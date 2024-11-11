@@ -1216,12 +1216,12 @@ private:
         int lev);
     void StoreCurrent (int lev);
     void RestoreCurrent (int lev);
-    void ApplyFilterJ (
-        const ablastr::fields::MultiLevelVectorField& current,
+    void ApplyFilterMF (
+        const ablastr::fields::MultiLevelVectorField& mfvec,
         int lev,
         int idim);
-    void ApplyFilterJ (
-        const ablastr::fields::MultiLevelVectorField& current,
+    void ApplyFilterMF (
+        const ablastr::fields::MultiLevelVectorField& mfvec,
         int lev);
     void SumBoundaryJ (
         const ablastr::fields::MultiLevelVectorField& current,
