@@ -24,10 +24,21 @@ class ParticleContainerWrapper(object):
 
     def __init__(self, species_name):
         self.name = species_name
+        self._particle_container = None
 
-        # grab the desired particle container
-        mypc = libwarpx.warpx.multi_particle_container()
-        self.particle_container = mypc.get_particle_container_from_name(self.name)
+    @property
+    def particle_container(self):
+        if self._particle_container is None:
+            try:
+                mypc = libwarpx.warpx.multi_particle_container()
+                self._particle_container = mypc.get_particle_container_from_name(
+                    self.name
+                )
+            except AttributeError as e:
+                msg = "This is likely caused by attempting to access a ParticleContainerWrapper before initialize_warpx has been called"
+                raise AttributeError(msg) from e
+
+        return self._particle_container
 
     def add_particles(
         self,
@@ -758,7 +769,18 @@ class ParticleBoundaryBufferWrapper(object):
     """
 
     def __init__(self):
-        self.particle_buffer = libwarpx.warpx.get_particle_boundary_buffer()
+        self._particle_buffer = None
+
+    @property
+    def particle_buffer(self):
+        if self._particle_buffer is None:
+            try:
+                self._particle_buffer = libwarpx.warpx.get_particle_boundary_buffer()
+            except AttributeError as e:
+                msg = "This is likely caused by attempting to access a ParticleBoundaryBufferWrapper before initialize_warpx has been called"
+                raise AttributeError(msg) from e
+
+        return self._particle_buffer
 
     def get_particle_boundary_buffer_size(self, species_name, boundary, local=False):
         """
