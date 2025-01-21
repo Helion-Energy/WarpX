@@ -320,14 +320,14 @@ WarpX::MarkUpdateCellsStairCase (
 
             if (fab_type == amrex::FabType::regular) { // All cells in the box are regular
 
-                // Every cell in box is all regular: update field in every cell
+                // Every cell in box is regular: update field in every cell
                 amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                     eb_update_arr(i, j, k) = 1;
                 });
 
             } else if (fab_type == amrex::FabType::covered) { // All cells in the box are covered
 
-                // Every cell in box is all covered: do not update field
+                // Every cell in box is fully covered: do not update field
                 amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                     eb_update_arr(i, j, k) = 0;
                 });
@@ -369,8 +369,7 @@ WarpX::MarkUpdateCellsStairCase (
                             for (int k_cell = k_start; k_cell <= k; ++k_cell) {
                                 // If one of the neighboring is either partially or fully covered
                                 // (i.e. if they are not regular cells), do not update field
-                                // (Note that `flag` is a cell-centered object, and `isRegular`
-                                // returns `false` if the cell is either partially or fully covered.)
+                                // (`isRegular` returns `false` if the cell is either partially or fully covered.)
                                 if ( !flag(i_cell, j_cell, k_cell).isRegular() ) {
                                     eb_update = 0;
                                 }
