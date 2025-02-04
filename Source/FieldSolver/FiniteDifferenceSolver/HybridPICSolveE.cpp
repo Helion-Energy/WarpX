@@ -709,7 +709,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                     auto nabla2Jz = T_Algo::Dzz(Jz, coefs_z, n_coefs_z, i, j, 0, 0);
                     if (r > 0.5_rt*dr) {
-                        nabla2Jz += T_Algo::Dr_rDr_over_r(Jz, r, dr, coefs_r, n_coefs_r, i, j, 0, 0)
+                        nabla2Jz += T_Algo::Dr_rDr_over_r(Jz, r, dr, coefs_r, n_coefs_r, i, j, 0, 0);
                     }
 
                     Ez(i, j, 0) -= eta_h * nabla2Jz;
