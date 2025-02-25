@@ -1951,7 +1951,12 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
                 self.plasma_resistivity, self.mangle_dict
             ),
         )
-        pywarpx.hybridpicmodel.plasma_hyper_resistivity = self.plasma_hyper_resistivity
+        pywarpx.hybridpicmodel.__setattr__(
+            "plasma_hyper_resistivity(rho,B)",
+            pywarpx.my_constants.mangle_expression(
+                self.plasma_hyper_resistivity, self.mangle_dict
+            ),
+        )
         pywarpx.hybridpicmodel.substeps = self.substeps
         pywarpx.hybridpicmodel.holmstrom_vacuum_region = self.holmstrom_vacuum_region
         pywarpx.hybridpicmodel.__setattr__(
