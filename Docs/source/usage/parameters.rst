@@ -2796,7 +2796,7 @@ In-situ capabilities can be used by turning on Sensei or Ascent (provided they a
     Only read if ``<diag_name>.format = sensei``.
     When 1 lower left corner of the mesh is pinned to 0.,0.,0.
 
-* ``<diag_name>.openpmd_backend`` (``bp``, ``h5`` or ``json``) optional, only used if ``<diag_name>.format = openpmd``
+* ``<diag_name>.openpmd_backend`` (``bp5``, ``bp4``, ``h5`` or ``json``) optional, only used if ``<diag_name>.format = openpmd``
     `I/O backend <https://openpmd-api.readthedocs.io/en/latest/backends/overview.html>`_ for `openPMD <https://www.openPMD.org>`_ data dumps.
     ``bp`` is the `ADIOS I/O library <https://csmd.ornl.gov/adios>`_, ``h5`` is the `HDF5 format <https://www.hdfgroup.org/solutions/hdf5/>`_, and ``json`` is a `simple text format <https://en.wikipedia.org/wiki/JSON>`_.
     ``json`` only works with serial/single-rank jobs.
@@ -2818,19 +2818,26 @@ In-situ capabilities can be used by turning on Sensei or Ascent (provided they a
 
     .. code-block:: text
 
-        <diag_name>.adios2_operator.type = blosc
-        <diag_name>.adios2_operator.parameters.compressor = zstd
-        <diag_name>.adios2_operator.parameters.clevel = 1
-        <diag_name>.adios2_operator.parameters.doshuffle = BLOSC_BITSHUFFLE
-        <diag_name>.adios2_operator.parameters.threshold = 2048
-        <diag_name>.adios2_operator.parameters.nthreads = 6  # per MPI rank (and thus per GPU)
+       <diag_name>.adios2_operator.type = blosc
+       <diag_name>.adios2_operator.parameters.compressor = zstd
+       <diag_name>.adios2_operator.parameters.clevel = 1
+       <diag_name>.adios2_operator.parameters.doshuffle = BLOSC_BITSHUFFLE
+       <diag_name>.adios2_operator.parameters.threshold = 2048
+       <diag_name>.adios2_operator.parameters.nthreads = 6  # per MPI rank (and thus per GPU)
 
     or for the lossy ZFP compressor using very strong compression per scalar:
 
     .. code-block:: text
 
-        <diag_name>.adios2_operator.type = zfp
-        <diag_name>.adios2_operator.parameters.precision = 3
+       <diag_name>.adios2_operator.type = zfp
+       <diag_name>.adios2_operator.parameters.precision = 3
+
+    For back-transformed diagnostics with ADIOS BP5, we are experimenting with a new option for variable-based encoding that "flattens" the output steps, aiming to increase write and read performance:
+
+    .. code-block:: text
+
+       <diag_name>.openpmd_backend = bp5
+       <diag_name>.adios2_engine.parameters.FlattenSteps = on
 
 * ``<diag_name>.adios2_engine.type`` (``bp4``, ``sst``, ``ssc``, ``dataman``) optional,
     `ADIOS2 Engine type <https://openpmd-api.readthedocs.io/en/0.16.1/details/backendconfig.html#adios2>`__ for `openPMD <https://www.openPMD.org>`_ data dumps.
