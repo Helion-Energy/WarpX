@@ -1114,7 +1114,7 @@ WarpX::SyncCurrent (const std::string& current_fp_string)
             for (const auto& dir : all_dirs){
                 ::UpdateCurrentNodalToStag(
                     *J_fp[lev][dir], *J_fp_nodal[lev][dir],
-                    current_centering_nox, current_centering_noy, current_centering_noz,
+                    m_current_centering_nox, m_current_centering_noy, m_current_centering_noz,
                     device_current_centering_stencil_coeffs_x,
                     device_current_centering_stencil_coeffs_y,
                     device_current_centering_stencil_coeffs_z);
@@ -1428,14 +1428,14 @@ void WarpX::SumBoundaryJ (
     if (do_current_centering)
     {
 #if   defined(WARPX_DIM_1D_Z)
-        ng_depos_J[0] += WarpX::current_centering_noz / 2;
+        ng_depos_J[0] += m_current_centering_noz / 2;
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
-        ng_depos_J[0] += WarpX::current_centering_nox / 2;
-        ng_depos_J[1] += WarpX::current_centering_noz / 2;
+        ng_depos_J[0] += m_current_centering_nox / 2;
+        ng_depos_J[1] += m_current_centering_noz / 2;
 #elif defined(WARPX_DIM_3D)
-        ng_depos_J[0] += WarpX::current_centering_nox / 2;
-        ng_depos_J[1] += WarpX::current_centering_noy / 2;
-        ng_depos_J[2] += WarpX::current_centering_noz / 2;
+        ng_depos_J[0] += m_current_centering_nox / 2;
+        ng_depos_J[1] += m_current_centering_noy / 2;
+        ng_depos_J[2] += m_current_centering_noz / 2;
 #endif
     }
 
