@@ -15,6 +15,66 @@
 
 #include <AMReX.H>
 
+
+/**
+ * \brief Nodal Scalar Field gather for a single particle, 
+ *  check the interpolation below is correct, this is hardcoded to be only linear interp using nodal multifab
+ *  intended to be used for MCC hybrid_ie scattering process
+ *  will extend to include different shape functions and possibility of multifab being nodal or cell centered
+ *  CHECK THAT IT IS CORRECT TO USE xyzmin here instead of plo..
+ *
+ * \tparam depos_order              Particle shape order
+ * \tparam galerkin_interpolation   Lower the order of the particle shape by
+ *                                  this value (0/1) for the parallel field component
+ * \param xp,yp,zp                        Particle position coordinates
+ * \param Fieldxp                         Scalar field on particles.
+ * \param Field_arr                       Array4 of the scalar field, either full array or tile.
+ * \param dinv                            3D cell size inverse
+ * \param xyzmin                          The lower bounds of the domain
+ * \param lo                              Index lower bounds of domain.
+ * \param n_rz_azimuthal_modes            Number of azimuthal modes when using RZ geometry
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+void doGatherNodalScalarFieldShapeN ([[maybe_unused]] const amrex::ParticleReal xp,
+                                     [[maybe_unused]] const amrex::ParticleReal yp,
+                                     [[maybe_unused]] const amrex::ParticleReal zp,
+                                     amrex::ParticleReal& Fieldxp,
+                                     amrex::Array4<amrex::Real const> const& Field_arr,
+                                     const amrex::XDim3 & dinv,
+                                     const amrex::XDim3 & xyzmin)
+{
+    using namespace amrex;
+
+    // Get particle position
+    const amrex::Real x = (xp-xyzmin.x)*dinv.x;
+    const amrex::Real y = (yp-xyzmin.y)*dinv.y;
+    const amrex::Real z = (zp-xyzmin.z)*dinv.z;
+
+    int i0p = std::floor(x);
+    int j0p = std::floor(y);
+    int k0p = std::floor(z);
+
+    amrex::Real dip = x - i0p;
+    amrex::Real djp = y - j0p;
+    amrex::Real dkp = z - k0p;
+
+    // Only nodal field for now
+    amrex:: Real sx[] = {1.-dip, dip};
+    amrex:: Real sy[] = {1.-djp, djp};
+    amrex:: Real sz[] = {1.-dkp, dkp};
+
+    // Gather field on particle Fieldxp from field on grid Field_arr
+    for         (int ioff = 0; ioff < 2; ++ioff){
+        for     (int joff = 0; joff < 2; ++joff){
+            for (int koff = 0; koff < 2; ++koff){
+
+                Fieldxp += sx[ioff]*sy[joff]*sz[koff]*Field_arr(i0p+ioff,j0p+joff,k0p+koff);                
+            }
+        }
+    }
+
+}
+
 /**
  * \brief Field gather for a single particle
  *

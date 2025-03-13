@@ -13,6 +13,7 @@
 #include "Utils/TextMsg.H"
 #include "Utils/ParticleUtils.H"
 #include "Utils/WarpXProfilerWrapper.H"
+#include "Particles/Gather/FieldGather.H"
 #include "WarpX.H"
 
 #include <AMReX_ParmParse.H>
@@ -491,6 +492,12 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                           );
 }
 
+/*
+    This is a super hard-coded function.
+    Need to refactor some of the functions here to do this properly.
+    Will refactor in the future, I need these changes to test an algorithm first.
+    Author: Marco D. Acciarri, Helion Energy Inc. March 2025. 
+*/
 void BackgroundMCCCollision::doBackgroundCollisionsWithinTile_hybrid_ie
 ( WarpXParIter& pti, amrex::Real t )
 {
@@ -502,9 +509,23 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile_hybrid_ie
     // get particle count
     const long np = pti.numParticles();
 
-    // get parsers for the background density and temperature
-    auto n_a_func = m_background_density_func;
-    auto T_a_func = m_background_temperature_func;
+    auto& warpx = WarpX::GetInstance();
+
+    using warpx::fields::FieldType;
+
+    // These multifabs should be passed as arguemnts, this is just for testing :)
+    // hardcoding level 0 too (Hybrid PIC model) :)
+    const amrex::MultiFab &rho_mf = *warpx.m_fields.get(FieldType::rho_fp, 0);
+    const amrex::MultiFab &Te_mf = *warpx.m_fields.get("fluid_temperature_electrons_hybrid", 0);
+
+    const auto &rho_arr = rho_mf[pti].array();
+    const auto &T_arr = Te_mf[pti].array();
+    //
+
+    amrex::Box tilebox = pti.tilebox();
+
+    const amrex::XDim3 dinv = WarpX::InvCellSize(0);
+    const amrex::XDim3 xyzmin = WarpX::LowerCorner(tilebox, 0, 0._rt);
 
     // get collision parameters
     auto *scattering_processes = m_scattering_processes_exe.data();
@@ -539,9 +560,12 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile_hybrid_ie
 
                               amrex::ParticleReal x, y, z;
                               GetPosition.AsStored(ip, x, y, z);
-
-                              const amrex::ParticleReal n_a = n_a_func(x, y, z, t);
-                              const amrex::ParticleReal T_a = T_a_func(x, y, z, t);
+                              
+                              amrex::ParticleReal n_a = 0;
+                              amrex::ParticleReal T_a = 0;
+                              doGatherNodalScalarFieldShapeN(x, y, z, n_a, rho_arr, dinv, xyzmin);
+                              doGatherNodalScalarFieldShapeN(x, y, z, T_a, T_arr, dinv, xyzmin);
+                              n_a = n_a/PhysConst::q_e;
 
                               amrex::ParticleReal v_coll, v_coll2, sigma_E, nu_i = 0;
                               double gamma, E_coll;
