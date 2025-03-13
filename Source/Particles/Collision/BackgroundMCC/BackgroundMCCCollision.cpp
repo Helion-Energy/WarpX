@@ -135,9 +135,22 @@ BackgroundMCCCollision::BackgroundMCCCollision (std::string const& collision_nam
             m_species_names.push_back(secondary_species);
 
             m_ionization_processes.push_back(std::move(process));
+        } else if (process.type() == ScatteringProcessType::HYBRID_PIC_ION_ELECTRON) {
+            hybrid_ie_MCC = true;
+            m_scattering_processes.push_back(std::move(process));
         } else {
             m_scattering_processes.push_back(std::move(process));
         }
+
+        // check if hybrid_ie_MCC is true but Hybrid solver is not used.
+        if (WarpX::electromagnetic_solver_id != ElectromagneticSolverAlgo::HybridPIC) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(hybrid_ie_MCC,
+                "Hybrid_PIC_ion_electron scattering process can only be used with Hybrid PIC model and only if electron energy equation is solved instead of adiabatic relationship.");
+        }
+        
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(hybrid_ie_MCC && m_scattering_processes.size() > 1,
+            "Each Background MCC only supports one scattering process if ion-electron collisions are turned on while using the Hybrid PIC model. Add other scattering processes separately.");
+        
     }
 
 #ifdef AMREX_USE_GPU
@@ -304,7 +317,12 @@ BackgroundMCCCollision::doCollisions (amrex::Real cur_time, amrex::Real dt, Mult
             }
             auto wt = static_cast<amrex::Real>(amrex::second());
 
-            doBackgroundCollisionsWithinTile(pti, cur_time);
+            if(hybrid_ie_MCC) {
+                doBackgroundCollisionsWithinTile_hybrid_ie(pti, cur_time);
+            } else {
+                doBackgroundCollisionsWithinTile(pti, cur_time);
+            }
+            
 
             if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
             {
@@ -473,6 +491,156 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                           );
 }
 
+void BackgroundMCCCollision::doBackgroundCollisionsWithinTile_hybrid_ie
+( WarpXParIter& pti, amrex::Real t )
+{
+    using namespace amrex::literals;
+
+    // So that CUDA code gets its intrinsic, not the host-only C++ library version
+    using std::sqrt;
+
+    // get particle count
+    const long np = pti.numParticles();
+
+    // get parsers for the background density and temperature
+    auto n_a_func = m_background_density_func;
+    auto T_a_func = m_background_temperature_func;
+
+    // get collision parameters
+    auto *scattering_processes = m_scattering_processes_exe.data();
+    auto const process_count  = static_cast<int>(m_scattering_processes_exe.size());
+
+    auto const total_collision_prob = m_total_collision_prob;
+    auto const nu_max = m_nu_max;
+
+    // store projectile and target masses
+    auto const m = m_mass1;
+    auto const M = m_background_mass;
+
+    // precalculate often used value
+    constexpr auto c2 = PhysConst::c * PhysConst::c;
+    auto const mc2 = m*c2;
+
+    // we need particle positions in order to calculate the local density
+    // and temperature
+    auto GetPosition = GetParticlePosition<PIdx>(pti);
+
+    // get Struct-Of-Array particle data, also called attribs
+    auto& attribs = pti.GetAttribs();
+    amrex::ParticleReal* const AMREX_RESTRICT ux = attribs[PIdx::ux].dataPtr();
+    amrex::ParticleReal* const AMREX_RESTRICT uy = attribs[PIdx::uy].dataPtr();
+    amrex::ParticleReal* const AMREX_RESTRICT uz = attribs[PIdx::uz].dataPtr();
+
+    amrex::ParallelForRNG(np,
+                          [=] AMREX_GPU_HOST_DEVICE (long ip, amrex::RandomEngine const& engine)
+                          {
+                              // determine if this particle should collide
+                              if (amrex::Random(engine) > total_collision_prob) { return; }
+
+                              amrex::ParticleReal x, y, z;
+                              GetPosition.AsStored(ip, x, y, z);
+
+                              const amrex::ParticleReal n_a = n_a_func(x, y, z, t);
+                              const amrex::ParticleReal T_a = T_a_func(x, y, z, t);
+
+                              amrex::ParticleReal v_coll, v_coll2, sigma_E, nu_i = 0;
+                              double gamma, E_coll;
+                              amrex::ParticleReal ua_x, ua_y, ua_z, vx, vy, vz;
+                              amrex::ParticleReal uCOM_x, uCOM_y, uCOM_z;
+                              const amrex::ParticleReal col_select = amrex::Random(engine);
+
+                              // get velocities of gas particles from a Maxwellian distribution
+                              auto const vel_std = sqrt(PhysConst::kb * T_a / M);
+                              ua_x = vel_std * amrex::RandomNormal(0_prt, 1.0_prt, engine);
+                              ua_y = vel_std * amrex::RandomNormal(0_prt, 1.0_prt, engine);
+                              ua_z = vel_std * amrex::RandomNormal(0_prt, 1.0_prt, engine);
+
+                              // we assume the target particle is not relativistic (in
+                              // the lab frame) and therefore we can transform the projectile
+                              // velocity to a frame in which the target is stationary with
+                              // a simple Galilean boost
+                              // not doing the full Lorentz boost here saves us computation
+                              // since most particles will not actually collide
+                              vx = ux[ip] - ua_x;
+                              vy = uy[ip] - ua_y;
+                              vz = uz[ip] - ua_z;
+                              v_coll2 = (vx*vx + vy*vy + vz*vz);
+                              v_coll = std::sqrt(v_coll2);
+
+                              // calculate the collision energy in eV
+                              ParticleUtils::getCollisionEnergy(v_coll2, m, M, gamma, E_coll);
+
+                              // loop through all collision pathways
+                              for (int i = 0; i < process_count; i++) {
+                                  auto const& scattering_process = *(scattering_processes + i);
+
+                                  // get collision cross-section
+                                  sigma_E = scattering_process.getCrossSection(static_cast<amrex::ParticleReal>(E_coll));
+
+                                  // calculate normalized collision frequency
+                                  nu_i += n_a * sigma_E * v_coll / nu_max;
+
+                                  // check if this collision should be performed
+                                  if (col_select > nu_i) { continue; }
+
+                                  // charge exchange is implemented as a simple swap of the projectile
+                                  // and target velocities which doesn't require any of the Lorentz
+                                  // transformations below; note that if the projectile and target
+                                  // have the same mass this is identical to back scattering
+                                  if (scattering_process.m_type == ScatteringProcessType::CHARGE_EXCHANGE) {
+                                      ux[ip] = ua_x;
+                                      uy[ip] = ua_y;
+                                      uz[ip] = ua_z;
+                                      break;
+                                  }
+
+                                  // At this point the given particle has been chosen for a collision
+                                  // and so we perform the needed calculations to transform to the
+                                  // COM frame.
+                                  uCOM_x = static_cast<amrex::ParticleReal>(m * vx / (gamma * m + M));
+                                  uCOM_y = static_cast<amrex::ParticleReal>(m * vy / (gamma * m + M));
+                                  uCOM_z = static_cast<amrex::ParticleReal>(m * vz / (gamma * m + M));
+
+                                  // subtract any energy penalty of the collision from the
+                                  // projectile energy
+                                  if (scattering_process.m_energy_penalty > 0.0_prt) {
+                                      ParticleUtils::getEnergy(v_coll2, m, E_coll);
+                                      E_coll = (E_coll - scattering_process.m_energy_penalty) * PhysConst::q_e;
+                                      const auto scale_fac = static_cast<amrex::ParticleReal>(
+                                        std::sqrt(E_coll * (E_coll + 2.0_prt*mc2) / c2) / m / v_coll);
+                                      vx *= scale_fac;
+                                      vy *= scale_fac;
+                                      vz *= scale_fac;
+                                  }
+
+                                  // transform to COM frame
+                                  ParticleUtils::doLorentzTransform(vx, vy, vz, uCOM_x, uCOM_y, uCOM_z);
+
+                                  if ((scattering_process.m_type == ScatteringProcessType::ELASTIC)
+                                      || (scattering_process.m_type == ScatteringProcessType::EXCITATION)) {
+                                      ParticleUtils::RandomizeVelocity(
+                                          vx, vy, vz, sqrt(vx*vx + vy*vy + vz*vz), engine
+                                      );
+                                  }
+                                  else if (scattering_process.m_type == ScatteringProcessType::BACK) {
+                                      // elastic scattering with cos(chi) = -1 (i.e. 180 degrees)
+                                      vx *= -1.0_prt;
+                                      vy *= -1.0_prt;
+                                      vz *= -1.0_prt;
+                                  }
+
+                                  // transform back to scattering frame
+                                  ParticleUtils::doLorentzTransform(vx, vy, vz, -uCOM_x, -uCOM_y, -uCOM_z);
+
+                                  // update particle velocity with new components in labframe
+                                  ux[ip] = vx + ua_x;
+                                  uy[ip] = vy + ua_y;
+                                  uz[ip] = vz + ua_z;
+                                  break;
+                              }
+                          }
+                          );
+}
 
 void BackgroundMCCCollision::doBackgroundIonization
 ( int lev, amrex::LayoutData<amrex::Real>* cost,

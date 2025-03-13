@@ -51,6 +51,8 @@ public:
      */
     void doBackgroundCollisionsWithinTile ( WarpXParIter& pti, amrex::Real t);
 
+    void doBackgroundCollisionsWithinTile_hybrid_ie ( WarpXParIter& pti, amrex::Real t);
+
     /** Perform MCC ionization interactions
      *
      * @param[in] lev the mesh-refinement level
@@ -77,6 +79,7 @@ private:
 
     bool init_flag = false;
     bool ionization_flag = false;
+    bool hybrid_ie_MCC = false;
 
     amrex::ParticleReal m_mass1;
 

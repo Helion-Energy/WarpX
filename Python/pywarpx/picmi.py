@@ -2505,6 +2505,7 @@ class MCCCollisions(picmistandard.base._ClassWithInit):
         background_mass=None,
         max_background_density=None,
         ndt=None,
+        #hybrid_ei=False,
         **kw,
     ):
         self.name = name
@@ -2515,11 +2516,16 @@ class MCCCollisions(picmistandard.base._ClassWithInit):
         self.scattering_processes = scattering_processes
         self.max_background_density = max_background_density
         self.ndt = ndt
+        self.hybrid_ei = hybrid_ei
 
         self.handle_init(kw)
 
     def collision_initialize_inputs(self):
         collision = pywarpx.Collisions.newcollision(self.name)
+        #if(self.hybrid_ei):
+        #    collision.type = "Hybrid_PIC_ion_electron"
+        #else:
+        #    collision.type = "background_mcc"
         collision.type = "background_mcc"
         collision.species = self.species.name
         if isinstance(self.background_density, str):

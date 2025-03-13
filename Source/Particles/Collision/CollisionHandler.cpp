@@ -67,6 +67,10 @@ CollisionHandler::CollisionHandler(MultiParticleContainer const * const mypc)
                     collision_names[i], mypc
                 );
         }
+        // commenting the following since elastic i-e collision type was added to scattering process and checked internally in BackgroundMCCCollision
+        //else if (type == "Hybrid_PIC_ion_electron") { // add extra argument here or not necessary ? 
+        //    allcollisions[i] = std::make_unique<BackgroundMCCCollision>(collision_names[i]);
+        //}
         else{
             WARPX_ABORT_WITH_MESSAGE("Unknown collision type.");
         }

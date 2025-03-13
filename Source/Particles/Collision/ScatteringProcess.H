@@ -17,6 +17,7 @@
 enum class ScatteringProcessType {
     INVALID,
     ELASTIC,
+    HYBRID_PIC_ION_ELECTRON,
     BACK,
     CHARGE_EXCHANGE,
     EXCITATION,
