@@ -41,14 +41,14 @@ void doGatherNodalScalarFieldShapeN ([[maybe_unused]] const amrex::ParticleReal 
                                      amrex::ParticleReal& Fieldxp,
                                      amrex::Array4<amrex::Real const> const& Field_arr,
                                      const amrex::XDim3 & dinv,
-                                     const amrex::XDim3 & xyzmin)
+                                     amrex::GpuArray<amrex::Real,AMREX_SPACEDIM> const& plo)
 {
     using namespace amrex;
 
     // Get particle position
-    const amrex::Real x = (xp-xyzmin.x)*dinv.x;
-    const amrex::Real y = (yp-xyzmin.y)*dinv.y;
-    const amrex::Real z = (zp-xyzmin.z)*dinv.z;
+    const amrex::Real x = (xp-plo[0])*dinv.x;
+    const amrex::Real y = (yp-plo[1])*dinv.y;
+    const amrex::Real z = (zp-plo[2])*dinv.z;
 
     int i0p = std::floor(x);
     int j0p = std::floor(y);

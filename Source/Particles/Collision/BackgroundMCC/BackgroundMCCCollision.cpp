@@ -524,8 +524,8 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile_hybrid_ie
 
     amrex::Box tilebox = pti.tilebox();
 
-    const amrex::XDim3 dinv = WarpX::InvCellSize(0);
-    const amrex::XDim3 xyzmin = WarpX::LowerCorner(tilebox, 0, 0._rt);
+    const amrex::XDim3 dinv = WarpX::InvCellSize(0); // lev 0
+    const auto plo = warpx.Geom(0).ProbLoArray(); // lev 0
 
     // get collision parameters
     auto *scattering_processes = m_scattering_processes_exe.data();
@@ -563,8 +563,8 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile_hybrid_ie
                               
                               amrex::ParticleReal n_a = 0;
                               amrex::ParticleReal T_a = 0;
-                              doGatherNodalScalarFieldShapeN(x, y, z, n_a, rho_arr, dinv, xyzmin);
-                              doGatherNodalScalarFieldShapeN(x, y, z, T_a, T_arr, dinv, xyzmin);
+                              doGatherNodalScalarFieldShapeN(x, y, z, n_a, rho_arr, dinv, plo);
+                              doGatherNodalScalarFieldShapeN(x, y, z, T_a, T_arr, dinv, plo);
                               n_a = n_a/PhysConst::q_e;
 
                               amrex::ParticleReal v_coll, v_coll2, sigma_E, nu_i = 0;
