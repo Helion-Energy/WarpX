@@ -1782,7 +1782,7 @@ void WarpXFluidContainer::Hybrid_Electron_Bremsstrahlung (ablastr::fields::Multi
 */
 void WarpXFluidContainer::Hybrid_Electron_Qei (ablastr::fields::MultiFabRegister& m_fields,
                                         HybridPICModel const* hybrid_model,
-                                        ablastr::fields::VectorField const& Ti_field,
+                                        const std::string temperature_vf_str,
                                         amrex::Real m_ion, amrex::Real dt, int lev)
 {
     WARPX_PROFILE("WarpXFluidContainer::Hybrid_Electron_Qei");
@@ -1792,12 +1792,29 @@ void WarpXFluidContainer::Hybrid_Electron_Qei (ablastr::fields::MultiFabRegister
     const amrex::Periodicity &period = geom.periodicity();
 
     using warpx::fields::FieldType;
+    using ablastr::fields::Direction;
 
-    const auto nu_ei = hybrid_model->m_nu_ei;
+    //const auto nu_ei = hybrid_model->m_nu_ei;
 
     // For safety condition (divition by rho)
     amrex::Real rho_floor = PhysConst::q_e*hybrid_model->m_n_floor;
-    const auto ix_type = m_fields.get(name_mf_N, lev)->ixType().toIntVect();
+
+    amrex::Real m_elec = PhysConst::m_e;
+    amrex::Real kb = PhysConst::kb;
+
+
+    //const auto ix_type = m_fields.get(name_mf_N, lev)->ixType().toIntVect();
+
+    // Index type required for interpolating fields from their respective
+    // staggering to nodal grid
+    amrex::GpuArray<int, 3> const& Jx_stag = hybrid_model->Jx_IndexType;
+    amrex::GpuArray<int, 3> const& Jy_stag = hybrid_model->Jy_IndexType;
+    amrex::GpuArray<int, 3> const& Jz_stag = hybrid_model->Jz_IndexType;
+
+    // Parameters for 'interp' that maps from Yee to nodal mesh
+    amrex::GpuArray<int, 3> const& nodal = {1, 1, 1};
+    // The coarsingng is just 1 so no coarsening is done
+    amrex::GpuArray<int, 3> const& coarsen = {1, 1, 1};
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -1807,41 +1824,44 @@ void WarpXFluidContainer::Hybrid_Electron_Qei (ablastr::fields::MultiFabRegister
             // This assumes operator splitting approach
             // use temperatures at n+1
             amrex::Array4<amrex::Real> const& Te = m_fields.get(name_mf_T, lev)->array(mfi);
-            amrex::Array4<amrex::Real> const& Ti_x = Ti_field[0]->array(mfi);
-            amrex::Array4<amrex::Real> const& Ti_y = Ti_field[1]->array(mfi);
-            amrex::Array4<amrex::Real> const& Ti_z = Ti_field[2]->array(mfi);
+            amrex::Array4<amrex::Real> const& Ti_x = m_fields.get(temperature_vf_str, Direction{0}, lev)->array(mfi);
+            amrex::Array4<amrex::Real> const& Ti_y = m_fields.get(temperature_vf_str, Direction{1}, lev)->array(mfi);
+            amrex::Array4<amrex::Real> const& Ti_z = m_fields.get(temperature_vf_str, Direction{2}, lev)->array(mfi);
 
             // using rho at n+1
             amrex::Array4<amrex::Real> const& rho = m_fields.get(FieldType::rho_fp, lev)->array(mfi);
 
             const Box& tilebox  = mfi.tilebox();
-            amrex::Box box = amrex::convert( tilebox, ix_type );
-            box.grow(m_fields.get(name_mf_N, lev)->nGrowVect());
+            //amrex::Box box = amrex::convert( tilebox, ix_type );
+            //box.grow(m_fields.get(name_mf_N, lev)->nGrowVect());
+            
 
-            ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            ParallelFor(tilebox, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
 
                 // careful here, once multi ion species feature is included
-                // use rho_val control since it will be needed in the formula below (ne won't be equal to ni).
-                if(rho(i, j, k) > 0.0_rt){
+                if(rho(i, j, k) > rho_floor){
 
                     amrex::Real rho_val = rho(i, j, k);
                     amrex::Real ne_val = rho_val/PhysConst::q_e;
                     amrex::Real Te_val_K = Te(i, j, k) / PhysConst::kb; // convert Te from J to K for nu_ei evaluation
 
                     // nu_ei expression defined by user using parser
-                    amrex::Real nu_ei_val = nu_ei(Te_val_K, ne_val);
+                    amrex::Real nu_ei_val = 0.0_rt; //nu_ei(Te_val_K, ne_val);
+
+                    auto const Tix_interp = ablastr::coarsen::sample::Interp(Ti_x, Jx_stag, nodal, coarsen, i, j, k, 0);
+                    auto const Tiy_interp = ablastr::coarsen::sample::Interp(Ti_y, Jy_stag, nodal, coarsen, i, j, k, 0);
+                    auto const Tiz_interp = ablastr::coarsen::sample::Interp(Ti_z, Jz_stag, nodal, coarsen, i, j, k, 0);
 
                     // avg Ti over degrees of freedom
-                    amrex::Real Ti_avg = (Ti_x(i, j, k) + Ti_y(i, j, k) + Ti_z(i, j, k))/3.0;
-
-                    // CHECK Ti UNITS !!!!
-                    // If Ti is in K, then convert to Joules below !
+                    amrex::Real Ti_val_K = (Tix_interp + Tiy_interp + Tiz_interp)/3.0;
+                   
                     // refactor hybrid code so Te is in K instead of J.
 
                     // -3*me/mi*nu_ei*ni*kb*(Te-Ti), then divide by 3/2*kb*ne
                     // since only one ion species for now, ni_val=ne_val -> -2*me/mi*nu_ei*kb*(Te-Ti)
                     // Te(i, j, k) and second term already in Joules so no need to divide by kb
-                    Te(i, j, k) = Te(i, j, k) - dt*2*PhysConst::m_e/m_ion*nu_ei_val*(Te(i, j, k) - PhysConst::kb*Ti_avg);
+
+                    Te(i, j, k) = Te_val_K*kb - dt*2*m_elec/m_ion*nu_ei_val*kb*(Te_val_K - Ti_val_K); // blows up with nu_ei_val=0.0 Why???
                 }
             });
         }

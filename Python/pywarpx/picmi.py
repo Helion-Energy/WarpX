@@ -2563,7 +2563,7 @@ class MCCCollisions(picmistandard.base._ClassWithInit):
         self.scattering_processes = scattering_processes
         self.max_background_density = max_background_density
         self.ndt = ndt
-        self.hybrid_ei = hybrid_ei
+        #self.hybrid_ei = hybrid_ei
 
         self.handle_init(kw)
 

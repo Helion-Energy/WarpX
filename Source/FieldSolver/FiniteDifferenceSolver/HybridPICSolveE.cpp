@@ -1132,8 +1132,6 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     }
                 }
 
-
-
                 // Add resistivity only if E field value is used to update B
                 if (solve_for_Faraday) {
                     Real jtot_val = 0._rt;

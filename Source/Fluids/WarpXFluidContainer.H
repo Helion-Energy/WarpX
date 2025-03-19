@@ -165,7 +165,7 @@ public:
     // add particle container
     void Hybrid_Electron_Qei (ablastr::fields::MultiFabRegister& m_fields,
                                         HybridPICModel const* hybrid_model,
-                                        ablastr::fields::VectorField  const& Ti,
+                                        const std::string temperature_vf_str,
                                         amrex::Real m_ion, amrex::Real dt, int lev);
 
 

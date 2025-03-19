@@ -149,8 +149,11 @@ BackgroundMCCCollision::BackgroundMCCCollision (std::string const& collision_nam
                 "Hybrid_PIC_ion_electron scattering process can only be used with Hybrid PIC model and only if electron energy equation is solved instead of adiabatic relationship.");
         }
         
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(hybrid_ie_MCC && m_scattering_processes.size() > 1,
-            "Each Background MCC only supports one scattering process if ion-electron collisions are turned on while using the Hybrid PIC model. Add other scattering processes separately.");
+        //if(hybrid_ie_MCC){
+        //    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_scattering_processes.size() > 1,
+        //    "Each Background MCC only supports one scattering process if ion-electron collisions are turned on while using the Hybrid PIC model. Add other scattering processes separately.");
+        //}
+        
         
     }
 
@@ -566,6 +569,7 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile_hybrid_ie
                               doGatherNodalScalarFieldShapeN(x, y, z, n_a, rho_arr, dinv, plo);
                               doGatherNodalScalarFieldShapeN(x, y, z, T_a, T_arr, dinv, plo);
                               n_a = n_a/PhysConst::q_e;
+                              T_a = T_a/PhysConst::kb; // HARDCODED: Te currently in J
 
                               amrex::ParticleReal v_coll, v_coll2, sigma_E, nu_i = 0;
                               double gamma, E_coll;
@@ -605,7 +609,7 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile_hybrid_ie
                                   nu_i += n_a * sigma_E * v_coll / nu_max;
 
                                   // check if this collision should be performed
-                                  if (col_select > nu_i) { continue; }
+                                  //if (col_select > nu_i) { continue; }
 
                                   // charge exchange is implemented as a simple swap of the projectile
                                   // and target velocities which doesn't require any of the Lorentz
@@ -641,6 +645,7 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile_hybrid_ie
                                   ParticleUtils::doLorentzTransform(vx, vy, vz, uCOM_x, uCOM_y, uCOM_z);
 
                                   if ((scattering_process.m_type == ScatteringProcessType::ELASTIC)
+                                      || (scattering_process.m_type == ScatteringProcessType::HYBRID_PIC_ION_ELECTRON)
                                       || (scattering_process.m_type == ScatteringProcessType::EXCITATION)) {
                                       ParticleUtils::RandomizeVelocity(
                                           vx, vy, vz, sqrt(vx*vx + vy*vy + vz*vz), engine
