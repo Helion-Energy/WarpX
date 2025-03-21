@@ -514,6 +514,8 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile_hybrid_ie
 
     auto& warpx = WarpX::GetInstance();
 
+    amrex::Real const dt = warpx.getdt(0);
+
     using warpx::fields::FieldType;
 
     // These multifabs should be passed as arguemnts, this is just for testing :)
@@ -559,7 +561,7 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile_hybrid_ie
                           [=] AMREX_GPU_HOST_DEVICE (long ip, amrex::RandomEngine const& engine)
                           {
                               // determine if this particle should collide
-                              if (amrex::Random(engine) > total_collision_prob) { return; }
+                              //if (amrex::Random(engine) > total_collision_prob) { return; }
 
                               amrex::ParticleReal x, y, z;
                               GetPosition.AsStored(ip, x, y, z);
@@ -606,10 +608,14 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile_hybrid_ie
                                   sigma_E = scattering_process.getCrossSection(static_cast<amrex::ParticleReal>(E_coll));
 
                                   // calculate normalized collision frequency
-                                  nu_i += n_a * sigma_E * v_coll / nu_max;
+                                  //nu_i += n_a * sigma_E * v_coll / nu_max;
 
                                   // check if this collision should be performed
-                                  if (col_select > nu_i) { continue; }
+                                  //if (col_select > nu_i) { continue; }
+
+                                  auto const prob = 1 - std::exp(- n_a * sigma_E * v_coll * dt);
+
+                                  if (col_select > prob) { continue; }
 
                                   // charge exchange is implemented as a simple swap of the projectile
                                   // and target velocities which doesn't require any of the Lorentz
