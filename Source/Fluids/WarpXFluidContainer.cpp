@@ -1794,7 +1794,7 @@ void WarpXFluidContainer::Hybrid_Electron_Qei (ablastr::fields::MultiFabRegister
     using warpx::fields::FieldType;
     using ablastr::fields::Direction;
 
-    //const auto nu_ei = hybrid_model->m_nu_ei;
+    const auto nu_ei = hybrid_model->m_nu_ei;
 
     // For safety condition (divition by rho)
     amrex::Real rho_floor = PhysConst::q_e*hybrid_model->m_n_floor;
@@ -1842,11 +1842,10 @@ void WarpXFluidContainer::Hybrid_Electron_Qei (ablastr::fields::MultiFabRegister
                 if(rho(i, j, k) > rho_floor){
 
                     amrex::Real rho_val = rho(i, j, k);
-                    amrex::Real ne_val = rho_val/PhysConst::q_e;
                     amrex::Real Te_val_K = Te(i, j, k) / PhysConst::kb; // convert Te from J to K for nu_ei evaluation
 
                     // nu_ei expression defined by user using parser
-                    amrex::Real nu_ei_val = 0.0_rt; //nu_ei(Te_val_K, ne_val);
+                    amrex::Real nu_ei_val = nu_ei(1e21, Te_val_K); // fix this, make it read rho instead of ne, not using this now
 
                     auto const Tix_interp = ablastr::coarsen::sample::Interp(Ti_x, Jx_stag, nodal, coarsen, i, j, k, 0);
                     auto const Tiy_interp = ablastr::coarsen::sample::Interp(Ti_y, Jy_stag, nodal, coarsen, i, j, k, 0);
@@ -1861,7 +1860,7 @@ void WarpXFluidContainer::Hybrid_Electron_Qei (ablastr::fields::MultiFabRegister
                     // since only one ion species for now, ni_val=ne_val -> -2*me/mi*nu_ei*kb*(Te-Ti)
                     // Te(i, j, k) and second term already in Joules so no need to divide by kb
 
-                    Te(i, j, k) = Te_val_K*kb - dt*2*m_elec/m_ion*nu_ei_val*kb*(Te_val_K - Ti_val_K); // blows up with nu_ei_val=0.0 Why???
+                    Te(i, j, k) = Te_val_K*kb - dt*2*m_elec/m_ion*nu_ei_val*kb*(Te_val_K - Ti_val_K);
                 }
             });
         }
