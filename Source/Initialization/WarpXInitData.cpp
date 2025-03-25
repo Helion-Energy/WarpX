@@ -595,7 +595,7 @@ WarpX::InitData ()
     m_electrostatic_solver->InitData();
 
     if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) {
-        m_hybrid_pic_model->InitData();
+        m_hybrid_pic_model->InitData(m_fields);
 
         if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
             m_hybrid_pic_model->InitQdsmcParticleContainer();
@@ -765,6 +765,7 @@ WarpX::InitPML ()
             eb_enabled,
             guard_cells.ng_FieldSolver.max(),
             v_particle_pml,
+            m_fields,
             do_pml_Lo[0], do_pml_Hi[0]);
 #endif
 
@@ -805,6 +806,7 @@ WarpX::InitPML ()
                 eb_enabled,
                 guard_cells.ng_FieldSolver.max(),
                 v_particle_pml,
+                m_fields,
                 do_pml_Lo[lev], do_pml_Hi[lev]);
         }
     }
@@ -1560,8 +1562,7 @@ WarpX::ReadExternalFieldFromFile (
        const std::string& F_name, const std::string& F_component)
 {
     // Get WarpX domain info
-    auto& warpx = WarpX::GetInstance();
-    amrex::Geometry const& geom0 = warpx.Geom(0);
+    amrex::Geometry const& geom0 = Geom(0);
     const amrex::RealBox& real_box = geom0.ProbDomain();
     const auto dx = geom0.CellSizeArray();
     const amrex::IntVect nodal_flag = mf->ixType().toIntVect();

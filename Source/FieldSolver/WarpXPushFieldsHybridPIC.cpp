@@ -19,6 +19,7 @@
 #include "WarpX.H"
 
 #include <ablastr/fields/MultiFabRegister.H>
+#include <ablastr/utils/Communication.H>
 
 
 using namespace amrex;
@@ -69,7 +70,7 @@ void WarpX::HybridPICEvolveFields ()
 
     // TODO: Perhaps add flag here for when using temperature accumulation in Hybrid
     // Perform Temperature Deposition at time t_{n+1/2}
-    mypc->DepositTemperatures(m_fields, dt[0], -0.5_rt * dt[0]);
+    mypc->DepositTemperatures(m_fields, dt[0], 0.0_rt);
 
     // Deposit cold-relativistic fluid charge and current
     if (do_fluid_species) {
@@ -91,8 +92,21 @@ void WarpX::HybridPICEvolveFields ()
     // for the hybrid-PIC solver since current values are interpolated to
     // a nodal grid
     for (int lev = 0; lev <= finest_level; ++lev) {
+        ablastr::utils::communication::FillBoundary(
+            *m_fields.get(FieldType::rho_fp, lev),
+            m_fields.get(FieldType::rho_fp, lev)->nGrowVect(),
+            WarpX::do_single_precision_comms,
+            Geom(lev).periodicity(),
+            true
+        );
         for (int idim = 0; idim < 3; ++idim) {
-            m_fields.get(FieldType::current_fp, Direction{idim}, lev)->FillBoundary(Geom(lev).periodicity());
+            ablastr::utils::communication::FillBoundary(
+                *m_fields.get(FieldType::current_fp, Direction{idim}, lev),
+                m_fields.get(FieldType::current_fp, Direction{idim}, lev)->nGrowVect(),
+                WarpX::do_single_precision_comms,
+                Geom(lev).periodicity(),
+                true
+            );
         }
     }
 
@@ -437,9 +451,22 @@ void WarpX::HybridPICDepositInitialRhoAndJ ()
         // SyncCurrent does not include a call to FillBoundary, but it is needed
         // for the hybrid-PIC solver since current values are interpolated to
         // a nodal grid
-        current_fp_temp[lev][0]->FillBoundary(Geom(lev).periodicity());
-        current_fp_temp[lev][1]->FillBoundary(Geom(lev).periodicity());
-        current_fp_temp[lev][2]->FillBoundary(Geom(lev).periodicity());
+        ablastr::utils::communication::FillBoundary(
+            *rho_fp_temp[lev],
+            rho_fp_temp[lev]->nGrowVect(),
+            WarpX::do_single_precision_comms,
+            Geom(lev).periodicity(),
+            true
+        );
+        for (int idim = 0; idim < 3; ++idim) {
+            ablastr::utils::communication::FillBoundary(
+                *current_fp_temp[lev][idim],
+                current_fp_temp[lev][idim]->nGrowVect(),
+                WarpX::do_single_precision_comms,
+                Geom(lev).periodicity(),
+                true
+            );
+        }
 
         ApplyRhofieldBoundary(lev, rho_fp_temp[lev], PatchType::fine);
         // Set current density at PEC boundaries, if needed.

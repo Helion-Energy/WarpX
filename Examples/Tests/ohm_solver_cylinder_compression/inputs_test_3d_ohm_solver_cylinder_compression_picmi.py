@@ -57,7 +57,7 @@ class PlasmaCylinderCompression(object):
     NZ = 128
 
     # Starting number of particles per cell
-    NPPC = 1000
+    NPPC = 50
 
     # Number of substeps used to update B
     substeps = 20
