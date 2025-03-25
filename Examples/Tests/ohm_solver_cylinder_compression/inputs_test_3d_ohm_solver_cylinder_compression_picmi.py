@@ -57,7 +57,7 @@ class PlasmaCylinderCompression(object):
     NZ = 128
 
     # Starting number of particles per cell
-    NPPC = 50
+    NPPC = 10
 
     # Number of substeps used to update B
     substeps = 20
@@ -151,7 +151,7 @@ class PlasmaCylinderCompression(object):
 
         # run very low resolution as a CI test
         if self.test:
-            self.total_steps = 20
+            self.total_steps = 100
             self.diag_steps = self.total_steps // 5
             self.NX = 64
             self.NY = 64
@@ -247,13 +247,13 @@ class PlasmaCylinderCompression(object):
             upper_boundary_conditions=["dirichlet", "dirichlet", "periodic"],
             lower_boundary_conditions_particles=["absorbing", "absorbing", "periodic"],
             upper_boundary_conditions_particles=["absorbing", "absorbing", "periodic"],
-            warpx_max_grid_size=self.NZ,
+            warpx_max_grid_size=16,
         )
         simulation.time_step_size = self.dt
         simulation.max_steps = self.total_steps
         simulation.current_deposition_algo = "direct"
         simulation.particle_shape = 1
-        simulation.use_filter = False
+        simulation.use_filter = True
         simulation.verbose = self.verbose
 
         #######################################################################
@@ -399,22 +399,10 @@ sys.argv = sys.argv[:1] + left
 run = PlasmaCylinderCompression(test=args.test, verbose=args.verbose)
 simulation.step(1)
 
-import matplotlib.pyplot as plt
 
-plt.ion()
+# Dump out temp arrays to np file
+Tx = fields.CustomNamedxWrapper("T_ions")
+Ty = fields.CustomNamedyWrapper("T_ions")
+Tz = fields.CustomNamedzWrapper("T_ions")
 
-wx = fields.CustomNamedxWrapper("w_ions", include_ghosts=False)
-wy = fields.CustomNamedyWrapper("w_ions", include_ghosts=False)
-wz = fields.CustomNamedzWrapper("w_ions", include_ghosts=False)
-
-w2x = fields.CustomNamedxWrapper("w2_ions", include_ghosts=False)
-w2y = fields.CustomNamedyWrapper("w2_ions", include_ghosts=False)
-w2z = fields.CustomNamedzWrapper("w2_ions", include_ghosts=False)
-
-vbarx = fields.CustomNamedxWrapper("vbar_ions", include_ghosts=False)
-vbary = fields.CustomNamedyWrapper("vbar_ions", include_ghosts=False)
-vbarz = fields.CustomNamedzWrapper("vbar_ions", include_ghosts=False)
-
-Tx = fields.CustomNamedxWrapper("T_ions", include_ghosts=False)
-Ty = fields.CustomNamedyWrapper("T_ions", include_ghosts=False)
-Tz = fields.CustomNamedzWrapper("T_ions", include_ghosts=False)
+np.savez("TemperatureArrays.npz", Tx=Tx[:], Ty=Ty[:], Tz=Tz[:])

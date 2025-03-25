@@ -1123,6 +1123,8 @@ private:
         int lev);
     void StoreCurrent (int lev);
     void RestoreCurrent (int lev);
+
+    public:
     void ApplyFilterMF (
         const ablastr::fields::MultiLevelVectorField& mfvec,
         int lev,
@@ -1130,6 +1132,8 @@ private:
     void ApplyFilterMF (
         const ablastr::fields::MultiLevelVectorField& mfvec,
         int lev);
+
+    private:
     void SumBoundaryJ (
         const ablastr::fields::MultiLevelVectorField& current,
         int lev,
