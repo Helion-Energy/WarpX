@@ -89,6 +89,8 @@ void HybridPICModel::ReadParameters ()
     // Z effective for Bremsstrahlung power loss.
     pp_hybrid.query("Zeff", m_Zeff);
 
+    pp_hybrid.query("ie_coll_species", m_ie_coll_species);
+
 }
 
 void HybridPICModel::AllocateLevelMFs (

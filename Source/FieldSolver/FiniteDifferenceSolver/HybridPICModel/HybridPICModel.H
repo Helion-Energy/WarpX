@@ -256,6 +256,8 @@ public:
 
     std::unique_ptr<QdsmcParticleContainer> qdsmc_hybrid_electron_pc;
 
+    std::string m_ie_coll_species;
+
 };
 
 /**

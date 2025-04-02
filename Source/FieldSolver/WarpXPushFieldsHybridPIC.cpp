@@ -331,12 +331,20 @@ void WarpX::HybridPICEvolveFields ()
         }
 
         // adds electron ion collisions
-        // current implementation is actually for one single ion species
-        // to fully extend to multiple ion species should create an aux multifab
-        // calculate in that multifab delta_Te due to collisions with each ion species
-        // add up contributions and then update Te after the loop over each species
         // TO DO: Add filter after this routine? 
+
+        
+        // This is called after Te is updated. Hence, Te is at n+1 however Ti is at n+1/2 ! 
+        // Should fix the mistmatch so both Qei and Qie (drag-diffusion) are calculated at the same step
+        // Should call this before doing ion current deposition, since Te is updated but ji is not, so E has a mistmatch between grad_Pe and je = j - ji
         if(m_hybrid_pic_model->m_include_Qei){
+
+            // pass particle container instead of name of species
+            // Once we have multi ion species support in the hybrid pic model,
+            // m_ie_coll_species should be a vector of strings, indicating the name of ion species we want to collide with electrons
+            // same should be used below for electron-ion collision fluid treatment.
+            hybrid_electron_fl->Hybrid_Drag_Diffusion (m_fields, m_hybrid_pic_model.get(), m_hybrid_pic_model->m_ie_coll_species, dt[0], finest_level); // replace by name from Hybrid parser
+                                                        
 
             auto const species_names = mypc->GetSpeciesNames();
             for(int i_s=0; i_s<mypc->nSpecies(); i_s++){
@@ -363,6 +371,12 @@ void WarpX::HybridPICEvolveFields ()
                         "Non-finite value detected in Tiz field."
                     );
 
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                        m_fields.get(hybrid_electron_fl->name_mf_T, finest_level)->is_finite(),
+                        "Non-finite value detected in Te_hybrid field."
+                    );
+
+
                 // ----------------------------------------------------------------------------------------
                 // ----------------------------------------------------------------------------------------
 
@@ -370,10 +384,10 @@ void WarpX::HybridPICEvolveFields ()
                                                             m_ion, dt[0], finest_level);
             }
         }
-        
-        // add conductivity term here.
-        // Write functions in FluidContainer, use multigrid solver from amrex
-        // look at example from amrex guided tutorials (MLMG) linear operator classes
+                
+        // add conductivity term here (separate PR)
+        // ...
+
 
     }
 

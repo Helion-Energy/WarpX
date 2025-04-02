@@ -168,7 +168,15 @@ public:
                                         const std::string temperature_vf_str,
                                         amrex::Real m_ion, amrex::Real dt, int lev);
 
+    //void Hybrid_Electron_Qei_from_dTi (ablastr::fields::MultiFabRegister& m_fields,
+    //                                    HybridPICModel const* hybrid_model,
+    //                                    const std::string temperature_vf_str,
+    //                                    amrex::Real dt, int lev, int sign_Ti);
 
+    void Hybrid_Drag_Diffusion (ablastr::fields::MultiFabRegister& m_fields,
+                                        HybridPICModel const* hybrid_model,
+                                        const std::string species_name, amrex::Real dt, int lev);
+                                        
     [[nodiscard]] amrex::Real getCharge () const {return charge;}
     [[nodiscard]] amrex::Real getMass () const {return mass;}
 

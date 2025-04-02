@@ -17,22 +17,18 @@
 
 
 /**
- * \brief Nodal Scalar Field gather for a single particle, 
- *  check the interpolation below is correct, this is hardcoded to be only linear interp using nodal multifab
- *  intended to be used for MCC hybrid_ie scattering process
- *  will extend to include different shape functions and possibility of multifab being nodal or cell centered
- *  CHECK THAT IT IS CORRECT TO USE xyzmin here instead of plo..
+ *  \brief Nodal Scalar Field gather for a single particle, 
+ *  This is a minimal general gather function
+ *  TO DO :
+ *  -Check the interpolation below is correct, this is hardcoded to be only linear interp using nodal multifab
+ *   intended to be used for MCC hybrid_ie scattering process (drag-diffusion or MCC)
+ *  -Will extend to include different shape functions and possibility of multifab being nodal or cell centered
  *
- * \tparam depos_order              Particle shape order
- * \tparam galerkin_interpolation   Lower the order of the particle shape by
- *                                  this value (0/1) for the parallel field component
  * \param xp,yp,zp                        Particle position coordinates
  * \param Fieldxp                         Scalar field on particles.
  * \param Field_arr                       Array4 of the scalar field, either full array or tile.
  * \param dinv                            3D cell size inverse
- * \param xyzmin                          The lower bounds of the domain
  * \param lo                              Index lower bounds of domain.
- * \param n_rz_azimuthal_modes            Number of azimuthal modes when using RZ geometry
  */
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
 void doGatherNodalScalarFieldShapeN ([[maybe_unused]] const amrex::ParticleReal xp,
@@ -74,6 +70,7 @@ void doGatherNodalScalarFieldShapeN ([[maybe_unused]] const amrex::ParticleReal 
     }
 
 }
+
 
 /**
  * \brief Field gather for a single particle

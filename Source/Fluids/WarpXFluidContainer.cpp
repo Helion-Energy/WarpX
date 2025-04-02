@@ -8,6 +8,8 @@
 #include "Particles/Pusher/UpdateMomentumHigueraCary.H"
 #include "Utils/WarpXProfilerWrapper.H"
 
+#include "Particles/MultiParticleContainer.H" // temporary
+
 #include "MusclHancockUtils.H"
 #include "Fluids/WarpXFluidContainer.H"
 #include "Utils/Parser/ParserUtils.H"
@@ -1729,7 +1731,7 @@ void WarpXFluidContainer::Hybrid_Electron_Bremsstrahlung (ablastr::fields::Multi
     // Once Hybrid PIC is extended to do more than 1 ion species
     // Zeff should be calculated from rho_total and rho of each species.
     const auto Zeff = hybrid_model->m_Zeff;
-    amrex::Real Zeff3 = Zeff*Zeff*Zeff;
+    amrex::Real Zeff2 = Zeff*Zeff;
     amrex::Real constant_val = 5.91361e37;
 
     // For safety condition (divition by rho)
@@ -1743,7 +1745,7 @@ void WarpXFluidContainer::Hybrid_Electron_Bremsstrahlung (ablastr::fields::Multi
         {
             // using Te right after Joule heating/qdsmc (operator splitting approach)
             // this is first order accurate in time
-            amrex::Array4<amrex::Real> const& Te = m_fields.get(name_mf_T, lev)->array(mfi);
+            amrex::Array4<amrex::Real> const& Te = m_fields.get(name_mf_T, lev)->array(mfi); // in Joules here
 
             // using rho at n+1
             amrex::Array4<amrex::Real> const& rho = m_fields.get(FieldType::rho_fp, lev)->array(mfi);
@@ -1761,9 +1763,8 @@ void WarpXFluidContainer::Hybrid_Electron_Bremsstrahlung (ablastr::fields::Multi
 
                     // calculate power loss per unit volume due to Bremsstrahlung
                     // Expression gives value in W/m^3
-                    // Te in sqrt() is in eV in this formula
                     // update once multi ion species is included (one of these ne_val should be ni_val)
-                    amrex::Real dW_dV = Zeff3*ne_val*ne_val*std::sqrt(Te(i, j, k)/PhysConst::q_e)/constant_val;
+                    amrex::Real dW_dV = Zeff2*ne_val*ne_val*std::sqrt(Te(i, j, k)/PhysConst::q_e)/constant_val;
 
                     // Te(i, j, k) and second term already in Joules
                     Te(i, j, k) = Te(i, j, k) - dW_dV*dt/(1.5*ne_val);
@@ -1802,9 +1803,6 @@ void WarpXFluidContainer::Hybrid_Electron_Qei (ablastr::fields::MultiFabRegister
     amrex::Real m_elec = PhysConst::m_e;
     amrex::Real kb = PhysConst::kb;
 
-
-    //const auto ix_type = m_fields.get(name_mf_N, lev)->ixType().toIntVect();
-
     // Index type required for interpolating fields from their respective
     // staggering to nodal grid
     amrex::GpuArray<int, 3> const& Jx_stag = hybrid_model->Jx_IndexType;
@@ -1835,17 +1833,17 @@ void WarpXFluidContainer::Hybrid_Electron_Qei (ablastr::fields::MultiFabRegister
             //amrex::Box box = amrex::convert( tilebox, ix_type );
             //box.grow(m_fields.get(name_mf_N, lev)->nGrowVect());
             
-
             ParallelFor(tilebox, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
 
                 // careful here, once multi ion species feature is included
                 if(rho(i, j, k) > rho_floor){
 
                     amrex::Real rho_val = rho(i, j, k);
+                    amrex::Real ne_val = rho(i, j, k) / PhysConst::q_e;
                     amrex::Real Te_val_K = Te(i, j, k) / PhysConst::kb; // convert Te from J to K for nu_ei evaluation
 
                     // nu_ei expression defined by user using parser
-                    amrex::Real nu_ei_val = nu_ei(1e21, Te_val_K); // fix this, make it read rho instead of ne, not using this now
+                    amrex::Real nu_ei_val = nu_ei(ne_val, Te_val_K);
 
                     auto const Tix_interp = ablastr::coarsen::sample::Interp(Ti_x, Jx_stag, nodal, coarsen, i, j, k, 0);
                     auto const Tiy_interp = ablastr::coarsen::sample::Interp(Ti_y, Jy_stag, nodal, coarsen, i, j, k, 0);
@@ -1867,3 +1865,220 @@ void WarpXFluidContainer::Hybrid_Electron_Qei (ablastr::fields::MultiFabRegister
 
     m_fields.get(name_mf_T, lev)->FillBoundary(m_fields.get(name_mf_T, lev)->nGrowVect(), period);
 }
+
+
+/*
+    TO DO: Move this to a separate class that computes drag diffusion for the following inputs:
+        - Particle container
+        - Fluid container
+        - Parser with collision frequency to use 
+        - Also: pass particle container as argument or species id instead of species_name to avoid loop over mypc
+*/
+void WarpXFluidContainer::Hybrid_Drag_Diffusion (ablastr::fields::MultiFabRegister& m_fields,
+                                        HybridPICModel const* hybrid_model,
+                                        const std::string species_name, amrex::Real dt, int lev)
+{
+    auto& warpx = WarpX::GetInstance();
+    auto& mypc = warpx.GetPartContainer();
+
+    const amrex::Geometry &geom = warpx.Geom(lev);
+    const amrex::Periodicity &period = geom.periodicity();
+
+    using warpx::fields::FieldType;
+    using ablastr::fields::Direction;
+
+    const auto nu_ei = hybrid_model->m_nu_ei;
+
+    amrex::Real rho_floor = PhysConst::q_e*hybrid_model->m_n_floor;
+    amrex::Real n_e_floor = hybrid_model->m_n_floor;
+    amrex::Real m_elec = PhysConst::m_e;
+    amrex::Real kb = PhysConst::kb;
+
+    const amrex::MultiFab &rho_mf = *warpx.m_fields.get(FieldType::rho_fp, 0);
+    const amrex::MultiFab &Te_mf = *warpx.m_fields.get(name_mf_T, 0);
+    const amrex::MultiFab &Ue_x = *warpx.m_fields.get(name_mf_NU, Direction{0}, 0);
+    const amrex::MultiFab &Ue_y = *warpx.m_fields.get(name_mf_NU, Direction{1}, 0);
+    const amrex::MultiFab &Ue_z = *warpx.m_fields.get(name_mf_NU, Direction{2}, 0);
+
+    // pass species id instead of species name as argument of function ?
+    auto const species_names = mypc.GetSpeciesNames();
+    for(int i_s=0; i_s<mypc.nSpecies(); i_s++){
+
+        auto& myspc = mypc.GetParticleContainer(i_s);
+        amrex::Real m_ion = myspc.getMass();
+
+        if(species_name==species_names[myspc.getSpeciesId()]){
+
+            // Loop over refinement levels
+            auto const flvl = myspc.finestLevel();
+            for (int lev = 0; lev <= flvl; ++lev) {
+
+                auto *cost = WarpX::getCosts(lev);
+
+#ifdef _OPENMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+                for (WarpXParIter pti(myspc, lev); pti.isValid(); ++pti) {
+
+                    if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
+                        {
+                            amrex::Gpu::synchronize();
+                        }
+                        auto wt = static_cast<amrex::Real>(amrex::second());
+
+                    // -------- Move this to "doDragDiffusionWithinTile function"
+                    //----------------------------------------------------------------------
+                    //----------------------------------------------------------------------
+
+                    const long np = pti.numParticles();
+
+                    const auto &rho_arr = rho_mf[pti].array();
+                    const auto &T_arr = Te_mf[pti].array();
+                    const auto &Ue_x_arr = Ue_x[pti].array();
+                    const auto &Ue_y_arr = Ue_y[pti].array();
+                    const auto &Ue_z_arr = Ue_z[pti].array();
+
+                    amrex::Box tilebox = pti.tilebox();
+                    const amrex::XDim3 dinv = WarpX::InvCellSize(0); // lev 0
+                    const auto plo = warpx.Geom(0).ProbLoArray(); // lev 0
+
+                    auto GetPosition = GetParticlePosition<PIdx>(pti);
+
+                    auto& attribs = pti.GetAttribs();
+                    amrex::ParticleReal* const AMREX_RESTRICT ux = attribs[PIdx::ux].dataPtr();
+                    amrex::ParticleReal* const AMREX_RESTRICT uy = attribs[PIdx::uy].dataPtr();
+                    amrex::ParticleReal* const AMREX_RESTRICT uz = attribs[PIdx::uz].dataPtr();
+
+                    amrex::ParallelForRNG(np, [=] AMREX_GPU_HOST_DEVICE (long ip, amrex::RandomEngine const& engine)
+                        {
+                            amrex::ParticleReal x, y, z;
+                            GetPosition.AsStored(ip, x, y, z);
+                            
+                            amrex::ParticleReal n_e = 0;
+                            amrex::ParticleReal T_e = 0;
+                            amrex::ParticleReal ue_x = 0, ue_y = 0, ue_z = 0;
+                            doGatherNodalScalarFieldShapeN(x, y, z, n_e, rho_arr, dinv, plo);
+                            doGatherNodalScalarFieldShapeN(x, y, z, T_e, T_arr, dinv, plo);
+                            doGatherNodalScalarFieldShapeN(x, y, z, ue_x, Ue_x_arr, dinv, plo);
+                            doGatherNodalScalarFieldShapeN(x, y, z, ue_y, Ue_y_arr, dinv, plo);
+                            doGatherNodalScalarFieldShapeN(x, y, z, ue_z, Ue_z_arr, dinv, plo);
+
+                            n_e = n_e/PhysConst::q_e;
+                            amrex::ParticleReal Te_val_K = T_e/PhysConst::kb; // T_e currently in J
+                            
+                            if(T_e/PhysConst::q_e<0.1){ return; }
+                            if(n_e<n_e_floor){ return; }
+
+                            // nu_ei expression defined by user using parser
+                            amrex::ParticleReal nu_ei_val = nu_ei(n_e, Te_val_K);
+
+                            amrex::ParticleReal nu_drag = nu_ei_val * m_elec / m_ion;
+                            amrex::ParticleReal D = nu_drag * T_e / m_ion; // T_e in Joules already
+                            amrex::ParticleReal R_x, R_y, R_z;
+                            amrex::ParticleReal diffusion_term = std::sqrt(2*D*dt);
+
+                            R_x = amrex::RandomNormal(0_prt, 1.0_prt, engine);
+                            R_y = amrex::RandomNormal(0_prt, 1.0_prt, engine);
+                            R_z = amrex::RandomNormal(0_prt, 1.0_prt, engine);
+                            
+                            // update particle velocity
+                            ux[ip] = ux[ip] - nu_drag*(ux[ip]-ue_x)*dt + diffusion_term*R_x;
+                            uy[ip] = uy[ip] - nu_drag*(uy[ip]-ue_y)*dt + diffusion_term*R_y;
+                            uz[ip] = uz[ip] - nu_drag*(uz[ip]-ue_z)*dt + diffusion_term*R_z;
+
+                        });
+
+                    //----------------------------------------------------------------------
+                    //----------------------------------------------------------------------
+
+                    if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
+                    {
+                        amrex::Gpu::synchronize();
+                        wt = static_cast<amrex::Real>(amrex::second()) - wt;
+                        amrex::HostDevice::Atomic::Add( &(*cost)[pti.index()], wt);
+                    }
+
+                }
+
+            }
+        }
+
+    }
+}
+
+
+/*
+void WarpXFluidContainer::Hybrid_Electron_Qei_from_dTi (ablastr::fields::MultiFabRegister& m_fields,
+                                        HybridPICModel const* hybrid_model,
+                                        const std::string temperature_vf_str,
+                                         amrex::Real dt, int lev, int sign_Ti)
+{
+    WARPX_PROFILE("WarpXFluidContainer::Hybrid_Electron_Qei_from_dTi");
+
+    WarpX &warpx = WarpX::GetInstance();
+    const amrex::Geometry &geom = warpx.Geom(lev);
+    const amrex::Periodicity &period = geom.periodicity();
+
+    using warpx::fields::FieldType;
+    using ablastr::fields::Direction;
+
+    // For safety condition (divition by rho)
+    amrex::Real rho_floor = PhysConst::q_e*hybrid_model->m_n_floor;
+    amrex::Real kb = PhysConst::kb;
+
+    // Index type required for interpolating fields from their respective
+    // staggering to nodal grid
+    amrex::GpuArray<int, 3> const& Jx_stag = hybrid_model->Jx_IndexType;
+    amrex::GpuArray<int, 3> const& Jy_stag = hybrid_model->Jy_IndexType;
+    amrex::GpuArray<int, 3> const& Jz_stag = hybrid_model->Jz_IndexType;
+
+    // Parameters for 'interp' that maps from Yee to nodal mesh
+    amrex::GpuArray<int, 3> const& nodal = {1, 1, 1};
+    // The coarsingng is just 1 so no coarsening is done
+    amrex::GpuArray<int, 3> const& coarsen = {1, 1, 1};
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for ( MFIter mfi(*m_fields.get(name_mf_N, lev), TilingIfNotGPU()); mfi.isValid(); ++mfi )
+        {
+            // This assumes operator splitting approach
+            // use temperatures at n+1
+            amrex::Array4<amrex::Real> const& Te = m_fields.get(name_mf_T, lev)->array(mfi);
+            amrex::Array4<amrex::Real> const& Ti_x = m_fields.get(temperature_vf_str, Direction{0}, lev)->array(mfi);
+            amrex::Array4<amrex::Real> const& Ti_y = m_fields.get(temperature_vf_str, Direction{1}, lev)->array(mfi);
+            amrex::Array4<amrex::Real> const& Ti_z = m_fields.get(temperature_vf_str, Direction{2}, lev)->array(mfi);
+
+            // using rho at n+1
+            amrex::Array4<amrex::Real> const& rho = m_fields.get(FieldType::rho_fp, lev)->array(mfi);
+
+            const Box& tilebox  = mfi.tilebox();          
+
+            ParallelFor(tilebox, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+
+                // careful here, once multi ion species feature is included
+                if(rho(i, j, k) > rho_floor){
+
+                    amrex::Real rho_val = rho(i, j, k);
+
+                    auto const Tix_interp = ablastr::coarsen::sample::Interp(Ti_x, Jx_stag, nodal, coarsen, i, j, k, 0);
+                    auto const Tiy_interp = ablastr::coarsen::sample::Interp(Ti_y, Jy_stag, nodal, coarsen, i, j, k, 0);
+                    auto const Tiz_interp = ablastr::coarsen::sample::Interp(Ti_z, Jz_stag, nodal, coarsen, i, j, k, 0);
+
+                    // avg Ti over degrees of freedom
+                    amrex::Real Ti_val_K = (Tix_interp + Tiy_interp + Tiz_interp)/3.0;
+                   
+                    // refactor hybrid code so Te is in K instead of J.
+                    // assuming quasineutrality and only one ion species.
+                    // should use rho for ne and rho_i for ion energy density
+                    // use sign_Ti = 1 pre collision
+                    // use sign_Ti = -1 post collision
+
+                    Te(i, j, k) += sign_Ti*Ti_val_K*kb; // replace by Te(i, j, k) += sign_Ti*ni/ne if ne>n_floor once multi ion species are included
+                }
+            });
+        }
+
+    m_fields.get(name_mf_T, lev)->FillBoundary(m_fields.get(name_mf_T, lev)->nGrowVect(), period);
+}
+*/

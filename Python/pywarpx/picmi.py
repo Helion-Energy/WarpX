@@ -1924,6 +1924,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         include_Qei=False,
         Zeff=None,
         nu_ei_function=None,
+        ie_coll_species=None,
         **kw,
     ):
         self.grid = grid
@@ -1954,6 +1955,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
 
         self.nu_ei_function = nu_ei_function
 
+        self.ie_coll_species = ie_coll_species
+
         # Handle keyword arguments used in expressions
         self.user_defined_kw = {}
         for k in list(kw.keys()):
@@ -1977,6 +1980,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         pywarpx.hybridpicmodel.gamma = self.gamma
         pywarpx.hybridpicmodel.n_floor = self.n_floor
         pywarpx.hybridpicmodel.Zeff = self.Zeff
+        pywarpx.hybridpicmodel.ie_coll_species = self.ie_coll_species
 
         pywarpx.hybridpicmodel.__setattr__(
             "plasma_resistivity(rho,J,Te)",

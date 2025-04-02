@@ -501,6 +501,7 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
     Will refactor in the future, I need these changes to test an algorithm first.
     Author: Marco D. Acciarri, Helion Energy Inc. March 2025. 
 */
+/*
 void BackgroundMCCCollision::doBackgroundCollisionsWithinTile_hybrid_ie
 ( WarpXParIter& pti, amrex::Real t )
 {
@@ -676,6 +677,255 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile_hybrid_ie
                           }
                           );
 }
+*/
+
+
+/*
+void BackgroundMCCCollision::doBackgroundCollisionsWithinTile_hybrid_ie
+( WarpXParIter& pti, amrex::Real t )
+{
+    using namespace amrex::literals;
+
+    // So that CUDA code gets its intrinsic, not the host-only C++ library version
+    using std::sqrt;
+
+    // get particle count
+    const long np = pti.numParticles();
+
+    auto& warpx = WarpX::GetInstance();
+
+    amrex::Real const dt = warpx.getdt(0);
+
+    using warpx::fields::FieldType;
+
+    // These multifabs should be passed as arguments, this is just for testing :)
+    // hardcoding level 0 too (Hybrid PIC model) :)
+    const amrex::MultiFab &rho_mf = *warpx.m_fields.get(FieldType::rho_fp, 0);
+    const amrex::MultiFab &Te_mf = *warpx.m_fields.get("fluid_temperature_electrons_hybrid", 0);
+
+    const auto &rho_arr = rho_mf[pti].array();
+    const auto &T_arr = Te_mf[pti].array();
+    //
+
+    amrex::Box tilebox = pti.tilebox();
+
+    const amrex::XDim3 dinv = WarpX::InvCellSize(0); // lev 0
+    const auto plo = warpx.Geom(0).ProbLoArray(); // lev 0
+
+    // get collision parameters
+    auto *scattering_processes = m_scattering_processes_exe.data();
+    auto const process_count  = static_cast<int>(m_scattering_processes_exe.size());
+
+    auto const total_collision_prob = m_total_collision_prob;
+    auto const nu_max = m_nu_max;
+
+    // store projectile and target masses
+    auto const m = m_mass1;
+    auto const M = m_background_mass;
+
+    // precalculate often used value
+    constexpr auto c2 = PhysConst::c * PhysConst::c;
+    auto const mc2 = m*c2;
+
+    // we need particle positions in order to calculate the local density
+    // and temperature
+    auto GetPosition = GetParticlePosition<PIdx>(pti);
+
+    // get Struct-Of-Array particle data, also called attribs
+    auto& attribs = pti.GetAttribs();
+    amrex::ParticleReal* const AMREX_RESTRICT ux = attribs[PIdx::ux].dataPtr();
+    amrex::ParticleReal* const AMREX_RESTRICT uy = attribs[PIdx::uy].dataPtr();
+    amrex::ParticleReal* const AMREX_RESTRICT uz = attribs[PIdx::uz].dataPtr();
+
+    amrex::ParallelForRNG(np,
+                          [=] AMREX_GPU_HOST_DEVICE (long ip, amrex::RandomEngine const& engine)
+                          {
+                              if (t==0) { return; } // avoid first collision, since Te is not initialized yet
+
+                              amrex::ParticleReal x, y, z;
+                              GetPosition.AsStored(ip, x, y, z);
+                              
+                              amrex::ParticleReal n_a = 0;
+                              amrex::ParticleReal T_a = 0;
+                              doGatherNodalScalarFieldShapeN(x, y, z, n_a, rho_arr, dinv, plo);
+                              doGatherNodalScalarFieldShapeN(x, y, z, T_a, T_arr, dinv, plo);
+                              n_a = n_a/PhysConst::q_e;
+                              T_a = T_a/PhysConst::kb; // HARDCODED: Te currently in J
+
+                              amrex::ParticleReal v_coll, v_coll2, sigma_E, nu_i = 0;
+                              double gamma, E_coll;
+                              amrex::ParticleReal ua_x, ua_y, ua_z, vx, vy, vz;
+                              amrex::ParticleReal uCOM_x, uCOM_y, uCOM_z;
+                              const amrex::ParticleReal col_select = amrex::Random(engine);
+
+                              // get velocities of gas particles from a Maxwellian distribution
+                              auto const vel_std = sqrt(PhysConst::kb * T_a / M);
+                              ua_x = vel_std * amrex::RandomNormal(0_prt, 1.0_prt, engine);
+                              ua_y = vel_std * amrex::RandomNormal(0_prt, 1.0_prt, engine);
+                              ua_z = vel_std * amrex::RandomNormal(0_prt, 1.0_prt, engine);
+
+                              // we assume the target particle is not relativistic (in
+                              // the lab frame) and therefore we can transform the projectile
+                              // velocity to a frame in which the target is stationary with
+                              // a simple Galilean boost
+                              // not doing the full Lorentz boost here saves us computation
+                              // since most particles will not actually collide
+                              vx = ux[ip] - ua_x;
+                              vy = uy[ip] - ua_y;
+                              vz = uz[ip] - ua_z;
+                              v_coll2 = (vx*vx + vy*vy + vz*vz);
+                              v_coll = std::sqrt(v_coll2);
+
+                              // calculate the collision energy in eV
+                              ParticleUtils::getCollisionEnergy(v_coll2, m, M, gamma, E_coll);
+
+                              // loop through all collision pathways
+                              for (int i = 0; i < process_count; i++) {
+                                  auto const& scattering_process = *(scattering_processes + i);
+
+                                  // get collision cross-section
+                                  sigma_E = scattering_process.getCrossSection(static_cast<amrex::ParticleReal>(E_coll));
+
+                                  auto const prob = 1 - std::exp(- n_a * sigma_E * v_coll * dt);
+
+                                  if (col_select > prob) { continue; }
+
+                                  // -----------------------------------------------
+                                  // ------------- move this to kernel -------------
+                                  // -----------------------------------------------
+                                  amrex::ParticleReal n_x, n_y, n_z, n_mag;
+
+                                  n_x = amrex::RandomNormal(0_prt, 1.0_prt, engine);
+                                  n_y = amrex::RandomNormal(0_prt, 1.0_prt, engine);
+                                  n_z = amrex::RandomNormal(0_prt, 1.0_prt, engine);
+
+                                  n_mag = std::sqrt(n_x*n_x + n_y*n_y + n_z*n_z);
+                                  n_x = n_x/n_mag;
+                                  n_y = n_y/n_mag;
+                                  n_z = n_z/n_mag;
+
+                                  amrex::ParticleReal dvi_x, dvi_y, dvi_z;
+
+                                  auto const dot_prod = vx*n_x + vy*n_y + vz*n_z;
+                                  auto const factor = 2*M/(M+m)*dot_prod; // m is ion, M is electron
+                    
+                                  dvi_x = -factor*n_x;
+                                  dvi_y = -factor*n_y;
+                                  dvi_z = -factor*n_z;
+                                  // -----------------------------------------------
+                                  // -----------------------------------------------
+
+                                  // update particle velocity
+                                  ux[ip] = ux[ip] + dvi_x;
+                                  uy[ip] = uy[ip] + dvi_y;
+                                  uz[ip] = uz[ip] + dvi_z;
+                                  break;
+                              }
+                          }
+                          );
+}
+*/
+
+// THIS IS NOT MCC, JUST TESTING DRAG-DIFFUSION APPROXIMATION
+void BackgroundMCCCollision::doBackgroundCollisionsWithinTile_hybrid_ie
+( WarpXParIter& pti, amrex::Real t )
+{
+    using namespace amrex::literals;
+
+    using ablastr::fields::Direction;
+
+    // So that CUDA code gets its intrinsic, not the host-only C++ library version
+    using std::sqrt;
+
+    // get particle count
+    const long np = pti.numParticles();
+
+    auto& warpx = WarpX::GetInstance();
+
+    amrex::Real const dt = warpx.getdt(0);
+
+    using warpx::fields::FieldType;
+
+    // These multifabs should be passed as arguments, this is just for testing :)
+    // hardcoding level 0 too (Hybrid PIC model) :)
+    const amrex::MultiFab &rho_mf = *warpx.m_fields.get(FieldType::rho_fp, 0);
+    const amrex::MultiFab &Te_mf = *warpx.m_fields.get("fluid_temperature_electrons_hybrid", 0);
+    const amrex::MultiFab &Ue_x = *warpx.m_fields.get("fluid_momentum_density_electrons_hybrid", Direction{0}, 0);
+    const amrex::MultiFab &Ue_y = *warpx.m_fields.get("fluid_momentum_density_electrons_hybrid", Direction{1}, 0);
+    const amrex::MultiFab &Ue_z = *warpx.m_fields.get("fluid_momentum_density_electrons_hybrid", Direction{2}, 0);
+
+    const auto &rho_arr = rho_mf[pti].array();
+    const auto &T_arr = Te_mf[pti].array();
+    const auto &Ue_x_arr = Ue_x[pti].array();
+    const auto &Ue_y_arr = Ue_y[pti].array();
+    const auto &Ue_z_arr = Ue_z[pti].array();
+
+    amrex::Box tilebox = pti.tilebox();
+
+    const amrex::XDim3 dinv = WarpX::InvCellSize(0); // lev 0
+    const auto plo = warpx.Geom(0).ProbLoArray(); // lev 0
+
+    // store projectile and target masses
+    auto const m = m_mass1;
+    auto const M = m_background_mass;
+
+    const amrex::ParticleReal factor = 3.3421710328413337;
+
+    // we need particle positions in order to calculate the local density
+    // and temperature
+    auto GetPosition = GetParticlePosition<PIdx>(pti);
+
+    // get Struct-Of-Array particle data, also called attribs
+    auto& attribs = pti.GetAttribs();
+    amrex::ParticleReal* const AMREX_RESTRICT ux = attribs[PIdx::ux].dataPtr();
+    amrex::ParticleReal* const AMREX_RESTRICT uy = attribs[PIdx::uy].dataPtr();
+    amrex::ParticleReal* const AMREX_RESTRICT uz = attribs[PIdx::uz].dataPtr();
+
+    amrex::ParallelForRNG(np,
+                          [=] AMREX_GPU_HOST_DEVICE (long ip, amrex::RandomEngine const& engine)
+                          {
+                              if (t==0) { return; } // avoid first collision, since Te is not initialized yet
+
+                              amrex::ParticleReal x, y, z;
+                              GetPosition.AsStored(ip, x, y, z);
+                              
+                              amrex::ParticleReal n_a = 0;
+                              amrex::ParticleReal T_a = 0;
+                              amrex::ParticleReal ue_x, ue_y, ue_z;
+                              doGatherNodalScalarFieldShapeN(x, y, z, n_a, rho_arr, dinv, plo);
+                              doGatherNodalScalarFieldShapeN(x, y, z, T_a, T_arr, dinv, plo);
+                              doGatherNodalScalarFieldShapeN(x, y, z, ue_x, Ue_x_arr, dinv, plo);
+                              doGatherNodalScalarFieldShapeN(x, y, z, ue_y, Ue_y_arr, dinv, plo);
+                              doGatherNodalScalarFieldShapeN(x, y, z, ue_z, Ue_z_arr, dinv, plo);
+
+                              n_a = n_a/PhysConst::q_e;
+                              T_a = T_a; // Te currently in J
+
+                              if(T_a/PhysConst::q_e<0.1){ return; }
+
+                              // TO DO: use parser instead.
+                              // don't use MCC, move this to hybrid to read mypc and do this random kick when needed.
+                              amrex::ParticleReal num = factor*std::pow(PhysConst::q_e,4)*12*n_a;
+                              amrex::ParticleReal den = std::pow(4*3.1415*PhysConst::ep0,2)*sqrt(M)*std::pow(T_a,1.5);
+                              amrex::ParticleReal nu_ei =  num/den;
+                              //amrex::ParticleReal nu_ei = 1;//2.2366076507200256e-18/std::pow(T_a,1.5);
+
+                              amrex::ParticleReal nu_drag = nu_ei * M / m; // M is me m is mi (confusing, I know)
+                              amrex::ParticleReal D = nu_drag * T_a / m; // T_a in Joules already
+                              amrex::ParticleReal R_x, R_y, R_z;
+                              amrex::ParticleReal diffusion_term = sqrt(2*D*dt);
+                              
+                              R_x = amrex::RandomNormal(0_prt, 1.0_prt, engine);
+                              R_y = amrex::RandomNormal(0_prt, 1.0_prt, engine);
+                              R_z = amrex::RandomNormal(0_prt, 1.0_prt, engine);
+                            
+                              // update particle velocity
+                              ux[ip] = ux[ip] - nu_drag*(ux[ip]-ue_x)*dt + diffusion_term*R_x;
+                              uy[ip] = uy[ip] - nu_drag*(uy[ip]-ue_y)*dt + diffusion_term*R_y;
+                              uz[ip] = uz[ip] - nu_drag*(uz[ip]-ue_z)*dt + diffusion_term*R_z;
+                          });
+}
+
 
 void BackgroundMCCCollision::doBackgroundIonization
 ( int lev, amrex::LayoutData<amrex::Real>* cost,
