@@ -1777,9 +1777,7 @@ void WarpXFluidContainer::Hybrid_Electron_Bremsstrahlung (ablastr::fields::Multi
 
 /*
     Function for electron-ion temperature relaxation as part of the electron energy equation used in the Hybrid PIC model.
-    When used, MCC module should be called in WarpXPushFieldsHybridPIC.cpp for ions so energy is conserved.
-    Collision frequencies should be used consistently.
-    Check that if Ti is vector field, then average over degrees of freedom to get Ti
+    This terms covers energy book-keeping since drag-diffusion approach is used on ions.
 */
 void WarpXFluidContainer::Hybrid_Electron_Qei (ablastr::fields::MultiFabRegister& m_fields,
                                         HybridPICModel const* hybrid_model,
@@ -1873,6 +1871,8 @@ void WarpXFluidContainer::Hybrid_Electron_Qei (ablastr::fields::MultiFabRegister
         - Fluid container
         - Parser with collision frequency to use 
         - Also: pass particle container as argument or species id instead of species_name to avoid loop over mypc
+
+    Since nu_drag is calculated with same collision frequency used in nu_ei, 
 */
 void WarpXFluidContainer::Hybrid_Drag_Diffusion (ablastr::fields::MultiFabRegister& m_fields,
                                         HybridPICModel const* hybrid_model,
@@ -1926,7 +1926,7 @@ void WarpXFluidContainer::Hybrid_Drag_Diffusion (ablastr::fields::MultiFabRegist
                         }
                         auto wt = static_cast<amrex::Real>(amrex::second());
 
-                    // -------- Move this to "doDragDiffusionWithinTile function"
+                    // -------- Move this to "doDragDiffusionWithinTile function" ----------
                     //----------------------------------------------------------------------
                     //----------------------------------------------------------------------
 
