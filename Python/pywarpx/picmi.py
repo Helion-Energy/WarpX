@@ -3943,7 +3943,6 @@ class LabFrameFieldDiagnostic(
                     # Adds rho_species diagnostic
                     fields_to_plot.add(dataname)
                 elif dataname == "Te_hybrid":
-                    # Adds rho_species diagnostic
                     fields_to_plot.add(dataname)
 
             # --- Convert the set to a sorted list so that the order
