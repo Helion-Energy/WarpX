@@ -371,11 +371,6 @@ void WarpX::HybridPICEvolveFields ()
                         "Non-finite value detected in Tiz field."
                     );
 
-                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                        m_fields.get(hybrid_electron_fl->name_mf_T, finest_level)->is_finite(),
-                        "Non-finite value detected in Te_hybrid field."
-                    );
-
                 // ----------------------------------------------------------------------------------------
                 // ----------------------------------------------------------------------------------------
 
@@ -383,10 +378,11 @@ void WarpX::HybridPICEvolveFields ()
                                                             m_ion, dt[0], finest_level);
             }
         }
-                
-        // add conductivity term here (separate PR)
-        // ...
 
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                        m_fields.get(hybrid_electron_fl->name_mf_T, finest_level)->is_finite(),
+                        "Non-finite value detected in Te_hybrid field."
+                    );
 
     }
 

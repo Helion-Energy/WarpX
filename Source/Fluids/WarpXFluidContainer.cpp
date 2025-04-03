@@ -1823,13 +1823,10 @@ void WarpXFluidContainer::Hybrid_Electron_Qei (ablastr::fields::MultiFabRegister
             amrex::Array4<amrex::Real> const& Ti_x = m_fields.get(temperature_vf_str, Direction{0}, lev)->array(mfi);
             amrex::Array4<amrex::Real> const& Ti_y = m_fields.get(temperature_vf_str, Direction{1}, lev)->array(mfi);
             amrex::Array4<amrex::Real> const& Ti_z = m_fields.get(temperature_vf_str, Direction{2}, lev)->array(mfi);
-
             // using rho at n+1
             amrex::Array4<amrex::Real> const& rho = m_fields.get(FieldType::rho_fp, lev)->array(mfi);
 
             const Box& tilebox  = mfi.tilebox();
-            //amrex::Box box = amrex::convert( tilebox, ix_type );
-            //box.grow(m_fields.get(name_mf_N, lev)->nGrowVect());
             
             ParallelFor(tilebox, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
 
@@ -1838,7 +1835,7 @@ void WarpXFluidContainer::Hybrid_Electron_Qei (ablastr::fields::MultiFabRegister
 
                     amrex::Real rho_val = rho(i, j, k);
                     amrex::Real ne_val = rho(i, j, k) / PhysConst::q_e;
-                    amrex::Real Te_val_K = Te(i, j, k) / PhysConst::kb; // convert Te from J to K for nu_ei evaluation
+                    amrex::Real Te_val_K = Te(i, j, k) / kb; // convert Te from J to K for nu_ei evaluation
 
                     // nu_ei expression defined by user using parser
                     amrex::Real nu_ei_val = nu_ei(ne_val, Te_val_K);
@@ -1868,7 +1865,7 @@ void WarpXFluidContainer::Hybrid_Electron_Qei (ablastr::fields::MultiFabRegister
 /*
     TO DO: Move this to a separate class that computes drag diffusion for the following inputs:
         - Particle container
-        - Fluid container
+        - Fluid multifabs (density, velocity and temperature)
         - Parser with collision frequency to use 
         - Also: pass particle container as argument or species id instead of species_name to avoid loop over mypc
 
@@ -1878,6 +1875,9 @@ void WarpXFluidContainer::Hybrid_Drag_Diffusion (ablastr::fields::MultiFabRegist
                                         HybridPICModel const* hybrid_model,
                                         const std::string species_name, amrex::Real dt, int lev)
 {
+
+    WARPX_PROFILE("WarpXFluidContainer::Hybrid_Drag_Diffusion");
+
     auto& warpx = WarpX::GetInstance();
     auto& mypc = warpx.GetPartContainer();
 
@@ -1894,7 +1894,8 @@ void WarpXFluidContainer::Hybrid_Drag_Diffusion (ablastr::fields::MultiFabRegist
     amrex::Real m_elec = PhysConst::m_e;
     amrex::Real kb = PhysConst::kb;
 
-    const amrex::MultiFab &rho_mf = *warpx.m_fields.get(FieldType::rho_fp, 0);
+    // Careful what rho is used here.
+    const amrex::MultiFab &rho_mf = *warpx.m_fields.get(FieldType::rho_fp, 0); // Instead of rho, check of using fluid container N
     const amrex::MultiFab &Te_mf = *warpx.m_fields.get(name_mf_T, 0);
     const amrex::MultiFab &Ue_x = *warpx.m_fields.get(name_mf_NU, Direction{0}, 0);
     const amrex::MultiFab &Ue_y = *warpx.m_fields.get(name_mf_NU, Direction{1}, 0);
@@ -1939,8 +1940,8 @@ void WarpXFluidContainer::Hybrid_Drag_Diffusion (ablastr::fields::MultiFabRegist
                     const auto &Ue_z_arr = Ue_z[pti].array();
 
                     amrex::Box tilebox = pti.tilebox();
-                    const amrex::XDim3 dinv = WarpX::InvCellSize(0); // lev 0
-                    const auto plo = warpx.Geom(0).ProbLoArray(); // lev 0
+                    const amrex::XDim3 dinv = WarpX::InvCellSize(lev);
+                    const auto plo = warpx.Geom(lev).ProbLoArray();
 
                     auto GetPosition = GetParticlePosition<PIdx>(pti);
 
