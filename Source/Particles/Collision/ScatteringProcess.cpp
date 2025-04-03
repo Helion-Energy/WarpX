@@ -79,8 +79,6 @@ ScatteringProcess::parseProcessType(const std::string& scattering_process)
 {
     if (scattering_process == "elastic") {
         return ScatteringProcessType::ELASTIC;
-    } else if (scattering_process == "Hybrid_PIC_ion_electron") {
-        return ScatteringProcessType::HYBRID_PIC_ION_ELECTRON;
     } else if (scattering_process == "back") {
         return ScatteringProcessType::BACK;
     } else if (scattering_process == "charge_exchange") {
