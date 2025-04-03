@@ -13,7 +13,6 @@
 #include "Utils/TextMsg.H"
 #include "Utils/ParticleUtils.H"
 #include "Utils/WarpXProfilerWrapper.H"
-#include "Particles/Gather/FieldGather.H"
 #include "WarpX.H"
 
 #include <AMReX_ParmParse.H>
@@ -41,7 +40,7 @@ BackgroundMCCCollision::BackgroundMCCCollision (std::string const& collision_nam
     }
     else {
         std::string background_density_str;
-        utils::parser::Store_parserString(pp_collision_name, "background_density(x,y,z,t)", background_density_str);
+        pp_collision_name.get("background_density(x,y,z,t)", background_density_str);
         m_background_density_parser =
             utils::parser::makeParser(background_density_str, {"x", "y", "z", "t"});
     }
@@ -56,7 +55,7 @@ BackgroundMCCCollision::BackgroundMCCCollision (std::string const& collision_nam
     }
     else {
         std::string background_temperature_str;
-        utils::parser::Store_parserString(pp_collision_name, "background_temperature(x,y,z,t)", background_temperature_str);
+        pp_collision_name.get("background_temperature(x,y,z,t)", background_temperature_str);
         m_background_temperature_parser =
             utils::parser::makeParser(background_temperature_str, {"x", "y", "z", "t"});
     }
@@ -138,7 +137,7 @@ BackgroundMCCCollision::BackgroundMCCCollision (std::string const& collision_nam
             m_ionization_processes.push_back(std::move(process));
         } else {
             m_scattering_processes.push_back(std::move(process));
-        }       
+        }
     }
 
 #ifdef AMREX_USE_GPU
@@ -305,12 +304,7 @@ BackgroundMCCCollision::doCollisions (amrex::Real cur_time, amrex::Real dt, Mult
             }
             auto wt = static_cast<amrex::Real>(amrex::second());
 
-            if(hybrid_ie_MCC) {
-                doBackgroundCollisionsWithinTile_hybrid_ie(pti, cur_time);
-            } else {
-                doBackgroundCollisionsWithinTile(pti, cur_time);
-            }
-            
+            doBackgroundCollisionsWithinTile(pti, cur_time);
 
             if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
             {
@@ -478,6 +472,7 @@ void BackgroundMCCCollision::doBackgroundCollisionsWithinTile
                           }
                           );
 }
+
 
 void BackgroundMCCCollision::doBackgroundIonization
 ( int lev, amrex::LayoutData<amrex::Real>* cost,
