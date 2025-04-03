@@ -3461,6 +3461,7 @@ class FieldDiagnostic(picmistandard.PICMI_FieldDiagnostic, WarpXDiagnosticBase):
                     "divB",
                     "proc_number",
                     "part_per_cell",
+                    "Te_hybrid"
                 ]:
                     fields_to_plot.add(dataname)
                 elif dataname in J_fields_list:
@@ -3923,6 +3924,8 @@ class LabFrameFieldDiagnostic(
                     fields_to_plot.add(dataname.lower())
                 elif dataname.startswith("rho_"):
                     # Adds rho_species diagnostic
+                    fields_to_plot.add(dataname)
+                elif dataname == "Te_hybrid":
                     fields_to_plot.add(dataname)
 
             # --- Convert the set to a sorted list so that the order
