@@ -128,7 +128,7 @@ void WarpX::HybridPICEvolveFields ()
             amrex::ParallelFor(tile_box,
                 [=] AMREX_GPU_DEVICE(int i, int j, int k)
                 {
-                    Te_arr(i, j, k) = Te0*std::pow(rho_arr(i, j, k)/rho0_ref,gamma_val-1);
+                    Te_arr(i, j, k) = Te0 * std::pow(rho_arr(i, j, k)/rho0_ref,gamma_val-1); // Te in K
                 }
             );
         }
@@ -318,18 +318,13 @@ void WarpX::HybridPICEvolveFields ()
         //    hybrid_electron_fl->Hybrid_Electron_Qei (m_fields, m_hybrid_pic_model.get(), Ti_field, m_ion, dt[0], finest_level);
         //}
         
-
         // add conductivity term here.
         // Write functions in FluidContainer, use multigrid solver from amrex
         // look at example from amrex guided tutorials (MLMG) linear operator classes
 
-
         // Source/Sink term due to collisions with ions (Qei)
         // This term should also apply MCC to ions particle container (Qie)
         // Implemented for 1 ion species. Should extend carefully in case of multiple ion species
-        
-
-
 
     }
 

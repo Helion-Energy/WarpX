@@ -39,7 +39,8 @@ void HybridPICModel::ReadParameters ()
 
     // The hybrid model requires an electron temperature, reference density
     // and exponent to be given. These values will be used to calculate the
-    // electron pressure according to p = n0 * Te * (n/n0)^gamma
+    // electron pressure according to p = n0 * kb * Te * (n/n0)^gamma if the 
+    // electron energy equation is not solved
     utils::parser::queryWithParser(pp_hybrid, "gamma", m_gamma);
     if (!utils::parser::queryWithParser(pp_hybrid, "elec_temp", m_elec_temp)) {
         Abort("hybrid_pic_model.elec_temp must be specified when using the hybrid solver");
@@ -54,9 +55,6 @@ void HybridPICModel::ReadParameters ()
 
     utils::parser::queryWithParser(pp_hybrid, "n_floor", m_n_floor);
 
-    // convert electron temperature from eV to J
-    m_elec_temp *= PhysConst::q_e;
-
     // external currents
     pp_hybrid.query("Jx_external_grid_function(x,y,z,t)", m_Jx_ext_grid_function);
     pp_hybrid.query("Jy_external_grid_function(x,y,z,t)", m_Jy_ext_grid_function);
@@ -70,6 +68,9 @@ void HybridPICModel::ReadParameters ()
     }
 
     //bool to indicate if electron fluid equation will be solved or not
+    // if True, qdsmc solver is used to update Te and additional terms can be turned on
+    // that will be calculated using operator splitting approach
+    // Reference to this method is Topanga paper (https://doi.org/10.1063/5.0177132)
     utils::parser::queryWithParser(pp_hybrid, "solve_electron_energy_equation", m_solve_electron_energy_equation);
 
     //bool to indicate if Joule heating is included (when m_solve_electron_energy_equation is True)

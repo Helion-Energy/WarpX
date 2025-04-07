@@ -648,17 +648,15 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 }
 
                 // Interpolate Te to get the appropiate temperature in space
-                // Te_val is converted to K since it will only be used to evaluate the resistivity
-                // which for consistency should only use SI units
                 Real Te_val = 0_rt;
                 if(resistivity_has_Te_dependence) {
                     if(solve_electron_energy_equation){
-                        Te_val = Interp(Te, nodal, Er_stag, coarsen, i, j, 0, 0)/PhysConst::kb;
+                        Te_val = Interp(Te, nodal, Er_stag, coarsen, i, j, 0, 0);
                     }
                     // if the electron energy equation is not solved
                     // Te is calculated using adiabatic relationship
                     else{
-                        Te_val = Te0*std::pow(rho_val/rho_n0_ref,gamma_val-1)/PhysConst::kb;
+                        Te_val = Te0*std::pow(rho_val/rho_n0_ref,gamma_val-1);
                     }
                 }
 
@@ -734,17 +732,15 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 }
 
                 // Interpolate Te to get the appropiate temperature in space
-                // Te_val is converted to K since it will only be used to evaluate the resistivity
-                // which for consistency should only use SI units
                 Real Te_val = 0_rt;
                 if(resistivity_has_Te_dependence) {
                     if(solve_electron_energy_equation){
-                        Te_val = Interp(Te, nodal, Et_stag, coarsen, i, j, 0, 0)/PhysConst::kb;
+                        Te_val = Interp(Te, nodal, Et_stag, coarsen, i, j, 0, 0);
                     }
                     // if the electron energy equation is not solved
                     // Te is calculated using adiabatic relationship
                     else{
-                        Te_val = Te0*std::pow(rho_val/rho_n0_ref,gamma_val-1)/PhysConst::kb;
+                        Te_val = Te0*std::pow(rho_val/rho_n0_ref,gamma_val-1);
                     }
                 }
 
@@ -812,17 +808,15 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 }
 
                 // Interpolate Te to get the appropiate temperature in space
-                // Te_val is converted to K since it will only be used to evaluate the resistivity
-                // which for consistency should only use SI units
                 Real Te_val = 0_rt;
                 if(resistivity_has_Te_dependence) {
                     if(solve_electron_energy_equation){
-                        Te_val = Interp(Te, nodal, Ez_stag, coarsen, i, j, 0, 0)/PhysConst::kb;
+                        Te_val = Interp(Te, nodal, Ez_stag, coarsen, i, j, 0, 0);
                     }
                     // if the electron energy equation is not solved
                     // Te is calculated using adiabatic relationship
                     else{
-                        Te_val = Te0*std::pow(rho_val/rho_n0_ref,gamma_val-1)/PhysConst::kb;
+                        Te_val = Te0*std::pow(rho_val/rho_n0_ref,gamma_val-1);
                     }
                 }
 
@@ -1118,17 +1112,15 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
 
                 // Interpolate Te to get the appropiate temperature in space
-                // Te_val is converted to K since it will only be used to evaluate the resistivity
-                // which for consistency should only use SI units
                 Real Te_val = 0_rt;
                 if(resistivity_has_Te_dependence) {
                     if(solve_electron_energy_equation){
-                        Te_val = Interp(Te, nodal, Ex_stag, coarsen, i, j, k, 0)/PhysConst::kb;
+                        Te_val = Interp(Te, nodal, Ex_stag, coarsen, i, j, k, 0);
                     }
                     // if the electron energy equation is not solved
                     // Te is calculated using adiabatic relationship
                     else{
-                        Te_val = Te0*std::pow(rho_val/rho_n0_ref,gamma_val-1)/PhysConst::kb;
+                        Te_val = Te0*std::pow(rho_val/rho_n0_ref,gamma_val-1);
                     }
                 }
 
@@ -1199,17 +1191,15 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
 
                 // Interpolate Te to get the appropiate temperature in space
-                // Te_val is converted to K since it will only be used to evaluate the resistivity
-                // which for consistency should only use SI units
                 Real Te_val = 0_rt;
                 if(resistivity_has_Te_dependence) {
                     if(solve_electron_energy_equation){
-                        Te_val = Interp(Te, nodal, Ey_stag, coarsen, i, j, k, 0)/PhysConst::kb;
+                        Te_val = Interp(Te, nodal, Ey_stag, coarsen, i, j, k, 0);
                     }
                     // if the electron energy equation is not solved
                     // Te is calculated using adiabatic relationship
                     else{
-                        Te_val = Te0*std::pow(rho_val/rho_n0_ref,gamma_val-1)/PhysConst::kb;
+                        Te_val = Te0*std::pow(rho_val/rho_n0_ref,gamma_val-1);
                     }
                 }
 
@@ -1278,17 +1268,15 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
 
                 // Interpolate Te to get the appropiate temperature in space
-                // Te_val is converted to K since it will only be used to evaluate the resistivity
-                // which for consistency should only use SI units
                 Real Te_val = 0_rt;
                 if(resistivity_has_Te_dependence) {
                     if(solve_electron_energy_equation){
-                        Te_val = Interp(Te, nodal, Ez_stag, coarsen, i, j, k, 0)/PhysConst::kb;
+                        Te_val = Interp(Te, nodal, Ez_stag, coarsen, i, j, k, 0);
                     }
                     // if the electron energy equation is not solved
                     // Te is calculated using adiabatic relationship
                     else{
-                        Te_val = Te0*std::pow(rho_val/rho_n0_ref,gamma_val-1)/PhysConst::kb;
+                        Te_val = Te0*std::pow(rho_val/rho_n0_ref,gamma_val-1);
                     }
                 }
 

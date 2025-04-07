@@ -182,7 +182,7 @@ public:
 
     bool m_holmstrom_vacuum_region = false;
 
-    /** Electron temperature in eV */
+    /** Electron temperature in K */
     amrex::Real m_elec_temp;
     /** Reference electron density */
     amrex::Real m_n0_ref = 1.0;
@@ -264,13 +264,13 @@ struct ElectronPressure {
                                      amrex::Real const T0,
                                      amrex::Real const gamma,
                                      amrex::Real const rho) {
-        return n0 * T0 * std::pow((rho/PhysConst::q_e)/n0, gamma);
+        return n0 * T0 * PhysConst::kb * std::pow((rho/PhysConst::q_e)/n0, gamma);
     }
 
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
     static amrex::Real get_pressure_ideal_gas (amrex::Real const Te,
                                                amrex::Real const rho) {
-        return Te*(rho/PhysConst::q_e);
+        return PhysConst::kb*Te*(rho/PhysConst::q_e);
     }
 };
 

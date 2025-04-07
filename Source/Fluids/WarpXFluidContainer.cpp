@@ -1479,11 +1479,6 @@ void WarpXFluidContainer::HybridInitializeUe (
                 // to test, Ue is calculated only when rho > rho_floor
                 if( rho(i, j, k) > rho_floor ){
 
-                    // safety condition since we divide by rho_val later
-                    //amrex::Real rho_val = rho_floor;
-                    //if(rho(i, j, k) > rho_floor){
-                    //    rho_val = rho(i, j, k);
-                    //}
                     amrex::Real rho_val = rho(i, j, k); // to test
 
                     // Interpolate the total plasma current to a nodal grid
@@ -1543,19 +1538,12 @@ void WarpXFluidContainer::HybridInitializeKe (ablastr::fields::MultiFabRegister&
             box.grow(m_fields.get(name_mf_K, lev)->nGrowVect());
 
             ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-                // to test, only calculated when rho > rho_floor
+
                 if( rho(i, j, k) > rho_floor ){
 
-                    // safety condition since we divide by rho_val later
-                    //amrex::Real rho_val = rho_floor;
-                    //if(rho(i, j, k) > rho_floor){
-                    //    rho_val = rho(i, j, k);
-                    //}
-
                     amrex::Real rho_val = rho(i, j, k);
-
                     amrex::Real ne = rho_val/PhysConst::q_e;
-                    Ke(i, j, k) = Te(i, j, k)*std::pow(ne, 1-gamma)/PhysConst::q_e; // Ke with Te in eV to avoid small numbers
+                    Ke(i, j, k) = Te(i, j, k)*std::pow(ne, 1-gamma)*(PhysConst::kb/PhysConst::q_e); // Ke with Te in eV to avoid too small or large numbers
                 }
             });
         }
@@ -1601,8 +1589,10 @@ void WarpXFluidContainer::HybridQDSMCUpdateTe (ablastr::fields::MultiFabRegister
                     amrex::Real weight = weights(i,j,k);
 
                     if(weight>0 && ne>n_floor){
+
                         weight = weight*cell_volume;
-                        Te(i, j, k) = (Ke(i, j, k)*PhysConst::q_e/std::pow(ne, 1-gamma))/weight; // Te in Joules
+                        Te(i, j, k) = (Ke(i, j, k)/std::pow(ne, 1-gamma))/weight / (PhysConst::kb/PhysConst::q_e); // Te back to K
+
                     }
                 }
             });
@@ -1668,8 +1658,6 @@ void WarpXFluidContainer::Hybrid_Electron_Joule_Heating (ablastr::fields::MultiF
             amrex::Array4<amrex::Real> const& Jz = current_fp_ampere[2]->array(mfi);
 
             const Box& tilebox  = mfi.tilebox();
-            //amrex::Box box = amrex::convert( tilebox, ix_type );
-            //box.grow(m_fields.get(name_mf_K, lev)->nGrowVect());
 
             ParallelFor(tilebox, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
 
@@ -1678,13 +1666,7 @@ void WarpXFluidContainer::Hybrid_Electron_Joule_Heating (ablastr::fields::MultiF
                     amrex::Real rho_val = rho(i, j, k);
                     amrex::Real ne_val = rho_val/PhysConst::q_e;
 
-                    amrex::Real Te_val = Te(i, j, k)/PhysConst::kb; // convert to K since eta expression should be in SI
-
-                    // remove this. Control on Te is set in eta() expression defined by the user.
-                    // unless this is necessary to avoid Te blowing up or m=4 amplification
-                    //if(Te_val<Te0_K){
-                    //    Te_val = Te0_K;
-                    //}
+                    amrex::Real Te_val = Te(i, j, k); // Te in K
 
                     // Interpolate the total plasma current to a nodal grid
                     auto const jx_interp = ablastr::coarsen::sample::Interp(Jx, Jx_stag, nodal, coarsen, i, j, k, 0);
@@ -1696,12 +1678,10 @@ void WarpXFluidContainer::Hybrid_Electron_Joule_Heating (ablastr::fields::MultiF
                     jtot_val = std::sqrt(jx_interp*jx_interp + jy_interp*jy_interp + jz_interp*jz_interp);
 
                     // calculate eta*J^2
-                    // eta expression and units should be in SI
-                    // so all variables here go in SI
                     amrex::Real eta_J2 = eta(rho_val, jtot_val, Te_val)*jtot_val*jtot_val;
 
-                    // Te(i, j, k) and second term already in Joules so no need to divide eta_J2 by kb
-                    Te(i, j, k) = Te(i, j, k) + dt*eta_J2/(1.5*ne_val);
+                    // update Te
+                    Te(i, j, k) = Te(i, j, k) + dt*eta_J2/(1.5*ne_val*PhysConst::kb);
                 }
             });
         }
@@ -1727,9 +1707,9 @@ void WarpXFluidContainer::Hybrid_Electron_Bremsstrahlung (ablastr::fields::Multi
     // Zeff should be self consistent with simulation but it is
     // an input parameter for now.
     // Once Hybrid PIC is extended to do more than 1 ion species
-    // Zeff should be calculated from rho_total and rho of each species.
+    // Zeff should be calculated based on relative densities
     const auto Zeff = hybrid_model->m_Zeff;
-    amrex::Real Zeff3 = Zeff*Zeff*Zeff;
+    amrex::Real Zeff2 = Zeff*Zeff;
     amrex::Real constant_val = 5.91361e37;
 
     // For safety condition (divition by rho)
@@ -1758,15 +1738,17 @@ void WarpXFluidContainer::Hybrid_Electron_Bremsstrahlung (ablastr::fields::Multi
 
                     amrex::Real rho_val = rho(i, j, k);
                     amrex::Real ne_val = rho_val/PhysConst::q_e;
+                    amrex::Real Te_eV = Te(i, j, k)*PhysConst::kb/PhysConst::q_e;
 
                     // calculate power loss per unit volume due to Bremsstrahlung
                     // Expression gives value in W/m^3
                     // Te in sqrt() is in eV in this formula
                     // update once multi ion species is included (one of these ne_val should be ni_val)
-                    amrex::Real dW_dV = Zeff3*ne_val*ne_val*std::sqrt(Te(i, j, k)/PhysConst::q_e)/constant_val;
+                    amrex::Real dW_dV = Zeff2*ne_val*ne_val*std::sqrt(Te_eV)/constant_val;
 
-                    // Te(i, j, k) and second term already in Joules
-                    Te(i, j, k) = Te(i, j, k) - dW_dV*dt/(1.5*ne_val);
+                    // update Te
+                    Te(i, j, k) = Te(i, j, k) - dW_dV*dt/(1.5*ne_val*PhysConst::kb);
+
                 }
             });
         }

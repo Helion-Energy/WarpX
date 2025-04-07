@@ -1840,7 +1840,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
     Parameters
     ----------
     Te: float
-        Electron temperature in eV.
+        Electron temperature in K.
 
     n0: float
         Reference plasma density in m^-3.
