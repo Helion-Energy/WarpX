@@ -39,7 +39,8 @@ void HybridPICModel::ReadParameters ()
 
     // The hybrid model requires an electron temperature, reference density
     // and exponent to be given. These values will be used to calculate the
-    // electron pressure according to p = n0 * Te * (n/n0)^gamma
+    // electron pressure according to p = n0 * kb * Te * (n/n0)^gamma if the 
+    // electron energy equation is not solved
     utils::parser::queryWithParser(pp_hybrid, "gamma", m_gamma);
     if (!utils::parser::queryWithParser(pp_hybrid, "elec_temp", m_elec_temp)) {
         Abort("hybrid_pic_model.elec_temp must be specified when using the hybrid solver");
@@ -52,12 +53,7 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("plasma_resistivity(rho,J,Te)", m_eta_expression);
     pp_hybrid.query("plasma_hyper_resistivity(rho,B)", m_eta_h_expression);
 
-    pp_hybrid.query("nu_ei_function(ne,Te)", m_nu_ei_expression);
-
     utils::parser::queryWithParser(pp_hybrid, "n_floor", m_n_floor);
-
-    // convert electron temperature from eV to J
-    m_elec_temp *= PhysConst::q_e;
 
     // external currents
     pp_hybrid.query("Jx_external_grid_function(x,y,z,t)", m_Jx_ext_grid_function);
@@ -72,6 +68,9 @@ void HybridPICModel::ReadParameters ()
     }
 
     //bool to indicate if electron fluid equation will be solved or not
+    // if True, qdsmc solver is used to update Te and additional terms can be turned on
+    // that will be calculated using operator splitting approach
+    // Reference to this method is Topanga paper (https://doi.org/10.1063/5.0177132)
     utils::parser::queryWithParser(pp_hybrid, "solve_electron_energy_equation", m_solve_electron_energy_equation);
 
     //bool to indicate if Joule heating is included (when m_solve_electron_energy_equation is True)
@@ -81,10 +80,6 @@ void HybridPICModel::ReadParameters ()
 
     //bool to indicate if classical Bremsstrahlung loss is included (when m_solve_electron_energy_equation is True)
     utils::parser::queryWithParser(pp_hybrid, "include_Bremsstrahlung", m_include_Bremsstrahlung);
-
-    // bool to indicate if electron ion collisions are included
-    // this requires to use MCC on the input file
-    utils::parser::queryWithParser(pp_hybrid, "include_Qei", m_include_Qei);
 
     // Z effective for Bremsstrahlung power loss.
     pp_hybrid.query("Zeff", m_Zeff);
@@ -199,10 +194,6 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
     m_eta_h = m_hyper_resistivity_parser->compile<2>();
     const std::set<std::string> hyper_resistivity_symbols = m_hyper_resistivity_parser->symbols();
     m_hyper_resistivity_has_B_dependence += hyper_resistivity_symbols.count("B");
-
-    m_nu_ei_parser = std::make_unique<amrex::Parser>(
-        utils::parser::makeParser(m_nu_ei_expression, {"ne","Te"}));
-    m_nu_ei = m_nu_ei_parser->compile<2>();
 
     m_J_external_parser[0] = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(m_Jx_ext_grid_function,{"x","y","z","t"}));

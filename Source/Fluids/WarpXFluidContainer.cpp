@@ -1481,11 +1481,6 @@ void WarpXFluidContainer::HybridInitializeUe (
                 // to test, Ue is calculated only when rho > rho_floor
                 if( rho(i, j, k) > rho_floor ){
 
-                    // safety condition since we divide by rho_val later
-                    //amrex::Real rho_val = rho_floor;
-                    //if(rho(i, j, k) > rho_floor){
-                    //    rho_val = rho(i, j, k);
-                    //}
                     amrex::Real rho_val = rho(i, j, k); // to test
 
                     // Interpolate the total plasma current to a nodal grid
@@ -1545,19 +1540,12 @@ void WarpXFluidContainer::HybridInitializeKe (ablastr::fields::MultiFabRegister&
             box.grow(m_fields.get(name_mf_K, lev)->nGrowVect());
 
             ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-                // to test, only calculated when rho > rho_floor
+
                 if( rho(i, j, k) > rho_floor ){
 
-                    // safety condition since we divide by rho_val later
-                    //amrex::Real rho_val = rho_floor;
-                    //if(rho(i, j, k) > rho_floor){
-                    //    rho_val = rho(i, j, k);
-                    //}
-
                     amrex::Real rho_val = rho(i, j, k);
-
                     amrex::Real ne = rho_val/PhysConst::q_e;
-                    Ke(i, j, k) = Te(i, j, k)*std::pow(ne, 1-gamma)/PhysConst::q_e; // Ke with Te in eV to avoid small numbers
+                    Ke(i, j, k) = Te(i, j, k)*std::pow(ne, 1-gamma)*(PhysConst::kb/PhysConst::q_e); // Ke with Te in eV to avoid too small or large numbers
                 }
             });
         }
@@ -1603,8 +1591,10 @@ void WarpXFluidContainer::HybridQDSMCUpdateTe (ablastr::fields::MultiFabRegister
                     amrex::Real weight = weights(i,j,k);
 
                     if(weight>0 && ne>n_floor){
+
                         weight = weight*cell_volume;
-                        Te(i, j, k) = (Ke(i, j, k)*PhysConst::q_e/std::pow(ne, 1-gamma))/weight; // Te in Joules
+                        Te(i, j, k) = (Ke(i, j, k)/std::pow(ne, 1-gamma))/weight / (PhysConst::kb/PhysConst::q_e); // Te back to K
+
                     }
                 }
             });
@@ -1670,8 +1660,6 @@ void WarpXFluidContainer::Hybrid_Electron_Joule_Heating (ablastr::fields::MultiF
             amrex::Array4<amrex::Real> const& Jz = current_fp_ampere[2]->array(mfi);
 
             const Box& tilebox  = mfi.tilebox();
-            //amrex::Box box = amrex::convert( tilebox, ix_type );
-            //box.grow(m_fields.get(name_mf_K, lev)->nGrowVect());
 
             ParallelFor(tilebox, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
 
@@ -1680,13 +1668,7 @@ void WarpXFluidContainer::Hybrid_Electron_Joule_Heating (ablastr::fields::MultiF
                     amrex::Real rho_val = rho(i, j, k);
                     amrex::Real ne_val = rho_val/PhysConst::q_e;
 
-                    amrex::Real Te_val = Te(i, j, k)/PhysConst::kb; // convert to K since eta expression should be in SI
-
-                    // remove this. Control on Te is set in eta() expression defined by the user.
-                    // unless this is necessary to avoid Te blowing up or m=4 amplification
-                    //if(Te_val<Te0_K){
-                    //    Te_val = Te0_K;
-                    //}
+                    amrex::Real Te_val = Te(i, j, k); // Te in K
 
                     // Interpolate the total plasma current to a nodal grid
                     auto const jx_interp = ablastr::coarsen::sample::Interp(Jx, Jx_stag, nodal, coarsen, i, j, k, 0);
@@ -1698,12 +1680,10 @@ void WarpXFluidContainer::Hybrid_Electron_Joule_Heating (ablastr::fields::MultiF
                     jtot_val = std::sqrt(jx_interp*jx_interp + jy_interp*jy_interp + jz_interp*jz_interp);
 
                     // calculate eta*J^2
-                    // eta expression and units should be in SI
-                    // so all variables here go in SI
                     amrex::Real eta_J2 = eta(rho_val, jtot_val, Te_val)*jtot_val*jtot_val;
 
-                    // Te(i, j, k) and second term already in Joules so no need to divide eta_J2 by kb
-                    Te(i, j, k) = Te(i, j, k) + dt*eta_J2/(1.5*ne_val);
+                    // update Te
+                    Te(i, j, k) = Te(i, j, k) + dt*eta_J2/(1.5*ne_val*PhysConst::kb);
                 }
             });
         }
@@ -1729,8 +1709,9 @@ void WarpXFluidContainer::Hybrid_Electron_Bremsstrahlung (ablastr::fields::Multi
     // Zeff should be self consistent with simulation but it is
     // an input parameter for now.
     // Once Hybrid PIC is extended to do more than 1 ion species
-    // Zeff should be calculated from rho_total and rho of each species.
+    // Zeff should be calculated based on relative densities
     const auto Zeff = hybrid_model->m_Zeff;
+    amrex::Real Zeff2 = Zeff*Zeff;
     amrex::Real Zeff2 = Zeff*Zeff;
     amrex::Real constant_val = 5.91361e37;
 
@@ -1760,104 +1741,19 @@ void WarpXFluidContainer::Hybrid_Electron_Bremsstrahlung (ablastr::fields::Multi
 
                     amrex::Real rho_val = rho(i, j, k);
                     amrex::Real ne_val = rho_val/PhysConst::q_e;
+                    amrex::Real Te_eV = Te(i, j, k)*PhysConst::kb/PhysConst::q_e;
 
                     // calculate power loss per unit volume due to Bremsstrahlung
                     // Expression gives value in W/m^3
                     // update once multi ion species is included (one of these ne_val should be ni_val)
-                    amrex::Real dW_dV = Zeff2*ne_val*ne_val*std::sqrt(Te(i, j, k)/PhysConst::q_e)/constant_val;
+                    amrex::Real dW_dV = Zeff2*ne_val*ne_val*std::sqrt(Te_eV)/constant_val;
 
-                    // Te(i, j, k) and second term already in Joules
-                    Te(i, j, k) = Te(i, j, k) - dW_dV*dt/(1.5*ne_val);
+                    // update Te
+                    Te(i, j, k) = Te(i, j, k) - dW_dV*dt/(1.5*ne_val*PhysConst::kb);
+
                 }
             });
         }
-    m_fields.get(name_mf_T, lev)->FillBoundary(m_fields.get(name_mf_T, lev)->nGrowVect(), period);
-}
-
-
-/*
-    Function for electron-ion temperature relaxation as part of the electron energy equation used in the Hybrid PIC model.
-    This terms covers energy book-keeping since drag-diffusion approach is used on ions.
-*/
-void WarpXFluidContainer::Hybrid_Electron_Qei (ablastr::fields::MultiFabRegister& m_fields,
-                                        HybridPICModel const* hybrid_model,
-                                        const std::string temperature_vf_str,
-                                        amrex::Real m_ion, amrex::Real dt, int lev)
-{
-    WARPX_PROFILE("WarpXFluidContainer::Hybrid_Electron_Qei");
-
-    WarpX &warpx = WarpX::GetInstance();
-    const amrex::Geometry &geom = warpx.Geom(lev);
-    const amrex::Periodicity &period = geom.periodicity();
-
-    using warpx::fields::FieldType;
-    using ablastr::fields::Direction;
-
-    const auto nu_ei = hybrid_model->m_nu_ei;
-
-    // For safety condition (divition by rho)
-    amrex::Real rho_floor = PhysConst::q_e*hybrid_model->m_n_floor;
-
-    amrex::Real m_elec = PhysConst::m_e;
-    amrex::Real kb = PhysConst::kb;
-
-    // Index type required for interpolating fields from their respective
-    // staggering to nodal grid
-    amrex::GpuArray<int, 3> const& Jx_stag = hybrid_model->Jx_IndexType;
-    amrex::GpuArray<int, 3> const& Jy_stag = hybrid_model->Jy_IndexType;
-    amrex::GpuArray<int, 3> const& Jz_stag = hybrid_model->Jz_IndexType;
-
-    // Parameters for 'interp' that maps from Yee to nodal mesh
-    amrex::GpuArray<int, 3> const& nodal = {1, 1, 1};
-    // The coarsingng is just 1 so no coarsening is done
-    amrex::GpuArray<int, 3> const& coarsen = {1, 1, 1};
-
-#ifdef AMREX_USE_OMP
-#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
-#endif
-    for ( MFIter mfi(*m_fields.get(name_mf_N, lev), TilingIfNotGPU()); mfi.isValid(); ++mfi )
-        {
-            // This assumes operator splitting approach
-            // use temperatures at n+1
-            amrex::Array4<amrex::Real> const& Te = m_fields.get(name_mf_T, lev)->array(mfi);
-            amrex::Array4<amrex::Real> const& Ti_x = m_fields.get(temperature_vf_str, Direction{0}, lev)->array(mfi);
-            amrex::Array4<amrex::Real> const& Ti_y = m_fields.get(temperature_vf_str, Direction{1}, lev)->array(mfi);
-            amrex::Array4<amrex::Real> const& Ti_z = m_fields.get(temperature_vf_str, Direction{2}, lev)->array(mfi);
-            // using rho at n+1
-            amrex::Array4<amrex::Real> const& rho = m_fields.get(FieldType::rho_fp, lev)->array(mfi);
-
-            const Box& tilebox  = mfi.tilebox();
-            
-            ParallelFor(tilebox, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-
-                // careful here, once multi ion species feature is included
-                if(rho(i, j, k) > rho_floor){
-
-                    amrex::Real rho_val = rho(i, j, k);
-                    amrex::Real ne_val = rho(i, j, k) / PhysConst::q_e;
-                    amrex::Real Te_val_K = Te(i, j, k) / kb; // convert Te from J to K for nu_ei evaluation
-
-                    // nu_ei expression defined by user using parser
-                    amrex::Real nu_ei_val = nu_ei(ne_val, Te_val_K);
-
-                    auto const Tix_interp = ablastr::coarsen::sample::Interp(Ti_x, Jx_stag, nodal, coarsen, i, j, k, 0);
-                    auto const Tiy_interp = ablastr::coarsen::sample::Interp(Ti_y, Jy_stag, nodal, coarsen, i, j, k, 0);
-                    auto const Tiz_interp = ablastr::coarsen::sample::Interp(Ti_z, Jz_stag, nodal, coarsen, i, j, k, 0);
-
-                    // avg Ti over degrees of freedom
-                    amrex::Real Ti_val_K = (Tix_interp + Tiy_interp + Tiz_interp)/3.0;
-                   
-                    // refactor hybrid code so Te is in K instead of J.
-
-                    // -3*me/mi*nu_ei*ni*kb*(Te-Ti), then divide by 3/2*kb*ne
-                    // since only one ion species for now, ni_val=ne_val -> -2*me/mi*nu_ei*kb*(Te-Ti)
-                    // Te(i, j, k) and second term already in Joules so no need to divide by kb
-
-                    Te(i, j, k) = Te_val_K*kb - dt*2*m_elec/m_ion*nu_ei_val*kb*(Te_val_K - Ti_val_K);
-                }
-            });
-        }
-
     m_fields.get(name_mf_T, lev)->FillBoundary(m_fields.get(name_mf_T, lev)->nGrowVect(), period);
 }
 

@@ -143,7 +143,7 @@ void WarpX::HybridPICEvolveFields ()
             amrex::ParallelFor(tile_box,
                 [=] AMREX_GPU_DEVICE(int i, int j, int k)
                 {
-                    Te_arr(i, j, k) = Te0*std::pow(rho_arr(i, j, k)/rho0_ref,gamma_val-1);
+                    Te_arr(i, j, k) = Te0 * std::pow(rho_arr(i, j, k)/rho0_ref,gamma_val-1); // Te in K
                 }
             );
         }

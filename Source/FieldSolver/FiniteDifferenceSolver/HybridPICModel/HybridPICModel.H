@@ -182,7 +182,7 @@ public:
 
     bool m_holmstrom_vacuum_region = false;
 
-    /** Electron temperature in eV */
+    /** Electron temperature in K */
     amrex::Real m_elec_temp;
     /** Reference electron density */
     amrex::Real m_n0_ref = 1.0;
@@ -205,11 +205,6 @@ public:
     amrex::ParserExecutor<2> m_eta_h;
     bool m_include_hyper_resistivity_term = false;
     bool m_hyper_resistivity_has_B_dependence = false;
-
-    /** Electron ion collision frequency expression */
-    std::string m_nu_ei_expression = "0.0";
-    std::unique_ptr<amrex::Parser> m_nu_ei_parser;
-    amrex::ParserExecutor<2> m_nu_ei;
 
     /** External current */
     std::string m_Jx_ext_grid_function = "0.0";
@@ -248,8 +243,6 @@ public:
 
     bool m_include_Bremsstrahlung;
 
-    bool m_include_Qei;
-
     // Z effective for classical Bremsstrahlung power loss calculation
     // only if QDSMC solver with Bremsstrahlung flag is used
     amrex::Real m_Zeff = 1.0;
@@ -273,13 +266,13 @@ struct ElectronPressure {
                                      amrex::Real const T0,
                                      amrex::Real const gamma,
                                      amrex::Real const rho) {
-        return n0 * T0 * std::pow((rho/PhysConst::q_e)/n0, gamma);
+        return n0 * T0 * PhysConst::kb * std::pow((rho/PhysConst::q_e)/n0, gamma);
     }
 
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
     static amrex::Real get_pressure_ideal_gas (amrex::Real const Te,
                                                amrex::Real const rho) {
-        return Te*(rho/PhysConst::q_e);
+        return PhysConst::kb*Te*(rho/PhysConst::q_e);
     }
 };
 

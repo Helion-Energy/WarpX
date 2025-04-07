@@ -1840,7 +1840,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
     Parameters
     ----------
     Te: float
-        Electron temperature in eV.
+        Electron temperature in K.
 
     n0: float
         Reference plasma density in m^-3.
@@ -1921,7 +1921,6 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         solve_electron_energy_equation=False,
         include_Joule_heating=False,
         include_Bremsstrahlung=False,
-        include_Qei=False,
         Zeff=None,
         nu_ei_function=None,
         ie_coll_species=None,
@@ -2061,14 +2060,6 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         )
         pywarpx.hybridpicmodel.include_Joule_heating = self.include_Joule_heating
         pywarpx.hybridpicmodel.include_Bremsstrahlung = self.include_Bremsstrahlung
-        pywarpx.hybridpicmodel.include_Qei = self.include_Qei
-
-        pywarpx.hybridpicmodel.__setattr__(
-            "nu_ei_function(ne,Te)",
-            pywarpx.my_constants.mangle_expression(
-                self.nu_ei_function, self.mangle_dict
-            ),
-        )
 
 
 class ElectrostaticSolver(picmistandard.PICMI_ElectrostaticSolver):
