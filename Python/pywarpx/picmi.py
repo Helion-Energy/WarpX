@@ -1921,6 +1921,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         solve_electron_energy_equation=False,
         include_Joule_heating=False,
         include_Bremsstrahlung=False,
+        include_Qei = False,
         Zeff=None,
         nu_ei_function=None,
         ie_coll_species=None,

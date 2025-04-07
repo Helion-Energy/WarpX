@@ -1712,7 +1712,6 @@ void WarpXFluidContainer::Hybrid_Electron_Bremsstrahlung (ablastr::fields::Multi
     // Zeff should be calculated based on relative densities
     const auto Zeff = hybrid_model->m_Zeff;
     amrex::Real Zeff2 = Zeff*Zeff;
-    amrex::Real Zeff2 = Zeff*Zeff;
     amrex::Real constant_val = 5.91361e37;
 
     // For safety condition (divition by rho)
@@ -1855,22 +1854,21 @@ void WarpXFluidContainer::Hybrid_Drag_Diffusion (ablastr::fields::MultiFabRegist
                             amrex::ParticleReal T_e = 0;
                             amrex::ParticleReal ue_x = 0, ue_y = 0, ue_z = 0;
                             doGatherNodalScalarFieldShapeN(x, y, z, n_e, rho_arr, dinv, plo);
-                            doGatherNodalScalarFieldShapeN(x, y, z, T_e, T_arr, dinv, plo);
+                            doGatherNodalScalarFieldShapeN(x, y, z, T_e, T_arr, dinv, plo); // T_e in K
                             doGatherNodalScalarFieldShapeN(x, y, z, ue_x, Ue_x_arr, dinv, plo);
                             doGatherNodalScalarFieldShapeN(x, y, z, ue_y, Ue_y_arr, dinv, plo);
                             doGatherNodalScalarFieldShapeN(x, y, z, ue_z, Ue_z_arr, dinv, plo);
 
                             n_e = n_e/PhysConst::q_e;
-                            amrex::ParticleReal Te_val_K = T_e/PhysConst::kb; // T_e currently in J
                             
-                            if(T_e/PhysConst::q_e<0.1){ return; }
+                            if(T_e*kb/PhysConst::q_e<0.1){ return; } // this SHOULD NOT be here, remove. Use Te_floor in parser
                             if(n_e<n_e_floor){ return; }
 
                             // nu_ei expression defined by user using parser
-                            amrex::ParticleReal nu_ei_val = nu_ei(n_e, Te_val_K);
+                            amrex::ParticleReal nu_ei_val = nu_ei(n_e, T_e);
 
                             amrex::ParticleReal nu_drag = nu_ei_val * m_elec / m_ion;
-                            amrex::ParticleReal D = nu_drag * T_e / m_ion; // T_e in Joules already
+                            amrex::ParticleReal D = nu_drag * kb * T_e / m_ion; // T_e in K
                             amrex::ParticleReal R_x, R_y, R_z;
                             amrex::ParticleReal diffusion_term = std::sqrt(2*D*dt);
 
