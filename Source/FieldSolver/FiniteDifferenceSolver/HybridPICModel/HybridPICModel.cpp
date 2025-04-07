@@ -83,6 +83,9 @@ void HybridPICModel::ReadParameters ()
     //bool to indicate if classical Bremsstrahlung loss is included (when m_solve_electron_energy_equation is True)
     utils::parser::queryWithParser(pp_hybrid, "include_Bremsstrahlung", m_include_Bremsstrahlung);
 
+    // bool to indicate if electron ion collisions are included
+    utils::parser::queryWithParser(pp_hybrid, "include_Qei", m_include_Qei);
+
     // Z effective for Bremsstrahlung power loss.
     pp_hybrid.query("Zeff", m_Zeff);
 
