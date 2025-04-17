@@ -103,6 +103,7 @@ public:
                  amrex::Real dt,
                  DtType a_dt_type=DtType::Full,
                  bool skip_deposition=false,
+                 bool deposit_mass_matrices=false,
                  PushType push_type=PushType::Explicit) override;
 
     virtual void PushPX (WarpXParIter& pti,
@@ -147,6 +148,8 @@ public:
                         long np,
                         WarpXParIter& pti,
                         int lev,
+                        int n_field_gather_buffer,
+                        int n_current_deposition_buffer,
                         amrex::iMultiFab const* current_masks,
                         amrex::iMultiFab const* gather_masks );
 
@@ -290,9 +293,12 @@ public:
     * \brief This function determines if resampling should be done for the current species, and
     * if so, performs the resampling.
     *
+    * @param[in] geom the geometry of all refinement levels
     * @param[in] timestep the current timestep.
+    * @param[in] verbose flag to control if information on the resampling process is printed out.
     */
-    void resample (int timestep, bool verbose=true) final;
+    void resample (
+        const amrex::Vector<amrex::Geometry>& geom, int timestep, bool verbose=true) final;
 
 #ifdef WARPX_QED
     //Functions decleared in WarpXParticleContainer.H
@@ -362,7 +368,6 @@ public:
 
     virtual void AccumulateVelocitiesAndComputeTemperature (
         ablastr::fields::MultiLevelVectorField const & T_vf,
-        amrex::Real dt,
         amrex::Real relative_time) override;
 
     virtual void DepositTemperature (
@@ -373,7 +378,7 @@ public:
         amrex::MultiFab * const Tx, amrex::MultiFab * const Ty, amrex::MultiFab * const Tz,
         long const offset, long const np_to_deposit,
         int const thread_num, const int lev, int const depos_lev,
-        amrex::Real const dt, amrex::Real const relative_time, PushType push_type) override;
+        amrex::Real const relative_time, PushType push_type) override;
 
 protected:
 

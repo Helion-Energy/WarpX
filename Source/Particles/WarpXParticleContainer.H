@@ -30,6 +30,7 @@
 
 #include <AMReX_Array.H>
 #include <AMReX_FArrayBox.H>
+#include <AMReX_Geometry.H>
 #include <AMReX_GpuAllocators.H>
 #include <AMReX_GpuContainers.H>
 #include <AMReX_INT.H>
@@ -226,7 +227,7 @@ public:
                          int lev,
                          const std::string& current_fp_string,
                          amrex::Real t, amrex::Real dt, DtType a_dt_type=DtType::Full, bool skip_deposition=false,
-                         PushType push_type=PushType::Explicit) = 0;
+                         bool deposit_mass_matrices=false, PushType push_type=PushType::Explicit) = 0;
 
     virtual void PostRestart () = 0;
 
@@ -337,7 +338,6 @@ public:
      */
     virtual void AccumulateVelocitiesAndComputeTemperature (
         [[maybe_unused]]ablastr::fields::MultiLevelVectorField const & T_vf,
-        [[maybe_unused]]amrex::Real dt,
         [[maybe_unused]]amrex::Real relative_time)
     {}
 
@@ -356,18 +356,39 @@ public:
         [[maybe_unused]]int const thread_num,
         [[maybe_unused]]const int lev,
         [[maybe_unused]]int const depos_lev,
-        [[maybe_unused]]amrex::Real const dt,
         [[maybe_unused]]amrex::Real const relative_time,
         [[maybe_unused]]PushType push_type)
     {}
 
-    void DepositTemperature (amrex::MultiFab* temperature, const int lev);
-    std::unique_ptr<amrex::MultiFab> GetTemperature (int lev);
+    void DepositIsotropicNGPTemperature (amrex::MultiFab* temperature, const int lev);
+    std::unique_ptr<amrex::MultiFab> GetIsotropicNGPTemperature (int lev);
 
     void DepositNumberDensity (amrex::MultiFab* number_density, const int lev);
     std::unique_ptr<amrex::MultiFab> GetNumberDensity (int lev);
 
     std::unique_ptr<amrex::MultiFab> GetDebyeLength (int lev);
+
+    virtual
+    void DepositCurrentAndMassMatrices ( WarpXParIter& pti,
+                                   const RealVector& wp,
+                                   const RealVector& uxp,
+                                   const RealVector& uyp,
+                                   const RealVector& uzp,
+                                         amrex::MultiFab* jx,
+                                         amrex::MultiFab* jy,
+                                         amrex::MultiFab* jz,
+                                         amrex::MultiFab* Sx,
+                                         amrex::MultiFab* Sy,
+                                         amrex::MultiFab* Sz,
+                                   const amrex::FArrayBox* bxfab,
+                                   const amrex::FArrayBox* byfab,
+                                   const amrex::FArrayBox* bzfab,
+                                         long offset,
+                                         long np_to_deposit,
+                                         int thread_num,
+                                         int lev,
+                                         int depos_lev,
+                                         amrex::Real dt );
 
     // If particles start outside of the domain, ContinuousInjection
     // makes sure that they are initialized when they enter the domain, and
@@ -523,7 +544,7 @@ public:
      * override the method for every derived class. Note that in practice this function is never
      * called because resample() is only called for PhysicalParticleContainers.
      */
-    virtual void resample (const int /*timestep*/, bool /*verbose*/) {}
+    virtual void resample (const amrex::Vector<amrex::Geometry>& /*geom*/, const int /*timestep*/, bool /*verbose*/) {}
 
     /**
      * When using runtime components, AMReX requires to touch all tiles
@@ -612,6 +633,11 @@ protected:
     amrex::Vector<amrex::FArrayBox> local_jx;
     amrex::Vector<amrex::FArrayBox> local_jy;
     amrex::Vector<amrex::FArrayBox> local_jz;
+
+    // local containers for mass matrix deposit used by implicit solvers
+    amrex::Vector<amrex::FArrayBox> local_Sx;
+    amrex::Vector<amrex::FArrayBox> local_Sy;
+    amrex::Vector<amrex::FArrayBox> local_Sz;
 
 public:
     using PairIndex = std::pair<int, int>;

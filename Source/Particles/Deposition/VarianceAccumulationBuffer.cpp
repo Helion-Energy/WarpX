@@ -34,9 +34,9 @@ VarianceAccumulationBuffer::VarianceAccumulationBuffer (ablastr::fields::MultiLe
             amrex::DistributionMapping const& dm = T_vf[lev][Direction{idir}]->DistributionMap();
             amrex::IntVect const& ng = T_vf[lev][Direction{idir}]->nGrowVect();
 
-            warpx.m_fields.alloc_init("w_" + m_species_name, Direction{idir}, lev, ba, dm, ncomps, ng, 0.0_rt);
-            warpx.m_fields.alloc_init("w2_" + m_species_name, Direction{idir}, lev, ba, dm, ncomps, ng, 0.0_rt);
-            warpx.m_fields.alloc_init("vbar_" + m_species_name, Direction{idir}, lev, ba, dm, ncomps, ng, 0.0_rt);
+            warpx.m_fields.alloc_init("variance_buffer_w_" + m_species_name, Direction{idir}, lev, ba, dm, ncomps, ng, 0.0_rt);
+            warpx.m_fields.alloc_init("variance_buffer_w2_" + m_species_name, Direction{idir}, lev, ba, dm, ncomps, ng, 0.0_rt);
+            warpx.m_fields.alloc_init("variance_buffer_vbar_" + m_species_name, Direction{idir}, lev, ba, dm, ncomps, ng, 0.0_rt);
         }
     }
 }
@@ -60,7 +60,7 @@ amrex::MultiFab*
 VarianceAccumulationBuffer::get(std::string arr, ablastr::fields::Direction dir, int lev)
 {
     auto &warpx = WarpX::GetInstance();
-    return warpx.m_fields.get(arr + "_" + m_species_name, dir, lev);
+    return warpx.m_fields.get("variance_buffer_" + arr + "_" + m_species_name, dir, lev);
 }
 
 void
@@ -171,6 +171,7 @@ VarianceAccumulationBuffer::SynchronizeBoundaryAndNormalizeVariance (ablastr::fi
                             amrex::Real vsum_a = vbar_old_arr(i,j,k);
                             amrex::Real v_a = vsum_a/w_a;
                             amrex::Real v_b = vbar_arr(i,j,k);
+
                             // Delta squared is ill-behaved when v_b and v_a are close.
                             // Check this for underflow when squaring.
                             amrex::Real delta = v_b - v_a;

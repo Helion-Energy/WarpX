@@ -126,6 +126,10 @@ Overall simulation parameters
     , this sets the relative tolerance for the iterative method used to obtain a self-consistent update of the particles at
     each iteration in the JFNK process.
 
+* ``implicit_evolve.use_mass_matrices`` (`bool`, default: false)
+    When `algo.evolve_scheme` is either `theta_implicit_em`, `strang_implicit_spectral_em`, or `semi_implicit_em` and `implicit_evolve.nonlinear_solver = newton` and a preconditioner is being used
+    , the diagonal components of the diagonal mass matrices are used to capture the plasma response in the preconditioner.
+
 * ``picard.verbose`` (`bool`, default: 1)
     When `implicit_evolve.nonlinear_solver = picard`, this sets the verbosity of the Picard solver. If true, then information
     on the nonlinear error are printed to screen at each nonlinear iteration.
@@ -1502,6 +1506,10 @@ Particle initialization
     Resampling is performed everytime the number of macroparticles per cell of the species
     averaged over the whole simulation domain exceeds this parameter.
 
+* ``<species>.do_temperature_deposition`` (`boolean`) optional (default `false`)
+    When running with Ohm's Law Hybrid Solver, this will enable temperature deposition
+    in each dimension with a matched shape function and filtering used for current deposition.
+    This is required when using the electron energy solver with electron-ion temperature relaxation.
 
 .. _running-cpp-parameters-fluids:
 
