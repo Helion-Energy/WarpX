@@ -403,7 +403,7 @@ void FiniteDifferenceSolver::HybridPICSolveE (
         );
     } else {
         HybridPICSolveECartesian <CartesianNodalAlgorithm> (
-            Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
+            Efield, Jfield, Jifield, Bfield, rhofield, Pefield, Tefield,
             eb_update_E, lev, hybrid_model, solve_for_Faraday
         );
     }
