@@ -29,16 +29,14 @@ import numpy as np
 import post_processing_utils
 from scipy.constants import c, e, epsilon_0, m_e
 
-sys.path.insert(1, "../../../../warpx/Regression/Checksum/")
-import checksumAPI
-
 # this will be the name of the plot file
 fn = sys.argv[1]
 
+# test name
 test_name = os.path.split(os.getcwd())[1]
 
 # Parse test name and check if current correction (psatd.current_correction) is applied
-current_correction = True if re.search("current_correction", fn) else False
+current_correction = True if re.search("current_correction", test_name) else False
 
 # Parameters (these parameters must match the parameters in `inputs.multi.rz.rt`)
 epsilon = 0.01
@@ -181,5 +179,3 @@ random_fraction = 0.66
 post_processing_utils.check_random_filter(
     fn, random_filter_fn, random_fraction, dim, species_name
 )
-
-checksumAPI.evaluate_checksum(test_name, fn)

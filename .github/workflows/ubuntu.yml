@@ -1,6 +1,13 @@
 name: 🐧 OpenMP
 
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - "development"
+  pull_request:
+    paths-ignore:
+      - "Docs/**"
+      - "**.rst"
 
 concurrency:
   group: ${{ github.ref }}-${{ github.head_ref }}-ubuntu
@@ -9,7 +16,7 @@ concurrency:
 jobs:
   build_cxxminimal:
     name: GCC Minimal w/o MPI
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     if: github.event.pull_request.draft == false
     env:
       CXXFLAGS: "-Werror"
@@ -39,15 +46,15 @@ jobs:
           -DWarpX_MPI=OFF              \
           -DWarpX_QED=OFF
         cmake --build build -j 4
-        ./build/bin/warpx.3d Examples/Physics_applications/laser_acceleration/inputs_3d
-        ./build/bin/warpx.rz Examples/Physics_applications/laser_acceleration/inputs_rz
+        ./build/bin/warpx.3d Examples/Physics_applications/laser_acceleration/inputs_base_3d
+        ./build/bin/warpx.rz Examples/Physics_applications/laser_acceleration/inputs_base_rz
 
         ccache -s
         du -hs ~/.cache/ccache
 
   build_1D_2D:
     name: GCC 1D & 2D w/ MPI, QED tools
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: github.event.pull_request.draft == false
     env:
       CXXFLAGS: "-Werror"
@@ -82,8 +89,8 @@ jobs:
           -DWarpX_QED_TOOLS=ON
 
         cmake --build build -j 4
-        ./build/bin/warpx.1d Examples/Physics_applications/laser_acceleration/inputs_1d
-        ./build/bin/warpx.2d Examples/Physics_applications/laser_acceleration/inputs_2d
+        ./build/bin/warpx.1d Examples/Physics_applications/laser_acceleration/inputs_base_1d
+        ./build/bin/warpx.2d Examples/Physics_applications/laser_acceleration/inputs_base_2d
 
         ccache -s
         du -hs ~/.cache/ccache
@@ -133,15 +140,15 @@ jobs:
           -DWarpX_QED_TABLE_GEN=ON
 
         cmake --build build -j 4
-        ./build/bin/warpx.3d Examples/Physics_applications/laser_acceleration/inputs_3d
-        ./build/bin/warpx.rz Examples/Physics_applications/laser_acceleration/inputs_rz
+        ./build/bin/warpx.3d Examples/Physics_applications/laser_acceleration/inputs_base_3d
+        ./build/bin/warpx.rz Examples/Physics_applications/laser_acceleration/inputs_base_rz
 
         ccache -s
         du -hs ~/.cache/ccache
 
   build_gcc_ablastr:
     name: GCC ABLASTR w/o MPI
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     if: github.event.pull_request.draft == false
     env:
       CMAKE_GENERATOR: Ninja
@@ -177,7 +184,7 @@ jobs:
 
   build_pyfull:
     name: Clang pywarpx
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     if: github.event.pull_request.draft == false
     env:
       CC: clang
@@ -204,13 +211,12 @@ jobs:
         ccache -z
 
         python3 -m pip install --upgrade pip
-        python3 -m pip install --upgrade build packaging setuptools wheel
+        python3 -m pip install --upgrade build packaging setuptools[core] wheel
 
         export CXXFLAGS="-Werror -Wno-error=pass-failed"
 
         cmake -S . -B build            \
           -DCMAKE_VERBOSE_MAKEFILE=ON  \
-          -DWarpX_APP=OFF              \
           -DWarpX_FFT=ON               \
           -DWarpX_PYTHON=ON            \
           -DWarpX_QED_TABLE_GEN=ON
@@ -222,19 +228,4 @@ jobs:
     - name: run pywarpx
       run: |
         export OMP_NUM_THREADS=1
-        mpirun -n 2 Examples/Physics_applications/laser_acceleration/PICMI_inputs_3d.py
-
-  save_pr_number:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Save PR number
-        env:
-          PR_NUMBER: ${{ github.event.number }}
-        run: |
-          echo $PR_NUMBER > pr_number.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pr_number
-          path: pr_number.txt
-          retention-days: 1
+        mpirun -n 2 Examples/Physics_applications/laser_acceleration/inputs_test_3d_laser_acceleration_picmi.py

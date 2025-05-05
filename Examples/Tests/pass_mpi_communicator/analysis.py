@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 # This is a script that analyses the simulation results from
-# the script `PICMI_inputs_2d`.
+# the script `inputs_test_2d_pass_mpi_comm_picmi.py`.
 
 import sys
 
@@ -37,7 +37,7 @@ atol = 1.0e-40
 
 # Dictionaries have same outer keys (levels, species)?
 if checksum1.data.keys() != checksum2.data.keys():
-    print("ERROR: plotfile 1 and plotfile 2 checksums " "have different outer keys:")
+    print("ERROR: plotfile 1 and plotfile 2 checksums have different outer keys:")
     print("Plot1: %s" % checksum1.data.keys())
     print("Plot2: %s" % checksum2.data.keys())
     sys.exit(1)
@@ -45,9 +45,7 @@ if checksum1.data.keys() != checksum2.data.keys():
 # Dictionaries have same inner keys (field and particle quantities)?
 for key1 in checksum1.data.keys():
     if checksum1.data[key1].keys() != checksum2.data[key1].keys():
-        print(
-            "ERROR: plotfile 1 and plotfile 2 checksums have " "different inner keys:"
-        )
+        print("ERROR: plotfile 1 and plotfile 2 checksums have different inner keys:")
         print("Common outer keys: %s" % checksum2.data.keys())
         print("Plotfile 1 inner keys in %s: %s" % (key1, checksum1.data[key1].keys()))
         print("Plotfile 2 inner keys in %s: %s" % (key1, checksum2.data[key1].keys()))

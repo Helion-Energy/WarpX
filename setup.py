@@ -63,14 +63,14 @@ class CMakeBuild(build_ext):
             out = subprocess.check_output(["cmake", "--version"])
         except OSError:
             raise RuntimeError(
-                "CMake 3.20.0+ must be installed to build the following "
+                "CMake 3.24.0+ must be installed to build the following "
                 + "extensions: "
                 + ", ".join(e.name for e in self.extensions)
             )
 
         cmake_version = parse(re.search(r"version\s*([\d.]+)", out.decode()).group(1))
-        if cmake_version < parse("3.20.0"):
-            raise RuntimeError("CMake >= 3.20.0 is required")
+        if cmake_version < parse("3.24.0"):
+            raise RuntimeError("CMake >= 3.24.0 is required")
 
         for ext in self.extensions:
             self.build_extension(ext)
@@ -84,7 +84,15 @@ class CMakeBuild(build_ext):
         r_dim = re.search(r"warpx_(1|2|rz|3)(?:d*)", ext.name)
         dims = r_dim.group(1).upper()
 
+        pyv = sys.version_info
         cmake_args = [
+            # Python: use the calling interpreter in CMake
+            # https://cmake.org/cmake/help/latest/module/FindPython.html#hints
+            # https://cmake.org/cmake/help/latest/command/find_package.html#config-mode-version-selection
+            f"-DPython_ROOT_DIR={sys.prefix}",
+            f"-DPython_FIND_VERSION={pyv.major}.{pyv.minor}.{pyv.micro}",
+            "-DPython_FIND_VERSION_EXACT=TRUE",
+            "-DPython_FIND_STRATEGY=LOCATION",
             "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=" + os.path.join(extdir, "pywarpx"),
             "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=" + extdir,
             "-DWarpX_DIMS=" + dims,
@@ -97,7 +105,6 @@ class CMakeBuild(build_ext):
             "-DWarpX_PRECISION=" + WARPX_PRECISION,
             "-DWarpX_PARTICLE_PRECISION=" + WARPX_PARTICLE_PRECISION,
             "-DWarpX_FFT:BOOL=" + WARPX_FFT,
-            "-DWarpX_HEFFTE:BOOL=" + WARPX_HEFFTE,
             "-DWarpX_PYTHON:BOOL=ON",
             "-DWarpX_PYTHON_IPO:BOOL=" + WARPX_PYTHON_IPO,
             "-DWarpX_QED:BOOL=" + WARPX_QED,
@@ -195,12 +202,11 @@ env = os.environ.copy()
 #         consistent across platforms (especially Windows)
 WARPX_COMPUTE = env.pop("WARPX_COMPUTE", "OMP")
 WARPX_MPI = env.pop("WARPX_MPI", "OFF")
-WARPX_EB = env.pop("WARPX_EB", "OFF")
+WARPX_EB = env.pop("WARPX_EB", "ON")
 WARPX_OPENPMD = env.pop("WARPX_OPENPMD", "ON")
 WARPX_PRECISION = env.pop("WARPX_PRECISION", "DOUBLE")
 WARPX_PARTICLE_PRECISION = env.pop("WARPX_PARTICLE_PRECISION", WARPX_PRECISION)
 WARPX_FFT = env.pop("WARPX_FFT", "OFF")
-WARPX_HEFFTE = env.pop("WARPX_HEFFTE", "OFF")
 WARPX_QED = env.pop("WARPX_QED", "ON")
 WARPX_QED_TABLE_GEN = env.pop("WARPX_QED_TABLE_GEN", "OFF")
 WARPX_DIMS = env.pop("WARPX_DIMS", "1;2;RZ;3")
@@ -274,7 +280,7 @@ with open("./requirements.txt") as f:
 setup(
     name="pywarpx",
     # note PEP-440 syntax: x.y.zaN but x.y.z.devN
-    version="24.08",
+    version="25.03",
     packages=["pywarpx"],
     package_dir={"pywarpx": "Python/pywarpx"},
     author="Jean-Luc Vay, David P. Grote, Maxence Thévenet, Rémi Lehe, Andrew Myers, Weiqun Zhang, Axel Huebl, et al.",
@@ -293,15 +299,15 @@ setup(
         "Documentation": "https://warpx.readthedocs.io",
         "Doxygen": "https://warpx.readthedocs.io/en/latest/_static/doxyhtml/index.html",
         #'Reference': 'https://doi.org/...', (Paper and/or Zenodo)
-        "Source": "https://github.com/ECP-WarpX/WarpX",
-        "Tracker": "https://github.com/ECP-WarpX/WarpX/issues",
+        "Source": "https://github.com/BLAST-WarpX/warpx",
+        "Tracker": "https://github.com/BLAST-WarpX/warpx/issues",
     },
     # CMake: self-built as extension module
     ext_modules=cxx_modules,
     cmdclass=cmdclass,
     # scripts=['warpx_1d', 'warpx_2d', 'warpx_rz', 'warpx_3d'],
     zip_safe=False,
-    python_requires=">=3.8",
+    python_requires=">=3.8",  # left for CI, truly ">=3.9"
     # tests_require=['pytest'],
     install_requires=install_requires,
     # see: src/bindings/python/cli
@@ -312,7 +318,7 @@ setup(
     # },
     extras_require={
         "all": [
-            "openPMD-api~=0.15.1",
+            "openPMD-api>=0.16.1",
             "openPMD-viewer~=1.1",
             "yt>=4.1.0",
             "matplotlib",
@@ -330,12 +336,13 @@ setup(
         "Topic :: Scientific/Engineering :: Physics",
         "Programming Language :: C++",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
         (
-            "License :: OSI Approved :: " "BSD License"
+            "License :: OSI Approved :: BSD License"
         ),  # TODO: use real SPDX: BSD-3-Clause-LBNL
     ],
     # new PEP 639 format

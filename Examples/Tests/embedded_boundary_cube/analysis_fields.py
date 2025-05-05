@@ -8,9 +8,6 @@ import numpy as np
 import yt
 from scipy.constants import c, mu_0, pi
 
-sys.path.insert(1, "../../../../warpx/Regression/Checksum/")
-import checksumAPI
-
 # This is a script that analyses the simulation results from
 # the script `inputs_3d`. This simulates a TMmnp mode in a PEC cubic resonator.
 # The magnetic field in the simulation is given (in theory) by:
@@ -22,6 +19,8 @@ import checksumAPI
 # $$ k_x = \frac{m\pi}{L}$$
 # $$ k_y = \frac{n\pi}{L}$$
 # $$ k_z = \frac{p\pi}{L}$$
+
+test_name = os.path.split(os.getcwd())[1]
 
 hi = [0.8, 0.8, 0.8]
 lo = [-0.8, -0.8, -0.8]
@@ -46,7 +45,7 @@ data = ds.covering_grid(
 
 # Parse test name and check whether this use the macroscopic solver
 # (i.e. solving the equation in a dielectric)
-macroscopic = True if re.search("macroscopic", filename) else False
+macroscopic = True if re.search("macroscopic", test_name) else False
 
 # Calculate frequency of the mode oscillation
 omega = np.sqrt(h_2) * c
@@ -107,7 +106,3 @@ assert rel_err_y < rel_tol_err
 Bz_sim = data[("mesh", "Bz")].to_ndarray()
 rel_err_z = np.sqrt(np.sum(np.square(Bz_sim - Bz_th)) / np.sum(np.square(Bz_th)))
 assert rel_err_z < rel_tol_err
-
-test_name = os.path.split(os.getcwd())[1]
-
-checksumAPI.evaluate_checksum(test_name, filename)

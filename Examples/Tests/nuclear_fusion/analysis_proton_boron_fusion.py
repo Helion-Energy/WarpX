@@ -5,15 +5,12 @@
 #
 # License: BSD-3-Clause-LBNL
 
-import os
+import re
 import sys
 
-import yt
-
-sys.path.insert(1, "../../../../warpx/Regression/Checksum/")
-import checksumAPI
 import numpy as np
 import scipy.constants as scc
+import yt
 
 ## This script performs various checks for the proton boron nuclear fusion module. The simulation
 ## that we check is made of 5 different tests, each with different proton, boron and alpha species.
@@ -82,7 +79,9 @@ E_decay = 3.12600414 * MeV_to_Joule  # Energy released during Be* -> 2*alpha
 E_fusion_total = E_fusion + E_decay  # Energy released during p + B -> 3*alpha
 
 ## Checks whether this is the 2D or the 3D test
-is_2D = "2D" in sys.argv[1]
+with open("./warpx_used_inputs") as warpx_used_inputs:
+    is_2D = re.search("geometry.dims\s*=\s*2", warpx_used_inputs.read())
+warpx_used_inputs.close()
 
 ## Some numerical parameters for this test
 size_x = 8
@@ -876,9 +875,6 @@ def main():
     rho_start = field_data_start["rho"].to_ndarray()
     rho_end = field_data_end["rho"].to_ndarray()
     check_charge_conservation(rho_start, rho_end)
-
-    test_name = os.path.split(os.getcwd())[1]
-    checksumAPI.evaluate_checksum(test_name, filename_end)
 
 
 if __name__ == "__main__":

@@ -32,8 +32,7 @@ import numpy
 import post_processing_utils
 import yt
 
-sys.path.insert(1, "../../../../warpx/Regression/Checksum/")
-import checksumAPI
+test_name = os.path.split(os.getcwd())[1]
 
 tolerance = 0.001
 
@@ -62,6 +61,11 @@ prefix = last_fn[:-6]  # i.e., diags/diag1
 # Collect all output files in fn_list (names match pattern prefix + arbitrary number)
 fn_list = glob.glob(prefix + "*[0-9]")
 
+print(last_fn)
+print(last_it)
+print(prefix)
+print(fn_list)
+
 error = 0.0
 nt = 0
 for fn in fn_list:
@@ -87,7 +91,7 @@ assert error < tolerance
 
 # The second part of the analysis is not done for the Python test
 # since the particle filter function is not accessible from PICMI yet
-if "Python" in last_fn:
+if "picmi" in test_name:
     exit()
 
 ## In the second part of the test, we verify that the diagnostic particle filter function works as
@@ -113,6 +117,3 @@ random_fraction = 0.77
 post_processing_utils.check_random_filter(
     last_fn, random_filter_fn, random_fraction, dim, species_name
 )
-
-test_name = os.path.split(os.getcwd())[1]
-checksumAPI.evaluate_checksum(test_name, last_fn)

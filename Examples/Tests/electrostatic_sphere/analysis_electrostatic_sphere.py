@@ -28,18 +28,16 @@ from openpmd_viewer import OpenPMDTimeSeries
 from scipy.constants import c
 from scipy.optimize import fsolve
 
-sys.path.insert(1, "../../../../warpx/Regression/Checksum/")
-import checksumAPI
-
 yt.funcs.mylog.setLevel(0)
 
 # Open plotfile specified in command line
+test_name = os.path.split(os.getcwd())[1]
 filename = sys.argv[1]
 ds = yt.load(filename)
 t_max = ds.current_time.item()  # time of simulation
 
 # Parse test name and check if particle_shape = 4 is used
-emass_10 = True if re.search("emass_10", filename) else False
+emass_10 = True if re.search("emass_10", test_name) else False
 
 if emass_10:
     l2_tolerance = 0.096
@@ -191,7 +189,3 @@ if "phi" in ts.avail_record_components["electron"]:
     assert abs((Ek_i + Ep_i) - (Ek_f + Ep_f)) < 0.003 * (
         Ek_i + Ep_i
     )  # Check conservation of energy
-
-# Checksum regression analysis
-test_name = os.path.split(os.getcwd())[1]
-checksumAPI.evaluate_checksum(test_name, filename)

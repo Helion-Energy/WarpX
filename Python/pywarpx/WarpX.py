@@ -20,10 +20,11 @@ from .Constants import my_constants
 from .Diagnostics import diagnostics, reduced_diagnostics
 from .EB2 import eb2
 from .Geometry import geometry
-from .HybridPICModel import hybridpicmodel
+from .HybridPICModel import external_vector_potential, hybridpicmodel
 from .Interpolation import interpolation
 from .Lasers import lasers, lasers_list
 from .Particles import particles, particles_list
+from .ProjectionDivBCleaner import projectiondivbcleaner
 from .PSATD import psatd
 
 
@@ -45,9 +46,11 @@ class WarpX(Bucket):
         argv += amrex.attrlist()
         argv += geometry.attrlist()
         argv += hybridpicmodel.attrlist()
+        argv += external_vector_potential.attrlist()
         argv += boundary.attrlist()
         argv += algo.attrlist()
         argv += interpolation.attrlist()
+        argv += projectiondivbcleaner.attrlist()
         argv += psatd.attrlist()
         argv += eb2.attrlist()
 
@@ -135,7 +138,7 @@ class WarpX(Bucket):
             for arg in argv:
                 # This prints the name of the input group (prefix) as a header
                 # before each group to make the input file more human readable
-                prefix_new = re.split(" |\.", arg)[0]
+                prefix_new = re.split(r" |\.", arg)[0]
                 if prefix_new != prefix_old:
                     if prefix_old != "":
                         ff.write("\n")

@@ -7,17 +7,14 @@ occurs along the angle given by the theoretical Airy pattern, i.e.
 theta_diffraction = 1.22 * lambda / d
 """
 
-import os
 import sys
 
 import numpy as np
 from openpmd_viewer import OpenPMDTimeSeries
 from scipy.ndimage import gaussian_filter1d
 
-sys.path.insert(1, "../../../../warpx/Regression/Checksum/")
-import checksumAPI
-
-ts = OpenPMDTimeSeries("./EmbeddedBoundaryDiffraction_plt/")
+filename = sys.argv[1]
+ts = OpenPMDTimeSeries(filename)
 
 # Extract the intensity as a function of r and z
 Ex, info = ts.get_field("E", "x", iteration=300)
@@ -40,8 +37,3 @@ r = np.array([r_first_minimum(iz) for iz in range(len(info.z))])
 # Check that this corresponds to the prediction from the Airy pattern
 theta_diffraction = np.arcsin(1.22 * 0.1 / 0.4) / 2
 assert np.all(abs(r[50:] - theta_diffraction * info.z[50:]) < 0.03)
-
-# Open the right plot file
-filename = sys.argv[1]
-test_name = os.path.split(os.getcwd())[1]
-checksumAPI.evaluate_checksum(test_name, filename, output_format="openpmd")

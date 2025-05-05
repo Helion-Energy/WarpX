@@ -35,16 +35,16 @@
 #include <AMReX_SPACE.H>
 #include <AMReX_Vector.H>
 
-#include <FieldSolver/Fields.H>
+#include "Fields.H"
+#include "Utils/Parser/ParserUtils.H"
 
 namespace warpx::initialization {
 
 class ProjectionDivCleaner
 {
 protected:
-    int m_levels;
+    int m_levels = 1; // Hard coded to 1 for now, will only clean first level
 
-    int m_max_level = 1;
     int m_ref_ratio = 1;
 
     // For MLMG solver
@@ -64,7 +64,7 @@ protected:
     amrex::Real m_rtol;
     amrex::Real m_atol;
 
-    warpx::fields::FieldType m_field_type;
+    std::string m_field_name;
 
 public:
     amrex::Vector< std::unique_ptr<amrex::MultiFab> > m_solution;
@@ -83,7 +83,9 @@ public:
     amrex::Gpu::DeviceVector<amrex::Real> m_stencil_coefs_z;
 
     // Default Constructor
-    ProjectionDivCleaner (warpx::fields::FieldType a_field_type);
+    ProjectionDivCleaner (std::string const& a_field_name);
+
+    void ReadParameters ();
 
     void solve ();
     void setSourceFromBfield ();

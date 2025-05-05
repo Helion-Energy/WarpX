@@ -1,6 +1,13 @@
 name: 🪟 Windows
 
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - "development"
+  pull_request:
+    paths-ignore:
+      - "Docs/**"
+      - "**.rst"
 
 concurrency:
   group: ${{ github.ref }}-${{ github.head_ref }}-windows
@@ -10,7 +17,9 @@ jobs:
   build_win_msvc:
     name: MSVC C++17 w/o MPI
     runs-on: windows-latest
-    if: github.event.pull_request.draft == false
+    # disabled due to issues in #5230
+    if: 0
+    #if: github.event.pull_request.draft == false
     steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-python@v5
@@ -43,7 +52,7 @@ jobs:
 
         python3 -m pip install --upgrade pip
         if(!$?) { Exit $LASTEXITCODE }
-        python3 -m pip install --upgrade build packaging setuptools wheel
+        python3 -m pip install --upgrade build packaging setuptools[core] wheel
         if(!$?) { Exit $LASTEXITCODE }
         cmake --build build --config Debug --target install
         if(!$?) { Exit $LASTEXITCODE }
@@ -54,7 +63,7 @@ jobs:
       run: |
         $env:PATH += ';C:/Program Files (x86)/WarpX/bin/'
 
-        python3 Examples\Tests\gaussian_beam\PICMI_inputs_gaussian_beam.py
+        python3 Examples/Tests/gaussian_beam/inputs_test_3d_gaussian_beam_picmi.py
 # JSON writes are currently very slow (50min) with MSVC
 #  --diagformat=openpmd
 
@@ -104,7 +113,7 @@ jobs:
 
         python3 -m pip install --upgrade pip
         if errorlevel 1 exit 1
-        python3 -m pip install --upgrade build packaging setuptools wheel
+        python3 -m pip install --upgrade build packaging setuptools[core] wheel
         if errorlevel 1 exit 1
         python3 -m pip install --upgrade -r requirements.txt
         if errorlevel 1 exit 1
@@ -118,5 +127,5 @@ jobs:
         call "C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\vc\Auxiliary\build\vcvarsall.bat" x64
         set "PATH=C:/Program Files (x86)/WarpX/bin/;%PATH%"
 
-        python3 Examples\Tests\gaussian_beam\PICMI_inputs_gaussian_beam.py --diagformat=openpmd
+        python3 Examples/Tests/gaussian_beam/inputs_test_3d_gaussian_beam_picmi.py --diagformat=openpmd
         if errorlevel 1 exit 1

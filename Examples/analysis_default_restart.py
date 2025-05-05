@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+import os
+import sys
+
 import numpy as np
 import yt
 
@@ -31,7 +34,7 @@ def check_restart(filename, tolerance=1e-12):
     )
 
     # Load output data generated from initial run
-    benchmark = "orig_" + filename
+    benchmark = os.path.join(os.getcwd().replace("_restart", ""), filename)
     ds_benchmark = yt.load(benchmark)
 
     # yt 4.0+ has rounding issues with our domain data:
@@ -48,7 +51,7 @@ def check_restart(filename, tolerance=1e-12):
 
     # Loop over all fields (all particle species, all particle attributes, all grid fields)
     # and compare output data generated from initial run with output data generated after restart
-    print("\ntolerance = {:g}".format(tolerance))
+    print(f"\ntolerance = {tolerance}")
     print()
     for field in ds_benchmark.field_list:
         dr = ad_restart[field].squeeze().v
@@ -56,6 +59,11 @@ def check_restart(filename, tolerance=1e-12):
         error = np.amax(np.abs(dr - db))
         if np.amax(np.abs(db)) != 0.0:
             error /= np.amax(np.abs(db))
-        print("field: {}; error = {:g}".format(field, error))
+        print(f"field: {field}; error = {error}")
         assert error < tolerance
     print()
+
+
+# compare restart results against original results
+output_file = sys.argv[1]
+check_restart(output_file)

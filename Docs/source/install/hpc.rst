@@ -43,21 +43,22 @@ This section documents quick-start guides for a selection of supercomputers that
    hpc/lassen
    hpc/lawrencium
    hpc/leonardo
+   hpc/lonestar6
    hpc/lumi
    hpc/lxplus
    hpc/ookami
    hpc/perlmutter
    hpc/pitzer
    hpc/polaris
-   hpc/quartz
-   hpc/spock
+   hpc/dane
    hpc/summit
    hpc/taurus
+   hpc/tioga
 
 .. tip::
 
    Your HPC system is not in the list?
-   `Open an issue <https://github.com/ECP-WarpX/WarpX/issues>`__ and together we can document it!
+   `Open an issue <https://github.com/BLAST-WarpX/warpx/issues>`__ and together we can document it!
 
 
 .. _install-hpc-batch:
