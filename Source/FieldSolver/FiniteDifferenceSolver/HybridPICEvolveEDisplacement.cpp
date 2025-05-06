@@ -23,14 +23,14 @@
 using namespace amrex;
 
 void FiniteDifferenceSolver::HybridPICEvolveEDisplacement (
-    std::array< std::unique_ptr<amrex::MultiFab>, 3 >& Efield,
-    std::array< std::unique_ptr<amrex::MultiFab>, 3 >& Jfield,
-    std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& Jifield,
-    std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& Jextfield,
-    std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& Bfield,
-    std::unique_ptr<amrex::MultiFab> const& rhofield,
-    std::unique_ptr<amrex::MultiFab> const& Pefield,
-    std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& edge_lengths,
+    ablastr::fields::VectorField& Efield,
+    ablastr::fields::VectorField& Jfield,
+    ablastr::fields::VectorField const& Jifield,
+    ablastr::fields::VectorField const& Jextfield,
+    ablastr::fields::VectorField const& Bfield,
+    amrex::MultiFab const& rhofield,
+    amrex::MultiFab const& Pefield,
+    std::array< std::unique_ptr<amrex::iMultiFab>, 3 > const& eb_update_E,
     amrex::Real dt, int lev, HybridPICModel const* hybrid_model,
     const bool include_resistivity_term)
 {
@@ -41,14 +41,14 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacement (
 
         HybridPICEvolveEDisplacementCylindrical <CylindricalYeeAlgorithm> (
             Efield, Jfield, Jifield, Jextfield, Bfield, rhofield, Pefield,
-            edge_lengths, dt, lev, hybrid_model, include_resistivity_term
+            eb_update_E, dt, lev, hybrid_model, include_resistivity_term
         );
 
 #else
 
         HybridPICEvolveEDisplacementCartesian <CartesianYeeAlgorithm> (
             Efield, Jfield, Jifield, Jextfield, Bfield, rhofield, Pefield,
-            edge_lengths, dt, lev, hybrid_model, include_resistivity_term
+            eb_update_E, dt, lev, hybrid_model, include_resistivity_term
         );
 
 #endif
@@ -61,19 +61,19 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacement (
 #ifdef WARPX_DIM_RZ
 template<typename T_Algo>
 void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
-    std::array< std::unique_ptr<amrex::MultiFab>, 3 >& Efield,
-    std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& Jfield,
-    std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& Jifield,
-    std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& Jextfield,
-    std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& Bfield,
-    std::unique_ptr<amrex::MultiFab> const& rhofield,
-    std::unique_ptr<amrex::MultiFab> const& Pefield,
-    std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& edge_lengths,
+    ablastr::fields::VectorField& Efield,
+    ablastr::fields::VectorField& Jfield,
+    ablastr::fields::VectorField const& Jifield,
+    ablastr::fields::VectorField const& Jextfield,
+    ablastr::fields::VectorField const& Bfield,
+    amrex::MultiFab const& rhofield,
+    amrex::MultiFab const& Pefield,
+    std::array< std::unique_ptr<amrex::iMultiFab>, 3 > const& eb_update_E,
     Real dt, int lev, HybridPICModel const* hybrid_model,
     const bool include_resistivity_term )
 {
 #ifndef AMREX_USE_EB
-    amrex::ignore_unused(edge_lengths);
+    amrex::ignore_unused(eb_update_E);
 #endif
 
     // Both steps below do not currently support m > 0 and should be
@@ -294,9 +294,9 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
         Array4<Real const> const& Bz = Bfield[2]->const_array(mfi);
 
 #ifdef AMREX_USE_EB
-        amrex::Array4<amrex::Real> const& lr = edge_lengths[0]->array(mfi);
-        amrex::Array4<amrex::Real> const& lt = edge_lengths[1]->array(mfi);
-        amrex::Array4<amrex::Real> const& lz = edge_lengths[2]->array(mfi);
+        amrex::Array4<amrex::Real> const& lr = eb_update_E[0]->array(mfi);
+        amrex::Array4<amrex::Real> const& lt = eb_update_E[1]->array(mfi);
+        amrex::Array4<amrex::Real> const& lz = eb_update_E[2]->array(mfi);
 #endif
 
         // Extract cylindrical specific parameters
@@ -565,19 +565,19 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
 
 template<typename T_Algo>
 void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
-    std::array< std::unique_ptr<amrex::MultiFab>, 3 >& Efield,
-    std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& Jfield,
-    std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& Jifield,
-    std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& Jextfield,
-    std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& Bfield,
-    std::unique_ptr<amrex::MultiFab> const& rhofield,
-    std::unique_ptr<amrex::MultiFab> const& Pefield,
-    std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& edge_lengths,
+    ablastr::fields::VectorField& Efield,
+    ablastr::fields::VectorField& Jfield,
+    ablastr::fields::VectorField const& Jifield,
+    ablastr::fields::VectorField const& Jextfield,
+    ablastr::fields::VectorField const& Bfield,
+    amrex::MultiFab const& rhofield,
+    amrex::MultiFab const& Pefield,
+    std::array< std::unique_ptr<amrex::iMultiFab>, 3 > const& eb_update_E,
     amrex::Real dt, int lev, HybridPICModel const* hybrid_model,
     const bool include_resistivity_term )
 {
 #ifndef AMREX_USE_EB
-    amrex::ignore_unused(edge_lengths);
+    amrex::ignore_unused(eb_update_E);
 #endif
 
     // for the profiler
@@ -799,9 +799,9 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
         Array4<Real const> const& nabla2_J_z = nabla2_J_z_mf.const_array(mfi);
 
 #ifdef AMREX_USE_EB
-        amrex::Array4<amrex::Real> const& lx = edge_lengths[0]->array(mfi);
-        amrex::Array4<amrex::Real> const& ly = edge_lengths[1]->array(mfi);
-        amrex::Array4<amrex::Real> const& lz = edge_lengths[2]->array(mfi);
+        amrex::Array4<amrex::Real> const& lx = eb_update_E[0]->array(mfi);
+        amrex::Array4<amrex::Real> const& ly = eb_update_E[1]->array(mfi);
+        amrex::Array4<amrex::Real> const& lz = eb_update_E[2]->array(mfi);
 #endif
 
         Box const& tex  = mfi.tilebox(Efield[0]->ixType().toIntVect());

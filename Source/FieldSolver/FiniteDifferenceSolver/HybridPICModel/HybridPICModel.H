@@ -161,7 +161,7 @@ public:
         ablastr::fields::MultiLevelVectorField const& Efield,
         ablastr::fields::MultiLevelVectorField const& Jfield,
         ablastr::fields::MultiLevelScalarField const& rhofield,
-        amrex::Vector<std::array< std::unique_ptr<amrex::MultiFab>, 3> >& eb_update_E,
+        amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>, 3> >& eb_update_E,
         amrex::Real dt,
         amrex::IntVect ng, std::optional<bool> nodal_sync );
 
@@ -170,7 +170,7 @@ public:
         ablastr::fields::MultiLevelVectorField const& Efield,
         ablastr::fields::MultiLevelVectorField const& Jfield,
         ablastr::fields::MultiLevelScalarField const& rhofield,
-        amrex::Vector<std::array< std::unique_ptr<amrex::MultiFab>, 3> > & eb_update_E,
+        amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>, 3> > & eb_update_E,
         amrex::Real dt, int lev,
         amrex::IntVect ng, std::optional<bool> nodal_sync );
 
