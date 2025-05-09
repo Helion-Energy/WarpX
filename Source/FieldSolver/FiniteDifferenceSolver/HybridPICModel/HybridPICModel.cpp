@@ -618,11 +618,11 @@ void HybridPICModel::FieldPush (
 }
 
 void HybridPICModel::EvolveEBFieldsDisplacement (
-    ablastr::fields::MultiLevelVectorField const& Bfield,
-    ablastr::fields::MultiLevelVectorField const& Efield,
+    ablastr::fields::MultiLevelVectorField const & Bfield,
+    ablastr::fields::MultiLevelVectorField const & Efield,
     ablastr::fields::MultiLevelVectorField const& Jfield,
     ablastr::fields::MultiLevelScalarField const& rhofield,
-    amrex::Vector<std::array< std::unique_ptr<amrex::MultiFab>, 3>> const& eb_update_E,
+    amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>, 3>>& eb_update_E,
     amrex::Real dt,
     IntVect ng, std::optional<bool> nodal_sync )
 {
@@ -637,59 +637,66 @@ void HybridPICModel::EvolveEBFieldsDisplacement (
 }
 
 void HybridPICModel::EvolveEBFieldsDisplacement (
-    ablastr::fields::MultiLevelVectorField const& Bfield,
-    ablastr::fields::MultiLevelVectorField const& Efield,
+    ablastr::fields::MultiLevelVectorField const & Bfield,
+    ablastr::fields::MultiLevelVectorField const & Efield,
     ablastr::fields::MultiLevelVectorField const& Jfield,
     ablastr::fields::MultiLevelScalarField const& rhofield,
-    amrex::Vector<std::array< std::unique_ptr<amrex::MultiFab>, 3>> const& eb_update_E,
+    amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>, 3>>& eb_update_E,
     amrex::Real dt, int lev,
     IntVect ng, std::optional<bool> nodal_sync )
 {
     auto& warpx = WarpX::GetInstance();
 
     // Push forward the B-field first half time step using Faraday's law
-    warpx.EvolveB(lev, 0.5*dt, DtType::FirstHalf);
-    warpx.ApplyBfieldBoundary(lev, PatchType::fine, DtType::FirstHalf);
+    amrex::Real const t_old = warpx.gett_old(0);
+    warpx.EvolveB(lev, 0.5*dt, DtType::FirstHalf, t_old);
+    warpx.ApplyBfieldBoundary(lev, PatchType::fine, DtType::FirstHalf, t_old);
     warpx.FillBoundaryB(lev, ng, nodal_sync);
 
+    
+    ablastr::fields::VectorField current_fp_plasma = warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
+    auto* const electron_pressure_fp = warpx.m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
+
     // Calculate J = curl x B / mu0
-    CalculateCurrentAmpere(Bfield, eb_update_E);
+    CalculatePlasmaCurrent(Bfield,eb_update_E);
     warpx.ApplyJfieldBoundary(
         lev,
-        current_fp_ampere[lev][0].get(),
-        current_fp_ampere[lev][1].get(),
-        current_fp_ampere[lev][2].get(),
+        current_fp_plasma[0],
+        current_fp_plasma[1],
+        current_fp_plasma[2],
         PatchType::fine
         );
-    current_fp_ampere[lev][0]->FillBoundary(warpx.Geom(lev).periodicity());
-    current_fp_ampere[lev][1]->FillBoundary(warpx.Geom(lev).periodicity());
-    current_fp_ampere[lev][2]->FillBoundary(warpx.Geom(lev).periodicity());
+    current_fp_plasma[0]->FillBoundary(warpx.Geom(lev).periodicity());
+    current_fp_plasma[1]->FillBoundary(warpx.Geom(lev).periodicity());
+    current_fp_plasma[2]->FillBoundary(warpx.Geom(lev).periodicity());
 
+    ablastr::fields::VectorField current_fp_external = warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_external, lev);
+    
     // Solve E field in regular cells
     warpx.get_pointer_fdtd_solver_fp(lev)->HybridPICEvolveEDisplacement(
-        Efield[lev], current_fp_ampere[lev], Jfield[lev], current_fp_external[lev],
-        Bfield[lev], rhofield[lev],
-        electron_pressure_fp[lev],
+        Efield[lev], current_fp_plasma, Jfield[lev], current_fp_external,
+        Bfield[lev], *rhofield[lev],
+        *electron_pressure_fp,
         eb_update_E[lev], dt, lev, this, true
     );
-    warpx.ApplyEfieldBoundary(lev, PatchType::fine);
+    warpx.ApplyEfieldBoundary(lev, PatchType::fine, t_old + dt);
     warpx.FillBoundaryE(lev, ng, nodal_sync);
 
     // Push forward the B-field using Faraday's law
-    warpx.EvolveB(lev, 0.5*dt, DtType::SecondHalf);
-    warpx.ApplyBfieldBoundary(lev, PatchType::fine, DtType::SecondHalf);
+    warpx.EvolveB(lev, 0.5*dt, DtType::SecondHalf, t_old + 0.5*dt);
+    warpx.ApplyBfieldBoundary(lev, PatchType::fine, DtType::SecondHalf, t_old + 0.5*dt);
     warpx.FillBoundaryB(ng, nodal_sync);
 
     // Calculate J = curl x B / mu0
-    CalculateCurrentAmpere(Bfield, eb_update_E);
+    CalculatePlasmaCurrent(Bfield,eb_update_E);
     warpx.ApplyJfieldBoundary(
         lev,
-        current_fp_ampere[lev][0].get(),
-        current_fp_ampere[lev][1].get(),
-        current_fp_ampere[lev][2].get(),
+        current_fp_plasma[0],
+        current_fp_plasma[1],
+        current_fp_plasma[2],
         PatchType::fine
         );
-    current_fp_ampere[lev][0]->FillBoundary(warpx.Geom(lev).periodicity());
-    current_fp_ampere[lev][1]->FillBoundary(warpx.Geom(lev).periodicity());
-    current_fp_ampere[lev][2]->FillBoundary(warpx.Geom(lev).periodicity());
+    current_fp_plasma[0]->FillBoundary(warpx.Geom(lev).periodicity());
+    current_fp_plasma[1]->FillBoundary(warpx.Geom(lev).periodicity());
+    current_fp_plasma[2]->FillBoundary(warpx.Geom(lev).periodicity());
 }

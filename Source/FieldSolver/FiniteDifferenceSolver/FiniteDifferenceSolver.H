@@ -215,14 +215,14 @@ class FiniteDifferenceSolver
           * \param[in] hybrid_model instance of the hybrid-PIC model
           * \param[in] include_resistivity_term boolean flag for whether to include resistivity
           */
-        void HybridPICEvolveEDisplacement ( std::array< std::unique_ptr<amrex::MultiFab>, 3>& Efield,
-                      std::array< std::unique_ptr<amrex::MultiFab>, 3>& Jfield,
-                      std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& Jifield,
-                      std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& Jextfield,
-                      std::array< std::unique_ptr<amrex::MultiFab>, 3> const& Bfield,
-                      std::unique_ptr<amrex::MultiFab> const& rhofield,
-                      std::unique_ptr<amrex::MultiFab> const& Pefield,
-                      std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& edge_lengths,
+        void HybridPICEvolveEDisplacement ( ablastr::fields::VectorField const& Efield,
+                      ablastr::fields::VectorField& Jfield,
+                      ablastr::fields::VectorField const& Jifield,
+                      ablastr::fields::VectorField const& Jextfield,
+                      ablastr::fields::VectorField const& Bfield,
+                      amrex::MultiFab const& rhofield,
+                      amrex::MultiFab const& Pefield,
+                      std::array< std::unique_ptr<amrex::iMultiFab>, 3 > const& eb_update_E,
                       amrex::Real dt, int lev, HybridPICModel const* hybrid_model,
                       bool include_resistivity_term );
 
@@ -314,14 +314,14 @@ class FiniteDifferenceSolver
 
         template<typename T_Algo>
         void HybridPICEvolveEDisplacementCylindrical (
-            std::array< std::unique_ptr<amrex::MultiFab>, 3>& Efield,
-            std::array< std::unique_ptr<amrex::MultiFab>, 3> const& Jfield,
-            std::array< std::unique_ptr<amrex::MultiFab>, 3> const& Jifield,
-            std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& Jextfield,
-            std::array< std::unique_ptr<amrex::MultiFab>, 3> const& Bfield,
-            std::unique_ptr<amrex::MultiFab> const& rhofield,
-            std::unique_ptr<amrex::MultiFab> const& Pefield,
-            std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& edge_lengths,
+            ablastr::fields::VectorField const& Efield,
+            ablastr::fields::VectorField const & Jfield,
+            ablastr::fields::VectorField const& Jifield,
+            ablastr::fields::VectorField const& Jextfield,
+            ablastr::fields::VectorField const& Bfield,
+            amrex::MultiFab const& rhofield,
+            amrex::MultiFab const& Pefield,
+            std::array< std::unique_ptr<amrex::iMultiFab>, 3 > const& eb_update_E,
             amrex::Real dt, int lev, HybridPICModel const* hybrid_model,
             bool include_resistivity_term );
 
@@ -439,16 +439,17 @@ class FiniteDifferenceSolver
 
         template<typename T_Algo>
         void HybridPICEvolveEDisplacementCartesian (
-            std::array< std::unique_ptr<amrex::MultiFab>, 3>& Efield,
-            std::array< std::unique_ptr<amrex::MultiFab>, 3> const& Jfield,
-            std::array< std::unique_ptr<amrex::MultiFab>, 3> const& Jifield,
-            std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& Jextfield,
-            std::array< std::unique_ptr<amrex::MultiFab>, 3> const& Bfield,
-            std::unique_ptr<amrex::MultiFab> const& rhofield,
-            std::unique_ptr<amrex::MultiFab> const& Pefield,
-            std::array< std::unique_ptr<amrex::MultiFab>, 3 > const& edge_lengths,
+            ablastr::fields::VectorField const& Efield,
+            ablastr::fields::VectorField const& Jfield,
+            ablastr::fields::VectorField const& Jifield,
+            ablastr::fields::VectorField const& Jextfield,
+            ablastr::fields::VectorField const& Bfield,
+            amrex::MultiFab const& rhofield,
+            amrex::MultiFab const& Pefield,
+            std::array< std::unique_ptr<amrex::iMultiFab>, 3 > const& eb_update_E,
             amrex::Real dt, int lev, HybridPICModel const* hybrid_model,
             bool include_resistivity_term );
+
 #endif
 
 };

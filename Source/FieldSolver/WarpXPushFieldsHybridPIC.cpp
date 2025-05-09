@@ -9,7 +9,6 @@
  */
 #include "Evolve/WarpXDtType.H"
 #include "Fields.H"
-#include "FieldSolver/Fields.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "Particles/MultiParticleContainer.H"
 #include "Utils/TextMsg.H"

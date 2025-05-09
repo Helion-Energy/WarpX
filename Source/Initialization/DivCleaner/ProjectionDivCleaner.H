@@ -65,6 +65,7 @@ protected:
     amrex::Real m_atol;
 
     std::string m_field_name;
+    warpx::fields::FieldType m_field_type;
 
 public:
     amrex::Vector< std::unique_ptr<amrex::MultiFab> > m_solution;
@@ -84,6 +85,7 @@ public:
 
     // Default Constructor
     ProjectionDivCleaner (std::string const& a_field_name);
+    ProjectionDivCleaner (warpx::fields::FieldType a_field_type);
 
     void ReadParameters ();
 

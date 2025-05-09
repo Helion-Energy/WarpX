@@ -23,7 +23,7 @@
 using namespace amrex;
 
 void FiniteDifferenceSolver::HybridPICEvolveEDisplacement (
-    ablastr::fields::VectorField& Efield,
+    ablastr::fields::VectorField const& Efield,
     ablastr::fields::VectorField& Jfield,
     ablastr::fields::VectorField const& Jifield,
     ablastr::fields::VectorField const& Jextfield,
@@ -61,8 +61,8 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacement (
 #ifdef WARPX_DIM_RZ
 template<typename T_Algo>
 void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
-    ablastr::fields::VectorField& Efield,
-    ablastr::fields::VectorField& Jfield,
+    ablastr::fields::VectorField const& Efield,
+    ablastr::fields::VectorField const& Jfield,
     ablastr::fields::VectorField const& Jifield,
     ablastr::fields::VectorField const& Jextfield,
     ablastr::fields::VectorField const& Bfield,
@@ -94,8 +94,10 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
     const auto eta_h = hybrid_model->m_eta_h;
     const auto rho_floor = hybrid_model->m_n_floor * PhysConst::q_e;
     const auto resistivity_has_J_dependence = hybrid_model->m_resistivity_has_J_dependence;
+    const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
+    const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
 
-    const bool include_hyper_resistivity_term = (eta_h > 0.0) && include_resistivity_term;
+    //const bool include_hyper_resistivity_term = (eta_h > 0.0) && include_resistivity_term;
 
     // Index type required for interpolating fields from their respective
     // staggering to the Ex, Ey, Ez locations
@@ -127,8 +129,8 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
     // Also note that enE_nodal_mf does not need to have any guard cells since
     // these values will be interpolated to the Yee mesh which is contained
     // by the nodal mesh.
-    auto const& ba = convert(rhofield->boxArray(), IntVect::TheNodeVector());
-    MultiFab enE_nodal_mf(ba, rhofield->DistributionMap(), 3, IntVect::TheZeroVector());
+    auto const& ba = convert(rhofield.boxArray(), IntVect::TheNodeVector());
+    MultiFab enE_nodal_mf(ba, rhofield.DistributionMap(), 3, IntVect::TheZeroVector());
 
     MultiFab grad_Pe_r_mf(Efield[0]->boxArray(), Efield[0]->DistributionMap(), 1, Efield[0]->nGrowVect());
     MultiFab grad_Pe_z_mf(Efield[2]->boxArray(), Efield[2]->DistributionMap(), 1, Efield[2]->nGrowVect());
@@ -213,7 +215,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
         }
         auto wt = static_cast<amrex::Real>(amrex::second());
 
-        Array4<Real> const& Pe = Pefield->array(mfi);
+        Array4<Real const> const& Pe = Pefield.const_array(mfi);
         Array4<Real> const& grad_Pe_r = grad_Pe_r_mf.array(mfi);
         Array4<Real> const& grad_Pe_z = grad_Pe_z_mf.array(mfi);
         Array4<Real const> const& Jr = Jfield[0]->const_array(mfi);
@@ -293,11 +295,14 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
         Array4<Real const> const& Bt = Bfield[1]->const_array(mfi);
         Array4<Real const> const& Bz = Bfield[2]->const_array(mfi);
 
-#ifdef AMREX_USE_EB
-        amrex::Array4<amrex::Real> const& lr = eb_update_E[0]->array(mfi);
-        amrex::Array4<amrex::Real> const& lt = eb_update_E[1]->array(mfi);
-        amrex::Array4<amrex::Real> const& lz = eb_update_E[2]->array(mfi);
-#endif
+        // Extract structures indicating where the fields
+        // should be updated, given the position of the embedded boundaries
+        amrex::Array4<int> update_Er_arr, update_Et_arr, update_Ez_arr;
+        if (EB::enabled()) {
+            update_Er_arr = eb_update_E[0]->array(mfi);
+            update_Et_arr = eb_update_E[1]->array(mfi);
+            update_Ez_arr = eb_update_E[2]->array(mfi);
+        }
 
         // Extract cylindrical specific parameters
         Real const dr = m_dr;
@@ -312,11 +317,11 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
 
             // Er calculation
             [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
-#ifdef AMREX_USE_EB
-                // Skip if this cell is fully covered by embedded boundaries
-                if (lr(i, j, 0) <= 0) return;
-#endif
-                // Interpolate to get the appropriate charge density in space
+                
+	        // Skip field update in the embedded boundaries
+                if (update_Er_arr && update_Er_arr(i, j, 0) == 0) { return; }
+
+	        // Interpolate to get the appropriate charge density in space
                 Real rho_val = Interp(rho, nodal, Er_stag, coarsen, i, j, 0, 0);
 
                 // Interpolate current to appropriate staggering to match E field
@@ -341,6 +346,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
                 auto Br_val = Interp(Br, Br_stag, Er_stag, coarsen, i, j, 0, 0);
                 auto Bt_val = Interp(Bt, Bt_stag, Er_stag, coarsen, i, j, 0, 0);
                 auto Bz_val = Interp(Bz, Bz_stag, Er_stag, coarsen, i, j, 0, 0);
+                const Real btot_val = std::sqrt(Br_val*Br_val + Bt_val*Bt_val + Bz_val*Bz_val);
 
                 // Store old E values
                 const Real Ero = Er(i,j,0);
@@ -364,8 +370,8 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
                     auto nabla2_J_r_val = nabla2_J_r(i, j, 0);
                     auto nabla2_J_z_val = Interp(nabla2_J_z, Ez_stag, Er_stag, coarsen, i, j, 0, 0);
 
-                    Jtilde_r -= rho_val * eta_h * nabla2_J_r_val;
-                    Jtilde_z -= rho_val * eta_h * nabla2_J_z_val;
+                    Jtilde_r -= rho_val * eta_h(rho_val, btot_val) * nabla2_J_r_val;
+                    Jtilde_z -= rho_val * eta_h(rho_val, btot_val) * nabla2_J_z_val;
                 }
 
                 // Include explicit terms for displacement current
@@ -389,12 +395,11 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
 
             // Et calculation
             [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
-#ifdef AMREX_USE_EB
-                // In RZ Et is associated with a mesh node, so we need to check if the mesh node is covered
-                amrex::ignore_unused(lt);
-                if (lr(i, j, 0)<=0 || lr(i-1, j, 0)<=0 || lz(i, j-1, 0)<=0 || lz(i, j, 0)<=0) return;
-#endif
-                // r on a nodal grid (Et is nodal in r)
+                
+		// Skip field update in the embedded boundaries
+                if (update_Er_arr && update_Er_arr(i, j, 0) == 0) { return; }
+		    
+		// r on a nodal grid (Et is nodal in r)
                 Real const r = rmin + i*dr;
                 // Mode m=0: // Ensure that Et remains 0 on axis
                 if (r < 0.5_rt*dr) {
@@ -427,6 +432,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
                 auto Br_val = Interp(Br, Br_stag, Et_stag, coarsen, i, j, 0, 0);
                 auto Bt_val = Interp(Bt, Bt_stag, Et_stag, coarsen, i, j, 0, 0);
                 auto Bz_val = Interp(Bz, Bz_stag, Et_stag, coarsen, i, j, 0, 0);
+                const Real btot_val = std::sqrt(Br_val*Br_val + Bt_val*Bt_val + Bz_val*Bz_val);
 
                 // Store old E values
                 const Real Ero = Interp(Er, Er_stag, Et_stag, coarsen, i, j, 0, 0);
@@ -449,8 +455,8 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
                     auto nabla2_J_r_val = Interp(nabla2_J_r, Er_stag, Et_stag, coarsen, i, j, 0, 0);
                     auto nabla2_J_z_val = Interp(nabla2_J_z, Ez_stag, Et_stag, coarsen, i, j, 0, 0);
 
-                    Jtilde_r -= rho_val * eta_h * nabla2_J_r_val;
-                    Jtilde_z -= rho_val * eta_h * nabla2_J_z_val;
+                    Jtilde_r -= rho_val * eta_h(rho_val, btot_val) * nabla2_J_r_val;
+                    Jtilde_z -= rho_val * eta_h(rho_val, btot_val) * nabla2_J_z_val;
                 }
 
                 // Include explicit terms for displacement current
@@ -476,11 +482,11 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
 
             // Ez calculation
             [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
-#ifdef AMREX_USE_EB
-                // Skip field solve if this cell is fully covered by embedded boundaries
-                if (lz(i,j,0) <= 0) { return; }
-#endif
-                // Interpolate to get the appropriate charge density in space
+                
+		// Skip field update in the embedded boundaries
+                if (update_Ez_arr && update_Ez_arr(i, j, 0) == 0) { return; }
+		    
+		// Interpolate to get the appropriate charge density in space
                 Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, 0, 0);
 
                 // Interpolate current to appropriate staggering to match E field
@@ -505,6 +511,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
                 auto Br_val = Interp(Br, Br_stag, Ez_stag, coarsen, i, j, 0, 0);
                 auto Bt_val = Interp(Bt, Bt_stag, Ez_stag, coarsen, i, j, 0, 0);
                 auto Bz_val = Interp(Bz, Bz_stag, Ez_stag, coarsen, i, j, 0, 0);
+                const Real btot_val = std::sqrt(Br_val*Br_val + Bt_val*Bt_val + Bz_val*Bz_val);
 
                 // Store old E values
                 const Real Ero = Interp(Er, Er_stag, Ez_stag, coarsen, i, j, 0, 0);
@@ -528,8 +535,8 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
                     auto nabla2_J_r_val = Interp(nabla2_J_r, Er_stag, Ez_stag, coarsen, i, j, 0, 0);
                     auto nabla2_J_z_val = nabla2_J_z(i, j, 0);
 
-                    Jtilde_r -= rho_val * eta_h * nabla2_J_r_val;
-                    Jtilde_z -= rho_val * eta_h * nabla2_J_z_val;
+                    Jtilde_r -= rho_val * eta_h(rho_val, btot_val) * nabla2_J_r_val;
+                    Jtilde_z -= rho_val * eta_h(rho_val, btot_val) * nabla2_J_z_val;
                 }
 
                 // Include explicit terms for displacement current
@@ -565,8 +572,8 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
 
 template<typename T_Algo>
 void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
-    ablastr::fields::VectorField& Efield,
-    ablastr::fields::VectorField& Jfield,
+    ablastr::fields::VectorField const& Efield,
+    ablastr::fields::VectorField const& Jfield,
     ablastr::fields::VectorField const& Jifield,
     ablastr::fields::VectorField const& Jextfield,
     ablastr::fields::VectorField const& Bfield,
@@ -592,8 +599,10 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
     const auto eta_h = hybrid_model->m_eta_h;
     const auto rho_floor = hybrid_model->m_n_floor * PhysConst::q_e;
     const auto resistivity_has_J_dependence = hybrid_model->m_resistivity_has_J_dependence;
-
-    const bool include_hyper_resistivity_term = (eta_h > 0.) && include_resistivity_term;
+    const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
+    const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
+    
+    //const bool include_hyper_resistivity_term = (eta_h > 0.) && include_resistivity_term;
 
     // Index type required for interpolating fields from their respective
     // staggering to the Ex, Ey, Ez locations
@@ -625,8 +634,8 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
     // Also note that enE_nodal_mf does not need to have any guard cells since
     // these values will be interpolated to the Yee mesh which is contained
     // by the nodal mesh.
-    auto const& ba = convert(rhofield->boxArray(), IntVect::TheNodeVector());
-    MultiFab enE_nodal_mf(ba, rhofield->DistributionMap(), 3, IntVect::TheZeroVector());
+    auto const& ba = convert(rhofield.boxArray(), IntVect::TheNodeVector());
+    MultiFab enE_nodal_mf(ba, rhofield.DistributionMap(), 3, IntVect::TheZeroVector());
 
     MultiFab grad_Pe_x_mf(Efield[0]->boxArray(), Efield[0]->DistributionMap(), 1, Efield[0]->nGrowVect());
     MultiFab grad_Pe_y_mf(Efield[1]->boxArray(), Efield[1]->DistributionMap(), 1, Efield[1]->nGrowVect());
@@ -713,7 +722,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
         }
         auto wt = static_cast<amrex::Real>(amrex::second());
 
-        Array4<Real> const& Pe = Pefield->array(mfi);
+        Array4<Real const> const& Pe = Pefield.const_array(mfi);
         Array4<Real> const& grad_Pe_x = grad_Pe_x_mf.array(mfi);
         Array4<Real> const& grad_Pe_y = grad_Pe_y_mf.array(mfi);
         Array4<Real> const& grad_Pe_z = grad_Pe_z_mf.array(mfi);
@@ -790,7 +799,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
         Array4<Real const> const& Jy = Jfield[1]->const_array(mfi);
         Array4<Real const> const& Jz = Jfield[2]->const_array(mfi);
         Array4<Real const> const& enE = enE_nodal_mf.const_array(mfi);
-        Array4<Real const> const& rho = rhofield->const_array(mfi);
+        Array4<Real const> const& rho = rhofield.const_array(mfi);
         Array4<Real const> const& grad_Pe_x = grad_Pe_x_mf.const_array(mfi);
         Array4<Real const> const& grad_Pe_y = grad_Pe_y_mf.const_array(mfi);
         Array4<Real const> const& grad_Pe_z = grad_Pe_z_mf.const_array(mfi);
@@ -798,11 +807,14 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
         Array4<Real const> const& nabla2_J_y = nabla2_J_y_mf.const_array(mfi);
         Array4<Real const> const& nabla2_J_z = nabla2_J_z_mf.const_array(mfi);
 
-#ifdef AMREX_USE_EB
-        amrex::Array4<amrex::Real> const& lx = eb_update_E[0]->array(mfi);
-        amrex::Array4<amrex::Real> const& ly = eb_update_E[1]->array(mfi);
-        amrex::Array4<amrex::Real> const& lz = eb_update_E[2]->array(mfi);
-#endif
+	// Extract structures indicating where the fields
+        // should be updated, given the position of the embedded boundaries
+        amrex::Array4<int> update_Ex_arr, update_Ey_arr, update_Ez_arr;
+        if (EB::enabled()) {
+            update_Ex_arr = eb_update_E[0]->array(mfi);
+            update_Ey_arr = eb_update_E[1]->array(mfi);
+            update_Ez_arr = eb_update_E[2]->array(mfi);
+        }
 
         Box const& tex  = mfi.tilebox(Efield[0]->ixType().toIntVect());
         Box const& tey  = mfi.tilebox(Efield[1]->ixType().toIntVect());
@@ -813,11 +825,11 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
 
             // Ex calculation
             [=] AMREX_GPU_DEVICE (int i, int j, int k){
-#ifdef AMREX_USE_EB
-                // Skip if this cell is fully covered by embedded boundaries
-                if (lx(i, j, k) <= 0) return;
-#endif
-                // Interpolate to get the appropriate charge density in space
+                
+	        // Skip field update in the embedded boundaries
+                if (update_Ex_arr && update_Ex_arr(i, j, k) == 0) { return; }
+	    
+	        // Interpolate to get the appropriate charge density in space
                 Real rho_val = Interp(rho, nodal, Ex_stag, coarsen, i, j, k, 0);
 
                 // Interpolate current to appropriate staggering to match E field
@@ -843,6 +855,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
                 auto Bx_val = Interp(Bx, Bx_stag, Ex_stag, coarsen, i, j, k, 0);
                 auto By_val = Interp(By, By_stag, Ex_stag, coarsen, i, j, k, 0);
                 auto Bz_val = Interp(Bz, Bz_stag, Ex_stag, coarsen, i, j, k, 0);
+                const Real btot_val = std::sqrt(Bx_val*Bx_val + By_val*By_val + Bz_val*Bz_val);
 
                 // Store old E values
                 const Real Exo = Ex(i,j,k);
@@ -867,9 +880,9 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
                     auto nabla2_J_y_val = Interp(nabla2_J_y, Ey_stag, Ex_stag, coarsen, i, j, k, 0);
                     auto nabla2_J_z_val = Interp(nabla2_J_z, Ez_stag, Ex_stag, coarsen, i, j, k, 0);
 
-                    Jtilde_x -= rho_val * eta_h * nabla2_J_x_val;
-                    Jtilde_y -= rho_val * eta_h * nabla2_J_y_val;
-                    Jtilde_z -= rho_val * eta_h * nabla2_J_z_val;
+                    Jtilde_x -= rho_val * eta_h(rho_val, btot_val)* nabla2_J_x_val;
+                    Jtilde_y -= rho_val * eta_h(rho_val, btot_val)* nabla2_J_y_val;
+                    Jtilde_z -= rho_val * eta_h(rho_val, btot_val)* nabla2_J_z_val;
                 }
 
                 // Include explicit terms for displacement current
@@ -893,17 +906,11 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
 
             // Ey calculation
             [=] AMREX_GPU_DEVICE (int i, int j, int k){
-#ifdef AMREX_USE_EB
-                // Skip field solve if this cell is fully covered by embedded boundaries
-#ifdef WARPX_DIM_3D
-                if (ly(i,j,k) <= 0) { return; }
-#elif defined(WARPX_DIM_XZ)
-                //In XZ Ey is associated with a mesh node, so we need to check if the mesh node is covered
-                amrex::ignore_unused(ly);
-                if (lx(i, j, k)<=0 || lx(i-1, j, k)<=0 || lz(i, j-1, k)<=0 || lz(i, j, k)<=0) { return; }
-#endif
-#endif
-                // Interpolate to get the appropriate charge density in space
+                
+		// Skip field update in the embedded boundaries
+                if (update_Ey_arr && update_Ey_arr(i, j, k) == 0) { return; }
+		    
+		// Interpolate to get the appropriate charge density in space
                 Real rho_val = Interp(rho, nodal, Ey_stag, coarsen, i, j, k, 0);
 
                 // Interpolate current to appropriate staggering to match E field
@@ -929,6 +936,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
                 auto Bx_val = Interp(Bx, Bx_stag, Ey_stag, coarsen, i, j, k, 0);
                 auto By_val = Interp(By, By_stag, Ey_stag, coarsen, i, j, k, 0);
                 auto Bz_val = Interp(Bz, Bz_stag, Ey_stag, coarsen, i, j, k, 0);
+                const Real btot_val = std::sqrt(Bx_val*Bx_val + By_val*By_val + Bz_val*Bz_val);
 
                 // Store old E values
                 const Real Exo = Interp(Ex, Ex_stag, Ey_stag, coarsen, i, j, k, 0);
@@ -953,9 +961,9 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
                     auto nabla2_J_y_val = nabla2_J_y(i, j, k);
                     auto nabla2_J_z_val = Interp(nabla2_J_z, Ez_stag, Ey_stag, coarsen, i, j, k, 0);
 
-                    Jtilde_x -= rho_val * eta_h * nabla2_J_x_val;
-                    Jtilde_y -= rho_val * eta_h * nabla2_J_y_val;
-                    Jtilde_z -= rho_val * eta_h * nabla2_J_z_val;
+                    Jtilde_x -= rho_val * eta_h(rho_val, btot_val)* nabla2_J_x_val;
+                    Jtilde_y -= rho_val * eta_h(rho_val, btot_val)* nabla2_J_y_val;
+                    Jtilde_z -= rho_val * eta_h(rho_val, btot_val)* nabla2_J_z_val;
                 }
 
                 // Include explicit terms for displacement current
@@ -979,11 +987,10 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
 
             // Ez calculation
             [=] AMREX_GPU_DEVICE (int i, int j, int k){
-#ifdef AMREX_USE_EB
-                // Skip field solve if this cell is fully covered by embedded boundaries
-                if (lz(i,j,k) <= 0) { return; }
-#endif
-                
+               
+                // Skip field update in the embedded boundaries
+                if (update_Ez_arr && update_Ez_arr(i, j, k) == 0) { return; }
+
                 // Interpolate to get the appropriate charge density in space
                 Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, k, 0);
 
@@ -1010,6 +1017,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
                 auto Bx_val = Interp(Bx, Bx_stag, Ez_stag, coarsen, i, j, k, 0);
                 auto By_val = Interp(By, By_stag, Ez_stag, coarsen, i, j, k, 0);
                 auto Bz_val = Interp(Bz, Bz_stag, Ez_stag, coarsen, i, j, k, 0);
+                const Real btot_val = std::sqrt(Bx_val*Bx_val + By_val*By_val + Bz_val*Bz_val);
 
                 // Store old E values
                 const Real Exo = Interp(Ex, Ex_stag, Ez_stag, coarsen, i, j, k, 0);
@@ -1034,9 +1042,9 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
                     auto nabla2_J_y_val = Interp(nabla2_J_y, Ey_stag, Ez_stag, coarsen, i, j, k, 0);
                     auto nabla2_J_z_val = nabla2_J_z(i, j, k);
 
-                    Jtilde_x -= rho_val * eta_h * nabla2_J_x_val;
-                    Jtilde_y -= rho_val * eta_h * nabla2_J_y_val;
-                    Jtilde_z -= rho_val * eta_h * nabla2_J_z_val;
+                    Jtilde_x -= rho_val * eta_h(rho_val, btot_val)* nabla2_J_x_val;
+                    Jtilde_y -= rho_val * eta_h(rho_val, btot_val)* nabla2_J_y_val;
+                    Jtilde_z -= rho_val * eta_h(rho_val, btot_val)* nabla2_J_z_val;
                 }
 
                 // Include explicit terms for displacement current

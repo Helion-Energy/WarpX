@@ -266,12 +266,6 @@ The physical fields in WarpX have the following naming:
             py::arg("potential"),
             "Sets the EB potential string and updates the function parser."
         )
-<<<<<<< HEAD
-        .def_static("run_div_cleaner",
-            [] () { WarpX::ProjectionCleanDivB(); },
-            "Executes projection based divergence cleaner on loaded Bfield_fp_external."
-        )
-=======
         .def("run_div_cleaner",
             [] (WarpX& wx) { wx.ProjectionCleanDivB(); },
             "Executes projection based divergence cleaner on loaded Bfield_fp_external."
@@ -284,7 +278,6 @@ The physical fields in WarpX have the following naming:
             [] (WarpX& wx) { wx.Synchronize(); },
             "Synchronize particle velocities and positions."
         )
->>>>>>> origin
     ;
 
     py::class_<warpx::Config>(m, "Config")
