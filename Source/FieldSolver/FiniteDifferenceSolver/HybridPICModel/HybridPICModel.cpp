@@ -682,9 +682,9 @@ void HybridPICModel::EvolveEBFieldsDisplacement (
     warpx.ApplyEfieldBoundary(lev, PatchType::fine, t_old + dt);
     warpx.FillBoundaryE(lev, ng, nodal_sync);
 
-    // Push forward the B-field using Faraday's law
-    warpx.EvolveB(lev, 0.5*dt, DtType::SecondHalf, t_old + 0.5*dt);
-    warpx.ApplyBfieldBoundary(lev, PatchType::fine, DtType::SecondHalf, t_old + 0.5*dt);
+    // Push forward the B-field second half time step using Faraday's law
+    warpx.EvolveB(lev, 0.5*dt, DtType::SecondHalf, t_old);
+    warpx.ApplyBfieldBoundary(lev, PatchType::fine, DtType::SecondHalf, t_old);
     warpx.FillBoundaryB(ng, nodal_sync);
 
     // Calculate J = curl x B / mu0
