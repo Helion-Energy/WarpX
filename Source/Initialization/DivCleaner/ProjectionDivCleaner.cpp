@@ -30,17 +30,9 @@ using namespace amrex;
 
 namespace warpx::initialization {
 
-ProjectionDivCleaner::ProjectionDivCleaner(warpx::fields::FieldType a_field_type) : m_field_type(a_field_type)
+ProjectionDivCleaner::ProjectionDivCleaner(std::string const& a_field_name) :
+    m_field_name(a_field_name)
 {
-    // Initialize tolerance based on field precision
-    if constexpr (std::is_same<Real, float>::value) {
-        m_rtol = 5e-5;
-        m_atol = 0.0;
-    }
-    else {
-        m_rtol = 1e-12;
-        m_atol = 0.0;
-    }
 
     using ablastr::fields::Direction;
     ReadParameters();
