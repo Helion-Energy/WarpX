@@ -19,6 +19,7 @@
 #include "WarpX.H"
 
 #include <ablastr/coarsen/sample.H>
+#include <ablastr/utils/Communication.H>
 
 using namespace amrex;
 
@@ -137,6 +138,11 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
 
     MultiFab nabla2_J_r_mf(Efield[0]->boxArray(), Efield[0]->DistributionMap(), 1, Efield[0]->nGrowVect());
     MultiFab nabla2_J_z_mf(Efield[2]->boxArray(), Efield[2]->DistributionMap(), 1, Efield[2]->nGrowVect());
+
+    grad_Pe_r_mf.setVal(0.);
+    grad_Pe_z_mf.setVal(0.);
+    nabla2_J_r_mf.setVal(0.);
+    nabla2_J_z_mf.setVal(0.);
 
     // Loop through the grids, and over the tiles within each grid for the
     // initial, nodal calculation of E
@@ -264,6 +270,14 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
     grad_Pe_z_mf.FillBoundary(warpx.Geom(lev).periodicity());
     nabla2_J_r_mf.FillBoundary(warpx.Geom(lev).periodicity());
     nabla2_J_z_mf.FillBoundary(warpx.Geom(lev).periodicity());
+
+    ablastr::utils::communication::FillBoundary(grad_Pe_xr_mf, WarpX::do_single_precision_comms, warpx.Geom(lev).periodicity(), true);
+    ablastr::utils::communication::FillBoundary(grad_Pe_z_mf, WarpX::do_single_precision_comms, warpx.Geom(lev).periodicity(), true);
+    ablastr::utils::communication::FillBoundary(nabla2_J_r_mf, WarpX::do_single_precision_comms, warpx.Geom(lev).periodicity(), true);
+    ablastr::utils::communication::FillBoundary(nabla2_J_z_mf, WarpX::do_single_precision_comms, warpx.Geom(lev).periodicity(), true);
+    
+    amrex::Gpu::synchronize();
+ 
 
 
     // Loop through the grids, and over the tiles within each grid again
@@ -645,6 +659,13 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
     MultiFab nabla2_J_y_mf(Efield[1]->boxArray(), Efield[1]->DistributionMap(), 1, Efield[1]->nGrowVect());
     MultiFab nabla2_J_z_mf(Efield[2]->boxArray(), Efield[2]->DistributionMap(), 1, Efield[2]->nGrowVect());
 
+    grad_Pe_x_mf.setVal(0.);
+    grad_Pe_y_mf.setVal(0.);
+    grad_Pe_z_mf.setVal(0.);
+    nabla2_J_x_mf.setVal(0.);
+    nabla2_J_y_mf.setVal(0.);
+    nabla2_J_z_mf.setVal(0.);
+
     // Loop through the grids, and over the tiles within each grid for the
     // initial, nodal calculation of E
 #ifdef AMREX_USE_OMP
@@ -769,12 +790,22 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
         }
     }
 
-    grad_Pe_x_mf.FillBoundary(warpx.Geom(lev).periodicity());
-    grad_Pe_y_mf.FillBoundary(warpx.Geom(lev).periodicity());
-    grad_Pe_z_mf.FillBoundary(warpx.Geom(lev).periodicity());
-    nabla2_J_x_mf.FillBoundary(warpx.Geom(lev).periodicity());
-    nabla2_J_y_mf.FillBoundary(warpx.Geom(lev).periodicity());
-    nabla2_J_z_mf.FillBoundary(warpx.Geom(lev).periodicity());
+    //grad_Pe_x_mf.FillBoundary(warpx.Geom(lev).periodicity());
+    //grad_Pe_y_mf.FillBoundary(warpx.Geom(lev).periodicity());
+    //grad_Pe_z_mf.FillBoundary(warpx.Geom(lev).periodicity());
+    //nabla2_J_x_mf.FillBoundary(warpx.Geom(lev).periodicity());
+    //nabla2_J_y_mf.FillBoundary(warpx.Geom(lev).periodicity());
+    //nabla2_J_z_mf.FillBoundary(warpx.Geom(lev).periodicity());
+
+    ablastr::utils::communication::FillBoundary(grad_Pe_x_mf, WarpX::do_single_precision_comms, warpx.Geom(lev).periodicity(), true);
+    ablastr::utils::communication::FillBoundary(grad_Pe_y_mf, WarpX::do_single_precision_comms, warpx.Geom(lev).periodicity(), true);
+    ablastr::utils::communication::FillBoundary(grad_Pe_z_mf, WarpX::do_single_precision_comms, warpx.Geom(lev).periodicity(), true);
+    ablastr::utils::communication::FillBoundary(nabla2_J_x_mf, WarpX::do_single_precision_comms, warpx.Geom(lev).periodicity(), true);
+    ablastr::utils::communication::FillBoundary(nabla2_J_y_mf, WarpX::do_single_precision_comms, warpx.Geom(lev).periodicity(), true);
+    ablastr::utils::communication::FillBoundary(nabla2_J_z_mf, WarpX::do_single_precision_comms, warpx.Geom(lev).periodicity(), true);
+
+    amrex::Gpu::synchronize();
+
 
     // Loop through the grids, and over the tiles within each grid again
     // for the Yee grid calculation of the E field
