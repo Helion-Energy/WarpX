@@ -2,7 +2,7 @@
  *
  * This file is part of WarpX.
  *
- * Authors: Prabhat Kumar (Helion Energy)
+ * Authors: Your Name (Your Institution)
  *
  * License: BSD-3-Clause-LBNL
  */
@@ -11,15 +11,13 @@
 #define WARPX_EXTERNAL_FIELD_SOURCE_H_
 
 #include "Fields.H"
-
 #include "Utils/WarpXAlgorithmSelection.H"
-
 #include "EmbeddedBoundary/Enabled.H"
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
 #include "Utils/Parser/ParserUtils.H"
+#include "Utils/Parser/IntervalsParser.H"
 #include "Utils/WarpXConst.H"
 #include "Utils/WarpXProfilerWrapper.H"
-#include "Initialization/ExternalField.H"
 
 #include <ablastr/fields/MultiFabRegister.H>
 
@@ -31,17 +29,22 @@
 
 #include <optional>
 
+/**
+ * \brief This class represents a space- and time-dependent external electric and magnetic field source
+ *        that can be applied directly to the grid.
+ */
 class ExternalFieldSource
 {
 protected:
-
     // Initialization Type for External E and B excitation on grid
     static std::string B_excitation_grid_s;
     static std::string E_excitation_grid_s;
-
     static int ApplyExcitationInPML;
+    static int excite_E_source;
+    static int excite_B_source;
+    static int excite_all;
 
-    // Function for B excitation (x,y,z,t) on the grid
+        // Function for B excitation (x,y,z,t) on the grid
     static std::string str_Bx_excitation_grid_function;
     static std::string str_By_excitation_grid_function;
     static std::string str_Bz_excitation_grid_function;
@@ -50,7 +53,7 @@ protected:
     static std::string str_Ey_excitation_grid_function;
     static std::string str_Ez_excitation_grid_function;
 
-    // Flag for type of excitation (hard/soft)
+     // Flag for type of excitation (hard/soft)
     static std::string str_Ex_excitation_flag_function;
     static std::string str_Ey_excitation_flag_function;
     static std::string str_Ez_excitation_flag_function;
@@ -77,9 +80,9 @@ protected:
 public:
 
     // Default Constructor
-    ExternalFieldSource ();
+    ExternalFieldSource();
 
-        /** \brief Adds the contribution of user-defined external field-excitation
+    /** \brief Adds the contribution of user-defined external field-excitation
      *   to Efield, Bfield, and also Hfield if `USE_LLG=TRUE`.
      *   Two types of excitation are supported, namely, hard source and soft source.
      *   An excitation is called hard source if the field value is set exactly equal
@@ -105,19 +108,25 @@ public:
      *   \param[in] zflag_parser  : Type zfield excitation (hard source=0/soft source=1)
      *   \param[in] lev           : level on which the excitation is applied.
      */
-    void ApplyExternalFieldExcitationOnGrid (int const externalfieldtype, DtType a_dt_type = DtType::Full);
-    void ApplyExternalFieldExcitationOnGrid ( amrex::MultiFab *mfx,
-         amrex::MultiFab *mfy, amrex::MultiFab *mfz,
-         amrex::ParserExecutor<4> const& xfield_parser,
-         amrex::ParserExecutor<4> const& yfield_parser,
-         amrex::ParserExecutor<4> const& zfield_parser,
-         amrex::ParserExecutor<3> const& xflag_parser,
-         amrex::ParserExecutor<3> const& yflag_parser,
-         amrex::ParserExecutor<3> const& zflag_parser, const int lev,
-         DtType a_dt_type );
+    //void ApplyExternalFieldExcitationOnGrid (DtType a_dt_type = DtType::Full);
+
+    void ApplyExternalFieldExcitationOnGrid (DtType a_dt_type,  bool apply_E, bool apply_B);
+
+    void ApplyExternalFieldExcitationOnGrid (
+       warpx::fields::FieldType field,
+       amrex::ParserExecutor<4> const& xfield_parser,
+       amrex::ParserExecutor<4> const& yfield_parser,
+       amrex::ParserExecutor<4> const& zfield_parser,
+       amrex::ParserExecutor<3> const& xflag_parser,
+       amrex::ParserExecutor<3> const& yflag_parser,
+       amrex::ParserExecutor<3> const& zflag_parser, 
+       const int lev, DtType a_dt_type);
+
     /** Parse field excitation functions and flags*/
     void ReadExcitationParser ();
 
+
 };
 
-#endif //WARPX_EXTERNAL_FIELD_SOURCE_H_
+#endif // WARPX_EXTERNAL_FIELD_SOURCE_H_
+

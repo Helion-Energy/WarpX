@@ -16,6 +16,7 @@
 #include "Fields.H"
 
 #include "ExternalVectorPotential.H"
+#include "ExternalFieldSource.H"
 #include "Utils/WarpXAlgorithmSelection.H"
 
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
@@ -239,6 +240,9 @@ public:
     /** External E/B fields */
     bool m_add_external_fields = false;
     std::unique_ptr<ExternalVectorPotential> m_external_vector_potential;
+
+    /** External E/B field source*/
+    std::unique_ptr<ExternalFieldSource> m_external_field_source;
 
     /** Gpu Vector with index type of the Jx multifab */
     amrex::GpuArray<int, 3> Jx_IndexType;
