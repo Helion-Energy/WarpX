@@ -669,24 +669,28 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
     enE_nodal_mf.setVal(0.);
 
     // Set Jfield = 0. Calculate Jfield = (curl x B) / mu0 on Yee grid, then interpolate it to nodal grid and use it to calculate enE_nodal = (curl x B) x B / mu0
-    Jfield[0]->setVal(0);
-    Jfield[1]->setVal(0);
-    Jfield[2]->setVal(0);
+    MultiFab curlB_x_mf(Efield[0]->boxArray(), Efield[0]->DistributionMap(), 1, Efield[0]->nGrowVect());
+    MultiFab curlB_y_mf(Efield[1]->boxArray(), Efield[1]->DistributionMap(), 1, Efield[1]->nGrowVect());
+    MultiFab curlB_z_mf(Efield[2]->boxArray(), Efield[2]->DistributionMap(), 1, Efield[2]->nGrowVect());
+
+    curlB_x_mf.setVal(0.);
+    curlB_y_mf.setVal(0.);
+    curlB_z_mf.setVal(0.);
 
         // Loop through the grids, and over the tiles within each grid
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
-    for ( MFIter mfi(*Jfield[0], TilingIfNotGPU()); mfi.isValid(); ++mfi ) {
+    for ( MFIter mfi(curlB_x_mf, TilingIfNotGPU()); mfi.isValid(); ++mfi ) {
         if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers) {
             amrex::Gpu::synchronize();
         }
         auto wt = static_cast<amrex::Real>(amrex::second());
 
         // Extract field data for this grid/tile
-        Array4<Real> const &Jx = Jfield[0]->array(mfi);
-        Array4<Real> const &Jy = Jfield[1]->array(mfi);
-        Array4<Real> const &Jz = Jfield[2]->array(mfi);
+        Array4<Real> const &Jx = curlB_x_mf.array(mfi);
+        Array4<Real> const &Jy = curlB_y_mf.array(mfi);
+        Array4<Real> const &Jz = curlB_z_mf.array(mfi);
         Array4<Real const> const &Bx = Bfield[0]->const_array(mfi);
         Array4<Real const> const &By = Bfield[1]->const_array(mfi);
         Array4<Real const> const &Bz = Bfield[2]->const_array(mfi);
@@ -712,9 +716,9 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
         auto const n_coefs_z = static_cast<int>(m_stencil_coefs_z.size());
 
         // Extract tileboxes for which to loop
-        Box const& tjx  = mfi.tilebox(Jfield[0]->ixType().toIntVect());
-        Box const& tjy  = mfi.tilebox(Jfield[1]->ixType().toIntVect());
-        Box const& tjz  = mfi.tilebox(Jfield[2]->ixType().toIntVect());
+        Box const& tjx  = mfi.tilebox(Efield[0]->ixType().toIntVect());
+        Box const& tjy  = mfi.tilebox(Efield[1]->ixType().toIntVect());
+        Box const& tjz  = mfi.tilebox(Efield[2]->ixType().toIntVect());
 
         Real const one_over_mu0 = 1._rt / PhysConst::mu0;
 
@@ -780,9 +784,9 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
         auto wt = static_cast<amrex::Real>(amrex::second());
 
         Array4<Real> const& enE_nodal = enE_nodal_mf.array(mfi);
-        Array4<Real const> const& Jx = Jfield[0]->const_array(mfi);
-        Array4<Real const> const& Jy = Jfield[1]->const_array(mfi);
-        Array4<Real const> const& Jz = Jfield[2]->const_array(mfi);
+        Array4<Real const> const& Jx = curlB_x_mf.const_array(mfi);
+        Array4<Real const> const& Jy = curlB_y_mf.const_array(mfi);
+        Array4<Real const> const& Jz = curlB_z_mf.const_array(mfi);
         Array4<Real const> const& Bx = Bfield[0]->const_array(mfi);
         Array4<Real const> const& By = Bfield[1]->const_array(mfi);
         Array4<Real const> const& Bz = Bfield[2]->const_array(mfi);
