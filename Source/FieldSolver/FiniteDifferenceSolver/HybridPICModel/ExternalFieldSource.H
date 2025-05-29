@@ -83,7 +83,7 @@ public:
     ExternalFieldSource();
 
     /** \brief Adds the contribution of user-defined external field-excitation
-     *   to Efield, Bfield, and also Hfield if `USE_LLG=TRUE`.
+     *   to Efield and Bfield.
      *   Two types of excitation are supported, namely, hard source and soft source.
      *   An excitation is called hard source if the field value is set exactly equal
      *   to the excitation (similar to a Dirichlet boundary) (field = excitation).
