@@ -668,7 +668,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
 
     enE_nodal_mf.setVal(0.);
 
-    // reset Jfield
+    // Set Jfield = 0. Calculate Jfield = (curl x B) / mu0 on Yee grid, then interpolate it to nodal grid and use it to calculate enE_nodal = (curl x B) x B / mu0
     Jfield[0]->setVal(0);
     Jfield[1]->setVal(0);
     Jfield[2]->setVal(0);
