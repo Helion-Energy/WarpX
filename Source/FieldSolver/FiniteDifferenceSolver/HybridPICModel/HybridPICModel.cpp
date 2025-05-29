@@ -679,18 +679,18 @@ void HybridPICModel::EvolveEBFieldsDisplacement (
     auto* const electron_pressure_fp = warpx.m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
 
     // Calculate J = curl x B / mu0
-    CalculatePlasmaCurrent(Bfield,eb_update_E);
-    warpx.ApplyJfieldBoundary(
-        lev,
-        current_fp_plasma[0],
-        current_fp_plasma[1],
-        current_fp_plasma[2],
-        PatchType::fine
-        );
-    current_fp_plasma[0]->FillBoundary(warpx.Geom(lev).periodicity());
-    current_fp_plasma[1]->FillBoundary(warpx.Geom(lev).periodicity());
-    current_fp_plasma[2]->FillBoundary(warpx.Geom(lev).periodicity());
-
+//    CalculatePlasmaCurrent(Bfield,eb_update_E);
+//    warpx.ApplyJfieldBoundary(
+//        lev,
+//        current_fp_plasma[0],
+//        current_fp_plasma[1],
+//        current_fp_plasma[2],
+//        PatchType::fine
+//        );
+//    current_fp_plasma[0]->FillBoundary(warpx.Geom(lev).periodicity());
+//    current_fp_plasma[1]->FillBoundary(warpx.Geom(lev).periodicity());
+//    current_fp_plasma[2]->FillBoundary(warpx.Geom(lev).periodicity());
+//
     ablastr::fields::VectorField current_fp_external = warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_external, lev);
     
     // Solve E field in regular cells
