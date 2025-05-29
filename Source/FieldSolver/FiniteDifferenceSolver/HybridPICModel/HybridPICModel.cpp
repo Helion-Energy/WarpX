@@ -24,7 +24,6 @@ using warpx::fields::FieldType;
 HybridPICModel::HybridPICModel ()
 {
     ReadParameters();
-    m_external_field_source = std::make_unique<ExternalFieldSource>();
 }
 
 
@@ -77,6 +76,12 @@ void HybridPICModel::ReadParameters ()
 
     if (m_add_external_fields) {
         m_external_vector_potential = std::make_unique<ExternalVectorPotential>();
+    }
+
+    //source excitation
+    pp_hybrid.query("add_external_source", m_add_external_source);
+    if (m_add_external_source) {
+        m_external_field_source = std::make_unique<ExternalFieldSource>();
     }
 }
 
@@ -618,6 +623,7 @@ void HybridPICModel::FieldPush (
     // Push forward the B-field using Faraday's law
     warpx.EvolveB(dt, dt_type, t_old);
     warpx.FillBoundaryB(ng, nodal_sync);
+
 }
 
 void HybridPICModel::EvolveEBFieldsDisplacement (
@@ -653,7 +659,7 @@ void HybridPICModel::EvolveEBFieldsDisplacement (
     // Push forward the B-field first half time step using Faraday's law
     amrex::Real const t_old = warpx.gett_old(0);
    
-    if(t_old == dt){
+    if(m_add_external_source && t_old == 0.0){
        amrex::Print() << "ApplyExternalFieldExcitationOnGrid at t = " << t_old << "\n";
        m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::Full,
                                                             /*apply_E=*/true,
@@ -663,10 +669,11 @@ void HybridPICModel::EvolveEBFieldsDisplacement (
     warpx.EvolveB(lev, 0.5*dt, DtType::FirstHalf, t_old);
     warpx.ApplyBfieldBoundary(lev, PatchType::fine, DtType::FirstHalf, t_old);
     warpx.FillBoundaryB(lev, ng, nodal_sync);
-    //m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::FirstHalf); //Add soft source B first half step
-    m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::FirstHalf,
-                                                            /*apply_E=*/false,
-                                                            /*apply_B=*/true);
+    
+    //Add soft source B first half step
+    if(m_add_external_source){
+	    m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::FirstHalf, /*apply_E=*/false, /*apply_B=*/true);
+    }
 
     ablastr::fields::VectorField current_fp_plasma = warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
     auto* const electron_pressure_fp = warpx.m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
@@ -693,21 +700,25 @@ void HybridPICModel::EvolveEBFieldsDisplacement (
         *electron_pressure_fp,
         eb_update_E[lev], dt, lev, this, true
     );
+    
+    // warpx.EvolveE(dt, t_old); // Test source excitation using EvolveE of the FDTD solver. Need to allow m_fdtd_algo == ElectromagneticSolverAlgo::hybrid to use EvolveE in EvolveE.cpp
     warpx.ApplyEfieldBoundary(lev, PatchType::fine, t_old);
     warpx.FillBoundaryE(lev, ng, nodal_sync);
-    //m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::Full); //Add soft source E
-    m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::Full,
-                                                            /*apply_E=*/true,
-                                                            /*apply_B=*/false);
+    
+    //Add soft source E
+    if(m_add_external_source){
+       m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::Full, /*apply_E=*/true, /*apply_B=*/false);
+    }
 
     // Push forward the B-field second half time step using Faraday's law
     warpx.EvolveB(lev, 0.5*dt, DtType::SecondHalf, t_old);
     warpx.ApplyBfieldBoundary(lev, PatchType::fine, DtType::SecondHalf, t_old);
     warpx.FillBoundaryB(ng, nodal_sync);
-    //m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::SecondHalf); //Add soft source B second half step
-    m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::SecondHalf,
-                                                            /*apply_E=*/false,
-                                                            /*apply_B=*/true);
+
+    //Add soft source B second half step
+    if(m_add_external_source){
+       m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::SecondHalf, /*apply_E=*/false, /*apply_B=*/true);
+    }
 
     // Calculate J = curl x B / mu0
     CalculatePlasmaCurrent(Bfield,eb_update_E);
@@ -721,4 +732,5 @@ void HybridPICModel::EvolveEBFieldsDisplacement (
     current_fp_plasma[0]->FillBoundary(warpx.Geom(lev).periodicity());
     current_fp_plasma[1]->FillBoundary(warpx.Geom(lev).periodicity());
     current_fp_plasma[2]->FillBoundary(warpx.Geom(lev).periodicity());
+
 }

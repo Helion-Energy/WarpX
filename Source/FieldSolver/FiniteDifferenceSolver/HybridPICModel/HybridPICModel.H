@@ -242,6 +242,7 @@ public:
     std::unique_ptr<ExternalVectorPotential> m_external_vector_potential;
 
     /** External E/B field source*/
+    bool m_add_external_source = false;
     std::unique_ptr<ExternalFieldSource> m_external_field_source;
 
     /** Gpu Vector with index type of the Jx multifab */

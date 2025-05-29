@@ -404,7 +404,7 @@ WarpX::WarpX ()
         m_hybrid_pic_model = std::make_unique<HybridPICModel>();
     }
 
-   // m_external_field_source = std::make_unique<ExternalFieldSource>();
+//    m_external_field_source = std::make_unique<ExternalFieldSource>();
 
     current_buffer_masks.resize(nlevs_max);
     gather_buffer_masks.resize(nlevs_max);

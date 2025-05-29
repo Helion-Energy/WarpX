@@ -2,7 +2,7 @@
  *
  * This file is part of WarpX.
  *
- * Authors: Your Name (Your Institution)
+ * Authors: Prabhat Kumar (Helion Energy Inc)
  *
  * License: BSD-3-Clause-LBNL
  */

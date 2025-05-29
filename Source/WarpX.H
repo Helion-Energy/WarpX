@@ -21,9 +21,9 @@
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver_fwd.H"
 #include "FieldSolver/FiniteDifferenceSolver/MacroscopicProperties/MacroscopicProperties_fwd.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel_fwd.H"
-/*
-#include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/ExternalFieldSource.H"
-*/
+
+//#include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/ExternalFieldSource.H"
+
 #include "Filter/NCIGodfreyFilter_fwd.H"
 #include "Initialization/ExternalField_fwd.H"
 #include "Particles/ParticleBoundaryBuffer_fwd.H"
@@ -92,7 +92,7 @@ public:
     static WarpX& GetInstance ();
 
     static void ResetInstance ();
-    //std::unique_ptr<ExternalFieldSource> m_external_field_source;
+//    std::unique_ptr<ExternalFieldSource> m_external_field_source;
 
 
 

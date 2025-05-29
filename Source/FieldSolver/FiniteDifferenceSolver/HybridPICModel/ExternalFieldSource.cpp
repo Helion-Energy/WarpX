@@ -1,3 +1,11 @@
+/* Copyright 2025 The WarpX Community
+ *
+ * This file is part of WarpX.
+ *
+ * Authors: Prabhat Kumar (Helion Energy Inc)
+ *
+ * License: BSD-3-Clause-LBNL
+ */
 #include "WarpX.H"
 #include "Fields.H"
 #include "ExternalFieldSource.H"
@@ -92,7 +100,6 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
        const int lev, DtType a_dt_type )
 {
 
-    //amrex::Print() << "ApplyExternalFieldExcitationOnGrid is called. field = " << static_cast<int>(field) << "\n"; 
 
     auto &warpx = WarpX::GetInstance();
     auto const &geom = warpx.Geom(lev);
@@ -136,6 +143,9 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
     if (a_dt_type == DtType::FirstHalf or a_dt_type == DtType::SecondHalf ) {
         dt_type_flag = 1;
     }
+
+//    amrex::Print() << "ApplyExternalFieldExcitationOnGrid is called. field = " << static_cast<int>(field) << ", DtType = " << dt_type_flag <<"\n"; 
+
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (Gpu::notInLaunchRegion())
 #endif

@@ -666,6 +666,8 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
     nabla2_J_y_mf.setVal(0.);
     nabla2_J_z_mf.setVal(0.);
 
+    enE_nodal_mf.setVal(0.);
+
     // Loop through the grids, and over the tiles within each grid for the
     // initial, nodal calculation of E
 #ifdef AMREX_USE_OMP
@@ -725,6 +727,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
             );
         });
 
+
         if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
         {
             amrex::Gpu::synchronize();
@@ -732,6 +735,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
             amrex::HostDevice::Atomic::Add( &(*cost)[mfi.index()], wt);
         }
     }
+
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -917,9 +921,13 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
                 }
 
                 // Include explicit terms for displacement current
-                Jtilde_x -= 0.5_rt * rho_val - PhysConst::ep0 / dt * (eta_val*Exo + Bz_val*Eyo - By_val*Ezo); 
-                Jtilde_y += PhysConst::ep0 / dt * (eta_val*Eyo - Bz_val*Exo + Bx_val*Ezo);
-                Jtilde_z += PhysConst::ep0 / dt * (eta_val*Ezo + By_val*Exo - Bx_val*Eyo);
+                //Jtilde_x -= 0.5_rt * rho_val - PhysConst::ep0 / dt * (eta_val*Exo + Bz_val*Eyo - By_val*Ezo); 
+                //Jtilde_y += PhysConst::ep0 / dt * (eta_val*Eyo - Bz_val*Exo + Bx_val*Ezo);
+                //Jtilde_z += PhysConst::ep0 / dt * (eta_val*Ezo + By_val*Exo - Bx_val*Eyo);
+
+                Jtilde_x -= PhysConst::ep0 / dt * (-rho_val*eta_val*Exo - Bz_val*Eyo + By_val*Ezo) + 0.5_rt * rho_val * Exo; 
+                Jtilde_y -= PhysConst::ep0 / dt * (Bz_val*Exo - rho_val*eta_val*Eyo -  Bx_val*Ezo) + 0.5_rt * rho_val * Eyo;
+                Jtilde_z -= PhysConst::ep0 / dt * (-By_val*Exo + Bx_val*Eyo - rho_val*eta_val*Ezo) + 0.5_rt * rho_val * Ezo;
 
                 // Calculate inverse for semi-implicit advance
                 Real bx = PhysConst::ep0 * Bx_val / dt;
@@ -933,6 +941,13 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
                     + (bx*by - d*bz) * Jtilde_y
                     + (bx*bz + d*by) * Jtilde_z
                     );
+//        	if(std::isnan(Ex(i,j,k))){
+//        	if(i == 0 && j == 0 && Ex(i,j,k) != 0.0){
+//        	if(i == 0 && j == 0 && (k == 120 || k == 121)){
+//                     amrex::Print()<< "Ex("<< i << "," << j << ", " << k << ") = " << Ex(i, j, k) << ", Jtilde_x = " << Jtilde_x << ", Jtilde_y = " << Jtilde_x << ", Jtilde_z = " << Jtilde_z << std::endl;
+//		     amrex::Print() << "d = " << d << ", bx = " << bx << ", by = " << by << ", bz = " << bz << std::endl;
+//                }
+	
             },
 
             // Ey calculation
@@ -998,9 +1013,13 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
                 }
 
                 // Include explicit terms for displacement current
-                Jtilde_x += PhysConst::ep0 / dt * (eta_val*Exo + Bz_val*Eyo - By_val*Ezo); 
-                Jtilde_y -= 0.5_rt * rho_val - PhysConst::ep0 / dt * (eta_val*Eyo - Bz_val*Exo + Bx_val*Ezo);
-                Jtilde_z += PhysConst::ep0 / dt * (eta_val*Ezo + By_val*Exo - Bx_val*Eyo);
+                //Jtilde_x += PhysConst::ep0 / dt * (eta_val*Exo + Bz_val*Eyo - By_val*Ezo); 
+                //Jtilde_y -= 0.5_rt * rho_val - PhysConst::ep0 / dt * (eta_val*Eyo - Bz_val*Exo + Bx_val*Ezo);
+                //Jtilde_z += PhysConst::ep0 / dt * (eta_val*Ezo + By_val*Exo - Bx_val*Eyo);
+
+                Jtilde_x -= PhysConst::ep0 / dt * (-rho_val*eta_val*Exo - Bz_val*Eyo + By_val*Ezo) + 0.5_rt * rho_val * Exo; 
+                Jtilde_y -= PhysConst::ep0 / dt * (Bz_val*Exo - rho_val*eta_val*Eyo -  Bx_val*Ezo) + 0.5_rt * rho_val * Eyo;
+                Jtilde_z -= PhysConst::ep0 / dt * (-By_val*Exo + Bx_val*Eyo - rho_val*eta_val*Ezo) + 0.5_rt * rho_val * Ezo;
 
                 // Calculate inverse for semi-implicit advance
                 Real bx = PhysConst::ep0 * Bx_val / dt;
@@ -1079,9 +1098,13 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
                 }
 
                 // Include explicit terms for displacement current
-                Jtilde_x += PhysConst::ep0 / dt * (eta_val*Exo + Bz_val*Eyo - By_val*Ezo); 
-                Jtilde_y += PhysConst::ep0 / dt * (eta_val*Eyo - Bz_val*Exo + Bx_val*Ezo);
-                Jtilde_z -= 0.5_rt * rho_val - PhysConst::ep0 / dt * (eta_val*Ezo + By_val*Exo - Bx_val*Eyo);
+                //Jtilde_x += PhysConst::ep0 / dt * (eta_val*Exo + Bz_val*Eyo - By_val*Ezo); 
+                //Jtilde_y += PhysConst::ep0 / dt * (eta_val*Eyo - Bz_val*Exo + Bx_val*Ezo);
+                //Jtilde_z -= 0.5_rt * rho_val - PhysConst::ep0 / dt * (eta_val*Ezo + By_val*Exo - Bx_val*Eyo);
+
+                Jtilde_x -= PhysConst::ep0 / dt * (-rho_val*eta_val*Exo - Bz_val*Eyo + By_val*Ezo) + 0.5_rt * rho_val * Exo; 
+                Jtilde_y -= PhysConst::ep0 / dt * (Bz_val*Exo - rho_val*eta_val*Eyo -  Bx_val*Ezo) + 0.5_rt * rho_val * Eyo;
+                Jtilde_z -= PhysConst::ep0 / dt * (-By_val*Exo + Bx_val*Eyo - rho_val*eta_val*Ezo) + 0.5_rt * rho_val * Ezo;
 
                 // Calculate inverse for semi-implicit advance
                 Real bx = PhysConst::ep0 * Bx_val / dt;

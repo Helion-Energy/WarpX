@@ -40,6 +40,9 @@ void WarpX::HybridPICEvolveFields ()
     // Get flag to include external fields.
     const bool add_external_fields = m_hybrid_pic_model->m_add_external_fields;
 
+    // Get flag to include external source.
+    const bool add_external_source = m_hybrid_pic_model->m_add_external_source;
+
     // Handle field splitting for Hybrid field push
     if (add_external_fields) {
         // Get the external fields
@@ -174,6 +177,13 @@ void WarpX::HybridPICEvolveFields ()
             0.5_rt*dt[0]);
     }
 
+    //Add soft source E and B
+    //if(include_displacement && add_external_source){
+    //if(add_external_source){
+    //   m_hybrid_pic_model->m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::FirstHalf, /*apply_E=*/false, /*apply_B=*/true);
+    //}
+
+
     // Now push the B field from t=n+1/2 to t=n+1 using the n+1/2 quantities
     for (int sub_step = 0; sub_step < sub_steps; sub_step++)
     {
@@ -203,6 +213,12 @@ void WarpX::HybridPICEvolveFields ()
             );
         }
     }
+
+    //Add soft source E and B
+    //if(include_displacement && add_external_source){
+    //   m_hybrid_pic_model->m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::Full, /*apply_E=*/false, /*apply_B=*/true);
+    //}
+
 
     // Extrapolate the ion current density to t=n+1 using
     // J_i^{n+1} = 1/2 * J_i^{n-1/2} + 3/2 * J_i^{n+1/2}, and recalling that
@@ -263,6 +279,12 @@ void WarpX::HybridPICEvolveFields ()
             }
         }
     }
+
+    //Add soft source E and B
+    //if(include_displacement && add_external_source){
+    //if(add_external_source){
+    //   m_hybrid_pic_model->m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::Full, /*apply_E=*/true, /*apply_B=*/false);
+    //}
 
     // Copy the rho^{n+1} values to rho_fp_temp and the J_i^{n+1/2} values to
     // current_fp_temp since at the next step those values will be needed as
