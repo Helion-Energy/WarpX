@@ -667,7 +667,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
     nabla2_J_z_mf.setVal(0.);
 
     enE_nodal_mf.setVal(0.);
-
+/*
     // Set Jfield = 0. Calculate Jfield = (curl x B) / mu0 on Yee grid, then interpolate it to nodal grid and use it to calculate enE_nodal = (curl x B) x B / mu0
     MultiFab curlB_x_mf(Efield[0]->boxArray(), Efield[0]->DistributionMap(), 1, Efield[0]->nGrowVect());
     MultiFab curlB_y_mf(Efield[1]->boxArray(), Efield[1]->DistributionMap(), 1, Efield[1]->nGrowVect());
@@ -770,6 +770,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
             amrex::HostDevice::Atomic::Add( &(*cost)[mfi.index()], wt);
         }
     }
+*/
 
     // Loop through the grids, and over the tiles within each grid for the
     // initial, nodal calculation of E
@@ -784,31 +785,70 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
         auto wt = static_cast<amrex::Real>(amrex::second());
 
         Array4<Real> const& enE_nodal = enE_nodal_mf.array(mfi);
-        Array4<Real const> const& Jx = curlB_x_mf.const_array(mfi);
-        Array4<Real const> const& Jy = curlB_y_mf.const_array(mfi);
-        Array4<Real const> const& Jz = curlB_z_mf.const_array(mfi);
-        Array4<Real const> const& Bx = Bfield[0]->const_array(mfi);
+        //Array4<Real const> const& Jx = curlB_x_mf.const_array(mfi);
+        //Array4<Real const> const& Jy = curlB_y_mf.const_array(mfi);
+        //Array4<Real const> const& Jz = curlB_z_mf.const_array(mfi);
+        Array4<Real const> const& Jx = Jfield[0]->const_array(mfi);
+        Array4<Real const> const& Jy = Jfield[1]->const_array(mfi);
+        Array4<Real const> const& Jz = Jfield[2]->const_array(mfi);
+        Array4<Real const> const& Jix = Jifield[0]->const_array(mfi);
+        Array4<Real const> const& Jiy = Jifield[1]->const_array(mfi);
+        Array4<Real const> const& Jiz = Jifield[2]->const_array(mfi);
+        Array4<Real const> const& Jextx = Jextfield[0]->const_array(mfi);
+        Array4<Real const> const& Jexty = Jextfield[1]->const_array(mfi);
+        Array4<Real const> const& Jextz = Jextfield[2]->const_array(mfi);
+	Array4<Real const> const& Bx = Bfield[0]->const_array(mfi);
         Array4<Real const> const& By = Bfield[1]->const_array(mfi);
         Array4<Real const> const& Bz = Bfield[2]->const_array(mfi);
 
 	// Loop over the cells and update the nodal E field
         amrex::ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
-            // interpolate the total current to a nodal grid
+            //// interpolate the total current to a nodal grid
+            //auto const jx_interp = Interp(Jx, Jx_stag, nodal, coarsen, i, j, k, 0);
+            //auto const jy_interp = Interp(Jy, Jy_stag, nodal, coarsen, i, j, k, 0);
+            //auto const jz_interp = Interp(Jz, Jz_stag, nodal, coarsen, i, j, k, 0);
+
+            //// interpolate the B field to a nodal grid
+            //auto const Bx_interp = Interp(Bx, Bx_stag, nodal, coarsen, i, j, k, 0);
+            //auto const By_interp = Interp(By, By_stag, nodal, coarsen, i, j, k, 0);
+            //auto const Bz_interp = Interp(Bz, Bz_stag, nodal, coarsen, i, j, k, 0);
+
+            //// calculate enE = J x B
+            //enE_nodal(i, j, k, 0) = jy_interp * Bz_interp - jz_interp * By_interp;
+            //enE_nodal(i, j, k, 1) = jz_interp * Bx_interp - jx_interp * Bz_interp;
+            //enE_nodal(i, j, k, 2) = jx_interp * By_interp - jy_interp * Bx_interp;
+
+            ////if (enE_nodal(i, j, k, 0) != 0.0 && i == 0 && j == 0) amrex::Print()<< "enE_nodal("<< i << "," << j << ", " << k << ") = " << enE_nodal(i, j, k, 0)  << std::endl;
+
+	     // interpolate the total current to a nodal grid
             auto const jx_interp = Interp(Jx, Jx_stag, nodal, coarsen, i, j, k, 0);
             auto const jy_interp = Interp(Jy, Jy_stag, nodal, coarsen, i, j, k, 0);
             auto const jz_interp = Interp(Jz, Jz_stag, nodal, coarsen, i, j, k, 0);
+
+            // interpolate the ion current to a nodal grid
+            auto const jix_interp = Interp(Jix, Jx_stag, nodal, coarsen, i, j, k, 0);
+            auto const jiy_interp = Interp(Jiy, Jy_stag, nodal, coarsen, i, j, k, 0);
+            auto const jiz_interp = Interp(Jiz, Jz_stag, nodal, coarsen, i, j, k, 0);
 
             // interpolate the B field to a nodal grid
             auto const Bx_interp = Interp(Bx, Bx_stag, nodal, coarsen, i, j, k, 0);
             auto const By_interp = Interp(By, By_stag, nodal, coarsen, i, j, k, 0);
             auto const Bz_interp = Interp(Bz, Bz_stag, nodal, coarsen, i, j, k, 0);
 
-            // calculate enE = J x B
-            enE_nodal(i, j, k, 0) = jy_interp * Bz_interp - jz_interp * By_interp;
-            enE_nodal(i, j, k, 1) = jz_interp * Bx_interp - jx_interp * Bz_interp;
-            enE_nodal(i, j, k, 2) = jx_interp * By_interp - jy_interp * Bx_interp;
-
+            // calculate enE = (J - Ji) x B
+            enE_nodal(i, j, k, 0) = (
+                (jy_interp - jiy_interp - Jexty(i, j, k)) * Bz_interp
+                - (jz_interp - jiz_interp - Jextz(i, j, k)) * By_interp
+            );
+            enE_nodal(i, j, k, 1) = (
+                (jz_interp - jiz_interp - Jextz(i, j, k)) * Bx_interp
+                - (jx_interp - jix_interp - Jextx(i, j, k)) * Bz_interp
+            );
+            enE_nodal(i, j, k, 2) = (
+                (jx_interp - jix_interp - Jextx(i, j, k)) * By_interp
+                - (jy_interp - jiy_interp - Jexty(i, j, k)) * Bx_interp
+            );
         });
 
 
@@ -1017,7 +1057,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
                 Real bx = PhysConst::ep0 * Bx_val / dt;
                 Real by = PhysConst::ep0 * By_val / dt;
                 Real bz = PhysConst::ep0 * Bz_val / dt;
-                Real d = 0.5_rt * rho_val + PhysConst::ep0 / dt * eta_val;
+                Real d = 0.5_rt * rho_val + PhysConst::ep0 / dt * rho_val * eta_val;
                 Real coeff = 1.0_rt / (d * (d*d + bx*bx + by*by + bz*bz));
 
                 Ex(i,j,k) = coeff * (
@@ -1109,7 +1149,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
                 Real bx = PhysConst::ep0 * Bx_val / dt;
                 Real by = PhysConst::ep0 * By_val / dt;
                 Real bz = PhysConst::ep0 * Bz_val / dt;
-                Real d = 0.5_rt * rho_val + PhysConst::ep0 / dt * eta_val;
+                Real d = 0.5_rt * rho_val + PhysConst::ep0 / dt * rho_val * eta_val;
                 Real coeff = 1.0_rt / (d * (d*d + bx*bx + by*by + bz*bz));
 
                 Ey(i,j,k) = coeff * (
@@ -1194,7 +1234,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
                 Real bx = PhysConst::ep0 * Bx_val / dt;
                 Real by = PhysConst::ep0 * By_val / dt;
                 Real bz = PhysConst::ep0 * Bz_val / dt;
-                Real d = 0.5_rt * rho_val + PhysConst::ep0 / dt * eta_val;
+                Real d = 0.5_rt * rho_val + PhysConst::ep0 / dt * rho_val * eta_val;
                 Real coeff = 1.0_rt / (d * (d*d + bx*bx + by*by + bz*bz));
 
                 Ez(i,j,k) = coeff * (
