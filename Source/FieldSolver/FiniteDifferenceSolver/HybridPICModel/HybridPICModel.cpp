@@ -79,7 +79,11 @@ void HybridPICModel::ReadParameters ()
     }
 
     //source excitation
-    pp_hybrid.query("add_external_source", m_add_external_source);
+    //pp_hybrid.query("add_external_source", m_add_external_source);
+    utils::parser::queryWithParser(
+        pp_hybrid,
+        "add_external_source", m_add_external_source
+    );
     if (m_add_external_source) {
         m_external_field_source = std::make_unique<ExternalFieldSource>();
     }
