@@ -462,9 +462,9 @@ WarpX::OneStep_nosub (Real cur_time)
         EvolveB(0.5_rt * dt[0], DtType::FirstHalf, cur_time); // We now have B^{n+1/2}
         FillBoundaryB(guard_cells.ng_FieldSolver, WarpX::sync_nodal_points);
 
-//        m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::FirstHalf,
-//                                                            /*apply_E=*/false,
-//                                                            /*apply_B=*/true);
+        m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::FirstHalf,
+                                                            /*apply_E=*/false,
+                                                            /*apply_B=*/true);
 	
         if (m_em_solver_medium == MediumForEM::Vacuum) {
             // vacuum medium
@@ -476,17 +476,17 @@ WarpX::OneStep_nosub (Real cur_time)
             WARPX_ABORT_WITH_MESSAGE("Medium for EM is unknown");
         }
         FillBoundaryE(guard_cells.ng_FieldSolver, WarpX::sync_nodal_points);
-//        m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::Full,
-//                                                            /*apply_E=*/true,
-//                                                            /*apply_B=*/false);
+        m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::Full,
+                                                            /*apply_E=*/true,
+                                                            /*apply_B=*/false);
 	
 
         EvolveF(0.5_rt * dt[0], DtType::SecondHalf);
         EvolveG(0.5_rt * dt[0], DtType::SecondHalf);
         EvolveB(0.5_rt * dt[0], DtType::SecondHalf, cur_time + 0.5_rt * dt[0]); // We now have B^{n+1}
-//        m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::SecondHalf,
-//                                                            /*apply_E=*/false,
-//                                                            /*apply_B=*/true);
+        m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::SecondHalf,
+                                                            /*apply_E=*/false,
+                                                            /*apply_B=*/true);
 	
 
         if (do_pml) {
