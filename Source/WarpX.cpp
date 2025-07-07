@@ -1096,12 +1096,9 @@ WarpX::ReadParameters ()
         if (!do_divb_cleaning
             && m_p_ext_field_params->B_ext_grid_type != ExternalFieldType::default_zero
             && m_p_ext_field_params->B_ext_grid_type != ExternalFieldType::constant
-<<<<<<< HEAD
-=======
 #if defined(WARPX_DIM_RZ)
             && WarpX::grid_type == GridType::Staggered
 #endif
->>>>>>> development
             && (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::Yee
             ||  WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC
             ||  ( (WarpX::electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrame
@@ -3189,11 +3186,7 @@ WarpX::ComputeDivB (amrex::MultiFab& divB, int const dcomp,
         [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
         {
             warpx_computedivb(i, j, k, dcomp, divBfab, Bxfab, Byfab, Bzfab, dxinv, dyinv, dzinv,
-<<<<<<< HEAD
-#ifdef WARPX_DIM_RZ
-=======
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
->>>>>>> development
                               rmin,
 #endif
                               collocated_grid_flag);

@@ -504,7 +504,7 @@ void FiniteDifferenceSolver::HybridPICSolveE (
 #elif defined(WARPX_DIM_RSPHERE)
 
         HybridPICSolveESpherical <SphericalYeeAlgorithm> (
-            Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
+            Efield, Jfield, Jifield, Bfield, rhofield, Pefield, Tefield,
             lev, hybrid_model, solve_for_Faraday
         );
 
@@ -517,7 +517,7 @@ void FiniteDifferenceSolver::HybridPICSolveE (
         );
     } else {
         HybridPICSolveECartesian <CartesianNodalAlgorithm> (
-            Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
+            Efield, Jfield, Jifield, Bfield, rhofield, Pefield, Tefield,
             eb_update_E, lev, hybrid_model, solve_for_Faraday
         );
     }
@@ -1011,7 +1011,7 @@ void FiniteDifferenceSolver::HybridPICSolveESpherical (
     int /*lev*/, HybridPICModel const* /*hybrid_model*/,
     const bool /*solve_for_Faraday*/ )
 {
-    WARPX_ABORT_WITH_MESSAGE("HybridPICSolveESphrical not fully implemented");
+    WARPX_ABORT_WITH_MESSAGE("HybridPICSolveESpherical not fully implemented");
 }
 #else
 
@@ -1249,19 +1249,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
 
                 Ex(i, j, k) = (enE_x - grad_Pe) / rho_val_limited;
-
-                // Interpolate Te to get the appropiate temperature in space
-                Real Te_val = 0_rt;
-                if(resistivity_has_Te_dependence) {
-                    if(solve_electron_energy_equation){
-                        Te_val = Interp(Te, nodal, Ex_stag, coarsen, i, j, k, 0);
-                    }
-                    // if the electron energy equation is not solved
-                    // Te is calculated using adiabatic relationship
-                    else{
-                        Te_val = Te0*std::pow(rho_val/rho_n0_ref,gamma_val-1);
-                    }
-                }
+            }
 
             // Add resistivity only if E field value is used to update B
             if (solve_for_Faraday) {
@@ -1272,6 +1260,20 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     const Real jy_val = Interp(Jy, Jy_stag, Ex_stag, coarsen, i, j, k, 0);
                     const Real jz_val = Interp(Jz, Jz_stag, Ex_stag, coarsen, i, j, k, 0);
                     jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
+                }
+
+                // Interpolate Te to get the appropiate temperature in space
+                Real Te_val = 0_rt;
+                if(resistivity_has_Te_dependence) {
+                    if(solve_electron_energy_equation){
+                        Te_val = Interp(Te, nodal, Ex_stag, coarsen, i, j, k, 0);
+                    }
+                    // if the electron energy equation is not solved
+                    // Te is calculated using adiabatic relationship
+                    else
+                    {
+                        Te_val = Te0*std::pow(rho_val/rho_n0_ref,gamma_val-1);
+                    }
                 }
 
                 Ex(i, j, k) += eta(rho_val, jtot_val, Te_val) * Jx(i, j, k);
@@ -1325,6 +1327,18 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
 
                 Ey(i, j, k) = (enE_y - grad_Pe) / rho_val_limited;
+            }
+
+            // Add resistivity only if E field value is used to update B
+            if (solve_for_Faraday) {
+                Real jtot_val = 0._rt;
+                if (resistivity_has_J_dependence) {
+                    // Interpolate current to appropriate staggering to match E field
+                    const Real jx_val = Interp(Jx, Jx_stag, Ey_stag, coarsen, i, j, k, 0);
+                    const Real jy_val = Jy(i, j, k);
+                    const Real jz_val = Interp(Jz, Jz_stag, Ey_stag, coarsen, i, j, k, 0);
+                    jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
+                }
 
                 // Interpolate Te to get the appropiate temperature in space
                 Real Te_val = 0_rt;
@@ -1337,17 +1351,6 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     else{
                         Te_val = Te0*std::pow(rho_val/rho_n0_ref,gamma_val-1);
                     }
-                }
-
-            // Add resistivity only if E field value is used to update B
-            if (solve_for_Faraday) {
-                Real jtot_val = 0._rt;
-                if (resistivity_has_J_dependence) {
-                    // Interpolate current to appropriate staggering to match E field
-                    const Real jx_val = Interp(Jx, Jx_stag, Ey_stag, coarsen, i, j, k, 0);
-                    const Real jy_val = Jy(i, j, k);
-                    const Real jz_val = Interp(Jz, Jz_stag, Ey_stag, coarsen, i, j, k, 0);
-                    jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
                 }
 
                 Ey(i, j, k) += eta(rho_val, jtot_val, Te_val) * Jy(i, j, k);
@@ -1401,6 +1404,18 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
 
                 Ez(i, j, k) = (enE_z - grad_Pe) / rho_val_limited;
+            }
+
+            // Add resistivity only if E field value is used to update B
+            if (solve_for_Faraday) {
+                Real jtot_val = 0._rt;
+                if (resistivity_has_J_dependence) {
+                    // Interpolate current to appropriate staggering to match E field
+                    const Real jx_val = Interp(Jx, Jx_stag, Ez_stag, coarsen, i, j, k, 0);
+                    const Real jy_val = Interp(Jy, Jy_stag, Ez_stag, coarsen, i, j, k, 0);
+                    const Real jz_val = Jz(i, j, k);
+                    jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
+                }
 
                 // Interpolate Te to get the appropiate temperature in space
                 Real Te_val = 0_rt;
@@ -1413,17 +1428,6 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     else{
                         Te_val = Te0*std::pow(rho_val/rho_n0_ref,gamma_val-1);
                     }
-                }
-
-            // Add resistivity only if E field value is used to update B
-            if (solve_for_Faraday) {
-                Real jtot_val = 0._rt;
-                if (resistivity_has_J_dependence) {
-                    // Interpolate current to appropriate staggering to match E field
-                    const Real jx_val = Interp(Jx, Jx_stag, Ez_stag, coarsen, i, j, k, 0);
-                    const Real jy_val = Interp(Jy, Jy_stag, Ez_stag, coarsen, i, j, k, 0);
-                    const Real jz_val = Jz(i, j, k);
-                    jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
                 }
 
                 Ez(i, j, k) += eta(rho_val, jtot_val, Te_val) * Jz(i, j, k);
