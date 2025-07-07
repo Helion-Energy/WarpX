@@ -170,14 +170,13 @@ public:
                     amrex::Real dt, amrex::Real relative_time);
 
     /**
-     * \brief Deposit temperatures to species MFs. This is done for each
+     * \brief Deposit temperature to species MFs. This is done for each
      *        species and can be used in the future for a single pass update of rho, J, and T.
      *
-     * \param[in,out] fields Multifab field register to grab Temeprature MFs
-     * \param[in] dt Time step for particle level
-     * \param[in] relative_time Time at which to deposit velocities, rel
-     *                          current positions of the partic
-     *                          the particle position will be at
+     * \param[in,out] fields Multifab field register to grab Temperature MFs
+     * \param[in] relative_time Time at which to deposit velocities, relative to the time of the
+     *                          current positions of the particles. When different than 0,
+     *                          the particle position will be temporarily modified to match
      *                          the time of the deposition.
      */
     void
@@ -195,7 +194,7 @@ public:
                             const amrex::MultiFab& Ex, const amrex::MultiFab& Ey, const amrex::MultiFab& Ez,
                             const amrex::MultiFab& Bx, const amrex::MultiFab& By, const amrex::MultiFab& Bz);
 
-    void doCollisions (amrex::Real cur_time, amrex::Real dt);
+    void doCollisions (int step, amrex::Real cur_time, amrex::Real dt);
 
     /**
     * \brief This function loops over all species and performs resampling if appropriate.
@@ -327,8 +326,6 @@ public:
         tmp.insert(tmp.end(), lasers_names.begin(), lasers_names.end());
         return tmp;
     }
-
-    PhysicalParticleContainer& GetPCtmp () { return *pc_tmp; }
 
     void ScrapeParticlesAtEB (ablastr::fields::MultiLevelScalarField const& distance_to_eb);
 
@@ -526,8 +523,6 @@ private:
 
     // physical particles (+ laser)
     amrex::Vector<std::unique_ptr<WarpXParticleContainer>> allcontainers;
-    // Temporary particle container, used e.g. for particle splitting.
-    std::unique_ptr<PhysicalParticleContainer> pc_tmp;
 
     void ReadParameters ();
 

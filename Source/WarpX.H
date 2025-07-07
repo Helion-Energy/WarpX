@@ -137,15 +137,7 @@ public:
     //
     // Functions used by implicit solvers
     //
-    void ImplicitPreRHSOp ( amrex::Real cur_time,
-                            amrex::Real a_theta,
-                            amrex::Real a_full_dt,
-                            int         a_nl_iter,
-                            bool        a_from_jacobian,
-                            bool        a_use_mass_matrices );
-    void SyncMassMatricesAndApplyBCs ();
-    void SyncMassMatrices ();
-    void SetMassMatricesForPC ( amrex::Real a_theta_dt );
+    void SyncMassMatricesPC ();
     void SaveParticlesAtImplicitStepStart ();
     void FinishImplicitParticleUpdate ();
     void SetElectricFieldAndApplyBCs ( const WarpXSolverVec& a_E, amrex::Real a_time );
@@ -292,6 +284,9 @@ public:
     static int noy;
     //! Order of the particle shape factors (splines) along z
     static int noz;
+
+    //! Maximum number of allowed grid crossings for particles
+    static int particle_max_grid_crossings;
 
     //! Order of finite centering of fields (from staggered grid to nodal grid), along x
     static int field_centering_nox;
@@ -514,7 +509,15 @@ public:
      * deposits the initial ion charge and current (before the first particle
      * push), to be used in the ``HybridPICEvolveFields()`` function.
      */
-    void HybridPICDepositInitialRhoAndJ ();
+    void HybridPICInitializeRhoJandB ();
+
+    /**
+     * \brief Hybrid-PIC deposition function.
+     * Helper function to contain all the needed logic to deposit charge and
+     * current densities for use in the Ohm's law solver. The deposition is
+     * done into the ``rho_fp`` and ``current_fp`` multifabs.
+     */
+    void HybridPICDepositRhoAndJ ();
 
     /** apply QED correction on electric field
      *
@@ -586,7 +589,7 @@ public:
      */
     void DampFieldsInGuards (int lev, amrex::MultiFab* mf);
 
-#ifdef WARPX_DIM_RZ
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     void ApplyInverseVolumeScalingToCurrentDensity(amrex::MultiFab* Jx,
                                                    amrex::MultiFab* Jy,
                                                    amrex::MultiFab* Jz,
@@ -616,7 +619,7 @@ public:
     void ApplyEfieldBoundary (int lev, PatchType patch_type, amrex::Real cur_time);
     void ApplyBfieldBoundary (int lev, PatchType patch_type, DtType dt_type, amrex::Real cur_time);
 
-#ifdef WARPX_DIM_RZ
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     // Applies the boundary conditions that are specific to the axis when in RZ.
     void ApplyFieldBoundaryOnAxis (amrex::MultiFab* Er, amrex::MultiFab* Et, amrex::MultiFab* Ez, int lev) const;
 #endif
@@ -891,6 +894,15 @@ public:
 
     void ApplyFilterandSumBoundaryRho (int lev, int glev, amrex::MultiFab& rho, int icomp, int ncomp);
 
+    void ApplyFilterMF (
+        const ablastr::fields::MultiLevelVectorField& mfvec,
+        int lev,
+        int idim);
+
+    void ApplyFilterMF (
+        const ablastr::fields::MultiLevelVectorField& mfvec,
+        int lev);
+
     // Device vectors of stencil coefficients used for finite-order centering of fields
     amrex::Gpu::DeviceVector<amrex::Real> device_field_centering_stencil_coeffs_x;
     amrex::Gpu::DeviceVector<amrex::Real> device_field_centering_stencil_coeffs_y;
@@ -924,10 +936,6 @@ public:
     */
     void ComputeDistanceToEB ();
     /**
-    * \brief Auxiliary function to count the amount of faces which still need to be extended
-    */
-    amrex::Array1D<int, 0, 2> CountExtFaces();
-    /**
     * \brief Main function computing the cell extension. Where possible it computes one-way
     *       extensions and, when this is not possible, it does eight-ways extensions.
     */
@@ -957,6 +965,7 @@ public:
 
     // Field container
     ablastr::fields::MultiFabRegister m_fields;
+    ablastr::fields::MultiFabRegister& GetMultiFabRegister() {return m_fields;}
 
 protected:
 
@@ -1069,13 +1078,6 @@ private:
     void RestoreCurrent (int lev);
 
     public:
-    void ApplyFilterMF (
-        const ablastr::fields::MultiLevelVectorField& mfvec,
-        int lev,
-        int idim);
-    void ApplyFilterMF (
-        const ablastr::fields::MultiLevelVectorField& mfvec,
-        int lev);
 
     private:
     void SumBoundaryJ (
@@ -1348,6 +1350,7 @@ private:
 
     // Other runtime parameters
     int verbose = 1;
+    bool m_limit_verbose_step = false;
 
     bool use_hybrid_QED = false;
 
@@ -1416,7 +1419,7 @@ private:
 
     //! Solve Poisson equation when loading an external magnetic field to clean divergence
     //! This is useful to remove errors that could lead to non-zero B field divergence
-    bool m_do_divb_cleaning_external = false;
+    bool m_do_initial_div_cleaning = false;
 
     //! Domain decomposition on Level 0
     amrex::IntVect numprocs{0};

@@ -70,6 +70,11 @@ protected:
     std::string m_field_name;
     ablastr::utils::enums::GridType m_grid_type;
 
+<<<<<<< HEAD
+=======
+    bool m_vector_potential;
+
+>>>>>>> development
 private:
     // Helper template for executing the MLMG solver with cell and node based solvers
     template <typename T>
@@ -95,7 +100,11 @@ private:
         mlmg.setBottomSolver(m_bottom_solver);
         mlmg.setVerbose(m_verbose);
         mlmg.setBottomVerbose(m_bottom_verbose);
+<<<<<<< HEAD
         mlmg.setAlwaysUseBNorm(false);
+=======
+        mlmg.setConvergenceNormType(amrex::MLMGNormType::greater);
+>>>>>>> development
         mlmg.solve({m_solution[lev].get()}, {m_source[lev].get()}, m_rtol, m_atol);
     }
 
@@ -104,19 +113,15 @@ public:
     amrex::Vector< std::unique_ptr<amrex::MultiFab> > m_source;
 
     amrex::Vector<amrex::Real> m_h_stencil_coefs_x;
-#if !defined(WARPX_DIM_RZ)
     amrex::Vector<amrex::Real> m_h_stencil_coefs_y;
-#endif
     amrex::Vector<amrex::Real> m_h_stencil_coefs_z;
 
     amrex::Gpu::DeviceVector<amrex::Real> m_stencil_coefs_x;
-#if !defined(WARPX_DIM_RZ)
     amrex::Gpu::DeviceVector<amrex::Real> m_stencil_coefs_y;
-#endif
     amrex::Gpu::DeviceVector<amrex::Real> m_stencil_coefs_z;
 
     // Default Constructor
-    ProjectionDivCleaner (std::string const& a_field_name);
+    ProjectionDivCleaner (std::string const& a_field_name, bool a_vector_potential=false);
 
     void ReadParameters ();
 

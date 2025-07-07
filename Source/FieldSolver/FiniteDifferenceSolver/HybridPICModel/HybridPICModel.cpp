@@ -14,6 +14,8 @@
 
 #include <ablastr/utils/Communication.H>
 
+#include <ablastr/utils/Communication.H>
+
 #include "EmbeddedBoundary/Enabled.H"
 #include "Python/callbacks.H"
 #include "Fields.H"
@@ -41,7 +43,7 @@ void HybridPICModel::ReadParameters ()
 
     // The hybrid model requires an electron temperature, reference density
     // and exponent to be given. These values will be used to calculate the
-    // electron pressure according to p = n0 * kb * Te * (n/n0)^gamma if the 
+    // electron pressure according to p = n0 * kb * Te * (n/n0)^gamma if the
     // electron energy equation is not solved
     utils::parser::queryWithParser(pp_hybrid, "gamma", m_gamma);
     if (!utils::parser::queryWithParser(pp_hybrid, "elec_temp", m_elec_temp)) {

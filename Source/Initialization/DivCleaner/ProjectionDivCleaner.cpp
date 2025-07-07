@@ -14,11 +14,13 @@
 #include <AMReX_MultiFabUtil.H>
 
 #include <WarpX.H>
-#if defined WARPX_DIM_RZ
-#include <FieldSolver/FiniteDifferenceSolver/FiniteDifferenceAlgorithms/CylindricalYeeAlgorithm.H>
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+    #include <FieldSolver/FiniteDifferenceSolver/FiniteDifferenceAlgorithms/CylindricalYeeAlgorithm.H>
+#elif defined(WARPX_DIM_RSPHERE)
+    #include <FieldSolver/FiniteDifferenceSolver/FiniteDifferenceAlgorithms/SphericalYeeAlgorithm.H>
 #else
-#include <FieldSolver/FiniteDifferenceSolver/FiniteDifferenceAlgorithms/CartesianYeeAlgorithm.H>
-#include <FieldSolver/FiniteDifferenceSolver/FiniteDifferenceAlgorithms/CartesianNodalAlgorithm.H>
+    #include <FieldSolver/FiniteDifferenceSolver/FiniteDifferenceAlgorithms/CartesianYeeAlgorithm.H>
+    #include <FieldSolver/FiniteDifferenceSolver/FiniteDifferenceAlgorithms/CartesianNodalAlgorithm.H>
 #endif
 #include "Fields.H"
 #include <Initialization/ExternalField.H>
@@ -31,8 +33,8 @@ using namespace amrex;
 
 namespace warpx::initialization {
 
-ProjectionDivCleaner::ProjectionDivCleaner(std::string const& a_field_name) :
-    m_field_name(a_field_name)
+ProjectionDivCleaner::ProjectionDivCleaner(std::string const& a_field_name, bool a_vector_potential) :
+    m_field_name(a_field_name), m_vector_potential(a_vector_potential)
 {
     using ablastr::fields::Direction;
     ReadParameters();
@@ -55,7 +57,7 @@ ProjectionDivCleaner::ProjectionDivCleaner(std::string const& a_field_name) :
     auto const& ng = warpx.m_fields.get(m_field_name, Direction{0}, 0)->nGrowVect();
 
     IntVect nodal_flag{};
-    if (m_grid_type == GridType::Collocated) {
+    if (m_grid_type == GridType::Collocated || m_vector_potential) {
         nodal_flag = IntVect::TheNodeVector();
     } else {
         nodal_flag = IntVect::TheCellVector();
@@ -83,11 +85,14 @@ ProjectionDivCleaner::ProjectionDivCleaner(std::string const& a_field_name) :
     }
 
     auto cell_size = WarpX::CellSize(0);
-#if defined(WARPX_DIM_RZ)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
     CylindricalYeeAlgorithm::InitializeStencilCoefficients( cell_size,
         m_h_stencil_coefs_x, m_h_stencil_coefs_z );
+#elif defined(WARPX_DIM_RSPHERE)
+    SphericalYeeAlgorithm::InitializeStencilCoefficients( cell_size,
+        m_h_stencil_coefs_x );
 #else
-    if (warpx.grid_type == GridType::Collocated) {
+    if (m_grid_type == GridType::Collocated) {
         CartesianNodalAlgorithm::InitializeStencilCoefficients( cell_size,
             m_h_stencil_coefs_x, m_h_stencil_coefs_y, m_h_stencil_coefs_z );
     } else {
@@ -96,24 +101,25 @@ ProjectionDivCleaner::ProjectionDivCleaner(std::string const& a_field_name) :
     }
 #endif
 
-    m_stencil_coefs_x.resize(m_h_stencil_coefs_x.size());
-#if !defined(WARPX_DIM_RZ)
-    m_stencil_coefs_y.resize(m_h_stencil_coefs_y.size());
-#endif
-    m_stencil_coefs_z.resize(m_h_stencil_coefs_z.size());
-
-    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
-                          m_h_stencil_coefs_x.begin(), m_h_stencil_coefs_x.end(),
-                          m_stencil_coefs_x.begin());
-#if !defined(WARPX_DIM_RZ)
-    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
-                          m_h_stencil_coefs_y.begin(), m_h_stencil_coefs_y.end(),
-                          m_stencil_coefs_y.begin());
-#endif
-    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
-                          m_h_stencil_coefs_z.begin(), m_h_stencil_coefs_z.end(),
-                          m_stencil_coefs_z.begin());
-    amrex::Gpu::streamSynchronize();
+    if (!m_h_stencil_coefs_x.empty()) {
+        m_stencil_coefs_x.resize(m_h_stencil_coefs_x.size());
+        amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
+                              m_h_stencil_coefs_x.begin(), m_h_stencil_coefs_x.end(),
+                              m_stencil_coefs_x.begin());
+    }
+    if (!m_h_stencil_coefs_y.empty()) {
+        m_stencil_coefs_y.resize(m_h_stencil_coefs_y.size());
+        amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
+                              m_h_stencil_coefs_y.begin(), m_h_stencil_coefs_y.end(),
+                              m_stencil_coefs_y.begin());
+    }
+    if (!m_h_stencil_coefs_z.empty()) {
+        m_stencil_coefs_z.resize(m_h_stencil_coefs_z.size());
+        amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
+                              m_h_stencil_coefs_z.begin(), m_h_stencil_coefs_z.end(),
+                              m_stencil_coefs_z.begin());
+    }
+    amrex::Gpu::synchronize();
 }
 
 void
@@ -129,11 +135,11 @@ ProjectionDivCleaner::ReadParameters ()
         m_atol = 0.0;
     }
 
-    const ParmParse pp_divb_cleaner("projection_divb_cleaner");
+    const ParmParse pp_div_cleaner("warpx.projection_div_cleaner");
 
     // Defaults to rtol 5e-12 for double fields and 5e-5 for single
-    utils::parser::queryWithParser(pp_divb_cleaner, "atol", m_atol);
-    utils::parser::queryWithParser(pp_divb_cleaner, "rtol", m_rtol);
+    utils::parser::queryWithParser(pp_div_cleaner, "atol", m_atol);
+    utils::parser::queryWithParser(pp_div_cleaner, "rtol", m_rtol);
 }
 
 void
@@ -180,18 +186,18 @@ ProjectionDivCleaner::solve ()
     info.setAgglomeration(m_agglomeration);
     info.setConsolidation(m_consolidation);
     info.setMaxCoarseningLevel(m_max_coarsening_level);
-#ifdef WARPX_DIM_RZ
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     info.setMetricTerm(true);
 #endif
 
 
     for (int ilev = 0; ilev < m_levels; ++ilev)
     {
-        if (m_grid_type == GridType::Collocated) {
+        if (m_grid_type == GridType::Collocated || m_vector_potential) {
 #if defined(AMREX_USE_EB)
             const amrex::Vector<amrex::EBFArrayBoxFactory const *> eb_farray_box_factory{};
 #else
-            const amrex::Vector<amrex::FArrayBoxFactory const *> eb_farray_box_factory{};
+            const amrex::Vector<amrex::FabFactory<amrex::FArrayBox> const*> eb_farray_box_factory{};
 #endif
 
             MLNodeLaplacian linop({geom[ilev]}, {ba[ilev]}, {dmap[ilev]}, info, eb_farray_box_factory, 1.0_rt);
@@ -318,30 +324,27 @@ ProjectionDivCleaner::correctField ()
         {
             // Grab references to B field arrays for this grid/tile
             amrex::Array4<Real> const& Bx_arr = Bx->array(mfi);
-#if !defined(WARPX_DIM_RZ)
-            amrex::Array4<Real> const& By_arr = By->array(mfi);
-#endif
-            amrex::Array4<Real> const& Bz_arr = Bz->array(mfi);
-
-            // Extract stencil coefficients
             Real const * const AMREX_RESTRICT coefs_x = m_stencil_coefs_x.dataPtr();
             auto const n_coefs_x = static_cast<int>(m_stencil_coefs_x.size());
-#if !defined(WARPX_DIM_RZ)
+            const Box& tbx = mfi.tilebox(Bx->ixType().toIntVect());
+
+#if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
+            amrex::Array4<Real> const& By_arr = By->array(mfi);
             Real const * const AMREX_RESTRICT coefs_y = m_stencil_coefs_y.dataPtr();
             auto const n_coefs_y = static_cast<int>(m_stencil_coefs_y.size());
-#endif
-            Real const * const AMREX_RESTRICT coefs_z = m_stencil_coefs_z.dataPtr();
-            auto const n_coefs_z = static_cast<int>(m_stencil_coefs_z.size());
-
-            const Box& tbx = mfi.tilebox(Bx->ixType().toIntVect());
-#if !defined(WARPX_DIM_RZ)
             const Box& tby = mfi.tilebox(By->ixType().toIntVect());
 #endif
+
+#if !defined(WARPX_DIM_RSPHERE)
+            amrex::Array4<Real> const& Bz_arr = Bz->array(mfi);
+            Real const * const AMREX_RESTRICT coefs_z = m_stencil_coefs_z.dataPtr();
+            auto const n_coefs_z = static_cast<int>(m_stencil_coefs_z.size());
             const Box& tbz = mfi.tilebox(Bz->ixType().toIntVect());
+#endif
 
             amrex::Array4<Real> const& sol_arr = m_solution[ilev]->array(mfi);
 
-#if defined(WARPX_DIM_RZ)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
             amrex::ParallelFor(tbx, tbz,
             [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/)
             {
@@ -351,13 +354,19 @@ ProjectionDivCleaner::correctField ()
             {
                 Bz_arr(i,j,0) += CylindricalYeeAlgorithm::DownwardDz(sol_arr, coefs_z, n_coefs_z, i, j, 0, 0);
             });
-#else
-            if (m_grid_type == GridType::Staggered)
+#elif defined(WARPX_DIM_RSPHERE)
+            amrex::ParallelFor(tbx,
+            [=] AMREX_GPU_DEVICE (int i, int /*j*/, int /*k*/)
             {
-                correctFieldCartesian_kernel<CartesianYeeAlgorithm>(tbx, tby, tbz, coefs_x, coefs_y, coefs_z,
+                Bx_arr(i,0,0) += SphericalYeeAlgorithm::DownwardDr(sol_arr, coefs_x, n_coefs_x, i, 0, 0, 0);
+            });
+#else
+            if (m_grid_type == GridType::Collocated)
+            {
+                correctFieldCartesian_kernel<CartesianNodalAlgorithm>(tbx, tby, tbz, coefs_x, coefs_y, coefs_z,
                     n_coefs_x, n_coefs_y, n_coefs_z, Bx_arr, By_arr, Bz_arr, sol_arr);
             } else {
-                correctFieldCartesian_kernel<CartesianNodalAlgorithm>(tbx, tby, tbz, coefs_x, coefs_y, coefs_z,
+                correctFieldCartesian_kernel<CartesianYeeAlgorithm>(tbx, tby, tbz, coefs_x, coefs_y, coefs_z,
                     n_coefs_x, n_coefs_y, n_coefs_z, Bx_arr, By_arr, Bz_arr, sol_arr);
             }
 #endif
@@ -388,11 +397,16 @@ void
 WarpX::ProjectionCleanDivB() {
     WARPX_PROFILE("WarpX::ProjectionDivCleanB()");
 
-        if ( WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::Yee
+    if ( (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::Yee
             ||  WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC
             ||  ( (WarpX::electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrame
                 || WarpX::electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameElectroMagnetostatic)
-                && WarpX::poisson_solver_id == PoissonSolverAlgo::Multigrid)) {
+                && WarpX::poisson_solver_id == PoissonSolverAlgo::Multigrid))
+#if defined(WARPX_DIM_RZ)
+                && WarpX::grid_type == GridType::Staggered
+#endif
+            )
+    {
         amrex::Print() << Utils::TextMsg::Info( "Starting Projection B-Field divergence cleaner.");
 
         if constexpr (!std::is_same_v<Real, double>) {

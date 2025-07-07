@@ -62,11 +62,16 @@ struct PIdx
 #if defined (WARPX_DIM_3D)
         y,
 #endif
+#if !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
         z,
+#endif
         w,      ///< weight
         ux, uy, uz,
-#ifdef WARPX_DIM_RZ
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
         theta,      ///< RZ needs all three position components
+#endif
+#if defined(WARPX_DIM_RSPHERE)
+        phi,      ///< 1D Sphere needs all three position components
 #endif
         nattribs    ///< number of compile-time attributes
     };
@@ -79,13 +84,18 @@ struct PIdx
 #if defined (WARPX_DIM_3D)
                                    "y",
 #endif
+#if !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
                                    "z",
+#endif
                                    "w",
                                    "ux",
                                    "uy",
                                    "uz",
-#ifdef WARPX_DIM_RZ
-                                   "theta"
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+                                   "theta",  // azimuthal angle
+#endif
+#if defined(WARPX_DIM_RSPHERE)
+                                   "phi", // polar angle, relative to the x-y plane
 #endif
     };
 
@@ -281,7 +291,8 @@ public:
      * \param[in,out] rho vector of charge densities (one pointer to MultiFab per mesh refinement level)
      * \param[in] local if false, exchange the data in the guard cells after the deposition
      * \param[in] reset if true, reset all values of rho to zero
-     * \param[in] apply_boundary_and_scale_volume whether to apply boundary conditions and scale the final density by some volume norm in RZ geometry
+     * \param[in] apply_boundary_and_scale_volume whether to apply boundary conditions and scale the
+     *            final density by some volume norm in cylindrical and spherical geometry
      * \param[in] interpolate_across_levels whether to average down from the fine patch to the coarse patch
      * \param[in] icomp component of the MultiFab where rho is deposited (old, new)
      */
@@ -330,7 +341,6 @@ public:
      *
      * \param[in,out] T_vf vector field of Temperatures (one three-dimensional array of pointers
      *                to MultiFabs per mesh refinement level)
-     * \param[in] dt Time step for particle level
      * \param[in] relative_time Time at which to deposit J, relative to the time of the
      *                          current positions of the particles. When different than 0,
      *                          the particle position will be temporarily modified to match
@@ -360,8 +370,8 @@ public:
         [[maybe_unused]]PushType push_type)
     {}
 
-    void DepositIsotropicNGPTemperature (amrex::MultiFab* temperature, const int lev);
-    std::unique_ptr<amrex::MultiFab> GetIsotropicNGPTemperature (int lev);
+    void DepositTotalNGPTemperature (amrex::MultiFab* temperature, const int lev);
+    std::unique_ptr<amrex::MultiFab> GetAverageNGPTemperature (int lev);
 
     void DepositNumberDensity (amrex::MultiFab* number_density, const int lev);
     std::unique_ptr<amrex::MultiFab> GetNumberDensity (int lev);
@@ -377,9 +387,15 @@ public:
                                          amrex::MultiFab* jx,
                                          amrex::MultiFab* jy,
                                          amrex::MultiFab* jz,
-                                         amrex::MultiFab* Sx,
-                                         amrex::MultiFab* Sy,
-                                         amrex::MultiFab* Sz,
+                                         amrex::MultiFab* Sxx,
+                                         amrex::MultiFab* Sxy,
+                                         amrex::MultiFab* Sxz,
+                                         amrex::MultiFab* Syx,
+                                         amrex::MultiFab* Syy,
+                                         amrex::MultiFab* Syz,
+                                         amrex::MultiFab* Szx,
+                                         amrex::MultiFab* Szy,
+                                         amrex::MultiFab* Szz,
                                    const amrex::FArrayBox* bxfab,
                                    const amrex::FArrayBox* byfab,
                                    const amrex::FArrayBox* bzfab,
@@ -635,9 +651,15 @@ protected:
     amrex::Vector<amrex::FArrayBox> local_jz;
 
     // local containers for mass matrix deposit used by implicit solvers
-    amrex::Vector<amrex::FArrayBox> local_Sx;
-    amrex::Vector<amrex::FArrayBox> local_Sy;
-    amrex::Vector<amrex::FArrayBox> local_Sz;
+    amrex::Vector<amrex::FArrayBox> local_Sxx;
+    amrex::Vector<amrex::FArrayBox> local_Sxy;
+    amrex::Vector<amrex::FArrayBox> local_Sxz;
+    amrex::Vector<amrex::FArrayBox> local_Syx;
+    amrex::Vector<amrex::FArrayBox> local_Syy;
+    amrex::Vector<amrex::FArrayBox> local_Syz;
+    amrex::Vector<amrex::FArrayBox> local_Szx;
+    amrex::Vector<amrex::FArrayBox> local_Szy;
+    amrex::Vector<amrex::FArrayBox> local_Szz;
 
 public:
     using PairIndex = std::pair<int, int>;
