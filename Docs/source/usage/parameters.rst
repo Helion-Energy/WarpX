@@ -1174,9 +1174,14 @@ Particle initialization
 * ``<species_name>.density_max`` (`float`) optional (default `infinity`)
     Maximum plasma density. The density at each point is the minimum between the value given in the profile, and `density_max`.
 
-* ``<species_name>.radially_weighted`` (`bool`) optional (default `true`)
-    Whether particle's weight is varied with their radius. This only applies to cylindrical geometry.
-    The only valid value is true.
+* ``<species_name>.radial_numpercell_power`` (`float`) optional (default `0`)
+    With cylindrical and spherical geometry, specifies the radial power scaling of the number of particles per cell.
+    The number of particles per cell will be proportional to :math:`r^p`, where :math:`r` is the radius, and :math:`p` is the specified power.
+    The power must be greater than -1.
+    When the power is 0, the default value, the number of particles per cell will be uniform.
+    With a uniform density, a power of 1 for cylindrical, and a power of 2 for spherical, will give uniform particle weights.
+    The total number of particles loaded along the radius will be :math:`rmax/dr*N_{percell}`, :math:`rmax` the maximum radius particles are loaded, :math:`dr` the radial grid cell size, and :math:`N_{percell}` the number of particles per cell.
+    The particle weights are set accordingly depending on the power and on the specified density profile.
 
 * ``<species_name>.momentum_distribution_type`` (`string`)
     Distribution of the normalized momentum (`u=p/mc`) for this species. The options are:
