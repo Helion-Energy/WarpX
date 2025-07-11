@@ -14,10 +14,12 @@
 #include "Utils/TextMsg.H"
 #include "Fluids/MultiFluidContainer.H"
 #include "Fluids/WarpXFluidContainer.H"
+#include "Fluids/QdsmcParticleContainer.H"
 #include "Utils/WarpXProfilerWrapper.H"
 #include "WarpX.H"
 
 #include <ablastr/fields/MultiFabRegister.H>
+#include <ablastr/utils/Communication.H>
 
 
 using namespace amrex;
@@ -60,35 +62,8 @@ void WarpX::HybridPICEvolveFields ()
     }
 
     // The particles have now been pushed to their t_{n+1} positions.
-    // Perform charge deposition in component 0 of rho_fp at t_{n+1}.
-    mypc->DepositCharge(m_fields.get_mr_levels(FieldType::rho_fp, finest_level), 0._rt);
-    // Perform current deposition at t_{n+1/2}.
-    mypc->DepositCurrent(m_fields.get_mr_levels_alldirs(FieldType::current_fp, finest_level), dt[0], -0.5_rt * dt[0]);
-
-    // Deposit cold-relativistic fluid charge and current
-    if (do_fluid_species) {
-        int const lev = 0;
-        myfl->DepositCharge(m_fields, *m_fields.get(FieldType::rho_fp, lev), lev);
-        myfl->DepositCurrent(m_fields,
-            *m_fields.get(FieldType::current_fp, Direction{0}, lev),
-            *m_fields.get(FieldType::current_fp, Direction{1}, lev),
-            *m_fields.get(FieldType::current_fp, Direction{2}, lev),
-            lev);
-    }
-
-    // Synchronize J and rho:
-    // filter (if used), exchange guard cells, interpolate across MR levels
-    // and apply boundary conditions
-    SyncCurrentAndRho();
-
-    // SyncCurrent does not include a call to FillBoundary, but it is needed
-    // for the hybrid-PIC solver since current values are interpolated to
-    // a nodal grid
-    for (int lev = 0; lev <= finest_level; ++lev) {
-        for (int idim = 0; idim < 3; ++idim) {
-            m_fields.get(FieldType::current_fp, Direction{idim}, lev)->FillBoundary(Geom(lev).periodicity());
-        }
-    }
+    // Perform charge deposition at t_{n+1} and current deposition at t_{n+1/2}.
+    HybridPICDepositRhoAndJ();
 
     const bool include_displacement = 
         m_hybrid_pic_model->m_include_displacement_current;
@@ -104,6 +79,91 @@ void WarpX::HybridPICEvolveFields ()
     // so that, at this time, we have rho^{n} in rho_fp_temp, rho{n+1} in the
     // 0'th index of `rho_fp`, J_i^{n-1/2} in `current_fp_temp` and J_i^{n+1/2}
     // in `current_fp`.
+
+    const amrex::Real cur_step = getistep(finest_level);
+    const amrex::Real Te0 = m_hybrid_pic_model->m_elec_temp;
+    const amrex::Real rho0_ref = m_hybrid_pic_model->m_n0_ref*PhysConst::q_e;
+    const amrex::Real gamma_val = m_hybrid_pic_model->m_gamma;
+
+    // Initialize electron temperature multifab if qdsmc solver is used
+    // TO DO: MOVE THIS TO A SEPARATE FUNCTION AND THEN CALL IT HERE, KEEP THE CODE CLEAN (Marco A.)
+    if(cur_step==1 && m_hybrid_pic_model->m_solve_electron_energy_equation){
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(*m_fields.get("fluid_temperature_electrons_hybrid", finest_level), TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            amrex::Box const &tile_box = mfi.tilebox(m_fields.get("fluid_temperature_electrons_hybrid",  finest_level)->ixType().toIntVect());
+            amrex::Array4<Real> const &Te_arr = m_fields.get("fluid_temperature_electrons_hybrid",  finest_level)->array(mfi);
+            const amrex::Array4<amrex::Real> rho_arr = m_fields.get(FieldType::rho_fp,  finest_level)->array(mfi);
+
+            amrex::ParallelFor(tile_box,
+                [=] AMREX_GPU_DEVICE(int i, int j, int k)
+                {
+                    Te_arr(i, j, k) = Te0 * std::pow(rho_arr(i, j, k)/rho0_ref,gamma_val-1); // Te in K
+                }
+            );
+        }
+        // TO DO: Use defined field type instead of this string, to avoid possible bugs
+        m_fields.get("fluid_temperature_electrons_hybrid",  finest_level)->FillBoundary(Geom(finest_level).periodicity());
+    }
+
+    if(m_hybrid_pic_model->m_solve_electron_energy_equation && m_hybrid_pic_model->m_include_Qei){
+
+            // pass particle container instead of name of species
+            // Once we have multi ion species support in the hybrid pic model,
+            // m_ie_coll_species should be a vector of strings, indicating the name of ion species we want to collide with electrons
+            // same should be used below for electron-ion collision fluid treatment.
+            hybrid_electron_fl->Hybrid_Drag_Diffusion (m_fields, m_hybrid_pic_model.get(), m_hybrid_pic_model->m_ie_coll_species, dt[0], finest_level); // replace by name from Hybrid parser
+
+            auto const species_names = mypc->GetSpeciesNames();
+            for(int i_s=0; i_s<mypc->nSpecies(); i_s++){
+
+                const auto & myspc = mypc->GetParticleContainer(i_s);
+                const std::string temperature_vf_str = "T_" + species_names[myspc.getSpeciesId()];
+                amrex::Real m_ion = myspc.getMass();
+
+                // ----------------------------------------------------------------------------------------
+                // -------------------------------------- Remove ------------------------------------------
+
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                        m_fields.get(temperature_vf_str, Direction{0}, finest_level)->is_finite(),
+                        "Non-finite value detected in Tix field."
+                    );
+
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                        m_fields.get(temperature_vf_str, Direction{1}, finest_level)->is_finite(),
+                        "Non-finite value detected in Tiy field."
+                        );
+
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                        m_fields.get(temperature_vf_str, Direction{2}, finest_level)->is_finite(),
+                        "Non-finite value detected in Tiz field."
+                    );
+
+                // ----------------------------------------------------------------------------------------
+                // ----------------------------------------------------------------------------------------
+
+                hybrid_electron_fl->Hybrid_Electron_Qei (m_fields, m_hybrid_pic_model.get(), temperature_vf_str,
+                                                            m_ion, dt[0], finest_level);
+            }
+        }
+
+    // Calculate Ke using rho^{n} in rho_fp_temp
+    if(m_hybrid_pic_model->m_solve_electron_energy_equation)
+    {
+
+        // copy rho_fp_temp to hybrid_electron_fl->name_mf_N
+        m_fields.get(hybrid_electron_fl->name_mf_N, finest_level)->setVal(0);
+        MultiFab::Copy( *m_fields.get(hybrid_electron_fl->name_mf_N, finest_level),
+                        *m_fields.get(FieldType::hybrid_rho_fp_temp, finest_level),
+                       0, 0, 1, m_fields.get(hybrid_electron_fl->name_mf_N, finest_level)->nGrowVect());
+        // Calculate Ke
+        hybrid_electron_fl->HybridInitializeKe(m_fields, m_hybrid_pic_model->m_gamma, m_hybrid_pic_model->m_n_floor, finest_level);
+
+    }
+
 
     // Note: E^{n} is recalculated with the accurate J_i^{n} since at the end
     // of the last step we had to "guess" it. It also needs to be
@@ -174,6 +234,24 @@ void WarpX::HybridPICEvolveFields ()
             0.5_rt*dt[0]);
     }
 
+    if(m_hybrid_pic_model->m_solve_electron_energy_equation)
+    {
+
+        // Calculate plasma current at n+1/2 using Ampere's law
+        // using B field at t=n+1/2
+        m_hybrid_pic_model->CalculatePlasmaCurrent(
+            m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, finest_level),
+            m_eb_update_E);
+
+        // Calculates Ue using Jtot at n+1/2 and Ji at n+1/2
+        hybrid_electron_fl->HybridInitializeUe(m_fields, // pass also rho as argument
+                m_fields.get_alldirs(FieldType::current_fp, finest_level),
+                m_hybrid_pic_model.get(),
+                finest_level);
+
+    }
+
+
     // Now push the B field from t=n+1/2 to t=n+1 using the n+1/2 quantities
     for (int sub_step = 0; sub_step < sub_steps; sub_step++)
     {
@@ -226,6 +304,114 @@ void WarpX::HybridPICEvolveFields ()
         m_hybrid_pic_model->m_external_vector_potential->UpdateHybridExternalFields(
             gett_new(0),
             0.5_rt*dt[0]);
+    }
+
+    // calculate plasma current at n+1
+    m_hybrid_pic_model->CalculatePlasmaCurrent(
+        m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, finest_level),
+        m_eb_update_E);
+
+    // all the qdsmc solver functions should be in a ElectronEnergyEquationSolver class as well as other solvers like Layer method
+    if(m_hybrid_pic_model->m_solve_electron_energy_equation){
+
+        // Reset qdsmc particles positions to x0,y0,z0 and rest of attributes to 0 and redistribute
+        m_hybrid_pic_model->qdsmc_hybrid_electron_pc->ResetParticles(finest_level);
+
+        // Set fictitious electron particles velocities
+        m_hybrid_pic_model->qdsmc_hybrid_electron_pc->SetV(finest_level,
+            *m_fields.get(hybrid_electron_fl->name_mf_NU, Direction{0}, finest_level),
+            *m_fields.get(hybrid_electron_fl->name_mf_NU, Direction{1}, finest_level),
+            *m_fields.get(hybrid_electron_fl->name_mf_NU, Direction{2}, finest_level));
+
+        // Set fictitious electron particles entropy
+        m_hybrid_pic_model->qdsmc_hybrid_electron_pc->SetK(finest_level,
+            *m_fields.get(hybrid_electron_fl->name_mf_K, finest_level),
+            *m_fields.get(hybrid_electron_fl->name_mf_N, finest_level));
+
+        // Push fictitious electron particles
+        m_hybrid_pic_model->qdsmc_hybrid_electron_pc->PushX(finest_level, dt[0]);
+
+        /// Needed to update Te later on (weights from qdsmc particles)
+        m_fields.get(hybrid_electron_fl->name_mf_weights, finest_level)->setVal(0);
+        m_hybrid_pic_model->qdsmc_hybrid_electron_pc->DepositField(finest_level, *m_fields.get(hybrid_electron_fl->name_mf_weights, finest_level));
+
+        // Deposit entropy from qdsmc
+        m_hybrid_pic_model->qdsmc_hybrid_electron_pc->DepositK(finest_level, *m_fields.get(hybrid_electron_fl->name_mf_K, finest_level));
+
+        // Update ne to n+1 before updating Te so the calculation is consistent
+        m_fields.get(hybrid_electron_fl->name_mf_N, finest_level)->setVal(0);
+        MultiFab::Copy( *m_fields.get(hybrid_electron_fl->name_mf_N, finest_level),
+                        *m_fields.get(FieldType::rho_fp, finest_level),
+                        0, 0, 1, m_fields.get(hybrid_electron_fl->name_mf_N, finest_level)->nGrowVect());
+
+        // Update Te after QDSMC solver:
+        hybrid_electron_fl->HybridQDSMCUpdateTe(m_fields, m_hybrid_pic_model->m_gamma, m_hybrid_pic_model->m_n_floor, finest_level);
+
+        // adds Joule heating using operator splitting approach
+        if(m_hybrid_pic_model->m_include_Joule_heating){
+            hybrid_electron_fl->Hybrid_Electron_Joule_Heating(m_fields, m_hybrid_pic_model.get(), dt[0], finest_level);
+        }
+
+        // adds Bremsstrahlung loss using operator splitting approach
+        if(m_hybrid_pic_model->m_include_Bremsstrahlung){
+            hybrid_electron_fl->Hybrid_Electron_Bremsstrahlung(m_fields, m_hybrid_pic_model.get(), dt[0], finest_level);
+        }
+
+        // adds electron ion collisions
+        // TO DO: Add filter after this routine?
+
+
+        // This is called after Te is updated. Hence, Te is at n+1 however Ti is at n+1/2 !
+        // Should fix the mistmatch so both Qei and Qie (drag-diffusion) are calculated at the same step
+        /*
+        if(m_hybrid_pic_model->m_include_Qei){
+
+            // pass particle container instead of name of species
+            // Once we have multi ion species support in the hybrid pic model,
+            // m_ie_coll_species should be a vector of strings, indicating the name of ion species we want to collide with electrons
+            // same should be used below for electron-ion collision fluid treatment.
+            hybrid_electron_fl->Hybrid_Drag_Diffusion (m_fields, m_hybrid_pic_model.get(), m_hybrid_pic_model->m_ie_coll_species, dt[0], finest_level); // replace by name from Hybrid parser
+
+
+            auto const species_names = mypc->GetSpeciesNames();
+            for(int i_s=0; i_s<mypc->nSpecies(); i_s++){
+
+                const auto & myspc = mypc->GetParticleContainer(i_s);
+                const std::string temperature_vf_str = "T_" + species_names[myspc.getSpeciesId()];
+                amrex::Real m_ion = myspc.getMass();
+
+                // ----------------------------------------------------------------------------------------
+                // -------------------------------------- Remove ------------------------------------------
+
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                        m_fields.get(temperature_vf_str, Direction{0}, finest_level)->is_finite(),
+                        "Non-finite value detected in Tix field."
+                    );
+
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                        m_fields.get(temperature_vf_str, Direction{1}, finest_level)->is_finite(),
+                        "Non-finite value detected in Tiy field."
+                        );
+
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                        m_fields.get(temperature_vf_str, Direction{2}, finest_level)->is_finite(),
+                        "Non-finite value detected in Tiz field."
+                    );
+
+                // ----------------------------------------------------------------------------------------
+                // ----------------------------------------------------------------------------------------
+
+                hybrid_electron_fl->Hybrid_Electron_Qei (m_fields, m_hybrid_pic_model.get(), temperature_vf_str,
+                                                            m_ion, dt[0], finest_level);
+            }
+        }
+        */
+
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                        m_fields.get(hybrid_electron_fl->name_mf_T, finest_level)->is_finite(),
+                        "Non-finite value detected in Te_hybrid field."
+                    );
+
     }
 
     // Calculate the electron pressure at t=n+1
@@ -291,34 +477,110 @@ void WarpX::HybridPICEvolveFields ()
     }
 }
 
-void WarpX::HybridPICDepositInitialRhoAndJ ()
+void WarpX::HybridPICDepositRhoAndJ ()
 {
+    using ablastr::fields::Direction;
     using warpx::fields::FieldType;
 
-    bool const skip_lev0_coarse_patch = true;
+    // Perform charge deposition in component 0 of rho_fp at current time.
+    mypc->DepositCharge(m_fields.get_mr_levels(FieldType::rho_fp, finest_level), 0._rt);
+    // Perform current deposition at t_{n-1/2}.
+    mypc->DepositCurrent(m_fields.get_mr_levels_alldirs(FieldType::current_fp, finest_level), dt[0], -0.5_rt * dt[0]);
 
+    // TODO: Perhaps add flag here for when using temperature accumulation in Hybrid
+    // Perform Temperature Deposition at time t_{n}
+    mypc->DepositTemperatures(m_fields, 0.0_rt);
+
+    // Deposit cold-relativistic fluid charge and current
+    if (do_fluid_species) {
+        int const lev = 0;
+        myfl->DepositCharge(m_fields, *m_fields.get(FieldType::rho_fp, lev), lev);
+        myfl->DepositCurrent(m_fields,
+            *m_fields.get(FieldType::current_fp, Direction{0}, lev),
+            *m_fields.get(FieldType::current_fp, Direction{1}, lev),
+            *m_fields.get(FieldType::current_fp, Direction{2}, lev),
+            lev);
+    }
+
+    // Synchronize J and rho:
+    // filter (if used), exchange guard cells, interpolate across MR levels
+    // and apply boundary conditions
+    SyncCurrentAndRho();
+
+    // SyncCurrent does not include a call to FillBoundary, but it is needed
+    // for the hybrid-PIC solver since current values are interpolated to
+    // a nodal grid
+    for (int lev = 0; lev <= finest_level; ++lev) {
+        ablastr::utils::communication::FillBoundary(
+            *m_fields.get(FieldType::rho_fp, lev),
+            m_fields.get(FieldType::rho_fp, lev)->nGrowVect(),
+            WarpX::do_single_precision_comms,
+            Geom(lev).periodicity(),
+            true
+        );
+        for (int idim = 0; idim < 3; ++idim) {
+            ablastr::utils::communication::FillBoundary(
+                *m_fields.get(FieldType::current_fp, Direction{idim}, lev),
+                m_fields.get(FieldType::current_fp, Direction{idim}, lev)->nGrowVect(),
+                WarpX::do_single_precision_comms,
+                Geom(lev).periodicity(),
+                true
+            );
+        }
+    }
+}
+
+void WarpX::HybridPICInitializeRhoJandB ()
+{
+    // The Ohm's law solver requires two timesteps' values for the charge
+    // and current densities. This function is called at the start of
+    // the PIC loop (before particles have been pushed for the first time,
+    // but after their positions and velocities have been de-synchronized).
+
+    using warpx::fields::FieldType;
+    using ablastr::fields::Direction;
+
+    if (restart_chkfile.empty()) {
+        // This is not a restart, so the rho_fp and current_fp multifabs are
+        // still empty.
+        HybridPICDepositRhoAndJ();
+
+        // Handle field splitting for Hybrid field push
+        if (m_hybrid_pic_model->m_add_external_fields) {
+            // Get the external fields
+            m_hybrid_pic_model->m_external_vector_potential->UpdateHybridExternalFields(
+                gett_old(0),
+                0.5_rt*dt[0]);
+
+            // If using split fields, add the external field at t=0
+            for (int lev = 0; lev <= finest_level; ++lev) {
+                for (int idim = 0; idim < 3; ++idim) {
+                    MultiFab::Add(
+                        *m_fields.get(FieldType::Bfield_fp, Direction{idim}, lev),
+                        *m_fields.get(FieldType::hybrid_B_fp_external, Direction{idim}, lev),
+                        0, 0, 1,
+                        m_fields.get(FieldType::Bfield_fp, Direction{idim}, lev)->nGrowVect());
+                }
+            }
+        }
+    }
+
+    // Copy the rho_fp values to rho_fp_temp and the current_fp values to
+    // current_fp_temp, since the "temp" multifabs are meant to store the
+    // particle and current densities from the previous step during the field
+    // solve routine and are needed when the first field solve is
+    // performed after pushing the particles.
     ablastr::fields::MultiLevelScalarField rho_fp_temp = m_fields.get_mr_levels(FieldType::hybrid_rho_fp_temp, finest_level);
     ablastr::fields::MultiLevelVectorField current_fp_temp = m_fields.get_mr_levels_alldirs(FieldType::hybrid_current_fp_temp, finest_level);
-    mypc->DepositCharge(rho_fp_temp, 0._rt);
-    mypc->DepositCurrent(current_fp_temp, dt[0], 0._rt);
-    SyncRho(rho_fp_temp, m_fields.get_mr_levels(FieldType::rho_cp, finest_level, skip_lev0_coarse_patch), m_fields.get_mr_levels(FieldType::rho_buf, finest_level, skip_lev0_coarse_patch));
-    SyncCurrent("hybrid_current_fp_temp");
-    for (int lev=0; lev <= finest_level; ++lev) {
-        // SyncCurrent does not include a call to FillBoundary, but it is needed
-        // for the hybrid-PIC solver since current values are interpolated to
-        // a nodal grid
-        current_fp_temp[lev][0]->FillBoundary(Geom(lev).periodicity());
-        current_fp_temp[lev][1]->FillBoundary(Geom(lev).periodicity());
-        current_fp_temp[lev][2]->FillBoundary(Geom(lev).periodicity());
-
-        ApplyRhofieldBoundary(lev, rho_fp_temp[lev], PatchType::fine);
-        // Set current density at PEC boundaries, if needed.
-        ApplyJfieldBoundary(
-            lev, current_fp_temp[lev][0],
-            current_fp_temp[lev][1],
-            current_fp_temp[lev][2],
-            PatchType::fine
-        );
+    for (int lev = 0; lev <= finest_level; ++lev)
+    {
+        // copy 1 component value starting at index 0 to index 0
+        MultiFab::Copy(*rho_fp_temp[lev], *m_fields.get(FieldType::rho_fp, lev),
+                        0, 0, 1, rho_fp_temp[lev]->nGrowVect());
+        for (int idim = 0; idim < 3; ++idim) {
+            MultiFab::Copy(*current_fp_temp[lev][idim], *m_fields.get(FieldType::current_fp, Direction{idim}, lev),
+                        0, 0, 1, current_fp_temp[lev][idim]->nGrowVect());
+        }
     }
 }
 

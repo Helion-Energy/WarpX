@@ -11,8 +11,12 @@
 #include "Initialization/PlasmaInjector.H"
 #include "MultiFluidContainer.H"
 
-#include<AMReX_MultiFab.H>
-#include<AMReX_Vector.H>
+#include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
+
+#include <AMReX_Geometry.H>
+#include <AMReX_MultiFab.H>
+#include <AMReX_Vector.H>
+#include <AMReX_REAL.H>
 
 #include <string>
 
@@ -30,7 +34,7 @@ class WarpXFluidContainer
 public:
     friend MultiFluidContainer;
 
-    WarpXFluidContainer (int ispecies, const std::string &name);
+    WarpXFluidContainer (int ispecies, const std::string &name, bool electron_hybrid=false);
     ~WarpXFluidContainer() = default;
 
     WarpXFluidContainer (WarpXFluidContainer const &)             = delete;
@@ -40,7 +44,9 @@ public:
 
     void AllocateLevelMFs (ablastr::fields::MultiFabRegister& m_fields, const amrex::BoxArray& ba, const amrex::DistributionMapping& dm, int lev) const;
 
-    void InitData (ablastr::fields::MultiFabRegister& m_fields, amrex::Box init_box, amrex::Real cur_time, int lev);
+    void InitData (
+        ablastr::fields::MultiFabRegister& m_fields, amrex::Box init_box, amrex::Real cur_time, int lev,
+        const amrex::Geometry& geom_lev, amrex::Real gamma_boost, amrex::Real beta_boost);
 
     void ReadParameters ();
 
@@ -74,7 +80,7 @@ public:
      */
     void ApplyBcFluidsAndComms (ablastr::fields::MultiFabRegister& m_fields, int lev);
 
-#if defined(WARPX_DIM_RZ)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     /**
      * centrifugal_source_rz adds contributions due to curvature acceleration for a
      * single timestep using an SSP-RK3 timestep for RZ specifically
@@ -130,6 +136,50 @@ public:
      * \param[in,out] rho charge density MultiFab.
      */
     void DepositCharge (ablastr::fields::MultiFabRegister& m_fields, amrex::MultiFab &rho, int lev, int icomp = 0);
+
+    // HybridUpdateUe calculates Ue from Je = J_ampere - Ji and saves in NU for hybrid solver
+    void HybridInitializeUe (ablastr::fields::MultiFabRegister& m_fields,
+                    ablastr::fields::VectorField const& Ji,
+                    HybridPICModel const* hybrid_model, int lev);
+
+    // Sets Ke in fluid container MF to be used by qdsmc particles
+    void HybridInitializeKe (ablastr::fields::MultiFabRegister& m_fields, amrex::Real gamma, amrex::Real n_floor, int lev);
+
+    // UpdateTe takes the already interpolated Ke values from the grid after pushing the fictitious particles
+    // and calculates Te at n+1
+    void HybridQDSMCUpdateTe (ablastr::fields::MultiFabRegister& m_fields, amrex::Real gamma, amrex::Real n_floor, int lev);
+
+    // Adds Joule heating to electrons
+    // current implementation assumes only 1 ion species
+    // only called if flag is used and compatible with QDSMC solver only
+    void Hybrid_Electron_Joule_Heating (ablastr::fields::MultiFabRegister& m_fields,
+                                        HybridPICModel const* hybrid_model,
+                                        amrex::Real dt, int lev);
+
+    // Adds Bremsstrahlung loss to electrons
+    // current implementation assumes only 1 ion species
+    // only called if flag is used and compatible with QDSMC solver only
+    void Hybrid_Electron_Bremsstrahlung (ablastr::fields::MultiFabRegister& m_fields,
+                                        HybridPICModel const* hybrid_model,
+                                        amrex::Real dt, int lev);
+
+    // Adds electron - ion temperature relaxation due to collisions term
+    // this is used exclusively in the electron energy equation part of the Hybrid PIC model.
+    // This function should be called once per ion species
+    // add particle container
+    void Hybrid_Electron_Qei (ablastr::fields::MultiFabRegister& m_fields,
+                                        HybridPICModel const* hybrid_model,
+                                        const std::string temperature_vf_str,
+                                        amrex::Real m_ion, amrex::Real dt, int lev);
+
+    //void Hybrid_Electron_Qei_from_dTi (ablastr::fields::MultiFabRegister& m_fields,
+    //                                    HybridPICModel const* hybrid_model,
+    //                                    const std::string temperature_vf_str,
+    //                                    amrex::Real dt, int lev, int sign_Ti);
+
+    void Hybrid_Drag_Diffusion (ablastr::fields::MultiFabRegister& m_fields,
+                                        HybridPICModel const* hybrid_model,
+                                        const std::string species_name, amrex::Real dt, int lev);
 
     [[nodiscard]] amrex::Real getCharge () const {return charge;}
     [[nodiscard]] amrex::Real getMass () const {return mass;}
@@ -188,6 +238,9 @@ public:
     // Names of Multifabs that will be added to the mfs register
     std::string name_mf_N = "fluid_density_"+species_name;
     std::string name_mf_NU = "fluid_momentum_density_"+species_name;
+    std::string name_mf_T = "fluid_temperature_"+species_name;
+    std::string name_mf_K = "fluid_entropy_"+species_name;
+    std::string name_mf_weights = "fluid_qdsmc_weights_"+species_name;
 
 };
 

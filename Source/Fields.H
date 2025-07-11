@@ -45,6 +45,7 @@ namespace warpx::fields
         vector_potential_fp_nodal,
         vector_potential_grad_buf_e_stag,
         vector_potential_grad_buf_b_stag,
+        hybrid_electron_temperature_fp, /**< Used with Ohm's law solver. Stores the electron temperature */
         hybrid_electron_pressure_fp, /**< Used with Ohm's law solver. Stores the electron pressure */
         hybrid_rho_fp_temp,          /**< Used with Ohm's law solver. Stores the time interpolated/extrapolated charge density */
         hybrid_current_fp_temp,      /**< Used with Ohm's law solver. Stores the time interpolated/extrapolated current density */
@@ -82,10 +83,15 @@ namespace warpx::fields
         Efield_avg_cp,
         Bfield_avg_cp,
         B_old, /**< Stores the value of B at the beginning of the timestep, for the implicit solver */
+        Efield_fp_save,  // Efield_fp at beginning of Newton step used by the implicit solvers
+        current_fp_save, // current_fp at beginning of Newton step  used by the implicit solvers
+        MassMatrices_X,  // Stores full mass matrix elements for Jx used by the implicit solvers
+        MassMatrices_Y,  // Stores full mass matrix elements for Jy used by the implicit solvers
+        MassMatrices_Z,  // Stores full mass matrix elements for Jz used by the implicit solvers
+        MassMatrices_PC, // Stores reduced mass matrix elements for the implicit solver preconditioner (PC)
         ECTRhofield,
         Venl,
-        global_debye_length,
-        sigmaPC
+        global_debye_length
     );
 
     /** these are vector fields */
@@ -126,9 +132,14 @@ namespace warpx::fields
         FieldType::Efield_avg_cp,
         FieldType::Bfield_avg_cp,
         FieldType::B_old,
+        FieldType::Efield_fp_save,
+        FieldType::current_fp_save,
+        FieldType::MassMatrices_X,
+        FieldType::MassMatrices_Y,
+        FieldType::MassMatrices_Z,
+        FieldType::MassMatrices_PC,
         FieldType::ECTRhofield,
-        FieldType::Venl,
-        FieldType::sigmaPC
+        FieldType::Venl
     };
 
     /** Returns true if a FieldType represents a vector field */

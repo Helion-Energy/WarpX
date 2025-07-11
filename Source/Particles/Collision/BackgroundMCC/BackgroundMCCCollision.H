@@ -51,6 +51,8 @@ public:
      */
     void doBackgroundCollisionsWithinTile ( WarpXParIter& pti, amrex::Real t);
 
+    void doBackgroundCollisionsWithinTile_hybrid_ie ( WarpXParIter& pti, amrex::Real t);
+
     /** Perform MCC ionization interactions
      *
      * @param[in] lev the mesh-refinement level

@@ -8,6 +8,8 @@
 #include "Particles/Pusher/UpdateMomentumHigueraCary.H"
 #include "Utils/WarpXProfilerWrapper.H"
 
+#include "Particles/MultiParticleContainer.H" // temporary
+
 #include "MusclHancockUtils.H"
 #include "Fluids/WarpXFluidContainer.H"
 #include "Utils/Parser/ParserUtils.H"
@@ -18,41 +20,44 @@
 #include <ablastr/coarsen/sample.H>
 #include <ablastr/utils/Communication.H>
 
+#include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
+
 using namespace ablastr::utils::communication;
 using namespace amrex;
 
 
-WarpXFluidContainer::WarpXFluidContainer(int ispecies, const std::string &name):
+WarpXFluidContainer::WarpXFluidContainer(int ispecies, const std::string &name, bool electron_hybrid):
     species_id{ispecies},
     species_name{name}
 {
-    ReadParameters();
+    if(!electron_hybrid){
+        ReadParameters();
 
-    // Initialize injection objects
-    const ParmParse pp_species_name(species_name);
-    SpeciesUtils::parseDensity(species_name, "", h_inj_rho, density_parser);
-    SpeciesUtils::parseMomentum(species_name, "", "none", h_inj_mom,
-        ux_parser, uy_parser, uz_parser, ux_th_parser, uy_th_parser, uz_th_parser, h_mom_temp, h_mom_vel);
-    if (h_inj_rho) {
-#ifdef AMREX_USE_GPU
-        d_inj_rho = static_cast<InjectorDensity*>
-            (amrex::The_Arena()->alloc(sizeof(InjectorDensity)));
-        amrex::Gpu::htod_memcpy_async(d_inj_rho, h_inj_rho.get(), sizeof(InjectorDensity));
-#else
-        d_inj_rho = h_inj_rho.get();
-#endif
-    }
-    if (h_inj_mom) {
-#ifdef AMREX_USE_GPU
-        d_inj_mom = static_cast<InjectorMomentum*>
-            (amrex::The_Arena()->alloc(sizeof(InjectorMomentum)));
-        amrex::Gpu::htod_memcpy_async(d_inj_mom, h_inj_mom.get(), sizeof(InjectorMomentum));
-#else
-        d_inj_mom = h_inj_mom.get();
-#endif
-    }
+        // Initialize injection objects
+        const ParmParse pp_species_name(species_name);
+        SpeciesUtils::parseDensity(species_name, "", h_inj_rho, density_parser);
+        SpeciesUtils::parseMomentum(species_name, "", "none", h_inj_mom,
+            ux_parser, uy_parser, uz_parser, ux_th_parser, uy_th_parser, uz_th_parser, h_mom_temp, h_mom_vel);
+        if (h_inj_rho) {
+    #ifdef AMREX_USE_GPU
+            d_inj_rho = static_cast<InjectorDensity*>
+                (amrex::The_Arena()->alloc(sizeof(InjectorDensity)));
+            amrex::Gpu::htod_memcpy_async(d_inj_rho, h_inj_rho.get(), sizeof(InjectorDensity));
+    #else
+            d_inj_rho = h_inj_rho.get();
+    #endif
+        }
+        if (h_inj_mom) {
+    #ifdef AMREX_USE_GPU
+            d_inj_mom = static_cast<InjectorMomentum*>
+                (amrex::The_Arena()->alloc(sizeof(InjectorMomentum)));
+            amrex::Gpu::htod_memcpy_async(d_inj_mom, h_inj_mom.get(), sizeof(InjectorMomentum));
+    #else
+            d_inj_mom = h_inj_mom.get();
+    #endif
+        }
     amrex::Gpu::synchronize();
-
+    }
 }
 
 void WarpXFluidContainer::ReadParameters()
@@ -161,9 +166,23 @@ void WarpXFluidContainer::AllocateLevelMFs(ablastr::fields::MultiFabRegister& fi
             name_mf_NU, Direction{2}, lev, amrex::convert(ba, amrex::IntVect::TheNodeVector()), dm,
             ncomps, nguards, 0.0_rt);
 
+    fields.alloc_init(
+            name_mf_T, lev, amrex::convert(ba, amrex::IntVect::TheNodeVector()), dm,
+            ncomps, nguards, 0.0_rt);
+
+    fields.alloc_init(
+            name_mf_K, lev, amrex::convert(ba, amrex::IntVect::TheNodeVector()), dm,
+            ncomps, nguards, 0.0_rt);
+
+    fields.alloc_init(
+            name_mf_weights, lev, amrex::convert(ba, amrex::IntVect::TheNodeVector()), dm,
+            ncomps, nguards, 0.0_rt);
+
 }
 
-void WarpXFluidContainer::InitData(ablastr::fields::MultiFabRegister& fields, amrex::Box init_box, amrex::Real cur_time, int lev)
+void WarpXFluidContainer::InitData(
+    ablastr::fields::MultiFabRegister& fields, amrex::Box init_box, amrex::Real cur_time, int lev,
+    const amrex::Geometry& geom_lev, const amrex::Real gamma_boost, const amrex::Real beta_boost)
 {
     using ablastr::fields::Direction;
     WARPX_PROFILE("WarpXFluidContainer::InitData");
@@ -176,13 +195,9 @@ void WarpXFluidContainer::InitData(ablastr::fields::MultiFabRegister& fields, am
     InjectorMomentum* inj_mom = d_inj_mom;
 
     // Extract grid geometry properties
-    WarpX &warpx = WarpX::GetInstance();
-    const amrex::Geometry &geom = warpx.Geom(lev);
-    const auto dx = geom.CellSizeArray();
-    const auto problo = geom.ProbLoArray();
+    const auto dx = geom_lev.CellSizeArray();
+    const auto problo = geom_lev.ProbLoArray();
     const amrex::Real clight = PhysConst::c;
-    const amrex::Real gamma_boost = WarpX::gamma_boost;
-    const amrex::Real beta_boost = WarpX::beta_boost;
 
     // Loop through cells and initialize their value
 #ifdef AMREX_USE_OMP
@@ -211,10 +226,14 @@ void WarpXFluidContainer::InitData(ablastr::fields::MultiFabRegister& fields, am
                 const amrex::Real x = problo[0] + i * dx[0];
                 const amrex::Real y = 0.0_rt;
                 amrex::Real z = problo[1] + j * dx[1];
-#else
+#elif defined(WARPX_DIM_1D_Z)
                 const amrex::Real x = 0.0_rt;
                 const amrex::Real y = 0.0_rt;
                 amrex::Real z = problo[0] + i * dx[0];
+#elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+                const amrex::Real x = problo[0] + i * dx[0];
+                const amrex::Real y = 0.0_rt;
+                amrex::Real z = 0.0_rt;
 #endif
 
                 // Lorentz transform z (from boosted to lab frame)
@@ -285,7 +304,7 @@ void WarpXFluidContainer::Evolve(
 
     // Cylindrical centrifugal term
     if(!do_not_push){
-#if defined(WARPX_DIM_RZ)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
         centrifugal_source_rz(fields, lev);
 #endif
 
@@ -386,7 +405,7 @@ void WarpXFluidContainer::ApplyBcFluidsAndComms (ablastr::fields::MultiFabRegist
 
                 }
 
-#elif ( defined(WARPX_DIM_1D_Z) || defined(WARPX_DIM_XZ) || defined(WARPX_DIM_3D) )
+#else
 
                 // Upper end (index 0)
                 if ( (periodic_directions[0] != 1) && (i==domain.bigEnd(0)+1) ){
@@ -402,8 +421,6 @@ void WarpXFluidContainer::ApplyBcFluidsAndComms (ablastr::fields::MultiFabRegist
                     NUy_arr(i,j,k) = NUy_arr(i+2,j,k);
                     NUz_arr(i,j,k) = NUz_arr(i+2,j,k);
                 }
-
-#else
 
 #endif
             }
@@ -446,9 +463,13 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
     const amrex::Real dt_over_dx_half = 0.5_rt*(dt/dx[0]);
     const amrex::Real dt_over_dz_half = 0.5_rt*(dt/dx[1]);
     const amrex::Box& domain = geom.Domain();
-#else
+#elif defined(WARPX_DIM_1D_Z)
     const amrex::Real dt_over_dz = (dt/dx[0]);
     const amrex::Real dt_over_dz_half = 0.5_rt*(dt/dx[0]);
+#elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+    const auto problo = geom.ProbLoArray();
+    const amrex::Real dt_over_dx_half = 0.5_rt*(dt/dx[0]);
+    const amrex::Box& domain = geom.Domain();
 #endif
 
     const amrex::BoxArray ba = fields.get(name_mf_N, lev)->boxArray();
@@ -466,9 +487,12 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
     amrex::MultiFab tmp_U_plus_x( amrex::convert(ba, IntVect(0,1)), fields.get(name_mf_N, lev)->DistributionMap(), 4, 1);
     amrex::MultiFab tmp_U_minus_z( amrex::convert(ba, IntVect(1,0)), fields.get(name_mf_N, lev)->DistributionMap(), 4, 1);
     amrex::MultiFab tmp_U_plus_z( amrex::convert(ba, IntVect(1,0)), fields.get(name_mf_N, lev)->DistributionMap(), 4, 1);
-#else
+#elif defined(WARPX_DIM_1D_Z)
     amrex::MultiFab tmp_U_minus_z( amrex::convert(ba, IntVect(0)), fields.get(name_mf_N, lev)->DistributionMap(), 4, 1);
     amrex::MultiFab tmp_U_plus_z( amrex::convert(ba, IntVect(0)), fields.get(name_mf_N, lev)->DistributionMap(), 4, 1);
+#elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+    amrex::MultiFab tmp_U_minus_x( amrex::convert(ba, IntVect(0)), fields.get(name_mf_N, lev)->DistributionMap(), 4, 1);
+    amrex::MultiFab tmp_U_plus_x( amrex::convert(ba, IntVect(0)), fields.get(name_mf_N, lev)->DistributionMap(), 4, 1);
 #endif
 
     // Fill edge values of N and U at the half timestep for MUSCL
@@ -483,7 +507,7 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
         // the flux calculation loop
         const amrex::Box tile_box = [&](){
             auto tt = mfi.growntilebox(1);
-#if defined (WARPX_DIM_RZ)
+#if defined (WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
             // Limit the grown box for RZ at r = 0, r_max
             const int idir = 0;
             const int n_cell = -1;
@@ -509,8 +533,10 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
         amrex::Box const box_x = amrex::convert( box, tmp_U_minus_x.ixType() );
         amrex::Box const box_z = amrex::convert( box, tmp_U_minus_z.ixType() );
-#else
+#elif defined(WARPX_DIM_1D_Z)
         amrex::Box const box_z = amrex::convert( box, tmp_U_minus_z.ixType() );
+#elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+        amrex::Box const box_x = amrex::convert( box, tmp_U_minus_x.ixType() );
 #endif
 
         //N and NU are always defined at the nodes, the tmp_Q_* are defined
@@ -530,9 +556,12 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
         const amrex::Array4<amrex::Real> U_plus_x = tmp_U_plus_x.array(mfi);
         const amrex::Array4<amrex::Real> U_minus_z = tmp_U_minus_z.array(mfi);
         const amrex::Array4<amrex::Real> U_plus_z = tmp_U_plus_z.array(mfi);
-#else
+#elif defined(WARPX_DIM_1D_Z)
         const amrex::Array4<amrex::Real> U_minus_z = tmp_U_minus_z.array(mfi);
         const amrex::Array4<amrex::Real> U_plus_z = tmp_U_plus_z.array(mfi);
+#elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+        const amrex::Array4<amrex::Real> U_minus_x = tmp_U_minus_x.array(mfi);
+        const amrex::Array4<amrex::Real> U_plus_x = tmp_U_plus_x.array(mfi);
 #endif
 
         amrex::ParallelFor(tile_box,
@@ -556,7 +585,7 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
                     // J represents are 4x4 matrices that show up in the advection
                     // equations written as a function of U = {N, Ux, Uy, Uz}:
                     // \partial_t U + Jx \partial_x U + Jy \partial_y U + Jz \partial_z U = 0
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_XZ)
+#if !defined(WARPX_DIM_1D_Z)
                     const amrex::Real Vx = Ux/gamma;
                     // Compute the non-zero element of Jx
                     const amrex::Real J00x = Vx;
@@ -595,6 +624,8 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
                     const amrex::Real dU3y = ave( DownDy_U(N_arr,NUz_arr,Uz,i,j,k), UpDy_U(N_arr,NUz_arr,Uz,i,j,k) );
 
 #endif
+
+#if !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
                     const amrex::Real Vz = Uz/gamma;
                     // Compute the non-zero element of Jz
                     const amrex::Real J00z = Vz;
@@ -610,6 +641,7 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
                     const amrex::Real dU1z = ave( DownDz_U(N_arr,NUx_arr,Ux,i,j,k), UpDz_U(N_arr,NUx_arr,Ux,i,j,k) );
                     const amrex::Real dU2z = ave( DownDz_U(N_arr,NUy_arr,Uy,i,j,k), UpDz_U(N_arr,NUy_arr,Uy,i,j,k) );
                     const amrex::Real dU3z = ave( DownDz_U(N_arr,NUz_arr,Uz,i,j,k), UpDz_U(N_arr,NUz_arr,Uz,i,j,k) );
+#endif
 
 
                     // Select the specific implementation depending on dimensionality
@@ -655,9 +687,9 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
                     // then set the slope (dU) to to zero in that cell/direction
                     positivity_limiter (U_plus_z, U_minus_z,  N_arr, i, j, k, box_z, Ux, Uy, Uz, 2);
 
-#elif defined(WARPX_DIM_RZ) || defined(WARPX_DIM_XZ)
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
 
-#if defined(WARPX_DIM_RZ)
+    #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
                     const amrex::Real dr = dx[0];
                     const amrex::Real r = problo[0] + i * dr;
                     // Impose "none" boundaries
@@ -684,11 +716,12 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
                     // RZ sources:
                     const amrex::Real N_source =
                         (i != domain.smallEnd(0)) ? N_arr(i,j,k)*Vx/r : 0.0_rt;
-#else
+    #else
                     // Have no RZ-inertial source for primitive vars if in XZ
                     const amrex::Real N_source = 0.0;
-#endif
+    #endif
 
+    #if defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
                     // Compute U ([ N, U]) at the halfsteps (U_tilde) using the slopes (dU)
                     const amrex::Real  JdU0x = J00x*dU0x + J01x*dU1x + J02x*dU2x + J03x*dU3x;
                     const amrex::Real  JdU1x = J11x*dU1x;
@@ -717,7 +750,26 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
                     // then set the slope (dU) to to zero in that cell/direction
                     positivity_limiter (U_plus_z, U_minus_z,  N_arr, i, j, k, box_z, Ux, Uy, Uz, 2);
 
-#else
+    #elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+                    // Compute U ([ N, U]) at the halfsteps (U_tilde) using the slopes (dU)
+                    const amrex::Real  JdU0x = J00x*dU0x + J01x*dU1x + J02x*dU2x + J03x*dU3x;
+                    const amrex::Real  JdU1x = J11x*dU1x;
+                    const amrex::Real  JdU2x = J22x*dU2x;
+                    const amrex::Real  JdU3x = J33x*dU3x;
+                    const amrex::Real  U_tilde0 = N_arr(i,j,k)   - dt_over_dx_half*JdU0x - (dt/2.0_rt)*N_source;
+                    const amrex::Real  U_tilde1 = Ux - dt_over_dx_half*JdU1x;
+                    const amrex::Real  U_tilde2 = Uy - dt_over_dx_half*JdU2x;
+                    const amrex::Real  U_tilde3 = Uz - dt_over_dx_half*JdU3x;
+
+                    // Predict U at the cell edges (x)
+                    compute_U_edges(U_minus_x, U_plus_x, i, j, k, box_x, U_tilde0, U_tilde1, U_tilde2, U_tilde3, dU0x, dU1x, dU2x, dU3x,0);
+
+                    // Positivity Limiter for density N, if N_edge < 0,
+                    // then set the slope (dU) to to zero in that cell/direction
+                    positivity_limiter (U_plus_x, U_minus_x,  N_arr, i, j, k, box_x, Ux, Uy, Uz, 0);
+    #endif
+
+#elif defined(WARPX_DIM_1D_Z)
 
                     // Compute U ([ N, U]) at the halfsteps (U_tilde) using the slopes (dU)
                     const amrex::Real  JdU0z = J00z*dU0z + J01z*dU1z + J02z*dU2z + J03z*dU3z;
@@ -746,8 +798,10 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
 #elif defined(WARPX_DIM_RZ) || defined(WARPX_DIM_XZ)
                     set_U_edges_to_zero(U_minus_x, U_plus_x, i, j, k, box_x, 0);
                     set_U_edges_to_zero(U_minus_z, U_plus_z, i, j, k, box_z, 2);
-#else
+#elif defined(WARPX_DIM_1D_Z)
                     set_U_edges_to_zero(U_minus_z, U_plus_z, i, j, k, box_z, 2);
+#elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+                    set_U_edges_to_zero(U_minus_x, U_plus_x, i, j, k, box_x, 2);
 #endif
                 }
             }
@@ -778,9 +832,12 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
         amrex::Array4<amrex::Real> const &U_plus_x = tmp_U_plus_x.array(mfi);
         amrex::Array4<amrex::Real> const &U_minus_z = tmp_U_minus_z.array(mfi);
         amrex::Array4<amrex::Real> const &U_plus_z = tmp_U_plus_z.array(mfi);
-#else
+#elif defined(WARPX_DIM_1D_Z)
         amrex::Array4<amrex::Real> const &U_minus_z = tmp_U_minus_z.array(mfi);
         amrex::Array4<amrex::Real> const &U_plus_z = tmp_U_plus_z.array(mfi);
+#elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+        amrex::Array4<amrex::Real> const &U_minus_x = tmp_U_minus_x.array(mfi);
+        amrex::Array4<amrex::Real> const &U_plus_x = tmp_U_plus_x.array(mfi);
 #endif
 
         amrex::ParallelFor(tile_box,
@@ -879,7 +936,86 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
                 NUy_arr(i,j,k) = NUy_arr(i,j,k) - (dt/Vij)*(F2_plusx - F2_minusx + dF(U_minus_z,U_plus_z,i,j,k,clight,2,2)*S_Az);
                 NUz_arr(i,j,k) = NUz_arr(i,j,k) - (dt/Vij)*(F3_plusx - F3_minusx + dF(U_minus_z,U_plus_z,i,j,k,clight,3,2)*S_Az);
 
-#else
+#elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+
+                // Compute the flux areas for RZ
+                // Cell-centered radius
+                const amrex::Real dr = dx[0];
+                const amrex::Real r = problo[0] + i * dr;
+                amrex::Real Vij = 0.0_rt;
+
+                // Volume element
+#if defined(WARPX_DIM_RCYLINDER)
+                if (i == domain.smallEnd(0)) {
+                    Vij = 2.0_rt*MathConst::pi*(dr/2.0_rt)*(dr/4.0_rt);
+                } else if (i == domain.bigEnd(0)+1) {
+                    Vij = 2.0_rt*MathConst::pi*(r - dr/4.0_rt)*(dr/2.0_rt);
+                }  else {
+                    Vij = 2.0_rt*MathConst::pi*r*dr;
+                }
+#elif defined(WARPX_DIM_RSPHERE)
+                if (i == domain.smallEnd(0)) {
+                    Vij = 4.0_rt/3.0_rt*MathConst::pi*(dr/2.0_rt)*(dr/2.0_rt)*(dr/2.0_rt);
+                } else if (i == domain.bigEnd(0)+1) {
+                    Vij = 2.0_rt*MathConst::pi*r*r*dr;
+                }  else {
+                    Vij = 4.0_rt*MathConst::pi*r*r*dr;
+                }
+#endif
+
+                // Radial Surfaces
+#if defined(WARPX_DIM_RCYLINDER)
+                amrex::Real S_Ar_plus = 2.0_rt*MathConst::pi*(r + dr/2.0_rt);
+                amrex::Real S_Ar_minus = 2.0_rt*MathConst::pi*(r - dr/2.0_rt);
+                if (i == domain.smallEnd(0)) {
+                    S_Ar_minus = 0.0_rt;
+                }
+                if (i == domain.bigEnd(0)+1) {
+                    S_Ar_plus = 2.0_rt*MathConst::pi*(r);
+                }
+#elif defined(WARPX_DIM_RSPHERE)
+                amrex::Real S_Ar_plus = 4.0_rt*MathConst::pi*(r + dr/2.0_rt)*(r + dr/2.0_rt);
+                amrex::Real S_Ar_minus = 4.0_rt*MathConst::pi*(r - dr/2.0_rt)*(r - dr/2.0_rt);
+                if (i == domain.smallEnd(0)) {
+                    S_Ar_minus = 0.0_rt;
+                }
+                if (i == domain.bigEnd(0)+1) {
+                    S_Ar_plus = 4.0_rt*MathConst::pi*(r*r);
+                }
+#endif
+
+                // Impose "none" boundaries
+                // Condition: Vx(r) = 0 at boundaries
+                const amrex::Real Vx_I_minus = V_calc(U_minus_x,i,j,k,0,clight);
+                const amrex::Real Vx_L_plus = V_calc(U_plus_x,i-1,j,k,0,clight);
+
+                // compute the fluxes:
+                // (note that _plus is shifted due to grid location)
+                amrex::Real Vx_L_minus = 0.0_rt, Vx_I_plus = 0.0_rt;
+                amrex::Real F0_minusx = 0.0_rt, F1_minusx = 0.0_rt, F2_minusx = 0.0_rt, F3_minusx = 0.0_rt;
+                amrex::Real F0_plusx = 0.0_rt, F1_plusx = 0.0_rt, F2_plusx = 0.0_rt, F3_plusx = 0.0_rt;
+                if (i != domain.smallEnd(0)) {
+                    Vx_L_minus = V_calc(U_minus_x,i-1,j,k,0,clight);
+                    F0_minusx = flux_N(  U_minus_x, U_plus_x, i-1, j, k, Vx_L_minus, Vx_L_plus)*S_Ar_minus;
+                    F1_minusx = flux_NUx(U_minus_x, U_plus_x, i-1, j, k, Vx_L_minus, Vx_L_plus)*S_Ar_minus;
+                    F2_minusx = flux_NUy(U_minus_x, U_plus_x, i-1, j, k, Vx_L_minus, Vx_L_plus)*S_Ar_minus;
+                    F3_minusx = flux_NUz(U_minus_x, U_plus_x, i-1, j, k, Vx_L_minus, Vx_L_plus)*S_Ar_minus;
+                }
+                if (i < domain.bigEnd(0)) {
+                    Vx_I_plus = V_calc(U_plus_x,i,j,k,0,clight);
+                    F0_plusx  = flux_N(  U_minus_x, U_plus_x, i  , j, k, Vx_I_minus, Vx_I_plus)*S_Ar_plus;
+                    F1_plusx  = flux_NUx(U_minus_x, U_plus_x, i  , j, k, Vx_I_minus, Vx_I_plus)*S_Ar_plus;
+                    F2_plusx  = flux_NUy(U_minus_x, U_plus_x, i  , j, k, Vx_I_minus, Vx_I_plus)*S_Ar_plus;
+                    F3_plusx  = flux_NUz(U_minus_x, U_plus_x, i  , j, k, Vx_I_minus, Vx_I_plus)*S_Ar_plus;
+                }
+
+                // Update the conserved variables from tn -> tn + dt
+                N_arr(i,j,k) = N_arr(i,j,k)     - (dt/Vij)*(F0_plusx - F0_minusx);
+                NUx_arr(i,j,k) = NUx_arr(i,j,k) - (dt/Vij)*(F1_plusx - F1_minusx);
+                NUy_arr(i,j,k) = NUy_arr(i,j,k) - (dt/Vij)*(F2_plusx - F2_minusx);
+                NUz_arr(i,j,k) = NUz_arr(i,j,k) - (dt/Vij)*(F3_plusx - F3_minusx);
+
+#elif defined(WARPX_DIM_1D_Z)
 
                 // Update the conserved variables Q = [N, NU] from tn -> tn + dt
                 N_arr(i,j,k) = N_arr(i,j,k) - dt_over_dz*dF(U_minus_z,U_plus_z,i,j,k,clight,0,2);
@@ -894,7 +1030,7 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
 
 
 // Momentum source due to curvature
-#if defined(WARPX_DIM_RZ)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
 void WarpXFluidContainer::centrifugal_source_rz (ablastr::fields::MultiFabRegister& fields, int lev)
 {
     using ablastr::fields::Direction;
@@ -1113,10 +1249,14 @@ void WarpXFluidContainer::GatherAndPush (
                             const amrex::Real x = problo[0] + i * dx[0];
                             const amrex::Real y = 0.0_rt;
                             const amrex::Real z = problo[1] + j * dx[1];
-#else
+#elif defined(WARPX_DIM_1D_Z)
                             const amrex::Real x = 0.0_rt;
                             const amrex::Real y = 0.0_rt;
                             const amrex::Real z = problo[0] + i * dx[0];
+#elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+                            const amrex::Real x = problo[0] + i * dx[0];
+                            const amrex::Real y = 0.0_rt;
+                            const amrex::Real z = 0.0_rt;
 #endif
 
                             // Get the lab frame E and B
@@ -1174,10 +1314,14 @@ void WarpXFluidContainer::GatherAndPush (
                             const amrex::Real x = problo[0] + i * dx[0];
                             const amrex::Real y = 0.0_rt;
                             const amrex::Real z = problo[1] + j * dx[1];
-#else
+#elif defined(WARPX_DIM_1D_Z)
                             const amrex::Real x = 0.0_rt;
                             const amrex::Real y = 0.0_rt;
                             const amrex::Real z = problo[0] + i * dx[0];
+#elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+                            const amrex::Real x = problo[0] + i * dx[0];
+                            const amrex::Real y = 0.0_rt;
+                            const amrex::Real z = 0.0_rt;
 #endif
 
                             Ex_Nodal += Exfield_parser(x, y, z, t);
@@ -1195,10 +1339,14 @@ void WarpXFluidContainer::GatherAndPush (
                             const amrex::Real x = problo[0] + i * dx[0];
                             const amrex::Real y = 0.0_rt;
                             const amrex::Real z = problo[1] + j * dx[1];
-#else
+#elif defined(WARPX_DIM_1D_Z)
                             const amrex::Real x = 0.0_rt;
                             const amrex::Real y = 0.0_rt;
                             const amrex::Real z = problo[0] + i * dx[0];
+#elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+                            const amrex::Real x = problo[0] + i * dx[0];
+                            const amrex::Real y = 0.0_rt;
+                            const amrex::Real z = 0.0_rt;
 #endif
 
                             Bx_Nodal += Bxfield_parser(x, y, z, t);
@@ -1213,7 +1361,7 @@ void WarpXFluidContainer::GatherAndPush (
                     amrex::Real tmp_Uz = (NUz_arr(i, j, k) / N_arr(i,j,k));
 
                     // Enforce RZ boundary conditions
-#if defined(WARPX_DIM_RZ)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
                     if  ( i == 0 ){
                         Ex_Nodal = 0.0;
                         Ey_Nodal = 0.0;
@@ -1394,5 +1542,574 @@ void WarpXFluidContainer::DepositCurrent(
                 if ( owner_mask_z_arr(i,j,k) ) { jz_arr(i, j, k) += jz_tmp; }
             }
         );
+    }
+}
+
+
+void WarpXFluidContainer::HybridInitializeUe (
+        ablastr::fields::MultiFabRegister& m_fields,
+        ablastr::fields::VectorField const& Ji,
+        HybridPICModel const* hybrid_model,
+        int lev)
+{
+    WARPX_PROFILE("WarpXFluidContainer::HybridInitializeUe");
+
+    WarpX &warpx = WarpX::GetInstance();
+    const amrex::Geometry &geom = warpx.Geom(lev);
+    const amrex::Periodicity &period = geom.periodicity();
+
+    using ablastr::fields::Direction;
+    using warpx::fields::FieldType;
+
+    // For safety condition (divition by rho)
+    amrex::Real rho_floor = PhysConst::q_e*hybrid_model->m_n_floor;
+
+    // Set Ue to 0
+    m_fields.get(name_mf_NU, Direction{0}, lev)->setVal(0.0_rt);
+    m_fields.get(name_mf_NU, Direction{1}, lev)->setVal(0.0_rt);
+    m_fields.get(name_mf_NU, Direction{2}, lev)->setVal(0.0_rt);
+
+    const auto ix_type = m_fields.get(name_mf_NU, Direction{0}, lev)->ixType().toIntVect();
+
+    ablastr::fields::VectorField current_fp_ampere = m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
+
+    // Index type required for interpolating fields from their respective
+    // staggering to nodal grid
+    amrex::GpuArray<int, 3> const& Jx_stag = hybrid_model->Jx_IndexType;
+    amrex::GpuArray<int, 3> const& Jy_stag = hybrid_model->Jy_IndexType;
+    amrex::GpuArray<int, 3> const& Jz_stag = hybrid_model->Jz_IndexType;
+
+    // Parameters for 'interp' that maps from Yee to nodal mesh
+    amrex::GpuArray<int, 3> const& nodal = {1, 1, 1};
+    // The coarsingng is just 1 so no coarsening is done
+    amrex::GpuArray<int, 3> const& coarsen = {1, 1, 1};
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for ( MFIter mfi(*m_fields.get(name_mf_N, lev), TilingIfNotGPU()); mfi.isValid(); ++mfi )
+        {
+            // using rho at n+1/2 in rho_fp_temp
+            amrex::Array4<amrex::Real> const& rho = m_fields.get(FieldType::hybrid_rho_fp_temp, lev)->array(mfi);
+
+            amrex::Array4<amrex::Real> const& Jx = current_fp_ampere[0]->array(mfi);
+            amrex::Array4<amrex::Real> const& Jy = current_fp_ampere[1]->array(mfi);
+            amrex::Array4<amrex::Real> const& Jz = current_fp_ampere[2]->array(mfi);
+
+            amrex::Array4<amrex::Real> const& Jix = Ji[0]->array(mfi);
+            amrex::Array4<amrex::Real> const& Jiy = Ji[1]->array(mfi);
+            amrex::Array4<amrex::Real> const& Jiz = Ji[2]->array(mfi);
+
+            amrex::Array4<amrex::Real> const& Uex = m_fields.get(name_mf_NU, Direction{0}, lev)->array(mfi);
+            amrex::Array4<amrex::Real> const& Uey = m_fields.get(name_mf_NU, Direction{1}, lev)->array(mfi);
+            amrex::Array4<amrex::Real> const& Uez = m_fields.get(name_mf_NU, Direction{2}, lev)->array(mfi);
+
+            const Box& tilebox  = mfi.tilebox();
+            //amrex::Box box = amrex::convert( tilebox, ix_type );
+            //box.grow(m_fields.get(name_mf_K, lev)->nGrowVect());
+
+            ParallelFor(tilebox, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                // to test, Ue is calculated only when rho > rho_floor
+                if( rho(i, j, k) > rho_floor ){
+
+                    amrex::Real rho_val = rho(i, j, k); // to test
+
+                    // Interpolate the total plasma current to a nodal grid
+                    auto const jx_interp = ablastr::coarsen::sample::Interp(Jx, Jx_stag, nodal, coarsen, i, j, k, 0);
+                    auto const jy_interp = ablastr::coarsen::sample::Interp(Jy, Jy_stag, nodal, coarsen, i, j, k, 0);
+                    auto const jz_interp = ablastr::coarsen::sample::Interp(Jz, Jz_stag, nodal, coarsen, i, j, k, 0);
+
+                    // Interpolate the ion current to a nodal grid
+                    auto const jix_interp = ablastr::coarsen::sample::Interp(Jix, Jx_stag, nodal, coarsen, i, j, k, 0);
+                    auto const jiy_interp = ablastr::coarsen::sample::Interp(Jiy, Jy_stag, nodal, coarsen, i, j, k, 0);
+                    auto const jiz_interp = ablastr::coarsen::sample::Interp(Jiz, Jz_stag, nodal, coarsen, i, j, k, 0);
+
+                    // this needs to be rewritten for multiple ion species when implemented :
+                    Uex(i, j, k) = -(jx_interp - jix_interp)/rho_val;
+                    Uey(i, j, k) = -(jy_interp - jiy_interp)/rho_val;
+                    Uez(i, j, k) = -(jz_interp - jiz_interp)/rho_val;
+                }
+
+            });
+        }
+
+    m_fields.get(name_mf_NU, Direction{0}, lev)->FillBoundary(m_fields.get(name_mf_NU, Direction{0}, lev)->nGrowVect(), period);
+    m_fields.get(name_mf_NU, Direction{1}, lev)->FillBoundary(m_fields.get(name_mf_NU, Direction{1}, lev)->nGrowVect(), period);
+    m_fields.get(name_mf_NU, Direction{2}, lev)->FillBoundary(m_fields.get(name_mf_NU, Direction{2}, lev)->nGrowVect(), period);
+}
+
+
+void WarpXFluidContainer::HybridInitializeKe (ablastr::fields::MultiFabRegister& m_fields, amrex::Real gamma, amrex::Real n_floor, int lev)
+{
+    WARPX_PROFILE("WarpXFluidContainer::HybridInitializeKe");
+
+    using warpx::fields::FieldType;
+
+    WarpX &warpx = WarpX::GetInstance();
+    const amrex::Geometry &geom = warpx.Geom(lev);
+    const amrex::Periodicity &period = geom.periodicity();
+
+    // Set Ke to 0
+    m_fields.get(name_mf_K, lev)->setVal(0);
+
+    const auto ix_type = m_fields.get(name_mf_K, lev)->ixType().toIntVect();
+
+    // For safety condition (divition by rho)
+    amrex::Real rho_floor = PhysConst::q_e*n_floor;
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for ( MFIter mfi(*m_fields.get(name_mf_N, lev), TilingIfNotGPU()); mfi.isValid(); ++mfi )
+        {
+            amrex::Array4<amrex::Real> const& rho = m_fields.get(name_mf_N, lev)->array(mfi);
+            amrex::Array4<amrex::Real> const& Te = m_fields.get(name_mf_T, lev)->array(mfi);
+            amrex::Array4<amrex::Real> const& Ke = m_fields.get(name_mf_K, lev)->array(mfi);
+
+            const Box& tilebox  = mfi.tilebox();
+            amrex::Box box = amrex::convert( tilebox, ix_type );
+            box.grow(m_fields.get(name_mf_K, lev)->nGrowVect());
+
+            ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+
+                if( rho(i, j, k) > rho_floor ){
+
+                    amrex::Real rho_val = rho(i, j, k);
+                    amrex::Real ne = rho_val/PhysConst::q_e;
+                    Ke(i, j, k) = Te(i, j, k)*std::pow(ne, 1-gamma)*(PhysConst::kb/PhysConst::q_e); // Ke with Te in eV to avoid too small or large numbers
+                }
+            });
+        }
+    m_fields.get(name_mf_K, lev)->FillBoundary(m_fields.get(name_mf_K, lev)->nGrowVect(), period);
+}
+
+
+void WarpXFluidContainer::HybridQDSMCUpdateTe (ablastr::fields::MultiFabRegister& m_fields, amrex::Real gamma, amrex::Real n_floor, int lev)
+{
+    WARPX_PROFILE("WarpXFluidContainer::HybridQDSMCUpdateTe");
+
+    using warpx::fields::FieldType;
+
+    WarpX &warpx = WarpX::GetInstance();
+    const amrex::Geometry &geom = warpx.Geom(lev);
+    const amrex::Periodicity &period = geom.periodicity();
+    const auto dx = geom.CellSizeArray();
+    const auto cell_volume = dx[0]*dx[1]*dx[2];
+
+    // Set Te to 0
+    m_fields.get(name_mf_T, lev)->setVal(0);
+
+    const auto ix_type = m_fields.get(name_mf_T, lev)->ixType().toIntVect();
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for ( MFIter mfi(*m_fields.get(name_mf_N, lev), TilingIfNotGPU()); mfi.isValid(); ++mfi )
+        {
+            amrex::Array4<amrex::Real> const& rho = m_fields.get(name_mf_N, lev)->array(mfi);
+            amrex::Array4<amrex::Real> const& Ke = m_fields.get(name_mf_K, lev)->array(mfi);
+            amrex::Array4<amrex::Real> const& Te = m_fields.get(name_mf_T, lev)->array(mfi);
+            amrex::Array4<amrex::Real> const& weights = m_fields.get(name_mf_weights, lev)->array(mfi);
+
+            const Box& tilebox  = mfi.tilebox();
+            amrex::Box box = amrex::convert( tilebox, ix_type );
+            box.grow(m_fields.get(name_mf_K, lev)->nGrowVect());
+
+            ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                if( rho(i, j, k) > 0 ){
+
+                    amrex::Real ne = rho(i, j, k)/PhysConst::q_e;
+                    amrex::Real weight = weights(i,j,k);
+
+                    if(weight>0 && ne>n_floor){
+
+                        weight = weight*cell_volume;
+                        Te(i, j, k) = (Ke(i, j, k)/std::pow(ne, 1-gamma))/weight / (PhysConst::kb/PhysConst::q_e); // Te back to K
+
+                    }
+                }
+            });
+        }
+    m_fields.get(name_mf_T, lev)->FillBoundary(m_fields.get(name_mf_T, lev)->nGrowVect(), period);
+}
+
+
+// To Do:
+// pass Te and rho multifabs as arguments too !
+void WarpXFluidContainer::Hybrid_Electron_Joule_Heating (ablastr::fields::MultiFabRegister& m_fields,
+                                        HybridPICModel const* hybrid_model,
+                                        amrex::Real dt, int lev)
+{
+    WARPX_PROFILE("WarpXFluidContainer::Hybrid_Electron_Joule_Heating");
+
+    WarpX &warpx = WarpX::GetInstance();
+    const amrex::Geometry &geom = warpx.Geom(lev);
+    const amrex::Periodicity &period = geom.periodicity();
+
+    using ablastr::fields::Direction;
+    using warpx::fields::FieldType;
+
+    // get hybrid model parameters
+    const auto eta = hybrid_model->m_eta;
+
+    // For safety condition (divition by rho)
+    amrex::Real rho_floor = PhysConst::q_e*hybrid_model->m_n_floor;
+
+    // Te0 to treat it as floor value. This is a quick fix for Spitzer type resistivity.
+    const auto Te0_K = hybrid_model->m_elec_temp / PhysConst::kb;
+
+    const auto ix_type = m_fields.get(name_mf_NU, Direction{0}, lev)->ixType().toIntVect();
+
+    ablastr::fields::VectorField current_fp_ampere = m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
+
+    // Index type required for interpolating fields from their respective
+    // staggering to nodal grid
+    amrex::GpuArray<int, 3> const& Jx_stag = hybrid_model->Jx_IndexType;
+    amrex::GpuArray<int, 3> const& Jy_stag = hybrid_model->Jy_IndexType;
+    amrex::GpuArray<int, 3> const& Jz_stag = hybrid_model->Jz_IndexType;
+
+    // Parameters for 'interp' that maps from Yee to nodal mesh
+    amrex::GpuArray<int, 3> const& nodal = {1, 1, 1};
+    // The coarsingng is just 1 so no coarsening is done
+    amrex::GpuArray<int, 3> const& coarsen = {1, 1, 1};
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for ( MFIter mfi(*m_fields.get(name_mf_N, lev), TilingIfNotGPU()); mfi.isValid(); ++mfi )
+        {
+
+            // using Te right after qdsmc update
+            amrex::Array4<amrex::Real> const& Te = m_fields.get(name_mf_T, lev)->array(mfi);
+
+            // using rho at n+1
+            amrex::Array4<amrex::Real> const& rho = m_fields.get(FieldType::rho_fp, lev)->array(mfi);
+
+            // using total plasma current at n+1
+            amrex::Array4<amrex::Real> const& Jx = current_fp_ampere[0]->array(mfi);
+            amrex::Array4<amrex::Real> const& Jy = current_fp_ampere[1]->array(mfi);
+            amrex::Array4<amrex::Real> const& Jz = current_fp_ampere[2]->array(mfi);
+
+            const Box& tilebox  = mfi.tilebox();
+
+            ParallelFor(tilebox, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+
+                if(rho(i, j, k) > rho_floor){
+
+                    amrex::Real rho_val = rho(i, j, k);
+                    amrex::Real ne_val = rho_val/PhysConst::q_e;
+
+                    amrex::Real Te_val = Te(i, j, k); // Te in K
+
+                    // Interpolate the total plasma current to a nodal grid
+                    auto const jx_interp = ablastr::coarsen::sample::Interp(Jx, Jx_stag, nodal, coarsen, i, j, k, 0);
+                    auto const jy_interp = ablastr::coarsen::sample::Interp(Jy, Jy_stag, nodal, coarsen, i, j, k, 0);
+                    auto const jz_interp = ablastr::coarsen::sample::Interp(Jz, Jz_stag, nodal, coarsen, i, j, k, 0);
+
+                    // calculate J^2 on nodal grid (since Te is nodal)
+                    amrex::Real jtot_val = 0_rt;
+                    jtot_val = std::sqrt(jx_interp*jx_interp + jy_interp*jy_interp + jz_interp*jz_interp);
+
+                    // calculate eta*J^2
+                    amrex::Real eta_J2 = eta(rho_val, jtot_val, Te_val)*jtot_val*jtot_val;
+
+                    // update Te
+                    Te(i, j, k) = Te(i, j, k) + dt*eta_J2/(1.5*ne_val*PhysConst::kb);
+                }
+            });
+        }
+    m_fields.get(name_mf_T, lev)->FillBoundary(m_fields.get(name_mf_T, lev)->nGrowVect(), period);
+}
+
+
+// To Do:
+// pass Te and rho multifabs as arguments too !
+void WarpXFluidContainer::Hybrid_Electron_Bremsstrahlung (ablastr::fields::MultiFabRegister& m_fields,
+                                        HybridPICModel const* hybrid_model,
+                                        amrex::Real dt, int lev)
+{
+    WARPX_PROFILE("WarpXFluidContainer::Hybrid_Electron_Bremsstrahlung");
+
+    WarpX &warpx = WarpX::GetInstance();
+    const amrex::Geometry &geom = warpx.Geom(lev);
+    const amrex::Periodicity &period = geom.periodicity();
+
+    using ablastr::fields::Direction;
+    using warpx::fields::FieldType;
+
+    // Zeff should be self consistent with simulation but it is
+    // an input parameter for now.
+    // Once Hybrid PIC is extended to do more than 1 ion species
+    // Zeff should be calculated based on relative densities
+    const auto Zeff = hybrid_model->m_Zeff;
+    amrex::Real Zeff2 = Zeff*Zeff;
+    amrex::Real constant_val = 5.91361e37;
+
+    // For safety condition (divition by rho)
+    amrex::Real rho_floor = PhysConst::q_e*hybrid_model->m_n_floor;
+    const auto ix_type = m_fields.get(name_mf_NU, Direction{0}, lev)->ixType().toIntVect();
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for ( MFIter mfi(*m_fields.get(name_mf_N, lev), TilingIfNotGPU()); mfi.isValid(); ++mfi )
+        {
+            // using Te right after Joule heating/qdsmc (operator splitting approach)
+            // this is first order accurate in time
+            amrex::Array4<amrex::Real> const& Te = m_fields.get(name_mf_T, lev)->array(mfi); // in Joules here
+
+            // using rho at n+1
+            amrex::Array4<amrex::Real> const& rho = m_fields.get(FieldType::rho_fp, lev)->array(mfi);
+
+            const Box& tilebox  = mfi.tilebox();
+            amrex::Box box = amrex::convert( tilebox, ix_type );
+            box.grow(m_fields.get(name_mf_K, lev)->nGrowVect());
+
+            ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+
+                if(rho(i, j, k) > rho_floor){
+
+                    amrex::Real rho_val = rho(i, j, k);
+                    amrex::Real ne_val = rho_val/PhysConst::q_e;
+                    amrex::Real Te_eV = Te(i, j, k)*PhysConst::kb/PhysConst::q_e;
+
+                    // calculate power loss per unit volume due to Bremsstrahlung
+                    // Expression gives value in W/m^3
+                    // update once multi ion species is included (one of these ne_val should be ni_val)
+                    amrex::Real dW_dV = Zeff2*ne_val*ne_val*std::sqrt(Te_eV)/constant_val;
+
+                    // update Te
+                    Te(i, j, k) = Te(i, j, k) - dW_dV*dt/(1.5*ne_val*PhysConst::kb);
+
+                }
+            });
+        }
+    m_fields.get(name_mf_T, lev)->FillBoundary(m_fields.get(name_mf_T, lev)->nGrowVect(), period);
+}
+
+
+/*
+    Function for electron-ion temperature relaxation as part of the electron energy equation used in the Hybrid PIC model.
+    This terms covers energy book-keeping since drag-diffusion approach is used on ions.
+*/
+void WarpXFluidContainer::Hybrid_Electron_Qei (ablastr::fields::MultiFabRegister& m_fields,
+                                        HybridPICModel const* hybrid_model,
+                                        const std::string temperature_vf_str,
+                                        amrex::Real m_ion, amrex::Real dt, int lev)
+{
+    WARPX_PROFILE("WarpXFluidContainer::Hybrid_Electron_Qei");
+
+    WarpX &warpx = WarpX::GetInstance();
+    const amrex::Geometry &geom = warpx.Geom(lev);
+    const amrex::Periodicity &period = geom.periodicity();
+
+    using warpx::fields::FieldType;
+    using ablastr::fields::Direction;
+
+    const auto nu_ei = hybrid_model->m_nu_ei;
+
+    // For safety condition (divition by rho)
+    amrex::Real rho_floor = PhysConst::q_e*hybrid_model->m_n_floor;
+
+    amrex::Real m_elec = PhysConst::m_e;
+    amrex::Real kb = PhysConst::kb;
+
+    // Index type required for interpolating fields from their respective
+    // staggering to nodal grid
+    amrex::GpuArray<int, 3> const& Jx_stag = hybrid_model->Jx_IndexType;
+    amrex::GpuArray<int, 3> const& Jy_stag = hybrid_model->Jy_IndexType;
+    amrex::GpuArray<int, 3> const& Jz_stag = hybrid_model->Jz_IndexType;
+
+    // Parameters for 'interp' that maps from Yee to nodal mesh
+    amrex::GpuArray<int, 3> const& nodal = {1, 1, 1};
+    // The coarsingng is just 1 so no coarsening is done
+    amrex::GpuArray<int, 3> const& coarsen = {1, 1, 1};
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for ( MFIter mfi(*m_fields.get(name_mf_N, lev), TilingIfNotGPU()); mfi.isValid(); ++mfi )
+        {
+            // This assumes operator splitting approach
+            // use temperatures at n+1
+            amrex::Array4<amrex::Real> const& Te = m_fields.get(name_mf_T, lev)->array(mfi);
+            amrex::Array4<amrex::Real> const& Ti_x = m_fields.get(temperature_vf_str, Direction{0}, lev)->array(mfi);
+            amrex::Array4<amrex::Real> const& Ti_y = m_fields.get(temperature_vf_str, Direction{1}, lev)->array(mfi);
+            amrex::Array4<amrex::Real> const& Ti_z = m_fields.get(temperature_vf_str, Direction{2}, lev)->array(mfi);
+            // using rho at n+1
+            amrex::Array4<amrex::Real> const& rho = m_fields.get(FieldType::rho_fp, lev)->array(mfi);
+
+            const Box& tilebox  = mfi.tilebox();
+
+            ParallelFor(tilebox, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+
+                // careful here, once multi ion species feature is included
+                if(rho(i, j, k) > rho_floor){
+
+                    amrex::Real rho_val = rho(i, j, k);
+                    amrex::Real ne_val = rho(i, j, k) / PhysConst::q_e;
+
+                    // nu_ei expression defined by user using parser
+                    amrex::Real nu_ei_val = nu_ei(ne_val, Te(i, j, k));
+
+                    auto const Tix_interp = ablastr::coarsen::sample::Interp(Ti_x, Jx_stag, nodal, coarsen, i, j, k, 0);
+                    auto const Tiy_interp = ablastr::coarsen::sample::Interp(Ti_y, Jy_stag, nodal, coarsen, i, j, k, 0);
+                    auto const Tiz_interp = ablastr::coarsen::sample::Interp(Ti_z, Jz_stag, nodal, coarsen, i, j, k, 0);
+
+                    // avg Ti over degrees of freedom
+                    amrex::Real Ti_val_K = (Tix_interp + Tiy_interp + Tiz_interp)/3.0;
+
+                    // -3*me/mi*nu_ei*ni*kb*(Te-Ti), then divide by 3/2*kb*ne
+                    // since only one ion species for now, ni_val=ne_val -> -2*me/mi*nu_ei*(Te-Ti)
+                    Te(i, j, k) = Te(i, j, k) - dt*2*m_elec/m_ion*nu_ei_val*(Te(i, j, k) - Ti_val_K);
+                }
+            });
+        }
+
+    m_fields.get(name_mf_T, lev)->FillBoundary(m_fields.get(name_mf_T, lev)->nGrowVect(), period);
+}
+
+
+/*
+    TO DO: Move this to a separate class that computes drag diffusion for the following inputs:
+        - Particle container
+        - Fluid multifabs (density, velocity and temperature)
+        - Parser with collision frequency to use
+        - Also: pass particle container as argument or species id instead of species_name to avoid loop over mypc
+
+    Since nu_drag is calculated with same collision frequency used in nu_ei,
+*/
+void WarpXFluidContainer::Hybrid_Drag_Diffusion (ablastr::fields::MultiFabRegister& m_fields,
+                                        HybridPICModel const* hybrid_model,
+                                        const std::string species_name, amrex::Real dt, int lev)
+{
+
+    WARPX_PROFILE("WarpXFluidContainer::Hybrid_Drag_Diffusion");
+
+    auto& warpx = WarpX::GetInstance();
+    auto& mypc = warpx.GetPartContainer();
+
+    const amrex::Geometry &geom = warpx.Geom(lev);
+    const amrex::Periodicity &period = geom.periodicity();
+
+    using warpx::fields::FieldType;
+    using ablastr::fields::Direction;
+
+    const auto nu_ei = hybrid_model->m_nu_ei;
+
+    amrex::Real rho_floor = PhysConst::q_e*hybrid_model->m_n_floor;
+    amrex::Real n_e_floor = hybrid_model->m_n_floor;
+    amrex::Real m_elec = PhysConst::m_e;
+    amrex::Real kb = PhysConst::kb;
+
+    // Careful what rho is used here.
+    const amrex::MultiFab &rho_mf = *warpx.m_fields.get(FieldType::rho_fp, 0); // Instead of rho, check of using fluid container N
+    const amrex::MultiFab &Te_mf = *warpx.m_fields.get(name_mf_T, 0);
+    const amrex::MultiFab &Ue_x = *warpx.m_fields.get(name_mf_NU, Direction{0}, 0);
+    const amrex::MultiFab &Ue_y = *warpx.m_fields.get(name_mf_NU, Direction{1}, 0);
+    const amrex::MultiFab &Ue_z = *warpx.m_fields.get(name_mf_NU, Direction{2}, 0);
+
+    // pass species id instead of species name as argument of function ?
+    auto const species_names = mypc.GetSpeciesNames();
+    for(int i_s=0; i_s<mypc.nSpecies(); i_s++){
+
+        auto& myspc = mypc.GetParticleContainer(i_s);
+        amrex::Real m_ion = myspc.getMass();
+
+        if(species_name==species_names[myspc.getSpeciesId()]){
+
+            // Loop over refinement levels
+            auto const flvl = myspc.finestLevel();
+            for (int lev = 0; lev <= flvl; ++lev) {
+
+                auto *cost = WarpX::getCosts(lev);
+
+#ifdef _OPENMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+                for (WarpXParIter pti(myspc, lev); pti.isValid(); ++pti) {
+
+                    if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
+                        {
+                            amrex::Gpu::synchronize();
+                        }
+                        auto wt = static_cast<amrex::Real>(amrex::second());
+
+                    // -------- Move this to "doDragDiffusionWithinTile function" ----------
+                    //----------------------------------------------------------------------
+                    //----------------------------------------------------------------------
+
+                    const long np = pti.numParticles();
+
+                    const auto &rho_arr = rho_mf[pti].array();
+                    const auto &T_arr = Te_mf[pti].array();
+                    const auto &Ue_x_arr = Ue_x[pti].array();
+                    const auto &Ue_y_arr = Ue_y[pti].array();
+                    const auto &Ue_z_arr = Ue_z[pti].array();
+
+                    amrex::Box tilebox = pti.tilebox();
+                    const amrex::XDim3 dinv = WarpX::InvCellSize(lev);
+                    const auto plo = warpx.Geom(lev).ProbLoArray();
+
+                    auto GetPosition = GetParticlePosition<PIdx>(pti);
+
+                    auto& attribs = pti.GetAttribs();
+                    amrex::ParticleReal* const AMREX_RESTRICT ux = attribs[PIdx::ux].dataPtr();
+                    amrex::ParticleReal* const AMREX_RESTRICT uy = attribs[PIdx::uy].dataPtr();
+                    amrex::ParticleReal* const AMREX_RESTRICT uz = attribs[PIdx::uz].dataPtr();
+
+                    amrex::ParallelForRNG(np, [=] AMREX_GPU_HOST_DEVICE (long ip, amrex::RandomEngine const& engine)
+                        {
+                            amrex::ParticleReal x, y, z;
+                            GetPosition.AsStored(ip, x, y, z);
+
+                            amrex::ParticleReal n_e = 0;
+                            amrex::ParticleReal T_e = 0;
+                            amrex::ParticleReal ue_x = 0, ue_y = 0, ue_z = 0;
+                            doGatherNodalScalarFieldShapeN(x, y, z, n_e, rho_arr, dinv, plo);
+                            doGatherNodalScalarFieldShapeN(x, y, z, T_e, T_arr, dinv, plo); // T_e in K
+                            doGatherNodalScalarFieldShapeN(x, y, z, ue_x, Ue_x_arr, dinv, plo);
+                            doGatherNodalScalarFieldShapeN(x, y, z, ue_y, Ue_y_arr, dinv, plo);
+                            doGatherNodalScalarFieldShapeN(x, y, z, ue_z, Ue_z_arr, dinv, plo);
+
+                            n_e = n_e/PhysConst::q_e;
+
+                            if(T_e*kb/PhysConst::q_e<0.1){ return; } // this SHOULD NOT be here, remove. Use Te_floor in parser
+                            if(n_e<n_e_floor){ return; }
+
+                            // nu_ei expression defined by user using parser
+                            amrex::ParticleReal nu_ei_val = nu_ei(n_e, T_e);
+
+                            amrex::ParticleReal nu_drag = nu_ei_val * m_elec / m_ion;
+                            amrex::ParticleReal D = nu_drag * kb * T_e / m_ion; // T_e in K
+                            amrex::ParticleReal R_x, R_y, R_z;
+                            amrex::ParticleReal diffusion_term = std::sqrt(2*D*dt);
+
+                            R_x = amrex::RandomNormal(0_prt, 1.0_prt, engine);
+                            R_y = amrex::RandomNormal(0_prt, 1.0_prt, engine);
+                            R_z = amrex::RandomNormal(0_prt, 1.0_prt, engine);
+
+                            // update particle velocity
+                            ux[ip] = ux[ip] - nu_drag*(ux[ip]-ue_x)*dt + diffusion_term*R_x;
+                            uy[ip] = uy[ip] - nu_drag*(uy[ip]-ue_y)*dt + diffusion_term*R_y;
+                            uz[ip] = uz[ip] - nu_drag*(uz[ip]-ue_z)*dt + diffusion_term*R_z;
+
+                        });
+
+                    //----------------------------------------------------------------------
+                    //----------------------------------------------------------------------
+
+                    if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
+                    {
+                        amrex::Gpu::synchronize();
+                        wt = static_cast<amrex::Real>(amrex::second()) - wt;
+                        amrex::HostDevice::Atomic::Add( &(*cost)[pti.index()], wt);
+                    }
+
+                }
+
+            }
+        }
+
     }
 }

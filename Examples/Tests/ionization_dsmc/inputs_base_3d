@@ -30,7 +30,6 @@ amr.max_grid_size = 4
 #################################
 ###### BOUNDARY CONDITIONS ######
 #################################
-geometry.is_periodic = 1 1 1
 boundary.field_hi = periodic periodic periodic
 boundary.field_lo = periodic periodic periodic
 boundary.particle_hi = periodic periodic periodic
@@ -89,7 +88,7 @@ neutrals.uz_th = sqrt(q_e * Tn / m_p) / clight
 collisions.collision_names = ioniz
 
 ioniz.ionization_energy = 13.59844
-ioniz.product_species = ions electrons
+ioniz.product_species = electrons ions
 ioniz.ionization_target_species = neutrals
 ioniz.ndt = 1
 ioniz.scattering_processes = ionization
@@ -103,6 +102,8 @@ warpx.reduced_diags_names = counts
 counts.intervals = 5
 counts.path = diags/
 counts.type = ParticleNumber
+
+warpx.synchronize_velocity_for_diagnostics = 1
 
 # Diagnostics
 diag1.intervals = 250
