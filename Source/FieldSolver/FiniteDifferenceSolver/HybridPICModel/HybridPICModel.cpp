@@ -84,7 +84,6 @@ void HybridPICModel::ReadParameters ()
         m_external_vector_potential = std::make_unique<ExternalVectorPotential>();
     }
 
-<<<<<<< HEAD
     //source excitation
     //pp_hybrid.query("add_external_source", m_add_external_source);
     utils::parser::queryWithParser(
@@ -94,7 +93,7 @@ void HybridPICModel::ReadParameters ()
     if (m_add_external_source) {
         m_external_field_source = std::make_unique<ExternalFieldSource>();
     }
-=======
+    
     //bool to indicate if electron fluid equation will be solved or not
     // if True, qdsmc solver is used to update Te and additional terms can be turned on
     // that will be calculated using operator splitting approach
@@ -117,7 +116,6 @@ void HybridPICModel::ReadParameters ()
 
     pp_hybrid.query("ie_coll_species", m_ie_coll_species);
 
->>>>>>> hedevel
 }
 
 void HybridPICModel::AllocateLevelMFs (

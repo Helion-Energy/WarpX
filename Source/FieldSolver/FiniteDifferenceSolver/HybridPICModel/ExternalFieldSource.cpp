@@ -44,6 +44,8 @@ std::string ExternalFieldSource::str_Bx_excitation_flag_function = "";
 std::string ExternalFieldSource::str_By_excitation_flag_function = "";
 std::string ExternalFieldSource::str_Bz_excitation_flag_function = "";
 
+// Circuit coupling static members
+int ExternalFieldSource::m_circuit_coupling_interval = 1;
 
 ExternalFieldSource::ExternalFieldSource ()
 {
@@ -88,6 +90,8 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (DtType a_dt_type,  bool
     } // for loop over level
 }
 
+
+
 void
 ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
        warpx::fields::FieldType field,
@@ -96,11 +100,9 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
        amrex::ParserExecutor<4> const& zfield_parser,
        amrex::ParserExecutor<3> const& xflag_parser,
        amrex::ParserExecutor<3> const& yflag_parser,
-       amrex::ParserExecutor<3> const& zflag_parser, 
+       amrex::ParserExecutor<3> const& zflag_parser,
        const int lev, DtType a_dt_type )
 {
-
-
     auto &warpx = WarpX::GetInstance();
     auto const &geom = warpx.Geom(lev);
 
@@ -109,14 +111,10 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
     amrex::MultiFab* mfy = warpx.m_fields.get(field, Direction{1}, lev);
     amrex::MultiFab* mfz = warpx.m_fields.get(field, Direction{2}, lev);
 
-    // This function adds the contribution from an external excitation to the fields.
-    // A flag is used to determine the type of excitation.
-    // If flag == 1, it is a hard source and the field = excitation
-    // If flag == 2, if is a soft source and the field += excitation
-    // If flag == 0, the excitation parser is not computed and the field is unchanged.
-    // If flag is not 0, or 1, or 2, the code will Abort!
+    // Simplified: All ports are soft sources (flag > 0 means add excitation)
+    // No hard sources, no flag validation needed - just add excitation where flag > 0
 
-    // Gpu vector to store Ex-Bz staggering
+    // Gpu vector to store field staggering
     GpuArray<int, AMREX_SPACEDIM> mfx_stag, mfy_stag, mfz_stag;
     for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
         mfx_stag[idim] = mfx->ixType()[idim];
@@ -131,20 +129,16 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
     amrex::IntVect x_nodal_flag = mfx->ixType().toIntVect();
     amrex::IntVect y_nodal_flag = mfy->ixType().toIntVect();
     amrex::IntVect z_nodal_flag = mfz->ixType().toIntVect();
-    // For each multifab, apply excitation to ncomponents
-    // If not split pml fields, the excitation is applied to the regular Efield used in Maxwell's eq.
-    // If pml field, then the excitation is applied to all the split field components.
+
     const int nComp_x = mfx->nComp();
     const int nComp_y = mfy->nComp();
     const int nComp_z = mfz->nComp();
-    // Multiplication factor for field parser depending on dt_type
-    // If Full, then 1 (default), if FirstHalf or SecondHalf then 0.5
-    int dt_type_flag = 0;
-    if (a_dt_type == DtType::FirstHalf or a_dt_type == DtType::SecondHalf ) {
-        dt_type_flag = 1;
-    }
 
-//    amrex::Print() << "ApplyExternalFieldExcitationOnGrid is called. field = " << static_cast<int>(field) << ", DtType = " << dt_type_flag <<"\n"; 
+    // Multiplication factor for FirstHalf/SecondHalf time stepping
+    amrex::Real dt_type_factor = 1.0_rt;
+    if (a_dt_type == DtType::FirstHalf or a_dt_type == DtType::SecondHalf) {
+        dt_type_factor = 0.5_rt;
+    }
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (Gpu::notInLaunchRegion())
@@ -160,30 +154,17 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
         const amrex::Box& tby = mfi.tilebox( y_nodal_flag, mfy->nGrowVect() );
         const amrex::Box& tbz = mfi.tilebox( z_nodal_flag, mfz->nGrowVect() );
 
-        // Loop over the cells and update the fields
+        // Simplified loops - just add excitation where ports exist (flag > 0)
         amrex::ParallelFor(tbx, nComp_x,
             [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) {
                 amrex::Real x, y, z;
                 WarpXUtilAlgo::getCellCoordinates(i, j, k, mfx_stag.data(),
                                                   problo.data(), dx.data(), x, y, z);
                 auto flag_type = xflag_parser(x,y,z);
-/*
-		if (flag_type > 0){
-			//amrex::Print() << "(x,y,z) = (" << x << ", " << y << ", " << z << "). flag type = " << flag_type << ", Fx(i,j,k,n) =  " << Fx(i,j,k,n) << ", xfield_parser(x,y,z,t) = " << xfield_parser(x,y,z,t) << "\n";
-			amrex::Print() << "field" << static_cast<int>(field) <<"(" << i << ", " << j << ", " << k << "). flag type = " << flag_type << ", Fx(i,j,k,n) =  " << Fx(i,j,k,n) << ", xfield_parser(x,y,z,t) = " << xfield_parser(x,y,z,t) << "\n";
-		}
-*/
-		amrex::Real dt_type_factor = 1._rt;
-                // For soft source and FirstHalf/SecondHalf evolve
-                // the excitation is split with a prefector of 0.5
-                if (flag_type == 2._rt and dt_type_flag == 1) {
-                    dt_type_factor = 0.5_rt;
-                }
-                if (flag_type != 0._rt && flag_type != 1._rt && flag_type != 2._rt) {
-                    amrex::Abort("flag type for excitation must be 0, or 1, or 2!");
-                } else if ( flag_type > 0._rt ) {
-                    Fx(i, j, k, n) = Fx(i,j,k,n)*(flag_type-1.0_rt)
-                                   + dt_type_factor * xfield_parser(x,y,z,t);
+
+                // If any port is detected (flag > 0), add soft source excitation
+                if (flag_type > 0._rt) {
+                    Fx(i, j, k, n) += dt_type_factor * xfield_parser(x,y,z,t);
                 }
             },
             tby, nComp_y,
@@ -192,17 +173,9 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
                 WarpXUtilAlgo::getCellCoordinates(i, j, k, mfy_stag.data(),
                                                   problo.data(), dx.data(), x, y, z);
                 auto flag_type = yflag_parser(x,y,z);
-                amrex::Real dt_type_factor = 1._rt;
-                // For soft source and FirstHalf/SecondHalf evolve
-                // the excitation is split with a prefector of 0.5
-                if (flag_type == 2._rt and dt_type_flag == 1) {
-                    dt_type_factor = 0.5_rt;
-                }
-                if (flag_type != 0._rt && flag_type != 1._rt && flag_type != 2._rt) {
-                    amrex::Abort("flag type for excitation must be 0, or 1, or 2!");
-                } else if ( flag_type > 0._rt ) {
-                    Fy(i, j, k, n) = Fy(i,j,k,n)*(flag_type-1.0_rt)
-                                   + dt_type_factor * yfield_parser(x,y,z,t);
+
+                if (flag_type > 0._rt) {
+                    Fy(i, j, k, n) += dt_type_factor * yfield_parser(x,y,z,t);
                 }
             },
             tbz, nComp_z,
@@ -211,22 +184,312 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
                 WarpXUtilAlgo::getCellCoordinates(i, j, k, mfz_stag.data(),
                                                   problo.data(), dx.data(), x, y, z);
                 auto flag_type = zflag_parser(x,y,z);
-                amrex::Real dt_type_factor = 1._rt;
-                // For soft source and FirstHalf/SecondHalf evolve
-                // the excitation is split with a prefector of 0.5
-                if (flag_type == 2._rt and dt_type_flag == 1) {
-                    dt_type_factor = 0.5_rt;
-                }
-                if (flag_type != 0._rt && flag_type != 1._rt && flag_type != 2._rt) {
-                    amrex::Abort("flag type for excitation must be 0, or 1, or 2!");
-                } else if ( flag_type > 0._rt ) {
-                    Fz(i, j, k,n) = Fz(i,j,k,n)*(flag_type-1.0_rt)
-                                  + dt_type_factor * zfield_parser(x,y,z,t);
+
+                if (flag_type > 0._rt) {
+                    Fz(i, j, k, n) += dt_type_factor * zfield_parser(x,y,z,t);
                 }
             }
         );
     }
 }
+
+
+
+void ExternalFieldSource::InitializePorts(int lev)
+{
+    if (m_ports_initialized) return;
+
+    if (m_circuit_coupling_enabled) {
+        m_unique_ports = GetUniquePortIDs(lev);
+
+        // Convert set to vector for consistent ordering
+        m_port_ids.clear();
+        for (int port_id : m_unique_ports) {
+            if (port_id > 0) { // Skip flag value 0 (no excitation)
+                m_port_ids.push_back(port_id);
+            }
+        }
+
+        // Initialize voltage storage
+        m_port_voltages.resize(m_port_ids.size(), 0.0);
+
+        m_ports_initialized = true;
+
+        if (amrex::ParallelDescriptor::IOProcessor()) {
+            amrex::Print() << "Auto-detected " << m_port_ids.size()
+                          << " ports for circuit coupling\n";
+            PrintPortInfo();
+        }
+    }
+}
+
+std::set<int> ExternalFieldSource::GetUniquePortIDs(int lev)
+{
+    auto &warpx = WarpX::GetInstance();
+    auto const &geom = warpx.Geom(lev);
+
+    std::set<int> unique_ports;
+
+    // Only proceed if we have the necessary parsers
+    if (!Exfield_flag_parser || !Eyfield_flag_parser || !Ezfield_flag_parser) {
+        return unique_ports;
+    }
+
+    auto ex_flag_parser = Exfield_flag_parser->compile<3>();
+    auto ey_flag_parser = Eyfield_flag_parser->compile<3>();
+    auto ez_flag_parser = Ezfield_flag_parser->compile<3>();
+
+    const auto problo = geom.ProbLoArray();
+    const auto dx = geom.CellSizeArray();
+
+    // Sample the domain to find unique port IDs
+    const auto& domain = geom.Domain();
+
+    // Use stride = 1 to ensure we don't miss any ports
+    for (int k = domain.smallEnd(2); k <= domain.bigEnd(2); ++k) {
+        for (int j = domain.smallEnd(1); j <= domain.bigEnd(1); ++j) {
+            for (int i = domain.smallEnd(0); i <= domain.bigEnd(0); ++i) {
+                amrex::Real x, y, z;
+                // Use cell-centered coordinates for sampling
+                x = problo[0] + (i + 0.5) * dx[0];
+                y = problo[1] + (j + 0.5) * dx[1];
+                z = problo[2] + (k + 0.5) * dx[2];
+
+                int ex_flag = static_cast<int>(ex_flag_parser(x, y, z));
+                int ey_flag = static_cast<int>(ey_flag_parser(x, y, z));
+                int ez_flag = static_cast<int>(ez_flag_parser(x, y, z));
+
+                if (ex_flag > 0) unique_ports.insert(ex_flag);
+                if (ey_flag > 0) unique_ports.insert(ey_flag);
+                if (ez_flag > 0) unique_ports.insert(ez_flag);
+            }
+        }
+    }
+
+    // Simple MPI reduction to find maximum port ID
+    int max_port_local = 0;
+    if (!unique_ports.empty()) {
+        max_port_local = *unique_ports.rbegin();
+    }
+
+    int max_port_global = max_port_local;
+    amrex::ParallelDescriptor::ReduceIntMax(max_port_global);
+
+    // Check which ports actually exist by testing each ID
+    std::set<int> global_unique_ports;
+    for (int port_id = 1; port_id <= max_port_global; ++port_id) {
+        int port_exists_local = (unique_ports.count(port_id) > 0) ? 1 : 0;
+        int port_exists_global = port_exists_local;
+        amrex::ParallelDescriptor::ReduceIntMax(port_exists_global);
+
+        if (port_exists_global > 0) {
+            global_unique_ports.insert(port_id);
+        }
+    }
+
+    return global_unique_ports;
+}
+
+void ExternalFieldSource::CalculatePortVoltages(int lev)
+{
+    if (!m_circuit_coupling_enabled) return;
+
+    // Initialize ports if not done yet
+    if (!m_ports_initialized) {
+        InitializePorts(lev);
+    }
+
+    // Clear voltage map
+    m_port_voltage_map.clear();
+
+    // Calculate voltage for each port
+    for (size_t i = 0; i < m_port_ids.size(); ++i) {
+        int port_id = m_port_ids[i];
+        amrex::Real voltage = CalculateVoltageForPort(port_id, lev);
+        m_port_voltages[i] = voltage;
+        m_port_voltage_map[port_id] = voltage;
+    }
+}
+
+amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
+{
+    auto &warpx = WarpX::GetInstance();
+    auto const &geom = warpx.Geom(lev);
+
+    using ablastr::fields::Direction;
+    using warpx::fields::FieldType;
+
+    amrex::MultiFab* Ex = warpx.m_fields.get(FieldType::Efield_fp, Direction{0}, lev);
+    amrex::MultiFab* Ey = warpx.m_fields.get(FieldType::Efield_fp, Direction{1}, lev);
+    amrex::MultiFab* Ez = warpx.m_fields.get(FieldType::Efield_fp, Direction{2}, lev);
+
+    if (!Exfield_flag_parser || !Eyfield_flag_parser || !Ezfield_flag_parser) {
+        return 0.0;
+    }
+
+    // Need both flag parsers and excitation parsers for scattered field calculation
+    if (!Exfield_xt_grid_parser || !Eyfield_xt_grid_parser || !Ezfield_xt_grid_parser) {
+        return 0.0;
+    }
+
+    auto ex_flag_parser = Exfield_flag_parser->compile<3>();
+    auto ey_flag_parser = Eyfield_flag_parser->compile<3>();
+    auto ez_flag_parser = Ezfield_flag_parser->compile<3>();
+
+    auto ex_excitation_parser = Exfield_xt_grid_parser->compile<4>();
+    auto ey_excitation_parser = Eyfield_xt_grid_parser->compile<4>();
+    auto ez_excitation_parser = Ezfield_xt_grid_parser->compile<4>();
+
+    const auto problo = geom.ProbLoArray();
+    const auto dx = geom.CellSizeArray();
+    amrex::Real t = warpx.gett_new(lev);
+
+    amrex::Real total_voltage = 0.0;
+
+    // Get staggering information
+    GpuArray<int, AMREX_SPACEDIM> ex_stag, ey_stag, ez_stag;
+    for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+        ex_stag[idim] = Ex->ixType()[idim];
+        ey_stag[idim] = Ey->ixType()[idim];
+        ez_stag[idim] = Ez->ixType()[idim];
+    }
+
+    amrex::IntVect ex_nodal_flag = Ex->ixType().toIntVect();
+    amrex::IntVect ey_nodal_flag = Ey->ixType().toIntVect();
+    amrex::IntVect ez_nodal_flag = Ez->ixType().toIntVect();
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(*Ex, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+
+        amrex::Array4<amrex::Real const> const& ex_arr = Ex->array(mfi);
+        amrex::Array4<amrex::Real const> const& ey_arr = Ey->array(mfi);
+        amrex::Array4<amrex::Real const> const& ez_arr = Ez->array(mfi);
+
+        // Get appropriate boxes for each component
+        const amrex::Box& ex_box = mfi.tilebox(ex_nodal_flag, Ex->nGrowVect());
+        const amrex::Box& ey_box = mfi.tilebox(ey_nodal_flag, Ey->nGrowVect());
+        const amrex::Box& ez_box = mfi.tilebox(ez_nodal_flag, Ez->nGrowVect());
+
+        amrex::Real local_voltage = 0.0;
+
+        // Integrate scattered field E·dl over the port region
+        // For Ex component
+        amrex::ParallelFor(ex_box, [=, &local_voltage] AMREX_GPU_DEVICE (int i, int j, int k) {
+            amrex::Real x, y, z;
+            WarpXUtilAlgo::getCellCoordinates(i, j, k, ex_stag.data(),
+                                              problo.data(), dx.data(), x, y, z);
+
+            int flag = static_cast<int>(ex_flag_parser(x, y, z));
+            if (flag == port_id) {
+                // Calculate scattered field = total - incident
+                amrex::Real ex_total = ex_arr(i, j, k, 0);
+                amrex::Real ex_incident = ex_excitation_parser(x, y, z, t);
+                amrex::Real ex_scattered = ex_total - ex_incident;
+		//amrex::Print() << "ex_total = " << ex_total << ", ex_incident  = " << ex_incident << std::endl;
+
+                // Accumulate voltage contribution: E_scattered·dl = -Ex_scattered * dx
+                amrex::Gpu::Atomic::Add(&local_voltage, -ex_scattered * dx[0]);
+            }
+        });
+
+        // For Ey component
+        amrex::ParallelFor(ey_box, [=, &local_voltage] AMREX_GPU_DEVICE (int i, int j, int k) {
+            amrex::Real x, y, z;
+            WarpXUtilAlgo::getCellCoordinates(i, j, k, ey_stag.data(),
+                                              problo.data(), dx.data(), x, y, z);
+
+            int flag = static_cast<int>(ey_flag_parser(x, y, z));
+            if (flag == port_id) {
+                // Calculate scattered field = total - incident
+                amrex::Real ey_total = ey_arr(i, j, k, 0);
+                amrex::Real ey_incident = ey_excitation_parser(x, y, z, t);
+                amrex::Real ey_scattered = ey_total - ey_incident;
+
+                // Accumulate voltage contribution: E_scattered·dl = -Ey_scattered * dy
+                amrex::Gpu::Atomic::Add(&local_voltage, -ey_scattered * dx[1]);
+            }
+        });
+
+        // For Ez component
+        amrex::ParallelFor(ez_box, [=, &local_voltage] AMREX_GPU_DEVICE (int i, int j, int k) {
+            amrex::Real x, y, z;
+            WarpXUtilAlgo::getCellCoordinates(i, j, k, ez_stag.data(),
+                                              problo.data(), dx.data(), x, y, z);
+
+            int flag = static_cast<int>(ez_flag_parser(x, y, z));
+            if (flag == port_id) {
+                // Calculate scattered field = total - incident
+                amrex::Real ez_total = ez_arr(i, j, k, 0);
+                amrex::Real ez_incident = ez_excitation_parser(x, y, z, t);
+                amrex::Real ez_scattered = ez_total - ez_incident;
+
+                // Accumulate voltage contribution: E_scattered·dl = -Ez_scattered * dz
+                amrex::Gpu::Atomic::Add(&local_voltage, -ez_scattered * dx[2]);
+            }
+        });
+
+        total_voltage += local_voltage;
+    }
+
+    // Reduce across MPI processes
+    amrex::ParallelDescriptor::ReduceRealSum(total_voltage);
+
+    return total_voltage;
+}
+
+amrex::Real ExternalFieldSource::GetVoltageForPort(int port_id) const
+{
+    auto it = m_port_voltage_map.find(port_id);
+    if (it != m_port_voltage_map.end()) {
+        return it->second;
+    }
+    return 0.0;
+}
+
+void ExternalFieldSource::UpdateExcitationsFromCircuitCurrents(const std::vector<amrex::Real>& currents)
+{
+    if (currents.size() != m_port_ids.size()) {
+        amrex::Abort("Number of currents must match number of ports!");
+    }
+
+    if (amrex::ParallelDescriptor::IOProcessor()) {
+        amrex::Print() << "Updating field excitations from circuit currents:\n";
+        for (size_t i = 0; i < m_port_ids.size(); ++i) {
+            amrex::Print() << "  Port " << m_port_ids[i]
+                          << ": Current = " << currents[i] << " A\n";
+        }
+    }
+}
+
+void ExternalFieldSource::PrintPortInfo() const
+{
+    if (amrex::ParallelDescriptor::IOProcessor()) {
+        amrex::Print() << "Circuit coupling port information:\n";
+        amrex::Print() << "  Number of ports: " << m_port_ids.size() << "\n";
+        amrex::Print() << "  Port IDs: ";
+        for (size_t i = 0; i < m_port_ids.size(); ++i) {
+            amrex::Print() << m_port_ids[i];
+            if (i < m_port_ids.size() - 1) {
+                amrex::Print() << ", ";
+            }
+        }
+        amrex::Print() << "\n";
+
+        if (!m_port_voltages.empty() && m_port_voltages.size() == m_port_ids.size()) {
+            amrex::Print() << "  Current voltages:\n";
+            for (size_t i = 0; i < m_port_ids.size(); ++i) {
+                amrex::Print() << "    Port " << m_port_ids[i]
+                              << ": " << m_port_voltages[i] << " V\n";
+            }
+        }
+
+        amrex::Print() << "  Circuit coupling enabled: "
+                      << (m_circuit_coupling_enabled ? "Yes" : "No") << "\n";
+    }
+}
+
 
 void
 ExternalFieldSource::ReadExcitationParser ()
@@ -329,6 +592,17 @@ ExternalFieldSource::ReadExcitationParser ()
                    utils::parser::makeParser(str_Ey_excitation_grid_function,{"x","y","z","t"}));
        Ezfield_xt_grid_parser = std::make_unique<amrex::Parser>(
                    utils::parser::makeParser(str_Ez_excitation_grid_function,{"x","y","z","t"}));
+    }
+
+
+    // Circuit coupling parameters (simplified)
+    amrex::ParmParse pp_circuit("circuit");
+    pp_circuit.query("enable_coupling", m_circuit_coupling_enabled);
+    pp_circuit.query("coupling_interval", m_circuit_coupling_interval);
+
+    if (m_circuit_coupling_enabled) {
+        amrex::Print() << "Circuit coupling enabled\n";
+        amrex::Print() << "Ports will be auto-detected from flag functions\n";
     }
 
 }

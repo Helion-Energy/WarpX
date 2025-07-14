@@ -371,7 +371,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
                 Real Jtilde_t = enE_t;
                 Real Jtilde_z = enE_z - grad_Pe_z_val;
 
-                const auto eta_val = eta(rho_val, jtot_val);
+                const auto eta_val = eta(rho_val, jtot_val, 0.);
 
                 // Add resistivity only if E field value is used to update B
                 if (include_resistivity_term) { 
@@ -457,7 +457,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
                 Real Jtilde_t = enE_t;
                 Real Jtilde_z = enE_z - grad_Pe_z_val;
 
-                const auto eta_val = eta(rho_val, jtot_val);
+                const auto eta_val = eta(rho_val, jtot_val, 0.);
 
                 // Add resistivity only if E field value is used to update B
                 if (include_resistivity_term) { 
@@ -536,7 +536,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCylindrical (
                 Real Jtilde_t = enE_t;
                 Real Jtilde_z = enE_z - grad_Pe_z_val;
 
-                const auto eta_val = eta(rho_val, jtot_val);
+                const auto eta_val = eta(rho_val, jtot_val, 0.);
 
                 // Add resistivity only if E field value is used to update B
                 if (include_resistivity_term) { 
@@ -1025,7 +1025,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
                 Real Jtilde_y = enE_y - grad_Pe_y_val;
                 Real Jtilde_z = enE_z - grad_Pe_z_val;
 
-                const auto eta_val = eta(rho_val, jtot_val);
+                const auto eta_val = eta(rho_val, jtot_val, 0.);
 
                 // Add resistivity only if E field value is used to update B
                 if (include_resistivity_term) { 
@@ -1117,7 +1117,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
                 Real Jtilde_y = enE_y - grad_Pe_y_val;
                 Real Jtilde_z = enE_z - grad_Pe_z_val;
 
-                const auto eta_val = eta(rho_val, jtot_val);
+                const auto eta_val = eta(rho_val, jtot_val, 0.);
 
                 // Add resistivity only if E field value is used to update B
                 if (include_resistivity_term) { 
@@ -1202,7 +1202,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
                 Real Jtilde_y = enE_y - grad_Pe_y_val;
                 Real Jtilde_z = enE_z - grad_Pe_z_val;
 
-                const auto eta_val = eta(rho_val, jtot_val);
+                const auto eta_val = eta(rho_val, jtot_val, 0.);
 
                 // Add resistivity only if E field value is used to update B
                 if (include_resistivity_term) { 

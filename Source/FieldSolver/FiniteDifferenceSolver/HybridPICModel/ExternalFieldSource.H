@@ -28,10 +28,14 @@
 #include <AMReX_DistributionMapping.H>
 
 #include <optional>
+#include <set>
+#include <vector>
+#include <map>
 
 /**
  * \brief This class represents a space- and time-dependent external electric and magnetic field source
- *        that can be applied directly to the grid.
+ *        that can be applied directly to the grid. It also supports circuit coupling through voltage
+ *        calculation at ports defined by the same flag parsers used for field excitation.
  */
 class ExternalFieldSource
 {
@@ -44,7 +48,7 @@ protected:
     static int excite_B_source;
     static int excite_all;
 
-        // Function for B excitation (x,y,z,t) on the grid
+    // Function for B excitation (x,y,z,t) on the grid
     static std::string str_Bx_excitation_grid_function;
     static std::string str_By_excitation_grid_function;
     static std::string str_Bz_excitation_grid_function;
@@ -53,7 +57,7 @@ protected:
     static std::string str_Ey_excitation_grid_function;
     static std::string str_Ez_excitation_grid_function;
 
-     // Flag for type of excitation (hard/soft)
+    // Flag for type of excitation (hard/soft)
     static std::string str_Ex_excitation_flag_function;
     static std::string str_Ey_excitation_flag_function;
     static std::string str_Ez_excitation_flag_function;
@@ -76,6 +80,21 @@ protected:
     std::unique_ptr<amrex::Parser> Bxfield_flag_parser;
     std::unique_ptr<amrex::Parser> Byfield_flag_parser;
     std::unique_ptr<amrex::Parser> Bzfield_flag_parser;
+
+    // Circuit coupling members
+    bool m_circuit_coupling_enabled = false;
+    std::vector<amrex::Real> m_port_voltages;
+    std::vector<int> m_port_ids;
+    
+    // Cache for port information to avoid repeated parsing
+    std::set<int> m_unique_ports;
+    bool m_ports_initialized = false;
+    
+    // Map for quick voltage lookup by port ID
+    std::map<int, amrex::Real> m_port_voltage_map;
+    
+    // Circuit coupling input parameters
+    static int m_circuit_coupling_interval;
 
 public:
 
@@ -108,7 +127,6 @@ public:
      *   \param[in] zflag_parser  : Type zfield excitation (hard source=0/soft source=1)
      *   \param[in] lev           : level on which the excitation is applied.
      */
-    //void ApplyExternalFieldExcitationOnGrid (DtType a_dt_type = DtType::Full);
 
     void ApplyExternalFieldExcitationOnGrid (DtType a_dt_type,  bool apply_E, bool apply_B);
 
@@ -125,8 +143,75 @@ public:
     /** Parse field excitation functions and flags*/
     void ReadExcitationParser ();
 
+    // ========================================================================
+    // Circuit coupling methods
+    // ========================================================================
+
+    /**
+     * \brief Calculate voltages at all ports defined by flag parsers
+     * \param lev AMR level
+     */
+    void CalculatePortVoltages(int lev);
+    
+    /**
+     * \brief Calculate voltage for a specific port ID
+     * \param port_id The port identifier from flag parser
+     * \param lev AMR level
+     * \return Calculated voltage for the port
+     */
+    amrex::Real CalculateVoltageForPort(int port_id, int lev);
+    
+    /**
+     * \brief Identify unique port IDs from flag parsers
+     * \param lev AMR level
+     * \return Set of unique port IDs found in the domain
+     */
+    std::set<int> GetUniquePortIDs(int lev);
+    
+    /**
+     * \brief Get calculated port voltages
+     * \return Vector of voltages corresponding to port IDs
+     */
+    std::vector<amrex::Real> GetPortVoltages() const { return m_port_voltages; }
+    
+    /**
+     * \brief Get port IDs in the same order as voltages
+     * \return Vector of port IDs
+     */
+    std::vector<int> GetPortIDs() const { return m_port_ids; }
+    
+    /**
+     * \brief Get voltage for a specific port ID
+     * \param port_id The port identifier
+     * \return Voltage for the specified port (0.0 if port not found)
+     */
+    amrex::Real GetVoltageForPort(int port_id) const;
+    
+    /**
+     * \brief Check if circuit coupling is enabled
+     * \return True if circuit coupling is enabled
+     */
+    bool IsCircuitCouplingEnabled() const { return m_circuit_coupling_enabled; }
+    
+    /**
+     * \brief Initialize port information (called once during setup)
+     * \param lev AMR level
+     */
+    void InitializePorts(int lev);
+    
+    /**
+     * \brief Update field excitations based on circuit currents
+     * \param currents Vector of currents corresponding to port IDs
+     */
+    void UpdateExcitationsFromCircuitCurrents(const std::vector<amrex::Real>& currents);
+    
+    /**
+     * \brief Print port information for debugging
+     */
+    void PrintPortInfo() const;
+
+private:
 
 };
 
 #endif // WARPX_EXTERNAL_FIELD_SOURCE_H_
-

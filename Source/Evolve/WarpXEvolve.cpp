@@ -509,7 +509,13 @@ WarpX::OneStep_nosub (Real cur_time)
         m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::Full,
                                                             /*apply_E=*/true,
                                                             /*apply_B=*/false);
-	
+
+        if (m_external_field_source && m_external_field_source->IsCircuitCouplingEnabled()) {
+            // Initialize ports and calculate voltages every time step
+            m_external_field_source->InitializePorts(0);//level 0 
+            m_external_field_source->CalculatePortVoltages(0); //level 0
+            m_external_field_source->PrintPortInfo(); 
+        }	
 
         EvolveF(0.5_rt * dt[0], DtType::SecondHalf);
         EvolveG(0.5_rt * dt[0], DtType::SecondHalf);
