@@ -108,44 +108,44 @@ void WarpX::HybridPICEvolveFields ()
 
     if(m_hybrid_pic_model->m_solve_electron_energy_equation && m_hybrid_pic_model->m_include_Qei){
 
-            // pass particle container instead of name of species
-            // Once we have multi ion species support in the hybrid pic model,
-            // m_ie_coll_species should be a vector of strings, indicating the name of ion species we want to collide with electrons
-            // same should be used below for electron-ion collision fluid treatment.
-            hybrid_electron_fl->Hybrid_Drag_Diffusion (m_fields, m_hybrid_pic_model.get(), m_hybrid_pic_model->m_ie_coll_species, dt[0], finest_level); // replace by name from Hybrid parser
+        // pass particle container instead of name of species
+        // Once we have multi ion species support in the hybrid pic model,
+        // m_ie_coll_species should be a vector of strings, indicating the name of ion species we want to collide with electrons
+        // same should be used below for electron-ion collision fluid treatment.
+        hybrid_electron_fl->Hybrid_Drag_Diffusion (m_fields, m_hybrid_pic_model.get(), m_hybrid_pic_model->m_ie_coll_species, dt[0], finest_level); // replace by name from Hybrid parser
 
-            auto const species_names = mypc->GetSpeciesNames();
-            for(int i_s=0; i_s<mypc->nSpecies(); i_s++){
+        auto const species_names = mypc->GetSpeciesNames();
+        for(int i_s=0; i_s<mypc->nSpecies(); i_s++){
 
-                const auto & myspc = mypc->GetParticleContainer(i_s);
-                const std::string temperature_vf_str = "T_" + species_names[myspc.getSpeciesId()];
-                amrex::Real m_ion = myspc.getMass();
+            const auto & myspc = mypc->GetParticleContainer(i_s);
+            const std::string temperature_vf_str = "T_" + species_names[myspc.getSpeciesId()];
+            amrex::Real m_ion = myspc.getMass();
 
-                // ----------------------------------------------------------------------------------------
-                // -------------------------------------- Remove ------------------------------------------
+            // ----------------------------------------------------------------------------------------
+            // -------------------------------------- Remove ------------------------------------------
 
-                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                        m_fields.get(temperature_vf_str, Direction{0}, finest_level)->is_finite(),
-                        "Non-finite value detected in Tix field."
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    m_fields.get(temperature_vf_str, Direction{0}, finest_level)->is_finite(),
+                    "Non-finite value detected in Tix field."
+                );
+
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    m_fields.get(temperature_vf_str, Direction{1}, finest_level)->is_finite(),
+                    "Non-finite value detected in Tiy field."
                     );
 
-                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                        m_fields.get(temperature_vf_str, Direction{1}, finest_level)->is_finite(),
-                        "Non-finite value detected in Tiy field."
-                        );
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    m_fields.get(temperature_vf_str, Direction{2}, finest_level)->is_finite(),
+                    "Non-finite value detected in Tiz field."
+                );
 
-                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                        m_fields.get(temperature_vf_str, Direction{2}, finest_level)->is_finite(),
-                        "Non-finite value detected in Tiz field."
-                    );
+            // ----------------------------------------------------------------------------------------
+            // ----------------------------------------------------------------------------------------
 
-                // ----------------------------------------------------------------------------------------
-                // ----------------------------------------------------------------------------------------
-
-                hybrid_electron_fl->Hybrid_Electron_Qei (m_fields, m_hybrid_pic_model.get(), temperature_vf_str,
-                                                            m_ion, dt[0], finest_level);
-            }
+            hybrid_electron_fl->Hybrid_Electron_Qei (m_fields, m_hybrid_pic_model.get(), temperature_vf_str,
+                                                        m_ion, dt[0], finest_level);
         }
+    }
 
     // Calculate Ke using rho^{n} in rho_fp_temp
     if(m_hybrid_pic_model->m_solve_electron_energy_equation)
@@ -512,8 +512,20 @@ void WarpX::HybridPICInitializeRhoJandB ()
         if (m_hybrid_pic_model->m_add_external_fields) {
             // Get the external fields
             m_hybrid_pic_model->m_external_vector_potential->UpdateHybridExternalFields(
-                gett_old(0),
-                0.5_rt*dt[0]);
+                gett_new(0),
+                -0.5_rt*dt[0]);
+
+            // Check that the B-field does not have nan or inf values, otherwise print a clear message
+            ablastr::fields::MultiLevelVectorField B_fp_ext = m_fields.get_mr_levels_alldirs(FieldType::hybrid_B_fp_external, finest_level);
+            for (int lev = 0; lev <= finest_level; ++lev)
+            {
+                for (int idim = 0; idim < 3; ++idim) {
+                    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                        B_fp_ext[lev][idim]->is_finite(),
+                        "Non-finite value detected in external B-field at t=0."
+                    );
+                }
+            }
 
             // If using split fields, add the external field at t=0
             for (int lev = 0; lev <= finest_level; ++lev) {
