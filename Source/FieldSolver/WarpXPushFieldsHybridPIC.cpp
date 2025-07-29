@@ -513,7 +513,7 @@ void WarpX::HybridPICInitializeRhoJandB ()
             // Get the external fields
             m_hybrid_pic_model->m_external_vector_potential->UpdateHybridExternalFields(
                 gett_new(0),
-                -0.5_rt*dt[0]);
+                0.5_rt*dt[0]);
 
             // Check that the B-field does not have nan or inf values, otherwise print a clear message
             ablastr::fields::MultiLevelVectorField B_fp_ext = m_fields.get_mr_levels_alldirs(FieldType::hybrid_B_fp_external, finest_level);
