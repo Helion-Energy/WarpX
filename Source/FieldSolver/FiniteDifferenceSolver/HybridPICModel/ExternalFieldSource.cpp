@@ -354,7 +354,7 @@ void ExternalFieldSource::CalculatePortVoltages(int lev)
         m_port_voltage_map[port_id] = voltage;
     }
 }
-
+/*
 amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
 {
     auto &warpx = WarpX::GetInstance();
@@ -478,6 +478,82 @@ amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
     }
 
     // Reduce across MPI processes
+    amrex::ParallelDescriptor::ReduceRealSum(total_voltage);
+
+    return total_voltage;
+}
+*/
+amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
+{
+    auto &warpx = WarpX::GetInstance();
+    auto const &geom = warpx.Geom(lev);
+
+    using ablastr::fields::Direction;
+    using warpx::fields::FieldType;
+
+    amrex::MultiFab* Ex = warpx.m_fields.get(FieldType::Efield_fp, Direction{0}, lev);
+    amrex::MultiFab* Ey = warpx.m_fields.get(FieldType::Efield_fp, Direction{1}, lev);
+
+    const auto problo = geom.ProbLoArray();
+    const auto dx = geom.CellSizeArray();
+    amrex::Real t = warpx.gett_new(lev);
+
+    // --- Hardcoded coil geometry ---
+    constexpr amrex::Real coil_radius = 0.01_rt;  // 1 cm radius
+    constexpr amrex::Real coil_x_center = 0.0_rt;
+    constexpr amrex::Real coil_y_center = 0.0_rt;
+
+    // Voltage accumulator
+    amrex::Real total_voltage = 0.0_rt;
+
+    // Get staggering info for Ex and Ey
+    GpuArray<int, AMREX_SPACEDIM> ex_stag, ey_stag;
+    for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+        ex_stag[idim] = Ex->ixType()[idim];
+        ey_stag[idim] = Ey->ixType()[idim];
+    }
+
+    amrex::IntVect ex_nodal_flag = Ex->ixType().toIntVect();
+    amrex::IntVect ey_nodal_flag = Ey->ixType().toIntVect();
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(*Ex, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+
+        auto const& ex_arr = Ex->array(mfi);
+        auto const& ey_arr = Ey->array(mfi);
+
+        const amrex::Box& ex_box = mfi.tilebox(ex_nodal_flag, Ex->nGrowVect());
+        const amrex::Box& ey_box = mfi.tilebox(ey_nodal_flag, Ey->nGrowVect());
+
+        amrex::Gpu::DeviceScalar<amrex::Real> local_voltage(0.0_rt);
+
+        amrex::ParallelFor(ex_box, [=, &local_voltage] AMREX_GPU_DEVICE (int i, int j, int k) {
+            amrex::Real x, y, z;
+            WarpXUtilAlgo::getCellCoordinates(i, j, k, ex_stag.data(), problo.data(), dx.data(), x, y, z);
+
+            // Distance from coil center
+            amrex::Real dx_c = x - coil_x_center;
+            amrex::Real dy_c = y - coil_y_center;
+            amrex::Real r = std::sqrt(dx_c*dx_c + dy_c*dy_c);
+
+            // Select cells near the coil contour
+            if (std::abs(r - coil_radius) < 0.5 * std::max(dx[0], dx[1])) {
+                // Tangential direction unit vector: phi_hat = (-sin(phi), cos(phi))
+                amrex::Real phi = std::atan2(dy_c, dx_c);
+                amrex::Real E_tan = ex_arr(i,j,k,0) * (-std::sin(phi)) + ey_arr(i,j,k,0) * (std::cos(phi));
+
+                // dl along contour is approximated as arc length step
+                amrex::Real dl = std::max(dx[0], dx[1]); // uses grid spacing as step
+                amrex::Gpu::Atomic::Add(local_voltage.dataPtr(), -E_tan * dl);
+            }
+        });
+
+        total_voltage += local_voltage.dataValue();
+    }
+
+    // Reduce across MPI
     amrex::ParallelDescriptor::ReduceRealSum(total_voltage);
 
     return total_voltage;
