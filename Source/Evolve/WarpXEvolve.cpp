@@ -510,13 +510,6 @@ WarpX::OneStep_nosub (Real cur_time)
                                                             /*apply_E=*/true,
                                                             /*apply_B=*/false);
 
-        if (m_external_field_source && m_external_field_source->IsCircuitCouplingEnabled()) {
-            // Initialize ports and calculate voltages every time step
-            m_external_field_source->InitializePorts(0);//level 0 
-            m_external_field_source->CalculatePortVoltages(0); //level 0
-            m_external_field_source->PrintPortInfo(); 
-        }	
-
         EvolveF(0.5_rt * dt[0], DtType::SecondHalf);
         EvolveG(0.5_rt * dt[0], DtType::SecondHalf);
         EvolveB(0.5_rt * dt[0], DtType::SecondHalf, cur_time + 0.5_rt * dt[0]); // We now have B^{n+1}
@@ -538,6 +531,58 @@ WarpX::OneStep_nosub (Real cur_time)
         if (m_safe_guard_cells) {
             FillBoundaryB(guard_cells.ng_alloc_EB);
         }
+
+	//circuit coupling
+	if (m_external_field_source && m_external_field_source->IsCircuitCouplingEnabled()) {
+           // Step 1: Initialize ports (safe to call multiple times)
+           m_external_field_source->InitializePorts(0); // level 0
+
+           // Step 2: WarpX → LC Circuit: Calculate port voltage from final E-field
+           m_external_field_source->CalculatePortVoltages(0); // level 0
+
+           // Step 3: Get port voltage and feed to LC circuit as external voltage
+           amrex::Real port_voltage = m_external_field_source->GetVoltageForPort(1); // Port ID = 1
+
+	   // SetExternalVoltage
+           if (m_external_field_source->m_lc_circuit) {
+               m_external_field_source->m_lc_circuit->SetExternalVoltage(port_voltage);
+           }
+
+           // Step 4: Update LC circuit with WarpX time step
+           m_external_field_source->UpdateLCCircuit(dt[0]);
+
+           // Step 5: LC Circuit → WarpX: Get circuit current for NEXT time step B-field excitation
+           amrex::Real circuit_current = m_external_field_source->GetLCCurrent();
+           m_external_field_source->UpdateBExcitationFromCurrent(circuit_current);
+
+	   if (amrex::ParallelDescriptor::IOProcessor()) {
+              static std::ofstream port_file;
+              static bool file_opened = false;
+
+              if (!file_opened) {
+                  port_file.open("port_voltage_vs_time.txt");
+                  port_file << "# Time(s) Port_Voltage(V) Circuit_Voltage(V) Circuit_Current(A)\n";
+                  file_opened = true;
+              }
+
+              amrex::Real current_time = gett_new(0);
+              amrex::Real circuit_voltage = m_external_field_source->m_lc_circuit->GetVoltage();
+
+              port_file << std::scientific << std::setprecision(12)
+                        << current_time << " "
+                        << port_voltage << " "
+                        << circuit_voltage << " "
+                        << circuit_current << "\n";
+              port_file.flush(); // Ensure data is written immediately
+           }
+
+           // Debug output
+           if (istep[0] % 10 == 0) {
+                m_external_field_source->PrintPortInfo();
+    	//	m_external_field_source->m_lc_circuit->PrintInfo();
+           }
+	}
+
     } // !PSATD
 
     ExecutePythonCallback("afterEsolve");

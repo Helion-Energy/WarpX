@@ -32,6 +32,80 @@
 #include <vector>
 #include <map>
 
+// ========================================================================
+// LC Circuit Solver Class
+// ========================================================================
+/**
+ * \brief Simple LC circuit solver for circuit coupling
+ */
+class LCCircuit {
+public:
+    /**
+     * \brief Constructor for LC circuit
+     * \param L Inductance in Henries
+     * \param C Capacitance in Farads
+     * \param V0 Initial voltage in Volts
+     * \param I0 Initial current in Amperes (default 0)
+     */
+    LCCircuit(amrex::Real L, amrex::Real C, amrex::Real V0, amrex::Real I0 = 0.0);
+
+    /**
+     * \brief Update circuit state to next time step
+     * \param dt Time step in seconds
+     */
+    void UpdateTimeStep(amrex::Real dt);
+
+    /**
+     * \brief Get current voltage across capacitor
+     * \return Voltage in Volts
+     */
+    amrex::Real GetVoltage() const { return m_voltage; }
+
+    /**
+     * \brief Get current through inductor
+     * \return Current in Amperes
+     */
+    amrex::Real GetCurrent() const { return m_current; }
+
+    /**
+     * \brief Get resonant frequency
+     * \return Frequency in Hz
+     */
+    amrex::Real GetResonantFrequency() const { return 1.0 / (2.0 * M_PI * sqrt(m_L * m_C)); }
+
+    /**
+     * \brief Get resonant period
+     * \return Period in seconds
+     */
+    amrex::Real GetResonantPeriod() const { return 2.0 * M_PI * sqrt(m_L * m_C); }
+
+    /**
+     * \brief Set external voltage source (for coupling)
+     * \param V_ext External voltage in Volts
+     */
+    void SetExternalVoltage(amrex::Real V_ext) { m_external_voltage = V_ext; }
+
+    /**
+     * \brief Reset circuit to initial conditions
+     */
+    void Reset();
+
+    /**
+     * \brief Print circuit parameters
+     */
+    void PrintInfo() const;
+
+private:
+    amrex::Real m_L;                    // Inductance [H]
+    amrex::Real m_C;                    // Capacitance [F]
+    amrex::Real m_V0;                   // Initial voltage [V]
+    amrex::Real m_I0;                   // Initial current [A]
+    amrex::Real m_voltage;              // Current voltage [V]
+    amrex::Real m_current;              // Current current [A]
+    amrex::Real m_external_voltage;     // External voltage source [V]
+    amrex::Real m_time;                 // Current time [s]
+};
+
 /**
  * \brief This class represents a space- and time-dependent external electric and magnetic field source
  *        that can be applied directly to the grid. It also supports circuit coupling through voltage
@@ -82,6 +156,7 @@ protected:
     std::unique_ptr<amrex::Parser> Bzfield_flag_parser;
 
     // Circuit coupling members
+    amrex::Real m_circuit_current = 0.0;
     bool m_circuit_coupling_enabled = false;
     std::vector<amrex::Real> m_port_voltages;
     std::vector<int> m_port_ids;
@@ -204,12 +279,46 @@ public:
      * \param currents Vector of currents corresponding to port IDs
      */
     void UpdateExcitationsFromCircuitCurrents(const std::vector<amrex::Real>& currents);
-    
+
+    /**
+     * \brief Update B-field excitation amplitude from single port current
+     * \param current Current in Amperes
+     */
+    void UpdateBExcitationFromCurrent(amrex::Real current);
+
     /**
      * \brief Print port information for debugging
      */
     void PrintPortInfo() const;
 
+    /**
+     * \brief Initialize LC circuit for testing
+     * \param L Inductance in Henries
+     * \param C Capacitance in Farads
+     * \param V0 Initial voltage in Volts
+     */
+    void InitializeLCCircuit(amrex::Real L, amrex::Real C, amrex::Real V0);
+
+    /**
+     * \brief Update LC circuit state
+     * \param dt Time step in seconds
+     */
+    void UpdateLCCircuit(amrex::Real dt);
+
+    /**
+     * \brief Get LC circuit voltage
+     * \return Voltage in Volts
+     */
+    amrex::Real GetLCVoltage() const;
+
+    /**
+     * \brief Get LC circuit current
+     * \return Current in Amperes
+     */
+    amrex::Real GetLCCurrent() const;
+
+    // LC Circuit for testing circuit coupling
+    std::unique_ptr<LCCircuit> m_lc_circuit;
 private:
 
 };
