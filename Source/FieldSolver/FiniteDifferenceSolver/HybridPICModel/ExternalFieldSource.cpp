@@ -17,6 +17,7 @@
 #include "Utils/Parser/ParserUtils.H"
 #include <AMReX_MultiFab.H>
 #include <AMReX_Parser.H>
+#include <ablastr/coarsen/sample.H>
 
 using namespace amrex;
 
@@ -498,6 +499,11 @@ amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
     const auto dx = geom.CellSizeArray();
     amrex::Real t = warpx.gett_new(lev);
 
+    // Cell-centered index type
+    const amrex::GpuArray<int,3> cc{0,0,0};
+    // Coarsening ratio (no coarsening)
+    const amrex::GpuArray<int,3> cr{1,1,1};
+
     // --- Hardcoded coil geometry ---
     constexpr amrex::Real coil_radius = 0.01_rt;  // 1 cm radius
     constexpr amrex::Real coil_x_center = 0.0_rt;
@@ -542,7 +548,12 @@ amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
             if (std::abs(r - coil_radius) < 0.5 * std::max(dx[0], dx[1])) {
                 // Tangential direction unit vector: phi_hat = (-sin(phi), cos(phi))
                 amrex::Real phi = std::atan2(dy_c, dx_c);
-                amrex::Real E_tan = ex_arr(i,j,k,0) * (-std::sin(phi)) + ey_arr(i,j,k,0) * (std::cos(phi));
+                
+		//const amrex::Real Ex_cc = ablastr::coarsen::sample::Interp(ex_arr, ex_stag, cc, cr, i, j, k, 0);
+                //const amrex::Real Ey_cc = ablastr::coarsen::sample::Interp(ey_arr, ey_stag, cc, cr, i, j, k, 0);
+		//amrex::Real E_tan = Ex_cc * (-std::sin(phi)) + Ey_cc * (std::cos(phi));
+		
+		amrex::Real E_tan = ex_arr(i,j,k,0) * (-std::sin(phi)) + ey_arr(i,j,k,0) * (std::cos(phi));
 
                 // dl along contour is approximated as arc length step
                 amrex::Real dl = std::max(dx[0], dx[1]); // uses grid spacing as step
