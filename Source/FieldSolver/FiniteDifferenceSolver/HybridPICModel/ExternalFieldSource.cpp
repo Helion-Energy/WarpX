@@ -180,6 +180,7 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
                         if (r_squared > 1e-12_rt) { // Avoid division by zero
                             // Bx = -μ₀I*y/(2π*r²) for current in +z direction
                             field_value = -mu0_over_2pi * m_circuit_current * dy_from_current / r_squared;
+                            //field_value = xfield_parser(x,y,z,t);
                         }
                     } else {
                         field_value = xfield_parser(x,y,z,t);
@@ -209,6 +210,7 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
                         if (r_squared > 1e-12_rt) { // Avoid division by zero
                             // By = +μ₀I*x/(2π*r²) for current in +z direction
                             field_value = mu0_over_2pi * m_circuit_current * dx_from_current / r_squared;
+                            //field_value = yfield_parser(x,y,z,t);
                         }
                     } else {
                         field_value = yfield_parser(x,y,z,t);
@@ -484,6 +486,7 @@ amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
     return total_voltage;
 }
 */
+/*
 amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
 {
     auto &warpx = WarpX::GetInstance();
@@ -530,14 +533,19 @@ amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
         auto const& ex_arr = Ex->array(mfi);
         auto const& ey_arr = Ey->array(mfi);
 
-        const amrex::Box& ex_box = mfi.tilebox(ex_nodal_flag, Ex->nGrowVect());
-        const amrex::Box& ey_box = mfi.tilebox(ey_nodal_flag, Ey->nGrowVect());
+        // Use a common box that works for both Ex and Ey
+        const amrex::Box& box = mfi.tilebox(); // Cell-centered box
 
         amrex::Gpu::DeviceScalar<amrex::Real> local_voltage(0.0_rt);
 
-        amrex::ParallelFor(ex_box, [=, &local_voltage] AMREX_GPU_DEVICE (int i, int j, int k) {
+        amrex::ParallelFor(box, [=, &local_voltage] AMREX_GPU_DEVICE (int i, int j, int k) {
+
             amrex::Real x, y, z;
-            WarpXUtilAlgo::getCellCoordinates(i, j, k, ex_stag.data(), problo.data(), dx.data(), x, y, z);
+            // Use cell-centered coordinates for consistent geometry
+            WarpXUtilAlgo::getCellCoordinates(i, j, k, cc.data(), problo.data(), dx.data(), x, y, z);
+
+            // Only integrate near z = 0 plane
+            //if (std::abs(z) > 2.0 * dx[2]) return;
 
             // Distance from coil center
             amrex::Real dx_c = x - coil_x_center;
@@ -546,18 +554,20 @@ amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
 
             // Select cells near the coil contour
             if (std::abs(r - coil_radius) < 0.5 * std::max(dx[0], dx[1])) {
-                // Tangential direction unit vector: phi_hat = (-sin(phi), cos(phi))
                 amrex::Real phi = std::atan2(dy_c, dx_c);
-                
-		//const amrex::Real Ex_cc = ablastr::coarsen::sample::Interp(ex_arr, ex_stag, cc, cr, i, j, k, 0);
-                //const amrex::Real Ey_cc = ablastr::coarsen::sample::Interp(ey_arr, ey_stag, cc, cr, i, j, k, 0);
-		//amrex::Real E_tan = Ex_cc * (-std::sin(phi)) + Ey_cc * (std::cos(phi));
-		
-		amrex::Real E_tan = ex_arr(i,j,k,0) * (-std::sin(phi)) + ey_arr(i,j,k,0) * (std::cos(phi));
 
-                // dl along contour is approximated as arc length step
-                amrex::Real dl = std::max(dx[0], dx[1]); // uses grid spacing as step
-                amrex::Gpu::Atomic::Add(local_voltage.dataPtr(), -E_tan * dl);
+                // Only integrate over 180° arc (right half of circle) to avoid cancellation
+                if (phi >= -M_PI/2.0 && phi <= M_PI/2.0) {
+                    // Interpolate both fields to cell center for consistency
+                    const amrex::Real Ex_cc = ablastr::coarsen::sample::Interp(ex_arr, ex_stag, cc, cr, i, j, k, 0);
+                    const amrex::Real Ey_cc = ablastr::coarsen::sample::Interp(ey_arr, ey_stag, cc, cr, i, j, k, 0);
+
+                    // Tangential E-field component
+                    amrex::Real E_tan = Ex_cc * (-std::sin(phi)) + Ey_cc * std::cos(phi);
+
+                    amrex::Real dl = std::max(dx[0], dx[1]);
+                    amrex::Gpu::Atomic::Add(local_voltage.dataPtr(), -E_tan * dl);
+                }
             }
         });
 
@@ -567,8 +577,116 @@ amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
     // Reduce across MPI
     amrex::ParallelDescriptor::ReduceRealSum(total_voltage);
 
-    return total_voltage;
+    return 2.0*total_voltage;
 }
+*/
+
+amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
+{
+    // Define gap parameters
+    constexpr amrex::Real coil_radius = 0.01_rt;
+    constexpr amrex::Real coil_x_center = 0.0_rt;
+    constexpr amrex::Real coil_y_center = 0.0_rt;
+
+    // Get E-field components
+    auto &warpx = WarpX::GetInstance();
+    
+    using ablastr::fields::Direction;
+    amrex::MultiFab* Ex = warpx.m_fields.get(warpx::fields::FieldType::Efield_fp, Direction{0}, lev);
+    amrex::MultiFab* Ey = warpx.m_fields.get(warpx::fields::FieldType::Efield_fp, Direction{1}, lev);
+
+    const auto geom = warpx.Geom(lev);
+    const auto problo = geom.ProbLoArray();
+    const auto dx = geom.CellSizeArray();
+
+    // DEBUG: Print domain and gap info
+    amrex::Print() << "=== GAP VOLTAGE DEBUG ===" << std::endl;
+    amrex::Print() << "Coil radius: " << coil_radius << std::endl;
+    amrex::Print() << "Domain: [" << problo[0] << ", " << problo[0] + geom.ProbLength(0) << "] x ["
+                   << problo[1] << ", " << problo[1] + geom.ProbLength(1) << "]" << std::endl;
+    amrex::Print() << "Cell size: dx=" << dx[0] << ", dy=" << dx[1] << ", dz=" << dx[2] << std::endl;
+    
+    const amrex::Real r_inner = coil_radius - 0.5 * dx[0];
+    const amrex::Real r_outer = coil_radius + 0.5 * dx[0];
+    amrex::Print() << "Gap radial range: [" << r_inner << ", " << r_outer << "]" << std::endl;
+
+    // Get staggering info for Ex and Ey
+    GpuArray<int, AMREX_SPACEDIM> ex_stag, ey_stag;
+    for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+        ex_stag[idim] = Ex->ixType()[idim];
+        ey_stag[idim] = Ey->ixType()[idim];
+    }
+    
+    amrex::GpuArray<int,3> cc = {AMREX_D_DECL(0, 0, 0)};
+    amrex::GpuArray<int,3> cr = {AMREX_D_DECL(1, 1, 1)};
+
+    constexpr amrex::Real gap_phi = 0.0_rt;
+    amrex::Real gap_voltage = 0.0_rt;
+    int cells_found = 0;
+    amrex::Real max_E_field = 0.0_rt;
+
+    for (MFIter mfi(*Ex, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        auto const& ex_arr = Ex->array(mfi);
+        auto const& ey_arr = Ey->array(mfi);
+        
+        const amrex::Box& box = mfi.tilebox();
+        amrex::Gpu::DeviceScalar<amrex::Real> local_voltage(0.0_rt);
+        amrex::Gpu::DeviceScalar<int> local_cells(0);
+        amrex::Gpu::DeviceScalar<amrex::Real> local_max_E(0.0_rt);
+
+        amrex::ParallelFor(box, [=, &local_voltage, &local_cells, &local_max_E] AMREX_GPU_DEVICE (int i, int j, int k) {
+            amrex::Real x, y, z;
+            WarpXUtilAlgo::getCellCoordinates(i, j, k, cc.data(), problo.data(), dx.data(), x, y, z);
+            
+            // Only integrate near z = 0 plane
+            if (std::abs(z) > 2.0 * dx[2]) return;
+            
+            amrex::Real dx_c = x - coil_x_center;
+            amrex::Real dy_c = y - coil_y_center;
+            amrex::Real r = std::sqrt(dx_c*dx_c + dy_c*dy_c);
+            amrex::Real phi = std::atan2(dy_c, dx_c);
+
+            // Get E-field for debugging
+            amrex::Real Ex_cc = ablastr::coarsen::sample::Interp(ex_arr, ex_stag, cc, cr, i, j, k, 0);
+            amrex::Real Ey_cc = ablastr::coarsen::sample::Interp(ey_arr, ey_stag, cc, cr, i, j, k, 0);
+            amrex::Real E_mag = std::sqrt(Ex_cc*Ex_cc + Ey_cc*Ey_cc);
+            
+            amrex::Gpu::Atomic::Max(local_max_E.dataPtr(), E_mag);
+
+            // Relaxed gap selection criteria for debugging
+            amrex::Real angular_tolerance = 0.1; // Much larger tolerance
+            
+            if ( (r >= r_inner && r <= r_outer) && 
+                 (std::abs(phi - gap_phi) < angular_tolerance) ) {
+                
+                amrex::Gpu::Atomic::Add(local_cells.dataPtr(), 1);
+
+                // E-field component along the gap (radial direction)
+                amrex::Real E_radial = Ex_cc * std::cos(phi) + Ey_cc * std::sin(phi);
+
+                // Line integral contribution
+                amrex::Gpu::Atomic::Add(local_voltage.dataPtr(), -E_radial * dx[0]);
+            }
+        });
+        
+        gap_voltage += local_voltage.dataValue();
+        cells_found += local_cells.dataValue();
+        max_E_field = std::max(max_E_field, local_max_E.dataValue());
+    }
+    
+    amrex::ParallelDescriptor::ReduceRealSum(gap_voltage);
+    amrex::ParallelDescriptor::ReduceIntSum(cells_found);
+    amrex::ParallelDescriptor::ReduceRealMax(max_E_field);
+    
+    // DEBUG OUTPUT
+    amrex::Print() << "Cells found in gap: " << cells_found << std::endl;
+    amrex::Print() << "Max E-field magnitude: " << max_E_field << std::endl;
+    amrex::Print() << "Gap voltage: " << gap_voltage << std::endl;
+    amrex::Print() << "=========================" << std::endl;
+    
+    return gap_voltage;
+}
+
 
 amrex::Real ExternalFieldSource::GetVoltageForPort(int port_id) const
 {
