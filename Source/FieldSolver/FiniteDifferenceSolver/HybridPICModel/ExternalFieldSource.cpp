@@ -162,7 +162,7 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
             [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) {
                 amrex::Real x, y, z;
                 WarpXUtilAlgo::getCellCoordinates(i, j, k, mfx_stag.data(),
-                                                  problo.data(), dx.data(), x, y, z);
+                                                 problo.data(), dx.data(), x, y, z);
                 auto flag_type = xflag_parser(x,y,z);
         
                 if (flag_type > 0._rt) {
@@ -172,11 +172,11 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
                         constexpr amrex::Real current_x = 0.0_rt;
                         constexpr amrex::Real current_y = 0.0_rt;
                         constexpr amrex::Real mu0_over_2pi = 2.0e-7_rt; // μ₀/(2π)
-                        
+        
                         amrex::Real dx_from_current = x - current_x;
                         amrex::Real dy_from_current = y - current_y;
                         amrex::Real r_squared = dx_from_current*dx_from_current + dy_from_current*dy_from_current;
-                        
+        
                         if (r_squared > 1e-12_rt) { // Avoid division by zero
                             // Bx = -μ₀I*y/(2π*r²) for current in +z direction
                             field_value = -mu0_over_2pi * m_circuit_current * dy_from_current / r_squared;
@@ -192,7 +192,7 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
             [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) {
                 amrex::Real x, y, z;
                 WarpXUtilAlgo::getCellCoordinates(i, j, k, mfy_stag.data(),
-                                                  problo.data(), dx.data(), x, y, z);
+                                                 problo.data(), dx.data(), x, y, z);
                 auto flag_type = yflag_parser(x,y,z);
         
                 if (flag_type > 0._rt) {
@@ -202,11 +202,11 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
                         constexpr amrex::Real current_x = 0.0_rt;
                         constexpr amrex::Real current_y = 0.0_rt;
                         constexpr amrex::Real mu0_over_2pi = 2.0e-7_rt; // μ₀/(2π)
-                        
+        
                         amrex::Real dx_from_current = x - current_x;
                         amrex::Real dy_from_current = y - current_y;
                         amrex::Real r_squared = dx_from_current*dx_from_current + dy_from_current*dy_from_current;
-                        
+        
                         if (r_squared > 1e-12_rt) { // Avoid division by zero
                             // By = +μ₀I*x/(2π*r²) for current in +z direction
                             field_value = mu0_over_2pi * m_circuit_current * dx_from_current / r_squared;
@@ -222,7 +222,7 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
             [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) {
                 amrex::Real x, y, z;
                 WarpXUtilAlgo::getCellCoordinates(i, j, k, mfz_stag.data(),
-                                                  problo.data(), dx.data(), x, y, z);
+                                                 problo.data(), dx.data(), x, y, z);
                 auto flag_type = zflag_parser(x,y,z);
         
                 if (flag_type > 0._rt) {
@@ -368,135 +368,6 @@ amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
 
     amrex::MultiFab* Ex = warpx.m_fields.get(FieldType::Efield_fp, Direction{0}, lev);
     amrex::MultiFab* Ey = warpx.m_fields.get(FieldType::Efield_fp, Direction{1}, lev);
-    amrex::MultiFab* Ez = warpx.m_fields.get(FieldType::Efield_fp, Direction{2}, lev);
-
-    if (!Exfield_flag_parser || !Eyfield_flag_parser || !Ezfield_flag_parser) {
-        return 0.0;
-    }
-
-    // Need both flag parsers and excitation parsers for scattered field calculation
-    if (!Exfield_xt_grid_parser || !Eyfield_xt_grid_parser || !Ezfield_xt_grid_parser) {
-        return 0.0;
-    }
-
-    auto ex_flag_parser = Exfield_flag_parser->compile<3>();
-    auto ey_flag_parser = Eyfield_flag_parser->compile<3>();
-    auto ez_flag_parser = Ezfield_flag_parser->compile<3>();
-
-    auto ex_excitation_parser = Exfield_xt_grid_parser->compile<4>();
-    auto ey_excitation_parser = Eyfield_xt_grid_parser->compile<4>();
-    auto ez_excitation_parser = Ezfield_xt_grid_parser->compile<4>();
-
-    const auto problo = geom.ProbLoArray();
-    const auto dx = geom.CellSizeArray();
-    amrex::Real t = warpx.gett_new(lev);
-
-    amrex::Real total_voltage = 0.0;
-
-    // Get staggering information
-    GpuArray<int, AMREX_SPACEDIM> ex_stag, ey_stag, ez_stag;
-    for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
-        ex_stag[idim] = Ex->ixType()[idim];
-        ey_stag[idim] = Ey->ixType()[idim];
-        ez_stag[idim] = Ez->ixType()[idim];
-    }
-
-    amrex::IntVect ex_nodal_flag = Ex->ixType().toIntVect();
-    amrex::IntVect ey_nodal_flag = Ey->ixType().toIntVect();
-    amrex::IntVect ez_nodal_flag = Ez->ixType().toIntVect();
-
-#ifdef AMREX_USE_OMP
-#pragma omp parallel if (Gpu::notInLaunchRegion())
-#endif
-    for (MFIter mfi(*Ex, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-
-        amrex::Array4<amrex::Real const> const& ex_arr = Ex->array(mfi);
-        amrex::Array4<amrex::Real const> const& ey_arr = Ey->array(mfi);
-        amrex::Array4<amrex::Real const> const& ez_arr = Ez->array(mfi);
-
-        // Get appropriate boxes for each component
-        const amrex::Box& ex_box = mfi.tilebox(ex_nodal_flag, Ex->nGrowVect());
-        const amrex::Box& ey_box = mfi.tilebox(ey_nodal_flag, Ey->nGrowVect());
-        const amrex::Box& ez_box = mfi.tilebox(ez_nodal_flag, Ez->nGrowVect());
-
-        amrex::Real local_voltage = 0.0;
-
-        // Integrate scattered field E·dl over the port region
-        // For Ex component
-        amrex::ParallelFor(ex_box, [=, &local_voltage] AMREX_GPU_DEVICE (int i, int j, int k) {
-            amrex::Real x, y, z;
-            WarpXUtilAlgo::getCellCoordinates(i, j, k, ex_stag.data(),
-                                              problo.data(), dx.data(), x, y, z);
-
-            int flag = static_cast<int>(ex_flag_parser(x, y, z));
-            if (flag == port_id) {
-                // Calculate scattered field = total - incident
-                amrex::Real ex_total = ex_arr(i, j, k, 0);
-                amrex::Real ex_incident = ex_excitation_parser(x, y, z, t);
-                amrex::Real ex_scattered = ex_total - ex_incident;
-		//amrex::Print() << "ex_total = " << ex_total << ", ex_incident  = " << ex_incident << std::endl;
-
-                // Accumulate voltage contribution: E_scattered·dl = -Ex_scattered * dx
-                amrex::Gpu::Atomic::Add(&local_voltage, -ex_scattered * dx[0]);
-            }
-        });
-
-        // For Ey component
-        amrex::ParallelFor(ey_box, [=, &local_voltage] AMREX_GPU_DEVICE (int i, int j, int k) {
-            amrex::Real x, y, z;
-            WarpXUtilAlgo::getCellCoordinates(i, j, k, ey_stag.data(),
-                                              problo.data(), dx.data(), x, y, z);
-
-            int flag = static_cast<int>(ey_flag_parser(x, y, z));
-            if (flag == port_id) {
-                // Calculate scattered field = total - incident
-                amrex::Real ey_total = ey_arr(i, j, k, 0);
-                amrex::Real ey_incident = ey_excitation_parser(x, y, z, t);
-                amrex::Real ey_scattered = ey_total - ey_incident;
-
-                // Accumulate voltage contribution: E_scattered·dl = -Ey_scattered * dy
-                amrex::Gpu::Atomic::Add(&local_voltage, -ey_scattered * dx[1]);
-            }
-        });
-
-        // For Ez component
-        amrex::ParallelFor(ez_box, [=, &local_voltage] AMREX_GPU_DEVICE (int i, int j, int k) {
-            amrex::Real x, y, z;
-            WarpXUtilAlgo::getCellCoordinates(i, j, k, ez_stag.data(),
-                                              problo.data(), dx.data(), x, y, z);
-
-            int flag = static_cast<int>(ez_flag_parser(x, y, z));
-            if (flag == port_id) {
-                // Calculate scattered field = total - incident
-                amrex::Real ez_total = ez_arr(i, j, k, 0);
-                amrex::Real ez_incident = ez_excitation_parser(x, y, z, t);
-                amrex::Real ez_scattered = ez_total - ez_incident;
-
-                // Accumulate voltage contribution: E_scattered·dl = -Ez_scattered * dz
-                amrex::Gpu::Atomic::Add(&local_voltage, -ez_scattered * dx[2]);
-            }
-        });
-
-        total_voltage += local_voltage;
-    }
-
-    // Reduce across MPI processes
-    amrex::ParallelDescriptor::ReduceRealSum(total_voltage);
-
-    return total_voltage;
-}
-*/
-/*
-amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
-{
-    auto &warpx = WarpX::GetInstance();
-    auto const &geom = warpx.Geom(lev);
-
-    using ablastr::fields::Direction;
-    using warpx::fields::FieldType;
-
-    amrex::MultiFab* Ex = warpx.m_fields.get(FieldType::Efield_fp, Direction{0}, lev);
-    amrex::MultiFab* Ey = warpx.m_fields.get(FieldType::Efield_fp, Direction{1}, lev);
 
     const auto problo = geom.ProbLoArray();
     const auto dx = geom.CellSizeArray();
@@ -583,107 +454,69 @@ amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
 
 amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
 {
-    // Define gap parameters
+    // Coil / port geometry
     constexpr amrex::Real coil_radius = 0.01_rt;
-    constexpr amrex::Real coil_x_center = 0.0_rt;
-    constexpr amrex::Real coil_y_center = 0.0_rt;
+    constexpr amrex::Real coil_z_plane = 0.01_rt; // Plane to sample Ex
+    constexpr int Npts = 50; // Number of integration samples
 
-    // Get E-field components
-    auto &warpx = WarpX::GetInstance();
-    
+    // Access WarpX fields
+    auto& warpx = WarpX::GetInstance();
     using ablastr::fields::Direction;
     amrex::MultiFab* Ex = warpx.m_fields.get(warpx::fields::FieldType::Efield_fp, Direction{0}, lev);
-    amrex::MultiFab* Ey = warpx.m_fields.get(warpx::fields::FieldType::Efield_fp, Direction{1}, lev);
 
     const auto geom = warpx.Geom(lev);
     const auto problo = geom.ProbLoArray();
     const auto dx = geom.CellSizeArray();
 
-    // DEBUG: Print domain and gap info
-    amrex::Print() << "=== GAP VOLTAGE DEBUG ===" << std::endl;
-    amrex::Print() << "Coil radius: " << coil_radius << std::endl;
-    amrex::Print() << "Domain: [" << problo[0] << ", " << problo[0] + geom.ProbLength(0) << "] x ["
-                   << problo[1] << ", " << problo[1] + geom.ProbLength(1) << "]" << std::endl;
-    amrex::Print() << "Cell size: dx=" << dx[0] << ", dy=" << dx[1] << ", dz=" << dx[2] << std::endl;
-    
-    const amrex::Real r_inner = coil_radius - 0.5 * dx[0];
-    const amrex::Real r_outer = coil_radius + 0.5 * dx[0];
-    amrex::Print() << "Gap radial range: [" << r_inner << ", " << r_outer << "]" << std::endl;
-
-    // Get staggering info for Ex and Ey
-    GpuArray<int, AMREX_SPACEDIM> ex_stag, ey_stag;
+    // Staggering info for interpolation
+    amrex::GpuArray<int, AMREX_SPACEDIM> ex_stag;
     for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
         ex_stag[idim] = Ex->ixType()[idim];
-        ey_stag[idim] = Ey->ixType()[idim];
     }
-    
-    amrex::GpuArray<int,3> cc = {AMREX_D_DECL(0, 0, 0)};
-    amrex::GpuArray<int,3> cr = {AMREX_D_DECL(1, 1, 1)};
+    amrex::GpuArray<int, 3> cc = {AMREX_D_DECL(0, 0, 0)};
+    amrex::GpuArray<int, 3> cr = {AMREX_D_DECL(1, 1, 1)};
 
-    constexpr amrex::Real gap_phi = 0.0_rt;
     amrex::Real gap_voltage = 0.0_rt;
-    int cells_found = 0;
-    amrex::Real max_E_field = 0.0_rt;
 
+    // Integration endpoints along x-axis
+    const amrex::Real x1 = -coil_radius;
+    const amrex::Real x2 =  coil_radius;
+    const amrex::Real y_fixed = 0.0_rt;
+    const amrex::Real z_fixed = coil_z_plane;
+
+    const amrex::Real dx_line = (x2 - x1) / (Npts - 1);
+
+    // Loop over MFIter tiles
     for (MFIter mfi(*Ex, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
         auto const& ex_arr = Ex->array(mfi);
-        auto const& ey_arr = Ey->array(mfi);
-        
-        const amrex::Box& box = mfi.tilebox();
-        amrex::Gpu::DeviceScalar<amrex::Real> local_voltage(0.0_rt);
-        amrex::Gpu::DeviceScalar<int> local_cells(0);
-        amrex::Gpu::DeviceScalar<amrex::Real> local_max_E(0.0_rt);
 
-        amrex::ParallelFor(box, [=, &local_voltage, &local_cells, &local_max_E] AMREX_GPU_DEVICE (int i, int j, int k) {
-            amrex::Real x, y, z;
-            WarpXUtilAlgo::getCellCoordinates(i, j, k, cc.data(), problo.data(), dx.data(), x, y, z);
-            
-            // Only integrate near z = 0 plane
-            if (std::abs(z) > 2.0 * dx[2]) return;
-            
-            amrex::Real dx_c = x - coil_x_center;
-            amrex::Real dy_c = y - coil_y_center;
-            amrex::Real r = std::sqrt(dx_c*dx_c + dy_c*dy_c);
-            amrex::Real phi = std::atan2(dy_c, dx_c);
+        amrex::Real V_local = 0.0_rt;
 
-            // Get E-field for debugging
-            amrex::Real Ex_cc = ablastr::coarsen::sample::Interp(ex_arr, ex_stag, cc, cr, i, j, k, 0);
-            amrex::Real Ey_cc = ablastr::coarsen::sample::Interp(ey_arr, ey_stag, cc, cr, i, j, k, 0);
-            amrex::Real E_mag = std::sqrt(Ex_cc*Ex_cc + Ey_cc*Ey_cc);
-            
-            amrex::Gpu::Atomic::Max(local_max_E.dataPtr(), E_mag);
+        for (int n = 0; n < Npts; ++n) {
+            amrex::Real xn = x1 + n * dx_line;
+            amrex::Real yn = y_fixed;
+            amrex::Real zn = z_fixed;
 
-            // Relaxed gap selection criteria for debugging
-            amrex::Real angular_tolerance = 0.1; // Much larger tolerance
-            
-            if ( (r >= r_inner && r <= r_outer) && 
-                 (std::abs(phi - gap_phi) < angular_tolerance) ) {
-                
-                amrex::Gpu::Atomic::Add(local_cells.dataPtr(), 1);
+            // Convert to cell indices
+            int i = static_cast<int>((xn - problo[0]) / dx[0]);
+            int j = static_cast<int>((yn - problo[1]) / dx[1]);
+            int k = static_cast<int>((zn - problo[2]) / dx[2]);
 
-                // E-field component along the gap (radial direction)
-                amrex::Real E_radial = Ex_cc * std::cos(phi) + Ey_cc * std::sin(phi);
-
-                // Line integral contribution
-                amrex::Gpu::Atomic::Add(local_voltage.dataPtr(), -E_radial * dx[0]);
+            // Only sample if inside valid tile
+            if (mfi.validbox().contains(amrex::IntVect(AMREX_D_DECL(i,j,k)))) {
+                amrex::Real Ex_val = ablastr::coarsen::sample::Interp(
+                    ex_arr, ex_stag, cc, cr, i, j, k, 0);
+                V_local += Ex_val;
             }
-        });
-        
-        gap_voltage += local_voltage.dataValue();
-        cells_found += local_cells.dataValue();
-        max_E_field = std::max(max_E_field, local_max_E.dataValue());
+        }
+
+        // Convert average E to voltage (negative line integral)
+        gap_voltage += - (V_local / static_cast<amrex::Real>(Npts)) * (x2 - x1);
     }
-    
+
+    // Reduce across MPI ranks
     amrex::ParallelDescriptor::ReduceRealSum(gap_voltage);
-    amrex::ParallelDescriptor::ReduceIntSum(cells_found);
-    amrex::ParallelDescriptor::ReduceRealMax(max_E_field);
-    
-    // DEBUG OUTPUT
-    amrex::Print() << "Cells found in gap: " << cells_found << std::endl;
-    amrex::Print() << "Max E-field magnitude: " << max_E_field << std::endl;
-    amrex::Print() << "Gap voltage: " << gap_voltage << std::endl;
-    amrex::Print() << "=========================" << std::endl;
-    
+
     return gap_voltage;
 }
 
@@ -804,34 +637,6 @@ void LCCircuit::UpdateTimeStep(amrex::Real dt)
 
     m_time += dt;
 }
-/*
-void LCCircuit::UpdateTimeStep(amrex::Real dt)
-{
-    // LC circuit differential equations:
-    // L * dI/dt + V = V_ext
-    // C * dV/dt = I
-    //
-    // Analytical solution for free oscillation (V_ext = 0):
-    // V(t) = V0 * cos(ωt) + (I0/ωC) * sin(ωt)
-    // I(t) = I0 * cos(ωt) - (V0*ωC) * sin(ωt)
-    // where ω = 1/sqrt(LC)
-
-    m_time += dt;
-    
-    amrex::Real omega = 1.0 / sqrt(m_L * m_C);  // Angular frequency
-    amrex::Real omega_t = omega * m_time;
-    
-    // For now, implement free oscillation (no external voltage coupling)
-    // V(t) = V0 * cos(ωt) + (I0/(ωC)) * sin(ωt)
-    // I(t) = I0 * cos(ωt) - (V0*ωC) * sin(ωt)
-    
-    m_voltage = m_V0 * cos(omega_t) + (m_I0 / (omega * m_C)) * sin(omega_t);
-    m_current = m_I0 * cos(omega_t) - (m_V0 * omega * m_C) * sin(omega_t);
-    
-    // TODO: Add external voltage coupling later
-    // For now, this gives you the classic LC oscillation
-}
-*/
 
 void LCCircuit::Reset()
 {
@@ -987,7 +792,7 @@ ExternalFieldSource::ReadExcitationParser ()
     }
 
 
-    // Circuit coupling parameters (simplified)
+    // Circuit coupling parameters
     amrex::ParmParse pp_circuit("circuit");
     pp_circuit.query("enable_coupling", m_circuit_coupling_enabled);
     pp_circuit.query("coupling_interval", m_circuit_coupling_interval);
