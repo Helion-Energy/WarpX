@@ -47,7 +47,7 @@ public:
      * \param V0 Initial voltage in Volts
      * \param I0 Initial current in Amperes (default 0)
      */
-    LCCircuit(amrex::Real L, amrex::Real C, amrex::Real V0, amrex::Real I0 = 0.0);
+    LCCircuit(amrex::Real L, amrex::Real C, amrex::Real R, amrex::Real V0, amrex::Real I0 = 0.0);
 
     /**
      * \brief Update circuit state to next time step
@@ -98,6 +98,7 @@ public:
 private:
     amrex::Real m_L;                    // Inductance [H]
     amrex::Real m_C;                    // Capacitance [F]
+    amrex::Real m_R;                    // Resistance [Ohm]
     amrex::Real m_V0;                   // Initial voltage [V]
     amrex::Real m_I0;                   // Initial current [A]
     amrex::Real m_voltage;              // Current voltage [V]
@@ -158,6 +159,7 @@ protected:
     // Circuit coupling members
     amrex::Real m_circuit_current = 0.0;
     bool m_circuit_coupling_enabled = false;
+    amrex::Real m_coupling_strength = 0.01;
     std::vector<amrex::Real> m_port_voltages;
     std::vector<int> m_port_ids;
     
@@ -297,7 +299,7 @@ public:
      * \param C Capacitance in Farads
      * \param V0 Initial voltage in Volts
      */
-    void InitializeLCCircuit(amrex::Real L, amrex::Real C, amrex::Real V0);
+    void InitializeLCCircuit(amrex::Real L, amrex::Real C, amrex::Real R, amrex::Real V0);
 
     /**
      * \brief Update LC circuit state

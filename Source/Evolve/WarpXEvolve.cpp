@@ -545,6 +545,7 @@ WarpX::OneStep_nosub (Real cur_time)
 
 	   // SetExternalVoltage
            if (m_external_field_source->m_lc_circuit) {
+               //m_external_field_source->m_lc_circuit->SetExternalVoltage(0.0);
                m_external_field_source->m_lc_circuit->SetExternalVoltage(port_voltage);
            }
 

@@ -179,8 +179,8 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
         
                         if (r_squared > 1e-12_rt) { // Avoid division by zero
                             // Bx = -μ₀I*y/(2π*r²) for current in +z direction
-                            field_value = -mu0_over_2pi * m_circuit_current * dy_from_current / r_squared;
-                            //field_value = xfield_parser(x,y,z,t);
+                            //field_value = -mu0_over_2pi * m_circuit_current * dy_from_current / r_squared;
+                            field_value = m_coupling_strength * m_circuit_current * xfield_parser(x,y,z,t);
                         }
                     } else {
                         field_value = xfield_parser(x,y,z,t);
@@ -209,8 +209,8 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
         
                         if (r_squared > 1e-12_rt) { // Avoid division by zero
                             // By = +μ₀I*x/(2π*r²) for current in +z direction
-                            field_value = mu0_over_2pi * m_circuit_current * dx_from_current / r_squared;
-                            //field_value = yfield_parser(x,y,z,t);
+                            //field_value = mu0_over_2pi * m_circuit_current * dx_from_current / r_squared;
+                            field_value = m_coupling_strength * m_circuit_current * yfield_parser(x,y,z,t);
                         }
                     } else {
                         field_value = yfield_parser(x,y,z,t);
@@ -229,7 +229,8 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
                     amrex::Real field_value = 0.0_rt;
                     if (m_circuit_coupling_enabled) {
                         // For current in z-direction, Bz = 0 (no field along current direction)
-                        field_value = 0.0_rt;
+                        //field_value = 0.0_rt;
+                        field_value = m_coupling_strength * m_circuit_current * zfield_parser(x,y,z,t);
                     } else {
                         field_value = zfield_parser(x,y,z,t);
                     }
@@ -278,13 +279,13 @@ std::set<int> ExternalFieldSource::GetUniquePortIDs(int lev)
     std::set<int> unique_ports;
 
     // Only proceed if we have the necessary parsers
-    if (!Exfield_flag_parser || !Eyfield_flag_parser || !Ezfield_flag_parser) {
+    if (!Bxfield_flag_parser || !Byfield_flag_parser || !Bzfield_flag_parser) {
         return unique_ports;
     }
 
-    auto ex_flag_parser = Exfield_flag_parser->compile<3>();
-    auto ey_flag_parser = Eyfield_flag_parser->compile<3>();
-    auto ez_flag_parser = Ezfield_flag_parser->compile<3>();
+    auto bx_flag_parser = Bxfield_flag_parser->compile<3>();
+    auto by_flag_parser = Byfield_flag_parser->compile<3>();
+    auto bz_flag_parser = Bzfield_flag_parser->compile<3>();
 
     const auto problo = geom.ProbLoArray();
     const auto dx = geom.CellSizeArray();
@@ -302,13 +303,13 @@ std::set<int> ExternalFieldSource::GetUniquePortIDs(int lev)
                 y = problo[1] + (j + 0.5) * dx[1];
                 z = problo[2] + (k + 0.5) * dx[2];
 
-                int ex_flag = static_cast<int>(ex_flag_parser(x, y, z));
-                int ey_flag = static_cast<int>(ey_flag_parser(x, y, z));
-                int ez_flag = static_cast<int>(ez_flag_parser(x, y, z));
+                int bx_flag = static_cast<int>(bx_flag_parser(x, y, z));
+                int by_flag = static_cast<int>(by_flag_parser(x, y, z));
+                int bz_flag = static_cast<int>(bz_flag_parser(x, y, z));
 
-                if (ex_flag > 0) unique_ports.insert(ex_flag);
-                if (ey_flag > 0) unique_ports.insert(ey_flag);
-                if (ez_flag > 0) unique_ports.insert(ez_flag);
+                if (bx_flag > 0) unique_ports.insert(bx_flag);
+                if (by_flag > 0) unique_ports.insert(by_flag);
+                if (bz_flag > 0) unique_ports.insert(bz_flag);
             }
         }
     }
@@ -452,49 +453,50 @@ amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
 }
 */
 
+
 amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
 {
-    // Coil / port geometry
-    constexpr amrex::Real coil_radius = 0.01_rt;
-    constexpr amrex::Real coil_z_plane = 0.01_rt; // Plane to sample Ex
-    constexpr int Npts = 50; // Number of integration samples
+    // Waveguide geometry from your config
+    constexpr amrex::Real waveguide_width = 14.95e-3_rt;   // 14.95mm
+    constexpr amrex::Real waveguide_height = 11.43e-3_rt;  // 11.43mm
+    constexpr amrex::Real port_z_plane = 0.246_rt;          // Near +z end (adjust as needed)
+    constexpr int Npts_y = 32; // Number of integration samples across height
 
     // Access WarpX fields
     auto& warpx = WarpX::GetInstance();
     using ablastr::fields::Direction;
-    amrex::MultiFab* Ex = warpx.m_fields.get(warpx::fields::FieldType::Efield_fp, Direction{0}, lev);
+    amrex::MultiFab* Ey = warpx.m_fields.get(warpx::fields::FieldType::Efield_fp, Direction{1}, lev);
 
     const auto geom = warpx.Geom(lev);
     const auto problo = geom.ProbLoArray();
     const auto dx = geom.CellSizeArray();
 
     // Staggering info for interpolation
-    amrex::GpuArray<int, AMREX_SPACEDIM> ex_stag;
+    amrex::GpuArray<int, AMREX_SPACEDIM> ey_stag;
     for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
-        ex_stag[idim] = Ex->ixType()[idim];
+        ey_stag[idim] = Ey->ixType()[idim];
     }
     amrex::GpuArray<int, 3> cc = {AMREX_D_DECL(0, 0, 0)};
     amrex::GpuArray<int, 3> cr = {AMREX_D_DECL(1, 1, 1)};
 
-    amrex::Real gap_voltage = 0.0_rt;
+    amrex::Real port_voltage = 0.0_rt;
 
-    // Integration endpoints along x-axis
-    const amrex::Real x1 = -coil_radius;
-    const amrex::Real x2 =  coil_radius;
-    const amrex::Real y_fixed = 0.0_rt;
-    const amrex::Real z_fixed = coil_z_plane;
+    // Integration across waveguide height (y-direction)
+    const amrex::Real y1 = -waveguide_height / 2.0_rt;
+    const amrex::Real y2 =  waveguide_height / 2.0_rt;
+    const amrex::Real x_fixed = 0.0_rt;  // Center of waveguide width
+    const amrex::Real z_fixed = port_z_plane;
 
-    const amrex::Real dx_line = (x2 - x1) / (Npts - 1);
+    const amrex::Real dy_line = (y2 - y1) / (Npts_y - 1);
 
     // Loop over MFIter tiles
-    for (MFIter mfi(*Ex, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-        auto const& ex_arr = Ex->array(mfi);
+    for (MFIter mfi(*Ey, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        auto const& ey_arr = Ey->array(mfi);
 
         amrex::Real V_local = 0.0_rt;
-
-        for (int n = 0; n < Npts; ++n) {
-            amrex::Real xn = x1 + n * dx_line;
-            amrex::Real yn = y_fixed;
+        for (int n = 0; n < Npts_y; ++n) {
+            amrex::Real xn = x_fixed;
+            amrex::Real yn = y1 + n * dy_line;
             amrex::Real zn = z_fixed;
 
             // Convert to cell indices
@@ -504,22 +506,21 @@ amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
 
             // Only sample if inside valid tile
             if (mfi.validbox().contains(amrex::IntVect(AMREX_D_DECL(i,j,k)))) {
-                amrex::Real Ex_val = ablastr::coarsen::sample::Interp(
-                    ex_arr, ex_stag, cc, cr, i, j, k, 0);
-                V_local += Ex_val;
+                amrex::Real Ey_val = ablastr::coarsen::sample::Interp(
+                    ey_arr, ey_stag, cc, cr, i, j, k, 0);
+                V_local += Ey_val;
             }
         }
 
-        // Convert average E to voltage (negative line integral)
-        gap_voltage += - (V_local / static_cast<amrex::Real>(Npts)) * (x2 - x1);
+        // Convert to voltage: V = ∫E⋅dl 
+        port_voltage += V_local * dy_line;
     }
 
     // Reduce across MPI ranks
-    amrex::ParallelDescriptor::ReduceRealSum(gap_voltage);
+    amrex::ParallelDescriptor::ReduceRealSum(port_voltage);
 
-    return gap_voltage;
+    return -port_voltage;
 }
-
 
 amrex::Real ExternalFieldSource::GetVoltageForPort(int port_id) const
 {
@@ -582,8 +583,8 @@ void ExternalFieldSource::PrintPortInfo() const
 // LC Circuit Implementation
 // ========================================================================
 
-LCCircuit::LCCircuit(amrex::Real L, amrex::Real C, amrex::Real V0, amrex::Real I0)
-    : m_L(L), m_C(C), m_V0(V0), m_I0(I0), 
+LCCircuit::LCCircuit(amrex::Real L, amrex::Real C, amrex::Real R, amrex::Real V0, amrex::Real I0)
+    : m_L(L), m_C(C), m_R(R), m_V0(V0), m_I0(I0), 
       m_voltage(V0), m_current(I0), m_external_voltage(0.0), m_time(0.0)
 {
     if (L <= 0.0 || C <= 0.0) {
@@ -595,14 +596,15 @@ LCCircuit::LCCircuit(amrex::Real L, amrex::Real C, amrex::Real V0, amrex::Real I
     }
 }
 
+
 void LCCircuit::UpdateTimeStep(amrex::Real dt)
 {
-    // LC circuit differential equations:
-    // L * dI/dt + V = V_ext  =>  dI/dt = (V_ext - V) / L
-    // C * dV/dt = I          =>  dV/dt = I / C
+    // RLC circuit differential equations:
+    // L * dI/dt + R * I + V = V_ext  =>  dI/dt = (V_ext - V - R*I) / L
+    // C * dV/dt = I                  =>  dV/dt = I / C
     //
     // State vector: [V, I]
-    // Derivatives: [I/C, (V_ext - V)/L]
+    // Derivatives: [I/C, (V_ext - V - R*I)/L]
 
     // Current state
     amrex::Real V = m_voltage;
@@ -611,25 +613,25 @@ void LCCircuit::UpdateTimeStep(amrex::Real dt)
     // RK4 implementation
     // k1 = f(t, y)
     amrex::Real dV_dt_k1 = I / m_C;
-    amrex::Real dI_dt_k1 = (m_external_voltage - V) / m_L;
+    amrex::Real dI_dt_k1 = (m_external_voltage - V - m_R * I) / m_L;
 
     // k2 = f(t + dt/2, y + k1*dt/2)
     amrex::Real V_k2 = V + 0.5 * dt * dV_dt_k1;
     amrex::Real I_k2 = I + 0.5 * dt * dI_dt_k1;
     amrex::Real dV_dt_k2 = I_k2 / m_C;
-    amrex::Real dI_dt_k2 = (m_external_voltage - V_k2) / m_L;
+    amrex::Real dI_dt_k2 = (m_external_voltage - V_k2 - m_R * I_k2) / m_L;
 
     // k3 = f(t + dt/2, y + k2*dt/2)
     amrex::Real V_k3 = V + 0.5 * dt * dV_dt_k2;
     amrex::Real I_k3 = I + 0.5 * dt * dI_dt_k2;
     amrex::Real dV_dt_k3 = I_k3 / m_C;
-    amrex::Real dI_dt_k3 = (m_external_voltage - V_k3) / m_L;
+    amrex::Real dI_dt_k3 = (m_external_voltage - V_k3 - m_R * I_k3) / m_L;
 
     // k4 = f(t + dt, y + k3*dt)
     amrex::Real V_k4 = V + dt * dV_dt_k3;
     amrex::Real I_k4 = I + dt * dI_dt_k3;
     amrex::Real dV_dt_k4 = I_k4 / m_C;
-    amrex::Real dI_dt_k4 = (m_external_voltage - V_k4) / m_L;
+    amrex::Real dI_dt_k4 = (m_external_voltage - V_k4 - m_R * I_k4) / m_L;
 
     // Final update: y_new = y + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
     m_voltage = V + (dt / 6.0) * (dV_dt_k1 + 2.0 * dV_dt_k2 + 2.0 * dV_dt_k3 + dV_dt_k4);
@@ -651,6 +653,7 @@ void LCCircuit::PrintInfo() const
     amrex::Print() << "LC Circuit Parameters:\n";
     amrex::Print() << "  Inductance L = " << m_L << " H\n";
     amrex::Print() << "  Capacitance C = " << m_C << " F\n";
+    amrex::Print() << "  Resistance R = " << m_R << " F\n";
     amrex::Print() << "  Initial Voltage V0 = " << m_V0 << " V\n";
     amrex::Print() << "  Initial Current I0 = " << m_I0 << " A\n";
     amrex::Print() << "  Resonant Frequency = " << GetResonantFrequency() << " Hz\n";
@@ -662,9 +665,9 @@ void LCCircuit::PrintInfo() const
 // ExternalFieldSource LC Circuit Methods
 // ========================================================================
 
-void ExternalFieldSource::InitializeLCCircuit(amrex::Real L, amrex::Real C, amrex::Real V0)
+void ExternalFieldSource::InitializeLCCircuit(amrex::Real L, amrex::Real C, amrex::Real R, amrex::Real V0)
 {
-    m_lc_circuit = std::make_unique<LCCircuit>(L, C, V0);
+    m_lc_circuit = std::make_unique<LCCircuit>(L, C, R, V0);
     
     if (amrex::ParallelDescriptor::IOProcessor()) {
         amrex::Print() << "LC Circuit initialized for circuit coupling\n";
@@ -796,6 +799,7 @@ ExternalFieldSource::ReadExcitationParser ()
     amrex::ParmParse pp_circuit("circuit");
     pp_circuit.query("enable_coupling", m_circuit_coupling_enabled);
     pp_circuit.query("coupling_interval", m_circuit_coupling_interval);
+    pp_circuit.query("coupling_strength", m_coupling_strength);
 
     if (m_circuit_coupling_enabled) {
         amrex::Print() << "Circuit coupling enabled\n";
@@ -808,12 +812,14 @@ ExternalFieldSource::ReadExcitationParser ()
     if (enable_lc_test) {
         amrex::Real lc_inductance = 1.0e-6;     // Default 1 μH
         amrex::Real lc_capacitance = 1.0e-9;    // Default 1 nF
+        amrex::Real lc_resistance = 50.0;    // Default 50 Ohm
         amrex::Real lc_initial_voltage = 10.0;  // Default 10 V
 
         pp_circuit.query("lc_inductance", lc_inductance);
         pp_circuit.query("lc_capacitance", lc_capacitance);
+        pp_circuit.query("lc_resistance", lc_resistance);
         pp_circuit.query("lc_initial_voltage", lc_initial_voltage);
 
-        InitializeLCCircuit(lc_inductance, lc_capacitance, lc_initial_voltage);
+        InitializeLCCircuit(lc_inductance, lc_capacitance, lc_resistance, lc_initial_voltage);
     }
 }
