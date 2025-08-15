@@ -261,6 +261,11 @@ void ExternalFieldSource::InitializePorts(int lev)
         // Initialize voltage storage
         m_port_voltages.resize(m_port_ids.size(), 0.0);
 
+	m_port_magnetic_flux_map.clear(); // Ensure it's empty before populating
+        for (int port_id : m_port_ids) {
+            m_port_magnetic_flux_map[port_id] = 0.0_rt; // Initialize flux to 0 for each port
+        }
+
         m_ports_initialized = true;
 
         if (amrex::ParallelDescriptor::IOProcessor()) {
@@ -353,7 +358,8 @@ void ExternalFieldSource::CalculatePortVoltages(int lev)
     // Calculate voltage for each port
     for (size_t i = 0; i < m_port_ids.size(); ++i) {
         int port_id = m_port_ids[i];
-        amrex::Real voltage = CalculateVoltageForPort(port_id, lev);
+        //amrex::Real voltage = CalculateVoltageForPort(port_id, lev);
+        amrex::Real voltage = CalculateVoltageForPort_EMF(port_id, lev);
         m_port_voltages[i] = voltage;
         m_port_voltage_map[port_id] = voltage;
     }
@@ -520,6 +526,143 @@ amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
     amrex::ParallelDescriptor::ReduceRealSum(port_voltage);
 
     return -port_voltage;
+}
+/*
+amrex::Real ExternalFieldSource::CalculateVoltageForPort_EMF(int port_id, int lev)
+{
+    // Waveguide geometry from your config
+    constexpr amrex::Real waveguide_width = 14.95e-3_rt;   // 14.95mm
+    constexpr amrex::Real waveguide_height = 11.43e-3_rt;  // 11.43mm
+    constexpr amrex::Real port_z_plane = 0.0; //0.246_rt;          // Near +z end (adjust as needed)
+
+    // Access WarpX fields - we need Bz for flux calculation
+    auto& warpx = WarpX::GetInstance();
+    using ablastr::fields::Direction;
+    // Assuming Bz is stored as a MultiFab. Check WarpX documentation for exact field name.
+    // In WarpX, magnetic fields (Bfield) have components Bx, By, Bz. We need Bz for flux through the x-y plane.
+    amrex::MultiFab* Bz_mf = warpx.m_fields.get(warpx::fields::FieldType::Bfield_fp, Direction{0}, lev);
+
+    // Staggering info for interpolation (Bz is typically cell-centered in z, edge-centered in x,y)
+    amrex::GpuArray<int, AMREX_SPACEDIM> bz_stag;
+    for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+        bz_stag[idim] = Bz_mf->ixType()[idim];
+    }
+    // You might need to adjust 'cc' and 'cr' based on Bz staggering relative to cell centers
+    // For cell-centered in z and edge-centered in x,y, if you want cell-centered values for integration:
+    amrex::GpuArray<int, 3> cc = {AMREX_D_DECL(1, 1, 0)}; // Sample Bz at cell center in x,y
+    amrex::GpuArray<int, 3> cr = {AMREX_D_DECL(0, 0, 1)}; // Relative to cell center, Bz is at z-face
+
+    const auto geom = warpx.Geom(lev);
+    const auto problo = geom.ProbLoArray();
+    const auto dx = geom.CellSizeArray();
+
+    amrex::Real current_flux = 0.0_rt;
+
+    // Integration over the port's cross-sectional area (x-y plane at port_z_plane)
+    // The surface integral is sum(Bz * dA) where dA = dx * dy
+    // We are iterating over cells that make up this cross-section.
+    // The number of points for integration will depend on the grid resolution.
+
+    // Calculate approximate cell indices for the port plane
+    int i_plane = static_cast<int>((port_z_plane - problo[0]) / dx[0]);
+
+    amrex::Print() << " i_plane = " << i_plane << "\n";
+    // Loop over MFIter tiles
+    for (MFIter mfi(*Bz_mf, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const Box& box = mfi.tilebox();
+
+	auto const& bz_arr = Bz_mf->array(mfi);
+
+	amrex::Loop(box, [=, &current_flux] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            if (i == i_plane) {
+                amrex::Real Bz_val = bz_arr(i, j, k);
+                amrex::Real dA = dx[1] * dx[2];
+                current_flux += Bz_val * dA; 
+            }
+        });
+
+    }
+
+    // Reduce across MPI ranks
+    amrex::ParallelDescriptor::ReduceRealSum(current_flux);
+
+    // Get previous flux from a stored map (needs to be initialized and updated each step)
+    amrex::Real previous_flux = m_port_magnetic_flux_map[port_id];
+
+    amrex::Real dt = warpx.getdt(0);
+
+    // Calculate EMF using Faraday's Law: E = -N * dPhi/dt
+    // Assuming N=1 for a single waveguide port
+    amrex::Real port_voltage = - (current_flux - previous_flux) / dt;
+
+    // Store current flux for the next time step
+    m_port_magnetic_flux_map[port_id] = current_flux;
+
+    return port_voltage;
+}
+*/
+amrex::Real ExternalFieldSource::CalculateVoltageForPort_EMF(int port_id, int lev)
+{
+    constexpr amrex::Real probe_x_position = 0.0; // mid-x plane for TE10
+
+    // Access WarpX instance and geometry
+    auto& warpx = WarpX::GetInstance();
+    const auto geom   = warpx.Geom(lev);
+    const auto problo = geom.ProbLoArray();
+    const auto dx     = geom.CellSizeArray();
+
+    // Get the MultiFab for Bx
+    using ablastr::fields::Direction;
+    amrex::MultiFab* Bx_mf = warpx.m_fields.get(
+        warpx::fields::FieldType::Bfield_fp,
+        Direction{0},
+        lev
+    );
+
+    // Find the i-index for the probe_x_position
+    int i_plane = static_cast<int>((probe_x_position - problo[0]) / dx[0]);
+
+    amrex::Real current_flux = 0.0_rt;
+
+    // device scalar to accumulate on GPU
+    amrex::Gpu::DeviceScalar<amrex::Real> d_flux(0.0);
+    
+    for (MFIter mfi(*Bx_mf, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const Box& box = mfi.tilebox();
+        auto const& bx_arr = Bx_mf->array(mfi);
+    
+        // capture a device pointer to the scalar
+        auto flux_ptr = d_flux.dataPtr();
+    
+        amrex::ParallelFor(box,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                if (i == i_plane) {
+                    amrex::Real dA = dx[1] * dx[2]; // dy * dz
+                    amrex::Real contrib = bx_arr(i, j, k) * dA;
+                    amrex::Gpu::Atomic::Add(flux_ptr, contrib);
+                }
+            });
+    }
+    
+    // copy device scalar back to host
+    current_flux = d_flux.dataValue();
+
+    // Sum across MPI ranks
+    amrex::ParallelDescriptor::ReduceRealSum(current_flux);
+
+    // Previous flux for dΦ/dt
+    amrex::Real previous_flux = m_port_magnetic_flux_map[port_id];
+    amrex::Real dt = warpx.getdt(0);
+
+    // Faraday's Law: V = -dΦ/dt
+    amrex::Real port_voltage = - (current_flux - previous_flux) / dt;
+
+    // Store for next step
+    m_port_magnetic_flux_map[port_id] = current_flux;
+
+    return port_voltage;
 }
 
 amrex::Real ExternalFieldSource::GetVoltageForPort(int port_id) const

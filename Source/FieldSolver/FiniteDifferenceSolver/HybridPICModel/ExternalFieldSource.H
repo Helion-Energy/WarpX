@@ -169,6 +169,8 @@ protected:
     
     // Map for quick voltage lookup by port ID
     std::map<int, amrex::Real> m_port_voltage_map;
+
+    std::map<int, amrex::Real> m_port_magnetic_flux_map;
     
     // Circuit coupling input parameters
     static int m_circuit_coupling_interval;
@@ -237,6 +239,7 @@ public:
      * \return Calculated voltage for the port
      */
     amrex::Real CalculateVoltageForPort(int port_id, int lev);
+    amrex::Real CalculateVoltageForPort_EMF(int port_id, int lev);
     
     /**
      * \brief Identify unique port IDs from flag parsers
