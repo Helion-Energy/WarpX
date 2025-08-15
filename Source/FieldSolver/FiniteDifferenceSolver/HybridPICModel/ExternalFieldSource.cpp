@@ -364,100 +364,6 @@ void ExternalFieldSource::CalculatePortVoltages(int lev)
         m_port_voltage_map[port_id] = voltage;
     }
 }
-/*
-amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
-{
-    auto &warpx = WarpX::GetInstance();
-    auto const &geom = warpx.Geom(lev);
-
-    using ablastr::fields::Direction;
-    using warpx::fields::FieldType;
-
-    amrex::MultiFab* Ex = warpx.m_fields.get(FieldType::Efield_fp, Direction{0}, lev);
-    amrex::MultiFab* Ey = warpx.m_fields.get(FieldType::Efield_fp, Direction{1}, lev);
-
-    const auto problo = geom.ProbLoArray();
-    const auto dx = geom.CellSizeArray();
-    amrex::Real t = warpx.gett_new(lev);
-
-    // Cell-centered index type
-    const amrex::GpuArray<int,3> cc{0,0,0};
-    // Coarsening ratio (no coarsening)
-    const amrex::GpuArray<int,3> cr{1,1,1};
-
-    // --- Hardcoded coil geometry ---
-    constexpr amrex::Real coil_radius = 0.01_rt;  // 1 cm radius
-    constexpr amrex::Real coil_x_center = 0.0_rt;
-    constexpr amrex::Real coil_y_center = 0.0_rt;
-
-    // Voltage accumulator
-    amrex::Real total_voltage = 0.0_rt;
-
-    // Get staggering info for Ex and Ey
-    GpuArray<int, AMREX_SPACEDIM> ex_stag, ey_stag;
-    for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
-        ex_stag[idim] = Ex->ixType()[idim];
-        ey_stag[idim] = Ey->ixType()[idim];
-    }
-
-    amrex::IntVect ex_nodal_flag = Ex->ixType().toIntVect();
-    amrex::IntVect ey_nodal_flag = Ey->ixType().toIntVect();
-
-#ifdef AMREX_USE_OMP
-#pragma omp parallel if (Gpu::notInLaunchRegion())
-#endif
-    for (MFIter mfi(*Ex, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-
-        auto const& ex_arr = Ex->array(mfi);
-        auto const& ey_arr = Ey->array(mfi);
-
-        // Use a common box that works for both Ex and Ey
-        const amrex::Box& box = mfi.tilebox(); // Cell-centered box
-
-        amrex::Gpu::DeviceScalar<amrex::Real> local_voltage(0.0_rt);
-
-        amrex::ParallelFor(box, [=, &local_voltage] AMREX_GPU_DEVICE (int i, int j, int k) {
-
-            amrex::Real x, y, z;
-            // Use cell-centered coordinates for consistent geometry
-            WarpXUtilAlgo::getCellCoordinates(i, j, k, cc.data(), problo.data(), dx.data(), x, y, z);
-
-            // Only integrate near z = 0 plane
-            //if (std::abs(z) > 2.0 * dx[2]) return;
-
-            // Distance from coil center
-            amrex::Real dx_c = x - coil_x_center;
-            amrex::Real dy_c = y - coil_y_center;
-            amrex::Real r = std::sqrt(dx_c*dx_c + dy_c*dy_c);
-
-            // Select cells near the coil contour
-            if (std::abs(r - coil_radius) < 0.5 * std::max(dx[0], dx[1])) {
-                amrex::Real phi = std::atan2(dy_c, dx_c);
-
-                // Only integrate over 180° arc (right half of circle) to avoid cancellation
-                if (phi >= -M_PI/2.0 && phi <= M_PI/2.0) {
-                    // Interpolate both fields to cell center for consistency
-                    const amrex::Real Ex_cc = ablastr::coarsen::sample::Interp(ex_arr, ex_stag, cc, cr, i, j, k, 0);
-                    const amrex::Real Ey_cc = ablastr::coarsen::sample::Interp(ey_arr, ey_stag, cc, cr, i, j, k, 0);
-
-                    // Tangential E-field component
-                    amrex::Real E_tan = Ex_cc * (-std::sin(phi)) + Ey_cc * std::cos(phi);
-
-                    amrex::Real dl = std::max(dx[0], dx[1]);
-                    amrex::Gpu::Atomic::Add(local_voltage.dataPtr(), -E_tan * dl);
-                }
-            }
-        });
-
-        total_voltage += local_voltage.dataValue();
-    }
-
-    // Reduce across MPI
-    amrex::ParallelDescriptor::ReduceRealSum(total_voltage);
-
-    return 2.0*total_voltage;
-}
-*/
 
 
 amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
@@ -495,113 +401,120 @@ amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
 
     const amrex::Real dy_line = (y2 - y1) / (Npts_y - 1);
 
+    amrex::Gpu::DeviceScalar<amrex::Real> d_voltage(0.0);
+    
     // Loop over MFIter tiles
     for (MFIter mfi(*Ey, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        const Box& box = mfi.tilebox();
         auto const& ey_arr = Ey->array(mfi);
-
-        amrex::Real V_local = 0.0_rt;
-        for (int n = 0; n < Npts_y; ++n) {
-            amrex::Real xn = x_fixed;
-            amrex::Real yn = y1 + n * dy_line;
-            amrex::Real zn = z_fixed;
-
-            // Convert to cell indices
-            int i = static_cast<int>((xn - problo[0]) / dx[0]);
-            int j = static_cast<int>((yn - problo[1]) / dx[1]);
-            int k = static_cast<int>((zn - problo[2]) / dx[2]);
-
-            // Only sample if inside valid tile
-            if (mfi.validbox().contains(amrex::IntVect(AMREX_D_DECL(i,j,k)))) {
-                amrex::Real Ey_val = ablastr::coarsen::sample::Interp(
-                    ey_arr, ey_stag, cc, cr, i, j, k, 0);
-                V_local += Ey_val;
-            }
-        }
-
-        // Convert to voltage: V = ∫E⋅dl 
-        port_voltage += V_local * dy_line;
+        
+        // Capture a device pointer to the scalar
+        auto voltage_ptr = d_voltage.dataPtr();
+        
+        amrex::ParallelFor(box,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                // Check each sampling point to see if it matches this cell
+                for (int n = 0; n < Npts_y; ++n) {
+                    amrex::Real xn = x_fixed;
+                    amrex::Real yn = y1 + n * dy_line;
+                    amrex::Real zn = z_fixed;
+                    
+                    // Convert to cell indices
+                    int i_sample = static_cast<int>((xn - problo[0]) / dx[0]);
+                    int j_sample = static_cast<int>((yn - problo[1]) / dx[1]);
+                    int k_sample = static_cast<int>((zn - problo[2]) / dx[2]);
+                    
+                    // Check if current cell matches the sampling point
+                    if (i == i_sample && j == j_sample && k == k_sample) {
+                        amrex::Real Ey_val = ablastr::coarsen::sample::Interp(
+                            ey_arr, ey_stag, cc, cr, i, j, k, 0);
+                        amrex::Real contrib = Ey_val * dy_line;
+                        amrex::Gpu::Atomic::Add(voltage_ptr, contrib);
+                        break; // Each cell can only contribute once
+                    }
+                }
+            });
     }
+    
+    // Copy device scalar back to host and add to total
+    port_voltage += d_voltage.dataValue();
 
     // Reduce across MPI ranks
     amrex::ParallelDescriptor::ReduceRealSum(port_voltage);
 
     return -port_voltage;
 }
-/*
+
 amrex::Real ExternalFieldSource::CalculateVoltageForPort_EMF(int port_id, int lev)
 {
-    // Waveguide geometry from your config
-    constexpr amrex::Real waveguide_width = 14.95e-3_rt;   // 14.95mm
-    constexpr amrex::Real waveguide_height = 11.43e-3_rt;  // 11.43mm
-    constexpr amrex::Real port_z_plane = 0.0; //0.246_rt;          // Near +z end (adjust as needed)
+    constexpr amrex::Real probe_z_position = 0.0; // mid-z plane where coil is located
 
-    // Access WarpX fields - we need Bz for flux calculation
+    // Access WarpX instance and geometry
     auto& warpx = WarpX::GetInstance();
-    using ablastr::fields::Direction;
-    // Assuming Bz is stored as a MultiFab. Check WarpX documentation for exact field name.
-    // In WarpX, magnetic fields (Bfield) have components Bx, By, Bz. We need Bz for flux through the x-y plane.
-    amrex::MultiFab* Bz_mf = warpx.m_fields.get(warpx::fields::FieldType::Bfield_fp, Direction{0}, lev);
-
-    // Staggering info for interpolation (Bz is typically cell-centered in z, edge-centered in x,y)
-    amrex::GpuArray<int, AMREX_SPACEDIM> bz_stag;
-    for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
-        bz_stag[idim] = Bz_mf->ixType()[idim];
-    }
-    // You might need to adjust 'cc' and 'cr' based on Bz staggering relative to cell centers
-    // For cell-centered in z and edge-centered in x,y, if you want cell-centered values for integration:
-    amrex::GpuArray<int, 3> cc = {AMREX_D_DECL(1, 1, 0)}; // Sample Bz at cell center in x,y
-    amrex::GpuArray<int, 3> cr = {AMREX_D_DECL(0, 0, 1)}; // Relative to cell center, Bz is at z-face
-
-    const auto geom = warpx.Geom(lev);
+    const auto geom   = warpx.Geom(lev);
     const auto problo = geom.ProbLoArray();
-    const auto dx = geom.CellSizeArray();
+    const auto dx     = geom.CellSizeArray();
+
+    // Get the MultiFab for Bz. coil is in x-y plane so use Bz to compute flux
+    using ablastr::fields::Direction;
+    amrex::MultiFab* Bz_mf = warpx.m_fields.get(
+        warpx::fields::FieldType::Bfield_fp,
+        Direction{2},
+        lev
+    );
+
+    // Find the i-index for the probe_x_position
+    int k_plane = static_cast<int>((probe_z_position - problo[2]) / dx[2]);
 
     amrex::Real current_flux = 0.0_rt;
 
-    // Integration over the port's cross-sectional area (x-y plane at port_z_plane)
-    // The surface integral is sum(Bz * dA) where dA = dx * dy
-    // We are iterating over cells that make up this cross-section.
-    // The number of points for integration will depend on the grid resolution.
-
-    // Calculate approximate cell indices for the port plane
-    int i_plane = static_cast<int>((port_z_plane - problo[0]) / dx[0]);
-
-    amrex::Print() << " i_plane = " << i_plane << "\n";
-    // Loop over MFIter tiles
+    // device scalar to accumulate on GPU
+    amrex::Gpu::DeviceScalar<amrex::Real> d_flux(0.0);
+    
     for (MFIter mfi(*Bz_mf, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
         const Box& box = mfi.tilebox();
+        auto const& bz_arr = Bz_mf->array(mfi);
+    
+        // capture a device pointer to the scalar
+        auto flux_ptr = d_flux.dataPtr();
+    
+        amrex::ParallelFor(box,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                if (k == k_plane) {
+		    amrex::Real x = problo[0] + (i + 0.5) * dx[0];
+                    amrex::Real y = problo[1] + (j + 0.5) * dx[1];
+                    amrex::Real r = std::sqrt(x*x + y*y); // Since x0, y0 = 0
 
-	auto const& bz_arr = Bz_mf->array(mfi);
-
-	amrex::Loop(box, [=, &current_flux] AMREX_GPU_DEVICE (int i, int j, int k)
-        {
-            if (i == i_plane) {
-                amrex::Real Bz_val = bz_arr(i, j, k);
-                amrex::Real dA = dx[1] * dx[2];
-                current_flux += Bz_val * dA; 
-            }
-        });
-
+                    if (r <= 0.05) {
+                        amrex::Real dA = dx[0] * dx[1];
+                        amrex::Real contrib = bz_arr(i, j, k) * dA;
+                        amrex::Gpu::Atomic::Add(flux_ptr, contrib);
+                    }
+                }
+            });
     }
+    
+    // copy device scalar back to host
+    current_flux = d_flux.dataValue();
 
-    // Reduce across MPI ranks
+    // Sum across MPI ranks
     amrex::ParallelDescriptor::ReduceRealSum(current_flux);
 
-    // Get previous flux from a stored map (needs to be initialized and updated each step)
+    // Previous flux for dΦ/dt
     amrex::Real previous_flux = m_port_magnetic_flux_map[port_id];
-
     amrex::Real dt = warpx.getdt(0);
 
-    // Calculate EMF using Faraday's Law: E = -N * dPhi/dt
-    // Assuming N=1 for a single waveguide port
+    // Faraday's Law: V = -dΦ/dt
     amrex::Real port_voltage = - (current_flux - previous_flux) / dt;
 
-    // Store current flux for the next time step
+    // Store for next step
     m_port_magnetic_flux_map[port_id] = current_flux;
 
     return port_voltage;
 }
-*/
+/*
 amrex::Real ExternalFieldSource::CalculateVoltageForPort_EMF(int port_id, int lev)
 {
     constexpr amrex::Real probe_x_position = 0.0; // mid-x plane for TE10
@@ -664,7 +577,7 @@ amrex::Real ExternalFieldSource::CalculateVoltageForPort_EMF(int port_id, int le
 
     return port_voltage;
 }
-
+*/
 amrex::Real ExternalFieldSource::GetVoltageForPort(int port_id) const
 {
     auto it = m_port_voltage_map.find(port_id);
