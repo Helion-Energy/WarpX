@@ -180,7 +180,7 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
                         if (r_squared > 1e-12_rt) { // Avoid division by zero
                             // Bx = -μ₀I*y/(2π*r²) for current in +z direction
                             //field_value = -mu0_over_2pi * m_circuit_current * dy_from_current / r_squared;
-                            field_value = m_coupling_strength * m_circuit_current * xfield_parser(x,y,z,t);
+                            field_value = m_coupling_strength * m_circuit_voltage * xfield_parser(x,y,z,t);
                         }
                     } else {
                         field_value = xfield_parser(x,y,z,t);
@@ -210,7 +210,7 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
                         if (r_squared > 1e-12_rt) { // Avoid division by zero
                             // By = +μ₀I*x/(2π*r²) for current in +z direction
                             //field_value = mu0_over_2pi * m_circuit_current * dx_from_current / r_squared;
-                            field_value = m_coupling_strength * m_circuit_current * yfield_parser(x,y,z,t);
+                            field_value = m_coupling_strength * m_circuit_voltage * yfield_parser(x,y,z,t);
                         }
                     } else {
                         field_value = yfield_parser(x,y,z,t);
@@ -230,7 +230,7 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
                     if (m_circuit_coupling_enabled) {
                         // For current in z-direction, Bz = 0 (no field along current direction)
                         //field_value = 0.0_rt;
-                        field_value = m_coupling_strength * m_circuit_current * zfield_parser(x,y,z,t);
+                        field_value = m_coupling_strength * m_circuit_voltage * zfield_parser(x,y,z,t);
                     } else {
                         field_value = zfield_parser(x,y,z,t);
                     }
@@ -284,13 +284,13 @@ std::set<int> ExternalFieldSource::GetUniquePortIDs(int lev)
     std::set<int> unique_ports;
 
     // Only proceed if we have the necessary parsers
-    if (!Bxfield_flag_parser || !Byfield_flag_parser || !Bzfield_flag_parser) {
+    if (!Exfield_flag_parser || !Eyfield_flag_parser || !Ezfield_flag_parser) {
         return unique_ports;
     }
 
-    auto bx_flag_parser = Bxfield_flag_parser->compile<3>();
-    auto by_flag_parser = Byfield_flag_parser->compile<3>();
-    auto bz_flag_parser = Bzfield_flag_parser->compile<3>();
+    auto bx_flag_parser = Exfield_flag_parser->compile<3>();
+    auto by_flag_parser = Eyfield_flag_parser->compile<3>();
+    auto bz_flag_parser = Ezfield_flag_parser->compile<3>();
 
     const auto problo = geom.ProbLoArray();
     const auto dx = geom.CellSizeArray();
@@ -605,6 +605,12 @@ void ExternalFieldSource::UpdateExcitationsFromCircuitCurrents(const std::vector
 void ExternalFieldSource::UpdateBExcitationFromCurrent(amrex::Real current)
 {
     m_circuit_current = current;
+    m_circuit_coupling_enabled = true;
+}
+
+void ExternalFieldSource::UpdateEExcitationFromVoltage(amrex::Real voltage)
+{
+    m_circuit_voltage = voltage;
     m_circuit_coupling_enabled = true;
 }
 

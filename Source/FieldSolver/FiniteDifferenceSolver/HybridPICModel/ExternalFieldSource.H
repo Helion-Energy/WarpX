@@ -158,6 +158,7 @@ protected:
 
     // Circuit coupling members
     amrex::Real m_circuit_current = 0.0;
+    amrex::Real m_circuit_voltage = 0.0;
     bool m_circuit_coupling_enabled = false;
     amrex::Real m_coupling_strength = 0.01;
     std::vector<amrex::Real> m_port_voltages;
@@ -290,6 +291,12 @@ public:
      * \param current Current in Amperes
      */
     void UpdateBExcitationFromCurrent(amrex::Real current);
+
+    /**
+     * \brief Update E-field excitation amplitude from single port voltage
+     * \param voltage Voltage in Volts
+     */
+    void UpdateEExcitationFromVoltage(amrex::Real voltage);
 
     /**
      * \brief Print port information for debugging

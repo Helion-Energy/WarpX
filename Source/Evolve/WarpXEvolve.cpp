@@ -554,7 +554,8 @@ WarpX::OneStep_nosub (Real cur_time)
 
            // Step 5: LC Circuit → WarpX: Get circuit current for NEXT time step B-field excitation
            amrex::Real circuit_current = m_external_field_source->GetLCCurrent();
-           m_external_field_source->UpdateBExcitationFromCurrent(circuit_current);
+           amrex::Real circuit_voltage = m_external_field_source->GetLCVoltage();
+           m_external_field_source->UpdateEExcitationFromVoltage(circuit_voltage);
 
 	   if (amrex::ParallelDescriptor::IOProcessor()) {
               static std::ofstream port_file;
