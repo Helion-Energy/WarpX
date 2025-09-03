@@ -168,20 +168,7 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
                 if (flag_type > 0._rt) {
                     amrex::Real field_value = 0.0_rt;
                     if (m_circuit_coupling_enabled) {
-                        // Current flows through center at (0,0) in z-direction
-                        constexpr amrex::Real current_x = 0.0_rt;
-                        constexpr amrex::Real current_y = 0.0_rt;
-                        constexpr amrex::Real mu0_over_2pi = 2.0e-7_rt; // μ₀/(2π)
-        
-                        amrex::Real dx_from_current = x - current_x;
-                        amrex::Real dy_from_current = y - current_y;
-                        amrex::Real r_squared = dx_from_current*dx_from_current + dy_from_current*dy_from_current;
-        
-                        if (r_squared > 1e-12_rt) { // Avoid division by zero
-                            // Bx = -μ₀I*y/(2π*r²) for current in +z direction
-                            //field_value = -mu0_over_2pi * m_circuit_current * dy_from_current / r_squared;
-                            field_value = m_coupling_strength * m_circuit_voltage * xfield_parser(x,y,z,t);
-                        }
+                        field_value = m_coupling_strength * m_circuit_voltage * xfield_parser(x,y,z,t);
                     } else {
                         field_value = xfield_parser(x,y,z,t);
                     }
@@ -198,20 +185,7 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
                 if (flag_type > 0._rt) {
                     amrex::Real field_value = 0.0_rt;
                     if (m_circuit_coupling_enabled) {
-                        // Current flows through center at (0,0) in z-direction
-                        constexpr amrex::Real current_x = 0.0_rt;
-                        constexpr amrex::Real current_y = 0.0_rt;
-                        constexpr amrex::Real mu0_over_2pi = 2.0e-7_rt; // μ₀/(2π)
-        
-                        amrex::Real dx_from_current = x - current_x;
-                        amrex::Real dy_from_current = y - current_y;
-                        amrex::Real r_squared = dx_from_current*dx_from_current + dy_from_current*dy_from_current;
-        
-                        if (r_squared > 1e-12_rt) { // Avoid division by zero
-                            // By = +μ₀I*x/(2π*r²) for current in +z direction
-                            //field_value = mu0_over_2pi * m_circuit_current * dx_from_current / r_squared;
-                            field_value = m_coupling_strength * m_circuit_voltage * yfield_parser(x,y,z,t);
-                        }
+                        field_value = m_coupling_strength * m_circuit_voltage * yfield_parser(x,y,z,t);
                     } else {
                         field_value = yfield_parser(x,y,z,t);
                     }
@@ -228,8 +202,6 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
                 if (flag_type > 0._rt) {
                     amrex::Real field_value = 0.0_rt;
                     if (m_circuit_coupling_enabled) {
-                        // For current in z-direction, Bz = 0 (no field along current direction)
-                        //field_value = 0.0_rt;
                         field_value = m_coupling_strength * m_circuit_voltage * zfield_parser(x,y,z,t);
                     } else {
                         field_value = zfield_parser(x,y,z,t);
@@ -448,46 +420,48 @@ amrex::Real ExternalFieldSource::CalculateVoltageForPort(int port_id, int lev)
 
 amrex::Real ExternalFieldSource::CalculateVoltageForPort_EMF(int port_id, int lev)
 {
-    constexpr amrex::Real probe_z_position = 0.0; // mid-z plane where coil is located
-
-    // Access WarpX instance and geometry
+    constexpr amrex::Real probe_z_position = 0.0;
+    
     auto& warpx = WarpX::GetInstance();
     const auto geom   = warpx.Geom(lev);
     const auto problo = geom.ProbLoArray();
     const auto dx     = geom.CellSizeArray();
+    
+    auto xflag_parser = Exfield_flag_parser->compile<3>();
 
-    // Get the MultiFab for Bz. coil is in x-y plane so use Bz to compute flux
     using ablastr::fields::Direction;
-    amrex::MultiFab* Bz_mf = warpx.m_fields.get(
-        warpx::fields::FieldType::Bfield_fp,
-        Direction{2},
-        lev
-    );
-
-    // Find the i-index for the probe_x_position
+    
+    amrex::MultiFab* Bx_mf = warpx.m_fields.get(warpx::fields::FieldType::Bfield_fp, Direction{0}, lev);
+    amrex::MultiFab* By_mf = warpx.m_fields.get(warpx::fields::FieldType::Bfield_fp, Direction{1}, lev);
+    amrex::MultiFab* Bz_mf = warpx.m_fields.get(warpx::fields::FieldType::Bfield_fp, Direction{2}, lev);
+    
+    // Gpu vector to store field staggering
+    GpuArray<int, AMREX_SPACEDIM> mfx_stag, mfy_stag, mfz_stag;
+    for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+        mfx_stag[idim] = Bx_mf->ixType()[idim];
+        mfy_stag[idim] = By_mf->ixType()[idim];
+        mfz_stag[idim] = Bz_mf->ixType()[idim];
+    }
+        
     int k_plane = static_cast<int>((probe_z_position - problo[2]) / dx[2]);
-
-    amrex::Real current_flux = 0.0_rt;
-
-    // device scalar to accumulate on GPU
+    
     amrex::Gpu::DeviceScalar<amrex::Real> d_flux(0.0);
     
     for (MFIter mfi(*Bz_mf, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
         const Box& box = mfi.tilebox();
         auto const& bz_arr = Bz_mf->array(mfi);
-    
-        // capture a device pointer to the scalar
         auto flux_ptr = d_flux.dataPtr();
-    
+        
         amrex::ParallelFor(box,
             [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
                 if (k == k_plane) {
-		    amrex::Real x = problo[0] + (i + 0.5) * dx[0];
-                    amrex::Real y = problo[1] + (j + 0.5) * dx[1];
-                    amrex::Real r = std::sqrt(x*x + y*y); // Since x0, y0 = 0
-
-                    if (r <= 0.05) {
+                    amrex::Real x, y, z;
+                    WarpXUtilAlgo::getCellCoordinates(i, j, k, mfx_stag.data(),
+                                                     problo.data(), dx.data(), x, y, z);
+                    
+                    auto flag_type = xflag_parser(x, y, z);
+                    if (flag_type == port_id) {
                         amrex::Real dA = dx[0] * dx[1];
                         amrex::Real contrib = bz_arr(i, j, k) * dA;
                         amrex::Gpu::Atomic::Add(flux_ptr, contrib);
@@ -496,24 +470,18 @@ amrex::Real ExternalFieldSource::CalculateVoltageForPort_EMF(int port_id, int le
             });
     }
     
-    // copy device scalar back to host
-    current_flux = d_flux.dataValue();
-
-    // Sum across MPI ranks
+    amrex::Real current_flux = d_flux.dataValue();
     amrex::ParallelDescriptor::ReduceRealSum(current_flux);
-
-    // Previous flux for dΦ/dt
+    
     amrex::Real previous_flux = m_port_magnetic_flux_map[port_id];
     amrex::Real dt = warpx.getdt(0);
-
-    // Faraday's Law: V = -dΦ/dt
-    amrex::Real port_voltage = - (current_flux - previous_flux) / dt;
-
-    // Store for next step
+    amrex::Real port_voltage = -(current_flux - previous_flux) / dt;
+    
     m_port_magnetic_flux_map[port_id] = current_flux;
-
+    
     return port_voltage;
 }
+
 /*
 amrex::Real ExternalFieldSource::CalculateVoltageForPort_EMF(int port_id, int lev)
 {
@@ -779,83 +747,80 @@ ExternalFieldSource::ReadExcitationParser ()
     amrex::Print() << "excite_E_source = " << excite_E_source << ", excite_B_source = " << excite_B_source << ", excite_all = " << excite_all << "\n";
 
     if (E_excitation_grid_s == "parse_e_excitation_grid_function") {
-        // if E excitation type is set to parser then the corresponding
-        // source type (hard=1, soft=2) must be specified for all components
-        // using the flag function. Note that a flag value of 0 will not update
-        // the field with the excitation.
-        utils::parser::Store_parserString(pp_external_source, "Ex_excitation_flag_function(x,y,z)",
-                                str_Ex_excitation_flag_function);
-        utils::parser::Store_parserString(pp_external_source, "Ey_excitation_flag_function(x,y,z)",
-                                str_Ey_excitation_flag_function);
-        utils::parser::Store_parserString(pp_external_source, "Ez_excitation_flag_function(x,y,z)",
-                                str_Ez_excitation_flag_function);
+        // Flag functions (just query as strings, like A_ext spatial functions)
+        pp_external_source.query("Ex_excitation_flag_function(x,y,z)",
+                                  str_Ex_excitation_flag_function);
+        pp_external_source.query("Ey_excitation_flag_function(x,y,z)",
+                                  str_Ey_excitation_flag_function);
+        pp_external_source.query("Ez_excitation_flag_function(x,y,z)",
+                                  str_Ez_excitation_flag_function);
+    
         Exfield_flag_parser = std::make_unique<amrex::Parser>(
-                   utils::parser::makeParser(str_Ex_excitation_flag_function,{"x","y","z"}));
+            utils::parser::makeParser(str_Ex_excitation_flag_function, {"x","y","z"}));
         Eyfield_flag_parser = std::make_unique<amrex::Parser>(
-                   utils::parser::makeParser(str_Ey_excitation_flag_function,{"x","y","z"}));
+            utils::parser::makeParser(str_Ey_excitation_flag_function, {"x","y","z"}));
         Ezfield_flag_parser = std::make_unique<amrex::Parser>(
-                   utils::parser::makeParser(str_Ez_excitation_flag_function,{"x","y","z"}));
-
+            utils::parser::makeParser(str_Ez_excitation_flag_function, {"x","y","z"}));
+    
         pp_external_source.query("Apply_E_excitation_in_pml_region", ApplyExcitationInPML);
     }
+    
     if (B_excitation_grid_s == "parse_b_excitation_grid_function") {
-        // if B excitation type is set to parser then the corresponding
-        // source type (hard=1, soft=2) must be specified for all components
-        // using the flag function. Note that a flag value of 0 will not update
-        // the field with the excitation.
-        utils::parser::Store_parserString(pp_external_source, "Bx_excitation_flag_function(x,y,z)",
-                                str_Bx_excitation_flag_function);
-        utils::parser::Store_parserString(pp_external_source, "By_excitation_flag_function(x,y,z)",
-                                str_By_excitation_flag_function);
-        utils::parser::Store_parserString(pp_external_source, "Bz_excitation_flag_function(x,y,z)",
-                                str_Bz_excitation_flag_function);
+        pp_external_source.query("Bx_excitation_flag_function(x,y,z)",
+                                  str_Bx_excitation_flag_function);
+        pp_external_source.query("By_excitation_flag_function(x,y,z)",
+                                  str_By_excitation_flag_function);
+        pp_external_source.query("Bz_excitation_flag_function(x,y,z)",
+                                  str_Bz_excitation_flag_function);
+    
         Bxfield_flag_parser = std::make_unique<amrex::Parser>(
-                   utils::parser::makeParser(str_Bx_excitation_flag_function,{"x","y","z"}));
+            utils::parser::makeParser(str_Bx_excitation_flag_function, {"x","y","z"}));
         Byfield_flag_parser = std::make_unique<amrex::Parser>(
-                   utils::parser::makeParser(str_By_excitation_flag_function,{"x","y","z"}));
+            utils::parser::makeParser(str_By_excitation_flag_function, {"x","y","z"}));
         Bzfield_flag_parser = std::make_unique<amrex::Parser>(
-                   utils::parser::makeParser(str_Bz_excitation_flag_function,{"x","y","z"}));
+            utils::parser::makeParser(str_Bz_excitation_flag_function, {"x","y","z"}));
     }
-
-
+    
     // make parser for the external B-excitation in space-time
     if (B_excitation_grid_s == "parse_b_excitation_grid_function") {
-#ifdef WARPX_DIM_RZ
-       amrex::Abort("E and B parser for external fields does not work with RZ -- TO DO");
-#endif
-       utils::parser::Store_parserString(pp_external_source, "Bx_excitation_grid_function(x,y,z,t)",
-                                                    str_Bx_excitation_grid_function);
-       utils::parser::Store_parserString(pp_external_source, "By_excitation_grid_function(x,y,z,t)",
-                                                    str_By_excitation_grid_function);
-       utils::parser::Store_parserString(pp_external_source, "Bz_excitation_grid_function(x,y,z,t)",
-                                                    str_Bz_excitation_grid_function);
-       Bxfield_xt_grid_parser = std::make_unique<amrex::Parser>(
-                   utils::parser::makeParser(str_Bx_excitation_grid_function,{"x","y","z","t"}));
-       Byfield_xt_grid_parser = std::make_unique<amrex::Parser>(
-                   utils::parser::makeParser(str_By_excitation_grid_function,{"x","y","z","t"}));
-       Bzfield_xt_grid_parser = std::make_unique<amrex::Parser>(
-                   utils::parser::makeParser(str_Bz_excitation_grid_function,{"x","y","z","t"}));
+    #ifdef WARPX_DIM_RZ
+        amrex::Abort("E and B parser for external fields does not work with RZ -- TO DO");
+    #endif
+        pp_external_source.query("Bx_excitation_grid_function(x,y,z,t)",
+                                  str_Bx_excitation_grid_function);
+        pp_external_source.query("By_excitation_grid_function(x,y,z,t)",
+                                  str_By_excitation_grid_function);
+        pp_external_source.query("Bz_excitation_grid_function(x,y,z,t)",
+                                  str_Bz_excitation_grid_function);
+    
+        Bxfield_xt_grid_parser = std::make_unique<amrex::Parser>(
+            utils::parser::makeParser(str_Bx_excitation_grid_function, {"x","y","z","t"}));
+        Byfield_xt_grid_parser = std::make_unique<amrex::Parser>(
+            utils::parser::makeParser(str_By_excitation_grid_function, {"x","y","z","t"}));
+        Bzfield_xt_grid_parser = std::make_unique<amrex::Parser>(
+            utils::parser::makeParser(str_Bz_excitation_grid_function, {"x","y","z","t"}));
     }
-
+    
     // make parser for the external E-excitation in space-time
     if (E_excitation_grid_s == "parse_e_excitation_grid_function") {
-#ifdef WARPX_DIM_RZ
-       amrex::Abort("E and B parser for external fields does not work with RZ -- TO DO");
-#endif
-       utils::parser::Store_parserString(pp_external_source, "Ex_excitation_grid_function(x,y,z,t)",
-                                                    str_Ex_excitation_grid_function);
-       utils::parser::Store_parserString(pp_external_source, "Ey_excitation_grid_function(x,y,z,t)",
-                                                    str_Ey_excitation_grid_function);
-       utils::parser::Store_parserString(pp_external_source, "Ez_excitation_grid_function(x,y,z,t)",
-                                                    str_Ez_excitation_grid_function);
-       Exfield_xt_grid_parser = std::make_unique<amrex::Parser>(
-                   utils::parser::makeParser(str_Ex_excitation_grid_function,{"x","y","z","t"}));
-       Eyfield_xt_grid_parser = std::make_unique<amrex::Parser>(
-                   utils::parser::makeParser(str_Ey_excitation_grid_function,{"x","y","z","t"}));
-       Ezfield_xt_grid_parser = std::make_unique<amrex::Parser>(
-                   utils::parser::makeParser(str_Ez_excitation_grid_function,{"x","y","z","t"}));
+    #ifdef WARPX_DIM_RZ
+        amrex::Abort("E and B parser for external fields does not work with RZ -- TO DO");
+    #endif
+	amrex::Print() << "parse_e_excitation_grid_function is called " << std::endl;
+        pp_external_source.query("Ex_excitation_grid_function(x,y,z,t)",
+                                  str_Ex_excitation_grid_function);
+        pp_external_source.query("Ey_excitation_grid_function(x,y,z,t)",
+                                  str_Ey_excitation_grid_function);
+        pp_external_source.query("Ez_excitation_grid_function(x,y,z,t)",
+                                  str_Ez_excitation_grid_function);
+    
+        Exfield_xt_grid_parser = std::make_unique<amrex::Parser>(
+            utils::parser::makeParser(str_Ex_excitation_grid_function, {"x","y","z","t"}));
+        Eyfield_xt_grid_parser = std::make_unique<amrex::Parser>(
+            utils::parser::makeParser(str_Ey_excitation_grid_function, {"x","y","z","t"}));
+        Ezfield_xt_grid_parser = std::make_unique<amrex::Parser>(
+            utils::parser::makeParser(str_Ez_excitation_grid_function, {"x","y","z","t"}));
     }
-
 
     // Circuit coupling parameters
     amrex::ParmParse pp_circuit("circuit");

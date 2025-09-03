@@ -615,7 +615,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
     const auto resistivity_has_J_dependence = hybrid_model->m_resistivity_has_J_dependence;
     const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
-    
+   
     //const bool include_hyper_resistivity_term = (eta_h > 0.) && include_resistivity_term;
 
     // Index type required for interpolating fields from their respective
@@ -667,110 +667,6 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
     nabla2_J_z_mf.setVal(0.);
 
     enE_nodal_mf.setVal(0.);
-/*
-    // Set Jfield = 0. Calculate Jfield = (curl x B) / mu0 on Yee grid, then interpolate it to nodal grid and use it to calculate enE_nodal = (curl x B) x B / mu0
-    MultiFab curlB_x_mf(Efield[0]->boxArray(), Efield[0]->DistributionMap(), 1, Efield[0]->nGrowVect());
-    MultiFab curlB_y_mf(Efield[1]->boxArray(), Efield[1]->DistributionMap(), 1, Efield[1]->nGrowVect());
-    MultiFab curlB_z_mf(Efield[2]->boxArray(), Efield[2]->DistributionMap(), 1, Efield[2]->nGrowVect());
-
-    curlB_x_mf.setVal(0.);
-    curlB_y_mf.setVal(0.);
-    curlB_z_mf.setVal(0.);
-
-        // Loop through the grids, and over the tiles within each grid
-#ifdef AMREX_USE_OMP
-#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
-#endif
-    for ( MFIter mfi(curlB_x_mf, TilingIfNotGPU()); mfi.isValid(); ++mfi ) {
-        if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers) {
-            amrex::Gpu::synchronize();
-        }
-        auto wt = static_cast<amrex::Real>(amrex::second());
-
-        // Extract field data for this grid/tile
-        Array4<Real> const &Jx = curlB_x_mf.array(mfi);
-        Array4<Real> const &Jy = curlB_y_mf.array(mfi);
-        Array4<Real> const &Jz = curlB_z_mf.array(mfi);
-        Array4<Real const> const &Bx = Bfield[0]->const_array(mfi);
-        Array4<Real const> const &By = Bfield[1]->const_array(mfi);
-        Array4<Real const> const &Bz = Bfield[2]->const_array(mfi);
-
-        // Extract structures indicating where the fields
-        // should be updated, given the position of the embedded boundaries.
-        // The plasma current is stored at the same locations as the E-field,
-        // therefore the `eb_update_E` multifab also appropriately specifies
-        // where the plasma current should be calculated.
-        amrex::Array4<int> update_Jx_arr, update_Jy_arr, update_Jz_arr;
-        if (EB::enabled()) {
-            update_Jx_arr = eb_update_E[0]->array(mfi);
-            update_Jy_arr = eb_update_E[1]->array(mfi);
-            update_Jz_arr = eb_update_E[2]->array(mfi);
-        }
-
-        // Extract stencil coefficients
-        Real const * const AMREX_RESTRICT coefs_x = m_stencil_coefs_x.dataPtr();
-        auto const n_coefs_x = static_cast<int>(m_stencil_coefs_x.size());
-        Real const * const AMREX_RESTRICT coefs_y = m_stencil_coefs_y.dataPtr();
-        auto const n_coefs_y = static_cast<int>(m_stencil_coefs_y.size());
-        Real const * const AMREX_RESTRICT coefs_z = m_stencil_coefs_z.dataPtr();
-        auto const n_coefs_z = static_cast<int>(m_stencil_coefs_z.size());
-
-        // Extract tileboxes for which to loop
-        Box const& tjx  = mfi.tilebox(Efield[0]->ixType().toIntVect());
-        Box const& tjy  = mfi.tilebox(Efield[1]->ixType().toIntVect());
-        Box const& tjz  = mfi.tilebox(Efield[2]->ixType().toIntVect());
-
-        Real const one_over_mu0 = 1._rt / PhysConst::mu0;
-
-        // Calculate the total current, using Ampere's law, on the same grid
-        // as the E-field
-        amrex::ParallelFor(tjx, tjy, tjz,
-
-            // Jx calculation
-            [=] AMREX_GPU_DEVICE (int i, int j, int k){
-
-                // Skip field update in the embedded boundaries
-                if (update_Jx_arr && update_Jx_arr(i, j, k) == 0) { return; }
-
-                Jx(i, j, k) = one_over_mu0 * (
-                    - T_Algo::DownwardDz(By, coefs_z, n_coefs_z, i, j, k)
-                    + T_Algo::DownwardDy(Bz, coefs_y, n_coefs_y, i, j, k)
-                );
-            },
-
-            // Jy calculation
-            [=] AMREX_GPU_DEVICE (int i, int j, int k){
-
-                // Skip field update in the embedded boundaries
-                if (update_Jy_arr && update_Jy_arr(i, j, k) == 0) { return; }
-
-                Jy(i, j, k) = one_over_mu0 * (
-                    - T_Algo::DownwardDx(Bz, coefs_x, n_coefs_x, i, j, k)
-                    + T_Algo::DownwardDz(Bx, coefs_z, n_coefs_z, i, j, k)
-                );
-            },
-
-            // Jz calculation
-            [=] AMREX_GPU_DEVICE (int i, int j, int k){
-
-                // Skip field update in the embedded boundaries
-                if (update_Jz_arr && update_Jz_arr(i, j, k) == 0) { return; }
-
-                Jz(i, j, k) = one_over_mu0 * (
-                    - T_Algo::DownwardDy(Bx, coefs_y, n_coefs_y, i, j, k)
-                    + T_Algo::DownwardDx(By, coefs_x, n_coefs_x, i, j, k)
-                );
-            }
-        );
-
-        if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
-        {
-            amrex::Gpu::synchronize();
-            wt = static_cast<amrex::Real>(amrex::second()) - wt;
-            amrex::HostDevice::Atomic::Add( &(*cost)[mfi.index()], wt);
-        }
-    }
-*/
 
     // Loop through the grids, and over the tiles within each grid for the
     // initial, nodal calculation of E
@@ -803,23 +699,6 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
 
 	// Loop over the cells and update the nodal E field
         amrex::ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE (int i, int j, int k){
-
-            //// interpolate the total current to a nodal grid
-            //auto const jx_interp = Interp(Jx, Jx_stag, nodal, coarsen, i, j, k, 0);
-            //auto const jy_interp = Interp(Jy, Jy_stag, nodal, coarsen, i, j, k, 0);
-            //auto const jz_interp = Interp(Jz, Jz_stag, nodal, coarsen, i, j, k, 0);
-
-            //// interpolate the B field to a nodal grid
-            //auto const Bx_interp = Interp(Bx, Bx_stag, nodal, coarsen, i, j, k, 0);
-            //auto const By_interp = Interp(By, By_stag, nodal, coarsen, i, j, k, 0);
-            //auto const Bz_interp = Interp(Bz, Bz_stag, nodal, coarsen, i, j, k, 0);
-
-            //// calculate enE = J x B
-            //enE_nodal(i, j, k, 0) = jy_interp * Bz_interp - jz_interp * By_interp;
-            //enE_nodal(i, j, k, 1) = jz_interp * Bx_interp - jx_interp * Bz_interp;
-            //enE_nodal(i, j, k, 2) = jx_interp * By_interp - jy_interp * Bx_interp;
-
-            ////if (enE_nodal(i, j, k, 0) != 0.0 && i == 0 && j == 0) amrex::Print()<< "enE_nodal("<< i << "," << j << ", " << k << ") = " << enE_nodal(i, j, k, 0)  << std::endl;
 
 	     // interpolate the total current to a nodal grid
             auto const jx_interp = Interp(Jx, Jx_stag, nodal, coarsen, i, j, k, 0);
@@ -917,13 +796,6 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
             amrex::HostDevice::Atomic::Add( &(*cost)[mfi.index()], wt);
         }
     }
-
-    //grad_Pe_x_mf.FillBoundary(warpx.Geom(lev).periodicity());
-    //grad_Pe_y_mf.FillBoundary(warpx.Geom(lev).periodicity());
-    //grad_Pe_z_mf.FillBoundary(warpx.Geom(lev).periodicity());
-    //nabla2_J_x_mf.FillBoundary(warpx.Geom(lev).periodicity());
-    //nabla2_J_y_mf.FillBoundary(warpx.Geom(lev).periodicity());
-    //nabla2_J_z_mf.FillBoundary(warpx.Geom(lev).periodicity());
 
     ablastr::utils::communication::FillBoundary(grad_Pe_x_mf, WarpX::do_single_precision_comms, warpx.Geom(lev).periodicity(), true);
     ablastr::utils::communication::FillBoundary(grad_Pe_y_mf, WarpX::do_single_precision_comms, warpx.Geom(lev).periodicity(), true);
@@ -1025,7 +897,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
                 Real Jtilde_y = enE_y - grad_Pe_y_val;
                 Real Jtilde_z = enE_z - grad_Pe_z_val;
 
-                const auto eta_val = eta(rho_val, jtot_val, 0.);
+                const auto eta_val = eta(rho_val, jtot_val, 0.0);
 
                 // Add resistivity only if E field value is used to update B
                 if (include_resistivity_term) { 
@@ -1117,7 +989,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
                 Real Jtilde_y = enE_y - grad_Pe_y_val;
                 Real Jtilde_z = enE_z - grad_Pe_z_val;
 
-                const auto eta_val = eta(rho_val, jtot_val, 0.);
+                const auto eta_val = eta(rho_val, jtot_val, 0.0);
 
                 // Add resistivity only if E field value is used to update B
                 if (include_resistivity_term) { 
@@ -1202,7 +1074,7 @@ void FiniteDifferenceSolver::HybridPICEvolveEDisplacementCartesian (
                 Real Jtilde_y = enE_y - grad_Pe_y_val;
                 Real Jtilde_z = enE_z - grad_Pe_z_val;
 
-                const auto eta_val = eta(rho_val, jtot_val, 0.);
+                const auto eta_val = eta(rho_val, jtot_val, 0.0);
 
                 // Add resistivity only if E field value is used to update B
                 if (include_resistivity_term) { 

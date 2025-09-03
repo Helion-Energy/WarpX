@@ -12,7 +12,7 @@ from .Bucket import Bucket
 
 hybridpicmodel = Bucket("hybrid_pic_model")
 external_vector_potential = Bucket("external_vector_potential")
-
+external_source = Bucket("external_source")
 
 class HybridPICModel(object):
     """HybridPICModel

@@ -492,9 +492,9 @@ WarpX::OneStep_nosub (Real cur_time)
         EvolveB(0.5_rt * dt[0], DtType::FirstHalf, cur_time); // We now have B^{n+1/2}
         FillBoundaryB(guard_cells.ng_FieldSolver, WarpX::sync_nodal_points);
 
-        m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::FirstHalf,
-                                                            /*apply_E=*/false,
-                                                            /*apply_B=*/true);
+        //m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::FirstHalf,
+        //                                                    /*apply_E=*/false,
+        //                                                    /*apply_B=*/true);
 	
         if (m_em_solver_medium == MediumForEM::Vacuum) {
             // vacuum medium
@@ -513,9 +513,9 @@ WarpX::OneStep_nosub (Real cur_time)
         EvolveF(0.5_rt * dt[0], DtType::SecondHalf);
         EvolveG(0.5_rt * dt[0], DtType::SecondHalf);
         EvolveB(0.5_rt * dt[0], DtType::SecondHalf, cur_time + 0.5_rt * dt[0]); // We now have B^{n+1}
-        m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::SecondHalf,
-                                                            /*apply_E=*/false,
-                                                            /*apply_B=*/true);
+        //m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::SecondHalf,
+        //                                                    /*apply_E=*/false,
+        //                                                    /*apply_B=*/true);
 	
 
         if (do_pml) {
@@ -541,12 +541,15 @@ WarpX::OneStep_nosub (Real cur_time)
            m_external_field_source->CalculatePortVoltages(0); // level 0
 
            // Step 3: Get port voltage and feed to LC circuit as external voltage
-           amrex::Real port_voltage = m_external_field_source->GetVoltageForPort(1); // Port ID = 1
+           amrex::Real port1_voltage = m_external_field_source->GetVoltageForPort(1); // Port ID = 1
+           amrex::Real port2_voltage = m_external_field_source->GetVoltageForPort(2); // Port ID = 1
+           amrex::Real port3_voltage = m_external_field_source->GetVoltageForPort(3); // Port ID = 1
+           amrex::Real port4_voltage = m_external_field_source->GetVoltageForPort(4); // Port ID = 1
 
 	   // SetExternalVoltage
            if (m_external_field_source->m_lc_circuit) {
-               //m_external_field_source->m_lc_circuit->SetExternalVoltage(0.0);
-               m_external_field_source->m_lc_circuit->SetExternalVoltage(port_voltage);
+               m_external_field_source->m_lc_circuit->SetExternalVoltage(0.0);
+               //m_external_field_source->m_lc_circuit->SetExternalVoltage(port_voltage);
            }
 
            // Step 4: Update LC circuit with WarpX time step
@@ -563,7 +566,7 @@ WarpX::OneStep_nosub (Real cur_time)
 
               if (!file_opened) {
                   port_file.open("port_voltage_vs_time.txt");
-                  port_file << "# Time(s) Port_Voltage(V) Circuit_Voltage(V) Circuit_Current(A)\n";
+                  port_file << "# Time(s) Port1_Voltage(V) Port2_Voltage(V) Port3_Voltage(V) Port4_Voltage(V) Circuit_Voltage(V) Circuit_Current(A)\n";
                   file_opened = true;
               }
 
@@ -572,7 +575,10 @@ WarpX::OneStep_nosub (Real cur_time)
 
               port_file << std::scientific << std::setprecision(12)
                         << current_time << " "
-                        << port_voltage << " "
+                        << port1_voltage << " "
+                        << port2_voltage << " "
+                        << port3_voltage << " "
+                        << port4_voltage << " "
                         << circuit_voltage << " "
                         << circuit_current << "\n";
               port_file.flush(); // Ensure data is written immediately

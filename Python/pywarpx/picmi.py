@@ -1929,6 +1929,10 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         Jy_external_function=None,
         Jz_external_function=None,
         A_external=None,
+        E_external_source=None,   
+        excite_E_source=False,    
+        excite_B_source=False,    
+        excite_all=False,         
         solve_electron_energy_equation=False,
         include_Joule_heating=False,
         include_Bremsstrahlung=False,
@@ -1960,6 +1964,11 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.Jz_external_function = Jz_external_function
 
         self.A_external = A_external
+
+        self.E_external_source = E_external_source
+        self.excite_E_source = excite_E_source
+        self.excite_B_source = excite_B_source
+        self.excite_all = excite_all
 
         self.solve_electron_energy_equation = solve_electron_energy_equation
         self.include_Joule_heating = include_Joule_heating
@@ -2073,6 +2082,102 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
                         field_dict["A_time_external_function"], self.mangle_dict
                     ),
                 )
+        if self.E_external_source is not None:
+            pywarpx.hybridpicmodel.add_external_source = True
+            # Set excitation toggles
+            pywarpx.external_source.excite_E_source = int(self.excite_E_source)
+            pywarpx.external_source.excite_B_source = int(self.excite_B_source)
+            pywarpx.external_source.excite_all = int(self.excite_all)
+
+            # Loop over provided styles (e.g. "parse_e_excitation_grid_function")
+            for style, field_dict in self.E_external_source.items():
+                # Style could be for E or B excitation
+                if style.lower().startswith("parse_e"):
+                    pywarpx.external_source.E_excitation_on_grid_style = style
+                    # Optional PML application flag
+                    if "Apply_E_excitation_in_pml_region" in field_dict:
+                        pywarpx.external_source.Apply_E_excitation_in_pml_region = int(
+                            field_dict["Apply_E_excitation_in_pml_region"]
+                        )
+                    # Flag functions
+                    pywarpx.external_source.__setattr__(
+                        "Ex_excitation_flag_function(x,y,z)",
+                        pywarpx.my_constants.mangle_expression(
+                            field_dict["Ex_excitation_flag_function"], self.mangle_dict
+                        ),
+                    )
+                    pywarpx.external_source.__setattr__(
+                        "Ey_excitation_flag_function(x,y,z)",
+                        pywarpx.my_constants.mangle_expression(
+                            field_dict["Ey_excitation_flag_function"], self.mangle_dict
+                        ),
+                    )
+                    pywarpx.external_source.__setattr__(
+                        "Ez_excitation_flag_function(x,y,z)",
+                        pywarpx.my_constants.mangle_expression(
+                            field_dict["Ez_excitation_flag_function"], self.mangle_dict
+                        ),
+                    )
+                    # Grid functions
+                    pywarpx.external_source.__setattr__(
+                        "Ex_excitation_grid_function(x,y,z,t)",
+                        pywarpx.my_constants.mangle_expression(
+                            field_dict["Ex_excitation_grid_function"], self.mangle_dict
+                        ),
+                    )
+                    pywarpx.external_source.__setattr__(
+                        "Ey_excitation_grid_function(x,y,z,t)",
+                        pywarpx.my_constants.mangle_expression(
+                            field_dict["Ey_excitation_grid_function"], self.mangle_dict
+                        ),
+                    )
+                    pywarpx.external_source.__setattr__(
+                        "Ez_excitation_grid_function(x,y,z,t)",
+                        pywarpx.my_constants.mangle_expression(
+                            field_dict["Ez_excitation_grid_function"], self.mangle_dict
+                        ),
+                    )
+
+                elif style.lower().startswith("parse_b"):
+                    pywarpx.external_source.B_excitation_on_grid_style = style
+                    # Flag functions
+                    pywarpx.external_source.__setattr__(
+                        "Bx_excitation_flag_function(x,y,z)",
+                        pywarpx.my_constants.mangle_expression(
+                            field_dict["Bx_excitation_flag_function"], self.mangle_dict
+                        ),
+                    )
+                    pywarpx.external_source.__setattr__(
+                        "By_excitation_flag_function(x,y,z)",
+                        pywarpx.my_constants.mangle_expression(
+                            field_dict["By_excitation_flag_function"], self.mangle_dict
+                        ),
+                    )
+                    pywarpx.external_source.__setattr__(
+                        "Bz_excitation_flag_function(x,y,z)",
+                        pywarpx.my_constants.mangle_expression(
+                            field_dict["Bz_excitation_flag_function"], self.mangle_dict
+                        ),
+                    )
+                    # Grid functions
+                    pywarpx.external_source.__setattr__(
+                        "Bx_excitation_grid_function(x,y,z,t)",
+                        pywarpx.my_constants.mangle_expression(
+                            field_dict["Bx_excitation_grid_function"], self.mangle_dict
+                        ),
+                    )
+                    pywarpx.external_source.__setattr__(
+                        "By_excitation_grid_function(x,y,z,t)",
+                        pywarpx.my_constants.mangle_expression(
+                            field_dict["By_excitation_grid_function"], self.mangle_dict
+                        ),
+                    )
+                    pywarpx.external_source.__setattr__(
+                        "Bz_excitation_grid_function(x,y,z,t)",
+                        pywarpx.my_constants.mangle_expression(
+                            field_dict["Bz_excitation_grid_function"], self.mangle_dict
+                        ),
+                    )
 
         pywarpx.hybridpicmodel.solve_electron_energy_equation = (
             self.solve_electron_energy_equation
