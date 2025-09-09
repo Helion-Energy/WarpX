@@ -129,21 +129,24 @@ namespace WarpXUtilAlgo{
  * \param[out] z   physical coordinate along z
  */
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
-void getCellCoordinates (int i, int j, int k,
-                         const int* mf_type,
-                         const amrex::Real* domain_lo,
-                         const amrex::Real* dx,
-                         amrex::Real &x, amrex::Real &y, amrex::Real &z)
+void getCellCoordinates (
+    int i, int j, int k,
+    const amrex::GpuArray<int, AMREX_SPACEDIM>& mf_type,
+    const amrex::GpuArray<amrex::Real, AMREX_SPACEDIM>& domain_lo,
+    const amrex::GpuArray<amrex::Real, AMREX_SPACEDIM>& dx,
+    amrex::Real &x, amrex::Real &y, amrex::Real &z)
 {
     using namespace amrex::literals;
-    x = domain_lo[0] + i*dx[0] + (1._rt - mf_type[0]) * dx[0]*0.5_rt;
+
+    x = domain_lo[0] + i*dx[0] + (1._rt - mf_type[0]) * 0.5_rt*dx[0];
+
 #if defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
     amrex::ignore_unused(j);
     y = 0._rt;
-    z = domain_lo[1] + k*dx[1] + (1._rt - mf_type[1]) * dx[1]*0.5_rt;
+    z = domain_lo[1] + k*dx[1] + (1._rt - mf_type[1]) * 0.5_rt*dx[1];
 #else
-    y = domain_lo[1] + j*dx[1] + (1._rt - mf_type[1]) * dx[1]*0.5_rt;
-    z = domain_lo[2] + k*dx[2] + (1._rt - mf_type[2]) * dx[2]*0.5_rt;
+    y = domain_lo[1] + j*dx[1] + (1._rt - mf_type[1]) * 0.5_rt*dx[1];
+    z = domain_lo[2] + k*dx[2] + (1._rt - mf_type[2]) * 0.5_rt*dx[2];
 #endif
 }
 

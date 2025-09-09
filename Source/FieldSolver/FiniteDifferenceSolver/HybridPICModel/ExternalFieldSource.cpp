@@ -160,57 +160,89 @@ ExternalFieldSource::ApplyExternalFieldExcitationOnGrid (
         amrex::ParallelFor(
             tbx, nComp_x,
             [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) {
-                amrex::Real x, y, z;
-                WarpXUtilAlgo::getCellCoordinates(i, j, k, mfx_stag.data(),
-                                                 problo.data(), dx.data(), x, y, z);
-                auto flag_type = xflag_parser(x,y,z);
-        
+                
+	        const amrex::Real fac_x = (1._rt - mfx_stag[0]) * dx[0] * 0.5_rt;
+                const amrex::Real x = i*dx[0] + problo[0] + fac_x;
+                #if defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+                const amrex::Real y = 0._rt;
+                const amrex::Real fac_z = (1._rt - mfx_stag[1]) * dx[1] * 0.5_rt;
+                const amrex::Real z = k*dx[1] + problo[1] + fac_z;
+                #else
+                const amrex::Real fac_y = (1._rt - mfx_stag[1]) * dx[1] * 0.5_rt;
+                const amrex::Real y = j*dx[1] + problo[1] + fac_y;
+                const amrex::Real fac_z = (1._rt - mfx_stag[2]) * dx[2] * 0.5_rt;
+                const amrex::Real z = k*dx[2] + problo[2] + fac_z;
+                #endif
+
+
+	        auto flag_type = xflag_parser(x,y,z);
+    
+	        //if(flag_type > 0) amrex::Print() << "Port "<< flag_type << " detected." << "\n";
                 if (flag_type > 0._rt) {
                     amrex::Real field_value = 0.0_rt;
-                    if (m_circuit_coupling_enabled) {
-                        field_value = m_coupling_strength * m_circuit_voltage * xfield_parser(x,y,z,t);
-                    } else {
+                //    if (m_circuit_coupling_enabled) {
+                //        field_value = m_coupling_strength * m_circuit_voltage * xfield_parser(x,y,z,t);
+                //    } else {
                         field_value = xfield_parser(x,y,z,t);
-                    }
+                //    }
                     Fx(i, j, k, n) += dt_type_factor * field_value;
                 }
             },
             tby, nComp_y,
             [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) {
-                amrex::Real x, y, z;
-                WarpXUtilAlgo::getCellCoordinates(i, j, k, mfy_stag.data(),
-                                                 problo.data(), dx.data(), x, y, z);
+	        const amrex::Real fac_x = (1._rt - mfx_stag[0]) * dx[0] * 0.5_rt;
+                const amrex::Real x = i*dx[0] + problo[0] + fac_x;
+                #if defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+                const amrex::Real y = 0._rt;
+                const amrex::Real fac_z = (1._rt - mfx_stag[1]) * dx[1] * 0.5_rt;
+                const amrex::Real z = k*dx[1] + problo[1] + fac_z;
+                #else
+                const amrex::Real fac_y = (1._rt - mfx_stag[1]) * dx[1] * 0.5_rt;
+                const amrex::Real y = j*dx[1] + problo[1] + fac_y;
+                const amrex::Real fac_z = (1._rt - mfx_stag[2]) * dx[2] * 0.5_rt;
+                const amrex::Real z = k*dx[2] + problo[2] + fac_z;
+                #endif
                 auto flag_type = yflag_parser(x,y,z);
         
                 if (flag_type > 0._rt) {
                     amrex::Real field_value = 0.0_rt;
-                    if (m_circuit_coupling_enabled) {
-                        field_value = m_coupling_strength * m_circuit_voltage * yfield_parser(x,y,z,t);
-                    } else {
+                 //   if (m_circuit_coupling_enabled) {
+                 //       field_value = m_coupling_strength * m_circuit_voltage * yfield_parser(x,y,z,t);
+                 //   } else {
                         field_value = yfield_parser(x,y,z,t);
-                    }
+                 //   }
                     Fy(i, j, k, n) += dt_type_factor * field_value;
                 }
             },
             tbz, nComp_z,
             [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) {
-                amrex::Real x, y, z;
-                WarpXUtilAlgo::getCellCoordinates(i, j, k, mfz_stag.data(),
-                                                 problo.data(), dx.data(), x, y, z);
+	        const amrex::Real fac_x = (1._rt - mfx_stag[0]) * dx[0] * 0.5_rt;
+                const amrex::Real x = i*dx[0] + problo[0] + fac_x;
+                #if defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+                const amrex::Real y = 0._rt;
+                const amrex::Real fac_z = (1._rt - mfx_stag[1]) * dx[1] * 0.5_rt;
+                const amrex::Real z = k*dx[1] + problo[1] + fac_z;
+                #else
+                const amrex::Real fac_y = (1._rt - mfx_stag[1]) * dx[1] * 0.5_rt;
+                const amrex::Real y = j*dx[1] + problo[1] + fac_y;
+                const amrex::Real fac_z = (1._rt - mfx_stag[2]) * dx[2] * 0.5_rt;
+                const amrex::Real z = k*dx[2] + problo[2] + fac_z;
+                #endif
                 auto flag_type = zflag_parser(x,y,z);
         
                 if (flag_type > 0._rt) {
                     amrex::Real field_value = 0.0_rt;
-                    if (m_circuit_coupling_enabled) {
-                        field_value = m_coupling_strength * m_circuit_voltage * zfield_parser(x,y,z,t);
-                    } else {
+               //     if (m_circuit_coupling_enabled) {
+               //         field_value = m_coupling_strength * m_circuit_voltage * zfield_parser(x,y,z,t);
+               //     } else {
                         field_value = zfield_parser(x,y,z,t);
-                    }
+               //     }
                     Fz(i, j, k, n) += dt_type_factor * field_value;
                 }
             }
         );
     }
+
 }
 
 
@@ -219,7 +251,7 @@ void ExternalFieldSource::InitializePorts(int lev)
 {
     if (m_ports_initialized) return;
 
-    if (m_circuit_coupling_enabled) {
+    //if (m_circuit_coupling_enabled) {
         m_unique_ports = GetUniquePortIDs(lev);
 
         // Convert set to vector for consistent ordering
@@ -228,7 +260,7 @@ void ExternalFieldSource::InitializePorts(int lev)
             if (port_id > 0) { // Skip flag value 0 (no excitation)
                 m_port_ids.push_back(port_id);
             }
-        }
+    //   }
 
         // Initialize voltage storage
         m_port_voltages.resize(m_port_ids.size(), 0.0);
@@ -317,7 +349,7 @@ std::set<int> ExternalFieldSource::GetUniquePortIDs(int lev)
 
 void ExternalFieldSource::CalculatePortVoltages(int lev)
 {
-    if (!m_circuit_coupling_enabled) return;
+    //if (!m_circuit_coupling_enabled) return;
 
     // Initialize ports if not done yet
     if (!m_ports_initialized) {
@@ -457,8 +489,8 @@ amrex::Real ExternalFieldSource::CalculateVoltageForPort_EMF(int port_id, int le
             {
                 if (k == k_plane) {
                     amrex::Real x, y, z;
-                    WarpXUtilAlgo::getCellCoordinates(i, j, k, mfx_stag.data(),
-                                                     problo.data(), dx.data(), x, y, z);
+                    WarpXUtilAlgo::getCellCoordinates(i, j, k, mfx_stag,
+                                                     problo, dx, x, y, z);
                     
                     auto flag_type = xflag_parser(x, y, z);
                     if (flag_type == port_id) {

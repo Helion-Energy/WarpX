@@ -731,7 +731,7 @@ void HybridPICModel::EvolveEBFieldsDisplacement (
     amrex::Real const t_old = warpx.gett_old(0);
    
     if(m_add_external_source && t_old == 0.0){
-       amrex::Print() << "ApplyExternalFieldExcitationOnGrid at t = " << t_old << "\n";
+       //amrex::Print() << "ApplyExternalFieldExcitationOnGrid at t = " << t_old << "\n";
        m_external_field_source->ApplyExternalFieldExcitationOnGrid(DtType::Full,
                                                             /*apply_E=*/true,
                                                             /*apply_B=*/true);
@@ -803,5 +803,42 @@ void HybridPICModel::EvolveEBFieldsDisplacement (
     current_fp_plasma[0]->FillBoundary(warpx.Geom(lev).periodicity());
     current_fp_plasma[1]->FillBoundary(warpx.Geom(lev).periodicity());
     current_fp_plasma[2]->FillBoundary(warpx.Geom(lev).periodicity());
+/*
+    if (m_external_field_source) {
+           m_external_field_source->InitializePorts(0); // level 0
 
+           m_external_field_source->CalculatePortVoltages(0); // level 0
+
+           amrex::Real port1_voltage = m_external_field_source->GetVoltageForPort(1); // Port ID = 1
+           amrex::Real port2_voltage = m_external_field_source->GetVoltageForPort(2); // Port ID = 2
+           amrex::Real port3_voltage = m_external_field_source->GetVoltageForPort(3); // Port ID = 3
+           amrex::Real port4_voltage = m_external_field_source->GetVoltageForPort(4); // Port ID = 4
+
+
+           if (amrex::ParallelDescriptor::IOProcessor()) {
+              static std::ofstream port_file;
+              static bool file_opened = false;
+
+              if (!file_opened) {
+                  port_file.open("port_voltage_vs_time.txt");
+                  port_file << "# Time(s) Port1_Voltage(V) Port2_Voltage(V) Port3_Voltage(V) Port4_Voltage(V) \n";
+                  file_opened = true;
+              }
+
+              amrex::Real circuit_voltage = m_external_field_source->m_lc_circuit->GetVoltage();
+
+              port_file << std::scientific << std::setprecision(12)
+                        << port1_voltage << " "
+                        << port2_voltage << " "
+                        << port3_voltage << " "
+                        << port4_voltage << " \n";
+              port_file.flush(); // Ensure data is written immediately
+           }
+
+           // Debug output
+          // if (istep[0] % 10 == 0) {
+                m_external_field_source->PrintPortInfo();
+          // }
+    }
+*/
 }
