@@ -1419,6 +1419,9 @@ PhysicalParticleContainer::AddPlasmaFlux (PlasmaInjector const& plasma_injector,
         int const loc_flux_normal_axis = plasma_injector.flux_normal_axis;
 #endif
 
+        // local copy for device lambda capture
+        amrex::ParticleReal const mass = m_mass;
+
         // Loop over all new particles and inject them (creates too many
         // particles, in particular does not consider xmin, xmax etc.).
         // The invalid ones are given negative ID and are deleted during the
@@ -1693,7 +1696,7 @@ PhysicalParticleContainer::AddPlasmaFlux (PlasmaInjector const& plasma_injector,
                 // Update particle position by a random `t_fract`
                 // so as to produce a continuous-looking flow of particles
                 const amrex::Real t_fract = amrex::Random(engine)*dt;
-                UpdatePosition(ppos.x, ppos.y, ppos.z, pu.x, pu.y, pu.z, t_fract);
+                UpdatePosition(ppos.x, ppos.y, ppos.z, pu.x, pu.y, pu.z, t_fract, mass);
 
 #if defined(WARPX_DIM_3D)
                 pa[PIdx::x][ip] = ppos.x;
