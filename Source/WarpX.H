@@ -915,14 +915,6 @@ public:
     */
     void ComputeFaceExtensions();
     /**
-    * \brief Initialize the memory for the FaceInfoBoxes
-    */
-    void InitBorrowing();
-    /**
-    * \brief Shrink the vectors in the FaceInfoBoxes
-    */
-    void ShrinkBorrowing();
-    /**
     * \brief Do the one-way extension
     */
     void ComputeOneWayExtensions();
