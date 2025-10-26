@@ -13,7 +13,6 @@ enum struct ConvertDirection;
 
 struct PIdx;
 struct DiagIdx;
-struct TmpIdx;
 
 class WarpXParIter;
 
@@ -24,15 +23,6 @@ struct DiagIdx
     enum {
         w = 0,
         x, y, z, ux, uy, uz,
-        nattribs
-    };
-};
-
-struct TmpIdx
-{
-    enum {
-        xold = 0,
-        yold, zold, uxold, uyold, uzold,
         nattribs
     };
 };
