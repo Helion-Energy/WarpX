@@ -1,7 +1,7 @@
 .. _running-cpp-parameters:
 
-Parameters: Inputs File
-=======================
+Inputs: Parameter List
+======================
 
 This documents on how to use WarpX with an inputs file (e.g., ``warpx.3d input_3d``).
 
@@ -399,8 +399,8 @@ Setting up the field mesh
     * For ``RCYLINDER``, a cylindrical geometry with the axis ``r``, invariant in ``theta`` and ``z``.
     * For ``RSPHERE``, a spherical geometry with the axis ``r``, invariant in ``theta`` and ``phi``. The polar angle ``phi`` is relative to the ``x-y`` plane.
 
-    Note that this value must be consistent with the :ref:`WarpX_DIMS <building-cmake-options>` compile-time option.
-    If you installed WarpX from a :ref:`package manager <install-users>`, then pick the right executable by name.
+    Note that this value must be consistent with the :ref:`WarpX_DIMS <install-build-options>` compile-time option.
+    If you installed WarpX from a :ref:`package manager <install-methods>`, then pick the right executable by name.
 
 * ``warpx.n_rz_azimuthal_modes`` (`integer`; 1 by default)
     When using the RZ version, this is the number of azimuthal modes.
@@ -1030,7 +1030,7 @@ Particle initialization
       The external file must include the species ``openPMD::Record`` labeled ``position`` and ``momentum`` (`double` arrays), with dimensionality and units set via ``openPMD::setUnitDimension`` and ``setUnitSI``.
       If the external file also contains ``openPMD::Records`` for ``mass`` and ``charge`` (constant `double` scalars) then the species will use these, unless overwritten in the input file (see ``<species_name>.mass``, ``<species_name>.charge`` or ``<species_name>.species_type``).
       The ``external_file`` option is currently implemented for 2D, 3D and RZ geometries, with record components in the cartesian coordinates ``(x,y,z)`` for 3D and RZ, and ``(x,z)`` for 2D.
-      For more information on the `openPMD format <https://github.com/openPMD>`__ and how to build WarpX with it, please visit :ref:`the install section <install-developers>`.
+      For more information on the `openPMD format <https://github.com/openPMD>`__ and how to build WarpX with it, please visit :ref:`the install section <install-build-cmake>`.
       See `this file <https://github.com/BLAST-WarpX/warpx/blob/development/Examples/Tests/gaussian_beam/inputs_test_3d_focusing_gaussian_beam_from_openpmd_prepare.py>`__
       for an example of how to prepare the openPMD data file.
 
@@ -3124,15 +3124,17 @@ In-situ capabilities can be used by turning on Sensei or Ascent (provided they a
     will be dumped.
 
 * ``amrex.async_out`` (`0` or `1`) optional (default `0`)
-    Whether to use asynchronous IO when writing plotfiles. This only has an effect
-    when using the AMReX plotfile format.
-    Please see the :ref:`data analysis section <dataanalysis-formats>` for more information.
+    Enable asynchronous I/O for AMReX ``plotfile`` output.
+    When set to ``1``, writing is handled by a background I/O
+    thread so the simulation can continue while data are written to disk, which can reduce
+    total time spent in I/O for large HPC runs. Actual benefits depend on the MPI
+    implementation and may be negligible on a workstation.
 
 * ``amrex.async_out_nfiles`` (`int`) optional (default `64`)
-    The maximum number of files to write to when using asynchronous IO.
-    To use asynchronous IO with more than ``amrex.async_out_nfiles`` MPI ranks,
-    WarpX must be configured with ``-DWarpX_MPI_THREAD_MULTIPLE=ON``.
-    Please see the :ref:`data analysis section <dataanalysis-formats>` for more information.
+    Maximum number of files to use for asynchronous I/O (default: 64).
+    When enabled, each MPI rank writes its own file up to this limit. If you
+    run with more MPI ranks than ``amrex.async_out_nfiles``, build WarpX with
+    ``-DWarpX_MPI_THREAD_MULTIPLE=ON``.
 
 * ``warpx.field_io_nfiles`` and ``warpx.particle_io_nfiles`` (`int`) optional (default `1024`)
     The maximum number of files to use when writing field and particle data to plotfile directories.

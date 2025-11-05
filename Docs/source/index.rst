@@ -80,8 +80,8 @@ Usage
 
    usage/how_to_run
    usage/examples
-   usage/python
    usage/parameters
+   usage/python
    usage/workflows
    usage/faq
 
@@ -102,14 +102,10 @@ Data Analysis
    :hidden:
 
    dataanalysis/formats
+   dataanalysis/openpmd
    dataanalysis/yt
-   dataanalysis/openpmdviewer
-   dataanalysis/openpmdapi
-   dataanalysis/paraview
-   dataanalysis/visit
-   dataanalysis/visualpic
-   dataanalysis/picviewer
-   dataanalysis/reduced_diags
+   dataanalysis/3dvisualizations
+   dataanalysis/insitu
    dataanalysis/workflows
 
 Theory
