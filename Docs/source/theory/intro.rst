@@ -38,6 +38,7 @@ Models & Algorithms
    :maxdepth: 1
 
    models_algorithms/electromagnetic_pic
+   models_algorithms/electrostatic_pic
    models_algorithms/kinetic_fluid_hybrid_model
 
 .. _theory-grid:
