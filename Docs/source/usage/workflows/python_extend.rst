@@ -42,7 +42,7 @@ How to run a simulation with Python extensions
          # register callbacks ...
 
          # advance simulation until the last time step
-         sim.evolve()
+         sim.step()
 
       .. dropdown:: Full Example
 
@@ -152,6 +152,10 @@ This object is the Python equivalent to the C++ ``WarpX`` simulation class.
    .. py:method:: evolve(numsteps=-1)
 
       Evolve the simulation the specified number of steps.
+
+   .. py:method:: step(numsteps=-1)
+
+      An alias to the evolve method.
 
    .. autofunction:: pywarpx.picmi.Simulation.extension.finalize
 
