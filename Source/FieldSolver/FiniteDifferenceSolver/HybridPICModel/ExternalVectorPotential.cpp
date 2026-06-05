@@ -150,7 +150,10 @@ ExternalVectorPotential::InitData ()
         if (m_read_A_from_file[i]) {
             // Read A fields from file
             for (auto lev = 0; lev <= warpx.finestLevel(); ++lev) {
-#if defined(WARPX_DIM_RZ)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RTZ)
+                // RZ and RTZ store the external A as cylindrical components (r, theta, z).
+                // For RTZ the file is a full 3D (r, theta, z) grid (e.g. an axisymmetric
+                // coil A broadcast over theta); the generic 3D reader handles the layout.
                 warpx.ReadExternalFieldFromFile(m_external_file_path[i],
                     warpx.m_fields.get(Aext_field, Direction{0}, lev),
                     "A", "r");
