@@ -41,6 +41,27 @@ ProjectionDivCleaner::ProjectionDivCleaner(std::string const& a_field_name, bool
     using ablastr::fields::Direction;
     ReadParameters();
 
+#if defined(WARPX_DIM_RTZ)
+    // The projection-based divergence cleaner is NOT yet implemented for the RTZ
+    // (3D real-space cylindrical) grid. The cylindrical Laplacian is anisotropic
+    // and position-dependent ( (1/r) d_r(r d_r) + (1/r^2) d_theta^2 + d_z^2 ), and
+    // AMReX has no 3D-cylindrical metric for its MLMG operators:
+    //   - cell-centered fields could use MLABecLaplacian with per-face metric
+    //     b-coefficients (r-face ~ r, theta-face ~ 1/r, z-face ~ r);
+    //   - nodal fields (vector potential / collocated) need a NEW AMReX nodal
+    //     anisotropic operator (MLNodeLaplacian's sigma is a scalar per cell and
+    //     cannot encode the cylindrical metric).
+    // Until that operator exists, abort rather than silently solve the wrong
+    // (Cartesian) Poisson problem. Disable div cleaning for RTZ runs:
+    //   HybridPICSolver(..., do_external_diva_cleaning=False)
+    //   LoadInitialFieldFromPython(..., warpx_do_initial_div_cleaning=False)
+    // (external fields that are already divergence free do not need cleaning).
+    WARPX_ABORT_WITH_MESSAGE(
+        "ProjectionDivCleaner is not implemented for RTZ (3D cylindrical). Disable "
+        "div cleaning (do_external_diva_cleaning=0 / warpx_do_initial_div_cleaning=0) "
+        "until a 3D-cylindrical MLMG operator is added.");
+#endif
+
     auto& warpx = WarpX::GetInstance();
 
     // Only div clean level 0
