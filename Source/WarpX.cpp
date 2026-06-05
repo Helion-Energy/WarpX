@@ -2425,7 +2425,11 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
     jx_nodal_flag = IntVect(0,1);
     jy_nodal_flag = IntVect(1,1);
     jz_nodal_flag = IntVect(1,0);
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
+    // RTZ (r, theta, z) is a full 3D AMReX grid and uses the same Yee staggering
+    // pattern as 3D Cartesian (Er/Jr on r-edges, Etheta/Jtheta on theta-edges,
+    // Ez/Jz on z-edges; B on the corresponding faces). The cylindrical metric is
+    // applied in the finite-difference operators, not the staggering.
     Ex_nodal_flag = IntVect(0,1,1);
     Ey_nodal_flag = IntVect(1,0,1);
     Ez_nodal_flag = IntVect(1,1,0);

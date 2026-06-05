@@ -1174,16 +1174,6 @@ PhysicalParticleContainer::AddPlasma (PlasmaInjector& plasma_injector, int lev, 
                 u.y *= PhysConst::c;
                 u.z *= PhysConst::c;
 
-#if defined(WARPX_DIM_RTZ)
-                // TEMP RTZ DEBUG: flag NaN injected momentum with its coordinates.
-                if (!(u.x==u.x && u.y==u.y && u.z==u.z)) {
-                    AMREX_DEVICE_PRINTF(
-                        "RTZ-INJ-NANU cart_x=%g cart_y=%g r=%g theta=%g z=%g dens=%g ux=%g uy=%g uz=%g\n",
-                        (double)pos.x,(double)pos.y,(double)xb,(double)theta,(double)pos.z,(double)dens,
-                        (double)u.x,(double)u.y,(double)u.z);
-                }
-#endif
-
                 amrex::Real weight = dens;
                 weight *= scale_fac;
 

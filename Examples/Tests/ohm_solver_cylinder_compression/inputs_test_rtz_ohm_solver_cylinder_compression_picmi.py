@@ -207,13 +207,22 @@ class PlasmaCylinderCompression(object):
             A_external=A_ext,
             tau_ramp=20e-6,
             t0_ramp=5e-6,
+            # The analytical uniform-Bz vector potential is already divergence
+            # free, and the projection div-cleaner is not yet implemented for the
+            # RTZ (3D cylindrical) grid (it would require a 3D cylindrical Poisson
+            # solve); disable it here. See the RZ case for the cleaned path.
+            do_external_diva_cleaning=False,
         )
         simulation.solver = self.solver
 
         # Add field loader callback for the initial equilibrium B field
         B_ext = picmi.LoadInitialFieldFromPython(
             load_from_python=self.load_fields,
-            warpx_do_divb_cleaning_external=True,
+            # The loaded equilibrium B is axisymmetric and z-independent (only Bz(r)
+            # is nonzero), so it is already divergence free. The projection
+            # div-cleaner is not yet implemented for the RTZ (3D cylindrical) grid
+            # (it would require a 3D cylindrical Poisson solve), so disable it.
+            warpx_do_initial_div_cleaning=False,
             load_B=True,
             load_E=False,
         )

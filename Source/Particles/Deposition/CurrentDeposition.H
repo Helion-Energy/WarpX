@@ -284,22 +284,6 @@ void doDepositionShapeNKernel([[maybe_unused]] const amrex::ParticleReal xp,
     // the same triple-loop stencil as 3D Cartesian (theta is a real grid
     // direction, so there is no azimuthal-mode sum). The 1/r radial volume
     // factor is applied afterwards by ApplyInverseVolumeScalingToCurrentDensity.
-    // TEMP RTZ DEBUG: detect non-finite / wildly-out-of-range deposit indices.
-    {
-        const bool finite = (xmid==xmid) && (ymid==ymid) && (zmid==zmid); // false if NaN
-        const bool bad = !finite
-            || j_jx < -100000 || j_jx > 100000
-            || k_jx < -100000 || k_jx > 100000
-            || l_jx < -100000 || l_jx > 100000;
-        if (bad) {
-            AMREX_DEVICE_PRINTF(
-                "RTZ-DEP-BAD xp=%g yp=%g zp=%g vx=%g vy=%g vz=%g rt=%g rpmid=%g thmid=%g xmid=%g ymid=%g zmid=%g j=%d k=%d l=%d lo=(%d,%d,%d)\n",
-                (double)xp,(double)yp,(double)zp,(double)vx,(double)vy,(double)vz,(double)relative_time,
-                (double)rpmid,(double)theta_mid,(double)xmid,(double)ymid,(double)zmid,
-                j_jx,k_jx,l_jx, lo.x,lo.y,lo.z);
-            return; // skip the bad atomicAdd so the run survives for diagnosis
-        }
-    }
     for (int iz=0; iz<=depos_order; iz++){
         for (int iy=0; iy<=depos_order; iy++){
             for (int ix=0; ix<=depos_order; ix++){

@@ -710,7 +710,8 @@ WarpX::ShiftGalileanBoundary ()
 
     const amrex::Real time_shift = (cur_time - time_of_last_gal_shift);
 
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
+        // RTZ is a full 3D AMReX grid; treat the (r, theta, z) axes like 3D here.
         m_galilean_shift = {
             m_v_galilean[0]*time_shift,
             m_v_galilean[1]*time_shift,
@@ -727,7 +728,7 @@ WarpX::ShiftGalileanBoundary ()
             m_v_galilean[2]*time_shift };
 #endif
 
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
         for (int i=0; i<AMREX_SPACEDIM; i++) {
             new_lo[i] = current_lo[i] + m_galilean_shift[i];
             new_hi[i] = current_hi[i] + m_galilean_shift[i];
