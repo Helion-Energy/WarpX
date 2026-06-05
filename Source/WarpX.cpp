@@ -854,7 +854,8 @@ WarpX::ReadParameters ()
 #if (AMREX_SPACEDIM >= 2)
         filter_npass_each_dir[1] = parse_filter_npass_each_dir[1];
 #endif
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
+        // RTZ is a full 3D grid: read the third-direction (z) filter passes too.
         filter_npass_each_dir[2] = parse_filter_npass_each_dir[2];
 #endif
 

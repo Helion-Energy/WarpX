@@ -41,7 +41,7 @@ void UpdatePosition ([[maybe_unused]] amrex::ParticleReal& x,
 #if !defined(WARPX_DIM_1D_Z)
         x += ux * inv_gamma * dt;
 #endif
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
         // Particles pushed in 3D even in 1D cylindrical, 1D spherical, and 2D cylindrical geometry
         y += uy * inv_gamma * dt;
 #endif
@@ -58,7 +58,7 @@ void UpdatePosition ([[maybe_unused]] amrex::ParticleReal& x,
 #if !defined(WARPX_DIM_1D_Z)
             x += ux * c_over_unorm * dt;
 #endif
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
             // Particles pushed in 3D even in 1D cylindrical, 1D spherical, and 2D cylindrical geometry
             y += uy * c_over_unorm * dt;
 #endif
@@ -117,7 +117,7 @@ void UpdatePositionImplicit ([[maybe_unused]] amrex::ParticleReal& x,
 #if !defined(WARPX_DIM_1D_Z)
     x += ux * inv_gamma * dt;
 #endif
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
     // Radial pushes particles in 3D
     y += uy * inv_gamma * dt;
 #endif
@@ -152,7 +152,7 @@ void PositionNorm ([[maybe_unused]] const amrex::ParticleReal dxp,
 #if !defined(WARPX_DIM_1D_Z)
     step_norm += (dxp - dxp_save)*(dxp - dxp_save)*idxg2;
 #endif
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     step_norm += (dyp - dyp_save)*(dyp - dyp_save)*idyg2;
 #elif defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     step_norm += (dyp - dyp_save)*(dyp - dyp_save)*idxg2;
