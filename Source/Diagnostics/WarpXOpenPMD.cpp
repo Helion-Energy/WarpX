@@ -271,6 +271,9 @@ namespace detail
         vs const axisLabels = var_in_theta_mode ? circAxisLabels : cartAxisLabels;
 #elif defined(WARPX_DIM_3D)
         vs const axisLabels{"x", "y", "z"};  // x varies fastest in memory
+#elif defined(WARPX_DIM_RTZ)
+        // Real-space cylindrical grid (r, theta, z); r varies fastest in memory
+        vs const axisLabels{"r", "theta", "z"};
 #else
 #   error Unknown WarpX dimensionality.
 #endif

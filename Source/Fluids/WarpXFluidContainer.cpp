@@ -221,7 +221,7 @@ void WarpXFluidContainer::InitData(
         amrex::ParallelFor(init_box_intersection,
             [=] AMREX_GPU_DEVICE(int i, int j, int k) noexcept
             {
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                 const amrex::Real x = problo[0] + i * dx[0];
                 const amrex::Real y = problo[1] + j * dx[1];
                 amrex::Real z = problo[2] + k * dx[2];
@@ -379,7 +379,7 @@ void WarpXFluidContainer::ApplyBcFluidsAndComms (ablastr::fields::MultiFabRegist
                 // If the cell is is first guard cell & the dimension is non
                 // periodic, then copy Q_{i+1} = Q_{i-1}.
                 // Don't check r-dir in Z:
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
 
                 // Upper end (index 2)
                 if ( (periodic_directions[2] != 1) && (k==domain.bigEnd(2)+1) ){
@@ -396,7 +396,7 @@ void WarpXFluidContainer::ApplyBcFluidsAndComms (ablastr::fields::MultiFabRegist
                     NUz_arr(i,j,k) = NUz_arr(i,j,k+2);
                 }
 
-#elif ( defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_3D) )
+#elif ( defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ) )
 
                 // Upper end (index 1)
                 if ( (periodic_directions[1] != 1) && (j==domain.bigEnd(1)+1) ){
@@ -455,7 +455,7 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
     const amrex::Geometry &geom = warpx.Geom(lev);
     const auto dx = geom.CellSizeArray();
     const amrex::Real clight = PhysConst::c;
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     const amrex::Real dt_over_dx = (dt/dx[0]);
     const amrex::Real dt_over_dy = (dt/dx[1]);
     const amrex::Real dt_over_dz = (dt/dx[2]);
@@ -484,7 +484,7 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
     const amrex::BoxArray ba = fields.get(name_mf_N, lev)->boxArray();
 
     // Temporary Half-step values
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     amrex::MultiFab tmp_U_minus_x( amrex::convert(ba, IntVect(0,1,1)), fields.get(name_mf_N, lev)->DistributionMap(), 4, 1);
     amrex::MultiFab tmp_U_plus_x( amrex::convert(ba, IntVect(0,1,1)), fields.get(name_mf_N, lev)->DistributionMap(), 4, 1);
     amrex::MultiFab tmp_U_minus_y( amrex::convert(ba, IntVect(1,0,1)), fields.get(name_mf_N, lev)->DistributionMap(), 4, 1);
@@ -535,7 +535,7 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
         // Grow the entire domain
         amrex::Box box = mfi.validbox();
         box.grow(1);
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
         amrex::Box const box_x = amrex::convert( box, tmp_U_minus_x.ixType() );
         amrex::Box const box_y = amrex::convert( box, tmp_U_minus_y.ixType() );
         amrex::Box const box_z = amrex::convert( box, tmp_U_minus_z.ixType() );
@@ -553,7 +553,7 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
         //values of N and U at these points.
         //(i.e. the 4 components correspond to N + the 3 components of U)
         // Extract the temporary arrays for edge values
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
         const amrex::Array4<amrex::Real> U_minus_x = tmp_U_minus_x.array(mfi);
         const amrex::Array4<amrex::Real> U_plus_x = tmp_U_plus_x.array(mfi);
         const amrex::Array4<amrex::Real> U_minus_y = tmp_U_minus_y.array(mfi);
@@ -615,7 +615,7 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
 
 #endif
 
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                     const amrex::Real Vy = Uy/gamma;
                     // Compute the non-zero element of Jy
                     const amrex::Real J00y = Vy;
@@ -654,7 +654,7 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
 
 
                     // Select the specific implementation depending on dimensionality
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
 
                     // Compute U ([ N, U]) at the halfsteps (U_tilde) using the slopes (dU)
                     const amrex::Real JdU0x = J00x*dU0x + J01x*dU1x + J02x*dU2x + J03x*dU3x;
@@ -800,7 +800,7 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
 #endif
                 // If N<= 0 then set the edge values (U_minus/U_plus) to zero
                 } else {
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                     set_U_edges_to_zero(U_minus_x, U_plus_x, i, j, k, box_x, 0);
                     set_U_edges_to_zero(U_minus_y, U_plus_y, i, j, k, box_y, 1);
                     set_U_edges_to_zero(U_minus_z, U_plus_z, i, j, k, box_z, 2);
@@ -829,7 +829,7 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
         const amrex::Array4<Real> NUy_arr = fields.get(name_mf_NU, Direction{1}, lev)->array(mfi);
         const amrex::Array4<Real> NUz_arr = fields.get(name_mf_NU, Direction{2}, lev)->array(mfi);
 
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
         amrex::Array4<amrex::Real> const &U_minus_x = tmp_U_minus_x.array(mfi);
         amrex::Array4<amrex::Real> const &U_plus_x = tmp_U_plus_x.array(mfi);
         amrex::Array4<amrex::Real> const &U_minus_y = tmp_U_minus_y.array(mfi);
@@ -854,7 +854,7 @@ void WarpXFluidContainer::AdvectivePush_Muscl (ablastr::fields::MultiFabRegister
             {
 
                 // Select the specific implementation depending on dimensionality
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
 
                 // Update the conserved variables Q = [N, NU] from tn -> tn + dt
                 N_arr(i,j,k) = N_arr(i,j,k)  - dt_over_dx*dF(U_minus_x,U_plus_x,i,j,k,clight,0,0)
@@ -1250,7 +1250,7 @@ void WarpXFluidContainer::GatherAndPush (
                             amrex::Real Bx_ext_lab, By_ext_lab, Bz_ext_lab;
 
                             // Grab the location
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                             const amrex::Real x = problo[0] + i * dx[0];
                             const amrex::Real y = problo[1] + j * dx[1];
                             const amrex::Real z = problo[2] + k * dx[2];
@@ -1315,7 +1315,7 @@ void WarpXFluidContainer::GatherAndPush (
 
                         // Added external e fields:
                         if constexpr ( exte_control == has_exte ){
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                             const amrex::Real x = problo[0] + i * dx[0];
                             const amrex::Real y = problo[1] + j * dx[1];
                             const amrex::Real z = problo[2] + k * dx[2];
@@ -1340,7 +1340,7 @@ void WarpXFluidContainer::GatherAndPush (
 
                         // Added external b fields:
                         if ( extb_control == has_extb ){
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                             const amrex::Real x = problo[0] + i * dx[0];
                             const amrex::Real y = problo[1] + j * dx[1];
                             const amrex::Real z = problo[2] + k * dx[2];

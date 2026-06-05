@@ -6,7 +6,7 @@
  */
 #include "FiniteDifferenceSolver.H"
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
 #   include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceAlgorithms/CylindricalYeeAlgorithm.H"
 #elif defined(WARPX_DIM_RSPHERE)
 #   include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceAlgorithms/SphericalYeeAlgorithm.H"
@@ -17,7 +17,7 @@
 #endif
 #include "Utils/TextMsg.H"
 #include "Utils/WarpXAlgorithmSelection.H"
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
 #   include "WarpX.H"
 #endif
 
@@ -43,14 +43,17 @@ FiniteDifferenceSolver::FiniteDifferenceSolver (
     }
 
     // Calculate coefficients of finite-difference stencil
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
     m_dr = cell_size[0];
     m_nmodes = WarpX::n_rz_azimuthal_modes;
     m_rmin = WarpX::GetInstance().Geom(0).ProbLo(0);
+#if defined(WARPX_DIM_RTZ)
+    m_dtheta = cell_size[1];
+#endif
     if (fdtd_algo == ElectromagneticSolverAlgo::Yee ||
         fdtd_algo == ElectromagneticSolverAlgo::HybridPIC ) {
         CylindricalYeeAlgorithm::InitializeStencilCoefficients( cell_size,
-            m_h_stencil_coefs_r, m_h_stencil_coefs_z );
+            m_h_stencil_coefs_r, m_h_stencil_coefs_theta, m_h_stencil_coefs_z );
         m_stencil_coefs_r.resize(m_h_stencil_coefs_r.size());
         m_stencil_coefs_z.resize(m_h_stencil_coefs_z.size());
         amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
@@ -59,6 +62,12 @@ FiniteDifferenceSolver::FiniteDifferenceSolver (
         amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
                               m_h_stencil_coefs_z.begin(), m_h_stencil_coefs_z.end(),
                               m_stencil_coefs_z.begin());
+#if defined(WARPX_DIM_RTZ)
+        m_stencil_coefs_theta.resize(m_h_stencil_coefs_theta.size());
+        amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
+                              m_h_stencil_coefs_theta.begin(), m_h_stencil_coefs_theta.end(),
+                              m_stencil_coefs_theta.begin());
+#endif
         amrex::Gpu::synchronize();
     } else {
         WARPX_ABORT_WITH_MESSAGE(

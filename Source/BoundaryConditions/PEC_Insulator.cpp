@@ -89,7 +89,7 @@ namespace
             t2 = coords.z;
         }
 #endif
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
         if (idim == 1) {
             t1 = coords.x;
             t2 = coords.z;
@@ -315,7 +315,7 @@ namespace
         Fy_parsers_hi.push_back(parser_F1_hi[0]->compile<3>());
         Fz_parsers_hi.push_back(parser_F2_hi[0]->compile<3>());
 #endif
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
         set_Fx_lo[1] = set_field_lo[1];
         set_Fz_lo[1] = set_field_lo[1];
         set_Fx_hi[1] = set_field_hi[1];
@@ -392,7 +392,7 @@ PEC_Insulator::PEC_Insulator ()
     m_set_E_hi[0] |= ::ReadTangentialFieldParser(pp_insulator, m_parsers_E2_hi, "Ez_x_hi(y,z,t)", "y", "z");
 #endif
 
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     std::string str_area_y_lo = "0";
     std::string str_area_y_hi = "0";
     utils::parser::Query_parserString( pp_insulator, "area_y_lo(x,z)", str_area_y_lo);

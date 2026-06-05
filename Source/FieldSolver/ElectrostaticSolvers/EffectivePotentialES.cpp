@@ -118,7 +118,7 @@ void EffectivePotentialES::ComputeSigma (
     // Below we set all the unused dimensions to have cell-centered values for
     // rho since these values will be interpolated onto a cell-centered grid
     // - if this is not done the Interp function returns nonsense values.
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     amrex::GpuArray<int, 3> const nodal = {1, 1, 1};
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
     amrex::GpuArray<int, 3> const nodal = {1, 1, 0};
@@ -247,7 +247,7 @@ void EffectivePotentialES::computePhi (
                 amrex::Array<amrex::MultiFab*, 2>{
                     efield[lev][0], efield[lev][2]
                 }
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                 amrex::Array<amrex::MultiFab *, 3>{
                     efield[lev][0], efield[lev][1], efield[lev][2]
                 }

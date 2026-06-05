@@ -308,7 +308,7 @@ void ColliderRelevant::ComputeDiags (int step)
         m_data[get_idx("thetax_ave_"+m_beam_name[i_s])] = thetax_ave;
         m_data[get_idx("thetax_max_"+m_beam_name[i_s])] = thetax_max;
         m_data[get_idx("thetax_std_"+m_beam_name[i_s])] = thetax_std;
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
         // w_tot
         // x_ave, y_ave,
         // thetax_min, thetax_ave, thetax_max

@@ -73,7 +73,7 @@ Index filterCreateTransformFromFAB (DstPC& pc1, DstPC& pc2,
     const Real dx         = geom_lev_zero.CellSize(0);
     const Real zlo_global = geom_lev_zero.ProbLo(1);
     const Real dz         = geom_lev_zero.CellSize(1);
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     const Real xlo_global = geom_lev_zero.ProbLo(0);
     const Real dx         = geom_lev_zero.CellSize(0);
     const Real ylo_global = geom_lev_zero.ProbLo(1);
@@ -126,7 +126,7 @@ Index filterCreateTransformFromFAB (DstPC& pc1, DstPC& pc2,
             Real const x = xlo_global + j*dx;
             Real const y = 0.0;
             Real const z = zlo_global + k*dz;
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
             Real const x = xlo_global + j*dx;
             Real const y = ylo_global + k*dy;
             Real const z = zlo_global + l*dz;

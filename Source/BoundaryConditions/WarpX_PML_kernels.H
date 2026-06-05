@@ -57,7 +57,7 @@ void warpx_damp_pml_ex (int i, int j, int k, amrex::Array4<amrex::Real> const& E
         Ex(i,j,k,PMLComp::xz) *= sigma_fac_z[j-zlo];
     }
 
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
 
     // sx = 0 means that Ex is staggered in x, while sx = 1 means that Ex is nodal in x (same for y, z)
     const int sx = Ex_stag[0];
@@ -131,7 +131,7 @@ void warpx_damp_pml_ey (int i, int j, int k, amrex::Array4<amrex::Real> const& E
         Ey(i,j,k,PMLComp::yz) *= sigma_fac_z[j-zlo];
     }
 
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
 
     // sx = 0 means that Ey is staggered in x, while sx = 1 means that Ey is nodal in x (same for y, z)
     const int sx = Ey_stag[0];
@@ -208,7 +208,7 @@ void warpx_damp_pml_ez (int i, int j, int k, amrex::Array4<amrex::Real> const& E
         }
     }
 
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
 
     // sx = 0 means that Ez is staggered in x, while sx = 1 means that Ez is nodal in x (same for y, z)
     const int sx = Ez_stag[0];
@@ -285,7 +285,7 @@ void warpx_damp_pml_bx (int i, int j, int k, amrex::Array4<amrex::Real> const& B
         Bx(i,j,k,PMLComp::xz) *= sigma_fac_z[j-zlo];
     }
 
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
 
     // sx = 0 means that Bx is staggered in x, while sx = 1 means that Bx is nodal in x (same for y, z)
     const int sx = Bx_stag[0];
@@ -359,7 +359,7 @@ void warpx_damp_pml_by (int i, int j, int k, amrex::Array4<amrex::Real> const& B
         By(i,j,k,PMLComp::yz) *= sigma_fac_z[j-zlo];
     }
 
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
 
     // sx = 0 means that By is staggered in x, while sx = 1 means that By is nodal in x (same for y, z)
     const int sx = By_stag[0];
@@ -436,7 +436,7 @@ void warpx_damp_pml_bz (int i, int j, int k, amrex::Array4<amrex::Real> const& B
         }
     }
 
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
 
     // sx = 0 means that Bz is staggered in x, while sx = 1 means that Bz is nodal in x (same for y, z)
     const int sx = Bz_stag[0];
@@ -509,7 +509,7 @@ void warpx_damp_pml_scalar (int i, int j, int k, amrex::Array4<amrex::Real> cons
         arr(i,j,k,PMLComp::z) *= sigma_fac_z[j-zlo];
     }
 
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
 
     // sx = 0 means that arr is staggered in x, while sx = 1 means that arr is nodal in x (same for y, z)
     const int sx = arr_stag[0];

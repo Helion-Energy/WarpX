@@ -10,7 +10,7 @@
 #include "FiniteDifferenceSolver.H"
 
 #include "EmbeddedBoundary/Enabled.H"
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
 #   include "FiniteDifferenceAlgorithms/CylindricalYeeAlgorithm.H"
 #elif defined(WARPX_DIM_RSPHERE)
 #   include "FiniteDifferenceAlgorithms/SphericalYeeAlgorithm.H"
@@ -34,7 +34,7 @@ void FiniteDifferenceSolver::ComputeCurlA (
     // but we compile code for each algorithm, using templates)
     if (m_fdtd_algo == ElectromagneticSolverAlgo::Yee ||
         m_fdtd_algo == ElectromagneticSolverAlgo::HybridPIC) {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
         ComputeCurlACylindrical <CylindricalYeeAlgorithm> (
             Bfield, Afield, eb_update_B, lev
         );
@@ -73,7 +73,7 @@ void FiniteDifferenceSolver::ComputeCurlA (
 //   * \param[in] lev refinement level
 
 //   */
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
 template<typename T_Algo>
 void FiniteDifferenceSolver::ComputeCurlACylindrical (
     ablastr::fields::VectorField& Bfield,
@@ -138,72 +138,72 @@ void FiniteDifferenceSolver::ComputeCurlACylindrical (
         amrex::ParallelFor(tbr, tbt, tbz,
 
             // Br calculation
-            [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
                 // Skip field update in the embedded boundaries
-                if (update_Br_arr && update_Br_arr(i, j, 0) == 0) { return; }
+                if (update_Br_arr && update_Br_arr(i, j, k) == 0) { return; }
 
                 Real const r = rmin + i*dr; // r on nodal point (Br is nodal in r)
                 if (r != 0) { // Off-axis, regular Maxwell equations
-                    Br(i, j, 0, 0) = - T_Algo::UpwardDz(At, coefs_z, n_coefs_z, i, j, 0, 0); // Mode m=0
+                    Br(i, j, k, 0) = - T_Algo::UpwardDz(At, coefs_z, n_coefs_z, i, j, k, 0); // Mode m=0
                     for (int m=1; m<nmodes; m++) { // Higher-order modes
-                        Br(i, j, 0, 2*m-1) = - (
-                            T_Algo::UpwardDz(At, coefs_z, n_coefs_z, i, j, 0, 2*m-1)
-                            - m * Az(i, j, 0, 2*m  )/r );  // Real part
-                        Br(i, j, 0, 2*m  ) = - (
-                            T_Algo::UpwardDz(At, coefs_z, n_coefs_z, i, j, 0, 2*m  )
-                            + m * Az(i, j, 0, 2*m-1)/r ); // Imaginary part
+                        Br(i, j, k, 2*m-1) = - (
+                            T_Algo::UpwardDz(At, coefs_z, n_coefs_z, i, j, k, 2*m-1)
+                            - m * Az(i, j, k, 2*m  )/r );  // Real part
+                        Br(i, j, k, 2*m  ) = - (
+                            T_Algo::UpwardDz(At, coefs_z, n_coefs_z, i, j, k, 2*m  )
+                            + m * Az(i, j, k, 2*m-1)/r ); // Imaginary part
                     }
                 } else { // r==0: On-axis corrections
                     // Ensure that Br remains 0 on axis (except for m=1)
-                    Br(i, j, 0, 0) = 0.; // Mode m=0
+                    Br(i, j, k, 0) = 0.; // Mode m=0
                     for (int m=1; m<nmodes; m++) { // Higher-order modes
                         if (m == 1){
                             // For m==1, Bz is linear in r, for small r
                             // Therefore, the formula below regularizes the singularity
-                            Br(i, j, 0, 2*m-1) = - (
-                                T_Algo::UpwardDz(At, coefs_z, n_coefs_z, i, j, 0, 2*m-1)
-                                - m * Az(i+1, j, 0, 2*m  )/dr );  // Real part
-                            Br(i, j, 0, 2*m  ) = - (
-                                T_Algo::UpwardDz(At, coefs_z, n_coefs_z, i, j, 0, 2*m  )
-                                + m * Az(i+1, j, 0, 2*m-1)/dr ); // Imaginary part
+                            Br(i, j, k, 2*m-1) = - (
+                                T_Algo::UpwardDz(At, coefs_z, n_coefs_z, i, j, k, 2*m-1)
+                                - m * Az(i+1, j, k, 2*m  )/dr );  // Real part
+                            Br(i, j, k, 2*m  ) = - (
+                                T_Algo::UpwardDz(At, coefs_z, n_coefs_z, i, j, k, 2*m  )
+                                + m * Az(i+1, j, k, 2*m-1)/dr ); // Imaginary part
                         } else {
-                            Br(i, j, 0, 2*m-1) = 0.;
-                            Br(i, j, 0, 2*m  ) = 0.;
+                            Br(i, j, k, 2*m-1) = 0.;
+                            Br(i, j, k, 2*m  ) = 0.;
                         }
                     }
                 }
             },
 
             // Btheta calculation
-            [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
                 // Skip field update in the embedded boundaries
-                if (update_Btheta_arr && update_Btheta_arr(i, j, 0) == 0) { return; }
+                if (update_Btheta_arr && update_Btheta_arr(i, j, k) == 0) { return; }
 
-                Btheta(i, j, 0, 0) = - (
-                    T_Algo::UpwardDr(Az, coefs_r, n_coefs_r, i, j, 0, 0)
-                    - T_Algo::UpwardDz(Ar, coefs_z, n_coefs_z, i, j, 0, 0)); // Mode m=0
+                Btheta(i, j, k, 0) = - (
+                    T_Algo::UpwardDr(Az, coefs_r, n_coefs_r, i, j, k, 0)
+                    - T_Algo::UpwardDz(Ar, coefs_z, n_coefs_z, i, j, k, 0)); // Mode m=0
                 for (int m=1 ; m<nmodes ; m++) { // Higher-order modes
-                    Btheta(i, j, 0, 2*m-1) = - (
-                        T_Algo::UpwardDr(Az, coefs_r, n_coefs_r, i, j, 0, 2*m-1)
-                        - T_Algo::UpwardDz(Ar, coefs_z, n_coefs_z, i, j, 0, 2*m-1)); // Real part
-                    Btheta(i, j, 0, 2*m  ) = - (
-                        T_Algo::UpwardDr(Az, coefs_r, n_coefs_r, i, j, 0, 2*m  )
-                        - T_Algo::UpwardDz(Ar, coefs_z, n_coefs_z, i, j, 0, 2*m  )); // Imaginary part
+                    Btheta(i, j, k, 2*m-1) = - (
+                        T_Algo::UpwardDr(Az, coefs_r, n_coefs_r, i, j, k, 2*m-1)
+                        - T_Algo::UpwardDz(Ar, coefs_z, n_coefs_z, i, j, k, 2*m-1)); // Real part
+                    Btheta(i, j, k, 2*m  ) = - (
+                        T_Algo::UpwardDr(Az, coefs_r, n_coefs_r, i, j, k, 2*m  )
+                        - T_Algo::UpwardDz(Ar, coefs_z, n_coefs_z, i, j, k, 2*m  )); // Imaginary part
                 }
             },
 
             // Bz calculation
-            [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
                 // Skip field update in the embedded boundaries
-                if (update_Bz_arr && update_Bz_arr(i, j, 0) == 0) { return; }
+                if (update_Bz_arr && update_Bz_arr(i, j, k) == 0) { return; }
 
                 Real const r = rmin + (i + 0.5_rt)*dr; // r on a cell-centered grid (Bz is cell-centered in r)
-                Bz(i, j, 0, 0) =  T_Algo::UpwardDrr_over_r(At, r, dr, coefs_r, n_coefs_r, i, j, 0, 0);
+                Bz(i, j, k, 0) =  T_Algo::UpwardDrr_over_r(At, r, dr, coefs_r, n_coefs_r, i, j, k, 0);
                 for (int m=1 ; m<nmodes ; m++) { // Higher-order modes
-                    Bz(i, j, 0, 2*m-1) = - ( m * Ar(i, j, 0, 2*m  )/r
-                        - T_Algo::UpwardDrr_over_r(At, r, dr, coefs_r, n_coefs_r, i, j, 0, 2*m-1)); // Real part
-                    Bz(i, j, 0, 2*m  ) = - (-m * Ar(i, j, 0, 2*m-1)/r
-                        - T_Algo::UpwardDrr_over_r(At, r, dr, coefs_r, n_coefs_r, i, j, 0, 2*m  )); // Imaginary part
+                    Bz(i, j, k, 2*m-1) = - ( m * Ar(i, j, k, 2*m  )/r
+                        - T_Algo::UpwardDrr_over_r(At, r, dr, coefs_r, n_coefs_r, i, j, k, 2*m-1)); // Real part
+                    Bz(i, j, k, 2*m  ) = - (-m * Ar(i, j, k, 2*m-1)/r
+                        - T_Algo::UpwardDrr_over_r(At, r, dr, coefs_r, n_coefs_r, i, j, k, 2*m  )); // Imaginary part
                 }
             }
         );

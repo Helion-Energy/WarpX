@@ -6,7 +6,7 @@
  */
 #include "FiniteDifferenceSolver.H"
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
 #   include "FiniteDifferenceAlgorithms/CylindricalYeeAlgorithm.H"
 #endif
 #include "Utils/TextMsg.H"
@@ -57,7 +57,7 @@ void FiniteDifferenceSolver::ApplySilverMuellerBoundary (
     // Ensure that we are using the cells the domain
     domain_box.enclosedCells();
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
     // Calculate relevant coefficients
     amrex::Real const cdt = PhysConst::c*dt;
     amrex::Real const cdt_over_dr = cdt*m_h_stencil_coefs_r[0];

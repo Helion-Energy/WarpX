@@ -566,7 +566,7 @@ public:
      */
     void DampFieldsInGuards (int lev, amrex::MultiFab* mf);
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
     void ApplyInverseVolumeScalingToCurrentDensity (amrex::MultiFab* Jx,
                                                     amrex::MultiFab* Jy,
                                                     amrex::MultiFab* Jz,

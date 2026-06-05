@@ -68,11 +68,12 @@ void BilinearFilter::ComputeStencils(){
 
     m_stencil_0.resize( 1u + npass_each_dir[0] );
     compute_stencil(m_stencil_0, npass_each_dir[0]);
-#if defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     m_stencil_1.resize( 1u + npass_each_dir[1] );
     compute_stencil(m_stencil_1, npass_each_dir[1]);
 #endif
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
+    // RTZ (r, theta, z) is a full AMReX-3D grid: it needs all three filter stencils
     m_stencil_2.resize( 1u + npass_each_dir[2] );
     compute_stencil(m_stencil_2, npass_each_dir[2]);
 #endif

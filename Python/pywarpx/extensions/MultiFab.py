@@ -26,6 +26,8 @@ def mesh(self, direction, include_ghosts=False):
     try:
         if libwarpx.geometry_dim == "3d":
             idir = ["x", "y", "z"].index(direction)
+        elif libwarpx.geometry_dim == "rtz":
+            idir = ["r", "theta", "z"].index(direction)
         elif libwarpx.geometry_dim == "2d":
             idir = ["x", "z"].index(direction)
         elif libwarpx.geometry_dim == "rz":

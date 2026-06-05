@@ -577,6 +577,16 @@ WarpX::ReadParameters ()
             "Lower bound of radial coordinate (prob_lo[0]) with RZ FDTD solver must be non-negative");
         }
 #endif
+#if defined(WARPX_DIM_RTZ)
+        // RTZ (3D real-space cylindrical r-theta-z) is only supported with the
+        // Ohm's-law hybrid solver at present.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC,
+            "RTZ (3D cylindrical) geometry is currently only supported with the "
+            "Ohm's-law hybrid solver (set algo.maxwell_solver = hybrid).");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(Geom(0).ProbLo(0) >= 0.,
+            "Lower bound of radial coordinate (prob_lo[0]) with RTZ must be non-negative");
+#endif
 
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         (electromagnetic_solver_id != ElectromagneticSolverAlgo::PSATD) ||
@@ -3190,7 +3200,8 @@ WarpX::CellSize (int lev)
 {
     const amrex::Geometry& gm = GetInstance().Geom(lev);
     const Real* dx = gm.CellSize();
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
+    // 3D and RTZ (r, theta, z) are full AMReX-3D grids: all three spacings are real
     return { dx[0], dx[1], dx[2] };
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
     return { dx[0], 1.0, dx[1] };
@@ -3230,7 +3241,8 @@ WarpX::LowerCorner(const Box& bx, const int lev, const amrex::Real time_shift_de
                                                    warpx.m_v_galilean[1]*time_shift,
                                                    warpx.m_v_galilean[2]*time_shift };
 
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
+    // RTZ (r, theta, z) is a full AMReX-3D grid: all three lower bounds are physical
     return { grid_min[0] + galilean_shift[0], grid_min[1] + galilean_shift[1], grid_min[2] + galilean_shift[2] };
 
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
@@ -3259,7 +3271,8 @@ WarpX::UpperCorner(const Box& bx, const int lev, const amrex::Real time_shift_de
                                                    warpx.m_v_galilean[1]*time_shift,
                                                    warpx.m_v_galilean[2]*time_shift };
 
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
+    // RTZ (r, theta, z) is a full AMReX-3D grid: all three upper bounds are physical
     return { grid_max[0] + galilean_shift[0], grid_max[1] + galilean_shift[1], grid_max[2] + galilean_shift[2] };
 
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)

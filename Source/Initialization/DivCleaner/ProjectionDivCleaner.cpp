@@ -87,7 +87,7 @@ ProjectionDivCleaner::ProjectionDivCleaner(std::string const& a_field_name, bool
     auto cell_size = WarpX::CellSize(0);
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
     CylindricalYeeAlgorithm::InitializeStencilCoefficients( cell_size,
-        m_h_stencil_coefs_x, m_h_stencil_coefs_z );
+        m_h_stencil_coefs_x, m_h_stencil_coefs_y, m_h_stencil_coefs_z );
 #elif defined(WARPX_DIM_RSPHERE)
     SphericalYeeAlgorithm::InitializeStencilCoefficients( cell_size,
         m_h_stencil_coefs_x );

@@ -32,7 +32,7 @@ NCIGodfreyFilter::NCIGodfreyFilter(godfrey_coeff_set coeff_set, amrex::Real cdto
     m_nodal_gather{nodal_gather}
 {
     // NCI Godfrey filter has fixed size, and is applied along z only.
-# if defined(WARPX_DIM_3D)
+# if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     stencil_length_each_dir = {1,1,5};
     slen = {1,1,5};
 # else
@@ -46,7 +46,7 @@ void NCIGodfreyFilter::ComputeStencils()
     using namespace warpx::nci_godfrey;
 
     // Sanity checks: filter length should be 5 in z
-#  if  defined(WARPX_DIM_3D)
+#  if  defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         slen.z==5,"ERROR: NCI filter requires 5 points in z");
 #  else
@@ -108,7 +108,7 @@ void NCIGodfreyFilter::ComputeStencils()
     // so only 1 coeff, equal to 1)
     Vector<Real> h_stencil_x(1);
     h_stencil_x[0] = 1._rt;
-#  if defined(WARPX_DIM_3D)
+#  if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     Vector<Real> h_stencil_y(1);
     h_stencil_y[0] = 1._rt;
 #  endif
@@ -116,14 +116,14 @@ void NCIGodfreyFilter::ComputeStencils()
     // Due to the way Filter::DoFilter() is written,
     // coefficient 0 has to be /2
     h_stencil_x[0] /= 2._rt;
-#  if defined(WARPX_DIM_3D)
+#  if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     h_stencil_y[0] /= 2._rt;
 #  endif
     h_stencil_z[0] /= 2._rt;
 
     m_stencil_0.resize(h_stencil_x.size());
     Gpu::copyAsync(Gpu::hostToDevice,h_stencil_x.begin(),h_stencil_x.end(),m_stencil_0.begin());
-#  if defined(WARPX_DIM_3D)
+#  if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     m_stencil_1.resize(h_stencil_y.size());
     m_stencil_2.resize(h_stencil_z.size());
     Gpu::copyAsync(Gpu::hostToDevice,h_stencil_y.begin(),h_stencil_y.end(),m_stencil_1.begin());

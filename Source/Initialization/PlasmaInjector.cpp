@@ -377,7 +377,7 @@ void PlasmaInjector::setupNFluxPerCell (amrex::ParmParse const& pp_species)
         }
 #    endif
 #endif
-#ifdef WARPX_DIM_3D
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
         if (flux_normal_axis_string == "y" || flux_normal_axis_string == "Y") {
             flux_normal_axis = 1;
         }
@@ -387,7 +387,7 @@ void PlasmaInjector::setupNFluxPerCell (amrex::ParmParse const& pp_species)
             flux_normal_axis = 2;
         }
 #endif
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
         const std::string flux_normal_axis_help = "'x', 'y', or 'z'.";
 #elif defined(WARPX_DIM_RZ)
         const std::string flux_normal_axis_help = "'r' or 'z'.";

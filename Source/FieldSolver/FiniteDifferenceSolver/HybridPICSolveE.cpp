@@ -11,7 +11,7 @@
 #include "FiniteDifferenceSolver.H"
 
 #include "EmbeddedBoundary/Enabled.H"
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
 #   include "FiniteDifferenceAlgorithms/CylindricalYeeAlgorithm.H"
 #elif defined(WARPX_DIM_RSPHERE)
 #   include "FiniteDifferenceAlgorithms/SphericalYeeAlgorithm.H"
@@ -37,7 +37,7 @@ void FiniteDifferenceSolver::CalculateCurrentAmpere (
     // Select algorithm (The choice of algorithm is a runtime option,
     // but we compile code for each algorithm, using templates)
     if (m_fdtd_algo == ElectromagneticSolverAlgo::HybridPIC) {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
         CalculateCurrentAmpereCylindrical <CylindricalYeeAlgorithm> (
             Jfield, Bfield, eb_update_E, lev
         );
@@ -75,7 +75,7 @@ void FiniteDifferenceSolver::CalculateCurrentAmpere (
 //   * \param[in] eb_update_E specifies where the plasma current should be calculated.
 //   * \param[in] lev refinement level
 //   */
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
 template<typename T_Algo>
 void FiniteDifferenceSolver::CalculateCurrentAmpereCylindrical (
     ablastr::fields::VectorField& Jfield,
@@ -123,6 +123,10 @@ void FiniteDifferenceSolver::CalculateCurrentAmpereCylindrical (
         int const n_coefs_r = static_cast<int>(m_stencil_coefs_r.size());
         Real const * const AMREX_RESTRICT coefs_z = m_stencil_coefs_z.dataPtr();
         int const n_coefs_z = static_cast<int>(m_stencil_coefs_z.size());
+#if defined(WARPX_DIM_RTZ)
+        Real const * const AMREX_RESTRICT coefs_theta = m_stencil_coefs_theta.dataPtr();
+        int const n_coefs_theta = static_cast<int>(m_stencil_coefs_theta.size());
+#endif
 
         // Extract cylindrical specific parameters
         Real const dr = m_dr;
@@ -141,8 +145,19 @@ void FiniteDifferenceSolver::CalculateCurrentAmpereCylindrical (
         amrex::ParallelFor(tjr, tjtheta, tjz,
 
             // Jr calculation
-            [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
-
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+#if defined(WARPX_DIM_RTZ)
+                // Real-space (r, theta, z): Jr = (1/mu0)[ (1/r) dBz/dtheta - dBtheta/dz ]
+                // Skip field update in the embedded boundaries
+                if (update_Jr_arr && update_Jr_arr(i, j, k) == 0) { return; }
+                // Jr is cell-centered in r, so r = rmin + (i+1/2)dr > 0 (no axis singularity)
+                Real const r = rmin + (i + 0.5_rt)*dr;
+                Jr(i, j, k, 0) = one_over_mu0 * (
+                    - T_Algo::DownwardDz(Btheta, coefs_z, n_coefs_z, i, j, k, 0)
+                    + T_Algo::DownwardDtheta(Bz, coefs_theta, n_coefs_theta, i, j, k, 0) / r
+                );
+#else
+                amrex::ignore_unused(k);
                 // Skip field update in the embedded boundaries
                 if (update_Jr_arr && update_Jr_arr(i, j, 0) == 0) { return; }
 
@@ -164,11 +179,26 @@ void FiniteDifferenceSolver::CalculateCurrentAmpereCylindrical (
                         - m * Bz(i, j, 0, 2*m-1) / r
                     ); // Imaginary part
                 }
+#endif
             },
 
             // Jtheta calculation
-            [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
-
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+#if defined(WARPX_DIM_RTZ)
+                // Real-space (r, theta, z): Jtheta = (1/mu0)[ dBr/dz - dBz/dr ] (no theta-derivative)
+                if (update_Jtheta_arr && update_Jtheta_arr(i, j, k) == 0) { return; }
+                Real const r = rmin + i*dr;  // Jtheta nodal in r
+                if (r > 0.5_rt*dr) {
+                    Jtheta(i, j, k, 0) = one_over_mu0 * (
+                        - T_Algo::DownwardDr(Bz, coefs_r, n_coefs_r, i, j, k, 0)
+                        + T_Algo::DownwardDz(Br, coefs_z, n_coefs_z, i, j, k, 0)
+                    );
+                } else {
+                    // On axis (r=0): Jtheta vanishes by symmetry for the axisymmetric part
+                    Jtheta(i, j, k, 0) = 0._rt;
+                }
+#else
+                amrex::ignore_unused(k);
                 // Skip field update in the embedded boundaries
                 if (update_Jtheta_arr && update_Jtheta_arr(i, j, 0) == 0) { return; }
 
@@ -211,11 +241,27 @@ void FiniteDifferenceSolver::CalculateCurrentAmpereCylindrical (
                         }
                     }
                 }
+#endif
             },
 
             // Jz calculation
-            [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
-
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+#if defined(WARPX_DIM_RTZ)
+                // Real-space (r, theta, z): Jz = (1/mu0)[ (1/r) d(r Btheta)/dr - (1/r) dBr/dtheta ]
+                if (update_Jz_arr && update_Jz_arr(i, j, k) == 0) { return; }
+                Real const r = rmin + i*dr;  // Jz nodal in r
+                if (r > 0.5_rt*dr) {
+                    Jz(i, j, k, 0) = one_over_mu0 * (
+                        T_Algo::DownwardDrr_over_r(Btheta, r, dr, coefs_r, n_coefs_r, i, j, k, 0)
+                        - T_Algo::DownwardDtheta(Br, coefs_theta, n_coefs_theta, i, j, k, 0) / r
+                    );
+                } else {
+                    // On axis (r=0): regularize the radial term (Btheta ~ linear in r);
+                    // the (1/r) dBr/dtheta term is dropped here as a first-order on-axis treatment.
+                    Jz(i, j, k, 0) = one_over_mu0 * 4._rt * Btheta(i, j, k, 0) / dr;
+                }
+#else
+                amrex::ignore_unused(k);
                 // Skip field update in the embedded boundaries
                 if (update_Jz_arr && update_Jz_arr(i, j, 0) == 0) { return; }
 
@@ -249,6 +295,7 @@ void FiniteDifferenceSolver::CalculateCurrentAmpereCylindrical (
                         Jz(i, j, 0, 2*m  ) = 0.;
                     }
                 }
+#endif
             }
         );
 
@@ -480,7 +527,7 @@ void FiniteDifferenceSolver::HybridPICSolveE (
     // Select algorithm (The choice of algorithm is a runtime option,
     // but we compile code for each algorithm, using templates)
     if (m_fdtd_algo == ElectromagneticSolverAlgo::HybridPIC) {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
 
         HybridPICSolveECylindrical <CylindricalYeeAlgorithm> (
             Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
@@ -514,7 +561,7 @@ void FiniteDifferenceSolver::HybridPICSolveE (
     }
 }
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
 template<typename T_Algo>
 void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     ablastr::fields::VectorField const& Efield,
@@ -622,39 +669,39 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         }
 
         // Loop over the cells and update the nodal E field
-        amrex::ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
+        amrex::ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
             // interpolate the total current to a nodal grid
-            auto const jr_interp = Interp(Jr, Jr_stag, nodal, coarsen, i, j, 0, 0);
-            auto const jtheta_interp = Interp(Jtheta, Jtheta_stag, nodal, coarsen, i, j, 0, 0);
-            auto const jz_interp = Interp(Jz, Jz_stag, nodal, coarsen, i, j, 0, 0);
+            auto const jr_interp = Interp(Jr, Jr_stag, nodal, coarsen, i, j, k, 0);
+            auto const jtheta_interp = Interp(Jtheta, Jtheta_stag, nodal, coarsen, i, j, k, 0);
+            auto const jz_interp = Interp(Jz, Jz_stag, nodal, coarsen, i, j, k, 0);
 
             // interpolate the ion current to a nodal grid
-            auto const jir_interp = Interp(Jir, Jr_stag, nodal, coarsen, i, j, 0, 0);
-            auto const jit_interp = Interp(Jit, Jtheta_stag, nodal, coarsen, i, j, 0, 0);
-            auto const jiz_interp = Interp(Jiz, Jz_stag, nodal, coarsen, i, j, 0, 0);
+            auto const jir_interp = Interp(Jir, Jr_stag, nodal, coarsen, i, j, k, 0);
+            auto const jit_interp = Interp(Jit, Jtheta_stag, nodal, coarsen, i, j, k, 0);
+            auto const jiz_interp = Interp(Jiz, Jz_stag, nodal, coarsen, i, j, k, 0);
 
             // interpolate the B field to a nodal grid
-            auto Br_interp = Interp(Br, Br_stag, nodal, coarsen, i, j, 0, 0);
-            auto Btheta_interp = Interp(Btheta, Btheta_stag, nodal, coarsen, i, j, 0, 0);
-            auto Bz_interp = Interp(Bz, Bz_stag, nodal, coarsen, i, j, 0, 0);
+            auto Br_interp = Interp(Br, Br_stag, nodal, coarsen, i, j, k, 0);
+            auto Btheta_interp = Interp(Btheta, Btheta_stag, nodal, coarsen, i, j, k, 0);
+            auto Bz_interp = Interp(Bz, Bz_stag, nodal, coarsen, i, j, k, 0);
 
             if (include_external_fields) {
-                Br_interp += Interp(Br_ext, Br_stag, nodal, coarsen, i, j, 0, 0);
-                Btheta_interp += Interp(Btheta_ext, Btheta_stag, nodal, coarsen, i, j, 0, 0);
-                Bz_interp += Interp(Bz_ext, Bz_stag, nodal, coarsen, i, j, 0, 0);
+                Br_interp += Interp(Br_ext, Br_stag, nodal, coarsen, i, j, k, 0);
+                Btheta_interp += Interp(Btheta_ext, Btheta_stag, nodal, coarsen, i, j, k, 0);
+                Bz_interp += Interp(Bz_ext, Bz_stag, nodal, coarsen, i, j, k, 0);
             }
 
             // calculate enE = (J - Ji) x B
-            enE_nodal(i, j, 0, 0) = (
+            enE_nodal(i, j, k, 0) = (
                 (jtheta_interp - jit_interp) * Bz_interp
                 - (jz_interp - jiz_interp) * Btheta_interp
             );
-            enE_nodal(i, j, 0, 1) = (
+            enE_nodal(i, j, k, 1) = (
                 (jz_interp - jiz_interp) * Br_interp
                 - (jr_interp - jir_interp) * Bz_interp
             );
-            enE_nodal(i, j, 0, 2) = (
+            enE_nodal(i, j, k, 2) = (
                 (jr_interp - jir_interp) * Btheta_interp
                 - (jtheta_interp - jit_interp) * Br_interp
             );
@@ -715,6 +762,10 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         int const n_coefs_r = static_cast<int>(m_stencil_coefs_r.size());
         Real const * const AMREX_RESTRICT coefs_z = m_stencil_coefs_z.dataPtr();
         int const n_coefs_z = static_cast<int>(m_stencil_coefs_z.size());
+#if defined(WARPX_DIM_RTZ)
+        Real const * const AMREX_RESTRICT coefs_theta = m_stencil_coefs_theta.dataPtr();
+        int const n_coefs_theta = static_cast<int>(m_stencil_coefs_theta.size());
+#endif
 
         // Extract cylindrical specific parameters
         Real const dr = m_dr;
@@ -728,30 +779,30 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         amrex::ParallelFor(ter, tet, tez,
 
             // Er calculation
-            [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
                 // Skip field update in the embedded boundaries
-                if (update_Er_arr && update_Er_arr(i, j, 0) == 0) { return; }
+                if (update_Er_arr && update_Er_arr(i, j, k) == 0) { return; }
 
                 // Interpolate to get the appropriate charge density in space
-                const Real rho_val = Interp(rho, nodal, Er_stag, coarsen, i, j, 0, 0);
+                const Real rho_val = Interp(rho, nodal, Er_stag, coarsen, i, j, k, 0);
 
                 if (rho_val < rho_floor && holmstrom_vacuum_region) {
-                    Er(i, j, 0) = 0._rt;
+                    Er(i, j, k) = 0._rt;
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
                     // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
                     const Real grad_Pe = (!solve_for_Faraday) ?
-                        T_Algo::UpwardDr(Pe, coefs_r, n_coefs_r, i, j, 0, 0)
+                        T_Algo::UpwardDr(Pe, coefs_r, n_coefs_r, i, j, k, 0)
                         : 0._rt;
 
                     // interpolate the nodal neE values to the Yee grid
-                    const auto enE_r = Interp(enE, nodal, Er_stag, coarsen, i, j, 0, 0);
+                    const auto enE_r = Interp(enE, nodal, Er_stag, coarsen, i, j, k, 0);
 
                     // safety condition since we divide by rho
                     const auto rho_val_limited = std::max(rho_val, rho_floor);
 
-                    Er(i, j, 0) = (enE_r - grad_Pe) / rho_val_limited;
+                    Er(i, j, k) = (enE_r - grad_Pe) / rho_val_limited;
                 }
 
                 // Add resistivity only if E field value is used to update B
@@ -759,70 +810,78 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     Real jtot_val = 0._rt;
                     if (resistivity_has_J_dependence) {
                         // Interpolate current to appropriate staggering to match E field
-                        const Real jr_val = Jr(i, j, 0);
-                        const Real jtheta_val = Interp(Jtheta, Jtheta_stag, Er_stag, coarsen, i, j, 0, 0);
-                        const Real jz_val = Interp(Jz, Jz_stag, Er_stag, coarsen, i, j, 0, 0);
+                        const Real jr_val = Jr(i, j, k);
+                        const Real jtheta_val = Interp(Jtheta, Jtheta_stag, Er_stag, coarsen, i, j, k, 0);
+                        const Real jz_val = Interp(Jz, Jz_stag, Er_stag, coarsen, i, j, k, 0);
                         jtot_val = std::sqrt(jr_val*jr_val + jtheta_val*jtheta_val + jz_val*jz_val);
                     }
 
-                    Er(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jr(i, j, 0);
+                    Er(i, j, k) += eta(rho_val, jtot_val, t_new) * Jr(i, j, k);
 
                     if (include_hyper_resistivity_term) {
 
                         // Interpolate B field to appropriate staggering to match E field
                         Real btot_val = 0._rt;
                         if (hyper_resistivity_has_B_dependence) {
-                            const Real br_val = Interp(Br, Br_stag, Er_stag, coarsen, i, j, 0, 0);
-                            const Real bt_val = Interp(Btheta, Btheta_stag, Er_stag, coarsen, i, j, 0, 0);
-                            const Real bz_val = Interp(Bz, Bz_stag, Er_stag, coarsen, i, j, 0, 0);
+                            const Real br_val = Interp(Br, Br_stag, Er_stag, coarsen, i, j, k, 0);
+                            const Real bt_val = Interp(Btheta, Btheta_stag, Er_stag, coarsen, i, j, k, 0);
+                            const Real bz_val = Interp(Bz, Bz_stag, Er_stag, coarsen, i, j, k, 0);
                             btot_val = std::sqrt(br_val*br_val + bt_val*bt_val + bz_val*bz_val);
                         }
 
                         // r on cell-centered point (Jr is cell-centered in r)
                         const Real r = rmin + (i + 0.5_rt)*dr;
-                        auto nabla2Jr = T_Algo::Dr_rDr_over_r(Jr, r, dr, coefs_r, n_coefs_r, i, j, 0, 0)
-                            + T_Algo::Dzz(Jr, coefs_z, n_coefs_z, i, j, 0, 0) - Jr(i, j, 0)/(r*r);
+                        auto nabla2Jr = T_Algo::Dr_rDr_over_r(Jr, r, dr, coefs_r, n_coefs_r, i, j, k, 0)
+                            + T_Algo::Dzz(Jr, coefs_z, n_coefs_z, i, j, k, 0) - Jr(i, j, k)/(r*r);
 
-                        Er(i, j, 0) -= eta_h(rho_val, btot_val) * nabla2Jr;
+                        Er(i, j, k) -= eta_h(rho_val, btot_val) * nabla2Jr;
                     }
                 }
 
                 if (include_external_fields && (rho_val >= rho_floor)) {
-                    Er(i, j, 0) -= Er_ext(i, j, 0);
+                    Er(i, j, k) -= Er_ext(i, j, k);
                 }
             },
 
             // Etheta calculation
-            [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
                 // Skip field update in the embedded boundaries
-                if (update_Etheta_arr && update_Etheta_arr(i, j, 0) == 0) { return; }
+                if (update_Etheta_arr && update_Etheta_arr(i, j, k) == 0) { return; }
 
                 // r on a nodal grid (Etheta is nodal in r)
                 Real const r = rmin + i*dr;
                 // Mode m=0: // Ensure that Etheta remains 0 on axis
                 if (r < 0.5_rt*dr) {
-                    Etheta(i, j, 0, 0) = 0.;
+                    Etheta(i, j, k, 0) = 0.;
                     return;
                 }
 
                 // Interpolate to get the appropriate charge density in space
-                const Real rho_val = Interp(rho, nodal, Etheta_stag, coarsen, i, j, 0, 0);
+                const Real rho_val = Interp(rho, nodal, Etheta_stag, coarsen, i, j, k, 0);
 
                 if (rho_val < rho_floor && holmstrom_vacuum_region) {
-                    Etheta(i, j, 0) = 0._rt;
+                    Etheta(i, j, k) = 0._rt;
                 } else {
                     // Get the gradient of the electron pressure
+#if defined(WARPX_DIM_RTZ)
+                    // theta-component of grad(Pe) = (1/r) dPe/dtheta (longitudinal part,
+                    // included only when not solving for Faraday; vanishes for theta-uniform Pe)
+                    const Real grad_Pe = (!solve_for_Faraday) ?
+                        T_Algo::UpwardDtheta(Pe, coefs_theta, n_coefs_theta, i, j, k, 0) / r
+                        : 0._rt;
+#else
                     // -> d/dt = 0 for m = 0
                     const auto grad_Pe = 0.0_rt;
+#endif
 
                     // interpolate the nodal neE values to the Yee grid
-                    const auto enE_t = Interp(enE, nodal, Etheta_stag, coarsen, i, j, 0, 1);
+                    const auto enE_t = Interp(enE, nodal, Etheta_stag, coarsen, i, j, k, 1);
 
                     // safety condition since we divide by rho
                     const auto rho_val_limited = std::max(rho_val, rho_floor);
 
-                    Etheta(i, j, 0) = (enE_t - grad_Pe) / rho_val_limited;
+                    Etheta(i, j, k) = (enE_t - grad_Pe) / rho_val_limited;
                 }
 
                 // Add resistivity only if E field value is used to update B
@@ -830,22 +889,22 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     Real jtot_val = 0._rt;
                     if(resistivity_has_J_dependence) {
                         // Interpolate current to appropriate staggering to match E field
-                        const Real jr_val = Interp(Jr, Jr_stag, Etheta_stag, coarsen, i, j, 0, 0);
-                        const Real jtheta_val = Jtheta(i, j, 0);
-                        const Real jz_val = Interp(Jz, Jz_stag, Etheta_stag, coarsen, i, j, 0, 0);
+                        const Real jr_val = Interp(Jr, Jr_stag, Etheta_stag, coarsen, i, j, k, 0);
+                        const Real jtheta_val = Jtheta(i, j, k);
+                        const Real jz_val = Interp(Jz, Jz_stag, Etheta_stag, coarsen, i, j, k, 0);
                         jtot_val = std::sqrt(jr_val*jr_val + jtheta_val*jtheta_val + jz_val*jz_val);
                     }
 
-                    Etheta(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jtheta(i, j, 0);
+                    Etheta(i, j, k) += eta(rho_val, jtot_val, t_new) * Jtheta(i, j, k);
 
                     if (include_hyper_resistivity_term) {
 
                         // Interpolate B field to appropriate staggering to match E field
                         Real btot_val = 0._rt;
                         if (hyper_resistivity_has_B_dependence) {
-                            const Real br_val = Interp(Br, Br_stag, Etheta_stag, coarsen, i, j, 0, 0);
-                            const Real bt_val = Interp(Btheta, Btheta_stag, Etheta_stag, coarsen, i, j, 0, 0);
-                            const Real bz_val = Interp(Bz, Bz_stag, Etheta_stag, coarsen, i, j, 0, 0);
+                            const Real br_val = Interp(Br, Br_stag, Etheta_stag, coarsen, i, j, k, 0);
+                            const Real bt_val = Interp(Btheta, Btheta_stag, Etheta_stag, coarsen, i, j, k, 0);
+                            const Real bz_val = Interp(Bz, Bz_stag, Etheta_stag, coarsen, i, j, k, 0);
                             btot_val = std::sqrt(br_val*br_val + bt_val*bt_val + bz_val*bz_val);
                         }
 
@@ -853,44 +912,44 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         // and ensure that Etheta remains 0 on axis for m=0 mode
                         auto nabla2Jtheta = 0.0_rt;
                         if (r > 0.0_rt) {
-                            nabla2Jtheta = T_Algo::Dr_rDr_over_r(Jtheta, r, dr, coefs_r, n_coefs_r, i, j, 0, 0)
-                                + T_Algo::Dzz(Jtheta, coefs_z, n_coefs_z, i, j, 0, 0) - Jtheta(i, j, 0)/(r*r);
+                            nabla2Jtheta = T_Algo::Dr_rDr_over_r(Jtheta, r, dr, coefs_r, n_coefs_r, i, j, k, 0)
+                                + T_Algo::Dzz(Jtheta, coefs_z, n_coefs_z, i, j, k, 0) - Jtheta(i, j, k)/(r*r);
                         }
 
-                        Etheta(i, j, 0) -= eta_h(rho_val, btot_val) * nabla2Jtheta;
+                        Etheta(i, j, k) -= eta_h(rho_val, btot_val) * nabla2Jtheta;
                     }
                 }
 
                 if (include_external_fields && (rho_val >= rho_floor)) {
-                    Etheta(i, j, 0) -= Etheta_ext(i, j, 0);
+                    Etheta(i, j, k) -= Etheta_ext(i, j, k);
                 }
             },
 
             // Ez calculation
-            [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
                 // Skip field update in the embedded boundaries
-                if (update_Ez_arr && update_Ez_arr(i, j, 0) == 0) { return; }
+                if (update_Ez_arr && update_Ez_arr(i, j, k) == 0) { return; }
 
                 // Interpolate to get the appropriate charge density in space
-                const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, 0, 0);
+                const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, k, 0);
 
                 if (rho_val < rho_floor && holmstrom_vacuum_region) {
-                    Ez(i, j, 0) = 0._rt;
+                    Ez(i, j, k) = 0._rt;
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
                     // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
                     const Real grad_Pe = (!solve_for_Faraday) ?
-                        T_Algo::UpwardDz(Pe, coefs_z, n_coefs_z, i, j, 0, 0)
+                        T_Algo::UpwardDz(Pe, coefs_z, n_coefs_z, i, j, k, 0)
                         : 0._rt;
 
                     // interpolate the nodal neE values to the Yee grid
-                    const auto enE_z = Interp(enE, nodal, Ez_stag, coarsen, i, j, 0, 2);
+                    const auto enE_z = Interp(enE, nodal, Ez_stag, coarsen, i, j, k, 2);
 
                     // safety condition since we divide by rho
                     const auto rho_val_limited = std::max(rho_val, rho_floor);
 
-                    Ez(i, j, 0) = (enE_z - grad_Pe) / rho_val_limited;
+                    Ez(i, j, k) = (enE_z - grad_Pe) / rho_val_limited;
                 }
 
                 // Add resistivity only if E field value is used to update B
@@ -898,44 +957,44 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     Real jtot_val = 0._rt;
                     if (resistivity_has_J_dependence) {
                         // Interpolate current to appropriate staggering to match E field
-                        const Real jr_val = Interp(Jr, Jr_stag, Ez_stag, coarsen, i, j, 0, 0);
-                        const Real jtheta_val = Interp(Jtheta, Jtheta_stag, Ez_stag, coarsen, i, j, 0, 0);
-                        const Real jz_val = Jz(i, j, 0);
+                        const Real jr_val = Interp(Jr, Jr_stag, Ez_stag, coarsen, i, j, k, 0);
+                        const Real jtheta_val = Interp(Jtheta, Jtheta_stag, Ez_stag, coarsen, i, j, k, 0);
+                        const Real jz_val = Jz(i, j, k);
                         jtot_val = std::sqrt(jr_val*jr_val + jtheta_val*jtheta_val + jz_val*jz_val);
                     }
 
-                    Ez(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jz(i, j, 0);
+                    Ez(i, j, k) += eta(rho_val, jtot_val, t_new) * Jz(i, j, k);
 
                     if (include_hyper_resistivity_term) {
 
                         // Interpolate B field to appropriate staggering to match E field
                         Real btot_val = 0._rt;
                         if (hyper_resistivity_has_B_dependence) {
-                            const Real br_val = Interp(Br, Br_stag, Ez_stag, coarsen, i, j, 0, 0);
-                            const Real bt_val = Interp(Btheta, Btheta_stag, Ez_stag, coarsen, i, j, 0, 0);
-                            const Real bz_val = Interp(Bz, Bz_stag, Ez_stag, coarsen, i, j, 0, 0);
+                            const Real br_val = Interp(Br, Br_stag, Ez_stag, coarsen, i, j, k, 0);
+                            const Real bt_val = Interp(Btheta, Btheta_stag, Ez_stag, coarsen, i, j, k, 0);
+                            const Real bz_val = Interp(Bz, Bz_stag, Ez_stag, coarsen, i, j, k, 0);
                             btot_val = std::sqrt(br_val*br_val + bt_val*bt_val + bz_val*bz_val);
                         }
 
                         // r on nodal point (Jz is nodal in r)
                         const Real r = rmin + i*dr;
 
-                        auto nabla2Jz = T_Algo::Dzz(Jz, coefs_z, n_coefs_z, i, j, 0, 0);
+                        auto nabla2Jz = T_Algo::Dzz(Jz, coefs_z, n_coefs_z, i, j, k, 0);
                         if (r > 0.5_rt*dr) {
-                            nabla2Jz += T_Algo::Dr_rDr_over_r(Jz, r, dr, coefs_r, n_coefs_r, i, j, 0, 0);
+                            nabla2Jz += T_Algo::Dr_rDr_over_r(Jz, r, dr, coefs_r, n_coefs_r, i, j, k, 0);
                         } else {
                             // Special handling of the hyper-resistivity term on axis to avoid division by zero
                             // and ensure that Jz remains well-behaved on axis for m=0 mode
                             // This works since there is a symmetry condition on axis that cancels the geometric 1/r term
-                            nabla2Jz += T_Algo::Drr(Jz, coefs_r, n_coefs_r, i, j, 0, 0);
+                            nabla2Jz += T_Algo::Drr(Jz, coefs_r, n_coefs_r, i, j, k, 0);
                         }
 
-                        Ez(i, j, 0) -= eta_h(rho_val, btot_val) * nabla2Jz;
+                        Ez(i, j, k) -= eta_h(rho_val, btot_val) * nabla2Jz;
                     }
                 }
 
                 if (include_external_fields && (rho_val >= rho_floor)) {
-                    Ez(i, j, 0) -= Ez_ext(i, j, 0);
+                    Ez(i, j, k) -= Ez_ext(i, j, k);
                 }
             }
         );

@@ -216,6 +216,7 @@ class ForceFreeSheetReconnection(object):
             plasma_resistivity=self.eta * self.eta0,
             substeps=self.substeps,
         )
+        self.solver.spatial_order = 4
         simulation.solver = self.solver
 
         B_ext = picmi.AnalyticInitialField(

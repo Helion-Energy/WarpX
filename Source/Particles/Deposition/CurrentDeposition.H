@@ -72,8 +72,8 @@ void doDepositionShapeNKernel([[maybe_unused]] const amrex::ParticleReal xp,
     constexpr int CELL = amrex::IndexType::CELL;
 
     // wqx, wqy wqz are particle current in each direction
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-    // In RZ and RCYLINDER, wqx is actually wqr, and wqy is wqtheta
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
+    // In RZ, RCYLINDER and RTZ, wqx is actually wqr, and wqy is wqtheta
     // Convert to cylindrical at the mid point
     const amrex::Real xpmid = xp + relative_time*vx;
     const amrex::Real ypmid = yp + relative_time*vy;
@@ -114,7 +114,7 @@ void doDepositionShapeNKernel([[maybe_unused]] const amrex::ParticleReal xp,
     // Get particle position after 1/2 push back in position
     // Keep these double to avoid bug in single precision
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
     const double xmid = (rpmid - xyzmin.x)*dinv.x;
 #else
     const double xmid = ((xp - xyzmin.x) + relative_time*vx)*dinv.x;
@@ -151,10 +151,18 @@ void doDepositionShapeNKernel([[maybe_unused]] const amrex::ParticleReal xp,
     int const j_jz = ((jz_type[0] == NODE) ? j_node : j_cell);
 #endif //!defined(WARPX_DIM_1D_Z)
 
-#if defined(WARPX_DIM_3D)
-    // y direction
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
+    // y direction (azimuthal theta direction in RTZ)
     // Keep these double to avoid bug in single precision
+#if defined(WARPX_DIM_RTZ)
+    // theta of the mid-point, wrapped into [thetamin, thetamin + 2*pi); thetamin = xyzmin.y
+    constexpr double twopi = 6.2831853071795864769252867665590;
+    double theta_mid = std::atan2(ypmid, xpmid);
+    theta_mid -= twopi*std::floor((theta_mid - xyzmin.y) / twopi);
+    const double ymid = (theta_mid - xyzmin.y)*dinv.y;
+#else
     const double ymid = ((yp - xyzmin.y) + relative_time*vy)*dinv.y;
+#endif
     double sy_node[depos_order + 1] = {0.};
     double sy_cell[depos_order + 1] = {0.};
     int k_node = 0;
@@ -255,6 +263,43 @@ void doDepositionShapeNKernel([[maybe_unused]] const amrex::ParticleReal xp,
         }
     }
 #elif defined(WARPX_DIM_3D)
+    for (int iz=0; iz<=depos_order; iz++){
+        for (int iy=0; iy<=depos_order; iy++){
+            for (int ix=0; ix<=depos_order; ix++){
+                amrex::Gpu::Atomic::AddNoRet(
+                    &jx_arr(lo.x+j_jx+ix, lo.y+k_jx+iy, lo.z+l_jx+iz),
+                    sx_jx[ix]*sy_jx[iy]*sz_jx[iz]*wqx);
+                amrex::Gpu::Atomic::AddNoRet(
+                    &jy_arr(lo.x+j_jy+ix, lo.y+k_jy+iy, lo.z+l_jy+iz),
+                    sx_jy[ix]*sy_jy[iy]*sz_jy[iz]*wqy);
+                amrex::Gpu::Atomic::AddNoRet(
+                    &jz_arr(lo.x+j_jz+ix, lo.y+k_jz+iy, lo.z+l_jz+iz),
+                    sx_jz[ix]*sy_jz[iy]*sz_jz[iz]*wqz);
+            }
+        }
+    }
+#elif defined(WARPX_DIM_RTZ)
+    // Real-space cylindrical (r, theta, z): deposit the cylindrical current
+    // components (wqx=wqr, wqy=wqtheta, wqz) on the 3D (r, theta, z) grid with
+    // the same triple-loop stencil as 3D Cartesian (theta is a real grid
+    // direction, so there is no azimuthal-mode sum). The 1/r radial volume
+    // factor is applied afterwards by ApplyInverseVolumeScalingToCurrentDensity.
+    // TEMP RTZ DEBUG: detect non-finite / wildly-out-of-range deposit indices.
+    {
+        const bool finite = (xmid==xmid) && (ymid==ymid) && (zmid==zmid); // false if NaN
+        const bool bad = !finite
+            || j_jx < -100000 || j_jx > 100000
+            || k_jx < -100000 || k_jx > 100000
+            || l_jx < -100000 || l_jx > 100000;
+        if (bad) {
+            AMREX_DEVICE_PRINTF(
+                "RTZ-DEP-BAD xp=%g yp=%g zp=%g vx=%g vy=%g vz=%g rt=%g rpmid=%g thmid=%g xmid=%g ymid=%g zmid=%g j=%d k=%d l=%d lo=(%d,%d,%d)\n",
+                (double)xp,(double)yp,(double)zp,(double)vx,(double)vy,(double)vz,(double)relative_time,
+                (double)rpmid,(double)theta_mid,(double)xmid,(double)ymid,(double)zmid,
+                j_jx,k_jx,l_jx, lo.x,lo.y,lo.z);
+            return; // skip the bad atomicAdd so the run survives for diagnosis
+        }
+    }
     for (int iz=0; iz<=depos_order; iz++){
         for (int iy=0; iy<=depos_order; iy++){
             for (int ix=0; ix<=depos_order; ix++){
@@ -558,6 +603,15 @@ void doDepositionSharedShapeN (const GetParticlePosition<PIdx>& GetPosition,
             IntVect iv = IntVect(int( amrex::Math::floor((xp-plo[0]) * dxiarr[0]) ),
                                  int( amrex::Math::floor((yp-plo[1]) * dxiarr[1]) ),
                                  int( amrex::Math::floor((zp-plo[2]) * dxiarr[2]) ));
+#elif defined(WARPX_DIM_RTZ)
+            // Bin by the cylindrical (r, theta, z) cell of the particle
+            const amrex::Real rp_bin = std::sqrt(xp*xp + yp*yp);
+            constexpr amrex::Real twopi_bin = amrex::Real(6.2831853071795864769252867665590);
+            amrex::Real theta_bin = std::atan2(yp, xp);
+            theta_bin -= twopi_bin*std::floor((theta_bin - plo[1]) / twopi_bin);
+            IntVect iv = IntVect(int( amrex::Math::floor((rp_bin   -plo[0]) * dxiarr[0]) ),
+                                 int( amrex::Math::floor((theta_bin-plo[1]) * dxiarr[1]) ),
+                                 int( amrex::Math::floor((zp       -plo[2]) * dxiarr[2]) ));
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
             IntVect iv = IntVect(int( amrex::Math::floor((xp-plo[0]) * dxiarr[0]) ),
                                  int( amrex::Math::floor((zp-plo[1]) * dxiarr[1]) ));
@@ -1139,6 +1193,17 @@ void doChargeConservingDepositionShapeNImplicit ([[maybe_unused]]const amrex::Pa
                                                  const amrex::Real q,
                                                  [[maybe_unused]] const int n_rz_azimuthal_modes)
 {
+#if defined(WARPX_DIM_RTZ)
+    // Charge-conserving implicit deposition is not used by the Ohm's-law hybrid
+    // solver (the only solver supported in RTZ), which uses direct deposition.
+    amrex::ignore_unused(xp_n, yp_n, zp_n, GetPosition, wp, uxp_n, uyp_n, uzp_n,
+                         uxp_nph, uyp_nph, uzp_nph, ion_lev, Jx_arr, Jy_arr, Jz_arr,
+                         np_to_deposit, dt, dinv, xyzmin, domain_double, do_cropping,
+                         lo, q, n_rz_azimuthal_modes);
+    WARPX_ABORT_WITH_MESSAGE(
+        "Charge-conserving implicit current deposition is not supported in RTZ geometry "
+        "(RTZ uses direct current deposition).");
+#else
     using namespace amrex;
 
     // Whether ion_lev is a null pointer (do_ionization=0) or a real pointer
@@ -1470,6 +1535,7 @@ void doChargeConservingDepositionShapeNImplicit ([[maybe_unused]]const amrex::Pa
 #endif
         }
     );
+#endif // !defined(WARPX_DIM_RTZ) (RTZ uses direct deposition; this body is stubbed above)
 }
 
 /**
@@ -1577,6 +1643,14 @@ void VillasenorDepositionShapeNKernel ([[maybe_unused]] amrex::ParticleReal cons
     amrex::Real const vy = uyp_mid*gaminv;
 #elif defined(WARPX_DIM_1D_Z)
     amrex::Real const vx = uxp_mid*gaminv;
+    amrex::Real const vy = uyp_mid*gaminv;
+#elif defined(WARPX_DIM_RTZ)
+    // Villasenor charge-conserving deposition is not used by the RTZ hybrid solver
+    // (which uses direct deposition); this is compile-only dead code. z_new/z_old/vz
+    // come from the !RCYLINDER&&!RSPHERE block below; the 3D-only dyp/crop are skipped.
+    double x_new = (xp_new - xyzmin.x)*dinv.x;
+    double const x_old = (xp_old - xyzmin.x)*dinv.x;
+    amrex::Real const vx = (xp_new - xp_old)/dt;
     amrex::Real const vy = uyp_mid*gaminv;
 #elif defined(WARPX_DIM_3D)
     // Keep these double to avoid bug in single precision
@@ -2410,14 +2484,14 @@ void doVayDepositionShapeN (const GetParticlePosition<PIdx>& GetPosition,
     WARPX_ABORT_WITH_MESSAGE("Vay deposition not implemented in RZ geometry");
 #endif
 
-#if defined(WARPX_DIM_1D_Z) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_1D_Z) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
     amrex::ignore_unused(GetPosition,
         wp, uxp, uyp, uzp, ion_lev, Dx_fab, Dy_fab, Dz_fab,
         np_to_deposit, dt, relative_time, dinv, xyzmin, lo, q);
-    WARPX_ABORT_WITH_MESSAGE("Vay deposition not implemented in 1D geometry");
+    WARPX_ABORT_WITH_MESSAGE("Vay deposition not implemented in 1D/RTZ geometry (RTZ uses direct deposition)");
 #endif
 
-#if !(defined WARPX_DIM_RZ || defined WARPX_DIM_1D_Z || defined WARPX_DIM_RCYLINDER || defined WARPX_DIM_RSPHERE)
+#if !(defined WARPX_DIM_RZ || defined WARPX_DIM_1D_Z || defined WARPX_DIM_RCYLINDER || defined WARPX_DIM_RSPHERE || defined WARPX_DIM_RTZ)
 
     // If ion_lev is a null pointer, then do_ionization=0, else do_ionization=1
     const bool do_ionization = ion_lev;

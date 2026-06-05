@@ -22,3 +22,14 @@ add_warpx_test(
     OFF  # dependency
 )
 label_warpx_test(test_rz_ohm_solver_cylinder_compression_picmi slow)
+
+add_warpx_test(
+    test_rtz_ohm_solver_cylinder_compression_picmi  # name
+    RTZ  # dims
+    2  # nprocs
+    "inputs_test_rtz_ohm_solver_cylinder_compression_picmi.py --test"  # inputs
+    OFF  # analysis
+    "analysis_default_regression.py --path diags/diag1000020 --rtol 1e-6"  # checksum
+    OFF  # dependency
+)
+label_warpx_test(test_rtz_ohm_solver_cylinder_compression_picmi slow)

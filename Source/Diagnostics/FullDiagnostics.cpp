@@ -848,7 +848,7 @@ FullDiagnostics::InitializeFieldFunctors (int lev)
 
     using ablastr::fields::Direction;
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
     std::vector<std::string> field_names = {"r", "t", "z"};
 #elif defined(WARPX_DIM_RSPHERE)
     std::vector<std::string> field_names = {"r", "t", "p"};
@@ -970,7 +970,8 @@ FullDiagnostics::MovingWindowAndGalileanDomainShift (int step)
     const amrex::Real* current_lo = m_geom_output[0][0].ProbLo();
     const amrex::Real* current_hi = m_geom_output[0][0].ProbHi();
 
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
+    // RTZ (r, theta, z) is a full AMReX-3D grid: shift all three axes
     for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
         new_lo[idim] = current_lo[idim] + warpx.m_galilean_shift[idim];
         new_hi[idim] = current_hi[idim] + warpx.m_galilean_shift[idim];

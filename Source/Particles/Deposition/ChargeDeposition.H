@@ -83,7 +83,7 @@ void doChargeDepositionShapeN (const GetParticlePosition<PIdx>& GetPosition,
             const amrex::Real sintheta = (rp > 0._rt ? yp/rp : 0._rt);
             const Complex xy0 = Complex{costheta, sintheta};
             const amrex::Real x = (rp - xyzmin.x)*dinv.x;
-#elif defined(WARPX_DIM_RCYLINDER)
+#elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
             const amrex::Real rp = std::sqrt(xp*xp + yp*yp);
             const amrex::Real x = (rp - xyzmin.x)*dinv.x;
 #elif defined(WARPX_DIM_RSPHERE)
@@ -103,9 +103,17 @@ void doChargeDepositionShapeN (const GetParticlePosition<PIdx>& GetPosition,
                 i = compute_shape_factor(sx, x - 0.5_rt);
             }
 #endif // !defined(WARPX_DIM_1D_Z)
-#if defined(WARPX_DIM_3D)
-            // y direction
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
+            // y direction (azimuthal theta direction in RTZ)
+#if defined(WARPX_DIM_RTZ)
+            // theta = atan2(y, x), wrapped into [thetamin, thetamin + 2*pi); thetamin = xyzmin.y
+            constexpr amrex::Real twopi = amrex::Real(6.2831853071795864769252867665590);
+            amrex::Real theta_p = std::atan2(yp, xp);
+            theta_p -= twopi*std::floor((theta_p - xyzmin.y) / twopi);
+            const amrex::Real y = (theta_p - xyzmin.y)*dinv.y;
+#else
             const amrex::Real y = (yp - xyzmin.y)*dinv.y;
+#endif
             amrex::Real sy[depos_order + 1] = {0._rt};
             int j = 0;
             if (rho_type[1] == NODE) {
@@ -156,7 +164,10 @@ void doChargeDepositionShapeN (const GetParticlePosition<PIdx>& GetPosition,
 #endif
                 }
             }
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
+            // RTZ: real-space (r, theta, z) grid; same triple-loop stencil as 3D
+            // (no azimuthal-mode sum). The 1/r radial volume factor is applied
+            // afterwards by ApplyInverseVolumeScalingToChargeDensity.
             for (int iz=0; iz<=depos_order; iz++){
                 for (int iy=0; iy<=depos_order; iy++){
                     for (int ix=0; ix<=depos_order; ix++){
@@ -283,6 +294,15 @@ void doChargeDepositionSharedShapeN (const GetParticlePosition<PIdx>& GetPositio
           IntVect iv = IntVect(int(amrex::Math::floor((xp-plo[0])*dinv.x)),
                                int(amrex::Math::floor((yp-plo[1])*dinv.y)),
                                int(amrex::Math::floor((zp-plo[2])*dinv.z)));
+#elif defined(WARPX_DIM_RTZ)
+          // Bin by the cylindrical (r, theta, z) cell of the particle
+          const amrex::Real rp_bin = std::sqrt(xp*xp + yp*yp);
+          constexpr amrex::Real twopi_bin = amrex::Real(6.2831853071795864769252867665590);
+          amrex::Real theta_bin = std::atan2(yp, xp);
+          theta_bin -= twopi_bin*std::floor((theta_bin - plo[1]) / twopi_bin);
+          IntVect iv = IntVect(int(amrex::Math::floor((rp_bin   -plo[0])*dinv.x)),
+                               int(amrex::Math::floor((theta_bin-plo[1])*dinv.y)),
+                               int(amrex::Math::floor((zp       -plo[2])*dinv.z)));
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
           IntVect iv = IntVect(int(amrex::Math::floor((xp-plo[0])*dinv.x)),
                                int(amrex::Math::floor((zp-plo[1])*dinv.z)));
@@ -347,7 +367,7 @@ void doChargeDepositionSharedShapeN (const GetParticlePosition<PIdx>& GetPositio
             }
             const Complex xy0 = Complex{costheta, sintheta};
             const amrex::Real x = (rp - xyzmin.x)*dinv.x;
-#elif defined(WARPX_DIM_RCYLINDER)
+#elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
             const amrex::Real rp = std::sqrt(xp*xp + yp*yp);
             const amrex::Real x = (rp - xyzmin.x)*dinv.x;
 #elif defined(WARPX_DIM_RSPHERE)
@@ -367,9 +387,17 @@ void doChargeDepositionSharedShapeN (const GetParticlePosition<PIdx>& GetPositio
                 i = compute_shape_factor(sx, x - 0.5_rt);
             }
 #endif //defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_3D)
-#if defined(WARPX_DIM_3D)
-            // y direction
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
+            // y direction (azimuthal theta direction in RTZ)
+#if defined(WARPX_DIM_RTZ)
+            // theta = atan2(y, x), wrapped into [thetamin, thetamin + 2*pi); thetamin = xyzmin.y
+            constexpr amrex::Real twopi = amrex::Real(6.2831853071795864769252867665590);
+            amrex::Real theta_p = std::atan2(yp, xp);
+            theta_p -= twopi*std::floor((theta_p - xyzmin.y) / twopi);
+            const amrex::Real y = (theta_p - xyzmin.y)*dinv.y;
+#else
             const amrex::Real y = (yp - xyzmin.y)*dinv.y;
+#endif
             amrex::Real sy[depos_order + 1] = {0._rt};
             int j = 0;
             if (rho_type[1] == NODE) {
@@ -420,7 +448,8 @@ void doChargeDepositionSharedShapeN (const GetParticlePosition<PIdx>& GetPositio
 #endif
                 }
             }
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
+            // RTZ: real-space (r, theta, z) grid; same triple-loop stencil as 3D
             for (int iz=0; iz<=depos_order; iz++){
                 for (int iy=0; iy<=depos_order; iy++){
                     for (int ix=0; ix<=depos_order; ix++){

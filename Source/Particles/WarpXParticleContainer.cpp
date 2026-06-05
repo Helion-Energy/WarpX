@@ -144,7 +144,7 @@ WarpXParticleContainer::WarpXParticleContainer (AmrCore* amr_core, int ispecies)
 #ifndef WARPX_DIM_1D_Z
     m_boundary_conditions.SetBoundsX(WarpX::particle_boundary_lo[0], WarpX::particle_boundary_hi[0]);
 #endif
-#ifdef WARPX_DIM_3D
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     m_boundary_conditions.SetBoundsY(WarpX::particle_boundary_lo[1], WarpX::particle_boundary_hi[1]);
     m_boundary_conditions.SetBoundsZ(WarpX::particle_boundary_lo[2], WarpX::particle_boundary_hi[2]);
 #elif WARPX_DIM_XZ || WARPX_DIM_RZ
@@ -261,7 +261,7 @@ WarpXParticleContainer::AddNParticles (int /*lev*/, long n,
 
     if (np > 0)
     {
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
         pinned_tile.push_back_real(PIdx::x, x.data() + ibegin, x.data() + iend);
         pinned_tile.push_back_real(PIdx::y, y.data() + ibegin, y.data() + iend);
         pinned_tile.push_back_real(PIdx::z, z.data() + ibegin, z.data() + iend);
@@ -426,7 +426,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
 #elif   defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
     const amrex::IntVect shape_extent = amrex::IntVect(static_cast<int>(WarpX::nox/2),
                                                        static_cast<int>(WarpX::noz/2));
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     const amrex::IntVect shape_extent = amrex::IntVect(static_cast<int>(WarpX::nox/2),
                                                        static_cast<int>(WarpX::noy/2),
                                                        static_cast<int>(WarpX::noz/2));
@@ -700,7 +700,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
 #else
                 const ParticleReal* xp_n_data = nullptr;
 #endif
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
                 auto& yp_n = pti.GetAttribs("y_n");
                 const ParticleReal* yp_n_data = yp_n.dataPtr() + offset;
 #else
@@ -757,7 +757,7 @@ WarpXParticleContainer::DepositCurrent (WarpXParIter& pti,
 #else
                 const ParticleReal* xp_n_data = nullptr;
 #endif
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
                 auto& yp_n = pti.GetAttribs("y_n");
                 const ParticleReal* yp_n_data = yp_n.dataPtr() + offset;
 #else
@@ -995,7 +995,7 @@ WarpXParticleContainer::DepositMassMatrices (WarpXParIter& pti, const RealVector
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
     const amrex::IntVect shape_extent = amrex::IntVect(static_cast<int>(WarpX::nox/2),
                                                        static_cast<int>(WarpX::noz/2));
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     const amrex::IntVect shape_extent = amrex::IntVect(static_cast<int>(WarpX::nox/2),
                                                        static_cast<int>(WarpX::noy/2),
                                                        static_cast<int>(WarpX::noz/2));
@@ -1173,7 +1173,7 @@ WarpXParticleContainer::DepositMassMatrices (WarpXParIter& pti, const RealVector
 #else
         const ParticleReal* xp_n_data = nullptr;
 #endif
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
         auto& yp_n = pti.GetAttribs("y_n");
         const ParticleReal* yp_n_data = yp_n.dataPtr() + offset;
 #else
@@ -1536,7 +1536,7 @@ WarpXParticleContainer::DepositCharge (WarpXParIter& pti, RealVector const& wp,
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
         const amrex::IntVect shape_extent = amrex::IntVect(static_cast<int>(WarpX::nox/2+1),
                                                            static_cast<int>(WarpX::noz/2+1));
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
         const amrex::IntVect shape_extent = amrex::IntVect(static_cast<int>(WarpX::nox/2+1),
                                                            static_cast<int>(WarpX::noy/2+1),
                                                            static_cast<int>(WarpX::noz/2+1));
@@ -2645,7 +2645,7 @@ WarpXParticleContainer::ApplyBoundaryConditions (){
             gridmin.x = Geom(lev).ProbLo(0);
             gridmax.x = Geom(lev).ProbHi(0);
 #endif
-#ifdef WARPX_DIM_3D
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
             gridmin.y = Geom(lev).ProbLo(1);
             gridmax.y = Geom(lev).ProbHi(1);
 #endif
@@ -2723,7 +2723,7 @@ WarpXParticleContainer::FinishImplicitParticleUpdate (
 #if !defined(WARPX_DIM_1D_Z)
         amrex::ParticleReal* x_n = pti.GetAttribs("x_n").dataPtr();
 #endif
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
         amrex::ParticleReal* y_n = pti.GetAttribs("y_n").dataPtr();
 #endif
 #if !defined(WARPX_DIM_RCYLINDER)
@@ -2744,7 +2744,7 @@ WarpXParticleContainer::FinishImplicitParticleUpdate (
 #if !defined(WARPX_DIM_1D_Z)
             xp = 2._rt*xp - x_n[ip];
 #endif
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
             yp = 2._rt*yp - y_n[ip];
 #endif
 #if !defined(WARPX_DIM_RCYLINDER)

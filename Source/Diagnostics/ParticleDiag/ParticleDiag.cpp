@@ -36,8 +36,8 @@ ParticleDiag::ParticleDiag (
         bool contains_positions = false;
         if (variables[0] != "none"){
             for (auto& var : variables){
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
-                // we reconstruct to Cartesian x,y,z for RZ particle output
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
+                // map x,y to the stored cylindrical position attributes (z stays z in RTZ)
                 if (var == "x") { var = "r"; }
                 if (var == "y") { var = "theta"; }
 #endif

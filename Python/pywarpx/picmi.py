@@ -1517,6 +1517,34 @@ class Cartesian3DGrid(picmistandard.PICMI_Cartesian3DGrid):
             pywarpx.amr.max_level = 0
 
 
+class CylindricalGrid3D(Cartesian3DGrid):
+    """3D real-space cylindrical (r, theta, z) grid (compiled with WarpX_DIMS=RTZ).
+
+    This is a full 3D AMReX grid whose three axes are the cylindrical coordinates
+    (r, theta, z). Unlike :py:class:`CylindricalGrid` (RZ), theta is a *real-space*
+    discretized coordinate, **not** an azimuthal-mode (Fourier) decomposition. It is
+    currently only supported with the Ohm's-law hybrid solver (HybridPICSolver).
+
+    The grid is configured exactly like :py:class:`Cartesian3DGrid`, with the three
+    axes interpreted as (r, theta, z) i.e. x -> r, y -> theta, z -> z. So
+    ``number_of_cells = [NR, Ntheta, NZ]`` and ``lower_bound``/``upper_bound`` give the
+    (r, theta, z) extents, and all ``warpx_*_x/y/z`` options map to (r, theta, z).
+
+    For a full 2*pi domain, use ``theta`` in ``[-pi, pi)`` with periodic boundary
+    conditions on the theta (second) axis; sub-2*pi wedges are also supported with
+    periodic or symmetry boundary conditions on the theta faces. The lower radial
+    bound must be non-negative (the axis r = 0 is supported).
+
+    See `Input Parameters <https://warpx.readthedocs.io/en/latest/usage/parameters.html>`__ for more information.
+    """
+
+    def init(self, kw):
+        super().init(kw)
+        # Override the dimensionality set by Cartesian3DGrid: select the real-space
+        # 3D cylindrical solver (WARPX_DIM_RTZ) rather than 3D Cartesian.
+        pywarpx.geometry.dims = "RTZ"
+
+
 class ElectromagneticSolver(picmistandard.PICMI_ElectromagneticSolver):
     """
     See `Input Parameters <https://warpx.readthedocs.io/en/latest/usage/parameters.html>`__ for more information.
@@ -4118,7 +4146,7 @@ class FieldDiagnostic(picmistandard.PICMI_FieldDiagnostic, WarpXDiagnosticBase):
         # --- Use a set to ensure that fields don't get repeated.
         fields_to_plot = set()
 
-        if pywarpx.geometry.dims == "RZ":
+        if pywarpx.geometry.dims in ("RZ", "RTZ"):
             E_fields_list = ["Er", "Et", "Ez"]
             B_fields_list = ["Br", "Bt", "Bz"]
             J_fields_list = ["Jr", "Jt", "Jz"]
@@ -4430,7 +4458,7 @@ class ParticleDiagnostic(picmistandard.PICMI_ParticleDiagnostic, WarpXDiagnostic
                 if dataname == "position":
                     if pywarpx.geometry.dims != "1":  # because then it's WARPX_DIM_1D_Z
                         variables.add("x")
-                    if pywarpx.geometry.dims == "3":
+                    if pywarpx.geometry.dims in ("3", "RTZ"):
                         variables.add("y")
                     variables.add("z")
                     if pywarpx.geometry.dims == "RZ":
@@ -4474,7 +4502,7 @@ class ParticleDiagnostic(picmistandard.PICMI_ParticleDiagnostic, WarpXDiagnostic
                             f"The attribute {dataname} is not available in mode WARPX_DIM_1D_Z"
                             f"chosen by dim={pywarpx.geometry.dims} in pywarpx."
                         )
-                    elif pywarpx.geometry.dims != "3" and dataname == "y":
+                    elif pywarpx.geometry.dims not in ("3", "RTZ") and dataname == "y":
                         raise RuntimeError(
                             f"The attribute {dataname} is not available outside of mode WARPX_DIM_3D"
                             f"The chosen value was dim={pywarpx.geometry.dims} in pywarpx."
@@ -4625,7 +4653,7 @@ class LabFrameFieldDiagnostic(
         # --- Use a set to ensure that fields don't get repeated.
         fields_to_plot = set()
 
-        if pywarpx.geometry.dims == "RZ":
+        if pywarpx.geometry.dims in ("RZ", "RTZ"):
             E_fields_list = ["Er", "Et", "Ez"]
             B_fields_list = ["Br", "Bt", "Bz"]
             J_fields_list = ["Jr", "Jt", "Jz"]
@@ -4748,7 +4776,7 @@ class LabFrameParticleDiagnostic(
                 if dataname == "position":
                     if pywarpx.geometry.dims != "1":  # because then it's WARPX_DIM_1D_Z
                         variables.add("x")
-                    if pywarpx.geometry.dims == "3":
+                    if pywarpx.geometry.dims in ("3", "RTZ"):
                         variables.add("y")
                     variables.add("z")
                     if pywarpx.geometry.dims == "RZ":
@@ -4792,7 +4820,7 @@ class LabFrameParticleDiagnostic(
                             f"The attribute {dataname} is not available in mode WARPX_DIM_1D_Z"
                             f"chosen by dim={pywarpx.geometry.dims} in pywarpx."
                         )
-                    elif pywarpx.geometry.dims != "3" and dataname == "y":
+                    elif pywarpx.geometry.dims not in ("3", "RTZ") and dataname == "y":
                         raise RuntimeError(
                             f"The attribute {dataname} is not available outside of mode WARPX_DIM_3D"
                             f"The chosen value was dim={pywarpx.geometry.dims} in pywarpx."
@@ -5248,7 +5276,7 @@ class ParticleBoundaryScrapingDiagnostic(
                 if dataname == "position":
                     if pywarpx.geometry.dims != "1":  # because then it's WARPX_DIM_1D_Z
                         variables.add("x")
-                    if pywarpx.geometry.dims == "3":
+                    if pywarpx.geometry.dims in ("3", "RTZ"):
                         variables.add("y")
                     variables.add("z")
                     if pywarpx.geometry.dims == "RZ":
@@ -5267,7 +5295,7 @@ class ParticleBoundaryScrapingDiagnostic(
                             f"The attribute {dataname} is not available in mode WARPX_DIM_1D_Z"
                             f"chosen by dim={pywarpx.geometry.dims} in pywarpx."
                         )
-                    elif pywarpx.geometry.dims != "3" and dataname == "y":
+                    elif pywarpx.geometry.dims not in ("3", "RTZ") and dataname == "y":
                         raise RuntimeError(
                             f"The attribute {dataname} is not available outside of mode WARPX_DIM_3D"
                             f"The chosen value was dim={pywarpx.geometry.dims} in pywarpx."

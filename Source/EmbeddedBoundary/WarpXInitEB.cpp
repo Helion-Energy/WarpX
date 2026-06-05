@@ -77,7 +77,7 @@ WarpX::InitEB ()
         throw std::runtime_error("InitEB only works when EBs are enabled at runtime");
     }
 
-#if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_XZ) && !defined(WARPX_DIM_RZ)
+#if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_XZ) && !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_RTZ)
     WARPX_ABORT_WITH_MESSAGE("EBs only implemented in 2D and 3D");
 #endif
 

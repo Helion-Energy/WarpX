@@ -349,7 +349,7 @@ public:
                     constexpr std::array<int, 2> position_indices = {PIdx::x, PIdx::theta};
 #elif defined(WARPX_DIM_RSPHERE)
                     constexpr std::array<int, 3> position_indices = {PIdx::x, PIdx::theta, PIdx::phi};
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                     constexpr std::array<int, 3> position_indices = {PIdx::x, PIdx::y, PIdx::z};
 #endif
                     // Loop over the components that define the positions and swap the positions of the products.

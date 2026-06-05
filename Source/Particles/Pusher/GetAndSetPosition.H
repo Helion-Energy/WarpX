@@ -54,6 +54,13 @@ void get_particle_position (const WarpXParticleContainer::SuperParticleType& p,
     x = p.pos(PIdx::x);
     y = p.pos(PIdx::y);
     z = p.pos(PIdx::z);
+#elif defined(WARPX_DIM_RTZ)
+    // Stored cylindrical (r, theta, z) -> Cartesian for the push
+    amrex::ParticleReal const r = p.pos(T_PIdx::x);
+    amrex::ParticleReal const theta = p.pos(T_PIdx::y);
+    x = r*std::cos(theta);
+    y = r*std::sin(theta);
+    z = p.pos(PIdx::z);
 #elif defined(WARPX_DIM_XZ)
     x = p.pos(PIdx::x);
     y = 0_prt;
@@ -108,7 +115,8 @@ struct GetParticlePosition
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_XZ)
         m_x = soa.GetRealData(PIdx::x).dataPtr() + a_offset;
         m_z = soa.GetRealData(PIdx::z).dataPtr() + a_offset;
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
+        // RTZ: positions are (r, theta, z); theta is a real position (PIdx::y)
         m_x = soa.GetRealData(PIdx::x).dataPtr() + a_offset;
         m_y = soa.GetRealData(PIdx::y).dataPtr() + a_offset;
         m_z = soa.GetRealData(PIdx::z).dataPtr() + a_offset;
@@ -152,6 +160,12 @@ struct GetParticlePosition
         x = m_x[i];
         y = m_y[i];
         z = m_z[i];
+#elif defined(WARPX_DIM_RTZ)
+        // Stored cylindrical (r, theta, z) -> Cartesian for the push
+        RType const r = m_x[i];
+        x = r*std::cos(m_y[i]);
+        y = r*std::sin(m_y[i]);
+        z = m_z[i];
 #elif defined(WARPX_DIM_XZ)
         x = m_x[i];
         y = m_y_default;
@@ -183,7 +197,8 @@ struct GetParticlePosition
         x = m_x[i];
         y = m_theta[i];
         z = m_phi[i];
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
+        // RTZ stores (r, theta, z) directly
         x = m_x[i];
         y = m_y[i];
         z = m_z[i];
@@ -211,7 +226,7 @@ struct SetParticlePosition
 {
     using RType = amrex::ParticleReal;
 
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     RType* AMREX_RESTRICT m_x;
     RType* AMREX_RESTRICT m_y;
     RType* AMREX_RESTRICT m_z;
@@ -239,7 +254,8 @@ struct SetParticlePosition
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_XZ)
         m_x = soa.GetRealData(PIdx::x).dataPtr() + a_offset;
         m_z = soa.GetRealData(PIdx::z).dataPtr() + a_offset;
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
+        // RTZ: positions are (r, theta, z); theta is a real position (PIdx::y)
         m_x = soa.GetRealData(PIdx::x).dataPtr() + a_offset;
         m_y = soa.GetRealData(PIdx::y).dataPtr() + a_offset;
         m_z = soa.GetRealData(PIdx::z).dataPtr() + a_offset;
@@ -281,6 +297,12 @@ struct SetParticlePosition
         m_x[i] = x;
         m_y[i] = y;
         m_z[i] = z;
+#elif defined(WARPX_DIM_RTZ)
+        // Cartesian push result -> stored cylindrical (r, theta, z).
+        // theta in [-pi, pi) from atan2 (RTZ theta-domain is [-pi, pi) for full 2pi).
+        m_x[i] = std::sqrt(x*x + y*y);
+        m_y[i] = std::atan2(y, x);
+        m_z[i] = z;
 #elif defined(WARPX_DIM_XZ)
         m_x[i] = x;
         m_z[i] = z;
@@ -308,7 +330,8 @@ struct SetParticlePosition
         m_x[i] = x;
         m_theta[i] = y;
         m_phi[i] = z;
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
+        // RTZ input is already cylindrical (r, theta, z); store directly
         m_x[i] = x;
         m_y[i] = y;
         m_z[i] = z;

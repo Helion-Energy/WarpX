@@ -161,10 +161,14 @@ namespace
     #elif defined(WARPX_DIM_RZ)
                            << " ; dr = " << dx_lev[0]
                            << " ; dz = " << dx_lev[1] << '\n';
+    #elif defined(WARPX_DIM_RTZ)
+                           << " ; dr = " << dx_lev[0]
+                           << " ; dtheta = " << dx_lev[1]
+                           << " ; dz = " << dx_lev[2] << '\n';
     #elif defined(WARPX_DIM_XZ)
                            << " ; dx = " << dx_lev[0]
                            << " ; dz = " << dx_lev[1] << '\n';
-    #elif defined(WARPX_DIM_3D)
+    #elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                            << " ; dx = " << dx_lev[0]
                            << " ; dy = " << dx_lev[1]
                            << " ; dz = " << dx_lev[2] << '\n';
@@ -333,7 +337,7 @@ WarpX::PostProcessBaseGrids (BoxArray& ba0) const
         const IntVect sz = domlen / numprocs;
         const IntVect extra = domlen - sz*numprocs;
         BoxList bl;
-#if defined(WARPX_DIM_3D)
+#if (AMREX_SPACEDIM == 3)
         for (int k = 0; k < numprocs[2]; ++k) {
             // The first extra[2] blocks get one extra cell with a total of
             // sz[2]+1.  The rest get sz[2] cells.  The decomposition in y
@@ -776,7 +780,7 @@ WarpX::PrintMainPICparameters ()
       if (WarpX::moving_window_dir == 0){
         amrex::Print() << "                      |  - moving_window_dir = x \n";
       }
-      #if defined(WARPX_DIM_3D)
+      #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
       else if (WarpX::moving_window_dir == 1){
         amrex::Print() << "                      |  - moving_window_dir = y \n";
       }
@@ -1171,7 +1175,7 @@ WarpX::InitNCICorrector ()
         {
             const Geometry& gm = Geom(lev);
             const Real* dx = gm.CellSize();
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                 const auto dz = dx[2];
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
                 const auto dz = dx[1];
@@ -1465,7 +1469,7 @@ void ComputeExternalFieldOnGridUsingParser_template (
                 const amrex::Real y = 0._rt;
                 const amrex::Real fac_z = (1._rt - y_nodal_flag[1]) * dx_lev[1] * 0.5_rt;
                 const amrex::Real z = j*dx_lev[1] + real_box.lo(1) + fac_z;
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                 const amrex::Real fac_x = (1._rt - y_nodal_flag[0]) * dx_lev[0] * 0.5_rt;
                 const amrex::Real x = i*dx_lev[0] + real_box.lo(0) + fac_x;
                 const amrex::Real fac_y = (1._rt - y_nodal_flag[1]) * dx_lev[1] * 0.5_rt;
@@ -1497,7 +1501,7 @@ void ComputeExternalFieldOnGridUsingParser_template (
                 const amrex::Real y = 0._rt;
                 const amrex::Real fac_z = (1._rt - z_nodal_flag[1]) * dx_lev[1] * 0.5_rt;
                 const amrex::Real z = j*dx_lev[1] + real_box.lo(1) + fac_z;
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                 const amrex::Real fac_x = (1._rt - z_nodal_flag[0]) * dx_lev[0] * 0.5_rt;
                 const amrex::Real x = i*dx_lev[0] + real_box.lo(0) + fac_x;
                 const amrex::Real fac_y = (1._rt - z_nodal_flag[1]) * dx_lev[1] * 0.5_rt;

@@ -112,9 +112,9 @@ class WarpX(Bucket):
 
         # included files
         file_pattern = re.compile(r'^\s*FILE\s*=\s*"?([^"\n\r]+)"?', re.I)
-        # geometry.dims can be 1/2/3/RZ/RCYLINDER/RSPHERE
+        # geometry.dims can be 1/2/3/RZ/RTZ/RCYLINDER/RSPHERE
         dims_pattern = re.compile(
-            r'^\s*geometry\.dims\s*=\s*"?\s*(1|2|3|RZ|RCYLINDER|RSPHERE)\s*"?', re.I
+            r'^\s*geometry\.dims\s*=\s*"?\s*(1|2|3|RZ|RTZ|RCYLINDER|RSPHERE)\s*"?', re.I
         )
 
         dims_value = None

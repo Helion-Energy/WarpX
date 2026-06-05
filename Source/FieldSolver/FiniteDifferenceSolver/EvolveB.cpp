@@ -8,7 +8,7 @@
 
 #include "EmbeddedBoundary/WarpXFaceInfoBox.H"
 #include "Fields.H"
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
 #   include "FiniteDifferenceAlgorithms/CylindricalYeeAlgorithm.H"
 #elif defined(WARPX_DIM_RSPHERE)
 #   include "FiniteDifferenceAlgorithms/SphericalYeeAlgorithm.H"
@@ -69,7 +69,7 @@ void FiniteDifferenceSolver::EvolveB (
 
     // Select algorithm (The choice of algorithm is a runtime option,
     // but we compile code for each algorithm, using templates)
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
     if ((m_fdtd_algo == ElectromagneticSolverAlgo::Yee)||
         (m_fdtd_algo == ElectromagneticSolverAlgo::HybridPIC)){
         EvolveBCylindrical <CylindricalYeeAlgorithm> ( Bfield, Efield, lev, dt );
@@ -123,7 +123,7 @@ void FiniteDifferenceSolver::EvolveB (
 }
 
 
-#if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
+#if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE) && !defined(WARPX_DIM_RTZ)
 
 template<typename T_Algo>
 void FiniteDifferenceSolver::EvolveBCartesian (
@@ -388,7 +388,7 @@ void FiniteDifferenceSolver::EvolveBCartesianECT (
 #endif
 }
 
-#elif defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#elif defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
 
 template<typename T_Algo>
 void FiniteDifferenceSolver::EvolveBCylindrical (
@@ -422,6 +422,10 @@ void FiniteDifferenceSolver::EvolveBCylindrical (
         auto const n_coefs_r = static_cast<int>(m_stencil_coefs_r.size());
         Real const * const AMREX_RESTRICT coefs_z = m_stencil_coefs_z.dataPtr();
         auto const n_coefs_z = static_cast<int>(m_stencil_coefs_z.size());
+#if defined(WARPX_DIM_RTZ)
+        Real const * const AMREX_RESTRICT coefs_theta = m_stencil_coefs_theta.dataPtr();
+        auto const n_coefs_theta = static_cast<int>(m_stencil_coefs_theta.size());
+#endif
 
         // Extract cylindrical specific parameters
         Real const dr = m_dr;
@@ -436,7 +440,22 @@ void FiniteDifferenceSolver::EvolveBCylindrical (
         // Loop over the cells and update the fields
         amrex::ParallelFor(tbr, tbt, tbz,
 
-            [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+#if defined(WARPX_DIM_RTZ)
+                // Br = -[ (1/r) dEz/dtheta - dEtheta/dz ]; Br nodal in r
+                Real const r = rmin + i*dr;
+                if (r != 0._rt) {
+                    Br(i, j, k, 0) += dt*(
+                        T_Algo::UpwardDz(Etheta, coefs_z, n_coefs_z, i, j, k, 0)
+                        - T_Algo::UpwardDtheta(Ez, coefs_theta, n_coefs_theta, i, j, k, 0) / r
+                    );
+                } else {
+                    // On axis (r=0): mirror the RZ m=0 treatment (Br=0 there).
+                    // For theta-uniform fields this reduces exactly to RZ m=0.
+                    Br(i, j, k, 0) = 0._rt;
+                }
+#else
+                amrex::ignore_unused(k);
                 Real const r = rmin + i*dr; // r on nodal point (Br is nodal in r)
                 if (r != 0) { // Off-axis, regular Maxwell equations
                     Br(i, j, 0, 0) += dt * T_Algo::UpwardDz(Etheta, coefs_z, n_coefs_z, i, j, 0, 0); // Mode m=0
@@ -467,9 +486,17 @@ void FiniteDifferenceSolver::EvolveBCylindrical (
                         }
                     }
                 }
+#endif
             },
 
-            [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+#if defined(WARPX_DIM_RTZ)
+                // Btheta = -[ dEr/dz - dEz/dr ] (no theta-derivative)
+                Btheta(i, j, k, 0) += dt*(
+                    T_Algo::UpwardDr(Ez, coefs_r, n_coefs_r, i, j, k, 0)
+                    - T_Algo::UpwardDz(Er, coefs_z, n_coefs_z, i, j, k, 0));
+#else
+                amrex::ignore_unused(k);
                 Btheta(i, j, 0, 0) += dt*(
                     T_Algo::UpwardDr(Ez, coefs_r, n_coefs_r, i, j, 0, 0)
                     - T_Algo::UpwardDz(Er, coefs_z, n_coefs_z, i, j, 0, 0)); // Mode m=0
@@ -481,9 +508,19 @@ void FiniteDifferenceSolver::EvolveBCylindrical (
                         T_Algo::UpwardDr(Ez, coefs_r, n_coefs_r, i, j, 0, 2*m  )
                         - T_Algo::UpwardDz(Er, coefs_z, n_coefs_z, i, j, 0, 2*m  )); // Imaginary part
                 }
+#endif
             },
 
-            [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+#if defined(WARPX_DIM_RTZ)
+                // Bz = -[ (1/r) d(r Etheta)/dr - (1/r) dEr/dtheta ]; Bz cell-centered in r (r>0)
+                Real const r = rmin + (i + 0.5_rt)*dr;
+                Bz(i, j, k, 0) += dt*(
+                    - T_Algo::UpwardDrr_over_r(Etheta, r, dr, coefs_r, n_coefs_r, i, j, k, 0)
+                    + T_Algo::UpwardDtheta(Er, coefs_theta, n_coefs_theta, i, j, k, 0) / r
+                );
+#else
+                amrex::ignore_unused(k);
                 Real const r = rmin + (i + 0.5_rt)*dr; // r on a cell-centered grid (Bz is cell-centered in r)
                 Bz(i, j, 0, 0) += dt*( - T_Algo::UpwardDrr_over_r(Etheta, r, dr, coefs_r, n_coefs_r, i, j, 0, 0));
                 for (int m=1 ; m<nmodes ; m++) { // Higher-order modes
@@ -492,6 +529,7 @@ void FiniteDifferenceSolver::EvolveBCylindrical (
                     Bz(i, j, 0, 2*m  ) += dt*(-m * Er(i, j, 0, 2*m-1)/r
                         - T_Algo::UpwardDrr_over_r(Etheta, r, dr, coefs_r, n_coefs_r, i, j, 0, 2*m  )); // Imaginary part
                 }
+#endif
             }
 
         );

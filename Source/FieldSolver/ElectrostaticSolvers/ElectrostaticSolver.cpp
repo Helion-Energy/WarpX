@@ -66,7 +66,7 @@ ElectrostaticSolver::setPhiBC (
     phi_bc_values_lo[0] = m_poisson_boundary_handler->potential_xlo(t);
     phi_bc_values_hi[0] = m_poisson_boundary_handler->potential_xhi(t);
 #endif
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     phi_bc_values_lo[1] = m_poisson_boundary_handler->potential_ylo(t);
     phi_bc_values_hi[1] = m_poisson_boundary_handler->potential_yhi(t);
 #endif
@@ -171,7 +171,7 @@ ElectrostaticSolver::computePhi (
                 amrex::Array<amrex::MultiFab*, 2>{
                     efield.value()[lev][0], efield.value()[lev][2]
                 }
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                 amrex::Array<amrex::MultiFab *, 3>{
                     efield.value()[lev][0], efield.value()[lev][1], efield.value()[lev][2]
                 }
@@ -238,7 +238,7 @@ ElectrostaticSolver::computeE (
 #endif
         for ( MFIter mfi(*phi[lev], TilingIfNotGPU()); mfi.isValid(); ++mfi )
         {
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
             const Real inv_dx = 1._rt/dx[0];
             const Real inv_dy = 1._rt/dx[1];
             const Real inv_dz = 1._rt/dx[2];
@@ -272,7 +272,7 @@ ElectrostaticSolver::computeE (
                 ey_type == amrex::IntVect::TheNodeVector() &&
                 ez_type == amrex::IntVect::TheNodeVector())
             {
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                 amrex::ParallelFor( tbx, tby, tbz,
                     [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                         Ex_arr(i,j,k) +=
@@ -329,7 +329,7 @@ ElectrostaticSolver::computeE (
             }
             else // Staggered solver
             {
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                 amrex::ParallelFor( tbx, tby, tbz,
                     [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                         Ex_arr(i,j,k) +=
@@ -405,7 +405,7 @@ void ElectrostaticSolver::computeB (
 #endif
         for ( MFIter mfi(*phi[lev], TilingIfNotGPU()); mfi.isValid(); ++mfi )
         {
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
             const Real inv_dx = 1._rt/dx[0];
             const Real inv_dy = 1._rt/dx[1];
             const Real inv_dz = 1._rt/dx[2];
@@ -439,7 +439,7 @@ void ElectrostaticSolver::computeB (
                 by_type == amrex::IntVect::TheNodeVector() &&
                 bz_type == amrex::IntVect::TheNodeVector())
             {
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                 amrex::ParallelFor( tbx, tby, tbz,
                     [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                         Bx_arr(i,j,k) += PhysConst::inv_c * (
@@ -489,7 +489,7 @@ void ElectrostaticSolver::computeB (
             }
             else // Staggered solver
             {
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                 amrex::ParallelFor( tbx, tby, tbz,
                     [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                         Bx_arr(i,j,k) += PhysConst::inv_c * (

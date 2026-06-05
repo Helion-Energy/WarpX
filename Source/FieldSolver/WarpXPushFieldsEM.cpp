@@ -1392,7 +1392,7 @@ void WarpX::DampFieldsInGuards(const int lev, amrex::MultiFab* mf)
     }
 }
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
 // This scales the current by the inverse volume and wraps around the deposition at negative radius.
 // It is faster to apply this on the grid than to do it particle by particle.
 // It is put here since there isn't another nice place for it.
@@ -1406,8 +1406,16 @@ WarpX::ApplyInverseVolumeScalingToCurrentDensity (amrex::MultiFab* Jx, amrex::Mu
     constexpr int NODE = amrex::IndexType::NODE;
 
     // See Verboncoeur JCP 174, 421-427 (2001) for the modified volume factor
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
     const amrex::Real axis_volume_factor = (m_verboncoeur_axis_correction ? 1._rt/3._rt : 1._rt/4._rt);
+    // RZ/RCYLINDER integrate over the full 2*pi azimuth, so the cell volume carries a
+    // factor (2*pi*r). In RTZ, theta is a real discretized coordinate and dtheta is
+    // already included in the deposition inverse-volume, so the radial factor is just r.
+#if defined(WARPX_DIM_RTZ)
+    const amrex::Real azimuthal_factor = 1._rt;
+#else
+    const amrex::Real azimuthal_factor = 2._rt*MathConst::pi;
+#endif
 #endif
 
     for (amrex::MFIter mfi(*Jx, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
@@ -1459,27 +1467,27 @@ WarpX::ApplyInverseVolumeScalingToCurrentDensity (amrex::MultiFab* Jx, amrex::Mu
         // Rescale current in r-z mode since the inverse volume factor was not
         // included in the current deposition.
         amrex::ParallelFor(tbr, tbt, tbz,
-        [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/)
+        [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
             // Wrap the current density deposited in the guard cells around
             // to the cells above the axis.
             // If Jr is node centered, Jr[0] is located on the boundary.
             // If Jr is cell centered, Jr[0] is at 1/2 dr.
             if (rmin == 0. && 1-ishift_r <= i && i <= ngJ[0]-ishift_r) {
-                Jr_arr(i,j,0,0) -= Jr_arr(-ishift_r-i,j,0,0);
+                Jr_arr(i,j,k,0) -= Jr_arr(-ishift_r-i,j,k,0);
             }
             // Apply the inverse volume scaling
             // Jr is forced to zero on axis
             const amrex::Real r = amrex::Math::abs(rminr + (i - irmin)*dr);
             if (r == 0._rt) {
-                Jr_arr(i,j,0,0) = 0.0_rt;
+                Jr_arr(i,j,k,0) = 0.0_rt;
             } else {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-                Jr_arr(i,j,0,0) /= 2.0_rt*MathConst::pi*r;
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
+                Jr_arr(i,j,k,0) /= azimuthal_factor*r;
 #elif defined(WARPX_DIM_RSPHERE)
                 // Scale factor is 4/3*pi*((r + dr/2)**3 - (r - dr/2)**3)/dr,
                 // leaving out the highest order term
-                Jr_arr(i,j,0,0) /= 4.0_rt*MathConst::pi*r*r;
+                Jr_arr(i,j,k,0) /= 4.0_rt*MathConst::pi*r*r;
 #endif
             }
 
@@ -1488,43 +1496,43 @@ WarpX::ApplyInverseVolumeScalingToCurrentDensity (amrex::MultiFab* Jx, amrex::Mu
                 // Wrap the current density deposited in the guard cells around
                 // to the cells above the axis.
                 if (rmin == 0._rt && 1-ishift_r <= i && i <= ngJ[0]-ishift_r) {
-                    Jr_arr(i,j,0,2*imode-1) += static_cast<amrex::Real>(std::pow(-1, imode+1)*Jr_arr(-ishift_r-i,j,0,2*imode-1));
-                    Jr_arr(i,j,0,2*imode) += static_cast<amrex::Real>(std::pow(-1, imode+1)*Jr_arr(-ishift_r-i,j,0,2*imode));
+                    Jr_arr(i,j,k,2*imode-1) += static_cast<amrex::Real>(std::pow(-1, imode+1)*Jr_arr(-ishift_r-i,j,k,2*imode-1));
+                    Jr_arr(i,j,k,2*imode) += static_cast<amrex::Real>(std::pow(-1, imode+1)*Jr_arr(-ishift_r-i,j,k,2*imode));
                 }
                 // Apply the inverse volume scaling
                 // Jr is forced to zero on axis.
                 if (r == 0._rt) {
-                    Jr_arr(i,j,0,2*imode-1) = 0.0_rt;
-                    Jr_arr(i,j,0,2*imode) = 0.0_rt;
+                    Jr_arr(i,j,k,2*imode-1) = 0.0_rt;
+                    Jr_arr(i,j,k,2*imode) = 0.0_rt;
                 } else {
-                    Jr_arr(i,j,0,2*imode-1) /= (2.0_rt*MathConst::pi*r);
-                    Jr_arr(i,j,0,2*imode) /= (2.0_rt*MathConst::pi*r);
+                    Jr_arr(i,j,k,2*imode-1) /= (azimuthal_factor*r);
+                    Jr_arr(i,j,k,2*imode) /= (azimuthal_factor*r);
                 }
             }
 #endif
         },
-        [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/)
+        [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
             // Wrap the current density deposited in the guard cells around
             // to the cells above the axis.
             // If Jt is node centered, Jt[0] is located on the boundary.
             // If Jt is cell centered, Jt[0] is at 1/2 dr.
             if (rmin == 0._rt && 1-ishift_t <= i && i <= ngJ[0]-ishift_t) {
-                Jt_arr(i,j,0,0) -= Jt_arr(-ishift_t-i,j,0,0);
+                Jt_arr(i,j,k,0) -= Jt_arr(-ishift_t-i,j,k,0);
             }
 
             // Apply the inverse volume scaling
             // Jt is forced to zero on axis.
             const amrex::Real r = amrex::Math::abs(rmint + (i - irmin)*dr);
             if (r == 0._rt) {
-                Jt_arr(i,j,0,0) = 0.0_rt;
+                Jt_arr(i,j,k,0) = 0.0_rt;
             } else {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-                Jt_arr(i,j,0,0) /= (2.0_rt*MathConst::pi*r);
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
+                Jt_arr(i,j,k,0) /= (azimuthal_factor*r);
 #elif defined(WARPX_DIM_RSPHERE)
                 // Scale factor is 4/3*pi*((r + dr/2)**3 - (r - dr/2)**3)/dr,
                 // leaving out the highest order term
-                Jt_arr(i,j,0,0) /= 4.0_rt*MathConst::pi*r*r;
+                Jt_arr(i,j,k,0) /= 4.0_rt*MathConst::pi*r*r;
 #endif
             }
 
@@ -1533,51 +1541,51 @@ WarpX::ApplyInverseVolumeScalingToCurrentDensity (amrex::MultiFab* Jx, amrex::Mu
                 // Wrap the current density deposited in the guard cells around
                 // to the cells above the axis.
                 if (rmin == 0._rt && 1-ishift_t <= i && i <= ngJ[0]-ishift_t) {
-                    Jt_arr(i,j,0,2*imode-1) += static_cast<amrex::Real>(std::pow(-1, imode+1)*Jt_arr(-ishift_t-i,j,0,2*imode-1));
-                    Jt_arr(i,j,0,2*imode) += static_cast<amrex::Real>(std::pow(-1, imode+1)*Jt_arr(-ishift_t-i,j,0,2*imode));
+                    Jt_arr(i,j,k,2*imode-1) += static_cast<amrex::Real>(std::pow(-1, imode+1)*Jt_arr(-ishift_t-i,j,k,2*imode-1));
+                    Jt_arr(i,j,k,2*imode) += static_cast<amrex::Real>(std::pow(-1, imode+1)*Jt_arr(-ishift_t-i,j,k,2*imode));
                 }
 
                 // Apply the inverse volume scaling
                 // Jt is forced to zero on axis.
                 if (r == 0._rt) {
-                    Jt_arr(i,j,0,2*imode-1) = 0.0_rt;
-                    Jt_arr(i,j,0,2*imode) = 0.0_rt;
+                    Jt_arr(i,j,k,2*imode-1) = 0.0_rt;
+                    Jt_arr(i,j,k,2*imode) = 0.0_rt;
                 } else {
-                    Jt_arr(i,j,0,2*imode-1) /= (2.0_rt*MathConst::pi*r);
-                    Jt_arr(i,j,0,2*imode) /= (2.0_rt*MathConst::pi*r);
+                    Jt_arr(i,j,k,2*imode-1) /= (azimuthal_factor*r);
+                    Jt_arr(i,j,k,2*imode) /= (azimuthal_factor*r);
                 }
             }
 #endif
         },
-        [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/)
+        [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
             // Wrap the current density deposited in the guard cells around
             // to the cells above the axis.
             // If Jz is node centered, Jz[0] is located on the boundary.
             // If Jz is cell centered, Jz[0] is at 1/2 dr.
             if (rmin == 0._rt && 1-ishift_z <= i && i <= ngJ[0]-ishift_z) {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-                Jz_arr(i,j,0,0) += Jz_arr(-ishift_z-i,j,0,0);
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
+                Jz_arr(i,j,k,0) += Jz_arr(-ishift_z-i,j,k,0);
 #elif defined(WARPX_DIM_RSPHERE)
-                Jz_arr(i,j,0,0) -= Jz_arr(-ishift_z-i,j,0,0);
+                Jz_arr(i,j,k,0) -= Jz_arr(-ishift_z-i,j,k,0);
 #endif
             }
 
             // Apply the inverse volume scaling
             const amrex::Real r = amrex::Math::abs(rminz + (i - irmin)*dr);
             if (r == 0._rt) {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-                Jz_arr(i,j,0,0) /= (MathConst::pi*dr*axis_volume_factor);
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
+                Jz_arr(i,j,k,0) /= (MathConst::pi*dr*axis_volume_factor);
 #elif defined(WARPX_DIM_RSPHERE)
-                Jz_arr(i,j,0,0) = 0.0_rt;
+                Jz_arr(i,j,k,0) = 0.0_rt;
 #endif
             } else {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-                Jz_arr(i,j,0,0) /= (2.0_rt*MathConst::pi*r);
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
+                Jz_arr(i,j,k,0) /= (azimuthal_factor*r);
 #elif defined(WARPX_DIM_RSPHERE)
                 // Scale factor is 4/3*pi*((r + dr/2)**3 - (r - dr/2)**3)/dr,
                 // leaving out the highest order term
-                Jz_arr(i,j,0,0) /= 4.0_rt*MathConst::pi*r*r;
+                Jz_arr(i,j,k,0) /= 4.0_rt*MathConst::pi*r*r;
 #endif
             }
 
@@ -1586,17 +1594,17 @@ WarpX::ApplyInverseVolumeScalingToCurrentDensity (amrex::MultiFab* Jx, amrex::Mu
                 // Wrap the current density deposited in the guard cells around
                 // to the cells above the axis.
                 if (rmin == 0._rt && 1-ishift_z <= i && i <= ngJ[0]-ishift_z) {
-                    Jz_arr(i,j,0,2*imode-1) -= static_cast<amrex::Real>(std::pow(-1, imode+1)*Jz_arr(-ishift_z-i,j,0,2*imode-1));
-                    Jz_arr(i,j,0,2*imode) -= static_cast<amrex::Real>(std::pow(-1, imode+1)*Jz_arr(-ishift_z-i,j,0,2*imode));
+                    Jz_arr(i,j,k,2*imode-1) -= static_cast<amrex::Real>(std::pow(-1, imode+1)*Jz_arr(-ishift_z-i,j,k,2*imode-1));
+                    Jz_arr(i,j,k,2*imode) -= static_cast<amrex::Real>(std::pow(-1, imode+1)*Jz_arr(-ishift_z-i,j,k,2*imode));
                 }
 
                 // Apply the inverse volume scaling
                 if (r == 0.) {
-                    Jz_arr(i,j,0,2*imode-1) /= (MathConst::pi*dr*axis_volume_factor);
-                    Jz_arr(i,j,0,2*imode) /= (MathConst::pi*dr*axis_volume_factor);
+                    Jz_arr(i,j,k,2*imode-1) /= (MathConst::pi*dr*axis_volume_factor);
+                    Jz_arr(i,j,k,2*imode) /= (MathConst::pi*dr*axis_volume_factor);
                 } else {
-                    Jz_arr(i,j,0,2*imode-1) /= (2.0_rt*MathConst::pi*r);
-                    Jz_arr(i,j,0,2*imode) /= (2.0_rt*MathConst::pi*r);
+                    Jz_arr(i,j,k,2*imode-1) /= (azimuthal_factor*r);
+                    Jz_arr(i,j,k,2*imode) /= (azimuthal_factor*r);
                 }
             }
 #endif
@@ -1618,7 +1626,7 @@ WarpX::ApplyInverseVolumeScalingToMassMatricesPC (amrex::MultiFab* Sxx, amrex::M
     constexpr int NODE = amrex::IndexType::NODE;
 
     // See Verboncoeur JCP 174, 421-427 (2001) for the modified volume factor
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
     const amrex::Real axis_volume_factor = (m_verboncoeur_axis_correction ? 1._rt/3._rt : 1._rt/4._rt);
 #endif
 
@@ -1688,7 +1696,7 @@ WarpX::ApplyInverseVolumeScalingToMassMatricesPC (amrex::MultiFab* Sxx, amrex::M
             if (r == 0._rt) {
                 Srr_arr(i,j,0,icomp) = 0.0_rt;
             } else {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
                 Srr_arr(i,j,0,icomp) /= 2.0_rt*MathConst::pi*r;
 #elif defined(WARPX_DIM_RSPHERE)
                 // Scale factor is 4/3*pi*((r + dr/2)**3 - (r - dr/2)**3)/dr,
@@ -1715,7 +1723,7 @@ WarpX::ApplyInverseVolumeScalingToMassMatricesPC (amrex::MultiFab* Sxx, amrex::M
             if (r == 0._rt) {
                 Stt_arr(i,j,0,icomp) = 0.0_rt;
             } else {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
                 Stt_arr(i,j,0,icomp) /= (2.0_rt*MathConst::pi*r);
 #elif defined(WARPX_DIM_RSPHERE)
                 // Scale factor is 4/3*pi*((r + dr/2)**3 - (r - dr/2)**3)/dr,
@@ -1739,13 +1747,13 @@ WarpX::ApplyInverseVolumeScalingToMassMatricesPC (amrex::MultiFab* Sxx, amrex::M
             // Apply the inverse volume scaling
             const amrex::Real r = amrex::Math::abs(rminz + (i - irmin)*dr);
             if (r == 0._rt) {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
                 Szz_arr(i,j,0,icomp) /= (MathConst::pi*dr*axis_volume_factor);
 #elif defined(WARPX_DIM_RSPHERE)
                 Szz_arr(i,j,0,icomp) = 0.0_rt;
 #endif
             } else {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
                 Szz_arr(i,j,0,icomp) /= (2.0_rt*MathConst::pi*r);
 #elif defined(WARPX_DIM_RSPHERE)
                 // Scale factor is 4/3*pi*((r + dr/2)**3 - (r - dr/2)**3)/dr,
@@ -1768,8 +1776,15 @@ WarpX::ApplyInverseVolumeScalingToChargeDensity (amrex::MultiFab* Rho, int lev) 
     constexpr int NODE = amrex::IndexType::NODE;
 
     // See Verboncoeur JCP 174, 421-427 (2001) for the modified volume factor
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
     const amrex::Real axis_volume_factor = (m_verboncoeur_axis_correction ? 1.0_rt/3.0_rt : 1.0_rt/4.0_rt);
+    // RTZ has theta as a real discretized coordinate (dtheta already in the deposition
+    // inverse-volume), so the radial factor is r; RZ/RCYLINDER integrate the full 2*pi.
+#if defined(WARPX_DIM_RTZ)
+    const amrex::Real azimuthal_factor = 1._rt;
+#else
+    const amrex::Real azimuthal_factor = 2._rt*MathConst::pi;
+#endif
 #elif defined(WARPX_DIM_RSPHERE)
     const amrex::Real axis_volume_factor = (m_verboncoeur_axis_correction ? 1.0_rt/4.0_rt : 1.0_rt/8.0_rt);
 #endif
@@ -1810,7 +1825,7 @@ WarpX::ApplyInverseVolumeScalingToChargeDensity (amrex::MultiFab* Rho, int lev) 
         // as well as the old and new rho.
         int const ncomp = Rho->nComp();
         amrex::ParallelFor(tb, ncomp,
-        [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/, int icomp)
+        [=] AMREX_GPU_DEVICE (int i, int j, int k, int icomp)
         {
             // Wrap the charge density deposited in the guard cells around
             // to the cells above the axis.
@@ -1826,25 +1841,25 @@ WarpX::ApplyInverseVolumeScalingToChargeDensity (amrex::MultiFab* Rho, int lev) 
                 else {
                     imode = (icomp - ncomp/2 + 1)/2;
                 }
-                Rho_arr(i,j,0,icomp) -= static_cast<amrex::Real>(std::pow(-1, imode+1)*Rho_arr(-ishift-i,j,0,icomp));
+                Rho_arr(i,j,k,icomp) -= static_cast<amrex::Real>(std::pow(-1, imode+1)*Rho_arr(-ishift-i,j,k,icomp));
             }
 
             // Apply the inverse volume scaling
             const amrex::Real r = amrex::Math::abs(rminr + (i - irmin)*dr);
             if (r == 0.) {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-                Rho_arr(i,j,0,icomp) /= (MathConst::pi*dr*axis_volume_factor);
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
+                Rho_arr(i,j,k,icomp) /= (MathConst::pi*dr*axis_volume_factor);
 #elif defined(WARPX_DIM_RSPHERE)
-                Rho_arr(i,j,0,icomp) /= 4.0_rt/3.0_rt*MathConst::pi*dr*dr*axis_volume_factor;
+                Rho_arr(i,j,k,icomp) /= 4.0_rt/3.0_rt*MathConst::pi*dr*dr*axis_volume_factor;
 #endif
             } else {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
                 // Scale factor is pi*((r + dr/2)**2 - (r - dr/2)**2)/dr
-                Rho_arr(i,j,0,icomp) /= (2.0_rt*MathConst::pi*r);
+                Rho_arr(i,j,k,icomp) /= (azimuthal_factor*r);
 #elif defined(WARPX_DIM_RSPHERE)
                 // Scale factor is 4/3*pi*((r + dr/2)**3 - (r - dr/2)**3)/dr,
                 // leaving out the highest order term
-                Rho_arr(i,j,0,icomp) /= 4.0_rt*MathConst::pi*r*r;
+                Rho_arr(i,j,k,icomp) /= 4.0_rt*MathConst::pi*r*r;
 #endif
             }
         });

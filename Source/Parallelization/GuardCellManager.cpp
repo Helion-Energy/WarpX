@@ -118,7 +118,7 @@ guardCellManager::Init (
         ngJz = std::max(ngJz,max_r);
     }
 
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     ng_alloc_EB = IntVect(ngx,ngy,ngz);
     ng_alloc_J = IntVect(ngJx,ngJy,ngJz);
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
@@ -228,7 +228,7 @@ guardCellManager::Init (
         utils::parser::queryWithParser(pp_psatd, "ny_guard", ngFFt_y);
         utils::parser::queryWithParser(pp_psatd, "nz_guard", ngFFt_z);
 
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
         auto ngFFT = IntVect(ngFFt_x, ngFFt_y, ngFFt_z);
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
         auto ngFFT = IntVect(ngFFt_x, ngFFt_z);

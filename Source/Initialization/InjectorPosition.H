@@ -41,7 +41,7 @@ struct InjectorPositionRandomPlane
                         amrex::RandomEngine const& engine) const noexcept
     {
         using namespace amrex::literals;
-#if ((defined WARPX_DIM_3D) || (defined WARPX_DIM_RZ) || (defined WARPX_DIM_RCYLINDER) || (defined WARPX_DIM_RSPHERE))
+#if ((defined WARPX_DIM_3D || defined WARPX_DIM_RTZ) || (defined WARPX_DIM_RZ) || (defined WARPX_DIM_RCYLINDER) || (defined WARPX_DIM_RSPHERE))
         // In RZ, the 3 components of the `XDim3` vector below correspond to r, theta, z respectively
         if (dir == 0)  { return amrex::XDim3{0._rt, amrex::Random(engine), amrex::Random(engine)}; }
         if (dir == 1)  { return amrex::XDim3{amrex::Random(engine), 0._rt, amrex::Random(engine)}; }
@@ -81,7 +81,7 @@ struct InjectorPositionRegular
     {
         using namespace amrex;
 
-#if (defined WARPX_DIM_3D)
+#if (defined WARPX_DIM_3D || defined WARPX_DIM_RTZ)
         int const nx = ref_fac[0]*ppc.x;
         int const ny = ref_fac[1]*ppc.y;
         int const nz = ref_fac[2]*ppc.z;

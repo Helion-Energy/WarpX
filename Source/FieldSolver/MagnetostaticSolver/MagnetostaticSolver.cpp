@@ -107,7 +107,7 @@ WarpX::AddMagnetostaticFieldLabFrame()
         }
     }
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
     for (int lev = 0; lev <= max_level; lev++) {
         ApplyInverseVolumeScalingToCurrentDensity(
             m_fields.get(FieldType::current_fp, Direction{0}, lev),
@@ -285,7 +285,7 @@ WarpX::setVectorPotentialBC (ablastr::fields::MultiLevelVectorField const& A) co
 void MagnetostaticSolver::VectorPoissonBoundaryHandler::defineVectorPotentialBCs ( )
 {
     for (int adim = 0; adim < 3; adim++) {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
         int dim_start = 0;
         WarpX& warpx = WarpX::GetInstance();
         auto geom = warpx.Geom(0);

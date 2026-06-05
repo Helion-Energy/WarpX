@@ -496,7 +496,7 @@ PhysicalParticleContainer::ImplicitPushXP (WarpXParIter & pti,
 #if !defined(WARPX_DIM_1D_Z)
     amrex::ParticleReal* x_n = pti.GetAttribs("x_n").dataPtr() + offset;
 #endif
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     amrex::ParticleReal* y_n = pti.GetAttribs("y_n").dataPtr() + offset;
 #endif
 #if !defined(WARPX_DIM_RCYLINDER)
@@ -580,7 +580,7 @@ PhysicalParticleContainer::ImplicitPushXP (WarpXParIter & pti,
         amrex::ParticleReal xp = 0._prt;
         const amrex::ParticleReal xp_n = 0._prt;
 #endif
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
         amrex::ParticleReal yp = y_n[ip];
         const amrex::ParticleReal yp_n = y_n[ip];
 #else
@@ -862,7 +862,7 @@ PhysicalParticleContainer::ImplicitPushXPSubOrbits (WarpXParIter& pti,
 #if !defined(WARPX_DIM_1D_Z)
     amrex::ParticleReal* x_n = pti.GetAttribs("x_n").dataPtr();
 #endif
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     amrex::ParticleReal* y_n = pti.GetAttribs("y_n").dataPtr();
 #endif
 #if !defined(WARPX_DIM_RCYLINDER)
@@ -947,7 +947,7 @@ PhysicalParticleContainer::ImplicitPushXPSubOrbits (WarpXParIter& pti,
 #else
         amrex::ParticleReal const xp_n0 = 0.0_prt;
 #endif
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
         amrex::ParticleReal const yp_n0 = y_n[ip];
 #else
         amrex::ParticleReal const yp_n0 = 0.0_prt;

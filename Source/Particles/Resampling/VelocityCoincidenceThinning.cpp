@@ -70,12 +70,12 @@ void VelocityCoincidenceThinning::operator() (
     auto& ptile = pc->ParticlesAt(lev, pti);
     const auto n_parts_in_tile = pti.numParticles();
     auto& soa = ptile.GetStructOfArrays();
-#if defined(WARPX_DIM_XZ) || defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_XZ) || defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     auto * const AMREX_RESTRICT x = soa.GetRealData(PIdx::x).data();
 #elif defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     auto * const AMREX_RESTRICT x = soa.GetRealData(PIdx::x).data(); // rename to PIdx::r after PR #4667
 #endif
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     auto * const AMREX_RESTRICT y = soa.GetRealData(PIdx::y).data();
 #endif
 #if defined(WARPX_ZINDEX)
@@ -190,7 +190,7 @@ void VelocityCoincidenceThinning::operator() (
 #if !defined(WARPX_DIM_1D_Z)
             amrex::ParticleReal cluster_x = 0._prt;
 #endif
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
             amrex::ParticleReal cluster_y = 0._prt;
 #endif
 #if defined(WARPX_ZINDEX)
@@ -208,7 +208,7 @@ void VelocityCoincidenceThinning::operator() (
 #if !defined(WARPX_DIM_1D_Z)
                 cluster_x += w[part_idx]*x[part_idx];
 #endif
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                 cluster_y += w[part_idx]*y[part_idx];
 #endif
 #if defined(WARPX_ZINDEX)
@@ -236,7 +236,7 @@ void VelocityCoincidenceThinning::operator() (
 #if !defined(WARPX_DIM_1D_Z)
                         cluster_x /= total_weight;
 #endif
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                         cluster_y /= total_weight;
 #endif
 #if defined(WARPX_ZINDEX)
@@ -294,7 +294,7 @@ void VelocityCoincidenceThinning::operator() (
                         x[part_idx] = cluster_x;
                         x[part_idx2] = cluster_x;
 #endif
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                         y[part_idx] = cluster_y;
                         y[part_idx2] = cluster_y;
 #endif
@@ -323,7 +323,7 @@ void VelocityCoincidenceThinning::operator() (
 #if !defined(WARPX_DIM_1D_Z)
                     cluster_x = 0_prt;
 #endif
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                     cluster_y = 0_prt;
 #endif
 #if defined(WARPX_ZINDEX)

@@ -390,7 +390,7 @@ void doGatherShapeN ([[maybe_unused]] const amrex::ParticleReal xp,
 #if !defined(WARPX_DIM_1D_Z)
     // x direction
     // Get particle position
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
     const amrex::Real rp = std::sqrt(xp*xp + yp*yp);
     const amrex::Real x = (rp - xyzmin.x)*dinv.x;
 #elif defined(WARPX_DIM_RSPHERE)
@@ -439,9 +439,17 @@ void doGatherShapeN ([[maybe_unused]] const amrex::ParticleReal xp,
     int const j_bz = ((bz_type[0] == NODE) ? j_node_v : j_cell_v);
 #endif
 
-#if defined(WARPX_DIM_3D)
-    // y direction
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
+    // y direction (azimuthal theta direction in RTZ)
+#if defined(WARPX_DIM_RTZ)
+    // theta = atan2(y, x), wrapped into [thetamin, thetamin + 2*pi); thetamin = xyzmin.y
+    constexpr amrex::Real twopi = amrex::Real(6.2831853071795864769252867665590);
+    amrex::Real theta_p = std::atan2(yp, xp);
+    theta_p -= twopi*std::floor((theta_p - xyzmin.y) / twopi);
+    const amrex::Real y = (theta_p - xyzmin.y)*dinv.y;
+#else
     const amrex::Real y = (yp-xyzmin.y)*dinv.y;
+#endif
     amrex::Real sy_node[depos_order + 1] = {0._rt};
     amrex::Real sy_cell[depos_order + 1] = {0._rt};
     amrex::Real sy_node_v[depos_order + 1 - galerkin_interpolation] = {0._rt};
@@ -765,6 +773,80 @@ void doGatherShapeN ([[maybe_unused]] const amrex::ParticleReal xp,
     Bxp += costheta*cosphi*Brp - sintheta*Bthetap - costheta*sinphi*Bphip;
     Byp += sintheta*cosphi*Brp + costheta*Bthetap - sintheta*sinphi*Bphip;
     Bzp += sinphi*Brp + cosphi*Bphip;
+
+#elif defined(WARPX_DIM_RTZ)
+    // Real-space cylindrical (r, theta, z): gather the cylindrical field
+    // components (stored in the ex/ey/ez = r/theta/z arrays) using the same
+    // triple-loop stencil as 3D Cartesian (theta is a real grid direction, so
+    // there is no azimuthal-mode sum), then rotate (Er, Etheta) -> (Ex, Ey)
+    // for the Cartesian particle pusher.
+    amrex::ParticleReal Erp = 0., Ethetap = 0., Ezp_cyl = 0.;
+    amrex::ParticleReal Brp = 0., Bthetap = 0., Bzp_cyl = 0.;
+
+    // Er from ex_arr (galerkin in r)
+    for (int iz=0; iz<=depos_order; iz++){
+        for (int iy=0; iy<=depos_order; iy++){
+            for (int ix=0; ix<= depos_order - galerkin_interpolation; ix++){
+                Erp += sx_ex[ix]*sy_ex[iy]*sz_ex[iz]*
+                    ex_arr(lo.x+j_ex+ix, lo.y+k_ex+iy, lo.z+l_ex+iz);
+            }
+        }
+    }
+    // Etheta from ey_arr (galerkin in theta)
+    for (int iz=0; iz<=depos_order; iz++){
+        for (int iy=0; iy<= depos_order - galerkin_interpolation; iy++){
+            for (int ix=0; ix<=depos_order; ix++){
+                Ethetap += sx_ey[ix]*sy_ey[iy]*sz_ey[iz]*
+                    ey_arr(lo.x+j_ey+ix, lo.y+k_ey+iy, lo.z+l_ey+iz);
+            }
+        }
+    }
+    // Ez from ez_arr (galerkin in z)
+    for (int iz=0; iz<= depos_order - galerkin_interpolation; iz++){
+        for (int iy=0; iy<=depos_order; iy++){
+            for (int ix=0; ix<=depos_order; ix++){
+                Ezp_cyl += sx_ez[ix]*sy_ez[iy]*sz_ez[iz]*
+                    ez_arr(lo.x+j_ez+ix, lo.y+k_ez+iy, lo.z+l_ez+iz);
+            }
+        }
+    }
+    // Bz from bz_arr (galerkin in r and theta)
+    for (int iz=0; iz<=depos_order; iz++){
+        for (int iy=0; iy<= depos_order - galerkin_interpolation; iy++){
+            for (int ix=0; ix<= depos_order - galerkin_interpolation; ix++){
+                Bzp_cyl += sx_bz[ix]*sy_bz[iy]*sz_bz[iz]*
+                    bz_arr(lo.x+j_bz+ix, lo.y+k_bz+iy, lo.z+l_bz+iz);
+            }
+        }
+    }
+    // Btheta from by_arr (galerkin in r and z)
+    for (int iz=0; iz<= depos_order - galerkin_interpolation; iz++){
+        for (int iy=0; iy<=depos_order; iy++){
+            for (int ix=0; ix<= depos_order - galerkin_interpolation; ix++){
+                Bthetap += sx_by[ix]*sy_by[iy]*sz_by[iz]*
+                    by_arr(lo.x+j_by+ix, lo.y+k_by+iy, lo.z+l_by+iz);
+            }
+        }
+    }
+    // Br from bx_arr (galerkin in theta and z)
+    for (int iz=0; iz<= depos_order - galerkin_interpolation; iz++){
+        for (int iy=0; iy<= depos_order - galerkin_interpolation; iy++){
+            for (int ix=0; ix<=depos_order; ix++){
+                Brp += sx_bx[ix]*sy_bx[iy]*sz_bx[iz]*
+                    bx_arr(lo.x+j_bx+ix, lo.y+k_bx+iy, lo.z+l_bx+iz);
+            }
+        }
+    }
+
+    // Rotate the cylindrical components to Cartesian for the (Cartesian) pusher
+    amrex::Real const costheta = (rp > 0. ? xp/rp : 1.);
+    amrex::Real const sintheta = (rp > 0. ? yp/rp : 0.);
+    Exp += costheta*Erp - sintheta*Ethetap;
+    Eyp += costheta*Ethetap + sintheta*Erp;
+    Ezp += Ezp_cyl;
+    Bxp += costheta*Brp - sintheta*Bthetap;
+    Byp += costheta*Bthetap + sintheta*Brp;
+    Bzp += Bzp_cyl;
 
 #else // defined(WARPX_DIM_3D)
     // Gather field on particle Exp from field on grid ex_arr

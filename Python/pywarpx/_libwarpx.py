@@ -82,6 +82,8 @@ class LibWarpX:
 
         if _dims == "RZ":
             self.geometry_dim = "rz"
+        elif _dims == "RTZ":
+            self.geometry_dim = "rtz"
         elif _dims == "1" or _dims == "2" or _dims == "3":
             self.geometry_dim = "%dd" % int(_dims)
         else:
@@ -112,6 +114,14 @@ class LibWarpX:
 
                 self.libwarpx_so = cxx_rz
                 self.dim = 2
+            elif self.geometry_dim == "rtz":
+                import amrex.space3d as amr
+
+                self.amr = amr
+                from . import warpx_pybind_rtz as cxx_rtz
+
+                self.libwarpx_so = cxx_rtz
+                self.dim = 3
             elif self.geometry_dim == "3d":
                 import amrex.space3d as amr
 

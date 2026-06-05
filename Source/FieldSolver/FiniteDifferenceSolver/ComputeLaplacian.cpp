@@ -10,7 +10,7 @@
 #include "FiniteDifferenceSolver.H"
 
 #include "EmbeddedBoundary/Enabled.H"
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
 #   include "FiniteDifferenceAlgorithms/CylindricalYeeAlgorithm.H"
 #elif defined(WARPX_DIM_RSPHERE)
 #   include "FiniteDifferenceAlgorithms/SphericalYeeAlgorithm.H"
@@ -32,7 +32,7 @@ void FiniteDifferenceSolver::ComputeLaplacian (
     // Select algorithm (The choice of algorithm is a runtime option,
     // but we compile code for each algorithm, using templates)
     if (m_fdtd_algo == ElectromagneticSolverAlgo::Yee) {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
         ComputeLaplacianCylindrical <CylindricalYeeAlgorithm> (
             out_field, in_field, eb_update, lev
         );
@@ -62,7 +62,7 @@ void FiniteDifferenceSolver::ComputeLaplacian (
      * \param[in] eb_update  array indicating where the field should be updated with respect to the position of the embedded boundary
      * \param[in] lev  level number for the calculation
      */
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
 template<typename T_Algo>
 void FiniteDifferenceSolver::ComputeLaplacianCylindrical (
     ablastr::fields::ScalarField& out_field,
@@ -174,7 +174,7 @@ void FiniteDifferenceSolver::ComputeVectorLaplacian (
     // Select algorithm (The choice of algorithm is a runtime option,
     // but we compile code for each algorithm, using templates)
     if (m_fdtd_algo == ElectromagneticSolverAlgo::Yee) {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
         ComputeVectorLaplacianCylindrical <CylindricalYeeAlgorithm> (
             out_field, in_field, eb_update, lev
         );
@@ -204,7 +204,7 @@ void FiniteDifferenceSolver::ComputeVectorLaplacian (
      * \param[in] eb_update  array indicating where the field should be updated with respect to the position of the embedded boundary
      * \param[in] lev  level number for the calculation
      */
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
 template<typename T_Algo>
 void FiniteDifferenceSolver::ComputeVectorLaplacianCylindrical (
     ablastr::fields::VectorField& out_field,

@@ -7,7 +7,7 @@
 #include "FiniteDifferenceSolver.H"
 
 #include "Fields.H"
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
 #   include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceAlgorithms/CylindricalYeeAlgorithm.H"
 #elif defined(WARPX_DIM_RSPHERE)
 #   include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceAlgorithms/SphericalYeeAlgorithm.H"
@@ -77,7 +77,7 @@ void FiniteDifferenceSolver::EvolveE (
 
     // Select algorithm (The choice of algorithm is a runtime option,
     // but we compile code for each algorithm, using templates)
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
     if (m_fdtd_algo == ElectromagneticSolverAlgo::Yee){
         EvolveECylindrical <CylindricalYeeAlgorithm> ( Efield, Bfield, Jfield, eb_update_E, Ffield, lev, dt );
 #elif defined(WARPX_DIM_RSPHERE)
@@ -105,7 +105,7 @@ void FiniteDifferenceSolver::EvolveE (
 }
 
 
-#if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
+#if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE) && !defined(WARPX_DIM_RTZ)
 
 template<typename T_Algo>
 void FiniteDifferenceSolver::EvolveECartesian (
@@ -234,7 +234,7 @@ void FiniteDifferenceSolver::EvolveECartesian (
 
 }
 
-#elif defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#elif defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
 
 template<typename T_Algo>
 void FiniteDifferenceSolver::EvolveECylindrical (

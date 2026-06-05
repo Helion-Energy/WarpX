@@ -243,13 +243,18 @@ class FiniteDifferenceSolver
         ElectromagneticSolverAlgo m_fdtd_algo;
         ablastr::utils::enums::GridType m_grid_type;
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
         amrex::Real m_dr, m_rmin;
         int m_nmodes;
-        // host-only
-        amrex::Vector<amrex::Real> m_h_stencil_coefs_r, m_h_stencil_coefs_z;
+#if defined(WARPX_DIM_RTZ)
+        // Azimuthal cell size (radians); theta is a real-space coordinate in RTZ
+        amrex::Real m_dtheta;
+#endif
+        // host-only (m_*_theta only populated/used in RTZ)
+        amrex::Vector<amrex::Real> m_h_stencil_coefs_r, m_h_stencil_coefs_theta, m_h_stencil_coefs_z;
         // device copy after init
         amrex::Gpu::DeviceVector<amrex::Real> m_stencil_coefs_r;
+        amrex::Gpu::DeviceVector<amrex::Real> m_stencil_coefs_theta;
         amrex::Gpu::DeviceVector<amrex::Real> m_stencil_coefs_z;
 #elif defined(WARPX_DIM_RSPHERE)
         amrex::Real m_dr, m_rmin;
@@ -270,7 +275,7 @@ class FiniteDifferenceSolver
         // The member functions below contain extended __device__ lambda.
         // In order to compile with nvcc, they need to be public.
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
         template< typename T_Algo >
         void EvolveBCylindrical (
             ablastr::fields::VectorField const& Bfield,

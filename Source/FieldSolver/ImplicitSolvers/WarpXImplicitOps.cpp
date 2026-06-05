@@ -157,7 +157,7 @@ WarpX::SaveParticlesAtImplicitStepStart ( )
 #if !defined(WARPX_DIM_1D_Z)
                 amrex::ParticleReal* x_n = pti.GetAttribs("x_n").dataPtr();
 #endif
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
                 amrex::ParticleReal* y_n = pti.GetAttribs("y_n").dataPtr();
 #endif
 #if !defined(WARPX_DIM_RCYLINDER)
@@ -180,7 +180,7 @@ WarpX::SaveParticlesAtImplicitStepStart ( )
 #if !defined(WARPX_DIM_1D_Z)
                     x_n[ip] = xp;
 #endif
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
                     y_n[ip] = yp;
 #endif
 #if !defined(WARPX_DIM_RCYLINDER)

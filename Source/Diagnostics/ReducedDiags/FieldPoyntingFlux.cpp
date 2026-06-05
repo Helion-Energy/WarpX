@@ -68,7 +68,7 @@ FieldPoyntingFlux::FieldPoyntingFlux (const std::string& rd_name)
 
             std::vector<std::string> sides = {"lo", "hi"};
 
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
             std::vector<std::string> space_coords = {"x", "y", "z"};
 #elif defined(WARPX_DIM_XZ)
             std::vector<std::string> space_coords = {"x", "z"};

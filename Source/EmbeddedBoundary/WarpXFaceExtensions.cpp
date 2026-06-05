@@ -35,7 +35,7 @@ namespace
         amrex::Array1D<int, 0, 2> sums{0, 0, 0};
 
         if (EB::enabled()) {
-#ifndef WARPX_DIM_RZ
+#if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_RTZ)
 
 #ifdef WARPX_DIM_XZ
             // In 2D we change the extrema of the for loop so that we only have the case idim=1
@@ -359,7 +359,7 @@ namespace
 
 #ifdef AMREX_USE_EB
 
-#ifndef WARPX_DIM_RZ
+#if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_RTZ)
 
     /**
     * \brief For the face of cell pointing in direction idim, return the number of faces
@@ -589,7 +589,7 @@ WarpX::ComputeOneWayExtensions ()
 #ifdef AMREX_USE_EB
     using ablastr::fields::Direction;
     using warpx::fields::FieldType;
-#ifndef WARPX_DIM_RZ
+#if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_RTZ)
     auto const eb_fact = fieldEBFactory(maxLevel());
 
     auto const &cell_size = CellSize(maxLevel());
@@ -720,7 +720,7 @@ WarpX::ComputeEightWaysExtensions ()
     using ablastr::fields::Direction;
     using warpx::fields::FieldType;
 
-#ifndef WARPX_DIM_RZ
+#if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_RTZ)
     auto const &cell_size = CellSize(maxLevel());
 
     const amrex::Real dx = cell_size[0];

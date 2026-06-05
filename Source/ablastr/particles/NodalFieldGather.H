@@ -91,6 +91,31 @@ void compute_weights (const amrex::ParticleReal xp,
 
     k = 0;
 
+#elif defined(WARPX_DIM_RTZ)
+
+    // Real-space cylindrical (r, theta, z) on a full 3D grid.
+    // The particle position is passed in Cartesian (xp, yp, zp); map it to the
+    // cylindrical grid coordinates (r, theta, z).
+    const amrex::Real r = (std::sqrt(xp*xp + yp*yp) - plo[0]) * dxi[0] - half_if_cell_centered;
+    i = static_cast<int>(amrex::Math::floor(r));
+    W[0][1] = r - i;
+
+    // theta in [-pi, pi] from atan2, wrapped into [plo[1], plo[1] + 2*pi)
+    constexpr amrex::Real twopi = 2.0_rt * amrex::Math::pi<amrex::Real>();
+    amrex::Real theta = std::atan2(yp, xp);
+    theta -= twopi * amrex::Math::floor((theta - plo[1]) / twopi);
+    const amrex::Real th = (theta - plo[1]) * dxi[1] - half_if_cell_centered;
+    j = static_cast<int>(amrex::Math::floor(th));
+    W[1][1] = th - j;
+
+    const amrex::Real z = (zp - plo[2]) * dxi[2] - half_if_cell_centered;
+    k = static_cast<int>(amrex::Math::floor(z));
+    W[2][1] = z - k;
+
+    W[0][0] = 1.0_rt - W[0][1];
+    W[1][0] = 1.0_rt - W[1][1];
+    W[2][0] = 1.0_rt - W[2][1];
+
 #elif defined(WARPX_DIM_RCYLINDER)
 
     amrex::ignore_unused(zp);

@@ -267,7 +267,7 @@ void doDirectJandSigmaDepositionKernel ([[maybe_unused]] const amrex::ParticleRe
     int const j_jz = ((jz_type[0] == NODE) ? j_node : j_cell);
 #endif //!defined(WARPX_DIM_1D_Z)
 
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     // y direction
     // Keep these double to avoid bug in single precision
     const double ymid = (yp - xyzmin.y)*dinv.y;
@@ -540,7 +540,7 @@ void doDirectJandSigmaDepositionKernel ([[maybe_unused]] const amrex::ParticleRe
             }
         }
     }
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     for (int iz = 0; iz <= depos_order; iz++){
         for (int iy = 0; iy <= depos_order; iy++){
             for (int ix = 0; ix <= depos_order; ix++){
@@ -853,7 +853,7 @@ void doVillasenorJandSigmaDepositionKernel ([[maybe_unused]] const amrex::Partic
 #elif defined(WARPX_DIM_1D_Z)
     amrex::Real const vx = uxp_mid*gaminv;
     amrex::Real const vy = uyp_mid*gaminv;
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     // Keep these double to avoid bug in single precision
     double x_new = (xp_new - xyzmin.x)*dinv.x;
     double const x_old = (xp_old - xyzmin.x)*dinv.x;
@@ -879,7 +879,7 @@ void doVillasenorJandSigmaDepositionKernel ([[maybe_unused]] const amrex::Partic
 #if !defined(WARPX_DIM_1D_Z)
     const double dxp = x_new - x_old;
 #endif
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     const double dyp = y_new - y_old;
 #endif
 #if !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
@@ -887,7 +887,7 @@ void doVillasenorJandSigmaDepositionKernel ([[maybe_unused]] const amrex::Partic
 #endif
 
     // Crop particle orbits at absorbing domain boundaries
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     ParticleUtils::crop_at_boundary(x_old, y_old, z_old, x_new, y_new, z_new,
                                     domain_double[0][0], domain_double[0][1], do_cropping[0]);
     ParticleUtils::crop_at_boundary(y_old, z_old, x_old, y_new, z_new, x_new,
@@ -915,7 +915,7 @@ void doVillasenorJandSigmaDepositionKernel ([[maybe_unused]] const amrex::Partic
     double shift = 0.0;
     if ( (depos_order % 2) == 0 ) { shift = 0.5; }
 
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
 
     // compute cell crossings in X-direction
     const auto i_old = static_cast<int>(x_old-shift);

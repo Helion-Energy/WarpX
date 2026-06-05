@@ -222,12 +222,14 @@ endfunction()
 
 # Set the suffix for targets and binaries depending on dimension
 #
-# User specify 1;2;3;RZ;RCYLINDER;RSPHERE in WarpX_DIMS.
+# User specify 1;2;3;RZ;RTZ;RCYLINDER;RSPHERE in WarpX_DIMS.
 # We append to CMake targets and binaries the suffix "Nd" for 1,2,3 or otherwise the lowercase dimension string
 #
 macro(warpx_set_suffix_dims suffix dim)
     if("${dim}" STREQUAL "RZ")
         set(${suffix} rz)
+    elseif("${dim}" STREQUAL "RTZ")
+        set(${suffix} rtz)
     elseif("${dim}" STREQUAL "RCYLINDER")
         set(${suffix} rcylinder)
     elseif("${dim}" STREQUAL "RSPHERE")

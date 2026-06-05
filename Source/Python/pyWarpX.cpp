@@ -22,6 +22,8 @@
 #  define PYWARPX_MODULE_NAME CONCAT_NAME(warpx_pybind_, 2d)
 #elif defined(WARPX_DIM_RZ)
 #  define PYWARPX_MODULE_NAME CONCAT_NAME(warpx_pybind_, rz)
+#elif defined(WARPX_DIM_RTZ)
+#  define PYWARPX_MODULE_NAME CONCAT_NAME(warpx_pybind_, rtz)
 #elif defined(WARPX_DIM_RCYLINDER)
 #  define PYWARPX_MODULE_NAME CONCAT_NAME(warpx_pybind_, rcylinder)
 #elif defined(WARPX_DIM_RSPHERE)
@@ -44,7 +46,7 @@ void init_WarpX(py::module&);
 
 PYBIND11_MODULE(PYWARPX_MODULE_NAME, m) {
     // make sure AMReX types are known
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     auto amr = py::module::import("amrex.space3d");
 #elif defined(WARPX_DIM_1D_Z) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     auto amr = py::module::import("amrex.space1d");

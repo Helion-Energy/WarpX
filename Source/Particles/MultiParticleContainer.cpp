@@ -384,7 +384,7 @@ MultiParticleContainer::ReadParameters ()
                 pp_qed_schwinger, "xmin", m_qed_schwinger_xmin);
             utils::parser::queryWithParser(
                 pp_qed_schwinger, "xmax", m_qed_schwinger_xmax);
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
             utils::parser::queryWithParser(
                 pp_qed_schwinger, "ymin", m_qed_schwinger_ymin);
             utils::parser::queryWithParser(
@@ -1083,7 +1083,7 @@ MultiParticleContainer::SetDoBackTransformedParticles (const std::string& specie
 #if (AMREX_SPACEDIM >= 2)
                pc->AddRealComp("x_n_btd", comm);
 #endif
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ) || defined(WARPX_DIM_RZ)
                pc->AddRealComp("y_n_btd", comm);
 #endif
                pc->AddRealComp("z_n_btd", comm);
@@ -1573,7 +1573,7 @@ MultiParticleContainer::doQEDSchwinger ()
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
     const auto dV = geom.CellSize(0) * geom.CellSize(1)
         * m_qed_schwinger_y_size;
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     const auto dV = geom.CellSize(0) * geom.CellSize(1)
         * geom.CellSize(2);
 #endif
@@ -1654,7 +1654,7 @@ MultiParticleContainer::ComputeSchwingerGlobalBox () const
     constexpr int level_0 = 0;
     amrex::Geometry const & geom = warpx.Geom(level_0);
 
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     const amrex::Array<amrex::Real,3> schwinger_min{m_qed_schwinger_xmin,
                                                     m_qed_schwinger_ymin,
                                                     m_qed_schwinger_zmin};

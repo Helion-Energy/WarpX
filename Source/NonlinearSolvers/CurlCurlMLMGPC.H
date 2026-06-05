@@ -306,7 +306,7 @@ void CurlCurlMLMGPC<T,Ops>::Update (const T& a_U)
             m_curl_curl->setBeta({Array<MultiFab const*,3>{ (*m_bcoefs)[n][0],
                                                             (*m_bcoefs)[n][2],
                                                             (*m_bcoefs)[n][1]}});
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
             m_curl_curl->setBeta({Array<MultiFab const*,3>{ (*m_bcoefs)[n][0],
                                                             (*m_bcoefs)[n][1],
                                                             (*m_bcoefs)[n][2]}});
@@ -378,7 +378,7 @@ void CurlCurlMLMGPC<T,Ops>::Apply (T& a_x, const T& a_b)
         Array<MultiFab,3> rhs      { MultiFab(*b_mfarrvec[n][0], make_alias, 0, 1),
                                      MultiFab(*b_mfarrvec[n][2], make_alias, 0, 1),
                                      MultiFab(*b_mfarrvec[n][1], make_alias, 0, 1) };
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
         Array<MultiFab,3> solution { MultiFab(*x_mfarrvec[n][0], make_alias, 0, 1),
                                      MultiFab(*x_mfarrvec[n][1], make_alias, 0, 1),
                                      MultiFab(*x_mfarrvec[n][2], make_alias, 0, 1) };

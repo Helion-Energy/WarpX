@@ -240,7 +240,7 @@ web::MarkUpdateECellsECT (
 
         amrex::Array4<amrex::Real> const & lx_arr = edge_lengths[0]->array(mfi);
         amrex::Array4<amrex::Real> const & lz_arr = edge_lengths[2]->array(mfi);
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
         amrex::Array4<amrex::Real> const & ly_arr = edge_lengths[1]->array(mfi);
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
         amrex::Dim3 const lx_lo = amrex::lbound(lx_arr);
@@ -255,7 +255,7 @@ web::MarkUpdateECellsECT (
                 eb_update_Ex_arr(i, j, k) = (lx_arr(i, j, k) == 0)? 0 : 1;
             },
             [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-#ifdef WARPX_DIM_3D
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                 // In 3D: Do not update Ey if the edge on which it lives is fully covered
                 eb_update_Ey_arr(i, j, k) = (ly_arr(i, j, k) == 0)? 0 : 1;
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
@@ -300,7 +300,7 @@ web::MarkUpdateBCellsECT (
         amrex::Array4<int> const & eb_update_By_arr = eb_update_B[1]->array(mfi);
         amrex::Array4<int> const & eb_update_Bz_arr = eb_update_B[2]->array(mfi);
 
-#ifdef WARPX_DIM_3D
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
         amrex::Array4<amrex::Real> const & Sx_arr = face_areas[0]->array(mfi);
         amrex::Array4<amrex::Real> const & Sy_arr = face_areas[1]->array(mfi);
         amrex::Array4<amrex::Real> const & Sz_arr = face_areas[2]->array(mfi);
@@ -312,7 +312,7 @@ web::MarkUpdateBCellsECT (
 #endif
         amrex::ParallelFor (tbx, tby, tbz,
             [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-#ifdef WARPX_DIM_3D
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                 // In 3D: do not update Bx if the face on which it lives is fully covered
                 eb_update_Bx_arr(i, j, k) = (Sx_arr(i, j, k) == 0)? 0 : 1;
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
@@ -325,7 +325,7 @@ web::MarkUpdateBCellsECT (
                 eb_update_By_arr(i, j, k) = (Sy_arr(i, j, k) == 0)? 0 : 1;
             },
             [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-#ifdef WARPX_DIM_3D
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                 // In 3D: do not update Bz if the face on which it lives is fully covered
                 eb_update_Bz_arr(i, j, k) = (Sz_arr(i, j, k) == 0)? 0 : 1;
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
@@ -479,7 +479,7 @@ web::ComputeEdgeLengths (
                 int idim_amrex = idim;
                 if (idim == 2) { idim_amrex = 1; }
                 auto const &edge_cent = edge_centroid[idim_amrex]->const_array(mfi);
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                 auto const &edge_cent = edge_centroid[idim]->const_array(mfi);
 #endif
                 amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
@@ -517,7 +517,7 @@ web::ComputeFaceAreas (
 #if defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
     //In 2D the volume frac is actually the area frac.
     auto const &area_frac = eb_fact.getVolFrac();
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     auto const &area_frac = eb_fact.getAreaFrac();
 #endif
 
@@ -546,7 +546,7 @@ web::ComputeFaceAreas (
             } else {
 #if defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
                 auto const &face = area_frac.const_array(mfi);
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                 auto const &face = area_frac[idim]->const_array(mfi);
 #endif
                 amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {

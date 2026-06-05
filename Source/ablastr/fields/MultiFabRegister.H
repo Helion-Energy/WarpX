@@ -74,7 +74,7 @@ namespace ablastr::fields
     public:
         constexpr explicit Direction (int d) : dir(d) {}
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
         static const Direction r;
         static const Direction theta;
 
@@ -106,7 +106,7 @@ namespace ablastr::fields
 
         operator std::string() const // NOLINT(google-explicit-constructor)
         {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
             if (dir == r) { return r_string; }
             if (dir == theta) { return theta_string; }
 #endif
@@ -127,7 +127,7 @@ namespace ablastr::fields
         Direction (std::string const & s) : // NOLINT(google-explicit-constructor)
             dir{-1}
         {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
             if (s == r_string) { dir = r; }
             if (s == theta_string) { dir = theta; }
 #endif
@@ -166,7 +166,7 @@ namespace ablastr::fields
 
     };
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
     inline constexpr Direction Direction::r = Direction{0};
     inline constexpr Direction Direction::theta = Direction{1};
 #endif
@@ -179,7 +179,7 @@ namespace ablastr::fields
     inline constexpr Direction Direction::y = Direction{1};
 #endif
 
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ) || defined(WARPX_DIM_1D_Z) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ) || defined(WARPX_DIM_1D_Z) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
     inline constexpr Direction Direction::z = Direction{2};
 #endif
 
@@ -944,7 +944,7 @@ namespace ablastr::fields
         static inline std::vector<Direction> m_all_dirs =
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ) || defined(WARPX_DIM_1D_Z)
             {Direction::x, Direction::y, Direction::z};
-#elif defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#elif defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
             {Direction::r, Direction::theta, Direction::z};
 #elif defined(WARPX_DIM_RSPHERE)
             {Direction::r, Direction::theta, Direction::phi};

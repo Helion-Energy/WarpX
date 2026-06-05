@@ -268,7 +268,7 @@ else:
 
 
 # for CMake
-cxx_modules = []  # values: warpx_1d, warpx_2d, warpx_rz, warpx_3d
+cxx_modules = []  # values: warpx_1d, warpx_2d, warpx_rz, warpx_rtz, warpx_3d
 cmdclass = {}  # build extensions
 
 # externally pre-built: pick up pre-built WarpX libraries
@@ -278,7 +278,7 @@ if PYWARPX_LIB_DIR:
 else:
     cmdclass = dict(build_ext=CMakeBuild)
     for dim in [x.lower() for x in WARPX_DIMS.split(";")]:
-        name = dim if dim == "rz" else dim + "d"
+        name = dim if dim in ("rz", "rtz") else dim + "d"
         cxx_modules.append(CMakeExtension("warpx_" + name))
 
 # Get the package requirements from the requirements.txt file

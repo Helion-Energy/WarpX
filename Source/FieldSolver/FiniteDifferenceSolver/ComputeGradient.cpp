@@ -10,7 +10,7 @@
 #include "FiniteDifferenceSolver.H"
 
 #include "EmbeddedBoundary/Enabled.H"
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
 #   include "FiniteDifferenceAlgorithms/CylindricalYeeAlgorithm.H"
 #elif defined(WARPX_DIM_RSPHERE)
 #   include "FiniteDifferenceAlgorithms/SphericalYeeAlgorithm.H"
@@ -32,7 +32,7 @@ void FiniteDifferenceSolver::ComputeGradient (
     // Select algorithm (The choice of algorithm is a runtime option,
     // but we compile code for each algorithm, using templates)
     if (m_fdtd_algo == ElectromagneticSolverAlgo::Yee) {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
         ComputeGradientCylindrical <CylindricalYeeAlgorithm> (
             out_field, in_field, eb_update, lev
         );
@@ -62,7 +62,7 @@ void FiniteDifferenceSolver::ComputeGradient (
      * \param[in] eb_update  array indicating where the field should be updated with respect to the position of the embedded boundary
      * \param[in] lev  level number for the calculation
      */
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
 template<typename T_Algo>
 void FiniteDifferenceSolver::ComputeGradientCylindrical (
     ablastr::fields::VectorField& out_field,

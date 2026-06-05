@@ -81,6 +81,13 @@ struct PIdx
 #elif defined(WARPX_DIM_3D)
     enum                          { x ,  y,   z,   w,   ux,   uy,   uz,            nattribs};
     static constexpr auto names = {"x", "y", "z", "w", "ux", "uy", "uz"};
+#elif defined(WARPX_DIM_RTZ)
+    // Real-space cylindrical (r, theta, z): three AMReX position coordinates,
+    // matching the three grid axes. Unlike RZ, theta is a position (PIdx::y),
+    // not a separate attribute. Positions are stored cylindrical; the push is
+    // done in Cartesian via Get/SetParticlePosition.
+    enum                          { x ,  y ,      z ,  w ,  ux ,  uy ,  uz,          nattribs};
+    static constexpr auto names = {"r", "theta", "z", "w", "ux", "uy", "uz"};
 #else
   #error WarpX dimension is not correctly set!
 #endif

@@ -21,7 +21,7 @@ void warpx_computedivb(
     amrex::Real dxinv,
     amrex::Real dyinv,
     amrex::Real dzinv,
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
     amrex::Real const rmin,
 #endif
     bool collocated = false)
@@ -29,7 +29,7 @@ void warpx_computedivb(
     // TODO: Update to use the templated operators in the FiniteDifference object
     using namespace amrex;
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
     const amrex::Real ru = 1._rt + 0.5_rt/(rmin*dxinv + i + 0.5_rt);
     const amrex::Real rd = 1._rt - 0.5_rt/(rmin*dxinv + i + 0.5_rt);
 #endif
@@ -48,7 +48,7 @@ void warpx_computedivb(
         divB(i,0,0,dcomp) = 0.5_rt*(Bz(i+1,0  ,0) - Bz(i-1,0,0))*dzinv;
         amrex::ignore_unused(j, Bx, dxinv);
         amrex::ignore_unused(k, By, dyinv);
-#elif defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#elif defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
         amrex::Abort("Collocated non-Cartesian grids are not a currently supported mode for computing div B.");
 #endif
     } else {

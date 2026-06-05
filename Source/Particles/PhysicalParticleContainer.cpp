@@ -326,7 +326,7 @@ PhysicalParticleContainer::PhysicalParticleContainer (AmrCore* amr_core, int isp
 #if !defined(WARPX_DIM_1D_Z)
         AddRealComp("prev_x");
 #endif
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
         AddRealComp("prev_y");
 #endif
 #if defined(WARPX_ZINDEX)
@@ -945,7 +945,7 @@ PhysicalParticleContainer::applyNCIFilter (
     byeli = filtered_By.elixir();
     nci_godfrey_filter_bxbyez[lev]->ApplyStencil(filtered_By, By, filtered_By.box());
     by_ptr = &filtered_By;
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     // Filter Ey
     filtered_Ey.resize(amrex::convert(tbox,Ey.box().ixType()));
     eyeli = filtered_Ey.elixir();
@@ -1088,7 +1088,7 @@ PhysicalParticleContainer::SplitParticles (int lev)
                         psplit_w.push_back( wp[i]/np_split );
                     }
                 }
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
                 if (split_type==0){
                     // Split particle in two along each diagonals
                     // 8 particles in 3d
@@ -1435,7 +1435,7 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
 #if !defined(WARPX_DIM_1D_Z)
         x_old = pti.GetAttribs("prev_x").dataPtr() + offset;
 #endif
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
         y_old = pti.GetAttribs("prev_y").dataPtr() + offset;
 #endif
 #if defined(WARPX_ZINDEX)
@@ -1493,7 +1493,7 @@ PhysicalParticleContainer::PushPX (WarpXParIter& pti,
 #if !defined(WARPX_DIM_1D_Z)
             x_old[ip] = xp;
 #endif
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
             y_old[ip] = yp;
 #endif
 #if defined(WARPX_ZINDEX)
@@ -1892,7 +1892,7 @@ PhysicalParticleContainer::DepositTemperature (
 #elif   defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
     const amrex::IntVect shape_extent = amrex::IntVect(static_cast<int>(WarpX::nox/2),
                                                        static_cast<int>(WarpX::noz/2));
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     const amrex::IntVect shape_extent = amrex::IntVect(static_cast<int>(WarpX::nox/2),
                                                        static_cast<int>(WarpX::noy/2),
                                                        static_cast<int>(WarpX::noz/2));

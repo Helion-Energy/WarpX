@@ -18,7 +18,7 @@ void ImplicitSolver::CreateParticleAttributes () const
 #if !defined(WARPX_DIM_1D_Z)
         pc->AddRealComp("x_n", comm);
 #endif
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
         pc->AddRealComp("y_n", comm);
 #endif
 #if !defined(WARPX_DIM_RCYLINDER)
@@ -496,7 +496,7 @@ void ImplicitSolver::parseNonlinearSolverParams ( const amrex::ParmParse&  pp )
             !m_use_mass_matrices,
             "Using mass matrices is not setup for DIM = RSPHERE!");
 #endif
-#if defined(WARPX_DIM_3D)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !m_use_mass_matrices_jacobian,
             "Using mass matrices for jacobian can not be used for DIM = 3");
@@ -831,7 +831,7 @@ void ImplicitSolver::PreRHSOp ( const amrex::Real  a_cur_time,
         CumulateJ();
     }
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
     for (int lev = 0; lev < m_num_amr_levels; ++lev) {
         ablastr::fields::VectorField J = m_WarpX->m_fields.get_alldirs(FieldType::current_fp, lev);
         m_WarpX->ApplyInverseVolumeScalingToCurrentDensity(J[0], J[1], J[2], lev);
@@ -908,7 +908,7 @@ void ImplicitSolver::SyncMassMatricesPCAndApplyBCs ()
             amrex::MultiFab::Add(*MM_PC[2], *MM_zz, mm_comp_start, mm_pc_comp_start, m_ncomp_pc_zz[0], MM_zz->nGrowVect());
         }
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RTZ)
         m_WarpX->ApplyInverseVolumeScalingToMassMatricesPC(MM_PC[0], MM_PC[1], MM_PC[2], lev);
 #endif
     }

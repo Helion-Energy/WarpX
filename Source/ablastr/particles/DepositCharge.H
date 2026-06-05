@@ -115,7 +115,7 @@ deposit_charge (typename T_PC::ParIterType& pti,
     amrex::ignore_unused(noy);
     const amrex::IntVect shape_extent = amrex::IntVect(static_cast<int>(nox/2+1),
                                                        static_cast<int>(noz/2+1));
-#elif defined(WARPX_DIM_3D)
+#elif defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     const amrex::IntVect shape_extent = amrex::IntVect(static_cast<int>(nox/2+1),
                                                        static_cast<int>(noy/2+1),
                                                        static_cast<int>(noz/2+1));
