@@ -33,3 +33,14 @@ add_warpx_test(
     OFF  # dependency
 )
 label_warpx_test(test_rtz_ohm_solver_cylinder_compression_picmi slow)
+
+add_warpx_test(
+    test_rtz_ohm_solver_cylinder_compression_theta_mode_picmi  # name
+    RTZ  # dims
+    2  # nprocs
+    "inputs_test_rtz_ohm_solver_cylinder_compression_theta_mode_picmi.py --test"  # inputs
+    "analysis_rtz_theta_mode.py"  # analysis (m=1 theta-operator exercise)
+    OFF  # checksum
+    OFF  # dependency
+)
+label_warpx_test(test_rtz_ohm_solver_cylinder_compression_theta_mode_picmi slow)
