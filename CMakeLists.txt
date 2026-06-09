@@ -90,9 +90,11 @@ option(WarpX_QED_TOOLS     "Build external tool to generate QED lookup tables (r
 
 # Advanced option to run tests
 option(WarpX_TEST_CLEANUP "Clean up automated test directories" OFF)
+option(WarpX_TEST_CXX "Build standalone C++ unit-test executables (e.g. FD operator tests)" OFF)
 option(WarpX_TEST_DEBUGGER "Run automated tests without AMReX signal handling (to attach debuggers)" OFF)
 option(WarpX_TEST_FPETRAP "Run automated tests with FPE-trapping runtime parameters" OFF)
 mark_as_advanced(WarpX_TEST_CLEANUP)
+mark_as_advanced(WarpX_TEST_CXX)
 mark_as_advanced(WarpX_TEST_DEBUGGER)
 mark_as_advanced(WarpX_TEST_FPETRAP)
 
