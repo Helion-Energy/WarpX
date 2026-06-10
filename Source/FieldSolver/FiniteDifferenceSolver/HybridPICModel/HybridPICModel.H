@@ -17,6 +17,7 @@
 
 #include "EBJBoundary.H"
 #include "ExternalVectorPotential.H"
+#include "GlobalARecovery.H"
 #include "Utils/WarpXAlgorithmSelection.H"
 
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
@@ -245,6 +246,10 @@ public:
     /** External E/B fields */
     bool m_add_external_fields = false;
     std::unique_ptr<ExternalVectorPotential> m_external_vector_potential;
+
+    /** Global A recovery for the vacuum region */
+    bool m_use_global_A_recovery = false;
+    std::unique_ptr<GlobalARecovery> m_global_A_recovery;
 
     /** If true, use the conformal embedded-boundary Faraday update (enlarged
      *  cell technique, Xiao and Liu, IEEE MWCL 2004) for the B-field push

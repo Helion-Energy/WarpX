@@ -197,6 +197,35 @@ class FiniteDifferenceSolver
             int lev );
 
         /**
+          * \brief Reconstruction of the E field in vacuum cells from the
+          * recovered vector potential: E = -dA/dt - grad(Pe)/rho, where
+          * dA/dt uses BDF2 time differencing when enough history exists.
+          * Cells with rho >= n_floor*q_e keep their Ohm's law E value.
+          *
+          * \param[out] Efield  vector of electric field MultiFabs updated in vacuum cells
+          * \param[in] Afield   vector potential at the new time (E staggering)
+          * \param[in] Afield_prev   vector potential at the previous time
+          * \param[in] Afield_old    vector potential two steps back (used by BDF2)
+          * \param[in] rhofield scalar ion charge density Multifab at a given level
+          * \param[in] Pefield  scalar electron pressure MultiFab at a given level
+          * \param[in] eb_update_E indicate in which cell E should be updated (related to embedded boundaries)
+          * \param[in] lev  level number for the calculation
+          * \param[in] hybrid_model instance of the hybrid-PIC model
+          * \param[in] dt  full timestep size
+          * \param[in] use_bdf2 whether to use BDF2 (3 time levels) for dA/dt
+          */
+        void HybridPICVacuumEFromA (
+            ablastr::fields::VectorField const& Efield,
+            ablastr::fields::VectorField const& Afield,
+            ablastr::fields::VectorField const& Afield_prev,
+            ablastr::fields::VectorField const& Afield_old,
+            amrex::MultiFab const& rhofield,
+            amrex::MultiFab const& Pefield,
+            std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_E,
+            int lev, HybridPICModel const* hybrid_model,
+            amrex::Real dt, bool use_bdf2 );
+
+        /**
           * \brief Calculation of the gradient of the given scalar field.
           *
           * \param[out] out_field  vector of output MultiFabs at a given level
@@ -328,6 +357,19 @@ class FiniteDifferenceSolver
             ablastr::fields::VectorField const& Afield,
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_B,
             int lev
+        );
+
+        template<typename T_Algo>
+        void HybridPICVacuumEFromACylindrical (
+            ablastr::fields::VectorField const& Efield,
+            ablastr::fields::VectorField const& Afield,
+            ablastr::fields::VectorField const& Afield_prev,
+            ablastr::fields::VectorField const& Afield_old,
+            amrex::MultiFab const& rhofield,
+            amrex::MultiFab const& Pefield,
+            std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_E,
+            int lev, HybridPICModel const* hybrid_model,
+            amrex::Real dt, bool use_bdf2
         );
 
         template<typename T_Algo>
@@ -545,6 +587,19 @@ class FiniteDifferenceSolver
             ablastr::fields::VectorField const& Afield,
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_B,
             int lev
+        );
+
+        template<typename T_Algo>
+        void HybridPICVacuumEFromACartesian (
+            ablastr::fields::VectorField const& Efield,
+            ablastr::fields::VectorField const& Afield,
+            ablastr::fields::VectorField const& Afield_prev,
+            ablastr::fields::VectorField const& Afield_old,
+            amrex::MultiFab const& rhofield,
+            amrex::MultiFab const& Pefield,
+            std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_E,
+            int lev, HybridPICModel const* hybrid_model,
+            amrex::Real dt, bool use_bdf2
         );
 
         template<typename T_Algo>

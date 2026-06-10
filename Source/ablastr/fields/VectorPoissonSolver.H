@@ -77,6 +77,7 @@ namespace ablastr::fields {
  * \param[in] post_A_calculation perform a calculation per level directly after A was calculated; required for embedded boundaries (default: none)
  * \param[in] current_time the current time; required for embedded boundaries (default: none)
  * \param[in] eb_farray_box_factory a factory for field data, @see amrex::EBFArrayBoxFactory; required for embedded boundaries (default: none)
+ * \param[in] bottom_solver the bottom solver used by MLMG on the coarsest level (default: amrex::BottomSolver::Default)
  */
 template<
     typename T_BoundaryHandler,
@@ -99,7 +100,8 @@ computeVectorPotential   (  amrex::Vector<amrex::Array<amrex::MultiFab*, 3> > co
                             std::optional<amrex::Vector<amrex::IntVect> > rel_ref_ratio = std::nullopt,
                             [[maybe_unused]] T_PostACalculationFunctor post_A_calculation = std::nullopt,
                             [[maybe_unused]] std::optional<amrex::Real const> current_time = std::nullopt, // only used for EB
-                            [[maybe_unused]] const std::optional<amrex::Vector<T_FArrayBoxFactory const *> >& eb_farray_box_factory = std::nullopt // only used for EB
+                            [[maybe_unused]] const std::optional<amrex::Vector<T_FArrayBoxFactory const *> >& eb_farray_box_factory = std::nullopt, // only used for EB
+                            amrex::BottomSolver bottom_solver = amrex::BottomSolver::Default
 )
 {
     using namespace amrex::literals;
@@ -212,6 +214,7 @@ computeVectorPotential   (  amrex::Vector<amrex::Array<amrex::MultiFab*, 3> > co
             mlmg[adim]->setVerbose(verbosity);
             mlmg[adim]->setMaxIter(max_iters);
             mlmg[adim]->setConvergenceNormType(always_use_bnorm ? amrex::MLMGNormType::bnorm : amrex::MLMGNormType::greater);
+            mlmg[adim]->setBottomSolver(bottom_solver);
 
             // Solve Poisson equation at lev
             mlmg[adim]->solve( {A[lev][adim]}, {curr[lev][adim]},

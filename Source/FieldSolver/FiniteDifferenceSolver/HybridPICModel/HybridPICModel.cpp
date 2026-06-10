@@ -95,6 +95,13 @@ void HybridPICModel::ReadParameters ()
         m_external_vector_potential = std::make_unique<ExternalVectorPotential>();
     }
 
+    // global A recovery to correct the fields in the vacuum region
+    pp_hybrid.query("use_global_A_recovery", m_use_global_A_recovery);
+
+    if (m_use_global_A_recovery) {
+        m_global_A_recovery = std::make_unique<GlobalARecovery>(this);
+    }
+
     // conformal (enlarged-cell technique) embedded-boundary Faraday update
     pp_hybrid.query("use_conformal_eb", m_use_conformal_eb);
 
@@ -217,6 +224,16 @@ void HybridPICModel::AllocateLevelMFs (
         );
     }
 
+    if (m_use_global_A_recovery) {
+        m_global_A_recovery->AllocateLevelMFs(
+            fields,
+            lev, ba, dm,
+            ncomps, ngEB, ngRho,
+            Ex_nodal_flag, Ey_nodal_flag, Ez_nodal_flag,
+            Bx_nodal_flag, By_nodal_flag, Bz_nodal_flag
+        );
+    }
+
 #ifdef WARPX_DIM_RZ
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         (ncomps == 1),
@@ -327,6 +344,10 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
 
     if (m_add_external_fields) {
         m_external_vector_potential->InitData();
+    }
+
+    if (m_use_global_A_recovery) {
+        m_global_A_recovery->InitData();
     }
 }
 

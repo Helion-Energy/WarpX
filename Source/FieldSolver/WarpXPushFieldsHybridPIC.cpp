@@ -43,6 +43,9 @@ void WarpX::HybridPICEvolveFields ()
     // Get flag to include external fields.
     const bool add_external_fields = m_hybrid_pic_model->m_add_external_fields;
 
+    // Get flag to recover the global vector potential A.
+    const bool use_A_recovery = m_hybrid_pic_model->m_use_global_A_recovery;
+
     // Handle field splitting for Hybrid field push
     if (add_external_fields) {
         // Get the external fields
@@ -98,6 +101,12 @@ void WarpX::HybridPICEvolveFields ()
         }
     }
 
+    // Rotate the recovered vector potential history (A_old <- A_prev <- A)
+    // before the new solves of this step
+    if (use_A_recovery) {
+        m_hybrid_pic_model->m_global_A_recovery->AdvanceHistory();
+    }
+
     // Push the B field from t=n to t=n+1/2 using the current and density
     // at t=n, while updating the E field along with B using the electron
     // momentum equation
@@ -146,6 +155,16 @@ void WarpX::HybridPICEvolveFields ()
             0.5_rt*dt[0]);
     }
 
+    // Recover the global vector potential A^{n+1/2} from the plasma current
+    // and replace B^{n+1/2} with curl(A) in the vacuum region where the
+    // local Faraday update is unreliable
+    if (use_A_recovery) {
+        m_hybrid_pic_model->m_global_A_recovery->RecoverB(
+            m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, finest_level),
+            rho_fp_temp,
+            guard_cells.ng_FieldSolver, WarpX::sync_nodal_points);
+    }
+
     // Now push the B field from t=n+1/2 to t=n+1 using the n+1/2 quantities
     if (use_rkf45) {
         m_hybrid_pic_model->BfieldEvolveRKF45(
@@ -173,6 +192,16 @@ void WarpX::HybridPICEvolveFields ()
                 WarpX::sync_nodal_points
             );
         }
+    }
+
+    // Recover the global vector potential A^{n+1} and replace B^{n+1} with
+    // curl(A) in the vacuum region. The recovered A is stored for the dA/dt
+    // used in the vacuum E reconstruction below.
+    if (use_A_recovery) {
+        m_hybrid_pic_model->m_global_A_recovery->RecoverB(
+            m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, finest_level),
+            m_fields.get_mr_levels(FieldType::rho_fp, finest_level),
+            guard_cells.ng_FieldSolver, WarpX::sync_nodal_points);
     }
 
     // Extrapolate the ion current density to t=n+1 using
@@ -213,6 +242,16 @@ void WarpX::HybridPICEvolveFields ()
         m_fields.get_mr_levels(FieldType::rho_fp, finest_level),
         m_eb_update_E, false);
     FillBoundaryE(guard_cells.ng_FieldSolver, WarpX::sync_nodal_points);
+
+    // Reconstruct the E field in the vacuum region from the recovered A,
+    // E = -dA/dt - grad(Pe)/rho, where the Ohm's law solution is unreliable
+    if (use_A_recovery) {
+        m_hybrid_pic_model->m_global_A_recovery->ReconstructVacuumE(
+            m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, finest_level),
+            m_fields.get_mr_levels(FieldType::rho_fp, finest_level),
+            dt[0],
+            guard_cells.ng_FieldSolver, WarpX::sync_nodal_points);
+    }
 
     // Handle field splitting for Hybrid field push
     if (add_external_fields) {
@@ -369,6 +408,13 @@ void WarpX::HybridPICInitializeRhoJandB ()
         // still empty.
         HybridPICDepositRhoAndJ();
 
+        // Seed the recovered vector potential history with A^0 solved from
+        // the initial (plasma-only) B field, so that the first step has a
+        // meaningful dA/dt. This does not modify the initial fields.
+        if (m_hybrid_pic_model->m_use_global_A_recovery) {
+            m_hybrid_pic_model->m_global_A_recovery->InitialSolve();
+        }
+
         // Handle field splitting for Hybrid field push
         if (m_hybrid_pic_model->m_add_external_fields) {
             // Get the external fields
@@ -387,6 +433,37 @@ void WarpX::HybridPICInitializeRhoJandB ()
                         "Non-finite value detected in external B-field at t=0."
                     );
 
+                    MultiFab::Add(
+                        *m_fields.get(FieldType::Bfield_fp, Direction{idim}, lev),
+                        *m_fields.get(FieldType::hybrid_B_fp_external, Direction{idim}, lev),
+                        0, 0, 1,
+                        m_fields.get(FieldType::Bfield_fp, Direction{idim}, lev)->nGrowVect());
+                }
+            }
+        }
+    } else if (m_hybrid_pic_model->m_use_global_A_recovery) {
+        // On restart the A history is not part of the checkpoint, so re-seed
+        // it from the restored fields. The restored B field holds the total
+        // field, so temporarily remove the external part to solve for the
+        // plasma-generated A.
+        const bool add_external_fields = m_hybrid_pic_model->m_add_external_fields;
+        if (add_external_fields) {
+            for (int lev = 0; lev <= finest_level; ++lev) {
+                for (int idim = 0; idim < 3; ++idim) {
+                    MultiFab::Subtract(
+                        *m_fields.get(FieldType::Bfield_fp, Direction{idim}, lev),
+                        *m_fields.get(FieldType::hybrid_B_fp_external, Direction{idim}, lev),
+                        0, 0, 1,
+                        m_fields.get(FieldType::Bfield_fp, Direction{idim}, lev)->nGrowVect());
+                }
+            }
+        }
+
+        m_hybrid_pic_model->m_global_A_recovery->InitialSolve();
+
+        if (add_external_fields) {
+            for (int lev = 0; lev <= finest_level; ++lev) {
+                for (int idim = 0; idim < 3; ++idim) {
                     MultiFab::Add(
                         *m_fields.get(FieldType::Bfield_fp, Direction{idim}, lev),
                         *m_fields.get(FieldType::hybrid_B_fp_external, Direction{idim}, lev),

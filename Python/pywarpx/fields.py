@@ -380,6 +380,18 @@ def BzHybridExternalWrapper(level=0):
     return MultiFabWrapper(mf_name="hybrid_B_fp_external", idir=2, level=level)
 
 
+def AxHybridRecoveredWrapper(level=0):
+    return MultiFabWrapper(mf_name="hybrid_A_fp", idir=0, level=level)
+
+
+def AyHybridRecoveredWrapper(level=0):
+    return MultiFabWrapper(mf_name="hybrid_A_fp", idir=1, level=level)
+
+
+def AzHybridRecoveredWrapper(level=0):
+    return MultiFabWrapper(mf_name="hybrid_A_fp", idir=2, level=level)
+
+
 def JxFPWrapper(level=0):
     return MultiFabWrapper(mf_name="current_fp", idir=0, level=level)
 
