@@ -423,10 +423,18 @@ void GlobalARecovery::SolveA ()
         std::nullopt,
         warpx.gett_new(0),
         eb_farray_box_factory,
+#if defined(WARPX_DIM_RZ)
         // The bottom BiCGStab solver breaks down on the coarsened RZ vector
         // Laplacian (the -1/r^2 term for the r and theta components), so use
         // plain relaxation on the (small) coarsest level instead.
         amrex::BottomSolver::smoother
+#else
+        // In Cartesian geometry use the default (BiCGStab) bottom solver:
+        // plain relaxation cannot reduce the coarsest-level error enough at
+        // higher resolutions (the embedded boundary limits the multigrid
+        // coarsening depth) and the solve stalls below convergence.
+        amrex::BottomSolver::Default
+#endif
     );
 }
 
