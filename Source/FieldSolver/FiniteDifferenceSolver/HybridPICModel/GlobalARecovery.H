@@ -143,8 +143,39 @@ public:
     /** Zero the Dirichlet domain boundary nodes of the nodal A guess. */
     void ZeroDirichletBoundaryNodes ();
 
-    /** Interpolate the nodal A solution onto the edge (E) staggering. */
+    /** Interpolate the nodal A solution onto the edge (E) staggering.
+     *
+     *  With the conformal embedded-boundary solve, cut edges receive the
+     *  average of A over their uncovered segment instead of the edge-center
+     *  value: the recovered A vanishes on the embedded surface (homogeneous
+     *  Dirichlet), so along a cut edge A closes linearly to zero at the cut
+     *  point and the segment average is half the fluid-endpoint value. This
+     *  is the value the conformal (length-weighted) circulations expect, and
+     *  it makes the reconstructed vacuum E = -dA/dt consistent on cut edges.
+     */
     void InterpNodalAToEdge ();
+
+    /** Compute B_from_A = curl(A) on the B staggering: the nodal solution is
+     *  interpolated to the edges, the standard curl is taken, and with the
+     *  conformal embedded-boundary solve the cut faces are recomputed from
+     *  the conformal circulation (see ConformalizeBFromA). */
+    void ComputeBFromA ();
+
+    /** Recompute B_from_A on cut faces from the conformal circulation of the
+     *  nodal A around the uncovered face contour:
+     *
+     *      B * S_cut = sum_edges (+/-) integral_(uncovered segment) A . dl
+     *
+     *  using the enlarged-cell-technique geometry (face areas and edge
+     *  lengths). The segment integrals are trapezoids of the nodal A; on cut
+     *  edges A closes linearly to zero at the cut point (the recovery solves
+     *  with homogeneous Dirichlet A on the embedded surface, so the closing
+     *  segment along the surface contributes nothing). This is exact for
+     *  linear A and second-order accurate in general, and it places blended
+     *  faces in the same discrete flux space as the conformally evolved
+     *  ones, removing the stair-step mismatch of the standard curl at the
+     *  walls. Faces with zero uncovered area are left to the mirror fill. */
+    void ConformalizeBFromA ();
 
     /** Replace B with curl(A) where the charge density interpolated to the
      *  B staggering is below n_floor*q_e. */

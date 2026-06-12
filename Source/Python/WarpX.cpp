@@ -317,6 +317,20 @@ void init_WarpX (py::module& m)
             "nodal scalar field rho_fp back across the embedded surface with "
             "the PEC image parity (subtracted: image charge of opposite sign)."
         )
+        .def("hybrid_recover_compute_b_from_a",
+            [](WarpX& wx) {
+                auto* hybrid = wx.get_pointer_HybridPICModel();
+                if (hybrid == nullptr || !hybrid->m_use_global_A_recovery) {
+                    throw std::runtime_error(
+                        "hybrid_recover_compute_b_from_a requires the hybrid "
+                        "solver with use_global_A_recovery");
+                }
+                hybrid->m_global_A_recovery->ComputeBFromA();
+            },
+            "Compute hybrid_B_fp_from_A = curl(hybrid_A_fp_nodal) on the B "
+            "staggering (conformal circulation on cut faces when the "
+            "conformal embedded-boundary solve is active)."
+        )
         .def("hybrid_apply_eb_boundary_to_nodal_scalar",
             [](WarpX& wx, std::string const& name, int const lev, bool const odd) {
                 using warpx::fields::FieldType;

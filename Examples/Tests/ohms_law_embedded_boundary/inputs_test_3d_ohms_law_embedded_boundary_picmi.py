@@ -96,6 +96,7 @@ def setup_simulation(geometry):
         plasma_resistivity=1.0e-6,
         substeps=4,
         use_conformal_eb=True,
+        use_global_A_recovery=True,
     )
 
     if geometry == "plane":
@@ -433,6 +434,79 @@ def run_plane_battery(sim):
         before[i_fluid, :, :],
         0.0,
     )
+
+    # --- 8) conformal curl(A): cut faces recover the flux-exact value -----
+    # Nodal Ay = b*(X_WALL-x)^2 vanishes at the wall (the recovery solves
+    # with homogeneous Dirichlet A on the surface) and gives the analytic
+    # Bz = -2b*(X_WALL-x). On the cut Bz face the conformal circulation must
+    # return the area average of Bz over the uncovered strip,
+    # -b*(X_WALL - x_i), which differs from the stair-step curl: this is the
+    # blend correction that removes the wall scalloping.
+    Anx = fields.MultiFabWrapper(mf_name="hybrid_A_fp_nodal", idir=0, level=0)
+    Any = fields.MultiFabWrapper(mf_name="hybrid_A_fp_nodal", idir=1, level=0)
+    Anz = fields.MultiFabWrapper(mf_name="hybrid_A_fp_nodal", idir=2, level=0)
+    shape_n = np.asarray(Any[...]).shape
+    s_n3 = np.broadcast_to(s_node[: shape_n[0], None, None], shape_n)
+    Anx[...] = 0.0
+    Anz[...] = 0.0
+    Any[...] = b * s_n3**2
+    wx.hybrid_recover_compute_b_from_a()
+
+    BzA = fields.MultiFabWrapper(mf_name="hybrid_B_fp_from_A", idir=2, level=0)
+    bza = np.asarray(BzA[...])
+    # full fluid faces: standard curl of the quadratic is exact at centers
+    i_full = [i for i in range(N_XY) if s_cent[i] / H > 0.6]
+    expected_full = np.array(
+        [b * (s_node[i + 1] ** 2 - s_node[i] ** 2) / H for i in i_full]
+    )
+    ck.close(
+        "conformal curl(A): full faces keep the standard curl",
+        bza[i_full, :, :] - expected_full[:, None, None],
+        0.0,
+        1e-12,
+    )
+    # cut faces: flux-exact area average -b*(X_WALL - x_i)
+    for i in i_cut:
+        expected_cut = -b * s_node[i]  # = -b*(X_WALL - x_i), s_node[i] > 0
+        stair_value = b * (0.0 - s_node[i] ** 2) / H  # what the stair curl gives
+        ck.close(
+            f"conformal curl(A): cut face flux-exact at s={s_cent[i] / H:+.2f}h",
+            bza[i, :, :],
+            expected_cut,
+            1e-12,
+        )
+        ck.expect(
+            "conformal curl(A): cut face differs from the stair curl (teeth)",
+            abs(expected_cut - stair_value) > 1e-3 * abs(expected_cut),
+            f"conformal={expected_cut:.4e} stair={stair_value:.4e}",
+        )
+    # By faces have no (Ax, Az) circulation: cut faces exactly zero
+    ByA = fields.MultiFabWrapper(mf_name="hybrid_B_fp_from_A", idir=1, level=0)
+    bya = np.asarray(ByA[...])
+    ck.close(
+        "conformal curl(A): cut By faces zero for Ay-only potential",
+        bya[i_cut, :, :],
+        0.0,
+        1e-12,
+    )
+
+    # cut-edge A interpolation: the uncovered-segment average is half the
+    # fluid-endpoint value (A closes linearly to zero at the cut point)
+    Anx[...] = b * s_n3**2
+    Any[...] = 0.0
+    Anz[...] = 0.0
+    wx.hybrid_recover_compute_b_from_a()
+    Aex = fields.MultiFabWrapper(mf_name="hybrid_A_fp", idir=0, level=0)
+    aex = np.asarray(Aex[...])
+    for i in i_cut:
+        ck.close(
+            f"conformal edge A: cut edge holds half the fluid value at s={s_cent[i] / H:+.2f}h",
+            aex[i, :, :],
+            0.5 * b * s_node[i] ** 2,
+            1e-12,
+        )
+    i_cov = cent_rows(-100.0, -0.5)
+    ck.close("conformal edge A: covered edges zero", aex[i_cov, :, :], 0.0, 0.0)
 
     ck.finish()
 

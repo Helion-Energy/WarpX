@@ -106,6 +106,9 @@ def setup_simulation(
     f_t_ci=F_T_CI,
     r_outer=R_OUTER,
     wall_supported=False,
+    no_plasma=False,
+    use_recovery=True,
+    eta_vac_frac=ETA_VAC_FRAC,
 ):
     """Create the PICMI simulation object.
 
@@ -197,10 +200,11 @@ def setup_simulation(
         substep_atol=1.0e-8,
         max_substep_attempts=1000,
         use_conformal_eb=True,
+        use_global_A_recovery=True if use_recovery else None,
         A_external=A_ext,
         **power_law_resistivity(
             ETA_PLASMA,
-            ETA_VAC_FRAC * eta_max,
+            eta_vac_frac * eta_max,
             eta_power,
             N_FLOOR_FRAC,
             eta_ntrans,
@@ -215,6 +219,9 @@ def setup_simulation(
     # Annular column carrying the inventory of a full column of radius
     # R_PART at N_I, plus a low-density interior fill (no plasma between the
     # annulus and the wall)
+    if no_plasma:
+        return _finish_setup(sim, grid, diag_period)
+
     n_annulus = N_I * R_PART**2 / (r_outer**2 - R_INNER**2)
     n_fill = 2.0 * n_floor
     r_expr = "sqrt(x*x+y*y)"
@@ -247,6 +254,10 @@ def setup_simulation(
     )
     sim.collisions = [ion_ion_coulomb]
 
+    return _finish_setup(sim, grid, diag_period)
+
+
+def _finish_setup(sim, grid, diag_period):
     field_diag = picmi.FieldDiagnostic(
         name="diag1",
         grid=grid,
@@ -313,6 +324,26 @@ def main():
         default=F_T_CI,
     )
     parser.add_argument(
+        "--eta-vac-frac",
+        help="vacuum resistivity as a fraction of the CFL limit (tune so a "
+        "resistive front crosses a few cells per diagnostic interval: the "
+        "front advances sqrt(eta*t/mu0))",
+        type=float,
+        default=ETA_VAC_FRAC,
+    )
+    parser.add_argument(
+        "--no-plasma",
+        help="vacuum verification mode: no particles (n_floor sets the "
+        "vacuum Alfven speed); the exact solution is the uniform ramped "
+        "external field",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--no-recovery",
+        help="disable the global A recovery (local Faraday update only)",
+        action="store_true",
+    )
+    parser.add_argument(
         "--r-outer",
         help="outer radius of the annular column (set near R_WALL=0.8 for a "
         "wall-supported start)",
@@ -373,6 +404,9 @@ def main():
         args.f_tci,
         args.r_outer,
         args.wall_supported,
+        args.no_plasma,
+        not args.no_recovery,
+        args.eta_vac_frac,
     )
     sim.step()
 

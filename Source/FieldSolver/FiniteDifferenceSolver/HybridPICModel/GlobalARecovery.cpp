@@ -233,18 +233,9 @@ void GlobalARecovery::RecoverB (
     // Solve del^2 A = -mu0 J with homogeneous Dirichlet boundaries
     SolveA();
 
-    // Interpolate the nodal solution onto the edge staggering
-    InterpNodalAToEdge();
-
-    // Compute B_from_A = curl(A) on the B staggering
-    for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
-        ablastr::fields::VectorField B_from_A =
-            warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_from_A, lev);
-        const ablastr::fields::VectorField A_edge =
-            warpx.m_fields.get_alldirs(FieldType::hybrid_A_fp, lev);
-        warpx.get_pointer_fdtd_solver_fp(lev)->ComputeCurlA(
-            B_from_A, A_edge, warpx.GetEBUpdateBFlag()[lev], lev);
-    }
+    // Interpolate the nodal solution onto the edge staggering and take the
+    // curl (conformal on cut faces when the conformal EB solve is active)
+    ComputeBFromA();
 
     // Replace B with curl(A) in vacuum cells, keeping the integrated B in
     // the plasma
@@ -489,6 +480,7 @@ void GlobalARecovery::ZeroDirichletBoundaryNodes ()
 void GlobalARecovery::InterpNodalAToEdge ()
 {
     using namespace ablastr::coarsen::sample;
+    using ablastr::fields::Direction;
     auto& warpx = WarpX::GetInstance();
 
     amrex::GpuArray<int, 3> const nodal{1, 1, 1};
@@ -497,6 +489,8 @@ void GlobalARecovery::InterpNodalAToEdge ()
         m_hybrid_model->Ex_IndexType,
         m_hybrid_model->Ey_IndexType,
         m_hybrid_model->Ez_IndexType};
+
+    const bool conformal = WarpX::UseConformalEBSolve();
 
     for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
         const ablastr::fields::VectorField A_nodal =
@@ -507,6 +501,13 @@ void GlobalARecovery::InterpNodalAToEdge ()
         for (int adim = 0; adim < 3; ++adim) {
             amrex::GpuArray<int, 3> const dst_stag = A_stag[adim];
 
+            amrex::MultiFab const* l_mf = conformal
+                ? warpx.m_fields.get(FieldType::edge_lengths, Direction{adim}, lev)
+                : nullptr;
+            amrex::MultiFab const* phi_mf = conformal
+                ? warpx.m_fields.get(FieldType::distance_to_eb, lev)
+                : nullptr;
+
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -515,9 +516,39 @@ void GlobalARecovery::InterpNodalAToEdge ()
                 Array4<Real> const& Ae = A_edge[adim]->array(mfi);
                 const Box& tb = mfi.tilebox(A_edge[adim]->ixType().toIntVect());
 
-                amrex::ParallelFor(tb, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-                    Ae(i, j, k) = Interp(An, nodal, dst_stag, coarsen, i, j, k, 0);
-                });
+                if (conformal) {
+                    // On cut edges the recovered A vanishes at the cut point
+                    // (homogeneous Dirichlet on the embedded surface), so
+                    // the uncovered-segment average is half the
+                    // fluid-endpoint value; covered edges hold zero. This is
+                    // the value the length-weighted conformal circulations
+                    // (Faraday and the conformal curl below) expect.
+                    // Note: edge_lengths stores physical (scaled) lengths.
+                    Array4<Real const> const& l_arr = l_mf->const_array(mfi);
+                    Array4<Real const> const& phi = phi_mf->const_array(mfi);
+                    const int adim_l = adim;
+                    const Real h_edge = warpx.Geom(lev).CellSize(adim);
+                    amrex::ParallelFor(tb, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                        const Real lf = l_arr(i, j, k);
+                        if (lf >= h_edge*(1.0_rt - 1.0e-12_rt)) {
+                            Ae(i, j, k) = Interp(An, nodal, dst_stag, coarsen, i, j, k, 0);
+                        } else if (lf <= 0.0_rt) {
+                            Ae(i, j, k) = 0.0_rt;
+                        } else {
+                            // endpoints of this edge on the nodal grid
+                            const int i2 = i + (adim_l == 0 ? 1 : 0);
+                            const int j2 = j + (adim_l == 1 ? 1 : 0);
+                            const int k2 = k + (adim_l == 2 ? 1 : 0);
+                            const Real A_fluid = (phi(i, j, k) > 0.0_rt)
+                                ? An(i, j, k) : An(i2, j2, k2);
+                            Ae(i, j, k) = 0.5_rt * A_fluid;
+                        }
+                    });
+                } else {
+                    amrex::ParallelFor(tb, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                        Ae(i, j, k) = Interp(An, nodal, dst_stag, coarsen, i, j, k, 0);
+                    });
+                }
             }
 
             ablastr::utils::communication::FillBoundary(
@@ -526,6 +557,138 @@ void GlobalARecovery::InterpNodalAToEdge ()
                 warpx.Geom(lev).periodicity());
         }
     }
+}
+
+void GlobalARecovery::ComputeBFromA ()
+{
+    auto& warpx = WarpX::GetInstance();
+
+    InterpNodalAToEdge();
+
+    for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+        ablastr::fields::VectorField B_from_A =
+            warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_from_A, lev);
+        const ablastr::fields::VectorField A_edge =
+            warpx.m_fields.get_alldirs(FieldType::hybrid_A_fp, lev);
+        warpx.get_pointer_fdtd_solver_fp(lev)->ComputeCurlA(
+            B_from_A, A_edge, warpx.GetEBUpdateBFlag()[lev], lev);
+    }
+
+    if (WarpX::UseConformalEBSolve()) {
+        ConformalizeBFromA();
+    }
+}
+
+void GlobalARecovery::ConformalizeBFromA ()
+{
+#if defined(WARPX_DIM_3D)
+    using ablastr::fields::Direction;
+    auto& warpx = WarpX::GetInstance();
+
+    for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+        const auto dx = warpx.Geom(lev).CellSizeArray();
+        ablastr::fields::VectorField B_from_A =
+            warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_from_A, lev);
+        const ablastr::fields::VectorField A_nodal =
+            warpx.m_fields.get_alldirs(FieldType::hybrid_A_fp_nodal, lev);
+        const ablastr::fields::VectorField l_edge =
+            warpx.m_fields.get_alldirs(FieldType::edge_lengths, lev);
+        const ablastr::fields::VectorField S_face =
+            warpx.m_fields.get_alldirs(FieldType::face_areas, lev);
+        auto const* phi_mf = warpx.m_fields.get(FieldType::distance_to_eb, lev);
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(*B_from_A[0], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            Array4<Real> const& Bx = B_from_A[0]->array(mfi);
+            Array4<Real> const& By = B_from_A[1]->array(mfi);
+            Array4<Real> const& Bz = B_from_A[2]->array(mfi);
+            Array4<Real const> const& Ax = A_nodal[0]->const_array(mfi);
+            Array4<Real const> const& Ay = A_nodal[1]->const_array(mfi);
+            Array4<Real const> const& Az = A_nodal[2]->const_array(mfi);
+            Array4<Real const> const& lx = l_edge[0]->const_array(mfi);
+            Array4<Real const> const& ly = l_edge[1]->const_array(mfi);
+            Array4<Real const> const& lz = l_edge[2]->const_array(mfi);
+            Array4<Real const> const& Sx = S_face[0]->const_array(mfi);
+            Array4<Real const> const& Sy = S_face[1]->const_array(mfi);
+            Array4<Real const> const& Sz = S_face[2]->const_array(mfi);
+            Array4<Real const> const& phi = phi_mf->const_array(mfi);
+
+            const Box& tbx = mfi.tilebox(B_from_A[0]->ixType().toIntVect());
+            const Box& tby = mfi.tilebox(B_from_A[1]->ixType().toIntVect());
+            const Box& tbz = mfi.tilebox(B_from_A[2]->ixType().toIntVect());
+
+            // trapezoid of the nodal A over the uncovered segment of the
+            // edge from node (i1,j1,k1) to node (i2,j2,k2): the recovered A
+            // vanishes at the cut point, so a cut edge contributes half the
+            // fluid-endpoint value over the uncovered length. Note:
+            // edge_lengths stores physical (scaled) lengths, so l is the
+            // uncovered length itself and h is the full edge length.
+            auto const seg = [=] AMREX_GPU_DEVICE (
+                Array4<Real const> const& An, Real l, Real h,
+                int i1, int j1, int k1, int i2, int j2, int k2) -> Real
+            {
+                if (l >= h*(1.0_rt - 1.0e-12_rt)) {
+                    return 0.5_rt*(An(i1, j1, k1) + An(i2, j2, k2))*h;
+                }
+                if (l <= 0.0_rt) { return 0.0_rt; }
+                const Real A_fluid = (phi(i1, j1, k1) > 0.0_rt)
+                    ? An(i1, j1, k1) : An(i2, j2, k2);
+                return 0.5_rt*A_fluid*l;
+            };
+
+            amrex::ParallelFor(tbx, tby, tbz,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    // face_areas stores physical (scaled) areas
+                    const Real S = Sx(i, j, k);
+                    const Real S_full = dx[1]*dx[2];
+                    if (S <= 0.0_rt || S >= S_full*(1.0_rt - 1.0e-12_rt)) { return; }
+                    // Bx*Sx = circulation of (Ay, Az) around the x-face
+                    const Real circ =
+                          seg(Az, lz(i, j+1, k), dx[2], i, j+1, k, i, j+1, k+1)
+                        - seg(Az, lz(i, j  , k), dx[2], i, j  , k, i, j  , k+1)
+                        + seg(Ay, ly(i, j, k  ), dx[1], i, j, k  , i, j+1, k  )
+                        - seg(Ay, ly(i, j, k+1), dx[1], i, j, k+1, i, j+1, k+1);
+                    Bx(i, j, k) = circ/S;
+                },
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    const Real S = Sy(i, j, k);
+                    const Real S_full = dx[0]*dx[2];
+                    if (S <= 0.0_rt || S >= S_full*(1.0_rt - 1.0e-12_rt)) { return; }
+                    // By*Sy = circulation of (Az, Ax) around the y-face
+                    const Real circ =
+                          seg(Ax, lx(i, j, k+1), dx[0], i, j, k+1, i+1, j, k+1)
+                        - seg(Ax, lx(i, j, k  ), dx[0], i, j, k  , i+1, j, k  )
+                        + seg(Az, lz(i  , j, k), dx[2], i  , j, k, i  , j, k+1)
+                        - seg(Az, lz(i+1, j, k), dx[2], i+1, j, k, i+1, j, k+1);
+                    By(i, j, k) = circ/S;
+                },
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    const Real S = Sz(i, j, k);
+                    const Real S_full = dx[0]*dx[1];
+                    if (S <= 0.0_rt || S >= S_full*(1.0_rt - 1.0e-12_rt)) { return; }
+                    // Bz*Sz = circulation of (Ax, Ay) around the z-face
+                    const Real circ =
+                          seg(Ay, ly(i+1, j, k), dx[1], i+1, j, k, i+1, j+1, k)
+                        - seg(Ay, ly(i  , j, k), dx[1], i  , j, k, i  , j+1, k)
+                        + seg(Ax, lx(i, j  , k), dx[0], i, j  , k, i+1, j  , k)
+                        - seg(Ax, lx(i, j+1, k), dx[0], i, j+1, k, i+1, j+1, k);
+                    Bz(i, j, k) = circ/S;
+                });
+        }
+
+        for (int idim = 0; idim < 3; ++idim) {
+            ablastr::utils::communication::FillBoundary(
+                *B_from_A[idim], B_from_A[idim]->nGrowVect(),
+                WarpX::do_single_precision_comms,
+                warpx.Geom(lev).periodicity());
+        }
+    }
+#endif
 }
 
 void GlobalARecovery::BlendB (
