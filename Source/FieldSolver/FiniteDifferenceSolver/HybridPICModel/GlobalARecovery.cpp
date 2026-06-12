@@ -9,6 +9,7 @@
 
 #include "GlobalARecovery.H"
 
+#include "EBJBoundary.H"
 #include "HybridPICModel.H"
 
 #include "EmbeddedBoundary/Enabled.H"
@@ -249,6 +250,27 @@ void GlobalARecovery::RecoverB (
     // the plasma
     BlendB(Bfield, rho_blend);
 
+    // Re-apply the PEC boundary condition to the overwritten B field so that
+    // the masked faces inside the embedded boundary hold consistent ghost
+    // values for the next Faraday integration (flux-excluding parity: the
+    // normal component is odd across the surface, the tangential part even)
+    if (EB::enabled()) {
+        for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+            if (static_cast<int>(m_hybrid_model->m_eb_bc_status_B.size()) <= lev) {
+                m_hybrid_model->m_eb_bc_status_B.resize(lev+1);
+            }
+            warpx::hybrid::ApplyPECBoundaryToField(
+                Bfield[lev], warpx.GetEBUpdateBFlag()[lev],
+                *warpx.m_fields.get(FieldType::distance_to_eb, lev),
+                warpx.Geom(lev),
+                m_hybrid_model->m_eb_bc_rtol,
+                m_hybrid_model->m_eb_bc_max_iters,
+                m_hybrid_model->m_eb_bc_direct_fill,
+                /*normal_odd=*/true, /*fill_covered_centers=*/false,
+                &m_hybrid_model->m_eb_bc_status_B[lev]);
+        }
+    }
+
     warpx.FillBoundaryB(ng, nodal_sync);
 }
 
@@ -330,6 +352,10 @@ void GlobalARecovery::BuildMaskedNodalSource (
                     Jy_n(i, j, k) = 0._rt;
                     Jz_n(i, j, k) = 0._rt;
                 } else {
+                    // Near embedded boundaries J_plasma already satisfies the
+                    // PEC current boundary condition (ApplyPECBoundaryToEdgeField
+                    // runs at the end of CalculatePlasmaCurrent), so nodes by
+                    // the wall interpolate boundary-consistent values here
                     Jx_n(i, j, k) = Interp(Jx, Jx_stag, nodal, coarsen, i, j, k, 0);
                     Jy_n(i, j, k) = Interp(Jy, Jy_stag, nodal, coarsen, i, j, k, 0);
                     Jz_n(i, j, k) = Interp(Jz, Jz_stag, nodal, coarsen, i, j, k, 0);
