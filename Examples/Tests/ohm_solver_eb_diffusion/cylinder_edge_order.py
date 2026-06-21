@@ -58,7 +58,7 @@ CONFIGS = [
 
 def auto_substeps(resolution):
     diffusivity = ETA / mu_0
-    dt = 0.5 / SQ_DECAY / MAX_STEPS
+    dt = 0.5 / GAMMA / MAX_STEPS  # cylinder dt (the deck uses gamma_cyl)
     dx = 1.6 / resolution
     dy = 0.05
     lam = 4 * diffusivity * (2.0 / dx**2 + 1.0 / dy**2)
