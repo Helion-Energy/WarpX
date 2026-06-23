@@ -34,13 +34,21 @@ add_warpx_test(
 )
 label_warpx_test(test_rtz_ohm_solver_cylinder_compression_picmi slow)
 
-add_warpx_test(
-    test_rtz_ohm_solver_cylinder_compression_theta_mode_picmi  # name
-    RTZ  # dims
-    2  # nprocs
-    "inputs_test_rtz_ohm_solver_cylinder_compression_theta_mode_picmi.py --test"  # inputs
-    "analysis_rtz_theta_mode.py"  # analysis (m=1 theta-operator exercise)
-    OFF  # checksum
-    OFF  # dependency
-)
-label_warpx_test(test_rtz_ohm_solver_cylinder_compression_theta_mode_picmi slow)
+# GPU-only: this m=1 theta-mode case exercises the RTZ theta-curl operators
+# through the full hybrid solver and is validated on the GPU CI / developer
+# workflow. It is intentionally NOT registered for CPU builds, so it never runs
+# on the CPU regression runner (the Azure ctest lane applies no label filter, so
+# a label alone would not exclude it -- gating the registration is what does).
+if(WarpX_COMPUTE STREQUAL "CUDA" OR WarpX_COMPUTE STREQUAL "HIP" OR WarpX_COMPUTE STREQUAL "SYCL")
+    add_warpx_test(
+        test_rtz_ohm_solver_cylinder_compression_theta_mode_picmi  # name
+        RTZ  # dims
+        2  # nprocs
+        "inputs_test_rtz_ohm_solver_cylinder_compression_theta_mode_picmi.py --test"  # inputs
+        "analysis_rtz_theta_mode.py"  # analysis (m=1 theta-operator exercise)
+        OFF  # checksum
+        OFF  # dependency
+    )
+    label_warpx_test(test_rtz_ohm_solver_cylinder_compression_theta_mode_picmi slow)
+    label_warpx_test(test_rtz_ohm_solver_cylinder_compression_theta_mode_picmi gpu)
+endif()
