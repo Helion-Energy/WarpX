@@ -1567,7 +1567,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields && (rho_val >= rho_floor)) {
+            if (include_external_fields && /*&& (rho_val >= rho_floor)*/) {
                 Ex(i, j, k) -= Ex_ext(i, j, k);
             }
         });
@@ -1658,7 +1658,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 #endif
             }
 
-            if (include_external_fields && (rho_val >= rho_floor)) {
+            if (include_external_fields /*&& (rho_val >= rho_floor)*/) {
                 Ey(i, j, k) -= Ey_ext(i, j, k);
             }
         });
@@ -1749,7 +1749,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 #endif
             }
 
-            if (include_external_fields && (rho_val >= rho_floor)) {
+            if (include_external_fields /*&& (rho_val >= rho_floor)*/) {
                 Ez(i, j, k) -= Ez_ext(i, j, k);
             }
         });
