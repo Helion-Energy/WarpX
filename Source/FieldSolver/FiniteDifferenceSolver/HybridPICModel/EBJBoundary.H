@@ -45,53 +45,9 @@ namespace warpx::hybrid
          * the corner-skip detector is enabled. */
         int n_corner = 0;
 
-        /** 2nd-order gather weight cache (quadratic_gather only). The gather
-         * weights are geometry-only (the image point, the per-component
-         * staggering, and which window cells are fluid -- not the field values),
-         * so they are built once (\c weights_built) and reused every substage;
-         * invalidated on regrid via reset(). For each fill-target component c,
-         * \c gslot maps an S_FILL cell to its compact band-sparse slot (or -1).
-         * The fill combines the 3 gathered field components at the image point;
-         * for each slot and each gathered component g the gather collapses to a
-         * sparse dot value_g = sum_t w * field_g(fill_cell + offset). \c gtap_n[c]
-         * holds the per-(slot,g) tap count; \c gtap_off[c]/\c gtap_w[c] pack, per
-         * (slot,g) and padded to \c maxtap, the (packed neighbour offset, weight)
-         * of each tap. The apply therefore does no matrix build, Cholesky, or
-         * basis evaluation. Memory scales with the wall band, not the volume. */
-        bool weights_built = false;
-        int maxtap = 0;
-        std::array<int, 3> n_slots = {{0, 0, 0}};
-        std::array<std::unique_ptr<amrex::iMultiFab>, 3> gslot;
-        std::array<amrex::Gpu::DeviceVector<int>, 3> gtap_n;
-        std::array<amrex::Gpu::DeviceVector<int>, 3> gtap_off;
-        std::array<amrex::Gpu::DeviceVector<amrex::Real>, 3> gtap_w;
-
-        /** Geometry-only mirror outputs cached per band slot (quadratic_gather
-         * only). mirror_geom() reads the static level-set phi (a second
-         * scattered field, ~32 reads/cell, plus a sqrt and the normal-gradient
-         * stencil) and produces quantities -- signed distance, image distance,
-         * unit boundary normal, point/image positions -- that depend ONLY on
-         * the embedded geometry, not on the field values. They are therefore
-         * identical on every substage and are computed once in the build pass
-         * (alongside the tap cache) and read in the apply path, so the apply
-         * never touches phi. Invalidated on regrid via reset() (assumes a
-         * static EB: the production case has no moving/deforming wall).
-         * Layout per slot: [s, d_im, nv[AMREX_SPACEDIM], xe[AMREX_SPACEDIM],
-         * xim[AMREX_SPACEDIM]]. */
-        static constexpr int geom_nr = 2 + 3*AMREX_SPACEDIM;
-        std::array<amrex::Gpu::DeviceVector<amrex::Real>, 3> ggeom;
-
         [[nodiscard]] bool empty () const { return !status[0]; }
         void reset () {
             for (auto& s : status) { s.reset(); }
-            for (auto& s : gslot) { s.reset(); }
-            for (auto& g : gtap_n) { g.clear(); }
-            for (auto& g : gtap_off) { g.clear(); }
-            for (auto& g : gtap_w) { g.clear(); }
-            for (auto& g : ggeom) { g.clear(); }
-            n_slots = {{0, 0, 0}};
-            maxtap = 0;
-            weights_built = false;
             n_pending = 0;
             n_corner = 0;
         }
@@ -169,55 +125,6 @@ namespace warpx::hybrid
      *            surface of revolution about \c eb_cyl_axis centered on the
      *            transverse origin. Default false = the planar reflection.
      * \param[in] eb_cyl_axis symmetry axis for \c eb_cyl (0=x, 1=y, 2=z)
-     * \param[in] quadratic_gather use the 2nd-order fluid-only quadratic gather
-     *            (covered-B b-curl-fill) instead of the linear band-decoupled
-     *            image gather
-     * \param[in] normal_weight_floor lower clamp on the wall-NORMAL reflection
-     *            weight \c w_n, applied only in the magnetic (\c normal_odd)
-     *            branch. The unclamped weight is g.s/d_im (= -1 for the
-     *            quadratic gather, in (-1,0) for the linear path), which gives
-     *            the covered normal component an ODD reflection (a full sign
-     *            reversal across the wall). Passing a floor of 0 clamps
-     *            w_n -> max(g.s/d_im, 0) = 0, driving the covered normal
-     *            component toward 0 (the physical PEC B_normal -> 0) instead of
-     *            reversing it, while leaving the tangential even reflection
-     *            (\c w_t) untouched. Default -1e30 = no clamp = byte-identical.
-     * \param[in] cut_blend near-wall stability blend for the covered-B
-     *            \c quadratic_gather fill, active only at CUT faces (update mask
-     *            != 0, i.e. the face has a positive area fraction for which the
-     *            conformal ECT B push already computed a value). At a cut face
-     *            the mirror would DISCARD that stabler ECT-solved B and replace
-     *            it with a steeper near-wall extrapolation; on a dense plasma
-     *            shell pinned against the wall this injects a near-wall radial-B
-     *            feature that stiffens the RKF45 substepper. With cut_blend in
-     *            (0,1] the cut face is instead written as
-     *            (1-cut_blend)*B_mirror + cut_blend*B_ECT, where B_ECT is the
-     *            value already sitting in \c field at the fill point (EvolveB
-     *            wrote it); cut_blend = 1 keeps the pure ECT value, cut_blend = 0
-     *            keeps the pure mirror. Fully-covered faces (mask == 0, no ECT
-     *            value) always take the full mirror. Default 0 = full mirror at
-     *            every face = byte-identical. No effect unless \c quadratic_gather.
-     * \param[in] cut_clamp relative cap on the cut-face mirror's deviation from
-     *            the conformal-ECT value (the quadratic gather can overshoot the
-     *            ECT value wildly on a stiff shell). With cut_clamp > 0 the cut
-     *            face is written as B_ECT + clamp(B_mirror - B_ECT, +/- cap),
-     *            cap = cut_clamp * max(|B_ECT|, |B_image|), so a gentle (small)
-     *            mirror correction passes unclamped (2nd order preserved) while a
-     *            stiff overshoot is bounded. Composes with \c cut_blend. Default
-     *            0 = no clamp = byte-identical. No effect unless \c quadratic_gather.
-     * \param[in] corner_skip Option-2 concave re-entrant-corner skip for the
-     *            covered-B \c quadratic_gather fill. When true, the fill
-     *            classification flags as S_CORNER every near-wall covered/cut
-     *            cell that the validated three-clause detector marks as a
-     *            concave re-entrant corner (a fiducial wall-normal bend > 30
-     *            degrees, a load-bearing level-set radius jump to a fluid
-     *            curl-difference neighbour across an opposite-sign phi, and the
-     *            mirror image within reach), and the direct pass SKIPS the
-     *            covered-B write there so the cell keeps its stable pre-fill
-     *            (OFF / conformal-ECT) value. This removes the destabilizing
-     *            cross-wall B jump whose Ampere curl crashes the RKF45
-     *            substepper at a stepdown corner. Default false = no skip =
-     *            byte-identical. No effect unless \c quadratic_gather.
      */
     void ApplyPECBoundaryToField (
         ablastr::fields::VectorField const& field,
@@ -232,12 +139,7 @@ namespace warpx::hybrid
         EBFillStatus* status_cache = nullptr,
         amrex::Real band_cells = 1.0,
         bool eb_cyl = false,
-        int eb_cyl_axis = 2,
-        bool quadratic_gather = false,
-        amrex::Real normal_weight_floor = -1.e30,
-        amrex::Real cut_blend = 0.0,
-        amrex::Real cut_clamp = 0.0,
-        bool corner_skip = false);
+        int eb_cyl_axis = 2);
 
     /** \brief Enforce an embedded-boundary condition on a nodal scalar field
      * (the hybrid solver's ion charge density and electron pressure).

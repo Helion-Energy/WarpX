@@ -99,45 +99,6 @@ void HybridPICModel::ReadParameters ()
 
     // conformal (enlarged-cell technique) embedded-boundary Faraday update
     pp_hybrid.query("use_conformal_eb", m_use_conformal_eb);
-    pp_hybrid.query("conformal_b_curl_fill", m_conformal_b_curl_fill);
-    if (m_conformal_b_curl_fill
-        && WarpX::grid_type == ablastr::utils::enums::GridType::Collocated) {
-        ablastr::warn_manager::WMRecordWarning(
-            "HybridPIC",
-            "hybrid_pic_model.conformal_b_curl_fill is only implemented for a "
-            "staggered (Yee) grid; it is ignored on a collocated grid (the nodal "
-            "2nd-order covered-B gather is not yet robust).",
-            ablastr::warn_manager::WarnPriority::medium);
-    }
-    if (m_conformal_b_curl_fill) {
-        ablastr::warn_manager::WMRecordWarning(
-            "HybridPIC",
-            "hybrid_pic_model.conformal_b_curl_fill (the covered-B quadratic mirror "
-            "gather run before the Ampere curl) is DEPRECATED and slated for removal: "
-            "it is a pointwise, non-divergence-constrained extrapolation that injects "
-            "div(B)/div(J) at the wall and has proven unstable. It will be replaced by "
-            "the ECT edge-circulation current (ComputeJCartesianECT), which builds "
-            "J = curl(B)/mu0 div-consistently from fluid-side B only.",
-            ablastr::warn_manager::WarnPriority::medium);
-    }
-    // Freeze the covered-B curl fill across RKF45 substages: compute it once per
-    // half-step from the step-entry B^n and hold it fixed, instead of re-evaluating
-    // the nonsmooth curved-wall extrapolation from the live substage B each substage
-    // (which injects a stiff near-wall radial-B feedback that collapses the adaptive
-    // substep as a reversal field builds). Opt-in (default off -> byte-identical).
-    // Covered-B curl fill gather order: quadratic ridge-LSQ (default) vs the basic
-    // linear/pointwise mirror (like the collocated grid). Flip to false to A/B the
-    // ridge solve against a plain mirror when debugging near-wall covered-B artifacts.
-    pp_hybrid.query("conformal_b_curl_fill_quadratic", m_conformal_b_curl_fill_quadratic);
-    pp_hybrid.query("conformal_b_curl_fill_freeze", m_conformal_b_curl_fill_freeze);
-    if (m_conformal_b_curl_fill_freeze && !m_conformal_b_curl_fill) {
-        ablastr::warn_manager::WMRecordWarning(
-            "HybridPIC",
-            "hybrid_pic_model.conformal_b_curl_fill_freeze has no effect without "
-            "hybrid_pic_model.conformal_b_curl_fill; the covered-B curl fill is "
-            "disabled, so there is nothing to freeze.",
-            ablastr::warn_manager::WarnPriority::medium);
-    }
     pp_hybrid.query("conformal_ect_curvature", m_conformal_ect_curvature);
     if (m_conformal_ect_curvature
         && WarpX::grid_type == ablastr::utils::enums::GridType::Collocated) {
@@ -259,36 +220,6 @@ void HybridPICModel::ReadParameters ()
     // Default 1 = legacy behavior.
     utils::parser::queryWithParser(pp_hybrid, "eb_b_fill_band_cells", m_eb_b_fill_band_cells);
 
-    // Lower clamp on the wall-normal reflection weight of the covered-B mirror
-    // fill (b-curl-fill). The unclamped normal-odd weight is g.s/d_im (= -1 for
-    // the quadratic gather), which reverses the covered B_normal across one
-    // cell, doubling the near-wall curl(B) -> J wherever there is a near-wall
-    // radial B. Clamping to >= 0 (set to 0) drives the covered B_normal toward
-    // 0 (the physical PEC B_normal -> 0) instead; the tangential even
-    // reflection is untouched. Default -1e30 = disabled / byte-identical.
-    pp_hybrid.query("eb_b_fill_normal_weight", m_eb_b_fill_normal_weight);
-
-    // Near-wall stability blend of the covered-B b-curl-fill toward the
-    // conformal-ECT cut-face B (see m_conformal_b_curl_fill_blend). 0 (default)
-    // = full mirror = byte-identical; 1 = keep the ECT value at cut faces.
-    utils::parser::queryWithParser(pp_hybrid, "conformal_b_curl_fill_blend",
-                                   m_conformal_b_curl_fill_blend);
-    // Relative cap on the cut-face mirror deviation from the ECT value (see
-    // m_conformal_b_curl_fill_clamp). 0 (default) = no clamp = byte-identical.
-    utils::parser::queryWithParser(pp_hybrid, "conformal_b_curl_fill_clamp",
-                                   m_conformal_b_curl_fill_clamp);
-    // Option-2 concave re-entrant-corner skip of the covered-B mirror (see
-    // m_conformal_b_curl_fill_corner_skip). false (default) = no skip = byte-identical.
-    pp_hybrid.query("conformal_b_curl_fill_corner_skip",
-                    m_conformal_b_curl_fill_corner_skip);
-    if (m_conformal_b_curl_fill_blend != 0.0_rt && !m_conformal_b_curl_fill) {
-        ablastr::warn_manager::WMRecordWarning(
-            "HybridPIC",
-            "hybrid_pic_model.conformal_b_curl_fill_blend has no effect without "
-            "hybrid_pic_model.conformal_b_curl_fill; the covered-B curl fill is "
-            "disabled, so there is no mirror to blend.",
-            ablastr::warn_manager::WarnPriority::medium);
-    }
 }
 
 void HybridPICModel::AllocateLevelMFs (
@@ -544,70 +475,6 @@ void HybridPICModel::CalculatePlasmaCurrent (
 
     auto& warpx = WarpX::GetInstance();
 
-    // Extend B into the covered cells with a 2nd-order quadratic (even-reflection)
-    // gather BEFORE the Ampere curl, so curl(B) -> J reads a curved-wall-accurate
-    // covered B. The conformal (ECT) B push is 2nd order, but the curl is plain-
-    // masked and otherwise reads the staircased covered B, capping the near-wall
-    // plasma current (and the Ohm's-law E built from it) at 1st order on a curved
-    // wall. Staggered (Yee) grid only -- the nodal quadratic gather is not yet
-    // robust (see m_conformal_b_curl_fill). Magnetic parity (normal odd /
-    // tangential even), covered centers filled, on the B update mask.
-    // The flux-weighted ECT curl (m_conformal_ect_j) drops covered B by its zero
-    // open-face area, so it needs no covered-B mirror; skip the curl fill then.
-    // Form A (conformal_ect_j) reads open-face fluxes only and needs no covered-B
-    // fill, so it stays excluded.
-    if (EB::enabled() && m_conformal_b_curl_fill && !m_conformal_ect_j
-        && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated) {
-        if (static_cast<int>(m_eb_bc_status_B.size()) <= lev) { m_eb_bc_status_B.resize(lev+1); }
-        // Freeze path: a valid step-start snapshot exists (taken in
-        // SnapshotConformalBCurlFreeze from B^n). Re-stamp the cells the fill
-        // controls (status != S_SOLUTION: the band targets + zeroed deep interior +
-        // cut/covered centers) from the frozen buffer, holding the nonsmooth
-        // covered-B extrapolation static across the RKF45 substages instead of
-        // re-evaluating it from the live substage B. The covered/band cells the
-        // masked Faraday push touched are overwritten back to their B^n values.
-        bool const use_freeze = m_conformal_b_curl_fill_freeze
-            && m_eb_b_curl_freeze_valid
-            && lev < static_cast<int>(m_eb_b_curl_freeze_buf.size())
-            && !m_eb_bc_status_B[lev].empty();
-        if (use_freeze) {
-            auto const& st = m_eb_bc_status_B[lev];
-            auto const& buf = m_eb_b_curl_freeze_buf[lev];
-            for (int c = 0; c < 3; ++c) {
-#ifdef AMREX_USE_OMP
-#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
-#endif
-                for (amrex::MFIter mfi(*Bfield[c], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-                    amrex::Box const tb = mfi.tilebox(Bfield[c]->ixType().toIntVect(),
-                                                      Bfield[c]->nGrowVect());
-                    auto const& Bc = Bfield[c]->array(mfi);
-                    auto const& bufc = buf[c].const_array(mfi);
-                    auto const& stat = st.status[c]->const_array(mfi);
-                    amrex::ParallelFor(tb,
-                        [=] AMREX_GPU_DEVICE (int i, int j, int k)
-                    {
-                        // S_SOLUTION (= 0) cells are the live solution domain (never
-                        // written by the fill); every other status is a covered/band
-                        // cell the fill controls, so hold it at the frozen value.
-                        if (stat(i, j, k) != 0) { Bc(i, j, k) = bufc(i, j, k); }
-                    });
-                }
-            }
-        } else {
-        warpx::hybrid::ApplyPECBoundaryToField(
-            Bfield, warpx.GetEBUpdateBFlag()[lev],
-            *warpx.m_fields.get(FieldType::distance_to_eb, lev),
-            warpx.Geom(lev),
-            m_eb_bc_rtol, m_eb_bc_max_iters, m_eb_bc_direct_fill,
-            /*normal_odd=*/true, /*fill_covered_centers=*/true,
-            &m_eb_bc_status_B[lev], m_eb_b_fill_band_cells,
-            m_eb_cylindrical_correction, m_eb_cyl_axis,
-            /*quadratic_gather=*/m_conformal_b_curl_fill_quadratic, m_eb_b_fill_normal_weight,
-            m_conformal_b_curl_fill_blend, m_conformal_b_curl_fill_clamp,
-            m_conformal_b_curl_fill_corner_skip);
-        }
-    }
-
     ablastr::fields::VectorField current_fp_plasma = warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
     if (m_conformal_ect_j && EB::enabled()
         && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated) {
@@ -669,56 +536,6 @@ void HybridPICModel::CalculatePlasmaCurrent (
             &m_eb_bc_status_Jplasma[lev], m_eb_fill_band_cells,
             m_eb_cylindrical_correction, m_eb_cyl_axis);
     }
-}
-
-void HybridPICModel::SnapshotConformalBCurlFreeze (
-    ablastr::fields::VectorField const& Bfield,
-    const int lev) const
-{
-    // Only active for a staggered conformal-EB b-curl-fill run with the freeze on.
-    m_eb_b_curl_freeze_valid = false;
-    if (!(EB::enabled() && m_conformal_b_curl_fill && m_conformal_b_curl_fill_freeze
-          && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated)) {
-        return;
-    }
-
-    auto& warpx = WarpX::GetInstance();
-
-    // Take the b-curl-fill ONCE on the step-entry B^n (this populates the status
-    // classification m_eb_bc_status_B[lev] and writes the covered/band cells of
-    // Bfield to their wall-consistent B^n values). The result is then snapshotted;
-    // every later RKF45 substage re-stamps it (see CalculatePlasmaCurrent) instead
-    // of recomputing the nonsmooth fill from the live substage B.
-    if (static_cast<int>(m_eb_bc_status_B.size()) <= lev) { m_eb_bc_status_B.resize(lev+1); }
-    warpx::hybrid::ApplyPECBoundaryToField(
-        Bfield, warpx.GetEBUpdateBFlag()[lev],
-        *warpx.m_fields.get(FieldType::distance_to_eb, lev),
-        warpx.Geom(lev),
-        m_eb_bc_rtol, m_eb_bc_max_iters, m_eb_bc_direct_fill,
-        /*normal_odd=*/true, /*fill_covered_centers=*/true,
-        &m_eb_bc_status_B[lev], m_eb_b_fill_band_cells,
-        m_eb_cylindrical_correction, m_eb_cyl_axis,
-        /*quadratic_gather=*/true, m_eb_b_fill_normal_weight,
-        m_conformal_b_curl_fill_blend, m_conformal_b_curl_fill_clamp,
-        m_conformal_b_curl_fill_corner_skip);
-
-    // Snapshot the filled B^n (full field incl. ghosts) into the per-level buffer.
-    if (static_cast<int>(m_eb_b_curl_freeze_buf.size()) <= lev) {
-        m_eb_b_curl_freeze_buf.resize(lev+1);
-    }
-    auto& buf = m_eb_b_curl_freeze_buf[lev];
-    for (int c = 0; c < 3; ++c) {
-        amrex::IntVect const ng = Bfield[c]->nGrowVect();
-        if (!buf[c].ok()
-            || buf[c].boxArray() != Bfield[c]->boxArray()
-            || buf[c].DistributionMap() != Bfield[c]->DistributionMap()
-            || buf[c].nGrowVect() != ng) {
-            buf[c] = amrex::MultiFab(Bfield[c]->boxArray(),
-                                     Bfield[c]->DistributionMap(), 1, ng);
-        }
-        amrex::MultiFab::Copy(buf[c], *Bfield[c], 0, 0, 1, ng);
-    }
-    m_eb_b_curl_freeze_valid = true;
 }
 
 void HybridPICModel::HybridPICSolveE (
@@ -1217,15 +1034,6 @@ void HybridPICModel::BfieldEvolveRKF45 (
             amrex::IntVect(0)
         );
     }
-
-    // conformal_b_curl_fill_freeze: take the once-per-half-step covered-B snapshot
-    // from the step-entry B^n (B_old above is the pre-fill staircase, matching the
-    // unfrozen baseline where stage 1 fills B from the staircase B_old). The fill
-    // here writes B's covered/band cells to their wall-consistent B^n values and
-    // records them; every RKF45 substage below re-stamps those frozen values rather
-    // than re-evaluating the nonsmooth fill from the live substage B. No-op (and
-    // byte-identical) unless the freeze flag is on.
-    SnapshotConformalBCurlFreeze(Bfield[lev], lev);
 
     amrex::Real dt_sub = 2._rt * dt_half / m_substeps;
     amrex::Real t = 0._rt;

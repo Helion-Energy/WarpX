@@ -123,11 +123,6 @@ def setup_simulation(
     grid_type="collocated",
     use_conformal_eb=True,
     equilibrium_b=False,
-    conformal_b_curl_fill=False,
-    conformal_b_curl_fill_freeze=False,
-    conformal_b_curl_fill_blend=0.0,
-    conformal_b_curl_fill_clamp=0.0,
-    conformal_b_curl_fill_quadratic=True,
 ):
     """Create the PICMI simulation object.
 
@@ -222,17 +217,6 @@ def setup_simulation(
         substep_atol=1.0e-8,
         max_substep_attempts=1000,
         use_conformal_eb=use_conformal_eb,
-        conformal_b_curl_fill=True if conformal_b_curl_fill else None,
-        conformal_b_curl_fill_freeze=(True if conformal_b_curl_fill_freeze else None),
-        conformal_b_curl_fill_blend=(
-            conformal_b_curl_fill_blend if conformal_b_curl_fill_blend else None
-        ),
-        conformal_b_curl_fill_clamp=(
-            conformal_b_curl_fill_clamp if conformal_b_curl_fill_clamp else None
-        ),
-        conformal_b_curl_fill_quadratic=(
-            None if conformal_b_curl_fill_quadratic else False
-        ),
         A_external=A_ext,
         **power_law_resistivity(
             ETA_PLASMA,
@@ -612,68 +596,6 @@ def main():
         "masked/staircase EB. Baseline for the 'cost of conformal walls' comparison.",
     )
     parser.add_argument(
-        "--b-curl-fill",
-        action="store_true",
-        help="enable hybrid_pic_model.conformal_b_curl_fill: 2nd-order quadratic "
-        "covered-B gather feeding the Ampere curl (replaces the staircased covered "
-        "B that drives the grid m=4/m=8 curl(B) near-wall runaway). Staggered only.",
-    )
-    parser.add_argument(
-        "--b-curl-fill-freeze",
-        action="store_true",
-        help="enable hybrid_pic_model.conformal_b_curl_fill_freeze: compute the "
-        "covered-B curl fill ONCE per RKF45 half-step from the step-entry B^n and "
-        "hold it fixed across all substages, instead of re-evaluating the nonsmooth "
-        "curved-wall extrapolation from the live substage B every substage (which "
-        "injects a stiff near-wall radial-B feedback that collapses the adaptive "
-        "substep as a reversal field builds). Requires --b-curl-fill.",
-    )
-    parser.add_argument(
-        "--b-curl-fill-blend",
-        type=float,
-        default=0.0,
-        help="near-wall stability blend of the covered-B b-curl-fill toward the "
-        "conformal-ECT cut-face B (hybrid_pic_model.conformal_b_curl_fill_blend), "
-        "in [0,1]. At a cut face the quadratic mirror discards the stabler "
-        "ECT-solved B and writes a steeper near-wall extrapolation that stiffens "
-        "the dense-shell liftoff; with blend in (0,1] the cut face is written as "
-        "(1-blend)*B_mirror + blend*B_ECT instead (blend=1 keeps the pure ECT "
-        "value, blend=0 the pure mirror). Fully-covered faces always take the "
-        "mirror. Requires --b-curl-fill. Default 0 = full mirror (byte-identical).",
-    )
-    parser.add_argument(
-        "--b-curl-fill-clamp",
-        type=float,
-        default=0.0,
-        help="relative cap on the cut-face covered-B mirror's deviation from the "
-        "conformal-ECT value (hybrid_pic_model.conformal_b_curl_fill_clamp): the "
-        "cut face is written as B_ECT + clamp(B_mirror - B_ECT, +/- clamp*"
-        "max(|B_ECT|,|B_image|)), bounding the stiff overshoot while passing a "
-        "gentle mirror correction. Requires --b-curl-fill. Default 0 = no clamp.",
-    )
-    parser.add_argument(
-        "--no-b-curl-fill-quadratic",
-        dest="conformal_b_curl_fill_quadratic",
-        action="store_false",
-        help="use the basic linear/pointwise covered-B mirror (like the collocated "
-        "grid) instead of the 2nd-order ridge-regularized quadratic least-squares "
-        "gather (hybrid_pic_model.conformal_b_curl_fill_quadratic=0). A/B the ridge "
-        "solve against a plain mirror when debugging near-wall covered-B artifacts. "
-        "Requires --b-curl-fill.",
-    )
-    parser.set_defaults(conformal_b_curl_fill_quadratic=True)
-    parser.add_argument(
-        "--eb-b-normal-weight",
-        type=float,
-        default=-1e30,
-        help="lower clamp on the wall-normal reflection weight of the covered-B "
-        "b-curl-fill (hybrid_pic_model.eb_b_fill_normal_weight). The unclamped "
-        "weight (-1) reverses the covered B_normal across one cell, doubling the "
-        "near-wall curl(B)->J wherever there is a near-wall radial B (the liftoff "
-        "shell+reversal). Set to 0 to drive the covered B_normal toward 0 (PEC "
-        "B_normal->0) instead. Default -1e30 = disabled (byte-identical).",
-    )
-    parser.add_argument(
         "--equilibrium-b",
         action="store_true",
         dest="equilibrium_b",
@@ -754,20 +676,7 @@ def main():
         grid_type=args.grid_type,
         use_conformal_eb=args.conformal_eb,
         equilibrium_b=args.equilibrium_b,
-        conformal_b_curl_fill=args.b_curl_fill,
-        conformal_b_curl_fill_freeze=args.b_curl_fill_freeze,
-        conformal_b_curl_fill_blend=args.b_curl_fill_blend,
-        conformal_b_curl_fill_clamp=args.b_curl_fill_clamp,
-        conformal_b_curl_fill_quadratic=args.conformal_b_curl_fill_quadratic,
     )
-
-    # conformal_b_curl_fill_blend is wired through the PICMI HybridPICSolver
-    # kwarg (in setup_simulation); eb_b_normal_weight is not a PICMI kwarg, so
-    # it is set on the hybrid_pic_model bucket directly here.
-    if args.eb_b_normal_weight != -1e30:
-        from pywarpx import hybridpicmodel
-
-        hybridpicmodel.eb_b_fill_normal_weight = args.eb_b_normal_weight
 
     # Dielectric standoff: hold the plasma args.standoff_cells cells off the (metal)
     # field wall with a Python particle scraper (a callfromparticlescraper hook that
