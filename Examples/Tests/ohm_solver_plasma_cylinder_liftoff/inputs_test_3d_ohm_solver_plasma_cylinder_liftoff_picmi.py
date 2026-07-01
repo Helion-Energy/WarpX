@@ -120,7 +120,6 @@ def setup_simulation(
     grid_type="collocated",
     use_conformal_eb=True,
     equilibrium_b=False,
-    eb_resistive_only_partial=False,
     conformal_b_curl_fill=False,
     conformal_b_curl_fill_freeze=False,
     conformal_b_curl_fill_blend=0.0,
@@ -218,7 +217,6 @@ def setup_simulation(
         substep_atol=1.0e-8,
         max_substep_attempts=1000,
         use_conformal_eb=use_conformal_eb,
-        eb_resistive_only_partial=True if eb_resistive_only_partial else None,
         conformal_b_curl_fill=True if conformal_b_curl_fill else None,
         conformal_b_curl_fill_freeze=(True if conformal_b_curl_fill_freeze else None),
         conformal_b_curl_fill_blend=(
@@ -553,14 +551,6 @@ def main():
         "masked/staircase EB. Baseline for the 'cost of conformal walls' comparison.",
     )
     parser.add_argument(
-        "--resistive-only-partial",
-        action="store_true",
-        help="make the generalized Ohm's law resistive-only (E=eta*J) in "
-        "partially-covered EB cells (hybrid_pic_model.eb_resistive_only_partial): "
-        "drop the stiff 1/n Hall+pressure and hyper/corner terms at the cut wall "
-        "band. Staggered (Yee) grid only (GOL masking, Lever 2).",
-    )
-    parser.add_argument(
         "--b-curl-fill",
         action="store_true",
         help="enable hybrid_pic_model.conformal_b_curl_fill: 2nd-order quadratic "
@@ -683,7 +673,6 @@ def main():
         grid_type=args.grid_type,
         use_conformal_eb=args.conformal_eb,
         equilibrium_b=args.equilibrium_b,
-        eb_resistive_only_partial=args.resistive_only_partial,
         conformal_b_curl_fill=args.b_curl_fill,
         conformal_b_curl_fill_freeze=args.b_curl_fill_freeze,
         conformal_b_curl_fill_blend=args.b_curl_fill_blend,
