@@ -123,6 +123,7 @@ def setup_simulation(
     grid_type="collocated",
     use_conformal_eb=True,
     equilibrium_b=False,
+    vacuum=False,
 ):
     """Create the PICMI simulation object.
 
@@ -235,7 +236,7 @@ def setup_simulation(
     # The Hermite ramp has f(0) = bz_bias, so the step-1 subtract of the
     # external A at t = 0 removes this seed and recovers plasma B = 0. A uniform
     # Bz is divergence-free, so the initial projection div cleaner is disabled.
-    if equilibrium_b:
+    if equilibrium_b and not vacuum:
         # Self-consistent MHD (theta-pinch) equilibrium seed instead of the uniform
         # bias: the diamagnetic axial field in radial force balance with the annular
         # plasma pressure, d/dr[P + B_z^2/(2 mu0)] = 0, referenced to the bias field at
@@ -284,21 +285,30 @@ def setup_simulation(
     # the density gradient -- and the diamagnetic current its curl drives -- is
     # grid-resolved rather than a one-cell step (whose curl is a spurious current
     # sheet). annulus_smooth_cells=0 recovers the hard top-hat.
-    n_annulus = N_I * R_PART**2 / (r_outer**2 - R_INNER**2)
     n_fill = 2.0 * n_floor
-    r_expr = "sqrt(x*x+y*y)"
-    dist_kwargs = dict(n_a=n_annulus, n_f=n_fill, R_in=R_INNER, R_out=r_outer)
-    if annulus_w > 0.0:
-        # smooth top-hat: fill inside R_in, annulus in [R_in, R_out], 0 beyond,
-        # with tanh transitions of width annulus_w.
-        edge_in = f"0.5*(1.0+tanh(({r_expr}-R_in)/sw))"
-        edge_out = f"0.5*(1.0+tanh((R_out-{r_expr})/sw))"
-        density_expression = f"n_f*(1.0-{edge_in})+n_a*{edge_in}*{edge_out}"
-        dist_kwargs["sw"] = annulus_w
+    if vacuum:
+        # Vacuum run (--vacuum): no plasma. density_expression 0 -> no particles are
+        # injected, so rho = 0 everywhere (clamped to the floor) and the field
+        # evolves as the external-A-driven resistive vacuum B with no plasma
+        # feedback -- isolates the conformal-EB Faraday push / external ramp /
+        # div-clean from the Ohm's-law plasma coupling.
+        density_expression = "0"
+        dist_kwargs = {}
     else:
-        density_expression = (
-            f"n_a*(({r_expr}>=R_in)*({r_expr}<=R_out))+n_f*({r_expr}<R_in)"
-        )
+        n_annulus = N_I * R_PART**2 / (r_outer**2 - R_INNER**2)
+        r_expr = "sqrt(x*x+y*y)"
+        dist_kwargs = dict(n_a=n_annulus, n_f=n_fill, R_in=R_INNER, R_out=r_outer)
+        if annulus_w > 0.0:
+            # smooth top-hat: fill inside R_in, annulus in [R_in, R_out], 0 beyond,
+            # with tanh transitions of width annulus_w.
+            edge_in = f"0.5*(1.0+tanh(({r_expr}-R_in)/sw))"
+            edge_out = f"0.5*(1.0+tanh((R_out-{r_expr})/sw))"
+            density_expression = f"n_f*(1.0-{edge_in})+n_a*{edge_in}*{edge_out}"
+            dist_kwargs["sw"] = annulus_w
+        else:
+            density_expression = (
+                f"n_a*(({r_expr}>=R_in)*({r_expr}<=R_out))+n_f*({r_expr}<R_in)"
+            )
     ions = picmi.Species(
         name="ions",
         mass=m_i,
@@ -316,12 +326,13 @@ def setup_simulation(
         layout=picmi.PseudoRandomLayout(grid=grid, n_macroparticles_per_cell=nppc),
     )
 
-    ion_ion_coulomb = picmi.CoulombCollisions(
-        name="ion_ion_Coulomb",
-        species=[ions, ions],
-        CoulombLog=12,
-    )
-    sim.collisions = [ion_ion_coulomb]
+    if not vacuum:
+        ion_ion_coulomb = picmi.CoulombCollisions(
+            name="ion_ion_Coulomb",
+            species=[ions, ions],
+            CoulombLog=12,
+        )
+        sim.collisions = [ion_ion_coulomb]
 
     field_diag = picmi.FieldDiagnostic(
         name="field_diag",
@@ -619,6 +630,15 @@ def main():
         "(afterEsolve callback, NOT per RKF45 substep), warm-started across steps. "
         "Test whether an end-of-step div(B) scrub stabilizes the run.",
     )
+    parser.add_argument(
+        "--vacuum",
+        action="store_true",
+        help="run with NO plasma (empty ion species): rho=0 everywhere, so the field "
+        "evolves as the external-A-driven resistive vacuum B through the conformal EB, "
+        "with no Ohm's-law plasma feedback. Isolates the field solver (ECT Faraday / "
+        "external ramp / div-clean). Forces the uniform-bias seed; skips collisions "
+        "and the wall scraper.",
+    )
     args, left = parser.parse_known_args()
     sys.argv = sys.argv[:1] + left
 
@@ -676,6 +696,7 @@ def main():
         grid_type=args.grid_type,
         use_conformal_eb=args.conformal_eb,
         equilibrium_b=args.equilibrium_b,
+        vacuum=args.vacuum,
     )
 
     # Dielectric standoff: hold the plasma args.standoff_cells cells off the (metal)
@@ -685,7 +706,7 @@ def main():
     # signed-distance field is clamped a few cells out, so a standoff wider than that
     # clamp scrapes the whole interior. r_standoff matches the annulus outer radius
     # (r_outer_eff) so nothing is scraped at t=0. See install_wall_scraper.
-    if args.standoff_cells > 0.0:
+    if args.standoff_cells > 0.0 and not args.vacuum:
         r_standoff = R_WALL - args.standoff_cells * (2.0 / resolution)
         install_wall_scraper("ions", r_standoff, verbose=args.verbose)
 
