@@ -319,6 +319,54 @@ PhysicalParticleContainer::PhysicalParticleContainer (AmrCore* amr_core, int isp
         AddRealComp(m_user_real_attribs.at(i));
     }
 
+    // Molecular internal degrees of freedom (rotational / vibrational) with Borgnakke-Larsen exchange.
+    // Adds runtime real comps E_rot (and E_vib for rovibrational), both in eV.
+    {
+        std::string internal_dof_str = "none";
+        pp_species_name.query("internal_dof", internal_dof_str);
+        if (internal_dof_str == "rotational" || internal_dof_str == "rovibrational") {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_mass > 0.0,
+                "<species>.internal_dof requires a finite species mass");
+            m_internal_dof = (internal_dof_str == "rovibrational") ? 2 : 1;
+            // Resampling (leveling_thinning / velocity_coincidence_thinning) merges particles but does not
+            // carry E_rot/E_vib through the merge, which would leak internal energy. Guard until the
+            // thinning kernels weight-average the internal-DOF components (Phase A follow-up).
+            int idof_do_resampling = 0;
+            utils::parser::queryWithParser(pp_species_name, "do_resampling", idof_do_resampling);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(idof_do_resampling == 0,
+                "<species>.internal_dof is not yet compatible with <species>.do_resampling (internal energy "
+                "is not conserved across particle merges); disable resampling for this species for now.");
+            amrex::Real theta_rot = 0.0;
+            utils::parser::getWithParser(pp_species_name, "theta_rot", theta_rot);
+            m_theta_rot = static_cast<amrex::ParticleReal>(theta_rot);
+            amrex::Real Z_rot = 5.0;
+            utils::parser::queryWithParser(pp_species_name, "Z_rot", Z_rot);
+            m_Z_rot = static_cast<amrex::ParticleReal>(Z_rot);
+            int zeta_rot = 2;
+            utils::parser::queryWithParser(pp_species_name, "rotational_dof", zeta_rot);
+            m_rotational_dof = zeta_rot;
+            amrex::Real rot_init_T = -1.0;
+            utils::parser::queryWithParser(pp_species_name, "rot_init_temperature", rot_init_T);
+            m_rot_init_T = static_cast<amrex::ParticleReal>(rot_init_T);  // <0 => default to gas T at init
+            AddRealComp("E_rot");
+            if (m_internal_dof == 2) {
+                amrex::Real theta_vib = 0.0;
+                utils::parser::getWithParser(pp_species_name, "theta_vib", theta_vib);
+                m_theta_vib = static_cast<amrex::ParticleReal>(theta_vib);
+                amrex::Real Z_vib = 0.0;
+                utils::parser::getWithParser(pp_species_name, "Z_vib", Z_vib);
+                m_Z_vib = static_cast<amrex::ParticleReal>(Z_vib);
+                amrex::Real vib_init_T = -1.0;
+                utils::parser::queryWithParser(pp_species_name, "vib_init_temperature", vib_init_T);
+                m_vib_init_T = static_cast<amrex::ParticleReal>(vib_init_T);
+                AddRealComp("E_vib");
+            }
+        } else {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(internal_dof_str == "none",
+                "<species>.internal_dof must be one of: none, rotational, rovibrational");
+        }
+    }
+
     // If old particle positions should be saved add the needed components
     pp_species_name.query("save_previous_position", m_save_previous_position);
     if (m_save_previous_position) {
