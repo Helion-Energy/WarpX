@@ -92,11 +92,31 @@ reflectParticlesAtEB (PC& pc,
                 amrex::Real const phi_value = ablastr::particles::interp_field_nodal(i, j, k, W, phi);
                 if (phi_value >= 0.0_rt) { return; }  // particle still in the gas region
 
+                // Corner safeguard (a): if the particle penetrated deeper than the signed-distance
+                // field is reliable (~1 cell), it entered at a sharp corner or tunneled -> absorb it
+                // (otherwise it can accumulate in the solid over long runs / complex geometry).
+                amrex::Real dx_max = amrex::Real(1.0)/dxi[0];
+#if (AMREX_SPACEDIM >= 2)
+                dx_max = amrex::max(dx_max, amrex::Real(1.0)/dxi[1]);
+#endif
+#if (AMREX_SPACEDIM == 3)
+                dx_max = amrex::max(dx_max, amrex::Real(1.0)/dxi[2]);
+#endif
+                if (phi_value < -dx_max) {
+                    amrex::ParticleIDWrapper{ptd.m_idcpu[ip]}.make_invalid();
+                    return;
+                }
+
                 int ic, jc, kc;
                 amrex::Real Wc[AMREX_SPACEDIM][2];
                 ablastr::particles::compute_weights<amrex::IndexType::CELL>(
                     xp, yp, zp, plo, dxi, ic, jc, kc, Wc);
                 amrex::RealVect n = DistanceToEB::interp_normal(i, j, k, W, ic, jc, kc, Wc, phi, dxi);
+                // Corner safeguard (b): degenerate normal (ill-defined at a sharp corner) -> absorb.
+                if (DistanceToEB::dot_product(n, n) < amrex::Real(1.e-20)) {
+                    amrex::ParticleIDWrapper{ptd.m_idcpu[ip]}.make_invalid();
+                    return;
+                }
                 DistanceToEB::normalize(n);  // unit normal pointing from the wall into the gas
 
                 const bool diffuse = (accommodation > 0._prt) &&
@@ -183,6 +203,19 @@ reflectParticlesAtEB (PC& pc,
                 amrex::ignore_unused(ux, uy);
                 zp -= twophi*n[0];
 #endif
+                // Corner safeguard (c): if the reflected particle is STILL inside the solid
+                // (sharp concave corner where the mirror-reflection fails), absorb it rather than
+                // let it accumulate in the body.
+                {
+                    int ir, jr, kr;
+                    amrex::Real Wr[AMREX_SPACEDIM][2];
+                    ablastr::particles::compute_weights<amrex::IndexType::NODE>(
+                        xp, yp, zp, plo, dxi, ir, jr, kr, Wr);
+                    if (ablastr::particles::interp_field_nodal(ir, jr, kr, Wr, phi) < 0.0_rt) {
+                        amrex::ParticleIDWrapper{ptd.m_idcpu[ip]}.make_invalid();
+                        return;
+                    }
+                }
                 setPosition(ip, xp, yp, zp);
             });
         }
