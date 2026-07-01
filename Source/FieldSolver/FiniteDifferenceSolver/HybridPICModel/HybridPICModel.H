@@ -308,6 +308,13 @@ public:
      *  nodal/collocated quadratic gather is not yet robust and is skipped. Opt-in
      *  (default off -> byte-identical); intended for use_conformal_eb runs. */
     bool m_conformal_b_curl_fill = false;
+    /** Covered-B curl fill gather order. true (default) = the 2nd-order ridge-
+     *  regularized moving-least-squares quadratic fit (gather_quadratic_pred +
+     *  solve_spd); false = the basic linear/pointwise mirror gather (the same
+     *  fill the collocated grid uses). Set false to A/B the ridge solve against
+     *  a plain mirror when debugging near-wall covered-B artifacts. Requires
+     *  conformal_b_curl_fill. */
+    bool m_conformal_b_curl_fill_quadratic = true;
     /** If true, compute the covered-B curl fill (conformal_b_curl_fill) ONCE per
      *  RKF45 half-step from the step-entry B^n and HOLD those covered/band values
      *  fixed across all RKF45 substages, instead of re-evaluating the nonsmooth
