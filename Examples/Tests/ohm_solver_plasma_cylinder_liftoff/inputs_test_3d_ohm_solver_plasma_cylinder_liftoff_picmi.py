@@ -43,18 +43,20 @@ T_I0 = 5.0  # ion temperature (eV)
 T_E0 = 5.0  # electron temperature (eV): no electron pressure
 
 # Annular column (radii in m) and low-density interior fill
-R_INNER = 0.5
-R_OUTER = 0.8
+R_INNER = 0.65
+R_OUTER = 0.75
 R_PART = 0.385  # the annulus carries the inventory of a full column of this radius;
-# with R_INNER=0.5 and r_outer tied to the 3-cell standoff (~0.753 at n=128) this puts
-# the annulus number density at ~7e19 m^-3 (~0.47 N_I), a physical loading density.
+# n_annulus = N_I * R_PART^2 / (R_OUTER^2 - R_INNER^2). With R_INNER=0.65, R_OUTER=0.75
+# this is ~1.6e20 m^-3 (~1.06 N_I). Reduce R_PART to lower the loading density.
+# ANNULUS_SMOOTH_CELLS tanh-softens the radial edges so the gradient is grid-resolved.
+ANNULUS_SMOOTH_CELLS = 2.0
 R_WALL = 0.8  # conducting wall radius (embedded boundary)
 
 # External field ramp: Hermite smoothstep from the bias field to the
 # (reversed) main field over TAU_RAMP
-BZ_BIAS = -0.025  # T
-BZ_REV = 0.85  # T
-TAU_RAMP = 8.0e-6  # s
+BZ_BIAS = -0.01  # T
+BZ_REV = 0.5  # T
+TAU_RAMP = 10.0e-6  # s
 
 # Resistivity (density-scaled power law) and hyper-resistivity
 ETA_PLASMA = 1.0e-6  # Ohm m, bulk plasma
@@ -117,6 +119,7 @@ def setup_simulation(
     bz_rev=BZ_REV,
     bz_bias=BZ_BIAS,
     nz=NZ,
+    annulus_smooth_cells=ANNULUS_SMOOTH_CELLS,
     grid_type="collocated",
     use_conformal_eb=True,
     equilibrium_b=False,
@@ -124,6 +127,7 @@ def setup_simulation(
     conformal_b_curl_fill_freeze=False,
     conformal_b_curl_fill_blend=0.0,
     conformal_b_curl_fill_clamp=0.0,
+    conformal_b_curl_fill_quadratic=True,
 ):
     """Create the PICMI simulation object.
 
@@ -147,6 +151,7 @@ def setup_simulation(
 
     # cell sizes (cubic cells; z slab centered on the z = 5 m midplane)
     dx = 2.0 / resolution
+    annulus_w = annulus_smooth_cells * dx  # tanh edge width of the radial profile
     lz = nz * dx
     zmin, zmax = 5.0 - lz / 2.0, 5.0 + lz / 2.0
 
@@ -225,6 +230,9 @@ def setup_simulation(
         conformal_b_curl_fill_clamp=(
             conformal_b_curl_fill_clamp if conformal_b_curl_fill_clamp else None
         ),
+        conformal_b_curl_fill_quadratic=(
+            None if conformal_b_curl_fill_quadratic else False
+        ),
         A_external=A_ext,
         **power_law_resistivity(
             ETA_PLASMA,
@@ -259,10 +267,17 @@ def setup_simulation(
         k_eq = 2.0 * constants.mu0 * (T_I0 + te) * constants.q_e
         sgn = "" if bz_bias >= 0 else "-"
         rr = "sqrt(x*x+y*y)"
-        n_of_r = (
-            f"({n_ann_eq}*(({rr}>={R_INNER})*({rr}<={r_outer}))"
-            f"+{n_fill_eq}*({rr}<{R_INNER}))"
-        )
+        # Match the (tanh-smoothed) loaded density profile so the seed B is in
+        # force balance with the density the particles actually carry.
+        if annulus_w > 0.0:
+            e_in = f"0.5*(1.0+tanh(({rr}-{R_INNER})/{annulus_w}))"
+            e_out = f"0.5*(1.0+tanh(({r_outer}-{rr})/{annulus_w}))"
+            n_of_r = f"({n_fill_eq}*(1.0-{e_in})+{n_ann_eq}*{e_in}*{e_out})"
+        else:
+            n_of_r = (
+                f"({n_ann_eq}*(({rr}>={R_INNER})*({rr}<={r_outer}))"
+                f"+{n_fill_eq}*({rr}<{R_INNER}))"
+            )
         bz_seed = f"{sgn}sqrt({bz_bias**2}+{k_eq}*({n_ann_eq}-{n_of_r}))"
     else:
         bz_seed = f"{bz_bias}"
@@ -279,27 +294,37 @@ def setup_simulation(
         implicit_function="(x**2+y**2-R_w**2)", R_w=R_WALL
     )
 
-    # Annular column carrying the inventory of a full column of radius
-    # R_PART at N_I, plus a low-density interior fill (no plasma between the
-    # annulus and the wall)
+    # Annular column carrying the inventory of a full column of radius R_PART at
+    # N_I, plus a low-density interior fill (no plasma between the annulus and the
+    # wall). The radial edges are tanh-softened over annulus_smooth_cells cells so
+    # the density gradient -- and the diamagnetic current its curl drives -- is
+    # grid-resolved rather than a one-cell step (whose curl is a spurious current
+    # sheet). annulus_smooth_cells=0 recovers the hard top-hat.
     n_annulus = N_I * R_PART**2 / (r_outer**2 - R_INNER**2)
     n_fill = 2.0 * n_floor
     r_expr = "sqrt(x*x+y*y)"
+    dist_kwargs = dict(n_a=n_annulus, n_f=n_fill, R_in=R_INNER, R_out=r_outer)
+    if annulus_w > 0.0:
+        # smooth top-hat: fill inside R_in, annulus in [R_in, R_out], 0 beyond,
+        # with tanh transitions of width annulus_w.
+        edge_in = f"0.5*(1.0+tanh(({r_expr}-R_in)/sw))"
+        edge_out = f"0.5*(1.0+tanh((R_out-{r_expr})/sw))"
+        density_expression = f"n_f*(1.0-{edge_in})+n_a*{edge_in}*{edge_out}"
+        dist_kwargs["sw"] = annulus_w
+    else:
+        density_expression = (
+            f"n_a*(({r_expr}>=R_in)*({r_expr}<=R_out))+n_f*({r_expr}<R_in)"
+        )
     ions = picmi.Species(
         name="ions",
         mass=m_i,
         charge="q_e",
         initial_distribution=picmi.AnalyticDistribution(
-            density_expression=(
-                f"n_a*(({r_expr}>=R_in)*({r_expr}<=R_out))+n_f*({r_expr}<R_in)"
-            ),
+            density_expression=density_expression,
             momentum_expressions=["0", "0", "0"],
             warpx_momentum_spread_expressions=[f"{vth}"] * 3,
             warpx_density_min=0.5 * n_fill,
-            n_a=n_annulus,
-            n_f=n_fill,
-            R_in=R_INNER,
-            R_out=r_outer,
+            **dist_kwargs,
         ),
     )
     sim.add_species(
@@ -487,6 +512,15 @@ def main():
         default=NZ,
     )
     parser.add_argument(
+        "--annulus-smooth-cells",
+        dest="annulus_smooth_cells",
+        type=float,
+        default=ANNULUS_SMOOTH_CELLS,
+        help="tanh-smoothing width (in cells) of the annulus radial density edges, "
+        "so the density gradient and its diamagnetic current are grid-resolved. "
+        "0 = hard top-hat (a one-cell step whose curl is a spurious current sheet).",
+    )
+    parser.add_argument(
         "--bz-rev",
         dest="bz_rev",
         help="reversed (target) external Bz in Tesla (default 1.5; lower = "
@@ -597,6 +631,17 @@ def main():
         "gentle mirror correction. Requires --b-curl-fill. Default 0 = no clamp.",
     )
     parser.add_argument(
+        "--no-b-curl-fill-quadratic",
+        dest="conformal_b_curl_fill_quadratic",
+        action="store_false",
+        help="use the basic linear/pointwise covered-B mirror (like the collocated "
+        "grid) instead of the 2nd-order ridge-regularized quadratic least-squares "
+        "gather (hybrid_pic_model.conformal_b_curl_fill_quadratic=0). A/B the ridge "
+        "solve against a plain mirror when debugging near-wall covered-B artifacts. "
+        "Requires --b-curl-fill.",
+    )
+    parser.set_defaults(conformal_b_curl_fill_quadratic=True)
+    parser.add_argument(
         "--eb-b-normal-weight",
         type=float,
         default=-1e30,
@@ -676,6 +721,7 @@ def main():
         args.bz_rev,
         args.bz_bias,
         args.nz,
+        annulus_smooth_cells=args.annulus_smooth_cells,
         grid_type=args.grid_type,
         use_conformal_eb=args.conformal_eb,
         equilibrium_b=args.equilibrium_b,
@@ -683,6 +729,7 @@ def main():
         conformal_b_curl_fill_freeze=args.b_curl_fill_freeze,
         conformal_b_curl_fill_blend=args.b_curl_fill_blend,
         conformal_b_curl_fill_clamp=args.b_curl_fill_clamp,
+        conformal_b_curl_fill_quadratic=args.conformal_b_curl_fill_quadratic,
     )
 
     # conformal_b_curl_fill_blend is wired through the PICMI HybridPICSolver
