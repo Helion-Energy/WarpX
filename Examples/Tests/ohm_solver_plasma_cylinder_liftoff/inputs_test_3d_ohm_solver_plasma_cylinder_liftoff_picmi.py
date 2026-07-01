@@ -122,6 +122,7 @@ def setup_simulation(
     annulus_smooth_cells=ANNULUS_SMOOTH_CELLS,
     grid_type="collocated",
     use_conformal_eb=True,
+    eb_b_straight_mirror=False,
     equilibrium_b=False,
     vacuum=False,
 ):
@@ -218,6 +219,7 @@ def setup_simulation(
         substep_atol=1.0e-8,
         max_substep_attempts=1000,
         use_conformal_eb=use_conformal_eb,
+        eb_b_straight_mirror=True if eb_b_straight_mirror else None,
         A_external=A_ext,
         **power_law_resistivity(
             ETA_PLASMA,
@@ -607,6 +609,16 @@ def main():
         "masked/staircase EB. Baseline for the 'cost of conformal walls' comparison.",
     )
     parser.add_argument(
+        "--eb-b-straight-mirror",
+        dest="eb_b_straight_mirror",
+        action="store_true",
+        help="impose the wall on the staggered (Yee) B with the collocated-style "
+        "direct level-set mirror after each Faraday push, instead of ECT face "
+        "borrowing (hybrid_pic_model.eb_b_straight_mirror). Use with --no-conformal-eb "
+        "(standard masked Yee Faraday). Best with a standoff holding plasma off the "
+        "wall. Default off.",
+    )
+    parser.add_argument(
         "--equilibrium-b",
         action="store_true",
         dest="equilibrium_b",
@@ -695,6 +707,7 @@ def main():
         annulus_smooth_cells=args.annulus_smooth_cells,
         grid_type=args.grid_type,
         use_conformal_eb=args.conformal_eb,
+        eb_b_straight_mirror=args.eb_b_straight_mirror,
         equilibrium_b=args.equilibrium_b,
         vacuum=args.vacuum,
     )

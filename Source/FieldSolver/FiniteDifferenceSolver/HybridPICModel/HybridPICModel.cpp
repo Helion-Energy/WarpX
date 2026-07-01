@@ -177,6 +177,11 @@ void HybridPICModel::ReadParameters ()
     // EB B fill) to recover the pre-treatment baseline (for A/B comparison).
     pp_hybrid.query("conformal_b_off", m_conformal_b_off);
 
+    // Collocated-style direct level-set mirror B fill on the staggered (Yee) grid,
+    // in place of the ECT enlarged-cell wall handling (use with use_conformal_eb
+    // off). Opt-in, default off -> byte-identical.
+    pp_hybrid.query("eb_b_straight_mirror", m_eb_b_straight_mirror);
+
     // Image parity of charge deposited beyond the embedded boundary: "pec" folds it back
     // with opposite sign (density vanishes at the wall), "reflect" folds it back with its
     // own sign (mass-conserving when the wall supports the plasma column).
@@ -419,8 +424,14 @@ void HybridPICModel::InitialBEBFill ()
 {
 #ifdef AMREX_USE_EB
     using ablastr::utils::enums::GridType;
-    if (!EB::enabled() || !m_use_conformal_eb || m_conformal_b_off) { return; }
-    if (WarpX::grid_type != GridType::Collocated) { return; }
+    if (!EB::enabled()) { return; }
+    // Collocated conformal fill, OR the opt-in staggered straight mirror (Yee, in
+    // place of ECT). Both use the same direct level-set magnetic mirror below.
+    bool const collocated_fill = m_use_conformal_eb && !m_conformal_b_off
+        && WarpX::grid_type == GridType::Collocated;
+    bool const staggered_straight = m_eb_b_straight_mirror
+        && WarpX::grid_type != GridType::Collocated;
+    if (!collocated_fill && !staggered_straight) { return; }
     auto& warpx = WarpX::GetInstance();
     auto const& eb_update_B = warpx.GetEBUpdateBFlag();
     for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
@@ -1466,8 +1477,11 @@ void HybridPICModel::FieldPush (
     // curl(B) plasma current. (The FillBoundaryB above gives the gather stencils
     // valid ghost values; a second exchange below propagates the band/covered
     // values.)
-    if (m_use_conformal_eb && !m_conformal_b_off &&
-        WarpX::grid_type == ablastr::utils::enums::GridType::Collocated) {
+    bool const collocated_fill = m_use_conformal_eb && !m_conformal_b_off
+        && WarpX::grid_type == ablastr::utils::enums::GridType::Collocated;
+    bool const staggered_straight = m_eb_b_straight_mirror
+        && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated;
+    if (EB::enabled() && (collocated_fill || staggered_straight)) {
         for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
             // The direct level-set mirror fill (magnetic parity, normal odd /
             // tangential even, flux-excluding PEC). It is self-consistent with

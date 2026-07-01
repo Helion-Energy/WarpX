@@ -2194,6 +2194,16 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         neighbors to avoid time-step restrictions. Requires an embedded
         boundary and a 3D Cartesian staggered grid.
 
+    eb_b_straight_mirror: bool, default=False
+        If True, impose the wall condition on the staggered (Yee) ``Bfield_fp``
+        with the collocated-style direct level-set mirror after each Faraday push,
+        instead of the ECT enlarged-cell face borrowing. Run with
+        ``use_conformal_eb=False`` (standard masked Yee Faraday) + this to get the
+        collocated wall treatment on a staggered grid, avoiding the ECT
+        face-extension / cross-box seam. Best with the plasma held off the wall (a
+        standoff), which removes the dense near-wall B that made the pointwise Yee
+        mirror spike. Opt-in (default off is byte-identical).
+
     conformal_ect_curvature: bool, default=False
         If True, apply the along-edge curvature correction to the conformal-ECT
         Faraday circulation: each cut edge's electric field is Taylor-shifted
@@ -2328,6 +2338,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         max_substep_attempts=None,
         holmstrom_vacuum_region=None,
         use_conformal_eb=None,
+        eb_b_straight_mirror=None,
         conformal_ect_curvature=None,
         conformal_ect_j=None,
         eb_bc_rtol=None,
@@ -2366,6 +2377,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.holmstrom_vacuum_region = holmstrom_vacuum_region
 
         self.use_conformal_eb = use_conformal_eb
+        self.eb_b_straight_mirror = eb_b_straight_mirror
         self.conformal_ect_curvature = conformal_ect_curvature
         self.conformal_ect_j = conformal_ect_j
         self.eb_bc_rtol = eb_bc_rtol
@@ -2428,6 +2440,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         pywarpx.hybridpicmodel.max_substep_attempts = self.max_substep_attempts
         pywarpx.hybridpicmodel.holmstrom_vacuum_region = self.holmstrom_vacuum_region
         pywarpx.hybridpicmodel.use_conformal_eb = self.use_conformal_eb
+        pywarpx.hybridpicmodel.eb_b_straight_mirror = self.eb_b_straight_mirror
         pywarpx.hybridpicmodel.conformal_ect_curvature = self.conformal_ect_curvature
         pywarpx.hybridpicmodel.conformal_ect_j = self.conformal_ect_j
         pywarpx.hybridpicmodel.eb_bc_rtol = self.eb_bc_rtol
