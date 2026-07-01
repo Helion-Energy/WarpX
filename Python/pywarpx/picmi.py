@@ -2307,6 +2307,13 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         the odd reflection (Dirichlet 0 at the wall); False is the even
         reflection (Neumann, for a wall-supported column).
 
+    eb_pe_dirichlet: bool, default=True
+        Parity of the electron-pressure embedded-boundary fill at a PEC wall:
+        True (default) is the odd reflection (Dirichlet 0 -> Pe vanishes at the
+        wall, so grad(Pe) supplies the radial E a PEC sustains via surface
+        charge); False is the even reflection (Neumann, zero normal gradient).
+        Not a physical sheath model (quasineutrality breaks down at the wall).
+
     eb_bc_direct_fill: bool, default=True
         If True (default), fill the embedded-boundary PEC boundary condition
         with a single-pass mirrored interpolation that uses only
@@ -2400,6 +2407,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         eb_bc_direct_fill=None,
         eb_deposit_fold=None,
         eb_rho_dirichlet=None,
+        eb_pe_dirichlet=None,
         isotropic_hyper_resistivity=None,
         isotropic_resistivity=None,
         Jx_external_function=None,
@@ -2443,6 +2451,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.eb_bc_direct_fill = eb_bc_direct_fill
         self.eb_deposit_fold = eb_deposit_fold
         self.eb_rho_dirichlet = eb_rho_dirichlet
+        self.eb_pe_dirichlet = eb_pe_dirichlet
         self.isotropic_hyper_resistivity = isotropic_hyper_resistivity
         self.isotropic_resistivity = isotropic_resistivity
 
@@ -2520,6 +2529,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         pywarpx.hybridpicmodel.eb_bc_direct_fill = self.eb_bc_direct_fill
         pywarpx.hybridpicmodel.eb_deposit_fold = self.eb_deposit_fold
         pywarpx.hybridpicmodel.eb_rho_dirichlet = self.eb_rho_dirichlet
+        pywarpx.hybridpicmodel.eb_pe_dirichlet = self.eb_pe_dirichlet
         pywarpx.hybridpicmodel.isotropic_hyper_resistivity = (
             self.isotropic_hyper_resistivity
         )
