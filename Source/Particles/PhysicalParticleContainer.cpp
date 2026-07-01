@@ -319,6 +319,24 @@ PhysicalParticleContainer::PhysicalParticleContainer (AmrCore* amr_core, int isp
         AddRealComp(m_user_real_attribs.at(i));
     }
 
+    // Embedded-boundary particle reflection (specular + diffuse/thermal) for neutral-gas walls.
+    {
+        int eb_reflect_flag = 0;
+        utils::parser::queryWithParser(pp_species_name, "eb_reflect", eb_reflect_flag);
+        if (eb_reflect_flag != 0) {
+            m_do_eb_reflection = true;
+            amrex::Real eb_reflect_temp = 300.0;
+            utils::parser::queryWithParser(pp_species_name, "eb_reflect_temp", eb_reflect_temp);
+            amrex::Real eb_accom = 1.0;
+            utils::parser::queryWithParser(pp_species_name, "eb_accommodation", eb_accom);
+            m_eb_accommodation = static_cast<amrex::ParticleReal>(eb_accom);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_mass > 0.0,
+                "<species>.eb_reflect requires a finite species mass");
+            m_eb_uth = static_cast<amrex::ParticleReal>(
+                std::sqrt(PhysConst::kb * eb_reflect_temp / m_mass) / PhysConst::c);
+        }
+    }
+
     // If old particle positions should be saved add the needed components
     pp_species_name.query("save_previous_position", m_save_previous_position);
     if (m_save_previous_position) {

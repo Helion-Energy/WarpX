@@ -40,6 +40,7 @@
 #include "Utils/WarpXUtil.H"
 #include "EmbeddedBoundary/ParticleScraper.H"
 #include "EmbeddedBoundary/ParticleBoundaryProcess.H"
+#include "EmbeddedBoundary/ParticleReflectAtEB.H"
 
 #include "WarpX.H"
 
@@ -1242,7 +1243,12 @@ void MultiParticleContainer::ScrapeParticlesAtEB (
     ablastr::fields::MultiLevelScalarField const& distance_to_eb)
 {
     for (auto& pc : allcontainers) {
-        scrapeParticlesAtEB(*pc, distance_to_eb, ParticleBoundaryProcess::Absorb());
+        if (pc->m_do_eb_reflection) {
+            // Neutral-gas walls: reflect (specular + diffuse) instead of absorbing.
+            reflectParticlesAtEB(*pc, distance_to_eb, pc->m_eb_uth, pc->m_eb_accommodation);
+        } else {
+            scrapeParticlesAtEB(*pc, distance_to_eb, ParticleBoundaryProcess::Absorb());
+        }
     }
 }
 
