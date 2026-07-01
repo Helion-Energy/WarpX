@@ -329,6 +329,61 @@ def setup_simulation(
     return sim
 
 
+def install_wall_scraper(species_name, r_standoff, verbose=False):
+    """Hold the plasma off the (metal) EB wall with a pure-Python particle scraper.
+
+    A ``callfromparticlescraper`` hook (fired each step in WarpX::Evolve *before* the
+    C++ EB scrape and Redistribute) flags ions with ``sqrt(x**2 + y**2) > r_standoff``
+    invalid -- via the zero-copy pyAMReX SoA / idcpu interface -- so Redistribute
+    removes them the same step. The id/cpu views alias WarpX's own particle buffers
+    (numpy on CPU, cupy on GPU), so the flag writes straight back with no copy.
+
+    This is a stand-in for a dielectric standoff, modelling a quartz liner so the
+    plasma never contacts the PEC wall. It deliberately replaces the C++
+    ``warpx.eb_particle_scrape_offset``: that path scrapes on ``distance_to_eb <
+    offset``, but AMReX ``FillSignedDistance`` clamps the deep-fluid distance to a
+    ``ls_roof`` of only ``(nGrow+1)*dx`` (a few cells), so any standoff wider than
+    that roof spuriously scrapes the entire interior annulus. Testing radius directly
+    sidesteps the clamp entirely.
+
+    The proper follow-up is a DielectricEB object (a second embedded boundary carrying
+    eps_r / surface charge) so the standoff and macroscopic dielectric physics live in
+    the field solve. See Docs/eb_fill_review/DIELECTRIC_EB_FOLLOWUP.md.
+    """
+    from pywarpx import callbacks
+    from pywarpx._libwarpx import libwarpx
+    from pywarpx.LoadThirdParty import load_cupy
+    from pywarpx.particle_containers import ParticleContainerWrapper
+
+    ions = ParticleContainerWrapper(species_name)
+    r2_standoff = r_standoff * r_standoff
+
+    @callbacks.callfromparticlescraper
+    def _scrape_beyond_standoff():
+        xp, _ = load_cupy()  # cupy on GPU, numpy on CPU -- zero-copy either way
+        amr = libwarpx.amr
+        level = 0
+        xs = ions.get_particle_real_arrays("x", level)
+        ys = ions.get_particle_real_arrays("y", level)
+        idcpus = ions.get_particle_idcpu_arrays(level)
+        nflagged = 0
+        for x, y, idcpu in zip(xs, ys, idcpus):
+            mask = (x * x + y * y) > r2_standoff
+            if not bool(mask.any()):
+                continue
+            ids = amr.unpack_ids(idcpu)  # signed particle id (negative == invalid)
+            ids[mask] = -xp.abs(ids[mask])  # flag for removal at Redistribute
+            amr.pack_ids(idcpu, ids)  # writes back into the shared idcpu buffer
+            nflagged += int(mask.sum())
+        if verbose and nflagged:
+            amr.Print(
+                f"[wall scraper] flagged {nflagged} '{species_name}' beyond "
+                f"r = {r_standoff:.5f} m\n"
+            )
+
+    return _scrape_beyond_standoff
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -643,14 +698,16 @@ def main():
 
         hybridpicmodel.eb_b_fill_normal_weight = args.eb_b_normal_weight
 
-    # Dielectric standoff: hold the plasma args.standoff_cells cells off the field wall
-    # (warpx.eb_particle_scrape_offset is a ParmParse warpx.* param, not a PICMI kwarg).
+    # Dielectric standoff: hold the plasma args.standoff_cells cells off the (metal)
+    # field wall with a Python particle scraper (a callfromparticlescraper hook that
+    # flags ions beyond r_standoff for removal). This replaces the C++
+    # warpx.eb_particle_scrape_offset, which over-scrapes a wide annulus: the AMReX
+    # signed-distance field is clamped a few cells out, so a standoff wider than that
+    # clamp scrapes the whole interior. r_standoff matches the annulus outer radius
+    # (r_outer_eff) so nothing is scraped at t=0. See install_wall_scraper.
     if args.standoff_cells > 0.0:
-        from pywarpx import warpx as _warpx_bucket
-
-        _warpx_bucket.eb_particle_scrape_offset = args.standoff_cells * (
-            2.0 / resolution
-        )
+        r_standoff = R_WALL - args.standoff_cells * (2.0 / resolution)
+        install_wall_scraper("ions", r_standoff, verbose=args.verbose)
 
     sim.step()
 

@@ -204,6 +204,15 @@ public:
     void CalculateElectronPressure (int lev) const;
 
     /**
+     * \brief Warn (once) if plasma sits within the particle shape order of the
+     * embedded-boundary wall. Deposition reaches nox cells, so plasma that close
+     * lays current onto wall-adjacent edges and drives near-wall current spikes
+     * (and an unmodelled sub-grid sheath). Recommends scraping >= nox*dx off the
+     * wall. Cheap: runs a single masked reduction on the first call, then latches.
+     */
+    void WarnIfPlasmaAgainstWall (int lev) const;
+
+    /**
      * \brief Fill the electron pressure multifab given the kinetic particle
      * charge density (and assumption of quasi-neutrality) using the user
      * specified electron equation of state.
@@ -380,6 +389,15 @@ public:
      *  the odd reflection (Dirichlet 0 at the wall); false is the even
      *  reflection (Neumann: the wall supports the column) */
     bool m_eb_rho_dirichlet = true;
+    /** Parity of the electron-pressure embedded-boundary fill at a PEC wall:
+     *  true (default) is the odd reflection (Dirichlet 0 -> Pe vanishes at the
+     *  wall, so grad(Pe) supports the allowable radial E a PEC sustains via
+     *  surface charge); false is the even reflection (Neumann: zero normal
+     *  gradient). A physical sheath/wall-function is not modelled here (see the
+     *  sheath note in Docs/eb_fill_review/DIELECTRIC_EB_FOLLOWUP.md). */
+    bool m_eb_pe_dirichlet = true;
+    /** Latch so the near-wall plasma warning is emitted at most once. */
+    mutable bool m_checked_plasma_at_wall = false;
 
     /** Cached embedded-boundary fill classification for the edge fields
      *  (current density and Ohm's-law E), one entry per level; reset on

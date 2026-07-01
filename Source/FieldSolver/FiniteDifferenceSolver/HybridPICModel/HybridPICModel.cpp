@@ -13,6 +13,8 @@
 #include <ablastr/utils/Communication.H>
 #include <ablastr/warn_manager/WarnManager.H>
 
+#include <AMReX_Reduce.H>
+
 #include "EBJBoundary.H"
 #include "EmbeddedBoundary/Enabled.H"
 #include "Python/callbacks.H"
@@ -240,6 +242,10 @@ void HybridPICModel::ReadParameters ()
     // Parity of the rho mirror fill across the wall: Dirichlet 0 (odd) by default,
     // Neumann (even) when the wall supports the column.
     pp_hybrid.query("eb_rho_dirichlet", m_eb_rho_dirichlet);
+    // Parity of the electron-pressure fill at a PEC wall: Dirichlet 0 (odd) by
+    // default (Pe -> 0 at the wall, grad(Pe) drives the radial E a PEC sustains),
+    // Neumann (even) to reflect the back-pressure with zero normal gradient.
+    pp_hybrid.query("eb_pe_dirichlet", m_eb_pe_dirichlet);
 
     // isotropized hyper-resistivity Laplacian (Cartesian geometries)
     pp_hybrid.query("isotropic_hyper_resistivity", m_isotropic_hyper_resistivity);
@@ -821,6 +827,69 @@ void HybridPICModel::HybridPICSolveE (
     }
 }
 
+void HybridPICModel::WarnIfPlasmaAgainstWall (int lev) const
+{
+#ifdef AMREX_USE_EB
+    if (m_checked_plasma_at_wall) { return; }
+    m_checked_plasma_at_wall = true;
+    if (!EB::enabled()) { return; }
+
+    using namespace amrex::literals;
+    using warpx::fields::FieldType;
+
+    auto& warpx = WarpX::GetInstance();
+    amrex::MultiFab const& rho = *warpx.m_fields.get(FieldType::rho_fp, lev);
+    amrex::MultiFab const& phi_eb = *warpx.m_fields.get(FieldType::distance_to_eb, lev);
+    auto const dx = warpx.Geom(lev).CellSizeArray();
+#if defined(WARPX_DIM_3D)
+    amrex::Real const h_max = amrex::max(dx[0], amrex::max(dx[1], dx[2]));
+#else
+    amrex::Real const h_max = amrex::max(dx[0], dx[1]);
+#endif
+    // Deposition reaches nox cells, so this is the recommended standoff distance.
+    int const order = WarpX::nox;
+    amrex::Real const band = amrex::Real(order) * h_max;
+
+    // One masked pass: max|rho| in the near-wall fluid band (0 < phi <= band) and
+    // the global max|rho|, so the test is scale-free (near-wall vs peak density).
+    amrex::ReduceOps<amrex::ReduceOpMax, amrex::ReduceOpMax> reduce_op;
+    amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+    for (amrex::MFIter mfi(rho); mfi.isValid(); ++mfi) {
+        amrex::Box const bx = mfi.validbox();
+        auto const& r = rho.const_array(mfi);
+        auto const& p = phi_eb.const_array(mfi);
+        reduce_op.eval(bx, reduce_data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                amrex::Real const ar = std::abs(r(i, j, k));
+                amrex::Real const s = p(i, j, k);
+                amrex::Real const in_band = (s > 0._rt && s <= band) ? ar : 0._rt;
+                return {in_band, ar};
+            });
+    }
+    auto const hv = reduce_data.value(reduce_op);
+    amrex::Real band_max = amrex::get<0>(hv);
+    amrex::Real glob_max = amrex::get<1>(hv);
+    amrex::ParallelDescriptor::ReduceRealMax(band_max);
+    amrex::ParallelDescriptor::ReduceRealMax(glob_max);
+
+    if (glob_max > 0._rt && band_max > 0.05_rt * glob_max) {
+        ablastr::warn_manager::WMRecordWarning(
+            "HybridPIC",
+            "Plasma sits within the particle shape order (nox = " +
+            std::to_string(order) + " cell(s)) of the embedded-boundary wall. In the "
+            "hybrid Ohm's-law solver, current deposited onto wall-adjacent edges drives "
+            "near-wall current spikes (and an unmodelled sub-grid sheath where "
+            "quasineutrality breaks down), a likely wall-instability driver. Scrape "
+            "particles at least nox*dx cells off the wall (e.g. the liftoff deck's "
+            "--standoff-cells >= particle shape order).",
+            ablastr::warn_manager::WarnPriority::medium);
+    }
+#else
+    amrex::ignore_unused(lev);
+#endif
+}
+
 void HybridPICModel::CalculateElectronPressure() const
 {
     auto& warpx = WarpX::GetInstance();
@@ -838,21 +907,31 @@ void HybridPICModel::CalculateElectronPressure(const int lev) const
     ablastr::fields::ScalarField electron_pressure_fp = warpx.m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
     ablastr::fields::ScalarField rho_fp = warpx.m_fields.get(FieldType::rho_fp, lev);
 
+    // Warn (once) if plasma is loaded up against the EB wall (rho^{n+1} is current).
+    WarnIfPlasmaAgainstWall(lev);
+
     // Calculate the electron pressure using rho^{n+1}.
     FillElectronPressureMF(
         *electron_pressure_fp,
         *rho_fp
     );
-    // The conducting wall supports the plasma back-pressure, so reflect Pe evenly (zero
-    // normal gradient) across the embedded boundary; grad(Pe) stencils straddling the wall
-    // must not see the equation of state evaluated on the nonpositive mirrored density
-    // inside the conductor.
+    // Electron-pressure embedded-boundary condition at a PEC wall. Default is
+    // Dirichlet (odd reflection -> Pe vanishes at the wall): a PEC supports a normal
+    // (radial) E via surface charge, and the resulting grad(Pe) across the wall
+    // supplies that allowable radial field in Ohm's law -- unlike a Neumann (even,
+    // zero-normal-gradient) reflection, which pins the pressure gradient to zero and
+    // suppresses the near-wall radial E. NOTE: this is NOT a physical sheath model;
+    // quasineutrality breaks down and a sub-grid sheath forms at the wall (a likely
+    // near-wall instability driver), to be revisited with a wall function under the
+    // implicit solver (see Docs/eb_fill_review/DIELECTRIC_EB_FOLLOWUP.md). Either
+    // parity keeps grad(Pe) stencils straddling the wall off the nonpositive mirrored
+    // density inside the conductor. Toggle with hybrid_pic_model.eb_pe_dirichlet.
     if (EB::enabled()) {
         warpx::hybrid::ApplyEBBoundaryToNodalScalar(
             *electron_pressure_fp,
             *warpx.m_fields.get(FieldType::distance_to_eb, lev),
             warpx.Geom(lev),
-            /*odd=*/false);
+            /*odd=*/m_eb_pe_dirichlet);
     }
     warpx.ApplyElectronPressureBoundary(lev, PatchType::fine);
     ablastr::utils::communication::FillBoundary(
