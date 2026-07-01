@@ -158,22 +158,6 @@ void HybridPICModel::ReadParameters ()
     }
     pp_hybrid.query("eb_hall_mask", m_eb_hall_mask);
 
-    // Resistive-only generalized Ohm's law in partially-covered EB cells (Lever 2 /
-    // GOL masking): drops the stiff 1/n Hall + electron-pressure terms in the cut-cell
-    // wall band, leaving E = eta*J (J from the wall-filled curl B). The partial-cell
-    // classification comes from the 3-state staggered (ECT) eb_update_E flag, so it is
-    // a no-op on a collocated grid (no cut edges are marked partial there).
-    pp_hybrid.query("eb_resistive_only_partial", m_eb_resistive_only_partial);
-    if (m_eb_resistive_only_partial
-        && WarpX::grid_type == ablastr::utils::enums::GridType::Collocated) {
-        ablastr::warn_manager::WMRecordWarning(
-            "HybridPIC",
-            "hybrid_pic_model.eb_resistive_only_partial requires a staggered (Yee) "
-            "embedded boundary; it is ignored on a collocated grid (no cut edges are "
-            "marked partially covered there).",
-            ablastr::warn_manager::WarnPriority::medium);
-    }
-
     if (m_use_conformal_eb) {
 #if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_XZ)
         WARPX_ABORT_WITH_MESSAGE(
@@ -259,19 +243,9 @@ void HybridPICModel::ReadParameters ()
     // corner). Widen the plasma-current EB mirror-fill band to that corner reach
     // so the diagonal edges near a curved wall are mirror-filled rather than left
     // in the zeroed deep interior (which would inject a spurious nabla^2 J there).
-    //
-    // With eb_resistive_only_partial on, HybridPICSolveECartesian disables the
-    // iso-hyper Laplacian (and the iso-resistivity corner-curl) at every regular
-    // edge whose 3x3x3 stencil reaches a non-regular edge near the wall. That
-    // removes the diagonal-reach requirement on the mirror fill, so the band
-    // collapses to 1: no near-wall edge ever reads diagonal J through the iso
-    // stencil. The E and plasma-current (J) fills stay pinned to this same band,
-    // now at 1.
-    m_eb_fill_band_cells = m_eb_resistive_only_partial
-        ? amrex::Real(1.0)
-        : (m_isotropic_hyper_resistivity
-            ? std::sqrt(static_cast<amrex::Real>(AMREX_SPACEDIM))
-            : amrex::Real(1.0));
+    m_eb_fill_band_cells = m_isotropic_hyper_resistivity
+        ? std::sqrt(static_cast<amrex::Real>(AMREX_SPACEDIM))
+        : amrex::Real(1.0);
 
     // Mirror-fill band width for the Bfield_fp EB fill. The level-set mirror
     // injects a div(B) jump at the band/deep interface; the filled B couples
