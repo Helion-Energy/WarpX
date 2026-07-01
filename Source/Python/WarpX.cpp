@@ -239,8 +239,7 @@ void init_WarpX (py::module& m)
         .def("hybrid_apply_eb_boundary_to_face_field",
             [](WarpX& wx, std::string const& name, int const lev,
                bool const fill_covered_centers, amrex::Real const band_cells,
-               bool const cyl_correction, int const cyl_axis,
-               bool const quadratic_gather) {
+               bool const cyl_correction, int const cyl_axis) {
                 using warpx::fields::FieldType;
                 auto* hybrid = wx.get_pointer_HybridPICModel();
                 if (!EB::enabled() || hybrid == nullptr) {
@@ -264,19 +263,18 @@ void init_WarpX (py::module& m)
                     hybrid->m_eb_bc_direct_fill,
                     /*normal_odd=*/true, fill_covered_centers,
                     &hybrid->m_eb_bc_status_B[lev], band_cells,
-                    cyl_correction, cyl_axis, quadratic_gather);
+                    cyl_correction, cyl_axis);
             },
             py::arg("name"), py::arg("lev") = 0,
             py::arg("fill_covered_centers") = false,
             py::arg("band_cells") = 1.0, py::arg("cyl_correction") = false,
-            py::arg("cyl_axis") = 2, py::arg("quadratic_gather") = false,
+            py::arg("cyl_axis") = 2,
             "Apply the hybrid embedded-boundary PEC fill with magnetic parity "
             "(normal odd / tangential even) to the registered face vector "
             "field Bfield_fp. With fill_covered_centers the covered-center faces "
             "are also extended (the mirror B a near-wall curl(B) read needs); "
             "cyl_correction applies the surface-of-revolution radial-Jacobian "
-            "weighting (axis cyl_axis); quadratic_gather uses the 2nd-order "
-            "even-reflection + quadratic fluid-only gather (curl(B) 2nd order)."
+            "weighting (axis cyl_axis)."
         )
         .def("hybrid_fold_eb_deposit_to_edge_field",
             [](WarpX& wx, std::string const& name, int const lev, bool const pec) {
