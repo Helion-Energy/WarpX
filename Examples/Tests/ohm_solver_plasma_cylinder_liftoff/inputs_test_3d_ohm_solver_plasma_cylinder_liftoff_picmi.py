@@ -332,9 +332,14 @@ def install_wall_scraper(species_name, r_standoff, verbose=False):
 
     A ``callfromparticlescraper`` hook (fired each step in WarpX::Evolve *before* the
     C++ EB scrape and Redistribute) flags ions with ``sqrt(x**2 + y**2) > r_standoff``
-    invalid -- via the zero-copy pyAMReX SoA / idcpu interface -- so Redistribute
-    removes them the same step. The id/cpu views alias WarpX's own particle buffers
-    (numpy on CPU, cupy on GPU), so the flag writes straight back with no copy.
+    invalid so Redistribute removes them the same step. AMReX marks a particle invalid
+    by clearing bit 63 of its packed ``idcpu`` (``particle_impl::make_invalid``;
+    ``is_valid == idcpu >> 63``); we do that bit-clear directly with ``xp`` on the
+    zero-copy SoA ``idcpu`` view, which aliases WarpX's own buffer (numpy on CPU, cupy
+    on GPU), so the flag writes straight back with no copy on either backend.
+    NOTE: this deliberately avoids ``amrex.pack_ids``/``unpack_ids`` -- those are
+    host-NumPy-only (``py::array_t``) and raise on a cupy device array, which is the
+    GPU crash this replaces.
 
     This is a stand-in for a dielectric standoff, modelling a quartz liner so the
     plasma never contacts the PEC wall. It deliberately replaces the C++
@@ -355,11 +360,13 @@ def install_wall_scraper(species_name, r_standoff, verbose=False):
 
     ions = ParticleContainerWrapper(species_name)
     r2_standoff = r_standoff * r_standoff
+    # ~(1 << 63): AND-mask that clears the valid/sign bit of a uint64 idcpu.
+    keep_valid_bits = 0x7FFFFFFFFFFFFFFF
 
     @callbacks.callfromparticlescraper
     def _scrape_beyond_standoff():
         xp, _ = load_cupy()  # cupy on GPU, numpy on CPU -- zero-copy either way
-        amr = libwarpx.amr
+        clear_bit63 = xp.uint64(keep_valid_bits)
         level = 0
         xs = ions.get_particle_real_arrays("x", level)
         ys = ions.get_particle_real_arrays("y", level)
@@ -369,12 +376,11 @@ def install_wall_scraper(species_name, r_standoff, verbose=False):
             mask = (x * x + y * y) > r2_standoff
             if not bool(mask.any()):
                 continue
-            ids = amr.unpack_ids(idcpu)  # signed particle id (negative == invalid)
-            ids[mask] = -xp.abs(ids[mask])  # flag for removal at Redistribute
-            amr.pack_ids(idcpu, ids)  # writes back into the shared idcpu buffer
+            # Clear bit 63 in place (make_invalid) -> removed at next Redistribute.
+            idcpu[mask] &= clear_bit63
             nflagged += int(mask.sum())
         if verbose and nflagged:
-            amr.Print(
+            libwarpx.amr.Print(
                 f"[wall scraper] flagged {nflagged} '{species_name}' beyond "
                 f"r = {r_standoff:.5f} m\n"
             )
