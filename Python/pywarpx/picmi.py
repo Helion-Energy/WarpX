@@ -2269,19 +2269,6 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         them, so they keep their stable pre-fill / OFF value. Requires
         ``conformal_b_curl_fill``; default False = no skip = byte-identical.
 
-    eb_resistive_only_partial: bool, default=False
-        If True, the generalized Ohm's law is made resistive-only (E = eta*J) in
-        partially-covered embedded-boundary cells: the stiff 1/n Hall and
-        electron-pressure terms, and the hyper-resistivity and corner-curl
-        corrections, are dropped there. As the density goes to zero toward the
-        wall the Hall/pressure terms are physically negligible but numerically
-        spurious in cut cells; J = curl(B)/mu0 remains well-posed because the
-        wall-filled B feeds the curl, so the resistive E stays clean. This is the
-        geometric companion to ``holmstrom_vacuum_region`` (a density threshold):
-        a cell is treated resistive-only if it is partially covered OR if
-        rho < n_floor*q_e. Requires a staggered (ECT) embedded boundary; ignored
-        on a collocated grid.
-
     eb_bc_rtol: float, default=1e-4
         Relative residual tolerance of the embedded-boundary PEC
         boundary-condition band relaxation. With embedded boundaries the
@@ -2401,7 +2388,6 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         conformal_b_curl_fill_corner_skip=None,
         conformal_ect_curvature=None,
         conformal_ect_j=None,
-        eb_resistive_only_partial=None,
         eb_bc_rtol=None,
         eb_bc_max_iters=None,
         eb_bc_direct_fill=None,
@@ -2445,7 +2431,6 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.conformal_b_curl_fill_corner_skip = conformal_b_curl_fill_corner_skip
         self.conformal_ect_curvature = conformal_ect_curvature
         self.conformal_ect_j = conformal_ect_j
-        self.eb_resistive_only_partial = eb_resistive_only_partial
         self.eb_bc_rtol = eb_bc_rtol
         self.eb_bc_max_iters = eb_bc_max_iters
         self.eb_bc_direct_fill = eb_bc_direct_fill
@@ -2521,9 +2506,6 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         )
         pywarpx.hybridpicmodel.conformal_ect_curvature = self.conformal_ect_curvature
         pywarpx.hybridpicmodel.conformal_ect_j = self.conformal_ect_j
-        pywarpx.hybridpicmodel.eb_resistive_only_partial = (
-            self.eb_resistive_only_partial
-        )
         pywarpx.hybridpicmodel.eb_bc_rtol = self.eb_bc_rtol
         pywarpx.hybridpicmodel.eb_bc_max_iters = self.eb_bc_max_iters
         pywarpx.hybridpicmodel.eb_bc_direct_fill = self.eb_bc_direct_fill

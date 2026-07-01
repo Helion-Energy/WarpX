@@ -117,7 +117,6 @@ def setup_simulation(
     b_curl_fill_blend=0.0,
     b_curl_fill_clamp=0.0,
     b_curl_fill_corner_skip=False,
-    resistive_only_partial=False,
     ect_curvature=False,
 ):
     """Create the PICMI simulation object.
@@ -242,7 +241,6 @@ def setup_simulation(
         conformal_b_curl_fill_clamp=(b_curl_fill_clamp if b_curl_fill_clamp else None),
         conformal_b_curl_fill_corner_skip=(True if b_curl_fill_corner_skip else None),
         conformal_ect_curvature=True if ect_curvature else None,
-        eb_resistive_only_partial=True if resistive_only_partial else None,
         Jy_external_function=f"{J_EXT}" if pec_j else None,
     )
 
@@ -552,14 +550,6 @@ def main():
         "value. Requires --b-curl-fill. Default off = byte-identical.",
     )
     parser.add_argument(
-        "--resistive-only-partial",
-        action="store_true",
-        help="make the generalized Ohm's law resistive-only (E=eta*J) in "
-        "partially-covered EB cells (hybrid_pic_model.eb_resistive_only_partial): "
-        "drop the stiff 1/n Hall + pressure and hyper/corner terms at the cut "
-        "wall band; staggered (Yee) grid only",
-    )
-    parser.add_argument(
         "--ect-curvature",
         action="store_true",
         help="apply the along-edge curvature correction to the conformal-ECT "
@@ -594,7 +584,6 @@ def main():
         args.b_curl_fill_blend,
         args.b_curl_fill_clamp,
         args.b_curl_fill_corner_skip,
-        args.resistive_only_partial,
         args.ect_curvature,
     )
     sim.step()
