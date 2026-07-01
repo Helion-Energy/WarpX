@@ -2269,6 +2269,14 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         them, so they keep their stable pre-fill / OFF value. Requires
         ``conformal_b_curl_fill``; default False = no skip = byte-identical.
 
+    conformal_b_curl_fill_quadratic: bool, default=True
+        Gather order of the covered-B curl fill (``conformal_b_curl_fill_quadratic``).
+        True (default) uses the 2nd-order ridge-regularized moving-least-squares
+        quadratic fit; False uses the basic linear/pointwise mirror gather (the same
+        fill the collocated grid uses). Set False to A/B the ridge solve against a
+        plain mirror when debugging near-wall covered-B artifacts. Requires
+        ``conformal_b_curl_fill``.
+
     eb_bc_rtol: float, default=1e-4
         Relative residual tolerance of the embedded-boundary PEC
         boundary-condition band relaxation. With embedded boundaries the
@@ -2386,6 +2394,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         conformal_b_curl_fill_blend=None,
         conformal_b_curl_fill_clamp=None,
         conformal_b_curl_fill_corner_skip=None,
+        conformal_b_curl_fill_quadratic=None,
         conformal_ect_curvature=None,
         conformal_ect_j=None,
         eb_bc_rtol=None,
@@ -2429,6 +2438,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.conformal_b_curl_fill_blend = conformal_b_curl_fill_blend
         self.conformal_b_curl_fill_clamp = conformal_b_curl_fill_clamp
         self.conformal_b_curl_fill_corner_skip = conformal_b_curl_fill_corner_skip
+        self.conformal_b_curl_fill_quadratic = conformal_b_curl_fill_quadratic
         self.conformal_ect_curvature = conformal_ect_curvature
         self.conformal_ect_j = conformal_ect_j
         self.eb_bc_rtol = eb_bc_rtol
@@ -2503,6 +2513,9 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         )
         pywarpx.hybridpicmodel.conformal_b_curl_fill_corner_skip = (
             self.conformal_b_curl_fill_corner_skip
+        )
+        pywarpx.hybridpicmodel.conformal_b_curl_fill_quadratic = (
+            self.conformal_b_curl_fill_quadratic
         )
         pywarpx.hybridpicmodel.conformal_ect_curvature = self.conformal_ect_curvature
         pywarpx.hybridpicmodel.conformal_ect_j = self.conformal_ect_j

@@ -125,6 +125,10 @@ void HybridPICModel::ReadParameters ()
     // the nonsmooth curved-wall extrapolation from the live substage B each substage
     // (which injects a stiff near-wall radial-B feedback that collapses the adaptive
     // substep as a reversal field builds). Opt-in (default off -> byte-identical).
+    // Covered-B curl fill gather order: quadratic ridge-LSQ (default) vs the basic
+    // linear/pointwise mirror (like the collocated grid). Flip to false to A/B the
+    // ridge solve against a plain mirror when debugging near-wall covered-B artifacts.
+    pp_hybrid.query("conformal_b_curl_fill_quadratic", m_conformal_b_curl_fill_quadratic);
     pp_hybrid.query("conformal_b_curl_fill_freeze", m_conformal_b_curl_fill_freeze);
     if (m_conformal_b_curl_fill_freeze && !m_conformal_b_curl_fill) {
         ablastr::warn_manager::WMRecordWarning(
@@ -598,7 +602,7 @@ void HybridPICModel::CalculatePlasmaCurrent (
             /*normal_odd=*/true, /*fill_covered_centers=*/true,
             &m_eb_bc_status_B[lev], m_eb_b_fill_band_cells,
             m_eb_cylindrical_correction, m_eb_cyl_axis,
-            /*quadratic_gather=*/true, m_eb_b_fill_normal_weight,
+            /*quadratic_gather=*/m_conformal_b_curl_fill_quadratic, m_eb_b_fill_normal_weight,
             m_conformal_b_curl_fill_blend, m_conformal_b_curl_fill_clamp,
             m_conformal_b_curl_fill_corner_skip);
         }
