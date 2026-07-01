@@ -1567,7 +1567,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields && /*&& (rho_val >= rho_floor)*/) {
+            if (include_external_fields /*&& (rho_val >= rho_floor)*/) {
                 Ex(i, j, k) -= Ex_ext(i, j, k);
             }
         });
