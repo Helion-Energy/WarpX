@@ -202,9 +202,7 @@ WarpX::RemakeLevel (int lev, Real /*time*/, const BoxArray& ba, const Distributi
                 if (WarpX::electromagnetic_solver_id != ElectromagneticSolverAlgo::PSATD) {
                     RemakeMultiFab( m_eb_update_E[lev][idim] );
                     RemakeMultiFab( m_eb_update_B[lev][idim] );
-                    if (WarpX::UseConformalEBSolve()) {
-                        RemakeMultiFab( m_flag_info_face[lev][idim] );
-                        RemakeMultiFab( m_flag_ext_face[lev][idim] );
+                    if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::ECT) {
                         m_borrowing[lev][idim] = std::make_unique<amrex::LayoutData<FaceInfoBox>>(amrex::convert(ba, Bfield_fp[lev][idim]->ixType().toIntVect()), dm);
                     }
                 }
@@ -216,6 +214,9 @@ WarpX::RemakeLevel (int lev, Real /*time*/, const BoxArray& ba, const Distributi
         if (eb_enabled && m_hybrid_pic_model) {
             if (lev < static_cast<int>(m_hybrid_pic_model->m_eb_bc_status_E.size())) {
                 m_hybrid_pic_model->m_eb_bc_status_E[lev].reset();
+            }
+            if (lev < static_cast<int>(m_hybrid_pic_model->m_eb_bc_status_Eohm.size())) {
+                m_hybrid_pic_model->m_eb_bc_status_Eohm[lev].reset();
             }
             if (lev < static_cast<int>(m_hybrid_pic_model->m_eb_bc_status_B.size())) {
                 m_hybrid_pic_model->m_eb_bc_status_B[lev].reset();

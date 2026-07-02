@@ -112,7 +112,6 @@ def setup_simulation(
     divb_clean=False,
     geometry="square",
     eb_cyl_correction=False,
-    ect_curvature=False,
 ):
     """Create the PICMI simulation object.
 
@@ -230,7 +229,6 @@ def setup_simulation(
         substeps=substeps,
         holmstrom_vacuum_region=True,
         use_conformal_eb=True if use_conformal_eb else None,
-        conformal_ect_curvature=True if ect_curvature else None,
         Jy_external_function=f"{J_EXT}" if pec_j else None,
     )
 
@@ -309,6 +307,15 @@ def setup_simulation(
             sim.add_applied_field(B_init)
 
     if pec_j:
+        # This battery's closed form asserts a CONTINUOUS electron pressure
+        # across the wall (the wall supports the plasma back-pressure), so opt
+        # into the even/Neumann Pe mirror explicitly (the default is the odd/
+        # Dirichlet mirror, Pe -> 0 at the wall) -- this is also the only CI
+        # coverage of the non-default parity.
+        from pywarpx import hybridpicmodel
+
+        hybridpicmodel.eb_pe_dirichlet = 0
+
         # Thermal protons filling the cavity (zero density inside the wall);
         # particles stream against the conducting wall and their deposition
         # would spill current onto interior edges without the PEC J boundary
@@ -447,7 +454,8 @@ def main():
     )
     parser.add_argument(
         "--conformal",
-        help="use the conformal (enlarged cell technique) EB update",
+        help="use the conformal (level-set mirror) EB wall treatment "
+        "(collocated grids only; pair with --grid-type collocated)",
         action="store_true",
     )
     parser.add_argument(
@@ -496,15 +504,6 @@ def main():
         "whether the curved-wall edge order lifts above the planar mirror",
     )
     parser.add_argument(
-        "--ect-curvature",
-        action="store_true",
-        help="apply the along-edge curvature correction to the conformal-ECT "
-        "Faraday circulation (hybrid_pic_model.conformal_ect_curvature): shift "
-        "each cut edge's E to the uncovered-segment centroid before forming the "
-        "per-face EMF, lifting the curved-wall B push toward 2nd order; "
-        "staggered (Yee) grid only",
-    )
-    parser.add_argument(
         "-v",
         "--verbose",
         help="WarpX verbosity",
@@ -525,7 +524,6 @@ def main():
         args.divb_clean,
         args.geometry,
         args.eb_cyl_correction,
-        args.ect_curvature,
     )
     sim.step()
 
