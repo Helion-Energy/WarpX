@@ -1184,7 +1184,10 @@ void HybridPICModel::QDSMCUpdateTe (int const lev) const
     amrex::MultiFab const & weights = *warpx.m_fields.get(FieldType::hybrid_qdsmc_weights_fp,        lev);
     amrex::MultiFab const & rho     = *warpx.m_fields.get(FieldType::rho_fp,                         lev);
 
-    Te.setVal(0.0_rt);
+    // Note: T_e is NOT zeroed here. Cells that received no QDSMC weight or
+    // are below the density floor keep their previous T_e -- zeroing them
+    // would erase valid state (and seed K_e = 0 into neighbors on the next
+    // step) whenever a cell momentarily receives no deposit.
 
     auto const gamma      = m_gamma;
     auto const n_floor    = m_qdsmc_n_floor;
