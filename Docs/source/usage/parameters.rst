@@ -3860,7 +3860,7 @@ Maxwell solver: kinetic-fluid hybrid
 
 .. pp:param:: hybrid_pic_model.eb_b_fill_band_cells
     :type: ``float``
-    :default: ``1``
+    :default: ``1`` (``sqrt(2)`` when :pp:param:`hybrid_pic_model.isotropic_resistivity` is enabled)
     :optional:
 
     Width, in cells, of the band of covered ``Bfield_fp`` nodes set by the direct level-set mirror fill
@@ -3868,7 +3868,11 @@ Maxwell solver: kinetic-fluid hybrid
     plasma-current curl and the isotropic corner-curl correction — a reach of about two cells when
     :pp:param:`hybrid_pic_model.isotropic_resistivity` is enabled — so widening this band pushes the
     mirror's curved-wall divergence error deeper into the zeroed conductor interior, where it can no
-    longer reach a solution-domain stencil.
+    longer reach a solution-domain stencil. The corner-curl correction reads the out-of-plane ``B``
+    at the in-plane diagonal neighbors (reach ``sqrt(2)`` cells), so when it is enabled the default
+    band is widened to that corner reach: with a 1-cell (axis-reach) band, any wall segment oblique
+    to the grid puts the diagonal tap in the zeroed deep interior, feeding a spurious
+    grid-diagonal-peaked (m=4) electric field along the wall on every substep.
 
 .. pp:param:: hybrid_pic_model.eb_deposit_fold
     :type: ``string``
