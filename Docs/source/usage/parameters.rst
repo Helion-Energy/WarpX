@@ -4029,7 +4029,8 @@ Maxwell solver: kinetic-fluid hybrid
     the curved-wall mirror injects without changing ``curl(B)`` (the plasma current) away from the
     band cutoffs, so the physics that consumes the current is largely unaffected. Stability-capped
     near ``1/6`` in 3D (the explicit grad(div) diffusion CFL; larger values diverge, ``0.15`` is a
-    validated sweet spot).
+    validated sweet spot). Supported in 3D and 2D (XZ) Cartesian geometry only (the gradient is the
+    discrete adjoint of the Cartesian divergence; other geometries abort at setup if enabled).
 
 .. pp:param:: hybrid_pic_model.divj_clean_alpha
     :type: ``float``

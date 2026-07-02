@@ -233,9 +233,13 @@ void HybridPICModel::ReadParameters ()
     // the grid diagonals (a C4/m=4 wall-ring source). Widen the band to the
     // corner reach -- the B-field analogue of the sqrt(3) plasma-current band
     // above.
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    // Only where the corner-curl actually compiles (Cartesian); on RZ etc. the
+    // correction does not exist, so the band keeps its legacy default there.
     if (m_isotropic_resistivity) {
         m_eb_b_fill_band_cells = std::sqrt(2.0_rt);
     }
+#endif
     utils::parser::queryWithParser(pp_hybrid, "eb_b_fill_band_cells", m_eb_b_fill_band_cells);
 
     // Marder-like diffusive divergence clean of B / the total Ampere current in
@@ -249,6 +253,15 @@ void HybridPICModel::ReadParameters ()
         pp_hybrid, "divb_clean_inner_div_cells", m_divb_clean_inner_div_cells);
     utils::parser::queryWithParser(
         pp_hybrid, "divb_clean_inner_corr_cells", m_divb_clean_inner_corr_cells);
+#if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_XZ)
+    // The clean's gradient is the adjoint of the CARTESIAN divergence only;
+    // abort rather than silently no-op (1D) or apply a non-dissipative
+    // metric-inconsistent update (RZ).
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_divb_clean_alpha <= 0.0_rt && m_divj_clean_alpha <= 0.0_rt,
+        "hybrid_pic_model.divb_clean_alpha / divj_clean_alpha are only "
+        "supported in 3D and 2D (XZ) Cartesian geometry");
+#endif
 }
 
 void HybridPICModel::AllocateLevelMFs (
