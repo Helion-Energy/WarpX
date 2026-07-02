@@ -63,7 +63,7 @@ collisions.collision_names = d2el
 d2el.type                  = dsmc
 d2el.scattering_processes  = elastic
 d2el.species               = D2 D2
-d2el.elastic_cross_section = ../../../../warpx-data/MCC_cross_sections/D2/neutral_elastic.dat
+d2el.elastic_cross_section = ../../../Examples/Tests/collision/D2_hard_sphere_elastic.dat
 
 diagnostics.diags_names = diag1
 diag1.diag_type     = Full
