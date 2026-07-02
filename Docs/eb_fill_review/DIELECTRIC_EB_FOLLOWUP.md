@@ -118,6 +118,8 @@ plasma off the wall (the scrape) so we do not fight the sheath at all.
 - `HybridPICModel.{H,cpp}`: `m_eb_pe_dirichlet` (default true, ParmParse `eb_pe_dirichlet`);
   electron-pressure BC flipped to Dirichlet; `WarnIfPlasmaAgainstWall` + `m_checked_plasma_at_wall`.
 - `Python/pywarpx/picmi.py`: `eb_pe_dirichlet` HybridPICSolver kwarg (mirrors `eb_rho_dirichlet`).
-- No change to the C++ scraper (`ParticleScraper.H` / `eb_particle_scrape_offset`): left in place,
-  documented limitation (narrow standoff only).
+- The C++ `warpx.eb_particle_scrape_offset` standoff was **removed** (`ParticleScraper.H` reverted
+  to the plain `phi < 0` EB scrape): it scraped on the clamped `distance_to_eb`, so any standoff
+  wider than the `(nGrow+1)*dx` roof over-scraped the whole interior. The Python radius callback
+  (`install_wall_scraper`) replaces it and is fast enough in practice.
 </content>
