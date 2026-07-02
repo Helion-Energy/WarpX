@@ -23,6 +23,7 @@
 #include <AMReX_MultiFab.H>
 
 #include <algorithm>
+#include <climits>
 #include <limits>
 
 using namespace amrex;
@@ -101,6 +102,24 @@ void HybridPICModel::MarderCleanDivergence (
     amrex::GpuArray<Real, AMREX_SPACEDIM> inv_dx{};
     for (int d = 0; d < AMREX_SPACEDIM; ++d) { inv_dx[d] = 1.0_rt/dx[d]; }
 
+    // Exclude the first two node layers at every NON-PERIODIC physical domain
+    // boundary from both the kept divergence and the correction. There the
+    // stencil goes asymmetric (the div ghost beyond the boundary is 0, and the
+    // boundary B is owned by the domain BC), and at a junction of the EB wall
+    // with the domain boundary that asymmetry PUMPS a spurious divergence
+    // instead of damping it (measured on the annulus throat at z=0: baseline
+    // machine-zero there, damped run grew 0.12 -> 24 T/m over 5000 steps,
+    // e-fold ~940). Nothing needs cleaning there anyway.
+    const amrex::Box nodal_domain = amrex::convert(geom.Domain(), IntVect::TheNodeVector());
+    amrex::GpuArray<int, 3> dom_lo{INT_MIN, INT_MIN, INT_MIN};
+    amrex::GpuArray<int, 3> dom_hi{INT_MAX, INT_MAX, INT_MAX};
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        if (!geom.isPeriodic(d)) {
+            dom_lo[d] = nodal_domain.smallEnd(d) + 2;
+            dom_hi[d] = nodal_domain.bigEnd(d) - 2;
+        }
+    }
+
     auto* fdtd = warpx.get_pointer_fdtd_solver_fp(lev);
 
     // Nodal divergence scratch with one ghost on EVERY grid type: the centered
@@ -135,7 +154,10 @@ void HybridPICModel::MarderCleanDivergence (
             Array4<Real const> const& phi = phi_mf->const_array(mfi);
             amrex::ParallelFor(mfi.tilebox(),
                 [=] AMREX_GPU_DEVICE (int i, int j, int k){
-                    if (phi(i, j, k) < d_div_keep || phi(i, j, k) > d_clean) { d(i, j, k) = 0.0_rt; }
+                    if (phi(i, j, k) < d_div_keep || phi(i, j, k) > d_clean
+                        || i < dom_lo[0] || i > dom_hi[0]
+                        || j < dom_lo[1] || j > dom_hi[1]
+                        || k < dom_lo[2] || k > dom_hi[2]) { d(i, j, k) = 0.0_rt; }
                 });
         }
         ablastr::utils::communication::FillBoundary(
@@ -166,19 +188,28 @@ void HybridPICModel::MarderCleanDivergence (
 #if defined(WARPX_DIM_3D)
             amrex::ParallelFor(tx, ty, tz,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k){
-                    if (ux(i,j,k)==0 || phi(i,j,k)<d_stencil || phi(i,j,k)>d_clean) { return; }
+                    if (ux(i,j,k)==0 || phi(i,j,k)<d_stencil || phi(i,j,k)>d_clean
+                        || i < dom_lo[0] || i > dom_hi[0]
+                        || j < dom_lo[1] || j > dom_hi[1]
+                        || k < dom_lo[2] || k > dom_hi[2]) { return; }
                     Fx(i,j,k) += nodal_grid
                         ? alpha_scaled*(d(i+1,j,k)-d(i-1,j,k))*(0.5_rt*inv_dx[0])
                         : alpha_scaled*(d(i+1,j,k)-d(i,j,k))*inv_dx[0];
                 },
                 [=] AMREX_GPU_DEVICE (int i, int j, int k){
-                    if (uy(i,j,k)==0 || phi(i,j,k)<d_stencil || phi(i,j,k)>d_clean) { return; }
+                    if (uy(i,j,k)==0 || phi(i,j,k)<d_stencil || phi(i,j,k)>d_clean
+                        || i < dom_lo[0] || i > dom_hi[0]
+                        || j < dom_lo[1] || j > dom_hi[1]
+                        || k < dom_lo[2] || k > dom_hi[2]) { return; }
                     Fy(i,j,k) += nodal_grid
                         ? alpha_scaled*(d(i,j+1,k)-d(i,j-1,k))*(0.5_rt*inv_dx[1])
                         : alpha_scaled*(d(i,j+1,k)-d(i,j,k))*inv_dx[1];
                 },
                 [=] AMREX_GPU_DEVICE (int i, int j, int k){
-                    if (uz(i,j,k)==0 || phi(i,j,k)<d_stencil || phi(i,j,k)>d_clean) { return; }
+                    if (uz(i,j,k)==0 || phi(i,j,k)<d_stencil || phi(i,j,k)>d_clean
+                        || i < dom_lo[0] || i > dom_hi[0]
+                        || j < dom_lo[1] || j > dom_hi[1]
+                        || k < dom_lo[2] || k > dom_hi[2]) { return; }
                     Fz(i,j,k) += nodal_grid
                         ? alpha_scaled*(d(i,j,k+1)-d(i,j,k-1))*(0.5_rt*inv_dx[2])
                         : alpha_scaled*(d(i,j,k+1)-d(i,j,k))*inv_dx[2];
@@ -188,13 +219,17 @@ void HybridPICModel::MarderCleanDivergence (
             amrex::ignore_unused(Fy, uy, ty);
             amrex::ParallelFor(tx, tz,
                 [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
-                    if (ux(i,j,0)==0 || phi(i,j,0)<d_stencil || phi(i,j,0)>d_clean) { return; }
+                    if (ux(i,j,0)==0 || phi(i,j,0)<d_stencil || phi(i,j,0)>d_clean
+                        || i < dom_lo[0] || i > dom_hi[0]
+                        || j < dom_lo[1] || j > dom_hi[1]) { return; }
                     Fx(i,j,0) += nodal_grid
                         ? alpha_scaled*(d(i+1,j,0)-d(i-1,j,0))*(0.5_rt*inv_dx[0])
                         : alpha_scaled*(d(i+1,j,0)-d(i,j,0))*inv_dx[0];
                 },
                 [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
-                    if (uz(i,j,0)==0 || phi(i,j,0)<d_stencil || phi(i,j,0)>d_clean) { return; }
+                    if (uz(i,j,0)==0 || phi(i,j,0)<d_stencil || phi(i,j,0)>d_clean
+                        || i < dom_lo[0] || i > dom_hi[0]
+                        || j < dom_lo[1] || j > dom_hi[1]) { return; }
                     Fz(i,j,0) += nodal_grid
                         ? alpha_scaled*(d(i,j+1,0)-d(i,j-1,0))*(0.5_rt*inv_dx[1])
                         : alpha_scaled*(d(i,j+1,0)-d(i,j,0))*inv_dx[1];
