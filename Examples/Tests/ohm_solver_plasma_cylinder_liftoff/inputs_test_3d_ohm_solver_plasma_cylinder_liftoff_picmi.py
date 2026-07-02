@@ -431,27 +431,6 @@ def install_wall_scraper(species_name, r_standoff, verbose=False):
     return _scrape_beyond_standoff
 
 
-def install_b_div_cleaner():
-    """End-of-step projection div-clean of Bfield_fp via an afterEsolve callback.
-
-    A prototype of a per-STEP (not per-substep) div(B) scrub: afterEsolve fires once
-    per step, AFTER HybridPICEvolveFields (the RKF45 substeps run inside it), so this
-    runs once at end of step. The C++ binding warm-starts across steps -- its
-    ProjectionDivCleaner object persists, so the MLMG solve reuses the previous
-    step's phi as the initial guess. The external B is already div-free, so cleaning
-    the total Bfield_fp here scrubs the plasma-induced div(B) regardless of the
-    external-field add order.
-    """
-    from pywarpx import callbacks
-    from pywarpx._libwarpx import libwarpx
-
-    @callbacks.callfromafterEsolve
-    def _clean_b_divergence():
-        libwarpx.warpx.clean_bfield_fp_divergence()
-
-    return _clean_b_divergence
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -673,14 +652,6 @@ def main():
         "so the plasma never contacts the PEC. 0 = no standoff.",
     )
     parser.add_argument(
-        "--divclean-b",
-        dest="divclean_b",
-        action="store_true",
-        help="prototype: projection div-clean Bfield_fp once at the end of each step "
-        "(afterEsolve callback, NOT per RKF45 substep), warm-started across steps. "
-        "Test whether an end-of-step div(B) scrub stabilizes the run.",
-    )
-    parser.add_argument(
         "--vacuum",
         action="store_true",
         help="run with NO plasma (empty ion species): rho=0 everywhere, so the field "
@@ -762,11 +733,6 @@ def main():
     if args.standoff_cells > 0.0 and not args.vacuum:
         r_standoff = R_WALL - args.standoff_cells * (2.0 / resolution)
         install_wall_scraper("ions", r_standoff, verbose=args.verbose)
-
-    # Prototype: end-of-step projection div-clean of Bfield_fp (once per step, not
-    # per RKF45 substep), warm-started across steps. See install_b_div_cleaner.
-    if args.divclean_b:
-        install_b_div_cleaner()
 
     sim.step()
 
