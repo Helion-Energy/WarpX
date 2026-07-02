@@ -211,6 +211,10 @@ void WarpX::HybridPICEvolveFields ()
     m_hybrid_pic_model->CalculatePlasmaCurrent(
         m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, finest_level),
         m_eb_update_E);
+    // Once-per-step diffusive div(B)/div(J_total) clean in the near-wall band.
+    // Runs before the external-field add-back below, so it acts on the plasma
+    // field only. No-op unless hybrid_pic_model.div{b,j}_clean_alpha > 0.
+    m_hybrid_pic_model->MarderCleanFieldsPerStep();
     m_hybrid_pic_model->HybridPICSolveE(
         m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, finest_level),
         current_fp_temp,
