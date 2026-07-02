@@ -65,10 +65,9 @@
  */
 template <class PC, class F, std::enable_if_t<amrex::IsParticleContainer<PC>::value, int> foo = 0>
 void
-scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& distance_to_eb, int lev, F&& f,
-                     amrex::Real offset = amrex::Real(0.0))
+scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& distance_to_eb, int lev, F&& f)
 {
-    scrapeParticlesAtEB(pc, distance_to_eb, lev, lev, std::forward<F>(f), offset);
+    scrapeParticlesAtEB(pc, distance_to_eb, lev, lev, std::forward<F>(f));
 }
 
 /**
@@ -109,10 +108,9 @@ scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& dista
  */
 template <class PC, class F, std::enable_if_t<amrex::IsParticleContainer<PC>::value, int> foo = 0>
 void
-scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& distance_to_eb, F&& f,
-                     amrex::Real offset = amrex::Real(0.0))
+scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& distance_to_eb, F&& f)
 {
-    scrapeParticlesAtEB(pc, distance_to_eb, 0, pc.finestLevel(), std::forward<F>(f), offset);
+    scrapeParticlesAtEB(pc, distance_to_eb, 0, pc.finestLevel(), std::forward<F>(f));
 }
 
 /**
@@ -156,7 +154,7 @@ scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& dista
 template <class PC, class F, std::enable_if_t<amrex::IsParticleContainer<PC>::value, int> foo = 0>
 void
 scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& distance_to_eb,
-                 int lev_min, int lev_max, F&& f, amrex::Real offset = amrex::Real(0.0))
+                 int lev_min, int lev_max, F&& f)
 {
     BL_PROFILE("scrapeParticlesAtEB");
 
@@ -189,10 +187,7 @@ scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& dista
                     xp, yp, zp, plo, dxi, i, j, k, W);
                 amrex::Real const phi_value = ablastr::particles::interp_field_nodal(i, j, k, W, phi);
 
-                // Scrape particles within `offset` of the wall on the fluid side
-                // (offset > 0 => a dielectric standoff N*dx inside the field EB, holding
-                // the plasma off the metal wall). offset = 0 recovers the plain EB scrape.
-                if (phi_value < offset)
+                if (phi_value < 0.0)
                 {
                     int ic, jc, kc; // Cell-centered indices
                     amrex::Real Wc[AMREX_SPACEDIM][2]; // Cell-centered weights

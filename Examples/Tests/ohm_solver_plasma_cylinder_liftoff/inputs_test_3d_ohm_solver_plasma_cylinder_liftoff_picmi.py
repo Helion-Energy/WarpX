@@ -364,12 +364,11 @@ def install_wall_scraper(species_name, r_standoff, verbose=False):
     GPU crash this replaces.
 
     This is a stand-in for a dielectric standoff, modelling a quartz liner so the
-    plasma never contacts the PEC wall. It deliberately replaces the C++
-    ``warpx.eb_particle_scrape_offset``: that path scrapes on ``distance_to_eb <
-    offset``, but AMReX ``FillSignedDistance`` clamps the deep-fluid distance to a
-    ``ls_roof`` of only ``(nGrow+1)*dx`` (a few cells), so any standoff wider than
-    that roof spuriously scrapes the entire interior annulus. Testing radius directly
-    sidesteps the clamp entirely.
+    plasma never contacts the PEC wall. It tests the particle radius directly rather
+    than scraping on the ``distance_to_eb`` signed distance, because AMReX
+    ``FillSignedDistance`` clamps the deep-fluid distance to a ``ls_roof`` of only
+    ``(nGrow+1)*dx`` (a few cells): a signed-distance standoff wider than that roof
+    spuriously scrapes the entire interior annulus. Testing radius sidesteps the clamp.
 
     The proper follow-up is a DielectricEB object (a second embedded boundary carrying
     eps_r / surface charge) so the standoff and macroscopic dielectric physics live in
@@ -631,8 +630,8 @@ def main():
         default=0.0,
         dest="standoff_cells",
         help="dielectric standoff: hold the plasma this many cells off the (metal) field "
-        "wall by scraping particles at warpx.eb_particle_scrape_offset = N*dx. Models a "
-        "quartz liner so the plasma never contacts the PEC. 0 = plain wall scrape.",
+        "wall with a Python radius scraper (install_wall_scraper). Models a quartz liner "
+        "so the plasma never contacts the PEC. 0 = no standoff.",
     )
     parser.add_argument(
         "--divclean-b",
@@ -714,11 +713,11 @@ def main():
 
     # Dielectric standoff: hold the plasma args.standoff_cells cells off the (metal)
     # field wall with a Python particle scraper (a callfromparticlescraper hook that
-    # flags ions beyond r_standoff for removal). This replaces the C++
-    # warpx.eb_particle_scrape_offset, which over-scrapes a wide annulus: the AMReX
-    # signed-distance field is clamped a few cells out, so a standoff wider than that
-    # clamp scrapes the whole interior. r_standoff matches the annulus outer radius
-    # (r_outer_eff) so nothing is scraped at t=0. See install_wall_scraper.
+    # flags ions beyond r_standoff for removal). Scraping on radius -- not the AMReX
+    # signed-distance field, which is clamped a few cells out and would over-scrape a
+    # wide annulus -- keeps the standoff exact at any width. r_standoff matches the
+    # annulus outer radius (r_outer_eff) so nothing is scraped at t=0. See
+    # install_wall_scraper.
     if args.standoff_cells > 0.0 and not args.vacuum:
         r_standoff = R_WALL - args.standoff_cells * (2.0 / resolution)
         install_wall_scraper("ions", r_standoff, verbose=args.verbose)
