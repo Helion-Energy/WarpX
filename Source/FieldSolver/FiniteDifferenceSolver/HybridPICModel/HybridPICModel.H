@@ -288,19 +288,19 @@ public:
     amrex::ParserExecutor<2> m_eta_h;
     bool m_include_hyper_resistivity_term = false;
     bool m_hyper_resistivity_has_B_dependence = false;
-    /** If true (default), evaluate the hyper-resistivity Laplacian with the
+    /** If true (opt-in), evaluate the hyper-resistivity Laplacian with the
      *  isotropic Mehrstellen (2D) / Patra-Karttunen (3D) stencils instead of
      *  the cross stencil, removing the cos(4*theta) anisotropy of its
      *  damping rate (fully isotropic on cubic cells; Cartesian only). */
-    bool m_isotropic_hyper_resistivity = true;
-    /** If true (default), add an isotropizing corner-curl correction to the
+    bool m_isotropic_hyper_resistivity = false;
+    /** If true (opt-in), add an isotropizing corner-curl correction to the
      *  resistive electric field so the emergent in-plane B diffusion uses the
      *  isotropic (Mehrstellen) Laplacian instead of the cross stencil. This
      *  removes the cos(4*theta) modulation of the resistive damping rate that
      *  drives a grid m=4 mode. Applied through E, so the standard Faraday
      *  curl is unchanged and div(B) stays exactly zero. Cartesian only (the
      *  RZ resistive operator is axisymmetric and has no such anisotropy). */
-    bool m_isotropic_resistivity = true;
+    bool m_isotropic_resistivity = false;
 
     /** External current */
     std::string m_Jx_ext_grid_function = "0.0";
@@ -320,26 +320,6 @@ public:
      *  instead of the stair-step approximation. Requires embedded boundaries
      *  and a 3D Cartesian staggered grid. */
     bool m_use_conformal_eb = false;
-    /** If true, apply the along-edge curvature correction to the conformal-ECT
-     *  Faraday circulation: in EvolveECTRho each cut edge's E is Taylor-shifted
-     *  from the full-edge center to the centroid of its uncovered segment before
-     *  forming the per-face EMF. Without it the circulation is a 1st-order
-     *  midpoint quadrature over the curved contour, capping the conformal B push
-     *  at ~1st order at a curved wall even when curl(B)->J is already 2nd order.
-     *  Uses the edge_cent_offset geometry field. Staggered
-     *  (Yee) grid only; opt-in (default off -> byte-identical, since the shift is
-     *  zero on uncut/covered edges). */
-    bool m_conformal_ect_curvature = false;
-    /** If true, compute the Ampere current J = curl(B)/mu0 with the flux-weighted
-     *  ("Form A") conformal-EB curl (CalculateCurrentAmpereCartesianECT): each B
-     *  value in the Yee curl is scaled by its open cut-face-area fraction
-     *  (face_areas / full face area), so J is a signed sum of open-face fluxes and
-     *  is discretely divergence-consistent across the cut wall with no separate
-     *  covered-B fill. Covered faces (face_areas = 0) drop out automatically, so no
-     *  covered-B mirror fill is needed. Reduces byte-for-byte
-     *  to the masked Yee curl on interior edges. Staggered (Yee) grid only; opt-in
-     *  (default off -> byte-identical, the standard masked Yee curl is used). */
-    bool m_conformal_ect_j = false;
     /** If true (default), the hybrid Hall term's nodal J x B interpolation excludes
      *  covered edges/faces (EB-aware, mask-renormalized) so covered-cell field values do
      *  not pollute the near-wall J x B. Set false to recover the plain (polluting)
@@ -396,16 +376,25 @@ public:
      *  true (default) is the odd reflection (Dirichlet 0 -> Pe vanishes at the
      *  wall, so grad(Pe) supports the allowable radial E a PEC sustains via
      *  surface charge); false is the even reflection (Neumann: zero normal
-     *  gradient). A physical sheath/wall-function is not modelled here (see the
-     *  sheath note in Docs/eb_fill_review/DIELECTRIC_EB_FOLLOWUP.md). */
+     *  gradient). A physical sheath/wall-function is not modelled here. */
     bool m_eb_pe_dirichlet = true;
     /** Latch so the near-wall plasma warning is emitted at most once. */
     mutable bool m_checked_plasma_at_wall = false;
 
-    /** Cached embedded-boundary fill classification for the edge fields
-     *  (current density and Ohm's-law E), one entry per level; reset on
-     *  regrid. Mutable: the cache is (re)built inside const solver calls. */
+    /** Cached embedded-boundary fill classification for the deposited edge
+     *  fields (ion current fill + deposit fold), one entry per level; reset on
+     *  regrid. Built at the one-cell band: the fold's covered gather set must
+     *  equal this fill's write set, and both use the fixed one-cell geometry.
+     *  Mutable: the cache is (re)built inside const solver calls. */
     mutable amrex::Vector<warpx::hybrid::EBFillStatus> m_eb_bc_status_E;
+    /** Cached EB fill classification for the Ohm's-law electric field, one
+     *  entry per level; reset on regrid. Separate from m_eb_bc_status_E
+     *  because the E fill band is pinned to the (possibly widened) plasma
+     *  current band m_eb_fill_band_cells, while the deposited-current cache
+     *  stays at the one-cell band -- an EBFillStatus cache must never be
+     *  shared between calls with different band widths (the first caller
+     *  would pin the classification). */
+    mutable amrex::Vector<warpx::hybrid::EBFillStatus> m_eb_bc_status_Eohm;
     /** Cached embedded-boundary fill classification for the recovered
      *  magnetic field, one entry per level; reset on regrid */
     mutable amrex::Vector<warpx::hybrid::EBFillStatus> m_eb_bc_status_B;

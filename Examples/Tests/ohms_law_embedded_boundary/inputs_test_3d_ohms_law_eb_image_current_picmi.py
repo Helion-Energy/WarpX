@@ -147,7 +147,9 @@ def setup_simulation(grid_type="collocated", with_species=False):
         n_floor=1.0e16,
         plasma_resistivity=1.0e-6,
         substeps=4,
-        use_conformal_eb=True,
+        # The conformal wall treatment is collocated-only (staggered aborts);
+        # the staggered variant exercises the always-on staircase EB fills.
+        use_conformal_eb=True if grid_type == "collocated" else None,
     )
 
     # cylinder: implicit_function > 0 OUTSIDE r = R_w marks the conductor; the

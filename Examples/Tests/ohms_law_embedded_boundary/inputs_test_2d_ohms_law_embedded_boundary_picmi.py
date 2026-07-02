@@ -14,11 +14,11 @@
 # --- odd; the cut By/Bz points are solver-owned). All normals are axis
 # --- aligned, so the closed forms hold to round-off.
 # ---
-# --- Unlike RZ (staircase masks), this deck runs with
-# --- hybrid_pic_model.use_conformal_eb = 1, which was just unguarded for
-# --- 2D XZ. The conformal (ECT) masks keep every staggered point whose
-# --- edge/face is only partially cut solver-owned (eb_update = 1), exactly
-# --- as in 3D, so the 3D closed forms carry over unchanged:
+# --- The wall is a plane on a cell boundary, so the staircase and conformal
+# --- update masks agree exactly: every staggered point whose edge/face is
+# --- only partially cut stays solver-owned (eb_update = 1), exactly as in
+# --- 3D, and the 3D closed forms carry over unchanged (the collocated
+# --- variant additionally runs with use_conformal_eb = 1):
 # ---   * the first fluid rows (s = +0.3h) stay untouched by the fills and
 # ---     RECEIVE the deposit folds,
 # ---   * the only vector fill band row is the covered row at s = -0.7h
@@ -26,12 +26,6 @@
 # ---   * the cut x-edge with covered center (s = -0.2h) is an Ex fill
 # ---     target (fill_covered_centers) but the cut By face / Bz x-edge is
 # ---     left to the conformal update.
-# ---
-# --- The Marder battery ports the 3D transitional-Marder unit tests with
-# --- the 2D nodal divergence d(Ex)/dx + d(Ez)/dz (no y term). In 2D the
-# --- correction updates Ex and Ez ONLY; the out-of-plane Ey has no
-# --- divergence contribution and must come through a Marder call
-# --- bit-identical (asserted).
 
 import argparse
 import sys
@@ -98,7 +92,7 @@ def setup_simulation(hyper=False, resistive=False, collocated=False):
     sim.current_deposition_algo = "direct"
     sim.grid_type = "collocated" if collocated else "staggered"
 
-    # use_conformal_eb was just unguarded for 2D XZ: the ECT masks make the
+    # The wall is a plane on a cell boundary: the staircase masks make the
     # planar-wall closed forms identical to the 3D battery
     sim.solver = picmi.HybridPICSolver(
         grid=grid,
@@ -112,8 +106,11 @@ def setup_simulation(hyper=False, resistive=False, collocated=False):
         plasma_resistivity=(1.0 if resistive else (0.0 if hyper else 1.0e-6)),
         plasma_hyper_resistivity=1.0 if hyper else None,
         isotropic_resistivity=resistive,
+        isotropic_hyper_resistivity=hyper,
         substeps=4,
-        use_conformal_eb=True,
+        # The conformal wall treatment is collocated-only (staggered aborts);
+        # the staggered batteries exercise the always-on staircase EB fills.
+        use_conformal_eb=True if collocated else None,
     )
 
     sim.embedded_boundary = picmi.EmbeddedBoundary(
@@ -510,282 +507,6 @@ def run_plane_battery(sim):
 
 
 # ----------------------------------------------------------------------------
-# Transitional Marder battery (planar wall; ports the 3D battery with the 2D
-# nodal divergence d(Ex)/dx + d(Ez)/dz and the in-plane-only update)
-# ----------------------------------------------------------------------------
-def run_marder_battery(sim):
-    wx = sim.extension.warpx
-    ck = CheckSet()
-
-    q_e = constants.q_e
-    N_FLOOR = 1.0e16  # matches the solver n_floor
-    RHO_FLOOR = N_FLOOR * q_e
-    RHO_DENSE = 1.0e18 * q_e
-    RHO_TRANS = 0.5e16 * q_e  # strictly inside (0, RHO_FLOOR]
-    P0 = 1.0
-
-    # x-aligned bands by node index: dense | transition | vacuum | wall
-    I_DENSE_END = 8
-    I_TRANS_END = 16
-
-    rho_prof = np.zeros(N_X + 1)
-    rho_prof[:I_DENSE_END] = RHO_DENSE
-    rho_prof[I_DENSE_END:I_TRANS_END] = RHO_TRANS
-    # Pe falls smoothly to zero at the vacuum boundary (zero slope there)
-    pe_prof = np.zeros(N_X + 1)
-    i_nodes = np.arange(I_TRANS_END + 1)
-    pe_prof[: I_TRANS_END + 1] = P0 * np.cos(np.pi * i_nodes / (2 * I_TRANS_END)) ** 2
-
-    rho = fields.RhoFPWrapper()
-    pe = fields.ElectronPressureFPWrapper()
-    set_xprofile(rho, rho_prof)
-    set_xprofile(pe, pe_prof)
-
-    Ex = fields.ExFPWrapper()
-    Ey = fields.EyFPWrapper()
-    Ez = fields.EzFPWrapper()
-    Bx = fields.BxFPWrapper()
-    By = fields.ByFPWrapper()
-    Bz = fields.BzFPWrapper()
-    Jx = fields.JxFPWrapper()
-    Jy = fields.JyFPWrapper()
-    Jz = fields.JzFPWrapper()
-    for w in (Bx, By, Bz, Jx, Jy, Jz):
-        w[...] = 0.0
-
-    # numpy mirrors of the kernel's 2-point stencils and masks --------------
-    # x-edge (cell-centered in x) interpolated rho and the closed-form
-    # pressure-only target Ex = -grad(Pe)/max(rho, floor); Ey = Ez = 0
-    rho_xedge = 0.5 * (rho_prof[:-1] + rho_prof[1:])
-    rho_lim_x = np.maximum(rho_xedge, RHO_FLOOR)
-    ex_target = -(np.diff(pe_prof) / H) / rho_lim_x
-
-    # update/mask bands
-    band_xedge = (rho_xedge > 0.0) & (rho_xedge <= RHO_FLOOR)  # Ex rows
-    band_node = (rho_prof > 0.0) & (rho_prof <= RHO_FLOOR)  # nodal (Ez) rows
-    dense_xedge = rho_xedge > RHO_FLOOR
-    # interior vacuum x-edge rows, clear of the wall fill band and the
-    # domain boundary
-    vac_rows = [i for i in range(N_X) if rho_xedge[i] <= 0.0 and 17 <= i <= 21]
-    dense_rows = [i for i in range(1, N_X) if dense_xedge[i]]
-    band_rows = [i for i in range(N_X) if band_xedge[i]]
-
-    def divergence(ex, ez):
-        """Nodal divergence with the kernel's downward stencils (2D: no y
-        term). Yee global shapes: ex (N, N+1), ez (N+1, N); result is nodal
-        (N+1, N+1) with periodic wrap in z and one-sided x boundary nodes
-        left at zero."""
-        div = np.zeros((N_X + 1, N_Z + 1))
-        div[1:-1, :] += (ex[1:, :] - ex[:-1, :]) / H
-        dvz = (ez - np.roll(ez, 1, axis=1)) / H  # at j = 0..N-1, j=0 wraps
-        div[:, :-1] += dvz
-        div[:, -1] += dvz[:, 0]  # duplicated periodic node row
-        return div
-
-    def masked_err_norm(div, div_target_1d):
-        err = div - div_target_1d[:, None]
-        err[~band_node, :] = 0.0
-        err[[0, -1], :] = 0.0  # one-sided boundary nodes excluded
-        return float(np.sqrt(np.sum(err**2)))
-
-    def set_baseline(noise_amp, seed):
-        rng = np.random.RandomState(seed)
-        ex0 = np.broadcast_to(ex_target[:, None], arr2d(Ex).shape).copy()
-        ez0 = np.zeros(arr2d(Ez).shape)
-        scale = noise_amp * np.max(np.abs(ex_target))
-        ex0[band_rows, :] += scale * (rng.rand(len(band_rows), *ex0.shape[1:]) - 0.5)
-        i_bnode = [i for i in range(1, N_X) if band_node[i]]
-        ez0[i_bnode, :] += scale * (rng.rand(len(i_bnode), *ez0.shape[1:]) - 0.5)
-        Ex[...] = ex0
-        Ey[...] = 0.0
-        Ez[...] = ez0
-
-    # the divergence target of the "ohm"/"grad_pe_only" modes with J = B = 0
-    div_target = divergence(
-        np.broadcast_to(ex_target[:, None], arr2d(Ex).shape),
-        np.zeros(arr2d(Ez).shape),
-    )[:, 0]
-
-    # --- 1) cleans divergence error (Phoenix test_cleans_divergence_error) -
-    set_baseline(0.3, seed=42)
-    err_before = masked_err_norm(divergence(arr2d(Ex), arr2d(Ez)), div_target)
-    n_iter, resid = wx.hybrid_marder_correct_e(
-        0, alpha=0.1, max_iterations=500, rtol=1e-2
-    )
-    err_after = masked_err_norm(divergence(arr2d(Ex), arr2d(Ez)), div_target)
-    ck.expect(
-        "marder: converged before the iteration cap",
-        n_iter < 500,
-        f"n_iter={n_iter}",
-    )
-    ck.expect(
-        "marder: cleans the divergence error in the band",
-        err_after < 0.15 * err_before,
-        f"before={err_before:.3e} after={err_after:.3e}",
-    )
-
-    # --- 2+3) modifies the transition band only; vacuum untouched; the
-    # out-of-plane Ey is bit-identical through the call (the 2D update
-    # touches Ex/Ez only). Ey is pre-settled: zero on the PEC x boundary
-    # rows and EB-filled once, so the in-call boundary applications rewrite
-    # values identical to those already present.
-    Ex[...] = 1.0e5
-    Ez[...] = 0.0
-    shape_ey = np.asarray(Ey[...]).shape
-    idx = np.indices(shape_ey)
-    ey0 = 2.0e5 * (1.0 + 0.05 * idx[0] + 0.013 * idx[1])
-    ey0[0, ...] = 0.0
-    ey0[-1, ...] = 0.0
-    Ey[...] = ey0
-    wx.hybrid_apply_eb_boundary_to_edge_field("Efield_fp", 0)
-    before_ex = np.array(arr2d(Ex))
-    before_ey = np.array(np.asarray(Ey[...]))
-    wx.hybrid_marder_correct_e(0, alpha=0.1, max_iterations=50, rtol=0.0, atol=0.0)
-    ex = arr2d(Ex)
-    ck.close(
-        "marder: dense plasma core bit-identical",
-        ex[dense_rows, :],
-        before_ex[dense_rows, :],
-        0.0,
-    )
-    d_band = np.max(np.abs(ex[band_rows, :] - before_ex[band_rows, :]))
-    ck.expect(
-        "marder: transition band is modified", d_band > 0.0, f"max|dE|={d_band:.3e}"
-    )
-    ck.close(
-        "marder: vacuum gap bit-identical",
-        ex[vac_rows, :],
-        before_ex[vac_rows, :],
-        0.0,
-    )
-    ck.close(
-        "marder: out-of-plane Ey bit-identical through the 2D update",
-        np.asarray(Ey[...]),
-        before_ey,
-        0.0,
-    )
-
-    # --- 4) monotone convergence (single-iteration calls; the returned
-    # residual is measured before each update, Phoenix semantics) -----------
-    set_baseline(0.5, seed=123)
-    residuals = []
-    for _ in range(20):
-        _, resid = wx.hybrid_marder_correct_e(
-            0, alpha=0.1, max_iterations=1, rtol=0.0, atol=0.0
-        )
-        residuals.append(resid)
-    residuals = np.array(residuals)
-    n_increase = int(np.sum(residuals[1:] > residuals[:-1] * (1.0 + 1.0e-10)))
-    ck.expect(
-        "marder: residual decreases monotonically",
-        n_increase <= 2,
-        f"increases={n_increase} residuals[0]={residuals[0]:.3e} "
-        f"residuals[-1]={residuals[-1]:.3e}",
-    )
-    ck.expect(
-        "marder: residual at least halved over 20 sweeps",
-        residuals[-1] < 0.5 * residuals[0],
-        f"ratio={residuals[-1] / residuals[0]:.3f}",
-    )
-
-    # --- 5) grad_pe_only: identical to ohm when J = B = 0, different once
-    # a JxB drive exists ------------------------------------------------------
-    set_baseline(0.3, seed=7)
-    e0 = [np.array(np.asarray(w[...])) for w in (Ex, Ey, Ez)]
-    wx.hybrid_marder_correct_e(0, alpha=0.1, max_iterations=5, rtol=0.0, target="ohm")
-    e_ohm = [np.array(np.asarray(w[...])) for w in (Ex, Ey, Ez)]
-    for w, e in zip((Ex, Ey, Ez), e0):
-        w[...] = e
-    wx.hybrid_marder_correct_e(
-        0, alpha=0.1, max_iterations=5, rtol=0.0, target="grad_pe_only"
-    )
-    e_gpe = [np.array(np.asarray(w[...])) for w in (Ex, Ey, Ez)]
-    # The two calls start from identical valid data but inherit different
-    # deep-ghost history (the restore rewrites valid data only, and the
-    # iteration fills exchange a single ghost layer), which shows up at the
-    # few-percent level on GPU arenas: compare at a tolerance two orders
-    # below the genuine JxB-drive signal (~14 in these units) instead of
-    # bitwise.
-    e_scale = max(float(np.max(np.abs(e))) for e in e0)
-    for name, a, b2 in zip("xyz", e_ohm, e_gpe):
-        ck.close(
-            f"marder: grad_pe_only == ohm for J=B=0 (E{name})",
-            a / e_scale,
-            np.asarray(b2) / e_scale,
-            5e-2,
-        )
-
-    # turn on a uniform JxB drive: enE_x = -Jy*Bz / rho(x) couples to the
-    # dense edge of the band, so the two targets must now differ
-    Jy[...] = 1.0e3
-    Bz[...] = 0.1
-    for w, e in zip((Ex, Ey, Ez), e0):
-        w[...] = e
-    wx.hybrid_marder_correct_e(0, alpha=0.1, max_iterations=5, rtol=0.0, target="ohm")
-    ex_ohm2 = np.array(arr2d(Ex))
-    for w, e in zip((Ex, Ey, Ez), e0):
-        w[...] = e
-    wx.hybrid_marder_correct_e(
-        0, alpha=0.1, max_iterations=5, rtol=0.0, target="grad_pe_only"
-    )
-    ex_gpe2 = arr2d(Ex)
-    d_t = np.max(np.abs(ex_ohm2[band_rows, :] - ex_gpe2[band_rows, :]))
-    ck.expect(
-        "marder: ohm and grad_pe_only differ under a JxB drive",
-        d_t > 0.0,
-        f"max|dE|={d_t:.3e}",
-    )
-
-    # --- 6) Marder RE-APPLIES the EB boundary condition ---------------------
-    # The transitional correction must leave E satisfying the EB BC (the
-    # in-loop ApplyPECBoundaryToField, MarderCorrection.cpp:543, runs after
-    # every E update). Seed a consistent baseline, make it EB-consistent, then
-    # deliberately CORRUPT the covered (x > X_WALL) region -- a BC violation.
-    # The covered cells are eb_update_E = 0, so the div-correction never touches
-    # them (and the transition band at rows 8-16 is far from the wall node 24,
-    # so the corruption does not perturb the correction either): the covered
-    # values are set ONLY by the in-loop EB re-apply. After Marder the field
-    # must again satisfy the EB fill, i.e. re-applying the EB operator is a
-    # no-op (idempotent), and the injected garbage is gone.
-    Jy[...] = 0.0
-    Bz[...] = 0.0
-    set_baseline(0.3, seed=99)
-    wx.hybrid_apply_eb_boundary_to_edge_field("Efield_fp", 0)  # consistent start
-    # covered rows just past the wall node (nodal i >= 25; x-edge i >= 24);
-    # element [0] of each is the actual fill-band row (s = -0.7h / -0.2h)
-    cov_nodes = list(range(X_WALL_NODE + 1, N_X + 1))
-    cov_edges = list(range(X_WALL_NODE, N_X))
-    GARBAGE = 1.0e5
-    for w, rows in ((Ex, cov_edges), (Ey, cov_nodes), (Ez, cov_nodes)):
-        set_xrows(w, rows, GARBAGE)
-    wx.hybrid_marder_correct_e(0, alpha=0.1, max_iterations=10, rtol=0.0, atol=0.0)
-    post = [np.array(np.asarray(w[...])) for w in (Ex, Ey, Ez)]
-    wx.hybrid_apply_eb_boundary_to_edge_field("Efield_fp", 0)
-    after_bc = [np.array(np.asarray(w[...])) for w in (Ex, Ey, Ez)]
-    e_scale = max(float(np.max(np.abs(p))) for p in post) + 1e-300
-    for name, p, q in zip("xyz", post, after_bc):
-        ck.close(
-            f"marder: post-Marder E satisfies the EB BC (E{name})",
-            np.asarray(p) / e_scale,
-            np.asarray(q) / e_scale,
-            1e-10,
-        )
-    # and the corrupted fill-band row was actually overwritten (so the
-    # idempotency above is a genuine re-apply, not an empty covered region)
-    moved = min(
-        float(np.min(np.abs(np.asarray(w[...])[rows[0], ...] - GARBAGE)))
-        for w, rows in ((Ex, cov_edges), (Ey, cov_nodes), (Ez, cov_nodes))
-    )
-    ck.expect(
-        "marder: corrupted covered fill band was overwritten by the EB re-apply",
-        moved > 0.5 * GARBAGE,
-        f"min|E_fillband - garbage| = {moved:.3e} (garbage={GARBAGE:.1e})",
-    )
-
-    ck.finish()
-
-
-# ----------------------------------------------------------------------------
 # Hyper-resistivity stencil battery (2D XZ): validates the isotropized
 # Mehrstellen 9-point Laplacian against its closed form and demonstrates the
 # isotropization of its damping rate via plane-wave eigenvalues (exact,
@@ -1006,196 +727,15 @@ def run_resistive_battery(sim):
     ck.finish()
 
 
-# ----------------------------------------------------------------------------
-# Div(B) Marder-clean battery (collocated planar wall)
-# ----------------------------------------------------------------------------
-def run_divb_clean_battery(sim):
-    """Div(B) Marder clean on a collocated grid: the band-restricted
-    ``B += alpha*grad(div B)`` diffusion that dissipates the curved-wall
-    divergence the EB mirror fill injects on the conformal-EB collocated B
-    push. The correction is a pure gradient, so curl(B) -- and hence the
-    plasma current J = curl(B) it feeds -- is preserved to round-off while
-    only the near-wall band divergence is reduced. Exercises the production
-    parity (magnetic: normal odd) through the hybrid_marder_clean_divergence
-    binding.
-
-    Key invariant tested: for the centered nodal grad the kernel uses, a
-    centered nodal curl of ``grad(scalar)`` vanishes identically, so curl(B)
-    is unchanged to round-off in the band interior regardless of how the
-    divergence itself is computed.
-    """
-    wx = sim.extension.warpx
-    ck = CheckSet()
-
-    L = HI - LO
-    nx, nz = N_X + 1, N_Z + 1  # collocated: every field is nodal
-    x_node = LO + np.arange(nx) * H
-    z_node = LO + np.arange(nz) * H
-    s_cell = (X_WALL - x_node) / H  # signed distance in cells (fluid s > 0)
-
-    CLEAN_CELLS = 6.0  # the clean band (grad(div) acts on |phi| <= 6 h)
-    FILL_CELLS = 1.0  # the EB mirror re-fill band (rewrites |phi| <~ 1 h)
-
-    Bx = fields.BxFPWrapper()
-    By = fields.ByFPWrapper()
-    Bz = fields.BzFPWrapper()
-    for w in (Bx, By, Bz):
-        w[...] = 0.0
-
-    # Analytic seed (all nodal):
-    #   Bx = A sin(2 pi (z-LO)/L) + P(x) ; Bz = 0 ; By = 0
-    #   curl_y = dBx/dz - dBz/dx = A (2 pi/L) cos(...)   (z-periodic, P drops out)
-    #   div    = dBx/dx + dBz/dz = dP/dx                 (localized in the band)
-    # P(x): a smooth fluid-side bump peaked ~2.5 cells inside the wall, zero in
-    # the bulk and inside the conductor, so the seeded divergence lives in the
-    # near-wall band -- mimicking the curved-wall injection of the mirror fill.
-    A = 3.0
-    sinz = np.sin(2.0 * np.pi * (z_node - LO) / L)
-    P = 0.7 * np.exp(-((s_cell - 2.5) ** 2) / (2.0 * 1.5**2))
-    P[s_cell <= 0.0] = 0.0
-    bx0 = np.broadcast_to(A * sinz[None, :] + P[:, None], arr2d(Bx).shape).copy()
-    bz0 = np.zeros(arr2d(Bz).shape)
-    Bx[...] = bx0
-    Bz[...] = bz0
-    By[...] = 0.0
-
-    def div_nodal(bx, bz):
-        """Centered nodal divergence dBx/dx + dBz/dz (z periodic, x interior)."""
-        d = np.zeros_like(bx)
-        d[1:-1, :] += (bx[2:, :] - bx[:-2, :]) / (2.0 * H)
-        d += (np.roll(bz, -1, axis=1) - np.roll(bz, 1, axis=1)) / (2.0 * H)
-        return d
-
-    def curl_y_nodal(bx, bz):
-        """Centered nodal curl_y = dBx/dz - dBz/dx (z periodic, x interior)."""
-        c = (np.roll(bx, -1, axis=1) - np.roll(bx, 1, axis=1)) / (2.0 * H)
-        c[1:-1, :] -= (bz[2:, :] - bz[:-2, :]) / (2.0 * H)
-        return c
-
-    bx_before = np.array(arr2d(Bx))
-    bz_before = np.array(arr2d(Bz))
-    div_before = div_nodal(bx_before, bz_before)
-    curl_before = curl_y_nodal(bx_before, bz_before)
-
-    # band-interior window: fluid nodes well clear of both the fill re-write
-    # band and the outer clean-band edge, so the centered stencils' x-neighbors
-    # are also inside the actively-corrected band.
-    interior = (s_cell >= FILL_CELLS + 1.0) & (s_cell <= CLEAN_CELLS - 1.0)
-    # bulk fluid the clean must not touch -- a window safely past the clean
-    # band's smooth tail and clear of the x-domain (Dirichlet) boundary nodes.
-    deep = (s_cell >= CLEAN_CELLS + 4.0) & (s_cell <= 20.0)
-
-    # Run a single sweep of the production div(B) clean (magnetic parity, B
-    # mask, nullptr cache). One sweep is the exact unit of the algorithm: the
-    # centered nodal grad(div) is applied once in the band, so curl(B) is
-    # preserved to round-off. (The production cadence takes a few such sweeps;
-    # on this idealized planar wall many sweeps would slowly pump the centered
-    # stencil's undamped checkerboard null-mode, which the per-sweep invariant
-    # below is the clean test of.)
-    wx.hybrid_marder_clean_divergence(
-        field="Bfield_fp",
-        lev=0,
-        alpha=0.1,
-        max_iters=1,
-        clean_band_cells=CLEAN_CELLS,
-        fill_band_cells=FILL_CELLS,
-    )
-
-    bx_after = np.array(arr2d(Bx))
-    bz_after = np.array(arr2d(Bz))
-    div_after = div_nodal(bx_after, bz_after)
-    curl_after = curl_y_nodal(bx_after, bz_after)
-
-    # --- 1) the clean actually modified the band ---------------------------
-    d_band = float(np.max(np.abs(bx_after[interior, :] - bx_before[interior, :])))
-    ck.expect(
-        "divb_clean: the band B field is modified",
-        d_band > 0.0,
-        f"max|dBx|={d_band:.3e}",
-    )
-
-    # --- 2) the divergence in the band is reduced --------------------------
-    dn_before = float(np.sqrt(np.sum(div_before[interior, :] ** 2)))
-    dn_after = float(np.sqrt(np.sum(div_after[interior, :] ** 2)))
-    ck.expect(
-        "divb_clean: the band div(B) is reduced",
-        dn_after < 0.9 * dn_before,
-        f"before={dn_before:.3e} after={dn_after:.3e}",
-    )
-
-    # --- 3) curl(B) is preserved to round-off (pure-gradient correction) ---
-    # This is the safety guarantee of the clean: a centered nodal curl of the
-    # centered nodal grad(div) vanishes identically, so J = curl(B) is left
-    # untouched while the divergence is dissipated.
-    curl_scale = float(np.max(np.abs(curl_before[interior, :])))
-    dcurl = float(np.max(np.abs(curl_after[interior, :] - curl_before[interior, :])))
-    ck.expect(
-        "divb_clean: curl(B) preserved to round-off in the band",
-        dcurl <= 1.0e-12 * curl_scale,
-        f"max|dcurl|={dcurl:.3e} curl_scale={curl_scale:.3e}",
-    )
-
-    # --- 4) the bulk fluid is left essentially untouched (band-restricted) --
-    deep_chg = float(np.max(np.abs(bx_after[deep, :] - bx_before[deep, :])))
-    ck.expect(
-        "divb_clean: deep fluid is unchanged (band-restricted)",
-        deep_chg < 1.0e-3,
-        f"max|dBx_deep|={deep_chg:.3e}",
-    )
-
-    # --- 5) the same clean on the total Ampere current (div(J), electric
-    # parity / E mask): the kernel is identical, so curl(J) -- the physical
-    # current the solver feeds back -- is likewise preserved to round-off while
-    # the band divergence is reduced. Exercises the binding's
-    # hybrid_current_fp_plasma branch.
-    Jx = fields.JxFPPlasmaWrapper()
-    Jy = fields.JyFPPlasmaWrapper()
-    Jz = fields.JzFPPlasmaWrapper()
-    for w in (Jx, Jy, Jz):
-        w[...] = 0.0
-    Jx[...] = np.broadcast_to(A * sinz[None, :] + P[:, None], arr2d(Jx).shape).copy()
-    Jz[...] = np.zeros(arr2d(Jz).shape)
-    jx0, jz0 = np.array(arr2d(Jx)), np.array(arr2d(Jz))
-    jdiv0 = div_nodal(jx0, jz0)
-    jcurl0 = curl_y_nodal(jx0, jz0)
-    wx.hybrid_marder_clean_divergence(
-        field="hybrid_current_fp_plasma",
-        lev=0,
-        alpha=0.1,
-        max_iters=1,
-        clean_band_cells=CLEAN_CELLS,
-        fill_band_cells=FILL_CELLS,
-    )
-    jx1, jz1 = np.array(arr2d(Jx)), np.array(arr2d(Jz))
-    jdiv1 = div_nodal(jx1, jz1)
-    jcurl1 = curl_y_nodal(jx1, jz1)
-    jdn0 = float(np.sqrt(np.sum(jdiv0[interior, :] ** 2)))
-    jdn1 = float(np.sqrt(np.sum(jdiv1[interior, :] ** 2)))
-    ck.expect(
-        "divj_clean: the band div(J) is reduced",
-        jdn1 < 0.9 * jdn0,
-        f"before={jdn0:.3e} after={jdn1:.3e}",
-    )
-    jcurl_scale = float(np.max(np.abs(jcurl0[interior, :])))
-    jdcurl = float(np.max(np.abs(jcurl1[interior, :] - jcurl0[interior, :])))
-    ck.expect(
-        "divj_clean: curl(J) preserved to round-off in the band",
-        jdcurl <= 1.0e-12 * jcurl_scale,
-        f"max|dcurl|={jdcurl:.3e} curl_scale={jcurl_scale:.3e}",
-    )
-
-    ck.finish()
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--battery",
-        choices=["eb", "marder", "hyper", "resistive", "divb_clean"],
+        choices=["eb", "hyper", "resistive"],
         default="eb",
-        help="which unit battery to run (eb fills/folds, the transitional "
-        "Marder correction, the isotropized hyper-resistivity stencil, or the "
-        "collocated div(B) Marder clean)",
+        help="which unit battery to run (eb fills/folds, the isotropized "
+        "hyper-resistivity stencil, or the resistive corner-curl "
+        "isotropization)",
     )
     args, left = parser.parse_known_args()
     sys.argv = sys.argv[:1] + left
@@ -1203,16 +743,11 @@ def main():
     sim = setup_simulation(
         hyper=(args.battery == "hyper"),
         resistive=(args.battery == "resistive"),
-        collocated=(args.battery == "divb_clean"),
     )
     if args.battery == "resistive":
         run_resistive_battery(sim)
     elif args.battery == "hyper":
         run_hyper_battery(sim)
-    elif args.battery == "marder":
-        run_marder_battery(sim)
-    elif args.battery == "divb_clean":
-        run_divb_clean_battery(sim)
     else:
         run_plane_battery(sim)
 

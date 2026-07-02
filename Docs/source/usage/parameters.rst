@@ -3771,22 +3771,18 @@ Maxwell solver: kinetic-fluid hybrid
     :default: ``false``
     :optional:
 
-    If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this enables the conformal embedded-boundary
-    Faraday update for the B-field push (the enlarged cell technique of :cite:t:`param-XiaoIEEE2005`,
-    shared with the ``ect`` Maxwell solver) instead of the default stair-step approximation.
-    Faces cut by the embedded boundary are advanced using the conformal circulation of E over the
-    uncovered face area, and faces that are too small to be stable at the full time step are enlarged
-    into their neighbors, avoiding any time-step reduction. This makes the field solution near embedded
-    boundaries second-order accurate instead of first-order. Requires embedded boundaries and a
-    3D or 2D (XZ) Cartesian staggered grid (not compatible with collocated grids, RZ geometry, or
-    PML boundaries).
-    The enlarged-cell face borrowing communicates across grid boxes: borrowing decisions are made
-    once per physical face (by its owner copy) and the lent areas, intruded marks and enlarged-cell
-    accumulator contributions are reduced across box seams, so multi-box (and periodic) layouts whose
-    seams cross cut cells produce the same fields as an equivalent single-box run up to communication
-    roundoff. Single-box non-periodic runs take the historical communication-free path bit-for-bit;
-    layouts with seam-adjacent cut faces pay a thin per-stage exchange of the face EMF ghosts and the
-    enlarged-cell accumulator.
+    If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this enables the conformal
+    embedded-boundary wall treatment of the collocated hybrid solver instead of the default
+    stair-step approximation: the field-update masks are keyed directly off the nodal signed
+    level set, and after each Faraday push the covered magnetic-field nodes are rewritten from
+    the level-set geometry (signed distance and boundary normal) by mirror-image interpolation
+    (normal component odd, tangential components even), so the masked nodal curl that forms the
+    next substep's plasma current sees wall-consistent values instead of a staircase-zeroed
+    conductor. Requires embedded boundaries and a 3D or 2D (XZ) Cartesian **collocated** grid
+    (``warpx.grid_type = collocated``); a staggered (Yee) grid aborts — on staggered grids run
+    the staircase wall, optionally imposing the magnetic wall condition with
+    :pp:param:`hybrid_pic_model.eb_b_straight_mirror`. Not compatible with RZ geometry or PML
+    boundaries.
 
     With embedded boundaries the hybrid solver also enforces the PEC boundary condition on the
     Ampere/plasma current (including the external-current subtraction), on the deposited ion current,
@@ -3807,12 +3803,13 @@ Maxwell solver: kinetic-fluid hybrid
 
     In addition, the deposited ion charge density is mirrored oddly across the embedded surface
     (a Dirichlet condition: the plasma density vanishes at the conducting wall and is zero deep
-    inside the conductor), and the electron pressure is mirrored evenly (a Neumann condition: the
-    wall supports the plasma back-pressure with zero normal pressure gradient), so that the
-    Ohm's-law density interpolation and the pressure-gradient stencils that straddle the wall see
-    boundary-consistent values. These scalar conditions are always active when the hybrid solver
-    is used with embedded boundaries (also without ``use_conformal_eb``) and introduce no input
-    parameters. Note that the mirrored charge density inside the conductor is negative by
+    inside the conductor; see :pp:param:`hybrid_pic_model.eb_rho_dirichlet`), and the electron
+    pressure is by default also mirrored oddly (a Dirichlet condition, Pe → 0 at the wall; set
+    :pp:param:`hybrid_pic_model.eb_pe_dirichlet` = ``false`` for the even/Neumann
+    wall-supported-pressure variant), so that the Ohm's-law density interpolation and the
+    pressure-gradient stencils that straddle the wall see boundary-consistent values. These
+    scalar conditions are always active when the hybrid solver is used with embedded boundaries
+    (also without ``use_conformal_eb``). Note that the mirrored charge density inside the conductor is negative by
     construction (it interpolates to zero exactly at the surface); it is excluded from the
     resistivity parsers and from the electron-pressure equation of state, but appears in the
     ``rho`` diagnostic as a thin negative band inside conducting walls.
@@ -3858,6 +3855,38 @@ Maxwell solver: kinetic-fluid hybrid
     collocated path (the direct level-set mirror fill is not applied), reproducing the pre-treatment
     stair-step baseline. Intended for A/B comparison of the EB ``B`` treatment; not for production runs.
 
+.. pp:param:: hybrid_pic_model.eb_b_straight_mirror
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Staggered (Yee) grids only. If ``true``, impose the magnetic wall condition on the staggered
+    ``Bfield_fp`` after each Faraday push with the same direct level-set mirror fill the collocated
+    conformal path uses (normal component odd, tangential even), instead of leaving the covered
+    faces staircase-zeroed. This is the recommended wall treatment for ``B`` on staggered
+    embedded-boundary hybrid runs (``use_conformal_eb`` is collocated-only). Opt-in; the default
+    (``false``) leaves the staggered staircase behavior unchanged.
+
+.. pp:param:: hybrid_pic_model.eb_cylindrical_correction
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If ``true``, the embedded-boundary mirror fills account for a wall that is a surface of
+    revolution about the axis set by :pp:param:`hybrid_pic_model.eb_cyl_axis` (centered on the
+    transverse origin): the mirrored radial and azimuthal components are scaled by the radial
+    Jacobian :math:`\lambda = r_\mathrm{image}/r_\mathrm{fill}` of the reflection, which the
+    planar mirror otherwise omits at a curved wall. 3D Cartesian only; requires
+    ``use_conformal_eb``. Reduces exactly to the planar reflection where :math:`\lambda = 1`.
+
+.. pp:param:: hybrid_pic_model.eb_cyl_axis
+    :type: ``string``
+    :default: ``z``
+    :optional:
+
+    Symmetry axis (``x``, ``y`` or ``z``) of the surface-of-revolution wall assumed by
+    :pp:param:`hybrid_pic_model.eb_cylindrical_correction`.
+
 .. pp:param:: hybrid_pic_model.eb_b_fill_band_cells
     :type: ``float``
     :default: ``1`` (``sqrt(2)`` when :pp:param:`hybrid_pic_model.isotropic_resistivity` is enabled)
@@ -3899,12 +3928,35 @@ Maxwell solver: kinetic-fluid hybrid
     edge). If ``false``, it is mirrored evenly (Neumann: zero normal gradient, for a column
     supported by the wall; combine with ``hybrid_pic_model.eb_deposit_fold = reflect``).
 
-.. pp:param:: hybrid_pic_model.isotropic_hyper_resistivity
+.. pp:param:: hybrid_pic_model.eb_pe_dirichlet
     :type: ``bool``
     :default: ``true``
     :optional:
 
-    If ``true`` (default), the hyper-resistivity Laplacian of the hybrid Ohm's law is evaluated
+    Parity of the embedded-boundary mirror fill of the electron pressure. If ``true`` (default),
+    the pressure is mirrored oddly and vanishes at the conducting wall (Dirichlet, consistent
+    with the odd density mirror: the electron pressure at a free plasma edge drops to zero, and
+    its normal gradient supplies the radial sheath-like electric field). If ``false``, it is
+    mirrored evenly (Neumann: the wall supports the plasma back-pressure with zero normal
+    pressure gradient).
+
+.. pp:param:: hybrid_pic_model.eb_hall_mask
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    If ``true`` (default), the Hall term's nodal :math:`\vec{J}\times\vec{B}` interpolation is
+    embedded-boundary aware: covered edges and faces are excluded from the nodal average (with
+    the interpolation weights renormalized over the remaining solver-owned points), so covered
+    values cannot pollute the near-wall Hall electric field. Set ``false`` to recover the plain
+    unmasked averaging for A/B comparison.
+
+.. pp:param:: hybrid_pic_model.isotropic_hyper_resistivity
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If ``true`` (opt-in), the hyper-resistivity Laplacian of the hybrid Ohm's law is evaluated
     with the isotropic Mehrstellen 9-point (2D XZ) or Patra-Karttunen 27-point (3D) stencil
     instead of the cross stencil. The cross stencil's leading truncation error modulates the
     hyper-resistive damping rate as :math:`\cos 4\theta` between the grid axes and the
@@ -3916,10 +3968,10 @@ Maxwell solver: kinetic-fluid hybrid
 
 .. pp:param:: hybrid_pic_model.isotropic_resistivity
     :type: ``bool``
-    :default: ``true``
+    :default: ``false``
     :optional:
 
-    If ``true`` (default), a corner-curl correction is added to the resistive electric field so
+    If ``true`` (opt-in), a corner-curl correction is added to the resistive electric field so
     that, after the (unchanged) Faraday curl, the emergent in-plane resistive diffusion of the
     out-of-plane magnetic field (:math:`B_z` in 3D, :math:`B_y` in 2D XZ) uses the isotropic
     Mehrstellen Laplacian rather than the cross stencil. The plain resistive term
@@ -3931,98 +3983,14 @@ Maxwell solver: kinetic-fluid hybrid
     degree :math:`\leq 3`). Cartesian geometries only; the RZ resistive operator is axisymmetric
     and has no such anisotropy.
 
-.. pp:param:: hybrid_pic_model.marder_alpha
-    :type: ``float``
-    :default: ``0.``
-    :optional:
-
-    Dimensionless damping factor of the transitional Marder divergence cleaning of the
-    Ohm's-law E field; ``0`` (the default) disables the correction. When enabled, the
-    correction iteratively applies
-
-    .. math::
-
-        \vec{E} \mathrel{+}= \alpha\,\min(\Delta x)^2\,\vec{\nabla}\left(\vec{\nabla}\cdot\vec{E} - D_\mathrm{target}\right)
-
-    restricted to the low-density transition band :math:`0 < \rho \leq n_\mathrm{floor} q_e`
-    (the same band classification used by :pp:param:`hybrid_pic_model.n_floor`); dense plasma
-    and true vacuum are never modified, and points inside embedded boundaries are excluded.
-    The discrete :math:`\vec{\nabla}(\vec{\nabla}\cdot)` update is CFL-limited, so values
-    above ``0.1`` are rejected. After every update the domain and embedded-boundary E
-    conditions are re-applied. Supported in 3D Cartesian and RZ (m=0) geometry.
-
-.. pp:param:: hybrid_pic_model.marder_target
-    :type: ``string``
-    :default: ``ohm``
-    :optional:
-
-    Divergence target :math:`D_\mathrm{target}` of the Marder correction. ``ohm`` drives
-    :math:`\vec{\nabla}\cdot\vec{E}` toward the divergence of the bare Hall/pressure
-    Ohm's-law field :math:`(\vec{J}\times\vec{B} - \vec{\nabla}P_e)/(n e)` evaluated from
-    the same fields the Ohm solve used (the Phoenix explicit-branch behavior).
-    ``grad_pe_only`` uses the pressure term only, :math:`-\vec{\nabla}P_e/(n e)`, dropping
-    the :math:`\vec{J}\times\vec{B}` term. ``zero`` smooths
-    :math:`\vec{\nabla}\cdot\vec{E}` toward zero. Note that with
-    :pp:param:`hybrid_pic_model.holmstrom_vacuum_region` enabled the Ohm solve zeroes the
-    Hall and pressure terms in the band while the ``ohm`` target is deliberately not gated
-    (Phoenix parity); ``grad_pe_only`` or ``zero`` are the more self-consistent companions
-    to the Holmstrom treatment, since the Hall term is exactly what it drops.
-
-.. pp:param:: hybrid_pic_model.marder_correction_level
-    :type: ``string``
-    :default: ``all_substeps``
-    :optional:
-
-    Where in the field advance the Marder correction is applied. ``all_substeps`` corrects
-    the substep E field inside every RK/RKF45 stage, before the Faraday curl, so the B
-    integration sees the cleaned field (runs once per stage evaluation, which with RKF45
-    substepping can dominate the solve cost: measured ~6x wall time on a wall-loaded
-    theta-pinch testbed - mitigate with
-    :pp:param:`hybrid_pic_model.marder_substep_interval` or the cheaper levels).
-    ``half_steps`` corrects E once after each half B push and ``full_steps`` corrects only
-    the final E field used for the particle push; both add negligible cost. The correction
-    cleans the transition-band divergence and preserves the plasma flux; it is not by
-    itself a remedy for RKF45 substep-stiffness aborts.
-
-.. pp:param:: hybrid_pic_model.marder_max_iterations
-    :type: ``int``
-    :default: ``50``
-    :optional:
-
-    Maximum number of fixed-point iterations per Marder application.
-
-.. pp:param:: hybrid_pic_model.marder_rtol
-    :type: ``float``
-    :default: ``1e-3``
-    :optional:
-
-    Relative tolerance on the masked divergence-error L2 norm: the iteration exits when the
-    residual falls below ``marder_rtol`` times the first-iteration residual.
-
-.. pp:param:: hybrid_pic_model.marder_atol
-    :type: ``float``
-    :default: ``1e-30``
-    :optional:
-
-    Absolute tolerance on the masked divergence-error L2 norm.
-
-.. pp:param:: hybrid_pic_model.marder_substep_interval
-    :type: ``int``
-    :default: ``1``
-    :optional:
-
-    Apply the correction only every N substep E evaluations (only meaningful at
-    ``marder_correction_level = all_substeps``). Note that with RKF45 a value above 1 makes
-    the right-hand side stage-history dependent, which can mildly bias the embedded error
-    estimate of the adaptive stepper.
-
 .. pp:param:: hybrid_pic_model.divb_clean_alpha
     :type: ``float``
     :default: ``0``
     :optional:
 
-    Damping factor of a Marder-style diffusive divergence clean of ``Bfield_fp`` on the collocated
-    direct-mirror embedded-boundary path. ``0`` (default) disables it. The clean iterates
+    Damping factor of a Marder-style diffusive divergence clean of ``Bfield_fp`` for hybrid
+    embedded-boundary runs (both grid types; the update uses the discrete-adjoint gradient of the
+    nodal divergence on either staggering). ``0`` (default) disables it. The clean iterates
     ``B += alpha * grad(div B)`` in a near-wall band (see
     :pp:param:`hybrid_pic_model.divb_clean_band_cells`), re-imposing the embedded-boundary condition
     after each sweep. Because the correction is a pure gradient it dissipates the divergence that

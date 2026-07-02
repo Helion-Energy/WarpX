@@ -2185,46 +2185,23 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         This flag is useful for suppressing vacuum region fluctuations. A large resistivity value must be used when rho <= rho_floor.
 
     use_conformal_eb: bool, default=False
-        If True, use the conformal embedded-boundary Faraday update for the
-        B-field push (enlarged cell technique of `Xiao and Liu (2004)
-        <https://doi.org/10.1109/LMWC.2004.837385>`_, shared with the ``ect``
-        Maxwell solver) instead of the stair-step approximation. Faces cut by
-        the embedded boundary are advanced using the conformal circulation of
-        E over the uncovered face area and small faces are enlarged into their
-        neighbors to avoid time-step restrictions. Requires an embedded
-        boundary and a 3D Cartesian staggered grid.
+        If True, use the conformal embedded-boundary wall treatment of the
+        collocated hybrid solver instead of the stair-step approximation: the
+        update masks are keyed off the nodal signed level set and the covered
+        magnetic-field nodes are rewritten after each Faraday push by
+        level-set mirror-image interpolation (normal odd, tangential even).
+        Requires an embedded boundary and a 3D or 2D (XZ) Cartesian
+        **collocated** grid (a staggered grid aborts; use
+        ``eb_b_straight_mirror`` there).
 
     eb_b_straight_mirror: bool, default=False
         If True, impose the wall condition on the staggered (Yee) ``Bfield_fp``
-        with the collocated-style direct level-set mirror after each Faraday push,
-        instead of the ECT enlarged-cell face borrowing. Run with
-        ``use_conformal_eb=False`` (standard masked Yee Faraday) + this to get the
-        collocated wall treatment on a staggered grid, avoiding the ECT
-        face-extension / cross-box seam. Best with the plasma held off the wall (a
-        standoff), which removes the dense near-wall B that made the pointwise Yee
-        mirror spike. Opt-in (default off is byte-identical).
-
-    conformal_ect_curvature: bool, default=False
-        If True, apply the along-edge curvature correction to the conformal-ECT
-        Faraday circulation: each cut edge's electric field is Taylor-shifted
-        from the full-edge center to the centroid of its uncovered segment
-        before forming the per-face EMF. Without it the circulation is a
-        1st-order midpoint quadrature over the curved contour, which caps the
-        conformal B push at ~1st order at a curved wall even when ``curl(B)``
-        feeding the plasma current is already 2nd order. Requires
-        ``use_conformal_eb`` and a staggered (Yee) grid; opt-in (default off is
-        byte-identical).
-
-    conformal_ect_j: bool, default=False
-        If True, compute the Ampere plasma current ``J = curl(B) / mu0`` with the
-        flux-weighted ("Form A") conformal-EB curl: each ``B`` value in the Yee
-        curl is scaled by the open-fluid fraction of the cut face it lives on
-        (``face_areas`` / full face area). The result is a signed sum of open-face
-        fluxes and is discretely divergence-consistent across the cut wall, so no
-        covered-B mirror fill is needed.
-        Covered faces (zero open area) drop out automatically. Requires a staggered
-        (Yee) embedded-boundary grid; opt-in (default off is byte-identical, the
-        standard masked Yee curl is used).
+        with the collocated-style direct level-set mirror after each Faraday
+        push, instead of leaving the covered faces staircase-zeroed. This is
+        the staggered-grid counterpart of ``use_conformal_eb``. Best with the
+        plasma held off the wall (a standoff), which removes the dense
+        near-wall B that made the pointwise Yee mirror spike. Opt-in (default
+        off is byte-identical).
 
     eb_bc_rtol: float, default=1e-4
         Relative residual tolerance of the embedded-boundary PEC
@@ -2300,14 +2277,14 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         band node (the wall-layer mode, for damping the divergence instability
         a sharp re-entrant wall corner pumps).
 
-    isotropic_hyper_resistivity: bool, default=True
+    isotropic_hyper_resistivity: bool, default=False
         Evaluate the hyper-resistivity Laplacian with the isotropic
         Mehrstellen (2D) / Patra-Karttunen (3D) stencils instead of the
         cross stencil, removing the fourfold (cos 4*theta) anisotropy of
         its damping rate (fully isotropic on cubic cells; Cartesian
         geometries).
 
-    isotropic_resistivity: bool, default=True
+    isotropic_resistivity: bool, default=False
         Add an isotropizing corner-curl correction to the resistive electric
         field so the emergent in-plane diffusion of the out-of-plane magnetic
         field uses the isotropic (Mehrstellen) Laplacian instead of the cross
@@ -2373,8 +2350,6 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         holmstrom_vacuum_region=None,
         use_conformal_eb=None,
         eb_b_straight_mirror=None,
-        conformal_ect_curvature=None,
-        conformal_ect_j=None,
         eb_bc_rtol=None,
         eb_bc_max_iters=None,
         eb_bc_direct_fill=None,
@@ -2418,8 +2393,6 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
 
         self.use_conformal_eb = use_conformal_eb
         self.eb_b_straight_mirror = eb_b_straight_mirror
-        self.conformal_ect_curvature = conformal_ect_curvature
-        self.conformal_ect_j = conformal_ect_j
         self.eb_bc_rtol = eb_bc_rtol
         self.eb_bc_max_iters = eb_bc_max_iters
         self.eb_bc_direct_fill = eb_bc_direct_fill
@@ -2487,8 +2460,6 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         pywarpx.hybridpicmodel.holmstrom_vacuum_region = self.holmstrom_vacuum_region
         pywarpx.hybridpicmodel.use_conformal_eb = self.use_conformal_eb
         pywarpx.hybridpicmodel.eb_b_straight_mirror = self.eb_b_straight_mirror
-        pywarpx.hybridpicmodel.conformal_ect_curvature = self.conformal_ect_curvature
-        pywarpx.hybridpicmodel.conformal_ect_j = self.conformal_ect_j
         pywarpx.hybridpicmodel.eb_bc_rtol = self.eb_bc_rtol
         pywarpx.hybridpicmodel.eb_bc_max_iters = self.eb_bc_max_iters
         pywarpx.hybridpicmodel.eb_bc_direct_fill = self.eb_bc_direct_fill

@@ -39,17 +39,10 @@ namespace warpx::hybrid
         std::array<std::unique_ptr<amrex::iMultiFab>, 3> status;
         int n_pending = 0;
 
-        /** Number of S_CORNER cells flagged by the concave re-entrant-corner
-         * detector (the Option-2 covered-B fill skip). Diagnostic count of the
-         * measure-zero ring where the fill reverts to its OFF value; 0 unless
-         * the corner-skip detector is enabled. */
-        int n_corner = 0;
-
         [[nodiscard]] bool empty () const { return !status[0]; }
         void reset () {
             for (auto& s : status) { s.reset(); }
             n_pending = 0;
-            n_corner = 0;
         }
     };
 

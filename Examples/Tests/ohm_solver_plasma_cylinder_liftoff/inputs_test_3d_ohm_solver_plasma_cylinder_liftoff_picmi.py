@@ -123,6 +123,8 @@ def setup_simulation(
     grid_type="collocated",
     use_conformal_eb=True,
     eb_b_straight_mirror=False,
+    eb_cyl_correction=False,
+    divb_clean=False,
     equilibrium_b=False,
     vacuum=False,
 ):
@@ -218,8 +220,19 @@ def setup_simulation(
         substep_rtol=substep_rtol,
         substep_atol=1.0e-8,
         max_substep_attempts=1000,
-        use_conformal_eb=use_conformal_eb,
+        # The conformal wall treatment is collocated-only (staggered aborts);
+        # on a staggered grid use eb_b_straight_mirror for the B wall instead.
+        use_conformal_eb=use_conformal_eb if grid_type == "collocated" else None,
         eb_b_straight_mirror=True if eb_b_straight_mirror else None,
+        # Diffusive near-wall div(B)/div(J) damper at the annulus production
+        # config: alpha=0.15 (just under the ~1/6 explicit-diffusion cap),
+        # 3 sweeps/step, unbounded band, wall-layer mode (inner cutoffs 0).
+        divb_clean_alpha=0.15 if divb_clean else None,
+        divj_clean_alpha=0.15 if divb_clean else None,
+        divb_clean_iters=3 if divb_clean else None,
+        divb_clean_band_cells=0.0 if divb_clean else None,
+        divb_clean_inner_div_cells=0.0 if divb_clean else None,
+        divb_clean_inner_corr_cells=0.0 if divb_clean else None,
         A_external=A_ext,
         **power_law_resistivity(
             ETA_PLASMA,
@@ -230,6 +243,15 @@ def setup_simulation(
             N_I,
         ),
     )
+
+    if eb_cyl_correction:
+        # Surface-of-revolution radial-Jacobian mirror correction (the wall is a
+        # cylinder about z, centered on the transverse origin). Not a PICMI
+        # kwarg; set through the bucket. Requires use_conformal_eb.
+        from pywarpx import hybridpicmodel
+
+        hybridpicmodel.eb_cylindrical_correction = 1
+        hybridpicmodel.eb_cyl_axis = "z"
 
     # Seed the initial grid B with the bias field so Bfield_fp starts as the
     # TOTAL B (plasma 0 + external bias) that the split-field external-A push
@@ -372,7 +394,7 @@ def install_wall_scraper(species_name, r_standoff, verbose=False):
 
     The proper follow-up is a DielectricEB object (a second embedded boundary carrying
     eps_r / surface charge) so the standoff and macroscopic dielectric physics live in
-    the field solve. See Docs/eb_fill_review/DIELECTRIC_EB_FOLLOWUP.md.
+    the field solve.
     """
     from pywarpx import callbacks
     from pywarpx._libwarpx import libwarpx
@@ -593,8 +615,9 @@ def main():
     )
     parser.add_argument(
         "--grid-type",
-        help="field grid staggering: 'staggered' (Yee, enlarged-cell conformal "
-        "EB) or 'collocated' (nodal, level-set conformal EB)",
+        help="field grid staggering: 'collocated' (nodal, level-set conformal "
+        "EB) or 'staggered' (Yee, staircase EB; pair with "
+        "--eb-b-straight-mirror for the B wall)",
         choices=["staggered", "collocated"],
         default="collocated",
     )
@@ -612,10 +635,26 @@ def main():
         dest="eb_b_straight_mirror",
         action="store_true",
         help="impose the wall on the staggered (Yee) B with the collocated-style "
-        "direct level-set mirror after each Faraday push, instead of ECT face "
-        "borrowing (hybrid_pic_model.eb_b_straight_mirror). Use with --no-conformal-eb "
-        "(standard masked Yee Faraday). Best with a standoff holding plasma off the "
-        "wall. Default off.",
+        "direct level-set mirror after each Faraday push, instead of leaving the "
+        "covered faces staircase-zeroed (hybrid_pic_model.eb_b_straight_mirror). "
+        "Use with --no-conformal-eb (standard masked Yee Faraday). Best with a "
+        "standoff holding plasma off the wall. Default off.",
+    )
+    parser.add_argument(
+        "--eb-cyl-correction",
+        dest="eb_cyl_correction",
+        action="store_true",
+        help="apply the cylindrical (surface-of-revolution about z) radial-Jacobian "
+        "mirror correction to the EB fills (hybrid_pic_model.eb_cylindrical_correction). "
+        "Requires the conformal (collocated) wall. Default off.",
+    )
+    parser.add_argument(
+        "--divb-clean",
+        dest="divb_clean",
+        action="store_true",
+        help="enable the diffusive near-wall div(B)/div(J) damper at the annulus "
+        "production config (alpha=0.15, 3 sweeps/step, unbounded band, wall-layer "
+        "mode). Default off.",
     )
     parser.add_argument(
         "--equilibrium-b",
@@ -707,6 +746,8 @@ def main():
         grid_type=args.grid_type,
         use_conformal_eb=args.conformal_eb,
         eb_b_straight_mirror=args.eb_b_straight_mirror,
+        eb_cyl_correction=args.eb_cyl_correction,
+        divb_clean=args.divb_clean,
         equilibrium_b=args.equilibrium_b,
         vacuum=args.vacuum,
     )
