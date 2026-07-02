@@ -416,8 +416,28 @@ WarpX::WarpX ()
         m_hybrid_pic_model = std::make_unique<HybridPICModel>();
     }
 
+    // The hybrid conformal-EB (ECT enlarged-cell Faraday) is COLLOCATED-ONLY: on a
+    // staggered (Yee) grid force use_conformal_eb off here -- BEFORE any ECT field
+    // is allocated or read -- so every downstream ECT path (field allocation,
+    // EvolveB routing, the edge_cent_offset curvature) is consistently disabled and
+    // the staggered hybrid falls back to the standard masked Yee Faraday (impose the
+    // wall on B with hybrid_pic_model.eb_b_straight_mirror). The shared ECT machinery
+    // stays intact for the standalone ECT Maxwell solver.
+    if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC
+        && m_hybrid_pic_model->m_use_conformal_eb
+        && grid_type != GridType::Collocated) {
+        m_hybrid_pic_model->m_use_conformal_eb = false;
+        ablastr::warn_manager::WMRecordWarning(
+            "HybridPIC",
+            "hybrid_pic_model.use_conformal_eb (the ECT enlarged-cell Faraday) is "
+            "collocated-only in the hybrid solver; disabled on this staggered (Yee) "
+            "grid (the standard masked Yee Faraday is used). Impose the wall on B "
+            "with hybrid_pic_model.eb_b_straight_mirror.",
+            ablastr::warn_manager::WarnPriority::medium);
+    }
+
     // The conformal (enlarged-cell technique) embedded-boundary field update is
-    // used by the ECT Maxwell solver and, optionally, by the hybrid-PIC solver
+    // used by the ECT Maxwell solver and, optionally, by the (collocated) hybrid-PIC.
     m_eb_use_conformal_solve =
         (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::ECT) ||
         (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC &&
