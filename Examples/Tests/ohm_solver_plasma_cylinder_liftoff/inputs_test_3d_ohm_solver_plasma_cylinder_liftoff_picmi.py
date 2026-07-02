@@ -124,6 +124,8 @@ def setup_simulation(
     use_conformal_eb=True,
     eb_b_straight_mirror=False,
     divb_clean=False,
+    divb_clean_iters=3,
+    eta_hyper_mult=1.0,
     equilibrium_b=False,
     vacuum=False,
 ):
@@ -165,7 +167,7 @@ def setup_simulation(
     vA = abs(bz_rev) / np.sqrt(constants.mu0 * N_I * m_i)
     dL2 = 1.0 / (2.0 / dx**2 + 1.0 / dx**2)  # 1/(1/dx^2+1/dy^2+1/dz^2), cubic
     eta_max = constants.mu0 * dL2 / (2.0 * dt)
-    eta_hyper = constants.mu0 * 0.2 * l_i * vA * dL2
+    eta_hyper = eta_hyper_mult * constants.mu0 * 0.2 * l_i * vA * dL2
 
     grid = picmi.Cartesian3DGrid(
         number_of_cells=[resolution, resolution, nz],
@@ -228,7 +230,7 @@ def setup_simulation(
         # 3 sweeps/step, unbounded band, wall-layer mode (inner cutoffs 0).
         divb_clean_alpha=0.15 if divb_clean else None,
         divj_clean_alpha=0.15 if divb_clean else None,
-        divb_clean_iters=3 if divb_clean else None,
+        divb_clean_iters=divb_clean_iters if divb_clean else None,
         divb_clean_band_cells=0.0 if divb_clean else None,
         divb_clean_inner_div_cells=0.0 if divb_clean else None,
         divb_clean_inner_corr_cells=0.0 if divb_clean else None,
@@ -614,8 +616,32 @@ def main():
         dest="divb_clean",
         action="store_true",
         help="enable the diffusive near-wall div(B)/div(J) damper at the annulus "
-        "production config (alpha=0.15, 3 sweeps/step, unbounded band, wall-layer "
-        "mode). Default off.",
+        "production config (alpha=0.15, unbounded band, wall-layer mode; sweep "
+        "count from --divb-clean-iters). Default off.",
+    )
+    parser.add_argument(
+        "--divb-clean-iters",
+        type=int,
+        default=3,
+        dest="divb_clean_iters",
+        help="grad(div) sweeps per step for --divb-clean (default 3).",
+    )
+    parser.add_argument(
+        "--eta-hyper-mult",
+        type=float,
+        default=1.0,
+        dest="eta_hyper_mult",
+        help="multiplier on the Chacon-style hyper-resistivity floor "
+        "(eta_hyper = mult * 0.2 * mu0 * l_i * vA * dL2). Stabilization knob "
+        "for the staggered (Yee) runs.",
+    )
+    parser.add_argument(
+        "--ni-mult",
+        type=float,
+        default=1.0,
+        dest="ni_mult",
+        help="multiplier on the reference density N_I (scales the annulus "
+        "loading, the density floor, l_i and vA consistently).",
     )
     parser.add_argument(
         "--equilibrium-b",
@@ -674,6 +700,12 @@ def main():
     else:
         r_outer_eff = args.r_outer
 
+    if args.ni_mult != 1.0:
+        # N_I is a module global read inside setup_simulation at call time, so
+        # scaling it here rescales the loading, the floor, l_i and vA together.
+        global N_I
+        N_I = N_I * args.ni_mult
+
     sim = setup_simulation(
         resolution,
         nppc,
@@ -700,6 +732,8 @@ def main():
         use_conformal_eb=args.conformal_eb,
         eb_b_straight_mirror=args.eb_b_straight_mirror,
         divb_clean=args.divb_clean,
+        divb_clean_iters=args.divb_clean_iters,
+        eta_hyper_mult=args.eta_hyper_mult,
         equilibrium_b=args.equilibrium_b,
         vacuum=args.vacuum,
     )
