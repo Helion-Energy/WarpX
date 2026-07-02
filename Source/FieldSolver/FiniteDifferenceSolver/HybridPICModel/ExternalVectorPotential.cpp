@@ -423,14 +423,12 @@ ExternalVectorPotential::UpdateHybridExternalFields (const amrex::Real t, const 
         ablastr::fields::MultiLevelVectorField curlA_ext =
             warpx.m_fields.get_mr_levels_alldirs(curlAext_field, warpx.finestLevel());
 
-        // Staircase EB excludes covered cells, so the external field is
-        // zeroed there. The conformal (ECT) EB instead treats the wall as a
-        // surface inside the cell, so the external vacuum field must fill
-        // through it (a uniform external then stays uniform -> satisfies the
-        // Neumann condition at the level set, consistent with A_ext, which is
-        // already evaluated everywhere). So apply the covered-cell EB mask to
-        // the external E/B only for the staircase update.
-        const bool ext_use_eb_flags = !WarpX::UseConformalEBSolve();
+        // The external A is evaluated everywhere (including inside the conductor),
+        // so its E/B are valid in the covered region and should fill through the
+        // wall: a uniform external field then stays uniform, satisfying the Neumann
+        // level-set condition the collocated conformal fill expects. Do NOT mask the
+        // external E/B with the covered-cell EB flags.
+        const bool ext_use_eb_flags = false;
         for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
             AddExternalFieldFromVectorPotential(E_ext[lev], scale_factor_E, A_ext[lev], warpx.GetEBUpdateEFlag()[lev], ext_use_eb_flags);
             AddExternalFieldFromVectorPotential(B_ext[lev], scale_factor_B, curlA_ext[lev], warpx.GetEBUpdateBFlag()[lev], ext_use_eb_flags);
