@@ -40,7 +40,12 @@ void HybridPICModel::MarderCleanDivergence (
     const amrex::Real fill_band_cells,
     const int lev) const
 {
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ) || defined(WARPX_DIM_XZ)
+// 3D/XZ Cartesian only: the gradient below is the discrete adjoint of the
+// Cartesian ComputeDivE, which is what makes the update strictly dissipative
+// of the divergence norm. In RZ ComputeDivE is the cylindrical (1/r)
+// divergence and the plain Cartesian gradient is NOT its adjoint, so the
+// dissipativity and curl-preservation guarantees would not hold there.
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
     if (alpha <= 0.0_rt || max_iters <= 0 || !EB::enabled()) { return; }
 
     auto& warpx = WarpX::GetInstance();
@@ -98,11 +103,16 @@ void HybridPICModel::MarderCleanDivergence (
 
     auto* fdtd = warpx.get_pointer_fdtd_solver_fp(lev);
 
-    // Nodal divergence scratch; one ghost on the collocated grid because the
-    // centered grad(div) update reaches one node past a box boundary.
-    const IntVect div_ng = nodal_grid ? IntVect(1) : IntVect::TheZeroVector();
+    // Nodal divergence scratch with one ghost on EVERY grid type: the centered
+    // (collocated) grad reads d(i-1..i+1) and the Yee forward difference reads
+    // d(i+1), and a valid face at the high box edge puts that read one node
+    // past the valid nodal range on both. Zero-initialize so ghost nodes at
+    // non-periodic physical domain boundaries (which FillBoundary does not
+    // fill) read as div=0 rather than uninitialized memory.
+    const IntVect div_ng = IntVect(1);
     auto const& nodal_ba = amrex::convert(field[0]->boxArray(), IntVect::TheNodeVector());
     MultiFab div_f(nodal_ba, field[0]->DistributionMap(), 1, div_ng);
+    div_f.setVal(0.0_rt);
 
     for (int it = 0; it < max_iters; ++it) {
         for (int c = 0; c < 3; ++c) {
@@ -117,6 +127,9 @@ void HybridPICModel::MarderCleanDivergence (
         // the wall-layer mode is selected, the wall layer / covered nodes
         // (phi < d_div_keep), where the centered divergence would read the
         // mirror-filled covered nodes across the wall.
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
         for (MFIter mfi(div_f, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
             Array4<Real> const& d = div_f.array(mfi);
             Array4<Real const> const& phi = phi_mf->const_array(mfi);
@@ -125,10 +138,8 @@ void HybridPICModel::MarderCleanDivergence (
                     if (phi(i, j, k) < d_div_keep || phi(i, j, k) > d_clean) { d(i, j, k) = 0.0_rt; }
                 });
         }
-        if (nodal_grid) {
-            ablastr::utils::communication::FillBoundary(
-                div_f, div_ng, WarpX::do_single_precision_comms, geom.periodicity());
-        }
+        ablastr::utils::communication::FillBoundary(
+            div_f, div_ng, WarpX::do_single_precision_comms, geom.periodicity());
 
         // field += alpha_scaled * grad(div), on solution nodes inside the band.
         // grad of a scalar is curl-free, so curl(field) (= J for B) is unchanged
@@ -172,7 +183,7 @@ void HybridPICModel::MarderCleanDivergence (
                         ? alpha_scaled*(d(i,j,k+1)-d(i,j,k-1))*(0.5_rt*inv_dx[2])
                         : alpha_scaled*(d(i,j,k+1)-d(i,j,k))*inv_dx[2];
                 });
-#elif defined(WARPX_DIM_RZ) || defined(WARPX_DIM_XZ)
+#elif defined(WARPX_DIM_XZ)
             // In-plane components only (out-of-plane has no divergence contribution).
             amrex::ignore_unused(Fy, uy, ty);
             amrex::ParallelFor(tx, tz,

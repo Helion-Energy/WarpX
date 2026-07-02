@@ -147,7 +147,9 @@ public:
      * fill is dissipated. With the inner cutoffs at 0 (the wall-layer mode) the
      * clean reaches the first fluid layers, where a sharp re-entrant corner
      * (e.g. a wall radius step) otherwise pumps an exponentially growing
-     * div(B). No-op when alpha<=0 or no EB. Collocated/nodal Cartesian + RZ/XZ.
+     * div(B). No-op when alpha<=0 or no EB. 3D/XZ Cartesian only (the gradient
+     * is the adjoint of the Cartesian divergence; ReadParameters aborts if the
+     * knobs are set on other geometries).
      */
     void MarderCleanDivergence (
         ablastr::fields::VectorField const& field,
@@ -431,7 +433,10 @@ public:
      *  reach is 2 cells, so widening this band to >=3 pushes the level-set
      *  mirror's div(B) jump out of the solution-coupling zone (into the zeroed
      *  deep interior, where it is causally inert). Runtime knob
-     *  hybrid_pic_model.eb_b_fill_band_cells; default 1 (legacy behavior). */
+     *  hybrid_pic_model.eb_b_fill_band_cells; default 1 (legacy behavior),
+     *  auto-widened to sqrt(2) on 3D/XZ when isotropic_resistivity is enabled
+     *  so the corner-curl's in-plane diagonal B taps read mirror values rather
+     *  than the zeroed deep interior (user query still overrides). */
     amrex::Real m_eb_b_fill_band_cells = 1.0;
 
     /** Marder-like diffusive div(B) clean coefficient (fraction of the explicit
