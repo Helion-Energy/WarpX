@@ -7,19 +7,24 @@
 # --- wrappers, the boundary operators are applied directly through their
 # --- Python bindings, and the values are asserted point by point:
 # ---
-# ---   * solution-domain (plasma) values are never modified,
+# ---   * staggered runs use the STAIRCASE update masks
+# ---     (MarkUpdateCellsStairCase): a staggered point adjacent to ANY
+# ---     partially cut cell is unowned (eb_update = 0) and becomes a
+# ---     level-set mirror-fill target -- including the first FLUID row next
+# ---     to the wall,
+# ---   * solver-owned (eb_update = 1) values are never modified,
 # ---   * deep conductor interior is exactly zeroed,
-# ---   * tangential E/J ghosts are odd mirrors (s/d_im scaling; exact -1
-# ---     for |s| >= h/2 against constant fields, exact linear continuation
-# ---     through zero at the surface against linear fields),
-# ---   * normal E/J ghosts are even mirrors (constant fields reproduced
-# ---     exactly),
-# ---   * B has the swapped (flux-excluding) parity: normal odd, cut faces
-# ---     left to the conformal update,
-# ---   * cut edges whose centers are covered are filled (junk poked into
-# ---     them is replaced),
+# ---   * tangential E/J fills are odd mirrors (s/d_im scaling; exact linear
+# ---     continuation through zero at the surface against linear fields),
+# ---   * normal E/J fills are even mirrors (constant fields reproduced
+# ---     exactly, junk poked into cut rows is replaced),
+# ---   * B has the swapped parity: normal odd, tangential even,
+# ---   * fill targets whose image stencils keep less than W_MIN of their
+# ---     weight in the solution domain are ill-posed and are resolved by
+# ---     the deterministic cascade from already-locked fill values,
 # ---   * the nodal scalars follow their parity: rho odd (Dirichlet 0 at the
-# ---     surface), Pe even (Neumann).
+# ---     surface), Pe even (Neumann); their fills and folds are keyed off
+# ---     the level set alone (not the staircase masks).
 # ---
 # --- The planar wall (normal -x) makes the level-set distance and the
 # --- mirror geometry analytic, so most assertions hold to round-off; the
@@ -170,6 +175,33 @@ def run_plane_battery(sim):
     def cent_rows(lo, hi):
         return [i for i in range(N_XY) if lo < s_cent[i] / H <= hi]
 
+    # Staircase-mask row layout (MarkUpdateCellsStairCase): a staggered point
+    # is solver-owned (eb_update = 1) only if every cell it touches along its
+    # nodal directions is fully regular. The wall at node 24.3 cuts cell 24, so
+    #   * nodal-in-x rows (Ey/Ez edges, Bx faces): nodes i <= 23 (s >= +1.3h)
+    #     owned; node 24 (s = +0.3h) is unowned FLUID -> direct mirror-fill
+    #     target (offset = h, image exactly at node 23, ratio s/(s+h));
+    #     node 25 (s = -0.7h) is covered and ILL-POSED (0.6 of its image
+    #     weight sits on the reclassified node 24 < W_MIN = 0.5) -> filled by
+    #     the cascade from the locked node-23/24 values;
+    #   * cell-centered-in-x rows (Ex/Jx edges, By/Bz faces): centers i <= 23
+    #     (s >= +0.8h) owned; the cut center 24 (s = -0.2h) is a well-posed
+    #     fill target (offset = h, image exactly at center 23).
+    i_owned = node_rows(1.0, 10.0)  # solver-owned node rows (s >= +1.3h)
+    i_first = node_rows(0.05, 0.5)  # first unowned fluid row (s = +0.3h)
+    i_band = node_rows(-1.0, -0.05)  # covered cascade row (s = -0.7h)
+    i_deep = node_rows(-100.0, -1.0)
+
+    # Both unowned nodal-x rows land on the same odd line for a constant
+    # tangential (or normal-B) field c: the direct fill of the first row has
+    # offset = h (image at the first owned row, d_im = s_first + h) and the
+    # cascade fill of the covered row linearly interpolates the locked
+    # node-23/24 values, i.e. the same line c*s/d_im pinned to 0 at the wall.
+    s_first = s_node[X_WALL_NODE]
+
+    def odd_line(s):
+        return s / (s_first + H)
+
     # --- 1) tangential E: odd mirror -------------------------------------
     Ey = fields.EyFPWrapper()
     Ex = fields.ExFPWrapper()
@@ -180,34 +212,38 @@ def run_plane_battery(sim):
     wx.hybrid_apply_eb_boundary_to_edge_field("Efield_fp", 0)
     ey = Ey[...]
 
-    i_fluid = node_rows(0.05, 10.0)  # strictly fluid edge rows
-    ck.close("E tangential: fluid rows untouched", ey[i_fluid, :, :], c, 0.0)
-    for i in node_rows(-1.0, -0.05):  # mirror band rows
+    ck.close("E tangential: owned rows untouched", ey[i_owned, :, :], c, 0.0)
+    for i in i_first:  # first unowned fluid row: direct mirror fill
         ck.close(
-            f"E tangential: odd mirror at s={s_node[i] / H:+.2f}h",
+            f"E tangential: unowned fluid row mirror-filled at s={s_node[i] / H:+.2f}h",
             ey[i, :, :],
             vector_ratio(s_node[i]) * c,
             1e-12,
         )
-    i_deep = node_rows(-100.0, -1.0)
+    for i in i_band:  # covered row: cascade fill from the locked rows
+        ck.close(
+            f"E tangential: cascade odd mirror at s={s_node[i] / H:+.2f}h",
+            ey[i, :, :],
+            odd_line(s_node[i]) * c,
+            1e-12,
+        )
     ck.close("E tangential: deep interior zero", ey[i_deep, :, :], 0.0, 0.0)
 
     # --- 2) tangential E: linear continuation through the surface --------
-    # Ey = b*s in the fluid must continue as b*s through the ghosts (the
-    # trilinear gather is exact on linear fields): Dirichlet 0 at the wall
+    # Ey = b*s in the fluid must continue as b*s through both fill rows (the
+    # trilinear gather is exact on linear fields, and the cascade interpolates
+    # exact linear values): Dirichlet 0 at the wall
     Ey[...] = b * np.broadcast_to(s_node[:, None, None], Ey[...].shape)
     Ex[...] = 0.0
     Ez[...] = 0.0
     wx.hybrid_apply_eb_boundary_to_edge_field("Efield_fp", 0)
     ey = Ey[...]
-    for i in node_rows(-1.0, -0.05):
+    for i in i_first + i_band:
         s = s_node[i]
-        offset = max(max(abs(s), D_IMG_MIN) - s, H)
-        expected = (s / (s + offset)) * b * (s + offset)  # = b*s
         ck.close(
             f"E tangential: linear field continues b*s at s={s / H:+.2f}h",
             ey[i, :, :],
-            expected,
+            b * s,  # = ratio * (gathered image value) for a linear field
             1e-12,
         )
 
@@ -240,32 +276,43 @@ def run_plane_battery(sim):
         "E normal: deep interior zero", ex[cent_rows(-100.0, -1.0), :, :], 0.0, 0.0
     )
 
-    # --- 4) B: swapped parity (normal odd, cut faces untouched) ----------
+    # --- 4) B: swapped parity (normal odd, tangential even) --------------
     Bx = fields.BxFPWrapper()
     By = fields.ByFPWrapper()
     Bz = fields.BzFPWrapper()
     Bx[...] = c
     By[...] = c
     Bz[...] = 0.0
+    # cut By faces (centers covered) are unowned under the staircase marking
+    # and are mirror-filled with the even tangential parity: poke junk in to
+    # prove they are actively refilled
+    for i in i_cut:
+        By[i, :, :] = 1.0e6
     wx.hybrid_apply_eb_boundary_to_face_field("Bfield_fp", 0)
     bx = Bx[...]
     by = By[...]
-    ck.close("B normal: fluid rows untouched", bx[node_rows(0.05, 10.0), :, :], c, 0.0)
-    for i in node_rows(-1.0, -0.05):
+    ck.close("B normal: owned rows untouched", bx[i_owned, :, :], c, 0.0)
+    for i in i_first:
         ck.close(
-            f"B normal: odd mirror at s={s_node[i] / H:+.2f}h",
+            f"B normal: unowned fluid row mirror-filled at s={s_node[i] / H:+.2f}h",
             bx[i, :, :],
             vector_ratio(s_node[i]) * c,
             1e-12,
         )
-    ck.close("B normal: deep zero", bx[node_rows(-100.0, -1.0), :, :], 0.0, 0.0)
-    # cut By faces (centers covered) belong to the conformal update: untouched
+    for i in i_band:
+        ck.close(
+            f"B normal: cascade odd mirror at s={s_node[i] / H:+.2f}h",
+            bx[i, :, :],
+            odd_line(s_node[i]) * c,
+            1e-12,
+        )
+    ck.close("B normal: deep zero", bx[i_deep, :, :], 0.0, 0.0)
     for i in i_cut:
         ck.close(
-            f"B tangential: cut face left to the conformal update at s={s_cent[i] / H:+.2f}h",
+            f"B tangential: cut face even mirror-filled (junk replaced) at s={s_cent[i] / H:+.2f}h",
             by[i, :, :],
             c,
-            0.0,
+            1e-12,
         )
     ck.close("B tangential: deep zero", by[cent_rows(-100.0, -1.0), :, :], 0.0, 0.0)
 
@@ -315,11 +362,14 @@ def run_plane_battery(sim):
     # --- 6) deposit fold: PEC image parities, planar closed forms ---------
     # The covered node row at s=-0.7h holds a deposit c (the shape-function
     # spill of wall-adjacent particles). Its mirror lands 0.6 of the way
-    # between the first two fluid rows, so the fold delivers -0.6c and -0.4c
-    # (PEC image charge: subtracted) and conserves the folded amount.
-    i_dep = node_rows(-1.0, -0.05)  # s = -0.7h (single row for this wall)
-    i_first = node_rows(0.05, 0.5)  # s = +0.3h
-    i_second = node_rows(1.0, 1.5)  # s = +1.3h
+    # between the first two fluid rows. The level-set-based rho fold writes
+    # both fluid rows (-0.6c and -0.4c, PEC image charge subtracted,
+    # conserving the folded amount); the mask-based J fold only writes
+    # S_SOLUTION rows, so the unowned s=+0.3h row is SKIPPED (it is a fill
+    # target, overwritten by the fill anyway) and only the first owned row
+    # receives its -0.4c share.
+    i_dep = i_band  # s = -0.7h (single covered row for this wall)
+    i_second = node_rows(1.0, 1.5)  # s = +1.3h (first owned row)
     rho[...] = 0.0
     for i in i_dep:
         rho[i, :, :] = c
@@ -348,7 +398,8 @@ def run_plane_battery(sim):
         1e-12,
     )
 
-    # tangential J: image current antiparallel (subtracted), same geometry
+    # tangential J: image current antiparallel (subtracted), same geometry,
+    # but only the owned row is a fold target under the staircase masks
     Jx = fields.JxFPWrapper()
     Jy = fields.JyFPWrapper()
     Jz = fields.JzFPWrapper()
@@ -359,8 +410,24 @@ def run_plane_battery(sim):
         Jy[i, :, :] = c
     wx.hybrid_fold_eb_deposit_to_edge_field("current_fp", 0)
     jy = Jy[...]
-    ck.close("fold J tangential: subtracted -0.6c", jy[i_first, :, :], -0.6 * c, 1e-12)
-    ck.close("fold J tangential: subtracted -0.4c", jy[i_second, :, :], -0.4 * c, 1e-12)
+    ck.close(
+        "fold J tangential: unowned fluid row skipped (fill target)",
+        jy[i_first, :, :],
+        0.0,
+        0.0,
+    )
+    ck.close(
+        "fold J tangential: first owned row subtracted -0.4c",
+        jy[i_second, :, :],
+        -0.4 * c,
+        1e-12,
+    )
+    ck.close(
+        "fold J tangential: covered deposit left in place for the fill",
+        jy[i_dep, :, :],
+        c,
+        0.0,
+    )
 
     # normal J: image current parallel (added); the deposit sits on the cut
     # x-edge with covered center (s=-0.2h), its mirror lands 0.6 of the way
@@ -416,7 +483,16 @@ def run_plane_battery(sim):
     wx.hybrid_fold_eb_deposit_to_edge_field("current_fp", 0, pec=False)
     jy = Jy[...]
     ck.close(
-        "fold J tangential (reflect): added +0.6c", jy[i_first, :, :], 0.6 * c, 1e-12
+        "fold J tangential (reflect): unowned fluid row skipped",
+        jy[i_first, :, :],
+        0.0,
+        0.0,
+    )
+    ck.close(
+        "fold J tangential (reflect): first owned row added +0.4c",
+        jy[i_second, :, :],
+        0.4 * c,
+        1e-12,
     )
     Jx[...] = 0.0
     Jy[...] = 0.0
@@ -441,13 +517,21 @@ def run_plane_battery(sim):
     before = np.array(Ey[...])
     wx.hybrid_apply_eb_boundary_to_edge_field("Efield_fp", 0)
     after = Ey[...]
-    i_fluid = node_rows(0.05, 10.0)
     ck.close(
-        "selectivity: varying field bit-identical in the fluid",
-        after[i_fluid, :, :],
-        before[i_fluid, :, :],
+        "selectivity: varying field bit-identical in the owned fluid",
+        after[i_owned, :, :],
+        before[i_owned, :, :],
         0.0,
     )
+    # the unowned fluid row is rewritten with the mirror ratio of the value
+    # at its image point (exactly the first owned row for this wall)
+    for i in i_first:
+        ck.close(
+            f"selectivity: unowned fluid row rewritten with the mirror ratio at s={s_node[i] / H:+.2f}h",
+            after[i, :, :],
+            vector_ratio(s_node[i]) * before[i - 1, :, :],
+            1e-12,
+        )
 
     ck.finish()
 
