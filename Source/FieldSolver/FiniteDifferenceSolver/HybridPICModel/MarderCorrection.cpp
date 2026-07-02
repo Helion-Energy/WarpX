@@ -58,7 +58,18 @@ void HybridPICModel::MarderCleanDivergence (
         h_max = std::max(h_max, dx[d]);
     }
     const Real alpha_scaled = alpha * h_min * h_min * (nodal_grid ? 4.0_rt : 1.0_rt);
-    const Real d_clean = clean_band_cells * h_max;
+
+    amrex::MultiFab const* phi_mf = warpx.m_fields.get(FieldType::distance_to_eb, lev);
+
+    // FillSignedDistance clamps every deep-fluid node to a constant roof of a
+    // few cells (the level set is only valid near the EB), so a phi-only band
+    // test would classify the ENTIRE deep interior as in-band once the band
+    // reaches the roof -- the clean would then diffuse the wall divergence
+    // inward through the whole domain instead of dissipating it locally. Cap
+    // the outer cutoff half a cell below the measured roof so clamped nodes
+    // are always out-of-band.
+    const Real phi_roof = phi_mf->max(0, 0, false);
+    const Real d_clean = std::min(clean_band_cells * h_max, phi_roof - 0.5_rt * h_max);
     // EB-aware band cutoffs, exposed as knobs. The defaults (inner_div=1,
     // inner_corr=2) trust the divergence only where its own +/-1 stencil is in
     // the fluid and apply the correction only where the full +/-2 grad(div)
@@ -76,7 +87,6 @@ void HybridPICModel::MarderCleanDivergence (
     amrex::GpuArray<Real, AMREX_SPACEDIM> inv_dx{};
     for (int d = 0; d < AMREX_SPACEDIM; ++d) { inv_dx[d] = 1.0_rt/dx[d]; }
 
-    amrex::MultiFab const* phi_mf = warpx.m_fields.get(FieldType::distance_to_eb, lev);
     auto* fdtd = warpx.get_pointer_fdtd_solver_fp(lev);
 
     // Nodal divergence scratch; one ghost on the collocated grid because the
