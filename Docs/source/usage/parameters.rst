@@ -1004,6 +1004,20 @@ additionally define the electric potential at the embedded boundary with an anal
     inside the embedded boundary. For this reason, it is important to define
     this function in such a way that it is constant inside the embedded boundary.
 
+.. pp:param:: warpx.eb_ect_balanced_borrow
+    :type: ``integer``
+    :default: ``0``
+
+    Only used with the ECT (enlarged cell technique) Maxwell solver
+    (:pp:param:`algo.maxwell_solver = ect`). When nonzero, the one-way
+    face-extension pass is skipped and every unstable cut face is enlarged with
+    the symmetric, area-proportional eight-way split. The one-way pass borrows
+    the entire area deficit from the first stable cardinal neighbor in a fixed
+    lattice order, which is not wall-normal aware and displaces the enlarged-face
+    area centroid off the wall normal (a :math:`\cos(4\theta)` symmetry-breaking
+    seed on curved walls). The default (``0``) keeps the historical one-way pass
+    and is bit-identical to previous behavior.
+
 .. _param-particle-thermalizer:
 
 Particle thermalizer
