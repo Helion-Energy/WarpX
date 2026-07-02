@@ -328,14 +328,21 @@ PhysicalParticleContainer::PhysicalParticleContainer (AmrCore* amr_core, int isp
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_mass > 0.0,
                 "<species>.internal_dof requires a finite species mass");
             m_internal_dof = (internal_dof_str == "rovibrational") ? 2 : 1;
-            // Resampling (leveling_thinning / velocity_coincidence_thinning) merges particles but does not
-            // carry E_rot/E_vib through the merge, which would leak internal energy. Guard until the
-            // thinning kernels weight-average the internal-DOF components (Phase A follow-up).
+            // Resampling compatibility: leveling_thinning thins particles in place (a survivor keeps ALL
+            // its attributes, so E_rot/E_vib ride along and total internal energy is conserved in
+            // expectation) -> OK. velocity_coincidence_thinning MERGES particles and writes only the PIdx
+            // components, which would drop E_rot/E_vib -> block it until that merge kernel weight-averages
+            // the internal-DOF energy (follow-up).
             int idof_do_resampling = 0;
             utils::parser::queryWithParser(pp_species_name, "do_resampling", idof_do_resampling);
-            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(idof_do_resampling == 0,
-                "<species>.internal_dof is not yet compatible with <species>.do_resampling (internal energy "
-                "is not conserved across particle merges); disable resampling for this species for now.");
+            if (idof_do_resampling != 0) {
+                std::string idof_resamp_algo = "leveling_thinning";  // WarpX default
+                pp_species_name.query("resampling_algorithm", idof_resamp_algo);
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(idof_resamp_algo == "leveling_thinning",
+                    "<species>.internal_dof currently supports resampling only with leveling_thinning "
+                    "(which conserves E_rot/E_vib in expectation); velocity_coincidence_thinning merges "
+                    "particles and would drop the internal-DOF energy. Use leveling_thinning or disable resampling.");
+            }
             amrex::Real theta_rot = 0.0;
             utils::parser::getWithParser(pp_species_name, "theta_rot", theta_rot);
             m_theta_rot = static_cast<amrex::ParticleReal>(theta_rot);
