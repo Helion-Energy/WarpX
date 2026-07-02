@@ -340,16 +340,6 @@ public:
      *  with the plasma held off the wall (a standoff), which removes the dense
      *  near-wall radial B that made the pointwise Yee mirror spike. */
     bool m_eb_b_straight_mirror = false;
-    /** If true, apply the cylindrical (surface-of-revolution) radial metric
-     *  correction to the embedded-boundary mirror fill of E, J and B: the
-     *  radial and azimuthal parts of the reflected field are scaled by the
-     *  radial Jacobian r_image/r_fill -- the leading O(h/R) curved-wall
-     *  correction the planar mirror misses. Opt-in; requires use_conformal_eb
-     *  and a 3D Cartesian grid; the wall must be a surface of revolution about
-     *  m_eb_cyl_axis, centered on the transverse origin. */
-    bool m_eb_cylindrical_correction = false;
-    /** Symmetry axis (0=x, 1=y, 2=z) for m_eb_cylindrical_correction. */
-    int m_eb_cyl_axis = 2;
 
     /** Relative residual tolerance of the Jacobi band relaxation of the
      *  embedded-boundary PEC field fills (only used when eb_bc_direct_fill
