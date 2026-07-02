@@ -210,8 +210,8 @@ def setup_simulation(
         plasma_hyper_resistivity=eta_hyper,
         substeps=substeps,
         holmstrom_vacuum_region=True if holmstrom else None,
-        eb_deposit_fold="pec" if wall_supported else None,
-        eb_rho_dirichlet=True if wall_supported else None,
+        eb_deposit_fold="pec",
+        eb_rho_dirichlet=True,
         isotropic_resistivity=isotropic_resistivity,
         isotropic_hyper_resistivity=isotropic_hyper,
         use_rkf45=True,
@@ -272,7 +272,7 @@ def setup_simulation(
         picmi.AnalyticInitialField(
             Bx_expression="0",
             By_expression="0",
-            Bz_expression=bz_seed,
+            Bz_expression=f"{bz_seed}",
             warpx_do_initial_div_cleaning=False,
         )
     )
@@ -319,7 +319,7 @@ def setup_simulation(
             density_expression=density_expression,
             momentum_expressions=["0", "0", "0"],
             warpx_momentum_spread_expressions=[f"{vth}"] * 3,
-            warpx_density_min=0.5 * n_fill,
+            warpx_density_min=0.05 * n_fill,
             **dist_kwargs,
         ),
     )
@@ -340,7 +340,7 @@ def setup_simulation(
         name="field_diag",
         grid=grid,
         period=diag_period,
-        data_list=["B", "E", "rho", "J"],
+        data_list=["B", "E", "rho", "J", "J_displacement", "divB"],
         write_dir="diags",
         warpx_format="plotfile",
     )
