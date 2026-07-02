@@ -1318,9 +1318,8 @@ WarpX::InitLevelData (int lev, Real /*time*/)
 
 #ifdef AMREX_USE_EB
         if (eb_enabled) {
-            // We initialize ECTRhofield consistently with the Efield (ECT is staggered-only;
-            // the collocated conformal solver has no ECT face circulations).
-            if (WarpX::UseConformalEBSolve() && grid_type != GridType::Collocated) {
+            // We initialize ECTRhofield consistently with the Efield
+            if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::ECT) {
                 m_fdtd_solver_fp[lev]->EvolveECTRho(
                     m_fields.get_alldirs(FieldType::Efield_fp, lev),
                     m_fields.get_alldirs(FieldType::edge_lengths, lev),
@@ -1347,9 +1346,8 @@ WarpX::InitLevelData (int lev, Real /*time*/)
                 lev, PatchType::coarse, m_eb_update_E);
 #ifdef AMREX_USE_EB
             if (eb_enabled) {
-                if (WarpX::UseConformalEBSolve() && grid_type != GridType::Collocated) {
-                    // We initialize ECTRhofield consistently with the Efield (ECT is
-                    // staggered-only; collocated has no ECT face circulations).
+                if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::ECT) {
+                    // We initialize ECTRhofield consistently with the Efield
                     m_fdtd_solver_cp[lev]->EvolveECTRho(
                         m_fields.get_alldirs(FieldType::Efield_cp, lev),
                         m_fields.get_alldirs(FieldType::edge_lengths, lev),
@@ -1613,18 +1611,11 @@ void WarpX::InitializeEBGridData (int lev)
         {
             using warpx::fields::FieldType;
 
-            if (WarpX::UseConformalEBSolve() && grid_type != GridType::Collocated) {
+            if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::ECT) {
 
                 auto edge_lengths_lev = m_fields.get_alldirs(FieldType::edge_lengths, lev);
                 warpx::embedded_boundary::ComputeEdgeLengths(edge_lengths_lev, eb_fact);
                 warpx::embedded_boundary::ScaleEdges(edge_lengths_lev, CellSize(lev));
-
-                // Per-edge uncovered-segment centroid offsets for the conformal-ECT
-                // Faraday curvature correction (dimensionless cell fraction; NOT
-                // ScaleEdges-scaled). Inert (0 everywhere) unless the correction is
-                // enabled, and recomputed here on init/restart/regrid like edge_lengths.
-                auto edge_cent_offset_lev = m_fields.get_alldirs(FieldType::edge_cent_offset, lev);
-                warpx::embedded_boundary::ComputeEdgeCentroidOffsets(edge_cent_offset_lev, eb_fact);
 
                 auto face_areas_lev = m_fields.get_alldirs(FieldType::face_areas, lev);
                 warpx::embedded_boundary::ComputeFaceAreas(face_areas_lev, eb_fact);
@@ -1637,19 +1628,6 @@ void WarpX::InitializeEBGridData (int lev)
                     m_fields.get_alldirs(FieldType::Bfield_fp, maxLevel()),
                     face_areas_lev,
                     edge_lengths_lev, area_mod);
-
-                // Face owner masks: borrowing decisions are owner-unique so
-                // that multi-box layouts make each physical face's decision
-                // exactly once (rebuilt here on init, restart and regrid)
-                if (static_cast<int>(m_ect_face_owner_mask.size()) <= maxLevel()) {
-                    m_ect_face_owner_mask.resize(maxLevel()+1);
-                }
-                for (int idim = 0; idim < 3; ++idim) {
-                    m_ect_face_owner_mask[maxLevel()][idim] = amrex::OwnerMask(
-                        *m_fields.get(FieldType::Bfield_fp, ablastr::fields::Direction{idim}, maxLevel()),
-                        Geom(maxLevel()).periodicity());
-                }
-
                 ComputeFaceExtensions();
 
                 // Mark on which grid points E should be updated
