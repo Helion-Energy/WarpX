@@ -230,15 +230,16 @@ def setup_simulation(
         holmstrom_vacuum_region=True,
         use_conformal_eb=True if use_conformal_eb else None,
         Jy_external_function=f"{J_EXT}" if pec_j else None,
+        # The pec_j battery's closed form asserts a CONTINUOUS electron
+        # pressure across the wall (the wall supports the plasma back-
+        # pressure), so it opts into the even/Neumann Pe mirror explicitly
+        # (default is the odd/Dirichlet mirror) -- also the only coverage of
+        # the non-default parity.
+        eb_pe_dirichlet=False if pec_j else None,
+        # Diffusive near-wall div(B)/div(J) clean (edge-order diagnostic knob)
+        divb_clean_alpha=0.1 if divb_clean else None,
+        divj_clean_alpha=0.1 if divb_clean else None,
     )
-
-    if divb_clean:
-        # The hybrid div(B)/div(J) Marder clean is not exposed as a PICMI
-        # kwarg; set the hybrid_pic_model.* inputs directly through the bucket.
-        from pywarpx import hybridpicmodel
-
-        hybridpicmodel.divb_clean_alpha = 0.1
-        hybridpicmodel.divj_clean_alpha = 0.1
 
     if eb_cyl_correction:
         # Cylindrical (surface-of-revolution) radial mirror correction; not a
@@ -307,15 +308,6 @@ def setup_simulation(
             sim.add_applied_field(B_init)
 
     if pec_j:
-        # This battery's closed form asserts a CONTINUOUS electron pressure
-        # across the wall (the wall supports the plasma back-pressure), so opt
-        # into the even/Neumann Pe mirror explicitly (the default is the odd/
-        # Dirichlet mirror, Pe -> 0 at the wall) -- this is also the only CI
-        # coverage of the non-default parity.
-        from pywarpx import hybridpicmodel
-
-        hybridpicmodel.eb_pe_dirichlet = 0
-
         # Thermal protons filling the cavity (zero density inside the wall);
         # particles stream against the conducting wall and their deposition
         # would spill current onto interior edges without the PEC J boundary
