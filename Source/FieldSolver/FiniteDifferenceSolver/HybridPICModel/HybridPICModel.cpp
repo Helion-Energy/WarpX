@@ -223,6 +223,19 @@ void HybridPICModel::ReadParameters ()
     // isotropic corner-curl E correction on), so a band >= 3 pushes that jump
     // into the zeroed deep interior where it cannot reach a solution stencil.
     // Default 1 = legacy behavior.
+    //
+    // The corner-curl correction (isotropic_resistivity) reads the out-of-plane
+    // B at the IN-PLANE DIAGONAL neighbors (reach sqrt(2)*h), so with the
+    // default 1-cell (axis-reach) band a wall segment oblique to the grid
+    // (|cos t|+|sin t| > 1, i.e. everywhere but the axis crossings) puts that
+    // tap in the zeroed deep interior: an O(B) second-difference jump feeds a
+    // spurious eta/(mu0*h)-scaled E along the wall every substage, peaked at
+    // the grid diagonals (a C4/m=4 wall-ring source). Widen the band to the
+    // corner reach -- the B-field analogue of the sqrt(3) plasma-current band
+    // above.
+    if (m_isotropic_resistivity) {
+        m_eb_b_fill_band_cells = std::sqrt(2.0_rt);
+    }
     utils::parser::queryWithParser(pp_hybrid, "eb_b_fill_band_cells", m_eb_b_fill_band_cells);
 
     // Marder-like diffusive divergence clean of B / the total Ampere current in
