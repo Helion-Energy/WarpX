@@ -123,7 +123,6 @@ def setup_simulation(
     grid_type="collocated",
     use_conformal_eb=True,
     eb_b_straight_mirror=False,
-    eb_cyl_correction=False,
     divb_clean=False,
     equilibrium_b=False,
     vacuum=False,
@@ -243,15 +242,6 @@ def setup_simulation(
             N_I,
         ),
     )
-
-    if eb_cyl_correction:
-        # Surface-of-revolution radial-Jacobian mirror correction (the wall is a
-        # cylinder about z, centered on the transverse origin). Not a PICMI
-        # kwarg; set through the bucket. Requires use_conformal_eb.
-        from pywarpx import hybridpicmodel
-
-        hybridpicmodel.eb_cylindrical_correction = 1
-        hybridpicmodel.eb_cyl_axis = "z"
 
     # Seed the initial grid B with the bias field so Bfield_fp starts as the
     # TOTAL B (plasma 0 + external bias) that the split-field external-A push
@@ -620,14 +610,6 @@ def main():
         "standoff holding plasma off the wall. Default off.",
     )
     parser.add_argument(
-        "--eb-cyl-correction",
-        dest="eb_cyl_correction",
-        action="store_true",
-        help="apply the cylindrical (surface-of-revolution about z) radial-Jacobian "
-        "mirror correction to the EB fills (hybrid_pic_model.eb_cylindrical_correction). "
-        "Requires the conformal (collocated) wall. Default off.",
-    )
-    parser.add_argument(
         "--divb-clean",
         dest="divb_clean",
         action="store_true",
@@ -717,7 +699,6 @@ def main():
         grid_type=args.grid_type,
         use_conformal_eb=args.conformal_eb,
         eb_b_straight_mirror=args.eb_b_straight_mirror,
-        eb_cyl_correction=args.eb_cyl_correction,
         divb_clean=args.divb_clean,
         equilibrium_b=args.equilibrium_b,
         vacuum=args.vacuum,

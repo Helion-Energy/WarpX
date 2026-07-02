@@ -3867,26 +3867,6 @@ Maxwell solver: kinetic-fluid hybrid
     embedded-boundary hybrid runs (``use_conformal_eb`` is collocated-only). Opt-in; the default
     (``false``) leaves the staggered staircase behavior unchanged.
 
-.. pp:param:: hybrid_pic_model.eb_cylindrical_correction
-    :type: ``bool``
-    :default: ``false``
-    :optional:
-
-    If ``true``, the embedded-boundary mirror fills account for a wall that is a surface of
-    revolution about the axis set by :pp:param:`hybrid_pic_model.eb_cyl_axis` (centered on the
-    transverse origin): the mirrored radial and azimuthal components are scaled by the radial
-    Jacobian :math:`\lambda = r_\mathrm{image}/r_\mathrm{fill}` of the reflection, which the
-    planar mirror otherwise omits at a curved wall. 3D Cartesian only; requires
-    ``use_conformal_eb``. Reduces exactly to the planar reflection where :math:`\lambda = 1`.
-
-.. pp:param:: hybrid_pic_model.eb_cyl_axis
-    :type: ``string``
-    :default: ``z``
-    :optional:
-
-    Symmetry axis (``x``, ``y`` or ``z``) of the surface-of-revolution wall assumed by
-    :pp:param:`hybrid_pic_model.eb_cylindrical_correction`.
-
 .. pp:param:: hybrid_pic_model.eb_b_fill_band_cells
     :type: ``float``
     :default: ``1`` (``sqrt(2)`` when :pp:param:`hybrid_pic_model.isotropic_resistivity` is enabled)

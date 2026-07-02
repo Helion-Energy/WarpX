@@ -121,32 +121,6 @@ void HybridPICModel::ReadParameters ()
         }
     }
 
-    // Optional cylindrical (surface-of-revolution) radial metric correction to
-    // the embedded-boundary mirror fill (E, J, B). Opt-in refinement of the
-    // conformal EB on a smoothly-curved wall: scales the radial/azimuthal parts
-    // of the reflected field by the radial Jacobian r_image/r_fill. See
-    // EBJBoundary.cpp (mirror_combine / cyl_lambda).
-    pp_hybrid.query("eb_cylindrical_correction", m_eb_cylindrical_correction);
-    if (m_eb_cylindrical_correction) {
-#if !defined(WARPX_DIM_3D)
-        WARPX_ABORT_WITH_MESSAGE(
-            "hybrid_pic_model.eb_cylindrical_correction is only supported in 3D "
-            "Cartesian geometry");
-#endif
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_use_conformal_eb,
-            "hybrid_pic_model.eb_cylindrical_correction requires "
-            "hybrid_pic_model.use_conformal_eb");
-        std::string cyl_axis = "z";
-        pp_hybrid.query("eb_cyl_axis", cyl_axis);
-        if      (cyl_axis == "x") { m_eb_cyl_axis = 0; }
-        else if (cyl_axis == "y") { m_eb_cyl_axis = 1; }
-        else if (cyl_axis == "z") { m_eb_cyl_axis = 2; }
-        else {
-            WARPX_ABORT_WITH_MESSAGE(
-                "hybrid_pic_model.eb_cyl_axis must be 'x', 'y' or 'z'");
-        }
-    }
-
     // controls for the embedded-boundary PEC field boundary condition
     utils::parser::queryWithParser(pp_hybrid, "eb_bc_rtol", m_eb_bc_rtol);
     utils::parser::queryWithParser(pp_hybrid, "eb_bc_max_iters", m_eb_bc_max_iters);
@@ -458,8 +432,7 @@ void HybridPICModel::InitialBEBFill ()
             warpx.Geom(lev),
             m_eb_bc_rtol, m_eb_bc_max_iters, m_eb_bc_direct_fill,
             /*normal_odd=*/true, /*fill_covered_centers=*/false,
-            &m_eb_bc_status_B[lev], m_eb_b_fill_band_cells,
-            m_eb_cylindrical_correction, m_eb_cyl_axis);
+            &m_eb_bc_status_B[lev], m_eb_b_fill_band_cells);
     }
 #endif
 }
@@ -542,8 +515,7 @@ void HybridPICModel::CalculatePlasmaCurrent (
             warpx.Geom(lev),
             m_eb_bc_rtol, m_eb_bc_max_iters, m_eb_bc_direct_fill,
             /*normal_odd=*/false, /*fill_covered_centers=*/true,
-            &m_eb_bc_status_Jplasma[lev], m_eb_fill_band_cells,
-            m_eb_cylindrical_correction, m_eb_cyl_axis);
+            &m_eb_bc_status_Jplasma[lev], m_eb_fill_band_cells);
     }
 }
 
@@ -629,8 +601,7 @@ void HybridPICModel::HybridPICSolveE (
             // Own cache (m_eb_bc_status_Eohm): m_eb_bc_status_E is built at the
             // one-cell band by the deposit fold and must not be reused here
             // with the (possibly widened) m_eb_fill_band_cells.
-            &m_eb_bc_status_Eohm[lev], m_eb_fill_band_cells,
-            m_eb_cylindrical_correction, m_eb_cyl_axis);
+            &m_eb_bc_status_Eohm[lev], m_eb_fill_band_cells);
     }
 }
 
@@ -1463,8 +1434,7 @@ void HybridPICModel::FieldPush (
                 warpx.Geom(lev),
                 m_eb_bc_rtol, m_eb_bc_max_iters, m_eb_bc_direct_fill,
                 /*normal_odd=*/true, /*fill_covered_centers=*/false,
-                &m_eb_bc_status_B[lev], m_eb_b_fill_band_cells,
-                m_eb_cylindrical_correction, m_eb_cyl_axis);
+                &m_eb_bc_status_B[lev], m_eb_b_fill_band_cells);
         }
         warpx.FillBoundaryB(ng, nodal_sync);
     }

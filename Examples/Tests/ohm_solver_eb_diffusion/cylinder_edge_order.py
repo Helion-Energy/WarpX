@@ -14,13 +14,15 @@
 # --- blind to the clean's fluid-band action).
 # ---
 # --- Compares, at doubling resolutions:
-# ---   - staircase (staggered)                     : the Yee baseline,
-# ---   - mirror (collocated), clean OFF            : the bare level-set mirror,
-# ---   - mirror (collocated) + cyl correction      : + the surface-of-revolution
-# ---       radial-Jacobian mirror correction (eb_cylindrical_correction) --
-# ---       the branch's namesake fix for the curved-wall mirror error,
-# ---   - mirror (collocated) + cyl + div(B) clean  : proves the clean
-# ---       preserves (or improves) the edge order.
+# ---   - staircase (staggered)              : the Yee baseline (order ~1.7 here),
+# ---   - mirror (collocated), clean OFF     : the bare level-set mirror -- its
+# ---       interior error is corner/lock-in limited and does NOT converge
+# ---       (measured order ~ -0.6 at N=48->96); the mirror's value is the wall-
+# ---       condition enforcement and liftoff stability, not interior order,
+# ---   - mirror (collocated) + div(B) clean : proves the production wall-layer
+# ---       clean is order-neutral (measured -0.64 vs -0.63 bare).
+# --- (The eb_cylindrical_correction radial-Jacobian mirror was measured a
+# --- no-op on this exact gate -- order -0.68 vs -0.63 bare -- and was removed.)
 # ---
 # --- Example:  python3 cylinder_edge_order.py -N 48 96
 
@@ -49,12 +51,11 @@ MARGIN = 0.15  # interior region r < R_CYL - MARGIN (fixed physical, like square
 MAX_STEPS = 200
 SQ_DECAY = ETA / mu_0 * (np.pi / 1.06) ** 2  # the deck's dt is set by the square rate
 
-# (label, conformal, grid_type, divb_clean, eb_cyl)
+# (label, conformal, grid_type, divb_clean)
 CONFIGS = [
-    ("staircase (staggered)", False, "staggered", False, False),
-    ("mirror (collocated), clean OFF", True, "collocated", False, False),
-    ("mirror (collocated) + cyl correction", True, "collocated", False, True),
-    ("mirror (collocated) + cyl + divb-clean", True, "collocated", True, True),
+    ("staircase (staggered)", False, "staggered", False),
+    ("mirror (collocated), clean OFF", True, "collocated", False),
+    ("mirror (collocated) + divb-clean", True, "collocated", True),
 ]
 
 
@@ -96,12 +97,11 @@ def run_case(
     conformal,
     grid_type,
     divb_clean,
-    eb_cyl,
     outdir,
 ):
     tag = (
         f"{grid_type}_{'conf' if conformal else 'stair'}"
-        f"{'_dc' if divb_clean else ''}{'_cyl' if eb_cyl else ''}_N{n}"
+        f"{'_dc' if divb_clean else ''}_N{n}"
     )
     rundir = os.path.join(outdir, tag)
     os.makedirs(rundir, exist_ok=True)
@@ -121,8 +121,6 @@ def run_case(
         cmd += ["--conformal"]
     if divb_clean:
         cmd += ["--divb-clean"]
-    if eb_cyl:
-        cmd += ["--eb-cyl-correction"]
     with open(os.path.join(rundir, "run.log"), "w") as log:
         subprocess.run(
             cmd, cwd=rundir, stdout=log, stderr=subprocess.STDOUT, check=True
@@ -138,11 +136,11 @@ def main():
     args = ap.parse_args()
 
     print(f"\ncylinder edge-order (interior L2 vs Bessel mode): N={args.resolutions}\n")
-    for label, conf, gt, dc, ec in CONFIGS:
+    for label, conf, gt, dc in CONFIGS:
         print(f"[{label}]")
         errs, hs = [], []
         for n in args.resolutions:
-            e, h = run_case(n, conf, gt, dc, ec, args.outdir)
+            e, h = run_case(n, conf, gt, dc, args.outdir)
             errs.append(e)
             hs.append(h)
             print(f"    N={n}: interior L2 = {e:.4e}")

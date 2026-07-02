@@ -111,7 +111,7 @@ def setup_simulation(
     grid_type="staggered",
     divb_clean=False,
     geometry="square",
-    eb_cyl_correction=False,
+    eb_b_straight_mirror=False,
 ):
     """Create the PICMI simulation object.
 
@@ -134,6 +134,11 @@ def setup_simulation(
         Add a uniform external current and a thermal proton fill, and output
         the current densities, to test the embedded-boundary PEC current
         boundary condition.
+    eb_b_straight_mirror: bool
+        Impose the wall condition on the staggered (Yee) B field with the
+        direct level-set mirror after each Faraday push (the staggered-grid
+        counterpart of use_conformal_eb), instead of leaving the covered
+        faces staircase-zeroed.
     verbose: int
         WarpX verbosity.
     """
@@ -229,6 +234,11 @@ def setup_simulation(
         substeps=substeps,
         holmstrom_vacuum_region=True,
         use_conformal_eb=True if use_conformal_eb else None,
+        # Yee-grid level-set mirror B wall fill (the staggered counterpart of
+        # use_conformal_eb). Must be passed HERE (the PICMI kwarg): a raw
+        # hybridpicmodel bucket attribute would be clobbered by
+        # initialize_inputs writing the (None) PICMI value over it.
+        eb_b_straight_mirror=True if eb_b_straight_mirror else None,
         Jy_external_function=f"{J_EXT}" if pec_j else None,
         # The pec_j battery's closed form asserts a CONTINUOUS electron
         # pressure across the wall (the wall supports the plasma back-
@@ -237,18 +247,17 @@ def setup_simulation(
         # the non-default parity.
         eb_pe_dirichlet=False if pec_j else None,
         # Diffusive near-wall div(B)/div(J) clean (edge-order diagnostic knob)
-        divb_clean_alpha=0.1 if divb_clean else None,
-        divj_clean_alpha=0.1 if divb_clean else None,
+        # Production (annulus) wall-layer config: unbounded band + inner
+        # cutoffs 0 so the clean reaches the first fluid layers where the
+        # wall divergence lives (the default band/inner knobs confine it to
+        # a half-cell shell under the level-set roof -- a near-no-op).
+        divb_clean_alpha=0.15 if divb_clean else None,
+        divj_clean_alpha=0.15 if divb_clean else None,
+        divb_clean_iters=3 if divb_clean else None,
+        divb_clean_band_cells=0.0 if divb_clean else None,
+        divb_clean_inner_div_cells=0.0 if divb_clean else None,
+        divb_clean_inner_corr_cells=0.0 if divb_clean else None,
     )
-
-    if eb_cyl_correction:
-        # Cylindrical (surface-of-revolution) radial mirror correction; not a
-        # PICMI kwarg, set through the bucket. Requires use_conformal_eb. This
-        # deck's cylinder is a surface of revolution about y.
-        from pywarpx import hybridpicmodel
-
-        hybridpicmodel.eb_cylindrical_correction = 1
-        hybridpicmodel.eb_cyl_axis = "y"
 
     if geometry == "cylinder":
         # Smooth circular wall (extruded along y): conductor at r > R_CYL. No
@@ -489,11 +498,11 @@ def main():
         "circular wall -- the curved-wall edge-order diagnostic)",
     )
     parser.add_argument(
-        "--eb-cyl-correction",
+        "--eb-b-straight-mirror",
         action="store_true",
-        help="apply the cylindrical (surface-of-revolution) radial mirror "
-        "correction to the EB fill of E/J/B (requires --conformal); tests "
-        "whether the curved-wall edge order lifts above the planar mirror",
+        help="impose the wall condition on the staggered (Yee) B field with "
+        "the direct level-set mirror after each Faraday push (the "
+        "staggered-grid counterpart of --conformal; staggered grids only)",
     )
     parser.add_argument(
         "-v",
@@ -515,7 +524,7 @@ def main():
         args.grid_type,
         args.divb_clean,
         args.geometry,
-        args.eb_cyl_correction,
+        args.eb_b_straight_mirror,
     )
     sim.step()
 

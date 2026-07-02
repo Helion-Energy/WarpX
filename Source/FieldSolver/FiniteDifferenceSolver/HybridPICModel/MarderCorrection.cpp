@@ -242,8 +242,7 @@ void HybridPICModel::MarderCleanDivergence (
         warpx::hybrid::ApplyPECBoundaryToField(
             field, eb_update, *phi_mf, geom,
             m_eb_bc_rtol, m_eb_bc_max_iters, m_eb_bc_direct_fill,
-            normal_odd, fill_covered_centers, status_cache, fill_band_cells,
-            m_eb_cylindrical_correction, m_eb_cyl_axis);
+            normal_odd, fill_covered_centers, status_cache, fill_band_cells);
     }
 
     for (int c = 0; c < 3; ++c) {

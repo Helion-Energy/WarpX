@@ -271,63 +271,24 @@ namespace
         return g;
     }
 
-    /** Radial metric Jacobian lambda = r_image / r_fill for a wall that is a
-     *  surface of revolution about axis \c cyl_ax (the cylinder is centered on
-     *  the transverse origin). Returns 1 in 2D / for a flat wall. */
-    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
-    amrex::Real cyl_lambda (
-        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& xe,
-        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& xim,
-        int cyl_ax) noexcept
-    {
-        using namespace amrex::literals;
-#if defined(WARPX_DIM_3D)
-        amrex::Real re2 = 0._rt;
-        amrex::Real ri2 = 0._rt;
-        for (int d = 0; d < 3; ++d) {
-            if (d == cyl_ax) { continue; }
-            re2 += xe[d]*xe[d];
-            ri2 += xim[d]*xim[d];
-        }
-        amrex::Real const re = std::sqrt(re2);
-        return std::sqrt(ri2) / amrex::max(re, std::numeric_limits<amrex::Real>::min());
-#else
-        amrex::ignore_unused(xe, xim, cyl_ax);
-        return 1._rt;
-#endif
-    }
-
     /** Parity-correct mirror value of component \c c built from the image-point
      *  field (Jx_im, Jy_im, Jz_im) and the unit boundary normal \c nv, with the
-     *  normal weight \c w_n and the tangential weight \c w_t. With \c cyl the
-     *  wall is a surface of revolution about axis \c cyl_ax: the radial and
-     *  azimuthal parts of the reflected field are scaled by the radial metric
-     *  Jacobian \c lambda (the axial part is not) -- the leading O(h/R)
-     *  curved-wall correction. With cyl=false (or lambda=1) this reduces exactly
-     *  to the planar reflection w_n*(n.J)n_c + w_t*(J_c - (n.J)n_c). */
+     *  normal weight \c w_n and the tangential weight \c w_t: the planar
+     *  reflection w_n*(n.J)n_c + w_t*(J_c - (n.J)n_c). */
     AMREX_GPU_DEVICE AMREX_FORCE_INLINE
     amrex::Real mirror_combine (
         int c,
         amrex::Real Jx_im, amrex::Real Jy_im, amrex::Real Jz_im,
-        amrex::RealVect const& nv, amrex::Real w_n, amrex::Real w_t,
-        bool cyl, int cyl_ax, amrex::Real lambda) noexcept
+        amrex::RealVect const& nv, amrex::Real w_n, amrex::Real w_t) noexcept
     {
         using namespace amrex::literals;
 #if defined(WARPX_DIM_3D)
         amrex::Real const ndotJ = nv[0]*Jx_im + nv[1]*Jy_im + nv[2]*Jz_im;
         amrex::Real const J_im_e = (c == 0) ? Jx_im : ((c == 1) ? Jy_im : Jz_im);
         amrex::Real const rad_c = ndotJ * nv[c];   // radial (normal) part along c
-        if (!cyl) {
-            return w_n*rad_c + w_t*(J_im_e - rad_c);
-        }
-        // surface of revolution about cyl_ax: split the tangential part into a
-        // purely axial piece (no radial metric) and the azimuthal remainder
-        amrex::Real const J_ax = (cyl_ax == 0) ? Jx_im : ((cyl_ax == 1) ? Jy_im : Jz_im);
-        amrex::Real const ax_c = (c == cyl_ax) ? J_ax : 0._rt;   // axial part along c
-        amrex::Real const azi_c = J_im_e - rad_c - ax_c;         // azimuthal part along c
-        return w_n*lambda*rad_c + w_t*(lambda*azi_c + ax_c);
+        return w_n*rad_c + w_t*(J_im_e - rad_c);
 #else
-        amrex::ignore_unused(cyl, cyl_ax, lambda, Jy_im);
+        amrex::ignore_unused(Jy_im);
         amrex::Real const ndotJ = nv[0]*Jx_im + nv[1]*Jz_im;
         amrex::Real const e_dot_n = (c == 0) ? nv[0] : ((c == 2) ? nv[1] : 0._rt);
         amrex::Real const J_im_e = (c == 0) ? Jx_im : ((c == 1) ? Jy_im : Jz_im);
@@ -464,9 +425,7 @@ void warpx::hybrid::ApplyPECBoundaryToField (
     bool normal_odd,
     bool fill_covered_centers,
     EBFillStatus* status_cache,
-    amrex::Real band_cells,
-    bool eb_cyl,
-    int eb_cyl_axis)
+    amrex::Real band_cells)
 {
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
     using namespace amrex::literals;
@@ -575,12 +534,8 @@ void warpx::hybrid::ApplyPECBoundaryToField (
                     // magnetic field: normal odd / tangential even.
                     amrex::Real const w_n = normal_odd ? g.s/d_im : 1._rt;
                     amrex::Real const w_t = normal_odd ? 1._rt : g.s/d_im;
-                    // optional surface-of-revolution radial metric Jacobian
-                    amrex::Real const lambda =
-                        eb_cyl ? ::cyl_lambda(g.xe, xim, eb_cyl_axis) : 1._rt;
                     Jc(i, j, k, n) = ::mirror_combine(
-                        c, Jx_im, Jy_im, Jz_im, g.nv,
-                        w_n, w_t, eb_cyl, eb_cyl_axis, lambda);
+                        c, Jx_im, Jy_im, Jz_im, g.nv, w_n, w_t);
                 });
             }
         }
@@ -671,10 +626,8 @@ void warpx::hybrid::ApplyPECBoundaryToField (
                                 amrex::ignore_unused(wx_im, wy_im, wz_im);
                                 amrex::Real const w_n = normal_odd ? g.s/g.d_im : 1._rt;
                                 amrex::Real const w_t = normal_odd ? 1._rt : g.s/g.d_im;
-                                amrex::Real const lambda =
-                                    eb_cyl ? ::cyl_lambda(g.xe, g.xim, eb_cyl_axis) : 1._rt;
                                 Jc(i, j, k, n) = ::mirror_combine(c, Jx_im, Jy_im, Jz_im,
-                                    g.nv, w_n, w_t, eb_cyl, eb_cyl_axis, lambda);
+                                    g.nv, w_n, w_t);
                             }
                             stat(i, j, k) = S_JUSTDONE;
                             return {1};
@@ -854,10 +807,8 @@ void warpx::hybrid::ApplyPECBoundaryToField (
                     // magnetic field: normal odd / tangential even.
                     amrex::Real const w_n = normal_odd ? s/d_im : 1._rt;
                     amrex::Real const w_t = normal_odd ? 1._rt : s/d_im;
-                    amrex::Real const lambda =
-                        eb_cyl ? ::cyl_lambda(xe, xim, eb_cyl_axis) : 1._rt;
                     amrex::Real const v_new = ::mirror_combine(c, Jx_im, Jy_im, Jz_im,
-                        nv, w_n, w_t, eb_cyl, eb_cyl_axis, lambda);
+                        nv, w_n, w_t);
 
                     Jc(i, j, k, n) = v_new;
 
@@ -893,7 +844,7 @@ void warpx::hybrid::ApplyPECBoundaryToField (
 #else
     amrex::ignore_unused(field, eb_update, distance_to_eb, geom, rtol, max_iters,
                          direct_fill, normal_odd, fill_covered_centers, status_cache,
-                         band_cells, eb_cyl, eb_cyl_axis);
+                         band_cells);
 #endif
 }
 
