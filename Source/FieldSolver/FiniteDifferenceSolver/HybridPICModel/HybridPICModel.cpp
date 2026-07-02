@@ -225,6 +225,17 @@ void HybridPICModel::ReadParameters ()
     // Default 1 = legacy behavior.
     utils::parser::queryWithParser(pp_hybrid, "eb_b_fill_band_cells", m_eb_b_fill_band_cells);
 
+    // Marder-like diffusive divergence clean of B / the total Ampere current in
+    // a near-wall band (MarderCleanDivergence), applied once per step from the
+    // hybrid field advance. Both alphas default to 0 = off (byte-identical).
+    utils::parser::queryWithParser(pp_hybrid, "divb_clean_alpha", m_divb_clean_alpha);
+    utils::parser::queryWithParser(pp_hybrid, "divj_clean_alpha", m_divj_clean_alpha);
+    utils::parser::queryWithParser(pp_hybrid, "divb_clean_iters", m_divb_clean_iters);
+    utils::parser::queryWithParser(pp_hybrid, "divb_clean_band_cells", m_divb_clean_band_cells);
+    utils::parser::queryWithParser(
+        pp_hybrid, "divb_clean_inner_div_cells", m_divb_clean_inner_div_cells);
+    utils::parser::queryWithParser(
+        pp_hybrid, "divb_clean_inner_corr_cells", m_divb_clean_inner_corr_cells);
 }
 
 void HybridPICModel::AllocateLevelMFs (

@@ -4021,10 +4021,11 @@ Maxwell solver: kinetic-fluid hybrid
     direct-mirror embedded-boundary path. ``0`` (default) disables it. The clean iterates
     ``B += alpha * grad(div B)`` in a near-wall band (see
     :pp:param:`hybrid_pic_model.divb_clean_band_cells`), re-imposing the embedded-boundary condition
-    after each sweep. Because the correction is a pure gradient it dissipates the small divergence that
-    the curved-wall mirror injects without changing ``curl(B)`` (the plasma current), so the physics
-    that consumes the current is unaffected. Stability-capped near ``0.1`` (the same diffusion CFL as
-    the E-field Marder; larger values diverge).
+    after each sweep. Because the correction is a pure gradient it dissipates the divergence that
+    the curved-wall mirror injects without changing ``curl(B)`` (the plasma current) away from the
+    band cutoffs, so the physics that consumes the current is largely unaffected. Stability-capped
+    near ``1/6`` in 3D (the explicit grad(div) diffusion CFL; larger values diverge, ``0.15`` is a
+    validated sweet spot).
 
 .. pp:param:: hybrid_pic_model.divj_clean_alpha
     :type: ``float``
@@ -4048,16 +4049,32 @@ Maxwell solver: kinetic-fluid hybrid
     :default: ``4``
     :optional:
 
-    Width, in cells, of the near-wall band over which the div(B)/div(J) clean acts (shared by both).
+    Outer cutoff, in cells from the wall, of the near-wall band over which the div(B)/div(J)
+    clean acts (shared by both). The clean is applied once per full step, after the
+    plasma-current update and before the external-field add-back (so it acts on the plasma
+    field only).
 
-.. pp:param:: hybrid_pic_model.divb_clean_per_step
-    :type: ``bool``
-    :default: ``false``
+.. pp:param:: hybrid_pic_model.divb_clean_inner_div_cells
+    :type: ``float``
+    :default: ``1``
     :optional:
 
-    If ``true``, the div(B)/div(J) clean is applied once per full step (after the plasma-current update)
-    instead of after every RKF45 substage. The divergence accumulates step-to-step, so this gives
-    nearly the same damping at a small fraction of the per-substage cost.
+    Inner cutoff, in cells from the wall, below which the computed divergence is dropped
+    before the grad(div) correction. The default trusts the divergence only where its
+    :math:`\pm 1` stencil is fully in the fluid; ``0`` keeps it on every uncovered node
+    (the wall-layer mode).
+
+.. pp:param:: hybrid_pic_model.divb_clean_inner_corr_cells
+    :type: ``float``
+    :default: ``2``
+    :optional:
+
+    Inner cutoff, in cells from the wall, below which no correction is applied. The default
+    keeps the full :math:`\pm 2` grad(div) stencil in the fluid, preserving the near-wall
+    order on a smooth wall but leaving the first fluid layers to the mirror fill; ``0``
+    corrects every uncovered band node (the wall-layer mode, for damping the exponentially
+    growing divergence a sharp re-entrant wall corner — e.g. a wall radius step — pumps
+    into the first fluid layers).
 
 .. pp:param:: hybrid_pic_model.add_external_fields
     :type: ``bool``
