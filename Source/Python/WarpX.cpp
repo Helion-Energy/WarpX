@@ -27,7 +27,6 @@
 #endif // use PSATD ifdef
 #include <FieldSolver/WarpX_FDTD.H>
 #include <Filter/NCIGodfreyFilter.H>
-#include <Initialization/DivCleaner/ProjectionDivCleaner.H>
 #include <Initialization/ExternalField.H>
 #include <Particles/MultiParticleContainer.H>
 #include <Fluids/MultiFluidContainer.H>
@@ -475,33 +474,6 @@ void init_WarpX (py::module& m)
         .def("run_div_cleaner",
             [] (WarpX& wx) { wx.ProjectionCleanDivB(); },
             "Executes projection based divergence cleaner on loaded Bfield_fp_external."
-        )
-        .def("clean_bfield_fp_divergence",
-            [] (WarpX& wx) {
-                amrex::ignore_unused(wx);
-                // Projection div-clean of Bfield_fp (the evolved B), WARM-STARTED:
-                // the cleaner persists across calls so its MLMG solve reuses the
-                // previous step's phi as the initial guess (div(B) changes little
-                // step-to-step). setSourceFromField/solve/correctField do not zero
-                // m_solution -- only the constructor does -- so a persistent object
-                // warm-starts for free. Intended for a once-per-step end-of-step
-                // scrub from an afterEsolve callback. PROTOTYPE: single-level, not
-                // reset on regrid.
-                static std::unique_ptr<warpx::initialization::ProjectionDivCleaner> dc;
-                if (!dc) {
-                    dc = std::make_unique<warpx::initialization::ProjectionDivCleaner>("Bfield_fp");
-                    // Free the persistent cleaner's (device) MultiFabs DURING
-                    // amrex::Finalize, before the AMReX/CUDA teardown. A process-
-                    // static unique_ptr would otherwise destruct after Finalize and
-                    // segfault freeing device memory with no CUDA context.
-                    amrex::ExecOnFinalize([] { dc.reset(); });
-                }
-                dc->setSourceFromField();
-                dc->solve();
-                dc->correctField();
-            },
-            "Projection div-clean of Bfield_fp (the evolved B), warm-started across\n"
-            "calls. For a once-per-step end-of-step scrub via an afterEsolve callback."
         )
         .def_static("calculate_hybrid_external_curlA",
             [] (WarpX& wx) { wx.CalculateExternalCurlA(); },
