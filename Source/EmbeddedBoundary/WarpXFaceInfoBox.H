@@ -18,7 +18,7 @@
 struct FaceInfoBox {
     enum Neighbours : uint8_t {n, s, e, w, nw, ne, sw, se};
 
-    amrex::Gpu::DeviceVector<Neighbours> neighbor_faces;
+    amrex::Gpu::DeviceVector<Neighbours> neigh_faces;
     amrex::Gpu::DeviceVector<amrex::Real> area;
     // this vector stores the indices to access in the previous vectors
     amrex::Gpu::DeviceVector<int> inds;
@@ -34,24 +34,24 @@ struct FaceInfoBox {
     * \brief add the neighbor i, j to the list of intruded neighbors.
     */
     AMREX_GPU_HOST_DEVICE
-    static void addConnectedNeighbor(int i, int j, int ind, Neighbours* neighbor_face_ptr){
+    static void addConnectedNeighbor(int i, int j, int ind, Neighbours* neigh_face_ptr){
 
         if(i == -1 && j == -1){
-            *(neighbor_face_ptr + ind) = nw;
+            *(neigh_face_ptr + ind) = nw;
         }else if(i == -1 && j == 0){
-            *(neighbor_face_ptr + ind) = w;
+            *(neigh_face_ptr + ind) = w;
         }else if(i == -1 && j == 1){
-            *(neighbor_face_ptr + ind) = sw;
+            *(neigh_face_ptr + ind) = sw;
         }else if(i == 0 && j == -1){
-            *(neighbor_face_ptr + ind) = n;
+            *(neigh_face_ptr + ind) = n;
         }else if(i == 0 && j == 1){
-            *(neighbor_face_ptr + ind) = s;
+            *(neigh_face_ptr + ind) = s;
         }else if(i == 1 && j == -1){
-            *(neighbor_face_ptr + ind) = ne;
+            *(neigh_face_ptr + ind) = ne;
         }else if(i == 1 && j == 0){
-            *(neighbor_face_ptr + ind) = e;
+            *(neigh_face_ptr + ind) = e;
         }else if(i == 1 && j == 1){
-            *(neighbor_face_ptr + ind) = se;
+            *(neigh_face_ptr + ind) = se;
         }
     }
 
