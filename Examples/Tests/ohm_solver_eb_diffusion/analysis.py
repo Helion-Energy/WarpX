@@ -21,9 +21,8 @@
 # --- hybrid MVP), but its INTERIOR error on this cavity is corner-limited
 # --- and does not converge (measured order ~ -0.9 at N=32->64): the corners
 # --- of the rotated square are exactly the planar mirror's failure mode.
-# --- The interior-accuracy gate for the collocated wall therefore lives on
-# --- the SMOOTH cylinder (cylinder_edge_order.py) with the
-# --- eb_cylindrical_correction radial-Jacobian mirror; here the collocated
+# --- The interior accuracy of the collocated wall is characterized on the
+# --- SMOOTH cylinder instead (cylinder_edge_order.py); here the collocated
 # --- asserts are boundedness + wall-condition-enforcement, not order.
 
 import argparse
