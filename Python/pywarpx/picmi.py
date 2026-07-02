@@ -2281,6 +2281,11 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
 
     divb_clean_band_cells: float, default=4
         Outer cutoff of the divergence-clean band, in cells from the wall.
+        <= 0 selects the unbounded mode (correction on every uncovered node;
+        strictly dissipative of the global divergence norm, no-op where the
+        field is already solenoidal). A hard cutoff transports divergence to
+        the band edge and accumulates it just outside, so unbounded is
+        preferred when the divergence source is strong.
 
     divb_clean_inner_div_cells: float, default=1
         Inner cutoff (in cells from the wall) below which the computed
