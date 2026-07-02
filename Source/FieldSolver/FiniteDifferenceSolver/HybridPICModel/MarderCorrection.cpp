@@ -23,6 +23,7 @@
 #include <AMReX_MultiFab.H>
 
 #include <algorithm>
+#include <limits>
 
 using namespace amrex;
 using warpx::fields::FieldType;
@@ -61,15 +62,23 @@ void HybridPICModel::MarderCleanDivergence (
 
     amrex::MultiFab const* phi_mf = warpx.m_fields.get(FieldType::distance_to_eb, lev);
 
-    // FillSignedDistance clamps every deep-fluid node to a constant roof of a
-    // few cells (the level set is only valid near the EB), so a phi-only band
-    // test would classify the ENTIRE deep interior as in-band once the band
-    // reaches the roof -- the clean would then diffuse the wall divergence
-    // inward through the whole domain instead of dissipating it locally. Cap
-    // the outer cutoff half a cell below the measured roof so clamped nodes
-    // are always out-of-band.
+    // band_cells <= 0 selects the UNBOUNDED mode: the correction applies on
+    // every uncovered node. The pure-gradient update is strictly dissipative
+    // of the global divergence norm (d/dt int(div^2) = -2 alpha int|grad div|^2)
+    // and is a round-off no-op wherever div is already ~0 (the bulk), so the
+    // only cost is the sweep itself. A HARD outer cutoff instead transports
+    // divergence to the band edge and piles it up just outside, where nothing
+    // damps it (measured on the annulus: d=3 divergence 14x the baseline).
+    // In the banded mode, cap the outer cutoff half a cell below the measured
+    // level-set roof: FillSignedDistance clamps every deep-fluid node to a
+    // constant roof of a few cells, so a phi-only band test would otherwise
+    // classify the ENTIRE deep interior as in-band once the band reaches the
+    // roof.
+    const bool unbounded = (clean_band_cells <= 0.0_rt);
     const Real phi_roof = phi_mf->max(0, 0, false);
-    const Real d_clean = std::min(clean_band_cells * h_max, phi_roof - 0.5_rt * h_max);
+    const Real d_clean = unbounded
+        ? std::numeric_limits<Real>::max()
+        : std::min(clean_band_cells * h_max, phi_roof - 0.5_rt * h_max);
     // EB-aware band cutoffs, exposed as knobs. The defaults (inner_div=1,
     // inner_corr=2) trust the divergence only where its own +/-1 stencil is in
     // the fluid and apply the correction only where the full +/-2 grad(div)

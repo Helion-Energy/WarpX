@@ -4052,7 +4052,10 @@ Maxwell solver: kinetic-fluid hybrid
     Outer cutoff, in cells from the wall, of the near-wall band over which the div(B)/div(J)
     clean acts (shared by both). The clean is applied once per full step, after the
     plasma-current update and before the external-field add-back (so it acts on the plasma
-    field only).
+    field only). A value ``<= 0`` selects the unbounded mode: the correction applies on
+    every uncovered node, which is strictly dissipative of the global divergence norm and a
+    no-op wherever the field is already solenoidal — a hard outer cutoff instead transports
+    divergence to the band edge and accumulates it just outside, where nothing damps it.
 
 .. pp:param:: hybrid_pic_model.divb_clean_inner_div_cells
     :type: ``float``
