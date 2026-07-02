@@ -1470,13 +1470,17 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         amrex::ParallelFor(tex, [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
             // Skip field update in the embedded boundaries
-            if (update_Ex_arr && update_Ex_arr(i, j, k) == 0) { return; }
+            //if (update_Ex_arr && update_Ex_arr(i, j, k) == 0) { return; }
 
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ex_stag, coarsen, i, j, k, 0);
 
             if (rho_val < rho_floor && holmstrom_vacuum_region) {
-                Ex(i, j, k) = 0._rt;
+                if (include_external_fields) {
+                    Ex(i, j, k) = Ex_ext(i, j, k);
+                } else {
+                    Ex(i, j, k) = 0._rt;
+                }
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
                 // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
@@ -1567,7 +1571,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields /*&& (rho_val >= rho_floor)*/) {
+            if (include_external_fields) {
                 Ex(i, j, k) -= Ex_ext(i, j, k);
             }
         });
@@ -1576,13 +1580,17 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         amrex::ParallelFor(tey, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
 
             // Skip field update in the embedded boundaries
-            if (update_Ey_arr && update_Ey_arr(i, j, k) == 0) { return; }
+            //if (update_Ey_arr && update_Ey_arr(i, j, k) == 0) { return; }
 
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ey_stag, coarsen, i, j, k, 0);
 
             if (rho_val < rho_floor && holmstrom_vacuum_region) {
-                Ey(i, j, k) = 0._rt;
+                if (include_external_fields) {
+                    Ey(i, j, k) = Ey_ext(i, j, k);
+                } else {
+                    Ey(i, j, k) = 0._rt;
+                }
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
                 // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
@@ -1658,7 +1666,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 #endif
             }
 
-            if (include_external_fields /*&& (rho_val >= rho_floor)*/) {
+            if (include_external_fields) {
                 Ey(i, j, k) -= Ey_ext(i, j, k);
             }
         });
@@ -1667,13 +1675,17 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         amrex::ParallelFor(tez, [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
             // Skip field update in the embedded boundaries
-            if (update_Ez_arr && update_Ez_arr(i, j, k) == 0) { return; }
+            //if (update_Ez_arr && update_Ez_arr(i, j, k) == 0) { return; }
 
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, k, 0);
 
             if (rho_val < rho_floor && holmstrom_vacuum_region) {
-                Ez(i, j, k) = 0._rt;
+                if (include_external_fields) {
+                    Ez(i, j, k) = Ez_ext(i, j, k);
+                } else {
+                    Ez(i, j, k) = 0._rt;
+                }
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
                 // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
@@ -1749,7 +1761,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 #endif
             }
 
-            if (include_external_fields /*&& (rho_val >= rho_floor)*/) {
+            if (include_external_fields) {
                 Ez(i, j, k) -= Ez_ext(i, j, k);
             }
         });
