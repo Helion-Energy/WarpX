@@ -272,6 +272,22 @@ void WarpX::HybridPICDepositRhoAndJ ()
                               0, 0, 1, current_fp[lev][idim]->nGrowVect());
             }
         }
+        // Fold the guard-cell deposits of J_spec into the valid cells of
+        // neighboring boxes. pc.DepositCurrent above is a local deposit:
+        // shape-spread contributions from particles near box edges land in
+        // guard cells and are only correct after a SumBoundary. The total
+        // current_fp gets this later via SyncCurrentAndRho (which is why the
+        // raw, unsummed J_spec is accumulated into it above), but the
+        // per-species fields are consumed directly (Vs = Js/rhos, per-species
+        // resistivity, resistive drag) and need their own sum here.
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            for (int idim = 0; idim < 3; ++idim) {
+                ablastr::utils::communication::SumBoundary(
+                    *J_spec[lev][idim], 0, J_spec[lev][idim]->nComp(),
+                    J_spec[lev][idim]->nGrowVect(), J_spec[lev][idim]->nGrowVect(),
+                    WarpX::do_single_precision_comms, Geom(lev).periodicity());
+            }
+        }
         // Per-species charge density (used to recover the species bulk
         // velocity Vs = Js/rhos in CalculateIonFluidVelocity).
         pc.DepositCharge(m_fields.get_mr_levels("rho_fp_" + spec, finest_level),
