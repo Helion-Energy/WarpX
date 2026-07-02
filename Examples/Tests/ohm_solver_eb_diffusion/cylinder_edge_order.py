@@ -14,12 +14,13 @@
 # --- blind to the clean's fluid-band action).
 # ---
 # --- Compares, at doubling resolutions:
-# ---   - conformal ECT (staggered)             : the 2nd-order reference,
-# ---   - mirror (collocated), clean OFF         : the bare level-set mirror,
-# ---   - mirror (collocated), EB-aware clean ON : mirror + the fluid-stencil
-# ---       div(B)/div(J) clean. Matching clean-OFF proves the clean preserves
-# ---       the edge order. (On the ohms_law_conformal_nodal_ect branch, add a
-# ---       collocated-C-ECT config to test whether C-ECT recovers 2nd order.)
+# ---   - staircase (staggered)                     : the Yee baseline,
+# ---   - mirror (collocated), clean OFF            : the bare level-set mirror,
+# ---   - mirror (collocated) + cyl correction      : + the surface-of-revolution
+# ---       radial-Jacobian mirror correction (eb_cylindrical_correction) --
+# ---       the branch's namesake fix for the curved-wall mirror error,
+# ---   - mirror (collocated) + cyl + div(B) clean  : proves the clean
+# ---       preserves (or improves) the edge order.
 # ---
 # --- Example:  python3 cylinder_edge_order.py -N 48 96
 
@@ -48,28 +49,12 @@ MARGIN = 0.15  # interior region r < R_CYL - MARGIN (fixed physical, like square
 MAX_STEPS = 200
 SQ_DECAY = ETA / mu_0 * (np.pi / 1.06) ** 2  # the deck's dt is set by the square rate
 
-# (label, conformal, grid_type, divb_clean, eb_cyl, b_curl, ect_curv)
+# (label, conformal, grid_type, divb_clean, eb_cyl)
 CONFIGS = [
-    ("conformal ECT (staggered)", True, "staggered", False, False, False, False),
-    (
-        "conformal ECT (staggered) + b-curl-fill",
-        True,
-        "staggered",
-        False,
-        False,
-        True,
-        False,
-    ),
-    (
-        "conformal ECT (staggered) + b-curl-fill + ect-curvature",
-        True,
-        "staggered",
-        False,
-        False,
-        True,
-        True,
-    ),
-    ("mirror (collocated), clean OFF", True, "collocated", False, False, False, False),
+    ("staircase (staggered)", False, "staggered", False, False),
+    ("mirror (collocated), clean OFF", True, "collocated", False, False),
+    ("mirror (collocated) + cyl correction", True, "collocated", False, True),
+    ("mirror (collocated) + cyl + divb-clean", True, "collocated", True, True),
 ]
 
 
@@ -112,16 +97,11 @@ def run_case(
     grid_type,
     divb_clean,
     eb_cyl,
-    b_curl,
-    ect_curv,
     outdir,
-    blend=0.0,
-    corner_trim=0.0,
 ):
     tag = (
         f"{grid_type}_{'conf' if conformal else 'stair'}"
-        f"{'_dc' if divb_clean else ''}{'_cyl' if eb_cyl else ''}"
-        f"{'_bcf' if b_curl else ''}{'_ect' if ect_curv else ''}_N{n}"
+        f"{'_dc' if divb_clean else ''}{'_cyl' if eb_cyl else ''}_N{n}"
     )
     rundir = os.path.join(outdir, tag)
     os.makedirs(rundir, exist_ok=True)
@@ -143,15 +123,6 @@ def run_case(
         cmd += ["--divb-clean"]
     if eb_cyl:
         cmd += ["--eb-cyl-correction"]
-    if b_curl:
-        cmd += ["--b-curl-fill"]
-        if blend != 0.0:
-            cmd += ["--b-curl-fill-blend", str(blend)]
-        if corner_trim != 0.0:
-            cmd += ["--b-curl-fill-corner-trim", str(corner_trim)]
-    if ect_curv:
-        cmd += ["--ect-curvature"]
-    print(f"  running {tag} ...")
     with open(os.path.join(rundir, "run.log"), "w") as log:
         subprocess.run(
             cmd, cwd=rundir, stdout=log, stderr=subprocess.STDOUT, check=True
@@ -164,21 +135,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("-N", "--resolutions", type=int, nargs="+", default=[48, 96])
     ap.add_argument("-o", "--outdir", default="cyl_edge_runs")
-    ap.add_argument(
-        "--blend",
-        type=float,
-        default=0.0,
-        help="conformal_b_curl_fill_blend strength [0,1] for the b-curl-fill "
-        "configs (near-wall blend toward the ECT cut-face B); 0 = full mirror.",
-    )
     args = ap.parse_args()
 
     print(f"\ncylinder edge-order (interior L2 vs Bessel mode): N={args.resolutions}\n")
-    for label, conf, gt, dc, ec, bc, cv in CONFIGS:
+    for label, conf, gt, dc, ec in CONFIGS:
         print(f"[{label}]")
         errs, hs = [], []
         for n in args.resolutions:
-            e, h = run_case(n, conf, gt, dc, ec, bc, cv, args.outdir, args.blend)
+            e, h = run_case(n, conf, gt, dc, ec, args.outdir)
             errs.append(e)
             hs.append(h)
             print(f"    N={n}: interior L2 = {e:.4e}")

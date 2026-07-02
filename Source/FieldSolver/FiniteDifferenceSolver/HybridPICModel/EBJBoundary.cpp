@@ -186,26 +186,6 @@ namespace
     constexpr int S_RESOLVED = 4;  //!< well-posed target written and locked during this call
     constexpr int S_JUSTDONE = 5;  //!< pending target written in the current cascade sweep
     constexpr int S_RESOLVED_P = 6; //!< pending target written and locked during this call
-    constexpr int S_CORNER   = 7;  //!< re-entrant corner: covered-B replaced by the diagonal-cut chamfer
-
-    // Concave re-entrant-corner detector thresholds (corner CHAMFER, opt-in).
-    // Clause (i): the level-set normal must bend by more than this against a
-    // +/-1-cell wall neighbour to count as a surface bend (dot below cos 30deg).
-    constexpr amrex::Real S_CORNER_COS_BEND = 0.866_rt;  // cos(30 degrees)
-    // Clause (ii), LOAD-BEARING: the discrete Laplacian of the signed distance,
-    // made dimensionless as |lap(phi)| * h_max, must exceed this. WarpX feeds a
-    // UNIT-GRADIENT signed distance (amrex::FillSignedDistance, |grad phi| ~ 1):
-    // there lap(phi) = -kappa (minus the surface curvature) away from the medial
-    // axis, so a SMOOTH cylinder gives a small bounded |lap*h| ~ 2 h / R (~0.08
-    // at the test resolutions), while a re-entrant CORNER puts the medial-axis
-    // kink (a delta-like ridge) right in the covered band and |lap*h| spikes to
-    // O(1) (measured 0.6 at the 90th pct, ~2 at the 99th on the stepdown).
-    // 0.30 separates them with zero smooth-wall false positives across radius /
-    // resolution / orientation (prototype_corner_detector.py). This REPLACES the
-    // old "phi_nbr - phi_cell > 1.5 h" radius-jump test, which is UNSATISFIABLE
-    // on a 1-Lipschitz signed distance (one-cell |dphi| <= h always) and fired
-    // n_corner = 0 on the real stepdown.
-    constexpr amrex::Real S_CORNER_LAP = 0.30_rt;
 
     // A fill target is well-posed when at least this fraction of every
     // component's image-interpolation weight lies in the solution domain
@@ -291,42 +271,6 @@ namespace
         return g;
     }
 
-    /** Unit boundary normal (toward the plasma) of the level set at an arbitrary
-     *  physical position \c xq. Returns the zero vector if the gradient is
-     *  degenerate. Used by the sharp-corner detector to compare the wall normal
-     *  at the fill cell against the normal in the region its mirror image lands
-     *  in: at a smooth wall they agree; at a sharp concave corner the image
-     *  crosses to the other facet and the two normals disagree. */
-    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
-    amrex::RealVect normal_at (
-        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& xq,
-        amrex::Array4<amrex::Real const> const& phi,
-        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& plo,
-        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& dxi) noexcept
-    {
-        using namespace amrex::literals;
-#if defined(WARPX_DIM_3D)
-        amrex::Real const yq = xq[1];
-        amrex::Real const zq = xq[2];
-#else
-        amrex::Real const yq = 0._rt;
-        amrex::Real const zq = xq[1];
-#endif
-        int ii, jj, kk;
-        amrex::Real W[AMREX_SPACEDIM][2];
-        ablastr::particles::compute_weights<amrex::IndexType::NODE>(
-            xq[0], yq, zq, plo, dxi, ii, jj, kk, W);
-        int ic, jc, kc;
-        amrex::Real Wc[AMREX_SPACEDIM][2];
-        ablastr::particles::compute_weights<amrex::IndexType::CELL>(
-            xq[0], yq, zq, plo, dxi, ic, jc, kc, Wc);
-        amrex::RealVect nv = DistanceToEB::interp_normal(ii, jj, kk, W, ic, jc, kc, Wc, phi, dxi);
-        amrex::Real const nv2 = DistanceToEB::dot_product(nv, nv);
-        if (!(nv2 > 0._rt) || !std::isfinite(nv2)) { return amrex::RealVect{AMREX_D_DECL(0._rt, 0._rt, 0._rt)}; }
-        DistanceToEB::normalize(nv);
-        return nv;
-    }
-
     /** Radial metric Jacobian lambda = r_image / r_fill for a wall that is a
      *  surface of revolution about axis \c cyl_ax (the cylinder is centered on
      *  the transverse origin). Returns 1 in 2D / for a flat wall. */
@@ -404,7 +348,7 @@ namespace
         amrex::Geometry const& geom,
         std::array<amrex::GpuArray<amrex::Real, AMREX_SPACEDIM>, 3> const& stag,
         amrex::Real d_band, amrex::Real d_img_min, amrex::Real h_max,
-        bool fill_covered_centers, bool corner_skip)
+        bool fill_covered_centers)
     {
         using namespace amrex::literals;
 
@@ -444,119 +388,6 @@ namespace
                 });
             }
             st.status[c]->FillBoundary(geom.periodicity());
-        }
-
-        // Corner sweep (corner CHAMFER, opt-in): flag the re-entrant-corner fill
-        // targets so the direct pass replaces their sharp-facet covered-B mirror
-        // with a DIAGONAL-CUT (chamfer) value -- the smooth fluid-side B carried
-        // across the corner -- which removes the cross-wall B jump whose Ampere
-        // curl (1/(mu0 h) x dB) crashes the substepper. Runs AFTER the
-        // S_FILL/S_DEEP split and BEFORE the well-posedness pass, so a flagged
-        // cell is no longer S_FILL and is never reclassified S_PENDING (its
-        // pointwise-mirror cascade is exactly the spike-injecting path we must
-        // avoid). A cell is S_CORNER only if BOTH geometry clauses hold:
-        //   (i)   the level-set normal bends > 30 deg vs a +/-1-cell wall
-        //         neighbour's normal (corroborates a surface bend);
-        //   (ii)  LOAD-BEARING Laplacian spike: |lap(phi)| * h_max > S_CORNER_LAP.
-        //         On the unit-gradient signed distance this is the corner kink
-        //         (medial-axis ridge); a smooth wall stays well below the gate.
-        //         This REPLACES the old radius-jump test that was unsatisfiable on
-        //         a 1-Lipschitz signed distance (n_corner = 0 on the real stepdown).
-        // Clause (iii) mirror-reach is folded into (ii): the kink ridge only
-        // reaches the covered band within ~2 cells of the corner edge.
-        if (corner_skip) {
-            amrex::ReduceOps<amrex::ReduceOpSum> creduce_op;
-            amrex::ReduceData<int> creduce_data(creduce_op);
-            using CornerTuple = typename decltype(creduce_data)::Type;
-
-            for (int c = 0; c < 3; ++c) {
-                auto const stag_own = stag[c];
-                for (amrex::MFIter mfi(*st.status[c], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-                    amrex::Box const tb = mfi.tilebox(field[c]->ixType().toIntVect());
-                    auto const& stat = st.status[c]->array(mfi);
-                    auto const& phi = distance_to_eb.const_array(mfi);
-
-                    creduce_op.eval(tb, creduce_data,
-                        [=] AMREX_GPU_DEVICE (int i, int j, int k) -> CornerTuple
-                    {
-                        if (stat(i, j, k) != S_FILL) { return {0}; }
-
-                        auto const g = ::mirror_geom(i, j, k, stag_own, phi,
-                            plo, dxi, dx_arr, d_band, d_img_min, h_max);
-                        if (!g.band) { return {0}; }
-
-                        // Clause (i): wall-normal bend > 30 deg vs a +/-1-cell
-                        // wall neighbour. nmin is the min dot of nv(xe) against
-                        // the wall normal at each valid neighbour (smooth wall
-                        // ~1; a sharp facet-change corner << 1).
-                        amrex::Real nmin = 2._rt;
-                        for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
-                            for (int sgn = -1; sgn <= 1; sgn += 2) {
-                                amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> xq = g.xe;
-                                xq[dd] += sgn*dx_arr[dd];
-                                amrex::RealVect const nn = ::normal_at(xq, phi, plo, dxi);
-                                amrex::Real nn2 = 0._rt;
-                                amrex::Real dt = 0._rt;
-                                for (int e = 0; e < AMREX_SPACEDIM; ++e) {
-                                    nn2 += nn[e]*nn[e];
-                                    dt  += g.nv[e]*nn[e];
-                                }
-                                if (nn2 > 0.5_rt) { nmin = amrex::min(nmin, dt); }
-                            }
-                        }
-                        bool const fiducial = (nmin < S_CORNER_COS_BEND);
-                        if (!fiducial) { return {0}; }
-
-                        // Clause (ii): LOAD-BEARING Laplacian spike. Build the
-                        // discrete Laplacian of the (unit-gradient) signed
-                        // distance at the staggered point xe by a centered 2nd
-                        // difference of the nodally-interpolated phi at
-                        // xe +/- h_max e_d. On a true signed distance lap(phi) =
-                        // -kappa away from the medial axis (bounded ~1/R for a
-                        // smooth cylinder); at a re-entrant corner the medial-axis
-                        // kink makes |lap(phi)| spike to O(1/h). The dimensionless
-                        // |lap(phi)| * h_max therefore separates the corner band
-                        // (O(1)) from the smooth wall (~2 h / R << 1) with zero
-                        // smooth-wall false positives (prototype-validated).
-                        amrex::Real lap = 0._rt;
-                        for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
-                            amrex::Real phi_pm[2];
-                            for (int sgn = -1, si = 0; sgn <= 1; sgn += 2, ++si) {
-                                amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> xq = g.xe;
-                                xq[dd] += sgn*h_max;
-#if defined(WARPX_DIM_3D)
-                                amrex::Real const yq = xq[1];
-                                amrex::Real const zq = xq[2];
-#else
-                                amrex::Real const yq = 0._rt;
-                                amrex::Real const zq = xq[1];
-#endif
-                                int iq, jq, kq;
-                                amrex::Real Wq[AMREX_SPACEDIM][2];
-                                ablastr::particles::compute_weights<amrex::IndexType::NODE>(
-                                    xq[0], yq, zq, plo, dxi, iq, jq, kq, Wq);
-                                phi_pm[si] =
-                                    ablastr::particles::interp_field_nodal(iq, jq, kq, Wq, phi);
-                            }
-                            lap += (phi_pm[0] + phi_pm[1] - 2._rt*g.s) / (h_max*h_max);
-                        }
-                        bool const laplacian_spike =
-                            (std::abs(lap) * h_max > S_CORNER_LAP);
-                        if (!laplacian_spike) { return {0}; }
-
-                        stat(i, j, k) = S_CORNER;
-                        return {1};
-                    });
-                }
-                st.status[c]->FillBoundary(geom.periodicity());
-            }
-
-            auto const cresult = creduce_data.value(creduce_op);
-            int n_corner = amrex::get<0>(cresult);
-            amrex::ParallelDescriptor::ReduceIntSum(n_corner);
-            st.n_corner = n_corner;
-            amrex::Print() << "[EBJBoundary] S_CORNER detector: n_corner = "
-                           << n_corner << " cells flagged (diagonal-cut chamfer)\n";
         }
 
         // Second pass: a fill target is well-posed only if every component
@@ -680,8 +511,7 @@ void warpx::hybrid::ApplyPECBoundaryToField (
         warpx::hybrid::EBFillStatus& st = status_cache ? *status_cache : local_status;
         if (st.empty()) {
             ::build_fill_status(st, field, eb_update, distance_to_eb, geom, stag,
-                                d_band, d_img_min, h_max, fill_covered_centers,
-                                /*corner_skip=*/false);
+                                d_band, d_img_min, h_max, fill_covered_centers);
         }
 
         for (int c = 0; c < 3; ++c) {
@@ -1251,8 +1081,7 @@ void warpx::hybrid::FoldEBDepositToField (
     if (st.empty()) {
         ::build_fill_status(st, field, eb_update, distance_to_eb, geom, stag,
                             d_band, d_img_min, h_max,
-                            /*fill_covered_centers=*/true,
-                            /*corner_skip=*/false);
+                            /*fill_covered_centers=*/true);
     }
 
     for (int c = 0; c < 3; ++c) {
