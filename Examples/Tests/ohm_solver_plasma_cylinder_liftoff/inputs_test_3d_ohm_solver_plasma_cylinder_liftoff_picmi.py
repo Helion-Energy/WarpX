@@ -625,6 +625,15 @@ def main():
         "standoff holding plasma off the wall. Default off.",
     )
     parser.add_argument(
+        "--eb-levelset-masks",
+        dest="eb_levelset_masks",
+        action="store_true",
+        help="mark the staggered EB update masks from the signed level set at each "
+        "component's own edge/face center (warpx.eb_levelset_masks) instead of the "
+        "stair-case any-cut-neighbor criterion, which freezes a C4-modulated band "
+        "of fluid points (an m=4 wall-imprint source). Staggered only. Default off.",
+    )
+    parser.add_argument(
         "--divb-clean",
         dest="divb_clean",
         action="store_true",
@@ -778,6 +787,13 @@ def main():
         equilibrium_b=args.equilibrium_b,
         vacuum=args.vacuum,
     )
+
+    # Opt-in staggered level-set EB update masks (warpx.* namespace, so set on the
+    # pywarpx bucket directly rather than through the picmi solver extension).
+    if args.eb_levelset_masks:
+        from pywarpx import warpx as warpx_bucket
+
+        warpx_bucket.eb_levelset_masks = 1
 
     # Dielectric standoff: hold the plasma args.standoff_cells cells off the (metal)
     # field wall with a Python particle scraper (a callfromparticlescraper hook that

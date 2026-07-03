@@ -3867,6 +3867,22 @@ Maxwell solver: kinetic-fluid hybrid
     embedded-boundary hybrid runs (``use_conformal_eb`` is collocated-only). Opt-in; the default
     (``false``) leaves the staggered staircase behavior unchanged.
 
+.. pp:param:: warpx.eb_levelset_masks
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Staggered hybrid-PIC embedded-boundary runs only; requires
+    :pp:param:`hybrid_pic_model.eb_b_straight_mirror`. If ``true``, the embedded-boundary field
+    update masks are marked from the signed level set evaluated at each component's own edge/face
+    center (deactivating only components whose centers are inside the conductor), instead of the
+    stair-case criterion that freezes every component neighboring a cut cell. The stair-case
+    marking deactivates a grid-aligned band that includes fluid-side components of cut cells, so
+    the effective wall seen by the near-wall field evolution carries the C4 symmetry of the grid
+    (an m=4 imprint source for curved walls); the level-set marking is the staggered analogue of
+    the collocated conformal nodal marking and leaves every fluid-side component active, with the
+    sub-cell wall treatment supplied by the level-set mirror fills.
+
 .. pp:param:: hybrid_pic_model.eb_b_fill_band_cells
     :type: ``float``
     :default: ``1`` (``sqrt(2)`` when :pp:param:`hybrid_pic_model.isotropic_resistivity` is enabled)
