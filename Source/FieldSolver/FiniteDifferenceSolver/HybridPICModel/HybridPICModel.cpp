@@ -108,10 +108,14 @@ void HybridPICModel::ReadParameters ()
         pp_hybrid, "holmstrom_blend_pow", m_holmstrom_blend_pow);
     utils::parser::queryWithParser(
         pp_hybrid, "holmstrom_blend_width", m_holmstrom_blend_width);
+    pp_hybrid.query("holmstrom_nodal_switch", m_holmstrom_nodal_switch);
 #if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_XZ)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_eta_nodal_interp,
         "hybrid_pic_model.eta_nodal_interp is only supported in 3D and 2D (XZ) "
         "Cartesian geometry");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_holmstrom_nodal_switch,
+        "hybrid_pic_model.holmstrom_nodal_switch is only supported in 3D and "
+        "2D (XZ) Cartesian geometry");
 #endif
 
     if (m_use_conformal_eb) {

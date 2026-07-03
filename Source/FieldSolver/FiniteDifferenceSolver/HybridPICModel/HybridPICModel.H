@@ -352,6 +352,17 @@ public:
      *  width*rho_floor]. Below the floor the legacy vacuum branch holds
      *  exactly (Hall fully off). Must be > 1 for the blend to be active. */
     amrex::Real m_holmstrom_blend_width = 2.0;
+    /** If true (opt-in), decide the holmstrom vacuum switch and the blend
+     *  weight from NODAL rho only: each staggered E component uses the maximum
+     *  of the nodal rho at its edge endpoints (identical to the point value on
+     *  collocated grids), instead of its own half-cell-shifted edge average.
+     *  On staggered grids the per-edge decision gives the three E components of
+     *  a cell inconsistent vacuum/plasma branches and blend weights along the
+     *  moving plasma/vacuum seam -- a grid-C4-patterned (m=4), drive-weakening
+     *  spurious-E source there. The plasma-favoring endpoint max keeps the Hall
+     *  push on right up to the seam. The physics division by rho and the
+     *  resistivity evaluation are unchanged. Cartesian only. */
+    bool m_holmstrom_nodal_switch = false;
     /** If true, skip the collocated conformal magnetic-field wall treatment
      *  entirely (no EB B fill): the unmasked nodal Faraday curl is left as-is.
      *  This reproduces the pre-treatment baseline and isolates the wall fill as
