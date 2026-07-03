@@ -111,9 +111,9 @@ void FiniteDifferenceSolver::ComputeCurlACylindrical (
 
         // Extract structures indicating where the fields
         // should be updated, given the position of the embedded boundaries.
-        // A null eb_update_B (passed for the conformal external vacuum field, so
-        // it fills through the wall) leaves the update arrays null -> the cell
-        // skips below are no-ops and curl(A) is computed everywhere.
+        // A null eb_update_B (passed for the hybrid external vacuum field on both
+        // grid types, so it fills through the wall) leaves the update arrays null
+        // -> the cell skips below are no-ops and curl(A) is computed everywhere.
         amrex::Array4<int> update_Br_arr, update_Btheta_arr, update_Bz_arr;
         // Guard against null EB update arrays: eb_update_B is null when filling the
         // conformal external vacuum field (fill through the wall), so the cell-skip
