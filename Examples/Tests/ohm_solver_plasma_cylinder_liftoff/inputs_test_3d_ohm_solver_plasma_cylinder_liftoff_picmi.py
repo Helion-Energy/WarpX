@@ -634,6 +634,17 @@ def main():
         "of fluid points (an m=4 wall-imprint source). Staggered only. Default off.",
     )
     parser.add_argument(
+        "--mc-gather",
+        dest="mc_gather",
+        action="store_true",
+        help="use momentum-conserving field gathering (algo.field_gathering): E/B "
+        "are interpolated to the nodes before the particle gather, so on staggered "
+        "grids the gather is single-valued per node with matched shapes (full "
+        "order), instead of the Galerkin gather whose order drops by one in the "
+        "staggered directions against Direct deposition. Default off "
+        "(energy-conserving/Galerkin).",
+    )
+    parser.add_argument(
         "--divb-clean",
         dest="divb_clean",
         action="store_true",
@@ -794,6 +805,12 @@ def main():
         from pywarpx import warpx as warpx_bucket
 
         warpx_bucket.eb_levelset_masks = 1
+
+    # Momentum-conserving gather: set on the picmi Simulation object (the picmi
+    # layer writes algo.field_gathering itself at initialize, so a raw bucket set
+    # here would be overwritten).
+    if args.mc_gather:
+        sim.field_gathering_algo = "momentum-conserving"
 
     # Dielectric standoff: hold the plasma args.standoff_cells cells off the (metal)
     # field wall with a Python particle scraper (a callfromparticlescraper hook that
