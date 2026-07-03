@@ -17,14 +17,14 @@ import numpy as np
 import yt
 
 # Defaults matching the simulation script
-R_INNER = 0.6
-R_OUTER = 0.7
+R_INNER = 0.65
+R_OUTER = 0.75
 R_WALL = 0.8
-BZ_BIAS = -0.1
-BZ_REV = 1.5
-TAU_RAMP = 4.0e-6
+BZ_BIAS = -0.01
+BZ_REV = 0.5
+TAU_RAMP = 10.0e-6
 N_I = 1.5e20
-N_FLOOR_FRAC = 0.03
+N_FLOOR_FRAC = 0.05
 Q_E = 1.602176634e-19
 
 # Azimuthal nonuniformity tolerances at the early-time CI checkpoint
@@ -172,6 +172,31 @@ def main():
     bz_axis = bz[R < 0.3].mean()
     assert abs(bz_axis - BZ_BIAS) < 0.05 * abs(BZ_BIAS), (
         f"on-axis Bz {bz_axis:.4f} T does not match the bias field {BZ_BIAS} T"
+    )
+
+    # The external drive field must fill through the conducting wall on BOTH
+    # grid types: deep inside the conductor (beyond the wall-band fill) the
+    # only field is the external ramp, so Bz there must track bz_external(t).
+    # Regression guard for the staggered path masking curl(A_ext) with the
+    # covered-cell EB flags, which zeroed the drive field in the conductor and
+    # put an O(B_ext) staircase jump at the wall (axis-aligned m=4 seed).
+    t_now = float(ds.current_time)
+    deep = R > R_WALL + 4 * h
+    bz_ext_now = bz_external(t_now)
+    err_cond = float(np.max(np.abs(bz[deep] - bz_ext_now)))
+    print(
+        f"deep-conductor Bz vs external ramp: max|Bz - {bz_ext_now:+.6f}| "
+        f"= {err_cond:.3e} T"
+    )
+    # The through-wall fill tracks the ramp exactly (round-off), while the
+    # masked-curl(A_ext) regression freezes the conductor at the t=0 seed, an
+    # error of |bz_external(t) - bz_external(0)| - so gate at 20% of the ramp
+    # progress at this checkpoint.
+    tol_cond = 0.2 * abs(bz_ext_now - bz_external(0.0)) + 1.0e-12
+    assert err_cond < tol_cond, (
+        f"deep-conductor Bz deviates from the external ramp by {err_cond:.3e} T "
+        f"(tol {tol_cond:.3e}) - the external vector-potential field is not "
+        "filling through the conducting wall"
     )
     assert np.max(rel["rho"]) < TOL_RHO_MODES, (
         f"azimuthal density modes {np.max(rel['rho']):.3f} above the "
