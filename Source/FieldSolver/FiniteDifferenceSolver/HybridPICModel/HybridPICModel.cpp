@@ -90,6 +90,15 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("solve_electron_energy_equation",
                     m_solve_electron_energy_equation);
     pp_hybrid.query("qdsmc_n_floor", m_qdsmc_n_floor);
+#if defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+    // The QDSMC transport compiles for the 1D radial geometries (so the full
+    // dimension matrix builds) but is not validated there -- the entropy
+    // deposit has no radial volume weighting yet.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_solve_electron_energy_equation,
+        "hybrid_pic_model.solve_electron_energy_equation is not supported in "
+        "RCYLINDER/RSPHERE geometries yet.");
+#endif
 
     // Resistive electron-heating source (Phys. Plasmas 31, 012902 (2024), Eq. 12):
     //   S_e = Sigma_s nu_{s,e} n_s m_s |V_s - V_e|^2,  nu_{s,e} = Z_s e^2 eta n_e / m_s
