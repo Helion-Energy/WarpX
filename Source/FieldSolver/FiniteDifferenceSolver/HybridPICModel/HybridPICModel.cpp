@@ -101,6 +101,15 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("use_conformal_eb", m_use_conformal_eb);
     pp_hybrid.query("eb_hall_mask", m_eb_hall_mask);
 
+    // nodal (hyper-)resistivity evaluation + interpolation to the staggered
+    // E locations (single-valued eta across the plasma/vacuum seam)
+    pp_hybrid.query("eta_nodal_interp", m_eta_nodal_interp);
+#if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_XZ)
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_eta_nodal_interp,
+        "hybrid_pic_model.eta_nodal_interp is only supported in 3D and 2D (XZ) "
+        "Cartesian geometry");
+#endif
+
     if (m_use_conformal_eb) {
 #if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_XZ)
         WARPX_ABORT_WITH_MESSAGE(

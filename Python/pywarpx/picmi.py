@@ -2277,6 +2277,17 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         band node (the wall-layer mode, for damping the divergence instability
         a sharp re-entrant wall corner pumps).
 
+    eta_nodal_interp: bool, default=False
+        Evaluate the resistivity and hyper-resistivity parsers once per NODE
+        (from the nodal rho and the Hall-consistent nodal J/B) and interpolate
+        the resulting eta fields to the staggered E locations, like the nodal
+        Hall term -- instead of evaluating the parsers pointwise at each
+        staggered component location, which samples a steep eta(rho) transition
+        at three different positions per cell and gives the E components
+        inconsistent resistivities across the plasma/vacuum (n_floor) seam.
+        No-op on collocated grids and for rho/J-independent resistivities.
+        Cartesian only.
+
     isotropic_hyper_resistivity: bool, default=False
         Evaluate the hyper-resistivity Laplacian with the isotropic
         Mehrstellen (2D) / Patra-Karttunen (3D) stencils instead of the
@@ -2362,6 +2373,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         divb_clean_band_cells=None,
         divb_clean_inner_div_cells=None,
         divb_clean_inner_corr_cells=None,
+        eta_nodal_interp=None,
         isotropic_hyper_resistivity=None,
         isotropic_resistivity=None,
         Jx_external_function=None,
@@ -2405,6 +2417,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.divb_clean_band_cells = divb_clean_band_cells
         self.divb_clean_inner_div_cells = divb_clean_inner_div_cells
         self.divb_clean_inner_corr_cells = divb_clean_inner_corr_cells
+        self.eta_nodal_interp = eta_nodal_interp
         self.isotropic_hyper_resistivity = isotropic_hyper_resistivity
         self.isotropic_resistivity = isotropic_resistivity
 
@@ -2476,6 +2489,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         pywarpx.hybridpicmodel.divb_clean_inner_corr_cells = (
             self.divb_clean_inner_corr_cells
         )
+        pywarpx.hybridpicmodel.eta_nodal_interp = self.eta_nodal_interp
         pywarpx.hybridpicmodel.isotropic_hyper_resistivity = (
             self.isotropic_hyper_resistivity
         )

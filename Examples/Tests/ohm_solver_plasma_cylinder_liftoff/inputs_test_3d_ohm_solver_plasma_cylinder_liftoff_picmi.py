@@ -126,6 +126,7 @@ def setup_simulation(
     divb_clean=False,
     divb_clean_iters=3,
     eta_hyper_mult=1.0,
+    eta_nodal=False,
     equilibrium_b=False,
     vacuum=False,
 ):
@@ -217,6 +218,7 @@ def setup_simulation(
         eb_rho_dirichlet=True,
         isotropic_resistivity=isotropic_resistivity,
         isotropic_hyper_resistivity=isotropic_hyper,
+        eta_nodal_interp=True if eta_nodal else None,
         use_rkf45=True,
         substep_rtol=substep_rtol,
         substep_atol=1.0e-8,
@@ -636,6 +638,14 @@ def main():
         "for the staggered (Yee) runs.",
     )
     parser.add_argument(
+        "--eta-nodal",
+        dest="eta_nodal",
+        action="store_true",
+        help="evaluate the (hyper-)resistivity once per node and interpolate "
+        "to the staggered E locations (hybrid_pic_model.eta_nodal_interp): a "
+        "single-valued eta across the plasma/vacuum seam on Yee grids.",
+    )
+    parser.add_argument(
         "--ni-mult",
         type=float,
         default=1.0,
@@ -734,6 +744,7 @@ def main():
         divb_clean=args.divb_clean,
         divb_clean_iters=args.divb_clean_iters,
         eta_hyper_mult=args.eta_hyper_mult,
+        eta_nodal=args.eta_nodal,
         equilibrium_b=args.equilibrium_b,
         vacuum=args.vacuum,
     )
