@@ -325,6 +325,17 @@ public:
      *  not pollute the near-wall J x B. Set false to recover the plain (polluting)
      *  averaging for A/B. Only affects conformal-EB staggered runs. */
     bool m_eb_hall_mask = true;
+    /** If true (opt-in), evaluate the resistivity and hyper-resistivity parsers
+     *  ONCE per node -- from the nodal rho and the Hall-consistent nodal J/B --
+     *  and interpolate the resulting eta fields to the staggered E locations
+     *  (like the nodal enE/Hall term), instead of evaluating the parsers
+     *  pointwise at each staggered component location. Pointwise evaluation
+     *  samples a steep eta(rho) transition at three different positions per
+     *  cell, giving the E components inconsistent resistivities across the
+     *  plasma/vacuum (n_floor) seam -- a spurious-E source there. No-op on
+     *  collocated grids and for rho/J-independent resistivities. Cartesian
+     *  only. */
+    bool m_eta_nodal_interp = false;
     /** If true, skip the collocated conformal magnetic-field wall treatment
      *  entirely (no EB B fill): the unmasked nodal Faraday curl is left as-is.
      *  This reproduces the pre-treatment baseline and isolates the wall fill as
