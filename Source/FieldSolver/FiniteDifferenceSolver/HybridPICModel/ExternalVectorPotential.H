@@ -63,9 +63,6 @@ protected:
     // Clean div A
     bool m_do_clean_divA = true;
 
-    // One-shot guard so CheckInitialB() warns at most once (first field push)
-    bool m_initial_B_checked = false;
-
 public:
 
     // Default Constructor
@@ -87,12 +84,6 @@ public:
     );
 
     void InitData ();
-
-    /** One-shot check (call from the first field push, after the grid initial B
-     *  has been applied): warn if the external vector potential gives a nonzero
-     *  B at t = 0 but the initial grid B was left at zero, which makes the
-     *  split-field push inject a turn-on transient at the first step. */
-    void CheckInitialB ();
 
     void CalculateExternalCurlA ();
     void CalculateExternalCurlA (std::string& coil_name);
