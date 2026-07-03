@@ -29,11 +29,17 @@ print(f"particle number: {N[0]:.6e} -> {N[-1]:.6e}   (max spread {N_spread:.3e})
 print(f"kinetic temperature: {T0:.1f} K -> {T1:.1f} K   (gas 300 K, wall 600 K)")
 
 # reflection, not absorption
-assert N_spread < 5e-3, "particle number not conserved -> EB is absorbing/leaking, not reflecting"
+assert N_spread < 5e-3, (
+    "particle number not conserved -> EB is absorbing/leaking, not reflecting"
+)
 # gas heats toward the wall ...
 assert T1 > T0 + 50.0, "gas did not heat -> diffuse accommodation not applied"
 assert T1 > 380.0, "insufficient heating toward the 600 K wall"
 # ... but never exceeds the wall temperature
-assert T1 < 610.0, "gas overshot the wall temperature -> thermal accommodation is unphysical"
+assert T1 < 610.0, (
+    "gas overshot the wall temperature -> thermal accommodation is unphysical"
+)
 
-print("PASS: diffuse EB reflection conserves particle number and thermalizes the gas toward the wall.")
+print(
+    "PASS: diffuse EB reflection conserves particle number and thermalizes the gas toward the wall."
+)

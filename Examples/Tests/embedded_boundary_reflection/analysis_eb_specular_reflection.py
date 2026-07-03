@@ -24,8 +24,12 @@ print(f"particle number: {N[0]:.6e} -> {N[-1]:.6e}   (max spread {N_spread:.3e})
 print(f"total energy:    {E[0]:.6e} -> {E[-1]:.6e} J (max spread {E_spread:.3e})")
 
 # specular reflection loses no particles ...
-assert N_spread < 5e-3, "particle number not conserved -> EB is absorbing/leaking, not reflecting"
+assert N_spread < 5e-3, (
+    "particle number not conserved -> EB is absorbing/leaking, not reflecting"
+)
 # ... and conserves kinetic energy
-assert E_spread < 5e-3, "kinetic energy not conserved -> specular reflection is not elastic"
+assert E_spread < 5e-3, (
+    "kinetic energy not conserved -> specular reflection is not elastic"
+)
 
 print("PASS: specular EB reflection conserves particle number and kinetic energy.")
