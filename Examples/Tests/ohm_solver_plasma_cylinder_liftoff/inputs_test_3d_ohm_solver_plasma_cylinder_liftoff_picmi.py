@@ -129,7 +129,10 @@ def setup_simulation(
     eta_nodal=False,
     holmstrom_blend_pow=0.0,
     holmstrom_blend_width=2.0,
-    holmstrom_nodal_switch=False,
+    holmstrom_switch_mode="edge",
+    dive_seam_alpha=0.0,
+    dive_seam_iters=1,
+    dive_seam_band=4.0,
     equilibrium_b=False,
     vacuum=False,
 ):
@@ -226,7 +229,12 @@ def setup_simulation(
         holmstrom_blend_width=holmstrom_blend_width
         if holmstrom_blend_pow > 0
         else None,
-        holmstrom_nodal_switch=True if holmstrom_nodal_switch else None,
+        holmstrom_switch_mode=holmstrom_switch_mode
+        if holmstrom_switch_mode != "edge"
+        else None,
+        dive_seam_alpha=dive_seam_alpha if dive_seam_alpha > 0 else None,
+        dive_seam_iters=dive_seam_iters if dive_seam_alpha > 0 else None,
+        dive_seam_band=dive_seam_band if dive_seam_alpha > 0 else None,
         use_rkf45=True,
         substep_rtol=substep_rtol,
         substep_atol=1.0e-8,
@@ -647,14 +655,38 @@ def main():
         "(energy-conserving/Galerkin).",
     )
     parser.add_argument(
-        "--holmstrom-nodal-switch",
-        dest="holmstrom_nodal_switch",
-        action="store_true",
-        help="decide the holmstrom vacuum switch and blend weight from nodal rho "
-        "only (endpoint max), so the three staggered E components use a "
-        "consistent branch/weight at the plasma/vacuum seam instead of three "
-        "half-cell-shifted per-edge samples "
-        "(hybrid_pic_model.holmstrom_nodal_switch). Default off.",
+        "--holmstrom-switch-mode",
+        dest="holmstrom_switch_mode",
+        choices=["edge", "node", "cell"],
+        default="edge",
+        help="sampling mode of the density deciding the holmstrom vacuum switch "
+        "and blend weight (hybrid_pic_model.holmstrom_switch_mode): 'edge' = "
+        "per-component half-cell-shifted average (legacy), 'node' = endpoint "
+        "min (vacuum-favoring, single-valued per node), 'cell' = cell-centered "
+        "average (one decision per cell for all three E components).",
+    )
+    parser.add_argument(
+        "--dive-seam-alpha",
+        dest="dive_seam_alpha",
+        type=float,
+        default=0.0,
+        help="density-banded Marder clean of the Ohm E at the n_floor seam, per "
+        "substage on staggered grids (hybrid_pic_model.dive_seam_alpha; "
+        "fraction of the explicit-diffusion cap, 0 = off).",
+    )
+    parser.add_argument(
+        "--dive-seam-iters",
+        dest="dive_seam_iters",
+        type=int,
+        default=1,
+        help="sweeps of the seam E clean per substage.",
+    )
+    parser.add_argument(
+        "--dive-seam-band",
+        dest="dive_seam_band",
+        type=float,
+        default=4.0,
+        help="upper edge of the seam clean window in units of the density floor.",
     )
     parser.add_argument(
         "--divb-clean",
@@ -807,7 +839,10 @@ def main():
         eta_nodal=args.eta_nodal,
         holmstrom_blend_pow=args.holmstrom_blend_pow,
         holmstrom_blend_width=args.holmstrom_blend_width,
-        holmstrom_nodal_switch=args.holmstrom_nodal_switch,
+        holmstrom_switch_mode=args.holmstrom_switch_mode,
+        dive_seam_alpha=args.dive_seam_alpha,
+        dive_seam_iters=args.dive_seam_iters,
+        dive_seam_band=args.dive_seam_band,
         equilibrium_b=args.equilibrium_b,
         vacuum=args.vacuum,
     )
