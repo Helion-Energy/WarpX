@@ -2291,13 +2291,15 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
 
     holmstrom_nodal_switch: bool, default=False
         If True, decide the Holmstrom vacuum switch and the blend weight from
-        nodal rho only (the maximum of the nodal rho at each staggered E
+        nodal rho only (the minimum of the nodal rho at each staggered E
         component's edge endpoints), so the three E components of a cell use a
         consistent vacuum/plasma branch and blend weight at the plasma/vacuum
         seam instead of three half-cell-shifted per-edge samples (a
         grid-C4-patterned spurious-E source there on staggered grids). The
-        physics division by rho and the resistivity evaluation are unchanged.
-        No-op on collocated grids; Cartesian only.
+        vacuum-favoring minimum keeps the stiff Hall branch strictly above the
+        density floor at every endpoint. The physics division by rho and the
+        resistivity evaluation are unchanged. No-op on collocated grids;
+        Cartesian only.
 
     eta_nodal_interp: bool, default=False
         Evaluate the resistivity and hyper-resistivity parsers once per NODE

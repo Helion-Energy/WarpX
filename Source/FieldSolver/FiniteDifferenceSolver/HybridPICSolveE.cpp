@@ -70,13 +70,17 @@ namespace {
     }
 
     /** Nodal decision density for the holmstrom vacuum switch / blend weight
-     * (hybrid_pic_model.holmstrom_nodal_switch): the MAXIMUM of the nodal rho at
+     * (hybrid_pic_model.holmstrom_nodal_switch): the MINIMUM of the nodal rho at
      * the endpoints of the staggered E component's edge (the same nodes the
      * standard edge average reads -- identical footprint, no extra ghost reads).
      * Degenerates to the point value on collocated grids. Using the same nodal
      * field for every component removes the per-component half-cell decision
-     * offsets at the plasma/vacuum seam; the endpoint max is plasma-favoring, so
-     * the Hall push stays on right up to the seam. */
+     * offsets at the plasma/vacuum seam. The endpoint min is vacuum-favoring:
+     * the Hall branch runs only where EVERY endpoint node is above the floor,
+     * so the stiff Hall physics never extends into sub-floor territory (the
+     * plasma-favoring endpoint-max variant was measured to DESTABILIZE, choking
+     * at step 734 vs 12000 -- it runs full Hall on edges whose own density is
+     * below the floor, the same poison as the below-floor blend ramp). */
     AMREX_GPU_DEVICE AMREX_FORCE_INLINE
     amrex::Real NodalSwitchRho (
         amrex::Array4<amrex::Real const> const& rho,
@@ -92,7 +96,7 @@ namespace {
         for (int kk = 0; kk < nk; ++kk) {
         for (int jj = 0; jj < nj; ++jj) {
         for (int ii = 0; ii < ni; ++ii) {
-            r = amrex::max(r, rho(i+ii, j+jj, k+kk));
+            r = amrex::min(r, rho(i+ii, j+jj, k+kk));
         }}}
         return r;
     }
