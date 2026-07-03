@@ -108,14 +108,47 @@ void HybridPICModel::ReadParameters ()
         pp_hybrid, "holmstrom_blend_pow", m_holmstrom_blend_pow);
     utils::parser::queryWithParser(
         pp_hybrid, "holmstrom_blend_width", m_holmstrom_blend_width);
-    pp_hybrid.query("holmstrom_nodal_switch", m_holmstrom_nodal_switch);
+    {
+        std::string switch_mode_str = "edge";
+        pp_hybrid.query("holmstrom_switch_mode", switch_mode_str);
+        if (switch_mode_str == "edge") { m_holmstrom_switch_mode = 0; }
+        else if (switch_mode_str == "node") { m_holmstrom_switch_mode = 1; }
+        else if (switch_mode_str == "cell") { m_holmstrom_switch_mode = 2; }
+        else {
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.holmstrom_switch_mode must be one of "
+                "'edge', 'node', 'cell' (got '" + switch_mode_str + "')");
+        }
+    }
+    utils::parser::queryWithParser(pp_hybrid, "dive_seam_alpha", m_dive_seam_alpha);
+    utils::parser::queryWithParser(pp_hybrid, "dive_seam_iters", m_dive_seam_iters);
+    utils::parser::queryWithParser(pp_hybrid, "dive_seam_band", m_dive_seam_band);
+    // The compact Yee grad(div) sweep is stable for alpha <= 1/6 (cubic 3D
+    // cells; the 2D cap is higher). The clean runs every substage, so an
+    // over-cap value detonates within one ion step -- reject it up front.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_dive_seam_alpha <= 1.0_rt/6.0_rt,
+        "hybrid_pic_model.dive_seam_alpha must be <= 1/6 (the explicit "
+        "grad(div) stability cap for cubic 3D cells).");
+    // Renamed parameter guard: the short-lived bool was replaced by the
+    // string-valued holmstrom_switch_mode.
+    {
+        bool old_nodal_switch = false;
+        if (pp_hybrid.query("holmstrom_nodal_switch", old_nodal_switch)) {
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.holmstrom_nodal_switch was renamed: use "
+                "hybrid_pic_model.holmstrom_switch_mode = node (or cell/edge).");
+        }
+    }
 #if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_XZ)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_eta_nodal_interp,
         "hybrid_pic_model.eta_nodal_interp is only supported in 3D and 2D (XZ) "
         "Cartesian geometry");
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_holmstrom_nodal_switch,
-        "hybrid_pic_model.holmstrom_nodal_switch is only supported in 3D and "
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_holmstrom_switch_mode == 0,
+        "hybrid_pic_model.holmstrom_switch_mode is only supported in 3D and "
         "2D (XZ) Cartesian geometry");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_dive_seam_alpha <= 0.0_rt,
+        "hybrid_pic_model.dive_seam_alpha is only supported in 3D and 2D (XZ) "
+        "Cartesian geometry");
 #endif
 
     if (m_use_conformal_eb) {
@@ -1413,6 +1446,13 @@ void HybridPICModel::FieldPush (
     CalculatePlasmaCurrent(Bfield, eb_update_E);
     // Calculate the E-field from Ohm's law
     HybridPICSolveE(Efield, Jfield, Bfield, rhofield, eb_update_E, true);
+    // Density-banded Marder clean of the Ohm E at the n_floor seam (staggered
+    // grids): diffuse the divergence-carrying, per-component-inconsistent E
+    // content at the plasma/vacuum seam before Faraday integrates it into B.
+    // No-op unless dive_seam_alpha > 0; handles its own ghost exchanges.
+    if (Bz_IndexType[0] != Ez_IndexType[0]) {
+        MarderCleanESeam(Efield, rhofield, eb_update_E, ng, nodal_sync);
+    }
     // Refresh the E ghosts before the Faraday push reads them on a collocated
     // grid: the masked nodal curl reads ghost E.
     if (Bz_IndexType[0] == Ez_IndexType[0]) {

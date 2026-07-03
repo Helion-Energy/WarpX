@@ -70,7 +70,7 @@ namespace {
     }
 
     /** Nodal decision density for the holmstrom vacuum switch / blend weight
-     * (hybrid_pic_model.holmstrom_nodal_switch): the MINIMUM of the nodal rho at
+     * (hybrid_pic_model.holmstrom_switch_mode = "node"): the MINIMUM of the nodal rho at
      * the endpoints of the staggered E component's edge (the same nodes the
      * standard edge average reads -- identical footprint, no extra ghost reads).
      * Degenerates to the point value on collocated grids. Using the same nodal
@@ -99,6 +99,47 @@ namespace {
             r = amrex::min(r, rho(i+ii, j+jj, k+kk));
         }}}
         return r;
+    }
+
+    /** Cell decision density for holmstrom_switch_mode = "cell": the MINIMUM
+     * over the component's ADJACENT cells of the cell-centered (node-averaged)
+     * rho. An edge is adjacent to one cell along its own (cell-centered)
+     * direction and to both neighbors in its transverse (nodal) directions;
+     * taking all of them keeps the edge-to-cell assignment reflection- and
+     * C4-equivariant (a single upper cell would carry a preferred grid
+     * diagonal), and the min is vacuum-favoring like the "node" mode. On a
+     * collocated grid this is the symmetric min over all cells sharing the
+     * node. Dummy dimensions (marked nodal beyond AMREX_SPACEDIM) take no
+     * offset and no averaging span. */
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    amrex::Real CellSwitchRho (
+        amrex::Array4<amrex::Real const> const& rho,
+        amrex::GpuArray<int,3> const& stag,
+        int i, int j, int k)
+    {
+        using namespace amrex::literals;
+        int off_lo[3], span[3];
+        int const ic[3] = {i, j, k};
+        for (int d = 0; d < 3; ++d) {
+            const bool real_dim = (d < AMREX_SPACEDIM);
+            off_lo[d] = (real_dim && stag[d] == 1) ? -1 : 0;
+            span[d] = real_dim ? 2 : 1;
+        }
+        amrex::Real rmin = std::numeric_limits<amrex::Real>::max();
+        for (int ok = off_lo[2]; ok <= 0; ++ok) {
+        for (int oj = off_lo[1]; oj <= 0; ++oj) {
+        for (int oi = off_lo[0]; oi <= 0; ++oi) {
+            amrex::Real sum = 0.0_rt;
+            int cnt = 0;
+            for (int kk = 0; kk < span[2]; ++kk) {
+            for (int jj = 0; jj < span[1]; ++jj) {
+            for (int ii = 0; ii < span[0]; ++ii) {
+                sum += rho(ic[0]+oi+ii, ic[1]+oj+jj, ic[2]+ok+kk);
+                cnt += 1;
+            }}}
+            rmin = amrex::min(rmin, sum/static_cast<amrex::Real>(cnt));
+        }}}
+        return rmin;
     }
 }
 
@@ -1130,10 +1171,12 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     const bool holmstrom_blend = holmstrom_vacuum_region && (holmstrom_blend_pow > 0._rt)
         && (holmstrom_blend_width > 1._rt);
     const amrex::Real inv_blend_range = 1._rt/((holmstrom_blend_width - 1._rt)*rho_floor);
-    // Nodal decision density for the vacuum switch/blend weight: single-valued
-    // per node, so the three staggered E components stop deciding the branch
-    // from three half-cell-shifted rho samples at the plasma/vacuum seam.
-    const bool nodal_switch = hybrid_model->m_holmstrom_nodal_switch;
+    // Sampling mode of the decision density for the vacuum switch/blend weight:
+    // 0 = per-edge average (legacy), 1 = endpoint-min nodal (single-valued per
+    // node, vacuum-favoring), 2 = cell-centered average (a single
+    // piecewise-constant-per-cell decision for all three E components of an
+    // index -- no per-component half-shifts at the plasma/vacuum seam).
+    const int switch_mode = hybrid_model->m_holmstrom_switch_mode;
     const amrex::Real inv_mu0 = 1._rt/PhysConst::mu0;
     amrex::GpuArray<amrex::Real, 3> dx_arr{};
     amrex::GpuArray<amrex::Real, 3> h2{};
@@ -1382,8 +1425,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ex_stag, coarsen, i, j, k, 0);
             // Decision density for the vacuum switch/blend (physics keeps rho_val)
-            const Real rho_dec = nodal_switch ?
-                NodalSwitchRho(rho, Ex_stag, i, j, k) : rho_val;
+            const Real rho_dec =
+                (switch_mode == 1) ? NodalSwitchRho(rho, Ex_stag, i, j, k) :
+                (switch_mode == 2) ? CellSwitchRho(rho, Ex_stag, i, j, k) :
+                rho_val;
 
             if (rho_dec < rho_floor && holmstrom_vacuum_region) {
                 if (include_external_fields) {
@@ -1514,8 +1559,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ey_stag, coarsen, i, j, k, 0);
             // Decision density for the vacuum switch/blend (physics keeps rho_val)
-            const Real rho_dec = nodal_switch ?
-                NodalSwitchRho(rho, Ey_stag, i, j, k) : rho_val;
+            const Real rho_dec =
+                (switch_mode == 1) ? NodalSwitchRho(rho, Ey_stag, i, j, k) :
+                (switch_mode == 2) ? CellSwitchRho(rho, Ey_stag, i, j, k) :
+                rho_val;
 
             if (rho_dec < rho_floor && holmstrom_vacuum_region) {
                 if (include_external_fields) {
@@ -1631,8 +1678,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, k, 0);
             // Decision density for the vacuum switch/blend (physics keeps rho_val)
-            const Real rho_dec = nodal_switch ?
-                NodalSwitchRho(rho, Ez_stag, i, j, k) : rho_val;
+            const Real rho_dec =
+                (switch_mode == 1) ? NodalSwitchRho(rho, Ez_stag, i, j, k) :
+                (switch_mode == 2) ? CellSwitchRho(rho, Ez_stag, i, j, k) :
+                rho_val;
 
             if (rho_dec < rho_floor && holmstrom_vacuum_region) {
                 if (include_external_fields) {

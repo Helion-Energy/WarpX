@@ -3973,21 +3973,53 @@ Maxwell solver: kinetic-fluid hybrid
     Upper edge of the :pp:param:`hybrid_pic_model.holmstrom_blend_pow` window, in units of the
     density floor.
 
-.. pp:param:: hybrid_pic_model.holmstrom_nodal_switch
-    :type: ``bool``
-    :default: ``false``
+.. pp:param:: hybrid_pic_model.holmstrom_switch_mode
+    :type: ``string``
+    :default: ``edge``
     :optional:
 
-    If ``true`` (opt-in), the Holmstrom vacuum switch and the blend weight are decided from the
-    NODAL charge density only: each staggered electric-field component uses the minimum of the
-    nodal density at its edge endpoints (identical to the point value on collocated grids),
-    instead of its own half-cell-shifted edge average. The default per-edge decision gives the
-    three electric-field components of a cell inconsistent vacuum/plasma branches and blend
-    weights along the plasma/vacuum seam on staggered grids — a grid-C4-patterned (m=4)
-    spurious-electric-field source that also weakens the Hall drive coupling at the seam. The
-    vacuum-favoring endpoint minimum keeps the stiff Hall branch strictly above the density
-    floor at every endpoint; the physics division by density and the resistivity evaluation are
-    unchanged. Cartesian only.
+    Sampling mode of the charge density that decides the Holmstrom vacuum switch and the blend
+    weight (the physics division by density and the resistivity evaluation are unchanged).
+    ``edge`` (default): each staggered electric-field component uses its own half-cell-shifted
+    edge average — the three components of a cell can take inconsistent vacuum/plasma branches
+    and blend weights along the plasma/vacuum seam, a grid-C4-patterned (m=4) spurious-field
+    source on staggered grids. ``node``: the minimum of the nodal density at the edge endpoints
+    (vacuum-favoring: the stiff Hall branch runs only where every endpoint is above the floor;
+    the plasma-favoring maximum was measured to destabilize). ``cell``: the density averaged to
+    the cell center decides for all three components of that index — a single
+    piecewise-constant-per-cell decision field with no per-component half-shifts. Cartesian
+    only.
+
+.. pp:param:: hybrid_pic_model.dive_seam_alpha
+    :type: ``float``
+    :default: ``0`` (off)
+    :optional:
+
+    Density-banded Marder clean of the Ohm's-law electric field at the ``n_floor`` seam,
+    applied per field substage on staggered grids: iterates
+    :math:`\vec{E} \mathrel{+}= \alpha\,\nabla(\nabla\cdot\vec{E})` restricted to edges whose
+    endpoint-averaged density is at or below
+    :pp:param:`hybrid_pic_model.dive_seam_band` :math:`\times \rho_\mathrm{floor}`, diffusing
+    the divergence-carrying, per-component-inconsistent electric-field content injected at the
+    moving plasma/vacuum seam before the Faraday push integrates it into the magnetic field.
+    The nodal-divergence / edge-gradient pair is mutually adjoint, so the update strictly
+    dissipates the divergence norm and preserves the curl to round-off away from the window
+    edge. The value is a fraction of the explicit-diffusion stability cap. 3D/XZ Cartesian,
+    staggered grids only.
+
+.. pp:param:: hybrid_pic_model.dive_seam_iters
+    :type: ``int``
+    :default: ``1``
+    :optional:
+
+    Sweeps of the seam electric-field clean per substage.
+
+.. pp:param:: hybrid_pic_model.dive_seam_band
+    :type: ``float``
+    :default: ``4``
+    :optional:
+
+    Upper edge of the seam clean window, in units of the density floor.
 
 .. pp:param:: hybrid_pic_model.eta_nodal_interp
     :type: ``bool``
