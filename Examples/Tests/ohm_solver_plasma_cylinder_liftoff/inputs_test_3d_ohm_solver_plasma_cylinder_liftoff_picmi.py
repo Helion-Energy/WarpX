@@ -253,13 +253,15 @@ def setup_simulation(
         ),
     )
 
-    # Seed the initial grid B with the bias field so Bfield_fp starts as the
-    # TOTAL B (plasma 0 + external bias) that the split-field external-A push
-    # expects. Without this, dump 0 has B = 0 and the first push's external
-    # subtract acts on an un-seeded B, seeding a spurious near-wall transient.
-    # The Hermite ramp has f(0) = bz_bias, so the step-1 subtract of the
-    # external A at t = 0 removes this seed and recovers plasma B = 0. A uniform
-    # Bz is divergence-free, so the initial projection div cleaner is disabled.
+    # Seed the initial grid B with the PLASMA self-field only. The split-field
+    # external-A machinery adds B_ext(t=0) to Bfield_fp at PIC-loop start
+    # (HybridPICInitializeRhoJandB, upstream #6047), so seeding the bias here
+    # would double-count it: the loop-start add stacks the external on top of
+    # the seed and the per-step subtract/add telescopes the double forever
+    # (measured: on-axis Bz = 2*bz_bias at the first CI checkpoint). The
+    # Hermite ramp has f(0) = bz_bias, so the external add supplies the bias.
+    # The seeds below are divergence-free, so the initial projection div
+    # cleaner is disabled.
     if equilibrium_b and not vacuum:
         # Self-consistent MHD (theta-pinch) equilibrium seed instead of the uniform
         # bias: the diamagnetic axial field in radial force balance with the annular
@@ -287,9 +289,12 @@ def setup_simulation(
                 f"({n_ann_eq}*(({rr}>={R_INNER})*({rr}<={r_outer}))"
                 f"+{n_fill_eq}*({rr}<{R_INNER}))"
             )
-        bz_seed = f"{sgn}sqrt({bz_bias**2}+{k_eq}*({n_ann_eq}-{n_of_r}))"
+        # Seed only the diamagnetic deviation B_eq(r) - bz_bias (the plasma
+        # self-field sustained by the ion current); the external add supplies
+        # the uniform bias part of B_eq.
+        bz_seed = f"{sgn}sqrt({bz_bias**2}+{k_eq}*({n_ann_eq}-{n_of_r}))-({bz_bias})"
     else:
-        bz_seed = f"{bz_bias}"
+        bz_seed = "0"
     sim.add_applied_field(
         picmi.AnalyticInitialField(
             Bx_expression="0",
