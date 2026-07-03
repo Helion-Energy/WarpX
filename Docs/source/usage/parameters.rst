@@ -3931,6 +3931,32 @@ Maxwell solver: kinetic-fluid hybrid
     values cannot pollute the near-wall Hall electric field. Set ``false`` to recover the plain
     unmasked averaging for A/B comparison.
 
+.. pp:param:: hybrid_pic_model.holmstrom_blend_pow
+    :type: ``float``
+    :default: ``0`` (off)
+    :optional:
+
+    If ``> 0``, smooths the binary Holmstrom vacuum switch (which turns the Ohm's-law
+    Hall/pressure terms on at full strength wherever the locally interpolated density crosses
+    the floor — flipping the staggered electric-field components independently across the
+    plasma/vacuum seam) with an above-floor power window: for
+    :math:`\rho \in [\rho_\mathrm{floor},\, W\rho_\mathrm{floor}]` (with :math:`W` set by
+    :pp:param:`hybrid_pic_model.holmstrom_blend_width`) the divided-by-density content of the
+    electric field is weighted by
+    :math:`w = ((\rho-\rho_\mathrm{floor})/((W-1)\rho_\mathrm{floor}))^{pow}` and blended
+    from the vacuum value, so the stiff Hall physics fades in over the low-density band. Below
+    the floor the field remains purely the diffusive resistive/hyper-resistive terms (the
+    legacy vacuum branch holds exactly). Only active with
+    :pp:param:`hybrid_pic_model.holmstrom_vacuum_region`; Cartesian geometries.
+
+.. pp:param:: hybrid_pic_model.holmstrom_blend_width
+    :type: ``float``
+    :default: ``2``
+    :optional:
+
+    Upper edge of the :pp:param:`hybrid_pic_model.holmstrom_blend_pow` window, in units of the
+    density floor.
+
 .. pp:param:: hybrid_pic_model.eta_nodal_interp
     :type: ``bool``
     :default: ``false``

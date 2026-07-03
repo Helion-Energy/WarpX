@@ -1079,6 +1079,25 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     // spurious-E source there. No-op on collocated grids (already nodal) and for
     // rho/J-independent resistivities (interpolating a constant).
     const bool eta_nodal = hybrid_model->m_eta_nodal_interp;
+    // Smooth holmstrom vacuum blend, ABOVE-floor window form: below the floor
+    // the legacy vacuum branch holds exactly (Hall fully off -- the binary
+    // cutoff is what protects the sub-floor region from whistler stiffness);
+    // on rho in [rho_floor, width*rho_floor] the Hall/pressure (divided-by-
+    // rho) content of E is ramped in with
+    //     w = ((rho - rho_floor) / ((width-1)*rho_floor))^pow,
+    // blending from the vacuum value to the full Ohm's law, so the staggered
+    // components no longer flip independently at the seam and the stiff Hall
+    // physics fades in over the low-density band (where the Yee liftoff
+    // erupts, n ~ 3x floor) instead of switching on at full strength one cell
+    // above the floor. The purely diffusive resistive/hyper-resistive terms
+    // (added below) are never gated. pow <= 0 keeps the legacy binary switch.
+    // (The below-floor ramp variant was measured to DESTABILIZE: it feeds
+    // partial Hall into the sub-floor region, choke 414 vs baseline 1594.)
+    const amrex::Real holmstrom_blend_pow = hybrid_model->m_holmstrom_blend_pow;
+    const amrex::Real holmstrom_blend_width = hybrid_model->m_holmstrom_blend_width;
+    const bool holmstrom_blend = holmstrom_vacuum_region && (holmstrom_blend_pow > 0._rt)
+        && (holmstrom_blend_width > 1._rt);
+    const amrex::Real inv_blend_range = 1._rt/((holmstrom_blend_width - 1._rt)*rho_floor);
     const amrex::Real inv_mu0 = 1._rt/PhysConst::mu0;
     amrex::GpuArray<amrex::Real, 3> dx_arr{};
     amrex::GpuArray<amrex::Real, 3> h2{};
@@ -1347,6 +1366,19 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
 
                 Ex(i, j, k) = (enE_x - grad_Pe) / rho_val_limited;
+
+                if (holmstrom_blend) {
+                    // smooth above-floor transition: ramp the Hall/pressure
+                    // content in over [rho_floor, width*rho_floor] and blend
+                    // from the vacuum value (E_ext or 0); the diffusive
+                    // resistive terms added below stay fully on.
+                    const Real s = (rho_val - rho_floor) * inv_blend_range;
+                    if (s < 1._rt) {
+                        const Real w = std::pow(std::max(s, 0._rt), holmstrom_blend_pow);
+                        const Real vac = include_external_fields ? Ex_ext(i, j, k) : 0._rt;
+                        Ex(i, j, k) = w * Ex(i, j, k) + (1._rt - w) * vac;
+                    }
+                }
             }
 
             // Add resistivity only if E field value is used to update B
@@ -1463,6 +1495,19 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
 
                 Ey(i, j, k) = (enE_y - grad_Pe) / rho_val_limited;
+
+                if (holmstrom_blend) {
+                    // smooth above-floor transition: ramp the Hall/pressure
+                    // content in over [rho_floor, width*rho_floor] and blend
+                    // from the vacuum value (E_ext or 0); the diffusive
+                    // resistive terms added below stay fully on.
+                    const Real s = (rho_val - rho_floor) * inv_blend_range;
+                    if (s < 1._rt) {
+                        const Real w = std::pow(std::max(s, 0._rt), holmstrom_blend_pow);
+                        const Real vac = include_external_fields ? Ey_ext(i, j, k) : 0._rt;
+                        Ey(i, j, k) = w * Ey(i, j, k) + (1._rt - w) * vac;
+                    }
+                }
             }
 
             // Add resistivity only if E field value is used to update B
@@ -1564,6 +1609,19 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
 
                 Ez(i, j, k) = (enE_z - grad_Pe) / rho_val_limited;
+
+                if (holmstrom_blend) {
+                    // smooth above-floor transition: ramp the Hall/pressure
+                    // content in over [rho_floor, width*rho_floor] and blend
+                    // from the vacuum value (E_ext or 0); the diffusive
+                    // resistive terms added below stay fully on.
+                    const Real s = (rho_val - rho_floor) * inv_blend_range;
+                    if (s < 1._rt) {
+                        const Real w = std::pow(std::max(s, 0._rt), holmstrom_blend_pow);
+                        const Real vac = include_external_fields ? Ez_ext(i, j, k) : 0._rt;
+                        Ez(i, j, k) = w * Ez(i, j, k) + (1._rt - w) * vac;
+                    }
+                }
             }
 
             // Add resistivity only if E field value is used to update B

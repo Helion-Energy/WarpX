@@ -2277,6 +2277,18 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         band node (the wall-layer mode, for damping the divergence instability
         a sharp re-entrant wall corner pumps).
 
+    holmstrom_blend_pow: float, default=0 (off)
+        If > 0, smooth the Holmstrom vacuum switch with an above-floor power
+        window: on ``rho in [rho_floor, holmstrom_blend_width*rho_floor]`` the
+        Hall/pressure (divided-by-rho) content of the Ohm's-law E is weighted
+        by ``w = ((rho-rho_floor)/((width-1)*rho_floor))**pow`` and blended
+        from the vacuum value, so the stiff Hall physics fades in over the
+        low-density band instead of switching on at full strength one cell
+        above the floor. Below the floor the field stays purely diffusive.
+
+    holmstrom_blend_width: float, default=2
+        Upper edge of the blend window in units of the density floor.
+
     eta_nodal_interp: bool, default=False
         Evaluate the resistivity and hyper-resistivity parsers once per NODE
         (from the nodal rho and the Hall-consistent nodal J/B) and interpolate
@@ -2374,6 +2386,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         divb_clean_inner_div_cells=None,
         divb_clean_inner_corr_cells=None,
         eta_nodal_interp=None,
+        holmstrom_blend_pow=None,
+        holmstrom_blend_width=None,
         isotropic_hyper_resistivity=None,
         isotropic_resistivity=None,
         Jx_external_function=None,
@@ -2418,6 +2432,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.divb_clean_inner_div_cells = divb_clean_inner_div_cells
         self.divb_clean_inner_corr_cells = divb_clean_inner_corr_cells
         self.eta_nodal_interp = eta_nodal_interp
+        self.holmstrom_blend_pow = holmstrom_blend_pow
+        self.holmstrom_blend_width = holmstrom_blend_width
         self.isotropic_hyper_resistivity = isotropic_hyper_resistivity
         self.isotropic_resistivity = isotropic_resistivity
 
@@ -2490,6 +2506,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
             self.divb_clean_inner_corr_cells
         )
         pywarpx.hybridpicmodel.eta_nodal_interp = self.eta_nodal_interp
+        pywarpx.hybridpicmodel.holmstrom_blend_pow = self.holmstrom_blend_pow
+        pywarpx.hybridpicmodel.holmstrom_blend_width = self.holmstrom_blend_width
         pywarpx.hybridpicmodel.isotropic_hyper_resistivity = (
             self.isotropic_hyper_resistivity
         )
