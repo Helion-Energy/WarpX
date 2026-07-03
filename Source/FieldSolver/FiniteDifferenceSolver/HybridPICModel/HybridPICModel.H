@@ -336,6 +336,22 @@ public:
      *  collocated grids and for rho/J-independent resistivities. Cartesian
      *  only. */
     bool m_eta_nodal_interp = false;
+    /** If > 0 (opt-in), smooth the holmstrom vacuum switch with an
+     *  above-floor power-law window: on rho in [rho_floor,
+     *  holmstrom_blend_width*rho_floor] the Hall/pressure (divided-by-rho)
+     *  content of the Ohm's-law E is weighted by
+     *  w = ((rho-rho_floor)/((width-1)*rho_floor))^pow and blended from the
+     *  vacuum value (E_ext or 0), so the stiff Hall physics fades in over the
+     *  low-density band instead of switching on at full strength one cell
+     *  above the floor. Below the floor the legacy vacuum branch holds
+     *  exactly (purely diffusive E). <= 0 keeps the legacy binary switch.
+     *  Only active with holmstrom_vacuum_region; Cartesian only. */
+    amrex::Real m_holmstrom_blend_pow = 0.0;
+    /** Upper edge of the blend window in units of the density floor: the
+     *  Hall/pressure content ramps in over rho in [rho_floor,
+     *  width*rho_floor]. Below the floor the legacy vacuum branch holds
+     *  exactly (Hall fully off). Must be > 1 for the blend to be active. */
+    amrex::Real m_holmstrom_blend_width = 2.0;
     /** If true, skip the collocated conformal magnetic-field wall treatment
      *  entirely (no EB B fill): the unmasked nodal Faraday curl is left as-is.
      *  This reproduces the pre-treatment baseline and isolates the wall fill as

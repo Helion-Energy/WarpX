@@ -127,6 +127,8 @@ def setup_simulation(
     divb_clean_iters=3,
     eta_hyper_mult=1.0,
     eta_nodal=False,
+    holmstrom_blend_pow=0.0,
+    holmstrom_blend_width=2.0,
     equilibrium_b=False,
     vacuum=False,
 ):
@@ -219,6 +221,10 @@ def setup_simulation(
         isotropic_resistivity=isotropic_resistivity,
         isotropic_hyper_resistivity=isotropic_hyper,
         eta_nodal_interp=True if eta_nodal else None,
+        holmstrom_blend_pow=holmstrom_blend_pow if holmstrom_blend_pow > 0 else None,
+        holmstrom_blend_width=holmstrom_blend_width
+        if holmstrom_blend_pow > 0
+        else None,
         use_rkf45=True,
         substep_rtol=substep_rtol,
         substep_atol=1.0e-8,
@@ -646,6 +652,23 @@ def main():
         "single-valued eta across the plasma/vacuum seam on Yee grids.",
     )
     parser.add_argument(
+        "--holmstrom-blend-pow",
+        type=float,
+        default=0.0,
+        dest="holmstrom_blend_pow",
+        help="smooth the holmstrom vacuum switch: over rho in [floor, "
+        "width*floor] the Hall/pressure content of E ramps in as "
+        "((rho-floor)/((width-1)*floor))**pow from the vacuum value "
+        "(0 = legacy binary switch).",
+    )
+    parser.add_argument(
+        "--holmstrom-blend-width",
+        type=float,
+        default=2.0,
+        dest="holmstrom_blend_width",
+        help="upper edge of the blend window in units of the density floor.",
+    )
+    parser.add_argument(
         "--ni-mult",
         type=float,
         default=1.0,
@@ -745,6 +768,8 @@ def main():
         divb_clean_iters=args.divb_clean_iters,
         eta_hyper_mult=args.eta_hyper_mult,
         eta_nodal=args.eta_nodal,
+        holmstrom_blend_pow=args.holmstrom_blend_pow,
+        holmstrom_blend_width=args.holmstrom_blend_width,
         equilibrium_b=args.equilibrium_b,
         vacuum=args.vacuum,
     )

@@ -104,6 +104,10 @@ void HybridPICModel::ReadParameters ()
     // nodal (hyper-)resistivity evaluation + interpolation to the staggered
     // E locations (single-valued eta across the plasma/vacuum seam)
     pp_hybrid.query("eta_nodal_interp", m_eta_nodal_interp);
+    utils::parser::queryWithParser(
+        pp_hybrid, "holmstrom_blend_pow", m_holmstrom_blend_pow);
+    utils::parser::queryWithParser(
+        pp_hybrid, "holmstrom_blend_width", m_holmstrom_blend_width);
 #if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_XZ)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_eta_nodal_interp,
         "hybrid_pic_model.eta_nodal_interp is only supported in 3D and 2D (XZ) "
