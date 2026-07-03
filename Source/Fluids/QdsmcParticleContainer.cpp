@@ -137,6 +137,7 @@ void QdsmcParticleContainer::InitParticles (int lev)
         amrex::ParallelFor(tile_box,
         [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
+            amrex::ignore_unused(j, k);  // unused below AMREX_SPACEDIM
             amrex::IntVect const iv(AMREX_D_DECL(i, j, k));
             long const ip = poffset[tile_box.index(iv)];
 
@@ -166,10 +167,15 @@ void QdsmcParticleContainer::InitParticles (int lev)
             amrex::Real const z_pos = plo[0] + (iv[0] + amrex::Real(0.5)) * dx_arr[0];
             pa[QdsmcPIdx::z][ip] = z_pos;
 #else
-            // RCYLINDER / RSPHERE intentionally not supported in this PR.
-            amrex::Real const x_pos = amrex::Real(0);
+            // WARPX_DIM_RCYLINDER / WARPX_DIM_RSPHERE: 1D radial; the single
+            // AMReX-tracked position slot is x (= r). QDSMC is not validated
+            // in these geometries (no radial volume weighting yet) and
+            // HybridPICModel::ReadParameters refuses to enable the energy
+            // equation there -- this branch only needs to compile and be sane.
+            amrex::Real const x_pos = plo[0] + (iv[0] + amrex::Real(0.5)) * dx_arr[0];
             amrex::Real const y_pos = amrex::Real(0);
             amrex::Real const z_pos = amrex::Real(0);
+            pa[QdsmcPIdx::x][ip] = x_pos;
 #endif
 
             // Home position is always stored as a 3D vector.
@@ -410,6 +416,11 @@ QdsmcParticleContainer::PushX (int lev, amrex::Real dt)
             if (!is_periodic[1]) { zp_new = amrex::Clamp(zp_new, lo_bnd[1], hi_bnd[1]); }
 #elif defined(WARPX_DIM_1D_Z)
             if (!is_periodic[0]) { zp_new = amrex::Clamp(zp_new, lo_bnd[0], hi_bnd[0]); }
+#else
+            // WARPX_DIM_RCYLINDER / WARPX_DIM_RSPHERE: x (= r) is the single
+            // tracked position (QDSMC is refused at runtime in these
+            // geometries; the clamp keeps the compiled code sane).
+            if (!is_periodic[0]) { xp_new = amrex::Clamp(xp_new, lo_bnd[0], hi_bnd[0]); }
 #endif
 
             // Write the new position back to the AMReX-tracked position
@@ -441,10 +452,16 @@ QdsmcParticleContainer::ResetParticles (int lev)
         long const np = pti.numParticles();
         auto & attribs = pti.GetStructOfArrays().GetRealData();
 
+        // The home components are only needed where a matching AMReX-tracked
+        // position slot exists (x everywhere but 1D_Z, y only in 3D).
+#if !defined(WARPX_DIM_1D_Z)
         amrex::ParticleReal* const AMREX_RESTRICT x_node =
             attribs[QdsmcPIdx::x_node].dataPtr();
+#endif
+#if defined(WARPX_DIM_3D)
         amrex::ParticleReal* const AMREX_RESTRICT y_node =
             attribs[QdsmcPIdx::y_node].dataPtr();
+#endif
         amrex::ParticleReal* const AMREX_RESTRICT z_node =
             attribs[QdsmcPIdx::z_node].dataPtr();
         amrex::ParticleReal* const AMREX_RESTRICT vx =
@@ -522,12 +539,13 @@ QdsmcParticleContainer::DepositK (int lev, amrex::MultiFab & Kfield)
         // The y-home is used in 2D (Cartesian/RZ) as the implicit y=0 coord;
         // the x-home is used in 1D as the implicit x=0 coord. In 3D the
         // full position lives in the AMReX-tracked pa_x/pa_y/pa_z slots, so
-        // no home component is needed.
+        // no home component is needed. In RCYLINDER/RSPHERE the y/z
+        // components are identically 0 (set as literals in the lambda).
 #if defined(WARPX_DIM_1D_Z)
         amrex::ParticleReal* const AMREX_RESTRICT x_node =
             attribs[QdsmcPIdx::x_node].dataPtr();
 #endif
-#if !defined(WARPX_DIM_3D)
+#if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
         amrex::ParticleReal* const AMREX_RESTRICT y_node =
             attribs[QdsmcPIdx::y_node].dataPtr();
 #endif
@@ -543,8 +561,10 @@ QdsmcParticleContainer::DepositK (int lev, amrex::MultiFab & Kfield)
         amrex::ParticleReal* const AMREX_RESTRICT pa_y =
             attribs[QdsmcPIdx::y].dataPtr();
 #endif
+#if !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
         amrex::ParticleReal* const AMREX_RESTRICT pa_z =
             attribs[QdsmcPIdx::z].dataPtr();
+#endif
 
         auto const K_arr = Kfield.array(pti);
 
@@ -566,7 +586,13 @@ QdsmcParticleContainer::DepositK (int lev, amrex::MultiFab & Kfield)
             amrex::Real const yp = y_node[ip];
             amrex::Real const zp = pa_z[ip];
 #else
-#   error "QdsmcParticleContainer::DepositK does not support WARPX_DIM_RCYLINDER / WARPX_DIM_RSPHERE yet"
+            // WARPX_DIM_RCYLINDER / WARPX_DIM_RSPHERE: x (= r) is the single
+            // tracked position; y and z are identically 0. QDSMC is refused
+            // at runtime in these geometries (see HybridPICModel::ReadParameters);
+            // this branch exists so the container compiles for them.
+            amrex::Real const xp = pa_x[ip];
+            amrex::Real const yp = amrex::Real(0);
+            amrex::Real const zp = amrex::Real(0);
 #endif
 
             do_deposit_scalar(K_arr, xp, yp, zp, plo, dxi, entropy[ip], box);
@@ -618,7 +644,7 @@ QdsmcParticleContainer::DepositField (int lev, amrex::MultiFab & Field)
         amrex::ParticleReal* const AMREX_RESTRICT x_node =
             attribs[QdsmcPIdx::x_node].dataPtr();
 #endif
-#if !defined(WARPX_DIM_3D)
+#if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
         amrex::ParticleReal* const AMREX_RESTRICT y_node =
             attribs[QdsmcPIdx::y_node].dataPtr();
 #endif
@@ -631,8 +657,10 @@ QdsmcParticleContainer::DepositField (int lev, amrex::MultiFab & Field)
         amrex::ParticleReal* const AMREX_RESTRICT pa_y =
             attribs[QdsmcPIdx::y].dataPtr();
 #endif
+#if !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
         amrex::ParticleReal* const AMREX_RESTRICT pa_z =
             attribs[QdsmcPIdx::z].dataPtr();
+#endif
 
         auto const field_arr = Field.array(pti);
 
@@ -653,7 +681,13 @@ QdsmcParticleContainer::DepositField (int lev, amrex::MultiFab & Field)
             amrex::Real const yp = y_node[ip];
             amrex::Real const zp = pa_z[ip];
 #else
-#   error "QdsmcParticleContainer::DepositField does not support WARPX_DIM_RCYLINDER / WARPX_DIM_RSPHERE yet"
+            // WARPX_DIM_RCYLINDER / WARPX_DIM_RSPHERE: x (= r) is the single
+            // tracked position; y and z are identically 0. QDSMC is refused
+            // at runtime in these geometries (see HybridPICModel::ReadParameters);
+            // this branch exists so the container compiles for them.
+            amrex::Real const xp = pa_x[ip];
+            amrex::Real const yp = amrex::Real(0);
+            amrex::Real const zp = amrex::Real(0);
 #endif
 
             // np_real already carries the n_e * V_cell weight; divide by V_cell
