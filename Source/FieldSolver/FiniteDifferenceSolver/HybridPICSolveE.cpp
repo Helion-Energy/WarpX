@@ -68,6 +68,34 @@ namespace {
         }}}
         return (w > 0.0_rt) ? (c / w) : 0.0_rt;
     }
+
+    /** Nodal decision density for the holmstrom vacuum switch / blend weight
+     * (hybrid_pic_model.holmstrom_nodal_switch): the MAXIMUM of the nodal rho at
+     * the endpoints of the staggered E component's edge (the same nodes the
+     * standard edge average reads -- identical footprint, no extra ghost reads).
+     * Degenerates to the point value on collocated grids. Using the same nodal
+     * field for every component removes the per-component half-cell decision
+     * offsets at the plasma/vacuum seam; the endpoint max is plasma-favoring, so
+     * the Hall push stays on right up to the seam. */
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    amrex::Real NodalSwitchRho (
+        amrex::Array4<amrex::Real const> const& rho,
+        amrex::GpuArray<int,3> const& stag,
+        int i, int j, int k)
+    {
+        // 1 point in node-centered directions, 2 endpoints in the cell-centered
+        // direction (unused dimensions are marked nodal upstream).
+        const int ni = (stag[0] == 0) ? 2 : 1;
+        const int nj = (stag[1] == 0) ? 2 : 1;
+        const int nk = (stag[2] == 0) ? 2 : 1;
+        amrex::Real r = rho(i, j, k);
+        for (int kk = 0; kk < nk; ++kk) {
+        for (int jj = 0; jj < nj; ++jj) {
+        for (int ii = 0; ii < ni; ++ii) {
+            r = amrex::max(r, rho(i+ii, j+jj, k+kk));
+        }}}
+        return r;
+    }
 }
 
 void FiniteDifferenceSolver::CalculateCurrentAmpere (
@@ -1098,6 +1126,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     const bool holmstrom_blend = holmstrom_vacuum_region && (holmstrom_blend_pow > 0._rt)
         && (holmstrom_blend_width > 1._rt);
     const amrex::Real inv_blend_range = 1._rt/((holmstrom_blend_width - 1._rt)*rho_floor);
+    // Nodal decision density for the vacuum switch/blend weight: single-valued
+    // per node, so the three staggered E components stop deciding the branch
+    // from three half-cell-shifted rho samples at the plasma/vacuum seam.
+    const bool nodal_switch = hybrid_model->m_holmstrom_nodal_switch;
     const amrex::Real inv_mu0 = 1._rt/PhysConst::mu0;
     amrex::GpuArray<amrex::Real, 3> dx_arr{};
     amrex::GpuArray<amrex::Real, 3> h2{};
@@ -1345,8 +1377,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ex_stag, coarsen, i, j, k, 0);
+            // Decision density for the vacuum switch/blend (physics keeps rho_val)
+            const Real rho_dec = nodal_switch ?
+                NodalSwitchRho(rho, Ex_stag, i, j, k) : rho_val;
 
-            if (rho_val < rho_floor && holmstrom_vacuum_region) {
+            if (rho_dec < rho_floor && holmstrom_vacuum_region) {
                 if (include_external_fields) {
                     Ex(i, j, k) = Ex_ext(i, j, k);
                 } else {
@@ -1372,7 +1407,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     // content in over [rho_floor, width*rho_floor] and blend
                     // from the vacuum value (E_ext or 0); the diffusive
                     // resistive terms added below stay fully on.
-                    const Real s = (rho_val - rho_floor) * inv_blend_range;
+                    const Real s = (rho_dec - rho_floor) * inv_blend_range;
                     if (s < 1._rt) {
                         const Real w = std::pow(std::max(s, 0._rt), holmstrom_blend_pow);
                         const Real vac = include_external_fields ? Ex_ext(i, j, k) : 0._rt;
@@ -1474,8 +1509,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ey_stag, coarsen, i, j, k, 0);
+            // Decision density for the vacuum switch/blend (physics keeps rho_val)
+            const Real rho_dec = nodal_switch ?
+                NodalSwitchRho(rho, Ey_stag, i, j, k) : rho_val;
 
-            if (rho_val < rho_floor && holmstrom_vacuum_region) {
+            if (rho_dec < rho_floor && holmstrom_vacuum_region) {
                 if (include_external_fields) {
                     Ey(i, j, k) = Ey_ext(i, j, k);
                 } else {
@@ -1501,7 +1539,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     // content in over [rho_floor, width*rho_floor] and blend
                     // from the vacuum value (E_ext or 0); the diffusive
                     // resistive terms added below stay fully on.
-                    const Real s = (rho_val - rho_floor) * inv_blend_range;
+                    const Real s = (rho_dec - rho_floor) * inv_blend_range;
                     if (s < 1._rt) {
                         const Real w = std::pow(std::max(s, 0._rt), holmstrom_blend_pow);
                         const Real vac = include_external_fields ? Ey_ext(i, j, k) : 0._rt;
@@ -1588,8 +1626,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, k, 0);
+            // Decision density for the vacuum switch/blend (physics keeps rho_val)
+            const Real rho_dec = nodal_switch ?
+                NodalSwitchRho(rho, Ez_stag, i, j, k) : rho_val;
 
-            if (rho_val < rho_floor && holmstrom_vacuum_region) {
+            if (rho_dec < rho_floor && holmstrom_vacuum_region) {
                 if (include_external_fields) {
                     Ez(i, j, k) = Ez_ext(i, j, k);
                 } else {
@@ -1615,7 +1656,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     // content in over [rho_floor, width*rho_floor] and blend
                     // from the vacuum value (E_ext or 0); the diffusive
                     // resistive terms added below stay fully on.
-                    const Real s = (rho_val - rho_floor) * inv_blend_range;
+                    const Real s = (rho_dec - rho_floor) * inv_blend_range;
                     if (s < 1._rt) {
                         const Real w = std::pow(std::max(s, 0._rt), holmstrom_blend_pow);
                         const Real vac = include_external_fields ? Ez_ext(i, j, k) : 0._rt;

@@ -129,6 +129,7 @@ def setup_simulation(
     eta_nodal=False,
     holmstrom_blend_pow=0.0,
     holmstrom_blend_width=2.0,
+    holmstrom_nodal_switch=False,
     equilibrium_b=False,
     vacuum=False,
 ):
@@ -225,6 +226,7 @@ def setup_simulation(
         holmstrom_blend_width=holmstrom_blend_width
         if holmstrom_blend_pow > 0
         else None,
+        holmstrom_nodal_switch=True if holmstrom_nodal_switch else None,
         use_rkf45=True,
         substep_rtol=substep_rtol,
         substep_atol=1.0e-8,
@@ -645,6 +647,16 @@ def main():
         "(energy-conserving/Galerkin).",
     )
     parser.add_argument(
+        "--holmstrom-nodal-switch",
+        dest="holmstrom_nodal_switch",
+        action="store_true",
+        help="decide the holmstrom vacuum switch and blend weight from nodal rho "
+        "only (endpoint max), so the three staggered E components use a "
+        "consistent branch/weight at the plasma/vacuum seam instead of three "
+        "half-cell-shifted per-edge samples "
+        "(hybrid_pic_model.holmstrom_nodal_switch). Default off.",
+    )
+    parser.add_argument(
         "--divb-clean",
         dest="divb_clean",
         action="store_true",
@@ -795,6 +807,7 @@ def main():
         eta_nodal=args.eta_nodal,
         holmstrom_blend_pow=args.holmstrom_blend_pow,
         holmstrom_blend_width=args.holmstrom_blend_width,
+        holmstrom_nodal_switch=args.holmstrom_nodal_switch,
         equilibrium_b=args.equilibrium_b,
         vacuum=args.vacuum,
     )

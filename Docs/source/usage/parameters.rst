@@ -3973,6 +3973,21 @@ Maxwell solver: kinetic-fluid hybrid
     Upper edge of the :pp:param:`hybrid_pic_model.holmstrom_blend_pow` window, in units of the
     density floor.
 
+.. pp:param:: hybrid_pic_model.holmstrom_nodal_switch
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If ``true`` (opt-in), the Holmstrom vacuum switch and the blend weight are decided from the
+    NODAL charge density only: each staggered electric-field component uses the maximum of the
+    nodal density at its edge endpoints (identical to the point value on collocated grids),
+    instead of its own half-cell-shifted edge average. The default per-edge decision gives the
+    three electric-field components of a cell inconsistent vacuum/plasma branches and blend
+    weights along the plasma/vacuum seam on staggered grids — a grid-C4-patterned (m=4)
+    spurious-electric-field source that also weakens the Hall drive coupling at the seam. The
+    plasma-favoring endpoint maximum keeps the Hall push on right up to the seam; the physics
+    division by density and the resistivity evaluation are unchanged. Cartesian only.
+
 .. pp:param:: hybrid_pic_model.eta_nodal_interp
     :type: ``bool``
     :default: ``false``

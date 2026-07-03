@@ -2289,6 +2289,16 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
     holmstrom_blend_width: float, default=2
         Upper edge of the blend window in units of the density floor.
 
+    holmstrom_nodal_switch: bool, default=False
+        If True, decide the Holmstrom vacuum switch and the blend weight from
+        nodal rho only (the maximum of the nodal rho at each staggered E
+        component's edge endpoints), so the three E components of a cell use a
+        consistent vacuum/plasma branch and blend weight at the plasma/vacuum
+        seam instead of three half-cell-shifted per-edge samples (a
+        grid-C4-patterned spurious-E source there on staggered grids). The
+        physics division by rho and the resistivity evaluation are unchanged.
+        No-op on collocated grids; Cartesian only.
+
     eta_nodal_interp: bool, default=False
         Evaluate the resistivity and hyper-resistivity parsers once per NODE
         (from the nodal rho and the Hall-consistent nodal J/B) and interpolate
@@ -2388,6 +2398,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         eta_nodal_interp=None,
         holmstrom_blend_pow=None,
         holmstrom_blend_width=None,
+        holmstrom_nodal_switch=None,
         isotropic_hyper_resistivity=None,
         isotropic_resistivity=None,
         Jx_external_function=None,
@@ -2434,6 +2445,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.eta_nodal_interp = eta_nodal_interp
         self.holmstrom_blend_pow = holmstrom_blend_pow
         self.holmstrom_blend_width = holmstrom_blend_width
+        self.holmstrom_nodal_switch = holmstrom_nodal_switch
         self.isotropic_hyper_resistivity = isotropic_hyper_resistivity
         self.isotropic_resistivity = isotropic_resistivity
 
@@ -2508,6 +2520,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         pywarpx.hybridpicmodel.eta_nodal_interp = self.eta_nodal_interp
         pywarpx.hybridpicmodel.holmstrom_blend_pow = self.holmstrom_blend_pow
         pywarpx.hybridpicmodel.holmstrom_blend_width = self.holmstrom_blend_width
+        pywarpx.hybridpicmodel.holmstrom_nodal_switch = self.holmstrom_nodal_switch
         pywarpx.hybridpicmodel.isotropic_hyper_resistivity = (
             self.isotropic_hyper_resistivity
         )
