@@ -1282,11 +1282,12 @@ PhysicalParticleContainer::AddPlasmaFlux (PlasmaInjector const& plasma_injector,
     // we will then call Redistribute on this new container and finally
     // add the new particles to the original container.
     PhysicalParticleContainer tmp_pc(&WarpX::GetInstance());
+    const auto real_soa_names = GetRealSoANames();
     for (int ic = 0; ic < NumRuntimeRealComps(); ++ic) {
         // Molecular internal-DOF energies are set on the injected particles (below, before Redistribute),
         // so they must be COMMUNICATED through tmp_pc.Redistribute() (otherwise migrating particles lose
         // them and get NaN). Other runtime comps keep the original non-communicated behavior.
-        const std::string& comp_name = GetRealSoANames()[ic + NArrayReal];
+        const std::string& comp_name = real_soa_names[ic + NArrayReal];
         const bool communicate = (comp_name == "E_rot" || comp_name == "E_vib");
         tmp_pc.AddRealComp(comp_name, communicate);
     }
