@@ -168,6 +168,10 @@ public:
      * field update is active: ECT Maxwell solver, or hybrid-PIC solver with
      * hybrid_pic_model.use_conformal_eb = 1. */
     [[nodiscard]] static bool UseConformalEBSolve () { return m_eb_use_conformal_solve; }
+    /** \brief True when the staggered EB update masks are marked from the signed
+     * level set at each component's own edge/face center (warpx.eb_levelset_masks = 1)
+     * instead of the stair-case any-cut-neighbor criterion. */
+    [[nodiscard]] static bool UseLevelSetMasks () { return m_eb_levelset_masks; }
     amrex::Vector< std::unique_ptr<amrex::iMultiFab> > const & GetEBReduceParticleShapeFlag() const { return m_eb_reduce_particle_shape; }
 
     /**
@@ -196,6 +200,9 @@ public:
     static inline auto electromagnetic_solver_id = ElectromagneticSolverAlgo::Default;
     //! Whether the conformal (enlarged-cell technique) embedded-boundary field update is active
     static inline bool m_eb_use_conformal_solve = false;
+    //! Whether the staggered EB update masks use the level-set (component-center)
+    //! criterion instead of the stair-case any-cut-neighbor criterion
+    static inline bool m_eb_levelset_masks = false;
     //! Integer that corresponds to the evolve scheme (explicit, semi_implicit_em, theta_implicit_em)
     EvolveScheme evolve_scheme = EvolveScheme::Default;
     /** Records a number corresponding to the load balance cost update strategy
