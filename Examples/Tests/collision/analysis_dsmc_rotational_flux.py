@@ -36,12 +36,18 @@ assert len(w) > 100
 # 2. no NaN / inf in the runtime component (the core regression)
 n_bad = np.count_nonzero(~np.isfinite(er))
 print(f"non-finite E_rot values: {n_bad}")
-assert n_bad == 0, "E_rot has non-finite values -> runtime component lost in Redistribute"
+assert n_bad == 0, (
+    "E_rot has non-finite values -> runtime component lost in Redistribute"
+)
 
 # 3. rotational temperature matches the injection temperature (<E_rot> = kB T_rot for zeta_rot = 2)
 W = w.sum()
 T_rot = (w * er).sum() / W * er_si / kB_eV
 print(f"injected rotational temperature: {T_rot:.1f} K  (expected ~300 K)")
-assert 220.0 < T_rot < 380.0, "rotational energy not carried through injection/resampling intact"
+assert 220.0 < T_rot < 380.0, (
+    "rotational energy not carried through injection/resampling intact"
+)
 
-print("PASS: E_rot survives flux injection, box migration, and leveling-thinning resampling.")
+print(
+    "PASS: E_rot survives flux injection, box migration, and leveling-thinning resampling."
+)

@@ -14,7 +14,6 @@ Checks (device-portable, physics-based; no checksum):
   4. vibration is quantum-suppressed (<E_vib> < kB T_trans_final).
 """
 
-import numpy as np
 import openpmd_api as io
 
 kB = 1.380649e-23
@@ -65,8 +64,12 @@ def state(it):
 T_trans0, T_rot0, Evib0, E0 = state(iterations[0])
 T_trans1, T_rot1, Evib1, E1 = state(iterations[-1])
 
-print(f"initial:  T_trans={T_trans0:8.1f} K  T_rot={T_rot0:8.1f} K  <E_vib>={Evib0:.4f} eV  E={E0:.6e} J")
-print(f"final:    T_trans={T_trans1:8.1f} K  T_rot={T_rot1:8.1f} K  <E_vib>={Evib1:.4f} eV  E={E1:.6e} J")
+print(
+    f"initial:  T_trans={T_trans0:8.1f} K  T_rot={T_rot0:8.1f} K  <E_vib>={Evib0:.4f} eV  E={E0:.6e} J"
+)
+print(
+    f"final:    T_trans={T_trans1:8.1f} K  T_rot={T_rot1:8.1f} K  <E_vib>={Evib1:.4f} eV  E={E1:.6e} J"
+)
 
 # 1. total energy conservation
 E_err = abs(E1 - E0) / E0
@@ -84,7 +87,11 @@ assert Evib1 > 0.02 and Evib1 > Evib0
 
 # 4. quantum suppression: classical equipartition would give <E_vib> = kB T; require well below it
 Evib_classical = kB_eV * T_trans1  # eV
-print(f"<E_vib>={Evib1:.4f} eV  vs classical kB*T={Evib_classical:.4f} eV  (must be sub-equipartition)")
+print(
+    f"<E_vib>={Evib1:.4f} eV  vs classical kB*T={Evib_classical:.4f} eV  (must be sub-equipartition)"
+)
 assert Evib1 < 0.8 * Evib_classical
 
-print("PASS: rovibrational Borgnakke-Larsen conserves energy, equipartitions rot, and keeps vib quantum.")
+print(
+    "PASS: rovibrational Borgnakke-Larsen conserves energy, equipartitions rot, and keeps vib quantum."
+)

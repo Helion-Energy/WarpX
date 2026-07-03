@@ -12,9 +12,6 @@ Checks (device-portable, physics-based; no checksum):
   3. the translational temperature has dropped from its initial value.
 """
 
-import os
-
-import numpy as np
 import openpmd_api as io
 
 kB = 1.380649e-23
@@ -63,8 +60,12 @@ def state(it):
 T_trans0, T_rot0, E0 = state(iterations[0])
 T_trans1, T_rot1, E1 = state(iterations[-1])
 
-print(f"initial:  T_trans = {T_trans0:8.1f} K   T_rot = {T_rot0:8.1f} K   E_tot = {E0:.6e} J")
-print(f"final:    T_trans = {T_trans1:8.1f} K   T_rot = {T_rot1:8.1f} K   E_tot = {E1:.6e} J")
+print(
+    f"initial:  T_trans = {T_trans0:8.1f} K   T_rot = {T_rot0:8.1f} K   E_tot = {E0:.6e} J"
+)
+print(
+    f"final:    T_trans = {T_trans1:8.1f} K   T_rot = {T_rot1:8.1f} K   E_tot = {E1:.6e} J"
+)
 
 # 1. energy conservation
 E_err = abs(E1 - E0) / E0
@@ -79,4 +80,6 @@ assert T_rot1 > 300.0
 print(f"T_trans dropped {T_trans0:.1f} -> {T_trans1:.1f} K  (must fall below 800 K)")
 assert T_trans1 < 800.0 and T_trans1 < T_trans0
 
-print("PASS: rotational Borgnakke-Larsen relaxation conserves energy and relaxes correctly.")
+print(
+    "PASS: rotational Borgnakke-Larsen relaxation conserves energy and relaxes correctly."
+)
