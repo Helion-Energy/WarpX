@@ -284,3 +284,174 @@ void HybridPICModel::MarderCleanFieldsPerStep () const
         }
     }
 }
+
+void HybridPICModel::MarderCleanESeam (
+    ablastr::fields::MultiLevelVectorField const& Efield,
+    ablastr::fields::MultiLevelScalarField const& rhofield,
+    amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E,
+    amrex::IntVect ng, std::optional<bool> nodal_sync) const
+{
+// 3D/XZ Cartesian, staggered grids only (the caller gates on grid type): the
+// nodal divergence below is the discrete adjoint of the edge gradient, which
+// makes the update strictly dissipative of the divergence norm; the masked
+// (density-banded, EB-masked, domain-excluded) variant stays dissipative since
+// every mask is a nonnegative diagonal weight.
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    if (m_dive_seam_alpha <= 0.0_rt || m_dive_seam_iters <= 0) { return; }
+
+    auto& warpx = WarpX::GetInstance();
+    const Real rho_floor = m_n_floor * PhysConst::q_e;
+    const Real rho_hi = m_dive_seam_band * rho_floor;
+    const bool eb = EB::enabled();
+
+    for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            Efield[lev][0]->nGrowVect().min() >= 1,
+            "MarderCleanESeam: the nodal divergence at box seams needs at "
+            "least one valid E ghost cell.");
+
+        const auto& geom = warpx.Geom(lev);
+        const auto dx = geom.CellSizeArray();
+        Real h_min = dx[0];
+        for (int d = 1; d < AMREX_SPACEDIM; ++d) { h_min = std::min(h_min, dx[d]); }
+        // Explicit grad(div) sweep: the compact Yee operator peaks at
+        // 4*sum_d(1/dx_d^2) = 12/h^2 (cubic 3D), so stability requires
+        // alpha <= 1/6 (asserted at parse time); alpha is the fraction of that
+        // cap actually applied.
+        const Real alpha_scaled = m_dive_seam_alpha * h_min * h_min;
+        GpuArray<Real, 3> inv_dx{0.0_rt, 0.0_rt, 0.0_rt};
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) { inv_dx[d] = 1.0_rt/dx[d]; }
+
+        // Exclude two layers at every non-periodic physical domain face, per
+        // component staggering: the asymmetric stencil at a domain/EB junction
+        // was measured to PUMP divergence in the B cleaner (e-fold ~940), and
+        // this cleaner runs every substage. Nothing needs cleaning there.
+        GpuArray<int, 3> ex_lo[3], ex_hi[3];
+        for (int c = 0; c < 3; ++c) {
+            const amrex::Box comp_domain =
+                amrex::convert(geom.Domain(), Efield[lev][c]->ixType());
+            for (int d = 0; d < 3; ++d) { ex_lo[c][d] = INT_MIN; ex_hi[c][d] = INT_MAX; }
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                if (!geom.isPeriodic(d)) {
+                    ex_lo[c][d] = comp_domain.smallEnd(d) + 2;
+                    ex_hi[c][d] = comp_domain.bigEnd(d) - 2;
+                }
+            }
+        }
+
+        // Nodal divergence scratch, zero-initialized: the valid region is
+        // recomputed each sweep and the (never-written) ghosts read as div=0.
+        auto const& nodal_ba = amrex::convert(
+            rhofield[lev]->boxArray(), IntVect::TheNodeVector());
+        MultiFab div_mf(nodal_ba, rhofield[lev]->DistributionMap(), 1, IntVect(1));
+        div_mf.setVal(0.0_rt);
+
+        auto const& Ex_stag = Ex_IndexType;
+        auto const& Ey_stag = Ey_IndexType;
+        auto const& Ez_stag = Ez_IndexType;
+
+        for (int it = 0; it < m_dive_seam_iters; ++it) {
+
+            // Fresh ghosts: on the staggered path the Ohm solve fills valid
+            // tileboxes only, and the update below invalidates them each sweep.
+            warpx.FillBoundaryE(lev, ng, nodal_sync);
+
+            // 1) nodal divergence of the edge E on the valid nodal boxes. Each
+            // component contributes the difference along its cell-centered
+            // direction; fully nodal components (the out-of-plane E in 2D)
+            // have no divergence role.
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(div_mf, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                const Box tbx = mfi.tilebox();
+                Array4<Real> const& div_arr = div_mf.array(mfi);
+                Array4<Real const> const& Ex = Efield[lev][0]->const_array(mfi);
+                Array4<Real const> const& Ey = Efield[lev][1]->const_array(mfi);
+                Array4<Real const> const& Ez = Efield[lev][2]->const_array(mfi);
+                amrex::ParallelFor(tbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    Real dsum = 0.0_rt;
+                    if (Ex_stag[0] == 0) { dsum += (Ex(i,j,k) - Ex(i-1,j,k))*inv_dx[0]; }
+                    else if (Ex_stag[1] == 0) { dsum += (Ex(i,j,k) - Ex(i,j-1,k))*inv_dx[1]; }
+                    else if (Ex_stag[2] == 0) { dsum += (Ex(i,j,k) - Ex(i,j,k-1))*inv_dx[2]; }
+                    if (Ey_stag[0] == 0) { dsum += (Ey(i,j,k) - Ey(i-1,j,k))*inv_dx[0]; }
+                    else if (Ey_stag[1] == 0) { dsum += (Ey(i,j,k) - Ey(i,j-1,k))*inv_dx[1]; }
+                    else if (Ey_stag[2] == 0) { dsum += (Ey(i,j,k) - Ey(i,j,k-1))*inv_dx[2]; }
+                    if (Ez_stag[0] == 0) { dsum += (Ez(i,j,k) - Ez(i-1,j,k))*inv_dx[0]; }
+                    else if (Ez_stag[1] == 0) { dsum += (Ez(i,j,k) - Ez(i,j-1,k))*inv_dx[1]; }
+                    else if (Ez_stag[2] == 0) { dsum += (Ez(i,j,k) - Ez(i,j,k-1))*inv_dx[2]; }
+                    div_arr(i,j,k) = dsum;
+                });
+            }
+
+            // 2) masked gradient update: E += alpha * grad(div E) on edges that
+            // (a) sit at or below the seam window (endpoint-averaged
+            // rho <= dive_seam_band * rho_floor), (b) are LIVE per the EB
+            // update masks (the wall/covered E is owned by the EB PEC fill the
+            // Ohm solve just applied -- do not rewrite it), and (c) are at
+            // least two layers from every non-periodic domain face. The bulk
+            // plasma is untouched; curl(E) is preserved to round-off away from
+            // the window edge.
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(*Efield[lev][0], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                Array4<Real> const& Ex = Efield[lev][0]->array(mfi);
+                Array4<Real> const& Ey = Efield[lev][1]->array(mfi);
+                Array4<Real> const& Ez = Efield[lev][2]->array(mfi);
+                Array4<Real const> const& div_arr = div_mf.const_array(mfi);
+                Array4<Real const> const& rho = rhofield[lev]->const_array(mfi);
+                Array4<int const> ux, uy, uz;
+                if (eb) {
+                    ux = eb_update_E[lev][0]->const_array(mfi);
+                    uy = eb_update_E[lev][1]->const_array(mfi);
+                    uz = eb_update_E[lev][2]->const_array(mfi);
+                }
+                const Box tex = mfi.tilebox(Efield[lev][0]->ixType().toIntVect());
+                const Box tey = mfi.tilebox(Efield[lev][1]->ixType().toIntVect());
+                const Box tez = mfi.tilebox(Efield[lev][2]->ixType().toIntVect());
+                const auto exl0 = ex_lo[0]; const auto exh0 = ex_hi[0];
+                const auto exl1 = ex_lo[1]; const auto exh1 = ex_hi[1];
+                const auto exl2 = ex_lo[2]; const auto exh2 = ex_hi[2];
+                amrex::ParallelFor(tex, tey, tez,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                        if (ux && ux(i,j,k) == 0) { return; }
+                        if (i < exl0[0] || i > exh0[0] || j < exl0[1] || j > exh0[1]
+                            || k < exl0[2] || k > exh0[2]) { return; }
+                        Real g = 0.0_rt; Real r = rho(i,j,k);
+                        if (Ex_stag[0] == 0) { g = (div_arr(i+1,j,k)-div_arr(i,j,k))*inv_dx[0]; r = 0.5_rt*(rho(i,j,k)+rho(i+1,j,k)); }
+                        else if (Ex_stag[1] == 0) { g = (div_arr(i,j+1,k)-div_arr(i,j,k))*inv_dx[1]; r = 0.5_rt*(rho(i,j,k)+rho(i,j+1,k)); }
+                        else if (Ex_stag[2] == 0) { g = (div_arr(i,j,k+1)-div_arr(i,j,k))*inv_dx[2]; r = 0.5_rt*(rho(i,j,k)+rho(i,j,k+1)); }
+                        if (r <= rho_hi) { Ex(i,j,k) += alpha_scaled * g; }
+                    },
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                        if (uy && uy(i,j,k) == 0) { return; }
+                        if (i < exl1[0] || i > exh1[0] || j < exl1[1] || j > exh1[1]
+                            || k < exl1[2] || k > exh1[2]) { return; }
+                        Real g = 0.0_rt; Real r = rho(i,j,k);
+                        if (Ey_stag[0] == 0) { g = (div_arr(i+1,j,k)-div_arr(i,j,k))*inv_dx[0]; r = 0.5_rt*(rho(i,j,k)+rho(i+1,j,k)); }
+                        else if (Ey_stag[1] == 0) { g = (div_arr(i,j+1,k)-div_arr(i,j,k))*inv_dx[1]; r = 0.5_rt*(rho(i,j,k)+rho(i,j+1,k)); }
+                        else if (Ey_stag[2] == 0) { g = (div_arr(i,j,k+1)-div_arr(i,j,k))*inv_dx[2]; r = 0.5_rt*(rho(i,j,k)+rho(i,j,k+1)); }
+                        if (r <= rho_hi) { Ey(i,j,k) += alpha_scaled * g; }
+                    },
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                        if (uz && uz(i,j,k) == 0) { return; }
+                        if (i < exl2[0] || i > exh2[0] || j < exl2[1] || j > exh2[1]
+                            || k < exl2[2] || k > exh2[2]) { return; }
+                        Real g = 0.0_rt; Real r = rho(i,j,k);
+                        if (Ez_stag[0] == 0) { g = (div_arr(i+1,j,k)-div_arr(i,j,k))*inv_dx[0]; r = 0.5_rt*(rho(i,j,k)+rho(i+1,j,k)); }
+                        else if (Ez_stag[1] == 0) { g = (div_arr(i,j+1,k)-div_arr(i,j,k))*inv_dx[1]; r = 0.5_rt*(rho(i,j,k)+rho(i,j+1,k)); }
+                        else if (Ez_stag[2] == 0) { g = (div_arr(i,j,k+1)-div_arr(i,j,k))*inv_dx[2]; r = 0.5_rt*(rho(i,j,k)+rho(i,j,k+1)); }
+                        if (r <= rho_hi) { Ez(i,j,k) += alpha_scaled * g; }
+                    });
+            }
+        }
+
+        // Leave the ghosts fresh for the Faraday push that follows.
+        warpx.FillBoundaryE(lev, ng, nodal_sync);
+    }
+#else
+    amrex::ignore_unused(Efield, rhofield, eb_update_E, ng, nodal_sync);
+#endif
+}

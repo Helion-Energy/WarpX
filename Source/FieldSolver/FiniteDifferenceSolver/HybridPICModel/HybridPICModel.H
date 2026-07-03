@@ -171,6 +171,22 @@ public:
      *  unless the respective alpha>0. */
     void MarderCleanFieldsPerStep () const;
 
+    /** Density-banded Marder clean of the Ohm's-law E at the n_floor seam
+     *  (staggered grids; called per substage from FieldPush between the Ohm
+     *  solve and the Faraday push). Iterates E += alpha_scaled * grad(div(E))
+     *  restricted to edges whose endpoint-averaged density is at or below
+     *  dive_seam_band * rho_floor, diffusing the vector-inconsistent
+     *  (divergence-carrying) E content the per-component staggered sampling
+     *  injects at the moving plasma/vacuum seam. The nodal div / edge grad pair
+     *  is mutually adjoint, so the update is strictly dissipative of the
+     *  divergence norm and preserves curl(E) to round-off away from the window
+     *  edge. No-op unless dive_seam_alpha > 0. 3D/XZ Cartesian only. */
+    void MarderCleanESeam (
+        ablastr::fields::MultiLevelVectorField const& Efield,
+        ablastr::fields::MultiLevelScalarField const& rhofield,
+        amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E,
+        amrex::IntVect ng, std::optional<bool> nodal_sync) const;
+
     void BfieldEvolveRK (
         ablastr::fields::MultiLevelVectorField const& Bfield,
         ablastr::fields::MultiLevelVectorField const& Efield,
@@ -352,19 +368,29 @@ public:
      *  width*rho_floor]. Below the floor the legacy vacuum branch holds
      *  exactly (Hall fully off). Must be > 1 for the blend to be active. */
     amrex::Real m_holmstrom_blend_width = 2.0;
-    /** If true (opt-in), decide the holmstrom vacuum switch and the blend
-     *  weight from NODAL rho only: each staggered E component uses the minimum
-     *  of the nodal rho at its edge endpoints (identical to the point value on
-     *  collocated grids), instead of its own half-cell-shifted edge average.
-     *  On staggered grids the per-edge decision gives the three E components of
-     *  a cell inconsistent vacuum/plasma branches and blend weights along the
-     *  moving plasma/vacuum seam -- a grid-C4-patterned (m=4), drive-weakening
-     *  spurious-E source there. The vacuum-favoring endpoint min keeps the
-     *  stiff Hall branch strictly above the floor at every endpoint (the
-     *  plasma-favoring max variant was measured to destabilize: full Hall on
-     *  edges whose own density is sub-floor). The physics division by rho and
-     *  the resistivity evaluation are unchanged. Cartesian only. */
-    bool m_holmstrom_nodal_switch = false;
+    /** Sampling mode of the density that decides the holmstrom vacuum switch
+     *  and the blend weight (the physics division by rho and the resistivity
+     *  evaluation are unchanged). 0 = "edge" (default): each staggered E
+     *  component uses its own half-cell-shifted edge average -- the three
+     *  components of a cell can take inconsistent vacuum/plasma branches along
+     *  the moving plasma/vacuum seam (a grid-C4-patterned spurious-E source
+     *  there). 1 = "node": the minimum of the nodal rho at the edge endpoints
+     *  (vacuum-favoring: the stiff Hall branch runs only where every endpoint
+     *  is above the floor; the plasma-favoring max variant was measured to
+     *  destabilize -- full Hall on edges whose own density is sub-floor).
+     *  2 = "cell": rho averaged to the CELL CENTER decides for all three E
+     *  components of that index -- a single piecewise-constant-per-cell
+     *  decision field with no per-component half-shifts. Cartesian only. */
+    int m_holmstrom_switch_mode = 0;
+    /** Density-banded Marder clean of the Ohm E at the n_floor seam
+     *  (MarderCleanESeam): fraction of the explicit-diffusion cap applied per
+     *  substage. 0 (default) = off. Staggered 3D/XZ Cartesian only. */
+    amrex::Real m_dive_seam_alpha = 0.0;
+    /** Sweeps of the seam E clean per substage. */
+    int m_dive_seam_iters = 1;
+    /** Upper edge of the seam clean window in units of the density floor:
+     *  the correction applies on edges with rho <= dive_seam_band*rho_floor. */
+    amrex::Real m_dive_seam_band = 4.0;
     /** If true, skip the collocated conformal magnetic-field wall treatment
      *  entirely (no EB B fill): the unmasked nodal Faraday curl is left as-is.
      *  This reproduces the pre-treatment baseline and isolates the wall fill as
