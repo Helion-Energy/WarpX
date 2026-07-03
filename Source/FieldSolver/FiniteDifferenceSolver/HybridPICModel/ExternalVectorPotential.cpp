@@ -297,18 +297,19 @@ ExternalVectorPotential::CalculateExternalCurlA (std::string& coil_name)
     ablastr::fields::MultiLevelVectorField curlA_ext =
         warpx.m_fields.get_mr_levels_alldirs(curlAext_field, warpx.finestLevel());
 
-    // Conformal EB: the external vacuum field must fill through the wall (a
-    // uniform external then stays uniform and satisfies the Neumann condition
+    // The external vacuum field must fill through the wall on BOTH grid types
+    // (a uniform external then stays uniform and satisfies the Neumann condition
     // at the level set), so compute curl(A) everywhere by passing no EB update
-    // flags. The staircase update keeps the covered-cell exclusion mask.
+    // flags. Masking curl(A) with the covered-cell exclusion flags zeroes the
+    // external B inside the conductor, which puts an O(B_ext) staircase jump at
+    // the wall; the unmasked Interp of B_ext in the Hall term (HybridPICSolveE)
+    // and the near-wall particle gather then read that jump every substep.
     static const std::array<std::unique_ptr<amrex::iMultiFab>, 3> no_eb_update{};
     for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
-        auto const& curl_eb_flag = WarpX::UseConformalEBSolve()
-            ? no_eb_update : warpx.GetEBUpdateBFlag()[lev];
         warpx.get_pointer_fdtd_solver_fp(lev)->ComputeCurlA(
             curlA_ext[lev],
             A_ext[lev],
-            curl_eb_flag,
+            no_eb_update,
             lev);
 
         for (int idir = 0; idir < 3; ++idir) {
