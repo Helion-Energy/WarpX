@@ -437,6 +437,44 @@ WarpX::WarpX ()
         (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC &&
          m_hybrid_pic_model->m_use_conformal_eb);
 
+    // Opt-in: mark the staggered EB update masks from the signed level set at
+    // each component's own edge/face center instead of the stair-case
+    // any-cut-neighbor criterion. The staircase marking freezes every component
+    // whose neighboring cell is cut -- a C4-modulated band that includes fluid
+    // points -- whereas the level-set criterion freezes only components whose
+    // centers are genuinely inside the conductor (the staggered analogue of the
+    // collocated conformal nodal marking).
+    {
+        const amrex::ParmParse pp_warpx("warpx");
+        m_eb_levelset_masks = false; // reset: static member must not leak across re-inits
+        pp_warpx.query("eb_levelset_masks", m_eb_levelset_masks);
+        if (m_eb_levelset_masks) {
+            // The level-set masks leave fluid-side components of cut cells LIVE, so
+            // their curl stencils read covered values half a cell inside the wall.
+            // The hybrid level-set mirror fills are the only writers of those values
+            // -- hence hybrid-PIC + eb_b_straight_mirror is required (plain
+            // FDTD/macroscopic/implicit EvolveE has no EB fill infrastructure, and
+            // the ECT / collocated-conformal paths have their own mask marking).
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC
+                && !m_eb_use_conformal_solve
+                && m_hybrid_pic_model->m_eb_b_straight_mirror,
+                "warpx.eb_levelset_masks requires the hybrid-PIC solver on the "
+                "staggered (non-conformal) path with "
+                "hybrid_pic_model.eb_b_straight_mirror = 1, so that every covered "
+                "value within reach of a live curl stencil is mirror-filled.");
+            // The mirror-fill band depths are correctness floors here: everything
+            // deeper than the band is actively zeroed, and live stencils now reach
+            // up to one cell inside the wall.
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_hybrid_pic_model->m_eb_b_fill_band_cells >= 1.0_rt
+                && m_hybrid_pic_model->m_eb_fill_band_cells >= 1.0_rt,
+                "warpx.eb_levelset_masks requires hybrid_pic_model.eb_b_fill_band_cells "
+                "and eb_fill_band_cells >= 1 (live curl stencils read up to one cell "
+                "inside the wall; a narrower band would zero values inside them).");
+        }
+    }
+
     current_buffer_masks.resize(nlevs_max);
     gather_buffer_masks.resize(nlevs_max);
 
