@@ -1941,6 +1941,38 @@ Particle initialization
        lead to memory issues if not periodically cleared. To clear the buffer
        call ``clear_buffer()``.
 
+.. pp:param:: <species_name>.eb_reflect
+    :type: ``0`` or ``1``
+    :default: ``0``
+    :optional:
+
+    **If USE_EB=TRUE**: if ``1``, particles of this species that strike an embedded boundary are
+    reflected back into the domain instead of being absorbed (the default). This is intended for
+    modelling neutral-gas flow against solid walls (e.g. DSMC gas dynamics). The reflection is
+    specular, diffuse (thermal), or a blend of the two, set by
+    :pp:param:`<species_name>.eb_accommodation`.
+
+.. pp:param:: <species_name>.eb_accommodation
+    :type: ``float`` (between ``0`` and ``1``)
+    :default: ``1``
+    :optional:
+
+    Thermal accommodation coefficient used when :pp:param:`<species_name>.eb_reflect` is ``1``.
+    ``0`` is purely specular reflection (the velocity component normal to the wall is reversed,
+    conserving kinetic energy); ``1`` is fully diffuse (thermal) reflection, where the particle is
+    re-emitted with a cosine-distributed direction and a speed drawn from a half-Maxwellian at the
+    wall temperature :pp:param:`<species_name>.eb_reflect_temp`. Intermediate values reflect that
+    fraction of impacts diffusely and the remainder specularly.
+
+.. pp:param:: <species_name>.eb_reflect_temp
+    :type: ``float`` (in K)
+    :default: ``300``
+    :optional:
+
+    Wall temperature used for diffuse (thermal) embedded-boundary reflection when
+    :pp:param:`<species_name>.eb_accommodation` is greater than ``0``. Ignored for purely specular
+    reflection.
+
 .. pp:param:: <species_name>.do_field_ionization
     :type: ``0`` or ``1``
     :default: ``0``
