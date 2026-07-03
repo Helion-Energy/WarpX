@@ -95,13 +95,12 @@ reflectParticlesAtEB (PC& pc,
                 // Corner safeguard (a): if the particle penetrated deeper than the signed-distance
                 // field is reliable (~1 cell), it entered at a sharp corner or tunneled -> absorb it
                 // (otherwise it can accumulate in the solid over long runs / complex geometry).
+                // largest cell size across dimensions; AMREX_D_TERM avoids a per-dimension CPP split
+                // and only expands the dxi[1]/dxi[2] accesses in the dimensions where they are valid.
                 amrex::Real dx_max = amrex::Real(1.0)/dxi[0];
-#if (AMREX_SPACEDIM >= 2)
-                dx_max = amrex::max(dx_max, amrex::Real(1.0)/dxi[1]);
-#endif
-#if (AMREX_SPACEDIM == 3)
-                dx_max = amrex::max(dx_max, amrex::Real(1.0)/dxi[2]);
-#endif
+                AMREX_D_TERM(,
+                             dx_max = amrex::max(dx_max, amrex::Real(1.0)/dxi[1]);,
+                             dx_max = amrex::max(dx_max, amrex::Real(1.0)/dxi[2]);)
                 if (phi_value < -dx_max) {
                     amrex::ParticleIDWrapper{ptd.m_idcpu[ip]}.make_invalid();
                     return;
