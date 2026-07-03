@@ -27,7 +27,7 @@
  *
  * The translational LB exponent is a_tr = 3/2 - omega, where omega is the VHS viscosity-temperature
  * exponent (omega = 1/2 for hard spheres => a_tr = 1). This choice reproduces equipartition at
- * equilibrium: <E_int> -> (zeta_int/2) kB T.  [Borgnakke & Larsen, JCP 18, 405 (1975); Bird 1994;
+ * equilibrium: the mean internal energy E_int -> (zeta_int/2) kB T.  [Borgnakke & Larsen, JCP 18, 405 (1975); Bird 1994;
  * Boyd & Schwartzentruber 2017.]
  */
 namespace InternalDOF {
