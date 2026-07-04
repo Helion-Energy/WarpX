@@ -143,7 +143,7 @@ void HybridPICModel::ReadParameters ()
         for (auto const & spec_name : species_names) {
             std::string expr;
             if (pp_hybrid.query(
-                ("plasma_resistivity_" + spec_name + "(rho_s,rho,Te,J,J_s,B,t)").c_str(),
+                "plasma_resistivity_" + spec_name + "(rho_s,rho,Te,J,J_s,B,t)",
                 expr)) {
                 m_has_per_species_eta = true;
             }
@@ -399,7 +399,7 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
             std::string const param_name =
                 "plasma_resistivity_" + spec_name + "(rho_s,rho,Te,J,J_s,B,t)";
             std::string expr;
-            if (pp_hybrid_init.query(param_name.c_str(), expr)) {
+            if (pp_hybrid_init.query(param_name, expr)) {
                 auto parser = std::make_unique<amrex::Parser>(
                     utils::parser::makeParser(
                         expr, {"rho_s","rho","Te","J","J_s","B","t"}));
@@ -427,8 +427,8 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
                     if (it != m_per_species_resistivity_parser.end()) {
                         std::string expr;
                         pp_hybrid_init.query(
-                            ("plasma_resistivity_" + spec_name +
-                             "(rho_s,rho,Te,J,J_s,B,t)").c_str(), expr);
+                            "plasma_resistivity_" + spec_name +
+                             "(rho_s,rho,Te,J,J_s,B,t)", expr);
                         amrex::Print() << "    " << spec_name
                                        << "  : " << expr << "\n";
                     } else {
@@ -1834,7 +1834,7 @@ void HybridPICModel::QDSMCFillElectronPressureFromTe (int const lev) const
 }
 
 
-void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt)
+void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
 {
     ABLASTR_PROFILE("HybridPICModel::AdvanceElectronEnergyQDSMC()");
 
