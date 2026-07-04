@@ -157,13 +157,13 @@ void QdsmcParticleContainer::InitParticles (int lev)
             // In 2D Cartesian and RZ the second in-plane coord is z; the y
             // axis is the unused out-of-plane direction.
             amrex::Real const x_pos = plo[0] + (iv[0] + amrex::Real(0.5)) * dx_arr[0];
-            amrex::Real const y_pos = amrex::Real(0);
+            auto const y_pos = amrex::Real(0);
             amrex::Real const z_pos = plo[1] + (iv[1] + amrex::Real(0.5)) * dx_arr[1];
             pa[QdsmcPIdx::x][ip] = x_pos;
             pa[QdsmcPIdx::z][ip] = z_pos;
 #elif defined(WARPX_DIM_1D_Z)
-            amrex::Real const x_pos = amrex::Real(0);
-            amrex::Real const y_pos = amrex::Real(0);
+            auto const x_pos = amrex::Real(0);
+            auto const y_pos = amrex::Real(0);
             amrex::Real const z_pos = plo[0] + (iv[0] + amrex::Real(0.5)) * dx_arr[0];
             pa[QdsmcPIdx::z][ip] = z_pos;
 #else
@@ -173,8 +173,8 @@ void QdsmcParticleContainer::InitParticles (int lev)
             // HybridPICModel::ReadParameters refuses to enable the energy
             // equation there -- this branch only needs to compile and be sane.
             amrex::Real const x_pos = plo[0] + (iv[0] + amrex::Real(0.5)) * dx_arr[0];
-            amrex::Real const y_pos = amrex::Real(0);
-            amrex::Real const z_pos = amrex::Real(0);
+            auto const y_pos = amrex::Real(0);
+            auto const z_pos = amrex::Real(0);
             pa[QdsmcPIdx::x][ip] = x_pos;
 #endif
 
@@ -591,8 +591,8 @@ QdsmcParticleContainer::DepositK (int lev, amrex::MultiFab & Kfield)
             // at runtime in these geometries (see HybridPICModel::ReadParameters);
             // this branch exists so the container compiles for them.
             amrex::Real const xp = pa_x[ip];
-            amrex::Real const yp = amrex::Real(0);
-            amrex::Real const zp = amrex::Real(0);
+            auto const yp = amrex::Real(0);
+            auto const zp = amrex::Real(0);
 #endif
 
             do_deposit_scalar(K_arr, xp, yp, zp, plo, dxi, entropy[ip], box);
@@ -686,8 +686,8 @@ QdsmcParticleContainer::DepositField (int lev, amrex::MultiFab & Field)
             // at runtime in these geometries (see HybridPICModel::ReadParameters);
             // this branch exists so the container compiles for them.
             amrex::Real const xp = pa_x[ip];
-            amrex::Real const yp = amrex::Real(0);
-            amrex::Real const zp = amrex::Real(0);
+            auto const yp = amrex::Real(0);
+            auto const zp = amrex::Real(0);
 #endif
 
             // np_real already carries the n_e * V_cell weight; divide by V_cell

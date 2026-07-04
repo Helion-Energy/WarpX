@@ -50,6 +50,11 @@ public:
     // member can destroy a forward-declared particle container.
     ~HybridPICModel ();
 
+    HybridPICModel ( HybridPICModel const & )             = delete;
+    HybridPICModel& operator= ( HybridPICModel const & )  = delete;
+    HybridPICModel ( HybridPICModel && )                  = delete;
+    HybridPICModel& operator= ( HybridPICModel && )       = delete;
+
     /** Read user-defined model parameters. Called in constructor. */
     void ReadParameters ();
 
@@ -350,7 +355,7 @@ public:
      *
      * Called from HybridPICEvolveFields when m_solve_electron_energy_equation is true.
      */
-    void AdvanceElectronEnergyQDSMC (amrex::Real dt);
+    void AdvanceElectronEnergyQDSMC (amrex::Real dt) const;
 
     /**
      * \brief Compute the per-species resistive overlay vector field added to

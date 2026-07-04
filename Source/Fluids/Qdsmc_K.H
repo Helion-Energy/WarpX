@@ -92,8 +92,8 @@ void gather_density_entropy (const amrex::ParticleReal xp,
     ablastr::particles::compute_weights<amrex::IndexType::CellIndex::NODE>(
         xp, yp, zp, plo, dxi, i, j, k, W);
 
-    amrex::Real n_local = amrex::Real(0);
-    amrex::Real K_local = amrex::Real(0);
+    auto n_local = amrex::Real(0);
+    auto K_local = amrex::Real(0);
 
 #if AMREX_SPACEDIM == 3
     for (int ioff = 0; ioff < 2; ++ioff) {

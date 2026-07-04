@@ -95,7 +95,7 @@ public:
     static constexpr int NReal = QdsmcPIdx::nattribs;
     static constexpr int NInt = 0;
 
-    QdsmcParticleContainer (amrex::AmrCore* amr_core);
+    explicit QdsmcParticleContainer (amrex::AmrCore* amr_core);
     ~QdsmcParticleContainer() override = default;
 
     QdsmcParticleContainer ( QdsmcParticleContainer const &)             = delete;
