@@ -544,21 +544,22 @@ def main():
         action="store_true",
     )
     parser.add_argument(
-        "--no-isotropic-resistivity",
+        "--isotropic-resistivity",
         dest="isotropic_resistivity",
-        action="store_false",
-        help="disable the corner-curl isotropization of the resistive "
-        "diffusion (on by default; A/B the grid m=4 mode amplitude)",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="corner-curl isotropization of the resistive diffusion. "
+        "Default: OFF on staggered (cuts late m=4, deepens the implosion), "
+        "ON on collocated.",
     )
-    parser.set_defaults(isotropic_resistivity=True)
     parser.add_argument(
-        "--no-isotropic-hyper",
+        "--isotropic-hyper",
         dest="isotropic_hyper",
-        action="store_false",
-        help="disable the isotropic Mehrstellen/Patra-Karttunen hyper-"
-        "resistivity Laplacian (on by default)",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="isotropic Mehrstellen/Patra-Karttunen hyper-resistivity "
+        "Laplacian. Default: OFF on staggered, ON on collocated.",
     )
-    parser.set_defaults(isotropic_hyper=True)
     parser.add_argument(
         "--nz",
         dest="nz",
@@ -651,45 +652,49 @@ def main():
     parser.add_argument(
         "--eb-b-straight-mirror",
         dest="eb_b_straight_mirror",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="impose the wall on the staggered (Yee) B with the collocated-style "
         "direct level-set mirror after each Faraday push, instead of leaving the "
         "covered faces staircase-zeroed (hybrid_pic_model.eb_b_straight_mirror). "
-        "Use with --no-conformal-eb (standard masked Yee Faraday). Best with a "
-        "standoff holding plasma off the wall. Default off.",
+        "Best with a standoff holding plasma off the wall. Default: ON on "
+        "staggered (inert on collocated).",
     )
     parser.add_argument(
         "--eb-levelset-masks",
         dest="eb_levelset_masks",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=None,
         help="mark the staggered EB update masks from the signed level set at each "
         "component's own edge/face center (warpx.eb_levelset_masks) instead of the "
         "stair-case any-cut-neighbor criterion, which freezes a C4-modulated band "
-        "of fluid points (an m=4 wall-imprint source). Staggered only. Default off.",
+        "of fluid points (an m=4 wall-imprint source). Staggered only. "
+        "Default: ON on staggered.",
     )
     parser.add_argument(
         "--mc-gather",
         dest="mc_gather",
         action=argparse.BooleanOptionalAction,
-        default=None,
+        default=True,
         help="momentum-conserving field gathering (algo.field_gathering): E/B "
         "are interpolated to the nodes before the particle gather, so on staggered "
         "grids the gather is single-valued per node with matched shapes (full "
         "order), instead of the Galerkin gather whose order drops by one in the "
-        "staggered directions against Direct deposition. Default: ON on staggered "
-        "(disable with --no-mc-gather), OFF (energy-conserving/Galerkin) on "
-        "collocated.",
+        "staggered directions against Direct deposition. Default: ON on both "
+        "grid types (disable with --no-mc-gather).",
     )
     parser.add_argument(
         "--holmstrom-switch-mode",
         dest="holmstrom_switch_mode",
         choices=["edge", "node", "cell"],
-        default="edge",
+        default=None,
         help="sampling mode of the density deciding the holmstrom vacuum switch "
         "and blend weight (hybrid_pic_model.holmstrom_switch_mode): 'edge' = "
         "per-component half-cell-shifted average (legacy), 'node' = endpoint "
         "min (vacuum-favoring, single-valued per node), 'cell' = cell-centered "
-        "average (one decision per cell for all three E components).",
+        "average (one decision per cell for all three E components). "
+        "Default: 'cell' on staggered (C4-equivariant), 'edge' on collocated "
+        "(where the sampling is single-valued anyway).",
     )
     parser.add_argument(
         "--dive-seam-alpha",
@@ -749,19 +754,23 @@ def main():
     parser.add_argument(
         "--holmstrom-blend-pow",
         type=float,
-        default=0.0,
+        default=None,
         dest="holmstrom_blend_pow",
         help="smooth the holmstrom vacuum switch: over rho in [floor, "
         "width*floor] the Hall/pressure content of E ramps in as "
         "((rho-floor)/((width-1)*floor))**pow from the vacuum value "
-        "(0 = legacy binary switch).",
+        "(0 = legacy binary switch). Default: 1 on staggered (the blend is "
+        "the load-bearing seam regularization there), 0 on collocated.",
     )
     parser.add_argument(
         "--holmstrom-blend-width",
         type=float,
-        default=2.0,
+        default=None,
         dest="holmstrom_blend_width",
-        help="upper edge of the blend window in units of the density floor.",
+        help="upper edge of the blend window in units of the density floor. "
+        "Default: 4 on staggered (narrower windows measurably choke the "
+        "moving plasma/vacuum seam), 2 on collocated (inert while the blend "
+        "pow is 0).",
     )
     parser.add_argument(
         "--ni-mult",
@@ -774,24 +783,24 @@ def main():
     parser.add_argument(
         "--fill-frac",
         type=float,
-        default=None,
+        default=0.20,
         dest="fill_frac",
         help="interior fill density as a fraction of N_I, decoupled from the "
-        "density floor (default: legacy 2*n_floor, which sits inside the "
-        "holmstrom blend window whenever --holmstrom-blend-width >= 2 and "
-        "makes the whole interior switch-decision-sensitive on staggered "
-        "grids). Feeds both the loaded profile and the --equilibrium-b seed.",
+        "density floor. Feeds both the loaded profile and the --equilibrium-b "
+        "seed. Default 0.20 (= the staggered w4 blend-window top, so the "
+        "interior is not switch-decision-sensitive); the legacy 2*n_floor "
+        "coupling is --fill-frac 0.10 at the default floor.",
     )
     parser.add_argument(
         "--particle-shape",
         type=int,
         choices=[1, 2, 3],
-        default=None,
+        default=2,
         dest="particle_shape",
         help="macroparticle shape-factor order (interpolation.nox). Order 2 "
         "(TSC) smooths deposition/gather noise; pair with --standoff-cells "
         ">= shape so the wider stencil never reaches the wall band. "
-        "Default: 2 on staggered, 1 on collocated.",
+        "Default: 2 on both grid types.",
     )
     parser.add_argument(
         "--deposition",
@@ -833,20 +842,33 @@ def main():
     args, left = parser.parse_known_args()
     sys.argv = sys.argv[:1] + left
 
-    # Grid-type-resolved particle-stack defaults. On staggered (Yee) grids the
-    # charge-conserving stack is the default: Esirkepov deposition keeps the
-    # current sheet coherent (div J_i consistent with d(rho)/dt discretely),
-    # TSC (order-2) shapes cut the deposition noise the seam decisions sample,
-    # and the momentum-conserving gather matches the shapes both ways.
-    # Esirkepov aborts on collocated grids, which keep the legacy stack.
-    # Explicit flags always override.
+    # Grid-type-resolved defaults (the validated apples-to-apples configs;
+    # explicit flags always override). Both grids: TSC (order-2) shapes,
+    # momentum-conserving gather, fill above the blend window. Staggered adds
+    # the charge-conserving Esirkepov deposition (keeps the current sheet
+    # coherent: div J_i consistent with d(rho)/dt discretely; aborts on
+    # collocated, which uses direct), the level-set wall treatment (straight
+    # mirror + component-center update masks), the cell-sampled holmstrom
+    # switch with the p1w4 blend (the seam regularization), and anisotropic
+    # (plain) resistive stencils; collocated keeps the isotropized stencils
+    # and its conformal wall.
     staggered = args.grid_type == "staggered"
-    if args.particle_shape is None:
-        args.particle_shape = 2 if staggered else 1
     if args.deposition is None:
         args.deposition = "esirkepov" if staggered else "direct"
-    if args.mc_gather is None:
-        args.mc_gather = staggered
+    if args.isotropic_resistivity is None:
+        args.isotropic_resistivity = not staggered
+    if args.isotropic_hyper is None:
+        args.isotropic_hyper = not staggered
+    if args.eb_b_straight_mirror is None:
+        args.eb_b_straight_mirror = staggered
+    if args.eb_levelset_masks is None:
+        args.eb_levelset_masks = staggered
+    if args.holmstrom_switch_mode is None:
+        args.holmstrom_switch_mode = "cell" if staggered else "edge"
+    if args.holmstrom_blend_pow is None:
+        args.holmstrom_blend_pow = 1.0 if staggered else 0.0
+    if args.holmstrom_blend_width is None:
+        args.holmstrom_blend_width = 4.0 if staggered else 2.0
 
     if args.test:
         resolution = 32
