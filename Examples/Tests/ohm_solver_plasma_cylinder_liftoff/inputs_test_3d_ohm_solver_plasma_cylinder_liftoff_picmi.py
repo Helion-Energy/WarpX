@@ -135,6 +135,9 @@ def setup_simulation(
     dive_seam_band=4.0,
     equilibrium_b=False,
     vacuum=False,
+    fill_frac=None,
+    particle_shape=1,
+    deposition="direct",
 ):
     """Create the PICMI simulation object.
 
@@ -154,6 +157,12 @@ def setup_simulation(
     """
     m_i = M_AMU * constants.m_p
     n_floor = n_floor_frac * N_I
+    # Interior fill density. The legacy default (2*n_floor) sits inside the
+    # holmstrom blend window [n_floor, blend_width*n_floor] whenever
+    # blend_width >= 2, making the whole interior switch-decision-sensitive
+    # every substep on staggered grids; --fill-frac decouples the fill from
+    # the floor so it can be placed above the window.
+    n_fill = fill_frac * N_I if fill_frac is not None else 2.0 * n_floor
     vth = np.sqrt(constants.q_e * T_I0 / m_i)
 
     # cell sizes (cubic cells; z slab centered on the z = 5 m midplane)
@@ -192,10 +201,10 @@ def setup_simulation(
     sim = picmi.Simulation(
         time_step_size=dt,
         max_steps=max_steps,
-        particle_shape=1,
+        particle_shape=particle_shape,
         verbose=verbose,
     )
-    sim.current_deposition_algo = "direct"
+    sim.current_deposition_algo = deposition
     sim.grid_type = grid_type
 
     # External reversal field: uniform Bz through A = (-y/2, x/2, 0) * f(t),
@@ -284,7 +293,7 @@ def setup_simulation(
         # divergence-free. The step-1 external subtract leaves the plasma self-field as
         # the diamagnetic deviation B_eq(r) - bz_bias, sustained by the ion current.
         n_ann_eq = N_I * R_PART**2 / (r_outer**2 - R_INNER**2)
-        n_fill_eq = 2.0 * n_floor
+        n_fill_eq = n_fill
         k_eq = 2.0 * constants.mu0 * (T_I0 + te) * constants.q_e
         sgn = "" if bz_bias >= 0 else "-"
         rr = "sqrt(x*x+y*y)"
@@ -324,7 +333,6 @@ def setup_simulation(
     # the density gradient -- and the diamagnetic current its curl drives -- is
     # grid-resolved rather than a one-cell step (whose curl is a spurious current
     # sheet). annulus_smooth_cells=0 recovers the hard top-hat.
-    n_fill = 2.0 * n_floor
     if vacuum:
         # Vacuum run (--vacuum): no plasma. density_expression 0 -> no particles are
         # injected, so rho = 0 everywhere (clamped to the floor) and the field
@@ -420,9 +428,25 @@ def install_wall_scraper(species_name, r_standoff, verbose=False):
     r2_standoff = r_standoff * r_standoff
     # ~(1 << 63): AND-mask that clears the valid/sign bit of a uint64 idcpu.
     keep_valid_bits = 0x7FFFFFFFFFFFFFFF
+    names_checked = []
+
+    def _repair_soa_names_once():
+        # On some CUDA toolchains the compile-time SoA names (a static
+        # constexpr initializer_list in PIdx) arrive EMPTY at runtime, so
+        # every name-based accessor (get_real_comp_index) throws. Restore
+        # the 3D PIdx name table before the first lookup. Only safe while
+        # no runtime real/int components have been added (they would have
+        # appeared in real_soa_names too, which we verify is empty).
+        if names_checked:
+            return
+        names_checked.append(True)
+        pc = ions.particle_container
+        if not list(pc.real_soa_names):
+            pc.set_soa_compile_time_names(["x", "y", "z", "w", "ux", "uy", "uz"], [])
 
     @callbacks.callfromparticlescraper
     def _scrape_beyond_standoff():
+        _repair_soa_names_once()
         xp, _ = load_cupy()  # cupy on GPU, numpy on CPU -- zero-copy either way
         clear_bit63 = xp.uint64(keep_valid_bits)
         level = 0
@@ -746,6 +770,37 @@ def main():
         "loading, the density floor, l_i and vA consistently).",
     )
     parser.add_argument(
+        "--fill-frac",
+        type=float,
+        default=None,
+        dest="fill_frac",
+        help="interior fill density as a fraction of N_I, decoupled from the "
+        "density floor (default: legacy 2*n_floor, which sits inside the "
+        "holmstrom blend window whenever --holmstrom-blend-width >= 2 and "
+        "makes the whole interior switch-decision-sensitive on staggered "
+        "grids). Feeds both the loaded profile and the --equilibrium-b seed.",
+    )
+    parser.add_argument(
+        "--particle-shape",
+        type=int,
+        choices=[1, 2, 3],
+        default=1,
+        dest="particle_shape",
+        help="macroparticle shape-factor order (interpolation.nox). Order 2 "
+        "(TSC) smooths deposition/gather noise; pair with --standoff-cells "
+        ">= shape so the wider stencil never reaches the wall band.",
+    )
+    parser.add_argument(
+        "--deposition",
+        choices=["direct", "esirkepov"],
+        default="direct",
+        dest="deposition",
+        help="ion current deposition scheme. 'esirkepov' is charge-conserving "
+        "(div J_i = -d(rho)/dt discretely on the Yee staggering) and, unlike "
+        "'direct', honors the EB reduced-particle-shape clamp near cut cells; "
+        "staggered grids only (WarpX aborts on collocated).",
+    )
+    parser.add_argument(
         "--equilibrium-b",
         action="store_true",
         dest="equilibrium_b",
@@ -801,6 +856,13 @@ def main():
         r_outer_eff = R_WALL - args.standoff_cells * (2.0 / resolution)
     else:
         r_outer_eff = args.r_outer
+    if not args.vacuum and r_outer_eff <= R_INNER:
+        parser.error(
+            f"effective annulus outer radius {r_outer_eff:.4f} m (R_WALL - "
+            f"standoff_cells*dx at this resolution) does not exceed "
+            f"R_INNER={R_INNER} m; the annulus inverts (negative loading "
+            "density). Increase --resolution or reduce --standoff-cells."
+        )
 
     if args.ni_mult != 1.0:
         # N_I is a module global read inside setup_simulation at call time, so
@@ -845,6 +907,9 @@ def main():
         dive_seam_band=args.dive_seam_band,
         equilibrium_b=args.equilibrium_b,
         vacuum=args.vacuum,
+        fill_frac=args.fill_frac,
+        particle_shape=args.particle_shape,
+        deposition=args.deposition,
     )
 
     # Opt-in staggered level-set EB update masks (warpx.* namespace, so set on the
