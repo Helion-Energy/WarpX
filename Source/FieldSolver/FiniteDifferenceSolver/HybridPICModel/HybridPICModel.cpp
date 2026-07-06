@@ -120,15 +120,6 @@ void HybridPICModel::ReadParameters ()
                 "'edge', 'node', 'cell' (got '" + switch_mode_str + "')");
         }
     }
-    utils::parser::queryWithParser(pp_hybrid, "dive_seam_alpha", m_dive_seam_alpha);
-    utils::parser::queryWithParser(pp_hybrid, "dive_seam_iters", m_dive_seam_iters);
-    utils::parser::queryWithParser(pp_hybrid, "dive_seam_band", m_dive_seam_band);
-    // The compact Yee grad(div) sweep is stable for alpha <= 1/6 (cubic 3D
-    // cells; the 2D cap is higher). The clean runs every substage, so an
-    // over-cap value detonates within one ion step -- reject it up front.
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_dive_seam_alpha <= 1.0_rt/6.0_rt,
-        "hybrid_pic_model.dive_seam_alpha must be <= 1/6 (the explicit "
-        "grad(div) stability cap for cubic 3D cells).");
     // Renamed parameter guard: the short-lived bool was replaced by the
     // string-valued holmstrom_switch_mode.
     {
@@ -146,9 +137,6 @@ void HybridPICModel::ReadParameters ()
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_holmstrom_switch_mode == 0,
         "hybrid_pic_model.holmstrom_switch_mode is only supported in 3D and "
         "2D (XZ) Cartesian geometry");
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_dive_seam_alpha <= 0.0_rt,
-        "hybrid_pic_model.dive_seam_alpha is only supported in 3D and 2D (XZ) "
-        "Cartesian geometry");
 #endif
 
     if (m_use_conformal_eb) {
@@ -243,27 +231,6 @@ void HybridPICModel::ReadParameters ()
     }
 #endif
     utils::parser::queryWithParser(pp_hybrid, "eb_b_fill_band_cells", m_eb_b_fill_band_cells);
-
-    // Marder-like diffusive divergence clean of B / the total Ampere current in
-    // a near-wall band (MarderCleanDivergence), applied once per step from the
-    // hybrid field advance. Both alphas default to 0 = off (byte-identical).
-    utils::parser::queryWithParser(pp_hybrid, "divb_clean_alpha", m_divb_clean_alpha);
-    utils::parser::queryWithParser(pp_hybrid, "divj_clean_alpha", m_divj_clean_alpha);
-    utils::parser::queryWithParser(pp_hybrid, "divb_clean_iters", m_divb_clean_iters);
-    utils::parser::queryWithParser(pp_hybrid, "divb_clean_band_cells", m_divb_clean_band_cells);
-    utils::parser::queryWithParser(
-        pp_hybrid, "divb_clean_inner_div_cells", m_divb_clean_inner_div_cells);
-    utils::parser::queryWithParser(
-        pp_hybrid, "divb_clean_inner_corr_cells", m_divb_clean_inner_corr_cells);
-#if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_XZ)
-    // The clean's gradient is the adjoint of the CARTESIAN divergence only;
-    // abort rather than silently no-op (1D) or apply a non-dissipative
-    // metric-inconsistent update (RZ).
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        m_divb_clean_alpha <= 0.0_rt && m_divj_clean_alpha <= 0.0_rt,
-        "hybrid_pic_model.divb_clean_alpha / divj_clean_alpha are only "
-        "supported in 3D and 2D (XZ) Cartesian geometry");
-#endif
 }
 
 void HybridPICModel::AllocateLevelMFs (
@@ -1446,13 +1413,6 @@ void HybridPICModel::FieldPush (
     CalculatePlasmaCurrent(Bfield, eb_update_E);
     // Calculate the E-field from Ohm's law
     HybridPICSolveE(Efield, Jfield, Bfield, rhofield, eb_update_E, true);
-    // Density-banded Marder clean of the Ohm E at the n_floor seam (staggered
-    // grids): diffuse the divergence-carrying, per-component-inconsistent E
-    // content at the plasma/vacuum seam before Faraday integrates it into B.
-    // No-op unless dive_seam_alpha > 0; handles its own ghost exchanges.
-    if (Bz_IndexType[0] != Ez_IndexType[0]) {
-        MarderCleanESeam(Efield, rhofield, eb_update_E, ng, nodal_sync);
-    }
     // Refresh the E ghosts before the Faraday push reads them on a collocated
     // grid: the masked nodal curl reads ghost E.
     if (Bz_IndexType[0] == Ez_IndexType[0]) {
