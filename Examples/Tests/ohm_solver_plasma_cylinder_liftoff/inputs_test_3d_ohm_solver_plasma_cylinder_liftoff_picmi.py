@@ -670,13 +670,15 @@ def main():
     parser.add_argument(
         "--mc-gather",
         dest="mc_gather",
-        action="store_true",
-        help="use momentum-conserving field gathering (algo.field_gathering): E/B "
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="momentum-conserving field gathering (algo.field_gathering): E/B "
         "are interpolated to the nodes before the particle gather, so on staggered "
         "grids the gather is single-valued per node with matched shapes (full "
         "order), instead of the Galerkin gather whose order drops by one in the "
-        "staggered directions against Direct deposition. Default off "
-        "(energy-conserving/Galerkin).",
+        "staggered directions against Direct deposition. Default: ON on staggered "
+        "(disable with --no-mc-gather), OFF (energy-conserving/Galerkin) on "
+        "collocated.",
     )
     parser.add_argument(
         "--holmstrom-switch-mode",
@@ -784,21 +786,24 @@ def main():
         "--particle-shape",
         type=int,
         choices=[1, 2, 3],
-        default=1,
+        default=None,
         dest="particle_shape",
         help="macroparticle shape-factor order (interpolation.nox). Order 2 "
         "(TSC) smooths deposition/gather noise; pair with --standoff-cells "
-        ">= shape so the wider stencil never reaches the wall band.",
+        ">= shape so the wider stencil never reaches the wall band. "
+        "Default: 2 on staggered, 1 on collocated.",
     )
     parser.add_argument(
         "--deposition",
         choices=["direct", "esirkepov"],
-        default="direct",
+        default=None,
         dest="deposition",
         help="ion current deposition scheme. 'esirkepov' is charge-conserving "
         "(div J_i = -d(rho)/dt discretely on the Yee staggering) and, unlike "
         "'direct', honors the EB reduced-particle-shape clamp near cut cells; "
-        "staggered grids only (WarpX aborts on collocated).",
+        "staggered grids only (WarpX aborts on collocated). Charge conservation "
+        "is important for keeping the current sheet coherent. "
+        "Default: esirkepov on staggered, direct on collocated.",
     )
     parser.add_argument(
         "--equilibrium-b",
@@ -827,6 +832,21 @@ def main():
     )
     args, left = parser.parse_known_args()
     sys.argv = sys.argv[:1] + left
+
+    # Grid-type-resolved particle-stack defaults. On staggered (Yee) grids the
+    # charge-conserving stack is the default: Esirkepov deposition keeps the
+    # current sheet coherent (div J_i consistent with d(rho)/dt discretely),
+    # TSC (order-2) shapes cut the deposition noise the seam decisions sample,
+    # and the momentum-conserving gather matches the shapes both ways.
+    # Esirkepov aborts on collocated grids, which keep the legacy stack.
+    # Explicit flags always override.
+    staggered = args.grid_type == "staggered"
+    if args.particle_shape is None:
+        args.particle_shape = 2 if staggered else 1
+    if args.deposition is None:
+        args.deposition = "esirkepov" if staggered else "direct"
+    if args.mc_gather is None:
+        args.mc_gather = staggered
 
     if args.test:
         resolution = 32
