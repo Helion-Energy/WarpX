@@ -152,6 +152,15 @@ public:
      * is the adjoint of the Cartesian divergence; ReadParameters aborts if the
      * knobs are set on other geometries).
      */
+    /** Constitutive-PEC zeroing of an edge-staggered field on the staggered
+     *  conformal (ECT) path: zero every masked (fully covered) edge and every
+     *  cut edge (open length < full). Used for the Ohm's-law E and the Ampere
+     *  current when conformal_pec_zero_ej is set (see that knob's docs). */
+    void ZeroConductorEdges (
+        ablastr::fields::VectorField const& field,
+        std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update,
+        int lev) const;
+
     void MarderCleanDivergence (
         ablastr::fields::VectorField const& field,
         std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update,
@@ -390,6 +399,23 @@ public:
      *  reconstructed J), not just metric-consistent explicit reads. No effect
      *  off the staggered conformal path. */
     bool m_conformal_e_geometric_pec = false;
+    /** On the staggered conformal (ECT) path, impose the PEC on the Ohm's-law
+     *  E and on the Ampere current CONSTITUTIVELY: at a perfect conductor
+     *  E = 0, and the hybrid cannot support wall (surface) currents, so with
+     *  a standoff keeping the plasma off the metal there is no physics on
+     *  EB-touching edges at all. Set E = 0 and J = 0 on every masked (fully
+     *  covered) edge and on EVERY cut edge (open length < full length),
+     *  instead of the pointwise level-set mirror extrapolations (which feed
+     *  near-wall values into the 1/S-amplified circulation). Cut faces then
+     *  evolve only through their fully-open edges: tangential E = 0 at the
+     *  wall, imposed at the cut-edge level (a first-order wall, traded for
+     *  unconditional boundedness). The density-based resistivity parser
+     *  cannot express this (rho sits at the floor in the conductor AND the
+     *  vacuum gap, so the conductor accidentally gets eta_vac -- the largest
+     *  eta in the problem); this mask is the geometry-aware eta -> 0 it
+     *  cannot write. Takes precedence over conformal_e_geometric_pec and the
+     *  covered-J mirror. */
+    bool m_conformal_pec_zero_ej = false;
     /** If true (default), the hybrid Hall term's nodal J x B interpolation excludes
      *  covered edges/faces (EB-aware, mask-renormalized) so covered-cell field values do
      *  not pollute the near-wall J x B. Set false to recover the plain (polluting)
