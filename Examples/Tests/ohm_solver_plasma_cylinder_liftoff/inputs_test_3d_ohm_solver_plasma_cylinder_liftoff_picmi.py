@@ -125,11 +125,16 @@ def setup_simulation(
     eb_b_straight_mirror=False,
     conformal_ect_j=False,
     conformal_ect_curvature=False,
+    divb_clean=False,
+    divb_clean_iters=3,
     eta_hyper_mult=1.0,
     eta_nodal=False,
     holmstrom_blend_pow=0.0,
     holmstrom_blend_width=2.0,
     holmstrom_switch_mode="edge",
+    dive_seam_alpha=0.0,
+    dive_seam_iters=1,
+    dive_seam_band=4.0,
     equilibrium_b=False,
     vacuum=False,
     fill_frac=None,
@@ -239,6 +244,9 @@ def setup_simulation(
         holmstrom_switch_mode=holmstrom_switch_mode
         if holmstrom_switch_mode != "edge"
         else None,
+        dive_seam_alpha=dive_seam_alpha if dive_seam_alpha > 0 else None,
+        dive_seam_iters=dive_seam_iters if dive_seam_alpha > 0 else None,
+        dive_seam_band=dive_seam_band if dive_seam_alpha > 0 else None,
         use_rkf45=True,
         substep_rtol=substep_rtol,
         substep_atol=1.0e-8,
@@ -254,6 +262,15 @@ def setup_simulation(
         # curvature correction.
         conformal_ect_j=True if conformal_ect_j else None,
         conformal_ect_curvature=True if conformal_ect_curvature else None,
+        # Diffusive near-wall div(B)/div(J) damper at the annulus production
+        # config: alpha=0.15 (just under the ~1/6 explicit-diffusion cap),
+        # 3 sweeps/step, unbounded band, wall-layer mode (inner cutoffs 0).
+        divb_clean_alpha=0.15 if divb_clean else None,
+        divj_clean_alpha=0.15 if divb_clean else None,
+        divb_clean_iters=divb_clean_iters if divb_clean else None,
+        divb_clean_band_cells=0.0 if divb_clean else None,
+        divb_clean_inner_div_cells=0.0 if divb_clean else None,
+        divb_clean_inner_corr_cells=0.0 if divb_clean else None,
         A_external=A_ext,
         **power_law_resistivity(
             ETA_PLASMA,
@@ -711,6 +728,44 @@ def main():
         "(where the sampling is single-valued anyway).",
     )
     parser.add_argument(
+        "--dive-seam-alpha",
+        dest="dive_seam_alpha",
+        type=float,
+        default=0.0,
+        help="density-banded Marder clean of the Ohm E at the n_floor seam, per "
+        "substage on staggered grids (hybrid_pic_model.dive_seam_alpha; "
+        "fraction of the explicit-diffusion cap, 0 = off).",
+    )
+    parser.add_argument(
+        "--dive-seam-iters",
+        dest="dive_seam_iters",
+        type=int,
+        default=1,
+        help="sweeps of the seam E clean per substage.",
+    )
+    parser.add_argument(
+        "--dive-seam-band",
+        dest="dive_seam_band",
+        type=float,
+        default=4.0,
+        help="upper edge of the seam clean window in units of the density floor.",
+    )
+    parser.add_argument(
+        "--divb-clean",
+        dest="divb_clean",
+        action="store_true",
+        help="enable the diffusive near-wall div(B)/div(J) damper at the annulus "
+        "production config (alpha=0.15, unbounded band, wall-layer mode; sweep "
+        "count from --divb-clean-iters). Default off.",
+    )
+    parser.add_argument(
+        "--divb-clean-iters",
+        type=int,
+        default=3,
+        dest="divb_clean_iters",
+        help="grad(div) sweeps per step for --divb-clean (default 3).",
+    )
+    parser.add_argument(
         "--eta-hyper-mult",
         type=float,
         default=1.0,
@@ -918,11 +973,16 @@ def main():
         eb_b_straight_mirror=args.eb_b_straight_mirror,
         conformal_ect_j=args.conformal_ect_j,
         conformal_ect_curvature=args.conformal_ect_curvature,
+        divb_clean=args.divb_clean,
+        divb_clean_iters=args.divb_clean_iters,
         eta_hyper_mult=args.eta_hyper_mult,
         eta_nodal=args.eta_nodal,
         holmstrom_blend_pow=args.holmstrom_blend_pow,
         holmstrom_blend_width=args.holmstrom_blend_width,
         holmstrom_switch_mode=args.holmstrom_switch_mode,
+        dive_seam_alpha=args.dive_seam_alpha,
+        dive_seam_iters=args.dive_seam_iters,
+        dive_seam_band=args.dive_seam_band,
         equilibrium_b=args.equilibrium_b,
         vacuum=args.vacuum,
         fill_frac=args.fill_frac,

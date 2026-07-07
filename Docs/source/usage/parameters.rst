@@ -4036,6 +4036,37 @@ Maxwell solver: kinetic-fluid hybrid
     piecewise-constant-per-cell decision field with no per-component half-shifts. Cartesian
     only.
 
+.. pp:param:: hybrid_pic_model.dive_seam_alpha
+    :type: ``float``
+    :default: ``0`` (off)
+    :optional:
+
+    Density-banded Marder clean of the Ohm's-law electric field at the ``n_floor`` seam,
+    applied per field substage on staggered grids: iterates
+    :math:`\vec{E} \mathrel{+}= \alpha\,\nabla(\nabla\cdot\vec{E})` restricted to edges whose
+    endpoint-averaged density is at or below
+    :pp:param:`hybrid_pic_model.dive_seam_band` :math:`\times \rho_\mathrm{floor}`, diffusing
+    the divergence-carrying, per-component-inconsistent electric-field content injected at the
+    moving plasma/vacuum seam before the Faraday push integrates it into the magnetic field.
+    The nodal-divergence / edge-gradient pair is mutually adjoint, so the update strictly
+    dissipates the divergence norm and preserves the curl to round-off away from the window
+    edge. The value is a fraction of the explicit-diffusion stability cap. 3D/XZ Cartesian,
+    staggered grids only.
+
+.. pp:param:: hybrid_pic_model.dive_seam_iters
+    :type: ``int``
+    :default: ``1``
+    :optional:
+
+    Sweeps of the seam electric-field clean per substage.
+
+.. pp:param:: hybrid_pic_model.dive_seam_band
+    :type: ``float``
+    :default: ``4``
+    :optional:
+
+    Upper edge of the seam clean window, in units of the density floor.
+
 .. pp:param:: hybrid_pic_model.eta_nodal_interp
     :type: ``bool``
     :default: ``false``
@@ -4083,6 +4114,75 @@ Maxwell solver: kinetic-fluid hybrid
     is preserved exactly; it is a pure O(h^2) truncation-error canceller (zero for fields of
     degree :math:`\leq 3`). Cartesian geometries only; the RZ resistive operator is axisymmetric
     and has no such anisotropy.
+
+.. pp:param:: hybrid_pic_model.divb_clean_alpha
+    :type: ``float``
+    :default: ``0``
+    :optional:
+
+    Damping factor of a Marder-style diffusive divergence clean of ``Bfield_fp`` for hybrid
+    embedded-boundary runs (both grid types; the update uses the discrete-adjoint gradient of the
+    nodal divergence on either staggering). ``0`` (default) disables it. The clean iterates
+    ``B += alpha * grad(div B)`` in a near-wall band (see
+    :pp:param:`hybrid_pic_model.divb_clean_band_cells`), re-imposing the embedded-boundary condition
+    after each sweep. Because the correction is a pure gradient it dissipates the divergence that
+    the curved-wall mirror injects without changing ``curl(B)`` (the plasma current) away from the
+    band cutoffs, so the physics that consumes the current is largely unaffected. Stability-capped
+    near ``1/6`` in 3D (the explicit grad(div) diffusion CFL; larger values diverge, ``0.15`` is a
+    validated sweet spot). Supported in 3D and 2D (XZ) Cartesian geometry only (the gradient is the
+    discrete adjoint of the Cartesian divergence; other geometries abort at setup if enabled).
+
+.. pp:param:: hybrid_pic_model.divj_clean_alpha
+    :type: ``float``
+    :default: ``0``
+    :optional:
+
+    As :pp:param:`hybrid_pic_model.divb_clean_alpha`, but cleans the divergence of the total
+    (Ampère/plasma) current ``hybrid_current_fp_plasma`` — current continuity, :math:`\nabla\cdot J = 0`,
+    which only the total current obeys. It never acts on a deposited ion-species current. ``0``
+    (default) disables it.
+
+.. pp:param:: hybrid_pic_model.divb_clean_iters
+    :type: ``int``
+    :default: ``5``
+    :optional:
+
+    Number of fixed-point sweeps per application of the div(B)/div(J) clean (shared by both).
+
+.. pp:param:: hybrid_pic_model.divb_clean_band_cells
+    :type: ``float``
+    :default: ``4``
+    :optional:
+
+    Outer cutoff, in cells from the wall, of the near-wall band over which the div(B)/div(J)
+    clean acts (shared by both). The clean is applied once per full step, after the
+    plasma-current update and before the external-field add-back (so it acts on the plasma
+    field only). A value ``<= 0`` selects the unbounded mode: the correction applies on
+    every uncovered node, which is strictly dissipative of the global divergence norm and a
+    no-op wherever the field is already solenoidal — a hard outer cutoff instead transports
+    divergence to the band edge and accumulates it just outside, where nothing damps it.
+
+.. pp:param:: hybrid_pic_model.divb_clean_inner_div_cells
+    :type: ``float``
+    :default: ``1``
+    :optional:
+
+    Inner cutoff, in cells from the wall, below which the computed divergence is dropped
+    before the grad(div) correction. The default trusts the divergence only where its
+    :math:`\pm 1` stencil is fully in the fluid; ``0`` keeps it on every uncovered node
+    (the wall-layer mode).
+
+.. pp:param:: hybrid_pic_model.divb_clean_inner_corr_cells
+    :type: ``float``
+    :default: ``2``
+    :optional:
+
+    Inner cutoff, in cells from the wall, below which no correction is applied. The default
+    keeps the full :math:`\pm 2` grad(div) stencil in the fluid, preserving the near-wall
+    order on a smooth wall but leaving the first fluid layers to the mirror fill; ``0``
+    corrects every uncovered band node (the wall-layer mode, for damping the exponentially
+    growing divergence a sharp re-entrant wall corner — e.g. a wall radius step — pumps
+    into the first fluid layers).
 
 .. pp:param:: hybrid_pic_model.add_external_fields
     :type: ``bool``
