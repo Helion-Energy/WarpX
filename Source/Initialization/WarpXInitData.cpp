@@ -1651,22 +1651,6 @@ void WarpX::InitializeEBGridData (int lev)
                     *m_fields.get(FieldType::distance_to_eb, lev),
                     Geom(lev).periodicity() );
 
-            } else if (WarpX::UseLevelSetMasks()) {
-
-                // Opt-in staggered level-set marking (warpx.eb_levelset_masks):
-                // deactivate a component only when the signed level set at its own
-                // edge/face center is inside the conductor, instead of freezing the
-                // whole stair-case any-cut-neighbor band (which C4-modulates the
-                // effective wall seen by the near-wall field evolution).
-                warpx::embedded_boundary::MarkUpdateCellsLevelSet(
-                    m_eb_update_E[lev],
-                    *m_fields.get(FieldType::distance_to_eb, lev),
-                    Geom(lev).periodicity() );
-                warpx::embedded_boundary::MarkUpdateCellsLevelSet(
-                    m_eb_update_B[lev],
-                    *m_fields.get(FieldType::distance_to_eb, lev),
-                    Geom(lev).periodicity() );
-
             } else {
                 // Mark on which grid points E should be updated (stair-case approximation)
                 warpx::embedded_boundary::MarkUpdateCellsStairCase(
