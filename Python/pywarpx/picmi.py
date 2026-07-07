@@ -2246,6 +2246,19 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         ``use_conformal_eb`` on a staggered (Yee) embedded-boundary grid; opt-in
         (default off is byte-identical, the standard masked Yee curl is used).
 
+    conformal_pec_zero_ej: bool, default=False
+        If True, impose the perfect-conductor condition constitutively on the
+        staggered conformal (ECT) path: the Ohm's-law ``E`` and the Ampere
+        plasma current ``J`` are zeroed on every EB-touching edge (fully
+        covered and cut), replacing the pointwise level-set mirror fills. Cut
+        faces then evolve only through their fully-open edges (tangential
+        ``E = 0`` at the cut-edge level — a first-order wall) and covered face
+        fluxes freeze, so wall flux is conserved by construction; the external
+        vector-potential fields are likewise zeroed in the conductor. This is
+        the stable, recommended wall for the staggered conformal hybrid
+        solver. Requires ``use_conformal_eb`` on a staggered (Yee)
+        embedded-boundary grid.
+
     eb_bc_rtol: float, default=1e-4
         Relative residual tolerance of the embedded-boundary PEC
         boundary-condition band relaxation. With embedded boundaries the
@@ -2444,6 +2457,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         eb_b_straight_mirror=None,
         conformal_ect_curvature=None,
         conformal_ect_j=None,
+        conformal_pec_zero_ej=None,
         eb_bc_rtol=None,
         eb_bc_max_iters=None,
         eb_bc_direct_fill=None,
@@ -2496,6 +2510,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.eb_b_straight_mirror = eb_b_straight_mirror
         self.conformal_ect_curvature = conformal_ect_curvature
         self.conformal_ect_j = conformal_ect_j
+        self.conformal_pec_zero_ej = conformal_pec_zero_ej
         self.eb_bc_rtol = eb_bc_rtol
         self.eb_bc_max_iters = eb_bc_max_iters
         self.eb_bc_direct_fill = eb_bc_direct_fill
@@ -2572,6 +2587,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         pywarpx.hybridpicmodel.eb_b_straight_mirror = self.eb_b_straight_mirror
         pywarpx.hybridpicmodel.conformal_ect_curvature = self.conformal_ect_curvature
         pywarpx.hybridpicmodel.conformal_ect_j = self.conformal_ect_j
+        pywarpx.hybridpicmodel.conformal_pec_zero_ej = self.conformal_pec_zero_ej
         pywarpx.hybridpicmodel.eb_bc_rtol = self.eb_bc_rtol
         pywarpx.hybridpicmodel.eb_bc_max_iters = self.eb_bc_max_iters
         pywarpx.hybridpicmodel.eb_bc_direct_fill = self.eb_bc_direct_fill
