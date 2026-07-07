@@ -161,6 +161,17 @@ public:
         std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update,
         int lev) const;
 
+    /** Constitutive-PEC zeroing of a face-staggered field on the staggered
+     *  conformal (ECT) path: zero every FULLY COVERED face (open area = 0).
+     *  Cut faces keep their value (their open part carries real flux). Used
+     *  for the external B (curl A) when conformal_pec_zero_ej is set: the
+     *  conductor excludes the time-varying external flux, and leaving the
+     *  through-wall ramp in the covered faces feeds a growing,
+     *  staircase-patterned B reservoir to every open-side curl stencil. */
+    void ZeroCoveredFaces (
+        ablastr::fields::VectorField const& field,
+        int lev) const;
+
     void MarderCleanDivergence (
         ablastr::fields::VectorField const& field,
         std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update,
