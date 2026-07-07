@@ -366,6 +366,11 @@ public:
      *  staggered (Yee) grid; opt-in (default off -> byte-identical, the standard
      *  masked Yee curl is used). */
     bool m_conformal_ect_j = false;
+    /** Experiment knob: keep the covered-J mirror fill when conformal_ect_j is
+     *  on (the default skips it, since the mirror injects div(J) into Form A's
+     *  div-consistent wall current). Isolates the flux-weighted READ from the
+     *  loss of the mirror's smoothing in the liftoff wall-instability ladder. */
+    bool m_conformal_ect_j_keep_mirror = false;
     /** If true (default), the hybrid Hall term's nodal J x B interpolation excludes
      *  covered edges/faces (EB-aware, mask-renormalized) so covered-cell field values do
      *  not pollute the near-wall J x B. Set false to recover the plain (polluting)
