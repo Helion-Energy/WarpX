@@ -286,6 +286,7 @@ void HybridPICModel::ReadParameters ()
         pp_hybrid, "divb_clean_inner_div_cells", m_divb_clean_inner_div_cells);
     utils::parser::queryWithParser(
         pp_hybrid, "divb_clean_inner_corr_cells", m_divb_clean_inner_corr_cells);
+    pp_hybrid.query("divb_clean_cut_metric", m_divb_clean_cut_metric);
 #if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_XZ)
     // The clean's gradient is the adjoint of the CARTESIAN divergence only;
     // abort rather than silently no-op (1D) or apply a non-dissipative

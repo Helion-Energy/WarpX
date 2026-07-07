@@ -4184,6 +4184,22 @@ Maxwell solver: kinetic-fluid hybrid
     growing divergence a sharp re-entrant wall corner — e.g. a wall radius step — pumps
     into the first fluid layers).
 
+.. pp:param:: hybrid_pic_model.divb_clean_cut_metric
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    On the staggered conformal (ECT) path (:pp:param:`hybrid_pic_model.use_conformal_eb` on a
+    staggered grid, 3D only), the div(``B``) clean uses the **matched cut-metric** operators:
+    the divergence is the signed sum of open-face fluxes (weighted by the open cut-face-area
+    fraction — the invariant the ECT Faraday update actually conserves) and the correction is
+    its exact negative adjoint, so the sweep is dissipative in the flux norm and does not fight
+    the ECT push (the raw uniform-metric divergence of an ECT-evolved field is
+    :math:`O((1-\mathrm{frac})B/h)` at a cut face *by construction*). In this mode covered
+    faces are never read or written and the per-sweep level-set mirror re-fill is skipped. Set
+    ``false`` to force the raw uniform-metric clean everywhere (the pre-cut-metric behavior).
+    Off the staggered conformal path this parameter has no effect.
+
 .. pp:param:: hybrid_pic_model.add_external_fields
     :type: ``bool``
     :default: ``false``

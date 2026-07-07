@@ -39,7 +39,8 @@ void HybridPICModel::MarderCleanDivergence (
     const int max_iters,
     const amrex::Real clean_band_cells,
     const amrex::Real fill_band_cells,
-    const int lev) const
+    const int lev,
+    const bool cut_metric) const
 {
 // 3D/XZ Cartesian only: the gradient below is the discrete adjoint of the
 // Cartesian ComputeDivE, which is what makes the update strictly dissipative
@@ -67,6 +68,40 @@ void HybridPICModel::MarderCleanDivergence (
     const Real alpha_scaled = alpha * h_min * h_min * (nodal_grid ? 4.0_rt : 1.0_rt);
 
     amrex::MultiFab const* phi_mf = warpx.m_fields.get(FieldType::distance_to_eb, lev);
+
+    // Matched cut-metric mode (staggered conformal/ECT path, 3D only): the
+    // divergence is the signed sum of OPEN-FACE fluxes, D = sum_d [frac_+ F_+
+    // - frac_- F_-]/h_d with frac = face_areas / full face area -- the
+    // invariant the ECT Faraday actually conserves -- and the correction is
+    // its exact negative adjoint, F_f += alpha * frac_f * grad_f(div). The
+    // frac weight appears once in each operator, so G = -D^T and the sweep is
+    // strictly dissipative of the FLUX-metric divergence norm; since
+    // frac <= 1 the explicit CFL cap is the same as the raw operator's (no
+    // implicit solve needed for the diffusive damper -- the CG/agglomeration
+    // requirement applies to the exact projection, not to Marder damping).
+    // Covered faces (frac = 0) are never read or written; live faces are
+    // gated on frac > 0 rather than the staircase update mask, which zeroes
+    // CUT faces and would otherwise skip exactly the flux DOFs the clean is
+    // for. The per-sweep level-set mirror re-fill is skipped too: the ECT arm
+    // imposes no mirror on B, and re-imposing one here would overwrite the
+    // ECT-advanced cut faces with raw-metric mirror values (the two-metric
+    // fight measured on the liftoff ect_clean arm).
+#if defined(WARPX_DIM_3D)
+    const bool use_cut = cut_metric && !nodal_grid;
+#else
+    const bool use_cut = false;
+    amrex::ignore_unused(cut_metric);
+#endif
+    ablastr::fields::VectorField frac_mf;
+    amrex::GpuArray<Real, 3> inv_full_area{0.0_rt, 0.0_rt, 0.0_rt};
+    if (use_cut) {
+        frac_mf = warpx.m_fields.get_alldirs(FieldType::face_areas, lev);
+#if defined(WARPX_DIM_3D)
+        inv_full_area[0] = 1.0_rt/(dx[1]*dx[2]);
+        inv_full_area[1] = 1.0_rt/(dx[0]*dx[2]);
+        inv_full_area[2] = 1.0_rt/(dx[0]*dx[1]);
+#endif
+    }
 
     // band_cells <= 0 selects the UNBOUNDED mode: the correction applies on
     // every uncovered node. The pure-gradient update is strictly dissipative
@@ -139,7 +174,35 @@ void HybridPICModel::MarderCleanDivergence (
                 *field[c], IntVect(1), WarpX::do_single_precision_comms,
                 geom.periodicity());
         }
-        fdtd->ComputeDivE(field, div_f);
+        if (use_cut) {
+#if defined(WARPX_DIM_3D)
+            // Flux divergence with the same DownwardD index arithmetic as
+            // ComputeDivE, weighted by the open-face fraction.
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(div_f, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                Array4<Real> const& d = div_f.array(mfi);
+                Array4<Real const> const& Fx = field[0]->const_array(mfi);
+                Array4<Real const> const& Fy = field[1]->const_array(mfi);
+                Array4<Real const> const& Fz = field[2]->const_array(mfi);
+                Array4<Real const> const& sx = frac_mf[0]->const_array(mfi);
+                Array4<Real const> const& sy = frac_mf[1]->const_array(mfi);
+                Array4<Real const> const& sz = frac_mf[2]->const_array(mfi);
+                const auto ifa = inv_full_area;
+                const auto idx = inv_dx;
+                amrex::ParallelFor(mfi.tilebox(),
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                        d(i, j, k) =
+                            (sx(i,j,k)*ifa[0]*Fx(i,j,k) - sx(i-1,j,k)*ifa[0]*Fx(i-1,j,k))*idx[0]
+                          + (sy(i,j,k)*ifa[1]*Fy(i,j,k) - sy(i,j-1,k)*ifa[1]*Fy(i,j-1,k))*idx[1]
+                          + (sz(i,j,k)*ifa[2]*Fz(i,j,k) - sz(i,j,k-1)*ifa[2]*Fz(i,j,k-1))*idx[2];
+                    });
+            }
+#endif
+        } else {
+            fdtd->ComputeDivE(field, div_f);
+        }
 
         // Keep the divergence only in the fluid-clean near-wall band
         // [d_div_keep, d_clean]: drop the bulk (already solenoidal) and, unless
@@ -186,6 +249,41 @@ void HybridPICModel::MarderCleanDivergence (
             Box const& tz = mfi.tilebox(field[2]->ixType().toIntVect());
 
 #if defined(WARPX_DIM_3D)
+            if (use_cut) {
+                // Adjoint (frac-weighted) gradient: F_f += alpha * frac_f *
+                // grad_f(div). Gated on frac > 0 (a live flux DOF), NOT on
+                // the staircase update mask, which zeroes cut faces.
+                Array4<Real const> const& sx = frac_mf[0]->const_array(mfi);
+                Array4<Real const> const& sy = frac_mf[1]->const_array(mfi);
+                Array4<Real const> const& sz = frac_mf[2]->const_array(mfi);
+                const auto ifa = inv_full_area;
+                amrex::ParallelFor(tx, ty, tz,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                        const Real fr = sx(i,j,k)*ifa[0];
+                        if (fr <= 0.0_rt || phi(i,j,k)<d_stencil || phi(i,j,k)>d_clean
+                            || i < dom_lo[0] || i > dom_hi[0]
+                            || j < dom_lo[1] || j > dom_hi[1]
+                            || k < dom_lo[2] || k > dom_hi[2]) { return; }
+                        Fx(i,j,k) += alpha_scaled*fr*(d(i+1,j,k)-d(i,j,k))*inv_dx[0];
+                    },
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                        const Real fr = sy(i,j,k)*ifa[1];
+                        if (fr <= 0.0_rt || phi(i,j,k)<d_stencil || phi(i,j,k)>d_clean
+                            || i < dom_lo[0] || i > dom_hi[0]
+                            || j < dom_lo[1] || j > dom_hi[1]
+                            || k < dom_lo[2] || k > dom_hi[2]) { return; }
+                        Fy(i,j,k) += alpha_scaled*fr*(d(i,j+1,k)-d(i,j,k))*inv_dx[1];
+                    },
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                        const Real fr = sz(i,j,k)*ifa[2];
+                        if (fr <= 0.0_rt || phi(i,j,k)<d_stencil || phi(i,j,k)>d_clean
+                            || i < dom_lo[0] || i > dom_hi[0]
+                            || j < dom_lo[1] || j > dom_hi[1]
+                            || k < dom_lo[2] || k > dom_hi[2]) { return; }
+                        Fz(i,j,k) += alpha_scaled*fr*(d(i,j,k+1)-d(i,j,k))*inv_dx[2];
+                    });
+                continue;
+            }
             amrex::ParallelFor(tx, ty, tz,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k){
                     if (ux(i,j,k)==0 || phi(i,j,k)<d_stencil || phi(i,j,k)>d_clean
@@ -239,10 +337,16 @@ void HybridPICModel::MarderCleanDivergence (
 
         // Re-impose the EB PEC condition with the field's own parity, using its
         // own fill band, so the covered band stays consistent with the main fill.
-        warpx::hybrid::ApplyPECBoundaryToField(
-            field, eb_update, *phi_mf, geom,
-            m_eb_bc_rtol, m_eb_bc_max_iters, m_eb_bc_direct_fill,
-            normal_odd, fill_covered_centers, status_cache, fill_band_cells);
+        // Skipped in the cut-metric mode: covered faces (frac = 0) were never
+        // touched, and the ECT arm imposes no level-set mirror on B -- re-filling
+        // here would overwrite the ECT-advanced cut faces with raw-metric mirror
+        // values every sweep.
+        if (!use_cut) {
+            warpx::hybrid::ApplyPECBoundaryToField(
+                field, eb_update, *phi_mf, geom,
+                m_eb_bc_rtol, m_eb_bc_max_iters, m_eb_bc_direct_fill,
+                normal_odd, fill_covered_centers, status_cache, fill_band_cells);
+        }
     }
 
     for (int c = 0; c < 3; ++c) {
@@ -252,7 +356,8 @@ void HybridPICModel::MarderCleanDivergence (
     }
 #else
     amrex::ignore_unused(field, eb_update, status_cache, normal_odd,
-        fill_covered_centers, alpha, max_iters, clean_band_cells, fill_band_cells, lev);
+        fill_covered_centers, alpha, max_iters, clean_band_cells, fill_band_cells,
+        lev, cut_metric);
 #endif
 }
 
@@ -262,15 +367,18 @@ void HybridPICModel::MarderCleanFieldsPerStep () const
 
     auto& warpx = WarpX::GetInstance();
     for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
-        // B (magnetic parity).
+        // B (magnetic parity). On the staggered conformal (ECT) path the clean
+        // uses the matched cut-metric operators (see MarderCleanDivergence).
         if (m_divb_clean_alpha > 0.0_rt) {
             if (static_cast<int>(m_eb_bc_status_B.size()) <= lev) { m_eb_bc_status_B.resize(lev+1); }
+            const bool cut_metric = m_divb_clean_cut_metric && m_use_conformal_eb
+                && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated;
             MarderCleanDivergence(
                 warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev),
                 warpx.GetEBUpdateBFlag()[lev], &m_eb_bc_status_B[lev],
                 /*normal_odd=*/true, /*fill_covered_centers=*/false,
                 m_divb_clean_alpha, m_divb_clean_iters,
-                m_divb_clean_band_cells, m_eb_b_fill_band_cells, lev);
+                m_divb_clean_band_cells, m_eb_b_fill_band_cells, lev, cut_metric);
         }
         // Total Ampere current (electric parity), never an ion species.
         if (m_divj_clean_alpha > 0.0_rt) {

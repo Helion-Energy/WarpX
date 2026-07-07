@@ -162,7 +162,8 @@ public:
         int max_iters,
         amrex::Real clean_band_cells,
         amrex::Real fill_band_cells,
-        int lev) const;
+        int lev,
+        bool cut_metric = false) const;
 
     /** Once-per-step driver for the div(B)/div(J_total) clean: cleans Bfield_fp
      *  (magnetic parity) and the total Ampere current hybrid_current_fp_plasma
@@ -525,6 +526,19 @@ public:
     int m_divb_clean_iters = 5;
     /** Outer cutoff of the divergence-clean band, in cells from the wall. */
     amrex::Real m_divb_clean_band_cells = 4.0;
+    /** If true (default), the div(B) clean on the staggered conformal (ECT)
+     *  path uses the MATCHED CUT-METRIC operators: the divergence is the
+     *  signed sum of open-face fluxes (face_areas-weighted, the invariant the
+     *  ECT Faraday actually conserves) and the correction is its exact
+     *  negative adjoint (frac-weighted gradient), so the sweep is dissipative
+     *  in the flux norm and does not fight the ECT push the way the raw
+     *  uniform-metric clean does (raw div at a cut face is O((1-frac)B/h) BY
+     *  CONSTRUCTION for an ECT-evolved field). In this mode covered faces
+     *  (frac = 0) are never read or written, live cut faces are gated on
+     *  frac > 0 rather than the staircase update mask, and the per-sweep
+     *  level-set mirror re-fill is skipped (the ECT arm imposes no mirror on
+     *  B). Ignored (raw metric) off the staggered conformal path and in 2D. */
+    bool m_divb_clean_cut_metric = true;
     /** Inner cutoff (in cells) below which the computed divergence is dropped.
      *  Default 1 trusts the divergence only where its own +/-1 stencil is fully
      *  in the fluid; 0 keeps it on every uncovered node (wall-layer mode). */
