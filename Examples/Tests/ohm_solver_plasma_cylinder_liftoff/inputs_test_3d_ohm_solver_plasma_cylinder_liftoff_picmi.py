@@ -240,9 +240,10 @@ def setup_simulation(
         substep_rtol=substep_rtol,
         substep_atol=1.0e-8,
         max_substep_attempts=1000,
-        # The conformal wall treatment is collocated-only (staggered aborts);
-        # on a staggered grid use eb_b_straight_mirror for the B wall instead.
-        use_conformal_eb=use_conformal_eb if grid_type == "collocated" else None,
+        # Conformal wall treatment: level-set masked/mirror fill on collocated,
+        # enlarged-cell (ECT) Faraday on staggered. On a staggered grid
+        # eb_b_straight_mirror is the level-set alternative to the ECT wall.
+        use_conformal_eb=use_conformal_eb if use_conformal_eb else None,
         eb_b_straight_mirror=True if eb_b_straight_mirror else None,
         A_external=A_ext,
         **power_law_resistivity(
@@ -624,13 +625,16 @@ def main():
         default="collocated",
     )
     parser.add_argument(
-        "--no-conformal-eb",
+        "--conformal-eb",
         dest="conformal_eb",
-        action="store_false",
-        default=True,
-        help="disable the conformal (ECT/level-set) EB wall solve "
-        "(hybrid_pic_model.use_conformal_eb=0); falls back to the standard "
-        "masked/staircase EB. Baseline for the 'cost of conformal walls' comparison.",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="the conformal EB wall solve (hybrid_pic_model.use_conformal_eb): "
+        "level-set masked/mirror wall on collocated, enlarged-cell (ECT) Faraday "
+        "on staggered. --no-conformal-eb falls back to the standard "
+        "masked/staircase EB (baseline for the 'cost of conformal walls' "
+        "comparison). Default: ON on collocated (the validated config); OFF on "
+        "staggered until the ECT wall is validated there.",
     )
     parser.add_argument(
         "--eb-b-straight-mirror",
@@ -787,6 +791,8 @@ def main():
     # (plain) resistive stencils; collocated keeps the isotropized stencils
     # and its conformal wall.
     staggered = args.grid_type == "staggered"
+    if args.conformal_eb is None:
+        args.conformal_eb = not staggered
     if args.deposition is None:
         args.deposition = "esirkepov" if staggered else "direct"
     if args.isotropic_resistivity is None:
@@ -794,7 +800,10 @@ def main():
     if args.isotropic_hyper is None:
         args.isotropic_hyper = not staggered
     if args.eb_b_straight_mirror is None:
-        args.eb_b_straight_mirror = staggered
+        # Level-set mirror B wall by default on staggered -- but only when the
+        # conformal (ECT) Faraday is off: the two wall treatments would stack
+        # (the mirror overwrites the covered faces the ECT push just advanced).
+        args.eb_b_straight_mirror = staggered and not args.conformal_eb
     if args.holmstrom_switch_mode is None:
         args.holmstrom_switch_mode = "cell" if staggered else "edge"
     if args.holmstrom_blend_pow is None:

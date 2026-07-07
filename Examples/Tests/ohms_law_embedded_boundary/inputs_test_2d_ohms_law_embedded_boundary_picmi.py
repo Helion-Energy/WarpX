@@ -112,8 +112,9 @@ def setup_simulation(hyper=False, resistive=False, collocated=False):
         isotropic_resistivity=resistive,
         isotropic_hyper_resistivity=hyper,
         substeps=4,
-        # The conformal wall treatment is collocated-only (staggered aborts);
-        # the staggered batteries exercise the always-on staircase EB fills.
+        # The staggered batteries deliberately exercise the always-on staircase
+        # EB fills (their gates assert that path), so the conformal wall
+        # treatment is only enabled on the collocated batteries here.
         use_conformal_eb=True if collocated else None,
     )
 
