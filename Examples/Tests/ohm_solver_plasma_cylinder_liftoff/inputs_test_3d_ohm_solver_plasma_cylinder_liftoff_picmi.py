@@ -135,6 +135,7 @@ def setup_simulation(
     fill_frac=None,
     particle_shape=1,
     deposition="direct",
+    openpmd=False,
 ):
     """Create the PICMI simulation object.
 
@@ -379,7 +380,10 @@ def setup_simulation(
         period=diag_period,
         data_list=["B", "E", "rho", "J", "J_displacement", "divB"],
         write_dir="diags",
-        warpx_format="plotfile",
+        # openPMD (h5) for research runs (--openpmd); plotfile stays the
+        # default for the CI analyses, which read plotfile paths via yt.
+        warpx_format="openpmd" if openpmd else "plotfile",
+        warpx_openpmd_backend="h5" if openpmd else None,
     )
     sim.add_diagnostic(field_diag)
 
@@ -643,6 +647,12 @@ def main():
         "masked/staircase EB (baseline for the 'cost of conformal walls' "
         "comparison). Default: ON on collocated (the validated config); OFF on "
         "staggered until the ECT wall is validated there.",
+    )
+    parser.add_argument(
+        "--openpmd",
+        action="store_true",
+        help="write the field diagnostic as openPMD (h5) instead of the "
+        "default plotfile (the CI analyses read plotfiles via yt).",
     )
     parser.add_argument(
         "--conformal-ect-j",
@@ -918,6 +928,7 @@ def main():
         fill_frac=args.fill_frac,
         particle_shape=args.particle_shape,
         deposition=args.deposition,
+        openpmd=args.openpmd,
     )
 
     # Momentum-conserving gather: set on the picmi Simulation object (the picmi
