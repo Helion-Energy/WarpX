@@ -568,10 +568,11 @@ def main():
         default=True,
         help="zero the Ohm's-law E in vacuum regions (Holmstrom treatment): "
         "suppresses the floor-density Hall amplification in the gap between "
-        "the column and the wall. Required for production explicit runs with "
-        "vacuum/low-density regions (without it the mirror-filled walls pump "
-        "wall flux and the imploded column drifts off axis); --no-holmstrom "
-        "is for A/B isolation studies only.",
+        "the column and the wall. Default ON: without it, noise fluctuations "
+        "in the sub-floor band drive spurious vacuum currents that pump "
+        "magnetic flux and wall-band div(B) secularly until the B substep "
+        "fails mid-ramp (see PR #6994 flux-conservation study); "
+        "--no-holmstrom restores the raw Ohm's-law vacuum response.",
     )
     parser.add_argument(
         "--isotropic-resistivity",
