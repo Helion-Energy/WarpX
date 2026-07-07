@@ -1325,6 +1325,19 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     // neighbours, so it is correct for both the Yee (edge-centered) and the
     // collocated (nodal) staggerings with no change.
     const bool iso_hyper = hybrid_model->m_isotropic_hyper_resistivity;
+    // Near-wall downgrade of the isotropic Laplacian (staggered conformal
+    // path): within a corner reach of the level set the Mehrstellen stencil's
+    // diagonal J reads land on EB-touching edges the constitutive PEC zeroes
+    // (and no mirror fill sets on this path); fall back to the compact
+    // cardinal-only stencil there. See m_isotropic_hyper_wall_compact.
+    const bool iso_wall_compact = iso_hyper
+        && hybrid_model->m_isotropic_hyper_wall_compact
+        && EB::enabled()
+        && WarpX::UseConformalEBSolve()
+        && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated;
+    amrex::MultiFab const* iso_phi_mf = iso_wall_compact
+        ? WarpX::GetInstance().m_fields.get(FieldType::distance_to_eb, lev)
+        : nullptr;
     // isotropized resistive diffusion (corner-curl E correction). Two stencils:
     // the Yee corner (one-sided Faraday UpwardD) and the nodal corner (wide centered
     // Faraday UpwardD); the call sites below select via T_Algo. Both isotropize the
@@ -1376,6 +1389,13 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             inv_h2[d] = 1._rt/h2[d];
         }
     }
+    // Corner-reach band of the isotropic-Laplacian wall downgrade: the
+    // diagonal reads reach sqrt(SPACEDIM) cells; +0.5 covers the half-cell
+    // staggering offset of the level-set sample at any E component.
+    amrex::Real h_max_iso = dx_arr[0];
+    for (int d = 1; d < AMREX_SPACEDIM; ++d) { h_max_iso = std::max(h_max_iso, dx_arr[d]); }
+    const amrex::Real d_iso_compact =
+        (std::sqrt(static_cast<amrex::Real>(AMREX_SPACEDIM)) + 0.5_rt) * h_max_iso;
 
     auto & warpx = WarpX::GetInstance();
     const amrex::Real t_new = warpx.gett_new(lev);
@@ -1583,6 +1603,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             update_Ez_arr = eb_update_E[2]->array(mfi);
         }
 
+        // Nodal signed distance for the isotropic-Laplacian wall downgrade
+        // (empty Array4 when the downgrade is off; every read is gated).
+        amrex::Array4<amrex::Real const> iso_phi;
+        if (iso_wall_compact) { iso_phi = iso_phi_mf->const_array(mfi); }
+
         Array4<Real> Ex_ext, Ey_ext, Ez_ext;
         if (include_external_fields) {
             Ex_ext = Efield_external[0]->array(mfi);
@@ -1690,7 +1715,9 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         btot_val = std::sqrt(bx_val*bx_val + by_val*by_val + bz_val*bz_val);
                     }
 
-                    const Real nabla2Jx = iso_hyper
+                    const bool iso_x = iso_hyper && !(iso_wall_compact
+                        && iso_phi(i, j, k) < d_iso_compact);
+                    const Real nabla2Jx = iso_x
                         ? warpx::hybrid_isotropic::LaplacianIsotropic(Jx, i, j, k, h2, inv_h2)
                         : T_Algo::Dxx(Jx, coefs_x, n_coefs_x, i, j, k)
                           + T_Algo::Dyy(Jx, coefs_y, n_coefs_y, i, j, k)
@@ -1824,7 +1851,9 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         btot_val = std::sqrt(bx_val*bx_val + by_val*by_val + bz_val*bz_val);
                     }
 
-                    const Real nabla2Jy = iso_hyper
+                    const bool iso_y = iso_hyper && !(iso_wall_compact
+                        && iso_phi(i, j, k) < d_iso_compact);
+                    const Real nabla2Jy = iso_y
                         ? warpx::hybrid_isotropic::LaplacianIsotropic(Jy, i, j, k, h2, inv_h2)
                         : T_Algo::Dxx(Jy, coefs_x, n_coefs_x, i, j, k)
                           + T_Algo::Dyy(Jy, coefs_y, n_coefs_y, i, j, k)
@@ -1943,7 +1972,9 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         btot_val = std::sqrt(bx_val*bx_val + by_val*by_val + bz_val*bz_val);
                     }
 
-                    const Real nabla2Jz = iso_hyper
+                    const bool iso_z = iso_hyper && !(iso_wall_compact
+                        && iso_phi(i, j, k) < d_iso_compact);
+                    const Real nabla2Jz = iso_z
                         ? warpx::hybrid_isotropic::LaplacianIsotropic(Jz, i, j, k, h2, inv_h2)
                         : T_Algo::Dxx(Jz, coefs_x, n_coefs_x, i, j, k)
                           + T_Algo::Dyy(Jz, coefs_y, n_coefs_y, i, j, k)
