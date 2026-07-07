@@ -286,11 +286,34 @@ public:
     bool m_add_external_fields = false;
     std::unique_ptr<ExternalVectorPotential> m_external_vector_potential;
 
-    /** If true, use the conformal embedded-boundary Faraday update (enlarged
-     *  cell technique, Xiao and Liu, IEEE MWCL 2004) for the B-field push
-     *  instead of the stair-step approximation. Requires embedded boundaries
-     *  and a 3D Cartesian staggered grid. */
+    /** If true, use the conformal embedded-boundary wall treatment for the
+     *  B-field push instead of the stair-step approximation. On a staggered
+     *  (Yee) grid this is the enlarged-cell technique (ECT) Faraday update
+     *  (Xiao and Liu, IEEE MWCL 2004) on cut faces/edges; on a collocated grid
+     *  it is the level-set masked nodal Faraday with the mirror B fill.
+     *  Requires embedded boundaries and 3D or 2D (XZ) Cartesian geometry. */
     bool m_use_conformal_eb = false;
+    /** If true, apply the along-edge curvature correction to the conformal-ECT
+     *  Faraday circulation: in EvolveECTRho each cut edge's E is Taylor-shifted
+     *  from the full-edge center to the centroid of its uncovered segment before
+     *  forming the per-face EMF. Without it the circulation is a 1st-order
+     *  midpoint quadrature over the curved contour, capping the conformal B push
+     *  at ~1st order at a curved wall even when curl(B)->J is already 2nd order.
+     *  Uses the edge_cent_offset geometry field. Requires use_conformal_eb on a
+     *  staggered (Yee) grid; opt-in (default off -> byte-identical, since the
+     *  shift is zero on uncut/covered edges). */
+    bool m_conformal_ect_curvature = false;
+    /** If true, compute the Ampere current J = curl(B)/mu0 with the flux-weighted
+     *  ("Form A") conformal-EB curl (CalculateCurrentAmpereCartesianECT): each B
+     *  value in the Yee curl is scaled by its open cut-face-area fraction
+     *  (face_areas / full face area), so J is a signed sum of open-face fluxes and
+     *  is discretely divergence-consistent across the cut wall with no separate
+     *  covered-B fill. Covered faces (face_areas = 0) drop out automatically, so no
+     *  covered-B mirror fill is needed. Reduces byte-for-byte
+     *  to the masked Yee curl on interior edges. Requires use_conformal_eb on a
+     *  staggered (Yee) grid; opt-in (default off -> byte-identical, the standard
+     *  masked Yee curl is used). */
+    bool m_conformal_ect_j = false;
     /** If true (default), the hybrid Hall term's nodal J x B interpolation excludes
      *  covered edges/faces (EB-aware, mask-renormalized) so covered-cell field values do
      *  not pollute the near-wall J x B. Set false to recover the plain (polluting)

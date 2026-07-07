@@ -100,8 +100,36 @@ void HybridPICModel::ReadParameters ()
         m_external_vector_potential = std::make_unique<ExternalVectorPotential>();
     }
 
-    // conformal (level-set masked/mirrored) embedded-boundary wall treatment
+    // conformal (level-set masked/mirrored, or staggered enlarged-cell/ECT)
+    // embedded-boundary wall treatment
     pp_hybrid.query("use_conformal_eb", m_use_conformal_eb);
+    pp_hybrid.query("conformal_ect_curvature", m_conformal_ect_curvature);
+    if (m_conformal_ect_curvature
+        && (!m_use_conformal_eb
+            || WarpX::grid_type == ablastr::utils::enums::GridType::Collocated)) {
+        m_conformal_ect_curvature = false;
+        ablastr::warn_manager::WMRecordWarning(
+            "HybridPIC",
+            "hybrid_pic_model.conformal_ect_curvature applies the ECT Faraday "
+            "circulation curvature correction, which requires use_conformal_eb on a "
+            "staggered (Yee) grid; it is ignored here (a collocated grid uses the "
+            "masked nodal curl, not ECT circulations).",
+            ablastr::warn_manager::WarnPriority::medium);
+    }
+    pp_hybrid.query("conformal_ect_j", m_conformal_ect_j);
+    if (m_conformal_ect_j
+        && (!m_use_conformal_eb
+            || WarpX::grid_type == ablastr::utils::enums::GridType::Collocated)) {
+        m_conformal_ect_j = false;
+        ablastr::warn_manager::WMRecordWarning(
+            "HybridPIC",
+            "hybrid_pic_model.conformal_ect_j computes the Ampere current with the "
+            "flux-weighted (open-cut-face-area) ECT curl, which requires "
+            "use_conformal_eb (for the face_areas geometry) on a staggered (Yee) "
+            "grid; it is ignored here (a collocated grid uses the masked nodal "
+            "curl, not open-face fluxes).",
+            ablastr::warn_manager::WarnPriority::medium);
+    }
     pp_hybrid.query("eb_hall_mask", m_eb_hall_mask);
 
     // nodal (hyper-)resistivity evaluation + interpolation to the staggered
@@ -495,9 +523,23 @@ void HybridPICModel::CalculatePlasmaCurrent (
     auto& warpx = WarpX::GetInstance();
 
     ablastr::fields::VectorField current_fp_plasma = warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
-    warpx.get_pointer_fdtd_solver_fp(lev)->CalculateCurrentAmpere(
-        current_fp_plasma, Bfield, eb_update_E, lev
-    );
+    if (m_conformal_ect_j && m_use_conformal_eb && EB::enabled()
+        && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated) {
+        // Flux-weighted ("Form A") conformal-EB curl: J = curl(B)/mu0 with each B
+        // weighted by its open cut-face-area fraction (face_areas is only allocated
+        // with use_conformal_eb on a staggered grid; ReadParameters enforces this).
+        // Divergence-consistent across the wall, so it needs no covered-B mirror
+        // (skipped below).
+        warpx.get_pointer_fdtd_solver_fp(lev)->CalculateCurrentAmpereECT(
+            current_fp_plasma, Bfield,
+            warpx.m_fields.get_alldirs(FieldType::face_areas, lev),
+            eb_update_E, lev
+        );
+    } else {
+        warpx.get_pointer_fdtd_solver_fp(lev)->CalculateCurrentAmpere(
+            current_fp_plasma, Bfield, eb_update_E, lev
+        );
+    }
 
     if (m_has_external_current) {
         // Subtract external current from "Ampere" current calculated above. Note
@@ -514,8 +556,12 @@ void HybridPICModel::CalculatePlasmaCurrent (
     // and the deep conductor interior carries no volume current. Cut edges
     // whose centers are on or inside the surface are filled too (the Ampere
     // current is evaluated at the covered centers and is not meaningful
-    // there).
-    if (EB::enabled()) {
+    // there). The flux-weighted ECT curl above is already divergence-
+    // consistent at the wall (it reads only open-face fluxes, fully-covered
+    // edges are zeroed in the kernel). The mirror fill below INJECTS div(J)
+    // and would corrupt Form A's clean wall current, so it is skipped when
+    // conformal_ect_j is on.
+    if (EB::enabled() && !m_conformal_ect_j) {
         // The plasma current uses its own (wider-band) fill classification when
         // the isotropic hyper-resistivity Laplacian is enabled: that stencil
         // reads diagonal/corner edges, so the band is widened to m_eb_fill_band_cells
@@ -1459,11 +1505,46 @@ void HybridPICModel::FieldPush (
     CalculatePlasmaCurrent(Bfield, eb_update_E);
     // Calculate the E-field from Ohm's law
     HybridPICSolveE(Efield, Jfield, Bfield, rhofield, eb_update_E, true);
-    // Refresh the E ghosts before the Faraday push reads them on a collocated
-    // grid: the masked nodal curl reads ghost E.
-    if (Bz_IndexType[0] == Ez_IndexType[0]) {
+    // Refresh the E ghosts before the Faraday push reads them. This is always
+    // required on a collocated grid (the masked nodal curl reads ghost E). On a
+    // staggered grid with the conformal embedded boundary, the ECT circulation
+    // (EvolveECTRho below) — and its along-edge curvature correction when enabled —
+    // also reads cross-box ghost E edges, which the 1-ghost ECTRhofield
+    // FillBoundary only refreshes *after* each face's Rho is formed; fill the E
+    // ghosts here first so the per-face circulation is seam-consistent.
+    bool fill_E_pre_faraday = (Bz_IndexType[0] == Ez_IndexType[0]);
+#ifdef AMREX_USE_EB
+    fill_E_pre_faraday = fill_E_pre_faraday ||
+        (m_use_conformal_eb &&
+         WarpX::grid_type != ablastr::utils::enums::GridType::Collocated);
+#endif
+    if (fill_E_pre_faraday) {
         warpx.FillBoundaryE(ng, nodal_sync);
     }
+
+#ifdef AMREX_USE_EB
+    // With the conformal embedded-boundary update on a staggered grid, recompute the
+    // face-centered electromotive-force density (ECTRhofield) from the new E-field so
+    // that the following Faraday push uses circulations consistent with Ohm's law. The
+    // collocated conformal path uses the masked nodal Faraday curl instead (no ECT
+    // circulations), so this staggered-only precompute is skipped there.
+    if (m_use_conformal_eb &&
+        WarpX::grid_type != ablastr::utils::enums::GridType::Collocated) {
+        for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+            // Opt-in along-edge curvature correction of the circulation: shift each
+            // cut edge's E to the uncovered-segment centroid (see EvolveECTRho).
+            auto edge_cent_offset = warpx.m_fields.get_alldirs(FieldType::edge_cent_offset, lev);
+            warpx.get_pointer_fdtd_solver_fp(lev)->EvolveECTRho(
+                Efield[lev],
+                warpx.m_fields.get_alldirs(FieldType::edge_lengths, lev),
+                warpx.m_fields.get_alldirs(FieldType::face_areas, lev),
+                warpx.m_fields.get_alldirs(FieldType::ECTRhofield, lev),
+                lev,
+                &edge_cent_offset,
+                m_conformal_ect_curvature);
+        }
+    }
+#endif
 
     // Push forward the B-field using Faraday's law
     warpx.EvolveB(dt, subcycling_half, t_old);

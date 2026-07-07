@@ -3803,17 +3803,18 @@ Maxwell solver: kinetic-fluid hybrid
     :optional:
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this enables the conformal
-    embedded-boundary wall treatment of the collocated hybrid solver instead of the default
-    stair-step approximation: the field-update masks are keyed directly off the nodal signed
-    level set, and after each Faraday push the covered magnetic-field nodes are rewritten from
-    the level-set geometry (signed distance and boundary normal) by mirror-image interpolation
-    (normal component odd, tangential components even), so the masked nodal curl that forms the
-    next substep's plasma current sees wall-consistent values instead of a staircase-zeroed
-    conductor. Requires embedded boundaries and a 3D or 2D (XZ) Cartesian **collocated** grid
-    (``warpx.grid_type = collocated``); a staggered (Yee) grid aborts — on staggered grids run
-    the staircase wall, optionally imposing the magnetic wall condition with
-    :pp:param:`hybrid_pic_model.eb_b_straight_mirror`. Not compatible with RZ geometry or PML
-    boundaries.
+    embedded-boundary wall treatment instead of the default stair-step approximation. On a
+    **collocated** grid (``warpx.grid_type = collocated``) the field-update masks are keyed
+    directly off the nodal signed level set, and after each Faraday push the covered
+    magnetic-field nodes are rewritten from the level-set geometry (signed distance and
+    boundary normal) by mirror-image interpolation (normal component odd, tangential
+    components even), so the masked nodal curl that forms the next substep's plasma current
+    sees wall-consistent values instead of a staircase-zeroed conductor. On a **staggered**
+    (Yee) grid the magnetic-field push instead uses the conformal enlarged-cell technique
+    (ECT) Faraday update on the cut faces and edges (the same machinery as the ECT Maxwell
+    solver), with the face-centered circulations recomputed from the Ohm's-law electric field
+    each substep. Requires embedded boundaries and a 3D or 2D (XZ) Cartesian grid. Not
+    compatible with RZ geometry or PML boundaries.
 
     With embedded boundaries the hybrid solver also enforces the PEC boundary condition on the
     Ampere/plasma current (including the external-current subtraction), on the deposited ion current,
@@ -3844,6 +3845,35 @@ Maxwell solver: kinetic-fluid hybrid
     construction (it interpolates to zero exactly at the surface); it is excluded from the
     resistivity parsers and from the electron-pressure equation of state, but appears in the
     ``rho`` diagnostic as a thin negative band inside conducting walls.
+
+.. pp:param:: hybrid_pic_model.conformal_ect_curvature
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If ``true``, apply the along-edge curvature correction to the conformal-ECT Faraday
+    circulation: each cut edge's electric field is Taylor-shifted from the full-edge center to
+    the centroid of its uncovered segment before forming the per-face electromotive force.
+    Without it the circulation is a first-order midpoint quadrature over the curved contour,
+    which caps the conformal ``B`` push at ~1st order at a curved wall. Requires
+    :pp:param:`hybrid_pic_model.use_conformal_eb` on a staggered (Yee) grid; ignored (with a
+    warning) otherwise. Opt-in; the default (``false``) is byte-identical, since the shift is
+    zero on uncut and covered edges.
+
+.. pp:param:: hybrid_pic_model.conformal_ect_j
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If ``true``, compute the Ampere plasma current ``J = curl(B)/mu0`` with the flux-weighted
+    ("Form A") conformal-EB curl: each ``B`` value in the Yee curl is scaled by the open-fluid
+    fraction of the cut face it lives on (``face_areas`` / full face area), so ``J`` is a signed
+    sum of open-face fluxes and is discretely divergence-consistent across the cut wall, with no
+    separate covered-``B`` mirror fill (that fill is skipped when this option is on). Covered
+    faces (zero open area) drop out automatically, and the expression reduces byte-for-byte to
+    the standard masked Yee curl on interior edges. Requires
+    :pp:param:`hybrid_pic_model.use_conformal_eb` on a staggered (Yee) grid; ignored (with a
+    warning) otherwise. Opt-in; the default (``false``) uses the standard masked Yee curl.
 
 .. pp:param:: hybrid_pic_model.eb_bc_rtol
     :type: ``float``
@@ -3894,9 +3924,10 @@ Maxwell solver: kinetic-fluid hybrid
     Staggered (Yee) grids only. If ``true``, impose the magnetic wall condition on the staggered
     ``Bfield_fp`` after each Faraday push with the same direct level-set mirror fill the collocated
     conformal path uses (normal component odd, tangential even), instead of leaving the covered
-    faces staircase-zeroed. This is the recommended wall treatment for ``B`` on staggered
-    embedded-boundary hybrid runs (``use_conformal_eb`` is collocated-only). Opt-in; the default
-    (``false``) leaves the staggered staircase behavior unchanged.
+    faces staircase-zeroed. Use with ``use_conformal_eb = false`` (the standard masked Yee
+    Faraday) as a level-set alternative to the staggered ECT wall treatment, avoiding the ECT
+    face-extension / cross-box seam machinery. Opt-in; the default (``false``) leaves the
+    staggered staircase behavior unchanged.
 
 .. pp:param:: hybrid_pic_model.eb_b_fill_band_cells
     :type: ``float``
