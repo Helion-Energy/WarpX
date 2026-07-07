@@ -699,7 +699,6 @@ def _ampere_bz(Jfill_x, Jfill_y, cx, cy, cz, profile, n_r=128):
     )
     # use a single interpolator pair on the in-plane nodal grid
     xn = _common_inplane_grid()
-    X, Y = np.meshgrid(xn, xn, indexing="ij")
     r_grid = np.linspace(0.0, R_WALL + 4.0 * H, n_r)
     n_theta = 256
     th = np.linspace(0.0, 2.0 * np.pi, n_theta, endpoint=False)
