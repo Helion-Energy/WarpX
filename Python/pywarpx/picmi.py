@@ -2286,6 +2286,40 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         relaxation controlled by ``eb_bc_rtol`` and ``eb_bc_max_iters``
         instead.
 
+    divb_clean_alpha: float, default=0
+        Coefficient of the Marder-like diffusive div(B) clean applied once per
+        step in a near-wall embedded-boundary band, as a fraction of the
+        explicit grad(div) CFL cap (stable below ~1/6 in 3D; ~0.15 is a
+        validated sweet spot). 0 (default) disables the clean.
+
+    divj_clean_alpha: float, default=0
+        Same diffusive divergence clean applied to the total Ampere current
+        (never an ion species). 0 (default) disables.
+
+    divb_clean_iters: int, default=5
+        Number of grad(div) sweeps per application of the divergence clean.
+
+    divb_clean_band_cells: float, default=4
+        Outer cutoff of the divergence-clean band, in cells from the wall.
+        <= 0 selects the unbounded mode (correction on every uncovered node;
+        strictly dissipative of the global divergence norm, no-op where the
+        field is already solenoidal). A hard cutoff transports divergence to
+        the band edge and accumulates it just outside, so unbounded is
+        preferred when the divergence source is strong.
+
+    divb_clean_inner_div_cells: float, default=1
+        Inner cutoff (in cells from the wall) below which the computed
+        divergence is dropped. The default trusts the divergence only where
+        its +/-1 stencil is fully in the fluid; 0 keeps it on every uncovered
+        node (the wall-layer mode).
+
+    divb_clean_inner_corr_cells: float, default=2
+        Inner cutoff (in cells from the wall) below which no correction is
+        applied. The default keeps the full +/-2 grad(div) stencil in the
+        fluid (order-preserving on a smooth wall); 0 corrects every uncovered
+        band node (the wall-layer mode, for damping the divergence instability
+        a sharp re-entrant wall corner pumps).
+
     holmstrom_blend_pow: float, default=0 (off)
         If > 0, smooth the Holmstrom vacuum switch with an above-floor power
         window: on ``rho in [rho_floor, holmstrom_blend_width*rho_floor]`` the
@@ -2309,6 +2343,20 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         components of that index (a single piecewise-constant-per-cell decision
         field, no per-component half-shifts). The physics division by rho and
         the resistivity evaluation are unchanged. Cartesian only.
+
+    dive_seam_alpha: float, default=0 (off)
+        Density-banded Marder clean of the Ohm's-law E at the n_floor seam,
+        applied per substage on staggered grids: E += alpha*grad(div(E))
+        restricted to edges with rho <= dive_seam_band*rho_floor, diffusing the
+        divergence-carrying per-component-inconsistent E content at the
+        plasma/vacuum seam before Faraday integrates it into B. Curl-preserving
+        away from the window edge. 3D/XZ Cartesian only.
+
+    dive_seam_iters: int, default=1
+        Sweeps of the seam E clean per substage.
+
+    dive_seam_band: float, default=4
+        Upper edge of the seam clean window in units of the density floor.
 
     eta_nodal_interp: bool, default=False
         Evaluate the resistivity and hyper-resistivity parsers once per NODE
@@ -2402,10 +2450,19 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         eb_deposit_fold=None,
         eb_rho_dirichlet=None,
         eb_pe_dirichlet=None,
+        divb_clean_alpha=None,
+        divj_clean_alpha=None,
+        divb_clean_iters=None,
+        divb_clean_band_cells=None,
+        divb_clean_inner_div_cells=None,
+        divb_clean_inner_corr_cells=None,
         eta_nodal_interp=None,
         holmstrom_blend_pow=None,
         holmstrom_blend_width=None,
         holmstrom_switch_mode=None,
+        dive_seam_alpha=None,
+        dive_seam_iters=None,
+        dive_seam_band=None,
         isotropic_hyper_resistivity=None,
         isotropic_resistivity=None,
         Jx_external_function=None,
@@ -2445,10 +2502,19 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.eb_deposit_fold = eb_deposit_fold
         self.eb_rho_dirichlet = eb_rho_dirichlet
         self.eb_pe_dirichlet = eb_pe_dirichlet
+        self.divb_clean_alpha = divb_clean_alpha
+        self.divj_clean_alpha = divj_clean_alpha
+        self.divb_clean_iters = divb_clean_iters
+        self.divb_clean_band_cells = divb_clean_band_cells
+        self.divb_clean_inner_div_cells = divb_clean_inner_div_cells
+        self.divb_clean_inner_corr_cells = divb_clean_inner_corr_cells
         self.eta_nodal_interp = eta_nodal_interp
         self.holmstrom_blend_pow = holmstrom_blend_pow
         self.holmstrom_blend_width = holmstrom_blend_width
         self.holmstrom_switch_mode = holmstrom_switch_mode
+        self.dive_seam_alpha = dive_seam_alpha
+        self.dive_seam_iters = dive_seam_iters
+        self.dive_seam_band = dive_seam_band
         self.isotropic_hyper_resistivity = isotropic_hyper_resistivity
         self.isotropic_resistivity = isotropic_resistivity
 
@@ -2512,10 +2578,23 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         pywarpx.hybridpicmodel.eb_deposit_fold = self.eb_deposit_fold
         pywarpx.hybridpicmodel.eb_rho_dirichlet = self.eb_rho_dirichlet
         pywarpx.hybridpicmodel.eb_pe_dirichlet = self.eb_pe_dirichlet
+        pywarpx.hybridpicmodel.divb_clean_alpha = self.divb_clean_alpha
+        pywarpx.hybridpicmodel.divj_clean_alpha = self.divj_clean_alpha
+        pywarpx.hybridpicmodel.divb_clean_iters = self.divb_clean_iters
+        pywarpx.hybridpicmodel.divb_clean_band_cells = self.divb_clean_band_cells
+        pywarpx.hybridpicmodel.divb_clean_inner_div_cells = (
+            self.divb_clean_inner_div_cells
+        )
+        pywarpx.hybridpicmodel.divb_clean_inner_corr_cells = (
+            self.divb_clean_inner_corr_cells
+        )
         pywarpx.hybridpicmodel.eta_nodal_interp = self.eta_nodal_interp
         pywarpx.hybridpicmodel.holmstrom_blend_pow = self.holmstrom_blend_pow
         pywarpx.hybridpicmodel.holmstrom_blend_width = self.holmstrom_blend_width
         pywarpx.hybridpicmodel.holmstrom_switch_mode = self.holmstrom_switch_mode
+        pywarpx.hybridpicmodel.dive_seam_alpha = self.dive_seam_alpha
+        pywarpx.hybridpicmodel.dive_seam_iters = self.dive_seam_iters
+        pywarpx.hybridpicmodel.dive_seam_band = self.dive_seam_band
         pywarpx.hybridpicmodel.isotropic_hyper_resistivity = (
             self.isotropic_hyper_resistivity
         )

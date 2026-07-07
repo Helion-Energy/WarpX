@@ -109,6 +109,7 @@ def setup_simulation(
     verbose,
     split_z=False,
     grid_type="staggered",
+    divb_clean=False,
     geometry="square",
     eb_b_straight_mirror=False,
 ):
@@ -245,6 +246,17 @@ def setup_simulation(
         # (default is the odd/Dirichlet mirror) -- also the only coverage of
         # the non-default parity.
         eb_pe_dirichlet=False if pec_j else None,
+        # Diffusive near-wall div(B)/div(J) clean (edge-order diagnostic knob)
+        # Production (annulus) wall-layer config: unbounded band + inner
+        # cutoffs 0 so the clean reaches the first fluid layers where the
+        # wall divergence lives (the default band/inner knobs confine it to
+        # a half-cell shell under the level-set roof -- a near-no-op).
+        divb_clean_alpha=0.15 if divb_clean else None,
+        divj_clean_alpha=0.15 if divb_clean else None,
+        divb_clean_iters=3 if divb_clean else None,
+        divb_clean_band_cells=0.0 if divb_clean else None,
+        divb_clean_inner_div_cells=0.0 if divb_clean else None,
+        divb_clean_inner_corr_cells=0.0 if divb_clean else None,
     )
 
     if geometry == "cylinder":
@@ -472,6 +484,13 @@ def main():
         "the level-set mirror B fill -- edge-order diagnostic)",
     )
     parser.add_argument(
+        "--divb-clean",
+        action="store_true",
+        help="enable the hybrid div(B)/div(J) Marder clean (alpha=0.1) -- "
+        "separates curved-wall div growth from the fill error in the "
+        "edge-order diagnosis",
+    )
+    parser.add_argument(
         "--geometry",
         choices=["square", "cylinder"],
         default="square",
@@ -503,6 +522,7 @@ def main():
         args.verbose,
         args.split_z,
         args.grid_type,
+        args.divb_clean,
         args.geometry,
         args.eb_b_straight_mirror,
     )
