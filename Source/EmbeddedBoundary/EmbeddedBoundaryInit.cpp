@@ -383,69 +383,6 @@ web::MarkUpdateCellsNodalLevelSet (
 }
 
 void
-web::MarkUpdateCellsLevelSet (
-    std::array< std::unique_ptr<amrex::iMultiFab>,3> & eb_update,
-    amrex::MultiFab const& distance_to_eb,
-    const amrex::Periodicity& periodicity )
-{
-    using namespace amrex::literals;
-
-    // Staggered level-set mask: deactivate a component only when the signed
-    // distance at ITS OWN edge/face center is inside the conductor. The distance
-    // at the component center is the average of the nodal distance over the
-    // cell-centered directions (linear interpolation to the midpoint). Unlike
-    // the stair-case any-cut-neighbor criterion -- which freezes a C4-modulated
-    // band that includes fluid-side components of cut cells -- every component
-    // whose center is in the fluid stays active, and the sub-cell wall treatment
-    // is left to the level-set mirror fills (the staggered analogue of the
-    // collocated conformal nodal marking).
-    for (int idim = 0; idim < 3; ++idim) {
-
-        auto const index_type = eb_update[idim]->ixType();
-        // Number of nodal points to average per direction: 1 if the component is
-        // node-centered in that direction (its center sits on the node plane),
-        // 2 if cell-centered (midpoint between the two node planes).
-        int const nx = index_type.nodeCentered(0) ? 1 : 2;
-#if AMREX_SPACEDIM > 1
-        int const ny = index_type.nodeCentered(1) ? 1 : 2;
-#else
-        int const ny = 1;
-#endif
-#if AMREX_SPACEDIM > 2
-        int const nz = index_type.nodeCentered(2) ? 1 : 2;
-#else
-        int const nz = 1;
-#endif
-
-#ifdef AMREX_USE_OMP
-#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
-#endif
-        for (amrex::MFIter mfi(*eb_update[idim], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-
-            const amrex::Box& box = mfi.tilebox();
-            amrex::Array4<int> const & eb_update_arr = eb_update[idim]->array(mfi);
-            amrex::Array4<amrex::Real const> const & dist_arr = distance_to_eb.const_array(mfi);
-
-            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-                amrex::Real dist_sum = 0._rt;
-                for (int kk = 0; kk < nz; ++kk) {
-                    for (int jj = 0; jj < ny; ++jj) {
-                        for (int ii = 0; ii < nx; ++ii) {
-                            dist_sum += dist_arr(i+ii, j+jj, k+kk);
-                        }
-                    }
-                }
-                // Deactivate when the component center is inside the conductor
-                // (distance_to_eb < 0 in the conductor, 0 on the surface).
-                eb_update_arr(i, j, k) = (dist_sum <= 0._rt)? 0 : 1;
-            });
-
-        }
-        eb_update[idim]->FillBoundary(periodicity);
-    }
-}
-
-void
 web::MarkExtensionCells (
     const std::array<amrex::Real,3>& cell_size,
     std::array< std::unique_ptr<amrex::iMultiFab>, 3 > & flag_info_face,
