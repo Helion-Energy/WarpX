@@ -859,7 +859,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 const Real rho_val = Interp(rho, nodal, Er_stag, coarsen, i, j, 0, 0);
 
                 if (rho_val < rho_floor && holmstrom_vacuum_region) {
-                    Er(i, j, 0) = 0._rt;
+                    if (include_external_fields) {
+                        Er(i, j, 0) = Er_ext(i, j, 0);
+                    } else {
+                        Er(i, j, 0) = 0._rt;
+                    }
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
                     // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
@@ -915,7 +919,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_external_fields) {
                     Er(i, j, 0) -= Er_ext(i, j, 0);
                 }
             },
@@ -938,7 +942,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 const Real rho_val = Interp(rho, nodal, Etheta_stag, coarsen, i, j, 0, 0);
 
                 if (rho_val < rho_floor && holmstrom_vacuum_region) {
-                    Etheta(i, j, 0) = 0._rt;
+                    if (include_external_fields) {
+                        Etheta(i, j, 0) = Etheta_ext(i, j, 0);
+                    } else {
+                        Etheta(i, j, 0) = 0._rt;
+                    }
                 } else {
                     // Get the gradient of the electron pressure
                     // -> d/dt = 0 for m = 0
@@ -995,7 +1003,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_external_fields) {
                     Etheta(i, j, 0) -= Etheta_ext(i, j, 0);
                 }
             },
@@ -1010,7 +1018,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, 0, 0);
 
                 if (rho_val < rho_floor && holmstrom_vacuum_region) {
-                    Ez(i, j, 0) = 0._rt;
+                    if (include_external_fields) {
+                        Ez(i, j, 0) = Ez_ext(i, j, 0);
+                    } else {
+                        Ez(i, j, 0) = 0._rt;
+                    }
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
                     // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
@@ -1078,7 +1090,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_external_fields) {
                     Ez(i, j, 0) -= Ez_ext(i, j, 0);
                 }
             }
