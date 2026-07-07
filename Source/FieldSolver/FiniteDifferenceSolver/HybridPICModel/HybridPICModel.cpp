@@ -94,9 +94,6 @@ void HybridPICModel::ReadParameters ()
                     m_solve_electron_energy_equation);
     pp_hybrid.query("qdsmc_n_floor", m_qdsmc_n_floor);
 #if defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
-    // The QDSMC transport compiles for the 1D radial geometries (so the full
-    // dimension matrix builds) but is not validated there -- the entropy
-    // deposit has no radial volume weighting yet.
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !m_solve_electron_energy_equation,
         "hybrid_pic_model.solve_electron_energy_equation is not supported in "
@@ -112,7 +109,7 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("include_joule_heating", m_include_joule_heating);
 
     // Te-threshold Joule redirection: heat electrons where Te < threshold,
-    // deposit the Joule energy to ions where Te >= threshold (energy-conserving).
+    // deposit the Joule energy to ions where Te >= threshold.
     pp_hybrid.query("redirect_joule_to_ions", m_joule_redirect_to_ions);
     utils::parser::queryWithParser(pp_hybrid, "joule_redirect_Te_threshold", m_joule_redirect_Te_eV);
 
