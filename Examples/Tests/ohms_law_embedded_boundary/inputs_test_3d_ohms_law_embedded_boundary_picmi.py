@@ -253,7 +253,6 @@ def run_plane_battery(sim):
     Ez[...] = 0.0
     # poke junk into the cut x-edge row whose center is covered
     # (edge [x_24, x_25] contains the wall; center s = (0.3-0.5)h = -0.2h)
-    ex = Ex[...]
     i_cut = [i for i in range(N_XY) if -0.5 < s_cent[i] / H <= 0.0]
     for i in i_cut:
         Ex[i, :, :] = 1.0e6
@@ -807,9 +806,6 @@ def run_resistive_battery(sim):
 
     def dnx(F):
         return (F - np.roll(F, 1, 0)) / h
-
-    def dny(F):
-        return (F - np.roll(F, 1, 1)) / h
 
     ii = (slice(4, 20), slice(4, 20), slice(2, 4))
 

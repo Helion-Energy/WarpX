@@ -118,12 +118,14 @@ namespace {
         int i, int j, int k)
     {
         using namespace amrex::literals;
-        int off_lo[3], span[3];
+        // dummy dimensions (beyond AMREX_SPACEDIM) keep no offset and no
+        // averaging span; the real dimensions are overwritten below
+        int off_lo[3] = {0, 0, 0};
+        int span[3] = {1, 1, 1};
         int const ic[3] = {i, j, k};
-        for (int d = 0; d < 3; ++d) {
-            const bool real_dim = (d < AMREX_SPACEDIM);
-            off_lo[d] = (real_dim && stag[d] == 1) ? -1 : 0;
-            span[d] = real_dim ? 2 : 1;
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            off_lo[d] = (stag[d] == 1) ? -1 : 0;
+            span[d] = 2;
         }
         amrex::Real rmin = std::numeric_limits<amrex::Real>::max();
         for (int ok = off_lo[2]; ok <= 0; ++ok) {
