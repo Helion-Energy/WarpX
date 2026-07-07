@@ -123,6 +123,8 @@ def setup_simulation(
     grid_type="collocated",
     use_conformal_eb=True,
     eb_b_straight_mirror=False,
+    conformal_ect_j=False,
+    conformal_ect_curvature=False,
     eta_hyper_mult=1.0,
     eta_nodal=False,
     holmstrom_blend_pow=0.0,
@@ -245,6 +247,12 @@ def setup_simulation(
         # eb_b_straight_mirror is the level-set alternative to the ECT wall.
         use_conformal_eb=use_conformal_eb if use_conformal_eb else None,
         eb_b_straight_mirror=True if eb_b_straight_mirror else None,
+        # Staggered-ECT companions (require use_conformal_eb on staggered):
+        # flux-weighted Form-A Ampere curl (reads S*B, div-consistent at the
+        # wall, skips the covered-J mirror) and the along-edge circulation
+        # curvature correction.
+        conformal_ect_j=True if conformal_ect_j else None,
+        conformal_ect_curvature=True if conformal_ect_curvature else None,
         A_external=A_ext,
         **power_law_resistivity(
             ETA_PLASMA,
@@ -637,6 +645,26 @@ def main():
         "staggered until the ECT wall is validated there.",
     )
     parser.add_argument(
+        "--conformal-ect-j",
+        dest="conformal_ect_j",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="flux-weighted (Form A) conformal-EB Ampere curl: each B in the "
+        "Yee curl is scaled by its open cut-face-area fraction, so J=curl(B) "
+        "is divergence-consistent across the cut wall and the covered-J "
+        "mirror fill is skipped (hybrid_pic_model.conformal_ect_j; requires "
+        "--conformal-eb on a staggered grid).",
+    )
+    parser.add_argument(
+        "--conformal-ect-curvature",
+        dest="conformal_ect_curvature",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="along-edge curvature correction of the conformal-ECT Faraday "
+        "circulation (hybrid_pic_model.conformal_ect_curvature; requires "
+        "--conformal-eb on a staggered grid).",
+    )
+    parser.add_argument(
         "--eb-b-straight-mirror",
         dest="eb_b_straight_mirror",
         action=argparse.BooleanOptionalAction,
@@ -878,6 +906,8 @@ def main():
         grid_type=args.grid_type,
         use_conformal_eb=args.conformal_eb,
         eb_b_straight_mirror=args.eb_b_straight_mirror,
+        conformal_ect_j=args.conformal_ect_j,
+        conformal_ect_curvature=args.conformal_ect_curvature,
         eta_hyper_mult=args.eta_hyper_mult,
         eta_nodal=args.eta_nodal,
         holmstrom_blend_pow=args.holmstrom_blend_pow,
