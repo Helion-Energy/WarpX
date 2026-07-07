@@ -3875,6 +3875,61 @@ Maxwell solver: kinetic-fluid hybrid
     :pp:param:`hybrid_pic_model.use_conformal_eb` on a staggered (Yee) grid; ignored (with a
     warning) otherwise. Opt-in; the default (``false``) uses the standard masked Yee curl.
 
+.. pp:param:: hybrid_pic_model.conformal_ect_j_keep_mirror
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Experiment knob: keep the covered-``B`` mirror fill when
+    :pp:param:`hybrid_pic_model.conformal_ect_j` is on (by default that fill is skipped, since
+    the mirrored values inject divergence into Form A's divergence-consistent wall current).
+    Isolates the flux-weighted Ampere read from the loss of the mirror fill's smoothing when
+    studying near-wall stability. No effect unless ``conformal_ect_j`` is active.
+
+.. pp:param:: hybrid_pic_model.conformal_pec_zero_ej
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    On the staggered conformal (ECT) path, impose the perfect-conductor condition on the
+    Ohm's-law electric field and on the Ampere plasma current *constitutively*: ``E`` and ``J``
+    are set to zero on every EB-touching edge — every masked (fully covered) edge and every cut
+    edge (open length smaller than the full edge length) — instead of being rewritten by the
+    pointwise level-set mirror extrapolations. The rationale: at a perfect conductor the
+    tangential electric field vanishes, and the hybrid model carries no wall (surface)
+    currents, so with a standoff keeping the plasma off the metal there is no physics to
+    represent on EB-touching edges. Cut faces then evolve only through their fully-open edges
+    (tangential ``E = 0`` imposed at the cut-edge level — a first-order wall), and fully
+    covered face fluxes freeze, so the conformal update conserves the wall flux by
+    construction. This also removes the unconditional instability of the explicit
+    mirror-filled ECT wall (the mirror feeds near-wall values into the :math:`1/S`-amplified
+    cut-face circulation). Note that the density-based resistivity parser cannot express a
+    conductor: the density sits at the floor both in the conductor and in the vacuum gap, so
+    the conductor would otherwise get the vacuum resistivity; this option is the
+    geometry-aware :math:`\eta \rightarrow 0` that the parser cannot write. When enabled, the
+    external fields added via ``external_vector_potential`` are also zeroed in the conductor
+    (``E`` on EB-touching edges, ``B`` on fully covered faces) after each external-field
+    update, so no unphysical external-field reservoir accumulates inside the wall. Takes
+    precedence over :pp:param:`hybrid_pic_model.conformal_e_geometric_pec` and the covered
+    mirror fills. Requires :pp:param:`hybrid_pic_model.use_conformal_eb` on a staggered (Yee)
+    grid.
+
+.. pp:param:: hybrid_pic_model.conformal_e_geometric_pec
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Research knob (opt-in; enabling it is explicitly **unstable** today). If ``true``, the
+    staggered conformal (ECT) path imposes the wall on the Ohm's-law ``E`` geometrically, as
+    the electromagnetic ECT solver does: the boundary fill rewrites only the masked (fully
+    covered, zero-open-length) edges, and live cut edges keep their Ohm value for the
+    circulation, whose open-length weights already exclude the covered portions. Measured on a
+    vacuum ECT wall test, the resulting explicit composite map has local gain above one at
+    small-open-area cut cells and diverges from round-off within the first step; the knob is
+    kept as the documented negative control for that measurement. Use
+    :pp:param:`hybrid_pic_model.conformal_pec_zero_ej` for the stable wall. No effect off the
+    staggered conformal path.
+
 .. pp:param:: hybrid_pic_model.eb_bc_rtol
     :type: ``float``
     :default: ``1e-4``
@@ -4097,6 +4152,24 @@ Maxwell solver: kinetic-fluid hybrid
     isotropic biharmonic; fully isotropic on cubic cells, consistent on non-cubic cells).
     Cartesian geometries only; in RZ the standard cylindrical operator is used (with the
     on-axis radial term carrying its L'Hopital factor of two).
+
+.. pp:param:: hybrid_pic_model.isotropic_hyper_wall_compact
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    If ``true`` (default), on the staggered conformal (ECT) path the isotropic
+    (Mehrstellen/Patra-Karttunen) hyper-resistivity Laplacian is downgraded to the compact
+    cardinal-only cross stencil on edges within a corner reach
+    (:math:`\sqrt{D} + 1/2` cells, :math:`D` the dimensionality) of the embedded surface: the
+    isotropic stencil reads the full :math:`3^3` neighborhood, and near the wall its
+    diagonal/corner current reads land on EB-touching edges that
+    :pp:param:`hybrid_pic_model.conformal_pec_zero_ej` zeroes (and that no mirror fill sets on
+    this path), which would inject a spurious :math:`\nabla^2 \vec{J}` into the wall-adjacent
+    electric field. The compact stencil's cardinal reach stays on set values one ring further
+    in. Only meaningful together with
+    :pp:param:`hybrid_pic_model.isotropic_hyper_resistivity`; no effect off the staggered
+    conformal path.
 
 .. pp:param:: hybrid_pic_model.isotropic_resistivity
     :type: ``bool``
