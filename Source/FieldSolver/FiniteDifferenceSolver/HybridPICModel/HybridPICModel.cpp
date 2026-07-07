@@ -119,6 +119,7 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("conformal_ect_j", m_conformal_ect_j);
     pp_hybrid.query("conformal_ect_j_keep_mirror", m_conformal_ect_j_keep_mirror);
     pp_hybrid.query("conformal_e_geometric_pec", m_conformal_e_geometric_pec);
+    pp_hybrid.query("conformal_pec_zero_ej", m_conformal_pec_zero_ej);
     if (m_conformal_ect_j
         && (!m_use_conformal_eb
             || WarpX::grid_type == ablastr::utils::enums::GridType::Collocated)) {
@@ -538,6 +539,57 @@ void HybridPICModel::GetCurrentExternal ()
     }
 }
 
+void HybridPICModel::ZeroConductorEdges (
+    ablastr::fields::VectorField const& field,
+    std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update,
+    const int lev) const
+{
+    // Constitutive PEC for an edge-staggered field on the staggered conformal
+    // (ECT) path: zero every masked (fully covered) edge and every CUT edge
+    // (open length < full length). Cut faces then evolve only through their
+    // fully-open edges; there is no wall physics to represent on the zeroed
+    // set (E = 0 in a perfect conductor, and the hybrid carries no surface
+    // currents). See m_conformal_pec_zero_ej.
+    auto& warpx = WarpX::GetInstance();
+    const auto dx = warpx.Geom(lev).CellSizeArray();
+    const ablastr::fields::VectorField edge_lengths =
+        warpx.m_fields.get_alldirs(FieldType::edge_lengths, lev);
+    // Full edges carry exactly their cell size after ScaleEdges; anything
+    // shorter is cut. The tolerance absorbs round-off in the EB geometry.
+    amrex::GpuArray<amrex::Real, 3> l_full{0.0_rt, 0.0_rt, 0.0_rt};
+    for (int d = 0; d < 3; ++d) {
+        const int gd = (d < AMREX_SPACEDIM) ? d : AMREX_SPACEDIM - 1;
+        l_full[d] = (1.0_rt - 1.e-6_rt) * dx[gd];
+    }
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (amrex::MFIter mfi(*field[0], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        amrex::Array4<amrex::Real> const& Fx = field[0]->array(mfi);
+        amrex::Array4<amrex::Real> const& Fy = field[1]->array(mfi);
+        amrex::Array4<amrex::Real> const& Fz = field[2]->array(mfi);
+        amrex::Array4<amrex::Real const> const& lx = edge_lengths[0]->const_array(mfi);
+        amrex::Array4<amrex::Real const> const& ly = edge_lengths[1]->const_array(mfi);
+        amrex::Array4<amrex::Real const> const& lz = edge_lengths[2]->const_array(mfi);
+        amrex::Array4<int const> const& ux = eb_update[0]->const_array(mfi);
+        amrex::Array4<int const> const& uy = eb_update[1]->const_array(mfi);
+        amrex::Array4<int const> const& uz = eb_update[2]->const_array(mfi);
+        const amrex::Box tx = mfi.tilebox(field[0]->ixType().toIntVect());
+        const amrex::Box ty = mfi.tilebox(field[1]->ixType().toIntVect());
+        const amrex::Box tz = mfi.tilebox(field[2]->ixType().toIntVect());
+        amrex::ParallelFor(tx, ty, tz,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                if (ux(i,j,k) == 0 || lx(i,j,k) < l_full[0]) { Fx(i,j,k) = 0.0_rt; }
+            },
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                if (uy(i,j,k) == 0 || ly(i,j,k) < l_full[1]) { Fy(i,j,k) = 0.0_rt; }
+            },
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                if (uz(i,j,k) == 0 || lz(i,j,k) < l_full[2]) { Fz(i,j,k) = 0.0_rt; }
+            });
+    }
+}
+
 void HybridPICModel::CalculatePlasmaCurrent (
     ablastr::fields::MultiLevelVectorField const& Bfield,
     amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E) const
@@ -585,6 +637,14 @@ void HybridPICModel::CalculatePlasmaCurrent (
         for (int i=0; i<3; i++) {
             current_fp_plasma[i]->minus(*current_fp_external[i], 0, 1, 1);
         }
+    }
+
+    // Constitutive PEC: J = 0 on every EB-touching edge (no surface currents
+    // in the hybrid; see m_conformal_pec_zero_ej) -- replaces the mirror fill.
+    if (m_conformal_pec_zero_ej && EB::enabled() && m_use_conformal_eb
+        && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated) {
+        ZeroConductorEdges(current_fp_plasma, eb_update_E, lev);
+        return;
     }
 
     // Enforce the PEC current boundary condition at the embedded boundary:
@@ -697,9 +757,16 @@ void HybridPICModel::HybridPICSolveE (
     // load-bearing damping for the explicit algebraic E(B) loop at small-S
     // cut cells. See the knob's declaration for the full story.
     if (EB::enabled()) {
+        const bool staggered_conformal = m_use_conformal_eb
+            && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated;
+        // Constitutive PEC: E = 0 on every EB-touching edge (see
+        // m_conformal_pec_zero_ej); replaces the mirror fill entirely.
+        if (m_conformal_pec_zero_ej && staggered_conformal) {
+            ZeroConductorEdges(Efield, eb_update_E, lev);
+            return;
+        }
         const bool fill_cut_centers = !(m_conformal_e_geometric_pec
-            && m_use_conformal_eb
-            && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated);
+            && staggered_conformal);
         if (static_cast<int>(m_eb_bc_status_Eohm.size()) <= lev) { m_eb_bc_status_Eohm.resize(lev+1); }
         warpx::hybrid::ApplyPECBoundaryToField(
             Efield, eb_update_E,
