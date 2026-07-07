@@ -31,6 +31,8 @@
 using namespace amrex;
 using warpx::fields::FieldType;
 
+// The helpers below are only consumed by the Cartesian Ohm's-law solve.
+#if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
 namespace {
     /** EB-aware staggered->nodal interpolation for the hybrid Hall term.
      *
@@ -144,6 +146,7 @@ namespace {
         return rmin;
     }
 }
+#endif // Cartesian-only helpers
 
 void FiniteDifferenceSolver::CalculateCurrentAmpere (
     ablastr::fields::VectorField & Jfield,
