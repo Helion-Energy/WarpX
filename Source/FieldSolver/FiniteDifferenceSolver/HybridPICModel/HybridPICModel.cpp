@@ -239,6 +239,9 @@ void HybridPICModel::ReadParameters ()
 
     // isotropized hyper-resistivity Laplacian (Cartesian geometries)
     pp_hybrid.query("isotropic_hyper_resistivity", m_isotropic_hyper_resistivity);
+    // Near-wall downgrade of the isotropic Laplacian to the compact stencil
+    // (staggered conformal path; see the header docs).
+    pp_hybrid.query("isotropic_hyper_wall_compact", m_isotropic_hyper_wall_compact);
 
     // isotropized resistive diffusion via the corner-curl E correction
     // (Cartesian geometries; suppresses the grid m=4 from the resistive term)
