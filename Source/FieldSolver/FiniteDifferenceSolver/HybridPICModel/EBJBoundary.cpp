@@ -889,16 +889,16 @@ void warpx::hybrid::FoldEBDepositToNodalScalar (
     // level-set scratch is initialized to a large positive (fluid) value so
     // unfilled physical-boundary ghosts never enter the covered set.
     int const ng_gather = 4;
-    amrex::MultiFab f_src(field.boxArray(), field.DistributionMap(), field.nComp(),
+    amrex::MultiFab f_scratch(field.boxArray(), field.DistributionMap(), field.nComp(),
                           amrex::IntVect(ng_gather));
-    f_src.setVal(0.0_rt);
-    amrex::MultiFab::Copy(f_src, field, 0, 0, field.nComp(), 0);
-    f_src.FillBoundary(geom.periodicity());
-    amrex::MultiFab phi_src(distance_to_eb.boxArray(), distance_to_eb.DistributionMap(),
+    f_scratch.setVal(0.0_rt);
+    amrex::MultiFab::Copy(f_scratch, field, 0, 0, field.nComp(), 0);
+    f_scratch.FillBoundary(geom.periodicity());
+    amrex::MultiFab phi_scratch(distance_to_eb.boxArray(), distance_to_eb.DistributionMap(),
                             1, amrex::IntVect(ng_gather));
-    phi_src.setVal(std::numeric_limits<amrex::Real>::max());
-    amrex::MultiFab::Copy(phi_src, distance_to_eb, 0, 0, 1, 0);
-    phi_src.FillBoundary(geom.periodicity());
+    phi_scratch.setVal(std::numeric_limits<amrex::Real>::max());
+    amrex::MultiFab::Copy(phi_scratch, distance_to_eb, 0, 0, 1, 0);
+    phi_scratch.FillBoundary(geom.periodicity());
 
     amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const stag0{};
 
@@ -907,9 +907,9 @@ void warpx::hybrid::FoldEBDepositToNodalScalar (
         int const ncomp = field.nComp();
 
         auto const& f = field.array(mfi);
-        auto const& f_r = f_src.const_array(mfi);
+        auto const& f_r = f_scratch.const_array(mfi);
         auto const& phi = distance_to_eb.const_array(mfi);
-        auto const& phi_g = phi_src.const_array(mfi);
+        auto const& phi_g = phi_scratch.const_array(mfi);
 
         amrex::ParallelFor(tb, ncomp,
             [=] AMREX_GPU_DEVICE (int i, int j, int k, int n)
