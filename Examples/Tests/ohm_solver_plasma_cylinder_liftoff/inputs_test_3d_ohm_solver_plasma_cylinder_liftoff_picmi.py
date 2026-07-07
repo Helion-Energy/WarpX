@@ -700,6 +700,17 @@ def main():
         "--conformal-eb on a staggered grid).",
     )
     parser.add_argument(
+        "--pec-zero-ej",
+        dest="pec_zero_ej",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="constitutive PEC at the EB: zero E and J on every EB-touching "
+        "(cut or fully covered) edge instead of the mirror fills; cut faces "
+        "evolve only through their fully-open edges "
+        "(hybrid_pic_model.conformal_pec_zero_ej; requires --conformal-eb on "
+        "a staggered grid).",
+    )
+    parser.add_argument(
         "--conformal-ect-j-keep-mirror",
         dest="conformal_ect_j_keep_mirror",
         action=argparse.BooleanOptionalAction,
@@ -1015,6 +1026,12 @@ def main():
         from pywarpx import hybridpicmodel
 
         hybridpicmodel.conformal_ect_j_keep_mirror = 1
+
+    if args.pec_zero_ej:
+        # Raw bucket attribute (no PICMI kwarg): constitutive PEC at the EB.
+        from pywarpx import hybridpicmodel
+
+        hybridpicmodel.conformal_pec_zero_ej = 1
 
     # Momentum-conserving gather: set on the picmi Simulation object (the picmi
     # layer writes algo.field_gathering itself at initialize, so a raw bucket set
