@@ -371,6 +371,25 @@ public:
      *  div-consistent wall current). Isolates the flux-weighted READ from the
      *  loss of the mirror's smoothing in the liftoff wall-instability ladder. */
     bool m_conformal_ect_j_keep_mirror = false;
+    /** RESEARCH KNOB (opt-in, default false -- enabling it is explicitly
+     *  UNSTABLE today). If true, the staggered conformal (ECT) path imposes
+     *  the wall on the Ohm's-law E geometrically, like the EM ECT solver: the
+     *  E fill rewrites only the masked (fully covered, zero-open-length)
+     *  edges, and LIVE cut edges keep their Ohm value for the circulation,
+     *  whose open-length weights already exclude the covered portions.
+     *
+     *  Measured (vacuum ECT liftoff, res 72: pure eta*J + external ramp): the
+     *  explicit composite map [l,S-circulation o eta*curl] has local gain > 1
+     *  at small-S cut cells, so with this on the RKF45 collapses within STEP
+     *  ONE from a round-off seed (~e-fold per substep) -- with either the raw
+     *  masked Yee curl or the flux-weighted Form-A curl supplying J. The
+     *  default pointwise mirror overwrite of covered-center cut edges is what
+     *  damps that map enough to reach ~900 steps; it is load-bearing for the
+     *  explicit scheme, not merely a BC choice. A stable geometric-PEC wall
+     *  needs the wall-local implicit solve (or a genuinely higher-order
+     *  reconstructed J), not just metric-consistent explicit reads. No effect
+     *  off the staggered conformal path. */
+    bool m_conformal_e_geometric_pec = false;
     /** If true (default), the hybrid Hall term's nodal J x B interpolation excludes
      *  covered edges/faces (EB-aware, mask-renormalized) so covered-cell field values do
      *  not pollute the near-wall J x B. Set false to recover the plain (polluting)
