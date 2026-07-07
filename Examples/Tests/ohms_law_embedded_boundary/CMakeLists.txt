@@ -198,3 +198,31 @@ if(WarpX_EB)
         OFF  # dependency
     )
 endif()
+
+# Production-path div(B) Marder clean (hybrid_pic_model.divb_clean_alpha, run
+# once per step from the hybrid field advance): a near-wall divergence bump is
+# damped, the deep fluid is untouched, and on the staggered (Yee) grid the
+# banded clean injects no bulk cell-centered divergence.
+if(WarpX_EB)
+    add_warpx_test(
+        test_3d_ohms_law_divb_clean_collocated_picmi  # name
+        3  # dims
+        2  # nprocs
+        "inputs_test_3d_ohms_law_divb_clean_picmi.py --grid-type collocated"  # inputs
+        OFF  # analysis
+        OFF  # checksum
+        OFF  # dependency
+    )
+endif()
+
+if(WarpX_EB)
+    add_warpx_test(
+        test_3d_ohms_law_divb_clean_staggered_picmi  # name
+        3  # dims
+        2  # nprocs
+        "inputs_test_3d_ohms_law_divb_clean_picmi.py --grid-type staggered"  # inputs
+        OFF  # analysis
+        OFF  # checksum
+        OFF  # dependency
+    )
+endif()

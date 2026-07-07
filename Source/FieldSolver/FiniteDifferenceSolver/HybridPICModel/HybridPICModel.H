@@ -137,6 +137,57 @@ public:
         std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update_E,
         int lev, PatchType patch_type, bool solve_for_Faraday) const;
 
+    /**
+     * \brief Optional Marder-like diffusive divergence clean of a nodal vector
+     * field. Iterates field += alpha_scaled * grad(div(field)) restricted to
+     * a near-wall geometric band (distance_to_eb <= band_cells*h), re-applying
+     * the embedded-boundary PEC fill (with the field's own parity) each sweep.
+     * The correction is a pure gradient, so curl(field) -- and hence J=curl(B) /
+     * the physics it feeds -- is unchanged to round-off away from the band
+     * cutoffs; only the spurious curved-wall divergence injected by the mirror
+     * fill is dissipated. With the inner cutoffs at 0 (the wall-layer mode) the
+     * clean reaches the first fluid layers, where a sharp re-entrant corner
+     * (e.g. a wall radius step) otherwise pumps an exponentially growing
+     * div(B). No-op when alpha<=0 or no EB. 3D/XZ Cartesian only (the gradient
+     * is the adjoint of the Cartesian divergence; ReadParameters aborts if the
+     * knobs are set on other geometries).
+     */
+    void MarderCleanDivergence (
+        ablastr::fields::VectorField const& field,
+        std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update,
+        warpx::hybrid::EBFillStatus* status_cache,
+        bool normal_odd,
+        bool fill_covered_centers,
+        amrex::Real alpha,
+        int max_iters,
+        amrex::Real clean_band_cells,
+        amrex::Real fill_band_cells,
+        int lev) const;
+
+    /** Once-per-step driver for the div(B)/div(J_total) clean: cleans Bfield_fp
+     *  (magnetic parity) and the total Ampere current hybrid_current_fp_plasma
+     *  (electric parity) on every level via MarderCleanDivergence. Called from
+     *  the hybrid field advance after the plasma-current update and before the
+     *  external-field add-back, so it acts on the plasma field only. No-op
+     *  unless the respective alpha>0. */
+    void MarderCleanFieldsPerStep () const;
+
+    /** Density-banded Marder clean of the Ohm's-law E at the n_floor seam
+     *  (staggered grids; called per substage from FieldPush between the Ohm
+     *  solve and the Faraday push). Iterates E += alpha_scaled * grad(div(E))
+     *  restricted to edges whose endpoint-averaged density is at or below
+     *  dive_seam_band * rho_floor, diffusing the vector-inconsistent
+     *  (divergence-carrying) E content the per-component staggered sampling
+     *  injects at the moving plasma/vacuum seam. The nodal div / edge grad pair
+     *  is mutually adjoint, so the update is strictly dissipative of the
+     *  divergence norm and preserves curl(E) to round-off away from the window
+     *  edge. No-op unless dive_seam_alpha > 0. 3D/XZ Cartesian only. */
+    void MarderCleanESeam (
+        ablastr::fields::MultiLevelVectorField const& Efield,
+        ablastr::fields::MultiLevelScalarField const& rhofield,
+        amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E,
+        amrex::IntVect ng, std::optional<bool> nodal_sync) const;
+
     void BfieldEvolve (
         ablastr::fields::MultiLevelVectorField const& Bfield,
         ablastr::fields::MultiLevelVectorField const& Efield,
@@ -360,6 +411,15 @@ public:
      *  components of that index -- a single piecewise-constant-per-cell
      *  decision field with no per-component half-shifts. Cartesian only. */
     int m_holmstrom_switch_mode = 0;
+    /** Density-banded Marder clean of the Ohm E at the n_floor seam
+     *  (MarderCleanESeam): fraction of the explicit-diffusion cap applied per
+     *  substage. 0 (default) = off. Staggered 3D/XZ Cartesian only. */
+    amrex::Real m_dive_seam_alpha = 0.0;
+    /** Sweeps of the seam E clean per substage. */
+    int m_dive_seam_iters = 1;
+    /** Upper edge of the seam clean window in units of the density floor:
+     *  the correction applies on edges with rho <= dive_seam_band*rho_floor. */
+    amrex::Real m_dive_seam_band = 4.0;
     /** If true, skip the collocated conformal magnetic-field wall treatment
      *  entirely (no EB B fill): the unmasked nodal Faraday curl is left as-is.
      *  This reproduces the pre-treatment baseline and isolates the wall fill as
@@ -452,6 +512,28 @@ public:
      *  so the corner-curl's in-plane diagonal B taps read mirror values rather
      *  than the zeroed deep interior (user query still overrides). */
     amrex::Real m_eb_b_fill_band_cells = 1.0;
+
+    /** Marder-like diffusive div(B) clean coefficient (fraction of the explicit
+     *  grad(div) CFL cap; stable below ~1/6 in 3D, PoC-validated sweet spot
+     *  ~0.15). 0 (default) disables. Runtime knob hybrid_pic_model.divb_clean_alpha. */
+    amrex::Real m_divb_clean_alpha = 0.0;
+    /** Same for the total Ampere current hybrid_current_fp_plasma; dissipates the
+     *  spurious near-wall div(J_total) the pointwise mirror injects (see
+     *  MarderCleanDivergence). 0 (default) disables. */
+    amrex::Real m_divj_clean_alpha = 0.0;
+    /** Number of grad(div) sweeps per application of the divergence clean. */
+    int m_divb_clean_iters = 5;
+    /** Outer cutoff of the divergence-clean band, in cells from the wall. */
+    amrex::Real m_divb_clean_band_cells = 4.0;
+    /** Inner cutoff (in cells) below which the computed divergence is dropped.
+     *  Default 1 trusts the divergence only where its own +/-1 stencil is fully
+     *  in the fluid; 0 keeps it on every uncovered node (wall-layer mode). */
+    amrex::Real m_divb_clean_inner_div_cells = 1.0;
+    /** Inner cutoff (in cells) below which no correction is applied. Default 2
+     *  keeps the full +/-2 grad(div) stencil in the fluid (order-preserving on a
+     *  smooth wall); 0 corrects every uncovered band node (wall-layer mode, for
+     *  a re-entrant-corner divergence instability). */
+    amrex::Real m_divb_clean_inner_corr_cells = 2.0;
 
     /** Gpu Vector with index type of the Jx multifab */
     amrex::GpuArray<int, 3> Jx_IndexType;
