@@ -118,6 +118,7 @@ void HybridPICModel::ReadParameters ()
     }
     pp_hybrid.query("conformal_ect_j", m_conformal_ect_j);
     pp_hybrid.query("conformal_ect_j_keep_mirror", m_conformal_ect_j_keep_mirror);
+    pp_hybrid.query("conformal_e_geometric_pec", m_conformal_e_geometric_pec);
     if (m_conformal_ect_j
         && (!m_use_conformal_eb
             || WarpX::grid_type == ablastr::utils::enums::GridType::Collocated)) {
@@ -687,14 +688,25 @@ void HybridPICModel::HybridPICSolveE (
     // (tangential E zero at the surface, normal E with zero normal gradient, zero deep in
     // the conductor) must be imposed directly on the masked edges, including cut edges with
     // covered centers, where the floored interpolated density makes Ohm's law spurious.
+    //
+    // The opt-in conformal_e_geometric_pec research knob (staggered ECT path
+    // only) skips the covered-center cut edges, imposing the wall purely
+    // geometrically like the EM ECT solver. Measured to be explicitly UNSTABLE
+    // today (step-one RKF45 collapse from a round-off seed in the vacuum
+    // liftoff, with either J curl variant): the mirror overwrite is
+    // load-bearing damping for the explicit algebraic E(B) loop at small-S
+    // cut cells. See the knob's declaration for the full story.
     if (EB::enabled()) {
+        const bool fill_cut_centers = !(m_conformal_e_geometric_pec
+            && m_use_conformal_eb
+            && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated);
         if (static_cast<int>(m_eb_bc_status_Eohm.size()) <= lev) { m_eb_bc_status_Eohm.resize(lev+1); }
         warpx::hybrid::ApplyPECBoundaryToField(
             Efield, eb_update_E,
             *warpx.m_fields.get(FieldType::distance_to_eb, lev),
             warpx.Geom(lev),
             m_eb_bc_rtol, m_eb_bc_max_iters, m_eb_bc_direct_fill,
-            /*normal_odd=*/false, /*fill_covered_centers=*/true,
+            /*normal_odd=*/false, /*fill_covered_centers=*/fill_cut_centers,
             // E fill band is PINNED to the J fill band: E = eta*J in the cut/
             // covered region, so filling E beyond where J is filled leaves E != 0
             // where J = 0 (an inconsistent source that blows up through the
