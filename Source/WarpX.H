@@ -164,6 +164,8 @@ public:
     ParticleBoundaryBuffer& GetParticleBoundaryBuffer () { return *m_particle_boundary_buffer; }
     amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& GetEBUpdateEFlag() { return m_eb_update_E; }
     amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& GetEBUpdateBFlag() { return m_eb_update_B; }
+    amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& GetECTFaceOwnerMask() { return m_ect_face_owner_mask; }
+    [[nodiscard]] bool ECTNeedsSeamSync () const { return m_ect_needs_seam_sync; }
     /** \brief True when the conformal (enlarged-cell technique) embedded-boundary
      * field update is active: ECT Maxwell solver, or hybrid-PIC solver with
      * hybrid_pic_model.use_conformal_eb = 1. */
