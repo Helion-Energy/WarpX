@@ -1180,6 +1180,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     // index -- no per-component half-shifts at the plasma/vacuum seam).
     const int switch_mode = hybrid_model->m_holmstrom_switch_mode;
     const amrex::Real inv_mu0 = 1._rt/PhysConst::mu0;
+#if defined(WARPX_DIM_1D_Z)
+    // only consumed by the 3D / 2D XZ corner-curl corrections below
+    amrex::ignore_unused(inv_mu0);
+#endif
     amrex::GpuArray<amrex::Real, 3> dx_arr{};
     amrex::GpuArray<amrex::Real, 3> h2{};
     amrex::GpuArray<amrex::Real, 3> inv_h2{};
@@ -1543,6 +1547,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         Ex(i, j, k) += eta_val
                             * warpx::hybrid_isotropic::CornerResistiveEx_XZ(By, i, j, k, h2, inv_h2, dx_arr, inv_mu0);
                     }
+#else
+                    amrex::ignore_unused(nodal_grid);
 #endif
                 }
             }

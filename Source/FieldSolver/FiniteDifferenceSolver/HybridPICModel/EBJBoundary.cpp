@@ -209,6 +209,7 @@ namespace
         amrex::Real const yq = xe[1];
         amrex::Real const zq = xe[2];
 #else
+        amrex::ignore_unused(k);
         xe[0] = plo[0] + (i + stag_own[0])*dx_arr[0];
         xe[1] = plo[1] + (j + stag_own[1])*dx_arr[1];
         amrex::Real const yq = 0._rt;
