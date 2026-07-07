@@ -126,6 +126,7 @@ def setup_simulation(
     eb_b_straight_mirror=False,
     conformal_ect_j=False,
     conformal_ect_curvature=False,
+    conformal_pec_zero_ej=False,
     divb_clean=False,
     divb_clean_iters=3,
     eta_hyper_mult=1.0,
@@ -263,6 +264,9 @@ def setup_simulation(
         # curvature correction.
         conformal_ect_j=True if conformal_ect_j else None,
         conformal_ect_curvature=True if conformal_ect_curvature else None,
+        # Constitutive PEC at the ECT wall: zero the Ohm E and the Ampere J on
+        # every EB-touching edge (the stable ECT wall; replaces the mirror fills).
+        conformal_pec_zero_ej=True if conformal_pec_zero_ej else None,
         # Diffusive near-wall div(B)/div(J) damper at the annulus production
         # config: alpha=0.15 (just under the ~1/6 explicit-diffusion cap),
         # 3 sweeps/step, unbounded band, wall-layer mode (inner cutoffs 0).
@@ -559,10 +563,15 @@ def main():
     )
     parser.add_argument(
         "--holmstrom",
+        dest="holmstrom",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="zero the Ohm's-law E in vacuum regions (Holmstrom treatment): "
         "suppresses the floor-density Hall amplification in the gap between "
-        "the column and the wall",
-        action="store_true",
+        "the column and the wall. Required for production explicit runs with "
+        "vacuum/low-density regions (without it the mirror-filled walls pump "
+        "wall flux and the imploded column drifts off axis); --no-holmstrom "
+        "is for A/B isolation studies only.",
     )
     parser.add_argument(
         "--isotropic-resistivity",
@@ -602,7 +611,7 @@ def main():
     parser.add_argument(
         "--bz-rev",
         dest="bz_rev",
-        help="reversed (target) external Bz in Tesla (default 1.5; lower = "
+        help="reversed (target) external Bz in Tesla (default %(default)s; lower = "
         "gentler compression / less stiff)",
         type=float,
         default=BZ_REV,
@@ -610,7 +619,7 @@ def main():
     parser.add_argument(
         "--bz-bias",
         dest="bz_bias",
-        help="initial bias external Bz in Tesla (default -0.1)",
+        help="initial bias external Bz in Tesla (default %(default)s)",
         type=float,
         default=BZ_BIAS,
     )
@@ -1003,6 +1012,7 @@ def main():
         eb_b_straight_mirror=args.eb_b_straight_mirror,
         conformal_ect_j=args.conformal_ect_j,
         conformal_ect_curvature=args.conformal_ect_curvature,
+        conformal_pec_zero_ej=args.pec_zero_ej,
         divb_clean=args.divb_clean,
         divb_clean_iters=args.divb_clean_iters,
         eta_hyper_mult=args.eta_hyper_mult,
@@ -1026,12 +1036,6 @@ def main():
         from pywarpx import hybridpicmodel
 
         hybridpicmodel.conformal_ect_j_keep_mirror = 1
-
-    if args.pec_zero_ej:
-        # Raw bucket attribute (no PICMI kwarg): constitutive PEC at the EB.
-        from pywarpx import hybridpicmodel
-
-        hybridpicmodel.conformal_pec_zero_ej = 1
 
     # Momentum-conserving gather: set on the picmi Simulation object (the picmi
     # layer writes algo.field_gathering itself at initialize, so a raw bucket set
