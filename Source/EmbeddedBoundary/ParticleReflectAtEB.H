@@ -97,7 +97,7 @@ reflectParticlesAtEB (PC& pc,
                 // (otherwise it can accumulate in the solid over long runs / complex geometry).
                 // largest cell size across dimensions; AMREX_D_TERM avoids a per-dimension CPP split
                 // and only expands the dxi[1]/dxi[2] accesses in the dimensions where they are valid.
-                amrex::Real dx_max = amrex::Real(1.0)/dxi[0];
+                amrex::Real dx_max = amrex::Real(1.0)/dxi[0]; // NOLINT(misc-const-correctness)
                 AMREX_D_TERM(,
                              dx_max = amrex::max(dx_max, amrex::Real(1.0)/dxi[1]);,
                              dx_max = amrex::max(dx_max, amrex::Real(1.0)/dxi[2]);)
@@ -120,7 +120,7 @@ reflectParticlesAtEB (PC& pc,
 
                 const bool diffuse = (accommodation > 0._prt) &&
                     ( accommodation >= 1._prt || amrex::Random(engine) < accommodation );
-                const amrex::ParticleReal cc = static_cast<amrex::ParticleReal>(PhysConst::c);
+                const auto cc = static_cast<amrex::ParticleReal>(PhysConst::c);
                 const amrex::ParticleReal twophi = 2._prt*static_cast<amrex::ParticleReal>(phi_value);
 
 #if defined(WARPX_DIM_3D)
