@@ -336,6 +336,19 @@ public:
      *  the cross stencil, removing the cos(4*theta) anisotropy of its
      *  damping rate (fully isotropic on cubic cells; Cartesian only). */
     bool m_isotropic_hyper_resistivity = false;
+    /** If true (default), on the staggered conformal (ECT) path the isotropic
+     *  (Mehrstellen) hyper-resistivity Laplacian is DOWNGRADED to the compact
+     *  cardinal-only stencil on edges within a corner reach
+     *  (sqrt(AMREX_SPACEDIM)+0.5 cells) of the level set: the isotropic
+     *  stencil reads the full 3^3 neighborhood, and near the wall its
+     *  diagonal/corner J reads land on EB-touching edges that the
+     *  constitutive PEC zeroes (and that no mirror fill sets on this path),
+     *  which would inject a spurious nabla^2 J into the wall-adjacent E.
+     *  The compact stencil's cardinal reach stays on set values one ring
+     *  further in. No effect off the staggered conformal path (the
+     *  collocated path instead widens the J mirror-fill band to the corner
+     *  reach; see m_eb_fill_band_cells). */
+    bool m_isotropic_hyper_wall_compact = true;
     /** If true (opt-in), add an isotropizing corner-curl correction to the
      *  resistive electric field so the emergent in-plane B diffusion uses the
      *  isotropic (Mehrstellen) Laplacian instead of the cross stencil. This
