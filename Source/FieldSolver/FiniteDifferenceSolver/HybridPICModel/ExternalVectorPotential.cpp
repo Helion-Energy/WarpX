@@ -8,7 +8,9 @@
  */
 
 #include "ExternalVectorPotential.H"
+#include "EmbeddedBoundary/Enabled.H"
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
+#include "HybridPICModel.H"
 #include "Initialization/DivCleaner/ProjectionDivCleaner.H"
 #include "Fields.H"
 #include "WarpX.H"
@@ -385,9 +387,29 @@ ExternalVectorPotential::UpdateHybridExternalFields (const amrex::Real t, const 
         // level-set condition the collocated conformal fill expects. Do NOT mask the
         // external E/B with the covered-cell EB flags.
         const bool ext_use_eb_flags = false;
+        // Constitutive PEC (conformal_pec_zero_ej, staggered ECT path): the
+        // conductor excludes the time-varying external field, so zero the
+        // external E on every EB-touching edge and the external B on every
+        // FULLY COVERED face (cut faces keep their value: their open part
+        // carries real external flux). Leaving the through-wall ramp in the
+        // covered faces builds a growing, staircase-patterned B reservoir
+        // that every open-side curl stencil reads; the eb_hall_mask'd Hall
+        // interpolation never reads covered faces on this path, so the
+        // original through-wall motivation (the unmasked Interp jump) does
+        // not apply here.
+        auto const* hybrid = warpx.get_pointer_HybridPICModel();
+        const bool pec_zero_ext = hybrid && hybrid->m_conformal_pec_zero_ej
+            && hybrid->m_use_conformal_eb
+            && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated
+            && EB::enabled();
         for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
             AddExternalFieldFromVectorPotential(E_ext[lev], scale_factor_E, A_ext[lev], warpx.GetEBUpdateEFlag()[lev], ext_use_eb_flags);
             AddExternalFieldFromVectorPotential(B_ext[lev], scale_factor_B, curlA_ext[lev], warpx.GetEBUpdateBFlag()[lev], ext_use_eb_flags);
+
+            if (pec_zero_ext) {
+                hybrid->ZeroConductorEdges(E_ext[lev], warpx.GetEBUpdateEFlag()[lev], lev);
+                hybrid->ZeroCoveredFaces(B_ext[lev], lev);
+            }
 
             for (int idir = 0; idir < 3; ++idir) {
                 E_ext[lev][Direction{idir}]->FillBoundary(warpx.Geom(lev).periodicity());
