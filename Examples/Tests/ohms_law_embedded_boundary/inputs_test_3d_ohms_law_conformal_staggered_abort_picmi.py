@@ -120,6 +120,9 @@ def main():
             with open(bt, errors="replace") as f:
                 output += "\n" + f.read()
         except OSError:
+            # a Backtrace file may be unreadable or disappear between the
+            # glob and the open; the abort marker is still searched for in
+            # the child's captured stdout/stderr, so just skip it
             pass
 
     print("---- child output ----")

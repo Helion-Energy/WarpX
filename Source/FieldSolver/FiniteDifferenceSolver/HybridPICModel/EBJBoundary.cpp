@@ -161,23 +161,6 @@ namespace
         return {v, wsum};
     }
 
-    /** Predicate-renormalized gather using only unmasked (update mask != 0)
-     *  points. */
-    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
-    amrex::GpuTuple<amrex::Real, amrex::Real> gather_staggered_masked (
-        amrex::Array4<amrex::Real const> const& a,
-        amrex::Array4<int const> const& msk,
-        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& pos,
-        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& stag,
-        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& plo,
-        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& dxi,
-        int n) noexcept
-    {
-        return gather_staggered_pred(a,
-            [&] (int i, int j, int k) { return msk(i, j, k) != 0; },
-            pos, stag, plo, dxi, n);
-    }
-
     // Classification of every staggered point for the embedded-boundary fill
     constexpr int S_SOLUTION = 0;  //!< solution domain: gather source, never written
     constexpr int S_FILL     = 1;  //!< fill target with a well-posed image stencil
