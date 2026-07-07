@@ -165,10 +165,7 @@ public:
                 if (mask[i] == 0) { return 0; }
                 const auto selected_process_index = mask[i] - 1;
                 auto const& scattering_process = scattering_processes[selected_process_index];
-                const auto process_type = scattering_process.m_type;
-                return ((process_type != ScatteringProcessType::IONIZATION) &&
-                        (process_type != ScatteringProcessType::TWOPRODUCT_REACTION) &&
-                        (process_type != ScatteringProcessType::CHARGE_EXCHANGE)) ? 1 : 0;
+                return !scattering_process.m_produces_products;
             },
             [=] AMREX_GPU_DEVICE (index_type i, index_type s) { no_product_offsets_data[i] = s; },
             amrex::Scan::Type::exclusive, amrex::Scan::retSum
@@ -194,10 +191,7 @@ public:
                 if (mask[i] == 0) { return 0; }
                 const auto selected_process_index = mask[i] - 1;
                 auto const& scattering_process = scattering_processes[selected_process_index];
-                const auto process_type = scattering_process.m_type;
-                return ((process_type == ScatteringProcessType::IONIZATION) ||
-                        (process_type == ScatteringProcessType::TWOPRODUCT_REACTION) ||
-                        (process_type == ScatteringProcessType::CHARGE_EXCHANGE)) ? 1 : 0;
+                return scattering_process.m_produces_products;
             },
             [=] AMREX_GPU_DEVICE (index_type i, index_type s) { with_product_offsets_data[i] = s; },
             amrex::Scan::Type::exclusive, amrex::Scan::retSum
@@ -279,9 +273,7 @@ public:
             auto const& scattering_process = scattering_processes[selected_process_index];
             const auto process_type = scattering_process.m_type;
 
-            if ((process_type != ScatteringProcessType::IONIZATION) &&
-                (process_type != ScatteringProcessType::TWOPRODUCT_REACTION) &&
-                (process_type != ScatteringProcessType::CHARGE_EXCHANGE))
+            if (!scattering_process.m_produces_products)
             {
                 const auto slot0_idx = products_np_data[0] + no_product_offsets_data[i];
                 // Make a copy of the particle from the first reactant species
@@ -321,15 +313,24 @@ public:
                 uy1 -= uCOM_y;
                 uz1 -= uCOM_z;
 
-                if (process_type == ScatteringProcessType::ELASTIC) {
-                    // Speed of particle 0 in the COM frame (magnitude preserved by elastic scatter,
-                    // unless Borgnakke-Larsen redistributes energy to/from internal modes below).
-                    amrex::ParticleReal speed0 = std::sqrt(ux0*ux0 + uy0*uy0 + uz0*uz0);
+                if (process_type == ScatteringProcessType::ELASTIC ||
+                    process_type == ScatteringProcessType::EXCITATION) {
+                    // Subtract the excitation energy penalty from the total COM
+                    // kinetic energy, then randomly rotate the velocity vector of
+                    // the first particle. For elastic collisions the energy penalty
+                    // is zero, so this reduces to a random rotation that conserves
+                    // the COM kinetic energy (unless Borgnakke-Larsen redistributes
+                    // energy to/from internal modes below).
+                    // Total KE in COM frame = 0.5 * m0 * u0^2 * (m0+m1)/m1
+                    const auto u0_sq = ux0*ux0 + uy0*uy0 + uz0*uz0;
+                    const auto E_com = 0.5_prt * m0 * u0_sq * (m0 + m1) / m1;
+                    const auto E_out = E_com - scattering_process.m_energy_penalty * PhysConst::q_e;
+                    amrex::ParticleReal speed0 = std::sqrt(u0_sq * E_out / E_com);
 
                     // Borgnakke-Larsen: exchange energy between relative translation and the molecular
                     // internal modes of either partner. Internal energies (eV) were copied parent->child
                     // by SmartCopy; we read them from the product slot, redistribute, and write them back.
-                    if (do_internal_dof) {
+                    if (do_internal_dof && process_type == ScatteringProcessType::ELASTIC) {
                         const amrex::ParticleReal mu = m0 * m1 / (m0 + m1);
                         // |u0_COM| = (m1/(m0+m1)) * g  =>  relative speed g, and E_trans = 1/2 mu g^2 [eV]
                         const amrex::ParticleReal g = speed0 * (m0 + m1) / m1;
