@@ -88,3 +88,34 @@ if(WarpX_EB)
         test_3d_ohm_solver_eb_diffusion_pec_j_picmi  # dependency
     )
 endif()
+
+# Staggered (Yee) conformal wall treatment: the enlarged-cell (ECT) Faraday
+# update on cut faces/edges (hybrid_pic_model.use_conformal_eb on the default
+# staggered grid) -- smoke + checksum coverage of the staggered conformal path.
+if(WarpX_EB)
+    add_warpx_test(
+        test_3d_ohm_solver_eb_diffusion_conformal_yee_picmi  # name
+        3  # dims
+        2  # nprocs
+        "inputs_test_3d_ohm_solver_eb_diffusion_picmi.py --test -n 32 --conformal"  # inputs
+        OFF  # analysis
+        "analysis_default_regression.py --path diags/diag1000200"  # checksum
+        test_3d_ohm_solver_eb_diffusion_yee_mirror_picmi  # dependency
+    )
+endif()
+
+# Cross-box seam equivalence of the staggered ECT face borrowing: the z-split
+# decomposition forces box seams across the borrowing planes and must
+# reproduce the y-split run to communication roundoff (guards the
+# owner-unique cross-box face-extension reduction in the hybrid solver).
+if(WarpX_EB)
+    add_warpx_test(
+        test_3d_ohm_solver_eb_diffusion_conformal_yee_seam_picmi  # name
+        3  # dims
+        2  # nprocs
+        "inputs_test_3d_ohm_solver_eb_diffusion_picmi.py --test -n 32 --conformal --split-z"  # inputs
+        "analysis_seam.py --path diags/diag1000200 --ref ../test_3d_ohm_solver_eb_diffusion_conformal_yee_picmi/diags/diag1000200"  # analysis
+        OFF  # checksum
+        test_3d_ohm_solver_eb_diffusion_conformal_yee_picmi  # dependency
+    )
+endif()

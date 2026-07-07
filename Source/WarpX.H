@@ -170,8 +170,6 @@ public:
      * field update is active: ECT Maxwell solver, or hybrid-PIC solver with
      * hybrid_pic_model.use_conformal_eb = 1. */
     [[nodiscard]] static bool UseConformalEBSolve () { return m_eb_use_conformal_solve; }
-    amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& GetECTFaceOwnerMask() { return m_ect_face_owner_mask; }
-    [[nodiscard]] bool ECTNeedsSeamSync () const { return m_ect_needs_seam_sync; }
     amrex::Vector< std::unique_ptr<amrex::iMultiFab> > const & GetEBReduceParticleShapeFlag() const { return m_eb_reduce_particle_shape; }
 
     /**

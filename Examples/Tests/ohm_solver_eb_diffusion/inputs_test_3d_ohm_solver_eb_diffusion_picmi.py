@@ -443,8 +443,8 @@ def main():
     )
     parser.add_argument(
         "--conformal",
-        help="use the conformal (level-set mirror) EB wall treatment "
-        "(collocated grids only; pair with --grid-type collocated)",
+        help="use the conformal EB wall treatment (level-set mirror on "
+        "collocated grids, enlarged-cell ECT Faraday on staggered grids)",
         action="store_true",
     )
     parser.add_argument(

@@ -416,20 +416,6 @@ WarpX::WarpX ()
         m_hybrid_pic_model = std::make_unique<HybridPICModel>();
     }
 
-    // The hybrid conformal-EB wall treatment (level-set masked nodal Faraday +
-    // mirror B fill) is COLLOCATED-ONLY. Abort -- rather than silently degrade to
-    // the staircase wall -- so a staggered deck cannot run with a different wall
-    // treatment than it requested.
-    if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC
-        && m_hybrid_pic_model->m_use_conformal_eb
-        && grid_type != GridType::Collocated) {
-        WARPX_ABORT_WITH_MESSAGE(
-            "hybrid_pic_model.use_conformal_eb is collocated-only in the hybrid "
-            "solver. Either set warpx.grid_type = collocated, or run the staggered "
-            "(Yee) staircase wall without it (optionally imposing the wall on B "
-            "with hybrid_pic_model.eb_b_straight_mirror).");
-    }
-
     // The conformal embedded-boundary field update is used by the ECT Maxwell
     // solver and, optionally, by the (collocated) hybrid-PIC.
     m_eb_use_conformal_solve =
@@ -2639,7 +2625,12 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
                 AllocInitMultiFab(m_eb_update_B[lev][2], amrex::convert(ba, Bz_nodal_flag), dm, ncomps,
                                   guard_cells.ng_FieldSolver, lev, "m_eb_update_B[z]", 1);
             }
-            if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::ECT) {
+            // The conformal (enlarged-cell technique) EB MultiFabs below are used by
+            // the ECT Maxwell solver and by the hybrid-PIC solver's staggered
+            // conformal wall (the collocated conformal path is level-set based and
+            // does not read them).
+            if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::ECT ||
+                (WarpX::UseConformalEBSolve() && grid_type != GridType::Collocated)) {
 
                 //! EB: Lengths of the mesh edges
                 m_fields.alloc_init(FieldType::edge_lengths, Direction{0}, lev, amrex::convert(ba, Ex_nodal_flag),
@@ -2647,6 +2638,17 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
                 m_fields.alloc_init(FieldType::edge_lengths, Direction{1}, lev, amrex::convert(ba, Ey_nodal_flag),
                     dm, ncomps, guard_cells.ng_FieldSolver, 0.0_rt);
                 m_fields.alloc_init(FieldType::edge_lengths, Direction{2}, lev, amrex::convert(ba, Ez_nodal_flag),
+                    dm, ncomps, guard_cells.ng_FieldSolver, 0.0_rt);
+
+                //! EB: Per-edge offset of the uncovered-segment centroid from the
+                //! edge center (full-cell units), for the conformal-ECT hybrid
+                //! curvature correction. Same staggering as edge_lengths; init 0
+                //! (no shift) so it is inert until ComputeEdgeCentroidOffsets fills it.
+                m_fields.alloc_init(FieldType::edge_cent_offset, Direction{0}, lev, amrex::convert(ba, Ex_nodal_flag),
+                    dm, ncomps, guard_cells.ng_FieldSolver, 0.0_rt);
+                m_fields.alloc_init(FieldType::edge_cent_offset, Direction{1}, lev, amrex::convert(ba, Ey_nodal_flag),
+                    dm, ncomps, guard_cells.ng_FieldSolver, 0.0_rt);
+                m_fields.alloc_init(FieldType::edge_cent_offset, Direction{2}, lev, amrex::convert(ba, Ez_nodal_flag),
                     dm, ncomps, guard_cells.ng_FieldSolver, 0.0_rt);
 
                 //! EB: Areas of the mesh faces
