@@ -38,6 +38,14 @@ namespace InternalDOF {
         return static_cast<amrex::ParticleReal>(PhysConst::kb / PhysConst::q_e);
     }
 
+    // Uniform random number in [0,1) as ParticleReal, clamped away from zero so that
+    // log(U) and pow(U, .) stay finite.
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    amrex::ParticleReal randomNonZero (amrex::RandomEngine const& engine) {
+        const auto U = static_cast<amrex::ParticleReal>(amrex::Random(engine));
+        return amrex::max(U, amrex::ParticleReal(1.e-30));
+    }
+
     // Equilibrium single-molecule rotational energy [eV] for zeta_rot = 2 (continuous) at temperature
     // T [K]: the 2-DOF equilibrium distribution is exponential, E_rot = -kB T ln(U).
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
@@ -46,7 +54,7 @@ namespace InternalDOF {
     {
         using namespace amrex::literals;
         if (T_K <= 0._prt) { return 0._prt; }
-        const amrex::ParticleReal U = amrex::max(amrex::Random(engine), amrex::ParticleReal(1.e-30));
+        const amrex::ParticleReal U = randomNonZero(engine);
         return -kB_eV() * T_K * std::log(U);
     }
 
@@ -59,7 +67,7 @@ namespace InternalDOF {
     {
         using namespace amrex::literals;
         if (T_K <= 0._prt || theta_vib_K <= 0._prt) { return 0._prt; }
-        const amrex::ParticleReal U = amrex::max(amrex::Random(engine), amrex::ParticleReal(1.e-30));
+        const amrex::ParticleReal U = randomNonZero(engine);
         const amrex::ParticleReal v = amrex::Math::floor( -(T_K/theta_vib_K) * std::log(U) );
         return v * kB_eV() * theta_vib_K;
     }
@@ -76,7 +84,7 @@ namespace InternalDOF {
         const amrex::ParticleReal a_int = zeta_int * 0.5_prt - 1.0_prt;
         // Closed-form inverse-CDF for zeta_int == 2 (a_int == 0): f(R) ∝ (1-R)^a_tr.
         if (a_int <= 0._prt) {
-            const amrex::ParticleReal U = amrex::max(amrex::Random(engine), amrex::ParticleReal(1.e-30));
+            const amrex::ParticleReal U = randomNonZero(engine);
             return E_c * (1.0_prt - std::pow(U, 1.0_prt/(a_tr + 1.0_prt)));
         }
         // General case: acceptance-rejection on f(R) = R^a_int (1-R)^a_tr, R = E_int/E_c.
@@ -107,7 +115,7 @@ namespace InternalDOF {
         int i = 0;
         for (int guard = 0; guard < 128; ++guard) {
             i = static_cast<int>(amrex::Math::floor(amrex::Random(engine) * static_cast<amrex::ParticleReal>(i_max + 1)));
-            if (i > i_max) { i = i_max; }
+            i = amrex::min(i, i_max);
             const amrex::ParticleReal frac = 1.0_prt - static_cast<amrex::ParticleReal>(i) * dev / E_c;
             const amrex::ParticleReal accept = (a_tr > 0._prt) ? std::pow(amrex::max(frac,0._prt), a_tr) : 1.0_prt;
             if (amrex::Random(engine) <= accept) { break; }
