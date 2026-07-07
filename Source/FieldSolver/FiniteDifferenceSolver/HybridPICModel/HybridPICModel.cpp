@@ -117,6 +117,7 @@ void HybridPICModel::ReadParameters ()
             ablastr::warn_manager::WarnPriority::medium);
     }
     pp_hybrid.query("conformal_ect_j", m_conformal_ect_j);
+    pp_hybrid.query("conformal_ect_j_keep_mirror", m_conformal_ect_j_keep_mirror);
     if (m_conformal_ect_j
         && (!m_use_conformal_eb
             || WarpX::grid_type == ablastr::utils::enums::GridType::Collocated)) {
@@ -595,7 +596,7 @@ void HybridPICModel::CalculatePlasmaCurrent (
     // edges are zeroed in the kernel). The mirror fill below INJECTS div(J)
     // and would corrupt Form A's clean wall current, so it is skipped when
     // conformal_ect_j is on.
-    if (EB::enabled() && !m_conformal_ect_j) {
+    if (EB::enabled() && (!m_conformal_ect_j || m_conformal_ect_j_keep_mirror)) {
         // The plasma current uses its own (wider-band) fill classification when
         // the isotropic hyper-resistivity Laplacian is enabled: that stencil
         // reads diagonal/corner edges, so the band is widened to m_eb_fill_band_cells
