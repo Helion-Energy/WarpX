@@ -644,17 +644,6 @@ def main():
         "staggered (inert on collocated).",
     )
     parser.add_argument(
-        "--eb-levelset-masks",
-        dest="eb_levelset_masks",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="mark the staggered EB update masks from the signed level set at each "
-        "component's own edge/face center (warpx.eb_levelset_masks) instead of the "
-        "stair-case any-cut-neighbor criterion, which freezes a C4-modulated band "
-        "of fluid points (an m=4 wall-imprint source). Staggered only. "
-        "Default: ON on staggered.",
-    )
-    parser.add_argument(
         "--mc-gather",
         dest="mc_gather",
         action=argparse.BooleanOptionalAction,
@@ -806,8 +795,6 @@ def main():
         args.isotropic_hyper = not staggered
     if args.eb_b_straight_mirror is None:
         args.eb_b_straight_mirror = staggered
-    if args.eb_levelset_masks is None:
-        args.eb_levelset_masks = staggered
     if args.holmstrom_switch_mode is None:
         args.holmstrom_switch_mode = "cell" if staggered else "edge"
     if args.holmstrom_blend_pow is None:
@@ -893,13 +880,6 @@ def main():
         particle_shape=args.particle_shape,
         deposition=args.deposition,
     )
-
-    # Opt-in staggered level-set EB update masks (warpx.* namespace, so set on the
-    # pywarpx bucket directly rather than through the picmi solver extension).
-    if args.eb_levelset_masks:
-        from pywarpx import warpx as warpx_bucket
-
-        warpx_bucket.eb_levelset_masks = 1
 
     # Momentum-conserving gather: set on the picmi Simulation object (the picmi
     # layer writes algo.field_gathering itself at initialize, so a raw bucket set

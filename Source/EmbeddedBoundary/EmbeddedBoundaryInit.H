@@ -113,28 +113,6 @@ namespace warpx::embedded_boundary
         amrex::MultiFab const& distance_to_eb,
         const amrex::Periodicity& periodicity );
 
-    /** \brief Set a flag to indicate on which grid points a (staggered) field should
-     *  be updated, using the signed level set at each component's own location
-     *  (warpx.eb_levelset_masks = 1).
-     *
-     * The staggered analogue of `MarkUpdateCellsNodalLevelSet`: each component of
-     * `eb_update` carries its field's IndexType, and the signed distance at the
-     * component's edge/face center is obtained by averaging the nodal
-     * `distance_to_eb` over the cell-centered directions (linear interpolation to
-     * the midpoint). A component is deactivated only when its center is inside the
-     * conductor (average distance <= 0). Unlike the stair-case criterion, fluid-side
-     * components of cut cells stay active; the sub-cell wall treatment is left to
-     * the level-set mirror fills.
-     *
-     * \param[in,out] eb_update      the three (staggered) iMultiFabs to fill with 0/1
-     * \param[in]     distance_to_eb the nodal signed distance to the embedded boundary
-     * \param[in]     periodicity    used to populate the guard cells
-     */
-    void MarkUpdateCellsLevelSet (
-        std::array< std::unique_ptr<amrex::iMultiFab>,3> & eb_update,
-        amrex::MultiFab const& distance_to_eb,
-        const amrex::Periodicity& periodicity );
-
    /**
     * \brief Initialize information for cell extensions.
     *        The flags convention for m_flag_info_face is as follows
