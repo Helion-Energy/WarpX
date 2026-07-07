@@ -107,6 +107,7 @@ def setup_simulation(
     holmstrom=False,
     eta_power=ETA_POWER,
     eta_ntrans=N_TRANSITION_FRAC,
+    eta_vac_frac=ETA_VAC_FRAC,
     f_t_ci=F_T_CI,
     r_outer=R_OUTER,
     wall_supported=True,
@@ -274,7 +275,7 @@ def setup_simulation(
         A_external=A_ext,
         **power_law_resistivity(
             ETA_PLASMA,
-            ETA_VAC_FRAC * eta_max,
+            eta_vac_frac * eta_max,
             eta_power,
             n_floor_frac,
             eta_ntrans,
@@ -528,6 +529,13 @@ def main():
         default=N_TRANSITION_FRAC,
     )
     parser.add_argument(
+        "--eta-vac-frac",
+        help="vacuum (density-floor) resistivity as a fraction of the CFL "
+        "limit (the eta the standoff band sees)",
+        type=float,
+        default=ETA_VAC_FRAC,
+    )
+    parser.add_argument(
         "--f-tci",
         help="time step as a fraction of the reversed-field ion cyclotron "
         "period (reduce to manage whistler stiffness, e.g. with the Hall "
@@ -690,6 +698,16 @@ def main():
         help="along-edge curvature correction of the conformal-ECT Faraday "
         "circulation (hybrid_pic_model.conformal_ect_curvature; requires "
         "--conformal-eb on a staggered grid).",
+    )
+    parser.add_argument(
+        "--conformal-ect-j-keep-mirror",
+        dest="conformal_ect_j_keep_mirror",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="experiment: keep the covered-J mirror fill with --conformal-ect-j "
+        "(default skips it); isolates the flux-weighted Ampere READ from the "
+        "loss of the mirror's smoothing "
+        "(hybrid_pic_model.conformal_ect_j_keep_mirror).",
     )
     parser.add_argument(
         "--eb-b-straight-mirror",
@@ -955,6 +973,7 @@ def main():
         args.holmstrom,
         args.eta_power,
         args.eta_ntrans,
+        args.eta_vac_frac,
         args.f_tci,
         r_outer_eff,
         args.wall_supported,
@@ -990,6 +1009,12 @@ def main():
         deposition=args.deposition,
         openpmd=args.openpmd,
     )
+
+    if args.conformal_ect_j_keep_mirror:
+        # Raw bucket attribute (no PICMI kwarg): experiment knob, see argparse.
+        from pywarpx import hybridpicmodel
+
+        hybridpicmodel.conformal_ect_j_keep_mirror = 1
 
     # Momentum-conserving gather: set on the picmi Simulation object (the picmi
     # layer writes algo.field_gathering itself at initialize, so a raw bucket set
