@@ -255,6 +255,7 @@ def run_battery(grid_type):
     bx0, by0, bz0 = read_b()
     d0, s_nodes = clean_div(bx0, by0, bz0, grid_type)
     band_before = band_l2(d0, s_nodes)
+    dcc0 = None  # set on staggered only; guard (c) below is Yee-only
     if grid_type == "staggered":
         dcc0, _ = yee_cc_div(bx0, by0, bz0)
 

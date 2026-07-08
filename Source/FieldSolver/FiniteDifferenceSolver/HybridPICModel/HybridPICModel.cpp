@@ -577,7 +577,7 @@ void HybridPICModel::ZeroConductorEdges (
     // shorter is cut. The tolerance absorbs round-off in the EB geometry.
     amrex::GpuArray<amrex::Real, 3> l_full{0.0_rt, 0.0_rt, 0.0_rt};
     for (int d = 0; d < 3; ++d) {
-        const int gd = (d < AMREX_SPACEDIM) ? d : AMREX_SPACEDIM - 1;
+        const int gd = amrex::min(d, AMREX_SPACEDIM - 1);
         l_full[d] = (1.0_rt - 1.e-6_rt) * dx[gd];
     }
 #ifdef AMREX_USE_OMP
