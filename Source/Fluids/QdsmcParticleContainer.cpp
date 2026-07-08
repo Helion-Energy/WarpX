@@ -391,6 +391,9 @@ QdsmcParticleContainer::PushX (int lev, amrex::Real dt)
             amrex::Real xp_new = x_node[ip] + vx[ip] * dt;
             amrex::Real yp_new = y_node[ip] + vy[ip] * dt;
             amrex::Real zp_new = z_node[ip] + vz[ip] * dt;
+            // Only the AMReX-tracked components are written back below
+            // AMREX_SPACEDIM; the others are computed for uniformity.
+            amrex::ignore_unused(xp_new, yp_new, zp_new);
 
             // Clamp the AMReX-tracked coordinates to the domain in
             // non-periodic directions (see the bound setup above).
