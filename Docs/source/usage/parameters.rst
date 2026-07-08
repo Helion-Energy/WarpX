@@ -1008,38 +1008,13 @@ additionally define the electric potential at the embedded boundary with an anal
     :type: ``integer``
     :default: ``0``
 
-    Only used with the ECT (enlarged cell technique) Maxwell solver
-    (:pp:param:`algo.maxwell_solver = ect`). When nonzero, the one-way
-    face-extension pass is skipped and every unstable cut face is enlarged with
-    the symmetric, area-proportional eight-way split. The one-way pass borrows
-    the entire area deficit from the first stable cardinal neighbor in a fixed
-    lattice order, which is not wall-normal aware and displaces the enlarged-face
-    area centroid off the wall normal (a :math:`\cos(4\theta)` symmetry-breaking
-    seed on curved walls). The default (``0``) keeps the historical one-way pass
-    and is bit-identical to previous behavior.
-
-.. _param-particle-thermalizer:
-
-Particle thermalizer
---------------------
-
-In simulations of the interaction between a laser and an over-dense plasma, it is not always
-practical to model the entire target. In this case, the region containing the plasma may
-extend all the way the domain boundary, using either an absorbing or a thermal boundary
-condition for the particles. With either choice, the resulting electric field build-up at
-the boundary can lead to a non-physical return current of hot electrons that can have an
-effect on the plasma instabilities and laser-plasma interaction under study.
-
-To mitigate, WarpX implements a particle thermalizing region that reduces the flux of particles
-leaving the simulation domain that leads to the non-physical build-up of electric fields at the boundary. The
-method used is similar to that of `Miller et al. (Phys. Plasmas 28, 112702 (2021)) <https://doi.org/10.1063/5.0065232>`__.
-
-The user specifies a region in which particles will be thermalized, a normal direction, a temperature, and a
-momentum threshold. Inside the thermalizing region, the probability that a particle will be affected increases
-from 0 to 1 as :math:`\frac{1}{1-x}^{1/4}`. Particles that are affected have their momenta thermalized
-using the temperature parameter ``theta`` for any direction in which their momentum component is over the threshold
-(different thresholds can be set for each direction).
-The parameters affecting this region are as follows:
+    Only used when the ECT (enlarged cell technique) face-extension geometry is built:
+    with the ECT Maxwell solver (:pp:param:`algo.maxwell_solver` = ``ect``), or with the
+    hybrid-PIC solver when :pp:param:`hybrid_pic_model.use_conformal_eb` is set on a
+    staggered grid. When nonzero, every unstable cut face is
+    enlarged with the symmetric, area-proportional eight-way split instead of the one-way
+    face-extension pass, whose fixed borrowing order is not wall-normal aware. The default
+    (``0``) keeps the historical one-way pass, bit-identical to previous behavior.
 
 .. pp:param:: particle_thermalizer.normal
     :type: ``string``
@@ -3852,28 +3827,24 @@ Maxwell solver: kinetic-fluid hybrid
     :optional:
 
     If ``true``, apply the along-edge curvature correction to the conformal-ECT Faraday
-    circulation: each cut edge's electric field is Taylor-shifted from the full-edge center to
-    the centroid of its uncovered segment before forming the per-face electromotive force.
-    Without it the circulation is a first-order midpoint quadrature over the curved contour,
-    which caps the conformal ``B`` push at ~1st order at a curved wall. Requires
-    :pp:param:`hybrid_pic_model.use_conformal_eb` on a staggered (Yee) grid; ignored (with a
-    warning) otherwise. Opt-in; the default (``false``) is byte-identical, since the shift is
-    zero on uncut and covered edges.
+    circulation: each cut edge's electric field is Taylor-shifted from the full-edge center
+    to the centroid of its uncovered segment before forming the per-face electromotive
+    force, improving the order of the ``B`` push at a curved wall. Requires
+    :pp:param:`hybrid_pic_model.use_conformal_eb` on a staggered (Yee) grid; ignored (with
+    a warning) otherwise. Opt-in; the default (``false``) is byte-identical.
 
 .. pp:param:: hybrid_pic_model.conformal_ect_j
     :type: ``bool``
     :default: ``false``
     :optional:
 
-    If ``true``, compute the Ampere plasma current ``J = curl(B)/mu0`` with the flux-weighted
-    ("Form A") conformal-EB curl: each ``B`` value in the Yee curl is scaled by the open-fluid
-    fraction of the cut face it lives on (``face_areas`` / full face area), so ``J`` is a signed
-    sum of open-face fluxes and is discretely divergence-consistent across the cut wall, with no
-    separate covered-``B`` mirror fill (that fill is skipped when this option is on). Covered
-    faces (zero open area) drop out automatically, and the expression reduces byte-for-byte to
-    the standard masked Yee curl on interior edges. Requires
-    :pp:param:`hybrid_pic_model.use_conformal_eb` on a staggered (Yee) grid; ignored (with a
-    warning) otherwise. Opt-in; the default (``false``) uses the standard masked Yee curl.
+    If ``true``, compute the Ampere plasma current ``J = curl(B)/mu0`` with the
+    flux-weighted conformal-EB curl: each ``B`` value in the Yee curl is scaled by the
+    open-fluid fraction of the cut face it lives on, making ``J`` discretely
+    divergence-consistent across the cut wall; the separate covered-``B`` mirror fill is
+    then skipped. Requires :pp:param:`hybrid_pic_model.use_conformal_eb` on a staggered
+    (Yee) grid; ignored (with a warning) otherwise. Opt-in; the default (``false``) uses
+    the standard masked Yee curl.
 
 .. pp:param:: hybrid_pic_model.conformal_ect_j_keep_mirror
     :type: ``bool``
@@ -3881,10 +3852,9 @@ Maxwell solver: kinetic-fluid hybrid
     :optional:
 
     Experiment knob: keep the covered-``B`` mirror fill when
-    :pp:param:`hybrid_pic_model.conformal_ect_j` is on (by default that fill is skipped, since
-    the mirrored values inject divergence into Form A's divergence-consistent wall current).
-    Isolates the flux-weighted Ampere read from the loss of the mirror fill's smoothing when
-    studying near-wall stability. No effect unless ``conformal_ect_j`` is active.
+    :pp:param:`hybrid_pic_model.conformal_ect_j` is on (by default that fill is skipped,
+    since the mirrored values inject divergence into the wall current). No effect unless
+    ``conformal_ect_j`` is active.
 
 .. pp:param:: hybrid_pic_model.conformal_pec_zero_ej
     :type: ``bool``
@@ -3892,43 +3862,28 @@ Maxwell solver: kinetic-fluid hybrid
     :optional:
 
     On the staggered conformal (ECT) path, impose the perfect-conductor condition on the
-    Ohm's-law electric field and on the Ampere plasma current *constitutively*: ``E`` and ``J``
-    are set to zero on every EB-touching edge — every masked (fully covered) edge and every cut
-    edge (open length smaller than the full edge length) — instead of being rewritten by the
-    pointwise level-set mirror extrapolations. The rationale: at a perfect conductor the
-    tangential electric field vanishes, and the hybrid model carries no wall (surface)
-    currents, so with a standoff keeping the plasma off the metal there is no physics to
-    represent on EB-touching edges. Cut faces then evolve only through their fully-open edges
-    (tangential ``E = 0`` imposed at the cut-edge level — a first-order wall), and fully
-    covered face fluxes freeze, so the conformal update conserves the wall flux by
-    construction. This also removes the unconditional instability of the explicit
-    mirror-filled ECT wall (the mirror feeds near-wall values into the :math:`1/S`-amplified
-    cut-face circulation). Note that the density-based resistivity parser cannot express a
-    conductor: the density sits at the floor both in the conductor and in the vacuum gap, so
-    the conductor would otherwise get the vacuum resistivity; this option is the
-    geometry-aware :math:`\eta \rightarrow 0` that the parser cannot write. When enabled, the
-    external fields added via ``external_vector_potential`` are also zeroed in the conductor
-    (``E`` on EB-touching edges, ``B`` on fully covered faces) after each external-field
-    update, so no unphysical external-field reservoir accumulates inside the wall. Takes
-    precedence over :pp:param:`hybrid_pic_model.conformal_e_geometric_pec` and the covered
-    mirror fills. Requires :pp:param:`hybrid_pic_model.use_conformal_eb` on a staggered (Yee)
-    grid.
+    Ohm's-law electric field and on the Ampere plasma current constitutively: ``E`` and
+    ``J`` are set to zero on every EB-touching edge (fully covered and cut) instead of
+    being rewritten by the level-set mirror extrapolations, and the fields added via
+    ``external_vector_potential`` are likewise zeroed in the conductor. Cut faces then
+    evolve only through their fully open edges (a first-order wall) and covered face
+    fluxes freeze, so the wall flux is conserved by construction. This is the stable,
+    recommended wall treatment for the staggered conformal path. Takes precedence over
+    :pp:param:`hybrid_pic_model.conformal_e_geometric_pec` and the covered mirror fills.
+    Requires :pp:param:`hybrid_pic_model.use_conformal_eb` on a staggered (Yee) grid.
 
 .. pp:param:: hybrid_pic_model.conformal_e_geometric_pec
     :type: ``bool``
     :default: ``false``
     :optional:
 
-    Research knob (opt-in; enabling it is explicitly **unstable** today). If ``true``, the
-    staggered conformal (ECT) path imposes the wall on the Ohm's-law ``E`` geometrically, as
-    the electromagnetic ECT solver does: the boundary fill rewrites only the masked (fully
-    covered, zero-open-length) edges, and live cut edges keep their Ohm value for the
-    circulation, whose open-length weights already exclude the covered portions. Measured on a
-    vacuum ECT wall test, the resulting explicit composite map has local gain above one at
-    small-open-area cut cells and diverges from round-off within the first step; the knob is
-    kept as the documented negative control for that measurement. Use
-    :pp:param:`hybrid_pic_model.conformal_pec_zero_ej` for the stable wall. No effect off the
-    staggered conformal path.
+    Research knob (opt-in; enabling it is **unstable**). If ``true``, the staggered
+    conformal (ECT) path imposes the wall on the Ohm's-law ``E`` geometrically, as the
+    electromagnetic ECT solver does: the boundary fill rewrites only the fully covered
+    edges, and live cut edges keep their Ohm value for the circulation. The resulting
+    explicit update diverges at small-open-area cut cells; use
+    :pp:param:`hybrid_pic_model.conformal_pec_zero_ej` for the stable wall. No effect off
+    the staggered conformal path.
 
 .. pp:param:: hybrid_pic_model.eb_bc_rtol
     :type: ``float``
@@ -4096,17 +4051,15 @@ Maxwell solver: kinetic-fluid hybrid
     :default: ``0`` (off)
     :optional:
 
-    Density-banded Marder clean of the Ohm's-law electric field at the ``n_floor`` seam,
-    applied per field substage on staggered grids: iterates
-    :math:`\vec{E} \mathrel{+}= \alpha\,\nabla(\nabla\cdot\vec{E})` restricted to edges whose
+    Density-banded Marder-style clean of the Ohm's-law electric field at the ``n_floor``
+    seam, applied per field substage: iterates
+    :math:`\vec{E} \mathrel{+}= \alpha\,\nabla(\nabla\cdot\vec{E})` on edges whose
     endpoint-averaged density is at or below
-    :pp:param:`hybrid_pic_model.dive_seam_band` :math:`\times \rho_\mathrm{floor}`, diffusing
-    the divergence-carrying, per-component-inconsistent electric-field content injected at the
-    moving plasma/vacuum seam before the Faraday push integrates it into the magnetic field.
-    The nodal-divergence / edge-gradient pair is mutually adjoint, so the update strictly
-    dissipates the divergence norm and preserves the curl to round-off away from the window
-    edge. The value is a fraction of the explicit-diffusion stability cap. 3D/XZ Cartesian,
-    staggered grids only.
+    :pp:param:`hybrid_pic_model.dive_seam_band` :math:`\times \rho_\mathrm{floor}`,
+    diffusing the divergence injected at the moving plasma/vacuum seam before the Faraday
+    push integrates it into the magnetic field. The update is curl-preserving away from
+    the window edge; the value is a fraction of the explicit-diffusion stability cap.
+    3D and 2D (XZ) Cartesian, staggered grids only.
 
 .. pp:param:: hybrid_pic_model.dive_seam_iters
     :type: ``int``
@@ -4159,17 +4112,12 @@ Maxwell solver: kinetic-fluid hybrid
     :optional:
 
     If ``true`` (default), on the staggered conformal (ECT) path the isotropic
-    (Mehrstellen/Patra-Karttunen) hyper-resistivity Laplacian is downgraded to the compact
-    cardinal-only cross stencil on edges within a corner reach
-    (:math:`\sqrt{D} + 1/2` cells, :math:`D` the dimensionality) of the embedded surface: the
-    isotropic stencil reads the full :math:`3^3` neighborhood, and near the wall its
-    diagonal/corner current reads land on EB-touching edges that
-    :pp:param:`hybrid_pic_model.conformal_pec_zero_ej` zeroes (and that no mirror fill sets on
-    this path), which would inject a spurious :math:`\nabla^2 \vec{J}` into the wall-adjacent
-    electric field. The compact stencil's cardinal reach stays on set values one ring further
-    in. Only meaningful together with
-    :pp:param:`hybrid_pic_model.isotropic_hyper_resistivity`; no effect off the staggered
-    conformal path.
+    hyper-resistivity Laplacian is downgraded to the compact cardinal-only cross stencil
+    on edges within :math:`\sqrt{D} + 1/2` cells (:math:`D` the dimensionality) of the
+    embedded surface, where the isotropic stencil's diagonal reads would land on
+    EB-touching edges that carry no valid current on this path. Only meaningful together
+    with :pp:param:`hybrid_pic_model.isotropic_hyper_resistivity`; no effect off the
+    staggered conformal path.
 
 .. pp:param:: hybrid_pic_model.isotropic_resistivity
     :type: ``bool``
@@ -4193,27 +4141,24 @@ Maxwell solver: kinetic-fluid hybrid
     :default: ``0``
     :optional:
 
-    Damping factor of a Marder-style diffusive divergence clean of ``Bfield_fp`` for hybrid
-    embedded-boundary runs (both grid types; the update uses the discrete-adjoint gradient of the
-    nodal divergence on either staggering). ``0`` (default) disables it. The clean iterates
-    ``B += alpha * grad(div B)`` in a near-wall band (see
-    :pp:param:`hybrid_pic_model.divb_clean_band_cells`), re-imposing the embedded-boundary condition
-    after each sweep. Because the correction is a pure gradient it dissipates the divergence that
-    the curved-wall mirror injects without changing ``curl(B)`` (the plasma current) away from the
-    band cutoffs, so the physics that consumes the current is largely unaffected. Stability-capped
-    near ``1/6`` in 3D (the explicit grad(div) diffusion CFL; larger values diverge, ``0.15`` is a
-    validated sweet spot). Supported in 3D and 2D (XZ) Cartesian geometry only (the gradient is the
-    discrete adjoint of the Cartesian divergence; other geometries abort at setup if enabled).
+    Damping factor of a Marder-style diffusive divergence clean of ``Bfield_fp`` for
+    hybrid embedded-boundary runs (both grid types); ``0`` (default) disables it. The
+    clean iterates ``B += alpha * grad(div B)`` in a near-wall band (see
+    :pp:param:`hybrid_pic_model.divb_clean_band_cells`), re-imposing the
+    embedded-boundary condition after each sweep; the pure-gradient correction leaves
+    ``curl(B)`` (the plasma current) unchanged away from the band cutoffs. Stability
+    requires values below the explicit-diffusion cap (about ``1/6`` in 3D; ``0.15`` is a
+    good choice). Supported in 3D and 2D (XZ) Cartesian geometry only (other geometries
+    abort at setup if enabled).
 
 .. pp:param:: hybrid_pic_model.divj_clean_alpha
     :type: ``float``
     :default: ``0``
     :optional:
 
-    As :pp:param:`hybrid_pic_model.divb_clean_alpha`, but cleans the divergence of the total
-    (Ampère/plasma) current ``hybrid_current_fp_plasma`` — current continuity, :math:`\nabla\cdot J = 0`,
-    which only the total current obeys. It never acts on a deposited ion-species current. ``0``
-    (default) disables it.
+    As :pp:param:`hybrid_pic_model.divb_clean_alpha`, but cleans the divergence of the
+    total (Ampère/plasma) current ``hybrid_current_fp_plasma``; it never acts on a
+    deposited ion-species current. ``0`` (default) disables it.
 
 .. pp:param:: hybrid_pic_model.divb_clean_iters
     :type: ``int``
@@ -4227,13 +4172,11 @@ Maxwell solver: kinetic-fluid hybrid
     :default: ``4``
     :optional:
 
-    Outer cutoff, in cells from the wall, of the near-wall band over which the div(B)/div(J)
-    clean acts (shared by both). The clean is applied once per full step, after the
-    plasma-current update and before the external-field add-back (so it acts on the plasma
-    field only). A value ``<= 0`` selects the unbounded mode: the correction applies on
-    every uncovered node, which is strictly dissipative of the global divergence norm and a
-    no-op wherever the field is already solenoidal — a hard outer cutoff instead transports
-    divergence to the band edge and accumulates it just outside, where nothing damps it.
+    Outer cutoff, in cells from the wall, of the near-wall band over which the
+    div(B)/div(J) clean acts (shared by both). The clean is applied once per full step,
+    after the plasma-current update and before the external-field add-back. A value
+    ``<= 0`` selects the unbounded mode (correction on every uncovered node), which
+    avoids the divergence pile-up a hard band edge produces just outside the cutoff.
 
 .. pp:param:: hybrid_pic_model.divb_clean_inner_div_cells
     :type: ``float``
@@ -4250,28 +4193,23 @@ Maxwell solver: kinetic-fluid hybrid
     :default: ``2``
     :optional:
 
-    Inner cutoff, in cells from the wall, below which no correction is applied. The default
-    keeps the full :math:`\pm 2` grad(div) stencil in the fluid, preserving the near-wall
-    order on a smooth wall but leaving the first fluid layers to the mirror fill; ``0``
-    corrects every uncovered band node (the wall-layer mode, for damping the exponentially
-    growing divergence a sharp re-entrant wall corner — e.g. a wall radius step — pumps
-    into the first fluid layers).
+    Inner cutoff, in cells from the wall, below which no correction is applied. The
+    default keeps the full :math:`\pm 2` grad(div) stencil in the fluid, preserving the
+    near-wall order on a smooth wall; ``0`` corrects every uncovered band node (the
+    wall-layer mode, for damping divergence growth at sharp re-entrant wall corners).
 
 .. pp:param:: hybrid_pic_model.divb_clean_cut_metric
     :type: ``bool``
     :default: ``true``
     :optional:
 
-    On the staggered conformal (ECT) path (:pp:param:`hybrid_pic_model.use_conformal_eb` on a
-    staggered grid, 3D only), the div(``B``) clean uses the **matched cut-metric** operators:
-    the divergence is the signed sum of open-face fluxes (weighted by the open cut-face-area
-    fraction — the invariant the ECT Faraday update actually conserves) and the correction is
-    its exact negative adjoint, so the sweep is dissipative in the flux norm and does not fight
-    the ECT push (the raw uniform-metric divergence of an ECT-evolved field is
-    :math:`O((1-\mathrm{frac})B/h)` at a cut face *by construction*). In this mode covered
-    faces are never read or written and the per-sweep level-set mirror re-fill is skipped. Set
-    ``false`` to force the raw uniform-metric clean everywhere (the pre-cut-metric behavior).
-    Off the staggered conformal path this parameter has no effect.
+    On the staggered conformal (ECT) path (:pp:param:`hybrid_pic_model.use_conformal_eb`
+    on a staggered grid, 3D only), the div(``B``) clean uses the matched cut-metric
+    operators: the divergence is the signed sum of open-face fluxes weighted by the open
+    face-area fraction, and the correction is its exact adjoint, so the sweep does not
+    fight the ECT Faraday update. In this mode covered faces are never read or written and
+    the per-sweep mirror re-fill is skipped. Set ``false`` to force the raw uniform-metric
+    clean everywhere. No effect off the staggered conformal path.
 
 .. pp:param:: hybrid_pic_model.add_external_fields
     :type: ``bool``

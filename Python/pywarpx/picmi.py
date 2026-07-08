@@ -2249,15 +2249,10 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
     conformal_pec_zero_ej: bool, default=False
         If True, impose the perfect-conductor condition constitutively on the
         staggered conformal (ECT) path: the Ohm's-law ``E`` and the Ampere
-        plasma current ``J`` are zeroed on every EB-touching edge (fully
-        covered and cut), replacing the pointwise level-set mirror fills. Cut
-        faces then evolve only through their fully-open edges (tangential
-        ``E = 0`` at the cut-edge level — a first-order wall) and covered face
-        fluxes freeze, so wall flux is conserved by construction; the external
-        vector-potential fields are likewise zeroed in the conductor. This is
-        the stable, recommended wall for the staggered conformal hybrid
-        solver. Requires ``use_conformal_eb`` on a staggered (Yee)
-        embedded-boundary grid.
+        plasma current ``J`` are zeroed on every EB-touching edge, replacing
+        the level-set mirror fills; external vector-potential fields are
+        likewise zeroed inside the conductor. The stable, recommended wall for
+        this path; requires ``use_conformal_eb`` on a staggered (Yee) grid.
 
     eb_bc_rtol: float, default=1e-4
         Relative residual tolerance of the embedded-boundary PEC
