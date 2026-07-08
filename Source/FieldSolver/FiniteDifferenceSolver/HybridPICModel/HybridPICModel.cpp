@@ -106,14 +106,14 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("conformal_ect_curvature", m_conformal_ect_curvature);
     if (m_conformal_ect_curvature
         && (!m_use_conformal_eb
-            || WarpX::grid_type == ablastr::utils::enums::GridType::Collocated)) {
+            || WarpX::grid_type != ablastr::utils::enums::GridType::Staggered)) {
         m_conformal_ect_curvature = false;
         ablastr::warn_manager::WMRecordWarning(
             "HybridPIC",
             "hybrid_pic_model.conformal_ect_curvature applies the ECT Faraday "
             "circulation curvature correction, which requires use_conformal_eb on a "
-            "staggered (Yee) grid; it is ignored here (a collocated grid uses the "
-            "masked nodal curl, not ECT circulations).",
+            "staggered (Yee) grid; it is ignored here (only the staggered grid "
+            "uses ECT circulations).",
             ablastr::warn_manager::WarnPriority::medium);
     }
     pp_hybrid.query("conformal_ect_j", m_conformal_ect_j);
@@ -122,15 +122,15 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("conformal_pec_zero_ej", m_conformal_pec_zero_ej);
     if (m_conformal_ect_j
         && (!m_use_conformal_eb
-            || WarpX::grid_type == ablastr::utils::enums::GridType::Collocated)) {
+            || WarpX::grid_type != ablastr::utils::enums::GridType::Staggered)) {
         m_conformal_ect_j = false;
         ablastr::warn_manager::WMRecordWarning(
             "HybridPIC",
             "hybrid_pic_model.conformal_ect_j computes the Ampere current with the "
             "flux-weighted (open-cut-face-area) ECT curl, which requires "
             "use_conformal_eb (for the face_areas geometry) on a staggered (Yee) "
-            "grid; it is ignored here (a collocated grid uses the masked nodal "
-            "curl, not open-face fluxes).",
+            "grid; it is ignored here (only the staggered grid uses open-face "
+            "fluxes).",
             ablastr::warn_manager::WarnPriority::medium);
     }
     pp_hybrid.query("eb_hall_mask", m_eb_hall_mask);
@@ -193,6 +193,10 @@ void HybridPICModel::ReadParameters ()
 #endif
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(EB::enabled(),
             "hybrid_pic_model.use_conformal_eb requires embedded boundaries to be enabled");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            WarpX::grid_type != ablastr::utils::enums::GridType::Hybrid,
+            "hybrid_pic_model.use_conformal_eb supports warpx.grid_type = staggered "
+            "(enlarged-cell/ECT wall) or collocated (level-set mirror wall), not hybrid");
         // Both grid types are supported: a staggered grid uses the enlarged-cell (ECT)
         // Faraday update on Yee cut faces/edges, while a collocated grid uses the masked
         // nodal Faraday update with the level-set mirror boundary condition. The nodal
@@ -217,6 +221,18 @@ void HybridPICModel::ReadParameters ()
     // in place of the ECT enlarged-cell wall handling (use with use_conformal_eb
     // off). Opt-in, default off -> byte-identical.
     pp_hybrid.query("eb_b_straight_mirror", m_eb_b_straight_mirror);
+    if (m_eb_b_straight_mirror && m_use_conformal_eb
+        && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated) {
+        m_eb_b_straight_mirror = false;
+        ablastr::warn_manager::WMRecordWarning(
+            "HybridPIC",
+            "hybrid_pic_model.eb_b_straight_mirror is the level-set alternative to "
+            "the staggered conformal (ECT) wall: with use_conformal_eb it would "
+            "repopulate the covered near-wall B band with raw level-set mirror "
+            "values on top of the ECT update every substep, mixing the two wall "
+            "metrics; it is ignored here (use it with use_conformal_eb = false).",
+            ablastr::warn_manager::WarnPriority::medium);
+    }
 
     // Image parity of charge deposited beyond the embedded boundary: "pec" folds it back
     // with opposite sign (density vanishes at the wall), "reflect" folds it back with its

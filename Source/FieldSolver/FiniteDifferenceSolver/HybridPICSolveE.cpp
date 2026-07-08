@@ -194,9 +194,9 @@ void FiniteDifferenceSolver::CalculateCurrentAmpereECT (
     int lev )
 {
     // The flux-weighted ECT curl is defined for the staggered Cartesian (Yee) grid
-    // only; the caller (HybridPICModel::CalculatePlasmaCurrent) gates it on a
-    // staggered embedded-boundary run. For any other configuration fall back to the
-    // standard masked curl so the entry point stays safe.
+    // only: ReadParameters downgrades conformal_ect_j on any other grid type and
+    // aborts use_conformal_eb outside 3D/XZ, so the fallbacks below are
+    // defense-in-depth for an unreachable configuration, not a supported mode.
     if (m_fdtd_algo == ElectromagneticSolverAlgo::HybridPIC) {
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
         CalculateCurrentAmpere(Jfield, Bfield, eb_update_E, lev);
