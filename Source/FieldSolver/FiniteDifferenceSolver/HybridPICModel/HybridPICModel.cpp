@@ -1685,11 +1685,12 @@ void HybridPICModel::FieldPush (
     // also reads cross-box ghost E edges, which the 1-ghost ECTRhofield
     // FillBoundary only refreshes *after* each face's Rho is formed; fill the E
     // ghosts here first so the per-face circulation is seam-consistent.
-    bool fill_E_pre_faraday = (Bz_IndexType[0] == Ez_IndexType[0]);
 #ifdef AMREX_USE_EB
-    fill_E_pre_faraday = fill_E_pre_faraday ||
+    const bool fill_E_pre_faraday = (Bz_IndexType[0] == Ez_IndexType[0]) ||
         (m_use_conformal_eb &&
          WarpX::grid_type != ablastr::utils::enums::GridType::Collocated);
+#else
+    const bool fill_E_pre_faraday = (Bz_IndexType[0] == Ez_IndexType[0]);
 #endif
     if (fill_E_pre_faraday) {
         warpx.FillBoundaryE(ng, nodal_sync);

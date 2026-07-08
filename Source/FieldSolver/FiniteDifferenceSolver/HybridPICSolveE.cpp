@@ -1734,8 +1734,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         btot_val = std::sqrt(bx_val*bx_val + by_val*by_val + bz_val*bz_val);
                     }
 
-                    const bool iso_x = iso_hyper && !(iso_wall_compact
-                        && iso_phi(i, j, k) < d_iso_compact);
+                    const bool iso_x = iso_hyper && (!iso_wall_compact
+                        || iso_phi(i, j, k) >= d_iso_compact);
                     const Real nabla2Jx = iso_x
                         ? warpx::hybrid_isotropic::LaplacianIsotropic(Jx, i, j, k, h2, inv_h2)
                         : T_Algo::Dxx(Jx, coefs_x, n_coefs_x, i, j, k)
@@ -1872,8 +1872,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         btot_val = std::sqrt(bx_val*bx_val + by_val*by_val + bz_val*bz_val);
                     }
 
-                    const bool iso_y = iso_hyper && !(iso_wall_compact
-                        && iso_phi(i, j, k) < d_iso_compact);
+                    const bool iso_y = iso_hyper && (!iso_wall_compact
+                        || iso_phi(i, j, k) >= d_iso_compact);
                     const Real nabla2Jy = iso_y
                         ? warpx::hybrid_isotropic::LaplacianIsotropic(Jy, i, j, k, h2, inv_h2)
                         : T_Algo::Dxx(Jy, coefs_x, n_coefs_x, i, j, k)
@@ -1993,8 +1993,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         btot_val = std::sqrt(bx_val*bx_val + by_val*by_val + bz_val*bz_val);
                     }
 
-                    const bool iso_z = iso_hyper && !(iso_wall_compact
-                        && iso_phi(i, j, k) < d_iso_compact);
+                    const bool iso_z = iso_hyper && (!iso_wall_compact
+                        || iso_phi(i, j, k) >= d_iso_compact);
                     const Real nabla2Jz = iso_z
                         ? warpx::hybrid_isotropic::LaplacianIsotropic(Jz, i, j, k, h2, inv_h2)
                         : T_Algo::Dxx(Jz, coefs_x, n_coefs_x, i, j, k)

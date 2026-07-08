@@ -93,18 +93,19 @@ void HybridPICModel::MarderCleanDivergence (
     amrex::ignore_unused(cut_metric);
 #endif
     ablastr::fields::VectorField frac_mf;
-    amrex::GpuArray<Real, 3> inv_full_area{0.0_rt, 0.0_rt, 0.0_rt};
-#if !defined(WARPX_DIM_3D)
-    amrex::ignore_unused(inv_full_area);
-#endif
     if (use_cut) {
         frac_mf = warpx.m_fields.get_alldirs(FieldType::face_areas, lev);
-#if defined(WARPX_DIM_3D)
-        inv_full_area[0] = 1.0_rt/(dx[1]*dx[2]);
-        inv_full_area[1] = 1.0_rt/(dx[0]*dx[2]);
-        inv_full_area[2] = 1.0_rt/(dx[0]*dx[1]);
-#endif
     }
+#if defined(WARPX_DIM_3D)
+    const amrex::GpuArray<Real, 3> inv_full_area = use_cut
+        ? amrex::GpuArray<Real, 3>{1.0_rt/(dx[1]*dx[2]),
+                                   1.0_rt/(dx[0]*dx[2]),
+                                   1.0_rt/(dx[0]*dx[1])}
+        : amrex::GpuArray<Real, 3>{0.0_rt, 0.0_rt, 0.0_rt};
+#else
+    const amrex::GpuArray<Real, 3> inv_full_area{0.0_rt, 0.0_rt, 0.0_rt};
+    amrex::ignore_unused(inv_full_area);
+#endif
 
     // band_cells <= 0 selects the UNBOUNDED mode: the correction applies on
     // every uncovered node. The pure-gradient update is strictly dissipative
