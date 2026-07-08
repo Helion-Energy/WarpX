@@ -1245,11 +1245,19 @@ void MultiParticleContainer::ScrapeParticlesAtEB (
     for (auto& pc : allcontainers) {
         if (pc->m_do_eb_reflection) {
             // Neutral-gas walls: reflect (specular + diffuse) instead of absorbing.
-            reflectParticlesAtEB(*pc, distance_to_eb, pc->m_eb_uth, pc->m_eb_accommodation);
+            reflectParticlesAtEB(*pc, distance_to_eb, pc->getMass(),
+                                 pc->m_eb_uth, pc->m_eb_accommodation,
+                                 WarpX::GetInstance().getdt());
         } else {
             scrapeParticlesAtEB(*pc, distance_to_eb, ParticleBoundaryProcess::Absorb());
         }
     }
+}
+
+bool MultiParticleContainer::doEBReflection () const
+{
+    return std::any_of(allcontainers.begin(), allcontainers.end(),
+        [] (auto const& pc) { return pc->m_do_eb_reflection; });
 }
 
 #ifdef WARPX_QED

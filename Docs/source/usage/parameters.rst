@@ -1950,7 +1950,9 @@ Particle initialization
     reflected back into the domain instead of being absorbed (the default). This is intended for
     modelling neutral-gas flow against solid walls (e.g. DSMC gas dynamics). The reflection is
     specular, diffuse (thermal), or a blend of the two, set by
-    :pp:param:`<species_name>.eb_accommodation`.
+    :pp:param:`<species_name>.eb_accommodation`. The exact wall-contact point is found by
+    bisection along the particle trajectory (correct also for curved surfaces), and the
+    particle is re-emitted from that point for the remaining fraction of the time step.
 
 .. pp:param:: <species_name>.eb_accommodation
     :type: ``float`` (between ``0`` and ``1``)

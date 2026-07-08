@@ -346,6 +346,9 @@ public:
 
     void ScrapeParticlesAtEB (ablastr::fields::MultiLevelScalarField const& distance_to_eb);
 
+    /** Whether any species reflects particles off the embedded boundary. */
+    [[nodiscard]] bool doEBReflection () const;
+
     std::string m_B_ext_particle_s = "none";
     std::string m_E_ext_particle_s = "none";
     // Parser for B_external on the particle

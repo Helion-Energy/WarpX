@@ -762,8 +762,18 @@ void WarpX::HandleParticlesAtBoundaries (int step, amrex::Real cur_time, int num
         mypc->ScrapeParticlesAtEB(m_fields.get_mr_levels(FieldType::distance_to_eb, finest_level));
         m_particle_boundary_buffer->gatherParticlesFromEmbeddedBoundaries(
             *mypc, m_fields.get_mr_levels(FieldType::distance_to_eb, finest_level), cur_time);
-        // Remove particles that have been flagged to be scraped
-        mypc->deleteInvalidParticles();
+        // (dereference mypc once: two different member calls through the smart pointer
+        // trip a bugprone-branch-clone false positive)
+        auto& particle_containers = *mypc;
+        if (particle_containers.doEBReflection()) {
+            // Particles reflected off the EB can end up owned by a different
+            // sub-domain: do a full Redistribute (which also removes the
+            // particles that have been flagged to be scraped).
+            particle_containers.Redistribute();
+        } else {
+            // Remove particles that have been flagged to be scraped
+            particle_containers.deleteInvalidParticles();
+        }
     }
 
     if (sort_intervals.contains(step+1)) {
