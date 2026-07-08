@@ -94,6 +94,9 @@ void HybridPICModel::MarderCleanDivergence (
 #endif
     ablastr::fields::VectorField frac_mf;
     amrex::GpuArray<Real, 3> inv_full_area{0.0_rt, 0.0_rt, 0.0_rt};
+#if !defined(WARPX_DIM_3D)
+    amrex::ignore_unused(inv_full_area);
+#endif
     if (use_cut) {
         frac_mf = warpx.m_fields.get_alldirs(FieldType::face_areas, lev);
 #if defined(WARPX_DIM_3D)
