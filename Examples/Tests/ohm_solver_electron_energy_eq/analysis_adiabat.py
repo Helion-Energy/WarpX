@@ -116,7 +116,12 @@ def main(argv=None):
     for j in idxs:
         c = plt.cm.viridis(j / max(nt - 1, 1))
         axP.plot(
-            c_cm, Te_x[j], "-", color=c, lw=1.8, label=f"t={times[j] * 1e6:.2f} μs"
+            c_cm,
+            Te_x[j],
+            "-",
+            color=c,
+            lw=1.8,
+            label=f"t={times[j] * 1e6:.2f}" + r" $\mu$s",
         )
         axP.plot(c_cm, Te_pred[j], "--", color=c, lw=1.0)
     axP.set_xlabel("x (cm)")
@@ -131,7 +136,7 @@ def main(argv=None):
     sc = axS.scatter(nn, tt, c=tcol, s=6, cmap="plasma", alpha=0.5)
     xs = np.linspace(nn.min(), nn.max(), 200)
     axS.plot(xs, xs**g1, "k-", lw=2, label=r"adiabat $(n/n_0)^{\gamma-1}$")
-    fig.colorbar(sc, ax=axS, label="time (μs)")
+    fig.colorbar(sc, ax=axS, label=r"time ($\mu$s)")
     axS.set_xlabel("$n / n_0$")
     axS.set_ylabel("$T_e / T_{e0}$")
     axS.set_title(f"adiabat collapse  (median err {med:.2%}, max {mx:.2%})")
