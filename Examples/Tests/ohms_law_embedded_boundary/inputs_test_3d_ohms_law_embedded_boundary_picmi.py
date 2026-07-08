@@ -32,6 +32,7 @@
 # --- interpolated normals and uses sign/containment assertions.
 
 import argparse
+import os
 import sys
 
 import numpy as np
@@ -1210,11 +1211,13 @@ def main():
     )
     parser.add_argument(
         "--battery",
-        choices=["eb", "hyper", "resistive"],
+        choices=["eb", "hyper", "resistive", "stencils"],
         default="eb",
         help="which unit battery to run (eb fills/folds, the isotropized "
         "hyper-resistivity stencil, or the isotropized resistive-diffusion "
-        "corner-curl)",
+        "corner-curl); 'stencils' runs the hyper and resistive batteries "
+        "as two subprocess children (they need different simulation "
+        "setups, and WarpX initializes once per process)",
     )
     parser.add_argument(
         "--grid-type",
@@ -1226,6 +1229,34 @@ def main():
     )
     args, left = parser.parse_known_args()
     sys.argv = sys.argv[:1] + left
+
+    if args.battery == "stencils":
+        # The hyper and resistive batteries configure the solver differently
+        # (each isolates its own term), and WarpX initializes once per
+        # process: run each as a fresh singleton child, scrubbing the MPI
+        # launcher environment like the staggered-abort test so the child
+        # does not try to join the parent's MPI job.
+        import subprocess
+
+        launcher_prefixes = ("PMI_", "PMIX_", "HYDRA_", "HYDI_", "OMPI_", "PRTE_")
+        env = {
+            k: v for k, v in os.environ.items() if not k.startswith(launcher_prefixes)
+        }
+        for battery in ("hyper", "resistive"):
+            cmd = [
+                sys.executable,
+                os.path.abspath(__file__),
+                "--geometry",
+                args.geometry,
+                "--grid-type",
+                args.grid_type,
+                "--battery",
+                battery,
+            ]
+            result = subprocess.run(cmd, env=env, check=False)
+            assert result.returncode == 0, f"{battery} battery failed"
+            print(f"[stencils] {battery} battery passed")
+        return
 
     sim = setup_simulation(
         args.geometry,
