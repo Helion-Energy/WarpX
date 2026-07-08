@@ -282,7 +282,8 @@ void FiniteDifferenceSolver::EvolveRhoCartesianECT (
         }
     }
 #else
-    amrex::ignore_unused(Efield, edge_lengths, face_areas, ECTRhofield, lev);
+    amrex::ignore_unused(Efield, edge_lengths, face_areas, ECTRhofield, lev,
+                         edge_cent_offset, apply_curvature);
 #endif
 }
 #endif
