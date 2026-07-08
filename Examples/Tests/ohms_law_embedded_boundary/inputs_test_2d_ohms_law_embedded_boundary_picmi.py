@@ -32,6 +32,7 @@
 # ---     (-0.6c / -0.4c, conserving the folded amount).
 
 import argparse
+import os
 import sys
 
 import numpy as np
@@ -817,14 +818,39 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--battery",
-        choices=["eb", "hyper", "resistive"],
+        choices=["eb", "hyper", "resistive", "stencils"],
         default="eb",
         help="which unit battery to run (eb fills/folds, the isotropized "
         "hyper-resistivity stencil, or the resistive corner-curl "
-        "isotropization)",
+        "isotropization); 'stencils' runs the hyper and resistive batteries "
+        "as two subprocess children (they need different simulation setups, "
+        "and WarpX initializes once per process)",
     )
     args, left = parser.parse_known_args()
     sys.argv = sys.argv[:1] + left
+
+    if args.battery == "stencils":
+        # Same child-launch pattern as the 3D deck / the staggered-abort
+        # test: scrub the MPI launcher environment so each child runs as a
+        # fresh singleton instead of trying to join the parent's MPI job.
+        import subprocess
+
+        launcher_prefixes = ("PMI_", "PMIX_", "HYDRA_", "HYDI_", "OMPI_", "PRTE_")
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith(launcher_prefixes)
+        }
+        for battery in ("hyper", "resistive"):
+            cmd = [
+                sys.executable,
+                os.path.abspath(__file__),
+                "--battery", battery,
+            ]
+            result = subprocess.run(cmd, env=env, check=False)
+            assert result.returncode == 0, f"{battery} battery failed"
+            print(f"[stencils] {battery} battery passed")
+        return
 
     sim = setup_simulation(
         hyper=(args.battery == "hyper"),
