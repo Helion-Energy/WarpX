@@ -1239,17 +1239,18 @@ def main():
 
         launcher_prefixes = ("PMI_", "PMIX_", "HYDRA_", "HYDI_", "OMPI_", "PRTE_")
         env = {
-            k: v
-            for k, v in os.environ.items()
-            if not k.startswith(launcher_prefixes)
+            k: v for k, v in os.environ.items() if not k.startswith(launcher_prefixes)
         }
         for battery in ("hyper", "resistive"):
             cmd = [
                 sys.executable,
                 os.path.abspath(__file__),
-                "--geometry", args.geometry,
-                "--grid-type", args.grid_type,
-                "--battery", battery,
+                "--geometry",
+                args.geometry,
+                "--grid-type",
+                args.grid_type,
+                "--battery",
+                battery,
             ]
             result = subprocess.run(cmd, env=env, check=False)
             assert result.returncode == 0, f"{battery} battery failed"
