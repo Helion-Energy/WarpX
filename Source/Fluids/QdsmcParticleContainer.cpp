@@ -350,16 +350,22 @@ QdsmcParticleContainer::PushX (int lev, amrex::Real dt)
         long const np = pti.numParticles();
         auto & attribs = pti.GetStructOfArrays().GetRealData();
 
+        // Home and velocity components are only needed for the axes with an
+        // AMReX-tracked position slot (x everywhere but 1D_Z, y only in 3D).
+#if !defined(WARPX_DIM_1D_Z)
         amrex::ParticleReal* const AMREX_RESTRICT x_node =
             attribs[QdsmcPIdx::x_node].dataPtr();
-        amrex::ParticleReal* const AMREX_RESTRICT y_node =
-            attribs[QdsmcPIdx::y_node].dataPtr();
-        amrex::ParticleReal* const AMREX_RESTRICT z_node =
-            attribs[QdsmcPIdx::z_node].dataPtr();
         amrex::ParticleReal* const AMREX_RESTRICT vx =
             attribs[QdsmcPIdx::vx].dataPtr();
+#endif
+#if defined(WARPX_DIM_3D)
+        amrex::ParticleReal* const AMREX_RESTRICT y_node =
+            attribs[QdsmcPIdx::y_node].dataPtr();
         amrex::ParticleReal* const AMREX_RESTRICT vy =
             attribs[QdsmcPIdx::vy].dataPtr();
+#endif
+        amrex::ParticleReal* const AMREX_RESTRICT z_node =
+            attribs[QdsmcPIdx::z_node].dataPtr();
         amrex::ParticleReal* const AMREX_RESTRICT vz =
             attribs[QdsmcPIdx::vz].dataPtr();
         amrex::ParticleReal* const AMREX_RESTRICT np_real =
@@ -386,44 +392,36 @@ QdsmcParticleContainer::PushX (int lev, amrex::Real dt)
             // before a SetK call). They contribute nothing to the deposit.
             if (np_real[ip] <= amrex::Real(0)) { return; }
 
-            // Forward-Euler push by one PIC step; the caller owns the CFL
-            // constraint |v| dt < dx (at most one cell per step).
-            amrex::Real xp_new = x_node[ip] + vx[ip] * dt;
-            amrex::Real yp_new = y_node[ip] + vy[ip] * dt;
-            amrex::Real zp_new = z_node[ip] + vz[ip] * dt;
-            // Only the AMReX-tracked components are written back below
-            // AMREX_SPACEDIM; the others are computed for uniformity.
-            amrex::ignore_unused(xp_new, yp_new, zp_new);
+            // Forward-Euler push of one coordinate by one PIC step, clamped
+            // just inside the domain in non-periodic directions (see the
+            // bound setup above). The caller owns the CFL constraint
+            // |v| dt < dx (at most one cell per step).
+            auto const push_clamp = [&] (amrex::Real x0, amrex::Real v, int d)
+            {
+                amrex::Real const xnew = x0 + v * dt;
+                return is_periodic[d] ? xnew
+                                      : amrex::Clamp(xnew, lo_bnd[d], hi_bnd[d]);
+            };
 
-            // Clamp the AMReX-tracked coordinates to the domain in
-            // non-periodic directions (see the bound setup above).
+            // Write the new position to the AMReX-tracked position slots.
+            // Axes not represented in the field have no enum slot and are
+            // simply not tracked (consistent with field dimensionality).
 #if defined(WARPX_DIM_3D)
-            if (!is_periodic[0]) { xp_new = amrex::Clamp(xp_new, lo_bnd[0], hi_bnd[0]); }
-            if (!is_periodic[1]) { yp_new = amrex::Clamp(yp_new, lo_bnd[1], hi_bnd[1]); }
-            if (!is_periodic[2]) { zp_new = amrex::Clamp(zp_new, lo_bnd[2], hi_bnd[2]); }
+            pa_x[ip] = push_clamp(x_node[ip], vx[ip], 0);
+            pa_y[ip] = push_clamp(y_node[ip], vy[ip], 1);
+            pa_z[ip] = push_clamp(z_node[ip], vz[ip], 2);
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
-            if (!is_periodic[0]) { xp_new = amrex::Clamp(xp_new, lo_bnd[0], hi_bnd[0]); }
-            if (!is_periodic[1]) { zp_new = amrex::Clamp(zp_new, lo_bnd[1], hi_bnd[1]); }
+            pa_x[ip] = push_clamp(x_node[ip], vx[ip], 0);
+            pa_z[ip] = push_clamp(z_node[ip], vz[ip], 1);
 #elif defined(WARPX_DIM_1D_Z)
-            if (!is_periodic[0]) { zp_new = amrex::Clamp(zp_new, lo_bnd[0], hi_bnd[0]); }
+            pa_z[ip] = push_clamp(z_node[ip], vz[ip], 0);
 #else
             // WARPX_DIM_RCYLINDER / WARPX_DIM_RSPHERE: x (= r) is the single
             // tracked position (QDSMC is refused at runtime in these
-            // geometries; the clamp keeps the compiled code sane).
-            if (!is_periodic[0]) { xp_new = amrex::Clamp(xp_new, lo_bnd[0], hi_bnd[0]); }
+            // geometries); z is a plain attribute, advanced unclamped.
+            pa_x[ip] = push_clamp(x_node[ip], vx[ip], 0);
+            pa_z[ip] = z_node[ip] + vz[ip] * dt;
 #endif
-
-            // Write the new position back to the AMReX-tracked position
-            // slots. For axes not represented in the field, there is no
-            // corresponding enum slot and the position is simply not
-            // tracked by AMReX (consistent with field dimensionality).
-#if !defined(WARPX_DIM_1D_Z)
-            pa_x[ip] = xp_new;
-#endif
-#if defined(WARPX_DIM_3D)
-            pa_y[ip] = yp_new;
-#endif
-            pa_z[ip] = zp_new;
         });
     }
 
