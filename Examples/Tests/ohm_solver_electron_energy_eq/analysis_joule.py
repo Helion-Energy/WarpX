@@ -169,7 +169,7 @@ def main(argv=None):
     axE.plot(tus_r, dE_i, "^-", ms=4, label=r"$\Delta E_{ion}$")
     axE.plot(tus_r[:n_b], dE_tot, "k-", lw=2.5, label=r"$\Delta E_{tot}$ (should be 0)")
     axE.axhline(0.0, color="gray", lw=0.8, ls=":")
-    axE.set_xlabel("time (µs)")
+    axE.set_xlabel(r"time ($\mu$s)")
     axE.set_ylabel("cumulative energy change (J)")
     axE.set_title(
         f"energy budget (non-conservation {100 * noncons:+.2f}% of "
@@ -190,7 +190,7 @@ def main(argv=None):
         lw=1.2,
         label=rf"fit, $\eta$ = {eta_T:.3e}",
     )
-    axT.set_xlabel("time (µs)")
+    axT.set_xlabel(r"time ($\mu$s)")
     axT.set_ylabel(r"$\Delta\langle T_e\rangle_n$ (eV)")
     axT.set_title("electron temperature ramp")
     axT.legend(fontsize=9)

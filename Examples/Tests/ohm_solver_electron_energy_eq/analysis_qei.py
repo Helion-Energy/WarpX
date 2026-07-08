@@ -142,7 +142,7 @@ def main(argv=None):
     ax[0].plot(tus, Te, "o-", ms=4, label=r"$\langle T_e\rangle$")
     ax[0].plot(tus, Ti, "s-", ms=4, color="C3", label=r"$\langle T_i\rangle$")
     ax[0].axhline(T_eq_pred, color="gray", lw=0.9, ls=":", label=r"$T_{eq}$ pred")
-    ax[0].set_xlabel("time (μs)")
+    ax[0].set_xlabel(r"time ($\mu$s)")
     ax[0].set_ylabel("temperature (eV)")
     ax[0].set_title("e-i relaxation to common T")
     ax[0].legend()
@@ -155,7 +155,7 @@ def main(argv=None):
     ax[1].semilogy(
         tus, np.exp(-rate_pred * t), "--", lw=2, label=f"pred rate={rate_pred:.2e}"
     )
-    ax[1].set_xlabel("time (μs)")
+    ax[1].set_xlabel(r"time ($\mu$s)")
     ax[1].set_ylabel(r"$(T_e-T_i)/(T_{e0}-T_{i0})$")
     ax[1].set_title(f"difference decay (err {rel_err * 100:.1f}%)")
     ax[1].legend()
@@ -163,7 +163,7 @@ def main(argv=None):
 
     ax[2].plot(tus, E_drift * 100, "o-", ms=4, color="C2")
     ax[2].axhline(0.0, color="gray", lw=0.8, ls=":")
-    ax[2].set_xlabel("time (μs)")
+    ax[2].set_xlabel(r"time ($\mu$s)")
     ax[2].set_ylabel(r"$(E-E_0)/E_0$ (%)")
     ax[2].set_title(f"total thermal energy (max {e_max * 100:.2f}%)")
     ax[2].grid(alpha=0.3)
