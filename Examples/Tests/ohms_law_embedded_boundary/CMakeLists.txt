@@ -61,12 +61,15 @@ if(WarpX_EB)
     )
 endif()
 
+# The isotropized hyper-resistivity and resistive corner-curl stencil
+# batteries share one ctest entry per dim/grid (--battery stencils runs both
+# as subprocess children; they need different solver setups).
 if(WarpX_EB)
     add_warpx_test(
-        test_3d_ohms_law_hyper_resistivity_picmi  # name
+        test_3d_ohms_law_stencils_picmi  # name
         3  # dims
         1  # nprocs
-        "inputs_test_3d_ohms_law_embedded_boundary_picmi.py --geometry plane --battery hyper"  # inputs
+        "inputs_test_3d_ohms_law_embedded_boundary_picmi.py --geometry plane --battery stencils"  # inputs
         OFF  # analysis
         OFF  # checksum
         OFF  # dependency
@@ -75,34 +78,10 @@ endif()
 
 if(WarpX_EB)
     add_warpx_test(
-        test_3d_ohms_law_resistivity_picmi  # name
-        3  # dims
-        1  # nprocs
-        "inputs_test_3d_ohms_law_embedded_boundary_picmi.py --geometry plane --battery resistive"  # inputs
-        OFF  # analysis
-        OFF  # checksum
-        OFF  # dependency
-    )
-endif()
-
-if(WarpX_EB)
-    add_warpx_test(
-        test_2d_ohms_law_resistivity_picmi  # name
+        test_2d_ohms_law_stencils_picmi  # name
         2  # dims
         1  # nprocs
-        "inputs_test_2d_ohms_law_embedded_boundary_picmi.py --battery resistive"  # inputs
-        OFF  # analysis
-        OFF  # checksum
-        OFF  # dependency
-    )
-endif()
-
-if(WarpX_EB)
-    add_warpx_test(
-        test_2d_ohms_law_hyper_resistivity_picmi  # name
-        2  # dims
-        1  # nprocs
-        "inputs_test_2d_ohms_law_embedded_boundary_picmi.py --battery hyper"  # inputs
+        "inputs_test_2d_ohms_law_embedded_boundary_picmi.py --battery stencils"  # inputs
         OFF  # analysis
         OFF  # checksum
         OFF  # dependency
@@ -137,22 +116,10 @@ endif()
 
 if(WarpX_EB)
     add_warpx_test(
-        test_3d_ohms_law_hyper_resistivity_collocated_picmi  # name
+        test_3d_ohms_law_stencils_collocated_picmi  # name
         3  # dims
         1  # nprocs
-        "inputs_test_3d_ohms_law_embedded_boundary_picmi.py --geometry plane --battery hyper --grid-type collocated"  # inputs
-        OFF  # analysis
-        OFF  # checksum
-        OFF  # dependency
-    )
-endif()
-
-if(WarpX_EB)
-    add_warpx_test(
-        test_3d_ohms_law_resistivity_collocated_picmi  # name
-        3  # dims
-        1  # nprocs
-        "inputs_test_3d_ohms_law_embedded_boundary_picmi.py --geometry plane --battery resistive --grid-type collocated"  # inputs
+        "inputs_test_3d_ohms_law_embedded_boundary_picmi.py --geometry plane --battery stencils --grid-type collocated"  # inputs
         OFF  # analysis
         OFF  # checksum
         OFF  # dependency
