@@ -137,21 +137,6 @@ public:
         std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update_E,
         int lev, PatchType patch_type, bool solve_for_Faraday) const;
 
-    /**
-     * \brief Optional Marder-like diffusive divergence clean of a nodal vector
-     * field. Iterates field += alpha_scaled * grad(div(field)) restricted to
-     * a near-wall geometric band (distance_to_eb <= band_cells*h), re-applying
-     * the embedded-boundary PEC fill (with the field's own parity) each sweep.
-     * The correction is a pure gradient, so curl(field) -- and hence J=curl(B) /
-     * the physics it feeds -- is unchanged to round-off away from the band
-     * cutoffs; only the spurious curved-wall divergence injected by the mirror
-     * fill is dissipated. With the inner cutoffs at 0 (the wall-layer mode) the
-     * clean reaches the first fluid layers, where a sharp re-entrant corner
-     * (e.g. a wall radius step) otherwise pumps an exponentially growing
-     * div(B). No-op when alpha<=0 or no EB. 3D/XZ Cartesian only (the gradient
-     * is the adjoint of the Cartesian divergence; ReadParameters aborts if the
-     * knobs are set on other geometries).
-     */
     /** Constitutive-PEC zeroing of an edge-staggered field on the staggered
      *  conformal (ECT) path: zero every masked (fully covered) edge and every
      *  cut edge (open length < full). Used for the Ohm's-law E and the Ampere
@@ -172,6 +157,22 @@ public:
         ablastr::fields::VectorField const& field,
         int lev) const;
 
+    /**
+     * \brief Optional Marder-like diffusive divergence clean of a staggered or
+     * nodal vector field. Iterates field += alpha_scaled * grad(div(field))
+     * restricted to a near-wall geometric band (distance_to_eb <=
+     * band_cells*h), re-applying the embedded-boundary PEC fill (with the
+     * field's own parity) each sweep. The correction is a pure gradient, so
+     * curl(field) -- and hence J=curl(B) / the physics it feeds -- is
+     * unchanged to round-off away from the band cutoffs; only the spurious
+     * curved-wall divergence injected by the mirror fill is dissipated. With
+     * the inner cutoffs at 0 (the wall-layer mode) the clean reaches the
+     * first fluid layers, where a sharp re-entrant corner (e.g. a wall radius
+     * step) otherwise pumps an exponentially growing div(B). No-op when
+     * alpha<=0 or no EB. 3D/XZ Cartesian only (the gradient is the adjoint of
+     * the Cartesian divergence; ReadParameters aborts if the knobs are set on
+     * other geometries).
+     */
     void MarderCleanDivergence (
         ablastr::fields::VectorField const& field,
         std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update,

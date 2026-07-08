@@ -417,7 +417,8 @@ WarpX::WarpX ()
     }
 
     // The conformal embedded-boundary field update is used by the ECT Maxwell
-    // solver and, optionally, by the (collocated) hybrid-PIC.
+    // solver and, optionally, by the hybrid-PIC solver on either grid type
+    // (hybrid_pic_model.use_conformal_eb).
     m_eb_use_conformal_solve =
         (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::ECT) ||
         (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC &&
