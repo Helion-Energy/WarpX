@@ -436,6 +436,15 @@ void init_WarpX (py::module& m)
             py::arg("lev"),
             "Get the current physical time step size on mesh-refinement level ``lev``."
         )
+        .def("setdt",
+            [](WarpX & wx, int lev, amrex::Real dt_new){ wx.setdt(lev, dt_new); },
+            py::arg("lev"), py::arg("dt"),
+            "Set the physical time step size on mesh-refinement level ``lev``.\n\n"
+            "To keep the leapfrog particle push consistent, call\n"
+            "``synchronize_velocity_with_position()`` first: it advances the\n"
+            "velocities to the position time with the old step, and the next\n"
+            "step then de-synchronizes them backward with the new one."
+        )
 
         .def("set_potential_on_domain_boundary",
             [](WarpX& wx,
