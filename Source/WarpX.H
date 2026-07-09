@@ -724,6 +724,7 @@ public:
     void sett_new (int lev, amrex::Real time) {t_new[lev] = time;}
     [[nodiscard]] amrex::Vector<amrex::Real> getdt () const {return dt;}
     [[nodiscard]] amrex::Real getdt (int lev) const {return dt.at(lev);}
+    void setdt (int lev, amrex::Real dt_new) {dt.at(lev) = dt_new;}
     [[nodiscard]] int getdo_moving_window() const {return do_moving_window;}
     [[nodiscard]] amrex::Real getmoving_window_x() const {return moving_window_x;}
     [[nodiscard]] bool getis_synchronized() const {return m_is_synchronized;}
