@@ -3817,6 +3817,28 @@ Maxwell solver: kinetic-fluid hybrid
 
     This enables or disables the divergence cleaner application to the external A fields.
 
+.. pp:param:: external_vector_potential.isotropic_curl
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If ``true`` (opt-in), the curl that computes the external B from the external vector
+    potential preconditions each A component with the compact second difference along its
+    own axis, :math:`S_a = 1 + \delta_a^2/24`, before the standard Yee curl. The plain Yee
+    curl's leading truncation error contains a fourfold (:math:`m=4`) azimuthal harmonic
+    on axisymmetric vector potentials; with the preconditioning the leading error becomes
+    the isotropic Laplacian smoothing of B, cancelling the :math:`m=4` imprint at leading
+    order (it converges at 4th instead of 2nd order). The corrected B is still an exact
+    discrete curl, so it remains exactly divergence-free on the staggered mesh. The
+    correction is skipped within one cell of non-periodic domain boundaries and within a
+    stencil reach of an embedded boundary, where it falls back to the plain Yee curl.
+    Only implemented for 3D Cartesian staggered grids.
+    Note that only the contributions of the transverse components (:math:`A_x`,
+    :math:`A_y`, i.e. :math:`A_\theta` for an axisymmetric coil drive) are isotropized:
+    :math:`A_z` is read by both in-plane derivatives and no divergence-preserving
+    per-component preconditioning can isotropize both uses, so :math:`B_\theta` fields
+    driven by :math:`A_z` keep the plain Yee curl error.
+
 .. pp:param:: external_vector_potential.fields
     :type: list of ``str``
     :default: ``empty``

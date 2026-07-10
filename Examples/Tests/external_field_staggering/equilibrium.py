@@ -98,6 +98,33 @@ FIELD_FUNCS = {
     "Bz": lambda x, y, z: bz_of_u(_u(x, y)),
 }
 
+# Axisymmetric external vector potential with a closed-form curl, used to
+# test the A -> B curl of the hybrid external-field (coil drive) path:
+#   A_theta = C1 (r/a)/(1+u),  A_z = -(C2 a/2) ln(1+u)   (u = (r/a)^2)
+#   B_theta = -dA_z/dr = C2 (r/a)/(1+u)                  (Gold-Hoyle-like)
+#   B_z     = (1/r) d(r A_theta)/dr = (2 C1/a)/(1+u)^2,  B_r = 0
+C1 = 0.0125  # -> B_z on axis = 2*C1/A = 0.1 T
+C2 = 0.0125
+
+# in-cell positions of the A components (edge staggering, like E)
+EDGE_POSITION = {
+    "Ax": (0.5, 0.0, 0.0),
+    "Ay": (0.0, 0.5, 0.0),
+    "Az": (0.0, 0.0, 0.5),
+}
+
+A_FIELD_FUNCS = {
+    "Ax": lambda x, y, z: -y * (C1 / A) / (1.0 + _u(x, y)),
+    "Ay": lambda x, y, z: x * (C1 / A) / (1.0 + _u(x, y)),
+    "Az": lambda x, y, z: -(C2 * A / 2.0) * np.log1p(_u(x, y)),
+}
+
+CURL_A_FUNCS = {
+    "Bx": lambda x, y, z: -y * (C2 / A) / (1.0 + _u(x, y)),
+    "By": lambda x, y, z: x * (C2 / A) / (1.0 + _u(x, y)),
+    "Bz": lambda x, y, z: (2.0 * C1 / A) / (1.0 + _u(x, y)) ** 2,
+}
+
 
 def check_pressure_balance(rmax=2.0, nr=200001, rtol=1.0e-6):
     """Verify the radial force balance residual on a fine 1D grid.

@@ -30,6 +30,15 @@ ExternalVectorPotential::ReadParameters ()
 
     pp_ext_A.query("do_diva_cleaning", m_do_clean_divA);
 
+    // Isotropize the leading truncation error of B = curl A (see
+    // FiniteDifferenceSolver::ComputeCurlACartesian). The corrected B is
+    // still an exact discrete curl, so it remains exactly divergence-free.
+    pp_ext_A.query("isotropic_curl", m_iso_curl);
+#if !defined(WARPX_DIM_3D)
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_iso_curl,
+        "external_vector_potential.isotropic_curl is only implemented for 3D Cartesian geometry");
+#endif
+
     pp_ext_A.queryarr("fields", m_field_names);
 
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_field_names.empty(),
@@ -256,7 +265,7 @@ ExternalVectorPotential::CalculateExternalCurlA (std::string& coil_name)
             curlA_ext[lev],
             A_ext[lev],
             warpx.GetEBUpdateBFlag()[lev],
-            lev);
+            lev, m_iso_curl);
 
         for (int idir = 0; idir < 3; ++idir) {
             warpx.m_fields.get(curlAext_field, Direction{idir}, lev)->

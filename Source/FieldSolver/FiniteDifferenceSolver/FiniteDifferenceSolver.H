@@ -189,12 +189,15 @@ class FiniteDifferenceSolver
           * \param[in] Afield   vector of magnetic field MultiFabs at a given level
           * \param[in] eb_update_B  array indicating where the field should be updated with respect to the position of the embedded boundary
           * \param[in] lev  level number for the calculation
+          * \param[in] iso_curl  isotropize the leading truncation error of the curl
+          *            by preconditioning each A component along its own axis
+          *            (3D Cartesian staggered grids only; see ComputeCurlACartesian)
           */
         void ComputeCurlA (
             ablastr::fields::VectorField& Bfield,
             ablastr::fields::VectorField const& Afield,
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_B,
-            int lev );
+            int lev, bool iso_curl = false );
 
         /**
           * \brief Calculation of the gradient of the given scalar field.
@@ -544,7 +547,7 @@ class FiniteDifferenceSolver
             ablastr::fields::VectorField & Bfield,
             ablastr::fields::VectorField const& Afield,
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_B,
-            int lev
+            int lev, bool iso_curl
         );
 
         template<typename T_Algo>

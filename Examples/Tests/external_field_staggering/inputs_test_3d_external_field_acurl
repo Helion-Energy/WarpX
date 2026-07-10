@@ -1,0 +1,5 @@
+# base input parameters
+FILE = inputs_base_3d_acurl
+
+# plain Yee curl of the external vector potential: its per-axis truncation
+# error imprints an m=4 azimuthal mode on the axisymmetric input

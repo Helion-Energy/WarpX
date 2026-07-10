@@ -1,0 +1,8 @@
+# base input parameters
+FILE = inputs_base_3d_acurl
+
+# isotropized curl: each A component is preconditioned with the compact
+# second difference along its own axis before the Yee curl, so the leading
+# error is the isotropic Laplacian smoothing of B (no m=4 at leading
+# order) and B remains exactly divergence-free
+external_vector_potential.isotropic_curl = 1
