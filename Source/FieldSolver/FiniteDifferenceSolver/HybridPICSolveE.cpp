@@ -1350,7 +1350,14 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         && EB::enabled()
         && WarpX::UseConformalEBSolve()
         && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated;
-    amrex::MultiFab const* iso_phi_mf = iso_wall_compact
+    // isotropized electron-pressure gradient (gathered E only; grad Pe never
+    // enters the Faraday push). Near ANY embedded boundary fall back to the
+    // bare stencil within the corner-reach band: the Pe mirror band is one
+    // cell deep on both wall treatments, so the smoothed stencil's diagonal
+    // taps would read the zeroed deep region.
+    const bool iso_grad_pe = hybrid_model->m_isotropic_pressure_grad;
+    const bool iso_grad_wall_compact = iso_grad_pe && EB::enabled();
+    amrex::MultiFab const* iso_phi_mf = (iso_wall_compact || iso_grad_wall_compact)
         ? WarpX::GetInstance().m_fields.get(FieldType::distance_to_eb, lev)
         : nullptr;
     // isotropized resistive diffusion (corner-curl E correction). Two stencils:
@@ -1622,10 +1629,12 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             update_Ez_arr = eb_update_E[2]->array(mfi);
         }
 
-        // Nodal signed distance for the isotropic-Laplacian wall downgrade
-        // (empty Array4 when the downgrade is off; every read is gated).
+        // Nodal signed distance for the isotropic-Laplacian / iso-grad(Pe)
+        // wall downgrades (empty Array4 when both are off; every read is gated).
         amrex::Array4<amrex::Real const> iso_phi;
-        if (iso_wall_compact) { iso_phi = iso_phi_mf->const_array(mfi); }
+        if (iso_wall_compact || iso_grad_wall_compact) {
+            iso_phi = iso_phi_mf->const_array(mfi);
+        }
 
         Array4<Real> Ex_ext, Ey_ext, Ez_ext;
         if (include_external_fields) {
@@ -1671,7 +1680,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 // Get the gradient of the electron pressure if the longitudinal part of
                 // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
                 const Real grad_Pe = (!solve_for_Faraday) ?
-                    T_Algo::UpwardDx(Pe, coefs_x, n_coefs_x, i, j, k)
+                    ((iso_grad_pe && (!iso_grad_wall_compact
+                                      || iso_phi(i, j, k) >= d_iso_compact))
+                     ? warpx::hybrid_isotropic::GradXIsotropic<T_Algo>(
+                           Pe, coefs_x, n_coefs_x, i, j, k)
+                     : T_Algo::UpwardDx(Pe, coefs_x, n_coefs_x, i, j, k))
                     : 0._rt;
 
                 // interpolate the nodal neE values to the Yee grid
@@ -1809,7 +1822,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 // Get the gradient of the electron pressure if the longitudinal part of
                 // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
                 const Real grad_Pe = (!solve_for_Faraday) ?
-                    T_Algo::UpwardDy(Pe, coefs_y, n_coefs_y, i, j, k)
+                    ((iso_grad_pe && (!iso_grad_wall_compact
+                                      || iso_phi(i, j, k) >= d_iso_compact))
+                     ? warpx::hybrid_isotropic::GradYIsotropic<T_Algo>(
+                           Pe, coefs_y, n_coefs_y, i, j, k)
+                     : T_Algo::UpwardDy(Pe, coefs_y, n_coefs_y, i, j, k))
                     : 0._rt;
 
                 // interpolate the nodal neE values to the Yee grid
@@ -1930,7 +1947,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 // Get the gradient of the electron pressure if the longitudinal part of
                 // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
                 const Real grad_Pe = (!solve_for_Faraday) ?
-                    T_Algo::UpwardDz(Pe, coefs_z, n_coefs_z, i, j, k)
+                    ((iso_grad_pe && (!iso_grad_wall_compact
+                                      || iso_phi(i, j, k) >= d_iso_compact))
+                     ? warpx::hybrid_isotropic::GradZIsotropic<T_Algo>(
+                           Pe, coefs_z, n_coefs_z, i, j, k)
+                     : T_Algo::UpwardDz(Pe, coefs_z, n_coefs_z, i, j, k))
                     : 0._rt;
 
                 // interpolate the nodal neE values to the Yee grid

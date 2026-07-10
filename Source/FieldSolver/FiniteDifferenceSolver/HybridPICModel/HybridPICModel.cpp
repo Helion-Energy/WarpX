@@ -263,6 +263,10 @@ void HybridPICModel::ReadParameters ()
     // (Cartesian geometries; suppresses the grid m=4 from the resistive term)
     pp_hybrid.query("isotropic_resistivity", m_isotropic_resistivity);
 
+    // isotropized electron-pressure gradient in the gathered E (3D Cartesian;
+    // suppresses the grid m=4 from the grad(Pe) term of the ion push)
+    pp_hybrid.query("isotropic_pressure_grad", m_isotropic_pressure_grad);
+
     // The isotropic hyper-resistivity Laplacian reads the plasma current at its
     // diagonal/corner neighbors (sqrt(2)*h in plane, sqrt(3)*h at a 3D cube
     // corner). Widen the plasma-current EB mirror-fill band to that corner reach
