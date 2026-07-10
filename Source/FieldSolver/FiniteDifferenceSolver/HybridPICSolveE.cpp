@@ -25,14 +25,81 @@
 
 #include <ablastr/coarsen/sample.H>
 
+#include <limits>
+
 using namespace amrex;
 using warpx::fields::FieldType;
+
+#if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
+namespace
+{
+    /**
+     * \brief Interpolate between grid staggerings for the nodal enE
+     * calculation of the Ohm's law solver.
+     *
+     * Along matched axes the data is sampled directly. Along mismatched
+     * axes, `use_order4 = false` selects the 2-point half-cell average used
+     * by ablastr::coarsen::sample::Interp (bitwise identical arithmetic),
+     * while `use_order4 = true` selects the 4-point Fornberg stencil
+     * (-1/16, 9/16, 9/16, -1/16), which is 4th-order accurate at the
+     * half-cell shift. Where the 4-point stencil would reach outside of
+     * [safe_lo, safe_hi] (used along non-periodic axes near the domain
+     * boundary, where only one layer of boundary-condition-filled guard
+     * cells is trusted) it falls back to the 2-point average, so that the
+     * boundary treatment matches the 2nd-order scheme.
+     */
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    amrex::Real InterpStaggered (
+        amrex::Array4<amrex::Real const> const& src,
+        amrex::GpuArray<int,3> const& sf,
+        amrex::GpuArray<int,3> const& sc,
+        int i, int j, int k, int comp,
+        bool use_order4,
+        amrex::GpuArray<int,3> const& safe_lo,
+        amrex::GpuArray<int,3> const& safe_hi)
+    {
+        constexpr amrex::Real c4a = -1.0_rt/16.0_rt;
+        constexpr amrex::Real c4b =  9.0_rt/16.0_rt;
+
+        const int ic[3] = {i, j, k};
+        int np[3], imin[3];
+        amrex::Real w[3][4];
+
+        for (int l = 0; l < 3; ++l) {
+            if (sf[l] == sc[l]) {
+                np[l] = 1;
+                imin[l] = ic[l];
+                w[l][0] = 1.0_rt;
+            } else if (use_order4 && ic[l] >= safe_lo[l] && ic[l] <= safe_hi[l]) {
+                np[l] = 4;
+                imin[l] = ic[l] - sc[l]*(1-sf[l]) - 1;
+                w[l][0] = c4a; w[l][1] = c4b; w[l][2] = c4b; w[l][3] = c4a;
+            } else {
+                np[l] = 2;
+                imin[l] = ic[l] - sc[l]*(1-sf[l]);
+                w[l][0] = 0.5_rt; w[l][1] = 0.5_rt;
+            }
+        }
+
+        amrex::Real c = 0.0_rt;
+        for (int kr = 0; kr < np[2]; ++kr) {
+            for (int jr = 0; jr < np[1]; ++jr) {
+                for (int ir = 0; ir < np[0]; ++ir) {
+                    c += w[0][ir]*w[1][jr]*w[2][kr]
+                        *src(imin[0]+ir, imin[1]+jr, imin[2]+kr, comp);
+                }
+            }
+        }
+        return c;
+    }
+}
+#endif
 
 void FiniteDifferenceSolver::CalculateCurrentAmpere (
     ablastr::fields::VectorField & Jfield,
     ablastr::fields::VectorField const& Bfield,
     [[maybe_unused]]std::array< std::unique_ptr<amrex::iMultiFab>,3 > const& eb_update_E,
-    int lev )
+    int lev, [[maybe_unused]] int ngrow )
 {
     // Select algorithm (The choice of algorithm is a runtime option,
     // but we compile code for each algorithm, using templates)
@@ -51,11 +118,11 @@ void FiniteDifferenceSolver::CalculateCurrentAmpere (
     if (WarpX::grid_type == GridType::Staggered)
     {
         CalculateCurrentAmpereCartesian <CartesianYeeAlgorithm> (
-            Jfield, Bfield, eb_update_E, lev
+            Jfield, Bfield, eb_update_E, lev, ngrow
         );
     } else {
         CalculateCurrentAmpereCartesian <CartesianNodalAlgorithm> (
-            Jfield, Bfield, eb_update_E, lev
+            Jfield, Bfield, eb_update_E, lev, ngrow
         );
     }
 
@@ -363,7 +430,7 @@ void FiniteDifferenceSolver::CalculateCurrentAmpereCartesian (
     ablastr::fields::VectorField& Jfield,
     ablastr::fields::VectorField const& Bfield,
     std::array< std::unique_ptr<amrex::iMultiFab>,3 > const& eb_update_E,
-    int lev
+    int lev, int ngrow
 )
 {
     // for the profiler
@@ -407,10 +474,11 @@ void FiniteDifferenceSolver::CalculateCurrentAmpereCartesian (
         Real const * const AMREX_RESTRICT coefs_z = m_stencil_coefs_z.dataPtr();
         auto const n_coefs_z = static_cast<int>(m_stencil_coefs_z.size());
 
-        // Extract tileboxes for which to loop with 1 guard cell included
-        Box const& tjx = mfi.tilebox(Jfield[0]->ixType().toIntVect(), IntVect(1));
-        Box const& tjy = mfi.tilebox(Jfield[1]->ixType().toIntVect(), IntVect(1));
-        Box const& tjz = mfi.tilebox(Jfield[2]->ixType().toIntVect(), IntVect(1));
+        // Extract tileboxes for which to loop, with the guard cells that the
+        // nodal interpolation in the Ohm's law solve will read included
+        Box const& tjx = mfi.tilebox(Jfield[0]->ixType().toIntVect(), IntVect(ngrow));
+        Box const& tjy = mfi.tilebox(Jfield[1]->ixType().toIntVect(), IntVect(ngrow));
+        Box const& tjz = mfi.tilebox(Jfield[2]->ixType().toIntVect(), IntVect(ngrow));
 
         Real const one_over_mu0 = 1._rt / PhysConst::mu0;
 
@@ -1019,6 +1087,43 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     // The "coarsening is just 1 i.e. no coarsening"
     amrex::GpuArray<int, 3> const& coarsen = {1, 1, 1};
 
+    // Order of the staggering interpolation used for the nodal enE
+    // calculation: 2-point half-cell average or 4-point Fornberg stencil
+    const bool use_order4 = (hybrid_model->m_enE_interpolation_order == 4);
+    if (use_order4) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            Jfield[0]->nGrowVect().allGE(IntVect(2)) &&
+            Jifield[0]->nGrowVect().allGE(IntVect(2)) &&
+            Bfield[0]->nGrowVect().allGE(IntVect(2)),
+            "hybrid_pic_model.enE_interpolation_order = 4 requires at least "
+            "2 guard cells for the current and magnetic field");
+    }
+
+    // Along non-periodic axes the 4-point stencil falls back to the 2-point
+    // average wherever it would reach beyond the valid domain data (i.e.
+    // into boundary guard cells), so that the boundary treatment matches the
+    // 2nd-order scheme. The ranges below are the destination indices for
+    // which the full 4-point stencil can be applied, for the Yee-to-nodal
+    // and the nodal-to-Yee hops respectively.
+    amrex::GpuArray<int, 3> yee2n_lo, yee2n_hi, n2yee_lo, n2yee_hi;
+    for (int d = 0; d < 3; ++d) {
+        yee2n_lo[d] = std::numeric_limits<int>::lowest()/2;
+        n2yee_lo[d] = std::numeric_limits<int>::lowest()/2;
+        yee2n_hi[d] = std::numeric_limits<int>::max()/2;
+        n2yee_hi[d] = std::numeric_limits<int>::max()/2;
+    }
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        if (!warpx.Geom(lev).isPeriodic(d)) {
+            const amrex::Box& domain = warpx.Geom(lev).Domain();
+            // Yee -> nodal: cell-centered sources ic-2..ic+1 must lie inside the domain
+            yee2n_lo[d] = domain.smallEnd(d) + 2;
+            yee2n_hi[d] = domain.bigEnd(d) - 1;
+            // nodal -> Yee: nodal sources ic-1..ic+2 must lie inside the domain
+            n2yee_lo[d] = domain.smallEnd(d) + 1;
+            n2yee_hi[d] = domain.bigEnd(d) - 1;
+        }
+    }
+
     // The E-field calculation is done in 2 steps:
     // 1) The J x B term is calculated on a nodal mesh in order to ensure
     //    energy conservation.
@@ -1029,11 +1134,13 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     // Create a temporary multifab to hold the nodal E-field values
     // Note the multifab has 3 values for Ex, Ey and Ez which we can do here
     // since all three components will be calculated on the same grid.
-    // Also note that enE_nodal_mf does not need to have any guard cells since
-    // these values will be interpolated to the Yee mesh which is contained
-    // by the nodal mesh.
+    // With the 2-point average, enE_nodal_mf does not need any guard cells
+    // since the Yee mesh is contained by the nodal mesh; the 4-point stencil
+    // additionally reads one guard node, which is filled by communication
+    // after the nodal values are calculated.
     auto const& ba = convert(rhofield.boxArray(), IntVect::TheNodeVector());
-    MultiFab enE_nodal_mf(ba, rhofield.DistributionMap(), 3, IntVect::TheZeroVector());
+    MultiFab enE_nodal_mf(ba, rhofield.DistributionMap(), 3,
+                          use_order4 ? IntVect(1) : IntVect::TheZeroVector());
 
     // Loop through the grids, and over the tiles within each grid for the
     // initial, nodal calculation of E
@@ -1069,24 +1176,36 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         amrex::ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
             // interpolate the total plasma current to a nodal grid
-            auto const jx_interp = Interp(Jx, Jx_stag, nodal, coarsen, i, j, k, 0);
-            auto const jy_interp = Interp(Jy, Jy_stag, nodal, coarsen, i, j, k, 0);
-            auto const jz_interp = Interp(Jz, Jz_stag, nodal, coarsen, i, j, k, 0);
+            auto const jx_interp = InterpStaggered(
+                Jx, Jx_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+            auto const jy_interp = InterpStaggered(
+                Jy, Jy_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+            auto const jz_interp = InterpStaggered(
+                Jz, Jz_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
 
             // interpolate the ion current to a nodal grid
-            auto const jix_interp = Interp(Jix, Jx_stag, nodal, coarsen, i, j, k, 0);
-            auto const jiy_interp = Interp(Jiy, Jy_stag, nodal, coarsen, i, j, k, 0);
-            auto const jiz_interp = Interp(Jiz, Jz_stag, nodal, coarsen, i, j, k, 0);
+            auto const jix_interp = InterpStaggered(
+                Jix, Jx_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+            auto const jiy_interp = InterpStaggered(
+                Jiy, Jy_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+            auto const jiz_interp = InterpStaggered(
+                Jiz, Jz_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
 
             // interpolate the B field to a nodal grid
-            auto Bx_interp = Interp(Bx, Bx_stag, nodal, coarsen, i, j, k, 0);
-            auto By_interp = Interp(By, By_stag, nodal, coarsen, i, j, k, 0);
-            auto Bz_interp = Interp(Bz, Bz_stag, nodal, coarsen, i, j, k, 0);
+            auto Bx_interp = InterpStaggered(
+                Bx, Bx_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+            auto By_interp = InterpStaggered(
+                By, By_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+            auto Bz_interp = InterpStaggered(
+                Bz, Bz_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
 
             if (include_external_fields) {
-                Bx_interp += Interp(Bx_ext, Bx_stag, nodal, coarsen, i, j, k, 0);
-                By_interp += Interp(By_ext, By_stag, nodal, coarsen, i, j, k, 0);
-                Bz_interp += Interp(Bz_ext, Bz_stag, nodal, coarsen, i, j, k, 0);
+                Bx_interp += InterpStaggered(
+                    Bx_ext, Bx_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+                By_interp += InterpStaggered(
+                    By_ext, By_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+                Bz_interp += InterpStaggered(
+                    Bz_ext, Bz_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
             }
 
             // calculate enE = (J - Ji) x B
@@ -1110,6 +1229,12 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             wt = static_cast<amrex::Real>(amrex::second()) - wt;
             amrex::HostDevice::Atomic::Add( &(*cost)[mfi.index()], wt);
         }
+    }
+
+    // The 4-point nodal-to-Yee stencil reads one guard node of the nodal
+    // enE values, which must be filled from the neighboring boxes.
+    if (use_order4) {
+        enE_nodal_mf.FillBoundary(warpx.Geom(lev).periodicity());
     }
 
     // Loop through the grids, and over the tiles within each grid again
@@ -1174,7 +1299,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             if (update_Ex_arr && update_Ex_arr(i, j, k) == 0) { return; }
 
             // Interpolate to get the appropriate charge density in space
-            const Real rho_val = Interp(rho, nodal, Ex_stag, coarsen, i, j, k, 0);
+            const Real rho_val = InterpStaggered(
+                rho, nodal, Ex_stag, i, j, k, 0, use_order4, n2yee_lo, n2yee_hi);
 
             if (rho_val < rho_floor && holmstrom_vacuum_region) {
                 Ex(i, j, k) = 0._rt;
@@ -1186,7 +1312,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     : 0._rt;
 
                 // interpolate the nodal neE values to the Yee grid
-                const auto enE_x = Interp(enE, nodal, Ex_stag, coarsen, i, j, k, 0);
+                const auto enE_x = InterpStaggered(
+                    enE, nodal, Ex_stag, i, j, k, 0, use_order4, n2yee_lo, n2yee_hi);
 
                 // safety condition since we divide by rho
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
@@ -1238,7 +1365,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             if (update_Ey_arr && update_Ey_arr(i, j, k) == 0) { return; }
 
             // Interpolate to get the appropriate charge density in space
-            const Real rho_val = Interp(rho, nodal, Ey_stag, coarsen, i, j, k, 0);
+            const Real rho_val = InterpStaggered(
+                rho, nodal, Ey_stag, i, j, k, 0, use_order4, n2yee_lo, n2yee_hi);
 
             if (rho_val < rho_floor && holmstrom_vacuum_region) {
                 Ey(i, j, k) = 0._rt;
@@ -1250,7 +1378,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     : 0._rt;
 
                 // interpolate the nodal neE values to the Yee grid
-                const auto enE_y = Interp(enE, nodal, Ey_stag, coarsen, i, j, k, 1);
+                const auto enE_y = InterpStaggered(
+                    enE, nodal, Ey_stag, i, j, k, 1, use_order4, n2yee_lo, n2yee_hi);
 
                 // safety condition since we divide by rho
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
@@ -1302,7 +1431,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             if (update_Ez_arr && update_Ez_arr(i, j, k) == 0) { return; }
 
             // Interpolate to get the appropriate charge density in space
-            const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, k, 0);
+            const Real rho_val = InterpStaggered(
+                rho, nodal, Ez_stag, i, j, k, 0, use_order4, n2yee_lo, n2yee_hi);
 
             if (rho_val < rho_floor && holmstrom_vacuum_region) {
                 Ez(i, j, k) = 0._rt;
@@ -1314,7 +1444,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     : 0._rt;
 
                 // interpolate the nodal neE values to the Yee grid
-                const auto enE_z = Interp(enE, nodal, Ez_stag, coarsen, i, j, k, 2);
+                const auto enE_z = InterpStaggered(
+                    enE, nodal, Ez_stag, i, j, k, 2, use_order4, n2yee_lo, n2yee_hi);
 
                 // safety condition since we divide by rho
                 const auto rho_val_limited = std::max(rho_val, rho_floor);

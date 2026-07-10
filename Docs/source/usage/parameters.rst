@@ -3701,6 +3701,23 @@ Maxwell solver: kinetic-fluid hybrid
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the plasma density floor, in :math:`m^{-3}`, which is useful since the generalized Ohm's law used to calculate the E-field includes a :math:`1/n` term.
 
+.. pp:param:: hybrid_pic_model.enE_interpolation_order
+    :type: ``int``
+    :default: ``2``
+    :optional:
+
+    If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this selects the order of the staggering
+    interpolation used to form :math:`en\vec{E} = (\vec{J} - \vec{J_i}) \times \vec{B}` on the nodal grid
+    and to bring the nodal :math:`en\vec{E}` and :math:`\rho` values back to the Yee E-field locations.
+    The default value of ``2`` uses 2-point half-cell averages, whose leading error is a second-order,
+    axis-aligned (anisotropic) smoothing that imprints an :math:`m=4` azimuthal mode on axisymmetric
+    configurations. A value of ``4`` uses the symmetric 4-point Fornberg stencil
+    :math:`(-1/16, 9/16, 9/16, -1/16)`, which is 4th-order accurate at the half-cell shift.
+    Along non-periodic axes the wider stencil automatically falls back to the 2-point average
+    next to the domain boundaries. Only implemented for Cartesian geometries.
+    Note that the interpolation used for the :math:`|J|` and :math:`|B|` dependence of the
+    (hyper-)resistivity coefficients is unaffected by this option.
+
 .. pp:param:: hybrid_pic_model.substeps
     :type: ``int``
     :default: ``10``
