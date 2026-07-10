@@ -359,6 +359,20 @@ public:
      *  RZ resistive operator is axisymmetric and has no such anisotropy). */
     bool m_isotropic_resistivity = false;
 
+    /** If true (opt-in), evaluate the electron-pressure gradient of Ohm's law
+     *  with the transversely binomial-smoothed (isotropic) difference instead
+     *  of the bare two-point stencil, cancelling the cos(4*theta) directional
+     *  bias the bare gradient imprints on the gathered pressure E of a radial
+     *  density feature (an m=4 source in the ion push). The term never enters
+     *  the Faraday push (grad Pe is omitted there since its discrete curl
+     *  vanishes), so the field advance is untouched. Within the corner reach
+     *  of an embedded boundary the bare stencil is kept (same compact
+     *  downgrade band as the isotropic Laplacian): the Pe mirror band is one
+     *  cell deep and the smoothed stencil's diagonal taps would read the
+     *  zeroed deep region. 3D Cartesian only (reduces to the bare difference
+     *  elsewhere). */
+    bool m_isotropic_pressure_grad = false;
+
     /** External current */
     std::string m_Jx_ext_grid_function = "0.0";
     std::string m_Jy_ext_grid_function = "0.0";
