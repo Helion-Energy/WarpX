@@ -72,6 +72,19 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("plasma_resistivity(rho,J,t)", m_eta_expression);
     pp_hybrid.query("plasma_hyper_resistivity(rho,B)", m_eta_h_expression);
 
+    // isotropized stencil upgrades of the dissipative/gradient terms
+    // (Cartesian 2D/3D only; see IsotropicOperators.H)
+    pp_hybrid.query("isotropic_hyper_resistivity", m_isotropic_hyper_resistivity);
+    pp_hybrid.query("isotropic_resistivity", m_isotropic_resistivity);
+    pp_hybrid.query("isotropic_gradient", m_isotropic_gradient);
+#if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_XZ)
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_isotropic_hyper_resistivity && !m_isotropic_resistivity
+            && !m_isotropic_gradient,
+        "hybrid_pic_model.isotropic_* options are only implemented for the "
+        "Cartesian 2D (XZ) and 3D geometries");
+#endif
+
     utils::parser::queryWithParser(pp_hybrid, "n_floor", m_n_floor);
 
     // convert electron temperature from eV to J
