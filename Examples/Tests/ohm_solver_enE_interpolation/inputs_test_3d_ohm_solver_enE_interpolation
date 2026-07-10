@@ -35,7 +35,6 @@ algo.current_deposition = direct
 hybrid_pic_model.elec_temp = 0.01
 hybrid_pic_model.n0_ref = 1e18
 hybrid_pic_model.gamma = 1.0
-hybrid_pic_model.plasma_resistivity = 0.0
 hybrid_pic_model.n_floor = 1e12
 hybrid_pic_model.substeps = 10
 hybrid_pic_model.enE_interpolation_order = 2
