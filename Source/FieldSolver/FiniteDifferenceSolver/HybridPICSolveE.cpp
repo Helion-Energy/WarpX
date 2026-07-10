@@ -1124,6 +1124,25 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         }
     }
 
+    // Near an embedded boundary the 4-point stencil likewise falls back to
+    // the 2-point average instead of reading EB-gated values deeper inside
+    // the boundary region (the same near-wall downgrade pattern as the
+    // isotropic operators). The bands below are the stencil reach plus a
+    // half cell for the staggering offset of the sample relative to the
+    // nodal signed-distance lattice: the Yee-to-nodal hops read up to 1.5
+    // cells away along up to two mismatched axes (the face-staggered B
+    // components), the nodal-to-Yee hops along one.
+    amrex::MultiFab const* enE_phi_mf = (use_order4 && EB::enabled())
+        ? warpx.m_fields.get(FieldType::distance_to_eb, lev)
+        : nullptr;
+    amrex::Real h_max_o4 = 0._rt;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        h_max_o4 = std::max(h_max_o4, warpx.Geom(lev).CellSizeArray()[d]);
+    }
+    const amrex::Real d_o4_yee2n =
+        (1.5_rt*std::sqrt(2._rt) + 0.5_rt) * h_max_o4;
+    const amrex::Real d_o4_n2yee = 2._rt * h_max_o4;
+
     // The E-field calculation is done in 2 steps:
     // 1) The J x B term is calculated on a nodal mesh in order to ensure
     //    energy conservation.
@@ -1172,40 +1191,50 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             Bz_ext = Bfield_external[2]->array(mfi);
         }
 
+        // Nodal signed distance for the near-EB stencil downgrade (empty
+        // Array4 when EB is off or the 2-point average is selected).
+        amrex::Array4<amrex::Real const> enE_phi;
+        if (enE_phi_mf) { enE_phi = enE_phi_mf->const_array(mfi); }
+
         // Loop over the cells and update the nodal E field
         amrex::ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
+            // Fall back to the 2-point average within a stencil reach of
+            // the embedded boundary
+            const bool o4 = use_order4
+                && (!enE_phi || enE_phi(i, j, k) >= d_o4_yee2n);
+
             // interpolate the total plasma current to a nodal grid
             auto const jx_interp = InterpStaggered(
-                Jx, Jx_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+                Jx, Jx_stag, nodal, i, j, k, 0, o4, yee2n_lo, yee2n_hi);
             auto const jy_interp = InterpStaggered(
-                Jy, Jy_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+                Jy, Jy_stag, nodal, i, j, k, 0, o4, yee2n_lo, yee2n_hi);
             auto const jz_interp = InterpStaggered(
-                Jz, Jz_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+                Jz, Jz_stag, nodal, i, j, k, 0, o4, yee2n_lo, yee2n_hi);
 
             // interpolate the ion current to a nodal grid
             auto const jix_interp = InterpStaggered(
-                Jix, Jx_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+                Jix, Jx_stag, nodal, i, j, k, 0, o4, yee2n_lo, yee2n_hi);
             auto const jiy_interp = InterpStaggered(
-                Jiy, Jy_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+                Jiy, Jy_stag, nodal, i, j, k, 0, o4, yee2n_lo, yee2n_hi);
             auto const jiz_interp = InterpStaggered(
-                Jiz, Jz_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+                Jiz, Jz_stag, nodal, i, j, k, 0, o4, yee2n_lo, yee2n_hi);
 
             // interpolate the B field to a nodal grid
             auto Bx_interp = InterpStaggered(
-                Bx, Bx_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+                Bx, Bx_stag, nodal, i, j, k, 0, o4, yee2n_lo, yee2n_hi);
             auto By_interp = InterpStaggered(
-                By, By_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+                By, By_stag, nodal, i, j, k, 0, o4, yee2n_lo, yee2n_hi);
             auto Bz_interp = InterpStaggered(
-                Bz, Bz_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+                Bz, Bz_stag, nodal, i, j, k, 0, o4, yee2n_lo, yee2n_hi);
 
             if (include_external_fields) {
                 Bx_interp += InterpStaggered(
-                    Bx_ext, Bx_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+                    Bx_ext, Bx_stag, nodal, i, j, k, 0, o4, yee2n_lo, yee2n_hi);
                 By_interp += InterpStaggered(
-                    By_ext, By_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+                    By_ext, By_stag, nodal, i, j, k, 0, o4, yee2n_lo, yee2n_hi);
                 Bz_interp += InterpStaggered(
-                    Bz_ext, Bz_stag, nodal, i, j, k, 0, use_order4, yee2n_lo, yee2n_hi);
+                    Bz_ext, Bz_stag, nodal, i, j, k, 0, o4, yee2n_lo, yee2n_hi);
             }
 
             // calculate enE = (J - Ji) x B
@@ -1272,6 +1301,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             update_Ez_arr = eb_update_E[2]->array(mfi);
         }
 
+        // Nodal signed distance for the near-EB stencil downgrade (empty
+        // Array4 when EB is off or the 2-point average is selected).
+        amrex::Array4<amrex::Real const> enE_phi;
+        if (enE_phi_mf) { enE_phi = enE_phi_mf->const_array(mfi); }
+
         Array4<Real> Ex_ext, Ey_ext, Ez_ext;
         if (include_external_fields) {
             Ex_ext = Efield_external[0]->array(mfi);
@@ -1298,9 +1332,14 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             // Skip field update in the embedded boundaries
             if (update_Ex_arr && update_Ex_arr(i, j, k) == 0) { return; }
 
+            // Fall back to the 2-point average within a stencil reach of
+            // the embedded boundary
+            const bool o4 = use_order4
+                && (!enE_phi || enE_phi(i, j, k) >= d_o4_n2yee);
+
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = InterpStaggered(
-                rho, nodal, Ex_stag, i, j, k, 0, use_order4, n2yee_lo, n2yee_hi);
+                rho, nodal, Ex_stag, i, j, k, 0, o4, n2yee_lo, n2yee_hi);
 
             if (rho_val < rho_floor && holmstrom_vacuum_region) {
                 Ex(i, j, k) = 0._rt;
@@ -1313,7 +1352,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 
                 // interpolate the nodal neE values to the Yee grid
                 const auto enE_x = InterpStaggered(
-                    enE, nodal, Ex_stag, i, j, k, 0, use_order4, n2yee_lo, n2yee_hi);
+                    enE, nodal, Ex_stag, i, j, k, 0, o4, n2yee_lo, n2yee_hi);
 
                 // safety condition since we divide by rho
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
@@ -1364,9 +1403,14 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             // Skip field update in the embedded boundaries
             if (update_Ey_arr && update_Ey_arr(i, j, k) == 0) { return; }
 
+            // Fall back to the 2-point average within a stencil reach of
+            // the embedded boundary
+            const bool o4 = use_order4
+                && (!enE_phi || enE_phi(i, j, k) >= d_o4_n2yee);
+
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = InterpStaggered(
-                rho, nodal, Ey_stag, i, j, k, 0, use_order4, n2yee_lo, n2yee_hi);
+                rho, nodal, Ey_stag, i, j, k, 0, o4, n2yee_lo, n2yee_hi);
 
             if (rho_val < rho_floor && holmstrom_vacuum_region) {
                 Ey(i, j, k) = 0._rt;
@@ -1379,7 +1423,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 
                 // interpolate the nodal neE values to the Yee grid
                 const auto enE_y = InterpStaggered(
-                    enE, nodal, Ey_stag, i, j, k, 1, use_order4, n2yee_lo, n2yee_hi);
+                    enE, nodal, Ey_stag, i, j, k, 1, o4, n2yee_lo, n2yee_hi);
 
                 // safety condition since we divide by rho
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
@@ -1430,9 +1474,14 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             // Skip field update in the embedded boundaries
             if (update_Ez_arr && update_Ez_arr(i, j, k) == 0) { return; }
 
+            // Fall back to the 2-point average within a stencil reach of
+            // the embedded boundary
+            const bool o4 = use_order4
+                && (!enE_phi || enE_phi(i, j, k) >= d_o4_n2yee);
+
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = InterpStaggered(
-                rho, nodal, Ez_stag, i, j, k, 0, use_order4, n2yee_lo, n2yee_hi);
+                rho, nodal, Ez_stag, i, j, k, 0, o4, n2yee_lo, n2yee_hi);
 
             if (rho_val < rho_floor && holmstrom_vacuum_region) {
                 Ez(i, j, k) = 0._rt;
@@ -1445,7 +1494,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 
                 // interpolate the nodal neE values to the Yee grid
                 const auto enE_z = InterpStaggered(
-                    enE, nodal, Ez_stag, i, j, k, 2, use_order4, n2yee_lo, n2yee_hi);
+                    enE, nodal, Ez_stag, i, j, k, 2, o4, n2yee_lo, n2yee_hi);
 
                 // safety condition since we divide by rho
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
