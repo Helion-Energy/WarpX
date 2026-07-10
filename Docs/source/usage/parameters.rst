@@ -2514,6 +2514,26 @@ are applied to the grid directly. In particular, these fields can be seen in the
     ``read_from_file``, the openPMD file specified by ``warpx.read_fields_from_path``
     should contain both B and E external fields data.
 
+.. pp:param:: warpx.external_fields_interp_order
+    :type: ``int``
+    :default: ``1``
+    :optional:
+
+    Order of the interpolation used when sampling external field data read from an
+    openPMD file (``read_from_file``) onto the simulation grid. The file lattice is
+    placed according to the openPMD ``position`` attribute of each field component, so
+    data written at the target staggering is sampled exactly, without interpolation
+    error. When the staggerings do not match (e.g. node-centered file data loaded onto
+    the staggered Yee grid), the default value of ``1`` resamples with n-linear
+    interpolation, whose leading error is a second-order, per-component axis-aligned
+    smoothing that imprints an :math:`m=4` azimuthal mode on axisymmetric fields.
+    A value of ``2`` uses a quadratic B-spline (momentum-conserving style) stencil in
+    every direction: its leading error is the isotropic Laplacian smoothing,
+    independent of the in-cell offset, which suppresses the :math:`m=4` anisotropy at
+    leading order. Note that the quadratic stencil is not interpolatory: it smooths
+    the data even where file and target staggerings match, so it should only be used
+    for staggering-mismatched (e.g. nodal) files.
+
 .. pp:param:: warpx.E/B_external_grid
     :link_aliases:
         warpx.E_external_grid
