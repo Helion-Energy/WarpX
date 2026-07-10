@@ -238,6 +238,28 @@ public:
     bool m_include_hyper_resistivity_term = false;
     bool m_hyper_resistivity_has_B_dependence = false;
 
+    /** Evaluate the hyper-resistivity Laplacian of the plasma current with the
+     *  isotropic Mehrstellen (2D) / Patra-Karttunen (3D) stencils instead of
+     *  the cross stencil, removing the cos(4*theta) grid anisotropy of its
+     *  damping rate (fully isotropic on cubic cells; Cartesian only). */
+    bool m_isotropic_hyper_resistivity = false;
+
+    /** Isotropize the in-plane resistive diffusion of the out-of-plane B
+     *  component (Bz in 3D, By in 2D XZ): a corner-curl correction added to
+     *  the in-plane E components makes the Faraday curl of the resistive E
+     *  emit the isotropic (Mehrstellen) Laplacian instead of the cross
+     *  stencil. This preserves div(B) exactly since the correction enters
+     *  only through E (Cartesian only). */
+    bool m_isotropic_resistivity = false;
+
+    /** Evaluate the electron-pressure gradient in Ohm's law with the
+     *  transverse-smoothed (isotropized) staggered difference instead of the
+     *  plain two-point stencil, removing the cos(4*theta) grid anisotropy of
+     *  |grad Pe| (fully isotropic on cubic cells; Cartesian only). Only
+     *  affects the E used for the particle push and diagnostics: the
+     *  Faraday/B-integration path omits grad(Pe) entirely. */
+    bool m_isotropic_gradient = false;
+
     /** External current */
     std::string m_Jx_ext_grid_function = "0.0";
     std::string m_Jy_ext_grid_function = "0.0";
