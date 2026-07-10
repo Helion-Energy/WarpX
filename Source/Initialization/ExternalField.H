@@ -82,14 +82,86 @@ struct ExternalFieldParams
  */
 struct ExternalFieldView
 {
+    //! Quadratic B-spline weights for the three lattice points nearest
+    //! to a target at in-cell offset t in [-1/2, 1/2].
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    static void quadratic_weights (amrex::Real t, amrex::Real w[3])
+    {
+        w[0] = amrex::Real(0.5)*(amrex::Real(0.5)-t)*(amrex::Real(0.5)-t);
+        w[1] = amrex::Real(0.75) - t*t;
+        w[2] = amrex::Real(0.5)*(amrex::Real(0.5)+t)*(amrex::Real(0.5)+t);
+    }
+
     //! Return value for given position. Linear interpolation is
-    //! performed. This returns zero if no data are available.
+    //! performed by default. With interp_order = 2, a quadratic
+    //! B-spline (momentum-conserving style) stencil is used in every
+    //! direction: its leading error is the isotropic (dx^2/8) Laplacian
+    //! of the field, independent of the in-cell offset, so resampling
+    //! staggered target points from nodal file data does not imprint an
+    //! axis-aligned (m=4) anisotropy. Note that order 2 is not
+    //! interpolatory: it smooths the data even where the target point
+    //! coincides with a file lattice point. This returns zero if no
+    //! data are available; points too close to the data edge for the
+    //! quadratic stencil fall back to linear interpolation.
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
     amrex::Real operator() (amrex::RealVect const& pos) const
     {
 #if defined(AMREX_USE_GPU)
         AMREX_IF_ON_HOST((amrex::Abort("For GPU builds, ExternalFieldView only works on device. We could make it work on host if necessary.");))
 #endif
+
+        if (interp_order == 2) {
+            // Nearest lattice point and in-cell offset in [-1/2, 1/2]
+            AMREX_D_TERM(const amrex::Real g0 = (pos[0]-offset[0])/dx[0];,
+                         const amrex::Real g1 = (pos[1]-offset[1])/dx[1];,
+                         const amrex::Real g2 = (pos[2]-offset[2])/dx[2]);
+            AMREX_D_TERM(const auto j0 = static_cast<int>(std::floor(g0 + amrex::Real(0.5)));,
+                         const auto j1 = static_cast<int>(std::floor(g1 + amrex::Real(0.5)));,
+                         const auto j2 = static_cast<int>(std::floor(g2 + amrex::Real(0.5))));
+#if (AMREX_SPACEDIM == 1)
+            const bool has_stencil = (j0-1 >= table.begin && j0+1 < table.end);
+#else
+            const bool has_stencil =
+                AMREX_D_TERM(   (j0-1 >= table.begin[0] && j0+1 < table.end[0]),
+                             && (j1-1 >= table.begin[1] && j1+1 < table.end[1]),
+                             && (j2-1 >= table.begin[2] && j2+1 < table.end[2]));
+#endif
+            if (has_stencil) {
+                amrex::Real w0[3];
+                quadratic_weights(g0 - j0, w0);
+#if (AMREX_SPACEDIM >= 2)
+                amrex::Real w1[3];
+                quadratic_weights(g1 - j1, w1);
+#endif
+#if (AMREX_SPACEDIM == 3)
+                amrex::Real w2[3];
+                quadratic_weights(g2 - j2, w2);
+#endif
+                double sum = 0.0;
+#if (AMREX_SPACEDIM == 1)
+                for (int a = 0; a < 3; ++a) {
+                    sum += double(w0[a]) * table(j0-1+a);
+                }
+#elif (AMREX_SPACEDIM == 2)
+                for (int b = 0; b < 3; ++b) {
+                    for (int a = 0; a < 3; ++a) {
+                        sum += double(w0[a]) * double(w1[b]) * table(j0-1+a, j1-1+b);
+                    }
+                }
+#elif (AMREX_SPACEDIM == 3)
+                for (int c = 0; c < 3; ++c) {
+                    for (int b = 0; b < 3; ++b) {
+                        for (int a = 0; a < 3; ++a) {
+                            sum += double(w0[a]) * double(w1[b]) * double(w2[c])
+                                * table(j0-1+a, j1-1+b, j2-1+c);
+                        }
+                    }
+                }
+#endif
+                return static_cast<amrex::Real>(sum);
+            }
+            // Fall through to linear interpolation near the data edge.
+        }
 
         // Get index of the external field array
         AMREX_D_TERM(const auto i0 = static_cast<int>(std::floor( (pos[0]-offset[0])/dx[0] ));,
@@ -161,6 +233,7 @@ struct ExternalFieldView
 
     amrex::RealVect dx;     //! mesh spacing of the data
     amrex::RealVect offset; //! data's physical location at (0,0,0)
+    int interp_order = 1;   //! 1: n-linear, 2: quadratic B-spline (MC-style)
 #if (AMREX_SPACEDIM == 1)
     amrex::Table1D<double> table;
 #elif (AMREX_SPACEDIM == 2)
@@ -247,6 +320,7 @@ private:
     std::string m_file;      //! OpenMPD file name
     std::string m_name;      //! Field name
     std::string m_component; //! Component name
+    int m_interp_order = 1;  //! interpolation order used by the views (1 or 2)
     amrex::GpuArray<amrex::Real,AMREX_SPACEDIM> m_problo; //! WarpX's initial prob lo
     amrex::GpuArray<amrex::Real,AMREX_SPACEDIM> m_probdx; //! WarpX's cell size
     amrex::Box m_dombox;                                  //! WarpX's initial domain

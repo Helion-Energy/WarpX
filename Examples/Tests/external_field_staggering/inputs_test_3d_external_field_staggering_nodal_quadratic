@@ -1,0 +1,8 @@
+# base input parameters
+FILE = inputs_base_3d
+
+# nodal file resampled with the quadratic B-spline (momentum-conserving
+# style) interpolation: its leading error is the isotropic Laplacian
+# smoothing, so the m=4 anisotropy cancels at leading order
+warpx.read_fields_from_path = "../test_3d_external_field_staggering_prepare/ext_fields_nodal.h5"
+warpx.external_fields_interp_order = 2

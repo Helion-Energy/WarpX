@@ -63,6 +63,13 @@ protected:
     // Clean div A
     bool m_do_clean_divA = true;
 
+    /** Isotropize the leading truncation error of B = curl A by
+     *  preconditioning each A component along its own axis (see
+     *  FiniteDifferenceSolver::ComputeCurlACartesian). Removes the m=4
+     *  azimuthal imprint of the Yee curl on axisymmetric vector potentials;
+     *  B remains exactly divergence-free. 3D Cartesian staggered only. */
+    bool m_iso_curl = false;
+
 public:
 
     // Default Constructor

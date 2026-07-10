@@ -203,7 +203,13 @@ ExternalFieldReader::ExternalFieldReader (
       m_probdx(pdx),
       m_dombox(dombox),
       m_distributed(distributed)
-{}
+{
+    const amrex::ParmParse pp_warpx("warpx");
+    pp_warpx.query("external_fields_interp_order", m_interp_order);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_interp_order == 1 || m_interp_order == 2,
+        "warpx.external_fields_interp_order must be 1 (n-linear) or 2 (quadratic B-spline)");
+}
 
 void ExternalFieldReader::load_data (amrex::RealBox const& pbox)
 {
@@ -582,6 +588,7 @@ ExternalFieldView ExternalFieldReader::make_view (amrex::BaseFab<double> const& 
     view.dx = m_dx;
     view.offset = m_offset;
     view.global_size = m_size;
+    view.interp_order = m_interp_order;
 
     const auto* p = fab.dataPtr();
     if (p) {

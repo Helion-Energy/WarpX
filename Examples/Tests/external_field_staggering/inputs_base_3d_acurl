@@ -1,0 +1,55 @@
+# Test bed for the A -> B curl of the hybrid external-field (coil drive)
+# path: an axisymmetric vector potential with a closed-form curl is read
+# from an openPMD file at the exact edge staggering (so the reader samples
+# it exactly) and B_ext = curl A is computed by the solver. A one-step
+# hybrid run with cold, regularly placed ions and a tiny time step leaves
+# the plasma fields at round-off, so the dumped raw B equals B_ext and any
+# deviation from the analytic curl measures the discrete curl alone.
+
+max_step = 1
+warpx.const_dt = 1e-15
+
+amr.n_cell = 64 64 8
+amr.max_grid_size = 64
+amr.max_level = 0
+
+geometry.dims = 3
+geometry.prob_lo = -0.8 -0.8 0.0
+geometry.prob_hi =  0.8  0.8 0.2
+
+boundary.field_lo = periodic periodic periodic
+boundary.field_hi = periodic periodic periodic
+boundary.particle_lo = periodic periodic periodic
+boundary.particle_hi = periodic periodic periodic
+
+algo.maxwell_solver = hybrid
+algo.particle_shape = 1
+algo.current_deposition = direct
+
+hybrid_pic_model.elec_temp = 0.01
+hybrid_pic_model.n0_ref = 1e18
+hybrid_pic_model.gamma = 1.0
+hybrid_pic_model.n_floor = 1e12
+hybrid_pic_model.substeps = 2
+hybrid_pic_model.add_external_fields = 1
+
+external_vector_potential.fields = coil
+external_vector_potential.coil.read_from_file = 1
+external_vector_potential.coil.path = "../test_3d_external_field_staggering_prepare/ext_A_yee.h5"
+external_vector_potential.do_diva_cleaning = 0
+
+particles.species_names = ions
+ions.charge = q_e
+ions.mass = m_p
+ions.injection_style = NUniformPerCell
+ions.num_particles_per_cell_each_dim = 2 2 2
+ions.profile = constant
+ions.density = 1e18
+ions.momentum_distribution_type = at_rest
+
+diagnostics.diags_names = diag1
+diag1.diag_type = Full
+diag1.intervals = 1
+diag1.format = plotfile
+diag1.fields_to_plot = Ex Ey Ez Bx By Bz
+diag1.plot_raw_fields = 1

@@ -2503,6 +2503,26 @@ are applied to the grid directly. In particular, these fields can be seen in the
     ``read_from_file``, the openPMD file specified by ``warpx.read_fields_from_path``
     should contain both B and E external fields data.
 
+.. pp:param:: warpx.external_fields_interp_order
+    :type: ``int``
+    :default: ``1``
+    :optional:
+
+    Order of the interpolation used when sampling external field data read from an
+    openPMD file (``read_from_file``) onto the simulation grid. The file lattice is
+    placed according to the openPMD ``position`` attribute of each field component, so
+    data written at the target staggering is sampled exactly, without interpolation
+    error. When the staggerings do not match (e.g. node-centered file data loaded onto
+    the staggered Yee grid), the default value of ``1`` resamples with n-linear
+    interpolation, whose leading error is a second-order, per-component axis-aligned
+    smoothing that imprints an :math:`m=4` azimuthal mode on axisymmetric fields.
+    A value of ``2`` uses a quadratic B-spline (momentum-conserving style) stencil in
+    every direction: its leading error is the isotropic Laplacian smoothing,
+    independent of the in-cell offset, which suppresses the :math:`m=4` anisotropy at
+    leading order. Note that the quadratic stencil is not interpolatory: it smooths
+    the data even where file and target staggerings match, so it should only be used
+    for staggering-mismatched (e.g. nodal) files.
+
 .. pp:param:: warpx.E/B_external_grid
     :link_aliases:
         warpx.E_external_grid
@@ -4224,6 +4244,28 @@ Maxwell solver: kinetic-fluid hybrid
     :optional:
 
     This enables or disables the divergence cleaner application to the external A fields.
+
+.. pp:param:: external_vector_potential.isotropic_curl
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If ``true`` (opt-in), the curl that computes the external B from the external vector
+    potential preconditions each A component with the compact second difference along its
+    own axis, :math:`S_a = 1 + \delta_a^2/24`, before the standard Yee curl. The plain Yee
+    curl's leading truncation error contains a fourfold (:math:`m=4`) azimuthal harmonic
+    on axisymmetric vector potentials; with the preconditioning the leading error becomes
+    the isotropic Laplacian smoothing of B, cancelling the :math:`m=4` imprint at leading
+    order (it converges at 4th instead of 2nd order). The corrected B is still an exact
+    discrete curl, so it remains exactly divergence-free on the staggered mesh. The
+    correction is skipped within one cell of non-periodic domain boundaries and within a
+    stencil reach of an embedded boundary, where it falls back to the plain Yee curl.
+    Only implemented for 3D Cartesian staggered grids.
+    Note that only the contributions of the transverse components (:math:`A_x`,
+    :math:`A_y`, i.e. :math:`A_\theta` for an axisymmetric coil drive) are isotropized:
+    :math:`A_z` is read by both in-plane derivatives and no divergence-preserving
+    per-component preconditioning can isotropize both uses, so :math:`B_\theta` fields
+    driven by :math:`A_z` keep the plain Yee curl error.
 
 .. pp:param:: external_vector_potential.fields
     :type: list of ``str``
