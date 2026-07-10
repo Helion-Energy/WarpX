@@ -4119,6 +4119,22 @@ Maxwell solver: kinetic-fluid hybrid
     with :pp:param:`hybrid_pic_model.isotropic_hyper_resistivity`; no effect off the
     staggered conformal path.
 
+.. pp:param:: hybrid_pic_model.isotropic_domain_edge_compact
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If ``true`` (opt-in), along non-periodic axes the isotropic operators are downgraded
+    within one cell of the domain boundary: the isotropic hyper-resistivity Laplacian
+    falls back to the compact cross stencil and the corner-curl resistive correction is
+    skipped. There the diagonal reads of both stencils would leave the domain interior
+    and land on boundary-condition guard data; with the downgrade the boundary treatment
+    matches the non-isotropic scheme (the same near-edge order reduction used by the
+    4th-order enE interpolation). Periodic axes are unaffected, since their guard data
+    is a valid periodic wrap. Only meaningful together with
+    :pp:param:`hybrid_pic_model.isotropic_hyper_resistivity` and/or
+    :pp:param:`hybrid_pic_model.isotropic_resistivity`.
+
 .. pp:param:: hybrid_pic_model.isotropic_resistivity
     :type: ``bool``
     :default: ``false``

@@ -26,6 +26,7 @@
 
 #include <ablastr/coarsen/sample.H>
 
+#include <limits>
 #include <type_traits>
 
 using namespace amrex;
@@ -1416,6 +1417,39 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     const amrex::Real d_iso_compact =
         (std::sqrt(static_cast<amrex::Real>(AMREX_SPACEDIM)) + 0.5_rt) * h_max_iso;
 
+    // Opt-in near-domain-edge downgrade of the isotropic operators
+    // (hybrid_pic_model.isotropic_domain_edge_compact): along non-periodic
+    // axes, within one cell of the domain boundary the diagonal reads of
+    // the isotropic Laplacian and of the corner-curl correction would leave
+    // the domain interior and land on boundary-condition guard data; fall
+    // back to the compact cross Laplacian / plain resistive diffusion there
+    // so the boundary treatment matches the non-isotropic scheme. The
+    // ranges below are the destination indices whose +-1 reads stay inside
+    // the domain, per E-component staggering (periodic axes and unused
+    // dimensions are unrestricted).
+    const bool iso_edge_compact = (iso_hyper || iso_resistivity)
+        && hybrid_model->m_isotropic_domain_edge_compact;
+    amrex::GpuArray<int,3> exi_lo, exi_hi, eyi_lo, eyi_hi, ezi_lo, ezi_hi;
+    for (int d = 0; d < 3; ++d) {
+        exi_lo[d] = eyi_lo[d] = ezi_lo[d] = std::numeric_limits<int>::lowest()/2;
+        exi_hi[d] = eyi_hi[d] = ezi_hi[d] = std::numeric_limits<int>::max()/2;
+    }
+    if (iso_edge_compact) {
+        const auto& geom_lev = WarpX::GetInstance().Geom(lev);
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            if (!geom_lev.isPeriodic(d)) {
+                // stagger 0 (cell-centered): +-1 reads stay in [lo, hi];
+                // stagger 1 (nodal): +-1 reads stay in [lo, hi+1]
+                exi_lo[d] = geom_lev.Domain().smallEnd(d) + 1;
+                eyi_lo[d] = geom_lev.Domain().smallEnd(d) + 1;
+                ezi_lo[d] = geom_lev.Domain().smallEnd(d) + 1;
+                exi_hi[d] = geom_lev.Domain().bigEnd(d) - 1 + hybrid_model->Ex_IndexType[d];
+                eyi_hi[d] = geom_lev.Domain().bigEnd(d) - 1 + hybrid_model->Ey_IndexType[d];
+                ezi_hi[d] = geom_lev.Domain().bigEnd(d) - 1 + hybrid_model->Ez_IndexType[d];
+            }
+        }
+    }
+
     auto & warpx = WarpX::GetInstance();
     const amrex::Real t_new = warpx.gett_new(lev);
     ablastr::fields::VectorField Bfield_external, Efield_external;
@@ -1653,6 +1687,14 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             // Skip field update in the embedded boundaries
             //if (update_Ex_arr && update_Ex_arr(i, j, k) == 0) { return; }
 
+            // Near-domain-edge downgrade of the isotropic operators (opt-in):
+            // true where the +-1 diagonal reads stay inside the domain along
+            // every non-periodic axis.
+            const bool iso_interior_x = !iso_edge_compact
+                || (i >= exi_lo[0] && i <= exi_hi[0]
+                 && j >= exi_lo[1] && j <= exi_hi[1]
+                 && k >= exi_lo[2] && k <= exi_hi[2]);
+
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ex_stag, coarsen, i, j, k, 0);
             // Decision density for the vacuum switch/blend (physics keeps rho_val)
@@ -1734,7 +1776,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         btot_val = std::sqrt(bx_val*bx_val + by_val*by_val + bz_val*bz_val);
                     }
 
-                    const bool iso_x = iso_hyper && (!iso_wall_compact
+                    const bool iso_x = iso_hyper && iso_interior_x && (!iso_wall_compact
                         || iso_phi(i, j, k) >= d_iso_compact);
                     const Real nabla2Jx = iso_x
                         ? warpx::hybrid_isotropic::LaplacianIsotropic(Jx, i, j, k, h2, inv_h2)
@@ -1751,7 +1793,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 // Isotropize the in-plane resistive diffusion of the
                 // out-of-plane B (Bz in 3D, By in 2D XZ) via the corner-curl
                 // correction; div(B) preserved (added through E).
-                if (iso_resistivity) {
+                if (iso_resistivity && iso_interior_x) {
                     // Runtime if (not if constexpr): nvcc forbids an extended
                     // __device__ lambda from first-capturing a variable inside a
                     // constexpr-if. The condition is still compile-time constant,
@@ -1790,6 +1832,14 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 
             // Skip field update in the embedded boundaries
             //if (update_Ey_arr && update_Ey_arr(i, j, k) == 0) { return; }
+
+            // Near-domain-edge downgrade of the isotropic operators (opt-in):
+            // true where the +-1 diagonal reads stay inside the domain along
+            // every non-periodic axis.
+            const bool iso_interior_y = !iso_edge_compact
+                || (i >= eyi_lo[0] && i <= eyi_hi[0]
+                 && j >= eyi_lo[1] && j <= eyi_hi[1]
+                 && k >= eyi_lo[2] && k <= eyi_hi[2]);
 
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ey_stag, coarsen, i, j, k, 0);
@@ -1872,7 +1922,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         btot_val = std::sqrt(bx_val*bx_val + by_val*by_val + bz_val*bz_val);
                     }
 
-                    const bool iso_y = iso_hyper && (!iso_wall_compact
+                    const bool iso_y = iso_hyper && iso_interior_y && (!iso_wall_compact
                         || iso_phi(i, j, k) >= d_iso_compact);
                     const Real nabla2Jy = iso_y
                         ? warpx::hybrid_isotropic::LaplacianIsotropic(Jy, i, j, k, h2, inv_h2)
@@ -1889,7 +1939,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 // Bz corner-curl correction, second (Ey) half (3D only; in
                 // 2D XZ the out-of-plane corner is delivered via Ex and Ez).
 #if defined(WARPX_DIM_3D)
-                if (iso_resistivity) {
+                if (iso_resistivity && iso_interior_y) {
                     if (std::is_same_v<T_Algo, CartesianNodalAlgorithm>) {
                         Ey(i, j, k) += eta_val
                             * warpx::hybrid_isotropic::CornerResistiveEy_3D_Nodal(Bz, i, j, k, dx_arr, inv_mu0);
@@ -1911,6 +1961,14 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 
             // Skip field update in the embedded boundaries
             //if (update_Ez_arr && update_Ez_arr(i, j, k) == 0) { return; }
+
+            // Near-domain-edge downgrade of the isotropic operators (opt-in):
+            // true where the +-1 diagonal reads stay inside the domain along
+            // every non-periodic axis.
+            const bool iso_interior_z = !iso_edge_compact
+                || (i >= ezi_lo[0] && i <= ezi_hi[0]
+                 && j >= ezi_lo[1] && j <= ezi_hi[1]
+                 && k >= ezi_lo[2] && k <= ezi_hi[2]);
 
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, k, 0);
@@ -1993,7 +2051,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         btot_val = std::sqrt(bx_val*bx_val + by_val*by_val + bz_val*bz_val);
                     }
 
-                    const bool iso_z = iso_hyper && (!iso_wall_compact
+                    const bool iso_z = iso_hyper && iso_interior_z && (!iso_wall_compact
                         || iso_phi(i, j, k) >= d_iso_compact);
                     const Real nabla2Jz = iso_z
                         ? warpx::hybrid_isotropic::LaplacianIsotropic(Jz, i, j, k, h2, inv_h2)
@@ -2010,7 +2068,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 // By corner-curl correction, second (Ez) half (2D XZ only;
                 // in 3D the axial Bz corner is delivered via Ex and Ey).
 #if defined(WARPX_DIM_XZ)
-                if (iso_resistivity) {
+                if (iso_resistivity && iso_interior_z) {
                     if (std::is_same_v<T_Algo, CartesianNodalAlgorithm>) {
                         Ez(i, j, k) += eta_val
                             * warpx::hybrid_isotropic::CornerResistiveEz_XZ_Nodal(By, i, j, k, dx_arr, inv_mu0);
