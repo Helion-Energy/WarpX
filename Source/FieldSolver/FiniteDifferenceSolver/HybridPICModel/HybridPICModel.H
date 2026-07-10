@@ -358,6 +358,15 @@ public:
      *  curl is unchanged and div(B) stays exactly zero. Cartesian only (the
      *  RZ resistive operator is axisymmetric and has no such anisotropy). */
     bool m_isotropic_resistivity = false;
+    /** If true (opt-in), along non-periodic axes the isotropic operators are
+     *  DOWNGRADED within one cell of the domain boundary: the isotropic
+     *  (Mehrstellen) hyper-resistivity Laplacian falls back to the compact
+     *  cross stencil and the corner-curl resistive correction is skipped.
+     *  There the diagonal reads of both stencils would leave the domain
+     *  interior and land on boundary-condition guard data; with the
+     *  downgrade the boundary treatment matches the non-isotropic scheme.
+     *  Periodic axes are unaffected (their guard data is a valid wrap). */
+    bool m_isotropic_domain_edge_compact = false;
 
     /** External current */
     std::string m_Jx_ext_grid_function = "0.0";

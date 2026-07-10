@@ -263,6 +263,10 @@ void HybridPICModel::ReadParameters ()
     // (Cartesian geometries; suppresses the grid m=4 from the resistive term)
     pp_hybrid.query("isotropic_resistivity", m_isotropic_resistivity);
 
+    // Near-domain-edge downgrade of the isotropic operators to the compact/
+    // plain stencils along non-periodic axes (see the header docs).
+    pp_hybrid.query("isotropic_domain_edge_compact", m_isotropic_domain_edge_compact);
+
     // The isotropic hyper-resistivity Laplacian reads the plasma current at its
     // diagonal/corner neighbors (sqrt(2)*h in plane, sqrt(3)*h at a 3D cube
     // corner). Widen the plasma-current EB mirror-fill band to that corner reach
