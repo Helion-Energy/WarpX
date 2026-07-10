@@ -3839,6 +3839,19 @@ Maxwell solver: kinetic-fluid hybrid
     Within a corner reach of an embedded boundary the operator falls back to the two-point
     stencil. Cartesian geometries only.
 
+.. pp:param:: hybrid_pic_model.isotropic_eb_compact_fallback
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    Near an embedded boundary, fall back per point from the isotropic stencils
+    (:pp:param:`hybrid_pic_model.isotropic_hyper_resistivity`,
+    :pp:param:`hybrid_pic_model.isotropic_resistivity`,
+    :pp:param:`hybrid_pic_model.isotropic_gradient`) to the standard compact ones within a
+    corner reach (:math:`(\sqrt{d}+1/2)\,h`) of the level set, where the diagonal reads are
+    not maintained by the EB update masks. A hybrid EB boundary layer that mirror-fills the
+    wide-stencil bands (keeping the diagonal reads valid) may disable it.
+
 .. pp:param:: hybrid_pic_model.add_external_fields
     :type: ``bool``
     :default: ``false``

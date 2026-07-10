@@ -1037,7 +1037,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     const amrex::Real d_iso_compact =
         (std::sqrt(static_cast<amrex::Real>(AMREX_SPACEDIM)) + 0.5_rt) * h_max_iso;
     const bool iso_any = iso_hyper || iso_resistivity || iso_gradient;
-    amrex::MultiFab const* iso_phi_mf = (iso_any && EB::enabled())
+    amrex::MultiFab const* iso_phi_mf =
+        (iso_any && EB::enabled() && hybrid_model->m_isotropic_eb_compact_fallback)
         ? warpx.m_fields.get(FieldType::distance_to_eb, lev)
         : nullptr;
 #if defined(WARPX_DIM_1D_Z)
