@@ -259,6 +259,91 @@ namespace warpx::hybrid_isotropic
     }
 #endif
 
+    /** Isotropic upward differences of a nodal scalar (electron pressure).
+     *
+     *  The bare two-point difference of grad(Pe) carries the same
+     *  cos(4*theta) angular truncation error as the cross Laplacian: the
+     *  gathered pressure electric field of a radial density feature is
+     *  stronger along the grid axes than the diagonals, a fourfold (m=4)
+     *  source in the ion push. Smoothing the bare difference with the
+     *  binomial (1/4, 1/2, 1/4) weights in each transverse direction
+     *  cancels the angular term on cubic cells (the gradient analogue of
+     *  the Mehrstellen Laplacian). The stencil is expressed through
+     *  T_Algo::UpwardD*, so it is correct for both the Yee (edge-centered
+     *  E) and collocated (nodal E) staggerings.
+     *
+     *  3D only: in other dimensionalities these reduce to the bare
+     *  difference (the 2D XZ plane has no azimuthal m=4 to cancel).
+     */
+    template <typename T_Algo>
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    amrex::Real GradXIsotropic (
+        amrex::Array4<amrex::Real const> const& F,
+        amrex::Real const * const coefs_x, int const n_coefs_x,
+        int const i, int const j, int const k)
+    {
+        using namespace amrex::literals;
+#if defined(WARPX_DIM_3D)
+        amrex::Real acc = 0._rt;
+        for (int dj = -1; dj <= 1; ++dj) {
+            const amrex::Real wj = (dj == 0) ? 0.5_rt : 0.25_rt;
+            for (int dk = -1; dk <= 1; ++dk) {
+                const amrex::Real wk = (dk == 0) ? 0.5_rt : 0.25_rt;
+                acc += wj * wk * T_Algo::UpwardDx(F, coefs_x, n_coefs_x, i, j+dj, k+dk);
+            }
+        }
+        return acc;
+#else
+        return T_Algo::UpwardDx(F, coefs_x, n_coefs_x, i, j, k);
+#endif
+    }
+
+    template <typename T_Algo>
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    amrex::Real GradYIsotropic (
+        amrex::Array4<amrex::Real const> const& F,
+        amrex::Real const * const coefs_y, int const n_coefs_y,
+        int const i, int const j, int const k)
+    {
+        using namespace amrex::literals;
+#if defined(WARPX_DIM_3D)
+        amrex::Real acc = 0._rt;
+        for (int di = -1; di <= 1; ++di) {
+            const amrex::Real wi = (di == 0) ? 0.5_rt : 0.25_rt;
+            for (int dk = -1; dk <= 1; ++dk) {
+                const amrex::Real wk = (dk == 0) ? 0.5_rt : 0.25_rt;
+                acc += wi * wk * T_Algo::UpwardDy(F, coefs_y, n_coefs_y, i+di, j, k+dk);
+            }
+        }
+        return acc;
+#else
+        return T_Algo::UpwardDy(F, coefs_y, n_coefs_y, i, j, k);
+#endif
+    }
+
+    template <typename T_Algo>
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    amrex::Real GradZIsotropic (
+        amrex::Array4<amrex::Real const> const& F,
+        amrex::Real const * const coefs_z, int const n_coefs_z,
+        int const i, int const j, int const k)
+    {
+        using namespace amrex::literals;
+#if defined(WARPX_DIM_3D)
+        amrex::Real acc = 0._rt;
+        for (int di = -1; di <= 1; ++di) {
+            const amrex::Real wi = (di == 0) ? 0.5_rt : 0.25_rt;
+            for (int dj = -1; dj <= 1; ++dj) {
+                const amrex::Real wj = (dj == 0) ? 0.5_rt : 0.25_rt;
+                acc += wi * wj * T_Algo::UpwardDz(F, coefs_z, n_coefs_z, i+di, j+dj, k);
+            }
+        }
+        return acc;
+#else
+        return T_Algo::UpwardDz(F, coefs_z, n_coefs_z, i, j, k);
+#endif
+    }
+
 #endif // !RZ && !RCYLINDER && !RSPHERE
 } // namespace warpx::hybrid_isotropic
 

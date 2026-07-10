@@ -2393,6 +2393,15 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         stays exactly zero (Cartesian geometries; the RZ resistive operator
         is axisymmetric and has no such anisotropy).
 
+    isotropic_pressure_grad: bool, default=False
+        Evaluate the electron-pressure gradient in Ohm's law with the
+        transversely binomial-smoothed (isotropic) difference instead of the
+        bare two-point stencil, cancelling the cos 4*theta directional bias
+        of the gathered pressure electric field (an m=4 source in the ion
+        push). The term never enters the Faraday push, so the field advance
+        is untouched; near an embedded boundary the bare stencil is kept
+        within the corner-reach band (3D Cartesian only).
+
     Jx/y/z_external_function: str
         Function of space and time specifying external (non-plasma) currents.
 
@@ -2474,6 +2483,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         dive_seam_band=None,
         isotropic_hyper_resistivity=None,
         isotropic_resistivity=None,
+        isotropic_pressure_grad=None,
         Jx_external_function=None,
         Jy_external_function=None,
         Jz_external_function=None,
@@ -2527,6 +2537,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.dive_seam_band = dive_seam_band
         self.isotropic_hyper_resistivity = isotropic_hyper_resistivity
         self.isotropic_resistivity = isotropic_resistivity
+        self.isotropic_pressure_grad = isotropic_pressure_grad
 
         self.Jx_external_function = Jx_external_function
         self.Jy_external_function = Jy_external_function
@@ -2610,6 +2621,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
             self.isotropic_hyper_resistivity
         )
         pywarpx.hybridpicmodel.isotropic_resistivity = self.isotropic_resistivity
+        pywarpx.hybridpicmodel.isotropic_pressure_grad = self.isotropic_pressure_grad
         pywarpx.hybridpicmodel.__setattr__(
             "Jx_external_grid_function(x,y,z,t)",
             pywarpx.my_constants.mangle_expression(
