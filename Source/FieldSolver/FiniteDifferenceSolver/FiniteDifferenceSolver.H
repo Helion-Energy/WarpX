@@ -176,12 +176,13 @@ class FiniteDifferenceSolver
           * \param[in] Bfield   vector of magnetic field MultiFabs at a given level
           * \param[in] eb_update_E indicate in which cell E should be updated (related to embedded boundaries)
           * \param[in] lev  level number for the calculation
+          * \param[in] ngrow  number of guard cells in which the current is also calculated
           */
         void CalculateCurrentAmpere (
             ablastr::fields::VectorField& Jfield,
             ablastr::fields::VectorField const& Bfield,
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_E,
-            int lev );
+            int lev, int ngrow = 1 );
 
         /**
           * \brief Flux-weighted ("Form A") conformal-EB variant of
@@ -564,7 +565,7 @@ class FiniteDifferenceSolver
             ablastr::fields::VectorField& Jfield,
             ablastr::fields::VectorField const& Bfield,
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_E,
-            int lev
+            int lev, int ngrow
         );
 
         /**

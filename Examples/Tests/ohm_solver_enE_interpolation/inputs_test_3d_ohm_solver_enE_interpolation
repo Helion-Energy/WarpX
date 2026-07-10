@@ -1,0 +1,64 @@
+# Manufactured test for hybrid_pic_model.enE_interpolation_order.
+#
+# A smooth, discretely divergence-free B field is loaded on a periodic
+# domain filled with cold ions placed regularly (2x2x2 per cell), so the
+# deposited charge density is exactly uniform and the ion current exactly
+# zero. With zero resistivity and constant electron pressure, the Ohm's law
+# E field reduces to
+#     E = (curl B x B) / (mu0 e n)
+# and any deviation from the analytic value measures the staggering
+# interpolation of the nodal enE calculation alone.
+#
+# Run with hybrid_pic_model.enE_interpolation_order = 2 or 4 and compare
+# the raw E fields against the analytic expression (analysis_enE.py).
+
+max_step = 1
+warpx.const_dt = 1e-13
+
+amr.n_cell = 32 32 32
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = 3
+geometry.prob_lo = 0.0 0.0 0.0
+geometry.prob_hi = 1.0 1.0 1.0
+
+boundary.field_lo = periodic periodic periodic
+boundary.field_hi = periodic periodic periodic
+boundary.particle_lo = periodic periodic periodic
+boundary.particle_hi = periodic periodic periodic
+
+algo.maxwell_solver = hybrid
+algo.particle_shape = 1
+algo.current_deposition = direct
+
+hybrid_pic_model.elec_temp = 0.01
+hybrid_pic_model.n0_ref = 1e18
+hybrid_pic_model.gamma = 1.0
+hybrid_pic_model.n_floor = 1e12
+hybrid_pic_model.substeps = 10
+hybrid_pic_model.enE_interpolation_order = 2
+
+particles.species_names = ions
+ions.charge = q_e
+ions.mass = m_p
+ions.injection_style = NUniformPerCell
+ions.num_particles_per_cell_each_dim = 2 2 2
+ions.profile = constant
+ions.density = 1e18
+ions.momentum_distribution_type = at_rest
+
+# Smooth divergence-free field: each component varies along one transverse
+# axis only, so the discrete Yee divergence vanishes identically.
+warpx.B_ext_grid_init_style = parse_b_ext_grid_function
+warpx.Bx_external_grid_function(x,y,z) = "0.02*sin(2*pi*y)"
+warpx.By_external_grid_function(x,y,z) = "0.02*sin(2*pi*z)"
+warpx.Bz_external_grid_function(x,y,z) = "0.1 + 0.02*sin(2*pi*x)"
+warpx.do_initial_div_cleaning = 0
+
+diagnostics.diags_names = diag1
+diag1.diag_type = Full
+diag1.intervals = 1
+diag1.format = plotfile
+diag1.fields_to_plot = Ex Ey Ez Bx By Bz
+diag1.plot_raw_fields = 1

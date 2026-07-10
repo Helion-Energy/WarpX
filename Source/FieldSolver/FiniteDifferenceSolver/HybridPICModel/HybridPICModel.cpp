@@ -322,6 +322,19 @@ void HybridPICModel::ReadParameters ()
         "hybrid_pic_model.divb_clean_alpha / divj_clean_alpha are only "
         "supported in 3D and 2D (XZ) Cartesian geometry");
 #endif
+
+    // interpolation order for the nodal enE = (J - Ji) x B calculation
+    pp_hybrid.query("enE_interpolation_order", m_enE_interpolation_order);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_enE_interpolation_order == 2 || m_enE_interpolation_order == 4,
+        "hybrid_pic_model.enE_interpolation_order must be 2 (half-cell average) "
+        "or 4 (Fornberg stencil)");
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_enE_interpolation_order == 2,
+        "hybrid_pic_model.enE_interpolation_order = 4 is only implemented for "
+        "Cartesian geometries");
+#endif
 }
 
 void HybridPICModel::AllocateLevelMFs (
@@ -380,17 +393,20 @@ void HybridPICModel::AllocateLevelMFs (
         dm, ncomps, ngJ, 0.0_rt);
 
     // the external current density multifab matches the current staggering and
-    // one ghost cell is used since we interpolate the current to a nodal grid
+    // ghost cells are used since we interpolate the current to a nodal grid
+    // (the 4-point enE interpolation stencil requires one more valid layer
+    // than the default half-cell average)
     if (m_has_external_current) {
+        const IntVect ngJext = IntVect(m_enE_interpolation_order == 4 ? 2 : 1);
         fields.alloc_init(FieldType::hybrid_current_fp_external, Direction{0},
             lev, amrex::convert(ba, jx_nodal_flag),
-            dm, ncomps, IntVect(1), 0.0_rt);
+            dm, ncomps, ngJext, 0.0_rt);
         fields.alloc_init(FieldType::hybrid_current_fp_external, Direction{1},
             lev, amrex::convert(ba, jy_nodal_flag),
-            dm, ncomps, IntVect(1), 0.0_rt);
+            dm, ncomps, ngJext, 0.0_rt);
         fields.alloc_init(FieldType::hybrid_current_fp_external, Direction{2},
             lev, amrex::convert(ba, jz_nodal_flag),
-            dm, ncomps, IntVect(1), 0.0_rt);
+            dm, ncomps, ngJext, 0.0_rt);
     }
 
     if (m_add_external_fields) {
@@ -666,6 +682,10 @@ void HybridPICModel::CalculatePlasmaCurrent (
 
     auto& warpx = WarpX::GetInstance();
 
+    // The nodal interpolation of the plasma current in the Ohm's law solve
+    // reads 1 (2-point average) or 2 (4-point Fornberg stencil) ghost cells,
+    // so the current must be calculated on a correspondingly grown region.
+    const int ngrow_J = (m_enE_interpolation_order == 4) ? 2 : 1;
     ablastr::fields::VectorField current_fp_plasma = warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
     if (m_conformal_ect_j && m_use_conformal_eb && EB::enabled()
         && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated) {
@@ -674,6 +694,11 @@ void HybridPICModel::CalculatePlasmaCurrent (
         // with use_conformal_eb on a staggered grid; ReadParameters enforces this).
         // Divergence-consistent across the wall, so it needs no covered-B mirror
         // (skipped below).
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_enE_interpolation_order == 2,
+            "hybrid_pic_model.enE_interpolation_order = 4 is not supported with "
+            "conformal_ect_j (the ECT Ampere curl does not compute the wider "
+            "ghost region the 4-point stencil reads)");
         warpx.get_pointer_fdtd_solver_fp(lev)->CalculateCurrentAmpereECT(
             current_fp_plasma, Bfield,
             warpx.m_fields.get_alldirs(FieldType::face_areas, lev),
@@ -681,17 +706,16 @@ void HybridPICModel::CalculatePlasmaCurrent (
         );
     } else {
         warpx.get_pointer_fdtd_solver_fp(lev)->CalculateCurrentAmpere(
-            current_fp_plasma, Bfield, eb_update_E, lev
+            current_fp_plasma, Bfield, eb_update_E, lev, ngrow_J
         );
     }
 
     if (m_has_external_current) {
-        // Subtract external current from "Ampere" current calculated above. Note
-        // we need to include 1 ghost cell since later we will interpolate the
-        // plasma current to a nodal grid.
+        // Subtract external current from "Ampere" current calculated above,
+        // including the ghost cells needed by the nodal interpolation.
         ablastr::fields::VectorField current_fp_external = warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_external, lev);
         for (int i=0; i<3; i++) {
-            current_fp_plasma[i]->minus(*current_fp_external[i], 0, 1, 1);
+            current_fp_plasma[i]->minus(*current_fp_external[i], 0, 1, ngrow_J);
         }
     }
 

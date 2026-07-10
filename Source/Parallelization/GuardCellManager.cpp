@@ -321,6 +321,18 @@ guardCellManager::Init (
         ng_FieldSolver += 1;
     }
 
+    // With the 4-point (Fornberg) enE interpolation of the hybrid-PIC solver,
+    // one more layer is required: the plasma current must be valid in 2 guard
+    // cells, and its curl-of-B stencil reaches into a 3rd guard cell of B.
+    if (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) {
+        const amrex::ParmParse pp_hybrid("hybrid_pic_model");
+        int enE_interpolation_order = 2;
+        pp_hybrid.query("enE_interpolation_order", enE_interpolation_order);
+        if (enE_interpolation_order == 4) {
+            ng_FieldSolver.max(IntVect(AMREX_D_DECL(3, 3, 3)));
+        }
+    }
+
     // Number of guard cells is the max of that determined by particle shape factor and
     // the stencil used in the field solve
     ng_alloc_EB.max( ng_FieldSolver );

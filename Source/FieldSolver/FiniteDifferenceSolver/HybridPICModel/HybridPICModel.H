@@ -309,6 +309,12 @@ public:
 
     bool m_holmstrom_vacuum_region = false;
 
+    /** Order of the staggering interpolation used to form enE = (J - Ji) x B
+     *  on the nodal grid and to bring the nodal enE and rho values back to
+     *  the Yee E-field locations: 2 selects the default 2-point half-cell
+     *  average, 4 selects the 4-point (Fornberg) stencil (-1/16, 9/16, 9/16,
+     *  -1/16), which is 4th-order accurate at the half-cell shift. */
+    int m_enE_interpolation_order = 2;
 
     /** Electron temperature in eV */
     amrex::Real m_elec_temp;
