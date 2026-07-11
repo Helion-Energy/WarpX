@@ -222,6 +222,39 @@ public:
      *  -1/16), which is 4th-order accurate at the half-cell shift. */
     int m_enE_interpolation_order = 2;
 
+    /** If true (opt-in), the hyper-resistivity Laplacian is evaluated with
+     *  the isotropic Mehrstellen 9-point (2D XZ) or Patra-Karttunen 27-point
+     *  (3D) stencil instead of the cross stencil, whose leading truncation
+     *  error modulates the hyper-resistive damping rate as cos(4*theta)
+     *  between the grid axes and the diagonals (a grid m=4 driver on
+     *  axisymmetric configurations). Cartesian 2D XZ / 3D only. */
+    bool m_isotropic_hyper_resistivity = false;
+    /** If true (default), the isotropic hyper-resistivity Laplacian is
+     *  DOWNGRADED to the compact cardinal-only cross stencil within a corner
+     *  reach (sqrt(AMREX_SPACEDIM)+0.5 cells of the signed distance) of an
+     *  embedded boundary: the isotropic stencil reads the full 3^3
+     *  neighborhood, and near the wall its diagonal/corner J reads land on
+     *  cells the EB gating leaves without valid current. Only meaningful
+     *  together with m_isotropic_hyper_resistivity and an EB. */
+    bool m_isotropic_hyper_wall_compact = true;
+    /** If true (opt-in), add an isotropizing corner-curl correction to the
+     *  resistive electric field so the emergent in-plane B diffusion uses
+     *  the isotropic (Mehrstellen) Laplacian instead of the cross stencil.
+     *  This removes the cos(4*theta) modulation of the resistive damping
+     *  rate that drives a grid m=4 mode. Applied through E, so the standard
+     *  Faraday curl is unchanged and div(B) stays exactly zero. Cartesian
+     *  2D XZ / 3D only. */
+    bool m_isotropic_resistivity = false;
+    /** If true (opt-in), along non-periodic axes the isotropic operators are
+     *  DOWNGRADED within one cell of the domain boundary: the isotropic
+     *  hyper-resistivity Laplacian falls back to the compact cross stencil
+     *  and the corner-curl resistive correction is skipped. There the
+     *  diagonal reads of both stencils would leave the domain interior and
+     *  land on boundary-condition guard data; with the downgrade the
+     *  boundary treatment matches the non-isotropic scheme. Periodic axes
+     *  are unaffected (their guard data is a valid wrap). */
+    bool m_isotropic_domain_edge_compact = false;
+
     /** Electron temperature in eV */
     amrex::Real m_elec_temp;
     /** Reference electron density */

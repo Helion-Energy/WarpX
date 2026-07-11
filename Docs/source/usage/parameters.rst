@@ -3718,6 +3718,64 @@ Maxwell solver: kinetic-fluid hybrid
     Note that the interpolation used for the :math:`|J|` and :math:`|B|` dependence of the
     (hyper-)resistivity coefficients is unaffected by this option.
 
+.. pp:param:: hybrid_pic_model.isotropic_hyper_resistivity
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If ``true`` (opt-in), the hyper-resistivity Laplacian of the hybrid Ohm's law is evaluated
+    with the isotropic Mehrstellen 9-point (2D XZ) or Patra-Karttunen 27-point (3D) stencil
+    instead of the cross stencil. The cross stencil's leading truncation error modulates the
+    hyper-resistive damping rate as :math:`\cos 4\theta` between the grid axes and the
+    diagonals, which imprints fourfold structure on diffusing fields at grid-scale wavenumbers;
+    the isotropic stencils cancel that term (their leading error is proportional to the
+    isotropic biharmonic; fully isotropic on cubic cells, consistent on non-cubic cells).
+    Cartesian 2D XZ / 3D geometries only; in RZ the standard cylindrical operator is used.
+
+.. pp:param:: hybrid_pic_model.isotropic_hyper_wall_compact
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    If ``true`` (default), the isotropic hyper-resistivity Laplacian is downgraded to the
+    compact cardinal-only cross stencil within :math:`\sqrt{D} + 1/2` cells (:math:`D` the
+    dimensionality) of an embedded boundary, where the isotropic stencil's diagonal reads
+    would land on cells the EB gating leaves without valid current. Only meaningful together
+    with :pp:param:`hybrid_pic_model.isotropic_hyper_resistivity` and an embedded boundary.
+
+.. pp:param:: hybrid_pic_model.isotropic_resistivity
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If ``true`` (opt-in), a corner-curl correction is added to the resistive electric field so
+    that, after the (unchanged) Faraday curl, the emergent in-plane resistive diffusion of the
+    out-of-plane magnetic field (:math:`B_z` in 3D, :math:`B_y` in 2D XZ) uses the isotropic
+    Mehrstellen Laplacian rather than the cross stencil. The plain resistive term
+    :math:`\eta\,\vec{J}` advanced by Faraday produces, for divergence-free :math:`\vec{B}`, the
+    cross-stencil Laplacian, whose :math:`\cos 4\theta` damping anisotropy drives a grid m=4 mode
+    (visible inside conducting cavities where :math:`\eta` is large). Because the correction
+    enters only through :math:`\vec{E}`, the Faraday curl is untouched and
+    :math:`\nabla\cdot\vec{B}` is preserved exactly; it is a pure O(h^2) truncation-error
+    canceller (zero for fields of degree :math:`\leq 3`). Cartesian 2D XZ / 3D geometries only;
+    the RZ resistive operator is axisymmetric and has no such anisotropy.
+
+.. pp:param:: hybrid_pic_model.isotropic_domain_edge_compact
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If ``true`` (opt-in), along non-periodic axes the isotropic operators are downgraded
+    within one cell of the domain boundary: the isotropic hyper-resistivity Laplacian
+    falls back to the compact cross stencil and the corner-curl resistive correction is
+    skipped. There the diagonal reads of both stencils would leave the domain interior
+    and land on boundary-condition guard data; with the downgrade the boundary treatment
+    matches the non-isotropic scheme (the same near-edge order reduction used by the
+    4th-order enE interpolation). Periodic axes are unaffected, since their guard data
+    is a valid periodic wrap. Only meaningful together with
+    :pp:param:`hybrid_pic_model.isotropic_hyper_resistivity` and/or
+    :pp:param:`hybrid_pic_model.isotropic_resistivity`.
+
 .. pp:param:: hybrid_pic_model.substeps
     :type: ``int``
     :default: ``10``

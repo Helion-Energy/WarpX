@@ -109,6 +109,24 @@ void HybridPICModel::ReadParameters ()
         "hybrid_pic_model.enE_interpolation_order = 4 is only implemented for "
         "Cartesian geometries");
 #endif
+
+    // isotropized hyper-resistivity Laplacian (Cartesian 2D XZ / 3D)
+    pp_hybrid.query("isotropic_hyper_resistivity", m_isotropic_hyper_resistivity);
+    // Near-EB downgrade of the isotropic Laplacian to the compact stencil
+    // (see the header docs).
+    pp_hybrid.query("isotropic_hyper_wall_compact", m_isotropic_hyper_wall_compact);
+    // isotropized resistive diffusion via the corner-curl E correction
+    // (Cartesian 2D XZ / 3D; suppresses the grid m=4 from the resistive term)
+    pp_hybrid.query("isotropic_resistivity", m_isotropic_resistivity);
+    // Near-domain-edge downgrade of the isotropic operators to the compact/
+    // plain stencils along non-periodic axes (see the header docs).
+    pp_hybrid.query("isotropic_domain_edge_compact", m_isotropic_domain_edge_compact);
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_1D_Z)
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_isotropic_hyper_resistivity && !m_isotropic_resistivity,
+        "hybrid_pic_model.isotropic_hyper_resistivity and isotropic_resistivity "
+        "are only implemented for 2D XZ and 3D Cartesian geometries");
+#endif
 }
 
 void HybridPICModel::AllocateLevelMFs (
