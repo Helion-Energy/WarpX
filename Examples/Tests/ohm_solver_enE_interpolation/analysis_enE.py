@@ -9,6 +9,14 @@ Modes:
                                        error ratio relative to the first.
   analysis_enE.py --same <pltA> <pltB> assert all raw E/B fields are bitwise
                                        identical between the two plotfiles.
+  analysis_enE.py --case {o2,o4} <plt> CI mode with assertions (32^3, one
+                                       step): the reference uses the discrete
+                                       curl, so the E error measures the enE
+                                       staggering interpolation alone. Order 2
+                                       must sit at its known O(h^2) level;
+                                       order 4 must be far below it; the
+                                       discrete div(B) must be at round-off
+                                       for both.
 """
 
 import sys
@@ -111,11 +119,30 @@ def analyze(plotfile):
     divb = sum((raw[c][..., 1] - raw[c][..., 0]) / H for c in ("Bx", "By", "Bz"))
     divb_norm = np.abs(divb).max() / (BAMP * K / H * H)  # normalized by b*k
     print(f"  max |div B| / (b k): {divb_norm:10.3e}")
-    return errs
+    return errs, divb_norm
+
+
+def assert_case(case, plotfile):
+    errs, divb_norm = analyze(plotfile)
+    # B is advanced by the curl of E, which is divergence-free for any E
+    assert divb_norm <= 1.0e-11, divb_norm
+    for c in ("Ex", "Ey", "Ez"):
+        if case == "o2":
+            # the half-cell averages leave their O(h^2) interpolation error
+            assert 1.0e-3 <= errs[c] <= 2.0e-2, (c, errs[c])
+        elif case == "o4":
+            # the 4-point stencil removes the interpolation error at O(h^2)
+            assert errs[c] <= 5.0e-4, (c, errs[c])
+        else:
+            raise ValueError(f"unknown case '{case}'")
+    print(f"PASS: case '{case}'")
 
 
 if __name__ == "__main__":
     args = sys.argv[1:]
+    if args and args[0] == "--case":
+        assert_case(args[1], args[2])
+        sys.exit(0)
     if args and args[0] == "--same":
         a, b = load_raw(args[1]), load_raw(args[2])
         worst = 0.0
@@ -126,7 +153,7 @@ if __name__ == "__main__":
         assert worst == 0.0, "plotfiles differ!"
         print("PASS: all raw fields bitwise identical")
     else:
-        results = [analyze(p) for p in args]
+        results = [analyze(p)[0] for p in args]
         if len(results) > 1:
             base = results[0]
             for p, r in zip(args[1:], results[1:]):

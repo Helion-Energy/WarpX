@@ -1,0 +1,7 @@
+# base input parameters
+FILE = inputs_base_3d
+
+# 4-point (Fornberg) stencil for the nodal enE calculation; run on two
+# ranks with split boxes to also exercise the guard-cell plumbing
+hybrid_pic_model.enE_interpolation_order = 4
+amr.max_grid_size = 16
