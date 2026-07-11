@@ -828,8 +828,10 @@ void FiniteDifferenceSolver::CalculateCurrentAmpereCartesianECT (
     }
 #else
     // 2D (XZ): face_areas alone does not carry the in-plane open fractions, so use
-    // the standard masked Yee curl (see comment above).
-    CalculateCurrentAmpereCartesian<T_Algo>(Jfield, Bfield, eb_update_E, lev);
+    // the standard masked Yee curl (see comment above). ngrow = 1 is the
+    // pre-Fornberg growth; the ECT path rejects enE_interpolation_order = 4
+    // (asserted in CalculatePlasmaCurrent), so the wider region is never needed.
+    CalculateCurrentAmpereCartesian<T_Algo>(Jfield, Bfield, eb_update_E, lev, 1);
 #endif
 }
 #endif

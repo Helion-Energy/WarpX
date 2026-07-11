@@ -330,6 +330,11 @@ guardCellManager::Init (
         pp_hybrid.query("enE_interpolation_order", enE_interpolation_order);
         if (enE_interpolation_order == 4) {
             ng_FieldSolver.max(IntVect(AMREX_D_DECL(3, 3, 3)));
+            // The J MultiFabs must HOLD the 2 grown layers the Ampere loop
+            // writes: with a low particle shape (and no bilinear filter)
+            // ng_alloc_J would otherwise be 1 and the grown tilebox writes
+            // would overrun the allocation.
+            ng_alloc_J.max(IntVect(AMREX_D_DECL(2, 2, 2)));
         }
     }
 
