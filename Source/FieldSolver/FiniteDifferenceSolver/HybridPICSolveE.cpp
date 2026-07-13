@@ -1419,7 +1419,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     // bare stencil within the corner-reach band: the Pe mirror band is one
     // cell deep on both wall treatments, so the smoothed stencil's diagonal
     // taps would read the zeroed deep region.
-    const bool iso_grad_pe = hybrid_model->m_isotropic_pressure_grad;
+    const bool iso_grad_pe = hybrid_model->m_isotropic_gradient;
     const bool iso_grad_wall_compact = iso_grad_pe && EB::enabled();
     amrex::MultiFab const* iso_phi_mf = (iso_wall_compact || iso_grad_wall_compact)
         ? WarpX::GetInstance().m_fields.get(FieldType::distance_to_eb, lev)

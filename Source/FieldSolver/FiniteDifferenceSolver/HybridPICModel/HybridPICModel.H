@@ -377,7 +377,7 @@ public:
      *  cell deep and the smoothed stencil's diagonal taps would read the
      *  zeroed deep region. 3D Cartesian only (reduces to the bare difference
      *  elsewhere). */
-    bool m_isotropic_pressure_grad = false;
+    bool m_isotropic_gradient = false;
 
     /** External current */
     std::string m_Jx_ext_grid_function = "0.0";

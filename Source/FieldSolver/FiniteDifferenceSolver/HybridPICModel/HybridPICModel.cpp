@@ -265,7 +265,7 @@ void HybridPICModel::ReadParameters ()
 
     // isotropized electron-pressure gradient in the gathered E (3D Cartesian;
     // suppresses the grid m=4 from the grad(Pe) term of the ion push)
-    pp_hybrid.query("isotropic_pressure_grad", m_isotropic_pressure_grad);
+    pp_hybrid.query("isotropic_gradient", m_isotropic_gradient);
 
     // The isotropic hyper-resistivity Laplacian reads the plasma current at its
     // diagonal/corner neighbors (sqrt(2)*h in plane, sqrt(3)*h at a 3D cube
