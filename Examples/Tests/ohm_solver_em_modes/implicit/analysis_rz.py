@@ -176,6 +176,9 @@ else:
     plt.close()
 
     # check if power spectrum sampling match earlier results
+    # (baseline regenerated on development@b3e232fd6: the RZ state shifted
+    # relative to the original PR baseline after the HybridPICSolveE axis
+    # fix in #6598 and the deposit reorganization in #6589)
     amps = np.abs(F_kw[2, 1, len(kz) // 2 - 2 : len(kz) // 2 + 2])
     print("Amplitude sample: ", repr(amps))
-    assert np.allclose(amps, np.array([4.19507711, 0.77143276, 4.48045048, 6.72821664]))
+    assert np.allclose(amps, np.array([12.1539756, 5.70115086, 2.30671667, 3.413128]))
