@@ -13,6 +13,7 @@
 #define WARPX_HYBRIDPICMODEL_H_
 
 #include "HybridPICModel_fwd.H"
+#include "HybridMagDiffusion.H"
 
 #include "Fields.H"
 #include "Fluids/QdsmcParticleContainer_fwd.H"
@@ -588,6 +589,33 @@ public:
      *  because its lifetime is tied to the electron-energy equation that
      *  the hybrid model is responsible for. */
     std::unique_ptr<QdsmcParticleContainer> m_qdsmc_pc;
+
+    /**
+     * \brief Operator-split (semi)implicit magnetic diffusion (FLASH MagDiff-inspired).
+     * Default-off. When enabled, stiff vacuum resistivity is advanced with
+     * MLCurlCurl after each hybrid B half-step; Ohm uses min(eta, eta_explicit_max).
+     */
+    HybridMagDiffusion m_mag_diffusion;
+
+    /**
+     * \brief Apply implicit magnetic diffusion for duration dt at all levels.
+     * No-op when hybrid_pic_model.implicit_mag_diffusion is off.
+     */
+    void ApplyImplicitMagDiffusion (
+        ablastr::fields::MultiLevelVectorField const& Bfield,
+        amrex::Real dt) const;
+
+    /**
+     * \brief Resistivity used in Ohm when building E for Faraday, possibly
+     * capped when operator-split implicit diffusion owns the stiff part.
+     * Host-side helper for documentation; device kernels read the cap fields.
+     */
+    [[nodiscard]] bool ImplicitMagDiffusionEnabled () const {
+        return m_mag_diffusion.Enabled();
+    }
+    [[nodiscard]] amrex::Real MagDiffEtaExplicitMax () const {
+        return m_mag_diffusion.EtaExplicitMax();
+    }
 };
 
 /**

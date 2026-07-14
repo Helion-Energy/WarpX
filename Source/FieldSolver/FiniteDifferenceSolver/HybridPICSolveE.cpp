@@ -546,6 +546,10 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     const auto resistivity_has_J_dependence = hybrid_model->m_resistivity_has_J_dependence;
     const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
+    // When operator-split implicit mag diffusion owns stiff η, cap Ohm's η
+    // so Faraday substeps are not resistively CFL-limited (default max=0).
+    const bool cap_eta_for_ohm = hybrid_model->ImplicitMagDiffusionEnabled();
+    const amrex::Real eta_ohm_max = hybrid_model->MagDiffEtaExplicitMax();
 
     const bool include_external_fields = hybrid_model->m_add_external_fields;
 
@@ -788,7 +792,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         jtot_val = std::sqrt(jr_val*jr_val + jtheta_val*jtheta_val + jz_val*jz_val);
                     }
 
-                    Er(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jr(i, j, 0);
+                    Er(i, j, 0) += (cap_eta_for_ohm ? amrex::min(eta(rho_val, jtot_val, t_new), eta_ohm_max) : eta(rho_val, jtot_val, t_new)) * Jr(i, j, 0);
                     // Per-species resistive overlay (Phys. Plasmas 31, 012902 (2024)); zero
                     // when no per-species eta is registered.
                     if (has_eta_overlay) { Er(i, j, 0) += eta_overlay_r(i, j, 0); }
@@ -862,7 +866,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         jtot_val = std::sqrt(jr_val*jr_val + jtheta_val*jtheta_val + jz_val*jz_val);
                     }
 
-                    Etheta(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jtheta(i, j, 0);
+                    Etheta(i, j, 0) += (cap_eta_for_ohm ? amrex::min(eta(rho_val, jtot_val, t_new), eta_ohm_max) : eta(rho_val, jtot_val, t_new)) * Jtheta(i, j, 0);
                     if (has_eta_overlay) { Etheta(i, j, 0) += eta_overlay_t(i, j, 0); }
 
                     if (include_hyper_resistivity_term) {
@@ -931,7 +935,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         jtot_val = std::sqrt(jr_val*jr_val + jtheta_val*jtheta_val + jz_val*jz_val);
                     }
 
-                    Ez(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jz(i, j, 0);
+                    Ez(i, j, 0) += (cap_eta_for_ohm ? amrex::min(eta(rho_val, jtot_val, t_new), eta_ohm_max) : eta(rho_val, jtot_val, t_new)) * Jz(i, j, 0);
                     if (has_eta_overlay) { Ez(i, j, 0) += eta_overlay_z(i, j, 0); }
 
                     if (include_hyper_resistivity_term) {
@@ -1017,6 +1021,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     const auto resistivity_has_J_dependence = hybrid_model->m_resistivity_has_J_dependence;
     const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
+    // When operator-split implicit mag diffusion owns stiff η, cap Ohm's η
+    // so Faraday substeps are not resistively CFL-limited (default max=0).
+    const bool cap_eta_for_ohm = hybrid_model->ImplicitMagDiffusionEnabled();
+    const amrex::Real eta_ohm_max = hybrid_model->MagDiffEtaExplicitMax();
 
     const bool include_external_fields = hybrid_model->m_add_external_fields;
 
@@ -1254,7 +1262,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
                 }
 
-                Ex(i, j, k) += eta(rho_val, jtot_val, t_new) * Jx(i, j, k);
+                Ex(i, j, k) += (cap_eta_for_ohm ? amrex::min(eta(rho_val, jtot_val, t_new), eta_ohm_max) : eta(rho_val, jtot_val, t_new)) * Jx(i, j, k);
                 if (has_eta_overlay) { Ex(i, j, k) += eta_overlay_x(i, j, k); }
 
                 if (include_hyper_resistivity_term) {
@@ -1319,7 +1327,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
                 }
 
-                Ey(i, j, k) += eta(rho_val, jtot_val, t_new) * Jy(i, j, k);
+                Ey(i, j, k) += (cap_eta_for_ohm ? amrex::min(eta(rho_val, jtot_val, t_new), eta_ohm_max) : eta(rho_val, jtot_val, t_new)) * Jy(i, j, k);
                 if (has_eta_overlay) { Ey(i, j, k) += eta_overlay_y(i, j, k); }
 
                 if (include_hyper_resistivity_term) {
@@ -1384,7 +1392,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
                 }
 
-                Ez(i, j, k) += eta(rho_val, jtot_val, t_new) * Jz(i, j, k);
+                Ez(i, j, k) += (cap_eta_for_ohm ? amrex::min(eta(rho_val, jtot_val, t_new), eta_ohm_max) : eta(rho_val, jtot_val, t_new)) * Jz(i, j, k);
                 if (has_eta_overlay) { Ez(i, j, k) += eta_overlay_z(i, j, k); }
 
                 if (include_hyper_resistivity_term) {

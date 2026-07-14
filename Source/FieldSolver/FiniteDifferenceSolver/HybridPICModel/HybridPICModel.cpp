@@ -82,6 +82,10 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("plasma_resistivity(rho,J,t)", m_eta_expression);
     pp_hybrid.query("plasma_hyper_resistivity(rho,B)", m_eta_h_expression);
 
+    // Operator-split (semi)implicit magnetic diffusion (default off).
+    // See HybridMagDiffusion and hybrid_implicit_mag_diffusion notes.
+    m_mag_diffusion.ReadParameters();
+
     utils::parser::queryWithParser(pp_hybrid, "n_floor", m_n_floor);
 
     // Master gate for the electron-energy equation. When enabled, K_e is
@@ -2037,6 +2041,40 @@ void HybridPICModel::BfieldEvolve (
             Bfield, Efield, Jfield, rhofield, eb_update_E,
             step, dt_half, lev, subcycling_half, ng, nodal_sync
         );
+    }
+
+    // Operator-split magnetic diffusion over the same half-step interval.
+    // Stiff vacuum η is advanced implicitly so Faraday substeps need not resolve
+    // the resistive CFL. No-op when hybrid_pic_model.implicit_mag_diffusion=0.
+    ApplyImplicitMagDiffusion(Bfield, dt_half);
+}
+
+void HybridPICModel::ApplyImplicitMagDiffusion (
+    ablastr::fields::MultiLevelVectorField const& Bfield,
+    amrex::Real dt) const
+{
+    if (!m_mag_diffusion.Enabled()) { return; }
+
+    auto& warpx = WarpX::GetInstance();
+
+    amrex::Real eta = 0.0_rt;
+    if (m_mag_diffusion.HasConstantEta()) {
+        eta = m_mag_diffusion.ConstantEta();
+    } else {
+        // Sample global resistivity parser at a representative vacuum-ish state.
+        // Full variable-η MultiFab support is a follow-on.
+        const amrex::Real t = warpx.gett_new(0);
+        const amrex::Real rho_sample = m_n_floor * PhysConst::q_e;
+        eta = m_eta(rho_sample, 0.0_rt, t);
+    }
+
+    if (eta <= 0.0_rt) { return; }
+
+    amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM> lobc, hibc;
+    HybridMagDiffusion::GetLinOpBCs(lobc, hibc);
+
+    for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+        m_mag_diffusion.Advance(Bfield[lev], eta, dt, lev, lobc, hibc);
     }
 }
 
