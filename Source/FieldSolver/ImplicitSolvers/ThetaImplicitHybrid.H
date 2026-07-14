@@ -99,7 +99,7 @@ public:
                       bool             a_from_jacobian ) override;
 
     // Hybrid model has no light waves, so return 0 for the PC theta parameter
-    [[nodiscard]] amrex::Real GetThetaForPC () const override { return 0.0_rt; }
+    [[nodiscard]] amrex::Real GetThetaForPC () const override { return amrex::Real(0.0); }
 
 private:
 
