@@ -235,6 +235,25 @@ public:
     void QDSMCInitializeUe (int lev) const;
 
     /**
+     * \brief Parameterized variant of QDSMCInitializeUe: fill the nodal V_e
+     *        from the given charge density and currents,
+     *          V_e = -(J_plasma_mid - J_i) / rho,
+     *        with the plasma current interpolated in time per cell as
+     *          J_plasma_mid = Jp_old + jp_interp * (Jp_new - Jp_old).
+     *        Pass the same field for Jp_new and Jp_old (any jp_interp) to use
+     *        it directly, which reproduces the explicit-path behavior. The
+     *        theta-implicit path passes Jp_new = J_plasma(B^{n+theta}),
+     *        Jp_old = J_plasma(B^n) and jp_interp = 0.5/theta to sample the
+     *        temporal midpoint.
+     */
+    void QDSMCInitializeUe (int lev,
+        amrex::MultiFab const & rho,
+        ablastr::fields::VectorField const & J_i,
+        ablastr::fields::VectorField const & Jp_new,
+        ablastr::fields::VectorField const & Jp_old,
+        amrex::Real jp_interp) const;
+
+    /**
      * \brief Fill the nodal K_e = T_e * n_e^(1-gamma) * (k_B / q_e) MultiFab
      *        from the current T_e and rho_fp_temp (= rho at n+1/2). Cells with
      *        rho <= rho_floor are left at 0.
@@ -243,6 +262,12 @@ public:
      *        hybrid_rho_fp_temp; writes hybrid_entropy_fp.
      */
     void QDSMCInitializeKe (int lev) const;
+
+    /** \brief Parameterized variant of QDSMCInitializeKe: seed K_e from the
+     *         current T_e and the given charge density (the state whose
+     *         entropy the markers carry — rho^n on the theta-implicit path).
+     */
+    void QDSMCInitializeKe (int lev, amrex::MultiFab const & rho) const;
 
     /**
      * \brief After the QDSMC scatter, recover T_e^{n+1} from
@@ -255,6 +280,12 @@ public:
      *        Writes hybrid_electron_temperature_fp.
      */
     void QDSMCUpdateTe (int lev) const;
+
+    /** \brief Parameterized variant of QDSMCUpdateTe: recover T_e from the
+     *         deposited entropy/weights and the given new-time charge density
+     *         (the extrapolated rho^{n+1} iterate on the theta-implicit path).
+     */
+    void QDSMCUpdateTe (int lev, amrex::MultiFab const & rho_new) const;
 
     /**
      * \brief Resistive electron-heating source (see Phys. Plasmas 31, 012902 (2024), Eq. 12).
@@ -283,6 +314,15 @@ public:
     void QDSMCAddJouleHeating (int lev, amrex::Real dt,
                                amrex::MultiFab * redirect_E = nullptr) const;
 
+    /** \brief Parameterized variant of QDSMCAddJouleHeating using the given
+     *         charge density for the coefficient state (rho^{n+1/2} on the
+     *         theta-implicit path; the plasma current is read from
+     *         hybrid_current_fp_plasma at its current state in both paths).
+     */
+    void QDSMCAddJouleHeating (int lev, amrex::Real dt,
+                               amrex::MultiFab const & rho,
+                               amrex::MultiFab * redirect_E) const;
+
     /**
      * \brief Add the electron-ion thermal-equilibration sink Q_ei to T_e.
      *
@@ -302,6 +342,28 @@ public:
      */
     void QDSMCAddTemperatureRelaxation (int lev, amrex::Real dt,
         std::map<std::string, amrex::MultiFab*> const & Ti_dep_by_species) const;
+
+    /** \brief Parameterized variant of QDSMCAddTemperatureRelaxation using the
+     *         given charge density for the coefficient state (rho^{n+1/2} on
+     *         the theta-implicit path).
+     */
+    void QDSMCAddTemperatureRelaxation (int lev, amrex::Real dt,
+        amrex::MultiFab const & rho,
+        std::map<std::string, amrex::MultiFab*> const & Ti_dep_by_species) const;
+
+    /** \brief Build the per-charged-species cell-centered ion temperature [eV]
+     *         from the shape-aware T_<species> deposits (collapse the
+     *         Yee-staggered 3-component field to a cell-centered scalar).
+     *         Shared by the explicit orchestrator (per step) and the
+     *         theta-implicit path (frozen at t^n across the step).
+     *
+     * \param[in]  lev AMR level
+     * \param[out] owned   storage for the built MultiFabs (must outlive users)
+     * \param[out] by_name raw-pointer view keyed by species name
+     */
+    void QDSMCBuildTiDeposits (int lev,
+        std::map<std::string, std::unique_ptr<amrex::MultiFab>> & owned,
+        std::map<std::string, amrex::MultiFab*> & by_name) const;
 
     /**
      * \brief Ion-heating operator: a stochastic drag-diffusion applied to
@@ -339,6 +401,20 @@ public:
      */
     void QDSMCFillElectronPressureFromTe (int lev) const;
 
+    /** \brief Parameterized variant of QDSMCFillElectronPressureFromTe using
+     *         the given charge density. */
+    void QDSMCFillElectronPressureFromTe (int lev, amrex::MultiFab const & rho) const;
+
+    /** \brief Theta-centered pressure emit for the implicit hybrid path:
+     *           Pe^{n+theta} = n_e^{n+theta} k_B [(1-theta) T_e^n + theta T_e^{n+1}]
+     *         with T_e^n from hybrid_electron_temperature_old_fp, T_e^{n+1}
+     *         the current hybrid_electron_temperature_fp iterate, and
+     *         n_e^{n+theta} extrapolated from rho^n (saved at step start in
+     *         hybrid_rho_fp_temp) and rho^{n+1/2} (rho_fp comp 1):
+     *           rho^{n+theta} = (1-2 theta) rho^n + 2 theta rho^{n+1/2}.
+     */
+    void QDSMCFillElectronPressureTheta (int lev, amrex::Real theta) const;
+
     /**
      * \brief Top-level orchestrator for the QDSMC electron-energy step.
      *
@@ -356,6 +432,65 @@ public:
      * Called from HybridPICEvolveFields when m_solve_electron_energy_equation is true.
      */
     void AdvanceElectronEnergyQDSMC (amrex::Real dt) const;
+
+    /**
+     * \brief Save the electron-energy state needed by the theta-implicit
+     *        hybrid scheme at the start of a step: T_e^n (into
+     *        hybrid_electron_temperature_old_fp), J_plasma(B^n) (into
+     *        hybrid_current_fp_plasma_old; the caller must have refreshed
+     *        hybrid_current_fp_plasma from B^n immediately before), and,
+     *        when Q_ei relaxation is on, the per-species ion-temperature
+     *        deposits (frozen at t^n for the whole step).
+     *
+     *        Called from ThetaImplicitHybrid::OneStep before the nonlinear
+     *        solve.
+     */
+    void QDSMCSaveImplicitStepStart () const;
+
+    /**
+     * \brief Theta-centered QDSMC electron-energy stage for the implicit
+     *        hybrid solver, run inside EVERY nonlinear residual evaluation
+     *        (in place of CalculateElectronPressure). Re-entrant: always
+     *        restarts from the saved T_e^n. Per level:
+     *
+     *        1. restore T_e <- T_e^n
+     *        2. V_e^{n+1/2} from J_i^{n+1/2} (current_fp), the plasma current
+     *           interpolated to the midpoint, and rho^{n+1/2} (rho_fp comp 1)
+     *        3. seed K_e from (T_e^n, rho^n) (rho_fp comp 0)
+     *        4. midpoint marker push: PushX(dt, 1/2) -> gather V_e at the
+     *           characteristic midpoint -> PushX(dt, 1) [second order]
+     *        5. deposit entropy/weights; recover T_e^{n+1} with the
+     *           extrapolated rho^{n+1} = 2 rho^{n+1/2} - rho^n
+     *        6. deterministic theta-state sources: Joule heating and the
+     *           exact-exponential Q_ei electron sink (coefficients at
+     *           rho^{n+1/2}; T_i frozen at t^n). The stochastic ion kick is
+     *           deferred to QDSMCFinishImplicitStep.
+     *        7. emit Pe^{n+theta} for the Ohm's-law E-solve.
+     *
+     *        Deterministic (quiet) throughout, so finite-difference
+     *        Jacobian-vector products across this stage remain valid.
+     *
+     * \param dt    full step size
+     * \param theta implicit time-biasing parameter
+     * \param refresh_species_deposits re-deposit the per-species charge
+     *        densities used by the multi-species sources (true once per
+     *        Newton iteration, false during Jacobian evaluations so the
+     *        linearization sees frozen species fractions)
+     */
+    void AdvanceElectronEnergyQDSMCTheta (amrex::Real dt, amrex::Real theta,
+                                          bool refresh_species_deposits) const;
+
+    /**
+     * \brief Post-solve completion of the theta-implicit electron-energy
+     *        step: apply the stochastic ion-heating realization (Q_ei
+     *        conjugate) once with converged states, refresh Pe to
+     *        Pe^{n+1} = n^{n+1} k_B T_e^{n+1} for diagnostics, reset the
+     *        QDSMC markers, and release the frozen T_i deposits.
+     *
+     *        Called from ThetaImplicitHybrid::OneStep after
+     *        FinishImplicitParticleUpdate.
+     */
+    void QDSMCFinishImplicitStep (amrex::Real dt) const;
 
     /**
      * \brief Compute the per-species resistive overlay vector field added to
@@ -588,6 +723,15 @@ public:
      *  because its lifetime is tied to the electron-energy equation that
      *  the hybrid model is responsible for. */
     std::unique_ptr<QdsmcParticleContainer> m_qdsmc_pc;
+
+    /** Per-charged-species ion-temperature deposits frozen at t^n for the
+     *  duration of one theta-implicit step (built by
+     *  QDSMCSaveImplicitStepStart, read by the in-residual Q_ei sink and the
+     *  post-solve ion-heating kick, released by QDSMCFinishImplicitStep).
+     *  Keyed by level, then species name. Mutable because the QDSMC stage
+     *  runs inside const residual evaluations. */
+    mutable std::map<int, std::map<std::string, std::unique_ptr<amrex::MultiFab>>> m_qdsmc_Ti_owned;
+    mutable std::map<int, std::map<std::string, amrex::MultiFab*>> m_qdsmc_Ti_by_name;
 };
 
 /**

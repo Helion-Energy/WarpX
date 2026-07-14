@@ -2,6 +2,16 @@
 #
 
 add_warpx_test(
+    test_2d_ohm_solver_electron_energy_adiabat_implicit_picmi  # name
+    2  # dims
+    2  # nprocs
+    "inputs_test_2d_ohm_solver_electron_energy_adiabat_picmi.py --test --implicit --nlsolver picard"  # inputs
+    "analysis_adiabat.py --tol-median 0.01 --tol-max 0.05"  # analysis
+    "analysis_default_regression.py --path diags/field_diags"  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
     test_2d_ohm_solver_electron_energy_adiabat_picmi  # name
     2  # dims
     2  # nprocs

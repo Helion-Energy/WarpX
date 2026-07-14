@@ -262,6 +262,75 @@ QdsmcParticleContainer::SetV (int lev,
 
 
 void
+QdsmcParticleContainer::GatherVAtCurrentPosition (int lev,
+                                                  const amrex::MultiFab & Ux,
+                                                  const amrex::MultiFab & Uy,
+                                                  const amrex::MultiFab & Uz)
+{
+    ABLASTR_PROFILE("QdsmcParticleContainer::GatherVAtCurrentPosition()");
+
+    auto & warpx = WarpX::GetInstance();
+    auto const plo = warpx.Geom(lev).ProbLoArray();
+    auto const dxi = warpx.Geom(lev).InvCellSizeArray();
+
+    for (iterator pti(*this, lev); pti.isValid(); ++pti)
+    {
+        long const np = pti.numParticles();
+        auto & attribs = pti.GetStructOfArrays().GetRealData();
+
+        // Current position: the AMReX-tracked slots written by PushX. Axes
+        // without a tracked slot use the (zero) home value, consistent with
+        // the home-position convention in SetV.
+#if !defined(WARPX_DIM_1D_Z)
+        amrex::ParticleReal const* const AMREX_RESTRICT pa_x =
+            attribs[QdsmcPIdx::x].dataPtr();
+#else
+        amrex::ParticleReal const* const AMREX_RESTRICT pa_x =
+            attribs[QdsmcPIdx::x_node].dataPtr();
+#endif
+#if defined(WARPX_DIM_3D)
+        amrex::ParticleReal const* const AMREX_RESTRICT pa_y =
+            attribs[QdsmcPIdx::y].dataPtr();
+#else
+        amrex::ParticleReal const* const AMREX_RESTRICT pa_y =
+            attribs[QdsmcPIdx::y_node].dataPtr();
+#endif
+#if !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
+        amrex::ParticleReal const* const AMREX_RESTRICT pa_z =
+            attribs[QdsmcPIdx::z].dataPtr();
+#else
+        amrex::ParticleReal const* const AMREX_RESTRICT pa_z =
+            attribs[QdsmcPIdx::z_node].dataPtr();
+#endif
+        amrex::ParticleReal* const AMREX_RESTRICT vx =
+            attribs[QdsmcPIdx::vx].dataPtr();
+        amrex::ParticleReal* const AMREX_RESTRICT vy =
+            attribs[QdsmcPIdx::vy].dataPtr();
+        amrex::ParticleReal* const AMREX_RESTRICT vz =
+            attribs[QdsmcPIdx::vz].dataPtr();
+
+        auto const ux_arr = Ux.const_array(pti);
+        auto const uy_arr = Uy.const_array(pti);
+        auto const uz_arr = Uz.const_array(pti);
+
+        amrex::ParallelFor(np, [=] AMREX_GPU_DEVICE (long ip)
+        {
+            // Linear gather of the nodal field at the marker's current position.
+            auto const v = ablastr::particles::doGatherVectorFieldNodal(
+                pa_x[ip], pa_y[ip], pa_z[ip],
+                ux_arr, uy_arr, uz_arr, dxi, plo);
+
+            vx[ip] = v[0];
+            vy[ip] = v[1];
+            vz[ip] = v[2];
+        });
+    }
+
+    amrex::Gpu::synchronize();
+}
+
+
+void
 QdsmcParticleContainer::SetK (int lev,
                               const amrex::MultiFab & Kfield,
                               const amrex::MultiFab & rhofield)
@@ -318,7 +387,7 @@ QdsmcParticleContainer::SetK (int lev,
 
 
 void
-QdsmcParticleContainer::PushX (int lev, amrex::Real dt)
+QdsmcParticleContainer::PushX (int lev, amrex::Real dt, amrex::Real frac)
 {
     ABLASTR_PROFILE("QdsmcParticleContainer::PushX()");
 
@@ -326,6 +395,9 @@ QdsmcParticleContainer::PushX (int lev, amrex::Real dt)
     auto const plo = geom.ProbLoArray();
     auto const phi = geom.ProbHiArray();
     auto const dx_arr = geom.CellSizeArray();
+
+    // Effective displacement time: frac*dt of the full-step characteristic.
+    amrex::Real const fdt = frac * dt;
 
     // Per-dimension domain clamp bounds. In non-periodic directions the
     // advected position is clamped just inside the domain (positions at or
@@ -392,13 +464,13 @@ QdsmcParticleContainer::PushX (int lev, amrex::Real dt)
             // before a SetK call). They contribute nothing to the deposit.
             if (np_real[ip] <= amrex::Real(0)) { return; }
 
-            // Forward-Euler push of one coordinate by one PIC step, clamped
-            // just inside the domain in non-periodic directions (see the
-            // bound setup above). The caller owns the CFL constraint
-            // |v| dt < dx (at most one cell per step).
+            // Push of one coordinate along the characteristic from home,
+            // clamped just inside the domain in non-periodic directions (see
+            // the bound setup above). Markers may cross multiple cells;
+            // Redistribute() below reassigns tiles.
             auto const push_clamp = [&] (amrex::Real x0, amrex::Real v, int d)
             {
-                amrex::Real const xnew = x0 + v * dt;
+                amrex::Real const xnew = x0 + v * fdt;
                 return is_periodic[d] ? xnew
                                       : amrex::Clamp(xnew, lo_bnd[d], hi_bnd[d]);
             };

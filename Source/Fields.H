@@ -50,6 +50,8 @@ namespace warpx::fields
         hybrid_entropy_fp,           /**< Used with the QDSMC electron-energy equation. Stores the electron entropy K_e = T_e * n_e^(1-gamma) on the grid; the QDSMC fictitious particles read this at the start of each step and rewrite it after Lagrangian advection. */
         hybrid_qdsmc_weights_fp,     /**< Used with the QDSMC electron-energy equation. Scratch field for the per-cell weight (N_e) deposited by QDSMC particles after their push, used to recover K_e^{n+1} as (deposited K*N) / (deposited N). */
         hybrid_electron_velocity_fp, /**< Used with the QDSMC electron-energy equation. Stores the electron fluid velocity V_e = -(J_plasma - J_i) / (q_e * n_e) on a NODAL grid (3 components); read by QDSMC SetV at the start of each step to advect the entropy-carrying particles. */
+        hybrid_electron_temperature_old_fp, /**< Used with the QDSMC electron-energy equation under the theta-implicit hybrid scheme. Stores T_e^n saved at the start of the step; every nonlinear residual evaluation restarts the QDSMC stage from this state so the stage is re-entrant. */
+        hybrid_current_fp_plasma_old, /**< Used with the QDSMC electron-energy equation under the theta-implicit hybrid scheme. Stores J_plasma = curl(B^n)/mu_0 saved at the start of the step, used to interpolate the plasma current to the temporal midpoint when theta > 1/2. */
         hybrid_rho_fp_temp,          /**< Used with Ohm's law solver. Stores the time interpolated/extrapolated charge density */
         hybrid_current_fp_temp,      /**< Used with Ohm's law solver. Stores the time interpolated/extrapolated current density */
         hybrid_current_fp_plasma,    /**< Used with Ohm's law solver. Stores plasma current calculated as J_plasma = curl x B / mu0 - J_ext */
@@ -117,6 +119,7 @@ namespace warpx::fields
         FieldType::vector_potential_grad_buf_b_stag,
         FieldType::hybrid_current_fp_temp,
         FieldType::hybrid_current_fp_plasma,
+        FieldType::hybrid_current_fp_plasma_old,
         FieldType::hybrid_current_fp_external,
         FieldType::hybrid_B_fp_external,
         FieldType::hybrid_E_fp_external,

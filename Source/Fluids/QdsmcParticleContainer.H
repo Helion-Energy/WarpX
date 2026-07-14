@@ -136,14 +136,37 @@ public:
                const amrex::MultiFab & rhofield);
 
     /**
-     * @brief Advance the particle position by x = x_home + v*dt (forward Euler).
+     * @brief Advance the particle position by x = x_home + frac*v*dt.
      *        In non-periodic directions the new position is clamped just
      *        inside the domain so Redistribute() cannot delete the marker
      *        (the carried entropy accumulates at the boundary nodes instead).
      *        Calls Redistribute() at the end so particles end up in the
      *        correct tile for their new position.
+     *
+     *        The displacement is always taken from the marker's home, so the
+     *        method may be called repeatedly with different velocities or
+     *        fractions (e.g. the two stages of a midpoint push). Markers may
+     *        cross multiple cells in one call; Redistribute() reassigns tiles.
+     *
+     * @param frac fraction of the full-step displacement (1 = full step,
+     *        0.5 = move to the temporal midpoint of the characteristic)
      */
-    void PushX (int lev, amrex::Real dt);
+    void PushX (int lev, amrex::Real dt, amrex::Real frac = 1.0);
+
+    /**
+     * @brief Gather a 3-component nodal vector field at the marker's CURRENT
+     *        position (as set by a previous PushX) into the velocity
+     *        attributes. Second stage of the midpoint push: after
+     *        PushX(lev, dt, 0.5) has placed the marker at the characteristic
+     *        midpoint (and redistributed it to the owning tile), this samples
+     *        v there so a following PushX(lev, dt, 1.0) completes
+     *        x = x_home + dt*v(x_mid), the second-order midpoint
+     *        characteristic.
+     */
+    void GatherVAtCurrentPosition (int lev,
+                                   const amrex::MultiFab & Ux,
+                                   const amrex::MultiFab & Uy,
+                                   const amrex::MultiFab & Uz);
 
     /**
      * @brief Scatter the per-particle entropy (K_e * N_e) onto Kfield via
