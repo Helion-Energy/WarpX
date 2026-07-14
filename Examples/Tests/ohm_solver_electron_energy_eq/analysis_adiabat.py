@@ -68,8 +68,13 @@ def main(argv=None):
     g1 = args.gamma - 1.0
 
     def zavg(name, it):
+        # The wave runs along the last array axis: x in the 2D Cartesian deck
+        # (average over z), z in the RZ deck (average over r).
         arr, info = ts.get_field(name, iteration=it)
-        return np.asarray(info.x, dtype=float), np.asarray(arr, dtype=float).mean(
+        coord = getattr(info, "x", None)
+        if coord is None:
+            coord = info.z
+        return np.asarray(coord, dtype=float), np.asarray(arr, dtype=float).mean(
             axis=0
         )
 
