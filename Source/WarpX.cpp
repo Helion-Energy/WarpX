@@ -1413,6 +1413,15 @@ WarpX::ReadParameters ()
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 current_deposition_algo == CurrentDepositionAlgo::Direct,
                 "Only Direct current deposition is supported with the implicit hybrid scheme");
+
+            const amrex::ParmParse pp_hybrid("hybrid_pic_model");
+            bool solve_electron_energy_equation = false;
+            pp_hybrid.query("solve_electron_energy_equation", solve_electron_energy_equation);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !solve_electron_energy_equation,
+                "hybrid_pic_model.solve_electron_energy_equation is not yet supported with "
+                "algo.evolve_scheme = theta_implicit_hybrid. The theta-centered QDSMC "
+                "electron-energy stage inside the nonlinear iteration is under development.");
         }
 
         // Load balancing parameters
