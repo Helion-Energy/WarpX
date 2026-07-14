@@ -68,4 +68,8 @@ add_warpx_test(
 #     effects under investigation; the 2D deck passes at <1%);
 #   * implicit:  dynamics diverge from the explicit run (median ~49%);
 #   * do_temperature_deposition segfaults in RZ (blocks RZ Q_ei runs).
-# Register the tests here once RZ validation lands.
+# Both configurations are guarded by runtime assertions until then
+# (HybridPICModel::ReadParameters refuses solve_electron_energy_equation in
+# RZ; PhysicalParticleContainer refuses do_temperature_deposition in radial
+# geometries). Remove the guards and register the tests here once RZ
+# validation lands.

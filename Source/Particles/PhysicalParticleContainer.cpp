@@ -203,6 +203,15 @@ PhysicalParticleContainer::PhysicalParticleContainer (AmrCore* amr_core, int isp
     );
 
     utils::parser::queryWithParser(pp_species_name, "do_temperature_deposition", m_do_temperature_deposition);
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+    // The shape-aware temperature deposition currently segfaults in the
+    // radial geometries (PhysicalParticleContainer::DepositTemperature);
+    // refuse cleanly until that is fixed.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_do_temperature_deposition,
+        "<species>.do_temperature_deposition is not supported in radial "
+        "geometries (RZ/RCYLINDER/RSPHERE) yet.");
+#endif
 
     pp_species_name.query("boost_adjust_transverse_positions", boost_adjust_transverse_positions);
     pp_species_name.query("do_backward_propagation", do_backward_propagation);
