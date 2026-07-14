@@ -65,11 +65,23 @@ class AdiabaticCompression(object):
     steps_per_period = 400
     substeps = 10
 
-    def __init__(self, test, verbose, implicit=False, nlsolver="newton"):
+    def __init__(
+        self,
+        test,
+        verbose,
+        implicit=False,
+        nlsolver="picard",
+        theta=0.5,
+        dt_scale=1.0,
+        energy_eq=True,
+    ):
         self.test = test
         self.verbose = verbose or test
         self.implicit = implicit
         self.nlsolver = nlsolver
+        self.theta = theta
+        self.dt_scale = dt_scale
+        self.energy_eq = energy_eq
 
         if self.test:
             self.NX = 32
@@ -98,11 +110,12 @@ class AdiabaticCompression(object):
         self.T_period = 2.0 * np.pi / self.omega  # = Lx / c_s for n_wave=1
         self.V0 = self.pert_frac * self.c_s  # velocity perturbation amplitude
 
-        self.dt = self.T_period / self.steps_per_period
+        self.dt = self.dt_scale * self.T_period / self.steps_per_period
         if self._steps_override is not None:
-            self.total_steps = self._steps_override
+            # keep the final time fixed under dt refinement (order studies)
+            self.total_steps = int(round(self._steps_override / self.dt_scale))
         else:
-            self.total_steps = int(self.periods * self.steps_per_period)
+            self.total_steps = int(round(self.periods * self.steps_per_period / self.dt_scale))
         self.diag_steps = max(1, self.total_steps // self.ndiag)
 
         self.vi_th = np.sqrt(constants.q_e * self.ti_eV / mi)
@@ -149,7 +162,7 @@ class AdiabaticCompression(object):
             n_floor=0.05 * self.n0,
             plasma_resistivity=self.eta,
             substeps=self.substeps,
-            solve_electron_energy_equation=True,
+            solve_electron_energy_equation=self.energy_eq,
             include_joule_heating=False,
         )
 
@@ -195,7 +208,7 @@ class AdiabaticCompression(object):
                     particle_tolerance=1.0e-12,
                 )
             simulation.evolve_scheme = picmi.ThetaImplicitHybridEvolveScheme(
-                theta=0.5,
+                theta=self.theta,
                 nonlinear_solver=nonlinear_solver,
             )
 
@@ -265,12 +278,35 @@ parser.add_argument(
     "--nlsolver",
     help="nonlinear solver for the implicit scheme",
     choices=["newton", "picard"],
-    default="newton",
+    default="picard",
+)
+parser.add_argument(
+    "--theta",
+    type=float,
+    default=0.5,
+    help="implicit time-biasing parameter (0.5 = time-centered)",
+)
+parser.add_argument(
+    "--dt-scale",
+    type=float,
+    default=1.0,
+    help="scale the time step while keeping the final time fixed (order studies)",
+)
+parser.add_argument(
+    "--no-energy-eq",
+    action="store_true",
+    help="use the algebraic adiabatic closure instead of the QDSMC energy equation",
 )
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
 run = AdiabaticCompression(
-    test=args.test, verbose=args.verbose, implicit=args.implicit, nlsolver=args.nlsolver
+    test=args.test,
+    verbose=args.verbose,
+    implicit=args.implicit,
+    nlsolver=args.nlsolver,
+    theta=args.theta,
+    dt_scale=args.dt_scale,
+    energy_eq=not args.no_energy_eq,
 )
 simulation.step()

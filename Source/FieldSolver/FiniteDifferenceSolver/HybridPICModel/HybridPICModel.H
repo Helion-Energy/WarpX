@@ -119,7 +119,8 @@ public:
         ablastr::fields::MultiLevelVectorField const& Bfield,
         ablastr::fields::MultiLevelScalarField const& rhofield,
         amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E,
-        bool solve_for_Faraday) const;
+        bool solve_for_Faraday,
+        std::optional<bool> include_resistivity = std::nullopt) const;
 
     void HybridPICSolveE (
         ablastr::fields::VectorField const& Efield,
@@ -127,7 +128,8 @@ public:
         ablastr::fields::VectorField const& Bfield,
         amrex::MultiFab const& rhofield,
         std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update_E,
-        int lev, bool solve_for_Faraday) const;
+        int lev, bool solve_for_Faraday,
+        std::optional<bool> include_resistivity = std::nullopt) const;
 
     void HybridPICSolveE (
         ablastr::fields::VectorField const& Efield,
@@ -135,7 +137,8 @@ public:
         ablastr::fields::VectorField const& Bfield,
         amrex::MultiFab const& rhofield,
         std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update_E,
-        int lev, PatchType patch_type, bool solve_for_Faraday) const;
+        int lev, PatchType patch_type, bool solve_for_Faraday,
+        std::optional<bool> include_resistivity = std::nullopt) const;
 
     void BfieldEvolve (
         ablastr::fields::MultiLevelVectorField const& Bfield,
@@ -490,7 +493,7 @@ public:
      *        Called from ThetaImplicitHybrid::OneStep after
      *        FinishImplicitParticleUpdate.
      */
-    void QDSMCFinishImplicitStep (amrex::Real dt) const;
+    void QDSMCFinishImplicitStep (amrex::Real dt, amrex::Real theta) const;
 
     /**
      * \brief Compute the per-species resistive overlay vector field added to

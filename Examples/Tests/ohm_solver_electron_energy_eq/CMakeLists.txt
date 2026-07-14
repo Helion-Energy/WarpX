@@ -22,11 +22,31 @@ add_warpx_test(
 )
 
 add_warpx_test(
+    test_2d_ohm_solver_electron_energy_joule_implicit_picmi  # name
+    2  # dims
+    2  # nprocs
+    "inputs_test_2d_ohm_solver_electron_energy_joule_picmi.py --test --eta-scale 100 --implicit"  # inputs
+    "analysis_joule.py --eta-scale 100"  # analysis
+    "analysis_default_regression.py --path diags/field_diags"  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
     test_2d_ohm_solver_electron_energy_joule_picmi  # name
     2  # dims
     2  # nprocs
     "inputs_test_2d_ohm_solver_electron_energy_joule_picmi.py --test --eta-scale 100"  # inputs
     "analysis_joule.py --eta-scale 100"  # analysis
+    "analysis_default_regression.py --path diags/field_diags"  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_2d_ohm_solver_electron_energy_qei_implicit_picmi  # name
+    2  # dims
+    2  # nprocs
+    "inputs_test_2d_ohm_solver_electron_energy_qei_picmi.py --test --implicit"  # inputs
+    "analysis_qei.py --nu-ei 1e6"  # analysis
     "analysis_default_regression.py --path diags/field_diags"  # checksum
     OFF  # dependency
 )

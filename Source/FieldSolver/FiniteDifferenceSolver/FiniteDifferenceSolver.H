@@ -164,7 +164,8 @@ class FiniteDifferenceSolver
                                amrex::MultiFab const& Pefield,
                                std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_E,
                                int lev, HybridPICModel const* hybrid_model,
-                               bool solve_for_Faraday );
+                               bool solve_for_Faraday,
+                               bool include_resistivity );
 
         /**
           * \brief Calculation of total current using Ampere's law (without
@@ -312,7 +313,8 @@ class FiniteDifferenceSolver
             amrex::MultiFab const& Pefield,
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_E,
             int lev, HybridPICModel const* hybrid_model,
-            bool solve_for_Faraday );
+            bool solve_for_Faraday,
+                               bool include_resistivity );
 
         template<typename T_Algo>
         void CalculateCurrentAmpereCylindrical (
@@ -394,7 +396,8 @@ class FiniteDifferenceSolver
             amrex::MultiFab const& rhofield,
             amrex::MultiFab const& Pefield,
             int lev, HybridPICModel const* hybrid_model,
-            bool solve_for_Faraday );
+            bool solve_for_Faraday,
+                               bool include_resistivity );
 
         template<typename T_Algo>
         void CalculateCurrentAmpereSpherical (
@@ -529,7 +532,8 @@ class FiniteDifferenceSolver
             amrex::MultiFab const& Pefield,
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_E,
             int lev, HybridPICModel const* hybrid_model,
-            bool solve_for_Faraday );
+            bool solve_for_Faraday,
+                               bool include_resistivity );
 
         template<typename T_Algo>
         void CalculateCurrentAmpereCartesian (

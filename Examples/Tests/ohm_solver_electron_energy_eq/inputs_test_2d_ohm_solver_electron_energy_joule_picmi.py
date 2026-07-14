@@ -69,7 +69,9 @@ class ForceFreeJoule(object):
     DIAG_EVERY = 150  # diagnostic cadence (steps)
     substeps = 20
 
-    def __init__(self, test, verbose, eta_scale):
+    def __init__(self, test, verbose, eta_scale, implicit=False, nlsolver="picard"):
+        self.implicit = implicit
+        self.nlsolver = nlsolver
         self.test = test
         self.verbose = verbose or test
         self.eta_scale = eta_scale
@@ -200,6 +202,41 @@ class ForceFreeJoule(object):
             warpx_use_filter=True,
         )
 
+        if self.implicit:
+            # Theta-implicit hybrid scheme with the theta-centered QDSMC
+            # energy stage inside the nonlinear iteration (see the adiabat
+            # deck). Picard is the default: Newton/JFNK is not robust in
+            # weakly-magnetized configurations.
+            if self.nlsolver == "picard":
+                nonlinear_solver = picmi.PicardNonlinearSolver(
+                    verbose=self.verbose,
+                    max_iterations=100,
+                    relative_tolerance=1.0e-8,
+                    absolute_tolerance=0.0,
+                    require_convergence=True,
+                )
+            else:
+                gmres_solver = picmi.GMRESLinearSolver(
+                    verbose_int=1,
+                    max_iterations=100,
+                    relative_tolerance=1.0e-6,
+                    absolute_tolerance=0.0,
+                )
+                nonlinear_solver = picmi.NewtonNonlinearSolver(
+                    verbose=self.verbose,
+                    max_iterations=20,
+                    relative_tolerance=1.0e-8,
+                    absolute_tolerance=0.0,
+                    require_convergence=True,
+                    linear_solver=gmres_solver,
+                    max_particle_iterations=21,
+                    particle_tolerance=1.0e-12,
+                )
+            simulation.evolve_scheme = picmi.ThetaImplicitHybridEvolveScheme(
+                theta=0.5,
+                nonlinear_solver=nonlinear_solver,
+            )
+
         B_init = picmi.LoadInitialFieldFromPython(
             load_from_python=self.load_initial_B,
             load_B=True,
@@ -287,8 +324,25 @@ parser.add_argument(
     help="multiplier on the base resistivity eta=1e-5 (amplifies the eta*J^2 "
     "heating signal; the CI test uses 100)",
 )
+parser.add_argument(
+    "--implicit",
+    help="use the theta-implicit hybrid evolve scheme (theta = 0.5)",
+    action="store_true",
+)
+parser.add_argument(
+    "--nlsolver",
+    help="nonlinear solver for the implicit scheme",
+    choices=["newton", "picard"],
+    default="picard",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
-run = ForceFreeJoule(test=args.test, verbose=args.verbose, eta_scale=args.eta_scale)
+run = ForceFreeJoule(
+    test=args.test,
+    verbose=args.verbose,
+    eta_scale=args.eta_scale,
+    implicit=args.implicit,
+    nlsolver=args.nlsolver,
+)
 simulation.step()
