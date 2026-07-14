@@ -1,0 +1,15 @@
+# Add tests (alphabetical order) ##############################################
+#
+
+# Analytic constant-η magnetic diffusion (Fourier By mode) with
+# hybrid_pic_model.implicit_mag_diffusion. Uses the C++ executable directly
+# (no PICMI) so pywarpx is not required.
+add_warpx_test(
+    test_2d_hybrid_mag_diffusion  # name
+    2  # dims
+    1  # nprocs
+    "inputs_test_2d_hybrid_mag_diffusion"  # inputs
+    "analysis.py"  # analysis
+    OFF  # checksum (analytic analysis is the oracle)
+    OFF  # dependency
+)
