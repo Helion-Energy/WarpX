@@ -65,9 +65,11 @@ class AdiabaticCompression(object):
     steps_per_period = 400
     substeps = 10
 
-    def __init__(self, test, verbose):
+    def __init__(self, test, verbose, implicit=False, nlsolver="newton"):
         self.test = test
         self.verbose = verbose or test
+        self.implicit = implicit
+        self.nlsolver = nlsolver
 
         if self.test:
             self.NX = 32
@@ -162,6 +164,41 @@ class AdiabaticCompression(object):
             warpx_use_filter=True,
         )
 
+        if self.implicit:
+            # Theta-implicit hybrid scheme: the QDSMC energy stage runs
+            # theta-centered inside every nonlinear residual evaluation
+            # (midpoint V_e and a midpoint marker push), so at theta = 0.5
+            # the same adiabat check holds with second-order accuracy in dt.
+            if self.nlsolver == "picard":
+                nonlinear_solver = picmi.PicardNonlinearSolver(
+                    verbose=self.verbose,
+                    max_iterations=100,
+                    relative_tolerance=1.0e-8,
+                    absolute_tolerance=0.0,
+                    require_convergence=True,
+                )
+            else:
+                gmres_solver = picmi.GMRESLinearSolver(
+                    verbose_int=1,
+                    max_iterations=100,
+                    relative_tolerance=1.0e-6,
+                    absolute_tolerance=0.0,
+                )
+                nonlinear_solver = picmi.NewtonNonlinearSolver(
+                    verbose=self.verbose,
+                    max_iterations=20,
+                    relative_tolerance=1.0e-8,
+                    absolute_tolerance=0.0,
+                    require_convergence=True,
+                    linear_solver=gmres_solver,
+                    max_particle_iterations=21,
+                    particle_tolerance=1.0e-12,
+                )
+            simulation.evolve_scheme = picmi.ThetaImplicitHybridEvolveScheme(
+                theta=0.5,
+                nonlinear_solver=nonlinear_solver,
+            )
+
         # Uniform density; sinusoidal x-velocity perturbation v_x = V0 sin(kx).
         # Uniform n0 and uniform Te0 -> uniform initial entropy.
         self.ions = picmi.Species(
@@ -219,8 +256,21 @@ parser.add_argument(
     help="Verbose output",
     action="store_true",
 )
+parser.add_argument(
+    "--implicit",
+    help="use the theta-implicit hybrid evolve scheme (theta = 0.5)",
+    action="store_true",
+)
+parser.add_argument(
+    "--nlsolver",
+    help="nonlinear solver for the implicit scheme",
+    choices=["newton", "picard"],
+    default="newton",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
-run = AdiabaticCompression(test=args.test, verbose=args.verbose)
+run = AdiabaticCompression(
+    test=args.test, verbose=args.verbose, implicit=args.implicit, nlsolver=args.nlsolver
+)
 simulation.step()

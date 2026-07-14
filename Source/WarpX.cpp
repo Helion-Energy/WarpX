@@ -1417,11 +1417,28 @@ WarpX::ReadParameters ()
             const amrex::ParmParse pp_hybrid("hybrid_pic_model");
             bool solve_electron_energy_equation = false;
             pp_hybrid.query("solve_electron_energy_equation", solve_electron_energy_equation);
-            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                !solve_electron_energy_equation,
-                "hybrid_pic_model.solve_electron_energy_equation is not yet supported with "
-                "algo.evolve_scheme = theta_implicit_hybrid. The theta-centered QDSMC "
-                "electron-energy stage inside the nonlinear iteration is under development.");
+            if (solve_electron_energy_equation) {
+                // The theta-centered QDSMC energy stage runs inside the
+                // nonlinear residual; these two options are not wired into
+                // that path yet.
+                bool joule_redirect = false;
+                pp_hybrid.query("redirect_joule_to_ions", joule_redirect);
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!joule_redirect,
+                    "hybrid_pic_model.redirect_joule_to_ions is not yet supported with "
+                    "algo.evolve_scheme = theta_implicit_hybrid");
+                std::vector<std::string> species_names_tmp;
+                const amrex::ParmParse pp_particles_tmp("particles");
+                pp_particles_tmp.queryarr("species_names", species_names_tmp);
+                for (auto const& sp : species_names_tmp) {
+                    std::string per_species_eta;
+                    pp_hybrid.query(
+                        ("plasma_resistivity_" + sp + "(rho_s,rho,Te,J,J_s,B,t)").c_str(),
+                        per_species_eta);
+                    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(per_species_eta.empty(),
+                        "hybrid_pic_model.plasma_resistivity_<species> is not yet supported with "
+                        "algo.evolve_scheme = theta_implicit_hybrid");
+                }
+            }
         }
 
         // Load balancing parameters

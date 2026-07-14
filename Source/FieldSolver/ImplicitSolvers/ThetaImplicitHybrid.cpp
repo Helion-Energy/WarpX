@@ -104,6 +104,16 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
         }
     }
 
+    // Save the electron-energy start-of-step state (T_e^n, J_plasma(B^n),
+    // rho^n, frozen T_i^n deposits). B currently holds B^n, so refresh the
+    // plasma current from it first.
+    if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
+        m_hybrid_pic_model->CalculatePlasmaCurrent(
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, m_num_amr_levels - 1),
+            m_WarpX->GetEBUpdateEFlag());
+        m_hybrid_pic_model->QDSMCSaveImplicitStepStart();
+    }
+
     // Initial guess: E^{n+theta} = E^n
     m_E.Copy(m_Eold);
 
@@ -124,6 +134,13 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
 
     // Advance fields from t^{n+theta} to t^{n+1}
     FinishFieldUpdate( new_time );
+
+    // Complete the electron-energy step: apply the stochastic ion-heating
+    // realization once with converged states, refresh Pe^{n+1}, and reset
+    // the QDSMC markers.
+    if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
+        m_hybrid_pic_model->QDSMCFinishImplicitStep(m_dt);
+    }
 
     return exit_status;
 }
@@ -156,8 +173,18 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     // Compute J_plasma = curl(B^{n+theta})/mu_0
     m_hybrid_pic_model->CalculatePlasmaCurrent(Bfield_fp, m_WarpX->GetEBUpdateEFlag());
 
-    // Compute electron pressure
-    m_hybrid_pic_model->CalculateElectronPressure();
+    // Electron pressure at t^{n+theta}: either the theta-centered QDSMC
+    // electron-energy stage (re-entrant; re-run from the saved t^n state in
+    // every residual evaluation, so the nonlinear solver converges the
+    // coupled E/T_e system by elimination) or the algebraic adiabatic
+    // closure. Per-species deposits feeding the multi-species sources are
+    // refreshed once per Newton iteration and frozen during Jacobian
+    // evaluations.
+    if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
+        m_hybrid_pic_model->AdvanceElectronEnergyQDSMCTheta(m_dt, m_theta, !a_from_jacobian);
+    } else {
+        m_hybrid_pic_model->CalculateElectronPressure();
+    }
 
     // Solve Ohm's law: E_ohm = f(B^{n+theta}, J_ion^{n+1/2}, rho^{n+1/2}, Pe)
     // Result stored in Efield_fp
