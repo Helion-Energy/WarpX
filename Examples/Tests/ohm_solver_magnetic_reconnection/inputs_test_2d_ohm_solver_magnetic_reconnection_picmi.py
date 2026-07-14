@@ -63,9 +63,35 @@ class ForceFreeSheetReconnection(object):
     # Number of substeps used to update B
     substeps = 40
 
-    def __init__(self, test, verbose):
+    def __init__(
+        self,
+        test,
+        verbose,
+        implicit=False,
+        nlsolver="picard",
+        theta=0.5,
+        dt_mult=1.0,
+        energy_eq=False,
+        nx=None,
+        nz=None,
+        nppc=None,
+        lt=None,
+    ):
         self.test = test
         self.verbose = verbose or self.test
+        self.implicit = implicit
+        self.nlsolver = nlsolver
+        self.theta = theta
+        self.energy_eq = energy_eq
+        if nx is not None:
+            self.NX = nx
+        if nz is not None:
+            self.NZ = nz
+        if nppc is not None:
+            self.NPPC = nppc
+        if lt is not None:
+            self.LT = lt
+        self.DT = self.DT * dt_mult
 
         # calculate various plasma parameters based on the simulation input
         self.get_plasma_quantities()
@@ -83,7 +109,7 @@ class ForceFreeSheetReconnection(object):
             self.NZ = 128
         else:
             self.total_steps = int(self.LT / self.DT)
-            self.diag_steps = self.total_steps // 200
+            self.diag_steps = max(1, self.total_steps // 200)
 
         # Initial magnetic field
         self.Bg *= self.B0
@@ -207,16 +233,65 @@ class ForceFreeSheetReconnection(object):
         # Field solver and external field                                     #
         #######################################################################
 
+        # With the electron energy equation the electrons get real
+        # thermodynamics (adiabatic index 5/3 + Joule heating at the current
+        # sheet) instead of the isothermal gamma = 1 closure.
         self.solver = picmi.HybridPICSolver(
             grid=self.grid,
-            gamma=1.0,
+            gamma=5.0 / 3.0 if self.energy_eq else 1.0,
             Te=self.Te,
             n0=self.n_plasma,
             n_floor=0.1 * self.n_plasma,
             plasma_resistivity=self.eta * self.eta0,
             substeps=self.substeps,
+            solve_electron_energy_equation=self.energy_eq,
+            include_joule_heating=self.energy_eq,
         )
         simulation.solver = self.solver
+
+        if self.implicit:
+            # Theta-implicit hybrid scheme; the QDSMC electron-energy stage
+            # (when enabled) runs theta-centered inside the nonlinear
+            # iteration. Picard is the default nonlinear solver.
+            #
+            # Size the deposition guard cells for the enlarged implicit time
+            # step: particles may cross more than one cell per step, and the
+            # default particles.max_grid_crossings = 1 under-sizes the guards
+            # (deposit-range abort at initialization otherwise).
+            import pywarpx
+
+            pywarpx.particles.max_grid_crossings = int(
+                np.ceil(0.5 * self.DT / 1.0e-3)
+            ) + 1
+            if self.nlsolver == "picard":
+                nonlinear_solver = picmi.PicardNonlinearSolver(
+                    verbose=self.verbose,
+                    max_iterations=100,
+                    relative_tolerance=1.0e-6,
+                    absolute_tolerance=0.0,
+                    require_convergence=True,
+                )
+            else:
+                gmres_solver = picmi.GMRESLinearSolver(
+                    verbose_int=1,
+                    max_iterations=100,
+                    relative_tolerance=1.0e-4,
+                    absolute_tolerance=0.0,
+                )
+                nonlinear_solver = picmi.NewtonNonlinearSolver(
+                    verbose=self.verbose,
+                    max_iterations=20,
+                    relative_tolerance=1.0e-6,
+                    absolute_tolerance=0.0,
+                    require_convergence=True,
+                    linear_solver=gmres_solver,
+                    max_particle_iterations=21,
+                    particle_tolerance=1.0e-10,
+                )
+            simulation.evolve_scheme = picmi.ThetaImplicitHybridEvolveScheme(
+                theta=self.theta,
+                nonlinear_solver=nonlinear_solver,
+            )
 
         B_ext = picmi.AnalyticInitialField(
             Bx_expression=self.Bx, By_expression=self.By, Bz_expression=self.Bz
@@ -277,6 +352,21 @@ class ForceFreeSheetReconnection(object):
         # reduced diagnostics for reconnection rate calculation
         # create a 2 l_i box around the X-point on which to measure
         # magnetic flux changes
+        data_list = ["rho", "B", "J", "E"]
+        if self.energy_eq:
+            data_list.append("Te")
+        field_diag = picmi.FieldDiagnostic(
+            name="field_diag",
+            grid=self.grid,
+            period=self.diag_steps,
+            data_list=data_list,
+            write_dir="diags",
+            warpx_file_prefix="field_diags",
+            warpx_format="openpmd",
+            warpx_openpmd_backend="h5",
+        )
+        simulation.add_diagnostic(field_diag)
+
         plane = picmi.ReducedDiagnostic(
             diag_type="FieldProbe",
             name="plane",
@@ -351,8 +441,47 @@ parser.add_argument(
     help="Verbose output",
     action="store_true",
 )
+parser.add_argument(
+    "--implicit",
+    help="use the theta-implicit hybrid evolve scheme",
+    action="store_true",
+)
+parser.add_argument(
+    "--nlsolver", choices=["newton", "picard"], default="picard",
+    help="nonlinear solver for the implicit scheme",
+)
+parser.add_argument(
+    "--theta", type=float, default=0.5,
+    help="implicit time-biasing parameter",
+)
+parser.add_argument(
+    "--dt-mult", type=float, default=1.0,
+    help="multiply the base time step (implicit runs can take larger steps)",
+)
+parser.add_argument(
+    "--energy-eq", action="store_true",
+    help="solve the QDSMC electron energy equation with Joule heating "
+    "(gamma = 5/3) instead of the isothermal closure",
+)
+parser.add_argument("--nx", type=int, default=None, help="override NX")
+parser.add_argument("--nz", type=int, default=None, help="override NZ")
+parser.add_argument("--nppc", type=int, default=None, help="override NPPC")
+parser.add_argument("--lt", type=float, default=None,
+                    help="override run length (ion cyclotron periods)")
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
-run = ForceFreeSheetReconnection(test=args.test, verbose=args.verbose)
+run = ForceFreeSheetReconnection(
+    test=args.test,
+    verbose=args.verbose,
+    implicit=args.implicit,
+    nlsolver=args.nlsolver,
+    theta=args.theta,
+    dt_mult=args.dt_mult,
+    energy_eq=args.energy_eq,
+    nx=args.nx,
+    nz=args.nz,
+    nppc=args.nppc,
+    lt=args.lt,
+)
 simulation.step()
