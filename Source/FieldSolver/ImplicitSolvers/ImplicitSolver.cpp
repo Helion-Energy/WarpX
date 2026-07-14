@@ -832,16 +832,13 @@ void ImplicitSolver::PreRHSOp ( const amrex::Real  a_cur_time,
     }
 
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+    // Apply the inverse volume scaling for radial geometries after the total
+    // current has been accumulated from all containers above. The charge
+    // density needs no such treatment here: rho is deposited directly and is
+    // scaled inside WarpX::PushParticlesandDeposit(), on the implicit path too.
     for (int lev = 0; lev < m_num_amr_levels; ++lev) {
         ablastr::fields::VectorField J = m_WarpX->m_fields.get_alldirs(FieldType::current_fp, lev);
         m_WarpX->ApplyInverseVolumeScalingToCurrentDensity(J[0], J[1], J[2], lev);
-        // The particle evolve applies the radial-geometry volume scaling only on the
-        // explicit path; charge density deposited during implicit residual evaluations
-        // must be scaled here or solvers that divide by rho (e.g. the hybrid Ohm's law)
-        // see an unscaled density.
-        if (m_WarpX->m_fields.has(FieldType::rho_fp, lev)) {
-            m_WarpX->ApplyInverseVolumeScalingToChargeDensity(m_WarpX->m_fields.get(FieldType::rho_fp, lev), lev);
-        }
     }
 #endif
 
