@@ -637,14 +637,15 @@ void HybridPICModel::HybridPICSolveE (
     ablastr::fields::MultiLevelVectorField const& Bfield,
     ablastr::fields::MultiLevelScalarField const& rhofield,
     amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E,
-    const bool solve_for_Faraday) const
+    const bool solve_for_Faraday,
+    const std::optional<bool> include_resistivity) const
 {
     auto& warpx = WarpX::GetInstance();
     for (int lev = 0; lev <= warpx.finestLevel(); ++lev)
     {
         HybridPICSolveE(
             Efield[lev], Jfield[lev], Bfield[lev], *rhofield[lev],
-            eb_update_E[lev], lev, solve_for_Faraday
+            eb_update_E[lev], lev, solve_for_Faraday, include_resistivity
         );
     }
     // Allow execution of Python callback after E-field push
@@ -657,13 +658,14 @@ void HybridPICModel::HybridPICSolveE (
     ablastr::fields::VectorField const& Bfield,
     amrex::MultiFab const& rhofield,
     std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update_E,
-    const int lev, const bool solve_for_Faraday) const
+    const int lev, const bool solve_for_Faraday,
+    const std::optional<bool> include_resistivity) const
 {
     ABLASTR_PROFILE("WarpX::HybridPICSolveE()");
 
     HybridPICSolveE(
         Efield, Jfield, Bfield, rhofield, eb_update_E, lev,
-        PatchType::fine, solve_for_Faraday
+        PatchType::fine, solve_for_Faraday, include_resistivity
     );
     if (lev > 0)
     {
@@ -679,7 +681,8 @@ void HybridPICModel::HybridPICSolveE (
     amrex::MultiFab const& rhofield,
     std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update_E,
     const int lev, PatchType patch_type,
-    const bool solve_for_Faraday) const
+    const bool solve_for_Faraday,
+    const std::optional<bool> include_resistivity) const
 {
     auto& warpx = WarpX::GetInstance();
 
@@ -687,9 +690,14 @@ void HybridPICModel::HybridPICSolveE (
     auto* const electron_pressure_fp = warpx.m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
 
     // Solve E field in regular cells
+    // The resistive (and hyper-resistive) terms default to the historical
+    // coupling with solve_for_Faraday; the theta-implicit solver overrides
+    // this to assemble the full Ohm E (grad(Pe) and eta*J together).
+    const bool incl_eta = include_resistivity.value_or(solve_for_Faraday);
     warpx.get_pointer_fdtd_solver_fp(lev)->HybridPICSolveE(
         Efield, current_fp_plasma, Jfield, Bfield, rhofield,
-        *electron_pressure_fp, eb_update_E, lev, this, solve_for_Faraday
+        *electron_pressure_fp, eb_update_E, lev, this, solve_for_Faraday,
+        incl_eta
     );
     amrex::Real const time = warpx.gett_old(0) + warpx.getdt(0);
     warpx.ApplyEfieldBoundary(lev, patch_type, time);
@@ -1907,6 +1915,12 @@ void HybridPICModel::QDSMCFillElectronPressureFromTe (int const lev,
             Pe_arr(i,j,k) = ne * PhysConst::kb * Te_arr(i,j,k);
         });
     }
+
+    // The Ohm's-law kernels difference Pe across box edges, so the domain
+    // boundary must be applied and the ghosts filled (mirrors
+    // CalculateElectronPressure).
+    warpx.ApplyElectronPressureBoundary(lev, PatchType::fine);
+    Pe.FillBoundary(warpx.Geom(lev).periodicity());
 }
 
 
@@ -2158,6 +2172,11 @@ void HybridPICModel::QDSMCFillElectronPressureTheta (int const lev, amrex::Real 
             Pe_arr(i,j,k) = ne * PhysConst::kb * Te_th;
         });
     }
+
+    // See QDSMCFillElectronPressureFromTe: the Ohm's-law kernels difference
+    // Pe across box edges.
+    warpx.ApplyElectronPressureBoundary(lev, PatchType::fine);
+    Pe.FillBoundary(warpx.Geom(lev).periodicity());
 }
 
 
@@ -2309,42 +2328,104 @@ void HybridPICModel::AdvanceElectronEnergyQDSMCTheta (amrex::Real const dt,
         m_qdsmc_pc->SetV(lev, Vex, Vey, Vez);
         m_qdsmc_pc->SetK(lev, Ke, rho_n);
 
-        // Step 3: second-order midpoint characteristic push: move to the
-        // temporal midpoint, resample V_e there, then complete the full step
-        // from home with the midpoint velocity.
-        m_qdsmc_pc->PushX(lev, dt, 0.5_rt);
-        m_qdsmc_pc->GatherVAtCurrentPosition(lev, Vex, Vey, Vez);
-        m_qdsmc_pc->PushX(lev, dt, 1.0_rt);
+        if (theta == 0.5_rt) {
+            // Time-centered path: the residual only needs midpoint-state
+            // quantities, so recover the temperature AT the temporal midpoint
+            // from midpoint-position deposits and the midpoint density --
+            // no time extrapolation of the density anywhere. (Recovering
+            // T^{n+1} with the extrapolated 2 rho^{n+1/2} - rho^n instead
+            // carries a one-sided deposition-shape bias, O(dt^2) per step,
+            // that contaminates the scheme with a global O(dt) error.)
+            //
+            // Step 3a: markers to the temporal midpoint of the characteristic
+            m_qdsmc_pc->PushX(lev, dt, 0.5_rt);
 
-        // Step 4: scatter and recover T_e^{n+1} with the end-of-step density
-        m_qdsmc_pc->DepositK(lev, Karr_out);
-        m_qdsmc_pc->DepositField(lev, weights_out);
-        QDSMCUpdateTe(lev, rho_np1);
+            // Step 4a: midpoint scatter and recovery: T_e^{n+1/2} from the
+            // midpoint entropy deposit and the midpoint density deposit
+            m_qdsmc_pc->DepositK(lev, Karr_out);
+            m_qdsmc_pc->DepositField(lev, weights_out);
+            QDSMCUpdateTe(lev, rho_half);
 
-        // Step 5: deterministic sources with midpoint coefficient states.
-        // The stochastic ion-heating realization (Q_ei conjugate) is applied
-        // once, post-solve, in QDSMCFinishImplicitStep; the Te-threshold
-        // Joule redirect is not yet supported on the implicit path (guarded
-        // at input parsing).
-        if (m_include_joule_heating) {
-            QDSMCAddJouleHeating(lev, dt, rho_half, nullptr);
+            // Step 5a: half-step deterministic sources with midpoint
+            // coefficient states, so the emitted pressure is the midpoint
+            // value including sources. The stochastic ion-heating
+            // realization (Q_ei conjugate) is applied once, post-solve, in
+            // QDSMCFinishImplicitStep; the Te-threshold Joule redirect is
+            // not yet supported on the implicit path (guarded at input
+            // parsing).
+            if (m_include_joule_heating) {
+                QDSMCAddJouleHeating(lev, 0.5_rt*dt, rho_half, nullptr);
+            }
+            if (m_include_temperature_relaxation) {
+                QDSMCAddTemperatureRelaxation(lev, 0.5_rt*dt, rho_half, m_qdsmc_Ti_by_name[lev]);
+            }
+
+            // Step 6a: emit Pe^{n+1/2} = n^{n+1/2} k_B T_e^{n+1/2} for the
+            // Ohm's-law E-solve of this residual evaluation. The markers are
+            // left at the midpoint; QDSMCFinishImplicitStep completes the
+            // characteristic and recovers T_e^{n+1} once, post-solve.
+            QDSMCFillElectronPressureFromTe(lev, rho_half);
+        } else {
+            // Dissipative (theta > 1/2) path: Pe^{n+theta} requires the
+            // end-of-step temperature iterate, recovered with the
+            // time-extrapolated density. The extrapolation carries a small
+            // deposition-shape bias (see above); acceptable here since
+            // theta > 1/2 biasing is itself first-order in time.
+            //
+            // Step 3: second-order midpoint characteristic push: move to the
+            // temporal midpoint, resample V_e there, then complete the full
+            // step from home with the midpoint velocity.
+            m_qdsmc_pc->PushX(lev, dt, 0.5_rt);
+            m_qdsmc_pc->GatherVAtCurrentPosition(lev, Vex, Vey, Vez);
+            m_qdsmc_pc->PushX(lev, dt, 1.0_rt);
+
+            // Step 4: scatter and recover T_e^{n+1} with the end-of-step density
+            m_qdsmc_pc->DepositK(lev, Karr_out);
+            m_qdsmc_pc->DepositField(lev, weights_out);
+            QDSMCUpdateTe(lev, rho_np1);
+
+            // Step 5: full-step deterministic sources with midpoint
+            // coefficient states.
+            if (m_include_joule_heating) {
+                QDSMCAddJouleHeating(lev, dt, rho_half, nullptr);
+            }
+            if (m_include_temperature_relaxation) {
+                QDSMCAddTemperatureRelaxation(lev, dt, rho_half, m_qdsmc_Ti_by_name[lev]);
+            }
+
+            // Step 6: emit Pe^{n+theta} for the Ohm's-law E-solve of this
+            // residual evaluation.
+            QDSMCFillElectronPressureTheta(lev, theta);
         }
-        if (m_include_temperature_relaxation) {
-            QDSMCAddTemperatureRelaxation(lev, dt, rho_half, m_qdsmc_Ti_by_name[lev]);
-        }
-
-        // Step 6: emit Pe^{n+theta} for the Ohm's-law E-solve of this
-        // residual evaluation.
-        QDSMCFillElectronPressureTheta(lev, theta);
     }
 }
 
 
-void HybridPICModel::QDSMCFinishImplicitStep (amrex::Real const dt) const
+void HybridPICModel::QDSMCFinishImplicitStep (amrex::Real const dt, amrex::Real const theta) const
 {
     ABLASTR_PROFILE("HybridPICModel::QDSMCFinishImplicitStep()");
 
+    using ablastr::fields::Direction;
+
     auto & warpx = WarpX::GetInstance();
+
+    // On the time-centered path the residual leaves the markers at the
+    // temporal midpoint of the characteristic; complete the push with the
+    // converged midpoint electron velocity and scatter the entropy at the
+    // end-of-step positions before recovering T_e^{n+1}.
+    if (theta == 0.5_rt) {
+        for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+            amrex::MultiFab const & Vex = *warpx.m_fields.get(FieldType::hybrid_electron_velocity_fp, Direction{0}, lev);
+            amrex::MultiFab const & Vey = *warpx.m_fields.get(FieldType::hybrid_electron_velocity_fp, Direction{1}, lev);
+            amrex::MultiFab const & Vez = *warpx.m_fields.get(FieldType::hybrid_electron_velocity_fp, Direction{2}, lev);
+            amrex::MultiFab & Karr_out    = *warpx.m_fields.get(FieldType::hybrid_entropy_fp,        lev);
+            amrex::MultiFab & weights_out = *warpx.m_fields.get(FieldType::hybrid_qdsmc_weights_fp, lev);
+            m_qdsmc_pc->GatherVAtCurrentPosition(lev, Vex, Vey, Vez);
+            m_qdsmc_pc->PushX(lev, dt, 1.0_rt);
+            m_qdsmc_pc->DepositK(lev, Karr_out);
+            m_qdsmc_pc->DepositField(lev, weights_out);
+        }
+    }
 
     // True end-of-step charge density: the ions are at x^{n+1} now, so a
     // fresh deposit replaces the extrapolated 2 rho^{n+1/2} - rho^n iterate
@@ -2353,6 +2434,12 @@ void HybridPICModel::QDSMCFinishImplicitStep (amrex::Real const dt) const
     // noise every other consumer of rho^{n+1} sees (the in-residual
     // extrapolation both amplifies the deposit noise and decorrelates it).
     // hybrid_rho_fp_temp (rho^n) is no longer needed this step, so reuse it.
+    //
+    // FinishImplicitParticleUpdate just extrapolated the positions to x^{n+1}
+    // without redistributing, so particles can sit outside their tiles'
+    // deposit-safe range; redistribute first (the main loop redistributes
+    // again later, which is harmless).
+    warpx.GetPartContainer().Redistribute();
     auto rho_end_levels = warpx.m_fields.get_mr_levels(FieldType::hybrid_rho_fp_temp, warpx.finestLevel());
     warpx.GetPartContainer().DepositCharge(rho_end_levels, 0.0_rt);
     for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {

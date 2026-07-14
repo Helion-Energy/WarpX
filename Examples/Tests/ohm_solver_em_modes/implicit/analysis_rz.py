@@ -176,9 +176,9 @@ else:
     plt.close()
 
     # check if power spectrum sampling match earlier results
-    # (baseline regenerated on development@b3e232fd6: the RZ state shifted
-    # relative to the original PR baseline after the HybridPICSolveE axis
-    # fix in #6598 and the deposit reorganization in #6589)
+    # (baseline last regenerated when the resistive term was restored in the
+    # theta-implicit Ohm residual -- eta now correctly damps the Faraday
+    # drive, which shifts these near-noise spectral bins)
     amps = np.abs(F_kw[2, 1, len(kz) // 2 - 2 : len(kz) // 2 + 2])
     print("Amplitude sample: ", repr(amps))
-    assert np.allclose(amps, np.array([12.1539756, 5.70115086, 2.30671667, 3.413128]))
+    assert np.allclose(amps, np.array([12.58451375, 5.05422146, 1.60447735, 3.08759338]))

@@ -139,7 +139,7 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     // realization once with converged states, refresh Pe^{n+1}, and reset
     // the QDSMC markers.
     if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
-        m_hybrid_pic_model->QDSMCFinishImplicitStep(m_dt);
+        m_hybrid_pic_model->QDSMCFinishImplicitStep(m_dt, m_theta);
     }
 
     return exit_status;
@@ -187,11 +187,22 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     }
 
     // Solve Ohm's law: E_ohm = f(B^{n+theta}, J_ion^{n+1/2}, rho^{n+1/2}, Pe)
-    // Result stored in Efield_fp
+    // Result stored in Efield_fp.
+    //
+    // The converged E^{n+theta} serves BOTH roles in the implicit scheme: it
+    // drives Faraday's law (so the resistive terms must be included or the
+    // magnetic field never decays resistively) and it is gathered by the
+    // particles (so grad(Pe) must be included for the pressure coupling).
+    // The explicit scheme separates these into two E-solves gated by
+    // solve_for_Faraday; here the full Ohm E is assembled by overriding the
+    // resistive gate. Note the particles therefore gather the resistive
+    // field as well; a momentum-conserving gather that subtracts eta*J from
+    // the push field is left as a follow-up.
     m_hybrid_pic_model->HybridPICSolveE(
         Efield_fp, current_fp, Bfield_fp, rho_fp,
         m_WarpX->GetEBUpdateEFlag(),
-        false  // solve_for_Faraday
+        false,  // solve_for_Faraday (retain grad(Pe))
+        true    // include_resistivity (retain eta*J for the B-update)
     );
 
     // Return RHS = E_ohm - E_old

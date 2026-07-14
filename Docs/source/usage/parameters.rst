@@ -3734,6 +3734,15 @@ Maxwell solver: kinetic-fluid hybrid
     (see the :ref:`theory section <theory-hybrid-model-electron-energy-eq>`), instead of evaluating the polytropic
     closure with the constant reference state :math:`(n_0, T_{e0})`.
 
+    Also supported with ``algo.evolve_scheme = theta_implicit_hybrid``, where the QDSMC stage runs
+    theta-centered inside every nonlinear residual evaluation (midpoint electron velocity and a
+    second-order midpoint characteristic push for the entropy markers) and the electron temperature is
+    converged together with the electric field by nonlinear elimination. The Picard nonlinear solver is
+    recommended for this configuration. The stochastic ion-heating realization of the electron-ion
+    energy exchange is applied once per step after the nonlinear solve. The Te-threshold Joule redirect
+    (:pp:param:`hybrid_pic_model.redirect_joule_to_ions`) and per-species resistivities are not yet
+    supported with the implicit scheme.
+
 .. pp:param:: hybrid_pic_model.qdsmc_n_floor
     :type: ``float``
     :default: ``1``

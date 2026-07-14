@@ -476,7 +476,7 @@ void FiniteDifferenceSolver::HybridPICSolveE (
     amrex::MultiFab const& Pefield,
     [[maybe_unused]]std::array< std::unique_ptr<amrex::iMultiFab>,3 > const& eb_update_E,
     int lev, HybridPICModel const* hybrid_model,
-    const bool solve_for_Faraday)
+    const bool solve_for_Faraday, const bool include_resistivity)
 {
     // Select algorithm (The choice of algorithm is a runtime option,
     // but we compile code for each algorithm, using templates)
@@ -485,14 +485,14 @@ void FiniteDifferenceSolver::HybridPICSolveE (
 
         HybridPICSolveECylindrical <CylindricalYeeAlgorithm> (
             Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
-            eb_update_E, lev, hybrid_model, solve_for_Faraday
+            eb_update_E, lev, hybrid_model, solve_for_Faraday, include_resistivity
         );
 
 #elif defined(WARPX_DIM_RSPHERE)
 
         HybridPICSolveESpherical <SphericalYeeAlgorithm> (
             Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
-            lev, hybrid_model, solve_for_Faraday
+            lev, hybrid_model, solve_for_Faraday, include_resistivity
         );
 
 #else
@@ -500,12 +500,12 @@ void FiniteDifferenceSolver::HybridPICSolveE (
     {
         HybridPICSolveECartesian <CartesianYeeAlgorithm> (
             Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
-            eb_update_E, lev, hybrid_model, solve_for_Faraday
+            eb_update_E, lev, hybrid_model, solve_for_Faraday, include_resistivity
         );
     } else {
         HybridPICSolveECartesian <CartesianNodalAlgorithm> (
             Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
-            eb_update_E, lev, hybrid_model, solve_for_Faraday
+            eb_update_E, lev, hybrid_model, solve_for_Faraday, include_resistivity
         );
     }
 #endif
@@ -526,7 +526,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     amrex::MultiFab const& Pefield,
     std::array< std::unique_ptr<amrex::iMultiFab>,3 > const& eb_update_E,
     int lev, HybridPICModel const* hybrid_model,
-    const bool solve_for_Faraday )
+    const bool solve_for_Faraday, const bool include_resistivity )
 {
     // Both steps below do not currently support m > 0 and should be
     // modified if such support wants to be added
@@ -778,7 +778,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 }
 
                 // Add resistivity only if E field value is used to update B
-                if (solve_for_Faraday) {
+                if (include_resistivity) {
                     Real jtot_val = 0._rt;
                     if (resistivity_has_J_dependence) {
                         // Interpolate current to appropriate staggering to match E field
@@ -852,7 +852,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 }
 
                 // Add resistivity only if E field value is used to update B
-                if (solve_for_Faraday) {
+                if (include_resistivity) {
                     Real jtot_val = 0._rt;
                     if(resistivity_has_J_dependence) {
                         // Interpolate current to appropriate staggering to match E field
@@ -921,7 +921,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 }
 
                 // Add resistivity only if E field value is used to update B
-                if (solve_for_Faraday) {
+                if (include_resistivity) {
                     Real jtot_val = 0._rt;
                     if (resistivity_has_J_dependence) {
                         // Interpolate current to appropriate staggering to match E field
@@ -987,7 +987,7 @@ void FiniteDifferenceSolver::HybridPICSolveESpherical (
     amrex::MultiFab const& /*rhofield*/,
     amrex::MultiFab const& /*Pefield*/,
     int /*lev*/, HybridPICModel const* /*hybrid_model*/,
-    const bool /*solve_for_Faraday*/ )
+    const bool /*solve_for_Faraday*/, const bool /*include_resistivity*/ )
 {
     WARPX_ABORT_WITH_MESSAGE("HybridPICSolveESphrical not fully implemented");
 }
@@ -1003,7 +1003,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     amrex::MultiFab const& Pefield,
     std::array< std::unique_ptr<amrex::iMultiFab>,3 > const& eb_update_E,
     int lev, HybridPICModel const* hybrid_model,
-    const bool solve_for_Faraday )
+    const bool solve_for_Faraday, const bool include_resistivity )
 {
     // for the profiler
     amrex::LayoutData<amrex::Real>* cost = WarpX::getCosts(lev);
@@ -1244,7 +1244,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             }
 
             // Add resistivity only if E field value is used to update B
-            if (solve_for_Faraday) {
+            if (include_resistivity) {
                 Real jtot_val = 0._rt;
                 if (resistivity_has_J_dependence) {
                     // Interpolate current to appropriate staggering to match E field
@@ -1309,7 +1309,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             }
 
             // Add resistivity only if E field value is used to update B
-            if (solve_for_Faraday) {
+            if (include_resistivity) {
                 Real jtot_val = 0._rt;
                 if (resistivity_has_J_dependence) {
                     // Interpolate current to appropriate staggering to match E field
@@ -1374,7 +1374,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             }
 
             // Add resistivity only if E field value is used to update B
-            if (solve_for_Faraday) {
+            if (include_resistivity) {
                 Real jtot_val = 0._rt;
                 if (resistivity_has_J_dependence) {
                     // Interpolate current to appropriate staggering to match E field
