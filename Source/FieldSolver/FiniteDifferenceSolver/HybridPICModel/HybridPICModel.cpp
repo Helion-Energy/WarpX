@@ -99,6 +99,19 @@ void HybridPICModel::ReadParameters ()
         "hybrid_pic_model.solve_electron_energy_equation is not supported in "
         "RCYLINDER/RSPHERE geometries yet.");
 #endif
+#if defined(WARPX_DIM_RZ)
+    // The QDSMC electron-energy machinery is not validated in RZ yet: the
+    // adiabatic-compression check fails at the several-percent level on the
+    // explicit path and the implicit dynamics diverge (see the tracking
+    // comment in Examples/Tests/ohm_solver_electron_energy_eq/CMakeLists.txt;
+    // the unregistered RZ decks there reproduce this). Refuse loudly rather
+    // than produce quietly wrong physics.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_solve_electron_energy_equation,
+        "hybrid_pic_model.solve_electron_energy_equation is not validated in "
+        "RZ geometry yet (theta=0-plane marker and axis/volume-weighting "
+        "handling under investigation).");
+#endif
 
     // Resistive electron-heating source (Phys. Plasmas 31, 012902 (2024), Eq. 12):
     //   S_e = Sigma_s nu_{s,e} n_s m_s |V_s - V_e|^2,  nu_{s,e} = Z_s e^2 eta n_e / m_s
