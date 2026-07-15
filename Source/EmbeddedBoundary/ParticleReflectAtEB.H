@@ -67,7 +67,7 @@
  * \param distance_to_eb signed-distance MultiFabs (one per level)
  * \param mass particle species mass
  * \param uth wall thermal speed normalized by c: sqrt(kB*T_wall/m)/c, parsed
- *            per species from boundary.<species_name>.u_th (the same input
+ *            per species from boundary.\<species_name\>.u_th (the same input
  *            the domain thermal boundary condition uses)
  * \param dt_lev time step at each refinement level
  */
