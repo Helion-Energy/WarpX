@@ -179,6 +179,7 @@ class ForceFreeJoule(object):
 
         # Electron energy equation ON with only the eta*J^2 Joule source.
         self.solver = picmi.HybridPICSolver(
+            implicit_push_excludes_resistive_field=self.implicit,
             grid=self.grid,
             gamma=self.gamma_e,
             Te=self.te_eV,

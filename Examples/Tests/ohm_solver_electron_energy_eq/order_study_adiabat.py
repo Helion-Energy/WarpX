@@ -33,12 +33,11 @@
 # Usage:  python3 order_study_adiabat.py [--np 2] [--dt-scales 10 5 2.5]
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
-
-import os
 
 import numpy as np
 
@@ -72,23 +71,37 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-deck = Path(__file__).parent / "inputs_test_2d_ohm_solver_electron_energy_adiabat_picmi.py"
+deck = (
+    Path(__file__).parent / "inputs_test_2d_ohm_solver_electron_energy_adiabat_picmi.py"
+)
 workdir = Path(args.workdir).absolute()
 
 
-def run_case (theta, dt_scale):
+def run_case(theta, dt_scale):
     case = workdir / f"theta{theta}_s{dt_scale}"
     if case.exists():
         shutil.rmtree(case)
     case.mkdir(parents=True)
     cmd = [
-        "mpiexec", "-n", str(args.np), sys.executable, str(deck),
-        "--test", "--implicit", "--nlsolver", "picard",
-        "--theta", str(theta), "--dt-scale", str(dt_scale),
+        "mpiexec",
+        "-n",
+        str(args.np),
+        sys.executable,
+        str(deck),
+        "--test",
+        "--implicit",
+        "--nlsolver",
+        "picard",
+        "--theta",
+        str(theta),
+        "--dt-scale",
+        str(dt_scale),
     ]
     if args.refine_grid:
         gs = args.dt_scales[0] / dt_scale
-        assert abs(gs - round(gs)) < 1e-12, "dt-scales must be power-of-two nested for --refine-grid"
+        assert abs(gs - round(gs)) < 1e-12, (
+            "dt-scales must be power-of-two nested for --refine-grid"
+        )
         cmd += ["--grid-scale", str(int(round(gs)))]
     if args.no_energy_eq:
         cmd.append("--no-energy-eq")
@@ -97,7 +110,7 @@ def run_case (theta, dt_scale):
     return case
 
 
-def final_Te (case):
+def final_Te(case):
     from openpmd_viewer import OpenPMDTimeSeries
 
     ts = OpenPMDTimeSeries(str(case / "diags" / "field_diags"))
@@ -129,5 +142,5 @@ for theta in args.thetas:
     for i, e in enumerate(errs):
         line = f"  e(dt*{args.dt_scales[i]}) = {e:.6e}"
         if i > 0 and errs[i] > 0:
-            line += f"   observed order = {np.log2(errs[i-1]/errs[i]):.2f}"
+            line += f"   observed order = {np.log2(errs[i - 1] / errs[i]):.2f}"
         print(line)

@@ -117,7 +117,9 @@ class AdiabaticCompression(object):
             # keep the final time fixed under dt refinement (order studies)
             self.total_steps = int(round(self._steps_override / self.dt_scale))
         else:
-            self.total_steps = int(round(self.periods * self.steps_per_period / self.dt_scale))
+            self.total_steps = int(
+                round(self.periods * self.steps_per_period / self.dt_scale)
+            )
         self.diag_steps = max(1, self.total_steps // self.ndiag)
 
         self.vi_th = np.sqrt(constants.q_e * self.ti_eV / mi)

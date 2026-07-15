@@ -59,12 +59,13 @@ class EMModes(object):
     # Number of substeps used to update B
     substeps = 40
 
-    def __init__(self, test, dim, B_dir, verbose):
+    def __init__(self, test, dim, B_dir, verbose, darwin=False):
         """Get input parameters for the specific case desired."""
         self.test = test
         self.dim = int(dim)
         self.B_dir = B_dir
         self.verbose = verbose or self.test
+        self.darwin = darwin
 
         # sanity check
         assert dim > 0 and dim < 4, f"{dim}-dimensions not a valid input"
@@ -218,6 +219,7 @@ class EMModes(object):
             n0=self.n_plasma,
             plasma_resistivity=self.eta,
             substeps=self.substeps,
+            darwin=self.darwin,
         )
         simulation.solver = self.solver
 
@@ -398,8 +400,19 @@ parser.add_argument(
     help="Verbose output",
     action="store_true",
 )
+parser.add_argument(
+    "--darwin",
+    help="use the Darwin (magnetoinductive) field split",
+    action="store_true",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
-run = EMModes(test=args.test, dim=args.dim, B_dir=args.bdir, verbose=args.verbose)
+run = EMModes(
+    test=args.test,
+    dim=args.dim,
+    B_dir=args.bdir,
+    verbose=args.verbose,
+    darwin=args.darwin,
+)
 simulation.step()
