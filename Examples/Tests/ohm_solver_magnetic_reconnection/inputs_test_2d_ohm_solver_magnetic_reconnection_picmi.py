@@ -72,12 +72,14 @@ class ForceFreeSheetReconnection(object):
         theta=0.5,
         dt_mult=1.0,
         energy_eq=False,
+        darwin=False,
         nx=None,
         nz=None,
         nppc=None,
         lt=None,
     ):
         self.test = test
+        self.darwin = darwin
         self.verbose = verbose or self.test
         self.implicit = implicit
         self.nlsolver = nlsolver
@@ -246,6 +248,7 @@ class ForceFreeSheetReconnection(object):
             substeps=self.substeps,
             solve_electron_energy_equation=self.energy_eq,
             include_joule_heating=self.energy_eq,
+            darwin=self.darwin,
         )
         simulation.solver = self.solver
 
@@ -463,6 +466,10 @@ parser.add_argument(
     help="solve the QDSMC electron energy equation with Joule heating "
     "(gamma = 5/3) instead of the isothermal closure",
 )
+parser.add_argument(
+    "--darwin", action="store_true",
+    help="use the Darwin (magnetoinductive) field split (implicit only)",
+)
 parser.add_argument("--nx", type=int, default=None, help="override NX")
 parser.add_argument("--nz", type=int, default=None, help="override NZ")
 parser.add_argument("--nppc", type=int, default=None, help="override NPPC")
@@ -478,6 +485,7 @@ run = ForceFreeSheetReconnection(
     nlsolver=args.nlsolver,
     theta=args.theta,
     dt_mult=args.dt_mult,
+    darwin=args.darwin,
     energy_eq=args.energy_eq,
     nx=args.nx,
     nz=args.nz,
