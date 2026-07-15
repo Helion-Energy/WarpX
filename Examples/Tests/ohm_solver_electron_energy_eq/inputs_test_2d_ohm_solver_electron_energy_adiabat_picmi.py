@@ -73,6 +73,7 @@ class AdiabaticCompression(object):
         nlsolver="picard",
         theta=0.5,
         dt_scale=1.0,
+        grid_scale=1,
         energy_eq=True,
     ):
         self.test = test
@@ -81,11 +82,12 @@ class AdiabaticCompression(object):
         self.nlsolver = nlsolver
         self.theta = theta
         self.dt_scale = dt_scale
+        self.grid_scale = grid_scale
         self.energy_eq = energy_eq
 
         if self.test:
-            self.NX = 32
-            self.NZ = 8
+            self.NX = 32 * self.grid_scale
+            self.NZ = 8 * self.grid_scale
             self.NPPC = 64
             self._steps_override = 60
             self.ndiag = 10
@@ -293,6 +295,12 @@ parser.add_argument(
     help="scale the time step while keeping the final time fixed (order studies)",
 )
 parser.add_argument(
+    "--grid-scale",
+    type=int,
+    default=1,
+    help="refine the grid by this integer factor (dt ~ dx order studies)",
+)
+parser.add_argument(
     "--no-energy-eq",
     action="store_true",
     help="use the algebraic adiabatic closure instead of the QDSMC energy equation",
@@ -307,6 +315,7 @@ run = AdiabaticCompression(
     nlsolver=args.nlsolver,
     theta=args.theta,
     dt_scale=args.dt_scale,
+    grid_scale=args.grid_scale,
     energy_eq=not args.no_energy_eq,
 )
 simulation.step()

@@ -9,6 +9,7 @@
 
 #include "QdsmcParticleContainer.H"
 
+#include "EmbeddedBoundary/Enabled.H"
 #include "Particles/Deposition/ChargeDeposition.H"
 #include "Particles/Pusher/GetAndSetPosition.H"
 #include "Utils/TextMsg.H"
@@ -25,6 +26,10 @@
 #include <AMReX_AmrCore.H>
 #include <AMReX_AmrParGDB.H>
 #include <AMReX_Box.H>
+#ifdef AMREX_USE_EB
+#   include <AMReX_EBCellFlag.H>
+#   include <AMReX_EBFabFactory.H>
+#endif
 #include <AMReX_GpuAtomic.H>
 #include <AMReX_GpuControl.H>
 #include <AMReX_GpuDevice.H>
@@ -96,9 +101,32 @@ void QdsmcParticleContainer::InitParticles (int lev)
         int const grid_id = mfi.index();
         int const tile_id = mfi.LocalTileIndex();
 
-        // One particle per cell. Use exclusive scan to assign per-cell offsets
-        // so the per-cell writes are race-free in parallel.
+        // One particle per cell, except cells fully covered by an embedded
+        // boundary: no electron fluid lives there, so no entropy marker is
+        // created (deposits into covered cells are inert -- the recovery is
+        // gated on the density floor -- and the EB clamp in PushX keeps
+        // markers out of the body). Use exclusive scan to assign per-cell
+        // offsets so the per-cell writes are race-free in parallel.
         amrex::Gpu::DeviceVector<amrex::Long> counts(tile_box.numPts(), 1);
+#ifdef AMREX_USE_EB
+        bool eb_on = false;
+        amrex::Array4<amrex::EBCellFlag const> eb_flag_arr;
+        if (EB::enabled()) {
+            eb_on = true;
+            auto const& eb_fact = WarpX::GetInstance().fieldEBFactory(lev);
+            eb_flag_arr = eb_fact.getMultiEBCellFlagFab().const_array(mfi);
+            auto * const pcounts = counts.data();
+            auto const flag = eb_flag_arr;
+            amrex::ParallelFor(tile_box,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
+                amrex::IntVect const iv(AMREX_D_DECL(i, j, k));
+                if (flag(i, j, k).isCovered()) {
+                    pcounts[tile_box.index(iv)] = 0;
+                }
+            });
+        }
+#endif
         amrex::Gpu::DeviceVector<amrex::Long> offset(tile_box.numPts());
         amrex::Long const max_new_particles = amrex::Scan::ExclusiveSum(
             counts.size(), counts.data(), offset.data());
@@ -140,11 +168,18 @@ void QdsmcParticleContainer::InitParticles (int lev)
 
         auto * const poffset = offset.data();
 
+#ifdef AMREX_USE_EB
+        auto const eb_flag = eb_flag_arr;
+        bool const skip_covered = eb_on;
+#endif
         amrex::ParallelFor(tile_box,
         [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
             amrex::ignore_unused(j, k);  // unused below AMREX_SPACEDIM
             amrex::IntVect const iv(AMREX_D_DECL(i, j, k));
+#ifdef AMREX_USE_EB
+            if (skip_covered && eb_flag(i, j, k).isCovered()) { return; }
+#endif
             long const ip = poffset[tile_box.index(iv)];
 
             pa_idcpu[ip] = amrex::SetParticleIDandCPU(pid + ip, cpuid);
@@ -417,10 +452,28 @@ QdsmcParticleContainer::PushX (int lev, amrex::Real dt, amrex::Real frac)
         is_periodic[d] = geom.isPeriodic(d);
     }
 
+    // Embedded-boundary clamp: markers whose advected position lands inside
+    // an EB body stay at home for this push. The entropy they carry then
+    // remains at the (uncovered) home node -- the same conservative
+    // treatment the domain-wall clamp gives markers pushed out of the
+    // domain. The signed distance function is negative inside the body.
+    auto const dxi = geom.InvCellSizeArray();
+    amrex::MultiFab const* eb_phi = nullptr;
+#ifdef AMREX_USE_EB
+    if (EB::enabled()) {
+        auto & warpx = WarpX::GetInstance();
+        eb_phi = warpx.m_fields.get(warpx::fields::FieldType::distance_to_eb, lev);
+    }
+#endif
+
     for (iterator pti(*this, lev); pti.isValid(); ++pti)
     {
         long const np = pti.numParticles();
         auto & attribs = pti.GetStructOfArrays().GetRealData();
+
+        amrex::Array4<amrex::Real const> eb_phi_arr;
+        if (eb_phi != nullptr) { eb_phi_arr = eb_phi->const_array(pti); }
+        bool const have_eb = (eb_phi != nullptr);
 
         // Home and velocity components are only needed for the axes with an
         // AMReX-tracked position slot (x everywhere but 1D_Z, y only in 3D).
@@ -479,18 +532,35 @@ QdsmcParticleContainer::PushX (int lev, amrex::Real dt, amrex::Real frac)
             // Axes not represented in the field have no enum slot and are
             // simply not tracked (consistent with field dimensionality).
 #if defined(WARPX_DIM_3D)
-            pa_x[ip] = push_clamp(x_node[ip], vx[ip], 0);
-            pa_y[ip] = push_clamp(y_node[ip], vy[ip], 1);
-            pa_z[ip] = push_clamp(z_node[ip], vz[ip], 2);
+            amrex::Real const xn = push_clamp(x_node[ip], vx[ip], 0);
+            amrex::Real const yn = push_clamp(y_node[ip], vy[ip], 1);
+            amrex::Real const zn = push_clamp(z_node[ip], vz[ip], 2);
+            if (have_eb) {
+                amrex::Real const d = ablastr::particles::doGatherScalarFieldNodal(
+                    xn, yn, zn, eb_phi_arr, dxi, plo);
+                if (d < amrex::Real(0)) { return; }  // stay at home this push
+            }
+            pa_x[ip] = xn;
+            pa_y[ip] = yn;
+            pa_z[ip] = zn;
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
-            pa_x[ip] = push_clamp(x_node[ip], vx[ip], 0);
-            pa_z[ip] = push_clamp(z_node[ip], vz[ip], 1);
+            amrex::Real const xn = push_clamp(x_node[ip], vx[ip], 0);
+            amrex::Real const zn = push_clamp(z_node[ip], vz[ip], 1);
+            if (have_eb) {
+                amrex::Real const d = ablastr::particles::doGatherScalarFieldNodal(
+                    xn, amrex::Real(0), zn, eb_phi_arr, dxi, plo);
+                if (d < amrex::Real(0)) { return; }  // stay at home this push
+            }
+            pa_x[ip] = xn;
+            pa_z[ip] = zn;
 #elif defined(WARPX_DIM_1D_Z)
+            amrex::ignore_unused(have_eb, eb_phi_arr, dxi);
             pa_z[ip] = push_clamp(z_node[ip], vz[ip], 0);
 #else
             // WARPX_DIM_RCYLINDER / WARPX_DIM_RSPHERE: x (= r) is the single
             // tracked position (QDSMC is refused at runtime in these
             // geometries); z is a plain attribute, advanced unclamped.
+            amrex::ignore_unused(have_eb, eb_phi_arr, dxi);
             pa_x[ip] = push_clamp(x_node[ip], vx[ip], 0);
             pa_z[ip] = z_node[ip] + vz[ip] * dt;
 #endif
