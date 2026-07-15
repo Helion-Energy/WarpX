@@ -8,6 +8,7 @@
 #include "ThetaImplicitHybrid.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
+#include "Particles/MultiParticleContainer.H"
 #include "WarpX.H"
 #include <ablastr/utils/Communication.H>
 
@@ -240,6 +241,14 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
         m_hybrid_pic_model->QDSMCFinishImplicitStep(m_dt, m_theta);
     }
+
+    // Refresh the per-species temperature deposits from the end-of-step
+    // particle state (after the ion-heating realization above). The
+    // explicit scheme deposits these every step; without this call the
+    // T_<species> diagnostics would hold their initialization values for
+    // the whole run. Species without do_temperature_deposition are
+    // skipped inside.
+    m_WarpX->GetPartContainer().DepositTemperatures(m_WarpX->m_fields, 0.0_rt);
 
     return exit_status;
 }
