@@ -547,7 +547,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
 
-    const bool include_external_fields = hybrid_model->m_add_external_fields;
+    const bool include_external_fields = hybrid_model->m_add_external_fields
+        && hybrid_model->m_external_split;
 
     const bool holmstrom_vacuum_region = hybrid_model->m_holmstrom_vacuum_region;
 
@@ -1018,7 +1019,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
 
-    const bool include_external_fields = hybrid_model->m_add_external_fields;
+    const bool include_external_fields = hybrid_model->m_add_external_fields
+        && hybrid_model->m_external_split;
 
     const bool holmstrom_vacuum_region = hybrid_model->m_holmstrom_vacuum_region;
 
