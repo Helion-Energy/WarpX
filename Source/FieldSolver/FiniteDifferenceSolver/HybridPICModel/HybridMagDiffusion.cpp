@@ -257,32 +257,22 @@ public:
         // Lower radial (r=0) is the axis and must be None (handled by
         // ApplyFieldBoundaryOnAxis). The upper radial face may be None (free),
         // PEC (conducting wall, B_normal=0), or PEC_Insulator (Dirichlet B_t
-        // feed = FLASH CIRCUIT analogue). Each axial (z) face may be Periodic
-        // or PEC (endwall, B_normal=0 + mirror). P1b relaxes the former
-        // periodic-z-only restriction for the *wall* path (PEC z endwalls),
-        // reusing ApplyBfieldBoundary's dimension-general PEC kernel through
-        // the matrix-free staging; this is validated (z-PEC wall smoke).
-        //
-        // NOTE: a z-face PEC_Insulator *B_t feed* is parsed and runs stably,
-        // but does NOT yet diffuse B_t axially — the cylindrical matrix-free
-        // curl(eta curl) operator appears to omit the axial diffusion of B_t
-        // (latent: all prior RZ mag-diff tests are z-uniform). The z-face
-        // pec_insulator feed is therefore intentionally NOT admitted here until
-        // that operator bug is fixed (see notes/2026-07-15_session_p1b.md);
-        // the feed machinery itself (prepareFeed/apply) is dimension-general.
+        // feed = FLASH CIRCUIT analogue). Each axial (z) face may be Periodic,
+        // PEC (endwall), or PEC_Insulator (axial B_t feed / SF breech).
+        // Staging reuses ApplyBfieldBoundary (dimension-general).
         auto const fb_is_radial_face = [] (FieldBoundaryType fb) {
             return fb == FieldBoundaryType::None ||
                    fb == FieldBoundaryType::PEC ||
                    fb == FieldBoundaryType::PEC_Insulator;
         };
         auto const fb_is_axial_face = [] (FieldBoundaryType fb) {
-            // Periodic (free, via FillBoundary) or PEC (endwall, B_normal=0 +
-            // mirror, actively filled by ApplyBfieldBoundary). PEC_Insulator on
-            // a z face is excluded for now (axial B_t feed broken — see note
-            // above). None is excluded: it leaves z edge ghosts unfilled (not a
-            // well-posed mag-diffusion BC).
+            // Periodic (FillBoundary), PEC endwall, or PEC_Insulator (Dirichlet
+            // B_t feed, FLASH CIRCUIT analogue on the axial breech face). None
+            // is excluded: it leaves z edge ghosts unfilled (not a well-posed
+            // mag-diffusion BC).
             return fb == FieldBoundaryType::Periodic ||
-                   fb == FieldBoundaryType::PEC;
+                   fb == FieldBoundaryType::PEC ||
+                   fb == FieldBoundaryType::PEC_Insulator;
         };
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             WarpX::field_boundary_lo[0] == FieldBoundaryType::None,
@@ -295,11 +285,9 @@ public:
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             fb_is_axial_face(WarpX::field_boundary_lo[1]) &&
             fb_is_axial_face(WarpX::field_boundary_hi[1]),
-            "RZ matrix-free hybrid magnetic diffusion supports Periodic or PEC "
-            "at each axial (z) boundary (a z-face pec_insulator B_t feed is not "
-            "yet admitted — axial B_t diffusion is broken, see notes; None is "
-            "not well-posed for the z edge ghosts). P1b lifts the former "
-            "periodic-z-only restriction for the z-PEC endwall path");
+            "RZ matrix-free hybrid magnetic diffusion supports Periodic, PEC, "
+            "or PEC_Insulator at each axial (z) boundary (None is not "
+            "well-posed for the z edge ghosts)");
 #elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
         WARPX_ABORT_WITH_MESSAGE(
             "Matrix-free hybrid magnetic diffusion is not yet supported in "
@@ -519,23 +507,30 @@ public:
         }
 #endif
 
+
         ablastr::fields::VectorField Bwork = {
             &m_Bwork[0], &m_Bwork[1], &m_Bwork[2]};
         ablastr::fields::VectorField Jwork = {
             &m_Jwork[0], &m_Jwork[1], &m_Jwork[2]};
+        // Zero J work so any unwritten ghost/edge cell does not retain
+        // stale values that would pollute curl(eta J) (especially Jr from
+        // DownwardDz(B_t) on the axial path).
+        for (int idim = 0; idim < 3; ++idim) {
+            m_Jwork[idim].setVal(0.0_rt);
+        }
         m_fdtd->CalculateCurrentAmpere(Jwork, Bwork, *m_eb_update_E, m_lev);
+
 
         for (int idim = 0; idim < 3; ++idim) {
             for (MFIter mfi(m_etaJ[idim], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
                 auto const etaJ = m_etaJ[idim].array(mfi);
                 auto const eta = m_eta[idim]->const_array(mfi);
                 auto const J = m_Jwork[idim].const_array(mfi);
-                amrex::Box const box =
-#if defined(WARPX_DIM_RZ)
-                    mfi.fabbox();
-#else
-                    mfi.tilebox();
-#endif
+                // Always form eta*J over the full fab (valid + ghosts). Ampere
+                // fills a grown tilebox; the second curl (ComputeCurlA) needs
+                // those face values, including domain-edge faces that
+                // FillBoundaryAndSync will not create when z is non-periodic.
+                amrex::Box const box = mfi.fabbox();
                 ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
                 {
                     etaJ(i, j, k) = eta(i, j, k) * J(i, j, k);
@@ -549,6 +544,7 @@ public:
         ablastr::fields::VectorField curl_etaJ = {
             &m_curl_etaJ[0], &m_curl_etaJ[1], &m_curl_etaJ[2]};
         m_fdtd->ComputeCurlA(curl_etaJ, etaJ, *m_eb_update_B, m_lev);
+
 
         auto& output_fields = output.fields();
         for (int idim = 0; idim < 3; ++idim) {
@@ -810,6 +806,7 @@ HybridMagDiffusion::AdvanceVariable (
     // registered B field (= Bfield). The true B^n lives in solution/rhs.
     solution.CopyFrom(Bfield);
     rhs.CopyFrom(Bfield);
+
 
     // Bake the inhomogeneous Dirichlet B_t feed (pec_insulator) into the RHS:
     // GMRES solves A_lin B^{n+1} = B^n - c, where c = A_full(0) is the constant

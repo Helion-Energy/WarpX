@@ -82,3 +82,17 @@ add_warpx_test(
     OFF  # checksum (z-PEC smoke analysis is the oracle)
     OFF  # dependency
 )
+
+# P1b-zfeed: axial z_lo pec_insulator B_t feed with matching r_hi Dirichlet so
+# the B_t∝r null mode fills the domain in z (proves axial curl-chain coupling).
+# A pure PEC tube instead yields a physical O(R) skin under stiff BE — not a
+# missing d^2/dz^2. analysis_rz_zfeed.py checks deep axial fill, not Fourier.
+add_warpx_test(
+    test_rz_hybrid_mag_diffusion_zfeed  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_hybrid_mag_diffusion_zfeed"  # inputs
+    "analysis_rz_zfeed.py"  # analysis
+    OFF  # checksum (z-feed deep-fill analysis is the oracle)
+    OFF  # dependency
+)
