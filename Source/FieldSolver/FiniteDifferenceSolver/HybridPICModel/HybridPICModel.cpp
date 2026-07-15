@@ -99,22 +99,6 @@ void HybridPICModel::ReadParameters ()
         "hybrid_pic_model.solve_electron_energy_equation is not supported in "
         "RCYLINDER/RSPHERE geometries yet.");
 #endif
-#if defined(WARPX_DIM_RZ)
-    // The QDSMC electron-energy machinery is not validated in RZ yet: the
-    // adiabatic-compression check fails at the several-percent level on the
-    // explicit path and the implicit dynamics diverge (see the tracking
-    // comment in Examples/Tests/ohm_solver_electron_energy_eq/CMakeLists.txt;
-    // the unregistered RZ decks there reproduce this). Refuse loudly rather
-    // than produce quietly wrong physics. The undocumented override below
-    // exists solely for the validation work itself.
-    bool qdsmc_allow_unvalidated_rz = false;
-    pp_hybrid.query("qdsmc_allow_unvalidated_rz", qdsmc_allow_unvalidated_rz);
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        !m_solve_electron_energy_equation || qdsmc_allow_unvalidated_rz,
-        "hybrid_pic_model.solve_electron_energy_equation is not validated in "
-        "RZ geometry yet (theta=0-plane marker and axis/volume-weighting "
-        "handling under investigation).");
-#endif
 
     // Resistive electron-heating source (Phys. Plasmas 31, 012902 (2024), Eq. 12):
     //   S_e = Sigma_s nu_{s,e} n_s m_s |V_s - V_e|^2,  nu_{s,e} = Z_s e^2 eta n_e / m_s
@@ -2219,22 +2203,24 @@ void HybridPICModel::QDSMCSaveImplicitStepStart () const
     // them; the (otherwise unused on this path) hybrid_rho_fp_temp fab stores
     // it for the whole step.
     //
-    // MultiParticleContainer::DepositCharge is a LOCAL deposit: shape-spread
+    // MultiParticleContainer::DepositCharge applies the radial inverse-volume
+    // scaling itself but leaves the per-species deposits LOCAL: shape-spread
     // contributions land in guard cells and boundary-shared nodes hold
     // partial sums until a SumBoundary. The K_e seed and the rho^{n+1}
-    // extrapolation read absolute node values, so fold the guards (after
-    // radial volume scaling, mirroring the rho_fp treatment) and fill ghosts
-    // for the grown-box consumers.
+    // extrapolation read absolute node values, so fold the guards and fill
+    // ghosts for the grown-box consumers (no additional volume scaling here
+    // -- applying it twice puts a spurious 1/r on the density).
     auto rho_n_levels = warpx.m_fields.get_mr_levels(FieldType::hybrid_rho_fp_temp, warpx.finestLevel());
     warpx.GetPartContainer().DepositCharge(rho_n_levels, 0.0_rt);
     for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
         amrex::MultiFab & rho_n_mf = *rho_n_levels[lev];
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
-        warpx.ApplyInverseVolumeScalingToChargeDensity(&rho_n_mf, lev);
-#endif
         ablastr::utils::communication::SumBoundary(
             rho_n_mf, 0, rho_n_mf.nComp(), rho_n_mf.nGrowVect(), rho_n_mf.nGrowVect(),
             WarpX::do_single_precision_comms, warpx.Geom(lev).periodicity());
+        // Same wall fold the main loop applies to rho_fp (reflect the
+        // shape-spill past reflecting/PEC walls back onto the boundary
+        // nodes); without it the boundary-node density is half-valued.
+        warpx.ApplyRhofieldBoundary(lev, &rho_n_mf, PatchType::fine);
         rho_n_mf.FillBoundary(warpx.Geom(lev).periodicity());
     }
 
@@ -2293,6 +2279,35 @@ void HybridPICModel::AdvanceElectronEnergyQDSMCTheta (amrex::Real const dt,
         }
     }
 
+    // Midpoint-position density deposited through the same
+    // MultiParticleContainer path as rho^n (QDSMCSaveImplicitStepStart) and
+    // rho^{n+1} (QDSMCFinishImplicitStep). The nonlinear-solver deposit in
+    // rho_fp treats the boundary nodes differently in the radial geometries
+    // (see m_qdsmc_rho_mid), and the seed/recovery algebra must not mix
+    // density conventions: T_e ~ K (n_recover / n_seed)^(gamma-1) at a
+    // stationary node, so a convention mismatch acts as a steady spurious
+    // boundary heat source. The ions sit at the current-iterate midpoint
+    // positions here, which is exactly the state this deposit captures.
+    ablastr::fields::MultiLevelScalarField rho_mid_levels;
+    for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+        amrex::MultiFab const & rho_fp = *warpx.m_fields.get(FieldType::rho_fp, lev);
+        auto & slot = m_qdsmc_rho_mid[lev];
+        if (!slot) {
+            slot = std::make_unique<amrex::MultiFab>(
+                rho_fp.boxArray(), rho_fp.DistributionMap(), 1, rho_fp.nGrowVect());
+        }
+        rho_mid_levels.push_back(slot.get());
+    }
+    warpx.GetPartContainer().DepositCharge(rho_mid_levels, 0.0_rt);
+    for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+        amrex::MultiFab & rho_mid_mf = *rho_mid_levels[lev];
+        ablastr::utils::communication::SumBoundary(
+            rho_mid_mf, 0, rho_mid_mf.nComp(), rho_mid_mf.nGrowVect(), rho_mid_mf.nGrowVect(),
+            WarpX::do_single_precision_comms, warpx.Geom(lev).periodicity());
+        warpx.ApplyRhofieldBoundary(lev, &rho_mid_mf, PatchType::fine);
+        rho_mid_mf.FillBoundary(warpx.Geom(lev).periodicity());
+    }
+
     for (int lev = 0; lev <= warpx.finestLevel(); ++lev)
     {
         // Step 0: re-entrancy -- every residual evaluation restarts the
@@ -2316,9 +2331,14 @@ void HybridPICModel::AdvanceElectronEnergyQDSMCTheta (amrex::Real const dt,
         // Second time level starts at nComp/2 (mode 0 of that level in RZ
         // multimode; identical to component 1 in the m=0-only case).
         amrex::MultiFab rho_half(rho_fp, amrex::make_alias, rho_fp.nComp()/2, 1);
+        // Midpoint density of the seed's own deposit convention (see above);
+        // all K_e/T_e recovery pairings below use this family, while the
+        // Ohm's-law-side quantities (V_e, sources, the emitted pressure)
+        // keep the solver's rho_fp states.
+        amrex::MultiFab const & rho_mid = *rho_mid_levels[lev];
         // Extrapolated end-of-step density iterate rho^{n+1} = 2 rho^{n+1/2} - rho^n.
         amrex::MultiFab rho_np1(rho_fp.boxArray(), rho_fp.DistributionMap(), 1, rho_fp.nGrowVect());
-        amrex::MultiFab::LinComb(rho_np1, 2.0_rt, rho_half, 0, -1.0_rt, rho_n, 0, 0, 1, rho_fp.nGrowVect());
+        amrex::MultiFab::LinComb(rho_np1, 2.0_rt, rho_mid, 0, -1.0_rt, rho_n, 0, 0, 1, rho_fp.nGrowVect());
 
         // Step 1: midpoint electron fluid velocity
         //   V_e^{n+1/2} = -(J_plasma^{n+1/2} - J_i^{n+1/2}) / rho^{n+1/2},
@@ -2358,9 +2378,10 @@ void HybridPICModel::AdvanceElectronEnergyQDSMCTheta (amrex::Real const dt,
 
             // Step 4a: midpoint scatter and recovery: T_e^{n+1/2} from the
             // midpoint entropy deposit and the midpoint density deposit
+            // (same deposit convention as the seed)
             m_qdsmc_pc->DepositK(lev, Karr_out);
             m_qdsmc_pc->DepositField(lev, weights_out);
-            QDSMCUpdateTe(lev, rho_half);
+            QDSMCUpdateTe(lev, rho_mid);
 
             // Step 5a: half-step deterministic sources with midpoint
             // coefficient states, so the emitted pressure is the midpoint
@@ -2459,13 +2480,14 @@ void HybridPICModel::QDSMCFinishImplicitStep (amrex::Real const dt, amrex::Real 
     auto rho_end_levels = warpx.m_fields.get_mr_levels(FieldType::hybrid_rho_fp_temp, warpx.finestLevel());
     warpx.GetPartContainer().DepositCharge(rho_end_levels, 0.0_rt);
     for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+        // DepositCharge already applied the radial inverse-volume scaling;
+        // the guard fold, the wall reflection and the ghost fill complete
+        // the same treatment the main loop gives rho_fp.
         amrex::MultiFab & rho_end_mf = *rho_end_levels[lev];
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
-        warpx.ApplyInverseVolumeScalingToChargeDensity(&rho_end_mf, lev);
-#endif
         ablastr::utils::communication::SumBoundary(
             rho_end_mf, 0, rho_end_mf.nComp(), rho_end_mf.nGrowVect(), rho_end_mf.nGrowVect(),
             WarpX::do_single_precision_comms, warpx.Geom(lev).periodicity());
+        warpx.ApplyRhofieldBoundary(lev, &rho_end_mf, PatchType::fine);
         rho_end_mf.FillBoundary(warpx.Geom(lev).periodicity());
     }
 
