@@ -71,9 +71,37 @@ class PlasmaCylinderCompression(object):
             / (1.0 + np.exp((r - self.R_p) / self.delta_p))
         )
 
-    def __init__(self, test, verbose):
+    def __init__(
+        self,
+        test,
+        verbose,
+        implicit=False,
+        nlsolver="picard",
+        theta=0.5,
+        dt_mult=1.0,
+        darwin=False,
+        n_floor_mult=1.0,
+        nr=None,
+        nz=None,
+        nppc=None,
+        lt=None,
+    ):
         self.test = test
         self.verbose = verbose or self.test
+        self.implicit = implicit
+        self.nlsolver = nlsolver
+        self.theta = theta
+        self.darwin = darwin
+        self.n_floor_mult = n_floor_mult
+        if nr is not None:
+            self.NR = nr
+        if nz is not None:
+            self.NZ = nz
+        if nppc is not None:
+            self.NPPC = nppc
+        if lt is not None:
+            self.LT = lt
+        self.DT = self.DT * dt_mult
 
         self.Lr = self.LR
         self.Lz = self.LZ
@@ -273,15 +301,58 @@ class PlasmaCylinderCompression(object):
             gamma=5.0 / 3.0,
             Te=self.T_e,
             n0=self.n0,
-            n_floor=0.05 * self.n0,
+            n_floor=0.05 * self.n0 * self.n_floor_mult,
             plasma_resistivity=1e-4 * constants.mu0 * self.R_c * self.vA,
             plasma_hyper_resistivity=1e-9,
             substeps=self.substeps,
             A_external=A_ext,
             tau_ramp=20e-6,
             t0_ramp=5e-6,
+            darwin=self.darwin,
         )
         simulation.solver = self.solver
+
+        if self.implicit:
+            # Theta-implicit hybrid scheme in total-field form: the
+            # step-averaged inductive field of the external vector
+            # potential is added to the Ohm field inside the residual, so
+            # the theta-Faraday advance carries the compression flux ramp
+            # exactly. With darwin=True the ramp enters through the
+            # evolved vector potential instead of the Faraday-advanced B.
+            import pywarpx
+
+            pywarpx.particles.max_grid_crossings = (
+                int(np.ceil(0.5 * self.DT / 1.0e-3)) + 1
+            )
+            if self.nlsolver == "picard":
+                nonlinear_solver = picmi.PicardNonlinearSolver(
+                    verbose=self.verbose,
+                    max_iterations=100,
+                    relative_tolerance=1.0e-6,
+                    absolute_tolerance=0.0,
+                    require_convergence=True,
+                )
+            else:
+                gmres_solver = picmi.GMRESLinearSolver(
+                    verbose_int=1,
+                    max_iterations=100,
+                    relative_tolerance=1.0e-4,
+                    absolute_tolerance=0.0,
+                )
+                nonlinear_solver = picmi.NewtonNonlinearSolver(
+                    verbose=self.verbose,
+                    max_iterations=20,
+                    relative_tolerance=1.0e-6,
+                    absolute_tolerance=0.0,
+                    require_convergence=True,
+                    linear_solver=gmres_solver,
+                    max_particle_iterations=21,
+                    particle_tolerance=1.0e-10,
+                )
+            simulation.evolve_scheme = picmi.ThetaImplicitHybridEvolveScheme(
+                theta=self.theta,
+                nonlinear_solver=nonlinear_solver,
+            )
 
         # Add field loader callback
         B_ext = picmi.LoadInitialFieldFromPython(
@@ -391,8 +462,65 @@ parser.add_argument(
     help="Verbose output",
     action="store_true",
 )
+parser.add_argument(
+    "--implicit",
+    help="use the theta-implicit hybrid evolve scheme",
+    action="store_true",
+)
+parser.add_argument(
+    "--nlsolver",
+    choices=["newton", "picard"],
+    default="picard",
+    help="nonlinear solver for the implicit scheme",
+)
+parser.add_argument(
+    "--theta",
+    type=float,
+    default=0.5,
+    help="implicit time-biasing parameter",
+)
+parser.add_argument(
+    "--dt-mult",
+    type=float,
+    default=1.0,
+    help="multiply the base time step (implicit runs can take larger steps)",
+)
+parser.add_argument(
+    "--darwin",
+    help="use the Darwin (magnetoinductive) field split (implicit only)",
+    action="store_true",
+)
+parser.add_argument(
+    "--n-floor-mult",
+    type=float,
+    default=1.0,
+    help="scale the vacuum density floor of the Ohm solve (the floored "
+    "halo sets the stiffest whistler scale for the implicit solvers)",
+)
+parser.add_argument("--nr", type=int, default=None, help="override NR")
+parser.add_argument("--nz", type=int, default=None, help="override NZ")
+parser.add_argument("--nppc", type=int, default=None, help="override NPPC")
+parser.add_argument(
+    "--lt",
+    type=float,
+    default=None,
+    help="override run length (ion cyclotron periods)",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
-run = PlasmaCylinderCompression(test=args.test, verbose=args.verbose)
+run = PlasmaCylinderCompression(
+    test=args.test,
+    verbose=args.verbose,
+    implicit=args.implicit,
+    nlsolver=args.nlsolver,
+    theta=args.theta,
+    dt_mult=args.dt_mult,
+    darwin=args.darwin,
+    n_floor_mult=args.n_floor_mult,
+    nr=args.nr,
+    nz=args.nz,
+    nppc=args.nppc,
+    lt=args.lt,
+)
 simulation.step()
