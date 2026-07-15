@@ -404,6 +404,19 @@ void WarpX::OneStep (
 
     // implicit solver
     if (m_implicit_solver) {
+        // Python-callback semantics under the implicit schemes: the field
+        // updates run inside the nonlinear residual evaluations (at iterate
+        // states, including Jacobian probes), where per-update callbacks
+        // must not fire. Instead, fire one coherent set of events around
+        // OneStep at well-defined states: beforeEsolve with the t^n state
+        // (note: charge/current deposition happens inside the nonlinear
+        // iteration, not before it), and afterEpush/afterBpush (plus
+        // afterEsolve for the hybrid solver) with the converged t^{n+1}
+        // state.
+        const bool fire_esolve_callbacks =
+            (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC);
+        if (fire_esolve_callbacks) { ExecutePythonCallback("beforeEsolve"); }
+
         // advance fields and particles by one time step
         const int exit_status = m_implicit_solver->OneStep(a_cur_time, a_dt, a_step);
         if (exit_status < 0) {
@@ -413,6 +426,10 @@ void WarpX::OneStep (
                       << "Nonlinear solver failed to converge: exit status = " << exit_status;
             WARPX_ABORT_WITH_MESSAGE(solverMsg.str());
         }
+
+        ExecutePythonCallback("afterEpush");
+        ExecutePythonCallback("afterBpush");
+        if (fire_esolve_callbacks) { ExecutePythonCallback("afterEsolve"); }
     }
     // explicit solver
     else {

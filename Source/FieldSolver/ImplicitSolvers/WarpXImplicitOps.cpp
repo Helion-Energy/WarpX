@@ -74,7 +74,14 @@ WarpX::UpdateMagneticFieldAndApplyBCs( ablastr::fields::MultiLevelVectorField co
         amrex::MultiFab::Copy(*Bfp[1], *a_Bn[lev][1], 0, 0, ncomps, a_Bn[lev][1]->nGrowVect());
         amrex::MultiFab::Copy(*Bfp[2], *a_Bn[lev][2], 0, 0, ncomps, a_Bn[lev][2]->nGrowVect());
     }
-    EvolveB(a_thetadt, SubcyclingHalf::None, start_time);
+    // Use the per-level EvolveB: this runs inside every nonlinear residual
+    // evaluation (including Jacobian probes), so the multi-level variant's
+    // afterBpush python callback must not fire here. A single afterBpush is
+    // fired at the converged state after ImplicitSolver::OneStep completes
+    // (see WarpX::OneStep).
+    for (int lev = 0; lev <= finest_level; ++lev) {
+        EvolveB(lev, a_thetadt, SubcyclingHalf::None, start_time);
+    }
     FillBoundaryB(guard_cells.ng_alloc_EB, WarpX::sync_nodal_points);
 }
 
