@@ -110,7 +110,7 @@ namespace {
 
 /** Alias WarpX (Bx,By,Bz) MultiFabs into AMReX MLCurlCurl component order. */
 Array<MultiFab,3>
-MakeCurlCurlAliases (Array<MultiFab,3>& mf)
+MakeCurlCurlAliases (const Array<MultiFab,3>& mf)
 {
 #if defined(WARPX_DIM_1D_Z)
     // Missing dimensions are x,y in WarpX and y,z in AMReX
@@ -152,7 +152,7 @@ public:
         for (int idim = 0; idim < 3; ++idim) {
             m_fields[idim].define(
                 source[idim]->boxArray(), source[idim]->DistributionMap(),
-                source[idim]->nComp(), 0);
+                source[idim]->nComp(), source[idim]->nGrowVect());
         }
         m_is_defined = true;
     }
@@ -162,7 +162,7 @@ public:
         AMREX_ALWAYS_ASSERT(m_is_defined && source.m_is_defined);
         for (int idim = 0; idim < 3; ++idim) {
             MultiFab::Copy(m_fields[idim], source.m_fields[idim], 0, 0,
-                           m_fields[idim].nComp(), 0);
+                           m_fields[idim].nComp(), m_fields[idim].nGrow());
         }
     }
 
@@ -171,7 +171,7 @@ public:
         AMREX_ALWAYS_ASSERT(m_is_defined);
         for (int idim = 0; idim < 3; ++idim) {
             MultiFab::Copy(m_fields[idim], *source[idim], 0, 0,
-                           m_fields[idim].nComp(), 0);
+                           m_fields[idim].nComp(), m_fields[idim].nGrow());
         }
     }
 
@@ -179,7 +179,7 @@ public:
     {
         AMREX_ALWAYS_ASSERT(m_is_defined);
         for (auto& field : m_fields) {
-            field.setVal(value);
+            field.setVal(value, field.nGrow());
         }
     }
 
@@ -188,7 +188,7 @@ public:
         AMREX_ALWAYS_ASSERT(m_is_defined && source.m_is_defined);
         for (int idim = 0; idim < 3; ++idim) {
             MultiFab::Saxpy(m_fields[idim], scale, source.m_fields[idim],
-                            0, 0, m_fields[idim].nComp(), 0);
+                            0, 0, m_fields[idim].nComp(), m_fields[idim].nGrow());
         }
     }
 
@@ -196,7 +196,7 @@ public:
     {
         AMREX_ALWAYS_ASSERT(m_is_defined);
         for (auto& field : m_fields) {
-            field.mult(scale, 0, field.nComp(), 0);
+            field.mult(scale, 0, field.nComp(), field.nGrow());
         }
     }
 
@@ -206,7 +206,7 @@ public:
         for (int idim = 0; idim < 3; ++idim) {
             MultiFab::LinComb(m_fields[idim], a, x.m_fields[idim], 0,
                                b, y.m_fields[idim], 0, 0,
-                               m_fields[idim].nComp(), 0);
+                               m_fields[idim].nComp(), m_fields[idim].nGrow());
         }
     }
 
@@ -237,12 +237,15 @@ public:
     VariableCoeffMagDiffusionOp (
         ablastr::fields::VectorField const& Bfield,
         ablastr::fields::VectorField const& eta,
-        Real theta_dt, int lev)
+        Real theta_dt, int lev,
+        amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM> const& lobc,
+        amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM> const& hibc)
         : m_theta_dt(theta_dt), m_lev(lev),
           m_source{Bfield[0], Bfield[1], Bfield[2]},
           m_eta{eta[0], eta[1], eta[2]},
           m_geom(WarpX::GetInstance().Geom(lev))
     {
+        amrex::ignore_unused(lobc, hibc);
 #if defined(WARPX_DIM_RZ)
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_geom.isPeriodic(1),
@@ -339,7 +342,74 @@ public:
 
     void precond (MagDiffVector& destination, MagDiffVector const& source)
     {
-        destination.Copy(source);
+        auto const& geom = WarpX::GetInstance().Geom(m_lev);
+        auto const dx = geom.CellSize();
+
+        Real dx_inv2 = 0.0_rt;
+        Real dz_inv2 = 0.0_rt;
+#if defined(WARPX_DIM_3D)
+        Real dy_inv2 = 1.0_rt / (dx[1]*dx[1]);
+        dx_inv2 = 1.0_rt / (dx[0]*dx[0]);
+        dz_inv2 = 1.0_rt / (dx[2]*dx[2]);
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+        dx_inv2 = 1.0_rt / (dx[0]*dx[0]);
+        dz_inv2 = 1.0_rt / (dx[1]*dx[1]);
+#elif defined(WARPX_DIM_1D_Z)
+        dz_inv2 = 1.0_rt / (dx[0]*dx[0]);
+#endif
+
+        auto& dest_fields = destination.fields();
+        auto const& src_fields = source.fields();
+
+        Real diag_factor = 0.0_rt;
+#if defined(WARPX_DIM_3D)
+        diag_factor = 2.0_rt * (dx_inv2 + dy_inv2 + dz_inv2);
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+        diag_factor = 2.0_rt * (dx_inv2 + dz_inv2);
+#elif defined(WARPX_DIM_1D_Z)
+        diag_factor = 2.0_rt * dz_inv2;
+#endif
+
+        Real min_eta = 1.0e100_rt;
+        for (int idim = 0; idim < 3; ++idim) {
+            min_eta = std::min(min_eta, m_eta[idim]->min(0));
+        }
+        const Real chi_min = min_eta / PhysConst::mu0;
+
+        for (int idim = 0; idim < 3; ++idim) {
+            auto const& eta = m_eta[idim];
+
+            for (MFIter mfi(dest_fields[idim], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                auto dest_arr = dest_fields[idim].array(mfi);
+                auto const src_arr = src_fields[idim].const_array(mfi);
+                auto const eta_arr = eta->const_array(mfi);
+                amrex::Box const box = mfi.tilebox();
+                const Real theta_dt = m_theta_dt;
+
+                ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    const Real eta_val = eta_arr(i, j, k);
+                    const Real chi_val = eta_val / PhysConst::mu0;
+                    const Real diag = (1.0_rt + theta_dt * chi_val * diag_factor) /
+                                      (1.0_rt + theta_dt * chi_min * diag_factor);
+                    dest_arr(i, j, k) = src_arr(i, j, k) / diag;
+                });
+            }
+        }
+
+#if defined(WARPX_DIM_RZ)
+        auto& warpx = WarpX::GetInstance();
+        for (int idim = 0; idim < 3; ++idim) {
+            MultiFab::Copy(*m_source[idim], dest_fields[idim], 0, 0, 1, 0);
+        }
+        warpx.ApplyBfieldBoundary(
+            m_lev, PatchType::fine, SubcyclingHalf::None, warpx.gett_new(m_lev));
+        warpx.FillBoundaryB(m_lev, m_source[0]->nGrowVect(), true);
+
+        for (int idim = 0; idim < 3; ++idim) {
+            MultiFab::Copy(dest_fields[idim], *m_source[idim], 0, 0, 1, 0);
+        }
+#endif
     }
 
     void apply (MagDiffVector& output, MagDiffVector const& input)
@@ -592,7 +662,6 @@ HybridMagDiffusion::AdvanceVariable (
 {
     ABLASTR_PROFILE("HybridMagDiffusion::AdvanceVariable()");
 
-    amrex::ignore_unused(lobc, hibc);
     if (!m_enabled || dt <= 0.0_rt) { return; }
 
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -603,7 +672,7 @@ HybridMagDiffusion::AdvanceVariable (
         "Variable-coefficient hybrid magnetic diffusion currently supports "
         "only backward Euler (mag_diff_theta = 1)");
 
-    VariableCoeffMagDiffusionOp linop(Bfield, eta_SI, m_theta * dt, lev);
+    VariableCoeffMagDiffusionOp linop(Bfield, eta_SI, m_theta * dt, lev, lobc, hibc);
     MagDiffVector solution;
     MagDiffVector rhs;
     solution.Define(Bfield);
