@@ -38,6 +38,8 @@
 #include <memory>
 #include <optional>
 
+class PoissonBoundaryHandler;
+
 /**
  * \brief This class contains the parameters needed to evaluate hybrid field
  * solutions (kinetic ions with fluid electrons).
@@ -572,6 +574,31 @@ public:
      * (FillElectronPressureMF) -- no temperature evolution. */
     bool m_solve_electron_energy_equation = false;
 
+    /** Darwin (magnetoinductive) field split for the theta-implicit hybrid
+     *  solver: the electric field is decomposed as E = E_T + E_L with the
+     *  longitudinal part E_L = grad(phi) obtained from the instantaneous
+     *  elliptic constraint
+     *      laplacian(phi) = div( -grad(Pe) / (q_e n_e) ),
+     *  i.e. the Helmholtz-longitudinal projection of the ambipolar pressure
+     *  field, and the transverse part advanced through the magnetic vector
+     *  potential, B = B_static + curl(A), A^{n+1} = A^n - dt E_T^{n+theta}.
+     *  This removes the radiative light-wave branch while retaining
+     *  Hall/whistler physics (Hewett & Nielson, J. Comput. Phys. 29, 219
+     *  (1978); Hewett, Comput. Phys. Comm. 84, 243 (1994)). Consumed by
+     *  ThetaImplicitHybrid. */
+    bool m_darwin = false;
+    amrex::Real m_darwin_poisson_rtol = 1.0e-10;
+    amrex::Real m_darwin_poisson_atol = 0.0;
+    int m_darwin_poisson_max_iters = 200;
+    int m_darwin_poisson_verbosity = 0;
+
+    /** Solve the Darwin longitudinal-field constraint with the given charge
+     *  density and the current hybrid_electron_pressure_fp, writing
+     *  E_L = grad(phi) into the "hybrid_E_long_fp" fields (E staggering).
+     */
+    void ComputeDarwinELong (ablastr::fields::MultiLevelScalarField const& rho,
+                             amrex::Real t);
+
     /** Resistive electron-heating source on T_e (see Phys. Plasmas 31, 012902 (2024), Eq. 12),
      * computed per cell as
      *     S_e = Sigma_s nu_{s,e} n_s m_s |V_s - V_e|^2,
@@ -624,6 +651,16 @@ public:
     std::unique_ptr<amrex::Parser> m_resistivity_parser;
     amrex::ParserExecutor<3> m_eta;
     bool m_resistivity_has_J_dependence = false;
+
+    /** Opt-in momentum-consistent particle push field for the
+     *  theta-implicit hybrid solver: subtract the resistive part of the
+     *  Ohm field from the field gathered by the ions (the explicit scheme
+     *  pushes ions with the no-resistivity Ohm field; ion-side resistive
+     *  friction is the separate drag operator). Off by default: the
+     *  correction couples the resistive field into the particle response
+     *  and can destabilize the Newton iteration in whistler-marginal
+     *  configurations. */
+    bool m_implicit_push_excludes_resistive_field = false;
 
     /** True when any resistive term is configured: a non-trivial global
      *  resistivity parser, per-species overlays, or hyper-resistivity. */
@@ -753,6 +790,10 @@ public:
      *  midpoint density through the same MultiParticleContainer path used
      *  for rho^n and rho^{n+1}. Lazily allocated per level. */
     mutable std::map<int, std::unique_ptr<amrex::MultiFab>> m_qdsmc_rho_mid;
+
+    /** Boundary-condition handler for the Darwin phi solve (same BC mapping
+     *  as the electrostatic solver). Lazily constructed on first use. */
+    mutable std::unique_ptr<PoissonBoundaryHandler> m_darwin_bc_handler;
 };
 
 /**

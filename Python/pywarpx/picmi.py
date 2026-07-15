@@ -2157,6 +2157,20 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         in Ohm's law, the Joule heating source and the resistive drag is
         ``plasma_resistivity + plasma_resistivity_species[s]``.
 
+    implicit_push_excludes_resistive_field: bool, default=False
+        With the theta-implicit hybrid evolve scheme, subtract the resistive
+        part of the Ohm field from the field gathered by the ions
+        (momentum-consistent with the explicit scheme's push field). Can
+        destabilize the Newton nonlinear solver in whistler-marginal
+        configurations; validated with the Picard solver.
+
+    darwin: bool, default=False
+        Whether to use the Darwin (magnetoinductive) field split with the
+        theta-implicit hybrid evolve scheme: the longitudinal electric field
+        comes from an instantaneous ambipolar constraint and the transverse
+        field advances the magnetic vector potential, removing the radiative
+        branch (Hewett & Nielson, J. Comput. Phys. 29, 219 (1978)).
+
     solve_electron_energy_equation: bool, default=False
         Solve the electron energy equation instead of the algebraic adiabatic
         pressure closure: the electron entropy ``K = Te * ne**(1-gamma)`` is
@@ -2298,6 +2312,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         plasma_hyper_resistivity=None,
         plasma_resistivity_species=None,
         solve_electron_energy_equation=None,
+        implicit_push_excludes_resistive_field=None,
+        darwin=None,
         include_joule_heating=None,
         redirect_joule_to_ions=None,
         joule_redirect_Te_threshold=None,
@@ -2331,6 +2347,10 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.plasma_resistivity_species = plasma_resistivity_species
 
         self.solve_electron_energy_equation = solve_electron_energy_equation
+        self.implicit_push_excludes_resistive_field = (
+            implicit_push_excludes_resistive_field
+        )
+        self.darwin = darwin
         self.include_joule_heating = include_joule_heating
         self.redirect_joule_to_ions = redirect_joule_to_ions
         self.joule_redirect_Te_threshold = joule_redirect_Te_threshold
@@ -2403,6 +2423,12 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
             pywarpx.hybridpicmodel.solve_electron_energy_equation = (
                 self.solve_electron_energy_equation
             )
+        if self.implicit_push_excludes_resistive_field is not None:
+            pywarpx.hybridpicmodel.implicit_push_excludes_resistive_field = (
+                self.implicit_push_excludes_resistive_field
+            )
+        if self.darwin is not None:
+            pywarpx.hybridpicmodel.darwin = self.darwin
         if self.include_joule_heating is not None:
             pywarpx.hybridpicmodel.include_joule_heating = self.include_joule_heating
         if self.redirect_joule_to_ions is not None:

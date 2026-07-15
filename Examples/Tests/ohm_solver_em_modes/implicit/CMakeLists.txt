@@ -2,6 +2,16 @@
 #
 
 add_warpx_test(
+    test_1d_ohm_solver_em_modes_darwin_picmi  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_ohm_solver_em_modes_implicit_picmi.py --test --dim 1 --bdir z --darwin"  # inputs
+    "analysis.py"  # analysis
+    "analysis_default_regression.py --path diags/field_diag000050 --rtol 2e-4"  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
     test_1d_ohm_solver_em_modes_implicit_picmi  # name
     1  # dims
     2  # nprocs

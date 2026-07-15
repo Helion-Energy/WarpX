@@ -3814,6 +3814,50 @@ Maxwell solver: kinetic-fluid hybrid
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the plasma density floor, in :math:`m^{-3}`, which is useful since the generalized Ohm's law used to calculate the E-field includes a :math:`1/n` term.
 
+.. pp:param:: hybrid_pic_model.implicit_push_excludes_resistive_field
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If ``algo.evolve_scheme = theta_implicit_hybrid``, subtract the resistive part of the Ohm field
+    (:math:`\eta \mathbf{J}` and hyper-resistivity) from the electric field gathered by the ions.
+    This makes the implicit particle push momentum-consistent with the explicit scheme, where ions
+    gather the no-resistivity Ohm field and the ion-side resistive friction is the separate
+    (optional) resistive-drag collision operator; without it the ions pick up a spurious resistive
+    acceleration and the Joule energy accounting double-counts. The correction couples the resistive
+    field into the particle response and can destabilize the Newton nonlinear solver in
+    whistler-marginal configurations; it is validated with the Picard solver.
+
+.. pp:param:: hybrid_pic_model.darwin
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If ``algo.evolve_scheme = theta_implicit_hybrid``, this switches the solver to the Darwin
+    (magnetoinductive) field split: the electric field is decomposed as :math:`\mathbf{E} = \mathbf{E}_T + \mathbf{E}_L`,
+    where the longitudinal part is the instantaneous solution of the ambipolar constraint
+    :math:`\nabla^2\phi = \nabla\cdot[-\nabla P_e/(q_e n_e)]`, :math:`\mathbf{E}_L = \nabla\phi`,
+    and the transverse part advances the magnetic vector potential,
+    :math:`\mathbf{A}^{n+1} = \mathbf{A}^n - \Delta t\,\mathbf{E}_T^{n+\theta}` with
+    :math:`\mathbf{B} = \mathbf{B}_\mathrm{static} + \nabla\times\mathbf{A}`
+    (:math:`\mathbf{B}_\mathrm{static}` is the initial magnetic field; the vector potential
+    accumulates all subsequent changes, keeping :math:`\mathbf{B}` solenoidal by construction).
+    This removes the radiative light-wave branch while retaining the Hall/whistler physics
+    (Hewett and Nielson, J. Comput. Phys. **29**, 219 (1978); Hewett, Comput. Phys. Comm. **84**, 243 (1994)).
+    The total current retains the longitudinal displacement current,
+    :math:`\mathbf{J} = \nabla\times\mathbf{B}/\mu_0 - \varepsilon_0\,\partial_t \mathbf{E}_L`,
+    which preserves charge continuity of the electron current.
+    Restarts are not supported yet. In RZ only the :math:`m = 0` azimuthal mode is supported.
+
+.. pp:param:: hybrid_pic_model.darwin_poisson_relative_tolerance
+    :type: ``float``
+    :default: ``1e-10``
+    :optional:
+
+    Relative tolerance of the MLMG solve for the Darwin constraint potential
+    (also ``darwin_poisson_absolute_tolerance``, default 0, ``darwin_poisson_max_iterations``,
+    default 200, and ``darwin_poisson_verbosity``, default 0).
+
 .. pp:param:: hybrid_pic_model.substeps
     :type: ``int``
     :default: ``10``

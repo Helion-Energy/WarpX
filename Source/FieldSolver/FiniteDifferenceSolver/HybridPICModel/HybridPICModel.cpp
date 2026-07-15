@@ -12,10 +12,12 @@
 #include "HybridPICModel.H"
 
 #include <ablastr/coarsen/sample.H>
+#include <ablastr/fields/PoissonSolver.H>
 #include <ablastr/utils/Communication.H>
 #include <ablastr/warn_manager/WarnManager.H>
 
 #include "EmbeddedBoundary/Enabled.H"
+#include "FieldSolver/ElectrostaticSolvers/PoissonBoundaryHandler.H"
 #include "Python/callbacks.H"
 #include "Fields.H"
 #include "Fluids/QdsmcParticleContainer.H"
@@ -93,6 +95,26 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("solve_electron_energy_equation",
                     m_solve_electron_energy_equation);
     pp_hybrid.query("qdsmc_n_floor", m_qdsmc_n_floor);
+
+    pp_hybrid.query("implicit_push_excludes_resistive_field",
+                    m_implicit_push_excludes_resistive_field);
+
+    // Darwin (magnetoinductive) field split, consumed by the theta-implicit
+    // hybrid solver (see the member documentation in HybridPICModel.H).
+    pp_hybrid.query("darwin", m_darwin);
+    if (m_darwin) {
+        utils::parser::queryWithParser(
+            pp_hybrid, "darwin_poisson_relative_tolerance", m_darwin_poisson_rtol);
+        utils::parser::queryWithParser(
+            pp_hybrid, "darwin_poisson_absolute_tolerance", m_darwin_poisson_atol);
+        utils::parser::queryWithParser(
+            pp_hybrid, "darwin_poisson_max_iterations", m_darwin_poisson_max_iters);
+        pp_hybrid.query("darwin_poisson_verbosity", m_darwin_poisson_verbosity);
+#if defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+        WARPX_ABORT_WITH_MESSAGE(
+            "hybrid_pic_model.darwin is not supported in the 1D radial geometries.");
+#endif
+    }
 #if defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !m_solve_electron_energy_equation,
@@ -262,6 +284,33 @@ void HybridPICModel::AllocateLevelMFs (
         fields.alloc_init(FieldType::hybrid_current_fp_plasma_old, Direction{2},
             lev, amrex::convert(ba, jz_nodal_flag),
             dm, ncomps, ngJ, 0.0_rt);
+    }
+
+    // Darwin split fields (only with hybrid_pic_model.darwin = 1):
+    //   * hybrid_A_fp / hybrid_A_old_fp : magnetic vector potential on the E
+    //     staggering, advanced as A^{n+1} = A^n - dt E_T^{n+theta};
+    //   * hybrid_B_static_fp            : the time-independent part of B
+    //     (B(t) = B_static + curl A with A(0) = 0, so B_static = B(0));
+    //   * hybrid_E_long_fp / _old_fp    : longitudinal field E_L = grad(phi);
+    //   * hybrid_phi_darwin_fp          : the constraint potential (nodal).
+    if (m_darwin) {
+        const amrex::IntVect E_stag[3] = {Ex_nodal_flag, Ey_nodal_flag, Ez_nodal_flag};
+        const amrex::IntVect B_stag[3] = {Bx_nodal_flag, By_nodal_flag, Bz_nodal_flag};
+        for (int dir = 0; dir < 3; ++dir) {
+            fields.alloc_init("hybrid_A_fp", Direction{dir},
+                lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB, 0.0_rt);
+            fields.alloc_init("hybrid_A_old_fp", Direction{dir},
+                lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB, 0.0_rt);
+            fields.alloc_init("hybrid_E_long_fp", Direction{dir},
+                lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB, 0.0_rt);
+            fields.alloc_init("hybrid_E_long_old_fp", Direction{dir},
+                lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB, 0.0_rt);
+            fields.alloc_init("hybrid_B_static_fp", Direction{dir},
+                lev, amrex::convert(ba, B_stag[dir]), dm, ncomps, ngEB, 0.0_rt);
+        }
+        fields.alloc_init("hybrid_phi_darwin_fp",
+            lev, amrex::convert(ba, amrex::IntVect::TheNodeVector()),
+            dm, ncomps, ngRho, 0.0_rt);
     }
 
     // The "hybrid_rho_fp_temp" multifab is used to store the ion charge density
@@ -1123,6 +1172,186 @@ void HybridPICModel::FillElectronPressureMF (
         });
     }
 }
+
+// =============================================================================
+// Darwin longitudinal-field constraint
+// =============================================================================
+
+void HybridPICModel::ComputeDarwinELong (
+    ablastr::fields::MultiLevelScalarField const& rho,
+    amrex::Real const t)
+{
+    ABLASTR_PROFILE("HybridPICModel::ComputeDarwinELong()");
+
+    using ablastr::fields::Direction;
+
+    auto & warpx = WarpX::GetInstance();
+    int const finest = warpx.finestLevel();
+
+#if defined(WARPX_DIM_RZ)
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(WarpX::ncomps == 1,
+        "hybrid_pic_model.darwin supports only the m = 0 azimuthal mode in RZ");
+#endif
+
+    if (!m_darwin_bc_handler) {
+        m_darwin_bc_handler = std::make_unique<PoissonBoundaryHandler>();
+        m_darwin_bc_handler->DefinePhiBCs(warpx.Geom(0));
+    }
+
+    // Per-direction nodal-to-staggered gradient offsets: component d of the
+    // gradient is nonzero only when dimension d is represented on the grid.
+    // (In 2D/RZ the y/theta component vanishes for the in-plane/m=0 fields,
+    // in 1D only the z component survives.)
+#if defined(WARPX_DIM_3D)
+    const amrex::IntVect grad_off[3] = {
+        amrex::IntVect(1,0,0), amrex::IntVect(0,1,0), amrex::IntVect(0,0,1)};
+    const int grad_dim[3] = {0, 1, 2};
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+    const amrex::IntVect grad_off[3] = {
+        amrex::IntVect(1,0), amrex::IntVect(0,0), amrex::IntVect(0,1)};
+    const int grad_dim[3] = {0, -1, 1};
+#elif defined(WARPX_DIM_1D_Z)
+    const amrex::IntVect grad_off[3] = {
+        amrex::IntVect(0), amrex::IntVect(0), amrex::IntVect(1)};
+    const int grad_dim[3] = {-1, -1, 0};
+#else
+    const amrex::IntVect grad_off[3] = {
+        amrex::IntVect(0), amrex::IntVect(0), amrex::IntVect(0)};
+    const int grad_dim[3] = {-1, -1, -1};
+#endif
+
+    amrex::Real const rho_floor = PhysConst::q_e * m_n_floor;
+
+    // Scratch (nodal, phi-shaped): rho_eff = -eps0 div(S), so the
+    // electrostatic-solver convention laplacian(phi) = -rho_eff/eps0
+    // produces laplacian(phi) = div(S).
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> rho_eff_store(finest + 1);
+    amrex::Vector<amrex::MultiFab *> sorted_rho, sorted_phi;
+
+    for (int lev = 0; lev <= finest; ++lev)
+    {
+        amrex::Geometry const & geom = warpx.Geom(lev);
+        auto const dx_arr = geom.CellSizeArray();
+
+        amrex::MultiFab const & Pe = *warpx.m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
+        ablastr::fields::VectorField E_long =
+            warpx.m_fields.get_alldirs("hybrid_E_long_fp", lev);
+
+        // Step 1: the ambipolar source S = -grad(Pe)/(q_e n_e) on the E
+        // staggering, assembled into the E_long fabs (overwritten with
+        // grad(phi) below).
+        for (int dir = 0; dir < 3; ++dir) {
+            amrex::MultiFab & Sd = *E_long[dir];
+            int const d = grad_dim[dir];
+            if (d < 0) { Sd.setVal(0.0_rt); continue; }
+            amrex::Real const inv_dx = 1.0_rt / dx_arr[d];
+            amrex::IntVect const off = grad_off[dir];
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(Sd, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                auto const & S_arr   = Sd.array(mfi);
+                auto const & Pe_arr  = Pe.const_array(mfi);
+                auto const & rho_arr = rho[lev]->const_array(mfi);
+                amrex::ParallelFor(mfi.tilebox(),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    amrex::IntVect const iv(AMREX_D_DECL(i, j, k));
+                    amrex::IntVect const ivp = iv + off;
+                    amrex::Real const rho_edge = amrex::max(
+                        0.5_rt*(rho_arr(iv) + rho_arr(ivp)), rho_floor);
+                    S_arr(iv) = -(Pe_arr(ivp) - Pe_arr(iv)) * inv_dx / rho_edge;
+                });
+            }
+            Sd.FillBoundary(geom.periodicity());
+        }
+
+        // Step 2: nodal div(S) via the geometry-aware finite-difference
+        // divergence, then rho_eff = -eps0 div(S).
+        amrex::MultiFab const & phi_shape = *warpx.m_fields.get("hybrid_phi_darwin_fp", lev);
+        rho_eff_store[lev] = std::make_unique<amrex::MultiFab>(
+            phi_shape.boxArray(), phi_shape.DistributionMap(),
+            phi_shape.nComp(), phi_shape.nGrowVect());
+        warpx.get_pointer_fdtd_solver_fp(lev)->ComputeDivE(E_long, *rho_eff_store[lev]);
+        rho_eff_store[lev]->mult(-PhysConst::epsilon_0);
+
+        sorted_rho.emplace_back(rho_eff_store[lev].get());
+        sorted_phi.emplace_back(warpx.m_fields.get("hybrid_phi_darwin_fp", lev));
+    }
+
+    // Step 3: MLMG solve for phi with the same machinery and boundary-type
+    // mapping as the electrostatic solver.
+#ifdef AMREX_USE_EB
+    std::optional<amrex::Vector<amrex::EBFArrayBoxFactory const *>> eb_farray_box_factory;
+    if (EB::enabled()) {
+        amrex::Vector<amrex::EBFArrayBoxFactory const *> factories;
+        for (int lev = 0; lev <= finest; ++lev) {
+            factories.push_back(&warpx.fieldEBFactory(lev));
+        }
+        eb_farray_box_factory = factories;
+    }
+#else
+    std::optional<amrex::Vector<amrex::FArrayBoxFactory const *>> const eb_farray_box_factory;
+#endif
+
+    ablastr::fields::computePhi(
+        sorted_rho,
+        sorted_phi,
+        {0._rt, 0._rt, 0._rt},
+        m_darwin_poisson_rtol,
+        m_darwin_poisson_atol,
+        m_darwin_poisson_max_iters,
+        m_darwin_poisson_verbosity,
+        warpx.Geom(),
+        warpx.DistributionMap(),
+        warpx.boxArray(),
+        WarpX::grid_type,
+        false,
+        false,
+        EB::enabled(),
+        WarpX::do_single_precision_comms,
+        warpx.refRatio(),
+        std::nullopt,
+        *m_darwin_bc_handler,
+        t,
+        eb_farray_box_factory
+    );
+
+    // Step 4: E_L = +grad(phi) on the E staggering (the longitudinal
+    // projection of S: laplacian(phi) = div(S) => grad(phi) = S_L).
+    for (int lev = 0; lev <= finest; ++lev)
+    {
+        amrex::Geometry const & geom = warpx.Geom(lev);
+        auto const dx_arr = geom.CellSizeArray();
+        amrex::MultiFab & phi = *warpx.m_fields.get("hybrid_phi_darwin_fp", lev);
+        phi.FillBoundary(geom.periodicity());
+        ablastr::fields::VectorField E_long =
+            warpx.m_fields.get_alldirs("hybrid_E_long_fp", lev);
+
+        for (int dir = 0; dir < 3; ++dir) {
+            amrex::MultiFab & Ed = *E_long[dir];
+            int const d = grad_dim[dir];
+            if (d < 0) { Ed.setVal(0.0_rt); continue; }
+            amrex::Real const inv_dx = 1.0_rt / dx_arr[d];
+            amrex::IntVect const off = grad_off[dir];
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(Ed, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                auto const & E_arr   = Ed.array(mfi);
+                auto const & phi_arr = phi.const_array(mfi);
+                amrex::ParallelFor(mfi.tilebox(),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    amrex::IntVect const iv(AMREX_D_DECL(i, j, k));
+                    E_arr(iv) = (phi_arr(iv + off) - phi_arr(iv)) * inv_dx;
+                });
+            }
+            Ed.FillBoundary(geom.periodicity());
+        }
+    }
+}
+
 
 // =============================================================================
 // QDSMC electron-energy-equation orchestration

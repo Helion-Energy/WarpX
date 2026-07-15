@@ -136,6 +136,29 @@ private:
      */
     void FinishFieldUpdate ( amrex::Real end_time );
 
+    /** Darwin split (hybrid_pic_model.darwin): when true, the solver state
+     *  is the transverse field E_T, the magnetic field is advanced through
+     *  the vector potential (B = B_static + curl A,
+     *  A^{n+1} = A^n - dt E_T^{n+theta}) instead of Faraday's law, and the
+     *  longitudinal field E_L = grad(phi) comes from the instantaneous
+     *  ambipolar constraint (HybridPICModel::ComputeDarwinELong), refreshed
+     *  once per nonlinear iteration. */
+    bool m_darwin = false;
+
+    /** One-time Darwin state capture (B_static = B(t=0), A = 0), performed
+     *  at the top of the first OneStep when all fields are initialized. */
+    bool m_darwin_initialized = false;
+
+    /** Cached in Define: subtract the resistive Ohm-field part from the
+     *  particle push field (hybrid_pic_model.implicit_push_excludes_resistive_field
+     *  and a resistive term configured). */
+    bool m_use_resistive_push_correction = false;
+
+    /** Darwin magnetic-field update: A^{n+theta} = A_old - theta dt E_T
+     *  (from Efield_fp, which holds the transverse state at entry),
+     *  then B = B_static + curl A with boundary treatment. */
+    void DarwinUpdateA_B ( amrex::Real a_thetadt, amrex::Real a_time );
+
 };
 
 #endif
