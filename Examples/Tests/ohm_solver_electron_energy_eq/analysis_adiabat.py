@@ -68,15 +68,19 @@ def main(argv=None):
     g1 = args.gamma - 1.0
 
     def zavg(name, it):
-        # The wave runs along the last array axis: x in the 2D Cartesian deck
-        # (average over z), z in the RZ deck (average over r).
+        # Average over the axis transverse to the wave, keeping the wave
+        # axis as the profile: the 2D Cartesian deck runs the wave along z
+        # with arrays (x, z), the RZ deck runs it along z with arrays
+        # (z, r). Averaging across the wave direction instead would mix
+        # wave phases through the nonlinear (n)^(gamma-1) map and fake an
+        # O(swing^2) error.
         arr, info = ts.get_field(name, iteration=it)
-        coord = getattr(info, "x", None)
-        if coord is None:
-            coord = info.z
-        return np.asarray(coord, dtype=float), np.asarray(arr, dtype=float).mean(
-            axis=0
-        )
+        arr = np.asarray(arr, dtype=float)
+        if hasattr(info, "r"):
+            # RZ: arrays are (z, r), wave along z -> average over r.
+            return np.asarray(info.z, dtype=float), arr.mean(axis=1)
+        # 2D Cartesian: arrays are (z, x), wave along x -> average over z.
+        return np.asarray(info.x, dtype=float), arr.mean(axis=0)
 
     coord = None
     Te_x, n_x = [], []
@@ -90,19 +94,26 @@ def main(argv=None):
     Te_x = np.array(Te_x)  # (nt, nx)
     n_x = np.array(n_x)
 
-    # Reference state = median of the first dump (uniform initial fill).
+    # Reference state: each cell against its OWN first-dump state, so the
+    # entropy-conservation statement T(x,t) = T(x,0) (n(x,t)/n(x,0))^(g-1)
+    # is tested per cell. This makes the metric independent of static
+    # per-node deposit conventions (e.g. the half-valued wall node and the
+    # Verboncoeur axis node of the radial geometries, which offset n by a
+    # time-constant factor that cancels in n(x,t)/n(x,0)).
     Te0 = float(np.median(Te_x[0]))
     n0 = float(np.median(n_x[0]))
-    Te_pred = Te0 * (n_x / n0) ** g1
+    Te_cell0 = Te_x[0][None, :]
+    n_cell0 = n_x[0][None, :]
+    Te_pred = Te_cell0 * (n_x / np.maximum(n_cell0, 1e-30)) ** g1
 
-    valid = n_x > args.n_floor_frac * n0
+    valid = (n_x > args.n_floor_frac * n0) & (n_cell0 > args.n_floor_frac * n0)
     rel = np.abs(Te_x - Te_pred) / np.maximum(Te_x, 1e-30)
     # Score only meaningfully compressed cells above the density floor.
-    sig = valid & (np.abs(n_x / n0 - 1.0) > 0.03)
+    sig = valid & (np.abs(n_x / np.maximum(n_cell0, 1e-30) - 1.0) > 0.03)
     med = float(np.median(rel[sig])) if np.any(sig) else float("nan")
     mx = float(np.max(rel[sig])) if np.any(sig) else float("nan")
 
-    dn = float(np.max(np.abs((n_x / n0 - 1.0)[valid])))
+    dn = float(np.max(np.abs((n_x / np.maximum(n_cell0, 1e-30) - 1.0)[valid])))
     print("=" * 62)
     print("Adiabatic-compression check  Te = Te0 (n/n0)^(gamma-1)")
     print(f"  gamma = {args.gamma:.5f}   Te0 = {Te0:.2f} eV   n0 = {n0:.3e} m^-3")

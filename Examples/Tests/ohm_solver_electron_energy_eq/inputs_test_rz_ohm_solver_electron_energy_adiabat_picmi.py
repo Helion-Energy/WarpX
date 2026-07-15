@@ -189,9 +189,9 @@ class AdiabaticCompressionRZ(object):
         # v_z = V0 sin(k z). Uniform n0 and Te0 -> uniform initial entropy.
         # NOTE: do_temperature_deposition is intentionally NOT enabled here.
         # It is not needed for the source-free adiabat check (no Q_ei), and
-        # the shape-aware temperature deposition currently segfaults in RZ
-        # (latent issue in the variance-deposition kernels; tracked
-        # separately -- it blocks RZ Q_ei runs, not this test).
+        # the shape-aware temperature deposition currently crashes in RZ on
+        # multi-rank runs (latent issue in the variance-deposition kernels;
+        # tracked separately -- it blocks RZ Q_ei runs, not this test).
         self.ions = picmi.Species(
             name="ions",
             charge="q_e",

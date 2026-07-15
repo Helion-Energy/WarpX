@@ -735,6 +735,17 @@ public:
      *  runs inside const residual evaluations. */
     mutable std::map<int, std::map<std::string, std::unique_ptr<amrex::MultiFab>>> m_qdsmc_Ti_owned;
     mutable std::map<int, std::map<std::string, amrex::MultiFab*>> m_qdsmc_Ti_by_name;
+
+    /** Scratch midpoint charge-density deposit used by the theta-implicit
+     *  QDSMC stage. The K_e seed / T_e recovery algebra must pair densities
+     *  of a single deposit convention: in the radial geometries the
+     *  boundary-node values of the nonlinear-solver deposit (rho_fp) and of
+     *  MultiParticleContainer::DepositCharge differ (no wall fold, different
+     *  axis handling), and mixing them turns the intensive T_e recovery into
+     *  a spurious boundary heat source. The stage therefore deposits its own
+     *  midpoint density through the same MultiParticleContainer path used
+     *  for rho^n and rho^{n+1}. Lazily allocated per level. */
+    mutable std::map<int, std::unique_ptr<amrex::MultiFab>> m_qdsmc_rho_mid;
 };
 
 /**

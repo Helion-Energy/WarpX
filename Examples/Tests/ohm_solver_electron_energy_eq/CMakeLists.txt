@@ -61,24 +61,40 @@ add_warpx_test(
     OFF  # dependency
 )
 
-# The RZ adiabat decks (inputs_test_rz_ohm_solver_electron_energy_adiabat_picmi.py)
-# are not registered yet. Investigation status (reproduce with the decks +
-# hybrid_pic_model.qdsmc_allow_unvalidated_rz = 1):
-#   * The QDSMC entropy transport itself is CLEAN in RZ: the median interior
-#     entropy K_e is conserved to +0.4% over the 60-step test and T_e follows
-#     its adiabat; the apparent ~5.7% adiabat error is dominated by a BASE
-#     RZ-hybrid ion-density redistribution (interior median n drops ~4%, wall
-#     ring to 0.66 n0, axis to 0.90 n0) that is IDENTICAL with the energy
-#     equation off (adiabatic closure) -- i.e., a pre-existing RZ hybrid
-#     wall/axis artifact, not a QDSMC one.
-#   * Remaining QDSMC-specific RZ items: the outermost ring shows a
-#     recovery-vs-diagnosed density inconsistency (adiabat ratio ~1.3 in that
-#     single ring; marker wall clamp + wall-node density under scrutiny), and
-#     the theta-implicit RZ run deviates strongly (needs the same
-#     energy-on/off bisect against the implicit closure run).
-#   * do_temperature_deposition segfaults in RZ (blocks RZ Q_ei runs).
-# Guards remain until the wall-ring and implicit items are resolved
-# (HybridPICModel::ReadParameters refuses solve_electron_energy_equation in
-# RZ without the override; PhysicalParticleContainer refuses
-# do_temperature_deposition in radial geometries). Register the tests here
-# once RZ validation lands.
+add_warpx_test(
+    test_rz_ohm_solver_electron_energy_adiabat_implicit_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_ohm_solver_electron_energy_adiabat_picmi.py --test --implicit --nlsolver picard"  # inputs
+    "analysis_adiabat.py --tol-median 0.03 --tol-max 0.08"  # analysis
+    "analysis_default_regression.py --path diags/field_diags"  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_ohm_solver_electron_energy_adiabat_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_ohm_solver_electron_energy_adiabat_picmi.py --test"  # inputs
+    "analysis_adiabat.py --tol-median 0.02 --tol-max 0.05"  # analysis
+    "analysis_default_regression.py --path diags/field_diags"  # checksum
+    OFF  # dependency
+)
+
+# RZ notes:
+#   * The adiabat analysis compares each cell against its own first-dump
+#     state, which cancels the static per-node deposit conventions of the
+#     radial geometries (half-valued wall node, Verboncoeur axis node --
+#     these offset the diagnosed density by time-constant factors and are a
+#     base-scheme property, present with the adiabatic closure as well).
+#   * The theta-implicit RZ run carries a slow secular redistribution at the
+#     outermost ring (wall-adjacent density/temperature drift over long runs,
+#     absent from the explicit path); its interior tracks the adiabat at the
+#     percent level. Tracked as a follow-up together with the upstream
+#     boundary-node deposit conventions.
+#   * do_temperature_deposition crashes in RZ when run on more than one MPI
+#     rank (SIGSEGV in the two-pass variance deposition at the first step;
+#     single-rank runs and the externally-driven cylinder-compression test
+#     pass). Pre-existing upstream issue in the temperature-deposition
+#     kernels; the RZ Q_ei configuration remains unregistered until it is
+#     fixed.
