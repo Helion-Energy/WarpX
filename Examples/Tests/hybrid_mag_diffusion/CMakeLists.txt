@@ -55,3 +55,17 @@ add_warpx_test(
     OFF  # checksum (RZ vacuum smoke analysis is the oracle)
     OFF  # dependency
 )
+
+# Dirichlet B_t feed at the upper-r face via pec_insulator (FLASH CIRCUIT
+# B_phi = f(I(t)) analogue). The feed is baked into the matrix-free operator
+# (homogeneous) + RHS (affine offset). analysis_rz_pec_feed.py is a finite
+# feed-held smoke, not an analytic oracle.
+add_warpx_test(
+    test_rz_hybrid_mag_diffusion_pec_feed  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_hybrid_mag_diffusion_pec_feed"  # inputs
+    "analysis_rz_pec_feed.py"  # analysis
+    OFF  # checksum (feed smoke analysis is the oracle)
+    OFF  # dependency
+)
