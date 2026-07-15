@@ -10,6 +10,7 @@
 
 #include "EmbeddedBoundary/Enabled.H"
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
+#include "Fields.H"
 #include "Utils/Parser/ParserUtils.H"
 #include "Utils/TextMsg.H"
 #include "Utils/WarpXAlgorithmSelection.H"
@@ -37,6 +38,7 @@
 #include <memory>
 
 using namespace amrex;
+using warpx::fields::FieldType;
 
 void
 HybridMagDiffusion::ReadParameters ()
@@ -241,15 +243,26 @@ public:
           m_eta{eta[0], eta[1], eta[2]},
           m_geom(WarpX::GetInstance().Geom(lev))
     {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ)
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_geom.isPeriodic(1),
+            "RZ matrix-free hybrid magnetic diffusion currently requires "
+            "a periodic axial (z) boundary");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            WarpX::field_boundary_lo[0] == FieldBoundaryType::None &&
+            WarpX::field_boundary_hi[0] == FieldBoundaryType::None,
+            "RZ matrix-free hybrid magnetic diffusion currently requires "
+            "FieldBoundaryType::None at the radial boundaries");
+#elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
         WARPX_ABORT_WITH_MESSAGE(
-            "Variable-coefficient hybrid magnetic diffusion is not yet supported "
-            "in cylindrical or spherical geometries");
-#endif
+            "Matrix-free hybrid magnetic diffusion is not yet supported in "
+            "RCYLINDER or RSPHERE geometries");
+#else
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_geom.isAllPeriodic(),
             "Variable-coefficient hybrid magnetic diffusion currently requires "
             "periodic field boundaries");
+#endif
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !EB::enabled(),
             "Variable-coefficient hybrid magnetic diffusion does not support "
@@ -332,10 +345,27 @@ public:
     void apply (MagDiffVector& output, MagDiffVector const& input)
     {
         auto const& input_fields = input.fields();
+#if defined(WARPX_DIM_RZ)
+        auto& warpx = WarpX::GetInstance();
+        // Krylov vectors have no ghost cells. Stage valid data into the
+        // registered B field so WarpX applies its RZ axis and field boundaries.
+        for (int idim = 0; idim < 3; ++idim) {
+            MultiFab::Copy(*m_source[idim], input_fields[idim], 0, 0, 1, 0);
+        }
+        warpx.ApplyBfieldBoundary(
+            m_lev, PatchType::fine, SubcyclingHalf::None, warpx.gett_new(m_lev));
+        warpx.FillBoundaryB(m_lev, m_source[0]->nGrowVect(), true);
+
+        for (int idim = 0; idim < 3; ++idim) {
+            MultiFab::Copy(m_Bwork[idim], *m_source[idim], 0, 0, 1,
+                           m_Bwork[idim].nGrowVect());
+        }
+#else
         for (int idim = 0; idim < 3; ++idim) {
             MultiFab::Copy(m_Bwork[idim], input_fields[idim], 0, 0, 1, 0);
             m_Bwork[idim].FillBoundaryAndSync(m_geom.periodicity());
         }
+#endif
 
         ablastr::fields::VectorField Bwork = {
             &m_Bwork[0], &m_Bwork[1], &m_Bwork[2]};
@@ -348,7 +378,13 @@ public:
                 auto const etaJ = m_etaJ[idim].array(mfi);
                 auto const eta = m_eta[idim]->const_array(mfi);
                 auto const J = m_Jwork[idim].const_array(mfi);
-                ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                amrex::Box const box =
+#if defined(WARPX_DIM_RZ)
+                    mfi.fabbox();
+#else
+                    mfi.tilebox();
+#endif
+                ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
                 {
                     etaJ(i, j, k) = eta(i, j, k) * J(i, j, k);
                 });
@@ -422,6 +458,25 @@ HybridMagDiffusion::Advance (
 
     auto& warpx = WarpX::GetInstance();
     Geometry const& geom = warpx.Geom(lev);
+
+#if defined(WARPX_DIM_RZ)
+    // AMReX MLCurlCurl supports only Cartesian operators in 2D. Build a
+    // constant eta field on the E/J staggering and use the matrix-free
+    // cylindrical FDTD curl chain instead.
+    ablastr::fields::VectorField const current_layout =
+        warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
+    Array<MultiFab,3> eta_storage;
+    for (int idim = 0; idim < 3; ++idim) {
+        eta_storage[idim].define(
+            current_layout[idim]->boxArray(), current_layout[idim]->DistributionMap(),
+            1, current_layout[idim]->nGrowVect());
+        eta_storage[idim].setVal(eta_SI);
+    }
+    ablastr::fields::VectorField eta_field = {
+        &eta_storage[0], &eta_storage[1], &eta_storage[2]};
+    AdvanceVariable(Bfield, eta_field, dt, lev, lobc, hibc);
+    return;
+#endif
 
     // MLCurlCurl expects cell-centered BoxArray (enclosedCells of edge BA)
     BoxArray ba = Bfield[0]->boxArray();
@@ -564,23 +619,32 @@ HybridMagDiffusion::AdvanceVariable (
 
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         solver.getStatus() == 0,
-        "Variable-coefficient hybrid magnetic diffusion GMRES did not converge");
+        "Matrix-free hybrid magnetic diffusion GMRES did not converge");
 
     if (m_verbose > 0) {
-        amrex::Print() << "HybridMagDiffusion variable-eta GMRES iterations="
+        amrex::Print() << "HybridMagDiffusion matrix-free GMRES iterations="
                        << solver.getNumIters()
                        << " residual=" << solver.getResidualNorm() << "\n";
     }
 
     auto const& solution_fields = solution.fields();
     auto& warpx = WarpX::GetInstance();
+#if !defined(WARPX_DIM_RZ)
     Geometry const& geom = warpx.Geom(lev);
+#endif
     for (int idim = 0; idim < 3; ++idim) {
         MultiFab::Copy(*Bfield[idim], solution_fields[idim], 0, 0, 1, 0);
+#if !defined(WARPX_DIM_RZ)
         ablastr::utils::communication::FillBoundary(
             *Bfield[idim],
             WarpX::do_single_precision_comms,
             geom.periodicity(),
             true);
+#endif
     }
+#if defined(WARPX_DIM_RZ)
+    warpx.ApplyBfieldBoundary(
+        lev, PatchType::fine, SubcyclingHalf::None, warpx.gett_new(lev));
+    warpx.FillBoundaryB(lev, Bfield[0]->nGrowVect(), true);
+#endif
 }

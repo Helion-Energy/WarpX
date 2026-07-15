@@ -2057,6 +2057,14 @@ void HybridPICModel::ApplyImplicitMagDiffusion (
 
     auto& warpx = WarpX::GetInstance();
 
+#if defined(WARPX_DIM_RZ)
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_mag_diffusion.UsesVariableEta(),
+        "Parser-driven variable eta magnetic diffusion is not yet supported "
+        "in RZ; use hybrid_pic_model.mag_diff_constant_eta for the "
+        "matrix-free RZ constant-eta path");
+#endif
+
     if (!m_mag_diffusion.UsesVariableEta()) {
         amrex::Real eta = 0.0_rt;
         if (m_mag_diffusion.HasConstantEta()) {

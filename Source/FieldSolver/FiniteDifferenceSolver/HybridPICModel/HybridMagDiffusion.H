@@ -25,7 +25,10 @@
  *
  *   dB/dt = - curl( (eta/mu0) curl B )
  *
- * using AMReX MLCurlCurl (same operator family as CurlCurlMLMGPC).
+ * using AMReX MLCurlCurl (same operator family as CurlCurlMLMGPC) in
+ * Cartesian geometry. In RZ, AMReX MLCurlCurl does not support a
+ * cylindrical 2D operator, so constant eta uses a matrix-free FDTD curl
+ * chain with GMRES.
  * Inspired by FLASH 4.8 MagDiff / Grid_advanceMagDiffusion (theta scheme +
  * linear solve); reimplemented in C++/AMReX — no FLASH source.
  *

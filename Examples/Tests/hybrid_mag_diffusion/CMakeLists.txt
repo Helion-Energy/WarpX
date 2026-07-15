@@ -33,3 +33,13 @@ add_warpx_test(
     OFF  # checksum (analytic analysis is the oracle)
     OFF  # dependency
 )
+
+add_warpx_test(
+    test_rz_hybrid_mag_diffusion_smoke  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_hybrid_mag_diffusion_smoke"  # inputs
+    "analysis_rz.py"  # analysis
+    OFF  # checksum (RZ vacuum smoke analysis is the oracle)
+    OFF  # dependency
+)
