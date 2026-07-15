@@ -127,6 +127,15 @@ public:
     [[nodiscard]] int GetPECInsulator_IsESet ( int  bdry_dir,
                                                int  bdry_side ) const;
 
+    // Whether a tangential B component is Dirichlet-set (insulator feed) on a
+    // domain boundary. Mirrors GetPECInsulator_IsESet but for the B-field feed
+    // used by the operator-split hybrid magnetic-diffusion solve (FLASH
+    // CIRCUIT / Dirichlet B_t analogue). bdry_dir is 0..AMREX_SPACEDIM-1,
+    // bdry_side is 0 (lo) or 1 (hi), ifield is 0/1/2 (Bx/By/Bz).
+    [[nodiscard]] int GetPECInsulator_IsBSet ( int  bdry_dir,
+                                               int  bdry_side,
+                                               int  ifield ) const;
+
     void InitData ();
 
     void Evolve (int numsteps = -1);
