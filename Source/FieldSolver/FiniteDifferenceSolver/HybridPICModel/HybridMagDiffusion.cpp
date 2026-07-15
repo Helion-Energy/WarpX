@@ -91,12 +91,17 @@ HybridMagDiffusion::GetLinOpBCs (
     Array<LinOpBCType, AMREX_SPACEDIM>& hibc)
 {
     // Map mirrors ProjectionDivCleaner; unmapped types fall back to Neumann
-    // (FLASH MagDiff default homogeneous Neumann).
+    // (FLASH MagDiff default homogeneous Neumann). PEC_Insulator with a
+    // tangential-B parser set is a Dirichlet B_t feed (FLASH CIRCUIT analogue);
+    // the matrix-free RZ path enforces it through ApplyBfieldBoundary staging
+    // + an inhomogeneous RHS injection (see VariableCoeffMagDiffusionOp), so
+    // this map entry only affects the Cartesian MLCurlCurl fast path.
     const std::map<FieldBoundaryType, LinOpBCType> bcmap{
         {FieldBoundaryType::PEC, LinOpBCType::Dirichlet},
         {FieldBoundaryType::Neumann, LinOpBCType::Neumann},
         {FieldBoundaryType::PMC, LinOpBCType::Neumann},
         {FieldBoundaryType::Periodic, LinOpBCType::Periodic},
+        {FieldBoundaryType::PEC_Insulator, LinOpBCType::Dirichlet},
         {FieldBoundaryType::None, LinOpBCType::Neumann}
     };
 
@@ -253,11 +258,22 @@ public:
             m_geom.isPeriodic(1),
             "RZ matrix-free hybrid magnetic diffusion currently requires "
             "a periodic axial (z) boundary");
+        // Lower radial (r=0) must stay None: the axis is handled by
+        // ApplyFieldBoundaryOnAxis. The upper radial face may be None (free),
+        // PEC (conducting wall, B_normal=0), or PEC_Insulator (Dirichlet B_t
+        // feed = FLASH CIRCUIT analogue). Feed faces require a tangential-B
+        // parser (insulator.B*_x_hi); the feed is baked into the operator
+        // (homogeneous) + RHS (affine offset) in prepareFeed/apply below.
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            WarpX::field_boundary_lo[0] == FieldBoundaryType::None &&
-            WarpX::field_boundary_hi[0] == FieldBoundaryType::None,
-            "RZ matrix-free hybrid magnetic diffusion currently requires "
-            "FieldBoundaryType::None at the radial boundaries");
+            WarpX::field_boundary_lo[0] == FieldBoundaryType::None,
+            "RZ matrix-free hybrid magnetic diffusion requires the lower "
+            "radial boundary to be None (r=0 axis)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            WarpX::field_boundary_hi[0] == FieldBoundaryType::None ||
+            WarpX::field_boundary_hi[0] == FieldBoundaryType::PEC ||
+            WarpX::field_boundary_hi[0] == FieldBoundaryType::PEC_Insulator,
+            "RZ matrix-free hybrid magnetic diffusion supports None, PEC, or "
+            "PEC_Insulator at the upper radial boundary");
 #elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
         WARPX_ABORT_WITH_MESSAGE(
             "Matrix-free hybrid magnetic diffusion is not yet supported in "
@@ -433,6 +449,25 @@ public:
 
     void apply (MagDiffVector& output, MagDiffVector const& input)
     {
+        // A_full(x) = (I + theta_dt curl(eta/mu0 curl .)) x, with the feed
+        // ghost pinned to g(t_new) by ApplyBfieldBoundary. With an
+        // inhomogeneous Dirichlet feed this is AFFINE: A_full(x) = A_lin(x)+c,
+        // where A_lin is the homogeneous operator (feed ghost=0) and
+        // c = A_full(0) is the constant curl from the g ghost alone (FLASH
+        // gr_hypreApplyBcToFaceMag Dirichlet RHS analogue). GMRES needs a
+        // LINEAR operator, so apply returns A_lin(x) = A_full(x) - c, and the
+        // RHS carries c (see AdvanceVariable). c is precomputed in prepareFeed.
+        computeAFull(output, input);
+        if (m_has_feed) {
+            output.increment(m_feed_offset, -1.0_rt);
+        }
+    }
+
+    // Compute A_full(x) = x + theta_dt * curl(eta/mu0 curl x), staging through
+    // the registered B field so ApplyBfieldBoundary imposes RZ axis, PEC walls,
+    // and any pec_insulator Dirichlet B_t feed (ghost = g(t_new)).
+    void computeAFull (MagDiffVector& output, MagDiffVector const& input)
+    {
         auto const& input_fields = input.fields();
 #if defined(WARPX_DIM_RZ)
         auto& warpx = WarpX::GetInstance();
@@ -498,6 +533,46 @@ public:
         }
     }
 
+    // Precompute the affine feed offset c = A_full(0): the curl driven by the
+    // Dirichlet feed value g(t_new) on a zero interior (axis/periodic ghosts
+    // are homogeneous, so they contribute nothing). Subtracted from the
+    // operator in apply() and from the RHS in AdvanceVariable() so GMRES sees
+    // the linear homogeneous operator A_lin and rhs = B^n - c. No-op (c=0)
+    // when no pec_insulator B_t feed is active.
+    void prepareFeed ()
+    {
+        m_has_feed = false;
+#if defined(WARPX_DIM_RZ)
+        auto& warpx = WarpX::GetInstance();
+        for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+            for (int iside = 0; iside < 2; ++iside) {
+                const FieldBoundaryType fb = (iside == 0)
+                    ? WarpX::field_boundary_lo[idim]
+                    : WarpX::field_boundary_hi[idim];
+                if (fb != FieldBoundaryType::PEC_Insulator) { continue; }
+                for (int ifield = 0; ifield < 3; ++ifield) {
+                    if (warpx.GetPECInsulator_IsBSet(idim, iside, ifield)) {
+                        m_has_feed = true;
+                    }
+                }
+            }
+        }
+#endif
+        if (!m_has_feed) { return; }
+
+        MagDiffVector zero;
+        zero.Define({m_source[0], m_source[1], m_source[2]});
+        zero.setVal(0.0_rt);
+        m_feed_offset.Define({m_source[0], m_source[1], m_source[2]});
+        // computeAFull writes only interior (nghost=0), so zero ghosts first to
+        // keep the later output -= c (which spans ghosts) well-defined.
+        m_feed_offset.setVal(0.0_rt);
+        computeAFull(m_feed_offset, zero);
+    }
+
+    [[nodiscard]] bool hasFeed () const { return m_has_feed; }
+    [[nodiscard]] MagDiffVector const& feedOffset () const { return m_feed_offset; }
+
 private:
     Real m_theta_dt;
     int m_lev;
@@ -511,6 +586,11 @@ private:
     Array<MultiFab,3> m_Jwork;
     Array<MultiFab,3> m_etaJ;
     Array<MultiFab,3> m_curl_etaJ;
+    // Dirichlet B_t feed (pec_insulator, FLASH CIRCUIT analogue). c = A_full(0)
+    // is the inhomogeneous offset; apply() subtracts it to keep the GMRES
+    // operator linear, and AdvanceVariable subtracts it from the RHS.
+    bool m_has_feed = false;
+    MagDiffVector m_feed_offset;
 };
 
 } // namespace
@@ -694,12 +774,26 @@ HybridMagDiffusion::AdvanceVariable (
         "only backward Euler (mag_diff_theta = 1)");
 
     VariableCoeffMagDiffusionOp linop(Bfield, eta_SI, m_theta * dt, lev, lobc, hibc);
+
     MagDiffVector solution;
     MagDiffVector rhs;
     solution.Define(Bfield);
     rhs.Define(Bfield);
+    // Capture B^n before prepareFeed: the operator stages its Krylov vectors
+    // (and the zero probe for the feed offset) through m_source, which is the
+    // registered B field (= Bfield). The true B^n lives in solution/rhs.
     solution.CopyFrom(Bfield);
     rhs.CopyFrom(Bfield);
+
+    // Bake the inhomogeneous Dirichlet B_t feed (pec_insulator) into the RHS:
+    // GMRES solves A_lin B^{n+1} = B^n - c, where c = A_full(0) is the constant
+    // curl from the feed value g(t_new). prepareFeed stages a zero probe
+    // through m_source (clobbering the registered B), so it must run after the
+    // B^n copy above. It is a no-op when no feed is active.
+    linop.prepareFeed();
+    if (linop.hasFeed()) {
+        rhs.increment(linop.feedOffset(), -1.0_rt);
+    }
 
     amrex::GMRES<MagDiffVector, VariableCoeffMagDiffusionOp> solver;
     solver.define(linop);
