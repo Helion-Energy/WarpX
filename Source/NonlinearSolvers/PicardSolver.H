@@ -15,6 +15,7 @@
 #include <vector>
 #include <istream>
 #include <filesystem>
+#include <sstream>
 
 /**
  * \brief Picard fixed-point iteration method to solve nonlinear
@@ -232,6 +233,19 @@ void PicardSolver<Vec,Ops>::Solve (Vec&         a_U,
                                << ". Satisfied relative tolerance " << m_rtol << "\n";
             }
             break;
+        }
+
+        if (norm_abs > 100._rt*norm0) {
+            this->m_exit_status = -9;
+            amrex::Print() << "Picard: exiting at iter = " << std::setw(3) << iter
+                           << ". SOLVER DIVERGED! relative tolerance = " << m_rtol << "\n";
+            std::stringstream convergenceMsg;
+            convergenceMsg << "Picard: exiting at iter " << std::setw(3) << iter <<
+                              ". SOLVER DIVERGED! absolute norm = " << norm_abs <<
+                              " has increased by 100X from that after first iteration." <<
+                              " The fixed-point iteration is not a contraction for this" <<
+                              " time step; reduce dt or use the Newton solver.";
+            WARPX_ABORT_WITH_MESSAGE(convergenceMsg.str());
         }
 
         if (iter >= m_maxits) {

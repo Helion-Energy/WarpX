@@ -257,6 +257,16 @@ class ForceFreeSheetReconnection(object):
             # (when enabled) runs theta-centered inside the nonlinear
             # iteration. Picard is the default nonlinear solver.
             #
+            # Picard applicability: the fixed-point iteration contracts only
+            # while the grid-scale whistler phase advance per step,
+            # theta * (k_max * l_i)**2 * omega_ci * dt, stays below ~2-3.
+            # At the default 512^2 resolution the base DT = 1e-3 t_ci gives
+            # ~20 at k_z,max and Picard diverges (~x2/iteration, any closure,
+            # Darwin or standard); it contracts cleanly at DT <= 1/16 of
+            # that (--dt-mult 0.0625, the 128^2-equivalent operating point).
+            # Use --dt-mult <= 0.0625, --nx 128 --nz 128, or Newton at the
+            # full resolution.
+            #
             # Size the deposition guard cells for the enlarged implicit time
             # step: particles may cross more than one cell per step, and the
             # default particles.max_grid_crossings = 1 under-sizes the guards
