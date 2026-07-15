@@ -38,10 +38,12 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
 
     // External vector-potential fields enter in total-field form here: the
     // solver state carries the full E and B (B_ext(0) is folded into
-    // Bfield_fp by HybridPICInitializeRhoJandB), the step-averaged
-    // inductive E_ext is added to the Ohm field in ComputeRHS, and the
-    // theta-Faraday advance of the total E then carries the external flux.
-    // The Ohm kernels must therefore not add the external fields again.
+    // Bfield_fp by HybridPICInitializeRhoJandB), the Ohm kernels add the
+    // step-averaged inductive E_ext in density-floored (vacuum) cells
+    // only, and the theta-Faraday advance of the total E carries the
+    // external flux in from the vacuum region. Clearing m_external_split
+    // switches the kernels from the explicit split-field convention to
+    // this total-field convention.
     if (m_hybrid_pic_model->m_add_external_fields) {
         m_hybrid_pic_model->m_external_split = false;
     }
@@ -121,12 +123,13 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     m_dt = a_dt;
 
     // Refresh the external vector-potential fields for this step. The Ohm
-    // kernels do not add them in the (total-field) implicit mode; instead
-    // ComputeRHS adds the step-averaged inductive field
-    // E_ext = -[f(t^{n+1}) - f(t^n)]/dt * A, which is constant over the
-    // step, so the theta-Faraday advance of the total E reproduces the
-    // external flux f(t^{n+1}) curl A at the end of the step exactly, for
-    // any ramp shape f(t).
+    // kernels add the step-averaged inductive field
+    // E_ext = -[f(t^{n+1}) - f(t^n)]/dt * A (constant over the step) in
+    // density-floored (vacuum) cells only -- see HybridPICSolveE. In the
+    // vacuum region the theta-Faraday advance of the total E then
+    // reproduces the external flux f(t^{n+1}) curl A at step ends exactly
+    // for any ramp shape f(t); at the plasma boundary the mask edge acts
+    // as the shielding layer, and further penetration is resistive.
     if (m_hybrid_pic_model->m_add_external_fields) {
         m_hybrid_pic_model->m_external_vector_potential->UpdateHybridExternalFields(
             start_time + 0.5_rt*a_dt, a_dt);
@@ -404,21 +407,14 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
         }
     }
 
-    // Add the step-averaged external inductive field (refreshed once per
-    // step in OneStep; the Ohm kernels do not add it in implicit mode).
-    // This runs after the resistive push-field refresh above so that
-    // E_res stays the pure eta*J difference and the particle push field
-    // E - E_res retains E_ext.
-    if (m_hybrid_pic_model->m_add_external_fields) {
-        using ablastr::fields::Direction;
-        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
-            for (int dir = 0; dir < 3; ++dir) {
-                amrex::MultiFab & E = *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{dir}, lev);
-                amrex::MultiFab const & E_ext = *m_WarpX->m_fields.get(FieldType::hybrid_E_fp_external, Direction{dir}, lev);
-                amrex::MultiFab::Add(E, E_ext, 0, 0, E.nComp(), E.nGrowVect());
-            }
-        }
-    }
+    // The step-averaged external inductive field enters through the Ohm
+    // kernels themselves (see HybridPICSolveE): in total-field mode E_ext
+    // is added only in density-floored (vacuum) cells, where the
+    // generalized Ohm's law does not determine E. Inside the plasma the
+    // Ohm field IS the electric field and the external drive reaches it
+    // through the evolving total B; adding E_ext there would bypass the
+    // electron response and pump the external flux through the plasma
+    // unshielded.
 
     // Darwin: the state is the transverse field, so the fixed point is
     // E_T = E_ohm - E_L. Subtracting E_L from the assembled Ohm field

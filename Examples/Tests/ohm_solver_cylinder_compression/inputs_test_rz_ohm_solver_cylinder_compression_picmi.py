@@ -325,9 +325,14 @@ class PlasmaCylinderCompression(object):
                 int(np.ceil(0.5 * self.DT / 1.0e-3)) + 1
             )
             if self.nlsolver == "picard":
+                # Fixed-point iterations are cheap; the generous cap covers
+                # the peak of the compression drive, where the step-start
+                # guess is far from the solution and Picard needs a few
+                # hundred (still-contracting) iterations. CI-scale runs
+                # converge in under ten.
                 nonlinear_solver = picmi.PicardNonlinearSolver(
                     verbose=self.verbose,
-                    max_iterations=100,
+                    max_iterations=500,
                     relative_tolerance=1.0e-6,
                     absolute_tolerance=0.0,
                     require_convergence=True,
