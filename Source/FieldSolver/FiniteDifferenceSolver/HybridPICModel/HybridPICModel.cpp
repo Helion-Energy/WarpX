@@ -12,8 +12,11 @@
 #include "HybridPICModel.H"
 
 #include <ablastr/coarsen/sample.H>
-#include <ablastr/fields/PoissonSolver.H>
 #include <ablastr/utils/Communication.H>
+
+#include <AMReX_MLEBNodeFDLaplacian.H>
+#include <AMReX_MLMG.H>
+#include <AMReX_MLNodeTensorLaplacian.H>
 #include <ablastr/warn_manager/WarnManager.H>
 
 #include "EmbeddedBoundary/Enabled.H"
@@ -1222,11 +1225,8 @@ void HybridPICModel::ComputeDarwinELong (
 
     amrex::Real const rho_floor = PhysConst::q_e * m_n_floor;
 
-    // Scratch (nodal, phi-shaped): rho_eff = -eps0 div(S), so the
-    // electrostatic-solver convention laplacian(phi) = -rho_eff/eps0
-    // produces laplacian(phi) = div(S).
-    amrex::Vector<std::unique_ptr<amrex::MultiFab>> rho_eff_store(finest + 1);
-    amrex::Vector<amrex::MultiFab *> sorted_rho, sorted_phi;
+    // Scratch (nodal, phi-shaped) for the constraint right-hand side div(S).
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> rhs_store(finest + 1);
 
     for (int lev = 0; lev <= finest; ++lev)
     {
@@ -1263,59 +1263,73 @@ void HybridPICModel::ComputeDarwinELong (
                     S_arr(iv) = -(Pe_arr(ivp) - Pe_arr(iv)) * inv_dx / rho_edge;
                 });
             }
+            // Zero-extend past non-periodic physical boundaries (setBndry
+            // zeroes all ghosts, FillBoundary then restores the interior and
+            // periodic ones): the divergence below reads the ghost layer at
+            // the walls, and the nodal Dirichlet phi solve constrains the
+            // wall nodes anyway. Proper per-boundary-type E_L conditions are
+            // a follow-up.
+            Sd.setBndry(0.0_rt);
             Sd.FillBoundary(geom.periodicity());
         }
 
         // Step 2: nodal div(S) via the geometry-aware finite-difference
-        // divergence, then rho_eff = -eps0 div(S).
+        // divergence.
         amrex::MultiFab const & phi_shape = *warpx.m_fields.get("hybrid_phi_darwin_fp", lev);
-        rho_eff_store[lev] = std::make_unique<amrex::MultiFab>(
+        rhs_store[lev] = std::make_unique<amrex::MultiFab>(
             phi_shape.boxArray(), phi_shape.DistributionMap(),
             phi_shape.nComp(), phi_shape.nGrowVect());
-        warpx.get_pointer_fdtd_solver_fp(lev)->ComputeDivE(E_long, *rho_eff_store[lev]);
-        rho_eff_store[lev]->mult(-PhysConst::epsilon_0);
-
-        sorted_rho.emplace_back(rho_eff_store[lev].get());
-        sorted_phi.emplace_back(warpx.m_fields.get("hybrid_phi_darwin_fp", lev));
+        warpx.get_pointer_fdtd_solver_fp(lev)->ComputeDivE(E_long, *rhs_store[lev]);
     }
 
-    // Step 3: MLMG solve for phi with the same machinery and boundary-type
-    // mapping as the electrostatic solver.
-#ifdef AMREX_USE_EB
-    std::optional<amrex::Vector<amrex::EBFArrayBoxFactory const *>> eb_farray_box_factory;
-    if (EB::enabled()) {
-        amrex::Vector<amrex::EBFArrayBoxFactory const *> factories;
-        for (int lev = 0; lev <= finest; ++lev) {
-            factories.push_back(&warpx.fieldEBFactory(lev));
-        }
-        eb_farray_box_factory = factories;
-    }
+    // Step 3: MLMG solve of laplacian(phi) = div(S) with the
+    // finite-difference nodal operator (MLEBNodeFDLaplacian without an EB
+    // factory), whose stencil is EXACTLY the composition of the divergence
+    // and gradient used here. Operator consistency is essential: with a
+    // different Laplacian stencil (e.g. the variational nodal operator the
+    // electrostatic solver uses in Cartesian geometry, which coincides with
+    // the FD composite only in 1D), the projection leaves a spurious
+    // stencil-mismatch remainder in E_T = E - E_L at the amplitude of the
+    // pressure-gradient noise, and the vector-potential update integrates
+    // it into B at O(dt/dx). Boundary types follow the electrostatic
+    // boundary-type mapping (m_darwin_bc_handler); Dirichlet values are 0.
+    amrex::ignore_unused(t);
+    for (int lev = 0; lev <= finest; ++lev)
+    {
+        amrex::LPInfo const info;
+        std::unique_ptr<amrex::MLNodeLinOp> linop;
+#if defined(WARPX_DIM_1D_Z)
+        // The FD nodal operator does not support 1D; the tensor nodal
+        // operator reduces to the same 3-point stencil there.
+        linop = std::make_unique<amrex::MLNodeTensorLaplacian>(
+            amrex::Vector<amrex::Geometry>{warpx.Geom(lev)},
+            amrex::Vector<amrex::BoxArray>{warpx.boxArray(lev)},
+            amrex::Vector<amrex::DistributionMapping>{warpx.DistributionMap(lev)},
+            info);
 #else
-    std::optional<amrex::Vector<amrex::FArrayBoxFactory const *>> const eb_farray_box_factory;
+        auto linop_fd = std::make_unique<amrex::MLEBNodeFDLaplacian>();
+        linop_fd->define(
+            amrex::Vector<amrex::Geometry>{warpx.Geom(lev)},
+            amrex::Vector<amrex::BoxArray>{warpx.boxArray(lev)},
+            amrex::Vector<amrex::DistributionMapping>{warpx.DistributionMap(lev)},
+            info);
+#if defined(WARPX_DIM_RZ)
+        linop_fd->setRZ(true);
+        linop_fd->setSigma({0._rt, 1._rt});
+#else
+        linop_fd->setSigma({AMREX_D_DECL(1._rt, 1._rt, 1._rt)});
 #endif
+        linop = std::move(linop_fd);
+#endif
+        linop->setDomainBC(m_darwin_bc_handler->lobc, m_darwin_bc_handler->hibc);
 
-    ablastr::fields::computePhi(
-        sorted_rho,
-        sorted_phi,
-        {0._rt, 0._rt, 0._rt},
-        m_darwin_poisson_rtol,
-        m_darwin_poisson_atol,
-        m_darwin_poisson_max_iters,
-        m_darwin_poisson_verbosity,
-        warpx.Geom(),
-        warpx.DistributionMap(),
-        warpx.boxArray(),
-        WarpX::grid_type,
-        false,
-        false,
-        EB::enabled(),
-        WarpX::do_single_precision_comms,
-        warpx.refRatio(),
-        std::nullopt,
-        *m_darwin_bc_handler,
-        t,
-        eb_farray_box_factory
-    );
+        amrex::MultiFab & phi = *warpx.m_fields.get("hybrid_phi_darwin_fp", lev);
+        amrex::MLMG mlmg(*linop);
+        mlmg.setVerbose(m_darwin_poisson_verbosity);
+        mlmg.setMaxIter(m_darwin_poisson_max_iters);
+        mlmg.solve({&phi}, {rhs_store[lev].get()},
+                   m_darwin_poisson_rtol, m_darwin_poisson_atol);
+    }
 
     // Step 4: E_L = +grad(phi) on the E staggering (the longitudinal
     // projection of S: laplacian(phi) = div(S) => grad(phi) = S_L).
@@ -1324,6 +1338,7 @@ void HybridPICModel::ComputeDarwinELong (
         amrex::Geometry const & geom = warpx.Geom(lev);
         auto const dx_arr = geom.CellSizeArray();
         amrex::MultiFab & phi = *warpx.m_fields.get("hybrid_phi_darwin_fp", lev);
+        phi.setBndry(0.0_rt);
         phi.FillBoundary(geom.periodicity());
         ablastr::fields::VectorField E_long =
             warpx.m_fields.get_alldirs("hybrid_E_long_fp", lev);
@@ -1347,7 +1362,18 @@ void HybridPICModel::ComputeDarwinELong (
                     E_arr(iv) = (phi_arr(iv + off) - phi_arr(iv)) * inv_dx;
                 });
             }
+            // As for S above: zero physical ghosts, since E_L is added into
+            // the (ghost-including) push field.
+            Ed.setBndry(0.0_rt);
             Ed.FillBoundary(geom.periodicity());
+        }
+
+        if (m_darwin_poisson_verbosity > 0) {
+            amrex::Print() << "[darwin] lev " << lev
+                << " max|E_L| = (" << E_long[0]->norminf()
+                << ", " << E_long[1]->norminf()
+                << ", " << E_long[2]->norminf()
+                << ") max|phi| = " << phi.norminf() << "\n";
         }
     }
 }

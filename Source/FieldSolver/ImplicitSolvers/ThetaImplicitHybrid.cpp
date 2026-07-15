@@ -250,6 +250,20 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
         }
     }
 
+    if (m_darwin && m_hybrid_pic_model->m_darwin_poisson_verbosity > 1) {
+        using ablastr::fields::Direction;
+        auto ni = [&](const char* nm, int dir) {
+            return m_WarpX->m_fields.get(nm, Direction{dir}, 0)->norminf();
+        };
+        amrex::Print() << "[darwin-eval] iter " << a_nl_iter
+            << (a_from_jacobian ? " (jac)" : "")
+            << " max|E_push| = " << m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{0}, 0)->norminf()
+            << "/" << m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{2}, 0)->norminf()
+            << " max|B| = " << m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{1}, 0)->norminf()
+            << " max|A| = " << ni("hybrid_A_fp", 0) << "/" << ni("hybrid_A_fp", 2)
+            << "\n";
+    }
+
     // Advance particles and deposit J^{n+1/2}, rho^{n+1/2}
     const amrex::Real theta_time = start_time + m_theta * m_dt;
     PreRHSOp( theta_time, a_nl_iter, a_from_jacobian );
@@ -417,6 +431,17 @@ void ThetaImplicitHybrid::UpdateWarpXFields ( const WarpXSolverVec&  a_E,
                 amrex::MultiFab::Add(E, EL, 0, 0, E.nComp(), E.nGrowVect());
             }
         }
+        // Re-apply the field boundary treatment to the ASSEMBLED field: the
+        // boundary/ghost values applied to the transverse state above do not
+        // survive the E_L addition (E_L physical ghosts are zero-extended),
+        // and wall-adjacent particles gather from those ghost layers. With
+        // stale ghosts the wall layer picks up O(E_L) spurious kicks whose
+        // density response feeds back through grad(Pe) into E_L -- a
+        // divergent per-iteration wall loop in non-periodic directions.
+        amrex::IntVect const ngE =
+            m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{0}, 0)->nGrowVect();
+        m_WarpX->FillBoundaryE(ngE, true /* sync nodal points */);
+        m_WarpX->ApplyEfieldBoundary(0, PatchType::fine, theta_time);
     } else {
         // Compute B^{n+theta} = B^n - theta*dt*curl(E^{n+theta}) via Faraday's law
         ablastr::fields::MultiLevelVectorField const& B_old =
