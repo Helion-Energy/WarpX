@@ -605,6 +605,12 @@ public:
         ablastr::fields::MultiLevelVectorField const& Bfield,
         amrex::Real dt) const;
 
+    void BuildMagDiffResistivity (
+        ablastr::fields::VectorField& eta_field,
+        ablastr::fields::VectorField const& Jfield,
+        amrex::MultiFab const& rhofield,
+        int lev) const;
+
     /**
      * \brief Resistivity used in Ohm when building E for Faraday, possibly
      * capped when operator-split implicit diffusion owns the stiff part.

@@ -8,6 +8,8 @@
  */
 #include "HybridMagDiffusion.H"
 
+#include "EmbeddedBoundary/Enabled.H"
+#include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
 #include "Utils/Parser/ParserUtils.H"
 #include "Utils/TextMsg.H"
 #include "Utils/WarpXAlgorithmSelection.H"
@@ -22,13 +24,17 @@
 #include <AMReX_Config.H>
 #include <AMReX_DistributionMapping.H>
 #include <AMReX_Geometry.H>
+#include <AMReX_GMRES.H>
 #include <AMReX_MLCurlCurl.H>
 #include <AMReX_MLMG.H>
 #include <AMReX_MultiFab.H>
 #include <AMReX_ParmParse.H>
 #include <AMReX_REAL.H>
+#include <AMReX_iMultiFab.H>
 
+#include <array>
 #include <map>
+#include <memory>
 
 using namespace amrex;
 
@@ -44,6 +50,7 @@ HybridMagDiffusion::ReadParameters ()
     pp.query("mag_diff_max_iter", m_max_iter);
     pp.query("mag_diff_verbose", m_verbose);
     utils::parser::queryWithParser(pp, "mag_diff_eta_explicit_max", m_eta_explicit_max);
+    pp.query("mag_diff_use_variable_eta", m_use_variable_eta);
 
     if (utils::parser::queryWithParser(pp, "mag_diff_constant_eta", m_constant_eta)) {
         m_has_constant_eta = true;
@@ -66,7 +73,8 @@ HybridMagDiffusion::ReadParameters ()
                    << "  theta=" << m_theta
                    << "  rtol=" << m_rtol
                    << "  atol=" << m_atol
-                   << "  eta_explicit_max=" << m_eta_explicit_max;
+                   << "  eta_explicit_max=" << m_eta_explicit_max
+                   << "  use_variable_eta=" << m_use_variable_eta;
     if (m_has_constant_eta) {
         amrex::Print() << "  constant_eta=" << m_constant_eta << " Ohm m";
     }
@@ -125,6 +133,258 @@ MakeCurlCurlAliases (Array<MultiFab,3>& mf)
     };
 #endif
 }
+
+class MagDiffVector
+{
+public:
+    using value_type = Real;
+
+    MagDiffVector () = default;
+    MagDiffVector (MagDiffVector const&) = delete;
+    MagDiffVector& operator= (MagDiffVector const&) = delete;
+    MagDiffVector (MagDiffVector&&) noexcept = default;
+    MagDiffVector& operator= (MagDiffVector&&) noexcept = default;
+
+    void Define (ablastr::fields::VectorField const& source)
+    {
+        for (int idim = 0; idim < 3; ++idim) {
+            m_fields[idim].define(
+                source[idim]->boxArray(), source[idim]->DistributionMap(),
+                source[idim]->nComp(), 0);
+        }
+        m_is_defined = true;
+    }
+
+    void Copy (MagDiffVector const& source)
+    {
+        AMREX_ALWAYS_ASSERT(m_is_defined && source.m_is_defined);
+        for (int idim = 0; idim < 3; ++idim) {
+            MultiFab::Copy(m_fields[idim], source.m_fields[idim], 0, 0,
+                           m_fields[idim].nComp(), 0);
+        }
+    }
+
+    void CopyFrom (ablastr::fields::VectorField const& source)
+    {
+        AMREX_ALWAYS_ASSERT(m_is_defined);
+        for (int idim = 0; idim < 3; ++idim) {
+            MultiFab::Copy(m_fields[idim], *source[idim], 0, 0,
+                           m_fields[idim].nComp(), 0);
+        }
+    }
+
+    void setVal (Real value)
+    {
+        AMREX_ALWAYS_ASSERT(m_is_defined);
+        for (auto& field : m_fields) {
+            field.setVal(value);
+        }
+    }
+
+    void increment (MagDiffVector const& source, Real scale)
+    {
+        AMREX_ALWAYS_ASSERT(m_is_defined && source.m_is_defined);
+        for (int idim = 0; idim < 3; ++idim) {
+            MultiFab::Saxpy(m_fields[idim], scale, source.m_fields[idim],
+                            0, 0, m_fields[idim].nComp(), 0);
+        }
+    }
+
+    void scale (Real scale)
+    {
+        AMREX_ALWAYS_ASSERT(m_is_defined);
+        for (auto& field : m_fields) {
+            field.mult(scale, 0, field.nComp(), 0);
+        }
+    }
+
+    void linComb (Real a, MagDiffVector const& x, Real b, MagDiffVector const& y)
+    {
+        AMREX_ALWAYS_ASSERT(m_is_defined && x.m_is_defined && y.m_is_defined);
+        for (int idim = 0; idim < 3; ++idim) {
+            MultiFab::LinComb(m_fields[idim], a, x.m_fields[idim], 0,
+                               b, y.m_fields[idim], 0, 0,
+                               m_fields[idim].nComp(), 0);
+        }
+    }
+
+    [[nodiscard]] Real dotProduct (MagDiffVector const& source) const
+    {
+        AMREX_ALWAYS_ASSERT(m_is_defined && source.m_is_defined);
+        Real result = 0.0_rt;
+        for (int idim = 0; idim < 3; ++idim) {
+            result += MultiFab::Dot(m_fields[idim], 0, source.m_fields[idim],
+                                    0, m_fields[idim].nComp(), 0);
+        }
+        return result;
+    }
+
+    [[nodiscard]] Array<MultiFab,3>& fields () { return m_fields; }
+    [[nodiscard]] Array<MultiFab,3> const& fields () const { return m_fields; }
+
+private:
+    Array<MultiFab,3> m_fields;
+    bool m_is_defined = false;
+};
+
+class VariableCoeffMagDiffusionOp
+{
+public:
+    using RT = Real;
+
+    VariableCoeffMagDiffusionOp (
+        ablastr::fields::VectorField const& Bfield,
+        ablastr::fields::VectorField const& eta,
+        Real theta_dt, int lev)
+        : m_theta_dt(theta_dt), m_lev(lev),
+          m_source{Bfield[0], Bfield[1], Bfield[2]},
+          m_eta{eta[0], eta[1], eta[2]},
+          m_geom(WarpX::GetInstance().Geom(lev))
+    {
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+        WARPX_ABORT_WITH_MESSAGE(
+            "Variable-coefficient hybrid magnetic diffusion is not yet supported "
+            "in cylindrical or spherical geometries");
+#endif
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_geom.isAllPeriodic(),
+            "Variable-coefficient hybrid magnetic diffusion currently requires "
+            "periodic field boundaries");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !EB::enabled(),
+            "Variable-coefficient hybrid magnetic diffusion does not support "
+            "embedded boundaries yet");
+
+        auto& warpx = WarpX::GetInstance();
+        m_fdtd = warpx.get_pointer_fdtd_solver_fp(lev);
+        m_eb_update_E = &warpx.GetEBUpdateEFlag()[lev];
+        m_eb_update_B = &warpx.GetEBUpdateBFlag()[lev];
+
+        for (int idim = 0; idim < 3; ++idim) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                Bfield[idim]->nComp() == 1 && eta[idim]->nComp() == 1,
+                "Variable-coefficient hybrid magnetic diffusion supports one "
+                "field component per Yee direction");
+            m_Bwork[idim].define(Bfield[idim]->boxArray(), Bfield[idim]->DistributionMap(),
+                                 1, Bfield[idim]->nGrowVect());
+            m_Jwork[idim].define(eta[idim]->boxArray(), eta[idim]->DistributionMap(),
+                                 1, eta[idim]->nGrowVect());
+            m_etaJ[idim].define(eta[idim]->boxArray(), eta[idim]->DistributionMap(),
+                                1, eta[idim]->nGrowVect());
+            m_curl_etaJ[idim].define(Bfield[idim]->boxArray(), Bfield[idim]->DistributionMap(),
+                                     1, Bfield[idim]->nGrowVect());
+        }
+    }
+
+    [[nodiscard]] MagDiffVector makeVecRHS () const
+    {
+        MagDiffVector result;
+        result.Define({m_source[0], m_source[1], m_source[2]});
+        return result;
+    }
+
+    [[nodiscard]] MagDiffVector makeVecLHS () const
+    {
+        return makeVecRHS();
+    }
+
+    void assign (MagDiffVector& destination, MagDiffVector const& source)
+    {
+        destination.Copy(source);
+    }
+
+    void setToZero (MagDiffVector& vector)
+    {
+        vector.setVal(0.0_rt);
+    }
+
+    void increment (MagDiffVector& destination, MagDiffVector const& source, Real scale)
+    {
+        destination.increment(source, scale);
+    }
+
+    void scale (MagDiffVector& vector, Real scale_factor)
+    {
+        vector.scale(scale_factor);
+    }
+
+    void linComb (MagDiffVector& destination, Real a, MagDiffVector const& x,
+                  Real b, MagDiffVector const& y)
+    {
+        destination.linComb(a, x, b, y);
+    }
+
+    [[nodiscard]] Real dotProduct (MagDiffVector const& x, MagDiffVector const& y) const
+    {
+        return x.dotProduct(y);
+    }
+
+    [[nodiscard]] Real norm2 (MagDiffVector const& vector) const
+    {
+        return std::sqrt(vector.dotProduct(vector));
+    }
+
+    void precond (MagDiffVector& destination, MagDiffVector const& source)
+    {
+        destination.Copy(source);
+    }
+
+    void apply (MagDiffVector& output, MagDiffVector const& input)
+    {
+        auto const& input_fields = input.fields();
+        for (int idim = 0; idim < 3; ++idim) {
+            MultiFab::Copy(m_Bwork[idim], input_fields[idim], 0, 0, 1, 0);
+            m_Bwork[idim].FillBoundaryAndSync(m_geom.periodicity());
+        }
+
+        ablastr::fields::VectorField Bwork = {
+            &m_Bwork[0], &m_Bwork[1], &m_Bwork[2]};
+        ablastr::fields::VectorField Jwork = {
+            &m_Jwork[0], &m_Jwork[1], &m_Jwork[2]};
+        m_fdtd->CalculateCurrentAmpere(Jwork, Bwork, *m_eb_update_E, m_lev);
+
+        for (int idim = 0; idim < 3; ++idim) {
+            for (MFIter mfi(m_etaJ[idim], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                auto const etaJ = m_etaJ[idim].array(mfi);
+                auto const eta = m_eta[idim]->const_array(mfi);
+                auto const J = m_Jwork[idim].const_array(mfi);
+                ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    etaJ(i, j, k) = eta(i, j, k) * J(i, j, k);
+                });
+            }
+            m_etaJ[idim].FillBoundaryAndSync(m_geom.periodicity());
+        }
+
+        ablastr::fields::VectorField etaJ = {
+            &m_etaJ[0], &m_etaJ[1], &m_etaJ[2]};
+        ablastr::fields::VectorField curl_etaJ = {
+            &m_curl_etaJ[0], &m_curl_etaJ[1], &m_curl_etaJ[2]};
+        m_fdtd->ComputeCurlA(curl_etaJ, etaJ, *m_eb_update_B, m_lev);
+
+        auto& output_fields = output.fields();
+        for (int idim = 0; idim < 3; ++idim) {
+            m_curl_etaJ[idim].OverrideSync(m_geom.periodicity());
+            MultiFab::Copy(output_fields[idim], input_fields[idim], 0, 0, 1, 0);
+            MultiFab::Saxpy(output_fields[idim], m_theta_dt, m_curl_etaJ[idim],
+                            0, 0, 1, 0);
+        }
+    }
+
+private:
+    Real m_theta_dt;
+    int m_lev;
+    Array<MultiFab*,3> m_source;
+    Array<MultiFab const*,3> m_eta;
+    Geometry const& m_geom;
+    FiniteDifferenceSolver* m_fdtd = nullptr;
+    std::array<std::unique_ptr<iMultiFab>,3> const* m_eb_update_E = nullptr;
+    std::array<std::unique_ptr<iMultiFab>,3> const* m_eb_update_B = nullptr;
+    Array<MultiFab,3> m_Bwork;
+    Array<MultiFab,3> m_Jwork;
+    Array<MultiFab,3> m_etaJ;
+    Array<MultiFab,3> m_curl_etaJ;
+};
 
 } // namespace
 
@@ -258,6 +518,65 @@ HybridMagDiffusion::Advance (
 
     for (int idim = 0; idim < 3; ++idim) {
         MultiFab::Copy(*Bfield[idim], sol[idim], 0, 0, 1, 0);
+        ablastr::utils::communication::FillBoundary(
+            *Bfield[idim],
+            WarpX::do_single_precision_comms,
+            geom.periodicity(),
+            true);
+    }
+}
+
+void
+HybridMagDiffusion::AdvanceVariable (
+    ablastr::fields::VectorField const& Bfield,
+    ablastr::fields::VectorField const& eta_SI,
+    Real dt,
+    int lev,
+    Array<LinOpBCType, AMREX_SPACEDIM> const& lobc,
+    Array<LinOpBCType, AMREX_SPACEDIM> const& hibc) const
+{
+    ABLASTR_PROFILE("HybridMagDiffusion::AdvanceVariable()");
+
+    amrex::ignore_unused(lobc, hibc);
+    if (!m_enabled || dt <= 0.0_rt) { return; }
+
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        lev == 0,
+        "HybridMagDiffusion only supports single-level hybrid runs");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_theta == 1.0_rt,
+        "Variable-coefficient hybrid magnetic diffusion currently supports "
+        "only backward Euler (mag_diff_theta = 1)");
+
+    VariableCoeffMagDiffusionOp linop(Bfield, eta_SI, m_theta * dt, lev);
+    MagDiffVector solution;
+    MagDiffVector rhs;
+    solution.Define(Bfield);
+    rhs.Define(Bfield);
+    solution.CopyFrom(Bfield);
+    rhs.CopyFrom(Bfield);
+
+    amrex::GMRES<MagDiffVector, VariableCoeffMagDiffusionOp> solver;
+    solver.define(linop);
+    solver.setMaxIters(m_max_iter);
+    solver.setVerbose(m_verbose);
+    solver.solve(solution, rhs, m_rtol, m_atol);
+
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        solver.getStatus() == 0,
+        "Variable-coefficient hybrid magnetic diffusion GMRES did not converge");
+
+    if (m_verbose > 0) {
+        amrex::Print() << "HybridMagDiffusion variable-eta GMRES iterations="
+                       << solver.getNumIters()
+                       << " residual=" << solver.getResidualNorm() << "\n";
+    }
+
+    auto const& solution_fields = solution.fields();
+    auto& warpx = WarpX::GetInstance();
+    Geometry const& geom = warpx.Geom(lev);
+    for (int idim = 0; idim < 3; ++idim) {
+        MultiFab::Copy(*Bfield[idim], solution_fields[idim], 0, 0, 1, 0);
         ablastr::utils::communication::FillBoundary(
             *Bfield[idim],
             WarpX::do_single_precision_comms,

@@ -43,6 +43,8 @@ public:
     [[nodiscard]] amrex::Real EtaExplicitMax () const { return m_eta_explicit_max; }
     [[nodiscard]] bool HasConstantEta () const { return m_has_constant_eta; }
     [[nodiscard]] amrex::Real ConstantEta () const { return m_constant_eta; }
+    [[nodiscard]] bool UsesVariableEta () const { return m_use_variable_eta; }
+    [[nodiscard]] int Verbose () const { return m_verbose; }
 
     /**
      * \brief Theta-method curl-curl magnetic diffusion on one level.
@@ -67,6 +69,14 @@ public:
         amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM> const& lobc,
         amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM> const& hibc) const;
 
+    void AdvanceVariable (
+        ablastr::fields::VectorField const& Bfield,
+        ablastr::fields::VectorField const& eta_SI,
+        amrex::Real dt,
+        int lev,
+        amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM> const& lobc,
+        amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM> const& hibc) const;
+
     /**
      * \brief Map WarpX field boundary types on this geometry to LinOp BCs.
      * Periodic/PEC→Dirichlet-like for edge data / Neumann / default Neumann.
@@ -85,6 +95,7 @@ private:
     amrex::Real m_eta_explicit_max = 0.0;
     bool m_has_constant_eta = false;
     amrex::Real m_constant_eta = 0.0;
+    bool m_use_variable_eta = false;
 };
 
 #endif // WARPX_HYBRID_MAG_DIFFUSION_H_
