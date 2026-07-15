@@ -742,18 +742,19 @@ public:
 
     /** External E/B fields */
     bool m_add_external_fields = false;
-    /** How the external vector-potential fields enter the field advance.
+    /** Which magnetic field the Ohm kernels receive when external
+     * vector-potential fields are enabled. Both schemes advance the
+     * external flux analytically from A(t) (wall boundary conditions act
+     * on the plasma fields only and cannot exclude the programmed coil
+     * flux) and both use the same stored-E convention (the kernels
+     * subtract the inductive E_ext from plasma cells; the push field
+     * re-adds it).
      *
-     * true (split, explicit scheme): Bfield_fp holds only the plasma field
-     * during the advance and the Ohm kernels add hybrid_B_fp_external and
-     * hybrid_E_fp_external themselves; the external flux is advanced
-     * analytically from A(t).
+     * true (explicit scheme): Bfield_fp is plasma-only during the field
+     * advance, so the kernels add hybrid_B_fp_external for the Hall term.
      *
-     * false (total, theta-implicit scheme): the solver state carries the
-     * total fields. The Ohm kernels must not add the external fields again;
-     * the implicit solver adds the step-averaged inductive E_ext once per
-     * step and the theta-Faraday advance of the total E then reproduces
-     * B_ext(t^{n+1}) = f(t^{n+1}) curl A exactly for any ramp shape. */
+     * false (theta-implicit scheme): the field assembly hands the kernels
+     * the total B already, so they must not add it again. */
     bool m_external_split = true;
     std::unique_ptr<ExternalVectorPotential> m_external_vector_potential;
 

@@ -548,13 +548,15 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
 
     const bool include_external_fields = hybrid_model->m_add_external_fields;
-    // Split (explicit) mode: the kernels add B_ext for the Hall term and
-    // subtract the inductive E_ext from the stored plasma-cell field (the
-    // analytic external-flux advance and the end-of-step E_ext addition
-    // happen in the caller). Total (implicit) mode: B already holds the
-    // total field, and E_ext is added only in density-floored (vacuum)
-    // cells -- inside the plasma the generalized Ohm's law itself is the
-    // electric field, and the external drive reaches it through B.
+    // The stored electric field follows the split-field convention in both
+    // schemes: the inductive E_ext is subtracted from plasma cells (where
+    // the generalized Ohm's law itself is the electric field and the
+    // external drive must not be double-counted), and the caller re-adds
+    // E_ext when assembling the particle-push field and advances the
+    // external flux analytically from A(t). The modes differ only in the
+    // Hall-term field: the explicit scheme keeps Bfield_fp plasma-only
+    // during the advance so the kernels add B_ext here; the implicit
+    // scheme hands the kernels the total field already.
     const bool external_split = hybrid_model->m_external_split;
 
     const bool holmstrom_vacuum_region = hybrid_model->m_holmstrom_vacuum_region;
@@ -821,12 +823,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields) {
-                    if (external_split) {
-                        if (rho_val >= rho_floor) { Er(i, j, 0) -= Er_ext(i, j, 0); }
-                    } else if (rho_val < rho_floor) {
-                        Er(i, j, 0) += Er_ext(i, j, 0);
-                    }
+                if (include_external_fields && (rho_val >= rho_floor)) {
+                    Er(i, j, 0) -= Er_ext(i, j, 0);
                 }
             },
 
@@ -900,12 +898,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields) {
-                    if (external_split) {
-                        if (rho_val >= rho_floor) { Etheta(i, j, 0) -= Etheta_ext(i, j, 0); }
-                    } else if (rho_val < rho_floor) {
-                        Etheta(i, j, 0) += Etheta_ext(i, j, 0);
-                    }
+                if (include_external_fields && (rho_val >= rho_floor)) {
+                    Etheta(i, j, 0) -= Etheta_ext(i, j, 0);
                 }
             },
 
@@ -978,12 +972,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields) {
-                    if (external_split) {
-                        if (rho_val >= rho_floor) { Ez(i, j, 0) -= Ez_ext(i, j, 0); }
-                    } else if (rho_val < rho_floor) {
-                        Ez(i, j, 0) += Ez_ext(i, j, 0);
-                    }
+                if (include_external_fields && (rho_val >= rho_floor)) {
+                    Ez(i, j, 0) -= Ez_ext(i, j, 0);
                 }
             }
         );
@@ -1039,13 +1029,15 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
 
     const bool include_external_fields = hybrid_model->m_add_external_fields;
-    // Split (explicit) mode: the kernels add B_ext for the Hall term and
-    // subtract the inductive E_ext from the stored plasma-cell field (the
-    // analytic external-flux advance and the end-of-step E_ext addition
-    // happen in the caller). Total (implicit) mode: B already holds the
-    // total field, and E_ext is added only in density-floored (vacuum)
-    // cells -- inside the plasma the generalized Ohm's law itself is the
-    // electric field, and the external drive reaches it through B.
+    // The stored electric field follows the split-field convention in both
+    // schemes: the inductive E_ext is subtracted from plasma cells (where
+    // the generalized Ohm's law itself is the electric field and the
+    // external drive must not be double-counted), and the caller re-adds
+    // E_ext when assembling the particle-push field and advances the
+    // external flux analytically from A(t). The modes differ only in the
+    // Hall-term field: the explicit scheme keeps Bfield_fp plasma-only
+    // during the advance so the kernels add B_ext here; the implicit
+    // scheme hands the kernels the total field already.
     const bool external_split = hybrid_model->m_external_split;
 
     const bool holmstrom_vacuum_region = hybrid_model->m_holmstrom_vacuum_region;
@@ -1304,12 +1296,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields) {
-                if (external_split) {
-                    if (rho_val >= rho_floor) { Ex(i, j, k) -= Ex_ext(i, j, k); }
-                } else if (rho_val < rho_floor) {
-                    Ex(i, j, k) += Ex_ext(i, j, k);
-                }
+            if (include_external_fields && (rho_val >= rho_floor)) {
+                Ex(i, j, k) -= Ex_ext(i, j, k);
             }
         });
 
@@ -1373,12 +1361,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields) {
-                if (external_split) {
-                    if (rho_val >= rho_floor) { Ey(i, j, k) -= Ey_ext(i, j, k); }
-                } else if (rho_val < rho_floor) {
-                    Ey(i, j, k) += Ey_ext(i, j, k);
-                }
+            if (include_external_fields && (rho_val >= rho_floor)) {
+                Ey(i, j, k) -= Ey_ext(i, j, k);
             }
         });
 
@@ -1442,12 +1426,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields) {
-                if (external_split) {
-                    if (rho_val >= rho_floor) { Ez(i, j, k) -= Ez_ext(i, j, k); }
-                } else if (rho_val < rho_floor) {
-                    Ez(i, j, k) += Ez_ext(i, j, k);
-                }
+            if (include_external_fields && (rho_val >= rho_floor)) {
+                Ez(i, j, k) -= Ez_ext(i, j, k);
             }
         });
 

@@ -37,14 +37,15 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
         "hybrid_pic_model.darwin does not support restarts yet (the vector "
         "potential and static magnetic field are not checkpointed)");
 
-    // External vector-potential fields enter in total-field form here: the
-    // solver state carries the full E and B (B_ext(0) is folded into
-    // Bfield_fp by HybridPICInitializeRhoJandB), the Ohm kernels add the
-    // step-averaged inductive E_ext in density-floored (vacuum) cells
-    // only, and the theta-Faraday advance of the total E carries the
-    // external flux in from the vacuum region. Clearing m_external_split
-    // switches the kernels from the explicit split-field convention to
-    // this total-field convention.
+    // External vector-potential fields use the split-field convention here,
+    // like the explicit scheme: the solver state carries the plasma fields
+    // (OneStep strips B_ext/E_ext at entry; Bfield_fp holds totals between
+    // steps for diagnostics), the external flux advances analytically from
+    // A(t) so wall boundary conditions cannot exclude the programmed coil
+    // flux, and the Ohm kernels subtract the inductive E_ext from plasma
+    // cells (inside the plasma the generalized Ohm's law IS the electric
+    // field). Clearing m_external_split only tells the kernels that the
+    // Hall-term field they receive is already the total.
     if (m_hybrid_pic_model->m_add_external_fields) {
         m_hybrid_pic_model->m_external_split = false;
     }
@@ -123,17 +124,35 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
 
     m_dt = a_dt;
 
-    // Refresh the external vector-potential fields for this step. The Ohm
-    // kernels add the step-averaged inductive field
-    // E_ext = -[f(t^{n+1}) - f(t^n)]/dt * A (constant over the step) in
-    // density-floored (vacuum) cells only -- see HybridPICSolveE. In the
-    // vacuum region the theta-Faraday advance of the total E then
-    // reproduces the external flux f(t^{n+1}) curl A at step ends exactly
-    // for any ramp shape f(t); at the plasma boundary the mask edge acts
-    // as the shielding layer, and further penetration is resistive.
+    // External vector-potential drive, split-field form: the solver state
+    // carries the PLASMA fields only, so the field boundary conditions act
+    // on the plasma response while the imposed external field rides
+    // through the wall unchanged (a conducting boundary must not exclude
+    // the programmed coil flux; advancing the external flux through the
+    // discrete Faraday/vector-potential update would pin it to the wall
+    // value of E or A). Strip the external field at t^n here; the field
+    // assembly in UpdateWarpXFields re-adds B_ext at the theta-time and
+    // the step-averaged inductive E_ext on top of the plasma fields, and
+    // FinishFieldUpdate restores end-of-step totals.
     if (m_hybrid_pic_model->m_add_external_fields) {
-        m_hybrid_pic_model->m_external_vector_potential->UpdateHybridExternalFields(
-            start_time + 0.5_rt*a_dt, a_dt);
+        using ablastr::fields::Direction;
+        auto & ext = *m_hybrid_pic_model->m_external_vector_potential;
+        ext.UpdateHybridExternalFields(start_time, a_dt);
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            for (int dir = 0; dir < 3; ++dir) {
+                amrex::MultiFab & B = *m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{dir}, lev);
+                amrex::MultiFab const & B_ext = *m_WarpX->m_fields.get(FieldType::hybrid_B_fp_external, Direction{dir}, lev);
+                amrex::MultiFab::Subtract(B, B_ext, 0, 0, B.nComp(), B.nGrowVect());
+                amrex::MultiFab & E = *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{dir}, lev);
+                amrex::MultiFab const & E_ext = *m_WarpX->m_fields.get(FieldType::hybrid_E_fp_external, Direction{dir}, lev);
+                amrex::MultiFab::Subtract(E, E_ext, 0, 0, E.nComp(), E.nGrowVect());
+            }
+        }
+        // Mid-step values used throughout the nonlinear solve: B_ext at
+        // t^{n+theta}, and E_ext = -[f(t^{n+theta}+dt/2) -
+        // f(t^{n+theta}-dt/2)]/dt * A for the push field (at theta = 1/2
+        // this is the exact step mean of the inductive field).
+        ext.UpdateHybridExternalFields(start_time + m_theta*a_dt, a_dt);
     }
 
     // Save particle state at t^n
@@ -416,14 +435,11 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
         }
     }
 
-    // The step-averaged external inductive field enters through the Ohm
-    // kernels themselves (see HybridPICSolveE): in total-field mode E_ext
-    // is added only in density-floored (vacuum) cells, where the
-    // generalized Ohm's law does not determine E. Inside the plasma the
-    // Ohm field IS the electric field and the external drive reaches it
-    // through the evolving total B; adding E_ext there would bypass the
-    // electron response and pump the external flux through the plasma
-    // unshielded.
+    // The Ohm kernels above returned the stored (plasma) field convention:
+    // E_ohm computed from the total B, with the inductive E_ext subtracted
+    // in plasma cells (inside the plasma the generalized Ohm's law IS the
+    // electric field; the external drive reaches it through B). The push
+    // field assembly in UpdateWarpXFields re-adds E_ext on top.
 
     // Darwin: the state is the transverse field, so the fixed point is
     // E_T = E_ohm - E_L. Subtracting E_L from the assembled Ohm field
@@ -445,6 +461,19 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     // Return RHS = E_ohm - E_old
     // Framework computes residual = E - E_old - RHS = E - E_ohm
     // Convergence: E = E_ohm
+    if (std::getenv("WARPX_DEBUG_RESID") != nullptr) {
+        using ablastr::fields::Direction;
+        for (int dir = 0; dir < 3; ++dir) {
+            amrex::MultiFab diff(m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{dir}, 0)->boxArray(),
+                                 m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{dir}, 0)->DistributionMap(), 1, 0);
+            amrex::MultiFab::Copy(diff, *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{dir}, 0), 0, 0, 1, 0);
+            amrex::MultiFab::Subtract(diff, *a_E.getArrayVec()[0][dir], 0, 0, 1, 0);
+            auto imax = diff.maxIndex(0);
+            amrex::AllPrintToFile("resid_probe") << "iter " << a_nl_iter
+                << " dir " << dir << " |dE|max " << diff.norminf(0)
+                << " at " << imax << "\n";
+        }
+    }
     a_RHS.Copy(FieldType::Efield_fp);         // a_RHS = E_ohm
     a_RHS.linComb(1.0, a_RHS, -1.0, m_Eold);  // a_RHS = E_ohm - E_old
 }
@@ -458,6 +487,25 @@ void ThetaImplicitHybrid::UpdateWarpXFields ( const WarpXSolverVec&  a_E,
 
     // Set E^{n+theta} in WarpX (the transverse part E_T on the Darwin path)
     m_WarpX->SetElectricFieldAndApplyBCs( a_E, theta_time );
+
+    // Assemble the external contributions on top of the plasma fields after
+    // the respective plasma-field updates below: B_ext at t^{n+theta} for
+    // the Ohm kernels and the particle push, and the step-averaged
+    // inductive E_ext for the push field. Deliberately applied AFTER the
+    // boundary treatments -- the imposed external field must not be
+    // altered by the wall conditions.
+    auto add_external = [&](warpx::fields::FieldType ftype,
+                            warpx::fields::FieldType ext_type) {
+        using ablastr::fields::Direction;
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            for (int dir = 0; dir < 3; ++dir) {
+                amrex::MultiFab & F = *m_WarpX->m_fields.get(ftype, Direction{dir}, lev);
+                amrex::MultiFab const & F_ext = *m_WarpX->m_fields.get(ext_type, Direction{dir}, lev);
+                amrex::MultiFab::Add(F, F_ext, 0, 0, F.nComp(), F.nGrowVect());
+            }
+        }
+    };
+    const bool has_external = m_hybrid_pic_model->m_add_external_fields;
 
     if (m_darwin) {
         // Darwin: advance the vector potential with the transverse field and
@@ -490,6 +538,11 @@ void ThetaImplicitHybrid::UpdateWarpXFields ( const WarpXSolverVec&  a_E,
         ablastr::fields::MultiLevelVectorField const& B_old =
             m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::B_old, m_num_amr_levels - 1);
         m_WarpX->UpdateMagneticFieldAndApplyBCs( B_old, m_theta * m_dt, start_time );
+    }
+
+    if (has_external) {
+        add_external(FieldType::Bfield_fp, FieldType::hybrid_B_fp_external);
+        add_external(FieldType::Efield_fp, FieldType::hybrid_E_fp_external);
     }
 }
 
@@ -577,5 +630,24 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
         ablastr::fields::MultiLevelVectorField const& B_old =
             m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::B_old, 0);
         m_WarpX->FinishMagneticFieldAndApplyBCs( B_old, m_theta, end_time );
+    }
+
+    // Restore end-of-step totals: the analytic external flux advance means
+    // Bfield_fp = B_plasma^{n+1} + f(t^{n+1}) curl A_ext exactly, for any
+    // ramp shape (OneStep strips the same values at the next entry).
+    if (m_hybrid_pic_model->m_add_external_fields) {
+        using ablastr::fields::Direction;
+        m_hybrid_pic_model->m_external_vector_potential->UpdateHybridExternalFields(
+            end_time, m_dt);
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            for (int dir = 0; dir < 3; ++dir) {
+                amrex::MultiFab & B = *m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{dir}, lev);
+                amrex::MultiFab const & B_ext = *m_WarpX->m_fields.get(FieldType::hybrid_B_fp_external, Direction{dir}, lev);
+                amrex::MultiFab::Add(B, B_ext, 0, 0, B.nComp(), B.nGrowVect());
+                amrex::MultiFab & E = *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{dir}, lev);
+                amrex::MultiFab const & E_ext = *m_WarpX->m_fields.get(FieldType::hybrid_E_fp_external, Direction{dir}, lev);
+                amrex::MultiFab::Add(E, E_ext, 0, 0, E.nComp(), E.nGrowVect());
+            }
+        }
     }
 }
