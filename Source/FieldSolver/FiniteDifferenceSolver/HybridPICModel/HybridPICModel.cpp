@@ -105,9 +105,12 @@ void HybridPICModel::ReadParameters ()
     // explicit path and the implicit dynamics diverge (see the tracking
     // comment in Examples/Tests/ohm_solver_electron_energy_eq/CMakeLists.txt;
     // the unregistered RZ decks there reproduce this). Refuse loudly rather
-    // than produce quietly wrong physics.
+    // than produce quietly wrong physics. The undocumented override below
+    // exists solely for the validation work itself.
+    bool qdsmc_allow_unvalidated_rz = false;
+    pp_hybrid.query("qdsmc_allow_unvalidated_rz", qdsmc_allow_unvalidated_rz);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        !m_solve_electron_energy_equation,
+        !m_solve_electron_energy_equation || qdsmc_allow_unvalidated_rz,
         "hybrid_pic_model.solve_electron_energy_equation is not validated in "
         "RZ geometry yet (theta=0-plane marker and axis/volume-weighting "
         "handling under investigation).");
