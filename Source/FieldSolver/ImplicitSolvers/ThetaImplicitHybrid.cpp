@@ -50,6 +50,20 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
         }
     }
 
+    // Resistive part of the Ohm's-law field, refreshed once per nonlinear
+    // iteration and subtracted from the particle-push field (see ComputeRHS).
+    // Only needed when a resistive term is configured.
+    if (m_hybrid_pic_model->HasResistivity()) {
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            for (int dir = 0; dir < 3; ++dir) {
+                const auto& Efp = m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{dir}, lev);
+                m_WarpX->m_fields.alloc_init("hybrid_E_resistive_fp", Direction{dir}, lev,
+                    Efp->boxArray(), Efp->DistributionMap(), Efp->nComp(),
+                    Efp->nGrowVect(), 0.0_rt);
+            }
+        }
+    }
+
     const amrex::ParmParse pp("implicit_evolve");
     pp.query("theta", m_theta);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -156,6 +170,25 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     // Update B^{n+theta} from current E estimate via Faraday's law
     UpdateWarpXFields( a_E, start_time );
 
+    // Momentum-consistent particle push field: the ions gather Efield_fp,
+    // and the solver state deliberately includes the resistive eta*J term
+    // (Faraday's law needs it), but the resistive friction must not
+    // accelerate the ions through E -- the explicit scheme pushes ions with
+    // the no-resistivity Ohm field, and the resistive electron-ion friction
+    // is a separate (optional) collision operator. Subtract the resistive
+    // part (refreshed from the previous nonlinear iterate at the bottom of
+    // this function; exact at convergence). B above already used the full E.
+    if (m_hybrid_pic_model->HasResistivity()) {
+        using ablastr::fields::Direction;
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            for (int dir = 0; dir < 3; ++dir) {
+                amrex::MultiFab& E_push = *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{dir}, lev);
+                amrex::MultiFab const& E_res = *m_WarpX->m_fields.get("hybrid_E_resistive_fp", Direction{dir}, lev);
+                amrex::MultiFab::Subtract(E_push, E_res, 0, 0, E_push.nComp(), E_push.nGrowVect());
+            }
+        }
+    }
+
     // Advance particles and deposit J^{n+1/2}, rho^{n+1/2}
     const amrex::Real theta_time = start_time + m_theta * m_dt;
     PreRHSOp( theta_time, a_nl_iter, a_from_jacobian );
@@ -195,9 +228,8 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     // particles (so grad(Pe) must be included for the pressure coupling).
     // The explicit scheme separates these into two E-solves gated by
     // solve_for_Faraday; here the full Ohm E is assembled by overriding the
-    // resistive gate. Note the particles therefore gather the resistive
-    // field as well; a momentum-conserving gather that subtracts eta*J from
-    // the push field is left as a follow-up.
+    // resistive gate, and the resistive part is subtracted again from the
+    // push field at the top of this function.
     m_hybrid_pic_model->HybridPICSolveE(
         Efield_fp, current_fp, Bfield_fp, rho_fp,
         m_WarpX->GetEBUpdateEFlag(),
@@ -210,6 +242,38 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     // Convergence: E = E_ohm
     a_RHS.Copy(FieldType::Efield_fp);         // a_RHS = E_ohm
     a_RHS.linComb(1.0, a_RHS, -1.0, m_Eold);  // a_RHS = E_ohm - E_old
+
+    // Refresh the resistive push-field correction from this iterate's
+    // fields: E_res = E_ohm(with resistivity) - E_ohm(without). Refreshed
+    // once per nonlinear iteration and frozen during finite-difference
+    // Jacobian evaluations (like the per-species source deposits), so the
+    // linearization sees a fixed correction.
+    if (m_hybrid_pic_model->HasResistivity() && !a_from_jacobian) {
+        using ablastr::fields::Direction;
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            for (int dir = 0; dir < 3; ++dir) {
+                amrex::MultiFab& E_res = *m_WarpX->m_fields.get("hybrid_E_resistive_fp", Direction{dir}, lev);
+                amrex::MultiFab const& E_full = *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{dir}, lev);
+                amrex::MultiFab::Copy(E_res, E_full, 0, 0, E_res.nComp(), E_res.nGrowVect());
+            }
+        }
+        m_hybrid_pic_model->HybridPICSolveE(
+            Efield_fp, current_fp, Bfield_fp, rho_fp,
+            m_WarpX->GetEBUpdateEFlag(),
+            false,  // solve_for_Faraday (retain grad(Pe))
+            false   // include_resistivity: no-resistivity push field
+        );
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            for (int dir = 0; dir < 3; ++dir) {
+                amrex::MultiFab& E_res = *m_WarpX->m_fields.get("hybrid_E_resistive_fp", Direction{dir}, lev);
+                amrex::MultiFab const& E_noeta = *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{dir}, lev);
+                amrex::MultiFab::Subtract(E_res, E_noeta, 0, 0, E_res.nComp(), E_res.nGrowVect());
+                // The push-field subtraction at the top of this function
+                // includes the ghosts the particle gather reads.
+                E_res.FillBoundary(m_WarpX->Geom(lev).periodicity());
+            }
+        }
+    }
 }
 
 void ThetaImplicitHybrid::UpdateWarpXFields ( const WarpXSolverVec&  a_E,

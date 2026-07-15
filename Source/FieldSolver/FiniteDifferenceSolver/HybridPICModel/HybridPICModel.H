@@ -625,6 +625,13 @@ public:
     amrex::ParserExecutor<3> m_eta;
     bool m_resistivity_has_J_dependence = false;
 
+    /** True when any resistive term is configured: a non-trivial global
+     *  resistivity parser, per-species overlays, or hyper-resistivity. */
+    [[nodiscard]] bool HasResistivity () const {
+        return (m_eta_expression != "0.0") || m_has_per_species_eta
+            || m_include_hyper_resistivity_term;
+    }
+
     /** Per-species resistivity overlay (see Phys. Plasmas 31, 012902 (2024), Eq. 10).
      *  Optional. For any charged species {spec} for which the user provides
      *
