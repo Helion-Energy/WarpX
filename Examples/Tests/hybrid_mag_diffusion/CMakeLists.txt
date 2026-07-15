@@ -13,3 +13,13 @@ add_warpx_test(
     OFF  # checksum (analytic analysis is the oracle)
     OFF  # dependency
 )
+
+add_warpx_test(
+    test_2d_hybrid_mag_diffusion_cn  # name
+    2  # dims
+    1  # nprocs
+    "inputs_test_2d_hybrid_mag_diffusion_cn"  # inputs
+    "analysis.py"  # analysis
+    OFF  # checksum (analytic analysis is the oracle)
+    OFF  # dependency
+)

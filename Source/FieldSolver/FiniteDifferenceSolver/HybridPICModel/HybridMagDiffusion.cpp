@@ -201,6 +201,14 @@ HybridMagDiffusion::Advance (
     //       = 2 B - A_e(B)
     // where A_e uses alpha_e = (1-theta) dt chi and beta = 1.
     if (m_theta < 1.0_rt) {
+        for (int idim = 0; idim < 3; ++idim) {
+            ablastr::utils::communication::FillBoundary(
+                rhs[idim],
+                WarpX::do_single_precision_comms,
+                geom.periodicity(),
+                true);
+        }
+
         const Real alpha_e = (1.0_rt - m_theta) * dt * chi;
         MLCurlCurl linop_e(geom_v, grids_v, dmap_v, info, coord);
         linop_e.setDomainBC(lobc, hibc);
@@ -215,7 +223,7 @@ HybridMagDiffusion::Advance (
             Ae_out[idim].setVal(0.0_rt);
         }
 
-        Array<MultiFab, 3> in_arr = MakeCurlCurlAliases(sol);
+        Array<MultiFab, 3> in_arr = MakeCurlCurlAliases(rhs);
         Array<MultiFab, 3> out_arr = MakeCurlCurlAliases(Ae_out);
 
         using Op = MLLinOpT<Array<MultiFab,3>>;
@@ -242,7 +250,6 @@ HybridMagDiffusion::Advance (
     mlmg.setMaxIter(m_max_iter);
     mlmg.setVerbose(m_verbose);
     mlmg.setBottomVerbose(0);
-
     const Real residual = mlmg.solve({&solution}, {&rhs_arr}, m_rtol, m_atol);
 
     if (m_verbose > 0) {
