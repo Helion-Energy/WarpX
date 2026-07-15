@@ -25,10 +25,13 @@
  *
  *   dB/dt = - curl( (eta/mu0) curl B )
  *
- * using AMReX MLCurlCurl (same operator family as CurlCurlMLMGPC) in
- * Cartesian geometry. In RZ, AMReX MLCurlCurl does not support a
- * cylindrical 2D operator, so constant eta uses a matrix-free FDTD curl
- * chain with GMRES.
+ * Paths:
+ *  - Cartesian constant eta: AMReX MLCurlCurl (same family as CurlCurlMLMGPC).
+ *  - Cartesian variable eta / all RZ: matrix-free FDTD curl(eta curl B)/mu0
+ *    with AMReX GMRES. RZ cannot use MLCurlCurl (Cartesian-only in 2D).
+ *  - GMRES uses a scaled Laplacian-diagonal Jacobi preconditioner (not
+ *    cylindrical multigrid). Uniform eta reduces to the identity scale.
+ *
  * Inspired by FLASH 4.8 MagDiff / Grid_advanceMagDiffusion (theta scheme +
  * linear solve); reimplemented in C++/AMReX — no FLASH source.
  *

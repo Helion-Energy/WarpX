@@ -43,3 +43,15 @@ add_warpx_test(
     OFF  # checksum (RZ vacuum smoke analysis is the oracle)
     OFF  # dependency
 )
+
+# Parser-driven eta on the matrix-free RZ path (uniform 129 Ohm m smoke).
+# analysis_rz.py is a finite/damping stability smoke, not a Fourier analytic oracle.
+add_warpx_test(
+    test_rz_hybrid_mag_diffusion_variable_eta  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_hybrid_mag_diffusion_variable_eta"  # inputs
+    "analysis_rz.py"  # analysis
+    OFF  # checksum (RZ vacuum smoke analysis is the oracle)
+    OFF  # dependency
+)

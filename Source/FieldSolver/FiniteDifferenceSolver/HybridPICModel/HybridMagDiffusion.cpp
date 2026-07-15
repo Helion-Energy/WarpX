@@ -34,8 +34,10 @@
 #include <AMReX_iMultiFab.H>
 
 #include <array>
+#include <limits>
 #include <map>
 #include <memory>
+
 
 using namespace amrex;
 using warpx::fields::FieldType;
@@ -340,6 +342,19 @@ public:
         return std::sqrt(vector.dotProduct(vector));
     }
 
+    /**
+     * \brief Scaled Jacobi preconditioner for matrix-free curl(eta curl) GMRES.
+     *
+     * Approximates the diagonal of I + theta_dt * chi * Laplacian (not the full
+     * vector curl-curl or cylindrical metric terms). Scales relative to the
+     * global min eta so uniform eta reduces to the identity (avoids huge
+     * absolute factors that harm GMRES). This is a lightweight scaling aid,
+     * not a cylindrical multigrid preconditioner.
+     *
+     * In RZ, stages through the registered B field for axis/boundary fill
+     * (same pattern as apply); that temporarily overwrites physical B during
+     * GMRES and is restored when the solve writes the solution back.
+     */
     void precond (MagDiffVector& destination, MagDiffVector const& source)
     {
         auto const& geom = WarpX::GetInstance().Geom(m_lev);
@@ -370,11 +385,15 @@ public:
         diag_factor = 2.0_rt * dz_inv2;
 #endif
 
-        Real min_eta = 1.0e100_rt;
+        // MultiFab::min does a global MPI reduce by default (local=false).
+        Real min_eta = std::numeric_limits<Real>::max();
         for (int idim = 0; idim < 3; ++idim) {
             min_eta = std::min(min_eta, m_eta[idim]->min(0));
         }
+        // Guard against empty/degenerate eta; identity-like fallback.
+        min_eta = std::max(min_eta, Real(1.e-99));
         const Real chi_min = min_eta / PhysConst::mu0;
+        const Real denom = 1.0_rt + m_theta_dt * chi_min * diag_factor;
 
         for (int idim = 0; idim < 3; ++idim) {
             auto const& eta = m_eta[idim];
@@ -388,16 +407,16 @@ public:
 
                 ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
                 {
-                    const Real eta_val = eta_arr(i, j, k);
+                    const Real eta_val = std::max(eta_arr(i, j, k), Real(0.0));
                     const Real chi_val = eta_val / PhysConst::mu0;
-                    const Real diag = (1.0_rt + theta_dt * chi_val * diag_factor) /
-                                      (1.0_rt + theta_dt * chi_min * diag_factor);
+                    const Real diag = (1.0_rt + theta_dt * chi_val * diag_factor) / denom;
                     dest_arr(i, j, k) = src_arr(i, j, k) / diag;
                 });
             }
         }
 
 #if defined(WARPX_DIM_RZ)
+        // Project preconditioned vector onto RZ axis/field BCs via registered B.
         auto& warpx = WarpX::GetInstance();
         for (int idim = 0; idim < 3; ++idim) {
             MultiFab::Copy(*m_source[idim], dest_fields[idim], 0, 0, 1, 0);
@@ -417,8 +436,10 @@ public:
         auto const& input_fields = input.fields();
 #if defined(WARPX_DIM_RZ)
         auto& warpx = WarpX::GetInstance();
-        // Krylov vectors have no ghost cells. Stage valid data into the
-        // registered B field so WarpX applies its RZ axis and field boundaries.
+        // Stage valid cells into the registered B field so WarpX applies RZ
+        // axis and field boundaries, then pull the filled ghost region into
+        // work arrays. (Krylov MagDiffVectors may carry ghost storage, but
+        // norms use nghost=0; BC fill goes through registered B.)
         for (int idim = 0; idim < 3; ++idim) {
             MultiFab::Copy(*m_source[idim], input_fields[idim], 0, 0, 1, 0);
         }
