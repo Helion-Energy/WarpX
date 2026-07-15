@@ -40,6 +40,7 @@
 #include "Utils/WarpXUtil.H"
 #include "EmbeddedBoundary/ParticleScraper.H"
 #include "EmbeddedBoundary/ParticleBoundaryProcess.H"
+#include "EmbeddedBoundary/ParticleReflectAtEB.H"
 
 #include "WarpX.H"
 
@@ -1255,6 +1256,14 @@ void MultiParticleContainer::ScrapeParticlesAtEB (
                 scrapeParticlesAtEB(*pc, distance_to_eb, lev,
                     ParticleBoundaryProcess::Reflect{dt_lev, mass});
             }
+        }
+    } else if (WarpX::eb_particle_boundary == ParticleBoundaryType::Thermal) {
+        // Thermal (fully diffuse) wall: re-emit every impinging particle from
+        // a wall Maxwellian with the species' boundary.<species>.u_th.
+        auto& warpx = WarpX::GetInstance();
+        for (auto& pc : allcontainers) {
+            thermalReflectParticlesAtEB(*pc, distance_to_eb, pc->getMass(),
+                                        pc->m_eb_thermal_uth, warpx.getdt());
         }
     } else {
         for (auto& pc : allcontainers) {

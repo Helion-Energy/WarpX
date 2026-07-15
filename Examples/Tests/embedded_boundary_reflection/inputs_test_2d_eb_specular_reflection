@@ -1,4 +1,4 @@
-# 2D embedded-boundary neutral-particle reflection test -- SPECULAR (accommodation = 0).
+# 2D embedded-boundary neutral-particle reflection test -- SPECULAR (boundary.particle_eb = reflecting).
 #
 # Field-free, collisionless box of neutral D2 sitting above a solid embedded-boundary slab
 # (a flat wall). WarpX EB convention: FLUID where implicit_function < 0, SOLID where > 0, so
@@ -50,10 +50,9 @@ D2.ux_th = uth_c
 D2.uy_th = uth_c
 D2.uz_th = uth_c
 
-# feature under test: specular embedded-boundary reflection
-D2.eb_reflect       = 1
-D2.eb_accommodation = 0.0     # 0 = specular (energy conserving)
-D2.eb_reflect_temp  = 300.0
+# feature under test: specular embedded-boundary reflection, applied
+# uniformly to all species (energy conserving)
+boundary.particle_eb = reflecting
 
 # reduced diagnostics: particle number and total kinetic energy vs time
 warpx.reduced_diags_names = npart pen

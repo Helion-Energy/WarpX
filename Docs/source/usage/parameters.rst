@@ -1015,6 +1015,16 @@ additionally define the electric potential at the embedded boundary with an anal
 
     * ``Reflecting``: Particles that reach the embedded boundary are specularly reflected back into the simulation domain
 
+    * ``Thermal``: Particles that reach the embedded boundary are re-emitted from a wall Maxwellian
+      (fully accommodating diffuse wall): the exact wall-contact point is found by bisection along
+      the particle trajectory, the velocity is re-sampled from a half-Maxwellian flux distribution
+      along the inward wall normal (full Maxwellian in the tangential plane), and the particle is
+      advanced from the contact point for the remaining fraction of the time step. The wall thermal
+      speed must be given per species via ``boundary.<species_name>.u_th`` (in units of :math:`c`,
+      i.e. :math:`\sqrt{k_B T_\mathrm{wall}/m}/c`), the same input used by the domain ``thermal``
+      particle boundary condition. This is intended for modelling neutral-gas flow against solid
+      walls (e.g. DSMC gas dynamics), where the wall must conserve the gas inventory.
+
 .. _param-particle-thermalizer:
 
 Particle thermalizer
@@ -1952,40 +1962,6 @@ Particle initialization
        buffer will grow unbounded as particles are scraped and therefore could
        lead to memory issues if not periodically cleared. To clear the buffer
        call ``clear_buffer()``.
-
-.. pp:param:: <species_name>.eb_reflect
-    :type: ``0`` or ``1``
-    :default: ``0``
-    :optional:
-
-    **If USE_EB=TRUE**: if ``1``, particles of this species that strike an embedded boundary are
-    reflected back into the domain instead of being absorbed (the default). This is intended for
-    modelling neutral-gas flow against solid walls (e.g. DSMC gas dynamics). The reflection is
-    specular, diffuse (thermal), or a blend of the two, set by
-    :pp:param:`<species_name>.eb_accommodation`. The exact wall-contact point is found by
-    bisection along the particle trajectory (correct also for curved surfaces), and the
-    particle is re-emitted from that point for the remaining fraction of the time step.
-
-.. pp:param:: <species_name>.eb_accommodation
-    :type: ``float`` (between ``0`` and ``1``)
-    :default: ``1``
-    :optional:
-
-    Thermal accommodation coefficient used when :pp:param:`<species_name>.eb_reflect` is ``1``.
-    ``0`` is purely specular reflection (the velocity component normal to the wall is reversed,
-    conserving kinetic energy); ``1`` is fully diffuse (thermal) reflection, where the particle is
-    re-emitted with a cosine-distributed direction and a speed drawn from a half-Maxwellian at the
-    wall temperature :pp:param:`<species_name>.eb_reflect_temp`. Intermediate values reflect that
-    fraction of impacts diffusely and the remainder specularly.
-
-.. pp:param:: <species_name>.eb_reflect_temp
-    :type: ``float`` (in K)
-    :default: ``300``
-    :optional:
-
-    Wall temperature used for diffuse (thermal) embedded-boundary reflection when
-    :pp:param:`<species_name>.eb_accommodation` is greater than ``0``. Ignored for purely specular
-    reflection.
 
 .. pp:param:: <species_name>.do_field_ionization
     :type: ``0`` or ``1``

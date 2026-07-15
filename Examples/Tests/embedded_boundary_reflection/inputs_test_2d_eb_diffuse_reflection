@@ -1,4 +1,4 @@
-# 2D embedded-boundary neutral-particle reflection test -- DIFFUSE / THERMAL (accommodation = 1).
+# 2D embedded-boundary neutral-particle reflection test -- THERMAL (boundary.particle_eb = thermal).
 #
 # Same field-free, collisionless geometry as the specular test (solid EB slab below z = 5 mm,
 # inward normal +z), but the wall is fully thermally accommodating at 600 K while the gas starts
@@ -13,6 +13,7 @@ my_constants.Tgas = 300.0
 my_constants.Twall = 600.0
 my_constants.n0   = 1.0e20
 my_constants.uth_c = sqrt(kB*Tgas/mD2)/clight
+my_constants.uthw_c = sqrt(kB*Twall/mD2)/clight
 
 geometry.dims       = 2
 geometry.prob_lo    = -0.01 0.0
@@ -48,10 +49,10 @@ D2.ux_th = uth_c
 D2.uy_th = uth_c
 D2.uz_th = uth_c
 
-# feature under test: diffuse (thermal) embedded-boundary reflection
-D2.eb_reflect       = 1
-D2.eb_accommodation = 1.0       # 1 = fully diffuse / thermal accommodation
-D2.eb_reflect_temp  = Twall     # 600 K wall (gas starts at 300 K)
+# feature under test: thermal (fully diffuse) embedded-boundary re-emission,
+# applied uniformly to all species; wall Maxwellian at Twall = 600 K
+boundary.particle_eb = thermal
+boundary.D2.u_th     = uthw_c
 
 warpx.reduced_diags_names = npart pen
 npart.type      = ParticleNumber

@@ -4,10 +4,10 @@
  *
  * License: BSD-3-Clause-LBNL
  *
- * Reflect particles off embedded boundaries (specular + diffuse/thermal),
- * a Maxwell accommodation wall model for neutral-gas DSMC. WarpX ships only
- * absorbing EB particle interaction; this adds reflection so that interior
- * solid geometry (orifice plates, tubes) conserves the gas it should.
+ * Thermal (diffuse) particle re-emission from embedded boundaries, for
+ * boundary.particle_eb = thermal: a fully accommodating wall model for
+ * neutral-gas DSMC. Specular reflection is handled separately by
+ * boundary.particle_eb = reflecting (ParticleBoundaryProcess::Reflect).
  */
 #ifndef WARPX_PARTICLEREFLECTATEB_H_
 #define WARPX_PARTICLEREFLECTATEB_H_
@@ -35,43 +35,52 @@
 #include <type_traits>
 
 /**
- * \brief Reflect particles off the embedded boundary (Maxwell accommodation model).
+ * \brief Re-emit particles thermally from the embedded boundary (fully
+ * accommodating diffuse wall, boundary.particle_eb = thermal).
  *
- * Detects particles that have crossed into the EB region (signed distance < 0) and,
- * rather than absorbing them, reflects them back into the domain. For each such
- * particle (following the bisection approach of PR #6588 and
+ * Detects particles that have crossed into the EB region (signed distance < 0)
+ * and, rather than absorbing them, re-emits them from a wall Maxwellian. For
+ * each such particle (following the bisection approach of
+ * ParticleBoundaryProcess::Reflect and
  * ParticleBoundaryBuffer::FindEmbeddedBoundaryIntersection):
- * 1. Bisect along the particle trajectory to find the exact contact point on the
- *    EB surface (where the signed distance phi = 0).
+ * 1. Bisect along the particle trajectory to find the exact contact point on
+ *    the EB surface (where the signed distance phi = 0).
  * 2. Compute the surface normal at that contact point (not at the penetrated
  *    position), which handles curved EB surfaces correctly.
- * 3. Update the velocity at the contact point: with probability `accommodation`
- *    the reflection is diffuse (re-emitted from a wall Maxwellian: a
- *    half-Maxwellian flux along the inward normal, full Maxwellian in the
- *    tangential plane); otherwise it is specular (mirror the normal velocity
- *    component).
- * 4. Advance the particle from the contact point with the new velocity for the
- *    remaining fraction of the timestep.
- * The particle id is kept valid (the particle is not removed).
+ * 3. Re-emit from the wall Maxwellian: a half-Maxwellian flux distribution
+ *    along the inward normal and a full Maxwellian in the tangential plane,
+ *    with thermal speed uth (the same convention and sampling primitives as
+ *    the domain thermal boundary, see thermalize_boundary_particle).
+ * 4. Advance the particle from the contact point with the new velocity for
+ *    the remaining fraction of the timestep.
+ * The particle id is kept valid (the particle is not removed), except for the
+ * corner safeguards below, which absorb rather than mis-emit:
+ * (a) the particle did not start the step in the gas region (sharp corner,
+ *     tunneling through a thin feature, bad initialization): there is no wall
+ *     crossing to bracket;
+ * (b) the level-set normal at the contact point is degenerate (ill-defined at
+ *     a sharp corner);
+ * (c) the re-emitted particle lands back inside the solid (sharp concave
+ *     corner).
  *
  * \param pc particle container to operate on
  * \param distance_to_eb signed-distance MultiFabs (one per level)
  * \param mass particle species mass
- * \param uth wall thermal speed normalized by c: sqrt(kB*T_wall/m)/c (used for diffuse)
- * \param accommodation probability of diffuse vs specular reflection, in [0,1]
+ * \param uth wall thermal speed normalized by c: sqrt(kB*T_wall/m)/c, parsed
+ *            per species from boundary.<species_name>.u_th (the same input
+ *            the domain thermal boundary condition uses)
  * \param dt_lev time step at each refinement level
  */
 template <class PC, std::enable_if_t<amrex::IsParticleContainer<PC>::value, int> foo = 0>
 void
-reflectParticlesAtEB (PC& pc,
-                      ablastr::fields::MultiLevelScalarField const& distance_to_eb,
-                      amrex::ParticleReal mass,
-                      amrex::ParticleReal uth,
-                      amrex::ParticleReal accommodation,
-                      amrex::Vector<amrex::Real> const& dt_lev)
+thermalReflectParticlesAtEB (PC& pc,
+                             ablastr::fields::MultiLevelScalarField const& distance_to_eb,
+                             amrex::ParticleReal mass,
+                             amrex::ParticleReal uth,
+                             amrex::Vector<amrex::Real> const& dt_lev)
 {
     using namespace amrex::literals;
-    BL_PROFILE("reflectParticlesAtEB");
+    BL_PROFILE("thermalReflectParticlesAtEB");
 
     for (int lev = 0; lev <= pc.finestLevel(); ++lev)
     {
@@ -151,104 +160,60 @@ reflectParticlesAtEB (PC& pc,
                 amrex::ParticleReal x_c = xp, y_c = yp, z_c = zp;
                 UpdatePosition(x_c, y_c, z_c, ux_ip, uy_ip, uz_ip, -dt_fraction*dt, mass);
 
-                // Surface normal at the contact point
-                int in, jn, kn;
-                amrex::Real Wn[AMREX_SPACEDIM][2];
-                ablastr::particles::compute_weights<amrex::IndexType::NODE>(
-                    x_c, y_c, z_c, plo, dxi, in, jn, kn, Wn);
-                int ic, jc, kc;
-                amrex::Real Wc[AMREX_SPACEDIM][2];
-                ablastr::particles::compute_weights<amrex::IndexType::CELL>(
-                    x_c, y_c, z_c, plo, dxi, ic, jc, kc, Wc);
-                amrex::RealVect n = DistanceToEB::interp_normal(in, jn, kn, Wn, ic, jc, kc, Wc, phi, dxi);
-                // Corner safeguard (b): degenerate normal (ill-defined at a sharp corner) -> absorb.
-                if (DistanceToEB::dot_product(n, n) < amrex::Real(1.e-20)) {
+                // Unit surface normal at the contact point, in 3D Cartesian
+                // coordinates for every dimensionality (interp_normal
+                // normalizes internally and rotates radial normals to the
+                // particle azimuth).
+                auto const n = DistanceToEB::interp_normal(x_c, y_c, z_c, plo, dxi, phi);
+                // Corner safeguard (b): degenerate level-set gradient at a sharp corner
+                // makes the internally-normalized normal non-finite -> absorb.
+                if (!(std::isfinite(n[0]) && std::isfinite(n[1]) && std::isfinite(n[2]))) {
                     amrex::ParticleIDWrapper{ptd.m_idcpu[ip]}.make_invalid();
                     return;
                 }
-                DistanceToEB::normalize(n);  // unit normal pointing from the wall into the gas
 
-                const bool diffuse = (accommodation > 0._prt) &&
-                    ( accommodation >= 1._prt || amrex::Random(engine) < accommodation );
+                // Diffuse (thermal) re-emission from the wall Maxwellian, in the
+                // orthonormal frame (n, t1, t2): half-Maxwellian flux along the
+                // inward normal, full Maxwellian tangentially. Valid for every
+                // dimensionality since both the normal and the momenta are 3D
+                // Cartesian (in 2D the out-of-plane direction is one of the
+                // tangentials; in RZ the normal is pre-rotated to the azimuth).
                 const auto cc = static_cast<amrex::ParticleReal>(PhysConst::c);
-
-#if defined(WARPX_DIM_3D)
-                if (!diffuse) {
-                    const amrex::ParticleReal un = ux[ip]*n[0] + uy[ip]*n[1] + uz[ip]*n[2];
-                    ux[ip] -= 2._prt*un*n[0];
-                    uy[ip] -= 2._prt*un*n[1];
-                    uz[ip] -= 2._prt*un*n[2];
+                amrex::ParticleReal e0 = 0._prt, e1 = 0._prt, e2 = 0._prt;
+                if (std::abs(n[0]) <= std::abs(n[1]) && std::abs(n[0]) <= std::abs(n[2])) {
+                    e0 = 1._prt;
+                } else if (std::abs(n[1]) <= std::abs(n[2])) {
+                    e1 = 1._prt;
                 } else {
-                    // orthonormal frame (n, t1, t2) for diffuse re-emission
-                    amrex::RealVect e = ( std::abs(n[0]) <= std::abs(n[1]) && std::abs(n[0]) <= std::abs(n[2]) )
-                        ? amrex::RealVect{1.0_rt, 0.0_rt, 0.0_rt}
-                        : ( (std::abs(n[1]) <= std::abs(n[2]))
-                              ? amrex::RealVect{0.0_rt, 1.0_rt, 0.0_rt}
-                              : amrex::RealVect{0.0_rt, 0.0_rt, 1.0_rt} );
-                    const amrex::Real edn = DistanceToEB::dot_product(e, n);
-                    amrex::RealVect t1 = {e[0]-edn*n[0], e[1]-edn*n[1], e[2]-edn*n[2]};
-                    DistanceToEB::normalize(t1);
-                    const amrex::RealVect t2 = {n[1]*t1[2]-n[2]*t1[1],
-                                                n[2]*t1[0]-n[0]*t1[2],
-                                                n[0]*t1[1]-n[1]*t1[0]};
-                    const amrex::ParticleReal un = cc*static_cast<amrex::ParticleReal>(generateGaussianFluxDist(0._rt, uth, engine));
-                    const amrex::ParticleReal v1 = cc*static_cast<amrex::ParticleReal>(amrex::RandomNormal(0._rt, uth, engine));
-                    const amrex::ParticleReal v2 = cc*static_cast<amrex::ParticleReal>(amrex::RandomNormal(0._rt, uth, engine));
-                    ux[ip] = un*n[0] + v1*t1[0] + v2*t2[0];
-                    uy[ip] = un*n[1] + v1*t1[1] + v2*t2[1];
-                    uz[ip] = un*n[2] + v1*t1[2] + v2*t2[2];
+                    e2 = 1._prt;
                 }
+                const amrex::ParticleReal edn = e0*n[0] + e1*n[1] + e2*n[2];
+                amrex::ParticleReal t10 = e0 - edn*n[0];
+                amrex::ParticleReal t11 = e1 - edn*n[1];
+                amrex::ParticleReal t12 = e2 - edn*n[2];
+                const amrex::ParticleReal t1n =
+                    1._prt/std::sqrt(t10*t10 + t11*t11 + t12*t12);
+                t10 *= t1n; t11 *= t1n; t12 *= t1n;
+                const amrex::ParticleReal t20 = n[1]*t12 - n[2]*t11;
+                const amrex::ParticleReal t21 = n[2]*t10 - n[0]*t12;
+                const amrex::ParticleReal t22 = n[0]*t11 - n[1]*t10;
 
-#elif defined(WARPX_DIM_XZ)
-                if (!diffuse) {
-                    const amrex::ParticleReal un = ux[ip]*n[0] + uz[ip]*n[1];
-                    ux[ip] -= 2._prt*un*n[0];
-                    uz[ip] -= 2._prt*un*n[1];
-                } else {
-                    const amrex::ParticleReal un = cc*static_cast<amrex::ParticleReal>(generateGaussianFluxDist(0._rt, uth, engine));
-                    const amrex::ParticleReal vt = cc*static_cast<amrex::ParticleReal>(amrex::RandomNormal(0._rt, uth, engine));
-                    const amrex::ParticleReal vy = cc*static_cast<amrex::ParticleReal>(amrex::RandomNormal(0._rt, uth, engine));
-                    ux[ip] = un*n[0] - vt*n[1];   // in-plane tangential t = (-n[1], n[0])
-                    uz[ip] = un*n[1] + vt*n[0];
-                    uy[ip] = vy;                   // out-of-plane component
-                }
+                const amrex::ParticleReal un =
+                    cc*static_cast<amrex::ParticleReal>(generateGaussianFluxDist(0._rt, uth, engine));
+                const amrex::ParticleReal v1 =
+                    cc*static_cast<amrex::ParticleReal>(amrex::RandomNormal(0._rt, uth, engine));
+                const amrex::ParticleReal v2 =
+                    cc*static_cast<amrex::ParticleReal>(amrex::RandomNormal(0._rt, uth, engine));
+                ux[ip] = un*n[0] + v1*t10 + v2*t20;
+                uy[ip] = un*n[1] + v1*t11 + v2*t21;
+                uz[ip] = un*n[2] + v1*t12 + v2*t22;
 
-#elif defined(WARPX_DIM_RZ)
-                // EB is not supported in RZ at runtime; this branch only needs to compile.
-                // The normal is (n_r, n_z): rotate it to the particle azimuth at the
-                // contact point to work with the Cartesian momentum components.
-                const amrex::ParticleReal r = std::sqrt(x_c*x_c + y_c*y_c);
-                const amrex::ParticleReal cr = (r > 0._prt) ? x_c/r : 1._prt;
-                const amrex::ParticleReal sr = (r > 0._prt) ? y_c/r : 0._prt;
-                amrex::ParticleReal ur = ux[ip]*cr + uy[ip]*sr;
-                const amrex::ParticleReal ut = -ux[ip]*sr + uy[ip]*cr;
-                if (!diffuse) {
-                    const amrex::ParticleReal un = ur*n[0] + uz[ip]*n[1];
-                    ur -= 2._prt*un*n[0];
-                    uz[ip] -= 2._prt*un*n[1];
-                } else {
-                    const amrex::ParticleReal un = cc*static_cast<amrex::ParticleReal>(generateGaussianFluxDist(0._rt, uth, engine));
-                    const amrex::ParticleReal vt = cc*static_cast<amrex::ParticleReal>(amrex::RandomNormal(0._rt, uth, engine));
-                    ur = un*n[0] - vt*n[1];
-                    uz[ip] = un*n[1] + vt*n[0];
-                }
-                ux[ip] = ur*cr - ut*sr;
-                uy[ip] = ur*sr + ut*cr;
-
-#elif defined(WARPX_DIM_1D_Z)
-                if (!diffuse) {
-                    uz[ip] -= 2._prt*(uz[ip]*n[0])*n[0];
-                } else {
-                    const amrex::ParticleReal s = (n[0] >= 0._rt) ? 1._prt : -1._prt;
-                    uz[ip] = s*cc*static_cast<amrex::ParticleReal>(generateGaussianFluxDist(0._rt, uth, engine));
-                }
-#endif
                 // Advance from the contact point with the new velocity for the remaining
                 // fraction of the timestep.
                 xp = x_c; yp = y_c; zp = z_c;
                 UpdatePosition(xp, yp, zp, ux[ip], uy[ip], uz[ip], dt_fraction*dt, mass);
-                // Corner safeguard (c): if the reflected particle is STILL inside the solid
-                // (sharp concave corner where the post-reflection advance re-enters the wall),
+                // Corner safeguard (c): if the re-emitted particle is STILL inside the solid
+                // (sharp concave corner where the post-emission advance re-enters the wall),
                 // absorb it rather than let it accumulate in the body.
                 {
                     int ir, jr, kr;

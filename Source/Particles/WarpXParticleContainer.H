@@ -550,11 +550,11 @@ public:
 
     bool do_splitting = false;
 
-    // Embedded-boundary particle reflection (neutral-gas walls), configured via
-    // <species>.eb_reflect / .eb_reflect_temp / .eb_accommodation
-    bool m_do_eb_reflection = false;
-    amrex::ParticleReal m_eb_uth = amrex::ParticleReal(0.0);            // wall sqrt(kB*T/m)/c (diffuse)
-    amrex::ParticleReal m_eb_accommodation = amrex::ParticleReal(1.0);  // 1 = diffuse, 0 = specular
+    // Wall thermal speed sqrt(kB*T_wall/m)/c for the thermal embedded-boundary
+    // particle boundary (boundary.particle_eb = thermal), parsed per species
+    // from boundary.<species_name>.u_th (the same input the domain thermal
+    // boundary condition uses).
+    amrex::ParticleReal m_eb_thermal_uth = amrex::ParticleReal(0.0);
 
     int do_not_deposit = 0;
     bool initialize_self_fields = false;
