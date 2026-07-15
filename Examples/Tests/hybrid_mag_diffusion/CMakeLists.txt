@@ -69,3 +69,16 @@ add_warpx_test(
     OFF  # checksum (feed smoke analysis is the oracle)
     OFF  # dependency
 )
+
+# P1b: non-periodic axial (z) boundary via PEC endwalls (B_normal=0, tangential
+# mirror). Lifts the former periodic-z-only restriction on the z-PEC wall path.
+# analysis_rz_z_pec_wall.py is a finite/damping smoke, not an analytic oracle.
+add_warpx_test(
+    test_rz_hybrid_mag_diffusion_z_pec_wall  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_hybrid_mag_diffusion_z_pec_wall"  # inputs
+    "analysis_rz_z_pec_wall.py"  # analysis
+    OFF  # checksum (z-PEC smoke analysis is the oracle)
+    OFF  # dependency
+)

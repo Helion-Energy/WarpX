@@ -1,0 +1,109 @@
+# !!! UNVERIFIED — INVESTIGATION DECK, NOT A CI TEST (not registered in CMakeLists) !!!
+# This z-face pec_insulator B_t feed runs stably (no Faraday/implicit abort at
+# eta=129) but is KNOWN BROKEN: the driven B_t does NOT diffuse axially. With
+# eta=129, dt=1 ns the diffusion length sqrt(chi*dt)=0.32 m/step
+# (sqrt(chi*5ns)=0.72 m vs Lz=1 m), so B_t should penetrate most of the domain
+# in 5 steps; instead it is confined to the first axial cell (skin depth ~1 mm)
+# and is frozen in time (identical at t=1..20 ns). Confirmed NOT a convergence
+# issue (identical at mag_diff_rtol=1e-10, 476 GMRES iters). The radial
+# pec_insulator feed (inputs_test_rz_hybrid_mag_diffusion_pec_feed) reaches the
+# correct radial steady state Bt~B0*r/R, so only the AXIAL (z) B_t diffusion is
+# broken. All prior RZ mag-diff tests are z-uniform, so this latent cylindrical
+# curl-curl operator bug was never probed. See notes/2026-07-15_session_p1b.md.
+# Kept in-tree (unregistered) as the follow-up reproduction deck. NB the z faces
+# here were relaxed to PEC walls (the P1b-admitted path) for tractability; the
+# pec_insulator z-feed is currently rejected by the guard (see HybridMagDiffusion.cpp).
+#
+# RZ hybrid implicit magnetic-diffusion axial (z) pec_insulator B_t feed.
+# Non-periodic z: the lower axial face (z_lo) is a pec_insulator that drives the
+# toroidal B_t via a time-ramped insulator.By_z_lo(x,y,t) parser (the SF-like
+# breech analogue: an axial endwall feeding tangential B, as opposed to the
+# upper-r radial feed of inputs_test_rz_hybrid_mag_diffusion_pec_feed). The
+# upper axial face (z_hi) is a PEC endwall (Bz=0 normal, Bt mirrored/reflecting),
+# so the z direction is fully non-periodic. r=0 is the axis (None); r_hi is a
+# PEC wall (closed tube).
+#
+# The operator-split implicit solve bakes the inhomogeneous z-face feed into the
+# matrix-free operator (homogeneous A_lin) and the RHS (affine offset c =
+# A_full(0)), reusing the SAME dimension-general machinery as the upper-r feed
+# (prepareFeed scans every idim/side; ApplyBfieldBoundary dispatches the z-face
+# pec_insulator kernel). See HybridMagDiffusion::prepareFeed.
+#
+# Oracle (analysis_rz_zfeed.py): a finite feed-driven smoke, NOT an analytic
+# Fourier oracle. Checks that B_t is injected from the z_lo endwall (grows from
+# a zero initialization toward the feed value) and the run is stable at
+# eta=129, dt=1 ns, z non-periodic.
+
+max_step = 5
+amr.n_cell = 32 64
+amr.max_level = 0
+amr.blocking_factor = 8
+amr.max_grid_size = 64
+
+geometry.dims = RZ
+geometry.prob_lo = 0.0 0.0
+geometry.prob_hi = 2.0e-2 1.0
+
+# r=0 is the axis (None); r_hi is a PEC wall; z_lo is the pec_insulator feed,
+# z_hi is a PEC endwall. z is non-periodic (the P1b relaxation).
+boundary.field_lo = none pec
+boundary.field_hi = pec pec
+boundary.particle_lo = none absorbing
+boundary.particle_hi = absorbing absorbing
+
+# Dirichlet B_t feed on the whole z_lo endwall: ramps 0 -> B0 over 1 ns, then
+# held. In RZ the z-face parser args are (x,y)=(r,z); on z_lo y=z=0 is fixed and
+# x=r varies. By_z_lo is the toroidal B_t tangential to the z endwall.
+# (Bz is normal to the z face and is mirrored/zeroed by PEC, not fed.)
+insulator.area_z_lo(x,y) = 1.0
+insulator.By_z_lo(x,y,t) = min(t/1.0e-9, 1.0)*1.0e-4
+
+warpx.const_dt = 1.0e-9
+warpx.cfl = -1.
+warpx.do_initial_div_cleaning = false
+
+algo.maxwell_solver = hybridPIC
+algo.particle_shape = 1
+algo.current_deposition = direct
+
+particles.species_names = protons
+particles.do_tiling = true
+
+protons.species_type = hydrogen
+protons.injection_style = NUniformPerCell
+protons.num_particles_per_cell_each_dim = 2 1 2
+protons.profile = constant
+protons.density = 1.0e26
+protons.momentum_distribution_type = constant
+protons.ux = 0.0
+protons.uy = 0.0
+protons.uz = 0.0
+
+# Start from zero B; the z_lo feed is the only source of B_t.
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 0.0
+
+hybrid_pic_model.elec_temp = 0.1
+hybrid_pic_model.gamma = 1.0
+hybrid_pic_model.n0_ref = 1.0e26
+hybrid_pic_model.n_floor = 1.0e20
+hybrid_pic_model.substeps = 4
+hybrid_pic_model.plasma_resistivity(rho,J,t) = "0.0"
+hybrid_pic_model.plasma_hyper_resistivity(rho,B) = "0.0"
+
+hybrid_pic_model.implicit_mag_diffusion = 1
+hybrid_pic_model.mag_diff_theta = 1.0
+hybrid_pic_model.mag_diff_constant_eta = 129.0
+hybrid_pic_model.mag_diff_eta_explicit_max = 0.0
+# Matrix-free GMRES with the Dirichlet z-face feed baked into operator + RHS.
+# rtol=1e-4 matches the RZ eta=129 stability smokes (no cylindrical MG PC).
+hybrid_pic_model.mag_diff_rtol = 1.0e-4
+hybrid_pic_model.mag_diff_atol = 1.0e-14
+hybrid_pic_model.mag_diff_max_iter = 300
+hybrid_pic_model.mag_diff_verbose = 1
+
+diagnostics.diags_names = diag1
+diag1.intervals = 5
+diag1.diag_type = Full
+diag1.fields_to_plot = Br Bt Bz
+diag1.format = plotfile

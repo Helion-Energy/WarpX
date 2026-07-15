@@ -254,26 +254,52 @@ public:
     {
         amrex::ignore_unused(lobc, hibc);
 #if defined(WARPX_DIM_RZ)
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            m_geom.isPeriodic(1),
-            "RZ matrix-free hybrid magnetic diffusion currently requires "
-            "a periodic axial (z) boundary");
-        // Lower radial (r=0) must stay None: the axis is handled by
-        // ApplyFieldBoundaryOnAxis. The upper radial face may be None (free),
+        // Lower radial (r=0) is the axis and must be None (handled by
+        // ApplyFieldBoundaryOnAxis). The upper radial face may be None (free),
         // PEC (conducting wall, B_normal=0), or PEC_Insulator (Dirichlet B_t
-        // feed = FLASH CIRCUIT analogue). Feed faces require a tangential-B
-        // parser (insulator.B*_x_hi); the feed is baked into the operator
-        // (homogeneous) + RHS (affine offset) in prepareFeed/apply below.
+        // feed = FLASH CIRCUIT analogue). Each axial (z) face may be Periodic
+        // or PEC (endwall, B_normal=0 + mirror). P1b relaxes the former
+        // periodic-z-only restriction for the *wall* path (PEC z endwalls),
+        // reusing ApplyBfieldBoundary's dimension-general PEC kernel through
+        // the matrix-free staging; this is validated (z-PEC wall smoke).
+        //
+        // NOTE: a z-face PEC_Insulator *B_t feed* is parsed and runs stably,
+        // but does NOT yet diffuse B_t axially — the cylindrical matrix-free
+        // curl(eta curl) operator appears to omit the axial diffusion of B_t
+        // (latent: all prior RZ mag-diff tests are z-uniform). The z-face
+        // pec_insulator feed is therefore intentionally NOT admitted here until
+        // that operator bug is fixed (see notes/2026-07-15_session_p1b.md);
+        // the feed machinery itself (prepareFeed/apply) is dimension-general.
+        auto const fb_is_radial_face = [] (FieldBoundaryType fb) {
+            return fb == FieldBoundaryType::None ||
+                   fb == FieldBoundaryType::PEC ||
+                   fb == FieldBoundaryType::PEC_Insulator;
+        };
+        auto const fb_is_axial_face = [] (FieldBoundaryType fb) {
+            // Periodic (free, via FillBoundary) or PEC (endwall, B_normal=0 +
+            // mirror, actively filled by ApplyBfieldBoundary). PEC_Insulator on
+            // a z face is excluded for now (axial B_t feed broken — see note
+            // above). None is excluded: it leaves z edge ghosts unfilled (not a
+            // well-posed mag-diffusion BC).
+            return fb == FieldBoundaryType::Periodic ||
+                   fb == FieldBoundaryType::PEC;
+        };
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             WarpX::field_boundary_lo[0] == FieldBoundaryType::None,
             "RZ matrix-free hybrid magnetic diffusion requires the lower "
             "radial boundary to be None (r=0 axis)");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            WarpX::field_boundary_hi[0] == FieldBoundaryType::None ||
-            WarpX::field_boundary_hi[0] == FieldBoundaryType::PEC ||
-            WarpX::field_boundary_hi[0] == FieldBoundaryType::PEC_Insulator,
+            fb_is_radial_face(WarpX::field_boundary_hi[0]),
             "RZ matrix-free hybrid magnetic diffusion supports None, PEC, or "
             "PEC_Insulator at the upper radial boundary");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            fb_is_axial_face(WarpX::field_boundary_lo[1]) &&
+            fb_is_axial_face(WarpX::field_boundary_hi[1]),
+            "RZ matrix-free hybrid magnetic diffusion supports Periodic or PEC "
+            "at each axial (z) boundary (a z-face pec_insulator B_t feed is not "
+            "yet admitted — axial B_t diffusion is broken, see notes; None is "
+            "not well-posed for the z edge ghosts). P1b lifts the former "
+            "periodic-z-only restriction for the z-PEC endwall path");
 #elif defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
         WARPX_ABORT_WITH_MESSAGE(
             "Matrix-free hybrid magnetic diffusion is not yet supported in "
