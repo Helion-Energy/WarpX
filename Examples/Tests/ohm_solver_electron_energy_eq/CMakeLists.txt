@@ -62,14 +62,23 @@ add_warpx_test(
 )
 
 # The RZ adiabat decks (inputs_test_rz_ohm_solver_electron_energy_adiabat_picmi.py)
-# are not registered yet: the QDSMC electron-energy machinery is not validated
-# in RZ. Current status (run the deck manually to reproduce):
-#   * explicit:  adiabat error median ~5.7%, max ~24% (axis/volume-weighting
-#     effects under investigation; the 2D deck passes at <1%);
-#   * implicit:  dynamics diverge from the explicit run (median ~49%);
+# are not registered yet. Investigation status (reproduce with the decks +
+# hybrid_pic_model.qdsmc_allow_unvalidated_rz = 1):
+#   * The QDSMC entropy transport itself is CLEAN in RZ: the median interior
+#     entropy K_e is conserved to +0.4% over the 60-step test and T_e follows
+#     its adiabat; the apparent ~5.7% adiabat error is dominated by a BASE
+#     RZ-hybrid ion-density redistribution (interior median n drops ~4%, wall
+#     ring to 0.66 n0, axis to 0.90 n0) that is IDENTICAL with the energy
+#     equation off (adiabatic closure) -- i.e., a pre-existing RZ hybrid
+#     wall/axis artifact, not a QDSMC one.
+#   * Remaining QDSMC-specific RZ items: the outermost ring shows a
+#     recovery-vs-diagnosed density inconsistency (adiabat ratio ~1.3 in that
+#     single ring; marker wall clamp + wall-node density under scrutiny), and
+#     the theta-implicit RZ run deviates strongly (needs the same
+#     energy-on/off bisect against the implicit closure run).
 #   * do_temperature_deposition segfaults in RZ (blocks RZ Q_ei runs).
-# Both configurations are guarded by runtime assertions until then
+# Guards remain until the wall-ring and implicit items are resolved
 # (HybridPICModel::ReadParameters refuses solve_electron_energy_equation in
-# RZ; PhysicalParticleContainer refuses do_temperature_deposition in radial
-# geometries). Remove the guards and register the tests here once RZ
-# validation lands.
+# RZ without the override; PhysicalParticleContainer refuses
+# do_temperature_deposition in radial geometries). Register the tests here
+# once RZ validation lands.
