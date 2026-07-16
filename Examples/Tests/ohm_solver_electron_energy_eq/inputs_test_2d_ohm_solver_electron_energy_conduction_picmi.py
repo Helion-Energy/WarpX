@@ -55,10 +55,13 @@ class ConductionTest(object):
     DT = 2.0e-8  # s
     total_steps = 40
 
-    def __init__(self, test, verbose, front=False):
+    def __init__(self, test, verbose, front=False, rz=False):
         self.test = test
         self.verbose = verbose or self.test
         self.front = front
+        self.rz = rz
+        if self.rz and not self.front:
+            raise ValueError("the RZ variant runs the front mode")
 
         if self.front:
             # Zel'dovich-Barenblatt slab front: kappa ~ T^{5/2} releases a
@@ -66,10 +69,27 @@ class ConductionTest(object):
             # x_f ~ t^{2/9} (porous-medium exponent m = 7/2, 1D). The cold
             # background (T_bg = T_e) has D smaller by (T_bg/T_peak)^{5/2}
             # = 1e-5, so it is effectively inert.
-            self.NX = 128
-            self.NZ = 8
-            self.L = 0.5
-            self.Lz = 0.03125
+            if self.rz:
+                # RZ: cylindrically uniform slab front along z. The same
+                # 1D Zel'dovich exponent applies, while the pass runs the
+                # full RZ machinery (off-plane kick fold into the radius,
+                # cylindrical deposit volumes, axis and wall handling).
+                #
+                # KNOWN ISSUE (unregistered): the discrete radial weights
+                # (2 pi r contents vs the nodal deposit volumes and the
+                # Verboncoeur axis factors) pump a uniform temperature
+                # radially at the axis scale, so this variant does not yet
+                # hold the RZ invariance. Same convention family as the
+                # RZ filter volume-weighting work; to be resolved with it.
+                self.NX = 8
+                self.NZ = 128
+                self.L = 0.03125
+                self.Lz = 0.5
+            else:
+                self.NX = 128
+                self.NZ = 8
+                self.L = 0.5
+                self.Lz = 0.03125
             self.T_e = 1.0  # eV background
             self.bump_amp = 99.0  # peak T = 100 eV
             self.bump_sigma_cells = 6.0
@@ -79,7 +99,7 @@ class ConductionTest(object):
             self.Lz = self.L
             self.diag_steps = self.total_steps // 5
 
-        self.dx = self.L / self.NX
+        self.dx = (self.Lz / self.NZ) if self.rz else (self.L / self.NX)
         self.bump_sigma = self.bump_sigma_cells * self.dx
         if self.front:
             # The kick width at the initial peak sits near dx (the front
@@ -114,11 +134,17 @@ class ConductionTest(object):
         """
         Te = simulation.fields.get("hybrid_electron_temperature_fp", level=0)
         # Nodal mesh coordinates spanning the (periodic) box.
-        x = np.linspace(-self.L / 2.0, self.L / 2.0, self.NX + 1)
+        if self.rz:
+            x = np.linspace(0.0, self.L, self.NX + 1)
+        else:
+            x = np.linspace(-self.L / 2.0, self.L / 2.0, self.NX + 1)
         z = np.linspace(-self.Lz / 2.0, self.Lz / 2.0, self.NZ + 1)
         X, Z = np.meshgrid(x, z, indexing="ij")
         T0_K = self.T_e * constants.q_e / constants.kb
-        r2 = X**2 if self.front else X**2 + Z**2
+        if self.front:
+            r2 = Z**2 if self.rz else X**2
+        else:
+            r2 = X**2 + Z**2
         prof = T0_K * (
             1.0 + self.bump_amp * np.exp(-r2 / (2.0 * self.bump_sigma**2))
         )
@@ -126,16 +152,28 @@ class ConductionTest(object):
         comm.Barrier()
 
     def setup_run(self):
-        self.grid = picmi.Cartesian2DGrid(
-            number_of_cells=[self.NX, self.NZ],
-            lower_bound=[-self.L / 2.0, -self.Lz / 2.0],
-            upper_bound=[self.L / 2.0, self.Lz / 2.0],
-            lower_boundary_conditions=["periodic", "periodic"],
-            upper_boundary_conditions=["periodic", "periodic"],
-            lower_boundary_conditions_particles=["periodic", "periodic"],
-            upper_boundary_conditions_particles=["periodic", "periodic"],
-            warpx_max_grid_size=self.NX,
-        )
+        if self.rz:
+            self.grid = picmi.CylindricalGrid(
+                number_of_cells=[self.NX, self.NZ],
+                lower_bound=[0.0, -self.Lz / 2.0],
+                upper_bound=[self.L, self.Lz / 2.0],
+                lower_boundary_conditions=["none", "periodic"],
+                upper_boundary_conditions=["dirichlet", "periodic"],
+                lower_boundary_conditions_particles=["none", "periodic"],
+                upper_boundary_conditions_particles=["reflecting", "periodic"],
+                warpx_max_grid_size=self.NZ,
+            )
+        else:
+            self.grid = picmi.Cartesian2DGrid(
+                number_of_cells=[self.NX, self.NZ],
+                lower_bound=[-self.L / 2.0, -self.Lz / 2.0],
+                upper_bound=[self.L / 2.0, self.Lz / 2.0],
+                lower_boundary_conditions=["periodic", "periodic"],
+                upper_boundary_conditions=["periodic", "periodic"],
+                lower_boundary_conditions_particles=["periodic", "periodic"],
+                upper_boundary_conditions_particles=["periodic", "periodic"],
+                warpx_max_grid_size=self.NX,
+            )
         simulation.time_step_size = self.DT
         simulation.max_steps = self.total_steps
         simulation.current_deposition_algo = "direct"
@@ -226,8 +264,15 @@ parser.add_argument(
     help="run the Zel'dovich nonlinear-front variant",
     action="store_true",
 )
+parser.add_argument(
+    "--rz",
+    help="run the front variant on an RZ grid (front along z)",
+    action="store_true",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
-run = ConductionTest(test=args.test, verbose=args.verbose, front=args.front)
+run = ConductionTest(
+    test=args.test, verbose=args.verbose, front=args.front, rz=args.rz
+)
 simulation.step()

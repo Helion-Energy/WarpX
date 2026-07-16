@@ -1708,10 +1708,17 @@ void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
                 auto const te_arr  = Te.array(mfi);
                 auto const u0_arr = U0.const_array(mfi);
                 auto const n0_arr = N0.const_array(mfi);
-                amrex::Real const count_floor = n_floor_rec * 1.0e-6_rt;
                 amrex::ParallelFor(box,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k)
                 {
+                    // Nodes whose deposited count is far below the local
+                    // density carry no reliable increment (boundary and
+                    // axis nodes in the radial geometries collect only
+                    // a fraction of a cell's deposit under the nodal
+                    // volume conventions): keep the prior temperature
+                    // there rather than dividing by a sliver.
+                    amrex::Real const count_floor = 0.1_rt * amrex::max(
+                        rho_arr(i,j,k) / PhysConst::q_e, n_floor_rec);
                     // Conservative delta recovery: the energy-density
                     // increment divided by the UNKICKED count deposit.
                     // The count carries the same gathered density
