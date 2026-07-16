@@ -214,6 +214,13 @@ public:
      * only and must never mix with the persistent advection markers (use a
      * dedicated container instance). Calls Redistribute() at the end.
      *
+     * The unkicked companion set (apply_kicks = false: zero displacement,
+     * zero drift) measures the pure gather-deposit roundtrip; the caller
+     * applies the conduction as the DIFFERENCE of the kicked and unkicked
+     * recoveries, cancelling the remap smoothing of the roundtrip (the
+     * dominant numerical diffusion for kernel widths below the cell size)
+     * along with the seam and noise factors.
+     *
      * @param h     pass time interval [s] (dt/2 per Strang half-pass)
      * @param Ufield nodal electron internal energy density [J/m^3], ghosts filled
      * @param Dfield nodal diffusivity [m^2/s], ghosts filled
@@ -225,7 +232,8 @@ public:
                                const amrex::MultiFab & Dfield,
                                const amrex::MultiFab & gradDx,
                                const amrex::MultiFab & gradDy,
-                               const amrex::MultiFab & gradDz);
+                               const amrex::MultiFab & gradDz,
+                               bool apply_kicks);
 
     /**
      * @brief Scatter the carried conduction energy onto Ufield as an energy

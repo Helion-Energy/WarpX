@@ -2209,6 +2209,25 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         Minimum electron number density (in m^-3) used when recovering the
         electron temperature from the QDSMC entropy deposit.
 
+    qdsmc_conduction: str, optional
+        Electron thermal conduction mode for the QDSMC energy equation:
+        "off" (default) or "isotropic". Requires
+        ``solve_electron_energy_equation``. Each Strang half-pass
+        transports the electron internal energy with deterministic
+        Gauss-Hermite samples of the Gaussian diffusion kernel
+        (Albright et al., Phys. Plasmas 9, 1898 (2002)); unconditionally
+        stable with no conduction CFL.
+
+    qdsmc_conduction_kappa: str, optional
+        Electron thermal conductivity kappa(T, n) in W/(m K) as an
+        expression of ``T`` (electron temperature in Kelvin) and ``n``
+        (electron number density in m^-3).
+
+    qdsmc_conduction_substeps: int, default=1
+        Substeps per conduction half-pass. The Gaussian kernel is exact in
+        time for frozen coefficients; substeps only refine the coefficient
+        variation of a strongly nonlinear kappa(T).
+
     substeps: int, default=10
         Total number of substeps used to advance the B-field over one full
         timestep (split evenly between the two half-steps, so ``substeps/2``
@@ -2320,6 +2339,9 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         include_temperature_relaxation=None,
         electron_ion_relaxation_rate=None,
         qdsmc_n_floor=None,
+        qdsmc_conduction=None,
+        qdsmc_conduction_kappa=None,
+        qdsmc_conduction_substeps=None,
         substeps=None,
         use_rkf45=None,
         substep_rtol=None,
@@ -2357,6 +2379,9 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.include_temperature_relaxation = include_temperature_relaxation
         self.electron_ion_relaxation_rate = electron_ion_relaxation_rate
         self.qdsmc_n_floor = qdsmc_n_floor
+        self.qdsmc_conduction = qdsmc_conduction
+        self.qdsmc_conduction_kappa = qdsmc_conduction_kappa
+        self.qdsmc_conduction_substeps = qdsmc_conduction_substeps
 
         self.substeps = substeps
         self.use_rkf45 = use_rkf45
@@ -2447,6 +2472,19 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
                 pywarpx.my_constants.mangle_expression(
                     self.electron_ion_relaxation_rate, self.mangle_dict
                 ),
+            )
+        if self.qdsmc_conduction is not None:
+            pywarpx.hybridpicmodel.qdsmc_conduction = self.qdsmc_conduction
+        if self.qdsmc_conduction_kappa is not None:
+            pywarpx.hybridpicmodel.__setattr__(
+                "qdsmc_conduction_kappa(T,n)",
+                pywarpx.my_constants.mangle_expression(
+                    self.qdsmc_conduction_kappa, self.mangle_dict
+                ),
+            )
+        if self.qdsmc_conduction_substeps is not None:
+            pywarpx.hybridpicmodel.qdsmc_conduction_substeps = (
+                self.qdsmc_conduction_substeps
             )
         if self.qdsmc_n_floor is not None:
             pywarpx.hybridpicmodel.qdsmc_n_floor = self.qdsmc_n_floor
