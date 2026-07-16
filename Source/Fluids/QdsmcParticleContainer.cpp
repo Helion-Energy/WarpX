@@ -645,10 +645,13 @@ QdsmcParticleContainer::SpawnConductionNodes (int lev, amrex::Real const h,
                                               const amrex::MultiFab & Ufield,
                                               const amrex::MultiFab & Nfield,
                                               const amrex::MultiFab & Dfield,
-                                              const amrex::MultiFab & gradDx,
-                                              const amrex::MultiFab & gradDy,
-                                              const amrex::MultiFab & gradDz,
-                                              bool const apply_kicks)
+                                              const amrex::MultiFab & driftx,
+                                              const amrex::MultiFab & drifty,
+                                              const amrex::MultiFab & driftz,
+                                              bool const apply_kicks,
+                                              const amrex::MultiFab * bhatx,
+                                              const amrex::MultiFab * bhaty,
+                                              const amrex::MultiFab * bhatz)
 {
     ABLASTR_PROFILE("QdsmcParticleContainer::SpawnConductionNodes()");
 
@@ -687,7 +690,13 @@ QdsmcParticleContainer::SpawnConductionNodes (int lev, amrex::Real const h,
 #else
     constexpr int n_ax = 1;
 #endif
-    constexpr int n_nodes = (n_ax == 3) ? 27 : ((n_ax == 2) ? 9 : 3);
+    const bool parallel_mode = (bhatx != nullptr);
+    const int n_nodes = parallel_mode
+        ? 3 : ((n_ax == 3) ? 27 : ((n_ax == 2) ? 9 : 3));
+#if defined(WARPX_DIM_RZ)
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!parallel_mode,
+        "qdsmc_conduction = parallel is not supported in RZ yet");
+#endif
 
     // 3-node Gauss-Hermite rule.
     const amrex::GpuArray<amrex::Real, 3> gh_xi
@@ -778,9 +787,15 @@ QdsmcParticleContainer::SpawnConductionNodes (int lev, amrex::Real const h,
         auto const u_arr   = Ufield.const_array(mfi);
         auto const nn_arr  = Nfield.const_array(mfi);
         auto const d_arr   = Dfield.const_array(mfi);
-        auto const gdx_arr = gradDx.const_array(mfi);
-        auto const gdy_arr = gradDy.const_array(mfi);
-        auto const gdz_arr = gradDz.const_array(mfi);
+        auto const gdx_arr = driftx.const_array(mfi);
+        auto const gdy_arr = drifty.const_array(mfi);
+        auto const gdz_arr = driftz.const_array(mfi);
+        amrex::Array4<amrex::Real const> bx_arr, by_arr, bz_arr;
+        if (parallel_mode) {
+            bx_arr = bhatx->const_array(mfi);
+            by_arr = bhaty->const_array(mfi);
+            bz_arr = bhatz->const_array(mfi);
+        }
 
         amrex::Array4<amrex::Real const> eb_phi_arr;
         if (eb_phi != nullptr) { eb_phi_arr = eb_phi->const_array(mfi); }
@@ -820,9 +835,24 @@ QdsmcParticleContainer::SpawnConductionNodes (int lev, amrex::Real const h,
             auto const gd = ablastr::particles::doGatherVectorFieldNodal(
                 xh, yh, zh, gdx_arr, gdy_arr, gdz_arr, dxi, plo);
 
-            amrex::Real const sig =
+            amrex::Real sig =
                 apply_kicks ? std::sqrt(2.0_rt * d_home * h) : 0.0_rt;
             amrex::Real const hdrift = apply_kicks ? h : 0.0_rt;
+
+            amrex::GpuArray<amrex::Real, 3> bpar{{0.0_rt, 0.0_rt, 0.0_rt}};
+            if (parallel_mode) {
+                auto const b = ablastr::particles::doGatherVectorFieldNodal(
+                    xh, yh, zh, bx_arr, by_arr, bz_arr, dxi, plo);
+                amrex::Real const bmag =
+                    std::sqrt(b[0]*b[0] + b[1]*b[1] + b[2]*b[2]);
+                if (bmag > 0.5_rt) {
+                    bpar[0] = b[0] / bmag;
+                    bpar[1] = b[1] / bmag;
+                    bpar[2] = b[2] / bmag;
+                } else {
+                    sig = 0.0_rt;  // unmagnetized: deposit in place
+                }
+            }
 
             // Energy content of the home cell carried by this cell's nodes.
             // The deposition kernel normalizes by the true (cylindrical in
@@ -869,14 +899,37 @@ QdsmcParticleContainer::SpawnConductionNodes (int lev, amrex::Real const h,
                 int const ky = (n_ax >= 2) ? (kn / 3) % 3 : 0;
                 int const kz = (n_ax == 3) ? (kn / 9)     : 0;
 
-                // Tensor-product weight and per-axis kicks. Axis mapping per
-                // dim: 3D/RZ kick (x, y, z); XZ kicks (x, z) via (kx, ky);
-                // 1D kicks z via kx.
-                amrex::Real w = gh_w[kx];
-                if (n_ax >= 2) { w *= gh_w[ky]; }
-                if (n_ax == 3) { w *= gh_w[kz]; }
+                // Node weight: the 1D rule along the field line in
+                // parallel mode, the tensor product otherwise (axis
+                // mapping per dim: 3D/RZ kick (x, y, z); XZ kicks (x, z)
+                // via (kx, ky); 1D kicks z via kx).
+                amrex::Real w = gh_w[parallel_mode ? kn : kx];
+                if (!parallel_mode && n_ax >= 2) { w *= gh_w[ky]; }
+                if (!parallel_mode && n_ax == 3) { w *= gh_w[kz]; }
 
                 amrex::Real xn = xh, yn = yh, zn = zh;
+                if (parallel_mode) {
+                    // Field-aligned 1D Gauss-Hermite kick. b_hat was
+                    // gathered per cell before the node loop; a zero
+                    // vector (unmagnetized cell) deposits in place.
+                    amrex::Real const s_arc = gh_xi[kn] * sig;
+                    xn += s_arc * bpar[0] + gd[0] * hdrift;
+                    yn += s_arc * bpar[1] + gd[1] * hdrift;
+                    zn += s_arc * bpar[2] + gd[2] * hdrift;
+#if !defined(WARPX_DIM_1D_Z)
+                    xn = reflect(xn, 0);
+#endif
+#if defined(WARPX_DIM_3D)
+                    yn = reflect(yn, 1);
+                    zn = reflect(zn, 2);
+#elif defined(WARPX_DIM_XZ)
+                    zn = reflect(zn, 1);
+#else
+                    zn = reflect(zn, 0);
+#endif
+                    amrex::Real w_par = gh_w[kn];
+                    amrex::ignore_unused(w_par);
+                } else {
 #if defined(WARPX_DIM_3D)
                 xn += gh_xi[kx] * sig + gd[0] * hdrift;
                 yn += gh_xi[ky] * sig + gd[1] * hdrift;
@@ -901,6 +954,7 @@ QdsmcParticleContainer::SpawnConductionNodes (int lev, amrex::Real const h,
                 zn += gh_xi[kx] * sig + gd[2] * hdrift;
                 zn = reflect(zn, 0);
 #endif
+                }
 
                 // Nodes kicked into an embedded body deposit at home
                 // instead (energy stays out of conductors; 3a stub).

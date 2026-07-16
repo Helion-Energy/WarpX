@@ -55,13 +55,31 @@ class ConductionTest(object):
     DT = 2.0e-8  # s
     total_steps = 40
 
-    def __init__(self, test, verbose, front=False, rz=False):
+    def __init__(self, test, verbose, front=False, rz=False, circle=False):
         self.test = test
         self.verbose = verbose or self.test
         self.front = front
         self.rz = rz
+        self.circle = circle
         if self.rz and not self.front:
             raise ValueError("the RZ variant runs the front mode")
+        if self.circle and (self.front or self.rz):
+            raise ValueError("--circle is a standalone mode")
+
+        if self.circle:
+            # Parallel-conduction verification on circular in-plane field
+            # lines: a hot patch on a ring spreads ALONG the line as 1D
+            # arc-length diffusion and must not leak across (the grid-free
+            # transport of the field-line Green's-function method;
+            # del-Castillo-Negrete & Chacon, PRL 106, 195004 (2011)).
+            self.NX = 64
+            self.NZ = 64
+            self.L = 0.5
+            self.Lz = 0.5
+            self.bump_sigma_cells = 3.0
+            self.ring_r0_cells = 16.0
+            self.total_steps = 40
+            self.diag_steps = 8
 
         if self.front:
             # Zel'dovich-Barenblatt slab front: kappa ~ T^{5/2} releases a
@@ -101,7 +119,15 @@ class ConductionTest(object):
 
         self.dx = (self.Lz / self.NZ) if self.rz else (self.L / self.NX)
         self.bump_sigma = self.bump_sigma_cells * self.dx
-        if self.front:
+        if self.circle:
+            self.ring_r0 = self.ring_r0_cells * self.dx
+        if self.circle:
+            # sub-kick ~ 0.7 dx along the line (4 substeps per half-pass);
+            # sized so the angular spread stays well under a radian and
+            # the circular-statistics variance remains linear.
+            self.D = self.dx**2 / self.DT * 2.0
+            self.kappa = f"{1.5 * self.n0 * constants.kb * self.D}"
+        elif self.front:
             # The kick width at the initial peak sits near dx (the front
             # exponent is set by scaling and conservation, not the kernel
             # prefactor); the run length keeps the front inside the box.
@@ -141,7 +167,9 @@ class ConductionTest(object):
         z = np.linspace(-self.Lz / 2.0, self.Lz / 2.0, self.NZ + 1)
         X, Z = np.meshgrid(x, z, indexing="ij")
         T0_K = self.T_e * constants.q_e / constants.kb
-        if self.front:
+        if self.circle:
+            r2 = (X - self.ring_r0) ** 2 + Z**2
+        elif self.front:
             r2 = Z**2 if self.rz else X**2
         else:
             r2 = X**2 + Z**2
@@ -180,6 +208,34 @@ class ConductionTest(object):
         simulation.particle_shape = 1
         simulation.verbose = self.verbose
 
+        if self.circle:
+            # Azimuthal in-plane rings about the box center,
+            # b = (-z, 0, x)/r, with a hybrid-friendly radial profile: a
+            # rigid-rotor core (B ~ r: uniform current, no field null), a
+            # current-free 1/r annulus where the test patch lives, and a
+            # cos^2 taper to zero before the box edge (no current sheets
+            # at the periodic seams; the zero-field corners deposit in
+            # place through the unmagnetized gate).
+            r_c = 6.0 * self.dx
+            r_t = 0.30 * self.L
+            r_e = 0.45 * self.L
+            rr = f"max(sqrt(x*x+z*z),{0.01 * self.dx})"
+            ramp = f"min({rr}/{r_c},1.0)"
+            taper = (f"cos(1.5707963267948966*"
+                     f"min(max(({rr}-{r_t})/{r_e - r_t},0.0),1.0))**2")
+            # 1 mT: the parallel kernel only consumes the field DIRECTION,
+            # and the whistler frequency at this grid/dt must stay under
+            # the explicit B-substepping stability limit
+            # (omega ~ k_max^2 B / (mu0 n e); 0.1 T would put
+            # omega dt_sub ~ 40 and detonate within two steps).
+            prof = f"(1.0e-3*{ramp}*{taper})"
+            b_init = picmi.AnalyticInitialField(
+                Bx_expression=f"-z/{rr}*{prof}",
+                By_expression="0.0",
+                Bz_expression=f"x/{rr}*{prof}",
+            )
+            simulation.add_applied_field(b_init)
+
         self.solver = picmi.HybridPICSolver(
             grid=self.grid,
             gamma=1.0,
@@ -193,9 +249,9 @@ class ConductionTest(object):
             # scale is << the run, so the field never builds; eta*J does
             # not enter the temperature (Joule heating off).
             plasma_resistivity=0.1,
-            substeps=4,
+            substeps=50 if self.circle else 4,
             solve_electron_energy_equation=True,
-            qdsmc_conduction="isotropic",
+            qdsmc_conduction="parallel" if self.circle else "isotropic",
             qdsmc_conduction_kappa=self.kappa,
             # Sub-kicks of ~1 dx: the 3-node Gauss-Hermite rule imprints
             # its node triplet on the field when a single kick spans
@@ -269,10 +325,16 @@ parser.add_argument(
     help="run the front variant on an RZ grid (front along z)",
     action="store_true",
 )
+parser.add_argument(
+    "--circle",
+    help="parallel conduction on circular field lines",
+    action="store_true",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
 run = ConductionTest(
-    test=args.test, verbose=args.verbose, front=args.front, rz=args.rz
+    test=args.test, verbose=args.verbose, front=args.front, rz=args.rz,
+    circle=args.circle,
 )
 simulation.step()
