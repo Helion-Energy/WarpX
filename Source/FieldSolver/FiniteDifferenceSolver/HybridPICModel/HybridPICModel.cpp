@@ -808,8 +808,10 @@ void HybridPICModel::CalculateElectronPressure(const int lev) const
     // is meaningful even when solve_electron_energy_equation is off. With
     // the polytropic Pe = n0_ref^(-gamma) * (rho/q_e)^gamma * k_B * Te_ref,
     // the per-cell implied T_e is just Pe / (n_e * k_B). When the energy
-    // equation is on, this path is skipped and T_e is owned by QDSMC.
-    {
+    // equation is on, this path is skipped and T_e is owned by QDSMC
+    // (without the gate, the first-step HybridPICInitializeRhoJandB call
+    // would silently overwrite any user-loaded initial T_e profile).
+    if (!m_solve_electron_energy_equation) {
         amrex::MultiFab       & Te  = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
         amrex::MultiFab const & Pe  = *electron_pressure_fp;
         amrex::MultiFab const & rho = *rho_fp;
@@ -1614,6 +1616,8 @@ void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
         amrex::IntVect const ng = Te.nGrowVect();
         amrex::MultiFab U (Te.boxArray(), Te.DistributionMap(), 1, ng);
         amrex::MultiFab N (Te.boxArray(), Te.DistributionMap(), 1, ng);
+        amrex::MultiFab U0 (Te.boxArray(), Te.DistributionMap(), 1, ng);
+        amrex::MultiFab N0 (Te.boxArray(), Te.DistributionMap(), 1, ng);
         amrex::MultiFab D (Te.boxArray(), Te.DistributionMap(), 1, ng);
         amrex::MultiFab gDx (Te.boxArray(), Te.DistributionMap(), 1, ng);
         amrex::MultiFab gDy (Te.boxArray(), Te.DistributionMap(), 1, ng);
@@ -1680,8 +1684,17 @@ void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
             gDy.FillBoundary(geom.periodicity());
             gDz.FillBoundary(geom.periodicity());
 
-            // Spawn-kick, deposit both fields, recover by ratio.
-            m_qdsmc_cond_pc->SpawnConductionNodes(lev, h_sub, U, N, D, gDx, gDy, gDz);
+            // Delta form: the kicked and unkicked node sets share every
+            // remap, seam and sampling factor; their recovery difference
+            // isolates the pure diffusive transport (without it the
+            // gather-deposit roundtrip's own smoothing dominates for
+            // kernels narrower than a cell).
+            m_qdsmc_cond_pc->SpawnConductionNodes(lev, h_sub, U, N, D,
+                                                  gDx, gDy, gDz, false);
+            m_qdsmc_cond_pc->DepositConductionEnergy(lev, U0);
+            m_qdsmc_cond_pc->DepositConductionCount(lev, N0);
+            m_qdsmc_cond_pc->SpawnConductionNodes(lev, h_sub, U, N, D,
+                                                  gDx, gDy, gDz, true);
             m_qdsmc_cond_pc->DepositConductionEnergy(lev, U);
             m_qdsmc_cond_pc->DepositConductionCount(lev, N);
 
@@ -1692,17 +1705,25 @@ void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
                 auto const rho_arr = rho.const_array(mfi, rho_comp);
                 auto const te_arr  = Te.array(mfi);
                 auto const nn_arr = N.const_array(mfi);
+                auto const u0_arr = U0.const_array(mfi);
+                auto const n0_arr = N0.const_array(mfi);
                 amrex::Real const count_floor =
                     n_floor_rec * 1.0e-6_rt;  // "some count arrived" gate
                 amrex::ParallelFor(box,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k)
                 {
-                    // Ratio recovery, energy per electron: nodes no
-                    // conduction node reached keep their prior temperature.
-                    if (nn_arr(i,j,k) > count_floor) {
+                    // Delta-form ratio recovery, energy per electron: the
+                    // difference of the kicked and unkicked recoveries is
+                    // the conduction increment; nodes no conduction node
+                    // reached keep their prior temperature.
+                    if (nn_arr(i,j,k) > count_floor
+                        && n0_arr(i,j,k) > count_floor) {
+                        amrex::Real const dT = (2.0_rt/3.0_rt)
+                            * (u_arr(i,j,k) / nn_arr(i,j,k)
+                               - u0_arr(i,j,k) / n0_arr(i,j,k))
+                            / PhysConst::kb;
                         te_arr(i,j,k) = amrex::max(
-                            (2.0_rt/3.0_rt) * u_arr(i,j,k)
-                            / (nn_arr(i,j,k) * PhysConst::kb), 0.0_rt);
+                            te_arr(i,j,k) + dT, 0.0_rt);
                     }
                 });
             }
@@ -2380,6 +2401,7 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
         QDSMCInitializeUe(lev);
         QDSMCInitializeKe(lev);
 
+
         using ablastr::fields::Direction;
         amrex::MultiFab const & Vex = *warpx.m_fields.get(FieldType::hybrid_electron_velocity_fp, Direction{0}, lev);
         amrex::MultiFab const & Vey = *warpx.m_fields.get(FieldType::hybrid_electron_velocity_fp, Direction{1}, lev);
@@ -2406,6 +2428,7 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
         // Step 5: recover T_e^{n+1} from (deposited K*N) / (deposited N) and
         // the updated n_e (from rho_fp = rho^{n+1}).
         QDSMCUpdateTe(lev);
+
 
         // Step 6: Joule-heating source on T_e (Phys. Plasmas 31, 012902 (2024), Eq. 12), per-cell from
         // rho_fp(_s), the plasma current, and the Ohm's-law eta parser. With the
