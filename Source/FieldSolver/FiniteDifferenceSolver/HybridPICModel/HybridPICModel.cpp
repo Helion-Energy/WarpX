@@ -85,6 +85,15 @@ void HybridPICModel::ReadParameters ()
     }
 
     pp_hybrid.query("plasma_resistivity(rho,J,t)", m_eta_expression);
+    pp_hybrid.query("qdsmc_conduction", m_qdsmc_conduction);
+    pp_hybrid.query("qdsmc_conduction_kappa(T,n)", m_qdsmc_kappa_expression);
+    pp_hybrid.query("qdsmc_conduction_substeps", m_qdsmc_conduction_substeps);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_qdsmc_conduction == "off" || m_qdsmc_conduction == "isotropic",
+        "hybrid_pic_model.qdsmc_conduction must be 'off' or 'isotropic'");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_qdsmc_conduction_substeps >= 1,
+        "hybrid_pic_model.qdsmc_conduction_substeps must be >= 1");
     pp_hybrid.query("plasma_hyper_resistivity(rho,B)", m_eta_h_expression);
 
     utils::parser::queryWithParser(pp_hybrid, "n_floor", m_n_floor);
@@ -435,6 +444,16 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
     m_resistivity_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(m_eta_expression, {"rho","J","t"}));
     m_eta = m_resistivity_parser->compile<3>();
+
+    if (m_qdsmc_conduction != "off") {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_solve_electron_energy_equation,
+            "hybrid_pic_model.qdsmc_conduction requires "
+            "hybrid_pic_model.solve_electron_energy_equation = true");
+        m_qdsmc_kappa_parser = std::make_unique<amrex::Parser>(
+            utils::parser::makeParser(m_qdsmc_kappa_expression, {"T","n"}));
+        m_qdsmc_kappa = m_qdsmc_kappa_parser->compile<2>();
+    }
     const std::set<std::string> resistivity_symbols = m_resistivity_parser->symbols();
     m_resistivity_has_J_dependence += resistivity_symbols.count("J");
 
@@ -627,6 +646,11 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
         m_qdsmc_pc = std::make_unique<QdsmcParticleContainer>(&warpx);
         for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
             m_qdsmc_pc->InitParticles(lev);
+        }
+        if (m_qdsmc_conduction != "off") {
+            // One-pass conduction nodes get their own container (the
+            // advection markers above are persistent).
+            m_qdsmc_cond_pc = std::make_unique<QdsmcParticleContainer>(&warpx);
         }
     }
 }
@@ -1562,6 +1586,131 @@ void HybridPICModel::QDSMCInitializeKe (int const lev, amrex::MultiFab const & r
 }
 
 
+void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
+                                          warpx::fields::FieldType const rho_type,
+                                          int const rho_comp) const
+{
+    ABLASTR_PROFILE("HybridPICModel::QdsmcConductionPass()");
+
+    auto & warpx = WarpX::GetInstance();
+    amrex::Real const n_floor_rec = m_qdsmc_n_floor;
+    auto const kappa = m_qdsmc_kappa;
+
+    amrex::Real const h_sub = h / m_qdsmc_conduction_substeps;
+
+    for (int lev = 0; lev <= warpx.finestLevel(); ++lev)
+    {
+        amrex::Geometry const & geom = warpx.Geom(lev);
+        auto const dxi = geom.InvCellSizeArray();
+
+        amrex::MultiFab & Te = *warpx.m_fields.get(
+            FieldType::hybrid_electron_temperature_fp, lev);
+        amrex::MultiFab const & rho = *warpx.m_fields.get(rho_type, lev);
+
+        // Work fields on the nodal T_e layout. The guard width must match
+        // the registered fields' deposition guards: the shape-1 scatter
+        // writes one node beyond the grown tile box, past a 1-ghost
+        // allocation.
+        amrex::IntVect const ng = Te.nGrowVect();
+        amrex::MultiFab U (Te.boxArray(), Te.DistributionMap(), 1, ng);
+        amrex::MultiFab N (Te.boxArray(), Te.DistributionMap(), 1, ng);
+        amrex::MultiFab D (Te.boxArray(), Te.DistributionMap(), 1, ng);
+        amrex::MultiFab gDx (Te.boxArray(), Te.DistributionMap(), 1, ng);
+        amrex::MultiFab gDy (Te.boxArray(), Te.DistributionMap(), 1, ng);
+        amrex::MultiFab gDz (Te.boxArray(), Te.DistributionMap(), 1, ng);
+
+        for (int sub = 0; sub < m_qdsmc_conduction_substeps; ++sub)
+        {
+            // Nodal energy density and diffusivity from the pass state.
+            for (amrex::MFIter mfi(Te, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                amrex::Box const box = mfi.growntilebox(ng);
+                auto const te_arr  = Te.const_array(mfi);
+                auto const rho_arr = rho.const_array(mfi, rho_comp);
+                auto const u_arr = U.array(mfi);
+                auto const d_arr = D.array(mfi);
+                auto const nn_arr = N.array(mfi);
+                amrex::ParallelFor(box,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    amrex::Real const n = amrex::max(
+                        rho_arr(i,j,k) / PhysConst::q_e, n_floor_rec);
+                    amrex::Real const T = amrex::max(te_arr(i,j,k), 0.0_rt);
+                    u_arr(i,j,k) = 1.5_rt * n * PhysConst::kb * T;
+                    nn_arr(i,j,k) = n;
+                    d_arr(i,j,k) = (2.0_rt/3.0_rt) * kappa(T, n)
+                                   / (n * PhysConst::kb);
+                });
+            }
+            U.FillBoundary(geom.periodicity());
+            N.FillBoundary(geom.periodicity());
+            D.FillBoundary(geom.periodicity());
+
+            // grad(D) by nodal central differences (Ito drift). Valid nodes
+            // only; the one-sided domain edge is handled by the ghost fill
+            // (periodic wrap or the last interior value via FillBoundary +
+            // the reflection treatment of the kick itself).
+            for (amrex::MFIter mfi(D, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                amrex::Box const box = mfi.tilebox();
+                auto const d_arr = D.const_array(mfi);
+                auto const gx = gDx.array(mfi);
+                auto const gy = gDy.array(mfi);
+                auto const gz = gDz.array(mfi);
+                amrex::ParallelFor(box,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+#if defined(WARPX_DIM_3D)
+                    gx(i,j,k) = 0.5_rt*dxi[0]*(d_arr(i+1,j,k) - d_arr(i-1,j,k));
+                    gy(i,j,k) = 0.5_rt*dxi[1]*(d_arr(i,j+1,k) - d_arr(i,j-1,k));
+                    gz(i,j,k) = 0.5_rt*dxi[2]*(d_arr(i,j,k+1) - d_arr(i,j,k-1));
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+                    gx(i,j,k) = 0.5_rt*dxi[0]*(d_arr(i+1,j,k) - d_arr(i-1,j,k));
+                    gy(i,j,k) = 0.0_rt;
+                    gz(i,j,k) = 0.5_rt*dxi[1]*(d_arr(i,j+1,k) - d_arr(i,j-1,k));
+#else
+                    // 1D: the single index runs along z.
+                    gx(i,j,k) = 0.0_rt;
+                    gy(i,j,k) = 0.0_rt;
+                    gz(i,j,k) = 0.5_rt*dxi[0]*(d_arr(i+1,j,k) - d_arr(i-1,j,k));
+#endif
+                });
+            }
+            gDx.FillBoundary(geom.periodicity());
+            gDy.FillBoundary(geom.periodicity());
+            gDz.FillBoundary(geom.periodicity());
+
+            // Spawn-kick, deposit both fields, recover by ratio.
+            m_qdsmc_cond_pc->SpawnConductionNodes(lev, h_sub, U, N, D, gDx, gDy, gDz);
+            m_qdsmc_cond_pc->DepositConductionEnergy(lev, U);
+            m_qdsmc_cond_pc->DepositConductionCount(lev, N);
+
+            for (amrex::MFIter mfi(Te, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                amrex::Box const box = mfi.tilebox();
+                auto const u_arr   = U.const_array(mfi);
+                auto const rho_arr = rho.const_array(mfi, rho_comp);
+                auto const te_arr  = Te.array(mfi);
+                auto const nn_arr = N.const_array(mfi);
+                amrex::Real const count_floor =
+                    n_floor_rec * 1.0e-6_rt;  // "some count arrived" gate
+                amrex::ParallelFor(box,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    // Ratio recovery, energy per electron: nodes no
+                    // conduction node reached keep their prior temperature.
+                    if (nn_arr(i,j,k) > count_floor) {
+                        te_arr(i,j,k) = amrex::max(
+                            (2.0_rt/3.0_rt) * u_arr(i,j,k)
+                            / (nn_arr(i,j,k) * PhysConst::kb), 0.0_rt);
+                    }
+                });
+            }
+            Te.FillBoundary(geom.periodicity());
+        }
+    }
+}
+
 void HybridPICModel::QDSMCUpdateTe (int const lev) const
 {
     auto & warpx = WarpX::GetInstance();
@@ -2210,6 +2359,13 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
 
     auto & warpx = WarpX::GetInstance();
 
+    // Strang first half of the electron thermal conduction (Phase 3a):
+    // cond(dt/2) o [advect + sources](dt) o cond(dt/2). The pass updates
+    // T_e in place, so the entropy seed below picks up the conducted state.
+    if (m_qdsmc_conduction != "off") {
+        QdsmcConductionPass(0.5_rt*dt, FieldType::hybrid_rho_fp_temp, 0);
+    }
+
     // J_plasma at the current B (B^{n+1/2} from the last Faraday substep) is
     // needed for V_e. The downstream final-state E-solve also recomputes
     // J_plasma later, so this call is redundant work in some configurations
@@ -2301,6 +2457,14 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
         if (m_include_temperature_relaxation || redirect_active) {
             QDSMCApplyIonHeating(lev, dt, redirect_active ? &ion_redirect_E : nullptr,
                                  m_include_temperature_relaxation ? &Ti_dep_by_species : nullptr);
+        }
+
+        // Strang second half of the electron thermal conduction, on the
+        // post-advection density rho^{n+1} (the pass loops levels
+        // internally; the single-level guard mirrors the solver-wide
+        // finest_level == 0 restriction).
+        if (m_qdsmc_conduction != "off" && lev == 0) {
+            QdsmcConductionPass(0.5_rt*dt, FieldType::rho_fp, 0);
         }
 
         // Step 7: emit P_e = n_e * k_B * T_e for the downstream Ohm's-law solve.
@@ -2593,6 +2757,14 @@ void HybridPICModel::AdvanceElectronEnergyQDSMCTheta (amrex::Real const dt,
         amrex::MultiFab::Copy(Te, Te_old, 0, 0, Te.nComp(), Te.nGrowVect());
         m_qdsmc_pc->ResetParticles(lev);
 
+        // Strang first half of the electron thermal conduction, from the
+        // restored T_e^n on rho^n (re-entrant: runs inside every residual
+        // evaluation with iterate-state coefficients; the pass loops levels
+        // internally, single-level guard as elsewhere).
+        if (m_qdsmc_conduction != "off" && lev == 0) {
+            QdsmcConductionPass(0.5_rt*dt, FieldType::hybrid_rho_fp_temp, 0);
+        }
+
         // Charge-density states: rho^n was deposited once at step start into
         // hybrid_rho_fp_temp (see QDSMCSaveImplicitStepStart); rho^{n+1/2} is
         // component 1 of rho_fp, deposited at the current-iterate midpoint
@@ -2702,6 +2874,12 @@ void HybridPICModel::AdvanceElectronEnergyQDSMCTheta (amrex::Real const dt,
             }
             if (m_include_temperature_relaxation) {
                 QDSMCAddTemperatureRelaxation(lev, dt, rho_half, m_qdsmc_Ti_by_name[lev]);
+            }
+
+            // Strang second half of the electron thermal conduction, on
+            // the midpoint density rho^{n+1/2} (rho_fp component 1).
+            if (m_qdsmc_conduction != "off" && lev == 0) {
+                QdsmcConductionPass(0.5_rt*dt, FieldType::rho_fp, 1);
             }
 
             // Step 6: emit Pe^{n+theta} for the Ohm's-law E-solve of this

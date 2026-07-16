@@ -486,6 +486,32 @@ public:
                                           bool refresh_species_deposits) const;
 
     /**
+     * \brief One isotropic QDSMC conduction half-pass over the interval h
+     *        (Phase 3a; Strang-wrapped around the entropy-advection stage
+     *        by the callers).
+     *
+     *        Per level: build the nodal internal-energy density
+     *        U = (3/2) n_e k_B T_e and diffusivity
+     *        D = 2 kappa(T_e, n_e) / (3 n_e k_B) (kappa from the
+     *        qdsmc_conduction_kappa parser) plus grad(D) by central
+     *        differences; spawn-kick the Gauss-Hermite conduction nodes
+     *        (see QdsmcParticleContainer::SpawnConductionNodes); deposit
+     *        the transported energy; recover
+     *        T_e = (2/3) U_new / (n_e k_B) into
+     *        hybrid_electron_temperature_fp. Unconditionally stable and
+     *        positivity-preserving (positive weights, conservative
+     *        deposit); no conduction CFL.
+     *
+     * \param h        pass interval [s] (dt/2 per Strang half)
+     * \param rho_type field register holding the charge density that
+     *                 defines n_e for this pass
+     * \param rho_comp component of that field to read
+     */
+    void QdsmcConductionPass (amrex::Real h,
+                              warpx::fields::FieldType rho_type,
+                              int rho_comp) const;
+
+    /**
      * \brief Post-solve completion of the theta-implicit electron-energy
      *        step: apply the stochastic ion-heating realization (Q_ei
      *        conjugate) once with converged states, refresh Pe to
@@ -643,6 +669,23 @@ public:
      * same floor as the rest of the hybrid solver. */
     amrex::Real m_qdsmc_n_floor = 1.0;
 
+    /** QDSMC electron thermal conduction (Phase 3a: isotropic scaffold).
+     *  "off" (default) or "isotropic". Requires
+     *  solve_electron_energy_equation. Strang-wrapped around the
+     *  entropy-advection stage; see QdsmcConductionPass. */
+    std::string m_qdsmc_conduction = "off";
+
+    /** Electron thermal conductivity kappa(T, n) [W/(m K)] for the QDSMC
+     *  conduction pass (T in Kelvin, n in 1/m^3). */
+    std::string m_qdsmc_kappa_expression = "0.0";
+    std::unique_ptr<amrex::Parser> m_qdsmc_kappa_parser;
+    amrex::ParserExecutor<2> m_qdsmc_kappa;
+
+    /** Substeps per conduction half-pass. The Gaussian kernel is exact in
+     *  time for frozen coefficients; substeps only refine the coefficient
+     *  variation of a strongly nonlinear kappa(T). */
+    int m_qdsmc_conduction_substeps = 1;
+
     /** Plasma density floor - if n < n_floor it will be set to n_floor */
     amrex::Real m_n_floor = 1.0;
 
@@ -789,6 +832,12 @@ public:
      *  because its lifetime is tied to the electron-energy equation that
      *  the hybrid model is responsible for. */
     std::unique_ptr<QdsmcParticleContainer> m_qdsmc_pc;
+
+    /** Dedicated container for the one-pass conduction nodes (Phase 3a).
+     *  Kept separate from m_qdsmc_pc: the advection markers are persistent
+     *  (spawned once per run), while conduction nodes are spawned, kicked,
+     *  deposited and destroyed every pass. */
+    std::unique_ptr<QdsmcParticleContainer> m_qdsmc_cond_pc;
 
     /** Per-charged-species ion-temperature deposits frozen at t^n for the
      *  duration of one theta-implicit step (built by
