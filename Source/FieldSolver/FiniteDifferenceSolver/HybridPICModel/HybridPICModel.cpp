@@ -1839,6 +1839,19 @@ void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
                                                   bpx, bpy, bpz);
             m_qdsmc_cond_pc->DepositConductionEnergy(lev, U);
 
+            if (std::getenv("WARPX_COND_TRACE") != nullptr) {
+                amrex::Real const dmax = D.max(0);
+                amrex::Real const nbar = rho.sum(rho_comp)
+                    / (PhysConst::q_e * rho.boxArray().numPts());
+                amrex::Print() << "[cond-trace] sub " << sub
+                    << " Dmax " << dmax
+                    << " sig/dx " << std::sqrt(2.0*dmax*h_sub)
+                        * geom.InvCellSize(0)
+                    << " nbar " << nbar
+                    << " dU " << (U.sum(0) - U0.sum(0))
+                    << " Te [" << Te.min(0) << "," << Te.max(0) << "]\n";
+            }
+
             for (amrex::MFIter mfi(Te, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
             {
                 amrex::Box const box = mfi.tilebox();
@@ -2635,7 +2648,8 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
         // post-advection density rho^{n+1} (the pass loops levels
         // internally; the single-level guard mirrors the solver-wide
         // finest_level == 0 restriction).
-        if (m_qdsmc_conduction != "off" && lev == 0) {
+        if (m_qdsmc_conduction != "off" && lev == 0
+            && std::getenv("WARPX_COND_SKIP_POST") == nullptr) {
             QdsmcConductionPass(0.5_rt*dt, FieldType::rho_fp, 0);
         }
 
