@@ -6,11 +6,17 @@
 # --- (porous-medium exponent m = 7/2 in one dimension). The front position
 # --- is the outermost crossing of a fixed threshold above the background.
 
+import argparse
 import glob
 import sys
 
 import numpy as np
 import yt
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--rz", action="store_true",
+                    help="RZ variant: the front runs along z")
+args, _ = parser.parse_known_args()
 
 # Deck constants (keep in sync with the inputs file)
 L = 0.5
@@ -27,7 +33,8 @@ EXPONENT = 2.0 / 9.0
 
 
 def front_position(te):
-    prof = te.mean(axis=1)  # slab: average over z
+    # slab: average over the uniform direction (r in RZ, z in Cartesian)
+    prof = te.mean(axis=0) if args.rz else te.mean(axis=1)
     x = (np.arange(prof.size) + 0.5) * DX - L / 2.0
     above = np.where(prof > THRESH)[0]
     if above.size == 0:
@@ -84,6 +91,15 @@ def main():
     ad = ds.covering_grid(0, ds.domain_left_edge, ds.domain_dimensions)
     te = np.squeeze(np.array(ad["boxlib", "Te"]))
     assert te.min() >= 0.5 * T_BG, "background cooled unphysically"
+
+    # 4) RZ only: the cylindrically uniform slab must STAY radially
+    #    uniform -- the off-plane kick fold, the cylindrical deposit
+    #    volumes and the axis/wall handling all cancel in the r-profile.
+    if args.rz:
+        hot = te[:, np.abs(te.mean(axis=0) - te.mean()).argmax()]
+        r_spread = (hot.max() - hot.min()) / hot.mean()
+        print(f"radial spread at the hottest z: {r_spread:.2%}")
+        assert r_spread < 0.10, f"radial nonuniformity: {r_spread:.2%}"
 
     print("\nAll QDSMC conduction-front checks passed.")
     return 0
