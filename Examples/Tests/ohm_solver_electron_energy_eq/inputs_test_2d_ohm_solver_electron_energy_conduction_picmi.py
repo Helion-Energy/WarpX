@@ -55,22 +55,50 @@ class ConductionTest(object):
     DT = 2.0e-8  # s
     total_steps = 40
 
-    def __init__(self, test, verbose):
+    def __init__(self, test, verbose, front=False):
         self.test = test
         self.verbose = verbose or self.test
+        self.front = front
+
+        if self.front:
+            # Zel'dovich-Barenblatt slab front: kappa ~ T^{5/2} releases a
+            # hot slab into a cold background; the self-similar front obeys
+            # x_f ~ t^{2/9} (porous-medium exponent m = 7/2, 1D). The cold
+            # background (T_bg = T_e) has D smaller by (T_bg/T_peak)^{5/2}
+            # = 1e-5, so it is effectively inert.
+            self.NX = 128
+            self.NZ = 8
+            self.L = 0.5
+            self.Lz = 0.03125
+            self.T_e = 1.0  # eV background
+            self.bump_amp = 99.0  # peak T = 100 eV
+            self.bump_sigma_cells = 6.0
+            self.total_steps = 300
+            self.diag_steps = 25
+        else:
+            self.Lz = self.L
+            self.diag_steps = self.total_steps // 5
 
         self.dx = self.L / self.NX
         self.bump_sigma = self.bump_sigma_cells * self.dx
-        self.kappa = 1.5 * self.n0 * constants.kb * self.D
-        self.diag_steps = self.total_steps // 5
+        if self.front:
+            # The kick width at the initial peak sits near dx (the front
+            # exponent is set by scaling and conservation, not the kernel
+            # prefactor); the run length keeps the front inside the box.
+            D_peak = 0.2 * (2.3 * self.dx) ** 2 / self.DT
+            T_peak_K = (
+                (1.0 + self.bump_amp) * self.T_e * constants.q_e / constants.kb
+            )
+            kappa0 = 1.5 * self.n0 * constants.kb * D_peak
+            self.kappa = f"{kappa0}*(T/{T_peak_K})**2.5"
+        else:
+            self.kappa = f"{1.5 * self.n0 * constants.kb * self.D}"
 
         if comm.rank == 0:
             print(
-                f"Initializing QDSMC conduction test:\n"
-                f"\tD = {self.D:.3e} m^2/s (kappa = {self.kappa:.3e} W/(m K))\n"
+                f"Initializing QDSMC conduction test (front={self.front}):\n"
+                f"\tkappa(T,n) = {self.kappa} W/(m K)\n"
                 f"\tsigma_0 = {self.bump_sigma:.3e} m\n"
-                f"\tkick/dx per half-pass = "
-                f"{np.sqrt(self.D * self.DT) / self.dx:.3f}\n"
                 f"\ttotal steps = {self.total_steps:d}\n"
             )
 
@@ -87,13 +115,12 @@ class ConductionTest(object):
         Te = simulation.fields.get("hybrid_electron_temperature_fp", level=0)
         # Nodal mesh coordinates spanning the (periodic) box.
         x = np.linspace(-self.L / 2.0, self.L / 2.0, self.NX + 1)
-        z = np.linspace(-self.L / 2.0, self.L / 2.0, self.NZ + 1)
+        z = np.linspace(-self.Lz / 2.0, self.Lz / 2.0, self.NZ + 1)
         X, Z = np.meshgrid(x, z, indexing="ij")
         T0_K = self.T_e * constants.q_e / constants.kb
+        r2 = X**2 if self.front else X**2 + Z**2
         prof = T0_K * (
-            1.0
-            + self.bump_amp
-            * np.exp(-(X**2 + Z**2) / (2.0 * self.bump_sigma**2))
+            1.0 + self.bump_amp * np.exp(-r2 / (2.0 * self.bump_sigma**2))
         )
         Te[:, :] = prof
         comm.Barrier()
@@ -101,8 +128,8 @@ class ConductionTest(object):
     def setup_run(self):
         self.grid = picmi.Cartesian2DGrid(
             number_of_cells=[self.NX, self.NZ],
-            lower_bound=[-self.L / 2.0, -self.L / 2.0],
-            upper_bound=[self.L / 2.0, self.L / 2.0],
+            lower_bound=[-self.L / 2.0, -self.Lz / 2.0],
+            upper_bound=[self.L / 2.0, self.Lz / 2.0],
             lower_boundary_conditions=["periodic", "periodic"],
             upper_boundary_conditions=["periodic", "periodic"],
             lower_boundary_conditions_particles=["periodic", "periodic"],
@@ -121,18 +148,33 @@ class ConductionTest(object):
             Te=self.T_e,
             n0=self.n0,
             n_floor=0.01 * self.n0,
-            plasma_resistivity=1e-6,
+            # Strong resistivity: with the inert-ion lattice nothing
+            # shorts the bump's grad(Pe), which would otherwise drive a
+            # secular Faraday growth of B and spin up spurious electron
+            # advection. The resistive diffusion time of B at the bump
+            # scale is << the run, so the field never builds; eta*J does
+            # not enter the temperature (Joule heating off).
+            plasma_resistivity=0.1,
             substeps=4,
             solve_electron_energy_equation=True,
             qdsmc_conduction="isotropic",
-            qdsmc_conduction_kappa=f"{self.kappa}",
+            qdsmc_conduction_kappa=self.kappa,
+            # Sub-kicks of ~1 dx: the 3-node Gauss-Hermite rule imprints
+            # its node triplet on the field when a single kick spans
+            # several cells; composing sub-cell kicks (central limit)
+            # recovers the smooth Gaussian kernel.
+            qdsmc_conduction_substeps=4,
         )
         simulation.solver = self.solver
 
+        # Inert heavy ions: the temperature bump's pressure gradient would
+        # otherwise ballistically accelerate light cold ions until one
+        # crosses the deposition guard cells in a single step. The test
+        # isolates conduction on a static density lattice.
         self.ions = picmi.Species(
             name="ions",
             charge="q_e",
-            mass=constants.m_p,
+            mass=1.0e5 * constants.m_p,
             initial_distribution=picmi.UniformDistribution(
                 density=self.n0,
                 rms_velocity=[np.sqrt(self.T_i * constants.q_e / constants.m_p)]
@@ -179,8 +221,13 @@ parser.add_argument(
     help="Verbose output",
     action="store_true",
 )
+parser.add_argument(
+    "--front",
+    help="run the Zel'dovich nonlinear-front variant",
+    action="store_true",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
-run = ConductionTest(test=args.test, verbose=args.verbose)
+run = ConductionTest(test=args.test, verbose=args.verbose, front=args.front)
 simulation.step()
