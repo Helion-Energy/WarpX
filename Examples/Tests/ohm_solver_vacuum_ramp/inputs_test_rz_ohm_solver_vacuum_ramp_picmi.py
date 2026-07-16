@@ -148,13 +148,23 @@ class VacuumInductiveRamp(object):
             },
         }
 
+        # With the Darwin (unified) drive the external flux enters through
+        # the boundary values of the evolved vector potential and must
+        # PENETRATE the low-density halo. A vacuum resistivity turns the
+        # halo into a fast resistive diffuser (Hewett, J. Comput. Phys. 38
+        # (1980): eta -> large in vacuum regions), giving a penetration
+        # time mu0*R^2/eta ~ 0.25 t_ci << tau_ramp. The split-field drive
+        # (explicit and non-Darwin implicit) imposes the external field
+        # volumetrically instead, so the plasma value suffices there.
+        eta = 2.0 if self.darwin else 1e-6
+
         self.solver = picmi.HybridPICSolver(
             grid=self.grid,
             gamma=1.0,
             Te=self.T_e,
             n0=self.n0,
             n_floor=self.n_floor_fac * self.n0,
-            plasma_resistivity=1e-6,
+            plasma_resistivity=eta,
             substeps=self.substeps,
             A_external=A_ext,
             tau_ramp=self.tau_ramp,
@@ -181,13 +191,36 @@ class VacuumInductiveRamp(object):
                 # The E_L asserts run at the percent level; the default
                 # 1e-10 Poisson tolerance only slows the CI run down.
                 pywarpx.hybridpicmodel.darwin_poisson_rtol = 1.0e-8
-            nonlinear_solver = picmi.PicardNonlinearSolver(
-                verbose=self.verbose,
-                max_iterations=100,
-                relative_tolerance=1.0e-6,
-                absolute_tolerance=0.0,
-                require_convergence=True,
-            )
+            if self.darwin:
+                # The vacuum resistivity puts the resistive gain
+                # eta*k_max^2*theta*dt/mu0 (~300) far beyond the Picard
+                # contraction bound, so the resistive diffusion must be
+                # solved with Newton-GMRES. The Krylov space needs the
+                # full diffusion spectrum: restart-free GMRES.
+                nonlinear_solver = picmi.NewtonNonlinearSolver(
+                    verbose=self.verbose,
+                    max_iterations=20,
+                    relative_tolerance=1.0e-6,
+                    absolute_tolerance=0.0,
+                    require_convergence=True,
+                    linear_solver=picmi.GMRESLinearSolver(
+                        verbose_int=0,
+                        max_iterations=600,
+                        restart_length=600,
+                        relative_tolerance=1.0e-6,
+                        absolute_tolerance=0.0,
+                    ),
+                    max_particle_iterations=21,
+                    particle_tolerance=1.0e-10,
+                )
+            else:
+                nonlinear_solver = picmi.PicardNonlinearSolver(
+                    verbose=self.verbose,
+                    max_iterations=100,
+                    relative_tolerance=1.0e-6,
+                    absolute_tolerance=0.0,
+                    require_convergence=True,
+                )
             simulation.evolve_scheme = picmi.ThetaImplicitHybridEvolveScheme(
                 theta=0.5,
                 nonlinear_solver=nonlinear_solver,

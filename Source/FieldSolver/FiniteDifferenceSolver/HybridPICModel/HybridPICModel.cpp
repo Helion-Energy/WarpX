@@ -1283,8 +1283,9 @@ void HybridPICModel::ComputeDarwinELong (
     }
 
     // Step 3: MLMG solve of laplacian(phi) = div(S) with the
-    // finite-difference nodal operator (MLEBNodeFDLaplacian without an EB
-    // factory), whose stencil is EXACTLY the composition of the divergence
+    // finite-difference nodal operator (MLEBNodeFDLaplacian; the EB factory
+    // and a Dirichlet body value are attached when embedded boundaries are
+    // active), whose stencil is EXACTLY the composition of the divergence
     // and gradient used here. Operator consistency is essential: with a
     // different Laplacian stencil (e.g. the variational nodal operator the
     // electrostatic solver uses in Cartesian geometry, which coincides with
@@ -1308,11 +1309,29 @@ void HybridPICModel::ComputeDarwinELong (
             info);
 #else
         auto linop_fd = std::make_unique<amrex::MLEBNodeFDLaplacian>();
-        linop_fd->define(
-            amrex::Vector<amrex::Geometry>{warpx.Geom(lev)},
-            amrex::Vector<amrex::BoxArray>{warpx.boxArray(lev)},
-            amrex::Vector<amrex::DistributionMapping>{warpx.DistributionMap(lev)},
-            info);
+#if defined(AMREX_USE_EB)
+        if (EB::enabled()) {
+            linop_fd->define(
+                amrex::Vector<amrex::Geometry>{warpx.Geom(lev)},
+                amrex::Vector<amrex::BoxArray>{warpx.boxArray(lev)},
+                amrex::Vector<amrex::DistributionMapping>{warpx.DistributionMap(lev)},
+                info,
+                amrex::Vector<amrex::EBFArrayBoxFactory const*>{&warpx.fieldEBFactory(lev)});
+            // Embedded conductors are equipotential: phi takes a Dirichlet
+            // value on the body so E_L has no tangential component along
+            // the surface and vanishes inside (the enclosed field is
+            // frozen through the vector potential, held at the gauge zero
+            // in covered cells).
+            linop_fd->setEBDirichlet(0.0_rt);
+        } else
+#endif
+        {
+            linop_fd->define(
+                amrex::Vector<amrex::Geometry>{warpx.Geom(lev)},
+                amrex::Vector<amrex::BoxArray>{warpx.boxArray(lev)},
+                amrex::Vector<amrex::DistributionMapping>{warpx.DistributionMap(lev)},
+                info);
+        }
 #if defined(WARPX_DIM_RZ)
         linop_fd->setRZ(true);
         linop_fd->setSigma({0._rt, 1._rt});

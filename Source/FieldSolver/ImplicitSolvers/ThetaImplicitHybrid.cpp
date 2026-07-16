@@ -47,7 +47,14 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
     // field). Clearing m_external_split only tells the kernels that the
     // Hall-term field they receive is already the total.
     if (m_hybrid_pic_model->m_add_external_fields) {
-        m_hybrid_pic_model->m_external_split = false;
+        if (m_darwin) {
+            // Unified drive: the external vector potential enters through
+            // the boundary values of the evolved A (DarwinApplyABoundary);
+            // the kernels and the split-field machinery stay out of it.
+            m_hybrid_pic_model->m_external_unified = true;
+        } else {
+            m_hybrid_pic_model->m_external_split = false;
+        }
     }
 
     m_E.Define( m_WarpX, "Efield_fp" );
@@ -134,7 +141,7 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     // assembly in UpdateWarpXFields re-adds B_ext at the theta-time and
     // the step-averaged inductive E_ext on top of the plasma fields, and
     // FinishFieldUpdate restores end-of-step totals.
-    if (m_hybrid_pic_model->m_add_external_fields) {
+    if (m_hybrid_pic_model->m_add_external_fields && !m_darwin) {
         using ablastr::fields::Direction;
         auto & ext = *m_hybrid_pic_model->m_external_vector_potential;
         ext.UpdateHybridExternalFields(start_time, a_dt);
@@ -207,6 +214,10 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
                 amrex::MultiFab::Subtract(E, EL, 0, 0, E.nComp(), E.nGrowVect());
             }
         }
+        // Boundary-driven external flux: pin A^n (idempotent re-pin of the
+        // end-of-last-step values, and the gauge reference on step one).
+        DarwinApplyABoundary(start_time);
+
         // The transverse state at t^n (Efield_fp = E^n - E_L^n here).
         m_Eold.Copy(FieldType::Efield_fp);
     } else {
@@ -540,7 +551,7 @@ void ThetaImplicitHybrid::UpdateWarpXFields ( const WarpXSolverVec&  a_E,
         m_WarpX->UpdateMagneticFieldAndApplyBCs( B_old, m_theta * m_dt, start_time );
     }
 
-    if (has_external) {
+    if (has_external && !m_darwin) {
         add_external(FieldType::Bfield_fp, FieldType::hybrid_B_fp_external);
         add_external(FieldType::Efield_fp, FieldType::hybrid_E_fp_external);
     }
@@ -548,6 +559,7 @@ void ThetaImplicitHybrid::UpdateWarpXFields ( const WarpXSolverVec&  a_E,
 
 void ThetaImplicitHybrid::DarwinUpdateA_B ( amrex::Real a_thetadt, amrex::Real a_time )
 {
+    const amrex::Real pin_time = a_time + a_thetadt;
     BL_PROFILE("ThetaImplicitHybrid::DarwinUpdateA_B()");
 
     using ablastr::fields::Direction;
@@ -562,6 +574,9 @@ void ThetaImplicitHybrid::DarwinUpdateA_B ( amrex::Real a_thetadt, amrex::Real a
             amrex::MultiFab::LinComb(*A[dir], 1.0_rt, A_old, 0, -a_thetadt, E, 0,
                                      0, A[dir]->nComp(), A[dir]->nGrowVect());
         }
+        // Boundary-driven external flux and embedded conductors act on A
+        // itself (see DarwinApplyABoundary).
+        DarwinApplyABoundary(pin_time);
         // B = B_static + curl A
         m_WarpX->get_pointer_fdtd_solver_fp(lev)->ComputeCurlA(
             B, A, m_WarpX->GetEBUpdateBFlag()[lev], lev);
@@ -570,10 +585,128 @@ void ThetaImplicitHybrid::DarwinUpdateA_B ( amrex::Real a_thetadt, amrex::Real a
             amrex::MultiFab::Add(*B[dir], Bs, 0, 0, B[dir]->nComp(), B[dir]->nGrowVect());
         }
     }
-    m_WarpX->ApplyBfieldBoundary(0, PatchType::fine, SubcyclingHalf::None, a_time);
+    // B is DERIVED here (B = B_static + curl A): boundary conditions act on
+    // A (DarwinApplyABoundary) and must not re-condition the curl, or the
+    // wall ring picks up values inconsistent with the enclosed-flux pin.
     amrex::IntVect const ngB =
         m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{0}, 0)->nGrowVect();
     m_WarpX->FillBoundaryB(ngB, true /* sync nodal points */);
+}
+
+void ThetaImplicitHybrid::DarwinApplyABoundary ( amrex::Real a_time )
+{
+    using ablastr::fields::Direction;
+    constexpr int NODE = amrex::IndexType::NODE;
+
+    const bool has_external = m_hybrid_pic_model->m_add_external_fields;
+    const bool has_eb = !m_WarpX->GetEBUpdateEFlag().empty()
+        && m_WarpX->GetEBUpdateEFlag()[0][0] != nullptr;
+    if (!has_external && !has_eb) { return; }
+
+    // Gauge: A was zeroed at initialization, so boundary values impose the
+    // CHANGE of the external vector potential since then.
+    amrex::Vector<amrex::Real> scales;
+    if (has_external) {
+        auto & ext = *m_hybrid_pic_model->m_external_vector_potential;
+        if (m_fext_init.empty()) {
+            for (int i = 0; i < ext.nFields(); ++i) {
+                m_fext_init.push_back(ext.TimeScale(i, a_time));
+            }
+        }
+        for (int i = 0; i < ext.nFields(); ++i) {
+            scales.push_back(ext.TimeScale(i, a_time) - m_fext_init[i]);
+        }
+    }
+
+    for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+        const amrex::Box& domain = m_WarpX->Geom(lev).Domain();
+        const amrex::Periodicity& period = m_WarpX->Geom(lev).periodicity();
+
+        for (int dir = 0; dir < 3; ++dir) {
+            amrex::MultiFab & A = *m_WarpX->m_fields.get("hybrid_A_fp", Direction{dir}, lev);
+
+            // Sum of the (gauge-shifted) external vector potentials on this
+            // component's staggering.
+            amrex::MultiFab A_bc(A.boxArray(), A.DistributionMap(), 1, A.nGrowVect());
+            A_bc.setVal(0.0_rt);
+            if (has_external) {
+                auto & ext = *m_hybrid_pic_model->m_external_vector_potential;
+                for (int i = 0; i < ext.nFields(); ++i) {
+                    amrex::MultiFab const & Aext = *m_WarpX->m_fields.get(
+                        ext.FieldName(i) + "_Aext", Direction{dir}, lev);
+                    amrex::MultiFab::Saxpy(A_bc, scales[i], Aext, 0, 0, 1,
+                                           amrex::min(A.nGrowVect(), Aext.nGrowVect()));
+                }
+            }
+
+            if (std::getenv("WARPX_DEBUG_ABC") != nullptr) {
+                amrex::Print() << "[A-bc] t=" << a_time << " dir " << dir
+                    << " |A_bc|max = " << A_bc.norminf(0)
+                    << " scale0 = " << (scales.empty() ? 0.0 : scales[0])
+                    << " |A|max = " << A.norminf(0) << "\n";
+            }
+
+            const amrex::iMultiFab* eb_flag = has_eb
+                ? m_WarpX->GetEBUpdateEFlag()[lev][dir].get() : nullptr;
+
+            for (amrex::MFIter mfi(A, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                amrex::Box tb = mfi.tilebox();
+                tb.grow(A.nGrowVect());
+                const amrex::Box domain_t = amrex::convert(domain, A.ixType().toIntVect());
+
+                amrex::Array4<amrex::Real> const& a = A.array(mfi);
+                amrex::Array4<amrex::Real const> const& abc = A_bc.const_array(mfi);
+                amrex::Array4<int const> eb;
+                if (eb_flag) { eb = eb_flag->const_array(mfi); }
+                const bool use_eb = (eb_flag != nullptr);
+
+                amrex::GpuArray<int, 3> dlo{{0, 0, 0}};
+                amrex::GpuArray<int, 3> dhi{{0, 0, 0}};
+                amrex::GpuArray<int, 3> per{{1, 1, 1}};
+                for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                    dlo[d] = domain_t.smallEnd(d);
+                    dhi[d] = domain_t.bigEnd(d);
+                    per[d] = period.isPeriodic(d) ? 1 : 0;
+                }
+
+                amrex::ParallelFor(tb,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    // Embedded conductors: hold A at the gauge zero inside
+                    // masked cells (frozen enclosed flux; the interior field
+                    // stays at B_static).
+                    if (use_eb && eb(i,j,k) == 0) {
+                        a(i,j,k) = 0.0_rt;
+                        return;
+                    }
+                    // Non-periodic domain boundaries: impose the external
+                    // vector potential on the boundary point and everything
+                    // beyond it.
+                    const int idx[3] = {i, j, k};
+                    bool on_boundary = false;
+                    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                        if (per[d]) { continue; }
+                        if (idx[d] <= dlo[d] || idx[d] >= dhi[d]) { on_boundary = true; }
+                    }
+                    if (on_boundary) {
+                        // Clamp the imposed value to the domain edge:
+                        // ghosts continue the wall value rather than the
+                        // (growing) exterior vector potential, so the wall
+                        // ring carries no spurious curl sheet.
+                        int ic[3] = {i, j, k};
+                        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                            if (per[d]) { continue; }
+                            ic[d] = amrex::Clamp(ic[d], dlo[d], dhi[d]);
+                        }
+                        a(i,j,k) = abc(ic[0], ic[1], ic[2]);
+                    }
+                });
+            }
+            A.FillBoundary(m_WarpX->Geom(lev).periodicity());
+
+        }
+    }
+    amrex::ignore_unused(NODE);
 }
 
 void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
@@ -610,6 +743,7 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
                 amrex::MultiFab::Add(E, EL, 0, 0, E.nComp(), E.nGrowVect());
             }
         }
+        DarwinApplyABoundary(end_time);
         // B^{n+1} = B_static + curl A^{n+1}
         for (int lev = 0; lev < m_num_amr_levels; ++lev) {
             ablastr::fields::VectorField A = m_WarpX->m_fields.get_alldirs("hybrid_A_fp", lev);
@@ -621,7 +755,8 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
                 amrex::MultiFab::Add(*B[dir], Bs, 0, 0, B[dir]->nComp(), B[dir]->nGrowVect());
             }
         }
-        m_WarpX->ApplyBfieldBoundary(0, PatchType::fine, SubcyclingHalf::None, end_time);
+        // Derived B: no independent boundary conditioning (see
+        // DarwinUpdateA_B).
         amrex::IntVect const ngB =
             m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{0}, 0)->nGrowVect();
         m_WarpX->FillBoundaryB(ngB, true /* sync nodal points */);
@@ -635,7 +770,11 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
     // Restore end-of-step totals: the analytic external flux advance means
     // Bfield_fp = B_plasma^{n+1} + f(t^{n+1}) curl A_ext exactly, for any
     // ramp shape (OneStep strips the same values at the next entry).
-    if (m_hybrid_pic_model->m_add_external_fields) {
+    // Split-field form only: under the Darwin unified drive the external
+    // flux already lives inside A through its boundary values, and adding
+    // E_ext here would poison the saved E^n and re-inject the drive
+    // volumetrically through the A rebuild (doubling the programmed flux).
+    if (m_hybrid_pic_model->m_add_external_fields && !m_darwin) {
         using ablastr::fields::Direction;
         m_hybrid_pic_model->m_external_vector_potential->UpdateHybridExternalFields(
             end_time, m_dt);
