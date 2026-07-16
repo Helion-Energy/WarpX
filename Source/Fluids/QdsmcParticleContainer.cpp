@@ -647,7 +647,8 @@ QdsmcParticleContainer::SpawnConductionNodes (int lev, amrex::Real const h,
                                               const amrex::MultiFab & Dfield,
                                               const amrex::MultiFab & gradDx,
                                               const amrex::MultiFab & gradDy,
-                                              const amrex::MultiFab & gradDz)
+                                              const amrex::MultiFab & gradDz,
+                                              bool const apply_kicks)
 {
     ABLASTR_PROFILE("QdsmcParticleContainer::SpawnConductionNodes()");
 
@@ -819,7 +820,9 @@ QdsmcParticleContainer::SpawnConductionNodes (int lev, amrex::Real const h,
             auto const gd = ablastr::particles::doGatherVectorFieldNodal(
                 xh, yh, zh, gdx_arr, gdy_arr, gdz_arr, dxi, plo);
 
-            amrex::Real const sig = std::sqrt(2.0_rt * d_home * h);
+            amrex::Real const sig =
+                apply_kicks ? std::sqrt(2.0_rt * d_home * h) : 0.0_rt;
+            amrex::Real const hdrift = apply_kicks ? h : 0.0_rt;
 
             // Energy content of the home cell carried by this cell's nodes.
             // The deposition kernel normalizes by the true (cylindrical in
@@ -875,27 +878,27 @@ QdsmcParticleContainer::SpawnConductionNodes (int lev, amrex::Real const h,
 
                 amrex::Real xn = xh, yn = yh, zn = zh;
 #if defined(WARPX_DIM_3D)
-                xn += gh_xi[kx] * sig + gd[0] * h;
-                yn += gh_xi[ky] * sig + gd[1] * h;
-                zn += gh_xi[kz] * sig + gd[2] * h;
+                xn += gh_xi[kx] * sig + gd[0] * hdrift;
+                yn += gh_xi[ky] * sig + gd[1] * hdrift;
+                zn += gh_xi[kz] * sig + gd[2] * hdrift;
                 xn = reflect(xn, 0); yn = reflect(yn, 1); zn = reflect(zn, 2);
 #elif defined(WARPX_DIM_RZ)
                 // In-plane radial and off-plane kicks fold into the radius:
                 // exact cylindrical diffusion, no metric drift, axis-safe.
-                xn += gh_xi[kx] * sig + gd[0] * h;
+                xn += gh_xi[kx] * sig + gd[0] * hdrift;
                 yn  = gh_xi[ky] * sig;
-                zn += gh_xi[kz] * sig + gd[2] * h;
+                zn += gh_xi[kz] * sig + gd[2] * hdrift;
                 xn = std::sqrt(xn*xn + yn*yn);
                 yn = 0.0_rt;
                 if (xn > hi_bnd[0]) { xn = 2.0_rt*hi_bnd[0] - xn; }
                 xn = amrex::Clamp(xn, lo_bnd[0], hi_bnd[0]);
                 zn = reflect(zn, 1);
 #elif defined(WARPX_DIM_XZ)
-                xn += gh_xi[kx] * sig + gd[0] * h;
-                zn += gh_xi[ky] * sig + gd[2] * h;
+                xn += gh_xi[kx] * sig + gd[0] * hdrift;
+                zn += gh_xi[ky] * sig + gd[2] * hdrift;
                 xn = reflect(xn, 0); zn = reflect(zn, 1);
 #else
-                zn += gh_xi[kx] * sig + gd[2] * h;
+                zn += gh_xi[kx] * sig + gd[2] * hdrift;
                 zn = reflect(zn, 0);
 #endif
 
