@@ -46,6 +46,7 @@
 #include <AMReX_Scan.H>
 #include <AMReX_Utility.H>
 
+#include <cmath>
 #include <cstdint>
 
 using namespace amrex::literals;
@@ -636,6 +637,333 @@ QdsmcParticleContainer::ResetParticles (int lev)
 
     Redistribute();
     amrex::Gpu::synchronize();
+}
+
+
+void
+QdsmcParticleContainer::SpawnConductionNodes (int lev, amrex::Real const h,
+                                              const amrex::MultiFab & Ufield,
+                                              const amrex::MultiFab & Nfield,
+                                              const amrex::MultiFab & Dfield,
+                                              const amrex::MultiFab & gradDx,
+                                              const amrex::MultiFab & gradDy,
+                                              const amrex::MultiFab & gradDz)
+{
+    ABLASTR_PROFILE("QdsmcParticleContainer::SpawnConductionNodes()");
+
+    // Conduction nodes live for exactly one pass.
+    clearParticles();
+    reserveData();
+    resizeData();
+
+    amrex::Geometry const & geom = Geom(lev);
+    auto const dx_arr = geom.CellSizeArray();
+    auto const dxi    = geom.InvCellSizeArray();
+    auto const plo    = geom.ProbLoArray();
+    auto const phi    = geom.ProbHiArray();
+
+    amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> lo_bnd;
+    amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> hi_bnd;
+    amrex::GpuArray<int, AMREX_SPACEDIM> is_periodic;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        lo_bnd[d] = plo[d];
+        hi_bnd[d] = phi[d] - 1.e-6_rt * dx_arr[d];
+        is_periodic[d] = geom.isPeriodic(d);
+    }
+
+    amrex::Real cell_volume = 1.0_rt;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        cell_volume *= dx_arr[d];
+    }
+
+    // Active kick axes and node count: the Gauss-Hermite tensor product runs
+    // over every physical direction of the energy transport, independent of
+    // the field dimensionality (RZ kicks off-plane and folds into r).
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RZ)
+    constexpr int n_ax = 3;
+#elif defined(WARPX_DIM_XZ)
+    constexpr int n_ax = 2;
+#else
+    constexpr int n_ax = 1;
+#endif
+    constexpr int n_nodes = (n_ax == 3) ? 27 : ((n_ax == 2) ? 9 : 3);
+
+    // 3-node Gauss-Hermite rule.
+    const amrex::GpuArray<amrex::Real, 3> gh_xi
+        {0.0_rt, 1.7320508075688772_rt, -1.7320508075688772_rt};
+    const amrex::GpuArray<amrex::Real, 3> gh_w
+        {2.0_rt/3.0_rt, 1.0_rt/6.0_rt, 1.0_rt/6.0_rt};
+
+    amrex::MultiFab const* eb_phi = nullptr;
+#ifdef AMREX_USE_EB
+    if (EB::enabled()) {
+        auto & warpx = WarpX::GetInstance();
+        eb_phi = warpx.m_fields.get(warpx::fields::FieldType::distance_to_eb, lev);
+    }
+#endif
+
+    // Define every (grid, tile) key with the SAME tiled iterator the
+    // parallel loop below uses: the tile map must not be mutated
+    // concurrently from OMP threads.
+    amrex::MFItInfo info;
+    if (do_tiling && amrex::Gpu::notInLaunchRegion()) {
+        info.EnableTiling(tile_size);
+    }
+    for (amrex::MFIter mfi = MakeMFIter(lev, info); mfi.isValid(); ++mfi) {
+        DefineAndReturnParticleTile(lev, mfi.index(), mfi.LocalTileIndex());
+    }
+
+#ifdef AMREX_USE_OMP
+    info.SetDynamic(true);
+#pragma omp parallel
+#endif
+    for (amrex::MFIter mfi = MakeMFIter(lev, info); mfi.isValid(); ++mfi)
+    {
+        amrex::Box const & tile_box = mfi.tilebox();
+        int const grid_id = mfi.index();
+        int const tile_id = mfi.LocalTileIndex();
+
+        // Per-cell node counts (0 in covered cells), scanned into offsets.
+        amrex::Gpu::DeviceVector<amrex::Long> counts(tile_box.numPts(), n_nodes);
+#ifdef AMREX_USE_EB
+        if (EB::enabled()) {
+            auto const& eb_fact = WarpX::GetInstance().fieldEBFactory(lev);
+            auto const flag = eb_fact.getMultiEBCellFlagFab().const_array(mfi);
+            auto * const pcounts = counts.data();
+            amrex::ParallelFor(tile_box,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
+                amrex::IntVect const iv(AMREX_D_DECL(i, j, k));
+                if (flag(i, j, k).isCovered()) {
+                    pcounts[tile_box.index(iv)] = 0;
+                }
+            });
+        }
+#endif
+        amrex::Gpu::DeviceVector<amrex::Long> offset(tile_box.numPts());
+        amrex::Long const max_new_particles = amrex::Scan::ExclusiveSum(
+            counts.size(), counts.data(), offset.data());
+
+        amrex::Long pid;
+#ifdef AMREX_USE_OMP
+#pragma omp critical (qdsmc_cond_nextid)
+#endif
+        {
+            pid = ParticleType::NextID();
+            ParticleType::NextID(pid + max_new_particles);
+        }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            pid + max_new_particles < amrex::LongParticleIds::LastParticleID,
+            "QdsmcParticleContainer::SpawnConductionNodes: particle id overflow");
+
+        int const cpuid = amrex::ParallelDescriptor::MyProc();
+
+        auto & particle_tile =
+            GetParticles(lev)[std::make_pair(grid_id, tile_id)];
+        auto const old_size = static_cast<amrex::Long>(particle_tile.size());
+        particle_tile.resize(old_size + max_new_particles);
+
+        auto & soa = particle_tile.GetStructOfArrays();
+        amrex::GpuArray<amrex::ParticleReal*, QdsmcPIdx::nattribs> pa;
+        for (int ia = 0; ia < QdsmcPIdx::nattribs; ++ia) {
+            pa[ia] = soa.GetRealData(ia).data() + old_size;
+        }
+        std::uint64_t * AMREX_RESTRICT pa_idcpu =
+            soa.GetIdCPUData().data() + old_size;
+
+        auto * const poffset = offset.data();
+        auto const * pcounts = counts.data();
+
+        auto const u_arr   = Ufield.const_array(mfi);
+        auto const nn_arr  = Nfield.const_array(mfi);
+        auto const d_arr   = Dfield.const_array(mfi);
+        auto const gdx_arr = gradDx.const_array(mfi);
+        auto const gdy_arr = gradDy.const_array(mfi);
+        auto const gdz_arr = gradDz.const_array(mfi);
+
+        amrex::Array4<amrex::Real const> eb_phi_arr;
+        if (eb_phi != nullptr) { eb_phi_arr = eb_phi->const_array(mfi); }
+        bool const have_eb = (eb_phi != nullptr);
+
+        amrex::ParallelFor(tile_box,
+        [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+        {
+            amrex::ignore_unused(j, k);
+            amrex::IntVect const iv(AMREX_D_DECL(i, j, k));
+            if (pcounts[tile_box.index(iv)] == 0) { return; }
+            long const ip0 = poffset[tile_box.index(iv)];
+
+            // Cell-center home position (3D record, missing axes zero).
+#if defined(WARPX_DIM_3D)
+            amrex::Real const xh = plo[0] + (iv[0] + 0.5_rt) * dx_arr[0];
+            amrex::Real const yh = plo[1] + (iv[1] + 0.5_rt) * dx_arr[1];
+            amrex::Real const zh = plo[2] + (iv[2] + 0.5_rt) * dx_arr[2];
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+            amrex::Real const xh = plo[0] + (iv[0] + 0.5_rt) * dx_arr[0];
+            auto const yh = amrex::Real(0);
+            amrex::Real const zh = plo[1] + (iv[1] + 0.5_rt) * dx_arr[1];
+#else
+            auto const xh = amrex::Real(0);
+            auto const yh = amrex::Real(0);
+            amrex::Real const zh = plo[0] + (iv[0] + 0.5_rt) * dx_arr[0];
+#endif
+
+            // Home-state gathers (nodal linear, exact cell-center average).
+            amrex::Real const u_home = ablastr::particles::doGatherScalarFieldNodal(
+                xh, yh, zh, u_arr, dxi, plo);
+            amrex::Real const n_home = ablastr::particles::doGatherScalarFieldNodal(
+                xh, yh, zh, nn_arr, dxi, plo);
+            amrex::Real const d_home = amrex::max(0.0_rt,
+                ablastr::particles::doGatherScalarFieldNodal(
+                    xh, yh, zh, d_arr, dxi, plo));
+            auto const gd = ablastr::particles::doGatherVectorFieldNodal(
+                xh, yh, zh, gdx_arr, gdy_arr, gdz_arr, dxi, plo);
+
+            amrex::Real const sig = std::sqrt(2.0_rt * d_home * h);
+
+            // Energy content of the home cell carried by this cell's nodes.
+            // The deposition kernel normalizes by the true (cylindrical in
+            // RZ) cell volume, so the content must be the true shell energy.
+#if defined(WARPX_DIM_RZ)
+            amrex::Real const vol = cell_volume * 2.0_rt * MathConst::pi * xh;
+#else
+            amrex::Real const vol = cell_volume;
+#endif
+            amrex::Real const content = u_home * vol;
+            // Electron count of the home cell: the recovery ratio
+            // (deposited energy)/(deposited count) gives the energy per
+            // electron with the SAME noise realization in numerator and
+            // denominator, so the PIC density noise cancels instead of
+            // rectifying into a mean-temperature drift (the advection
+            // stage's K*N / N construction).
+            amrex::Real const count = n_home * vol;
+
+            // Boundary fold: periodic directions wrap by fmod (the
+            // wrapped-Gaussian quadrature, exact for periodic boxes and
+            // O(1) for kernels wider than the box -- Redistribute's
+            // one-period-per-iteration wrap must never see distant
+            // positions); non-periodic walls mirror-reflect (insulating
+            // image construction).
+            auto const reflect = [&] (amrex::Real p, int d) {
+                if (is_periodic[d]) {
+                    amrex::Real const L = phi[d] - plo[d];
+                    p = std::fmod(p - plo[d], L);
+                    if (p < 0.0_rt) { p += L; }
+                    p += plo[d];
+                } else {
+                    if (p < lo_bnd[d]) { p = 2.0_rt*lo_bnd[d] - p; }
+                    if (p > hi_bnd[d]) { p = 2.0_rt*hi_bnd[d] - p; }
+                    p = amrex::Clamp(p, lo_bnd[d], hi_bnd[d]);
+                }
+                return p;
+            };
+
+            for (int kn = 0; kn < n_nodes; ++kn) {
+                long const ip = ip0 + kn;
+                pa_idcpu[ip] = amrex::SetParticleIDandCPU(pid + ip, cpuid);
+
+                int const kx =  kn % 3;
+                int const ky = (n_ax >= 2) ? (kn / 3) % 3 : 0;
+                int const kz = (n_ax == 3) ? (kn / 9)     : 0;
+
+                // Tensor-product weight and per-axis kicks. Axis mapping per
+                // dim: 3D/RZ kick (x, y, z); XZ kicks (x, z) via (kx, ky);
+                // 1D kicks z via kx.
+                amrex::Real w = gh_w[kx];
+                if (n_ax >= 2) { w *= gh_w[ky]; }
+                if (n_ax == 3) { w *= gh_w[kz]; }
+
+                amrex::Real xn = xh, yn = yh, zn = zh;
+#if defined(WARPX_DIM_3D)
+                xn += gh_xi[kx] * sig + gd[0] * h;
+                yn += gh_xi[ky] * sig + gd[1] * h;
+                zn += gh_xi[kz] * sig + gd[2] * h;
+                xn = reflect(xn, 0); yn = reflect(yn, 1); zn = reflect(zn, 2);
+#elif defined(WARPX_DIM_RZ)
+                // In-plane radial and off-plane kicks fold into the radius:
+                // exact cylindrical diffusion, no metric drift, axis-safe.
+                xn += gh_xi[kx] * sig + gd[0] * h;
+                yn  = gh_xi[ky] * sig;
+                zn += gh_xi[kz] * sig + gd[2] * h;
+                xn = std::sqrt(xn*xn + yn*yn);
+                yn = 0.0_rt;
+                if (xn > hi_bnd[0]) { xn = 2.0_rt*hi_bnd[0] - xn; }
+                xn = amrex::Clamp(xn, lo_bnd[0], hi_bnd[0]);
+                zn = reflect(zn, 1);
+#elif defined(WARPX_DIM_XZ)
+                xn += gh_xi[kx] * sig + gd[0] * h;
+                zn += gh_xi[ky] * sig + gd[2] * h;
+                xn = reflect(xn, 0); zn = reflect(zn, 1);
+#else
+                zn += gh_xi[kx] * sig + gd[2] * h;
+                zn = reflect(zn, 0);
+#endif
+
+                // Nodes kicked into an embedded body deposit at home
+                // instead (energy stays out of conductors; 3a stub).
+                if (have_eb) {
+                    amrex::Real const dist =
+                        ablastr::particles::doGatherScalarFieldNodal(
+                            xn, yn, zn, eb_phi_arr, dxi, plo);
+                    if (dist < 0.0_rt) { xn = xh; yn = yh; zn = zh; }
+                }
+
+                pa[QdsmcPIdx::x_node][ip] = xh;
+                pa[QdsmcPIdx::y_node][ip] = yh;
+                pa[QdsmcPIdx::z_node][ip] = zh;
+                pa[QdsmcPIdx::vx][ip] = 0.0_rt;
+                pa[QdsmcPIdx::vy][ip] = 0.0_rt;
+                pa[QdsmcPIdx::vz][ip] = 0.0_rt;
+                pa[QdsmcPIdx::entropy][ip] = w * content;
+                // Volume measure paired with the energy content: the
+                // recovery uses the deposited-energy / deposited-volume
+                // ratio, so every kernel, staggering and periodic-seam
+                // factor cancels exactly (the same construction as the
+                // advection stage's K*N / N recovery).
+                pa[QdsmcPIdx::np_real][ip] = w * count;
+
+#if defined(WARPX_DIM_3D)
+                pa[QdsmcPIdx::x][ip] = xn;
+                pa[QdsmcPIdx::y][ip] = yn;
+                pa[QdsmcPIdx::z][ip] = zn;
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+                pa[QdsmcPIdx::x][ip] = xn;
+                pa[QdsmcPIdx::z][ip] = zn;
+#elif defined(WARPX_DIM_1D_Z)
+                pa[QdsmcPIdx::z][ip] = zn;
+#else
+                pa[QdsmcPIdx::x][ip] = xn;
+#endif
+            }
+        });
+    }
+
+    Redistribute();
+    amrex::Gpu::synchronize();
+}
+
+
+void
+QdsmcParticleContainer::DepositConductionEnergy (int lev, amrex::MultiFab & Ufield)
+{
+    ABLASTR_PROFILE("QdsmcParticleContainer::DepositConductionEnergy()");
+
+    // The carried attribute is an energy content [J] (times 2 pi r_home in
+    // RZ); the deposition kernel already normalizes by the true cell
+    // volume (cylindrical in RZ), so the deposited field is an energy
+    // density [J/m^3] with unit scale.
+    DepositScalar(lev, QdsmcPIdx::entropy, 1.0_rt, Ufield);
+}
+
+
+void
+QdsmcParticleContainer::DepositConductionCount (int lev, amrex::MultiFab & Nfield)
+{
+    ABLASTR_PROFILE("QdsmcParticleContainer::DepositConductionCount()");
+
+    // Companion electron-count measure for the ratio recovery (see
+    // SpawnConductionNodes).
+    DepositScalar(lev, QdsmcPIdx::np_real, 1.0_rt, Nfield);
 }
 
 

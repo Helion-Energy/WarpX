@@ -188,6 +188,60 @@ public:
      */
     void ResetParticles (int lev);
 
+    /**
+     * @brief Spawn the Gauss-Hermite conduction nodes of one isotropic
+     *        diffusion pass over the time interval h (spawn-kick in one
+     *        kernel; deposit and destroy follow).
+     *
+     * Discrete Green's-function transport of the electron internal energy
+     * (Albright et al., Phys. Plasmas 9, 1898 (2002); del-Castillo-Negrete &
+     * Chacon, Phys. Rev. Lett. 106, 195004 (2011)): per uncovered cell, the
+     * 3-node Gauss-Hermite rule per active axis (xi = {0, +-sqrt(3)}, w =
+     * {2/3, 1/6, 1/6} -- Gaussian moments through order 5, weak order 2)
+     * samples the Gaussian kernel of width sqrt(2 D h), plus the Ito drift
+     * grad(D) h. Each node carries its weight-product fraction of the home
+     * cell's energy content U * V_cell (times 2 pi r_home in RZ, where the
+     * deposition kernel normalizes by the cylindrical volume). Off-plane
+     * kicks in RZ are folded into the radius, r' = sqrt((r+dx)^2 + dy^2),
+     * which reproduces cylindrical diffusion exactly with no metric drift
+     * term and handles the axis by construction. At non-periodic domain
+     * boundaries the kicked position is mirror-reflected (insulating wall,
+     * exact image construction for plane walls); nodes kicked into an
+     * embedded body deposit at their home instead (energy stays out of
+     * conductors).
+     *
+     * The container is cleared first: conduction nodes live for one pass
+     * only and must never mix with the persistent advection markers (use a
+     * dedicated container instance). Calls Redistribute() at the end.
+     *
+     * @param h     pass time interval [s] (dt/2 per Strang half-pass)
+     * @param Ufield nodal electron internal energy density [J/m^3], ghosts filled
+     * @param Dfield nodal diffusivity [m^2/s], ghosts filled
+     * @param gradDx,gradDy,gradDz nodal components of grad(D), ghosts filled
+     */
+    void SpawnConductionNodes (int lev, amrex::Real h,
+                               const amrex::MultiFab & Ufield,
+                               const amrex::MultiFab & Nfield,
+                               const amrex::MultiFab & Dfield,
+                               const amrex::MultiFab & gradDx,
+                               const amrex::MultiFab & gradDy,
+                               const amrex::MultiFab & gradDz);
+
+    /**
+     * @brief Scatter the carried conduction energy onto Ufield as an energy
+     *        density [J/m^3] (zeroes the field, deposits, SumBoundary).
+     */
+    void DepositConductionEnergy (int lev, amrex::MultiFab & Ufield);
+
+    /**
+     * @brief Scatter the companion electron-count measure onto Nfield.
+     *        The energy/count deposit ratio recovers the transported
+     *        energy per electron with every kernel, staggering,
+     *        periodic-seam factor AND the correlated PIC density noise
+     *        cancelled.
+     */
+    void DepositConductionCount (int lev, amrex::MultiFab & Nfield);
+
 private:
     /**
      * @brief Scatter one real attribute of every marker onto a nodal
