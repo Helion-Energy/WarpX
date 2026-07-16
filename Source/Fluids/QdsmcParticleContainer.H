@@ -214,6 +214,18 @@ public:
      * only and must never mix with the persistent advection markers (use a
      * dedicated container instance). Calls Redistribute() at the end.
      *
+     * When the nodal unit-vector fields bhat{x,y,z} are supplied, the
+     * kicks run ALONG the field line through each home (3 nodes per cell
+     * at arc offsets xi_k sqrt(2 D_par h) b_hat -- the Gauss-Hermite
+     * quadrature of the parallel Green's function, del-Castillo-Negrete &
+     * Chacon, PRL 106, 195004 (2011)); the drift fields then carry the
+     * full Ito vector of the tensor kernel, div(D b b). Homes where the
+     * gathered b_hat has magnitude below 1/2 (the caller marks
+     * unmagnetized cells with a zero vector) deposit in place. Composing
+     * sub-cell kicks follows curved lines to O((sigma_sub/L_B)^2) per
+     * substep. Without bhat the kicks form the isotropic tensor product
+     * (3^d nodes) with drift grad(D).
+     *
      * The unkicked companion set (apply_kicks = false: zero displacement,
      * zero drift) measures the pure gather-deposit roundtrip; the caller
      * applies the conduction as the DIFFERENCE of the kicked and unkicked
@@ -230,10 +242,13 @@ public:
                                const amrex::MultiFab & Ufield,
                                const amrex::MultiFab & Nfield,
                                const amrex::MultiFab & Dfield,
-                               const amrex::MultiFab & gradDx,
-                               const amrex::MultiFab & gradDy,
-                               const amrex::MultiFab & gradDz,
-                               bool apply_kicks);
+                               const amrex::MultiFab & driftx,
+                               const amrex::MultiFab & drifty,
+                               const amrex::MultiFab & driftz,
+                               bool apply_kicks,
+                               const amrex::MultiFab * bhatx = nullptr,
+                               const amrex::MultiFab * bhaty = nullptr,
+                               const amrex::MultiFab * bhatz = nullptr);
 
     /**
      * @brief Scatter the carried conduction energy onto Ufield as an energy

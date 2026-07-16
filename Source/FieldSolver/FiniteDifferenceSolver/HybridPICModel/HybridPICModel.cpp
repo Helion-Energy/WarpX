@@ -89,8 +89,10 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("qdsmc_conduction_kappa(T,n)", m_qdsmc_kappa_expression);
     pp_hybrid.query("qdsmc_conduction_substeps", m_qdsmc_conduction_substeps);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        m_qdsmc_conduction == "off" || m_qdsmc_conduction == "isotropic",
-        "hybrid_pic_model.qdsmc_conduction must be 'off' or 'isotropic'");
+        m_qdsmc_conduction == "off" || m_qdsmc_conduction == "isotropic"
+            || m_qdsmc_conduction == "parallel",
+        "hybrid_pic_model.qdsmc_conduction must be 'off', 'isotropic' or "
+        "'parallel'");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_qdsmc_conduction_substeps >= 1,
         "hybrid_pic_model.qdsmc_conduction_substeps must be >= 1");
@@ -1623,6 +1625,77 @@ void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
         amrex::MultiFab gDy (Te.boxArray(), Te.DistributionMap(), 1, ng);
         amrex::MultiFab gDz (Te.boxArray(), Te.DistributionMap(), 1, ng);
 
+        // Parallel mode: nodal unit field direction and the six-component
+        // symmetric kernel tensor W = D b b (stored as xx,xy,xz,yy,yz,zz)
+        // whose divergence is the Ito drift.
+        const bool parallel_mode = (m_qdsmc_conduction == "parallel");
+        amrex::MultiFab bhx, bhy, bhz, W;
+        if (parallel_mode) {
+            bhx.define(Te.boxArray(), Te.DistributionMap(), 1, ng);
+            bhy.define(Te.boxArray(), Te.DistributionMap(), 1, ng);
+            bhz.define(Te.boxArray(), Te.DistributionMap(), 1, ng);
+            W.define(Te.boxArray(), Te.DistributionMap(), 6, ng);
+        }
+
+        if (parallel_mode) {
+            // Nodal unit b from the staggered magnetic field; cells with
+            // |B| below the floor get a zero vector (deposit in place).
+            using ablastr::fields::Direction;
+            amrex::MultiFab const & Bx = *warpx.m_fields.get(
+                FieldType::Bfield_fp, Direction{0}, lev);
+            amrex::MultiFab const & By = *warpx.m_fields.get(
+                FieldType::Bfield_fp, Direction{1}, lev);
+            amrex::MultiFab const & Bz = *warpx.m_fields.get(
+                FieldType::Bfield_fp, Direction{2}, lev);
+            amrex::GpuArray<int, 3> const bx_stag{{
+                Bx.ixType().nodeCentered(0), Bx.ixType().nodeCentered(1),
+                AMREX_SPACEDIM == 3 ? Bx.ixType().nodeCentered(2) : 0}};
+            amrex::ignore_unused(bx_stag);
+            constexpr amrex::Real b_floor = 1.0e-12_rt;
+            for (amrex::MFIter mfi(Te, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                amrex::Box const box = mfi.tilebox();
+                auto const bxs = Bx.const_array(mfi);
+                auto const bys = By.const_array(mfi);
+                auto const bzs = Bz.const_array(mfi);
+                auto const hx = bhx.array(mfi);
+                auto const hy = bhy.array(mfi);
+                auto const hz = bhz.array(mfi);
+                auto to_stag = [] (amrex::IntVect const& iv) {
+                    amrex::GpuArray<int, 3> a{{0, 0, 0}};
+                    for (int d = 0; d < AMREX_SPACEDIM; ++d) { a[d] = iv[d]; }
+                    return a;
+                };
+                amrex::GpuArray<int,3> const sx = to_stag(Bx.ixType().toIntVect());
+                amrex::GpuArray<int,3> const sy = to_stag(By.ixType().toIntVect());
+                amrex::GpuArray<int,3> const sz = to_stag(Bz.ixType().toIntVect());
+                amrex::GpuArray<int,3> const sn = to_stag(Te.ixType().toIntVect());
+                amrex::GpuArray<int,3> const cr{{1,1,1}};
+                amrex::ParallelFor(box,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    using ablastr::coarsen::sample::Interp;
+                    amrex::Real const bx_n = Interp(bxs, sx, sn, cr, i, j, k, 0);
+                    amrex::Real const by_n = Interp(bys, sy, sn, cr, i, j, k, 0);
+                    amrex::Real const bz_n = Interp(bzs, sz, sn, cr, i, j, k, 0);
+                    amrex::Real const bm = std::sqrt(
+                        bx_n*bx_n + by_n*by_n + bz_n*bz_n);
+                    if (bm > b_floor) {
+                        hx(i,j,k) = bx_n / bm;
+                        hy(i,j,k) = by_n / bm;
+                        hz(i,j,k) = bz_n / bm;
+                    } else {
+                        hx(i,j,k) = 0.0_rt;
+                        hy(i,j,k) = 0.0_rt;
+                        hz(i,j,k) = 0.0_rt;
+                    }
+                });
+            }
+            bhx.FillBoundary(geom.periodicity());
+            bhy.FillBoundary(geom.periodicity());
+            bhz.FillBoundary(geom.periodicity());
+        }
+
         for (int sub = 0; sub < m_qdsmc_conduction_substeps; ++sub)
         {
             // Nodal energy density and diffusivity from the pass state.
@@ -1650,6 +1723,66 @@ void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
             N.FillBoundary(geom.periodicity());
             D.FillBoundary(geom.periodicity());
 
+            if (parallel_mode) {
+                // W = D b b, then drift_i = sum_j d_j W_ij by central
+                // differences.
+                for (amrex::MFIter mfi(D, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+                {
+                    amrex::Box const box = mfi.growntilebox(ng);
+                    auto const d_arr = D.const_array(mfi);
+                    auto const hx = bhx.const_array(mfi);
+                    auto const hy = bhy.const_array(mfi);
+                    auto const hz = bhz.const_array(mfi);
+                    auto const w = W.array(mfi);
+                    amrex::ParallelFor(box,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    {
+                        amrex::Real const d = d_arr(i,j,k);
+                        w(i,j,k,0) = d * hx(i,j,k) * hx(i,j,k);
+                        w(i,j,k,1) = d * hx(i,j,k) * hy(i,j,k);
+                        w(i,j,k,2) = d * hx(i,j,k) * hz(i,j,k);
+                        w(i,j,k,3) = d * hy(i,j,k) * hy(i,j,k);
+                        w(i,j,k,4) = d * hy(i,j,k) * hz(i,j,k);
+                        w(i,j,k,5) = d * hz(i,j,k) * hz(i,j,k);
+                    });
+                }
+                for (amrex::MFIter mfi(D, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+                {
+                    amrex::Box const box = mfi.tilebox();
+                    auto const w = W.const_array(mfi);
+                    auto const gx = gDx.array(mfi);
+                    auto const gy = gDy.array(mfi);
+                    auto const gz = gDz.array(mfi);
+                    amrex::ParallelFor(box,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    {
+#if defined(WARPX_DIM_3D)
+                        gx(i,j,k) = 0.5_rt*dxi[0]*(w(i+1,j,k,0)-w(i-1,j,k,0))
+                                  + 0.5_rt*dxi[1]*(w(i,j+1,k,1)-w(i,j-1,k,1))
+                                  + 0.5_rt*dxi[2]*(w(i,j,k+1,2)-w(i,j,k-1,2));
+                        gy(i,j,k) = 0.5_rt*dxi[0]*(w(i+1,j,k,1)-w(i-1,j,k,1))
+                                  + 0.5_rt*dxi[1]*(w(i,j+1,k,3)-w(i,j-1,k,3))
+                                  + 0.5_rt*dxi[2]*(w(i,j,k+1,4)-w(i,j,k-1,4));
+                        gz(i,j,k) = 0.5_rt*dxi[0]*(w(i+1,j,k,2)-w(i-1,j,k,2))
+                                  + 0.5_rt*dxi[1]*(w(i,j+1,k,4)-w(i,j-1,k,4))
+                                  + 0.5_rt*dxi[2]*(w(i,j,k+1,5)-w(i,j,k-1,5));
+#elif defined(WARPX_DIM_XZ)
+                        // In-plane derivatives only: d_x and d_z (index j).
+                        gx(i,j,k) = 0.5_rt*dxi[0]*(w(i+1,j,k,0)-w(i-1,j,k,0))
+                                  + 0.5_rt*dxi[1]*(w(i,j+1,k,2)-w(i,j-1,k,2));
+                        gy(i,j,k) = 0.5_rt*dxi[0]*(w(i+1,j,k,1)-w(i-1,j,k,1))
+                                  + 0.5_rt*dxi[1]*(w(i,j+1,k,4)-w(i,j-1,k,4));
+                        gz(i,j,k) = 0.5_rt*dxi[0]*(w(i+1,j,k,2)-w(i-1,j,k,2))
+                                  + 0.5_rt*dxi[1]*(w(i,j+1,k,5)-w(i,j-1,k,5));
+#else
+                        gx(i,j,k) = 0.5_rt*dxi[0]*(w(i,j+1,k,2)-w(i,j-1,k,2));
+                        amrex::ignore_unused(gx);
+                        gy(i,j,k) = 0.0_rt;
+                        gz(i,j,k) = 0.5_rt*dxi[0]*(w(i,j+1,k,5)-w(i,j-1,k,5));
+#endif
+                    });
+                }
+            } else {
             // grad(D) by nodal central differences (Ito drift). Valid nodes
             // only; the one-sided domain edge is handled by the ghost fill
             // (periodic wrap or the last interior value via FillBoundary +
@@ -1680,6 +1813,7 @@ void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
 #endif
                 });
             }
+            }
             gDx.FillBoundary(geom.periodicity());
             gDy.FillBoundary(geom.periodicity());
             gDz.FillBoundary(geom.periodicity());
@@ -1692,12 +1826,17 @@ void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
             // gather-deposit roundtrip's own smoothing dominates for
             // kernels narrower than a cell; recovering RATIOS instead
             // breaks conservation at strong temperature contrast).
+            const amrex::MultiFab* bpx = parallel_mode ? &bhx : nullptr;
+            const amrex::MultiFab* bpy = parallel_mode ? &bhy : nullptr;
+            const amrex::MultiFab* bpz = parallel_mode ? &bhz : nullptr;
             m_qdsmc_cond_pc->SpawnConductionNodes(lev, h_sub, U, N, D,
-                                                  gDx, gDy, gDz, false);
+                                                  gDx, gDy, gDz, false,
+                                                  bpx, bpy, bpz);
             m_qdsmc_cond_pc->DepositConductionEnergy(lev, U0);
             m_qdsmc_cond_pc->DepositConductionCount(lev, N0);
             m_qdsmc_cond_pc->SpawnConductionNodes(lev, h_sub, U, N, D,
-                                                  gDx, gDy, gDz, true);
+                                                  gDx, gDy, gDz, true,
+                                                  bpx, bpy, bpz);
             m_qdsmc_cond_pc->DepositConductionEnergy(lev, U);
 
             for (amrex::MFIter mfi(Te, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
