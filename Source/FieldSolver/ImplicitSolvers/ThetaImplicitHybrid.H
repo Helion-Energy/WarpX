@@ -159,6 +159,17 @@ private:
      *  then B = B_static + curl A with boundary treatment. */
     void DarwinUpdateA_B ( amrex::Real a_thetadt, amrex::Real a_time );
 
+    /** Unified external drive on the Darwin path: impose the (gauge-shifted)
+     * external vector potential as the boundary value of the evolved A on
+     * non-periodic domain boundaries, and hold A inside embedded-boundary
+     * bodies (frozen enclosed flux). Applied after every A update. */
+    void DarwinApplyABoundary ( amrex::Real a_time );
+
+    /** f_i(t_init) for each external A field: the Darwin gauge zeroes A at
+     * initialization, so boundary values impose the CHANGE of the external
+     * vector potential since then. */
+    amrex::Vector<amrex::Real> m_fext_init;
+
 };
 
 #endif

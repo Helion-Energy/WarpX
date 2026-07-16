@@ -65,6 +65,13 @@ protected:
 
 public:
 
+    /** Number of independent external vector-potential fields. */
+    [[nodiscard]] int nFields () const { return m_nFields; }
+    /** Registry base name of external field i (fields "<name>_Aext"). */
+    [[nodiscard]] const std::string& FieldName (int i) const { return m_field_names[i]; }
+    /** Time-profile f_i(t) of external field i. */
+    [[nodiscard]] amrex::Real TimeScale (int i, amrex::Real t) const { return m_A_time_scale[i](t); }
+
     // Default Constructor
     ExternalVectorPotential ();
 

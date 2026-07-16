@@ -756,6 +756,11 @@ public:
      * false (theta-implicit scheme): the field assembly hands the kernels
      * the total B already, so they must not add it again. */
     bool m_external_split = true;
+    /** Unified-drive mode (Darwin path): the external vector potential
+     * enters through the boundary values of the evolved A instead of the
+     * split external fields, and the Ohm kernels must not touch the
+     * external-field arrays at all. */
+    bool m_external_unified = false;
     std::unique_ptr<ExternalVectorPotential> m_external_vector_potential;
 
     /** Gpu Vector with index type of the Jx multifab */

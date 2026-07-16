@@ -547,7 +547,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
 
-    const bool include_external_fields = hybrid_model->m_add_external_fields;
+    const bool include_external_fields = hybrid_model->m_add_external_fields
+        && !hybrid_model->m_external_unified;
     // The stored electric field follows the split-field convention in both
     // schemes: the inductive E_ext is subtracted from plasma cells (where
     // the generalized Ohm's law itself is the electric field and the
@@ -1028,7 +1029,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
 
-    const bool include_external_fields = hybrid_model->m_add_external_fields;
+    const bool include_external_fields = hybrid_model->m_add_external_fields
+        && !hybrid_model->m_external_unified;
     // The stored electric field follows the split-field convention in both
     // schemes: the inductive E_ext is subtracted from plasma cells (where
     // the generalized Ohm's law itself is the electric field and the
