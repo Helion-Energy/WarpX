@@ -32,6 +32,16 @@ add_warpx_test(
 )
 
 add_warpx_test(
+    test_2d_ohm_solver_electron_energy_conduction_front_picmi  # name
+    2  # dims
+    2  # nprocs
+    "inputs_test_2d_ohm_solver_electron_energy_conduction_picmi.py --test --front"  # inputs
+    "analysis_conduction_front.py"  # analysis
+    "analysis_default_regression.py --path diags/diag1000300"  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
     test_2d_ohm_solver_electron_energy_joule_implicit_picmi  # name
     2  # dims
     2  # nprocs

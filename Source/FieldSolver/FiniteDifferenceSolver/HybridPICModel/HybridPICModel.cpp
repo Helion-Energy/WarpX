@@ -1684,11 +1684,14 @@ void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
             gDy.FillBoundary(geom.periodicity());
             gDz.FillBoundary(geom.periodicity());
 
-            // Delta form: the kicked and unkicked node sets share every
-            // remap, seam and sampling factor; their recovery difference
-            // isolates the pure diffusive transport (without it the
+            // Delta form: the kicked and unkicked node sets carry
+            // IDENTICAL contents, so the difference of their raw energy
+            // deposits is exactly conservative (both sum to the same
+            // total) and shares every remap, seam and sampling factor --
+            // isolating the pure diffusive transport (without it the
             // gather-deposit roundtrip's own smoothing dominates for
-            // kernels narrower than a cell).
+            // kernels narrower than a cell; recovering RATIOS instead
+            // breaks conservation at strong temperature contrast).
             m_qdsmc_cond_pc->SpawnConductionNodes(lev, h_sub, U, N, D,
                                                   gDx, gDy, gDz, false);
             m_qdsmc_cond_pc->DepositConductionEnergy(lev, U0);
@@ -1696,7 +1699,6 @@ void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
             m_qdsmc_cond_pc->SpawnConductionNodes(lev, h_sub, U, N, D,
                                                   gDx, gDy, gDz, true);
             m_qdsmc_cond_pc->DepositConductionEnergy(lev, U);
-            m_qdsmc_cond_pc->DepositConductionCount(lev, N);
 
             for (amrex::MFIter mfi(Te, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
             {
@@ -1704,24 +1706,25 @@ void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
                 auto const u_arr   = U.const_array(mfi);
                 auto const rho_arr = rho.const_array(mfi, rho_comp);
                 auto const te_arr  = Te.array(mfi);
-                auto const nn_arr = N.const_array(mfi);
                 auto const u0_arr = U0.const_array(mfi);
                 auto const n0_arr = N0.const_array(mfi);
-                amrex::Real const count_floor =
-                    n_floor_rec * 1.0e-6_rt;  // "some count arrived" gate
+                amrex::Real const count_floor = n_floor_rec * 1.0e-6_rt;
                 amrex::ParallelFor(box,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k)
                 {
-                    // Delta-form ratio recovery, energy per electron: the
-                    // difference of the kicked and unkicked recoveries is
-                    // the conduction increment; nodes no conduction node
-                    // reached keep their prior temperature.
-                    if (nn_arr(i,j,k) > count_floor
-                        && n0_arr(i,j,k) > count_floor) {
+                    // Conservative delta recovery: the energy-density
+                    // increment divided by the UNKICKED count deposit.
+                    // The count carries the same gathered density
+                    // realization and the same deposit smoothing as the
+                    // energy fields, so the PIC density noise cancels in
+                    // the quotient (dividing by the raw grid density
+                    // injects a noise source proportional to T), while
+                    // sum(N0 * dT) = sum(dU) = 0 keeps the discrete
+                    // thermal energy exactly conserved.
+                    if (n0_arr(i,j,k) > count_floor) {
                         amrex::Real const dT = (2.0_rt/3.0_rt)
-                            * (u_arr(i,j,k) / nn_arr(i,j,k)
-                               - u0_arr(i,j,k) / n0_arr(i,j,k))
-                            / PhysConst::kb;
+                            * (u_arr(i,j,k) - u0_arr(i,j,k))
+                            / (n0_arr(i,j,k) * PhysConst::kb);
                         te_arr(i,j,k) = amrex::max(
                             te_arr(i,j,k) + dT, 0.0_rt);
                     }
