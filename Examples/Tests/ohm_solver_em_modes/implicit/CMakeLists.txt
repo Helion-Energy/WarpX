@@ -31,3 +31,28 @@ add_warpx_test(
     OFF  # dependency
 )
 label_warpx_test(test_rz_ohm_solver_em_modes_implicit_picmi slow)
+
+# 3D Cartesian coverage of the theta-implicit hybrid solver and its Darwin
+# variant (CI-sized column: Nz = 128, NPPC = 32 in test mode; the physics
+# dispersion analyses live in the 1D tests).
+add_warpx_test(
+    test_3d_ohm_solver_em_modes_implicit_picmi  # name
+    3  # dims
+    2  # nprocs
+    "inputs_test_1d_ohm_solver_em_modes_implicit_picmi.py --test --dim 3 --bdir z"  # inputs
+    OFF  # analysis
+    "analysis_default_regression.py --path diags/field_diag000050 --rtol 2e-4"  # checksum
+    OFF  # dependency
+)
+label_warpx_test(test_3d_ohm_solver_em_modes_implicit_picmi slow)
+
+add_warpx_test(
+    test_3d_ohm_solver_em_modes_darwin_picmi  # name
+    3  # dims
+    2  # nprocs
+    "inputs_test_1d_ohm_solver_em_modes_implicit_picmi.py --test --dim 3 --bdir z --darwin"  # inputs
+    OFF  # analysis
+    "analysis_default_regression.py --path diags/field_diag000050 --rtol 2e-4"  # checksum
+    OFF  # dependency
+)
+label_warpx_test(test_3d_ohm_solver_em_modes_darwin_picmi slow)

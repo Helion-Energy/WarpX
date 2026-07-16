@@ -77,6 +77,12 @@ class EMModes(object):
         # calculate various plasma parameters based on the simulation input
         self.get_plasma_quantities()
 
+        if self.test and self.dim == 3:
+            # CI-sized 3D column: the production-length column at 3D cost
+            # would run for tens of minutes on the CI runners.
+            self.Nz = 128
+            self.NPPC = 32
+
         self.dz = self.DZ * self.l_i
         self.Lz = self.Nz * self.dz
         self.Lx = self.Nx * self.dz
@@ -258,6 +264,14 @@ class EMModes(object):
             nonlinear_solver=nonlinear_solver,
         )
         simulation.evolve_scheme = evolve_scheme
+
+        if self.darwin and self.dim == 3:
+            # The 3D E_L Poisson solve dominates the residual-evaluation
+            # cost; the default 1e-10 tolerance is far tighter than any
+            # quantity checked at CI scale.
+            import pywarpx
+
+            pywarpx.hybridpicmodel.darwin_poisson_rtol = 1.0e-8
 
         #######################################################################
         # Particle types setup                                                #
