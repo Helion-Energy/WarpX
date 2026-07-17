@@ -512,6 +512,25 @@ public:
                               int rho_comp) const;
 
     /**
+     * \brief PROTOTYPE (WARPX_COND_FUSED): fused composition of the
+     *        conduction increment with the advection stage. The
+     *        kicked-minus-unkicked energy-deposit difference (in the
+     *        stage's K*N units) is added into the stage's deposited
+     *        entropy BEFORE its single N-ratio recovery, so conduction
+     *        and advection share ONE gather-deposit remap instead of
+     *        exchanging spectral power across two.
+     *
+     * \param dt        full step (the increment is applied once per step)
+     * \param Karr      the stage's deposited K*N field, incremented
+     * \param rho_type  density register defining n_e for the kernel
+     * \param rho_comp  component of that register
+     */
+    void QdsmcConductionFusedIncrement (amrex::Real dt,
+                                        amrex::MultiFab & Karr,
+                                        warpx::fields::FieldType rho_type,
+                                        int rho_comp) const;
+
+    /**
      * \brief Post-solve completion of the theta-implicit electron-energy
      *        step: apply the stochastic ion-heating realization (Q_ei
      *        conjugate) once with converged states, refresh Pe to
