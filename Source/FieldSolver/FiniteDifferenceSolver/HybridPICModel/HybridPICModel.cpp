@@ -1969,25 +1969,26 @@ void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
             // contrasts grow energy without a ledger constraint. Rescale
             // the cooling part of the increment so the density-weighted
             // sum vanishes exactly.
-            amrex::Real pos = 0.0_rt;
-            amrex::Real neg = 0.0_rt;
-            for (amrex::MFIter mfi(Te); mfi.isValid(); ++mfi)
+            amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+            amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
+            for (amrex::MFIter mfi(Te, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
             {
-                amrex::Box const box = mfi.validbox();
+                amrex::Box const box = mfi.tilebox();
                 auto const dt_arr  = dT.const_array(mfi);
                 auto const rho_arr = rho.const_array(mfi, rho_comp);
-                amrex::Real p_loc = 0.0_rt;
-                amrex::Real m_loc = 0.0_rt;
-                amrex::LoopOnCpu(box, [&] (int i, int j, int k)
+                reduce_op.eval(box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    -> amrex::GpuTuple<amrex::Real, amrex::Real>
                 {
                     amrex::Real const n = amrex::max(
                         rho_arr(i,j,k) / PhysConst::q_e, n_floor_rec);
                     amrex::Real const v = n * dt_arr(i,j,k);
-                    if (v > 0.0_rt) { p_loc += v; } else { m_loc += v; }
+                    return {amrex::max(v, 0.0_rt), amrex::min(v, 0.0_rt)};
                 });
-                pos += p_loc;
-                neg += m_loc;
             }
+            auto rtuple = reduce_data.value(reduce_op);
+            amrex::Real pos = amrex::get<0>(rtuple);
+            amrex::Real neg = amrex::get<1>(rtuple);
             amrex::ParallelDescriptor::ReduceRealSum(pos);
             amrex::ParallelDescriptor::ReduceRealSum(neg);
             amrex::Real const alpha =
