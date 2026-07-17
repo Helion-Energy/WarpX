@@ -1618,6 +1618,10 @@ void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
     auto & warpx = WarpX::GetInstance();
     amrex::Real const n_floor_rec = m_qdsmc_n_floor;
     auto const kappa = m_qdsmc_kappa;
+    // Recovery variant: the conservative difference is the default; the
+    // ratio-delta + conservation projection (noise-cancelling,
+    // ledger-projected) is selectable for the composition study.
+    const bool use_ratio = (std::getenv("WARPX_COND_RATIO_PROJ") != nullptr);
 
     amrex::Real const h_sub = h / m_qdsmc_conduction_substeps;
 
@@ -1639,6 +1643,8 @@ void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
         amrex::MultiFab N (Te.boxArray(), Te.DistributionMap(), 1, ng);
         amrex::MultiFab U0 (Te.boxArray(), Te.DistributionMap(), 1, ng);
         amrex::MultiFab N0 (Te.boxArray(), Te.DistributionMap(), 1, ng);
+        amrex::MultiFab Nk (Te.boxArray(), Te.DistributionMap(), 1, ng);
+        amrex::MultiFab dT (Te.boxArray(), Te.DistributionMap(), 1, ng);
         amrex::MultiFab D (Te.boxArray(), Te.DistributionMap(), 1, ng);
         amrex::MultiFab gDx (Te.boxArray(), Te.DistributionMap(), 1, ng);
         amrex::MultiFab gDy (Te.boxArray(), Te.DistributionMap(), 1, ng);
@@ -1857,6 +1863,7 @@ void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
                                                   gDx, gDy, gDz, true,
                                                   bpx, bpy, bpz);
             m_qdsmc_cond_pc->DepositConductionEnergy(lev, U);
+            m_qdsmc_cond_pc->DepositConductionCount(lev, Nk);
 
             if (std::getenv("WARPX_COND_TRACE") != nullptr) {
                 amrex::Real const dmax = D.max(0);
@@ -1879,33 +1886,207 @@ void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
                 auto const te_arr  = Te.array(mfi);
                 auto const u0_arr = U0.const_array(mfi);
                 auto const n0_arr = N0.const_array(mfi);
+                auto const nk_arr = Nk.const_array(mfi);
+                auto const dt_arr = dT.array(mfi);
                 amrex::ParallelFor(box,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k)
                 {
-                    // Nodes whose deposited count is far below the local
-                    // density carry no reliable increment (boundary and
-                    // axis nodes in the radial geometries collect only
-                    // a fraction of a cell's deposit under the nodal
-                    // volume conventions): keep the prior temperature
-                    // there rather than dividing by a sliver.
+                    // Ratio-delta recovery: the difference of the kicked
+                    // and unkicked energy-per-count estimates. Each ratio
+                    // carries the SAME gathered density realization and
+                    // deposit smoothing in numerator and denominator, so
+                    // the PIC density noise cancels (a raw energy-deposit
+                    // difference moves the noise-modulated content and
+                    // injects density-noise-squared temperature noise per
+                    // pass). Nodes whose deposited count is far below the
+                    // local density carry no reliable increment (boundary
+                    // and axis nodes in the radial geometries): zero.
                     amrex::Real const count_floor = 0.1_rt * amrex::max(
                         rho_arr(i,j,k) / PhysConst::q_e, n_floor_rec);
-                    // Conservative delta recovery: the energy-density
-                    // increment divided by the UNKICKED count deposit.
-                    // The count carries the same gathered density
-                    // realization and the same deposit smoothing as the
-                    // energy fields, so the PIC density noise cancels in
-                    // the quotient (dividing by the raw grid density
-                    // injects a noise source proportional to T), while
-                    // sum(N0 * dT) = sum(dU) = 0 keeps the discrete
-                    // thermal energy exactly conserved.
-                    if (n0_arr(i,j,k) > count_floor) {
-                        amrex::Real const dT = (2.0_rt/3.0_rt)
-                            * (u_arr(i,j,k) - u0_arr(i,j,k))
-                            / (n0_arr(i,j,k) * PhysConst::kb);
-                        te_arr(i,j,k) = amrex::max(
-                            te_arr(i,j,k) + dT, 0.0_rt);
+                    if (n0_arr(i,j,k) > count_floor
+                        && nk_arr(i,j,k) > count_floor) {
+                        if (use_ratio) {
+                            dt_arr(i,j,k) = (2.0_rt/3.0_rt) / PhysConst::kb
+                                * (u_arr(i,j,k) / nk_arr(i,j,k)
+                                   - u0_arr(i,j,k) / n0_arr(i,j,k));
+                        } else {
+                            // conservative difference (default): exactly
+                            // conservative; carries the density noise in
+                            // the increment (see the ratio variant).
+                            dt_arr(i,j,k) = (2.0_rt/3.0_rt) / PhysConst::kb
+                                * (u_arr(i,j,k) - u0_arr(i,j,k))
+                                / n0_arr(i,j,k);
+                        }
+                    } else {
+                        dt_arr(i,j,k) = 0.0_rt;
                     }
+                });
+            }
+
+            // Conservation projection (ratio variant only): the ratio
+            // estimates are noise-clean but do not telescope, and strong
+            // contrasts grow energy without a ledger constraint. Rescale
+            // the cooling part of the increment so the density-weighted
+            // sum vanishes exactly.
+            amrex::Real pos = 0.0_rt;
+            amrex::Real neg = 0.0_rt;
+            for (amrex::MFIter mfi(Te); mfi.isValid(); ++mfi)
+            {
+                amrex::Box const box = mfi.validbox();
+                auto const dt_arr  = dT.const_array(mfi);
+                auto const rho_arr = rho.const_array(mfi, rho_comp);
+                amrex::Real p_loc = 0.0_rt;
+                amrex::Real m_loc = 0.0_rt;
+                amrex::LoopOnCpu(box, [&] (int i, int j, int k)
+                {
+                    amrex::Real const n = amrex::max(
+                        rho_arr(i,j,k) / PhysConst::q_e, n_floor_rec);
+                    amrex::Real const v = n * dt_arr(i,j,k);
+                    if (v > 0.0_rt) { p_loc += v; } else { m_loc += v; }
+                });
+                pos += p_loc;
+                neg += m_loc;
+            }
+            amrex::ParallelDescriptor::ReduceRealSum(pos);
+            amrex::ParallelDescriptor::ReduceRealSum(neg);
+            amrex::Real const alpha =
+                (use_ratio && neg < 0.0_rt) ? (pos / (-neg)) : 1.0_rt;
+
+            for (amrex::MFIter mfi(Te, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                amrex::Box const box = mfi.tilebox();
+                auto const dt_arr = dT.const_array(mfi);
+                auto const te_arr = Te.array(mfi);
+                amrex::ParallelFor(box,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    amrex::Real const d = dt_arr(i,j,k);
+                    amrex::Real const dc = (d > 0.0_rt) ? d : alpha * d;
+                    te_arr(i,j,k) = amrex::max(te_arr(i,j,k) + dc, 0.0_rt);
+                });
+            }
+            Te.FillBoundary(geom.periodicity());
+        }
+    }
+}
+
+void HybridPICModel::QdsmcConductionFusedIncrement (amrex::Real const dt,
+                                                    amrex::MultiFab & Karr,
+                                                    warpx::fields::FieldType const rho_type,
+                                                    int const rho_comp) const
+{
+    ABLASTR_PROFILE("HybridPICModel::QdsmcConductionFusedIncrement()");
+
+    auto & warpx = WarpX::GetInstance();
+    int const lev = 0;
+    amrex::Real const n_floor_rec = m_qdsmc_n_floor;
+    auto const kappa = m_qdsmc_kappa;
+    // The stage stores K in eV-equivalent units: T[K] * (k_B / q_e).
+    auto const kb_over_qe = PhysConst::kb / PhysConst::q_e;
+
+    amrex::Geometry const & geom = warpx.Geom(lev);
+    auto const dxi = geom.InvCellSizeArray();
+
+    amrex::MultiFab & Te = *warpx.m_fields.get(
+        FieldType::hybrid_electron_temperature_fp, lev);
+    amrex::MultiFab const & rho = *warpx.m_fields.get(rho_type, lev);
+
+    amrex::IntVect const ng = Te.nGrowVect();
+    amrex::MultiFab U (Te.boxArray(), Te.DistributionMap(), 1, ng);
+    amrex::MultiFab N (Te.boxArray(), Te.DistributionMap(), 1, ng);
+    amrex::MultiFab U0 (Te.boxArray(), Te.DistributionMap(), 1, ng);
+    amrex::MultiFab D (Te.boxArray(), Te.DistributionMap(), 1, ng);
+    amrex::MultiFab gDx (Te.boxArray(), Te.DistributionMap(), 1, ng);
+    amrex::MultiFab gDy (Te.boxArray(), Te.DistributionMap(), 1, ng);
+    amrex::MultiFab gDz (Te.boxArray(), Te.DistributionMap(), 1, ng);
+
+    amrex::Real const h_sub = dt / m_qdsmc_conduction_substeps;
+    for (int sub = 0; sub < m_qdsmc_conduction_substeps; ++sub)
+    {
+        for (amrex::MFIter mfi(Te, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            amrex::Box const box = mfi.growntilebox(ng);
+            auto const te_arr  = Te.const_array(mfi);
+            auto const rho_arr = rho.const_array(mfi, rho_comp);
+            auto const u_arr = U.array(mfi);
+            auto const nn_arr = N.array(mfi);
+            auto const d_arr = D.array(mfi);
+            amrex::ParallelFor(box,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                amrex::Real const n = amrex::max(
+                    rho_arr(i,j,k) / PhysConst::q_e, n_floor_rec);
+                amrex::Real const T = amrex::max(te_arr(i,j,k), 0.0_rt);
+                // K*N-unit energy density: T[eV-equivalent] * n.
+                u_arr(i,j,k) = kb_over_qe * T * n;
+                nn_arr(i,j,k) = n;
+                d_arr(i,j,k) = (2.0_rt/3.0_rt) * kappa(T, n)
+                               / (n * PhysConst::kb);
+            });
+        }
+        U.FillBoundary(geom.periodicity());
+        N.FillBoundary(geom.periodicity());
+        D.FillBoundary(geom.periodicity());
+
+        for (amrex::MFIter mfi(D, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            amrex::Box const box = mfi.tilebox();
+            auto const d_arr = D.const_array(mfi);
+            auto const gx = gDx.array(mfi);
+            auto const gy = gDy.array(mfi);
+            auto const gz = gDz.array(mfi);
+            amrex::ParallelFor(box,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+#if defined(WARPX_DIM_3D)
+                gx(i,j,k) = 0.5_rt*dxi[0]*(d_arr(i+1,j,k) - d_arr(i-1,j,k));
+                gy(i,j,k) = 0.5_rt*dxi[1]*(d_arr(i,j+1,k) - d_arr(i,j-1,k));
+                gz(i,j,k) = 0.5_rt*dxi[2]*(d_arr(i,j,k+1) - d_arr(i,j,k-1));
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+                gx(i,j,k) = 0.5_rt*dxi[0]*(d_arr(i+1,j,k) - d_arr(i-1,j,k));
+                gy(i,j,k) = 0.0_rt;
+                gz(i,j,k) = 0.5_rt*dxi[1]*(d_arr(i,j+1,k) - d_arr(i,j-1,k));
+#else
+                gx(i,j,k) = 0.0_rt;
+                gy(i,j,k) = 0.0_rt;
+                gz(i,j,k) = 0.5_rt*dxi[0]*(d_arr(i+1,j,k) - d_arr(i-1,j,k));
+#endif
+            });
+        }
+        gDx.FillBoundary(geom.periodicity());
+        gDy.FillBoundary(geom.periodicity());
+        gDz.FillBoundary(geom.periodicity());
+
+        m_qdsmc_cond_pc->SpawnConductionNodes(lev, h_sub, U, N, D,
+                                              gDx, gDy, gDz, false);
+        m_qdsmc_cond_pc->DepositConductionEnergy(lev, U0);
+        m_qdsmc_cond_pc->SpawnConductionNodes(lev, h_sub, U, N, D,
+                                              gDx, gDy, gDz, true);
+        m_qdsmc_cond_pc->DepositConductionEnergy(lev, U);
+
+        // The increment rides the stage's deposited K*N: on the LAST
+        // substep add into Karr (the stage recovery divides by its own
+        // deposited N once, sharing the remap); earlier substeps must
+        // compose through Te directly.
+        if (sub + 1 == m_qdsmc_conduction_substeps) {
+            amrex::MultiFab::Subtract(U, U0, 0, 0, 1, amrex::IntVect(0));
+            amrex::MultiFab::Add(Karr, U, 0, 0, 1, amrex::IntVect(0));
+        } else {
+            for (amrex::MFIter mfi(Te, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                amrex::Box const box = mfi.tilebox();
+                auto const u_arr   = U.const_array(mfi);
+                auto const u0_arr  = U0.const_array(mfi);
+                auto const rho_arr = rho.const_array(mfi, rho_comp);
+                auto const te_arr  = Te.array(mfi);
+                amrex::ParallelFor(box,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    amrex::Real const n = amrex::max(
+                        rho_arr(i,j,k) / PhysConst::q_e, n_floor_rec);
+                    amrex::Real const dT = (u_arr(i,j,k) - u0_arr(i,j,k))
+                        / (kb_over_qe * n);
+                    te_arr(i,j,k) = amrex::max(te_arr(i,j,k) + dT, 0.0_rt);
                 });
             }
             Te.FillBoundary(geom.periodicity());
@@ -2564,7 +2745,8 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
     // Strang first half of the electron thermal conduction (Phase 3a):
     // cond(dt/2) o [advect + sources](dt) o cond(dt/2). The pass updates
     // T_e in place, so the entropy seed below picks up the conducted state.
-    if (m_qdsmc_conduction != "off") {
+    const bool cond_fused = (std::getenv("WARPX_COND_FUSED") != nullptr);
+    if (m_qdsmc_conduction != "off" && !cond_fused) {
         PrintTeVariance("step-entry");
         QdsmcConductionPass(0.5_rt*dt, FieldType::hybrid_rho_fp_temp, 0);
         PrintTeVariance("post-prehalf");
@@ -2607,6 +2789,15 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
         // call zeroes its target field, then deposits, then SumBoundary).
         m_qdsmc_pc->DepositK(lev, Karr_out);
         m_qdsmc_pc->DepositField(lev, weights_out);
+
+        // PROTOTYPE: fused conduction increment into the stage's deposit
+        // (shares the stage's single remap; see
+        // QdsmcConductionFusedIncrement).
+        if (m_qdsmc_conduction != "off"
+            && std::getenv("WARPX_COND_FUSED") != nullptr) {
+            QdsmcConductionFusedIncrement(dt, Karr_out,
+                                          FieldType::hybrid_rho_fp_temp, 0);
+        }
 
         // Step 5: recover T_e^{n+1} from (deposited K*N) / (deposited N) and
         // the updated n_e (from rho_fp = rho^{n+1}).
@@ -2669,7 +2860,7 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
         // post-advection density rho^{n+1} (the pass loops levels
         // internally; the single-level guard mirrors the solver-wide
         // finest_level == 0 restriction).
-        if (m_qdsmc_conduction != "off" && lev == 0) {
+        if (m_qdsmc_conduction != "off" && lev == 0 && !cond_fused) {
             PrintTeVariance("post-stage");
             if (std::getenv("WARPX_COND_SKIP_POST") == nullptr) {
                 QdsmcConductionPass(0.5_rt*dt, FieldType::rho_fp, 0);
