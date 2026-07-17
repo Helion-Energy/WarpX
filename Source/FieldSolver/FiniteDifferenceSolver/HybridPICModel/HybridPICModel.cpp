@@ -1590,6 +1590,25 @@ void HybridPICModel::QDSMCInitializeKe (int const lev, amrex::MultiFab const & r
 }
 
 
+namespace {
+    // Total field variance of Te about its own mean: for a Gaussian bump
+    // of width sigma on a uniform background, Var ~ 1/sigma^2(t), so
+    // 1/Var grows linearly at the transport rate -- an estimator-free
+    // in-step probe.
+    void PrintTeVariance (char const* tag)
+    {
+        if (std::getenv("WARPX_COND_VARTRACE") == nullptr) { return; }
+        auto & warpx = WarpX::GetInstance();
+        amrex::MultiFab const & Te = *warpx.m_fields.get(
+            warpx::fields::FieldType::hybrid_electron_temperature_fp, 0);
+        auto const npts = static_cast<amrex::Real>(Te.boxArray().numPts());
+        amrex::Real const mean = Te.sum(0) / npts;
+        amrex::Real const m2 = amrex::MultiFab::Dot(Te, 0, Te, 0, 1, 0) / npts;
+        amrex::Print() << "[var-trace] " << tag << " var "
+            << m2 - mean*mean << " mean " << mean << "\n";
+    }
+}
+
 void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
                                           warpx::fields::FieldType const rho_type,
                                           int const rho_comp) const
@@ -2546,7 +2565,9 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
     // cond(dt/2) o [advect + sources](dt) o cond(dt/2). The pass updates
     // T_e in place, so the entropy seed below picks up the conducted state.
     if (m_qdsmc_conduction != "off") {
+        PrintTeVariance("step-entry");
         QdsmcConductionPass(0.5_rt*dt, FieldType::hybrid_rho_fp_temp, 0);
+        PrintTeVariance("post-prehalf");
     }
 
     // J_plasma at the current B (B^{n+1/2} from the last Faraday substep) is
@@ -2648,9 +2669,12 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
         // post-advection density rho^{n+1} (the pass loops levels
         // internally; the single-level guard mirrors the solver-wide
         // finest_level == 0 restriction).
-        if (m_qdsmc_conduction != "off" && lev == 0
-            && std::getenv("WARPX_COND_SKIP_POST") == nullptr) {
-            QdsmcConductionPass(0.5_rt*dt, FieldType::rho_fp, 0);
+        if (m_qdsmc_conduction != "off" && lev == 0) {
+            PrintTeVariance("post-stage");
+            if (std::getenv("WARPX_COND_SKIP_POST") == nullptr) {
+                QdsmcConductionPass(0.5_rt*dt, FieldType::rho_fp, 0);
+            }
+            PrintTeVariance("post-posthalf");
         }
 
         // Step 7: emit P_e = n_e * k_B * T_e for the downstream Ohm's-law solve.
