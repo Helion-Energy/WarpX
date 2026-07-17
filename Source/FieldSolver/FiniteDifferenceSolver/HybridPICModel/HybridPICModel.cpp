@@ -3224,9 +3224,31 @@ void HybridPICModel::AdvanceElectronEnergyQDSMCTheta (amrex::Real const dt,
         // Ohm's-law-side quantities (V_e, sources, the emitted pressure)
         // keep the solver's rho_fp states.
         amrex::MultiFab const & rho_mid = *rho_mid_levels[lev];
-        // Extrapolated end-of-step density iterate rho^{n+1} = 2 rho^{n+1/2} - rho^n.
+        // Extrapolated end-of-step density iterate. The GEOMETRIC form
+        // rho^{n+1} = rho_mid^2 / rho^n is used instead of the linear
+        // 2 rho_mid - rho^n: both are second-order for smooth density,
+        // but the two deposits carry different shape-noise realizations
+        // and the linear combination amplifies their difference into a
+        // dt-INDEPENDENT recovery bias (measured as a flat 6e-3 offset in
+        // the theta = 1 temporal-order study), while the per-node ratio
+        // cancels the common deposition-shape convention exactly.
         amrex::MultiFab rho_np1(rho_fp.boxArray(), rho_fp.DistributionMap(), 1, rho_fp.nGrowVect());
-        amrex::MultiFab::LinComb(rho_np1, 2.0_rt, rho_mid, 0, -1.0_rt, rho_n, 0, 0, 1, rho_fp.nGrowVect());
+        {
+            amrex::Real const rho_floor_x = PhysConst::q_e * m_n_floor * 1.0e-6_rt;
+            for (amrex::MFIter mfi(rho_np1, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                amrex::Box const box = mfi.growntilebox(rho_np1.nGrowVect());
+                auto const mid = rho_mid.const_array(mfi);
+                auto const rn  = rho_n.const_array(mfi);
+                auto const out = rho_np1.array(mfi);
+                amrex::ParallelFor(box,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    out(i,j,k) = mid(i,j,k) * mid(i,j,k)
+                        / amrex::max(rn(i,j,k), rho_floor_x);
+                });
+            }
+        }
 
         // Step 1: midpoint electron fluid velocity
         //   V_e^{n+1/2} = -(J_plasma^{n+1/2} - J_i^{n+1/2}) / rho^{n+1/2},
