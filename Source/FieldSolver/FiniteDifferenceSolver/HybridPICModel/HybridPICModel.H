@@ -705,6 +705,13 @@ public:
      *  variation of a strongly nonlinear kappa(T). */
     int m_qdsmc_conduction_substeps = 1;
 
+    /** Free-streaming flux-limiter coefficient alpha (0 = off, default).
+     *  The parallel/isotropic diffusivity is blended harmonically against
+     *  the free-streaming bound q_fs = alpha n k_B T v_th,e:
+     *  D_eff = D / (1 + (3/2) D |grad T| / (alpha T v_th,e)), evaluated
+     *  per node at the pass state. */
+    amrex::Real m_qdsmc_conduction_flux_limiter = 0.0;
+
     /** Plasma density floor - if n < n_floor it will be set to n_floor */
     amrex::Real m_n_floor = 1.0;
 
