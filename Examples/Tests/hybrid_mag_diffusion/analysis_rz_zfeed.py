@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""RZ hybrid mag-diffusion axial z-face pec_insulator B_t feed (deep fill).
+"""RZ hybrid magnetic diffusion with an axial pec_insulator B_t feed.
 
-Oracle (not Fourier analytic): with a z_lo feed B_t = B0*(r/R) and a matching
-r_hi Dirichlet B_t = B0, the cylindrical null mode B_t ≈ B0*r/R is admitted by
-both faces. Stiff BE (eta=129, dt=1 ns) reaches that steady state by step 5:
-max B_t ~ B0, and the field fills the full axial domain (not an O(R) skin).
+With z_lo feed B_t = B0*(r/R) and matching r_hi Dirichlet B_t = B0, the
+cylindrical mode B_t ≈ B0*r/R is admitted. After several resistive steps the
+field should fill the axial domain with max B_t near B0.
 
-This is the corrected verification of axial B_t coupling in the RZ matrix-free
-curl chain. A pure PEC tube (Neumann on B_t at r_hi) instead yields a short
-physical skin O(R) under stiff BE — that is elliptic cylindrical structure,
-not a missing d^2/dz^2 term. See notes/2026-07-15_session_p1b_zfeed.md.
+Checks (not a Fourier analytic solution):
+  - peak B_t near the feed scale B0
+  - deep axial fill of that profile
 """
+
 import glob
 import math
 import os
@@ -57,12 +56,20 @@ def bt_z_profile(diag_dir):
     path = os.path.join(diag_dir, "Level_0", "Cell_D_00000")
     with open(path, "rb") as f:
         f.readline()  # FAB header
-        # 32 * 64 * 3 doubles, Fortran order (i, j, comp)
+        # 32 * 64 * 3 values, Fortran order (i, j, comp). Double or float
+        # depending on WarpX_PRECISION.
         n = 32 * 64 * 3
-        data = f.read(n * 8)
-    vals = list(struct.unpack(f"{n}d", data))
-    # reshape (nr, nz, nc) Fortran
-    nr, nz, nc = 32, 64, 3
+        data = f.read()
+    if len(data) == n * 8:
+        vals = list(struct.unpack(f"{n}d", data))
+    elif len(data) == n * 4:
+        vals = list(struct.unpack(f"{n}f", data))
+    else:
+        raise RuntimeError(
+            f"Unexpected Cell_D size {len(data)} (expected {n * 4} or {n * 8})"
+        )
+    # reshape (nr, nz, ncomp) Fortran; ncomp = 3 (Br, Bt, Bz)
+    nr, nz = 32, 64
     bt_z = []
     for j in range(nz):
         m = 0.0
@@ -109,7 +116,9 @@ def main():
     bt_z = bt_z_profile(plotfiles[-1])
     mid = bt_z[len(bt_z) // 2]
     lo = bt_z[0]
-    print(f"max|Bt| z-lo={lo:.6e}  z-mid={mid:.6e}  ratio mid/lo={mid/max(lo,1e-30):.4f}")
+    print(
+        f"max|Bt| z-lo={lo:.6e}  z-mid={mid:.6e}  ratio mid/lo={mid / max(lo, 1e-30):.4f}"
+    )
     if mid < 0.5 * lo:
         print(
             "FAILED: mid-z Bt is less than half the endwall value — axial fill "
@@ -118,8 +127,10 @@ def main():
         )
         return 1
 
-    print("PASSED: z-face pec_insulator B_t feed reaches deep axial fill "
-          f"(max Bt={bt_max1:.4e} ~ B0, mid/lo={mid/max(lo,1e-30):.3f})")
+    print(
+        "PASSED: z-face pec_insulator B_t feed reaches deep axial fill "
+        f"(max Bt={bt_max1:.4e} ~ B0, mid/lo={mid / max(lo, 1e-30):.3f})"
+    )
     return 0
 
 
