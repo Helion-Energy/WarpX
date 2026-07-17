@@ -171,7 +171,9 @@ ion-derived density as
         T_e = \frac{\sum K_e N_e}{\sum N_e}\, n_e^{\gamma - 1}.
 
 Since the scheme only advects the electron entropy, thermal conduction is
-neglected (:math:`\nabla\cdot\vec{q}_e = 0`).
+neglected (:math:`\nabla\cdot\vec{q}_e = 0`) unless the optional conduction
+pass described :ref:`below <theory-hybrid-model-electron-conduction>` is
+enabled.
 
 Two source terms can be enabled on the right-hand side. The first is the Joule
 (Ohmic) heating consistent with the resistive friction in Ohm's law
@@ -207,6 +209,52 @@ conserves energy exactly.
 Verification tests of the transport terms (adiabatic compression), the Joule
 source (force-free field decay) and the :math:`Q_{ei}` exchange are described
 in the :ref:`examples section <examples-ohm-solver-electron-energy-eq>`.
+
+.. _theory-hybrid-model-electron-conduction:
+
+Electron thermal conduction
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+An optional conduction pass (``hybrid_pic_model.qdsmc_conduction``) transports
+the electron internal energy with the same deterministic
+Green's-function-sampling machinery as the entropy advection
+:cite:p:`kfhm-Albright2002`. Each cell spawns a small set of Gauss-Hermite
+nodes that sample the Gaussian kernel of the diffusion operator over one pass,
+
+.. math::
+
+    \Delta x_k = \xi_k \sqrt{2 D \Delta t} + \nabla D\, \Delta t,
+    \qquad D = \frac{2\,\kappa(T_e, n_e)}{3 n_e k_B},
+
+with the three-node rule :math:`\xi \in \{0, \pm\sqrt{3}\}`,
+:math:`w \in \{2/3, 1/6, 1/6\}` (Gaussian moments through fifth order) and
+the conductivity :math:`\kappa(T,n)` a user expression
+(``hybrid_pic_model.qdsmc_conduction_kappa(T,n)``). Because every node weight
+is positive and the deposit is conservative, the pass is unconditionally
+stable and positivity-preserving with no conduction CFL limit -- the
+time-step restrictions that make strongly anisotropic conduction stiff for
+grid-stencil discretizations do not arise
+:cite:p:`kfhm-SharmaHammett2007,kfhm-Sovinec2004`.
+
+In the ``parallel`` mode the kicks run along the local magnetic field
+direction: the pass is a per-step quadrature of the field-line
+Green's-function solution of parallel transport
+:cite:p:`kfhm-delCastilloNegrete2011`, and transports no energy across field
+lines by construction. A verification case with a hot patch on circular field
+lines measures cross-field pollution consistent with zero
+(:math:`\kappa_{\perp,\mathrm{num}}/\kappa_\parallel \lesssim 10^{-3}`,
+bounded by fit noise), the property that motivates field-line methods at the
+:math:`\kappa_\parallel/\kappa_\perp \gg 1` ratios of magnetized
+plasmas. A free-streaming flux limiter
+(``hybrid_pic_model.qdsmc_conduction_flux_limiter``) optionally blends the
+diffusivity harmonically against :math:`q_\mathrm{fs} = \alpha n k_B T
+v_{\mathrm{th},e}` at steep gradients.
+
+The nonlinear-front verification test releases a hot slab with
+:math:`\kappa \propto T^{5/2}` into a cold background and asserts the
+Zel'dovich-Barenblatt self-similar front exponent
+:math:`x_f \propto t^{2/9}`; a Gaussian-spread test checks the linear
+variance growth, the discrete maximum principle and the energy ledger.
 
 Electron current
 ^^^^^^^^^^^^^^^^
