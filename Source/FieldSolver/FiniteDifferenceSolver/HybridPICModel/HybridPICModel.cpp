@@ -88,6 +88,8 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("qdsmc_conduction", m_qdsmc_conduction);
     pp_hybrid.query("qdsmc_conduction_kappa(T,n)", m_qdsmc_kappa_expression);
     pp_hybrid.query("qdsmc_conduction_substeps", m_qdsmc_conduction_substeps);
+    utils::parser::queryWithParser(pp_hybrid,
+        "qdsmc_conduction_flux_limiter", m_qdsmc_conduction_flux_limiter);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_qdsmc_conduction == "off" || m_qdsmc_conduction == "isotropic"
             || m_qdsmc_conduction == "parallel",
@@ -1747,6 +1749,45 @@ void HybridPICModel::QdsmcConductionPass (amrex::Real const h,
             U.FillBoundary(geom.periodicity());
             N.FillBoundary(geom.periodicity());
             D.FillBoundary(geom.periodicity());
+
+            if (m_qdsmc_conduction_flux_limiter > 0.0_rt) {
+                // Free-streaming limiter: harmonic blend of the Spitzer
+                // flux against q_fs = alpha n k_B T v_th,e, applied as a
+                // per-node diffusivity reduction
+                // D_eff = D / (1 + (3/2) D |grad T| / (alpha T v_th,e)).
+                amrex::Real const alpha = m_qdsmc_conduction_flux_limiter;
+                for (amrex::MFIter mfi(D, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+                {
+                    amrex::Box const box = mfi.tilebox();
+                    auto const te_arr = Te.const_array(mfi);
+                    auto const d_arr = D.array(mfi);
+                    amrex::ParallelFor(box,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    {
+                        amrex::Real gx2 = 0.0_rt;
+#if defined(WARPX_DIM_3D)
+                        amrex::Real const tx = 0.5_rt*dxi[0]*(te_arr(i+1,j,k)-te_arr(i-1,j,k));
+                        amrex::Real const ty = 0.5_rt*dxi[1]*(te_arr(i,j+1,k)-te_arr(i,j-1,k));
+                        amrex::Real const tz = 0.5_rt*dxi[2]*(te_arr(i,j,k+1)-te_arr(i,j,k-1));
+                        gx2 = tx*tx + ty*ty + tz*tz;
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+                        amrex::Real const tx = 0.5_rt*dxi[0]*(te_arr(i+1,j,k)-te_arr(i-1,j,k));
+                        amrex::Real const tz = 0.5_rt*dxi[1]*(te_arr(i,j+1,k)-te_arr(i,j-1,k));
+                        gx2 = tx*tx + tz*tz;
+#else
+                        amrex::Real const tz = 0.5_rt*dxi[0]*(te_arr(i+1,j,k)-te_arr(i-1,j,k));
+                        gx2 = tz*tz;
+#endif
+                        amrex::Real const T = amrex::max(te_arr(i,j,k), 1.0_rt);
+                        amrex::Real const vth = std::sqrt(
+                            PhysConst::kb * T / PhysConst::m_e);
+                        d_arr(i,j,k) = d_arr(i,j,k)
+                            / (1.0_rt + 1.5_rt * d_arr(i,j,k)
+                               * std::sqrt(gx2) / (alpha * T * vth));
+                    });
+                }
+                D.FillBoundary(geom.periodicity());
+            }
 
             if (parallel_mode) {
                 // W = D b b, then drift_i = sum_j d_j W_ij by central

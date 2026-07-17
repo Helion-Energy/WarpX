@@ -2228,6 +2228,12 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         time for frozen coefficients; substeps only refine the coefficient
         variation of a strongly nonlinear kappa(T).
 
+    qdsmc_conduction_flux_limiter: float, optional
+        Free-streaming flux-limiter coefficient alpha (off when omitted).
+        The conduction diffusivity is blended harmonically against the
+        free-streaming bound q_fs = alpha n k_B T v_th,e, limiting the
+        heat flux at steep temperature gradients.
+
     substeps: int, default=10
         Total number of substeps used to advance the B-field over one full
         timestep (split evenly between the two half-steps, so ``substeps/2``
@@ -2342,6 +2348,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         qdsmc_conduction=None,
         qdsmc_conduction_kappa=None,
         qdsmc_conduction_substeps=None,
+        qdsmc_conduction_flux_limiter=None,
         substeps=None,
         use_rkf45=None,
         substep_rtol=None,
@@ -2382,6 +2389,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.qdsmc_conduction = qdsmc_conduction
         self.qdsmc_conduction_kappa = qdsmc_conduction_kappa
         self.qdsmc_conduction_substeps = qdsmc_conduction_substeps
+        self.qdsmc_conduction_flux_limiter = qdsmc_conduction_flux_limiter
 
         self.substeps = substeps
         self.use_rkf45 = use_rkf45
@@ -2485,6 +2493,10 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         if self.qdsmc_conduction_substeps is not None:
             pywarpx.hybridpicmodel.qdsmc_conduction_substeps = (
                 self.qdsmc_conduction_substeps
+            )
+        if self.qdsmc_conduction_flux_limiter is not None:
+            pywarpx.hybridpicmodel.qdsmc_conduction_flux_limiter = (
+                self.qdsmc_conduction_flux_limiter
             )
         if self.qdsmc_n_floor is not None:
             pywarpx.hybridpicmodel.qdsmc_n_floor = self.qdsmc_n_floor

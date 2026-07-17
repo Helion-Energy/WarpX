@@ -839,6 +839,18 @@ QdsmcParticleContainer::SpawnConductionNodes (int lev, amrex::Real const h,
                 apply_kicks ? std::sqrt(2.0_rt * d_home * h) : 0.0_rt;
             amrex::Real const hdrift = apply_kicks ? h : 0.0_rt;
 
+            // Cap the drift displacement at half a cell per substep: at
+            // flux-limiter or coefficient transitions the discrete grad(D)
+            // can span orders of magnitude across one cell and the raw
+            // Ito drift overshoots.
+            amrex::GpuArray<amrex::Real, 3> gdc{{0.0_rt, 0.0_rt, 0.0_rt}};
+            {
+                amrex::Real const cap = 0.5_rt * dx_arr[0];
+                for (int d = 0; d < 3; ++d) {
+                    gdc[d] = amrex::Clamp(gd[d] * hdrift, -cap, cap);
+                }
+            }
+
             amrex::GpuArray<amrex::Real, 3> bpar{{0.0_rt, 0.0_rt, 0.0_rt}};
             if (parallel_mode) {
                 auto const b = ablastr::particles::doGatherVectorFieldNodal(
@@ -913,9 +925,9 @@ QdsmcParticleContainer::SpawnConductionNodes (int lev, amrex::Real const h,
                     // gathered per cell before the node loop; a zero
                     // vector (unmagnetized cell) deposits in place.
                     amrex::Real const s_arc = gh_xi[kn] * sig;
-                    xn += s_arc * bpar[0] + gd[0] * hdrift;
-                    yn += s_arc * bpar[1] + gd[1] * hdrift;
-                    zn += s_arc * bpar[2] + gd[2] * hdrift;
+                    xn += s_arc * bpar[0] + gdc[0];
+                    yn += s_arc * bpar[1] + gdc[1];
+                    zn += s_arc * bpar[2] + gdc[2];
 #if !defined(WARPX_DIM_1D_Z)
                     xn = reflect(xn, 0);
 #endif
@@ -931,27 +943,27 @@ QdsmcParticleContainer::SpawnConductionNodes (int lev, amrex::Real const h,
                     amrex::ignore_unused(w_par);
                 } else {
 #if defined(WARPX_DIM_3D)
-                xn += gh_xi[kx] * sig + gd[0] * hdrift;
-                yn += gh_xi[ky] * sig + gd[1] * hdrift;
-                zn += gh_xi[kz] * sig + gd[2] * hdrift;
+                xn += gh_xi[kx] * sig + gdc[0];
+                yn += gh_xi[ky] * sig + gdc[1];
+                zn += gh_xi[kz] * sig + gdc[2];
                 xn = reflect(xn, 0); yn = reflect(yn, 1); zn = reflect(zn, 2);
 #elif defined(WARPX_DIM_RZ)
                 // In-plane radial and off-plane kicks fold into the radius:
                 // exact cylindrical diffusion, no metric drift, axis-safe.
-                xn += gh_xi[kx] * sig + gd[0] * hdrift;
+                xn += gh_xi[kx] * sig + gdc[0];
                 yn  = gh_xi[ky] * sig;
-                zn += gh_xi[kz] * sig + gd[2] * hdrift;
+                zn += gh_xi[kz] * sig + gdc[2];
                 xn = std::sqrt(xn*xn + yn*yn);
                 yn = 0.0_rt;
                 if (xn > hi_bnd[0]) { xn = 2.0_rt*hi_bnd[0] - xn; }
                 xn = amrex::Clamp(xn, lo_bnd[0], hi_bnd[0]);
                 zn = reflect(zn, 1);
 #elif defined(WARPX_DIM_XZ)
-                xn += gh_xi[kx] * sig + gd[0] * hdrift;
-                zn += gh_xi[ky] * sig + gd[2] * hdrift;
+                xn += gh_xi[kx] * sig + gdc[0];
+                zn += gh_xi[ky] * sig + gdc[2];
                 xn = reflect(xn, 0); zn = reflect(zn, 1);
 #else
-                zn += gh_xi[kx] * sig + gd[2] * hdrift;
+                zn += gh_xi[kx] * sig + gdc[2];
                 zn = reflect(zn, 0);
 #endif
                 }
