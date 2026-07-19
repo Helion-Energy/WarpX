@@ -25,6 +25,7 @@
 #include <AMReX_Arena.H>
 #include <AMReX_Config.H>
 #include <AMReX_Geometry.H>
+#include <AMReX_Gpu.H>
 #include <AMReX_Loop.H>
 #include <AMReX_MultiFab.H>
 #include <AMReX_Print.H>
@@ -85,15 +86,21 @@ public:
         : m_geom(geom), m_theta_dt(theta_dt), m_mu0(mu0),
           m_pc_choice(pc_choice), m_rtol(rtol), m_atol(atol),
           m_max_iter(max_iter), m_verbose(verbose),
-          m_matvec(matvec), m_pcapply(pcapply), m_opctx(opctx),
-          m_eb_update_B(eb_update_B)
+          m_matvec(matvec), m_pcapply(pcapply), m_opctx(opctx)
     {
+        // EB masks live on the device under CUDA. Copy to pinned host once so
+        // all LoopOnCpu DOF counting / indexing is host-safe (raw device
+        // Array4 from eb_update_B in LoopOnCpu SEGVs on GPU builds).
+        if (eb_update_B) {
+            copyEbMasksToHost(*eb_update_B);
+        }
+
         // Local DOF count over interior (nghost=0) cells, component-major,
         // skipping covered B DOFs when the EB mask is provided.
         for (int idim = 0; idim < 3; ++idim) {
             for (amrex::MFIter mfi(*B_proto[idim]); mfi.isValid(); ++mfi) {
-                if (eb_update_B) {
-                    auto const& mask_arr = (*eb_update_B)[idim]->const_array(mfi);
+                if (m_eb_mask_host[0]) {
+                    auto const& mask_arr = m_eb_mask_host[idim]->const_array(mfi);
                     amrex::Box const& tb = mfi.tilebox();
                     amrex::LoopOnCpu(amrex::lbound(tb), amrex::ubound(tb),
                         [&] (int i, int j, int k) {
@@ -261,6 +268,26 @@ private:
         PetscFunctionReturn(PETSC_SUCCESS);
     }
 
+    // Copy device (or host) EB B-masks onto pinned host iMultiFabs for safe
+    // LoopOnCpu access. Called once from the ctor when eb_update_B is non-null.
+    void copyEbMasksToHost (
+        amrex::Array<amrex::iMultiFab const*,3> const& eb_update_B)
+    {
+        amrex::MFInfo const host_info =
+            amrex::MFInfo().SetArena(amrex::The_Pinned_Arena());
+        for (int idim = 0; idim < 3; ++idim) {
+            m_eb_mask_host[idim] = std::make_unique<amrex::iMultiFab>(
+                eb_update_B[idim]->boxArray(),
+                eb_update_B[idim]->DistributionMap(), 1, 0, host_info);
+            // iMultiFab::Copy handles device -> pinned host under CUDA.
+            amrex::iMultiFab::Copy(*m_eb_mask_host[idim], *eb_update_B[idim],
+                                   0, 0, 1, 0);
+        }
+#ifdef AMREX_USE_GPU
+        amrex::Gpu::streamSynchronize();
+#endif
+    }
+
     // Per-component global DOF index for interior cells (component-major).
     // nghost=1 so neighbor columns resolve; -1 marks exterior/unknown or covered
     // B DOFs (when an EB mask is provided). Pinned host arena: PETSc scatter/gather
@@ -280,13 +307,13 @@ private:
         // LoopOnCpu(lbound,ubound,(i,j,k)) (k pads to 0 in 2D/1D), not explicit
         // smallEnd(2)/bigEnd(2) which is out of range for BoxND<2>.
         PetscInt run = static_cast<PetscInt>(m_rstart);
-        bool const skip_covered = (m_eb_update_B != nullptr);
+        bool const skip_covered = (m_eb_mask_host[0] != nullptr);
         for (int idim = 0; idim < 3; ++idim) {
             for (amrex::MFIter mfi(*B_proto[idim]); mfi.isValid(); ++mfi) {
                 auto gix = m_gindex[idim]->array(mfi);
                 amrex::Box const& tb = mfi.tilebox();
                 if (skip_covered) {
-                    auto const& mask_arr = (*m_eb_update_B)[idim]->const_array(mfi);
+                    auto const& mask_arr = m_eb_mask_host[idim]->const_array(mfi);
                     amrex::LoopOnCpu(amrex::lbound(tb), amrex::ubound(tb),
                         [&] (int i, int j, int k) {
                             if (mask_arr(i, j, k) == 0) { return; }
@@ -406,10 +433,6 @@ private:
     MagDiffMatvecFn m_matvec = nullptr;
     MagDiffPCFn m_pcapply = nullptr;
     void* m_opctx = nullptr;
-    // Optional stair-case EB B-field mask (nullptr when EB is off or mask not
-    // provided). Covered B DOFs (eb_update_B[comp] == 0) are skipped in the
-    // global index and omitted from the PETSc system.
-    amrex::Array<amrex::iMultiFab const*,3> const* m_eb_update_B = nullptr;
 
     PetscInt m_n_local = 0;
     PetscInt m_n_global = 0;
@@ -421,6 +444,9 @@ private:
     KSP m_ksp = nullptr;
     std::array<std::unique_ptr<amrex::iMultiFab>,3> m_gindex;
     amrex::Array<amrex::MultiFab,3> m_eta_g;
+    // Host (pinned) copy of eb_update_B when EB is on. Empty when EB off.
+    // Never LoopOnCpu into the live device eb_update_B MultiFabs.
+    std::array<std::unique_ptr<amrex::iMultiFab>,3> m_eb_mask_host;
 };
 
 } // namespace
