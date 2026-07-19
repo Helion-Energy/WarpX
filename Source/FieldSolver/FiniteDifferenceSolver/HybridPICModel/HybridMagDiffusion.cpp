@@ -1320,8 +1320,14 @@ HybridMagDiffusion::AdvanceVariable (
         // Initial guess (B^n) and RHS (B^n - feed offset), flat / DOF-mapped.
         std::vector<Real> sol_flat(static_cast<std::size_t>(n_local), Real(0.0));
         std::vector<Real> rhs_flat(static_cast<std::size_t>(n_local), Real(0.0));
+#ifdef AMREX_USE_GPU
+        // Same host staging as matvec/PC callbacks (CUDA: device MultiFabs).
+        petscGather(sol_flat.data(), solution, gindex, rstart, opctx.host_F);
+        petscGather(rhs_flat.data(), rhs, gindex, rstart, opctx.host_F);
+#else
         petscGather(sol_flat.data(), solution, gindex, rstart);
         petscGather(rhs_flat.data(), rhs, gindex, rstart);
+#endif
 
         Real rnorm = 0.0_rt;
         const int reason = magdiff_petsc_solve(
@@ -1332,7 +1338,11 @@ HybridMagDiffusion::AdvanceVariable (
             "Variable-eta operator or preconditioner is broken.");
         amrex::ignore_unused(reason);
 
+#ifdef AMREX_USE_GPU
+        petscScatter(solution, sol_flat.data(), gindex, rstart, opctx.host_U);
+#else
         petscScatter(solution, sol_flat.data(), gindex, rstart);
+#endif
         magdiff_petsc_destroy(petsc_solver);
 #else
         WARPX_ABORT_WITH_MESSAGE(
