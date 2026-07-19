@@ -749,8 +749,7 @@ void WarpX::HandleParticlesAtBoundaries (int step, amrex::Real cur_time, int num
                 // Standard algorithm ; particles can move by up to the max number
                 max_cells_travelled += particle_max_grid_crossings;
             }
-            // IntVect API (AMReX): same max cells in each active direction.
-            mypc->RedistributeLocal(amrex::IntVect(max_cells_travelled));
+            mypc->RedistributeLocal(max_cells_travelled);
         }
         else {
             mypc->Redistribute();
@@ -758,8 +757,6 @@ void WarpX::HandleParticlesAtBoundaries (int step, amrex::Real cur_time, int num
     }
 
     // interact the particles with EB walls (if present)
-    // Science: per-species eb_reflect (specular/diffuse) preserved — not PR's
-    // global eb_particle_boundary Reflecting branch.
     if (EB::enabled()) {
         using warpx::fields::FieldType;
         mypc->ScrapeParticlesAtEB(m_fields.get_mr_levels(FieldType::distance_to_eb, finest_level));

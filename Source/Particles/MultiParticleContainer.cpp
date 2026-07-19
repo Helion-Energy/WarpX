@@ -901,14 +901,15 @@ MultiParticleContainer::deleteInvalidParticles ()
 }
 
 void
-MultiParticleContainer::RedistributeLocal (const amrex::IntVect& max_cells_travelled)
+MultiParticleContainer::RedistributeLocal (const int max_cells_travelled)
 {
-    ABLASTR_PROFILE("MultiParticleContainer::RedistributeLocal");
     for (auto& pc : allcontainers) {
-        // max_cells_travelled specifies, per direction, the number of cells a
-        // particle might have travelled outside its current tile / box.
-        pc->Redistribute(/*lev_min=*/0, /*lev_max=*/0, /*nGrow=*/amrex::IntVect(0),
-                         /*local=*/true, /*max_cells_moved=*/max_cells_travelled);
+        // Compatible with older AMReX (4th arg = local cell radius as int) and
+        // newer AMReX (int overload wraps to IntVect). Do not call the
+        // IntVect/bool overload — it is missing on older AMReX still common in
+        // GPU build caches.
+        pc->Redistribute(/*lev_min=*/0, /*lev_max=*/0, /*nGrow=*/0,
+                         /*local=*/max_cells_travelled);
     }
 }
 
