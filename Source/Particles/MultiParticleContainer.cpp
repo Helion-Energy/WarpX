@@ -901,12 +901,14 @@ MultiParticleContainer::deleteInvalidParticles ()
 }
 
 void
-MultiParticleContainer::RedistributeLocal (const int max_cells_travelled)
+MultiParticleContainer::RedistributeLocal (const amrex::IntVect& max_cells_travelled)
 {
+    ABLASTR_PROFILE("MultiParticleContainer::RedistributeLocal");
     for (auto& pc : allcontainers) {
-        // The local argument specifies the number of cells a particle
-        // might have travelled outside its current tile / box.
-        pc->Redistribute(/*lev_min=*/0, /*lev_max=*/0, /*nGrow=*/0, /*local=*/max_cells_travelled);
+        // max_cells_travelled specifies, per direction, the number of cells a
+        // particle might have travelled outside its current tile / box.
+        pc->Redistribute(/*lev_min=*/0, /*lev_max=*/0, /*nGrow=*/amrex::IntVect(0),
+                         /*local=*/true, /*max_cells_moved=*/max_cells_travelled);
     }
 }
 

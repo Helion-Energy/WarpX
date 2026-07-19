@@ -2,7 +2,7 @@
  *
  * This file is part of WarpX.
  *
- * Authors: Hybrid implicit magnetic diffusion (FLASH MagDiff-inspired)
+ * Authors: Bowen Zhu
  *
  * License: BSD-3-Clause-LBNL
  */
@@ -11,31 +11,44 @@
 
 #include <ablastr/fields/MultiFabRegister.H>
 
+#include "HybridMagDiffusionPetsc.H"  // MagDiffPetscPC (PETSc-free enum)
+
 #include <AMReX_Array.H>
+#include <AMReX_Enum.H>
 #include <AMReX_Geometry.H>
 #include <AMReX_LO_BCTYPES.H>
 #include <AMReX_MLLinOp.H>
 #include <AMReX_MultiFab.H>
 #include <AMReX_REAL.H>
 
+// Solver driver for the matrix-free variable-eta / RZ curl-curl path. Default
+// is AMReX GMRES + scaled Jacobi; `petsc` routes the same matrix-free operator
+// through a PETSc KSP (MATSHELL matvec) when WarpX is built with PETSc. The enum
+// is declared outside the AMREX_USE_PETSC guard so non-PETSc builds still parse
+// it (see PreconditionerLibrary.H for the same pattern).
+AMREX_ENUM(MagDiffLinearSolver,
+    amrex_gmres,
+    petsc
+);
+
 /**
- * \brief Operator-split (semi)implicit magnetic diffusion for hybrid-PIC.
+ * \brief Implicit magnetic diffusion for hybrid-PIC (operator-split).
  *
  * Advances the Yee magnetic field with a theta-method discretization of
  *
  *   dB/dt = - curl( (eta/mu0) curl B )
  *
- * Paths:
- *  - Cartesian constant eta: AMReX MLCurlCurl (same family as CurlCurlMLMGPC).
- *  - Cartesian variable eta / all RZ: matrix-free FDTD curl(eta curl B)/mu0
- *    with AMReX GMRES. RZ cannot use MLCurlCurl (Cartesian-only in 2D).
- *  - GMRES uses a scaled Laplacian-diagonal Jacobi preconditioner (not
- *    cylindrical multigrid). Uniform eta reduces to the identity scale.
+ * after each hybrid B half-step when enabled. Resistivity may be constant
+ * or spatially varying (parser / MultiFab).
  *
- * Inspired by FLASH 4.8 MagDiff / Grid_advanceMagDiffusion (theta scheme +
- * linear solve); reimplemented in C++/AMReX — no FLASH source.
+ * Implementation paths:
+ *  - Cartesian, constant eta: AMReX MLCurlCurl.
+ *  - Cartesian variable eta and RZ: matrix-free FDTD curl(eta curl B)/mu0
+ *    with AMReX GMRES and a scaled Laplacian-diagonal Jacobi preconditioner.
+ *    (MLCurlCurl is Cartesian-only in 2D; uniform eta reduces the PC to a
+ *    constant scale.)
  *
- * Default-off: Enable with hybrid_pic_model.implicit_mag_diffusion = 1.
+ * Disabled by default. Enable with hybrid_pic_model.implicit_mag_diffusion = 1.
  */
 class HybridMagDiffusion
 {
@@ -51,6 +64,8 @@ public:
     [[nodiscard]] amrex::Real ConstantEta () const { return m_constant_eta; }
     [[nodiscard]] bool UsesVariableEta () const { return m_use_variable_eta; }
     [[nodiscard]] int Verbose () const { return m_verbose; }
+    [[nodiscard]] MagDiffLinearSolver LinearSolver () const { return m_linear_solver; }
+    [[nodiscard]] MagDiffPetscPC PetscPC () const { return m_petsc_pc; }
 
     /**
      * \brief Theta-method curl-curl magnetic diffusion on one level.
@@ -62,10 +77,10 @@ public:
      *
      * \param[in,out] Bfield  Yee B components (WarpX ordering)
      * \param[in]     eta_SI  resistivity [Ohm m]
-     * \param[in]     dt      step length for this operator-split advance [s]
-     * \param[in]     lev     AMR level (must be 0 for hybrid)
-     * \param[in]     lobc    low domain BCs for MLCurlCurl
-     * \param[in]     hibc    high domain BCs for MLCurlCurl
+     * \param[in]     dt      diffusion step size [s]
+     * \param[in]     lev     AMR level (hybrid is single-level)
+     * \param[in]     lobc    low-side linear-operator boundary types
+     * \param[in]     hibc    high-side linear-operator boundary types
      */
     void Advance (
         ablastr::fields::VectorField const& Bfield,
@@ -84,8 +99,10 @@ public:
         amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM> const& hibc) const;
 
     /**
-     * \brief Map WarpX field boundary types on this geometry to LinOp BCs.
-     * Periodic/PEC→Dirichlet-like for edge data / Neumann / default Neumann.
+     * \brief Map WarpX field boundary types to AMReX LinOpBCType values.
+     *
+     * Used by the Cartesian MLCurlCurl path. Unmapped types default to
+     * Neumann. PEC_Insulator maps to Dirichlet (tangential B prescribed).
      */
     static void GetLinOpBCs (
         amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM>& lobc,
@@ -102,6 +119,8 @@ private:
     bool m_has_constant_eta = false;
     amrex::Real m_constant_eta = 0.0;
     bool m_use_variable_eta = false;
+    MagDiffLinearSolver m_linear_solver = MagDiffLinearSolver::amrex_gmres;
+    MagDiffPetscPC m_petsc_pc = MagDiffPetscPC::shell_jacobi;
 };
 
 #endif // WARPX_HYBRID_MAG_DIFFUSION_H_
