@@ -95,6 +95,13 @@ public:
             copyEbMasksToHost(*eb_update_B);
         }
 
+        // Per-component r-staggering (1 = NODE in r, 0 = CELL) for the
+        // cylindrical 1/r metric in assembleFrozenLaplacian (Br is NODE in r;
+        // Bt/Bz are CELL in r). Read once from B_proto's index type.
+        for (int idim = 0; idim < 3; ++idim) {
+            m_r_nodal[idim] = B_proto[idim]->ixType().toIntVect()[0];
+        }
+
         // Local DOF count over interior (nghost=0) cells, component-major,
         // skipping covered B DOFs when the EB mask is provided.
         for (int idim = 0; idim < 3; ++idim) {
@@ -350,9 +357,28 @@ private:
         }
     }
 
-    // Assemble P = I + theta*dt*(eta/mu0)*L_scalar per component (block-diagonal,
-    // symmetric face-averaged Laplacian). Exterior neighbors (global index -1)
-    // are dropped, matching the homogeneous-operator BC the matvec imposes.
+    // Assemble P = I + theta*dt*(eta/mu0)*L_geom per component, block-diagonal
+    // (no Br-Bt / Br-Bz coupling -- those live only in the matrix-free matvec;
+    // P is a PC proxy, P != A). Exterior neighbors (global index -1) are dropped,
+    // matching the homogeneous-operator BC the matvec imposes.
+    //
+    // Cartesian dims (XZ/3D/1D_Z): symmetric face-averaged scalar Laplacian,
+    // identical for all three components.
+    //
+    // Cylindrical dims (RZ / RCYLINDER): the radial direction (AMReX dir 0 = r)
+    // uses the flux-form cylindrical scalar Laplacian (1/r) d/dr (r chi d/dr f),
+    // so the +/- radial off-diagonals carry r_face/r_dof weights (asymmetric,
+    // one-sided at the axis); for uniform dr the radial diagonal is still
+    // 2/dr^2. B_t (idim 1) additionally gets -1/r^2 on the diagonal (the
+    // cylindrical vector-Laplacian azimuthal term; the Bt~r null mode:
+    // nabla^2(r) - r/r^2 = 1/r - 1/r = 0), applied only off-axis where it keeps
+    // the Laplacian diagonal positive -- near the axis 1/r^2 would dominate and
+    // drive the assembled-P diagonal negative (ILU-unstable; the prompt forbids
+    // zero/negative diags), so the near-axis Bt cell stays on the scalar flux
+    // form (v1 axis compromise). The axis r=0 (only Br, NODE in r) skips the
+    // radial direction entirely (1/0 + matvec pins Br(0,*) = 0). The z
+    // direction (RZ, dir 1) is Cartesian (no metric). See
+    // notes/2026-07-20_cylindrical_frozen_laplacian_pc.md.
     PetscErrorCode assembleFrozenLaplacian () {
         PetscFunctionBeginUser;
         auto const* const dx = m_geom.CellSize();
@@ -360,6 +386,10 @@ private:
         for (int d = 0; d < AMREX_SPACEDIM; ++d) {
             dxinv2[d] = amrex::Real(1.0) / (dx[d] * dx[d]);
         }
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+        amrex::Real const rmin = m_geom.ProbLo(0);
+        amrex::Real const dr = dx[0];
+#endif
 
         std::vector<PetscInt> cols;
         std::vector<PetscScalar> vals;
@@ -367,6 +397,13 @@ private:
         vals.reserve(1 + 2 * AMREX_SPACEDIM);
 
         for (int idim = 0; idim < 3; ++idim) {
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+            // r at the DOF: rmin + (i + ishift)*dr; ishift = 0 for Br (NODE in
+            // r), 0.5 for Bt/Bz (CELL in r). is_bt -> apply -1/r^2 (Bt only).
+            amrex::Real const ishift =
+                m_r_nodal[idim] ? amrex::Real(0.0) : amrex::Real(0.5);
+            bool const is_bt = (idim == 1);
+#endif
             for (amrex::MFIter mfi(*m_gindex[idim]); mfi.isValid(); ++mfi) {
                 auto const& gix = m_gindex[idim]->const_array(mfi);
                 auto const& et = m_eta_g[idim].const_array(mfi);
@@ -378,6 +415,12 @@ private:
                     amrex::Real const chi_c =
                         std::max(et(i, j, k), amrex::Real(0.0)) / m_mu0;
                     PetscScalar diag = 1.0;
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+                    amrex::Real const r_dof = rmin + (i + ishift) * dr;
+                    // chi-free Laplacian diagonal (radial metric + z), used only
+                    // to guard the Bt -1/r^2 term so the diagonal stays positive.
+                    amrex::Real lap_diag_scalar = amrex::Real(0.0);
+#endif
                     cols.clear();
                     vals.clear();
                     for (int d = 0; d < AMREX_SPACEDIM; ++d) {
@@ -388,6 +431,44 @@ private:
                         else { kp += 1; km -= 1; }
                         PetscInt const cp = gix(ip, jp, kp);
                         PetscInt const cm = gix(im, jm, km);
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+                        if (d == 0) {
+                            // Radial direction: cylindrical flux-form metric.
+                            // Skip at the axis (r_dof <= 0, only Br at r=0) to
+                            // avoid 1/0; the matvec pins Br(0,*) = 0 there.
+                            if (r_dof > amrex::Real(0.0)) {
+                                if (cp >= 0) {
+                                    amrex::Real const r_face =
+                                        r_dof + amrex::Real(0.5) * dr;
+                                    amrex::Real const chi_n =
+                                        std::max(et(ip, jp, kp), amrex::Real(0.0)) / m_mu0;
+                                    amrex::Real const chi_f = amrex::Real(0.5) * (chi_c + chi_n);
+                                    PetscScalar const v = -m_theta_dt * chi_f
+                                        * dxinv2[d] * (r_face / r_dof);
+                                    diag -= v;
+                                    lap_diag_scalar += (r_face / r_dof) * dxinv2[d];
+                                    cols.push_back(cp);
+                                    vals.push_back(v);
+                                }
+                                if (cm >= 0) {
+                                    amrex::Real const r_face =
+                                        r_dof - amrex::Real(0.5) * dr;
+                                    amrex::Real const chi_n =
+                                        std::max(et(im, jm, km), amrex::Real(0.0)) / m_mu0;
+                                    amrex::Real const chi_f = amrex::Real(0.5) * (chi_c + chi_n);
+                                    PetscScalar const v = -m_theta_dt * chi_f
+                                        * dxinv2[d] * (r_face / r_dof);
+                                    diag -= v;
+                                    lap_diag_scalar += (r_face / r_dof) * dxinv2[d];
+                                    cols.push_back(cm);
+                                    vals.push_back(v);
+                                }
+                            }
+                            continue;  // radial handled; z (RZ d=1) is Cartesian below
+                        }
+#endif
+                        // Cartesian direction (z in RZ; any dir in XZ/3D/1D_Z):
+                        // unchanged face-averaged Laplacian.
                         if (cp >= 0) {
                             amrex::Real const chi_n =
                                 std::max(et(ip, jp, kp), amrex::Real(0.0)) / m_mu0;
@@ -397,6 +478,9 @@ private:
                             diag -= v;
                             cols.push_back(cp);
                             vals.push_back(v);
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+                            lap_diag_scalar += dxinv2[d];
+#endif
                         }
                         if (cm >= 0) {
                             amrex::Real const chi_n =
@@ -407,8 +491,25 @@ private:
                             diag -= v;
                             cols.push_back(cm);
                             vals.push_back(v);
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+                            lap_diag_scalar += dxinv2[d];
+#endif
                         }
                     }
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+                    // B_t (idim 1): cylindrical vector Laplacian adds -1/r^2.
+                    // Apply only off-axis (lap_diag_scalar - 1/r^2 > 0) so the
+                    // assembled-P diagonal stays positive (no zero/negative
+                    // diags); near the axis the Bt cell keeps the scalar flux
+                    // form (the v1 axis compromise documented above).
+                    if (is_bt && r_dof > amrex::Real(0.0)) {
+                        amrex::Real const inv_r2 =
+                            amrex::Real(1.0) / (r_dof * r_dof);
+                        if (lap_diag_scalar - inv_r2 > amrex::Real(0.0)) {
+                            diag -= m_theta_dt * chi_c * inv_r2;
+                        }
+                    }
+#endif
                     cols.push_back(row);
                     vals.push_back(diag);
                     PetscInt const ncol = static_cast<PetscInt>(cols.size());
@@ -443,6 +544,12 @@ private:
     Mat m_P = nullptr;
     KSP m_ksp = nullptr;
     std::array<std::unique_ptr<amrex::iMultiFab>,3> m_gindex;
+    // r-direction staggering per B component (1 = NODE in r, 0 = CELL in r),
+    // read from B_proto's ixType. Used by assembleFrozenLaplacian to place the
+    // cylindrical 1/r metric at the correct face (Br is NODE in r; Bt/Bz are
+    // CELL in r -- see ComputeCurlACylindrical). Only read under the
+    // WARPX_DIM_RZ / WARPX_DIM_RCYLINDER guard; harmless otherwise.
+    std::array<int,3> m_r_nodal{{0, 0, 0}};
     amrex::Array<amrex::MultiFab,3> m_eta_g;
     // Host (pinned) copy of eb_update_B when EB is on. Empty when EB off.
     // Never LoopOnCpu into the live device eb_update_B MultiFabs.
