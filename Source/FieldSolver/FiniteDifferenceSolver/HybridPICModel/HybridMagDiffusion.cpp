@@ -182,7 +182,7 @@ struct MagDiffJacobiPrecond
     Real dr_inv2 = 0.0_rt;
     Real dz_inv2 = 0.0_rt;
     int ishift_r = 1;
-    int is_bt = 0;
+    int idim = 0;
 #endif
 
     AMREX_GPU_DEVICE AMREX_FORCE_INLINE
@@ -200,21 +200,28 @@ struct MagDiffJacobiPrecond
         Real const eta_val = std::max(eta(i, j, k), Real(0.0));
         Real const chi_val = eta_val / PhysConst::mu0;
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-        // Geometric diagonal of the scalar cylindrical Laplacian at this DOF
-        // (matches assembleFrozenLaplacian): radial flux-form diagonal = 2/dr^2
-        // for uniform dr (0 at the Br axis, where the radial direction is
-        // skipped); z (RZ) = 2/dz^2. B_t subtracts 1/r^2 only off-axis (where
-        // the diagonal stays positive); near the axis it keeps the scalar form
-        // so the Jacobi diagonal never goes zero/negative.
+        // Exact geometric diagonal of the curl-curl operator at this DOF.
+        // Br (idim 0) has only axial self-derivatives: 2/dz^2
+        // Bz (idim 2) has only radial self-derivatives: 2/dr^2
+        // Bt (idim 1) has both, minus 1/r^2 (applied off-axis to avoid zero/neg diag).
         Real const r = rmin + (i + (ishift_r ? 0.0_rt : 0.5_rt)) * dr;
         Real lap_diag = 0.0_rt;
-        if (r > 0.0_rt) { lap_diag += 2.0_rt * dr_inv2; }
+
+        if (idim == 1) { // B_theta
+            if (r > 0.0_rt) { lap_diag += 2.0_rt * dr_inv2; }
 #if defined(WARPX_DIM_RZ)
-        lap_diag += 2.0_rt * dz_inv2;
+            lap_diag += 2.0_rt * dz_inv2;
 #endif
-        if (is_bt && r > 0.0_rt) {
-            Real const inv_r2 = 1.0_rt / (r * r);
-            if (lap_diag - inv_r2 > 0.0_rt) { lap_diag -= inv_r2; }
+            if (r > 0.0_rt) {
+                Real const inv_r2 = 1.0_rt / (r * r);
+                if (lap_diag - inv_r2 > 0.0_rt) { lap_diag -= inv_r2; }
+            }
+        } else if (idim == 0) { // B_r
+#if defined(WARPX_DIM_RZ)
+            lap_diag = 2.0_rt * dz_inv2;
+#endif
+        } else if (idim == 2) { // B_z
+            if (r > 0.0_rt) { lap_diag = 2.0_rt * dr_inv2; }
         }
 #else
         Real const lap_diag = diag_factor;
@@ -617,7 +624,7 @@ public:
         // Laplacian diagonal used as the denom reference scale (uniform eta ->
         // identity after PC). The per-DOF metric-aware diagonal (radial 1/r and
         // the Bt -1/r^2 term) is computed inside MagDiffJacobiPrecond from the
-        // geometry passed below -- mirroring assembleFrozenLaplacian.
+        // geometry passed below -- mirroring assembleExactCurlCurl diagonals.
         Real const dr_inv2 = 1.0_rt / (dx[0]*dx[0]);
         Real const diag_factor = 2.0_rt * dr_inv2;
 #else
@@ -666,7 +673,7 @@ public:
             // r-staggering per component: 1 = NODE in r (Br), 0 = CELL in r
             // (Bt/Bz); is_bt -> subtract 1/r^2 (Bt only). See ComputeCurlA.cpp.
             int const ishift_r = dest_fields[idim].ixType().toIntVect()[0];
-            int const is_bt = (idim == 1);
+
 #endif
             for (MFIter mfi(dest_fields[idim], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
                 // Covered B faces are identity in the operator; the PC mirrors
@@ -682,7 +689,7 @@ public:
                     mask_arr,
                     m_theta_dt, diag_factor, denom
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-                    , rmin, dr, kern_dr_inv2, kern_dz_inv2, ishift_r, is_bt
+                    , rmin, dr, kern_dr_inv2, kern_dz_inv2, ishift_r, idim
 #endif
                 };
                 ParallelFor(mfi.tilebox(), kernel);
@@ -835,16 +842,18 @@ public:
     [[nodiscard]] MagDiffVector const& feedOffset () const { return m_feed_offset; }
 
     // Accessors used by the optional PETSc KSP path (MagDiffPetscKSP): the
-    // homogeneous apply()/precond() are reused directly, and the assembled
-    // frozen-eta Laplacian Pmat needs the B-centered eta (m_eta_pc), the
-    // theta*dt scale, and the geometry (cell sizes). apply()/precond() are
-    // non-const because they stage through internal work MultiFabs.
+    // homogeneous apply()/precond() are reused directly. The assembled
+    // exact_curl_curl Pmat uses E/J-face eta (m_eta) on RZ/Rcyl to match the
+    // matvec face selection; Cartesian still uses B-sampled m_eta_pc. Jacobi
+    // shell PC always uses m_eta_pc. apply()/precond() are non-const because
+    // they stage through internal work MultiFabs.
     void applyPetsc (MagDiffVector& output, MagDiffVector const& input) { apply(output, input); }
     void precondPetsc (MagDiffVector& destination, MagDiffVector const& source)
     { precond(destination, source); }
     [[nodiscard]] Real thetaDt () const { return m_theta_dt; }
     [[nodiscard]] Geometry const& geom () const { return m_geom; }
     [[nodiscard]] Array<MultiFab,3> const& etaPC () const { return m_eta_pc; }
+    [[nodiscard]] Array<MultiFab const*,3> const& etaEdge () const { return m_eta; }
 
 private:
     Real m_theta_dt;
@@ -1201,9 +1210,10 @@ HybridMagDiffusion::AdvanceVariable (
 #endif
 
         auto& eta_pc = linop.etaPC();
+        auto const& eta_edge = linop.etaEdge();
         amrex::Array<MultiFab const*,3> const B_proto{
             &solution.fields()[0], &solution.fields()[1], &solution.fields()[2]};
-        amrex::Array<MultiFab const*,3> const eta_proto{
+        amrex::Array<MultiFab const*,3> const eta_pc_proto{
             &eta_pc[0], &eta_pc[1], &eta_pc[2]};
 
         // Pass the EB B-field mask (if any) so covered DOFs are skipped from
@@ -1214,8 +1224,8 @@ HybridMagDiffusion::AdvanceVariable (
         bool const petsc_eb_on = EB::enabled();
 
         MagDiffPetscSolver* petsc_solver = magdiff_petsc_make(
-            B_proto, eta_proto, linop.geom(), linop.thetaDt(), PhysConst::mu0,
-            m_petsc_pc, m_rtol, m_atol, m_max_iter, m_verbose,
+            B_proto, eta_edge, eta_pc_proto, linop.geom(), linop.thetaDt(),
+            PhysConst::mu0, m_petsc_pc, m_rtol, m_atol, m_max_iter, m_verbose,
             &petscMatvec, &petscPCApply, &opctx,
             petsc_eb_on ? &eb_update_B_ptrs : nullptr);
 

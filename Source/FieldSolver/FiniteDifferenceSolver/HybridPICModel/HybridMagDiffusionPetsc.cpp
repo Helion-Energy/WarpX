@@ -17,7 +17,7 @@
  * supplied as callbacks by HybridMagDiffusion.cpp, which owns the Yee/RZ
  * curl-curl apply() and the field MultiFabs. This file owns the PETSc objects
  * (Vec, MatShell, assembled Pmat, KSP, PC), the DOF layout, and the assembled
- * frozen-eta Laplacian Pmat.
+ * frozen-η curl-curl Pmat (exact_curl_curl).
  */
 #include "HybridMagDiffusionPetsc.H"
 
@@ -47,7 +47,7 @@
 
 #ifdef AMREX_USE_PETSC
 // PetscCall (PETSc's macro) can only be used inside functions returning
-// PetscErrorCode (the static callbacks and assembleFrozenLaplacian). In other
+// PetscErrorCode (the static callbacks and assembleExactCurlCurl). In other
 // functions (ctor, make, solve) we abort on a non-zero PETSc error.
 #define MAGDIFF_PETSC_CHK(call) do { \
     PetscErrorCode const _magdiff_ierr = (call); \
@@ -77,6 +77,7 @@ class MagDiffPetscSolverImpl
 public:
     MagDiffPetscSolverImpl (
         amrex::Array<amrex::MultiFab const*,3> const& B_proto,
+        amrex::Array<amrex::MultiFab const*,3> const& eta_edge,
         amrex::Array<amrex::MultiFab const*,3> const& eta_pc,
         amrex::Geometry const& geom, amrex::Real theta_dt, amrex::Real mu0,
         MagDiffPetscPC pc_choice,
@@ -93,13 +94,6 @@ public:
         // Array4 from eb_update_B in LoopOnCpu SEGVs on GPU builds).
         if (eb_update_B) {
             copyEbMasksToHost(*eb_update_B);
-        }
-
-        // Per-component r-staggering (1 = NODE in r, 0 = CELL) for the
-        // cylindrical 1/r metric in assembleFrozenLaplacian (Br is NODE in r;
-        // Bt/Bz are CELL in r). Read once from B_proto's index type.
-        for (int idim = 0; idim < 3; ++idim) {
-            m_r_nodal[idim] = B_proto[idim]->ixType().toIntVect()[0];
         }
 
         // Local DOF count over interior (nghost=0) cells, component-major,
@@ -130,7 +124,15 @@ public:
         m_n_global = ng;
 
         buildGlobalIndex(B_proto);
+        // RZ/Rcyl exact curl-curl Pmat selects η on E/J faces (match matvec).
+        // Cartesian proxy still uses B-sampled η (same BA as each B component).
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+        amrex::ignore_unused(eta_pc);
+        buildEtaGhosts(eta_edge);
+#else
+        amrex::ignore_unused(eta_edge);
         buildEtaGhosts(eta_pc);
+#endif
 
         // MatShell operator: matvec = caller's apply (homogeneous A_lin).
         MAGDIFF_PETSC_CHK(MatCreateShell(
@@ -145,15 +147,21 @@ public:
 
         PC pc = nullptr;
         MAGDIFF_PETSC_CHK(KSPGetPC(m_ksp, &pc));
-        if (m_pc_choice == MagDiffPetscPC::frozen_laplacian) {
-            // Assembled frozen-eta Laplacian Pmat (see assembleFrozenLaplacian).
+        if (m_pc_choice == MagDiffPetscPC::exact_curl_curl) {
+            // Assembled frozen-η curl-curl Pmat (see assembleExactCurlCurl).
             // Lets runtime -pc_type asm/ilu/hypre factor a real matrix; default
             // PC for an assembled Pmat is block-Jacobi ILU(0).
+            // RZ/Rcyl: up to ~7 nonzeros/row (Br–Bz cross terms). Cartesian:
+            // face-averaged Laplacian proxy (5/7-point).
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+            PetscInt const nz = 7;
+#else
             PetscInt const nz = 1 + 2 * AMREX_SPACEDIM;
+#endif
             MAGDIFF_PETSC_CHK(MatCreateAIJ(
                 PETSC_COMM_WORLD, m_n_local, m_n_local, m_n_global, m_n_global,
                 nz, nullptr, nz, nullptr, &m_P));
-            assembleFrozenLaplacian();
+            assembleExactCurlCurl();
             MAGDIFF_PETSC_CHK(KSPSetOperators(m_ksp, m_A, m_P));
         } else {
             // Shell PC reusing the caller's scaled Jacobi (precond callback).
@@ -342,7 +350,7 @@ private:
     }
 
     // nghost=1 copy of B-centered eta for neighbor reads in the assembled Pmat.
-    // Pinned host: assembleFrozenLaplacian uses LoopOnCpu host access.
+    // Pinned host: assembleExactCurlCurl uses LoopOnCpu host access.
     void buildEtaGhosts (amrex::Array<amrex::MultiFab const*,3> const& eta_pc) {
         amrex::MFInfo const host_info =
             amrex::MFInfo().SetArena(amrex::The_Pinned_Arena());
@@ -357,72 +365,232 @@ private:
         }
     }
 
-    // Assemble P = I + theta*dt*(eta/mu0)*L_geom per component, block-diagonal
-    // (no Br-Bt / Br-Bz coupling -- those live only in the matrix-free matvec;
-    // P is a PC proxy, P != A). Exterior neighbors (global index -1) are dropped,
-    // matching the homogeneous-operator BC the matvec imposes.
+    // Assemble frozen-η Pmat for the exact_curl_curl PC (P != A; matvec stays
+    // matrix-free computeAFull). Exterior neighbors (global index -1) are
+    // dropped, matching the homogeneous-operator BC the matvec imposes.
     //
-    // Cartesian dims (XZ/3D/1D_Z): symmetric face-averaged scalar Laplacian,
-    // identical for all three components.
+    // RZ / RCYLINDER: discrete curl-curl stencil from the staggered Yee/RZ
+    // operator — uncoupled Bt 5-point block; Br and Bz coupled via J_θ mixed
+    // derivatives (~7-point). Axis: Br(0,*) is diagonal-only (pin); Bt on-axis
+    // uses the 4/dr^2 J_z correction. η is face-selected per term (et_r/t/z).
+    // See notes/2026-07-20_exact_curl_curl_pc.md.
     //
-    // Cylindrical dims (RZ / RCYLINDER): the radial direction (AMReX dir 0 = r)
-    // uses the flux-form cylindrical scalar Laplacian (1/r) d/dr (r chi d/dr f),
-    // so the +/- radial off-diagonals carry r_face/r_dof weights (asymmetric,
-    // one-sided at the axis); for uniform dr the radial diagonal is still
-    // 2/dr^2. B_t (idim 1) additionally gets -1/r^2 on the diagonal (the
-    // cylindrical vector-Laplacian azimuthal term; the Bt~r null mode:
-    // nabla^2(r) - r/r^2 = 1/r - 1/r = 0), applied only off-axis where it keeps
-    // the Laplacian diagonal positive -- near the axis 1/r^2 would dominate and
-    // drive the assembled-P diagonal negative (ILU-unstable; the prompt forbids
-    // zero/negative diags), so the near-axis Bt cell stays on the scalar flux
-    // form (v1 axis compromise). The axis r=0 (only Br, NODE in r) skips the
-    // radial direction entirely (1/0 + matvec pins Br(0,*) = 0). The z
-    // direction (RZ, dir 1) is Cartesian (no metric). See
-    // notes/2026-07-20_cylindrical_frozen_laplacian_pc.md.
-    PetscErrorCode assembleFrozenLaplacian () {
+    // Cartesian (XZ / 3D / 1D_Z): still the face-averaged scalar Laplacian
+    // proxy per component (block-diagonal; no cross-component terms yet).
+
+    PetscErrorCode assembleExactCurlCurl () {
         PetscFunctionBeginUser;
         auto const* const dx = m_geom.CellSize();
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+        amrex::Real const rmin = m_geom.ProbLo(0);
+        amrex::Real const dr = dx[0];
+        amrex::Real const dz = (AMREX_SPACEDIM > 1) ? dx[1] : amrex::Real(1.0);
+        amrex::Real const dr2 = dr * dr;
+        amrex::Real const dz2 = dz * dz;
+        amrex::Real const drdz = dr * dz;
+#else
         amrex::Real dxinv2[3] = {amrex::Real(0.0), amrex::Real(0.0), amrex::Real(0.0)};
         for (int d = 0; d < AMREX_SPACEDIM; ++d) {
             dxinv2[d] = amrex::Real(1.0) / (dx[d] * dx[d]);
         }
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-        amrex::Real const rmin = m_geom.ProbLo(0);
-        amrex::Real const dr = dx[0];
 #endif
 
         std::vector<PetscInt> cols;
         std::vector<PetscScalar> vals;
-        cols.reserve(1 + 2 * AMREX_SPACEDIM);
-        vals.reserve(1 + 2 * AMREX_SPACEDIM);
+        cols.reserve(1 + 4 * AMREX_SPACEDIM);
+        vals.reserve(1 + 4 * AMREX_SPACEDIM);
 
         for (int idim = 0; idim < 3; ++idim) {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-            // r at the DOF: rmin + (i + ishift)*dr; ishift = 0 for Br (NODE in
-            // r), 0.5 for Bt/Bz (CELL in r). is_bt -> apply -1/r^2 (Bt only).
-            amrex::Real const ishift =
-                m_r_nodal[idim] ? amrex::Real(0.0) : amrex::Real(0.5);
-            bool const is_bt = (idim == 1);
-#endif
             for (amrex::MFIter mfi(*m_gindex[idim]); mfi.isValid(); ++mfi) {
                 auto const& gix = m_gindex[idim]->const_array(mfi);
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+                auto const& gix_r = m_gindex[0]->const_array(mfi);
+                auto const& gix_t = m_gindex[1]->const_array(mfi);
+                auto const& gix_z = m_gindex[2]->const_array(mfi);
+                auto const& et_r = m_eta_g[0].const_array(mfi);
+                auto const& et_t = m_eta_g[1].const_array(mfi);
+                auto const& et_z = m_eta_g[2].const_array(mfi);
+#else
                 auto const& et = m_eta_g[idim].const_array(mfi);
+#endif
                 amrex::Box const& tb = mfi.tilebox();
                 amrex::LoopOnCpu(amrex::lbound(tb), amrex::ubound(tb),
                 [&] (int i, int j, int k) {
                     PetscInt const row = gix(i, j, k);
                     if (row < 0) { return; }  // covered B DOF (EB), skip
-                    amrex::Real const chi_c =
-                        std::max(et(i, j, k), amrex::Real(0.0)) / m_mu0;
                     PetscScalar diag = 1.0;
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-                    amrex::Real const r_dof = rmin + (i + ishift) * dr;
-                    // chi-free Laplacian diagonal (radial metric + z), used only
-                    // to guard the Bt -1/r^2 term so the diagonal stays positive.
-                    amrex::Real lap_diag_scalar = amrex::Real(0.0);
-#endif
                     cols.clear();
                     vals.clear();
+
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+                    // RZ / RCYLINDER Exact Curl-Curl Assembly
+                    amrex::Real const r_node_i = rmin + i * dr;
+                    amrex::Real const r_node_ip1 = rmin + (i + 1) * dr;
+                    amrex::Real const r_cell_i = rmin + (i + 0.5) * dr;
+                    amrex::Real const r_cell_im1 = rmin + (i - 0.5) * dr;
+                    amrex::Real const r_cell_ip1 = rmin + (i + 1.5) * dr;
+
+                    if (idim == 1) {
+                        // B_theta (idim = 1)
+                        // Couples only to B_theta.
+                        // r-derivatives use et_z, z-derivatives use et_r.
+
+                        // Radial neighbor i+1
+                        PetscInt cp_r = gix_t(i+1, j, k);
+                        if (cp_r >= 0) {
+                            amrex::Real const chi_n = std::max(et_z(i+1, j, k), amrex::Real(0.0)) / m_mu0;
+                            PetscScalar v = -m_theta_dt * chi_n / dr2 * (r_cell_ip1 / r_node_ip1);
+                            cols.push_back(cp_r);
+                            vals.push_back(v);
+                            diag += m_theta_dt * chi_n / dr2 * (r_cell_i / r_node_ip1);
+                        }
+
+                        // Radial neighbor i-1
+                        PetscInt cm_r = gix_t(i-1, j, k);
+                        if (i == 0) {
+                            // On-axis correction for J_z at i=0
+                            amrex::Real const chi_0 = std::max(et_z(0, j, k), amrex::Real(0.0)) / m_mu0;
+                            diag += m_theta_dt * chi_0 * 4.0 / dr2;
+                        } else if (cm_r >= 0) {
+                            amrex::Real const chi_n = std::max(et_z(i, j, k), amrex::Real(0.0)) / m_mu0;
+                            PetscScalar v = -m_theta_dt * chi_n / dr2 * (r_cell_im1 / r_node_i);
+                            cols.push_back(cm_r);
+                            vals.push_back(v);
+                            diag += m_theta_dt * chi_n / dr2 * (r_cell_i / r_node_i);
+                        }
+
+                        // Axial neighbors (z direction, only for RZ)
+                        if (AMREX_SPACEDIM > 1) {
+                            PetscInt cp_z = gix_t(i, j+1, k);
+                            if (cp_z >= 0) {
+                                amrex::Real const chi_n = std::max(et_r(i, j+1, k), amrex::Real(0.0)) / m_mu0;
+                                PetscScalar v = -m_theta_dt * chi_n / dz2;
+                                cols.push_back(cp_z);
+                                vals.push_back(v);
+                                diag -= v;
+                            }
+                            PetscInt cm_z = gix_t(i, j-1, k);
+                            if (cm_z >= 0) {
+                                amrex::Real const chi_n = std::max(et_r(i, j, k), amrex::Real(0.0)) / m_mu0;
+                                PetscScalar v = -m_theta_dt * chi_n / dz2;
+                                cols.push_back(cm_z);
+                                vals.push_back(v);
+                                diag -= v;
+                            }
+                        }
+                    } else if (idim == 0) {
+                        // B_r (idim = 0)
+                        if (i == 0) {
+                            // On axis, B_r is pinned to 0
+                            // Do not add any off-diagonals, diag = 1.0.
+                        } else {
+                            // Axial neighbors (B_r to B_r)
+                            if (AMREX_SPACEDIM > 1) {
+                                PetscInt cp_z = gix_r(i, j+1, k);
+                                if (cp_z >= 0) {
+                                    amrex::Real const chi_n = std::max(et_t(i, j+1, k), amrex::Real(0.0)) / m_mu0;
+                                    PetscScalar v = -m_theta_dt * chi_n / dz2;
+                                    cols.push_back(cp_z);
+                                    vals.push_back(v);
+                                    diag -= v;
+                                }
+                                PetscInt cm_z = gix_r(i, j-1, k);
+                                if (cm_z >= 0) {
+                                    amrex::Real const chi_n = std::max(et_t(i, j, k), amrex::Real(0.0)) / m_mu0;
+                                    PetscScalar v = -m_theta_dt * chi_n / dz2;
+                                    cols.push_back(cm_z);
+                                    vals.push_back(v);
+                                    diag -= v;
+                                }
+
+                                // Cross terms to B_z
+                                PetscInt cp_z_cp_r = gix_z(i, j+1, k);
+                                if (cp_z_cp_r >= 0) {
+                                    amrex::Real const chi_n = std::max(et_t(i, j+1, k), amrex::Real(0.0)) / m_mu0;
+                                    PetscScalar v = m_theta_dt * chi_n / drdz;
+                                    cols.push_back(cp_z_cp_r);
+                                    vals.push_back(v);
+                                }
+                                PetscInt cm_z_cp_r = gix_z(i-1, j+1, k);
+                                if (cm_z_cp_r >= 0) {
+                                    amrex::Real const chi_n = std::max(et_t(i, j+1, k), amrex::Real(0.0)) / m_mu0;
+                                    PetscScalar v = -m_theta_dt * chi_n / drdz;
+                                    cols.push_back(cm_z_cp_r);
+                                    vals.push_back(v);
+                                }
+                                PetscInt cp_z_cm_r = gix_z(i, j, k);
+                                if (cp_z_cm_r >= 0) {
+                                    amrex::Real const chi_n = std::max(et_t(i, j, k), amrex::Real(0.0)) / m_mu0;
+                                    PetscScalar v = -m_theta_dt * chi_n / drdz;
+                                    cols.push_back(cp_z_cm_r);
+                                    vals.push_back(v);
+                                }
+                                PetscInt cm_z_cm_r = gix_z(i-1, j, k);
+                                if (cm_z_cm_r >= 0) {
+                                    amrex::Real const chi_n = std::max(et_t(i, j, k), amrex::Real(0.0)) / m_mu0;
+                                    PetscScalar v = m_theta_dt * chi_n / drdz;
+                                    cols.push_back(cm_z_cm_r);
+                                    vals.push_back(v);
+                                }
+                            }
+                        }
+                    } else if (idim == 2) {
+                        // B_z (idim = 2)
+                        // Radial neighbors (B_z to B_z)
+                        PetscInt cp_r = gix_z(i+1, j, k);
+                        if (cp_r >= 0) {
+                            amrex::Real const chi_n = std::max(et_t(i+1, j, k), amrex::Real(0.0)) / m_mu0;
+                            PetscScalar v = -m_theta_dt * chi_n / dr2 * (r_node_ip1 / r_cell_i);
+                            cols.push_back(cp_r);
+                            vals.push_back(v);
+                            diag -= v;
+                        }
+                        PetscInt cm_r = gix_z(i-1, j, k);
+                        if (cm_r >= 0 && i > 0) { // If i=0, r_node_0 = 0, so v=0
+                            amrex::Real const chi_n = std::max(et_t(i, j, k), amrex::Real(0.0)) / m_mu0;
+                            PetscScalar v = -m_theta_dt * chi_n / dr2 * (r_node_i / r_cell_i);
+                            cols.push_back(cm_r);
+                            vals.push_back(v);
+                            diag -= v;
+                        }
+
+                        // Cross terms to B_r
+                        if (AMREX_SPACEDIM > 1) {
+                            PetscInt cp_r_cp_z = gix_r(i+1, j, k);
+                            if (cp_r_cp_z >= 0) {
+                                amrex::Real const chi_n = std::max(et_t(i+1, j, k), amrex::Real(0.0)) / m_mu0;
+                                PetscScalar v = m_theta_dt * chi_n / drdz * (r_node_ip1 / r_cell_i);
+                                cols.push_back(cp_r_cp_z);
+                                vals.push_back(v);
+                            }
+                            PetscInt cp_r_cm_z = gix_r(i+1, j-1, k);
+                            if (cp_r_cm_z >= 0) {
+                                amrex::Real const chi_n = std::max(et_t(i+1, j, k), amrex::Real(0.0)) / m_mu0;
+                                PetscScalar v = -m_theta_dt * chi_n / drdz * (r_node_ip1 / r_cell_i);
+                                cols.push_back(cp_r_cm_z);
+                                vals.push_back(v);
+                            }
+                            PetscInt cm_r_cp_z = gix_r(i, j, k);
+                            if (cm_r_cp_z >= 0 && i > 0) {
+                                amrex::Real const chi_n = std::max(et_t(i, j, k), amrex::Real(0.0)) / m_mu0;
+                                PetscScalar v = -m_theta_dt * chi_n / drdz * (r_node_i / r_cell_i);
+                                cols.push_back(cm_r_cp_z);
+                                vals.push_back(v);
+                            }
+                            PetscInt cm_r_cm_z = gix_r(i, j-1, k);
+                            if (cm_r_cm_z >= 0 && i > 0) {
+                                amrex::Real const chi_n = std::max(et_t(i, j, k), amrex::Real(0.0)) / m_mu0;
+                                PetscScalar v = m_theta_dt * chi_n / drdz * (r_node_i / r_cell_i);
+                                cols.push_back(cm_r_cm_z);
+                                vals.push_back(v);
+                            }
+                        }
+                    }
+
+#else
+                    // Cartesian (1D_Z, 2D XZ, 3D)
+                    // Unchanged face-averaged Laplacian proxy
+                    amrex::Real const chi_c = std::max(et(i, j, k), amrex::Real(0.0)) / m_mu0;
                     for (int d = 0; d < AMREX_SPACEDIM; ++d) {
                         int ip = i, jp = j, kp = k;
                         int im = i, jm = j, km = k;
@@ -431,82 +599,22 @@ private:
                         else { kp += 1; km -= 1; }
                         PetscInt const cp = gix(ip, jp, kp);
                         PetscInt const cm = gix(im, jm, km);
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-                        if (d == 0) {
-                            // Radial direction: cylindrical flux-form metric.
-                            // Skip at the axis (r_dof <= 0, only Br at r=0) to
-                            // avoid 1/0; the matvec pins Br(0,*) = 0 there.
-                            if (r_dof > amrex::Real(0.0)) {
-                                if (cp >= 0) {
-                                    amrex::Real const r_face =
-                                        r_dof + amrex::Real(0.5) * dr;
-                                    amrex::Real const chi_n =
-                                        std::max(et(ip, jp, kp), amrex::Real(0.0)) / m_mu0;
-                                    amrex::Real const chi_f = amrex::Real(0.5) * (chi_c + chi_n);
-                                    PetscScalar const v = -m_theta_dt * chi_f
-                                        * dxinv2[d] * (r_face / r_dof);
-                                    diag -= v;
-                                    lap_diag_scalar += (r_face / r_dof) * dxinv2[d];
-                                    cols.push_back(cp);
-                                    vals.push_back(v);
-                                }
-                                if (cm >= 0) {
-                                    amrex::Real const r_face =
-                                        r_dof - amrex::Real(0.5) * dr;
-                                    amrex::Real const chi_n =
-                                        std::max(et(im, jm, km), amrex::Real(0.0)) / m_mu0;
-                                    amrex::Real const chi_f = amrex::Real(0.5) * (chi_c + chi_n);
-                                    PetscScalar const v = -m_theta_dt * chi_f
-                                        * dxinv2[d] * (r_face / r_dof);
-                                    diag -= v;
-                                    lap_diag_scalar += (r_face / r_dof) * dxinv2[d];
-                                    cols.push_back(cm);
-                                    vals.push_back(v);
-                                }
-                            }
-                            continue;  // radial handled; z (RZ d=1) is Cartesian below
-                        }
-#endif
-                        // Cartesian direction (z in RZ; any dir in XZ/3D/1D_Z):
-                        // unchanged face-averaged Laplacian.
+
                         if (cp >= 0) {
-                            amrex::Real const chi_n =
-                                std::max(et(ip, jp, kp), amrex::Real(0.0)) / m_mu0;
+                            amrex::Real const chi_n = std::max(et(ip, jp, kp), amrex::Real(0.0)) / m_mu0;
                             amrex::Real const chi_f = amrex::Real(0.5) * (chi_c + chi_n);
-                            PetscScalar const v =
-                                -m_theta_dt * chi_f * dxinv2[d];
+                            PetscScalar const v = -m_theta_dt * chi_f * dxinv2[d];
                             diag -= v;
                             cols.push_back(cp);
                             vals.push_back(v);
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-                            lap_diag_scalar += dxinv2[d];
-#endif
                         }
                         if (cm >= 0) {
-                            amrex::Real const chi_n =
-                                std::max(et(im, jm, km), amrex::Real(0.0)) / m_mu0;
+                            amrex::Real const chi_n = std::max(et(im, jm, km), amrex::Real(0.0)) / m_mu0;
                             amrex::Real const chi_f = amrex::Real(0.5) * (chi_c + chi_n);
-                            PetscScalar const v =
-                                -m_theta_dt * chi_f * dxinv2[d];
+                            PetscScalar const v = -m_theta_dt * chi_f * dxinv2[d];
                             diag -= v;
                             cols.push_back(cm);
                             vals.push_back(v);
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-                            lap_diag_scalar += dxinv2[d];
-#endif
-                        }
-                    }
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-                    // B_t (idim 1): cylindrical vector Laplacian adds -1/r^2.
-                    // Apply only off-axis (lap_diag_scalar - 1/r^2 > 0) so the
-                    // assembled-P diagonal stays positive (no zero/negative
-                    // diags); near the axis the Bt cell keeps the scalar flux
-                    // form (the v1 axis compromise documented above).
-                    if (is_bt && r_dof > amrex::Real(0.0)) {
-                        amrex::Real const inv_r2 =
-                            amrex::Real(1.0) / (r_dof * r_dof);
-                        if (lap_diag_scalar - inv_r2 > amrex::Real(0.0)) {
-                            diag -= m_theta_dt * chi_c * inv_r2;
                         }
                     }
 #endif
@@ -544,12 +652,6 @@ private:
     Mat m_P = nullptr;
     KSP m_ksp = nullptr;
     std::array<std::unique_ptr<amrex::iMultiFab>,3> m_gindex;
-    // r-direction staggering per B component (1 = NODE in r, 0 = CELL in r),
-    // read from B_proto's ixType. Used by assembleFrozenLaplacian to place the
-    // cylindrical 1/r metric at the correct face (Br is NODE in r; Bt/Bz are
-    // CELL in r -- see ComputeCurlACylindrical). Only read under the
-    // WARPX_DIM_RZ / WARPX_DIM_RCYLINDER guard; harmless otherwise.
-    std::array<int,3> m_r_nodal{{0, 0, 0}};
     amrex::Array<amrex::MultiFab,3> m_eta_g;
     // Host (pinned) copy of eb_update_B when EB is on. Empty when EB off.
     // Never LoopOnCpu into the live device eb_update_B MultiFabs.
@@ -562,6 +664,7 @@ struct MagDiffPetscSolver { std::unique_ptr<MagDiffPetscSolverImpl> impl; };
 
 MagDiffPetscSolver* magdiff_petsc_make (
     amrex::Array<amrex::MultiFab const*,3> const& B_proto,
+    amrex::Array<amrex::MultiFab const*,3> const& eta_edge,
     amrex::Array<amrex::MultiFab const*,3> const& eta_pc,
     amrex::Geometry const& geom, amrex::Real theta_dt, amrex::Real mu0,
     MagDiffPetscPC pc_choice, amrex::Real rtol, amrex::Real atol,
@@ -571,7 +674,7 @@ MagDiffPetscSolver* magdiff_petsc_make (
 {
     auto* s = new MagDiffPetscSolver;
     s->impl = std::make_unique<MagDiffPetscSolverImpl>(
-        B_proto, eta_pc, geom, theta_dt, mu0, pc_choice,
+        B_proto, eta_edge, eta_pc, geom, theta_dt, mu0, pc_choice,
         rtol, atol, max_iter, verbose, matvec, pcapply, opctx, eb_update_B);
     return s;
 }
@@ -603,9 +706,10 @@ void magdiff_petsc_destroy (MagDiffPetscSolver* s) {
 // HybridMagDiffusion.cpp only reaches them inside its own AMREX_USE_PETSC guard.
 
 MagDiffPetscSolver* magdiff_petsc_make (
-    amrex::Array<amrex::MultiFab const*,3> const&,
-    amrex::Array<amrex::MultiFab const*,3> const&,
-    amrex::Geometry const&, amrex::Real, amrex::Real,
+    amrex::Array<amrex::MultiFab const*,3> const& /*B_proto*/,
+    amrex::Array<amrex::MultiFab const*,3> const& /*eta_edge*/,
+    amrex::Array<amrex::MultiFab const*,3> const& /*eta_pc*/,
+    amrex::Geometry const& /*geom*/, amrex::Real /*theta_dt*/, amrex::Real /*mu0*/,
     MagDiffPetscPC, amrex::Real, amrex::Real, int, int,
     MagDiffMatvecFn, MagDiffPCFn, void*,
     amrex::Array<amrex::iMultiFab const*,3> const*)
