@@ -52,6 +52,7 @@ class HybridMagDiffusion
 {
 public:
     HybridMagDiffusion () = default;
+    ~HybridMagDiffusion ();
 
     void ReadParameters ();
 
@@ -122,6 +123,7 @@ private:
     bool m_use_variable_eta = false;
     MagDiffLinearSolver m_linear_solver = MagDiffLinearSolver::amrex_gmres;
     MagDiffPetscPC m_petsc_pc = MagDiffPetscPC::shell_jacobi;
+    mutable MagDiffPetscSolver* m_petsc_solver = nullptr;
 };
 
 #endif // WARPX_HYBRID_MAG_DIFFUSION_H_

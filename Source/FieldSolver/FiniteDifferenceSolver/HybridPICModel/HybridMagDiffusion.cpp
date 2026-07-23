@@ -44,6 +44,16 @@
 
 using namespace amrex;
 
+HybridMagDiffusion::~HybridMagDiffusion ()
+{
+#ifdef AMREX_USE_PETSC
+    if (m_petsc_solver != nullptr) {
+        magdiff_petsc_destroy(m_petsc_solver);
+        m_petsc_solver = nullptr;
+    }
+#endif
+}
+
 void
 HybridMagDiffusion::ReadParameters ()
 {
@@ -1132,10 +1142,44 @@ HybridMagDiffusion::AdvanceVariable (
 
     VariableCoeffMagDiffusionOp linop(Bfield, eta_SI, m_theta * dt, lev, lobc, hibc);
 
-    MagDiffVector solution;
-    MagDiffVector rhs;
-    solution.Define(Bfield);
-    rhs.Define(Bfield);
+    // Reuse field work buffers across half-steps (same BA/DM for single-level
+    // hybrid mag-diff). Avoids MultiFab alloc/free churn every AdvanceVariable.
+    static thread_local MagDiffVector solution;
+    static thread_local MagDiffVector rhs;
+    static thread_local MagDiffVector Ae;
+    static thread_local PetscOpCtx opctx;
+    static thread_local BoxArray cached_ba;
+    static thread_local DistributionMapping cached_dm;
+    static thread_local bool bufs_defined = false;
+
+    bool const layout_changed = !bufs_defined
+        || !BoxArray::SameRefs(cached_ba, Bfield[0]->boxArray())
+        || !DistributionMapping::SameRefs(cached_dm, Bfield[0]->DistributionMap());
+    if (layout_changed) {
+#ifdef AMREX_USE_PETSC
+        // DOF map / PETSc layout tied to BA/DM — rebuild solver.
+        if (m_petsc_solver != nullptr) {
+            magdiff_petsc_destroy(m_petsc_solver);
+            m_petsc_solver = nullptr;
+        }
+#endif
+        solution.Define(Bfield);
+        rhs.Define(Bfield);
+        Ae.Define(Bfield);
+        opctx = PetscOpCtx{};
+        opctx.U.Define(makeVectorFieldView(solution.fields()));
+        opctx.F.Define(makeVectorFieldView(solution.fields()));
+        opctx.PCsrc.Define(makeVectorFieldView(solution.fields()));
+        opctx.PCdst.Define(makeVectorFieldView(solution.fields()));
+#ifdef AMREX_USE_GPU
+        opctx.ensureHostBufs(solution.fields());
+#endif
+        cached_ba = Bfield[0]->boxArray();
+        cached_dm = Bfield[0]->DistributionMap();
+        bufs_defined = true;
+    }
+    opctx.linop = &linop;
+
     // Capture B^n before prepareFeed: the operator stages its Krylov vectors
     // (and the zero probe for the feed offset) through m_source, which is the
     // registered B field (= Bfield). The true B^n lives in solution/rhs.
@@ -1181,8 +1225,6 @@ HybridMagDiffusion::AdvanceVariable (
     // - theta < 1: one extra matrix-free apply per step (same cost as the
     //   constant-eta CN path). c = 0 with no feed -> rhs = 2*B^n - A_e.
     if (m_theta < 1.0_rt) {
-        MagDiffVector Ae;
-        Ae.Define(Bfield);
         const Real alpha_e = (1.0_rt - m_theta) * dt;
         linop.computeAFull(Ae, solution, alpha_e);
         rhs.linComb(2.0_rt, solution, -1.0_rt, Ae);
@@ -1193,22 +1235,6 @@ HybridMagDiffusion::AdvanceVariable (
 
     if (m_linear_solver == MagDiffLinearSolver::petsc) {
 #ifdef AMREX_USE_PETSC
-        // Optional PETSc KSP path: same matrix-free operator (MATSHELL matvec =
-        // linop.apply, the homogeneous A_lin) and same RHS (built above:
-        // 2*B^n - A_e(B^n) - c for theta<1, B^n - c for theta=1), only the
-        // solver driver differs. PC is the existing scaled Jacobi (shell) by
-        // default, or an assembled frozen-eta Laplacian Pmat for algebraic PCs.
-        PetscOpCtx opctx;
-        opctx.linop = &linop;
-        opctx.U.Define(makeVectorFieldView(solution.fields()));
-        opctx.F.Define(makeVectorFieldView(solution.fields()));
-        opctx.PCsrc.Define(makeVectorFieldView(solution.fields()));
-        opctx.PCdst.Define(makeVectorFieldView(solution.fields()));
-#ifdef AMREX_USE_GPU
-        // One-time pinned host staging for the whole KSP (not per matvec).
-        opctx.ensureHostBufs(solution.fields());
-#endif
-
         auto& eta_pc = linop.etaPC();
         auto const& eta_edge = linop.etaEdge();
         amrex::Array<MultiFab const*,3> const B_proto{
@@ -1223,15 +1249,19 @@ HybridMagDiffusion::AdvanceVariable (
             eb_update_B[0].get(), eb_update_B[1].get(), eb_update_B[2].get()};
         bool const petsc_eb_on = EB::enabled();
 
-        MagDiffPetscSolver* petsc_solver = magdiff_petsc_make(
-            B_proto, eta_edge, eta_pc_proto, linop.geom(), linop.thetaDt(),
-            PhysConst::mu0, m_petsc_pc, m_rtol, m_atol, m_max_iter, m_verbose,
-            &petscMatvec, &petscPCApply, &opctx,
-            petsc_eb_on ? &eb_update_B_ptrs : nullptr);
+        if (!m_petsc_solver) {
+            m_petsc_solver = magdiff_petsc_make(
+                B_proto, eta_edge, eta_pc_proto, linop.geom(), linop.thetaDt(),
+                PhysConst::mu0, m_petsc_pc, m_rtol, m_atol, m_max_iter, m_verbose,
+                &petscMatvec, &petscPCApply, &opctx,
+                petsc_eb_on ? &eb_update_B_ptrs : nullptr);
+        } else {
+            magdiff_petsc_update(m_petsc_solver, eta_edge, eta_pc_proto, linop.thetaDt(), &opctx);
+        }
 
-        const amrex::Long n_local = magdiff_petsc_nlocal(petsc_solver);
-        const amrex::Long rstart = magdiff_petsc_rstart(petsc_solver);
-        auto const gindex = magdiff_petsc_gindex(petsc_solver);
+        const amrex::Long n_local = magdiff_petsc_nlocal(m_petsc_solver);
+        const amrex::Long rstart = magdiff_petsc_rstart(m_petsc_solver);
+        auto const gindex = magdiff_petsc_gindex(m_petsc_solver);
 
         // Initial guess (B^n) and RHS (B^n - feed offset), flat / DOF-mapped.
         std::vector<Real> sol_flat(static_cast<std::size_t>(n_local), Real(0.0));
@@ -1247,7 +1277,7 @@ HybridMagDiffusion::AdvanceVariable (
 
         Real rnorm = 0.0_rt;
         const int reason = magdiff_petsc_solve(
-            petsc_solver, rhs_flat.data(), sol_flat.data(), rnorm);
+            m_petsc_solver, rhs_flat.data(), sol_flat.data(), rnorm);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             std::isfinite(rnorm),
             "HybridMagDiffusion PETSc KSP residual is non-finite (NaN/Inf). "
@@ -1259,7 +1289,6 @@ HybridMagDiffusion::AdvanceVariable (
 #else
         petscScatter(solution, sol_flat.data(), gindex, rstart);
 #endif
-        magdiff_petsc_destroy(petsc_solver);
 #else
         WARPX_ABORT_WITH_MESSAGE(
             "hybrid_pic_model.mag_diff_linear_solver = petsc requires building "
