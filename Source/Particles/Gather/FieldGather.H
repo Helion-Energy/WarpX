@@ -442,10 +442,18 @@ void doGatherShapeN ([[maybe_unused]] const amrex::ParticleReal xp,
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     // y direction (azimuthal theta direction in RTZ)
 #if defined(WARPX_DIM_RTZ)
-    // theta = atan2(y, x), wrapped into [thetamin, thetamin + 2*pi); thetamin = xyzmin.y
+    // theta = atan2(y, x) is the principal value in (-pi, pi]. Select the
+    // periodic image nearest the box theta mid-plane (cell space, recovered
+    // from the FAB bounds), matching the deposition kernels: gathers then
+    // stay within the valid region + adjacent filled guards.
     constexpr amrex::Real twopi = amrex::Real(6.2831853071795864769252867665590);
+    const amrex::Real theta_c = xyzmin.y +
+        (static_cast<amrex::Real>(ey_arr.begin[1] - lo.y)
+         + 0.5_rt*static_cast<amrex::Real>(ey_arr.end[1] - ey_arr.begin[1]
+                                           - (ey_type[1] == NODE ? 1 : 0)))/dinv.y;
     amrex::Real theta_p = std::atan2(yp, xp);
-    theta_p -= twopi*std::floor((theta_p - xyzmin.y) / twopi);
+    // half-open image selection [theta_c - pi, theta_c + pi)
+    theta_p -= twopi*std::floor((theta_p - theta_c)/twopi + 0.5_rt);
     const amrex::Real y = (theta_p - xyzmin.y)*dinv.y;
 #else
     const amrex::Real y = (yp-xyzmin.y)*dinv.y;

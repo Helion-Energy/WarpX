@@ -53,6 +53,20 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("use_rkf45", m_use_rkf45);
 
     utils::parser::queryWithParser(pp_hybrid, "holmstrom_vacuum_region", m_holmstrom_vacuum_region);
+    utils::parser::queryWithParser(pp_hybrid, "holmstrom_blend_pow", m_holmstrom_blend_pow);
+    utils::parser::queryWithParser(pp_hybrid, "holmstrom_blend_width", m_holmstrom_blend_width);
+    {
+        std::string switch_mode_str = "edge";
+        pp_hybrid.query("holmstrom_switch_mode", switch_mode_str);
+        if (switch_mode_str == "edge") { m_holmstrom_switch_mode = 0; }
+        else if (switch_mode_str == "node") { m_holmstrom_switch_mode = 1; }
+        else if (switch_mode_str == "cell") { m_holmstrom_switch_mode = 2; }
+        else {
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.holmstrom_switch_mode must be one of "
+                "edge, node, cell");
+        }
+    }
 
     // The hybrid model requires an electron temperature, reference density
     // and exponent to be given. These values will be used to calculate the

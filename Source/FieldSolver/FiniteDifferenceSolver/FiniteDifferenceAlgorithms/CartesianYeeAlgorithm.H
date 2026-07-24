@@ -139,6 +139,7 @@ struct CartesianYeeAlgorithm {
 #else
         amrex::ignore_unused(F, coefs_y, n_coefs_y,
             i, j, k, ncomp);
+        return 0._rt; // cylindrical dims (RZ/RTZ/RCYLINDER/RSPHERE) use CylindricalYeeAlgorithm
 #endif
     }
 
@@ -163,6 +164,7 @@ struct CartesianYeeAlgorithm {
 #else
         amrex::ignore_unused(F, coefs_y, n_coefs_y,
             i, j, k, ncomp);
+        return 0._rt; // cylindrical dims (RZ/RTZ/RCYLINDER/RSPHERE) use CylindricalYeeAlgorithm
 #endif
     }
 
@@ -182,6 +184,9 @@ struct CartesianYeeAlgorithm {
 #elif (defined WARPX_DIM_XZ || WARPX_DIM_1D_Z)
         amrex::ignore_unused(F, coefs_y, i, j, k, ncomp);
         return 0._rt; // 1D and 2D Cartesian: derivative along y is 0
+#else
+        amrex::ignore_unused(F, coefs_y, i, j, k, ncomp);
+        return 0._rt; // cylindrical dims (RZ/RTZ/RCYLINDER/RSPHERE) use CylindricalYeeAlgorithm
 #endif
     }
 
@@ -201,6 +206,9 @@ struct CartesianYeeAlgorithm {
         return inv_dz*( F(i,j+1,k,ncomp) - F(i,j,k,ncomp) );
 #elif (defined WARPX_DIM_1D_Z)
         return inv_dz*( F(i+1,j,k,ncomp) - F(i,j,k,ncomp) );
+#else
+        amrex::ignore_unused(F, inv_dz, i, j, k, ncomp);
+        return 0._rt; // cylindrical dims (RZ/RTZ/RCYLINDER/RSPHERE) use CylindricalYeeAlgorithm
 #endif
     }
 
@@ -221,6 +229,9 @@ struct CartesianYeeAlgorithm {
         return inv_dz*( F(i,j,k,ncomp) - F(i,j-1,k,ncomp) );
 #elif (defined WARPX_DIM_1D_Z)
         return inv_dz*( F(i,j,k,ncomp) - F(i-1,j,k,ncomp) );
+#else
+        amrex::ignore_unused(F, inv_dz, i, j, k, ncomp);
+        return 0._rt; // cylindrical dims (RZ/RTZ/RCYLINDER/RSPHERE) use CylindricalYeeAlgorithm
 #endif
     }
 
@@ -241,6 +252,9 @@ struct CartesianYeeAlgorithm {
         return inv_dz2*( F(i,j-1,k,ncomp) - 2._rt*F(i,j,k,ncomp) + F(i,j+1,k,ncomp) );
 #elif (defined WARPX_DIM_1D_Z)
         return inv_dz2*( F(i-1,j,k,ncomp) - 2._rt*F(i,j,k,ncomp) + F(i+1,j,k,ncomp) );
+#else
+        amrex::ignore_unused(F, inv_dz2, i, j, k, ncomp);
+        return 0._rt; // cylindrical dims (RZ/RTZ/RCYLINDER/RSPHERE) use CylindricalYeeAlgorithm
 #endif
     }
 

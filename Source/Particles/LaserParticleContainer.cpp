@@ -405,6 +405,10 @@ LaserParticleContainer::InitData (int lev)
                  0.0_rt,
                  m_position[2] + (S_X*(Real(i)+0.5_rt))*m_u_X[2] };
 #   endif
+#elif defined(WARPX_DIM_RTZ)
+        amrex::ignore_unused(i, j);
+        WARPX_ABORT_WITH_MESSAGE("LaserParticleContainer: lasers are not supported in RTZ geometry");
+        return {};
 #endif
     };
 #endif

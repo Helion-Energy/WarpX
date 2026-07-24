@@ -76,6 +76,13 @@ void warpx_computedivb(
         divB(i,j,0,dcomp) = (ru*Bx(i+1,j,0) - rd*Bx(i,j,0))*dxinv
                            + (Bz(i,j+1,0) - Bz(i,j,0))*dzinv;
         amrex::ignore_unused(k, By, dyinv);
+#elif defined(WARPX_DIM_RTZ)
+        // div B = (1/r) d(r Br)/dr + (1/r) dBtheta/dtheta + dBz/dz, evaluated
+        // at the cell center (rc = dr/2 in the innermost cell, never zero)
+        const amrex::Real rc = rmin + (i + 0.5_rt)/dxinv;
+        divB(i,j,k,dcomp) = (ru*Bx(i+1,j,k) - rd*Bx(i,j,k))*dxinv
+                           + (By(i,j+1,k) - By(i,j,k))*dyinv/rc
+                           + (Bz(i,j,k+1) - Bz(i,j,k))*dzinv;
 #endif
     }
 }

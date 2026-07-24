@@ -1462,10 +1462,25 @@ WarpX::ApplyInverseVolumeScalingToCurrentDensity (amrex::MultiFab* Jx, amrex::Mu
         tbz.grow(1, ngJ[1]);
 
         const int nmodes = n_rz_azimuthal_modes;
+#elif defined(WARPX_DIM_RTZ)
+        // Scale the theta and z guard cells too: deposits there (e.g. the
+        // half-cell spill of the theta-cell-centered Jt at the +-pi seam) are
+        // folded back across the periodic boundaries by the guard-cell sum and
+        // must carry the same 1/r scaling as the valid cells.
+        tbr.grow(1, ngJ[1]);
+        tbt.grow(1, ngJ[1]);
+        tbz.grow(1, ngJ[1]);
+        tbr.grow(2, ngJ[2]);
+        tbt.grow(2, ngJ[2]);
+        tbz.grow(2, ngJ[2]);
 #endif
 
         // Rescale current in r-z mode since the inverse volume factor was not
         // included in the current deposition.
+#if defined(WARPX_DIM_RTZ)
+        const int nth = Geom(lev).Domain().length(1);
+        const int jdomlo = Geom(lev).Domain().smallEnd(1);
+#endif
         amrex::ParallelFor(tbr, tbt, tbz,
         [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
@@ -1474,7 +1489,16 @@ WarpX::ApplyInverseVolumeScalingToCurrentDensity (amrex::MultiFab* Jx, amrex::Mu
             // If Jr is node centered, Jr[0] is located on the boundary.
             // If Jr is cell centered, Jr[0] is at 1/2 dr.
             if (rmin == 0. && 1-ishift_r <= i && i <= ngJ[0]-ishift_r) {
+#if defined(WARPX_DIM_RTZ)
+                // Below-axis deposits belong at theta + pi; the radial unit
+                // vector flips under that map, hence the minus sign. Fall back
+                // to the same column if theta is split across boxes.
+                int jo = jdomlo + (j - jdomlo + nth/2) % nth;
+                if (jo < Jr_arr.begin[1] || jo >= Jr_arr.end[1]) { jo = j; }
+                Jr_arr(i,j,k,0) -= Jr_arr(-ishift_r-i,jo,k,0);
+#else
                 Jr_arr(i,j,k,0) -= Jr_arr(-ishift_r-i,j,k,0);
+#endif
             }
             // Apply the inverse volume scaling
             // Jr is forced to zero on axis
@@ -1518,7 +1542,14 @@ WarpX::ApplyInverseVolumeScalingToCurrentDensity (amrex::MultiFab* Jx, amrex::Mu
             // If Jt is node centered, Jt[0] is located on the boundary.
             // If Jt is cell centered, Jt[0] is at 1/2 dr.
             if (rmin == 0._rt && 1-ishift_t <= i && i <= ngJ[0]-ishift_t) {
+#if defined(WARPX_DIM_RTZ)
+                // theta + pi map; the azimuthal unit vector flips (minus sign)
+                int jo = jdomlo + (j - jdomlo + nth/2) % nth;
+                if (jo < Jt_arr.begin[1] || jo >= Jt_arr.end[1]) { jo = j; }
+                Jt_arr(i,j,k,0) -= Jt_arr(-ishift_t-i,jo,k,0);
+#else
                 Jt_arr(i,j,k,0) -= Jt_arr(-ishift_t-i,j,k,0);
+#endif
             }
 
             // Apply the inverse volume scaling
@@ -1564,7 +1595,12 @@ WarpX::ApplyInverseVolumeScalingToCurrentDensity (amrex::MultiFab* Jx, amrex::Mu
             // If Jz is node centered, Jz[0] is located on the boundary.
             // If Jz is cell centered, Jz[0] is at 1/2 dr.
             if (rmin == 0._rt && 1-ishift_z <= i && i <= ngJ[0]-ishift_z) {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
+#if defined(WARPX_DIM_RTZ)
+                // theta + pi map; the axial unit vector is unchanged (plus sign)
+                int jo = jdomlo + (j - jdomlo + nth/2) % nth;
+                if (jo < Jz_arr.begin[1] || jo >= Jz_arr.end[1]) { jo = j; }
+                Jz_arr(i,j,k,0) += Jz_arr(-ishift_z-i,jo,k,0);
+#elif defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
                 Jz_arr(i,j,k,0) += Jz_arr(-ishift_z-i,j,k,0);
 #elif defined(WARPX_DIM_RSPHERE)
                 Jz_arr(i,j,k,0) -= Jz_arr(-ishift_z-i,j,k,0);
@@ -1574,7 +1610,10 @@ WarpX::ApplyInverseVolumeScalingToCurrentDensity (amrex::MultiFab* Jx, amrex::Mu
             // Apply the inverse volume scaling
             const amrex::Real r = amrex::Math::abs(rminz + (i - irmin)*dr);
             if (r == 0._rt) {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
+#if defined(WARPX_DIM_RTZ)
+                // per-column wedge volume: effective radius dr*factor/2
+                Jz_arr(i,j,k,0) /= (0.5_rt*dr*axis_volume_factor);
+#elif defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
                 Jz_arr(i,j,k,0) /= (MathConst::pi*dr*axis_volume_factor);
 #elif defined(WARPX_DIM_RSPHERE)
                 Jz_arr(i,j,k,0) = 0.0_rt;
@@ -1817,6 +1856,13 @@ WarpX::ApplyInverseVolumeScalingToChargeDensity (amrex::MultiFab* Rho, int lev) 
         tb.growHi(0, ngRho[0]);
 #if defined(WARPX_DIM_RZ)
         tb.grow(1, ngRho[1]);
+#elif defined(WARPX_DIM_RTZ)
+        // Scale the theta and z guard cells too: deposits there are folded
+        // back across the periodic boundaries by the later guard-cell sum and
+        // must carry the same 1/r scaling as the valid cells (otherwise the
+        // seam-adjacent cells receive raw, unscaled charge).
+        tb.grow(1, ngRho[1]);
+        tb.grow(2, ngRho[2]);
 #endif
 
         // Rescale charge in r-z mode since the inverse volume factor was not
@@ -1824,6 +1870,10 @@ WarpX::ApplyInverseVolumeScalingToChargeDensity (amrex::MultiFab* Rho, int lev) 
         // Note that the loop is also over ncomps, which takes care of the RZ modes,
         // as well as the old and new rho.
         int const ncomp = Rho->nComp();
+#if defined(WARPX_DIM_RTZ)
+        const int nth = Geom(lev).Domain().length(1);
+        const int jdomlo = Geom(lev).Domain().smallEnd(1);
+#endif
         amrex::ParallelFor(tb, ncomp,
         [=] AMREX_GPU_DEVICE (int i, int j, int k, int icomp)
         {
@@ -1831,6 +1881,14 @@ WarpX::ApplyInverseVolumeScalingToChargeDensity (amrex::MultiFab* Rho, int lev) 
             // to the cells above the axis.
             // Rho is located on the boundary
             if (rmin == 0. && 1-ishift <= i && i <= ngRho[0]-ishift) {
+#if defined(WARPX_DIM_RTZ)
+                // A point below the axis at theta belongs above the axis at
+                // theta + pi. Fall back to the same column when the opposite
+                // column is not in this box (theta-split decompositions).
+                int jo = jdomlo + (j - jdomlo + nth/2) % nth;
+                if (jo < Rho_arr.begin[1] || jo >= Rho_arr.end[1]) { jo = j; }
+                Rho_arr(i,j,k,icomp) += Rho_arr(-ishift-i,jo,k,icomp);
+#else
                 int imode;
                 if (icomp == 0 || icomp == ncomp/2) {
                     imode = 0;
@@ -1842,12 +1900,18 @@ WarpX::ApplyInverseVolumeScalingToChargeDensity (amrex::MultiFab* Rho, int lev) 
                     imode = (icomp - ncomp/2 + 1)/2;
                 }
                 Rho_arr(i,j,k,icomp) -= static_cast<amrex::Real>(std::pow(-1, imode+1)*Rho_arr(-ishift-i,j,k,icomp));
+#endif
             }
 
             // Apply the inverse volume scaling
             const amrex::Real r = amrex::Math::abs(rminr + (i - irmin)*dr);
             if (r == 0.) {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
+#if defined(WARPX_DIM_RTZ)
+                // theta is a real coordinate: the axis control volume is the
+                // per-column wedge, so the effective radius is dr*factor/2
+                // (no 2*pi; dtheta is already in the deposition inverse volume)
+                Rho_arr(i,j,k,icomp) /= (0.5_rt*dr*axis_volume_factor);
+#elif defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
                 Rho_arr(i,j,k,icomp) /= (MathConst::pi*dr*axis_volume_factor);
 #elif defined(WARPX_DIM_RSPHERE)
                 Rho_arr(i,j,k,icomp) /= 4.0_rt/3.0_rt*MathConst::pi*dr*dr*axis_volume_factor;

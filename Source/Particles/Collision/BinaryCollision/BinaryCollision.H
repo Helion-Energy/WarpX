@@ -320,9 +320,9 @@ public:
         amrex::Geometry const& geom_lev = WarpX::GetInstance().Geom(lev);
         // dV is level-specific: cell volume at this refinement level (smaller on fine levels).
         amrex::ParticleReal const dV = AMREX_D_TERM(geom_lev.CellSize(0), *geom_lev.CellSize(1), *geom_lev.CellSize(2));
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RTZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
         amrex::Box const& cbx = mfi.tilebox(amrex::IntVect::TheZeroVector()); //Cell-centered box
-#if defined(WARPX_DIM_RZ)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RTZ)
         auto const lo = lbound(cbx);
         auto const hi = ubound(cbx);
         int const nr = hi.x - lo.x + 1;
@@ -340,6 +340,13 @@ public:
             // rr is radius at the cell center
             amrex::ParticleReal const rr = rmin + (ri + 0.5_prt)*dr;
             return 2.0_prt*static_cast<amrex::ParticleReal>(MathConst::pi)*rr;
+#elif defined(WARPX_DIM_RTZ)
+            // Real theta cell width: dV already carries dtheta*dz, so the
+            // radial metric factor is just the cell-center radius (no 2*pi).
+            // DenseBins uses x-fastest ordering: i_cell = (iz*ntheta + itheta)*nr + ir
+            int const ri = i_cell % nr;
+            amrex::ParticleReal const rr = rmin + (ri + 0.5_prt)*dr;
+            return rr;
 #elif defined(WARPX_DIM_RCYLINDER)
             int const ri = i_cell;
             // rr is radius at the cell center

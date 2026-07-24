@@ -204,6 +204,11 @@ int main (int argc, char* argv[])
             Fzz.fill([&](Real, Real, Real z) { return a + b * z + cc * z * z; });
             check_exact("Dzz(a+b*z+c*z^2) == 2c", T::Dzz(Fzz.a, cz, nz, i0, j0, k0, 0), 2.0 * cc);
 
+            Field Ftt(N, rmin, dr, thmin, dth, zmin, dz);
+            Ftt.fill([&](Real, Real th, Real) { return a + b * th + cc * th * th; });
+            check_exact("Dtt(a+b*theta+c*theta^2) == 2c",
+                        T::Dtt(Ftt.a, ct, nt, i0, j0, k0, 0), 2.0 * cc);
+
             // (1/r) d(rF)/dr  with F = a + b*r  ->  a/r + 2b (exact for F linear in r)
             // UpwardDrr_over_r: F nodal in r, result cell-centered at r_cc = rmin+(i+0.5)dr
             {
@@ -241,7 +246,7 @@ int main (int argc, char* argv[])
         std::printf("\n[Group A'] convergence order (smooth field)\n");
         {
             auto run = [&](int Nres, Real dr_, Real dth_, Real dz_,
-                           std::array<Real, 6>& err) {
+                           std::array<Real, 7>& err) {
                 Coefs cf({dr_, dth_, dz_});
                 const Real* lr = cf.r.dataPtr(); const int lnr = cf.r.size();
                 const Real* lt = cf.th.dataPtr(); const int lnt = cf.th.size();
@@ -251,7 +256,7 @@ int main (int argc, char* argv[])
                 F.fill([&](Real r, Real th, Real z) {
                     return std::sin(r) * std::sin(th) * std::sin(z);
                 });
-                err = {0, 0, 0, 0, 0, 0};
+                err = {0, 0, 0, 0, 0, 0, 0};
                 for (int k = 1; k < Nres; ++k) {
                     for (int j = 1; j < Nres; ++j) {
                         for (int i = 1; i < Nres; ++i) {
@@ -283,11 +288,15 @@ int main (int argc, char* argv[])
                             err[5] = std::max(err[5], std::abs(
                                 T::UpwardDrr_over_r(F.a, rm, dr_, lr, lnr, i, j, k, 0)
                                 - (std::sin(rm) / rm + std::cos(rm)) * g));
+                            // Dtt ~ d2/dtheta2 at node
+                            err[6] = std::max(err[6], std::abs(
+                                T::Dtt(F.a, lt, lnt, i, j, k, 0)
+                                - std::sin(r) * (-std::sin(th)) * std::sin(z)));
                         }
                     }
                 }
             };
-            std::array<Real, 6> e1, e2;
+            std::array<Real, 7> e1, e2;
             run(N, dr, dth, dz, e1);
             run(2 * N, 0.5 * dr, 0.5 * dth, 0.5 * dz, e2);
             check_order("UpwardDtheta order",      e1[0], e2[0]);
@@ -296,6 +305,7 @@ int main (int argc, char* argv[])
             check_order("Drr order",               e1[3], e2[3]);
             check_order("Dzz order",               e1[4], e2[4]);
             check_order("UpwardDrr_over_r order",  e1[5], e2[5]);
+            check_order("Dtt order",               e1[6], e2[6]);
         }
 
         // -------------------------------------------------------------------

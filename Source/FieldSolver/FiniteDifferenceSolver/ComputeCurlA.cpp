@@ -123,6 +123,10 @@ void FiniteDifferenceSolver::ComputeCurlACylindrical (
         int const n_coefs_r = static_cast<int>(m_stencil_coefs_r.size());
         Real const * const AMREX_RESTRICT coefs_z = m_stencil_coefs_z.dataPtr();
         int const n_coefs_z = static_cast<int>(m_stencil_coefs_z.size());
+#if defined(WARPX_DIM_RTZ)
+        Real const * const AMREX_RESTRICT coefs_theta = m_stencil_coefs_theta.dataPtr();
+        int const n_coefs_theta = static_cast<int>(m_stencil_coefs_theta.size());
+#endif
 
         // Extract cylindrical specific parameters
         Real const dr = m_dr;
@@ -145,6 +149,11 @@ void FiniteDifferenceSolver::ComputeCurlACylindrical (
                 Real const r = rmin + i*dr; // r on nodal point (Br is nodal in r)
                 if (r != 0) { // Off-axis, regular Maxwell equations
                     Br(i, j, k, 0) = - T_Algo::UpwardDz(At, coefs_z, n_coefs_z, i, j, k, 0); // Mode m=0
+#if defined(WARPX_DIM_RTZ)
+                    // (curl A)_r theta term: + (1/r) dAz/dtheta (Az is theta-nodal,
+                    // UpwardDtheta lands on Br's theta-cell-centered staggering)
+                    Br(i, j, k, 0) += T_Algo::UpwardDtheta(Az, coefs_theta, n_coefs_theta, i, j, k, 0) / r;
+#endif
                     for (int m=1; m<nmodes; m++) { // Higher-order modes
                         Br(i, j, k, 2*m-1) = - (
                             T_Algo::UpwardDz(At, coefs_z, n_coefs_z, i, j, k, 2*m-1)
@@ -199,6 +208,11 @@ void FiniteDifferenceSolver::ComputeCurlACylindrical (
 
                 Real const r = rmin + (i + 0.5_rt)*dr; // r on a cell-centered grid (Bz is cell-centered in r)
                 Bz(i, j, k, 0) =  T_Algo::UpwardDrr_over_r(At, r, dr, coefs_r, n_coefs_r, i, j, k, 0);
+#if defined(WARPX_DIM_RTZ)
+                // (curl A)_z theta term: - (1/r) dAr/dtheta (Ar is theta-nodal,
+                // UpwardDtheta lands on Bz's theta-cell-centered staggering)
+                Bz(i, j, k, 0) -= T_Algo::UpwardDtheta(Ar, coefs_theta, n_coefs_theta, i, j, k, 0) / r;
+#endif
                 for (int m=1 ; m<nmodes ; m++) { // Higher-order modes
                     Bz(i, j, k, 2*m-1) = - ( m * Ar(i, j, k, 2*m  )/r
                         - T_Algo::UpwardDrr_over_r(At, r, dr, coefs_r, n_coefs_r, i, j, k, 2*m-1)); // Real part

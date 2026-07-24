@@ -804,7 +804,7 @@ void WarpX::SyncCurrentAndRho ()
                 // TODO This works only without mesh refinement
                 const int lev = 0;
                 if (use_filter) {
-                    ApplyFilterMF(m_fields.get_mr_levels_alldirs(FieldType::current_fp_vay, finest_level), lev);
+                    ApplyFilterJ(m_fields.get_mr_levels_alldirs(FieldType::current_fp_vay, finest_level), lev);
                 }
             }
         }
@@ -1094,7 +1094,7 @@ WarpX::OneStep_sub1 (Real cur_time)
         m_fields.get_mr_levels_alldirs(FieldType::current_cp, finest_level, skip_lev0_coarse_patch), fine_lev);
     RestrictRhoFromFineToCoarsePatch(fine_lev);
     if (use_filter) {
-        ApplyFilterMF( m_fields.get_mr_levels_alldirs(FieldType::current_fp, finest_level), fine_lev);
+        ApplyFilterJ( m_fields.get_mr_levels_alldirs(FieldType::current_fp, finest_level), fine_lev);
     }
     SumBoundaryJ(
         m_fields.get_mr_levels_alldirs(FieldType::current_fp, finest_level),
@@ -1180,7 +1180,7 @@ WarpX::OneStep_sub1 (Real cur_time)
         m_fields.get_mr_levels_alldirs(FieldType::current_cp, finest_level, skip_lev0_coarse_patch), fine_lev);
     RestrictRhoFromFineToCoarsePatch(fine_lev);
     if (use_filter) {
-        ApplyFilterMF( m_fields.get_mr_levels_alldirs(FieldType::current_fp, finest_level), fine_lev);
+        ApplyFilterJ( m_fields.get_mr_levels_alldirs(FieldType::current_fp, finest_level), fine_lev);
     }
     SumBoundaryJ( m_fields.get_mr_levels_alldirs(FieldType::current_fp, finest_level), fine_lev, Geom(fine_lev).periodicity());
 
@@ -1388,7 +1388,7 @@ WarpX::PushParticlesandDeposit (
     );
 
     if (!skip_deposition && !implicit_options) {
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RTZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
         // This is called after all particles have deposited their current and charge.
         ApplyInverseVolumeScalingToCurrentDensity(
             m_fields.get(FieldType::current_fp, Direction{0}, lev),

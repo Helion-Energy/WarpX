@@ -106,10 +106,28 @@ void doChargeDepositionShapeN (const GetParticlePosition<PIdx>& GetPosition,
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
             // y direction (azimuthal theta direction in RTZ)
 #if defined(WARPX_DIM_RTZ)
-            // theta = atan2(y, x), wrapped into [thetamin, thetamin + 2*pi); thetamin = xyzmin.y
+            // theta = atan2(y, x) is the principal value in (-pi, pi]. Select
+            // the periodic image nearest the theta mid-plane of this box
+            // (recovered from the FAB bounds; xyzmin is the guard-grown tile
+            // corner): a full-2*pi box keeps the principal value, so seam-cell
+            // particles deposit in the valid region; a theta-split box maps
+            // just-crossed particles to the guard-side image. Wrapping into
+            // [xyzmin.y, xyzmin.y + 2*pi) instead shifted particles in the top
+            // guard-width slice down a full period, losing their charge at the
+            // periodic seam.
             constexpr amrex::Real twopi = amrex::Real(6.2831853071795864769252867665590);
+            // box theta mid-plane in CELL space (subtract the extra plane of a
+            // theta-nodal FAB so nodal and cell-centered fields use the same
+            // image window)
+            const amrex::Real theta_c = xyzmin.y +
+                (static_cast<amrex::Real>(rho_arr.begin[1] - lo.y)
+                 + 0.5_rt*static_cast<amrex::Real>(rho_arr.end[1] - rho_arr.begin[1]
+                                                   - (rho_type[1] == NODE ? 1 : 0)))/dinv.y;
             amrex::Real theta_p = std::atan2(yp, xp);
-            theta_p -= twopi*std::floor((theta_p - xyzmin.y) / twopi);
+            // half-open image selection [theta_c - pi, theta_c + pi): the floor
+            // form keeps the lower endpoint (no round-half ambiguity for
+            // particles exactly half a period from the box center)
+            theta_p -= twopi*std::floor((theta_p - theta_c)/twopi + 0.5_rt);
             const amrex::Real y = (theta_p - xyzmin.y)*dinv.y;
 #else
             const amrex::Real y = (yp - xyzmin.y)*dinv.y;
@@ -390,10 +408,18 @@ void doChargeDepositionSharedShapeN (const GetParticlePosition<PIdx>& GetPositio
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
             // y direction (azimuthal theta direction in RTZ)
 #if defined(WARPX_DIM_RTZ)
-            // theta = atan2(y, x), wrapped into [thetamin, thetamin + 2*pi); thetamin = xyzmin.y
+            // Same nearest-image selection as the non-shared kernel above; buf
+            // is the shared bin tile on GPU (its center) or the FAB on CPU.
+            // The old [xyzmin.y, +2*pi) wrap would push seam particles a full
+            // period down, OUTSIDE the shared bin buffer (OOB write).
             constexpr amrex::Real twopi = amrex::Real(6.2831853071795864769252867665590);
+            const amrex::Real theta_c = xyzmin.y +
+                (static_cast<amrex::Real>(buf.begin[1] - lo.y)
+                 + 0.5_rt*static_cast<amrex::Real>(buf.end[1] - buf.begin[1]
+                                                   - (rho_type[1] == NODE ? 1 : 0)))/dinv.y;
             amrex::Real theta_p = std::atan2(yp, xp);
-            theta_p -= twopi*std::floor((theta_p - xyzmin.y) / twopi);
+            // half-open image selection [theta_c - pi, theta_c + pi)
+            theta_p -= twopi*std::floor((theta_p - theta_c)/twopi + 0.5_rt);
             const amrex::Real y = (theta_p - xyzmin.y)*dinv.y;
 #else
             const amrex::Real y = (yp - xyzmin.y)*dinv.y;

@@ -43,6 +43,12 @@ using namespace amrex::literals;
 FieldPoyntingFlux::FieldPoyntingFlux (const std::string& rd_name)
     : ReducedDiags{rd_name}
 {
+#if defined(WARPX_DIM_RTZ)
+    WARPX_ABORT_WITH_MESSAGE(
+        "The Poynting flux reduced diagnostic is not implemented for RTZ geometry "
+        "(cylindrical face-area weighting is not applied to the surface integrals).");
+#endif
+
     // Resize data array
     // lo and hi is 2
     // space dims is AMREX_SPACEDIM
