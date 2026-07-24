@@ -2212,6 +2212,20 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         Flag to determine handling of vacuum region (where rho < n_floor*q_e). Setting to True will solve the simplified Generalized Ohm's Law dropping the Hall and pressure terms in the vacuum region. See `Holmstrom (2013) <https://arxiv.org/abs/1301.0272v1>`_.
         This flag is useful for suppressing vacuum region fluctuations. A large resistivity value must be used when rho <= rho_floor.
 
+    use_azimuthal_filter: bool, default=False
+        RTZ geometry only. Enforce the azimuthal band limit
+        ``m <= max(1, floor(azimuthal_filter_alpha*pi*r/dr))`` per radial ring
+        on the deposited charge/current densities and on B within the B-field
+        substep integrators (the RKF45 error estimate is band-limited
+        consistently). Removes the near-axis azimuthal-Nyquist whistler
+        stiffness - the real-space analog of RZ azimuthal mode truncation.
+        The projection is exact on retained modes, preserves each ring's
+        average (m=0), and is the identity for r >= NT*dr/(2*pi*alpha).
+
+    azimuthal_filter_alpha: float, default=1.0
+        Scale factor on the azimuthal band limit (``k_theta <= alpha*pi/dr``).
+        Only used when ``use_azimuthal_filter=True``.
+
     Jx/y/z_external_function: str
         Function of space and time specifying external (non-plasma) currents.
 
@@ -2270,6 +2284,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         holmstrom_blend_pow=None,
         holmstrom_blend_width=None,
         holmstrom_switch_mode=None,
+        use_azimuthal_filter=None,
+        azimuthal_filter_alpha=None,
         Jx_external_function=None,
         Jy_external_function=None,
         Jz_external_function=None,
@@ -2306,6 +2322,11 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.holmstrom_blend_pow = holmstrom_blend_pow
         self.holmstrom_blend_width = holmstrom_blend_width
         self.holmstrom_switch_mode = holmstrom_switch_mode
+
+        # Azimuthal band-limit filter (RTZ only): removes the near-axis
+        # theta-Nyquist whistler stiffness by truncating m > m_max(r).
+        self.use_azimuthal_filter = use_azimuthal_filter
+        self.azimuthal_filter_alpha = azimuthal_filter_alpha
 
         self.Jx_external_function = Jx_external_function
         self.Jy_external_function = Jy_external_function
@@ -2360,6 +2381,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         pywarpx.hybridpicmodel.holmstrom_blend_pow = self.holmstrom_blend_pow
         pywarpx.hybridpicmodel.holmstrom_blend_width = self.holmstrom_blend_width
         pywarpx.hybridpicmodel.holmstrom_switch_mode = self.holmstrom_switch_mode
+        pywarpx.hybridpicmodel.use_azimuthal_filter = self.use_azimuthal_filter
+        pywarpx.hybridpicmodel.azimuthal_filter_alpha = self.azimuthal_filter_alpha
         pywarpx.hybridpicmodel.__setattr__(
             "Jx_external_grid_function(x,y,z,t)",
             pywarpx.my_constants.mangle_expression(

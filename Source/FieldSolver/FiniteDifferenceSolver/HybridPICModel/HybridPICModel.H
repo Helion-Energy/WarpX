@@ -15,6 +15,7 @@
 
 #include "Fields.H"
 
+#include "AzimuthalFilter.H"
 #include "ExternalVectorPotential.H"
 #include "Utils/WarpXAlgorithmSelection.H"
 
@@ -206,6 +207,19 @@ public:
     int m_max_substep_attempts = 250;
     /** If true, use the adaptive RKF45 integrator; if false, use fixed-step RK4 */
     bool m_use_rkf45 = false;
+
+    /** If true (RTZ only), enforce the azimuthal band limit
+     * m <= max(1, floor(azimuthal_filter_alpha * pi * r / dr)) per radial
+     * ring on the deposited rho/J and on B within the B-field substep
+     * integrators (projected integrator: the RKF45 error estimate is
+     * band-limited too, so the substep size is set by the retained spectrum).
+     * Removes the near-axis azimuthal-Nyquist whistler stiffness; the
+     * real-space-theta analog of RZ mode truncation. See AzimuthalFilter. */
+    bool m_use_azimuthal_filter = false;
+    /** Scale factor on the band limit (k_theta <= alpha*pi/dr) */
+    amrex::Real m_azimuthal_filter_alpha = 1.0;
+    /** The azimuthal band-limit filter (inert unless enabled and RTZ) */
+    AzimuthalFilter m_azimuthal_filter;
 
     bool m_holmstrom_vacuum_region = false;
     /** If > 0, smooth the Holmstrom vacuum switch with an above-floor power

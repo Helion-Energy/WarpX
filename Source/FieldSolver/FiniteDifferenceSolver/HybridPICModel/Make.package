@@ -1,3 +1,4 @@
+CEXE_sources += AzimuthalFilter.cpp
 CEXE_sources += HybridPICModel.cpp
 CEXE_sources += ExternalVectorPotential.cpp
 

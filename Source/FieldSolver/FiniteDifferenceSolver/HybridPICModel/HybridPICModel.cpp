@@ -52,6 +52,15 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("max_substep_attempts", m_max_substep_attempts);
     pp_hybrid.query("use_rkf45", m_use_rkf45);
 
+    pp_hybrid.query("use_azimuthal_filter", m_use_azimuthal_filter);
+    utils::parser::queryWithParser(pp_hybrid, "azimuthal_filter_alpha", m_azimuthal_filter_alpha);
+#ifndef WARPX_DIM_RTZ
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_use_azimuthal_filter,
+        "hybrid_pic_model.use_azimuthal_filter is only supported for RTZ geometry");
+#endif
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_azimuthal_filter_alpha > 0._rt,
+        "hybrid_pic_model.azimuthal_filter_alpha must be positive");
+
     utils::parser::queryWithParser(pp_hybrid, "holmstrom_vacuum_region", m_holmstrom_vacuum_region);
     utils::parser::queryWithParser(pp_hybrid, "holmstrom_blend_pow", m_holmstrom_blend_pow);
     utils::parser::queryWithParser(pp_hybrid, "holmstrom_blend_width", m_holmstrom_blend_width);
@@ -197,6 +206,10 @@ void HybridPICModel::AllocateLevelMFs (
 
 void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
 {
+    if (m_use_azimuthal_filter) {
+        m_azimuthal_filter.Init(WarpX::GetInstance().Geom(0), m_azimuthal_filter_alpha);
+    }
+
     m_resistivity_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(m_eta_expression, {"rho","J","t"}));
     m_eta = m_resistivity_parser->compile<3>();
@@ -456,6 +469,16 @@ void HybridPICModel::FillElectronPressureMF (
     const auto elec_temp = m_elec_temp;
     const auto gamma = m_gamma;
 
+    // The azimuthal band-limit filter conserves each ring's average exactly
+    // but is not pointwise positivity-preserving (Gibbs undershoot near
+    // sharp theta profiles): a sub-floor cell can go slightly negative,
+    // and pow(rho, gamma) of a negative rho is NaN. Floor the pressure
+    // input at the density floor, mirroring the Hall-term floor in the
+    // E-solve. Only active with the filter so unfiltered runs are
+    // bit-identical.
+    const bool floor_pe_input = m_use_azimuthal_filter;
+    const Real rho_floor = m_n_floor*PhysConst::q_e;
+
     // Loop through the grids, and over the tiles within each grid
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -470,8 +493,10 @@ void HybridPICModel::FillElectronPressureMF (
         const Box& tilebox  = mfi.tilebox();
 
         ParallelFor(tilebox, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            const Real rho_val = floor_pe_input
+                ? amrex::max(rho(i, j, k), rho_floor) : rho(i, j, k);
             Pe(i, j, k) = ElectronPressure::get_pressure(
-                n0_ref, elec_temp, gamma, rho(i, j, k)
+                n0_ref, elec_temp, gamma, rho_val
             );
         });
     }
@@ -671,6 +696,14 @@ void HybridPICModel::BfieldEvolveRK (
                 Bz(i, j, k) = Bz_old(i, j, k) + Kz(i, j, k, 0) / 3.0_rt;
             }
         );
+    }
+
+    // Azimuthal band-limit projection (RTZ): project the assembled RK4
+    // result so B never carries m > m_max(r) content into the next substep.
+    if (m_azimuthal_filter.Enabled()) {
+        for (int ii = 0; ii < 3; ii++) {
+            m_azimuthal_filter.ApplyFilter(*Bfield[lev][ii]);
+        }
     }
 }
 
@@ -1054,6 +1087,21 @@ void HybridPICModel::BfieldEvolveRKF45 (
                     }
                 }
             );
+        }
+
+        // ---- Azimuthal band-limit projection (RTZ) ----
+        // Project the candidate B4 AND the error estimate before the norm:
+        // the substep controller then never sees m > m_max(r) content, so
+        // dt_sub is set by the retained spectrum (whose stiffest whistler is
+        // the radial-Nyquist rate) instead of the near-axis theta-Nyquist
+        // mode. Filtering only at acceptance would not help - the error norm
+        // would still be dominated by the stiff mode and collapse dt_sub.
+        if (m_azimuthal_filter.Enabled()) {
+            for (int ii = 0; ii < 3; ii++) {
+                m_azimuthal_filter.ApplyFilter(*Bfield[lev][ii]);
+                // err_scratch has no ghost cells
+                m_azimuthal_filter.ApplyFilter(err_scratch[ii], 0, 1, false);
+            }
         }
 
         // ---- Error norm and adaptive step control ----

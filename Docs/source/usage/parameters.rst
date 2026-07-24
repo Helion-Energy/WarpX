@@ -3760,6 +3760,20 @@ Maxwell solver: kinetic-fluid hybrid
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the vacuum region handling of the generalized Ohm's Law to suppress vacuum fluctuations. :cite:t:`param-holmstrom2013handlingvacuumregionshybrid`.
 
+.. pp:param:: hybrid_pic_model.use_azimuthal_filter
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    RTZ geometry only. If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, enforce the azimuthal band limit :math:`m \le \max(1, \lfloor \alpha \pi r / \Delta r \rfloor)` per radial ring on the deposited charge/current densities and on the magnetic field within the B-field substep integrators (the RKF45 error estimate is band-limited consistently, so the substep size is set by the retained spectrum). This removes the near-axis azimuthal-Nyquist whistler stiffness of the Ohm solver -- the real-space analog of the azimuthal mode truncation of RZ spectral solvers. The projection is exact on retained modes, preserves each ring average (:math:`m=0`) exactly, and is the identity for :math:`r \ge N_\theta \Delta r/(2\pi\alpha)`.
+
+.. pp:param:: hybrid_pic_model.azimuthal_filter_alpha
+    :type: ``float``
+    :default: ``1.0``
+    :optional:
+
+    Scale factor :math:`\alpha` on the azimuthal band limit (:math:`k_\theta \le \alpha\pi/\Delta r`). Only used when :pp:param:`hybrid_pic_model.use_azimuthal_filter` is ``true``.
+
 .. pp:param:: hybrid_pic_model.add_external_fields
     :type: ``bool``
     :default: ``false``

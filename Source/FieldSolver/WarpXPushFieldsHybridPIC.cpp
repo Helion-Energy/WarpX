@@ -309,6 +309,21 @@ void WarpX::HybridPICDepositRhoAndJ ()
             );
         }
     }
+
+    // Azimuthal band-limit projection (RTZ): remove near-axis theta-Nyquist
+    // deposition noise from the Ohm's-law sources at the source. The filter
+    // preserves each ring's average (m=0) exactly, so deposited charge and
+    // ring-integrated current are unchanged.
+    if (m_hybrid_pic_model->m_azimuthal_filter.Enabled()) {
+        auto& az_filter = m_hybrid_pic_model->m_azimuthal_filter;
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            az_filter.ApplyFilter(*m_fields.get(FieldType::rho_fp, lev));
+            for (int idim = 0; idim < 3; ++idim) {
+                az_filter.ApplyFilter(
+                    *m_fields.get(FieldType::current_fp, Direction{idim}, lev));
+            }
+        }
+    }
 }
 
 void WarpX::HybridPICInitializeRhoJandB ()
