@@ -838,8 +838,10 @@ WarpX::ReadParameters ()
         }
 
         // Filter currently not working with FDTD solver in non-Cartesian geometry: turn OFF by default
-        // (see https://github.com/BLAST-WarpX/warpx/issues/1943)
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+        // (see https://github.com/BLAST-WarpX/warpx/issues/1943). For RTZ the bilinear
+        // filter's empty below-axis guard scales the axis nodes by 3/4 per pass and the
+        // index-space stencil ignores the radial metric.
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RTZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
         if (WarpX::electromagnetic_solver_id != ElectromagneticSolverAlgo::PSATD) { WarpX::use_filter = false; }
 #endif
 
