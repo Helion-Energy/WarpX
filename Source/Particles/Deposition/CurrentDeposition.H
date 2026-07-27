@@ -155,10 +155,22 @@ void doDepositionShapeNKernel([[maybe_unused]] const amrex::ParticleReal xp,
     // y direction (azimuthal theta direction in RTZ)
     // Keep these double to avoid bug in single precision
 #if defined(WARPX_DIM_RTZ)
-    // theta of the mid-point, wrapped into [thetamin, thetamin + 2*pi); thetamin = xyzmin.y
+    // theta of the mid-point: atan2 gives the principal value in (-pi, pi];
+    // select the periodic image nearest the theta mid-plane of this box
+    // (recovered from the FAB bounds; xyzmin is the guard-grown tile corner).
+    // See the matching comment in ChargeDeposition.H: wrapping into
+    // [xyzmin.y, xyzmin.y + 2*pi) lost the top guard-width slice's current at
+    // the periodic seam.
     constexpr double twopi = 6.2831853071795864769252867665590;
+    // box theta mid-plane in CELL space (Jy=Jt is theta-cell-centered on the
+    // Yee grid; the correction keeps this exact for other staggerings)
+    const double theta_c = static_cast<double>(xyzmin.y) +
+        (static_cast<double>(jy_arr.begin[1] - lo.y)
+         + 0.5*static_cast<double>(jy_arr.end[1] - jy_arr.begin[1]
+                                   - (jy_type[1] == NODE ? 1 : 0)))/static_cast<double>(dinv.y);
     double theta_mid = std::atan2(ypmid, xpmid);
-    theta_mid -= twopi*std::floor((theta_mid - xyzmin.y) / twopi);
+    // half-open image selection [theta_c - pi, theta_c + pi)
+    theta_mid -= twopi*std::floor((theta_mid - theta_c)/twopi + 0.5);
     const double ymid = (theta_mid - xyzmin.y)*dinv.y;
 #else
     const double ymid = ((yp - xyzmin.y) + relative_time*vy)*dinv.y;
