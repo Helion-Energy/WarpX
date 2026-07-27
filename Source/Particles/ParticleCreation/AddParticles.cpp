@@ -884,9 +884,19 @@ PhysicalParticleContainer::AddPlasma (PlasmaInjector& plasma_injector, int lev, 
                     for (const auto& x : xlim) {
                         for (const auto& y : ylim) {
                             for (const auto& z : zlim) {
+#if defined(WARPX_DIM_RTZ)
+                                // grid coords are (r, theta, z): insideBounds takes
+                                // them as-is, but the density parser takes Cartesian
+                                // positions (matching the creation loop below)
+                                if (inj_pos->insideBounds(x,y,z) and
+                                    (inj_rho->getDensity(x*std::cos(y),x*std::sin(y),z) > 0) ) {
+                                    return 1;
+                                }
+#else
                                 if (inj_pos->insideBounds(x,y,z) and (inj_rho->getDensity(x,y,z) > 0) ) {
                                     return 1;
                                 }
+#endif
                             }
                         }
                     }

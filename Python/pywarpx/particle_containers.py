@@ -355,6 +355,13 @@ class ParticleContainerWrapper(object):
         List of arrays
             The requested particle x position
         """
+        if libwarpx.geometry_dim == "rtz":
+            xp, _ = load_cupy()
+            r = self.get_particle_real_arrays("r", level, copy_to_host=copy_to_host)
+            theta = self.get_particle_real_arrays(
+                "theta", level, copy_to_host=copy_to_host
+            )
+            return [rr * xp.cos(tt) for rr, tt in zip(r, theta)]
         return self.get_particle_real_arrays("x", level, copy_to_host=copy_to_host)
 
     xp = property(get_particle_x)
@@ -380,6 +387,13 @@ class ParticleContainerWrapper(object):
         List of arrays
             The requested particle y position
         """
+        if libwarpx.geometry_dim == "rtz":
+            xp, _ = load_cupy()
+            r = self.get_particle_real_arrays("r", level, copy_to_host=copy_to_host)
+            theta = self.get_particle_real_arrays(
+                "theta", level, copy_to_host=copy_to_host
+            )
+            return [rr * xp.sin(tt) for rr, tt in zip(r, theta)]
         return self.get_particle_real_arrays("y", level, copy_to_host=copy_to_host)
 
     yp = property(get_particle_y)
@@ -409,6 +423,8 @@ class ParticleContainerWrapper(object):
 
         if libwarpx.geometry_dim == "rz":
             return self.get_particle_x(level, copy_to_host)
+        elif libwarpx.geometry_dim == "rtz":
+            return self.get_particle_real_arrays("r", level, copy_to_host=copy_to_host)
         elif libwarpx.geometry_dim == "3d":
             x = self.get_particle_x(level, copy_to_host)
             y = self.get_particle_y(level, copy_to_host)
@@ -443,7 +459,7 @@ class ParticleContainerWrapper(object):
         """
         xp, cupy_status = load_cupy()
 
-        if libwarpx.geometry_dim == "rz":
+        if libwarpx.geometry_dim in ("rz", "rtz"):
             return self.get_particle_real_arrays("theta", level, copy_to_host)
         elif libwarpx.geometry_dim == "3d":
             x = self.get_particle_x(level, copy_to_host)

@@ -96,17 +96,19 @@ PlasmaInjector::PlasmaInjector (int ispecies, const std::string& name,
 
 #   if AMREX_SPACEDIM > 1
     if( geom.isPeriodic(1) ) {
-#       ifndef WARPX_DIM_3D
+#       if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_RTZ)
         zmin = geom.ProbLo(1);
         zmax = geom.ProbHi(1);
 #       else
+        // 3D: y bounds; RTZ: dim 1 is theta, checked against ymin/ymax in
+        // insideBounds (the injection checks pass (r, theta, z) for RTZ)
         ymin = geom.ProbLo(1);
         ymax = geom.ProbHi(1);
 #       endif
     }
 #       endif
 
-#   ifdef WARPX_DIM_3D
+#   if defined(WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     if( geom.isPeriodic(2) ) {
         zmin = geom.ProbLo(2);
         zmax = geom.ProbHi(2);

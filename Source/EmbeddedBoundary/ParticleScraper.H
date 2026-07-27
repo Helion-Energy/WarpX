@@ -193,12 +193,26 @@ scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& dista
                     amrex::Real Wc[AMREX_SPACEDIM][2]; // Cell-centered weights
                     ablastr::particles::compute_weights<amrex::IndexType::CELL>(
                         xp, yp, zp, plo, dxi, ic, jc, kc, Wc);
+#if defined(WARPX_DIM_RTZ)
+                    // normal comes back in cylindrical (r, theta, z) components;
+                    // the particle radius supplies the theta arc-length metric
+                    amrex::RealVect normal = DistanceToEB::interp_normal(
+                        i, j, k, W, ic, jc, kc, Wc, phi, dxi,
+                        std::sqrt(xp*xp + yp*yp));
+#else
                     amrex::RealVect normal = DistanceToEB::interp_normal(i, j, k, W, ic, jc, kc, Wc, phi, dxi);
+#endif
                     DistanceToEB::normalize(normal);
                     amrex::RealVect pos;
 #if (defined WARPX_DIM_3D)
                     pos[0] = xp;
                     pos[1] = yp;
+                    pos[2] = zp;
+#elif (defined WARPX_DIM_RTZ)
+                    // grid coordinates (r, theta, z), matching the normal's
+                    // cylindrical components; getPosition returned Cartesian
+                    pos[0] = std::sqrt(xp*xp + yp*yp);
+                    pos[1] = std::atan2(yp, xp);
                     pos[2] = zp;
 #elif (defined WARPX_DIM_XZ)
                     pos[0] = xp;

@@ -43,11 +43,15 @@ AMREX_GPU_HOST_DEVICE AMREX_INLINE
 amrex::RealVect interp_normal (int i, int j, int k, const amrex::Real W[AMREX_SPACEDIM][2],
                                int ic, int jc, int kc, const amrex::Real Wc[AMREX_SPACEDIM][2],
                                amrex::Array4<const amrex::Real> const& phi,
-                               amrex::GpuArray<amrex::Real,AMREX_SPACEDIM> const& dxi) noexcept
+                               amrex::GpuArray<amrex::Real,AMREX_SPACEDIM> const& dxi,
+                               amrex::Real rp = 1.0) noexcept
 {
     using namespace amrex::literals;
+    // rp: particle radius, used only for the RTZ theta metric (1/r); the
+    // default leaves Cartesian/RZ callers unchanged.
+    amrex::ignore_unused(rp);
 
-#if (defined WARPX_DIM_3D)
+#if (defined WARPX_DIM_3D) || defined(WARPX_DIM_RTZ)
     amrex::RealVect normal{0.0, 0.0, 0.0};
     for (int iic = 0; iic < 2; ++iic) {
         for (int kk = 0; kk < 2; ++kk) {
@@ -91,6 +95,13 @@ amrex::RealVect interp_normal (int i, int j, int k, const amrex::Real W[AMREX_SP
             }
         }
     }
+#if defined(WARPX_DIM_RTZ)
+    // theta is an angle: convert the coordinate-space theta gradient to a
+    // physical (arc-length) gradient. The metric is capped at the half-cell
+    // radius so the on-axis limit stays finite (for smooth walls the theta
+    // gradient vanishes there anyway).
+    normal[1] /= amrex::max(rp, 0.5_rt/dxi[0]);
+#endif
 
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
     amrex::RealVect normal{0.0, 0.0};

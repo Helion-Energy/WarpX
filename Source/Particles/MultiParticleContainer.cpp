@@ -602,7 +602,7 @@ MultiParticleContainer::DepositCurrent (
         pc->DepositCurrent(J, dt, relative_time);
     }
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RTZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     for (int lev = 0; lev < J.size(); ++lev)
     {
         WarpX::GetInstance().ApplyInverseVolumeScalingToCurrentDensity(
@@ -640,7 +640,7 @@ MultiParticleContainer::DepositCharge (
     // Push the particles back in time
     if (relative_time != 0.) { PushX(-relative_time); }
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RTZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     for (int lev = 0; lev < rho.size(); ++lev)
     {
         WarpX::GetInstance().ApplyInverseVolumeScalingToChargeDensity(rho[lev], lev);
