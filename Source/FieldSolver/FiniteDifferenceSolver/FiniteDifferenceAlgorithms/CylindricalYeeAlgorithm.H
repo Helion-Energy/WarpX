@@ -273,6 +273,29 @@ struct CylindricalYeeAlgorithm {
     }
 
     /**
+     * Perform second derivative along theta on a field `F`, at the field's own
+     * staggering (central difference in the theta index). Returns the *pure*
+     * azimuthal finite difference (1/dtheta^2) * d2F; the `1/r^2` metric factor
+     * is applied by the caller (see UpwardDtheta). Only meaningful for RTZ. */
+    template< typename T_Field>
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    static amrex::Real Dtt (
+        T_Field const& F,
+        amrex::Real const * const coefs_theta, int const /*n_coefs_theta*/,
+        int const i, int const j, int const k, int const ncomp=0 ) {
+
+        using namespace amrex;
+
+#if defined(WARPX_DIM_RTZ)
+        Real const inv_dtheta2 = coefs_theta[0]*coefs_theta[0];
+        return inv_dtheta2*( F(i,j-1,k,ncomp) - 2._rt*F(i,j,k,ncomp) + F(i,j+1,k,ncomp) );
+#else
+        amrex::ignore_unused(F, coefs_theta, i, j, k, ncomp);
+        return 0._rt;
+#endif
+    }
+
+    /**
      * Perform second derivative along r on a field `F`*/
     template< typename T_Field>
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE

@@ -562,6 +562,71 @@ void FiniteDifferenceSolver::HybridPICSolveE (
 }
 
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RTZ)
+namespace
+{
+    /** Nodal decision density for the holmstrom vacuum switch / blend weight
+     * (hybrid_pic_model.holmstrom_switch_mode = "node"): the MINIMUM of the
+     * nodal rho at the endpoints of the staggered E component's edge
+     * (vacuum-favoring: the Hall branch runs only where every endpoint is
+     * above the floor). Ported from the conformal-EB branch. */
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    amrex::Real NodalSwitchRho (
+        amrex::Array4<amrex::Real const> const& rho,
+        amrex::GpuArray<int,3> const& stag,
+        int i, int j, int k)
+    {
+        const int ni = (stag[0] == 0) ? 2 : 1;
+        const int nj = (stag[1] == 0) ? 2 : 1;
+        const int nk = (stag[2] == 0) ? 2 : 1;
+        amrex::Real r = rho(i, j, k);
+        for (int kk = 0; kk < nk; ++kk) {
+        for (int jj = 0; jj < nj; ++jj) {
+        for (int ii = 0; ii < ni; ++ii) {
+            r = amrex::min(r, rho(i+ii, j+jj, k+kk));
+        }}}
+        return r;
+    }
+
+    /** Cell decision density for holmstrom_switch_mode = "cell": the MINIMUM
+     * over the component's adjacent cells of the cell-centered (node-averaged)
+     * rho — one piecewise-constant-per-cell decision field, no per-component
+     * half-cell decision offsets at the plasma/vacuum seam; the min is
+     * vacuum-favoring like the "node" mode. Ported from the conformal-EB
+     * branch. */
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    amrex::Real CellSwitchRho (
+        amrex::Array4<amrex::Real const> const& rho,
+        amrex::GpuArray<int,3> const& stag,
+        int i, int j, int k)
+    {
+        using namespace amrex::literals;
+        // dummy dimensions (beyond AMREX_SPACEDIM) keep no offset and no
+        // averaging span; the real dimensions are overwritten below
+        int off_lo[3] = {0, 0, 0};
+        int span[3] = {1, 1, 1};
+        int const ic[3] = {i, j, k};
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            off_lo[d] = (stag[d] == 1) ? -1 : 0;
+            span[d] = 2;
+        }
+        amrex::Real rmin_dec = std::numeric_limits<amrex::Real>::max();
+        for (int ok = off_lo[2]; ok <= 0; ++ok) {
+        for (int oj = off_lo[1]; oj <= 0; ++oj) {
+        for (int oi = off_lo[0]; oi <= 0; ++oi) {
+            amrex::Real sum = 0.0_rt;
+            int cnt = 0;
+            for (int kk = 0; kk < span[2]; ++kk) {
+            for (int jj = 0; jj < span[1]; ++jj) {
+            for (int ii = 0; ii < span[0]; ++ii) {
+                sum += rho(ic[0]+oi+ii, ic[1]+oj+jj, ic[2]+ok+kk);
+                cnt += 1;
+            }}}
+            rmin_dec = amrex::min(rmin_dec, sum/static_cast<amrex::Real>(cnt));
+        }}}
+        return rmin_dec;
+    }
+}
+
 template<typename T_Algo>
 void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     ablastr::fields::VectorField const& Efield,
@@ -596,6 +661,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     const bool include_external_fields = hybrid_model->m_add_external_fields;
 
     const bool holmstrom_vacuum_region = hybrid_model->m_holmstrom_vacuum_region;
+    // Smooth above-floor blend + decision-density sampling mode for the
+    // Holmstrom vacuum switch (ported from the conformal-EB branch)
+    const amrex::Real holmstrom_blend_pow = hybrid_model->m_holmstrom_blend_pow;
+    const amrex::Real holmstrom_blend_width = hybrid_model->m_holmstrom_blend_width;
+    const bool holmstrom_blend = holmstrom_vacuum_region && (holmstrom_blend_pow > 0._rt)
+        && (holmstrom_blend_width > 1._rt);
+    const amrex::Real inv_blend_range = 1._rt/((holmstrom_blend_width - 1._rt)*rho_floor);
+    const int switch_mode = hybrid_model->m_holmstrom_switch_mode;
 
     auto & warpx = WarpX::GetInstance();
     const amrex::Real t_new = warpx.gett_new(lev);
@@ -786,9 +859,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Er_stag, coarsen, i, j, k, 0);
+                // Decision density for the vacuum switch/blend (physics keeps rho_val)
+                const Real rho_dec =
+                    (switch_mode == 1) ? NodalSwitchRho(rho, Er_stag, i, j, k) :
+                    (switch_mode == 2) ? CellSwitchRho(rho, Er_stag, i, j, k) :
+                    rho_val;
 
-                if (rho_val < rho_floor && holmstrom_vacuum_region) {
-                    Er(i, j, k) = 0._rt;
+                if (rho_dec < rho_floor && holmstrom_vacuum_region) {
+                    Er(i, j, k) = include_external_fields ? Er_ext(i, j, k) : 0._rt;
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
                     // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
@@ -803,6 +881,19 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto rho_val_limited = std::max(rho_val, rho_floor);
 
                     Er(i, j, k) = (enE_r - grad_Pe) / rho_val_limited;
+
+                    if (holmstrom_blend) {
+                        // smooth above-floor transition: ramp the Hall/pressure
+                        // content in over [rho_floor, width*rho_floor] and blend
+                        // from the vacuum value (E_ext or 0); the resistive
+                        // terms added below stay fully on.
+                        const Real s = (rho_dec - rho_floor) * inv_blend_range;
+                        if (s < 1._rt) {
+                            const Real w = std::pow(std::max(s, 0._rt), holmstrom_blend_pow);
+                            const Real vac = include_external_fields ? Er_ext(i, j, k) : 0._rt;
+                            Er(i, j, k) = w * Er(i, j, k) + (1._rt - w) * vac;
+                        }
+                    }
                 }
 
                 // Add resistivity only if E field value is used to update B
@@ -833,12 +924,31 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         const Real r = rmin + (i + 0.5_rt)*dr;
                         auto nabla2Jr = T_Algo::Dr_rDr_over_r(Jr, r, dr, coefs_r, n_coefs_r, i, j, k, 0)
                             + T_Algo::Dzz(Jr, coefs_z, n_coefs_z, i, j, k, 0) - Jr(i, j, k)/(r*r);
+#if defined(WARPX_DIM_RTZ)
+                        // vector-Laplacian theta terms:
+                        // (1/r^2) d2Jr/dtheta2 - (2/r^2) dJtheta/dtheta.
+                        // Jtheta is theta-cell-centered, so DownwardDtheta lands on the
+                        // theta-nodal Er staggering; Jtheta is r-nodal, so average the two
+                        // radial neighbors onto Er's r-cell-centered point.
+                        const Real dJt_dt = 0.5_rt*(
+                              T_Algo::DownwardDtheta(Jtheta, coefs_theta, n_coefs_theta, i, j, k, 0)
+                            + T_Algo::DownwardDtheta(Jtheta, coefs_theta, n_coefs_theta, i+1, j, k, 0));
+                        // Cap the azimuthal metric at the radial grid scale
+                        // (arc length >= dr): the hyper-resistive damping targets
+                        // grid-scale structure, and the explicit substepping cannot
+                        // resolve the 1/r^2 stiffness of the thin near-axis cells.
+                        const Real r_t = amrex::max(r, dr*coefs_theta[0]);
+                        nabla2Jr += (T_Algo::Dtt(Jr, coefs_theta, n_coefs_theta, i, j, k, 0)
+                                     - 2._rt*dJt_dt)/(r_t*r_t);
+#endif
 
                         Er(i, j, k) -= eta_h(rho_val, btot_val) * nabla2Jr;
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                // With the Holmstrom vacuum treatment the vacuum branch stores
+                // E_ext, so the subtraction is unconditional (EB-branch convention)
+                if (include_external_fields && (holmstrom_vacuum_region || rho_val >= rho_floor)) {
                     Er(i, j, k) -= Er_ext(i, j, k);
                 }
             },
@@ -859,9 +969,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Etheta_stag, coarsen, i, j, k, 0);
+                // Decision density for the vacuum switch/blend (physics keeps rho_val)
+                const Real rho_dec =
+                    (switch_mode == 1) ? NodalSwitchRho(rho, Etheta_stag, i, j, k) :
+                    (switch_mode == 2) ? CellSwitchRho(rho, Etheta_stag, i, j, k) :
+                    rho_val;
 
-                if (rho_val < rho_floor && holmstrom_vacuum_region) {
-                    Etheta(i, j, k) = 0._rt;
+                if (rho_dec < rho_floor && holmstrom_vacuum_region) {
+                    Etheta(i, j, k) = include_external_fields ? Etheta_ext(i, j, k) : 0._rt;
                 } else {
                     // Get the gradient of the electron pressure
 #if defined(WARPX_DIM_RTZ)
@@ -882,6 +997,16 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto rho_val_limited = std::max(rho_val, rho_floor);
 
                     Etheta(i, j, k) = (enE_t - grad_Pe) / rho_val_limited;
+
+                    if (holmstrom_blend) {
+                        // smooth above-floor transition (see Er)
+                        const Real s = (rho_dec - rho_floor) * inv_blend_range;
+                        if (s < 1._rt) {
+                            const Real w = std::pow(std::max(s, 0._rt), holmstrom_blend_pow);
+                            const Real vac = include_external_fields ? Etheta_ext(i, j, k) : 0._rt;
+                            Etheta(i, j, k) = w * Etheta(i, j, k) + (1._rt - w) * vac;
+                        }
+                    }
                 }
 
                 // Add resistivity only if E field value is used to update B
@@ -914,13 +1039,27 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         if (r > 0.0_rt) {
                             nabla2Jtheta = T_Algo::Dr_rDr_over_r(Jtheta, r, dr, coefs_r, n_coefs_r, i, j, k, 0)
                                 + T_Algo::Dzz(Jtheta, coefs_z, n_coefs_z, i, j, k, 0) - Jtheta(i, j, k)/(r*r);
+#if defined(WARPX_DIM_RTZ)
+                            // vector-Laplacian theta terms:
+                            // (1/r^2) d2Jtheta/dtheta2 + (2/r^2) dJr/dtheta.
+                            // Jr is theta-nodal, so UpwardDtheta lands on the theta-cell-centered
+                            // Etheta staggering; Jr is r-cell-centered, so average the two radial
+                            // neighbors onto Etheta's r-nodal point (r > 0 here, so i >= 1).
+                            const Real dJr_dt = 0.5_rt*(
+                                  T_Algo::UpwardDtheta(Jr, coefs_theta, n_coefs_theta, i-1, j, k, 0)
+                                + T_Algo::UpwardDtheta(Jr, coefs_theta, n_coefs_theta, i, j, k, 0));
+                            // azimuthal metric capped at the radial grid scale (see Er)
+                            const Real r_t = amrex::max(r, dr*coefs_theta[0]);
+                            nabla2Jtheta += (T_Algo::Dtt(Jtheta, coefs_theta, n_coefs_theta, i, j, k, 0)
+                                             + 2._rt*dJr_dt)/(r_t*r_t);
+#endif
                         }
 
                         Etheta(i, j, k) -= eta_h(rho_val, btot_val) * nabla2Jtheta;
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_external_fields && (holmstrom_vacuum_region || rho_val >= rho_floor)) {
                     Etheta(i, j, k) -= Etheta_ext(i, j, k);
                 }
             },
@@ -933,9 +1072,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, k, 0);
+                // Decision density for the vacuum switch/blend (physics keeps rho_val)
+                const Real rho_dec =
+                    (switch_mode == 1) ? NodalSwitchRho(rho, Ez_stag, i, j, k) :
+                    (switch_mode == 2) ? CellSwitchRho(rho, Ez_stag, i, j, k) :
+                    rho_val;
 
-                if (rho_val < rho_floor && holmstrom_vacuum_region) {
-                    Ez(i, j, k) = 0._rt;
+                if (rho_dec < rho_floor && holmstrom_vacuum_region) {
+                    Ez(i, j, k) = include_external_fields ? Ez_ext(i, j, k) : 0._rt;
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
                     // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
@@ -950,6 +1094,16 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto rho_val_limited = std::max(rho_val, rho_floor);
 
                     Ez(i, j, k) = (enE_z - grad_Pe) / rho_val_limited;
+
+                    if (holmstrom_blend) {
+                        // smooth above-floor transition (see Er)
+                        const Real s = (rho_dec - rho_floor) * inv_blend_range;
+                        if (s < 1._rt) {
+                            const Real w = std::pow(std::max(s, 0._rt), holmstrom_blend_pow);
+                            const Real vac = include_external_fields ? Ez_ext(i, j, k) : 0._rt;
+                            Ez(i, j, k) = w * Ez(i, j, k) + (1._rt - w) * vac;
+                        }
+                    }
                 }
 
                 // Add resistivity only if E field value is used to update B
@@ -982,6 +1136,13 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         auto nabla2Jz = T_Algo::Dzz(Jz, coefs_z, n_coefs_z, i, j, k, 0);
                         if (r > 0.5_rt*dr) {
                             nabla2Jz += T_Algo::Dr_rDr_over_r(Jz, r, dr, coefs_r, n_coefs_r, i, j, k, 0);
+#if defined(WARPX_DIM_RTZ)
+                            // (1/r^2) d2Jz/dtheta2; dropped on axis (the axis value is
+                            // theta-independent to the order of the axis treatment);
+                            // azimuthal metric capped at the radial grid scale (see Er)
+                            const Real r_t = amrex::max(r, dr*coefs_theta[0]);
+                            nabla2Jz += T_Algo::Dtt(Jz, coefs_theta, n_coefs_theta, i, j, k, 0)/(r_t*r_t);
+#endif
                         } else {
                             // Special handling of the hyper-resistivity term on axis to avoid division by zero
                             // and ensure that Jz remains well-behaved on axis for m=0 mode
@@ -993,7 +1154,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_external_fields && (holmstrom_vacuum_region || rho_val >= rho_floor)) {
                     Ez(i, j, k) -= Ez_ext(i, j, k);
                 }
             }

@@ -208,6 +208,20 @@ public:
     bool m_use_rkf45 = false;
 
     bool m_holmstrom_vacuum_region = false;
+    /** If > 0, smooth the Holmstrom vacuum switch with an above-floor power
+     * window over rho in [rho_floor, holmstrom_blend_width*rho_floor]:
+     * the Hall/pressure content of the Ohm's-law E is weighted by
+     * w = ((rho-rho_floor)/((width-1)*rho_floor))**pow and blended from the
+     * vacuum value (ported from the conformal-EB branch). */
+    amrex::Real m_holmstrom_blend_pow = 0.;
+    /** Upper edge of the blend window in units of the density floor */
+    amrex::Real m_holmstrom_blend_width = 2.;
+    /** Sampling mode of the decision density for the Holmstrom vacuum
+     * switch/blend: 0 = edge (per-component staggered average, historical),
+     * 1 = node (min of the nodal rho at the edge endpoints),
+     * 2 = cell (rho averaged per cell decides for all components of the cell,
+     * removing per-component half-cell decision offsets at the seam). */
+    int m_holmstrom_switch_mode = 0;
 
     /** Electron temperature in eV */
     amrex::Real m_elec_temp;

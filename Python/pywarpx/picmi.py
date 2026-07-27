@@ -2267,6 +2267,9 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         substep_max_growth=None,
         max_substep_attempts=None,
         holmstrom_vacuum_region=None,
+        holmstrom_blend_pow=None,
+        holmstrom_blend_width=None,
+        holmstrom_switch_mode=None,
         Jx_external_function=None,
         Jy_external_function=None,
         Jz_external_function=None,
@@ -2293,6 +2296,16 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.max_substep_attempts = max_substep_attempts
 
         self.holmstrom_vacuum_region = holmstrom_vacuum_region
+        # Smooth above-floor blend window and decision-density sampling mode
+        # for the Holmstrom vacuum switch (ported from the conformal-EB
+        # branch): blend_pow > 0 ramps the Hall/pressure content in over
+        # rho in [rho_floor, blend_width*rho_floor]; switch_mode is one of
+        # 'edge' (per-component staggered average, historical), 'node'
+        # (endpoint-min), 'cell' (per-cell decision, no per-component
+        # half-cell offsets at the plasma/vacuum seam).
+        self.holmstrom_blend_pow = holmstrom_blend_pow
+        self.holmstrom_blend_width = holmstrom_blend_width
+        self.holmstrom_switch_mode = holmstrom_switch_mode
 
         self.Jx_external_function = Jx_external_function
         self.Jy_external_function = Jy_external_function
@@ -2344,6 +2357,9 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         pywarpx.hybridpicmodel.substep_max_growth = self.substep_max_growth
         pywarpx.hybridpicmodel.max_substep_attempts = self.max_substep_attempts
         pywarpx.hybridpicmodel.holmstrom_vacuum_region = self.holmstrom_vacuum_region
+        pywarpx.hybridpicmodel.holmstrom_blend_pow = self.holmstrom_blend_pow
+        pywarpx.hybridpicmodel.holmstrom_blend_width = self.holmstrom_blend_width
+        pywarpx.hybridpicmodel.holmstrom_switch_mode = self.holmstrom_switch_mode
         pywarpx.hybridpicmodel.__setattr__(
             "Jx_external_grid_function(x,y,z,t)",
             pywarpx.my_constants.mangle_expression(
