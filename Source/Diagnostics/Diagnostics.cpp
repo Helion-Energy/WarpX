@@ -71,7 +71,7 @@ Diagnostics::BaseReadParameters ()
     // Query list of grid fields to write to output
     const bool varnames_specified = pp_diag_name.queryarr("fields_to_plot", m_varnames_fields);
     if (!varnames_specified){
-        if( dims == "RZ" || dims == "RCYLINDER") {
+        if( dims == "RZ" || dims == "RCYLINDER" || dims == "RTZ") {
             m_varnames_fields = {"Er", "Et", "Ez", "Br", "Bt", "Bz", "jr", "jt", "jz"};
         }
         else if( dims == "RSPHERE") {

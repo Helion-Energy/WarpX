@@ -31,8 +31,8 @@ class CopyPreBuild(build):
         # call superclass
         build.run(self)
 
-        # matches: warpx_pybind_(1d|2d|rz|3d). ... .(so|pyd)
-        re_libprefix = re.compile(r"warpx_pybind_..\..*\.(?:so|pyd)")
+        # matches: warpx_pybind_(1d|2d|rz|3d|rtz|rcylinder|rsphere). ... .(so|pyd)
+        re_libprefix = re.compile(r"warpx_pybind_[a-z0-9]+\..*\.(?:so|pyd)")
         libs_found = []
         for lib_name in os.listdir(PYWARPX_LIB_DIR):
             if re_libprefix.match(lib_name):
