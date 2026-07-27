@@ -188,7 +188,11 @@ class PlasmaCylinderCompression(object):
         # A = 0.25*dB*(-y, x, 0) -> B = curl(A) = (0, 0, 0.5*dB) uniform Bz.
         A_ext = {
             "uniform_analytical": {
-                "Ax_external_function": f"-0.25*y*{self.dB}",
+                # In RTZ the parser's (x, y) are the GRID coordinates (r, theta):
+                # the Cartesian-form Ar = -0.25*y*dB would be a theta-dependent,
+                # seam-discontinuous A_r (harmless only while the curl-A theta
+                # terms were missing). The uniform-Bz drive needs only A_theta.
+                "Ax_external_function": "0",
                 "Ay_external_function": f"0.25*x*{self.dB}",
                 "Az_external_function": "0",
                 "A_time_external_function": "1/(1+exp(5*(1-(t-t0_ramp)*sqrt(2)/tau_ramp)))",
