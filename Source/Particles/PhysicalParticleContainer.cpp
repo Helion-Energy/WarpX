@@ -353,13 +353,10 @@ PhysicalParticleContainer::PhysicalParticleContainer (AmrCore* amr_core, int isp
     // same distribution is applied to all boundaries (the domain faces and,
     // when boundary.particle_eb = thermal, the embedded boundary)
     const amrex::ParmParse pp_species_boundary("boundary." + species_name);
-    const bool eb_thermal =
-        (WarpX::eb_particle_boundary == ParticleBoundaryType::Thermal);
-    if (WarpX::isAnyParticleBoundaryThermal() || eb_thermal) {
+    if (WarpX::isAnyParticleBoundaryThermal()) {
         amrex::Real boundary_uth = 0;
         utils::parser::getWithParser(pp_species_boundary,"u_th",boundary_uth);
         m_boundary_conditions.SetThermalVelocity(boundary_uth);
-        m_eb_thermal_uth = static_cast<amrex::ParticleReal>(boundary_uth);
     }
 }
 

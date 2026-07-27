@@ -550,12 +550,6 @@ public:
 
     bool do_splitting = false;
 
-    // Wall thermal speed sqrt(kB*T_wall/m)/c for the thermal embedded-boundary
-    // particle boundary (boundary.particle_eb = thermal), parsed per species
-    // from boundary.<species_name>.u_th (the same input the domain thermal
-    // boundary condition uses).
-    amrex::ParticleReal m_eb_thermal_uth = amrex::ParticleReal(0.0);
-
     int do_not_deposit = 0;
     bool initialize_self_fields = false;
     amrex::Real self_fields_required_precision = amrex::Real(1.e-11);
@@ -588,6 +582,14 @@ public:
     amrex::ParticleReal getCharge () const {return m_charge;}
 
     amrex::ParticleReal getMass () const {return m_mass;}
+
+    /** Thermal velocity (normalized by c) used by thermal particle boundaries
+     *  for this species, parsed from ``boundary.\<species_name\>.u_th``.
+     */
+    amrex::ParticleReal getBoundaryThermalVelocity () const
+    {
+        return static_cast<amrex::ParticleReal>(m_boundary_conditions.data.m_uth);
+    }
 
     int DoFieldIonization() const { return do_field_ionization; }
 

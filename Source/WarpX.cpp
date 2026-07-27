@@ -3565,7 +3565,7 @@ WarpX::isAnyParticleBoundaryThermal ()
         if (WarpX::particle_boundary_lo[idim] == ParticleBoundaryType::Thermal) {return true;}
         if (WarpX::particle_boundary_hi[idim] == ParticleBoundaryType::Thermal) {return true;}
     }
-    return false;
+    return WarpX::eb_particle_boundary == ParticleBoundaryType::Thermal;
 }
 
 void

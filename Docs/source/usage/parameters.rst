@@ -1015,15 +1015,14 @@ additionally define the electric potential at the embedded boundary with an anal
 
     * ``Reflecting``: Particles that reach the embedded boundary are specularly reflected back into the simulation domain
 
-    * ``Thermal``: Particles that reach the embedded boundary are re-emitted from a wall Maxwellian
-      (fully accommodating diffuse wall): the exact wall-contact point is found by bisection along
-      the particle trajectory, the velocity is re-sampled from a half-Maxwellian flux distribution
-      along the inward wall normal (full Maxwellian in the tangential plane), and the particle is
-      advanced from the contact point for the remaining fraction of the time step. The wall thermal
-      speed must be given per species via ``boundary.<species_name>.u_th`` (in units of :math:`c`,
-      i.e. :math:`\sqrt{k_B T_\mathrm{wall}/m}/c`), the same input used by the domain ``thermal``
-      particle boundary condition. This is intended for modelling neutral-gas flow against solid
-      walls (e.g. DSMC gas dynamics), where the wall must conserve the gas inventory.
+    * ``Thermal``: Particles that reach the embedded boundary are re-emitted back into the simulation domain
+      with a thermalized velocity, as from a fully accommodating diffuse wall. The two velocity components
+      tangential to the local surface are sampled from a ``gaussian`` distribution, and the component along
+      the (inward) surface normal is sampled from a ``gaussian flux`` distribution.
+      The standard deviation for these distributions should be provided for each species using
+      ``boundary.<species_name>.u_th`` (in units of :math:`c`, i.e. :math:`\sqrt{k_B T_\mathrm{wall}/m}/c`),
+      the same input used by the domain ``thermal`` particle boundary condition. The same standard
+      deviation is used to sample all components.
 
 .. _param-particle-thermalizer:
 
