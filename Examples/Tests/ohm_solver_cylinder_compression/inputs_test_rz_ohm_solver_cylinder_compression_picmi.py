@@ -80,6 +80,8 @@ class PlasmaCylinderCompression(object):
         theta=0.5,
         dt_mult=1.0,
         darwin=False,
+        recovery=False,
+        recovery_cadence="half",
         n_floor_mult=1.0,
         nr=None,
         nz=None,
@@ -92,6 +94,8 @@ class PlasmaCylinderCompression(object):
         self.nlsolver = nlsolver
         self.theta = theta
         self.darwin = darwin
+        self.recovery = recovery
+        self.recovery_cadence = recovery_cadence
         self.n_floor_mult = n_floor_mult
         if nr is not None:
             self.NR = nr
@@ -309,6 +313,14 @@ class PlasmaCylinderCompression(object):
             tau_ramp=20e-6,
             t0_ramp=5e-6,
             darwin=self.darwin,
+            **(
+                dict(
+                    darwin_vacuum_recovery=True,
+                    darwin_vacuum_recovery_cadence=self.recovery_cadence,
+                )
+                if self.recovery
+                else {}
+            ),
         )
         simulation.solver = self.solver
 
@@ -491,6 +503,18 @@ parser.add_argument(
     help="multiply the base time step (implicit runs can take larger steps)",
 )
 parser.add_argument(
+    "--recovery",
+    help="enable the Darwin vacuum vector-potential recovery (the halo field "
+    "responds magnetostatically instead of at the floored transport rate)",
+    action="store_true",
+)
+parser.add_argument(
+    "--recovery-cadence",
+    help="vacuum recovery cadence",
+    choices=["half", "full"],
+    default="half",
+)
+parser.add_argument(
     "--darwin",
     help="use the Darwin (magnetoinductive) field split (implicit only)",
     action="store_true",
@@ -522,6 +546,8 @@ run = PlasmaCylinderCompression(
     theta=args.theta,
     dt_mult=args.dt_mult,
     darwin=args.darwin,
+    recovery=args.recovery,
+    recovery_cadence=args.recovery_cadence,
     n_floor_mult=args.n_floor_mult,
     nr=args.nr,
     nz=args.nz,

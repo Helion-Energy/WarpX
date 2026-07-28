@@ -17,3 +17,19 @@ add_warpx_test(
     OFF  # dependency
 )
 label_warpx_test(test_rz_ohm_solver_vacuum_ramp_darwin_picmi slow)
+
+# Same ramp with the vacuum vector-potential recovery instead of the Hewett
+# vacuum resistivity: the deck runs at the plasma eta (1e-6, six orders below
+# the value the plain darwin variant needs for flux penetration), so the same
+# three asserts prove the recovery delivers the programmed flux through the
+# sub-floor region by itself. Runs the in-residual ("half") cadence.
+add_warpx_test(
+    test_rz_ohm_solver_vacuum_ramp_darwin_recovery_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_ohm_solver_vacuum_ramp_picmi.py --test --implicit --darwin --recovery"  # inputs
+    "analysis_vacuum_ramp.py"  # analysis
+    "analysis_default_regression.py --path diags/diag1000400 --rtol 2e-4"  # checksum
+    OFF  # dependency
+)
+label_warpx_test(test_rz_ohm_solver_vacuum_ramp_darwin_recovery_picmi slow)

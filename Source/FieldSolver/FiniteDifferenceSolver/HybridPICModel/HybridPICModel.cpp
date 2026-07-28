@@ -130,6 +130,52 @@ void HybridPICModel::ReadParameters ()
         WARPX_ABORT_WITH_MESSAGE(
             "hybrid_pic_model.darwin is not supported in the 1D radial geometries.");
 #endif
+
+        // Vacuum vector-potential recovery (see the member documentation in
+        // HybridPICModel.H).
+        pp_hybrid.query("darwin_vacuum_recovery", m_darwin_vacuum_recovery);
+        if (m_darwin_vacuum_recovery) {
+            pp_hybrid.query("darwin_vacuum_recovery_mask",
+                            m_darwin_vacuum_recovery_mask);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_darwin_vacuum_recovery_mask == "vacuum"
+                || m_darwin_vacuum_recovery_mask == "transition"
+                || m_darwin_vacuum_recovery_mask == "global",
+                "hybrid_pic_model.darwin_vacuum_recovery_mask must be one of "
+                "'vacuum', 'transition', 'global'");
+            pp_hybrid.query("darwin_vacuum_recovery_cadence",
+                            m_darwin_vacuum_recovery_cadence);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_darwin_vacuum_recovery_cadence == "half"
+                || m_darwin_vacuum_recovery_cadence == "full",
+                "hybrid_pic_model.darwin_vacuum_recovery_cadence must be "
+                "'half' or 'full'");
+            pp_hybrid.query("darwin_vacuum_recovery_components",
+                            m_darwin_vacuum_recovery_components);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_darwin_vacuum_recovery_components == "flux"
+                || m_darwin_vacuum_recovery_components == "all",
+                "hybrid_pic_model.darwin_vacuum_recovery_components must "
+                "be 'flux' or 'all'");
+            utils::parser::queryWithParser(
+                pp_hybrid, "darwin_vacuum_recovery_relative_tolerance",
+                m_darwin_vacrec_rtol);
+            utils::parser::queryWithParser(
+                pp_hybrid, "darwin_vacuum_recovery_absolute_tolerance",
+                m_darwin_vacrec_atol);
+            utils::parser::queryWithParser(
+                pp_hybrid, "darwin_vacuum_recovery_max_iterations",
+                m_darwin_vacrec_max_iters);
+            pp_hybrid.query("darwin_vacuum_recovery_verbosity",
+                            m_darwin_vacrec_verbosity);
+#if defined(WARPX_DIM_1D_Z)
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.darwin_vacuum_recovery is not supported "
+                "in 1D (the nodal FD vector-Poisson operator has no 1D "
+                "form, and the boundary-driven vacuum problem it targets "
+                "has no 1D analog).");
+#endif
+        }
     }
 #if defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -327,6 +373,20 @@ void HybridPICModel::AllocateLevelMFs (
         fields.alloc_init("hybrid_phi_darwin_fp",
             lev, amrex::convert(ba, amrex::IntVect::TheNodeVector()),
             dm, ncomps, ngRho, 0.0_rt);
+
+        // Vacuum A recovery: the nodal correction fields dA (persistent —
+        // the previous solution warm-starts each MLMG solve) and the
+        // edge-staggered scratch for the field-implied current source.
+        if (m_darwin_vacuum_recovery) {
+            for (int dir = 0; dir < 3; ++dir) {
+                fields.alloc_init("hybrid_A_vac_dA_nodal", Direction{dir},
+                    lev, amrex::convert(ba, amrex::IntVect::TheNodeVector()),
+                    dm, ncomps, ngRho, 0.0_rt);
+                fields.alloc_init("hybrid_J_vac_fp", Direction{dir},
+                    lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB,
+                    0.0_rt);
+            }
+        }
     }
 
     // The "hybrid_rho_fp_temp" multifab is used to store the ion charge density
@@ -1425,6 +1485,384 @@ void HybridPICModel::ComputeDarwinELong (
                 << ") max|phi| = " << phi.norminf() << "\n";
         }
     }
+}
+
+void HybridPICModel::ComputeVacuumARecovery ()
+{
+#if defined(WARPX_DIM_1D_Z) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+    // Blocked at parse time (see ReadParameters); the FD nodal operator has
+    // no 1D form.
+    WARPX_ABORT_WITH_MESSAGE(
+        "hybrid_pic_model.darwin_vacuum_recovery is not supported in 1D "
+        "geometries.");
+#else
+    ABLASTR_PROFILE("HybridPICModel::ComputeVacuumARecovery()");
+
+    using ablastr::fields::Direction;
+    using namespace ablastr::coarsen::sample;
+
+    auto & warpx = WarpX::GetInstance();
+
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(warpx.finestLevel() == 0,
+        "hybrid_pic_model.darwin_vacuum_recovery supports a single level only");
+#if defined(WARPX_DIM_RZ)
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(WarpX::ncomps == 1,
+        "hybrid_pic_model.darwin_vacuum_recovery supports only the m = 0 "
+        "azimuthal mode in RZ");
+#endif
+
+    constexpr int lev = 0;
+    amrex::Geometry const & geom = warpx.Geom(lev);
+    const bool trace = (std::getenv("WARPX_DEBUG_VACREC") != nullptr);
+
+    // Mask policy on the step-entry charge density (rho^n, component 0 of
+    // rho_fp): frozen across the step, so the mask cannot flicker between
+    // nonlinear-solver iterations.
+    amrex::Real const rho_floor = PhysConst::q_e * m_n_floor;
+    const int mask_mode = (m_darwin_vacuum_recovery_mask == "global") ? 2
+        : ((m_darwin_vacuum_recovery_mask == "transition") ? 1 : 0);
+
+    ablastr::fields::VectorField A =
+        warpx.m_fields.get_alldirs("hybrid_A_fp", lev);
+    ablastr::fields::VectorField B =
+        warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev);
+    ablastr::fields::VectorField Jvac =
+        warpx.m_fields.get_alldirs("hybrid_J_vac_fp", lev);
+    ablastr::fields::VectorField dA =
+        warpx.m_fields.get_alldirs("hybrid_A_vac_dA_nodal", lev);
+    amrex::MultiFab const & rho = *warpx.m_fields.get(FieldType::rho_fp, lev);
+
+    // The field-implied current J_imp = curl(curl A)/mu0 on the E staggering.
+    // Bfield_fp is curl scratch here (the caller rebuilds B = B_static +
+    // curl A right after the recovery); zero-extension past non-periodic
+    // walls mirrors the E_L source convention.
+    warpx.get_pointer_fdtd_solver_fp(lev)->ComputeCurlA(
+        B, A, warpx.GetEBUpdateBFlag()[lev], lev);
+    for (int dir = 0; dir < 3; ++dir) {
+        B[dir]->setBndry(0.0_rt);
+        B[dir]->FillBoundary(geom.periodicity());
+    }
+    warpx.get_pointer_fdtd_solver_fp(lev)->CalculateCurrentAmpere(
+        Jvac, B, warpx.GetEBUpdateEFlag()[lev], lev);
+    for (int dir = 0; dir < 3; ++dir) {
+        Jvac[dir]->FillBoundary(geom.periodicity());
+    }
+
+    amrex::GpuArray<int, 3> const coarsen_rr = {1, 1, 1};
+    amrex::GpuArray<int, 3> const nodal = {1, 1, 1};
+    const amrex::GpuArray<int, 3> A_stag[3] =
+        {Ex_IndexType, Ey_IndexType, Ez_IndexType};
+
+    // Domain BCs for the correction: homogeneous Dirichlet on non-periodic
+    // faces (the evolved A already carries the boundary pin there, so the
+    // correction vanishes), periodic where periodic, Neumann at the RZ axis
+    // (required by the RZ FD nodal operator).
+    amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM> lobc, hibc;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        if (geom.isPeriodic(d)) {
+            lobc[d] = amrex::LinOpBCType::Periodic;
+            hibc[d] = amrex::LinOpBCType::Periodic;
+        } else {
+            lobc[d] = amrex::LinOpBCType::Dirichlet;
+            hibc[d] = amrex::LinOpBCType::Dirichlet;
+        }
+    }
+#if defined(WARPX_DIM_RZ)
+    lobc[0] = amrex::LinOpBCType::Neumann;
+#endif
+
+    // Nodal domain box and periodicity flags for the boundary-node guard in
+    // the RHS assembly (Dirichlet rows carry no source).
+    const amrex::Box domain_nd = amrex::convert(
+        geom.Domain(), amrex::IntVect::TheNodeVector());
+    amrex::GpuArray<int, 3> dlo{{0, 0, 0}};
+    amrex::GpuArray<int, 3> dhi{{0, 0, 0}};
+    amrex::GpuArray<int, 3> per{{1, 1, 1}};
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        dlo[d] = domain_nd.smallEnd(d);
+        dhi[d] = domain_nd.bigEnd(d);
+        per[d] = geom.isPeriodic(d) ? 1 : 0;
+    }
+
+    // "flux": only the out-of-plane component (index 1: A_theta in RZ, A_y
+    // in 2D) is recovered — it carries the boundary-driven flux, and its
+    // nodal operator (with the RZ metric term) is discretely consistent
+    // with the edge curl-curl source. The in-plane corrections are NOT
+    // consistent near the RZ axis (O(1) 1/r stencil mismatch in the first
+    // rows) and pump an axis-localized instability there; they stay on the
+    // raw dynamics unless "all" is requested. In 3D there is no
+    // distinguished component and "flux" recovers all three.
+#if defined(WARPX_DIM_3D)
+    const bool flux_only = false;
+#else
+    const bool flux_only = (m_darwin_vacuum_recovery_components == "flux");
+#endif
+
+    for (int dir = 0; dir < 3; ++dir) {
+        if (flux_only && dir != 1) { continue; }
+        amrex::MultiFab & dAd = *dA[dir];
+        amrex::MultiFab const & Jd = *Jvac[dir];
+        amrex::GpuArray<int, 3> const Jstag = A_stag[dir];
+
+        // Nodal right-hand side: +mu0 * J_imp, source-masked at the
+        // (native-nodal) rho, zero on Dirichlet boundary nodes.
+        amrex::MultiFab rhs(dAd.boxArray(), dAd.DistributionMap(),
+                            dAd.nComp(), amrex::IntVect(0));
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(rhs, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const & rhs_arr = rhs.array(mfi);
+            auto const & J_arr   = Jd.const_array(mfi);
+            auto const & rho_arr = rho.const_array(mfi);
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                const int idx[3] = {i, j, k};
+                for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                    if (!per[d] && (idx[d] <= dlo[d] || idx[d] >= dhi[d])) {
+                        rhs_arr(i, j, k) = 0.0_rt;
+                        return;
+                    }
+                }
+                amrex::Real const rho_val = rho_arr(i, j, k, 0);
+                const bool in_mask = (mask_mode == 2)
+                    || (mask_mode == 0 && rho_val < rho_floor)
+                    || (mask_mode == 1 && rho_val > 0.0_rt
+                        && rho_val < rho_floor);
+                rhs_arr(i, j, k) = in_mask
+                    ? PhysConst::mu0
+                        * Interp(J_arr, Jstag, nodal, coarsen_rr, i, j, k, 0)
+                    : 0.0_rt;
+            });
+        }
+
+        // Empty mask (or a fully-relaxed correction): the solution is
+        // identically the incoming dA; skip the solve and, when dA is also
+        // zero, skip the A update entirely so the recovery is exactly the
+        // identity (bit-for-bit) in no-vacuum configurations.
+        if (rhs.norminf(0) == 0.0_rt && dAd.norminf(0) == 0.0_rt) {
+            if (trace) {
+                amrex::Print() << "[vac-recover] dir " << dir
+                    << " empty mask, skipped\n";
+            }
+            continue;
+        }
+
+        amrex::LPInfo const info;
+        auto linop = std::make_unique<amrex::MLEBNodeFDLaplacian>();
+#if defined(AMREX_USE_EB)
+        if (EB::enabled()) {
+            linop->define(
+                amrex::Vector<amrex::Geometry>{geom},
+                amrex::Vector<amrex::BoxArray>{warpx.boxArray(lev)},
+                amrex::Vector<amrex::DistributionMapping>{warpx.DistributionMap(lev)},
+                info,
+                amrex::Vector<amrex::EBFArrayBoxFactory const*>{&warpx.fieldEBFactory(lev)});
+            // dA = 0 inside embedded conductors: both the evolved and the
+            // recovered A hold the gauge zero there.
+            linop->setEBDirichlet(0.0_rt);
+        } else
+#endif
+        {
+            linop->define(
+                amrex::Vector<amrex::Geometry>{geom},
+                amrex::Vector<amrex::BoxArray>{warpx.boxArray(lev)},
+                amrex::Vector<amrex::DistributionMapping>{warpx.DistributionMap(lev)},
+                info);
+        }
+#if defined(WARPX_DIM_RZ)
+        linop->setRZ(true);
+        linop->setSigma({0._rt, 1._rt});
+        if (dir < 2) {
+            // The RZ vector Laplacian carries a -1/r^2 metric term for the
+            // r and theta components (none for z).
+            linop->setAlpha(1._rt);
+        }
+#else
+        linop->setSigma({AMREX_D_DECL(1._rt, 1._rt, 1._rt)});
+#endif
+        linop->setDomainBC(lobc, hibc);
+
+        // Previous correction as the initial guess (warm start); its
+        // Dirichlet boundary nodes are zero by construction and stay so.
+        dAd.setBndry(0.0_rt);
+        dAd.FillBoundary(geom.periodicity());
+
+        if (trace) {
+            amrex::Print() << "[vac-recover] dir " << dir
+                << " solving: |rhs|max = " << rhs.norminf(0)
+                << " |dA_in|max = " << dAd.norminf(0) << "\n";
+        }
+        amrex::MLMG mlmg(*linop);
+        mlmg.setVerbose(trace ? std::max(m_darwin_vacrec_verbosity, 2)
+                              : m_darwin_vacrec_verbosity);
+        mlmg.setMaxIter(m_darwin_vacrec_max_iters);
+        mlmg.setThrowException(true);
+        // The default coarsest-level BiCGStab fails on the RZ vector
+        // Laplacian's -alpha/r^2 rows and its failures amplify through the
+        // V-cycles; plain smoothing at the bottom is robust here (the
+        // coarse level is tiny and every solve is warm-started).
+        mlmg.setBottomSolver(amrex::BottomSolver::smoother);
+        amrex::Real resid = 0.0_rt;
+        bool solve_ok = true;
+        std::string fail_msg;
+        try {
+            resid = mlmg.solve({&dAd}, {&rhs},
+                               m_darwin_vacrec_rtol, m_darwin_vacrec_atol);
+        } catch (std::exception const & e) {
+            // A failed solve leaves dA mid-iteration: reset it so the
+            // recovery degrades to the identity for this component (and
+            // the next evaluation restarts from scratch) instead of
+            // aborting the nonlinear iteration.
+            dAd.setVal(0.0_rt);
+            solve_ok = false;
+            fail_msg = e.what();
+        }
+        if (trace) {
+            amrex::IntVect const rhs_loc = rhs.maxIndex(0);
+            amrex::IntVect const dA_loc = dAd.maxIndex(0);
+            amrex::Print() << "[vac-recover] dir " << dir
+                << " |rhs|max = " << rhs.norminf(0) << " @ " << rhs_loc
+                << " |dA|max = " << dAd.norminf(0) << " @ " << dA_loc
+                << " resid = " << resid
+                << (solve_ok ? "" : (" (SOLVE FAILED: " + fail_msg + ")"))
+                << "\n";
+        }
+        if (!solve_ok) { continue; }
+        dAd.FillBoundary(geom.periodicity());
+
+        // A += dA at the component's edge points, replace-masked; edges
+        // frozen by the embedded-boundary flags keep A = 0 (the recovered
+        // and evolved fields agree there by construction). The caller
+        // re-applies the A boundary values afterwards.
+        amrex::MultiFab & Ad = *A[dir];
+        amrex::GpuArray<int, 3> const Astag = A_stag[dir];
+        const amrex::iMultiFab* eb_flag =
+            (!warpx.GetEBUpdateEFlag().empty()
+             && warpx.GetEBUpdateEFlag()[lev][dir] != nullptr)
+            ? warpx.GetEBUpdateEFlag()[lev][dir].get() : nullptr;
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(Ad, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const & a_arr   = Ad.array(mfi);
+            auto const & dA_arr  = dAd.const_array(mfi);
+            auto const & rho_arr = rho.const_array(mfi);
+            amrex::Array4<int const> eb;
+            if (eb_flag) { eb = eb_flag->const_array(mfi); }
+            const bool use_eb = (eb_flag != nullptr);
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                if (use_eb && eb(i, j, k) == 0) { return; }
+                amrex::Real const rho_val =
+                    Interp(rho_arr, nodal, Astag, coarsen_rr, i, j, k, 0);
+                const bool in_mask = (mask_mode == 2)
+                    || (mask_mode == 0 && rho_val < rho_floor)
+                    || (mask_mode == 1 && rho_val > 0.0_rt
+                        && rho_val < rho_floor);
+                if (!in_mask) { return; }
+                a_arr(i, j, k) +=
+                    Interp(dA_arr, nodal, Astag, coarsen_rr, i, j, k, 0);
+            });
+        }
+        Ad.FillBoundary(geom.periodicity());
+    }
+#endif
+}
+
+void HybridPICModel::ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_long)
+{
+#if defined(WARPX_DIM_1D_Z) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+    amrex::ignore_unused(a_dt_eff, a_add_E_long);
+    WARPX_ABORT_WITH_MESSAGE(
+        "hybrid_pic_model.darwin_vacuum_recovery is not supported in 1D "
+        "geometries.");
+#else
+    ABLASTR_PROFILE("HybridPICModel::ApplyVacuumFaradayE()");
+
+    using ablastr::fields::Direction;
+    using namespace ablastr::coarsen::sample;
+
+    auto & warpx = WarpX::GetInstance();
+    constexpr int lev = 0;
+    amrex::Geometry const & geom = warpx.Geom(lev);
+    const bool trace = (std::getenv("WARPX_DEBUG_VACREC") != nullptr);
+    if (trace) {
+        amrex::Print() << "[vac-faraday] enter dt_eff = " << a_dt_eff
+            << " add_EL = " << a_add_E_long << "\n";
+    }
+
+    amrex::Real const rho_floor = PhysConst::q_e * m_n_floor;
+    const int mask_mode = (m_darwin_vacuum_recovery_mask == "global") ? 2
+        : ((m_darwin_vacuum_recovery_mask == "transition") ? 1 : 0);
+#if defined(WARPX_DIM_3D)
+    const bool flux_only = false;
+#else
+    const bool flux_only = (m_darwin_vacuum_recovery_components == "flux");
+#endif
+    amrex::Real const inv_dt = 1.0_rt / a_dt_eff;
+
+    amrex::MultiFab const & rho = *warpx.m_fields.get(FieldType::rho_fp, lev);
+    amrex::GpuArray<int, 3> const coarsen_rr = {1, 1, 1};
+    amrex::GpuArray<int, 3> const nodal = {1, 1, 1};
+    const amrex::GpuArray<int, 3> A_stag[3] =
+        {Ex_IndexType, Ey_IndexType, Ez_IndexType};
+
+    for (int dir = 0; dir < 3; ++dir) {
+        if (flux_only && dir != 1) { continue; }
+        amrex::MultiFab & E = *warpx.m_fields.get(
+            FieldType::Efield_fp, Direction{dir}, lev);
+        amrex::MultiFab const & A = *warpx.m_fields.get(
+            "hybrid_A_fp", Direction{dir}, lev);
+        amrex::MultiFab const & A_old = *warpx.m_fields.get(
+            "hybrid_A_old_fp", Direction{dir}, lev);
+        amrex::MultiFab const * EL = a_add_E_long
+            ? warpx.m_fields.get("hybrid_E_long_fp", Direction{dir}, lev)
+            : nullptr;
+        amrex::GpuArray<int, 3> const Astag = A_stag[dir];
+        const amrex::iMultiFab* eb_flag =
+            (!warpx.GetEBUpdateEFlag().empty()
+             && warpx.GetEBUpdateEFlag()[lev][dir] != nullptr)
+            ? warpx.GetEBUpdateEFlag()[lev][dir].get() : nullptr;
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(E, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const & e_arr    = E.array(mfi);
+            auto const & a_arr    = A.const_array(mfi);
+            auto const & aold_arr = A_old.const_array(mfi);
+            auto const & rho_arr  = rho.const_array(mfi);
+            amrex::Array4<amrex::Real const> el_arr;
+            if (EL) { el_arr = EL->const_array(mfi); }
+            const bool add_el = (EL != nullptr);
+            amrex::Array4<int const> eb;
+            if (eb_flag) { eb = eb_flag->const_array(mfi); }
+            const bool use_eb = (eb_flag != nullptr);
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                if (use_eb && eb(i, j, k) == 0) { return; }
+                amrex::Real const rho_val =
+                    Interp(rho_arr, nodal, Astag, coarsen_rr, i, j, k, 0);
+                const bool in_mask = (mask_mode == 2)
+                    || (mask_mode == 0 && rho_val < rho_floor)
+                    || (mask_mode == 1 && rho_val > 0.0_rt
+                        && rho_val < rho_floor);
+                if (!in_mask) { return; }
+                e_arr(i, j, k) =
+                    -(a_arr(i, j, k) - aold_arr(i, j, k)) * inv_dt
+                    + (add_el ? el_arr(i, j, k) : 0.0_rt);
+            });
+        }
+        E.FillBoundary(geom.periodicity());
+        if (trace) {
+            amrex::Print() << "[vac-faraday] dir " << dir
+                << " |E|max = " << E.norminf(0) << "\n";
+        }
+    }
+#endif
 }
 
 

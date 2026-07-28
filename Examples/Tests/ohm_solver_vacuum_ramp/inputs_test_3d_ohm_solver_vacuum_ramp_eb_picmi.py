@@ -64,10 +64,13 @@ class VacuumRampEB3d(object):
 
     substeps = 10
 
-    def __init__(self, test, verbose, darwin=False):
+    def __init__(self, test, verbose, darwin=False, recovery=False,
+                 recovery_cadence="half"):
         self.test = test
         self.verbose = verbose or self.test
         self.darwin = darwin
+        self.recovery = recovery
+        self.recovery_cadence = recovery_cadence
         if self.test:
             # CI-sized window: exercises the drive, the embedded conductor
             # and the flux bookkeeping through the onset of the ramp.
@@ -173,6 +176,14 @@ class VacuumRampEB3d(object):
             tau_ramp=self.tau_ramp,
             t0_ramp=self.t0_ramp,
             darwin=self.darwin,
+            **(
+                dict(
+                    darwin_vacuum_recovery=True,
+                    darwin_vacuum_recovery_cadence=self.recovery_cadence,
+                )
+                if self.recovery
+                else {}
+            ),
         )
         simulation.solver = self.solver
 
@@ -293,6 +304,17 @@ parser.add_argument(
     action="store_true",
 )
 parser.add_argument(
+    "--recovery",
+    help="enable the Darwin vacuum vector-potential recovery",
+    action="store_true",
+)
+parser.add_argument(
+    "--recovery-cadence",
+    help="vacuum recovery cadence",
+    choices=["half", "full"],
+    default="half",
+)
+parser.add_argument(
     "--darwin",
     help="use the Darwin (magnetoinductive) field split",
     action="store_true",
@@ -300,5 +322,11 @@ parser.add_argument(
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
-run = VacuumRampEB3d(test=args.test, verbose=args.verbose, darwin=args.darwin)
+run = VacuumRampEB3d(
+    test=args.test,
+    verbose=args.verbose,
+    darwin=args.darwin,
+    recovery=args.recovery,
+    recovery_cadence=args.recovery_cadence,
+)
 simulation.step()

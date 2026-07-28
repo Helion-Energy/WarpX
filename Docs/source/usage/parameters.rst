@@ -3858,6 +3858,58 @@ Maxwell solver: kinetic-fluid hybrid
     (also ``darwin_poisson_absolute_tolerance``, default 0, ``darwin_poisson_max_iterations``,
     default 200, and ``darwin_poisson_verbosity``, default 0).
 
+.. pp:param:: hybrid_pic_model.darwin_vacuum_recovery
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    With ``hybrid_pic_model.darwin``, replace the evolved vector potential in low-density
+    (vacuum) cells with the magnetostatic solution driven by the retained plasma currents and
+    the boundary values of :math:`\mathbf{A}`, so the vacuum-region field responds
+    instantaneously instead of at the density-floored halo's transport rate — the vacuum-field
+    limit of the resistive-vacuum treatment of Hewett, J. Comput. Phys. **38**, 378 (1980),
+    imposed elliptically. Implemented in correction form: with the field-implied current
+    :math:`\mu_0 \mathbf{J}_\mathrm{imp} = \nabla\times\nabla\times\mathbf{A}`, the correction
+    solves :math:`\nabla^2 \delta\mathbf{A} = +\mu_0\,\mathbf{J}_\mathrm{imp}` restricted to the
+    masked cells, with homogeneous Dirichlet values on non-periodic faces and inside embedded
+    conductors, and :math:`\mathbf{A} \mathrel{+}= \delta\mathbf{A}` in the masked cells. An
+    empty mask reduces to the exact identity. Supported in 2D, 3D and RZ (:math:`m = 0`),
+    single level.
+
+.. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_mask
+    :type: ``string``
+    :default: ``vacuum``
+    :optional:
+
+    Where the recovery replaces the field, evaluated on the step-entry charge density:
+    ``vacuum`` (:math:`\rho < q_e\,n_\mathrm{floor}`, including true vacuum), ``transition``
+    (:math:`0 < \rho < q_e\,n_\mathrm{floor}`) or ``global`` (everywhere; diagnostic use).
+
+.. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_cadence
+    :type: ``string``
+    :default: ``half``
+    :optional:
+
+    ``half`` applies the recovery inside every nonlinear-solver residual evaluation at the
+    theta-stage field (a nonlinear elimination of the vacuum field dynamics), plus once at the
+    end-of-step state; ``full`` applies it at the end-of-step state only (cheaper; the vacuum
+    dynamics stay in the residual).
+
+.. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_components
+    :type: ``string``
+    :default: ``flux``
+    :optional:
+
+    ``flux`` recovers only the out-of-plane component (:math:`A_\theta` in RZ, :math:`A_y` in
+    2D) that carries the boundary-driven flux; in 3D it is equivalent to ``all``. ``all``
+    recovers every component; caution: in RZ the in-plane corrections are discretely
+    inconsistent with the curl-curl source near the axis and can destabilize the
+    :math:`B_\theta`-carrying content.
+    The MLMG controls are ``darwin_vacuum_recovery_relative_tolerance`` (default ``1e-8``),
+    ``darwin_vacuum_recovery_absolute_tolerance`` (default 0),
+    ``darwin_vacuum_recovery_max_iterations`` (default 200) and
+    ``darwin_vacuum_recovery_verbosity`` (default 0).
+
 .. pp:param:: hybrid_pic_model.substeps
     :type: ``int``
     :default: ``10``

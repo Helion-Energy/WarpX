@@ -37,6 +37,13 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
         "hybrid_pic_model.darwin does not support restarts yet (the vector "
         "potential and static magnetic field are not checkpointed)");
 
+    // Vacuum vector-potential recovery cadence (see HybridPICModel.H):
+    // "half" applies inside every residual evaluation at the theta-stage
+    // field and once at the end-of-step state; "full" end-of-step only.
+    m_vacuum_recovery = m_darwin && m_hybrid_pic_model->m_darwin_vacuum_recovery;
+    m_vacuum_recovery_half = m_vacuum_recovery
+        && (m_hybrid_pic_model->m_darwin_vacuum_recovery_cadence == "half");
+
     // External vector-potential fields use the split-field convention here,
     // like the explicit scheme: the solver state carries the plasma fields
     // (OneStep strips B_ext/E_ext at entry; Bfield_fp holds totals between
@@ -467,6 +474,12 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
                 amrex::MultiFab::Subtract(E, EL, 0, 0, E.nComp(), E.nGrowVect());
             }
         }
+        // NOTE: overwriting the band E_ohm with the Faraday value of the
+        // recovered A inside the residual is ill-conditioned: the band
+        // Jacobian degenerates to the recovery's small leak factor and
+        // Newton steps blow up as (mismatch / leak). The Faraday-consistent
+        // band field is imposed once per step in FinishFieldUpdate instead
+        // (operator-split vacuum field stage).
     }
 
     // Return RHS = E_ohm - E_old
@@ -577,6 +590,16 @@ void ThetaImplicitHybrid::DarwinUpdateA_B ( amrex::Real a_thetadt, amrex::Real a
         // Boundary-driven external flux and embedded conductors act on A
         // itself (see DarwinApplyABoundary).
         DarwinApplyABoundary(pin_time);
+        // In-residual vacuum recovery: replace A in masked (vacuum) cells
+        // with the magnetostatic solution before deriving B, then restore
+        // the exact boundary pin. Runs in every residual evaluation
+        // including FD-Jacobian probes -- like E_L, the recovery is a
+        // smooth function of the state and freezing it per iteration would
+        // make the Jacobian inconsistent with the iterate map.
+        if (m_vacuum_recovery_half) {
+            m_hybrid_pic_model->ComputeVacuumARecovery();
+            DarwinApplyABoundary(pin_time);
+        }
         // B = B_static + curl A
         m_WarpX->get_pointer_fdtd_solver_fp(lev)->ComputeCurlA(
             B, A, m_WarpX->GetEBUpdateBFlag()[lev], lev);
@@ -744,6 +767,19 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
             }
         }
         DarwinApplyABoundary(end_time);
+        // Vacuum recovery at the full-step state (both cadences: in "half"
+        // mode the theta-stage was recovered inside the solve, and the
+        // extrapolated end state gets the same treatment so the delivered
+        // field is exactly recovered; in "full" mode this is the only
+        // application). Restore the exact boundary pin afterwards.
+        if (m_vacuum_recovery) {
+            m_hybrid_pic_model->ComputeVacuumARecovery();
+            DarwinApplyABoundary(end_time);
+            // The delivered end-of-step field in the band is the Faraday
+            // value of the recovered A across the step (Efield_fp holds
+            // the full field here, so E_L is added back on top).
+            m_hybrid_pic_model->ApplyVacuumFaradayE(m_dt, true);
+        }
         // B^{n+1} = B_static + curl A^{n+1}
         for (int lev = 0; lev < m_num_amr_levels; ++lev) {
             ablastr::fields::VectorField A = m_WarpX->m_fields.get_alldirs("hybrid_A_fp", lev);

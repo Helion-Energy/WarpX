@@ -63,11 +63,21 @@ class VacuumInductiveRamp(object):
 
     substeps = 10
 
-    def __init__(self, test, verbose, implicit=False, darwin=False):
+    def __init__(
+        self,
+        test,
+        verbose,
+        implicit=False,
+        darwin=False,
+        recovery=False,
+        recovery_cadence="half",
+    ):
         self.test = test
         self.verbose = verbose or self.test
         self.implicit = implicit
         self.darwin = darwin
+        self.recovery = recovery
+        self.recovery_cadence = recovery_cadence
 
         self.get_plasma_quantities()
 
@@ -156,7 +166,18 @@ class VacuumInductiveRamp(object):
         # time mu0*R^2/eta ~ 0.25 t_ci << tau_ramp. The split-field drive
         # (explicit and non-Darwin implicit) imposes the external field
         # volumetrically instead, so the plasma value suffices there.
-        eta = 2.0 if self.darwin else 1e-6
+        # The vacuum A recovery replaces the transport problem outright
+        # (the masked cells take the magnetostatic solution each
+        # application), so the recovery variant runs at the PLASMA eta:
+        # the ramp asserts then prove the recovery delivers the flux.
+        eta = 2.0 if (self.darwin and not self.recovery) else 1e-6
+
+        recovery_kwargs = {}
+        if self.recovery:
+            recovery_kwargs = dict(
+                darwin_vacuum_recovery=True,
+                darwin_vacuum_recovery_cadence=self.recovery_cadence,
+            )
 
         self.solver = picmi.HybridPICSolver(
             grid=self.grid,
@@ -170,6 +191,7 @@ class VacuumInductiveRamp(object):
             tau_ramp=self.tau_ramp,
             t0_ramp=self.t0_ramp,
             darwin=self.darwin,
+            **recovery_kwargs,
         )
         simulation.solver = self.solver
 
@@ -309,6 +331,20 @@ parser.add_argument(
     help="use the Darwin (magnetoinductive) field split (implicit only)",
     action="store_true",
 )
+parser.add_argument(
+    "--recovery",
+    help="enable the vacuum vector-potential recovery (darwin only); the "
+    "deck then runs at the plasma resistivity instead of the Hewett "
+    "vacuum value, so the ramp asserts prove the recovery delivers the "
+    "external flux",
+    action="store_true",
+)
+parser.add_argument(
+    "--recovery-cadence",
+    help="vacuum recovery cadence",
+    choices=["half", "full"],
+    default="half",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
@@ -317,5 +353,7 @@ run = VacuumInductiveRamp(
     verbose=args.verbose,
     implicit=args.implicit,
     darwin=args.darwin,
+    recovery=args.recovery,
+    recovery_cadence=args.recovery_cadence,
 )
 simulation.step()
