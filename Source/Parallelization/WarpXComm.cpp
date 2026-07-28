@@ -658,7 +658,13 @@ WarpX::ComputeDivBAux (amrex::MultiFab& divB_out, const int dcomp,
                     m_fields.get_alldirs(FieldType::Bfield_fp, l),
                     CellSize(l), ng);
 
-        if (l > 0 && m_fields.has_vector(FieldType::Bfield_cp, l))
+        // Coarse-patch correction only where the aux fields carry one:
+        // with the electrostatic/None solver the aux update is a plain
+        // copy per level (no cp contribution), and cp fields/solvers
+        // may not exist at all.
+        if (l > 0
+            && electromagnetic_solver_id != ElectromagneticSolverAlgo::None
+            && m_fields.has_vector(FieldType::Bfield_cp, l))
         {
             const amrex::MultiFab& Bx_cp =
                 *m_fields.get(FieldType::Bfield_cp, Direction{0}, l);
@@ -743,7 +749,11 @@ WarpX::ComputeDivEAux (amrex::MultiFab& divE_out, const int lev)
             ba, DistributionMap(l), ncomps, amrex::IntVect(1));
         compute_dive_fp(*dive_aux[l], l);
 
-        if (l > 0 && m_fields.has_vector(FieldType::Efield_cp, l))
+        if (l > 0
+            && electromagnetic_solver_id != ElectromagneticSolverAlgo::None
+            && m_fields.has_vector(FieldType::Efield_cp, l)
+            && (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::PSATD
+                || m_fdtd_solver_cp[l] != nullptr))
         {
             const amrex::MultiFab& Ex_cp =
                 *m_fields.get(FieldType::Efield_cp, Direction{0}, l);
