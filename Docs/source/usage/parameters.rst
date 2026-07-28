@@ -1895,6 +1895,74 @@ Particle initialization
     If ``1`` is given, this species will not be pushed
     by any pusher during the simulation.
 
+.. pp:param:: <species_name>.do_subcycled_push
+    :type: ``0`` or ``1``
+    :default: ``0``
+    :optional:
+
+    If ``1`` is given, this species is advanced on its own subcycle time step,
+    smaller than the global time step, against the (frozen) fields of the
+    current step. The subcycle step is
+    ``dt_sub = min(subcycling_cfl_cyclotron/omega_c(B_max), subcycling_cfl_grid*dx_min/v_ref)``,
+    with the final subcycle truncated so the subcycles sum exactly to the global
+    step. Boundary conditions and embedded-boundary scraping are applied every
+    subcycle, so wall-loss records in the particle boundary buffer carry the
+    sub-step absorption time. This is intended for species whose gyration or
+    grid-crossing time is much shorter than the global step, e.g. fusion-born
+    alpha particles in Ohm's-law hybrid simulations or strongly magnetized
+    species in electrostatic simulations. Requires a single mesh level and is
+    not compatible with implicit evolution schemes or particle splitting.
+
+.. pp:param:: <species_name>.do_orbit_averaged_deposition
+    :type: ``0`` or ``1``
+    :default: ``1``
+    :optional:
+
+    Only used when ``<species_name>.do_subcycled_push = 1``. If ``1``, the
+    species deposits its charge and current densities every subcycle, scaled by
+    ``dt_sub/dt``, and the accumulated **orbit-averaged** moments (time averages
+    over the global step) are served to the field solvers in place of an
+    instantaneous deposition at the end-of-step positions. The per-step weights
+    sum exactly to one, so the deposited charge equals the charge carried by
+    the macroparticles. The orbit-averaged current is the species' vector flux
+    times its charge, so particle fluxes through surfaces can be computed
+    directly from the deposited current.
+
+.. pp:param:: <species_name>.subcycling_cfl_cyclotron
+    :type: `float`
+    :default: ``0.1``
+    :optional:
+
+    Only used when ``<species_name>.do_subcycled_push = 1``. Maximum gyration
+    angle (in radians) per subcycle, evaluated with the maximum magnitude of
+    the magnetic field on the grid.
+
+.. pp:param:: <species_name>.subcycling_cfl_grid
+    :type: `float`
+    :default: ``0.4``
+    :optional:
+
+    Only used when ``<species_name>.do_subcycled_push = 1``. Maximum fraction
+    of the smallest cell size crossed per subcycle at the reference speed.
+
+.. pp:param:: <species_name>.subcycling_v_ref
+    :type: `float`
+    :default: ``-1.``
+    :optional:
+
+    Only used when ``<species_name>.do_subcycled_push = 1``. Reference speed
+    (in m/s) for the grid-crossing subcycle constraint. When not positive, the
+    maximum particle speed of the species is computed each step and used
+    instead.
+
+.. pp:param:: <species_name>.subcycling_max_subcycles
+    :type: `int`
+    :default: ``10000``
+    :optional:
+
+    Only used when ``<species_name>.do_subcycled_push = 1``. Safety cap on the
+    number of subcycles per global step.
+
 .. pp:param:: <species_name>.addIntegerAttributes
     :type: list of ``string``
 

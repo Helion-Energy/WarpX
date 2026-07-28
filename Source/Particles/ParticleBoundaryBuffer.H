@@ -46,6 +46,30 @@ public:
         amrex::Real cur_time
     );
 
+    /** Gather scraped particles of a single species into the boundary buffer.
+     *
+     * Used by species that handle boundaries more often than once per step
+     * (e.g. SubcycledParticleContainer), so that scrape records carry the
+     * sub-step time stamp.
+     *
+     * \param pc the particle container of the species
+     * \param i the species index (WarpXParticleContainer::getSpeciesId())
+     * \param cur_time time at which the particles are scraped
+     * \param dt time step used for the sub-step scrape time stamps
+     */
+    void gatherParticlesFromDomainBoundaries (
+        WarpXParticleContainer const& pc, int i,
+        amrex::Real cur_time, amrex::Real dt
+    );
+    /** Gather particles of a single species scraped at the embedded boundary
+     * (see gatherParticlesFromDomainBoundaries for the parameters)
+     */
+    void gatherParticlesFromEmbeddedBoundaries (
+        WarpXParticleContainer const& pc, int i,
+        ablastr::fields::MultiLevelScalarField const& distance_to_eb,
+        amrex::Real cur_time, amrex::Real dt
+    );
+
     void redistribute ();
     void clearParticles ();
     void clearParticles (int i);

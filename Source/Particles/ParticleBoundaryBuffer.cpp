@@ -360,6 +360,16 @@ void ParticleBoundaryBuffer::clearParticles (int const i) {
 
 void ParticleBoundaryBuffer::gatherParticlesFromDomainBoundaries (MultiParticleContainer& mypc, amrex::Real cur_time)
 {
+    const amrex::Real dt = WarpX::GetInstance().getdt(0);
+    for (int i = 0; i < numSpecies(); ++i)
+    {
+        gatherParticlesFromDomainBoundaries(mypc.GetParticleContainer(i), i, cur_time, dt);
+    }
+}
+
+void ParticleBoundaryBuffer::gatherParticlesFromDomainBoundaries (
+    WarpXParticleContainer const& pc, const int i, amrex::Real cur_time, amrex::Real dt)
+{
     ABLASTR_PROFILE("ParticleBoundaryBuffer::gatherParticles");
 
     using PIter = amrex::ParConstIterSoA<PIdx::nattribs, 0, amrex::PolymorphicArenaAllocator>;
@@ -373,10 +383,8 @@ void ParticleBoundaryBuffer::gatherParticlesFromDomainBoundaries (MultiParticleC
         for (int iside = 0; iside < 2; ++iside)
         {
             auto& buffer = m_particle_containers[2*idim+iside];
-            for (int i = 0; i < numSpecies(); ++i)
             {
                 if (!m_do_boundary_buffer[2*idim+iside][i]) { continue; }
-                const WarpXParticleContainer& pc = mypc.GetParticleContainer(i);
                 if (!buffer[i].isDefined())
                 {
                     buffer[i] = pc.make_alike<>();
@@ -449,8 +457,6 @@ void ParticleBoundaryBuffer::gatherParticlesFromDomainBoundaries (MultiParticleC
                         }
                         {
                           ABLASTR_PROFILE("ParticleBoundaryBuffer::gatherParticles::filterAndTransform");
-                          auto& warpx = WarpX::GetInstance();
-                          const auto dt = warpx.getdt(pti.GetLevel());
                           auto & buf = buffer[i];
                           const int step_scraped_index = buf.GetIntCompIndex("stepScraped") - WarpXParticleContainer::NArrayInt;
                           const int delta_index = buf.GetRealCompIndex("deltaTimeScraped") - WarpXParticleContainer::NArrayReal;
@@ -473,6 +479,19 @@ void ParticleBoundaryBuffer::gatherParticlesFromDomainBoundaries (MultiParticleC
 void ParticleBoundaryBuffer::gatherParticlesFromEmbeddedBoundaries (
     MultiParticleContainer& mypc, ablastr::fields::MultiLevelScalarField const& distance_to_eb, amrex::Real cur_time)
 {
+    if (!EB::enabled()) { return; }
+    const amrex::Real dt = WarpX::GetInstance().getdt(0);
+    for (int i = 0; i < numSpecies(); ++i)
+    {
+        gatherParticlesFromEmbeddedBoundaries(mypc.GetParticleContainer(i), i, distance_to_eb, cur_time, dt);
+    }
+}
+
+void ParticleBoundaryBuffer::gatherParticlesFromEmbeddedBoundaries (
+    WarpXParticleContainer const& pc, const int i,
+    ablastr::fields::MultiLevelScalarField const& distance_to_eb,
+    amrex::Real cur_time, amrex::Real dt)
+{
     if (EB::enabled()) {
         ABLASTR_PROFILE("ParticleBoundaryBuffer::gatherParticles::EB");
 
@@ -483,10 +502,8 @@ void ParticleBoundaryBuffer::gatherParticlesFromEmbeddedBoundaries (
         auto plo = geom.ProbLoArray();
 
         auto& buffer = m_particle_containers[m_particle_containers.size()-1];
-        for (int i = 0; i < numSpecies(); ++i)
         {
-            if (!m_do_boundary_buffer[AMREX_SPACEDIM*2][i]) { continue; }
-            const auto& pc = mypc.GetParticleContainer(i);
+            if (!m_do_boundary_buffer[AMREX_SPACEDIM*2][i]) { return; }
             if (!buffer[i].isDefined())
             {
                 buffer[i] = pc.make_alike<>();
@@ -561,8 +578,6 @@ void ParticleBoundaryBuffer::gatherParticlesFromEmbeddedBoundaries (
                         if (new_np > capacity) { ptile_buffer.reserve(2*new_np); }
                         ptile_buffer.resize(new_np);
                     }
-                    auto &warpx = WarpX::GetInstance();
-                    const auto dt = warpx.getdt(pti.GetLevel());
                     auto & buf = buffer[i];
                     const int step_scraped_index = buf.GetIntCompIndex("stepScraped") - WarpXParticleContainer::NArrayInt;
                     const int delta_index = buf.GetRealCompIndex("deltaTimeScraped") - WarpXParticleContainer::NArrayReal;

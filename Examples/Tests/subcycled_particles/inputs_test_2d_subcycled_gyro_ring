@@ -1,0 +1,78 @@
+# Subcycled particle push with orbit-averaged deposition: gyro-ring test
+#
+# A single alpha particle gyrates in a uniform out-of-plane magnetic field
+# under the hybrid (Ohm's law) solver. Ten global steps cover exactly one
+# gyroperiod, so the time-weighted sum of the orbit-averaged charge densities
+# deposited by the SubcycledParticleContainer must be an annulus of radius
+# r_L centered on the gyrocenter, the summed orbit-averaged current density a
+# closed ring current, and the deposited charge of every step exactly q*w
+# (the orbit-average weights sum to one). The analysis script checks these
+# invariants.
+#
+# Parameters: B = 1 T (in y), v = 1e6 m/s, alpha particle (q = 2e, m = 4 m_p):
+#   omega_c = q B / m  = 4.82249e7 rad/s
+#   T_gyro  = 2 pi / omega_c = 1.302859e-7 s
+#   r_L     = m v / (q B) = 2.073645e-2 m
+#
+# The gyroperiod is covered in 10 global steps (the hybrid B-field advance
+# cannot span a full gyroperiod in one step), each subcycled ~21x for the
+# alpha; the analysis sums the 10 per-step orbit averages into the
+# full-period ring.
+
+max_step = 10
+warpx.const_dt = 1.302859e-8
+warpx.serialize_initial_conditions = 1
+warpx.verbose = 1
+
+amr.n_cell = 128 128
+amr.max_grid_size = 64
+amr.max_level = 0
+
+geometry.dims = 2
+geometry.prob_lo = -0.1 -0.1
+geometry.prob_hi =  0.1  0.1
+
+boundary.field_lo = periodic periodic
+boundary.field_hi = periodic periodic
+boundary.particle_lo = periodic periodic
+boundary.particle_hi = periodic periodic
+
+# Hybrid (Ohm's law) field solver with an exactly inert field advance: the
+# density floor is set above any deposited density and the Holmstrom vacuum
+# treatment zeroes E in below-floor cells, so E = 0 identically, B stays at
+# its uniform initial value, and the alpha undergoes textbook gyration while
+# its orbit-averaged moments are deposited.
+algo.maxwell_solver = hybrid
+algo.particle_shape = 1
+hybrid_pic_model.elec_temp = 1.0
+hybrid_pic_model.gamma = 1.0
+hybrid_pic_model.n_floor = 1.0e30
+hybrid_pic_model.holmstrom_vacuum_region = 1
+
+# Uniform initial magnetic field, out of the simulation plane
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 1.0 0.0
+
+particles.species_names = alpha
+
+alpha.species_type = helium4
+alpha.charge = 3.20435324e-19
+alpha.mass = 6.64465751e-27
+alpha.injection_style = singleparticle
+# Start on the +x side of the gyrocenter (at the origin), moving in +z:
+# with B = +y the orbit is a circle of radius r_L about the origin.
+alpha.single_particle_pos = 2.073645e-2 0.0 0.0
+# proper velocity u/c = gamma*v/c with v = 1e6 m/s
+alpha.single_particle_u = 0.0 0.0 3.335640952e-3
+alpha.single_particle_weight = 1.0e6
+
+# Subcycled push with orbit-averaged deposition
+alpha.do_subcycled_push = 1
+alpha.subcycling_cfl_cyclotron = 0.1
+alpha.subcycling_cfl_grid = 0.4
+alpha.do_orbit_averaged_deposition = 1
+
+diagnostics.diags_names = diag1
+diag1.intervals = 1
+diag1.diag_type = Full
+diag1.fields_to_plot = rho jx jy jz Bx By Bz

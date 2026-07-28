@@ -1,6 +1,7 @@
 CEXE_sources += MultiParticleContainer.cpp
 CEXE_sources += WarpXParticleContainer.cpp
 CEXE_sources += RigidInjectedParticleContainer.cpp
+CEXE_sources += SubcycledParticleContainer.cpp
 CEXE_sources += PhysicalParticleContainer.cpp
 CEXE_sources += PhotonParticleContainer.cpp
 CEXE_sources += LaserParticleContainer.cpp
