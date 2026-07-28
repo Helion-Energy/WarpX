@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 #
 # --- Self-asserting unit batteries of the isotropized hybrid Ohm's-law
-# --- operators (hybrid_pic_model.isotropic_hyper_resistivity /
-# --- isotropic_resistivity / isotropic_gradient): a small species-free grid
+# --- operators (hybrid_pic_model.isotropic_operators): a small species-free grid
 # --- is initialized, synthetic fields with known closed-form behavior are
 # --- loaded through the field wrappers, the Ohm's-law solve is applied
 # --- directly through its Python binding, and the values are asserted point
@@ -81,7 +80,6 @@ def setup_simulation(battery, grid_type="staggered"):
     # force a single box.
     hyper = battery.startswith("hyper") or battery == "eb_fallback"
     resistive = battery.startswith("resistive")
-    gradient = battery.startswith("gradient") or battery == "eb_fallback"
 
     grid = picmi.Cartesian3DGrid(
         number_of_cells=[N_XY, N_XY, N_Z],
@@ -115,14 +113,9 @@ def setup_simulation(battery, grid_type="staggered"):
         # corner-curl correction, the gradient battery E = -grad(Pe)/rho
         plasma_resistivity=(ETA_R if resistive else 0.0),
         plasma_hyper_resistivity=(ETA_H if hyper else None),
-        isotropic_hyper_resistivity=(True if hyper else None),
-        isotropic_resistivity=(True if resistive else None),
-        isotropic_gradient=(True if gradient else None),
-        # request the near-EB compact fallback explicitly: it is the default
-        # upstream, but branches whose EB boundary layer mirror-fills the
-        # wide-stencil bands flip that default -- this battery asserts the
-        # fallback itself, so pin it on
-        isotropic_eb_compact_fallback=(True if battery == "eb_fallback" else None),
+        # every battery runs with the isotropized operators enabled; the
+        # other terms are inert through their zero coefficients above
+        isotropic_operators=True,
         substeps=4,
     )
 
