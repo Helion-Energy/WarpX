@@ -596,8 +596,12 @@ public:
 
     /**
      * \brief Operator-split (semi)implicit magnetic diffusion (FLASH MagDiff-inspired).
-     * Default-off. When enabled, stiff vacuum resistivity is advanced with
-     * MLCurlCurl after each hybrid B half-step; Ohm uses min(eta, eta_explicit_max).
+     * Default-off. When enabled, advances dB/dt = -curl((eta_D/mu0) curl B)
+     * after each hybrid B half-step, where
+     * eta_D = max(eta - mag_diff_eta_explicit_max, 0) is the residual after
+     * Ohm's law (which uses eta_Ohm = min(eta, mag_diff_eta_explicit_max)).
+     * With mag_diff_eta_explicit_max = 0 (default), eta_D = eta and all
+     * resistive diffusion is implicit.
      */
     HybridMagDiffusion m_mag_diffusion;
 

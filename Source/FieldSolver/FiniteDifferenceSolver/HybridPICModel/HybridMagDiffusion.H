@@ -64,6 +64,7 @@ public:
 
     [[nodiscard]] bool Enabled () const { return m_enabled; }
     [[nodiscard]] amrex::Real Theta () const { return m_theta; }
+    /** Max Ohm resistivity; mag-diff uses residual max(eta - this, 0). */
     [[nodiscard]] amrex::Real EtaExplicitMax () const { return m_eta_explicit_max; }
     [[nodiscard]] bool HasConstantEta () const { return m_has_constant_eta; }
     [[nodiscard]] amrex::Real ConstantEta () const { return m_constant_eta; }
