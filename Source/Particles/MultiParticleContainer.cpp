@@ -31,6 +31,7 @@
 #include "Particles/PhotonParticleContainer.H"
 #include "Particles/PhysicalParticleContainer.H"
 #include "Particles/RigidInjectedParticleContainer.H"
+#include "Particles/SubcycledParticleContainer.H"
 #include "Particles/WarpXParticleContainer.H"
 #include "SpeciesPhysicalProperties.H"
 #include "Utils/Algorithms/IsIn.H"
@@ -111,6 +112,9 @@ MultiParticleContainer::MultiParticleContainer (AmrCore* amr_core)
         }
         else if (species_types[i] == PCTypes::Photon) {
             allcontainers[i] = std::make_unique<PhotonParticleContainer>(amr_core, i, species_names[i]);
+        }
+        else if (species_types[i] == PCTypes::Subcycled) {
+            allcontainers[i] = std::make_unique<SubcycledParticleContainer>(amr_core, i, species_names[i]);
         }
         allcontainers[i]->m_deposit_on_main_grid = m_deposit_on_main_grid[i];
         allcontainers[i]->m_gather_from_main_grid = m_gather_from_main_grid[i];
@@ -336,6 +340,16 @@ MultiParticleContainer::ReadParameters ()
 
                 if (name_is_in_photon_species || species_type_is_photon  ){
                     species_types[spec_index] = PCTypes::Photon;
+                }
+
+                // Get subcycled species
+                bool do_subcycled_push = false;
+                pp_species.query("do_subcycled_push", do_subcycled_push);
+                if (do_subcycled_push) {
+                    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                        species_types[spec_index] == PCTypes::Physical,
+                        "<species>.do_subcycled_push is only supported for plain physical species");
+                    species_types[spec_index] = PCTypes::Subcycled;
                 }
             }
         }
