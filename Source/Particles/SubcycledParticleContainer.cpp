@@ -274,11 +274,12 @@ SubcycledParticleContainer::Evolve (ablastr::fields::MultiFabRegister& fields,
             SubcyclingHalf::None, /*skip_deposition=*/true,
             position_push_type, momentum_push_type, nullptr);
 
-        // Boundary handling every subcycle: absorbed particles stop
-        // contributing to the averaged moments from this subcycle on, and
-        // wall-loss records carry the sub-step time stamp.
-        HandleBoundariesSubcycle(t_sub + dt_sub, dt_sub);
-
+        // Deposit BEFORE any boundary handling (as in the main PIC loop):
+        // charge-conserving (Esirkepov) deposition reconstructs the segment
+        // of this subcycle as [x - v*dt_sub, x], which is only valid while
+        // the pushed positions are unmodified — reflections or periodic
+        // wraps must come after. Out-of-box positions deposit through the
+        // guard cells and are folded back by the caller's guard-cell sum.
         if (average)
         {
             const amrex::Real lambda = dt_sub / dt;
@@ -308,6 +309,11 @@ SubcycledParticleContainer::Evolve (ablastr::fields::MultiFabRegister& fields,
                     0, 0, m_rho_tmp->nComp(), m_rho_tmp->nGrowVect());
             }
         }
+
+        // Boundary handling every subcycle: absorbed particles stop
+        // contributing to the averaged moments from the next subcycle on,
+        // and wall-loss records carry the sub-step time stamp.
+        HandleBoundariesSubcycle(t_sub + dt_sub, dt_sub);
 
         t_sub += dt_sub;
         remaining -= dt_sub;
