@@ -271,7 +271,7 @@ class EMModes(object):
             # quantity checked at CI scale.
             import pywarpx
 
-            pywarpx.hybridpicmodel.darwin_poisson_rtol = 1.0e-8
+            pywarpx.hybridpicmodel.darwin_poisson_relative_tolerance = 1.0e-8
 
         #######################################################################
         # Particle types setup                                                #

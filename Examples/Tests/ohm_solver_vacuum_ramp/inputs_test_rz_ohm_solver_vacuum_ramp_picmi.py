@@ -190,7 +190,7 @@ class VacuumInductiveRamp(object):
             if self.darwin:
                 # The E_L asserts run at the percent level; the default
                 # 1e-10 Poisson tolerance only slows the CI run down.
-                pywarpx.hybridpicmodel.darwin_poisson_rtol = 1.0e-8
+                pywarpx.hybridpicmodel.darwin_poisson_relative_tolerance = 1.0e-8
             if self.darwin:
                 # The vacuum resistivity puts the resistive gain
                 # eta*k_max^2*theta*dt/mu0 (~300) far beyond the Picard
