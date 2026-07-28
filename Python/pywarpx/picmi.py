@@ -2173,42 +2173,19 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         Flag to determine handling of vacuum region (where rho < n_floor*q_e). Setting to True will solve the simplified Generalized Ohm's Law dropping the Hall and pressure terms in the vacuum region. See `Holmstrom (2013) <https://arxiv.org/abs/1301.0272v1>`_.
         This flag is useful for suppressing vacuum region fluctuations. A large resistivity value must be used when rho <= rho_floor.
 
-    isotropic_hyper_resistivity: bool, default=False
-        Evaluate the hyper-resistivity Laplacian with the isotropic
-        Mehrstellen (2D) / Patra-Karttunen (3D) stencils instead of the
-        cross stencil, removing the fourfold (cos 4*theta) anisotropy of
-        its damping rate (fully isotropic on cubic cells; Cartesian
-        geometries). Near an embedded boundary the operator falls back to
-        the cross stencil.
-
-    isotropic_resistivity: bool, default=False
-        Add an isotropizing corner-curl correction to the resistive electric
-        field so the emergent in-plane diffusion of the out-of-plane magnetic
-        field uses the isotropic (Mehrstellen) Laplacian instead of the cross
-        stencil, removing the cos 4*theta anisotropy that drives a grid m=4
-        mode. Applied through E, so the Faraday curl is unchanged and div(B)
-        stays exactly zero (Cartesian geometries; the RZ resistive operator
-        is axisymmetric and has no such anisotropy). Near an embedded
-        boundary the correction is dropped.
-
-    isotropic_gradient: bool, default=False
-        Evaluate the electron-pressure gradient in Ohm's law with the
-        transverse-smoothed (isotropized) staggered difference instead of
-        the plain two-point stencil, removing the cos 4*theta anisotropy of
-        the pressure-gradient magnitude (fully isotropic on cubic cells;
-        Cartesian geometries).
-        Only affects the E used for the particle push and diagnostics: the
-        Faraday/B-integration path omits grad(Pe) entirely, which is also
-        what keeps the (only O(h^2)-small, not identically zero) discrete
-        curl of the isotropized gradient out of the B update. Near an
-        embedded boundary the operator falls back to the two-point stencil.
-
-    isotropic_eb_compact_fallback: bool, default=True
-        Near an embedded boundary, fall back per point from the isotropic
-        stencils to the standard compact ones within a corner reach of the
-        level set, where the diagonal reads are not maintained by the EB
-        update masks. A hybrid EB boundary layer that mirror-fills the
-        wide-stencil bands may disable it.
+    isotropic_operators: bool, default=False
+        Evaluate the dissipative/gradient operators of the Ohm's law with
+        their isotropized stencils: the hyper-resistivity Laplacian uses the
+        isotropic Mehrstellen (2D) / Patra-Karttunen (3D) stencil, the
+        resistive term gains the corner-curl correction (applied through E,
+        so the Faraday curl is unchanged and div(B) stays exactly zero), and
+        the electron-pressure gradient uses the transverse-smoothed staggered
+        difference. All three cancel the same fourfold (cos 4*theta) grid
+        anisotropy, which otherwise imprints an m=4 mode on diffusing or
+        pinching fields; they are enabled together (fully isotropic on cubic
+        cells; Cartesian geometries). Near an embedded boundary the operators
+        automatically fall back per point to the standard compact stencils
+        within a corner reach of the level set.
 
     Jx/y/z_external_function: str
         Function of space and time specifying external (non-plasma) currents.
@@ -2265,10 +2242,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         substep_max_growth=None,
         max_substep_attempts=None,
         holmstrom_vacuum_region=None,
-        isotropic_hyper_resistivity=None,
-        isotropic_resistivity=None,
-        isotropic_gradient=None,
-        isotropic_eb_compact_fallback=None,
+        isotropic_operators=None,
         Jx_external_function=None,
         Jy_external_function=None,
         Jz_external_function=None,
@@ -2296,10 +2270,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
 
         self.holmstrom_vacuum_region = holmstrom_vacuum_region
 
-        self.isotropic_hyper_resistivity = isotropic_hyper_resistivity
-        self.isotropic_resistivity = isotropic_resistivity
-        self.isotropic_gradient = isotropic_gradient
-        self.isotropic_eb_compact_fallback = isotropic_eb_compact_fallback
+        self.isotropic_operators = isotropic_operators
 
         self.Jx_external_function = Jx_external_function
         self.Jy_external_function = Jy_external_function
@@ -2351,14 +2322,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         pywarpx.hybridpicmodel.substep_max_growth = self.substep_max_growth
         pywarpx.hybridpicmodel.max_substep_attempts = self.max_substep_attempts
         pywarpx.hybridpicmodel.holmstrom_vacuum_region = self.holmstrom_vacuum_region
-        pywarpx.hybridpicmodel.isotropic_hyper_resistivity = (
-            self.isotropic_hyper_resistivity
-        )
-        pywarpx.hybridpicmodel.isotropic_resistivity = self.isotropic_resistivity
-        pywarpx.hybridpicmodel.isotropic_gradient = self.isotropic_gradient
-        pywarpx.hybridpicmodel.isotropic_eb_compact_fallback = (
-            self.isotropic_eb_compact_fallback
-        )
+        pywarpx.hybridpicmodel.isotropic_operators = self.isotropic_operators
         pywarpx.hybridpicmodel.__setattr__(
             "Jx_external_grid_function(x,y,z,t)",
             pywarpx.my_constants.mangle_expression(
