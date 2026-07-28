@@ -1147,7 +1147,9 @@ HybridMagDiffusion::AdvanceVariable (
     static thread_local MagDiffVector solution;
     static thread_local MagDiffVector rhs;
     static thread_local MagDiffVector Ae;
+#ifdef AMREX_USE_PETSC
     static thread_local PetscOpCtx opctx;
+#endif
     static thread_local BoxArray cached_ba;
     static thread_local DistributionMapping cached_dm;
     static thread_local bool bufs_defined = false;
@@ -1166,6 +1168,7 @@ HybridMagDiffusion::AdvanceVariable (
         solution.Define(Bfield);
         rhs.Define(Bfield);
         Ae.Define(Bfield);
+#ifdef AMREX_USE_PETSC
         opctx = PetscOpCtx{};
         opctx.U.Define(makeVectorFieldView(solution.fields()));
         opctx.F.Define(makeVectorFieldView(solution.fields()));
@@ -1174,11 +1177,14 @@ HybridMagDiffusion::AdvanceVariable (
 #ifdef AMREX_USE_GPU
         opctx.ensureHostBufs(solution.fields());
 #endif
+#endif
         cached_ba = Bfield[0]->boxArray();
         cached_dm = Bfield[0]->DistributionMap();
         bufs_defined = true;
     }
+#ifdef AMREX_USE_PETSC
     opctx.linop = &linop;
+#endif
 
     // Capture B^n before prepareFeed: the operator stages its Krylov vectors
     // (and the zero probe for the feed offset) through m_source, which is the

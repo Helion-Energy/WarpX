@@ -35,8 +35,25 @@ VERSION_DASHED=${VERSION_DOTTED/./-}  # replace first occurence of "." with "-"
 # install nvhpc
 curl https://developer.download.nvidia.com/hpc-sdk/ubuntu/DEB-GPG-KEY-NVIDIA-HPC-SDK | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-hpcsdk-archive-keyring.gpg
 echo 'deb [signed-by=/usr/share/keyrings/nvidia-hpcsdk-archive-keyring.gpg] https://developer.download.nvidia.com/hpc-sdk/ubuntu/amd64 /' | sudo tee /etc/apt/sources.list.d/nvhpc.list
-sudo apt update -y
-sudo apt install -y --no-install-recommends nvhpc-${VERSION_DASHED}
+PKG="nvhpc-${VERSION_DASHED}"
+
+sudo apt-get update
+
+if ! apt-cache show "${PKG}" >/dev/null 2>&1; then
+    echo "Requested ${PKG} not found in apt metadata; falling back to nvhpc-25-3"
+    PKG="nvhpc-25-3"
+    VERSION_DOTTED="25.3"
+fi
+
+VER="$(apt-cache madison "${PKG}" | awk '{print $3}' | head -n1)"
+if [[ -n "${VER}" ]]; then
+    echo "Installing ${PKG}=${VER}"
+    sudo apt-get install -y --no-install-recommends "${PKG}=${VER}" || \
+    sudo apt-get install -y --no-install-recommends "${PKG}"
+else
+    echo "Installing ${PKG} (unpinned candidate)"
+    sudo apt-get install -y --no-install-recommends "${PKG}"
+fi
 
 # clean up space
 sudo rm -rf /var/lib/apt/lists/*
