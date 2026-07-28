@@ -654,6 +654,10 @@ WarpX::ComputeDivBAux (amrex::MultiFab& divB_out, const int dcomp,
         const amrex::IntVect ng = (l == lev) ? ngrow : amrex::IntVect(1);
         divb_aux[l] = std::make_unique<amrex::MultiFab>(
             boxArray(l), DistributionMap(l), ncomps, ng);
+        // The stencil fills valid cells only; zero the ghosts so no
+        // uninitialized values reach the diagnostic copy (or trip
+        // FPE trapping in CI).
+        divb_aux[l]->setVal(0.0);
         ComputeDivB(*divb_aux[l], 0,
                     m_fields.get_alldirs(FieldType::Bfield_fp, l),
                     CellSize(l), ng);
@@ -747,6 +751,7 @@ WarpX::ComputeDivEAux (amrex::MultiFab& divE_out, const int lev)
             amrex::convert(boxArray(l), divE_type);
         dive_aux[l] = std::make_unique<amrex::MultiFab>(
             ba, DistributionMap(l), ncomps, amrex::IntVect(1));
+        dive_aux[l]->setVal(0.0);
         compute_dive_fp(*dive_aux[l], l);
 
         if (l > 0
