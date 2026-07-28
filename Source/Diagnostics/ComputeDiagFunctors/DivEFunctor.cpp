@@ -17,12 +17,10 @@ DivEFunctor::DivEFunctor (
     const int lev,
     const amrex::IntVect crse_ratio,
     bool convertRZmodes2cartesian,
-    const int ncomp,
-    bool use_fp_field
+    const int ncomp
 )
     : ComputeDiagFunctor(ncomp, crse_ratio), m_lev(lev),
-      m_convertRZmodes2cartesian(convertRZmodes2cartesian),
-      m_use_fp_field(use_fp_field)
+      m_convertRZmodes2cartesian(convertRZmodes2cartesian)
 {}
 
 void
@@ -47,7 +45,9 @@ DivEFunctor::operator()(amrex::MultiFab& mf_dst, const int dcomp, const int /*i_
 
     const amrex::BoxArray& ba = amrex::convert(warpx.boxArray(m_lev), cell_type);
     amrex::MultiFab divE(ba, warpx.DistributionMap(m_lev), WarpX::ncomps, ng );
-    warpx.ComputeDivE(divE, m_lev, m_use_fp_field);
+    // Reconstructed solver-field divergence (MR-aware); see
+    // WarpX::ComputeDivEAux.
+    warpx.ComputeDivEAux(divE, m_lev);
 
 #ifdef WARPX_DIM_RZ
     if (m_convertRZmodes2cartesian) {

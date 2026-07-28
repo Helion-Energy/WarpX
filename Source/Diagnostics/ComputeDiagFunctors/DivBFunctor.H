@@ -11,22 +11,11 @@
 class DivBFunctor final : public ComputeDiagFunctor
 {
 public:
-    /** Constructor.
-     * \param[in] lev level of multifab.
-     * \param[in] crse_ratio for interpolating field values from simulation MultiFabs
-                  to the output diagnostic MultiFab, mf_dst.
-     * \param[in] convertRZmodes2cartesian whether to generate the result in Cartesian coordinates
-     *            (summing over modes)
-     * \param[in] ncomp Number of component of mf_src to cell-center in dst multifab.
-     * \param[in] use_fp_field if true, compute divB from the fine-patch (solver) fields
-     *            instead of the aux (gather) fields
-     */
     DivBFunctor (
         int lev,
         amrex::IntVect crse_ratio,
         bool convertRZmodes2cartesian=true,
-        int ncomp=1,
-        bool use_fp_field=false
+        int ncomp=1
     );
 
     /** \brief Compute DivB directly into mf_dst.
@@ -41,7 +30,6 @@ private:
     /**< (for cylindrical) whether to average all modes into 1 comp */
     bool m_convertRZmodes2cartesian;
     /**< whether to compute divB from the fine-patch (solver) fields instead of the aux fields */
-    bool m_use_fp_field;
 };
 
 #endif // WARPX_DIVBFUNCTOR_H_

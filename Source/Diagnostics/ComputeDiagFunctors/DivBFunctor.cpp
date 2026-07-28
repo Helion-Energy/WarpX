@@ -9,18 +9,14 @@
 #include <AMReX_IntVect.H>
 #include <AMReX_MultiFab.H>
 
-using warpx::fields::FieldType;
-
 DivBFunctor::DivBFunctor (
     const int lev,
     const amrex::IntVect crse_ratio,
     bool convertRZmodes2cartesian,
-    const int ncomp,
-    bool use_fp_field
+    const int ncomp
 )
     : ComputeDiagFunctor(ncomp, crse_ratio), m_lev(lev),
-      m_convertRZmodes2cartesian(convertRZmodes2cartesian),
-      m_use_fp_field(use_fp_field)
+      m_convertRZmodes2cartesian(convertRZmodes2cartesian)
 {}
 
 void
@@ -34,10 +30,9 @@ DivBFunctor::operator()(amrex::MultiFab& mf_dst, int dcomp, const int /*i_buffer
     // A cell-centered divB multifab spanning the entire domain is generated
     // and divB is computed on the cell-center, with ng=1.
     amrex::MultiFab divB( warpx.boxArray(m_lev), warpx.DistributionMap(m_lev), WarpX::ncomps, ng );
-    const ablastr::fields::VectorField Bfield = m_use_fp_field ?
-        warpx.m_fields.get_alldirs(FieldType::Bfield_fp, m_lev) :
-        warpx.m_fields.get_alldirs(FieldType::Bfield_aux, m_lev);
-    WarpX::ComputeDivB(divB, 0, Bfield, WarpX::CellSize(m_lev) );
+    // Reconstructed solver-field divergence (MR-aware, machine-zero
+    // for curl-updated B on every level); see WarpX::ComputeDivBAux.
+    warpx.ComputeDivBAux(divB, 0, m_lev, amrex::IntVect(ng));
     // // Coarsen and Interpolate from divB to coarsened/reduced_domain mf_dst
     // ablastr::coarsen::sample::Coarsen( mf_dst, divB, dcomp, 0, nComp(), 0, m_crse_ratio);
 #ifdef WARPX_DIM_RZ
