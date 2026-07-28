@@ -637,6 +637,65 @@ public:
     int m_darwin_poisson_max_iters = 200;
     int m_darwin_poisson_verbosity = 0;
 
+    /** Vacuum vector-potential recovery (Darwin path only): every application
+     *  replaces the evolved A in low-density cells with the magnetostatic
+     *  solution driven by the retained (plasma) currents and the boundary
+     *  values of A, making the vacuum-region field response instantaneous
+     *  instead of limited by the density-floored halo's Ohm dynamics
+     *  (the vacuum-field limit of Hewett, J. Comput. Phys. 38, 378 (1980)).
+     *  Implemented in correction form: with J_imp = curl(curl A)/mu0 the
+     *  field-implied current, solve
+     *      laplacian(dA) = +mu0 * (J_imp restricted to masked cells),
+     *  with homogeneous Dirichlet values on non-periodic faces and inside
+     *  embedded conductors (the evolved A already carries the external-A
+     *  pin and the conductor gauge zero, so the recovered field shares
+     *  them), then A += dA in masked cells. An empty mask gives dA = 0
+     *  identically: the operation is exactly the identity there.
+     *  Masks (from the step-entry rho^n, component 0 of rho_fp):
+     *  "vacuum" = rho < q_e n_floor (includes true vacuum, default);
+     *  "transition" = 0 < rho < q_e n_floor; "global" = everywhere.
+     *  Cadence: "half" applies inside every residual evaluation at the
+     *  theta-stage field (nonlinear elimination of the vacuum dynamics)
+     *  plus once at the end-of-step state; "full" applies at the
+     *  end-of-step state only. */
+    bool m_darwin_vacuum_recovery = false;
+    std::string m_darwin_vacuum_recovery_mask = "vacuum";
+    std::string m_darwin_vacuum_recovery_cadence = "half";
+    /** Which components are recovered. "flux" (default) recovers only the
+     *  out-of-plane component (A_theta in RZ, A_y in 2D) that carries the
+     *  boundary-driven flux; in 3D it is equivalent to "all". "all"
+     *  recovers every component — CAUTION: in RZ the in-plane (A_r, A_z)
+     *  corrections are discretely inconsistent with the edge curl-curl
+     *  source near the axis (the 1/r stencil factors differ at O(1) in the
+     *  first rows), which pumps an axis-localized instability in the
+     *  B_theta-carrying content. */
+    std::string m_darwin_vacuum_recovery_components = "flux";
+    amrex::Real m_darwin_vacrec_rtol = 1.0e-8;
+    amrex::Real m_darwin_vacrec_atol = 0.0;
+    int m_darwin_vacrec_max_iters = 200;
+    int m_darwin_vacrec_verbosity = 0;
+
+    /** Apply the vacuum vector-potential recovery to "hybrid_A_fp" in place
+     *  (see m_darwin_vacuum_recovery). Uses Bfield_fp as curl scratch: the
+     *  caller must rebuild B = B_static + curl A afterwards (both call
+     *  sites do so anyway) and re-apply the A boundary values.
+     */
+    void ComputeVacuumARecovery ();
+
+    /** Overwrite the recovered components of Efield_fp in masked (vacuum)
+     *  cells with the Faraday-consistent field of the recovered vector
+     *  potential history, E = -(A - A_old)/a_dt_eff (+ E_L when
+     *  a_add_E_long, for call sites where Efield_fp holds the full field).
+     *  The generalized Ohm's law has no validity in vacuum: without this,
+     *  the flux delivered through A never materializes as the inductive
+     *  electric field (particles miss the drive) and the stored E carries
+     *  floored Hall noise; the resulting dA/dt != -E_T inconsistency also
+     *  drives a secular instability of the band content. Only recovered
+     *  components are overwritten -- for raw components the relation holds
+     *  identically and the overwrite would degenerate the residual.
+     */
+    void ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_long);
+
     /** Solve the Darwin longitudinal-field constraint with the given charge
      *  density and the current hybrid_electron_pressure_fp, writing
      *  E_L = grad(phi) into the "hybrid_E_long_fp" fields (E staggering).

@@ -149,6 +149,13 @@ private:
      *  at the top of the first OneStep when all fields are initialized. */
     bool m_darwin_initialized = false;
 
+    /** Cached in Define: vacuum vector-potential recovery enabled
+     *  (hybrid_pic_model.darwin_vacuum_recovery), and its "half" cadence
+     *  (apply inside every residual evaluation at the theta-stage field, in
+     *  addition to the end-of-step application both cadences share). */
+    bool m_vacuum_recovery = false;
+    bool m_vacuum_recovery_half = false;
+
     /** Cached in Define: subtract the resistive Ohm-field part from the
      *  particle push field (hybrid_pic_model.implicit_push_excludes_resistive_field
      *  and a resistive term configured). */

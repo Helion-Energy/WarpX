@@ -2171,6 +2171,34 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         field advances the magnetic vector potential, removing the radiative
         branch (Hewett & Nielson, J. Comput. Phys. 29, 219 (1978)).
 
+    darwin_vacuum_recovery: bool, default=False
+        With the Darwin split, replace the evolved vector potential in
+        low-density (vacuum) cells with the magnetostatic solution driven by
+        the retained plasma currents and the boundary values of A, so the
+        vacuum-region field responds instantaneously instead of at the
+        density-floored halo's transport rate (the vacuum-field limit of
+        Hewett, J. Comput. Phys. 38, 378 (1980)).
+
+    darwin_vacuum_recovery_mask: str, default="vacuum"
+        Where the recovery replaces the field: "vacuum" (density below
+        ``n_floor``, including true vacuum), "transition" (strictly between
+        zero and ``n_floor``) or "global" (everywhere; diagnostic).
+
+    darwin_vacuum_recovery_cadence: str, default="half"
+        "half" applies the recovery inside every nonlinear-solver residual
+        evaluation at the theta-stage field (plus once at the end-of-step
+        state); "full" applies it at the end-of-step state only.
+
+    darwin_vacuum_recovery_components: str, default="flux"
+        "flux" recovers only the out-of-plane component (A_theta in RZ, A_y
+        in 2D) that carries the boundary-driven flux; in 3D it is
+        equivalent to "all". "all" recovers every component (caution: the
+        in-plane corrections are discretely inconsistent with the source
+        near the RZ axis and can destabilize the B_theta content there).
+
+    darwin_vacuum_recovery_relative_tolerance: float, default=1e-8
+        Relative tolerance of the recovery's per-component Poisson solves.
+
     solve_electron_energy_equation: bool, default=False
         Solve the electron energy equation instead of the algebraic adiabatic
         pressure closure: the electron entropy ``K = Te * ne**(1-gamma)`` is
@@ -2339,6 +2367,11 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         solve_electron_energy_equation=None,
         implicit_push_excludes_resistive_field=None,
         darwin=None,
+        darwin_vacuum_recovery=None,
+        darwin_vacuum_recovery_mask=None,
+        darwin_vacuum_recovery_cadence=None,
+        darwin_vacuum_recovery_components=None,
+        darwin_vacuum_recovery_relative_tolerance=None,
         include_joule_heating=None,
         redirect_joule_to_ions=None,
         joule_redirect_Te_threshold=None,
@@ -2380,6 +2413,13 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
             implicit_push_excludes_resistive_field
         )
         self.darwin = darwin
+        self.darwin_vacuum_recovery = darwin_vacuum_recovery
+        self.darwin_vacuum_recovery_mask = darwin_vacuum_recovery_mask
+        self.darwin_vacuum_recovery_cadence = darwin_vacuum_recovery_cadence
+        self.darwin_vacuum_recovery_components = darwin_vacuum_recovery_components
+        self.darwin_vacuum_recovery_relative_tolerance = (
+            darwin_vacuum_recovery_relative_tolerance
+        )
         self.include_joule_heating = include_joule_heating
         self.redirect_joule_to_ions = redirect_joule_to_ions
         self.joule_redirect_Te_threshold = joule_redirect_Te_threshold
@@ -2462,6 +2502,26 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
             )
         if self.darwin is not None:
             pywarpx.hybridpicmodel.darwin = self.darwin
+        if self.darwin_vacuum_recovery is not None:
+            pywarpx.hybridpicmodel.darwin_vacuum_recovery = (
+                self.darwin_vacuum_recovery
+            )
+        if self.darwin_vacuum_recovery_mask is not None:
+            pywarpx.hybridpicmodel.darwin_vacuum_recovery_mask = (
+                self.darwin_vacuum_recovery_mask
+            )
+        if self.darwin_vacuum_recovery_cadence is not None:
+            pywarpx.hybridpicmodel.darwin_vacuum_recovery_cadence = (
+                self.darwin_vacuum_recovery_cadence
+            )
+        if self.darwin_vacuum_recovery_components is not None:
+            pywarpx.hybridpicmodel.darwin_vacuum_recovery_components = (
+                self.darwin_vacuum_recovery_components
+            )
+        if self.darwin_vacuum_recovery_relative_tolerance is not None:
+            pywarpx.hybridpicmodel.darwin_vacuum_recovery_relative_tolerance = (
+                self.darwin_vacuum_recovery_relative_tolerance
+            )
         if self.include_joule_heating is not None:
             pywarpx.hybridpicmodel.include_joule_heating = self.include_joule_heating
         if self.redirect_joule_to_ions is not None:
