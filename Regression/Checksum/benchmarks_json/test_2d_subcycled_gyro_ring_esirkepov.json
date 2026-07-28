@@ -1,0 +1,19 @@
+{
+  "alpha": {
+    "particle_momentum_x": 4.765618152788985e-24,
+    "particle_momentum_y": 0.0,
+    "particle_momentum_z": 6.644655801060898e-21,
+    "particle_position_x": 0.020736667432252498,
+    "particle_position_y": 1.4872828046054768e-05,
+    "particle_weight": 1000000.0
+  },
+  "lev=0": {
+    "Bx": 0.0,
+    "By": 16384.0,
+    "Bz": 0.0,
+    "jx": 0.03813785844142664,
+    "jy": 0.0,
+    "jz": 0.12334891044140528,
+    "rho": 1.3125030871040001e-07
+  }
+}

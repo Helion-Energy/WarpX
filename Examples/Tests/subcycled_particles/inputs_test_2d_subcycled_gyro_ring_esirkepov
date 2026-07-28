@@ -1,0 +1,16 @@
+# base input parameters
+FILE = inputs_base_2d_subcycled_gyro_ring
+
+# Charge-conserving current deposition: the per-subcycle Esirkepov segments
+# accumulate into an orbit-averaged current that satisfies
+#   div(J_avg) = -(rho_inst(t^{n+1}) - rho_inst(t^n)) / dt
+# exactly (the intermediate subcycle levels telescope). The analysis verifies
+# this discretely from the raw (natively staggered) current, with no
+# filtering so the identity holds to machine precision.
+algo.current_deposition = esirkepov
+warpx.use_filter = 0
+
+# raw (natively staggered) fields for the continuity check; fewer boxes
+# keep the raw-field assembly in the analysis simple
+amr.max_grid_size = 128
+diag1.plot_raw_fields = 1
