@@ -3905,6 +3905,9 @@ Maxwell solver: kinetic-fluid hybrid
     recovers every component; caution: in RZ the in-plane corrections are discretely
     inconsistent with the curl-curl source near the axis and can destabilize the
     :math:`B_\theta`-carrying content.
+    ``darwin_vacuum_recovery_density_fraction`` (default 1) scales the mask threshold below
+    ``n_floor``: use values below 1 when the Ohm's-law floor sits inside real plasma so the
+    vacuum treatment stays in the genuine low-density region.
     The MLMG controls are ``darwin_vacuum_recovery_relative_tolerance`` (default ``1e-8``),
     ``darwin_vacuum_recovery_absolute_tolerance`` (default 0),
     ``darwin_vacuum_recovery_max_iterations`` (default 200) and

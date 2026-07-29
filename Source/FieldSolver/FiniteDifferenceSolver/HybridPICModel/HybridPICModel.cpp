@@ -152,6 +152,9 @@ void HybridPICModel::ReadParameters ()
                 "'half' or 'full'");
             pp_hybrid.query("darwin_vacuum_recovery_components",
                             m_darwin_vacuum_recovery_components);
+            utils::parser::queryWithParser(
+                pp_hybrid, "darwin_vacuum_recovery_density_fraction",
+                m_darwin_vacuum_recovery_density_fraction);
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 m_darwin_vacuum_recovery_components == "flux"
                 || m_darwin_vacuum_recovery_components == "all",
@@ -383,6 +386,9 @@ void HybridPICModel::AllocateLevelMFs (
                     lev, amrex::convert(ba, amrex::IntVect::TheNodeVector()),
                     dm, ncomps, ngRho, 0.0_rt);
                 fields.alloc_init("hybrid_J_vac_fp", Direction{dir},
+                    lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB,
+                    0.0_rt);
+                fields.alloc_init("hybrid_E_vac_target_fp", Direction{dir},
                     lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB,
                     0.0_rt);
             }
@@ -1487,7 +1493,7 @@ void HybridPICModel::ComputeDarwinELong (
     }
 }
 
-void HybridPICModel::ComputeVacuumARecovery ()
+void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian)
 {
 #if defined(WARPX_DIM_1D_Z) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     // Blocked at parse time (see ReadParameters); the FD nodal operator has
@@ -1518,7 +1524,8 @@ void HybridPICModel::ComputeVacuumARecovery ()
     // Mask policy on the step-entry charge density (rho^n, component 0 of
     // rho_fp): frozen across the step, so the mask cannot flicker between
     // nonlinear-solver iterations.
-    amrex::Real const rho_floor = PhysConst::q_e * m_n_floor;
+    amrex::Real const rho_floor = PhysConst::q_e * m_n_floor
+        * m_darwin_vacuum_recovery_density_fraction;
     const int mask_mode = (m_darwin_vacuum_recovery_mask == "global") ? 2
         : ((m_darwin_vacuum_recovery_mask == "transition") ? 1 : 0);
 
@@ -1536,6 +1543,11 @@ void HybridPICModel::ComputeVacuumARecovery ()
     // Bfield_fp is curl scratch here (the caller rebuilds B = B_static +
     // curl A right after the recovery); zero-extension past non-periodic
     // walls mirrors the E_L source convention.
+    // FD-Jacobian probes must not difference through the iterative solve
+    // (its rtol-level noise is amplified by the 1/(theta dt) scaling of the
+    // band field rows): they reuse the correction from the last
+    // non-Jacobian evaluation, keeping the probed map smooth and affine.
+    if (!a_from_jacobian) {
     warpx.get_pointer_fdtd_solver_fp(lev)->ComputeCurlA(
         B, A, warpx.GetEBUpdateBFlag()[lev], lev);
     for (int dir = 0; dir < 3; ++dir) {
@@ -1547,6 +1559,7 @@ void HybridPICModel::ComputeVacuumARecovery ()
     for (int dir = 0; dir < 3; ++dir) {
         Jvac[dir]->FillBoundary(geom.periodicity());
     }
+    } // !a_from_jacobian
 
     amrex::GpuArray<int, 3> const coarsen_rr = {1, 1, 1};
     amrex::GpuArray<int, 3> const nodal = {1, 1, 1};
@@ -1604,6 +1617,11 @@ void HybridPICModel::ComputeVacuumARecovery ()
         amrex::MultiFab const & Jd = *Jvac[dir];
         amrex::GpuArray<int, 3> const Jstag = A_stag[dir];
 
+        if (a_from_jacobian) {
+            // Frozen correction: nothing to apply if it is identically zero
+            // (also preserves the exact-identity property bit-for-bit).
+            if (dAd.norminf(0) == 0.0_rt) { continue; }
+        } else {
         // Nodal right-hand side: +mu0 * J_imp, source-masked at the
         // (native-nodal) rho, zero on Dirichlet boundary nodes.
         amrex::MultiFab rhs(dAd.boxArray(), dAd.DistributionMap(),
@@ -1731,6 +1749,7 @@ void HybridPICModel::ComputeVacuumARecovery ()
         }
         if (!solve_ok) { continue; }
         dAd.FillBoundary(geom.periodicity());
+        } // !a_from_jacobian
 
         // A += dA at the component's edge points, replace-masked; edges
         // frozen by the embedded-boundary flags keep A = 0 (the recovered
@@ -1772,7 +1791,8 @@ void HybridPICModel::ComputeVacuumARecovery ()
 #endif
 }
 
-void HybridPICModel::ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_long)
+void HybridPICModel::ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_long,
+                                          bool a_from_jacobian)
 {
 #if defined(WARPX_DIM_1D_Z) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     amrex::ignore_unused(a_dt_eff, a_add_E_long);
@@ -1794,7 +1814,8 @@ void HybridPICModel::ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_lon
             << " add_EL = " << a_add_E_long << "\n";
     }
 
-    amrex::Real const rho_floor = PhysConst::q_e * m_n_floor;
+    amrex::Real const rho_floor = PhysConst::q_e * m_n_floor
+        * m_darwin_vacuum_recovery_density_fraction;
     const int mask_mode = (m_darwin_vacuum_recovery_mask == "global") ? 2
         : ((m_darwin_vacuum_recovery_mask == "transition") ? 1 : 0);
 #if defined(WARPX_DIM_3D)
@@ -1821,6 +1842,8 @@ void HybridPICModel::ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_lon
         amrex::MultiFab const * EL = a_add_E_long
             ? warpx.m_fields.get("hybrid_E_long_fp", Direction{dir}, lev)
             : nullptr;
+        amrex::MultiFab & Etgt = *warpx.m_fields.get(
+            "hybrid_E_vac_target_fp", Direction{dir}, lev);
         amrex::GpuArray<int, 3> const Astag = A_stag[dir];
         const amrex::iMultiFab* eb_flag =
             (!warpx.GetEBUpdateEFlag().empty()
@@ -1831,9 +1854,11 @@ void HybridPICModel::ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_lon
 #endif
         for (MFIter mfi(E, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
             auto const & e_arr    = E.array(mfi);
+            auto const & tgt_arr  = Etgt.array(mfi);
             auto const & a_arr    = A.const_array(mfi);
             auto const & aold_arr = A_old.const_array(mfi);
             auto const & rho_arr  = rho.const_array(mfi);
+            const bool from_jac = a_from_jacobian;
             amrex::Array4<amrex::Real const> el_arr;
             if (EL) { el_arr = EL->const_array(mfi); }
             const bool add_el = (EL != nullptr);
@@ -1851,9 +1876,21 @@ void HybridPICModel::ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_lon
                     || (mask_mode == 1 && rho_val > 0.0_rt
                         && rho_val < rho_floor);
                 if (!in_mask) { return; }
-                e_arr(i, j, k) =
-                    -(a_arr(i, j, k) - aold_arr(i, j, k)) * inv_dt
-                    + (add_el ? el_arr(i, j, k) : 0.0_rt);
+                if (from_jac) {
+                    // Probe evaluations use the target stored by the last
+                    // non-Jacobian evaluation: the band rows differentiate
+                    // to the identity, and the outer Newton iteration lags
+                    // the recovery (no differencing through the iterative
+                    // solve).
+                    e_arr(i, j, k) = tgt_arr(i, j, k)
+                        + (add_el ? el_arr(i, j, k) : 0.0_rt);
+                } else {
+                    amrex::Real const efar =
+                        -(a_arr(i, j, k) - aold_arr(i, j, k)) * inv_dt;
+                    tgt_arr(i, j, k) = efar;
+                    e_arr(i, j, k) = efar
+                        + (add_el ? el_arr(i, j, k) : 0.0_rt);
+                }
             });
         }
         E.FillBoundary(geom.periodicity());

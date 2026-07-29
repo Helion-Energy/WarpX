@@ -670,6 +670,14 @@ public:
      *  first rows), which pumps an axis-localized instability in the
      *  B_theta-carrying content. */
     std::string m_darwin_vacuum_recovery_components = "flux";
+    /** Density fraction (of q_e*n_floor) below which the recovery masks
+     *  apply. The Ohm's-law density floor can sit well inside real plasma
+     *  (it regularizes the stiff whistler response at the plasma edge);
+     *  the vacuum treatment must not: with the default 1 the masks follow
+     *  the floor, smaller values restrict the recovery (and especially the
+     *  Faraday band-E overwrite, which fights valid Ohm physics if applied
+     *  to genuine plasma) to the true low-density region. */
+    amrex::Real m_darwin_vacuum_recovery_density_fraction = 1.0;
     amrex::Real m_darwin_vacrec_rtol = 1.0e-8;
     amrex::Real m_darwin_vacrec_atol = 0.0;
     int m_darwin_vacrec_max_iters = 200;
@@ -680,7 +688,7 @@ public:
      *  caller must rebuild B = B_static + curl A afterwards (both call
      *  sites do so anyway) and re-apply the A boundary values.
      */
-    void ComputeVacuumARecovery ();
+    void ComputeVacuumARecovery (bool a_from_jacobian);
 
     /** Overwrite the recovered components of Efield_fp in masked (vacuum)
      *  cells with the Faraday-consistent field of the recovered vector
@@ -694,7 +702,8 @@ public:
      *  components are overwritten -- for raw components the relation holds
      *  identically and the overwrite would degenerate the residual.
      */
-    void ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_long);
+    void ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_long,
+                              bool a_from_jacobian);
 
     /** Solve the Darwin longitudinal-field constraint with the given charge
      *  density and the current hybrid_electron_pressure_fp, writing

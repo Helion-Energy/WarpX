@@ -261,7 +261,7 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     if (exit_status < 0) { return exit_status; }
 
     // Update WarpX fields to t^{n+theta}
-    UpdateWarpXFields( m_E, start_time );
+    UpdateWarpXFields( m_E, false, start_time );
     m_WarpX->reduced_diags->ComputeDiagsMidStep(a_step);
 
     const amrex::Real new_time = start_time + m_dt;
@@ -299,7 +299,7 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     BL_PROFILE("ThetaImplicitHybrid::ComputeRHS()");
 
     // Update B^{n+theta} from current E estimate via Faraday's law
-    UpdateWarpXFields( a_E, start_time );
+    UpdateWarpXFields( a_E, a_from_jacobian, start_time );
 
     // Momentum-consistent particle push field: the ions gather Efield_fp,
     // and the solver state deliberately includes the resistive eta*J term
@@ -474,12 +474,18 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
                 amrex::MultiFab::Subtract(E, EL, 0, 0, E.nComp(), E.nGrowVect());
             }
         }
-        // NOTE: overwriting the band E_ohm with the Faraday value of the
-        // recovered A inside the residual is ill-conditioned: the band
-        // Jacobian degenerates to the recovery's small leak factor and
-        // Newton steps blow up as (mismatch / leak). The Faraday-consistent
-        // band field is imposed once per step in FinishFieldUpdate instead
-        // (operator-split vacuum field stage).
+        // In the vacuum band the field is defined by the recovered vector
+        // potential, E_T = -(A_rec - A^n)/(theta dt), not by the (invalid
+        // there) generalized Ohm's law. The FD-Jacobian must not
+        // difference through the iterative recovery solve, whose
+        // rtol-level noise enters these rows amplified by 1/(theta dt):
+        // probe evaluations reuse the correction and the stored target
+        // (identity Jacobian rows), and the outer Newton iteration lags
+        // the recovery (contraction at the recovery's small leak factor).
+        if (m_vacuum_recovery_half) {
+            m_hybrid_pic_model->ApplyVacuumFaradayE(
+                m_theta * m_dt, false, a_from_jacobian);
+        }
     }
 
     // Return RHS = E_ohm - E_old
@@ -503,6 +509,7 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
 }
 
 void ThetaImplicitHybrid::UpdateWarpXFields ( const WarpXSolverVec&  a_E,
+                                                bool a_from_jacobian,
                                                 amrex::Real start_time )
 {
     BL_PROFILE("ThetaImplicitHybrid::UpdateWarpXFields()");
@@ -538,7 +545,7 @@ void ThetaImplicitHybrid::UpdateWarpXFields ( const WarpXSolverVec&  a_E,
         // E = E_T + E_L for the particle push. E_L is the constraint field
         // refreshed once per nonlinear iteration in ComputeRHS.
         using ablastr::fields::Direction;
-        DarwinUpdateA_B( m_theta * m_dt, start_time );
+        DarwinUpdateA_B( m_theta * m_dt, start_time, a_from_jacobian );
         for (int lev = 0; lev < m_num_amr_levels; ++lev) {
             for (int dir = 0; dir < 3; ++dir) {
                 amrex::MultiFab & E = *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{dir}, lev);
@@ -570,7 +577,8 @@ void ThetaImplicitHybrid::UpdateWarpXFields ( const WarpXSolverVec&  a_E,
     }
 }
 
-void ThetaImplicitHybrid::DarwinUpdateA_B ( amrex::Real a_thetadt, amrex::Real a_time )
+void ThetaImplicitHybrid::DarwinUpdateA_B ( amrex::Real a_thetadt, amrex::Real a_time,
+                                            bool a_from_jacobian )
 {
     const amrex::Real pin_time = a_time + a_thetadt;
     BL_PROFILE("ThetaImplicitHybrid::DarwinUpdateA_B()");
@@ -597,7 +605,7 @@ void ThetaImplicitHybrid::DarwinUpdateA_B ( amrex::Real a_thetadt, amrex::Real a
         // smooth function of the state and freezing it per iteration would
         // make the Jacobian inconsistent with the iterate map.
         if (m_vacuum_recovery_half) {
-            m_hybrid_pic_model->ComputeVacuumARecovery();
+            m_hybrid_pic_model->ComputeVacuumARecovery(a_from_jacobian);
             DarwinApplyABoundary(pin_time);
         }
         // B = B_static + curl A
@@ -773,12 +781,12 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
         // field is exactly recovered; in "full" mode this is the only
         // application). Restore the exact boundary pin afterwards.
         if (m_vacuum_recovery) {
-            m_hybrid_pic_model->ComputeVacuumARecovery();
+            m_hybrid_pic_model->ComputeVacuumARecovery(false);
             DarwinApplyABoundary(end_time);
             // The delivered end-of-step field in the band is the Faraday
             // value of the recovered A across the step (Efield_fp holds
             // the full field here, so E_L is added back on top).
-            m_hybrid_pic_model->ApplyVacuumFaradayE(m_dt, true);
+            m_hybrid_pic_model->ApplyVacuumFaradayE(m_dt, true, false);
         }
         // B^{n+1} = B_static + curl A^{n+1}
         for (int lev = 0; lev < m_num_amr_levels; ++lev) {
