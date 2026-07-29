@@ -104,6 +104,34 @@ public:
     /**
      * Prepare for the linear solve. This includes depositing the mass matrices and updating the PC.
      */
+    /**
+     * \brief Restrict a nonlinear-solver update to the admissible state domain.
+     *
+     * The proposed candidate is
+     * `a_state + returned_step * a_direction`. The base implementation leaves
+     * the requested step unchanged. Fluid solvers can override this hook to
+     * keep Newton updates and matrix-free Jacobian probes inside positivity
+     * bounds without imposing those constraints on unrelated implicit schemes.
+     */
+    [[nodiscard]] virtual amrex::Real
+    LimitSolverStep (const WarpXSolverVec& a_state,
+                     const WarpXSolverVec& a_direction,
+                     amrex::Real a_requested_step) const
+    {
+        amrex::ignore_unused(a_state, a_direction);
+        return a_requested_step;
+    }
+
+    /**
+     * \brief Whether Newton updates should use residual-decreasing
+     * backtracking.
+     */
+    [[nodiscard]] virtual bool
+    UseNewtonLineSearch () const
+    {
+        return false;
+    }
+
     void PreLinearSolve ();
 
     [[nodiscard]] int numAMRLevels () const { return m_num_amr_levels; }

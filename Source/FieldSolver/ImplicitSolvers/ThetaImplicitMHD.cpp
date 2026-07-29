@@ -5,24 +5,31 @@
  * License: BSD-3-Clause-LBNL
  */
 #include "ThetaImplicitMHD.H"
+#include "ThetaImplicitMHD_K.H"
 
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
+#include "EmbeddedBoundary/Enabled.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "Fields.H"
+#include "Python/callbacks.H"
 #include "Utils/Parser/ParserUtils.H"
 #include "Utils/WarpXConst.H"
 #include "WarpX.H"
 
 #include <ablastr/coarsen/sample.H>
+#include <ablastr/warn_manager/WarnManager.H>
 
 #include <AMReX_Array4.H>
 #include <AMReX_GpuContainers.H>
 #include <AMReX_GpuLaunch.H>
 #include <AMReX_MFIter.H>
+#include <AMReX_ParallelReduce.H>
 #include <AMReX_ParmParse.H>
+#include <AMReX_Reduce.H>
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -57,16 +64,6 @@ shift_index (int& i, int& j, int& k, const int physical_direction, const int off
 #else
     amrex::ignore_unused(i, j, k, physical_direction, offset);
 #endif
-}
-
-AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
-ion_pressure (const amrex::Real rho, const amrex::Real rho_floor, const amrex::Real rho_reference,
-              const amrex::Real pressure_reference, const amrex::Real gamma_i) noexcept
-{
-    if (pressure_reference == 0.0_rt) {
-        return 0.0_rt;
-    }
-    return pressure_reference * std::pow(std::max(rho, rho_floor) / rho_reference, gamma_i);
 }
 
 amrex::GpuArray<int, 3> field_staggering (const amrex::MultiFab& field)
@@ -134,6 +131,8 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     const bool has_mass_density_floor =
         utils::parser::queryWithParser(pp, "mass_density_floor", m_mass_density_floor);
     utils::parser::queryWithParser(pp, "electron_pressure_floor", m_electron_pressure_floor);
+    utils::parser::queryWithParser(pp, "positivity_safety", m_positivity_safety);
+    pp.query("fluid_flux", m_fluid_flux);
     pp.query("evolve_ion_fluid", m_evolve_ion_fluid);
     pp.query("include_joule_heating", m_include_joule_heating);
 
@@ -162,6 +161,12 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
                                      "implicit_mhd.mass_density_floor must be positive");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_electron_pressure_floor >= 0.0_rt,
                                      "implicit_mhd.electron_pressure_floor cannot be negative");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_fluid_flux == "centered" || m_fluid_flux == "rusanov",
+        "implicit_mhd.fluid_flux must be centered or rusanov");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_positivity_safety > 0.0_rt && m_positivity_safety < 1.0_rt,
+        "implicit_mhd.positivity_safety must be greater than zero and less than one");
 
     std::string mass_density_expression;
     std::string electron_pressure_expression;
@@ -225,6 +230,13 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
     m_num_amr_levels = 1;
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_WarpX->maxLevel() == 0,
                                      "theta_implicit_mhd currently supports one AMR level");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!EB::enabled(),
+                                     "theta_implicit_mhd does not yet include "
+                                     "embedded-boundary fluid fluxes");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_WarpX->get_load_balance_intervals().isActivated(),
+        "theta_implicit_mhd does not yet remake its composite solver state after "
+        "runtime load balancing; algo.load_balance_intervals must be disabled");
     for (int direction = 0; direction < AMREX_SPACEDIM; ++direction) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_WarpX->Geom(0).isPeriodic(direction),
@@ -242,6 +254,43 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         !m_hybrid_pic_model->m_add_external_fields,
         "theta_implicit_mhd does not yet support hybrid external fields");
 
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_hybrid_pic_model->m_has_external_current,
+        "theta_implicit_mhd does not yet support hybrid external currents");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_hybrid_pic_model->m_holmstrom_vacuum_region,
+        "theta_implicit_mhd does not yet support the Holmstrom vacuum-region "
+        "model");
+
+    // Ohm's law and the fluid equations must regularize the same charge
+    // density. Use the stricter requested floor and mirror it into both paths.
+    const amrex::Real hybrid_mass_density_floor =
+        m_hybrid_pic_model->m_n_floor * PhysConst::q_e / m_ion_charge_to_mass;
+    m_mass_density_floor =
+        std::max(m_mass_density_floor, hybrid_mass_density_floor);
+    m_hybrid_pic_model->m_n_floor =
+        m_ion_charge_to_mass * m_mass_density_floor / PhysConst::q_e;
+
+    if (m_hybrid_pic_model->m_include_hall_term !=
+        m_hybrid_pic_model->m_include_electron_pressure_term)
+    {
+        ablastr::warn_manager::WMRecordWarning(
+            "ThetaImplicitMHD",
+            "Using different Hall and electron-pressure switches is an "
+            "exploratory extended-MHD model and does not preserve the continuum "
+            "total-energy "
+            "exchange of either Hall MHD (both true) or standard resistive MHD "
+            "(both false).");
+    }
+    if (m_include_joule_heating &&
+        m_hybrid_pic_model->m_include_hyper_resistivity_term)
+    {
+        ablastr::warn_manager::WMRecordWarning(
+            "ThetaImplicitMHD",
+            "Electron heating currently includes eta*|J|^2 but not the "
+            "hyper-resistive magnetic-energy loss. Total-energy accounting is "
+            "therefore incomplete when plasma_hyper_resistivity is nonzero.");
+    }
     if (!from_restart) {
         InitializeFluidState();
     }
@@ -274,10 +323,11 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_theta >= 0.5_rt && m_theta <= 1.0_rt,
                                      "implicit_evolve.theta must be between 0.5 and 1");
     parseNonlinearSolverParams(pp);
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_nlsolver_type == NonlinearSolverType::newton ||
-                                         m_nlsolver_type == NonlinearSolverType::petsc_snes,
-                                     "theta_implicit_mhd requires a JFNK nonlinear solver "
-                                     "(implicit_evolve.nonlinear_solver = newton or petsc_snes)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_nlsolver_type == NonlinearSolverType::newton,
+        "theta_implicit_mhd currently requires "
+        "implicit_evolve.nonlinear_solver = newton so fluid-positivity bounds are "
+        "also applied to matrix-free Jacobian probes");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !m_use_mass_matrices, "particle mass matrices are not applicable to theta_implicit_mhd");
     m_nlsolver->Define(m_state, this);
@@ -303,11 +353,15 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "Ion charge-to-mass [C/kg]:     " << m_ion_charge_to_mass << "\n"
                    << "Electron gamma:                " << m_gamma_e << "\n"
                    << "Ion gamma:                     " << m_gamma_i << "\n"
-                   << "Hall term:                     " << m_hybrid_pic_model->m_include_hall_term
+                   << "Mass-density floor [kg/m^3]:   " << m_mass_density_floor << "\n"
+                   << "Hall term:                     "
+                   << m_hybrid_pic_model->m_include_hall_term
                    << "\n"
                    << "Electron-pressure Ohm term:    "
                    << m_hybrid_pic_model->m_include_electron_pressure_term << "\n"
                    << "Evolve ion fluid:              " << m_evolve_ion_fluid << "\n"
+                   << "Fluid flux:                    " << m_fluid_flux << "\n"
+                   << "Positivity step safety:        " << m_positivity_safety << "\n"
                    << "Joule heating:                 " << m_include_joule_heating << "\n";
     PrintBaseImplicitSolverParameters();
     m_nlsolver->PrintParams();
@@ -336,7 +390,7 @@ void ThetaImplicitMHD::InitializeFluidState ()
         const auto density_array = density.array(mfi);
         const auto momentum_array = momentum.array(mfi);
         const auto energy_array = electron_energy.array(mfi);
-        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
 #if defined(WARPX_DIM_3D)
             const amrex::Real x = lower[0] + (i + 0.5_rt) * cell_size[0];
             const amrex::Real y = lower[1] + (j + 0.5_rt) * cell_size[1];
@@ -399,6 +453,7 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
     UpdateWarpXFields(m_state, start_time);
     m_WarpX->reduced_diags->ComputeDiagsMidStep(step);
     FinishStateUpdate(start_time + m_dt);
+    ExecutePythonCallback("afterEpush");
     return exit_status;
 }
 
@@ -538,14 +593,80 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
     const auto electric_field = m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, 0);
     const auto ion_current = m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::current_fp, 0);
     const auto charge_density = m_WarpX->m_fields.get_mr_levels(FieldType::rho_fp, 0);
-    m_hybrid_pic_model->HybridPICSolveE(electric_field, ion_current, magnetic_field, charge_density,
-                                        m_WarpX->GetEBUpdateEFlag(), true, true);
+
+    const amrex::Real theta_time = start_time + m_theta * m_dt;
+    m_hybrid_pic_model->HybridPICSolveE(
+        electric_field, ion_current, magnetic_field, charge_density,
+        m_WarpX->GetEBUpdateEFlag(), true, true, theta_time, false);
 
     rhs.Copy(FieldType::Efield_fp);
     for (int component = 0; component < 3; ++component) {
         rhs.getArrayVec()[0][component]->minus(*m_state_old.getArrayVec()[0][component], 0, 1, 0);
     }
-    ComputeFluidRHS(rhs, start_time + m_theta * m_dt);
+    ComputeFluidRHS(rhs, theta_time);
+}
+
+amrex::Real
+ThetaImplicitMHD::LimitSolverStep (const WarpXSolverVec& state,
+                                   const WarpXSolverVec& direction,
+                                   const amrex::Real requested_step) const
+{
+    if (requested_step == 0.0_rt) {
+        return requested_step;
+    }
+
+    const amrex::MultiFab& density = state.getMultiFabBlock(MassDensityName, 0);
+    const amrex::MultiFab& energy =
+        state.getMultiFabBlock(ElectronEnergyName, 0);
+    const amrex::MultiFab& density_direction =
+        direction.getMultiFabBlock(MassDensityName, 0);
+    const amrex::MultiFab& energy_direction =
+        direction.getMultiFabBlock(ElectronEnergyName, 0);
+    const amrex::MultiFab& old_density =
+        m_state_old.getMultiFabBlock(MassDensityName, 0);
+    const amrex::MultiFab& old_energy =
+        m_state_old.getMultiFabBlock(ElectronEnergyName, 0);
+
+    amrex::ReduceOps<amrex::ReduceOpMin> reduce_op;
+    amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+    const amrex::Real theta = m_theta;
+    const amrex::Real density_floor = m_mass_density_floor;
+    const amrex::Real energy_floor =
+        m_electron_pressure_floor / (m_gamma_e - 1.0_rt);
+
+    for (amrex::MFIter mfi(density); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto rho = density.const_array(mfi);
+        const auto electron_energy = energy.const_array(mfi);
+        const auto delta_rho = density_direction.const_array(mfi);
+        const auto delta_energy = energy_direction.const_array(mfi);
+        const auto rho_old = old_density.const_array(mfi);
+        const auto energy_old = old_energy.const_array(mfi);
+        reduce_op.eval(
+            box, reduce_data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
+            {
+                const amrex::Real density_fraction =
+                    theta_implicit_mhd::admissible_step_fraction(
+                        rho(i, j, k), rho_old(i, j, k), delta_rho(i, j, k),
+                        requested_step, density_floor, theta);
+                const amrex::Real energy_fraction =
+                    theta_implicit_mhd::admissible_step_fraction(
+                        electron_energy(i, j, k), energy_old(i, j, k),
+                        delta_energy(i, j, k), requested_step, energy_floor,
+                        theta);
+                return {std::min(density_fraction, energy_fraction)};
+            });
+    }
+
+    amrex::Real step_fraction = amrex::get<0>(reduce_data.value(reduce_op));
+    amrex::ParallelAllReduce::Min(step_fraction,
+                                  amrex::ParallelContext::CommunicatorSub());
+    if (step_fraction < 1.0_rt) {
+        step_fraction *= m_positivity_safety;
+    }
+    return requested_step * step_fraction;
 }
 
 void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real time) const
@@ -566,14 +687,21 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
     const amrex::Real density_floor = m_mass_density_floor;
     const amrex::Real charge_to_mass = m_ion_charge_to_mass;
     const amrex::Real gamma_e_minus_one = m_gamma_e - 1.0_rt;
-    const amrex::Real gamma_i = m_gamma_i;
-    const amrex::Real reference_density = m_reference_mass_density;
-    const amrex::Real reference_ion_pressure = m_reference_ion_pressure;
     const amrex::Real pressure_floor = m_electron_pressure_floor;
     const bool include_hall_term = m_hybrid_pic_model->m_include_hall_term;
     const bool evolve_ion_fluid = m_evolve_ion_fluid;
     const bool include_joule_heating = m_include_joule_heating;
     const auto eta = m_hybrid_pic_model->m_eta;
+    const theta_implicit_mhd::FluxParameters flux_parameters = {
+        density_floor,
+        charge_to_mass,
+        m_gamma_e,
+        m_gamma_i,
+        m_reference_mass_density,
+        m_reference_ion_pressure,
+        pressure_floor,
+        include_hall_term,
+        m_fluid_flux == "rusanov"};
 
     for (amrex::MFIter mfi(density); mfi.isValid(); ++mfi) {
         const amrex::Box box = mfi.validbox();
@@ -591,65 +719,43 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
             amrex::Real divergence_energy_flux = 0.0_rt;
             amrex::Real divergence_electron_velocity = 0.0_rt;
             amrex::Real divergence_momentum_flux[3] = {0.0_rt, 0.0_rt, 0.0_rt};
-            amrex::Real electron_pressure_gradient[3] = {0.0_rt, 0.0_rt, 0.0_rt};
 
             for (int direction = 0; direction < 3; ++direction) {
                 if (!active[direction]) {
                     continue;
                 }
-                int ip = i;
-                int jp = j;
-                int kp = k;
-                int im = i;
-                int jm = j;
-                int km = k;
-                shift_index(ip, jp, kp, direction, 1);
-                shift_index(im, jm, km, direction, -1);
-                const amrex::Real derivative_scale = 0.5_rt * inverse_cell_size[direction];
+                int ih = i;
+                int jh = j;
+                int kh = k;
+                int il = i;
+                int jl = j;
+                int kl = k;
+                shift_index(ih, jh, kh, direction, 1);
+                shift_index(il, jl, kl, direction, -1);
 
-                const amrex::Real rho_plus = std::max(rho(ip, jp, kp), density_floor);
-                const amrex::Real rho_minus = std::max(rho(im, jm, km), density_floor);
-                const amrex::Real pressure_i_plus = ion_pressure(
-                    rho_plus, density_floor, reference_density, reference_ion_pressure, gamma_i);
-                const amrex::Real pressure_i_minus = ion_pressure(
-                    rho_minus, density_floor, reference_density, reference_ion_pressure, gamma_i);
+                const auto high_flux = theta_implicit_mhd::face_flux(
+                    rho, mom, energy, j_plasma, i, j, k, ih, jh, kh, direction,
+                    flux_parameters);
+                const auto low_flux = theta_implicit_mhd::face_flux(
+                    rho, mom, energy, j_plasma, il, jl, kl, i, j, k, direction,
+                    flux_parameters);
+                const amrex::Real derivative_scale = inverse_cell_size[direction];
 
                 divergence_momentum +=
-                    derivative_scale * (mom(ip, jp, kp, direction) - mom(im, jm, km, direction));
+                    derivative_scale * (high_flux.mass - low_flux.mass);
 
                 for (int component = 0; component < 3; ++component) {
-                    const amrex::Real flux_plus =
-                        mom(ip, jp, kp, direction) * mom(ip, jp, kp, component) / rho_plus +
-                        (component == direction ? pressure_i_plus : 0.0_rt);
-                    const amrex::Real flux_minus =
-                        mom(im, jm, km, direction) * mom(im, jm, km, component) / rho_minus +
-                        (component == direction ? pressure_i_minus : 0.0_rt);
                     divergence_momentum_flux[component] +=
-                        derivative_scale * (flux_plus - flux_minus);
+                        derivative_scale *
+                        (high_flux.momentum[component] - low_flux.momentum[component]);
                 }
 
-                const amrex::Real pressure_e_plus =
-                    std::max(gamma_e_minus_one * energy(ip, jp, kp), pressure_floor);
-                const amrex::Real pressure_e_minus =
-                    std::max(gamma_e_minus_one * energy(im, jm, km), pressure_floor);
-                electron_pressure_gradient[direction] =
-                    derivative_scale * (pressure_e_plus - pressure_e_minus);
-
-                const amrex::Real charge_density_plus = charge_to_mass * rho_plus;
-                const amrex::Real charge_density_minus = charge_to_mass * rho_minus;
-                const amrex::Real electron_velocity_plus =
-                    mom(ip, jp, kp, direction) / rho_plus -
-                    (include_hall_term ? j_plasma(ip, jp, kp, direction) / charge_density_plus
-                                       : 0.0_rt);
-                const amrex::Real electron_velocity_minus =
-                    mom(im, jm, km, direction) / rho_minus -
-                    (include_hall_term ? j_plasma(im, jm, km, direction) / charge_density_minus
-                                       : 0.0_rt);
                 divergence_energy_flux +=
-                    derivative_scale * (energy(ip, jp, kp) * electron_velocity_plus -
-                                        energy(im, jm, km) * electron_velocity_minus);
+                    derivative_scale * (high_flux.electron_energy -
+                                        low_flux.electron_energy);
                 divergence_electron_velocity +=
-                    derivative_scale * (electron_velocity_plus - electron_velocity_minus);
+                    derivative_scale *
+                    (high_flux.electron_velocity - low_flux.electron_velocity);
             }
 
             rho_increment(i, j, k) = evolve_ion_fluid ? -theta_dt * divergence_momentum : 0.0_rt;
@@ -665,8 +771,8 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
             for (int component = 0; component < 3; ++component) {
                 momentum_increment(i, j, k, component) =
                     evolve_ion_fluid
-                        ? theta_dt * (-divergence_momentum_flux[component] + j_cross_b[component] -
-                                      electron_pressure_gradient[component])
+                        ? theta_dt *
+                              (-divergence_momentum_flux[component] + j_cross_b[component])
                         : 0.0_rt;
             }
 
@@ -691,9 +797,46 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
     const amrex::Real inverse_theta = 1.0_rt / m_theta;
     m_state.linComb(inverse_theta, m_state, 1.0_rt - inverse_theta, m_state_old);
     m_state.CopyMultiFabBlocksToFields();
-    m_WarpX->SetElectricFieldAndApplyBCs(m_state, end_time);
+
+    const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
+    const amrex::MultiFab& electron_energy =
+        *m_WarpX->m_fields.get(ElectronEnergyName, 0);
+    const amrex::Real density_tolerance =
+        64.0_rt * std::numeric_limits<amrex::Real>::epsilon() *
+        m_reference_mass_density;
+    const amrex::Real energy_scale = m_reference_magnetic_field *
+                                     m_reference_magnetic_field /
+                                     PhysConst::mu0;
+    const amrex::Real energy_tolerance =
+        64.0_rt * std::numeric_limits<amrex::Real>::epsilon() * energy_scale;
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        density.min(0) >= m_mass_density_floor - density_tolerance,
+        "theta_implicit_mhd produced a final mass density below its positivity floor");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        electron_energy.min(0) >=
+            m_electron_pressure_floor / (m_gamma_e - 1.0_rt) - energy_tolerance,
+        "theta_implicit_mhd produced a final electron energy below its positivity floor");
 
     const auto& magnetic_field_old = m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::B_old, 0);
     m_WarpX->FinishMagneticFieldAndApplyBCs(magnetic_field_old, m_theta, end_time);
     FillFluidSources(m_state);
+
+    // E is an algebraic Ohm-law variable rather than an independently evolved
+    // endpoint state. Recompute it from final B, rho, momentum, and Ue instead
+    // of retaining the theta extrapolation, which generally would not satisfy
+    // Ohm's law at t^{n+1}.
+    const auto magnetic_field =
+        m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, 0);
+    m_hybrid_pic_model->CalculatePlasmaCurrent(magnetic_field,
+                                               m_WarpX->GetEBUpdateEFlag());
+    const auto electric_field =
+        m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, 0);
+    const auto ion_current =
+        m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::current_fp, 0);
+    const auto charge_density =
+        m_WarpX->m_fields.get_mr_levels(FieldType::rho_fp, 0);
+    m_hybrid_pic_model->HybridPICSolveE(
+        electric_field, ion_current, magnetic_field, charge_density,
+        m_WarpX->GetEBUpdateEFlag(), true, true, end_time, false);
+    m_state.Copy(FieldType::Efield_fp);
 }

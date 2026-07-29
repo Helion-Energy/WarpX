@@ -42,6 +42,43 @@ add_warpx_test(
 )
 
 add_warpx_test(
+    test_1d_theta_implicit_mhd_contact  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_contact  # inputs
+    "analysis_mhd_contact.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_positivity  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_positivity  # inputs
+    "analysis_mhd_positivity.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+if(TEST test_1d_theta_implicit_mhd_positivity.run)
+    set_property(
+        TEST test_1d_theta_implicit_mhd_positivity.run
+        PROPERTY PASS_REGULAR_EXPRESSION
+        "Newton: admissibility-limited trial step ="
+    )
+endif()
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_resistive  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_resistive  # inputs
+    "analysis_mhd_resistive.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
     test_1d_theta_implicit_mhd_sound  # name
     1  # dims
     1  # nprocs

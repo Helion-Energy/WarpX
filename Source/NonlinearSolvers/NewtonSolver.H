@@ -103,7 +103,7 @@ private:
     /**
      * \brief Intermediate Vec containers used by the solver.
      */
-    mutable Vec m_dU, m_F, m_R;
+    mutable Vec m_dU, m_F, m_R, m_trial_U, m_trial_F;
 
     /**
      * \brief Pointer to Ops class.
@@ -215,6 +215,8 @@ void NewtonSolver<Vec,Ops>::Define ( const Vec&  a_U,
     m_dU.Define(a_U);
     m_F.Define(a_U); // residual function F(U) = U - b - R(U) = 0
     m_R.Define(a_U); // right hand side function R(U)
+    m_trial_U.Define(a_U);
+    m_trial_F.Define(a_U);
 
     m_ops = a_ops;
 
@@ -396,7 +398,54 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         linear_solver_iters += m_linear_solver->getNumIters();
 
         // Update solution
-        a_U -= m_dU;
+        // Update solution, allowing the operator to enforce its admissible
+        // state domain (for example, positive fluid density and energy).
+        const amrex::Real solver_step =
+            m_ops->LimitSolverStep(a_U, m_dU, -1.0_rt);
+        if (m_ops->UseNewtonLineSearch()) {
+            constexpr int max_backtracks = 12;
+            constexpr amrex::Real reduction = 0.5_rt;
+            constexpr amrex::Real armijo = 1.0e-4_rt;
+            amrex::Real step_length = -solver_step;
+            if (this->m_verbose && step_length != 1.0_rt) {
+                amrex::Print() << "Newton: admissibility-limited trial step = "
+                               << step_length << "\n";
+            }
+            bool accepted = false;
+            for (int backtrack = 0; backtrack <= max_backtracks; ++backtrack) {
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    step_length > 0.0_rt,
+                    "Newton line search found no positive admissible step");
+                m_trial_U.Copy(a_U);
+                m_trial_U.increment(m_dU, -step_length);
+
+                EvalResidual(m_trial_F, m_trial_U, a_b, a_time, iter);
+                const amrex::Real trial_norm = m_trial_F.norm2();
+                if (trial_norm <= (1.0_rt - armijo * step_length) * norm_abs) {
+                    a_U.Copy(m_trial_U);
+                    accepted = true;
+                    if (this->m_verbose &&
+                        (step_length != 1.0_rt || backtrack != 0)) {
+                        amrex::Print()
+                            << "Newton: accepted damped step = " << step_length
+                            << " after " << backtrack << " backtracks\n";
+                    }
+                    break;
+                }
+                step_length *= reduction;
+            }
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                accepted,
+                "Newton line search failed to find a residual-decreasing "
+                "admissible step");
+        } else {
+            a_U.increment(m_dU, solver_step);
+            if (this->m_verbose && solver_step != -1.0_rt) {
+                amrex::Print()
+                    << "Newton: admissibility-limited step = " << -solver_step
+                    << "\n";
+            }
+        }
 
         iter++;
         if (iter >= m_maxits) {

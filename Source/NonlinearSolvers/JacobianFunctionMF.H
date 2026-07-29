@@ -13,6 +13,9 @@
 #include "JacobiPC.H"
 #include "Utils/TextMsg.H"
 #include <AMReX_Config.H>
+
+#include <cmath>
+#include <limits>
 #include <string>
 
 /**
@@ -223,6 +226,19 @@ void JacobianFunctionMF<T,Ops>::apply (T& a_dF, const T& a_dU)
                 eps = m_epsJFNK * m_normY0 / normY;
             }
         }
+        const RT requested_eps = eps;
+        eps = m_ops->LimitSolverStep(m_Y0, a_dU, requested_eps);
+        if (std::abs(eps) < std::abs(requested_eps)) {
+            const RT negative_eps =
+                m_ops->LimitSolverStep(m_Y0, a_dU, -requested_eps);
+            if (std::abs(negative_eps) > std::abs(eps)) {
+                eps = negative_eps;
+            }
+        }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            std::abs(eps) > std::numeric_limits<RT>::epsilon(),
+            "The matrix-free Jacobian perturbation cannot remain in the "
+            "operator's admissible state domain");
         const RT eps_inv = 1.0_rt/eps;
 
         m_Z.linComb( 1.0, m_Y0, eps, a_dU ); // Z = Y0 + eps*dU

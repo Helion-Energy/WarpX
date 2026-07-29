@@ -156,6 +156,7 @@ class FiniteDifferenceSolver
           * \param[in] hybrid_model instance of the hybrid-PIC model
           * \param[in] include_pressure_gradient whether to include -grad(Pe)/(e ne)
           * \param[in] include_resistive_terms whether to include resistivity and hyper-resistivity
+          * \param[in] evaluation_time time at which model coefficients are evaluated
           */
         void HybridPICSolveE ( ablastr::fields::VectorField const& Efield,
                                ablastr::fields::VectorField & Jfield,
@@ -166,7 +167,8 @@ class FiniteDifferenceSolver
                                std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_E,
                                int lev, HybridPICModel const* hybrid_model,
                                bool include_pressure_gradient,
-                               bool include_resistive_terms );
+                               bool include_resistive_terms,
+                               amrex::Real evaluation_time );
 
         /**
           * \brief Calculation of total current using Ampere's law (without
@@ -315,7 +317,8 @@ class FiniteDifferenceSolver
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_E,
             int lev, HybridPICModel const* hybrid_model,
             bool include_pressure_gradient,
-            bool include_resistive_terms );
+            bool include_resistive_terms,
+            amrex::Real evaluation_time );
 
         template<typename T_Algo>
         void CalculateCurrentAmpereCylindrical (
@@ -398,7 +401,8 @@ class FiniteDifferenceSolver
             amrex::MultiFab const& Pefield,
             int lev, HybridPICModel const* hybrid_model,
             bool include_pressure_gradient,
-            bool include_resistive_terms );
+            bool include_resistive_terms,
+            amrex::Real evaluation_time );
 
         template<typename T_Algo>
         void CalculateCurrentAmpereSpherical (
@@ -534,7 +538,8 @@ class FiniteDifferenceSolver
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_E,
             int lev, HybridPICModel const* hybrid_model,
             bool include_pressure_gradient,
-            bool include_resistive_terms );
+            bool include_resistive_terms,
+            amrex::Real evaluation_time );
 
         template<typename T_Algo>
         void CalculateCurrentAmpereCartesian (

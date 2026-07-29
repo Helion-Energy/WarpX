@@ -1,0 +1,103 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.Te = 1.0
+my_constants.Pe = n0 * Te * q_e
+my_constants.gamma = 5.0/3.0
+my_constants.amplitude = 0.99
+my_constants.velocity = 1.0e5
+my_constants.B0 = 1.0e-3
+my_constants.nz = 64
+my_constants.Lz = 1.0
+my_constants.k = 2*pi/Lz
+my_constants.dt = 2.0e-6
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 1
+amr.n_cell = nz
+amr.max_grid_size = 16
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-11
+newton.relative_tolerance = 1.0e-9
+newton.max_iterations = 12
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-10
+gmres.max_iterations = 300
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE ######
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_velocity = velocity
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = Pe
+implicit_mhd.fluid_flux = rusanov
+implicit_mhd.mass_density_floor = 1.0e-5 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-5 * Pe
+implicit_mhd.mass_density(x,y,z) = rho0 * (1.0 + amplitude*sin(k*z))
+implicit_mhd.electron_pressure(x,y,z) = Pe * (1.0 + amplitude*sin(k*z))
+implicit_mhd.velocity_z(x,y,z) = velocity * sin(k*z)
+
+# A uniform field parallel to the flow keeps the electromagnetic subsystem
+# quiescent while the fluid undergoes strong periodic compression and
+# rarefaction.
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 B0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 1
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz jz Pe implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy
+diag1.write_species = 0

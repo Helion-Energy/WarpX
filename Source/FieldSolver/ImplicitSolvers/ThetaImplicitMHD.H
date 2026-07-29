@@ -31,10 +31,11 @@ class HybridPICModel;
  * ThetaImplicitHybrid, the nonlinear residual advances ion continuity and
  * momentum directly and does not push or redeposit ion particles.
  *
- * The first implementation is intentionally restricted to a single Cartesian,
- * periodic AMR level and smooth flows. It uses centered spatial fluxes; a
- * conservative shock-capturing flux and a block preconditioner are follow-on
- * work.
+ * The implementation is restricted to a single Cartesian, periodic AMR level.
+ * Fluid transport can use centered or conservative Rusanov face fluxes. The
+ * current state omits ion total energy and a compatible magnetic-energy flux,
+ * so the Rusanov option regularizes compression but is not yet a complete
+ * conservative shock-MHD scheme.
  */
 class ThetaImplicitMHD final : public ImplicitSolver
 {
@@ -61,6 +62,17 @@ class ThetaImplicitMHD final : public ImplicitSolver
 
     // These implementation methods contain extended __device__ lambdas and must
     // therefore be public when compiled with NVCC.
+    [[nodiscard]] amrex::Real
+    LimitSolverStep (const WarpXSolverVec& state,
+                     const WarpXSolverVec& direction,
+                     amrex::Real requested_step) const override;
+
+    [[nodiscard]] bool
+    UseNewtonLineSearch () const override
+    {
+        return true;
+    }
+
     void InitializeFluidState ();
     void FillFluidSources (const WarpXSolverVec& state);
     void FillCellCenteredElectromagneticFields ();
@@ -90,6 +102,8 @@ class ThetaImplicitMHD final : public ImplicitSolver
     amrex::Real m_reference_ion_pressure = 0.0;
     amrex::Real m_mass_density_floor = 0.0;
     amrex::Real m_electron_pressure_floor = 0.0;
+    amrex::Real m_positivity_safety = 0.99;
+    std::string m_fluid_flux = "centered";
     bool m_evolve_ion_fluid = true;
     bool m_include_joule_heating = true;
 

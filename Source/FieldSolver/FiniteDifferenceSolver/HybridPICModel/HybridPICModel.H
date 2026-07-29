@@ -139,6 +139,16 @@ public:
         bool include_resistive_terms) const;
 
     void HybridPICSolveE (
+        ablastr::fields::MultiLevelVectorField const& Efield,
+        ablastr::fields::MultiLevelVectorField const& Jfield,
+        ablastr::fields::MultiLevelVectorField const& Bfield,
+        ablastr::fields::MultiLevelScalarField const& rhofield,
+        amrex::Vector<std::array<std::unique_ptr<amrex::iMultiFab>, 3>>&
+            eb_update_E,
+        bool include_pressure_gradient, bool include_resistive_terms,
+        amrex::Real evaluation_time, bool execute_python_callback) const;
+
+    void HybridPICSolveE (
         ablastr::fields::VectorField const& Efield,
         ablastr::fields::VectorField const& Jfield,
         ablastr::fields::VectorField const& Bfield,
@@ -156,6 +166,15 @@ public:
         PatchType patch_type,
         bool include_pressure_gradient,
         bool include_resistive_terms) const;
+
+    void HybridPICSolveE (
+        ablastr::fields::VectorField const& Efield,
+        ablastr::fields::VectorField const& Jfield,
+        ablastr::fields::VectorField const& Bfield,
+        amrex::MultiFab const& rhofield,
+        std::array<std::unique_ptr<amrex::iMultiFab>, 3>& eb_update_E, int lev,
+        PatchType patch_type, bool include_pressure_gradient,
+        bool include_resistive_terms, amrex::Real evaluation_time) const;
 
     void BfieldEvolve (
         ablastr::fields::MultiLevelVectorField const& Bfield,

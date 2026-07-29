@@ -2155,6 +2155,14 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
     evolve_ion_fluid: bool, default=True
         Advance ion density and momentum. Set False with Hall physics enabled
         and zero ion velocity for an electron-MHD limit.
+
+    fluid_flux: {"centered", "rusanov"}, optional
+        Cell-face fluid flux. Centered is low-dissipation for smooth flows;
+        Rusanov adds local Lax--Friedrichs regularization.
+
+    positivity_safety: float, optional
+        Safety factor in (0, 1) for density/electron-energy bounded Newton
+        updates and matrix-free Jacobian probes.
     """
 
     def __init__(
@@ -2175,6 +2183,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         gamma_i=None,
         mass_density_floor=None,
         electron_pressure_floor=None,
+        fluid_flux=None,
+        positivity_safety=None,
         evolve_ion_fluid=None,
         include_joule_heating=None,
     ):
@@ -2194,6 +2204,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.gamma_i = gamma_i
         self.mass_density_floor = mass_density_floor
         self.electron_pressure_floor = electron_pressure_floor
+        self.fluid_flux = fluid_flux
+        self.positivity_safety = positivity_safety
         self.evolve_ion_fluid = evolve_ion_fluid
         self.include_joule_heating = include_joule_heating
 
@@ -2219,6 +2231,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.gamma_i = self.gamma_i
         implicit_mhd.mass_density_floor = self.mass_density_floor
         implicit_mhd.electron_pressure_floor = self.electron_pressure_floor
+        implicit_mhd.fluid_flux = self.fluid_flux
+        implicit_mhd.positivity_safety = self.positivity_safety
         implicit_mhd.evolve_ion_fluid = self.evolve_ion_fluid
         implicit_mhd.include_joule_heating = self.include_joule_heating
 

@@ -36,7 +36,8 @@ see :ref:`here <theory-hybrid-model-elec-temp>`),
 
     .. math::
 
-        \vec{E} = -\frac{1}{en_e}\left( \vec{J}_e\times\vec{B} + \nabla P_e \right)+\eta\vec{J}-\eta_h \nabla^2\vec{J}.
+        \vec{E} = \frac{\vec{J}_e\times\vec{B}-\nabla P_e}{en_e}
+        +\eta\vec{J}-\eta_h \nabla^2\vec{J}.
 
 The electron current is in turn obtained by subtracting the ion current (obtained from
 kinetic ion macro-particles) from the total current (obtained from Ampere's law):
@@ -66,7 +67,11 @@ The runtime switches :pp:param:`hybrid_pic_model.include_hall_term` and
 :pp:param:`hybrid_pic_model.include_electron_pressure_term` set
 :math:`\chi_H` and :math:`\chi_P`, respectively. In particular,
 :math:`\chi_H=0` removes only Hall physics and leaves the ideal
-:math:`-\vec{u}_i\times\vec{B}` term intact.
+:math:`-\vec{u}_i\times\vec{B}` term intact. The standard resistive-MHD
+Ohm's law is selected with :math:`\chi_H=\chi_P=0`. Keeping only one of
+these two terms is supported as an exploratory extended-MHD model, but does
+not retain the continuum total-energy exchange of either standard resistive
+MHD or the complete Hall/electron-pressure system.
 
 Algorithm details
 -----------------
@@ -109,9 +114,9 @@ fluid part of the model is
    \frac{\partial\boldsymbol M_i}{\partial t}
    + \nabla\cdot\left(
        \frac{\boldsymbol M_i\boldsymbol M_i}{\rho_i}
-       + P_i\mathbb I
+       + (P_i+P_e)\mathbb I
      \right)
-   = \boldsymbol J\times\boldsymbol B-\nabla P_e ,
+   = \boldsymbol J\times\boldsymbol B ,
 
 .. math::
 
@@ -137,7 +142,11 @@ The total current is
 is constrained by the same generalized Ohm's law as the kinetic-ion model.
 Thus setting ``hybrid_pic_model.include_hall_term = false`` consistently makes
 :math:`\boldsymbol u_e=\boldsymbol u_i` in the energy equation and removes the
-Hall term from Ohm's law, yielding the resistive-MHD limit of this system.
+Hall term from Ohm's law. For the standard resistive-MHD limit, also set
+``hybrid_pic_model.include_electron_pressure_term = false``; the evolved
+electron pressure remains in the total fluid-pressure force. Leaving the
+electron-pressure Ohm term enabled instead retains a Biermann-like extension
+that is not part of the conservative resistive-MHD limit implemented here.
 Setting ``implicit_mhd.evolve_ion_fluid = false`` instead freezes the
 prescribed ion density and momentum. With Hall physics enabled and a stationary
 ion background, this gives the electron-MHD limit
@@ -153,15 +162,31 @@ For every component :math:`Q` of the fluid state, the nonlinear residual uses
 
 After convergence,
 :math:`Q^{n+1}=Q^n+(Q^{n+\theta}-Q^n)/\theta`. The electric and magnetic fields
-use the same time centering. Characteristic density, velocity, magnetic-field,
-momentum, and energy scales normalize the composite JFNK vector so that its
-Euclidean norm does not mix dimensional quantities.
+use the same time centering during the coupled update; because the electric
+field is algebraic, it is then recomputed from the final fluid and magnetic
+state so checkpointed/output :math:`\boldsymbol E^{n+1}` satisfies Ohm's law.
+Characteristic density, velocity, magnetic-field, momentum, and energy scales
+normalize the composite JFNK vector so that its Euclidean norm does not mix
+dimensional quantities.
 
-The first implementation uses second-order centered differences for the fluid
-fluxes and is therefore restricted to smooth, periodic verification problems.
-A conservative shock-capturing flux, positivity-preserving nonlinear update,
-AMR/non-periodic boundaries, and a physics-based block preconditioner are
-planned extensions.
+The fluid divergence is evaluated from one shared face flux, so mass and
+fluid momentum telescope conservatively on the periodic mesh. The default
+``implicit_mhd.fluid_flux = centered`` option retains a second-order centered
+operator for smooth, low-dissipation verification. The optional ``rusanov``
+flux adds piecewise-constant local Lax--Friedrichs dissipation using the
+ion/electron acoustic and advective speeds. Newton updates and matrix-free
+Jacobian probes are restricted to positive density and electron energy, with
+residual-decreasing backtracking. The bound accounts for the final
+:math:`1/\theta` extrapolation as well as the intermediate theta state.
+
+The Rusanov option is a shock-regularized *fluid* flux, not yet a conservative
+MHD shock formulation: magnetic induction remains in the staggered
+Ohm/Faraday operator, the ion closure is barotropic, and the evolved thermal
+variable is electron internal energy rather than total energy. As discussed
+by :cite:t:`Chacon2008`, a total-energy equation is preferable when exact
+shock-energy conservation is required. Compatible electromagnetic work,
+ion/total-energy evolution, AMR/non-periodic boundaries, and a physics-based
+block preconditioner remain planned extensions.
 
 The kinetic-fluid hybrid extension mostly uses the same routines as the standard electromagnetic
 PIC algorithm with the only exception that the E-field is calculated from Ohm's law
@@ -344,9 +369,9 @@ integrating over velocity), also called the generalized Ohm's law, is given by:
 
     .. math::
 
-        en_e\vec{E} = \frac{m}{e}\frac{\partial \vec{J}_e}{\partial t} + \frac{m}{e}\left( \vec{U}_e\cdot\nabla \right) \vec{J}_e - \nabla\cdot {\overleftrightarrow P}_e - \vec{J}_e\times\vec{B}+\vec{R}_e
+        en_e\vec{E} = \frac{m}{e}\frac{\partial \vec{J}_e}{\partial t} + \frac{m}{e}\left( \vec{U}_e\cdot\nabla \right) \vec{J}_e - \nabla\cdot {\overleftrightarrow P}_e + \vec{J}_e\times\vec{B}+\vec{R}_e
 
-where :math:`\vec{U}_e = \vec{J}_e/(en_e)` is the electron fluid velocity,
+where :math:`\vec{U}_e = -\vec{J}_e/(en_e)` is the electron fluid velocity,
 :math:`{\overleftrightarrow P}_e` is the electron pressure tensor and
 :math:`\vec{R}_e` is the drag force due to collisions between electrons and ions.
 Applying the above momentum equation to the Maxwell-Faraday equation (:math:`\frac{\partial\vec{B}}{\partial t} = -\nabla\times\vec{E}`)
@@ -362,13 +387,13 @@ Plugging this back into the generalized Ohm's law gives:
 
         \left(en_e +\frac{m}{e\mu_0}\nabla\times\nabla\times\right)\vec{E} =&
         - \frac{m}{e}\left( \frac{\partial\vec{J}_{ext}}{\partial t} + \sum_{s\neq e}\frac{\partial\vec{J}_s}{\partial t} \right) \\
-        &+ \frac{m}{e}\left( \vec{U}_e\cdot\nabla \right) \vec{J}_e - \nabla\cdot {\overleftrightarrow P}_e - \vec{J}_e\times\vec{B}+\vec{R}_e.
+        &+ \frac{m}{e}\left( \vec{U}_e\cdot\nabla \right) \vec{J}_e - \nabla\cdot {\overleftrightarrow P}_e + \vec{J}_e\times\vec{B}+\vec{R}_e.
 
 If we now further assume electrons are inertialess (i.e. :math:`m=0`), the above equation simplifies to,
 
     .. math::
 
-        en_e\vec{E} = -\vec{J}_e\times\vec{B}-\nabla\cdot{\overleftrightarrow P}_e+\vec{R}_e.
+        en_e\vec{E} = \vec{J}_e\times\vec{B}-\nabla\cdot{\overleftrightarrow P}_e+\vec{R}_e.
 
 Making the further simplifying assumptions that the electron pressure is isotropic and that
 the electron drag term can be written using a simple resistivity (:math:`\eta`) and hyper-resistivity (:math:`\eta_h`)
@@ -377,7 +402,8 @@ Ohm's law:
 
     .. math::
 
-        \vec{E} = -\frac{1}{en_e}\left( \vec{J}_e\times\vec{B} + \nabla P_e \right)+\eta\vec{J}-\eta_h \nabla^2\vec{J}.
+        \vec{E} = \frac{\vec{J}_e\times\vec{B}-\nabla P_e}{en_e}
+        +\eta\vec{J}-\eta_h \nabla^2\vec{J}.
 
 Multi-species resistivity
 ^^^^^^^^^^^^^^^^^^^^^^^^^

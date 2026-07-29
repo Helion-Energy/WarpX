@@ -9,6 +9,7 @@
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "Fields.H"
+#include "Python/callbacks.H"
 #include "WarpX.H"
 
 #include <ablastr/utils/Communication.H>
@@ -129,6 +130,8 @@ int ThetaImplicitHybrid::OneStep (const amrex::Real start_time,
     // Advance fields from t^{n+theta} to t^{n+1}
     FinishFieldUpdate(new_time);
 
+    ExecutePythonCallback("afterEpush");
+
     return exit_status;
 }
 
@@ -169,7 +172,9 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
         Efield_fp, current_fp, Bfield_fp, rho_fp,
         m_WarpX->GetEBUpdateEFlag(),
         true,  // include electron-pressure gradient
-        true   // include resistivity and hyper-resistivity
+        true,  // include resistivity and hyper-resistivity
+        theta_time,
+        false  // residual evaluations must not execute user callbacks
     );
 
     // Return RHS = E_ohm - E_old

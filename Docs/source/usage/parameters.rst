@@ -3770,16 +3770,19 @@ Maxwell solver: kinetic-fluid hybrid
 The parameters below are used when
 :pp:param:`algo.evolve_scheme = theta_implicit_mhd`. This mode also requires
 :pp:param:`algo.maxwell_solver = hybrid` and uses the Hall, electron-pressure,
-resistivity, and hyper-resistivity controls from ``hybrid_pic_model``.
+resistivity, and hyper-resistivity controls from ``hybrid_pic_model``. It
+currently requires ``implicit_evolve.nonlinear_solver = newton`` so the same
+fluid admissibility bounds can be applied to Newton updates and matrix-free
+Jacobian probes.
 
 .. warning::
 
-    The initial implementation is intended for smooth verification problems.
-    It supports one Cartesian, periodic AMR level, one ion fluid, and no
-    kinetic or regular WarpX fluid species. External hybrid vector-potential
-    fields, particle mass matrices, and existing field-only preconditioners
-    are not supported. The spatial fluid flux is centered and is not a
-    shock-capturing discretization.
+    The initial implementation supports one Cartesian, periodic AMR level,
+    one ion fluid, and no kinetic or regular WarpX fluid species. Embedded
+    boundaries, runtime load balancing, hybrid external currents/fields,
+    Holmstrom vacuum regions, particle mass matrices, and existing field-only
+    preconditioners are not supported. The Rusanov option regularizes fluid
+    discontinuities but is not a total-energy conservative MHD shock solver.
 
 .. pp:param:: implicit_mhd.reference_mass_density
     :type: ``float``
@@ -3835,7 +3838,11 @@ resistivity, and hyper-resistivity controls from ``hybrid_pic_model``.
     :unit: :math:`\mathrm{kg\,m^{-3}}`
     :default: ``1.e-12 * reference_mass_density``
 
-    Positive floor used in velocity, pressure, and charge-density divisions.
+    Positive floor used in velocity, pressure, and charge-density divisions
+    and as the lower bound for nonlinear updates. The effective floor is the
+    stricter of this value and the mass-density equivalent of
+    :pp:param:`hybrid_pic_model.n_floor`; both operators then use that same
+    effective value.
 
 .. pp:param:: implicit_mhd.electron_pressure_floor
     :type: ``float``
@@ -3843,6 +3850,26 @@ resistivity, and hyper-resistivity controls from ``hybrid_pic_model``.
     :default: ``0``
 
     Non-negative pressure floor used in Ohm's law and electron-energy terms.
+    The corresponding internal-energy floor is also enforced during Newton
+    updates, matrix-free Jacobian probes, and final theta extrapolation.
+
+.. pp:param:: implicit_mhd.fluid_flux
+    :type: ``string``
+    :default: ``centered``
+
+    Fluid face flux. ``centered`` gives the second-order, low-dissipation
+    operator used by smooth-wave verification. ``rusanov`` uses a
+    piecewise-constant local Lax--Friedrichs flux for conservative,
+    nonoscillatory fluid transport. It does not constitute a full MHD
+    Riemann solver because magnetic induction remains in the staggered
+    Ohm/Faraday update.
+
+.. pp:param:: implicit_mhd.positivity_safety
+    :type: ``float``
+    :default: ``0.99``
+
+    Safety factor in ``(0,1)`` applied when a Newton update or matrix-free
+    Jacobian perturbation reaches the density or electron-energy bound.
 
 .. pp:param:: implicit_mhd.include_joule_heating
     :type: ``bool``
@@ -3850,7 +3877,9 @@ resistivity, and hyper-resistivity controls from ``hybrid_pic_model``.
 
     Include :math:`\eta |\boldsymbol J|^2` in the JFNK electron-energy
     residual. This is independent of the QDSMC
-    ``hybrid_pic_model.include_joule_heating`` option.
+    ``hybrid_pic_model.include_joule_heating`` option. Hyper-resistive
+    heating is not yet included, so total-energy accounting is incomplete
+    when ``plasma_hyper_resistivity`` is nonzero.
 
 .. pp:param:: implicit_mhd.evolve_ion_fluid
     :type: ``bool``
