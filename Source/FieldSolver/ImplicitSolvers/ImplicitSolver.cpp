@@ -7,6 +7,15 @@
 using namespace amrex;
 using namespace amrex::literals;
 
+void ImplicitSolver::AllocateLevelMFs (
+    ablastr::fields::MultiFabRegister& fields,
+    const int lev,
+    const amrex::BoxArray& ba,
+    const amrex::DistributionMapping& dm) const
+{
+    amrex::ignore_unused(fields, lev, ba, dm);
+}
+
 void ImplicitSolver::CreateParticleAttributes () const
 {
     // Set comm to false so that the attributes are not communicated

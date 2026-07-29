@@ -352,6 +352,19 @@ Overall simulation parameters
         - `Angus et al., An implicit particle code with exact energy and charge conservation for electromagnetic studies of dense plasmas <https://doi.org/10.1016/j.jcp.2023.112383>`__.
         - `Angus et al., An implicit particle code with exact energy and charge conservation for studies of dense plasmas in axisymmetric geometries <https://doi.org/10.1016/j.jcp.2024.113427>`__.
 
+    * ``theta_implicit_hybrid``: Use the :math:`\theta`-implicit hybrid-PIC
+      solver. The nonlinear state contains the electric field; kinetic ions
+      are pushed and deposited inside each nonlinear residual evaluation.
+
+    * ``theta_implicit_mhd``: Use the :math:`\theta`-implicit single-ion-fluid
+      MHD solver. The JFNK state contains
+      :math:`(\boldsymbol E,\rho_i,\rho_i\boldsymbol u_i,U_e)`, so the ion
+      continuity and momentum equations and the electron internal-energy
+      equation are advanced inside the nonlinear solve instead of pushing
+      particles. See :ref:`the implicit-MHD parameters
+      <running-cpp-parameters-implicit-mhd>` and
+      :ref:`the model description <theory-hybrid-model-implicit-mhd>`.
+
     * ``semi_implicit_em``: Use an approximately energy conserving semi-implicit electromagnetic solver.
 
       - Difference with ``theta_implicit_em`` is that light waves are treated explicit just as in the standard FDTD method. Consequently, this method has the CFL limitation :math:`c\Delta t < 1/\sqrt( \sum_i 1/\Delta x_i^2 )`.
@@ -3729,6 +3742,147 @@ Maxwell solver: kinetic-fluid hybrid
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the exponent used to calculate
     the electron pressure (see :ref:`here <theory-hybrid-model-elec-temp>`).
+
+.. pp:param:: hybrid_pic_model.include_hall_term
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    Controls the Hall contribution :math:`\vec{J}\times\vec{B}/(e n_e)` in
+    generalized Ohm's law. Setting this to ``false`` retains
+    :math:`-\vec{u}_i\times\vec{B}` and selects the non-Hall, resistive-MHD
+    limit. This switch does not disable the electron-pressure or resistive
+    terms.
+
+.. pp:param:: hybrid_pic_model.include_electron_pressure_term
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    Controls the electron-pressure contribution
+    :math:`-\nabla P_e/(e n_e)` in generalized Ohm's law independently of
+    the Hall and resistive terms.
+
+.. _running-cpp-parameters-implicit-mhd:
+
+.. rubric:: Theta-implicit ion-fluid MHD
+
+The parameters below are used when
+:pp:param:`algo.evolve_scheme = theta_implicit_mhd`. This mode also requires
+:pp:param:`algo.maxwell_solver = hybrid` and uses the Hall, electron-pressure,
+resistivity, and hyper-resistivity controls from ``hybrid_pic_model``.
+
+.. warning::
+
+    The initial implementation is intended for smooth verification problems.
+    It supports one Cartesian, periodic AMR level, one ion fluid, and no
+    kinetic or regular WarpX fluid species. External hybrid vector-potential
+    fields, particle mass matrices, and existing field-only preconditioners
+    are not supported. The spatial fluid flux is centered and is not a
+    shock-capturing discretization.
+
+.. pp:param:: implicit_mhd.reference_mass_density
+    :type: ``float``
+    :unit: :math:`\mathrm{kg\,m^{-3}}`
+
+    Required positive mass-density scale used to normalize the JFNK state.
+
+.. pp:param:: implicit_mhd.reference_magnetic_field
+    :type: ``float``
+    :unit: T
+
+    Required positive magnetic-field scale used to normalize the JFNK state.
+
+.. pp:param:: implicit_mhd.reference_velocity
+    :type: ``float``
+    :unit: :math:`\mathrm{m\,s^{-1}}`
+    :optional:
+
+    Velocity scale used for nonlinear-state normalization. The default is the
+    Alfvén speed computed from ``reference_mass_density`` and
+    ``reference_magnetic_field``.
+
+.. pp:param:: implicit_mhd.reference_ion_pressure
+    :type: ``float``
+    :unit: Pa
+    :default: ``0``
+
+    Ion pressure at ``reference_mass_density``. The ion closure is
+    :math:`P_i=P_{i0}(\rho_i/\rho_{i0})^{\gamma_i}`.
+
+.. pp:param:: implicit_mhd.ion_charge_to_mass
+    :type: ``float``
+    :unit: :math:`\mathrm{C\,kg^{-1}}`
+    :default: proton charge-to-mass ratio
+
+    Charge-to-mass ratio of the single ion fluid.
+
+.. pp:param:: implicit_mhd.gamma_e
+    :type: ``float``
+    :default: ``5/3``
+
+    Electron adiabatic index. The evolved electron pressure is
+    :math:`P_e=(\gamma_e-1)U_e`.
+
+.. pp:param:: implicit_mhd.gamma_i
+    :type: ``float``
+    :default: ``5/3``
+
+    Exponent in the polytropic ion-pressure closure.
+
+.. pp:param:: implicit_mhd.mass_density_floor
+    :type: ``float``
+    :unit: :math:`\mathrm{kg\,m^{-3}}`
+    :default: ``1.e-12 * reference_mass_density``
+
+    Positive floor used in velocity, pressure, and charge-density divisions.
+
+.. pp:param:: implicit_mhd.electron_pressure_floor
+    :type: ``float``
+    :unit: Pa
+    :default: ``0``
+
+    Non-negative pressure floor used in Ohm's law and electron-energy terms.
+
+.. pp:param:: implicit_mhd.include_joule_heating
+    :type: ``bool``
+    :default: ``true``
+
+    Include :math:`\eta |\boldsymbol J|^2` in the JFNK electron-energy
+    residual. This is independent of the QDSMC
+    ``hybrid_pic_model.include_joule_heating`` option.
+
+.. pp:param:: implicit_mhd.evolve_ion_fluid
+    :type: ``bool``
+    :default: ``true``
+
+    Advance ion mass and momentum in the JFNK residual. Setting this to
+    ``false`` freezes the prescribed ion background while retaining the
+    electron-energy and electromagnetic unknowns. With
+    :pp:param:`hybrid_pic_model.include_hall_term = true` and zero ion
+    velocity, this selects an electron-MHD limit with
+    :math:`\boldsymbol u_e=-\boldsymbol J/\rho_q`.
+
+.. pp:param:: implicit_mhd.mass_density(x,y,z)
+    :type: ``string``
+    :unit: :math:`\mathrm{kg\,m^{-3}}`
+
+    Required analytic initial ion mass-density profile, evaluated at cell
+    centers.
+
+.. pp:param:: implicit_mhd.electron_pressure(x,y,z)
+    :type: ``string``
+    :unit: Pa
+
+    Required analytic initial electron-pressure profile, evaluated at cell
+    centers and converted to electron internal energy.
+
+.. pp:param:: implicit_mhd.velocity_[x/y/z](x,y,z)
+    :type: ``string``
+    :unit: :math:`\mathrm{m\,s^{-1}}`
+    :default: ``0``
+
+    Analytic initial ion-fluid velocity components.
 
 .. pp:param:: hybrid_pic_model.plasma_resistivity(rho,J,t)
     :type: ``float`` or ``str``

@@ -2119,6 +2119,112 @@ class ThetaImplicitHybridEvolveScheme(picmistandard.base._ClassWithInit):
         self.nonlinear_solver.nonlinear_solver_initialize_inputs()
 
 
+class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
+    """
+    Sets up the theta-implicit single-ion-fluid MHD evolve scheme.
+
+    The JFNK unknown contains the electric field, ion mass density, ion
+    momentum density, and electron internal-energy density. The initial fluid
+    state is specified by analytic expressions evaluated at cell centers.
+
+    Parameters
+    ----------
+    nonlinear_solver: nonlinear solver instance
+        Must be a Newton/JFNK solver.
+
+    mass_density: float or str
+        Initial ion mass density in kg/m^3, optionally as an expression of
+        ``x``, ``y``, and ``z``.
+
+    electron_pressure: float or str
+        Initial electron pressure in Pa, optionally as an expression of
+        ``x``, ``y``, and ``z``.
+
+    reference_mass_density: float
+        Positive density scale in kg/m^3 used to normalize the nonlinear state.
+
+    reference_magnetic_field: float
+        Positive magnetic-field scale in T used to normalize the nonlinear state.
+
+    velocity_x, velocity_y, velocity_z: float or str, optional
+        Initial ion-fluid velocity components in m/s.
+
+    theta: float, optional
+        Time-centering parameter, in the interval [0.5, 1].
+
+    evolve_ion_fluid: bool, default=True
+        Advance ion density and momentum. Set False with Hall physics enabled
+        and zero ion velocity for an electron-MHD limit.
+    """
+
+    def __init__(
+        self,
+        nonlinear_solver,
+        mass_density,
+        electron_pressure,
+        reference_mass_density,
+        reference_magnetic_field,
+        velocity_x=None,
+        velocity_y=None,
+        velocity_z=None,
+        theta=None,
+        reference_velocity=None,
+        reference_ion_pressure=None,
+        ion_charge_to_mass=None,
+        gamma_e=None,
+        gamma_i=None,
+        mass_density_floor=None,
+        electron_pressure_floor=None,
+        evolve_ion_fluid=None,
+        include_joule_heating=None,
+    ):
+        self.nonlinear_solver = nonlinear_solver
+        self.mass_density = mass_density
+        self.electron_pressure = electron_pressure
+        self.reference_mass_density = reference_mass_density
+        self.reference_magnetic_field = reference_magnetic_field
+        self.velocity_x = velocity_x
+        self.velocity_y = velocity_y
+        self.velocity_z = velocity_z
+        self.theta = theta
+        self.reference_velocity = reference_velocity
+        self.reference_ion_pressure = reference_ion_pressure
+        self.ion_charge_to_mass = ion_charge_to_mass
+        self.gamma_e = gamma_e
+        self.gamma_i = gamma_i
+        self.mass_density_floor = mass_density_floor
+        self.electron_pressure_floor = electron_pressure_floor
+        self.evolve_ion_fluid = evolve_ion_fluid
+        self.include_joule_heating = include_joule_heating
+
+        assert isinstance(nonlinear_solver, NonlinearSolverBase)
+
+    def solver_scheme_initialize_inputs(self):
+        pywarpx.algo.evolve_scheme = "theta_implicit_mhd"
+        implicit_evolve = pywarpx.warpx.get_bucket("implicit_evolve")
+        implicit_evolve.theta = self.theta
+
+        implicit_mhd = pywarpx.warpx.get_bucket("implicit_mhd")
+        implicit_mhd.__setattr__("mass_density(x,y,z)", self.mass_density)
+        implicit_mhd.__setattr__("electron_pressure(x,y,z)", self.electron_pressure)
+        implicit_mhd.__setattr__("velocity_x(x,y,z)", self.velocity_x)
+        implicit_mhd.__setattr__("velocity_y(x,y,z)", self.velocity_y)
+        implicit_mhd.__setattr__("velocity_z(x,y,z)", self.velocity_z)
+        implicit_mhd.reference_mass_density = self.reference_mass_density
+        implicit_mhd.reference_magnetic_field = self.reference_magnetic_field
+        implicit_mhd.reference_velocity = self.reference_velocity
+        implicit_mhd.reference_ion_pressure = self.reference_ion_pressure
+        implicit_mhd.ion_charge_to_mass = self.ion_charge_to_mass
+        implicit_mhd.gamma_e = self.gamma_e
+        implicit_mhd.gamma_i = self.gamma_i
+        implicit_mhd.mass_density_floor = self.mass_density_floor
+        implicit_mhd.electron_pressure_floor = self.electron_pressure_floor
+        implicit_mhd.evolve_ion_fluid = self.evolve_ion_fluid
+        implicit_mhd.include_joule_heating = self.include_joule_heating
+
+        self.nonlinear_solver.nonlinear_solver_initialize_inputs()
+
+
 class HybridPICSolver(picmistandard.base._ClassWithInit):
     """
     Hybrid-PIC solver based on Ohm's law.
@@ -2137,6 +2243,13 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
 
     n_floor: float, optional
         Minimum density used in Ohm's law calculation.
+
+    include_hall_term: bool, default=True
+        Include the Hall term while retaining the ideal ion-advection term
+        when disabled.
+
+    include_electron_pressure_term: bool, default=True
+        Include the electron-pressure-gradient term in generalized Ohm's law.
 
     plasma_resistivity: float or str
         Value or expression to use for the plasma resistivity in Ohm*m.
@@ -2293,6 +2406,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         n0=None,
         gamma=None,
         n_floor=None,
+        include_hall_term=None,
+        include_electron_pressure_term=None,
         plasma_resistivity=None,
         plasma_hyper_resistivity=None,
         plasma_resistivity_species=None,
@@ -2323,6 +2438,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.n0 = n0
         self.gamma = gamma
         self.n_floor = n_floor
+        self.include_hall_term = include_hall_term
+        self.include_electron_pressure_term = include_electron_pressure_term
         self.plasma_resistivity = plasma_resistivity
         self.plasma_hyper_resistivity = plasma_hyper_resistivity
         self.plasma_resistivity_species = plasma_resistivity_species
@@ -2373,6 +2490,10 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         pywarpx.hybridpicmodel.n0_ref = self.n0
         pywarpx.hybridpicmodel.gamma = self.gamma
         pywarpx.hybridpicmodel.n_floor = self.n_floor
+        pywarpx.hybridpicmodel.include_hall_term = self.include_hall_term
+        pywarpx.hybridpicmodel.include_electron_pressure_term = (
+            self.include_electron_pressure_term
+        )
         pywarpx.hybridpicmodel.__setattr__(
             "plasma_resistivity(rho,J,t)",
             pywarpx.my_constants.mangle_expression(

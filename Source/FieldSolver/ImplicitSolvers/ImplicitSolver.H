@@ -15,6 +15,8 @@
 #include "NonlinearSolvers/NonlinearSolverLibrary.H"
 
 #include <AMReX_Array.H>
+#include <AMReX_BoxArray.H>
+#include <AMReX_DistributionMapping.H>
 #include <AMReX_REAL.H>
 #include <AMReX_LO_BCTYPES.H>
 
@@ -49,6 +51,18 @@ public:
      * Allocate internal arrays for intermediate field values needed by the solver.
      */
     virtual void Define (WarpX* a_WarpX, bool from_restart) = 0;
+
+    /**
+     * \brief Allocate scheme-specific fields while a WarpX level is created.
+     *
+     * Most implicit schemes need no additional state and use this no-op
+     * implementation.
+     */
+    virtual void AllocateLevelMFs (
+        ablastr::fields::MultiFabRegister& fields,
+        int lev,
+        const amrex::BoxArray& ba,
+        const amrex::DistributionMapping& dm) const;
 
     [[nodiscard]] bool IsDefined () const { return m_is_defined; }
 

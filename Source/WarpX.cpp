@@ -830,9 +830,10 @@ WarpX::ReadParameters ()
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 (electromagnetic_solver_id == ElectromagneticSolverAlgo::None ||
                  evolve_scheme == EvolveScheme::Theta_Implicit_EM ||
-                 evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid),
+                 evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid ||
+                 evolve_scheme == EvolveScheme::Theta_Implicit_MHD),
                 "For electromagnetic solvers, warpx.dt_update_interval can only be used "
-                "with algo.evolve_scheme = theta_implicit_em or theta_implicit_hybrid."
+                "with a theta-implicit evolve scheme."
              );
         }
 
@@ -1279,6 +1280,9 @@ WarpX::ReadParameters ()
         else if (evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid) {
             m_implicit_solver = std::make_unique<ThetaImplicitHybrid>();
         }
+        else if (evolve_scheme == EvolveScheme::Theta_Implicit_MHD) {
+            m_implicit_solver = std::make_unique<ThetaImplicitMHD>();
+        }
         else if (evolve_scheme == EvolveScheme::Strang_Implicit_Spectral_EM) {
             m_implicit_solver = std::make_unique<StrangImplicitSpectralEM>();
         }
@@ -1286,7 +1290,8 @@ WarpX::ReadParameters ()
         // implicit evolve schemes not setup to use mirrors
         if (evolve_scheme == EvolveScheme::Semi_Implicit_EM ||
             evolve_scheme == EvolveScheme::Theta_Implicit_EM ||
-            evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid) {
+            evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid ||
+            evolve_scheme == EvolveScheme::Theta_Implicit_MHD) {
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE( m_num_mirrors == 0,
                 "Mirrors cannot be used with Implicit evolve schemes.");
         }
@@ -1427,6 +1432,26 @@ WarpX::ReadParameters ()
                 "Only Direct current deposition is supported with the implicit hybrid scheme");
         }
 
+        if (evolve_scheme == EvolveScheme::Theta_Implicit_MHD) {
+            std::vector<std::string> kinetic_species_names;
+            amrex::ParmParse("particles").queryarr(
+                "species_names", kinetic_species_names);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC,
+                "ThetaImplicitMHD scheme requires the HybridPIC solver");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                current_deposition_algo == CurrentDepositionAlgo::Direct,
+                "ThetaImplicitMHD requires direct current deposition");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                kinetic_species_names.empty(),
+                "ThetaImplicitMHD advances one ion fluid in JFNK and does not "
+                "accept kinetic particle species");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !do_fluid_species,
+                "ThetaImplicitMHD owns its ion-fluid state; fluids.species_names "
+                "must be empty");
+        }
+
         // Load balancing parameters
         std::vector<std::string> load_balance_intervals_string_vec = {"0"};
         pp_algo.queryarr("load_balance_intervals", load_balance_intervals_string_vec);
@@ -1500,6 +1525,7 @@ WarpX::ReadParameters ()
             // These evolve schemes permit time steps that violate the CFL condition
             if (evolve_scheme == EvolveScheme::Theta_Implicit_EM ||
                 evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid ||
+                evolve_scheme == EvolveScheme::Theta_Implicit_MHD ||
                 evolve_scheme == EvolveScheme::Strang_Implicit_Spectral_EM) {
                 pp_particles.query("max_grid_crossings", particle_max_grid_crossings);
             }
@@ -2590,6 +2616,10 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
         );
     }
 
+    if (m_implicit_solver) {
+        m_implicit_solver->AllocateLevelMFs(m_fields, lev, ba, dm);
+    }
+
     // Allocate extra multifabs needed for fluids
     if (do_fluid_species) {
         myfl->AllocateLevelMFs(m_fields, ba, dm, lev);
@@ -2730,7 +2760,8 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
         rho_ncomps = 2*ncomps;
     }
 
-    if (evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid) {
+    if (evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid ||
+        evolve_scheme == EvolveScheme::Theta_Implicit_MHD) {
         rho_ncomps = 2*ncomps;  // Need old and new time levels
     }
 

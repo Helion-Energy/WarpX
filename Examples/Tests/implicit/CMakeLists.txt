@@ -12,6 +12,56 @@ add_warpx_test(
 )
 
 add_warpx_test(
+    test_1d_theta_implicit_mhd_uniform  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_uniform  # inputs
+    "analysis_mhd_uniform.py diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_alfven  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_alfven  # inputs
+    "analysis_mhd_alfven.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_alfven_mpi  # name
+    1  # dims
+    2  # nprocs
+    inputs_test_1d_theta_implicit_mhd_alfven  # inputs
+    "analysis_mhd_alfven.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_sound  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_sound  # inputs
+    "analysis_mhd_sound.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_emhd  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_emhd  # inputs
+    "analysis_mhd_emhd.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
     test_1d_semi_implicit_picard  # name
     1  # dims
     2  # nprocs

@@ -51,6 +51,23 @@ where
 
         \mu_0\vec{J} = \vec{\nabla}\times\vec{B}.
 
+Equivalently, for one ion fluid with
+:math:`\vec{J}_i=e n_e\vec{u}_i`, the implemented ideal and Hall terms are
+
+    .. math::
+
+        \vec{E}
+        = -\vec{u}_i\times\vec{B}
+          + \chi_H\frac{\vec{J}\times\vec{B}}{e n_e}
+          - \chi_P\frac{\nabla P_e}{e n_e}
+          + \eta\vec{J}-\eta_h\nabla^2\vec{J}.
+
+The runtime switches :pp:param:`hybrid_pic_model.include_hall_term` and
+:pp:param:`hybrid_pic_model.include_electron_pressure_term` set
+:math:`\chi_H` and :math:`\chi_P`, respectively. In particular,
+:math:`\chi_H=0` removes only Hall physics and leaves the ideal
+:math:`-\vec{u}_i\times\vec{B}` term intact.
+
 Algorithm details
 -----------------
 
@@ -58,6 +75,93 @@ Algorithm details
 
     Various verification tests of the hybrid model implementation can be found in
     the :ref:`examples section <examples-hybrid-model>`.
+
+.. _theory-hybrid-model-implicit-mhd:
+
+Theta-implicit ion-fluid mode
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+In addition to kinetic-ion hybrid PIC, WarpX provides an initial
+single-ion-fluid mode selected by
+``algo.evolve_scheme = theta_implicit_mhd``. It replaces the particle push and
+moment deposition inside the nonlinear loop with an ion continuity and
+momentum update. This monolithic Jacobian-free Newton--Krylov treatment follows
+the fully implicit MHD strategy of :cite:t:`Chacon2008`; the present initial
+implementation does not yet include that work's physics-based multigrid
+preconditioner. The nonlinear unknown is
+
+.. math::
+
+   \mathcal{U}^{n+\theta}
+   = \left(\boldsymbol E,\rho_i,\boldsymbol M_i,U_e\right)^{n+\theta},
+   \qquad \boldsymbol M_i=\rho_i\boldsymbol u_i ,
+
+and the magnetic field at the same time is obtained from Faraday's law. The
+fluid part of the model is
+
+.. math::
+
+   \frac{\partial \rho_i}{\partial t}
+   + \nabla\cdot\boldsymbol M_i = 0,
+
+.. math::
+
+   \frac{\partial\boldsymbol M_i}{\partial t}
+   + \nabla\cdot\left(
+       \frac{\boldsymbol M_i\boldsymbol M_i}{\rho_i}
+       + P_i\mathbb I
+     \right)
+   = \boldsymbol J\times\boldsymbol B-\nabla P_e ,
+
+.. math::
+
+   \frac{\partial U_e}{\partial t}
+   + \nabla\cdot(U_e\boldsymbol u_e)
+   + P_e\nabla\cdot\boldsymbol u_e
+   = \eta|\boldsymbol J|^2 ,
+
+where
+
+.. math::
+
+   P_e=(\gamma_e-1)U_e,\qquad
+   P_i=P_{i0}\left(\frac{\rho_i}{\rho_{i0}}\right)^{\gamma_i},
+   \qquad
+   \boldsymbol u_e
+   =\boldsymbol u_i-\chi_H\frac{\boldsymbol J}{\rho_q},
+   \qquad
+   \rho_q=\frac{q_i}{m_i}\rho_i.
+
+The total current is
+:math:`\boldsymbol J=\nabla\times\boldsymbol B/\mu_0`, and the electric field
+is constrained by the same generalized Ohm's law as the kinetic-ion model.
+Thus setting ``hybrid_pic_model.include_hall_term = false`` consistently makes
+:math:`\boldsymbol u_e=\boldsymbol u_i` in the energy equation and removes the
+Hall term from Ohm's law, yielding the resistive-MHD limit of this system.
+Setting ``implicit_mhd.evolve_ion_fluid = false`` instead freezes the
+prescribed ion density and momentum. With Hall physics enabled and a stationary
+ion background, this gives the electron-MHD limit
+:math:`\boldsymbol u_e=-\boldsymbol J/\rho_q`, which is useful for whistler and
+magnetic-structure studies on timescales short compared with the ion response.
+
+For every component :math:`Q` of the fluid state, the nonlinear residual uses
+
+.. math::
+
+   Q^{n+\theta}-Q^n-\theta\Delta t\,
+   \mathcal{R}\!\left(\mathcal{U}^{n+\theta}\right)=0.
+
+After convergence,
+:math:`Q^{n+1}=Q^n+(Q^{n+\theta}-Q^n)/\theta`. The electric and magnetic fields
+use the same time centering. Characteristic density, velocity, magnetic-field,
+momentum, and energy scales normalize the composite JFNK vector so that its
+Euclidean norm does not mix dimensional quantities.
+
+The first implementation uses second-order centered differences for the fluid
+fluxes and is therefore restricted to smooth, periodic verification problems.
+A conservative shock-capturing flux, positivity-preserving nonlinear update,
+AMR/non-periodic boundaries, and a physics-based block preconditioner are
+planned extensions.
 
 The kinetic-fluid hybrid extension mostly uses the same routines as the standard electromagnetic
 PIC algorithm with the only exception that the E-field is calculated from Ohm's law
