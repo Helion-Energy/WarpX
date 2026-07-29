@@ -462,14 +462,13 @@ public:
             "ApplyFieldBoundaryOnAxis)");
         auto const fb_is_outer_radial = [] (FieldBoundaryType fb) {
             return fb == FieldBoundaryType::None ||
-                   fb == FieldBoundaryType::PEC;
+                   fb == FieldBoundaryType::PEC ||
+                   fb == FieldBoundaryType::PEC_Insulator;
         };
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             fb_is_outer_radial(WarpX::field_boundary_hi[0]),
-            "RCYLINDER matrix-free hybrid magnetic diffusion supports None or "
-            "PEC at the outer radial boundary. pec_insulator (Dirichlet B_t "
-            "feed) is a follow-up, not yet wired into the affine-feed split "
-            "(prepareFeed); see notes/2026-07-19_rcyl_mag_diff_port.md");
+            "RCYLINDER matrix-free hybrid magnetic diffusion supports None, "
+            "PEC, or PEC_Insulator at the outer radial boundary.");
 #elif defined(WARPX_DIM_RSPHERE)
         WARPX_ABORT_WITH_MESSAGE(
             "Matrix-free hybrid magnetic diffusion is not yet supported in "
@@ -820,7 +819,7 @@ public:
     void prepareFeed ()
     {
         m_has_feed = false;
-#if defined(WARPX_DIM_RZ)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
         auto& warpx = WarpX::GetInstance();
         for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
             for (int iside = 0; iside < 2; ++iside) {
