@@ -64,12 +64,21 @@ public:
 
     using value_type = amrex::Real;
     using RT = value_type;
+    using MultiFabBlockSpec = WarpXSolverMultiFabBlockSpec;
 
     [[nodiscard]] inline bool IsDefined () const { return m_is_defined; }
 
     void Define ( WarpX*  a_WarpX,
              const std::string&  a_vector_type_name,
              const std::string&  a_scalar_type_name = "none" );
+
+    void Define (
+        WarpX* a_WarpX,
+        const std::string& a_vector_type_name,
+        const std::string& a_scalar_type_name,
+        const std::vector<MultiFabBlockSpec>& a_multifab_block_specs,
+        RT a_vector_scale = 1.0,
+        RT a_scalar_scale = 1.0);
 
     void Define (const WarpXSolverVec& a_solver_vec);
 
@@ -99,6 +108,13 @@ public:
                 amrex::MultiFab::Copy( *m_scalar_vec[lev], *this_scalar, 0, 0, m_ncomp,
                                        amrex::IntVect::TheZeroVector() );
             }
+            for (std::size_t iblock = 0; iblock < m_multifab_blocks.size(); ++iblock) {
+                auto& destination = *m_multifab_blocks[iblock].data[lev];
+                amrex::MultiFab::Copy(
+                    destination,
+                    *a_solver_vec.m_multifab_blocks[iblock].data[lev],
+                    0, 0, destination.nComp(), amrex::IntVect::TheZeroVector());
+            }
         }
     }
 
@@ -118,6 +134,10 @@ public:
             m_scalar_type = a_solver_vec.m_scalar_type;
             m_vector_type_name = std::move(a_solver_vec.m_vector_type_name);
             m_scalar_type_name = std::move(a_solver_vec.m_scalar_type_name);
+            m_array_scale = a_solver_vec.m_array_scale;
+            m_scalar_scale = a_solver_vec.m_scalar_scale;
+            m_multifab_blocks = std::move(a_solver_vec.m_multifab_blocks);
+            m_multifab_block_specs = std::move(a_solver_vec.m_multifab_block_specs);
             m_num_amr_levels = a_solver_vec.m_num_amr_levels;
             m_WarpX = a_solver_vec.m_WarpX;
             m_dofs = std::move(a_solver_vec.m_dofs);
@@ -125,8 +145,12 @@ public:
 
             a_solver_vec.m_array_vec.clear();
             a_solver_vec.m_scalar_vec.clear();
+            a_solver_vec.m_multifab_blocks.clear();
+            a_solver_vec.m_multifab_block_specs.clear();
             a_solver_vec.m_array_type = warpx::fields::FieldType::None;
             a_solver_vec.m_scalar_type = warpx::fields::FieldType::None;
+            a_solver_vec.m_array_scale = 1.0;
+            a_solver_vec.m_scalar_scale = 1.0;
             a_solver_vec.m_num_amr_levels = 0;
             a_solver_vec.m_WarpX = nullptr;
             a_solver_vec.m_is_defined = false;
@@ -148,6 +172,11 @@ public:
             if (m_scalar_type != warpx::fields::FieldType::None) {
                 m_scalar_vec[lev]->plus(*(a_solver_vec.getScalarVec()[lev]), 0, 1, 0);
             }
+            for (std::size_t iblock = 0; iblock < m_multifab_blocks.size(); ++iblock) {
+                auto& block = *m_multifab_blocks[iblock].data[lev];
+                block.plus(*a_solver_vec.m_multifab_blocks[iblock].data[lev],
+                           0, block.nComp(), 0);
+            }
         }
     }
 
@@ -164,6 +193,11 @@ public:
             }
             if (m_scalar_type != warpx::fields::FieldType::None) {
                 m_scalar_vec[lev]->minus(*(a_solver_vec.getScalarVec()[lev]), 0, 1, 0);
+            }
+            for (std::size_t iblock = 0; iblock < m_multifab_blocks.size(); ++iblock) {
+                auto& block = *m_multifab_blocks[iblock].data[lev];
+                block.minus(*a_solver_vec.m_multifab_blocks[iblock].data[lev],
+                            0, block.nComp(), 0);
             }
         }
     }
@@ -191,6 +225,15 @@ public:
                                                              b, *Y.getScalarVec()[lev], 0,
                                                              0, 1, 0);
             }
+            for (std::size_t iblock = 0; iblock < m_multifab_blocks.size(); ++iblock) {
+                auto& block = *m_multifab_blocks[iblock].data[lev];
+                const int ncomp = block.nComp();
+                amrex::MultiFab::LinComb(
+                    block,
+                    a, *X.m_multifab_blocks[iblock].data[lev], 0,
+                    b, *Y.m_multifab_blocks[iblock].data[lev], 0,
+                    0, ncomp, 0);
+            }
         }
     }
 
@@ -211,6 +254,12 @@ public:
             if (m_scalar_type != warpx::fields::FieldType::None) {
                 amrex::MultiFab::Saxpy( *m_scalar_vec[lev], a, *X.getScalarVec()[lev],
                                         0, 0, 1, amrex::IntVect::TheZeroVector() );
+            }
+            for (std::size_t iblock = 0; iblock < m_multifab_blocks.size(); ++iblock) {
+                auto& block = *m_multifab_blocks[iblock].data[lev];
+                amrex::MultiFab::Saxpy(
+                    block, a, *X.m_multifab_blocks[iblock].data[lev],
+                    0, 0, block.nComp(), amrex::IntVect::TheZeroVector());
             }
         }
     }
@@ -233,6 +282,9 @@ public:
             if (m_scalar_type != warpx::fields::FieldType::None) {
                 m_scalar_vec[lev]->mult(a_a, 0, 1);
             }
+            for (auto& block : m_multifab_blocks) {
+                block.data[lev]->mult(a_a, 0, block.data[lev]->nComp());
+            }
         }
     }
 
@@ -254,6 +306,9 @@ public:
             if (m_scalar_type != warpx::fields::FieldType::None) {
                 m_scalar_vec[lev]->setVal(a_val);
             }
+            for (auto& block : m_multifab_blocks) {
+                block.data[lev]->setVal(a_val);
+            }
         }
     }
 
@@ -270,7 +325,10 @@ public:
     {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             a_solver_vec.getArrayVecType()==m_array_type &&
-            a_solver_vec.getScalarVecType()==m_scalar_type,
+            a_solver_vec.getScalarVecType()==m_scalar_type &&
+            a_solver_vec.m_array_scale == m_array_scale &&
+            a_solver_vec.m_scalar_scale == m_scalar_scale &&
+            a_solver_vec.m_multifab_block_specs == m_multifab_block_specs,
             "WarpXSolverVec::function(X) called with WarpXSolverVec X of different type");
     }
 
@@ -293,6 +351,18 @@ public:
     // solver vector type names
     [[nodiscard]] std::string getVectorType () const { return m_vector_type_name; }
     [[nodiscard]] std::string getScalarType () const { return m_scalar_type_name; }
+
+    [[nodiscard]] bool hasMultiFabBlock (const std::string& a_name) const;
+    [[nodiscard]] amrex::MultiFab& getMultiFabBlock (const std::string& a_name, int a_lev);
+    [[nodiscard]] const amrex::MultiFab& getMultiFabBlock (
+        const std::string& a_name, int a_lev) const;
+    [[nodiscard]] const std::vector<MultiFabBlockSpec>& getMultiFabBlockSpecs () const
+    {
+        return m_multifab_block_specs;
+    }
+
+    void CopyMultiFabBlocksFromFields ();
+    void CopyMultiFabBlocksToFields () const;
 
     // vector sizes
     [[nodiscard]] amrex::Long nDOF_local  () const
@@ -325,16 +395,26 @@ public:
 
 private:
 
+    struct MultiFabBlock
+    {
+        MultiFabBlockSpec spec;
+        amrex::Vector<std::unique_ptr<amrex::MultiFab>> data;
+    };
+
     bool m_is_defined = false;
 
     ablastr::fields::MultiLevelVectorField m_array_vec;
     ablastr::fields::MultiLevelScalarField m_scalar_vec;
+    std::vector<MultiFabBlock> m_multifab_blocks;
+    std::vector<MultiFabBlockSpec> m_multifab_block_specs;
 
     warpx::fields::FieldType m_array_type = warpx::fields::FieldType::None;
     warpx::fields::FieldType m_scalar_type = warpx::fields::FieldType::None;
 
     std::string m_vector_type_name = "none";
     std::string m_scalar_type_name = "none";
+    RT m_array_scale = 1.0;
+    RT m_scalar_scale = 1.0;
 
     static constexpr int m_ncomp = 1;
     int m_num_amr_levels = 1;
@@ -350,7 +430,10 @@ private:
 
     void DefineData (WarpX* a_WarpX,
                      const std::string& a_vector_type_name,
-                     const std::string& a_scalar_type_name);
+                     const std::string& a_scalar_type_name,
+                     const std::vector<MultiFabBlockSpec>& a_multifab_block_specs,
+                     RT a_vector_scale,
+                     RT a_scalar_scale);
 
     void ClearData () noexcept;
 };

@@ -19,7 +19,9 @@ using namespace amrex;
 void WarpXSolverDOF::Define ( WarpX* const        a_WarpX,
                               const int           a_num_amr_levels,
                               const std::string&  a_vector_type_name,
-                              const std::string&  a_scalar_type_name )
+                              const std::string&  a_scalar_type_name,
+                              const std::vector<WarpXSolverMultiFabBlockSpec>&
+                                  a_multifab_block_specs )
 {
     if (a_vector_type_name=="Efield_fp") {
         m_array_type = FieldType::Efield_fp;
@@ -91,6 +93,32 @@ void WarpXSolverDOF::Define ( WarpX* const        a_WarpX,
 
     }
 
+    m_multifab_blocks.reserve(a_multifab_block_specs.size());
+    for (auto const& spec : a_multifab_block_specs) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            spec.scale > 0.0,
+            "WarpXSolverDOF block scale must be positive for " + spec.name);
+
+        WarpXSolverMultiFabDOFBlock block;
+        block.name = spec.name;
+        block.dofs.resize(a_num_amr_levels);
+        block.masks.resize(a_num_amr_levels);
+
+        for (int lev = 0; lev < a_num_amr_levels; ++lev) {
+            amrex::MultiFab const& field = *a_WarpX->m_fields.get(spec.name, lev);
+            const int ncomp = field.nComp();
+
+            block.dofs[lev] = std::make_unique<amrex::iMultiFab>(
+                field.boxArray(),
+                field.DistributionMap(),
+                2 * ncomp,
+                field.nGrowVect());
+            block.masks[lev] = field.OwnerMask(a_WarpX->Geom(lev).periodicity());
+            fill_local_dof(*block.dofs[lev], *block.masks[lev]);
+        }
+        m_multifab_blocks.push_back(std::move(block));
+    }
+
     fill_global_dof();
 
     for (int lev = 0; lev < a_num_amr_levels; ++lev) {
@@ -106,6 +134,13 @@ void WarpXSolverDOF::Define ( WarpX* const        a_WarpX,
                 dof->FillBoundaryAndSync(comp, 1, dof->nGrowVect(), a_WarpX->Geom(lev).periodicity());
             }
         }
+        for (auto& block : m_multifab_blocks) {
+            auto* dof = block.dofs[lev].get();
+            for (int comp = 1; comp < dof->nComp(); comp += 2) {
+                dof->FillBoundaryAndSync(
+                    comp, 1, dof->nGrowVect(), a_WarpX->Geom(lev).periodicity());
+            }
+        }
     }
 
     amrex::Print() << "Defined DOF object for linear solves (total DOFs = " << m_nDoFs_g << ").\n";
@@ -115,7 +150,8 @@ void WarpXSolverDOF::fill_local_dof (iMultiFab& dof, iMultiFab const& mask)
 {
     const int ncomp = dof.nComp() / 2; // /2 because both local and global ids are stored in dof
 
-    AMREX_ALWAYS_ASSERT(dof.boxArray().numPts()*ncomp < static_cast<Long>(std::numeric_limits<int>::max()));
+    constexpr Long max_int = static_cast<Long>(std::numeric_limits<int>::max());
+    AMREX_ALWAYS_ASSERT(dof.boxArray().numPts()*ncomp < max_int);
 
     dof.setVal(std::numeric_limits<int>::lowest());
 
@@ -124,6 +160,7 @@ void WarpXSolverDOF::fill_local_dof (iMultiFab& dof, iMultiFab const& mask)
 #endif
 
     for (MFIter mfi(dof); mfi.isValid(); ++mfi) {
+        AMREX_ALWAYS_ASSERT(m_nDoFs_l < max_int);
         Box const& vbx = mfi.validbox();
         const auto npts = static_cast<int>(vbx.numPts());
         const BoxIndexer boxindex(vbx);
@@ -166,6 +203,7 @@ void WarpXSolverDOF::fill_local_dof (iMultiFab& dof, iMultiFab const& mask)
             });
         }
         m_nDoFs_l += Long(ndofs)*ncomp;
+        AMREX_ALWAYS_ASSERT(m_nDoFs_l < max_int);
     }
 }
 
@@ -191,6 +229,7 @@ void WarpXSolverDOF::fill_global_dof ()
             }
             m_nDoFs_g += ndofs_allprocs[iproc];
         }
+        AMREX_ALWAYS_ASSERT(m_nDoFs_g < static_cast<Long>(std::numeric_limits<int>::max()));
         for (auto& x : m_array) {
             for (auto& y : x) {
                 if (y) {
@@ -211,6 +250,19 @@ void WarpXSolverDOF::fill_global_dof ()
                 {
                     dof[b](i,j,k,2*n+1) = dof[b](i,j,k,2*n) + int(proc_begin);
                 });
+            }
+        }
+        for (auto& block : m_multifab_blocks) {
+            for (auto& x : block.dofs) {
+                auto const& dof = x->arrays();
+                const int ncomp = x->nComp() / 2;
+                ParallelFor(
+                    *x, IntVect(0), ncomp,
+                    [=] AMREX_GPU_DEVICE (int b, int i, int j, int k, int n)
+                    {
+                        dof[b](i,j,k,2*n+1) =
+                            dof[b](i,j,k,2*n) + int(proc_begin);
+                    });
             }
         }
         Gpu::streamSynchronize();

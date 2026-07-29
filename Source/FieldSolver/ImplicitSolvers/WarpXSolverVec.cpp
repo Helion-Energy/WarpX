@@ -29,16 +29,40 @@ void WarpXSolverVec::ClearData () noexcept
     }
     m_array_vec.clear();
     m_scalar_vec.clear();
+    m_multifab_blocks.clear();
+    m_multifab_block_specs.clear();
 }
 
 void WarpXSolverVec::Define ( WarpX*  a_WarpX,
                               const std::string&  a_vector_type_name,
                               const std::string&  a_scalar_type_name )
 {
-    DefineData(a_WarpX, a_vector_type_name, a_scalar_type_name);
+    Define(a_WarpX, a_vector_type_name, a_scalar_type_name, {}, 1.0, 1.0);
+}
+
+void WarpXSolverVec::Define (
+    WarpX* a_WarpX,
+    const std::string& a_vector_type_name,
+    const std::string& a_scalar_type_name,
+    const std::vector<MultiFabBlockSpec>& a_multifab_block_specs,
+    const RT a_vector_scale,
+    const RT a_scalar_scale)
+{
+    DefineData(
+        a_WarpX,
+        a_vector_type_name,
+        a_scalar_type_name,
+        a_multifab_block_specs,
+        a_vector_scale,
+        a_scalar_scale);
 
     m_dofs = std::make_shared<WarpXSolverDOF>();
-    m_dofs->Define(m_WarpX, m_num_amr_levels, m_vector_type_name, m_scalar_type_name);
+    m_dofs->Define(
+        m_WarpX,
+        m_num_amr_levels,
+        m_vector_type_name,
+        m_scalar_type_name,
+        m_multifab_block_specs);
 
     m_is_defined = true;
 }
@@ -50,7 +74,10 @@ void WarpXSolverVec::Define (const WarpXSolverVec& a_solver_vec)
     DefineData(
         a_solver_vec.m_WarpX,
         a_solver_vec.getVectorType(),
-        a_solver_vec.getScalarType());
+        a_solver_vec.getScalarType(),
+        a_solver_vec.m_multifab_block_specs,
+        a_solver_vec.m_array_scale,
+        a_solver_vec.m_scalar_scale);
 
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         a_solver_vec.m_dofs != nullptr,
@@ -62,7 +89,11 @@ void WarpXSolverVec::Define (const WarpXSolverVec& a_solver_vec)
 
 void WarpXSolverVec::DefineData (WarpX* a_WarpX,
                                  const std::string& a_vector_type_name,
-                                 const std::string& a_scalar_type_name)
+                                 const std::string& a_scalar_type_name,
+                                 const std::vector<MultiFabBlockSpec>&
+                                     a_multifab_block_specs,
+                                 const RT a_vector_scale,
+                                 const RT a_scalar_scale)
 {
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !IsDefined(),
@@ -77,6 +108,31 @@ void WarpXSolverVec::DefineData (WarpX* a_WarpX,
 
     m_vector_type_name = a_vector_type_name;
     m_scalar_type_name = a_scalar_type_name;
+    m_array_scale = a_vector_scale;
+    m_scalar_scale = a_scalar_scale;
+    m_multifab_block_specs = a_multifab_block_specs;
+
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_array_scale > 0.0,
+        "WarpXSolverVec vector field scale must be positive");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_scalar_scale > 0.0,
+        "WarpXSolverVec scalar field scale must be positive");
+
+    for (std::size_t i = 0; i < m_multifab_block_specs.size(); ++i) {
+        auto const& spec = m_multifab_block_specs[i];
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !spec.name.empty(),
+            "WarpXSolverVec MultiFab block names cannot be empty");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            spec.scale > 0.0,
+            "WarpXSolverVec MultiFab block scale must be positive for " + spec.name);
+        for (std::size_t j = 0; j < i; ++j) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                spec.name != m_multifab_block_specs[j].name,
+                "WarpXSolverVec MultiFab block names must be unique: " + spec.name);
+        }
+    }
 
     if (m_vector_type_name=="Efield_fp") {
         m_array_type = FieldType::Efield_fp;
@@ -136,10 +192,27 @@ void WarpXSolverVec::DefineData (WarpX* a_WarpX,
         }
     }
 
+    m_multifab_blocks.reserve(m_multifab_block_specs.size());
+    for (auto const& spec : m_multifab_block_specs) {
+        MultiFabBlock block;
+        block.spec = spec;
+        block.data.resize(m_num_amr_levels);
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            amrex::MultiFab const& field = *m_WarpX->m_fields.get(spec.name, lev);
+            block.data[lev] = std::make_unique<amrex::MultiFab>(
+                field.boxArray(),
+                field.DistributionMap(),
+                field.nComp(),
+                amrex::IntVect::TheZeroVector());
+        }
+        m_multifab_blocks.push_back(std::move(block));
+    }
+
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_array_type != FieldType::None ||
-        m_scalar_type != FieldType::None,
-        "WarpXSolverVec cannot be defined with both array and scalar vecs FieldType::None");
+        m_scalar_type != FieldType::None ||
+        !m_multifab_blocks.empty(),
+        "WarpXSolverVec must contain at least one field block");
 }
 
 void WarpXSolverVec::Copy ( warpx::fields::FieldType  a_array_type,
@@ -170,6 +243,80 @@ void WarpXSolverVec::Copy ( warpx::fields::FieldType  a_array_type,
     }
 }
 
+bool WarpXSolverVec::hasMultiFabBlock (const std::string& a_name) const
+{
+    return std::any_of(
+        m_multifab_blocks.begin(),
+        m_multifab_blocks.end(),
+        [&a_name] (auto const& block) { return block.spec.name == a_name; });
+}
+
+amrex::MultiFab& WarpXSolverVec::getMultiFabBlock (
+    const std::string& a_name, const int a_lev)
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        a_lev >= 0 && a_lev < m_num_amr_levels,
+        "WarpXSolverVec::getMultiFabBlock() level is out of range");
+    for (auto& block : m_multifab_blocks) {
+        if (block.spec.name == a_name) {
+            return *block.data[a_lev];
+        }
+    }
+    WARPX_ABORT_WITH_MESSAGE(
+        "WarpXSolverVec does not contain MultiFab block " + a_name);
+    return *m_multifab_blocks.front().data[a_lev];
+}
+
+const amrex::MultiFab& WarpXSolverVec::getMultiFabBlock (
+    const std::string& a_name, const int a_lev) const
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        a_lev >= 0 && a_lev < m_num_amr_levels,
+        "WarpXSolverVec::getMultiFabBlock() level is out of range");
+    for (auto const& block : m_multifab_blocks) {
+        if (block.spec.name == a_name) {
+            return *block.data[a_lev];
+        }
+    }
+    WARPX_ABORT_WITH_MESSAGE(
+        "WarpXSolverVec does not contain MultiFab block " + a_name);
+    return *m_multifab_blocks.front().data[a_lev];
+}
+
+void WarpXSolverVec::CopyMultiFabBlocksFromFields ()
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        IsDefined(),
+        "WarpXSolverVec::CopyMultiFabBlocksFromFields() called on undefined object");
+    for (auto& block : m_multifab_blocks) {
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            amrex::MultiFab const& source =
+                *m_WarpX->m_fields.get(block.spec.name, lev);
+            amrex::MultiFab::Copy(
+                *block.data[lev],
+                source,
+                0, 0, source.nComp(), amrex::IntVect::TheZeroVector());
+        }
+    }
+}
+
+void WarpXSolverVec::CopyMultiFabBlocksToFields () const
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        IsDefined(),
+        "WarpXSolverVec::CopyMultiFabBlocksToFields() called on undefined object");
+    for (auto const& block : m_multifab_blocks) {
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            amrex::MultiFab& destination =
+                *m_WarpX->m_fields.get(block.spec.name, lev);
+            amrex::MultiFab::Copy(
+                destination,
+                *block.data[lev],
+                0, 0, destination.nComp(), amrex::IntVect::TheZeroVector());
+        }
+    }
+}
+
 void WarpXSolverVec::copyFrom ( const amrex::Real* const a_arr)
 {
     BL_PROFILE("WarpXSolverVec::copyFrom");
@@ -179,6 +326,8 @@ void WarpXSolverVec::copyFrom ( const amrex::Real* const a_arr)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         (m_dofs != nullptr),
         "WarpXSolverVec::CopyFrom() DOF object is a nullptr");
+    const amrex::Real array_scale = m_array_scale;
+    const amrex::Real scalar_scale = m_scalar_scale;
     for (int lev = 0; lev < m_num_amr_levels; ++lev) {
         if (m_array_type != FieldType::None) {
             for (int n = 0; n < 3; ++n) {
@@ -192,7 +341,7 @@ void WarpXSolverVec::copyFrom ( const amrex::Real* const a_arr)
                         for (int v = 0; v < ncomp; v++) {
                             const  int dof = dof_arr(i,j,k,2*v); // local
                             if (dof >= 0) {
-                                data_arr(i,j,k,v) = a_arr[dof];
+                                data_arr(i,j,k,v) = array_scale * a_arr[dof];
                             }
                         }
                     });
@@ -211,12 +360,35 @@ void WarpXSolverVec::copyFrom ( const amrex::Real* const a_arr)
                     for (int v = 0; v < ncomp; v++) {
                         const int dof = dof_arr(i,j,k,2*v); // local
                         if (dof >= 0) {
-                            data_arr(i,j,k,v) = a_arr[dof];
+                            data_arr(i,j,k,v) = scalar_scale * a_arr[dof];
                         }
                     }
                 });
             }
             m_scalar_vec[lev]->FillBoundaryAndSync(m_WarpX->Geom(lev).periodicity());
+        }
+        for (std::size_t iblock = 0; iblock < m_multifab_blocks.size(); ++iblock) {
+            auto& field = *m_multifab_blocks[iblock].data[lev];
+            auto const& dofs = *m_dofs->m_multifab_blocks[iblock].dofs[lev];
+            const int ncomp = field.nComp();
+            const amrex::Real scale = m_multifab_blocks[iblock].spec.scale;
+            for (amrex::MFIter mfi(dofs); mfi.isValid(); ++mfi) {
+                auto const bx = mfi.tilebox();
+                auto const data_arr = field.array(mfi);
+                auto const dof_arr = dofs.const_array(mfi);
+                ParallelFor(
+                    bx,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    {
+                        for (int v = 0; v < ncomp; ++v) {
+                            const int dof = dof_arr(i,j,k,2*v);
+                            if (dof >= 0) {
+                                data_arr(i,j,k,v) = scale * a_arr[dof];
+                            }
+                        }
+                    });
+            }
+            field.FillBoundaryAndSync(m_WarpX->Geom(lev).periodicity());
         }
     }
 }
@@ -230,6 +402,8 @@ void WarpXSolverVec::copyTo ( amrex::Real* const a_arr) const
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         (m_dofs != nullptr),
         "WarpXSolverVec::CopyTo() DOF object is a nullptr");
+    const amrex::Real inverse_array_scale = 1.0 / m_array_scale;
+    const amrex::Real inverse_scalar_scale = 1.0 / m_scalar_scale;
     for (int lev = 0; lev < m_num_amr_levels; ++lev) {
         if (m_array_type != FieldType::None) {
             for (int n = 0; n < 3; ++n) {
@@ -243,7 +417,7 @@ void WarpXSolverVec::copyTo ( amrex::Real* const a_arr) const
                         for (int v = 0; v < ncomp; v++) {
                             const int dof = dof_arr(i,j,k,2*v); // local
                             if (dof >= 0) {
-                                a_arr[dof] = data_arr(i,j,k,v);
+                                a_arr[dof] = inverse_array_scale * data_arr(i,j,k,v);
                             }
                         }
                     });
@@ -261,10 +435,33 @@ void WarpXSolverVec::copyTo ( amrex::Real* const a_arr) const
                     for (int v = 0; v < ncomp; v++) {
                         const int dof = dof_arr(i,j,k,2*v); // local
                         if (dof >= 0) {
-                            a_arr[dof] = data_arr(i,j,k,v);
+                            a_arr[dof] = inverse_scalar_scale * data_arr(i,j,k,v);
                         }
                     }
                 });
+            }
+        }
+        for (std::size_t iblock = 0; iblock < m_multifab_blocks.size(); ++iblock) {
+            auto const& field = *m_multifab_blocks[iblock].data[lev];
+            auto const& dofs = *m_dofs->m_multifab_blocks[iblock].dofs[lev];
+            const int ncomp = field.nComp();
+            const amrex::Real inverse_scale =
+                1.0 / m_multifab_blocks[iblock].spec.scale;
+            for (amrex::MFIter mfi(dofs); mfi.isValid(); ++mfi) {
+                auto const bx = mfi.tilebox();
+                auto const data_arr = field.const_array(mfi);
+                auto const dof_arr = dofs.const_array(mfi);
+                ParallelFor(
+                    bx,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    {
+                        for (int v = 0; v < ncomp; ++v) {
+                            const int dof = dof_arr(i,j,k,2*v);
+                            if (dof >= 0) {
+                                a_arr[dof] = inverse_scale * data_arr(i,j,k,v);
+                            }
+                        }
+                    });
             }
         }
     }
@@ -284,7 +481,7 @@ void WarpXSolverVec::copyTo ( amrex::Real* const a_arr) const
                 auto rtmp = amrex::MultiFab::Dot( *dotMask,
                                                   *m_array_vec[lev][n], 0,
                                                   *a_X.getArrayVec()[lev][n], 0, 1, 0, local);
-                result += rtmp;
+                result += rtmp / (m_array_scale * m_array_scale);
             }
         }
         if (m_scalar_type != FieldType::None) {
@@ -292,7 +489,20 @@ void WarpXSolverVec::copyTo ( amrex::Real* const a_arr) const
             auto rtmp = amrex::MultiFab::Dot( *dotMask,
                                               *m_scalar_vec[lev], 0,
                                               *a_X.getScalarVec()[lev], 0, 1, 0, local);
-            result += rtmp;
+            result += rtmp / (m_scalar_scale * m_scalar_scale);
+        }
+        for (std::size_t iblock = 0; iblock < m_multifab_blocks.size(); ++iblock) {
+            auto const& block = m_multifab_blocks[iblock];
+            auto const& other_block = a_X.m_multifab_blocks[iblock];
+            auto const& mask = *m_dofs->m_multifab_blocks[iblock].masks[lev];
+            const int ncomp = block.data[lev]->nComp();
+            const amrex::Real inverse_scale = 1.0 / block.spec.scale;
+            const amrex::Real rtmp = amrex::MultiFab::Dot(
+                mask,
+                *block.data[lev], 0,
+                *other_block.data[lev], 0,
+                ncomp, 0, local);
+            result += inverse_scale * inverse_scale * rtmp;
         }
     }
     amrex::ParallelAllReduce::Sum(result, amrex::ParallelContext::CommunicatorSub());
