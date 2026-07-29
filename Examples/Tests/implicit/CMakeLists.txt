@@ -42,6 +42,26 @@ add_warpx_test(
 )
 
 add_warpx_test(
+    test_1d_theta_implicit_mhd_stiff_alfven_preconditioner  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_stiff_alfven_preconditioner  # inputs
+    "analysis_mhd_stiff_alfven.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_stiff_alfven_preconditioner_mpi  # name
+    1  # dims
+    2  # nprocs
+    inputs_test_1d_theta_implicit_mhd_stiff_alfven_preconditioner  # inputs
+    "analysis_mhd_stiff_alfven.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
     test_1d_theta_implicit_mhd_contact  # name
     1  # dims
     1  # nprocs

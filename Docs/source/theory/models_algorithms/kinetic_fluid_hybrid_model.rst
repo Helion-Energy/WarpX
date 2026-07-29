@@ -172,34 +172,32 @@ dimensional quantities.
 Physics-based block preconditioner
 """"""""""""""""""""""""""""""""""
 
-The prototype selected with ``jacobian.pc_type = pc_mhd_block`` approximates
-the inverse Jacobian with independent resistive-field and acoustic-fluid
-blocks. Let :math:`h=\theta\Delta t`. In the non-Hall limit, Faraday's law and
-the resistive part of Ohm's law give the field operator
+The prototype selected with ``jacobian.pc_type = pc_mhd_block`` uses the
+predictor--Schur--corrector strategy of :cite:t:`Chacon2008`. Let
+:math:`h=\theta\Delta t`. In the non-Hall limit, Faraday's law and the
+resistive part of Ohm's law give the field operator
 
 .. math::
 
-   \mathcal{P}_E\,\delta\boldsymbol E
+   \mathcal{P}_E
    =
-   \left[
-      \mathbb I
-      + \frac{h\eta_*}{\mu_0}
-        \nabla\times\nabla\times
-   \right]\delta\boldsymbol E ,
+   \mathbb I
+   + \frac{h\eta_*}{\mu_0}
+     \nabla\times\nabla\times ,
 
 where :math:`\eta_*` is a scalar reference resistivity evaluated at the
 theta-centered time. This staggered curl--curl system is approximately
 inverted with AMReX MLMG.
 
-The fluid block is the small-flow pressure Schur complement corresponding to
-the predictor--Schur--corrector strategy in :cite:t:`Chacon2008`. This
-prototype freezes domain-global/reference acoustic scalars during each Newton
-linear solve rather than constructing spatially varying coefficient fields.
-Specifically, it uses
+The preconditioner freezes domain-global/reference coefficients during each
+Newton linear solve rather than constructing spatially varying coefficient
+fields. Its reference magnetic field
+:math:`\boldsymbol B_*=\langle\boldsymbol B^{n+\theta}\rangle` is the domain
+average of the current theta state. Its acoustic coefficients are
 :math:`a_e=\gamma_e\sum U_e/\sum\rho_i` and
 :math:`c_i^2=\gamma_iP_{i,\mathrm{ref}}/\rho_{i,\mathrm{ref}}`.
 Given a preconditioner right-hand side
-:math:`(b_\rho,\boldsymbol b_M,b_U)`, define
+:math:`(\boldsymbol b_E,b_\rho,\boldsymbol b_M,b_U)`, define
 
 .. math::
 
@@ -209,31 +207,96 @@ Given a preconditioner right-hand side
 where :math:`c_i^2` is the reference-state approximation to
 :math:`\partial P_i/\partial\rho_i`,
 :math:`\chi_e=\partial P_e/\partial U_e`, and
-:math:`a_e=(U_e+P_e)/\rho_i`. The pressure increment is obtained from
+:math:`a_e=(U_e+P_e)/\rho_i`. The electric-field predictor is
+
+.. math::
+
+   \delta\boldsymbol E^*
+   =\mathcal{P}_E^{-1}\boldsymbol b_E .
+
+The momentum right-hand side then includes both the predicted pressure and
+Lorentz responses,
+
+.. math::
+
+   \boldsymbol r_M
+   =
+   \boldsymbol b_M
+   -h\nabla b_p
+   -\frac{h^2}{\mu_0}
+      \left(\nabla\times\nabla\times\delta\boldsymbol E^*\right)
+      \times\boldsymbol B_* .
+
+For nonzero :math:`\boldsymbol B_*`, the three momentum components are solved
+together with the constant-coefficient ideal-MHD wave Schur complement
+
+.. math::
+
+   \left[
+      \mathbb I
+      -h^2c_s^2\nabla\nabla\cdot
+      +\frac{h^2}{\mu_0\rho_*}\mathcal W(\boldsymbol B_*)
+   \right]\delta\boldsymbol M
+   =\boldsymbol r_M ,
+
+where
+
+.. math::
+
+   \mathcal W(\boldsymbol B_*)\boldsymbol M
+   =
+   \boldsymbol B_*\times
+   \nabla\times\nabla\times
+   \left(\boldsymbol M\times\boldsymbol B_*\right).
+
+For a uniform reference field and periodic boundaries this magnetic operator
+is positive semidefinite:
+
+.. math::
+
+   \left\langle\boldsymbol M,\mathcal W\boldsymbol M\right\rangle
+   =
+   \left\|
+      \nabla\times(\boldsymbol M\times\boldsymbol B_*)
+   \right\|_2^2 .
+
+The density, electron energy, and electric-field correctors are
+
+.. math::
+
+   \delta\rho_i
+   &= b_\rho-h\nabla\cdot\delta\boldsymbol M,\\
+   \delta U_e
+   &= b_U-ha_e\nabla\cdot\delta\boldsymbol M,\\
+   \delta\boldsymbol E
+   &=
+   \mathcal P_E^{-1}
+   \left[
+      \boldsymbol b_E
+      -\frac{\delta\boldsymbol M}{\rho_*}\times\boldsymbol B_*
+   \right].
+
+The momentum operator is rediscretized with compact centered pure and mixed
+second derivatives on every multigrid level and approximately inverted with a
+three-component cell-centered MLMG solve using a local :math:`3\times3`
+weighted block-Jacobi smoother. Inside this magnetic Schur operator,
+:math:`\mathcal P_E^{-1}` is approximated by the identity; the staggered
+resistive predictor and corrector still use :math:`\mathcal P_E`. When ideal
+coupling is disabled, or when the domain-average magnetic field is negligible
+relative to ``implicit_mhd.reference_magnetic_field``, the implementation
+falls back to the scalar acoustic pressure-Schur solve
 
 .. math::
 
    \left(\frac{1}{c_s^2}-h^2\nabla^2\right)\delta p
    =
-   \frac{b_p}{c_s^2}-h\nabla\cdot\boldsymbol b_M ,
+   \frac{b_p}{c_s^2}-h\nabla\cdot\boldsymbol b_M .
 
-followed by
-
-.. math::
-
-   \delta\boldsymbol M
-   &= \boldsymbol b_M-h\nabla\delta p,\\
-   \delta\rho_i
-   &= b_\rho-h\nabla\cdot\delta\boldsymbol M,\\
-   \delta U_e
-   &= b_U-ha_e\nabla\cdot\delta\boldsymbol M.
-
-The scalar Helmholtz equation is approximately inverted with
-``MLABecLaplacian`` and MLMG. Both multigrid applications start from zero, run
-fixed cycle counts, and use a fixed smoother at the bottom. The resulting map
-is stationary and linear to solver roundoff within each standard
-right-preconditioned GMRES solve; AMReX MLMG can still stop early if it reaches
-its internal machine-precision residual threshold.
+All multigrid applications start from zero, run fixed cycle counts, and use a
+fixed smoother at the bottom. The resulting map is stationary and linear to
+solver roundoff within each standard right-preconditioned GMRES solve; AMReX
+MLMG can still stop early if it reaches its internal machine-precision
+residual threshold.
 
 This first version is restricted to one Cartesian, periodic AMR level, a
 staggered field grid, ``implicit_mhd.fluid_flux = centered``, evolving ions,
@@ -241,22 +304,26 @@ zero Hall and electron-pressure terms in Ohm's law, and zero
 hyper-resistivity. Resistivity may be constant or time dependent; density,
 current, and per-species dependence is rejected because the field block uses
 only the scalar value :math:`\eta_*`. Strongly nonuniform and pressure-floor
-active states are also outside the robustness claim because the acoustic
-coefficients are global scalars and do not linearize the pressure ``max`` at
-its floor. The approximation omits background-flow advection, the
-Joule-heating derivative, and ideal magnetic/Lorentz couplings, so it is not
-yet the full MHD wave preconditioner of :cite:t:`Chacon2008`.
+active states are also outside the robustness claim because the acoustic and
+magnetic coefficients are global scalars and do not linearize the pressure
+``max`` at its floor. The small-flow approximation omits background-flow
+advection, :math:`\boldsymbol J_*\times\delta\boldsymbol B` from a nonuniform
+reference field, spatial coefficient variations, and the Joule-heating
+derivative. Hall/electron-MHD and whistler coupling require a different,
+higher-order Schur operator and remain unsupported by this preconditioner.
 
-There is also a deliberate discretization mismatch in the acoustic block.
-The centered nonlinear face flux composes centered cell derivatives and has
-the one-dimensional pressure symbol
+There is also a deliberate discretization mismatch in the wave block. The
+centered nonlinear face flux and the cell-to-Yee Lorentz/induction path
+compose centered derivatives and interpolations. For example, the
+one-dimensional pressure symbol is
 :math:`-\sin^2(k\Delta x)/\Delta x^2`, including its checkerboard null mode.
-The compact MLMG Laplacian instead has symbol
+The compact MLMG pure second derivative instead has symbol
 :math:`-4\sin^2(k\Delta x/2)/\Delta x^2`. The two agree for smooth,
-well-resolved modes but not near the grid scale. Thus this prototype is
-expected to accelerate smooth acoustic and resistive problems; it does not
-establish grid-independent robustness for discontinuities or checkerboard
-modes.
+well-resolved modes but not near the grid scale. The same distinction applies
+to the compact magnetic-wave operator versus exact composition of the
+staggered residual operators. Thus this prototype targets smooth resistive,
+acoustic, Alfvén, and magnetosonic dynamics; it does not establish
+grid-independent robustness for discontinuities or checkerboard modes.
 
 The fluid divergence is evaluated from one shared face flux, so mass and
 fluid momentum telescope conservatively on the periodic mesh. The default
@@ -274,8 +341,8 @@ Ohm/Faraday operator, the ion closure is barotropic, and the evolved thermal
 variable is electron internal energy rather than total energy. As discussed
 by :cite:t:`Chacon2008`, a total-energy equation is preferable when exact
 shock-energy conservation is required. Compatible electromagnetic work,
-ion/total-energy evolution, AMR/non-periodic boundaries, and a block
-preconditioner containing the complete ideal-MHD wave operator remain planned
+ion/total-energy evolution, AMR/non-periodic boundaries, spatially varying
+wave coefficients, and Hall/whistler preconditioning remain planned
 extensions.
 
 The kinetic-fluid hybrid extension mostly uses the same routines as the standard electromagnetic

@@ -204,6 +204,19 @@ public:
     }
 
     /**
+     * \brief Return the physical xyz reference magnetic field used by the MHD
+     * wave preconditioner.
+     *
+     * The zero default keeps this coupling inactive for implicit schemes that
+     * do not expose an MHD background field.
+     */
+    [[nodiscard]] virtual amrex::GpuArray<amrex::Real, 3>
+    GetMHDReferenceMagneticFieldForPC () const
+    {
+        return {0.0, 0.0, 0.0};
+    }
+
+    /**
      * \brief Apply deposited mass matrices to a vector field.
      * Computes a_out += a_scale * S * (a_in - a_in_ref) [+ a_baseline],
      * where S is the mass matrix, accumulating into a_out.

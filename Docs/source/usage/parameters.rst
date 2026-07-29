@@ -333,39 +333,74 @@ Overall simulation parameters
           - ``jacobian.pc_type = pc_mhd_block``: Use the prototype
             physics-based block preconditioner for
             ``algo.evolve_scheme = theta_implicit_mhd``. In the Hall-off,
-            small-flow approximation, it combines:
+            small-flow approximation, it uses an electric predictor,
+            three-component momentum-wave Schur solve, and electric
+            corrector. With :math:`h=\theta\Delta t`, the field operator is
 
-            - a staggered resistive curl--curl solve,
+            .. math::
 
-              .. math::
+               \mathcal P_E
+               =
+               \mathbb I
+               + \frac{h\eta_*}{\mu_0}
+                 \nabla\times\nabla\times .
 
-                 \left[
-                    \mathbb I
-                    + \frac{\theta\Delta t\,\eta_*}{\mu_0}
-                      \nabla\times\nabla\times
-                 \right]\delta\boldsymbol E
-                 = \boldsymbol b_E ,
+            The predictor is
+            :math:`\delta\boldsymbol E^*=\mathcal P_E^{-1}\boldsymbol b_E`.
+            For the domain-average theta-state field
+            :math:`\boldsymbol B_*`, the coupled momentum solve is
 
-            - and a cell-centered acoustic pressure-Schur solve,
+            .. math::
 
-              .. math::
+               \left[
+                  \mathbb I
+                  -h^2c_s^2\nabla\nabla\cdot
+                  +\frac{h^2}{\mu_0\rho_*}
+                   \mathcal W(\boldsymbol B_*)
+               \right]\delta\boldsymbol M
+               =
+               \boldsymbol r_M ,
 
-                 \left[
-                    \frac{1}{c_s^2}
-                    -(\theta\Delta t)^2\nabla^2
-                 \right]\delta p
-                 =
-                 \frac{b_p}{c_s^2}
-                 -\theta\Delta t\,\nabla\cdot\boldsymbol b_M .
+            where
 
-            The preconditioner then corrects ion momentum, density, and
-            electron energy from :math:`\delta p`. The acoustic coefficients
-            are domain-global/reference scalars, not spatial coefficient
-            fields. Both MLMG solves use zero initial guesses, fixed cycle
-            counts, and fixed bottom smoothing. This keeps the operation
-            stationary to solver roundoff for standard right-preconditioned
-            GMRES; MLMG can still stop early at its internal machine-precision
-            residual threshold.
+            .. math::
+
+               \mathcal W(\boldsymbol B_*)\boldsymbol M
+               =
+               \boldsymbol B_*\times
+               \nabla\times\nabla\times
+               (\boldsymbol M\times\boldsymbol B_*).
+
+            The right-hand side :math:`\boldsymbol r_M` contains the pressure
+            predictor and the Lorentz response to
+            :math:`\delta\boldsymbol E^*`. Density and electron energy are
+            corrected from :math:`\nabla\cdot\delta\boldsymbol M`, followed by
+
+            .. math::
+
+               \delta\boldsymbol E
+               =
+               \mathcal P_E^{-1}
+               \left[
+                  \boldsymbol b_E
+                  -\frac{\delta\boldsymbol M}{\rho_*}
+                   \times\boldsymbol B_*
+               \right].
+
+            The acoustic and magnetic coefficients are
+            domain-global/reference scalars, not spatial coefficient fields.
+            The magnetic Schur action approximates
+            :math:`\mathcal P_E^{-1}` by the identity, while the staggered
+            predictor and corrector retain the resistive solve. When ideal
+            coupling is disabled or the mean magnetic field is negligible,
+            the implementation falls back to the scalar acoustic
+            pressure-Schur block.
+
+            All MLMG solves use zero initial guesses, fixed cycle counts, and
+            fixed bottom smoothing. This keeps the operation stationary to
+            solver roundoff for standard right-preconditioned GMRES; MLMG can
+            still stop early at its internal machine-precision residual
+            threshold.
 
             The prototype requires one Cartesian, periodic AMR level,
             ``warpx.grid_type = staggered``,
@@ -377,25 +412,36 @@ Overall simulation parameters
             may be constant or time dependent; density, current, and
             per-species dependence is rejected because the field block uses a
             scalar reference value. It does not yet include Hall/whistler
-            physics, ideal magnetic-wave coupling, background advection,
-            Rusanov transport, or the Joule-heating derivative. Strongly
-            nonuniform and pressure-floor-active states are outside this
-            scalar-coefficient prototype's robustness claim.
+            physics, background advection,
+            :math:`\boldsymbol J_*\times\delta\boldsymbol B` for a nonuniform
+            reference field, Rusanov transport, spatial wave coefficients, or
+            the Joule-heating derivative. Strongly nonuniform and
+            pressure-floor-active states are outside this scalar-coefficient
+            prototype's robustness claim.
 
-            The fluid Schur complement uses a compact MLMG Laplacian, whereas
-            the centered nonlinear face flux composes a wider centered
-            derivative. They agree for smooth, well-resolved modes but differ
-            near the grid scale, including at the centered operator's
-            checkerboard null mode. This option should therefore be regarded
-            as an acoustic/resistive prototype, not yet a robust
-            discontinuous-flow or complete MHD preconditioner.
+            The wave Schur complement uses compact centered pure and mixed
+            second derivatives, whereas the centered nonlinear flux and
+            staggered Lorentz/induction paths compose wider derivatives and
+            interpolations. They agree for smooth, well-resolved modes but
+            differ near the grid scale, including at the centered acoustic
+            operator's checkerboard null mode. This option targets smooth
+            resistive, acoustic, Alfvén, and magnetosonic dynamics, not
+            discontinuous flow.
 
             - ``pc_mhd_block.verbose`` (``bool``, default: false)
             - ``pc_mhd_block.bottom_verbose`` (``bool``, default: false)
+            - ``pc_mhd_block.include_ideal_mhd_coupling`` (``bool``,
+              default: true): include the domain-mean ideal magnetic/Lorentz
+              wave coupling. If false, use the acoustic fluid block.
             - ``pc_mhd_block.field_iterations`` (``int``, default: 2):
               fixed MLMG iteration count for the resistive curl--curl block.
             - ``pc_mhd_block.fluid_iterations`` (``int``, default: 2):
-              fixed MLMG iteration count for the acoustic pressure block.
+              fixed MLMG iteration count for the three-component wave block,
+              or for the scalar acoustic fallback.
+            - ``pc_mhd_block.wave_relaxation`` (``float``, default: 0.5):
+              weighted block-Jacobi factor for the three-component wave
+              smoother;
+              must be in :math:`(0,0.5]`.
             - ``pc_mhd_block.max_coarsening_level`` (``int``, default: 30)
             - ``pc_mhd_block.agglomeration`` (``bool``, default: true)
             - ``pc_mhd_block.consolidation`` (``bool``, default: true)

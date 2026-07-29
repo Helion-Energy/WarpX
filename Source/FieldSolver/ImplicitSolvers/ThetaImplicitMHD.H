@@ -85,6 +85,9 @@ class ThetaImplicitMHD final : public ImplicitSolver
     [[nodiscard]] amrex::Real
     GetMHDReferenceResistivityForPC (amrex::Real time) const override;
 
+    [[nodiscard]] amrex::GpuArray<amrex::Real, 3>
+    GetMHDReferenceMagneticFieldForPC () const override;
+
     inline static constexpr char MassDensityName[] = "implicit_mhd_mass_density";
     inline static constexpr char MomentumDensityName[] = "implicit_mhd_momentum_density";
     inline static constexpr char ElectronEnergyName[] = "implicit_mhd_electron_energy";

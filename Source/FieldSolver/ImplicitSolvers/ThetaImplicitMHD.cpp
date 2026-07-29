@@ -388,6 +388,18 @@ ThetaImplicitMHD::GetMHDReferenceResistivityForPC (const amrex::Real time) const
     return m_hybrid_pic_model->m_eta(reference_charge_density, 0.0_rt, time);
 }
 
+amrex::GpuArray<amrex::Real, 3>
+ThetaImplicitMHD::GetMHDReferenceMagneticFieldForPC () const
+{
+    const amrex::MultiFab& magnetic_field =
+        *m_WarpX->m_fields.get(MagneticFieldCCName, 0);
+    const amrex::Real inverse_number_of_cells =
+        1.0_rt / static_cast<amrex::Real>(magnetic_field.boxArray().numPts());
+    return {inverse_number_of_cells * magnetic_field.sum(0, false),
+            inverse_number_of_cells * magnetic_field.sum(1, false),
+            inverse_number_of_cells * magnetic_field.sum(2, false)};
+}
+
 void ThetaImplicitMHD::PrintParameters () const
 {
     if (!m_WarpX->Verbose()) {
