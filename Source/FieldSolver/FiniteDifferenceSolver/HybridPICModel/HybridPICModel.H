@@ -121,6 +121,23 @@ public:
         amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E,
         bool solve_for_Faraday) const;
 
+    /**
+     * \brief Update E from Ohm's law with explicit control of the pressure
+     * gradient and resistive terms.
+     *
+     * This overload is used by coupled implicit schemes, where both terms
+     * belong to the same nonlinear residual. The legacy solve_for_Faraday
+     * overload preserves the split explicit-hybrid behavior.
+     */
+    void HybridPICSolveE (
+        ablastr::fields::MultiLevelVectorField const& Efield,
+        ablastr::fields::MultiLevelVectorField const& Jfield,
+        ablastr::fields::MultiLevelVectorField const& Bfield,
+        ablastr::fields::MultiLevelScalarField const& rhofield,
+        amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E,
+        bool include_pressure_gradient,
+        bool include_resistive_terms) const;
+
     void HybridPICSolveE (
         ablastr::fields::VectorField const& Efield,
         ablastr::fields::VectorField const& Jfield,
@@ -135,7 +152,10 @@ public:
         ablastr::fields::VectorField const& Bfield,
         amrex::MultiFab const& rhofield,
         std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update_E,
-        int lev, PatchType patch_type, bool solve_for_Faraday) const;
+        int lev,
+        PatchType patch_type,
+        bool include_pressure_gradient,
+        bool include_resistive_terms) const;
 
     void BfieldEvolve (
         ablastr::fields::MultiLevelVectorField const& Bfield,
@@ -487,6 +507,13 @@ public:
 
     /** Plasma density floor - if n < n_floor it will be set to n_floor */
     amrex::Real m_n_floor = 1.0;
+
+    /** Include J x B/(e n_e) in generalized Ohm's law. Disabling this
+     *  preserves -u_i x B and selects the resistive-MHD limit. */
+    bool m_include_hall_term = true;
+
+    /** Include -grad(P_e)/(e n_e) in generalized Ohm's law. */
+    bool m_include_electron_pressure_term = true;
 
     /** Plasma resistivity */
     std::string m_eta_expression = "0.0";

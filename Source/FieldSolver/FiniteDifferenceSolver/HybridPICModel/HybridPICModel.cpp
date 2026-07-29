@@ -81,6 +81,8 @@ void HybridPICModel::ReadParameters ()
 
     pp_hybrid.query("plasma_resistivity(rho,J,t)", m_eta_expression);
     pp_hybrid.query("plasma_hyper_resistivity(rho,B)", m_eta_h_expression);
+    pp_hybrid.query("include_hall_term", m_include_hall_term);
+    pp_hybrid.query("include_electron_pressure_term", m_include_electron_pressure_term);
 
     utils::parser::queryWithParser(pp_hybrid, "n_floor", m_n_floor);
 
@@ -675,12 +677,32 @@ void HybridPICModel::HybridPICSolveE (
     amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E,
     const bool solve_for_Faraday) const
 {
+    HybridPICSolveE(
+        Efield,
+        Jfield,
+        Bfield,
+        rhofield,
+        eb_update_E,
+        !solve_for_Faraday,
+        solve_for_Faraday);
+}
+
+void HybridPICModel::HybridPICSolveE (
+    ablastr::fields::MultiLevelVectorField const& Efield,
+    ablastr::fields::MultiLevelVectorField const& Jfield,
+    ablastr::fields::MultiLevelVectorField const& Bfield,
+    ablastr::fields::MultiLevelScalarField const& rhofield,
+    amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E,
+    const bool include_pressure_gradient,
+    const bool include_resistive_terms) const
+{
     auto& warpx = WarpX::GetInstance();
     for (int lev = 0; lev <= warpx.finestLevel(); ++lev)
     {
         HybridPICSolveE(
             Efield[lev], Jfield[lev], Bfield[lev], *rhofield[lev],
-            eb_update_E[lev], lev, solve_for_Faraday
+            eb_update_E[lev], lev, PatchType::fine,
+            include_pressure_gradient, include_resistive_terms
         );
     }
     // Allow execution of Python callback after E-field push
@@ -699,7 +721,7 @@ void HybridPICModel::HybridPICSolveE (
 
     HybridPICSolveE(
         Efield, Jfield, Bfield, rhofield, eb_update_E, lev,
-        PatchType::fine, solve_for_Faraday
+        PatchType::fine, !solve_for_Faraday, solve_for_Faraday
     );
     if (lev > 0)
     {
@@ -714,8 +736,10 @@ void HybridPICModel::HybridPICSolveE (
     ablastr::fields::VectorField const& Bfield,
     amrex::MultiFab const& rhofield,
     std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update_E,
-    const int lev, PatchType patch_type,
-    const bool solve_for_Faraday) const
+    const int lev,
+    PatchType patch_type,
+    const bool include_pressure_gradient,
+    const bool include_resistive_terms) const
 {
     auto& warpx = WarpX::GetInstance();
 
@@ -725,7 +749,8 @@ void HybridPICModel::HybridPICSolveE (
     // Solve E field in regular cells
     warpx.get_pointer_fdtd_solver_fp(lev)->HybridPICSolveE(
         Efield, current_fp_plasma, Jfield, Bfield, rhofield,
-        *electron_pressure_fp, eb_update_E, lev, this, solve_for_Faraday
+        *electron_pressure_fp, eb_update_E, lev, this,
+        include_pressure_gradient, include_resistive_terms
     );
     amrex::Real const time = warpx.gett_old(0) + warpx.getdt(0);
     warpx.ApplyEfieldBoundary(lev, patch_type, time);

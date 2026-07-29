@@ -476,7 +476,8 @@ void FiniteDifferenceSolver::HybridPICSolveE (
     amrex::MultiFab const& Pefield,
     [[maybe_unused]]std::array< std::unique_ptr<amrex::iMultiFab>,3 > const& eb_update_E,
     int lev, HybridPICModel const* hybrid_model,
-    const bool solve_for_Faraday)
+    const bool include_pressure_gradient,
+    const bool include_resistive_terms)
 {
     // Select algorithm (The choice of algorithm is a runtime option,
     // but we compile code for each algorithm, using templates)
@@ -485,14 +486,15 @@ void FiniteDifferenceSolver::HybridPICSolveE (
 
         HybridPICSolveECylindrical <CylindricalYeeAlgorithm> (
             Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
-            eb_update_E, lev, hybrid_model, solve_for_Faraday
+            eb_update_E, lev, hybrid_model,
+            include_pressure_gradient, include_resistive_terms
         );
 
 #elif defined(WARPX_DIM_RSPHERE)
 
         HybridPICSolveESpherical <SphericalYeeAlgorithm> (
             Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
-            lev, hybrid_model, solve_for_Faraday
+            lev, hybrid_model, include_pressure_gradient, include_resistive_terms
         );
 
 #else
@@ -500,12 +502,14 @@ void FiniteDifferenceSolver::HybridPICSolveE (
     {
         HybridPICSolveECartesian <CartesianYeeAlgorithm> (
             Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
-            eb_update_E, lev, hybrid_model, solve_for_Faraday
+            eb_update_E, lev, hybrid_model,
+            include_pressure_gradient, include_resistive_terms
         );
     } else {
         HybridPICSolveECartesian <CartesianNodalAlgorithm> (
             Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
-            eb_update_E, lev, hybrid_model, solve_for_Faraday
+            eb_update_E, lev, hybrid_model,
+            include_pressure_gradient, include_resistive_terms
         );
     }
 #endif
@@ -526,7 +530,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     amrex::MultiFab const& Pefield,
     std::array< std::unique_ptr<amrex::iMultiFab>,3 > const& eb_update_E,
     int lev, HybridPICModel const* hybrid_model,
-    const bool solve_for_Faraday )
+    const bool include_pressure_gradient,
+    const bool include_resistive_terms )
 {
     // Both steps below do not currently support m > 0 and should be
     // modified if such support wants to be added
@@ -546,6 +551,9 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     const auto resistivity_has_J_dependence = hybrid_model->m_resistivity_has_J_dependence;
     const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
+    const bool include_hall_term = hybrid_model->m_include_hall_term;
+    const bool include_electron_pressure_term =
+        hybrid_model->m_include_electron_pressure_term;
 
     const bool include_external_fields = hybrid_model->m_add_external_fields;
 
@@ -659,18 +667,22 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 Bz_interp += Interp(Bz_ext, Bz_stag, nodal, coarsen, i, j, 0, 0);
             }
 
-            // calculate enE = (J - Ji) x B
+            // Calculate enE = (chi_H J - Ji) x B. With chi_H=0 this
+            // retains the ideal -u_i x B term while removing Hall physics.
+            const auto jer_interp =
+                (include_hall_term ? jr_interp : 0.0_rt) - jir_interp;
+            const auto jet_interp =
+                (include_hall_term ? jtheta_interp : 0.0_rt) - jit_interp;
+            const auto jez_interp =
+                (include_hall_term ? jz_interp : 0.0_rt) - jiz_interp;
             enE_nodal(i, j, 0, 0) = (
-                (jtheta_interp - jit_interp) * Bz_interp
-                - (jz_interp - jiz_interp) * Btheta_interp
+                jet_interp * Bz_interp - jez_interp * Btheta_interp
             );
             enE_nodal(i, j, 0, 1) = (
-                (jz_interp - jiz_interp) * Br_interp
-                - (jr_interp - jir_interp) * Bz_interp
+                jez_interp * Br_interp - jer_interp * Bz_interp
             );
             enE_nodal(i, j, 0, 2) = (
-                (jr_interp - jir_interp) * Btheta_interp
-                - (jtheta_interp - jit_interp) * Br_interp
+                jer_interp * Btheta_interp - jet_interp * Br_interp
             );
         });
 
@@ -764,7 +776,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
                     // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
-                    const Real grad_Pe = (!solve_for_Faraday) ?
+                    const Real grad_Pe =
+                        (include_pressure_gradient && include_electron_pressure_term) ?
                         T_Algo::UpwardDr(Pe, coefs_r, n_coefs_r, i, j, 0, 0)
                         : 0._rt;
 
@@ -778,7 +791,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 }
 
                 // Add resistivity only if E field value is used to update B
-                if (solve_for_Faraday) {
+                if (include_resistive_terms) {
                     Real jtot_val = 0._rt;
                     if (resistivity_has_J_dependence) {
                         // Interpolate current to appropriate staggering to match E field
@@ -852,7 +865,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 }
 
                 // Add resistivity only if E field value is used to update B
-                if (solve_for_Faraday) {
+                if (include_resistive_terms) {
                     Real jtot_val = 0._rt;
                     if(resistivity_has_J_dependence) {
                         // Interpolate current to appropriate staggering to match E field
@@ -907,7 +920,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
                     // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
-                    const Real grad_Pe = (!solve_for_Faraday) ?
+                    const Real grad_Pe =
+                        (include_pressure_gradient && include_electron_pressure_term) ?
                         T_Algo::UpwardDz(Pe, coefs_z, n_coefs_z, i, j, 0, 0)
                         : 0._rt;
 
@@ -921,7 +935,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 }
 
                 // Add resistivity only if E field value is used to update B
-                if (solve_for_Faraday) {
+                if (include_resistive_terms) {
                     Real jtot_val = 0._rt;
                     if (resistivity_has_J_dependence) {
                         // Interpolate current to appropriate staggering to match E field
@@ -987,7 +1001,8 @@ void FiniteDifferenceSolver::HybridPICSolveESpherical (
     amrex::MultiFab const& /*rhofield*/,
     amrex::MultiFab const& /*Pefield*/,
     int /*lev*/, HybridPICModel const* /*hybrid_model*/,
-    const bool /*solve_for_Faraday*/ )
+    const bool /*include_pressure_gradient*/,
+    const bool /*include_resistive_terms*/ )
 {
     WARPX_ABORT_WITH_MESSAGE("HybridPICSolveESphrical not fully implemented");
 }
@@ -1003,7 +1018,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     amrex::MultiFab const& Pefield,
     std::array< std::unique_ptr<amrex::iMultiFab>,3 > const& eb_update_E,
     int lev, HybridPICModel const* hybrid_model,
-    const bool solve_for_Faraday )
+    const bool include_pressure_gradient,
+    const bool include_resistive_terms )
 {
     // for the profiler
     amrex::LayoutData<amrex::Real>* cost = WarpX::getCosts(lev);
@@ -1017,6 +1033,9 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     const auto resistivity_has_J_dependence = hybrid_model->m_resistivity_has_J_dependence;
     const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
+    const bool include_hall_term = hybrid_model->m_include_hall_term;
+    const bool include_electron_pressure_term =
+        hybrid_model->m_include_electron_pressure_term;
 
     const bool include_external_fields = hybrid_model->m_add_external_fields;
 
@@ -1129,18 +1148,22 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 Bz_interp += Interp(Bz_ext, Bz_stag, nodal, coarsen, i, j, k, 0);
             }
 
-            // calculate enE = (J - Ji) x B
+            // Calculate enE = (chi_H J - Ji) x B. With chi_H=0 this
+            // retains the ideal -u_i x B term while removing Hall physics.
+            const auto jex_interp =
+                (include_hall_term ? jx_interp : 0.0_rt) - jix_interp;
+            const auto jey_interp =
+                (include_hall_term ? jy_interp : 0.0_rt) - jiy_interp;
+            const auto jez_interp =
+                (include_hall_term ? jz_interp : 0.0_rt) - jiz_interp;
             enE_nodal(i, j, k, 0) = (
-                (jy_interp - jiy_interp) * Bz_interp
-                - (jz_interp - jiz_interp) * By_interp
+                jey_interp * Bz_interp - jez_interp * By_interp
             );
             enE_nodal(i, j, k, 1) = (
-                (jz_interp - jiz_interp) * Bx_interp
-                - (jx_interp - jix_interp) * Bz_interp
+                jez_interp * Bx_interp - jex_interp * Bz_interp
             );
             enE_nodal(i, j, k, 2) = (
-                (jx_interp - jix_interp) * By_interp
-                - (jy_interp - jiy_interp) * Bx_interp
+                jex_interp * By_interp - jey_interp * Bx_interp
             );
         });
 
@@ -1230,7 +1253,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
                 // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
-                const Real grad_Pe = (!solve_for_Faraday) ?
+                const Real grad_Pe =
+                    (include_pressure_gradient && include_electron_pressure_term) ?
                     T_Algo::UpwardDx(Pe, coefs_x, n_coefs_x, i, j, k)
                     : 0._rt;
 
@@ -1244,7 +1268,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             }
 
             // Add resistivity only if E field value is used to update B
-            if (solve_for_Faraday) {
+            if (include_resistive_terms) {
                 Real jtot_val = 0._rt;
                 if (resistivity_has_J_dependence) {
                     // Interpolate current to appropriate staggering to match E field
@@ -1295,7 +1319,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
                 // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
-                const Real grad_Pe = (!solve_for_Faraday) ?
+                const Real grad_Pe =
+                    (include_pressure_gradient && include_electron_pressure_term) ?
                     T_Algo::UpwardDy(Pe, coefs_y, n_coefs_y, i, j, k)
                     : 0._rt;
 
@@ -1309,7 +1334,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             }
 
             // Add resistivity only if E field value is used to update B
-            if (solve_for_Faraday) {
+            if (include_resistive_terms) {
                 Real jtot_val = 0._rt;
                 if (resistivity_has_J_dependence) {
                     // Interpolate current to appropriate staggering to match E field
@@ -1360,7 +1385,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
                 // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
-                const Real grad_Pe = (!solve_for_Faraday) ?
+                const Real grad_Pe =
+                    (include_pressure_gradient && include_electron_pressure_term) ?
                     T_Algo::UpwardDz(Pe, coefs_z, n_coefs_z, i, j, k)
                     : 0._rt;
 
@@ -1374,7 +1400,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             }
 
             // Add resistivity only if E field value is used to update B
-            if (solve_for_Faraday) {
+            if (include_resistive_terms) {
                 Real jtot_val = 0._rt;
                 if (resistivity_has_J_dependence) {
                     // Interpolate current to appropriate staggering to match E field
