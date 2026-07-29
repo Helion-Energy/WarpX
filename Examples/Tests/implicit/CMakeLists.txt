@@ -69,6 +69,26 @@ if(TEST test_1d_theta_implicit_mhd_positivity.run)
 endif()
 
 add_warpx_test(
+    test_1d_theta_implicit_mhd_preconditioner  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_preconditioner  # inputs
+    "analysis_mhd_preconditioner.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_preconditioner_mpi  # name
+    1  # dims
+    2  # nprocs
+    inputs_test_1d_theta_implicit_mhd_preconditioner  # inputs
+    "analysis_mhd_preconditioner.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
     test_1d_theta_implicit_mhd_resistive  # name
     1  # dims
     1  # nprocs

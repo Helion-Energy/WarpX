@@ -91,9 +91,9 @@ single-ion-fluid mode selected by
 ``algo.evolve_scheme = theta_implicit_mhd``. It replaces the particle push and
 moment deposition inside the nonlinear loop with an ion continuity and
 momentum update. This monolithic Jacobian-free Newton--Krylov treatment follows
-the fully implicit MHD strategy of :cite:t:`Chacon2008`; the present initial
-implementation does not yet include that work's physics-based multigrid
-preconditioner. The nonlinear unknown is
+the fully implicit MHD strategy of :cite:t:`Chacon2008`. A first
+physics-based block preconditioner for the non-Hall, small-flow limit is
+described below. The nonlinear unknown is
 
 .. math::
 
@@ -169,6 +169,95 @@ Characteristic density, velocity, magnetic-field, momentum, and energy scales
 normalize the composite JFNK vector so that its Euclidean norm does not mix
 dimensional quantities.
 
+Physics-based block preconditioner
+""""""""""""""""""""""""""""""""""
+
+The prototype selected with ``jacobian.pc_type = pc_mhd_block`` approximates
+the inverse Jacobian with independent resistive-field and acoustic-fluid
+blocks. Let :math:`h=\theta\Delta t`. In the non-Hall limit, Faraday's law and
+the resistive part of Ohm's law give the field operator
+
+.. math::
+
+   \mathcal{P}_E\,\delta\boldsymbol E
+   =
+   \left[
+      \mathbb I
+      + \frac{h\eta_*}{\mu_0}
+        \nabla\times\nabla\times
+   \right]\delta\boldsymbol E ,
+
+where :math:`\eta_*` is a scalar reference resistivity evaluated at the
+theta-centered time. This staggered curl--curl system is approximately
+inverted with AMReX MLMG.
+
+The fluid block is the small-flow pressure Schur complement corresponding to
+the predictor--Schur--corrector strategy in :cite:t:`Chacon2008`. This
+prototype freezes domain-global/reference acoustic scalars during each Newton
+linear solve rather than constructing spatially varying coefficient fields.
+Specifically, it uses
+:math:`a_e=\gamma_e\sum U_e/\sum\rho_i` and
+:math:`c_i^2=\gamma_iP_{i,\mathrm{ref}}/\rho_{i,\mathrm{ref}}`.
+Given a preconditioner right-hand side
+:math:`(b_\rho,\boldsymbol b_M,b_U)`, define
+
+.. math::
+
+   b_p = c_i^2 b_\rho + \chi_e b_U,\qquad
+   c_s^2 = c_i^2+\chi_e a_e ,
+
+where :math:`c_i^2` is the reference-state approximation to
+:math:`\partial P_i/\partial\rho_i`,
+:math:`\chi_e=\partial P_e/\partial U_e`, and
+:math:`a_e=(U_e+P_e)/\rho_i`. The pressure increment is obtained from
+
+.. math::
+
+   \left(\frac{1}{c_s^2}-h^2\nabla^2\right)\delta p
+   =
+   \frac{b_p}{c_s^2}-h\nabla\cdot\boldsymbol b_M ,
+
+followed by
+
+.. math::
+
+   \delta\boldsymbol M
+   &= \boldsymbol b_M-h\nabla\delta p,\\
+   \delta\rho_i
+   &= b_\rho-h\nabla\cdot\delta\boldsymbol M,\\
+   \delta U_e
+   &= b_U-ha_e\nabla\cdot\delta\boldsymbol M.
+
+The scalar Helmholtz equation is approximately inverted with
+``MLABecLaplacian`` and MLMG. Both multigrid applications start from zero, run
+fixed cycle counts, and use a fixed smoother at the bottom. The resulting map
+is stationary and linear to solver roundoff within each standard
+right-preconditioned GMRES solve; AMReX MLMG can still stop early if it reaches
+its internal machine-precision residual threshold.
+
+This first version is restricted to one Cartesian, periodic AMR level, a
+staggered field grid, ``implicit_mhd.fluid_flux = centered``, evolving ions,
+zero Hall and electron-pressure terms in Ohm's law, and zero
+hyper-resistivity. Resistivity may be constant or time dependent; density,
+current, and per-species dependence is rejected because the field block uses
+only the scalar value :math:`\eta_*`. Strongly nonuniform and pressure-floor
+active states are also outside the robustness claim because the acoustic
+coefficients are global scalars and do not linearize the pressure ``max`` at
+its floor. The approximation omits background-flow advection, the
+Joule-heating derivative, and ideal magnetic/Lorentz couplings, so it is not
+yet the full MHD wave preconditioner of :cite:t:`Chacon2008`.
+
+There is also a deliberate discretization mismatch in the acoustic block.
+The centered nonlinear face flux composes centered cell derivatives and has
+the one-dimensional pressure symbol
+:math:`-\sin^2(k\Delta x)/\Delta x^2`, including its checkerboard null mode.
+The compact MLMG Laplacian instead has symbol
+:math:`-4\sin^2(k\Delta x/2)/\Delta x^2`. The two agree for smooth,
+well-resolved modes but not near the grid scale. Thus this prototype is
+expected to accelerate smooth acoustic and resistive problems; it does not
+establish grid-independent robustness for discontinuities or checkerboard
+modes.
+
 The fluid divergence is evaluated from one shared face flux, so mass and
 fluid momentum telescope conservatively on the periodic mesh. The default
 ``implicit_mhd.fluid_flux = centered`` option retains a second-order centered
@@ -185,8 +274,9 @@ Ohm/Faraday operator, the ion closure is barotropic, and the evolved thermal
 variable is electron internal energy rather than total energy. As discussed
 by :cite:t:`Chacon2008`, a total-energy equation is preferable when exact
 shock-energy conservation is required. Compatible electromagnetic work,
-ion/total-energy evolution, AMR/non-periodic boundaries, and a physics-based
-block preconditioner remain planned extensions.
+ion/total-energy evolution, AMR/non-periodic boundaries, and a block
+preconditioner containing the complete ideal-MHD wave operator remain planned
+extensions.
 
 The kinetic-fluid hybrid extension mostly uses the same routines as the standard electromagnetic
 PIC algorithm with the only exception that the E-field is calculated from Ohm's law

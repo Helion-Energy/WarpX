@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -331,13 +332,60 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !m_use_mass_matrices, "particle mass matrices are not applicable to theta_implicit_mhd");
     m_nlsolver->Define(m_state, this);
+    const PreconditionerType preconditioner_type =
+        m_nlsolver->GetPreconditionerType();
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        m_nlsolver->GetPreconditionerType() == PreconditionerType::none,
-        "theta_implicit_mhd does not yet provide a block preconditioner; "
-        "jacobian.pc_type must be none");
+        preconditioner_type == PreconditionerType::none ||
+            preconditioner_type == PreconditionerType::pc_mhd_block,
+        "theta_implicit_mhd supports jacobian.pc_type = none or pc_mhd_block");
+    if (preconditioner_type == PreconditionerType::pc_mhd_block) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            WarpX::grid_type == ablastr::utils::enums::GridType::Staggered,
+            "pc_mhd_block currently requires warpx.grid_type = staggered");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_hybrid_pic_model->m_include_hall_term,
+            "pc_mhd_block currently requires "
+            "hybrid_pic_model.include_hall_term = false");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_hybrid_pic_model->m_include_electron_pressure_term,
+            "pc_mhd_block currently requires "
+            "hybrid_pic_model.include_electron_pressure_term = false");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_hybrid_pic_model->m_include_hyper_resistivity_term,
+            "pc_mhd_block currently requires zero plasma_hyper_resistivity");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_hybrid_pic_model->m_has_per_species_eta,
+            "pc_mhd_block does not yet support per-species resistivity");
+        const amrex::Parser resistivity_parser = utils::parser::makeParser(
+            m_hybrid_pic_model->m_eta_expression, {"rho", "J", "t"});
+        const std::set<std::string> resistivity_symbols =
+            resistivity_parser.symbols();
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            resistivity_symbols.count("rho") == 0 &&
+                resistivity_symbols.count("J") == 0,
+            "pc_mhd_block currently requires plasma_resistivity to be "
+            "constant or time-only (no rho or J dependence)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_fluid_flux == "centered",
+            "pc_mhd_block currently requires implicit_mhd.fluid_flux = centered");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_evolve_ion_fluid,
+            "pc_mhd_block currently requires implicit_mhd.evolve_ion_fluid = true");
+    }
 
     FillFluidSources(m_state);
     m_is_defined = true;
+}
+
+amrex::Real
+ThetaImplicitMHD::GetMHDReferenceResistivityForPC (const amrex::Real time) const
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_hybrid_pic_model != nullptr,
+        "ThetaImplicitMHD reference resistivity requested before Define()");
+    const amrex::Real reference_charge_density =
+        m_ion_charge_to_mass * m_reference_mass_density;
+    return m_hybrid_pic_model->m_eta(reference_charge_density, 0.0_rt, time);
 }
 
 void ThetaImplicitMHD::PrintParameters () const

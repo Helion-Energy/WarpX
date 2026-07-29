@@ -1,0 +1,115 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.Te = 10.0
+my_constants.Pe = n0 * Te * q_e
+my_constants.Pi = Pe
+my_constants.B0 = 0.1
+my_constants.gamma = 5.0/3.0
+my_constants.drho = 1.0e-4
+my_constants.dB = 1.0e-8
+my_constants.nz = 64
+my_constants.Lz = 1.0
+my_constants.k = 2*pi/Lz
+my_constants.sound_speed = sqrt(gamma*(Pi+Pe)/rho0)
+my_constants.acoustic_cfl = 10.0
+my_constants.dt = acoustic_cfl * (Lz/nz) / sound_speed
+my_constants.k_resistive = 2*sin(k*(Lz/nz)/2)/(Lz/nz)
+my_constants.resistive_number = 0.4
+my_constants.eta_time_slope = 2.0
+my_constants.eta_theta_factor = 1.0 + 0.5*eta_time_slope
+my_constants.eta0 = resistive_number*mu0/(eta_theta_factor*k_resistive**2*dt)
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 1
+amr.n_cell = nz
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.grid_type = staggered
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 8
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-10
+gmres.max_iterations = 50
+
+jacobian.pc_type = pc_mhd_block
+pc_mhd_block.field_iterations = 2
+pc_mhd_block.fluid_iterations = 4
+pc_mhd_block.agglomeration = true
+pc_mhd_block.consolidation = true
+pc_mhd_block.max_coarsening_level = 30
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = eta0*(1.0+eta_time_slope*t/dt)
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE ######
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = Pi
+implicit_mhd.fluid_flux = centered
+implicit_mhd.mass_density(x,y,z) = rho0*(1.0 + drho*sin(k*z))
+implicit_mhd.electron_pressure(x,y,z) = Pe*(1.0 + gamma*drho*sin(k*z))
+implicit_mhd.velocity_z(x,y,z) = sound_speed*drho*sin(k*z)
+
+warpx.B_ext_grid_init_style = parse_B_ext_grid_function
+warpx.Bx_external_grid_function(x,y,z) = dB*sin(k*z)
+warpx.By_external_grid_function(x,y,z) = 0.0
+warpx.Bz_external_grid_function(x,y,z) = 0.0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 1
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bx Ey Ez Bz Pe implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy
+diag1.write_species = 0

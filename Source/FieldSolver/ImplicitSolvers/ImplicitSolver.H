@@ -177,6 +177,33 @@ public:
     [[nodiscard]] virtual amrex::Real  GetThetaForPC () const = 0;
 
     /**
+     * \brief Return theta for the MHD block preconditioner.
+     *
+     * This is separate from GetThetaForPC(), whose established meaning is the
+     * implicit light-wave fraction used by electromagnetic preconditioners.
+     */
+    [[nodiscard]] virtual amrex::Real
+    GetMHDThetaForPC () const
+    {
+        return -1.0;
+    }
+
+    /**
+     * \brief Evaluate the scalar reference resistivity used by the MHD block
+     * preconditioner.
+     *
+     * The base sentinel makes selecting pc_mhd_block for an unsupported
+     * implicit scheme fail during its first update with a descriptive
+     * assertion.
+     */
+    [[nodiscard]] virtual amrex::Real
+    GetMHDReferenceResistivityForPC (amrex::Real a_time) const
+    {
+        amrex::ignore_unused(a_time);
+        return -1.0;
+    }
+
+    /**
      * \brief Apply deposited mass matrices to a vector field.
      * Computes a_out += a_scale * S * (a_in - a_in_ref) [+ a_baseline],
      * where S is the mass matrix, accumulating into a_out.

@@ -308,7 +308,7 @@ Overall simulation parameters
           If using ``jacobian.pc_type = pc_petsc``, this parameter specifies the width of the mass matrices included in the preconditioner.
           In most cases, a width of 1 is sufficient for good GMRES performance.
 
-        - ``jacobian.pc_type`` (``string``, default: None). A preconditioner can be used to minimize the number of linear GMRES iterations. There are three options:
+        - ``jacobian.pc_type`` (``string``, default: None). A preconditioner can be used to minimize the number of linear GMRES iterations. There are four options:
 
           - ``jacobian.pc_type = pc_curl_curl_mlmg``: Use the AMReX MLMG solver for the curl curl formulation of Maxwell's equations. This preconditioner solves the following equation:
 
@@ -329,6 +329,76 @@ Overall simulation parameters
             - ``pc_curl_curl_mlmg.max_coarsening_level`` (``int``, default: 30)
             - ``pc_curl_curl_mlmg.relative_tolerance`` (``float``, default: 1.0e-4)
             - ``pc_curl_curl_mlmg.absolute_tolerance`` (``float``, default: 1.0e-16)
+
+          - ``jacobian.pc_type = pc_mhd_block``: Use the prototype
+            physics-based block preconditioner for
+            ``algo.evolve_scheme = theta_implicit_mhd``. In the Hall-off,
+            small-flow approximation, it combines:
+
+            - a staggered resistive curl--curl solve,
+
+              .. math::
+
+                 \left[
+                    \mathbb I
+                    + \frac{\theta\Delta t\,\eta_*}{\mu_0}
+                      \nabla\times\nabla\times
+                 \right]\delta\boldsymbol E
+                 = \boldsymbol b_E ,
+
+            - and a cell-centered acoustic pressure-Schur solve,
+
+              .. math::
+
+                 \left[
+                    \frac{1}{c_s^2}
+                    -(\theta\Delta t)^2\nabla^2
+                 \right]\delta p
+                 =
+                 \frac{b_p}{c_s^2}
+                 -\theta\Delta t\,\nabla\cdot\boldsymbol b_M .
+
+            The preconditioner then corrects ion momentum, density, and
+            electron energy from :math:`\delta p`. The acoustic coefficients
+            are domain-global/reference scalars, not spatial coefficient
+            fields. Both MLMG solves use zero initial guesses, fixed cycle
+            counts, and fixed bottom smoothing. This keeps the operation
+            stationary to solver roundoff for standard right-preconditioned
+            GMRES; MLMG can still stop early at its internal machine-precision
+            residual threshold.
+
+            The prototype requires one Cartesian, periodic AMR level,
+            ``warpx.grid_type = staggered``,
+            ``implicit_mhd.fluid_flux = centered``,
+            ``implicit_mhd.evolve_ion_fluid = true``, both
+            ``hybrid_pic_model.include_hall_term = false`` and
+            ``hybrid_pic_model.include_electron_pressure_term = false``, and
+            zero ``hybrid_pic_model.plasma_hyper_resistivity``. Resistivity
+            may be constant or time dependent; density, current, and
+            per-species dependence is rejected because the field block uses a
+            scalar reference value. It does not yet include Hall/whistler
+            physics, ideal magnetic-wave coupling, background advection,
+            Rusanov transport, or the Joule-heating derivative. Strongly
+            nonuniform and pressure-floor-active states are outside this
+            scalar-coefficient prototype's robustness claim.
+
+            The fluid Schur complement uses a compact MLMG Laplacian, whereas
+            the centered nonlinear face flux composes a wider centered
+            derivative. They agree for smooth, well-resolved modes but differ
+            near the grid scale, including at the centered operator's
+            checkerboard null mode. This option should therefore be regarded
+            as an acoustic/resistive prototype, not yet a robust
+            discontinuous-flow or complete MHD preconditioner.
+
+            - ``pc_mhd_block.verbose`` (``bool``, default: false)
+            - ``pc_mhd_block.bottom_verbose`` (``bool``, default: false)
+            - ``pc_mhd_block.field_iterations`` (``int``, default: 2):
+              fixed MLMG iteration count for the resistive curl--curl block.
+            - ``pc_mhd_block.fluid_iterations`` (``int``, default: 2):
+              fixed MLMG iteration count for the acoustic pressure block.
+            - ``pc_mhd_block.max_coarsening_level`` (``int``, default: 30)
+            - ``pc_mhd_block.agglomeration`` (``bool``, default: true)
+            - ``pc_mhd_block.consolidation`` (``bool``, default: true)
 
           - ``jacobian.pc_type = pc_jacobi``: Use the Point-Jacobi method. This preconditioner only captures the plasma response via the diagonal mass matrices.
 
@@ -3781,8 +3851,13 @@ Jacobian probes.
     one ion fluid, and no kinetic or regular WarpX fluid species. Embedded
     boundaries, runtime load balancing, hybrid external currents/fields,
     Holmstrom vacuum regions, particle mass matrices, and existing field-only
-    preconditioners are not supported. The Rusanov option regularizes fluid
-    discontinuities but is not a total-energy conservative MHD shock solver.
+    preconditioners are not supported. The prototype ``pc_mhd_block``
+    preconditioner is available only with staggered fields, centered fluid
+    fluxes, evolving ions, the Hall and electron-pressure Ohm terms disabled,
+    and zero hyper-resistivity. Its scalar reference resistivity may be
+    constant or time dependent, but not density, current, or species
+    dependent. The Rusanov option regularizes fluid discontinuities but is not
+    a total-energy conservative MHD shock solver.
 
 .. pp:param:: implicit_mhd.reference_mass_density
     :type: ``float``
