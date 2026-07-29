@@ -128,6 +128,12 @@ public:
                 const amrex::MultiFab& Bz,
                 MomentumPushType momentum_push_type = MomentumPushType::Full) override;
 
+    /** Global maximum particle speed (m/s) of this species.
+     * Public because the reduction uses an extended device lambda, which
+     * CUDA does not allow inside private/protected member functions.
+     */
+    [[nodiscard]] amrex::Real MaxParticleSpeed ();
+
     /** Number of subcycles used in the most recent Evolve call */
     [[nodiscard]] int getNSubcycles () const { return m_n_subcycles; }
 
@@ -142,9 +148,6 @@ protected:
      */
     void ComputeSubcycleCount (ablastr::fields::MultiFabRegister& fields,
                                int lev, amrex::Real dt);
-
-    /** Global maximum particle speed (m/s) of this species */
-    [[nodiscard]] amrex::Real MaxParticleSpeed ();
 
     /** Apply domain boundary conditions, gather scraped particles into the
      * boundary buffer, redistribute, and scrape at the embedded boundary —
