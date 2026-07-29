@@ -127,6 +127,7 @@ private:
      * from E via Faraday's law, then computes E^{n+theta} from Ohm's law.
      */
     void UpdateWarpXFields ( const WarpXSolverVec&  a_E,
+                             bool a_from_jacobian,
                              amrex::Real            start_time );
 
     /**
@@ -164,7 +165,8 @@ private:
     /** Darwin magnetic-field update: A^{n+theta} = A_old - theta dt E_T
      *  (from Efield_fp, which holds the transverse state at entry),
      *  then B = B_static + curl A with boundary treatment. */
-    void DarwinUpdateA_B ( amrex::Real a_thetadt, amrex::Real a_time );
+    void DarwinUpdateA_B ( amrex::Real a_thetadt, amrex::Real a_time,
+                           bool a_from_jacobian );
 
     /** Unified external drive on the Darwin path: impose the (gauge-shifted)
      * external vector potential as the boundary value of the evolved A on

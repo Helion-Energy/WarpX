@@ -2196,6 +2196,12 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         in-plane corrections are discretely inconsistent with the source
         near the RZ axis and can destabilize the B_theta content there).
 
+    darwin_vacuum_recovery_density_fraction: float, default=1.0
+        Fraction of ``n_floor`` below which the recovery masks apply. Use
+        values < 1 when the Ohm's-law floor sits inside real plasma (e.g.
+        raised floors on driven decks), so the vacuum treatment stays in
+        the genuine low-density region.
+
     darwin_vacuum_recovery_relative_tolerance: float, default=1e-8
         Relative tolerance of the recovery's per-component Poisson solves.
 
@@ -2371,6 +2377,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         darwin_vacuum_recovery_mask=None,
         darwin_vacuum_recovery_cadence=None,
         darwin_vacuum_recovery_components=None,
+        darwin_vacuum_recovery_density_fraction=None,
         darwin_vacuum_recovery_relative_tolerance=None,
         include_joule_heating=None,
         redirect_joule_to_ions=None,
@@ -2417,6 +2424,9 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.darwin_vacuum_recovery_mask = darwin_vacuum_recovery_mask
         self.darwin_vacuum_recovery_cadence = darwin_vacuum_recovery_cadence
         self.darwin_vacuum_recovery_components = darwin_vacuum_recovery_components
+        self.darwin_vacuum_recovery_density_fraction = (
+            darwin_vacuum_recovery_density_fraction
+        )
         self.darwin_vacuum_recovery_relative_tolerance = (
             darwin_vacuum_recovery_relative_tolerance
         )
@@ -2517,6 +2527,10 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         if self.darwin_vacuum_recovery_components is not None:
             pywarpx.hybridpicmodel.darwin_vacuum_recovery_components = (
                 self.darwin_vacuum_recovery_components
+            )
+        if self.darwin_vacuum_recovery_density_fraction is not None:
+            pywarpx.hybridpicmodel.darwin_vacuum_recovery_density_fraction = (
+                self.darwin_vacuum_recovery_density_fraction
             )
         if self.darwin_vacuum_recovery_relative_tolerance is not None:
             pywarpx.hybridpicmodel.darwin_vacuum_recovery_relative_tolerance = (
