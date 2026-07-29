@@ -703,7 +703,7 @@ public:
      *  identically and the overwrite would degenerate the residual.
      */
     void ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_long,
-                              bool a_from_jacobian);
+                              bool a_from_jacobian, bool a_bdf2);
 
     /** Solve the Darwin longitudinal-field constraint with the given charge
      *  density and the current hybrid_electron_pressure_fp, writing

@@ -484,7 +484,7 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
         // the recovery (contraction at the recovery's small leak factor).
         if (m_vacuum_recovery_half) {
             m_hybrid_pic_model->ApplyVacuumFaradayE(
-                m_theta * m_dt, false, a_from_jacobian);
+                m_theta * m_dt, false, a_from_jacobian, false);
         }
     }
 
@@ -786,7 +786,21 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
             // The delivered end-of-step field in the band is the Faraday
             // value of the recovered A across the step (Efield_fp holds
             // the full field here, so E_L is added back on top).
-            m_hybrid_pic_model->ApplyVacuumFaradayE(m_dt, true, false);
+            m_hybrid_pic_model->ApplyVacuumFaradayE(m_dt, true, false,
+                                                    true /* BDF2 */);
+            // Rotate the A history for the next step's BDF2: A^n becomes
+            // A^{n-1} (A_old still holds A^n here; it is rewritten from the
+            // end state at the next OneStep entry).
+            for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+                for (int dir = 0; dir < 3; ++dir) {
+                    amrex::MultiFab & Anm1 = *m_WarpX->m_fields.get(
+                        "hybrid_A_vac_nm1_fp", Direction{dir}, lev);
+                    amrex::MultiFab const & Aold = *m_WarpX->m_fields.get(
+                        "hybrid_A_old_fp", Direction{dir}, lev);
+                    amrex::MultiFab::Copy(Anm1, Aold, 0, 0, Anm1.nComp(),
+                                          Anm1.nGrowVect());
+                }
+            }
         }
         // B^{n+1} = B_static + curl A^{n+1}
         for (int lev = 0; lev < m_num_amr_levels; ++lev) {
