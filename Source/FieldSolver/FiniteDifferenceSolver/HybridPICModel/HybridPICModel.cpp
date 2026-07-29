@@ -391,6 +391,13 @@ void HybridPICModel::AllocateLevelMFs (
                 fields.alloc_init("hybrid_E_vac_target_fp", Direction{dir},
                     lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB,
                     0.0_rt);
+                // A^{n-1} for the BDF2 endpoint reconstruction of the band
+                // field. Zero is the EXACT pre-history under the gauge-free
+                // initialization (A = 0 for t <= 0, B_static carries B(0)),
+                // so BDF2 is valid from the first step.
+                fields.alloc_init("hybrid_A_vac_nm1_fp", Direction{dir},
+                    lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB,
+                    0.0_rt);
             }
         }
     }
@@ -1792,10 +1799,10 @@ void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian)
 }
 
 void HybridPICModel::ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_long,
-                                          bool a_from_jacobian)
+                                          bool a_from_jacobian, bool a_bdf2)
 {
 #if defined(WARPX_DIM_1D_Z) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
-    amrex::ignore_unused(a_dt_eff, a_add_E_long);
+    amrex::ignore_unused(a_dt_eff, a_add_E_long, a_bdf2);
     WARPX_ABORT_WITH_MESSAGE(
         "hybrid_pic_model.darwin_vacuum_recovery is not supported in 1D "
         "geometries.");
@@ -1844,6 +1851,8 @@ void HybridPICModel::ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_lon
             : nullptr;
         amrex::MultiFab & Etgt = *warpx.m_fields.get(
             "hybrid_E_vac_target_fp", Direction{dir}, lev);
+        amrex::MultiFab const & Anm1 = *warpx.m_fields.get(
+            "hybrid_A_vac_nm1_fp", Direction{dir}, lev);
         amrex::GpuArray<int, 3> const Astag = A_stag[dir];
         const amrex::iMultiFab* eb_flag =
             (!warpx.GetEBUpdateEFlag().empty()
@@ -1857,8 +1866,10 @@ void HybridPICModel::ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_lon
             auto const & tgt_arr  = Etgt.array(mfi);
             auto const & a_arr    = A.const_array(mfi);
             auto const & aold_arr = A_old.const_array(mfi);
+            auto const & anm1_arr = Anm1.const_array(mfi);
             auto const & rho_arr  = rho.const_array(mfi);
             const bool from_jac = a_from_jacobian;
+            const bool bdf2 = a_bdf2;
             amrex::Array4<amrex::Real const> el_arr;
             if (EL) { el_arr = EL->const_array(mfi); }
             const bool add_el = (EL != nullptr);
@@ -1885,8 +1896,16 @@ void HybridPICModel::ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_lon
                     e_arr(i, j, k) = tgt_arr(i, j, k)
                         + (add_el ? el_arr(i, j, k) : 0.0_rt);
                 } else {
-                    amrex::Real const efar =
-                        -(a_arr(i, j, k) - aold_arr(i, j, k)) * inv_dt;
+                    // theta-stage: the scheme's own difference quotient
+                    // (algebraically the midpoint-centered full-step rate at
+                    // theta = 1/2). End of step: BDF2, the second-order
+                    // endpoint derivative of the recovered A chain,
+                    //   E^{n+1} = -(3A^{n+1} - 4A^n + A^{n-1})/(2 dt).
+                    amrex::Real const efar = bdf2
+                        ? -(3.0_rt * a_arr(i, j, k)
+                            - 4.0_rt * aold_arr(i, j, k)
+                            + anm1_arr(i, j, k)) * (0.5_rt * inv_dt)
+                        : -(a_arr(i, j, k) - aold_arr(i, j, k)) * inv_dt;
                     tgt_arr(i, j, k) = efar;
                     e_arr(i, j, k) = efar
                         + (add_el ? el_arr(i, j, k) : 0.0_rt);
