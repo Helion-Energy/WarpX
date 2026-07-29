@@ -8,9 +8,13 @@
 #include "WarpX.H"
 
 using warpx::fields::FieldType;
-std::unique_ptr<WarpXSolverDOF> WarpXSolverVec::m_dofs = nullptr;
 
 WarpXSolverVec::~WarpXSolverVec ()
+{
+    ClearData();
+}
+
+void WarpXSolverVec::ClearData () noexcept
 {
     for (auto & lvl : m_array_vec)
     {
@@ -19,21 +23,55 @@ WarpXSolverVec::~WarpXSolverVec ()
             delete lvl[i];
         }
     }
+    for (auto* scalar : m_scalar_vec)
+    {
+        delete scalar;
+    }
+    m_array_vec.clear();
+    m_scalar_vec.clear();
 }
 
 void WarpXSolverVec::Define ( WarpX*  a_WarpX,
-                         const std::string&  a_vector_type_name,
-                         const std::string&  a_scalar_type_name )
+                              const std::string&  a_vector_type_name,
+                              const std::string&  a_scalar_type_name )
+{
+    DefineData(a_WarpX, a_vector_type_name, a_scalar_type_name);
+
+    m_dofs = std::make_shared<WarpXSolverDOF>();
+    m_dofs->Define(m_WarpX, m_num_amr_levels, m_vector_type_name, m_scalar_type_name);
+
+    m_is_defined = true;
+}
+
+void WarpXSolverVec::Define (const WarpXSolverVec& a_solver_vec)
+{
+    assertIsDefined(a_solver_vec);
+
+    DefineData(
+        a_solver_vec.m_WarpX,
+        a_solver_vec.getVectorType(),
+        a_solver_vec.getScalarType());
+
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        a_solver_vec.m_dofs != nullptr,
+        "WarpXSolverVec::Define() source DOF object is a nullptr");
+    m_dofs = a_solver_vec.m_dofs;
+
+    m_is_defined = true;
+}
+
+void WarpXSolverVec::DefineData (WarpX* a_WarpX,
+                                 const std::string& a_vector_type_name,
+                                 const std::string& a_scalar_type_name)
 {
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !IsDefined(),
         "WarpXSolverVec::Define() called on already defined WarpXSolverVec");
 
-    // Define static member pointer to WarpX
-    if (!m_warpx_ptr_defined) {
-        m_WarpX = a_WarpX;
-        m_warpx_ptr_defined = true;
-    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        a_WarpX != nullptr,
+        "WarpXSolverVec::Define() called with a nullptr WarpX object");
+    m_WarpX = a_WarpX;
 
     m_num_amr_levels = 1;
 
@@ -102,13 +140,6 @@ void WarpXSolverVec::Define ( WarpX*  a_WarpX,
         m_array_type != FieldType::None ||
         m_scalar_type != FieldType::None,
         "WarpXSolverVec cannot be defined with both array and scalar vecs FieldType::None");
-    if (m_dofs == nullptr) {
-        m_dofs = std::make_unique<WarpXSolverDOF>();
-        m_dofs->Define(m_WarpX, m_num_amr_levels, m_vector_type_name, m_scalar_type_name);
-        amrex::ExecOnFinalize([p=&m_dofs] () { p->reset(); });
-    }
-
-    m_is_defined = true;
 }
 
 void WarpXSolverVec::Copy ( warpx::fields::FieldType  a_array_type,

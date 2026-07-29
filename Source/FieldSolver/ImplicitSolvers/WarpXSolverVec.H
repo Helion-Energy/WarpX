@@ -71,15 +71,7 @@ public:
              const std::string&  a_vector_type_name,
              const std::string&  a_scalar_type_name = "none" );
 
-    inline
-    void Define ( const WarpXSolverVec&  a_solver_vec )
-    {
-        assertIsDefined( a_solver_vec );
-        m_num_amr_levels = a_solver_vec.m_num_amr_levels;
-        Define( WarpXSolverVec::m_WarpX,
-                a_solver_vec.getVectorType(),
-                a_solver_vec.getScalarType() );
-    }
+    void Define (const WarpXSolverVec& a_solver_vec);
 
     [[nodiscard]] RT dotProduct( const WarpXSolverVec&  a_X ) const;
 
@@ -118,11 +110,26 @@ public:
     WarpXSolverVec& operator= ( WarpXSolverVec&&  a_solver_vec ) noexcept
     {
         if (this != &a_solver_vec) {
+            ClearData();
+
             m_array_vec = std::move(a_solver_vec.m_array_vec);
             m_scalar_vec = std::move(a_solver_vec.m_scalar_vec);
             m_array_type = a_solver_vec.m_array_type;
             m_scalar_type = a_solver_vec.m_scalar_type;
-            m_is_defined = true;
+            m_vector_type_name = std::move(a_solver_vec.m_vector_type_name);
+            m_scalar_type_name = std::move(a_solver_vec.m_scalar_type_name);
+            m_num_amr_levels = a_solver_vec.m_num_amr_levels;
+            m_WarpX = a_solver_vec.m_WarpX;
+            m_dofs = std::move(a_solver_vec.m_dofs);
+            m_is_defined = a_solver_vec.m_is_defined;
+
+            a_solver_vec.m_array_vec.clear();
+            a_solver_vec.m_scalar_vec.clear();
+            a_solver_vec.m_array_type = warpx::fields::FieldType::None;
+            a_solver_vec.m_scalar_type = warpx::fields::FieldType::None;
+            a_solver_vec.m_num_amr_levels = 0;
+            a_solver_vec.m_WarpX = nullptr;
+            a_solver_vec.m_is_defined = false;
         }
         return *this;
     }
@@ -332,10 +339,20 @@ private:
     static constexpr int m_ncomp = 1;
     int m_num_amr_levels = 1;
 
-    inline static bool m_warpx_ptr_defined = false;
-    inline static WarpX* m_WarpX = nullptr;
+    WarpX* m_WarpX = nullptr;
 
-    static std::unique_ptr<WarpXSolverDOF> m_dofs;
+    /**
+     * Serialized layout for this nonlinear state. Solver work vectors created
+     * with Define(other) share the layout, while independently defined states
+     * may use different field blocks and centerings.
+     */
+    std::shared_ptr<WarpXSolverDOF> m_dofs;
+
+    void DefineData (WarpX* a_WarpX,
+                     const std::string& a_vector_type_name,
+                     const std::string& a_scalar_type_name);
+
+    void ClearData () noexcept;
 };
 
 #endif
