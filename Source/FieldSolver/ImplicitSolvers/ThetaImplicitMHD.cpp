@@ -343,14 +343,6 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
             WarpX::grid_type == ablastr::utils::enums::GridType::Staggered,
             "pc_mhd_block currently requires warpx.grid_type = staggered");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            !m_hybrid_pic_model->m_include_hall_term,
-            "pc_mhd_block currently requires "
-            "hybrid_pic_model.include_hall_term = false");
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            !m_hybrid_pic_model->m_include_electron_pressure_term,
-            "pc_mhd_block currently requires "
-            "hybrid_pic_model.include_electron_pressure_term = false");
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !m_hybrid_pic_model->m_include_hyper_resistivity_term,
             "pc_mhd_block currently requires zero plasma_hyper_resistivity");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -368,9 +360,6 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_fluid_flux == "centered",
             "pc_mhd_block currently requires implicit_mhd.fluid_flux = centered");
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            m_evolve_ion_fluid,
-            "pc_mhd_block currently requires implicit_mhd.evolve_ion_fluid = true");
     }
 
     FillFluidSources(m_state);
@@ -398,6 +387,15 @@ ThetaImplicitMHD::GetMHDReferenceMagneticFieldForPC () const
     return {inverse_number_of_cells * magnetic_field.sum(0, false),
             inverse_number_of_cells * magnetic_field.sum(1, false),
             inverse_number_of_cells * magnetic_field.sum(2, false)};
+}
+
+bool
+ThetaImplicitMHD::GetMHDIncludeHallTermForPC () const
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_hybrid_pic_model != nullptr,
+        "ThetaImplicitMHD Hall configuration requested before Define()");
+    return m_hybrid_pic_model->m_include_hall_term;
 }
 
 void ThetaImplicitMHD::PrintParameters () const

@@ -62,6 +62,36 @@ add_warpx_test(
 )
 
 add_warpx_test(
+    test_1d_theta_implicit_mhd_stiff_whistler_evolving_ions  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_stiff_whistler_preconditioner implicit_mhd.evolve_ion_fluid=true"  # inputs
+    "analysis_mhd_stiff_whistler_evolving_ions.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_stiff_whistler_preconditioner  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_stiff_whistler_preconditioner  # inputs
+    "analysis_mhd_stiff_whistler.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_stiff_whistler_preconditioner_mpi  # name
+    1  # dims
+    2  # nprocs
+    inputs_test_1d_theta_implicit_mhd_stiff_whistler_preconditioner  # inputs
+    "analysis_mhd_stiff_whistler.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
     test_1d_theta_implicit_mhd_contact  # name
     1  # dims
     1  # nprocs

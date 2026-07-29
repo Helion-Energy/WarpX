@@ -32,13 +32,24 @@
 /**
  * \brief Physics-based block preconditioner for the theta-implicit MHD state.
  *
- * The electric predictor and corrector approximate resistive magnetic
- * diffusion with
+ * The electric predictor and corrector approximate resistive and Hall
+ * magnetic stiffness with
  *
- *     [I + h eta_ref / mu0 curl curl] dE = bE.
+ *     [I + d_* curl curl] dE = bE,
  *
- * For a nonzero domain-mean magnetic field, the fluid block applies the
- * constant-coefficient Chacon small-flow wave Schur approximation
+ *     d_* = hypot(h eta_ref / mu0,
+ *                 h |B_ref| / (mu0 rho_q,ref)).
+ *
+ * The second term is enabled only when Hall physics is active. It is the
+ * spectral-magnitude approximation to the skew Hall/whistler block: for a
+ * homogeneous one-dimensional circular mode the exact transverse field
+ * symbol is I +/- i d_H k^2, while this fixed-work scalar approximation is
+ * I + d_H k^2. It bounds the preconditioned high-k spectrum without changing
+ * the nonlinear residual.
+ *
+ * For a nonzero domain-mean magnetic field with Hall physics disabled, the
+ * fluid block applies the constant-coefficient Chacon small-flow wave Schur
+ * approximation
  *
  *     [I - h^2 c_s^2 grad div
  *        + h^2/(mu0 rho_ref) W(B_ref)] dM = r_M,
@@ -46,9 +57,12 @@
  * where W(B_ref) is the conservative ideal-MHD magnetic wave operator.
  * Density and electron energy are then recovered from continuity and
  * compression, and the electric field is corrected by dM/rho_ref x B_ref.
- * The previous acoustic pressure Schur block remains the zero-background
- * path. All MLMG applications use zero initial guesses, fixed cycle counts,
- * and fixed bottom smoothing.
+ * When Hall physics is active with evolving ions, the acoustic fluid block is
+ * followed by the momentum-to-field correction instead: the current wave
+ * Schur approximates the inverse Hall field block by the identity and is not
+ * robust in that regime. The acoustic pressure Schur block also remains the
+ * zero-background path. All MLMG applications use zero initial guesses, fixed
+ * cycle counts, and fixed bottom smoothing.
  */
 template <class T, class Ops>
 class MHDBlockPC : public Preconditioner<T, Ops>
@@ -73,6 +87,7 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         // These methods contain extended __device__ lambdas and must therefore
         // be public when compiled with NVCC.
         void ApplyFluidBlock (T& solution, const T& rhs);
+        void ApplyFrozenIonFluidBlock (T& solution, const T& rhs);
         void BuildFieldRHS (const T& rhs, const amrex::MultiFab* momentum);
         void AddIdealLorentzForceToMomentumRHS (const T& field_predictor, const T& rhs);
         void ApplyIdealWaveFluidBlock (T& solution, const T& rhs);
@@ -95,7 +110,11 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         bool m_consolidation = true;
         bool m_acoustic_active = false;
         bool m_include_ideal_mhd_coupling = true;
+        bool m_include_hall_mhd_coupling = true;
         bool m_ideal_mhd_active = false;
+        bool m_ideal_mhd_wave_active = false;
+        bool m_hall_mhd_active = false;
+        bool m_evolve_ion_fluid = true;
 
         int m_field_iterations = 2;
         int m_fluid_iterations = 2;
@@ -106,11 +125,14 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         RT m_reference_mass_density = 0.0;
         RT m_reference_magnetic_field_scale = 0.0;
         RT m_reference_ion_pressure = 0.0;
+        RT m_reference_charge_density = 0.0;
         RT m_wave_relaxation = 0.5;
 
         RT m_h = 0.0;
         RT m_eta_reference = 0.0;
         RT m_field_diffusion_coefficient = 0.0;
+        RT m_hall_diffusion_coefficient = 0.0;
+        RT m_field_preconditioning_coefficient = 0.0;
         RT m_electron_enthalpy = 0.0;
         RT m_ion_sound_speed_squared = 0.0;
         RT m_sound_speed_squared = 0.0;
@@ -154,6 +176,7 @@ MHDBlockPC<T, Ops>::ReadParameters ()
     pp.query("agglomeration", m_agglomeration);
     pp.query("consolidation", m_consolidation);
     pp.query("include_ideal_mhd_coupling", m_include_ideal_mhd_coupling);
+    pp.query("include_hall_mhd_coupling", m_include_hall_mhd_coupling);
     utils::parser::queryWithParser(pp, "field_iterations", m_field_iterations);
     utils::parser::queryWithParser(pp, "fluid_iterations", m_fluid_iterations);
     utils::parser::queryWithParser(pp, "max_coarsening_level", m_max_coarsening_level);
@@ -317,7 +340,6 @@ MHDBlockPC<T, Ops>::Update (const T& state)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_eta_reference >= 0.0,
                                      "pc_mhd_block requires a non-negative reference resistivity");
     m_field_diffusion_coefficient = m_h * m_eta_reference / PhysConst::mu0;
-    m_curl_curl->setScalars(m_field_diffusion_coefficient, 1.0);
 
     const amrex::MultiFab& density = state.getMultiFabBlock(MassDensityName, 0);
     const amrex::MultiFab& electron_energy = state.getMultiFabBlock(ElectronEnergyName, 0);
@@ -349,9 +371,39 @@ MHDBlockPC<T, Ops>::Update (const T& state)
                                   m_reference_magnetic_field[component];
     }
     const RT activation_threshold = 1.0e-12 * m_reference_magnetic_field_scale;
-    m_ideal_mhd_active =
-        m_include_ideal_mhd_coupling &&
+    const bool magnetic_field_active =
         magnetic_field_squared > activation_threshold * activation_threshold;
+    m_evolve_ion_fluid = m_ops->GetMHDEvolveIonFluidForPC();
+
+    const bool include_hall_term = m_ops->GetMHDIncludeHallTermForPC();
+    m_hall_mhd_active =
+        m_include_hall_mhd_coupling && include_hall_term && magnetic_field_active;
+    m_hall_diffusion_coefficient = 0.0;
+    if (m_hall_mhd_active)
+    {
+        m_reference_charge_density = m_ops->GetMHDReferenceChargeDensityForPC();
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_reference_charge_density > 0.0,
+            "pc_mhd_block requires a positive reference charge density for Hall physics");
+        m_hall_diffusion_coefficient =
+            m_h * std::sqrt(magnetic_field_squared) /
+            (PhysConst::mu0 * m_reference_charge_density);
+    }
+    m_field_preconditioning_coefficient =
+        std::hypot(m_field_diffusion_coefficient, m_hall_diffusion_coefficient);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        std::isfinite(m_field_preconditioning_coefficient),
+        "pc_mhd_block encountered a non-finite field preconditioning coefficient");
+    m_curl_curl->setScalars(m_field_preconditioning_coefficient, 1.0);
+
+    m_ideal_mhd_active =
+        m_evolve_ion_fluid && m_include_ideal_mhd_coupling && magnetic_field_active;
+    // The ideal wave Schur approximates the inverse field block by the
+    // identity. That approximation is not robust once the Hall field block is
+    // stiff, so Hall-active solves retain only the triangular momentum-to-field
+    // correction until a Hall-aware ion Schur operator is available.
+    m_ideal_mhd_wave_active = m_ideal_mhd_active && !include_hall_term;
+
     m_wave_operator->setCoefficients(
         m_h * m_h * m_sound_speed_squared,
         m_h * m_h / (PhysConst::mu0 * m_reference_mass_density),
@@ -360,13 +412,20 @@ MHDBlockPC<T, Ops>::Update (const T& state)
     if (m_verbose)
     {
         amrex::Print() << "Updating pc_mhd_block: h = " << m_h << ", eta_ref = " << m_eta_reference
+                       << ", d_eta = " << m_field_diffusion_coefficient
+                       << ", d_H = " << m_hall_diffusion_coefficient
                        << ", a_e = " << m_electron_enthalpy
                        << ", ci^2 = " << m_ion_sound_speed_squared
                        << ", c^2 = " << m_sound_speed_squared
                        << ", B_ref = (" << m_reference_magnetic_field[0] << ", "
                        << m_reference_magnetic_field[1] << ", "
                        << m_reference_magnetic_field[2] << "), ideal MHD = "
-                       << (m_ideal_mhd_active ? "active" : "inactive") << "\n";
+                       << (m_ideal_mhd_wave_active
+                               ? "wave"
+                               : (m_ideal_mhd_active ? "triangular" : "inactive"))
+                       << ", Hall MHD = " << (m_hall_mhd_active ? "active" : "inactive")
+                       << ", ion fluid = " << (m_evolve_ion_fluid ? "evolving" : "frozen")
+                       << "\n";
     }
 }
 
@@ -379,18 +438,46 @@ MHDBlockPC<T, Ops>::Apply (T& solution, const T& rhs)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(IsDefined(),
                                      "MHDBlockPC::Apply() called on an undefined object");
     solution.zero();
-    ApplyFieldBlock(solution, rhs);
-    if (m_ideal_mhd_active)
+    if (!m_evolve_ion_fluid)
     {
+        ApplyFrozenIonFluidBlock(solution, rhs);
+        BuildFieldRHS(
+            rhs, m_include_ideal_mhd_coupling ? m_momentum_solution.get() : nullptr);
+        SolveFieldBlock(solution);
+        return;
+    }
+
+    if (m_ideal_mhd_wave_active)
+    {
+        ApplyFieldBlock(solution, rhs);
         AddIdealLorentzForceToMomentumRHS(solution, rhs);
         ApplyIdealWaveFluidBlock(solution, rhs);
         BuildFieldRHS(rhs, m_momentum_solution.get());
         SolveFieldBlock(solution);
+        return;
     }
-    else
-    {
-        ApplyFluidBlock(solution, rhs);
-    }
+
+    ApplyFluidBlock(solution, rhs);
+    BuildFieldRHS(rhs, m_ideal_mhd_active ? m_momentum_solution.get() : nullptr);
+    SolveFieldBlock(solution);
+}
+
+template <class T, class Ops>
+void
+MHDBlockPC<T, Ops>::ApplyFrozenIonFluidBlock (T& solution, const T& rhs)
+{
+    const amrex::MultiFab& density_rhs = rhs.getMultiFabBlock(MassDensityName, 0);
+    const amrex::MultiFab& momentum_rhs = rhs.getMultiFabBlock(MomentumDensityName, 0);
+    const amrex::MultiFab& energy_rhs = rhs.getMultiFabBlock(ElectronEnergyName, 0);
+    amrex::MultiFab& density_solution = solution.getMultiFabBlock(MassDensityName, 0);
+    amrex::MultiFab& momentum_solution = solution.getMultiFabBlock(MomentumDensityName, 0);
+    amrex::MultiFab& energy_solution = solution.getMultiFabBlock(ElectronEnergyName, 0);
+
+    amrex::MultiFab::Copy(density_solution, density_rhs, 0, 0, 1, 0);
+    amrex::MultiFab::Copy(momentum_solution, momentum_rhs, 0, 0, 3, 0);
+    amrex::MultiFab::Copy(energy_solution, energy_rhs, 0, 0, 1, 0);
+    amrex::MultiFab::Copy(*m_momentum_solution, momentum_rhs, 0, 0, 3, 0);
+    m_momentum_solution->FillBoundary(m_geometry.periodicity());
 }
 
 template <class T, class Ops>
@@ -471,7 +558,7 @@ MHDBlockPC<T, Ops>::SolveFieldBlock (T& solution)
         solution_fields[0][component]->setVal(0.0);
     }
 
-    if (m_field_diffusion_coefficient == 0.0)
+    if (m_field_preconditioning_coefficient == 0.0)
     {
         for (int component = 0; component < 3; ++component)
         {
@@ -908,6 +995,8 @@ MHDBlockPC<T, Ops>::printParameters () const
                    << "\n";
     amrex::Print() << name << " ideal MHD coupling:   "
                    << (m_include_ideal_mhd_coupling ? "true" : "false") << "\n";
+    amrex::Print() << name << " Hall MHD coupling:    "
+                   << (m_include_hall_mhd_coupling ? "true" : "false") << "\n";
     amrex::Print() << name << " field iterations:     " << m_field_iterations << "\n";
     amrex::Print() << name << " fluid iterations:     " << m_fluid_iterations << "\n";
     amrex::Print() << name << " wave relaxation:      " << m_wave_relaxation << "\n";

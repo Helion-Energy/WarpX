@@ -217,6 +217,39 @@ public:
     }
 
     /**
+     * \brief Return whether the generalized Ohm law includes the Hall current
+     * for the MHD block preconditioner.
+     */
+    [[nodiscard]] virtual bool
+    GetMHDIncludeHallTermForPC () const
+    {
+        return false;
+    }
+
+    /**
+     * \brief Return whether the implicit MHD state advances the ion fluid.
+     *
+     * When false, the MHD block preconditioner treats the ion density and
+     * momentum rows as identities and applies only the electron-MHD field
+     * block.
+     */
+    [[nodiscard]] virtual bool
+    GetMHDEvolveIonFluidForPC () const
+    {
+        return true;
+    }
+
+    /**
+     * \brief Return the positive reference ion charge density used by the Hall
+     * field preconditioner.
+     */
+    [[nodiscard]] virtual amrex::Real
+    GetMHDReferenceChargeDensityForPC () const
+    {
+        return -1.0;
+    }
+
+    /**
      * \brief Apply deposited mass matrices to a vector field.
      * Computes a_out += a_scale * S * (a_in - a_in_ref) [+ a_baseline],
      * where S is the mass matrix, accumulating into a_out.

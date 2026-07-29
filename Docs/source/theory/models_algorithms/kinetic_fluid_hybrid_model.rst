@@ -91,9 +91,10 @@ single-ion-fluid mode selected by
 ``algo.evolve_scheme = theta_implicit_mhd``. It replaces the particle push and
 moment deposition inside the nonlinear loop with an ion continuity and
 momentum update. This monolithic Jacobian-free Newton--Krylov treatment follows
-the fully implicit MHD strategy of :cite:t:`Chacon2008`. A first
-physics-based block preconditioner for the non-Hall, small-flow limit is
-described below. The nonlinear unknown is
+the fully implicit MHD strategy of :cite:t:`Chacon2008`. Its physics-based
+block preconditioner includes small-flow resistive/ideal-MHD blocks and a first
+electron-MHD whistler approximation inspired by the electron-first operator
+split of :cite:t:`Chacon2025`. The nonlinear unknown is
 
 .. math::
 
@@ -173,21 +174,66 @@ Physics-based block preconditioner
 """"""""""""""""""""""""""""""""""
 
 The prototype selected with ``jacobian.pc_type = pc_mhd_block`` uses the
-predictor--Schur--corrector strategy of :cite:t:`Chacon2008`. Let
-:math:`h=\theta\Delta t`. In the non-Hall limit, Faraday's law and the
-resistive part of Ohm's law give the field operator
+predictor--Schur--corrector strategy of :cite:t:`Chacon2008` and solves the
+electron field response before the ion response, following the operator
+ordering of :cite:t:`Chacon2025`. Let :math:`h=\theta\Delta t` and
+:math:`\mathcal C=\nabla\times\nabla\times`. Linearizing the electric
+residual about constant reference charge density
+:math:`\rho_{q,*}` and magnetic field :math:`\boldsymbol B_*` gives the
+dominant field block
+
+.. math::
+
+   \mathcal A_E\delta\boldsymbol E
+   \simeq
+   \left(\mathbb I+d_\eta\mathcal C\right)\delta\boldsymbol E
+   +\frac{h}{\mu_0\rho_{q,*}}
+      \left(\mathcal C\delta\boldsymbol E\right)
+      \times\boldsymbol B_* ,
+   \qquad
+   d_\eta=\frac{h\eta_*}{\mu_0}.
+
+For a one-dimensional circular mode parallel to
+:math:`\boldsymbol B_*`, its two transverse eigenvalues are
+:math:`1+d_\eta k_h^2\mathbin{\pm}\mathrm{i}d_Hk_h^2`, where
+
+.. math::
+
+   d_H=\frac{h|\boldsymbol B_*|}{\mu_0\rho_{q,*}} .
+
+The current first Hall slice replaces this skew vector block by its
+high-wavenumber spectral-magnitude surrogate
 
 .. math::
 
    \mathcal{P}_E
    =
    \mathbb I
-   + \frac{h\eta_*}{\mu_0}
-     \nabla\times\nabla\times ,
+   +d_*\mathcal C ,
+   \qquad
+   d_*=\sqrt{d_\eta^2+d_H^2}.
 
-where :math:`\eta_*` is a scalar reference resistivity evaluated at the
-theta-centered time. This staggered curl--curl system is approximately
-inverted with AMReX MLMG.
+For an exactly inverted aligned-mode symbol with
+:math:`\lambda=k_h^2\geq0`, the two preconditioned eigenvalues are
+
+.. math::
+
+   \zeta_\pm
+   =
+   \frac{1+d_\eta\lambda\mathbin{\pm}\mathrm{i}d_H\lambda}
+        {1+d_*\lambda},
+   \qquad
+   \frac{1}{\sqrt{2}}\leq|\zeta_\pm|\leq1 .
+
+Thus the idealized aligned spectrum remains bounded independently of the
+whistler stiffness :math:`d_H\lambda`; fixed MLMG cycles only approximate this
+scalar inverse.
+
+Here :math:`\eta_*` is a scalar reference resistivity evaluated at the
+theta-centered time. Hall-off operation sets :math:`d_H=0` and exactly
+recovers the resistive field preconditioner. This staggered scalar
+curl--curl system is approximately inverted with AMReX MLMG. It changes only
+the preconditioner; the JFNK residual retains the full skew Hall term.
 
 The preconditioner freezes domain-global/reference coefficients during each
 Newton linear solve rather than constructing spatially varying coefficient
@@ -227,8 +273,9 @@ Lorentz responses,
       \left(\nabla\times\nabla\times\delta\boldsymbol E^*\right)
       \times\boldsymbol B_* .
 
-For nonzero :math:`\boldsymbol B_*`, the three momentum components are solved
-together with the constant-coefficient ideal-MHD wave Schur complement
+For nonzero :math:`\boldsymbol B_*` with Hall physics disabled, the three
+momentum components are solved together with the constant-coefficient
+ideal-MHD wave Schur complement
 
 .. math::
 
@@ -276,15 +323,33 @@ The density, electron energy, and electric-field correctors are
       -\frac{\delta\boldsymbol M}{\rho_*}\times\boldsymbol B_*
    \right].
 
-The momentum operator is rediscretized with compact centered pure and mixed
-second derivatives on every multigrid level and approximately inverted with a
-three-component cell-centered MLMG solve using a local :math:`3\times3`
-weighted block-Jacobi smoother. Inside this magnetic Schur operator,
-:math:`\mathcal P_E^{-1}` is approximated by the identity; the staggered
-resistive predictor and corrector still use :math:`\mathcal P_E`. When ideal
-coupling is disabled, or when the domain-average magnetic field is negligible
-relative to ``implicit_mhd.reference_magnetic_field``, the implementation
-falls back to the scalar acoustic pressure-Schur solve
+When Hall physics and ion evolution are both active, the current ideal-wave
+Schur operator is not applied. That operator replaces
+:math:`\mathcal P_E^{-1}` inside the ion Schur complement by the identity,
+which loses the magnitude and phase of a stiff Hall response. Instead, the
+preconditioner first applies the acoustic fluid block and then applies the
+same momentum-to-field correction in the last equation above. This
+block-triangular path retains ion continuity, pressure, and ideal induction
+coupling without claiming a Hall-aware ion-wave Schur approximation.
+
+When ``implicit_mhd.evolve_ion_fluid = false``, the ion density and momentum
+rows are identities. The preconditioner then copies
+:math:`\delta\rho_i=b_\rho`, :math:`\delta\boldsymbol M=\boldsymbol b_M`, and,
+as an electron-energy approximation, :math:`\delta U_e=b_U`, before applying
+the last field corrector. Thus the stiff electron-MHD field block is solved
+without invoking the ideal ion-wave Schur block. The nonlinear residual still
+advances electron energy.
+
+The Hall-off momentum operator is rediscretized with compact centered pure and
+mixed second derivatives on every multigrid level and approximately inverted
+with a three-component cell-centered MLMG solve using a local
+:math:`3\times3` weighted block-Jacobi smoother. Inside this magnetic Schur
+operator, :math:`\mathcal P_E^{-1}` is approximated by the identity; the
+staggered resistive predictor and corrector still use :math:`\mathcal P_E`.
+When Hall physics is active, ideal coupling is disabled, or the domain-average
+magnetic field is negligible relative to
+``implicit_mhd.reference_magnetic_field``, an evolving-ion calculation uses
+the scalar acoustic pressure-Schur solve
 
 .. math::
 
@@ -299,18 +364,25 @@ MLMG can still stop early if it reaches its internal machine-precision
 residual threshold.
 
 This first version is restricted to one Cartesian, periodic AMR level, a
-staggered field grid, ``implicit_mhd.fluid_flux = centered``, evolving ions,
-zero Hall and electron-pressure terms in Ohm's law, and zero
-hyper-resistivity. Resistivity may be constant or time dependent; density,
-current, and per-species dependence is rejected because the field block uses
-only the scalar value :math:`\eta_*`. Strongly nonuniform and pressure-floor
-active states are also outside the robustness claim because the acoustic and
-magnetic coefficients are global scalars and do not linearize the pressure
-``max`` at its floor. The small-flow approximation omits background-flow
-advection, :math:`\boldsymbol J_*\times\delta\boldsymbol B` from a nonuniform
-reference field, spatial coefficient variations, and the Joule-heating
-derivative. Hall/electron-MHD and whistler coupling require a different,
-higher-order Schur operator and remain unsupported by this preconditioner.
+staggered field grid, ``implicit_mhd.fluid_flux = centered``, and zero
+hyper-resistivity. Ions may evolve or be frozen, and the Hall and
+electron-pressure Ohm terms may be enabled independently. Resistivity may be
+constant or time dependent; density, current, and per-species dependence is
+rejected because the field block uses only the scalar value :math:`\eta_*`.
+Strongly nonuniform and pressure-floor-active states are outside the robustness
+claim because the acoustic, magnetic, charge-density, and Hall coefficients
+are global scalars and do not linearize either ``max`` at its floor.
+
+The Hall-magnitude block is a deliberately limited first slice, not the full
+six-variable electron subsystem and block-Jacobi multigrid smoother of
+:cite:t:`Chacon2025`. It captures the stiff homogeneous, field-aligned
+whistler spectrum, but its isotropic :math:`|\boldsymbol B_*|\mathcal C`
+surrogate does not retain the multidimensional :math:`k k_\parallel`
+anisotropy. The evolving-ion path also lacks a Hall-aware ideal-wave Schur
+operator. It further omits the electron-pressure Ohm derivative, background
+current/flow terms, denominator variations, spatial coefficients, and the
+Joule-heating derivative. No grid-independent robustness claim is therefore
+made yet for oblique, strongly nonuniform, or nonlinear Hall-MHD states.
 
 There is also a deliberate discretization mismatch in the wave block. The
 centered nonlinear face flux and the cell-to-Yee Lorentz/induction path

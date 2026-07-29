@@ -332,23 +332,33 @@ Overall simulation parameters
 
           - ``jacobian.pc_type = pc_mhd_block``: Use the prototype
             physics-based block preconditioner for
-            ``algo.evolve_scheme = theta_implicit_mhd``. In the Hall-off,
-            small-flow approximation, it uses an electric predictor,
+            ``algo.evolve_scheme = theta_implicit_mhd``. In the small-flow
+            approximation, it uses an electric predictor,
             three-component momentum-wave Schur solve, and electric
-            corrector. With :math:`h=\theta\Delta t`, the field operator is
+            corrector. With :math:`h=\theta\Delta t`, define
+
+            .. math::
+
+               d_\eta=\frac{h\eta_*}{\mu_0},\qquad
+               d_H=\frac{h|\boldsymbol B_*|}{\mu_0\rho_{q,*}} .
+
+            The Hall-aware scalar field operator is
 
             .. math::
 
                \mathcal P_E
                =
-               \mathbb I
-               + \frac{h\eta_*}{\mu_0}
-                 \nabla\times\nabla\times .
+               \mathbb I+
+               \sqrt{d_\eta^2+d_H^2}
+               \nabla\times\nabla\times .
 
             The predictor is
             :math:`\delta\boldsymbol E^*=\mathcal P_E^{-1}\boldsymbol b_E`.
-            For the domain-average theta-state field
-            :math:`\boldsymbol B_*`, the coupled momentum solve is
+            The Hall term uses a high-wavenumber spectral-magnitude
+            approximation to the skew whistler block. Hall-off operation sets
+            :math:`d_H=0` and recovers the resistive operator.
+            With Hall physics disabled, the domain-average theta-state field
+            :math:`\boldsymbol B_*` enters the coupled momentum solve
 
             .. math::
 
@@ -390,11 +400,19 @@ Overall simulation parameters
             The acoustic and magnetic coefficients are
             domain-global/reference scalars, not spatial coefficient fields.
             The magnetic Schur action approximates
-            :math:`\mathcal P_E^{-1}` by the identity, while the staggered
-            predictor and corrector retain the resistive solve. When ideal
-            coupling is disabled or the mean magnetic field is negligible,
-            the implementation falls back to the scalar acoustic
-            pressure-Schur block.
+            :math:`\mathcal P_E^{-1}` by the identity, while its staggered
+            predictor and corrector retain the resistive solve. With Hall
+            physics and evolving ions, this wave Schur is disabled because
+            that identity approximation loses the stiff Hall response. The
+            implementation instead applies the acoustic fluid block followed
+            by the ideal momentum-to-field correction. When ideal coupling is
+            disabled or the mean magnetic field is negligible, it uses the
+            acoustic block without that correction.
+
+            With ``implicit_mhd.evolve_ion_fluid = false``, the preconditioner
+            instead treats the ion density and momentum rows, and
+            approximately the electron-energy row, as identities. It applies
+            the Hall-aware field corrector without the ion-wave Schur solve.
 
             All MLMG solves use zero initial guesses, fixed cycle counts, and
             fixed bottom smoothing. This keeps the operation stationary to
@@ -404,15 +422,17 @@ Overall simulation parameters
 
             The prototype requires one Cartesian, periodic AMR level,
             ``warpx.grid_type = staggered``,
-            ``implicit_mhd.fluid_flux = centered``,
-            ``implicit_mhd.evolve_ion_fluid = true``, both
-            ``hybrid_pic_model.include_hall_term = false`` and
-            ``hybrid_pic_model.include_electron_pressure_term = false``, and
+            ``implicit_mhd.fluid_flux = centered``, and
             zero ``hybrid_pic_model.plasma_hyper_resistivity``. Resistivity
             may be constant or time dependent; density, current, and
             per-species dependence is rejected because the field block uses a
-            scalar reference value. It does not yet include Hall/whistler
-            physics, background advection,
+            scalar reference value. Hall and electron-pressure physics may be
+            enabled, and ions may evolve or be frozen. The Hall preconditioner
+            is currently an isotropic, constant-coefficient whistler-magnitude
+            surrogate; it is not the full skew electron subsystem and does not
+            retain multidimensional :math:`k k_\parallel` anisotropy. It does
+            not yet include the electron-pressure Ohm derivative, background
+            advection,
             :math:`\boldsymbol J_*\times\delta\boldsymbol B` for a nonuniform
             reference field, Rusanov transport, spatial wave coefficients, or
             the Joule-heating derivative. Strongly nonuniform and
@@ -432,12 +452,21 @@ Overall simulation parameters
             - ``pc_mhd_block.bottom_verbose`` (``bool``, default: false)
             - ``pc_mhd_block.include_ideal_mhd_coupling`` (``bool``,
               default: true): include the domain-mean ideal magnetic/Lorentz
-              wave coupling. If false, use the acoustic fluid block.
+              coupling. Hall-off evolving-ion solves use the momentum-wave
+              Schur block. Hall-active evolving-ion solves use an acoustic
+              block followed by a triangular momentum-to-field correction.
+              If false, use the acoustic block without either ideal coupling.
+            - ``pc_mhd_block.include_hall_mhd_coupling`` (``bool``,
+              default: true): when Hall physics is enabled, include its
+              spectral-magnitude coefficient in the field curl--curl block.
+              This changes only the preconditioner, not the nonlinear Hall
+              residual.
             - ``pc_mhd_block.field_iterations`` (``int``, default: 2):
-              fixed MLMG iteration count for the resistive curl--curl block.
+              fixed MLMG iteration count for the resistive/Hall-magnitude
+              curl--curl block.
             - ``pc_mhd_block.fluid_iterations`` (``int``, default: 2):
-              fixed MLMG iteration count for the three-component wave block,
-              or for the scalar acoustic fallback.
+              fixed MLMG iteration count for the Hall-off three-component
+              wave block, or for the scalar acoustic block.
             - ``pc_mhd_block.wave_relaxation`` (``float``, default: 0.5):
               weighted block-Jacobi factor for the three-component wave
               smoother;
@@ -3899,11 +3928,13 @@ Jacobian probes.
     Holmstrom vacuum regions, particle mass matrices, and existing field-only
     preconditioners are not supported. The prototype ``pc_mhd_block``
     preconditioner is available only with staggered fields, centered fluid
-    fluxes, evolving ions, the Hall and electron-pressure Ohm terms disabled,
-    and zero hyper-resistivity. Its scalar reference resistivity may be
-    constant or time dependent, but not density, current, or species
-    dependent. The Rusanov option regularizes fluid discontinuities but is not
-    a total-energy conservative MHD shock solver.
+    fluxes, and zero hyper-resistivity. It supports evolving or frozen ions and
+    permits the Hall and electron-pressure Ohm terms, but its first Hall block
+    is a constant-coefficient spectral-magnitude approximation rather than a
+    full multidimensional electron-subsystem solve. Its scalar reference
+    resistivity may be constant or time dependent, but not density, current,
+    or species dependent. The Rusanov option regularizes fluid discontinuities
+    but is not a total-energy conservative MHD shock solver.
 
 .. pp:param:: implicit_mhd.reference_mass_density
     :type: ``float``
