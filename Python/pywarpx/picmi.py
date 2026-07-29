@@ -2148,6 +2148,52 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         Can be a constant value or an expression depending on ``rho`` (charge density)
         and ``B`` (magnetic field magnitude).
 
+    plasma_resistivity_species: dict, optional
+        Per-species resistivity overlays added on top of ``plasma_resistivity``,
+        as a dictionary mapping a charged species name to a value or expression
+        in Ohm*m. The expression may depend on ``rho_s`` (the species charge
+        density), ``rho`` (total charge density which, by quasineutrality,
+        equals the electron charge density), ``Te`` (electron temperature
+        in Kelvin), ``J`` (plasma current density magnitude), ``J_s`` (the
+        species current density magnitude), ``B`` (magnetic field magnitude)
+        and ``t`` (time). The effective resistivity applied to species ``s``
+        in Ohm's law, the Joule heating source and the resistive drag is
+        ``plasma_resistivity + plasma_resistivity_species[s]``.
+
+    solve_electron_energy_equation: bool, default=False
+        Solve the electron energy equation instead of the algebraic adiabatic
+        pressure closure: the electron entropy ``K = Te * ne**(1-gamma)`` is
+        transported each step by QDSMC markers advected with the electron
+        fluid velocity, the source terms below are applied per cell, and
+        ``Pe = ne * kB * Te`` is fed back into the Ohm's-law E-solve.
+
+    include_joule_heating: bool, default=False
+        Add the resistive (Joule) heating source to the electron temperature.
+        Reduces to ``eta * J**2`` for a single ion species. Only used when
+        ``solve_electron_energy_equation`` is True.
+
+    joule_redirect_Te_threshold: float, optional
+        Electron temperature threshold in eV above which the Joule heating of
+        a cell is routed to the ions (as an energy-conserving stochastic kick)
+        instead of the electrons, allowing ``Ti > Te`` to develop. Specifying
+        a value >= 0 enables the redirect (off by default). Requires
+        ``include_joule_heating``.
+
+    electron_ion_relaxation_rate: float or str, optional
+        Value or expression for the electron-ion energy-equilibration rate
+        ``nu_ei`` in 1/s. Specifying it enables the electron-ion thermal
+        equilibration ``Q_ei`` on the electron temperature, with the conjugate
+        ion heating applied as an energy-conserving drag-diffusion kick on
+        each ion (the required shape-aware ion temperature deposition is
+        enabled automatically on every charged species). The expression may
+        depend on ``rho`` (charge density in C/m^3), ``Te`` and ``Ti``
+        (temperatures in eV) and ``t`` (time). Only used when
+        ``solve_electron_energy_equation`` is True.
+
+    qdsmc_n_floor: float, optional
+        Minimum electron number density (in m^-3) used when recovering the
+        electron temperature from the QDSMC entropy deposit.
+
     substeps: int, default=10
         Total number of substeps used to advance the B-field over one full
         timestep (split evenly between the two half-steps, so ``substeps/2``
@@ -2249,6 +2295,12 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         n_floor=None,
         plasma_resistivity=None,
         plasma_hyper_resistivity=None,
+        plasma_resistivity_species=None,
+        solve_electron_energy_equation=None,
+        include_joule_heating=None,
+        joule_redirect_Te_threshold=None,
+        electron_ion_relaxation_rate=None,
+        qdsmc_n_floor=None,
         substeps=None,
         use_rkf45=None,
         substep_rtol=None,
@@ -2273,6 +2325,13 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.n_floor = n_floor
         self.plasma_resistivity = plasma_resistivity
         self.plasma_hyper_resistivity = plasma_hyper_resistivity
+        self.plasma_resistivity_species = plasma_resistivity_species
+
+        self.solve_electron_energy_equation = solve_electron_energy_equation
+        self.include_joule_heating = include_joule_heating
+        self.joule_redirect_Te_threshold = joule_redirect_Te_threshold
+        self.electron_ion_relaxation_rate = electron_ion_relaxation_rate
+        self.qdsmc_n_floor = qdsmc_n_floor
 
         self.substeps = substeps
         self.use_rkf45 = use_rkf45
@@ -2326,6 +2385,34 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
                 self.plasma_hyper_resistivity, self.mangle_dict
             ),
         )
+        if self.plasma_resistivity_species is not None:
+            for name, expr in self.plasma_resistivity_species.items():
+                pywarpx.hybridpicmodel.__setattr__(
+                    f"plasma_resistivity_{name}(rho_s,rho,Te,J,J_s,B,t)",
+                    pywarpx.my_constants.mangle_expression(expr, self.mangle_dict),
+                )
+        # Only emit the electron-energy-equation attributes that were
+        # explicitly set, so the generated input deck contains only
+        # user-specified parameters.
+        if self.solve_electron_energy_equation is not None:
+            pywarpx.hybridpicmodel.solve_electron_energy_equation = (
+                self.solve_electron_energy_equation
+            )
+        if self.include_joule_heating is not None:
+            pywarpx.hybridpicmodel.include_joule_heating = self.include_joule_heating
+        if self.joule_redirect_Te_threshold is not None:
+            pywarpx.hybridpicmodel.joule_redirect_Te_threshold = (
+                self.joule_redirect_Te_threshold
+            )
+        if self.electron_ion_relaxation_rate is not None:
+            pywarpx.hybridpicmodel.__setattr__(
+                "electron_ion_relaxation_rate(rho,Te,Ti,t)",
+                pywarpx.my_constants.mangle_expression(
+                    self.electron_ion_relaxation_rate, self.mangle_dict
+                ),
+            )
+        if self.qdsmc_n_floor is not None:
+            pywarpx.hybridpicmodel.qdsmc_n_floor = self.qdsmc_n_floor
         pywarpx.hybridpicmodel.substeps = self.substeps
         pywarpx.hybridpicmodel.use_rkf45 = self.use_rkf45
         pywarpx.hybridpicmodel.substep_rtol = self.substep_rtol
