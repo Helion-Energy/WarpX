@@ -829,9 +829,11 @@ WarpX::ReadParameters ()
             );
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 (electromagnetic_solver_id == ElectromagneticSolverAlgo::None ||
-                 evolve_scheme == EvolveScheme::Theta_Implicit_EM),
-                "For electromagnetic solvers, warpx.dt_update_interval can only be used with algo.evolve_scheme = theta_implicit_em."
-            );
+                 evolve_scheme == EvolveScheme::Theta_Implicit_EM ||
+                 evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid),
+                "For electromagnetic solvers, warpx.dt_update_interval can only be used "
+                "with algo.evolve_scheme = theta_implicit_em or theta_implicit_hybrid."
+             );
         }
 
         // Filter defaults to true for the explicit scheme, and false for the implicit schemes
@@ -1274,13 +1276,17 @@ WarpX::ReadParameters ()
         else if (evolve_scheme == EvolveScheme::Theta_Implicit_EM) {
             m_implicit_solver = std::make_unique<ThetaImplicitEM>();
         }
+        else if (evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid) {
+            m_implicit_solver = std::make_unique<ThetaImplicitHybrid>();
+        }
         else if (evolve_scheme == EvolveScheme::Strang_Implicit_Spectral_EM) {
             m_implicit_solver = std::make_unique<StrangImplicitSpectralEM>();
         }
 
         // implicit evolve schemes not setup to use mirrors
         if (evolve_scheme == EvolveScheme::Semi_Implicit_EM ||
-            evolve_scheme == EvolveScheme::Theta_Implicit_EM) {
+            evolve_scheme == EvolveScheme::Theta_Implicit_EM ||
+            evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid) {
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE( m_num_mirrors == 0,
                 "Mirrors cannot be used with Implicit evolve schemes.");
         }
@@ -1410,6 +1416,17 @@ WarpX::ReadParameters ()
                 "With the strang_implicit_spectral_em evolve scheme, the algo.maxwell_solver must be psatd");
         }
 
+        // Checks for hybrid implicit scheme
+        if (evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC,
+                "ThetaImplicitHybrid scheme requires the HybridPIC solver");
+
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                current_deposition_algo == CurrentDepositionAlgo::Direct,
+                "Only Direct current deposition is supported with the implicit hybrid scheme");
+        }
+
         // Load balancing parameters
         std::vector<std::string> load_balance_intervals_string_vec = {"0"};
         pp_algo.queryarr("load_balance_intervals", load_balance_intervals_string_vec);
@@ -1482,6 +1499,7 @@ WarpX::ReadParameters ()
 
             // These evolve schemes permit time steps that violate the CFL condition
             if (evolve_scheme == EvolveScheme::Theta_Implicit_EM ||
+                evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid ||
                 evolve_scheme == EvolveScheme::Strang_Implicit_Spectral_EM) {
                 pp_particles.query("max_grid_crossings", particle_max_grid_crossings);
             }
@@ -2711,6 +2729,11 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
     if (do_dive_cleaning) {
         rho_ncomps = 2*ncomps;
     }
+
+    if (evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid) {
+        rho_ncomps = 2*ncomps;  // Need old and new time levels
+    }
+
     if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::PSATD) {
         if (do_dive_cleaning || update_with_rho || current_correction) {
             // For the PSATD-JRhom algorithm we can allocate only one rho component (no distinction between old and new)
