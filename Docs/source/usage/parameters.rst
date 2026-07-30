@@ -3858,6 +3858,51 @@ Maxwell solver: kinetic-fluid hybrid
     (also ``darwin_poisson_absolute_tolerance``, default 0, ``darwin_poisson_max_iterations``,
     default 200, and ``darwin_poisson_verbosity``, default 0).
 
+.. pp:param:: hybrid_pic_model.include_electron_inertia
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Add the electron-inertia term to the generalized Ohm's law: the Je-form of the material
+    derivative :math:`-(m_e^\mathrm{eff}/e)\,\mathrm{D}\mathbf{u}_e/\mathrm{D}t` of the electron
+    fluid velocity :math:`\mathbf{u}_e = -\mathbf{J}_e/\rho`,
+
+    .. math:: \mathbf{E}_\mathrm{inertial} = \frac{m_e^\mathrm{eff}}{e\,\rho}\left[
+        \frac{\partial \mathbf{J}_e}{\partial t}
+        - \frac{\mathbf{J}_e}{\rho}\frac{\partial \rho}{\partial t}
+        - (\mathbf{J}_e\cdot\nabla)\frac{\mathbf{J}_e}{\rho} \right],
+
+    whose cold-electron limit is the collisionless inertial impedance
+    :math:`\mathbf{E} = (m_e/e^2 n_e)\,\partial\mathbf{J}_e/\partial t`, following the implicit-PIC
+    formulation of Angus *et al.* The term rolls the whistler branch over at the effective electron
+    skin depth :math:`d_e = c/\omega_{pe}(m_e^\mathrm{eff})`, providing physical electron-scale
+    dispersion and damping. The time derivative uses a second-order three-point stencil on the
+    per-step electron-current history, centered at the :math:`\theta` stage where Ohm's law is
+    imposed (``electron_inertia_bdf2``, default on; two-point form when off), with the
+    :math:`\theta`-extrapolated iterate. Only cells with strictly zero density drop the term
+    (density-floored cells keep their inertia). Requires
+    ``algo.evolve_scheme = theta_implicit_hybrid``. Supported in 1D, 2D, 3D and RZ (:math:`m = 0`).
+
+.. pp:param:: hybrid_pic_model.reduced_electron_mass_ratio
+    :type: ``float``
+    :default: ``0``
+    :optional:
+
+    When positive, the effective electron mass is the lightest charged ion mass divided by this
+    ratio (``0`` selects the physical electron mass). Reduced ratios move the electron-scale
+    physics toward the grid scale at affordable resolution.
+
+.. pp:param:: hybrid_pic_model.electron_inertia_bdf2
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    Use the second-order three-point time-derivative stencil for the inertial
+    :math:`\partial\mathbf{J}_e/\partial t`, centered at the :math:`\theta` stage where the Ohm's
+    law is imposed: classic BDF2 for :math:`\theta = 1`, reducing exactly to the two-point midpoint
+    difference at :math:`\theta = 1/2` (an endpoint-BDF2 stencil at :math:`\theta < 1` would be
+    mis-centered and pumps reactive modes). When off, always use the two-point form.
+
 .. pp:param:: hybrid_pic_model.darwin_vacuum_recovery
     :type: ``bool``
     :default: ``false``
@@ -3894,6 +3939,18 @@ Maxwell solver: kinetic-fluid hybrid
     theta-stage field (a nonlinear elimination of the vacuum field dynamics), plus once at the
     end-of-step state; ``full`` applies it at the end-of-step state only (cheaper; the vacuum
     dynamics stay in the residual).
+
+.. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_relaxation_time
+    :type: ``float``
+    :default: ``0``
+    :optional:
+
+    Finite response time of the vacuum recovery (seconds; ``0`` replaces instantly). The band
+    vector potential relaxes toward the magnetostatic solution,
+    :math:`\mathbf{A} \mathrel{+}= (1 - e^{-\Delta t_\mathrm{eff}/\tau})\,\delta\mathbf{A}`,
+    capping the reconstructed band EMF at the correction rate instead of the one-interval jump —
+    the analog of the halo's finite response time that the instantaneous elliptic limit
+    idealizes away. Slow drives (ramp time :math:`\gg \tau`) are delivered unchanged.
 
 .. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_components
     :type: ``string``

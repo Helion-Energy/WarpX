@@ -2171,6 +2171,23 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         field advances the magnetic vector potential, removing the radiative
         branch (Hewett & Nielson, J. Comput. Phys. 29, 219 (1978)).
 
+    include_electron_inertia: bool, default=False
+        Add the electron-inertia term to the generalized Ohm's law (the
+        Je-form material derivative of the electron fluid velocity, per the
+        implicit-PIC formulation of Angus et al.), rolling the whistler
+        branch over at the effective electron skin depth. Theta-implicit
+        hybrid evolve scheme only.
+
+    reduced_electron_mass_ratio: float, default=0
+        When > 0, the effective electron mass is the lightest ion mass
+        divided by this ratio (0 selects the physical electron mass),
+        moving the electron-scale dispersion and damping relative to the
+        grid.
+
+    electron_inertia_bdf2: bool, default=True
+        Use the second-order three-point stencil, centered at the theta
+        stage, for the inertial time derivative (two-point form when off).
+
     darwin_vacuum_recovery: bool, default=False
         With the Darwin split, replace the evolved vector potential in
         low-density (vacuum) cells with the magnetostatic solution driven by
@@ -2195,6 +2212,12 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         equivalent to "all". "all" recovers every component (caution: the
         in-plane corrections are discretely inconsistent with the source
         near the RZ axis and can destabilize the B_theta content there).
+
+    darwin_vacuum_recovery_relaxation_time: float, default=0
+        Finite response time (seconds) of the vacuum recovery: the band A
+        relaxes toward the magnetostatic solution instead of replacing
+        instantly, capping the reconstructed band EMF at the correction
+        rate. 0 = instant replacement.
 
     darwin_vacuum_recovery_density_fraction: float, default=1.0
         Fraction of ``n_floor`` below which the recovery masks apply. Use
@@ -2373,11 +2396,15 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         solve_electron_energy_equation=None,
         implicit_push_excludes_resistive_field=None,
         darwin=None,
+        include_electron_inertia=None,
+        reduced_electron_mass_ratio=None,
+        electron_inertia_bdf2=None,
         darwin_vacuum_recovery=None,
         darwin_vacuum_recovery_mask=None,
         darwin_vacuum_recovery_cadence=None,
         darwin_vacuum_recovery_components=None,
         darwin_vacuum_recovery_density_fraction=None,
+        darwin_vacuum_recovery_relaxation_time=None,
         darwin_vacuum_recovery_relative_tolerance=None,
         include_joule_heating=None,
         redirect_joule_to_ions=None,
@@ -2420,12 +2447,18 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
             implicit_push_excludes_resistive_field
         )
         self.darwin = darwin
+        self.include_electron_inertia = include_electron_inertia
+        self.reduced_electron_mass_ratio = reduced_electron_mass_ratio
+        self.electron_inertia_bdf2 = electron_inertia_bdf2
         self.darwin_vacuum_recovery = darwin_vacuum_recovery
         self.darwin_vacuum_recovery_mask = darwin_vacuum_recovery_mask
         self.darwin_vacuum_recovery_cadence = darwin_vacuum_recovery_cadence
         self.darwin_vacuum_recovery_components = darwin_vacuum_recovery_components
         self.darwin_vacuum_recovery_density_fraction = (
             darwin_vacuum_recovery_density_fraction
+        )
+        self.darwin_vacuum_recovery_relaxation_time = (
+            darwin_vacuum_recovery_relaxation_time
         )
         self.darwin_vacuum_recovery_relative_tolerance = (
             darwin_vacuum_recovery_relative_tolerance
@@ -2512,6 +2545,18 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
             )
         if self.darwin is not None:
             pywarpx.hybridpicmodel.darwin = self.darwin
+        if self.include_electron_inertia is not None:
+            pywarpx.hybridpicmodel.include_electron_inertia = (
+                self.include_electron_inertia
+            )
+        if self.reduced_electron_mass_ratio is not None:
+            pywarpx.hybridpicmodel.reduced_electron_mass_ratio = (
+                self.reduced_electron_mass_ratio
+            )
+        if self.electron_inertia_bdf2 is not None:
+            pywarpx.hybridpicmodel.electron_inertia_bdf2 = (
+                self.electron_inertia_bdf2
+            )
         if self.darwin_vacuum_recovery is not None:
             pywarpx.hybridpicmodel.darwin_vacuum_recovery = (
                 self.darwin_vacuum_recovery
@@ -2531,6 +2576,10 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         if self.darwin_vacuum_recovery_density_fraction is not None:
             pywarpx.hybridpicmodel.darwin_vacuum_recovery_density_fraction = (
                 self.darwin_vacuum_recovery_density_fraction
+            )
+        if self.darwin_vacuum_recovery_relaxation_time is not None:
+            pywarpx.hybridpicmodel.darwin_vacuum_recovery_relaxation_time = (
+                self.darwin_vacuum_recovery_relaxation_time
             )
         if self.darwin_vacuum_recovery_relative_tolerance is not None:
             pywarpx.hybridpicmodel.darwin_vacuum_recovery_relative_tolerance = (

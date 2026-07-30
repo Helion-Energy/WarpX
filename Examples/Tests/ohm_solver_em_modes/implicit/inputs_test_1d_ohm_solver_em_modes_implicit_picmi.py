@@ -59,13 +59,20 @@ class EMModes(object):
     # Number of substeps used to update B
     substeps = 40
 
-    def __init__(self, test, dim, B_dir, verbose, darwin=False):
+    def __init__(self, test, dim, B_dir, verbose, darwin=False,
+                 inertia=False, inertia_seeded=False):
         """Get input parameters for the specific case desired."""
         self.test = test
         self.dim = int(dim)
         self.B_dir = B_dir
         self.verbose = verbose or self.test
         self.darwin = darwin
+        self.inertia_seeded = inertia_seeded
+        self.inertia = inertia or inertia_seeded
+        assert not (self.inertia_seeded and B_dir != "z"), (
+            "--inertia-seeded seeds a transverse mode on the Bz guide "
+            "field and requires --bdir z"
+        )
 
         # sanity check
         assert dim > 0 and dim < 4, f"{dim}-dimensions not a valid input"
@@ -83,6 +90,14 @@ class EMModes(object):
             self.Nz = 128
             self.NPPC = 32
 
+        if self.inertia_seeded:
+            # Electron-inertia dispersion variant: a short box at the same
+            # resolution (dz = d_e for M/m = 100) with a single seeded
+            # transverse mode at k d_e ~ 1, dumped every step for a
+            # complex-frequency fit against the inertia-modified whistler
+            # branch (see analysis_inertia.py).
+            self.Nz = 256
+
         self.dz = self.DZ * self.l_i
         self.Lz = self.Nz * self.dz
         self.Lx = self.Nx * self.dz
@@ -97,6 +112,10 @@ class EMModes(object):
             # if this is a test case run for only a small number of steps
             self.total_steps = 50
             self.diag_steps = 10
+
+        if self.inertia_seeded:
+            self.total_steps = 100
+            self.diag_steps = 1
 
         # dump all the current attributes to a dill pickle file
         if comm.rank == 0:
@@ -226,11 +245,20 @@ class EMModes(object):
             plasma_resistivity=self.eta,
             substeps=self.substeps,
             darwin=self.darwin,
+            include_electron_inertia=True if self.inertia else None,
         )
         simulation.solver = self.solver
 
+        if self.inertia_seeded:
+            # Seed one transverse mode at k d_e ~ 1 (mode 41 in the short
+            # box) on top of the uniform field; both circular branches are
+            # populated and the fast (whistler) one is fit by the analysis.
+            k_seed = 2.0 * np.pi * 41.0 / self.Lz
+            Bx_expr = f"{2.0e-3 * self.B0}*cos({k_seed}*z)"
+        else:
+            Bx_expr = self.Bx
         B_ext = picmi.AnalyticInitialField(
-            Bx_expression=self.Bx, By_expression=self.By, Bz_expression=self.Bz
+            Bx_expression=Bx_expr, By_expression=self.By, Bz_expression=self.Bz
         )
         simulation.add_applied_field(B_ext)
 
@@ -238,10 +266,16 @@ class EMModes(object):
         # Implicit solver setup                                               #
         #######################################################################
 
-        # Create GMRES linear solver for Newton (JFNK)
+        # Create GMRES linear solver for Newton (JFNK). The electron-inertia
+        # term adds an unpreconditioned (2 theta + 1)/2 * (k d_e)^2 curl-curl
+        # block to the Jacobian; with the seeded coherent whistler the
+        # default Krylov budget under-converges and Newton loses its basin,
+        # so the dispersion variant carries a matched restart length (with
+        # the backtracking line search below it converges in ~3 iterations).
         gmres_solver = picmi.GMRESLinearSolver(
             verbose_int=1,
-            max_iterations=100,
+            max_iterations=400 if self.inertia_seeded else 100,
+            restart_length=200 if self.inertia_seeded else None,
             relative_tolerance=1.0e-4,
             absolute_tolerance=0.0,
         )
@@ -257,6 +291,10 @@ class EMModes(object):
             max_particle_iterations=21,
             particle_tolerance=1.0e-10,
         )
+        if self.inertia_seeded:
+            import pywarpx
+
+            pywarpx.warpx.get_bucket("newton").line_search = 1
 
         # Create the theta-implicit hybrid evolve scheme
         evolve_scheme = picmi.ThetaImplicitHybridEvolveScheme(
@@ -419,6 +457,17 @@ parser.add_argument(
     help="use the Darwin (magnetoinductive) field split",
     action="store_true",
 )
+parser.add_argument(
+    "--inertia",
+    help="include the electron-inertia term (physical electron mass)",
+    action="store_true",
+)
+parser.add_argument(
+    "--inertia-seeded",
+    help="electron-inertia dispersion variant: short box, one seeded "
+    "whistler mode at k*d_e ~ 1, per-step dumps (implies --inertia)",
+    action="store_true",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
@@ -428,5 +477,7 @@ run = EMModes(
     B_dir=args.bdir,
     verbose=args.verbose,
     darwin=args.darwin,
+    inertia=args.inertia,
+    inertia_seeded=args.inertia_seeded,
 )
 simulation.step()

@@ -24,6 +24,11 @@ using namespace amrex;
 
 void WarpX::HybridPICEvolveFields ()
 {
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_hybrid_pic_model->m_include_electron_inertia,
+        "hybrid_pic_model.include_electron_inertia requires "
+        "algo.evolve_scheme = theta_implicit_hybrid (the explicit "
+        "hybrid loop never assembles the inertial field).");
     using ablastr::fields::Direction;
     using warpx::fields::FieldType;
 
