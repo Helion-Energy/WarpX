@@ -29,7 +29,6 @@ hybrid_pic_model.elec_temp = 1.0
 hybrid_pic_model.n0_ref = 1e18
 hybrid_pic_model.gamma = 1.0
 hybrid_pic_model.n_floor = 5e16
-hybrid_pic_model.plasma_resistivity(rho,J) = 1e-4
 hybrid_pic_model.substeps = 10
 hybrid_pic_model.holmstrom_vacuum_region = 1
 
