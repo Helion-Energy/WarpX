@@ -1,0 +1,17 @@
+# Temporal-coupling guard, run A (20 substeps): mid-transient snapshot of
+# the diffusing ring field. Compared against the identical run with 80
+# substeps (run B) by analysis_transient.py: because the Green's ghost fill
+# is applied INSIDE every RK stage evaluation (part of the RHS), the
+# transient is independent of the substep count to the integrator's order.
+# A lagged fill (ghosts from the pre-substep state -- the variant the
+# design doc forbids because it makes the boundary partially reflecting)
+# makes the transient substep-dependent at O(dt_sub) and fails the
+# comparison by orders of magnitude.
+FILE = inputs_base_rz_open_bc_greens
+
+max_step = 30
+diag1.intervals = 30
+
+hybrid_pic_model.substeps = 20
+
+hybrid_pic_model.Jy_external_grid_function(x,y,z,t) = "1.0e3 * exp(-((x-0.4)^2 + z^2)/0.1^2)"

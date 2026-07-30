@@ -1,0 +1,13 @@
+# Near-wall variant of test 1: a compact Gaussian ring of azimuthal current
+# 4 cells from the open face (r0 = 0.875, wall at r = 1, a = 0.025 < dr,
+# i.e. nearly a single-node filament at the worst in-bin phase). This
+# guards the GRADED source binning: with uniform coarsening the source bins
+# adjacent to the face violate the multipole acceptance criterion (in-bin
+# offset ~ evaluation distance) and the ghost field is wrong by ~10%; the
+# graded bins are single nodes there and the error stays at the
+# discretization floor.
+FILE = inputs_base_rz_open_bc_greens
+
+hybrid_pic_model.Jy_external_grid_function(x,y,z,t) = "1.0e3 * exp(-((x-0.875)^2 + z^2)/0.025^2)"
+
+boundary.open_bc_coarsening = 4
