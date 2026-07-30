@@ -768,7 +768,13 @@ void ImplicitSolver::PreLinearSolve ()
 
         if (m_use_mass_matrices_jacobian) {
             FinishMassMatrices();
-            SaveE();
+            // NOTE: the E0 snapshot paired with J0 (SaveE) is taken in
+            // PreRHSOp immediately before the deposit, NOT here: by the
+            // time PreLinearSolve runs, solvers whose ComputeRHS overwrites
+            // Efield_fp with the assembled RHS (the hybrid Ohm solve leaves
+            // E_ohm there) no longer hold the gather field in Efield_fp,
+            // and snapshotting it would inject a residual-proportional
+            // M*F(U) offset into every linear-stage matvec.
         }
 
         if (m_use_mass_matrices_pc) {
@@ -827,9 +833,27 @@ void ImplicitSolver::PreRHSOp ( const amrex::Real  a_cur_time,
         ComputeJfromMassMatrices( J_from_MM_only );
     }
     else { // Conventional particle-suppressed JFNK
+        if (m_use_mass_matrices_jacobian) {
+            // Snapshot the gather field paired with this deposit: the
+            // linear stage composes J = J0 + MM*(E - E0), and E0 must be
+            // the field the J0-depositing particles gathered in THIS
+            // evaluation (Efield_fp right now, after the E-filter and any
+            // scheme-specific push-field adjustments). Snapshotting later
+            // breaks for residuals that overwrite Efield_fp (hybrid Ohm).
+            SaveE();
+        }
         m_WarpX->PushParticlesandDeposit(a_cur_time, skip_deposition, PositionPushType::Full, MomentumPushType::Full, &options);
         CumulateJ();
     }
+
+    // During the mass-matrix linear stage nothing deposits rho or the
+    // per-species moments: they stay frozen at the last nonlinear
+    // evaluation's (already synced) state. Re-syncing rho here would
+    // re-add guard-cell images per matvec (SumBoundary is not
+    // idempotent) and, in radial geometry, re-apply the inverse-volume
+    // scaling to the stale density.
+    const bool mm_linear_stage =
+        m_use_mass_matrices_jacobian && a_from_jacobian && !m_particle_suborbits;
 
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     for (int lev = 0; lev < m_num_amr_levels; ++lev) {
@@ -839,14 +863,26 @@ void ImplicitSolver::PreRHSOp ( const amrex::Real  a_cur_time,
         // explicit path; charge density deposited during implicit residual evaluations
         // must be scaled here or solvers that divide by rho (e.g. the hybrid Ohm's law)
         // see an unscaled density.
-        if (m_WarpX->m_fields.has(FieldType::rho_fp, lev)) {
+        if (!mm_linear_stage && m_WarpX->m_fields.has(FieldType::rho_fp, lev)) {
             m_WarpX->ApplyInverseVolumeScalingToChargeDensity(m_WarpX->m_fields.get(FieldType::rho_fp, lev), lev);
         }
     }
 #endif
 
-    // Apply BCs to J and communicate
-    m_WarpX->SyncCurrentAndRho();
+    // Apply BCs to J and communicate (rho only when it was re-deposited)
+    if (mm_linear_stage) {
+        using ablastr::fields::Direction;
+        m_WarpX->SyncCurrent("current_fp");
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            m_WarpX->ApplyJfieldBoundary(lev,
+                m_WarpX->m_fields.get(FieldType::current_fp, Direction{0}, lev),
+                m_WarpX->m_fields.get(FieldType::current_fp, Direction{1}, lev),
+                m_WarpX->m_fields.get(FieldType::current_fp, Direction{2}, lev),
+                PatchType::fine);
+        }
+    } else {
+        m_WarpX->SyncCurrentAndRho();
+    }
 
     if (m_nlsolver_type == NonlinearSolverType::petsc_snes && !a_from_jacobian) {
         // The native Newton solver calls this routine immediately before the linear solve,
