@@ -1,0 +1,49 @@
+# Base input deck for the RZ Green's-function open-boundary tests.
+#
+# A prescribed external current is held fixed in a vacuum domain and the
+# explicit hybrid (Ohm's law) solver relaxes B resistively, with
+#     E = eta * J_plasma = eta * (curl B / mu0 - J_ext),
+# so the steady state satisfies curl B = mu0 J_ext with the boundary values
+# supplied by the field boundary condition. With the Green's-function open
+# boundary the steady state is the free-space magnetostatic field of the
+# source; with PEC it carries the wall-image response.
+#
+# The Hall and electron-pressure terms are disabled (no plasma), which makes
+# the field advance exactly linear resistive vacuum diffusion.
+
+max_step = 170
+
+amr.n_cell = 32 64
+# small boxes so the source deposition and the ghost fill are exercised
+# across box seams in both r and z
+amr.max_grid_size = 16
+amr.max_level = 0
+
+geometry.dims = RZ
+geometry.prob_lo = 0.0 -1.0
+geometry.prob_hi = 1.0  1.0
+
+boundary.field_lo = none periodic
+boundary.field_hi = open periodic
+
+warpx.verbose = 1
+warpx.n_rz_azimuthal_modes = 1
+warpx.const_dt = 6.0e-3
+warpx.abort_on_warning_threshold = high
+
+algo.maxwell_solver = hybrid
+
+# Resistive vacuum: eta = mu0 * D with D = 1 m^2/s
+hybrid_pic_model.elec_temp = 1.0
+hybrid_pic_model.gamma = 1.0
+hybrid_pic_model.n_floor = 1.0e12
+hybrid_pic_model.include_hall_term = 0
+hybrid_pic_model.include_electron_pressure_term = 0
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 1.25663706212e-6
+hybrid_pic_model.substeps = 20
+
+# Diagnostics
+diagnostics.diags_names = diag1
+diag1.intervals = 170
+diag1.diag_type = Full
+diag1.fields_to_plot = Br Bt Bz

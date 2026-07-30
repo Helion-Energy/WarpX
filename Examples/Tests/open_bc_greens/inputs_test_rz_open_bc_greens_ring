@@ -1,0 +1,13 @@
+# Test 1: static toroidal current ring, Green's-function open boundary.
+# The relaxed grid field must match the analytic (free-space, z-periodic)
+# loop field to discretization + coarse-graining order, with no wall-image
+# contribution. Compared in the analysis against the PEC baseline run.
+FILE = inputs_base_rz_open_bc_greens
+
+# Gaussian ring of azimuthal current at (r0, z0) = (0.4, 0), radius a = 0.1
+hybrid_pic_model.Jy_external_grid_function(x,y,z,t) = "1.0e3 * exp(-((x-0.4)^2 + z^2)/0.1^2)"
+
+# Green's-function open-boundary controls (defaults made explicit)
+boundary.open_bc_coarsening = 4
+boundary.open_bc_image_sum_rtol = 1.0e-6
+boundary.open_bc_max_images = 200

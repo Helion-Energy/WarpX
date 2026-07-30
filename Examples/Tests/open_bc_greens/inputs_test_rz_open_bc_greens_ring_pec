@@ -1,0 +1,10 @@
+# PEC baseline for test 1: identical to the ring test but with a PEC wall
+# at r_hi. The wall image current distorts the near-wall field; the ring
+# test's analysis measures the image-suppression factor of the open BC
+# against this run.
+FILE = inputs_base_rz_open_bc_greens
+
+boundary.field_hi = pec periodic
+
+# Same Gaussian ring source
+hybrid_pic_model.Jy_external_grid_function(x,y,z,t) = "1.0e3 * exp(-((x-0.4)^2 + z^2)/0.1^2)"
