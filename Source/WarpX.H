@@ -165,6 +165,11 @@ public:
     amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& GetEBUpdateEFlag() { return m_eb_update_E; }
     amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& GetEBUpdateBFlag() { return m_eb_update_B; }
     amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& GetECTFaceOwnerMask() { return m_ect_face_owner_mask; }
+
+    /** True when the conformal (enlarged-cell technique) embedded-boundary
+     *  field update is active: ECT Maxwell solver, or hybrid-PIC with
+     *  hybrid_pic_model.use_conformal_eb = 1. */
+    [[nodiscard]] static bool UseConformalEBSolve () { return m_eb_use_conformal_solve; }
     [[nodiscard]] bool ECTNeedsSeamSync () const { return m_ect_needs_seam_sync; }
     amrex::Vector< std::unique_ptr<amrex::iMultiFab> > const & GetEBReduceParticleShapeFlag() const { return m_eb_reduce_particle_shape; }
 
@@ -1273,6 +1278,9 @@ private:
      * boxes. False for single-box non-periodic layouts: the legacy
      * communication-free path is then taken and stays bit-identical. */
     bool m_ect_needs_seam_sync = false;
+
+    //! Whether the conformal (ECT) embedded-boundary field update is active
+    static inline bool m_eb_use_conformal_solve = false;
 
     // Copy of the coarse aux
     amrex::Vector<std::unique_ptr<amrex::iMultiFab> > current_buffer_masks;
