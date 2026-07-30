@@ -12,6 +12,7 @@
 #ifndef WARPX_H_
 #define WARPX_H_
 
+#include "BoundaryConditions/GreensFunctionOpenBC_fwd.H"
 #include "BoundaryConditions/PEC_Insulator_fwd.H"
 #include "BoundaryConditions/PML_fwd.H"
 #include "Diagnostics/MultiDiagnostics_fwd.H"
@@ -1271,6 +1272,11 @@ private:
 
     // Insulator boundary conditions
     std::unique_ptr<PEC_Insulator> pec_insulator_boundary;
+
+    /** Green's-function open (free-space) field boundary for the RZ
+     * hybrid-PIC B-field advance; lazily constructed in
+     * ApplyBfieldBoundary when active (boundary.field_hi[0] == open). */
+    std::unique_ptr<GreensFunctionOpenBC> m_open_bc_greens;
 
     // External fields parameters
     std::unique_ptr<ExternalFieldParams> m_p_ext_field_params;
