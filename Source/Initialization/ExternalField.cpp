@@ -20,6 +20,7 @@
 #endif
 
 #include <algorithm>
+#include <cstddef>
 #include <functional>
 #include <numeric>
 #include <vector>
@@ -289,7 +290,8 @@ void ExternalFieldReader::load_data (amrex::RealBox const& pbox)
     // assumption) are unchanged.
     {
         const auto pos = FC.position<double>();
-        if (pos.size() >= AMREX_SPACEDIM) {
+        constexpr auto ndim = static_cast<std::size_t>(AMREX_SPACEDIM);
+        if (pos.size() >= ndim) {
             if (xyz_order) {
                 AMREX_D_TERM(m_offset[0] += Real(pos.at(0))*m_dx[0];,
                              m_offset[1] += Real(pos.at(1))*m_dx[1];,
