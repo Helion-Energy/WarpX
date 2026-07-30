@@ -1671,7 +1671,7 @@ class GMRESLinearSolver(LinearSolverBase):
         self.max_iterations = max_iterations
 
     def linear_solver_initialize_inputs(self, nonlinear_solver):
-        nonlinear_solver.liner_solver = "amrex_gmres"
+        nonlinear_solver.linear_solver = "amrex_gmres"
         amrex_gmres = pywarpx.warpx.get_bucket("amrex_gmres")
         amrex_gmres.verbose_int = self.verbose_int
         amrex_gmres.restart_length = self.restart_length
@@ -1689,7 +1689,7 @@ class PETScKSPLinearSolver(LinearSolverBase):
     """
 
     def linear_solver_initialize_inputs(self, nonlinear_solver):
-        nonlinear_solver.liner_solver = "petsc_ksp"
+        nonlinear_solver.linear_solver = "petsc_ksp"
 
 
 class PreconditionerBase(picmistandard.base._ClassWithInit):
@@ -1745,8 +1745,9 @@ class CurlCurlMLMGPreconditioner(PreconditionerBase):
         self.relative_tolerance = relative_tolerance
         self.absolute_tolerance = absolute_tolerance
 
-    def preconditioner_type_initialize_inputs(self):
-        pywarpx.warpx.get_bucket("jacobian").pc_type = "pc_curl_curl_mlmg"
+    def preconditioner_type_initialize_inputs(self, jacobian=None):
+        if jacobian is not None:
+            jacobian.pc_type = "pc_curl_curl_mlmg"
         pc_curl_curl_mlmg = pywarpx.warpx.get_bucket("pc_curl_curl_mlmg")
         pc_curl_curl_mlmg.verbose = self.verbose
         pc_curl_curl_mlmg.bottom_verbose = self.bottom_verbose
@@ -1789,8 +1790,9 @@ class JacobiPreconditioner(PreconditionerBase):
         self.relative_tolerance = relative_tolerance
         self.absolute_tolerance = absolute_tolerance
 
-    def preconditioner_type_initialize_inputs(self):
-        pywarpx.warpx.get_bucket("jacobian").pc_type = "pc_jacobi"
+    def preconditioner_type_initialize_inputs(self, jacobian=None):
+        if jacobian is not None:
+            jacobian.pc_type = "pc_jacobi"
         pc_jacobi = pywarpx.warpx.get_bucket("pc_jacobi")
         pc_jacobi.verbose = self.verbose
         pc_jacobi.max_iter = self.max_iter
@@ -1839,8 +1841,9 @@ class PETScPreconditioner(PreconditionerBase):
         self.hypre_type = hypre_type
         self.euclid_factor_levels = euclid_factor_levels
 
-    def preconditioner_type_initialize_inputs(self):
-        pywarpx.warpx.get_bucket("jacobian").pc_type = "pc_petsc"
+    def preconditioner_type_initialize_inputs(self, jacobian=None):
+        if jacobian is not None:
+            jacobian.pc_type = "pc_petsc"
         pc_petsc = pywarpx.warpx.get_bucket("pc_petsc")
         pc_petsc.type = self.type
         pc_petsc.asm_overlap = self.asm_overlap
@@ -1982,7 +1985,8 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
             self.linear_solver.linear_solver_initialize_inputs(newton)
 
         if self.pc_type is not None:
-            self.pc_type.preconditioner_type_initialize_inputs()
+            jacobian = pywarpx.warpx.get_bucket("jacobian")
+            self.pc_type.preconditioner_type_initialize_inputs(jacobian)
 
 
 class PicardNonlinearSolver(NonlinearSolverBase):
