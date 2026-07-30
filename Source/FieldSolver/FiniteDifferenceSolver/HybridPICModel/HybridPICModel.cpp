@@ -1601,6 +1601,16 @@ void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian,
     constexpr int lev = 0;
     amrex::Geometry const & geom = warpx.Geom(lev);
     const bool trace = (std::getenv("WARPX_DEBUG_VACREC") != nullptr);
+    // EXPERIMENTAL (env-gated): recompute the recovery inside Jacobian
+    // probe evaluations instead of reusing the frozen correction. The
+    // frozen-probe lag costs ~0.99/iteration Newton contraction on
+    // violent decks; with exact (mass-matrix) particle JVPs the FD-noise
+    // objection to differencing through the solve reduces to the
+    // recovery MLMG's own tolerance -- run with a tight
+    // darwin_vacuum_recovery_relative_tolerance (<= 1e-10).
+    const bool live_probes =
+        (std::getenv("WARPX_VACREC_LIVE_PROBES") != nullptr);
+    const bool frozen_probe = a_from_jacobian && !live_probes;
 
     // Mask policy on the step-entry charge density (rho^n, component 0 of
     // rho_fp): frozen across the step, so the mask cannot flicker between
@@ -1628,7 +1638,8 @@ void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian,
     // (its rtol-level noise is amplified by the 1/(theta dt) scaling of the
     // band field rows): they reuse the correction from the last
     // non-Jacobian evaluation, keeping the probed map smooth and affine.
-    if (!a_from_jacobian) {
+    // (Unless WARPX_VACREC_LIVE_PROBES is set -- see above.)
+    if (!frozen_probe) {
     warpx.get_pointer_fdtd_solver_fp(lev)->ComputeCurlA(
         B, A, warpx.GetEBUpdateBFlag()[lev], lev);
     for (int dir = 0; dir < 3; ++dir) {
@@ -1698,7 +1709,7 @@ void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian,
         amrex::MultiFab const & Jd = *Jvac[dir];
         amrex::GpuArray<int, 3> const Jstag = A_stag[dir];
 
-        if (a_from_jacobian) {
+        if (frozen_probe) {
             // Frozen correction: nothing to apply if it is identically zero
             // (also preserves the exact-identity property bit-for-bit).
             if (dAd.norminf(0) == 0.0_rt) { continue; }
@@ -1911,6 +1922,10 @@ void HybridPICModel::ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_lon
     amrex::GpuArray<int, 3> const nodal = {1, 1, 1};
     const amrex::GpuArray<int, 3> A_stag[3] =
         {Ex_IndexType, Ey_IndexType, Ez_IndexType};
+    // Live-probe mode (see ComputeVacuumARecovery): probes evaluate the
+    // band field from the live recovered A instead of the stored target.
+    const bool live_probes =
+        (std::getenv("WARPX_VACREC_LIVE_PROBES") != nullptr);
 
     for (int dir = 0; dir < 3; ++dir) {
         if (flux_only && dir != 1) { continue; }
@@ -1942,7 +1957,7 @@ void HybridPICModel::ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_lon
             auto const & aold_arr = A_old.const_array(mfi);
             auto const & anm1_arr = Anm1.const_array(mfi);
             auto const & rho_arr  = rho.const_array(mfi);
-            const bool from_jac = a_from_jacobian;
+            const bool from_jac = a_from_jacobian && !live_probes;
             const bool bdf2 = a_bdf2;
             amrex::Array4<amrex::Real const> el_arr;
             if (EL) { el_arr = EL->const_array(mfi); }
