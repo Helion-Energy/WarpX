@@ -28,7 +28,6 @@
 using namespace amrex;
 using warpx::fields::FieldType;
 
-#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
 namespace
 {
     /** Endpoint-min nodal decision density for holmstrom_switch_mode = "node":
@@ -88,7 +87,6 @@ namespace
         return rmin;
     }
 }
-#endif
 
 void FiniteDifferenceSolver::CalculateCurrentAmpere (
     ablastr::fields::VectorField & Jfield,
