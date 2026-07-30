@@ -1,0 +1,14 @@
+# Off-center variant of test 1: a compact Gaussian ring of azimuthal
+# current (r0 = 0.4375 = source node 14, a = 0.025 < dr, i.e. nearly a
+# single-node filament) at the worst in-bin phase of its 4x4 source bin
+# (offset 1.5 cells from the expansion center in both r and z), 18 cells
+# from the open face. This guards the dipole (first-moment) error-control
+# machinery of the coarse-grained kernel: with monopole-only binning the
+# in-bin source offset is uncorrected and this test fails by ~3x the
+# tolerance (measured 8.8e-2), while the dipole-corrected kernel stays at
+# the quadrupole floor (measured 1.4e-2).
+FILE = inputs_base_rz_open_bc_greens
+
+hybrid_pic_model.Jy_external_grid_function(x,y,z,t) = "1.0e3 * exp(-((x-0.4375)^2 + z^2)/0.025^2)"
+
+boundary.open_bc_coarsening = 4

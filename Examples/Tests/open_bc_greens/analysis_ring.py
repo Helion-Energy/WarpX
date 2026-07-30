@@ -21,8 +21,22 @@ curl B = mu0 J_ext, with boundary values from the field BC. This script:
    exactly as the code does;
 2. verifies the open-BC run matches this analytic field to discretization +
    coarse-graining order, globally and in a near-wall band;
-3. measures the image-suppression factor relative to the PEC baseline run
-   (which is distorted near the wall by its image currents).
+3. for the centered variant, measures the image-suppression factor relative
+   to the PEC baseline run (which is distorted near the wall by its image
+   currents).
+
+Variants (second positional argument, default ``centered``):
+
+* ``centered``: broad ring far from the wall (r0 = 0.4, a = 0.1). Requires
+  the PEC baseline directory as the third argument.
+* ``nearwall``: near-filament ring 4 cells from the open face (r0 = 0.875,
+  a = 0.025). Guards the graded near-face source binning: uniform-coarsening
+  binning violates the multipole acceptance criterion there and fails this
+  test by an order of magnitude (measured 1.1e-1 vs 1.3e-2).
+* ``offcenter``: near-filament ring at r0 = 0.4375, a = 0.025, at the worst
+  in-bin phase of its 4x4 source bin, 18 cells from the face. Guards the
+  dipole (first-moment) error-control machinery: monopole-only binning
+  fails this test by ~3x (measured 8.8e-2 vs 1.4e-2).
 """
 
 import sys
@@ -36,10 +50,21 @@ yt.funcs.mylog.setLevel(0)
 mu0 = 4.0e-7 * np.pi
 
 # ---------------------------------------------------------------------------
-# Load the open-BC run (argv[1]) and the PEC baseline (argv[2])
+# Arguments: open-BC plotfile, variant name, PEC baseline (centered only)
 # ---------------------------------------------------------------------------
 fn_open = sys.argv[1]
-fn_pec = sys.argv[2]
+variant = sys.argv[2] if len(sys.argv) > 2 else "centered"
+
+# Source parameters must match the Jy_external_grid_function of the inputs
+# file; tolerances are set ~4x above the values measured on the 32x64 grid
+# (see README.rst).
+params = {
+    #            r0    z0    a     tol_out  tol_wall
+    "centered": (0.4, 0.0, 0.1, 0.02, 0.02),
+    "nearwall": (0.875, 0.0, 0.025, 0.02, 0.03),
+    "offcenter": (0.4375, 0.0, 0.025, 0.03, 0.03),
+}
+r0, z0, a, tol_out, tol_wall = params[variant]
 
 
 def load_B(fn):
@@ -59,7 +84,6 @@ def load_B(fn):
 
 
 Br_o, Bz_o, extent, dims = load_B(fn_open)
-Br_p, Bz_p, _, _ = load_B(fn_pec)
 
 nr, nz = int(dims[0]), int(dims[1])
 rmin, rmax, zmin, zmax = extent
@@ -71,7 +95,7 @@ Lz = zmax - zmin
 # Discrete source: J_theta sampled at its (nodal r, nodal z) staggering,
 # exactly as hybrid_pic_model.Jy_external_grid_function is evaluated.
 # ---------------------------------------------------------------------------
-J0, r0, z0, a = 1.0e3, 0.4, 0.0, 0.1
+J0 = 1.0e3
 r_nodes = rmin + dr * np.arange(nr + 1)
 z_nodes = zmin + dz * np.arange(nz)  # periodic: node nz == node 0
 RN, ZN = np.meshgrid(r_nodes, z_nodes, indexing="ij")
@@ -119,6 +143,7 @@ psi[:, nz] = psi[:, 0]  # periodic top node
 # exactly as the plotfile does.
 # ---------------------------------------------------------------------------
 r_cc = rmin + dr * (np.arange(nr) + 0.5)
+z_cc = zmin + dz * (np.arange(nz) + 0.5)
 
 # Br at (nodal r, cc z); Br = 0 on axis
 Br_stag = np.zeros((nr + 1, nz))
@@ -140,33 +165,53 @@ def err(Br_g, Bz_g, mask):
     return dB[mask].max() / Bmag_a[mask].max()
 
 
-# Probe regions: outside the source support (Gaussian ring at r0 = 0.4,
-# a = 0.1; J/J0 < 1.3e-4 for r >= 0.7), where the analytic filament
+# Probe regions: outside the source support, where the analytic filament
 # superposition (with self-terms dropped) is exact to discretization order.
-outer = np.broadcast_to((r_cc >= 0.7)[:, None], (nr, nz))
-wall_band = np.broadcast_to((r_cc > rmax - 4.5 * dr)[:, None], (nr, nz))
+# For the centered variant (broad ring at r0 = 0.4, a = 0.1; J/J0 < 1.3e-4
+# for r >= 0.7) the original fixed masks are kept so the measured numbers
+# stay comparable across revisions; the compact variants exclude a disk of
+# radius 6*a (J/J0 < 2.4e-16) around the source, with periodic z distance.
+RCC, ZCC = np.meshgrid(r_cc, z_cc, indexing="ij")
+if variant == "centered":
+    outer = np.broadcast_to((r_cc >= 0.7)[:, None], (nr, nz))
+    wall_band = np.broadcast_to((r_cc > rmax - 4.5 * dr)[:, None], (nr, nz))
+else:
+    dzp = np.abs(ZCC - z0)
+    dist = np.sqrt((RCC - r0) ** 2 + np.minimum(dzp, Lz - dzp) ** 2)
+    outside = dist >= max(6.0 * a, 0.15)
+    outer = (RCC >= 0.55) & outside
+    wall_band = (RCC > rmax - 4.5 * dr) & outside
 
 err_open_out = err(Br_o, Bz_o, outer)
 err_open_wall = err(Br_o, Bz_o, wall_band)
-err_pec_out = err(Br_p, Bz_p, outer)
-err_pec_wall = err(Br_p, Bz_p, wall_band)
-suppression = err_pec_wall / err_open_wall
 
-print(f"outer     error: open = {err_open_out:.3e}   pec = {err_pec_out:.3e}")
-print(f"wall-band error: open = {err_open_wall:.3e}   pec = {err_pec_wall:.3e}")
-print(f"image-suppression factor (wall band, pec/open) = {suppression:.1f}")
+print(f"variant: {variant}")
+print(f"outer     error: open = {err_open_out:.3e}")
+print(f"wall-band error: open = {err_open_wall:.3e}")
 
 # The open-BC solution must match free space to discretization +
-# coarse-graining order (measured ~5e-3 on this grid) ...
-assert err_open_out < 0.02, f"open-BC outer error too large: {err_open_out:.3e}"
-assert err_open_wall < 0.02, f"open-BC wall-band error too large: {err_open_wall:.3e}"
-# ... and the PEC image must be suppressed by at least the design acceptance
-# factor of 100x (measured ~400x on this grid)
-assert suppression > 100.0, f"image suppression too weak: {suppression:.1f}x"
-# sanity: the PEC baseline really is image-distorted near the wall (i.e. the
-# comparison is meaningful)
-assert err_pec_wall > 0.10, (
-    f"PEC baseline suspiciously free-space-like: {err_pec_wall:.3e}"
+# coarse-graining order (see README.rst for the measured values)
+assert err_open_out < tol_out, f"open-BC outer error too large: {err_open_out:.3e}"
+assert err_open_wall < tol_wall, (
+    f"open-BC wall-band error too large: {err_open_wall:.3e}"
 )
 
-print("Ring test PASSED")
+if variant == "centered":
+    # ... and the PEC image must be suppressed by at least the design
+    # acceptance factor of 100x (measured ~400x on this grid)
+    fn_pec = sys.argv[3]
+    Br_p, Bz_p, _, _ = load_B(fn_pec)
+    err_pec_out = err(Br_p, Bz_p, outer)
+    err_pec_wall = err(Br_p, Bz_p, wall_band)
+    suppression = err_pec_wall / err_open_wall
+    print(f"outer     error: pec = {err_pec_out:.3e}")
+    print(f"wall-band error: pec = {err_pec_wall:.3e}")
+    print(f"image-suppression factor (wall band, pec/open) = {suppression:.1f}")
+    assert suppression > 100.0, f"image suppression too weak: {suppression:.1f}x"
+    # sanity: the PEC baseline really is image-distorted near the wall
+    # (i.e. the comparison is meaningful)
+    assert err_pec_wall > 0.10, (
+        f"PEC baseline suspiciously free-space-like: {err_pec_wall:.3e}"
+    )
+
+print(f"Ring test ({variant}) PASSED")

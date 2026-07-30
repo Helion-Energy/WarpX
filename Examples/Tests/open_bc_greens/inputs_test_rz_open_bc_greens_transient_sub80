@@ -1,0 +1,10 @@
+# Temporal-coupling guard, run B (80 substeps): see
+# inputs_test_rz_open_bc_greens_transient_sub20.
+FILE = inputs_base_rz_open_bc_greens
+
+max_step = 30
+diag1.intervals = 30
+
+hybrid_pic_model.substeps = 80
+
+hybrid_pic_model.Jy_external_grid_function(x,y,z,t) = "1.0e3 * exp(-((x-0.4)^2 + z^2)/0.1^2)"
