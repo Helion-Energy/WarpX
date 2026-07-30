@@ -36,6 +36,10 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
         !(m_darwin && a_from_restart),
         "hybrid_pic_model.darwin does not support restarts yet (the vector "
         "potential and static magnetic field are not checkpointed)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !(m_hybrid_pic_model->m_include_electron_inertia && a_from_restart),
+        "hybrid_pic_model.include_electron_inertia does not support "
+        "restarts yet (the electron-current history is not checkpointed)");
 
     // Vacuum vector-potential recovery cadence (see HybridPICModel.H):
     // "half" applies inside every residual evaluation at the theta-stage
@@ -208,6 +212,11 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
             rho_n_store[lev] = std::make_unique<amrex::MultiFab>(rho_fp, amrex::make_alias, 0, 1);
             rho_n_alias.push_back(rho_n_store[lev].get());
         }
+        // With electron inertia, the E_L source reads the inertial field
+        // at its last converged assembly (t^{n-1+theta}) here -- a
+        // half-step staleness of the same order as the ion half-step
+        // offset in the Je history; a t^n reassembly from the histories
+        // is a possible refinement.
         m_hybrid_pic_model->ComputeDarwinELong(rho_n_alias, start_time);
         for (int lev = 0; lev < m_num_amr_levels; ++lev) {
             for (int dir = 0; dir < 3; ++dir) {
@@ -368,6 +377,17 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
                 amrex::MultiFab::Saxpy(Jp,  PhysConst::epsilon_0 * inv_thetadt, EL_old, 0, 0, Jp.nComp(), Jp.nGrowVect());
             }
         }
+    }
+
+    // Electron inertia: assemble the nodal inertial field from the
+    // theta-stage state, ahead of both the E_L constraint solve (which
+    // takes its longitudinal part into the source) and the Ohm E-solve
+    // (which adds it per component). Refreshed in every evaluation
+    // including Jacobian probes -- a smooth function of the state; the Je
+    // histories are frozen per step.
+    if (m_hybrid_pic_model->m_include_electron_inertia) {
+        m_hybrid_pic_model->ComputeElectronInertiaNodal(m_theta, m_dt,
+                                                        a_from_jacobian);
     }
 
     // Electron pressure at t^{n+theta}: either the theta-centered QDSMC
@@ -605,7 +625,8 @@ void ThetaImplicitHybrid::DarwinUpdateA_B ( amrex::Real a_thetadt, amrex::Real a
         // smooth function of the state and freezing it per iteration would
         // make the Jacobian inconsistent with the iterate map.
         if (m_vacuum_recovery_half) {
-            m_hybrid_pic_model->ComputeVacuumARecovery(a_from_jacobian);
+            m_hybrid_pic_model->ComputeVacuumARecovery(
+                a_from_jacobian, a_thetadt);
             DarwinApplyABoundary(pin_time);
         }
         // B = B_static + curl A
@@ -781,7 +802,13 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
         // field is exactly recovered; in "full" mode this is the only
         // application). Restore the exact boundary pin afterwards.
         if (m_vacuum_recovery) {
-            m_hybrid_pic_model->ComputeVacuumARecovery(false);
+            // Half cadence already relaxed over theta*dt inside the
+            // solve; the end application covers the remaining
+            // (1 - theta)*dt so the configured tau is the effective
+            // response time in both cadences.
+            m_hybrid_pic_model->ComputeVacuumARecovery(false,
+                m_vacuum_recovery_half ? (1.0_rt - m_theta) * m_dt
+                                       : m_dt);
             DarwinApplyABoundary(end_time);
             // The delivered end-of-step field in the band is the Faraday
             // value of the recovered A across the step (Efield_fp holds
@@ -823,6 +850,14 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
         ablastr::fields::MultiLevelVectorField const& B_old =
             m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::B_old, 0);
         m_WarpX->FinishMagneticFieldAndApplyBCs( B_old, m_theta, end_time );
+    }
+
+    // Electron inertia: rotate the per-step nodal Je history via the
+    // theta-extrapolation of the converged theta-stage assembly (one
+    // assembly family end to end -- differencing across assembly
+    // conventions injects deposit-noise derivatives at 1/dt).
+    if (m_hybrid_pic_model->m_include_electron_inertia) {
+        m_hybrid_pic_model->RotateElectronInertiaHistory(m_theta);
     }
 
     // Restore end-of-step totals: the analytic external flux advance means

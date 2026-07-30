@@ -637,6 +637,66 @@ public:
     int m_darwin_poisson_max_iters = 200;
     int m_darwin_poisson_verbosity = 0;
 
+    /** Electron inertia in the generalized Ohm's law (per the implicit-PIC
+     *  formulation of Angus et al.): the Je-form of the material derivative
+     *  -(m_e_eff/e) D u_e/Dt of the electron fluid velocity u_e = -Je/rho,
+     *      E_inertial = +(m_e_eff/(e rho)) [ dJe/dt - (Je/rho) drho/dt
+     *                                        - (Je.grad)(Je/rho) ]
+     *  (cold-electron limit: E = (m_e/(e^2 n_e)) dJe/dt, which fixes the
+     *  sign and the 1/rho), assembled at nodes each residual evaluation and
+     *  added to the Ohm electric field. Rolls the whistler branch over at
+     *  the (effective) electron skin depth d_e = c/omega_pe(m_e_eff): with
+     *  reduced_electron_mass_ratio = R, m_e_eff = m_lightest_ion / R
+     *  (R = 0 or unset: the physical electron mass), so R tunes where the
+     *  electron-scale dispersion and damping act relative to the grid.
+     *  dJe/dt uses the second-order three-point stencil centered at the
+     *  theta stage where Ohm's law is imposed (classic BDF2 at theta = 1,
+     *  exactly the two-point midpoint form at theta = 1/2; two-point until
+     *  two history levels exist or always when electron_inertia_bdf2 = 0)
+     *  with the theta-extrapolated iterate Je^{n+1}; the term is zeroed
+     *  only where rho <= 0 (density-floored cells keep their inertia --
+     *  that is what regularizes the floored-halo response). */
+    bool m_include_electron_inertia = false;
+    amrex::Real m_reduced_electron_mass_ratio = 0.0;
+    bool m_electron_inertia_bdf2 = true;
+    /** Effective electron mass, resolved lazily on first use (needs the
+     *  ion species list). */
+    amrex::Real m_electron_inertia_mass = 0.0;
+    /** NOTE on the theta-stage save feeding the history rotation: the
+     *  last non-Jacobian residual evaluation is the accepted iterate for
+     *  every converged Newton/Picard exit (convergence is checked on a
+     *  fresh residual). A rolled-back final line-search iteration or a
+     *  max-iteration exit can leave the save at a nearby trial state
+     *  (error O(alpha dU)); reassembling at the accepted state in the
+     *  rotation is a possible refinement.
+     *
+     *  One-time Je-history seeding from the first evaluated state: a
+     *  quiescent plasma's pre-history is its initial (noisy) electron
+     *  current, NOT zero -- seeding both levels with Je(t=0) makes the
+     *  first BDF2 derivative exactly zero instead of a deposit-noise
+     *  impulse of order Je/dt. */
+    bool m_inertia_history_initialized = false;
+    /** Number of genuine per-step history levels accumulated (seeding
+     *  counts as one). BDF2 engages only at >= 2 -- the first step after
+     *  seeding uses the two-point form (a seeded-equal history would
+     *  overweight a driven first step by 1.5x under BDF2). */
+    int m_inertia_history_levels = 0;
+
+    /** Assemble E_inertial on the nodal scratch "hybrid_E_inertial_nodal"
+     *  from the current theta-stage state (see m_include_electron_inertia).
+     */
+    void ComputeElectronInertiaNodal (amrex::Real a_theta, amrex::Real a_dt,
+                                      bool a_from_jacobian);
+
+    /** Rotate the per-step nodal Je history: nm1 <- n, then
+     *  n <- (Je^theta - (1-theta) Je^n)/theta from the converged
+     *  theta-stage assembly saved by the last non-Jacobian evaluation --
+     *  the same extrapolation family as every other end-of-step field, so
+     *  the derivative never differences across deposit-noise realizations
+     *  from different assembly conventions. Called from the implicit
+     *  solver's end-of-step update. */
+    void RotateElectronInertiaHistory (amrex::Real a_theta);
+
     /** Vacuum vector-potential recovery (Darwin path only): every application
      *  replaces the evolved A in low-density cells with the magnetostatic
      *  solution driven by the retained (plasma) currents and the boundary
@@ -678,6 +738,14 @@ public:
      *  Faraday band-E overwrite, which fights valid Ohm physics if applied
      *  to genuine plasma) to the true low-density region. */
     amrex::Real m_darwin_vacuum_recovery_density_fraction = 1.0;
+    /** Finite response time of the vacuum recovery (seconds; 0 = replace
+     *  instantly). The band A relaxes toward the magnetostatic solution,
+     *  A += (1 - exp(-dt_eff/tau)) * dA, capping the reconstructed band
+     *  EMF at the correction rate dA/tau instead of the one-interval jump
+     *  dA/(theta dt) -- the physical analog of the halo's finite (whistler)
+     *  response time that the instantaneous elliptic limit idealizes away.
+     *  Slow drives (ramp time >> tau) are delivered unchanged. */
+    amrex::Real m_darwin_vacrec_relax_time = 0.0;
     amrex::Real m_darwin_vacrec_rtol = 1.0e-8;
     amrex::Real m_darwin_vacrec_atol = 0.0;
     int m_darwin_vacrec_max_iters = 200;
@@ -688,7 +756,8 @@ public:
      *  caller must rebuild B = B_static + curl A afterwards (both call
      *  sites do so anyway) and re-apply the A boundary values.
      */
-    void ComputeVacuumARecovery (bool a_from_jacobian);
+    void ComputeVacuumARecovery (bool a_from_jacobian,
+                                 amrex::Real a_dt_eff);
 
     /** Overwrite the recovered components of Efield_fp in masked (vacuum)
      *  cells with the Faraday-consistent field of the recovered vector

@@ -546,6 +546,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     const auto resistivity_has_J_dependence = hybrid_model->m_resistivity_has_J_dependence;
     const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
+    const bool include_electron_inertia = hybrid_model->m_include_electron_inertia;
 
     const bool include_external_fields = hybrid_model->m_add_external_fields
         && !hybrid_model->m_external_unified;
@@ -564,6 +565,10 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
     auto & warpx = WarpX::GetInstance();
     const amrex::Real t_new = warpx.gett_new(lev);
+    // Nodal electron-inertia field, assembled by the caller each
+    // evaluation (theta-implicit hybrid only; stays zero elsewhere).
+    amrex::MultiFab const * Ei_nodal_mf = include_electron_inertia
+        ? warpx.m_fields.get("hybrid_E_inertial_nodal", lev) : nullptr;
     ablastr::fields::VectorField Bfield_external, Efield_external;
     if (include_external_fields) {
         Bfield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_external, 0); // lev=0
@@ -713,6 +718,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         Array4<Real const> const& Jtheta = Jfield[1]->const_array(mfi);
         Array4<Real const> const& Jz = Jfield[2]->const_array(mfi);
         Array4<Real const> const& enE = enE_nodal_mf.const_array(mfi);
+        Array4<Real const> eiN;
+        if (Ei_nodal_mf) { eiN = Ei_nodal_mf->const_array(mfi); }
         Array4<Real const> const& rho = rhofield.const_array(mfi);
         Array4<Real const> const& Pe = Pefield.const_array(mfi);
         Array4<Real> const& Br = Bfield[0]->array(mfi);
@@ -787,6 +794,10 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                     Er(i, j, 0) = (enE_r - grad_Pe) / rho_val_limited;
                 }
+                if (include_electron_inertia) {
+                    Er(i, j, 0) += Interp(eiN, nodal, Er_stag, coarsen, i, j, 0, 0);
+                }
+
 
                 // Add resistivity only if E field value is used to update B
                 if (include_resistivity) {
@@ -861,6 +872,10 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                     Etheta(i, j, 0) = (enE_t - grad_Pe) / rho_val_limited;
                 }
+                if (include_electron_inertia) {
+                    Etheta(i, j, 0) += Interp(eiN, nodal, Etheta_stag, coarsen, i, j, 0, 1);
+                }
+
 
                 // Add resistivity only if E field value is used to update B
                 if (include_resistivity) {
@@ -930,6 +945,10 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                     Ez(i, j, 0) = (enE_z - grad_Pe) / rho_val_limited;
                 }
+                if (include_electron_inertia) {
+                    Ez(i, j, 0) += Interp(eiN, nodal, Ez_stag, coarsen, i, j, 0, 2);
+                }
+
 
                 // Add resistivity only if E field value is used to update B
                 if (include_resistivity) {
@@ -1028,6 +1047,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     const auto resistivity_has_J_dependence = hybrid_model->m_resistivity_has_J_dependence;
     const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
+    const bool include_electron_inertia = hybrid_model->m_include_electron_inertia;
 
     const bool include_external_fields = hybrid_model->m_add_external_fields
         && !hybrid_model->m_external_unified;
@@ -1046,6 +1066,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 
     auto & warpx = WarpX::GetInstance();
     const amrex::Real t_new = warpx.gett_new(lev);
+    // Nodal electron-inertia field, assembled by the caller each
+    // evaluation (theta-implicit hybrid only; stays zero elsewhere).
+    amrex::MultiFab const * Ei_nodal_mf = include_electron_inertia
+        ? warpx.m_fields.get("hybrid_E_inertial_nodal", lev) : nullptr;
     ablastr::fields::VectorField Bfield_external, Efield_external;
     if (include_external_fields) {
         Bfield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_external, 0); // lev=0
@@ -1194,6 +1218,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         Array4<Real const> const& Jy = Jfield[1]->const_array(mfi);
         Array4<Real const> const& Jz = Jfield[2]->const_array(mfi);
         Array4<Real const> const& enE = enE_nodal_mf.const_array(mfi);
+        Array4<Real const> eiN;
+        if (Ei_nodal_mf) { eiN = Ei_nodal_mf->const_array(mfi); }
         Array4<Real const> const& rho = rhofield.const_array(mfi);
         Array4<Real const> const& Pe = Pefield.array(mfi);
         Array4<Real> const& Bx = Bfield[0]->array(mfi);
@@ -1264,6 +1290,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 
                 Ex(i, j, k) = (enE_x - grad_Pe) / rho_val_limited;
             }
+            if (include_electron_inertia) {
+                Ex(i, j, k) += Interp(eiN, nodal, Ex_stag, coarsen, i, j, k, 0);
+            }
+
 
             // Add resistivity only if E field value is used to update B
             if (include_resistivity) {
@@ -1329,6 +1359,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 
                 Ey(i, j, k) = (enE_y - grad_Pe) / rho_val_limited;
             }
+            if (include_electron_inertia) {
+                Ey(i, j, k) += Interp(eiN, nodal, Ey_stag, coarsen, i, j, k, 1);
+            }
+
 
             // Add resistivity only if E field value is used to update B
             if (include_resistivity) {
@@ -1394,6 +1428,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 
                 Ez(i, j, k) = (enE_z - grad_Pe) / rho_val_limited;
             }
+            if (include_electron_inertia) {
+                Ez(i, j, k) += Interp(eiN, nodal, Ez_stag, coarsen, i, j, k, 2);
+            }
+
 
             // Add resistivity only if E field value is used to update B
             if (include_resistivity) {
