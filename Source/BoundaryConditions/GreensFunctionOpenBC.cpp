@@ -30,9 +30,11 @@
 #include <AMReX_REAL.H>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <string>
 
-using namespace amrex;
+using namespace amrex::literals;
 
 #if defined(WARPX_DIM_RZ)
 
@@ -88,12 +90,17 @@ bool GreensFunctionOpenBC::IsActive ()
 void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
                                    amrex::Geometry const& geom)
 {
-    const ParmParse pp_boundary("boundary");
+    const amrex::ParmParse pp_boundary("boundary");
     pp_boundary.query("open_bc_coarsening", m_coarsening);
     pp_boundary.query("open_bc_image_sum_rtol", m_image_sum_rtol);
     pp_boundary.query("open_bc_max_images", m_max_images);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_coarsening >= 1,
         "boundary.open_bc_coarsening must be >= 1");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_max_images >= 1,
+        "boundary.open_bc_max_images must be >= 1 (the periodic-z image sum "
+        "cannot be disabled while z is periodic)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_image_sum_rtol > 0.0_rt,
+        "boundary.open_bc_image_sum_rtol must be > 0");
 
     // Validate the supported configuration
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -109,14 +116,41 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
         WarpX::field_boundary_lo[0] != FieldBoundaryType::Open,
         "The Green's-function open boundary is only implemented on the r_hi face.");
 
-    const Box& domain = geom.Domain();
+    // Externally applied fields initialized directly into the evolved B
+    // (warpx.B_ext_grid_init_style) are curl-free inside the domain, so the
+    // curl-B source deposit below does not see them: the ghost fill would
+    // silently erase them at the open face and drive a spurious azimuthal
+    // wall current sheet ~ B_applied / (mu0 dr) that resistively erodes the
+    // applied field from the wall inward. Applied fields must instead be
+    // loaded through the hybrid solver's split external-field registers,
+    // which provide their own ghost values.
+    {
+        const amrex::ParmParse pp_warpx("warpx");
+        std::string B_ext_grid_s;
+        pp_warpx.query("B_ext_grid_init_style", B_ext_grid_s);
+        std::transform(B_ext_grid_s.begin(), B_ext_grid_s.end(),
+                       B_ext_grid_s.begin(),
+                       [] (unsigned char c) { return std::tolower(c); });
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            B_ext_grid_s.empty() || B_ext_grid_s == "default",
+            "warpx.B_ext_grid_init_style is not compatible with the Green's-function "
+            "open boundary: a curl-free applied field written into the evolved B would "
+            "be erased at the open face (the ghost fill reconstructs only the field of "
+            "the interior currents), creating a spurious wall current sheet. Load "
+            "applied fields with hybrid_pic_model.add_external_fields = 1 and "
+            "hybrid_pic_model.B[x/y/z]_external_grid_function instead.");
+    }
+
+    const amrex::Box& domain = geom.Domain();
     m_nr = domain.length(0);
     m_nz = domain.length(1);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         domain.smallEnd(0) == 0 && domain.smallEnd(1) == 0,
         "GreensFunctionOpenBC: unexpected domain index origin.");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_nr >= 2,
+        "GreensFunctionOpenBC: at least two radial cells are required.");
 
-    const IntVect ng = Bfield[0]->nGrowVect();
+    const amrex::IntVect ng = Bfield[0]->nGrowVect();
     for (int d = 0; d < 3; ++d) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             Bfield[d]->nGrowVect() == ng,
@@ -136,102 +170,161 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
     m_psi_nj = m_nz + 2 * m_ngz + 1;
     const int nrows = m_psi_ni * m_psi_nj;
 
-    // Source bins over nodal source indices i in [0, m_nr-1], j in [0, m_nz-1].
-    // (The r = 0 axis nodes carry no ring current; the face node i = m_nr and,
-    // for non-periodic z, the top node j = m_nz are excluded from the source
-    // support -- interior sources are assumed to stay away from the faces.)
-    const int nbin_r = (m_nr - 1) / m_coarsening + 1;
-    m_nbin_z = (m_nz - 1) / m_coarsening + 1;
-    m_nbins = nbin_r * m_nbin_z;
-    m_ncols = 3 * m_nbins;
-
-    // Bin centers (geometric center of the bin's node range; the dipole
-    // kernel entries account for in-bin offsets exactly to first order).
-    Vector<amrex::Real> bin_r_h(m_nbins), bin_z_h(m_nbins);
-    for (int bi = 0; bi < nbin_r; ++bi) {
-        const int ilo = bi * m_coarsening;
-        const int ihi = std::min((bi + 1) * m_coarsening - 1, m_nr - 1);
-        for (int bj = 0; bj < m_nbin_z; ++bj) {
-            const int jlo = bj * m_coarsening;
-            const int jhi = std::min((bj + 1) * m_coarsening - 1, m_nz - 1);
-            const int b = bi * m_nbin_z + bj;
-            bin_r_h[b] = 0.5_rt * (ilo + ihi) * m_dr;
-            bin_z_h[b] = m_zmin + 0.5_rt * (jlo + jhi) * m_dz;
+    // ---- Graded source bins ------------------------------------------------
+    // Source nodes are i in [1, m_nr-1], j in [0, m_nz-1]. (The r = 0 axis
+    // nodes carry no ring current; the face node i = m_nr and, for
+    // non-periodic z, the top node j = m_nz are excluded from the source
+    // support -- see the deposition below.)
+    //
+    // Uniform coarsening violates the multipole acceptance criterion for
+    // bins adjacent to the open face (in-bin offset ~ evaluation distance),
+    // so the bin size is GRADED: a radial bin whose outermost node sits at
+    // a distance d from the first evaluation radius (node i = m_nr) may not
+    // be wider than d/4 in either direction, and is never wider than the
+    // requested interior coarsening. Bins within a few cells of the face
+    // are then single nodes (no coarse-graining error at all), and the
+    // in-bin offset over evaluation distance stays <= ~1/4 everywhere, so
+    // the dipole-corrected remainder keeps the far-field O((h/d)^2) law up
+    // to the face.
+    constexpr int mac_inv_theta = 4;   // bin extent <= (distance to face) / 4
+    amrex::Vector<int> bin_wz_h, bin_nzb_h, bin_col0_h;
+    amrex::Vector<amrex::Real> bin_rc_h;
+    amrex::Vector<amrex::Long> bin_koff_h;
+    amrex::Vector<int> rbin_of_i_h(m_nr, -1);
+    amrex::Long kernel_size = 0;
+    {
+        int nbins = 0;
+        int ihi = m_nr - 1;
+        while (ihi >= 1) {
+            const amrex::Real d_face = (m_nr - ihi) * m_dr;
+            const int wr = amrex::Clamp(
+                static_cast<int>(d_face / (mac_inv_theta * m_dr)), 1, m_coarsening);
+            const int wz = amrex::Clamp(
+                static_cast<int>(d_face / (mac_inv_theta * m_dz)), 1, m_coarsening);
+            const int ilo = std::max(1, ihi - wr + 1);
+            const int nzb = (m_nz - 1) / wz + 1;
+            const auto b = static_cast<int>(bin_rc_h.size());
+            for (int i = ilo; i <= ihi; ++i) { rbin_of_i_h[i] = b; }
+            bin_rc_h.push_back(0.5_rt * (ilo + ihi) * m_dr);
+            bin_wz_h.push_back(wz);
+            bin_nzb_h.push_back(nzb);
+            bin_col0_h.push_back(nbins);
+            bin_koff_h.push_back(kernel_size);
+            nbins += nzb;
+            // per-bin kernel block: [m_psi_ni][3][offset table of length L]
+            kernel_size += static_cast<amrex::Long>(m_psi_ni) * 3
+                           * (m_psi_nj + static_cast<amrex::Long>(wz) * (nzb - 1));
+            ihi = ilo - 1;
         }
+        m_nrbins = static_cast<int>(bin_rc_h.size());
+        m_nbins = nbins;
+        m_ncols = 3 * nbins;
     }
 
-    // Assemble the kernel on the host (elliptic integrals; setup only),
-    // then copy to device. For periodic z, image rings at z' + n L_z are
+    // ---- Kernel assembly ---------------------------------------------------
+    // Free space is translation-invariant in z (with or without the
+    // periodic-z image sum), so the kernel is NOT stored as a dense
+    // (psi-point x bin) matrix: for each radial bin it is a per-moment
+    // table over the integer z-offset o = j_psi - wz * j_bin between the
+    // psi point and the bin's nominal center. This factorization keeps the
+    // kernel at O(n_radial_bins * nz) reals -- tens of MB at production
+    // resolutions -- instead of the O(nz^2 nr) dense form (GBs), and
+    // shrinks the setup-time elliptic-integral count by the same factor.
+    //
+    // Entries are assembled on the host (elliptic integrals; setup only),
+    // then copied to device. For periodic z, image rings at z' + n L_z are
     // summed in +/- pairs until the pair increment drops below
     // m_image_sum_rtol relative to the accumulated value.
-    Vector<amrex::Real> kernel_h(static_cast<Long>(nrows) * m_ncols);
+    amrex::Vector<amrex::Real> kernel_h(kernel_size);
     const amrex::Real Lz = geom.ProbLength(1);
     const amrex::Real rtol = m_image_sum_rtol;
     const int max_images = m_max_images;
     const bool periodic_z = m_periodic_z;
+    const int psi_ni = m_psi_ni;
     const int psi_nj = m_psi_nj;
     const int ngz = m_ngz;
     const int nr = m_nr;
     const amrex::Real dr = m_dr;
     const amrex::Real dz = m_dz;
-    const amrex::Real zmin = m_zmin;
 
 #ifdef AMREX_USE_OMP
-#pragma omp parallel for
+#pragma omp parallel for schedule(dynamic)
 #endif
-    for (int row = 0; row < nrows; ++row) {
-        const int ip = row / psi_nj;             // 0 .. m_ngr
-        const int jp = row % psi_nj;             // 0 .. m_psi_nj-1
-        const amrex::Real rb = (nr + ip) * dr;
-        const amrex::Real zb = zmin + (jp - ngz) * dz;
-        for (int b = 0; b < m_nbins; ++b) {
-            const amrex::Real rs = bin_r_h[b];
-            const amrex::Real zs = bin_z_h[b];
-            // finite-difference step for the dipole entries, scaled to the
-            // n = 0 source-observer distance
-            const amrex::Real d0 = std::sqrt((zb - zs) * (zb - zs)
-                                             + (rb + rs) * (rb + rs));
-            const amrex::Real h = 1.0e-5_rt * d0;
-            amrex::Real g = 0.0_rt, gr = 0.0_rt, gz = 0.0_rt;
-            auto add_image = [&] (amrex::Real zoff) -> amrex::Real {
-                const amrex::Real zsi = zs + zoff;
-                const amrex::Real g0 = RingPsiPerAmp(rb, zb, rs, zsi);
-                g  += g0;
-                gr += (RingPsiPerAmp(rb, zb, rs + h, zsi)
-                       - RingPsiPerAmp(rb, zb, rs - h, zsi)) / (2.0_rt * h);
-                gz += (RingPsiPerAmp(rb, zb, rs, zsi + h)
-                       - RingPsiPerAmp(rb, zb, rs, zsi - h)) / (2.0_rt * h);
-                return g0;
-            };
-            add_image(0.0_rt);
-            if (periodic_z) {
-                for (int n = 1; n <= max_images; ++n) {
-                    amrex::Real dpair = add_image(n * Lz);
-                    dpair += add_image(-n * Lz);
-                    if (n >= 2 && std::abs(dpair) < rtol * std::abs(g)) { break; }
+    for (int b = 0; b < m_nrbins; ++b) {
+        const int wz = bin_wz_h[b];
+        const int nzb = bin_nzb_h[b];
+        const int L = psi_nj + wz * (nzb - 1);
+        const int omin = -wz * (nzb - 1);
+        const amrex::Real rs = bin_rc_h[b];
+        for (int ip = 0; ip < psi_ni; ++ip) {
+            const amrex::Real rb = (nr + ip) * dr;
+            for (int io = 0; io < L; ++io) {
+                // z of the psi point relative to the bin's nominal center
+                const amrex::Real zb = (omin + io - ngz - 0.5_rt * (wz - 1)) * dz;
+                // finite-difference step for the dipole entries, scaled to
+                // the n = 0 source-observer distance
+                const amrex::Real d0 = std::sqrt(zb * zb + (rb + rs) * (rb + rs));
+                const amrex::Real h = 1.0e-5_rt * d0;
+                amrex::Real g = 0.0_rt, gr = 0.0_rt, gz = 0.0_rt;
+                auto add_image = [&] (amrex::Real zoff) -> amrex::Real {
+                    const amrex::Real g0 = RingPsiPerAmp(rb, zb, rs, zoff);
+                    g  += g0;
+                    gr += (RingPsiPerAmp(rb, zb, rs + h, zoff)
+                           - RingPsiPerAmp(rb, zb, rs - h, zoff)) / (2.0_rt * h);
+                    gz += (RingPsiPerAmp(rb, zb, rs, zoff + h)
+                           - RingPsiPerAmp(rb, zb, rs, zoff - h)) / (2.0_rt * h);
+                    return g0;
+                };
+                add_image(0.0_rt);
+                if (periodic_z) {
+                    for (int n = 1; n <= max_images; ++n) {
+                        amrex::Real dpair = add_image(n * Lz);
+                        dpair += add_image(-n * Lz);
+                        if (n >= 2 && std::abs(dpair) < rtol * std::abs(g)) { break; }
+                    }
                 }
+                const amrex::Long idx =
+                    bin_koff_h[b] + (static_cast<amrex::Long>(ip) * 3) * L + io;
+                kernel_h[idx        ] = g;
+                kernel_h[idx +     L] = gr;
+                kernel_h[idx + 2 * L] = gz;
             }
-            const Long idx = static_cast<Long>(row) * m_ncols + 3 * b;
-            kernel_h[idx + 0] = g;
-            kernel_h[idx + 1] = gr;
-            kernel_h[idx + 2] = gz;
         }
     }
 
     m_kernel.resize(kernel_h.size());
-    m_bin_r.resize(m_nbins);
-    m_bin_z.resize(m_nbins);
+    m_rbin_of_i.resize(m_nr);
+    m_bin_rc.resize(m_nrbins);
+    m_bin_wz.resize(m_nrbins);
+    m_bin_nzb.resize(m_nrbins);
+    m_bin_col0.resize(m_nrbins);
+    m_bin_koff.resize(m_nrbins);
     m_src.resize(m_ncols);
     m_src_host.resize(m_ncols);
     m_psi.resize(nrows);
-    Gpu::copyAsync(Gpu::hostToDevice, kernel_h.begin(), kernel_h.end(), m_kernel.begin());
-    Gpu::copyAsync(Gpu::hostToDevice, bin_r_h.begin(), bin_r_h.end(), m_bin_r.begin());
-    Gpu::copyAsync(Gpu::hostToDevice, bin_z_h.begin(), bin_z_h.end(), m_bin_z.begin());
-    Gpu::streamSynchronize();
+    m_psi_host.resize(nrows);
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
+        kernel_h.begin(), kernel_h.end(), m_kernel.begin());
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
+        rbin_of_i_h.begin(), rbin_of_i_h.end(), m_rbin_of_i.begin());
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
+        bin_rc_h.begin(), bin_rc_h.end(), m_bin_rc.begin());
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
+        bin_wz_h.begin(), bin_wz_h.end(), m_bin_wz.begin());
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
+        bin_nzb_h.begin(), bin_nzb_h.end(), m_bin_nzb.begin());
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
+        bin_col0_h.begin(), bin_col0_h.end(), m_bin_col0.begin());
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
+        bin_koff_h.begin(), bin_koff_h.end(), m_bin_koff.begin());
+    amrex::Gpu::streamSynchronize();
 
     amrex::Print() << "GreensFunctionOpenBC: open (free-space) boundary active on r_hi;"
-                   << " kernel " << nrows << " x " << m_ncols
-                   << " (coarsening " << m_coarsening << ", "
+                   << " " << m_nrbins << " graded radial bins, " << m_nbins
+                   << " source bins, kernel " << kernel_size << " reals ("
+                   << static_cast<double>(kernel_size * sizeof(amrex::Real))
+                      / (1024.0 * 1024.0) << " MB,"
+                   << " interior coarsening " << m_coarsening << ", "
                    << (m_periodic_z ? "periodic" : "isolated") << " z)\n";
 
     m_defined = true;
@@ -265,15 +358,17 @@ void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& Bf
     const amrex::Real inv_dz = 1.0_rt / dz;
     const amrex::Real dA_over_mu0 = dr * dz / PhysConst::mu0;
     const int nr = m_nr;
-    const int coarsening = m_coarsening;
-    const int nbin_z = m_nbin_z;
-    const amrex::Real* const AMREX_RESTRICT bin_r = m_bin_r.data();
-    const amrex::Real* const AMREX_RESTRICT bin_z = m_bin_z.data();
+    const int* const AMREX_RESTRICT rbin_of_i = m_rbin_of_i.data();
+    const amrex::Real* const AMREX_RESTRICT bin_rc = m_bin_rc.data();
+    const int* const AMREX_RESTRICT bin_wz = m_bin_wz.data();
+    const int* const AMREX_RESTRICT bin_nzb = m_bin_nzb.data();
+    const int* const AMREX_RESTRICT bin_col0 = m_bin_col0.data();
+    const amrex::Long* const AMREX_RESTRICT bin_koff = m_bin_koff.data();
 
-    for (MFIter mfi(*Bfield[0]); mfi.isValid(); ++mfi) {
-        const Box vbx_cc = amrex::enclosedCells(mfi.validbox());
-        Array4<amrex::Real const> const& Br = Bfield[0]->const_array(mfi);
-        Array4<amrex::Real const> const& Bz = Bfield[2]->const_array(mfi);
+    for (amrex::MFIter mfi(*Bfield[0]); mfi.isValid(); ++mfi) {
+        const amrex::Box vbx_cc = amrex::enclosedCells(mfi.validbox());
+        amrex::Array4<amrex::Real const> const& Br = Bfield[0]->const_array(mfi);
+        amrex::Array4<amrex::Real const> const& Bz = Bfield[2]->const_array(mfi);
         // Each source node (i, j) is owned by the rank whose valid
         // cell-centered box contains cell (i, j); this counts every node
         // exactly once and drops the r_hi face node (i = m_nr) and, for
@@ -287,68 +382,112 @@ void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& Bf
                 const amrex::Real i_ring =
                     ((Br(i, j, 0) - Br(i, j - 1, 0)) * inv_dz
                      - (Bz(i, j, 0) - Bz(i - 1, j, 0)) * inv_dr) * dA_over_mu0;
-                const int b = (i / coarsening) * nbin_z + (j / coarsening);
+                const int b = rbin_of_i[i];
+                const int wz = bin_wz[b];
+                const int bj = j / wz;
+                const int c0 = 3 * (bin_col0[b] + bj);
+                // moments are taken about the bin's nominal expansion center
+                // (the same point the kernel's offset table assumes)
                 const amrex::Real rn = i * dr;
                 const amrex::Real zn = zmin + j * dz;
-                HostDevice::Atomic::Add(&src[3 * b + 0], i_ring);
-                HostDevice::Atomic::Add(&src[3 * b + 1], i_ring * (rn - bin_r[b]));
-                HostDevice::Atomic::Add(&src[3 * b + 2], i_ring * (zn - bin_z[b]));
+                const amrex::Real zc = zmin + (wz * bj + 0.5_rt * (wz - 1)) * dz;
+                amrex::HostDevice::Atomic::Add(&src[c0 + 0], i_ring);
+                amrex::HostDevice::Atomic::Add(&src[c0 + 1], i_ring * (rn - bin_rc[b]));
+                amrex::HostDevice::Atomic::Add(&src[c0 + 2], i_ring * (zn - zc));
             });
     }
 
     // ---- 2. Global reduction of the moments ----
-    Gpu::copyAsync(Gpu::deviceToHost, m_src.begin(), m_src.end(), m_src_host.begin());
-    Gpu::streamSynchronize();
-    ParallelDescriptor::ReduceRealSum(m_src_host.data(), m_ncols);
-    Gpu::copyAsync(Gpu::hostToDevice, m_src_host.begin(), m_src_host.end(), m_src.begin());
-    Gpu::streamSynchronize();
+    amrex::Gpu::copyAsync(amrex::Gpu::deviceToHost,
+        m_src.begin(), m_src.end(), m_src_host.begin());
+    amrex::Gpu::streamSynchronize();
+    amrex::ParallelDescriptor::ReduceRealSum(m_src_host.data(), m_ncols);
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
+        m_src_host.begin(), m_src_host.end(), m_src.begin());
+    amrex::Gpu::streamSynchronize();
 
     // ---- 3. GEMV: psi at the ghost psi-points ----
+    // The rows (psi points) are distributed over the MPI ranks -- the
+    // kernel tables are replicated but each row is computed by exactly one
+    // rank -- and the assembled psi vector (a few thousand reals) is then
+    // summed across ranks alongside the existing source reduction.
     const int nrows = m_psi_ni * m_psi_nj;
+    const int psi_nj = m_psi_nj;
+    const int nrbins = m_nrbins;
     const amrex::Real* const AMREX_RESTRICT kernel = m_kernel.data();
     amrex::Real* const AMREX_RESTRICT psi = m_psi.data();
-    amrex::ParallelFor(nrows, [=] AMREX_GPU_DEVICE (int row) {
+
+    const int nprocs = amrex::ParallelDescriptor::NProcs();
+    const int myproc = amrex::ParallelDescriptor::MyProc();
+    const int rows_per_rank = (nrows + nprocs - 1) / nprocs;
+    const int row0 = std::min(myproc * rows_per_rank, nrows);
+    const int nlocal = std::min(rows_per_rank, nrows - row0);
+
+    amrex::ParallelFor(nrows, [=] AMREX_GPU_DEVICE (int row) { psi[row] = 0.0_rt; });
+    amrex::ParallelFor(nlocal, [=] AMREX_GPU_DEVICE (int idx) {
+        const int row = row0 + idx;
+        const int ip = row / psi_nj;
+        const int jp = row % psi_nj;
         amrex::Real s = 0.0_rt;
-        const amrex::Real* const AMREX_RESTRICT krow =
-            kernel + static_cast<Long>(row) * ncols;
-        for (int c = 0; c < ncols; ++c) { s += krow[c] * src[c]; }
+        for (int b = 0; b < nrbins; ++b) {
+            const int wz = bin_wz[b];
+            const int nzb = bin_nzb[b];
+            const int L = psi_nj + wz * (nzb - 1);
+            const amrex::Real* const AMREX_RESTRICT blk =
+                kernel + bin_koff[b] + (static_cast<amrex::Long>(ip) * 3) * L;
+            const amrex::Real* const AMREX_RESTRICT sb = src + 3 * bin_col0[b];
+            for (int bj = 0; bj < nzb; ++bj) {
+                // offset-table index of (psi row jp, z bin bj)
+                const int oo = jp + wz * (nzb - 1 - bj);
+                s += blk[oo] * sb[3 * bj]
+                     + blk[L + oo] * sb[3 * bj + 1]
+                     + blk[2 * L + oo] * sb[3 * bj + 2];
+            }
+        }
         psi[row] = s;
     });
+
+    amrex::Gpu::copyAsync(amrex::Gpu::deviceToHost,
+        m_psi.begin(), m_psi.end(), m_psi_host.begin());
+    amrex::Gpu::streamSynchronize();
+    amrex::ParallelDescriptor::ReduceRealSum(m_psi_host.data(), nrows);
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
+        m_psi_host.begin(), m_psi_host.end(), m_psi.begin());
+    amrex::Gpu::streamSynchronize();
 
     // ---- 4. Fill the r_hi ghost values of B ----
     // psi table lookup (device pointer): nodal point (i, j) with
     // i in [m_nr, m_nr+m_ngr] maps to psi[(i - nr) * psi_nj + (j + ngz_psi)]
-    const int psi_nj = m_psi_nj;
     const int ngz_psi = m_ngz;
     const int nz = m_nz;
     const bool periodic_z = m_periodic_z;
 
-    for (MFIter mfi(*Bfield[0]); mfi.isValid(); ++mfi) {
-        const Box vbx_cc = amrex::enclosedCells(mfi.validbox());
+    for (amrex::MFIter mfi(*Bfield[0]); mfi.isValid(); ++mfi) {
+        const amrex::Box vbx_cc = amrex::enclosedCells(mfi.validbox());
         if (vbx_cc.bigEnd(0) != nr - 1) { continue; }   // not on the r_hi face
 
-        Array4<amrex::Real> const& Br = Bfield[0]->array(mfi);
-        Array4<amrex::Real> const& Bt = Bfield[1]->array(mfi);
-        Array4<amrex::Real> const& Bz = Bfield[2]->array(mfi);
+        amrex::Array4<amrex::Real> const& Br = Bfield[0]->array(mfi);
+        amrex::Array4<amrex::Real> const& Bt = Bfield[1]->array(mfi);
+        amrex::Array4<amrex::Real> const& Bz = Bfield[2]->array(mfi);
 
-        const IntVect ngv_r = Bfield[0]->nGrowVect();
-        const IntVect ngv_t = Bfield[1]->nGrowVect();
-        const IntVect ngv_z = Bfield[2]->nGrowVect();
+        const amrex::IntVect ngv_r = Bfield[0]->nGrowVect();
+        const amrex::IntVect ngv_t = Bfield[1]->nGrowVect();
+        const amrex::IntVect ngv_z = Bfield[2]->nGrowVect();
 
         const int jlo_cc = vbx_cc.smallEnd(1);
         const int jhi_cc = vbx_cc.bigEnd(1);
 
         // Br (nodal r, cc z): ghost nodes i in [m_nr+1, m_nr+ngr],
         // Br = -(1/r_i) (psi(i,j+1) - psi(i,j)) / dz
-        const Box br_bx(IntVect(nr + 1, jlo_cc - ngv_r[1]),
-                        IntVect(nr + ngv_r[0], jhi_cc + ngv_r[1]));
+        const amrex::Box br_bx(amrex::IntVect(nr + 1, jlo_cc - ngv_r[1]),
+                               amrex::IntVect(nr + ngv_r[0], jhi_cc + ngv_r[1]));
         // Bz (cc r, nodal z): ghost cells i in [m_nr, m_nr+ngr-1],
         // Bz = (psi(i+1,j) - psi(i,j)) / (r_{i+1/2} dr)
-        const Box bz_bx(IntVect(nr, jlo_cc - ngv_z[1]),
-                        IntVect(nr + ngv_z[0] - 1, jhi_cc + ngv_z[1] + 1));
+        const amrex::Box bz_bx(amrex::IntVect(nr, jlo_cc - ngv_z[1]),
+                               amrex::IntVect(nr + ngv_z[0] - 1, jhi_cc + ngv_z[1] + 1));
         // Btheta (cc r, cc z): Ampere continuation r_c Btheta = const
-        const Box bt_bx(IntVect(nr, jlo_cc - ngv_t[1]),
-                        IntVect(nr + ngv_t[0] - 1, jhi_cc + ngv_t[1]));
+        const amrex::Box bt_bx(amrex::IntVect(nr, jlo_cc - ngv_t[1]),
+                               amrex::IntVect(nr + ngv_t[0] - 1, jhi_cc + ngv_t[1]));
 
         amrex::ParallelFor(br_bx, bz_bx, bt_bx,
             [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) {
