@@ -31,7 +31,8 @@ STEP = 10
 
 
 def read_vismf(prefix):
-    hdr = open(prefix + "_H").read().split("\n")
+    with open(prefix + "_H") as header_file:
+        hdr = header_file.read().split("\n")
     nfabs = int(hdr[4].split()[0].lstrip("("))
     fod = [line for line in hdr if line.startswith("FabOnDisk:")]
     fabs = []
