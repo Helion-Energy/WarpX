@@ -1006,6 +1006,14 @@ Domain Boundary Conditions
     * ``neumann``: For the electrostatic multigrid solver, a Neumann boundary condition (with gradient of the potential equal to 0) will be applied on the specified boundary.
 
     * ``open``: For the electrostatic Poisson solver based on a Integrated Green Function method.
+      In RZ geometry with the hybrid-PIC solver (:pp:param:`algo.maxwell_solver = hybrid`), ``open`` on the upper radial face
+      selects a free-space (Green's-function) boundary for the B-field advance: the radial ghost values of B are filled with
+      the free-space field of the interior sources through the axisymmetric ring-current Green's function (poloidal
+      components, differenced from the flux function so the ghost field is discretely divergence-free) and Ampere's law
+      (toroidal component), so the boundary carries no image currents. Supported for m = 0 only, on the r_hi face only.
+      Optional controls: ``boundary.open_bc_coarsening`` (linear source-binning factor of the precomputed kernel, default
+      ``4``), ``boundary.open_bc_image_sum_rtol`` (relative tolerance of the periodic-z image sum at kernel assembly,
+      default ``1e-6``), ``boundary.open_bc_max_images`` (cap on image pairs, default ``200``).
 
 .. pp:param:: boundary.potential_lo/hi_x/y/z
     :link_aliases:
