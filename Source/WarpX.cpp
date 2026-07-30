@@ -12,6 +12,7 @@
 #include "WarpX.H"
 
 #include "BoundaryConditions/FieldBoundaries.H"
+#include "BoundaryConditions/GreensFunctionOpenBC.H"
 #include "BoundaryConditions/PEC_Insulator.H"
 #include "BoundaryConditions/PML.H"
 #include "Diagnostics/MultiDiagnostics.H"
@@ -750,9 +751,25 @@ WarpX::ReadParameters ()
             std::any_of(field_boundary_hi.begin(), field_boundary_hi.end(), [](auto fb){return (fb == FieldBoundaryType::Open ); }) ;
 
         if(is_any_boundary_open){
+            // In RZ geometry with the hybrid-PIC solver, `open` on the r_hi
+            // face selects the Green's-function free-space boundary for the
+            // B-field advance (see BoundaryConditions/GreensFunctionOpenBC).
+#if defined(WARPX_DIM_RZ)
+            const bool open_bc_greens_rz =
+                (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) &&
+                (field_boundary_hi[0] == FieldBoundaryType::Open) &&
+                (field_boundary_lo[0] != FieldBoundaryType::Open) &&
+                (field_boundary_lo[1] != FieldBoundaryType::Open) &&
+                (field_boundary_hi[1] != FieldBoundaryType::Open);
+#else
+            const bool open_bc_greens_rz = false;
+#endif
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                poisson_solver_id == PoissonSolverAlgo::IntegratedGreenFunction,
-                "Field open boundary conditions are only implemented for the FFT-based Poisson solver");
+                poisson_solver_id == PoissonSolverAlgo::IntegratedGreenFunction ||
+                open_bc_greens_rz,
+                "Field open boundary conditions are only implemented for the FFT-based "
+                "Poisson solver, or (in RZ geometry with the hybrid-PIC solver) on the "
+                "r_hi face where they select the Green's-function free-space boundary");
         }
 
 
