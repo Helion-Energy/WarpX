@@ -286,6 +286,20 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     // the QDSMC markers.
     if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
         m_hybrid_pic_model->QDSMCFinishImplicitStep(m_dt, m_theta);
+    } else if (!m_darwin) {
+        // Closure path: re-evaluate Pe^{n+1} (and the diagnostic T_e
+        // mirror) from a true end-of-step density deposit. The in-solve
+        // closure evaluations consumed midpoint-position deposits, so
+        // without this the dumped Pe/Te lag the ion state by half a step
+        // -- a first-order error in Te-based convergence metrics on a
+        // scheme whose dynamics are second order. The energy-equation
+        // branch above already ends with an equivalent end-of-step
+        // recovery inside QDSMCFinishImplicitStep. Skipped under darwin:
+        // the entry E_L^n solve consumes the as-left Pe together with the
+        // as-left rho_fp, and re-labeling only one of that pair (or both)
+        // changes validated darwin evolution -- the entry-state
+        // time-labeling there is a separate, jointly-decided item.
+        m_hybrid_pic_model->CalculateElectronPressureAtStepEnd();
     }
 
     // Refresh the per-species temperature deposits from the end-of-step

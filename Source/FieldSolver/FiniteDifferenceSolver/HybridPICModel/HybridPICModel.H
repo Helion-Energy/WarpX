@@ -193,9 +193,26 @@ public:
      * \brief
      * Function to calculate the electron pressure using the simulation charge
      * density. Used in the Ohm's law solver (kinetic-fluid hybrid model).
+     * The two-argument overload evaluates the closure against an explicitly
+     * provided charge density instead of rho_fp.
      */
     void CalculateElectronPressure () const;
     void CalculateElectronPressure (int lev) const;
+    void CalculateElectronPressure (int lev, amrex::MultiFab const& rho) const;
+
+    /**
+     * \brief Re-evaluate the algebraic-closure electron pressure (and the
+     * diagnostic electron-temperature mirror) from a fresh end-of-step
+     * charge-density deposit. Only meaningful under the theta-implicit
+     * scheme, where every in-solve closure evaluation consumes
+     * midpoint-position deposits: without this refresh the dumped Pe/Te
+     * carry a half-step-stale density label, a first-order error in any
+     * Te-based convergence metric even though the field/ion dynamics are
+     * second order. Deposits from the as-left (un-redistributed) step-end
+     * particle state so the particle ordering -- and with it the bit-level
+     * trajectory of the run -- is untouched; see the implementation note.
+     */
+    void CalculateElectronPressureAtStepEnd () const;
 
     /**
      * \brief Compute the electron fluid velocity V_e on the grid from the
