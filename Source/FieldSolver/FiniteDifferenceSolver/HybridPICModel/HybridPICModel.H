@@ -698,6 +698,13 @@ public:
      *  seeding uses the two-point form (a seeded-equal history would
      *  overweight a driven first step by 1.5x under BDF2). */
     int m_inertia_history_levels = 0;
+    /** Per-step latch for the frozen rho^n capture (see
+     *  "hybrid_rho_n_frozen" in ComputeElectronInertiaNodal): set on the
+     *  first non-Jacobian evaluation of each step -- the only evaluation
+     *  whose rho_fp component 0 is a true step-start-position deposit --
+     *  and cleared by RotateElectronInertiaHistory at the end of the
+     *  step, alongside the equally per-step-frozen Je histories. */
+    bool m_inertia_rho_n_captured = false;
 
     /** Assemble E_inertial on the nodal scratch "hybrid_E_inertial_nodal"
      *  from the current theta-stage state (see m_include_electron_inertia).
