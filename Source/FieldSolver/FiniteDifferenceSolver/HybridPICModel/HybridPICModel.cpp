@@ -442,6 +442,15 @@ void HybridPICModel::AllocateLevelMFs (
             lev, amrex::convert(ba, nd), dm, 3, ng1, 0.0_rt);
         fields.alloc_init("hybrid_Je_theta_nodal",
             lev, amrex::convert(ba, nd), dm, 3, ng1, 0.0_rt);
+        // Step-start density frozen for the drho/dt leg: during the
+        // nonlinear iteration rho_fp component 0 is a midpoint-position
+        // deposit (only the first evaluation of a step sees rho(x^n)
+        // there), so the rate term needs its own per-step-frozen copy --
+        // captured in ComputeElectronInertiaNodal on the same deposit
+        // family the midpoint component comes from. One mode: the inertia
+        // term asserts m = 0 in RZ.
+        fields.alloc_init("hybrid_rho_n_frozen",
+            lev, amrex::convert(ba, rho_nodal_flag), dm, 1, ngRho, 0.0_rt);
     }
 
     // The "hybrid_rho_fp_temp" multifab is used to store the ion charge density
@@ -2134,6 +2143,25 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
     const int rho_mid_comp = rho.nComp() / 2;
     amrex::Real const rho_floor = PhysConst::q_e * m_n_floor;
 
+    // Freeze rho(x^n) for the drho/dt leg on the first non-Jacobian
+    // evaluation of the step: rho_fp component 0 is a PRE-push deposit, so
+    // only that evaluation sees the true step-start density there -- from
+    // the second evaluation on it holds the previous evaluation's midpoint
+    // positions, and differencing the midpoint component against it drives
+    // drho/dt toward zero at convergence (and makes it probe-order noise
+    // in finite-difference Jacobian evaluations). Same per-step freeze
+    // discipline as the Je histories; same deposit family as the midpoint
+    // component it is differenced against. Cleared by
+    // RotateElectronInertiaHistory.
+    amrex::MultiFab & rho_n_frozen =
+        *warpx.m_fields.get("hybrid_rho_n_frozen", lev);
+    if (!a_from_jacobian && !m_inertia_rho_n_captured) {
+        amrex::MultiFab::Copy(rho_n_frozen, rho, 0, 0, 1,
+                              amrex::min(rho_n_frozen.nGrowVect(),
+                                         rho.nGrowVect()));
+        m_inertia_rho_n_captured = true;
+    }
+
     ablastr::fields::VectorField Jp =
         warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
     ablastr::fields::VectorField Ji =
@@ -2263,13 +2291,14 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
         auto const & jen    = Je_n.const_array(mfi);
         auto const & jenm1  = Je_nm1.const_array(mfi);
         auto const & rhoa   = rho.const_array(mfi);
+        auto const & rhona  = rho_n_frozen.const_array(mfi);
         const int mid = rho_mid_comp;
         auto const dlo = amrex::lbound(dom_nd);
         auto const dhi = amrex::ubound(dom_nd);
         amrex::ParallelFor(mfi.tilebox(),
         [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
-            amrex::Real const rho_n   = rhoa(i, j, k, 0);
+            amrex::Real const rho_n   = rhona(i, j, k, 0);
             amrex::Real const rho_mid = rhoa(i, j, k, mid);
             // True vacuum carries no electron fluid: zero the term there
             // (density-floored cells keep their inertia).
@@ -2415,6 +2444,9 @@ void HybridPICModel::RotateElectronInertiaHistory (amrex::Real a_theta)
         1.0_rt / a_theta, Je_th, 0,
         1.0_rt - 1.0_rt / a_theta, Je_nm1, 0,
         0, 3, Je_n.nGrowVect());
+    // Re-arm the step-start density capture for the next step's first
+    // evaluation (see ComputeElectronInertiaNodal).
+    m_inertia_rho_n_captured = false;
 #endif
 }
 
