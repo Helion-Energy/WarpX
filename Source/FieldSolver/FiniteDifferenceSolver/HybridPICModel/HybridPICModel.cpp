@@ -909,16 +909,27 @@ void HybridPICModel::CalculateElectronPressure() const
 
 void HybridPICModel::CalculateElectronPressure(const int lev) const
 {
+    auto& warpx = WarpX::GetInstance();
+    CalculateElectronPressure(
+        lev, *warpx.m_fields.get(FieldType::rho_fp, lev));
+}
+
+void HybridPICModel::CalculateElectronPressure(const int lev,
+                                               amrex::MultiFab const& rho_mf) const
+{
     ABLASTR_PROFILE("WarpX::CalculateElectronPressure()");
 
     auto& warpx = WarpX::GetInstance();
     ablastr::fields::ScalarField electron_pressure_fp = warpx.m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
-    ablastr::fields::ScalarField rho_fp = warpx.m_fields.get(FieldType::rho_fp, lev);
 
-    // Calculate the electron pressure using rho^{n+1}.
+    // Calculate the electron pressure from component 0 of the given density
+    // (the current time level on the explicit path; under the theta-implicit
+    // scheme the in-solve evaluations see midpoint-position deposits, and
+    // CalculateElectronPressureAtStepEnd re-evaluates with a true
+    // end-of-step deposit after the solve).
     FillElectronPressureMF(
         *electron_pressure_fp,
-        *rho_fp
+        rho_mf
     );
     warpx.ApplyElectronPressureBoundary(lev, PatchType::fine);
 
@@ -933,7 +944,7 @@ void HybridPICModel::CalculateElectronPressure(const int lev) const
     if (!m_solve_electron_energy_equation) {
         amrex::MultiFab       & Te  = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
         amrex::MultiFab const & Pe  = *electron_pressure_fp;
-        amrex::MultiFab const & rho = *rho_fp;
+        amrex::MultiFab const & rho = rho_mf;
         auto const rho_floor = PhysConst::q_e * m_n_floor;
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -958,6 +969,56 @@ void HybridPICModel::CalculateElectronPressure(const int lev) const
         WarpX::do_single_precision_comms,
         warpx.Geom(lev).periodicity(),
         true);
+}
+
+void HybridPICModel::CalculateElectronPressureAtStepEnd () const
+{
+    ABLASTR_PROFILE("HybridPICModel::CalculateElectronPressureAtStepEnd()");
+
+    auto& warpx = WarpX::GetInstance();
+
+    // True end-of-step charge density for the closure evaluation: during the
+    // nonlinear iteration the rho_fp components hold midpoint-position
+    // deposits (the correct theta-level density for the residual), and
+    // nothing after the solve re-evaluates the closure, so the dumped Pe/Te
+    // -- and the values the next step's pre-solve consumers see (the
+    // resistive-drag collision operator's T_e) -- would otherwise lag the
+    // ion state by half a step. That label error is invisible in the
+    // dynamics but first order in every Te-based convergence metric
+    // (closure-ladder measurement: Te order ~1.0 vs rho ~2.0).
+    //
+    // Deposit through the MultiParticleContainer path into the
+    // (implicit-path-idle) hybrid_rho_fp_temp fab, then fold the guards,
+    // reflect at the walls and fill ghosts -- the same treatment the main
+    // loop gives rho_fp. rho_fp itself is deliberately left untouched: the
+    // Darwin entry block reads its component 0 (and the as-left Pe) for the
+    // E_L^n solve, and re-labeling that input is a separate decision.
+    //
+    // Deliberately NO Redistribute before this deposit, unlike the
+    // QDSMCFinishImplicitStep end recovery: redistributing here reorders
+    // the particles ahead of the next step's deposits, and the last-bit
+    // float reassociation that follows grows chaotically -- measured as a
+    // ~1e-3 trajectory shift over the 50-step RZ em-modes test, breaking
+    // bit comparability of every closure-path implicit run (and the pinned
+    // regression data) for what is a diagnostics-only fix. The step-end
+    // extrapolated positions deposit from their home tiles through the
+    // guard cells, which the SumBoundary below folds back home -- the same
+    // posture as the per-species temperature deposits that already run
+    // un-redistributed at this point in the step. (Pathological one-step
+    // guard-range crossers are a documented pre-existing hazard of that
+    // posture; test decks use inert heavy ions to avoid it.)
+    auto rho_end_levels = warpx.m_fields.get_mr_levels(
+        FieldType::hybrid_rho_fp_temp, warpx.finestLevel());
+    warpx.GetPartContainer().DepositCharge(rho_end_levels, 0.0_rt);
+    for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+        amrex::MultiFab & rho_end_mf = *rho_end_levels[lev];
+        ablastr::utils::communication::SumBoundary(
+            rho_end_mf, 0, rho_end_mf.nComp(), rho_end_mf.nGrowVect(), rho_end_mf.nGrowVect(),
+            WarpX::do_single_precision_comms, warpx.Geom(lev).periodicity());
+        warpx.ApplyRhofieldBoundary(lev, &rho_end_mf, PatchType::fine);
+        rho_end_mf.FillBoundary(warpx.Geom(lev).periodicity());
+        CalculateElectronPressure(lev, rho_end_mf);
+    }
 }
 
 void HybridPICModel::CalculateElectronFluidVelocity () const
@@ -4226,7 +4287,13 @@ void HybridPICModel::AdvanceElectronEnergyQDSMCTheta (amrex::Real const dt,
             // carries a one-sided deposition-shape bias, O(dt^2) per step,
             // that contaminates the scheme with a global O(dt) error.)
             //
-            // Step 3a: markers to the temporal midpoint of the characteristic
+            // Step 3a: markers to the temporal midpoint of the characteristic.
+            // (The half-push samples V_e at the home position; a quarter-point
+            // V_e resample -- one implicit-midpoint iteration for the
+            // half-characteristic -- was tested in the 2026-07-30 order study
+            // and changed the solution by only ~3e-9 relative: the
+            // displacement-sampling error is NOT the coherent O(dt) term on
+            // the adiabat deck. See NOTES-theta-offset.md.)
             m_qdsmc_pc->PushX(lev, dt, 0.5_rt);
 
             // Step 4a: midpoint scatter and recovery: T_e^{n+1/2} from the
