@@ -33,6 +33,17 @@ add_warpx_test(
 label_warpx_test(test_1d_ohm_solver_em_modes_implicit_inertia_picmi slow)
 
 add_warpx_test(
+    test_1d_ohm_solver_em_modes_implicit_inertia_mm_picmi  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_ohm_solver_em_modes_implicit_picmi.py --test --dim 1 --bdir z --inertia-seeded --mass-matrices"  # inputs
+    "analysis_inertia.py"  # analysis
+    "analysis_default_regression.py --path diags/field_diag000100 --rtol 2e-4"  # checksum
+    OFF  # dependency
+)
+label_warpx_test(test_1d_ohm_solver_em_modes_implicit_inertia_mm_picmi slow)
+
+add_warpx_test(
     test_rz_ohm_solver_em_modes_implicit_picmi  # name
     RZ  # dims
     2  # nprocs
