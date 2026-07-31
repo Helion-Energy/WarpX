@@ -2165,7 +2165,6 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
         && (m_inertia_history_levels >= 2);
     amrex::Real const inv_th = 1.0_rt / a_theta;
     amrex::Real const inv_dt = 1.0_rt / a_dt;
-    amrex::Real const inv_thdt = 1.0_rt / (a_theta * a_dt);
     // Three-point (second-order) time-derivative stencil for dJe/dt,
     // centered at the theta stage where Ohm's law is imposed: the
     // quadratic through {Je^{n-1}, Je^n, Je^{n+1}} differentiated at
@@ -2220,7 +2219,11 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
                 return;
             }
             amrex::Real const rho_lim = amrex::max(rho_mid, rho_floor);
-            amrex::Real const drhodt = (rho_mid - rho_n) * inv_thdt;
+            // rho_mid is the MIDPOINT deposit for every theta (the implicit
+            // particle push advances positions by dt/2), so the rate is the
+            // half-step difference quotient -- dividing by theta*dt instead
+            // is correct only at theta = 1/2.
+            amrex::Real const drhodt = (rho_mid - rho_n) * (2.0_rt * inv_dt);
 
             // Central differences of u = Je/rho at nodes (one-sided at
             // non-periodic edges); rho ghosts follow the deposit exchange.
@@ -3968,15 +3971,27 @@ void HybridPICModel::QDSMCFillElectronPressureTheta (int const lev, amrex::Real 
         int const c_half = rho.nComp()/2;  // second time level (mode 0)
         amrex::ParallelFor(tbox, [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
-            // rho^{n+theta} extrapolated from rho^n (saved at step start in
-            // hybrid_rho_fp_temp) and rho^{n+1/2} (the current-iterate
-            // midpoint deposit in the second time-level component):
-            //   rho^{n+theta} = (1-2 theta) rho^n + 2 theta rho^{n+1/2}.
-            amrex::Real const rho_theta = (1.0_rt - 2.0_rt*th) * rho_old_arr(i,j,k)
-                                        +           2.0_rt*th  * rho_arr(i,j,k,c_half);
-            amrex::Real const rho_val = std::max(rho_theta, rho_floor);
+            // Density: the raw midpoint deposit (second time-level
+            // component), NOT a time extrapolation toward n+theta.
+            // Extrapolating between the step-start and midpoint DEPOSITS,
+            //   (1-2 theta) rho^n + 2 theta rho^{n+1/2},
+            // amplifies the step-alternating (deposit-noise) component of
+            // their difference by (2 theta - 1) and rectifies it through
+            // Pe into the slow dynamics: a dt-INDEPENDENT spurious response
+            // ~ 13% x (theta - 1/2) of the compression amplitude on the
+            // adiabat deck (6.5e-3 at theta = 1; the 2026-07-16 order-study
+            // offset). Ratio/geometric extrapolation does not help (the
+            // alternating component still extrapolates). Deposits are
+            // consumed raw -- the same rule the RZ deposit conventions and
+            // the QDSMC recovery already follow; the O((theta-1/2) dt)
+            // label error this leaves in Pe is subdominant to the
+            // theta > 1/2 path's own first-order time biasing.
+            amrex::Real const rho_val =
+                std::max(rho_arr(i,j,k,c_half), rho_floor);
+            amrex::ignore_unused(rho_old_arr);
             amrex::Real const ne      = rho_val / PhysConst::q_e;
-            amrex::Real const Te_th   = (1.0_rt - th) * Te_old_arr(i,j,k) + th * Te_arr(i,j,k);
+            amrex::Real const Te_th   = (1.0_rt - th) * Te_old_arr(i,j,k)
+                                      + th * Te_arr(i,j,k);
             Pe_arr(i,j,k) = ne * PhysConst::kb * Te_th;
         });
     }
