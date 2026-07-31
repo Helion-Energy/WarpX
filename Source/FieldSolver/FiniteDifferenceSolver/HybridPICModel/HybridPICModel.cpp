@@ -100,11 +100,11 @@ void HybridPICModel::ReadParameters ()
                     m_solve_electron_energy_equation);
     m_qdsmc_n_floor = m_n_floor;
     pp_hybrid.query("qdsmc_n_floor", m_qdsmc_n_floor);
-#if defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+#if defined(WARPX_DIM_RSPHERE)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !m_solve_electron_energy_equation,
         "hybrid_pic_model.solve_electron_energy_equation is not supported in "
-        "RCYLINDER/RSPHERE geometries yet.");
+        "RSPHERE geometry yet.");
 #endif
 
     // Resistive electron-heating source (Phys. Plasmas 31, 012902 (2024), Eq. 12):
