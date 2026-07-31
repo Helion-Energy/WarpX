@@ -60,7 +60,7 @@ class EMModes(object):
     substeps = 40
 
     def __init__(self, test, dim, B_dir, verbose, darwin=False,
-                 inertia=False, inertia_seeded=False):
+                 inertia=False, inertia_seeded=False, mass_matrices=False):
         """Get input parameters for the specific case desired."""
         self.test = test
         self.dim = int(dim)
@@ -69,6 +69,7 @@ class EMModes(object):
         self.darwin = darwin
         self.inertia_seeded = inertia_seeded
         self.inertia = inertia or inertia_seeded
+        self.mass_matrices = mass_matrices
         assert not (self.inertia_seeded and B_dir != "z"), (
             "--inertia-seeded seeds a transverse mode on the Bz guide "
             "field and requires --bdir z"
@@ -270,12 +271,16 @@ class EMModes(object):
         # term adds an unpreconditioned (2 theta + 1)/2 * (k d_e)^2 curl-curl
         # block to the Jacobian; with the seeded coherent whistler the
         # default Krylov budget under-converges and Newton loses its basin,
-        # so the dispersion variant carries a matched restart length (with
-        # the backtracking line search below it converges in ~3 iterations).
+        # so the FD-JVP dispersion variant carries a matched restart length
+        # (with the backtracking line search below it converges in ~3
+        # iterations). With the exact mass-matrix Jacobian and the Jacobi
+        # preconditioner the default budget suffices (2-iteration Newton),
+        # which is exactly what the mass-matrices variant exercises.
+        boost_gmres = self.inertia_seeded and not self.mass_matrices
         gmres_solver = picmi.GMRESLinearSolver(
             verbose_int=1,
-            max_iterations=400 if self.inertia_seeded else 100,
-            restart_length=200 if self.inertia_seeded else None,
+            max_iterations=400 if boost_gmres else 100,
+            restart_length=200 if boost_gmres else None,
             relative_tolerance=1.0e-4,
             absolute_tolerance=0.0,
         )
@@ -290,6 +295,16 @@ class EMModes(object):
             linear_solver=gmres_solver,
             max_particle_iterations=21,
             particle_tolerance=1.0e-10,
+            use_mass_matrices_jacobian=True if self.mass_matrices else None,
+            use_mass_matrices_pc=True if self.mass_matrices else None,
+            pc_type=picmi.JacobiPreconditioner(
+                verbose=False,
+                max_iter=200,
+                relative_tolerance=1.0e-4,
+                absolute_tolerance=0.0,
+            )
+            if self.mass_matrices
+            else None,
         )
         if self.inertia_seeded:
             import pywarpx
@@ -468,6 +483,12 @@ parser.add_argument(
     "whistler mode at k*d_e ~ 1, per-step dumps (implies --inertia)",
     action="store_true",
 )
+parser.add_argument(
+    "--mass-matrices",
+    help="use the exact mass-matrix Jacobian and the Jacobi "
+    "preconditioner in the Newton solve (implicit only)",
+    action="store_true",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
@@ -479,5 +500,6 @@ run = EMModes(
     darwin=args.darwin,
     inertia=args.inertia,
     inertia_seeded=args.inertia_seeded,
+    mass_matrices=args.mass_matrices,
 )
 simulation.step()
