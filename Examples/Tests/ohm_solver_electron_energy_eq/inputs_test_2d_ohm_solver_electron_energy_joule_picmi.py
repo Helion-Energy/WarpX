@@ -69,9 +69,18 @@ class ForceFreeJoule(object):
     DIAG_EVERY = 150  # diagnostic cadence (steps)
     substeps = 20
 
-    def __init__(self, test, verbose, eta_scale, implicit=False, nlsolver="picard"):
+    def __init__(
+        self,
+        test,
+        verbose,
+        eta_scale,
+        implicit=False,
+        nlsolver="picard",
+        segregated=False,
+    ):
         self.implicit = implicit
         self.nlsolver = nlsolver
+        self.segregated = segregated
         self.test = test
         self.verbose = verbose or test
         self.eta_scale = eta_scale
@@ -233,9 +242,17 @@ class ForceFreeJoule(object):
                     max_particle_iterations=21,
                     particle_tolerance=1.0e-12,
                 )
+            scheme_kwargs = {}
+            if self.segregated:
+                # Segregated midpoint-iterated solve: the QDSMC stage runs
+                # once per outer iteration against inner-converged fields
+                # instead of inside every residual evaluation.
+                scheme_kwargs["qdsmc_segregated_solve"] = 1
+                scheme_kwargs["qdsmc_outer_verbose"] = int(self.verbose)
             simulation.evolve_scheme = picmi.ThetaImplicitHybridEvolveScheme(
                 theta=0.5,
                 nonlinear_solver=nonlinear_solver,
+                **scheme_kwargs,
             )
 
         B_init = picmi.LoadInitialFieldFromPython(
@@ -336,6 +353,11 @@ parser.add_argument(
     choices=["newton", "picard"],
     default="picard",
 )
+parser.add_argument(
+    "--segregated",
+    action="store_true",
+    help="segregated midpoint-iterated solve for the QDSMC stage (implicit only)",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
@@ -345,5 +367,6 @@ run = ForceFreeJoule(
     eta_scale=args.eta_scale,
     implicit=args.implicit,
     nlsolver=args.nlsolver,
+    segregated=args.segregated,
 )
 simulation.step()

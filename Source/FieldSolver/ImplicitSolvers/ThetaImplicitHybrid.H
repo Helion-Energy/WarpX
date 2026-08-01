@@ -162,6 +162,37 @@ private:
      *  and a resistive term configured). */
     bool m_use_resistive_push_correction = false;
 
+    /** Segregated midpoint-iterated solve for the QDSMC electron-energy
+     *  stage (implicit_evolve.qdsmc_segregated_solve): the stage is lifted
+     *  out of the residual evaluations -- the inner nonlinear solver
+     *  converges the field system at frozen electron pressure, then one
+     *  re-entrant stage pass re-solves the midpoint entropy transport
+     *  against the converged fields, and the outer loop in OneStep iterates
+     *  the pair to joint self-consistency (convergence measured on the
+     *  relative change of the emitted pressure). Keeps the marker
+     *  gather/push/deposit chain out of Jacobian-vector products and
+     *  line-search trials; the coupled fixed point is unchanged. */
+    bool m_qdsmc_segregated_solve = false;
+    int m_qdsmc_outer_max_iterations = 20;
+    amrex::Real m_qdsmc_outer_relative_tolerance = 1.0e-6;
+    bool m_qdsmc_outer_require_convergence = true;
+    bool m_qdsmc_outer_verbose = false;
+
+    /** Previous outer iterate of the emitted electron pressure, for the
+     *  outer convergence test (allocated on first use). */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_qdsmc_Pe_prev;
+
+    /** Outer loop of the segregated solve: alternate {inner nonlinear solve
+     *  at frozen Pe, one stage pass on the as-left converged grid state}
+     *  until the emitted pressure stops changing. Ends on the stage pass so
+     *  the markers and V_e are consistent with the accepted field state
+     *  (QDSMCFinishImplicitStep completes the characteristic unchanged).
+     *
+     *  \return the inner solver's exit status, or -7 if the outer loop
+     *          reached qdsmc_outer_max_iterations with
+     *          qdsmc_outer_require_convergence set. */
+    int SolveSegregated ( amrex::Real start_time, int a_step );
+
     /** Darwin magnetic-field update: A^{n+theta} = A_old - theta dt E_T
      *  (from Efield_fp, which holds the transverse state at entry),
      *  then B = B_static + curl A with boundary treatment. */

@@ -3737,11 +3737,57 @@ Maxwell solver: kinetic-fluid hybrid
     Also supported with ``algo.evolve_scheme = theta_implicit_hybrid``, where the QDSMC stage runs
     theta-centered inside every nonlinear residual evaluation (midpoint electron velocity and a
     second-order midpoint characteristic push for the entropy markers) and the electron temperature is
-    converged together with the electric field by nonlinear elimination. The Picard nonlinear solver is
-    recommended for this configuration. The stochastic ion-heating realization of the electron-ion
-    energy exchange is applied once per step after the nonlinear solve. The Te-threshold Joule redirect
-    (:pp:param:`hybrid_pic_model.redirect_joule_to_ions`) and per-species resistivities are not yet
-    supported with the implicit scheme.
+    converged together with the electric field by nonlinear elimination (or through the segregated
+    outer iteration, see :pp:param:`implicit_evolve.qdsmc_segregated_solve`). The Picard nonlinear
+    solver is recommended for this configuration. The stochastic ion-heating realization of the
+    electron-ion energy exchange is applied once per step after the nonlinear solve. The Te-threshold
+    Joule redirect (:pp:param:`hybrid_pic_model.redirect_joule_to_ions`) and per-species resistivities
+    are not yet supported with the implicit scheme.
+
+.. pp:param:: implicit_evolve.qdsmc_segregated_solve
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If ``algo.evolve_scheme = theta_implicit_hybrid`` and
+    :pp:param:`hybrid_pic_model.solve_electron_energy_equation` is on, solve the coupled field/electron-energy
+    system in segregated midpoint-iterated form: the nonlinear solver converges the field system with the
+    electron pressure frozen, then one re-entrant QDSMC stage pass re-solves the midpoint entropy transport
+    against the converged fields, and an outer loop iterates the pair to joint self-consistency (measured on
+    the relative change of the emitted electron pressure between outer iterations). The converged coupled
+    state is the same as the default (monolithic) form up to the solver tolerances; the segregated form keeps
+    the marker gather/push/deposit chain out of Jacobian-vector products, line-search trials, and Picard
+    sweeps of the field solve.
+
+.. pp:param:: implicit_evolve.qdsmc_outer_max_iterations
+    :type: ``integer``
+    :default: ``20``
+    :optional:
+
+    Maximum number of outer (stage/field) iterations of the segregated solve.
+
+.. pp:param:: implicit_evolve.qdsmc_outer_relative_tolerance
+    :type: ``float``
+    :default: ``1.e-6``
+    :optional:
+
+    Outer convergence tolerance of the segregated solve: the relative :math:`L_2` change of the emitted
+    electron pressure between consecutive outer iterations.
+
+.. pp:param:: implicit_evolve.qdsmc_outer_require_convergence
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    Whether a segregated outer loop that reaches :pp:param:`implicit_evolve.qdsmc_outer_max_iterations`
+    without satisfying the tolerance is a fatal error (mirrors ``newton.require_convergence``).
+
+.. pp:param:: implicit_evolve.qdsmc_outer_verbose
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Print the per-step outer-iteration history (relative pressure change) of the segregated solve.
 
 .. pp:param:: hybrid_pic_model.qdsmc_n_floor
     :type: ``float``
