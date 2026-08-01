@@ -12,6 +12,16 @@ add_warpx_test(
 )
 
 add_warpx_test(
+    test_2d_ohm_solver_electron_energy_adiabat_implicit_segregated_picmi  # name
+    2  # dims
+    2  # nprocs
+    "inputs_test_2d_ohm_solver_electron_energy_adiabat_picmi.py --test --implicit --nlsolver picard --segregated"  # inputs
+    "analysis_adiabat.py --tol-median 0.01 --tol-max 0.05"  # analysis
+    "analysis_default_regression.py --path diags/field_diags"  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
     test_2d_ohm_solver_electron_energy_adiabat_picmi  # name
     2  # dims
     2  # nprocs
@@ -46,6 +56,16 @@ add_warpx_test(
     2  # dims
     2  # nprocs
     "inputs_test_2d_ohm_solver_electron_energy_joule_picmi.py --test --eta-scale 100 --implicit"  # inputs
+    "analysis_joule.py --eta-scale 100"  # analysis
+    "analysis_default_regression.py --path diags/field_diags"  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_2d_ohm_solver_electron_energy_joule_implicit_segregated_picmi  # name
+    2  # dims
+    2  # nprocs
+    "inputs_test_2d_ohm_solver_electron_energy_joule_picmi.py --test --eta-scale 100 --implicit --segregated"  # inputs
     "analysis_joule.py --eta-scale 100"  # analysis
     "analysis_default_regression.py --path diags/field_diags"  # checksum
     OFF  # dependency
@@ -101,6 +121,19 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Segregated-variant notes:
+#   * The *_implicit_segregated_* tests exercise
+#     implicit_evolve.qdsmc_segregated_solve: the QDSMC stage runs once per
+#     outer iteration against inner-converged fields (frozen electron
+#     pressure inside the residual) instead of inside every residual
+#     evaluation. Converges to the same coupled state as the monolithic
+#     form up to the solver tolerances, so the physics analyses apply
+#     unchanged; the checksums are legitimately distinct.
+#   * Both variants run the Picard inner solver, like their monolithic
+#     implicit counterparts: the joule deck's Newton configuration diverges
+#     at step 1 on this branch in BOTH monolithic and segregated forms
+#     (pre-existing weakly-magnetized JFNK fragility, see the deck comment).
+#
 # RZ notes:
 #   * The adiabat analysis compares each cell against its own first-dump
 #     state, which cancels the static per-node deposit conventions of the

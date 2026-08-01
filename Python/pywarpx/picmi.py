@@ -2087,11 +2087,47 @@ class ThetaImplicitHybridEvolveScheme(picmistandard.base._ClassWithInit):
 
     theta: float, optional
         The "theta" parameter, determining the level of implicitness
+
+    qdsmc_segregated_solve: bool, optional
+        Segregated midpoint-iterated solve for the QDSMC electron-energy
+        stage: the nonlinear solver converges the field system at frozen
+        electron pressure and an outer loop alternates it with one
+        re-entrant stage pass per iteration, instead of re-running the
+        stage inside every residual evaluation. Requires the electron
+        energy equation.
+
+    qdsmc_outer_max_iterations: integer, optional
+        Maximum number of outer (stage/field) iterations of the
+        segregated solve
+
+    qdsmc_outer_relative_tolerance: float, optional
+        Outer convergence tolerance on the relative change of the emitted
+        electron pressure between outer iterations
+
+    qdsmc_outer_require_convergence: bool, optional
+        Whether a non-converged outer loop is a fatal error
+
+    qdsmc_outer_verbose: bool, optional
+        Print the outer-iteration pressure-change history
     """
 
-    def __init__(self, nonlinear_solver, theta=None):
+    def __init__(
+        self,
+        nonlinear_solver,
+        theta=None,
+        qdsmc_segregated_solve=None,
+        qdsmc_outer_max_iterations=None,
+        qdsmc_outer_relative_tolerance=None,
+        qdsmc_outer_require_convergence=None,
+        qdsmc_outer_verbose=None,
+    ):
         self.nonlinear_solver = nonlinear_solver
         self.theta = theta
+        self.qdsmc_segregated_solve = qdsmc_segregated_solve
+        self.qdsmc_outer_max_iterations = qdsmc_outer_max_iterations
+        self.qdsmc_outer_relative_tolerance = qdsmc_outer_relative_tolerance
+        self.qdsmc_outer_require_convergence = qdsmc_outer_require_convergence
+        self.qdsmc_outer_verbose = qdsmc_outer_verbose
 
         assert isinstance(nonlinear_solver, NonlinearSolverBase)
 
@@ -2099,6 +2135,18 @@ class ThetaImplicitHybridEvolveScheme(picmistandard.base._ClassWithInit):
         pywarpx.algo.evolve_scheme = "theta_implicit_hybrid"
         implicit_evolve = pywarpx.warpx.get_bucket("implicit_evolve")
         implicit_evolve.theta = self.theta
+        # Assign only when set: an unconditional None assignment would
+        # clobber values written to the bucket directly by the user.
+        for knob in [
+            "qdsmc_segregated_solve",
+            "qdsmc_outer_max_iterations",
+            "qdsmc_outer_relative_tolerance",
+            "qdsmc_outer_require_convergence",
+            "qdsmc_outer_verbose",
+        ]:
+            value = getattr(self, knob)
+            if value is not None:
+                setattr(implicit_evolve, knob, value)
 
         self.nonlinear_solver.nonlinear_solver_initialize_inputs()
 
@@ -2561,13 +2609,9 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
                 self.reduced_electron_mass_ratio
             )
         if self.electron_inertia_bdf2 is not None:
-            pywarpx.hybridpicmodel.electron_inertia_bdf2 = (
-                self.electron_inertia_bdf2
-            )
+            pywarpx.hybridpicmodel.electron_inertia_bdf2 = self.electron_inertia_bdf2
         if self.darwin_vacuum_recovery is not None:
-            pywarpx.hybridpicmodel.darwin_vacuum_recovery = (
-                self.darwin_vacuum_recovery
-            )
+            pywarpx.hybridpicmodel.darwin_vacuum_recovery = self.darwin_vacuum_recovery
         if self.darwin_vacuum_recovery_mask is not None:
             pywarpx.hybridpicmodel.darwin_vacuum_recovery_mask = (
                 self.darwin_vacuum_recovery_mask

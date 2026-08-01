@@ -30,13 +30,25 @@
 # 3-point (A, B) fit consistent with a second-order A-term; theta = 1 gives
 # slope ~0.9 throughout with ~5x larger absolute error at matched dt.
 #
+# Realization averaging (marker-noise floor mitigation): with --seeds the
+# study runs each (theta, dt-scale) case once per seed (warpx.random_seed on
+# the particle load) and AVERAGES the final fields across seeds before taking
+# successive differences -- the stage's noise injection decorrelates across
+# loadings (floor drops ~ 1/sqrt(R)) while the coherent dt-error is shared.
+# Judge the energy-equation dynamics on rho (--field rho): the closure ladder
+# established rho as the clean second-order control metric.
+#
 # Usage:  python3 order_study_adiabat.py [--np 2] [--dt-scales 10 5 2.5]
+#         python3 order_study_adiabat.py --thetas 0.5 --dt-scales 4 2 1 0.5 0.25 \
+#             --seeds 101 102 103 104 105 106 107 108 --field rho \
+#             [--segregated] [--low-pass 2 4 8] [--jobs 4]
 
 import argparse
 import os
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -69,6 +81,40 @@ parser.add_argument(
     "grid by stride subsampling (the fields are nodal, so refined-grid nodes "
     "coincide with coarse ones)",
 )
+parser.add_argument(
+    "--segregated",
+    action="store_true",
+    help="run the implicit scheme with the segregated midpoint-iterated "
+    "QDSMC solve (implicit_evolve.qdsmc_segregated_solve)",
+)
+parser.add_argument(
+    "--seeds",
+    type=int,
+    nargs="+",
+    default=None,
+    help="realization ensemble: run each case once per seed and average the "
+    "final fields across seeds before the ladder (default: one unseeded run)",
+)
+parser.add_argument(
+    "--field",
+    default=None,
+    help="field to judge the ladder on (default: rho for --no-energy-eq, "
+    "else Te; the ORDER_FIELD env var is honored as a fallback)",
+)
+parser.add_argument(
+    "--low-pass",
+    type=int,
+    nargs="+",
+    default=None,
+    help="also report the ladder restricted to Fourier modes with all "
+    "|k-index| <= K, for each given K (box-scale coherent response)",
+)
+parser.add_argument(
+    "--jobs",
+    type=int,
+    default=1,
+    help="number of cases to run concurrently (each with --np ranks)",
+)
 args = parser.parse_args()
 
 deck = (
@@ -77,8 +123,9 @@ deck = (
 workdir = Path(args.workdir).absolute()
 
 
-def run_case(theta, dt_scale):
-    case = workdir / f"theta{theta}_s{dt_scale}"
+def run_case(theta, dt_scale, seed=None):
+    tag = f"theta{theta}_s{dt_scale}" + (f"_seed{seed}" if seed is not None else "")
+    case = workdir / tag
     if case.exists():
         shutil.rmtree(case)
     case.mkdir(parents=True)
@@ -105,28 +152,59 @@ def run_case(theta, dt_scale):
         cmd += ["--grid-scale", str(int(round(gs)))]
     if args.no_energy_eq:
         cmd.append("--no-energy-eq")
+    if args.segregated:
+        cmd.append("--segregated")
+    if seed is not None:
+        cmd += ["--seed", str(seed)]
     with open(case / "run.log", "w") as log:
         subprocess.run(cmd, cwd=case, stdout=log, stderr=subprocess.STDOUT, check=True)
     return case
 
 
-def final_Te(case):
+def final_field(case):
     from openpmd_viewer import OpenPMDTimeSeries
 
     ts = OpenPMDTimeSeries(str(case / "diags" / "field_diags"))
-    name = os.environ.get("ORDER_FIELD", "rho" if args.no_energy_eq else "Te")
+    name = args.field or os.environ.get(
+        "ORDER_FIELD", "rho" if args.no_energy_eq else "Te"
+    )
     f, _ = ts.get_field(name, iteration=ts.iterations[-1])
     return f
 
 
+def low_pass(f, kmax):
+    """Restrict to the box-scale modes: zero every Fourier mode with any
+    wavenumber index above kmax (axis-agnostic; the fields are periodic)."""
+    fk = np.fft.fftn(f)
+    mask = np.ones_like(fk, dtype=bool)
+    for ax, n in enumerate(f.shape):
+        k = np.abs(np.fft.fftfreq(n, d=1.0 / n))
+        mask &= np.expand_dims(k <= kmax, tuple(i for i in range(f.ndim) if i != ax))
+    return np.real(np.fft.ifftn(np.where(mask, fk, 0.0)))
+
+
+def ladder(fields, label):
+    errs = [np.sqrt(np.mean((a - b) ** 2)) for a, b in zip(fields[:-1], fields[1:])]
+    print(f"  -- {label} --")
+    for i, e in enumerate(errs):
+        line = f"  e(dt*{args.dt_scales[i]}) = {e:.6e}"
+        if i > 0 and errs[i] > 0:
+            line += f"   observed order = {np.log2(errs[i - 1] / errs[i]):.2f}"
+        print(line)
+
+
+seeds = args.seeds if args.seeds is not None else [None]
+
 for theta in args.thetas:
-    print(f"\n=== theta = {theta} ===")
+    print(f"\n=== theta = {theta}{' (segregated)' if args.segregated else ''} ===")
     fields = []
     for s in args.dt_scales:
-        case = run_case(theta, s)
-        fields.append(final_Te(case))
-        print(f"  ran dt-scale {s}")
-    errs = []
+        # One run per seed; realization-average the final fields (the noise
+        # floor drops ~ 1/sqrt(R); the coherent dt-error survives averaging).
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            cases = list(pool.map(lambda sd: run_case(theta, s, sd), seeds))
+        fields.append(np.mean([final_field(c) for c in cases], axis=0))
+        print(f"  ran dt-scale {s} ({len(seeds)} realization(s))")
     if args.refine_grid:
         # Stride-subsample every field onto the coarsest case's nodes.
         base_shape = fields[0].shape
@@ -137,10 +215,6 @@ for theta in args.thetas:
             strides = tuple(n // b for n, b in zip(f.shape, base_shape))
             sub.append(f[:: strides[0], :: strides[1]])
         fields = sub
-    for a, b in zip(fields[:-1], fields[1:]):
-        errs.append(np.sqrt(np.mean((a - b) ** 2)))
-    for i, e in enumerate(errs):
-        line = f"  e(dt*{args.dt_scales[i]}) = {e:.6e}"
-        if i > 0 and errs[i] > 0:
-            line += f"   observed order = {np.log2(errs[i - 1] / errs[i]):.2f}"
-        print(line)
+    ladder(fields, "full field")
+    for kmax in args.low_pass or []:
+        ladder([low_pass(f, kmax) for f in fields], f"low-pass |k| <= {kmax}")

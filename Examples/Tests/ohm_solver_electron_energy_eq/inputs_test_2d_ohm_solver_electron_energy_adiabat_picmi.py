@@ -75,6 +75,8 @@ class AdiabaticCompression(object):
         dt_scale=1.0,
         grid_scale=1,
         energy_eq=True,
+        segregated=False,
+        seed=None,
     ):
         self.test = test
         self.verbose = verbose or test
@@ -84,6 +86,8 @@ class AdiabaticCompression(object):
         self.dt_scale = dt_scale
         self.grid_scale = grid_scale
         self.energy_eq = energy_eq
+        self.segregated = segregated
+        self.seed = seed
 
         if self.test:
             self.NX = 32 * self.grid_scale
@@ -179,6 +183,9 @@ class AdiabaticCompression(object):
             warpx_serialize_initial_conditions=True,
             warpx_current_deposition_algo="direct",
             warpx_use_filter=True,
+            # Realization control for order studies (with
+            # serialize_initial_conditions the load is deterministic per seed)
+            warpx_random_seed=self.seed,
         )
 
         if self.implicit:
@@ -211,9 +218,17 @@ class AdiabaticCompression(object):
                     max_particle_iterations=21,
                     particle_tolerance=1.0e-12,
                 )
+            scheme_kwargs = {}
+            if self.segregated:
+                # Segregated midpoint-iterated solve: the QDSMC stage runs
+                # once per outer iteration against inner-converged fields
+                # instead of inside every residual evaluation.
+                scheme_kwargs["qdsmc_segregated_solve"] = 1
+                scheme_kwargs["qdsmc_outer_verbose"] = int(self.verbose)
             simulation.evolve_scheme = picmi.ThetaImplicitHybridEvolveScheme(
                 theta=self.theta,
                 nonlinear_solver=nonlinear_solver,
+                **scheme_kwargs,
             )
 
         # Uniform density; sinusoidal x-velocity perturbation v_x = V0 sin(kx).
@@ -307,6 +322,17 @@ parser.add_argument(
     action="store_true",
     help="use the algebraic adiabatic closure instead of the QDSMC energy equation",
 )
+parser.add_argument(
+    "--segregated",
+    action="store_true",
+    help="segregated midpoint-iterated solve for the QDSMC stage (implicit only)",
+)
+parser.add_argument(
+    "--seed",
+    type=int,
+    default=None,
+    help="warpx.random_seed for the particle load (realization control)",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
@@ -319,5 +345,7 @@ run = AdiabaticCompression(
     dt_scale=args.dt_scale,
     grid_scale=args.grid_scale,
     energy_eq=not args.no_energy_eq,
+    segregated=args.segregated,
+    seed=args.seed,
 )
 simulation.step()

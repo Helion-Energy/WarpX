@@ -11,6 +11,11 @@
 #include "Particles/MultiParticleContainer.H"
 #include "WarpX.H"
 #include <ablastr/utils/Communication.H>
+#include <ablastr/warn_manager/WarnManager.H>
+
+#include <algorithm>
+#include <limits>
+#include <sstream>
 
 using warpx::fields::FieldType;
 using namespace amrex::literals;
@@ -111,6 +116,23 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
         m_theta >= 0.5 && m_theta <= 1.0,
         "theta parameter must be between 0.5 and 1.0");
 
+    // Segregated midpoint-iterated solve for the QDSMC electron-energy
+    // stage (see the member documentation in the header).
+    pp.query("qdsmc_segregated_solve", m_qdsmc_segregated_solve);
+    if (m_qdsmc_segregated_solve) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_hybrid_pic_model->m_solve_electron_energy_equation,
+            "implicit_evolve.qdsmc_segregated_solve requires "
+            "hybrid_pic_model.solve_electron_energy_equation = true");
+        pp.query("qdsmc_outer_max_iterations", m_qdsmc_outer_max_iterations);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_qdsmc_outer_max_iterations >= 1,
+            "implicit_evolve.qdsmc_outer_max_iterations must be >= 1");
+        pp.query("qdsmc_outer_relative_tolerance", m_qdsmc_outer_relative_tolerance);
+        pp.query("qdsmc_outer_require_convergence", m_qdsmc_outer_require_convergence);
+        pp.query("qdsmc_outer_verbose", m_qdsmc_outer_verbose);
+    }
+
     parseNonlinearSolverParams( pp );
     m_nlsolver->Define(m_E, this);
 
@@ -129,6 +151,12 @@ void ThetaImplicitHybrid::PrintParameters () const
     amrex::Print() << "-------- THETA IMPLICIT HYBRID PIC SOLVER PARAMETERS ------\n";
     amrex::Print() << "-----------------------------------------------------------\n";
     amrex::Print() << "Time-bias parameter theta:           " << m_theta << "\n";
+    if (m_qdsmc_segregated_solve) {
+        amrex::Print() << "QDSMC segregated solve:              on\n";
+        amrex::Print() << "  outer max iterations:              " << m_qdsmc_outer_max_iterations << "\n";
+        amrex::Print() << "  outer relative tolerance:          " << m_qdsmc_outer_relative_tolerance << "\n";
+        amrex::Print() << "  outer require convergence:         " << (m_qdsmc_outer_require_convergence?"true":"false") << "\n";
+    }
     PrintBaseImplicitSolverParameters();
     m_nlsolver->PrintParams();
     amrex::Print() << "-----------------------------------------------------------\n\n";
@@ -264,9 +292,13 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     m_E.Copy(m_Eold);
 
     // Solve nonlinear system for E^{n+theta} (and eventually Pe^{n+theta})
-    m_nlsolver->Solve( m_E, m_Eold, start_time, m_dt, a_step );
-
-    const int exit_status = m_nlsolver->GetExitStatus();
+    int exit_status = 0;
+    if (m_qdsmc_segregated_solve) {
+        exit_status = SolveSegregated( start_time, a_step );
+    } else {
+        m_nlsolver->Solve( m_E, m_Eold, start_time, m_dt, a_step );
+        exit_status = m_nlsolver->GetExitStatus();
+    }
     if (exit_status < 0) { return exit_status; }
 
     // Update WarpX fields to t^{n+theta}
@@ -309,6 +341,94 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     // the whole run. Species without do_temperature_deposition are
     // skipped inside.
     m_WarpX->GetPartContainer().DepositTemperatures(m_WarpX->m_fields, 0.0_rt);
+
+    return exit_status;
+}
+
+int ThetaImplicitHybrid::SolveSegregated ( const amrex::Real  start_time,
+                                           const int          a_step )
+{
+    BL_PROFILE("ThetaImplicitHybrid::SolveSegregated()");
+
+    // Previous-iterate pressure scratch for the outer convergence test
+    // (re-allocated if a load balance moved the field distribution).
+    if (m_qdsmc_Pe_prev.empty()) { m_qdsmc_Pe_prev.resize(m_num_amr_levels); }
+    for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+        amrex::MultiFab const & Pe =
+            *m_WarpX->m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
+        if (!m_qdsmc_Pe_prev[lev]
+            || m_qdsmc_Pe_prev[lev]->boxArray() != Pe.boxArray()
+            || m_qdsmc_Pe_prev[lev]->DistributionMap() != Pe.DistributionMap()) {
+            m_qdsmc_Pe_prev[lev] = std::make_unique<amrex::MultiFab>(
+                Pe.boxArray(), Pe.DistributionMap(), Pe.nComp(), amrex::IntVect(0));
+        }
+    }
+
+    // Alternate {inner nonlinear solve at frozen Pe, one re-entrant stage
+    // pass} until the emitted pressure stops changing between outer
+    // iterations. The stage pass runs on the grid state as left by the
+    // inner solver's last (non-probe) residual evaluation -- the plasma
+    // current at B^{n+theta}, the midpoint particle deposits, and the
+    // frozen step-start states are all mutually consistent there, and
+    // nothing may be re-pushed or re-deposited (the as-left discipline of
+    // CalculateElectronPressureAtStepEnd). Each outer iteration ENDS on the
+    // stage pass, so the markers and the electron velocity are consistent
+    // with the accepted field state and QDSMCFinishImplicitStep completes
+    // the characteristic unchanged; the O(tolerance) pressure-field
+    // mismatch of the final pair is the explicit segregation error.
+    int exit_status = 0;
+    amrex::Real dPe_rel = std::numeric_limits<amrex::Real>::max();
+    int outer = 0;
+    for (; outer < m_qdsmc_outer_max_iterations; ++outer) {
+
+        // Inner solve: E^{n+theta} at frozen electron pressure. Warm-started
+        // from the previous outer iterate (m_E carries through).
+        m_nlsolver->Solve( m_E, m_Eold, start_time, m_dt, a_step );
+        exit_status = m_nlsolver->GetExitStatus();
+        if (exit_status < 0) { return exit_status; }
+
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            amrex::MultiFab const & Pe =
+                *m_WarpX->m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
+            amrex::MultiFab::Copy(*m_qdsmc_Pe_prev[lev], Pe, 0, 0, Pe.nComp(),
+                                  amrex::IntVect(0));
+        }
+
+        // One stage pass against the converged fields (re-entrant: restarts
+        // from the saved t^n state and re-solves the midpoint entropy
+        // transport; runs non-probe by construction, so the per-species
+        // source deposits refresh once per outer iteration).
+        m_hybrid_pic_model->AdvanceElectronEnergyQDSMCTheta(m_dt, m_theta, true);
+
+        dPe_rel = 0.0_rt;
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            amrex::MultiFab const & Pe =
+                *m_WarpX->m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
+            amrex::MultiFab & dPe = *m_qdsmc_Pe_prev[lev];
+            amrex::MultiFab::Subtract(dPe, Pe, 0, 0, Pe.nComp(), amrex::IntVect(0));
+            amrex::Real const norm_Pe = Pe.norm2(0);
+            amrex::Real const norm_dPe = dPe.norm2(0);
+            dPe_rel = std::max(dPe_rel,
+                norm_dPe / std::max(norm_Pe, std::numeric_limits<amrex::Real>::min()));
+        }
+
+        if (m_qdsmc_outer_verbose) {
+            amrex::Print() << "QDSMC segregated: outer iteration = " << outer
+                           << ", dPe/Pe = " << std::scientific << dPe_rel << "\n";
+        }
+        if (dPe_rel < m_qdsmc_outer_relative_tolerance) { break; }
+    }
+
+    if (dPe_rel >= m_qdsmc_outer_relative_tolerance) {
+        std::stringstream convergenceMsg;
+        convergenceMsg << "QDSMC segregated outer loop failed to converge after "
+                       << outer << " iterations. Relative pressure change is "
+                       << dPe_rel << " and the outer relative tolerance is "
+                       << m_qdsmc_outer_relative_tolerance;
+        ablastr::warn_manager::WMRecordWarning(
+            "ThetaImplicitHybrid", convergenceMsg.str());
+        if (m_qdsmc_outer_require_convergence) { return -7; }
+    }
 
     return exit_status;
 }
@@ -410,9 +530,14 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     // coupled E/T_e system by elimination) or the algebraic adiabatic
     // closure. Per-species deposits feeding the multi-species sources are
     // refreshed once per Newton iteration and frozen during Jacobian
-    // evaluations.
+    // evaluations. Under the segregated solve the stage runs once per OUTER
+    // iteration from SolveSegregated instead, and the residual consumes the
+    // pressure left on the grid unchanged (Pe enters the Ohm solve purely
+    // as a field argument, so freezing it is simply not overwriting it).
     if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
-        m_hybrid_pic_model->AdvanceElectronEnergyQDSMCTheta(m_dt, m_theta, !a_from_jacobian);
+        if (!m_qdsmc_segregated_solve) {
+            m_hybrid_pic_model->AdvanceElectronEnergyQDSMCTheta(m_dt, m_theta, !a_from_jacobian);
+        }
     } else {
         m_hybrid_pic_model->CalculateElectronPressure();
     }
