@@ -194,10 +194,6 @@ if(AMReX_PETSC)
     if(TEST test_1d_hybrid_mag_diffusion_coupled_petsc.run)
         set_property(
             TEST test_1d_hybrid_mag_diffusion_coupled_petsc.run
-            APPEND PROPERTY ENVIRONMENT "PETSC_OPTIONS=-pc_type lu"
-        )
-        set_property(
-            TEST test_1d_hybrid_mag_diffusion_coupled_petsc.run
             PROPERTY PASS_REGULAR_EXPRESSION "PETSc KSP iterations=1"
         )
         set_property(
@@ -243,10 +239,6 @@ if(AMReX_PETSC)
     if(TEST test_2d_hybrid_mag_diffusion_coupled_petsc.run)
         set_property(
             TEST test_2d_hybrid_mag_diffusion_coupled_petsc.run
-            APPEND PROPERTY ENVIRONMENT "PETSC_OPTIONS=-pc_type lu"
-        )
-        set_property(
-            TEST test_2d_hybrid_mag_diffusion_coupled_petsc.run
             PROPERTY PASS_REGULAR_EXPRESSION "PETSc KSP iterations=1"
         )
         set_property(
@@ -277,10 +269,6 @@ if(AMReX_PETSC)
         test_3d_hybrid_mag_diffusion_coupled  # dependency (AMReX reference)
     )
     if(TEST test_3d_hybrid_mag_diffusion_coupled_petsc.run)
-        set_property(
-            TEST test_3d_hybrid_mag_diffusion_coupled_petsc.run
-            APPEND PROPERTY ENVIRONMENT "PETSC_OPTIONS=-pc_type lu"
-        )
         set_property(
             TEST test_3d_hybrid_mag_diffusion_coupled_petsc.run
             PROPERTY PASS_REGULAR_EXPRESSION "PETSc KSP iterations=1"

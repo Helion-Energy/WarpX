@@ -3753,6 +3753,46 @@ Maxwell solver: kinetic-fluid hybrid
     Note that in RZ geometry ``J_s`` is the magnitude of the raw (not volume-scaled) species current deposit;
     in Cartesian geometry it is the physical current-density magnitude.
 
+.. pp:param:: hybrid_pic_model.mag_diff_petsc_pc_type
+    :type: ``str``
+    :optional:
+
+    PETSc preconditioner type for implicit hybrid magnetic diffusion when
+    ``mag_diff_linear_solver = petsc``. If omitted, PETSc selects its default.
+    Common values include ``asm``, ``bjacobi`` and, on a single CPU rank, ``lu``.
+    Global ``lu`` is not supported in GPU builds; use ``asm`` with
+    :pp:param:`hybrid_pic_model.mag_diff_petsc_sub_pc_type` = ``lu`` instead.
+    An external PETSc ``-pc_type`` option takes precedence over this input group.
+
+.. pp:param:: hybrid_pic_model.mag_diff_petsc_asm_overlap
+    :type: ``int``
+    :default: ``0``
+    :optional:
+
+    Number of graph-overlap layers for ``mag_diff_petsc_pc_type = asm``.
+
+.. pp:param:: hybrid_pic_model.mag_diff_petsc_sub_ksp_type
+    :type: ``str``
+    :default: ``preonly``
+    :optional:
+
+    PETSc KSP type used for each ASM subdomain solve.
+
+.. pp:param:: hybrid_pic_model.mag_diff_petsc_sub_pc_type
+    :type: ``str``
+    :default: ``ilu``
+    :optional:
+
+    PETSc preconditioner used inside each ASM subdomain. ``lu`` selects an exact
+    local factorization and does not require a distributed sparse-direct package.
+
+.. pp:param:: hybrid_pic_model.mag_diff_petsc_ilu_factor_levels
+    :type: ``int``
+    :default: ``2``
+    :optional:
+
+    Fill level used when ``mag_diff_petsc_sub_pc_type = ilu``.
+
 .. pp:param:: hybrid_pic_model.solve_electron_energy_equation
     :type: ``bool``
     :default: ``false``

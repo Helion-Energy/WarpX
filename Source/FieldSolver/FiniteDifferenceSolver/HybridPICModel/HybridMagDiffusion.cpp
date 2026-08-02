@@ -68,6 +68,11 @@ HybridMagDiffusion::ReadParameters ()
     pp.query("mag_diff_use_variable_eta", m_use_variable_eta);
 
     pp.query("mag_diff_linear_solver", m_linear_solver);
+    pp.query("mag_diff_petsc_pc_type", m_petsc_options.pc_type);
+    pp.query("mag_diff_petsc_asm_overlap", m_petsc_options.asm_overlap);
+    pp.query("mag_diff_petsc_sub_ksp_type", m_petsc_options.sub_ksp_type);
+    pp.query("mag_diff_petsc_sub_pc_type", m_petsc_options.sub_pc_type);
+    pp.query("mag_diff_petsc_ilu_factor_levels", m_petsc_options.ilu_factor_levels);
 
     if (utils::parser::queryWithParser(pp, "mag_diff_constant_eta", m_constant_eta)) {
         m_has_constant_eta = true;
@@ -92,6 +97,20 @@ HybridMagDiffusion::ReadParameters ()
         m_rtol > 0.0_rt && m_atol >= 0.0_rt,
         "hybrid_pic_model.mag_diff_rtol/atol must be non-negative (rtol > 0)");
 
+    if (m_linear_solver == MagDiffLinearSolver::petsc) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_petsc_options.asm_overlap >= 0 && m_petsc_options.ilu_factor_levels >= 0,
+            "hybrid_pic_model.mag_diff_petsc_asm_overlap and "
+            "mag_diff_petsc_ilu_factor_levels must be non-negative");
+
+#ifdef AMREX_USE_GPU
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_petsc_options.pc_type != "lu",
+            "hybrid_pic_model.mag_diff_petsc_pc_type = lu is not available on GPUs; "
+            "use pc_type = asm with sub_pc_type = lu for local subdomain solves");
+#endif
+    }
+
     // theta=1 is backward Euler. For theta in (0,1), the same linear system is
     // used with a modified RHS that includes an explicit curl-curl term.
     amrex::Print() << "HybridMagDiffusion: enabled"
@@ -103,6 +122,19 @@ HybridMagDiffusion::ReadParameters ()
                    << "  linear_solver=" << amrex::getEnumNameString(m_linear_solver);
     if (m_has_constant_eta) {
         amrex::Print() << "  constant_eta=" << m_constant_eta << " Ohm m";
+    }
+    if (m_linear_solver == MagDiffLinearSolver::petsc &&
+        !m_petsc_options.pc_type.empty()) {
+        amrex::Print() << "  petsc_pc_type=" << m_petsc_options.pc_type;
+        if (m_petsc_options.pc_type == "asm") {
+            amrex::Print() << "  petsc_asm_overlap=" << m_petsc_options.asm_overlap
+                           << "  petsc_sub_ksp_type=" << m_petsc_options.sub_ksp_type
+                           << "  petsc_sub_pc_type=" << m_petsc_options.sub_pc_type;
+            if (m_petsc_options.sub_pc_type == "ilu") {
+                amrex::Print() << "  petsc_ilu_factor_levels="
+                               << m_petsc_options.ilu_factor_levels;
+            }
+        }
     }
     amrex::Print() << "\n";
 }
@@ -1222,6 +1254,7 @@ HybridMagDiffusion::AdvanceVariable (
             m_petsc_solver = magdiff_petsc_make(
                 B_proto, eta_edge, linop.geom(), linop.thetaDt(),
                 PhysConst::mu0, m_rtol, m_atol, m_max_iter, m_verbose,
+                m_petsc_options,
                 &petscMatvec, &opctx,
                 petsc_eb_on ? &eb_update_B_ptrs : nullptr);
         } else {

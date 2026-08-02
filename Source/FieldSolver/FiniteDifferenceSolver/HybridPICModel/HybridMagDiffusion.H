@@ -128,6 +128,7 @@ private:
     amrex::Real m_constant_eta = 0.0;
     bool m_use_variable_eta = false;
     MagDiffLinearSolver m_linear_solver = MagDiffLinearSolver::amrex_gmres;
+    MagDiffPetscOptions m_petsc_options;
 #ifdef AMREX_USE_PETSC
     mutable MagDiffPetscSolver* m_petsc_solver = nullptr;
 #endif

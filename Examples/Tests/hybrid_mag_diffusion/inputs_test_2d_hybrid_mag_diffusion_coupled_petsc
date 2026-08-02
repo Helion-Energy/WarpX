@@ -60,8 +60,12 @@ hybrid_pic_model.mag_diff_linear_solver = petsc
 hybrid_pic_model.mag_diff_rtol = 1.0e-10
 hybrid_pic_model.mag_diff_atol = 0.0
 hybrid_pic_model.mag_diff_max_iter = 300
-# CI runs this deck with PETSC_OPTIONS=-pc_type lu. Exact Pmat == MatShell then
-# converges in one iteration; the CMake test rejects any iteration count > 1.
+hybrid_pic_model.mag_diff_petsc_pc_type = asm
+hybrid_pic_model.mag_diff_petsc_asm_overlap = 0
+hybrid_pic_model.mag_diff_petsc_sub_ksp_type = preonly
+hybrid_pic_model.mag_diff_petsc_sub_pc_type = lu
+# One-rank ASM with an exact local LU makes Pmat == MatShell converge in one
+# iteration; the CMake test rejects any larger iteration count.
 hybrid_pic_model.mag_diff_verbose = 1
 
 diagnostics.diags_names = diag1

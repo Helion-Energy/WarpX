@@ -80,6 +80,7 @@ public:
         amrex::Array<amrex::MultiFab const*,3> const& eta_edge,
         amrex::Geometry const& geom, amrex::Real theta_dt, amrex::Real mu0,
         amrex::Real rtol, amrex::Real atol, int max_iter, int verbose,
+        MagDiffPetscOptions const& options,
         MagDiffMatvecFn matvec, void* opctx,
         amrex::Array<amrex::iMultiFab const*,3> const* eb_update_B)
         : m_geom(geom), m_theta_dt(theta_dt), m_mu0(mu0),
@@ -173,6 +174,7 @@ public:
             MAGDIFF_PETSC_CHK(KSPMonitorSet(
                 m_ksp, monitorResidual, nullptr, nullptr));
         }
+        setOptions(options);
         // Let -ksp_type / -pc_type / -ksp_rtol ... from argv or PETSC_OPTIONS win.
         MAGDIFF_PETSC_CHK(KSPSetFromOptions(m_ksp));
     }
@@ -237,6 +239,31 @@ public:
     }
 
 private:
+    void setOptions (MagDiffPetscOptions const& options)
+    {
+        PetscBool pc_specified = PETSC_FALSE;
+        MAGDIFF_PETSC_CHK(PetscOptionsHasName(
+            nullptr, nullptr, "-pc_type", &pc_specified));
+        if (pc_specified || options.pc_type.empty()) { return; }
+
+        MAGDIFF_PETSC_CHK(PetscOptionsSetValue(
+            nullptr, "-pc_type", options.pc_type.c_str()));
+        if (options.pc_type != "asm") { return; }
+
+        std::string const overlap = std::to_string(options.asm_overlap);
+        MAGDIFF_PETSC_CHK(PetscOptionsSetValue(
+            nullptr, "-pc_asm_overlap", overlap.c_str()));
+        MAGDIFF_PETSC_CHK(PetscOptionsSetValue(
+            nullptr, "-sub_ksp_type", options.sub_ksp_type.c_str()));
+        MAGDIFF_PETSC_CHK(PetscOptionsSetValue(
+            nullptr, "-sub_pc_type", options.sub_pc_type.c_str()));
+        if (options.sub_pc_type == "ilu") {
+            std::string const levels = std::to_string(options.ilu_factor_levels);
+            MAGDIFF_PETSC_CHK(PetscOptionsSetValue(
+                nullptr, "-sub_pc_factor_levels", levels.c_str()));
+        }
+    }
+
     static PetscErrorCode applyMatOp (Mat A, Vec in, Vec out) {
         PetscFunctionBeginUser;
         MagDiffPetscSolverImpl* self = nullptr;
@@ -727,13 +754,14 @@ MagDiffPetscSolver* magdiff_petsc_make (
     amrex::Array<amrex::MultiFab const*,3> const& eta_edge,
     amrex::Geometry const& geom, amrex::Real theta_dt, amrex::Real mu0,
     amrex::Real rtol, amrex::Real atol, int max_iter, int verbose,
+    MagDiffPetscOptions const& options,
     MagDiffMatvecFn matvec, void* opctx,
     amrex::Array<amrex::iMultiFab const*,3> const* eb_update_B)
 {
     auto* s = new MagDiffPetscSolver;
     s->impl = std::make_unique<MagDiffPetscSolverImpl>(
         B_proto, eta_edge, geom, theta_dt, mu0,
-        rtol, atol, max_iter, verbose, matvec, opctx, eb_update_B);
+        rtol, atol, max_iter, verbose, options, matvec, opctx, eb_update_B);
     return s;
 }
 
@@ -776,7 +804,8 @@ MagDiffPetscSolver* magdiff_petsc_make (
     amrex::Array<amrex::MultiFab const*,3> const& /*B_proto*/,
     amrex::Array<amrex::MultiFab const*,3> const& /*eta_edge*/,
     amrex::Geometry const& /*geom*/, amrex::Real /*theta_dt*/, amrex::Real /*mu0*/,
-    amrex::Real, amrex::Real, int, int, MagDiffMatvecFn, void*,
+    amrex::Real, amrex::Real, int, int, MagDiffPetscOptions const&,
+    MagDiffMatvecFn, void*,
     amrex::Array<amrex::iMultiFab const*,3> const*)
 {
     amrex::Abort("magdiff_petsc_make: WarpX was not built with PETSc "
