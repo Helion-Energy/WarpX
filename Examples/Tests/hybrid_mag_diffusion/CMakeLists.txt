@@ -1,5 +1,10 @@
 # Add tests (alphabetical order) ##############################################
 #
+# Coverage is intentionally factorized rather than taking the Cartesian product
+# of eta source, theta value, linear solver, and geometry. The theta RHS is
+# built before solver dispatch, while the PETSc tests focus on exact-Pmat and
+# AMReX parity. Add combination tests only for interactions with distinct logic
+# (variable coefficients, affine feeds, EB, or geometry-specific boundaries).
 
 # Analytic constant-η magnetic diffusion (Fourier By mode) with
 # hybrid_pic_model.implicit_mag_diffusion. Uses the C++ executable directly
@@ -14,23 +19,30 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Crank-Nicolson (theta=0.5) with a uniform parser eta. This combines the
+# quantitative variable-eta and theta-method coverage in one analytic test;
+# the constant-eta backward-Euler test above covers the other eta source.
 add_warpx_test(
-    test_2d_hybrid_mag_diffusion_cn  # name
+    test_2d_hybrid_mag_diffusion_variable_eta_cn  # name
     2  # dims
     1  # nprocs
-    "inputs_test_2d_hybrid_mag_diffusion_cn"  # inputs
+    "inputs_test_2d_hybrid_mag_diffusion_variable_eta_cn"  # inputs
     "analysis.py"  # analysis
-    OFF  # checksum (analytic analysis is the oracle)
+    OFF  # checksum (analytic CN comparison in analysis.py)
     OFF  # dependency
 )
 
+# Crank-Nicolson (theta=0.5) smoke with a spatially varying (J-dependent)
+# parser-frozen eta on the 2D matrix-free path: exercises the (1-theta) explicit
+# RHS term with a genuinely non-uniform eta MultiFab (not a single Fourier mode,
+# so analysis_2d_smoke checks finite/damped By rather than the amplification).
 add_warpx_test(
-    test_2d_hybrid_mag_diffusion_variable_eta  # name
+    test_2d_hybrid_mag_diffusion_variable_eta_j_cn  # name
     2  # dims
     1  # nprocs
-    "inputs_test_2d_hybrid_mag_diffusion_variable_eta"  # inputs
-    "analysis.py"  # analysis
-    OFF  # checksum (analytic analysis is the oracle)
+    "inputs_test_2d_hybrid_mag_diffusion_variable_eta_j_cn"  # inputs
+    "analysis_2d_smoke.py"  # analysis
+    OFF  # checksum (finite/damping smoke in analysis_2d_smoke.py)
     OFF  # dependency
 )
 
@@ -39,18 +51,6 @@ add_warpx_test(
     RZ  # dims
     1  # nprocs
     "inputs_test_rz_hybrid_mag_diffusion_smoke"  # inputs
-    "analysis_rz.py"  # analysis
-    OFF  # checksum (RZ vacuum smoke analysis is the oracle)
-    OFF  # dependency
-)
-
-# Parser-driven eta on the matrix-free RZ path (uniform 129 Ohm m smoke).
-# analysis_rz.py is a finite/damping stability smoke, not a Fourier analytic oracle.
-add_warpx_test(
-    test_rz_hybrid_mag_diffusion_variable_eta  # name
-    RZ  # dims
-    1  # nprocs
-    "inputs_test_rz_hybrid_mag_diffusion_variable_eta"  # inputs
     "analysis_rz.py"  # analysis
     OFF  # checksum (RZ vacuum smoke analysis is the oracle)
     OFF  # dependency
@@ -65,7 +65,7 @@ add_warpx_test(
     RZ  # dims
     1  # nprocs
     "inputs_test_rz_hybrid_mag_diffusion_split_parity_ref"  # inputs
-    "analysis_rz.py"  # analysis (finite + damped Bt smoke on the explicit ref)
+    OFF  # analysis (the dependent parity analysis validates this reference)
     OFF  # checksum
     OFF  # dependency
 )
@@ -80,10 +80,10 @@ add_warpx_test(
     test_rz_hybrid_mag_diffusion_split_parity_ref  # dependency
 )
 
-# Dirichlet B_t feed at the upper-r face via pec_insulator (FLASH CIRCUIT
-# B_phi = f(I(t)) analogue). The feed is baked into the matrix-free operator
-# (homogeneous) + RHS (affine offset). analysis_rz_pec_feed.py is a finite
-# feed-held smoke, not an analytic oracle.
+# Dirichlet tangential B at the upper-r face via pec_insulator. The feed is
+# included in the matrix-free operator (homogeneous part) and RHS (affine
+# offset). analysis_rz_pec_feed.py checks that the feed is held and the run
+# is stable.
 add_warpx_test(
     test_rz_hybrid_mag_diffusion_pec_feed  # name
     RZ  # dims
@@ -173,24 +173,6 @@ if(AMReX_PETSC)
         "inputs_test_rz_hybrid_mag_diffusion_petsc"  # inputs
         "analysis_rz.py"  # analysis
         OFF  # checksum (RZ vacuum smoke analysis is the oracle)
-        OFF  # dependency
-    )
-
-    # Crank-Nicolson (theta=0.5) companion to the PETSc KSP smoke, on the 2D
-    # matrix-free path with the discrete-Fourier amplification oracle. The
-    # theta<1 RHS (2*B^n - A_e(B^n)) is assembled before the GMRES/PETSc branch,
-    # so the PETSc KSP inherits it unchanged; mild eta (1e-2) keeps the system
-    # well conditioned so PETSc converges tightly and reproduces the CN
-    # amplification factor (the matvec is the same homogeneous operator the
-    # GMRES path validates). Stiff-eta CN is a known ill-conditioned limitation
-    # (see test_rz_hybrid_mag_diffusion_pec_feed_cn and the design note).
-    add_warpx_test(
-        test_2d_hybrid_mag_diffusion_petsc_cn  # name
-        2  # dims
-        1  # nprocs
-        "inputs_test_2d_hybrid_mag_diffusion_petsc_cn"  # inputs
-        "analysis.py"  # analysis
-        OFF  # checksum (analytic CN comparison in analysis.py)
         OFF  # dependency
     )
 
