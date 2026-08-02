@@ -152,10 +152,15 @@ public:
         MAGDIFF_PETSC_CHK(MatCreateAIJ(
             PETSC_COMM_WORLD, m_n_local, m_n_local, m_n_global, m_n_global,
             nz, nullptr, nz, nullptr, &m_P));
+        // Variable eta can activate a stencil coefficient that was initially
+        // zero. Store those structural zeros so later updates only change
+        // values, not the matrix graph.
+        MAGDIFF_PETSC_CHK(MatSetOption(
+            m_P, MAT_IGNORE_ZERO_ENTRIES, PETSC_FALSE));
         // Fail loudly if a row exceeds preallocation (heap corruption risk).
         MAGDIFF_PETSC_CHK(MatSetOption(
             m_P, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_TRUE));
-        assemblePreconditioner();
+        MAGDIFF_PETSC_CHK(assemblePreconditioner());
         MAGDIFF_PETSC_CHK(KSPSetOperators(m_ksp, m_A, m_P));
         MAGDIFF_PETSC_CHK(KSPSetPCSide(m_ksp, PC_RIGHT));
         MAGDIFF_PETSC_CHK(KSPSetType(m_ksp, KSPGMRES));
@@ -603,7 +608,7 @@ private:
                         else { kk += amount; }
                     };
                     auto add_value = [&] (PetscInt column, PetscScalar value) {
-                        if (column < 0 || value == PetscScalar(0.0)) { return; }
+                        if (column < 0) { return; }
                         if (column == row) {
                             diag += value;
                             return;
@@ -657,8 +662,9 @@ private:
                     cols.push_back(row);
                     vals.push_back(diag);
                     PetscInt const ncol = static_cast<PetscInt>(cols.size());
-                    MatSetValues(m_P, 1, &row, ncol,
-                                 cols.data(), vals.data(), INSERT_VALUES);
+                    MAGDIFF_PETSC_CHK(MatSetValues(
+                        m_P, 1, &row, ncol,
+                        cols.data(), vals.data(), INSERT_VALUES));
                 });
             }
         }
@@ -683,7 +689,7 @@ public:
         PC pc = nullptr;
         MAGDIFF_PETSC_CHK(KSPGetPC(m_ksp, &pc));
         MAGDIFF_PETSC_CHK(PCReset(pc));
-        assemblePreconditioner();
+        MAGDIFF_PETSC_CHK(assemblePreconditioner());
         MAGDIFF_PETSC_CHK(KSPSetOperators(m_ksp, m_A, m_P));
     }
 
