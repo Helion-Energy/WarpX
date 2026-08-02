@@ -13,11 +13,10 @@
  * `ReductionType`, petscvec.h). Only pure AMReX headers are used here, mirroring
  * the WarpX_PETSc.cpp isolation precedent.
  *
- * The matrix-free operator (matvec) and the scaled-Jacobi preconditioner are
- * supplied as callbacks by HybridMagDiffusion.cpp, which owns the Yee/RZ
- * curl-curl apply() and the field MultiFabs. This file owns the PETSc objects
- * (Vec, MatShell, assembled Pmat, KSP, PC), the DOF layout, and the assembled
- * frozen-η curl-curl Pmat (exact_curl_curl).
+ * The matrix-free operator (matvec) is supplied as a callback by
+ * HybridMagDiffusion.cpp, which owns the Yee/RZ curl-curl apply() and the field
+ * MultiFabs. This file owns the PETSc objects (Vec, MatShell, assembled Pmat,
+ * KSP, PC), the DOF layout, and the assembled frozen-η curl-curl Pmat.
  */
 #include "HybridMagDiffusionPetsc.H"
 
@@ -67,8 +66,8 @@ namespace {
  * DOF layout: component-major (B0, B1, B2), per-rank MFIter order, interior
  * (nghost=0) cells only. A per-component global-index iMultiFab (nghost=1,
  * -1 = exterior) maps each interior cell to its PETSc row/column; the matvec
- * and PC callbacks (in HybridMagDiffusion.cpp) read this same index to
- * scatter/gather their field MultiFabs, so the Vec and the assembled Pmat stay
+ * callback (in HybridMagDiffusion.cpp) reads this same index to scatter/gather
+ * its field MultiFabs, so the Vec and the assembled Pmat stay
  * self-consistent regardless of tiling. Norms use the nghost=0 interior only
  * (the FPE-trap invariant).
  */
@@ -80,14 +79,12 @@ public:
         amrex::Array<amrex::MultiFab const*,3> const& eta_edge,
         amrex::Array<amrex::MultiFab const*,3> const& eta_pc,
         amrex::Geometry const& geom, amrex::Real theta_dt, amrex::Real mu0,
-        MagDiffPetscPC pc_choice,
         amrex::Real rtol, amrex::Real atol, int max_iter, int verbose,
-        MagDiffMatvecFn matvec, MagDiffPCFn pcapply, void* opctx,
+        MagDiffMatvecFn matvec, void* opctx,
         amrex::Array<amrex::iMultiFab const*,3> const* eb_update_B)
         : m_geom(geom), m_theta_dt(theta_dt), m_mu0(mu0),
-          m_pc_choice(pc_choice), m_rtol(rtol), m_atol(atol),
-          m_max_iter(max_iter), m_verbose(verbose),
-          m_matvec(matvec), m_pcapply(pcapply), m_opctx(opctx)
+          m_rtol(rtol), m_atol(atol), m_max_iter(max_iter),
+          m_verbose(verbose), m_matvec(matvec), m_opctx(opctx)
     {
         // EB masks live on the device under CUDA. Copy to pinned host once so
         // all LoopOnCpu DOF counting / indexing is host-safe (raw device
@@ -145,33 +142,24 @@ public:
         MAGDIFF_PETSC_CHK(KSPCreate(PETSC_COMM_WORLD, &m_ksp));
         MAGDIFF_PETSC_CHK(KSPSetOperators(m_ksp, m_A, m_A));
 
-        PC pc = nullptr;
-        MAGDIFF_PETSC_CHK(KSPGetPC(m_ksp, &pc));
-        if (m_pc_choice == MagDiffPetscPC::exact_curl_curl) {
-            // Assembled frozen-η curl-curl Pmat (see assembleExactCurlCurl).
-            // Lets runtime -pc_type asm/ilu/hypre factor a real matrix; default
-            // PC for an assembled Pmat is block-Jacobi ILU(0).
-            // RZ/Rcyl: up to ~7 nonzeros/row (Br–Bz cross terms). Cartesian:
-            // face-averaged Laplacian proxy (5/7-point).
+        // Assembled frozen-η curl-curl Pmat (see assemblePreconditioner).
+        // Lets runtime -pc_type asm/ilu/hypre factor a real matrix; default PC
+        // for an assembled Pmat is block-Jacobi ILU(0). RZ/Rcyl has up to ~7
+        // nonzeros/row (Br-Bz cross terms); Cartesian uses a face-averaged
+        // Laplacian proxy (5/7-point).
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-            PetscInt const nz = 9;
+        PetscInt const nz = 9;
 #else
-            PetscInt const nz = 1 + 2 * AMREX_SPACEDIM;
+        PetscInt const nz = 1 + 2 * AMREX_SPACEDIM;
 #endif
-            MAGDIFF_PETSC_CHK(MatCreateAIJ(
-                PETSC_COMM_WORLD, m_n_local, m_n_local, m_n_global, m_n_global,
-                nz, nullptr, nz, nullptr, &m_P));
-            // Fail loudly if a row exceeds preallocation (heap corruption risk).
-            MAGDIFF_PETSC_CHK(MatSetOption(
-                m_P, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_TRUE));
-            assembleExactCurlCurl();
-            MAGDIFF_PETSC_CHK(KSPSetOperators(m_ksp, m_A, m_P));
-        } else {
-            // Shell PC reusing the caller's scaled Jacobi (precond callback).
-            MAGDIFF_PETSC_CHK(PCSetType(pc, PCSHELL));
-            MAGDIFF_PETSC_CHK(PCShellSetApply(pc, applyShellPC));
-            MAGDIFF_PETSC_CHK(PCShellSetContext(pc, this));
-        }
+        MAGDIFF_PETSC_CHK(MatCreateAIJ(
+            PETSC_COMM_WORLD, m_n_local, m_n_local, m_n_global, m_n_global,
+            nz, nullptr, nz, nullptr, &m_P));
+        // Fail loudly if a row exceeds preallocation (heap corruption risk).
+        MAGDIFF_PETSC_CHK(MatSetOption(
+            m_P, MAT_NEW_NONZERO_ALLOCATION_ERR, PETSC_TRUE));
+        assemblePreconditioner();
+        MAGDIFF_PETSC_CHK(KSPSetOperators(m_ksp, m_A, m_P));
         MAGDIFF_PETSC_CHK(KSPSetPCSide(m_ksp, PC_RIGHT));
         MAGDIFF_PETSC_CHK(KSPSetType(m_ksp, KSPGMRES));
         MAGDIFF_PETSC_CHK(KSPSetTolerances(
@@ -258,22 +246,6 @@ private:
                        reinterpret_cast<amrex::Real const*>(x),
                        reinterpret_cast<amrex::Real*>(y),
                        self->gindexView(), self->m_rstart);
-        PetscCall(VecRestoreArrayRead(in, &x));
-        PetscCall(VecRestoreArray(out, &y));
-        PetscFunctionReturn(PETSC_SUCCESS);
-    }
-
-    static PetscErrorCode applyShellPC (PC pc, Vec in, Vec out) {
-        PetscFunctionBeginUser;
-        MagDiffPetscSolverImpl* self = nullptr;
-        PetscCall(PCShellGetContext(pc, reinterpret_cast<void**>(&self)));
-        const PetscScalar* x = nullptr; PetscScalar* y = nullptr;
-        PetscCall(VecGetArrayRead(in, &x));
-        PetscCall(VecGetArray(out, &y));
-        self->m_pcapply(self->m_opctx,
-                        reinterpret_cast<amrex::Real const*>(x),
-                        reinterpret_cast<amrex::Real*>(y),
-                        self->gindexView(), self->m_rstart);
         PetscCall(VecRestoreArrayRead(in, &x));
         PetscCall(VecRestoreArray(out, &y));
         PetscFunctionReturn(PETSC_SUCCESS);
@@ -372,7 +344,7 @@ private:
         }
     }
 
-    // Assemble frozen-η Pmat for the exact_curl_curl PC (P != A; matvec stays
+    // Assemble frozen-η curl-curl Pmat (P != A; matvec stays
     // matrix-free computeAFull). Exterior neighbors (global index -1) are
     // dropped, matching the homogeneous-operator BC the matvec imposes.
     //
@@ -385,7 +357,7 @@ private:
     // Cartesian (XZ / 3D / 1D_Z): still the face-averaged scalar Laplacian
     // proxy per component (block-diagonal; no cross-component terms yet).
 
-    PetscErrorCode assembleExactCurlCurl () {
+    PetscErrorCode assemblePreconditioner () {
         PetscFunctionBeginUser;
         if (m_P) {
             PetscCall(MatZeroEntries(m_P));
@@ -659,27 +631,23 @@ public:
         buildEtaGhosts(eta_pc);
 #endif
 
-        if (m_pc_choice == MagDiffPetscPC::exact_curl_curl) {
-            // Drop stale PC factors before rewriting P (avoids use-after-free
-            // when ILU/BJACOBI held internal refs into the previous P values).
-            PC pc = nullptr;
-            MAGDIFF_PETSC_CHK(KSPGetPC(m_ksp, &pc));
-            MAGDIFF_PETSC_CHK(PCReset(pc));
-            assembleExactCurlCurl();
-            MAGDIFF_PETSC_CHK(KSPSetOperators(m_ksp, m_A, m_P));
-        }
+        // Drop stale PC factors before rewriting P (avoids use-after-free when
+        // ILU/BJACOBI held internal refs into the previous P values).
+        PC pc = nullptr;
+        MAGDIFF_PETSC_CHK(KSPGetPC(m_ksp, &pc));
+        MAGDIFF_PETSC_CHK(PCReset(pc));
+        assemblePreconditioner();
+        MAGDIFF_PETSC_CHK(KSPSetOperators(m_ksp, m_A, m_P));
     }
 
     amrex::Geometry m_geom;
     amrex::Real m_theta_dt = amrex::Real(0.0);
     amrex::Real m_mu0 = amrex::Real(0.0);
-    MagDiffPetscPC m_pc_choice = MagDiffPetscPC::shell_jacobi;
     amrex::Real m_rtol = amrex::Real(0.0);
     amrex::Real m_atol = amrex::Real(0.0);
     int m_max_iter = 0;
     int m_verbose = 0;
     MagDiffMatvecFn m_matvec = nullptr;
-    MagDiffPCFn m_pcapply = nullptr;
     void* m_opctx = nullptr;
 
     PetscInt m_n_local = 0;
@@ -706,15 +674,14 @@ MagDiffPetscSolver* magdiff_petsc_make (
     amrex::Array<amrex::MultiFab const*,3> const& eta_edge,
     amrex::Array<amrex::MultiFab const*,3> const& eta_pc,
     amrex::Geometry const& geom, amrex::Real theta_dt, amrex::Real mu0,
-    MagDiffPetscPC pc_choice, amrex::Real rtol, amrex::Real atol,
-    int max_iter, int verbose,
-    MagDiffMatvecFn matvec, MagDiffPCFn pcapply, void* opctx,
+    amrex::Real rtol, amrex::Real atol, int max_iter, int verbose,
+    MagDiffMatvecFn matvec, void* opctx,
     amrex::Array<amrex::iMultiFab const*,3> const* eb_update_B)
 {
     auto* s = new MagDiffPetscSolver;
     s->impl = std::make_unique<MagDiffPetscSolverImpl>(
-        B_proto, eta_edge, eta_pc, geom, theta_dt, mu0, pc_choice,
-        rtol, atol, max_iter, verbose, matvec, pcapply, opctx, eb_update_B);
+        B_proto, eta_edge, eta_pc, geom, theta_dt, mu0,
+        rtol, atol, max_iter, verbose, matvec, opctx, eb_update_B);
     return s;
 }
 
@@ -759,8 +726,7 @@ MagDiffPetscSolver* magdiff_petsc_make (
     amrex::Array<amrex::MultiFab const*,3> const& /*eta_edge*/,
     amrex::Array<amrex::MultiFab const*,3> const& /*eta_pc*/,
     amrex::Geometry const& /*geom*/, amrex::Real /*theta_dt*/, amrex::Real /*mu0*/,
-    MagDiffPetscPC, amrex::Real, amrex::Real, int, int,
-    MagDiffMatvecFn, MagDiffPCFn, void*,
+    amrex::Real, amrex::Real, int, int, MagDiffMatvecFn, void*,
     amrex::Array<amrex::iMultiFab const*,3> const*)
 {
     amrex::Abort("magdiff_petsc_make: WarpX was not built with PETSc "

@@ -69,7 +69,6 @@ HybridMagDiffusion::ReadParameters ()
     pp.query("mag_diff_use_variable_eta", m_use_variable_eta);
 
     pp.query("mag_diff_linear_solver", m_linear_solver);
-    pp.query("mag_diff_petsc_pc", m_petsc_pc);
 
     if (utils::parser::queryWithParser(pp, "mag_diff_constant_eta", m_constant_eta)) {
         m_has_constant_eta = true;
@@ -102,8 +101,7 @@ HybridMagDiffusion::ReadParameters ()
                    << "  atol=" << m_atol
                    << "  eta_explicit_max=" << m_eta_explicit_max
                    << "  use_variable_eta=" << m_use_variable_eta
-                   << "  linear_solver=" << amrex::getEnumNameString(m_linear_solver)
-                   << "  petsc_pc=" << amrex::getEnumNameString(m_petsc_pc);
+                   << "  linear_solver=" << amrex::getEnumNameString(m_linear_solver);
     if (m_has_constant_eta) {
         amrex::Print() << "  constant_eta=" << m_constant_eta << " Ohm m";
     }
@@ -850,15 +848,12 @@ public:
     [[nodiscard]] bool hasFeed () const { return m_has_feed; }
     [[nodiscard]] MagDiffVector const& feedOffset () const { return m_feed_offset; }
 
-    // Accessors used by the optional PETSc KSP path (MagDiffPetscKSP): the
-    // homogeneous apply()/precond() are reused directly. The assembled
-    // exact_curl_curl Pmat uses E/J-face eta (m_eta) on RZ/Rcyl to match the
-    // matvec face selection; Cartesian still uses B-sampled m_eta_pc. Jacobi
-    // shell PC always uses m_eta_pc. apply()/precond() are non-const because
-    // they stage through internal work MultiFabs.
+    // Accessors used by the optional PETSc KSP path. The homogeneous apply() is
+    // reused directly. The assembled curl-curl Pmat uses E/J-face eta (m_eta)
+    // on RZ/Rcyl to match the matvec face selection; Cartesian still uses
+    // B-sampled m_eta_pc. apply() is non-const because it stages through
+    // internal work MultiFabs.
     void applyPetsc (MagDiffVector& output, MagDiffVector const& input) { apply(output, input); }
-    void precondPetsc (MagDiffVector& destination, MagDiffVector const& source)
-    { precond(destination, source); }
     [[nodiscard]] Real thetaDt () const { return m_theta_dt; }
     [[nodiscard]] Geometry const& geom () const { return m_geom; }
     [[nodiscard]] Array<MultiFab,3> const& etaPC () const { return m_eta_pc; }
@@ -892,7 +887,7 @@ private:
 // matrix-free operator (apply/precond) and the field MultiFabs. The glue below
 // scatters flat local arrays <-> MagDiffVector interior (nghost=0) using the
 // shared per-component global-DOF index owned by the PETSc side, and supplies
-// the matvec/PC callbacks the PETSc side invokes. The whole block is compiled
+// the matvec callback the PETSc side invokes. The whole block is compiled
 // only when PETSc is on; the caller in AdvanceVariable is guarded the same way.
 #ifdef AMREX_USE_PETSC
 
@@ -911,8 +906,6 @@ struct PetscOpCtx
     VariableCoeffMagDiffusionOp* linop = nullptr;
     MagDiffVector U;       // matvec input buffer
     MagDiffVector F;       // matvec output buffer
-    MagDiffVector PCsrc;   // PC input buffer
-    MagDiffVector PCdst;   // PC output buffer
 #ifdef AMREX_USE_GPU
     // Cached pinned host staging for PETSc flat <-> device MultiFab. Allocated
     // once per AdvanceVariable (not per matvec): the naive GPU-safe path that
@@ -1025,24 +1018,6 @@ petscMatvec (void* ctx, Real const* x, Real* y,
     petscScatter(c->U, x, gindex, rstart);
     c->linop->applyPetsc(c->F, c->U);
     petscGather(y, c->F, gindex, rstart);
-#endif
-}
-
-// PC callback: y = M^{-1} x = linop.precond (scaled Jacobi).
-void
-petscPCApply (void* ctx, Real const* x, Real* y,
-              Array<iMultiFab const*,3> const& gindex, amrex::Long rstart)
-{
-    auto* c = static_cast<PetscOpCtx*>(ctx);
-#ifdef AMREX_USE_GPU
-    // Reuse host_U / host_F staging (PC is not concurrent with matvec).
-    petscScatter(c->PCsrc, x, gindex, rstart, c->host_U);
-    c->linop->precondPetsc(c->PCdst, c->PCsrc);
-    petscGather(y, c->PCdst, gindex, rstart, c->host_F);
-#else
-    petscScatter(c->PCsrc, x, gindex, rstart);
-    c->linop->precondPetsc(c->PCdst, c->PCsrc);
-    petscGather(y, c->PCdst, gindex, rstart);
 #endif
 }
 
@@ -1171,8 +1146,6 @@ HybridMagDiffusion::AdvanceVariable (
         opctx = PetscOpCtx{};
         opctx.U.Define(makeVectorFieldView(solution.fields()));
         opctx.F.Define(makeVectorFieldView(solution.fields()));
-        opctx.PCsrc.Define(makeVectorFieldView(solution.fields()));
-        opctx.PCdst.Define(makeVectorFieldView(solution.fields()));
 #ifdef AMREX_USE_GPU
         opctx.ensureHostBufs(solution.fields());
 #endif
@@ -1257,8 +1230,8 @@ HybridMagDiffusion::AdvanceVariable (
         if (!m_petsc_solver) {
             m_petsc_solver = magdiff_petsc_make(
                 B_proto, eta_edge, eta_pc_proto, linop.geom(), linop.thetaDt(),
-                PhysConst::mu0, m_petsc_pc, m_rtol, m_atol, m_max_iter, m_verbose,
-                &petscMatvec, &petscPCApply, &opctx,
+                PhysConst::mu0, m_rtol, m_atol, m_max_iter, m_verbose,
+                &petscMatvec, &opctx,
                 petsc_eb_on ? &eb_update_B_ptrs : nullptr);
         } else {
             magdiff_petsc_update(m_petsc_solver, eta_edge, eta_pc_proto, linop.thetaDt(), &opctx);
