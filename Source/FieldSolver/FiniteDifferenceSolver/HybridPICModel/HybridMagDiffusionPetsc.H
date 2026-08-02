@@ -44,18 +44,15 @@ using MagDiffMatvecFn = void (*)(
  * \brief Create the PETSc KSP. The 3 B-component MultiFabs (`B_proto`) define the
  * DOF layout (boxArray/DistributionMap/IndexType).
  *
- * `eta_edge` is the E/J-face resistivity (matvec staggering); the assembled
- * curl-curl Pmat is built from these faces in RZ, Rcyl, and Cartesian XZ.
- * `eta_pc` is the B-sampled resistivity used by the remaining 1D/3D Cartesian
- * Laplacian proxy. Both are copied to nghost=1 host buffers as needed. `mu0`
- * keeps this header free of WarpX constants.
+ * `eta_edge` is the E/J-face resistivity used by both the matrix-free operator
+ * and the assembled curl-curl Pmat. It is copied to nghost=1 host buffers as
+ * needed. `mu0` keeps this header free of WarpX constants.
  *
  * Returns nullptr if built without PETSc (AMREX_USE_PETSC undefined).
  */
 MagDiffPetscSolver* magdiff_petsc_make (
     amrex::Array<amrex::MultiFab const*,3> const& B_proto,
     amrex::Array<amrex::MultiFab const*,3> const& eta_edge,
-    amrex::Array<amrex::MultiFab const*,3> const& eta_pc,
     amrex::Geometry const& geom, amrex::Real theta_dt, amrex::Real mu0,
     amrex::Real rtol, amrex::Real atol, int max_iter, int verbose,
     MagDiffMatvecFn matvec, void* opctx,
@@ -79,7 +76,6 @@ int magdiff_petsc_solve (MagDiffPetscSolver* s,
 void magdiff_petsc_update (
     MagDiffPetscSolver* s,
     amrex::Array<amrex::MultiFab const*,3> const& eta_edge,
-    amrex::Array<amrex::MultiFab const*,3> const& eta_pc,
     amrex::Real theta_dt,
     void* opctx);
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare the coupled Cartesian XZ PETSc solve with AMReX GMRES."""
+"""Compare a coupled Cartesian PETSc solve with its AMReX GMRES reference."""
 
 import glob
 import math
@@ -7,8 +7,14 @@ import os
 import re
 import sys
 
-AMREX_REF_DIR = os.path.join("..", "test_2d_hybrid_mag_diffusion_coupled")
 PARITY_TOL = 2.0e-6
+
+
+def reference_dir():
+    test_name = os.path.basename(os.getcwd())
+    if not test_name.endswith("_petsc"):
+        raise RuntimeError(f"PETSc test directory expected, got {test_name}")
+    return os.path.join("..", test_name.removesuffix("_petsc"))
 
 
 def last_plotfile(base_dir):
@@ -38,9 +44,14 @@ def component_minmax(diag_dir):
             continue
         if len(values) >= 3:
             float_lines.append(values)
-    if len(float_lines) < 2:
+    if len(float_lines) < 2 or len(float_lines) % 2 != 0:
         raise RuntimeError(f"Could not parse field min/max from {cell_h}")
-    return float_lines[-2][:3], float_lines[-1][:3]
+    num_boxes = len(float_lines) // 2
+    box_mins = float_lines[:num_boxes]
+    box_maxs = float_lines[num_boxes:]
+    global_min = [min(row[component] for row in box_mins) for component in range(3)]
+    global_max = [max(row[component] for row in box_maxs) for component in range(3)]
+    return global_min, global_max
 
 
 def magnetic_energy(base_dir):
@@ -61,11 +72,12 @@ def relative_error(a, b, scale):
 
 
 def main():
-    ref_plot = last_plotfile(AMREX_REF_DIR)
+    amrex_ref_dir = reference_dir()
+    ref_plot = last_plotfile(amrex_ref_dir)
     petsc_plot = last_plotfile(".")
     ref_min, ref_max = component_minmax(ref_plot)
     petsc_min, petsc_max = component_minmax(petsc_plot)
-    ref_energy = magnetic_energy(AMREX_REF_DIR)
+    ref_energy = magnetic_energy(amrex_ref_dir)
     petsc_energy = magnetic_energy(".")
 
     values = ref_min + ref_max + petsc_min + petsc_max + [ref_energy, petsc_energy]
@@ -75,12 +87,14 @@ def main():
 
     names = ["By", "Bx", "Bz"]
     errors = []
+    field_scale = max(abs(value) for value in ref_min + ref_max + petsc_min + petsc_max)
     for component, name in enumerate(names):
         scale = max(
             abs(ref_min[component]),
             abs(ref_max[component]),
             abs(petsc_min[component]),
             abs(petsc_max[component]),
+            field_scale * 1.0e-10,
         )
         error = max(
             relative_error(ref_min[component], petsc_min[component], scale),
@@ -106,7 +120,7 @@ def main():
         return 1
 
     print(
-        "PASSED: Cartesian XZ coupled PETSc/AMReX parity and exact-Pmat "
+        "PASSED: Cartesian coupled PETSc/AMReX parity and exact-Pmat "
         f"field agreement < {PARITY_TOL:.0e}"
     )
     return 0

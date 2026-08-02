@@ -128,6 +128,44 @@ add_warpx_test(
 # Only registered when WarpX is built with PETSc (AMReX_PETSC), mirroring the
 # implicit/* curl-curl PETSc PC tests.
 if(AMReX_PETSC)
+    # Cartesian 1D_Z exact-Pmat regression. Variable eta diffuses both
+    # transverse components, while longitudinal Bz checks the identity block.
+    # Direct LU must reduce the MatShell solve to one iteration, and the
+    # analysis compares the result with the AMReX GMRES reference.
+    add_warpx_test(
+        test_1d_hybrid_mag_diffusion_coupled  # name
+        1  # dims
+        1  # nprocs
+        "inputs_test_1d_hybrid_mag_diffusion_coupled"  # inputs
+        OFF  # analysis (reference data consumed by PETSc companion)
+        OFF  # checksum
+        OFF  # dependency
+    )
+    add_warpx_test(
+        test_1d_hybrid_mag_diffusion_coupled_petsc  # name
+        1  # dims
+        1  # nprocs
+        "inputs_test_1d_hybrid_mag_diffusion_coupled_petsc"  # inputs
+        "analysis_cartesian_coupled_parity.py"  # analysis
+        OFF  # checksum (solver parity + exact-Pmat iteration oracle)
+        test_1d_hybrid_mag_diffusion_coupled  # dependency (AMReX reference)
+    )
+    if(TEST test_1d_hybrid_mag_diffusion_coupled_petsc.run)
+        set_property(
+            TEST test_1d_hybrid_mag_diffusion_coupled_petsc.run
+            APPEND PROPERTY ENVIRONMENT "PETSC_OPTIONS=-pc_type lu"
+        )
+        set_property(
+            TEST test_1d_hybrid_mag_diffusion_coupled_petsc.run
+            PROPERTY PASS_REGULAR_EXPRESSION "PETSc KSP iterations=1"
+        )
+        set_property(
+            TEST test_1d_hybrid_mag_diffusion_coupled_petsc.run
+            PROPERTY FAIL_REGULAR_EXPRESSION
+            "PETSc KSP iterations=([2-9]|[1-9][0-9]);did not converge"
+        )
+    endif()
+
     add_warpx_test(
         test_rz_hybrid_mag_diffusion_petsc  # name
         RZ  # dims
@@ -175,23 +213,61 @@ if(AMReX_PETSC)
         2  # dims
         1  # nprocs
         "inputs_test_2d_hybrid_mag_diffusion_coupled_petsc"  # inputs
-        "analysis_2d_coupled_parity.py"  # analysis
+        "analysis_cartesian_coupled_parity.py"  # analysis
         OFF  # checksum (solver parity + exact-Pmat iteration oracle)
         test_2d_hybrid_mag_diffusion_coupled  # dependency (AMReX reference)
     )
-    set_property(
-        TEST test_2d_hybrid_mag_diffusion_coupled_petsc.run
-        APPEND PROPERTY ENVIRONMENT "PETSC_OPTIONS=-pc_type lu"
+    if(TEST test_2d_hybrid_mag_diffusion_coupled_petsc.run)
+        set_property(
+            TEST test_2d_hybrid_mag_diffusion_coupled_petsc.run
+            APPEND PROPERTY ENVIRONMENT "PETSC_OPTIONS=-pc_type lu"
+        )
+        set_property(
+            TEST test_2d_hybrid_mag_diffusion_coupled_petsc.run
+            PROPERTY PASS_REGULAR_EXPRESSION "PETSc KSP iterations=1"
+        )
+        set_property(
+            TEST test_2d_hybrid_mag_diffusion_coupled_petsc.run
+            PROPERTY FAIL_REGULAR_EXPRESSION
+            "PETSc KSP iterations=([2-9]|[1-9][0-9]);did not converge"
+        )
+    endif()
+
+    # Cartesian 3D exact-Pmat regression. A divergence-free three-component B
+    # and variable eta exercise all same-component and mixed-derivative blocks.
+    add_warpx_test(
+        test_3d_hybrid_mag_diffusion_coupled  # name
+        3  # dims
+        1  # nprocs
+        "inputs_test_3d_hybrid_mag_diffusion_coupled"  # inputs
+        OFF  # analysis (reference data consumed by PETSc companion)
+        OFF  # checksum
+        OFF  # dependency
     )
-    set_property(
-        TEST test_2d_hybrid_mag_diffusion_coupled_petsc.run
-        PROPERTY PASS_REGULAR_EXPRESSION "PETSc KSP iterations=1"
+    add_warpx_test(
+        test_3d_hybrid_mag_diffusion_coupled_petsc  # name
+        3  # dims
+        1  # nprocs
+        "inputs_test_3d_hybrid_mag_diffusion_coupled_petsc"  # inputs
+        "analysis_cartesian_coupled_parity.py"  # analysis
+        OFF  # checksum (solver parity + exact-Pmat iteration oracle)
+        test_3d_hybrid_mag_diffusion_coupled  # dependency (AMReX reference)
     )
-    set_property(
-        TEST test_2d_hybrid_mag_diffusion_coupled_petsc.run
-        PROPERTY FAIL_REGULAR_EXPRESSION
-        "PETSc KSP iterations=([2-9]|[1-9][0-9]);did not converge"
-    )
+    if(TEST test_3d_hybrid_mag_diffusion_coupled_petsc.run)
+        set_property(
+            TEST test_3d_hybrid_mag_diffusion_coupled_petsc.run
+            APPEND PROPERTY ENVIRONMENT "PETSC_OPTIONS=-pc_type lu"
+        )
+        set_property(
+            TEST test_3d_hybrid_mag_diffusion_coupled_petsc.run
+            PROPERTY PASS_REGULAR_EXPRESSION "PETSc KSP iterations=1"
+        )
+        set_property(
+            TEST test_3d_hybrid_mag_diffusion_coupled_petsc.run
+            PROPERTY FAIL_REGULAR_EXPRESSION
+            "PETSc KSP iterations=([2-9]|[1-9][0-9]);did not converge"
+        )
+    endif()
 endif()
 
 # Stair-case embedded boundary on the RZ matrix-free variable-eta path (theta=1):

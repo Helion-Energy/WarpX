@@ -850,13 +850,11 @@ public:
 
     // Accessors used by the optional PETSc KSP path. The homogeneous apply() is
     // reused directly. The assembled curl-curl Pmat uses E/J-face eta (m_eta)
-    // in RZ/Rcyl and Cartesian XZ to match the matvec face selection. The
-    // remaining 1D/3D Cartesian proxy uses B-sampled m_eta_pc. apply() is
-    // non-const because it stages through internal work MultiFabs.
+    // in every supported geometry to match the matvec face selection. apply()
+    // is non-const because it stages through internal work MultiFabs.
     void applyPetsc (MagDiffVector& output, MagDiffVector const& input) { apply(output, input); }
     [[nodiscard]] Real thetaDt () const { return m_theta_dt; }
     [[nodiscard]] Geometry const& geom () const { return m_geom; }
-    [[nodiscard]] Array<MultiFab,3> const& etaPC () const { return m_eta_pc; }
     [[nodiscard]] Array<MultiFab const*,3> const& etaEdge () const { return m_eta; }
 
 private:
@@ -1213,12 +1211,9 @@ HybridMagDiffusion::AdvanceVariable (
 
     if (m_linear_solver == MagDiffLinearSolver::petsc) {
 #ifdef AMREX_USE_PETSC
-        auto& eta_pc = linop.etaPC();
         auto const& eta_edge = linop.etaEdge();
         amrex::Array<MultiFab const*,3> const B_proto{
             &solution.fields()[0], &solution.fields()[1], &solution.fields()[2]};
-        amrex::Array<MultiFab const*,3> const eta_pc_proto{
-            &eta_pc[0], &eta_pc[1], &eta_pc[2]};
 
         // Pass the EB B-field mask (if any) so covered DOFs are skipped from
         // the PETSc system. Must be nullptr when EB is off (the mask MultiFabs
@@ -1229,12 +1224,12 @@ HybridMagDiffusion::AdvanceVariable (
 
         if (!m_petsc_solver) {
             m_petsc_solver = magdiff_petsc_make(
-                B_proto, eta_edge, eta_pc_proto, linop.geom(), linop.thetaDt(),
+                B_proto, eta_edge, linop.geom(), linop.thetaDt(),
                 PhysConst::mu0, m_rtol, m_atol, m_max_iter, m_verbose,
                 &petscMatvec, &opctx,
                 petsc_eb_on ? &eb_update_B_ptrs : nullptr);
         } else {
-            magdiff_petsc_update(m_petsc_solver, eta_edge, eta_pc_proto, linop.thetaDt(), &opctx);
+            magdiff_petsc_update(m_petsc_solver, eta_edge, linop.thetaDt(), &opctx);
         }
 
         const amrex::Long n_local = magdiff_petsc_nlocal(m_petsc_solver);

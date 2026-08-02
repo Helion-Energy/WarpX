@@ -39,6 +39,7 @@
 #include <petscvec.h>
 #endif
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <memory>
@@ -77,7 +78,6 @@ public:
     MagDiffPetscSolverImpl (
         amrex::Array<amrex::MultiFab const*,3> const& B_proto,
         amrex::Array<amrex::MultiFab const*,3> const& eta_edge,
-        amrex::Array<amrex::MultiFab const*,3> const& eta_pc,
         amrex::Geometry const& geom, amrex::Real theta_dt, amrex::Real mu0,
         amrex::Real rtol, amrex::Real atol, int max_iter, int verbose,
         MagDiffMatvecFn matvec, void* opctx,
@@ -122,14 +122,7 @@ public:
 
         buildGlobalIndex(B_proto);
         // Exact curl-curl rows select η on E/J faces to match the matvec.
-        // The remaining Cartesian proxies use B-sampled η.
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_XZ)
-        amrex::ignore_unused(eta_pc);
         buildEtaGhosts(eta_edge);
-#else
-        amrex::ignore_unused(eta_edge);
-        buildEtaGhosts(eta_pc);
-#endif
 
         // MatShell operator: matvec = caller's apply (homogeneous A_lin).
         MAGDIFF_PETSC_CHK(MatCreateShell(
@@ -144,13 +137,17 @@ public:
 
         // Assembled frozen-η curl-curl Pmat (see assemblePreconditioner).
         // Lets runtime -pc_type asm/ilu/hypre factor a real matrix; default PC
-        // for an assembled Pmat is block-Jacobi ILU(0). RZ/Rcyl has up to ~7
-        // nonzeros/row (Br-Bz cross terms); Cartesian XZ has up to 7. The
-        // remaining Cartesian dimensions use a 3/7-point Laplacian proxy.
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_XZ)
+        // for an assembled Pmat is block-Jacobi ILU(0). Preallocation follows
+        // the maximum exact stencil width in each geometry.
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
         PetscInt const nz = 9;
+#elif defined(WARPX_DIM_3D)
+        // Four same-component neighbors, eight mixed couplings, and diagonal.
+        PetscInt const nz = 13;
+#elif defined(WARPX_DIM_XZ)
+        PetscInt const nz = 7;
 #else
-        PetscInt const nz = 1 + 2 * AMREX_SPACEDIM;
+        PetscInt const nz = 3;
 #endif
         MAGDIFF_PETSC_CHK(MatCreateAIJ(
             PETSC_COMM_WORLD, m_n_local, m_n_local, m_n_global, m_n_global,
@@ -326,20 +323,20 @@ private:
         }
     }
 
-    // nghost=1 copy of B-centered eta for neighbor reads in the assembled Pmat.
+    // nghost=1 copy of edge-centered eta for neighbor reads in the assembled Pmat.
     // Pinned host: assemblePreconditioner uses LoopOnCpu host access.
-    void buildEtaGhosts (amrex::Array<amrex::MultiFab const*,3> const& eta_pc) {
+    void buildEtaGhosts (amrex::Array<amrex::MultiFab const*,3> const& eta_edge) {
         amrex::MFInfo const host_info =
             amrex::MFInfo().SetArena(amrex::The_Pinned_Arena());
         for (int idim = 0; idim < 3; ++idim) {
             if (!m_eta_g[idim].ok()) {
-                m_eta_g[idim].define(eta_pc[idim]->boxArray(),
-                                     eta_pc[idim]->DistributionMap(), 1,
+                m_eta_g[idim].define(eta_edge[idim]->boxArray(),
+                                     eta_edge[idim]->DistributionMap(), 1,
                                      amrex::IntVect::Unit, host_info);
             }
             m_eta_g[idim].setVal(amrex::Real(0.0));
-            // eta_pc may be device memory under CUDA; Copy handles H<->D.
-            amrex::MultiFab::Copy(m_eta_g[idim], *eta_pc[idim], 0, 0, 1, 0);
+            // eta_edge may be device memory under CUDA; Copy handles H<->D.
+            amrex::MultiFab::Copy(m_eta_g[idim], *eta_edge[idim], 0, 0, 1, 0);
             m_eta_g[idim].FillBoundary(m_geom.periodicity());
         }
     }
@@ -354,9 +351,8 @@ private:
     // uses the 4/dr^2 J_z correction. η is face-selected per term (et_r/t/z).
     // See notes/2026-07-20_exact_curl_curl_pc.md.
     //
-    // Cartesian XZ: exact staggered curl-curl stencil. Bx and Bz are coupled
-    // through Jy mixed derivatives; By is an uncoupled 5-point block.
-    // Cartesian 3D / 1D_Z retain the face-averaged scalar Laplacian proxy.
+    // Cartesian: exact algebraic expansion of the staggered Yee operator,
+    // C_up diag(eta/mu0) C_down. Inactive derivatives vanish in XZ and 1D_Z.
 
     PetscErrorCode assemblePreconditioner () {
         PetscFunctionBeginUser;
@@ -371,21 +367,28 @@ private:
         amrex::Real const dr2 = dr * dr;
         amrex::Real const dz2 = dz * dz;
         amrex::Real const drdz = dr * dz;
-#elif defined(WARPX_DIM_XZ)
-        amrex::Real const dx2 = dx[0] * dx[0];
-        amrex::Real const dz2 = dx[1] * dx[1];
-        amrex::Real const dxdz = dx[0] * dx[1];
 #else
-        amrex::Real dxinv2[3] = {amrex::Real(0.0), amrex::Real(0.0), amrex::Real(0.0)};
-        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
-            dxinv2[d] = amrex::Real(1.0) / (dx[d] * dx[d]);
-        }
+        // Map physical x/y/z derivatives to AMReX index directions. A value
+        // of -1 marks an invariant direction that contributes no curl term.
+#if defined(WARPX_DIM_3D)
+        std::array<int,3> const phys_to_amrex{0, 1, 2};
+        std::array<amrex::Real,3> const spacing{dx[0], dx[1], dx[2]};
+#elif defined(WARPX_DIM_XZ)
+        std::array<int,3> const phys_to_amrex{0, -1, 1};
+        std::array<amrex::Real,3> const spacing{dx[0], 1.0, dx[1]};
+#elif defined(WARPX_DIM_1D_Z)
+        std::array<int,3> const phys_to_amrex{-1, -1, 0};
+        std::array<amrex::Real,3> const spacing{1.0, 1.0, dx[0]};
+#else
+        std::array<int,3> const phys_to_amrex{-1, -1, -1};
+        std::array<amrex::Real,3> const spacing{1.0, 1.0, 1.0};
+#endif
 #endif
 
         std::vector<PetscInt> cols;
         std::vector<PetscScalar> vals;
-        cols.reserve(1 + 4 * AMREX_SPACEDIM);
-        vals.reserve(1 + 4 * AMREX_SPACEDIM);
+        cols.reserve(13);
+        vals.reserve(13);
 
         for (int idim = 0; idim < 3; ++idim) {
             for (amrex::MFIter mfi(*m_gindex[idim]); mfi.isValid(); ++mfi) {
@@ -397,15 +400,15 @@ private:
                 auto const& et_r = m_eta_g[0].const_array(mfi);
                 auto const& et_t = m_eta_g[1].const_array(mfi);
                 auto const& et_z = m_eta_g[2].const_array(mfi);
-#elif defined(WARPX_DIM_XZ)
-                auto const& gix_x = m_gindex[0]->const_array(mfi);
-                auto const& gix_y = m_gindex[1]->const_array(mfi);
-                auto const& gix_z = m_gindex[2]->const_array(mfi);
-                auto const& et_x = m_eta_g[0].const_array(mfi);
-                auto const& et_y = m_eta_g[1].const_array(mfi);
-                auto const& et_z = m_eta_g[2].const_array(mfi);
 #else
-                auto const& et = m_eta_g[idim].const_array(mfi);
+                amrex::Array<amrex::Array4<int const>,3> const gix_b{
+                    m_gindex[0]->const_array(mfi),
+                    m_gindex[1]->const_array(mfi),
+                    m_gindex[2]->const_array(mfi)};
+                amrex::Array<amrex::Array4<amrex::Real const>,3> const eta_j{
+                    m_eta_g[0].const_array(mfi),
+                    m_eta_g[1].const_array(mfi),
+                    m_eta_g[2].const_array(mfi)};
 #endif
                 amrex::Box const& tb = mfi.tilebox();
                 amrex::LoopOnCpu(amrex::lbound(tb), amrex::ubound(tb),
@@ -581,164 +584,73 @@ private:
                         }
                     }
 
-#elif defined(WARPX_DIM_XZ)
-                    // Cartesian XZ exact curl-curl assembly. In 2D,
-                    //   Jx = -Dz(By)/mu0,
-                    //   Jy = (-Dx(Bz) + Dz(Bx))/mu0,
-                    //   Jz =  Dx(By)/mu0.
-                    // Bx/Bz therefore share the eta_y Jy block and its mixed
-                    // derivatives; By is uncoupled through eta_x Jx and
-                    // eta_z Jz.
-                    if (idim == 1) {
-                        // By: -Dx(eta_z Dx By) - Dz(eta_x Dz By).
-                        PetscInt const cp_x = gix_y(i+1, j, k);
-                        if (cp_x >= 0) {
-                            amrex::Real const chi =
-                                std::max(et_z(i+1, j, k), amrex::Real(0.0)) / m_mu0;
-                            PetscScalar const v = -m_theta_dt * chi / dx2;
-                            cols.push_back(cp_x);
-                            vals.push_back(v);
-                            diag -= v;
-                        }
-                        PetscInt const cm_x = gix_y(i-1, j, k);
-                        if (cm_x >= 0) {
-                            amrex::Real const chi =
-                                std::max(et_z(i, j, k), amrex::Real(0.0)) / m_mu0;
-                            PetscScalar const v = -m_theta_dt * chi / dx2;
-                            cols.push_back(cm_x);
-                            vals.push_back(v);
-                            diag -= v;
-                        }
-                        PetscInt const cp_z = gix_y(i, j+1, k);
-                        if (cp_z >= 0) {
-                            amrex::Real const chi =
-                                std::max(et_x(i, j+1, k), amrex::Real(0.0)) / m_mu0;
-                            PetscScalar const v = -m_theta_dt * chi / dz2;
-                            cols.push_back(cp_z);
-                            vals.push_back(v);
-                            diag -= v;
-                        }
-                        PetscInt const cm_z = gix_y(i, j-1, k);
-                        if (cm_z >= 0) {
-                            amrex::Real const chi =
-                                std::max(et_x(i, j, k), amrex::Real(0.0)) / m_mu0;
-                            PetscScalar const v = -m_theta_dt * chi / dz2;
-                            cols.push_back(cm_z);
-                            vals.push_back(v);
-                            diag -= v;
-                        }
-                    } else if (idim == 0) {
-                        // Bx: -Dz[eta_y(-Dx Bz + Dz Bx)]/mu0.
-                        amrex::Real const chi_p =
-                            std::max(et_y(i, j+1, k), amrex::Real(0.0)) / m_mu0;
-                        amrex::Real const chi_m =
-                            std::max(et_y(i, j, k), amrex::Real(0.0)) / m_mu0;
-
-                        PetscInt const cp_z = gix_x(i, j+1, k);
-                        if (cp_z >= 0) {
-                            PetscScalar const v = -m_theta_dt * chi_p / dz2;
-                            cols.push_back(cp_z);
-                            vals.push_back(v);
-                            diag -= v;
-                        }
-                        PetscInt const cm_z = gix_x(i, j-1, k);
-                        if (cm_z >= 0) {
-                            PetscScalar const v = -m_theta_dt * chi_m / dz2;
-                            cols.push_back(cm_z);
-                            vals.push_back(v);
-                            diag -= v;
-                        }
-
-                        PetscInt const xp_zp = gix_z(i, j+1, k);
-                        if (xp_zp >= 0) {
-                            cols.push_back(xp_zp);
-                            vals.push_back(m_theta_dt * chi_p / dxdz);
-                        }
-                        PetscInt const xm_zp = gix_z(i-1, j+1, k);
-                        if (xm_zp >= 0) {
-                            cols.push_back(xm_zp);
-                            vals.push_back(-m_theta_dt * chi_p / dxdz);
-                        }
-                        PetscInt const xp_zm = gix_z(i, j, k);
-                        if (xp_zm >= 0) {
-                            cols.push_back(xp_zm);
-                            vals.push_back(-m_theta_dt * chi_m / dxdz);
-                        }
-                        PetscInt const xm_zm = gix_z(i-1, j, k);
-                        if (xm_zm >= 0) {
-                            cols.push_back(xm_zm);
-                            vals.push_back(m_theta_dt * chi_m / dxdz);
-                        }
-                    } else {
-                        // Bz: Dx[eta_y(-Dx Bz + Dz Bx)]/mu0.
-                        amrex::Real const chi_p =
-                            std::max(et_y(i+1, j, k), amrex::Real(0.0)) / m_mu0;
-                        amrex::Real const chi_m =
-                            std::max(et_y(i, j, k), amrex::Real(0.0)) / m_mu0;
-
-                        PetscInt const cp_x = gix_z(i+1, j, k);
-                        if (cp_x >= 0) {
-                            PetscScalar const v = -m_theta_dt * chi_p / dx2;
-                            cols.push_back(cp_x);
-                            vals.push_back(v);
-                            diag -= v;
-                        }
-                        PetscInt const cm_x = gix_z(i-1, j, k);
-                        if (cm_x >= 0) {
-                            PetscScalar const v = -m_theta_dt * chi_m / dx2;
-                            cols.push_back(cm_x);
-                            vals.push_back(v);
-                            diag -= v;
-                        }
-
-                        PetscInt const xp_zp = gix_x(i+1, j, k);
-                        if (xp_zp >= 0) {
-                            cols.push_back(xp_zp);
-                            vals.push_back(m_theta_dt * chi_p / dxdz);
-                        }
-                        PetscInt const xp_zm = gix_x(i+1, j-1, k);
-                        if (xp_zm >= 0) {
-                            cols.push_back(xp_zm);
-                            vals.push_back(-m_theta_dt * chi_p / dxdz);
-                        }
-                        PetscInt const xm_zp = gix_x(i, j, k);
-                        if (xm_zp >= 0) {
-                            cols.push_back(xm_zp);
-                            vals.push_back(-m_theta_dt * chi_m / dxdz);
-                        }
-                        PetscInt const xm_zm = gix_x(i, j-1, k);
-                        if (xm_zm >= 0) {
-                            cols.push_back(xm_zm);
-                            vals.push_back(m_theta_dt * chi_m / dxdz);
-                        }
-                    }
 #else
-                    // Cartesian 1D_Z / 3D face-averaged Laplacian proxy.
-                    amrex::Real const chi_c = std::max(et(i, j, k), amrex::Real(0.0)) / m_mu0;
-                    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
-                        int ip = i, jp = j, kp = k;
-                        int im = i, jm = j, km = k;
-                        if (d == 0) { ip += 1; im -= 1; }
-                        else if (d == 1) { jp += 1; jm -= 1; }
-                        else { kp += 1; km -= 1; }
-                        PetscInt const cp = gix(ip, jp, kp);
-                        PetscInt const cm = gix(im, jm, km);
+                    // Expand C_up diag(eta/mu0) C_down directly. For each
+                    // output curl term, q is either p+e_d or p; the nested curl
+                    // contributes B(q)-B(q-e_e). This is the exact Yee stencil
+                    // in 3D and naturally removes invariant directions in XZ
+                    // and 1D_Z.
+                    int const curl_component[3][2] = {
+                        {2, 1}, {0, 2}, {1, 0}};
+                    int const curl_direction[3][2] = {
+                        {1, 2}, {2, 0}, {0, 1}};
+                    int const curl_sign[2] = {1, -1};
 
-                        if (cp >= 0) {
-                            amrex::Real const chi_n = std::max(et(ip, jp, kp), amrex::Real(0.0)) / m_mu0;
-                            amrex::Real const chi_f = amrex::Real(0.5) * (chi_c + chi_n);
-                            PetscScalar const v = -m_theta_dt * chi_f * dxinv2[d];
-                            diag -= v;
-                            cols.push_back(cp);
-                            vals.push_back(v);
+                    auto shift = [] (int direction, int amount,
+                                     int& ii, int& jj, int& kk) {
+                        if (direction == 0) { ii += amount; }
+                        else if (direction == 1) { jj += amount; }
+                        else { kk += amount; }
+                    };
+                    auto add_value = [&] (PetscInt column, PetscScalar value) {
+                        if (column < 0 || value == PetscScalar(0.0)) { return; }
+                        if (column == row) {
+                            diag += value;
+                            return;
                         }
-                        if (cm >= 0) {
-                            amrex::Real const chi_n = std::max(et(im, jm, km), amrex::Real(0.0)) / m_mu0;
-                            amrex::Real const chi_f = amrex::Real(0.5) * (chi_c + chi_n);
-                            PetscScalar const v = -m_theta_dt * chi_f * dxinv2[d];
-                            diag -= v;
-                            cols.push_back(cm);
-                            vals.push_back(v);
+                        auto const iter = std::find(cols.begin(), cols.end(), column);
+                        if (iter == cols.end()) {
+                            cols.push_back(column);
+                            vals.push_back(value);
+                        } else {
+                            auto const index = static_cast<std::size_t>(iter - cols.begin());
+                            vals[index] += value;
+                        }
+                    };
+
+                    for (int outer_term = 0; outer_term < 2; ++outer_term) {
+                        int const jcomp = curl_component[idim][outer_term];
+                        int const outer_phys = curl_direction[idim][outer_term];
+                        int const outer_dir = phys_to_amrex[outer_phys];
+                        if (outer_dir < 0) { continue; }
+
+                        for (int outer_side = 0; outer_side < 2; ++outer_side) {
+                            int qi = i, qj = j, qk = k;
+                            if (outer_side == 0) {
+                                shift(outer_dir, 1, qi, qj, qk);
+                            }
+                            amrex::Real const outer_coeff =
+                                curl_sign[outer_term] *
+                                ((outer_side == 0) ? amrex::Real(1.0) : amrex::Real(-1.0)) /
+                                spacing[outer_phys];
+                            amrex::Real const chi =
+                                std::max(eta_j[jcomp](qi, qj, qk), amrex::Real(0.0)) /
+                                m_mu0;
+
+                            for (int inner_term = 0; inner_term < 2; ++inner_term) {
+                                int const bcomp = curl_component[jcomp][inner_term];
+                                int const inner_phys = curl_direction[jcomp][inner_term];
+                                int const inner_dir = phys_to_amrex[inner_phys];
+                                if (inner_dir < 0) { continue; }
+
+                                PetscScalar const value = m_theta_dt * chi * outer_coeff *
+                                    curl_sign[inner_term] / spacing[inner_phys];
+                                add_value(gix_b[bcomp](qi, qj, qk), value);
+
+                                int mi = qi, mj = qj, mk = qk;
+                                shift(inner_dir, -1, mi, mj, mk);
+                                add_value(gix_b[bcomp](mi, mj, mk), -value);
+                            }
                         }
                     }
 #endif
@@ -758,20 +670,13 @@ private:
 public:
     void update (
         amrex::Array<amrex::MultiFab const*,3> const& eta_edge,
-        amrex::Array<amrex::MultiFab const*,3> const& eta_pc,
         amrex::Real theta_dt,
         void* opctx)
     {
         m_theta_dt = theta_dt;
         m_opctx = opctx;
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_XZ)
-        amrex::ignore_unused(eta_pc);
         buildEtaGhosts(eta_edge);
-#else
-        amrex::ignore_unused(eta_edge);
-        buildEtaGhosts(eta_pc);
-#endif
 
         // Drop stale PC factors before rewriting P (avoids use-after-free when
         // ILU/BJACOBI held internal refs into the previous P values).
@@ -814,7 +719,6 @@ struct MagDiffPetscSolver { std::unique_ptr<MagDiffPetscSolverImpl> impl; };
 MagDiffPetscSolver* magdiff_petsc_make (
     amrex::Array<amrex::MultiFab const*,3> const& B_proto,
     amrex::Array<amrex::MultiFab const*,3> const& eta_edge,
-    amrex::Array<amrex::MultiFab const*,3> const& eta_pc,
     amrex::Geometry const& geom, amrex::Real theta_dt, amrex::Real mu0,
     amrex::Real rtol, amrex::Real atol, int max_iter, int verbose,
     MagDiffMatvecFn matvec, void* opctx,
@@ -822,7 +726,7 @@ MagDiffPetscSolver* magdiff_petsc_make (
 {
     auto* s = new MagDiffPetscSolver;
     s->impl = std::make_unique<MagDiffPetscSolverImpl>(
-        B_proto, eta_edge, eta_pc, geom, theta_dt, mu0,
+        B_proto, eta_edge, geom, theta_dt, mu0,
         rtol, atol, max_iter, verbose, matvec, opctx, eb_update_B);
     return s;
 }
@@ -847,11 +751,10 @@ int magdiff_petsc_solve (MagDiffPetscSolver* s, amrex::Real const* rhs,
 void magdiff_petsc_update (
     MagDiffPetscSolver* s,
     amrex::Array<amrex::MultiFab const*,3> const& eta_edge,
-    amrex::Array<amrex::MultiFab const*,3> const& eta_pc,
     amrex::Real theta_dt,
     void* opctx)
 {
-    s->impl->update(eta_edge, eta_pc, theta_dt, opctx);
+    s->impl->update(eta_edge, theta_dt, opctx);
 }
 
 void magdiff_petsc_destroy (MagDiffPetscSolver* s) {
@@ -866,7 +769,6 @@ void magdiff_petsc_destroy (MagDiffPetscSolver* s) {
 MagDiffPetscSolver* magdiff_petsc_make (
     amrex::Array<amrex::MultiFab const*,3> const& /*B_proto*/,
     amrex::Array<amrex::MultiFab const*,3> const& /*eta_edge*/,
-    amrex::Array<amrex::MultiFab const*,3> const& /*eta_pc*/,
     amrex::Geometry const& /*geom*/, amrex::Real /*theta_dt*/, amrex::Real /*mu0*/,
     amrex::Real, amrex::Real, int, int, MagDiffMatvecFn, void*,
     amrex::Array<amrex::iMultiFab const*,3> const*)
@@ -886,7 +788,6 @@ int magdiff_petsc_solve (MagDiffPetscSolver*, amrex::Real const*, amrex::Real*,
 
 void magdiff_petsc_update (
     MagDiffPetscSolver*,
-    amrex::Array<amrex::MultiFab const*,3> const&,
     amrex::Array<amrex::MultiFab const*,3> const&,
     amrex::Real,
     void*) {}
