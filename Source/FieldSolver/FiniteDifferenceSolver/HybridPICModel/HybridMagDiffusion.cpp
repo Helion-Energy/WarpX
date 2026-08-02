@@ -19,7 +19,6 @@
 
 #include <ablastr/coarsen/sample.H>
 #include <ablastr/profiler/ProfilerWrapper.H>
-#include <ablastr/utils/Communication.H>
 
 #include <AMReX_Array.H>
 #include <AMReX_Arena.H>
@@ -447,12 +446,7 @@ public:
         // (computeAFull / copy-back), not the Cartesian FillBoundaryAndSync.
         // BC policy mirrors RZ minus the z dimension:
         //   - r_lo (r=0): None (axis; ApplyFieldBoundaryOnAxis).
-        //   - r_hi: None (unforced) or PEC (tangential-mirror wall).
-        // pec_insulator (Dirichlet B_t feed) is NOT wired into the mag-diff
-        // affine-feed split for RCYLINDER yet (prepareFeed is RZ-only); assert
-        // here so a feed deck fails fast instead of silently treating an affine
-        // operator as linear. Extending the feed to Rcyl is a documented
-        // follow-up (notes/2026-07-19_rcyl_mag_diff_port.md Sec 2/7).
+        //   - r_hi: None (unforced), PEC, or PEC_Insulator.
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             WarpX::field_boundary_lo[0] == FieldBoundaryType::None,
             "RCYLINDER matrix-free hybrid magnetic diffusion requires the "
@@ -472,10 +466,21 @@ public:
             "Matrix-free hybrid magnetic diffusion is not yet supported in "
             "RSPHERE geometry");
 #else
+        auto const fb_is_supported = [] (FieldBoundaryType fb) {
+            return fb == FieldBoundaryType::Periodic ||
+                   fb == FieldBoundaryType::PEC ||
+                   fb == FieldBoundaryType::PEC_Insulator;
+        };
+        bool cartesian_bcs_supported = true;
+        for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+            cartesian_bcs_supported = cartesian_bcs_supported &&
+                fb_is_supported(WarpX::field_boundary_lo[idim]) &&
+                fb_is_supported(WarpX::field_boundary_hi[idim]);
+        }
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            m_geom.isAllPeriodic(),
-            "Variable-coefficient hybrid magnetic diffusion currently requires "
-            "periodic field boundaries");
+            cartesian_bcs_supported,
+            "Cartesian matrix-free hybrid magnetic diffusion supports Periodic, "
+            "PEC, or PEC_Insulator field boundaries");
 #endif
         // EB is supported on the matrix-free path via the stair-case masks
         // m_eb_update_E/B (MarkUpdateCellsStairCase): covered E faces carry
@@ -719,8 +724,8 @@ public:
     }
 
     // Compute A_full(x) = x + alpha_dt * curl(eta/mu0 curl x), staging through
-    // the registered B field so ApplyBfieldBoundary imposes RZ axis, PEC walls,
-    // and any pec_insulator Dirichlet B_t feed (ghost = g(t_new)). With a nonzero
+    // the registered B field so ApplyBfieldBoundary imposes geometry axes, PEC
+    // walls, and any pec_insulator Dirichlet B_t feed (ghost = g(t_new)). With a nonzero
     // feed, A_full is affine (A_full(x) = A_lin(x) + c); apply() subtracts c so
     // GMRES/PETSc see the homogeneous A_lin, and c is carried on the RHS.
     //
@@ -733,10 +738,9 @@ public:
     void computeAFull (MagDiffVector& output, MagDiffVector const& input, Real alpha_dt)
     {
         auto const& input_fields = input.fields();
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
         auto& warpx = WarpX::GetInstance();
-        // Stage valid cells into the registered B field so WarpX applies RZ
-        // axis and field boundaries, then pull the filled ghost region into
+        // Stage valid cells into the registered B field so WarpX applies the
+        // geometry axis and physical field boundaries, then pull the filled ghost region into
         // work arrays. (Krylov MagDiffVectors may carry ghost storage, but
         // norms use nghost=0; BC fill goes through registered B.)
         for (int idim = 0; idim < 3; ++idim) {
@@ -750,12 +754,6 @@ public:
             MultiFab::Copy(m_Bwork[idim], *m_source[idim], 0, 0, 1,
                            m_Bwork[idim].nGrowVect());
         }
-#else
-        for (int idim = 0; idim < 3; ++idim) {
-            MultiFab::Copy(m_Bwork[idim], input_fields[idim], 0, 0, 1, 0);
-            m_Bwork[idim].FillBoundaryAndSync(m_geom.periodicity());
-        }
-#endif
 
 
         MultiFab * const Bwork_ptr = m_Bwork.data();
@@ -817,7 +815,6 @@ public:
     void prepareFeed ()
     {
         m_has_feed = false;
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
         auto& warpx = WarpX::GetInstance();
         for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
             for (int iside = 0; iside < 2; ++iside) {
@@ -832,7 +829,6 @@ public:
                 }
             }
         }
-#endif
         if (!m_has_feed) { return; }
 
         MagDiffVector zero;
@@ -1301,26 +1297,12 @@ HybridMagDiffusion::AdvanceVariable (
     // never write a nonzero value into the solid.
     zeroCoveredB(solution, eb_update_B);
     auto& warpx = WarpX::GetInstance();
-#if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_RCYLINDER)
-    Geometry const& geom = warpx.Geom(lev);
-#endif
     for (int idim = 0; idim < 3; ++idim) {
         MultiFab::Copy(*Bfield[idim], solution_fields[idim], 0, 0, 1, 0);
-#if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_RCYLINDER)
-        ablastr::utils::communication::FillBoundary(
-            *Bfield[idim],
-            WarpX::do_single_precision_comms,
-            geom.periodicity(),
-            true);
-#endif
     }
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-    // Re-apply the axis (r=0 mirror) and any PEC wall via the same boundary
-    // path the RZ matvec uses, then refill ghosts. RCYLINDER mirrors RZ here
-    // (ApplyFieldBoundaryOnAxis supports both); the Cartesian FillBoundary
-    // tail above is for 3D/XZ/1D_Z only.
+    // Re-apply physical boundaries through the same path used by the matvec,
+    // then exchange periodic and inter-box ghosts.
     warpx.ApplyBfieldBoundary(
         lev, PatchType::fine, SubcyclingHalf::None, warpx.gett_new(lev));
     warpx.FillBoundaryB(lev, Bfield[0]->nGrowVect(), true);
-#endif
 }

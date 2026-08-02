@@ -6,9 +6,22 @@
 # AMReX parity. Add combination tests only for interactions with distinct logic
 # (variable coefficients, affine feeds, EB, or geometry-specific boundaries).
 
-# Analytic constant-η magnetic diffusion (Fourier By mode) with
-# hybrid_pic_model.implicit_mag_diffusion. Uses the C++ executable directly
-# (no PICMI) so pywarpx is not required.
+# Cartesian 1D_Z physical-boundary regression: a homogeneous PEC endwall and
+# an inhomogeneous pec_insulator tangential-B feed exercise both boundary
+# contributions in the matrix-free operator.
+add_warpx_test(
+    test_1d_hybrid_mag_diffusion_pec_feed  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_hybrid_mag_diffusion_pec_feed"  # inputs
+    "analysis_cartesian_boundaries_eb.py"  # analysis
+    OFF  # checksum (PEC/feed checks in analysis)
+    OFF  # dependency
+)
+
+# Analytic constant-eta magnetic diffusion (Fourier By mode) with
+# hybrid_pic_model.implicit_mag_diffusion (matrix-free flat-eta Advance).
+# Uses the C++ executable directly (no PICMI) so pywarpx is not required.
 add_warpx_test(
     test_2d_hybrid_mag_diffusion  # name
     2  # dims
@@ -259,6 +272,29 @@ endif()
 # option, so only register when WarpX_EB is ON (EB-off CI skips cleanly).
 # Ported from public feature/hybrid-mag-diffusion-wip (EB mag-diff MVP).
 if(WarpX_EB)
+    # XZ and 3D each combine a PEC wall, a pec_insulator feed, and an interior
+    # stair-step EB. This proves the interactions without multiplying separate
+    # smoke tests for each feature and dimension.
+    add_warpx_test(
+        test_2d_hybrid_mag_diffusion_boundaries_eb  # name
+        2  # dims
+        1  # nprocs
+        "inputs_test_2d_hybrid_mag_diffusion_boundaries_eb"  # inputs
+        "analysis_cartesian_boundaries_eb.py"  # analysis
+        OFF  # checksum (PEC/feed/covered-field checks in analysis)
+        OFF  # dependency
+    )
+
+    add_warpx_test(
+        test_3d_hybrid_mag_diffusion_boundaries_eb  # name
+        3  # dims
+        1  # nprocs
+        "inputs_test_3d_hybrid_mag_diffusion_boundaries_eb"  # inputs
+        "analysis_cartesian_boundaries_eb.py"  # analysis
+        OFF  # checksum (PEC/feed/covered-field checks in analysis)
+        OFF  # dependency
+    )
+
     add_warpx_test(
         test_rz_hybrid_mag_diffusion_variable_eta_eb  # name
         RZ  # dims
