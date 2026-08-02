@@ -19,14 +19,18 @@ add_warpx_test(
     OFF  # dependency
 )
 
-# Analytic constant-eta magnetic diffusion (Fourier By mode) with
-# hybrid_pic_model.implicit_mag_diffusion (matrix-free flat-eta Advance).
-# Uses the C++ executable directly (no PICMI) so pywarpx is not required.
+# Analytic constant-eta magnetic diffusion (Fourier By mode). Python-enabled
+# builds use HybridPICSolver to cover PICMI input emission; other builds retain
+# the native deck, so this core regression is never lost and is not duplicated.
+set(hybrid_mag_diffusion_2d_input "inputs_test_2d_hybrid_mag_diffusion")
+if(WarpX_PYTHON)
+    set(hybrid_mag_diffusion_2d_input "inputs_test_2d_hybrid_mag_diffusion_picmi.py")
+endif()
 add_warpx_test(
     test_2d_hybrid_mag_diffusion  # name
     2  # dims
     1  # nprocs
-    "inputs_test_2d_hybrid_mag_diffusion"  # inputs
+    "${hybrid_mag_diffusion_2d_input}"  # inputs
     "analysis.py"  # analysis
     OFF  # checksum (analytic analysis is the oracle)
     OFF  # dependency
