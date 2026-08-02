@@ -46,7 +46,7 @@
 
 #ifdef AMREX_USE_PETSC
 // PetscCall (PETSc's macro) can only be used inside functions returning
-// PetscErrorCode (the static callbacks and assembleExactCurlCurl). In other
+// PetscErrorCode (the static callbacks and assemblePreconditioner). In other
 // functions (ctor, make, solve) we abort on a non-zero PETSc error.
 #define MAGDIFF_PETSC_CHK(call) do { \
     PetscErrorCode const _magdiff_ierr = (call); \
@@ -121,9 +121,9 @@ public:
         m_n_global = ng;
 
         buildGlobalIndex(B_proto);
-        // RZ/Rcyl exact curl-curl Pmat selects η on E/J faces (match matvec).
-        // Cartesian proxy still uses B-sampled η (same BA as each B component).
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+        // Exact curl-curl rows select η on E/J faces to match the matvec.
+        // The remaining Cartesian proxies use B-sampled η.
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_XZ)
         amrex::ignore_unused(eta_pc);
         buildEtaGhosts(eta_edge);
 #else
@@ -145,9 +145,9 @@ public:
         // Assembled frozen-η curl-curl Pmat (see assemblePreconditioner).
         // Lets runtime -pc_type asm/ilu/hypre factor a real matrix; default PC
         // for an assembled Pmat is block-Jacobi ILU(0). RZ/Rcyl has up to ~7
-        // nonzeros/row (Br-Bz cross terms); Cartesian uses a face-averaged
-        // Laplacian proxy (5/7-point).
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+        // nonzeros/row (Br-Bz cross terms); Cartesian XZ has up to 7. The
+        // remaining Cartesian dimensions use a 3/7-point Laplacian proxy.
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_XZ)
         PetscInt const nz = 9;
 #else
         PetscInt const nz = 1 + 2 * AMREX_SPACEDIM;
@@ -327,7 +327,7 @@ private:
     }
 
     // nghost=1 copy of B-centered eta for neighbor reads in the assembled Pmat.
-    // Pinned host: assembleExactCurlCurl uses LoopOnCpu host access.
+    // Pinned host: assemblePreconditioner uses LoopOnCpu host access.
     void buildEtaGhosts (amrex::Array<amrex::MultiFab const*,3> const& eta_pc) {
         amrex::MFInfo const host_info =
             amrex::MFInfo().SetArena(amrex::The_Pinned_Arena());
@@ -354,8 +354,9 @@ private:
     // uses the 4/dr^2 J_z correction. η is face-selected per term (et_r/t/z).
     // See notes/2026-07-20_exact_curl_curl_pc.md.
     //
-    // Cartesian (XZ / 3D / 1D_Z): still the face-averaged scalar Laplacian
-    // proxy per component (block-diagonal; no cross-component terms yet).
+    // Cartesian XZ: exact staggered curl-curl stencil. Bx and Bz are coupled
+    // through Jy mixed derivatives; By is an uncoupled 5-point block.
+    // Cartesian 3D / 1D_Z retain the face-averaged scalar Laplacian proxy.
 
     PetscErrorCode assemblePreconditioner () {
         PetscFunctionBeginUser;
@@ -370,6 +371,10 @@ private:
         amrex::Real const dr2 = dr * dr;
         amrex::Real const dz2 = dz * dz;
         amrex::Real const drdz = dr * dz;
+#elif defined(WARPX_DIM_XZ)
+        amrex::Real const dx2 = dx[0] * dx[0];
+        amrex::Real const dz2 = dx[1] * dx[1];
+        amrex::Real const dxdz = dx[0] * dx[1];
 #else
         amrex::Real dxinv2[3] = {amrex::Real(0.0), amrex::Real(0.0), amrex::Real(0.0)};
         for (int d = 0; d < AMREX_SPACEDIM; ++d) {
@@ -391,6 +396,13 @@ private:
                 auto const& gix_z = m_gindex[2]->const_array(mfi);
                 auto const& et_r = m_eta_g[0].const_array(mfi);
                 auto const& et_t = m_eta_g[1].const_array(mfi);
+                auto const& et_z = m_eta_g[2].const_array(mfi);
+#elif defined(WARPX_DIM_XZ)
+                auto const& gix_x = m_gindex[0]->const_array(mfi);
+                auto const& gix_y = m_gindex[1]->const_array(mfi);
+                auto const& gix_z = m_gindex[2]->const_array(mfi);
+                auto const& et_x = m_eta_g[0].const_array(mfi);
+                auto const& et_y = m_eta_g[1].const_array(mfi);
                 auto const& et_z = m_eta_g[2].const_array(mfi);
 #else
                 auto const& et = m_eta_g[idim].const_array(mfi);
@@ -569,9 +581,139 @@ private:
                         }
                     }
 
+#elif defined(WARPX_DIM_XZ)
+                    // Cartesian XZ exact curl-curl assembly. In 2D,
+                    //   Jx = -Dz(By)/mu0,
+                    //   Jy = (-Dx(Bz) + Dz(Bx))/mu0,
+                    //   Jz =  Dx(By)/mu0.
+                    // Bx/Bz therefore share the eta_y Jy block and its mixed
+                    // derivatives; By is uncoupled through eta_x Jx and
+                    // eta_z Jz.
+                    if (idim == 1) {
+                        // By: -Dx(eta_z Dx By) - Dz(eta_x Dz By).
+                        PetscInt const cp_x = gix_y(i+1, j, k);
+                        if (cp_x >= 0) {
+                            amrex::Real const chi =
+                                std::max(et_z(i+1, j, k), amrex::Real(0.0)) / m_mu0;
+                            PetscScalar const v = -m_theta_dt * chi / dx2;
+                            cols.push_back(cp_x);
+                            vals.push_back(v);
+                            diag -= v;
+                        }
+                        PetscInt const cm_x = gix_y(i-1, j, k);
+                        if (cm_x >= 0) {
+                            amrex::Real const chi =
+                                std::max(et_z(i, j, k), amrex::Real(0.0)) / m_mu0;
+                            PetscScalar const v = -m_theta_dt * chi / dx2;
+                            cols.push_back(cm_x);
+                            vals.push_back(v);
+                            diag -= v;
+                        }
+                        PetscInt const cp_z = gix_y(i, j+1, k);
+                        if (cp_z >= 0) {
+                            amrex::Real const chi =
+                                std::max(et_x(i, j+1, k), amrex::Real(0.0)) / m_mu0;
+                            PetscScalar const v = -m_theta_dt * chi / dz2;
+                            cols.push_back(cp_z);
+                            vals.push_back(v);
+                            diag -= v;
+                        }
+                        PetscInt const cm_z = gix_y(i, j-1, k);
+                        if (cm_z >= 0) {
+                            amrex::Real const chi =
+                                std::max(et_x(i, j, k), amrex::Real(0.0)) / m_mu0;
+                            PetscScalar const v = -m_theta_dt * chi / dz2;
+                            cols.push_back(cm_z);
+                            vals.push_back(v);
+                            diag -= v;
+                        }
+                    } else if (idim == 0) {
+                        // Bx: -Dz[eta_y(-Dx Bz + Dz Bx)]/mu0.
+                        amrex::Real const chi_p =
+                            std::max(et_y(i, j+1, k), amrex::Real(0.0)) / m_mu0;
+                        amrex::Real const chi_m =
+                            std::max(et_y(i, j, k), amrex::Real(0.0)) / m_mu0;
+
+                        PetscInt const cp_z = gix_x(i, j+1, k);
+                        if (cp_z >= 0) {
+                            PetscScalar const v = -m_theta_dt * chi_p / dz2;
+                            cols.push_back(cp_z);
+                            vals.push_back(v);
+                            diag -= v;
+                        }
+                        PetscInt const cm_z = gix_x(i, j-1, k);
+                        if (cm_z >= 0) {
+                            PetscScalar const v = -m_theta_dt * chi_m / dz2;
+                            cols.push_back(cm_z);
+                            vals.push_back(v);
+                            diag -= v;
+                        }
+
+                        PetscInt const xp_zp = gix_z(i, j+1, k);
+                        if (xp_zp >= 0) {
+                            cols.push_back(xp_zp);
+                            vals.push_back(m_theta_dt * chi_p / dxdz);
+                        }
+                        PetscInt const xm_zp = gix_z(i-1, j+1, k);
+                        if (xm_zp >= 0) {
+                            cols.push_back(xm_zp);
+                            vals.push_back(-m_theta_dt * chi_p / dxdz);
+                        }
+                        PetscInt const xp_zm = gix_z(i, j, k);
+                        if (xp_zm >= 0) {
+                            cols.push_back(xp_zm);
+                            vals.push_back(-m_theta_dt * chi_m / dxdz);
+                        }
+                        PetscInt const xm_zm = gix_z(i-1, j, k);
+                        if (xm_zm >= 0) {
+                            cols.push_back(xm_zm);
+                            vals.push_back(m_theta_dt * chi_m / dxdz);
+                        }
+                    } else {
+                        // Bz: Dx[eta_y(-Dx Bz + Dz Bx)]/mu0.
+                        amrex::Real const chi_p =
+                            std::max(et_y(i+1, j, k), amrex::Real(0.0)) / m_mu0;
+                        amrex::Real const chi_m =
+                            std::max(et_y(i, j, k), amrex::Real(0.0)) / m_mu0;
+
+                        PetscInt const cp_x = gix_z(i+1, j, k);
+                        if (cp_x >= 0) {
+                            PetscScalar const v = -m_theta_dt * chi_p / dx2;
+                            cols.push_back(cp_x);
+                            vals.push_back(v);
+                            diag -= v;
+                        }
+                        PetscInt const cm_x = gix_z(i-1, j, k);
+                        if (cm_x >= 0) {
+                            PetscScalar const v = -m_theta_dt * chi_m / dx2;
+                            cols.push_back(cm_x);
+                            vals.push_back(v);
+                            diag -= v;
+                        }
+
+                        PetscInt const xp_zp = gix_x(i+1, j, k);
+                        if (xp_zp >= 0) {
+                            cols.push_back(xp_zp);
+                            vals.push_back(m_theta_dt * chi_p / dxdz);
+                        }
+                        PetscInt const xp_zm = gix_x(i+1, j-1, k);
+                        if (xp_zm >= 0) {
+                            cols.push_back(xp_zm);
+                            vals.push_back(-m_theta_dt * chi_p / dxdz);
+                        }
+                        PetscInt const xm_zp = gix_x(i, j, k);
+                        if (xm_zp >= 0) {
+                            cols.push_back(xm_zp);
+                            vals.push_back(-m_theta_dt * chi_m / dxdz);
+                        }
+                        PetscInt const xm_zm = gix_x(i, j-1, k);
+                        if (xm_zm >= 0) {
+                            cols.push_back(xm_zm);
+                            vals.push_back(m_theta_dt * chi_m / dxdz);
+                        }
+                    }
 #else
-                    // Cartesian (1D_Z, 2D XZ, 3D)
-                    // Unchanged face-averaged Laplacian proxy
+                    // Cartesian 1D_Z / 3D face-averaged Laplacian proxy.
                     amrex::Real const chi_c = std::max(et(i, j, k), amrex::Real(0.0)) / m_mu0;
                     for (int d = 0; d < AMREX_SPACEDIM; ++d) {
                         int ip = i, jp = j, kp = k;
@@ -623,7 +765,7 @@ public:
         m_theta_dt = theta_dt;
         m_opctx = opctx;
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_XZ)
         amrex::ignore_unused(eta_pc);
         buildEtaGhosts(eta_edge);
 #else

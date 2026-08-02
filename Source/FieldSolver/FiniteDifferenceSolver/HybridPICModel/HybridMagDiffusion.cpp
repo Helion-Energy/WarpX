@@ -631,7 +631,7 @@ public:
         // Laplacian diagonal used as the denom reference scale (uniform eta ->
         // identity after PC). The per-DOF metric-aware diagonal (radial 1/r and
         // the Bt -1/r^2 term) is computed inside MagDiffJacobiPrecond from the
-        // geometry passed below -- mirroring assembleExactCurlCurl diagonals.
+        // geometry passed below, mirroring the assembled PETSc diagonals.
         Real const dr_inv2 = 1.0_rt / (dx[0]*dx[0]);
         Real const diag_factor = 2.0_rt * dr_inv2;
 #else
@@ -850,9 +850,9 @@ public:
 
     // Accessors used by the optional PETSc KSP path. The homogeneous apply() is
     // reused directly. The assembled curl-curl Pmat uses E/J-face eta (m_eta)
-    // on RZ/Rcyl to match the matvec face selection; Cartesian still uses
-    // B-sampled m_eta_pc. apply() is non-const because it stages through
-    // internal work MultiFabs.
+    // in RZ/Rcyl and Cartesian XZ to match the matvec face selection. The
+    // remaining 1D/3D Cartesian proxy uses B-sampled m_eta_pc. apply() is
+    // non-const because it stages through internal work MultiFabs.
     void applyPetsc (MagDiffVector& output, MagDiffVector const& input) { apply(output, input); }
     [[nodiscard]] Real thetaDt () const { return m_theta_dt; }
     [[nodiscard]] Geometry const& geom () const { return m_geom; }

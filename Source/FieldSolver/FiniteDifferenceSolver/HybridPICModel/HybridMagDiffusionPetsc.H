@@ -44,11 +44,11 @@ using MagDiffMatvecFn = void (*)(
  * \brief Create the PETSc KSP. The 3 B-component MultiFabs (`B_proto`) define the
  * DOF layout (boxArray/DistributionMap/IndexType).
  *
- * `eta_edge` is the E/J-face resistivity (matvec staggering); on RZ/Rcyl the
- * assembled curl-curl Pmat is built from these faces. `eta_pc` is the B-sampled
- * resistivity used for the Cartesian Laplacian proxy Pmat. Both are copied to
- * nghost=1 host buffers as needed. `mu0` keeps this header free of WarpX
- * constants.
+ * `eta_edge` is the E/J-face resistivity (matvec staggering); the assembled
+ * curl-curl Pmat is built from these faces in RZ, Rcyl, and Cartesian XZ.
+ * `eta_pc` is the B-sampled resistivity used by the remaining 1D/3D Cartesian
+ * Laplacian proxy. Both are copied to nghost=1 host buffers as needed. `mu0`
+ * keeps this header free of WarpX constants.
  *
  * Returns nullptr if built without PETSc (AMREX_USE_PETSC undefined).
  */

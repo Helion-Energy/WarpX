@@ -121,6 +121,79 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Optional PETSc KSP/PC path for the matrix-free variable-eta curl-curl solve
+# (mag_diff_linear_solver = petsc, assembled frozen-eta curl-curl Pmat). Same
+# finite/damped Bt oracle as the variable-eta smoke; only the linear-solver
+# driver differs.
+# Only registered when WarpX is built with PETSc (AMReX_PETSC), mirroring the
+# implicit/* curl-curl PETSc PC tests.
+if(AMReX_PETSC)
+    add_warpx_test(
+        test_rz_hybrid_mag_diffusion_petsc  # name
+        RZ  # dims
+        1  # nprocs
+        "inputs_test_rz_hybrid_mag_diffusion_petsc"  # inputs
+        "analysis_rz.py"  # analysis
+        OFF  # checksum (RZ vacuum smoke analysis is the oracle)
+        OFF  # dependency
+    )
+
+    # Crank-Nicolson (theta=0.5) companion to the PETSc KSP smoke, on the 2D
+    # matrix-free path with the discrete-Fourier amplification oracle. The
+    # theta<1 RHS (2*B^n - A_e(B^n)) is assembled before the GMRES/PETSc branch,
+    # so the PETSc KSP inherits it unchanged; mild eta (1e-2) keeps the system
+    # well conditioned so PETSc converges tightly and reproduces the CN
+    # amplification factor (the matvec is the same homogeneous operator the
+    # GMRES path validates). Stiff-eta CN is a known ill-conditioned limitation
+    # (see test_rz_hybrid_mag_diffusion_pec_feed_cn and the design note).
+    add_warpx_test(
+        test_2d_hybrid_mag_diffusion_petsc_cn  # name
+        2  # dims
+        1  # nprocs
+        "inputs_test_2d_hybrid_mag_diffusion_petsc_cn"  # inputs
+        "analysis.py"  # analysis
+        OFF  # checksum (analytic CN comparison in analysis.py)
+        OFF  # dependency
+    )
+
+    # Cartesian XZ exact-Pmat regression. The reference and PETSc runs use a
+    # divergence-free coupled Bx/Bz mode and spatially varying eta. With a
+    # direct LU factorization of P, an exact Pmat must converge the MatShell
+    # system in one iteration. The analysis also compares all field extrema and
+    # magnetic energy against the AMReX GMRES reference.
+    add_warpx_test(
+        test_2d_hybrid_mag_diffusion_coupled  # name
+        2  # dims
+        1  # nprocs
+        "inputs_test_2d_hybrid_mag_diffusion_coupled"  # inputs
+        OFF  # analysis (reference data consumed by PETSc companion)
+        OFF  # checksum
+        OFF  # dependency
+    )
+    add_warpx_test(
+        test_2d_hybrid_mag_diffusion_coupled_petsc  # name
+        2  # dims
+        1  # nprocs
+        "inputs_test_2d_hybrid_mag_diffusion_coupled_petsc"  # inputs
+        "analysis_2d_coupled_parity.py"  # analysis
+        OFF  # checksum (solver parity + exact-Pmat iteration oracle)
+        test_2d_hybrid_mag_diffusion_coupled  # dependency (AMReX reference)
+    )
+    set_property(
+        TEST test_2d_hybrid_mag_diffusion_coupled_petsc.run
+        APPEND PROPERTY ENVIRONMENT "PETSC_OPTIONS=-pc_type lu"
+    )
+    set_property(
+        TEST test_2d_hybrid_mag_diffusion_coupled_petsc.run
+        PROPERTY PASS_REGULAR_EXPRESSION "PETSc KSP iterations=1"
+    )
+    set_property(
+        TEST test_2d_hybrid_mag_diffusion_coupled_petsc.run
+        PROPERTY FAIL_REGULAR_EXPRESSION
+        "PETSc KSP iterations=([2-9]|[1-9][0-9]);did not converge"
+    )
+endif()
+
 # Stair-case embedded boundary on the RZ matrix-free variable-eta path (theta=1):
 # outer-wall solid for r > r_wall, fluid on axis. Covered Bt stays inert (0),
 # fluid Bt persists (mild eta). analysis_rz_eb.py checks finite Bt, fluid Bt
