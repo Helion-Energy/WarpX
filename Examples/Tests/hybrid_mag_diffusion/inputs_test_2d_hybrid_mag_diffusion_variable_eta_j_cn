@@ -1,13 +1,12 @@
-# Constant-eta magnetic diffusion analytic test (2D XZ hybrid).
-#
-# Physics: operator-split θ-method curl-curl diffusion of a Fourier mode
-#   By = B0 cos(kx x), kx = 2π/Lx
-# with plasma_resistivity = 0 in Ohm (Faraday free of η) and
-# mag_diff_constant_eta → flat-η MultiFab → matrix-free AdvanceVariable
-# (same discrete path as variable-η / production).
-# High n_floor / density keeps Hall negligible so the pure diffusion
-# solution By(t) = B0 cos(kx x) exp(-χ kx^2 t), χ = η/μ0, applies.
-#
+# 2D XZ hybrid magnetic-diffusion Crank-Nicolson smoke with a spatially varying
+# (J-dependent) parser-frozen eta. plasma_resistivity = 1e-1 + 1e-4*J makes the
+# frozen eta MultiFab genuinely non-uniform (eta varies by ~50% across the By
+# mode), exercising the (1-theta) explicit curl RHS term on the matrix-free path
+# with an arbitrary eta pattern -- not just a uniform parser eta. Periodic, so no
+# feed; the Cartesian (non-RZ) branch of computeAFull is used. analysis_2d_smoke
+# checks finite, damped By (no Fourier oracle: a J-dependent eta has no single
+# exponential mode).
+
 max_step = 20
 amr.n_cell = 64 64
 amr.max_level = 0
@@ -30,7 +29,6 @@ algo.maxwell_solver = hybridPIC
 algo.particle_shape = 1
 algo.current_deposition = direct
 
-# Dense cold background so Hall and pressure are negligible vs diffusion
 particles.species_names = protons
 particles.do_tiling = true
 
@@ -44,7 +42,6 @@ protons.ux = 0.0
 protons.uy = 0.0
 protons.uz = 0.0
 
-# Pure By Fourier mode (div-free for d/dz = 0). Loaded into Bfield at init.
 warpx.B_ext_grid_init_style = parse_B_ext_grid_function
 warpx.Bx_external_grid_function(x,y,z) = "0.0"
 warpx.By_external_grid_function(x,y,z) = "1.0e-4 * cos(2.*pi*x/1.0)"
@@ -55,20 +52,21 @@ hybrid_pic_model.gamma = 1.0
 hybrid_pic_model.n0_ref = 1.0e26
 hybrid_pic_model.n_floor = 1.0e20
 hybrid_pic_model.substeps = 4
-hybrid_pic_model.plasma_resistivity(rho,J,t) = "0.0"
+# J-dependent parser eta: frozen each half-step from J = curl(B)/mu0, so the eta
+# MultiFab is spatially varying (~0.10 to ~0.15 Ohm m across the By mode).
+hybrid_pic_model.plasma_resistivity(rho,J,t) = "1.0e-1 + 1.0e-4*J"
 hybrid_pic_model.plasma_hyper_resistivity(rho,B) = "0.0"
 
-# Implicit magnetic diffusion
 hybrid_pic_model.implicit_mag_diffusion = 1
-hybrid_pic_model.mag_diff_theta = 1.0
-hybrid_pic_model.mag_diff_constant_eta = 1.0e-2
+hybrid_pic_model.mag_diff_theta = 0.5
+hybrid_pic_model.mag_diff_use_variable_eta = 1
+hybrid_pic_model.mag_diff_constant_eta = 1.0e-1
 hybrid_pic_model.mag_diff_eta_explicit_max = 0.0
 hybrid_pic_model.mag_diff_rtol = 1.0e-8
 hybrid_pic_model.mag_diff_atol = 0.0
-hybrid_pic_model.mag_diff_max_iter = 200
+hybrid_pic_model.mag_diff_max_iter = 300
 hybrid_pic_model.mag_diff_verbose = 0
 
-# Diagnostics: dump By at end (plotfile; openPMD not required)
 diagnostics.diags_names = diag1
 diag1.intervals = 20
 diag1.diag_type = Full

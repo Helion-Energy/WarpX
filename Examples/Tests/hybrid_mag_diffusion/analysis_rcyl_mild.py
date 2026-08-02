@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""RZ hybrid magnetic-diffusion vacuum stability smoke.
+"""RCYLINDER hybrid magnetic-diffusion MILD-eta AMReX reference smoke.
 
-Oracle (not an analytic Fourier solution):
+Own oracle (also the parity reference for test_rcylinder_hybrid_mag_diffusion_petsc):
   - Bt min/max finite
   - initial |Bt| amplitude nonzero
   - final peak amplitude strictly smaller than initial (damping)
 
-Used for both constant-eta and parser variable-eta RZ smokes.
+Mild eta = 1e-2 Ohm*m so the field persists (the slowest mode damps by only
+~1/(1+0.067) per step); this is the nonzero-field reference the PETSc parity
+test compares against.
 """
 
 import glob
@@ -21,10 +23,8 @@ def component_minmax(diag_dir, component):
     cell_h = os.path.join(diag_dir, "Level_0", "Cell_H")
     if not os.path.isfile(cell_h):
         raise FileNotFoundError(cell_h)
-
     with open(cell_h) as infile:
         text = infile.read()
-
     float_lines = []
     for line in text.splitlines():
         if re.match(r"^-?[0-9]", line.strip()):
@@ -38,7 +38,6 @@ def component_minmax(diag_dir, component):
                 continue
             if len(values) >= 3:
                 float_lines.append(values)
-
     if len(float_lines) < 2:
         raise RuntimeError(f"Could not parse field min/max from {cell_h}")
     minimum, maximum = float_lines[-2], float_lines[-1]
@@ -46,9 +45,9 @@ def component_minmax(diag_dir, component):
 
 
 def main():
-    plotfiles = sorted(glob.glob("diags/diag1*"))
+    plotfiles = sorted(p for p in glob.glob("diags/diag1*") if os.path.isdir(p))
     if len(plotfiles) < 2:
-        print("FAILED: expected initial and final RZ plotfiles")
+        print("FAILED: expected initial and final RCYLINDER plotfiles")
         return 1
 
     bt_min0, bt_max0 = component_minmax(plotfiles[0], 1)
@@ -60,17 +59,17 @@ def main():
     print(f"Bt range t=0   = [{bt_min0:.8e}, {bt_max0:.8e}] T")
     print(f"Bt range t=end = [{bt_min1:.8e}, {bt_max1:.8e}] T")
 
-    if not all(math.isfinite(value) for value in (bt_min0, bt_max0, bt_min1, bt_max1)):
+    if not all(math.isfinite(v) for v in (bt_min0, bt_max0, bt_min1, bt_max1)):
         print("FAILED: non-finite Bt value")
         return 1
     if amplitude0 < 1.0e-8:
         print("FAILED: initial Bt was not initialized")
         return 1
     if amplitude1 >= 0.999 * amplitude0:
-        print("FAILED: Bt did not damp in the RZ eta=129 smoke")
+        print("FAILED: Bt did not damp in the mild-eta RCYLINDER smoke")
         return 1
 
-    print("PASSED: RZ hybrid magnetic-diffusion vacuum stability smoke")
+    print("PASSED: RCYLINDER mild-eta AMReX reference smoke (finite, damped)")
     return 0
 
 

@@ -43,6 +43,7 @@ else()
         OFF  # dependency
     )
 endif()
+
 # Crank-Nicolson (theta=0.5) with a uniform parser eta. This combines the
 # quantitative variable-eta and theta-method coverage in one analytic test;
 # the constant-eta backward-Euler test above covers the other eta source.
@@ -76,7 +77,7 @@ add_warpx_test(
     1  # nprocs
     "inputs_test_rz_hybrid_mag_diffusion_smoke"  # inputs
     "analysis_rz.py"  # analysis
-    OFF  # checksum (RZ vacuum smoke analysis is the oracle)
+    OFF  # checksum (finite/damping checks in analysis_rz.py)
     OFF  # dependency
 )
 
@@ -114,34 +115,50 @@ add_warpx_test(
     1  # nprocs
     "inputs_test_rz_hybrid_mag_diffusion_pec_feed"  # inputs
     "analysis_rz_pec_feed.py"  # analysis
-    OFF  # checksum (feed smoke analysis is the oracle)
+    OFF  # checksum (feed checks in analysis_rz_pec_feed.py)
     OFF  # dependency
 )
 
-# P1b: non-periodic axial (z) boundary via PEC endwalls (B_normal=0, tangential
-# mirror). Lifts the former periodic-z-only restriction on the z-PEC wall path.
-# analysis_rz_z_pec_wall.py is a finite/damping smoke, not an analytic oracle.
+# Crank-Nicolson (theta=0.5) companion to the RZ pec_insulator feed test. The
+# matrix-free CN solve keeps the affine feed split (homogeneous operator, feed
+# on the RHS) and adds the (1-theta) explicit curl term; the feed is evaluated
+# at g(t_new) for both implicit and explicit terms. CN is not L-stable, so with
+# stiff vacuum eta=129 it reaches the diffusion equilibrium slowly (oscillating
+# stiff modes, g -> -1); analysis_rz_pec_feed_cn.py checks finite/feed-injected/
+# axis-regular/stable rather than the theta=1 steady-state "held near B0" check.
+add_warpx_test(
+    test_rz_hybrid_mag_diffusion_pec_feed_cn  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_hybrid_mag_diffusion_pec_feed_cn"  # inputs
+    "analysis_rz_pec_feed_cn.py"  # analysis
+    OFF  # checksum (stiff-CN feed smoke in analysis_rz_pec_feed_cn.py)
+    OFF  # dependency
+)
+
+# Non-periodic axial (z) boundaries with PEC endwalls (B_normal = 0,
+# tangential mirror). analysis_rz_z_pec_wall.py checks finite damped Bt and
+# Bz ~ 0.
 add_warpx_test(
     test_rz_hybrid_mag_diffusion_z_pec_wall  # name
     RZ  # dims
     1  # nprocs
     "inputs_test_rz_hybrid_mag_diffusion_z_pec_wall"  # inputs
     "analysis_rz_z_pec_wall.py"  # analysis
-    OFF  # checksum (z-PEC smoke analysis is the oracle)
+    OFF  # checksum (PEC endwall checks in analysis_rz_z_pec_wall.py)
     OFF  # dependency
 )
 
-# P1b-zfeed: axial z_lo pec_insulator B_t feed with matching r_hi Dirichlet so
-# the B_t∝r null mode fills the domain in z (proves axial curl-chain coupling).
-# A pure PEC tube instead yields a physical O(R) skin under stiff BE — not a
-# missing d^2/dz^2. analysis_rz_zfeed.py checks deep axial fill, not Fourier.
+# Axial z_lo pec_insulator B_t feed with matching r_hi Dirichlet data so the
+# B_t proportional to r mode fills the domain in z (axial coupling).
+# analysis_rz_zfeed.py checks deep axial fill of that mode.
 add_warpx_test(
     test_rz_hybrid_mag_diffusion_zfeed  # name
     RZ  # dims
     1  # nprocs
     "inputs_test_rz_hybrid_mag_diffusion_zfeed"  # inputs
     "analysis_rz_zfeed.py"  # analysis
-    OFF  # checksum (z-feed deep-fill analysis is the oracle)
+    OFF  # checksum (axial-fill checks in analysis_rz_zfeed.py)
     OFF  # dependency
 )
 
@@ -276,12 +293,12 @@ if(AMReX_PETSC)
     endif()
 endif()
 
-# Stair-case embedded boundary on the RZ matrix-free variable-eta path (theta=1):
+# Stair-case embedded boundary on the RZ matrix-free variable-eta path (θ=1):
 # outer-wall solid for r > r_wall, fluid on axis. Covered Bt stays inert (0),
 # fluid Bt persists (mild eta). analysis_rz_eb.py checks finite Bt, fluid Bt
 # nonzero, damping, and covered-region Bt ~ 0 (global min). EB is a build-time
-# option, so only register when WarpX_EB is ON (EB-off CI skips cleanly).
-# Ported from public feature/hybrid-mag-diffusion-wip (EB mag-diff MVP).
+# option, so only register when WarpX_EB is ON (EB-off CI skips cleanly, as the
+# other embedded_boundary_* tests do).
 if(WarpX_EB)
     # XZ and 3D each combine a PEC wall, a pec_insulator feed, and an interior
     # stair-step EB. This proves the interactions without multiplying separate
@@ -316,6 +333,7 @@ if(WarpX_EB)
         OFF  # dependency
     )
 endif()
+
 # ---- RCYLINDER (1D r-only, axisymmetric) matrix-free mag-diff ----------------
 # RCYLINDER reuses the RZ cylindrical curl kernels + axis BC, so it routes
 # through the matrix-free AdvanceVariable path.

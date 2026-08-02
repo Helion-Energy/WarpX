@@ -1,14 +1,7 @@
-# RZ hybrid implicit magnetic-diffusion axial (z) PEC endwall smoke.
-# Non-periodic z: both axial faces are PEC conducting walls. B_normal (Bz) is
-# pinned to 0 on each z endwall; tangential B (Br, Bt) is mirrored (reflecting).
-# This deck lifts the former periodic-z-only restriction (P1b) and reuses the
-# existing ApplyBfieldBoundary PEC kernel through the matrix-free staging.
-#
-# Oracle (analysis_rz_z_pec_wall.py, yt): a uniform Bt is tangential to both z
-# endwalls, so PEC mirrors it (same sign) -> the z-reflecting endwalls behave
-# like the periodic-z baseline for a z-uniform field. The smoke checks Bt is
-# finite, damps (no Faraday/implicit blow-up), and Bz stays ~0 (PEC zeros the
-# normal component) with z non-periodic.
+# RZ hybrid magnetic diffusion with non-periodic z and PEC endwalls.
+# Both axial faces are PEC: B_normal (Bz) is zero; tangential B is mirrored.
+# For a z-uniform Bt field this is comparable to the periodic-z smoke test.
+# analysis_rz_z_pec_wall.py checks finite damped Bt and Bz ~ 0.
 
 max_step = 5
 amr.n_cell = 32 64
@@ -20,8 +13,7 @@ geometry.dims = RZ
 geometry.prob_lo = 0.0 0.0
 geometry.prob_hi = 2.0e-2 1.0
 
-# r=0 is the axis (None), r_hi is unforced (None/free), z endwalls are PEC.
-# z is non-periodic here (the P1b relaxation).
+# r=0 is the axis (None), r_hi is free (None), z endwalls are PEC.
 boundary.field_lo = none pec
 boundary.field_hi = none pec
 boundary.particle_lo = none absorbing

@@ -1,10 +1,17 @@
-# RZ hybrid implicit magnetic diffusion with a Dirichlet tangential-B feed
-# on the upper-r face. pec_insulator drives B_t through insulator.By_x_hi(y,z,t).
-# The matrix-free solve includes the feed in the operator (homogeneous part)
-# and RHS (affine offset); see HybridMagDiffusion prepareFeed / apply.
+# RZ hybrid implicit magnetic diffusion with a Dirichlet tangential-B feed on
+# the upper-r face, Crank-Nicolson (theta=0.5). pec_insulator drives B_t through
+# insulator.By_x_hi(y,z,t). The matrix-free CN solve includes the feed in the
+# operator (homogeneous part) and RHS (affine offset), plus the (1-theta)
+# explicit curl term; the feed is evaluated at g(t_new) for both implicit and
+# explicit terms (a stable extension of the BE feed to general theta; see the
+# design note).
 #
-# analysis_rz_pec_feed.py checks that B_t is held near the feed value on the
-# outer face, remains small on axis, and that the run is stable.
+# CN is not L-stable: with stiff vacuum eta=129 and dt >> R^2/chi, the stiff
+# modes have amplification g -> -1 and so reach the diffusion equilibrium only
+# slowly (they oscillate rather than being killed in one step like backward
+# Euler). analysis_rz_pec_feed_cn.py therefore checks finite / feed-injected /
+# axis-regular / stable -- NOT the theta=1 "feed face held near B0" steady-state
+# check (which BE passes because it is L-stable).
 
 max_step = 5
 amr.n_cell = 32 64
@@ -61,7 +68,7 @@ hybrid_pic_model.plasma_resistivity(rho,J,t) = "0.0"
 hybrid_pic_model.plasma_hyper_resistivity(rho,B) = "0.0"
 
 hybrid_pic_model.implicit_mag_diffusion = 1
-hybrid_pic_model.mag_diff_theta = 1.0
+hybrid_pic_model.mag_diff_theta = 0.5
 hybrid_pic_model.mag_diff_constant_eta = 129.0
 hybrid_pic_model.mag_diff_eta_explicit_max = 0.0
 # Matrix-free GMRES with the Dirichlet feed baked into operator + RHS.

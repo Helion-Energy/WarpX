@@ -1,21 +1,11 @@
-# RZ hybrid mag-diffusion: axial (z) pec_insulator B_t feed with deep fill.
+# RZ hybrid magnetic diffusion with an axial (z) pec_insulator B_t feed.
 #
-# VERIFIED (2026-07-15): the cylindrical matrix-free curl chain DOES carry the
-# axial B_t term. An earlier diagnosis that B_t was "frozen" under a z_lo feed
-# + r_hi=PEC tube was a wrong oracle: with stiff BE (eta=129, dt=1 ns) the solve
-# jumps to the elliptic steady state of curl(curl B)=0. For B_theta in a tube
-# with PEC sidewalls (homogeneous Neumann on B_t), the lowest radial modes have
-# transverse eigenvalue ~1/R, so the z-skin depth is O(R) — not the free
-# Cartesian diffusion length sqrt(chi*t). That short skin is physical for the
-# PEC-tube BC, not a missing d^2/dz^2 term.
-#
-# This deck proves axial coupling by using compatible Dirichlet data for the
-# B_t ∝ r null mode of the radial operator:
-#   - z_lo pec_insulator: B_t = B0 * (r/R)  (axis-regular endwall feed)
-#   - r_hi pec_insulator: B_t = B0           (sidewall matching B0*r/R at r=R)
+# Compatible Dirichlet data admit the cylindrical mode B_t proportional to r:
+#   - z_lo pec_insulator: B_t = B0 * (r/R)
+#   - r_hi pec_insulator: B_t = B0
 #   - z_hi PEC endwall
-# Then the steady state is B_t ≈ B0 * r/R, approximately uniform in z (deep
-# fill). See notes/2026-07-15_session_p1b_zfeed.md.
+# The expected steady state is B_t ≈ B0 * r/R, approximately uniform in z.
+# analysis_rz_zfeed.py checks deep axial fill of that profile.
 
 max_step = 5
 amr.n_cell = 32 64
