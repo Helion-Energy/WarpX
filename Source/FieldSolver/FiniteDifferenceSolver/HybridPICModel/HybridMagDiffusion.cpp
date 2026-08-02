@@ -181,9 +181,9 @@ struct MagDiffJacobiPrecond
     Real diag_factor = 0.0_rt;   // Cartesian Laplacian diagonal (scalar; cyl unused)
     Real denom = 1.0_rt;
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-    // Cylindrical metric for the per-DOF Laplacian diagonal (matches the
-    // assembled frozen-Laplacian P). ishift_r = 1 if the component is NODE in
-    // r (Br), 0 if CELL in r (Bt/Bz); is_bt = (idim == 1) -> subtract 1/r^2.
+    // Cylindrical metric for the scaled-Jacobi approximation of the per-DOF
+    // curl-curl diagonal. ishift_r = 1 if the component is NODE in r (Br), 0 if
+    // CELL in r (Bt/Bz); is_bt = (idim == 1) -> subtract 1/r^2.
     Real rmin = 0.0_rt;
     Real dr = 1.0_rt;
     Real dr_inv2 = 0.0_rt;
