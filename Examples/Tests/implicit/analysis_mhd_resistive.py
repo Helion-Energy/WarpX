@@ -17,7 +17,7 @@ not presently constructed as a total-energy-conserving pair.
 import sys
 
 import numpy as np
-import scipy.constants as constants
+import warpx_constants as constants
 import yt
 
 

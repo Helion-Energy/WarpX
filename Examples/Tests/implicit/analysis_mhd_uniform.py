@@ -9,7 +9,7 @@
 import sys
 
 import numpy as np
-import scipy.constants as constants
+import warpx_constants as constants
 import yt
 
 ds = yt.load(sys.argv[1])
