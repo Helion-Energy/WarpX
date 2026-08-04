@@ -46,9 +46,13 @@
 using namespace amrex::literals;
 
 // The QDSMC grid fields (K_e, the deposited weights and the nodal v_e) are
-// stored with NODAL staggering; every gather and scatter below uses the
-// matching order-1 (linear) nodal weights, so a marker at rest reproduces
-// its cell values exactly.
+// stored with NODAL staggering and the markers are homed AT the grid nodes,
+// so with the order-1 (linear) nodal weights used by every gather and
+// scatter below, a marker at rest reproduces its node values exactly: the
+// at-rest gather/deposit round trip is the identity. (Cell-center homes on
+// the nodal grid make that round trip a [1/2,1/2]^dim box filter instead,
+// i.e. a numerical diffusion of dx^2/(4*dt) per direction regardless of dt
+// -- measured to three digits before the switch to node homing.)
 
 
 QdsmcParticleContainer::QdsmcParticleContainer (amrex::AmrCore* amr_core)
@@ -68,6 +72,7 @@ void QdsmcParticleContainer::InitParticles (int lev)
     amrex::Geometry const & geom = Geom(lev);
     auto const dx_arr = geom.CellSizeArray();
     auto const plo    = geom.ProbLoArray();
+    auto const phi    = geom.ProbHiArray();
 
     // Define particle tiles for every (grid, tile) pair on this level.
     for (auto mfi = MakeMFIter(lev); mfi.isValid(); ++mfi) {
@@ -92,12 +97,30 @@ void QdsmcParticleContainer::InitParticles (int lev)
         }
         auto wt = static_cast<amrex::Real>(amrex::second());
 
-        amrex::Box const & tile_box = mfi.tilebox();
+        // One marker per OWNED grid node. Nodal tileboxes are disjoint within
+        // a box (AMReX gives the box's top node in each direction to the last
+        // tile only), but ACROSS boxes the seam node appears in both boxes'
+        // nodal boxes, and in periodic directions the domain's top node is
+        // the image of the bottom one: trim the high side in those cases so
+        // every physical node gets exactly one marker (Sigma(N) must not
+        // double-count at seams).
+        amrex::Box tile_box = mfi.tilebox(amrex::IntVect::TheNodeVector());
+        {
+            amrex::Box const box_nodes = amrex::surroundingNodes(mfi.validbox());
+            amrex::Box const dom_nodes = amrex::surroundingNodes(geom.Domain());
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                if (tile_box.bigEnd(d) == box_nodes.bigEnd(d) &&
+                    (box_nodes.bigEnd(d) != dom_nodes.bigEnd(d) ||
+                     geom.isPeriodic(d))) {
+                    tile_box.growHi(d, -1);
+                }
+            }
+        }
         int const grid_id = mfi.index();
         int const tile_id = mfi.LocalTileIndex();
 
-        // One particle per cell. Use exclusive scan to assign per-cell offsets
-        // so the per-cell writes are race-free in parallel.
+        // Use exclusive scan to assign per-node offsets so the per-node
+        // writes are race-free in parallel.
         amrex::Gpu::DeviceVector<amrex::Long> counts(tile_box.numPts(), 1);
         amrex::Gpu::DeviceVector<amrex::Long> offset(tile_box.numPts());
         amrex::Long const max_new_particles = amrex::Scan::ExclusiveSum(
@@ -149,28 +172,39 @@ void QdsmcParticleContainer::InitParticles (int lev)
 
             pa_idcpu[ip] = amrex::SetParticleIDandCPU(pid + ip, cpuid);
 
-            // Compute the cell-center position in physical units. The field
-            // dimension determines which axis indices are physically meaningful;
-            // missing axes are set to 0 on the particle's home record.
+            // Compute the node position in physical units. The field
+            // dimension determines which axis indices are physically
+            // meaningful; missing axes are set to 0 on the particle's home
+            // record. At a non-periodic domain-top node the position is
+            // pulled just inside the boundary (positions at or beyond
+            // ProbHi count as outside and Redistribute would delete the
+            // marker) -- same guard as the PushX clamp; interior nodes are
+            // unaffected by the min().
+            auto const node_pos = [&] (int d_field, int d_iv)
+            {
+                return amrex::min(
+                    plo[d_field] + iv[d_iv] * dx_arr[d_field],
+                    phi[d_field] - amrex::Real(1.e-6) * dx_arr[d_field]);
+            };
 #if defined(WARPX_DIM_3D)
-            amrex::Real const x_pos = plo[0] + (iv[0] + amrex::Real(0.5)) * dx_arr[0];
-            amrex::Real const y_pos = plo[1] + (iv[1] + amrex::Real(0.5)) * dx_arr[1];
-            amrex::Real const z_pos = plo[2] + (iv[2] + amrex::Real(0.5)) * dx_arr[2];
+            amrex::Real const x_pos = node_pos(0, 0);
+            amrex::Real const y_pos = node_pos(1, 1);
+            amrex::Real const z_pos = node_pos(2, 2);
             pa[QdsmcPIdx::x][ip] = x_pos;
             pa[QdsmcPIdx::y][ip] = y_pos;
             pa[QdsmcPIdx::z][ip] = z_pos;
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
             // In 2D Cartesian and RZ the second in-plane coord is z; the y
             // axis is the unused out-of-plane direction.
-            amrex::Real const x_pos = plo[0] + (iv[0] + amrex::Real(0.5)) * dx_arr[0];
+            amrex::Real const x_pos = node_pos(0, 0);
             auto const y_pos = amrex::Real(0);
-            amrex::Real const z_pos = plo[1] + (iv[1] + amrex::Real(0.5)) * dx_arr[1];
+            amrex::Real const z_pos = node_pos(1, 1);
             pa[QdsmcPIdx::x][ip] = x_pos;
             pa[QdsmcPIdx::z][ip] = z_pos;
 #elif defined(WARPX_DIM_1D_Z)
             auto const x_pos = amrex::Real(0);
             auto const y_pos = amrex::Real(0);
-            amrex::Real const z_pos = plo[0] + (iv[0] + amrex::Real(0.5)) * dx_arr[0];
+            amrex::Real const z_pos = node_pos(0, 0);
             pa[QdsmcPIdx::z][ip] = z_pos;
 #else
             // WARPX_DIM_RCYLINDER / WARPX_DIM_RSPHERE: 1D radial; the single
@@ -178,7 +212,7 @@ void QdsmcParticleContainer::InitParticles (int lev)
             // in these geometries (no radial volume weighting yet) and
             // HybridPICModel::ReadParameters refuses to enable the energy
             // equation there -- this branch only needs to compile and be sane.
-            amrex::Real const x_pos = plo[0] + (iv[0] + amrex::Real(0.5)) * dx_arr[0];
+            amrex::Real const x_pos = node_pos(0, 0);
             auto const y_pos = amrex::Real(0);
             auto const z_pos = amrex::Real(0);
             pa[QdsmcPIdx::x][ip] = x_pos;
@@ -331,10 +365,10 @@ QdsmcParticleContainer::PushX (int lev, amrex::Real dt)
     // advected position is clamped just inside the domain (positions at or
     // beyond ProbHi count as outside) rather than handed to Redistribute,
     // which would DELETE the marker: since InitParticles runs only once, the
-    // home cell would then have no QDSMC marker for the rest of the run and
+    // home node would then have no QDSMC marker for the rest of the run and
     // its T_e could never be updated again. Clamping instead accumulates the
     // carried entropy at the boundary nodes and preserves the
-    // one-marker-per-cell invariant (ResetParticles returns it home).
+    // one-marker-per-node invariant (ResetParticles returns it home).
     // Periodic directions are left unclamped so Redistribute wraps them.
     amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> lo_bnd;
     amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> hi_bnd;

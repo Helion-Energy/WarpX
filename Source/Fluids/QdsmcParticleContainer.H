@@ -23,9 +23,13 @@
 /**
  * @brief Indexing for the QDSMC fictitious-particle SoA storage.
  *
- * QDSMC particles are one-per-cell Lagrangian markers used to transport the
+ * QDSMC particles are one-per-node Lagrangian markers used to transport the
  * electron entropy K_e by the electron fluid velocity V_e over one PIC step
- * (see Belyaev et al., Phys. Plasmas 31, 012902 (2024), Sec. III.A).
+ * (see Belyaev et al., Phys. Plasmas 31, 012902 (2024), Sec. III.A). Homing
+ * the markers at the nodes of the (nodal) QDSMC grid fields makes the
+ * at-rest gather/deposit round trip the identity; cell-center homes would
+ * smooth the fields by a [1/2,1/2]^dim box filter every step (a numerical
+ * diffusion ~ dx^2/(4*dt) per direction, independent of dt).
  *
  * Layout: AMReX's `ParticleContainerPureSoA\<NReal=nattribs, NInt=0\>` treats the
  * first AMREX_SPACEDIM real attributes as the AMReX particle positions used
@@ -38,10 +42,10 @@
  *     3D   : [x, y, z]         -> AMReX positions 0, 1, 2
  *
  *   User attributes (always present, 3D semantic regardless of field dim):
- *     x_node, y_node, z_node : home position (cell center at start of QDSMC step)
+ *     x_node, y_node, z_node : home position (owning grid node)
  *     vx, vy, vz             : electron-fluid velocity gathered at home (3 components)
  *     entropy                : weighted entropy K_e * N_e carried by this particle
- *     np_real                : weight N_e (electrons in this cell)
+ *     np_real                : weight N_e (electrons in this node's dual cell)
  *
  * The home positions and velocities are always stored as 3 components even when
  * the field dimension is lower. In 2D the y-home is set to 0 at init; in 1D
@@ -61,7 +65,7 @@ struct QdsmcPIdx
         y,
 #endif
         z,
-        // Home position (3D, used for cell-centered gather at start of step).
+        // Home position (3D, the owning node; gather target at start of step).
         x_node, y_node, z_node,
         // Electron-fluid velocity gathered at home (3 components, always).
         vx, vy, vz,
@@ -75,7 +79,7 @@ struct QdsmcPIdx
 /**
  * @brief Container for QDSMC fictitious electron-energy-equation particles.
  *
- * One particle is initialized per cell at its center; the particle's velocity
+ * One particle is initialized per grid node; the particle's velocity
  * is set to V_e (gathered at home), its entropy slot to K_e * N_e, its weight
  * slot to N_e, and the particle is then pushed by one PIC step. After the
  * push, entropy and weight are scattered back to the grid; the new K_e is
@@ -107,7 +111,13 @@ public:
     using const_iterator = amrex::ParConstIterSoA<QdsmcPIdx::nattribs, 0>;
 
     /**
-     * @brief Initialize one particle per cell at the cell center.
+     * @brief Initialize one particle per grid node.
+     *
+     * Node ownership is unique: box-seam nodes belong to the lower box, and
+     * in periodic directions the domain's top node (the image of the bottom
+     * one) gets no marker. At a non-periodic domain-top node the particle
+     * position is pulled 1e-6*dx inside the boundary so Redistribute cannot
+     * delete it; the home record keeps the same pulled-in position.
      *
      * For dim D < 3 the missing position components of the home are set to 0.
      * Particle velocity, entropy and np_real are all set to 0; subsequent

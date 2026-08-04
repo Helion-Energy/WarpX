@@ -438,7 +438,7 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
     }
 
     // QDSMC: lazy-construct the fictitious-particle container and lay one
-    // particle per cell.
+    // particle per grid node.
     if (m_solve_electron_energy_equation) {
         m_qdsmc_pc = std::make_unique<QdsmcParticleContainer>(&warpx);
         for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
