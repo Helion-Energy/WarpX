@@ -2160,11 +2160,12 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Cell-face fluid flux. Centered is low-dissipation for smooth flows;
         Rusanov adds local Lax--Friedrichs regularization; HLLC is a
         contact-preserving approximate Riemann flux. HLLD selects the
-        conservative-form recast (1D only for now): B replaces E as the
-        JFNK field unknown and one smoothed HLLD Riemann solution per face
-        supplies the fluid fluxes, the Maxwell stress, and the ideal EMF;
-        requires no Hall term, no electron-pressure Ohm term, no
-        hyper-resistivity, and no preconditioner.
+        conservative-form recast (1D and RZ): B replaces E as the JFNK
+        field unknown and one smoothed HLLD Riemann solution per face
+        supplies the fluid fluxes, the Maxwell stress, and the ideal EMF
+        (corner UCT-HLL E_theta in RZ); requires no Hall term, no
+        electron-pressure Ohm term, no hyper-resistivity, and no
+        preconditioner.
 
     r_open_fluid: {"outflow", "reflect"}, optional
         Fluid ghost treatment at an open (Green's-function) upper radial

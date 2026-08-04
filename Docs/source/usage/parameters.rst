@@ -4096,16 +4096,23 @@ Jacobian probes.
     constitute a full MHD Riemann solver because magnetic induction
     remains in the staggered Ohm/Faraday update.
 
-    ``hlld`` selects the conservative-form recast (1D Cartesian only for
-    now): :math:`B^{n+\theta}` replaces :math:`E` as the JFNK field
-    unknown, and one smoothed HLLD (Miyoshi--Kusano) Riemann solution per
-    cell face supplies the fluid fluxes, the Maxwell-stress momentum
-    coupling (replacing the pointwise :math:`J \times B` force), the
-    ion-energy magnetic work (from the same discrete stress-flux
+    ``hlld`` selects the conservative-form recast (1D Cartesian and
+    cylindrical RZ): :math:`B^{n+\theta}` replaces :math:`E` as the JFNK
+    field unknown, and one smoothed HLLD (Miyoshi--Kusano) Riemann
+    solution per cell face supplies the fluid fluxes, the Maxwell-stress
+    momentum coupling (replacing the pointwise :math:`J \times B` force),
+    the ion-energy magnetic work (from the same discrete stress-flux
     difference as the momentum equation), and the ideal EMF, whose
     theta-implicit Yee curl advances :math:`B` with :math:`\nabla \cdot
     B = 0` preserved to round-off. :math:`E` becomes a derived Ohm's-law
     quantity, :math:`E = -u \times B + \eta J`, assembled by the solver.
+    In RZ, :math:`E_r` and :math:`E_z` are direct face Riemann induction
+    fluxes at their native Yee staggering, :math:`E_\theta` is assembled
+    on cell corners with a smoothed UCT-HLL (Londrillo--Del Zanna)
+    average using the stored face signal speeds (zero on axis by
+    :math:`m = 0` parity), and the cylindrical geometric source terms
+    carry the Maxwell-stress parts consistently in both the momentum and
+    ion-energy equations.
     ``hlld`` requires ``include_hall_term = false``,
     ``include_electron_pressure_term = false``, no hyper-resistivity, and
     ``jacobian.pc_type = none``. The wave fan is assembled
