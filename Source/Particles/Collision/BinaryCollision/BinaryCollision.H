@@ -547,7 +547,8 @@ public:
 
                 ABLASTR_PROFILE_VAR("BinaryCollision::doCollisionsWithinTile::findDensityTemperatures::atomics", prof_findDensityTemperatures_atomics);
                 // Loop over particles and compute quantities needed for energy conservation and the collsion parameters
-                amrex::ParallelFor( np1,
+                // amrex::For: iterations scatter-add into shared per-cell sums (no SIMD pragma, see issue #7097)
+                amrex::For( np1,
                     [=] AMREX_GPU_DEVICE (int ip) noexcept
                     {
                         if (correct_energy_momentum) {
@@ -615,9 +616,10 @@ public:
                 }
             );
             ABLASTR_PROFILE_VAR_STOP(prof_findDensityTemperatures_finish);
+            ABLASTR_PROFILE_VAR_STOP(prof_findDensityTemperatures);
 
             // shuffle
-            ABLASTR_PROFILE_VAR("BinaryCollision::doCollisionsWithinTile::findDensityTemperatures::shuffle", prof_findDensityTemperatures_shuffle);
+            ABLASTR_PROFILE_VAR("BinaryCollision::doCollisionsWithinTile::shuffle", prof_shuffle);
             amrex::ParallelForRNG( n_cells,
                 [=] AMREX_GPU_DEVICE (int i_cell, amrex::RandomEngine const& engine) noexcept
                 {
@@ -632,8 +634,7 @@ public:
                     ShuffleFisherYates(indices_1, cell_start_1, cell_stop_1, engine);
                 }
             );
-            ABLASTR_PROFILE_VAR_STOP(prof_findDensityTemperatures_shuffle);
-            ABLASTR_PROFILE_VAR_STOP(prof_findDensityTemperatures);
+            ABLASTR_PROFILE_VAR_STOP(prof_shuffle);
 
             // Loop over independent particle pairs
             // To speed up binary collisions on GPU, we try to expose as much parallelism
@@ -697,6 +698,7 @@ public:
             ABLASTR_PROFILE_VAR_STOP(prof_loopOverCollisions);
             // Create the new product particles and define their initial values
             // num_added: how many particles of each product species have been created
+            ABLASTR_PROFILE_VAR("BinaryCollision::doCollisionsWithinTile::copyTransform", prof_copyTransform);
             //NOLINTNEXTLINE(readability-suspicious-call-argument)
             const amrex::Vector<int> num_added = m_copy_transform_functor(n_total_pairs,
                                                     ptile_1, ptile_1,
@@ -707,6 +709,7 @@ public:
                                                     copy_species1, copy_species2,
                                                     p_pair_indices_1, p_pair_indices_2,
                                                     p_pair_reaction_weight, p_product_data);
+            ABLASTR_PROFILE_VAR_STOP(prof_copyTransform);
 
             for (int i = 0; i < n_product_species; i++)
             {
@@ -718,7 +721,8 @@ public:
                 amrex::ParticleReal const energy_fraction = m_energy_fraction;
 
                 ABLASTR_PROFILE_VAR("BinaryCollision::doCollisionsWithinTile::correctEnergyMomentum", prof_correctEnergyMomentum);
-                amrex::ParallelFor( np1,
+                // amrex::For: iterations scatter-add into shared per-cell sums (no SIMD pragma, see issue #7097)
+                amrex::For( np1,
                     [=] AMREX_GPU_DEVICE (int i1) noexcept
                     {
 
@@ -735,7 +739,8 @@ public:
                     }
                 );
 
-                amrex::ParallelFor( np1,
+                // amrex::For: iterations scatter-add into shared per-cell sums (no SIMD pragma, see issue #7097)
+                amrex::For( np1,
                     [=] AMREX_GPU_DEVICE (int i1) noexcept
                     {
 
@@ -762,9 +767,10 @@ public:
                 const int energy_correction_sort_by_weight_flag = m_energy_correction_sort_by_weight ? sort : no_sort;
                 auto heapSortDecreasing = ParticleUtils::HeapSortDecreasing();
 
-                amrex::ParallelFor(amrex::TypeList<amrex::CompileTimeOptions<no_sort,sort>>{},
-                                   {energy_correction_sort_by_weight_flag},
-                                   n_cells,
+                // amrex::For: iterations share the failed-corrections counter (no SIMD pragma, see issue #7097)
+                amrex::For(amrex::TypeList<amrex::CompileTimeOptions<no_sort,sort>>{},
+                           {energy_correction_sort_by_weight_flag},
+                           n_cells,
                     [=] AMREX_GPU_DEVICE (int i_cell, auto energy_correction_sort_by_weight_control) noexcept
                     {
 
@@ -1077,7 +1083,8 @@ public:
 
                 // Loop over particles and compute quantities needed for energy conservation and the collsion parameters
                 ABLASTR_PROFILE_VAR("BinaryCollision::doCollisionsWithinTile::findDensityTemperatures::atomics", prof_findDensityTemperatures_atomics);
-                amrex::ParallelFor( std::max(np1, np2),
+                // amrex::For: iterations scatter-add into shared per-cell sums (no SIMD pragma, see issue #7097)
+                amrex::For( std::max(np1, np2),
                     [=] AMREX_GPU_DEVICE (int ip) noexcept
                     {
                         if (correct_energy_momentum) {
@@ -1203,9 +1210,10 @@ public:
                 }
             );
             ABLASTR_PROFILE_VAR_STOP(prof_findDensityTemperatures_finish);
+            ABLASTR_PROFILE_VAR_STOP(prof_findDensityTemperatures);
 
             // shuffle - we launch 2*n_cells threads to compute both species simultaneously
-        ABLASTR_PROFILE_VAR("BinaryCollision::doCollisionsWithinTile::findDensityTemperatures::shuffle", prof_findDensityTemperatures_shuffle);
+            ABLASTR_PROFILE_VAR("BinaryCollision::doCollisionsWithinTile::shuffle", prof_shuffle);
             amrex::ParallelForRNG( 2*n_cells,
                 [=] AMREX_GPU_DEVICE (int i, amrex::RandomEngine const& engine) noexcept
                 {
@@ -1231,9 +1239,7 @@ public:
           }
                 }
             );
-            ABLASTR_PROFILE_VAR_STOP(prof_findDensityTemperatures_shuffle);
-
-        ABLASTR_PROFILE_VAR_STOP(prof_findDensityTemperatures);
+            ABLASTR_PROFILE_VAR_STOP(prof_shuffle);
             // Loop over independent particle pairs
             // To speed up binary collisions on GPU, we try to expose as much parallelism
             // as possible (while avoiding race conditions): Instead of looping with one GPU
@@ -1304,6 +1310,7 @@ public:
 
             // Create the new product particles and define their initial values
             // num_added: how many particles of each product species have been created
+            ABLASTR_PROFILE_VAR("BinaryCollision::doCollisionsWithinTile::copyTransform", prof_copyTransform);
             //NOLINTNEXTLINE(readability-suspicious-call-argument)
             const amrex::Vector<int> num_added = m_copy_transform_functor(n_total_pairs,
                                                     ptile_1, ptile_2,
@@ -1314,6 +1321,7 @@ public:
                                                     copy_species1, copy_species2,
                                                     p_pair_indices_1, p_pair_indices_2,
                                                     p_pair_reaction_weight, p_product_data);
+            ABLASTR_PROFILE_VAR_STOP(prof_copyTransform);
 
             for (int i = 0; i < n_product_species; i++)
             {
@@ -1325,7 +1333,8 @@ public:
                 amrex::ParticleReal const energy_fraction = m_energy_fraction;
 
                 ABLASTR_PROFILE_VAR("BinaryCollision::doCollisionsWithinTile::correctEnergyMomentum", prof_correctEnergyMomentum);
-                amrex::ParallelFor( std::max(np1, np2),
+                // amrex::For: iterations scatter-add into shared per-cell sums (no SIMD pragma, see issue #7097)
+                amrex::For( std::max(np1, np2),
                     [=] AMREX_GPU_DEVICE (int ip) noexcept
                     {
 
@@ -1396,9 +1405,10 @@ public:
                 const int energy_correction_sort_by_weight_flag = m_energy_correction_sort_by_weight ? sort : no_sort;
                 auto heapSortDecreasing = ParticleUtils::HeapSortDecreasing();
 
-                amrex::ParallelFor(amrex::TypeList<amrex::CompileTimeOptions<no_sort,sort>>{},
-                                   {energy_correction_sort_by_weight_flag},
-                                   n_cells,
+                // amrex::For: iterations share the failed-corrections counter (no SIMD pragma, see issue #7097)
+                amrex::For(amrex::TypeList<amrex::CompileTimeOptions<no_sort,sort>>{},
+                           {energy_correction_sort_by_weight_flag},
+                           n_cells,
                     [=] AMREX_GPU_DEVICE (int i_cell, auto energy_correction_sort_by_weight_control) noexcept
                     {
                         // The particles from species1 that are in the cell `i_cell` are

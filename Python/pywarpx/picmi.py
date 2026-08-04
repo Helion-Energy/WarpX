@@ -1670,8 +1670,9 @@ class GMRESLinearSolver(LinearSolverBase):
         self.relative_tolerance = relative_tolerance
         self.max_iterations = max_iterations
 
-    def linear_solver_initialize_inputs(self, nonlinear_solver):
-        nonlinear_solver.linear_solver = "amrex_gmres"
+    def linear_solver_initialize_inputs(self, nonlinear_solver=None):
+        if nonlinear_solver is not None:
+            nonlinear_solver.linear_solver = "amrex_gmres"
         amrex_gmres = pywarpx.warpx.get_bucket("amrex_gmres")
         amrex_gmres.verbose_int = self.verbose_int
         amrex_gmres.restart_length = self.restart_length
@@ -1688,8 +1689,9 @@ class PETScKSPLinearSolver(LinearSolverBase):
     ----------
     """
 
-    def linear_solver_initialize_inputs(self, nonlinear_solver):
-        nonlinear_solver.linear_solver = "petsc_ksp"
+    def linear_solver_initialize_inputs(self, nonlinear_solver=None):
+        if nonlinear_solver is not None:
+            nonlinear_solver.linear_solver = "petsc_ksp"
 
 
 class PreconditionerBase(picmistandard.base._ClassWithInit):
@@ -2542,6 +2544,12 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.qdsmc_conduction_kappa = qdsmc_conduction_kappa
         self.qdsmc_conduction_substeps = qdsmc_conduction_substeps
         self.qdsmc_conduction_flux_limiter = qdsmc_conduction_flux_limiter
+
+        self.solve_electron_energy_equation = solve_electron_energy_equation
+        self.include_joule_heating = include_joule_heating
+        self.joule_redirect_Te_threshold = joule_redirect_Te_threshold
+        self.electron_ion_relaxation_rate = electron_ion_relaxation_rate
+        self.qdsmc_n_floor = qdsmc_n_floor
 
         self.substeps = substeps
         self.use_rkf45 = use_rkf45
