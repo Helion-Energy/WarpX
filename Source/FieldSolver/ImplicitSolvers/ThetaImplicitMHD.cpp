@@ -1973,50 +1973,86 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
             // energy channels, gating on the theta-extrapolated
             // end-of-step donor values -- identical policy to face_flux
             // (momentum, stress, and induction channels have no floors).
+            // The donor SIDE is selected by a C-infinity smoothed flux
+            // sign: near-stagnant faces whose two donors carry different
+            // limiter values (a floored halo cell against a healthy
+            // neighbor) would otherwise present a derivative kink at
+            // every zero crossing, which defeats the Newton line search
+            // on near-floor equilibria. The blend width scales with the
+            // face signal span times the donor magnitudes, so an exactly
+            // zero flux stays exactly zero (static contacts remain
+            // machine-preserved) and a strong flux keeps its pure donor.
             const amrex::Real ext =
                 (1.0_rt - parameters.theta) / parameters.theta;
-            const bool mass_from_left = (flux.mass >= 0.0_rt);
-            const int im = mass_from_left ? il : i;
-            const int jm = mass_from_left ? jl : j;
-            const int km = mass_from_left ? kl : k;
-            const amrex::Real rho_end =
-                rho(im, jm, km) * (1.0_rt + ext) - rho_old(im, jm, km) * ext;
-            flux.mass *= theta_implicit_mhd::floor_outflow_limiter(
-                rho_end, parameters.density_floor);
-            const bool ue_from_left = (flux.electron_energy >= 0.0_rt);
-            const int ie = ue_from_left ? il : i;
-            const int je = ue_from_left ? jl : j;
-            const int ke = ue_from_left ? kl : k;
-            const amrex::Real ue_end =
-                energy(ie, je, ke) * (1.0_rt + ext) -
-                energy_old(ie, je, ke) * ext;
-            flux.electron_energy *= theta_implicit_mhd::floor_outflow_limiter(
-                ue_end, parameters.electron_pressure_floor /
-                            (parameters.gamma_e - 1.0_rt));
+            const amrex::Real signal_span =
+                0.5_rt * (flux.signal_right - flux.signal_left);
+            const auto donor_blend = [=] (const amrex::Real flux_value,
+                                          const amrex::Real limiter_left,
+                                          const amrex::Real limiter_right,
+                                          const amrex::Real value_scale) {
+                const amrex::Real width = parameters.hlld_kappa_signal *
+                                          signal_span * value_scale;
+                const amrex::Real left_weight =
+                    0.5_rt * (1.0_rt + theta_implicit_mhd::smooth_sign(
+                                           flux_value, width));
+                return left_weight * limiter_left +
+                       (1.0_rt - left_weight) * limiter_right;
+            };
+            const auto donor_end = [=] (const amrex::Array4<const amrex::Real>& now,
+                                        const amrex::Array4<const amrex::Real>& old,
+                                        const int id, const int jd, const int kd) {
+                return now(id, jd, kd) * (1.0_rt + ext) - old(id, jd, kd) * ext;
+            };
+            flux.mass *= donor_blend(
+                flux.mass,
+                theta_implicit_mhd::floor_outflow_limiter(
+                    donor_end(rho, rho_old, il, jl, kl),
+                    parameters.density_floor),
+                theta_implicit_mhd::floor_outflow_limiter(
+                    donor_end(rho, rho_old, i, j, k),
+                    parameters.density_floor),
+                0.5_rt * (left.safe_density + right.safe_density));
+            const amrex::Real electron_energy_floor =
+                parameters.electron_pressure_floor /
+                (parameters.gamma_e - 1.0_rt);
+            flux.electron_energy *= donor_blend(
+                flux.electron_energy,
+                theta_implicit_mhd::floor_outflow_limiter(
+                    donor_end(energy, energy_old, il, jl, kl),
+                    electron_energy_floor),
+                theta_implicit_mhd::floor_outflow_limiter(
+                    donor_end(energy, energy_old, i, j, k),
+                    electron_energy_floor),
+                0.5_rt * (left.electron_energy + right.electron_energy) +
+                    electron_energy_floor);
             if (parameters.total_energy_closure) {
-                const bool ei_from_left = (flux.ion_energy >= 0.0_rt);
-                const int ii = ei_from_left ? il : i;
-                const int ji = ei_from_left ? jl : j;
-                const int ki = ei_from_left ? kl : k;
-                const amrex::Real ei_end =
-                    ion_e(ii, ji, ki) * (1.0_rt + ext) -
-                    ion_e_old(ii, ji, ki) * ext;
-                amrex::Real kinetic_end = 0.0_rt;
-                for (int component = 0; component < 3; ++component) {
-                    const amrex::Real mom_end =
-                        mom(ii, ji, ki, component) * (1.0_rt + ext) -
-                        mom_old(ii, ji, ki, component) * ext;
-                    kinetic_end += mom_end * mom_end;
-                }
-                const amrex::Real rho_end_donor = std::max(
-                    rho(ii, ji, ki) * (1.0_rt + ext) -
-                        rho_old(ii, ji, ki) * ext,
-                    parameters.density_floor);
-                kinetic_end *= 0.5_rt / rho_end_donor;
-                flux.ion_energy *= theta_implicit_mhd::floor_outflow_limiter(
-                    ei_end - kinetic_end,
+                const auto ion_internal_end = [=] (const int id, const int jd,
+                                                   const int kd) {
+                    const amrex::Real ei_end =
+                        donor_end(ion_e, ion_e_old, id, jd, kd);
+                    amrex::Real kinetic_end = 0.0_rt;
+                    for (int component = 0; component < 3; ++component) {
+                        const amrex::Real mom_end =
+                            mom(id, jd, kd, component) * (1.0_rt + ext) -
+                            mom_old(id, jd, kd, component) * ext;
+                        kinetic_end += mom_end * mom_end;
+                    }
+                    kinetic_end *=
+                        0.5_rt / std::max(donor_end(rho, rho_old, id, jd, kd),
+                                          parameters.density_floor);
+                    return ei_end - kinetic_end;
+                };
+                const amrex::Real ion_energy_floor =
                     parameters.ion_pressure_floor /
-                        (parameters.gamma_i - 1.0_rt));
+                    (parameters.gamma_i - 1.0_rt);
+                flux.ion_energy *= donor_blend(
+                    flux.ion_energy,
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        ion_internal_end(il, jl, kl), ion_energy_floor),
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        ion_internal_end(i, j, k), ion_energy_floor),
+                    0.5_rt * (left.ion_energy + right.ion_energy) +
+                        ion_energy_floor);
             }
 
             flux_arr(i, j, k, flux_mass) = flux.mass;
@@ -2657,6 +2693,10 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                              : 0.0_rt;
     const bool evolve_ion_fluid = m_evolve_ion_fluid;
     const bool include_joule_heating = m_include_joule_heating;
+    const amrex::Real work_kappa = m_hlld_kappa_signal;
+    const amrex::Real electron_energy_floor_rate =
+        m_electron_pressure_floor / (m_gamma_e - 1.0_rt) / theta_dt;
+    const amrex::Real ion_energy_floor_rate = ion_energy_floor / theta_dt;
     const bool holmstrom_vacuum = m_vacuum_mass_density > 0.0_rt;
     const amrex::Real vacuum_mass_density = m_vacuum_mass_density;
     const amrex::Real vacuum_drag_rate = m_vacuum_drag_rate;
@@ -2799,10 +2839,14 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                                           mom(i, j, k, component);
                     }
                     kinetic_energy *= 0.5_rt / safe_density;
+                    // Same C-infinity smooth internal-energy floor as the
+                    // kernel's p_i(E_i) recovery: halo cells pinned at the
+                    // floor sit exactly on a hard max() kink otherwise.
                     pressure_i =
                         gamma_i_minus_one *
-                        std::max(ion_e(i, j, k) - kinetic_energy,
-                                 ion_energy_floor);
+                        theta_implicit_mhd::smooth_positive_floor(
+                            ion_e(i, j, k) - kinetic_energy,
+                            ion_energy_floor);
                 } else {
                     pressure_i = theta_implicit_mhd::ion_pressure(
                         safe_density, flux_parameters);
@@ -2877,10 +2921,33 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
             const amrex::Real energy_end =
                 energy(i, j, k) * (1.0_rt + extrapolation_weight) -
                 energy_old(i, j, k) * extrapolation_weight;
-            if (pressure_work < 0.0_rt) {
-                pressure_work *= theta_implicit_mhd::floor_outflow_limiter(
-                    energy_end, pressure_floor / gamma_e_minus_one);
-            }
+            // C-infinity smoothed drain gates: blend full and
+            // floor-limited work by the smoothed work sign, with the
+            // width set by the local flux-divergence scale (anchored
+            // strictly positive by the floor rate). The hard
+            // if (work < 0) gate is a derivative kink that sits exactly
+            // where near-floor halo work terms fluctuate around zero,
+            // which defeats the Newton line search on magnetized
+            // floor-density equilibria.
+            const auto drain_gate = [=] (const amrex::Real work,
+                                         const amrex::Real divergence_scale,
+                                         const amrex::Real floor_rate,
+                                         const amrex::Real limiter) {
+                const amrex::Real width =
+                    work_kappa *
+                    std::sqrt(divergence_scale * divergence_scale +
+                              floor_rate * floor_rate);
+                const amrex::Real positive_weight =
+                    0.5_rt *
+                    (1.0_rt + theta_implicit_mhd::smooth_sign(work, width));
+                return work * (positive_weight +
+                               (1.0_rt - positive_weight) * limiter);
+            };
+            pressure_work = drain_gate(
+                pressure_work, divergence_energy_flux,
+                electron_energy_floor_rate,
+                theta_implicit_mhd::floor_outflow_limiter(
+                    energy_end, pressure_floor / gamma_e_minus_one));
             energy_increment(i, j, k) =
                 theta_dt * plasma_weight *
                 (-divergence_energy_flux + pressure_work + joule_heating);
@@ -2916,16 +2983,15 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 lorentz_work /= safe_density;
                 amrex::Real ion_pressure_work =
                     pressure_e * divergence_electron_velocity;
-                if (ion_pressure_work < 0.0_rt) {
-                    ion_pressure_work *=
-                        theta_implicit_mhd::floor_outflow_limiter(
-                            internal_proxy_end, ion_energy_floor);
-                }
-                if (lorentz_work < 0.0_rt) {
-                    lorentz_work *=
-                        theta_implicit_mhd::floor_outflow_limiter(
-                            internal_proxy_end, ion_energy_floor);
-                }
+                const amrex::Real ion_limiter =
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        internal_proxy_end, ion_energy_floor);
+                ion_pressure_work =
+                    drain_gate(ion_pressure_work, divergence_ion_energy_flux,
+                               ion_energy_floor_rate, ion_limiter);
+                lorentz_work =
+                    drain_gate(lorentz_work, divergence_ion_energy_flux,
+                               ion_energy_floor_rate, ion_limiter);
                 ion_energy_increment(i, j, k) =
                     theta_dt * plasma_weight *
                     (-divergence_ion_energy_flux + lorentz_work +
