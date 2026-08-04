@@ -627,6 +627,15 @@ public:
     bool m_add_external_fields = false;
     std::unique_ptr<ExternalVectorPotential> m_external_vector_potential;
 
+    /** Subtract the external E field from the Ohm's-law E unconditionally
+     * instead of gating the subtraction on rho >= rho_floor. The per-cell
+     * gate is a state-dependent discontinuity that breaks matrix-free
+     * Jacobian probes, so the theta-implicit MHD solver enables this in its
+     * Define(). The default (false) preserves the explicit-hybrid
+     * split-field behavior, where external fields penetrate sub-floor
+     * vacuum regions freely. Not a user input. */
+    bool m_external_e_subtraction_unconditional = false;
+
     /** Gpu Vector with index type of the Jx multifab */
     amrex::GpuArray<int, 3> Jx_IndexType;
     /** Gpu Vector with index type of the Jy multifab */

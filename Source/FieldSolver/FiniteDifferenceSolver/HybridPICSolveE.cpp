@@ -558,6 +558,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         hybrid_model->m_include_electron_pressure_term;
 
     const bool include_external_fields = hybrid_model->m_add_external_fields;
+    const bool subtract_E_ext_everywhere =
+        hybrid_model->m_external_e_subtraction_unconditional;
 
     const bool holmstrom_vacuum_region = hybrid_model->m_holmstrom_vacuum_region;
 
@@ -827,7 +829,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_external_fields &&
+                    (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                     Er(i, j, 0) -= Er_ext(i, j, 0);
                 }
             },
@@ -902,7 +905,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_external_fields &&
+                    (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                     Etheta(i, j, 0) -= Etheta_ext(i, j, 0);
                 }
             },
@@ -977,7 +981,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_external_fields &&
+                    (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                     Ez(i, j, 0) -= Ez_ext(i, j, 0);
                 }
             }
@@ -1041,6 +1046,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         hybrid_model->m_include_electron_pressure_term;
 
     const bool include_external_fields = hybrid_model->m_add_external_fields;
+    const bool subtract_E_ext_everywhere =
+        hybrid_model->m_external_e_subtraction_unconditional;
 
     const bool holmstrom_vacuum_region = hybrid_model->m_holmstrom_vacuum_region;
 
@@ -1302,7 +1309,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields && (rho_val >= rho_floor)) {
+            if (include_external_fields && (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                 Ex(i, j, k) -= Ex_ext(i, j, k);
             }
         });
@@ -1368,7 +1375,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields && (rho_val >= rho_floor)) {
+            if (include_external_fields && (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                 Ey(i, j, k) -= Ey_ext(i, j, k);
             }
         });
@@ -1434,7 +1441,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields && (rho_val >= rho_floor)) {
+            if (include_external_fields && (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                 Ez(i, j, k) -= Ez_ext(i, j, k);
             }
         });
