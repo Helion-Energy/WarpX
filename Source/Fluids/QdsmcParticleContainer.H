@@ -71,6 +71,12 @@ struct QdsmcPIdx
         vx, vy, vz,
         // QDSMC transported scalars: weighted entropy and electron count.
         entropy, np_real,
+        // Limited (MC) slopes of the transported scalars, per GRID dimension
+        // (d0/d1/d2; unused above AMREX_SPACEDIM stay 0), in physical units
+        // [attr / m]. Loaded by SetK and consumed by the gradient-corrected
+        // deposit; zeroed by ResetParticles.
+        entropy_g0, entropy_g1, entropy_g2,
+        np_g0, np_g1, np_g2,
         nattribs
     };
 };
@@ -177,15 +183,27 @@ public:
      * @brief Scatter the per-particle entropy (K_e * N_e) onto Kfield via
      *        linear shape-factor weighted atomic add.
      *        Kfield is zeroed at the start of this call.
+     *
+     * @param gradient_corrected deposit w * (A + 1/2 G . (x_dest - x_p))
+     *        instead of w * A, using the limited slopes loaded by SetK. The
+     *        correction sums to zero exactly (the hat's weighted mean is the
+     *        particle position), so conservation is unchanged, and it
+     *        cancels the hat kernel's second moment, making the remap exact
+     *        through quadratics (2nd-order spatial transport). The MC
+     *        limiter keeps deposited values within the local neighbor range
+     *        (positivity).
      */
-    void DepositK (int lev, amrex::MultiFab & Kfield);
+    void DepositK (int lev, amrex::MultiFab & Kfield,
+                   bool gradient_corrected = false);
 
     /**
      * @brief Scatter the per-particle weight np_real/V_cell (= n_e) onto
      *        Field via linear shape-factor weighted atomic add.
      *        Field is zeroed at the start of this call.
+     *        See DepositK for the gradient_corrected option.
      */
-    void DepositField (int lev, amrex::MultiFab & Field);
+    void DepositField (int lev, amrex::MultiFab & Field,
+                       bool gradient_corrected = false);
 
     /**
      * @brief Reset particle position to home, zero velocity / entropy / weight.
@@ -199,9 +217,13 @@ private:
      *        MultiFab with the order-1 charge-deposition kernel:
      *        field += scale * attribute * S(x). The field is zeroed first
      *        and guard-cell deposits are summed back in afterward.
+     *
+     * @param slope_attr0 index of the first of AMREX_SPACEDIM consecutive
+     *        slope attributes for the half-gradient-corrected deposit, or
+     *        -1 for the plain point deposit.
      */
-    void DepositScalar (int lev, int attr, amrex::Real scale,
-                        amrex::MultiFab & field);
+    void DepositScalar (int lev, int attr, int slope_attr0,
+                        amrex::Real scale, amrex::MultiFab & field);
 };
 
 #endif // WARPX_QDSMCPARTICLECONTAINER_H_

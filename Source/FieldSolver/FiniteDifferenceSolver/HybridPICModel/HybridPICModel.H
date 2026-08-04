@@ -435,9 +435,21 @@ public:
 
     /** Time-advance scheme for the QDSMC energy step (bake-off switch,
      *  hybrid_pic_model.qdsmc_time_advance = euler | leapfrog | pc).
-     *  See AdvanceElectronEnergyQDSMC for the scheme definitions. */
+     *  See AdvanceElectronEnergyQDSMC for the scheme definitions.
+     *  Default: pc — selected 2026-08-04 after the bake-off (second order
+     *  in dt, best stiff-Joule energy budget, integer-time state). euler is
+     *  the #6982 first-order control. */
     enum struct QdsmcTimeAdvance { Euler, Leapfrog, PC };
-    QdsmcTimeAdvance m_qdsmc_time_advance = QdsmcTimeAdvance::Euler;
+    QdsmcTimeAdvance m_qdsmc_time_advance = QdsmcTimeAdvance::PC;
+
+    /** Half-gradient-corrected QDSMC deposit (Thrust B / B1): markers carry
+     *  limited MC slopes of their content and the scatter deposits
+     *  w * (A + 1/2 G . (x_dest - x_p)). Conservation is exact (the
+     *  correction sums to zero by the hat's first-moment property); the
+     *  remap becomes exact through quadratics, breaking the first-order
+     *  remap-diffusion cap. Disable (with qdsmc_time_advance = euler) to
+     *  recover #6982 bit-for-bit. Input: hybrid_pic_model.qdsmc_gradient_deposit. */
+    bool m_qdsmc_gradient_deposit = true;
 
     /** One entropy-transport pass on level lev over dt_adv: K_e init ->
      *  SetV -> SetK [-> midpoint velocity re-gather] -> PushX -> deposits ->

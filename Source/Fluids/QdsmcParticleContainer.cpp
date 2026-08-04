@@ -229,6 +229,12 @@ void QdsmcParticleContainer::InitParticles (int lev)
             pa[QdsmcPIdx::vz][ip] = amrex::Real(0);
             pa[QdsmcPIdx::entropy][ip] = amrex::Real(0);
             pa[QdsmcPIdx::np_real][ip] = amrex::Real(0);
+            pa[QdsmcPIdx::entropy_g0][ip] = amrex::Real(0);
+            pa[QdsmcPIdx::entropy_g1][ip] = amrex::Real(0);
+            pa[QdsmcPIdx::entropy_g2][ip] = amrex::Real(0);
+            pa[QdsmcPIdx::np_g0][ip] = amrex::Real(0);
+            pa[QdsmcPIdx::np_g1][ip] = amrex::Real(0);
+            pa[QdsmcPIdx::np_g2][ip] = amrex::Real(0);
         });
 
         amrex::Gpu::synchronize();
@@ -303,13 +309,26 @@ QdsmcParticleContainer::SetK (int lev,
     ABLASTR_PROFILE("QdsmcParticleContainer::SetK()");
 
     auto & warpx = WarpX::GetInstance();
-    auto const plo = warpx.Geom(lev).ProbLoArray();
-    auto const dxi = warpx.Geom(lev).InvCellSizeArray();
-    auto const * dx_arr = warpx.Geom(lev).CellSize();
+    amrex::Geometry const & geom = warpx.Geom(lev);
+    auto const plo = geom.ProbLoArray();
+    auto const dxi = geom.InvCellSizeArray();
+    auto const dx  = geom.CellSizeArray();
+    auto const * dx_arr = geom.CellSize();
 
     amrex::Real cell_volume = 1.0_rt;
     for (int d = 0; d < AMREX_SPACEDIM; ++d) {
         cell_volume *= dx_arr[d];
+    }
+
+    // Nodal domain bounds and periodicity for the boundary-safe slope
+    // stencils: at a non-periodic domain edge the missing neighbor is
+    // replaced by the node value itself, which zeroes the MC slope there.
+    amrex::Box const dom_nodes = amrex::surroundingNodes(geom.Domain());
+    amrex::GpuArray<int, AMREX_SPACEDIM> ndlo, ndhi, is_per;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        ndlo[d] = dom_nodes.smallEnd(d);
+        ndhi[d] = dom_nodes.bigEnd(d);
+        is_per[d] = geom.isPeriodic(d);
     }
 
     for (iterator pti(*this, lev); pti.isValid(); ++pti)
@@ -327,6 +346,14 @@ QdsmcParticleContainer::SetK (int lev,
             attribs[QdsmcPIdx::entropy].dataPtr();
         amrex::ParticleReal* const AMREX_RESTRICT np_real =
             attribs[QdsmcPIdx::np_real].dataPtr();
+        amrex::GpuArray<amrex::ParticleReal*, 3> s_g = {
+            attribs[QdsmcPIdx::entropy_g0].dataPtr(),
+            attribs[QdsmcPIdx::entropy_g1].dataPtr(),
+            attribs[QdsmcPIdx::entropy_g2].dataPtr()};
+        amrex::GpuArray<amrex::ParticleReal*, 3> n_g = {
+            attribs[QdsmcPIdx::np_g0].dataPtr(),
+            attribs[QdsmcPIdx::np_g1].dataPtr(),
+            attribs[QdsmcPIdx::np_g2].dataPtr()};
 
         auto const K_arr   = Kfield.const_array(pti);
         auto const rho_arr = rhofield.const_array(pti);
@@ -335,7 +362,9 @@ QdsmcParticleContainer::SetK (int lev,
         {
             // Linear gathers of the nodal charge density and entropy at the
             // marker's home position; the marker then carries the electron
-            // count N of its cell and the matching entropy content K*N.
+            // count N of its dual cell and the matching entropy content K*N.
+            // (Kept as gathers -- identical to node reads for node-homed
+            // markers -- so the plain-deposit path stays bit-identical.)
             amrex::Real const n_p = ablastr::particles::doGatherScalarFieldNodal(
                 x_node[ip], y_node[ip], z_node[ip], rho_arr, dxi, plo)
                 * cell_volume / PhysConst::q_e;
@@ -344,6 +373,54 @@ QdsmcParticleContainer::SetK (int lev,
 
             np_real[ip] = n_p;
             entropy[ip] = k_p * n_p;
+
+            // Limited (MC) slopes of the transported node fields
+            // s(x) = K*rho*V/q and n(x) = rho*V/q, per grid dimension, for
+            // the half-gradient-corrected deposit. The marker sits on its
+            // owning node: snap the compute_weights base index to it.
+            int i = 0, j = 0, k = 0;
+            amrex::Real W[AMREX_SPACEDIM][2];
+            ablastr::particles::compute_weights<amrex::IndexType::CellIndex::NODE>(
+                x_node[ip], y_node[ip], z_node[ip], plo, dxi, i, j, k, W);
+            amrex::GpuArray<int, 3> iv = {i, j, k};
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                if (W[d][1] >= 0.5_rt) { iv[d] += 1; }
+            }
+
+            auto const node_val = [&] (int const i0, int const j0, int const k0,
+                                       bool const with_k)
+            {
+                amrex::Real const v = rho_arr(i0, j0, k0) * cell_volume / PhysConst::q_e;
+                return with_k ? K_arr(i0, j0, k0) * v : v;
+            };
+            auto const mc = [] (amrex::Real const dfp, amrex::Real const dfm)
+            {
+                if (dfp * dfm <= 0.0_rt) { return 0.0_rt; }
+                amrex::Real const s = (dfp > 0.0_rt) ? 1.0_rt : -1.0_rt;
+                return s * amrex::min(2.0_rt * amrex::Math::abs(dfp),
+                                      2.0_rt * amrex::Math::abs(dfm),
+                                      0.5_rt * amrex::Math::abs(dfp + dfm));
+            };
+
+            for (int comp = 0; comp < 2; ++comp) {
+                bool const with_k = (comp == 0);
+                amrex::ParticleReal* const* gout =
+                    with_k ? s_g.data() : n_g.data();
+                amrex::Real const f0 = node_val(iv[0], iv[1], iv[2], with_k);
+                for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                    amrex::GpuArray<int, 3> ivp = iv, ivm = iv;
+                    ivp[d] += 1; ivm[d] -= 1;
+                    bool const has_p = is_per[d] || (iv[d] + 1 <= ndhi[d]);
+                    bool const has_m = is_per[d] || (iv[d] - 1 >= ndlo[d]);
+                    amrex::Real const fp = has_p ? node_val(ivp[0], ivp[1], ivp[2], with_k) : f0;
+                    amrex::Real const fm = has_m ? node_val(ivm[0], ivm[1], ivm[2], with_k) : f0;
+                    gout[d][ip] = mc(fp - f0, f0 - fm) * dxi[d];
+                    amrex::ignore_unused(dx);
+                }
+                for (int d = AMREX_SPACEDIM; d < 3; ++d) {
+                    gout[d][ip] = 0.0_rt;
+                }
+            }
         });
     }
 
@@ -592,6 +669,13 @@ QdsmcParticleContainer::ResetParticles (int lev)
             attribs[QdsmcPIdx::entropy].dataPtr();
         amrex::ParticleReal* const AMREX_RESTRICT np_real =
             attribs[QdsmcPIdx::np_real].dataPtr();
+        amrex::GpuArray<amrex::ParticleReal*, 6> slopes = {
+            attribs[QdsmcPIdx::entropy_g0].dataPtr(),
+            attribs[QdsmcPIdx::entropy_g1].dataPtr(),
+            attribs[QdsmcPIdx::entropy_g2].dataPtr(),
+            attribs[QdsmcPIdx::np_g0].dataPtr(),
+            attribs[QdsmcPIdx::np_g1].dataPtr(),
+            attribs[QdsmcPIdx::np_g2].dataPtr()};
 
 #if !defined(WARPX_DIM_1D_Z)
         amrex::ParticleReal* const AMREX_RESTRICT pa_x =
@@ -619,6 +703,7 @@ QdsmcParticleContainer::ResetParticles (int lev)
             vz[ip] = 0;
             entropy[ip] = 0;
             np_real[ip] = 0;
+            for (int c = 0; c < 6; ++c) { slopes[c][ip] = 0; }
         });
     }
 
@@ -629,14 +714,124 @@ QdsmcParticleContainer::ResetParticles (int lev)
 
 void
 QdsmcParticleContainer::DepositScalar (int lev, int const attr,
+                                       int const slope_attr0,
                                        amrex::Real const scale,
                                        amrex::MultiFab & field)
 {
     auto & warpx = WarpX::GetInstance();
-    amrex::Periodicity const & period = warpx.Geom(lev).periodicity();
+    amrex::Geometry const & geom = warpx.Geom(lev);
+    amrex::Periodicity const & period = geom.periodicity();
     amrex::XDim3 const dinv = WarpX::InvCellSize(lev);
 
     field.setVal(0);
+
+    // Half-gradient-corrected deposit: field_j += w_ij * scale *
+    // (A_i + 1/2 G_i . (x_j - y_i)), with y_i the pushed position and G_i
+    // the limited slopes loaded by SetK. Sum_j w_ij (x_j - y_i) = 0 for the
+    // linear hat (its weighted mean is the particle position), so the
+    // correction conserves Sum(A) exactly; the 1/2 cancels the hat's second
+    // moment, making the remap exact through quadratics.
+    if (slope_attr0 >= 0)
+    {
+        auto const plo = geom.ProbLoArray();
+        auto const dxi = geom.InvCellSizeArray();
+        auto const dx  = geom.CellSizeArray();
+
+        for (iterator pti(*this, lev); pti.isValid(); ++pti)
+        {
+            long const np = pti.numParticles();
+            auto & attribs = pti.GetStructOfArrays().GetRealData();
+
+            const amrex::ParticleReal* AMREX_RESTRICT ap =
+                attribs[attr].dataPtr();
+            amrex::GpuArray<const amrex::ParticleReal*, AMREX_SPACEDIM> gp;
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                gp[d] = attribs[slope_attr0 + d].dataPtr();
+            }
+
+            // Pushed positions from the tracked slots, mapped to the
+            // (xp, yp, zp) convention compute_weights expects (the
+            // out-of-plane components are 0, matching the theta = 0
+            // convention of the plain-deposit path).
+#if !defined(WARPX_DIM_1D_Z)
+            const amrex::ParticleReal* AMREX_RESTRICT pa_x =
+                attribs[QdsmcPIdx::x].dataPtr();
+#endif
+#if defined(WARPX_DIM_3D)
+            const amrex::ParticleReal* AMREX_RESTRICT pa_y =
+                attribs[QdsmcPIdx::y].dataPtr();
+#endif
+            const amrex::ParticleReal* AMREX_RESTRICT pa_z =
+                attribs[QdsmcPIdx::z].dataPtr();
+
+            auto out = field.array(pti);
+
+            amrex::ParallelFor(np, [=] AMREX_GPU_DEVICE (long ip)
+            {
+#if defined(WARPX_DIM_3D)
+                amrex::ParticleReal const xp = pa_x[ip];
+                amrex::ParticleReal const yp = pa_y[ip];
+                amrex::ParticleReal const zp = pa_z[ip];
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+                amrex::ParticleReal const xp = pa_x[ip];
+                auto const yp = amrex::ParticleReal(0);
+                amrex::ParticleReal const zp = pa_z[ip];
+#elif defined(WARPX_DIM_1D_Z)
+                auto const xp = amrex::ParticleReal(0);
+                auto const yp = amrex::ParticleReal(0);
+                amrex::ParticleReal const zp = pa_z[ip];
+#else
+                amrex::ParticleReal const xp = pa_x[ip];
+                auto const yp = amrex::ParticleReal(0);
+                auto const zp = amrex::ParticleReal(0);
+#endif
+                int i = 0, j = 0, k = 0;
+                amrex::Real W[AMREX_SPACEDIM][2];
+                ablastr::particles::compute_weights<amrex::IndexType::CellIndex::NODE>(
+                    xp, yp, zp, plo, dxi, i, j, k, W);
+
+                amrex::Real const a = ap[ip];
+#if defined(WARPX_DIM_3D)
+                for (int kk = 0; kk < 2; ++kk) {
+                for (int jj = 0; jj < 2; ++jj) {
+                for (int ii = 0; ii < 2; ++ii) {
+                    amrex::Real const w = W[0][ii] * W[1][jj] * W[2][kk];
+                    amrex::Real const val = a + amrex::Real(0.5) * (
+                        gp[0][ip] * (ii - W[0][1]) * dx[0] +
+                        gp[1][ip] * (jj - W[1][1]) * dx[1] +
+                        gp[2][ip] * (kk - W[2][1]) * dx[2]);
+                    amrex::Gpu::Atomic::AddNoRet(
+                        &out(i + ii, j + jj, k + kk), scale * w * val);
+                }}}
+#elif (AMREX_SPACEDIM == 2)
+                for (int jj = 0; jj < 2; ++jj) {
+                for (int ii = 0; ii < 2; ++ii) {
+                    amrex::Real const w = W[0][ii] * W[1][jj];
+                    amrex::Real const val = a + amrex::Real(0.5) * (
+                        gp[0][ip] * (ii - W[0][1]) * dx[0] +
+                        gp[1][ip] * (jj - W[1][1]) * dx[1]);
+                    amrex::Gpu::Atomic::AddNoRet(
+                        &out(i + ii, j + jj, k), scale * w * val);
+                }}
+#else
+                for (int ii = 0; ii < 2; ++ii) {
+                    amrex::Real const w = W[0][ii];
+                    amrex::Real const val = a + amrex::Real(0.5) *
+                        gp[0][ip] * (ii - W[0][1]) * dx[0];
+                    amrex::Gpu::Atomic::AddNoRet(
+                        &out(i + ii, j, k), scale * w * val);
+                }
+#endif
+            });
+        }
+
+        amrex::Gpu::synchronize();
+
+        ablastr::utils::communication::SumBoundary(
+            field, 0, field.nComp(), field.nGrowVect(), field.nGrowVect(),
+            WarpX::do_single_precision_comms, period);
+        return;
+    }
 
     for (iterator pti(*this, lev); pti.isValid(); ++pti)
     {
@@ -690,16 +885,20 @@ QdsmcParticleContainer::DepositScalar (int lev, int const attr,
 
 
 void
-QdsmcParticleContainer::DepositK (int lev, amrex::MultiFab & Kfield)
+QdsmcParticleContainer::DepositK (int lev, amrex::MultiFab & Kfield,
+                                  bool const gradient_corrected)
 {
     ABLASTR_PROFILE("QdsmcParticleContainer::DepositK()");
 
-    DepositScalar(lev, QdsmcPIdx::entropy, 1.0_rt, Kfield);
+    DepositScalar(lev, QdsmcPIdx::entropy,
+                  gradient_corrected ? int(QdsmcPIdx::entropy_g0) : -1,
+                  1.0_rt, Kfield);
 }
 
 
 void
-QdsmcParticleContainer::DepositField (int lev, amrex::MultiFab & Field)
+QdsmcParticleContainer::DepositField (int lev, amrex::MultiFab & Field,
+                                      bool const gradient_corrected)
 {
     ABLASTR_PROFILE("QdsmcParticleContainer::DepositField()");
 
@@ -710,5 +909,7 @@ QdsmcParticleContainer::DepositField (int lev, amrex::MultiFab & Field)
     for (int d = 0; d < AMREX_SPACEDIM; ++d) {
         cell_volume *= dx_arr[d];
     }
-    DepositScalar(lev, QdsmcPIdx::np_real, 1.0_rt / cell_volume, Field);
+    DepositScalar(lev, QdsmcPIdx::np_real,
+                  gradient_corrected ? int(QdsmcPIdx::np_g0) : -1,
+                  1.0_rt / cell_volume, Field);
 }

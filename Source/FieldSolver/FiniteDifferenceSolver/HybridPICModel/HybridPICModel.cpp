@@ -95,12 +95,13 @@ void HybridPICModel::ReadParameters ()
     m_qdsmc_n_floor = m_n_floor;
     pp_hybrid.query("qdsmc_n_floor", m_qdsmc_n_floor);
 
-    // Time-advance scheme for the QDSMC energy step (bake-off switch; only
-    // consulted when solve_electron_energy_equation is on). Default "euler"
-    // reproduces the #6982 scheme bit-for-bit; "leapfrog" and "pc" are the
-    // second-order candidates under evaluation.
+    // Time-advance scheme for the QDSMC energy step (only consulted when
+    // solve_electron_energy_equation is on). Default "pc" (selected
+    // 2026-08-04): second-order predictor-corrector, transport between the
+    // two B half-pushes. "euler" reproduces the #6982 scheme bit-for-bit
+    // (first-order control); "leapfrog" is the half-staggered alternative.
     {
-        std::string advance_str = "euler";
+        std::string advance_str = "pc";
         pp_hybrid.query("qdsmc_time_advance", advance_str);
         if (advance_str == "euler") {
             m_qdsmc_time_advance = QdsmcTimeAdvance::Euler;
@@ -114,6 +115,11 @@ void HybridPICModel::ReadParameters ()
                 "'euler', 'leapfrog', 'pc' (got '" + advance_str + "')");
         }
     }
+
+    // Half-gradient-corrected deposit (2nd-order spatial remap; see the
+    // member doc). Default on; disable together with qdsmc_time_advance =
+    // euler to recover the #6982 scheme bit-for-bit.
+    pp_hybrid.query("qdsmc_gradient_deposit", m_qdsmc_gradient_deposit);
 #if defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !m_solve_electron_energy_equation,
@@ -1419,9 +1425,10 @@ void HybridPICModel::QdsmcTransportOnce (int const lev, amrex::Real const dt_adv
     m_qdsmc_pc->PushX(lev, dt_adv);
 
     // Scatter the carried entropy and weight onto the grid (each call
-    // zeroes its target field, then deposits, then SumBoundary).
-    m_qdsmc_pc->DepositK(lev, Karr_out);
-    m_qdsmc_pc->DepositField(lev, weights_out);
+    // zeroes its target field, then deposits, then SumBoundary), with the
+    // half-gradient correction when enabled.
+    m_qdsmc_pc->DepositK(lev, Karr_out, m_qdsmc_gradient_deposit);
+    m_qdsmc_pc->DepositField(lev, weights_out, m_qdsmc_gradient_deposit);
 
     // Recover the new T_e from (deposited K*N) / (deposited N) and the
     // updated n_e (from rho_fp = rho^{n+1}).
