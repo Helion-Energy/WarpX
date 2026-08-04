@@ -195,6 +195,10 @@ void HybridPICModel::ReadParameters ()
                 m_darwin_vacrec_max_iters);
             pp_hybrid.query("darwin_vacuum_recovery_verbosity",
                             m_darwin_vacrec_verbosity);
+            // Live-probe mode (see the member documentation): env-gated,
+            // and forced on by circuit-in-the-residual solvers.
+            m_vacuum_recovery_live_probes =
+                (std::getenv("WARPX_VACREC_LIVE_PROBES") != nullptr);
 #if defined(WARPX_DIM_1D_Z)
             WARPX_ABORT_WITH_MESSAGE(
                 "hybrid_pic_model.darwin_vacuum_recovery is not supported "
@@ -1673,15 +1677,15 @@ void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian,
     constexpr int lev = 0;
     amrex::Geometry const & geom = warpx.Geom(lev);
     const bool trace = (std::getenv("WARPX_DEBUG_VACREC") != nullptr);
-    // EXPERIMENTAL (env-gated): recompute the recovery inside Jacobian
-    // probe evaluations instead of reusing the frozen correction. The
-    // frozen-probe lag costs ~0.99/iteration Newton contraction on
-    // violent decks; with exact (mass-matrix) particle JVPs the FD-noise
-    // objection to differencing through the solve reduces to the
-    // recovery MLMG's own tolerance -- run with a tight
-    // darwin_vacuum_recovery_relative_tolerance (<= 1e-10).
-    const bool live_probes =
-        (std::getenv("WARPX_VACREC_LIVE_PROBES") != nullptr);
+    // Recompute the recovery inside Jacobian probe evaluations instead of
+    // reusing the frozen correction (WARPX_VACREC_LIVE_PROBES, or forced
+    // by circuit-in-the-residual solvers). The frozen-probe lag costs
+    // ~0.99/iteration Newton contraction on violent decks; with exact
+    // (mass-matrix) particle JVPs the FD-noise objection to differencing
+    // through the solve reduces to the recovery MLMG's own tolerance --
+    // run with a tight darwin_vacuum_recovery_relative_tolerance
+    // (<= 1e-10).
+    const bool live_probes = m_vacuum_recovery_live_probes;
     const bool frozen_probe = a_from_jacobian && !live_probes;
 
     // Mask policy on the step-entry charge density (rho^n, component 0 of
@@ -1996,8 +2000,7 @@ void HybridPICModel::ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_lon
         {Ex_IndexType, Ey_IndexType, Ez_IndexType};
     // Live-probe mode (see ComputeVacuumARecovery): probes evaluate the
     // band field from the live recovered A instead of the stored target.
-    const bool live_probes =
-        (std::getenv("WARPX_VACREC_LIVE_PROBES") != nullptr);
+    const bool live_probes = m_vacuum_recovery_live_probes;
 
     for (int dir = 0; dir < 3; ++dir) {
         if (flux_only && dir != 1) { continue; }

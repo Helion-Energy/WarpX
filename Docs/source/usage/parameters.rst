@@ -3822,6 +3822,31 @@ Maxwell solver: kinetic-fluid hybrid
 
     Print the per-step outer-iteration history (relative pressure change) of the segregated solve.
 
+.. pp:param:: implicit_evolve.external_field_iteration
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If ``algo.evolve_scheme = theta_implicit_hybrid`` with external vector-potential fields and the Darwin
+    unified drive (:pp:param:`hybrid_pic_model.darwin`), iterate the external drive inside the nonlinear
+    residual (circuit-in-the-residual coupling): every residual evaluation executes the ``externalcoiltheta``
+    python callback after the plasma current of the current iterate has been computed
+    (``hybrid_current_fp_plasma``), then re-imposes the external-drive boundary values of the vector
+    potential at the updated coil scales (re-running the vacuum recovery when active) and re-derives B.
+    From the callback, python measures the flux linkage of the iterate's plasma current, re-advances a
+    coupled external circuit against it, and pushes updated coil scale segments through
+    ``set_external_vector_potential_scale`` (the coils must be declared with
+    :pp:param:`external_vector_potential.<field_name>.python_scale`). At the end of the step the
+    ``externalcoilfinish`` callback runs once before the end-of-step boundary values are imposed, so the
+    circuit state and the final coil segments are left at :math:`t^{n+1}`. Because the callback runs in
+    every evaluation, the coupled plasma-circuit map stays smooth in the state and matrix-free Jacobian
+    probes see the coupled physics — Newton converges plasma and circuit together (a step-lagged circuit
+    is unstable at strong coil-plasma coupling). When the vacuum recovery is active, its live-probe mode is
+    forced on; run with a tight :pp:param:`hybrid_pic_model.darwin_vacuum_recovery_relative_tolerance`.
+    The recovery is re-applied after the callback in every evaluation, so a finite
+    :pp:param:`hybrid_pic_model.darwin_vacuum_recovery_relaxation_time` is currently applied twice per
+    evaluation under this mode — run circuit-coupled decks with the default (instant) recovery.
+
 .. pp:param:: hybrid_pic_model.qdsmc_n_floor
     :type: ``float``
     :default: ``1``
@@ -4179,6 +4204,33 @@ Maxwell solver: kinetic-fluid hybrid
     :optional:
 
     This sets the relative strength of the external vector potential by a dimensionless implicit time function, which can compute the external B fields and E fields based on the value and first time derivative of the function.
+
+.. pp:param:: external_vector_potential.<field_name>.python_scale
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Drive the scale of this external field from python instead of the compiled
+    time function: the scale is a piecewise-linear segment pushed per step via
+    ``warpx.set_external_vector_potential_scale(name, s_old, s_new, t_old, t_new)``
+    (e.g. from a ``beforestep`` callback for a measured/sampled coil current, or
+    from the ``externalcoiltheta`` callback under
+    :pp:param:`implicit_evolve.external_field_iteration` for a coupled circuit).
+    The B-field scale follows the linear interpolant of the segment and the
+    inductive E-field scale carries its exact constant slope, so the discrete
+    Faraday relation between the external B and E holds without a
+    finite-difference approximation. Consecutive segments should be continuous
+    at the step junctions (``s_old`` of the new segment equal to the previous
+    segment's value there); a jump acts as an unphysical impulsive flux change.
+
+.. pp:param:: external_vector_potential.<field_name>.initial_scale
+    :type: ``float``
+    :default: ``1``
+    :optional:
+
+    With :pp:param:`external_vector_potential.<field_name>.python_scale`, the
+    constant scale held until the first ``set_external_vector_potential_scale``
+    call (e.g. a coil at its pre-ramp current).
 
 
 Grid types (collocated, staggered, hybrid)
