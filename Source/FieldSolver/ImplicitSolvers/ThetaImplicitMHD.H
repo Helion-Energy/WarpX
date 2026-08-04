@@ -31,11 +31,11 @@ class HybridPICModel;
  * ThetaImplicitHybrid, the nonlinear residual advances ion continuity and
  * momentum directly and does not push or redeposit ion particles.
  *
- * The implementation is restricted to a single Cartesian, periodic AMR level.
- * Fluid transport can use centered or conservative Rusanov face fluxes. The
- * current state omits ion total energy and a compatible magnetic-energy flux,
- * so the Rusanov option regularizes compression but is not yet a complete
- * conservative shock-MHD scheme.
+ * With implicit_mhd.ion_closure = total_energy the state gains the
+ * conservative ion total energy E_i = U_i + rho |u|^2 / 2 as an additional
+ * block, with p_i = (gamma_i - 1) max(E_i - KE, U_i_floor); the default
+ * barotropic closure evaluates p_i from the polytropic law and leaves the
+ * (always allocated) ion-energy MultiFab zeroed and unused.
  */
 class ThetaImplicitMHD final : public ImplicitSolver
 {
@@ -67,14 +67,35 @@ class ThetaImplicitMHD final : public ImplicitSolver
                      const WarpXSolverVec& direction,
                      amrex::Real requested_step) const override;
 
+    [[nodiscard]] amrex::Real
+    ProjectAndLimitSolverStep (const WarpXSolverVec& state,
+                               WarpXSolverVec& direction,
+                               amrex::Real requested_step) const override;
+
     [[nodiscard]] bool
     UseNewtonLineSearch () const override
     {
         return true;
     }
 
+    // NOTE: Jacobian probe perturbations stay LIMITED for this solver
+    // (base-class default). Although every floored quantity is clamped
+    // pointwise inside the residual kernels (so inadmissible probe states
+    // would be evaluable), an unlimited probe crossing a clamp kink
+    // measures the flat exterior side of the floor instead of the
+    // interior slope, and GMRES then confidently steers into the bounds
+    // (measured: Newton stalls at the first FRC step with hundreds of
+    // projected components). The componentwise projection keeps a small
+    // slack margin above each bound precisely so limited probes always
+    // retain an admissible perturbation.
+
     void InitializeFluidState ();
+    void FinishStateUpdate (amrex::Real end_time);
     void FillFluidSources (const WarpXSolverVec& state);
+    void ApplyFluidDomainBoundaries (amrex::MultiFab& density, amrex::MultiFab& momentum,
+                                     amrex::MultiFab& electron_energy,
+                                     amrex::MultiFab& ion_energy) const;
+    void ApplyNeumannZDomainGhosts (amrex::MultiFab& mf) const;
     void FillCellCenteredElectromagneticFields ();
     void ComputeFluidRHS (WarpXSolverVec& rhs, amrex::Real time) const;
 
@@ -105,10 +126,19 @@ class ThetaImplicitMHD final : public ImplicitSolver
     inline static constexpr char MassDensityName[] = "implicit_mhd_mass_density";
     inline static constexpr char MomentumDensityName[] = "implicit_mhd_momentum_density";
     inline static constexpr char ElectronEnergyName[] = "implicit_mhd_electron_energy";
+    inline static constexpr char IonEnergyName[] = "implicit_mhd_ion_energy";
 
   private:
     inline static constexpr char TotalCurrentCCName[] = "implicit_mhd_total_current_cc";
     inline static constexpr char MagneticFieldCCName[] = "implicit_mhd_magnetic_field_cc";
+    // Ghosted beginning-of-step fluid state (the solver-vec old-state
+    // blocks are zero-ghost): filled once per step in OneStep, read by
+    // the flux kernels' floor limiters, which gate on theta-extrapolated
+    // end-of-step DONOR values and therefore need old neighbors.
+    inline static constexpr char OldMassDensityName[] = "implicit_mhd_old_mass_density";
+    inline static constexpr char OldMomentumDensityName[] = "implicit_mhd_old_momentum_density";
+    inline static constexpr char OldElectronEnergyName[] = "implicit_mhd_old_electron_energy";
+    inline static constexpr char OldIonEnergyName[] = "implicit_mhd_old_ion_energy";
 
     HybridPICModel* m_hybrid_pic_model = nullptr;
 
@@ -124,25 +154,73 @@ class ThetaImplicitMHD final : public ImplicitSolver
     amrex::Real m_reference_ion_pressure = 0.0;
     amrex::Real m_mass_density_floor = 0.0;
     amrex::Real m_electron_pressure_floor = 0.0;
+    // Ion thermodynamic closure: "barotropic" (default; p_i from the
+    // polytropic law) or "total_energy" (E_i evolved as a JFNK block).
+    std::string m_ion_closure = "barotropic";
+    amrex::Real m_ion_pressure_floor = 0.0;
+    // Vacuum cell-switch threshold for the ion fluid (0 disables): cells
+    // below it are passive dust with frozen momentum (Holmstrom-style).
+    amrex::Real m_vacuum_mass_density = 0.0;
+    // Velocity relaxation rate [1/s] applied to vacuum dust (0 disables).
+    amrex::Real m_vacuum_drag_rate = 0.0;
+    // Non-periodic z (RZ only): the solver fills axial domain ghosts with
+    // zero-gradient (Neumann) values, giving outflow ends instead of the
+    // periodic seam. Set automatically when the z geometry is non-periodic.
+    bool m_z_neumann = false;
+    // Open upper radial boundary (RZ only): boundary.field_hi = open on r
+    // selects the Green's-function free-space fill for the fields; the
+    // fluid then gets zero-gradient (outflow) radial ghosts at r_max
+    // instead of the reflecting conducting-wall mirror.
+    bool m_r_open = false;
+    // Fluid ghost treatment at an OPEN r_max: "outflow" (default;
+    // zero-gradient) or "reflect" (keep the no-normal-flow mirror while
+    // the field is free-space -- removes the wall-cell drainage channel
+    // during violent boundary relaxations).
+    std::string m_r_open_fluid = "outflow";
     amrex::Real m_positivity_safety = 0.99;
     std::string m_fluid_flux = "centered";
+    // HLLC signal-speed closure: "consistent" (default; wave-speed
+    // estimates from the same p_i as the physical flux) or "barotropic"
+    // (wave-speed estimates from the polytropic p_i(rho), decoupling the
+    // HLLC wave structure from the E_i unknown; total_energy only).
+    std::string m_hllc_signal_closure = "consistent";
+    // Smooth contact-side blending width kappa for the HLLC flux
+    // (0 disables the blend and keeps the hard upwind-side switch).
+    amrex::Real m_hllc_contact_blend = 0.0;
     bool m_evolve_ion_fluid = true;
     bool m_include_joule_heating = true;
+    // Circuit-in-the-residual coupling: every residual evaluation executes
+    // the "externalcoiltheta" python callback (and FinishStateUpdate the
+    // "externalcoilfinish" one) and then re-refreshes the external fields,
+    // so python can re-advance a coupled circuit against the current
+    // iterate's plasma flux linkage and push updated coil scales. The
+    // segregated one-step-lagged alternative is unstable whenever the
+    // coil-plasma mutual coupling is strong.
+    bool m_external_field_iteration = false;
 
     std::unique_ptr<amrex::Parser> m_mass_density_parser;
     std::unique_ptr<amrex::Parser> m_velocity_x_parser;
     std::unique_ptr<amrex::Parser> m_velocity_y_parser;
     std::unique_ptr<amrex::Parser> m_velocity_z_parser;
     std::unique_ptr<amrex::Parser> m_electron_pressure_parser;
+    std::unique_ptr<amrex::Parser> m_ion_pressure_parser;
     amrex::ParserExecutor<3> m_mass_density;
     amrex::ParserExecutor<3> m_velocity_x;
     amrex::ParserExecutor<3> m_velocity_y;
     amrex::ParserExecutor<3> m_velocity_z;
     amrex::ParserExecutor<3> m_electron_pressure;
+    amrex::ParserExecutor<3> m_ion_pressure;
 
     void SaveMagneticField ();
     void UpdateWarpXFields (const WarpXSolverVec& state, amrex::Real start_time);
-    void FinishStateUpdate (amrex::Real end_time);
+
+    /** Split-field external-A bookkeeping: add (sign = +1) or subtract
+     * (sign = -1) the stored hybrid external E/B fields to/from
+     * Efield_fp/Bfield_fp. Between steps the WarpX fields hold total
+     * fields; inside the nonlinear solve they hold the plasma response
+     * only. Using the stored multifabs (rather than re-evaluating the
+     * time function) makes each subtract/add cycle exact. */
+    void AddExternalFieldsToTotals (amrex::Real sign) const;
 };
 
 #endif
