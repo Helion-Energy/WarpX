@@ -400,8 +400,11 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         // Update solution
         // Update solution, allowing the operator to enforce its admissible
         // state domain (for example, positive fluid density and energy).
+        // The projecting variant may also zero descent components at
+        // cells resting on their bound (active-set treatment), so a
+        // single floor-resident cell cannot deadlock the line search.
         const amrex::Real solver_step =
-            m_ops->LimitSolverStep(a_U, m_dU, -1.0_rt);
+            m_ops->ProjectAndLimitSolverStep(a_U, m_dU, -1.0_rt);
         if (m_ops->UseNewtonLineSearch()) {
             constexpr int max_backtracks = 12;
             constexpr amrex::Real reduction = 0.5_rt;

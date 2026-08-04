@@ -123,6 +123,25 @@ public:
     }
 
     /**
+     * \brief Like LimitSolverStep, but may additionally PROJECT the update
+     * direction (active-set treatment): a cell resting exactly on its
+     * admissibility bound with a descent direction component would
+     * otherwise zero the GLOBAL step fraction and deadlock the Newton
+     * line search; zeroing that component instead lets the rest of the
+     * update proceed while the bound-resident cell stays put. Called only
+     * on the Newton-update path -- never on matrix-free Jacobian probe
+     * vectors, whose Krylov data must not be mutated. The base
+     * implementation performs no projection.
+     */
+    [[nodiscard]] virtual amrex::Real
+    ProjectAndLimitSolverStep (const WarpXSolverVec& a_state,
+                               WarpXSolverVec& a_direction,
+                               const amrex::Real a_requested_step) const
+    {
+        return LimitSolverStep(a_state, a_direction, a_requested_step);
+    }
+
+    /**
      * \brief Whether Newton updates should use residual-decreasing
      * backtracking.
      */
@@ -130,6 +149,20 @@ public:
     UseNewtonLineSearch () const
     {
         return false;
+    }
+
+    /**
+     * \brief Whether matrix-free Jacobian probe perturbations must be
+     * limited to the admissible state domain. Operators whose residual
+     * evaluation clamps every floored quantity pointwise can return
+     * false: probe states are then evaluable even when transiently
+     * inadmissible, which keeps the Jacobian exact for states resting on
+     * their admissibility bounds.
+     */
+    [[nodiscard]] virtual bool
+    ProbePerturbationsNeedLimiting () const
+    {
+        return true;
     }
 
     void PreLinearSolve ();
