@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <set>
 #include <string>
@@ -1405,9 +1406,12 @@ ThetaImplicitMHD::ProjectAndLimitSolverStep (const WarpXSolverVec& state,
         MassDensityName, ElectronEnergyName, IonEnergyName};
     const std::array<amrex::Real, 3> block_floors = {
         density_floor, energy_floor, ion_energy_floor};
+    const bool report_projections =
+        (std::getenv("WARPX_MHD_REPORT_PROJECTIONS") != nullptr);
     amrex::Long projected_components = 0;
     for (int block = 0; block < num_blocks; ++block) {
         const amrex::Real floor = block_floors[block];
+        const int block_id = block;
         const amrex::MultiFab& value_mf =
             state.getMultiFabBlock(block_names[block], 0);
         const amrex::MultiFab& old_mf =
@@ -1441,6 +1445,13 @@ ThetaImplicitMHD::ProjectAndLimitSolverStep (const WarpXSolverVec& state,
                     const amrex::Real change =
                         delta(i, j, k) * requested_step;
                     if (change < target) {
+                        if (report_projections) {
+                            AMREX_DEVICE_PRINTF(
+                                "ProjectDirection: block %d at (%d,%d,%d): "
+                                "value %.6e old %.6e change %.6e floor %.6e\n",
+                                block_id, i, j, k, value(i, j, k),
+                                old_value(i, j, k), change, floor);
+                        }
                         delta(i, j, k) = target / requested_step;
                         return {1};
                     }
