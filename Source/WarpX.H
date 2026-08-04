@@ -144,6 +144,7 @@ public:
     void SaveParticlesAtImplicitStepStart ();
     void FinishImplicitParticleUpdate (amrex::Real a_time);
     void SetElectricFieldAndApplyBCs ( const WarpXSolverVec& a_E, amrex::Real a_time );
+    void SetMagneticFieldAndApplyBCs ( const WarpXSolverVec& a_B, amrex::Real a_time );
     void UpdateMagneticFieldAndApplyBCs ( ablastr::fields::MultiLevelVectorField const& a_Bn,
                                           amrex::Real a_thetadt, amrex::Real start_time );
     void SpectralSourceFreeFieldAdvance ( amrex::Real start_time);

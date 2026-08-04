@@ -62,6 +62,24 @@ WarpX::SetElectricFieldAndApplyBCs ( const WarpXSolverVec& a_E, amrex::Real a_ti
 }
 
 void
+WarpX::SetMagneticFieldAndApplyBCs ( const WarpXSolverVec& a_B, amrex::Real a_time )
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        a_B.getArrayVecType()==warpx::fields::FieldType::Bfield_fp,
+        "WarpX::SetMagneticFieldAndApplyBCs() must be called with Bfield_fp type");
+
+    using warpx::fields::FieldType;
+
+    ablastr::fields::MultiLevelVectorField Bfield_fp = m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, finest_level);
+    const ablastr::fields::MultiLevelVectorField& Bvec = a_B.getArrayVec();
+    amrex::MultiFab::Copy(*Bfield_fp[0][0], *Bvec[0][0], 0, 0, ncomps, Bvec[0][0]->nGrowVect());
+    amrex::MultiFab::Copy(*Bfield_fp[0][1], *Bvec[0][1], 0, 0, ncomps, Bvec[0][1]->nGrowVect());
+    amrex::MultiFab::Copy(*Bfield_fp[0][2], *Bvec[0][2], 0, 0, ncomps, Bvec[0][2]->nGrowVect());
+    FillBoundaryB(guard_cells.ng_alloc_EB, WarpX::sync_nodal_points);
+    ApplyBfieldBoundary(0, PatchType::fine, SubcyclingHalf::None, a_time);
+}
+
+void
 WarpX::UpdateMagneticFieldAndApplyBCs( ablastr::fields::MultiLevelVectorField const& a_Bn,
                                        amrex::Real a_thetadt, amrex::Real start_time )
 {
