@@ -1,0 +1,109 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.Ti = 100.0
+my_constants.P0 = n0 * Ti * q_e
+my_constants.gamma = 5.0/3.0
+my_constants.pe_over_pi = 0.5
+my_constants.B0 = sqrt(mu0 * P0)
+# Static RADIAL contact: a density annulus with uniform pressures and
+# uniform Bz, u = 0. Exactly stationary for the hlld path if and only if
+# the cylindrical face-weighted divergence and the geometric source
+# terms pair exactly: the radial momentum flux p_tot (+ Bz^2/2mu0 in the
+# Maxwell-stress channel) times the (r_hi - r_lo)/(r_c dr) face-weight
+# imbalance must cancel the -Pi_theta_theta/r geometric source
+# cell-by-cell. Any weight or source error shows as radial drift.
+my_constants.r1 = 0.04
+my_constants.r2 = 0.07
+my_constants.rho_ratio = 0.4
+my_constants.nr = 32
+my_constants.nz = 16
+my_constants.Lr = 0.1
+my_constants.Lz = 0.2
+my_constants.v0 = sqrt(P0/rho0)
+my_constants.dt = 0.2 * (Lr/nr) / v0
+
+max_step = 100
+amr.n_cell = nr nz
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = RZ
+geometry.prob_lo = 0.0 0.0
+geometry.prob_hi = Lr Lz
+boundary.field_lo = none periodic
+boundary.field_hi = pec periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-11
+newton.relative_tolerance = 1.0e-9
+newton.max_iterations = 20
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-9
+gmres.max_iterations = 400
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = pe_over_pi * Ti
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = P0
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.ion_pressure_floor = 1.0e-6 * P0
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-9 * P0
+implicit_mhd.fluid_flux = hlld
+implicit_mhd.mass_density(x,y,z) = \
+    "rho0 * if((x>r1) and (x<r2), 1.0, rho_ratio)"
+implicit_mhd.ion_pressure(x,y,z) = "P0"
+implicit_mhd.electron_pressure(x,y,z) = "pe_over_pi * P0"
+
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 B0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 100
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Br Bt Bz implicit_mhd_mass_density \
+                       implicit_mhd_ion_energy implicit_mhd_electron_energy
+diag1.write_species = 0

@@ -469,6 +469,53 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# RZ recast invariants: div B at round-off and B_theta EXACTLY zero
+# through 60 steps of corner-UCT-driven poloidal dynamics, on 2 ranks so
+# the corner EMF is exercised across MPI seams
+add_warpx_test(
+    test_rz_theta_implicit_mhd_poloidal_divb  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_poloidal_divb  # inputs
+    "analysis_mhd_poloidal_divb.py diags/diag000000 diags/diag000060"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# static radial contact: exact cancellation of the cylindrical
+# face-weighted divergence against the geometric sources (hydro and
+# Maxwell-stress parts)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_radial_contact  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_radial_contact  # inputs
+    "analysis_mhd_radial_contact.py diags/diag000000 diags/diag000100 hlld"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_radial_contact_rusanov  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_radial_contact implicit_mhd.fluid_flux=rusanov"  # inputs
+    "analysis_mhd_radial_contact.py diags/diag000000 diags/diag000100 rusanov"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# hlld variant of the RZ outflow test (Neumann-z ends, PEC wall, axis)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_z_outflow_hlld  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_z_outflow implicit_mhd.fluid_flux=hlld"  # inputs
+    "analysis_mhd_z_outflow.py diags/diag000000 diags/diag000240 pec"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_2d_theta_implicit_jfnk_vandb  # name
     2  # dims

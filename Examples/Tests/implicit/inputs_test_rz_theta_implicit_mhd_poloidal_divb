@@ -1,0 +1,114 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.Ti = 100.0
+my_constants.P0 = n0 * Ti * q_e
+my_constants.gamma = 5.0/3.0
+my_constants.pe_over_pi = 0.5
+my_constants.B0 = sqrt(mu0 * P0)
+# Uniform Bz (discretely divergence-free to round-off) plus an off-axis
+# poloidal velocity ring that bends the field lines and generates Br/Bz
+# dynamics. Axisymmetric poloidal dynamics keep B_theta = 0 exactly (the
+# current is purely toroidal, so E_r and E_z are pure eta J = 0 here):
+# any B_theta growth flags an Er/Ez assembly error, and any div B growth
+# flags a violation of the Yee-curl structure by the corner UCT EMF.
+my_constants.u0 = 0.3 * B0 / sqrt(mu0 * rho0)
+my_constants.r0 = 0.05
+my_constants.z0 = 0.5
+my_constants.w = 0.02
+my_constants.nr = 32
+my_constants.nz = 96
+my_constants.Lr = 0.1
+my_constants.Lz = 1.0
+my_constants.vA = B0 / sqrt(mu0 * rho0)
+my_constants.dt = 0.25 * (Lr/nr) / vA
+
+max_step = 60
+amr.n_cell = nr nz
+amr.max_grid_size = 48
+amr.max_level = 0
+
+geometry.dims = RZ
+geometry.prob_lo = 0.0 0.0
+geometry.prob_hi = Lr Lz
+boundary.field_lo = none periodic
+boundary.field_hi = pec periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 0.0
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 20
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-10
+gmres.max_iterations = 600
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = pe_over_pi * Ti
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = P0
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.ion_pressure_floor = 1.0e-6 * P0
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-9 * P0
+implicit_mhd.fluid_flux = hlld
+implicit_mhd.mass_density(x,y,z) = "rho0"
+implicit_mhd.ion_pressure(x,y,z) = "P0"
+implicit_mhd.electron_pressure(x,y,z) = "pe_over_pi * P0"
+# poloidal velocity ring (x plays the role of r at the theta = 0 plane;
+# u_r vanishes on axis by the r/r0 factor)
+implicit_mhd.velocity_x(x,y,z) = \
+    "u0 * (x/r0) * exp(-((x-r0)^2 + (z-z0)^2)/(w*w))"
+implicit_mhd.velocity_z(x,y,z) = \
+    "u0 * exp(-((x-r0)^2 + (z-z0)^2)/(w*w))"
+
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 B0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 60
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.plot_raw_fields = 1
+diag1.fields_to_plot = Br Bt Bz implicit_mhd_mass_density \
+                       implicit_mhd_ion_energy
+diag1.write_species = 0
