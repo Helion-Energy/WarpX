@@ -426,6 +426,19 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# hyper-resistivity in the solver-assembled Ohm's law: a contact-inert
+# transverse mode must decay at exactly eta_H kd^4 / mu0 through the
+# theta-discrete amplification factor
+add_warpx_test(
+    test_1d_theta_implicit_mhd_hyper_resistive  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_hyper_resistive  # inputs
+    "analysis_mhd_hyper_resistive.py diags/diag000000 diags/diag000040"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # hlld variants of the closure/positivity suite: the recast must
 # reproduce the exact-Riemann plateaus, the exact static contact, and
 # the exact fluid-energy pairing of the hllc/rusanov paths

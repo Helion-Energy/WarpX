@@ -4105,7 +4105,10 @@ Jacobian probes.
     difference as the momentum equation), and the ideal EMF, whose
     theta-implicit Yee curl advances :math:`B` with :math:`\nabla \cdot
     B = 0` preserved to round-off. :math:`E` becomes a derived Ohm's-law
-    quantity, :math:`E = -u \times B + \eta J`, assembled by the solver.
+    quantity, :math:`E = -u \times B + \eta J - \eta_H \nabla^2 J`,
+    assembled by the solver (the hyper-resistive term follows
+    ``hybrid_pic_model.plasma_hyper_resistivity``, discretized with the
+    same cylindrical vector Laplacian as the hybrid solver).
     In RZ, :math:`E_r` and :math:`E_z` are direct face Riemann induction
     fluxes at their native Yee staggering, :math:`E_\theta` is assembled
     on cell corners with a smoothed UCT-HLL (Londrillo--Del Zanna)
@@ -4114,7 +4117,7 @@ Jacobian probes.
     carry the Maxwell-stress parts consistently in both the momentum and
     ion-energy equations.
     ``hlld`` requires ``include_hall_term = false``,
-    ``include_electron_pressure_term = false``, no hyper-resistivity, and
+    ``include_electron_pressure_term = false``, and
     ``jacobian.pc_type = none``. The wave fan is assembled
     :math:`C^\infty`-smooth for matrix-free Jacobian probes (smoothed
     signal bounds, telescoped region form without if-chains, blended

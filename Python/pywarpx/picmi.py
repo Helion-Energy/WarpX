@@ -2163,9 +2163,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         conservative-form recast (1D and RZ): B replaces E as the JFNK
         field unknown and one smoothed HLLD Riemann solution per face
         supplies the fluid fluxes, the Maxwell stress, and the ideal EMF
-        (corner UCT-HLL E_theta in RZ); requires no Hall term, no
-        electron-pressure Ohm term, no hyper-resistivity, and no
-        preconditioner.
+        (corner UCT-HLL E_theta in RZ); E is the derived Ohm's-law
+        quantity -u x B + eta J - eta_H laplacian(J). Requires no Hall
+        term, no electron-pressure Ohm term, and no preconditioner.
 
     r_open_fluid: {"outflow", "reflect"}, optional
         Fluid ghost treatment at an open (Green's-function) upper radial
