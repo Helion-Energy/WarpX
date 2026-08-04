@@ -1,0 +1,826 @@
+# QDSMC Electron Energy Equation: Second-Order Accuracy + Ito Thermal Conduction
+
+Research plan, drafted 2026-08-04. Baseline: `development` @ `d72f49d70` (26.08),
+which contains PR #6982 (QDSMC entropy transport, Joule heating, Q_ei relaxation,
+multi-species Ohm's law; Belyaev et al., Phys. Plasmas 31, 012902 (2024)).
+
+Working branch for this effort: new branch off `development` (suggested:
+`qdsmc_energy_leapfrog`). Do NOT base on `eb_ect_yee_followup`; the EB/ECT work
+merges independently. This document stays untracked.
+
+---
+
+## 0. Baseline: what #6982 does and where first-order enters
+
+Per-step sequence (`WarpX::HybridPICEvolveFields`, `HybridPICModel::AdvanceElectronEnergyQDSMC`):
+
+1. Particles pushed to t^{n+1}; deposit rho^{n+1} (into `rho_fp`), J_i^{n+1/2}
+   (into `current_fp`). `hybrid_rho_fp_temp` = rho^n, `hybrid_current_fp_temp` = J_i^{n-1/2}.
+2. **Energy advance (documented as T_e^n -> T_e^{n+1}):**
+   - `QDSMCInitializeUe`: V_e = -(J_plasma - J_i)/rho on nodes, from
+     **J_i^{n-1/2}** (`current_fp_temp`, averaging to J_i^n happens LATER),
+     J_plasma(B^n), rho^n.
+   - `QDSMCInitializeKe`: K_e = T_e n_e^{1-gamma} (nodal, eV-scaled).
+   - Markers (one per cell, home = **cell center**, fields **nodal**): gather V_e,
+     K_e*N, N with linear weights; **forward-Euler** push x = home + V_e dt
+     (clamped at domain walls -> entropy piles up at boundary nodes);
+     linear scatter of K*N and N; T_e recovered with n_e^{n+1} from rho_fp.
+   - Operator-split sources (Lie, full dt, applied after transport):
+     Joule (from J_plasma^n, eta parser, optional T_e-threshold redirect to ions),
+     Q_ei (T_i^n from the shape-aware temperature deposit), drag-diffusion ion kick.
+   - Emit Pe = n_e k_B T_e; markers reset to home.
+3. J_i^n = avg(J_i^{n±1/2}); B pushed n -> n+1/2 -> n+1 (both halves see the
+   **same frozen Pe** from step 2); final E-solve at n+1 with extrapolated
+   J_i^{n+1} = 3/2 J^{n+1/2} - 1/2 J^{n-1/2} — again with the same Pe.
+
+**First-order (or worse) error sources, enumerated:**
+
+| # | Source | Where |
+|---|--------|-------|
+| E1 | Forward-Euler marker push with beginning-of-interval V_e | `QdsmcParticleContainer::PushX` |
+| E2 | V_e built from J_i^{n-1/2} (half-step stale) while B^n, rho^n | `QDSMCInitializeUe` + call order in `HybridPICEvolveFields` |
+| E3 | Lie splitting of sources (full-dt kick after transport) | `AdvanceElectronEnergyQDSMC` steps 6–6c |
+| E4 | Pe fed to the B-push halves and final E-solve at a single frozen time level | `HybridPICEvolveFields` |
+| E5 | Per-step gather/scatter remap with linear shapes: hat-kernel convolution each step -> numerical diffusion ~ dx*|V_e|*(1-CFL)/2 (first order in dx) | `SetK`/`DepositK` |
+| E6 | Home = cell center on a **nodal** grid: the at-rest gather is already a 2^D box filter, so the round trip smooths even at V_e = 0 (rate ~ dx^2/dt) | `InitParticles` vs nodal fields |
+| E7 | Domain-wall clamp accumulates advected entropy at boundary nodes (uncontrolled BC) | `PushX` clamp |
+
+E6 deserves a targeted check early: verify against Belyaev Sec. III.A whether
+markers belong at nodes for nodal fields (at-rest round trip is then the
+identity). If confirmed, it is a cheap, self-contained accuracy fix and a
+possible upstream bugfix PR on its own.
+
+**What is already right and must be preserved:** the scatter (deposit) form is
+conservative in Sigma(K*N) and Sigma(N) by construction — no iteration needed.
+This is precisely what the old gather-based layer method (monotone cubic
+interpolants, Milstein-style) lacked. The plan keeps the scatter form everywhere
+and gets second order by *time-centering the velocity* and *raising the
+effective reconstruction order*, not by switching to backward semi-Lagrangian.
+
+---
+
+## Thrust A — Second-order time advance (candidates measured, best selected)
+
+### A.0 Scheme selection by measurement (decided 2026-08-04)
+
+Do not pre-commit: implement the time-centering candidates behind a runtime
+switch (dev-only knob, e.g. `hybrid_pic_model.qdsmc_time_advance = euler |
+leapfrog | pc`), measure on the shared harness, and select the winner. The
+half-staggered leapfrog (A.1) is the on-paper favorite (one transport per
+step, sources auto-centered); the predictor–corrector keeps T_e on integer
+levels at the cost of a second transport pass.
+
+Candidates:
+
+- **`euler`** — the #6982 scheme, kept as the A/B control.
+- **`leapfrog`** — half-staggered T_e^{n+1/2} + midpoint push (A.1–A.3).
+  One transport/step; minimal restructuring (J_i LinComb reorder).
+- **`pc`** — integer-level predictor–corrector: predictor transports
+  T_e^n -> T_e* with V_e^n (midpoint push), emits Pe* for the first B
+  half-push; corrector re-transports T_e^n -> T_e^{n+1} from the SAME initial
+  markers using V_e^{n+1/2} built from B^{n+1/2}, J_i^{n+1/2}, rho^{n+1/2}
+  after the first half-push. Two transports/step; restructures
+  `HybridPICEvolveFields` (energy advance split across the B halves), but T_e
+  stays at integer levels (diagnostics comparability, no half-level
+  checkpoint state, no Pe extrapolation for the final E-solve).
+
+Selection criteria (recorded with numbers, not vibes): measured dt-order on
+the manufactured-advection and adiabatic-compression sweeps; conservation;
+wall-clock overhead vs ion PIC cost; robustness on a stiff liftoff-like deck
+(substepped/RKF45 B advance, Joule hot spots); implementation invasiveness /
+restart-state complexity. Losing candidates are removed before the upstream
+PR (the switch does not ship, or ships reduced to the winner + `euler`).
+
+### A.1 Candidate `leapfrog`: reinterpret T_e as living at half-integer times
+
+Synchronize the thermodynamic state with the ion PIC staggering
+(x at integer, v and J_i at half-integer):
+
+- **T_e^{n+1/2}** is the state variable; the QDSMC advance maps
+  T_e^{n-1/2} -> T_e^{n+1/2} over one dt.
+- The time-centered advection velocity for that interval is **V_e^n** — built
+  from J_i^n = avg(J_i^{n±1/2}), J_plasma(B^n), rho^n. All three are available
+  at the existing call site; the ONLY ordering change is to move the J_i
+  averaging LinComb **before** the energy advance (fixes E2 for free).
+- The existing sources are then *automatically midpoint-centered*: Joule uses
+  J_plasma^n, Q_ei uses T_i^n (the temperature deposit is already at t^n).
+  This is the elegant payoff of the half-staggering: no source extrapolation
+  needed.
+- Pe^{n+1/2} emitted by the advance is exactly time-centered for the full
+  [n, n+1] B-push — better than today's centering for both halves (fixes E4
+  for the halves). The final E-solve at t^{n+1} gets
+  **Pe^{n+1} = 3/2 Pe^{n+1/2} - 1/2 Pe^{n-1/2}**, mirroring the existing
+  J_i^{n+1} extrapolation (store one previous Pe or Te level, analogous to
+  `current_fp_temp`).
+
+### A.2 Midpoint spatial evaluation (fixes E1)
+
+Time-centered V_e^n alone is not enough: the marker must sample it at the
+trajectory midpoint. Two-stage push per marker:
+
+```
+x_mid  = home + (dt/2) * V_e^n(home)       # predictor half-push
+x_new  = home +  dt    * V_e^n(x_mid)      # midpoint full push
+```
+
+Two gathers of the same grid field — cheap, no extra deposit, no iteration,
+and conservation is untouched (deposit still moves the full carried content).
+This is RK2-midpoint on the ODE dx/dt = V_e(x, t), globally O(dt^2) when V_e is
+time-centered.
+
+### A.3 Strang-split sources (fixes E3)
+
+Apply half-dt Joule and Q_ei kicks **before** marker load and half-dt after
+recovery: S(dt/2) A(dt) S(dt/2). All source operators are grid-local
+(cheap); the ion drag-diffusion kick pairs with the Q_ei halves.
+**Decided 2026-08-04: implement Strang from the start**; a Lie variant can be
+added later as a cost/simplicity follow-on if measurements show the
+commutator is negligible.
+
+### A.4 Bookkeeping changes
+
+- **Self-start:** first step advances T_e^0 -> T_e^{1/2} with dt/2 (same
+  desynchronization pattern as the PIC velocity half-kick). On restart-from-
+  closure the same half-kick applies.
+- **Checkpoint/restart:** T_e^{n-1/2} (and the previous-level Pe/Te for the
+  extrapolation) become genuine state. Audit against the rho_fp checkpoint gap
+  (PR #7049) — T_e appears to NOT be checkpointed today, which is already a
+  restart bug for #6982 with the energy equation on. Fix alongside, or fold
+  into #7049's follow-up. Test names must not contain "_restart" (CI quirk).
+- **Substep/RKF45 interplay:** Pe stays frozen across B substeps within each
+  half — unchanged from today, but now the frozen value is time-centered.
+  Document that Joule-stiff hot spots may want the substep controller to see
+  Pe updates (out of scope; note as known limitation).
+
+### A.4b Predictor–corrector specifics (candidate `pc`)
+
+IMPLEMENTED 2026-08-04 (commit bc3cde26f), and it simplified: the predictor
+transport is UNNECESSARY. The first B half-push needs a Pe at its start time
+t^n — and the previous step's corrector already left Pe^n in the register, so
+`pc` is a SINGLE corrector transport per step, placed between the two B
+half-pushes: T_e^n -> T_e^{n+1} with V_e^{n+1/2}(J_i^{n+1/2} = current_fp,
+B^{n+1/2} = register mid-push, rho^{n+1/2} averaged in-kernel), midpoint
+push, Strang sources (Joule uses J_plasma^{n+1/2} — better centered than
+euler's). It must run BEFORE the rho^{n+1/2} LinComb so rho_fp_temp still
+holds rho^n for the K_e/N_e load. One extra `CalculatePlasmaCurrent` at
+B^{n+1/2} per step. T_e stays at integer levels: no half-level checkpoint
+state, no Pe extrapolation. Same transport count as leapfrog — the original
+two-transport concern (corrector restart from initial marker state) is moot.
+
+### A.5 Gate G1
+
+- Manufactured advection test (prescribed V_e, frozen fields): L2(T_e) slope in
+  dt >= 1.9 at fixed dx (dx chosen fine enough that E5/E6 don't floor the sweep)
+  — for BOTH `leapfrog` and `pc`, with `euler` slope ~1 as the control.
+- Adiabatic compression test (existing `analysis_adiabat.py` extended to a dt
+  sweep): slope >= 1.9.
+- Sigma(K*N), Sigma(N) conserved to round-off per step (periodic box).
+- **Selection recorded** per A.0 criteria (order, cost, robustness,
+  invasiveness); losing candidate stripped before upstreaming.
+- Existing three CI tests re-blessed; qei/joule budgets unchanged in physics.
+
+---
+
+## Thrust B — Spatial accuracy of the remap (contingent, measure first)
+
+Phase 0 measures the dx-order and the effective numerical diffusion chi_num of
+the current scheme (at-rest test for E6; translating-Gaussian test for E5).
+Options, in escalation order:
+
+1. **B0 — node homing (E6 fix):** home markers at nodes so the at-rest round
+   trip is the identity. One-line-ish change in `InitParticles` (plus box-
+   ownership care at domain edges so shared nodes aren't double-initialized).
+   Verify against the Belyaev paper's placement.
+2. **B1 — slope-carrying markers (recommended target):** each marker carries
+   limited gradients of its content (MUSCL/monotonized-central limited
+   reconstruction of K and N at load time); the scatter integrates the linear
+   sub-cell profile against the destination hat functions. Conservative by
+   construction (integrals of the reconstruction are the carried totals),
+   positivity-preserving via the limiter, and second-order in dx for CFL < 1.
+   This is the conservative counterpart of the old monotone-cubic layer
+   method — same reconstruction philosophy, but on the scatter side, so no
+   iteration is needed.
+3. **B2 — BFECC/MacCormack correction** on the deposited fields (advect
+   forward, back, correct): 2–3x transport cost, second order, needs a limiter
+   for positivity. Fallback if B1's limiter proves fussy near the EB.
+
+Decision gate G2: pick B1 or B2 only if the measured dx-order after A+B0 caps
+below ~1.7 on the translating-Gaussian and rigid-rotation tests at liftoff-
+relevant CFL; otherwise defer (the dt fix may dominate practical error).
+
+**G2 MEASURED 2026-08-04 — trigger TRIPPED, B1 is GO**: post-B0, with a
+resolved blob (sigma = 0.08 L, translation vs exact, CFL 0.5, N = 32..192),
+the spatial order climbs 0.61 -> 0.86 toward the expected FIRST-order remap
+asymptote (the alpha(1-alpha) donor-style diffusion cap). Overall fit 0.74.
+Full second order requires Thrust B; B1 (slope-carrying markers: limited
+MUSCL reconstruction carried per marker, integrated on scatter) is the
+target per the standing preference, with B2 (BFECC) as fallback.
+
+**B1 IMPLEMENTED AND MEASURED 2026-08-04 — spatial slope 1.92** (same sweep;
+local orders 1.98 -> 1.86, the tail dip being the MC limiter's standard
+first-order clip at the blob extremum; 25x absolute error reduction at
+N = 128). Design as-built: the **half-gradient-corrected deposit** — SetK
+loads limited MC slopes (per grid dimension, boundary-safe one-sided at
+non-periodic edges) of the transported node fields s = K*rho*V/q and
+n = rho*V/q; the scatter deposits w*(A + 1/2 G.(x_dest - x_p)). The
+correction sums to zero exactly per marker (hat first-moment property =>
+conservation unchanged, verified ~1e-8), cancels the hat's second moment
+(exact through quadratics), and reduces to the identity at rest (verified
+2.8e-6, unchanged from B0). Knob: hybrid_pic_model.qdsmc_gradient_deposit,
+default ON; euler + gradient_deposit=false recovers #6982 bit-for-bit.
+Simpler than the full sub-cell-integration variant sketched above — the
+half-gradient trick achieves the same order with a 2-point stencil deposit.
+
+---
+
+## Thrust C — Ito-process tensor diffusion: electron thermal conduction
+
+### C.1 Physics target
+
+Add heat conduction to the energy equation:
+dU_e/dt += div(kappa . grad T_e), with anisotropic
+kappa = kappa_par b b + kappa_perp (I - b b), b = B/|B| (from B^n),
+kappa_par Spitzer ~ T_e^{5/2} (parser-driven, like eta), kappa_perp with its
+own parser. **Decided 2026-08-04: the full tensor ships from day one —
+anisotropic thermal conduction is a must-have** (kappa_perp = 0 is just the
+trivial parser setting, not a deferred feature).
+
+### C.2 SDE formulation (conservative form)
+
+Work on the **energy density** u = (3/2) n_e k_B T_e during the conduction
+substep (NOT on the entropy K — conduction is not adiabatic, and mapping the
+Fourier flux into K-space drags in n-gradient corrections; see C.5). With
+diffusivity tensor D = chi_par b b + chi_perp (I - b b), chi = kappa/((3/2) n_e k_B):
+
+div(kappa grad T) in Fokker–Planck (Ito, conservative) form for u requires the
+drift correction:
+
+```
+dX_i = [ d_j D_ij + D_ij d_j ln(n_e) ] dt + (sqrt(2D))_ij dW_j
+sqrt(2D) = sqrt(2 chi_par) b b + sqrt(2 chi_perp) (I - b b)
+```
+
+(The `grad ln n_e` term converts Fickian diffusion of u into Fourier diffusion
+of T; the `div D` term is the standard Ito drift for spatially varying D.
+Both evaluated on the grid at t^n and gathered at the marker; n_e floored by
+`qdsmc_n_floor` before the log-gradient.)
+
+### C.3 Quiet (deterministic) sampling — no RNG noise
+
+One marker per cell + random kicks = unacceptable noise. Use QDSMC-style quiet
+daughters: replace the diffusive displacement by a deterministic Gauss–Hermite
+quadrature of the Gaussian, per quadrature direction (the eigendirections of D:
+b and the perpendicular pair).
+
+**Number of quadrature points is an input knob, settable per direction.** The
+quadrature axes are field-aligned — (b, e_perp1, e_perp2), i.e. the "cardinal"
+directions of the quadrature are oriented with the parallel/perpendicular
+eigendirections of D — so the parallel and perpendicular counts can differ:
+`hybrid_pic_model.qdsmc_conduction_quadrature_points = <npts_par> <npts_perp>`
+(scalar broadcasts to both). **Default 2 in each direction** (decided
+2026-08-04). Raising npts_par alone buys fast parallel tails where Spitzer
+chi_par is large, without paying for perpendicular daughters (see the
+stiffness analysis, C.7). Normalized probabilists' GH abscissae/weights
+hardcoded in a small table (2..~7 points; sigma = sqrt(2 chi dt) per
+direction):
+
+| npts | offsets (units of sigma) | weights | properties |
+|---|---|---|---|
+| 2 (default) | ±1 | 1/2, 1/2 | variance-exact; per-step 4th-moment defect => conduction operator is **weak order 1 in dt**; cheapest (2 daughters, parallel-only) |
+| 3 | 0, ±sqrt(3) | 2/3, 1/6, 1/6 | matches through 5th moment => **weak order 2**; tails to sqrt(3) sigma |
+| 4+ | standard GH roots (e.g. 4-pt: ±0.742, ±2.334) | GH weights | tail sampling out to larger multiples of sigma — for high-T / large-hop regimes where the capped Gaussian tail carries real flux |
+
+Notes:
+- All GH weights are positive => positivity of the deposited u is automatic at
+  every npts.
+- The default npts=2 caps the conduction operator's formal dt-order at 1; the
+  research target of overall 2nd order is demonstrated at npts=3 (see G3), with
+  npts=2 accepted as the cheap production setting. In practice conduction
+  errors are subdominant where the limiter engages, and the knob is the escape
+  hatch when tails matter (large T_e => large chi => hops comparable to
+  gradients).
+- Full tensor: tensor-product across eigendirections (npts^d daughters, exact
+  covariance) or a sparse per-direction stencil (npts*d daughters, covariance-
+  exact with rescaled offsets); default chi_perp=0 keeps it at npts daughters.
+- Daughters are ephemeral: spawned at the (already advected) marker position,
+  displaced, deposited, discarded. They carry energy content only (conduction
+  transports heat, not electrons — do NOT diffuse the N weights).
+
+### C.4 Splitting and recovery
+
+Strang-compatible placement: C(dt/2) . [S(dt/2) A(dt) S(dt/2)] . C(dt/2), or
+fold conduction into the same push as advection (single SDE — no A/C splitting
+error at all) once the split version is validated. **Decided 2026-08-04:
+split substep** (clean physics, independently testable, and the clean seam
+for an elliptic parallel backend if C.7 demands one); unify later only if
+profiling says so.
+
+Recovery after the conduction deposit: T_e = u_dep / ((3/2) k_B n_e) with n_e
+from rho_fp — no weight division, positivity guaranteed by positive quadrature
+weights and positive u.
+
+Conservation: Sigma(u) exact to round-off (deposit form + reflecting BCs).
+
+### C.5 Recorded alternative (not first choice)
+
+Unified single-push SDE acting on the entropy markers directly (diffusing K
+with chi' and extra n-gradient drift terms derived from K = T n^{1-gamma}).
+Saves one deposit pass but couples the limiter and the BCs into the adiabatic
+carrier. Explicitly deferred 2026-08-04 (split substep chosen); revisit only
+if the split substep is a measured bottleneck.
+
+### C.6 Flux limiting and the vacuum policy (the user-specified knobs)
+
+Two distinct caps on chi_par, applied per cell before the drift/offset build:
+
+1. **Physical free-streaming limiter** (longitudinal only):
+   `kappa_eff = kappa_Sp / (1 + |q_Sp| / (f q_fs))`, q_Sp = kappa_Sp |grad_par T_e|,
+   q_fs = n_e k_B T_e v_te, flux-limit factor f ~ 0.1–0.3 (input knob).
+   Needs grad_par T_e on the grid at t^n — one stencil pass.
+2. **Numerical hop cap:** sqrt(2 chi_par dt) <= m_hop * dx (m_hop input, default
+   ~2): guarantees daughters stay within the guard/Redistribute reach and keeps
+   the deposit local. Where the cap engages, transport is slower than physical —
+   accepted by design, exactly like the vacuum-resistivity ceiling turning
+   vacuum into a fast-but-finite diffusion front. In floored/vacuum cells
+   (n_e <= qdsmc_n_floor) chi is set to the capped ceiling value, not zero,
+   so fronts propagate through low-density regions instead of stalling.
+
+Smooth both caps (soft-min) to avoid kinks in div D feeding the drift term.
+
+### C.7 Stiffness analysis — SDE arm vs elliptic parallel solve (added 2026-08-04)
+
+Answers, with measurements, whether the explicit stack can carry Spitzer
+parallel conduction or the parallel channel needs an implicit/elliptic solve.
+Prior-art datum: the reference algorithm's implicit solver absorbed the full conductivity
+stiffness in JFNK without trouble; the question is what the explicit hybrid
+stack tolerates.
+
+**Framing — where stiffness actually bites the SDE arm.** The quiet-daughter
+kernel is NOT explicit-diffusion-CFL limited: for locally constant
+coefficients the one-step Gaussian kernel is exact in time at any chi*dt, so
+the classic S = chi_par dt/dx^2 bound does not apply to it. The real limits
+are:
+
+1. **Hop-cap engagement**: x_max sqrt(2 chi_par dt) > m_hop dx => transport
+   artificially slowed. Accepted-by-design fallback, but the deficit must be
+   quantified against reference solutions, not assumed benign.
+2. **Geometry variation over the hop**: b changes over the hop length l_hop
+   (curvature R_c, shear), so straight-line parallel hops leak cross-field:
+   spurious chi_perp,num ~ chi_par (l_hop/R_c)^2. This — not instability —
+   is the anisotropy-killer at high stiffness.
+3. **Drift-term locality**: div D and grad ln n gathered at the marker are
+   assumed constant over the hop.
+
+**Analysis tasks** (before the C implementation hardens):
+
+- **Regime survey** (pure script, no runs): tabulate S = chi_par dt/dx^2,
+  l_hop/dx, and l_hop/R_c across the target decks (liftoff, annulus,
+  compression) over the expected T_e range with Spitzer T^{5/2}.
+- **Pollution measurement**: the ring test (C.8) swept over l_hop and
+  (npts_par, npts_perp) => empirical max usable hop before
+  chi_perp,num/chi_par crosses threshold; separately measure the hop-cap
+  transport deficit.
+- **Escalation options, evaluated cheapest-first**:
+  - (a) **Anisotropic quadrature + field-line-following hops**: raise
+    npts_par (fast tails, per-direction knob in C.3) and replace the straight
+    parallel hop with an arclength displacement along the traced field line
+    (RK2/RK4 trace of b per daughter). Kills the (l_hop/R_c)^2 leak for a few
+    extra B gathers per daughter; stays explicit, conservative, positive.
+  - (b) **Subcycling**, two flavors: (i) SDE hop subcycling — repeat smaller
+    hops N_sub times per step with its own controller (reuse the B-advance
+    substep-controller pattern, minus the #7091 ratchet); cost is N_sub
+    deposits plus N_sub remap smoothings. (ii) Grid-form conduction folded
+    into the existing RKF45 field advance as an RHS term — then RKF45's
+    adaptive controller carries it, but explicit-parabolic stability forces
+    N_sub ~ S, so the regime survey's S table answers feasibility directly
+    (S ~ 10: fine; S ~ 10^3+: hopeless), and it couples the thermal and field
+    substep controllers.
+  - (c) **Elliptic parallel solve — LAST RESORT, not scoped up front**
+    (decided 2026-08-04: avoid elliptic solves in the explicit advance at all
+    costs; scope this only if G3a measurements prove (a)/(b) insufficient):
+    backward-Euler (I - dt div(chi_par b b grad)) T^{n+1} = T^n with a
+    Guenter-style symmetric anisotropic stencil to bound perpendicular
+    pollution; AMReX GMRES with MLMG preconditioning (plain MLABecLaplacian
+    is diagonal-beta only, so the b b cross terms need the custom stencil) or
+    a JFNK port of the reference algorithm's approach. Perpendicular conduction and the
+    flux limiter stay in the SDE arm; the split-substep decision (C.4) makes
+    the handover a clean seam. Until G3a, the accepted answer to
+    over-stiffness is the capped/limited fast-front transport, not an
+    implicit solve.
+
+**Gate G3a (decision)**: stiffness table + pollution/deficit measurements =>
+choose the backend, strongly biased explicit: (a), then (a)+(b); (c) is
+scoped only if the measurements prove the explicit options insufficient AND
+the capped-transport fallback distorts the target physics. Record the
+crossover S* either way. If (c) is ever selected, its implementation inserts
+as Phase 3b before Phase 4.
+
+### C.8 Gate G3
+
+- 1D Gaussian spread along B parallel to z: sigma^2(t) = sigma_0^2 + 2 chi t to
+  second order in dt and dx.
+- Same with B tilted 30 deg to the grid (tensor rotation exercised): identical
+  spread along b, measure spurious perpendicular spread => effective
+  chi_perp,num / chi_par below a set threshold (target <= 1e-3 at N=64,
+  refine goal after first measurements).
+- Anisotropic ring test (Sharma–Hammett style): hot patch on circular field
+  lines, chi_perp = 0 — heat stays on the flux surface.
+- Zeldovich nonlinear front (kappa ~ T^{5/2}) against self-similar solution;
+  limiter off/on comparison; front speed <= f v_te when limited.
+- Energy budget closes to round-off with reflecting BCs.
+
+---
+
+## Thrust D — Boundary conditions (domain + EB), flux and temperature
+
+Replace the E7 clamp with real BCs; the same machinery serves advection
+markers and conduction daughters.
+
+Per-domain-face and per-EB options (input-driven, parser for space/time
+dependence where sensible):
+
+| BC type | Marker rule | Conserves |
+|---|---|---|
+| Adiabatic / zero heat flux (default) | Specular reflection of the displacement across the face / level set | energy exactly |
+| Isothermal T_wall (Dirichlet) | Crossing daughter's energy content reset to the T_wall value at the wall-intersection point (thermal-bath re-emission); tally the exchanged energy as wall heat flux diagnostic | budget via wall tally |
+| Prescribed flux q_wall (Neumann != 0) | Adiabatic reflection + injection of energy markers at faces at rate q_wall * A * dt (EB: cut-face areas) | budget via source tally |
+
+Notes:
+- **Advection BC** stays as-is physically (V_e normal component at walls is
+  governed by the Ohm's-law/EB E and J BCs already in place); what changes is
+  that the *clamp* becomes reflection so entropy stops piling on boundary
+  nodes. Outflow faces (if ever needed) delete content with a tally — markers
+  are reset to home each step anyway, so deletion does not orphan cells.
+- **EB geometry:** use the existing level set phi and distance machinery;
+  reflection = mirror across the local normal, iterate the intersection to
+  second order per the house EB-BC standard (level-set mirror ghosts). Check
+  the reference algorithm for an existing marker-reflection implementation to port before
+  writing a new one.
+- **Cut-face areas** for EB flux injection can reuse the conformal-EB area
+  fractions when `use_conformal_eb` is active; staircase areas otherwise.
+- Wall-tally reduced diagnostics (net wall heat flux per boundary) come for
+  free from the BC bookkeeping and should be exposed — they are the
+  verification instrument for G4.
+
+Gate G4: slab with two isothermal walls -> steady linear T profile (const
+kappa) and correct q_wall; EB annulus with T(r_in)=T1, T(r_out)=T2 -> ln r
+profile; budget closure |dE_plasma/dt - Q_wall| at round-off-adjacent levels.
+
+---
+
+## Verification harness (shared infrastructure, Phase 0)
+
+A small research driver (untracked, alongside the existing
+`Examples/Tests/ohm_solver_electron_energy_eq/`) that can:
+- prescribe V_e analytically (bypass the Ohm's-law solve) for advection-only
+  convergence sweeps (translation, rigid rotation, compression);
+- sweep dt at fixed dx and dx at fixed CFL, emit L1/L2 orders;
+- run the at-rest test (V_e = 0: T_e must be stationary — today it is not,
+  E6) and report the per-step smoothing rate;
+- budget audits: Sigma(K*N), Sigma(N), Sigma(u), wall tallies.
+
+CI additions (each < 30 s, 2-core, CPU/GPU portable): one dt-order assert on
+the advection test (3-point sweep, slope > 1.7 as a loose CI-proof bound), one
+conduction spread test, one BC budget test. Existing adiabat/joule/qei tests
+re-blessed once per behavior-changing phase (CHECKSUM_RESET procedure).
+
+---
+
+## Sequencing
+
+| Phase | Content | Gate |
+|---|---|---|
+| 0 | Branch off development @ d72f49d70; build with energy eq; verification harness; measure baseline dt/dx orders, at-rest smoothing, chi_num; audit T_e restart | G0: baseline numbers recorded |
+
+Phase 0 started 2026-08-04 (worktree `~/src/WarpX-qdsmc`, venv
+`~/.env/warpx-qdsmc`, harness in
+`Examples/Tests/ohm_solver_electron_energy_eq/convergence/`). Results:
+- **T_e checkpoint gap CONFIRMED**: `FlushFormatCheckpoint.cpp` writes zero
+  hybrid energy-equation fields (trap 2 is real).
+- **E6 CONFIRMED and DOMINANT (G0 headline)**: at rest (V_e = 0, sum(Te)
+  conserved to 1e-9), a Gaussian blob (sigma = 0.04L) loses half its
+  amplitude in 64 steps: peak 20 -> 10.5 eV (N=32), -> 11.7 (N=64),
+  -> 14.5 (N=128). The smoothing is per-step (dt-independent), so it is a
+  numerical diffusion ~ dx^2/dt that grows unbounded as dt is refined.
+- **Measured baseline spatial order: 0.2-0.4** (translation vs exact,
+  CFL = 0.5, N = 32..128) — the E6 floor buries even the expected 1st-order
+  remap error. The scheme is effectively sub-first-order in space at
+  practical resolutions.
+- **chi_num measured = dx^2/(4 dt) exactly**: added variance per step per
+  direction = 0.50 dx^2 at N = 32, 64 and 128 (three-digit agreement) — the
+  analytic [1/2,1/2]x[1/2,1/2] round-trip prediction for cell-center homes on
+  a nodal grid. Scale check (liftoff placeholders, dx=1e-3, dt=1e-9):
+  chi_num ~ 2.5e2 m^2/s vs flux-limited physical chi_eff ~ 1.3e3 at 10 eV —
+  baseline numerical diffusion is ~20% of the conduction Thrust C would add.
+  Physical conduction cannot be credibly added until B0 lands.
+- **Consequence — plan reorder**: B0 (node homing) is promoted from Phase 2
+  to a Phase 1 PREREQUISITE. No dt-order measurement is meaningful while E6
+  dominates: finer dt = more remaps = more smoothing, so dt self-convergence
+  slopes ~ 0 at baseline. G1's instrument after B0: same-discretization A/B
+  between `euler`/`leapfrog`/`pc` + fixed-CFL combined refinement (pure-dt
+  refinement at fixed dx cannot converge for a remap-every-step scheme —
+  the donor-cell-limit diffusion dx*v*t*(1-CFL) grows as dt shrinks).
+- **Ion CFL trap (harness)**: Esirkepov + hybrid segfaults on multi-cell
+  crossings (WarpX warns at startup); keep ion and marker CFL < ~0.6 in all
+  sweep points.
+- **B0 LANDED (commit 296df8406 on qdsmc_energy_leapfrog)**: markers homed at
+  grid nodes with unique seam/periodic ownership (box-seam nodes belong to
+  the lower box; periodic top node gets no marker; non-periodic domain-top
+  markers pulled 1e-6 dx inside). Post-B0 measurements:
+  * at rest: relL2 3e-6 over 64 steps at every N (was 3-7e-2) — identity
+    restored, residual is recovery-roundoff, resolution-independent.
+  * translate spatial slope 0.40 overall, local order 0.29 -> 0.52 by N=128 —
+    PRE-ASYMPTOTIC: the remap variance ~ dx*v*t*(1-CFL) is still comparable
+    to the blob variance at N=128 (sb = 0.04L); the asymptotic 1st-order
+    remap regime needs a wider blob or N >~ 512. Widen the blob for the
+    Thrust-A instrument.
+  * rotate dt self-convergence: slope 1.33 (local 1.16 -> 1.60) — the euler
+    baseline platform number; mixed Euler + remap-difference contributions.
+  * rotate sum(Te) drift ~ -6.6e-2 but IDENTICAL across step counts 64..1024
+    => a property of the test setup (ballistic ion pattern evolution + the
+    uniform-n proxy assumption), not a per-step numerical leak; at-rest and
+    translate conserve to 1e-9. Use Sigma(entropy_fp) directly for the
+    conservation gate in Thrust A.
+- **Thrust A IMPLEMENTED (commit bc3cde26f)**: `qdsmc_time_advance` switch
+  with all three schemes; euler verified BIT-IDENTICAL to the pre-restructure
+  build (max |dTe| = 0 on the rotation test); knob verified in
+  warpx_used_inputs; both new schemes conserve like euler. `pc` simplified to
+  a single corrector transport (see A.4b); leapfrog carries pe_prev/pe_ext
+  scratch fields and the dt/2 self-start. Also fixed in passing:
+  QDSMCFillElectronPressureFromTe now FillBoundary's Pe (the E-solve reads
+  grad Pe at box edges — latent multi-box ghost staleness in #6982).
+- **G1 accuracy leg MEASURED (2026-08-04, rotate, N=128, CFL<=0.55)**:
+  * Per-scheme errors vs a fine-dt reference all slope ~1.1 with candidates
+    only 1.2-1.3x below euler — as predicted, that instrument is dominated by
+    the scheme-independent remap-DIFFERENCE (itself O(dt) at fixed N).
+  * Same-discretization differences (remap cancels): euler-leapfrog slope
+    **1.04** = euler's isolated first-order time error. pc-leapfrog raw
+    slope 1.01 is NOT an error: it is the half-step staggering offset
+    (leapfrog's state ends at t - dt/2, so the pair is compared 0.5*dt
+    apart). Subtracting a dt-scaled template of that offset leaves a
+    residual at slope **1.88** — the two independently-staggered candidates
+    agree to O(dt^2).
+  * VERDICT (accuracy): both `leapfrog` and `pc` eliminate the O(dt)
+    integrator error; at practical operating points their time error is
+    already subdominant to spatial remap effects. The binding error is now
+    SPATIAL (G2 territory), exactly as the plan structure anticipated.
+  * Instrument note for the record: any fixed-time reference comparison of
+    `leapfrog` carries the 0.5*dt*dTe/dt staggering offset; validate
+    leapfrog against half-level-time references or template-subtract.
+  * Remaining A.0 legs before selection: sources-on behavior (Strang wiring
+    is in but untested — adiabat/joule tests), stiff-deck robustness
+    (watch: pc's FIRST half-push uses Pe^n, dt/2 staler than leapfrog's
+    centered Pe^{n+1/2} — the thing to probe on Joule-stiff decks),
+    restart complexity (pc wins structurally: integer-time state, no
+    extrapolation, no half-level checkpoint). Preliminary lean: **pc**,
+    pending the sources/stiffness legs and Eric's call.
+- **Stiff-robustness leg DONE (2026-08-04)**: Joule test at eta-scale 1000
+  and 5000 (10x and 50x the CI value), all three schemes: NO instabilities
+  anywhere — the pc Pe^n-lag concern does not manifest even at 50x. Budget
+  closure at the stiffest point: euler +3.86% (its Lie full-dt source kick
+  degrades with stiffness), leapfrog -1.00%, **pc -0.16%** — the Strang
+  midpoint-valued sources win exactly where it matters. (Leapfrog's budget
+  artifact shrinks with scale — consistent with the half-level-offset
+  interpretation, relative to a growing dE_e.)
+- **BAKE-OFF COMPLETE — RECOMMENDATION: select `pc`** (pending Eric's
+  sign-off). Scorecard: accuracy tie with leapfrog (both O(dt^2)); cost tie;
+  sources-on all-pass with pc budgets tracking euler at CI scale and best of
+  all three under stiff heating; structurally simplest (integer-time state,
+  no Pe extrapolation, no half-level checkpoint or diagnostic offsets).
+  Leapfrog stays on the branch as a research alternative until upstreaming
+  strips it per A.0.
+- **Sources-on leg DONE (2026-08-04)**: all NINE case x scheme CI
+  combinations PASS (adiabat / joule@eta-scale-100 / qei, run through a
+  scheme-injection wrapper on the MPI+openPMD rebuild; results in
+  convergence/ci_matrix/). Discriminator found: the Joule energy-budget
+  closure is euler -5.9% / pc -6.0% / **leapfrog -16.4%** — the half-level
+  T_e staggering leaks into integer-time energy accounting (adiabat and qei
+  are scheme-equivalent, so the Strang/midpoint machinery itself is clean;
+  the differentiator is purely the staggering). Operationally this means
+  every downstream energy-budget diagnostic would need half-level-aware
+  corrections under leapfrog — a second structural point for pc.
+- **Survey (PLACEHOLDER deck numbers) preview of G3a**: raw Spitzer chi_par
+  gives S_Sp up to 1e9 and hops of 30-1e5 cells — never carry it explicitly.
+  Flux-limited (f=0.1, L_T=10dx) chi_eff collapses to S_eff ~ 0.5-23,
+  l_hop(npts=2) ~ 1-7 dx, curvature leak (l_hop/R_c)^2 <~ 2% at npts=2 —
+  i.e. the free-streaming limiter itself is what makes the explicit SDE arm
+  viable; supports the no-elliptic preference. Re-run with real deck numbers
+  before gating.
+- **Thrust C IMPLEMENTED (2026-08-04)**: `QdsmcConductionOnce` — the
+  daughters are EPHEMERAL, so no particle container: a grid kernel over
+  owned nodes (same seam/periodic ownership trim as InitParticles) builds
+  u = 3/2 n_e k_B T_e, spawns the quiet GH daughters along (b, e_perp1,
+  e_perp2) with the Ito drift [div D + D.grad ln n] dt, hat-deposits into a
+  scratch nodal MF (SumBoundary), and recovers T_e = u/(3/2 k_B n_e). Knobs:
+  `qdsmc_kappa_par(n,Te,t)` (presence enables; n [m^-3], Te [eV], kappa
+  [W/(m K)]), `qdsmc_kappa_perp(n,Te,t)` (default 0),
+  `qdsmc_conduction_quadrature_points = <par> [<perp>]` (GH 2..7 hardcoded,
+  probabilists' normalization), `qdsmc_conduction_flux_limit_factor`
+  (default 0.1), `qdsmc_conduction_max_hop` (default 2),
+  `qdsmc_conduction_vacuum_fast_front` (default on: floored cells get the
+  capped ceiling chi, isotropic). Strang bracket
+  C(dt/2).[S(dt/2) A(dt) S(dt/2)].C(dt/2) in pc and leapfrog (rho pairing:
+  rho^n pre-transport, rho^{n+1} post), Lie C(dt) in euler; all no-ops with
+  the parser unset, so the #6982 control stays bit-identical. Perp basis is
+  chosen nearest yhat so the out-of-plane daughter loop collapses in 2D;
+  zero-sigma / zero-projection loops collapse to a single point.
+- **Daughter remap floor MEASURED — the half-gradient correction is
+  MANDATORY, not an optimization**: without it (`qdsmc_gradient_deposit=0`)
+  the aligned sweep is flat at slope **-0.01** with a resolution-INDEPENDENT
+  spurious conduction chi_meas/chi0 = **1.432** at every N (24..128; the
+  hat's alpha(1-alpha) dx^2 variance per deposit, constant in hop/dx under
+  parabolic refinement — the conduction analogue of E6). With the
+  correction (source-node MC slopes of u, same B1 identity: zero-sum =>
+  conservation exact, cancels the hat second moment) the floor vanishes:
+  chi recovery exact to ~1e-4.
+- **G3 MEASURED (2026-08-04) — conduction is 2nd order**: aligned-B Gaussian
+  spread, parabolic refinement (dt ~ dx^2, nsteps = 32(N/32)^2, chi0 =
+  s0^2/2T, hops ~0.6 dx), L2 vs exact wrapped solution:
+  * npts=3: N=24..128 slope **1.95** (local 1.86 -> 1.97), relL2 1.9e-4 at
+    N=64. sigma^2 growth exact: the apparent 0.28% chi deficit is the
+    wrapped-moment ESTIMATOR (the exact field scores 0.99717 under the same
+    estimator; scheme-vs-estimator-consistent-reference agreement ~1e-4).
+  * npts=2 (production default): slope **1.93**, constant 4.8x npts=3 — the
+    weak-order-1 4th-moment defect scales as O(dt) = O(dx^2) under parabolic
+    refinement, so 2nd order holds with a bigger constant, as designed.
+  * tilted 30 deg (tensor rotation, chi_perp=0): relL2 6.4e-4 / 2.9e-4 /
+    1.6e-4 at N=64/96/128 (local orders 1.96, 2.03) — 2nd order holds with
+    the full rotated tensor. Perpendicular pollution: the raw moment reads
+    1.7-1.8e-3, but the EXACT field scores 1.65e-3 under the same estimator
+    (wrapped parallel tails leak into the tilted perp moment), so the
+    scheme's actual spurious spread is the difference:
+    **chi_perp_num/chi_par = 1.4e-4 at N=64, 4e-5 at N=96, 2e-5 at N=128**
+    (~N^-2) — an order below the 1e-3 gate target and converging away.
+    Uniform B => no curvature contribution; the curved-field-line leak
+    (trap 11) remains the C.7 ring-test question.
+  * Sigma(Te) conserved to 2-3e-8 in every run; at-rest/uniform identity
+    preserved (chi=0 or uniform Te => exact by construction).
+  * Hop-cap soft-min form matters: the harmonic soft-min chi*cap/(chi+cap)
+    biases chi by ~20% already at chi = cap/4 — replaced by the p=4 power
+    soft-min chi/(1+(chi/cap)^4)^(1/4) (<0.4% at cap/2, still smooth for
+    div D).
+- **Evolve re-entry T_e reset — pre-existing #6982 bug FOUND and FIXED**:
+  `HybridPICInitializeRhoJandB` runs at step == step_begin of EVERY
+  `Evolve()` entry (not just run start), and its closure
+  `CalculateElectronPressure()` overwrote the evolved T_e/Pe with the
+  polytropic value — any PICMI deck calling sim.step() in segments silently
+  resets the energy equation's state each segment (found because the
+  conduction probe scripts stepped one step at a time: the blob vanished at
+  the second sim.step()). Fix on the branch: with the energy equation on,
+  that entry point now emits Pe from the CURRENT T_e
+  (QDSMCFillElectronPressureFromTe) instead of the closure — also the
+  energy-consistent Pe^0 = n k_B Te0 seed on fresh start/restart. CI matrix
+  re-run after the fix: 9/9 PASS (joule budgets shift by ~0.8 points from
+  the changed first-step seed: euler -6.7 / pc -6.7 / leapfrog -17.2%).
+  Same family as the T_e checkpoint gap (trap 2); fold both into the
+  eventual restart fix.
+- **Host-OMP deposit race trap (segfault diagnosed)**: on the HOST,
+  `amrex::Gpu::Atomic::AddNoRet` is a PLAIN `+=` — any OMP-threaded MFIter
+  loop whose deposits reach across tile boundaries races (NaN -> floor() ->
+  wild index -> segfault). The daughter deposit loop is therefore
+  unthreaded, same as DepositScalar. House rule: no `#pragma omp parallel`
+  around host atomic-deposit kernels.
+- **Conduction-harness whistler note**: the uniform-B decks must keep the
+  explicit B-substep advance stable against machine-eps curl(E) seeds:
+  omega_wh(k_max) dt_sub = (pi N/L)^2 B/(mu0 q n0) dt/substeps <~ 0.1
+  (B0 = 2e-5 T for the standard parameters; the ratio is INVARIANT under
+  the parabolic dt ~ dx^2 sweep, so one B0 serves the whole N range).
+  At B0 = 0.01 T the instability seeds from rounding and destroys the run
+  by step ~4 — harness scripts qdsmc_conduction_test.py / run_conduction.py
+  encode this.
+| 1 | Thrust A bake-off: J_i^n reorder + midpoint push (shared); `leapfrog` (half-staggered T_e, Pe extrapolation, self-start, checkpoint) and `pc` (split advance across B halves) behind the `qdsmc_time_advance` switch; Strang sources; measure and select | G1 |
+| 2 | B0 node-homing; re-measure; decide on B1/B2 | G2 |
+| 3 | Thrust C conduction (split substep, quiet daughters, full tensor D, per-direction quadrature, both limiters, vacuum policy) | G3 |
+| 3a | C.7 stiffness analysis: regime survey (script), curvature-pollution + hop-cap-deficit measurements on the Phase-3 prototype; parallel-backend decision | G3a |
+| 3b | (last resort; NOT scoped unless G3a proves explicit options insufficient) elliptic parallel solve | — |
+| 4 | Thrust D BCs (domain + EB, Dirichlet/flux, tallies); remove E7 clamp | G4 |
+| 5 | Integration: liftoff/annulus decks with conduction on (the GPU nodes for the big runs); perf target: energy-eq + conduction overhead < ~15% of ion PIC cost; docs (parameters.rst, theory section), PICMI knobs | G5 |
+
+Upstream packaging is deferred (decided 2026-08-04): explore and test first;
+revisit PR slicing once G1/G3 numbers exist. The E6 node-homing and T_e
+checkpoint findings stay recorded as candidate standalone fixes for when that
+conversation happens.
+
+---
+
+## Traps (numbered, house style)
+
+1. **PICMI bucket-write clobber** — new knobs (flux-limit factor f, m_hop,
+   kappa parsers, BC selections) must be verified in `warpx_used_inputs`, not
+   assumed from the deck.
+2. **T_e checkpoint gap** — energy-equation state is not checkpointed today
+   (same class as the rho_fp gap, PR #7049). Leapfrog makes it worse (half-level
+   state + previous Pe). Fix explicitly; test without "_restart" in the name.
+3. **OMP deposition heap bug** — pre-existing (OMP<=2 workaround); the new
+   conduction deposit adds another scatter path that may trip it. Keep the
+   workaround in test decks.
+4. **Redistribute reach** — conduction daughters hopping m_hop*dx can cross
+   more than one box; ensure ghost/`RedistributeLocal` assumptions and the
+   one-cell CFL comment in `PushX` are updated together.
+5. **RZ volume weighting** — `DepositScalar` uses a constant cell_volume;
+   markers move in the (x,y) plane with theta = 0 pinned. Validate RZ
+   conservation explicitly before enabling conduction there (RCYLINDER/RSPHERE
+   already refused at ReadParameters).
+6. **Node double-ownership** — B0 node-homing puts markers on box-boundary
+   nodes; ownership must be unique or Sigma(N) double-counts at seams.
+7. **Drift-term kinks** — hard min() in the chi caps makes div D
+   discontinuous; soft-min or the drift correction will inject spurious
+   structure exactly at the limiter engagement front.
+8. **Checksum re-bless discipline** — every phase that changes physics
+   re-blesses; keep the per-phase re-bless commits separate from code commits.
+9. **Frozen Pe across B substeps** — unchanged by this work but more visible
+   once Joule + conduction sharpen hot spots; record as known limitation, do
+   not silently "fix" inside the substep controller.
+10. **Isolate with controls** — any instability during liftoff integration
+    gets an A/B ladder (advection-only / +sources / +conduction / +BCs) before
+    touching the scheme.
+11. **Curved-field-line leak** — straight parallel hops across curved/sheared
+    B leak cross-field as chi_par (l_hop/R_c)^2; every time the hop cap is
+    raised (or npts_par extends the tails), re-check the ring-test pollution
+    number. The failure is silent anisotropy loss, not a crash.
+
+---
+
+## Decision log
+
+- **2026-08-04** — Conduction quadrature: Gauss–Hermite, **default 2 points
+  per direction**, selectable via `qdsmc_conduction_quadrature_points` for
+  high-T / tail-sampling regimes. npts=2 is variance-exact but weak order 1;
+  the G3 order-2 demonstration runs at npts=3. (Eric)
+- **2026-08-04** — Time advance: no pre-commitment to half-staggered leapfrog.
+  Implement `leapfrog` and `pc` behind the `qdsmc_time_advance` switch (with
+  `euler` as control), measure per A.0 criteria, select the best performing.
+  (Eric)
+- **2026-08-04** — Review resolutions: Strang first (Lie as follow-on);
+  conduction as split substeps on u; **full tensor from day one** (anisotropic
+  conduction is a must-have); G2 trigger 1.7 confirmed; upstream packaging
+  deferred until after exploration. (Eric)
+- **2026-08-04** — Quadrature counts become **per-direction**
+  (`qdsmc_conduction_quadrature_points = <npts_par> <npts_perp>`), quadrature
+  axes field-aligned, so the parallel direction can carry more points for
+  fast tails. (Eric)
+- **2026-08-04** — Added C.7 stiffness analysis / gate G3a: measure whether
+  the explicit stack (quiet daughters, field-line hops, subcycling,
+  RKF45-embedded grid form) carries Spitzer parallel conduction, or the
+  parallel channel needs an elliptic implicit solve. The reference algorithm's JFNK precedent:
+  the conductivity stiffness was acceptable implicitly. (Eric)
+- **2026-08-04** — GO for Phase 0. Elliptic parallel solve demoted to last
+  resort: avoid elliptic solves in the explicit advance at all costs; do not
+  scope option (c) unless G3a proves (a)/(b) insufficient. Work branch
+  `qdsmc_energy_leapfrog`, worktree `~/src/WarpX-qdsmc`. (Eric)
+- **2026-08-04** — **Time advance SELECTED: `pc`** (G1 tie on accuracy/cost;
+  9/9 sources-on matrix; best stiff-Joule budget −0.16% at 50x eta;
+  structurally simplest). Default flipped to pc on the branch; euler kept as
+  control; leapfrog kept until upstream packaging strips it per A.0. Proceed
+  to Thrust B (B1 slope-carrying markers — G2 tripped at first-order remap
+  cap 0.86). (Eric)
+- **2026-08-04** — **Thrust C implementation form: grid-kernel ephemeral
+  daughters** (spawn/displace/deposit/discard inside one ParallelFor over
+  owned nodes) instead of an AMReX particle pass — no container, no
+  Redistribute, reuses the validated seam-ownership and SumBoundary
+  patterns. (Claude, measured)
+- **2026-08-04** — **Daughters carry the B1 half-gradient correction —
+  mandatory**: without it the hat remap adds a resolution-independent
+  +43% spurious chi under parabolic refinement (slope 0.00); with it,
+  chi exact to 1e-4 and slope 1.95. Gated by the same
+  `qdsmc_gradient_deposit` knob as the advection markers. (measured)
+- **2026-08-04** — **Hop-cap smoothing = p=4 power soft-min**
+  chi/(1+(chi/cap)^4)^(1/4); the harmonic soft-min rejected (~20% chi bias
+  already at cap/4 — would silently slow all conduction). (measured)
+- **2026-08-04** — **G3 PASSED**: aligned slope 1.95 (npts=3) / 1.93
+  (npts=2, 4.8x constant); tilted-30deg slope ~2.0 with
+  chi_perp_num/chi_par = 1.4e-4 at N=64 falling ~N^-2 (estimator-floor
+  subtracted). Zeldovich nonlinear front + limiter-on legs and the C.7
+  ring test remain open.
+- **2026-08-04** — **Evolve re-entry Pe/Te reset fixed** (pre-existing
+  #6982 bug): with the energy equation on, HybridPICInitializeRhoJandB now
+  emits Pe from the current T_e instead of the algebraic closure, so
+  segmented PICMI sim.step() no longer wipes the evolved state. CI matrix
+  9/9 after the fix.
+
+## Design questions — resolutions (2026-08-04 review)
+
+1. **Leapfrog vs predictor–corrector** — test and choose: both behind the
+   `qdsmc_time_advance` switch, measured on the A.0 criteria (A.0/A.4b).
+2. **Strang vs Lie** — Strang first; Lie only as a possible follow-on
+   simplification if the commutator measures negligible (A.3).
+3. **Conduction carrier** — split substeps on u (C.4); unified single-push
+   SDE (C.5) deferred.
+4. **Tensor** — full tensor from day one; anisotropic thermal conduction is a
+   must-have (C.1).
+5. **Spatial thrust trigger** — G2 threshold 1.7 confirmed.
+6. **Upstream packaging** — deferred; explore and test before planning any
+   upstream work.
+
+## Open question (new, 2026-08-04)
+
+- **SDE arm vs elliptic parallel solve** for Spitzer-stiff parallel
+  conduction — pending the C.7 stiffness analysis and gate G3a. Levers on the
+  explicit side, in escalation order: field-aligned per-direction quadrature
+  (npts_par > npts_perp for fast tails), field-line-following hops,
+  subcycling (SDE-repeat or RKF45-embedded grid form, where N_sub ~ S =
+  chi_par dt/dx^2 decides feasibility). The elliptic parallel solve is a
+  LAST RESORT (avoid elliptic solves in the explicit advance at all costs)
+  — the default answer to over-stiffness is capped/limited fast-front
+  transport, and (c) gets scoped only if G3a proves that fallback distorts
+  the target physics.
