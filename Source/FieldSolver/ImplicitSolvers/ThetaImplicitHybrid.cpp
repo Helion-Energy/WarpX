@@ -142,13 +142,6 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
             m_hybrid_pic_model->m_add_external_fields,
             "implicit_evolve.external_field_iteration requires "
             "hybrid_pic_model.add_external_fields");
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            m_darwin,
-            "implicit_evolve.external_field_iteration currently requires "
-            "the Darwin unified drive (hybrid_pic_model.darwin = 1): on "
-            "the split-field path the external arrays are assembled into "
-            "the fields at the start of each residual evaluation, before "
-            "the plasma current the circuit responds to exists");
         if (m_vacuum_recovery) {
             // The recovery's frozen-probe shortcut reuses the correction
             // from the last non-Jacobian evaluation; with the coil scales
@@ -541,32 +534,49 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     }
 
     // Circuit-in-the-residual coupling: python measures the flux linkage
-    // of THIS iterate's plasma current (hybrid_current_fp_plasma, just
-    // computed), re-advances the coupled external circuit against it, and
-    // pushes updated coil scale segments (SetScale); the boundary values
-    // of A are then re-imposed at the new scales and B re-derived, so the
-    // Ohm's law below sees circuit-consistent fields. Interior A is
-    // state-only -- the scales enter through the boundary pin and the
-    // vacuum band -- so the particle stage above needs no re-run. The map
-    // is smooth in the state, so the matrix-free Jacobian probes see the
-    // coupled plasma-circuit physics and Newton converges both together
-    // (a step-lagged circuit is unstable at strong coil-plasma coupling).
+    // of THIS iterate's plasma response, re-advances the coupled external
+    // circuit against it, and pushes updated coil scale segments
+    // (SetScale); the external fields are then refreshed at the new
+    // scales, so the Ohm's law below sees circuit-consistent fields. The
+    // map is smooth in the state, so the matrix-free Jacobian probes see
+    // the coupled plasma-circuit physics and Newton converges both
+    // together (a step-lagged circuit is unstable at strong coil-plasma
+    // coupling).
     if (m_external_field_iteration) {
-        ExecutePythonCallback("externalcoiltheta");
-        DarwinApplyABoundary(theta_time);
-        if (m_vacuum_recovery_half) {
-            // Recompute the recovery against the re-imposed boundary
-            // values (live in Jacobian probes too -- Define forced the
-            // live-probe mode), then restore the exact pin. NOTE: this is
-            // the second recovery application of the evaluation, so a
-            // finite darwin_vacuum_recovery_relaxation_time would be
-            // double-applied -- circuit decks should run the default
-            // (instant) recovery.
-            m_hybrid_pic_model->ComputeVacuumARecovery(
-                a_from_jacobian, m_theta * m_dt);
+        if (m_darwin) {
+            // Unified drive: the scales enter through the boundary pin
+            // and the vacuum band (interior A is state-only, so the
+            // particle stage above needs no re-run). Re-impose the pin at
+            // the updated scales and re-derive B.
+            ExecutePythonCallback("externalcoiltheta");
             DarwinApplyABoundary(theta_time);
+            if (m_vacuum_recovery_half) {
+                // Recompute the recovery against the re-imposed boundary
+                // values (live in Jacobian probes too -- Define forced the
+                // live-probe mode), then restore the exact pin. NOTE: this
+                // is the second recovery application of the evaluation, so
+                // a finite darwin_vacuum_recovery_relaxation_time would be
+                // double-applied -- circuit decks should run the default
+                // (instant) recovery.
+                m_hybrid_pic_model->ComputeVacuumARecovery(
+                    a_from_jacobian, m_theta * m_dt);
+                DarwinApplyABoundary(theta_time);
+            }
+            DarwinDeriveB();
+        } else {
+            // Split-field path: enter the plasma-response frame by
+            // subtracting the stored externals the assembly added at
+            // evaluation start (python probes then measure the
+            // response-only flux linkage -- the same frame the
+            // theta-implicit MHD coupler contract was written against),
+            // then refresh the externals at the updated scales and
+            // restore the totals for the Ohm solve below.
+            AddSplitExternalFields(-1.0_rt);
+            ExecutePythonCallback("externalcoiltheta");
+            m_hybrid_pic_model->m_external_vector_potential
+                ->UpdateHybridExternalFields(theta_time, m_dt);
+            AddSplitExternalFields(1.0_rt);
         }
-        DarwinDeriveB();
     }
 
     // Electron inertia: assemble the nodal inertial field from the
@@ -1095,6 +1105,13 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
     // volumetrically through the A rebuild (doubling the programmed flux).
     if (m_hybrid_pic_model->m_add_external_fields && !m_darwin) {
         using ablastr::fields::Direction;
+        if (m_external_field_iteration) {
+            // Final circuit pass against the accepted end-of-step plasma
+            // response (Bfield_fp still holds the response-only field
+            // here), leaving the circuit state -- and the coil segments
+            // the refresh below reads -- at t^{n+1}.
+            ExecutePythonCallback("externalcoilfinish");
+        }
         m_hybrid_pic_model->m_external_vector_potential->UpdateHybridExternalFields(
             end_time, m_dt);
         for (int lev = 0; lev < m_num_amr_levels; ++lev) {
@@ -1106,6 +1123,27 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
                 amrex::MultiFab const & E_ext = *m_WarpX->m_fields.get(FieldType::hybrid_E_fp_external, Direction{dir}, lev);
                 amrex::MultiFab::Add(E, E_ext, 0, 0, E.nComp(), E.nGrowVect());
             }
+        }
+    }
+}
+
+void ThetaImplicitHybrid::AddSplitExternalFields ( amrex::Real a_sign )
+{
+    using ablastr::fields::Direction;
+    for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+        for (int dir = 0; dir < 3; ++dir) {
+            amrex::MultiFab & B = *m_WarpX->m_fields.get(
+                FieldType::Bfield_fp, Direction{dir}, lev);
+            amrex::MultiFab const & B_ext = *m_WarpX->m_fields.get(
+                FieldType::hybrid_B_fp_external, Direction{dir}, lev);
+            amrex::MultiFab::Saxpy(B, a_sign, B_ext, 0, 0,
+                                   B.nComp(), B.nGrowVect());
+            amrex::MultiFab & E = *m_WarpX->m_fields.get(
+                FieldType::Efield_fp, Direction{dir}, lev);
+            amrex::MultiFab const & E_ext = *m_WarpX->m_fields.get(
+                FieldType::hybrid_E_fp_external, Direction{dir}, lev);
+            amrex::MultiFab::Saxpy(E, a_sign, E_ext, 0, 0,
+                                   E.nComp(), E.nGrowVect());
         }
     }
 }

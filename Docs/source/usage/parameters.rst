@@ -3866,25 +3866,32 @@ Maxwell solver: kinetic-fluid hybrid
     :default: ``false``
     :optional:
 
-    If ``algo.evolve_scheme = theta_implicit_hybrid`` with external vector-potential fields and the Darwin
-    unified drive (:pp:param:`hybrid_pic_model.darwin`), iterate the external drive inside the nonlinear
-    residual (circuit-in-the-residual coupling): every residual evaluation executes the ``externalcoiltheta``
-    python callback after the plasma current of the current iterate has been computed
-    (``hybrid_current_fp_plasma``), then re-imposes the external-drive boundary values of the vector
-    potential at the updated coil scales (re-running the vacuum recovery when active) and re-derives B.
-    From the callback, python measures the flux linkage of the iterate's plasma current, re-advances a
-    coupled external circuit against it, and pushes updated coil scale segments through
-    ``set_external_vector_potential_scale`` (the coils must be declared with
+    If ``algo.evolve_scheme = theta_implicit_hybrid`` with external vector-potential fields, iterate the
+    external drive inside the nonlinear residual (circuit-in-the-residual coupling): every residual
+    evaluation executes the ``externalcoiltheta`` python callback after the plasma current of the current
+    iterate has been computed (``hybrid_current_fp_plasma``), then refreshes the external fields at the
+    updated coil scales. From the callback, python measures the flux linkage of the iterate's plasma
+    response, re-advances a coupled external circuit against it, and pushes updated coil scale segments
+    through ``set_external_vector_potential_scale`` (the coils must be declared with
     :pp:param:`external_vector_potential.<field_name>.python_scale`). At the end of the step the
-    ``externalcoilfinish`` callback runs once before the end-of-step boundary values are imposed, so the
+    ``externalcoilfinish`` callback runs once before the end-of-step external state is finalized, so the
     circuit state and the final coil segments are left at :math:`t^{n+1}`. Because the callback runs in
     every evaluation, the coupled plasma-circuit map stays smooth in the state and matrix-free Jacobian
     probes see the coupled physics — Newton converges plasma and circuit together (a step-lagged circuit
-    is unstable at strong coil-plasma coupling). When the vacuum recovery is active, its live-probe mode is
-    forced on; run with a tight :pp:param:`hybrid_pic_model.darwin_vacuum_recovery_relative_tolerance`.
-    The recovery is re-applied after the callback in every evaluation, so a finite
+    is unstable at strong coil-plasma coupling).
+
+    On the Darwin unified drive (:pp:param:`hybrid_pic_model.darwin`) the updated scales re-enter through
+    the boundary values of the evolved vector potential (re-running the vacuum recovery when active) and B
+    is re-derived. The recovery's live-probe mode is then forced on; run with a tight
+    :pp:param:`hybrid_pic_model.darwin_vacuum_recovery_relative_tolerance`, and note the recovery is
+    re-applied after the callback in every evaluation, so a finite
     :pp:param:`hybrid_pic_model.darwin_vacuum_recovery_relaxation_time` is currently applied twice per
-    evaluation under this mode — run circuit-coupled decks with the default (instant) recovery.
+    evaluation — run circuit-coupled decks with the default (instant) recovery.
+
+    On the split-field path (standard theta-implicit hybrid) the callback runs in the plasma-response
+    frame: the stored external fields are subtracted from the totals first (so flux-linkage probes reading
+    B measure the response only), the externals are refreshed at the updated scales, and the totals are
+    restored for the Ohm solve of the same evaluation.
 
 .. pp:param:: hybrid_pic_model.qdsmc_n_floor
     :type: ``float``

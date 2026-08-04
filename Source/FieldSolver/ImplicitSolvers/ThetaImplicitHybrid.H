@@ -170,7 +170,10 @@ private:
      *  state, so matrix-free Jacobian probes see the coupled
      *  plasma-circuit physics and Newton converges both together (a
      *  step-lagged circuit is unstable at strong coil-plasma coupling).
-     *  Requires the Darwin unified drive. */
+     *  On the Darwin unified drive the scales re-enter through the
+     *  boundary pin (+ vacuum recovery); on the split-field path the
+     *  callback runs in the plasma-response frame (stored externals
+     *  subtracted, refreshed at the new scales, then restored). */
     bool m_external_field_iteration = false;
 
     /** Cached in Define: subtract the resistive Ohm-field part from the
@@ -226,6 +229,13 @@ private:
      * coupling to re-derive B after the boundary values of A were
      * re-imposed at updated coil scales. */
     void DarwinDeriveB ();
+
+    /** Split-field path: add a_sign times the stored external B/E arrays
+     * to the total fields. The circuit-in-the-residual coupling uses the
+     * (-1, refresh, +1) sequence to expose the plasma-response frame to
+     * the python flux-linkage probes and re-assemble circuit-consistent
+     * totals within the evaluation. */
+    void AddSplitExternalFields ( amrex::Real a_sign );
 
     /** f_i(t_init) for each external A field: the Darwin gauge zeroes A at
      * initialization, so boundary values impose the CHANGE of the external
