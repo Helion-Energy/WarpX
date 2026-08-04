@@ -11,6 +11,7 @@
 #include "NonlinearSolver.H"
 #include "JacobianFunctionMF.H"
 #include "Preconditioner.H"
+#include "Utils/Parser/ParserUtils.H"
 #include "Utils/TextMsg.H"
 
 #include <ablastr/warn_manager/WarnManager.H>
@@ -18,6 +19,8 @@
 #include <AMReX_ParmParse.H>
 #include <AMReX_Config.H>
 
+#include <algorithm>
+#include <cmath>
 #include <vector>
 #include <istream>
 #include <filesystem>
@@ -93,6 +96,11 @@ public:
         amrex::Print()     << "Linear solver (" << linsol_name << ") max iterations:     " << m_linsol_maxits << "\n";
         amrex::Print()     << "Linear solver (" << linsol_name << ") relative tolerance: " << m_linsol_rtol << "\n";
         amrex::Print()     << "Linear solver (" << linsol_name << ") absolute tolerance: " << m_linsol_atol << "\n";
+        amrex::Print()     << "Adaptive forcing:           " << (m_adaptive_forcing ? "true" : "false") << "\n";
+        if (m_adaptive_forcing) {
+            amrex::Print() << "Forcing alpha/gamma/max:    " << m_forcing_alpha
+                           << " " << m_forcing_gamma << " " << m_forcing_max << "\n";
+        }
         amrex::Print()     << "Preconditioner type:      " << amrex::getEnumNameString(m_pc_type) << "\n";
 
         m_linear_function->printParams();
@@ -134,6 +142,25 @@ private:
      * \brief Total nonlinear iterations for the diagnostic file
      */
     mutable int m_total_iters = 0;
+
+    /**
+     * \brief Inexact-Newton adaptive forcing (Eisenstat--Walker-style, the
+     * prescription of Chacon & Knoll, JCP 188 (2003) 577): the linear
+     * solve tolerance of iteration k is
+     *
+     *   zeta_A = gamma (||F_k|| / ||F_{k-1}||)^alpha,
+     *   zeta_B = min[zeta_max, max(zeta_A, gamma zeta_{k-1}^alpha)],
+     *   zeta_k = min[zeta_max, max(zeta_B, gamma eps_t / ||F_k||)],
+     *
+     * with eps_t the Newton convergence target. The first term gives
+     * superlinear convergence, the second avoids volatile decreases, and
+     * the third avoids oversolving the last iteration. When disabled
+     * (default) the fixed m_linsol_rtol is used every iteration.
+     */
+    bool m_adaptive_forcing = false;
+    amrex::Real m_forcing_alpha = 1.5;
+    amrex::Real m_forcing_gamma = 0.9;
+    amrex::Real m_forcing_max = 0.5;
 
     /**
      * \brief Relative tolerance for linear solver.
@@ -290,6 +317,16 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
     pp_newton.query("require_convergence", m_require_convergence);
     pp_newton.query("diagnostic_file",     this->m_diagnostic_file);
     pp_newton.query("diagnostic_interval", this->m_diagnostic_interval);
+    pp_newton.query("adaptive_forcing",    m_adaptive_forcing);
+    utils::parser::queryWithParser(pp_newton, "forcing_alpha", m_forcing_alpha);
+    utils::parser::queryWithParser(pp_newton, "forcing_gamma", m_forcing_gamma);
+    utils::parser::queryWithParser(pp_newton, "forcing_max",   m_forcing_max);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_forcing_alpha > 1.0 && m_forcing_gamma > 0.0 &&
+            m_forcing_gamma <= 1.0 && m_forcing_max > 0.0 &&
+            m_forcing_max < 1.0,
+        "newton.forcing_alpha must exceed 1, newton.forcing_gamma must be "
+        "in (0, 1], and newton.forcing_max must be in (0, 1)");
 
     const amrex::ParmParse pp_l(amrex::getEnumNameString(m_linear_solver_type));
     pp_l.query("verbose_int",         m_linsol_verbose_int);
@@ -334,6 +371,8 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
     amrex::Real norm_abs = 0.;
     amrex::Real norm0 = 1._rt;
     amrex::Real norm_rel = 0.;
+    amrex::Real norm_prev = 0.;
+    amrex::Real forcing_prev = m_forcing_max;
 
     int iter;
     int linear_solver_iters = 0;
@@ -392,9 +431,40 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         m_linear_function->setBaseRHS(m_R);
         m_linear_function->updatePreCondMat(a_U);
 
+        // Inexact-Newton adaptive forcing (see the member documentation):
+        // loose linear tolerances far from the solution, superlinearly
+        // tightening near it, floored so the last iteration is not
+        // oversolved.
+        amrex::Real linsol_rtol = m_linsol_rtol;
+        if (m_adaptive_forcing) {
+            amrex::Real zeta = m_forcing_max;
+            if (iter > 0 && norm_prev > 0._rt) {
+                const amrex::Real zeta_a =
+                    m_forcing_gamma *
+                    std::pow(norm_abs / norm_prev, m_forcing_alpha);
+                const amrex::Real safeguard =
+                    m_forcing_gamma * std::pow(forcing_prev, m_forcing_alpha);
+                zeta = std::min(m_forcing_max, std::max(zeta_a, safeguard));
+            }
+            const amrex::Real convergence_target =
+                std::max(m_atol, m_rtol * norm0);
+            if (norm_abs > 0._rt) {
+                zeta = std::min(
+                    m_forcing_max,
+                    std::max(zeta, m_forcing_gamma * convergence_target /
+                                       norm_abs));
+            }
+            forcing_prev = zeta;
+            norm_prev = norm_abs;
+            linsol_rtol = zeta;
+            if (this->m_verbose) {
+                amrex::Print() << "Newton: forcing term = " << zeta << "\n";
+            }
+        }
+
         // Solve linear system for Newton step [Jac]*dU = F
         m_dU.zero();
-        m_linear_solver->solve( m_dU, m_F, m_linsol_rtol, m_linsol_atol );
+        m_linear_solver->solve( m_dU, m_F, linsol_rtol, m_linsol_atol );
         linear_solver_iters += m_linear_solver->getNumIters();
 
         // Update solution
