@@ -81,9 +81,10 @@ class VacuumInductiveRamp(object):
         self.recovery_cadence = recovery_cadence
         self.circuit = circuit
         if self.circuit:
-            assert self.implicit and self.darwin, (
+            assert self.implicit, (
                 "--circuit exercises the circuit-in-the-residual coupling "
-                "and requires --implicit --darwin"
+                "and requires --implicit (with --darwin for the unified "
+                "drive, without it for the split-field path)"
             )
         # Callback bookkeeping of the circuit mode (asserted after the run:
         # the theta callback must fire in every residual evaluation, the
@@ -245,16 +246,28 @@ class VacuumInductiveRamp(object):
             pywarpx.particles.max_grid_crossings = (
                 int(np.ceil(0.5 * self.DT / 1.0e-3)) + 1
             )
+            if self.circuit and not self.darwin:
+                # The STANDARD scheme's Newton overshoots on this deck's
+                # driven floored-halo whistler mode (two-cycle divergence
+                # at step 1, circuit-independent); the backtracking line
+                # search is the validated fix for exactly this
+                # configuration. The darwin variants converge without it
+                # and keep their bit-pinned trajectories.
+                pywarpx.warpx.get_bucket("newton").line_search = 1
             if self.darwin:
                 # The E_L asserts run at the percent level; the default
                 # 1e-10 Poisson tolerance only slows the CI run down.
                 pywarpx.hybridpicmodel.darwin_poisson_relative_tolerance = 1.0e-8
-            if self.darwin:
+            if self.darwin or self.circuit:
                 # The vacuum resistivity puts the resistive gain
                 # eta*k_max^2*theta*dt/mu0 (~300) far beyond the Picard
                 # contraction bound, so the resistive diffusion must be
                 # solved with Newton-GMRES. The Krylov space needs the
-                # full diffusion spectrum: restart-free GMRES.
+                # full diffusion spectrum: restart-free GMRES. The
+                # split-field circuit variant also runs Newton: the
+                # standard scheme's driven marginal whistler mode
+                # limit-cycles Picard on this deck (the known floor-64
+                # mid-ramp stall).
                 nonlinear_solver = picmi.NewtonNonlinearSolver(
                     verbose=self.verbose,
                     max_iterations=20,

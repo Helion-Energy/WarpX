@@ -51,3 +51,28 @@ add_warpx_test(
     OFF  # dependency
 )
 label_warpx_test(test_rz_ohm_solver_vacuum_ramp_darwin_circuit_picmi slow)
+
+# Split-field-path variant of the circuit coupling (standard theta-implicit
+# hybrid, no darwin): the callback runs in the plasma-response frame
+# (stored externals subtracted, refreshed at the pushed scales, totals
+# restored within the evaluation). Same drive and asserts as the darwin
+# variant.
+#
+# REGISTRATION DISABLED: the STANDARD scheme mis-tracks the programmed
+# flux under Newton on this deck (B overshoots ~293x over the ramp;
+# reproduces IDENTICALLY without the circuit coupling, so the coupling
+# machinery is not the cause). Picard cannot cover it either (the known
+# driven marginal-mode limit cycle). Deck support (--circuit without
+# --darwin) is kept; re-register once the split+Newton drive defect is
+# fixed.
+#
+# add_warpx_test(
+#     test_rz_ohm_solver_vacuum_ramp_circuit_split_picmi  # name
+#     RZ  # dims
+#     2  # nprocs
+#     "inputs_test_rz_ohm_solver_vacuum_ramp_picmi.py --test --implicit --circuit"  # inputs
+#     "analysis_vacuum_ramp.py"  # analysis
+#     OFF  # checksum
+#     OFF  # dependency
+# )
+# label_warpx_test(test_rz_ohm_solver_vacuum_ramp_circuit_split_picmi slow)

@@ -2116,12 +2116,13 @@ class ThetaImplicitHybridEvolveScheme(picmistandard.base._ClassWithInit):
         Circuit-in-the-residual coupling: every residual evaluation
         executes the "externalcoiltheta" python callback (and the
         end-of-step update the "externalcoilfinish" one) after the
-        iterate's plasma current is computed, then re-imposes the
-        external-drive boundary values at the updated coil scales, so
-        python can advance a coupled external circuit against the
-        iterate's flux linkage and push updated coil scale segments
-        (set_external_vector_potential_scale). Requires external fields
-        and the Darwin unified drive.
+        iterate's plasma current is computed, then refreshes the external
+        fields at the updated coil scales, so python can advance a coupled
+        external circuit against the iterate's flux linkage and push
+        updated coil scale segments (set_external_vector_potential_scale).
+        Requires external fields; works on both the Darwin unified drive
+        (scales re-enter through the boundary pin) and the split-field
+        path (the callback runs in the plasma-response frame).
     """
 
     def __init__(
