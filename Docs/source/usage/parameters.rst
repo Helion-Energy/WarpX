@@ -273,6 +273,11 @@ Overall simulation parameters
           - ``newton.absolute_tolerance`` (``float``, default: 0.0)
           - ``newton.diagnostic_file`` (``string``, default: None)
           - ``newton.diagnostic_interval`` (``int``, default: 1)
+          - ``newton.adaptive_forcing`` (``bool``, default: false).
+            When ``true``, the linear-solve relative tolerance of each Newton iteration is set adaptively by the inexact-Newton forcing prescription of Chacón & Knoll, JCP 188 (2003) 577: :math:`\zeta_A = \gamma\,(\|F_k\|/\|F_{k-1}\|)^\alpha`, safeguarded from volatile decreases by :math:`\gamma \zeta_{k-1}^\alpha`, capped at ``newton.forcing_max``, and floored at :math:`\gamma\,\epsilon_t/\|F_k\|` so the final iteration is not oversolved. Loose tolerances far from the solution cut linear iterations while preserving superlinear Newton convergence.
+          - ``newton.forcing_alpha`` (``float``, default: 1.5)
+          - ``newton.forcing_gamma`` (``float``, default: 0.9)
+          - ``newton.forcing_max`` (``float``, default: 0.5)
 
           - The PS-JFNK solver uses GMRES to solve the linear system at each nonlinear iteration:
 
@@ -4087,9 +4092,27 @@ Jacobian probes.
     electron-energy fluxes (and the expansion pdV sink) as a donor cell
     approaches its positivity floor. ``hllc`` requires
     ``hybrid_pic_model.include_hall_term = false`` because the electron
-    energy is advected with the ion contact wave. None of these
+    energy is advected with the ion contact wave. None of these three
     constitute a full MHD Riemann solver because magnetic induction
     remains in the staggered Ohm/Faraday update.
+
+    ``hlld`` selects the conservative-form recast (1D Cartesian only for
+    now): :math:`B^{n+\theta}` replaces :math:`E` as the JFNK field
+    unknown, and one smoothed HLLD (Miyoshi--Kusano) Riemann solution per
+    cell face supplies the fluid fluxes, the Maxwell-stress momentum
+    coupling (replacing the pointwise :math:`J \times B` force), the
+    ion-energy magnetic work (from the same discrete stress-flux
+    difference as the momentum equation), and the ideal EMF, whose
+    theta-implicit Yee curl advances :math:`B` with :math:`\nabla \cdot
+    B = 0` preserved to round-off. :math:`E` becomes a derived Ohm's-law
+    quantity, :math:`E = -u \times B + \eta J`, assembled by the solver.
+    ``hlld`` requires ``include_hall_term = false``,
+    ``include_electron_pressure_term = false``, no hyper-resistivity, and
+    ``jacobian.pc_type = none``. The wave fan is assembled
+    :math:`C^\infty`-smooth for matrix-free Jacobian probes (smoothed
+    signal bounds, telescoped region form without if-chains, blended
+    :math:`B_n \to 0` rotational layer); the widths are the
+    ``implicit_mhd.hlld_kappa_*`` parameters below.
 
 .. pp:param:: implicit_mhd.r_open_fluid
     :type: ``string``
@@ -4137,6 +4160,58 @@ Jacobian probes.
     the switch kink that matrix-free Jacobian probes otherwise straddle
     at near-stagnant balanced interfaces (e.g. an FRC separatrix), which
     can defeat the Newton line search. Requires ``fluid_flux = hllc``.
+
+.. pp:param:: implicit_mhd.hlld_fan_closure
+    :type: ``string``
+    :default: ``consistent``
+
+    Ion pressure seen by the HLLD wave-fan structure — the contact-speed
+    estimate :math:`S_M` and the star states built from it.
+    ``consistent`` uses the recovered :math:`p_i(E_i)`. ``barotropic``
+    evaluates the fan ion pressure from the polytropic law (the electron
+    and magnetic contributions stay consistent); the physical fluxes,
+    and hence the jump conditions, keep the consistent pressure, so only
+    the dissipation structure is re-centered. This is the robustness
+    configuration for violent rotational/compound structures
+    (:math:`B_t` through zero at finite :math:`B_n`), where the
+    :math:`p_i(E_i)` coupling into the star algebra otherwise defeats
+    the Newton line search (the Brio--Wu CI test is the reproducer);
+    combine with a widened ``hlld_kappa_bn`` (:math:`\approx 0.2`).
+    Requires ``fluid_flux = hlld``, ``ion_closure = total_energy``, and
+    a positive ``reference_ion_pressure``.
+
+.. pp:param:: implicit_mhd.hlld_kappa_signal
+    :type: ``float``
+    :default: ``0.05``
+
+    :math:`C^\infty` smoothing widths of the HLLD wave fan, in units of
+    the local fast-speed scale; ``0`` recovers the corresponding hard
+    form. ``hlld_kappa_signal`` smooths the Davis signal bounds and the
+    ion-energy dissipation coefficient; ``hlld_kappa_contact`` sets the
+    region-blend width of the telescoped fan; ``hlld_kappa_bn`` sets the
+    :math:`B_n \to 0` degeneracy scale of the rotational (Alfvén) layer
+    — widen to :math:`\approx 0.2` together with
+    ``hlld_fan_closure = barotropic`` for violent compound structures;
+    ``hlld_kappa_denominator`` guards the star-state denominators at the
+    switch-on/switch-off degeneracy.
+
+.. pp:param:: implicit_mhd.hlld_kappa_contact
+    :type: ``float``
+    :default: ``0.05``
+
+    See ``hlld_kappa_signal``.
+
+.. pp:param:: implicit_mhd.hlld_kappa_bn
+    :type: ``float``
+    :default: ``0.05``
+
+    See ``hlld_kappa_signal``.
+
+.. pp:param:: implicit_mhd.hlld_kappa_denominator
+    :type: ``float``
+    :default: ``0.05``
+
+    See ``hlld_kappa_signal``.
 
 .. pp:param:: implicit_mhd.positivity_safety
     :type: ``float``

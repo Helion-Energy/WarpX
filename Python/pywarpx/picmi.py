@@ -2156,10 +2156,15 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Advance ion density and momentum. Set False with Hall physics enabled
         and zero ion velocity for an electron-MHD limit.
 
-    fluid_flux: {"centered", "rusanov", "hllc"}, optional
+    fluid_flux: {"centered", "rusanov", "hllc", "hlld"}, optional
         Cell-face fluid flux. Centered is low-dissipation for smooth flows;
         Rusanov adds local Lax--Friedrichs regularization; HLLC is a
-        contact-preserving approximate Riemann flux.
+        contact-preserving approximate Riemann flux. HLLD selects the
+        conservative-form recast (1D only for now): B replaces E as the
+        JFNK field unknown and one smoothed HLLD Riemann solution per face
+        supplies the fluid fluxes, the Maxwell stress, and the ideal EMF;
+        requires no Hall term, no electron-pressure Ohm term, no
+        hyper-resistivity, and no preconditioner.
 
     r_open_fluid: {"outflow", "reflect"}, optional
         Fluid ghost treatment at an open (Green's-function) upper radial
@@ -2182,6 +2187,20 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         contact speeds |s_star| ~ kappa (|s_left| + |s_right|) / 2, keeping
         the residual smooth for matrix-free Jacobian probes. Requires
         fluid_flux="hllc".
+
+    hlld_fan_closure: {"consistent", "barotropic"}, optional
+        Ion pressure seen by the HLLD wave-fan structure (contact-speed
+        estimate and star states). "barotropic" decouples the fan from the
+        ion-energy unknown (physical fluxes stay consistent) — the
+        robustness configuration for violent rotational/compound
+        structures, combined with hlld_kappa_bn ~ 0.2. Requires
+        fluid_flux="hlld", ion_closure="total_energy", and a positive
+        reference_ion_pressure.
+
+    hlld_kappa_signal, hlld_kappa_contact, hlld_kappa_bn, hlld_kappa_denominator: float, optional
+        C-infinity smoothing widths of the HLLD wave fan (defaults 0.05):
+        Davis signal bounds, region blend, B_n -> 0 rotational-layer
+        degeneracy scale, and star-denominator guard respectively.
 
     ion_closure: {"barotropic", "total_energy"}, optional
         Ion thermodynamic closure. The default barotropic closure evaluates
@@ -2228,6 +2247,11 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         r_open_fluid=None,
         hllc_signal_closure=None,
         hllc_contact_blend=None,
+        hlld_fan_closure=None,
+        hlld_kappa_signal=None,
+        hlld_kappa_contact=None,
+        hlld_kappa_bn=None,
+        hlld_kappa_denominator=None,
         ion_closure=None,
         ion_pressure=None,
         ion_pressure_floor=None,
@@ -2258,6 +2282,11 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.r_open_fluid = r_open_fluid
         self.hllc_signal_closure = hllc_signal_closure
         self.hllc_contact_blend = hllc_contact_blend
+        self.hlld_fan_closure = hlld_fan_closure
+        self.hlld_kappa_signal = hlld_kappa_signal
+        self.hlld_kappa_contact = hlld_kappa_contact
+        self.hlld_kappa_bn = hlld_kappa_bn
+        self.hlld_kappa_denominator = hlld_kappa_denominator
         self.ion_closure = ion_closure
         self.ion_pressure = ion_pressure
         self.ion_pressure_floor = ion_pressure_floor
@@ -2294,6 +2323,11 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.r_open_fluid = self.r_open_fluid
         implicit_mhd.hllc_signal_closure = self.hllc_signal_closure
         implicit_mhd.hllc_contact_blend = self.hllc_contact_blend
+        implicit_mhd.hlld_fan_closure = self.hlld_fan_closure
+        implicit_mhd.hlld_kappa_signal = self.hlld_kappa_signal
+        implicit_mhd.hlld_kappa_contact = self.hlld_kappa_contact
+        implicit_mhd.hlld_kappa_bn = self.hlld_kappa_bn
+        implicit_mhd.hlld_kappa_denominator = self.hlld_kappa_denominator
         implicit_mhd.ion_closure = self.ion_closure
         implicit_mhd.__setattr__("ion_pressure(x,y,z)", self.ion_pressure)
         implicit_mhd.ion_pressure_floor = self.ion_pressure_floor
