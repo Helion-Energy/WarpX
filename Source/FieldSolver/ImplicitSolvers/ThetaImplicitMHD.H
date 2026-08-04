@@ -114,7 +114,10 @@ class ThetaImplicitMHD final : public ImplicitSolver
     void ComputeFluidRHS (WarpXSolverVec& rhs, amrex::Real time) const;
     void ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs, amrex::Real time) const;
     void ComputeFaceFluxes ();
+    void ComputeDirectionalFaceFluxes (amrex::MultiFab& face_flux_mf,
+                                       int normal_direction);
     void AssembleOhmElectricField (amrex::Real time) const;
+    void ApplyMagneticCCDomainGhosts (amrex::MultiFab& mf) const;
 
     [[nodiscard]] amrex::Real GetThetaForPC () const override { return 0.0; }
 
@@ -151,7 +154,10 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // Per-face-direction Riemann flux registers for the conservative-form
     // hlld path: one HLLD solution per face feeds the fluid divergences,
     // the Maxwell stress, the ion-energy magnetic work, and the ideal EMF.
-    // Channel layout is FaceFluxComponent below.
+    // Channel layout is FaceFluxComponent below. 1D has z-faces only; RZ
+    // has r-faces (normal = physical direction 0) and z-faces (normal =
+    // physical direction 2).
+    inline static constexpr char FaceFluxRName[] = "implicit_mhd_face_flux_r";
     inline static constexpr char FaceFluxZName[] = "implicit_mhd_face_flux_z";
 
     // Component indices of the face-flux MultiFabs (hlld path).
@@ -169,6 +175,8 @@ class ThetaImplicitMHD final : public ImplicitSolver
             electron_velocity,
             induction_t1, // flux of B_t1 through the face = -EMF_t2
             induction_t2, // flux of B_t2 through the face = +EMF_t1
+            signal_left,  // smoothed Davis bounds, for the corner UCT EMF
+            signal_right,
             count
         };
     };
