@@ -2109,6 +2109,17 @@ class ThetaImplicitHybridEvolveScheme(picmistandard.base._ClassWithInit):
 
     qdsmc_outer_verbose: bool, optional
         Print the outer-iteration pressure-change history
+
+    external_field_iteration: bool, optional
+        Circuit-in-the-residual coupling: every residual evaluation
+        executes the "externalcoiltheta" python callback (and the
+        end-of-step update the "externalcoilfinish" one) after the
+        iterate's plasma current is computed, then re-imposes the
+        external-drive boundary values at the updated coil scales, so
+        python can advance a coupled external circuit against the
+        iterate's flux linkage and push updated coil scale segments
+        (set_external_vector_potential_scale). Requires external fields
+        and the Darwin unified drive.
     """
 
     def __init__(
@@ -2120,6 +2131,7 @@ class ThetaImplicitHybridEvolveScheme(picmistandard.base._ClassWithInit):
         qdsmc_outer_relative_tolerance=None,
         qdsmc_outer_require_convergence=None,
         qdsmc_outer_verbose=None,
+        external_field_iteration=None,
     ):
         self.nonlinear_solver = nonlinear_solver
         self.theta = theta
@@ -2128,6 +2140,7 @@ class ThetaImplicitHybridEvolveScheme(picmistandard.base._ClassWithInit):
         self.qdsmc_outer_relative_tolerance = qdsmc_outer_relative_tolerance
         self.qdsmc_outer_require_convergence = qdsmc_outer_require_convergence
         self.qdsmc_outer_verbose = qdsmc_outer_verbose
+        self.external_field_iteration = external_field_iteration
 
         assert isinstance(nonlinear_solver, NonlinearSolverBase)
 
@@ -2143,6 +2156,7 @@ class ThetaImplicitHybridEvolveScheme(picmistandard.base._ClassWithInit):
             "qdsmc_outer_relative_tolerance",
             "qdsmc_outer_require_convergence",
             "qdsmc_outer_verbose",
+            "external_field_iteration",
         ]:
             value = getattr(self, knob)
             if value is not None:
@@ -2744,12 +2758,26 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
                             field_dict["Az_external_function"], self.mangle_dict
                         ),
                     )
-                pywarpx.external_vector_potential.__setattr__(
-                    f"{field_name}.A_time_external_function(t)",
-                    pywarpx.my_constants.mangle_expression(
-                        field_dict["A_time_external_function"], self.mangle_dict
-                    ),
-                )
+                if field_dict.get("python_scale", False):
+                    # Piecewise-linear scale segments pushed from python
+                    # (warpx.set_external_vector_potential_scale) instead of
+                    # a compiled time function.
+                    pywarpx.external_vector_potential.__setattr__(
+                        f"{field_name}.python_scale", 1
+                    )
+                    if "initial_scale" in field_dict:
+                        pywarpx.external_vector_potential.__setattr__(
+                            f"{field_name}.initial_scale",
+                            field_dict["initial_scale"],
+                        )
+                else:
+                    pywarpx.external_vector_potential.__setattr__(
+                        f"{field_name}.A_time_external_function(t)",
+                        pywarpx.my_constants.mangle_expression(
+                            field_dict["A_time_external_function"],
+                            self.mangle_dict,
+                        ),
+                    )
 
 
 class ElectrostaticSolver(picmistandard.PICMI_ElectrostaticSolver):

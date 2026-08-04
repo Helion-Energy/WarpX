@@ -783,6 +783,15 @@ public:
     amrex::Real m_darwin_vacrec_atol = 0.0;
     int m_darwin_vacrec_max_iters = 200;
     int m_darwin_vacrec_verbosity = 0;
+    /** Recompute the recovery (and evaluate the band field from the live
+     *  recovered A) inside matrix-free Jacobian probe evaluations, instead
+     *  of reusing the frozen correction and stored target. Initialized
+     *  from the WARPX_VACREC_LIVE_PROBES environment variable; forced on
+     *  by solvers that iterate the external drive inside the residual
+     *  (with per-evaluation scale changes a frozen recovery makes the
+     *  probed map inconsistent with the iterate map). Run with a tight
+     *  darwin_vacuum_recovery_relative_tolerance (<= 1e-10). */
+    bool m_vacuum_recovery_live_probes = false;
 
     /** Apply the vacuum vector-potential recovery to "hybrid_A_fp" in place
      *  (see m_darwin_vacuum_recovery). Uses Bfield_fp as curl scratch: the

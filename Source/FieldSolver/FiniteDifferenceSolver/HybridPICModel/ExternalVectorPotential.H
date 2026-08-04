@@ -63,14 +63,61 @@ protected:
     // Clean div A
     bool m_do_clean_divA = true;
 
+    /** Piecewise-linear scale segment for python-driven coils: the coil
+     * scale is s_old at t_old and s_new at t_new, interpolated linearly in
+     * between. The E-field scale is the exact constant slope
+     * -(s_new - s_old)/(t_new - t_old), which is the discrete Faraday
+     * partner of the linear B-scale (no finite-difference approximation).
+     */
+    struct ScaleSegment {
+        amrex::Real s_old = 1.0;
+        amrex::Real s_new = 1.0;
+        amrex::Real t_old = 0.0;
+        amrex::Real t_new = 0.0;
+    };
+
+    /** Per-field flag: scale comes from SetScale instead of the compiled
+     * A_time_external_function parser. Set by <name>.python_scale. */
+    std::vector<bool> m_use_python_scale;
+    std::vector<ScaleSegment> m_python_scale;
+
 public:
 
     /** Number of independent external vector-potential fields. */
     [[nodiscard]] int nFields () const { return m_nFields; }
     /** Registry base name of external field i (fields "<name>_Aext"). */
     [[nodiscard]] const std::string& FieldName (int i) const { return m_field_names[i]; }
-    /** Time-profile f_i(t) of external field i. */
-    [[nodiscard]] amrex::Real TimeScale (int i, amrex::Real t) const { return m_A_time_scale[i](t); }
+    /** Time-profile f_i(t) of external field i: the compiled
+     * A_time_external_function parser, or the current piecewise-linear
+     * segment for coils declared with <name>.python_scale = 1 — every
+     * scale consumer (the split-field refresh, the Darwin boundary pin,
+     * diagnostics) sees the same scale family. */
+    [[nodiscard]] amrex::Real TimeScale (int i, amrex::Real t) const
+    {
+        if (m_use_python_scale[i]) {
+            const ScaleSegment& segment = m_python_scale[i];
+            const amrex::Real slope =
+                (segment.t_new > segment.t_old)
+                    ? (segment.s_new - segment.s_old) /
+                          (segment.t_new - segment.t_old)
+                    : amrex::Real(0.0);
+            return segment.s_old + slope * (t - segment.t_old);
+        }
+        return m_A_time_scale[i](t);
+    }
+
+    /** Set the piecewise-linear scale segment of a python-driven coil for
+     * the upcoming step. Must be called before the step's field refresh
+     * (e.g. from a "beforestep" or "externalcoiltheta" callback); aborts
+     * if the coil was not declared with <name>.python_scale = 1 or the
+     * name is unknown.
+     */
+    void SetScale (const std::string& coil_name, amrex::Real s_old,
+                   amrex::Real s_new, amrex::Real t_old, amrex::Real t_new);
+
+    /** Current scale of a coil at time t (parser or python segment). */
+    [[nodiscard]] amrex::Real GetScale (const std::string& coil_name,
+                                        amrex::Real t) const;
 
     // Default Constructor
     ExternalVectorPotential ();

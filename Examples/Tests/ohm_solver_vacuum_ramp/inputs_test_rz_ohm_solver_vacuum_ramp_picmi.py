@@ -71,6 +71,7 @@ class VacuumInductiveRamp(object):
         darwin=False,
         recovery=False,
         recovery_cadence="half",
+        circuit=False,
     ):
         self.test = test
         self.verbose = verbose or self.test
@@ -78,6 +79,17 @@ class VacuumInductiveRamp(object):
         self.darwin = darwin
         self.recovery = recovery
         self.recovery_cadence = recovery_cadence
+        self.circuit = circuit
+        if self.circuit:
+            assert self.implicit and self.darwin, (
+                "--circuit exercises the circuit-in-the-residual coupling "
+                "and requires --implicit --darwin"
+            )
+        # Callback bookkeeping of the circuit mode (asserted after the run:
+        # the theta callback must fire in every residual evaluation, the
+        # finish callback exactly once per step).
+        self.n_theta_calls = 0
+        self.n_finish_calls = 0
 
         self.get_plasma_quantities()
 
@@ -114,6 +126,14 @@ class VacuumInductiveRamp(object):
 
         self.vi_th = np.sqrt(self.T_i * constants.q_e / self.M)
 
+    def f_ramp(self, t):
+        """The ramp time profile, identical to the compiled
+        A_time_external_function of the parser-driven variants."""
+        return 1.0 / (
+            1.0
+            + np.exp(5.0 * (1.0 - (t - self.t0_ramp) * np.sqrt(2.0) / self.tau_ramp))
+        )
+
     def load_fields(self):
         Br = simulation.fields.get("Bfield_fp_external", dir="r", level=0)
         Bt = simulation.fields.get("Bfield_fp_external", dir="theta", level=0)
@@ -146,17 +166,33 @@ class VacuumInductiveRamp(object):
 
         # Uniform compression field ramped with a sigmoid in time; only the
         # vector potential of the CHANGE is prescribed (the initial B0 is
-        # loaded directly).
-        A_ext = {
-            "uniform_analytical": {
-                "Ax_external_function": f"-0.5*y*{self.dB}",
-                "Ay_external_function": f"0.5*x*{self.dB}",
-                "Az_external_function": "0",
-                "A_time_external_function": (
-                    "1/(1+exp(5*(1-(t-t0_ramp)*sqrt(2)/tau_ramp)))"
-                ),
-            },
-        }
+        # loaded directly). In circuit mode the same sigmoid is sampled in
+        # python and delivered as per-step piecewise-linear scale segments
+        # (SetScale) instead of a compiled time function: segment endpoints
+        # lie exactly on f(t), so the boundary pin at every step boundary
+        # (and hence every diagnostic dump) matches the parser drive and
+        # the standard ramp asserts apply unchanged.
+        if self.circuit:
+            A_ext = {
+                "uniform_analytical": {
+                    "Ax_external_function": f"-0.5*y*{self.dB}",
+                    "Ay_external_function": f"0.5*x*{self.dB}",
+                    "Az_external_function": "0",
+                    "python_scale": True,
+                    "initial_scale": self.f_ramp(0.0),
+                },
+            }
+        else:
+            A_ext = {
+                "uniform_analytical": {
+                    "Ax_external_function": f"-0.5*y*{self.dB}",
+                    "Ay_external_function": f"0.5*x*{self.dB}",
+                    "Az_external_function": "0",
+                    "A_time_external_function": (
+                        "1/(1+exp(5*(1-(t-t0_ramp)*sqrt(2)/tau_ramp)))"
+                    ),
+                },
+            }
 
         # With the Darwin (unified) drive the external flux enters through
         # the boundary values of the evolved vector potential and must
@@ -246,6 +282,7 @@ class VacuumInductiveRamp(object):
             simulation.evolve_scheme = picmi.ThetaImplicitHybridEvolveScheme(
                 theta=0.5,
                 nonlinear_solver=nonlinear_solver,
+                external_field_iteration=(True if self.circuit else None),
             )
 
         #######################################################################
@@ -303,6 +340,51 @@ class VacuumInductiveRamp(object):
         simulation.initialize_inputs()
         simulation.initialize_warpx()
 
+        if self.circuit:
+            from pywarpx import callbacks
+
+            warpx = simulation.extension.warpx
+            coil = "uniform_analytical"
+            self._t_n = 0.0
+
+            def push_step_segment():
+                # The "circuit solve" of this test is prescribed: the same
+                # sigmoid the parser variants compile, sampled at the step
+                # endpoints. Consecutive segments share their junction
+                # values exactly, as the drive contract requires.
+                self._t_n = warpx.gett_new(0)
+                warpx.set_external_vector_potential_scale(
+                    coil,
+                    self.f_ramp(self._t_n),
+                    self.f_ramp(self._t_n + self.dt),
+                    self._t_n,
+                    self._t_n + self.dt,
+                )
+
+            def on_theta():
+                # Fires in EVERY residual evaluation: a real circuit would
+                # measure the flux linkage of the iterate's plasma current
+                # (hybrid_current_fp_plasma) here and re-advance the
+                # circuit against it; this test re-pushes the prescribed
+                # segment (idempotent) and checks the GetScale round trip
+                # of the piecewise-linear interpolant.
+                self.n_theta_calls += 1
+                push_step_segment()
+                t_mid = self._t_n + 0.5 * self.dt
+                s_mid = warpx.get_external_vector_potential_scale(coil, t_mid)
+                expected = 0.5 * (
+                    self.f_ramp(self._t_n) + self.f_ramp(self._t_n + self.dt)
+                )
+                assert abs(s_mid - expected) < 1e-12
+
+            def on_finish():
+                self.n_finish_calls += 1
+                push_step_segment()
+
+            callbacks.installcallback("beforestep", push_step_segment)
+            callbacks.installcallback("externalcoiltheta", on_theta)
+            callbacks.installcallback("externalcoilfinish", on_finish)
+
 
 ##########################
 # parse input parameters
@@ -345,6 +427,16 @@ parser.add_argument(
     choices=["half", "full"],
     default="half",
 )
+parser.add_argument(
+    "--circuit",
+    help="drive the ramp through the circuit-in-the-residual coupling "
+    "(implicit_evolve.external_field_iteration with a python_scale coil): "
+    "the sigmoid is sampled into per-step piecewise-linear scale segments "
+    "pushed from the externalcoiltheta/externalcoilfinish callbacks, so the "
+    "standard ramp asserts prove the coupled drive delivers the same flux "
+    "(requires --implicit --darwin)",
+    action="store_true",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
@@ -355,5 +447,26 @@ run = VacuumInductiveRamp(
     darwin=args.darwin,
     recovery=args.recovery,
     recovery_cadence=args.recovery_cadence,
+    circuit=args.circuit,
 )
 simulation.step()
+
+if run.circuit:
+    # The finish callback fires exactly once per step; the theta callback
+    # fires in every residual evaluation (at least the initial residual
+    # plus one Newton iteration per step, in practice many more through
+    # the matrix-free Jacobian probes).
+    assert run.n_finish_calls == run.total_steps, (
+        f"externalcoilfinish fired {run.n_finish_calls} times, "
+        f"expected {run.total_steps}"
+    )
+    assert run.n_theta_calls >= 2 * run.total_steps, (
+        f"externalcoiltheta fired {run.n_theta_calls} times, expected at "
+        f"least 2 per step"
+    )
+    if comm.rank == 0:
+        print(
+            f"circuit mode: externalcoiltheta fired {run.n_theta_calls} times "
+            f"over {run.total_steps} steps, externalcoilfinish "
+            f"{run.n_finish_calls}"
+        )

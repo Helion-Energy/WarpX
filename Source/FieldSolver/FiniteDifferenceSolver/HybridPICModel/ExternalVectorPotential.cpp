@@ -58,11 +58,28 @@ ExternalVectorPotential::ReadParameters ()
     m_external_file_path.resize(m_nFields);
     for (std::string & file_name : m_external_file_path) { file_name = ""; }
 
+    m_use_python_scale.resize(m_nFields, false);
+    m_python_scale.resize(m_nFields);
+
     for (int i = 0; i < m_nFields; ++i) {
         bool read_from_file = false;
         utils::parser::queryWithParser(pp_ext_A,
             (m_field_names[i]+".read_from_file").c_str(), read_from_file);
         m_read_A_from_file[i] = read_from_file;
+
+        bool python_scale = false;
+        utils::parser::queryWithParser(pp_ext_A,
+            (m_field_names[i]+".python_scale").c_str(), python_scale);
+        m_use_python_scale[i] = python_scale;
+        if (python_scale) {
+            // Scale held constant at initial_scale until the first
+            // SetScale call (e.g. a coil at its pre-ramp current).
+            amrex::Real initial_scale = 1.0_rt;
+            utils::parser::queryWithParser(pp_ext_A,
+                (m_field_names[i]+".initial_scale").c_str(), initial_scale);
+            m_python_scale[i].s_old = initial_scale;
+            m_python_scale[i].s_new = initial_scale;
+        }
 
         if (m_read_A_from_file[i]) {
             pp_ext_A.query(m_field_names[i]+".path", m_external_file_path[i]);
@@ -229,6 +246,43 @@ ExternalVectorPotential::InitData ()
 
 
 void
+ExternalVectorPotential::SetScale (const std::string& coil_name,
+                                   const amrex::Real s_old,
+                                   const amrex::Real s_new,
+                                   const amrex::Real t_old,
+                                   const amrex::Real t_new)
+{
+    for (int i = 0; i < m_nFields; ++i) {
+        if (m_field_names[i] == coil_name) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_use_python_scale[i],
+                "SetScale called for external field '" + coil_name +
+                    "' which was not declared with external_vector_potential." +
+                    coil_name + ".python_scale = 1");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                t_new >= t_old,
+                "SetScale segment for '" + coil_name + "' must have t_new >= t_old");
+            m_python_scale[i] = {s_old, s_new, t_old, t_new};
+            return;
+        }
+    }
+    WARPX_ABORT_WITH_MESSAGE(
+        "SetScale: unknown external field '" + coil_name + "'");
+}
+
+amrex::Real
+ExternalVectorPotential::GetScale (const std::string& coil_name,
+                                   const amrex::Real t) const
+{
+    for (int i = 0; i < m_nFields; ++i) {
+        if (m_field_names[i] == coil_name) { return TimeScale(i, t); }
+    }
+    WARPX_ABORT_WITH_MESSAGE(
+        "GetScale: unknown external field '" + coil_name + "'");
+    return 0.0_rt;
+}
+
+void
 ExternalVectorPotential::CalculateExternalCurlA ()
 {
     for (auto fname : m_field_names) {
@@ -352,13 +406,30 @@ ExternalVectorPotential::UpdateHybridExternalFields (const amrex::Real t, const 
         const std::string Aext_field = m_field_names[i] + std::string{"_Aext"};
         const std::string curlAext_field = m_field_names[i] + std::string{"_curlAext"};
 
-        // Get B-field Scaling Factor
-        const amrex::Real scale_factor_B = m_A_time_scale[i](t);
+        amrex::Real scale_factor_B;
+        amrex::Real scale_factor_E;
+        if (m_use_python_scale[i]) {
+            // Piecewise-linear python-driven scale: B follows the linear
+            // interpolant of the (s_old, s_new) segment and E carries its
+            // exact constant slope, so the discrete Faraday relation
+            // between B_ext and E_ext holds without FD approximation.
+            const ScaleSegment& segment = m_python_scale[i];
+            const amrex::Real slope =
+                (segment.t_new > segment.t_old)
+                    ? (segment.s_new - segment.s_old) /
+                          (segment.t_new - segment.t_old)
+                    : 0.0_rt;
+            scale_factor_B = segment.s_old + slope * (t - segment.t_old);
+            scale_factor_E = -slope;
+        } else {
+            // Get B-field Scaling Factor
+            scale_factor_B = m_A_time_scale[i](t);
 
-        // Get dA/dt scaling factor based on time centered FD around t
-        const amrex::Real sf_l = m_A_time_scale[i](t-0.5_rt*dt);
-        const amrex::Real sf_r = m_A_time_scale[i](t+0.5_rt*dt);
-        const amrex::Real scale_factor_E = -(sf_r - sf_l)/dt;
+            // Get dA/dt scaling factor based on time centered FD around t
+            const amrex::Real sf_l = m_A_time_scale[i](t-0.5_rt*dt);
+            const amrex::Real sf_r = m_A_time_scale[i](t+0.5_rt*dt);
+            scale_factor_E = -(sf_r - sf_l)/dt;
+        }
 
         ablastr::fields::MultiLevelVectorField A_ext =
             warpx.m_fields.get_mr_levels_alldirs(Aext_field, warpx.finestLevel());

@@ -47,6 +47,16 @@ Functions can be called at the following times:
 * ``particleinjection``: called when particle injection happens, after the position
   advance and before deposition is called, allowing a user
   defined particle distribution to be injected each time step
+* ``externalcoiltheta``: inside every residual evaluation of the theta-implicit
+  hybrid solver when ``implicit_evolve.external_field_iteration`` is on, after
+  the plasma current of the current iterate has been computed and before the
+  external fields are refreshed — re-advance a coupled external circuit
+  against the iterate's flux linkage and push updated coil scale segments
+  (``set_external_vector_potential_scale``)
+* ``externalcoilfinish``: once per step at the end-of-step field update under
+  ``implicit_evolve.external_field_iteration``, before the final boundary
+  values are imposed at :math:`t^{n+1}` — leave the circuit state converged
+  at the end of the step
 
 Example that calls the Python function ``myplots`` after each step:
 
@@ -303,6 +313,8 @@ callback_instances = {
     "onbreaksignal": {},
     "particleinjection": {},
     "appliedfields": {},
+    "externalcoiltheta": {},
+    "externalcoilfinish": {},
 }
 
 # --- Now create the actual instances.

@@ -33,3 +33,21 @@ add_warpx_test(
     OFF  # dependency
 )
 label_warpx_test(test_rz_ohm_solver_vacuum_ramp_darwin_recovery_picmi slow)
+
+# Same recovery ramp driven through the circuit-in-the-residual coupling
+# (implicit_evolve.external_field_iteration with a python_scale coil): the
+# sigmoid is sampled into per-step piecewise-linear scale segments pushed
+# from the externalcoiltheta callback inside every residual evaluation, so
+# the standard ramp asserts prove the coupled drive delivers the programmed
+# flux, and the deck asserts the callback cadence (every evaluation for the
+# theta callback, once per step for the finish one).
+add_warpx_test(
+    test_rz_ohm_solver_vacuum_ramp_darwin_circuit_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_ohm_solver_vacuum_ramp_picmi.py --test --implicit --darwin --recovery --circuit"  # inputs
+    "analysis_vacuum_ramp.py"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+label_warpx_test(test_rz_ohm_solver_vacuum_ramp_darwin_circuit_picmi slow)

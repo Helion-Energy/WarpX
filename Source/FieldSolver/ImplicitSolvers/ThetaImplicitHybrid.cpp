@@ -9,6 +9,7 @@
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "Particles/MultiParticleContainer.H"
+#include "Python/callbacks.H"
 #include "WarpX.H"
 #include <ablastr/utils/Communication.H>
 #include <ablastr/warn_manager/WarnManager.H>
@@ -131,6 +132,32 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
         pp.query("qdsmc_outer_relative_tolerance", m_qdsmc_outer_relative_tolerance);
         pp.query("qdsmc_outer_require_convergence", m_qdsmc_outer_require_convergence);
         pp.query("qdsmc_outer_verbose", m_qdsmc_outer_verbose);
+    }
+
+    // Circuit-in-the-residual coupling (see the member documentation in
+    // the header).
+    pp.query("external_field_iteration", m_external_field_iteration);
+    if (m_external_field_iteration) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_hybrid_pic_model->m_add_external_fields,
+            "implicit_evolve.external_field_iteration requires "
+            "hybrid_pic_model.add_external_fields");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_darwin,
+            "implicit_evolve.external_field_iteration currently requires "
+            "the Darwin unified drive (hybrid_pic_model.darwin = 1): on "
+            "the split-field path the external arrays are assembled into "
+            "the fields at the start of each residual evaluation, before "
+            "the plasma current the circuit responds to exists");
+        if (m_vacuum_recovery) {
+            // The recovery's frozen-probe shortcut reuses the correction
+            // from the last non-Jacobian evaluation; with the coil scales
+            // changing inside every evaluation that would make the probed
+            // map inconsistent with the iterate map (the frozen-probe-lag
+            // failure class). Force the live-probe recovery; run with a
+            // tight darwin_vacuum_recovery_relative_tolerance.
+            m_hybrid_pic_model->m_vacuum_recovery_live_probes = true;
+        }
     }
 
     parseNonlinearSolverParams( pp );
@@ -513,6 +540,35 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
         }
     }
 
+    // Circuit-in-the-residual coupling: python measures the flux linkage
+    // of THIS iterate's plasma current (hybrid_current_fp_plasma, just
+    // computed), re-advances the coupled external circuit against it, and
+    // pushes updated coil scale segments (SetScale); the boundary values
+    // of A are then re-imposed at the new scales and B re-derived, so the
+    // Ohm's law below sees circuit-consistent fields. Interior A is
+    // state-only -- the scales enter through the boundary pin and the
+    // vacuum band -- so the particle stage above needs no re-run. The map
+    // is smooth in the state, so the matrix-free Jacobian probes see the
+    // coupled plasma-circuit physics and Newton converges both together
+    // (a step-lagged circuit is unstable at strong coil-plasma coupling).
+    if (m_external_field_iteration) {
+        ExecutePythonCallback("externalcoiltheta");
+        DarwinApplyABoundary(theta_time);
+        if (m_vacuum_recovery_half) {
+            // Recompute the recovery against the re-imposed boundary
+            // values (live in Jacobian probes too -- Define forced the
+            // live-probe mode), then restore the exact pin. NOTE: this is
+            // the second recovery application of the evaluation, so a
+            // finite darwin_vacuum_recovery_relaxation_time would be
+            // double-applied -- circuit decks should run the default
+            // (instant) recovery.
+            m_hybrid_pic_model->ComputeVacuumARecovery(
+                a_from_jacobian, m_theta * m_dt);
+            DarwinApplyABoundary(theta_time);
+        }
+        DarwinDeriveB();
+    }
+
     // Electron inertia: assemble the nodal inertial field from the
     // theta-stage state, ahead of both the E_L constraint solve (which
     // takes its longitudinal part into the source) and the Ohm E-solve
@@ -784,6 +840,30 @@ void ThetaImplicitHybrid::DarwinUpdateA_B ( amrex::Real a_thetadt, amrex::Real a
     m_WarpX->FillBoundaryB(ngB, true /* sync nodal points */);
 }
 
+void ThetaImplicitHybrid::DarwinDeriveB ()
+{
+    using ablastr::fields::Direction;
+    for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+        ablastr::fields::VectorField A =
+            m_WarpX->m_fields.get_alldirs("hybrid_A_fp", lev);
+        ablastr::fields::VectorField B =
+            m_WarpX->m_fields.get_alldirs(FieldType::Bfield_fp, lev);
+        m_WarpX->get_pointer_fdtd_solver_fp(lev)->ComputeCurlA(
+            B, A, m_WarpX->GetEBUpdateBFlag()[lev], lev);
+        for (int dir = 0; dir < 3; ++dir) {
+            amrex::MultiFab const & Bs = *m_WarpX->m_fields.get(
+                "hybrid_B_static_fp", Direction{dir}, lev);
+            amrex::MultiFab::Add(*B[dir], Bs, 0, 0,
+                                 B[dir]->nComp(), B[dir]->nGrowVect());
+        }
+    }
+    // Derived B: boundary conditions act on A (DarwinApplyABoundary), so
+    // only exchange/sync the ghosts of the derived field.
+    amrex::IntVect const ngB =
+        m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{0}, 0)->nGrowVect();
+    m_WarpX->FillBoundaryB(ngB, true /* sync nodal points */);
+}
+
 void ThetaImplicitHybrid::DarwinApplyABoundary ( amrex::Real a_time )
 {
     using ablastr::fields::Direction;
@@ -933,6 +1013,13 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
                 amrex::MultiFab & E = *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{dir}, lev);
                 amrex::MultiFab::Add(E, EL, 0, 0, E.nComp(), E.nGrowVect());
             }
+        }
+        if (m_external_field_iteration) {
+            // Final circuit pass against the converged theta-stage plasma
+            // current (hybrid_current_fp_plasma as left by the last
+            // residual evaluation), leaving the circuit state -- and the
+            // coil scale segments the pin below reads -- at t^{n+1}.
+            ExecutePythonCallback("externalcoilfinish");
         }
         DarwinApplyABoundary(end_time);
         // Vacuum recovery at the full-step state (both cadences: in "half"

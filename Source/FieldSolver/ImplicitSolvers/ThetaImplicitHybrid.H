@@ -157,6 +157,22 @@ private:
     bool m_vacuum_recovery = false;
     bool m_vacuum_recovery_half = false;
 
+    /** Circuit-in-the-residual coupling
+     *  (implicit_evolve.external_field_iteration): every residual
+     *  evaluation executes the "externalcoiltheta" python callback after
+     *  the iterate's plasma current is computed (and FinishFieldUpdate the
+     *  "externalcoilfinish" one before the end-of-step boundary values are
+     *  imposed), then re-imposes the external-drive boundary values of A
+     *  at the updated coil scales and re-derives B. Python measures the
+     *  flux linkage of the iterate's plasma current
+     *  (hybrid_current_fp_plasma), re-advances the coupled circuit, and
+     *  pushes coil scale segments (SetScale). The map stays smooth in the
+     *  state, so matrix-free Jacobian probes see the coupled
+     *  plasma-circuit physics and Newton converges both together (a
+     *  step-lagged circuit is unstable at strong coil-plasma coupling).
+     *  Requires the Darwin unified drive. */
+    bool m_external_field_iteration = false;
+
     /** Cached in Define: subtract the resistive Ohm-field part from the
      *  particle push field (hybrid_pic_model.implicit_push_excludes_resistive_field
      *  and a resistive term configured). */
@@ -204,6 +220,12 @@ private:
      * non-periodic domain boundaries, and hold A inside embedded-boundary
      * bodies (frozen enclosed flux). Applied after every A update. */
     void DarwinApplyABoundary ( amrex::Real a_time );
+
+    /** Derive B = B_static + curl A (with the derived-field boundary
+     * treatment) from the current A. Used by the circuit-in-the-residual
+     * coupling to re-derive B after the boundary values of A were
+     * re-imposed at updated coil scales. */
+    void DarwinDeriveB ();
 
     /** f_i(t_init) for each external A field: the Darwin gauge zeroes A at
      * initialization, so boundary values impose the CHANGE of the external
