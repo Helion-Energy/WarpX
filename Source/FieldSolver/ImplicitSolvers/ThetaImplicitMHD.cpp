@@ -179,8 +179,45 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
                                      "implicit_mhd.electron_pressure_floor cannot be negative");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_fluid_flux == "centered" || m_fluid_flux == "rusanov" ||
-            m_fluid_flux == "hllc",
-        "implicit_mhd.fluid_flux must be centered, rusanov, or hllc");
+            m_fluid_flux == "hllc" || m_fluid_flux == "hlld",
+        "implicit_mhd.fluid_flux must be centered, rusanov, hllc, or hlld");
+    m_use_hlld = (m_fluid_flux == "hlld");
+#if !defined(WARPX_DIM_1D_Z)
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_use_hlld,
+        "implicit_mhd.fluid_flux = hlld (the conservative-form recast) "
+        "currently supports 1D Cartesian geometry only");
+#endif
+    utils::parser::queryWithParser(pp, "hlld_kappa_signal",
+                                   m_hlld_kappa_signal);
+    utils::parser::queryWithParser(pp, "hlld_kappa_contact",
+                                   m_hlld_kappa_contact);
+    utils::parser::queryWithParser(pp, "hlld_kappa_bn", m_hlld_kappa_bn);
+    utils::parser::queryWithParser(pp, "hlld_kappa_denominator",
+                                   m_hlld_kappa_denominator);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_hlld_kappa_signal >= 0.0_rt && m_hlld_kappa_contact >= 0.0_rt &&
+            m_hlld_kappa_bn >= 0.0_rt && m_hlld_kappa_denominator >= 0.0_rt,
+        "implicit_mhd.hlld_kappa_* smoothing widths cannot be negative");
+    pp.query("hlld_fan_closure", m_hlld_fan_closure);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_hlld_fan_closure == "consistent" ||
+            m_hlld_fan_closure == "barotropic",
+        "implicit_mhd.hlld_fan_closure must be consistent or barotropic");
+    if (m_hlld_fan_closure == "barotropic") {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_use_hlld && m_ion_closure == "total_energy",
+            "implicit_mhd.hlld_fan_closure = barotropic requires "
+            "implicit_mhd.fluid_flux = hlld and implicit_mhd.ion_closure = "
+            "total_energy (it decouples the wave-fan structure from the "
+            "E_i unknown; the barotropic closure already has an "
+            "E_i-independent fan)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_reference_ion_pressure > 0.0_rt,
+            "implicit_mhd.hlld_fan_closure = barotropic requires a "
+            "positive implicit_mhd.reference_ion_pressure (it sets the "
+            "polytropic fan ion pressure)");
+    }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_positivity_safety > 0.0_rt && m_positivity_safety < 1.0_rt,
         "implicit_mhd.positivity_safety must be greater than zero and less than one");
@@ -293,6 +330,15 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
     fields.alloc_init(TotalCurrentCCName, lev, ba, dm, 3, guard_cells, 0.0_rt);
     fields.alloc_init(MagneticFieldCCName, lev, ba, dm, 3, guard_cells, 0.0_rt);
 
+#if defined(WARPX_DIM_1D_Z)
+    // hlld face-flux register (z-faces = z-nodal in 1D). Allocated
+    // unconditionally: the register remake machinery wants a static field
+    // list, and the cost of one unused 12-component MultiFab is trivial.
+    fields.alloc_init(FaceFluxZName, lev,
+                      amrex::convert(ba, amrex::IntVect::TheNodeVector()), dm,
+                      FaceFluxComponent::count, amrex::IntVect(0), 0.0_rt);
+#endif
+
     fields.alloc_init(OldMassDensityName, lev, ba, dm, 1, guard_cells, 0.0_rt);
     fields.alloc_init(OldMomentumDensityName, lev, ba, dm, 3, guard_cells, 0.0_rt);
     fields.alloc_init(OldElectronEnergyName, lev, ba, dm, 1, guard_cells, 0.0_rt);
@@ -375,6 +421,22 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         "implicit_mhd.fluid_flux = hllc requires include_hall_term = false: "
         "the electron energy is advected with the ion contact wave, which "
         "assumes u_e = u_i at the fluid faces");
+    if (m_use_hlld) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_hybrid_pic_model->m_include_hall_term,
+            "implicit_mhd.fluid_flux = hlld requires include_hall_term = "
+            "false: the ideal EMF is the single-fluid Riemann induction "
+            "flux, u x B with u_e = u_i");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_hybrid_pic_model->m_include_electron_pressure_term,
+            "implicit_mhd.fluid_flux = hlld requires "
+            "include_electron_pressure_term = false: the solver-assembled "
+            "Ohm's law is E = -u x B + eta J (standard resistive MHD)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_hybrid_pic_model->m_include_hyper_resistivity_term,
+            "implicit_mhd.fluid_flux = hlld does not yet include "
+            "hyper-resistivity in the solver-assembled Ohm's law");
+    }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !m_hybrid_pic_model->m_solve_electron_energy_equation,
         "theta_implicit_mhd advances electron energy inside JFNK; "
@@ -463,9 +525,17 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
     if (m_ion_closure == "total_energy") {
         fluid_blocks.push_back({IonEnergyName, energy_scale});
     }
-    m_state.Define(m_WarpX, "Efield_fp", "none", fluid_blocks, electric_field_scale);
+    if (m_use_hlld) {
+        // Conservative-form recast: B^{n+theta} is the JFNK array block
+        // (E is derived from the Riemann EMF and eta J each residual).
+        m_state.Define(m_WarpX, "Bfield_fp", "none", fluid_blocks,
+                       m_reference_magnetic_field);
+    } else {
+        m_state.Define(m_WarpX, "Efield_fp", "none", fluid_blocks,
+                       electric_field_scale);
+    }
     m_state_old.Define(m_state);
-    m_state.Copy(FieldType::Efield_fp);
+    m_state.Copy(m_use_hlld ? FieldType::Bfield_fp : FieldType::Efield_fp);
     m_state.CopyMultiFabBlocksFromFields();
     m_state_old.Copy(m_state);
 
@@ -497,6 +567,13 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         preconditioner_type == PreconditionerType::none ||
             preconditioner_type == PreconditionerType::pc_mhd_block,
         "theta_implicit_mhd supports jacobian.pc_type = none or pc_mhd_block");
+    if (m_use_hlld) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            preconditioner_type == PreconditionerType::none,
+            "implicit_mhd.fluid_flux = hlld runs unpreconditioned "
+            "(jacobian.pc_type = none); pc_mhd_block assumes the E-based "
+            "state layout");
+    }
 #if defined(WARPX_DIM_RZ)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         preconditioner_type == PreconditionerType::none,
@@ -591,7 +668,15 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "Evolve ion fluid:              " << m_evolve_ion_fluid << "\n"
                    << "Fluid flux:                    " << m_fluid_flux << "\n"
                    << "HLLC signal closure:           " << m_hllc_signal_closure << "\n"
-                   << "HLLC contact blend:            " << m_hllc_contact_blend << "\n"
+                   << "HLLC contact blend:            " << m_hllc_contact_blend << "\n";
+    if (m_use_hlld) {
+        amrex::Print() << "HLLD fan closure:              " << m_hlld_fan_closure << "\n"
+                       << "HLLD kappa signal/contact:     " << m_hlld_kappa_signal
+                       << " " << m_hlld_kappa_contact << "\n"
+                       << "HLLD kappa bn/denominator:     " << m_hlld_kappa_bn
+                       << " " << m_hlld_kappa_denominator << "\n";
+    }
+    amrex::Print()
                    << "Ion closure:                   " << m_ion_closure << "\n"
                    << "Positivity step safety:        " << m_positivity_safety << "\n"
                    << "Joule heating:                 " << m_include_joule_heating << "\n";
@@ -821,7 +906,7 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
 
     SaveMagneticField();
 
-    m_state.Copy(FieldType::Efield_fp);
+    m_state.Copy(m_use_hlld ? FieldType::Bfield_fp : FieldType::Efield_fp);
     m_state.CopyMultiFabBlocksFromFields();
     m_state_old.Copy(m_state);
 
@@ -867,10 +952,18 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
 void ThetaImplicitMHD::UpdateWarpXFields (const WarpXSolverVec& state, const amrex::Real start_time)
 {
     const amrex::Real theta_time = start_time + m_theta * m_dt;
-    m_WarpX->SetElectricFieldAndApplyBCs(state, theta_time);
+    if (m_use_hlld) {
+        // Conservative form: the state array block IS B^{n+theta}; E is
+        // assembled from the Riemann EMF and eta J later in the residual.
+        m_WarpX->SetMagneticFieldAndApplyBCs(state, theta_time);
+    } else {
+        m_WarpX->SetElectricFieldAndApplyBCs(state, theta_time);
 
-    const auto& magnetic_field_old = m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::B_old, 0);
-    m_WarpX->UpdateMagneticFieldAndApplyBCs(magnetic_field_old, m_theta * m_dt, start_time);
+        const auto& magnetic_field_old =
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::B_old, 0);
+        m_WarpX->UpdateMagneticFieldAndApplyBCs(magnetic_field_old,
+                                                m_theta * m_dt, start_time);
+    }
 
     if (m_z_neumann) {
         using ablastr::fields::Direction;
@@ -1063,16 +1156,34 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
 
     FillCellCenteredElectromagneticFields();
 
-    const auto electric_field = m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, 0);
-    const auto ion_current = m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::current_fp, 0);
-    const auto charge_density = m_WarpX->m_fields.get_mr_levels(FieldType::rho_fp, 0);
-
     const amrex::Real theta_time = start_time + m_theta * m_dt;
-    m_hybrid_pic_model->HybridPICSolveE(
-        electric_field, ion_current, magnetic_field, charge_density,
-        m_WarpX->GetEBUpdateEFlag(), true, true, theta_time, false);
+    if (m_use_hlld) {
+        // Conservative form: one HLLD Riemann solution per face feeds the
+        // fluid divergences AND the ideal EMF; E = EMF + eta J is derived,
+        // and the array-block residual is the theta-implicit Faraday
+        // update evaluated with the exact Yee curl (div B preserved to
+        // round-off): rhs_B = (B_old - theta dt curl E) - B_old.
+        ComputeFaceFluxes();
+        AssembleOhmElectricField(theta_time);
+        const auto& magnetic_field_old =
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::B_old, 0);
+        m_WarpX->UpdateMagneticFieldAndApplyBCs(magnetic_field_old,
+                                                m_theta * m_dt, start_time);
+        rhs.Copy(FieldType::Bfield_fp);
+    } else {
+        const auto electric_field =
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, 0);
+        const auto ion_current =
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::current_fp, 0);
+        const auto charge_density =
+            m_WarpX->m_fields.get_mr_levels(FieldType::rho_fp, 0);
 
-    rhs.Copy(FieldType::Efield_fp);
+        m_hybrid_pic_model->HybridPICSolveE(
+            electric_field, ion_current, magnetic_field, charge_density,
+            m_WarpX->GetEBUpdateEFlag(), true, true, theta_time, false);
+
+        rhs.Copy(FieldType::Efield_fp);
+    }
     for (int component = 0; component < 3; ++component) {
         rhs.getArrayVec()[0][component]->minus(*m_state_old.getArrayVec()[0][component], 0, 1, 0);
     }
@@ -1334,8 +1445,46 @@ ThetaImplicitMHD::ProjectAndLimitSolverStep (const WarpXSolverVec& state,
     return LimitSolverStep(state, direction, requested_step);
 }
 
+theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
+{
+    theta_implicit_mhd::FluxParameters flux_parameters = {
+        m_mass_density_floor,
+        m_ion_charge_to_mass,
+        m_gamma_e,
+        m_gamma_i,
+        m_reference_mass_density,
+        m_reference_ion_pressure,
+        m_electron_pressure_floor,
+        m_ion_pressure_floor,
+        m_hybrid_pic_model->m_include_hall_term,
+        m_fluid_flux == "rusanov",
+        m_fluid_flux == "hllc",
+        m_ion_closure == "total_energy",
+        m_hllc_signal_closure == "barotropic",
+        m_hllc_contact_blend,
+        m_theta};
+    // Only read by the hlld kernels (the default 1.0 is unit-agnostic for
+    // the host harness); harmless for the other flux paths.
+    flux_parameters.mu0 = PhysConst::mu0;
+    flux_parameters.hlld_kappa_signal = m_hlld_kappa_signal;
+    flux_parameters.hlld_kappa_contact = m_hlld_kappa_contact;
+    flux_parameters.hlld_kappa_bn = m_hlld_kappa_bn;
+    flux_parameters.hlld_kappa_denominator = m_hlld_kappa_denominator;
+    flux_parameters.hlld_barotropic_fan =
+        (m_hlld_fan_closure == "barotropic");
+    return flux_parameters;
+}
+
 void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real time) const
 {
+    if (m_use_hlld) {
+        // Conservative form: read the precomputed per-face Riemann fluxes
+        // (one HLLD solution per face; the same solution feeds the ideal
+        // EMF) instead of re-evaluating fluxes cell-by-cell.
+        ComputeFluidRHSFromFaceFluxes(rhs, time);
+        return;
+    }
+
     const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
     const amrex::MultiFab& momentum = *m_WarpX->m_fields.get(MomentumDensityName, 0);
     const amrex::MultiFab& electron_energy = *m_WarpX->m_fields.get(ElectronEnergyName, 0);
@@ -1380,7 +1529,6 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
     const amrex::Real charge_to_mass = m_ion_charge_to_mass;
     const amrex::Real gamma_e_minus_one = m_gamma_e - 1.0_rt;
     const amrex::Real pressure_floor = m_electron_pressure_floor;
-    const bool include_hall_term = m_hybrid_pic_model->m_include_hall_term;
     const bool evolve_ion_fluid = m_evolve_ion_fluid;
     const bool include_joule_heating = m_include_joule_heating;
     // Holmstrom-style vacuum cell switching: below the threshold the fluid
@@ -1391,22 +1539,8 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
     const amrex::Real vacuum_mass_density = m_vacuum_mass_density;
     const amrex::Real vacuum_drag_rate = m_vacuum_drag_rate;
     const auto eta = m_hybrid_pic_model->m_eta;
-    const theta_implicit_mhd::FluxParameters flux_parameters = {
-        density_floor,
-        charge_to_mass,
-        m_gamma_e,
-        m_gamma_i,
-        m_reference_mass_density,
-        m_reference_ion_pressure,
-        pressure_floor,
-        m_ion_pressure_floor,
-        include_hall_term,
-        m_fluid_flux == "rusanov",
-        m_fluid_flux == "hllc",
-        total_energy_closure,
-        m_hllc_signal_closure == "barotropic",
-        m_hllc_contact_blend,
-        m_theta};
+    const theta_implicit_mhd::FluxParameters flux_parameters =
+        MakeFluxParameters();
 
     for (amrex::MFIter mfi(density); mfi.isValid(); ++mfi) {
         const amrex::Box box = mfi.validbox();
@@ -1689,6 +1823,488 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
     }
 }
 
+void ThetaImplicitMHD::ComputeFaceFluxes ()
+{
+#if defined(WARPX_DIM_1D_Z)
+    using ablastr::fields::Direction;
+    const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
+    const amrex::MultiFab& momentum =
+        *m_WarpX->m_fields.get(MomentumDensityName, 0);
+    const amrex::MultiFab& electron_energy =
+        *m_WarpX->m_fields.get(ElectronEnergyName, 0);
+    const amrex::MultiFab& ion_energy =
+        *m_WarpX->m_fields.get(IonEnergyName, 0);
+    const amrex::MultiFab& old_density =
+        *m_WarpX->m_fields.get(OldMassDensityName, 0);
+    const amrex::MultiFab& old_momentum =
+        *m_WarpX->m_fields.get(OldMomentumDensityName, 0);
+    const amrex::MultiFab& old_electron_energy =
+        *m_WarpX->m_fields.get(OldElectronEnergyName, 0);
+    const amrex::MultiFab& old_ion_energy =
+        *m_WarpX->m_fields.get(OldIonEnergyName, 0);
+    const amrex::MultiFab& current_cc =
+        *m_WarpX->m_fields.get(TotalCurrentCCName, 0);
+    const amrex::MultiFab& magnetic_cc =
+        *m_WarpX->m_fields.get(MagneticFieldCCName, 0);
+    // Single-valued normal field on the z-face: Bz is z-nodal in 1D, so
+    // the native staggered value (plasma + external under the split-field
+    // scheme) is already the face value the Riemann fan needs.
+    const amrex::MultiFab& magnetic_face_z =
+        *m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{2}, 0);
+    const amrex::MultiFab* const external_face_z =
+        m_hybrid_pic_model->m_add_external_fields
+            ? m_WarpX->m_fields.get(FieldType::hybrid_B_fp_external,
+                                    Direction{2}, 0)
+            : nullptr;
+    amrex::MultiFab& face_flux_mf = *m_WarpX->m_fields.get(FaceFluxZName, 0);
+
+    const theta_implicit_mhd::FluxParameters parameters = MakeFluxParameters();
+    const bool add_external = (external_face_z != nullptr);
+    constexpr int normal = 2;
+    constexpr int flux_mass = FaceFluxComponent::mass;
+    constexpr int flux_momentum = FaceFluxComponent::momentum_x;
+    constexpr int flux_magnetic = FaceFluxComponent::magnetic_x;
+    constexpr int flux_electron_energy = FaceFluxComponent::electron_energy;
+    constexpr int flux_ion_energy = FaceFluxComponent::ion_energy;
+    constexpr int flux_electron_velocity =
+        FaceFluxComponent::electron_velocity;
+    constexpr int flux_induction_t1 = FaceFluxComponent::induction_t1;
+    constexpr int flux_induction_t2 = FaceFluxComponent::induction_t2;
+
+    for (amrex::MFIter mfi(face_flux_mf); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto rho = density.const_array(mfi);
+        const auto mom = momentum.const_array(mfi);
+        const auto energy = electron_energy.const_array(mfi);
+        const auto ion_e = ion_energy.const_array(mfi);
+        const auto rho_old = old_density.const_array(mfi);
+        const auto mom_old = old_momentum.const_array(mfi);
+        const auto energy_old = old_electron_energy.const_array(mfi);
+        const auto ion_e_old = old_ion_energy.const_array(mfi);
+        const auto j_cc = current_cc.const_array(mfi);
+        const auto b_cc = magnetic_cc.const_array(mfi);
+        const auto bz_face = magnetic_face_z.const_array(mfi);
+        const auto bz_external =
+            add_external ? external_face_z->const_array(mfi)
+                         : amrex::Array4<const amrex::Real>{};
+        const auto flux_arr = face_flux_mf.array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            // Face i separates cells i-1 (left) and i (right).
+            const auto left = theta_implicit_mhd::load_cell_state_hlld(
+                rho, mom, energy, ion_e, j_cc, b_cc, i - 1, j, k, normal,
+                parameters);
+            const auto right = theta_implicit_mhd::load_cell_state_hlld(
+                rho, mom, energy, ion_e, j_cc, b_cc, i, j, k, normal,
+                parameters);
+            amrex::Real bn_face = bz_face(i, j, k);
+            if (add_external) {
+                bn_face += bz_external(i, j, k);
+            }
+            auto flux = theta_implicit_mhd::hlld_flux(left, right, bn_face,
+                                                      normal, parameters);
+
+            // Donor-gated positivity guards on the advected mass and
+            // energy channels, gating on the theta-extrapolated
+            // end-of-step donor values -- identical policy to face_flux
+            // (momentum, stress, and induction channels have no floors).
+            const amrex::Real ext =
+                (1.0_rt - parameters.theta) / parameters.theta;
+            const int im = (flux.mass >= 0.0_rt) ? i - 1 : i;
+            const amrex::Real rho_end =
+                rho(im, j, k) * (1.0_rt + ext) - rho_old(im, j, k) * ext;
+            flux.mass *= theta_implicit_mhd::floor_outflow_limiter(
+                rho_end, parameters.density_floor);
+            const int ie = (flux.electron_energy >= 0.0_rt) ? i - 1 : i;
+            const amrex::Real ue_end =
+                energy(ie, j, k) * (1.0_rt + ext) -
+                energy_old(ie, j, k) * ext;
+            flux.electron_energy *= theta_implicit_mhd::floor_outflow_limiter(
+                ue_end, parameters.electron_pressure_floor /
+                            (parameters.gamma_e - 1.0_rt));
+            if (parameters.total_energy_closure) {
+                const int ii = (flux.ion_energy >= 0.0_rt) ? i - 1 : i;
+                const amrex::Real ei_end =
+                    ion_e(ii, j, k) * (1.0_rt + ext) -
+                    ion_e_old(ii, j, k) * ext;
+                amrex::Real kinetic_end = 0.0_rt;
+                for (int component = 0; component < 3; ++component) {
+                    const amrex::Real mom_end =
+                        mom(ii, j, k, component) * (1.0_rt + ext) -
+                        mom_old(ii, j, k, component) * ext;
+                    kinetic_end += mom_end * mom_end;
+                }
+                const amrex::Real rho_end_donor = std::max(
+                    rho(ii, j, k) * (1.0_rt + ext) -
+                        rho_old(ii, j, k) * ext,
+                    parameters.density_floor);
+                kinetic_end *= 0.5_rt / rho_end_donor;
+                flux.ion_energy *= theta_implicit_mhd::floor_outflow_limiter(
+                    ei_end - kinetic_end,
+                    parameters.ion_pressure_floor /
+                        (parameters.gamma_i - 1.0_rt));
+            }
+
+            flux_arr(i, j, k, flux_mass) = flux.mass;
+            for (int component = 0; component < 3; ++component) {
+                flux_arr(i, j, k, flux_momentum + component) =
+                    flux.momentum[component];
+                flux_arr(i, j, k, flux_magnetic + component) =
+                    flux.momentum_magnetic[component];
+            }
+            flux_arr(i, j, k, flux_electron_energy) = flux.electron_energy;
+            flux_arr(i, j, k, flux_ion_energy) = flux.ion_energy;
+            flux_arr(i, j, k, flux_electron_velocity) = flux.electron_velocity;
+            flux_arr(i, j, k, flux_induction_t1) = flux.induction_t1;
+            flux_arr(i, j, k, flux_induction_t2) = flux.induction_t2;
+        });
+    }
+#else
+    WARPX_ABORT_WITH_MESSAGE(
+        "ThetaImplicitMHD::ComputeFaceFluxes() requires 1D geometry");
+#endif
+}
+
+void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
+{
+#if defined(WARPX_DIM_1D_Z)
+    using ablastr::fields::Direction;
+    // Standard resistive-MHD Ohm's law, E = -u x B + eta J, assembled at
+    // the native Yee staggering. The ideal part of the tangential
+    // components is the SAME Riemann induction flux that closes the fluid
+    // update (Ex and Ey live on z-faces in 1D): F_{B_t1} = -EMF_t2 and
+    // F_{B_t2} = +EMF_t1, so Ey = -F_Bx and Ex = +F_By. Ez (cell
+    // centered) does not enter the 1D curl and is assembled from the
+    // cell-centered fields for diagnostics. Under the split-field
+    // external-A scheme the evolved B is the plasma response, so E_ext is
+    // subtracted (dB_ext/dt = -curl E_ext is carried by the externals).
+    amrex::MultiFab& electric_field_x =
+        *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{0}, 0);
+    amrex::MultiFab& electric_field_y =
+        *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{1}, 0);
+    amrex::MultiFab& electric_field_z =
+        *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{2}, 0);
+    const amrex::MultiFab& current_x = *m_WarpX->m_fields.get(
+        FieldType::hybrid_current_fp_plasma, Direction{0}, 0);
+    const amrex::MultiFab& current_y = *m_WarpX->m_fields.get(
+        FieldType::hybrid_current_fp_plasma, Direction{1}, 0);
+    const amrex::MultiFab& current_z = *m_WarpX->m_fields.get(
+        FieldType::hybrid_current_fp_plasma, Direction{2}, 0);
+    const amrex::MultiFab& charge_density =
+        *m_WarpX->m_fields.get(FieldType::rho_fp, 0);
+    const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
+    const amrex::MultiFab& momentum =
+        *m_WarpX->m_fields.get(MomentumDensityName, 0);
+    const amrex::MultiFab& magnetic_cc =
+        *m_WarpX->m_fields.get(MagneticFieldCCName, 0);
+    const amrex::MultiFab& face_flux_mf =
+        *m_WarpX->m_fields.get(FaceFluxZName, 0);
+
+    const auto eta = m_hybrid_pic_model->m_eta;
+    const amrex::Real charge_density_floor =
+        m_ion_charge_to_mass * m_mass_density_floor;
+    const amrex::Real density_floor = m_mass_density_floor;
+    constexpr int flux_induction_t1 = FaceFluxComponent::induction_t1;
+    constexpr int flux_induction_t2 = FaceFluxComponent::induction_t2;
+
+    // Ex and Ey (z-nodal, i.e. on the z-faces).
+    for (amrex::MFIter mfi(electric_field_x); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto electric_x = electric_field_x.array(mfi);
+        const auto electric_y = electric_field_y.array(mfi);
+        const auto j_x = current_x.const_array(mfi);
+        const auto j_y = current_y.const_array(mfi);
+        const auto j_z = current_z.const_array(mfi);
+        const auto rho_q = charge_density.const_array(mfi);
+        const auto flux_arr = face_flux_mf.const_array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            const amrex::Real jx = j_x(i, j, k);
+            const amrex::Real jy = j_y(i, j, k);
+            const amrex::Real jz = 0.5_rt * (j_z(i - 1, j, k) + j_z(i, j, k));
+            const amrex::Real current_magnitude =
+                std::sqrt(jx * jx + jy * jy + jz * jz);
+            const amrex::Real charge_density_value =
+                std::max(rho_q(i, j, k), charge_density_floor);
+            const amrex::Real resistivity =
+                eta(charge_density_value, current_magnitude, time);
+            electric_x(i, j, k) =
+                flux_arr(i, j, k, flux_induction_t2) + resistivity * jx;
+            electric_y(i, j, k) =
+                -flux_arr(i, j, k, flux_induction_t1) + resistivity * jy;
+        });
+    }
+
+    // Ez (cell centered): purely diagnostic in 1D (no curl contribution).
+    for (amrex::MFIter mfi(electric_field_z); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto electric_z = electric_field_z.array(mfi);
+        const auto j_x = current_x.const_array(mfi);
+        const auto j_y = current_y.const_array(mfi);
+        const auto j_z = current_z.const_array(mfi);
+        const auto rho_q = charge_density.const_array(mfi);
+        const auto rho = density.const_array(mfi);
+        const auto mom = momentum.const_array(mfi);
+        const auto b_cc = magnetic_cc.const_array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            const amrex::Real jx = 0.5_rt * (j_x(i, j, k) + j_x(i + 1, j, k));
+            const amrex::Real jy = 0.5_rt * (j_y(i, j, k) + j_y(i + 1, j, k));
+            const amrex::Real jz = j_z(i, j, k);
+            const amrex::Real current_magnitude =
+                std::sqrt(jx * jx + jy * jy + jz * jz);
+            const amrex::Real charge_density_value = std::max(
+                0.5_rt * (rho_q(i, j, k) + rho_q(i + 1, j, k)),
+                charge_density_floor);
+            const amrex::Real resistivity =
+                eta(charge_density_value, current_magnitude, time);
+            const amrex::Real safe_density =
+                std::max(rho(i, j, k), density_floor);
+            const amrex::Real velocity_x = mom(i, j, k, 0) / safe_density;
+            const amrex::Real velocity_y = mom(i, j, k, 1) / safe_density;
+            electric_z(i, j, k) =
+                -(velocity_x * b_cc(i, j, k, 1) -
+                  velocity_y * b_cc(i, j, k, 0)) +
+                resistivity * jz;
+        });
+    }
+
+    if (m_hybrid_pic_model->m_add_external_fields) {
+        for (int direction = 0; direction < 3; ++direction) {
+            amrex::MultiFab& electric_field = *m_WarpX->m_fields.get(
+                FieldType::Efield_fp, Direction{direction}, 0);
+            const amrex::MultiFab& electric_field_external =
+                *m_WarpX->m_fields.get(FieldType::hybrid_E_fp_external,
+                                       Direction{direction}, 0);
+            amrex::MultiFab::Subtract(electric_field,
+                                      electric_field_external, 0, 0, 1, 0);
+        }
+    }
+
+    for (int direction = 0; direction < 3; ++direction) {
+        m_WarpX->m_fields
+            .get(FieldType::Efield_fp, Direction{direction}, 0)
+            ->FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
+    }
+#else
+    amrex::ignore_unused(time);
+    WARPX_ABORT_WITH_MESSAGE(
+        "ThetaImplicitMHD::AssembleOhmElectricField() requires 1D geometry");
+#endif
+}
+
+void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
+                                                      const amrex::Real time) const
+{
+#if defined(WARPX_DIM_1D_Z)
+    const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
+    const amrex::MultiFab& momentum =
+        *m_WarpX->m_fields.get(MomentumDensityName, 0);
+    const amrex::MultiFab& electron_energy =
+        *m_WarpX->m_fields.get(ElectronEnergyName, 0);
+    const amrex::MultiFab& ion_energy =
+        *m_WarpX->m_fields.get(IonEnergyName, 0);
+    const amrex::MultiFab& old_density =
+        *m_WarpX->m_fields.get(OldMassDensityName, 0);
+    const amrex::MultiFab& old_momentum =
+        *m_WarpX->m_fields.get(OldMomentumDensityName, 0);
+    const amrex::MultiFab& old_electron_energy =
+        *m_WarpX->m_fields.get(OldElectronEnergyName, 0);
+    const amrex::MultiFab& old_ion_energy =
+        *m_WarpX->m_fields.get(OldIonEnergyName, 0);
+    const amrex::MultiFab& current = *m_WarpX->m_fields.get(TotalCurrentCCName, 0);
+    const amrex::MultiFab& face_flux_mf =
+        *m_WarpX->m_fields.get(FaceFluxZName, 0);
+
+    const bool total_energy_closure = m_ion_closure == "total_energy";
+    amrex::MultiFab& density_rhs = rhs.getMultiFabBlock(MassDensityName, 0);
+    amrex::MultiFab& momentum_rhs = rhs.getMultiFabBlock(MomentumDensityName, 0);
+    amrex::MultiFab& electron_energy_rhs =
+        rhs.getMultiFabBlock(ElectronEnergyName, 0);
+    amrex::MultiFab* const ion_energy_rhs =
+        total_energy_closure ? &rhs.getMultiFabBlock(IonEnergyName, 0) : nullptr;
+
+    const auto inverse_cell_size = physical_inverse_cell_size(m_WarpX->Geom(0));
+    const amrex::Real inverse_dz = inverse_cell_size[2];
+    const amrex::Real theta_dt = m_theta * m_dt;
+    const amrex::Real extrapolation_weight = (1.0_rt - m_theta) / m_theta;
+    const amrex::Real density_floor = m_mass_density_floor;
+    const amrex::Real charge_to_mass = m_ion_charge_to_mass;
+    const amrex::Real gamma_e_minus_one = m_gamma_e - 1.0_rt;
+    const amrex::Real pressure_floor = m_electron_pressure_floor;
+    const amrex::Real ion_energy_floor =
+        total_energy_closure ? m_ion_pressure_floor / (m_gamma_i - 1.0_rt)
+                             : 0.0_rt;
+    const bool evolve_ion_fluid = m_evolve_ion_fluid;
+    const bool include_joule_heating = m_include_joule_heating;
+    const bool holmstrom_vacuum = m_vacuum_mass_density > 0.0_rt;
+    const amrex::Real vacuum_mass_density = m_vacuum_mass_density;
+    const amrex::Real vacuum_drag_rate = m_vacuum_drag_rate;
+    const auto eta = m_hybrid_pic_model->m_eta;
+    constexpr int flux_mass = FaceFluxComponent::mass;
+    constexpr int flux_momentum = FaceFluxComponent::momentum_x;
+    constexpr int flux_magnetic = FaceFluxComponent::magnetic_x;
+    constexpr int flux_electron_energy = FaceFluxComponent::electron_energy;
+    constexpr int flux_ion_energy = FaceFluxComponent::ion_energy;
+    constexpr int flux_electron_velocity =
+        FaceFluxComponent::electron_velocity;
+
+    for (amrex::MFIter mfi(density); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto rho = density.const_array(mfi);
+        const auto rho_old = old_density.const_array(mfi);
+        const auto mom = momentum.const_array(mfi);
+        const auto mom_old = old_momentum.const_array(mfi);
+        const auto energy = electron_energy.const_array(mfi);
+        const auto energy_old = old_electron_energy.const_array(mfi);
+        const auto ion_e = ion_energy.const_array(mfi);
+        const auto ion_e_old = old_ion_energy.const_array(mfi);
+        const auto j_plasma = current.const_array(mfi);
+        const auto flux_arr = face_flux_mf.const_array(mfi);
+        const auto rho_increment = density_rhs.array(mfi);
+        const auto momentum_increment = momentum_rhs.array(mfi);
+        const auto energy_increment = electron_energy_rhs.array(mfi);
+        const auto ion_energy_increment =
+            total_energy_closure ? ion_energy_rhs->array(mfi)
+                                 : amrex::Array4<amrex::Real>{};
+
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            // Finite-volume divergences from the precomputed face fluxes
+            // (cell i is bounded by faces i and i+1).
+            const amrex::Real divergence_momentum =
+                inverse_dz * (flux_arr(i + 1, j, k, flux_mass) -
+                              flux_arr(i, j, k, flux_mass));
+            amrex::Real divergence_momentum_flux[3];
+            amrex::Real magnetic_force[3];
+            for (int component = 0; component < 3; ++component) {
+                divergence_momentum_flux[component] =
+                    inverse_dz *
+                    (flux_arr(i + 1, j, k, flux_momentum + component) -
+                     flux_arr(i, j, k, flux_momentum + component));
+                // The magnetic force is minus the divergence of the
+                // Maxwell-stress flux channels: the discrete J x B the
+                // ion-energy work must pair with.
+                magnetic_force[component] =
+                    -inverse_dz *
+                    (flux_arr(i + 1, j, k, flux_magnetic + component) -
+                     flux_arr(i, j, k, flux_magnetic + component));
+            }
+            const amrex::Real divergence_energy_flux =
+                inverse_dz * (flux_arr(i + 1, j, k, flux_electron_energy) -
+                              flux_arr(i, j, k, flux_electron_energy));
+            const amrex::Real divergence_ion_energy_flux =
+                inverse_dz * (flux_arr(i + 1, j, k, flux_ion_energy) -
+                              flux_arr(i, j, k, flux_ion_energy));
+            const amrex::Real divergence_electron_velocity =
+                inverse_dz * (flux_arr(i + 1, j, k, flux_electron_velocity) -
+                              flux_arr(i, j, k, flux_electron_velocity));
+
+            const amrex::Real plasma_weight =
+                holmstrom_vacuum
+                    ? 0.5_rt * (1.0_rt + std::tanh(
+                                             (rho_old(i, j, k) - vacuum_mass_density) /
+                                             (0.3_rt * vacuum_mass_density)))
+                    : 1.0_rt;
+
+            rho_increment(i, j, k) =
+                evolve_ion_fluid
+                    ? -theta_dt * plasma_weight * divergence_momentum
+                    : 0.0_rt;
+
+            const amrex::Real vacuum_drag =
+                vacuum_drag_rate * (1.0_rt - plasma_weight);
+            for (int component = 0; component < 3; ++component) {
+                // The Maxwell stress inside the total momentum flux
+                // replaces the pointwise J x B force.
+                momentum_increment(i, j, k, component) =
+                    evolve_ion_fluid
+                        ? theta_dt *
+                              (plasma_weight *
+                                   (-divergence_momentum_flux[component]) -
+                               vacuum_drag * mom(i, j, k, component))
+                        : 0.0_rt;
+            }
+
+            const amrex::Real jx = j_plasma(i, j, k, 0);
+            const amrex::Real jy = j_plasma(i, j, k, 1);
+            const amrex::Real jz = j_plasma(i, j, k, 2);
+            const amrex::Real pressure_e =
+                std::max(gamma_e_minus_one * energy(i, j, k), pressure_floor);
+            const amrex::Real current_magnitude =
+                std::sqrt(jx * jx + jy * jy + jz * jz);
+            const amrex::Real charge_density =
+                charge_to_mass * std::max(rho(i, j, k), density_floor);
+            const amrex::Real joule_heating =
+                include_joule_heating
+                    ? eta(charge_density, current_magnitude, time) *
+                          current_magnitude * current_magnitude
+                    : 0.0_rt;
+            amrex::Real pressure_work =
+                -pressure_e * divergence_electron_velocity;
+            const amrex::Real energy_end =
+                energy(i, j, k) * (1.0_rt + extrapolation_weight) -
+                energy_old(i, j, k) * extrapolation_weight;
+            if (pressure_work < 0.0_rt) {
+                pressure_work *= theta_implicit_mhd::floor_outflow_limiter(
+                    energy_end, pressure_floor / gamma_e_minus_one);
+            }
+            energy_increment(i, j, k) =
+                theta_dt * plasma_weight *
+                (-divergence_energy_flux + pressure_work + joule_heating);
+
+            if (total_energy_closure) {
+                const amrex::Real safe_density =
+                    std::max(rho(i, j, k), density_floor);
+                amrex::Real kinetic_end = 0.0_rt;
+                for (int component = 0; component < 3; ++component) {
+                    const amrex::Real mom_end =
+                        mom(i, j, k, component) *
+                            (1.0_rt + extrapolation_weight) -
+                        mom_old(i, j, k, component) * extrapolation_weight;
+                    kinetic_end += mom_end * mom_end;
+                }
+                kinetic_end *=
+                    0.5_rt /
+                    std::max(rho(i, j, k) * (1.0_rt + extrapolation_weight) -
+                                 rho_old(i, j, k) * extrapolation_weight,
+                             density_floor);
+                const amrex::Real internal_proxy_end =
+                    ion_e(i, j, k) * (1.0_rt + extrapolation_weight) -
+                    ion_e_old(i, j, k) * extrapolation_weight - kinetic_end;
+                // Work done by the magnetic force on the ion fluid, from
+                // the SAME discrete stress-flux difference the momentum
+                // equation uses, so field-to-fluid energy exchange is
+                // discretely consistent.
+                amrex::Real lorentz_work = 0.0_rt;
+                for (int component = 0; component < 3; ++component) {
+                    lorentz_work +=
+                        mom(i, j, k, component) * magnetic_force[component];
+                }
+                lorentz_work /= safe_density;
+                amrex::Real ion_pressure_work =
+                    pressure_e * divergence_electron_velocity;
+                if (ion_pressure_work < 0.0_rt) {
+                    ion_pressure_work *=
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            internal_proxy_end, ion_energy_floor);
+                }
+                if (lorentz_work < 0.0_rt) {
+                    lorentz_work *=
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            internal_proxy_end, ion_energy_floor);
+                }
+                ion_energy_increment(i, j, k) =
+                    theta_dt * plasma_weight *
+                    (-divergence_ion_energy_flux + lorentz_work +
+                     ion_pressure_work);
+            }
+        });
+    }
+#else
+    amrex::ignore_unused(rhs, time);
+    WARPX_ABORT_WITH_MESSAGE(
+        "ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes() requires 1D "
+        "geometry");
+#endif
+}
+
 void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
 {
     const amrex::Real inverse_theta = 1.0_rt / m_theta;
@@ -1764,8 +2380,16 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
             "internal-energy floor");
     }
 
-    const auto& magnetic_field_old = m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::B_old, 0);
-    m_WarpX->FinishMagneticFieldAndApplyBCs(magnetic_field_old, m_theta, end_time);
+    if (m_use_hlld) {
+        // The linComb above already extrapolated the state (including its
+        // B array block) to t^{n+1}; publish it to Bfield_fp with BCs.
+        m_WarpX->SetMagneticFieldAndApplyBCs(m_state, end_time);
+    } else {
+        const auto& magnetic_field_old =
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::B_old, 0);
+        m_WarpX->FinishMagneticFieldAndApplyBCs(magnetic_field_old, m_theta,
+                                                end_time);
+    }
     if (m_z_neumann) {
         using ablastr::fields::Direction;
         for (int direction = 0; direction < 3; ++direction) {
@@ -1804,15 +2428,24 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
         m_hybrid_pic_model->m_external_vector_potential->UpdateHybridExternalFields(
             end_time, m_dt);
     }
-    const auto electric_field =
-        m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, 0);
-    const auto ion_current =
-        m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::current_fp, 0);
-    const auto charge_density =
-        m_WarpX->m_fields.get_mr_levels(FieldType::rho_fp, 0);
-    m_hybrid_pic_model->HybridPICSolveE(
-        electric_field, ion_current, magnetic_field, charge_density,
-        m_WarpX->GetEBUpdateEFlag(), true, true, end_time, false);
+    if (m_use_hlld) {
+        // Recompute the end-of-step Ohm E (diagnostics and coupling) from
+        // the accepted final state: the same Riemann-EMF assembly the
+        // residual used, evaluated at t^{n+1}.
+        FillCellCenteredElectromagneticFields();
+        ComputeFaceFluxes();
+        AssembleOhmElectricField(end_time);
+    } else {
+        const auto electric_field =
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, 0);
+        const auto ion_current =
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::current_fp, 0);
+        const auto charge_density =
+            m_WarpX->m_fields.get_mr_levels(FieldType::rho_fp, 0);
+        m_hybrid_pic_model->HybridPICSolveE(
+            electric_field, ion_current, magnetic_field, charge_density,
+            m_WarpX->GetEBUpdateEFlag(), true, true, end_time, false);
+    }
     if (m_z_neumann) {
         using ablastr::fields::Direction;
         for (int direction = 0; direction < 3; ++direction) {
@@ -1820,7 +2453,9 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
                 *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{direction}, 0));
         }
     }
-    m_state.Copy(FieldType::Efield_fp);
+    if (!m_use_hlld) {
+        m_state.Copy(FieldType::Efield_fp);
+    }
 
     if (m_hybrid_pic_model->m_add_external_fields) {
         // Leave total fields in Efield_fp/Bfield_fp between steps for

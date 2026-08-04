@@ -68,6 +68,18 @@ struct FluxParameters {
     // Star-state denominator guard scale (C^1 smooth-max floor, same
     // idiom as the internal-energy floor in load_cell_state).
     amrex::Real hlld_kappa_denominator = 0.05;
+    // Fan closure (implicit_mhd.hlld_fan_closure = barotropic): evaluate
+    // the WAVE-FAN structure -- the contact-speed estimate S_M and the
+    // star states built from it -- with the polytropic p_i(rho) instead
+    // of the recovered p_i(E_i). The physical fluxes (and hence the jump
+    // conditions, which telescope over the input states) keep the
+    // consistent pressure, so this only re-centers the dissipation
+    // structure. Rationale: p_i(E_i) feeding S_M couples the E_i block
+    // into the star algebra, whose curvature at rotational/compound
+    // structures (B_t through zero at finite B_n) defeats the Newton
+    // line search; the Brio-Wu lock bisection localized the mechanism
+    // to exactly this path.
+    bool hlld_barotropic_fan = false;
 };
 
 struct CellState {
@@ -607,6 +619,18 @@ hlld_flux (const CellState& left, const CellState& right,
     const amrex::Real s_right = smooth_max(
         u_left + left.fast_speed, u_right + right.fast_speed, signal_width);
 
+    // Barotropic fan closure: the fan structure sees the polytropic
+    // p_i(rho); the physical fluxes keep the consistent pressure (see
+    // FluxParameters::hlld_barotropic_fan).
+    amrex::Real p_fan_left = p_total_left;
+    amrex::Real p_fan_right = p_total_right;
+    if (parameters.hlld_barotropic_fan) {
+        p_fan_left +=
+            ion_pressure(left.safe_density, parameters) - left.ion_pressure;
+        p_fan_right += ion_pressure(right.safe_density, parameters) -
+                       right.ion_pressure;
+    }
+
     // m_k = rho_k (S_k - u_k): m_left <= -rho_L c_fL < 0 and
     // m_right >= rho_R c_fR > 0 (smoothing only widens the fan), so the
     // S_M denominator is strictly negative. Same expression as hllc_flux
@@ -614,7 +638,7 @@ hlld_flux (const CellState& left, const CellState& right,
     const amrex::Real m_left = left.safe_density * (s_left - u_left);
     const amrex::Real m_right = right.safe_density * (s_right - u_right);
     const amrex::Real s_mid =
-        (p_total_right - p_total_left + m_left * u_left -
+        (p_fan_right - p_fan_left + m_left * u_left -
          m_right * u_right) /
         (m_left - m_right);
 
@@ -840,9 +864,15 @@ hlld_flux (const CellState& left, const CellState& right,
 
     // Ion total energy: LLF enthalpy channel (H = E_i + p_i + p_e, no
     // magnetic terms) with the fast-speed alpha -- see the component-
-    // hybrid rationale in hllc_flux.
-    const amrex::Real alpha_energy =
-        std::max(left.fast_wave_speed, right.fast_wave_speed);
+    // hybrid rationale in hllc_flux. The alpha is assembled C-infinity:
+    // both the |u_n| of each side (a hard kink exactly where a fan-
+    // internal face crosses stagnation -- invisible under the barotropic
+    // closure because alpha multiplies the E_i jump) and the left/right
+    // max are smoothed with the signal width; the smoothing only raises
+    // alpha, and smooth_abs(0) = 0 keeps static contacts exact.
+    const amrex::Real alpha_energy = smooth_max(
+        smooth_abs(u_left, signal_width) + left.fast_speed,
+        smooth_abs(u_right, signal_width) + right.fast_speed, signal_width);
     flux.ion_energy =
         0.5 * (u_left * (left.ion_energy + left.ion_pressure +
                          left.electron_pressure) +

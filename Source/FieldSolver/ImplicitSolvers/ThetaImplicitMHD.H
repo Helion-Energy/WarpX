@@ -17,6 +17,9 @@
 #include <string>
 
 class HybridPICModel;
+namespace theta_implicit_mhd {
+struct FluxParameters;
+}
 
 /**
  * \brief Theta-implicit single-ion-fluid MHD solver.
@@ -36,6 +39,17 @@ class HybridPICModel;
  * block, with p_i = (gamma_i - 1) max(E_i - KE, U_i_floor); the default
  * barotropic closure evaluates p_i from the polytropic law and leaves the
  * (always allocated) ion-energy MultiFab zeroed and unused.
+ *
+ * With implicit_mhd.fluid_flux = hlld the solver switches to the
+ * conservative-form recast: the JFNK state carries B^{n+theta} (the Yee
+ * face-staggered Bfield_fp) instead of E, one HLLD Riemann solution per
+ * cell face supplies the fluid fluxes (with the Maxwell stress replacing
+ * the pointwise J x B force), the ideal EMF (upwinded constrained
+ * transport, so div B = 0 is preserved exactly by the Yee curl), and the
+ * ion-energy magnetic work; E becomes a derived Ohm's-law quantity
+ * (Riemann EMF + eta J) assembled by the solver itself rather than by
+ * HybridPICSolveE. The B-block residual is the theta-implicit Faraday
+ * update, B - B^n + theta dt curl E(B, fluid) = 0.
  */
 class ThetaImplicitMHD final : public ImplicitSolver
 {
@@ -98,6 +112,9 @@ class ThetaImplicitMHD final : public ImplicitSolver
     void ApplyNeumannZDomainGhosts (amrex::MultiFab& mf) const;
     void FillCellCenteredElectromagneticFields ();
     void ComputeFluidRHS (WarpXSolverVec& rhs, amrex::Real time) const;
+    void ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs, amrex::Real time) const;
+    void ComputeFaceFluxes ();
+    void AssembleOhmElectricField (amrex::Real time) const;
 
     [[nodiscard]] amrex::Real GetThetaForPC () const override { return 0.0; }
 
@@ -131,6 +148,30 @@ class ThetaImplicitMHD final : public ImplicitSolver
   private:
     inline static constexpr char TotalCurrentCCName[] = "implicit_mhd_total_current_cc";
     inline static constexpr char MagneticFieldCCName[] = "implicit_mhd_magnetic_field_cc";
+    // Per-face-direction Riemann flux registers for the conservative-form
+    // hlld path: one HLLD solution per face feeds the fluid divergences,
+    // the Maxwell stress, the ion-energy magnetic work, and the ideal EMF.
+    // Channel layout is FaceFluxComponent below.
+    inline static constexpr char FaceFluxZName[] = "implicit_mhd_face_flux_z";
+
+    // Component indices of the face-flux MultiFabs (hlld path).
+    struct FaceFluxComponent {
+        enum : int {
+            mass = 0,
+            momentum_x,   // total momentum flux, including Maxwell stress
+            momentum_y,
+            momentum_z,
+            magnetic_x,   // Maxwell-stress part of the momentum flux
+            magnetic_y,
+            magnetic_z,
+            electron_energy,
+            ion_energy,
+            electron_velocity,
+            induction_t1, // flux of B_t1 through the face = -EMF_t2
+            induction_t2, // flux of B_t2 through the face = +EMF_t1
+            count
+        };
+    };
     // Ghosted beginning-of-step fluid state (the solver-vec old-state
     // blocks are zero-ghost): filled once per step in OneStep, read by
     // the flux kernels' floor limiters, which gate on theta-extrapolated
@@ -179,6 +220,21 @@ class ThetaImplicitMHD final : public ImplicitSolver
     std::string m_r_open_fluid = "outflow";
     amrex::Real m_positivity_safety = 0.99;
     std::string m_fluid_flux = "centered";
+    // Conservative-form recast (fluid_flux = hlld): B replaces E as the
+    // JFNK array block and E is derived from the Riemann EMF + eta J.
+    bool m_use_hlld = false;
+    // C-infinity smoothing widths of the HLLD wave fan (see FluxParameters
+    // in ThetaImplicitMHD_K.H); inputs implicit_mhd.hlld_kappa_*.
+    amrex::Real m_hlld_kappa_signal = 0.05;
+    amrex::Real m_hlld_kappa_contact = 0.05;
+    amrex::Real m_hlld_kappa_bn = 0.05;
+    amrex::Real m_hlld_kappa_denominator = 0.05;
+    // HLLD fan closure: "consistent" (default; the wave fan sees the
+    // recovered p_i(E_i)) or "barotropic" (the fan structure sees the
+    // polytropic p_i(rho); physical fluxes stay consistent). The
+    // barotropic fan, with a widened hlld_kappa_bn, is the robustness
+    // configuration for violent rotational/compound structures.
+    std::string m_hlld_fan_closure = "consistent";
     // HLLC signal-speed closure: "consistent" (default; wave-speed
     // estimates from the same p_i as the physical flux) or "barotropic"
     // (wave-speed estimates from the polytropic p_i(rho), decoupling the
@@ -213,6 +269,7 @@ class ThetaImplicitMHD final : public ImplicitSolver
 
     void SaveMagneticField ();
     void UpdateWarpXFields (const WarpXSolverVec& state, amrex::Real start_time);
+    [[nodiscard]] theta_implicit_mhd::FluxParameters MakeFluxParameters () const;
 
     /** Split-field external-A bookkeeping: add (sign = +1) or subtract
      * (sign = -1) the stored hybrid external E/B fields to/from
