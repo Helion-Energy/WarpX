@@ -2190,13 +2190,14 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         fluid_flux="hllc".
 
     hlld_fan_closure: {"consistent", "barotropic"}, optional
-        Ion pressure seen by the HLLD wave-fan structure (contact-speed
-        estimate and star states). "barotropic" decouples the fan from the
-        ion-energy unknown (physical fluxes stay consistent) — the
-        robustness configuration for violent rotational/compound
-        structures, combined with hlld_kappa_bn ~ 0.2. Requires
-        fluid_flux="hlld", ion_closure="total_energy", and a positive
-        reference_ion_pressure.
+        Ion pressure seen by the HLLD wave-fan structure (signal bounds,
+        contact-speed estimate, and star states). "barotropic" decouples
+        the whole dissipation structure from the ion-energy unknown
+        (physical fluxes stay consistent) — the robustness configuration
+        for violent rotational/compound structures (combined with
+        hlld_kappa_bn ~ 0.2) and for strongly magnetized floor-density
+        halos. Requires fluid_flux="hlld", ion_closure="total_energy",
+        and a positive reference_ion_pressure.
 
     hlld_kappa_signal, hlld_kappa_contact, hlld_kappa_bn, hlld_kappa_denominator: float, optional
         C-infinity smoothing widths of the HLLD wave fan (defaults 0.05):

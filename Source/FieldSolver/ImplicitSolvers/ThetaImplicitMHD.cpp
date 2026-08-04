@@ -1473,7 +1473,13 @@ theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
         m_fluid_flux == "rusanov",
         m_fluid_flux == "hllc",
         m_ion_closure == "total_energy",
-        m_hllc_signal_closure == "barotropic",
+        // Under hlld the barotropic fan closure decouples the WHOLE
+        // dissipation structure from E_i: the signal bounds (Davis fast
+        // speeds, which parametrize every channel's upwind dissipation
+        // and the corner-EMF alphas) as well as S_M and the star states.
+        // The physical fluxes keep the consistent p_i(E_i) either way.
+        m_hllc_signal_closure == "barotropic" ||
+            (m_use_hlld && m_hlld_fan_closure == "barotropic"),
         m_hllc_contact_blend,
         m_theta};
     // Only read by the hlld kernels (the default 1.0 is unit-agnostic for

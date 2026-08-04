@@ -4175,13 +4175,15 @@ Jacobian probes.
     :type: ``string``
     :default: ``consistent``
 
-    Ion pressure seen by the HLLD wave-fan structure — the contact-speed
-    estimate :math:`S_M` and the star states built from it.
-    ``consistent`` uses the recovered :math:`p_i(E_i)`. ``barotropic``
-    evaluates the fan ion pressure from the polytropic law (the electron
-    and magnetic contributions stay consistent); the physical fluxes,
-    and hence the jump conditions, keep the consistent pressure, so only
-    the dissipation structure is re-centered. This is the robustness
+    Ion pressure seen by the HLLD wave-fan structure — the signal
+    bounds (the Davis fast-speed estimates, which parametrize every
+    channel's upwind dissipation and the RZ corner-EMF weights), the
+    contact-speed estimate :math:`S_M`, and the star states built from
+    it. ``consistent`` uses the recovered :math:`p_i(E_i)`.
+    ``barotropic`` evaluates the fan ion pressure from the polytropic
+    law (the electron and magnetic contributions stay consistent); the
+    physical fluxes, and hence the jump conditions, keep the consistent
+    pressure, so only the dissipation structure is re-centered. This is the robustness
     configuration for violent rotational/compound structures
     (:math:`B_t` through zero at finite :math:`B_n`), where the
     :math:`p_i(E_i)` coupling into the star algebra otherwise defeats
