@@ -3935,9 +3935,17 @@ Jacobian probes.
 
 .. warning::
 
-    The initial implementation supports one Cartesian, periodic AMR level,
-    one ion fluid, and no kinetic or regular WarpX fluid species. Embedded
-    boundaries, runtime load balancing, hybrid external currents/fields,
+    The implementation supports one AMR level, one ion fluid, and no kinetic
+    or regular WarpX fluid species. Cartesian domains must be periodic.
+    Cylindrical (RZ, ``m = 0``) domains require a non-periodic radial
+    direction whose upper boundary is either ``pec`` (conducting wall; the
+    fluid is reflected there) or ``open`` (the Green's-function free-space
+    boundary, evaluated inside every JFNK residual; the fluid gets
+    zero-gradient outflow ghosts there, and curl-free applied fields must
+    enter through the split external vector potential); non-periodic z ends
+    get the solver's own Neumann outflow ghost fills and require
+    ``boundary.field_lo/hi = none`` in z. Embedded
+    boundaries, runtime load balancing, hybrid external currents,
     Holmstrom vacuum regions, particle mass matrices, and existing field-only
     preconditioners are not supported. The prototype ``pc_mhd_block``
     preconditioner is available only with staggered fields, centered fluid
@@ -3975,8 +3983,9 @@ Jacobian probes.
     :unit: Pa
     :default: ``0``
 
-    Ion pressure at ``reference_mass_density``. The ion closure is
-    :math:`P_i=P_{i0}(\rho_i/\rho_{i0})^{\gamma_i}`.
+    Ion pressure at ``reference_mass_density``. The barotropic ion closure is
+    :math:`P_i=P_{i0}(\rho_i/\rho_{i0})^{\gamma_i}`. Not used by the
+    ``total_energy`` closure.
 
 .. pp:param:: implicit_mhd.ion_charge_to_mass
     :type: ``float``
@@ -3996,7 +4005,40 @@ Jacobian probes.
     :type: ``float``
     :default: ``5/3``
 
-    Exponent in the polytropic ion-pressure closure.
+    Ion adiabatic index: the exponent of the barotropic ion-pressure closure,
+    and the ratio of specific heats of the ``total_energy`` closure (which
+    requires :math:`\gamma_i>1`).
+
+.. pp:param:: implicit_mhd.ion_closure
+    :type: ``string``
+    :default: ``barotropic``
+
+    Ion thermodynamic closure. ``barotropic`` evaluates
+    :math:`P_i=P_{i0}(\rho_i/\rho_{i0})^{\gamma_i}` from
+    :pp:param:`implicit_mhd.reference_ion_pressure`. ``total_energy`` evolves
+    the conservative ion total energy density
+    :math:`E_i=U_i+\rho_i|\boldsymbol{u}_i|^2/2` as an additional JFNK
+    unknown, in enthalpy form (the flux carries the same total pressure as
+    the momentum equation),
+
+    .. math::
+
+        \partial_t E_i +
+        \nabla\cdot\left[\boldsymbol{u}_i(E_i+P_i+P_e)\right] =
+        \boldsymbol{u}_i\cdot(\boldsymbol{J}\times\boldsymbol{B})
+        + P_e\,\nabla\cdot\boldsymbol{u}_e,
+
+    with :math:`P_i=(\gamma_i-1)\max(E_i-\rho_i|\boldsymbol{u}_i|^2/2,
+    U_{i,\mathrm{floor}})`, so shock and compressional heating are captured
+    conservatively by the same face fluxes that transport mass and momentum.
+    The :math:`+P_e\nabla\cdot\boldsymbol{u}_e` source is evaluated on the
+    same faces as the electron equation's
+    :math:`-P_e\nabla\cdot\boldsymbol{u}_e` work, so the pair cancels
+    discretely and :math:`\sum(E_i+U_e)` is conserved exactly on a periodic
+    mesh (away from the floor limiters). Requires
+    :pp:param:`implicit_mhd.evolve_ion_fluid` ``= true``, a positive
+    :pp:param:`implicit_mhd.ion_pressure_floor`, and :math:`\gamma_i>1`; the
+    ``pc_mhd_block`` preconditioner supports only the barotropic closure.
 
 .. pp:param:: implicit_mhd.mass_density_floor
     :type: ``float``
@@ -4018,6 +4060,19 @@ Jacobian probes.
     The corresponding internal-energy floor is also enforced during Newton
     updates, matrix-free Jacobian probes, and final theta extrapolation.
 
+.. pp:param:: implicit_mhd.ion_pressure_floor
+    :type: ``float``
+    :unit: Pa
+    :default: ``0``
+
+    Ion-pressure floor of the ``total_energy`` closure. The corresponding
+    internal-energy floor :math:`U_{i,\mathrm{floor}} =
+    P_{i,\mathrm{floor}}/(\gamma_i-1)` clamps the pressure recovered from
+    :math:`E_i`, bounds Newton updates and matrix-free Jacobian probes, and
+    smoothly closes the advected :math:`E_i` flux of a donor cell near the
+    floor. Must be positive when ``implicit_mhd.ion_closure = total_energy``;
+    unused otherwise.
+
 .. pp:param:: implicit_mhd.fluid_flux
     :type: ``string``
     :default: ``centered``
@@ -4025,9 +4080,63 @@ Jacobian probes.
     Fluid face flux. ``centered`` gives the second-order, low-dissipation
     operator used by smooth-wave verification. ``rusanov`` uses a
     piecewise-constant local Lax--Friedrichs flux for conservative,
-    nonoscillatory fluid transport. It does not constitute a full MHD
-    Riemann solver because magnetic induction remains in the staggered
-    Ohm/Faraday update.
+    nonoscillatory fluid transport. ``hllc`` uses a contact-preserving
+    HLLC flux: stationary contacts and held equilibria are not diffused
+    (Rusanov diffuses every variable at the acoustic speed there), and a
+    smooth floor-outflow limiter closes the advected mass and
+    electron-energy fluxes (and the expansion pdV sink) as a donor cell
+    approaches its positivity floor. ``hllc`` requires
+    ``hybrid_pic_model.include_hall_term = false`` because the electron
+    energy is advected with the ion contact wave. None of these
+    constitute a full MHD Riemann solver because magnetic induction
+    remains in the staggered Ohm/Faraday update.
+
+.. pp:param:: implicit_mhd.r_open_fluid
+    :type: ``string``
+    :default: ``outflow``
+
+    Fluid ghost treatment at an open (Green's-function) upper radial
+    boundary (RZ only, with ``boundary.field_hi = open`` on ``r``).
+    ``outflow`` fills zero-gradient radial ghosts at :math:`r_{\max}`,
+    letting fluid leave with the field free-space-coupled. ``reflect``
+    keeps the no-normal-flow conducting-wall mirror for the fluid while
+    the field remains open — useful when a violent boundary relaxation
+    (e.g. releasing a wall-image-supported equilibrium) would otherwise
+    drain wall cells through their positivity floors.
+
+.. pp:param:: implicit_mhd.hllc_signal_closure
+    :type: ``string``
+    :default: ``consistent``
+
+    Ion pressure used in the HLLC wave-speed estimates (Davis bounds and
+    the local Lax--Friedrichs coefficient of the ion-energy channel).
+    ``consistent`` uses the same pressure as the physical flux.
+    ``barotropic`` evaluates the signal-speed ion pressure from the
+    polytropic law :math:`P_{i,\mathrm{ref}} (\rho/\rho_{\mathrm{ref}})
+    ^{\gamma_i}`, so the HLLC wave structure does not respond to the
+    ion-energy unknown at all; the physical fluxes and the contact speed
+    keep the consistent pressure, preserving flux continuity across the
+    contact. This improves Newton robustness at near-stagnant,
+    magnetically balanced interfaces where the recovered
+    :math:`p_i(E_i)` otherwise couples the ion-energy Jacobian block to
+    the Riemann wave fan. Requires ``fluid_flux = hllc``,
+    ``ion_closure = total_energy``, and a positive
+    ``reference_ion_pressure``.
+
+.. pp:param:: implicit_mhd.hllc_contact_blend
+    :type: ``float``
+    :default: ``0``
+
+    Smooth contact-side blending width :math:`\kappa` for the HLLC flux;
+    ``0`` keeps the standard hard upwind-side switch at zero contact
+    speed. When positive, the two side-complete star fluxes are blended
+    with a :math:`C^\infty` weight over contact speeds :math:`|S_*|
+    \lesssim \kappa \, (|S_L| + |S_R|)/2` (:math:`\kappa \approx 0.05`
+    recommended). At :math:`S_* = 0` the two branches carry the identical
+    flux, so static contacts remain machine-preserved; the blend removes
+    the switch kink that matrix-free Jacobian probes otherwise straddle
+    at near-stagnant balanced interfaces (e.g. an FRC separatrix), which
+    can defeat the Newton line search. Requires ``fluid_flux = hllc``.
 
 .. pp:param:: implicit_mhd.positivity_safety
     :type: ``float``
@@ -4070,6 +4179,15 @@ Jacobian probes.
 
     Required analytic initial electron-pressure profile, evaluated at cell
     centers and converted to electron internal energy.
+
+.. pp:param:: implicit_mhd.ion_pressure(x,y,z)
+    :type: ``string``
+    :unit: Pa
+
+    Analytic initial ion-pressure profile, evaluated at cell centers and
+    combined with the initial velocity to form the initial ion total energy.
+    Required when ``implicit_mhd.ion_closure = total_energy``; ignored by the
+    barotropic closure.
 
 .. pp:param:: implicit_mhd.velocity_[x/y/z](x,y,z)
     :type: ``string``

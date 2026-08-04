@@ -2156,9 +2156,47 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Advance ion density and momentum. Set False with Hall physics enabled
         and zero ion velocity for an electron-MHD limit.
 
-    fluid_flux: {"centered", "rusanov"}, optional
+    fluid_flux: {"centered", "rusanov", "hllc"}, optional
         Cell-face fluid flux. Centered is low-dissipation for smooth flows;
-        Rusanov adds local Lax--Friedrichs regularization.
+        Rusanov adds local Lax--Friedrichs regularization; HLLC is a
+        contact-preserving approximate Riemann flux.
+
+    r_open_fluid: {"outflow", "reflect"}, optional
+        Fluid ghost treatment at an open (Green's-function) upper radial
+        boundary: zero-gradient outflow (default) or the no-normal-flow
+        reflecting mirror (field stays free-space; removes the wall-cell
+        drainage channel during boundary relaxations).
+
+    hllc_signal_closure: {"consistent", "barotropic"}, optional
+        Ion pressure used in the HLLC wave-speed estimates. The default
+        "consistent" uses the same pressure as the physical flux;
+        "barotropic" uses the polytropic p_i(rho), decoupling the wave
+        structure from the ion-energy unknown for Newton robustness at
+        near-stagnant balanced interfaces. Requires fluid_flux="hllc" and
+        ion_closure="total_energy".
+
+    hllc_contact_blend: float, optional
+        Smooth contact-side blending width kappa for the HLLC flux
+        (default 0 keeps the hard upwind-side switch; ~0.05 recommended
+        when enabled). Blends the two side-complete star fluxes over
+        contact speeds |s_star| ~ kappa (|s_left| + |s_right|) / 2, keeping
+        the residual smooth for matrix-free Jacobian probes. Requires
+        fluid_flux="hllc".
+
+    ion_closure: {"barotropic", "total_energy"}, optional
+        Ion thermodynamic closure. The default barotropic closure evaluates
+        the ion pressure from reference_ion_pressure and gamma_i;
+        "total_energy" evolves the conservative ion total energy density as
+        an additional JFNK unknown, capturing shock and compressional
+        heating.
+
+    ion_pressure: float or str, optional
+        Initial ion pressure in Pa, optionally as an expression of ``x``,
+        ``y``, and ``z``. Required with ion_closure="total_energy".
+
+    ion_pressure_floor: float, optional
+        Positive ion-pressure floor in Pa whose internal-energy equivalent
+        bounds Newton updates. Required with ion_closure="total_energy".
 
     positivity_safety: float, optional
         Safety factor in (0, 1) for density/electron-energy bounded Newton
@@ -2183,7 +2221,16 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         gamma_i=None,
         mass_density_floor=None,
         electron_pressure_floor=None,
+        vacuum_mass_density=None,
+        external_field_iteration=None,
+        vacuum_drag_rate=None,
         fluid_flux=None,
+        r_open_fluid=None,
+        hllc_signal_closure=None,
+        hllc_contact_blend=None,
+        ion_closure=None,
+        ion_pressure=None,
+        ion_pressure_floor=None,
         positivity_safety=None,
         evolve_ion_fluid=None,
         include_joule_heating=None,
@@ -2204,7 +2251,16 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.gamma_i = gamma_i
         self.mass_density_floor = mass_density_floor
         self.electron_pressure_floor = electron_pressure_floor
+        self.vacuum_mass_density = vacuum_mass_density
+        self.external_field_iteration = external_field_iteration
+        self.vacuum_drag_rate = vacuum_drag_rate
         self.fluid_flux = fluid_flux
+        self.r_open_fluid = r_open_fluid
+        self.hllc_signal_closure = hllc_signal_closure
+        self.hllc_contact_blend = hllc_contact_blend
+        self.ion_closure = ion_closure
+        self.ion_pressure = ion_pressure
+        self.ion_pressure_floor = ion_pressure_floor
         self.positivity_safety = positivity_safety
         self.evolve_ion_fluid = evolve_ion_fluid
         self.include_joule_heating = include_joule_heating
@@ -2231,7 +2287,16 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.gamma_i = self.gamma_i
         implicit_mhd.mass_density_floor = self.mass_density_floor
         implicit_mhd.electron_pressure_floor = self.electron_pressure_floor
+        implicit_mhd.vacuum_mass_density = self.vacuum_mass_density
+        implicit_mhd.external_field_iteration = self.external_field_iteration
+        implicit_mhd.vacuum_drag_rate = self.vacuum_drag_rate
         implicit_mhd.fluid_flux = self.fluid_flux
+        implicit_mhd.r_open_fluid = self.r_open_fluid
+        implicit_mhd.hllc_signal_closure = self.hllc_signal_closure
+        implicit_mhd.hllc_contact_blend = self.hllc_contact_blend
+        implicit_mhd.ion_closure = self.ion_closure
+        implicit_mhd.__setattr__("ion_pressure(x,y,z)", self.ion_pressure)
+        implicit_mhd.ion_pressure_floor = self.ion_pressure_floor
         implicit_mhd.positivity_safety = self.positivity_safety
         implicit_mhd.evolve_ion_fluid = self.evolve_ion_fluid
         implicit_mhd.include_joule_heating = self.include_joule_heating
@@ -2496,6 +2561,12 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         # defined in my_constants with the same name but different value.
         self.mangle_dict = pywarpx.my_constants.add_keywords(self.user_defined_kw)
 
+        # Open BC means FieldBoundaryType::Open (the Green's-function
+        # free-space boundary on the RZ r_hi face) for the hybrid solver,
+        # rather than a perfectly-matched layer (PML is not implemented for
+        # the hybrid field advance).
+        BC_map["open"] = "open"
+
         self.grid.grid_initialize_inputs()
 
         pywarpx.algo.maxwell_solver = self.method
@@ -2612,12 +2683,26 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
                             field_dict["Az_external_function"], self.mangle_dict
                         ),
                     )
-                pywarpx.external_vector_potential.__setattr__(
-                    f"{field_name}.A_time_external_function(t)",
-                    pywarpx.my_constants.mangle_expression(
-                        field_dict["A_time_external_function"], self.mangle_dict
-                    ),
-                )
+                if field_dict.get("python_scale", False):
+                    # Piecewise-linear scale segments pushed from python
+                    # (warpx.set_external_vector_potential_scale) instead of
+                    # a compiled time function.
+                    pywarpx.external_vector_potential.__setattr__(
+                        f"{field_name}.python_scale", 1
+                    )
+                    if "initial_scale" in field_dict:
+                        pywarpx.external_vector_potential.__setattr__(
+                            f"{field_name}.initial_scale",
+                            field_dict["initial_scale"],
+                        )
+                else:
+                    pywarpx.external_vector_potential.__setattr__(
+                        f"{field_name}.A_time_external_function(t)",
+                        pywarpx.my_constants.mangle_expression(
+                            field_dict["A_time_external_function"],
+                            self.mangle_dict,
+                        ),
+                    )
 
 
 class ElectrostaticSolver(picmistandard.PICMI_ElectrostaticSolver):
