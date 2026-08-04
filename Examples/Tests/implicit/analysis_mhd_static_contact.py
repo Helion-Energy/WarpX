@@ -34,7 +34,7 @@ def get_data(plotfile):
 initial_ds, initial = get_data(sys.argv[1])
 final_ds, final = get_data(sys.argv[2])
 mode = sys.argv[3]
-assert mode in ("hllc", "rusanov")
+assert mode in ("hllc", "hlld", "rusanov")
 
 initial_density = initial["boxlib", "implicit_mhd_mass_density"].value.ravel()
 final_density = final["boxlib", "implicit_mhd_mass_density"].value.ravel()
@@ -57,7 +57,7 @@ drift = np.max(np.abs(final_density - initial_density))
 print(f"mode = {mode}: max |rho_final - rho_initial| = {drift:.3e} "
       f"({drift / density_low:.3e} rho_low)")
 
-if mode == "hllc":
+if mode in ("hllc", "hlld"):
     # exact preservation to solver roundoff (100 steps at newton
     # atol 1e-11 in scaled units)
     assert drift < 1.0e-9 * density_low, (
@@ -82,7 +82,7 @@ assert np.max(final_density) <= density_high + density_tolerance
 # hllc: the preserved state has an identically zero residual, so Newton
 # legitimately exits with 0 iterations; rusanov must be doing real work
 newton_history = np.atleast_2d(np.loadtxt("diags/newton.txt"))
-minimum_iterations = 0 if mode == "hllc" else 1
+minimum_iterations = 0 if mode in ("hllc", "hlld") else 1
 assert minimum_iterations <= newton_history[-1][2] <= 12
 
 print(f"mode = {mode}: PASS")

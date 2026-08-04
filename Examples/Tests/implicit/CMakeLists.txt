@@ -369,6 +369,106 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# ---------------------------------------------------------------------
+# Conservative-form recast (fluid_flux = hlld): B is the JFNK array block
+# and one HLLD Riemann solution per face feeds the fluid divergences, the
+# Maxwell stress, and the ideal EMF.
+# ---------------------------------------------------------------------
+
+# circularly polarized Alfven wave: exact nonlinear solution; pins the
+# EMF signs, the propagation speed, the first-order dissipation scale,
+# and the absence of magnetosonic contamination
+add_warpx_test(
+    test_1d_theta_implicit_mhd_cpaw  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_cpaw  # inputs
+    "analysis_mhd_cpaw.py diags/diag000000 diags/diag000080 diags/diag000160"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Brio & Wu shock tube in the robustness configuration (barotropic fan
+# closure + widened kappa_bn): with the consistent fan at default
+# kappa_bn this deterministically locks the Newton line search at step
+# 18, so completion is the Newton-lock regression gate
+add_warpx_test(
+    test_1d_theta_implicit_mhd_briowu  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_briowu  # inputs
+    "analysis_mhd_briowu.py diags/diag000000 diags/diag000200"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# static magnetized tangential discontinuity (the FRC-separatrix
+# invariant) must be machine-preserved through the full assembly
+add_warpx_test(
+    test_1d_theta_implicit_mhd_tangential_discontinuity  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_tangential_discontinuity  # inputs
+    "analysis_mhd_tangential_discontinuity.py diags/diag000000 diags/diag000100 hlld"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# calibration variant: the SAME state must diffuse under Rusanov,
+# proving the exactness assert is discriminating
+add_warpx_test(
+    test_1d_theta_implicit_mhd_tangential_discontinuity_rusanov  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_tangential_discontinuity implicit_mhd.fluid_flux=rusanov"  # inputs
+    "analysis_mhd_tangential_discontinuity.py diags/diag000000 diags/diag000100 rusanov"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# hlld variants of the closure/positivity suite: the recast must
+# reproduce the exact-Riemann plateaus, the exact static contact, and
+# the exact fluid-energy pairing of the hllc/rusanov paths
+add_warpx_test(
+    test_1d_theta_implicit_mhd_sod_hlld  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_sod implicit_mhd.fluid_flux=hlld"  # inputs
+    "analysis_mhd_sod.py diags/diag000000 diags/diag000200 total_energy"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_sod_pe_dominated_hlld  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_sod_pe_dominated implicit_mhd.fluid_flux=hlld"  # inputs
+    "analysis_mhd_sod_pe_dominated.py diags/diag000000 diags/diag000200"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_static_contact_hlld  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_static_contact implicit_mhd.fluid_flux=hlld"  # inputs
+    "analysis_mhd_static_contact.py diags/diag000000 diags/diag000100 hlld"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_energy_conservation_hlld  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_energy_conservation implicit_mhd.fluid_flux=hlld"  # inputs
+    "analysis_mhd_energy_conservation.py diags/diag000000 diags/diag000100"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_2d_theta_implicit_jfnk_vandb  # name
     2  # dims

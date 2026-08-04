@@ -1,0 +1,114 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.Ti = 100.0
+my_constants.P0 = n0 * Ti * q_e
+my_constants.gamma = 5.0/3.0
+# Static tangential discontinuity: B_t jumps between the diaphragms with
+# ZERO normal field, the density jumps with it, and the ELECTRON pressure
+# carries the total-pressure balance, p_e + B_t^2/2mu0 = const (the ion
+# pressure and hence E_i are uniform, so every hlld channel is exactly
+# inert: chi = 0 at B_n = 0 and q(0) = 0 for the static fan). This is the
+# FRC-separatrix invariant of the kernel harness, exercised through the
+# full assembly: face fluxes, EMF, Yee curl, floors, and limiters.
+my_constants.Bt0 = sqrt(mu0 * P0)
+my_constants.pe0 = 0.75 * P0
+my_constants.zl = 0.45
+my_constants.zr = 1.15
+my_constants.rho_ratio = 0.4
+my_constants.nz = 128
+my_constants.Lz = 1.6
+my_constants.v0 = sqrt(P0/rho0)
+my_constants.t_end = 0.1 / v0
+my_constants.dt = t_end / 100
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 100
+amr.n_cell = nz
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-11
+newton.relative_tolerance = 1.0e-9
+newton.max_iterations = 20
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-9
+gmres.max_iterations = 400
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Ti
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = Bt0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = P0
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.ion_pressure_floor = 1.0e-6 * P0
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-9 * P0
+implicit_mhd.fluid_flux = hlld
+implicit_mhd.mass_density(x,y,z) = "rho0 * if((z>zl) and (z<zr), 1.0, rho_ratio)"
+implicit_mhd.ion_pressure(x,y,z) = "P0"
+# total-pressure balance: pe + B_t^2/2mu0 = pe0 + Bt0^2/2mu0 everywhere
+implicit_mhd.electron_pressure(x,y,z) = \
+    "pe0 + if((z>zl) and (z<zr), 0.0, Bt0*Bt0/(2*mu0))"
+
+warpx.B_ext_grid_init_style = parse_b_ext_grid_function
+warpx.Bx_external_grid_function(x,y,z) = "0.0"
+warpx.By_external_grid_function(x,y,z) = "Bt0 * if((z>zl) and (z<zr), 1.0, 0.0)"
+warpx.Bz_external_grid_function(x,y,z) = "0.0"
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 100
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bx By Bz implicit_mhd_mass_density \
+                       implicit_mhd_ion_energy implicit_mhd_electron_energy
+diag1.write_species = 0
