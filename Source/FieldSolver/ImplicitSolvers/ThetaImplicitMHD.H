@@ -181,8 +181,10 @@ class ThetaImplicitMHD final : public ImplicitSolver
             electron_velocity,
             induction_t1, // flux of B_t1 through the face = -EMF_t2
             induction_t2, // flux of B_t2 through the face = +EMF_t1
-            signal_left,  // smoothed Davis bounds, for the corner UCT EMF
+            signal_left,  // smoothed Davis bounds: corner-EMF upwind weights
             signal_right,
+            signal_alfven_left,  // fan rotational bounds S_M -+ c_An*:
+            signal_alfven_right, // corner-EMF dissipation coefficients
             count
         };
     };

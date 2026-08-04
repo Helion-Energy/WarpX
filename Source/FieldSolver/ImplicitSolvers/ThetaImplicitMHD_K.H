@@ -130,6 +130,14 @@ struct FaceFlux {
     // transport (UCT) edge assembly in the recast.
     amrex::Real signal_left = 0.0;
     amrex::Real signal_right = 0.0;
+    // Rotational (Alfven) wave speeds of the HLLD fan, S_M -+ c_An*: the
+    // scale at which the fan itself dissipates tangential-field jumps.
+    // They collapse to S_M as B_n -> 0 (kappa_bn-smoothed), and S_M -> 0
+    // for static pressure-balanced states, so corner-EMF dissipation
+    // built on them vanishes for held equilibria instead of diffusing
+    // them at the fast-speed scale.
+    amrex::Real signal_alfven_left = 0.0;
+    amrex::Real signal_alfven_right = 0.0;
 };
 
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
@@ -928,6 +936,8 @@ hlld_flux (const CellState& left, const CellState& right,
 
     flux.signal_left = s_left;
     flux.signal_right = s_right;
+    flux.signal_alfven_left = s_alfven_left;
+    flux.signal_alfven_right = s_alfven_right;
     return flux;
 }
 

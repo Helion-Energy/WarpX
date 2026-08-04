@@ -518,6 +518,20 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# static theta-pinch column (pe-balanced Bz(r), u = 0, B_n = 0): the
+# UCT-HLLD corner E_theta must be exactly inert -- the equilibrium-hold
+# gate for the corner-EMF dissipation (fast-bound coefficients diffuse
+# this profile within the run)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_theta_pinch  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_theta_pinch  # inputs
+    "analysis_mhd_theta_pinch.py diags/diag000000 diags/diag000100"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # hlld variant of the RZ outflow test (Neumann-z ends, PEC wall, axis)
 add_warpx_test(
     test_rz_theta_implicit_mhd_z_outflow_hlld  # name

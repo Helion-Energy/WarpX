@@ -1925,6 +1925,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     constexpr int flux_induction_t2 = FaceFluxComponent::induction_t2;
     constexpr int flux_signal_left = FaceFluxComponent::signal_left;
     constexpr int flux_signal_right = FaceFluxComponent::signal_right;
+    constexpr int flux_alfven_left = FaceFluxComponent::signal_alfven_left;
+    constexpr int flux_alfven_right = FaceFluxComponent::signal_alfven_right;
 
     for (amrex::MFIter mfi(face_flux_mf); mfi.isValid(); ++mfi) {
         // Grow in the transverse direction(s): the corner UCT EMF reads
@@ -2080,6 +2082,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
             flux_arr(i, j, k, flux_induction_t2) = flux.induction_t2;
             flux_arr(i, j, k, flux_signal_left) = flux.signal_left;
             flux_arr(i, j, k, flux_signal_right) = flux.signal_right;
+            flux_arr(i, j, k, flux_alfven_left) = flux.signal_alfven_left;
+            flux_arr(i, j, k, flux_alfven_right) = flux.signal_alfven_right;
         });
     }
 #else
@@ -2322,6 +2326,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
         m_ion_charge_to_mass * m_mass_density_floor;
     const amrex::Real density_floor = m_mass_density_floor;
     const amrex::Real kappa_signal = m_hlld_kappa_signal;
+    const amrex::Real kappa_denominator = m_hlld_kappa_denominator;
     const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
     const amrex::Real radial_cell_size = m_WarpX->Geom(0).CellSize(0);
     const amrex::Real axial_cell_size = m_WarpX->Geom(0).CellSize(1);
@@ -2334,6 +2339,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
     constexpr int flux_induction_t2 = FaceFluxComponent::induction_t2;
     constexpr int flux_signal_left = FaceFluxComponent::signal_left;
     constexpr int flux_signal_right = FaceFluxComponent::signal_right;
+    constexpr int flux_alfven_left = FaceFluxComponent::signal_alfven_left;
+    constexpr int flux_alfven_right = FaceFluxComponent::signal_alfven_right;
 
     // Er on z-faces (r-cc, z-nodal): direct induction flux + eta J_r.
     for (amrex::MFIter mfi(electric_field_r); mfi.isValid(); ++mfi) {
@@ -2496,16 +2503,25 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
             }
             // Smoothed one-sided signal magnitudes, combined over the two
             // adjacent faces of each family: alpha+ from the right-going
-            // bound S_R, alpha- from the left-going bound S_L.
+            // bound, alpha- from the left-going bound. Evaluated for two
+            // channel pairs: the fast Davis bounds set the upwind WEIGHTS
+            // of the four-state average (their span is bounded below by
+            // the fast scale, so the weights are always well defined),
+            // while the fan's rotational bounds S_M -+ c_An set the
+            // DISSIPATION coefficients (UCT-HLLD): tangential-field jumps
+            // are carried by the rotational discontinuities, so a static
+            // pressure-balanced equilibrium (S_M = 0, and c_An* -> 0 with
+            // B_n) suffers no corner diffusion instead of being destroyed
+            // at the fast-speed scale.
             const auto alpha_pair =
                 [=] (const amrex::Array4<const amrex::Real>& faces,
-                     const int i1, const int j1, const int i2,
-                     const int j2, amrex::Real& alpha_plus,
-                     amrex::Real& alpha_minus) {
-                const amrex::Real sl1 = faces(i1, j1, k, flux_signal_left);
-                const amrex::Real sr1 = faces(i1, j1, k, flux_signal_right);
-                const amrex::Real sl2 = faces(i2, j2, k, flux_signal_left);
-                const amrex::Real sr2 = faces(i2, j2, k, flux_signal_right);
+                     const int i1, const int j1, const int i2, const int j2,
+                     const int channel_left, const int channel_right,
+                     amrex::Real& alpha_plus, amrex::Real& alpha_minus) {
+                const amrex::Real sl1 = faces(i1, j1, k, channel_left);
+                const amrex::Real sr1 = faces(i1, j1, k, channel_right);
+                const amrex::Real sl2 = faces(i2, j2, k, channel_left);
+                const amrex::Real sr2 = faces(i2, j2, k, channel_right);
                 const amrex::Real w1 = kappa_signal * (sr1 - sl1);
                 const amrex::Real w2 = kappa_signal * (sr2 - sl2);
                 const amrex::Real w = 0.5_rt * (w1 + w2);
@@ -2523,10 +2539,20 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
             };
             amrex::Real alpha_r_plus;
             amrex::Real alpha_r_minus;
-            alpha_pair(rface, i, j - 1, i, j, alpha_r_plus, alpha_r_minus);
+            alpha_pair(rface, i, j - 1, i, j, flux_signal_left,
+                       flux_signal_right, alpha_r_plus, alpha_r_minus);
             amrex::Real alpha_z_plus;
             amrex::Real alpha_z_minus;
-            alpha_pair(zface, i - 1, j, i, j, alpha_z_plus, alpha_z_minus);
+            alpha_pair(zface, i - 1, j, i, j, flux_signal_left,
+                       flux_signal_right, alpha_z_plus, alpha_z_minus);
+            amrex::Real alfven_r_plus;
+            amrex::Real alfven_r_minus;
+            alpha_pair(rface, i, j - 1, i, j, flux_alfven_left,
+                       flux_alfven_right, alfven_r_plus, alfven_r_minus);
+            amrex::Real alfven_z_plus;
+            amrex::Real alfven_z_minus;
+            alpha_pair(zface, i - 1, j, i, j, flux_alfven_left,
+                       flux_alfven_right, alfven_z_plus, alfven_z_minus);
 
             // Cell-centered ideal EMF states of the four cells around the
             // corner: E_theta = -(u x B)_theta = u_r B_z - u_z B_r.
@@ -2557,6 +2583,11 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
             // Dissipation on the native staggered TOTAL fields: +z-jump
             // of Br (from the z-face Riemann limit of E_theta = -F_Br)
             // and -r-jump of Bz (from the r-face limit E_theta = +F_Bz).
+            // The coefficients are built from the ROTATIONAL alphas (the
+            // scale at which the face fan itself dissipates tangential
+            // field), with the denominator anchored by the fast span so
+            // the coefficient goes to zero smoothly (never 0/0) as the
+            // rotational bounds collapse onto a static contact.
             amrex::Real br_low = br_stag(i, j - 1, k);
             amrex::Real br_high = br_stag(i, j, k);
             amrex::Real bz_low = bz_stag(i - 1, j, k);
@@ -2567,9 +2598,17 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
                 bz_low += bz_ext(i - 1, j, k);
                 bz_high += bz_ext(i, j, k);
             }
+            const amrex::Real coefficient_z =
+                alfven_z_plus * alfven_z_minus /
+                (alfven_z_plus + alfven_z_minus +
+                 kappa_denominator * sum_z);
+            const amrex::Real coefficient_r =
+                alfven_r_plus * alfven_r_minus /
+                (alfven_r_plus + alfven_r_minus +
+                 kappa_denominator * sum_r);
             const amrex::Real dissipation =
-                (alpha_z_plus * alpha_z_minus / sum_z) * (br_high - br_low) -
-                (alpha_r_plus * alpha_r_minus / sum_r) * (bz_high - bz_low);
+                coefficient_z * (br_high - br_low) -
+                coefficient_r * (bz_high - bz_low);
 
             // J_theta is corner-staggered: native value, no interpolation.
             const amrex::Real jt_corner = j_theta(i, j, k);

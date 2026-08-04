@@ -4111,11 +4111,16 @@ Jacobian probes.
     same cylindrical vector Laplacian as the hybrid solver).
     In RZ, :math:`E_r` and :math:`E_z` are direct face Riemann induction
     fluxes at their native Yee staggering, :math:`E_\theta` is assembled
-    on cell corners with a smoothed UCT-HLL (Londrillo--Del Zanna)
-    average using the stored face signal speeds (zero on axis by
-    :math:`m = 0` parity), and the cylindrical geometric source terms
-    carry the Maxwell-stress parts consistently in both the momentum and
-    ion-energy equations.
+    on cell corners with a smoothed UCT-HLLD (Londrillo--Del Zanna
+    upwind-CT) form: the four-state upwind average is weighted by the
+    stored fast Davis bounds, while the dissipation coefficients come
+    from the fan's rotational wave speeds :math:`S_M \mp c_{An}` — the
+    scale at which HLLD itself dissipates tangential-field jumps — so a
+    static pressure-balanced equilibrium suffers no corner diffusion
+    instead of being destroyed at the fast-speed scale
+    (:math:`E_\theta` is zero on axis by :math:`m = 0` parity). The
+    cylindrical geometric source terms carry the Maxwell-stress parts
+    consistently in both the momentum and ion-energy equations.
     ``hlld`` requires ``include_hall_term = false``,
     ``include_electron_pressure_term = false``, and
     ``jacobian.pc_type = none``. The wave fan is assembled

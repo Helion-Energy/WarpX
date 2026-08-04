@@ -116,12 +116,27 @@ ExternalFieldParams::ExternalFieldParams(const amrex::ParmParse& pp_warpx)
         std::string str_Bz_ext_grid_function;
 
 #if defined(WARPX_DIM_RZ)
+        // Only the axial component supports a parser in RZ (evaluated
+        // with x = r at the staggered radii, so Bz(r, z) is fine); Br
+        // and Btheta are hardcoded to zero. Warn at high priority only
+        // when a user-supplied Br/Btheta expression is actually being
+        // discarded.
+        std::string str_Br_requested = "0";
+        std::string str_Bt_requested = "0";
+        pp_warpx.query("Bx_external_grid_function(x,y,z)", str_Br_requested);
+        pp_warpx.query("By_external_grid_function(x,y,z)", str_Bt_requested);
+        const bool discards_user_expression =
+            (str_Br_requested != "0" && str_Br_requested != "0.0") ||
+            (str_Bt_requested != "0" && str_Bt_requested != "0.0");
         std::stringstream warnMsg;
         warnMsg << "Parser for external B (r and theta) fields does not work with cylindrical and spherical\n"
             << "The initial Br and Bt fields are currently hardcoded to 0.\n"
-            << "The initial Bz field should only be a function of z.\n";
+            << "The initial Bz field may depend on r (passed as x) and z.\n";
         ablastr::warn_manager::WMRecordWarning(
-          "Inputs", warnMsg.str(), ablastr::warn_manager::WarnPriority::high);
+          "Inputs", warnMsg.str(),
+          discards_user_expression
+              ? ablastr::warn_manager::WarnPriority::high
+              : ablastr::warn_manager::WarnPriority::low);
         str_Bx_ext_grid_function = "0";
         str_By_ext_grid_function = "0";
 #else
