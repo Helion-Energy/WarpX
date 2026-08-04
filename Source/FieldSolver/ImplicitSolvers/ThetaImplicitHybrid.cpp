@@ -1082,6 +1082,26 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
             m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{0}, 0)->nGrowVect();
         m_WarpX->FillBoundaryB(ngB, true /* sync nodal points */);
     } else {
+        // The residual evaluations (and the post-solve UpdateWarpXFields)
+        // leave Bfield_fp holding the TOTAL theta-time field, with
+        // B_ext^{n+theta} assembled on top of the Faraday-advanced plasma
+        // field, while B_old holds the plasma response alone. Strip the
+        // still-stored theta-time external before the theta-extrapolation:
+        // extrapolating the total against the plasma B_old amplifies
+        // B_ext^{n+theta} by 1/theta, and with B_ext^{n+1} restored below
+        // the carried plasma field would gain a spurious
+        // (1/theta)*B_ext^{n+theta} every step (the vacuum-ramp deck
+        // integrates the programmed ramp to a ~300x overshoot).
+        if (m_hybrid_pic_model->m_add_external_fields) {
+            using ablastr::fields::Direction;
+            for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+                for (int dir = 0; dir < 3; ++dir) {
+                    amrex::MultiFab & B = *m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{dir}, lev);
+                    amrex::MultiFab const & B_ext = *m_WarpX->m_fields.get(FieldType::hybrid_B_fp_external, Direction{dir}, lev);
+                    amrex::MultiFab::Subtract(B, B_ext, 0, 0, B.nComp(), B.nGrowVect());
+                }
+            }
+        }
         // B^{n+1}
         ablastr::fields::MultiLevelVectorField const& B_old =
             m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::B_old, 0);
