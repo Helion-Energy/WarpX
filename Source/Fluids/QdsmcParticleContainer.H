@@ -107,13 +107,23 @@ public:
     using const_iterator = amrex::ParConstIterSoA<QdsmcPIdx::nattribs, 0>;
 
     /**
-     * @brief Initialize one particle per cell at the cell center.
+     * @brief Initialize one particle per cell.
      *
-     * For dim D < 3 the missing position components of the home are set to 0.
-     * Particle velocity, entropy and np_real are all set to 0; subsequent
-     * SetV/SetK calls will populate them.
+     * Default: cell center. If markers_at_nodes is set, place each marker at
+     * the low-side node of its cell so order-1 gather/deposit is the identity
+     * at rest (no numerical K diffusion). For dim D < 3 missing home
+     * components are 0. Velocity/entropy/np_real start at 0.
      */
     void InitParticles (int lev);
+
+    /** Place markers at low-side nodes instead of cell centers (default false). */
+    void SetMarkersAtNodes (bool markers_at_nodes) { m_markers_at_nodes = markers_at_nodes; }
+
+    /** QDSMC deposit shape order: 0 = NGP, 1 = linear (default 1). */
+    void SetDeposOrder (int depos_order) { m_depos_order = depos_order; }
+
+    bool MarkersAtNodes () const { return m_markers_at_nodes; }
+    int DeposOrder () const { return m_depos_order; }
 
     /**
      * @brief Gather a 3-component vector field (e.g. V_e) at the particle's
@@ -147,15 +157,16 @@ public:
 
     /**
      * @brief Scatter the per-particle entropy (K_e * N_e) onto Kfield via
-     *        linear shape-factor weighted atomic add.
+     *        shape-factor weighted atomic add (order from SetDeposOrder).
      *        Kfield is zeroed at the start of this call.
      */
     void DepositK (int lev, amrex::MultiFab & Kfield);
 
     /**
-     * @brief Scatter the per-particle weight np_real/V_cell (= n_e) onto
-     *        Field via linear shape-factor weighted atomic add.
-     *        Field is zeroed at the start of this call.
+     * @brief Scatter the per-particle extensive electron count np_real
+     *        (= n_e * V_phys) onto Field via shape-factor weighted atomic
+     *        add (order from SetDeposOrder). Field is zeroed at the start.
+     *        V_phys includes the cylindrical metric (2 π r) in RZ/RCYLINDER.
      */
     void DepositField (int lev, amrex::MultiFab & Field);
 
@@ -168,12 +179,15 @@ public:
 private:
     /**
      * @brief Scatter one real attribute of every marker onto a nodal
-     *        MultiFab with the order-1 charge-deposition kernel:
-     *        field += scale * attribute * S(x). The field is zeroed first
-     *        and guard-cell deposits are summed back in afterward.
+     *        MultiFab with the charge-deposition kernel of order
+     *        m_depos_order: field += scale * attribute * S(x). The field
+     *        is zeroed first and guard-cell deposits are summed back in.
      */
     void DepositScalar (int lev, int attr, amrex::Real scale,
                         amrex::MultiFab & field);
+
+    bool m_markers_at_nodes = false;
+    int m_depos_order = 1;
 };
 
 #endif // WARPX_QDSMCPARTICLECONTAINER_H_

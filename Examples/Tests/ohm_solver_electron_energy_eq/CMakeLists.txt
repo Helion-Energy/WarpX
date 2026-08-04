@@ -30,3 +30,15 @@ add_warpx_test(
     "analysis_default_regression.py --path diags/field_diags"  # checksum
     OFF  # dependency
 )
+
+# RCYLINDER: QDSMC entropy transport with cylindrical volume weighting
+# (N_e = n_e * 2 π r Δr). Sources off → T_e must track the polytropic adiabat.
+add_warpx_test(
+    test_rcylinder_ohm_solver_electron_energy_adiabat  # name
+    RCYLINDER  # dims
+    2  # nprocs
+    "inputs_test_rcylinder_ohm_solver_electron_energy_adiabat"  # inputs
+    "analysis_adiabat_rcylinder.py --diag-dir diags --tol-median 0.05 --tol-max 0.25"  # analysis
+    OFF  # checksum (physics check is the analysis script)
+    OFF  # dependency
+)

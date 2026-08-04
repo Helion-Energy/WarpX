@@ -49,6 +49,63 @@ using namespace amrex::literals;
 // stored with NODAL staggering; every gather and scatter below uses the
 // matching order-1 (linear) nodal weights, so a marker at rest reproduces
 // its cell values exactly.
+//
+// Markers carry *extensive* electron count N_e and entropy K_e*N_e. In
+// Cartesian geometry the cell volume is ∏ dx. In RZ / RCYLINDER the physical
+// volume includes the cylindrical metric 2 π r (Verboncoeur axis factor at
+// r = 0), matching ApplyInverseVolumeScalingToChargeDensity / FieldEnergy.
+// Depositing N_e (not n_e) and recovering T_e from deposited (K*N)/N keeps
+// extensive entropy conserved when markers move across different r.
+
+namespace
+{
+    /**
+     * Physical volume associated with a marker at radial coordinate r
+     * (x in RZ/RCYLINDER). Cartesian: ∏ dx. Cylindrical: (2 π r) * ∏ dx
+     * for r > 0; Verboncoeur axis volume at r = 0.
+     */
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    amrex::Real
+    qdsmc_physical_volume (
+        amrex::Real r,
+        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& dx,
+        amrex::Real const axis_volume_factor,
+        bool const marker_at_node)
+    {
+        amrex::Real vol = 1.0_rt;
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            vol *= dx[d];
+        }
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+        // A node marker represents the cell on its high-r side. Use that
+        // cell's effective radial center for the annular volume away from
+        // the axis. At r=0 retain WarpX's special axis control volume.
+        if (marker_at_node && r > 0.0_rt) {
+            r += 0.5_rt * dx[0];
+        }
+        r = amrex::Math::abs(r);
+        if (r == 0.0_rt) {
+            // Match ApplyInverseVolumeScalingToChargeDensity axis branch:
+            // geometric factor (pi * dr * axis_volume_factor) times the product
+            // of the remaining cell sizes already in vol (= dr * ...).
+            // vol_cart = dr * (dz ...), want pi*dr*axis_factor*(dz ...)
+            //          = vol_cart * (pi * axis_factor).
+            vol *= MathConst::pi * axis_volume_factor;
+        } else {
+            vol *= 2.0_rt * MathConst::pi * r;
+        }
+#elif defined(WARPX_DIM_RSPHERE)
+        r = amrex::Math::abs(r);
+        if (r == 0.0_rt) {
+            vol *= (4.0_rt / 3.0_rt) * MathConst::pi * axis_volume_factor;
+        } else {
+            vol *= 4.0_rt * MathConst::pi * r * r;
+        }
+#endif
+        amrex::ignore_unused(r);
+        return vol;
+    }
+}
 
 
 QdsmcParticleContainer::QdsmcParticleContainer (amrex::AmrCore* amr_core)
@@ -140,6 +197,11 @@ void QdsmcParticleContainer::InitParticles (int lev)
 
         auto * const poffset = offset.data();
 
+        // Marker home: cell center (default) or low-side node of the cell.
+        // At a node, order-1 gather/deposit of a nodal field is the identity,
+        // so rest-state K is not diffused. Capture half by value for the GPU lambda.
+        amrex::Real const half = m_markers_at_nodes ? amrex::Real(0) : amrex::Real(0.5);
+
         amrex::ParallelFor(tile_box,
         [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
         {
@@ -148,37 +210,33 @@ void QdsmcParticleContainer::InitParticles (int lev)
             long const ip = poffset[tile_box.index(iv)];
 
             pa_idcpu[ip] = amrex::SetParticleIDandCPU(pid + ip, cpuid);
-
-            // Compute the cell-center position in physical units. The field
-            // dimension determines which axis indices are physically meaningful;
-            // missing axes are set to 0 on the particle's home record.
 #if defined(WARPX_DIM_3D)
-            amrex::Real const x_pos = plo[0] + (iv[0] + amrex::Real(0.5)) * dx_arr[0];
-            amrex::Real const y_pos = plo[1] + (iv[1] + amrex::Real(0.5)) * dx_arr[1];
-            amrex::Real const z_pos = plo[2] + (iv[2] + amrex::Real(0.5)) * dx_arr[2];
+            amrex::Real const x_pos = plo[0] + (iv[0] + half) * dx_arr[0];
+            amrex::Real const y_pos = plo[1] + (iv[1] + half) * dx_arr[1];
+            amrex::Real const z_pos = plo[2] + (iv[2] + half) * dx_arr[2];
             pa[QdsmcPIdx::x][ip] = x_pos;
             pa[QdsmcPIdx::y][ip] = y_pos;
             pa[QdsmcPIdx::z][ip] = z_pos;
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
             // In 2D Cartesian and RZ the second in-plane coord is z; the y
             // axis is the unused out-of-plane direction.
-            amrex::Real const x_pos = plo[0] + (iv[0] + amrex::Real(0.5)) * dx_arr[0];
+            amrex::Real const x_pos = plo[0] + (iv[0] + half) * dx_arr[0];
             auto const y_pos = amrex::Real(0);
-            amrex::Real const z_pos = plo[1] + (iv[1] + amrex::Real(0.5)) * dx_arr[1];
+            amrex::Real const z_pos = plo[1] + (iv[1] + half) * dx_arr[1];
             pa[QdsmcPIdx::x][ip] = x_pos;
             pa[QdsmcPIdx::z][ip] = z_pos;
 #elif defined(WARPX_DIM_1D_Z)
             auto const x_pos = amrex::Real(0);
             auto const y_pos = amrex::Real(0);
-            amrex::Real const z_pos = plo[0] + (iv[0] + amrex::Real(0.5)) * dx_arr[0];
+            amrex::Real const z_pos = plo[0] + (iv[0] + half) * dx_arr[0];
             pa[QdsmcPIdx::z][ip] = z_pos;
 #else
             // WARPX_DIM_RCYLINDER / WARPX_DIM_RSPHERE: 1D radial; the single
-            // AMReX-tracked position slot is x (= r). QDSMC is not validated
-            // in these geometries (no radial volume weighting yet) and
-            // HybridPICModel::ReadParameters refuses to enable the energy
-            // equation there -- this branch only needs to compile and be sane.
-            amrex::Real const x_pos = plo[0] + (iv[0] + amrex::Real(0.5)) * dx_arr[0];
+            // AMReX-tracked position slot is x (= r). Physical cell volumes
+            // use the cylindrical/spherical metric in SetK (see
+            // qdsmc_physical_volume). RSPHERE still refuses the energy
+            // equation at runtime until further validation.
+            amrex::Real const x_pos = plo[0] + (iv[0] + half) * dx_arr[0];
             auto const y_pos = amrex::Real(0);
             auto const z_pos = amrex::Real(0);
             pa[QdsmcPIdx::x][ip] = x_pos;
@@ -271,12 +329,17 @@ QdsmcParticleContainer::SetK (int lev,
     auto & warpx = WarpX::GetInstance();
     auto const plo = warpx.Geom(lev).ProbLoArray();
     auto const dxi = warpx.Geom(lev).InvCellSizeArray();
-    auto const * dx_arr = warpx.Geom(lev).CellSize();
-
-    amrex::Real cell_volume = 1.0_rt;
-    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
-        cell_volume *= dx_arr[d];
-    }
+    auto const dx = warpx.Geom(lev).CellSizeArray();
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
+    amrex::Real const axis_volume_factor = warpx.GetVerboncoeurAxisCorrection()
+        ? 1.0_rt/3.0_rt : 1.0_rt/4.0_rt;
+#elif defined(WARPX_DIM_RSPHERE)
+    amrex::Real const axis_volume_factor = warpx.GetVerboncoeurAxisCorrection()
+        ? 1.0_rt/4.0_rt : 1.0_rt/8.0_rt;
+#else
+    amrex::Real const axis_volume_factor = 1.0_rt;
+#endif
+    bool const marker_at_node = m_markers_at_nodes;
 
     for (iterator pti(*this, lev); pti.isValid(); ++pti)
     {
@@ -300,11 +363,20 @@ QdsmcParticleContainer::SetK (int lev,
         amrex::ParallelFor(np, [=] AMREX_GPU_DEVICE (long ip)
         {
             // Linear gathers of the nodal charge density and entropy at the
-            // marker's home position; the marker then carries the electron
-            // count N of its cell and the matching entropy content K*N.
-            amrex::Real const n_p = ablastr::particles::doGatherScalarFieldNodal(
+            // marker's home position. Carry the extensive electron count
+            // N = n_e * V_phys(r) and entropy K*N so markers that move in r
+            // conserve extensive quantities under the cylindrical metric.
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+            amrex::Real const r_home = x_node[ip];
+#else
+            amrex::Real const r_home = 0.0_rt;
+#endif
+            amrex::Real const V_phys = qdsmc_physical_volume(
+                r_home, dx, axis_volume_factor, marker_at_node);
+            amrex::Real const n_e = ablastr::particles::doGatherScalarFieldNodal(
                 x_node[ip], y_node[ip], z_node[ip], rho_arr, dxi, plo)
-                * cell_volume / PhysConst::q_e;
+                / PhysConst::q_e;
+            amrex::Real const n_p = n_e * V_phys;
             amrex::Real const k_p = ablastr::particles::doGatherScalarFieldNodal(
                 x_node[ip], y_node[ip], z_node[ip], K_arr, dxi, plo);
 
@@ -546,9 +618,17 @@ QdsmcParticleContainer::DepositScalar (int lev, int const attr,
         amrex::Dim3 const lo = amrex::lbound(tilebox);
         amrex::XDim3 const xyzmin = WarpX::LowerCorner(tilebox, lev, 0.0_rt);
 
-        doChargeDepositionShapeN<1>(GetPosition, attribs[attr].dataPtr(),
-                                    nullptr, field[pti], np, dinv, xyzmin, lo,
-                                    scale, WarpX::n_rz_azimuthal_modes);
+        // Runtime order: 0 = NGP (rest-state identity if markers on nodes or
+        // cell-centered fields), 1 = linear (legacy; smooths at cell centers).
+        if (m_depos_order <= 0) {
+            doChargeDepositionShapeN<0>(GetPosition, attribs[attr].dataPtr(),
+                                        nullptr, field[pti], np, dinv, xyzmin, lo,
+                                        scale, WarpX::n_rz_azimuthal_modes);
+        } else {
+            doChargeDepositionShapeN<1>(GetPosition, attribs[attr].dataPtr(),
+                                        nullptr, field[pti], np, dinv, xyzmin, lo,
+                                        scale, WarpX::n_rz_azimuthal_modes);
+        }
     }
 
     amrex::Gpu::synchronize();
@@ -573,12 +653,11 @@ QdsmcParticleContainer::DepositField (int lev, amrex::MultiFab & Field)
 {
     ABLASTR_PROFILE("QdsmcParticleContainer::DepositField()");
 
-    // np_real carries the electron count n_e * V_cell; the 1/V_cell scale
-    // makes the deposited field an electron (number) density.
-    auto const * dx_arr = WarpX::GetInstance().Geom(lev).CellSize();
-    amrex::Real cell_volume = 1.0_rt;
-    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
-        cell_volume *= dx_arr[d];
-    }
-    DepositScalar(lev, QdsmcPIdx::np_real, 1.0_rt / cell_volume, Field);
+    // np_real carries the *extensive* electron count N_e = n_e * V_phys(r).
+    // Deposit N_e with scale 1 so the nodal field holds deposited electron
+    // number (same convention as DepositK for K_e*N_e). QDSMCUpdateTe then
+    // recovers K_e = (deposited entropy) / (deposited N) without a second
+    // volume factor. Using extensive N (with V_phys including 2 π r in
+    // RZ/RCYLINDER) keeps entropy conservation when markers cross radii.
+    DepositScalar(lev, QdsmcPIdx::np_real, 1.0_rt, Field);
 }

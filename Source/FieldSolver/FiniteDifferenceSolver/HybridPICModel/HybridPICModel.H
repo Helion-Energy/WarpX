@@ -309,12 +309,13 @@ public:
      * \brief Ion-heating operator: a stochastic drag-diffusion applied to
      *        every ion. It delivers both electron-ion energy channels:
      *
-     *   dv_p = -nu_ei (v_p - u_e) dt + sqrt(2 D dt) R,   D = D_qei + D_redir,
+     *   dv_p = -nu_ei (v_p - u_i) dt + sqrt(2 D dt) R,   D = D_qei + D_redir,
      *
      * with R a unit-variance Gaussian vector. The Q_ei conjugate (when
-     * m_include_temperature_relaxation) supplies the drag toward the electron
-     * fluid u_e and the thermal diffusion D_qei = nu_ei k_B T_e / m_i, relaxing
-     * the ions toward a Maxwellian at T_e (T_i -> T_e at rate 2 nu_ei). The
+     * m_include_temperature_relaxation) acts about the ion bulk u_i and supplies
+     * thermal diffusion D_qei = nu_ei k_B T_e / m_i, relaxing the ions toward a
+     * Maxwellian at T_e (T_i -> T_e at rate 2 nu_ei) without duplicating the
+     * momentum exchange supplied by hybrid_resistive_drag. The
      * Te-threshold Joule redirection (when \c redirect_E is non-null) supplies
      * an additional pure-diffusion heating sig_redir^2 = E_s/m_i that injects,
      * in expectation, the redirected electron energy per cell. Either or both
@@ -441,6 +442,33 @@ public:
      * adiabatic). */
     bool m_solve_electron_energy_equation = false;
 
+    /** Debug / validation: if true, zero V_e for the QDSMC marker push so
+     *  entropy is not advected (markers stay at home). Isolates numerical
+     *  shape-diffusion of K_e from physical V_e transport. Default false. */
+    bool m_qdsmc_disable_advection = false;
+
+    /** Debug / validation: if true, skip the entire QDSMC marker cycle
+     *  (SetV/SetK/PushX/Deposit/UpdateTe/Reset). T_e is advanced only by
+     *  grid-local sources (Joule, e-i relaxation). Isolates order-1
+     *  gather/deposit numerical diffusion of K_e from all particle remaps.
+     *  Default false. */
+    bool m_qdsmc_skip_remap = false;
+
+    /** If true, place QDSMC markers at the low-side node of each cell
+     *  instead of the cell center. With order-1 nodal gather/deposit this
+     *  makes rest-state remap the identity (no numerical K diffusion).
+     *  Default false (legacy cell-center placement). */
+    bool m_qdsmc_markers_at_nodes = false;
+
+    /** QDSMC deposit shape order: 0 = NGP, 1 = linear (default). */
+    int m_qdsmc_depos_order = 1;
+
+    /** Skip Joule heating (and clamp Te) where n_e < this fraction of n0_ref.
+     *  Suppresses vacuum/floor ηJ² pile-up that identity-at-rest projection
+     *  no longer smears away. Default 0.05 (5% of n0_ref). Set <= 0 to
+     *  disable (use only n_floor). */
+    amrex::Real m_qdsmc_joule_nmin_frac = amrex::Real(0.05);
+
     /** Resistive electron-heating source on T_e (see Phys. Plasmas 31, 012902 (2024), Eq. 12),
      * computed per cell as
      *     S_e = Sigma_s nu_{s,e} n_s m_s |V_s - V_e|^2,
@@ -516,11 +544,11 @@ public:
      *  (e.g. classical Spitzer with Z^2 scaling). Species without a
      *  per-species parser registered fall back to the global parser only.
      *  Parser variables, in order, are:
-     *    rho_s : per-species charge density        (C/m^3, unscaled in RZ)
-     *    rho   : total plasma charge density       (C/m^3, volume-scaled)
+     *    rho_s : per-species charge density        (C/m^3)
+     *    rho   : total plasma charge density       (C/m^3)
      *    Te    : electron temperature              (Kelvin)
      *    J     : |J_plasma|                        (A/m^2)
-     *    J_s   : |J_{species}|                     (A/m^2, unscaled in RZ)
+     *    J_s   : |J_{species}|                     (A/m^2)
      *    B     : |B|                               (Tesla)
      *    t     : time                              (seconds)
      */
@@ -559,8 +587,9 @@ public:
     mutable bool m_qdsmc_J_plasma_valid = false;
 
     /** True when the gridded fluid velocities Ve_fp / Vs_fp_{spec} are
-     *  needed, i.e. when a per-species resistivity parser is registered or
-     *  a hybrid_resistive_drag collision is present in the input deck.
+     *  needed, i.e. when a per-species resistivity parser is registered,
+     *  a hybrid_resistive_drag collision is present, or electron-ion thermal
+     *  relaxation is enabled in the input deck.
      *  Gates their allocation and the once-per-step
      *  CalculateElectronFluidVelocity / CalculateIonFluidVelocity calls.
      *  Set in ReadParameters. */

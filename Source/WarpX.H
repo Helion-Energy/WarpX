@@ -136,6 +136,13 @@ public:
                                                int  bdry_side,
                                                int  ifield ) const;
 
+    /** Whether the Verboncoeur axis correction is applied to radial
+     * charge/current volumes. */
+    [[nodiscard]] bool GetVerboncoeurAxisCorrection () const
+    {
+        return m_verboncoeur_axis_correction;
+    }
+
     void InitData ();
 
     void Evolve (int numsteps = -1);
