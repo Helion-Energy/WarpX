@@ -176,9 +176,11 @@ else:
     plt.close()
 
     # check if power spectrum sampling match earlier results
-    # (baseline last regenerated when the resistive term was restored in the
-    # theta-implicit Ohm residual -- eta now correctly damps the Faraday
-    # drive, which shifts these near-noise spectral bins)
+    # (baseline last regenerated at the upstream 26.08 merge -- the
+    # flux-form RZ binomial filter (#7059) changes every filtered deposit
+    # at the smoothing level, which decorrelates the noise realization
+    # behind these near-noise spectral bins; the dispersion-curve physics
+    # checks above are the discriminating asserts)
     amps = np.abs(F_kw[2, 1, len(kz) // 2 - 2 : len(kz) // 2 + 2])
     print("Amplitude sample: ", repr(amps))
-    assert np.allclose(amps, np.array([12.58451375, 5.05422146, 1.60447735, 3.08759338]))
+    assert np.allclose(amps, np.array([16.79716509, 6.59353623, 9.15999897, 5.52081282]))
