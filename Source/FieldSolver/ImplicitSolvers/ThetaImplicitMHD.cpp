@@ -442,11 +442,7 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
             !m_hybrid_pic_model->m_include_electron_pressure_term,
             "implicit_mhd.fluid_flux = hlld requires "
             "include_electron_pressure_term = false: the solver-assembled "
-            "Ohm's law is E = -u x B + eta J (standard resistive MHD)");
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            !m_hybrid_pic_model->m_include_hyper_resistivity_term,
-            "implicit_mhd.fluid_flux = hlld does not yet include "
-            "hyper-resistivity in the solver-assembled Ohm's law");
+            "Ohm's law is E = -u x B + eta J - eta_H laplacian(J)");
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !m_hybrid_pic_model->m_solve_electron_energy_equation,
@@ -2077,6 +2073,14 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
         *m_WarpX->m_fields.get(FaceFluxZName, 0);
 
     const auto eta = m_hybrid_pic_model->m_eta;
+    const auto eta_h = m_hybrid_pic_model->m_eta_h;
+    const bool include_hyper_resistivity =
+        m_hybrid_pic_model->m_include_hyper_resistivity_term;
+    const bool hyper_resistivity_needs_b =
+        m_hybrid_pic_model->m_hyper_resistivity_has_B_dependence;
+    const amrex::Real axial_cell_size = m_WarpX->Geom(0).CellSize(0);
+    const amrex::Real inverse_dz2 =
+        1.0_rt / (axial_cell_size * axial_cell_size);
     const amrex::Real charge_density_floor =
         m_ion_charge_to_mass * m_mass_density_floor;
     const amrex::Real density_floor = m_mass_density_floor;
@@ -2092,6 +2096,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
         const auto j_y = current_y.const_array(mfi);
         const auto j_z = current_z.const_array(mfi);
         const auto rho_q = charge_density.const_array(mfi);
+        const auto b_cc = magnetic_cc.const_array(mfi);
         const auto flux_arr = face_flux_mf.const_array(mfi);
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
             const amrex::Real jx = j_x(i, j, k);
@@ -2107,6 +2112,32 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
                 flux_arr(i, j, k, flux_induction_t2) + resistivity * jx;
             electric_y(i, j, k) =
                 -flux_arr(i, j, k, flux_induction_t1) + resistivity * jy;
+            if (include_hyper_resistivity) {
+                // E -= eta_H laplacian(J), same operator as the hybrid
+                // solver; the floored charge density keeps the eta_H
+                // parametrization smooth for matrix-free Jacobian probes.
+                amrex::Real magnetic_magnitude = 0.0_rt;
+                if (hyper_resistivity_needs_b) {
+                    const amrex::Real bx =
+                        0.5_rt * (b_cc(i - 1, j, k, 0) + b_cc(i, j, k, 0));
+                    const amrex::Real by =
+                        0.5_rt * (b_cc(i - 1, j, k, 1) + b_cc(i, j, k, 1));
+                    const amrex::Real bz =
+                        0.5_rt * (b_cc(i - 1, j, k, 2) + b_cc(i, j, k, 2));
+                    magnetic_magnitude =
+                        std::sqrt(bx * bx + by * by + bz * bz);
+                }
+                const amrex::Real hyper_resistivity =
+                    eta_h(charge_density_value, magnetic_magnitude);
+                const amrex::Real laplacian_jx =
+                    (j_x(i - 1, j, k) - 2.0_rt * jx + j_x(i + 1, j, k)) *
+                    inverse_dz2;
+                const amrex::Real laplacian_jy =
+                    (j_y(i - 1, j, k) - 2.0_rt * jy + j_y(i + 1, j, k)) *
+                    inverse_dz2;
+                electric_x(i, j, k) -= hyper_resistivity * laplacian_jx;
+                electric_y(i, j, k) -= hyper_resistivity * laplacian_jy;
+            }
         });
     }
 
@@ -2140,6 +2171,22 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
                 -(velocity_x * b_cc(i, j, k, 1) -
                   velocity_y * b_cc(i, j, k, 0)) +
                 resistivity * jz;
+            if (include_hyper_resistivity) {
+                amrex::Real magnetic_magnitude = 0.0_rt;
+                if (hyper_resistivity_needs_b) {
+                    const amrex::Real bx = b_cc(i, j, k, 0);
+                    const amrex::Real by = b_cc(i, j, k, 1);
+                    const amrex::Real bz = b_cc(i, j, k, 2);
+                    magnetic_magnitude =
+                        std::sqrt(bx * bx + by * by + bz * bz);
+                }
+                const amrex::Real hyper_resistivity =
+                    eta_h(charge_density_value, magnetic_magnitude);
+                const amrex::Real laplacian_jz =
+                    (j_z(i - 1, j, k) - 2.0_rt * jz + j_z(i + 1, j, k)) *
+                    inverse_dz2;
+                electric_z(i, j, k) -= hyper_resistivity * laplacian_jz;
+            }
         });
     }
 
@@ -2213,12 +2260,22 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
                      : nullptr;
 
     const auto eta = m_hybrid_pic_model->m_eta;
+    const auto eta_h = m_hybrid_pic_model->m_eta_h;
+    const bool include_hyper_resistivity =
+        m_hybrid_pic_model->m_include_hyper_resistivity_term;
+    const bool hyper_resistivity_needs_b =
+        m_hybrid_pic_model->m_hyper_resistivity_has_B_dependence;
     const amrex::Real charge_density_floor =
         m_ion_charge_to_mass * m_mass_density_floor;
     const amrex::Real density_floor = m_mass_density_floor;
     const amrex::Real kappa_signal = m_hlld_kappa_signal;
     const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
     const amrex::Real radial_cell_size = m_WarpX->Geom(0).CellSize(0);
+    const amrex::Real axial_cell_size = m_WarpX->Geom(0).CellSize(1);
+    const amrex::Real inverse_dr2 =
+        1.0_rt / (radial_cell_size * radial_cell_size);
+    const amrex::Real inverse_dz2 =
+        1.0_rt / (axial_cell_size * axial_cell_size);
     const int domain_lo_r = m_WarpX->Geom(0).Domain().smallEnd(0);
     constexpr int flux_induction_t1 = FaceFluxComponent::induction_t1;
     constexpr int flux_induction_t2 = FaceFluxComponent::induction_t2;
@@ -2234,10 +2291,12 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
         const auto j_theta = current_theta.const_array(mfi);
         const auto j_z = current_z.const_array(mfi);
         const auto rho_q = charge_density.const_array(mfi);
+        const auto b_cc = magnetic_cc.const_array(mfi);
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
             const amrex::Real jr = j_r(i, j, k);
+            // J_theta is corner-staggered (r-nodal, z-nodal).
             const amrex::Real jt =
-                0.5_rt * (j_theta(i, j - 1, k) + j_theta(i, j, k));
+                0.5_rt * (j_theta(i, j, k) + j_theta(i + 1, j, k));
             const amrex::Real jz =
                 0.25_rt * (j_z(i, j, k) + j_z(i + 1, j, k) +
                            j_z(i, j - 1, k) + j_z(i + 1, j - 1, k));
@@ -2250,6 +2309,36 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
                 eta(charge_density_value, current_magnitude, time);
             electric_r(i, j, k) =
                 zface(i, j, k, flux_induction_t2) + resistivity * jr;
+            if (include_hyper_resistivity) {
+                // E_r -= eta_H (laplacian J)_r with the m = 0 cylindrical
+                // vector Laplacian, discretely matching the hybrid solver;
+                // r is cell centered here, so no axis special case.
+                amrex::Real magnetic_magnitude = 0.0_rt;
+                if (hyper_resistivity_needs_b) {
+                    const amrex::Real br =
+                        0.5_rt * (b_cc(i, j - 1, k, 0) + b_cc(i, j, k, 0));
+                    const amrex::Real bt =
+                        0.5_rt * (b_cc(i, j - 1, k, 1) + b_cc(i, j, k, 1));
+                    const amrex::Real bz =
+                        0.5_rt * (b_cc(i, j - 1, k, 2) + b_cc(i, j, k, 2));
+                    magnetic_magnitude =
+                        std::sqrt(br * br + bt * bt + bz * bz);
+                }
+                const amrex::Real hyper_resistivity =
+                    eta_h(charge_density_value, magnetic_magnitude);
+                const amrex::Real radius =
+                    radial_lower + (i + 0.5_rt) * radial_cell_size;
+                const amrex::Real laplacian_jr =
+                    ((radius + 0.5_rt * radial_cell_size) *
+                         (j_r(i + 1, j, k) - jr) -
+                     (radius - 0.5_rt * radial_cell_size) *
+                         (jr - j_r(i - 1, j, k))) *
+                        inverse_dr2 / radius +
+                    (j_r(i, j - 1, k) - 2.0_rt * jr + j_r(i, j + 1, k)) *
+                        inverse_dz2 -
+                    jr / (radius * radius);
+                electric_r(i, j, k) -= hyper_resistivity * laplacian_jr;
+            }
         });
     }
 
@@ -2264,6 +2353,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
         const auto j_theta = current_theta.const_array(mfi);
         const auto j_z = current_z.const_array(mfi);
         const auto rho_q = charge_density.const_array(mfi);
+        const auto b_cc = magnetic_cc.const_array(mfi);
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
             // r-index of the lower cell column; clamped at the physical
             // axis where no below-axis staggered current exists (the
@@ -2272,8 +2362,9 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
             const amrex::Real jr =
                 0.25_rt * (j_r(il, j, k) + j_r(i, j, k) +
                            j_r(il, j + 1, k) + j_r(i, j + 1, k));
+            // J_theta is corner-staggered (r-nodal, z-nodal).
             const amrex::Real jt =
-                0.5_rt * (j_theta(il, j, k) + j_theta(i, j, k));
+                0.5_rt * (j_theta(i, j, k) + j_theta(i, j + 1, k));
             const amrex::Real jz = j_z(i, j, k);
             const amrex::Real current_magnitude =
                 std::sqrt(jr * jr + jt * jt + jz * jz);
@@ -2284,6 +2375,43 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
                 eta(charge_density_value, current_magnitude, time);
             electric_z(i, j, k) =
                 -rface(i, j, k, flux_induction_t1) + resistivity * jz;
+            if (include_hyper_resistivity) {
+                // E_z -= eta_H (laplacian J)_z. On axis the geometric
+                // radial part reduces to Drr by the m = 0 symmetry of
+                // J_z (same treatment as the hybrid solver); the b_cc
+                // below-axis radial ghosts carry the axis parities.
+                amrex::Real magnetic_magnitude = 0.0_rt;
+                if (hyper_resistivity_needs_b) {
+                    const amrex::Real br =
+                        0.5_rt * (b_cc(i - 1, j, k, 0) + b_cc(i, j, k, 0));
+                    const amrex::Real bt =
+                        0.5_rt * (b_cc(i - 1, j, k, 1) + b_cc(i, j, k, 1));
+                    const amrex::Real bz =
+                        0.5_rt * (b_cc(i - 1, j, k, 2) + b_cc(i, j, k, 2));
+                    magnetic_magnitude =
+                        std::sqrt(br * br + bt * bt + bz * bz);
+                }
+                const amrex::Real hyper_resistivity =
+                    eta_h(charge_density_value, magnetic_magnitude);
+                const amrex::Real radius =
+                    radial_lower + i * radial_cell_size;
+                amrex::Real laplacian_jz =
+                    (j_z(i, j - 1, k) - 2.0_rt * jz + j_z(i, j + 1, k)) *
+                    inverse_dz2;
+                if (radius > 0.5_rt * radial_cell_size) {
+                    laplacian_jz +=
+                        ((radius + 0.5_rt * radial_cell_size) *
+                             (j_z(i + 1, j, k) - jz) -
+                         (radius - 0.5_rt * radial_cell_size) *
+                             (jz - j_z(i - 1, j, k))) *
+                        inverse_dr2 / radius;
+                } else {
+                    laplacian_jz +=
+                        (j_z(i - 1, j, k) - 2.0_rt * jz + j_z(i + 1, j, k)) *
+                        inverse_dr2;
+                }
+                electric_z(i, j, k) -= hyper_resistivity * laplacian_jz;
+            }
         });
     }
 
@@ -2390,9 +2518,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
                 (alpha_z_plus * alpha_z_minus / sum_z) * (br_high - br_low) -
                 (alpha_r_plus * alpha_r_minus / sum_r) * (bz_high - bz_low);
 
-            const amrex::Real jt_corner =
-                0.25_rt * (j_theta(i - 1, j - 1, k) + j_theta(i, j - 1, k) +
-                           j_theta(i - 1, j, k) + j_theta(i, j, k));
+            // J_theta is corner-staggered: native value, no interpolation.
+            const amrex::Real jt_corner = j_theta(i, j, k);
             const amrex::Real jr_corner =
                 0.5_rt * (j_r(i - 1, j, k) + j_r(i, j, k));
             const amrex::Real jz_corner =
@@ -2406,6 +2533,39 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
                 eta(charge_density_value, current_magnitude, time);
             electric_theta(i, j, k) =
                 average + dissipation + resistivity * jt_corner;
+            if (include_hyper_resistivity) {
+                // E_theta -= eta_H (laplacian J)_theta at the corner
+                // (J_theta's native staggering, so the stencil needs no
+                // interpolation); the axis corner returned zero above.
+                amrex::Real magnetic_magnitude = 0.0_rt;
+                if (hyper_resistivity_needs_b) {
+                    const amrex::Real br = 0.25_rt *
+                        (b_cc(i - 1, j - 1, k, 0) + b_cc(i, j - 1, k, 0) +
+                         b_cc(i - 1, j, k, 0) + b_cc(i, j, k, 0));
+                    const amrex::Real bt = 0.25_rt *
+                        (b_cc(i - 1, j - 1, k, 1) + b_cc(i, j - 1, k, 1) +
+                         b_cc(i - 1, j, k, 1) + b_cc(i, j, k, 1));
+                    const amrex::Real bz = 0.25_rt *
+                        (b_cc(i - 1, j - 1, k, 2) + b_cc(i, j - 1, k, 2) +
+                         b_cc(i - 1, j, k, 2) + b_cc(i, j, k, 2));
+                    magnetic_magnitude =
+                        std::sqrt(br * br + bt * bt + bz * bz);
+                }
+                const amrex::Real hyper_resistivity =
+                    eta_h(charge_density_value, magnetic_magnitude);
+                const amrex::Real laplacian_jt =
+                    ((corner_radius + 0.5_rt * radial_cell_size) *
+                         (j_theta(i + 1, j, k) - jt_corner) -
+                     (corner_radius - 0.5_rt * radial_cell_size) *
+                         (jt_corner - j_theta(i - 1, j, k))) *
+                        inverse_dr2 / corner_radius +
+                    (j_theta(i, j - 1, k) - 2.0_rt * jt_corner +
+                     j_theta(i, j + 1, k)) *
+                        inverse_dz2 -
+                    jt_corner / (corner_radius * corner_radius);
+                electric_theta(i, j, k) -=
+                    hyper_resistivity * laplacian_jt;
+            }
         });
     }
 
