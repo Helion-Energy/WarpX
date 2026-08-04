@@ -102,6 +102,97 @@ add_warpx_test(
 )
 
 add_warpx_test(
+    test_1d_theta_implicit_mhd_static_contact_hllc  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_static_contact  # inputs
+    "analysis_mhd_static_contact.py diags/diag000000 diags/diag000100 hllc"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# calibration variant: the SAME static contact must diffuse under the
+# Rusanov flux, proving the hllc preservation assert is discriminating
+add_warpx_test(
+    test_1d_theta_implicit_mhd_static_contact_rusanov  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_static_contact implicit_mhd.fluid_flux=rusanov"  # inputs
+    "analysis_mhd_static_contact.py diags/diag000000 diags/diag000100 rusanov"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_sod  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_sod  # inputs
+    "analysis_mhd_sod.py diags/diag000000 diags/diag000200 total_energy"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# calibration variant: the SAME shock tube with the barotropic closure has
+# the wrong (isentropic) jump conditions and must MISS the exact Riemann
+# plateaus, proving the total_energy assert above is discriminating
+add_warpx_test(
+    test_1d_theta_implicit_mhd_sod_barotropic  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_sod implicit_mhd.ion_closure=barotropic"  # inputs
+    "analysis_mhd_sod.py diags/diag000000 diags/diag000200 barotropic"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# JFNK-smoothing options: barotropic signal speeds + the C-infinity
+# contact-side blend must not degrade the shock solution -- the same
+# exact-Riemann plateau asserts as the reference sod test above
+add_warpx_test(
+    test_1d_theta_implicit_mhd_sod_smoothed  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_sod implicit_mhd.hllc_signal_closure=barotropic implicit_mhd.hllc_contact_blend=0.05"  # inputs
+    "analysis_mhd_sod.py diags/diag000000 diags/diag000200 total_energy"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# electron-pressure-dominated regime (FRC-halo-like): the total-pressure
+# enthalpy form of the E_i flux must stay consistent with the HLLC wave
+# structure, or the Newton line search locks here
+add_warpx_test(
+    test_1d_theta_implicit_mhd_sod_pe_dominated  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_sod_pe_dominated  # inputs
+    "analysis_mhd_sod_pe_dominated.py diags/diag000000 diags/diag000200"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_energy_conservation  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_energy_conservation  # inputs
+    "analysis_mhd_energy_conservation.py diags/diag000000 diags/diag000100"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_hllc_floor  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_hllc_floor  # inputs
+    "analysis_mhd_hllc_floor.py diags/diag000000 diags/diag000250"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
     test_1d_theta_implicit_mhd_positivity  # name
     1  # dims
     1  # nprocs
@@ -111,10 +202,12 @@ add_warpx_test(
     OFF  # dependency
 )
 if(TEST test_1d_theta_implicit_mhd_positivity.run)
+    # the positivity mechanism is componentwise projection of the Newton
+    # direction onto the admissibility bounds (was: a global step clamp)
     set_property(
         TEST test_1d_theta_implicit_mhd_positivity.run
         PROPERTY PASS_REGULAR_EXPRESSION
-        "Newton: admissibility-limited trial step ="
+        "Newton: projected"
     )
 endif()
 
@@ -248,7 +341,33 @@ if(AMReX_PETSC)
         "analysis_default_regression.py --path diags/diag1000010"  # checksum
         OFF  # dependency
     )
+
 endif()
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_z_outflow  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_z_outflow  # inputs
+    "analysis_mhd_z_outflow.py diags/diag000000 diags/diag000240"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Green's-function open r_hi boundary through the implicit residual: the
+# same outflow physics with the uniform Bz supplied by the split external
+# vector potential; the ghost fill (a linear map of the interior J_theta)
+# runs inside every JFNK residual evaluation, on 2 ranks so the
+# MPI-distributed kernel GEMV and psi reduction are exercised.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_z_outflow_open  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_z_outflow_open  # inputs
+    "analysis_mhd_z_outflow.py diags/diag000000 diags/diag000240 open"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
 
 add_warpx_test(
     test_2d_theta_implicit_jfnk_vandb  # name
