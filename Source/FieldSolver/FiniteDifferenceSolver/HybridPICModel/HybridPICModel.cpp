@@ -120,6 +120,42 @@ void HybridPICModel::ReadParameters ()
     // member doc). Default on; disable together with qdsmc_time_advance =
     // euler to recover the #6982 scheme bit-for-bit.
     pp_hybrid.query("qdsmc_gradient_deposit", m_qdsmc_gradient_deposit);
+
+    // Ito tensor thermal conduction (split substep on u = 3/2 n_e k_B T_e;
+    // see QdsmcConductionOnce). Enabled by specifying the parallel
+    // conductivity parser; kappa_perp is optional (default 0 -- the full
+    // tensor always ships, kappa_perp = 0 is just the trivial setting).
+    m_include_thermal_conduction =
+        pp_hybrid.query("qdsmc_kappa_par(n,Te,t)", m_kappa_par_expression);
+    pp_hybrid.query("qdsmc_kappa_perp(n,Te,t)", m_kappa_perp_expression);
+    {
+        std::vector<int> npts;
+        pp_hybrid.queryarr("qdsmc_conduction_quadrature_points", npts);
+        if (npts.size() == 1) {
+            m_cond_npts_par = m_cond_npts_perp = npts[0];
+        } else if (npts.size() >= 2) {
+            m_cond_npts_par  = npts[0];
+            m_cond_npts_perp = npts[1];
+        }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_cond_npts_par >= 2 && m_cond_npts_par <= 7 &&
+            m_cond_npts_perp >= 2 && m_cond_npts_perp <= 7,
+            "hybrid_pic_model.qdsmc_conduction_quadrature_points entries "
+            "must be in [2, 7]");
+    }
+    utils::parser::queryWithParser(pp_hybrid,
+        "qdsmc_conduction_flux_limit_factor", m_cond_flux_limit_factor);
+    utils::parser::queryWithParser(pp_hybrid,
+        "qdsmc_conduction_max_hop", m_cond_max_hop);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_cond_max_hop > 0._rt,
+        "hybrid_pic_model.qdsmc_conduction_max_hop must be positive");
+    pp_hybrid.query("qdsmc_conduction_vacuum_fast_front",
+                    m_cond_vacuum_fast_front);
+#if defined(WARPX_DIM_RZ)
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_include_thermal_conduction,
+        "hybrid_pic_model.qdsmc_kappa_par: QDSMC thermal conduction is not "
+        "supported in RZ geometry yet (the daughter deposit is Cartesian).");
+#endif
 #if defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !m_solve_electron_energy_equation,
@@ -349,6 +385,15 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
     m_nu_ei_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(m_nu_ei_expression, {"rho","Te","Ti","t"}));
     m_nu_ei = m_nu_ei_parser->compile<4>();
+
+    // Thermal conductivities kappa(n [m^-3], Te [eV], t [s]) in W/(m K) for
+    // the Ito conduction substep (chi = kappa / (3/2 n_e k_B)).
+    m_kappa_par_parser = std::make_unique<amrex::Parser>(
+        utils::parser::makeParser(m_kappa_par_expression, {"n","Te","t"}));
+    m_kappa_par = m_kappa_par_parser->compile<3>();
+    m_kappa_perp_parser = std::make_unique<amrex::Parser>(
+        utils::parser::makeParser(m_kappa_perp_expression, {"n","Te","t"}));
+    m_kappa_perp = m_kappa_perp_parser->compile<3>();
 
 
     // The Te-threshold Joule redirect only acts inside the Joule source.
@@ -1585,6 +1630,579 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
 }
 
 
+namespace
+{
+    /** Probabilists' Gauss--Hermite abscissae/weights for the unit-variance
+     *  Gaussian (x = sqrt(2) * physicists' roots, w = physicists' weights /
+     *  sqrt(pi); sum w = 1, sum w x^2 = 1), npts in [2, 7]. All weights are
+     *  positive, so positivity of the deposited energy is automatic at
+     *  every npts. npts = 2 is variance-exact (weak order 1 per step from
+     *  the 4th-moment defect); npts = 3 matches through the 5th moment
+     *  (weak order 2); npts >= 4 buys Gaussian tails out to larger
+     *  multiples of sigma. */
+    void qdsmc_gh_table (int const npts,
+                         amrex::GpuArray<amrex::Real, 8> & x,
+                         amrex::GpuArray<amrex::Real, 8> & w)
+    {
+        for (int q = 0; q < 8; ++q) { x[q] = 0.0_rt; w[q] = 0.0_rt; }
+        switch (npts) {
+        case 2:
+            x[0] = -1.0_rt; x[1] = 1.0_rt;
+            w[0] = 0.5_rt;  w[1] = 0.5_rt;
+            break;
+        case 3:
+            x[0] = -1.7320508075688772_rt; x[1] = 0.0_rt;
+            x[2] =  1.7320508075688772_rt;
+            w[0] = 1.0_rt/6.0_rt; w[1] = 2.0_rt/3.0_rt; w[2] = 1.0_rt/6.0_rt;
+            break;
+        case 4:
+            x[0] = -2.3344142183389773_rt; x[1] = -0.7419637843027258_rt;
+            x[2] =  0.7419637843027258_rt; x[3] =  2.3344142183389773_rt;
+            w[0] = 0.045875854768068503_rt; w[1] = 0.45412414523193150_rt;
+            w[2] = w[1]; w[3] = w[0];
+            break;
+        case 5:
+            x[0] = -2.8569700138728056_rt; x[1] = -1.3556261799742659_rt;
+            x[2] =  0.0_rt;
+            x[3] =  1.3556261799742659_rt; x[4] =  2.8569700138728056_rt;
+            w[0] = 0.011257411327720693_rt; w[1] = 0.22207592200561263_rt;
+            w[2] = 8.0_rt/15.0_rt; w[3] = w[1]; w[4] = w[0];
+            break;
+        case 6:
+            x[0] = -3.3242574335521193_rt; x[1] = -1.8891758777537107_rt;
+            x[2] = -0.6167065901925941_rt; x[3] =  0.6167065901925941_rt;
+            x[4] =  1.8891758777537107_rt; x[5] =  3.3242574335521193_rt;
+            w[0] = 0.0025557844020562464_rt; w[1] = 0.088615746041914523_rt;
+            w[2] = 0.40882846955602925_rt;
+            w[3] = w[2]; w[4] = w[1]; w[5] = w[0];
+            break;
+        case 7:
+            x[0] = -3.7504397177257425_rt; x[1] = -2.3667594107345415_rt;
+            x[2] = -1.1544053947399682_rt; x[3] =  0.0_rt;
+            x[4] =  1.1544053947399682_rt; x[5] =  2.3667594107345415_rt;
+            x[6] =  3.7504397177257425_rt;
+            w[0] = 0.00054826885597221730_rt; w[1] = 0.030757124976191933_rt;
+            w[2] = 0.24012317860501250_rt;    w[3] = 16.0_rt/35.0_rt;
+            w[4] = w[2]; w[5] = w[1]; w[6] = w[0];
+            break;
+        default:
+            WARPX_ABORT_WITH_MESSAGE(
+                "qdsmc_gh_table: quadrature point count must be in [2, 7]");
+        }
+    }
+}
+
+
+void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
+                                          bool const use_rho_new) const
+{
+    if (!m_include_thermal_conduction) { return; }
+
+    ABLASTR_PROFILE("HybridPICModel::QdsmcConductionOnce()");
+
+    auto & warpx = WarpX::GetInstance();
+    using ablastr::fields::Direction;
+
+    amrex::Geometry const & geom = warpx.Geom(lev);
+    amrex::Periodicity const & period = geom.periodicity();
+    auto const dx_arr  = geom.CellSizeArray();
+    auto const dxi_arr = geom.InvCellSizeArray();
+
+    amrex::MultiFab & Te =
+        *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+    // The rho paired with T_e at this substep's time level: rho^n
+    // (hybrid_rho_fp_temp) for the pre-transport half, rho^{n+1} (rho_fp)
+    // for the post-transport half. Used consistently for the u build, the
+    // grad ln n drift AND the recovery, so pure-T_e dynamics are exact.
+    amrex::MultiFab const & rho = use_rho_new
+        ? *warpx.m_fields.get(FieldType::rho_fp, lev)
+        : *warpx.m_fields.get(FieldType::hybrid_rho_fp_temp, lev);
+    amrex::MultiFab const & Bx = *warpx.m_fields.get(FieldType::Bfield_fp, Direction{0}, lev);
+    amrex::MultiFab const & By = *warpx.m_fields.get(FieldType::Bfield_fp, Direction{1}, lev);
+    amrex::MultiFab const & Bz = *warpx.m_fields.get(FieldType::Bfield_fp, Direction{2}, lev);
+    // TODO(add_external_fields): Bfield_fp holds the internal field only;
+    // with hybrid external vector-potential fields on, b should be built
+    // from B + B_ext. Not needed by the current research decks.
+
+    // T_e ghosts feed the flux-limiter gradient and the source-node u
+    // slopes below.
+    ablastr::utils::communication::FillBoundary(
+        Te, WarpX::do_single_precision_comms, period, true);
+
+    amrex::Real const t_now = warpx.gett_new(lev);
+    amrex::Real const kb = PhysConst::kb;
+    amrex::Real const qe = PhysConst::q_e;
+    amrex::Real const me = PhysConst::m_e;
+    auto const kappa_par_ex  = m_kappa_par;
+    auto const kappa_perp_ex = m_kappa_perp;
+    amrex::Real const n_floor  = m_qdsmc_n_floor;
+    amrex::Real const f_lim    = m_cond_flux_limit_factor;
+    bool const vac_fast        = m_cond_vacuum_fast_front;
+    bool const grad_dep        = m_qdsmc_gradient_deposit;
+
+    amrex::GpuArray<amrex::Real, 8> xq_par, wq_par, xq_perp, wq_perp;
+    qdsmc_gh_table(m_cond_npts_par,  xq_par,  wq_par);
+    qdsmc_gh_table(m_cond_npts_perp, xq_perp, wq_perp);
+    int const nq_par  = m_cond_npts_par;
+    int const nq_perp = m_cond_npts_perp;
+    amrex::Real const xmax_par  = std::abs(xq_par[0]);
+    amrex::Real const xmax_perp = std::abs(xq_perp[0]);
+
+    // Hop-cap chi ceilings: largest quadrature offset x_max sqrt(2 chi dt_c)
+    // limited to m_cond_max_hop * dx_min (per direction class, since the
+    // largest abscissa differs with npts).
+    amrex::Real dx_min = dx_arr[0];
+    for (int d = 1; d < AMREX_SPACEDIM; ++d) { dx_min = std::min(dx_min, dx_arr[d]); }
+    amrex::Real const hop = m_cond_max_hop * dx_min;
+    amrex::Real const chi_cap_par  = hop*hop / (2.0_rt * dt_c * xmax_par*xmax_par);
+    amrex::Real const chi_cap_perp = hop*hop / (2.0_rt * dt_c * xmax_perp*xmax_perp);
+
+    // Grid-dim bookkeeping for the device kernels: physical axis -> grid
+    // dim (-1 where collapsed), physical-axis cell sizes, periodicity and
+    // the nodal domain extents per grid dim.
+#if defined(WARPX_DIM_3D)
+    amrex::GpuArray<int, 3> const ax2gd = {0, 1, 2};
+#elif (AMREX_SPACEDIM == 2)
+    amrex::GpuArray<int, 3> const ax2gd = {0, -1, 1};
+#else
+    amrex::GpuArray<int, 3> const ax2gd = {-1, -1, 0};
+#endif
+    amrex::GpuArray<amrex::Real, 3> dxi3 = {0.0_rt, 0.0_rt, 0.0_rt};
+    for (int ax = 0; ax < 3; ++ax) {
+        if (ax2gd[ax] >= 0) { dxi3[ax] = dxi_arr[ax2gd[ax]]; }
+    }
+    amrex::Box const dom_nodes = amrex::surroundingNodes(geom.Domain());
+    amrex::GpuArray<int, 3> is_per = {0, 0, 0};
+    amrex::GpuArray<int, 3> dom_lo = {0, 0, 0};
+    amrex::GpuArray<int, 3> dom_hi = {0, 0, 0};
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        is_per[d] = geom.isPeriodic(d) ? 1 : 0;
+        dom_lo[d] = dom_nodes.smallEnd(d);
+        dom_hi[d] = dom_nodes.bigEnd(d);
+    }
+
+    // B staggering for the node interpolation (collapsed dims match the
+    // source staggering so Interp does not read the out-of-bounds
+    // neighbour there, as in the T_i collapse above).
+    amrex::GpuArray<int, 3> const Bx_stag = Bx_IndexType;
+    amrex::GpuArray<int, 3> const By_stag = By_IndexType;
+    amrex::GpuArray<int, 3> const Bz_stag = Bz_IndexType;
+    amrex::GpuArray<int, 3> nd_x = {1, 1, 1};
+    amrex::GpuArray<int, 3> nd_y = {1, 1, 1};
+    amrex::GpuArray<int, 3> nd_z = {1, 1, 1};
+    for (int d = AMREX_SPACEDIM; d < 3; ++d) {
+        nd_x[d] = Bx_stag[d]; nd_y[d] = By_stag[d]; nd_z[d] = Bz_stag[d];
+    }
+    amrex::GpuArray<int, 3> const coarsen = {1, 1, 1};
+
+    // Scratch: per-node capped diffusivities, unit b, and the full tensor
+    // D = chi_perp I + (chi_par - chi_perp) b b (whose divergence feeds the
+    // Ito drift). One ghost ring for the drift's central differences.
+    enum Cond : int { c_chip = 0, c_chiq, c_bx, c_by, c_bz,
+                      c_dxx, c_dxy, c_dxz, c_dyy, c_dyz, c_dzz, c_ncomp };
+    amrex::MultiFab cond(Te.boxArray(), Te.DistributionMap(), Cond::c_ncomp, 1);
+
+    // Deposit target: guard reach must cover the clamped hop.
+    int const ng_dep = static_cast<int>(std::ceil(m_cond_max_hop)) + 2;
+    amrex::MultiFab u_dep(Te.boxArray(), Te.DistributionMap(), 1, ng_dep);
+
+    // --- Pass 1: capped/limited diffusivities and the D tensor per node ---
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(cond, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        amrex::Box const box = mfi.tilebox();
+        amrex::Array4<amrex::Real>       const & c_arr   = cond.array(mfi);
+        amrex::Array4<amrex::Real const> const & Te_arr  = Te.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & Bx_arr  = Bx.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & By_arr  = By.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & Bz_arr  = Bz.const_array(mfi);
+
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            amrex::Real const ne_raw = rho_arr(i,j,k) / qe;
+            bool const vac = (ne_raw <= n_floor);
+            amrex::Real const ne  = amrex::max(ne_raw, n_floor);
+            amrex::Real const TeK = amrex::max(Te_arr(i,j,k), 0.0_rt);
+            amrex::Real const Te_eV = TeK * kb / qe;
+
+            // Unit b from B interpolated to the node; unmagnetized nodes
+            // conduct isotropically at chi_par.
+            amrex::Real const bxv = ablastr::coarsen::sample::Interp(
+                Bx_arr, Bx_stag, nd_x, coarsen, i, j, k, 0);
+            amrex::Real const byv = ablastr::coarsen::sample::Interp(
+                By_arr, By_stag, nd_y, coarsen, i, j, k, 0);
+            amrex::Real const bzv = ablastr::coarsen::sample::Interp(
+                Bz_arr, Bz_stag, nd_z, coarsen, i, j, k, 0);
+            amrex::Real const B2 = bxv*bxv + byv*byv + bzv*bzv;
+            bool const unmag = (B2 <= 0.0_rt);
+            amrex::Real const Binv = unmag ? 0.0_rt : 1.0_rt/std::sqrt(B2);
+            amrex::Real const ubx = unmag ? 0.0_rt : bxv*Binv;
+            amrex::Real const uby = unmag ? 0.0_rt : byv*Binv;
+            amrex::Real const ubz = unmag ? 1.0_rt : bzv*Binv;
+
+            amrex::Real chi_par =
+                kappa_par_ex(ne, Te_eV, t_now) / (1.5_rt * ne * kb);
+            amrex::Real chi_perp = unmag ? chi_par :
+                kappa_perp_ex(ne, Te_eV, t_now) / (1.5_rt * ne * kb);
+            chi_par  = amrex::max(chi_par,  0.0_rt);
+            chi_perp = amrex::max(chi_perp, 0.0_rt);
+
+            // Physical free-streaming limiter (longitudinal only):
+            // kappa_eff = kappa / (1 + |q_Sp| / (f q_fs)), with
+            // q_Sp = kappa |grad_par T_e| and q_fs = n_e k_B T_e v_te.
+            if (f_lim > 0.0_rt && TeK > 0.0_rt && !vac && chi_par > 0.0_rt) {
+                amrex::Real gT[3] = {0.0_rt, 0.0_rt, 0.0_rt};
+                for (int ax = 0; ax < 3; ++ax) {
+                    int const g = ax2gd[ax];
+                    if (g < 0) { continue; }
+                    int c[3] = {i, j, k};
+                    int cp = c[g] + 1, cm = c[g] - 1;
+                    if (!is_per[g]) {
+                        cp = amrex::min(cp, dom_hi[g]);
+                        cm = amrex::max(cm, dom_lo[g]);
+                    }
+                    if (cp == cm) { continue; }
+                    int p[3] = {i, j, k}, m[3] = {i, j, k};
+                    p[g] = cp; m[g] = cm;
+                    gT[ax] = (Te_arr(p[0],p[1],p[2]) - Te_arr(m[0],m[1],m[2]))
+                             * dxi3[ax] / amrex::Real(cp - cm);
+                }
+                amrex::Real const gparT =
+                    std::abs(ubx*gT[0] + uby*gT[1] + ubz*gT[2]);
+                amrex::Real const q_sp = 1.5_rt * ne * kb * chi_par * gparT;
+                amrex::Real const q_fs = ne * kb * TeK * std::sqrt(kb*TeK/me);
+                chi_par /= (1.0_rt + q_sp / (f_lim * q_fs));
+            }
+
+            // Numerical hop cap: smooth p = 4 soft-min
+            // chi / (1 + (chi/cap)^4)^(1/4), sharp enough that chi <= cap/2
+            // is biased < 0.4% (a harmonic soft-min would bite ~20% already
+            // at cap/4 and pollute convergence), yet kink-free where the
+            // cap engages so div D stays smooth for the drift term.
+            if (chi_par > 0.0_rt) {
+                amrex::Real const r2 = (chi_par/chi_cap_par)*(chi_par/chi_cap_par);
+                chi_par /= std::sqrt(std::sqrt(1.0_rt + r2*r2));
+            }
+            if (chi_perp > 0.0_rt) {
+                amrex::Real const r2 = (chi_perp/chi_cap_perp)*(chi_perp/chi_cap_perp);
+                chi_perp /= std::sqrt(std::sqrt(1.0_rt + r2*r2));
+            }
+            // Vacuum policy: floored cells conduct isotropically at the
+            // capped ceiling (fast-but-finite front, not a stall).
+            if (vac && vac_fast) {
+                chi_par  = chi_cap_par;
+                chi_perp = chi_cap_perp;
+            }
+
+            amrex::Real const dchi = chi_par - chi_perp;
+            c_arr(i,j,k,Cond::c_chip) = chi_par;
+            c_arr(i,j,k,Cond::c_chiq) = chi_perp;
+            c_arr(i,j,k,Cond::c_bx)   = ubx;
+            c_arr(i,j,k,Cond::c_by)   = uby;
+            c_arr(i,j,k,Cond::c_bz)   = ubz;
+            c_arr(i,j,k,Cond::c_dxx)  = chi_perp + dchi*ubx*ubx;
+            c_arr(i,j,k,Cond::c_dxy)  = dchi*ubx*uby;
+            c_arr(i,j,k,Cond::c_dxz)  = dchi*ubx*ubz;
+            c_arr(i,j,k,Cond::c_dyy)  = chi_perp + dchi*uby*uby;
+            c_arr(i,j,k,Cond::c_dyz)  = dchi*uby*ubz;
+            c_arr(i,j,k,Cond::c_dzz)  = chi_perp + dchi*ubz*ubz;
+        });
+    }
+    cond.FillBoundary(period);
+
+    // --- Pass 2: spawn quiet daughters per owned node and deposit u ---
+    // NO OpenMP here: Gpu::Atomic::AddNoRet is a plain += on the host, and
+    // neighboring tiles' deposit reaches overlap (same fab), so a threaded
+    // loop would race (same reason DepositScalar is unthreaded).
+    u_dep.setVal(0.0_rt);
+
+    for (MFIter mfi(u_dep, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        // Unique node ownership: same seam/periodic trim as the advection
+        // markers (InitParticles), so every physical node spawns exactly
+        // one daughter family and Sigma(u) is not double-counted.
+        amrex::Box tile_box = mfi.tilebox();
+        {
+            amrex::Box const box_nodes = amrex::surroundingNodes(mfi.validbox());
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                if (tile_box.bigEnd(d) == box_nodes.bigEnd(d) &&
+                    (box_nodes.bigEnd(d) != dom_nodes.bigEnd(d) ||
+                     geom.isPeriodic(d))) {
+                    tile_box.growHi(d, -1);
+                }
+            }
+        }
+
+        amrex::Array4<amrex::Real>       const & out     = u_dep.array(mfi);
+        amrex::Array4<amrex::Real const> const & c_arr   = cond.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & Te_arr  = Te.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+
+        amrex::ParallelFor(tile_box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            amrex::Real const ne0 = rho_arr(i,j,k) / qe;
+            if (ne0 <= 0.0_rt) { return; }   // nothing to carry; recovery skips too
+
+            // u and its MC-limited slopes (per grid dim) at the source
+            // node -- the B1 half-gradient correction for the daughter
+            // deposit. One-sided clamping at non-periodic domain edges
+            // degrades to a zero slope, as in SetK.
+            amrex::Real const u0 = 1.5_rt * kb * ne0 * Te_arr(i,j,k);
+            amrex::Real gu[AMREX_SPACEDIM];
+            int const node[3] = {i, j, k};
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                int cp = node[d] + 1, cm = node[d] - 1;
+                if (!is_per[d]) {
+                    cp = amrex::min(cp, dom_hi[d]);
+                    cm = amrex::max(cm, dom_lo[d]);
+                }
+                int p[3] = {i, j, k}, m[3] = {i, j, k};
+                p[d] = cp; m[d] = cm;
+                amrex::Real const up = 1.5_rt * kb
+                    * (rho_arr(p[0],p[1],p[2])/qe) * Te_arr(p[0],p[1],p[2]);
+                amrex::Real const um = 1.5_rt * kb
+                    * (rho_arr(m[0],m[1],m[2])/qe) * Te_arr(m[0],m[1],m[2]);
+                amrex::Real const dfp = (cp > node[d]) ? (up - u0) : 0.0_rt;
+                amrex::Real const dfm = (cm < node[d]) ? (u0 - um) : 0.0_rt;
+                amrex::Real g = 0.0_rt;
+                if (dfp*dfm > 0.0_rt) {
+                    amrex::Real const s = (dfp > 0.0_rt) ? 1.0_rt : -1.0_rt;
+                    g = s * amrex::min(2.0_rt*std::abs(dfp),
+                                       2.0_rt*std::abs(dfm),
+                                       0.5_rt*std::abs(dfp + dfm));
+                }
+                gu[d] = g * dxi_arr[d];
+            }
+
+            // Ito drift a = div D + D . grad ln n_e (physical components),
+            // from clamped central differences of the D tensor and rho.
+            amrex::Real dD[3][3];   // dD[row][axis] = d D_{row,ax} / d x_ax
+            amrex::Real gln[3];     // grad ln n_e
+            {
+                int const drow[3][3] = {
+                    {Cond::c_dxx, Cond::c_dxy, Cond::c_dxz},
+                    {Cond::c_dxy, Cond::c_dyy, Cond::c_dyz},
+                    {Cond::c_dxz, Cond::c_dyz, Cond::c_dzz}};
+                amrex::Real const rho_fl =
+                    amrex::max(rho_arr(i,j,k), n_floor*qe);
+                for (int ax = 0; ax < 3; ++ax) {
+                    int const g = ax2gd[ax];
+                    if (g < 0) {
+                        for (int r = 0; r < 3; ++r) { dD[r][ax] = 0.0_rt; }
+                        gln[ax] = 0.0_rt;
+                        continue;
+                    }
+                    int cp = node[g] + 1, cm = node[g] - 1;
+                    if (!is_per[g]) {
+                        cp = amrex::min(cp, dom_hi[g]);
+                        cm = amrex::max(cm, dom_lo[g]);
+                    }
+                    if (cp == cm) {
+                        for (int r = 0; r < 3; ++r) { dD[r][ax] = 0.0_rt; }
+                        gln[ax] = 0.0_rt;
+                        continue;
+                    }
+                    int p[3] = {i, j, k}, m[3] = {i, j, k};
+                    p[g] = cp; m[g] = cm;
+                    amrex::Real const fac = dxi3[ax] / amrex::Real(cp - cm);
+                    for (int r = 0; r < 3; ++r) {
+                        dD[r][ax] = (c_arr(p[0],p[1],p[2],drow[r][ax])
+                                   - c_arr(m[0],m[1],m[2],drow[r][ax])) * fac;
+                    }
+                    gln[ax] = (rho_arr(p[0],p[1],p[2])
+                             - rho_arr(m[0],m[1],m[2])) * fac / rho_fl;
+                }
+            }
+            amrex::Real const Dxx = c_arr(i,j,k,Cond::c_dxx);
+            amrex::Real const Dxy = c_arr(i,j,k,Cond::c_dxy);
+            amrex::Real const Dxz = c_arr(i,j,k,Cond::c_dxz);
+            amrex::Real const Dyy = c_arr(i,j,k,Cond::c_dyy);
+            amrex::Real const Dyz = c_arr(i,j,k,Cond::c_dyz);
+            amrex::Real const Dzz = c_arr(i,j,k,Cond::c_dzz);
+            amrex::Real drift[3];
+            drift[0] = (dD[0][0] + dD[0][1] + dD[0][2]
+                        + Dxx*gln[0] + Dxy*gln[1] + Dxz*gln[2]) * dt_c;
+            drift[1] = (dD[1][0] + dD[1][1] + dD[1][2]
+                        + Dxy*gln[0] + Dyy*gln[1] + Dyz*gln[2]) * dt_c;
+            drift[2] = (dD[2][0] + dD[2][1] + dD[2][2]
+                        + Dxz*gln[0] + Dyz*gln[1] + Dzz*gln[2]) * dt_c;
+            for (int ax = 0; ax < 3; ++ax) {
+                drift[ax] = amrex::min(amrex::max(drift[ax], -hop), hop);
+            }
+
+            // Field-aligned quadrature frame: e1 is the perpendicular
+            // direction nearest yhat (so it projects out of the plane, and
+            // its daughter loop collapses, in the common 2D in-plane-b
+            // case); e2 = b x e1.
+            amrex::Real const bxv = c_arr(i,j,k,Cond::c_bx);
+            amrex::Real const byv = c_arr(i,j,k,Cond::c_by);
+            amrex::Real const bzv = c_arr(i,j,k,Cond::c_bz);
+            amrex::Real e1x = -byv*bxv, e1y = 1.0_rt - byv*byv, e1z = -byv*bzv;
+            amrex::Real e1n = e1x*e1x + e1y*e1y + e1z*e1z;
+            if (e1n < 1.0e-12_rt) {   // b ~ yhat: build from xhat instead
+                e1x = 1.0_rt - bxv*bxv; e1y = -bxv*byv; e1z = -bxv*bzv;
+                e1n = e1x*e1x + e1y*e1y + e1z*e1z;
+            }
+            amrex::Real const e1i = 1.0_rt/std::sqrt(e1n);
+            e1x *= e1i; e1y *= e1i; e1z *= e1i;
+            amrex::Real const e2x = byv*e1z - bzv*e1y;
+            amrex::Real const e2y = bzv*e1x - bxv*e1z;
+            amrex::Real const e2z = bxv*e1y - byv*e1x;
+
+            amrex::Real const chi_par  = c_arr(i,j,k,Cond::c_chip);
+            amrex::Real const chi_perp = c_arr(i,j,k,Cond::c_chiq);
+            amrex::Real const sig_par  = std::sqrt(2.0_rt*chi_par *dt_c);
+            amrex::Real const sig_perp = std::sqrt(2.0_rt*chi_perp*dt_c);
+
+            // Collapse quadrature loops whose offsets cannot move the
+            // deposit: zero sigma, or a direction with no projection onto
+            // the simulated axes (weights then sum to 1 at zero offset).
+            auto proj_sq = [&] (amrex::Real vx, amrex::Real vy, amrex::Real vz)
+            {
+                amrex::Real s2 = 0.0_rt;
+                for (int ax = 0; ax < 3; ++ax) {
+                    amrex::Real const v = (ax == 0) ? vx : ((ax == 1) ? vy : vz);
+                    if (ax2gd[ax] >= 0) { s2 += v*v; }
+                }
+                return s2;
+            };
+            int const n0 = (sig_par  > 0.0_rt &&
+                            proj_sq(bxv, byv, bzv) > 1.0e-24_rt) ? nq_par  : 1;
+            int const n1 = (sig_perp > 0.0_rt &&
+                            proj_sq(e1x, e1y, e1z) > 1.0e-24_rt) ? nq_perp : 1;
+            int const n2 = (sig_perp > 0.0_rt &&
+                            proj_sq(e2x, e2y, e2z) > 1.0e-24_rt) ? nq_perp : 1;
+
+            for (int q0 = 0; q0 < n0; ++q0) {
+            for (int q1 = 0; q1 < n1; ++q1) {
+            for (int q2 = 0; q2 < n2; ++q2) {
+                amrex::Real const o0 = (n0 > 1) ? xq_par[q0]*sig_par   : 0.0_rt;
+                amrex::Real const o1 = (n1 > 1) ? xq_perp[q1]*sig_perp : 0.0_rt;
+                amrex::Real const o2 = (n2 > 1) ? xq_perp[q2]*sig_perp : 0.0_rt;
+                amrex::Real const wq = ((n0 > 1) ? wq_par[q0]  : 1.0_rt)
+                                     * ((n1 > 1) ? wq_perp[q1] : 1.0_rt)
+                                     * ((n2 > 1) ? wq_perp[q2] : 1.0_rt);
+                amrex::Real const disp[3] = {
+                    drift[0] + o0*bxv + o1*e1x + o2*e2x,
+                    drift[1] + o0*byv + o1*e1y + o2*e2y,
+                    drift[2] + o0*bzv + o1*e1z + o2*e2z};
+
+                // Continuous destination in grid-index space, hard-clamped
+                // to the deposit's guard reach and (E7-style, pending the
+                // Thrust-D reflection BCs) just inside non-periodic domain
+                // edges.
+                amrex::Real s[AMREX_SPACEDIM];
+                int i0[AMREX_SPACEDIM];
+                amrex::Real fr[AMREX_SPACEDIM];
+                for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                    int ax = 2;   // 1D: grid dim 0 = z
+#if defined(WARPX_DIM_3D)
+                    ax = d;
+#elif (AMREX_SPACEDIM == 2)
+                    ax = (d == 0) ? 0 : 2;
+#endif
+                    amrex::Real ds = disp[ax] * dxi_arr[d];
+                    amrex::Real const rmax =
+                        amrex::Real(ng_dep - 1) - 1.0e-6_rt;
+                    ds = amrex::min(amrex::max(ds, -rmax), rmax);
+                    s[d] = amrex::Real(node[d]) + ds;
+                    if (!is_per[d]) {
+                        s[d] = amrex::min(
+                            amrex::max(s[d], amrex::Real(dom_lo[d])),
+                            amrex::Real(dom_hi[d]) - 1.0e-6_rt);
+                    }
+                    auto const fl = std::floor(s[d]);
+                    i0[d] = static_cast<int>(fl);
+                    fr[d] = s[d] - fl;
+                }
+
+                // Hat deposit with the half-gradient correction
+                // w * (u + 1/2 gu . (x_dest - x_daughter)): the correction
+                // sums to zero (conservation exact) and cancels the hat's
+                // second moment (remap exact through quadratics).
+#if defined(WARPX_DIM_3D)
+                for (int kk = 0; kk < 2; ++kk) {
+                for (int jj = 0; jj < 2; ++jj) {
+                for (int ii = 0; ii < 2; ++ii) {
+                    amrex::Real const w = (ii ? fr[0] : 1.0_rt - fr[0])
+                                        * (jj ? fr[1] : 1.0_rt - fr[1])
+                                        * (kk ? fr[2] : 1.0_rt - fr[2]);
+                    amrex::Real val = u0;
+                    if (grad_dep) {
+                        val += 0.5_rt * (
+                            gu[0]*(amrex::Real(i0[0]+ii) - s[0])*dx_arr[0] +
+                            gu[1]*(amrex::Real(i0[1]+jj) - s[1])*dx_arr[1] +
+                            gu[2]*(amrex::Real(i0[2]+kk) - s[2])*dx_arr[2]);
+                    }
+                    amrex::Gpu::Atomic::AddNoRet(
+                        &out(i0[0]+ii, i0[1]+jj, i0[2]+kk), wq*w*val);
+                }}}
+#elif (AMREX_SPACEDIM == 2)
+                for (int jj = 0; jj < 2; ++jj) {
+                for (int ii = 0; ii < 2; ++ii) {
+                    amrex::Real const w = (ii ? fr[0] : 1.0_rt - fr[0])
+                                        * (jj ? fr[1] : 1.0_rt - fr[1]);
+                    amrex::Real val = u0;
+                    if (grad_dep) {
+                        val += 0.5_rt * (
+                            gu[0]*(amrex::Real(i0[0]+ii) - s[0])*dx_arr[0] +
+                            gu[1]*(amrex::Real(i0[1]+jj) - s[1])*dx_arr[1]);
+                    }
+                    amrex::Gpu::Atomic::AddNoRet(
+                        &out(i0[0]+ii, i0[1]+jj, k), wq*w*val);
+                }}
+#else
+                for (int ii = 0; ii < 2; ++ii) {
+                    amrex::Real const w = (ii ? fr[0] : 1.0_rt - fr[0]);
+                    amrex::Real val = u0;
+                    if (grad_dep) {
+                        val += 0.5_rt *
+                            gu[0]*(amrex::Real(i0[0]+ii) - s[0])*dx_arr[0];
+                    }
+                    amrex::Gpu::Atomic::AddNoRet(
+                        &out(i0[0]+ii, j, k), wq*w*val);
+                }
+#endif
+            }}}
+        });
+    }
+
+    amrex::Gpu::synchronize();
+    ablastr::utils::communication::SumBoundary(
+        u_dep, 0, 1, u_dep.nGrowVect(), u_dep.nGrowVect(),
+        WarpX::do_single_precision_comms, period);
+
+    // --- Pass 3: recover T_e = u / (3/2 k_B n_e) -----------------------
+    // Floored cells keep their previous T_e (mirroring QDSMCUpdateTe);
+    // dividing by the same n_e that built u makes chi = 0 the exact
+    // identity.
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(Te, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        amrex::Box const box = mfi.tilebox();
+        amrex::Array4<amrex::Real>       const & Te_arr  = Te.array(mfi);
+        amrex::Array4<amrex::Real const> const & u_arr   = u_dep.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            if (rho_arr(i,j,k) <= 0.0_rt) { return; }
+            amrex::Real const ne = rho_arr(i,j,k) / qe;
+            if (ne <= n_floor) { return; }
+            Te_arr(i,j,k) = u_arr(i,j,k) / (1.5_rt * kb * ne);
+        });
+    }
+    // The subsequent K_e init (and the E-solve's grad Pe) read T_e ghosts.
+    ablastr::utils::communication::FillBoundary(
+        Te, WarpX::do_single_precision_comms, period, true);
+}
+
+
 void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
 {
     ABLASTR_PROFILE("HybridPICModel::AdvanceElectronEnergyQDSMC()");
@@ -1622,6 +2240,10 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
             QDSMCInitializeUe(lev, QdsmcUeMode::JiOld);
             QdsmcTransportOnce(lev, dt, /*midpoint=*/false);
             ApplyQdsmcEnergySources(lev, dt, /*fill_te_ghosts=*/false);
+            // Lie conduction, matching euler's Lie sources (no-op unless
+            // the kappa_par parser is set, keeping the control bit-identical
+            // to #6982).
+            QdsmcConductionOnce(lev, dt, /*use_rho_new=*/true);
             QDSMCFillElectronPressureFromTe(lev);
             m_qdsmc_pc->ResetParticles(lev);
         }
@@ -1643,9 +2265,13 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
     {
         QDSMCInitializeUe(lev, QdsmcUeMode::JiAvg);
 
+        // Strang bracket as in the pc driver (the rho pairing is
+        // half-integer-staggered here, accepted for the non-default scheme).
+        QdsmcConductionOnce(lev, 0.5_rt * dt_adv, /*use_rho_new=*/false);
         ApplyQdsmcEnergySources(lev, 0.5_rt * dt_adv, /*fill_te_ghosts=*/true);
         QdsmcTransportOnce(lev, dt_adv, /*midpoint=*/true);
         ApplyQdsmcEnergySources(lev, 0.5_rt * dt_adv, /*fill_te_ghosts=*/true);
+        QdsmcConductionOnce(lev, 0.5_rt * dt_adv, /*use_rho_new=*/true);
 
         // Pe bookkeeping for the integer-time extrapolation (consumed by
         // ApplyQdsmcPeExtrapolation right before the final E-solve). The
@@ -1709,9 +2335,15 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
     {
         QDSMCInitializeUe(lev, QdsmcUeMode::JiNewRhoHalf);
 
+        // Strang: C(dt/2) . [S(dt/2) A(dt) S(dt/2)] . C(dt/2). The
+        // conduction halves pair T_e with the rho of their time level
+        // (rho^n before the transport, rho^{n+1} after); both no-op unless
+        // the kappa_par parser is set.
+        QdsmcConductionOnce(lev, 0.5_rt * dt, /*use_rho_new=*/false);
         ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true);
         QdsmcTransportOnce(lev, dt, /*midpoint=*/true);
         ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true);
+        QdsmcConductionOnce(lev, 0.5_rt * dt, /*use_rho_new=*/true);
 
         QDSMCFillElectronPressureFromTe(lev);
         m_qdsmc_pc->ResetParticles(lev);

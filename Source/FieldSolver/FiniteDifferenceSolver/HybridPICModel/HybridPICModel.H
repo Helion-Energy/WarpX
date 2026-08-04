@@ -467,6 +467,30 @@ public:
     void ApplyQdsmcEnergySources (int lev, amrex::Real dt_src,
                                   bool fill_te_ghosts) const;
 
+    /** One Ito tensor-conduction substep on level lev over dt_c (Thrust C),
+     *  operating on the energy density u = 3/2 n_e k_B T_e (NOT on the
+     *  entropy K_e: conduction is not adiabatic, and mapping the Fourier
+     *  flux into K-space drags in n-gradient corrections). Each owned node
+     *  spawns ephemeral quiet Gauss--Hermite daughters along the
+     *  field-aligned eigendirections of D = chi_par b b + chi_perp (I - bb),
+     *  displaced by the Ito drift [div D + D . grad ln n_e] dt_c plus the
+     *  quadrature offsets x_q sqrt(2 chi dt_c), and hat-deposits w_q * u
+     *  with the same half-gradient correction as the advection markers
+     *  (source-node MC slopes of u; without it the hat remap adds a
+     *  chi_num ~ dx^2/(12 dt) floor -- the conduction analogue of the
+     *  cell-center-home diffusion). T_e is then recovered as
+     *  u_dep / (3/2 k_B n_e) and its ghosts refreshed. Positivity is
+     *  automatic (positive quadrature weights, positive u); Sigma(u) is
+     *  conserved to round-off (the correction sums to zero per daughter).
+     *  No-op unless m_include_thermal_conduction.
+     *
+     *  use_rho_new selects rho_fp (post-transport Strang half) vs
+     *  hybrid_rho_fp_temp (pre-transport half) for the u build, the
+     *  grad ln n_e drift and the recovery, so u <-> T_e stays consistent
+     *  within the substep. b and chi are evaluated from whatever B is in
+     *  the register (B^{n+1/2} in the pc driver). */
+    void QdsmcConductionOnce (int lev, amrex::Real dt_c, bool use_rho_new) const;
+
     /** leapfrog self-start: false until the first advance has run (which
      *  advances by dt/2 to move T_e^0 to the half level). */
     mutable bool m_qdsmc_leapfrog_started = false;
@@ -512,6 +536,55 @@ public:
     std::string m_nu_ei_expression = "0.0";
     std::unique_ptr<amrex::Parser> m_nu_ei_parser;
     amrex::ParserExecutor<4> m_nu_ei;
+
+    /** Ito-process tensor thermal conduction on T_e (Thrust C):
+     *   dU_e/dt += div(kappa grad T_e),
+     *   kappa = kappa_par b b + kappa_perp (I - b b),  b = B/|B|,
+     * applied as a split substep bracketing the entropy transport
+     * (QdsmcConductionOnce). Enabled by specifying the parallel-conductivity
+     * parser qdsmc_kappa_par(n,Te,t) (n [m^-3], Te [eV], t [s], kappa in
+     * W/(m K)); kappa_perp has its own optional parser and defaults to 0.
+     * Only consulted when m_solve_electron_energy_equation is on. */
+    bool m_include_thermal_conduction = false;
+    std::string m_kappa_par_expression = "0.0";
+    std::string m_kappa_perp_expression = "0.0";
+    std::unique_ptr<amrex::Parser> m_kappa_par_parser;
+    std::unique_ptr<amrex::Parser> m_kappa_perp_parser;
+    amrex::ParserExecutor<3> m_kappa_par;
+    amrex::ParserExecutor<3> m_kappa_perp;
+
+    /** Quiet Gauss--Hermite quadrature points per field-aligned direction
+     *  (parallel, perpendicular), each in [2, 7]. npts = 2 is variance-exact
+     *  but has a per-step 4th-moment defect (conduction weak order 1 in dt);
+     *  npts = 3 matches through the 5th moment (weak order 2). The counts
+     *  are per-direction so npts_par can be raised alone for fast parallel
+     *  tails at large Spitzer chi_par. Input:
+     *  qdsmc_conduction_quadrature_points = <npts_par> [<npts_perp>]
+     *  (a single value broadcasts to both). */
+    int m_cond_npts_par = 2;
+    int m_cond_npts_perp = 2;
+
+    /** Free-streaming flux-limit factor f (longitudinal channel only):
+     *  kappa_eff = kappa / (1 + |q_Sp| / (f q_fs)) with
+     *  q_Sp = kappa |grad_par T_e| and q_fs = n_e k_B T_e v_te. Values
+     *  <= 0 disable the limiter. Input:
+     *  qdsmc_conduction_flux_limit_factor. */
+    amrex::Real m_cond_flux_limit_factor = 0.1;
+
+    /** Numerical hop cap in cells: chi is soft-min limited so the largest
+     *  quadrature offset obeys x_max sqrt(2 chi dt_c) <= m_cond_max_hop *
+     *  dx_min. Where the cap engages, transport is slower than physical --
+     *  accepted by design, like the vacuum-resistivity ceiling turning
+     *  vacuum into a fast-but-finite diffusion front. Also bounds the
+     *  deposit's guard-cell reach. Input: qdsmc_conduction_max_hop. */
+    amrex::Real m_cond_max_hop = 2.0;
+
+    /** In floored cells (n_e <= qdsmc_n_floor) set chi (both channels) to
+     *  the hop-cap ceiling instead of the parser value, so conduction
+     *  fronts propagate through vacuum/low-density regions at the capped
+     *  rate instead of stalling. Input:
+     *  qdsmc_conduction_vacuum_fast_front. */
+    bool m_cond_vacuum_fast_front = true;
 
     /** Density floor used when dividing by the deposited QDSMC weight to
      * recover K_e^{n+1} from (K*N) / N. Avoids divide-by-zero in cells
