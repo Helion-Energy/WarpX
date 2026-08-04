@@ -3710,6 +3710,26 @@ Maxwell solver: kinetic-fluid hybrid
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the exponent used to calculate
     the electron pressure (see :ref:`here <theory-hybrid-model-elec-temp>`).
 
+.. pp:param:: hybrid_pic_model.include_hall_term
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    Whether the Hall contribution — the total (curl-B) current in the
+    :math:`(\boldsymbol{J} - \boldsymbol{J}_i)\times\boldsymbol{B}/(e n_e)` term of the generalized
+    Ohm's law — enters the E-field solve. With it off the term reduces to the ideal
+    :math:`-\boldsymbol{u}_i\times\boldsymbol{B}` motional field. Turning both this and
+    :pp:param:`hybrid_pic_model.include_electron_pressure_term` off makes a species-free
+    resistive-vacuum simulation exactly linear.
+
+.. pp:param:: hybrid_pic_model.include_electron_pressure_term
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    Whether the electron-pressure gradient :math:`-\nabla P_e/(e n_e)` enters the E-field solve.
+    The electron pressure itself (closure or energy equation) is still evaluated.
+
 .. pp:param:: hybrid_pic_model.plasma_resistivity(rho,J,t)
     :type: ``float`` or ``str``
     :default: ``0``

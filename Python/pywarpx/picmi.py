@@ -2561,6 +2561,12 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         # defined in my_constants with the same name but different value.
         self.mangle_dict = pywarpx.my_constants.add_keywords(self.user_defined_kw)
 
+        # Open BC means FieldBoundaryType::Open (the Green's-function
+        # free-space boundary on the RZ r_hi face) for the hybrid solver,
+        # rather than a perfectly-matched layer (PML is not implemented for
+        # the hybrid field advance).
+        BC_map["open"] = "open"
+
         self.grid.grid_initialize_inputs()
 
         pywarpx.algo.maxwell_solver = self.method

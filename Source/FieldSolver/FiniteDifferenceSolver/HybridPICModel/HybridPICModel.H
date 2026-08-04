@@ -620,6 +620,15 @@ public:
 
     bool m_holmstrom_vacuum_region = false;
 
+    /** Independent Ohm's-law term controls: whether the Hall contribution
+     * (the curl-B total current in the (J - J_i) x B / (e n) term; with it
+     * off the term reduces to the ideal -u_i x B motional field) and the
+     * electron-pressure gradient enter the E-field solve. Both default on;
+     * turning them off makes e.g. a species-free resistive-vacuum deck
+     * exactly linear (used by the open-boundary Green's-function tests). */
+    bool m_include_hall_term = true;
+    bool m_include_electron_pressure_term = true;
+
     /** Electron temperature in eV */
     amrex::Real m_elec_temp;
     /** Reference electron density */
@@ -991,6 +1000,14 @@ public:
      * split external fields, and the Ohm kernels must not touch the
      * external-field arrays at all. */
     bool m_external_unified = false;
+    /** Subtract the external E field from the Ohm's-law E unconditionally
+     * instead of gating the subtraction on rho >= rho_floor. The per-cell
+     * gate is a state-dependent discontinuity that breaks matrix-free
+     * Jacobian probes, so a solver iterating the external fields inside
+     * its residual can enable this in its Define(). The default (false)
+     * preserves the split-field behavior, where external fields penetrate
+     * sub-floor vacuum regions freely. Not a user input. */
+    bool m_external_e_subtraction_unconditional = false;
     std::unique_ptr<ExternalVectorPotential> m_external_vector_potential;
 
     /** Gpu Vector with index type of the Jx multifab */

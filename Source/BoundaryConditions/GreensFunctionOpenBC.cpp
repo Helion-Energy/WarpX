@@ -14,6 +14,8 @@
 #include "Utils/WarpXConst.H"
 #include "WarpX.H"
 
+#include <ablastr/warn_manager/WarnManager.H>
+
 #include <AMReX.H>
 #include <AMReX_Algorithm.H>
 #include <AMReX_Array4.H>
@@ -123,7 +125,12 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
     // wall current sheet ~ B_applied / (mu0 dr) that resistively erodes the
     // applied field from the wall inward. Applied fields must instead be
     // loaded through the hybrid solver's split external-field registers,
-    // which provide their own ghost values.
+    // which provide their own ghost values. A "constant" init style is
+    // curl-free by construction and is rejected outright; the other init
+    // styles (parser, file, python loaders) may legitimately load a field
+    // supported by interior currents -- e.g. the plasma-response flux of an
+    // equilibrium whose vacuum part rides in the external registers -- so
+    // they get a warning that any curl-free component will be erased.
     {
         const amrex::ParmParse pp_warpx("warpx");
         std::string B_ext_grid_s;
@@ -132,13 +139,26 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
                        B_ext_grid_s.begin(),
                        [] (unsigned char c) { return std::tolower(c); });
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            B_ext_grid_s.empty() || B_ext_grid_s == "default",
-            "warpx.B_ext_grid_init_style is not compatible with the Green's-function "
-            "open boundary: a curl-free applied field written into the evolved B would "
-            "be erased at the open face (the ghost fill reconstructs only the field of "
-            "the interior currents), creating a spurious wall current sheet. Load "
-            "applied fields with hybrid_pic_model.add_external_fields = 1 and "
+            B_ext_grid_s != "constant",
+            "warpx.B_ext_grid_init_style = constant is not compatible with the "
+            "Green's-function open boundary: a curl-free applied field written into "
+            "the evolved B would be erased at the open face (the ghost fill "
+            "reconstructs only the field of the interior currents), creating a "
+            "spurious wall current sheet. Load applied fields with "
+            "hybrid_pic_model.add_external_fields = 1 and "
             "hybrid_pic_model.B[x/y/z]_external_grid_function instead.");
+        if (!B_ext_grid_s.empty() && B_ext_grid_s != "default") {
+            ablastr::warn_manager::WMRecordWarning(
+                "GreensFunctionOpenBC",
+                "warpx.B_ext_grid_init_style = " + B_ext_grid_s +
+                    " writes into the evolved B: the Green's-function open "
+                    "boundary reconstructs ghost values from the interior "
+                    "currents only, so any curl-free (applied/vacuum) component "
+                    "of the loaded field will be erased at the open face. Make "
+                    "sure the loaded field is supported by interior currents "
+                    "and carry applied fields in the split external registers.",
+                ablastr::warn_manager::WarnPriority::high);
+        }
     }
 
     const amrex::Box& domain = geom.Domain();
