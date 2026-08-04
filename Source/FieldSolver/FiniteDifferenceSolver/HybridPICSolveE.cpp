@@ -550,6 +550,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
     const bool include_external_fields = hybrid_model->m_add_external_fields
         && !hybrid_model->m_external_unified;
+    const bool subtract_E_ext_everywhere =
+        hybrid_model->m_external_e_subtraction_unconditional;
+    const bool include_hall_term = hybrid_model->m_include_hall_term;
+    const bool include_electron_pressure_term =
+        hybrid_model->m_include_electron_pressure_term;
     // The stored electric field follows the split-field convention in both
     // schemes: the inductive E_ext is subtracted from plasma cells (where
     // the generalized Ohm's law itself is the electric field and the
@@ -675,18 +680,23 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 Bz_interp += Interp(Bz_ext, Bz_stag, nodal, coarsen, i, j, 0, 0);
             }
 
-            // calculate enE = (J - Ji) x B
+            // calculate enE = (J - Ji) x B (without the Hall term the total
+            // current drops out and this is the ideal -u_i x B motional
+            // field)
+            const Real jer = (include_hall_term ? jr_interp : 0.0_rt) - jir_interp;
+            const Real jet = (include_hall_term ? jtheta_interp : 0.0_rt) - jit_interp;
+            const Real jez = (include_hall_term ? jz_interp : 0.0_rt) - jiz_interp;
             enE_nodal(i, j, 0, 0) = (
-                (jtheta_interp - jit_interp) * Bz_interp
-                - (jz_interp - jiz_interp) * Btheta_interp
+                jet * Bz_interp
+                - jez * Btheta_interp
             );
             enE_nodal(i, j, 0, 1) = (
-                (jz_interp - jiz_interp) * Br_interp
-                - (jr_interp - jir_interp) * Bz_interp
+                jez * Br_interp
+                - jer * Bz_interp
             );
             enE_nodal(i, j, 0, 2) = (
-                (jr_interp - jir_interp) * Btheta_interp
-                - (jtheta_interp - jit_interp) * Br_interp
+                jer * Btheta_interp
+                - jet * Br_interp
             );
         });
 
@@ -782,7 +792,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
                     // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
-                    const Real grad_Pe = (!solve_for_Faraday) ?
+                    const Real grad_Pe =
+                        (!solve_for_Faraday && include_electron_pressure_term) ?
                         T_Algo::UpwardDr(Pe, coefs_r, n_coefs_r, i, j, 0, 0)
                         : 0._rt;
 
@@ -835,7 +846,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_external_fields &&
+                    (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                     Er(i, j, 0) -= Er_ext(i, j, 0);
                 }
             },
@@ -914,7 +926,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_external_fields &&
+                    (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                     Etheta(i, j, 0) -= Etheta_ext(i, j, 0);
                 }
             },
@@ -933,7 +946,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
                     // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
-                    const Real grad_Pe = (!solve_for_Faraday) ?
+                    const Real grad_Pe =
+                        (!solve_for_Faraday && include_electron_pressure_term) ?
                         T_Algo::UpwardDz(Pe, coefs_z, n_coefs_z, i, j, 0, 0)
                         : 0._rt;
 
@@ -992,7 +1006,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_external_fields &&
+                    (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                     Ez(i, j, 0) -= Ez_ext(i, j, 0);
                 }
             }
@@ -1051,6 +1066,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 
     const bool include_external_fields = hybrid_model->m_add_external_fields
         && !hybrid_model->m_external_unified;
+    const bool subtract_E_ext_everywhere =
+        hybrid_model->m_external_e_subtraction_unconditional;
+    const bool include_hall_term = hybrid_model->m_include_hall_term;
+    const bool include_electron_pressure_term =
+        hybrid_model->m_include_electron_pressure_term;
     // The stored electric field follows the split-field convention in both
     // schemes: the inductive E_ext is subtracted from plasma cells (where
     // the generalized Ohm's law itself is the electric field and the
@@ -1175,18 +1195,23 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 Bz_interp += Interp(Bz_ext, Bz_stag, nodal, coarsen, i, j, k, 0);
             }
 
-            // calculate enE = (J - Ji) x B
+            // calculate enE = (J - Ji) x B (without the Hall term the total
+            // current drops out and this is the ideal -u_i x B motional
+            // field)
+            const Real jex = (include_hall_term ? jx_interp : 0.0_rt) - jix_interp;
+            const Real jey = (include_hall_term ? jy_interp : 0.0_rt) - jiy_interp;
+            const Real jez = (include_hall_term ? jz_interp : 0.0_rt) - jiz_interp;
             enE_nodal(i, j, k, 0) = (
-                (jy_interp - jiy_interp) * Bz_interp
-                - (jz_interp - jiz_interp) * By_interp
+                jey * Bz_interp
+                - jez * By_interp
             );
             enE_nodal(i, j, k, 1) = (
-                (jz_interp - jiz_interp) * Bx_interp
-                - (jx_interp - jix_interp) * Bz_interp
+                jez * Bx_interp
+                - jex * Bz_interp
             );
             enE_nodal(i, j, k, 2) = (
-                (jx_interp - jix_interp) * By_interp
-                - (jy_interp - jiy_interp) * Bx_interp
+                jex * By_interp
+                - jey * Bx_interp
             );
         });
 
@@ -1278,7 +1303,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
                 // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
-                const Real grad_Pe = (!solve_for_Faraday) ?
+                const Real grad_Pe =
+                    (!solve_for_Faraday && include_electron_pressure_term) ?
                     T_Algo::UpwardDx(Pe, coefs_x, n_coefs_x, i, j, k)
                     : 0._rt;
 
@@ -1328,7 +1354,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields && (rho_val >= rho_floor)) {
+            if (include_external_fields &&
+                (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                 Ex(i, j, k) -= Ex_ext(i, j, k);
             }
         });
@@ -1347,7 +1374,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
                 // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
-                const Real grad_Pe = (!solve_for_Faraday) ?
+                const Real grad_Pe =
+                    (!solve_for_Faraday && include_electron_pressure_term) ?
                     T_Algo::UpwardDy(Pe, coefs_y, n_coefs_y, i, j, k)
                     : 0._rt;
 
@@ -1397,7 +1425,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields && (rho_val >= rho_floor)) {
+            if (include_external_fields &&
+                (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                 Ey(i, j, k) -= Ey_ext(i, j, k);
             }
         });
@@ -1416,7 +1445,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
                 // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
-                const Real grad_Pe = (!solve_for_Faraday) ?
+                const Real grad_Pe =
+                    (!solve_for_Faraday && include_electron_pressure_term) ?
                     T_Algo::UpwardDz(Pe, coefs_z, n_coefs_z, i, j, k)
                     : 0._rt;
 
@@ -1466,7 +1496,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields && (rho_val >= rho_floor)) {
+            if (include_external_fields &&
+                (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                 Ez(i, j, k) -= Ez_ext(i, j, k);
             }
         });
