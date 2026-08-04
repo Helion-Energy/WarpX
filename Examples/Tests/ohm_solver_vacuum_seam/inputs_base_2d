@@ -1,9 +1,12 @@
-# Holmstrom vacuum-switch seam-noise test bed: a magnetized plasma disk
-# drifts across a periodic 2D (XZ) box, so its circular plasma/vacuum seam
-# samples every angle and cell phase.
+# Vacuum-seam switch-mode test bed: a magnetized plasma disk drifts across
+# a periodic 2D (XZ) box, so its circular plasma/vacuum seam samples every
+# angle and cell phase.
 # With the legacy per-edge switch decision the three E components take
-# inconsistent vacuum/plasma branches at the seam (a grid-patterned
-# spurious-E source); the node/cell decision modes remove it.
+# inconsistent vacuum/plasma decisions at the seam (a grid-patterned
+# spurious-E source); the node/cell decision modes remove it. The seam
+# decision drives the holmstrom vacuum branch here (the guarded_* tests
+# override holmstrom_vacuum_region back off to exercise the guarded Hall
+# density-floor selection instead).
 max_step = 10
 warpx.const_dt = 1.5e-9
 

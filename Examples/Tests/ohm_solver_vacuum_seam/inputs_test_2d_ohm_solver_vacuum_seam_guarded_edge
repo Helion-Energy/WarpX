@@ -1,0 +1,13 @@
+# base input parameters
+FILE = inputs_base_2d
+
+# guarded Hall floor only (no holmstrom vacuum treatment). The bare guarded
+# vacuum supports whistlers at the floor density (5e16 -> substep dt must
+# resolve ~1.25e11 rad/s at the grid scale) and needs the production-typical
+# large smooth vacuum resistivity (rho_floor*q_e ~ 8.0e-3 C/m^3) to damp them.
+hybrid_pic_model.holmstrom_vacuum_region = 0
+hybrid_pic_model.substeps = 200
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 1.5*exp(-(rho/8.0e-3)*(rho/8.0e-3)) + 1.0e-6
+
+# vacuum-seam decision mode under test
+hybrid_pic_model.vacuum_seam_switch_mode = edge

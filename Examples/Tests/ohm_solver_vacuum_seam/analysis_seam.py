@@ -4,15 +4,19 @@
 # This file is part of WarpX.
 #
 # License: BSD-3-Clause-LBNL
-"""Seam-noise comparison for the holmstrom vacuum-switch decision modes.
+"""Seam-noise comparison for the vacuum-seam switch decision modes.
 
 A magnetized plasma disk drifts through a periodic box; its circular
 plasma/vacuum seam samples every angle and cell phase. The legacy per-edge
 switch decision lets the E components of a cell take inconsistent
-vacuum/plasma branches along the seam, sourcing a grid-(C4-)patterned
-spurious E there; the node and cell decision modes remove most of it.
-With one run directory the script only checks boundedness; with three
-(edge, node, cell) it asserts the noise reduction.
+vacuum/plasma decisions along the seam -- the holmstrom vacuum branch when
+that treatment is on, the density-floor selection of the guarded Hall term
+otherwise -- sourcing a grid-(C4-)patterned spurious E there; the node and
+cell decision modes remove most of it.
+With one run directory the script only checks boundedness (the guarded
+tests use this: their seam ring carries the physical Hall halo of the
+floored vacuum, so the modes are pinned by checksums instead of a noise
+ratio); with three (holmstrom edge, node, cell) it asserts the reduction.
 """
 
 import os

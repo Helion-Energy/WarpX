@@ -2,4 +2,4 @@
 FILE = inputs_base_2d
 
 # vacuum-switch decision mode under test
-hybrid_pic_model.holmstrom_switch_mode = cell
+hybrid_pic_model.vacuum_seam_switch_mode = cell

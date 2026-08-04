@@ -59,17 +59,17 @@ void HybridPICModel::ReadParameters ()
 
     {
         std::string switch_mode_str = "edge";
-        pp_hybrid.query("holmstrom_switch_mode", switch_mode_str);
-        if (switch_mode_str == "edge") { m_holmstrom_switch_mode = 0; }
-        else if (switch_mode_str == "node") { m_holmstrom_switch_mode = 1; }
-        else if (switch_mode_str == "cell") { m_holmstrom_switch_mode = 2; }
+        pp_hybrid.query("vacuum_seam_switch_mode", switch_mode_str);
+        if (switch_mode_str == "edge") { m_vacuum_seam_switch_mode = 0; }
+        else if (switch_mode_str == "node") { m_vacuum_seam_switch_mode = 1; }
+        else if (switch_mode_str == "cell") { m_vacuum_seam_switch_mode = 2; }
         else {
             WARPX_ABORT_WITH_MESSAGE(
-                "hybrid_pic_model.holmstrom_switch_mode must be edge, node or cell");
+                "hybrid_pic_model.vacuum_seam_switch_mode must be edge, node or cell");
         }
 #if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_XZ)
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_holmstrom_switch_mode == 0,
-            "hybrid_pic_model.holmstrom_switch_mode is only supported in 3D and "
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_vacuum_seam_switch_mode == 0,
+            "hybrid_pic_model.vacuum_seam_switch_mode is only supported in 3D and "
             "2D (XZ) Cartesian geometry");
 #endif
     }
