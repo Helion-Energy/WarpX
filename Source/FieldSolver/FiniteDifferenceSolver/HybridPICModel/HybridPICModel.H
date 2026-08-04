@@ -204,17 +204,31 @@ public:
         amrex::MultiFab& Pe_field,
         amrex::MultiFab const& rho_field ) const;
 
+    /** Which J_i / rho time levels QDSMCInitializeUe combines into V_e.
+     *  The QDSMC advance is called at a point where hybrid_current_fp_temp
+     *  holds J_i^{n-1/2}, current_fp holds J_i^{n+1/2}, hybrid_rho_fp_temp
+     *  holds rho^n and rho_fp holds rho^{n+1} (the euler/leapfrog call site);
+     *  the pc corrector runs after the J_i^n LinComb, where
+     *  hybrid_current_fp_temp already holds J_i^n. */
+    enum struct QdsmcUeMode {
+        JiOld,       /**< euler (#6982): J_i^{n-1/2}, rho^n, J_plasma(B^n) */
+        JiAvg,       /**< leapfrog: J_i^n = avg(temp, fp), rho^n, J_plasma(B^n) */
+        JiNewRhoHalf /**< pc corrector: J_i^{n+1/2} (= current_fp),
+                          rho^{n+1/2} = avg(rho_fp_temp, rho_fp),
+                          J_plasma(B^{n+1/2}) */
+    };
+
     /**
      * \brief Fill the nodal V_e = -(J_plasma - J_i) / (q_e n_e) MultiFabs by
      *        interpolating the Yee-staggered total plasma current and ion
      *        current to the nodal grid (using ablastr::coarsen::sample::Interp)
      *        and dividing by rho. Cells with rho <= rho_floor are left at 0.
      *
-     *        Reads hybrid_current_fp_plasma (J_plasma), hybrid_current_fp_temp
-     *        (J_i at n+1/2), hybrid_rho_fp_temp (rho at n+1/2). Writes
+     *        Reads hybrid_current_fp_plasma (J_plasma) plus the J_i / rho
+     *        fields selected by \c mode (see QdsmcUeMode). Writes
      *        hybrid_electron_velocity_fp (3 directions, nodal).
      */
-    void QDSMCInitializeUe (int lev) const;
+    void QDSMCInitializeUe (int lev, QdsmcUeMode mode = QdsmcUeMode::JiOld) const;
 
     /**
      * \brief Fill the nodal K_e = T_e * n_e^(1-gamma) * (k_B / q_e) MultiFab
@@ -336,8 +350,45 @@ public:
      *   8. Reset QDSMC particles to home positions for the next step
      *
      * Called from HybridPICEvolveFields when m_solve_electron_energy_equation is true.
+     *
+     * Scheme dispatch (qdsmc_time_advance, Thrust-A bake-off):
+     *   - euler (default, #6982-identical): forward-Euler push with
+     *     V_e(J_i^{n-1/2}, B^n, rho^n), Lie sources after transport.
+     *   - leapfrog: T_e lives at HALF-INTEGER times; this call advances
+     *     T_e^{n-1/2} -> T_e^{n+1/2} with the time-centered
+     *     V_e^n(J_i^n, B^n, rho^n), a two-stage midpoint push, and
+     *     Strang-split sources. The emitted Pe^{n+1/2} is time-centered for
+     *     both B half-pushes; ApplyQdsmcPeExtrapolation swaps in the
+     *     linearly extrapolated Pe^{n+1} before the final E-solve. The first
+     *     call self-starts with a dt/2 advance (T_e^0 -> T_e^{1/2}).
+     *   - pc: nothing happens at this call site; the transport runs in
+     *     AdvanceElectronEnergyQDSMC_PC between the two B half-pushes.
      */
     void AdvanceElectronEnergyQDSMC (amrex::Real dt) const;
+
+    /**
+     * \brief pc-mode corrector: single transport T_e^n -> T_e^{n+1} using the
+     *        mid-step velocity V_e^{n+1/2}(J_i^{n+1/2}, B^{n+1/2}, rho^{n+1/2}),
+     *        a two-stage midpoint push and Strang-split sources.
+     *
+     * Must be called from HybridPICEvolveFields AFTER the first B half-push
+     * (so B^{n+1/2} is in the register) and BEFORE the rho^{n+1/2} LinComb
+     * (so hybrid_rho_fp_temp still holds rho^n for the K_e / N_e load).
+     * Recomputes J_plasma from B^{n+1/2}. The first B half-push runs with the
+     * previous step's Pe^n (already in the register); the emitted Pe^{n+1}
+     * serves the second half-push and the final E-solve.
+     */
+    void AdvanceElectronEnergyQDSMC_PC (amrex::Real dt) const;
+
+    /**
+     * \brief leapfrog only: overwrite the Pe register with the linearly
+     *        extrapolated integer-time value
+     *        Pe^{n+1} = 3/2 Pe^{n+1/2} - 1/2 Pe^{n-1/2} (first step:
+     *        2 Pe^{1/2} - Pe^0), staged by AdvanceElectronEnergyQDSMC into
+     *        hybrid_qdsmc_pe_ext_fp. Call right before the final E-solve;
+     *        mirrors the existing J_i^{n+1} extrapolation.
+     */
+    void ApplyQdsmcPeExtrapolation () const;
 
     /** Check if rkf45 should be used */
     [[nodiscard]] bool DoRKF45(int step) const { return m_rkf45_intervals.contains(step); }
@@ -381,6 +432,35 @@ public:
      * through the closure (with the chosen gamma, which need not be
      * adiabatic). */
     bool m_solve_electron_energy_equation = false;
+
+    /** Time-advance scheme for the QDSMC energy step (bake-off switch,
+     *  hybrid_pic_model.qdsmc_time_advance = euler | leapfrog | pc).
+     *  See AdvanceElectronEnergyQDSMC for the scheme definitions. */
+    enum struct QdsmcTimeAdvance { Euler, Leapfrog, PC };
+    QdsmcTimeAdvance m_qdsmc_time_advance = QdsmcTimeAdvance::Euler;
+
+    /** One entropy-transport pass on level lev over dt_adv: K_e init ->
+     *  SetV -> SetK [-> midpoint velocity re-gather] -> PushX -> deposits ->
+     *  T_e recovery. V_e must already be filled (QDSMCInitializeUe) and
+     *  sources are NOT applied here. */
+    void QdsmcTransportOnce (int lev, amrex::Real dt_adv, bool midpoint) const;
+
+    /** Operator-split energy sources over dt_src: Joule heating (+ the
+     *  Te-threshold redirect staging), the per-species T_i collapse, the
+     *  Q_ei electron sink and the conjugate/redirected stochastic ion
+     *  heating. Factored out of the #6982 advance so Strang halves can call
+     *  it twice. When fill_te_ghosts is true (the Strang paths), T_e's
+     *  ghost cells are refreshed afterward (the source kernels write valid
+     *  cells only and the subsequent K_e init reads ghosts). */
+    void ApplyQdsmcEnergySources (int lev, amrex::Real dt_src,
+                                  bool fill_te_ghosts) const;
+
+    /** leapfrog self-start: false until the first advance has run (which
+     *  advances by dt/2 to move T_e^0 to the half level). */
+    mutable bool m_qdsmc_leapfrog_started = false;
+    /** leapfrog: false until hybrid_qdsmc_pe_prev_fp holds a valid previous
+     *  Pe level (Pe^0 on the first step, Pe^{n-1/2} afterward). */
+    mutable bool m_qdsmc_pe_prev_valid = false;
 
     /** Resistive electron-heating source on T_e (see Phys. Plasmas 31, 012902 (2024), Eq. 12),
      * computed per cell as

@@ -352,6 +352,102 @@ QdsmcParticleContainer::SetK (int lev,
 
 
 void
+QdsmcParticleContainer::GatherVAtMidpoint (int lev, amrex::Real dt,
+                                           const amrex::MultiFab & Ux,
+                                           const amrex::MultiFab & Uy,
+                                           const amrex::MultiFab & Uz)
+{
+    ABLASTR_PROFILE("QdsmcParticleContainer::GatherVAtMidpoint()");
+
+    auto & warpx = WarpX::GetInstance();
+    amrex::Geometry const & geom = warpx.Geom(lev);
+    auto const plo = geom.ProbLoArray();
+    auto const phi = geom.ProbHiArray();
+    auto const dxi = geom.InvCellSizeArray();
+    auto const dx_arr = geom.CellSizeArray();
+
+    // Same clamp policy as PushX: keep the sample point just inside the
+    // domain in non-periodic directions; periodic directions gather through
+    // the (FillBoundary-filled) ghost layer unchanged.
+    amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> lo_bnd;
+    amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> hi_bnd;
+    amrex::GpuArray<int, AMREX_SPACEDIM> is_periodic;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        lo_bnd[d] = plo[d];
+        hi_bnd[d] = phi[d] - 1.e-6_rt * dx_arr[d];
+        is_periodic[d] = geom.isPeriodic(d);
+    }
+
+    for (iterator pti(*this, lev); pti.isValid(); ++pti)
+    {
+        long const np = pti.numParticles();
+        auto & attribs = pti.GetStructOfArrays().GetRealData();
+
+        amrex::ParticleReal* const AMREX_RESTRICT x_node =
+            attribs[QdsmcPIdx::x_node].dataPtr();
+        amrex::ParticleReal* const AMREX_RESTRICT y_node =
+            attribs[QdsmcPIdx::y_node].dataPtr();
+        amrex::ParticleReal* const AMREX_RESTRICT z_node =
+            attribs[QdsmcPIdx::z_node].dataPtr();
+        amrex::ParticleReal* const AMREX_RESTRICT vx =
+            attribs[QdsmcPIdx::vx].dataPtr();
+        amrex::ParticleReal* const AMREX_RESTRICT vy =
+            attribs[QdsmcPIdx::vy].dataPtr();
+        amrex::ParticleReal* const AMREX_RESTRICT vz =
+            attribs[QdsmcPIdx::vz].dataPtr();
+
+        auto const ux_arr = Ux.const_array(pti);
+        auto const uy_arr = Uy.const_array(pti);
+        auto const uz_arr = Uz.const_array(pti);
+
+        amrex::ParallelFor(np, [=] AMREX_GPU_DEVICE (long ip)
+        {
+            // Midpoint of the would-be push, per the 3-vector home record.
+            // The clamp applies only to the axes that map to a simulated
+            // dimension; the remaining components (e.g. y in 2D) shift
+            // freely -- they only matter through the gather's coordinate
+            // routing (e.g. r = sqrt(x^2 + y^2) in RZ).
+            auto const mid_clamp = [&] (amrex::Real x0, amrex::Real v, int d)
+            {
+                amrex::Real const xm = x0 + amrex::Real(0.5) * dt * v;
+                return is_periodic[d] ? xm
+                                      : amrex::Clamp(xm, lo_bnd[d], hi_bnd[d]);
+            };
+
+#if defined(WARPX_DIM_3D)
+            amrex::Real const xm = mid_clamp(x_node[ip], vx[ip], 0);
+            amrex::Real const ym = mid_clamp(y_node[ip], vy[ip], 1);
+            amrex::Real const zm = mid_clamp(z_node[ip], vz[ip], 2);
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+            amrex::Real const xm = mid_clamp(x_node[ip], vx[ip], 0);
+            amrex::Real const ym = y_node[ip] + amrex::Real(0.5) * dt * vy[ip];
+            amrex::Real const zm = mid_clamp(z_node[ip], vz[ip], 1);
+#elif defined(WARPX_DIM_1D_Z)
+            amrex::Real const xm = x_node[ip] + amrex::Real(0.5) * dt * vx[ip];
+            amrex::Real const ym = y_node[ip] + amrex::Real(0.5) * dt * vy[ip];
+            amrex::Real const zm = mid_clamp(z_node[ip], vz[ip], 0);
+#else
+            // WARPX_DIM_RCYLINDER / WARPX_DIM_RSPHERE: compile-and-be-sane
+            // only (the energy equation is refused at runtime there).
+            amrex::Real const xm = mid_clamp(x_node[ip], vx[ip], 0);
+            amrex::Real const ym = y_node[ip] + amrex::Real(0.5) * dt * vy[ip];
+            amrex::Real const zm = z_node[ip] + amrex::Real(0.5) * dt * vz[ip];
+#endif
+
+            auto const v = ablastr::particles::doGatherVectorFieldNodal(
+                xm, ym, zm, ux_arr, uy_arr, uz_arr, dxi, plo);
+
+            vx[ip] = v[0];
+            vy[ip] = v[1];
+            vz[ip] = v[2];
+        });
+    }
+
+    amrex::Gpu::synchronize();
+}
+
+
+void
 QdsmcParticleContainer::PushX (int lev, amrex::Real dt)
 {
     ABLASTR_PROFILE("QdsmcParticleContainer::PushX()");

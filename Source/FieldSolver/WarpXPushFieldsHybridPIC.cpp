@@ -119,6 +119,19 @@ void WarpX::HybridPICEvolveFields ()
         WarpX::sync_nodal_points
     );
 
+    // qdsmc_time_advance = pc: single mid-step corrector transport
+    // T_e^n -> T_e^{n+1} using V_e^{n+1/2}(J_i^{n+1/2}, B^{n+1/2},
+    // rho^{n+1/2}). Must run AFTER the first B half-push (B^{n+1/2} in the
+    // register) and BEFORE the rho averaging just below (the K_e / N_e load
+    // needs rho_fp_temp = rho^n). The first half-push above ran with the
+    // previous step's Pe^n; the Pe^{n+1} emitted here serves the second
+    // half-push and the final E-solve.
+    if (m_hybrid_pic_model->m_solve_electron_energy_equation &&
+        m_hybrid_pic_model->m_qdsmc_time_advance ==
+            HybridPICModel::QdsmcTimeAdvance::PC) {
+        m_hybrid_pic_model->AdvanceElectronEnergyQDSMC_PC(dt[0]);
+    }
+
     // Average rho^{n} and rho^{n+1} to get rho^{n+1/2} in rho_fp_temp
     for (int lev = 0; lev <= finest_level; ++lev)
     {
@@ -173,6 +186,14 @@ void WarpX::HybridPICEvolveFields ()
         m_hybrid_pic_model->m_external_vector_potential->UpdateHybridExternalFields(
             gett_new(0),
             0.5_rt*dt[0]);
+    }
+
+    // qdsmc_time_advance = leapfrog: both half-pushes above consumed the
+    // time-centered Pe^{n+1/2}; the final E-solve at t^{n+1} gets the
+    // linearly extrapolated Pe^{n+1} (mirroring the J_i^{n+1} extrapolation
+    // just above). No-op for the other schemes.
+    if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
+        m_hybrid_pic_model->ApplyQdsmcPeExtrapolation();
     }
 
     // Update the E field to t=n+1 using the extrapolated J_i^n+1 value

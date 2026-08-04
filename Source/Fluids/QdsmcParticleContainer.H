@@ -146,6 +146,24 @@ public:
                const amrex::MultiFab & rhofield);
 
     /**
+     * @brief Two-stage midpoint (RK2) velocity evaluation: re-gather the
+     *        velocity field at the trajectory midpoint
+     *        x_mid = home + (dt/2) * v, where v is the velocity currently
+     *        stored on the particle (from SetV), and overwrite vx/vy/vz
+     *        with the midpoint sample. A subsequent PushX(dt) then realizes
+     *        x_new = home + dt * v(x_mid).
+     *
+     *        The midpoint excursion is at most half the one-cell CFL bound,
+     *        so the gather stays within the home tile's ghost coverage and
+     *        no Redistribute is needed. In non-periodic directions x_mid is
+     *        clamped just inside the domain (same guard as PushX).
+     */
+    void GatherVAtMidpoint (int lev, amrex::Real dt,
+                            const amrex::MultiFab & Ux,
+                            const amrex::MultiFab & Uy,
+                            const amrex::MultiFab & Uz);
+
+    /**
      * @brief Advance the particle position by x = x_home + v*dt (forward Euler).
      *        In non-periodic directions the new position is clamped just
      *        inside the domain so Redistribute() cannot delete the marker
