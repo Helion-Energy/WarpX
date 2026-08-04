@@ -391,15 +391,28 @@ void WarpX::HybridPICInitializeRhoJandB ()
     // treatment, silently wrong physics for one step).
     HybridPICDepositRhoAndJ();
 
-    // Fill the electron pressure from the algebraic closure using the freshly
-    // deposited rho. On a fresh start this seeds Pe^0 for the iteration-0
-    // diagnostics and the first step's B-substep E-solves; on restart it
-    // restores Pe(rho^n), which is not checkpointed and would otherwise be
-    // zero for the whole first restarted step. From the first step onward,
-    // HybridPICEvolveFields refreshes Pe right after each deposition (via the
-    // closure, or via the QDSMC entropy transport when
-    // solve_electron_energy_equation is on).
-    m_hybrid_pic_model->CalculateElectronPressure();
+    // Fill the electron pressure using the freshly deposited rho. On a fresh
+    // start this seeds Pe^0 for the iteration-0 diagnostics and the first
+    // step's B-substep E-solves; on restart it restores Pe(rho^n), which is
+    // not checkpointed and would otherwise be zero for the whole first
+    // restarted step. From the first step onward, HybridPICEvolveFields
+    // refreshes Pe right after each deposition.
+    //
+    // With the energy equation on, Pe must come from the CURRENT T_e state,
+    // not the algebraic closure: this entry point also runs whenever Evolve
+    // is re-entered mid-run (e.g. PICMI sim.step() called in segments,
+    // step == step_begin each time), and the closure would silently reset
+    // the evolved T_e/Pe to the polytropic value. On a fresh start or
+    // restart T_e holds the uniform elec_temp seed from InitData (T_e is
+    // not checkpointed -- known gap), so this path reproduces the closure
+    // seed there anyway (up to the (n/n0)^(gamma-1) factor).
+    if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            m_hybrid_pic_model->QDSMCFillElectronPressureFromTe(lev);
+        }
+    } else {
+        m_hybrid_pic_model->CalculateElectronPressure();
+    }
 
     if (restart_chkfile.empty()) {
         // Handle field splitting for Hybrid field push
