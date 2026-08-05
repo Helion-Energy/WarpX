@@ -711,6 +711,15 @@ ThetaImplicitMHD::GetMHDReferenceMagneticFieldForPC () const
             inverse_number_of_cells * magnetic_field.sum(2, false)};
 }
 
+const amrex::MultiFab*
+ThetaImplicitMHD::GetMHDMagneticFieldCCForPC () const
+{
+    // Filled (with ghosts) by FillCellCenteredElectromagneticFields() during
+    // the residual evaluation at the preconditioner's update state; includes
+    // the external contribution under the split-field scheme.
+    return m_WarpX->m_fields.get(MagneticFieldCCName, 0);
+}
+
 bool
 ThetaImplicitMHD::GetMHDIncludeHallTermForPC () const
 {

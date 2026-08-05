@@ -9,6 +9,9 @@
 
 #include "Fields.H"
 #include "MHDWaveOp.H"
+#if defined(WARPX_DIM_RZ)
+#include "MHDWaveOpRZ.H"
+#endif
 #include "Preconditioner.H"
 #include "Utils/Parser/ParserUtils.H"
 #include "Utils/TextMsg.H"
@@ -66,21 +69,59 @@
  * cycle counts, and fixed bottom smoothing.
  *
  * For the conservative-form recast (implicit_mhd.fluid_flux = hlld) the state
- * carries face-staggered B^{n+theta} instead of E. Stage-1 treatment: the
- * Faraday block is the identity, and every cell-centered block (rho, M,
- * U_e, and the ion-closure energies) is preconditioned by the scalar
- * signal-diffusion Helmholtz
+ * carries face-staggered B^{n+theta} instead of E, and the preconditioner
+ * composes three pieces, each of which engages only where it measurably
+ * pays (on resolved states the residuals are smooth, and any preconditioner
+ * content merely injects structure that GMRES must then resolve against the
+ * Jacobian's rough grid-scale HLLD response):
  *
- *     [I + theta dt S_ref (h_dir/2) (-lap)] dU = bU,
+ * 1. Per-direction signal diffusion (OPT-IN via
+ *    pc_mhd_block.signal_diffusion_scale; it degraded plain GMRES on every
+ *    benchmarked regime because HLLD dissipates per characteristic channel
+ *    while one scalar coefficient per block diffuses them all): every
+ *    cell-centered block sees
  *
- * where S_ref = |u|_ref + sqrt(c_s,ref^2 + v_A,ref^2) is the domain-reference
- * signal speed and h_dir the cell size. This stands in for the
- * O(theta dt |S|/h) HLLD upwind dissipation, the stiffest near-wall Jacobian
- * content. In RZ the Helmholtz is assembled in cylindrical form by
- * multiplying the equation through by r (a = r, b_r = r_face D_r,
- * b_z = r_cell D_z). Boundary types the residual handles itself are mapped
- * to preconditioner-only linear-operator types: Open -> homogeneous
- * Dirichlet and None (solver-managed zero-gradient ghosts) -> Neumann.
+ *        [I + theta dt S_dir (h_dir/2) (-lap_dir)] dU = bU,
+ *
+ *    with S_dir = |u_dir|_ref + c_fast,ref, |u_dir|_ref the domain RMS of
+ *    the instantaneous velocity component (an isotropic |u|_ref would add
+ *    the axial flow to the radial faces' diffusion on axially-flowing
+ *    states), reduced by pc_mhd_block.signal_cfl_floor resolved cells per
+ *    implicit interval. In RZ the Helmholtz is assembled in cylindrical
+ *    form by multiplying the equation through by r (a = r, b_r = r_face
+ *    D_r, b_z = r_cell D_z).
+ *
+ * 2. RZ (m = 0) momentum wave Schur: the momentum block is composed with
+ *    the cylindrical wave operator MHDWaveOpRZ
+ *    (I - h^2 c_s^2 grad div + h^2/(mu0 rho_ref) W_B with the INPUT
+ *    reference field magnitude along zhat; the domain mean is near zero
+ *    for reversed-field states, and W_B is quadratic in B so the sign
+ *    structure is immaterial), applied after the scalar diffusion with a
+ *    fixed-cycle MLMG and zero initial guess, engaged when the reference
+ *    fast CFL reaches pc_mhd_block.wave_cfl_threshold.
+ *
+ * 3. Triangular ideal-induction (Faraday) corrector on the otherwise
+ *    identity B block:
+ *
+ *        dB = bB + theta dt curl(dM/rho_ref x B_cc),
+ *
+ *    evaluated with the solver's staggered curl conventions from the
+ *    cell-centered magnetic field frozen at the preconditioner update (the
+ *    frozen field carries the reversed-core sign structure and any
+ *    external contribution, and vanishes on unmagnetized states; the
+ *    coupling is linear in B, so unlike W_B the sign matters). The sign
+ *    follows from the residual convention F_B = B - b + theta dt curl E
+ *    with E = -u x B, whose momentum coupling is
+ *    J_BM dM = -theta dt curl(dM/rho x B). The corrector requires either
+ *    an active wave Schur or a sub-unity Alfven CFL: correcting from an
+ *    identity momentum block at stiff coupling amplifies the neglected
+ *    J_MB J_BM product quadratically.
+ *
+ * Boundary types the residual handles itself are mapped per component to
+ * preconditioner-only linear-operator types matching the residual's fluid
+ * ghosts: PEC (reflecting wall) -> Neumann for scalars and tangential
+ * momentum, homogeneous Dirichlet for the normal momentum; Open (fluid
+ * outflow) and None (solver-managed zero-gradient ghosts) -> Neumann.
  */
 template <class T, class Ops>
 class MHDBlockPC : public Preconditioner<T, Ops>
@@ -111,6 +152,7 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         void ApplyIdealWaveFluidBlock (T& solution, const T& rhs);
         void UpdateSignalDiffusion (const T& state);
         void ApplySignalDiffusionBlocks (T& solution, const T& rhs);
+        void ApplyFaradayCorrector (T& solution);
 
         [[nodiscard]] bool
         IsDefined () const override
@@ -137,10 +179,23 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         bool m_hall_mhd_active = false;
         bool m_evolve_ion_fluid = true;
 
+        bool m_include_wave_schur = true;
+        bool m_wave_schur_active = false;
+        bool m_signal_diffusion_active = false;
+        bool m_faraday_active = false;
+        // Signal diffusion is opt-in (see UpdateSignalDiffusion): on every
+        // benchmarked regime of the conservative-form recast it degraded
+        // plain GMRES, because HLLD dissipates per characteristic channel
+        // while one scalar coefficient per block diffuses them all.
+        RT m_signal_diffusion_scale = 0.0;
+        RT m_signal_cfl_floor = 1.0;
+        RT m_wave_cfl_threshold = 1.0;
+
         int m_field_iterations = 2;
         int m_fluid_iterations = 2;
         int m_max_coarsening_level = 30;
         int m_signal_components = 0;
+        int m_momentum_component = -1;
 
         RT m_gamma_e = RT(5.0 / 3.0);
         RT m_gamma_i = RT(5.0 / 3.0);
@@ -159,7 +214,8 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         RT m_electron_enthalpy = 0.0;
         RT m_ion_sound_speed_squared = 0.0;
         RT m_sound_speed_squared = 0.0;
-        RT m_signal_speed = 0.0;
+        RT m_fast_speed = 0.0;
+        amrex::GpuArray<RT, AMREX_SPACEDIM> m_signal_speed = {};
         amrex::GpuArray<RT, AMREX_SPACEDIM> m_signal_diffusion = {};
         amrex::GpuArray<RT, 3> m_reference_magnetic_field = {0.0, 0.0, 0.0};
 
@@ -179,6 +235,10 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         std::unique_ptr<amrex::MLMG> m_wave_solver;
         std::unique_ptr<amrex::MLABecLaplacian> m_signal_operator;
         std::unique_ptr<amrex::MLMG> m_signal_solver;
+#if defined(WARPX_DIM_RZ)
+        std::unique_ptr<MHDWaveOpRZ> m_wave_operator_rz;
+        std::unique_ptr<amrex::MLMG> m_wave_solver_rz;
+#endif
 
         amrex::Array<std::unique_ptr<amrex::MultiFab>, 3> m_field_rhs;
         amrex::Array<std::unique_ptr<amrex::MultiFab>, 3> m_field_operator_action;
@@ -194,6 +254,11 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         // coefficient also carry the cylindrical metric factor r.
         std::unique_ptr<amrex::MultiFab> m_signal_acoef;
         amrex::Array<std::unique_ptr<amrex::MultiFab>, AMREX_SPACEDIM> m_signal_bcoef;
+        // Scratch for the per-direction velocity RMS reductions.
+        std::unique_ptr<amrex::MultiFab> m_signal_scratch;
+        // Cell-centered magnetic field frozen at the preconditioner update,
+        // read by the triangular Faraday corrector.
+        std::unique_ptr<amrex::MultiFab> m_faraday_field;
 
         void ReadParameters ();
         void ApplyFieldBlock (T& solution, const T& rhs);
@@ -201,7 +266,26 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         void ComputeUnitCurlCurlAction (const T& field);
         void DefineSignalDiffusion (const T& state);
         [[nodiscard]] amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM>
-        GetCellCenteredLinOpBC (bool a_high_side) const;
+        GetCellCenteredLinOpBC (bool a_high_side, int a_momentum_component) const;
+        [[nodiscard]] amrex::Vector<amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM>>
+        GetMomentumLinOpBC (bool a_high_side) const;
+
+        /**
+         * \brief Physical vector component normal to the given logical
+         * direction (the same map orders the per-direction velocity RMS).
+         */
+        [[nodiscard]] static int
+        PhysicalNormalComponent (const int a_direction)
+        {
+#if defined(WARPX_DIM_1D_Z)
+            constexpr amrex::GpuArray<int, AMREX_SPACEDIM> normal_component = {2};
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+            constexpr amrex::GpuArray<int, AMREX_SPACEDIM> normal_component = {0, 2};
+#else
+            constexpr amrex::GpuArray<int, AMREX_SPACEDIM> normal_component = {0, 1, 2};
+#endif
+            return normal_component[a_direction];
+        }
 };
 
 template <class T, class Ops>
@@ -215,10 +299,21 @@ MHDBlockPC<T, Ops>::ReadParameters ()
     pp.query("consolidation", m_consolidation);
     pp.query("include_ideal_mhd_coupling", m_include_ideal_mhd_coupling);
     pp.query("include_hall_mhd_coupling", m_include_hall_mhd_coupling);
+    pp.query("include_wave_schur", m_include_wave_schur);
     utils::parser::queryWithParser(pp, "field_iterations", m_field_iterations);
     utils::parser::queryWithParser(pp, "fluid_iterations", m_fluid_iterations);
     utils::parser::queryWithParser(pp, "max_coarsening_level", m_max_coarsening_level);
     utils::parser::queryWithParser(pp, "wave_relaxation", m_wave_relaxation);
+    utils::parser::queryWithParser(pp, "signal_diffusion_scale", m_signal_diffusion_scale);
+    utils::parser::queryWithParser(pp, "signal_cfl_floor", m_signal_cfl_floor);
+    utils::parser::queryWithParser(pp, "wave_cfl_threshold", m_wave_cfl_threshold);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_signal_diffusion_scale >= 0.0,
+        "pc_mhd_block.signal_diffusion_scale cannot be negative");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_signal_cfl_floor >= 0.0,
+                                     "pc_mhd_block.signal_cfl_floor cannot be negative");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_wave_cfl_threshold >= 0.0,
+                                     "pc_mhd_block.wave_cfl_threshold cannot be negative");
 
     const amrex::ParmParse pp_mhd("implicit_mhd");
     utils::parser::getWithParser(pp_mhd, "reference_mass_density", m_reference_mass_density);
@@ -389,8 +484,19 @@ MHDBlockPC<T, Ops>::Define (const T& state, Ops* const ops)
 
 template <class T, class Ops>
 amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM>
-MHDBlockPC<T, Ops>::GetCellCenteredLinOpBC (const bool a_high_side) const
+MHDBlockPC<T, Ops>::GetCellCenteredLinOpBC (const bool a_high_side,
+                                            const int a_momentum_component) const
 {
+    // Match the residual's fluid domain ghosts (ApplyFluidDomainBoundaries):
+    // a PEC wall is a reflecting no-normal-flow wall (even scalars and
+    // tangential momentum -> Neumann; odd normal momentum -> homogeneous
+    // Dirichlet), Open is zero-gradient fluid outflow (-> Neumann; the
+    // Green's-function coupling lives on the face-staggered field block,
+    // not here), and None marks solver-managed zero-gradient ghosts (the RZ
+    // axis and outflow z ends -> Neumann; the axis parity of the odd
+    // components is inert because the r-weighted radial fluxes vanish on
+    // the r = 0 face). a_momentum_component is the physical component a
+    // momentum row carries, or -1 for scalar blocks.
     const amrex::Array<FieldBoundaryType, AMREX_SPACEDIM>& field_bc =
         a_high_side ? m_ops->GetFieldBoundaryHi() : m_ops->GetFieldBoundaryLo();
     amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM> linop_bc;
@@ -404,20 +510,17 @@ MHDBlockPC<T, Ops>::GetCellCenteredLinOpBC (const bool a_high_side) const
         {
             linop_bc[direction] = amrex::LinOpBCType::Periodic;
         }
-        else if (field_bc[direction] == FieldBoundaryType::PEC ||
-                 field_bc[direction] == FieldBoundaryType::Open)
+        else if (field_bc[direction] == FieldBoundaryType::PEC)
         {
-            // Open is a preconditioner-only approximation: homogeneous
-            // Dirichlet stands in for the Green's-function coupling, which
-            // the nonlinear residual retains exactly.
-            linop_bc[direction] = amrex::LinOpBCType::Dirichlet;
+            linop_bc[direction] =
+                a_momentum_component == PhysicalNormalComponent(direction)
+                    ? amrex::LinOpBCType::Dirichlet
+                    : amrex::LinOpBCType::Neumann;
         }
-        else if (field_bc[direction] == FieldBoundaryType::Neumann ||
+        else if (field_bc[direction] == FieldBoundaryType::Open ||
+                 field_bc[direction] == FieldBoundaryType::Neumann ||
                  field_bc[direction] == FieldBoundaryType::None)
         {
-            // None marks solver-managed zero-gradient ghosts (the RZ axis
-            // and outflow z ends); the preconditioner treats them as
-            // homogeneous Neumann.
             linop_bc[direction] = amrex::LinOpBCType::Neumann;
         }
         else
@@ -431,17 +534,35 @@ MHDBlockPC<T, Ops>::GetCellCenteredLinOpBC (const bool a_high_side) const
 }
 
 template <class T, class Ops>
+amrex::Vector<amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM>>
+MHDBlockPC<T, Ops>::GetMomentumLinOpBC (const bool a_high_side) const
+{
+    amrex::Vector<amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM>> linop_bc;
+    linop_bc.reserve(3);
+    for (int component = 0; component < 3; ++component)
+    {
+        linop_bc.push_back(GetCellCenteredLinOpBC(a_high_side, component));
+    }
+    return linop_bc;
+}
+
+template <class T, class Ops>
 void
 MHDBlockPC<T, Ops>::DefineSignalDiffusion (const T& state)
 {
     const amrex::MultiFab& density = state.getMultiFabBlock(MassDensityName, 0);
 
     m_signal_components = 0;
+    m_momentum_component = -1;
     for (const auto& spec : state.getMultiFabBlockSpecs())
     {
+        if (spec.name == MomentumDensityName)
+        {
+            m_momentum_component = m_signal_components;
+        }
         m_signal_components += state.getMultiFabBlock(spec.name, 0).nComp();
     }
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_signal_components > 0,
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_signal_components > 0 && m_momentum_component >= 0,
                                      "pc_mhd_block found no cell-centered state blocks");
 
     m_signal_rhs = std::make_unique<amrex::MultiFab>(density.boxArray(),
@@ -459,13 +580,38 @@ MHDBlockPC<T, Ops>::DefineSignalDiffusion (const T& state)
             amrex::convert(density.boxArray(), amrex::IntVect::TheDimensionVector(direction)),
             density.DistributionMap(), 1, 0);
     }
+    m_signal_scratch =
+        std::make_unique<amrex::MultiFab>(density.boxArray(), density.DistributionMap(), 1, 0);
+    m_momentum_solution =
+        std::make_unique<amrex::MultiFab>(density.boxArray(), density.DistributionMap(), 3, 1);
+    m_faraday_field =
+        std::make_unique<amrex::MultiFab>(density.boxArray(), density.DistributionMap(), 3, 1);
 
     m_signal_operator = std::make_unique<amrex::MLABecLaplacian>(
         amrex::Vector<amrex::Geometry>{m_geometry},
         amrex::Vector<amrex::BoxArray>{density.boxArray()},
         amrex::Vector<amrex::DistributionMapping>{density.DistributionMap()}, *m_info,
         amrex::Vector<amrex::FabFactory<amrex::FArrayBox> const*>{}, m_signal_components);
-    m_signal_operator->setDomainBC(GetCellCenteredLinOpBC(false), GetCellCenteredLinOpBC(true));
+    // Per-component boundaries: the momentum components carry the residual's
+    // reflecting-wall parity; every other stacked component is a scalar.
+    {
+        amrex::Vector<amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM>> low_bc;
+        amrex::Vector<amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM>> high_bc;
+        low_bc.reserve(m_signal_components);
+        high_bc.reserve(m_signal_components);
+        for (const auto& spec : state.getMultiFabBlockSpecs())
+        {
+            const bool is_momentum = spec.name == MomentumDensityName;
+            const int block_components = state.getMultiFabBlock(spec.name, 0).nComp();
+            for (int component = 0; component < block_components; ++component)
+            {
+                const int momentum_component = is_momentum ? component : -1;
+                low_bc.push_back(GetCellCenteredLinOpBC(false, momentum_component));
+                high_bc.push_back(GetCellCenteredLinOpBC(true, momentum_component));
+            }
+        }
+        m_signal_operator->setDomainBC(low_bc, high_bc);
+    }
     // Homogeneous boundary values on every side the map produces.
     m_signal_operator->setLevelBC(0, nullptr);
     m_signal_operator->setScalars(1.0, 1.0);
@@ -479,6 +625,26 @@ MHDBlockPC<T, Ops>::DefineSignalDiffusion (const T& state)
     m_signal_solver->setBottomSolver(amrex::BottomSolver::smoother);
     m_signal_solver->setVerbose(static_cast<int>(m_verbose));
     m_signal_solver->setBottomVerbose(static_cast<int>(m_bottom_verbose));
+
+#if defined(WARPX_DIM_RZ)
+    // Cylindrical m = 0 momentum wave Schur, composed after the scalar
+    // signal diffusion (see the class documentation).
+    m_wave_operator_rz = std::make_unique<MHDWaveOpRZ>(
+        amrex::Vector<amrex::Geometry>{m_geometry},
+        amrex::Vector<amrex::BoxArray>{density.boxArray()},
+        amrex::Vector<amrex::DistributionMapping>{density.DistributionMap()}, *m_info);
+    m_wave_operator_rz->setDomainBC(GetMomentumLinOpBC(false), GetMomentumLinOpBC(true));
+    m_wave_operator_rz->setLevelBC(0, nullptr);
+    m_wave_operator_rz->setRelaxation(m_wave_relaxation);
+
+    m_wave_solver_rz = std::make_unique<amrex::MLMG>(*m_wave_operator_rz);
+    m_wave_solver_rz->setMaxIter(m_fluid_iterations);
+    m_wave_solver_rz->setFixedIter(m_fluid_iterations);
+    m_wave_solver_rz->setMaxFmgIter(0);
+    m_wave_solver_rz->setBottomSolver(amrex::BottomSolver::smoother);
+    m_wave_solver_rz->setVerbose(static_cast<int>(m_verbose));
+    m_wave_solver_rz->setBottomVerbose(static_cast<int>(m_bottom_verbose));
+#endif
 }
 
 template <class T, class Ops>
@@ -486,6 +652,7 @@ void
 MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
 {
     const amrex::MultiFab& density = state.getMultiFabBlock(MassDensityName, 0);
+    const amrex::MultiFab& momentum = state.getMultiFabBlock(MomentumDensityName, 0);
     const amrex::MultiFab& electron_energy = state.getMultiFabBlock(ElectronEnergyName, 0);
     const RT density_sum = density.sum(0, false);
     const RT energy_sum = electron_energy.sum(0, false);
@@ -505,16 +672,118 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
     const RT alfven_speed_squared = m_reference_magnetic_field_scale *
                                     m_reference_magnetic_field_scale /
                                     (PhysConst::mu0 * m_reference_mass_density);
-    m_signal_speed =
-        m_reference_velocity + std::sqrt(m_sound_speed_squared + alfven_speed_squared);
+    m_fast_speed = std::sqrt(m_sound_speed_squared + alfven_speed_squared);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        std::isfinite(m_signal_speed) && m_signal_speed > 0.0,
-        "pc_mhd_block requires a positive finite reference signal speed");
+        std::isfinite(m_fast_speed) && m_fast_speed > 0.0,
+        "pc_mhd_block requires a positive finite reference fast speed");
 
+    // Per-direction reference signal speeds S_dir = |u_dir|_ref + c_fast,ref
+    // with |u_dir|_ref the domain RMS of the instantaneous velocity
+    // component: an isotropic |u|_ref would add the axial flow to the radial
+    // faces' diffusion, over-preconditioning r on axially-flowing states and
+    // distorting the Krylov space.
+    // Divide-by-zero guard only; admissible states stay far above this.
+    const RT density_guard = RT(1.0e-12) * m_reference_mass_density;
+    const RT inverse_number_of_cells =
+        RT(1.0) / static_cast<RT>(density.boxArray().numPts());
     const auto cell_size = m_geometry.CellSizeArray();
+    const RT fast_speed = m_fast_speed;
     for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
     {
-        m_signal_diffusion[direction] = m_h * m_signal_speed * RT(0.5) * cell_size[direction];
+        const int component = PhysicalNormalComponent(direction);
+        for (amrex::MFIter mfi(*m_signal_scratch); mfi.isValid(); ++mfi)
+        {
+            const auto scratch = m_signal_scratch->array(mfi);
+            const auto rho = density.const_array(mfi);
+            const auto mom = momentum.const_array(mfi);
+            amrex::ParallelFor(mfi.validbox(),
+                               [=] AMREX_GPU_DEVICE(int i, int j, int k)
+                               {
+                                   const RT velocity =
+                                       mom(i, j, k, component) /
+                                       amrex::max(rho(i, j, k), density_guard);
+                                   scratch(i, j, k) = velocity * velocity;
+                               });
+        }
+        const RT velocity_rms =
+            std::sqrt(m_signal_scratch->sum(0, false) * inverse_number_of_cells);
+        m_signal_speed[direction] = velocity_rms + fast_speed;
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            std::isfinite(m_signal_speed[direction]) && m_signal_speed[direction] > 0.0,
+            "pc_mhd_block requires positive finite reference signal speeds");
+        // Precondition only the UNRESOLVED part of the upwind dissipation:
+        // subtract signal_cfl_floor cells per implicit interval from the
+        // reference speed. Below the floor the diffusion switches off
+        // exactly: on resolved states the residuals are smooth and any
+        // preconditioner content only injects structure that GMRES must
+        // then resolve against the Jacobian's rough (grid-scale HLLD)
+        // response, degrading iteration counts. Asymptotically (stiff CFL)
+        // the subtraction is negligible and the full dissipation is
+        // preconditioned.
+        const RT excess_speed =
+            amrex::max(RT(0.0), m_signal_speed[direction] -
+                                    m_signal_cfl_floor * cell_size[direction] / m_h);
+        m_signal_diffusion[direction] = m_signal_diffusion_scale * m_h * excess_speed *
+                                        RT(0.5) * cell_size[direction];
+    }
+    m_signal_diffusion_active = false;
+    for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+    {
+        m_signal_diffusion_active =
+            m_signal_diffusion_active || m_signal_diffusion[direction] > 0.0;
+    }
+
+    m_evolve_ion_fluid = m_ops->GetMHDEvolveIonFluidForPC();
+
+#if defined(WARPX_DIM_RZ)
+    // Engage the momentum wave Schur only when the reference fast wave is
+    // actually stiff on the grid (same rationale as the signal-CFL floor: a
+    // fixed-cycle multigrid application of a near-identity wave operator is
+    // pure spectral pollution on resolved states).
+    RT fast_wave_cfl = 0.0;
+    for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+    {
+        fast_wave_cfl = amrex::max(fast_wave_cfl, m_h * fast_speed / cell_size[direction]);
+    }
+    m_wave_schur_active = m_evolve_ion_fluid && m_include_wave_schur &&
+                          fast_wave_cfl >= m_wave_cfl_threshold;
+    if (m_wave_schur_active)
+    {
+        m_wave_operator_rz->setCoefficients(
+            m_h * m_h * m_sound_speed_squared,
+            m_h * m_h / (PhysConst::mu0 * m_reference_mass_density),
+            m_reference_magnetic_field_scale);
+    }
+#endif
+
+    // The triangular Faraday corrector is exact only when the momentum
+    // block it corrects from has been solved; with an identity momentum
+    // block and a stiff ideal coupling (Alfven CFL >= 1) the neglected
+    // J_MB J_BM product amplifies quadratically and measurably saturates
+    // GMRES, so the corrector then stands down.
+    RT alfven_wave_cfl = 0.0;
+    const RT alfven_speed = m_reference_magnetic_field_scale /
+                            std::sqrt(PhysConst::mu0 * m_reference_mass_density);
+    for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+    {
+        alfven_wave_cfl = amrex::max(alfven_wave_cfl, m_h * alfven_speed / cell_size[direction]);
+    }
+    m_faraday_active = m_evolve_ion_fluid && m_include_ideal_mhd_coupling &&
+                       (m_wave_schur_active || alfven_wave_cfl < 1.0);
+    if (m_faraday_active)
+    {
+        // Freeze the cell-centered magnetic field (including any external
+        // contribution) at the update state for the triangular Faraday
+        // corrector; domain ghosts are never read (the corrector clamps its
+        // reads to the domain).
+        const amrex::MultiFab* const magnetic_field_cc =
+            m_ops->GetMHDMagneticFieldCCForPC();
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            magnetic_field_cc != nullptr,
+            "pc_mhd_block requires the solver's cell-centered magnetic field "
+            "for the Faraday corrector");
+        amrex::MultiFab::Copy(*m_faraday_field, *magnetic_field_cc, 0, 0, 3, 0);
+        m_faraday_field->FillBoundary(m_geometry.periodicity());
     }
 
     m_signal_operator->setScalars(1.0, 1.0);
@@ -580,7 +849,21 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
         amrex::Print() << "Updating pc_mhd_block (hlld state): h = " << m_h
                        << ", a_e = " << m_electron_enthalpy
                        << ", c^2 = " << m_sound_speed_squared
-                       << ", S_ref = " << m_signal_speed << "\n";
+                       << ", c_fast = " << m_fast_speed << ", S_dir = (";
+        for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+        {
+            amrex::Print() << m_signal_speed[direction]
+                           << (direction + 1 < AMREX_SPACEDIM ? ", " : ")");
+        }
+        amrex::Print() << ", D_dir = (";
+        for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+        {
+            amrex::Print() << m_signal_diffusion[direction]
+                           << (direction + 1 < AMREX_SPACEDIM ? ", " : ")");
+        }
+        amrex::Print() << ", Faraday = " << (m_faraday_active ? "active" : "inactive")
+                       << ", wave Schur = " << (m_wave_schur_active ? "active" : "inactive")
+                       << "\n";
     }
 }
 
@@ -588,9 +871,8 @@ template <class T, class Ops>
 void
 MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
 {
-    // Faraday block: identity. TODO(Stage 2): triangular corrector
-    // bB - theta dt curl(dM/rho_ref x B_ref) on faces, which needs the
-    // solver's staggered curl and the RZ corner-EMF conventions.
+    // Faraday block: identity here; the triangular ideal-induction corrector
+    // needs the momentum solution and is added at the end.
     auto const& rhs_fields = rhs.getArrayVec();
     auto const& solution_fields = solution.getArrayVec();
     for (int component = 0; component < 3; ++component)
@@ -613,27 +895,54 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(stacked_component == m_signal_components,
                                      "pc_mhd_block state block layout changed after Define()");
 
-#if defined(WARPX_DIM_RZ)
-    // The cylindrical operator assembly multiplied the equation by r.
-    const RT radial_lo = static_cast<RT>(m_geometry.ProbLo(0));
-    const RT radial_cell_size = static_cast<RT>(m_geometry.CellSize(0));
-    const int number_of_components = m_signal_components;
-    for (amrex::MFIter mfi(*m_signal_rhs); mfi.isValid(); ++mfi)
+    if (m_signal_diffusion_active)
     {
-        const auto signal_rhs = m_signal_rhs->array(mfi);
-        amrex::ParallelFor(
-            mfi.validbox(), number_of_components,
-            [=] AMREX_GPU_DEVICE(int i, int j, int k, int n)
-            {
-                const RT radius =
-                    radial_lo + (static_cast<RT>(i) + RT(0.5)) * radial_cell_size;
-                signal_rhs(i, j, k, n) *= radius;
-            });
-    }
+#if defined(WARPX_DIM_RZ)
+        // The cylindrical operator assembly multiplied the equation by r.
+        const RT radial_lo = static_cast<RT>(m_geometry.ProbLo(0));
+        const RT radial_cell_size = static_cast<RT>(m_geometry.CellSize(0));
+        const int number_of_components = m_signal_components;
+        for (amrex::MFIter mfi(*m_signal_rhs); mfi.isValid(); ++mfi)
+        {
+            const auto signal_rhs = m_signal_rhs->array(mfi);
+            amrex::ParallelFor(
+                mfi.validbox(), number_of_components,
+                [=] AMREX_GPU_DEVICE(int i, int j, int k, int n)
+                {
+                    const RT radius =
+                        radial_lo + (static_cast<RT>(i) + RT(0.5)) * radial_cell_size;
+                    signal_rhs(i, j, k, n) *= radius;
+                });
+        }
 #endif
 
-    m_signal_solution->setVal(0.0);
-    m_signal_solver->solve({m_signal_solution.get()}, {m_signal_rhs.get()}, 0.0, 0.0);
+        m_signal_solution->setVal(0.0);
+        m_signal_solver->solve({m_signal_solution.get()}, {m_signal_rhs.get()}, 0.0, 0.0);
+    }
+    else
+    {
+        // Every direction is below the signal-CFL floor: the diffusion block
+        // is exactly the identity (skipping the fixed-cycle solve keeps it
+        // exact rather than V-cycle-approximate).
+        amrex::MultiFab::Copy(*m_signal_solution, *m_signal_rhs, 0, 0, m_signal_components,
+                              0);
+    }
+
+#if defined(WARPX_DIM_RZ)
+    if (m_wave_schur_active)
+    {
+        // Cylindrical momentum wave Schur composed after the scalar signal
+        // diffusion: the Helmholtz output is the wave RHS (fixed-cycle MLMG,
+        // zero initial guess), so the momentum block sees the product of
+        // both approximate inverses.
+        const amrex::MultiFab wave_rhs(*m_signal_solution, amrex::make_alias,
+                                       m_momentum_component, 3);
+        m_momentum_solution->setVal(0.0);
+        m_wave_solver_rz->solve({m_momentum_solution.get()}, {&wave_rhs}, 0.0, 0.0);
+        amrex::MultiFab::Copy(*m_signal_solution, *m_momentum_solution, 0,
+                              m_momentum_component, 3, 0);
+    }
+#endif
 
     stacked_component = 0;
     for (const auto& spec : rhs.getMultiFabBlockSpecs())
@@ -643,6 +952,237 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
                               block_solution.nComp(), 0);
         stacked_component += block_solution.nComp();
     }
+
+    if (m_faraday_active)
+    {
+        ApplyFaradayCorrector(solution);
+    }
+}
+
+template <class T, class Ops>
+void
+MHDBlockPC<T, Ops>::ApplyFaradayCorrector (T& solution)
+{
+    // Triangular ideal-induction (Faraday) corrector on the face-staggered
+    // B block: dB += theta dt curl(dM/rho_ref x B_cc), with dM the momentum
+    // solution and B_cc the cell-centered field frozen at the update (see
+    // the class documentation for the sign convention). The curl uses the
+    // solver's staggered conventions: (dM x B) is built on the edge/corner
+    // locations of E and differenced onto the B faces, with the RZ
+    // r-weighted corner-EMF divergence for Bz and a zero azimuthal edge
+    // value on the axis corner (odd m = 0 parity, matching the residual's
+    // zero axis EMF). Cell-centered reads clamp to the domain: a
+    // zero-gradient preconditioner-only approximation at the physical
+    // boundaries (interior and periodic ghosts are filled).
+    amrex::MultiFab::Copy(*m_momentum_solution,
+                          solution.getMultiFabBlock(MomentumDensityName, 0), 0, 0, 3, 0);
+    m_momentum_solution->FillBoundary(m_geometry.periodicity());
+
+    auto const& solution_fields = solution.getArrayVec();
+    const RT coefficient = m_h / m_reference_mass_density;
+    const amrex::Box domain = m_geometry.Domain();
+    const auto inverse_cell_size = m_geometry.InvCellSizeArray();
+
+#if defined(WARPX_DIM_1D_Z)
+    const int domain_axial_low = domain.smallEnd(0);
+    const int domain_axial_high = domain.bigEnd(0);
+    const bool axial_periodic = m_geometry.isPeriodic(0);
+    const RT inverse_dz = inverse_cell_size[0];
+
+    // Bx and By are z-cell faces; (curl V)_x = -d_z V_y and
+    // (curl V)_y = d_z V_x with V on the z-nodal transverse edges. Bz is
+    // z-nodal and (curl V)_z vanishes in 1D, so it keeps the identity.
+    for (int component = 0; component < 2; ++component)
+    {
+        const int transverse_component = component == 0 ? 1 : 0;
+        const RT sign = component == 0 ? RT(-1.0) : RT(1.0);
+        for (amrex::MFIter mfi(*solution_fields[0][component]); mfi.isValid(); ++mfi)
+        {
+            const amrex::Box box = mfi.validbox();
+            const auto face = solution_fields[0][component]->array(mfi);
+            const auto dm = m_momentum_solution->const_array(mfi);
+            const auto bcc = m_faraday_field->const_array(mfi);
+            amrex::ParallelFor(
+                box,
+                [=] AMREX_GPU_DEVICE(int i, int j, int k)
+                {
+                    // (dM x B) component at the z-node between cells
+                    // node - 1 and node, averaged from the two cells.
+                    const auto edge_value = [&] (const int node) -> RT
+                    {
+                        int cell_low = node - 1;
+                        int cell_high = node;
+                        if (!axial_periodic)
+                        {
+                            cell_low = amrex::max(cell_low, domain_axial_low);
+                            cell_high = amrex::min(cell_high, domain_axial_high);
+                        }
+                        RT momentum_average[3];
+                        RT field_average[3];
+                        for (int direction = 0; direction < 3; ++direction)
+                        {
+                            momentum_average[direction] =
+                                RT(0.5) * (dm(cell_low, j, k, direction) +
+                                           dm(cell_high, j, k, direction));
+                            field_average[direction] =
+                                RT(0.5) * (bcc(cell_low, j, k, direction) +
+                                           bcc(cell_high, j, k, direction));
+                        }
+                        const int first = (transverse_component + 1) % 3;
+                        const int second = (transverse_component + 2) % 3;
+                        return momentum_average[first] * field_average[second] -
+                               momentum_average[second] * field_average[first];
+                    };
+                    face(i, j, k) += coefficient * sign * inverse_dz *
+                                     (edge_value(i + 1) - edge_value(i));
+                });
+        }
+    }
+#elif defined(WARPX_DIM_RZ)
+    const int domain_radial_low = domain.smallEnd(0);
+    const int domain_radial_high = domain.bigEnd(0);
+    const int domain_axial_low = domain.smallEnd(1);
+    const int domain_axial_high = domain.bigEnd(1);
+    const bool axial_periodic = m_geometry.isPeriodic(1);
+    const RT inverse_dr = inverse_cell_size[0];
+    const RT inverse_dz = inverse_cell_size[1];
+    const RT radial_lower = static_cast<RT>(m_geometry.ProbLo(0));
+    const RT radial_cell_size = static_cast<RT>(m_geometry.CellSize(0));
+
+    for (int component = 0; component < 3; ++component)
+    {
+        for (amrex::MFIter mfi(*solution_fields[0][component]); mfi.isValid(); ++mfi)
+        {
+            const amrex::Box box = mfi.validbox();
+            const auto face = solution_fields[0][component]->array(mfi);
+            const auto dm = m_momentum_solution->const_array(mfi);
+            const auto bcc = m_faraday_field->const_array(mfi);
+            amrex::ParallelFor(
+                box,
+                [=] AMREX_GPU_DEVICE(int i, int j, int k)
+                {
+                    const auto clamp_radial = [&] (const int cell) -> int
+                    {
+                        return amrex::max(domain_radial_low,
+                                          amrex::min(cell, domain_radial_high));
+                    };
+                    const auto clamp_axial = [&] (const int cell) -> int
+                    {
+                        return axial_periodic
+                                   ? cell
+                                   : amrex::max(domain_axial_low,
+                                                amrex::min(cell, domain_axial_high));
+                    };
+                    // V_t = (dM x B)_t on the (r-node, z-node) corner
+                    // (node_r, node_z); zero on the axis corner.
+                    const auto corner_azimuthal = [&] (const int node_r,
+                                                       const int node_z) -> RT
+                    {
+                        const RT corner_radius =
+                            radial_lower + static_cast<RT>(node_r) * radial_cell_size;
+                        if (corner_radius == RT(0.0))
+                        {
+                            return RT(0.0);
+                        }
+                        const int cell_r[2] = {clamp_radial(node_r - 1),
+                                               clamp_radial(node_r)};
+                        const int cell_z[2] = {clamp_axial(node_z - 1),
+                                               clamp_axial(node_z)};
+                        RT momentum_r = RT(0.0);
+                        RT momentum_z = RT(0.0);
+                        RT field_r = RT(0.0);
+                        RT field_z = RT(0.0);
+                        for (int radial_side = 0; radial_side < 2; ++radial_side)
+                        {
+                            for (int axial_side = 0; axial_side < 2; ++axial_side)
+                            {
+                                momentum_r += dm(cell_r[radial_side], cell_z[axial_side], k, 0);
+                                momentum_z += dm(cell_r[radial_side], cell_z[axial_side], k, 2);
+                                field_r += bcc(cell_r[radial_side], cell_z[axial_side], k, 0);
+                                field_z += bcc(cell_r[radial_side], cell_z[axial_side], k, 2);
+                            }
+                        }
+                        return RT(0.0625) *
+                               (momentum_z * field_r - momentum_r * field_z);
+                    };
+                    // V_r = (dM x B)_r on the (r-cell, z-node) edge.
+                    const auto edge_radial = [&] (const int cell_r,
+                                                  const int node_z) -> RT
+                    {
+                        const int cell_z_low = clamp_axial(node_z - 1);
+                        const int cell_z_high = clamp_axial(node_z);
+                        const RT momentum_t =
+                            RT(0.5) * (dm(cell_r, cell_z_low, k, 1) +
+                                       dm(cell_r, cell_z_high, k, 1));
+                        const RT momentum_z =
+                            RT(0.5) * (dm(cell_r, cell_z_low, k, 2) +
+                                       dm(cell_r, cell_z_high, k, 2));
+                        const RT field_t = RT(0.5) * (bcc(cell_r, cell_z_low, k, 1) +
+                                                      bcc(cell_r, cell_z_high, k, 1));
+                        const RT field_z = RT(0.5) * (bcc(cell_r, cell_z_low, k, 2) +
+                                                      bcc(cell_r, cell_z_high, k, 2));
+                        return momentum_t * field_z - momentum_z * field_t;
+                    };
+                    // V_z = (dM x B)_z on the (r-node, z-cell) edge.
+                    const auto edge_axial = [&] (const int node_r,
+                                                 const int cell_z) -> RT
+                    {
+                        const int cell_r_low = clamp_radial(node_r - 1);
+                        const int cell_r_high = clamp_radial(node_r);
+                        const RT momentum_r =
+                            RT(0.5) * (dm(cell_r_low, cell_z, k, 0) +
+                                       dm(cell_r_high, cell_z, k, 0));
+                        const RT momentum_t =
+                            RT(0.5) * (dm(cell_r_low, cell_z, k, 1) +
+                                       dm(cell_r_high, cell_z, k, 1));
+                        const RT field_r = RT(0.5) * (bcc(cell_r_low, cell_z, k, 0) +
+                                                      bcc(cell_r_high, cell_z, k, 0));
+                        const RT field_t = RT(0.5) * (bcc(cell_r_low, cell_z, k, 1) +
+                                                      bcc(cell_r_high, cell_z, k, 1));
+                        return momentum_r * field_t - momentum_t * field_r;
+                    };
+
+                    if (component == 0)
+                    {
+                        // Br on (r-node, z-cell): (curl V)_r = -d_z V_t.
+                        face(i, j, k) -= coefficient * inverse_dz *
+                                         (corner_azimuthal(i, j + 1) -
+                                          corner_azimuthal(i, j));
+                    }
+                    else if (component == 1)
+                    {
+                        // Bt on (r-cell, z-cell):
+                        // (curl V)_t = d_z V_r - d_r V_z.
+                        face(i, j, k) +=
+                            coefficient *
+                            (inverse_dz * (edge_radial(i, j + 1) - edge_radial(i, j)) -
+                             inverse_dr * (edge_axial(i + 1, j) - edge_axial(i, j)));
+                    }
+                    else
+                    {
+                        // Bz on (r-cell, z-node):
+                        // (curl V)_z = (1/r) d_r(r V_t), the residual's
+                        // r-weighted corner-EMF divergence.
+                        const RT radius_center =
+                            radial_lower +
+                            (static_cast<RT>(i) + RT(0.5)) * radial_cell_size;
+                        const RT radius_node_low =
+                            radial_lower + static_cast<RT>(i) * radial_cell_size;
+                        const RT radius_node_high =
+                            radial_lower + (static_cast<RT>(i) + RT(1.0)) * radial_cell_size;
+                        face(i, j, k) +=
+                            coefficient * inverse_dr / radius_center *
+                            (radius_node_high * corner_azimuthal(i + 1, j) -
+                             radius_node_low * corner_azimuthal(i, j));
+                    }
+                });
+        }
+    }
+#else
+    amrex::ignore_unused(solution_fields, coefficient, domain, inverse_cell_size);
+    WARPX_ABORT_WITH_MESSAGE(
+        "pc_mhd_block: the hlld Faraday corrector supports 1D and RZ only");
+#endif
 }
 
 template <class T, class Ops>

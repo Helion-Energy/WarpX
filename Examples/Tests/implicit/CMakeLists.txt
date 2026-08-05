@@ -596,6 +596,21 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# paired pc/no-pc gate for the Stage-2 hlld block preconditioner in RZ:
+# the SAME advected pulse with jacobian.pc_type = pc_mhd_block must leave
+# the domain identically (the z-outflow analysis runs unchanged) and,
+# because every reference CFL is below one here, the stiffness-gated
+# preconditioner must stay iteration-neutral against the pc-off twin
+add_warpx_test(
+    test_rz_theta_implicit_mhd_z_outflow_hlld_pc  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_z_outflow implicit_mhd.fluid_flux=hlld jacobian.pc_type=pc_mhd_block"  # inputs
+    "analysis_mhd_z_outflow_pc.py diags/diag000000 diags/diag000240 pec"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_2d_theta_implicit_jfnk_vandb  # name
     2  # dims

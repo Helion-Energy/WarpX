@@ -433,39 +433,81 @@ Overall simulation parameters
 
             With ``implicit_mhd.fluid_flux = hlld`` (the conservative-form
             recast, where face-staggered :math:`\boldsymbol B^{n+\theta}` is
-            the JFNK array block), the preconditioner instead takes its
-            Stage-1 form: the Faraday block is the **identity** (the
-            triangular ideal-induction corrector is not yet implemented), and
-            every cell-centered block (:math:`\rho`, the three momentum
-            components, :math:`U_e`, and the ion-closure energies
-            :math:`E_i` or :math:`U_\parallel,U_\perp`) is preconditioned by
-            one scalar signal-diffusion Helmholtz solve,
+            the JFNK array block), the preconditioner instead composes three
+            pieces, each engaged only where it measurably pays — on resolved
+            states the residuals are smooth, and preconditioner content only
+            injects structure that GMRES must then resolve against the
+            Jacobian's rough grid-scale HLLD response:
 
-            .. math::
+            1. **Per-direction signal diffusion** (opt-in): every
+               cell-centered block (:math:`\rho`, the three momentum
+               components, :math:`U_e`, and the ion-closure energies
+               :math:`E_i` or :math:`U_\parallel,U_\perp`) is preconditioned
+               by one stacked Helmholtz solve,
 
-               \left[\mathbb I
-                 + \theta\Delta t\, S_*\, \tfrac{h_d}{2}\,(-\nabla^2)\right]
-               \delta U = b_U ,
+               .. math::
 
-            where :math:`h_d` is the cell size per direction and
-            :math:`S_* = |u|_* + \sqrt{c_{s,*}^2 + v_{A,*}^2}` is the
-            domain-reference signal speed built from
-            ``implicit_mhd.reference_velocity``,
-            ``implicit_mhd.reference_magnetic_field``,
-            ``implicit_mhd.reference_ion_pressure``, and the instantaneous
-            mean electron enthalpy. This approximates the
-            :math:`O(\theta\Delta t\,|S|/h)` HLLD upwind dissipation — the
-            stiffest near-wall Jacobian content — but not the wave couplings
-            or the advective (skew) part, so it targets robustness at large
-            signal CFL rather than a large iteration-count reduction on
-            resolved runs. In RZ the Helmholtz is assembled in cylindrical
-            form. Boundaries the recast residual manages itself are mapped to
-            preconditioner-only linear-operator types: ``open`` becomes
-            homogeneous Dirichlet and ``none`` (the RZ axis and outflow ends)
-            becomes homogeneous Neumann; the nonlinear residual keeps the
-            true boundary coupling. The hlld form supports any ion closure,
+                  \left[\mathbb I
+                    + \theta\Delta t\, S_d\, \tfrac{h_d}{2}\,(-\partial_d^2)\right]
+                  \delta U = b_U ,
+
+               where :math:`h_d` is the cell size per direction and
+               :math:`S_d = |u_d|_* + \sqrt{c_{s,*}^2 + v_{A,*}^2}` the
+               per-direction reference signal speed built from the domain RMS
+               of the instantaneous velocity component,
+               ``implicit_mhd.reference_magnetic_field``,
+               ``implicit_mhd.reference_ion_pressure``, and the instantaneous
+               mean electron enthalpy, reduced by
+               ``pc_mhd_block.signal_cfl_floor`` resolved cells per implicit
+               interval. This approximates the
+               :math:`O(\theta\Delta t\,|S|/h)` HLLD upwind dissipation, but
+               HLLD dissipates per characteristic channel while one scalar
+               coefficient per block diffuses them all; on every benchmarked
+               regime it degraded plain GMRES, so it is disabled by default
+               (``pc_mhd_block.signal_diffusion_scale = 0``) pending
+               per-channel reference speeds. In RZ the Helmholtz is assembled
+               in cylindrical form.
+
+            2. **RZ (m = 0) momentum wave Schur**: in RZ the momentum block
+               is additionally composed with the constant-coefficient
+               cylindrical ideal-MHD wave operator
+               :math:`\mathbb I - h^2 c_{s,*}^2 \nabla (\nabla\cdot)
+               + h^2/(\mu_0 \rho_*)\, W_{B}` (:math:`h = \theta\Delta t`,
+               with the **input** ``implicit_mhd.reference_magnetic_field``
+               magnitude along :math:`\hat z`: the domain mean is near zero
+               for reversed-field states, and :math:`W_B` is quadratic in
+               :math:`B` so the sign structure is immaterial), discretized
+               with the residual's cylindrical stencil conventions
+               (r-weighted flux divergences and the :math:`-M_r/r^2` hoop
+               term) on every multigrid level and smoothed with the
+               per-cell block-Jacobi pattern. It engages when the reference
+               fast CFL :math:`\theta\Delta t\,c_{f,*}/h_d` reaches
+               ``pc_mhd_block.wave_cfl_threshold``.
+
+            3. **Triangular Faraday corrector**: the Faraday block is the
+               identity plus the ideal-induction coupling
+               :math:`\delta B = b_B + \theta\Delta t\,
+               \nabla\times(\delta\boldsymbol M/\rho_* \times
+               \boldsymbol B_{cc})`, evaluated with the solver's staggered
+               curl conventions (1D transverse faces; RZ face forms with the
+               r-weighted corner-EMF divergence for :math:`B_z` and a zero
+               azimuthal edge value on the axis) from the cell-centered
+               magnetic field frozen at the preconditioner update. It
+               requires either an active wave Schur or a sub-unity reference
+               Alfvén CFL: correcting from an identity momentum block at
+               stiff coupling amplifies the neglected
+               :math:`J_{MB} J_{BM}` product quadratically.
+
+            Boundaries the recast residual manages itself are mapped per
+            component to preconditioner-only linear-operator types matching
+            the residual's fluid ghosts: ``pec`` (a reflecting wall) becomes
+            Neumann for scalars and tangential momentum and homogeneous
+            Dirichlet for the normal momentum, while ``open`` (zero-gradient
+            fluid outflow) and ``none`` (the RZ axis and outflow ends) become
+            homogeneous Neumann; the nonlinear residual keeps the true
+            boundary coupling. The hlld form supports any ion closure,
             any resistivity, and uses ``pc_mhd_block.fluid_iterations``
-            fixed MLMG cycles for the single stacked solve.
+            fixed MLMG cycles for the stacked and wave solves.
 
             All MLMG solves use zero initial guesses, fixed cycle counts, and
             fixed bottom smoothing. This keeps the operation stationary to
@@ -526,6 +568,19 @@ Overall simulation parameters
               weighted block-Jacobi factor for the three-component wave
               smoother;
               must be in :math:`(0,0.5]`.
+            - ``pc_mhd_block.include_wave_schur`` (``bool``, default: true):
+              hlld/RZ only; allow the cylindrical momentum wave Schur.
+            - ``pc_mhd_block.wave_cfl_threshold`` (``float``, default: 1.0):
+              hlld/RZ only; reference fast CFL at which the momentum wave
+              Schur engages.
+            - ``pc_mhd_block.signal_diffusion_scale`` (``float``,
+              default: 0.0): hlld only; overall scale of the per-direction
+              signal-diffusion Helmholtz on the cell-centered blocks
+              (0 disables it, the default).
+            - ``pc_mhd_block.signal_cfl_floor`` (``float``, default: 1.0):
+              hlld only; resolved cells per implicit interval subtracted
+              from the per-direction reference signal speed before the
+              diffusion coefficient is formed.
             - ``pc_mhd_block.max_coarsening_level`` (``int``, default: 30)
             - ``pc_mhd_block.agglomeration`` (``bool``, default: true)
             - ``pc_mhd_block.consolidation`` (``bool``, default: true)

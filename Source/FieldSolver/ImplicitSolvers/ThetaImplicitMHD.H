@@ -112,23 +112,6 @@ class ThetaImplicitMHD final : public ImplicitSolver
         return false;
     }
 
-    // NOTE: Jacobian probe perturbations stay LIMITED for this solver
-    // (base-class default). Although every floored quantity is clamped
-    // pointwise inside the residual kernels (so inadmissible probe states
-    // would be evaluable), an unlimited probe crossing a hard clamp kink
-    // measures the flat exterior side of the floor instead of the
-    // interior slope, and GMRES then confidently steers into the bounds
-    // (measured: Newton stalls at the first FRC step with hundreds of
-    // projected components). The componentwise projection keeps a small
-    // slack margin above each bound precisely so limited probes always
-    // retain an admissible perturbation. Caveat for the future: the
-    // limiter is GLOBAL (one bound-resting cell shrinks every probe's
-    // epsilon toward that slack margin), so a large floored population
-    // can degrade the finite-difference Krylov space; with the hlld
-    // path's C-infinity floor smoothing this trade-off could be
-    // revisited, but flipping it showed no benefit on the FRC
-    // free-boundary hold (2026-08-04).
-
     void InitializeFluidState ();
     void FinishStateUpdate (amrex::Real end_time);
     void FillFluidSources (const WarpXSolverVec& state);
@@ -170,6 +153,9 @@ class ThetaImplicitMHD final : public ImplicitSolver
     {
         return m_ion_charge_to_mass * m_reference_mass_density;
     }
+
+    [[nodiscard]] const amrex::MultiFab*
+    GetMHDMagneticFieldCCForPC () const override;
 
     inline static constexpr char MassDensityName[] = "implicit_mhd_mass_density";
     inline static constexpr char MomentumDensityName[] = "implicit_mhd_momentum_density";

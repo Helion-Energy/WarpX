@@ -6,17 +6,18 @@
 #
 # License: BSD-3-Clause-LBNL
 
-"""Paired pc/no-pc gate for the Stage-1 hlld block preconditioner.
+"""Paired pc/no-pc gate for the hlld block preconditioner.
 
 This runs on the SAME Sod shock tube as test_1d_theta_implicit_mhd_sod_hlld
 with jacobian.pc_type = pc_mhd_block. The identical-physics contract is the
 full exact-Riemann plateau analysis of the pc-off twin, executed unchanged at
 its tolerances. On top of that, the preconditioner engagement and its
-stationary fixed-cycle bound on the linear work become part of the
-regression contract: the Stage-1 form (identity Faraday block plus one
-signal-diffusion Helmholtz over the stacked cell-centered blocks) must keep
-plain GMRES convergent without inflating the iteration count of the pc-off
-twin (about 3.9e3 cumulative) by more than the allowed margin.
+stationary bound on the linear work become part of the regression contract:
+the Stage-2 1D form (identity B block plus the triangular Faraday corrector,
+which engages here because the reference Alfven CFL is below one; the
+per-direction signal diffusion is opt-in and off by default) must keep plain
+GMRES convergent without inflating the iteration count of the pc-off twin
+(about 3.9e3 cumulative) by more than the allowed margin.
 
 Usage: analysis_mhd_hlld_preconditioner.py <initial_plotfile> <final_plotfile> total_energy
 """
@@ -29,7 +30,9 @@ import numpy as np
 
 # Identical physics within the pc-off pattern's tolerances: execute the Sod
 # analysis unchanged (it reads the same sys.argv).
-runpy.run_path(str(Path(__file__).resolve().parent / "analysis_mhd_sod.py"), run_name="__main__")
+runpy.run_path(
+    str(Path(__file__).resolve().parent / "analysis_mhd_sod.py"), run_name="__main__"
+)
 
 used_inputs = Path("warpx_used_inputs").read_text()
 

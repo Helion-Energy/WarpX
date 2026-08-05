@@ -283,6 +283,21 @@ public:
     }
 
     /**
+     * \brief Return the cell-centered magnetic field (including any external
+     * contribution) at the preconditioner update state, read by the MHD
+     * block preconditioner's triangular Faraday corrector under the
+     * conservative-form recast.
+     *
+     * The null default keeps that coupling inactive for implicit schemes
+     * that do not expose it.
+     */
+    [[nodiscard]] virtual const amrex::MultiFab*
+    GetMHDMagneticFieldCCForPC () const
+    {
+        return nullptr;
+    }
+
+    /**
      * \brief Apply deposited mass matrices to a vector field.
      * Computes a_out += a_scale * S * (a_in - a_in_ref) [+ a_baseline],
      * where S is the mass matrix, accumulating into a_out.
