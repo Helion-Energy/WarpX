@@ -77,6 +77,33 @@ parser.add_argument(
 parser.add_argument("--flux-limit", type=float, default=0.0)
 parser.add_argument("--advance", choices=["euler", "leapfrog", "pc"], default="pc")
 parser.add_argument("--grad-deposit", type=int, choices=[0, 1], default=1)
+parser.add_argument(
+    "--form",
+    choices=["scatter", "layer"],
+    default="scatter",
+    help="conduction grid-transfer form (layer = Milstein gather)",
+)
+parser.add_argument(
+    "--interp",
+    choices=["linear", "monocubic", "keys"],
+    default="monocubic",
+    help="layer-form interpolant",
+)
+parser.add_argument(
+    "--curved-feet",
+    type=int,
+    choices=[0, 1],
+    default=0,
+    help="layer form: midpoint-rotated feet (measured harmful: the div-D "
+    "drift already carries the mean curvature; rotation double-counts)",
+)
+parser.add_argument(
+    "--conserve-fixup",
+    type=int,
+    choices=[0, 1],
+    default=0,
+    help="layer form: global proportional Sigma(rho T) restore per gather",
+)
 parser.add_argument("--out", type=str, required=True)
 parser.add_argument("--verbose", type=int, default=0)
 args = parser.parse_args()
@@ -185,6 +212,10 @@ pywarpx.hybridpicmodel.add_new_attr("qdsmc_kappa_perp(n,Te,t)", kappa_perp_expr)
 pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = npts
 pywarpx.hybridpicmodel.qdsmc_conduction_flux_limit_factor = args.flux_limit
 pywarpx.hybridpicmodel.qdsmc_conduction_max_hop = args.max_hop
+pywarpx.hybridpicmodel.qdsmc_conduction_form = args.form
+pywarpx.hybridpicmodel.qdsmc_conduction_interp = args.interp
+pywarpx.hybridpicmodel.qdsmc_conduction_curved_feet = args.curved_feet
+pywarpx.hybridpicmodel.qdsmc_conduction_conserve_fixup = args.conserve_fixup
 
 sim.initialize_warpx()
 
@@ -294,6 +325,9 @@ np.savez_compressed(
     blob_sigma=s0,
     max_hop=args.max_hop,
     advance=args.advance,
+    form=args.form,
+    interp=args.interp,
+    curved_feet=args.curved_feet,
     te_initial=state["initial"],
     te_final=te_final,
     avar0=avar0,

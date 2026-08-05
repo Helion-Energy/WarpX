@@ -60,6 +60,13 @@ cd ~/src/WarpX-qdsmc && PATH=/usr/local/openmpi5/bin:$PATH \
   (matches to 3-4 digits across the engagement range).
 - `qdsmc_zeldovich_test.py` — nonlinear front, kappa ~ Te^{5/2} parser, vs a
   1D flux-conservative reference; front trajectory + limiter legs.
+- `run_layer.py` — layer-(gather)-form gauntlet (plan doc §C.7b): aligned
+  order, eps=0 floors, the curvature-leak discrimination matrix +
+  dt-growth + liftoff point, Zeldovich with/without the conservation
+  fixup. All decks take `--form scatter|layer`,
+  `--interp linear|monocubic|keys`, `--curved-feet` (default 0: measured
+  harmful) and (wiggle/zeldovich) `--conserve-fixup`.
 
 Output dirs (`baseline_out/`, `cond_out/`, `ci_matrix*/`, `wiggle_out/`,
-`hopcap_out/`, `zeld_out*.npz`, `*.log`) are regenerable and stay untracked.
+`hopcap_out/`, `layer_out/`, `zeld_out*.npz`, `*.log`) are regenerable and
+stay untracked.

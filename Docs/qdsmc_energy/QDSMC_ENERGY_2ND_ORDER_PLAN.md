@@ -503,6 +503,63 @@ correction in the field frame, or field-line-coordinate remap) BEFORE any
 elliptic consideration. Mechanism pinning and the fix design are the next
 scheme work; (c) elliptic remains unscoped.
 
+### C.7b LAYER (GATHER) FORM — the curvature-leak fix (2026-08-05)
+
+Eric's call ("it's just a layer method solution"): replace the scatter
+deposit with the Milstein layer/gather transfer,
+T^{n+1}(node) = sum_q w_q Interp(T^n)(foot_q). T satisfies the backward
+equation with the SAME Ito drift (div D + D grad ln n), so the feet are
+node + drift + quadrature offsets; pointwise interpolation carries no
+deposit-moment frame, removing the remap leak by construction. Landed as
+`qdsmc_conduction_form = scatter | layer` with
+`qdsmc_conduction_interp = linear | monocubic | keys` (all interpolating
+=> machine-exact at-rest identity; monocubic = MC-limited monotone
+Hermite, positive and overshoot-free), `qdsmc_conduction_curved_feet`
+(default OFF, see below) and `qdsmc_conduction_conserve_fixup` (global
+proportional Sigma(rho T) restore). Gather is race-free => the layer loop
+is OMP-threaded, unlike the scatter deposit. Scatter path untouched
+(bit-identical defaults). Gauntlet: run_layer.py + layer_gauntlet.log /
+layer_followup.log; production arm = **layer + monocubic + straight feet
+(+ fixup where fronts are steep)**:
+
+- Aligned parabolic order 1.97 (relL2 7.7e-5 at N=128) — no G3
+  regression; monocubic == keys bit-for-bit on smooth data (MC slopes
+  reduce to central differences; Catmull-Rom IS the Keys kernel).
+- Straight-field floor 3.6e-6 (scatter 4.9e-6); linear-interp arm shows
+  chi_par inflated 12% at N=64 (the uncorrected hat-adjoint remap floor,
+  as predicted for the control); monocubic/keys read chi_par = 1.000.
+- Curvature leak at the eps=0.2 wiggle point: **4.7e-4 vs scatter
+  2.07e-1 (440x)**; dt-growth signature FLAT (4.41e-3 -> 4.44e-3 over
+  ns 64 -> 256, vs scatter 0.21 -> 0.34): the per-remap mechanism is
+  gone. Layer-linear control leaks 7.9e-2 (transfer-operator-borne,
+  mechanism confirmed).
+- **Liftoff dimensionless point (npts=2): 2.56e-4 vs scatter 1.81 —
+  ~7000x**; npts-insensitive (npts=3: 4.0e-4). The chi_par ~ 0.89
+  reading there is the z-vs-arc estimator factor (1+eps^2/4)^-2 at
+  eps=0.45, not a transport deficit.
+- **Curved feet (midpoint rotation) are HARMFUL as implemented**: the
+  div-D drift already IS the mean-curvature correction for straight
+  chords (Euler-Maruyama consistent pairing, ring-validated), so
+  rotating the feet double-counts curvature: systematic cross-field
+  drift (adrift -1e-2 to -2.4e-2 L) and 10-80x more leak. Default OFF;
+  a future weak-2 scheme must re-derive the drift consistently.
+- Zeldovich front: relL2 6.0e-2 without fixup but Sigma drift -3.2%
+  (steep front + one-sided limiter clipping = the gather deficit,
+  exactly where Eric's old layer method needed iteration). **With the
+  global proportional fixup: relL2 4.2e-2, Sigma drift 7.8e-7** — the
+  cheap fixup restores conservation AND improves the profile; no
+  iteration needed at these scales. Front exponent 0.190 (reference
+  0.206, scatter 0.154).
+- Conservation elsewhere without fixup: 3e-8 (aligned), ~1e-5 (wiggle).
+
+**G3a verdict amended (2026-08-05)**: the curved-field blocker is
+RESOLVED by the layer form; explicit SDE arm now validated including
+machine-scale-curved fields. Open: default-form decision (scatter stays
+default until Eric flips it), Thrust-D BCs (reflected feet are the
+natural gather-form wall treatment), a local (vs global) conservation
+fixup if production decks show structured deficits, and the strong-bind
+limiter demo.
+
 ### C.8 Gate G3
 
 - 1D Gaussian spread along B parallel to z: sigma^2(t) = sigma_0^2 + 2 chi t to

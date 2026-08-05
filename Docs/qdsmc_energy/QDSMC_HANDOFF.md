@@ -143,16 +143,20 @@ gradient-corrected `DepositScalar`.
    Zeldovich front: qualitatively correct, relL2 0.13 at N=128 with a
    hop-tail precursor; production f=0.1 limiter leaves resolved fronts
    untouched.
-1. **Curved-deposit fix (new, from G3a)**: the leak survives npts=2 (zero
-   chord variance) and B1-off — it lives in the deposit/gather chain on
-   curved b̂, so field-line-following hops alone will NOT fix it. Next
-   scheme work: pin the mechanism, then a field-frame deposit/slope
-   correction or field-line-coordinate remap. Until then the explicit arm
-   is validated for straight/gently-curved fields only (FRC closed-line
-   regions isotropize).
+1. **RESOLVED 2026-08-05 — layer (gather) form** (Eric's call; plan doc
+   §C.7b): `qdsmc_conduction_form = layer` +
+   `qdsmc_conduction_interp = monocubic`, straight feet, optional
+   `qdsmc_conduction_conserve_fixup`. Liftoff-point leak 2.56e-4 vs
+   scatter 1.81 (~7000x), dt-growth flat, aligned order 1.97 preserved,
+   Zeldovich 4.2e-2 with conservation 7.8e-7 under the global fixup.
+   Curved feet (midpoint rotation) measured HARMFUL — the div-D drift
+   already carries the mean curvature; default OFF. Scatter remains the
+   input default until Eric flips it. Remaining follow-ups:
+   - local conservation fixup if production decks show structured
+     deficits (global proportional validated at the ZK front);
    - small open leg: strong-bind limiter demo (front speed ≤ f·v_te needs
      a q_Sp ≫ f·q_fs parameter point; at ZK-test parameters the limiter
-     only bites ~30% even at f=0.01).
+     only bites ~30% even at f=0.01);
    - annulus/compression regime-survey rows still placeholders.
 2. **Thrust D — boundary conditions** (domain + EB): daughter/marker
    specular reflection (adiabatic, default), isothermal T_wall re-emission
