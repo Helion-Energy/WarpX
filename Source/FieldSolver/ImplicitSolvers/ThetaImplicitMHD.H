@@ -92,6 +92,26 @@ class ThetaImplicitMHD final : public ImplicitSolver
         return true;
     }
 
+    /**
+     * \brief The MHD residual is evaluable for ARBITRARY real states by
+     * construction: densities are max-floored, pressures and energies go
+     * through C-infinity smooth floors, the barotropic pow() falls back
+     * to the floor ratio below the density floor, and every user-parser
+     * input (resistivity) receives a floored density. Jacobian probes
+     * therefore need no admissibility limiting -- and skipping it keeps
+     * the Jacobian exact for states resting on their bounds, where a
+     * limited probe underflows to the eps -> 0 abort whenever a Krylov
+     * vector concentrates on a bound-resident cell (observed at the
+     * 54.8 t_ci CGL reorganization event of the FRC free hold). The
+     * Newton UPDATE path keeps its projection and limiting unchanged;
+     * only probes go unlimited.
+     */
+    [[nodiscard]] bool
+    ProbePerturbationsNeedLimiting () const override
+    {
+        return false;
+    }
+
     // NOTE: Jacobian probe perturbations stay LIMITED for this solver
     // (base-class default). Although every floored quantity is clamped
     // pointwise inside the residual kernels (so inadmissible probe states
