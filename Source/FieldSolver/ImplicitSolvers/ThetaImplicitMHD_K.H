@@ -210,6 +210,22 @@ smooth_max (const amrex::Real a, const amrex::Real b,
     return 0.5 * (a + b + std::sqrt((a - b) * (a - b) + width * width));
 }
 
+// C^2 soft upper clip: EXACT identity for value <= cap - width, exact
+// asymptote to cap as value -> +infinity, tanh rolloff in between
+// (value and its first two derivatives are continuous at the knee:
+// tanh(0) = 0, tanh'(0) = 1, tanh''(0) = 0). Unlike smooth_min, states
+// deep inside the admissible band are passed through UNCHANGED -- an
+// equilibrium far from the cap acquires no spurious offset. width > 0.
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+soft_upper_clip (const amrex::Real value, const amrex::Real cap,
+                 const amrex::Real width) noexcept {
+    const amrex::Real knee = cap - width;
+    if (value <= knee) {
+        return value;
+    }
+    return knee + width * std::tanh((value - knee) / width);
+}
+
 // C-infinity smoothed sign: s/sqrt(s^2 + w^2), i.e. +-1 for |s| >> w.
 // Returns 0 at s = w = 0 (the hard-sign limit is undefined there).
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real

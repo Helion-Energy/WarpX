@@ -4114,6 +4114,16 @@ Jacobian probes.
     :default: ``0.1``
 
     Relative :math:`C^\infty` switch width of the instability bounds.
+    Also sets the relative knee width of the marginal-stability clamp on
+    the *transmitted* deviation stress: the anisotropy entering the
+    stress divergence and the work terms is soft-clipped (:math:`C^2`,
+    exact inside the band) to the firehose marginal value
+    :math:`p_\parallel - p_\perp \le B^2/\mu_0` and the mirror marginal
+    value :math:`p_\perp - p_\parallel \le (B^2/\mu_0)\,
+    p_\parallel/(2 p_\perp)` — kinetic instabilities cap the stress a
+    plasma can sustain, and the bounded relaxation alone cannot stop a
+    transient super-marginal excursion from transmitting unbounded force
+    through the dissipation-free stress divergence.
 
 .. pp:param:: implicit_mhd.cgl_null_scale
     :type: ``float``

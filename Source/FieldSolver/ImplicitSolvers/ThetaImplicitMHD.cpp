@@ -3208,6 +3208,54 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 return magnetization2 / (magnetization2 + thermal_speed2);
             };
 
+            // Marginal-stability clamp of the TRANSMITTED anisotropy
+            // (Stage B+): kinetic instabilities cap the deviation stress
+            // a plasma can sustain at the firehose marginal value
+            // Delta p = +B^2/mu0 (effective tension reaches zero, never
+            // negative) and the mirror marginal value
+            // Delta p = -(B^2/mu0) p_par/(2 p_perp). The Stage B bounded
+            // RELAXATION drives U_par/U_perp toward this band but cannot
+            // stop a transient super-marginal excursion from transmitting
+            // unbounded force through the dissipation-free
+            // central-difference stress divergence (the ~53 t_ci FRC
+            // wall-channel runaway reached |Delta p| ~ 1e3 x marginal).
+            // C^2 tanh soft clips (knee widths from cgl_instability_width)
+            // pass the stable interior through EXACTLY -- an equilibrium
+            // inside the band acquires no spurious stress offset -- and
+            // the mirror bound is self-limiting: it shrinks as
+            // p_par/p_perp collapses. The energy work terms use the SAME
+            // clamped difference through the p_eff/Delta p decomposition,
+            // keeping the total internal work exactly -P_blend : grad u.
+            const auto marginal_pressure_difference =
+                [=] (const int ic, const int jc, const int kc) {
+                    const amrex::Real raw =
+                        2.0_rt * upar(ic, jc, kc) - uperp(ic, jc, kc);
+                    amrex::Real b2n = 0.0_rt;
+                    for (int component = 0; component < 3; ++component) {
+                        b2n += b_cc(ic, jc, kc, component) *
+                               b_cc(ic, jc, kc, component);
+                    }
+                    const amrex::Real magnetic_pressure =
+                        theta_implicit_mhd::smooth_positive_floor(
+                            b2n, small_b2) * cgl_inverse_mu0;
+                    const amrex::Real parallel_floored =
+                        theta_implicit_mhd::smooth_positive_floor(
+                            2.0_rt * upar(ic, jc, kc), ion_pressure_floor);
+                    const amrex::Real perp_floored =
+                        theta_implicit_mhd::smooth_positive_floor(
+                            uperp(ic, jc, kc), ion_pressure_floor);
+                    const amrex::Real mirror_magnitude =
+                        magnetic_pressure * parallel_floored /
+                        (2.0_rt * perp_floored);
+                    const amrex::Real firehose_clamped =
+                        theta_implicit_mhd::soft_upper_clip(
+                            raw, magnetic_pressure,
+                            cgl_instability_width * magnetic_pressure);
+                    return -theta_implicit_mhd::soft_upper_clip(
+                        -firehose_clamped, mirror_magnitude,
+                        cgl_instability_width * mirror_magnitude);
+                };
+
             if (cgl_closure) {
                 // Anisotropic (CGL) deviation stress, magnetization
                 // weighted (Stage B+):
@@ -3221,16 +3269,16 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 // b_a b_b / smooth_positive_floor(|b|^2, mu0 p_i_floor):
                 // below that field-energy scale the deviation force is
                 // physically negligible and only the (arbitrary) field
-                // direction is smoothed away. p_par - p_perp uses the RAW
-                // energies (linear, hence smooth; the difference must not
-                // be distorted by one-sided floors). The weight w makes
-                // the momentum stress exactly the P_blend whose work the
-                // energy blocks integrate below.
+                // direction is smoothed away. p_par - p_perp is the
+                // marginal-stability CLAMPED difference (smooth in the
+                // unknowns; see marginal_pressure_difference above). The
+                // weight w makes the momentum stress exactly the P_blend
+                // whose work the energy blocks integrate below.
                 const auto pi_dev = [=] (const int ic, const int jc,
                                          const int kc, const int a,
                                          const int b) {
                     const amrex::Real pressure_difference =
-                        2.0_rt * upar(ic, jc, kc) - uperp(ic, jc, kc);
+                        marginal_pressure_difference(ic, jc, kc);
                     amrex::Real b2 = 0.0_rt;
                     for (int component = 0; component < 3; ++component) {
                         b2 += b_cc(ic, jc, kc, component) *
@@ -3501,17 +3549,19 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                     inverse_b2;
 #endif
                 // CGL work terms (internal-energy form, no heat flux),
-                // magnetization blended (Stage B+):
+                // magnetization blended and marginal-clamped (Stage B+),
+                // written in the p_eff/Delta p decomposition
+                // p_par = p_eff + (2/3) dp, p_perp = p_eff - (1/3) dp
+                // with dp the marginal-stability CLAMPED difference:
                 //   dU_par/dt  + div(U_par u)  =
-                //       -w p_par (bb : grad u) - (1-w)(1/3) p_eff div u,
+                //       -w (p_eff + (2/3) dp)(bb : grad u)
+                //       - (1-w)(1/3) p_eff div u,
                 //   dU_perp/dt + div(U_perp u) =
-                //       -w p_perp (div u - bb : grad u)
-                //       - (1-w)(2/3) p_eff div u,
-                // with p_par = 2 U_par and p_perp = U_perp taken RAW
-                // (linear, hence smooth, in the unknowns). The total
-                // internal work is exactly -P_blend : grad u with
-                // P_blend = p_eff I + w (p_par - p_perp)(bhat bhat - I/3)
-                // -- the SAME weighted stress the momentum divergence
+                //       -w (p_eff - (1/3) dp)(div u - bb : grad u)
+                //       - (1-w)(2/3) p_eff div u.
+                // The total internal work is exactly -P_blend : grad u
+                // with P_blend = p_eff I + w dp (bhat bhat - I/3) -- the
+                // SAME weighted, clamped stress the momentum divergence
                 // integrates -- and the (1/3, 2/3) split keeps isotropy
                 // a fixed point of pure compression at w = 0.
                 const amrex::Real pressure_parallel =
@@ -3523,16 +3573,21 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                     (pressure_parallel + 2.0_rt * pressure_perp) / 3.0_rt;
                 const amrex::Real magnetization_weight =
                     null_weight(i, j, k);
+                const amrex::Real pressure_difference_clamped =
+                    marginal_pressure_difference(i, j, k);
                 const amrex::Real isotropic_work =
                     -pressure_effective * divergence_velocity;
                 amrex::Real parallel_work =
                     magnetization_weight *
-                        (-pressure_parallel * parallel_gradient) +
+                        (-(pressure_effective +
+                           (2.0_rt / 3.0_rt) * pressure_difference_clamped) *
+                         parallel_gradient) +
                     (1.0_rt - magnetization_weight) *
                         (1.0_rt / 3.0_rt) * isotropic_work;
                 amrex::Real perp_work =
                     magnetization_weight *
-                        (-pressure_perp *
+                        (-(pressure_effective -
+                           (1.0_rt / 3.0_rt) * pressure_difference_clamped) *
                          (divergence_velocity - parallel_gradient)) +
                     (1.0_rt - magnetization_weight) *
                         (2.0_rt / 3.0_rt) * isotropic_work;
