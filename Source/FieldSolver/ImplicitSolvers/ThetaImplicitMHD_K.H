@@ -87,6 +87,12 @@ struct FluxParameters {
     // term (Minoshima & Miyoshi 2021); false keeps the original HLLD
     // fast-speed scaling.
     bool hlld_all_speed = true;
+    // CGL (bi-Maxwellian) ion closure: load_cell_state_cgl overwrites
+    // ion_pressure with the effective isotropic pressure
+    // p_eff = (p_par + 2 p_perp)/3 and hlld_flux adds the U_par/U_perp
+    // advection channels. Mutually exclusive with total_energy_closure
+    // (MakeFluxParameters keeps the latter false under cgl).
+    bool cgl_closure = false;
 };
 
 struct CellState {
@@ -111,6 +117,12 @@ struct CellState {
     amrex::Real fast_speed;
     // |u_n| + fast_speed: the LLF alpha scale for the ion-energy channel.
     amrex::Real fast_wave_speed;
+    // --- CGL (bi-Maxwellian) additions. load_cell_state_cgl fills the
+    // internal energies U_par = p_par/2 and U_perp = p_perp and overwrites
+    // ion_pressure with p_eff = (p_par + 2 p_perp)/3; default zero so the
+    // isotropic closures are undisturbed. ---
+    amrex::Real ion_parallel_energy = 0.0;
+    amrex::Real ion_perp_energy = 0.0;
 };
 
 struct FaceFlux {
@@ -119,6 +131,11 @@ struct FaceFlux {
     amrex::Real electron_energy;
     amrex::Real ion_energy;
     amrex::Real electron_velocity;
+    // CGL closure: advective fluxes of U_par and U_perp (populated by
+    // hlld_flux only when FluxParameters::cgl_closure is set; the CGL
+    // work terms are pointwise RHS sources, not fluxes).
+    amrex::Real ion_parallel_energy = 0.0;
+    amrex::Real ion_perp_energy = 0.0;
     // --- HLLD additions (populated by hlld_flux only; default-zero so
     // the existing hllc/rusanov paths are undisturbed). ---
     // Maxwell-stress part of the momentum flux; momentum[] holds the
@@ -236,6 +253,38 @@ ion_pressure (const amrex::Real density,
                     parameters.gamma_i);
 }
 
+// (Re)build the acoustic wave speeds from the CURRENT state.ion_pressure
+// and electron pressure, leaving hydro-limit values in the HLLD members
+// (fast_speed = sound_speed); finish_magnetized_state upgrades them.
+// Shared by load_cell_state and load_cell_state_cgl, which overwrites
+// ion_pressure with the CGL effective pressure and must then refresh
+// every speed derived from it.
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE void
+finish_acoustic_speeds (CellState& state, const int normal_direction,
+                        const FluxParameters& parameters) noexcept {
+    // With the barotropic signal closure the wave-speed estimates use the
+    // polytropic p_i(rho) instead of p_i(E_i): the signal speeds then do
+    // not respond to E_i Jacobian probes at all, while the physical fluxes
+    // and the contact speed keep the consistent (E_i-recovered) pressure,
+    // preserving HLLC flux continuity across s_star = 0.
+    const amrex::Real signal_ion_pressure =
+        parameters.barotropic_signal_speeds
+            ? ion_pressure(state.safe_density, parameters)
+            : state.ion_pressure;
+    const amrex::Real sound_speed_squared =
+        std::max((parameters.gamma_i * signal_ion_pressure +
+                  parameters.gamma_e * state.electron_pressure) /
+                     state.safe_density,
+                 0.0);
+    state.sound_speed = std::sqrt(sound_speed_squared);
+    state.wave_speed = std::max(std::abs(state.ion_velocity[normal_direction]) +
+                                    state.sound_speed,
+                                std::abs(state.electron_velocity_normal));
+    state.fast_speed = state.sound_speed;
+    state.fast_wave_speed =
+        std::abs(state.ion_velocity[normal_direction]) + state.sound_speed;
+}
+
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE CellState
 load_cell_state (const amrex::Array4<const amrex::Real>& density,
                  const amrex::Array4<const amrex::Real>& momentum,
@@ -293,57 +342,71 @@ load_cell_state (const amrex::Array4<const amrex::Real>& density,
              ? current(i, j, k, normal_direction) / charge_density
              : 0.0);
 
-    // With the barotropic signal closure the wave-speed estimates use the
-    // polytropic p_i(rho) instead of p_i(E_i): the signal speeds then do
-    // not respond to E_i Jacobian probes at all, while the physical fluxes
-    // and the contact speed keep the consistent (E_i-recovered) pressure,
-    // preserving HLLC flux continuity across s_star = 0.
-    const amrex::Real signal_ion_pressure =
-        parameters.barotropic_signal_speeds
-            ? ion_pressure(state.safe_density, parameters)
-            : state.ion_pressure;
-    const amrex::Real sound_speed_squared =
-        std::max((parameters.gamma_i * signal_ion_pressure +
-                  parameters.gamma_e * state.electron_pressure) /
-                     state.safe_density,
-                 0.0);
-    state.sound_speed = std::sqrt(sound_speed_squared);
-    state.wave_speed = std::max(std::abs(state.ion_velocity[normal_direction]) +
-                                    state.sound_speed,
-                                std::abs(state.electron_velocity_normal));
+    finish_acoustic_speeds(state, normal_direction, parameters);
     // Hydro-limit values for the HLLD members; load_cell_state_hlld
     // upgrades them to the magnetized values.
     for (int component = 0; component < 3; ++component) {
         state.magnetic[component] = 0.0;
     }
-    state.fast_speed = state.sound_speed;
-    state.fast_wave_speed =
-        std::abs(state.ion_velocity[normal_direction]) + state.sound_speed;
     return state;
 }
 
 /**
- * \brief load_cell_state plus the cell-centered TOTAL magnetic field and
- * the fast-magnetosonic wave speeds required by hlld_flux.
+ * \brief load_cell_state for the CGL (bi-Maxwellian) ion closure: the
+ * separately evolved internal energies U_par = p_par/2 and U_perp = p_perp
+ * replace the isotropic pressure closure.
  *
- * The fast speed is evaluated from the cell's own field (including its
- * normal component); hlld_flux itself uses the single-valued face B_n for
- * the wave-fan structure. Existing load_cell_state call sites are
- * undisturbed: they keep hydro-limit values for the new members.
+ * The base load_cell_state is called with the SAME parameters -- under cgl
+ * MakeFluxParameters keeps total_energy_closure false, so it fills the
+ * (unused) polytropic pressure -- and its ion pressure is then overwritten
+ * with the effective isotropic pressure p_eff = (p_par + 2 p_perp)/3,
+ * which is what the HLLD wave fan and total-pressure algebra see. The
+ * recovery is LINEAR in the unknowns (no kinetic-energy subtraction);
+ * p_par = 2 U_par and p_perp = U_perp are floored with the same C-infinity
+ * smooth-max idiom as the total-energy pressure recovery. The trace-free
+ * deviation stress (p_par - p_perp)(bhat bhat - I/3) is a pointwise RHS
+ * source, not part of the face flux.
  */
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE CellState
-load_cell_state_hlld (const amrex::Array4<const amrex::Real>& density,
-                      const amrex::Array4<const amrex::Real>& momentum,
-                      const amrex::Array4<const amrex::Real>& electron_energy,
-                      const amrex::Array4<const amrex::Real>& ion_energy,
-                      const amrex::Array4<const amrex::Real>& current,
-                      const amrex::Array4<const amrex::Real>& magnetic,
-                      const int i, const int j, const int k,
-                      const int normal_direction,
-                      const FluxParameters& parameters) noexcept {
+load_cell_state_cgl (const amrex::Array4<const amrex::Real>& density,
+                     const amrex::Array4<const amrex::Real>& momentum,
+                     const amrex::Array4<const amrex::Real>& electron_energy,
+                     const amrex::Array4<const amrex::Real>& ion_energy,
+                     const amrex::Array4<const amrex::Real>& ion_parallel_energy,
+                     const amrex::Array4<const amrex::Real>& ion_perp_energy,
+                     const amrex::Array4<const amrex::Real>& current,
+                     const int i, const int j, const int k,
+                     const int normal_direction,
+                     const FluxParameters& parameters) noexcept {
     CellState state =
         load_cell_state(density, momentum, electron_energy, ion_energy,
                         current, i, j, k, normal_direction, parameters);
+    state.ion_parallel_energy = ion_parallel_energy(i, j, k);
+    state.ion_perp_energy = ion_perp_energy(i, j, k);
+    state.ion_internal =
+        state.ion_parallel_energy + state.ion_perp_energy;
+    const amrex::Real pressure_parallel = smooth_positive_floor(
+        2.0 * state.ion_parallel_energy, parameters.ion_pressure_floor);
+    const amrex::Real pressure_perp = smooth_positive_floor(
+        state.ion_perp_energy, parameters.ion_pressure_floor);
+    state.ion_pressure = (pressure_parallel + 2.0 * pressure_perp) / 3.0;
+    // The acoustic speeds depend on ion_pressure and must be rebuilt.
+    finish_acoustic_speeds(state, normal_direction, parameters);
+    return state;
+}
+
+/**
+ * \brief Load the cell-centered TOTAL magnetic field into the state and
+ * upgrade the fast speeds (from the current state.sound_speed) to
+ * fast-magnetosonic. Shared tail of load_cell_state_hlld and
+ * load_cell_state_hlld_cgl.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE void
+finish_magnetized_state (CellState& state,
+                         const amrex::Array4<const amrex::Real>& magnetic,
+                         const int i, const int j, const int k,
+                         const int normal_direction,
+                         const FluxParameters& parameters) noexcept {
     for (int component = 0; component < 3; ++component) {
         state.magnetic[component] = magnetic(i, j, k, component);
     }
@@ -373,6 +436,57 @@ load_cell_state_hlld (const amrex::Array4<const amrex::Real>& density,
     state.fast_speed = std::sqrt(fast2);
     state.fast_wave_speed =
         std::abs(state.ion_velocity[normal_direction]) + state.fast_speed;
+}
+
+/**
+ * \brief load_cell_state plus the cell-centered TOTAL magnetic field and
+ * the fast-magnetosonic wave speeds required by hlld_flux.
+ *
+ * The fast speed is evaluated from the cell's own field (including its
+ * normal component); hlld_flux itself uses the single-valued face B_n for
+ * the wave-fan structure. Existing load_cell_state call sites are
+ * undisturbed: they keep hydro-limit values for the new members.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE CellState
+load_cell_state_hlld (const amrex::Array4<const amrex::Real>& density,
+                      const amrex::Array4<const amrex::Real>& momentum,
+                      const amrex::Array4<const amrex::Real>& electron_energy,
+                      const amrex::Array4<const amrex::Real>& ion_energy,
+                      const amrex::Array4<const amrex::Real>& current,
+                      const amrex::Array4<const amrex::Real>& magnetic,
+                      const int i, const int j, const int k,
+                      const int normal_direction,
+                      const FluxParameters& parameters) noexcept {
+    CellState state =
+        load_cell_state(density, momentum, electron_energy, ion_energy,
+                        current, i, j, k, normal_direction, parameters);
+    finish_magnetized_state(state, magnetic, i, j, k, normal_direction,
+                            parameters);
+    return state;
+}
+
+/**
+ * \brief load_cell_state_cgl plus the cell-centered TOTAL magnetic field
+ * and the fast-magnetosonic wave speeds (built from the CGL effective
+ * pressure p_eff) required by hlld_flux under the cgl closure.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE CellState
+load_cell_state_hlld_cgl (const amrex::Array4<const amrex::Real>& density,
+                          const amrex::Array4<const amrex::Real>& momentum,
+                          const amrex::Array4<const amrex::Real>& electron_energy,
+                          const amrex::Array4<const amrex::Real>& ion_energy,
+                          const amrex::Array4<const amrex::Real>& ion_parallel_energy,
+                          const amrex::Array4<const amrex::Real>& ion_perp_energy,
+                          const amrex::Array4<const amrex::Real>& current,
+                          const amrex::Array4<const amrex::Real>& magnetic,
+                          const int i, const int j, const int k,
+                          const int normal_direction,
+                          const FluxParameters& parameters) noexcept {
+    CellState state = load_cell_state_cgl(
+        density, momentum, electron_energy, ion_energy, ion_parallel_energy,
+        ion_perp_energy, current, i, j, k, normal_direction, parameters);
+    finish_magnetized_state(state, magnetic, i, j, k, normal_direction,
+                            parameters);
     return state;
 }
 
@@ -913,6 +1027,34 @@ hlld_flux (const CellState& left, const CellState& right,
                 ue_star_left - left.electron_energy,
                 ue_star_right - ue_star_left,
                 right.electron_energy - ue_star_right);
+    if (parameters.cgl_closure) {
+        // CGL internal-energy channels: pure advection with the contact
+        // (star values fraction * U, the U_e pattern). The CGL work terms
+        // (-p_par bb:grad u, -p_perp (div u - bb:grad u)) and the
+        // isotropization exchange are pointwise sources in the fluid RHS,
+        // not fluxes: this is the internal-energy (non-conservative)
+        // formulation.
+        const amrex::Real upar_star_left =
+            fraction_left * left.ion_parallel_energy;
+        const amrex::Real upar_star_right =
+            fraction_right * right.ion_parallel_energy;
+        const amrex::Real uperp_star_left =
+            fraction_left * left.ion_perp_energy;
+        const amrex::Real uperp_star_right =
+            fraction_right * right.ion_perp_energy;
+        flux.ion_parallel_energy =
+            central(left.ion_parallel_energy * u_left,
+                    right.ion_parallel_energy * u_right,
+                    upar_star_left - left.ion_parallel_energy,
+                    upar_star_right - upar_star_left,
+                    right.ion_parallel_energy - upar_star_right);
+        flux.ion_perp_energy =
+            central(left.ion_perp_energy * u_left,
+                    right.ion_perp_energy * u_right,
+                    uperp_star_left - left.ion_perp_energy,
+                    uperp_star_right - uperp_star_left,
+                    right.ion_perp_energy - uperp_star_right);
+    }
     flux.induction_t1 =
         sqrt_mu0 *
         (central(bt1_flux_left, bt1_flux_right, bt1_star_left - bt1_left,

@@ -114,7 +114,9 @@ class ThetaImplicitMHD final : public ImplicitSolver
     void FillFluidSources (const WarpXSolverVec& state);
     void ApplyFluidDomainBoundaries (amrex::MultiFab& density, amrex::MultiFab& momentum,
                                      amrex::MultiFab& electron_energy,
-                                     amrex::MultiFab& ion_energy) const;
+                                     amrex::MultiFab& ion_energy,
+                                     amrex::MultiFab& ion_parallel_energy,
+                                     amrex::MultiFab& ion_perp_energy) const;
     void ApplyNeumannZDomainGhosts (amrex::MultiFab& mf) const;
     void FillCellCenteredElectromagneticFields ();
     void ComputeFluidRHS (WarpXSolverVec& rhs, amrex::Real time) const;
@@ -153,6 +155,13 @@ class ThetaImplicitMHD final : public ImplicitSolver
     inline static constexpr char MomentumDensityName[] = "implicit_mhd_momentum_density";
     inline static constexpr char ElectronEnergyName[] = "implicit_mhd_electron_energy";
     inline static constexpr char IonEnergyName[] = "implicit_mhd_ion_energy";
+    // CGL (bi-Maxwellian) ion closure: parallel internal energy
+    // U_par = p_par/2 (one degree of freedom along b) and perpendicular
+    // internal energy U_perp = p_perp (two degrees of freedom).
+    inline static constexpr char IonParallelEnergyName[] =
+        "implicit_mhd_ion_parallel_energy";
+    inline static constexpr char IonPerpEnergyName[] =
+        "implicit_mhd_ion_perp_energy";
 
   private:
     inline static constexpr char TotalCurrentCCName[] = "implicit_mhd_total_current_cc";
@@ -178,6 +187,8 @@ class ThetaImplicitMHD final : public ImplicitSolver
             magnetic_z,
             electron_energy,
             ion_energy,
+            ion_parallel_energy, // CGL closure: U_par advective flux
+            ion_perp_energy,     // CGL closure: U_perp advective flux
             electron_velocity,
             induction_t1, // flux of B_t1 through the face = -EMF_t2
             induction_t2, // flux of B_t2 through the face = +EMF_t1
@@ -196,6 +207,10 @@ class ThetaImplicitMHD final : public ImplicitSolver
     inline static constexpr char OldMomentumDensityName[] = "implicit_mhd_old_momentum_density";
     inline static constexpr char OldElectronEnergyName[] = "implicit_mhd_old_electron_energy";
     inline static constexpr char OldIonEnergyName[] = "implicit_mhd_old_ion_energy";
+    inline static constexpr char OldIonParallelEnergyName[] =
+        "implicit_mhd_old_ion_parallel_energy";
+    inline static constexpr char OldIonPerpEnergyName[] =
+        "implicit_mhd_old_ion_perp_energy";
 
     HybridPICModel* m_hybrid_pic_model = nullptr;
 
@@ -212,9 +227,18 @@ class ThetaImplicitMHD final : public ImplicitSolver
     amrex::Real m_mass_density_floor = 0.0;
     amrex::Real m_electron_pressure_floor = 0.0;
     // Ion thermodynamic closure: "barotropic" (default; p_i from the
-    // polytropic law) or "total_energy" (E_i evolved as a JFNK block).
+    // polytropic law), "total_energy" (E_i evolved as a JFNK block), or
+    // "cgl" (bi-Maxwellian: U_par = p_par/2 and U_perp = p_perp evolved
+    // as JFNK blocks with CGL work terms and ion-ion isotropization;
+    // hlld only). Under cgl the fan sees the effective isotropic
+    // pressure p_eff = (p_par + 2 p_perp)/3 and the pressure recovery
+    // is LINEAR in the unknowns (no kinetic-energy subtraction).
     std::string m_ion_closure = "barotropic";
     amrex::Real m_ion_pressure_floor = 0.0;
+    // CGL isotropization: Braginskii ion-ion collision rate times this
+    // scale (0 disables relaxation), with the given Coulomb logarithm.
+    amrex::Real m_cgl_relaxation_scale = 1.0;
+    amrex::Real m_cgl_coulomb_log = 10.0;
     // Vacuum cell-switch threshold for the ion fluid (0 disables): cells
     // below it are passive dust with frozen momentum (Holmstrom-style).
     amrex::Real m_vacuum_mass_density = 0.0;

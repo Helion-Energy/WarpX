@@ -228,10 +228,37 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         m_positivity_safety > 0.0_rt && m_positivity_safety < 1.0_rt,
         "implicit_mhd.positivity_safety must be greater than zero and less than one");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        m_ion_closure == "barotropic" || m_ion_closure == "total_energy",
-        "implicit_mhd.ion_closure must be barotropic or total_energy");
+        m_ion_closure == "barotropic" || m_ion_closure == "total_energy" ||
+            m_ion_closure == "cgl",
+        "implicit_mhd.ion_closure must be barotropic, total_energy, or cgl");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_ion_pressure_floor >= 0.0_rt,
                                      "implicit_mhd.ion_pressure_floor cannot be negative");
+    utils::parser::queryWithParser(pp, "cgl_relaxation_scale",
+                                   m_cgl_relaxation_scale);
+    utils::parser::queryWithParser(pp, "cgl_coulomb_log", m_cgl_coulomb_log);
+    if (m_ion_closure == "cgl") {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_use_hlld,
+            "implicit_mhd.ion_closure = cgl requires implicit_mhd.fluid_flux "
+            "= hlld (the CGL channels, work terms, and deviation stress are "
+            "only wired into the conservative-form face-flux path)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_evolve_ion_fluid,
+            "implicit_mhd.ion_closure = cgl requires "
+            "implicit_mhd.evolve_ion_fluid = true");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_ion_pressure_floor > 0.0_rt,
+            "implicit_mhd.ion_closure = cgl requires a positive "
+            "implicit_mhd.ion_pressure_floor (it sets the U_par/U_perp "
+            "positivity floors and anchors the smooth regularizations of "
+            "the deviation stress and the isotropization rate)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_cgl_relaxation_scale >= 0.0_rt,
+            "implicit_mhd.cgl_relaxation_scale cannot be negative");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_cgl_coulomb_log > 0.0_rt,
+            "implicit_mhd.cgl_coulomb_log must be positive");
+    }
     if (m_ion_closure == "total_energy") {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_evolve_ion_fluid,
@@ -283,7 +310,7 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     std::string velocity_z_expression = "0.0";
     utils::parser::Store_parserString(pp, "mass_density(x,y,z)", mass_density_expression);
     utils::parser::Store_parserString(pp, "electron_pressure(x,y,z)", electron_pressure_expression);
-    if (m_ion_closure == "total_energy") {
+    if (m_ion_closure == "total_energy" || m_ion_closure == "cgl") {
         utils::parser::Store_parserString(pp, "ion_pressure(x,y,z)", ion_pressure_expression);
     } else {
         utils::parser::Query_parserString(pp, "ion_pressure(x,y,z)", ion_pressure_expression);
@@ -332,6 +359,11 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
     // flux-kernel signatures and diagnostics are uniform across closures.
     fields.alloc_init(IonEnergyName, lev, ba, dm, 1, guard_cells, 0.0_rt, remake,
                       redistribute_on_remake, checkpoint_restart);
+    // CGL closure blocks (zeroed and unused with the other closures).
+    fields.alloc_init(IonParallelEnergyName, lev, ba, dm, 1, guard_cells, 0.0_rt, remake,
+                      redistribute_on_remake, checkpoint_restart);
+    fields.alloc_init(IonPerpEnergyName, lev, ba, dm, 1, guard_cells, 0.0_rt, remake,
+                      redistribute_on_remake, checkpoint_restart);
 
     fields.alloc_init(TotalCurrentCCName, lev, ba, dm, 3, guard_cells, 0.0_rt);
     fields.alloc_init(MagneticFieldCCName, lev, ba, dm, 3, guard_cells, 0.0_rt);
@@ -360,6 +392,8 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
     fields.alloc_init(OldMomentumDensityName, lev, ba, dm, 3, guard_cells, 0.0_rt);
     fields.alloc_init(OldElectronEnergyName, lev, ba, dm, 1, guard_cells, 0.0_rt);
     fields.alloc_init(OldIonEnergyName, lev, ba, dm, 1, guard_cells, 0.0_rt);
+    fields.alloc_init(OldIonParallelEnergyName, lev, ba, dm, 1, guard_cells, 0.0_rt);
+    fields.alloc_init(OldIonPerpEnergyName, lev, ba, dm, 1, guard_cells, 0.0_rt);
 }
 
 void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
@@ -537,6 +571,9 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         {ElectronEnergyName, energy_scale}};
     if (m_ion_closure == "total_energy") {
         fluid_blocks.push_back({IonEnergyName, energy_scale});
+    } else if (m_ion_closure == "cgl") {
+        fluid_blocks.push_back({IonParallelEnergyName, energy_scale});
+        fluid_blocks.push_back({IonPerpEnergyName, energy_scale});
     }
     if (m_use_hlld) {
         // Conservative-form recast: B^{n+theta} is the JFNK array block
@@ -695,6 +732,10 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "Ion closure:                   " << m_ion_closure << "\n"
                    << "Positivity step safety:        " << m_positivity_safety << "\n"
                    << "Joule heating:                 " << m_include_joule_heating << "\n";
+    if (m_ion_closure == "cgl") {
+        amrex::Print() << "CGL relaxation scale:          " << m_cgl_relaxation_scale << "\n"
+                       << "CGL Coulomb logarithm:         " << m_cgl_coulomb_log << "\n";
+    }
     PrintBaseImplicitSolverParameters();
     m_nlsolver->PrintParams();
     amrex::Print() << "-----------------------------------------------------------\n\n";
@@ -706,6 +747,10 @@ void ThetaImplicitMHD::InitializeFluidState ()
     amrex::MultiFab& momentum = *m_WarpX->m_fields.get(MomentumDensityName, 0);
     amrex::MultiFab& electron_energy = *m_WarpX->m_fields.get(ElectronEnergyName, 0);
     amrex::MultiFab& ion_energy = *m_WarpX->m_fields.get(IonEnergyName, 0);
+    amrex::MultiFab& ion_parallel_energy =
+        *m_WarpX->m_fields.get(IonParallelEnergyName, 0);
+    amrex::MultiFab& ion_perp_energy =
+        *m_WarpX->m_fields.get(IonPerpEnergyName, 0);
 
     const auto cell_size = m_WarpX->Geom(0).CellSizeArray();
     const auto lower = m_WarpX->Geom(0).ProbLoArray();
@@ -719,6 +764,7 @@ void ThetaImplicitMHD::InitializeFluidState ()
     const amrex::Real pressure_floor = m_electron_pressure_floor;
     const amrex::Real gamma_e_minus_one = m_gamma_e - 1.0_rt;
     const bool total_energy_closure = m_ion_closure == "total_energy";
+    const bool cgl_closure = m_ion_closure == "cgl";
     const amrex::Real ion_pressure_floor = m_ion_pressure_floor;
     const amrex::Real gamma_i_minus_one = m_gamma_i - 1.0_rt;
 
@@ -728,6 +774,8 @@ void ThetaImplicitMHD::InitializeFluidState ()
         const auto momentum_array = momentum.array(mfi);
         const auto energy_array = electron_energy.array(mfi);
         const auto ion_energy_array = ion_energy.array(mfi);
+        const auto ion_parallel_array = ion_parallel_energy.array(mfi);
+        const auto ion_perp_array = ion_perp_energy.array(mfi);
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
 #if defined(WARPX_DIM_3D)
             const amrex::Real x = lower[0] + (i + 0.5_rt) * cell_size[0];
@@ -757,6 +805,16 @@ void ThetaImplicitMHD::InitializeFluidState ()
                     std::max(ion_pressure(x, y, z), ion_pressure_floor) / gamma_i_minus_one +
                     0.5_rt * rho * (vx * vx + vy * vy + vz * vz);
             }
+            if (cgl_closure) {
+                // Isotropic bi-Maxwellian initialization: p_par = p_perp
+                // = p_i, so U_par = p_i/2 and U_perp = p_i. No kinetic
+                // term -- the CGL blocks are pure internal energies (the
+                // kinetic energy lives in the momentum block only).
+                const amrex::Real p_i =
+                    std::max(ion_pressure(x, y, z), ion_pressure_floor);
+                ion_parallel_array(i, j, k) = 0.5_rt * p_i;
+                ion_perp_array(i, j, k) = p_i;
+            }
         });
     }
 
@@ -764,13 +822,18 @@ void ThetaImplicitMHD::InitializeFluidState ()
     momentum.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
     electron_energy.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
     ion_energy.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
-    ApplyFluidDomainBoundaries(density, momentum, electron_energy, ion_energy);
+    ion_parallel_energy.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
+    ion_perp_energy.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
+    ApplyFluidDomainBoundaries(density, momentum, electron_energy, ion_energy,
+                               ion_parallel_energy, ion_perp_energy);
 }
 
 void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
                                                    amrex::MultiFab& momentum,
                                                    amrex::MultiFab& electron_energy,
-                                                   amrex::MultiFab& ion_energy) const
+                                                   amrex::MultiFab& ion_energy,
+                                                   amrex::MultiFab& ion_parallel_energy,
+                                                   amrex::MultiFab& ion_perp_energy) const
 {
 #if defined(WARPX_DIM_RZ)
     // Fill radial domain ghost cells: mirror parity across the axis (odd u_r
@@ -788,6 +851,8 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
         ApplyNeumannZDomainGhosts(momentum);
         ApplyNeumannZDomainGhosts(electron_energy);
         ApplyNeumannZDomainGhosts(ion_energy);
+        ApplyNeumannZDomainGhosts(ion_parallel_energy);
+        ApplyNeumannZDomainGhosts(ion_perp_energy);
     }
     const amrex::Box& domain = m_WarpX->Geom(0).Domain();
     const int domain_lo = domain.smallEnd(0);
@@ -802,12 +867,16 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
         const auto mom = momentum.array(mfi);
         const auto energy = electron_energy.array(mfi);
         const auto ion_e = ion_energy.array(mfi);
+        const auto ion_par = ion_parallel_energy.array(mfi);
+        const auto ion_perp = ion_perp_energy.array(mfi);
         amrex::ParallelFor(grown, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
             if (i < domain_lo) {
                 const int mirror = 2 * domain_lo - 1 - i;
                 rho(i, j, k) = rho(mirror, j, k);
                 energy(i, j, k) = energy(mirror, j, k);
                 ion_e(i, j, k) = ion_e(mirror, j, k);
+                ion_par(i, j, k) = ion_par(mirror, j, k);
+                ion_perp(i, j, k) = ion_perp(mirror, j, k);
                 mom(i, j, k, 0) = -mom(mirror, j, k, 0);
                 mom(i, j, k, 1) = -mom(mirror, j, k, 1);
                 mom(i, j, k, 2) = mom(mirror, j, k, 2);
@@ -819,6 +888,8 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
                 rho(i, j, k) = rho(mirror, j, k);
                 energy(i, j, k) = energy(mirror, j, k);
                 ion_e(i, j, k) = ion_e(mirror, j, k);
+                ion_par(i, j, k) = ion_par(mirror, j, k);
+                ion_perp(i, j, k) = ion_perp(mirror, j, k);
                 mom(i, j, k, 0) =
                     r_open ? mom(mirror, j, k, 0) : -mom(mirror, j, k, 0);
                 mom(i, j, k, 1) = mom(mirror, j, k, 1);
@@ -827,7 +898,8 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
         });
     }
 #else
-    amrex::ignore_unused(density, momentum, electron_energy, ion_energy);
+    amrex::ignore_unused(density, momentum, electron_energy, ion_energy,
+                         ion_parallel_energy, ion_perp_energy);
 #endif
 }
 
@@ -929,11 +1001,16 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
     // limiters (theta-extrapolated end-of-step donor gating needs old
     // NEIGHBOR values; the solver-vec old blocks are zero-ghost).
     {
-        const std::array<std::pair<const char*, const char*>, 4> pairs = {
-            {{MassDensityName, OldMassDensityName},
-             {MomentumDensityName, OldMomentumDensityName},
-             {ElectronEnergyName, OldElectronEnergyName},
-             {IonEnergyName, OldIonEnergyName}}};
+        std::vector<std::pair<const char*, const char*>> pairs = {
+            {MassDensityName, OldMassDensityName},
+            {MomentumDensityName, OldMomentumDensityName},
+            {ElectronEnergyName, OldElectronEnergyName},
+            {IonEnergyName, OldIonEnergyName}};
+        if (m_ion_closure == "cgl") {
+            pairs.emplace_back(IonParallelEnergyName,
+                               OldIonParallelEnergyName);
+            pairs.emplace_back(IonPerpEnergyName, OldIonPerpEnergyName);
+        }
         for (const auto& [source_name, destination_name] : pairs) {
             const amrex::MultiFab& source =
                 *m_WarpX->m_fields.get(source_name, 0);
@@ -948,7 +1025,9 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
             *m_WarpX->m_fields.get(OldMassDensityName, 0),
             *m_WarpX->m_fields.get(OldMomentumDensityName, 0),
             *m_WarpX->m_fields.get(OldElectronEnergyName, 0),
-            *m_WarpX->m_fields.get(OldIonEnergyName, 0));
+            *m_WarpX->m_fields.get(OldIonEnergyName, 0),
+            *m_WarpX->m_fields.get(OldIonParallelEnergyName, 0),
+            *m_WarpX->m_fields.get(OldIonPerpEnergyName, 0));
     }
 
     m_nlsolver->Solve(m_state, m_state_old, start_time, m_dt, step);
@@ -1004,7 +1083,9 @@ void ThetaImplicitMHD::FillFluidSources (const WarpXSolverVec& state)
     ApplyFluidDomainBoundaries(*m_WarpX->m_fields.get(MassDensityName, 0),
                                *m_WarpX->m_fields.get(MomentumDensityName, 0),
                                *m_WarpX->m_fields.get(ElectronEnergyName, 0),
-                               *m_WarpX->m_fields.get(IonEnergyName, 0));
+                               *m_WarpX->m_fields.get(IonEnergyName, 0),
+                               *m_WarpX->m_fields.get(IonParallelEnergyName, 0),
+                               *m_WarpX->m_fields.get(IonPerpEnergyName, 0));
 
     const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
     const amrex::MultiFab& momentum = *m_WarpX->m_fields.get(MomentumDensityName, 0);
@@ -1220,35 +1301,14 @@ ThetaImplicitMHD::LimitSolverStep (const WarpXSolverVec& state,
         return requested_step;
     }
 
-    const amrex::MultiFab& density = state.getMultiFabBlock(MassDensityName, 0);
-    const amrex::MultiFab& energy =
-        state.getMultiFabBlock(ElectronEnergyName, 0);
-    const amrex::MultiFab& density_direction =
-        direction.getMultiFabBlock(MassDensityName, 0);
-    const amrex::MultiFab& energy_direction =
-        direction.getMultiFabBlock(ElectronEnergyName, 0);
-    const amrex::MultiFab& old_density =
-        m_state_old.getMultiFabBlock(MassDensityName, 0);
-    const amrex::MultiFab& old_energy =
-        m_state_old.getMultiFabBlock(ElectronEnergyName, 0);
-
     // v1 positivity for the total-energy closure: bound E_i at the INTERNAL
     // energy floor U_i_floor. This is exact where the kinetic energy is
     // small and merely conservative (never permissive) where it is not; the
     // pressure clamp in load_cell_state protects the KE-dominated corner.
+    // The CGL blocks are pure internal energies, so their bounds are exact:
+    // U_par >= p_i_floor/2 and U_perp >= p_i_floor.
     const bool total_energy_closure = m_ion_closure == "total_energy";
-    const amrex::MultiFab* const ion_energy =
-        total_energy_closure ? &state.getMultiFabBlock(IonEnergyName, 0) : nullptr;
-    const amrex::MultiFab* const ion_energy_direction =
-        total_energy_closure ? &direction.getMultiFabBlock(IonEnergyName, 0)
-                             : nullptr;
-    const amrex::MultiFab* const old_ion_energy =
-        total_energy_closure ? &m_state_old.getMultiFabBlock(IonEnergyName, 0)
-                             : nullptr;
-
-    amrex::ReduceOps<amrex::ReduceOpMin> reduce_op;
-    amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
-    using ReduceTuple = typename decltype(reduce_data)::Type;
+    const bool cgl_closure = m_ion_closure == "cgl";
     const amrex::Real theta = m_theta;
     const amrex::Real density_floor = m_mass_density_floor;
     const amrex::Real energy_floor =
@@ -1257,115 +1317,87 @@ ThetaImplicitMHD::LimitSolverStep (const WarpXSolverVec& state,
         total_energy_closure ? m_ion_pressure_floor / (m_gamma_i - 1.0_rt)
                              : 0.0_rt;
 
-    for (amrex::MFIter mfi(density); mfi.isValid(); ++mfi) {
-        const amrex::Box box = mfi.validbox();
-        const auto rho = density.const_array(mfi);
-        const auto electron_energy = energy.const_array(mfi);
-        const auto delta_rho = density_direction.const_array(mfi);
-        const auto delta_energy = energy_direction.const_array(mfi);
-        const auto rho_old = old_density.const_array(mfi);
-        const auto energy_old = old_energy.const_array(mfi);
-        const auto ion_e = total_energy_closure
-                               ? ion_energy->const_array(mfi)
-                               : amrex::Array4<const amrex::Real>{};
-        const auto delta_ion_e = total_energy_closure
-                                     ? ion_energy_direction->const_array(mfi)
-                                     : amrex::Array4<const amrex::Real>{};
-        const auto ion_e_old = total_energy_closure
-                                   ? old_ion_energy->const_array(mfi)
-                                   : amrex::Array4<const amrex::Real>{};
-        reduce_op.eval(
-            box, reduce_data,
-            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
-            {
-                const amrex::Real density_fraction =
-                    theta_implicit_mhd::admissible_step_fraction(
-                        rho(i, j, k), rho_old(i, j, k), delta_rho(i, j, k),
-                        requested_step, density_floor, theta);
-                const amrex::Real energy_fraction =
-                    theta_implicit_mhd::admissible_step_fraction(
-                        electron_energy(i, j, k), energy_old(i, j, k),
-                        delta_energy(i, j, k), requested_step, energy_floor,
-                        theta);
-                amrex::Real fraction =
-                    std::min(density_fraction, energy_fraction);
-                if (total_energy_closure) {
-                    fraction = std::min(
-                        fraction,
-                        theta_implicit_mhd::admissible_step_fraction(
-                            ion_e(i, j, k), ion_e_old(i, j, k),
-                            delta_ion_e(i, j, k), requested_step,
-                            ion_energy_floor, theta));
-                }
-                return {fraction};
-            });
+    const int num_blocks = cgl_closure ? 4 : (total_energy_closure ? 3 : 2);
+    const std::array<const char*, 4> block_names = {
+        MassDensityName, ElectronEnergyName,
+        cgl_closure ? IonParallelEnergyName : IonEnergyName,
+        IonPerpEnergyName};
+    const std::array<amrex::Real, 4> block_floors = {
+        density_floor, energy_floor,
+        cgl_closure ? 0.5_rt * m_ion_pressure_floor : ion_energy_floor,
+        m_ion_pressure_floor};
+
+    amrex::Real step_fraction = 1.0_rt;
+    for (int block = 0; block < num_blocks; ++block) {
+        const amrex::Real floor = block_floors[block];
+        const amrex::MultiFab& value_mf =
+            state.getMultiFabBlock(block_names[block], 0);
+        const amrex::MultiFab& delta_mf =
+            direction.getMultiFabBlock(block_names[block], 0);
+        const amrex::MultiFab& old_mf =
+            m_state_old.getMultiFabBlock(block_names[block], 0);
+        amrex::ReduceOps<amrex::ReduceOpMin> reduce_op;
+        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        for (amrex::MFIter mfi(value_mf); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox();
+            const auto value = value_mf.const_array(mfi);
+            const auto delta = delta_mf.const_array(mfi);
+            const auto old_value = old_mf.const_array(mfi);
+            reduce_op.eval(
+                box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
+                {
+                    return {theta_implicit_mhd::admissible_step_fraction(
+                        value(i, j, k), old_value(i, j, k), delta(i, j, k),
+                        requested_step, floor, theta)};
+                });
+        }
+        step_fraction = std::min(
+            step_fraction, amrex::get<0>(reduce_data.value(reduce_op)));
     }
 
-    amrex::Real step_fraction = amrex::get<0>(reduce_data.value(reduce_op));
     amrex::ParallelAllReduce::Min(step_fraction,
                                   amrex::ParallelContext::CommunicatorSub());
     if (step_fraction <= 1.0e-8_rt) {
         // The global clamp has effectively zeroed the Newton update: some
         // cell sits at its admissibility bound with a downward direction,
         // and the solve is about to lock. Report the offending cells
-        // (quantity, index, state, old state, proposed change, floor) so
-        // floor lockups are diagnosable from the log.
+        // (block, index, state, old state, proposed change, floor) so
+        // floor lockups are diagnosable from the log. Block ids follow
+        // block_names: 0 = rho, 1 = U_e, 2 = E_i (total_energy) or U_par
+        // (cgl), 3 = U_perp (cgl).
         constexpr amrex::Real report_threshold = 1.0e-8;
-        for (amrex::MFIter mfi(density); mfi.isValid(); ++mfi) {
-            const amrex::Box box = mfi.validbox();
-            const auto rho = density.const_array(mfi);
-            const auto electron_energy = energy.const_array(mfi);
-            const auto delta_rho = density_direction.const_array(mfi);
-            const auto delta_energy = energy_direction.const_array(mfi);
-            const auto rho_old = old_density.const_array(mfi);
-            const auto energy_old = old_energy.const_array(mfi);
-            const auto ion_e = total_energy_closure
-                                   ? ion_energy->const_array(mfi)
-                                   : amrex::Array4<const amrex::Real>{};
-            const auto delta_ion_e =
-                total_energy_closure ? ion_energy_direction->const_array(mfi)
-                                     : amrex::Array4<const amrex::Real>{};
-            const auto ion_e_old = total_energy_closure
-                                       ? old_ion_energy->const_array(mfi)
-                                       : amrex::Array4<const amrex::Real>{};
-            amrex::ParallelFor(
-                box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-                    if (theta_implicit_mhd::admissible_step_fraction(
-                            rho(i, j, k), rho_old(i, j, k),
-                            delta_rho(i, j, k), requested_step,
-                            density_floor, theta) <= report_threshold) {
-                        AMREX_DEVICE_PRINTF(
-                            "LimitSolverStep: rho pinned at (%d,%d,%d): "
-                            "value %.6e old %.6e change %.6e floor %.6e\n",
-                            i, j, k, rho(i, j, k), rho_old(i, j, k),
-                            delta_rho(i, j, k) * requested_step,
-                            density_floor);
-                    }
-                    if (theta_implicit_mhd::admissible_step_fraction(
-                            electron_energy(i, j, k), energy_old(i, j, k),
-                            delta_energy(i, j, k), requested_step,
-                            energy_floor, theta) <= report_threshold) {
-                        AMREX_DEVICE_PRINTF(
-                            "LimitSolverStep: U_e pinned at (%d,%d,%d): "
-                            "value %.6e old %.6e change %.6e floor %.6e\n",
-                            i, j, k, electron_energy(i, j, k),
-                            energy_old(i, j, k),
-                            delta_energy(i, j, k) * requested_step,
-                            energy_floor);
-                    }
-                    if (total_energy_closure &&
-                        theta_implicit_mhd::admissible_step_fraction(
-                            ion_e(i, j, k), ion_e_old(i, j, k),
-                            delta_ion_e(i, j, k), requested_step,
-                            ion_energy_floor, theta) <= report_threshold) {
-                        AMREX_DEVICE_PRINTF(
-                            "LimitSolverStep: E_i pinned at (%d,%d,%d): "
-                            "value %.6e old %.6e change %.6e floor %.6e\n",
-                            i, j, k, ion_e(i, j, k), ion_e_old(i, j, k),
-                            delta_ion_e(i, j, k) * requested_step,
-                            ion_energy_floor);
-                    }
-                });
+        for (int block = 0; block < num_blocks; ++block) {
+            const amrex::Real floor = block_floors[block];
+            const int block_id = block;
+            const amrex::MultiFab& value_mf =
+                state.getMultiFabBlock(block_names[block], 0);
+            const amrex::MultiFab& delta_mf =
+                direction.getMultiFabBlock(block_names[block], 0);
+            const amrex::MultiFab& old_mf =
+                m_state_old.getMultiFabBlock(block_names[block], 0);
+            for (amrex::MFIter mfi(value_mf); mfi.isValid(); ++mfi) {
+                const amrex::Box box = mfi.validbox();
+                const auto value = value_mf.const_array(mfi);
+                const auto delta = delta_mf.const_array(mfi);
+                const auto old_value = old_mf.const_array(mfi);
+                amrex::ParallelFor(
+                    box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                        if (theta_implicit_mhd::admissible_step_fraction(
+                                value(i, j, k), old_value(i, j, k),
+                                delta(i, j, k), requested_step, floor,
+                                theta) <= report_threshold) {
+                            AMREX_DEVICE_PRINTF(
+                                "LimitSolverStep: block %d pinned at "
+                                "(%d,%d,%d): value %.6e old %.6e change "
+                                "%.6e floor %.6e\n",
+                                block_id, i, j, k, value(i, j, k),
+                                old_value(i, j, k),
+                                delta(i, j, k) * requested_step, floor);
+                        }
+                    });
+            }
         }
         amrex::Gpu::streamSynchronize();
     }
@@ -1400,6 +1432,7 @@ ThetaImplicitMHD::ProjectAndLimitSolverStep (const WarpXSolverVec& state,
     // standard practice. Only the Newton-update path calls this;
     // Jacobian probe vectors are never mutated.
     const bool total_energy_closure = m_ion_closure == "total_energy";
+    const bool cgl_closure = m_ion_closure == "cgl";
     const amrex::Real theta = m_theta;
     const amrex::Real density_floor = m_mass_density_floor;
     const amrex::Real energy_floor =
@@ -1408,11 +1441,15 @@ ThetaImplicitMHD::ProjectAndLimitSolverStep (const WarpXSolverVec& state,
         total_energy_closure ? m_ion_pressure_floor / (m_gamma_i - 1.0_rt)
                              : 0.0_rt;
 
-    const int num_blocks = total_energy_closure ? 3 : 2;
-    const std::array<const char*, 3> block_names = {
-        MassDensityName, ElectronEnergyName, IonEnergyName};
-    const std::array<amrex::Real, 3> block_floors = {
-        density_floor, energy_floor, ion_energy_floor};
+    const int num_blocks = cgl_closure ? 4 : (total_energy_closure ? 3 : 2);
+    const std::array<const char*, 4> block_names = {
+        MassDensityName, ElectronEnergyName,
+        cgl_closure ? IonParallelEnergyName : IonEnergyName,
+        IonPerpEnergyName};
+    const std::array<amrex::Real, 4> block_floors = {
+        density_floor, energy_floor,
+        cgl_closure ? 0.5_rt * m_ion_pressure_floor : ion_energy_floor,
+        m_ion_pressure_floor};
     const bool report_projections =
         (std::getenv("WARPX_MHD_REPORT_PROJECTIONS") != nullptr);
     amrex::Long projected_components = 0;
@@ -1512,6 +1549,10 @@ theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
     flux_parameters.hlld_ion_energy_star =
         (m_hlld_ion_energy_flux == "star");
     flux_parameters.hlld_all_speed = m_hlld_all_speed;
+    // total_energy_closure (set above from m_ion_closure) stays false
+    // under cgl: load_cell_state_cgl overwrites the polytropic pressure
+    // with p_eff and the E_i machinery stays dormant.
+    flux_parameters.cgl_closure = (m_ion_closure == "cgl");
     return flux_parameters;
 }
 
@@ -1524,6 +1565,13 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
         ComputeFluidRHSFromFaceFluxes(rhs, time);
         return;
     }
+    // Defensive: the CGL closure is only wired into the hlld face-flux
+    // path above (and the input parser asserts fluid_flux = hlld), so the
+    // E-based fluid RHS below must never see it.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_ion_closure != "cgl",
+        "implicit_mhd.ion_closure = cgl requires implicit_mhd.fluid_flux = "
+        "hlld");
 
     const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
     const amrex::MultiFab& momentum = *m_WarpX->m_fields.get(MomentumDensityName, 0);
@@ -1896,6 +1944,14 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
         *m_WarpX->m_fields.get(OldElectronEnergyName, 0);
     const amrex::MultiFab& old_ion_energy =
         *m_WarpX->m_fields.get(OldIonEnergyName, 0);
+    const amrex::MultiFab& ion_parallel_energy =
+        *m_WarpX->m_fields.get(IonParallelEnergyName, 0);
+    const amrex::MultiFab& ion_perp_energy =
+        *m_WarpX->m_fields.get(IonPerpEnergyName, 0);
+    const amrex::MultiFab& old_ion_parallel_energy =
+        *m_WarpX->m_fields.get(OldIonParallelEnergyName, 0);
+    const amrex::MultiFab& old_ion_perp_energy =
+        *m_WarpX->m_fields.get(OldIonPerpEnergyName, 0);
     const amrex::MultiFab& current_cc =
         *m_WarpX->m_fields.get(TotalCurrentCCName, 0);
     const amrex::MultiFab& magnetic_cc =
@@ -1929,6 +1985,9 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     constexpr int flux_magnetic = FaceFluxComponent::magnetic_x;
     constexpr int flux_electron_energy = FaceFluxComponent::electron_energy;
     constexpr int flux_ion_energy = FaceFluxComponent::ion_energy;
+    constexpr int flux_ion_parallel_energy =
+        FaceFluxComponent::ion_parallel_energy;
+    constexpr int flux_ion_perp_energy = FaceFluxComponent::ion_perp_energy;
     constexpr int flux_electron_velocity =
         FaceFluxComponent::electron_velocity;
     constexpr int flux_induction_t1 = FaceFluxComponent::induction_t1;
@@ -1952,6 +2011,10 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
         const auto mom_old = old_momentum.const_array(mfi);
         const auto energy_old = old_electron_energy.const_array(mfi);
         const auto ion_e_old = old_ion_energy.const_array(mfi);
+        const auto upar = ion_parallel_energy.const_array(mfi);
+        const auto uperp = ion_perp_energy.const_array(mfi);
+        const auto upar_old = old_ion_parallel_energy.const_array(mfi);
+        const auto uperp_old = old_ion_perp_energy.const_array(mfi);
         const auto j_cc = current_cc.const_array(mfi);
         const auto b_cc = magnetic_cc.const_array(mfi);
         const auto bn_staggered = magnetic_face.const_array(mfi);
@@ -1979,12 +2042,22 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 }
             }
 #endif
-            const auto left = theta_implicit_mhd::load_cell_state_hlld(
-                rho, mom, energy, ion_e, j_cc, b_cc, il, jl, kl, normal,
-                parameters);
-            const auto right = theta_implicit_mhd::load_cell_state_hlld(
-                rho, mom, energy, ion_e, j_cc, b_cc, i, j, k, normal,
-                parameters);
+            const auto left =
+                parameters.cgl_closure
+                    ? theta_implicit_mhd::load_cell_state_hlld_cgl(
+                          rho, mom, energy, ion_e, upar, uperp, j_cc, b_cc,
+                          il, jl, kl, normal, parameters)
+                    : theta_implicit_mhd::load_cell_state_hlld(
+                          rho, mom, energy, ion_e, j_cc, b_cc, il, jl, kl,
+                          normal, parameters);
+            const auto right =
+                parameters.cgl_closure
+                    ? theta_implicit_mhd::load_cell_state_hlld_cgl(
+                          rho, mom, energy, ion_e, upar, uperp, j_cc, b_cc,
+                          i, j, k, normal, parameters)
+                    : theta_implicit_mhd::load_cell_state_hlld(
+                          rho, mom, energy, ion_e, j_cc, b_cc, i, j, k,
+                          normal, parameters);
             amrex::Real bn_face = bn_staggered(i, j, k);
             if (add_external) {
                 bn_face += bn_external(i, j, k);
@@ -2077,6 +2150,34 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     0.5_rt * (left.ion_energy + right.ion_energy) +
                         ion_energy_floor);
             }
+            if (parameters.cgl_closure) {
+                // CGL internal-energy channels: same donor-gated guards,
+                // gating on the U fields directly (U_par and U_perp are
+                // pure internal energies -- no kinetic subtraction), with
+                // U_par floored at p_i_floor/2 and U_perp at p_i_floor.
+                const amrex::Real parallel_floor =
+                    0.5_rt * parameters.ion_pressure_floor;
+                flux.ion_parallel_energy *= donor_blend(
+                    flux.ion_parallel_energy,
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        donor_end(upar, upar_old, il, jl, kl),
+                        parallel_floor),
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        donor_end(upar, upar_old, i, j, k), parallel_floor),
+                    0.5_rt * (left.ion_parallel_energy +
+                              right.ion_parallel_energy) +
+                        parallel_floor);
+                const amrex::Real perp_floor = parameters.ion_pressure_floor;
+                flux.ion_perp_energy *= donor_blend(
+                    flux.ion_perp_energy,
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        donor_end(uperp, uperp_old, il, jl, kl), perp_floor),
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        donor_end(uperp, uperp_old, i, j, k), perp_floor),
+                    0.5_rt *
+                            (left.ion_perp_energy + right.ion_perp_energy) +
+                        perp_floor);
+            }
 
             flux_arr(i, j, k, flux_mass) = flux.mass;
             for (int component = 0; component < 3; ++component) {
@@ -2087,6 +2188,11 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
             }
             flux_arr(i, j, k, flux_electron_energy) = flux.electron_energy;
             flux_arr(i, j, k, flux_ion_energy) = flux.ion_energy;
+            // Zero under the non-cgl closures (hlld_flux leaves the
+            // struct defaults untouched there).
+            flux_arr(i, j, k, flux_ion_parallel_energy) =
+                flux.ion_parallel_energy;
+            flux_arr(i, j, k, flux_ion_perp_energy) = flux.ion_perp_energy;
             flux_arr(i, j, k, flux_electron_velocity) = flux.electron_velocity;
             flux_arr(i, j, k, flux_induction_t1) = flux.induction_t1;
             flux_arr(i, j, k, flux_induction_t2) = flux.induction_t2;
@@ -2722,23 +2828,37 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
         *m_WarpX->m_fields.get(OldElectronEnergyName, 0);
     const amrex::MultiFab& old_ion_energy =
         *m_WarpX->m_fields.get(OldIonEnergyName, 0);
+    const amrex::MultiFab& ion_parallel_energy =
+        *m_WarpX->m_fields.get(IonParallelEnergyName, 0);
+    const amrex::MultiFab& ion_perp_energy =
+        *m_WarpX->m_fields.get(IonPerpEnergyName, 0);
+    const amrex::MultiFab& old_ion_parallel_energy =
+        *m_WarpX->m_fields.get(OldIonParallelEnergyName, 0);
+    const amrex::MultiFab& old_ion_perp_energy =
+        *m_WarpX->m_fields.get(OldIonPerpEnergyName, 0);
     const amrex::MultiFab& current = *m_WarpX->m_fields.get(TotalCurrentCCName, 0);
+    const amrex::MultiFab& magnetic_cc =
+        *m_WarpX->m_fields.get(MagneticFieldCCName, 0);
     const amrex::MultiFab& face_flux_mf =
         *m_WarpX->m_fields.get(FaceFluxZName, 0);
 #if defined(WARPX_DIM_RZ)
     const amrex::MultiFab& face_flux_r_mf =
         *m_WarpX->m_fields.get(FaceFluxRName, 0);
-    const amrex::MultiFab& magnetic_cc =
-        *m_WarpX->m_fields.get(MagneticFieldCCName, 0);
 #endif
 
     const bool total_energy_closure = m_ion_closure == "total_energy";
+    const bool cgl_closure = m_ion_closure == "cgl";
     amrex::MultiFab& density_rhs = rhs.getMultiFabBlock(MassDensityName, 0);
     amrex::MultiFab& momentum_rhs = rhs.getMultiFabBlock(MomentumDensityName, 0);
     amrex::MultiFab& electron_energy_rhs =
         rhs.getMultiFabBlock(ElectronEnergyName, 0);
     amrex::MultiFab* const ion_energy_rhs =
         total_energy_closure ? &rhs.getMultiFabBlock(IonEnergyName, 0) : nullptr;
+    amrex::MultiFab* const ion_parallel_energy_rhs =
+        cgl_closure ? &rhs.getMultiFabBlock(IonParallelEnergyName, 0)
+                    : nullptr;
+    amrex::MultiFab* const ion_perp_energy_rhs =
+        cgl_closure ? &rhs.getMultiFabBlock(IonPerpEnergyName, 0) : nullptr;
 
     const auto inverse_cell_size = physical_inverse_cell_size(m_WarpX->Geom(0));
     const amrex::Real inverse_dz = inverse_cell_size[2];
@@ -2757,6 +2877,33 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     const amrex::Real electron_energy_floor_rate =
         m_electron_pressure_floor / (m_gamma_e - 1.0_rt) / theta_dt;
     const amrex::Real ion_energy_floor_rate = ion_energy_floor / theta_dt;
+    // --- CGL closure constants (all host-precomputed and strictly
+    // positive, so every in-kernel regularization is C-infinity). ---
+    const amrex::Real ion_pressure_floor = m_ion_pressure_floor;
+    const amrex::Real ion_parallel_floor_rate =
+        0.5_rt * m_ion_pressure_floor / theta_dt;
+    const amrex::Real ion_perp_floor_rate = m_ion_pressure_floor / theta_dt;
+    const amrex::Real ion_mass = PhysConst::q_e / m_ion_charge_to_mass;
+    const amrex::Real inverse_ion_mass = 1.0_rt / ion_mass;
+    // Braginskii ion-ion collision rate, nu_ii = sqrt(2) n_i e^4 lnLambda
+    // / (12 pi^{3/2} sqrt(m_i) eps0^2 (k T_i)^{3/2}), scaled by
+    // cgl_relaxation_scale; the kernel evaluates
+    // nu_iso = prefactor * n_i / kT_eff^{3/2}.
+    const amrex::Real cgl_relaxation_prefactor =
+        m_cgl_relaxation_scale * std::sqrt(2.0_rt) *
+        std::pow(PhysConst::q_e, 4) * m_cgl_coulomb_log /
+        (12.0_rt * std::pow(MathConst::pi, amrex::Real(1.5)) *
+         std::sqrt(ion_mass) * PhysConst::epsilon_0 * PhysConst::epsilon_0);
+    // Strictly positive temperature anchor for the smooth kT_eff floor:
+    // the floor state kT = p_i_floor / n_i_floor (any positive anchor
+    // works; it only bounds nu_iso and keeps the T^{-3/2} smooth).
+    const amrex::Real cgl_temperature_floor =
+        m_ion_pressure_floor * ion_mass / m_mass_density_floor;
+    // Direction regularization of bhat bhat = b b / smooth-floored |b|^2:
+    // below the field-energy scale mu0 p_i_floor the deviation force and
+    // the anisotropy work are physically negligible, so only the
+    // (arbitrary) field direction is smoothed out there.
+    const amrex::Real small_b2 = PhysConst::mu0 * m_ion_pressure_floor;
     const bool holmstrom_vacuum = m_vacuum_mass_density > 0.0_rt;
     const amrex::Real vacuum_mass_density = m_vacuum_mass_density;
     const amrex::Real vacuum_drag_rate = m_vacuum_drag_rate;
@@ -2775,6 +2922,9 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     constexpr int flux_magnetic = FaceFluxComponent::magnetic_x;
     constexpr int flux_electron_energy = FaceFluxComponent::electron_energy;
     constexpr int flux_ion_energy = FaceFluxComponent::ion_energy;
+    constexpr int flux_ion_parallel_energy =
+        FaceFluxComponent::ion_parallel_energy;
+    constexpr int flux_ion_perp_energy = FaceFluxComponent::ion_perp_energy;
     constexpr int flux_electron_velocity =
         FaceFluxComponent::electron_velocity;
 
@@ -2788,11 +2938,15 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
         const auto energy_old = old_electron_energy.const_array(mfi);
         const auto ion_e = ion_energy.const_array(mfi);
         const auto ion_e_old = old_ion_energy.const_array(mfi);
+        const auto upar = ion_parallel_energy.const_array(mfi);
+        const auto uperp = ion_perp_energy.const_array(mfi);
+        const auto upar_old = old_ion_parallel_energy.const_array(mfi);
+        const auto uperp_old = old_ion_perp_energy.const_array(mfi);
         const auto j_plasma = current.const_array(mfi);
+        const auto b_cc = magnetic_cc.const_array(mfi);
         const auto flux_arr = face_flux_mf.const_array(mfi);
 #if defined(WARPX_DIM_RZ)
         const auto rflux_arr = face_flux_r_mf.const_array(mfi);
-        const auto b_cc = magnetic_cc.const_array(mfi);
 #endif
         const auto rho_increment = density_rhs.array(mfi);
         const auto momentum_increment = momentum_rhs.array(mfi);
@@ -2800,6 +2954,12 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
         const auto ion_energy_increment =
             total_energy_closure ? ion_energy_rhs->array(mfi)
                                  : amrex::Array4<amrex::Real>{};
+        const auto ion_parallel_increment =
+            cgl_closure ? ion_parallel_energy_rhs->array(mfi)
+                        : amrex::Array4<amrex::Real>{};
+        const auto ion_perp_increment =
+            cgl_closure ? ion_perp_energy_rhs->array(mfi)
+                        : amrex::Array4<amrex::Real>{};
 
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
             // Finite-volume divergences from the precomputed face fluxes:
@@ -2834,6 +2994,13 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
             amrex::Real divergence_ion_energy_flux =
                 inverse_dz * (flux_arr(izh, jzh, kzh, flux_ion_energy) -
                               flux_arr(i, j, k, flux_ion_energy));
+            amrex::Real divergence_ion_parallel_flux =
+                inverse_dz *
+                (flux_arr(izh, jzh, kzh, flux_ion_parallel_energy) -
+                 flux_arr(i, j, k, flux_ion_parallel_energy));
+            amrex::Real divergence_ion_perp_flux =
+                inverse_dz * (flux_arr(izh, jzh, kzh, flux_ion_perp_energy) -
+                              flux_arr(i, j, k, flux_ion_perp_energy));
             amrex::Real divergence_electron_velocity =
                 inverse_dz * (flux_arr(izh, jzh, kzh, flux_electron_velocity) -
                               flux_arr(i, j, k, flux_electron_velocity));
@@ -2872,6 +3039,17 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                     inverse_dr *
                     (weight_high * rflux_arr(i + 1, j, k, flux_ion_energy) -
                      weight_low * rflux_arr(i, j, k, flux_ion_energy));
+                divergence_ion_parallel_flux +=
+                    inverse_dr *
+                    (weight_high *
+                         rflux_arr(i + 1, j, k, flux_ion_parallel_energy) -
+                     weight_low *
+                         rflux_arr(i, j, k, flux_ion_parallel_energy));
+                divergence_ion_perp_flux +=
+                    inverse_dr *
+                    (weight_high *
+                         rflux_arr(i + 1, j, k, flux_ion_perp_energy) -
+                     weight_low * rflux_arr(i, j, k, flux_ion_perp_energy));
                 divergence_electron_velocity +=
                     inverse_dr *
                     (weight_high *
@@ -2907,6 +3085,18 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                         theta_implicit_mhd::smooth_positive_floor(
                             ion_e(i, j, k) - kinetic_energy,
                             ion_energy_floor);
+                } else if (cgl_closure) {
+                    // Effective isotropic pressure with the SAME smooth
+                    // floors as the kernel's p_eff, so this geometric
+                    // source matches the fan's momentum flux; the
+                    // trace-free deviation part enters through the
+                    // separate deviation-stress divergence below.
+                    pressure_i =
+                        (theta_implicit_mhd::smooth_positive_floor(
+                             2.0_rt * upar(i, j, k), ion_pressure_floor) +
+                         2.0_rt * theta_implicit_mhd::smooth_positive_floor(
+                                      uperp(i, j, k), ion_pressure_floor)) /
+                        3.0_rt;
                 } else {
                     pressure_i = theta_implicit_mhd::ion_pressure(
                         safe_density, flux_parameters);
@@ -2935,6 +3125,81 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 magnetic_force[1] -= inverse_radius * magnetic_theta_r;
             }
 #endif
+
+            if (cgl_closure) {
+                // Anisotropic (CGL) deviation stress
+                // PI_dev = (p_par - p_perp)(bhat bhat - I/3): the fan's
+                // momentum flux already carries the EFFECTIVE isotropic
+                // pressure p_eff = (p_par + 2 p_perp)/3, so only the
+                // trace-free deviation enters here, as a pointwise
+                // second-order central-difference divergence of the
+                // cell-centered products (ghost neighbors are filled each
+                // residual). bhat_a bhat_b is regularized C-infinity as
+                // b_a b_b / smooth_positive_floor(|b|^2, mu0 p_i_floor):
+                // below that field-energy scale the deviation force is
+                // physically negligible and only the (arbitrary) field
+                // direction is smoothed away. p_par - p_perp uses the RAW
+                // energies (linear, hence smooth; the difference must not
+                // be distorted by one-sided floors).
+                const auto pi_dev = [=] (const int ic, const int jc,
+                                         const int kc, const int a,
+                                         const int b) {
+                    const amrex::Real pressure_difference =
+                        2.0_rt * upar(ic, jc, kc) - uperp(ic, jc, kc);
+                    amrex::Real b2 = 0.0_rt;
+                    for (int component = 0; component < 3; ++component) {
+                        b2 += b_cc(ic, jc, kc, component) *
+                              b_cc(ic, jc, kc, component);
+                    }
+                    const amrex::Real bhat_ab =
+                        b_cc(ic, jc, kc, a) * b_cc(ic, jc, kc, b) /
+                        theta_implicit_mhd::smooth_positive_floor(b2,
+                                                                  small_b2);
+                    return pressure_difference *
+                           (bhat_ab -
+                            (a == b ? (1.0_rt / 3.0_rt) : 0.0_rt));
+                };
+#if defined(WARPX_DIM_1D_Z)
+                // 1D: only d/dz of the PI_dev z-row contributes.
+                for (int component = 0; component < 3; ++component) {
+                    divergence_momentum_flux[component] +=
+                        0.5_rt * inverse_dz *
+                        (pi_dev(i + 1, j, k, 2, component) -
+                         pi_dev(i - 1, j, k, 2, component));
+                }
+#elif defined(WARPX_DIM_RZ)
+                // RZ (m = 0): (div PI)_c = (1/r) d(r PI_rc)/dr
+                // + d(PI_zc)/dz plus the geometric terms
+                // -PI_theta_theta / r (r component) and +PI_theta_r / r
+                // (theta component), mirroring the magnetic geometric
+                // sources above. The radial derivative uses the SIGNED
+                // neighbor radii, so the axis cell (i = 0) reads the
+                // parity-mirrored ghost at r = -dr/2 and the difference
+                // is the smooth even/odd extension across the axis.
+                const amrex::Real radius_center =
+                    radial_lower + (i + 0.5_rt) * radial_cell_size;
+                const amrex::Real radius_high =
+                    radial_lower + (i + 1.5_rt) * radial_cell_size;
+                const amrex::Real radius_low =
+                    radial_lower + (i - 0.5_rt) * radial_cell_size;
+                const amrex::Real inverse_radius = 1.0_rt / radius_center;
+                for (int component = 0; component < 3; ++component) {
+                    divergence_momentum_flux[component] +=
+                        0.5_rt * inverse_dr * inverse_radius *
+                            (radius_high *
+                                 pi_dev(i + 1, j, k, 0, component) -
+                             radius_low *
+                                 pi_dev(i - 1, j, k, 0, component)) +
+                        0.5_rt * inverse_dz *
+                            (pi_dev(i, j + 1, k, 2, component) -
+                             pi_dev(i, j - 1, k, 2, component));
+                }
+                divergence_momentum_flux[0] -=
+                    inverse_radius * pi_dev(i, j, k, 1, 1);
+                divergence_momentum_flux[1] +=
+                    inverse_radius * pi_dev(i, j, k, 1, 0);
+#endif
+            }
 
             const amrex::Real plasma_weight =
                 holmstrom_vacuum
@@ -3057,6 +3322,172 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                     (-divergence_ion_energy_flux + lorentz_work +
                      ion_pressure_work);
             }
+
+            if (cgl_closure) {
+                // Neither the lorentz_work nor the ion_pressure_work
+                // machinery of the total-energy closure applies here: the
+                // magnetic force does no work on internal energies (it
+                // acts through the momentum block only) and the electron
+                // pdV pairing is a total-energy bookkeeping device.
+                const amrex::Real safe_density =
+                    std::max(rho(i, j, k), density_floor);
+                // Cell-centered velocity of this cell and its neighbors
+                // (ghosts are filled every residual) for the central-
+                // difference velocity gradients of the CGL work terms.
+                const auto velocity = [=] (const int ic, const int jc,
+                                           const int kc,
+                                           const int component) {
+                    return mom(ic, jc, kc, component) /
+                           std::max(rho(ic, jc, kc), density_floor);
+                };
+                // bhat_a bhat_b with the same C-infinity regularization
+                // as the deviation stress above.
+                amrex::Real b2 = 0.0_rt;
+                for (int component = 0; component < 3; ++component) {
+                    b2 += b_cc(i, j, k, component) *
+                          b_cc(i, j, k, component);
+                }
+                const amrex::Real inverse_b2 =
+                    1.0_rt /
+                    theta_implicit_mhd::smooth_positive_floor(b2, small_b2);
+#if defined(WARPX_DIM_1D_Z)
+                // 1D: nabla has only the z row, so div u = du_z/dz and
+                // bb : grad u = bhat_z sum_j bhat_j du_j/dz.
+                amrex::Real gradient_z[3];
+                for (int component = 0; component < 3; ++component) {
+                    gradient_z[component] =
+                        0.5_rt * inverse_dz *
+                        (velocity(i + 1, j, k, component) -
+                         velocity(i - 1, j, k, component));
+                }
+                const amrex::Real divergence_velocity = gradient_z[2];
+                amrex::Real parallel_gradient = 0.0_rt;
+                for (int component = 0; component < 3; ++component) {
+                    parallel_gradient += b_cc(i, j, k, 2) *
+                                         b_cc(i, j, k, component) *
+                                         gradient_z[component];
+                }
+                parallel_gradient *= inverse_b2;
+#elif defined(WARPX_DIM_RZ)
+                // Axisymmetric cylindrical grad u, with components
+                // A_ij = nabla_i u_j (i = derivative direction) for
+                // u = u_r e_r + u_t e_t + u_z e_z and d/dtheta = 0:
+                //   nabla_r u_j = du_j/dr,  nabla_z u_j = du_j/dz,
+                //   nabla_t u_r = (1/r) du_r/dt - u_t/r = -u_t/r,
+                //   nabla_t u_t = (1/r) du_t/dt + u_r/r = +u_r/r,
+                //   nabla_t u_z = 0,
+                // so div u = A_rr + A_tt + A_zz = du_r/dr + u_r/r
+                // + du_z/dz and bb : grad u = sum_ij bhat_i bhat_j A_ij.
+                // The axis cell (i = 0) sits at r = dr/2 > 0 and its i-1
+                // neighbor is the parity-mirrored radial ghost, so both
+                // 1/r terms and the central r derivative stay smooth.
+                amrex::Real gradient_r[3];
+                amrex::Real gradient_z[3];
+                for (int component = 0; component < 3; ++component) {
+                    gradient_r[component] =
+                        0.5_rt * inverse_dr *
+                        (velocity(i + 1, j, k, component) -
+                         velocity(i - 1, j, k, component));
+                    gradient_z[component] =
+                        0.5_rt * inverse_dz *
+                        (velocity(i, j + 1, k, component) -
+                         velocity(i, j - 1, k, component));
+                }
+                const amrex::Real inverse_radius =
+                    1.0_rt /
+                    (radial_lower + (i + 0.5_rt) * radial_cell_size);
+                const amrex::Real velocity_r =
+                    mom(i, j, k, 0) / safe_density;
+                const amrex::Real velocity_theta =
+                    mom(i, j, k, 1) / safe_density;
+                const amrex::Real divergence_velocity =
+                    gradient_r[0] + velocity_r * inverse_radius +
+                    gradient_z[2];
+                const amrex::Real br = b_cc(i, j, k, 0);
+                const amrex::Real bt = b_cc(i, j, k, 1);
+                const amrex::Real bz = b_cc(i, j, k, 2);
+                const amrex::Real parallel_gradient =
+                    (br * (br * gradient_r[0] + bt * gradient_r[1] +
+                           bz * gradient_r[2]) +
+                     bt * (br * (-velocity_theta * inverse_radius) +
+                           bt * (velocity_r * inverse_radius)) +
+                     bz * (br * gradient_z[0] + bt * gradient_z[1] +
+                           bz * gradient_z[2])) *
+                    inverse_b2;
+#endif
+                // CGL work terms (internal-energy form, no heat flux):
+                //   dU_par/dt  + div(U_par u)  = -p_par (bb : grad u),
+                //   dU_perp/dt + div(U_perp u) =
+                //       -p_perp (div u - bb : grad u),
+                // with p_par = 2 U_par and p_perp = U_perp taken RAW
+                // (linear, hence smooth, in the unknowns).
+                const amrex::Real pressure_parallel =
+                    2.0_rt * upar(i, j, k);
+                const amrex::Real pressure_perp = uperp(i, j, k);
+                amrex::Real parallel_work =
+                    -pressure_parallel * parallel_gradient;
+                amrex::Real perp_work =
+                    -pressure_perp *
+                    (divergence_velocity - parallel_gradient);
+                // Ion-ion isotropization at nu_iso = scale * nu_ii
+                // (Braginskii), with kT_eff = p_eff/n_i smooth-floored at
+                // the strictly positive floor-state anchor:
+                //   R_par = +(nu_iso/3)(p_perp - p_par) = -R_perp,
+                // conserving U_par + U_perp exactly (up to the separate
+                // drain gates below, which only reduce a draining side
+                // near its floor).
+                const amrex::Real number_density =
+                    safe_density * inverse_ion_mass;
+                const amrex::Real pressure_effective =
+                    (pressure_parallel + 2.0_rt * pressure_perp) / 3.0_rt;
+                const amrex::Real temperature =
+                    theta_implicit_mhd::smooth_positive_floor(
+                        pressure_effective / number_density,
+                        cgl_temperature_floor);
+                const amrex::Real nu_iso =
+                    cgl_relaxation_prefactor * number_density /
+                    (temperature * std::sqrt(temperature));
+                amrex::Real parallel_relaxation =
+                    (nu_iso / 3.0_rt) *
+                    (pressure_perp - pressure_parallel);
+                amrex::Real perp_relaxation = -parallel_relaxation;
+                // Smoothed drain gates on the pointwise sources, exactly
+                // like the total-energy ion gates: theta-extrapolated
+                // end-of-step limiter values, widths from the local
+                // flux-divergence scale anchored by the floor rates.
+                const amrex::Real parallel_end =
+                    upar(i, j, k) * (1.0_rt + extrapolation_weight) -
+                    upar_old(i, j, k) * extrapolation_weight;
+                const amrex::Real perp_end =
+                    uperp(i, j, k) * (1.0_rt + extrapolation_weight) -
+                    uperp_old(i, j, k) * extrapolation_weight;
+                const amrex::Real parallel_limiter =
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        parallel_end, 0.5_rt * ion_pressure_floor);
+                const amrex::Real perp_limiter =
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        perp_end, ion_pressure_floor);
+                parallel_work = drain_gate(
+                    parallel_work, divergence_ion_parallel_flux,
+                    ion_parallel_floor_rate, parallel_limiter);
+                parallel_relaxation = drain_gate(
+                    parallel_relaxation, divergence_ion_parallel_flux,
+                    ion_parallel_floor_rate, parallel_limiter);
+                perp_work =
+                    drain_gate(perp_work, divergence_ion_perp_flux,
+                               ion_perp_floor_rate, perp_limiter);
+                perp_relaxation =
+                    drain_gate(perp_relaxation, divergence_ion_perp_flux,
+                               ion_perp_floor_rate, perp_limiter);
+                ion_parallel_increment(i, j, k) =
+                    theta_dt * plasma_weight *
+                    (-divergence_ion_parallel_flux + parallel_work +
+                     parallel_relaxation);
+                ion_perp_increment(i, j, k) =
+                    theta_dt * plasma_weight *
+                    (-divergence_ion_perp_flux + perp_work +
+                     perp_relaxation);
+            }
         });
     }
 #else
@@ -3151,6 +3582,32 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
             });
         }
         ion_energy_block.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
+    } else if (m_ion_closure == "cgl") {
+        // Floor restoration at the accepted step end (round-off
+        // insurance; the Newton admissibility bounds already hold the
+        // extrapolated end state at or above the floors, and the CGL
+        // blocks are pure internal energies so no kinetic-energy sync is
+        // needed): U_par >= p_i_floor/2 and U_perp >= p_i_floor. Outside
+        // the residual, so the hard max() cannot perturb Jacobian probes.
+        const std::array<std::pair<const char*, amrex::Real>, 2> blocks = {
+            {{IonParallelEnergyName, 0.5_rt * m_ion_pressure_floor},
+             {IonPerpEnergyName, m_ion_pressure_floor}}};
+        for (const auto& [block_name, floor] : blocks) {
+            amrex::MultiFab& energy_block =
+                m_state.getMultiFabBlock(block_name, 0);
+            const amrex::Real block_floor = floor;
+            for (amrex::MFIter mfi(energy_block); mfi.isValid(); ++mfi) {
+                const amrex::Box box = mfi.validbox();
+                const auto energy_array = energy_block.array(mfi);
+                amrex::ParallelFor(
+                    box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                        energy_array(i, j, k) =
+                            std::max(energy_array(i, j, k), block_floor);
+                    });
+            }
+            energy_block.FillBoundaryAndSync(
+                m_WarpX->Geom(0).periodicity());
+        }
     }
 
     m_state.CopyMultiFabBlocksToFields();
@@ -3181,6 +3638,20 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
                 m_ion_pressure_floor / (m_gamma_i - 1.0_rt) - energy_tolerance,
             "theta_implicit_mhd produced a final ion total energy below its "
             "internal-energy floor");
+    } else if (m_ion_closure == "cgl") {
+        const amrex::MultiFab& parallel_energy =
+            *m_WarpX->m_fields.get(IonParallelEnergyName, 0);
+        const amrex::MultiFab& perp_energy =
+            *m_WarpX->m_fields.get(IonPerpEnergyName, 0);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            parallel_energy.min(0) >=
+                0.5_rt * m_ion_pressure_floor - energy_tolerance,
+            "theta_implicit_mhd produced a final ion parallel energy below "
+            "its positivity floor");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            perp_energy.min(0) >= m_ion_pressure_floor - energy_tolerance,
+            "theta_implicit_mhd produced a final ion perpendicular energy "
+            "below its positivity floor");
     }
 
     if (m_use_hlld) {
