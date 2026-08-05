@@ -143,21 +143,29 @@ gradient-corrected `DepositScalar`.
    Zeldovich front: qualitatively correct, relL2 0.13 at N=128 with a
    hop-tail precursor; production f=0.1 limiter leaves resolved fronts
    untouched.
-1. **RESOLVED 2026-08-05 — layer (gather) form** (Eric's call; plan doc
-   §C.7b): `qdsmc_conduction_form = layer` +
-   `qdsmc_conduction_interp = monocubic`, straight feet, optional
-   `qdsmc_conduction_conserve_fixup`. Liftoff-point leak 2.56e-4 vs
-   scatter 1.81 (~7000x), dt-growth flat, aligned order 1.97 preserved,
-   Zeldovich 4.2e-2 with conservation 7.8e-7 under the global fixup.
-   Curved feet (midpoint rotation) measured HARMFUL — the div-D drift
-   already carries the mean curvature; default OFF. Scatter remains the
-   input default until Eric flips it. Remaining follow-ups:
-   - local conservation fixup if production decks show structured
-     deficits (global proportional validated at the ZK front);
-   - small open leg: strong-bind limiter demo (front speed ≤ f·v_te needs
-     a q_Sp ≫ f·q_fs parameter point; at ZK-test parameters the limiter
-     only bites ~30% even at f=0.01);
+1. **SUPERSEDED 2026-08-05 — layer form is OFF THE TABLE for production**
+   (Eric): the production path is the **Esirkepov flux-form remap**,
+   `qdsmc_conduction_form = fluxform` — plan doc §C.7d has the full
+   design, traps, and gates GF1–GF4. Layer (§C.7b: liftoff-point leak
+   2.56e-4 vs scatter 1.81, aligned 1.97) stays in-tree as the leak
+   reference arm only; scatter stays as the #6982 control and input
+   default until fluxform passes its gates. Open legs that carry over:
+   - strong-bind limiter demo (front speed ≤ f·v_te needs a q_Sp ≫ f·q_fs
+     parameter point; at ZK-test parameters the limiter only bites ~30%
+     even at f=0.01);
    - annulus/compression regime-survey rows still placeholders.
+1b. **fluxform BUILT + gauntlet MEASURED 2026-08-05** (plan doc C.7d
+   RESULTS block; three design iterations — backward trace and
+   fold-guard variants failed measurably, production form = **forward
+   donor decomposition**). GF1/GF2/GF4 PASS (aligned 1.93–1.97 at
+   scatter's constant; ZK front relL2 1.98e-2 = best of campaign, no
+   undershoot, no fixup; conservation structural at deck floors; CI
+   9/9). **GF3 OPEN**: liftoff-point leak 1.13e-1 (npts=2) / 2.32e-2
+   (npts=3) vs layer 2.56e-4 — residual splitting error. NEXT rungs:
+   (i) limiter-off diagnostic to split limiter-clipping from splitting,
+   (ii) unsplit 2D donor images (corner transport) = expected real fix,
+   (iii) donor-window cost pass (walltime 3.5x scatter, goal 2x).
+   Driver: `run_fluxform.py` (all sections; caches fluxform_out/).
 2. **Thrust D — boundary conditions** (domain + EB): daughter/marker
    specular reflection (adiabatic, default), isothermal T_wall re-emission
    with wall-flux tally, prescribed-flux injection; replace the E7 clamp;

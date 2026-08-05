@@ -616,6 +616,187 @@ finding: FCT-compensated hat beats hat+B1 on straight fields (1.6x,
 monotone, no slope storage) — a candidate default for the scatter form
 regardless.
 
+### C.7d Esirkepov flux-form remap — the production path (decided 2026-08-05)
+
+**Decision (Eric, 2026-08-05): layer is OFF the table as the production
+method.** The production conduction transfer is the flux-form
+conservative semi-Lagrangian remap ("Esirkepov form"):
+`qdsmc_conduction_form = fluxform`. Layer and scatter remain in the tree
+as measurement controls (layer = the leak reference arm, scatter = the
+#6982-compatible control); neither is a production candidate.
+
+**Why this form satisfies every standing constraint at once**
+- *Strict conservation, structurally*: the update is
+  u_i^{new} = u_i − (F_{i+1/2} − F_{i−1/2}) per axis; Σu telescopes to
+  machine regardless of what F is. Limiting, wall handling, and tallies
+  modify F and can never break conservation.
+- *Never-add monotonicity*: each face flux is the integral of a
+  MC-limited PLM reconstruction of u^n over the swept interval, so every
+  branch remap is a mean of reconstruction values — bounded by the local
+  data. Convex GH-weighted combination of branches preserves the bound.
+  (The Godunov box of C.7c does not apply: limiting lives in the
+  reconstruction, not in an antidiffusive correction.)
+- *Kills the pushforward term*: the swept-interval integral is the exact
+  pushforward of the reconstructed density under a displacement field
+  interpolated CONTINUOUSLY between nodes — the source-evaluated,
+  per-cloud displacement error that no fixed deposit kernel could remove
+  (C.7c, Keys) is absent by construction.
+- *Thrust D substrate*: face fluxes exist as first-class objects. Wall
+  faces default to F = 0 = exact adiabatic (replaces the E7 clamp with
+  the correct default BC, no marker reflection needed); isothermal and
+  prescribed-flux BCs and the wall heat-flux tally become face-local
+  bookkeeping on F.
+
+**Operator layout** (per conduction substep, inside QdsmcConductionOnce,
+after the existing Pass-1 cond build; scatter/layer paths untouched):
+
+1. *kin field* (scratch MF, 8 comps, ghosts ceil(max_hop)+3): per node,
+   the Ito drift a·dt (same clamped central differences and the same
+   node-evaluated pairing as scatter/layer — trap 13 applies: the drift
+   already carries the mean curvature, do NOT re-rotate), unit b, and
+   sigma_par/perp = sqrt(2 chi dt). Computed on valid nodes, then
+   FillBoundary (seam/periodic ghosts). Frame vectors e1, e2 are
+   recomputed from b on the fly (deterministic), so the branch
+   displacement field disp_q(x) = a dt + xq_par sig_par b
+   + xq_perp sig_perp e1 + xq_perp sig_perp e2 is defined at every node
+   and interpolates linearly along sweep lines.
+2. *Branch loop* over the FULL GH lattice (nq_par x nq_perp x nq_perp;
+   no per-node collapse logic — offsets with no grid projection drop out
+   automatically because sweeps only read grid components of disp, and
+   the collapsed-direction weights sum to 1).
+3. *Per branch: dimensionally split 1D conservative remaps* (x-sweep
+   then z-sweep in 2D, order alternating per substep call). Per face
+   f = (n, n+1): departure point by two Picard iterations of
+   s_dep + disp(s_dep) = s_f on the linearly-interpolated disp;
+   F = integral of the PLM-MC reconstruction over [s_dep, s_f] (walks at
+   most ceil(max_hop)+1 dual cells). Each node's update recomputes both
+   of its face fluxes locally (deterministic recomputation = exact
+   telescoping, no face scratch, no atomics, race-free => OMP-threaded,
+   unlike the scatter deposit). Sequential oblique sweeps retain the
+   D_xz cross term exactly at the hop level (mass from p lands at
+   p + (dx,dz) after both sweeps).
+4. *Accumulate* u_acc += w_branch * u_branch; recovery
+   Te = u_acc/(3/2 kB ne) with the same rho pairing and floored-node
+   skip as scatter Pass 3.
+
+**Splitting-error ladder** (escalate only if gates demand): alternate
+sweep order per substep (default, free) -> average both orderings (2x)
+-> Lin-Rood inner-advection cross terms -> unsplit swept-parallelogram
+(CSLAM-lite). The wiggle matrix and tilted-30deg tensor legs are the
+adjudicators.
+
+**Known traps recorded up front**
+- *Map folding*: the remap assumes the per-branch map is monotone along
+  the sweep line (d disp/ds > −1). Chi cliffs (vacuum_fast_front) can
+  fold it — the hop cap and p=4 soft-min keep smooth decks safe, but a
+  fold guard (departure-interval positivity check) must abort/donor-cell
+  rather than silently produce negative u. Deferred to the first
+  vacuum-facing run; gauntlet decks are smooth.
+- *Frame-flip lines* (e1 fallback near b ~ yhat) make disp_q
+  discontinuous per branch. In 2D with in-plane b, e1 = yhat exactly and
+  projects out — no flip exists, all gauntlet decks unaffected. In 3D,
+  fix by sign-continuity along each sweep line before trusting 3D runs.
+- *Vacuum semantics match scatter for now*: u flowing into floored nodes
+  is dropped by the recovery skip (the known Thrust-D deletion class).
+  Flux form makes the eventual fix trivial (zero/reflect the face), but
+  v1 reproduces scatter behavior away from walls.
+- *Point-value vs dual-cell-average identification* of nodal u is
+  O(dx^2) and uniform — does not cap the order-2 target.
+
+**Gates (run with the existing drivers, `--form fluxform`)**
+- GF1 *correctness/identity*: uniform-Te preservation to machine;
+  eps=0 wiggle floor at the layer level (~4e-6); Sigma(rho Te) drift
+  <= 1e-12 (structural — any violation is a bug, not a tolerance);
+  Zeldovich undershoot at machine (never-add).
+- GF2 *accuracy*: aligned parabolic order >= 1.9 with constant within
+  ~2x of layer-monocubic; tilted-30deg order ~2 with chi_perp_num at the
+  estimator floor.
+- GF3 *the leak* (the reason this form exists): wiggle eps=0.2 and the
+  liftoff point (sigma/dx=0.84, dx/R_c=0.045, npts=2) at layer level
+  (2.6e-4-class, >= 100x below scatter); dt-growth FLAT.
+- GF4 *integration*: Zeldovich relL2 <= layer+fixup (4.2e-2) with Sigma
+  at machine and no ringing; CI matrix 9/9 with joule budgets at the pc
+  baseline; walltime within ~2x of scatter at npts=2 (expected faster:
+  no atomics, threaded sweeps).
+
+Follow-ups staged behind the gates: PPM reconstruction knob if the PLM
+constant disappoints vs layer-monocubic; face-level free-streaming
+limiting and wall tallies (Thrust D); the advection remap on the same
+flux substrate (single branch, disp = V_e dt) as a later unification.
+
+**RESULTS (2026-08-05, three design iterations measured — run_fluxform.py,
+fluxform_out/, logs fluxform_gauntlet*.log):**
+
+*Iteration log (each fix was forced by a gauntlet failure):*
+1. *Backward face-trace* (departure = face − Picard-traced displacement):
+   aligned/floors clean, but (a) wiggle leak 5.7e-2, dt-FLAT, with a
+   systematic adrift ~1e-2 — the second sweep evaluated its displacement
+   at the destination grid point, re-introducing the source-vs-destination
+   cross term through the dimensional splitting; and (b) the ZK front
+   fired the map-fold trap exactly as recorded above (chi ~ Te^2.5 cliff
+   gives d(disp)/ds < -1): departure intervals crossed, cells overdrawn to
+   Te = -4.9e6 K, and the negativity poisoned the advection markers
+   (Sigma drift -1.8e-3).
+2. *Fold guard (trailing-window max monotonization) + Lin-Rood-style
+   pull-back* (later sweeps evaluate their displacement at the
+   backward-traced source point of the earlier sweeps): positivity
+   restored (min Te +132 K) but the ZK front STARVED (front_exp -0.50,
+   relL2 1.73) — a backward Picard trace converges to the NEAREST root of
+   a folded map and never finds fast donors whose hop crosses the face,
+   and the max-window then discards exactly the crossing mass. Backward
+   tracing is the wrong member of the flux-form family at chi cliffs.
+3. *Forward donor decomposition (the true Esirkepov construction,
+   production form)*: donor dual cells map affinely by the
+   face-interpolated (and pulled-back) displacement; face flux = sum over
+   the donor window of (mass of image beyond face − pre-move mass beyond
+   face). No Picard at faces, no fold guard needed — a folded donor's
+   image degenerates to a point and the mass lands where the map says;
+   positivity unconditional; zero displacement returns F = 0 exactly.
+   Sweeps stay race-free (both neighbors sum the same donor window
+   deterministically) and OMP-threaded, no atomics.
+
+*Gate scorecard (v3 = forward donor form):*
+- **GF1 PASS**: eps=0 wiggle floor 3.6e-6 (= layer); at-rest/zero-disp
+  identity exact by construction; Sigma(rho Te) at the harness floor in
+  every run — aligned 3e-8 (identical digits to scatter), wiggle 4e-9,
+  liftoff 6e-9, ZK -7.3e-6 vs scatter's own -2e-5..-6e-5 on the same
+  deck (the deck's advection front floor, i.e. fluxform is cleaner than
+  the exactly-conservative scatter arm there). No fixup knob exists.
+- **GF2 PASS**: aligned parabolic orders 1.93/1.96/1.97/1.96 (N=32..128)
+  at SCATTER's error constant (7.16e-4 at N=32; 1.6x below layer);
+  tilted-30deg orders 1.85/1.94 with raw chi_perp_num/chi0 1.7-2.0e-3 =
+  the moment-estimator floor — the split remap carries the full tensor.
+- **GF3 OPEN — the one red gate**: wiggle eps=0.2 point 1.69e-2
+  (12x below scatter's 0.207, but 36x above layer's 4.7e-4); dt-growth
+  mild (1.69e-2 -> 2.65e-2 for 4x steps: sub-linear, mixed
+  per-remap/operator character); liftoff point npts=2 1.13e-1 / npts=3
+  2.32e-2 (scatter 1.81/0.56, layer 2.56e-4). The pull-back cut the v1
+  leak 3.4x and collapsed adrift 9.7e-3 -> -1.7e-4; the residual is the
+  remaining splitting error of per-branch oblique hops swept
+  axis-by-axis (plus a possible limiter-clipping component at the
+  filament crest). Escalation rungs left: limiter-off diagnostic to
+  split those two, ordering-average (cheap, likely small), UNSPLIT 2D
+  donor images (corner transport — the expected real fix).
+- **GF4 PASS**: ZK front relL2 **1.98e-2** — best of the whole campaign
+  (layer+fixup 4.2e-2, scatter plateau 1.32e-1) — with front exponent
+  0.204 vs reference 0.206, min(Te) pinned at ambient (no undershoot,
+  -3e-3 relative), no fixup. CI matrix 9/9 PASS with joule budgets at
+  the pc baselines to the decimal; scatter and layer control arms
+  reproduce their recorded numbers exactly. Walltime ~3.5x scatter on
+  the aligned deck at npts=3 (branch-lattice collapse included; the
+  donor window is the next optimization target — GF4's 2x cost goal
+  needs one more pass).
+
+*Implementation notes (knobs and internals):* form value `fluxform` in
+`qdsmc_conduction_form`; branch kinematics staged per node in a `kin` MF
+(drift, b, sigmas), per-branch displacement staged in a `dsp` MF
+(grid-dim components, index units, clamped at min(max_hop, 6) cells —
+the internal `ff_rmax` bound keeps stencils fixed when decks set
+max_hop large to park the chi soft-min cap); global branch-lattice
+collapse (zero sigma, or 2D in-plane b => e1 = yhat exactly) replaces
+the scatter form's per-node loop collapse; sweep order alternates by
+(istep + Strang-half) parity.
+
 ### C.8 Gate G3
 
 - 1D Gaussian spread along B parallel to z: sigma^2(t) = sigma_0^2 + 2 chi t to
@@ -998,6 +1179,14 @@ conversation happens.
   emits Pe from the current T_e instead of the algebraic closure, so
   segmented PICMI sim.step() no longer wipes the evolved state. CI matrix
   9/9 after the fix.
+- **2026-08-05** — **Production conduction form: Esirkepov flux-form
+  remap** (`qdsmc_conduction_form = fluxform`, design C.7d). **Layer is
+  off the table as a production method** (Eric); it stays in-tree only as
+  the leak reference arm. Rationale: the flux form is the only scheme
+  that gives strict conservation, never-add monotonicity, and the
+  pushforward fix structurally at once, and its face fluxes are the
+  Thrust-D substrate (adiabatic walls = F=0 by construction, wall-flux
+  tallies for free). (Eric)
 
 ## Design questions — resolutions (2026-08-04 review)
 

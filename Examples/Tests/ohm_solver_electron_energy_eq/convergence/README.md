@@ -63,10 +63,14 @@ cd ~/src/WarpX-qdsmc && PATH=/usr/local/openmpi5/bin:$PATH \
 - `run_layer.py` — layer-(gather)-form gauntlet (plan doc §C.7b): aligned
   order, eps=0 floors, the curvature-leak discrimination matrix +
   dt-growth + liftoff point, Zeldovich with/without the conservation
-  fixup. All decks take `--form scatter|layer`,
+  fixup. All decks take `--form scatter|layer|fluxform`,
   `--interp linear|monocubic|keys`, `--curved-feet` (default 0: measured
   harmful) and (wiggle/zeldovich) `--conserve-fixup`.
+- `run_fluxform.py` — flux-form (Esirkepov) remap gauntlet (plan doc
+  §C.7d, gates GF1–GF4): the same measurement points as `run_layer.py`
+  with `--form fluxform`, so rows are directly comparable to the recorded
+  layer/scatter references; per-case walltime printed for the cost gate.
 
 Output dirs (`baseline_out/`, `cond_out/`, `ci_matrix*/`, `wiggle_out/`,
-`hopcap_out/`, `layer_out/`, `zeld_out*.npz`, `*.log`) are regenerable and
-stay untracked.
+`hopcap_out/`, `layer_out/`, `fluxform_out/`, `zeld_out*.npz`, `*.log`)
+are regenerable and stay untracked.
