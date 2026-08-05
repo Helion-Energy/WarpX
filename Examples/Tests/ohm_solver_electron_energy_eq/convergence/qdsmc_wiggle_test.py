@@ -104,6 +104,21 @@ parser.add_argument(
     default=0,
     help="layer form: global proportional Sigma(rho T) restore per gather",
 )
+parser.add_argument(
+    "--deposit-kernel",
+    choices=["hat", "keys"],
+    default="hat",
+    help="scatter-form deposit kernel (keys = conservative cubic, "
+    "no B1 correction, not monotone)",
+)
+parser.add_argument(
+    "--compensate",
+    type=int,
+    choices=[0, 1],
+    default=0,
+    help="scatter hat + bookkept Boris-Book FCT antidiffusion pass "
+    "(requires --grad-deposit 0)",
+)
 parser.add_argument("--out", type=str, required=True)
 parser.add_argument("--verbose", type=int, default=0)
 args = parser.parse_args()
@@ -215,6 +230,8 @@ pywarpx.hybridpicmodel.qdsmc_conduction_max_hop = args.max_hop
 pywarpx.hybridpicmodel.qdsmc_conduction_form = args.form
 pywarpx.hybridpicmodel.qdsmc_conduction_interp = args.interp
 pywarpx.hybridpicmodel.qdsmc_conduction_curved_feet = args.curved_feet
+pywarpx.hybridpicmodel.qdsmc_conduction_deposit_kernel = args.deposit_kernel
+pywarpx.hybridpicmodel.qdsmc_conduction_compensate = args.compensate
 pywarpx.hybridpicmodel.qdsmc_conduction_conserve_fixup = args.conserve_fixup
 
 sim.initialize_warpx()
@@ -328,6 +345,7 @@ np.savez_compressed(
     form=args.form,
     interp=args.interp,
     curved_feet=args.curved_feet,
+    deposit_kernel=args.deposit_kernel,
     te_initial=state["initial"],
     te_final=te_final,
     avar0=avar0,

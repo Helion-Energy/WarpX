@@ -81,6 +81,21 @@ parser.add_argument(
     default=0,
     help="layer form: global proportional Sigma(rho T) restore per gather",
 )
+parser.add_argument(
+    "--deposit-kernel",
+    choices=["hat", "keys"],
+    default="hat",
+    help="scatter-form deposit kernel (keys = conservative cubic, "
+    "no B1 correction, not monotone)",
+)
+parser.add_argument(
+    "--compensate",
+    type=int,
+    choices=[0, 1],
+    default=0,
+    help="scatter hat + bookkept Boris-Book FCT antidiffusion pass "
+    "(requires --grad-deposit 0)",
+)
 parser.add_argument("--out", type=str, required=True)
 parser.add_argument("--verbose", type=int, default=0)
 args = parser.parse_args()
@@ -183,6 +198,8 @@ pywarpx.hybridpicmodel.qdsmc_conduction_max_hop = args.max_hop
 pywarpx.hybridpicmodel.qdsmc_conduction_form = args.form
 pywarpx.hybridpicmodel.qdsmc_conduction_interp = args.interp
 pywarpx.hybridpicmodel.qdsmc_conduction_curved_feet = args.curved_feet
+pywarpx.hybridpicmodel.qdsmc_conduction_deposit_kernel = args.deposit_kernel
+pywarpx.hybridpicmodel.qdsmc_conduction_compensate = args.compensate
 pywarpx.hybridpicmodel.qdsmc_conduction_conserve_fixup = args.conserve_fixup
 
 sim.initialize_warpx()
@@ -302,6 +319,10 @@ vfront_max = np.nanmax(vfront) if len(vfront) else np.nan
 v_te_front = np.sqrt(constants.kb * FRONT_LEVEL * Te0_K / constants.m_e)
 
 te_final = Te_wrap[:, :]
+# ringing metric: most negative Te deviation below the T0 background
+# (monotone kernels keep this at ~0; negative-lobe kernels ring at the
+# front foot)
+undershoot = float((te_final[:-1, :-1] - Te0_K).min() / Te0_K)
 sum1 = te_final[:-1, :-1].sum()
 np.savez_compressed(
     args.out,
@@ -321,6 +342,7 @@ np.savez_compressed(
     form=args.form,
     interp=args.interp,
     curved_feet=args.curved_feet,
+    deposit_kernel=args.deposit_kernel,
     blob_sigma=s0,
     front_level=FRONT_LEVEL,
     te_initial=state["initial"],
@@ -331,6 +353,7 @@ np.savez_compressed(
     front_z=fz,
     front_exp=front_exp,
     vfront_max=vfront_max,
+    undershoot=undershoot,
     v_te_front=v_te_front,
     rel_l2=rel_l2,
     te_sum0=state["sum0"],
@@ -340,6 +363,7 @@ print(
     f"[harness] zeldovich done: N={N} steps={args.nsteps} npts={npts} "
     f"chi0={chi0} amp={amp} flim={args.flux_limit} "
     f"relL2(prof)={rel_l2:.4e} front_exp={front_exp:.3f} "
+    f"undershoot={undershoot:.3e} "
     f"vfront_max={vfront_max:.3e} m/s (f*v_te(front)="
     f"{args.flux_limit * v_te_front if args.flux_limit > 0 else 0:.3e}) "
     f"sum drift={(sum1 - state['sum0']) / state['sum0']:.3e}"

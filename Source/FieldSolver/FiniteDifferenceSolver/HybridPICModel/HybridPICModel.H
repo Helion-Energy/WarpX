@@ -627,6 +627,35 @@ public:
      *  diffuse). Input: qdsmc_conduction_conserve_fixup. */
     bool m_cond_conserve_fixup = false;
 
+    /** Scatter-form compensated deposit (Boris--Book FCT architecture,
+     *  JCP 11, 38 (1973)): after the hat deposit, run one limited
+     *  antidiffusive flux sweep per axis whose coefficient is the
+     *  EXACTLY BOOKKEPT deposit covariance (a second tally accumulates
+     *  u-weighted fr(1-fr)dx^2 per axis during the deposit), evaluated
+     *  with destination-local gradients. In the unlimited smooth limit
+     *  the composition hat (x) filter cancels the kernel's second moment
+     *  -- equivalent to the Keys deposit through quadratics -- while the
+     *  Boris--Book limiter clips the antidiffusive fluxes at extrema:
+     *  keys-class interior accuracy with hat positivity/monotonicity and
+     *  exact (flux-form) conservation. Requires the hat kernel and
+     *  qdsmc_gradient_deposit = 0 (B1 would partially cancel the variance
+     *  the tally then over-compensates). Input:
+     *  qdsmc_conduction_compensate. */
+    bool m_cond_compensate = false;
+
+    /** Scatter-form deposit kernel. 0 = hat (2^d CIC + the B1
+     *  half-gradient correction). 1 = Keys cubic convolution (a = -1/2,
+     *  4^d): partition of unity is exact (conservation stays exact) and
+     *  the kernel reproduces quadratics, so its first AND second deposit
+     *  moments vanish -- the remap diffusion the B1 correction fights,
+     *  including the curvature-rotated cross part the per-axis B1 cannot
+     *  cancel, is absent by construction (no correction applied). The
+     *  price is Godunov's: negative lobes, NOT monotone -- sharp fronts
+     *  can ring/undershoot. Interpolating at zero displacement, so the
+     *  at-rest identity stays machine-exact. Input:
+     *  qdsmc_conduction_deposit_kernel = hat | keys. */
+    int m_cond_deposit_kernel = 0;
+
     /** Density floor used when dividing by the deposited QDSMC weight to
      * recover K_e^{n+1} from (K*N) / N. Avoids divide-by-zero in cells
      * that no QDSMC particle reached during the push. Defaults to the
