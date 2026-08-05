@@ -4218,6 +4218,21 @@ Jacobian probes.
     steady ion-energy drain along strong-:math:`B_n` field lines in
     near-static equilibria).
 
+.. pp:param:: implicit_mhd.hlld_all_speed
+    :type: ``bool``
+    :default: ``true``
+
+    LHLLD all-speed pressure correction (Minoshima & Miyoshi, JCP 446
+    (2021) 110639): the velocity-difference term of the fan's star
+    total pressure — a normal-momentum diffusion that scales with the
+    fast-magnetosonic speed — is scaled by :math:`\phi = \chi(2-\chi)`,
+    :math:`\chi = \min(1, \max(c_{u,L}, c_{u,R})/c_{f,\max})`, with
+    :math:`c_u` the fast-speed formula evaluated with :math:`|u|` in
+    place of the sound speed. :math:`\phi \to 1` for super-magnetosonic
+    flow (original HLLD) and :math:`\to 0` at stagnation, removing the
+    spurious fast-scale response to low-Mach velocity noise. Assembled
+    :math:`C^\infty`; exactly inert where :math:`u_L = u_R`.
+
 .. pp:param:: implicit_mhd.hlld_kappa_signal
     :type: ``float``
     :default: ``0.05``

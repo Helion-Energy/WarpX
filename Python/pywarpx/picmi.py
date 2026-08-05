@@ -2233,6 +2233,12 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         magnetically balanced gradients) or the fast-speed LLF enthalpy
         fallback.
 
+    hlld_all_speed: bool, default=True
+        LHLLD all-speed correction (Minoshima--Miyoshi 2021): scale the
+        fast-speed velocity-difference term of the star total pressure
+        by a Mach-aware factor, removing the spurious low-Mach
+        normal-momentum diffusion.
+
     hlld_kappa_signal, hlld_kappa_contact, hlld_kappa_bn, hlld_kappa_denominator: float, optional
         C-infinity smoothing widths of the HLLD wave fan (defaults 0.05):
         Davis signal bounds, region blend, B_n -> 0 rotational-layer
@@ -2285,6 +2291,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         hllc_contact_blend=None,
         hlld_fan_closure=None,
         hlld_ion_energy_flux=None,
+        hlld_all_speed=None,
         hlld_kappa_signal=None,
         hlld_kappa_contact=None,
         hlld_kappa_bn=None,
@@ -2321,6 +2328,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.hllc_contact_blend = hllc_contact_blend
         self.hlld_fan_closure = hlld_fan_closure
         self.hlld_ion_energy_flux = hlld_ion_energy_flux
+        self.hlld_all_speed = hlld_all_speed
         self.hlld_kappa_signal = hlld_kappa_signal
         self.hlld_kappa_contact = hlld_kappa_contact
         self.hlld_kappa_bn = hlld_kappa_bn
@@ -2363,6 +2371,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.hllc_contact_blend = self.hllc_contact_blend
         implicit_mhd.hlld_fan_closure = self.hlld_fan_closure
         implicit_mhd.hlld_ion_energy_flux = self.hlld_ion_energy_flux
+        implicit_mhd.hlld_all_speed = self.hlld_all_speed
         implicit_mhd.hlld_kappa_signal = self.hlld_kappa_signal
         implicit_mhd.hlld_kappa_contact = self.hlld_kappa_contact
         implicit_mhd.hlld_kappa_bn = self.hlld_kappa_bn

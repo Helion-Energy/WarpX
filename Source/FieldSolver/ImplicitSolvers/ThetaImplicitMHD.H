@@ -255,6 +255,9 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // contact-scale dissipation) or "llf" (the fast-alpha enthalpy
     // fallback, which diffuses every E_i gradient at the fast speed).
     std::string m_hlld_ion_energy_flux = "star";
+    // LHLLD all-speed scaling of the star-pressure velocity-difference
+    // term (Minoshima & Miyoshi, JCP 446 (2021) 110639).
+    bool m_hlld_all_speed = true;
     // HLLC signal-speed closure: "consistent" (default; wave-speed
     // estimates from the same p_i as the physical flux) or "barotropic"
     // (wave-speed estimates from the polytropic p_i(rho), decoupling the

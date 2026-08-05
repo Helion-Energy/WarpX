@@ -209,6 +209,7 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_hlld_ion_energy_flux == "star" || m_hlld_ion_energy_flux == "llf",
         "implicit_mhd.hlld_ion_energy_flux must be star or llf");
+    pp.query("hlld_all_speed", m_hlld_all_speed);
     if (m_hlld_fan_closure == "barotropic") {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_use_hlld && m_ion_closure == "total_energy",
@@ -684,6 +685,7 @@ void ThetaImplicitMHD::PrintParameters () const
     if (m_use_hlld) {
         amrex::Print() << "HLLD fan closure:              " << m_hlld_fan_closure << "\n"
                        << "HLLD ion-energy flux:          " << m_hlld_ion_energy_flux << "\n"
+                       << "HLLD all-speed correction:     " << (m_hlld_all_speed ? "true" : "false") << "\n"
                        << "HLLD kappa signal/contact:     " << m_hlld_kappa_signal
                        << " " << m_hlld_kappa_contact << "\n"
                        << "HLLD kappa bn/denominator:     " << m_hlld_kappa_bn
@@ -1509,6 +1511,7 @@ theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
         (m_hlld_fan_closure == "barotropic");
     flux_parameters.hlld_ion_energy_star =
         (m_hlld_ion_energy_flux == "star");
+    flux_parameters.hlld_all_speed = m_hlld_all_speed;
     return flux_parameters;
 }
 

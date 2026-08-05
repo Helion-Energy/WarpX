@@ -83,6 +83,10 @@ struct FluxParameters {
     // Fan-consistent star construction for the ion-energy channel
     // (default); false selects the LLF enthalpy fallback.
     bool hlld_ion_energy_star = true;
+    // LHLLD all-speed scaling of the star-pressure velocity-difference
+    // term (Minoshima & Miyoshi 2021); false keeps the original HLLD
+    // fast-speed scaling.
+    bool hlld_all_speed = true;
 };
 
 struct CellState {
@@ -653,6 +657,55 @@ hlld_flux (const CellState& left, const CellState& right,
          m_right * u_right) /
         (m_left - m_right);
 
+    // LHLLD all-speed pressure correction (Minoshima & Miyoshi, JCP 446
+    // (2021) 110639, eqs. 14-16): the velocity-difference term inside
+    // the fan's star total pressure scales with the fast speed and acts
+    // as a normal-momentum diffusion ~ rho c_f (u_R - u_L); at low Mach
+    // a velocity difference is not necessarily compression (rotational
+    // flow), and the term degrades the solution and pumps noise-driven
+    // pressure work into near-stagnant regions. Scale it by
+    // phi = chi (2 - chi), chi = min(1, max(c_u,L, c_u,R)/c_f,max),
+    // where c_u is the fast-speed formula with |u| in place of the
+    // sound speed -- phi -> 1 for super-magnetosonic flow (original
+    // HLLD) and -> 0 at stagnation -- assembled C-infinity with the
+    // usual signal widths.
+    amrex::Real phi_all_speed = 1.0;
+    if (parameters.hlld_all_speed) {
+        const auto modified_fast = [&] (const CellState& state,
+                                        const amrex::Real bt1,
+                                        const amrex::Real bt2) noexcept {
+            const amrex::Real alfven2 =
+                (bn2 + bt1 * bt1 + bt2 * bt2) / state.safe_density;
+            const amrex::Real alfven_normal2 = bn2 / state.safe_density;
+            amrex::Real speed2 = 0.0;
+            for (int component = 0; component < 3; ++component) {
+                speed2 += state.ion_velocity[component] *
+                          state.ion_velocity[component];
+            }
+            const amrex::Real total = alfven2 + speed2;
+            const amrex::Real radicand =
+                total * total - 4.0 * speed2 * alfven_normal2;
+            return std::sqrt(
+                0.5 * (total + std::sqrt(std::max(radicand, 0.0))));
+        };
+        const amrex::Real signal_width_u =
+            parameters.hlld_kappa_signal *
+            (left.fast_speed + right.fast_speed);
+        const amrex::Real c_u = smooth_max(
+            modified_fast(left, bt1_left, bt2_left),
+            modified_fast(right, bt1_right, bt2_right), signal_width_u);
+        const amrex::Real c_f_max = smooth_max(
+            left.fast_speed, right.fast_speed, signal_width_u);
+        const amrex::Real chi_all_speed = smooth_min(
+            1.0, c_u / c_f_max, parameters.hlld_kappa_signal);
+        phi_all_speed = chi_all_speed * (2.0 - chi_all_speed);
+    }
+    // The (u_R - u_L) content of the star total pressure (the third term
+    // of MK05 eq. 41 / Minoshima-Miyoshi eq. 7): m_L m_R < 0 and
+    // m_R - m_L > 0 strictly, so no denominator guard is needed.
+    const amrex::Real pressure_velocity_term =
+        m_left * m_right * (u_right - u_left) / (m_right - m_left);
+
     // B_n -> 0 degeneracy scales; eps_b^2 = kappa_bn^2 mean(p_T) in
     // b-units (= kappa_bn^2 mu0 mean(p_T) in field units).
     const amrex::Real eps_b2 = parameters.hlld_kappa_bn *
@@ -893,7 +946,8 @@ hlld_flux (const CellState& left, const CellState& right,
     if (parameters.hlld_ion_energy_star) {
         const amrex::Real p_t_star =
             0.5 * ((p_fan_left + m_left * slip_left) +
-                   (p_fan_right + m_right * slip_right));
+                   (p_fan_right + m_right * slip_right)) +
+            (phi_all_speed - 1.0) * pressure_velocity_term;
         const amrex::Real p_gas_left =
             left.ion_pressure + left.electron_pressure;
         const amrex::Real p_gas_right =
@@ -955,6 +1009,14 @@ hlld_flux (const CellState& left, const CellState& right,
         smooth_sign(s_alfven_left, contact_width);
     const amrex::Real r_alfven_right =
         smooth_sign(s_alfven_right, contact_width);
+    // Apply the all-speed correction to the star total pressure implied
+    // by the telescoped normal-momentum flux, weighted by the (smoothed)
+    // star-region indicator: for S_L < 0 < S_R the interface sits in the
+    // fan and the weight is ~1; it vanishes when the whole fan is swept
+    // to one side.
+    flux.momentum[normal_direction] +=
+        0.5 * (r_right - r_left) * (phi_all_speed - 1.0) *
+        pressure_velocity_term;
     const auto stress_blend = [&] (const amrex::Real x_left_state,
                                    const amrex::Real x_star_left,
                                    const amrex::Real x_dstar,
