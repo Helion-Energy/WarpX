@@ -196,6 +196,15 @@ void HybridPICModel::ReadParameters ()
             "hybrid_pic_model.qdsmc_conduction_compensate is a scatter-form "
             "option; the fluxform remap is conservative and monotone by "
             "construction");
+        std::string slim = "mc";
+        pp_hybrid.query("qdsmc_conduction_slope_limiter", slim);
+        if (slim == "mc") { m_cond_slope_limiter = 0; }
+        else if (slim == "none") { m_cond_slope_limiter = 1; }
+        else {
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.qdsmc_conduction_slope_limiter must be "
+                "'mc' or 'none'");
+        }
         std::string fctl = "bb";
         pp_hybrid.query("qdsmc_conduction_fct_limiter", fctl);
         if (fctl == "bb") { m_cond_fct_limiter = 0; }
@@ -2476,6 +2485,7 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
         // 3*ff_rmax+4 covers every read below.
         int constexpr ff_rmax = 6;
         int const ng_f = 3*ff_rmax + 4;
+        bool const slim_off = (m_cond_slope_limiter == 1);
 
         // Per-node branch kinematics: hop-clamped Ito drift (physical
         // axes), unit b, and the two quadrature sigmas. e1/e2 are rebuilt
@@ -2800,11 +2810,16 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                         };
                         // MC-limited PLM slope of u along the sweep axis
                         // (per index unit); one-sided wall stencils
-                        // degenerate to zero slope via the index clamp
+                        // degenerate to zero slope via the index clamp.
+                        // slim_off = unlimited central slopes (diagnostic
+                        // control arm, see the knob doc).
                         auto slope_at = [&] (int const c) {
                             amrex::Real const uc  = u_at(c);
                             amrex::Real const dfp = u_at(c + 1) - uc;
                             amrex::Real const dfm = uc - u_at(c - 1);
+                            if (slim_off) {
+                                return 0.5_rt*(dfp + dfm);
+                            }
                             amrex::Real g = 0.0_rt;
                             if (dfp*dfm > 0.0_rt) {
                                 amrex::Real const sgn =

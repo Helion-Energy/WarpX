@@ -665,6 +665,14 @@ public:
      *  Input: qdsmc_conduction_fct_limiter = bb | zalesak | none. */
     int m_cond_fct_limiter = 0;
 
+    /** Fluxform reconstruction slope limiter. 0 = mc (MC-limited PLM:
+     *  never-add monotone, production). 1 = none (unlimited central
+     *  slopes -- DIAGNOSTIC control arm: separates limiter-clipping at
+     *  filament crests from splitting error in the curvature-leak
+     *  metric; can ring at fronts). Input:
+     *  qdsmc_conduction_slope_limiter = mc | none. */
+    int m_cond_slope_limiter = 0;
+
     /** Scatter-form deposit kernel. 0 = hat (2^d CIC + the B1
      *  half-gradient correction). 1 = Keys cubic convolution (a = -1/2,
      *  4^d): partition of unity is exact (conservation stays exact) and
