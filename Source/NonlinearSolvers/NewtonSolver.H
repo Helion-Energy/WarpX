@@ -507,10 +507,24 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                 }
                 step_length *= reduction;
             }
-            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                accepted,
-                "Newton line search failed to find a residual-decreasing "
-                "admissible step");
+            if (!accepted) {
+                // No admissible step decreased the residual. With
+                // require_convergence the solve aborts; otherwise this is
+                // treated like the max-iteration exit (the same policy
+                // that already tolerates a non-converged step): keep the
+                // current iterate -- which typically carries most of the
+                // step's residual reduction -- warn, and hand the state
+                // back to the time loop.
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    !m_require_convergence,
+                    "Newton line search failed to find a residual-decreasing "
+                    "admissible step (newton.require_convergence = true)");
+                amrex::Print()
+                    << "WARNING: Newton line search stagnated at iter = "
+                    << iter << " (rel. norm " << norm_rel
+                    << "); accepting the current iterate and continuing\n";
+                break;
+            }
         } else {
             a_U.increment(m_dU, solver_step);
             if (this->m_verbose && solver_step != -1.0_rt) {

@@ -267,7 +267,11 @@ Overall simulation parameters
 
           - ``newton.verbose`` (``bool``, default: true)
           - ``newton.linear_solver`` (``string``, default: "gmres") Other excepted value, "petsc_ksp".
-          - ``newton.require_convergence`` (``bool``, default: true)
+          - ``newton.require_convergence`` (``bool``, default: true).
+            When ``false``, a Newton step that reaches ``max_iterations``
+            without converging — or whose residual-decreasing line search
+            stagnates (for operators that request one) — is accepted with
+            a warning instead of aborting the run.
           - ``newton.max_iterations`` (``int``, default: 100)
           - ``newton.relative_tolerance`` (``float``, default: 1.0e-6)
           - ``newton.absolute_tolerance`` (``float``, default: 0.0)
