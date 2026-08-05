@@ -176,6 +176,18 @@ private:
      *  subtracted, refreshed at the new scales, then restored). */
     bool m_external_field_iteration = false;
 
+    /** Apply the particle boundary conditions and re-bin (Redistribute)
+     *  BEFORE the end-of-step deposits
+     *  (implicit_evolve.redistribute_before_end_deposits, default false).
+     *  The full-dt extrapolated positions can exceed the deposit guard
+     *  range (v dt > range * dx) -- a documented hazard of the
+     *  deposit-then-redistribute posture that CI decks dodge with inert
+     *  ions but driven production decks with warm boundary populations
+     *  cannot (the crosser rate scales with particle count). Opt-in: the
+     *  redistribution reorders particles ahead of the next step's
+     *  deposits, so enabling it changes bit-pinned CI trajectories. */
+    bool m_redistribute_before_end_deposits = false;
+
     /** Cached in Define: subtract the resistive Ohm-field part from the
      *  particle push field (hybrid_pic_model.implicit_push_excludes_resistive_field
      *  and a resistive term configured). */

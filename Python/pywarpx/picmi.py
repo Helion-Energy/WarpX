@@ -2123,6 +2123,14 @@ class ThetaImplicitHybridEvolveScheme(picmistandard.base._ClassWithInit):
         Requires external fields; works on both the Darwin unified drive
         (scales re-enter through the boundary pin) and the split-field
         path (the callback runs in the plasma-response frame).
+
+    redistribute_before_end_deposits: bool, optional
+        Apply the particle boundary conditions and re-bin (Redistribute)
+        before the end-of-step closure deposits. The full-dt extrapolated
+        positions can exceed the deposit guard range for warm boundary
+        populations (an abort, not an error estimate); enabling this
+        removes the hazard at the cost of reordering particles ahead of
+        the next step's deposits (changes bit-pinned trajectories).
     """
 
     def __init__(
@@ -2135,6 +2143,7 @@ class ThetaImplicitHybridEvolveScheme(picmistandard.base._ClassWithInit):
         qdsmc_outer_require_convergence=None,
         qdsmc_outer_verbose=None,
         external_field_iteration=None,
+        redistribute_before_end_deposits=None,
     ):
         self.nonlinear_solver = nonlinear_solver
         self.theta = theta
@@ -2144,6 +2153,7 @@ class ThetaImplicitHybridEvolveScheme(picmistandard.base._ClassWithInit):
         self.qdsmc_outer_require_convergence = qdsmc_outer_require_convergence
         self.qdsmc_outer_verbose = qdsmc_outer_verbose
         self.external_field_iteration = external_field_iteration
+        self.redistribute_before_end_deposits = redistribute_before_end_deposits
 
         assert isinstance(nonlinear_solver, NonlinearSolverBase)
 
@@ -2160,6 +2170,7 @@ class ThetaImplicitHybridEvolveScheme(picmistandard.base._ClassWithInit):
             "qdsmc_outer_require_convergence",
             "qdsmc_outer_verbose",
             "external_field_iteration",
+            "redistribute_before_end_deposits",
         ]:
             value = getattr(self, knob)
             if value is not None:

@@ -172,6 +172,22 @@ void WarpX::ApplyEfieldBoundary(const int lev, PatchType patch_type, amrex::Real
                                  m_fields.get(FieldType::Efield_cp, Direction{2}, lev), lev);
     }
 #endif
+
+#if defined(WARPX_DIM_RZ)
+    // Green's-function open boundary (hybrid solver, r_hi): the open face
+    // imposes no wall condition on E, but the physical r_hi ghosts feed the
+    // particle gather, the E-filter, and near-boundary stencils, and no
+    // other handler ever writes them -- they would otherwise carry values
+    // left by previous evaluations (hidden state that breaks the implicit
+    // residual's determinism). Continue the outermost valid ring outward
+    // (zero-gradient, the free-space consistent choice).
+    if (GreensFunctionOpenBC::IsActive() && patch_type == PatchType::fine) {
+        for (int dir = 0; dir < 3; ++dir) {
+            GreensFunctionOpenBC::FillGhostsZeroGradientRhi(
+                *m_fields.get(FieldType::Efield_fp, Direction{dir}, lev), Geom(lev));
+        }
+    }
+#endif
 }
 
 void WarpX::ApplyBfieldBoundary (const int lev, PatchType patch_type, SubcyclingHalf subcycling_half, amrex::Real time)

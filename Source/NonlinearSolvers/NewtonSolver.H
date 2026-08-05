@@ -201,6 +201,15 @@ private:
      *  resistivity ramps, flux limiters) and noisy residual landscapes. */
     bool m_use_line_search = false;
     int m_line_search_max_halvings = 6;
+    /** Cap on the first line-search trial's update max-norm
+     *  (newton.line_search_trial_max_norm, same units as the solver
+     *  state; 0 = off). The trial state U - alpha*dU is evaluated through
+     *  the full residual, and on kinetic solvers an unmoderated trial can
+     *  hard-abort the run (particle displacements past the deposit guard
+     *  range) before the line search gets a chance to reject it. When
+     *  |dU|inf * alpha exceeds the cap, the search starts at
+     *  alpha = cap/|dU|inf instead of 1. */
+    amrex::Real m_line_search_trial_max_norm = 0.0;
     mutable Vec m_U_ls;
 
     void EvalResidual ( Vec&         a_F,
@@ -299,6 +308,7 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
     pp_newton.query("require_convergence", m_require_convergence);
     pp_newton.query("line_search",          m_use_line_search);
     pp_newton.query("line_search_max_halvings", m_line_search_max_halvings);
+    pp_newton.query("line_search_trial_max_norm", m_line_search_trial_max_norm);
     pp_newton.query("diagnostic_file",     this->m_diagnostic_file);
     pp_newton.query("diagnostic_interval", this->m_diagnostic_interval);
 
@@ -408,6 +418,59 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
         m_linear_solver->solve( m_dU, m_F, m_linsol_rtol, m_linsol_atol );
         linear_solver_iters += m_linear_solver->getNumIters();
 
+        // Jacobian consistency instrument (WARPX_JAC_CHECK=1): along the
+        // solved Newton direction, compare the linear operator GMRES used
+        // (probe/linear-stage semantics) against true-residual secants over
+        // an epsilon ladder (nonlinear-evaluation semantics). A converged
+        // linear solve that yields a non-descent direction implies these
+        // disagree; the epsilon dependence separates non-smoothness of the
+        // map from a frozen/approximate operator model. Diagnostic only --
+        // it mutates grid state like any residual evaluation, and the line
+        // search / next iteration re-evaluate from the solver state anyway.
+        if (std::getenv("WARPX_JAC_CHECK") != nullptr) {
+            {
+                const auto& dU_mfs = m_dU.getArrayVec();
+                for (int dir = 0; dir < 3; ++dir) {
+                    amrex::Print() << "JAC_CHECK: iter = " << iter
+                        << ", dir " << dir << " |dU|inf = "
+                        << std::scientific
+                        << dU_mfs[0][dir]->norminf(0) << "\n";
+                }
+            }
+            Vec v, Jv, Up, Fp, F0;
+            v.Define(a_U); Jv.Define(a_U); Up.Define(a_U);
+            Fp.Define(a_U); F0.Define(a_U);
+            v.Copy(m_dU);
+            const amrex::Real vnorm = v.norm2();
+            if (vnorm > 0._rt) {
+                v.scale(1._rt/vnorm);
+                // Operator as the Krylov solve saw it (baseline vectors were
+                // set before the solve and are unmodified).
+                m_linear_function->apply(Jv, v);
+                const amrex::Real Jvnorm = Jv.norm2();
+                // Fresh nonlinear-semantics base for the secants.
+                EvalResidual(F0, a_U, a_b, a_time, iter);
+                const amrex::Real unorm = a_U.norm2();
+                // Ladder tops out at the JFNK scale: larger rungs create
+                // perturbed states wild enough to push particles past the
+                // deposit guard range and abort the run.
+                for (int p = -2; p <= 0; ++p) {
+                    const amrex::Real eps = std::pow(10._rt, 2*p) * 1.0e-6_rt
+                        * (unorm > 0._rt ? unorm : 1._rt);
+                    Up.linComb(1._rt, a_U, eps, v);
+                    EvalResidual(Fp, Up, a_b, a_time, iter);
+                    Fp.linComb(1._rt/eps, Fp, -1._rt/eps, F0);
+                    Fp.linComb(1._rt, Fp, -1._rt, Jv);
+                    amrex::Print() << "JAC_CHECK: iter = " << iter
+                        << ", eps = " << std::scientific << eps
+                        << ", ||secant - Jv||/||Jv|| = "
+                        << Fp.norm2()/Jvnorm << "\n";
+                }
+                // Restore the base-state evaluation for the update below.
+                EvalResidual(m_F, a_U, a_b, a_time, iter);
+            }
+        }
+
         // Update solution
         if (m_use_line_search) {
             // Backtracking: try alpha = 1, 1/2, ... and accept the first
@@ -417,7 +480,23 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
             // Newton iteration as usual.
             m_U_ls.Copy(a_U);
             amrex::Real alpha = 1._rt;
-            amrex::Real best_alpha = 1._rt;
+            if (m_line_search_trial_max_norm > 0._rt) {
+                const auto& dU_mfs = m_dU.getArrayVec();
+                amrex::Real dU_inf = 0._rt;
+                for (int dir = 0; dir < 3; ++dir) {
+                    dU_inf = std::max(dU_inf, dU_mfs[0][dir]->norminf(0));
+                }
+                if (dU_inf * alpha > m_line_search_trial_max_norm) {
+                    alpha = m_line_search_trial_max_norm / dU_inf;
+                    if (this->m_verbose) {
+                        amrex::Print() << "Newton: line search first trial "
+                            "capped at alpha = " << alpha
+                            << " (|dU|inf = " << std::scientific << dU_inf
+                            << ")\n";
+                    }
+                }
+            }
+            amrex::Real best_alpha = alpha;
             amrex::Real best_norm = -1._rt;
             for (int ls = 0; ls <= m_line_search_max_halvings; ++ls) {
                 a_U.linComb(1._rt, m_U_ls, -alpha, m_dU);

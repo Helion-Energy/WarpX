@@ -101,6 +101,21 @@ public:
     void ApplyToBfield (ablastr::fields::VectorField const& Bfield,
                         amrex::Geometry const& geom, int lev);
 
+    /** \brief Zero-gradient fill of the r_hi physical ghost values (copy
+     * the outermost valid ring outward). The open face has no wall
+     * condition to impose on E: the ghosts only feed the particle gather,
+     * the E-filter, and near-boundary interpolation stencils, and without
+     * an explicit fill they retain values from previous evaluations --
+     * hidden state that makes the implicit residual non-deterministic in
+     * the state (diagnosed as an epsilon-independent noise floor in
+     * Jacobian secants). Local (no communication).
+     *
+     * \param[in,out] a_mf   field MultiFab at level 0
+     * \param[in] a_geom     geometry at level 0
+     */
+    static void FillGhostsZeroGradientRhi (amrex::MultiFab& a_mf,
+                                           amrex::Geometry const& a_geom);
+
 private:
     /** Read input parameters, validate the configuration and assemble the
      * coarse-grained Green's-function kernel. Called once, lazily, on the

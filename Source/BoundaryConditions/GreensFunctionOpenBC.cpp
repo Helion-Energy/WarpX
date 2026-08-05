@@ -89,6 +89,29 @@ bool GreensFunctionOpenBC::IsActive ()
         && (WarpX::field_boundary_hi[0] == FieldBoundaryType::Open);
 }
 
+void GreensFunctionOpenBC::FillGhostsZeroGradientRhi (amrex::MultiFab& a_mf,
+                                                      amrex::Geometry const& a_geom)
+{
+    const amrex::Box domain = amrex::convert(a_geom.Domain(),
+                                             a_mf.ixType().toIntVect());
+    const int ihi = domain.bigEnd(0);
+    const int ncomp = a_mf.nComp();
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (amrex::MFIter mfi(a_mf, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        amrex::Box gbx = mfi.growntilebox();
+        if (gbx.bigEnd(0) <= ihi) { continue; }
+        gbx.setSmall(0, ihi + 1);
+        auto const& arr = a_mf.array(mfi);
+        amrex::ParallelFor(gbx, ncomp,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) {
+                arr(i, j, k, n) = arr(ihi, j, k, n);
+            });
+    }
+}
+
 void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
                                    amrex::Geometry const& geom)
 {
@@ -548,6 +571,13 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& /*Bfield*
 
 void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& /*Bfield*/,
                                           amrex::Geometry const& /*geom*/, int /*lev*/)
+{
+    WARPX_ABORT_WITH_MESSAGE(
+        "The Green's-function open field boundary is only available in RZ geometry.");
+}
+
+void GreensFunctionOpenBC::FillGhostsZeroGradientRhi (amrex::MultiFab& /*a_mf*/,
+                                                      amrex::Geometry const& /*a_geom*/)
 {
     WARPX_ABORT_WITH_MESSAGE(
         "The Green's-function open field boundary is only available in RZ geometry.");
