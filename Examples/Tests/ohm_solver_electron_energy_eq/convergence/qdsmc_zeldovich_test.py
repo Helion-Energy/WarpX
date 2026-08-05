@@ -56,7 +56,7 @@ parser.add_argument("--advance", choices=["euler", "leapfrog", "pc"], default="p
 parser.add_argument("--grad-deposit", type=int, choices=[0, 1], default=1)
 parser.add_argument(
     "--form",
-    choices=["scatter", "layer"],
+    choices=["scatter", "layer", "fluxform"],
     default="scatter",
     help="conduction grid-transfer form (layer = Milstein gather)",
 )

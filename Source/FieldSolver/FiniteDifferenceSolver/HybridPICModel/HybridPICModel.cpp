@@ -156,10 +156,11 @@ void HybridPICModel::ReadParameters ()
         pp_hybrid.query("qdsmc_conduction_form", form);
         if (form == "scatter") { m_cond_form = 0; }
         else if (form == "layer") { m_cond_form = 1; }
+        else if (form == "fluxform") { m_cond_form = 2; }
         else {
             WARPX_ABORT_WITH_MESSAGE(
-                "hybrid_pic_model.qdsmc_conduction_form must be 'scatter' "
-                "or 'layer'");
+                "hybrid_pic_model.qdsmc_conduction_form must be 'scatter', "
+                "'layer' or 'fluxform'");
         }
         std::string interp = "monocubic";
         pp_hybrid.query("qdsmc_conduction_interp", interp);
@@ -190,6 +191,11 @@ void HybridPICModel::ReadParameters ()
             "hybrid_pic_model.qdsmc_conduction_compensate requires the hat "
             "deposit kernel and qdsmc_gradient_deposit = 0 (the FCT pass "
             "replaces the B1 correction)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !(m_cond_form == 2 && m_cond_compensate),
+            "hybrid_pic_model.qdsmc_conduction_compensate is a scatter-form "
+            "option; the fluxform remap is conservative and monotone by "
+            "construction");
         std::string fctl = "bb";
         pp_hybrid.query("qdsmc_conduction_fct_limiter", fctl);
         if (fctl == "bb") { m_cond_fct_limiter = 0; }
@@ -1858,6 +1864,32 @@ namespace
                 "qdsmc_gh_table: quadrature point count must be in [2, 7]");
         }
     }
+
+    /** Field-aligned perpendicular frame (e1, e2) for a unit b, matching
+     *  the scatter/layer construction: e1 is the perpendicular direction
+     *  nearest yhat (falls back to xhat when b ~ yhat), e2 = b x e1. The
+     *  same deterministic formula everywhere keeps the per-branch
+     *  quadrature displacement field single-valued across kernels. */
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    void qdsmc_perp_frame (amrex::Real const bx, amrex::Real const by,
+                           amrex::Real const bz,
+                           amrex::Real & e1x, amrex::Real & e1y,
+                           amrex::Real & e1z,
+                           amrex::Real & e2x, amrex::Real & e2y,
+                           amrex::Real & e2z)
+    {
+        e1x = -by*bx; e1y = 1.0_rt - by*by; e1z = -by*bz;
+        amrex::Real e1n = e1x*e1x + e1y*e1y + e1z*e1z;
+        if (e1n < 1.0e-12_rt) {   // b ~ yhat: build from xhat instead
+            e1x = 1.0_rt - bx*bx; e1y = -bx*by; e1z = -bx*bz;
+            e1n = e1x*e1x + e1y*e1y + e1z*e1z;
+        }
+        amrex::Real const e1i = 1.0_rt/std::sqrt(e1n);
+        e1x *= e1i; e1y *= e1i; e1z *= e1i;
+        e2x = by*e1z - bz*e1y;
+        e2y = bz*e1x - bx*e1z;
+        e2z = bx*e1y - by*e1x;
+    }
 }
 
 
@@ -2409,6 +2441,495 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
         }
 
         amrex::MultiFab::Copy(Te, T_new, 0, 0, 1, 0);
+        ablastr::utils::communication::FillBoundary(
+            Te, WarpX::do_single_precision_comms, period, true);
+        return;
+    }
+
+    // --- Flux-form (Esirkepov) conservative semi-Lagrangian remap --------
+    // Production path (plan doc C.7d). Per GH branch the update is a
+    // dimensionally split sequence of 1D conservative remaps on the node
+    // dual cells: each face flux integrates the MC-limited PLM
+    // reconstruction of u^n over the interval swept through the face by
+    // the backward-traced branch displacement (two Picard iterations on
+    // the linearly-interpolated node displacement field). The update
+    // u_i -= (F_hi - F_lo) telescopes, so conservation is exact by
+    // construction no matter what F is; the limited reconstruction makes
+    // every branch remap never-add monotone, and the convex GH
+    // combination of branches preserves the bound. The displacement field
+    // interpolates continuously between nodes, so the source-evaluated
+    // pushforward error of the deposit kernels (C.7c) is absent. Both
+    // face fluxes of a node are recomputed locally from the same data
+    // (deterministic, so the neighbor gets bit-identical values): no face
+    // scratch, no atomics, race-free -> OMP-threaded. Wall faces carry
+    // zero flux = exact adiabatic default (replaces the E7 clamp;
+    // Thrust D adds tallies/isothermal variants on the same faces).
+    if (m_cond_form == 2)
+    {
+        // The sweeps clamp the per-axis displacement at
+        // min(max_hop, ff_rmax) cells -- a fixed safety independent of the
+        // qdsmc_conduction_max_hop knob, so decks that set max_hop large to
+        // keep the soft-min chi cap out of the physics (e.g. the wiggle
+        // instrument) still get bounded stencils. Ghost reach: the
+        // fold-guard window looks back 2*ceil(rhop) faces, each with a
+        // backward trace of up to rhop cells plus the interp stencil --
+        // 3*ff_rmax+4 covers every read below.
+        int constexpr ff_rmax = 6;
+        int const ng_f = 3*ff_rmax + 4;
+
+        // Per-node branch kinematics: hop-clamped Ito drift (physical
+        // axes), unit b, and the two quadrature sigmas. e1/e2 are rebuilt
+        // from b wherever needed (deterministic), keeping the branch
+        // displacement field single-valued across kernels.
+        enum Kin : int { k_ax = 0, k_ay, k_az, k_bx, k_by, k_bz,
+                         k_sp, k_sq, k_ncomp };
+        amrex::MultiFab kin(Te.boxArray(), Te.DistributionMap(),
+                            Kin::k_ncomp, ng_f);
+        kin.setVal(0.0_rt);
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(kin, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            amrex::Box const box = mfi.tilebox();
+            amrex::Array4<amrex::Real>       const & kn      = kin.array(mfi);
+            amrex::Array4<amrex::Real const> const & c_arr   = cond.const_array(mfi);
+            amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                int const node[3] = {i, j, k};
+                // Ito drift a = div D + D . grad ln n_e -- the same
+                // clamped central differences and node-evaluated pairing
+                // as the scatter/layer forms (the drift already carries
+                // the mean curvature; do not re-rotate, trap 13).
+                amrex::Real dD[3][3];
+                amrex::Real gln[3];
+                {
+                    int const drow[3][3] = {
+                        {Cond::c_dxx, Cond::c_dxy, Cond::c_dxz},
+                        {Cond::c_dxy, Cond::c_dyy, Cond::c_dyz},
+                        {Cond::c_dxz, Cond::c_dyz, Cond::c_dzz}};
+                    amrex::Real const rho_fl =
+                        amrex::max(rho_arr(i,j,k), n_floor*qe);
+                    for (int ax = 0; ax < 3; ++ax) {
+                        int const g = ax2gd[ax];
+                        if (g < 0) {
+                            for (int r = 0; r < 3; ++r) { dD[r][ax] = 0.0_rt; }
+                            gln[ax] = 0.0_rt;
+                            continue;
+                        }
+                        int cp = node[g] + 1, cm = node[g] - 1;
+                        if (!is_per[g]) {
+                            cp = amrex::min(cp, dom_hi[g]);
+                            cm = amrex::max(cm, dom_lo[g]);
+                        }
+                        if (cp == cm) {
+                            for (int r = 0; r < 3; ++r) { dD[r][ax] = 0.0_rt; }
+                            gln[ax] = 0.0_rt;
+                            continue;
+                        }
+                        int p[3] = {i, j, k}, m[3] = {i, j, k};
+                        p[g] = cp; m[g] = cm;
+                        amrex::Real const fac = dxi3[ax] / amrex::Real(cp - cm);
+                        for (int r = 0; r < 3; ++r) {
+                            dD[r][ax] = (c_arr(p[0],p[1],p[2],drow[r][ax])
+                                       - c_arr(m[0],m[1],m[2],drow[r][ax])) * fac;
+                        }
+                        gln[ax] = (rho_arr(p[0],p[1],p[2])
+                                 - rho_arr(m[0],m[1],m[2])) * fac / rho_fl;
+                    }
+                }
+                amrex::Real const Dxx = c_arr(i,j,k,Cond::c_dxx);
+                amrex::Real const Dxy = c_arr(i,j,k,Cond::c_dxy);
+                amrex::Real const Dxz = c_arr(i,j,k,Cond::c_dxz);
+                amrex::Real const Dyy = c_arr(i,j,k,Cond::c_dyy);
+                amrex::Real const Dyz = c_arr(i,j,k,Cond::c_dyz);
+                amrex::Real const Dzz = c_arr(i,j,k,Cond::c_dzz);
+                amrex::Real drift[3];
+                drift[0] = (dD[0][0] + dD[0][1] + dD[0][2]
+                            + Dxx*gln[0] + Dxy*gln[1] + Dxz*gln[2]) * dt_c;
+                drift[1] = (dD[1][0] + dD[1][1] + dD[1][2]
+                            + Dxy*gln[0] + Dyy*gln[1] + Dyz*gln[2]) * dt_c;
+                drift[2] = (dD[2][0] + dD[2][1] + dD[2][2]
+                            + Dxz*gln[0] + Dyz*gln[1] + Dzz*gln[2]) * dt_c;
+                for (int ax = 0; ax < 3; ++ax) {
+                    drift[ax] = amrex::min(amrex::max(drift[ax], -hop), hop);
+                }
+                kn(i,j,k,Kin::k_ax) = drift[0];
+                kn(i,j,k,Kin::k_ay) = drift[1];
+                kn(i,j,k,Kin::k_az) = drift[2];
+                kn(i,j,k,Kin::k_bx) = c_arr(i,j,k,Cond::c_bx);
+                kn(i,j,k,Kin::k_by) = c_arr(i,j,k,Cond::c_by);
+                kn(i,j,k,Kin::k_bz) = c_arr(i,j,k,Cond::c_bz);
+                kn(i,j,k,Kin::k_sp) =
+                    std::sqrt(2.0_rt*c_arr(i,j,k,Cond::c_chip)*dt_c);
+                kn(i,j,k,Kin::k_sq) =
+                    std::sqrt(2.0_rt*c_arr(i,j,k,Cond::c_chiq)*dt_c);
+            });
+        }
+        ablastr::utils::communication::FillBoundary(
+            kin, WarpX::do_single_precision_comms, period, true);
+
+        // u^n = 3/2 n_e k_B T_e (zero where n_e <= 0, as in the scatter
+        // spawn skip); every branch remap restarts from this frozen copy.
+        amrex::MultiFab u0(Te.boxArray(), Te.DistributionMap(), 1, ng_f);
+        u0.setVal(0.0_rt);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(u0, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            amrex::Box const box = mfi.tilebox();
+            amrex::Array4<amrex::Real>       const & ua      = u0.array(mfi);
+            amrex::Array4<amrex::Real const> const & Te_arr  = Te.const_array(mfi);
+            amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                amrex::Real const ne = amrex::max(rho_arr(i,j,k)/qe, 0.0_rt);
+                ua(i,j,k) = 1.5_rt * kb * ne * Te_arr(i,j,k);
+            });
+        }
+        ablastr::utils::communication::FillBoundary(
+            u0, WarpX::do_single_precision_comms, period, true);
+
+        amrex::MultiFab u_a(Te.boxArray(), Te.DistributionMap(), 1, ng_f);
+        amrex::MultiFab u_b(Te.boxArray(), Te.DistributionMap(), 1, ng_f);
+        u_b.setVal(0.0_rt);
+        amrex::MultiFab u_acc(Te.boxArray(), Te.DistributionMap(), 1, 0);
+        u_acc.setVal(0.0_rt);
+
+        // Alternate the split order per substep call (the two Strang
+        // halves get opposite orders; euler's single Lie call alternates
+        // by step) so the O(dt) splitting cross term does not bias one
+        // diagonal.
+        int const parity = (warpx.getistep(lev) + (use_rho_new ? 1 : 0)) % 2;
+        amrex::GpuArray<int, 3> order_arr = {0, 0, 0};
+        for (int pass = 0; pass < AMREX_SPACEDIM; ++pass) {
+            order_arr[pass] = (parity == 0)
+                ? pass : (AMREX_SPACEDIM - 1 - pass);
+        }
+        // per-grid-dim hop clamp in index units, bounded by ff_rmax
+        amrex::GpuArray<amrex::Real, 3> rhop3 = {0.0_rt, 0.0_rt, 0.0_rt};
+        for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+            rhop3[dd] = amrex::min(hop * dxi_arr[dd],
+                                   amrex::Real(ff_rmax));
+        }
+
+        // Per-branch displacement field (grid-dim components, index
+        // units, hop-clamped per axis) -- rebuilt per branch below.
+        amrex::MultiFab dsp(Te.boxArray(), Te.DistributionMap(),
+                            AMREX_SPACEDIM, ng_f);
+
+        // Branch-lattice collapse: a quadrature direction whose offsets
+        // cannot move any sweep -- zero sigma everywhere, or (2D XZ with
+        // b in-plane everywhere, so e1 = yhat exactly) no grid projection
+        // -- produces the same remap at every abscissa; run it once at
+        // weight 1 instead (the GH weights sum to 1). This is the global
+        // analogue of the scatter form's per-node loop collapse and is
+        // what keeps the aligned/in-plane production decks at a few
+        // branches instead of npts^3.
+        amrex::Real const spmax = kin.max(Kin::k_sp, 0);
+        amrex::Real const sqmax = kin.max(Kin::k_sq, 0);
+        int const n0_eff = (spmax > 0.0_rt) ? nq_par : 1;
+        int n1_eff = (sqmax > 0.0_rt) ? nq_perp : 1;
+        int const n2_eff = (sqmax > 0.0_rt) ? nq_perp : 1;
+#if !defined(WARPX_DIM_3D) && (AMREX_SPACEDIM == 2)
+        if (kin.norm0(Kin::k_by, 0, 0) == 0.0_rt) { n1_eff = 1; }
+#endif
+
+        for (int q0 = 0; q0 < n0_eff; ++q0) {
+        for (int q1 = 0; q1 < n1_eff; ++q1) {
+        for (int q2 = 0; q2 < n2_eff; ++q2) {
+            // Offsets of non-collapsed directions with no grid projection
+            // at some node drop out of the sweeps there automatically.
+            amrex::Real const xq0 = (n0_eff > 1) ? xq_par[q0]  : 0.0_rt;
+            amrex::Real const xq1 = (n1_eff > 1) ? xq_perp[q1] : 0.0_rt;
+            amrex::Real const xq2 = (n2_eff > 1) ? xq_perp[q2] : 0.0_rt;
+            amrex::Real const w_branch =
+                  ((n0_eff > 1) ? wq_par[q0]  : 1.0_rt)
+                * ((n1_eff > 1) ? wq_perp[q1] : 1.0_rt)
+                * ((n2_eff > 1) ? wq_perp[q2] : 1.0_rt);
+
+            // Build the branch displacement field at every node including
+            // ghosts, straight from kin's filled ghosts (deterministic per
+            // node, so no communication is needed; ghost values at
+            // physical boundaries reduce to zero displacement and are
+            // never read thanks to the wall clamps below).
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(dsp, false); mfi.isValid(); ++mfi)
+            {
+                amrex::Box const gbox = amrex::grow(mfi.validbox(), ng_f);
+                amrex::Array4<amrex::Real>       const & dv = dsp.array(mfi);
+                amrex::Array4<amrex::Real const> const & kn = kin.const_array(mfi);
+                amrex::ParallelFor(gbox, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    amrex::Real const bxv = kn(i,j,k,Kin::k_bx);
+                    amrex::Real const byv = kn(i,j,k,Kin::k_by);
+                    amrex::Real const bzv = kn(i,j,k,Kin::k_bz);
+                    amrex::Real e1x, e1y, e1z, e2x, e2y, e2z;
+                    qdsmc_perp_frame(bxv, byv, bzv,
+                                     e1x, e1y, e1z, e2x, e2y, e2z);
+                    amrex::Real const sp = kn(i,j,k,Kin::k_sp);
+                    amrex::Real const sq = kn(i,j,k,Kin::k_sq);
+                    amrex::Real const dphys[3] = {
+                        kn(i,j,k,Kin::k_ax) + xq0*sp*bxv + xq1*sq*e1x + xq2*sq*e2x,
+                        kn(i,j,k,Kin::k_ay) + xq0*sp*byv + xq1*sq*e1y + xq2*sq*e2y,
+                        kn(i,j,k,Kin::k_az) + xq0*sp*bzv + xq1*sq*e1z + xq2*sq*e2z};
+                    for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                        int ax = 2;
+#if defined(WARPX_DIM_3D)
+                        ax = dd;
+#elif (AMREX_SPACEDIM == 2)
+                        ax = (dd == 0) ? 0 : 2;
+#endif
+                        amrex::Real const del = dphys[ax] * dxi3[ax];
+                        dv(i,j,k,dd) = amrex::min(
+                            amrex::max(del, -rhop3[dd]), rhop3[dd]);
+                    }
+                });
+            }
+
+            amrex::MultiFab::Copy(u_a, u0, 0, 0, 1, ng_f);
+            amrex::MultiFab * src = &u_a;
+            amrex::MultiFab * dst = &u_b;
+
+            for (int pass = 0; pass < AMREX_SPACEDIM; ++pass)
+            {
+                int const d = order_arr[pass];
+                amrex::Real const rhop = rhop3[d];
+
+                if (pass > 0) {
+                    // the previous sweep wrote valid nodes only
+                    ablastr::utils::communication::FillBoundary(
+                        *src, WarpX::do_single_precision_comms, period, true);
+                }
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+                for (MFIter mfi(*dst, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+                {
+                    amrex::Box const box = mfi.tilebox();
+                    amrex::Array4<amrex::Real>       const & ud = dst->array(mfi);
+                    amrex::Array4<amrex::Real const> const & us = src->const_array(mfi);
+                    amrex::Array4<amrex::Real const> const & dv = dsp.const_array(mfi);
+
+                    amrex::ParallelFor(box,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    {
+                        int const node[3] = {i, j, k};
+
+                        auto clampd = [&] (int idx) {
+                            if (!is_per[d]) {
+                                idx = amrex::min(
+                                    amrex::max(idx, dom_lo[d]), dom_hi[d]);
+                            }
+                            return idx;
+                        };
+
+                        // multilinear read of a dsp component at the
+                        // fractional index position q (grid dims)
+                        auto dinterp = [&] (amrex::Real const * q, int const dc)
+                        {
+                            int ib[3] = {i, j, k};
+                            amrex::Real fb[3] = {0.0_rt, 0.0_rt, 0.0_rt};
+                            for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                                amrex::Real s = q[dd];
+                                if (!is_per[dd]) {
+                                    s = amrex::min(amrex::max(s,
+                                        amrex::Real(dom_lo[dd])),
+                                        amrex::Real(dom_hi[dd]));
+                                }
+                                auto const fl = std::floor(s);
+                                ib[dd] = static_cast<int>(fl);
+                                fb[dd] = s - fl;
+                            }
+                            amrex::Real acc = 0.0_rt;
+                            for (int cn = 0; cn < (1 << AMREX_SPACEDIM); ++cn) {
+                                int idx[3] = {ib[0], ib[1], ib[2]};
+                                amrex::Real w = 1.0_rt;
+                                for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                                    if (cn & (1 << dd)) { idx[dd] += 1; w *= fb[dd]; }
+                                    else                { w *= 1.0_rt - fb[dd]; }
+                                    if (!is_per[dd]) {
+                                        idx[dd] = amrex::min(
+                                            amrex::max(idx[dd], dom_lo[dd]),
+                                            dom_hi[dd]);
+                                    }
+                                }
+                                acc += w * dv(idx[0], idx[1], idx[2], dc);
+                            }
+                            return acc;
+                        };
+
+                        // Pulled-back sweep-axis displacement at line
+                        // coordinate s: sweeps after the first evaluate
+                        // their component at the SOURCE point of the
+                        // earlier sweeps (Picard backward trace per prior
+                        // axis, most recent first), which restores the
+                        // exact composed branch map through second order.
+                        // Without the pull-back the second sweep
+                        // re-introduces the source-vs-destination cross
+                        // term -- measured as a dt-flat eps=0.2 wiggle
+                        // leak of 5.7e-2 with a systematic 1e-2 adrift.
+                        auto dsp_line = [&] (amrex::Real const s)
+                        {
+                            amrex::Real q[3] = {amrex::Real(node[0]),
+                                                amrex::Real(node[1]),
+                                                amrex::Real(node[2])};
+                            q[d] = s;
+                            for (int pp = pass - 1; pp >= 0; --pp) {
+                                int const e = order_arr[pp];
+                                amrex::Real xi = dinterp(q, e);
+                                amrex::Real qp[3] = {q[0], q[1], q[2]};
+                                qp[e] -= xi;
+                                xi = dinterp(qp, e);
+                                q[e] -= xi;
+                            }
+                            return dinterp(q, d);
+                        };
+
+                        auto u_at = [&] (int const c) {
+                            int p[3] = {i, j, k};
+                            p[d] = clampd(c);
+                            return us(p[0], p[1], p[2]);
+                        };
+                        // MC-limited PLM slope of u along the sweep axis
+                        // (per index unit); one-sided wall stencils
+                        // degenerate to zero slope via the index clamp
+                        auto slope_at = [&] (int const c) {
+                            amrex::Real const uc  = u_at(c);
+                            amrex::Real const dfp = u_at(c + 1) - uc;
+                            amrex::Real const dfm = uc - u_at(c - 1);
+                            amrex::Real g = 0.0_rt;
+                            if (dfp*dfm > 0.0_rt) {
+                                amrex::Real const sgn =
+                                    (dfp > 0.0_rt) ? 1.0_rt : -1.0_rt;
+                                g = sgn*amrex::min(2.0_rt*std::abs(dfp),
+                                                   2.0_rt*std::abs(dfm),
+                                                   0.5_rt*std::abs(dfp + dfm));
+                            }
+                            return g;
+                        };
+
+                        // Flux through the face between nodes fn and fn+1
+                        // (positive = mass toward +d), by FORWARD donor
+                        // decomposition (the Esirkepov construction): each
+                        // dual cell maps affinely by the face-interpolated
+                        // displacement; its contribution is the mass of
+                        // its image beyond the face minus its pre-move
+                        // mass beyond the face. Both neighbors of a face
+                        // sum the same donor window (deterministic), so
+                        // fluxes are consistent and conservation
+                        // telescopes exactly. A fold (map compression at
+                        // a chi cliff, e.g. a kappa ~ Te^2.5 front) just
+                        // degenerates a donor's image to a point: the
+                        // mass lands where the map says and positivity is
+                        // unconditional. A backward face trace fails
+                        // exactly there -- its Picard iteration converges
+                        // to the nearest root of the folded map and
+                        // misses fast donors hopping past the face, which
+                        // starves the front (measured: ZK front_exp -0.5
+                        // and a hole dug below ambient at the front foot).
+                        auto face_flux = [&] (int const fn) {
+                            if (!is_per[d] &&
+                                (fn < dom_lo[d] || fn >= dom_hi[d])) {
+                                return 0.0_rt;   // wall face: adiabatic
+                            }
+                            amrex::Real const sf = amrex::Real(fn) + 0.5_rt;
+                            int const W =
+                                static_cast<int>(std::ceil(rhop)) + 1;
+                            amrex::Real F = 0.0_rt;
+                            amrex::Real dlo =
+                                dsp_line(amrex::Real(fn - W) - 0.5_rt);
+                            for (int c = fn - W; c <= fn + W + 1; ++c) {
+                                amrex::Real const dhi =
+                                    dsp_line(amrex::Real(c) + 0.5_rt);
+                                bool const skip = (!is_per[d] &&
+                                    (c < dom_lo[d] || c > dom_hi[d]));
+                                if (!skip) {
+                                    amrex::Real L =
+                                        amrex::Real(c) - 0.5_rt + dlo;
+                                    amrex::Real R =
+                                        amrex::Real(c) + 0.5_rt + dhi;
+                                    if (!is_per[d]) {
+                                        // adiabatic: images stay inside
+                                        amrex::Real const blo =
+                                            amrex::Real(dom_lo[d]) - 0.5_rt
+                                            + 1.0e-6_rt;
+                                        amrex::Real const bhi =
+                                            amrex::Real(dom_hi[d]) + 0.5_rt
+                                            - 1.0e-6_rt;
+                                        L = amrex::min(amrex::max(L, blo), bhi);
+                                        R = amrex::min(amrex::max(R, blo), bhi);
+                                    }
+                                    amrex::Real const wid = R - L;
+                                    amrex::Real mright;
+                                    if (wid <= 1.0e-10_rt) {
+                                        // folded donor: point mass
+                                        mright = (0.5_rt*(L + R) > sf)
+                                            ? u_at(c) : 0.0_rt;
+                                    } else if (sf <= L) {
+                                        mright = u_at(c);
+                                    } else if (sf >= R) {
+                                        mright = 0.0_rt;
+                                    } else {
+                                        // affine preimage of the face in
+                                        // the donor; mass beyond = PLM
+                                        // integral over [xs, c+1/2]
+                                        amrex::Real const xs = amrex::Real(c)
+                                            - 0.5_rt + (sf - L)/wid;
+                                        amrex::Real const dx_hi =
+                                            0.5_rt;
+                                        amrex::Real const dx_lo =
+                                            xs - amrex::Real(c);
+                                        mright = (dx_hi - dx_lo)*u_at(c)
+                                            + 0.5_rt*slope_at(c)
+                                            *(dx_hi*dx_hi - dx_lo*dx_lo);
+                                    }
+                                    if (c >= fn + 1) { mright -= u_at(c); }
+                                    F += mright;
+                                }
+                                dlo = dhi;
+                            }
+                            return F;
+                        };
+
+                        amrex::Real const Fhi = face_flux(node[d]);
+                        amrex::Real const Flo = face_flux(node[d] - 1);
+                        ud(i,j,k) = us(i,j,k) - (Fhi - Flo);
+                    });
+                }
+                std::swap(src, dst);
+            }
+            amrex::MultiFab::Saxpy(u_acc, w_branch, *src, 0, 0, 1, 0);
+        }}}
+
+        // Recovery (scatter Pass-3 semantics): floored nodes keep their
+        // previous T_e; dividing by the same n_e that built u keeps the
+        // zero-displacement identity exact.
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(Te, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            amrex::Box const box = mfi.tilebox();
+            amrex::Array4<amrex::Real>       const & Te_arr  = Te.array(mfi);
+            amrex::Array4<amrex::Real const> const & u_arr   = u_acc.const_array(mfi);
+            amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                if (rho_arr(i,j,k) <= 0.0_rt) { return; }
+                amrex::Real const ne = rho_arr(i,j,k) / qe;
+                if (ne <= n_floor) { return; }
+                Te_arr(i,j,k) = u_arr(i,j,k) / (1.5_rt * kb * ne);
+            });
+        }
         ablastr::utils::communication::FillBoundary(
             Te, WarpX::do_single_precision_comms, period, true);
         return;

@@ -593,8 +593,17 @@ public:
      *  interpolation has no deposit-moment frame seam, so the curvature-
      *  activated remap leak of the scatter form is absent by construction,
      *  at the cost of exact conservation -- see
-     *  qdsmc_conduction_conserve_fixup). Input: qdsmc_conduction_form =
-     *  scatter | layer. */
+     *  qdsmc_conduction_conserve_fixup). 2 = fluxform (Esirkepov flux-form
+     *  conservative semi-Lagrangian remap, the production path -- plan doc
+     *  C.7d: per GH branch, dimensionally split 1D remaps whose face
+     *  fluxes integrate an MC-limited PLM reconstruction of u over the
+     *  swept interval of the backward-traced displacement field.
+     *  Conservation is telescoping-exact, monotonicity is never-add
+     *  (limited reconstruction), and the displacement field interpolates
+     *  continuously between nodes so the source-evaluated pushforward
+     *  error of the deposit kernels is absent; wall faces carry zero flux
+     *  = exact adiabatic default). Input: qdsmc_conduction_form =
+     *  scatter | layer | fluxform. */
     int m_cond_form = 0;
 
     /** Layer-form interpolant: 0 = linear (bilinear; the exact adjoint of
