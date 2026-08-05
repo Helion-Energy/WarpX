@@ -2439,6 +2439,10 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         'Az_external_function', plus 'A_time_external_function' with (t) dependence, or
         alternatively 'load_from_file': True with a 'path' to an OpenPMD file along with
         'A_time_external_function'.
+        An entry may also set 'in_initial_field': True to declare that the coil's t=0
+        field is already contained in the loaded initial B field (e.g. a free-boundary
+        equilibrium whose flux includes the confining coils); the first-step state
+        assembly then does not add that coil's field on top of the initial condition.
 
     do_external_diva_cleaning: bool (default=True)
         This flag can be used to disable divA cleaning. This may be necessary when using a non-periodic
@@ -2777,6 +2781,14 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
                         pywarpx.my_constants.mangle_expression(
                             field_dict["Az_external_function"], self.mangle_dict
                         ),
+                    )
+                if field_dict.get("in_initial_field", False):
+                    # The coil's t=0 field is already contained in the
+                    # loaded initial B (e.g. a free-boundary equilibrium
+                    # file including the confining coils): the first-step
+                    # state assembly must not add it again.
+                    pywarpx.external_vector_potential.__setattr__(
+                        f"{field_name}.in_initial_field", 1
                     )
                 if field_dict.get("python_scale", False):
                     # Piecewise-linear scale segments pushed from python

@@ -72,6 +72,7 @@ class VacuumInductiveRamp(object):
         recovery=False,
         recovery_cadence="half",
         circuit=False,
+        static_coil_check=False,
     ):
         self.test = test
         self.verbose = verbose or self.test
@@ -80,6 +81,7 @@ class VacuumInductiveRamp(object):
         self.recovery = recovery
         self.recovery_cadence = recovery_cadence
         self.circuit = circuit
+        self.static_coil_check = static_coil_check
         if self.circuit:
             assert self.implicit, (
                 "--circuit exercises the circuit-in-the-residual coupling "
@@ -193,6 +195,23 @@ class VacuumInductiveRamp(object):
                         "1/(1+exp(5*(1-(t-t0_ramp)*sqrt(2)/tau_ramp)))"
                     ),
                 },
+            }
+
+        # Regression guard for the in_initial_field contract: declare the
+        # uniform bias B0 -- which load_fields puts into the initial
+        # condition directly -- as a STATIC external coil flagged as already
+        # contained in the initial field. The first-step state assembly must
+        # then not add it again (without the flag the total field doubles at
+        # step 1 and the ramp asserts fail); the per-step external
+        # strip/restore choreography carries the static coil as an exact
+        # wash, so all standard ramp asserts apply unchanged.
+        if self.static_coil_check:
+            A_ext["bias_analytical"] = {
+                "Ax_external_function": f"-0.5*y*{self.B0}",
+                "Ay_external_function": f"0.5*x*{self.B0}",
+                "Az_external_function": "0",
+                "A_time_external_function": "1.0",
+                "in_initial_field": True,
             }
 
         # With the Darwin (unified) drive the external flux enters through
@@ -450,6 +469,14 @@ parser.add_argument(
     "(requires --implicit --darwin)",
     action="store_true",
 )
+parser.add_argument(
+    "--static-coil-check",
+    help="declare the loaded uniform bias B0 as a static external coil "
+    "with in_initial_field=True: guards the first-step state assembly "
+    "against double-adding a coil whose flux the initial condition "
+    "already contains (the standard ramp asserts apply unchanged)",
+    action="store_true",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
@@ -461,6 +488,7 @@ run = VacuumInductiveRamp(
     recovery=args.recovery,
     recovery_cadence=args.recovery_cadence,
     circuit=args.circuit,
+    static_coil_check=args.static_coil_check,
 )
 simulation.step()
 

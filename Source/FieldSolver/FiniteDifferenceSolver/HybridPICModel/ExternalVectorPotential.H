@@ -81,6 +81,14 @@ protected:
     std::vector<bool> m_use_python_scale;
     std::vector<ScaleSegment> m_python_scale;
 
+    /** Per-coil flag: the coil's t=0 field is already contained in the
+     * loaded initial B (e.g. a free-boundary equilibrium file whose flux
+     * includes the confining coils). The first-step state assembly then
+     * must not add this coil's field on top of the loaded state. Default
+     * false: the initial condition is the plasma-only field and the t=0
+     * external is added to form the total (the original convention). */
+    std::vector<bool> m_in_initial_field;
+
 public:
 
     /** Number of independent external vector-potential fields. */
@@ -149,10 +157,20 @@ public:
         ablastr::fields::VectorField const& srcField,
         std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update);
 
+    /** Refresh the summed external E/B arrays at time t. With
+     * skip_in_initial_field, coils flagged <name>.in_initial_field are
+     * left out of the sum (used only by AddInitialExternalBField). */
     void UpdateHybridExternalFields (
         amrex::Real t,
-        amrex::Real dt
+        amrex::Real dt,
+        bool skip_in_initial_field = false
     );
+
+    /** Add the t=0 external B of every coil NOT flagged with
+     * <name>.in_initial_field to Bfield_fp, forming the total initial
+     * field from a plasma-only load. Called once per fresh start from
+     * WarpX::HybridPICInitializeRhoJandB. */
+    void AddInitialExternalBField ();
 };
 
 #endif //WARPX_TIME_DEPENDENT_VECTOR_POTENTIAL_H_
