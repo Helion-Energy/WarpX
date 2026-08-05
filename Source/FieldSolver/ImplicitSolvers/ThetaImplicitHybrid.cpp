@@ -137,6 +137,11 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
     // Circuit-in-the-residual coupling (see the member documentation in
     // the header).
     pp.query("external_field_iteration", m_external_field_iteration);
+
+    // Redistribute ahead of the end-of-step deposits (see the member
+    // documentation in the header).
+    pp.query("redistribute_before_end_deposits",
+             m_redistribute_before_end_deposits);
     if (m_external_field_iteration) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_hybrid_pic_model->m_add_external_fields,
@@ -333,6 +338,15 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     // Advance fields from t^{n+theta} to t^{n+1}
     FinishFieldUpdate( new_time );
 
+    // Opt-in: apply the particle boundary conditions and re-bin before the
+    // end-of-step deposits below (see the member documentation; the guard
+    // range only covers displacements up to ~(nox + max_grid_crossings - 1
+    // - nox/2 - 1) cells, and the full-dt extrapolation above can exceed it
+    // for warm boundary populations).
+    if (m_redistribute_before_end_deposits) {
+        m_WarpX->GetPartContainer().Redistribute();
+    }
+
     // Complete the electron-energy step: apply the stochastic ion-heating
     // realization once with converged states, refresh Pe^{n+1}, and reset
     // the QDSMC markers.
@@ -464,6 +478,28 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     // Update B^{n+theta} from current E estimate via Faraday's law
     UpdateWarpXFields( a_E, a_from_jacobian, start_time );
 
+    // Split-field circuit-in-the-residual coupling, run BEFORE the
+    // particle stage: python measures the flux linkage of THIS iterate's
+    // plasma response (disk probes read the theta-stage response B just
+    // assembled above), re-advances the coupled external circuit against
+    // it, and pushes updated coil scale segments (SetScale); the external
+    // fields are then refreshed at the new scales so the particle push
+    // AND the Ohm's law below see circuit-consistent fields. Running the
+    // coupling after the push (as the darwin branch below does for its
+    // boundary pin) would make the gathered E_ext lag the iterate by one
+    // evaluation -- hidden history that shows up as an
+    // epsilon-independent noise floor in Jacobian secants once the drive
+    // is active. Reciprocity (J-based) probes see the PREVIOUS
+    // evaluation's plasma current here (refreshed below); the circuit
+    // ports in use are disk-flux based.
+    if (m_external_field_iteration && !m_darwin) {
+        AddSplitExternalFields(-1.0_rt);
+        ExecutePythonCallback("externalcoiltheta");
+        m_hybrid_pic_model->m_external_vector_potential
+            ->UpdateHybridExternalFields(start_time + m_theta * m_dt, m_dt);
+        AddSplitExternalFields(1.0_rt);
+    }
+
     // Momentum-consistent particle push field: the ions gather Efield_fp,
     // and the solver state deliberately includes the resistive eta*J term
     // (Faraday's law needs it), but the resistive friction must not
@@ -533,50 +569,32 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
         }
     }
 
-    // Circuit-in-the-residual coupling: python measures the flux linkage
-    // of THIS iterate's plasma response, re-advances the coupled external
-    // circuit against it, and pushes updated coil scale segments
-    // (SetScale); the external fields are then refreshed at the new
-    // scales, so the Ohm's law below sees circuit-consistent fields. The
-    // map is smooth in the state, so the matrix-free Jacobian probes see
-    // the coupled plasma-circuit physics and Newton converges both
-    // together (a step-lagged circuit is unstable at strong coil-plasma
-    // coupling).
-    if (m_external_field_iteration) {
-        if (m_darwin) {
-            // Unified drive: the scales enter through the boundary pin
-            // and the vacuum band (interior A is state-only, so the
-            // particle stage above needs no re-run). Re-impose the pin at
-            // the updated scales and re-derive B.
-            ExecutePythonCallback("externalcoiltheta");
+    // Circuit-in-the-residual coupling, darwin (unified-drive) branch:
+    // python measures the flux linkage of THIS iterate's plasma response,
+    // re-advances the coupled external circuit against it, and pushes
+    // updated coil scale segments (SetScale). The scales enter through
+    // the boundary pin and the vacuum band (interior A is state-only, so
+    // the particle stage above needs no re-run). Re-impose the pin at
+    // the updated scales and re-derive B. The split-field branch of this
+    // coupling runs BEFORE the particle stage (top of this function): its
+    // scales enter the gathered push field, which must not lag the
+    // iterate.
+    if (m_external_field_iteration && m_darwin) {
+        ExecutePythonCallback("externalcoiltheta");
+        DarwinApplyABoundary(theta_time);
+        if (m_vacuum_recovery_half) {
+            // Recompute the recovery against the re-imposed boundary
+            // values (live in Jacobian probes too -- Define forced the
+            // live-probe mode), then restore the exact pin. NOTE: this
+            // is the second recovery application of the evaluation, so
+            // a finite darwin_vacuum_recovery_relaxation_time would be
+            // double-applied -- circuit decks should run the default
+            // (instant) recovery.
+            m_hybrid_pic_model->ComputeVacuumARecovery(
+                a_from_jacobian, m_theta * m_dt);
             DarwinApplyABoundary(theta_time);
-            if (m_vacuum_recovery_half) {
-                // Recompute the recovery against the re-imposed boundary
-                // values (live in Jacobian probes too -- Define forced the
-                // live-probe mode), then restore the exact pin. NOTE: this
-                // is the second recovery application of the evaluation, so
-                // a finite darwin_vacuum_recovery_relaxation_time would be
-                // double-applied -- circuit decks should run the default
-                // (instant) recovery.
-                m_hybrid_pic_model->ComputeVacuumARecovery(
-                    a_from_jacobian, m_theta * m_dt);
-                DarwinApplyABoundary(theta_time);
-            }
-            DarwinDeriveB();
-        } else {
-            // Split-field path: enter the plasma-response frame by
-            // subtracting the stored externals the assembly added at
-            // evaluation start (python probes then measure the
-            // response-only flux linkage -- the same frame the
-            // theta-implicit MHD coupler contract was written against),
-            // then refresh the externals at the updated scales and
-            // restore the totals for the Ohm solve below.
-            AddSplitExternalFields(-1.0_rt);
-            ExecutePythonCallback("externalcoiltheta");
-            m_hybrid_pic_model->m_external_vector_potential
-                ->UpdateHybridExternalFields(theta_time, m_dt);
-            AddSplitExternalFields(1.0_rt);
         }
+        DarwinDeriveB();
     }
 
     // Electron inertia: assemble the nodal inertial field from the
