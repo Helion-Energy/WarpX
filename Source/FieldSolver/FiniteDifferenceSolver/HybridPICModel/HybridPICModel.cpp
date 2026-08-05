@@ -71,6 +71,7 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("max_substep_attempts", m_max_substep_attempts);
 
     utils::parser::queryWithParser(pp_hybrid, "holmstrom_vacuum_region", m_holmstrom_vacuum_region);
+    utils::parser::queryWithParser(pp_hybrid, "holmstrom_transition_width", m_holmstrom_transition_width);
     pp_hybrid.query("include_hall_term", m_include_hall_term);
     pp_hybrid.query("include_electron_pressure_term", m_include_electron_pressure_term);
 

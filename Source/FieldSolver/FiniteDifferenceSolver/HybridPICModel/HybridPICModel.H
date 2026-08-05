@@ -620,6 +620,15 @@ public:
 
     bool m_holmstrom_vacuum_region = false;
 
+    /** Smooth transition width of the Holmstrom vacuum gate, as a fraction
+     * of n_floor. With width w > 0 the Hall + grad-Pe part of the Ohm's-law
+     * E is multiplied by 0.5*(1 + tanh((rho - rho_floor)/(w*rho_floor)))
+     * instead of switching off discontinuously below the floor: the binary
+     * branch makes the implicit residual discontinuous in the state where
+     * cells straddle the gate (Newton limit cycles, grid-scale E jumps at
+     * the plasma edge). 0 (default) keeps the legacy hard branch. */
+    amrex::Real m_holmstrom_transition_width = 0.0;
+
     /** Independent Ohm's-law term controls: whether the Hall contribution
      * (the curl-B total current in the (J - J_i) x B / (e n) term; with it
      * off the term reduces to the ideal -u_i x B motional field) and the

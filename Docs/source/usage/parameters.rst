@@ -4202,6 +4202,22 @@ Maxwell solver: kinetic-fluid hybrid
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the vacuum region handling of the generalized Ohm's Law to suppress vacuum fluctuations. :cite:t:`param-holmstrom2013handlingvacuumregionshybrid`.
 
+.. pp:param:: hybrid_pic_model.holmstrom_transition_width
+    :type: ``float``
+    :default: ``0``
+    :optional:
+
+    Smooth transition width of the Holmström vacuum gate, as a fraction of
+    ``n_floor``. With a width :math:`w > 0` the Hall and electron-pressure
+    part of the Ohm's-law electric field is multiplied by
+    :math:`\tfrac{1}{2}(1 + \tanh((\rho - \rho_{floor})/(w\,\rho_{floor})))`
+    instead of switching off discontinuously below the floor. The binary
+    branch makes the implicit residual discontinuous in the state wherever
+    cells straddle the gate, which produces Newton limit cycles and a
+    growing grid-scale mode at the plasma edge under the theta-implicit
+    solver; the smooth blend restores differentiability. ``0`` (default)
+    keeps the legacy hard branch.
+
 .. pp:param:: hybrid_pic_model.add_external_fields
     :type: ``bool``
     :default: ``false``
