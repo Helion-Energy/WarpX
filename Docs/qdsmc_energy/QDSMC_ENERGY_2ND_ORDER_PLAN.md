@@ -415,6 +415,94 @@ the capped-transport fallback distorts the target physics. Record the
 crossover S* either way. If (c) is ever selected, its implementation inserts
 as Phase 3b before Phase 4.
 
+### C.7 RESULTS (measured 2026-08-04)
+
+**Regime survey with REAL liftoff deck numbers** (2026-08-04 deck defaults,
+eb_ect_yee_followup: dx = 2/N m, dt = 0.01 t_ci(bz_rev=0.5 T) = 2.62e-9 s,
+n_annulus = 1.59e20, fill 3e19, floor 7.5e18 m^-3; R_c is ASSUMED — 0.35 m
+column scale, 0.10 m pessimistic near-null; annulus/compression rows still
+placeholders): S_eff < 4 everywhere up to 3 keV, the f = 0.1 flux limiter
+dominates Spitzer above ~10 eV, l_hop(npts=2) <= 2.8 dx at N=128 so the
+m_hop = 2 cap barely engages below 1 keV. The raw-stiffness arm of the
+question is settled: comfortable.
+
+**Hop-cap transport deficit = the designed soft-min, exactly**
+(run_hopcap.py, aligned N=64, npts=3, chi_cap/chi0 swept 16.7 -> 0.128):
+chi_meas/chi0 tracks (1+(chi0/chi_cap)^4)^{-1/4} to 3-4 digits at every
+point (e.g. 8x over cap: measured 0.1276, predicted 0.1276). No excess
+deficit beyond design; capped transport is predictable.
+
+**Curvature leak: the framing-item-2 model chi_perp,num ~
+chi_par (l_hop/R_c)^2 is WRONG — ~1000x too optimistic at sigma/dx <~ 1.**
+Instrument: qdsmc_wiggle_test.py + run_wiggle.py (fully periodic snaking
+field B = B0 (eps sin kz, 0, 1), R_c = (1+eps^2)/(eps k); leak = growth of
+Var_w of the exact flux function A = x + (eps/k) cos kz; eps = 0 floor
+5e-6). Findings (all pc, chi0 = 1e3, wiggle_out/ + wiggle_sweep.log):
+- leak/chi0 ~ eps^2.07, k^0.68, OSCILLATES with sigma/dx (aliasing
+  structure, factor ~5 swings), and GROWS as dt shrinks at fixed dx: it is
+  a PER-REMAP effect — the E6 remap floor dx^2/(4 dt) reopened by
+  curvature — not the per-hop chord term (which is chi^2 dt kappa^2-sized
+  and ~1e-3 here).
+- Not fixed by quadrature choice (eps=.2, m=2, N=64: npts=2: 0.47,
+  npts=3: 0.21, npts=5: 0.53 of chi0) and the B1 half-gradient correction
+  barely participates (OFF: 0.26 vs ON: 0.21) — unlike the straight-field
+  case where B1 removes the 43% floor. npts=2's zero chord variance NOT
+  helping proves the leak is in the deposit/gather chain on curved b, so
+  escalation (a)'s field-line-following hops alone will NOT remove it.
+- **At the liftoff dimensionless point** (sigma/dx = 0.84,
+  kappa dx = dx/R_c = 0.045, N=128): chi_perp_num/chi_par = **1.8 at
+  npts=2 (the production default) and 0.56 at npts=3**, vs physical
+  chi_perp/chi_par ~ 3e-9 there. Electron heat transport effectively
+  isotropizes wherever field lines curve at machine scale; straight-field
+  regions are clean (floor 5e-6).
+- Breakdown regime mapped: hops spanning >~ 1 radian of field rotation
+  (l_hop k >~ 1) fully isotropize (leak 2.3 chi0 at m=6).
+
+**Zeldovich nonlinear front (kappa ~ Te^{5/2} parser)**: N=128, ns=256,
+amp 15, chi0(Te0) = 3 vs a 1D flux-conservative reference with the same
+T0-floored background: relL2(profile) = 0.13; error structure = core too
+hot (+0.5 Te0), front tip too cold (-1.0), precursor pre-heat beyond the
+front (+0.24) — the hop tails pre-heat ahead of the nonlinear front and
+the MC limiter clips slopes at it; front half-width 11% ahead of
+reference; front exponent 0.154 vs reference 0.206 (ZK cold-background
+2/9). Conservation -2e-5. **The 13% error is a PLATEAU: N=192 parabolic
+(fixed sigma/dx) gives relL2 = 0.134** — grid-sharp fronts are
+first-order-limited by the front-foot limiter clip + hop precursor, the
+same per-remap class as the curvature leak. Limiter legs (windowed front
+speeds; the naive per-step tracker is dx/dt-quantized): unlimited front
+runs at 3.75e4 m/s; production f = 0.1 leaves it untouched (20% of
+allowance — no distortion of resolved fronts); even f = 0.01 only bites
+~30% because q_Sp/q_fs ~ 5e-3 here — the strong-bind front-speed-bound
+demonstration needs a dedicated q_Sp >> f q_fs parameter point (open
+leg).
+
+**Ring-test campaign (qdsmc_ring_test.py) — kept as the div-D validator,
+superseded as the leak instrument.** Its four design iterations each hit a
+scatter-form boundary pathology worth recording (they are Thrust-D
+previews): (i) a periodic box cannot host phi_hat — the seam b-flip makes
+a div-D kick line; (ii) blending b to zhat stirs O(1) when b rotates
+within a hop length; (iii) **PEC/dirichlet walls zero rho on the wall
+rows, the (default ON) vacuum fast-front then boosts their chi to the hop
+cap, and the resulting D cliff drift-kicks row-1 daughters into the wall
+where the floored-node recovery skip DELETES the energy from Te
+(Te(row+-1) -> 0 in ONE substep, Sigma(Te) -6% even at chi = 0)** — any
+Thrust-D wall BC must handle the rho=0-row + fast-front pairing;
+(iv) sharp chi switches make the first chi=0 node a one-way accumulator
+(receives spill, never re-emits). On the working (walled, annular-chi)
+configuration the ring DID validate the drift/chord mean cancellation:
+blob mean radius drift 2e-4 L over a full run (chi=0 identity: 1e-7).
+
+**Gate G3a verdict (2026-08-04, pending Eric's sign-off)**: the explicit
+SDE arm is validated for straight and gently-curved fields at liftoff
+stiffness (S_eff small, cap predictable, conservation machine-level). It
+is NOT ready for machine-scale-curved field regions (FRC closed-line
+geometry): the remap-borne curvature leak isotropizes heat transport
+there. The (a)/(b) escalation as scoped does not address the actual
+mechanism; the follow-up is a **curved-deposit fix** (deposit/slope
+correction in the field frame, or field-line-coordinate remap) BEFORE any
+elliptic consideration. Mechanism pinning and the fix design are the next
+scheme work; (c) elliptic remains unscoped.
+
 ### C.8 Gate G3
 
 - 1D Gaussian spread along B parallel to z: sigma^2(t) = sigma_0^2 + 2 chi t to

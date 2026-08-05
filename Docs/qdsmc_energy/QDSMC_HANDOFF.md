@@ -130,27 +130,39 @@ gradient-corrected `DepositScalar`.
 
 ## 7. Open work queue (in order)
 
-1. **C.7 / G3a measurements** on the Thrust-C prototype:
-   - Sharma–Hammett ring test (hot patch on circular field lines,
-     χ⊥=0): measures the curved-field-line leak χ⊥,num ~ χ∥(l_hop/R_c)²
-     (trap 11) vs hop size and npts — the uniform-B tilted test cannot see
-     this term. Needs a new deck (circular B from a line current or
-     analytic A_θ).
-   - Hop-cap transport deficit: capped run vs reference, quantify the
-     slowdown when the cap engages.
-   - Zeldovich nonlinear front (κ ~ T^{5/2} parser) vs self-similar
-     solution; limiter off/on; front speed ≤ f·v_te when limited.
-   - **Regime survey needs REAL deck numbers from Eric**
-     (liftoff/annulus/compression dx, dt, n, B, R_c) —
-     `regime_survey.py` rows are placeholders.
-   - Gate G3a: choose explicit escalation (field-line-following hops →
-     subcycling) only if measurements demand; elliptic parallel solve is
-     LAST RESORT (Eric: avoid elliptic in the explicit advance at all costs).
+0. **C.7 / G3a MEASURED 2026-08-04** — see the plan doc's "C.7 RESULTS"
+   block. Headlines: regime survey rerun with real liftoff deck numbers
+   (S_eff < 4, cap rarely engages — raw stiffness comfortable); hop-cap
+   deficit = the designed p=4 soft-min to 4 digits (`run_hopcap.py`);
+   **the curvature leak is remap-borne and ~1000x the trap-11
+   (l_hop/R_c)² model at σ/dx ≲ 1** — measured with the wiggle instrument
+   (`qdsmc_wiggle_test.py` + `run_wiggle.py`; the Sharma–Hammett ring is
+   trap-limited as a leak instrument, kept as the div-D validator and a
+   Thrust-D pathology record). At the liftoff dimensionless point:
+   χ⊥,num/χ∥ = 1.8 (npts=2 default!) / 0.56 (npts=3) vs physical 3e-9.
+   Zeldovich front: qualitatively correct, relL2 0.13 at N=128 with a
+   hop-tail precursor; production f=0.1 limiter leaves resolved fronts
+   untouched.
+1. **Curved-deposit fix (new, from G3a)**: the leak survives npts=2 (zero
+   chord variance) and B1-off — it lives in the deposit/gather chain on
+   curved b̂, so field-line-following hops alone will NOT fix it. Next
+   scheme work: pin the mechanism, then a field-frame deposit/slope
+   correction or field-line-coordinate remap. Until then the explicit arm
+   is validated for straight/gently-curved fields only (FRC closed-line
+   regions isotropize).
+   - small open leg: strong-bind limiter demo (front speed ≤ f·v_te needs
+     a q_Sp ≫ f·q_fs parameter point; at ZK-test parameters the limiter
+     only bites ~30% even at f=0.01).
+   - annulus/compression regime-survey rows still placeholders.
 2. **Thrust D — boundary conditions** (domain + EB): daughter/marker
    specular reflection (adiabatic, default), isothermal T_wall re-emission
    with wall-flux tally, prescribed-flux injection; replace the E7 clamp;
    EB via level-set reflection ([[eb-bc-design-preferences]]: check the reference algorithm
-   first).
+   first). MUST handle the measured PEC-wall pairing: dirichlet/PEC zeroes
+   rho on wall rows, vacuum_fast_front (default ON) boosts their χ to the
+   hop cap, and the D-cliff drift kicks row-1 daughters into the wall
+   where the floored-node recovery skip DELETES energy (Te(row±1) → 0 in
+   one substep, −6% Σ(Te) even at χ=0; `qdsmc_ring_test.py` docstring).
 3. **Deferred fixes recorded, not started**: Te not checkpointed
    (FlushFormatCheckpoint has zero hybrid energy-eq fields — real restart
    bug, same family as re-entry); RZ support for conduction (guarded off);

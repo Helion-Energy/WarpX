@@ -42,9 +42,24 @@ cd ~/src/WarpX-qdsmc && PATH=/usr/local/openmpi5/bin:$PATH \
   refinement (dt ~ dx^2, nsteps = 32(N/32)^2). Caches npz per case.
 - `run_ci_matrix.py` — 3 CI cases (adiabat / joule / qei) x 3 schemes via a
   scheme-injection wrapper; runs each test's analysis with CI tolerances.
-- `regime_survey.py` — C.7 stiffness table (no runs). PLACEHOLDER deck
-  numbers; replace with real liftoff/annulus/compression values before
-  gating G3a.
+- `regime_survey.py` — C.7 stiffness table (no runs). Liftoff rows are REAL
+  deck numbers (2026-08-04 defaults; R_c assumed); annulus/compression rows
+  remain placeholders.
+- `qdsmc_wiggle_test.py` — C.7/G3a curvature-leak instrument: periodic
+  snaking field B = B0 (eps sin kz, 0, 1); the leak is the growth of the
+  w-weighted variance of the exact flux function A = x + (eps/k) cos kz.
+  `run_wiggle.py` sweeps k, eps, dx, dt, npts, +-B1 (sections keps / dxdt /
+  quad / floor). See the plan doc "C.7 RESULTS".
+- `qdsmc_ring_test.py` — Sharma-Hammett ring on a walled domain with an
+  annular chi zone. Superseded by the wiggle test as the leak instrument
+  (every ring variant is boundary/trap-limited — the docstring records four
+  measured scatter-form boundary pathologies, incl. the PEC-wall
+  vacuum-fast-front energy deletion that Thrust D must handle); kept as the
+  div-D drift validator (blob mean-radius drift ~2e-4 L).
+- `run_hopcap.py` — hop-cap transport deficit vs the designed p=4 soft-min
+  (matches to 3-4 digits across the engagement range).
+- `qdsmc_zeldovich_test.py` — nonlinear front, kappa ~ Te^{5/2} parser, vs a
+  1D flux-conservative reference; front trajectory + limiter legs.
 
-Output dirs (`baseline_out/`, `cond_out/`, `ci_matrix*/`, `*.log`) are
-regenerable and stay untracked.
+Output dirs (`baseline_out/`, `cond_out/`, `ci_matrix*/`, `wiggle_out/`,
+`hopcap_out/`, `zeld_out*.npz`, `*.log`) are regenerable and stay untracked.

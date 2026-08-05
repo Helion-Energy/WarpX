@@ -11,9 +11,19 @@ For each (deck, T_e) point, tabulates:
   l_hop/R_c    curved-field-line leak indicator (spurious chi_perp/chi_par
                ~ (l_hop/R_c)^2 for straight hops)
 
-Deck parameters below are REPRESENTATIVE PLACEHOLDERS — replace dx, dt, n_e,
-B, R_c with the real liftoff / annulus / compression deck values before
-drawing conclusions (marked TODO).
+Liftoff rows are REAL deck numbers (2026-08-04, eb_ect_yee_followup
+inputs_test_3d_ohm_solver_plasma_cylinder_liftoff_picmi.py defaults):
+domain [-1,1]^2 so dx = 2/N (N=72 CLI default, 128 research runs);
+dt = 0.01 * t_ci(bz_rev) with bz_rev = 0.5 T default (2.62e-9 s) and the
+historical hard-drive variant 1.5 T (8.75e-10 s); annulus density
+n = N_I * R_PART^2/(R_out^2 - R_in^2) = 1.59e20 m^-3, interior fill
+0.2*N_I = 3e19, floor 0.05*N_I = 7.5e18 (fast-front territory).
+R_c is ASSUMED, not a deck number: the slab B is mostly axial (straight
+lines); the quoted R_c ~ 0.35 m is the column-scale closed-line curvature
+of the formation geometry the slab is cut from, with 0.10 m as a
+pessimistic near-null bound for the reversal layer.
+
+Annulus / compression rows are still REPRESENTATIVE PLACEHOLDERS (TODO).
 
 Physics:
   tau_e  = 3.44e5 * Te_eV^1.5 / (n_cc * lnL)   [s]   (NRL formulary)
@@ -32,15 +42,19 @@ lnL = 10.0
 # Largest probabilists' Gauss-Hermite abscissa (units of sigma) per npts.
 X_MAX = {2: 1.0, 3: np.sqrt(3.0), 4: 2.3344, 5: 2.8570, 7: 3.7504}
 
-# TODO(Eric): replace with real deck numbers (dx, dt, n_e, B, R_c).
+# Liftoff rows = real deck values (see module docstring); annulus and
+# compression rows are TODO placeholders.
 DECKS = [
-    # name,        n_e [m^-3], B [T],  dx [m],  dt [s],   R_c [m]
-    ("liftoff", 1.0e19, 1.0, 1.0e-3, 1.0e-9, 0.05),
-    ("annulus", 5.0e18, 2.0, 5.0e-4, 5.0e-10, 0.03),
-    ("compression", 1.0e20, 10.0, 5.0e-4, 2.0e-10, 0.10),
+    # name,                  n_e [m^-3], B [T],  dx [m],     dt [s],    R_c [m]
+    ("liftoff-72-annulus", 1.59e20, 0.5, 2.0 / 72, 2.62e-9, 0.35),
+    ("liftoff-128-annulus", 1.59e20, 0.5, 2.0 / 128, 2.62e-9, 0.35),
+    ("liftoff-128-fill", 3.0e19, 0.5, 2.0 / 128, 2.62e-9, 0.10),
+    ("liftoff-128-hard-1.5T", 1.59e20, 1.5, 2.0 / 128, 8.75e-10, 0.35),
+    ("annulus (PLACEHOLDER)", 5.0e18, 2.0, 5.0e-4, 5.0e-10, 0.03),
+    ("compression (PLACEHOLDER)", 1.0e20, 10.0, 5.0e-4, 2.0e-10, 0.10),
 ]
 
-TE_EV = [10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0]
+TE_EV = [5.0, 10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0]
 NPTS = [2, 3, 5]
 
 
