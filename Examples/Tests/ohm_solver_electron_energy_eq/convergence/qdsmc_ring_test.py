@@ -111,6 +111,26 @@ parser.add_argument(
     help="debug control: do not set the kappa parsers (no conduction "
     "substep at all; isolates the transport/E7 wall behavior)",
 )
+parser.add_argument(
+    "--form",
+    choices=["scatter", "layer"],
+    default="scatter",
+    help="conduction grid-transfer form (layer = Milstein gather)",
+)
+parser.add_argument(
+    "--interp",
+    choices=["linear", "monocubic", "keys"],
+    default="monocubic",
+    help="layer-form interpolant",
+)
+parser.add_argument(
+    "--curved-feet",
+    type=int,
+    choices=[0, 1],
+    default=0,
+    help="layer form: midpoint-rotated feet (measured harmful: the div-D "
+    "drift already carries the mean curvature; rotation double-counts)",
+)
 parser.add_argument("--out", type=str, required=True)
 parser.add_argument("--verbose", type=int, default=0)
 args = parser.parse_args()
@@ -245,6 +265,9 @@ if not args.no_cond:
 pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = npts
 pywarpx.hybridpicmodel.qdsmc_conduction_flux_limit_factor = args.flux_limit
 pywarpx.hybridpicmodel.qdsmc_conduction_max_hop = args.max_hop
+pywarpx.hybridpicmodel.qdsmc_conduction_form = args.form
+pywarpx.hybridpicmodel.qdsmc_conduction_interp = args.interp
+pywarpx.hybridpicmodel.qdsmc_conduction_curved_feet = args.curved_feet
 # MUST be off here (default on): the dirichlet/PEC field BC zeroes rho on
 # the wall rows, fast-front then boosts their chi to the hop-cap ceiling,
 # and the D cliff's div-D drift kicks the row-1 daughters into the wall
@@ -380,6 +403,9 @@ np.savez_compressed(
     sigma_phi=sp,
     max_hop=args.max_hop,
     advance=args.advance,
+    form=args.form,
+    interp=args.interp,
+    curved_feet=args.curved_feet,
     te_initial=state["initial"],
     te_final=te_final,
     te_exact=te_exact,

@@ -586,6 +586,47 @@ public:
      *  qdsmc_conduction_vacuum_fast_front. */
     bool m_cond_vacuum_fast_front = true;
 
+    /** Conduction grid-transfer form. 0 = scatter (spawn daughters at each
+     *  node, deposit u forward with the B1 half-gradient hat; exactly
+     *  conservative). 1 = layer (Milstein layer/gather form: T^{n+1}(node)
+     *  = sum_q w_q Interp(T^n)(foot_q), the adjoint transfer; pointwise
+     *  interpolation has no deposit-moment frame seam, so the curvature-
+     *  activated remap leak of the scatter form is absent by construction,
+     *  at the cost of exact conservation -- see
+     *  qdsmc_conduction_conserve_fixup). Input: qdsmc_conduction_form =
+     *  scatter | layer. */
+    int m_cond_form = 0;
+
+    /** Layer-form interpolant: 0 = linear (bilinear; the exact adjoint of
+     *  the uncorrected hat scatter -- control arm, carries the full
+     *  dx^2/(4 dt) remap floor), 1 = monotone cubic Hermite (MC-limited
+     *  slopes; positive, overshoot-free, ~3rd order in smooth regions),
+     *  2 = Keys cubic convolution (a = -1/2; higher order, NOT monotone).
+     *  All three are interpolating (exact at integer feet), so the at-rest
+     *  identity is machine-exact. Input: qdsmc_conduction_interp =
+     *  linear | monocubic | keys. */
+    int m_cond_interp = 1;
+
+    /** Layer form: trace the quadrature feet along the curved field line
+     *  (midpoint/RK2 rotation: re-gather b at the half-displacement point
+     *  and rebuild the quadrature frame there) instead of the straight
+     *  tangent chord at the node. MEASURED HARMFUL as implemented
+     *  (2026-08-05): the div-D Ito drift already IS the mean-curvature
+     *  correction for straight chords (the consistent Euler--Maruyama
+     *  pairing, validated by the ring test), so rotating the feet
+     *  double-counts the curvature -- systematic cross-field drift plus
+     *  10-80x more leak than straight feet on the wiggle instrument.
+     *  Default OFF; kept for future consistently-paired weak-2 work.
+     *  Input: qdsmc_conduction_curved_feet. */
+    bool m_cond_curved_feet = false;
+
+    /** Layer form: restore Sigma(u) after each gather with a global
+     *  proportional rescale of T_e (the gather transfer is not exactly
+     *  conservative; the per-call deficit is what this hides -- keep OFF
+     *  while measuring, ON for production once the deficit is known to be
+     *  diffuse). Input: qdsmc_conduction_conserve_fixup. */
+    bool m_cond_conserve_fixup = false;
+
     /** Density floor used when dividing by the deposited QDSMC weight to
      * recover K_e^{n+1} from (K*N) / N. Avoids divide-by-zero in cells
      * that no QDSMC particle reached during the push. Defaults to the
