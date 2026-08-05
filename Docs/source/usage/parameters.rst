@@ -4278,6 +4278,20 @@ Maxwell solver: kinetic-fluid hybrid
     constant scale held until the first ``set_external_vector_potential_scale``
     call (e.g. a coil at its pre-ramp current).
 
+.. pp:param:: external_vector_potential.<field_name>.in_initial_field
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Declare that this coil's t=0 field is already contained in the loaded
+    initial B field (e.g. a free-boundary equilibrium whose flux includes the
+    confining coil set). By default the first-step state assembly adds each
+    external field's t=0 value on top of the initial condition to form the
+    total field, which double-counts a coil the initial condition already
+    carries; setting this flag skips that coil in the t=0 addition. The coil
+    is still stripped and restored by the per-step external-field
+    choreography like any other.
+
 
 Grid types (collocated, staggered, hybrid)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -21,6 +21,25 @@
 using warpx::fields::FieldType;
 using namespace amrex::literals;
 
+namespace {
+// TEMPORARY diagnosis instrument (WARPX_EXT_LEDGER): valid-region sums of the
+// Bz state and the stored external Bz at each strip/add choreography point.
+void ExtLedgerPrint (WarpX* a_wx, const char* a_tag)
+{
+    if (std::getenv("WARPX_EXT_LEDGER") == nullptr) { return; }
+    using ablastr::fields::Direction;
+    const amrex::Real bsum =
+        a_wx->m_fields.get(FieldType::Bfield_fp, Direction{2}, 0)->sum(0);
+    amrex::Real esum = 0.0_rt;
+    if (a_wx->m_fields.has(FieldType::hybrid_B_fp_external, Direction{2}, 0)) {
+        esum = a_wx->m_fields.get(
+            FieldType::hybrid_B_fp_external, Direction{2}, 0)->sum(0);
+    }
+    amrex::Print() << "EXT_LEDGER[" << a_tag << "] sumBz=" << bsum
+                   << " sumBextz=" << esum << "\n";
+}
+}
+
 void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_restart )
 {
     BL_PROFILE("ThetaImplicitHybrid::Define()");
@@ -209,6 +228,7 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
         using ablastr::fields::Direction;
         auto & ext = *m_hybrid_pic_model->m_external_vector_potential;
         ext.UpdateHybridExternalFields(start_time, a_dt);
+        ExtLedgerPrint(m_WarpX, "entry pre-strip");
         for (int lev = 0; lev < m_num_amr_levels; ++lev) {
             for (int dir = 0; dir < 3; ++dir) {
                 amrex::MultiFab & B = *m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{dir}, lev);
@@ -219,11 +239,13 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
                 amrex::MultiFab::Subtract(E, E_ext, 0, 0, E.nComp(), E.nGrowVect());
             }
         }
+        ExtLedgerPrint(m_WarpX, "entry post-strip");
         // Mid-step values used throughout the nonlinear solve: B_ext at
         // t^{n+theta}, and E_ext = -[f(t^{n+theta}+dt/2) -
         // f(t^{n+theta}-dt/2)]/dt * A for the push field (at theta = 1/2
         // this is the exact step mean of the inductive field).
         ext.UpdateHybridExternalFields(start_time + m_theta*a_dt, a_dt);
+        ExtLedgerPrint(m_WarpX, "entry post-theta-eval");
     }
 
     // Save particle state at t^n
@@ -1110,6 +1132,7 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
         // the carried plasma field would gain a spurious
         // (1/theta)*B_ext^{n+theta} every step (the vacuum-ramp deck
         // integrates the programmed ramp to a ~300x overshoot).
+        ExtLedgerPrint(m_WarpX, "finish pre-theta-strip");
         if (m_hybrid_pic_model->m_add_external_fields) {
             using ablastr::fields::Direction;
             for (int lev = 0; lev < m_num_amr_levels; ++lev) {
@@ -1120,10 +1143,12 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
                 }
             }
         }
+        ExtLedgerPrint(m_WarpX, "finish post-theta-strip");
         // B^{n+1}
         ablastr::fields::MultiLevelVectorField const& B_old =
             m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::B_old, 0);
         m_WarpX->FinishMagneticFieldAndApplyBCs( B_old, m_theta, end_time );
+        ExtLedgerPrint(m_WarpX, "finish post-extrap");
     }
 
     // Electron inertia: rotate the per-step nodal Je history via the
@@ -1162,6 +1187,7 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
                 amrex::MultiFab::Add(E, E_ext, 0, 0, E.nComp(), E.nGrowVect());
             }
         }
+        ExtLedgerPrint(m_WarpX, "finish post-restore");
     }
 }
 

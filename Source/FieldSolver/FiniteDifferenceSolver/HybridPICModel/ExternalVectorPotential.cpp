@@ -60,6 +60,7 @@ ExternalVectorPotential::ReadParameters ()
 
     m_use_python_scale.resize(m_nFields, false);
     m_python_scale.resize(m_nFields);
+    m_in_initial_field.resize(m_nFields, false);
 
     for (int i = 0; i < m_nFields; ++i) {
         bool read_from_file = false;
@@ -94,6 +95,11 @@ ExternalVectorPotential::ReadParameters ()
 
         pp_ext_A.query(m_field_names[i]+".A_time_external_function(t)",
             m_A_ext_time_function[i]);
+
+        bool in_initial_field = false;
+        utils::parser::queryWithParser(pp_ext_A,
+            (m_field_names[i]+".in_initial_field").c_str(), in_initial_field);
+        m_in_initial_field[i] = in_initial_field;
     }
 }
 
@@ -383,7 +389,8 @@ ExternalVectorPotential::AddExternalFieldFromVectorPotential (
 }
 
 void
-ExternalVectorPotential::UpdateHybridExternalFields (const amrex::Real t, const amrex::Real dt)
+ExternalVectorPotential::UpdateHybridExternalFields (const amrex::Real t, const amrex::Real dt,
+                                                     const bool skip_in_initial_field)
 {
     using ablastr::fields::Direction;
     auto& warpx = WarpX::GetInstance();
@@ -403,6 +410,8 @@ ExternalVectorPotential::UpdateHybridExternalFields (const amrex::Real t, const 
 
     // Iterate over external fields and add together with individual time functions.
     for (int i = 0; i < m_nFields; ++i) {
+        if (skip_in_initial_field && m_in_initial_field[i]) { continue; }
+
         const std::string Aext_field = m_field_names[i] + std::string{"_Aext"};
         const std::string curlAext_field = m_field_names[i] + std::string{"_curlAext"};
 
@@ -447,4 +456,45 @@ ExternalVectorPotential::UpdateHybridExternalFields (const amrex::Real t, const 
         }
     }
     amrex::Gpu::streamSynchronize();
+}
+
+void
+ExternalVectorPotential::AddInitialExternalBField ()
+{
+    using ablastr::fields::Direction;
+    auto& warpx = WarpX::GetInstance();
+
+    // Form the total initial field from the loaded initial condition: add
+    // the summed t=0 external B to the state, EXCLUDING coils declared
+    // in_initial_field (their flux is already contained in the loaded
+    // field -- e.g. a free-boundary equilibrium file that includes the
+    // confining coil set; adding them again would double the vacuum field
+    // everywhere and destroy the loaded configuration).
+    //
+    // t/dt conventions match the historical call site
+    // (WarpX::HybridPICInitializeRhoJandB): t_new is what t_old will be
+    // when entering the solver.
+    const amrex::Real t0 = warpx.gett_new(0);
+    const amrex::Real dt_half = 0.5_rt * warpx.getdt(0);
+
+    // Accumulate the subset sum into the external arrays, add it to the
+    // state exactly as the historical code did (all ghosts), then restore
+    // the full-coil-set arrays for downstream consumers. With no coil
+    // flagged both evaluations are the full sum and the add is unchanged.
+    UpdateHybridExternalFields(t0, dt_half, true /* skip_in_initial_field */);
+
+    for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+        for (int idir = 0; idir < 3; ++idir) {
+            amrex::MultiFab & B_ext = *warpx.m_fields.get(
+                FieldType::hybrid_B_fp_external, Direction{idir}, lev);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                B_ext.is_finite(),
+                "Non-finite value detected in external B-field at t=0.");
+            amrex::MultiFab & B = *warpx.m_fields.get(
+                FieldType::Bfield_fp, Direction{idir}, lev);
+            amrex::MultiFab::Add(B, B_ext, 0, 0, 1, B.nGrowVect());
+        }
+    }
+
+    UpdateHybridExternalFields(t0, dt_half);
 }

@@ -70,3 +70,22 @@ add_warpx_test(
     OFF  # dependency
 )
 label_warpx_test(test_rz_ohm_solver_vacuum_ramp_circuit_split_picmi slow)
+
+# Regression guard for external_vector_potential.<name>.in_initial_field:
+# the loaded uniform bias B0 is also declared as a static external coil
+# flagged as already contained in the initial condition. The first-step
+# state assembly must skip its t=0 addition (without the flag the total
+# field doubles at step 1 -- the loaded-equilibrium double-count that
+# destroys free-boundary configurations -- and the ramp asserts fail);
+# the per-step strip/restore carries the static coil as an exact wash,
+# so the standard ramp asserts apply unchanged.
+add_warpx_test(
+    test_rz_ohm_solver_vacuum_ramp_static_coil_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_ohm_solver_vacuum_ramp_picmi.py --test --implicit --static-coil-check"  # inputs
+    "analysis_vacuum_ramp.py"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+label_warpx_test(test_rz_ohm_solver_vacuum_ramp_static_coil_picmi slow)
