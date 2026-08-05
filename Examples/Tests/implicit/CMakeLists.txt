@@ -453,6 +453,18 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# instability-bounded variant: the same mirror-unstable state must be
+# pulled to marginal stability at the cyclotron-scale enhanced rate
+add_warpx_test(
+    test_1d_theta_implicit_mhd_cgl_relaxation_bounded  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_cgl_relaxation implicit_mhd.cgl_instability_scale=0.1"  # inputs
+    "analysis_mhd_cgl_relaxation.py diags/diag000000 diags/diag000040 bounded"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # hlld variants of the closure/positivity suite: the recast must
 # reproduce the exact-Riemann plateaus, the exact static contact, and
 # the exact fluid-energy pairing of the hllc/rusanov paths

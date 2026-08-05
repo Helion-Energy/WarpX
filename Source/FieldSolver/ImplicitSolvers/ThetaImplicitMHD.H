@@ -239,6 +239,15 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // scale (0 disables relaxation), with the given Coulomb logarithm.
     amrex::Real m_cgl_relaxation_scale = 1.0;
     amrex::Real m_cgl_coulomb_log = 10.0;
+    // Instability-bounded relaxation (Stage B): where the state crosses
+    // the firehose (p_par - p_perp > B^2/mu0) or mirror
+    // (beta_perp (p_perp/p_par - 1) > 1) thresholds, kinetic
+    // instabilities isotropize on cyclotron timescales; the relaxation
+    // rate gains cgl_instability_scale * Omega_ci through a C-infinity
+    // switch of relative width cgl_instability_width in the threshold
+    // measures. 0 disables the bounds (pure collisional Stage A).
+    amrex::Real m_cgl_instability_scale = 0.1;
+    amrex::Real m_cgl_instability_width = 0.1;
     // Vacuum cell-switch threshold for the ion fluid (0 disables): cells
     // below it are passive dust with frozen momentum (Holmstrom-style).
     amrex::Real m_vacuum_mass_density = 0.0;

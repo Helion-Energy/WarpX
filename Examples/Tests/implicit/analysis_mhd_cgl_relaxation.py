@@ -49,6 +49,8 @@ def load(path):
 
 initial = load(sys.argv[1])
 final = load(sys.argv[2])
+mode = sys.argv[3] if len(sys.argv) > 3 else "collisional"
+assert mode in ("collisional", "bounded")
 
 
 def delta(state):
@@ -82,10 +84,32 @@ print(f"U_par + U_perp drift       {conservation:.3e}")
 print(f"final spatial nonuniformity {uniformity:.3e}")
 
 assert delta(initial) > 0.9 * P0 * (3.0 / 5.0)
-assert relative_error < 1.0e-5, (
-    f"isotropization rate off by {relative_error:.3e}"
-)
 assert conservation < 1.0e-12
 assert uniformity < 1.0e-12
+
+if mode == "collisional":
+    assert relative_error < 1.0e-5, (
+        f"isotropization rate off by {relative_error:.3e}"
+    )
+else:
+    # Instability-bounded variant: the A0 = 2 state starts mirror
+    # unstable (beta_perp (p_perp/p_par - 1) = 2.4 > 1) and the
+    # cyclotron-scale enhancement must pull it to marginal stability
+    # far faster than the collisional rate alone
+    # (nu_inst dt ~ 0.6 vs nu_ii dt = 0.1 here).
+    magnetic_pressure = P0  # deck: B0 = sqrt(mu0 P0), so B0^2/mu0 = P0
+    p_par = 2.0 * np.mean(final["implicit_mhd_ion_parallel_energy"])
+    p_perp = np.mean(final["implicit_mhd_ion_perp_energy"])
+    mirror_measure = 2.0 * p_perp * (p_perp - p_par) / \
+        (magnetic_pressure * p_par) - 1.0
+    print(f"final mirror measure       {mirror_measure:.4f}")
+    assert mirror_measure < 0.2, (
+        "instability bound failed to pull the state to marginal "
+        f"stability (mirror measure {mirror_measure:.3f})"
+    )
+    collisional_growth = GROWTH**NSTEPS
+    assert delta(final) / delta(initial) < 0.5 * collisional_growth, (
+        "bounded relaxation is not faster than collisional"
+    )
 
 print("PASS")

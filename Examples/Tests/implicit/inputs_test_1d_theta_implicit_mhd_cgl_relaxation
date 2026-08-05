@@ -86,6 +86,10 @@ implicit_mhd.reference_ion_pressure = P0
 implicit_mhd.ion_closure = cgl
 implicit_mhd.cgl_relaxation_scale = 1.0
 implicit_mhd.cgl_coulomb_log = lnL
+# collisional-rate calibration: the A0 = 2 state is mirror-unstable
+# (beta_perp (A - 1) = 2.4), so the instability-bounded enhancement
+# must be off for the measured decay to be the pure Braginskii rate
+implicit_mhd.cgl_instability_scale = 0.0
 implicit_mhd.ion_pressure_floor = 1.0e-6 * P0
 implicit_mhd.mass_density_floor = 1.0e-6 * rho0
 implicit_mhd.electron_pressure_floor = 1.0e-9 * P0

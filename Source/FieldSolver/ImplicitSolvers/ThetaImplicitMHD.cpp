@@ -236,7 +236,16 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     utils::parser::queryWithParser(pp, "cgl_relaxation_scale",
                                    m_cgl_relaxation_scale);
     utils::parser::queryWithParser(pp, "cgl_coulomb_log", m_cgl_coulomb_log);
+    utils::parser::queryWithParser(pp, "cgl_instability_scale",
+                                   m_cgl_instability_scale);
+    utils::parser::queryWithParser(pp, "cgl_instability_width",
+                                   m_cgl_instability_width);
     if (m_ion_closure == "cgl") {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_cgl_instability_scale >= 0.0_rt &&
+                m_cgl_instability_width > 0.0_rt,
+            "implicit_mhd.cgl_instability_scale cannot be negative and "
+            "cgl_instability_width must be positive");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_use_hlld,
             "implicit_mhd.ion_closure = cgl requires implicit_mhd.fluid_flux "
@@ -743,7 +752,9 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "Joule heating:                 " << m_include_joule_heating << "\n";
     if (m_ion_closure == "cgl") {
         amrex::Print() << "CGL relaxation scale:          " << m_cgl_relaxation_scale << "\n"
-                       << "CGL Coulomb logarithm:         " << m_cgl_coulomb_log << "\n";
+                       << "CGL Coulomb logarithm:         " << m_cgl_coulomb_log << "\n"
+                       << "CGL instability scale/width:   " << m_cgl_instability_scale
+                       << " " << m_cgl_instability_width << "\n";
     }
     PrintBaseImplicitSolverParameters();
     m_nlsolver->PrintParams();
@@ -2904,6 +2915,9 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     const amrex::Real ion_perp_floor_rate = m_ion_pressure_floor / theta_dt;
     const amrex::Real ion_mass = PhysConst::q_e / m_ion_charge_to_mass;
     const amrex::Real inverse_ion_mass = 1.0_rt / ion_mass;
+    const amrex::Real cgl_inverse_mu0 = 1.0_rt / PhysConst::mu0;
+    const amrex::Real cgl_instability_scale = m_cgl_instability_scale;
+    const amrex::Real cgl_instability_width = m_cgl_instability_width;
     // Braginskii ion-ion collision rate, nu_ii = sqrt(2) n_i e^4 lnLambda
     // / (12 pi^{3/2} sqrt(m_i) eps0^2 (k T_i)^{3/2}), scaled by
     // cgl_relaxation_scale; the kernel evaluates
@@ -3468,9 +3482,53 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                     theta_implicit_mhd::smooth_positive_floor(
                         pressure_effective / number_density,
                         cgl_temperature_floor);
-                const amrex::Real nu_iso =
+                const amrex::Real nu_collisional =
                     cgl_relaxation_prefactor * number_density /
                     (temperature * std::sqrt(temperature));
+                // Instability-bounded relaxation (Stage B): past the
+                // firehose bound, p_par - p_perp > B^2/mu0, or the
+                // mirror bound, beta_perp (p_perp/p_par - 1) > 1,
+                // kinetic instabilities isotropize on cyclotron
+                // timescales that no collisional rate represents; the
+                // rate gains cgl_instability_scale * Omega_ci through
+                // C-infinity switches of relative width
+                // cgl_instability_width in the dimensionless threshold
+                // measures, holding the anisotropy near marginal
+                // stability (relaxation drives toward isotropy, which
+                // exits both unstable regions). b2 is the |B|^2 already
+                // assembled above; both measures reuse the smooth
+                // small_b2 and pressure-floor regularizations.
+                const amrex::Real b2_floored =
+                    theta_implicit_mhd::smooth_positive_floor(b2,
+                                                              small_b2);
+                const amrex::Real magnetic_pressure =
+                    b2_floored * cgl_inverse_mu0;
+                const amrex::Real firehose_measure =
+                    (pressure_parallel - pressure_perp) /
+                        magnetic_pressure -
+                    1.0_rt;
+                const amrex::Real parallel_pressure_floored =
+                    theta_implicit_mhd::smooth_positive_floor(
+                        pressure_parallel, ion_pressure_floor);
+                const amrex::Real mirror_measure =
+                    2.0_rt * pressure_perp *
+                        (pressure_perp - pressure_parallel) /
+                        (magnetic_pressure * parallel_pressure_floored) -
+                    1.0_rt;
+                const amrex::Real firehose_switch =
+                    0.5_rt * (1.0_rt + theta_implicit_mhd::smooth_sign(
+                                           firehose_measure,
+                                           cgl_instability_width));
+                const amrex::Real mirror_switch =
+                    0.5_rt * (1.0_rt + theta_implicit_mhd::smooth_sign(
+                                           mirror_measure,
+                                           cgl_instability_width));
+                const amrex::Real cyclotron_frequency =
+                    charge_to_mass * std::sqrt(b2_floored);
+                const amrex::Real nu_iso =
+                    nu_collisional +
+                    cgl_instability_scale * cyclotron_frequency *
+                        (firehose_switch + mirror_switch);
                 amrex::Real parallel_relaxation =
                     (nu_iso / 3.0_rt) *
                     (pressure_perp - pressure_parallel);

@@ -4086,6 +4086,27 @@ Jacobian probes.
 
     Coulomb logarithm of the ``cgl`` isotropization rate.
 
+.. pp:param:: implicit_mhd.cgl_instability_scale
+    :type: ``float``
+    :default: ``0.1``
+
+    Instability-bounded relaxation of the ``cgl`` closure: past the
+    firehose bound (:math:`p_\parallel - p_\perp > B^2/\mu_0`) or the
+    mirror bound (:math:`\beta_\perp(p_\perp/p_\parallel - 1) > 1`),
+    kinetic instabilities isotropize on cyclotron timescales that no
+    collisional rate represents; the relaxation rate gains
+    ``cgl_instability_scale`` :math:`\times\,\Omega_{ci}` through
+    :math:`C^\infty` switches in the dimensionless threshold measures,
+    holding the anisotropy near marginal stability. ``0`` disables the
+    bounds (pure collisional relaxation, which lets the anisotropy grow
+    to unphysical values in collisionless regions).
+
+.. pp:param:: implicit_mhd.cgl_instability_width
+    :type: ``float``
+    :default: ``0.1``
+
+    Relative :math:`C^\infty` switch width of the instability bounds.
+
 .. pp:param:: implicit_mhd.mass_density_floor
     :type: ``float``
     :unit: :math:`\mathrm{kg\,m^{-3}}`

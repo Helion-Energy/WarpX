@@ -2248,6 +2248,14 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
     cgl_coulomb_log: float, default=10.0
         Coulomb logarithm of the CGL isotropization rate.
 
+    cgl_instability_scale: float, default=0.1
+        Instability-bounded relaxation: fraction of the local ion
+        cyclotron frequency added to the isotropization rate past the
+        firehose/mirror thresholds (0 disables the bounds).
+
+    cgl_instability_width: float, default=0.1
+        Relative C-infinity switch width of the instability bounds.
+
     ion_pressure_anisotropy: str or float, optional
         With ion_closure="cgl": initial p_perp/p_par ratio expression
         (default 1, isotropic), with the effective pressure pinned to
@@ -2315,6 +2323,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         ion_pressure_anisotropy=None,
         cgl_relaxation_scale=None,
         cgl_coulomb_log=None,
+        cgl_instability_scale=None,
+        cgl_instability_width=None,
         ion_pressure_floor=None,
         positivity_safety=None,
         evolve_ion_fluid=None,
@@ -2355,6 +2365,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.ion_pressure_anisotropy = ion_pressure_anisotropy
         self.cgl_relaxation_scale = cgl_relaxation_scale
         self.cgl_coulomb_log = cgl_coulomb_log
+        self.cgl_instability_scale = cgl_instability_scale
+        self.cgl_instability_width = cgl_instability_width
         self.ion_pressure_floor = ion_pressure_floor
         self.positivity_safety = positivity_safety
         self.evolve_ion_fluid = evolve_ion_fluid
@@ -2402,6 +2414,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
             "ion_pressure_anisotropy(x,y,z)", self.ion_pressure_anisotropy)
         implicit_mhd.cgl_relaxation_scale = self.cgl_relaxation_scale
         implicit_mhd.cgl_coulomb_log = self.cgl_coulomb_log
+        implicit_mhd.cgl_instability_scale = self.cgl_instability_scale
+        implicit_mhd.cgl_instability_width = self.cgl_instability_width
         implicit_mhd.ion_pressure_floor = self.ion_pressure_floor
         implicit_mhd.positivity_safety = self.positivity_safety
         implicit_mhd.evolve_ion_fluid = self.evolve_ion_fluid
