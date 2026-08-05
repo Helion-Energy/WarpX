@@ -307,12 +307,14 @@ class ThetaImplicitMHD final : public ImplicitSolver
     std::unique_ptr<amrex::Parser> m_velocity_z_parser;
     std::unique_ptr<amrex::Parser> m_electron_pressure_parser;
     std::unique_ptr<amrex::Parser> m_ion_pressure_parser;
+    std::unique_ptr<amrex::Parser> m_ion_anisotropy_parser;
     amrex::ParserExecutor<3> m_mass_density;
     amrex::ParserExecutor<3> m_velocity_x;
     amrex::ParserExecutor<3> m_velocity_y;
     amrex::ParserExecutor<3> m_velocity_z;
     amrex::ParserExecutor<3> m_electron_pressure;
     amrex::ParserExecutor<3> m_ion_pressure;
+    amrex::ParserExecutor<3> m_ion_anisotropy;
 
     void SaveMagneticField ();
     void UpdateWarpXFields (const WarpXSolverVec& state, amrex::Real start_time);

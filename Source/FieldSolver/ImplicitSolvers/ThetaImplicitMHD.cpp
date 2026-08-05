@@ -315,6 +315,12 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     } else {
         utils::parser::Query_parserString(pp, "ion_pressure(x,y,z)", ion_pressure_expression);
     }
+    // cgl: optional initial anisotropy A = p_perp/p_par with the
+    // effective pressure pinned to ion_pressure, i.e.
+    // p_par = 3 p_i/(1 + 2A) and p_perp = A p_par.
+    std::string ion_anisotropy_expression = "1.0";
+    utils::parser::Query_parserString(pp, "ion_pressure_anisotropy(x,y,z)",
+                                      ion_anisotropy_expression);
     utils::parser::Query_parserString(pp, "velocity_x(x,y,z)", velocity_x_expression);
     utils::parser::Query_parserString(pp, "velocity_y(x,y,z)", velocity_y_expression);
     utils::parser::Query_parserString(pp, "velocity_z(x,y,z)", velocity_z_expression);
@@ -332,12 +338,15 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         utils::parser::makeParser(electron_pressure_expression, variables));
     m_ion_pressure_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(ion_pressure_expression, variables));
+    m_ion_anisotropy_parser = std::make_unique<amrex::Parser>(
+        utils::parser::makeParser(ion_anisotropy_expression, variables));
     m_mass_density = m_mass_density_parser->compile<3>();
     m_velocity_x = m_velocity_x_parser->compile<3>();
     m_velocity_y = m_velocity_y_parser->compile<3>();
     m_velocity_z = m_velocity_z_parser->compile<3>();
     m_electron_pressure = m_electron_pressure_parser->compile<3>();
     m_ion_pressure = m_ion_pressure_parser->compile<3>();
+    m_ion_anisotropy = m_ion_anisotropy_parser->compile<3>();
 }
 
 void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fields, const int lev,
@@ -760,6 +769,7 @@ void ThetaImplicitMHD::InitializeFluidState ()
     const auto velocity_z = m_velocity_z;
     const auto electron_pressure = m_electron_pressure;
     const auto ion_pressure = m_ion_pressure;
+    const auto ion_anisotropy = m_ion_anisotropy;
     const amrex::Real density_floor = m_mass_density_floor;
     const amrex::Real pressure_floor = m_electron_pressure_floor;
     const amrex::Real gamma_e_minus_one = m_gamma_e - 1.0_rt;
@@ -806,14 +816,23 @@ void ThetaImplicitMHD::InitializeFluidState ()
                     0.5_rt * rho * (vx * vx + vy * vy + vz * vz);
             }
             if (cgl_closure) {
-                // Isotropic bi-Maxwellian initialization: p_par = p_perp
-                // = p_i, so U_par = p_i/2 and U_perp = p_i. No kinetic
-                // term -- the CGL blocks are pure internal energies (the
-                // kinetic energy lives in the momentum block only).
+                // Bi-Maxwellian initialization with the effective
+                // pressure pinned to ion_pressure and the optional
+                // anisotropy A = p_perp/p_par (default 1, isotropic):
+                // p_par = 3 p_i/(1 + 2A), p_perp = A p_par; U_par =
+                // p_par/2, U_perp = p_perp. No kinetic term -- the CGL
+                // blocks are pure internal energies (the kinetic energy
+                // lives in the momentum block only).
                 const amrex::Real p_i =
                     std::max(ion_pressure(x, y, z), ion_pressure_floor);
-                ion_parallel_array(i, j, k) = 0.5_rt * p_i;
-                ion_perp_array(i, j, k) = p_i;
+                const amrex::Real anisotropy =
+                    std::max(ion_anisotropy(x, y, z), 0.0_rt);
+                const amrex::Real p_par =
+                    3.0_rt * p_i / (1.0_rt + 2.0_rt * anisotropy);
+                ion_parallel_array(i, j, k) = std::max(
+                    0.5_rt * p_par, 0.5_rt * ion_pressure_floor);
+                ion_perp_array(i, j, k) =
+                    std::max(anisotropy * p_par, ion_pressure_floor);
             }
         });
     }
@@ -2895,10 +2914,15 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
         (12.0_rt * std::pow(MathConst::pi, amrex::Real(1.5)) *
          std::sqrt(ion_mass) * PhysConst::epsilon_0 * PhysConst::epsilon_0);
     // Strictly positive temperature anchor for the smooth kT_eff floor:
-    // the floor state kT = p_i_floor / n_i_floor (any positive anchor
-    // works; it only bounds nu_iso and keeps the T^{-3/2} smooth).
+    // the FLOOR pressure at the REFERENCE density, which is far below
+    // any operating temperature (the earlier p_floor/n_floor anchor is
+    // the reference temperature itself when both floors are the same
+    // fraction of their references, and the softplus then inflates
+    // healthy kT by 1.5x, biasing nu_iso low by 1.5^{3/2} -- caught by
+    // the calibrated relaxation CI test). Any strictly positive anchor
+    // is admissible; it only bounds nu_iso and keeps T^{-3/2} smooth.
     const amrex::Real cgl_temperature_floor =
-        m_ion_pressure_floor * ion_mass / m_mass_density_floor;
+        m_ion_pressure_floor * ion_mass / m_reference_mass_density;
     // Direction regularization of bhat bhat = b b / smooth-floored |b|^2:
     // below the field-energy scale mu0 p_i_floor the deviation force and
     // the anisotropy work are physically negligible, so only the

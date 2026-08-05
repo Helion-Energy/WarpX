@@ -1,0 +1,114 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.Ti = 100.0
+my_constants.P0 = n0 * Ti * q_e
+my_constants.pe0 = 0.5 * P0
+my_constants.gamma = 5.0/3.0
+my_constants.B0 = sqrt(mu0 * P0)
+# Uniform static bi-Maxwellian with p_perp/p_par = A0: every flux and
+# work term is exactly inert (uniform state, u = 0), so the ONLY
+# dynamics is the ion-ion isotropization exchange
+#   dU_par/dt = (nu/3)(p_perp - p_par) = -dU_perp/dt,
+# under which Delta = p_perp - p_par decays at exactly nu (the
+# effective pressure, density, and hence nu itself are conserved, so
+# the ODE is linear) and U_par + U_perp is conserved to round-off.
+# nu = sqrt(2) q_e^4 lnL n0 / (12 pi^1.5 sqrt(m_p) epsilon0^2 kT^1.5)
+# with kT = P0/n0; the theta scheme multiplies Delta per step by
+#   g = (1 - (1-theta) nu dt)/(1 + theta nu dt).
+my_constants.A0 = 2.0
+my_constants.lnL = 10.0
+my_constants.kT = P0 / n0
+my_constants.nu = sqrt(2) * q_e^4 * lnL * n0 / \
+                  (12 * pi^1.5 * sqrt(m_p) * epsilon0^2 * kT^1.5)
+my_constants.dt = 0.1 / nu
+my_constants.nz = 16
+my_constants.Lz = 0.2
+
+max_step = 40
+amr.n_cell = nz
+amr.max_grid_size = 16
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 20
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-10
+gmres.max_iterations = 400
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Ti
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = P0
+implicit_mhd.ion_closure = cgl
+implicit_mhd.cgl_relaxation_scale = 1.0
+implicit_mhd.cgl_coulomb_log = lnL
+implicit_mhd.ion_pressure_floor = 1.0e-6 * P0
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-9 * P0
+implicit_mhd.fluid_flux = hlld
+implicit_mhd.mass_density(x,y,z) = "rho0"
+implicit_mhd.ion_pressure(x,y,z) = "P0"
+implicit_mhd.ion_pressure_anisotropy(x,y,z) = "A0"
+implicit_mhd.electron_pressure(x,y,z) = "pe0"
+
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 B0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 40
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz implicit_mhd_mass_density \
+                       implicit_mhd_ion_parallel_energy \
+                       implicit_mhd_ion_perp_energy \
+                       implicit_mhd_electron_energy
+diag1.write_species = 0

@@ -2239,6 +2239,20 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         by a Mach-aware factor, removing the spurious low-Mach
         normal-momentum diffusion.
 
+    cgl_relaxation_scale: float, default=1.0
+        With ion_closure="cgl": multiplier on the Braginskii ion-ion
+        isotropization rate driving T_i_par toward T_i_perp (0 disables
+        relaxation; >1 models anomalous/instability-driven
+        isotropization).
+
+    cgl_coulomb_log: float, default=10.0
+        Coulomb logarithm of the CGL isotropization rate.
+
+    ion_pressure_anisotropy: str or float, optional
+        With ion_closure="cgl": initial p_perp/p_par ratio expression
+        (default 1, isotropic), with the effective pressure pinned to
+        ion_pressure.
+
     hlld_kappa_signal, hlld_kappa_contact, hlld_kappa_bn, hlld_kappa_denominator: float, optional
         C-infinity smoothing widths of the HLLD wave fan (defaults 0.05):
         Davis signal bounds, region blend, B_n -> 0 rotational-layer
@@ -2298,6 +2312,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         hlld_kappa_denominator=None,
         ion_closure=None,
         ion_pressure=None,
+        ion_pressure_anisotropy=None,
+        cgl_relaxation_scale=None,
+        cgl_coulomb_log=None,
         ion_pressure_floor=None,
         positivity_safety=None,
         evolve_ion_fluid=None,
@@ -2335,6 +2352,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.hlld_kappa_denominator = hlld_kappa_denominator
         self.ion_closure = ion_closure
         self.ion_pressure = ion_pressure
+        self.ion_pressure_anisotropy = ion_pressure_anisotropy
+        self.cgl_relaxation_scale = cgl_relaxation_scale
+        self.cgl_coulomb_log = cgl_coulomb_log
         self.ion_pressure_floor = ion_pressure_floor
         self.positivity_safety = positivity_safety
         self.evolve_ion_fluid = evolve_ion_fluid
@@ -2378,6 +2398,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.hlld_kappa_denominator = self.hlld_kappa_denominator
         implicit_mhd.ion_closure = self.ion_closure
         implicit_mhd.__setattr__("ion_pressure(x,y,z)", self.ion_pressure)
+        implicit_mhd.__setattr__(
+            "ion_pressure_anisotropy(x,y,z)", self.ion_pressure_anisotropy)
+        implicit_mhd.cgl_relaxation_scale = self.cgl_relaxation_scale
+        implicit_mhd.cgl_coulomb_log = self.cgl_coulomb_log
         implicit_mhd.ion_pressure_floor = self.ion_pressure_floor
         implicit_mhd.positivity_safety = self.positivity_safety
         implicit_mhd.evolve_ion_fluid = self.evolve_ion_fluid

@@ -4049,6 +4049,43 @@ Jacobian probes.
     :pp:param:`implicit_mhd.ion_pressure_floor`, and :math:`\gamma_i>1`; the
     ``pc_mhd_block`` preconditioner supports only the barotropic closure.
 
+    ``cgl`` (``fluid_flux = hlld`` only) evolves the CGL bi-Maxwellian
+    ion internal energies :math:`U_\parallel = p_\parallel/2` and
+    :math:`U_\perp = p_\perp` as two JFNK unknowns instead of
+    :math:`E_i` — the pressure recovery is then LINEAR in the state (no
+    kinetic-energy subtraction), which removes the cold-ion Newton
+    degeneracy of near-stagnant kinetic-dominated cells. The Riemann
+    fan carries the effective isotropic pressure
+    :math:`p_\mathrm{eff}=(p_\parallel+2p_\perp)/3`; the internal
+    energies ride the fan as contact-advected star channels; the
+    trace-free deviation stress
+    :math:`(p_\parallel-p_\perp)(\hat b\hat b - I/3)` enters the
+    momentum equation pointwise (with the cylindrical geometric terms
+    in RZ); and the CGL work terms use the full axisymmetric covariant
+    velocity-gradient contraction. Ion--ion isotropization relaxes
+    :math:`p_\perp - p_\parallel` at
+    ``cgl_relaxation_scale`` :math:`\times \nu_{ii}` (Braginskii, with
+    ``cgl_coulomb_log``), conserving :math:`U_\parallel + U_\perp`;
+    a calibrated CI test pins the implemented rate to the analytic
+    :math:`\theta`-discrete decay at machine precision. The optional
+    ``ion_pressure_anisotropy(x,y,z)`` parser sets the initial
+    :math:`p_\perp/p_\parallel` (default 1) with
+    :math:`p_\mathrm{eff}` pinned to ``ion_pressure(x,y,z)``.
+
+.. pp:param:: implicit_mhd.cgl_relaxation_scale
+    :type: ``float``
+    :default: ``1.0``
+
+    Multiplier on the Braginskii ion-ion isotropization rate of the
+    ``cgl`` closure (0 disables relaxation; values above 1 model
+    anomalous/instability-driven isotropization).
+
+.. pp:param:: implicit_mhd.cgl_coulomb_log
+    :type: ``float``
+    :default: ``10.0``
+
+    Coulomb logarithm of the ``cgl`` isotropization rate.
+
 .. pp:param:: implicit_mhd.mass_density_floor
     :type: ``float``
     :unit: :math:`\mathrm{kg\,m^{-3}}`

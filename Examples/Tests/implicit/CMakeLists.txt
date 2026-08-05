@@ -439,6 +439,20 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# CGL bi-Maxwellian isotropization: a uniform static anisotropic state
+# must relax p_perp - p_par at exactly the Braginskii nu_ii (re-derived
+# from first principles in the analysis) through the theta-discrete
+# factor, conserving U_par + U_perp to round-off
+add_warpx_test(
+    test_1d_theta_implicit_mhd_cgl_relaxation  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_cgl_relaxation  # inputs
+    "analysis_mhd_cgl_relaxation.py diags/diag000000 diags/diag000040"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # hlld variants of the closure/positivity suite: the recast must
 # reproduce the exact-Riemann plateaus, the exact static contact, and
 # the exact fluid-energy pairing of the hllc/rusanov paths
