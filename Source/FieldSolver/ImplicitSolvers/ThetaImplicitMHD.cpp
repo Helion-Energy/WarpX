@@ -241,6 +241,7 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     utils::parser::queryWithParser(pp, "cgl_instability_width",
                                    m_cgl_instability_width);
     utils::parser::queryWithParser(pp, "cgl_null_scale", m_cgl_null_scale);
+    pp.query("z_outflow_no_reflux", m_z_outflow_no_reflux);
     if (m_ion_closure == "cgl") {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_cgl_instability_scale >= 0.0_rt &&
@@ -887,6 +888,35 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
     if (m_z_neumann) {
         ApplyNeumannZDomainGhosts(density);
         ApplyNeumannZDomainGhosts(momentum);
+        if (m_z_outflow_no_reflux) {
+            // No-reflux outflow (opt-in): the zero-gradient ghosts are
+            // passive and admit inflow when the interior pulls inward
+            // (e.g. mirror flux compression dragging the end columns
+            // through the throats); clamping the ghost AXIAL momentum
+            // to the outward sign permits drainage but forbids the
+            // boundary feeding plasma back. Scalars stay zero-gradient.
+            const amrex::Box domain = amrex::convert(
+                m_WarpX->Geom(0).Domain(), momentum.ixType().toIntVect());
+            const int domain_lo = domain.smallEnd(1);
+            const int domain_hi = domain.bigEnd(1);
+            for (amrex::MFIter mfi(momentum); mfi.isValid(); ++mfi) {
+                const amrex::Box grown =
+                    amrex::grow(mfi.validbox(), momentum.nGrowVect());
+                if (grown.smallEnd(1) >= domain_lo &&
+                    grown.bigEnd(1) <= domain_hi) {
+                    continue;
+                }
+                const auto arr = momentum.array(mfi);
+                amrex::ParallelFor(grown,
+                                   [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    if (j < domain_lo) {
+                        arr(i, j, k, 2) = std::min(arr(i, j, k, 2), 0.0_rt);
+                    } else if (j > domain_hi) {
+                        arr(i, j, k, 2) = std::max(arr(i, j, k, 2), 0.0_rt);
+                    }
+                });
+            }
+        }
         ApplyNeumannZDomainGhosts(electron_energy);
         ApplyNeumannZDomainGhosts(ion_energy);
         ApplyNeumannZDomainGhosts(ion_parallel_energy);

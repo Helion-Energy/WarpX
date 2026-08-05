@@ -292,6 +292,10 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // zero-gradient (Neumann) values, giving outflow ends instead of the
     // periodic seam. Set automatically when the z geometry is non-periodic.
     bool m_z_neumann = false;
+    // Opt-in no-reflux variant of the Neumann-z outflow: ghost axial
+    // momentum clamped to the outward sign (drainage allowed, reflux
+    // forbidden). Default keeps the passive zero-gradient behavior.
+    bool m_z_outflow_no_reflux = false;
     // Open upper radial boundary (RZ only): boundary.field_hi = open on r
     // selects the Green's-function free-space fill for the fields; the
     // fluid then gets zero-gradient (outflow) radial ghosts at r_max
