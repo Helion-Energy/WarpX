@@ -4201,6 +4201,23 @@ Jacobian probes.
     Requires ``fluid_flux = hlld``, ``ion_closure = total_energy``, and
     a positive ``reference_ion_pressure``.
 
+.. pp:param:: implicit_mhd.hlld_ion_energy_flux
+    :type: ``string``
+    :default: ``star``
+
+    Ion total-energy channel of the HLLD flux. ``star`` (default)
+    builds fan-consistent star energies from the :math:`S_{L,R}` jump
+    conditions with the gas star pressure derived from the fan's
+    total star pressure: a magnetically balanced static gradient gives
+    :math:`S_M = 0` and star states equal to the inputs (no energy
+    pumping — the Toro gas-star pathology does not arise because
+    :math:`S_M` comes from the total pressure), and contact jumps
+    dissipate at :math:`|S_M|` scale. ``llf`` selects the fast-speed
+    local Lax--Friedrichs enthalpy fallback, which diffuses every
+    :math:`E_i` gradient at the fast-magnetosonic scale (visible as a
+    steady ion-energy drain along strong-:math:`B_n` field lines in
+    near-static equilibria).
+
 .. pp:param:: implicit_mhd.hlld_kappa_signal
     :type: ``float``
     :default: ``0.05``

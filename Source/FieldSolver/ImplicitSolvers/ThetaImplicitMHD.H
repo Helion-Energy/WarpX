@@ -251,6 +251,10 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // barotropic fan, with a widened hlld_kappa_bn, is the robustness
     // configuration for violent rotational/compound structures.
     std::string m_hlld_fan_closure = "consistent";
+    // Ion-energy channel: "star" (default; fan-consistent star energy,
+    // contact-scale dissipation) or "llf" (the fast-alpha enthalpy
+    // fallback, which diffuses every E_i gradient at the fast speed).
+    std::string m_hlld_ion_energy_flux = "star";
     // HLLC signal-speed closure: "consistent" (default; wave-speed
     // estimates from the same p_i as the physical flux) or "barotropic"
     // (wave-speed estimates from the polytropic p_i(rho), decoupling the

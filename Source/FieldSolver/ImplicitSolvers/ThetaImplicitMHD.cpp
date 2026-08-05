@@ -205,6 +205,10 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         m_hlld_fan_closure == "consistent" ||
             m_hlld_fan_closure == "barotropic",
         "implicit_mhd.hlld_fan_closure must be consistent or barotropic");
+    pp.query("hlld_ion_energy_flux", m_hlld_ion_energy_flux);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_hlld_ion_energy_flux == "star" || m_hlld_ion_energy_flux == "llf",
+        "implicit_mhd.hlld_ion_energy_flux must be star or llf");
     if (m_hlld_fan_closure == "barotropic") {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_use_hlld && m_ion_closure == "total_energy",
@@ -679,6 +683,7 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "HLLC contact blend:            " << m_hllc_contact_blend << "\n";
     if (m_use_hlld) {
         amrex::Print() << "HLLD fan closure:              " << m_hlld_fan_closure << "\n"
+                       << "HLLD ion-energy flux:          " << m_hlld_ion_energy_flux << "\n"
                        << "HLLD kappa signal/contact:     " << m_hlld_kappa_signal
                        << " " << m_hlld_kappa_contact << "\n"
                        << "HLLD kappa bn/denominator:     " << m_hlld_kappa_bn
@@ -1502,6 +1507,8 @@ theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
     flux_parameters.hlld_kappa_denominator = m_hlld_kappa_denominator;
     flux_parameters.hlld_barotropic_fan =
         (m_hlld_fan_closure == "barotropic");
+    flux_parameters.hlld_ion_energy_star =
+        (m_hlld_ion_energy_flux == "star");
     return flux_parameters;
 }
 

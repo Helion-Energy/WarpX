@@ -80,6 +80,9 @@ struct FluxParameters {
     // line search; the Brio-Wu lock bisection localized the mechanism
     // to exactly this path.
     bool hlld_barotropic_fan = false;
+    // Fan-consistent star construction for the ion-energy channel
+    // (default); false selects the LLF enthalpy fallback.
+    bool hlld_ion_energy_star = true;
 };
 
 struct CellState {
@@ -870,23 +873,74 @@ hlld_flux (const CellState& left, const CellState& right,
          weight_alfven_left * (bt2_dstar - bt2_star_left) -
          weight_alfven_right * (bt2_star_right - bt2_dstar));
 
-    // Ion total energy: LLF enthalpy channel (H = E_i + p_i + p_e, no
-    // magnetic terms) with the fast-speed alpha -- see the component-
-    // hybrid rationale in hllc_flux. The alpha is assembled C-infinity:
-    // both the |u_n| of each side (a hard kink exactly where a fan-
-    // internal face crosses stagnation -- invisible under the barotropic
-    // closure because alpha multiplies the E_i jump) and the left/right
-    // max are smoothed with the signal width; the smoothing only raises
-    // alpha, and smooth_abs(0) = 0 keeps static contacts exact.
-    const amrex::Real alpha_energy = smooth_max(
-        smooth_abs(u_left, signal_width) + left.fast_speed,
-        smooth_abs(u_right, signal_width) + right.fast_speed, signal_width);
-    flux.ion_energy =
-        0.5 * (u_left * (left.ion_energy + left.ion_pressure +
-                         left.electron_pressure) +
-               u_right * (right.ion_energy + right.ion_pressure +
-                          right.electron_pressure) -
-               alpha_energy * (right.ion_energy - left.ion_energy));
+    // Ion total energy. The fan-consistent star channel (default) builds
+    // E_i* from the S_L/S_R jump conditions of the model equation
+    // dE_i/dt + div(u (E_i + p_i + p_e)) = sources (the magnetic work
+    // arrives through the SEPARATE discrete stress difference, so the
+    // flux carries only the gas work): the gas star pressure is the
+    // fan's single-valued total star pressure (MK05 eq. 41, evaluated
+    // with the fan pressures) minus each side's star magnetic pressure.
+    // Because S_M comes from the TOTAL pressure, a magnetically balanced
+    // static gradient (an FRC separatrix or halo: u ~ 0, gas jump held
+    // by J x B) gives S_M = 0 and star states equal to the inputs -- no
+    // energy pumping (the Toro gas-star pathology that motivated the
+    // hllc component hybrid does not arise) and only |S_M|-scale
+    // dissipation of contact jumps, instead of the LLF channel's
+    // fast-speed diffusion of every E_i gradient (which visibly drains
+    // near-static ion energy along strong-B_n field lines). The LLF
+    // enthalpy channel is retained as a fallback
+    // (FluxParameters::hlld_ion_energy_star = false).
+    if (parameters.hlld_ion_energy_star) {
+        const amrex::Real p_t_star =
+            0.5 * ((p_fan_left + m_left * slip_left) +
+                   (p_fan_right + m_right * slip_right));
+        const amrex::Real p_gas_left =
+            left.ion_pressure + left.electron_pressure;
+        const amrex::Real p_gas_right =
+            right.ion_pressure + right.electron_pressure;
+        const amrex::Real p_gas_star_left =
+            p_t_star - 0.5 * (bn2 + bt1_star_left * bt1_star_left +
+                              bt2_star_left * bt2_star_left);
+        const amrex::Real p_gas_star_right =
+            p_t_star - 0.5 * (bn2 + bt1_star_right * bt1_star_right +
+                              bt2_star_right * bt2_star_right);
+        // Arranged with explicit slip/consistency factors: at S_M = u
+        // (and hence p_gas* = p_gas) the star energy equals the input
+        // state exactly, independent of the guarded gaps.
+        const amrex::Real ei_star_left =
+            left.ion_energy -
+            (slip_left * left.ion_energy + p_gas_star_left * s_mid -
+             p_gas_left * u_left) /
+                gap_left;
+        const amrex::Real ei_star_right =
+            right.ion_energy +
+            (slip_right * right.ion_energy + p_gas_star_right * s_mid -
+             p_gas_right * u_right) /
+                gap_right;
+        flux.ion_energy =
+            central(u_left * (left.ion_energy + p_gas_left),
+                    u_right * (right.ion_energy + p_gas_right),
+                    ei_star_left - left.ion_energy,
+                    ei_star_right - ei_star_left,
+                    right.ion_energy - ei_star_right);
+    } else {
+        // LLF enthalpy channel with the fast-speed alpha, assembled
+        // C-infinity: both the |u_n| of each side (a hard kink exactly
+        // where a fan-internal face crosses stagnation) and the
+        // left/right max are smoothed with the signal width; the
+        // smoothing only raises alpha, and smooth_abs(0) = 0 keeps
+        // static contacts exact.
+        const amrex::Real alpha_energy = smooth_max(
+            smooth_abs(u_left, signal_width) + left.fast_speed,
+            smooth_abs(u_right, signal_width) + right.fast_speed,
+            signal_width);
+        flux.ion_energy =
+            0.5 * (u_left * (left.ion_energy + left.ion_pressure +
+                             left.electron_pressure) +
+                   u_right * (right.ion_energy + right.ion_pressure +
+                              right.electron_pressure) -
+                   alpha_energy * (right.ion_energy - left.ion_energy));
+    }
     flux.electron_velocity =
         0.5 * (left.electron_velocity_normal + right.electron_velocity_normal);
 
