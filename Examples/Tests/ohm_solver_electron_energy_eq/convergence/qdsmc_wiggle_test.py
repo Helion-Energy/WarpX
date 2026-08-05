@@ -75,6 +75,7 @@ parser.add_argument(
     help="hop cap in cells (large: the cap must NOT engage here)",
 )
 parser.add_argument("--flux-limit", type=float, default=0.0)
+parser.add_argument("--slope-limiter", choices=["mc", "none"], default="mc")
 parser.add_argument("--advance", choices=["euler", "leapfrog", "pc"], default="pc")
 parser.add_argument("--grad-deposit", type=int, choices=[0, 1], default=1)
 parser.add_argument(
@@ -235,6 +236,7 @@ pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = npts
 pywarpx.hybridpicmodel.qdsmc_conduction_flux_limit_factor = args.flux_limit
 pywarpx.hybridpicmodel.qdsmc_conduction_max_hop = args.max_hop
 pywarpx.hybridpicmodel.qdsmc_conduction_form = args.form
+pywarpx.hybridpicmodel.qdsmc_conduction_slope_limiter = args.slope_limiter
 pywarpx.hybridpicmodel.qdsmc_conduction_interp = args.interp
 pywarpx.hybridpicmodel.qdsmc_conduction_curved_feet = args.curved_feet
 pywarpx.hybridpicmodel.qdsmc_conduction_deposit_kernel = args.deposit_kernel

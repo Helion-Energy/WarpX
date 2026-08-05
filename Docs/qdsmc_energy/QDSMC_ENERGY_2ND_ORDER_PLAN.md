@@ -773,10 +773,21 @@ fluxform_out/, logs fluxform_gauntlet*.log):**
   2.32e-2 (scatter 1.81/0.56, layer 2.56e-4). The pull-back cut the v1
   leak 3.4x and collapsed adrift 9.7e-3 -> -1.7e-4; the residual is the
   remaining splitting error of per-branch oblique hops swept
-  axis-by-axis (plus a possible limiter-clipping component at the
-  filament crest). Escalation rungs left: limiter-off diagnostic to
-  split those two, ordering-average (cheap, likely small), UNSPLIT 2D
-  donor images (corner transport — the expected real fix).
+  axis-by-axis. **Limiter-clipping ruled out by measurement
+  (2026-08-05)**: `qdsmc_conduction_slope_limiter = none` (unlimited
+  central slopes, diagnostic arm) moves the eps=0.2 point only
+  1.690e-2 -> 1.665e-2 and the liftoff npts=3 point 2.317e-2 ->
+  2.308e-2 — the leak is PURE SPLITTING ERROR. Remaining rung: UNSPLIT
+  2D donor images (corner transport): per branch, dual cells map to
+  bilinear quadrilaterals (corner-evaluated displacement). Design fork
+  to settle when building it: (a) overlap-gather deposit — race-free,
+  simplest, but conservation only to polygon-clipping roundoff unless
+  each destination also normalizes by the donor's total clipped area
+  (exactness restored at ~(rhop+2)^2 extra clips per pair); vs (b)
+  CSLAM-style flux-form swept areas per face — keeps telescoping-exact
+  conservation and the Thrust-D face fluxes, at more geometric
+  complexity. Note the split form stays valuable as the cheap arm for
+  gently-curved fields (it already beats scatter 12-16x everywhere).
 - **GF4 PASS**: ZK front relL2 **1.98e-2** — best of the whole campaign
   (layer+fixup 4.2e-2, scatter plateau 1.32e-1) — with front exponent
   0.204 vs reference 0.206, min(Te) pinned at ambient (no undershoot,
