@@ -131,6 +131,13 @@ parser.add_argument(
     help="layer form: midpoint-rotated feet (measured harmful: the div-D "
     "drift already carries the mean curvature; rotation double-counts)",
 )
+parser.add_argument(
+    "--deposit-kernel",
+    choices=["hat", "keys"],
+    default="hat",
+    help="scatter-form deposit kernel (keys = conservative cubic, "
+    "no B1 correction, not monotone)",
+)
 parser.add_argument("--out", type=str, required=True)
 parser.add_argument("--verbose", type=int, default=0)
 args = parser.parse_args()
@@ -268,6 +275,7 @@ pywarpx.hybridpicmodel.qdsmc_conduction_max_hop = args.max_hop
 pywarpx.hybridpicmodel.qdsmc_conduction_form = args.form
 pywarpx.hybridpicmodel.qdsmc_conduction_interp = args.interp
 pywarpx.hybridpicmodel.qdsmc_conduction_curved_feet = args.curved_feet
+pywarpx.hybridpicmodel.qdsmc_conduction_deposit_kernel = args.deposit_kernel
 # MUST be off here (default on): the dirichlet/PEC field BC zeroes rho on
 # the wall rows, fast-front then boosts their chi to the hop-cap ceiling,
 # and the D cliff's div-D drift kicks the row-1 daughters into the wall
@@ -406,6 +414,7 @@ np.savez_compressed(
     form=args.form,
     interp=args.interp,
     curved_feet=args.curved_feet,
+    deposit_kernel=args.deposit_kernel,
     te_initial=state["initial"],
     te_final=te_final,
     te_exact=te_exact,

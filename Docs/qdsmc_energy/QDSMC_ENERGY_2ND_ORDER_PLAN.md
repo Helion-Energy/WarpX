@@ -560,6 +560,62 @@ natural gather-form wall treatment), a local (vs global) conservation
 fixup if production decks show structured deficits, and the strong-bind
 limiter demo.
 
+### C.7c Conservative-scatter alternatives — measured and CLOSED (2026-08-05)
+
+Eric's constraint: strict conservation is non-negotiable for the explicit
+arm. Two conservative scatter upgrades were built and measured against
+the layer form (knobs kept; run_keys.py, fct_out/):
+
+**Keys deposit** (`qdsmc_conduction_deposit_kernel = keys`): the
+interpolating zero-first-and-second-moment cubic-convolution kernel
+(Keys 1981, a = -1/2; = Catmull-Rom; 4^d stencil). Conservation exact
+(PoU), at-rest identity exact, aligned order 1.97. Curvature leak:
+eps=0.2 point 7.9e-2 (2.6x better than hat), liftoff point 9.0e-2 (20x)
+— but ~350x above layer-monocubic: with kernel moments identically zero,
+the residual is the PUSHFORWARD term (the displacement field is
+source-evaluated and varies across the cloud; per-hop, ~ sqrt(dt)), which
+no fixed kernel can remove. Zeldovich: relL2 13.3% (no gain — the
+plateau is front-foot physics, not kernel moments), front exponent 0.125
+(worse than hat), and **undershoot -0.375 T0** at the front foot (2.5% of
+the step height, textbook signed-kernel step response) — at a floor-
+pinned plasma edge the 1/n Te recovery would amplify this into deeply
+negative Te. Note (Eric): the SPH-deficiency framing does NOT apply
+(daughters regenerate on the full grid every substep); the ringing is
+plain step response, re-created per substep wherever the profile is
+grid-sharp.
+
+**Compensated hat / Boris-Book FCT**
+(`qdsmc_conduction_compensate = 1`, requires hat + grad_deposit 0): hat
+deposit plus an exactly-bookkept per-node covariance tally and one
+Boris-Book-limited antidiffusive flux sweep per axis (destination-local
+gradients; flux form => conservation exact). Measured: **monotonicity
+perfect** (Zeldovich undershoot -3.5e-15), conservation exact, aligned
+relL2 1.93e-4 at N=64/ns=128 — better than hat+B1 (3.03e-4) — but the
+**curvature leak is UNTOUCHED: liftoff point 1.813 vs hat's 1.812**.
+Mechanism, now measured: a cross-field-confined filament IS an extremum,
+so the "no new extrema" limiter zeroes the antidiffusive fluxes exactly
+at the crest — re-admitting exactly the hat diffusion that constitutes
+the leak. Unlimited compensation would equal Keys (composition/
+convolution identity) and ring.
+
+**The structural conclusion**: conservative scatter is boxed in by
+Godunov exactly at the structure that matters. "Add-then-remove"
+(hat + any compensation) fails because removal is forbidden at extrema;
+"zero-moment kernel" (Keys) evades the limiter and pays with ringing +
+the pushforward wall. The two schemes that work are both "NEVER-ADD":
+the layer/gather form (monotone interpolation adds no variance; limiter
+only costs local order) and the flux-form conservative semi-Lagrangian
+remap (Lin-Rood/SLICE class: limited RECONSTRUCTION = never-add
+monotonicity, departure-volume integration = inherent conservation AND
+kills the pushforward term). Decision reduced to: layer + LOCAL
+conservative fixup (cheap, deficits measured tiny except steep fronts
+where the global fixup already restores Sigma exactly) vs the flux-form
+remap build (satisfies every constraint inherently; the
+multidimensional/tensor-hop departure geometry is the cost). Side
+finding: FCT-compensated hat beats hat+B1 on straight fields (1.6x,
+monotone, no slope storage) — a candidate default for the scatter form
+regardless.
+
 ### C.8 Gate G3
 
 - 1D Gaussian spread along B parallel to z: sigma^2(t) = sigma_0^2 + 2 chi t to

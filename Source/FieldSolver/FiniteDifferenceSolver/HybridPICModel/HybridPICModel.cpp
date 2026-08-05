@@ -174,6 +174,22 @@ void HybridPICModel::ReadParameters ()
         pp_hybrid.query("qdsmc_conduction_curved_feet", m_cond_curved_feet);
         pp_hybrid.query("qdsmc_conduction_conserve_fixup",
                         m_cond_conserve_fixup);
+        std::string depk = "hat";
+        pp_hybrid.query("qdsmc_conduction_deposit_kernel", depk);
+        if (depk == "hat") { m_cond_deposit_kernel = 0; }
+        else if (depk == "keys") { m_cond_deposit_kernel = 1; }
+        else {
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.qdsmc_conduction_deposit_kernel must be "
+                "'hat' or 'keys'");
+        }
+        pp_hybrid.query("qdsmc_conduction_compensate", m_cond_compensate);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_cond_compensate ||
+            (m_cond_deposit_kernel == 0 && !m_qdsmc_gradient_deposit),
+            "hybrid_pic_model.qdsmc_conduction_compensate requires the hat "
+            "deposit kernel and qdsmc_gradient_deposit = 0 (the FCT pass "
+            "replaces the B1 correction)");
     }
 #if defined(WARPX_DIM_RZ)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_include_thermal_conduction,
@@ -1699,6 +1715,22 @@ namespace
              + f1*(-2.0_rt*t3 + 3.0_rt*t2)          + m1*(t3 - t2);
     }
 
+    /** 1D Keys cubic-convolution (a = -1/2) weights on the stencil
+     *  offsets {-1, 0, 1, 2} for fractional t in [0, 1). Sum(w) = 1
+     *  identically (exact partition of unity: a conservative scatter),
+     *  and linears AND quadratics are reproduced, so the deposit's first
+     *  and second moments vanish. w[0] and w[3] are negative lobes. */
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    void qdsmc_keys_w (amrex::Real const t, amrex::Real w[4])
+    {
+        amrex::Real const t2 = t*t;
+        amrex::Real const t3 = t2*t;
+        w[0] = 0.5_rt*(-t3 + 2.0_rt*t2 - t);
+        w[1] = 0.5_rt*( 3.0_rt*t3 - 5.0_rt*t2 + 2.0_rt);
+        w[2] = 0.5_rt*(-3.0_rt*t3 + 4.0_rt*t2 + t);
+        w[3] = 0.5_rt*( t3 - t2);
+    }
+
     /** Tensor-product interpolation of a nodal Array4 at the fractional
      *  index position (i0 + fr0, j0 + fr1, k0 + fr2), nesting
      *  qdsmc_interp1d per grid dim (the monotone kind is nonlinear in the
@@ -1934,8 +1966,16 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                          ng_cond);
 
     // Deposit target: guard reach must cover the clamped hop.
-    int const ng_dep = static_cast<int>(std::ceil(m_cond_max_hop)) + 2;
-    amrex::MultiFab u_dep(Te.boxArray(), Te.DistributionMap(), 1, ng_dep);
+    bool const dep_keys = (m_cond_deposit_kernel == 1);
+    bool const compensate = m_cond_compensate;
+    int const ng_dep = static_cast<int>(std::ceil(m_cond_max_hop))
+                       + (dep_keys ? 3 : 2);
+    // comps 1..SPACEDIM (compensated deposit only): the bookkept per-axis
+    // deposit covariance, u-weighted fr(1-fr)dx^2, hat-distributed -- the
+    // exact antidiffusion coefficient for the FCT pass below.
+    int const nc_dep = compensate ? 1 + AMREX_SPACEDIM : 1;
+    amrex::MultiFab u_dep(Te.boxArray(), Te.DistributionMap(), nc_dep,
+                          ng_dep);
 
     // --- Pass 1: capped/limited diffusivities and the D tensor per node ---
 #ifdef AMREX_USE_OMP
@@ -2557,7 +2597,7 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
 #endif
                     amrex::Real ds = disp[ax] * dxi_arr[d];
                     amrex::Real const rmax =
-                        amrex::Real(ng_dep - 1) - 1.0e-6_rt;
+                        amrex::Real(ng_dep - (dep_keys ? 2 : 1)) - 1.0e-6_rt;
                     ds = amrex::min(amrex::max(ds, -rmax), rmax);
                     s[d] = amrex::Real(node[d]) + ds;
                     if (!is_per[d]) {
@@ -2568,6 +2608,51 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                     auto const fl = std::floor(s[d]);
                     i0[d] = static_cast<int>(fl);
                     fr[d] = s[d] - fl;
+                }
+
+                // Keys deposit (4^d): partition of unity exact, first and
+                // second moments vanish (quadratic reproduction) -- no
+                // gradient correction needed or applied. Negative lobes:
+                // not monotone. Non-periodic writes fold onto the wall
+                // nodes (index clamp), which preserves conservation.
+                if (dep_keys) {
+                    amrex::Real wk[AMREX_SPACEDIM][4];
+                    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                        qdsmc_keys_w(fr[d], wk[d]);
+                    }
+                    auto widx = [&] (int const d, int idx) {
+                        if (!is_per[d]) {
+                            idx = amrex::min(amrex::max(idx, dom_lo[d]),
+                                             dom_hi[d]);
+                        }
+                        return idx;
+                    };
+#if defined(WARPX_DIM_3D)
+                    for (int kk = 0; kk < 4; ++kk) {
+                    for (int jj = 0; jj < 4; ++jj) {
+                    for (int ii = 0; ii < 4; ++ii) {
+                        amrex::Real const w =
+                            wk[0][ii]*wk[1][jj]*wk[2][kk];
+                        amrex::Gpu::Atomic::AddNoRet(
+                            &out(widx(0, i0[0]+ii-1), widx(1, i0[1]+jj-1),
+                                 widx(2, i0[2]+kk-1)), wq*w*u0);
+                    }}}
+#elif (AMREX_SPACEDIM == 2)
+                    for (int jj = 0; jj < 4; ++jj) {
+                    for (int ii = 0; ii < 4; ++ii) {
+                        amrex::Real const w = wk[0][ii]*wk[1][jj];
+                        amrex::Gpu::Atomic::AddNoRet(
+                            &out(widx(0, i0[0]+ii-1), widx(1, i0[1]+jj-1),
+                                 k), wq*w*u0);
+                    }}
+#else
+                    for (int ii = 0; ii < 4; ++ii) {
+                        amrex::Gpu::Atomic::AddNoRet(
+                            &out(widx(0, i0[0]+ii-1), j, k),
+                            wq*wk[0][ii]*u0);
+                    }
+#endif
+                    continue;
                 }
 
                 // Hat deposit with the half-gradient correction
@@ -2590,6 +2675,15 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                     }
                     amrex::Gpu::Atomic::AddNoRet(
                         &out(i0[0]+ii, i0[1]+jj, i0[2]+kk), wq*w*val);
+                    if (compensate) {
+                        for (int d = 0; d < 3; ++d) {
+                            amrex::Real const frv =
+                                fr[d]*(1.0_rt - fr[d])*dx_arr[d]*dx_arr[d];
+                            amrex::Gpu::Atomic::AddNoRet(
+                                &out(i0[0]+ii, i0[1]+jj, i0[2]+kk, 1 + d),
+                                wq*w*u0*frv);
+                        }
+                    }
                 }}}
 #elif (AMREX_SPACEDIM == 2)
                 for (int jj = 0; jj < 2; ++jj) {
@@ -2604,6 +2698,15 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                     }
                     amrex::Gpu::Atomic::AddNoRet(
                         &out(i0[0]+ii, i0[1]+jj, k), wq*w*val);
+                    if (compensate) {
+                        for (int d = 0; d < 2; ++d) {
+                            amrex::Real const frv =
+                                fr[d]*(1.0_rt - fr[d])*dx_arr[d]*dx_arr[d];
+                            amrex::Gpu::Atomic::AddNoRet(
+                                &out(i0[0]+ii, i0[1]+jj, k, 1 + d),
+                                wq*w*u0*frv);
+                        }
+                    }
                 }}
 #else
                 for (int ii = 0; ii < 2; ++ii) {
@@ -2615,6 +2718,12 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                     }
                     amrex::Gpu::Atomic::AddNoRet(
                         &out(i0[0]+ii, j, k), wq*w*val);
+                    if (compensate) {
+                        amrex::Real const frv =
+                            fr[0]*(1.0_rt - fr[0])*dx_arr[0]*dx_arr[0];
+                        amrex::Gpu::Atomic::AddNoRet(
+                            &out(i0[0]+ii, j, k, 1), wq*w*u0*frv);
+                    }
                 }
 #endif
             }}}
@@ -2623,8 +2732,91 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
 
     amrex::Gpu::synchronize();
     ablastr::utils::communication::SumBoundary(
-        u_dep, 0, 1, u_dep.nGrowVect(), u_dep.nGrowVect(),
+        u_dep, 0, nc_dep, u_dep.nGrowVect(), u_dep.nGrowVect(),
         WarpX::do_single_precision_comms, period);
+
+    // --- Pass 2.5 (compensated deposit): Boris--Book FCT antidiffusion --
+    // One limited antidiffusive flux sweep per axis. The raw flux between
+    // nodes i and i+1 is Phi = vbar/(2 dx^2) * (u_{i+1} - u_i) with vbar =
+    // (C_i + C_{i+1})/(u_i + u_{i+1}) the bookkept per-unit-u deposit
+    // variance (<= dx^2/4, so the sweep is stable); the Boris--Book
+    // limiter Phi~ = S max(0, min(|Phi|, S(u_{i+2}-u_{i+1}),
+    // S(u_i-u_{i-1}))), S = sign(u_{i+1}-u_i), forbids new extrema
+    // (positivity and monotonicity). Flux form => conservation exact.
+    // In the unlimited smooth limit this composes with the hat to cancel
+    // the kernel's second moment (Keys-equivalent through quadratics),
+    // with destination-local gradients. Dimensionally split; each axis
+    // sweep reads a frozen copy.
+    if (compensate)
+    {
+        ablastr::utils::communication::FillBoundary(
+            u_dep, WarpX::do_single_precision_comms, period, false);
+        amrex::MultiFab u_fct(Te.boxArray(), Te.DistributionMap(), 1, 2);
+        for (int d = 0; d < AMREX_SPACEDIM; ++d)
+        {
+            // frozen per-axis copy; refresh ghosts each sweep (the
+            // previous sweep updated valid values only)
+            amrex::MultiFab::Copy(u_fct, u_dep, 0, 0, 1, 0);
+            ablastr::utils::communication::FillBoundary(
+                u_fct, WarpX::do_single_precision_comms, period, false);
+            amrex::Real const dxi2 = dxi_arr[d]*dxi_arr[d];
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(u_dep, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                amrex::Box const fbox = mfi.tilebox();
+                amrex::Array4<amrex::Real>       const & ua = u_dep.array(mfi);
+                amrex::Array4<amrex::Real const> const & uf = u_fct.const_array(mfi);
+
+                amrex::ParallelFor(fbox,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    int const node[3] = {i, j, k};
+                    auto uat = [&] (int const off) {
+                        int p[3] = {i, j, k};
+                        int idx = node[d] + off;
+                        if (!is_per[d]) {
+                            idx = amrex::min(amrex::max(idx, dom_lo[d]),
+                                             dom_hi[d]);
+                        }
+                        p[d] = idx;
+                        return uf(p[0], p[1], p[2]);
+                    };
+                    auto cat = [&] (int const off) {
+                        int p[3] = {i, j, k};
+                        int idx = node[d] + off;
+                        if (!is_per[d]) {
+                            idx = amrex::min(amrex::max(idx, dom_lo[d]),
+                                             dom_hi[d]);
+                        }
+                        p[d] = idx;
+                        return ua(p[0], p[1], p[2], 1 + d);
+                    };
+                    auto phi = [&] (int const lo) {
+                        // limited antidiffusive flux across the edge
+                        // (lo, lo+1); zero if clamped onto itself
+                        amrex::Real const um  = uat(lo - 1);
+                        amrex::Real const u0v = uat(lo);
+                        amrex::Real const u1v = uat(lo + 1);
+                        amrex::Real const u2  = uat(lo + 2);
+                        amrex::Real const du = u1v - u0v;
+                        if (du == 0.0_rt) { return 0.0_rt; }
+                        amrex::Real const usum = u0v + u1v;
+                        if (usum <= 0.0_rt) { return 0.0_rt; }
+                        amrex::Real const vbar =
+                            (cat(lo) + cat(lo + 1)) / usum;
+                        amrex::Real const raw = 0.5_rt*vbar*dxi2*du;
+                        amrex::Real const S = (du > 0.0_rt) ? 1.0_rt : -1.0_rt;
+                        return S*amrex::max(0.0_rt,
+                            amrex::min(std::abs(raw),
+                                       S*(u2 - u1v), S*(u0v - um)));
+                    };
+                    ua(i,j,k) = uf(i,j,k) - (phi(0) - phi(-1));
+                });
+            }
+        }
+    }
 
     // --- Pass 3: recover T_e = u / (3/2 k_B n_e) -----------------------
     // Floored cells keep their previous T_e (mirroring QDSMCUpdateTe);
