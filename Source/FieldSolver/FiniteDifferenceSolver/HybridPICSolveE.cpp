@@ -567,6 +567,17 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     const bool external_split = hybrid_model->m_external_split;
 
     const bool holmstrom_vacuum_region = hybrid_model->m_holmstrom_vacuum_region;
+    // Smooth Hall/grad-Pe turn-off across the vacuum gate: the binary branch
+    // makes the residual discontinuous in the state exactly where cells
+    // straddle the gate (Newton limit-cycles and grid-scale E jumps at the
+    // separatrix edge); a tanh blend over holmstrom_transition_width*n_floor
+    // restores smoothness. Width 0 (default) keeps the hard branch.
+    const Real holmstrom_inv_width =
+        (hybrid_model->m_holmstrom_transition_width > 0._rt)
+        ? 1._rt / (hybrid_model->m_holmstrom_transition_width * rho_floor)
+        : 0._rt;
+    const bool holmstrom_smooth =
+        holmstrom_vacuum_region && (holmstrom_inv_width > 0._rt);
 
     auto & warpx = WarpX::GetInstance();
     const amrex::Real t_new = warpx.gett_new(lev);
@@ -787,7 +798,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Er_stag, coarsen, i, j, 0, 0);
 
-                if (rho_val < rho_floor && holmstrom_vacuum_region) {
+                if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                     Er(i, j, 0) = 0._rt;
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
@@ -803,7 +814,12 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     // safety condition since we divide by rho
                     const auto rho_val_limited = std::max(rho_val, rho_floor);
 
-                    Er(i, j, 0) = (enE_r - grad_Pe) / rho_val_limited;
+                    Real ohm_val = (enE_r - grad_Pe) / rho_val_limited;
+                    if (holmstrom_smooth) {
+                        ohm_val *= 0.5_rt * (1._rt + std::tanh(
+                            (rho_val - rho_floor) * holmstrom_inv_width));
+                    }
+                    Er(i, j, 0) = ohm_val;
                 }
                 if (include_electron_inertia) {
                     Er(i, j, 0) += Interp(eiN, nodal, Er_stag, coarsen, i, j, 0, 0);
@@ -869,7 +885,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Etheta_stag, coarsen, i, j, 0, 0);
 
-                if (rho_val < rho_floor && holmstrom_vacuum_region) {
+                if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                     Etheta(i, j, 0) = 0._rt;
                 } else {
                     // Get the gradient of the electron pressure
@@ -882,7 +898,12 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     // safety condition since we divide by rho
                     const auto rho_val_limited = std::max(rho_val, rho_floor);
 
-                    Etheta(i, j, 0) = (enE_t - grad_Pe) / rho_val_limited;
+                    Real ohm_val = (enE_t - grad_Pe) / rho_val_limited;
+                    if (holmstrom_smooth) {
+                        ohm_val *= 0.5_rt * (1._rt + std::tanh(
+                            (rho_val - rho_floor) * holmstrom_inv_width));
+                    }
+                    Etheta(i, j, 0) = ohm_val;
                 }
                 if (include_electron_inertia) {
                     Etheta(i, j, 0) += Interp(eiN, nodal, Etheta_stag, coarsen, i, j, 0, 1);
@@ -941,7 +962,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, 0, 0);
 
-                if (rho_val < rho_floor && holmstrom_vacuum_region) {
+                if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                     Ez(i, j, 0) = 0._rt;
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
@@ -957,7 +978,12 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     // safety condition since we divide by rho
                     const auto rho_val_limited = std::max(rho_val, rho_floor);
 
-                    Ez(i, j, 0) = (enE_z - grad_Pe) / rho_val_limited;
+                    Real ohm_val = (enE_z - grad_Pe) / rho_val_limited;
+                    if (holmstrom_smooth) {
+                        ohm_val *= 0.5_rt * (1._rt + std::tanh(
+                            (rho_val - rho_floor) * holmstrom_inv_width));
+                    }
+                    Ez(i, j, 0) = ohm_val;
                 }
                 if (include_electron_inertia) {
                     Ez(i, j, 0) += Interp(eiN, nodal, Ez_stag, coarsen, i, j, 0, 2);
@@ -1083,6 +1109,17 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     const bool external_split = hybrid_model->m_external_split;
 
     const bool holmstrom_vacuum_region = hybrid_model->m_holmstrom_vacuum_region;
+    // Smooth Hall/grad-Pe turn-off across the vacuum gate: the binary branch
+    // makes the residual discontinuous in the state exactly where cells
+    // straddle the gate (Newton limit-cycles and grid-scale E jumps at the
+    // separatrix edge); a tanh blend over holmstrom_transition_width*n_floor
+    // restores smoothness. Width 0 (default) keeps the hard branch.
+    const Real holmstrom_inv_width =
+        (hybrid_model->m_holmstrom_transition_width > 0._rt)
+        ? 1._rt / (hybrid_model->m_holmstrom_transition_width * rho_floor)
+        : 0._rt;
+    const bool holmstrom_smooth =
+        holmstrom_vacuum_region && (holmstrom_inv_width > 0._rt);
 
     auto & warpx = WarpX::GetInstance();
     const amrex::Real t_new = warpx.gett_new(lev);
@@ -1298,7 +1335,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ex_stag, coarsen, i, j, k, 0);
 
-            if (rho_val < rho_floor && holmstrom_vacuum_region) {
+            if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                 Ex(i, j, k) = 0._rt;
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
@@ -1314,7 +1351,12 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 // safety condition since we divide by rho
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
 
-                Ex(i, j, k) = (enE_x - grad_Pe) / rho_val_limited;
+                Real ohm_val = (enE_x - grad_Pe) / rho_val_limited;
+                if (holmstrom_smooth) {
+                    ohm_val *= 0.5_rt * (1._rt + std::tanh(
+                        (rho_val - rho_floor) * holmstrom_inv_width));
+                }
+                Ex(i, j, k) = ohm_val;
             }
             if (include_electron_inertia) {
                 Ex(i, j, k) += Interp(eiN, nodal, Ex_stag, coarsen, i, j, k, 0);
@@ -1369,7 +1411,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ey_stag, coarsen, i, j, k, 0);
 
-            if (rho_val < rho_floor && holmstrom_vacuum_region) {
+            if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                 Ey(i, j, k) = 0._rt;
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
@@ -1385,7 +1427,12 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 // safety condition since we divide by rho
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
 
-                Ey(i, j, k) = (enE_y - grad_Pe) / rho_val_limited;
+                Real ohm_val = (enE_y - grad_Pe) / rho_val_limited;
+                if (holmstrom_smooth) {
+                    ohm_val *= 0.5_rt * (1._rt + std::tanh(
+                        (rho_val - rho_floor) * holmstrom_inv_width));
+                }
+                Ey(i, j, k) = ohm_val;
             }
             if (include_electron_inertia) {
                 Ey(i, j, k) += Interp(eiN, nodal, Ey_stag, coarsen, i, j, k, 1);
@@ -1440,7 +1487,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, k, 0);
 
-            if (rho_val < rho_floor && holmstrom_vacuum_region) {
+            if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                 Ez(i, j, k) = 0._rt;
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
@@ -1456,7 +1503,12 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 // safety condition since we divide by rho
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
 
-                Ez(i, j, k) = (enE_z - grad_Pe) / rho_val_limited;
+                Real ohm_val = (enE_z - grad_Pe) / rho_val_limited;
+                if (holmstrom_smooth) {
+                    ohm_val *= 0.5_rt * (1._rt + std::tanh(
+                        (rho_val - rho_floor) * holmstrom_inv_width));
+                }
+                Ez(i, j, k) = ohm_val;
             }
             if (include_electron_inertia) {
                 Ez(i, j, k) += Interp(eiN, nodal, Ez_stag, coarsen, i, j, k, 2);
