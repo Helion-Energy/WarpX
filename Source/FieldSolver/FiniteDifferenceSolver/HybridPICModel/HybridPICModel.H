@@ -643,6 +643,19 @@ public:
      *  qdsmc_conduction_compensate. */
     bool m_cond_compensate = false;
 
+    /** FCT limiter for the compensated deposit. 0 = bb (Boris--Book,
+     *  bounds from post-deposit neighbors only: provably clips the
+     *  antidiffusion at cross-field filament crests -- a confined
+     *  filament IS an extremum -- re-admitting the leak there).
+     *  1 = zalesak (Zalesak 1979 flux budgeting with bounds that INCLUDE
+     *  the pre-deposit field: restoring a crest toward its pre-substep
+     *  height is not a new extremum, so crest compensation is allowed
+     *  while ringing stays forbidden -- values remain in the hull of the
+     *  old and transported states). 2 = none (unlimited: composes with
+     *  the hat to the Keys-equivalent kernel; control arm, rings).
+     *  Input: qdsmc_conduction_fct_limiter = bb | zalesak | none. */
+    int m_cond_fct_limiter = 0;
+
     /** Scatter-form deposit kernel. 0 = hat (2^d CIC + the B1
      *  half-gradient correction). 1 = Keys cubic convolution (a = -1/2,
      *  4^d): partition of unity is exact (conservation stays exact) and

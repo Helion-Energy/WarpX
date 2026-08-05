@@ -190,6 +190,16 @@ void HybridPICModel::ReadParameters ()
             "hybrid_pic_model.qdsmc_conduction_compensate requires the hat "
             "deposit kernel and qdsmc_gradient_deposit = 0 (the FCT pass "
             "replaces the B1 correction)");
+        std::string fctl = "bb";
+        pp_hybrid.query("qdsmc_conduction_fct_limiter", fctl);
+        if (fctl == "bb") { m_cond_fct_limiter = 0; }
+        else if (fctl == "zalesak") { m_cond_fct_limiter = 1; }
+        else if (fctl == "none") { m_cond_fct_limiter = 2; }
+        else {
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.qdsmc_conduction_fct_limiter must be "
+                "'bb', 'zalesak' or 'none'");
+        }
     }
 #if defined(WARPX_DIM_RZ)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_include_thermal_conduction,
@@ -2749,9 +2759,33 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
     // sweep reads a frozen copy.
     if (compensate)
     {
+        int const fct_lim = m_cond_fct_limiter;
         ablastr::utils::communication::FillBoundary(
             u_dep, WarpX::do_single_precision_comms, period, false);
         amrex::MultiFab u_fct(Te.boxArray(), Te.DistributionMap(), 1, 2);
+        // Pre-deposit u field: the zalesak bounds include it, so
+        // restoring a crest toward its pre-substep height is allowed
+        // (it is not a new extremum).
+        amrex::MultiFab u_pre(Te.boxArray(), Te.DistributionMap(), 1, 2);
+        if (fct_lim == 1) {
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(u_pre, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                amrex::Box const pbox = mfi.tilebox();
+                amrex::Array4<amrex::Real>       const & up  = u_pre.array(mfi);
+                amrex::Array4<amrex::Real const> const & Te_arr  = Te.const_array(mfi);
+                amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+                amrex::ParallelFor(pbox,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    up(i,j,k) = 1.5_rt*kb*(rho_arr(i,j,k)/qe)*Te_arr(i,j,k);
+                });
+            }
+            ablastr::utils::communication::FillBoundary(
+                u_pre, WarpX::do_single_precision_comms, period, false);
+        }
         for (int d = 0; d < AMREX_SPACEDIM; ++d)
         {
             // frozen per-axis copy; refresh ghosts each sweep (the
@@ -2768,51 +2802,104 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                 amrex::Box const fbox = mfi.tilebox();
                 amrex::Array4<amrex::Real>       const & ua = u_dep.array(mfi);
                 amrex::Array4<amrex::Real const> const & uf = u_fct.const_array(mfi);
+                amrex::Array4<amrex::Real const> const & up = u_pre.const_array(mfi);
 
                 amrex::ParallelFor(fbox,
                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
                 {
                     int const node[3] = {i, j, k};
-                    auto uat = [&] (int const off) {
-                        int p[3] = {i, j, k};
+                    auto pidx = [&] (int const off) {
                         int idx = node[d] + off;
                         if (!is_per[d]) {
                             idx = amrex::min(amrex::max(idx, dom_lo[d]),
                                              dom_hi[d]);
                         }
-                        p[d] = idx;
+                        return idx;
+                    };
+                    auto uat = [&] (int const off) {
+                        int p[3] = {i, j, k};
+                        p[d] = pidx(off);
                         return uf(p[0], p[1], p[2]);
                     };
                     auto cat = [&] (int const off) {
                         int p[3] = {i, j, k};
-                        int idx = node[d] + off;
-                        if (!is_per[d]) {
-                            idx = amrex::min(amrex::max(idx, dom_lo[d]),
-                                             dom_hi[d]);
-                        }
-                        p[d] = idx;
+                        p[d] = pidx(off);
                         return ua(p[0], p[1], p[2], 1 + d);
                     };
-                    auto phi = [&] (int const lo) {
-                        // limited antidiffusive flux across the edge
-                        // (lo, lo+1); zero if clamped onto itself
-                        amrex::Real const um  = uat(lo - 1);
+                    auto upre = [&] (int const off) {
+                        int p[3] = {i, j, k};
+                        p[d] = pidx(off);
+                        return up(p[0], p[1], p[2]);
+                    };
+                    auto rawphi = [&] (int const lo) {
                         amrex::Real const u0v = uat(lo);
                         amrex::Real const u1v = uat(lo + 1);
-                        amrex::Real const u2  = uat(lo + 2);
                         amrex::Real const du = u1v - u0v;
                         if (du == 0.0_rt) { return 0.0_rt; }
                         amrex::Real const usum = u0v + u1v;
                         if (usum <= 0.0_rt) { return 0.0_rt; }
                         amrex::Real const vbar =
                             (cat(lo) + cat(lo + 1)) / usum;
-                        amrex::Real const raw = 0.5_rt*vbar*dxi2*du;
-                        amrex::Real const S = (du > 0.0_rt) ? 1.0_rt : -1.0_rt;
-                        return S*amrex::max(0.0_rt,
-                            amrex::min(std::abs(raw),
-                                       S*(u2 - u1v), S*(u0v - um)));
+                        return 0.5_rt*vbar*dxi2*du;
                     };
-                    ua(i,j,k) = uf(i,j,k) - (phi(0) - phi(-1));
+                    amrex::Real phiL = 0.0_rt, phiH = 0.0_rt;
+                    if (fct_lim == 2) {          // unlimited (control)
+                        phiH = rawphi(0);
+                        phiL = rawphi(-1);
+                    } else if (fct_lim == 0) {   // Boris--Book
+                        auto bb = [&] (int const lo) {
+                            amrex::Real const raw = rawphi(lo);
+                            if (raw == 0.0_rt) { return 0.0_rt; }
+                            amrex::Real const S =
+                                (raw > 0.0_rt) ? 1.0_rt : -1.0_rt;
+                            return S*amrex::max(0.0_rt,
+                                amrex::min(std::abs(raw),
+                                           S*(uat(lo + 2) - uat(lo + 1)),
+                                           S*(uat(lo) - uat(lo - 1))));
+                        };
+                        phiH = bb(0);
+                        phiL = bb(-1);
+                    } else {                     // Zalesak + pre-deposit
+                        auto rfac = [&] (int const off,
+                                         amrex::Real & Rp, amrex::Real & Rm) {
+                            amrex::Real const fl = rawphi(off - 1);
+                            amrex::Real const fh = rawphi(off);
+                            // update is u -= (phi_hi - phi_lo): inflow =
+                            // max(fl,0) - min(fh,0), outflow the mirror
+                            amrex::Real const Pp =
+                                amrex::max(fl, 0.0_rt) - amrex::min(fh, 0.0_rt);
+                            amrex::Real const Pm =
+                                amrex::max(fh, 0.0_rt) - amrex::min(fl, 0.0_rt);
+                            amrex::Real const utd = uat(off);
+                            amrex::Real umax = utd, umin = utd;
+                            for (int o = -1; o <= 1; ++o) {
+                                umax = amrex::max(umax, uat(off + o),
+                                                  upre(off + o));
+                                umin = amrex::min(umin, uat(off + o),
+                                                  upre(off + o));
+                            }
+                            Rp = (Pp > 0.0_rt)
+                               ? amrex::min(1.0_rt, (umax - utd)/Pp) : 0.0_rt;
+                            Rm = (Pm > 0.0_rt)
+                               ? amrex::min(1.0_rt, (utd - umin)/Pm) : 0.0_rt;
+                        };
+                        auto zal = [&] (int const lo) {
+                            amrex::Real const raw = rawphi(lo);
+                            if (raw == 0.0_rt) { return 0.0_rt; }
+                            amrex::Real Rp0, Rm0, Rp1, Rm1;
+                            rfac(lo,     Rp0, Rm0);
+                            rfac(lo + 1, Rp1, Rm1);
+                            // raw > 0 removes from node lo (donor) and
+                            // adds to node lo+1 (receiver)
+                            amrex::Real const C = (raw > 0.0_rt)
+                                ? amrex::min(Rp1, Rm0)
+                                : amrex::min(Rp0, Rm1);
+                            return C*raw;
+                        };
+                        phiH = zal(0);
+                        phiL = zal(-1);
+                    }
+                    ua(i,j,k) = uf(i,j,k) - (phiH - phiL);
                 });
             }
         }
