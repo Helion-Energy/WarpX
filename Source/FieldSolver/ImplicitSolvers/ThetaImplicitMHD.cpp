@@ -639,26 +639,26 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         preconditioner_type == PreconditionerType::none ||
             preconditioner_type == PreconditionerType::pc_mhd_block,
         "theta_implicit_mhd supports jacobian.pc_type = none or pc_mhd_block");
-    if (m_use_hlld) {
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            preconditioner_type == PreconditionerType::none,
-            "implicit_mhd.fluid_flux = hlld runs unpreconditioned "
-            "(jacobian.pc_type = none); pc_mhd_block assumes the E-based "
-            "state layout");
-    }
 #if defined(WARPX_DIM_RZ)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        preconditioner_type == PreconditionerType::none,
-        "pc_mhd_block does not yet include cylindrical metric terms; "
-        "theta_implicit_mhd in RZ requires jacobian.pc_type = none");
+        preconditioner_type == PreconditionerType::none || m_use_hlld,
+        "pc_mhd_block in RZ requires implicit_mhd.fluid_flux = hlld: the "
+        "E-based block preconditioner has no cylindrical metric terms");
 #endif
-    if (preconditioner_type == PreconditionerType::pc_mhd_block) {
+    if (preconditioner_type == PreconditionerType::pc_mhd_block &&
+        !m_use_hlld) {
+        // The E-based operators do not apply to the conservative-form
+        // recast; under hlld the preconditioner is the Stage-1 identity-B +
+        // signal-diffusion form, which handles any ion closure, any
+        // resistivity, and the Open/None boundaries the recast supports.
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             WarpX::grid_type == ablastr::utils::enums::GridType::Staggered,
-            "pc_mhd_block currently requires warpx.grid_type = staggered");
+            "pc_mhd_block with the E-based state currently requires "
+            "warpx.grid_type = staggered");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !m_hybrid_pic_model->m_include_hyper_resistivity_term,
-            "pc_mhd_block currently requires zero plasma_hyper_resistivity");
+            "pc_mhd_block with the E-based state currently requires zero "
+            "plasma_hyper_resistivity");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !m_hybrid_pic_model->m_has_per_species_eta,
             "pc_mhd_block does not yet support per-species resistivity");
@@ -669,15 +669,18 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             resistivity_symbols.count("rho") == 0 &&
                 resistivity_symbols.count("J") == 0,
-            "pc_mhd_block currently requires plasma_resistivity to be "
-            "constant or time-only (no rho or J dependence)");
+            "pc_mhd_block with the E-based state currently requires "
+            "plasma_resistivity to be constant or time-only (no rho or J "
+            "dependence)");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_fluid_flux == "centered",
-            "pc_mhd_block currently requires implicit_mhd.fluid_flux = centered");
+            "pc_mhd_block with the E-based state currently requires "
+            "implicit_mhd.fluid_flux = centered");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_ion_closure == "barotropic",
-            "pc_mhd_block currently requires implicit_mhd.ion_closure = "
-            "barotropic; total_energy runs unpreconditioned");
+            "pc_mhd_block with the E-based state currently requires "
+            "implicit_mhd.ion_closure = barotropic; total_energy runs "
+            "unpreconditioned");
     }
 
     FillFluidSources(m_state);

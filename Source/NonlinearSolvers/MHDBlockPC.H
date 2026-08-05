@@ -12,6 +12,7 @@
 #include "Preconditioner.H"
 #include "Utils/Parser/ParserUtils.H"
 #include "Utils/TextMsg.H"
+#include "Utils/WarpXAlgorithmSelection.H"
 #include "Utils/WarpXConst.H"
 
 #include <ablastr/coarsen/sample.H>
@@ -63,6 +64,23 @@
  * robust in that regime. The acoustic pressure Schur block also remains the
  * zero-background path. All MLMG applications use zero initial guesses, fixed
  * cycle counts, and fixed bottom smoothing.
+ *
+ * For the conservative-form recast (implicit_mhd.fluid_flux = hlld) the state
+ * carries face-staggered B^{n+theta} instead of E. Stage-1 treatment: the
+ * Faraday block is the identity, and every cell-centered block (rho, M,
+ * U_e, and the ion-closure energies) is preconditioned by the scalar
+ * signal-diffusion Helmholtz
+ *
+ *     [I + theta dt S_ref (h_dir/2) (-lap)] dU = bU,
+ *
+ * where S_ref = |u|_ref + sqrt(c_s,ref^2 + v_A,ref^2) is the domain-reference
+ * signal speed and h_dir the cell size. This stands in for the
+ * O(theta dt |S|/h) HLLD upwind dissipation, the stiffest near-wall Jacobian
+ * content. In RZ the Helmholtz is assembled in cylindrical form by
+ * multiplying the equation through by r (a = r, b_r = r_face D_r,
+ * b_z = r_cell D_z). Boundary types the residual handles itself are mapped
+ * to preconditioner-only linear-operator types: Open -> homogeneous
+ * Dirichlet and None (solver-managed zero-gradient ghosts) -> Neumann.
  */
 template <class T, class Ops>
 class MHDBlockPC : public Preconditioner<T, Ops>
@@ -91,6 +109,8 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         void BuildFieldRHS (const T& rhs, const amrex::MultiFab* momentum);
         void AddIdealLorentzForceToMomentumRHS (const T& field_predictor, const T& rhs);
         void ApplyIdealWaveFluidBlock (T& solution, const T& rhs);
+        void UpdateSignalDiffusion (const T& state);
+        void ApplySignalDiffusionBlocks (T& solution, const T& rhs);
 
         [[nodiscard]] bool
         IsDefined () const override
@@ -104,6 +124,7 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         inline static constexpr char ElectronEnergyName[] = "implicit_mhd_electron_energy";
 
         bool m_is_defined = false;
+        bool m_hlld_state = false;
         bool m_verbose = false;
         bool m_bottom_verbose = false;
         bool m_agglomeration = true;
@@ -119,6 +140,7 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         int m_field_iterations = 2;
         int m_fluid_iterations = 2;
         int m_max_coarsening_level = 30;
+        int m_signal_components = 0;
 
         RT m_gamma_e = RT(5.0 / 3.0);
         RT m_gamma_i = RT(5.0 / 3.0);
@@ -126,6 +148,7 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         RT m_reference_magnetic_field_scale = 0.0;
         RT m_reference_ion_pressure = 0.0;
         RT m_reference_charge_density = 0.0;
+        RT m_reference_velocity = 0.0;
         RT m_wave_relaxation = 0.5;
 
         RT m_h = 0.0;
@@ -136,6 +159,8 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         RT m_electron_enthalpy = 0.0;
         RT m_ion_sound_speed_squared = 0.0;
         RT m_sound_speed_squared = 0.0;
+        RT m_signal_speed = 0.0;
+        amrex::GpuArray<RT, AMREX_SPACEDIM> m_signal_diffusion = {};
         amrex::GpuArray<RT, 3> m_reference_magnetic_field = {0.0, 0.0, 0.0};
 
         Ops* m_ops = nullptr;
@@ -152,6 +177,8 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         std::unique_ptr<amrex::MLMG> m_fluid_solver;
         std::unique_ptr<MHDWaveOp> m_wave_operator;
         std::unique_ptr<amrex::MLMG> m_wave_solver;
+        std::unique_ptr<amrex::MLABecLaplacian> m_signal_operator;
+        std::unique_ptr<amrex::MLMG> m_signal_solver;
 
         amrex::Array<std::unique_ptr<amrex::MultiFab>, 3> m_field_rhs;
         amrex::Array<std::unique_ptr<amrex::MultiFab>, 3> m_field_operator_action;
@@ -159,11 +186,22 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         std::unique_ptr<amrex::MultiFab> m_momentum_solution;
         std::unique_ptr<amrex::MultiFab> m_pressure_rhs;
         std::unique_ptr<amrex::MultiFab> m_pressure;
+        // All cell-centered blocks stacked as components of one Helmholtz
+        // solve (they share the same reference operator).
+        std::unique_ptr<amrex::MultiFab> m_signal_rhs;
+        std::unique_ptr<amrex::MultiFab> m_signal_solution;
+        // Per-direction face coefficients; in RZ they and the cell
+        // coefficient also carry the cylindrical metric factor r.
+        std::unique_ptr<amrex::MultiFab> m_signal_acoef;
+        amrex::Array<std::unique_ptr<amrex::MultiFab>, AMREX_SPACEDIM> m_signal_bcoef;
 
         void ReadParameters ();
         void ApplyFieldBlock (T& solution, const T& rhs);
         void SolveFieldBlock (T& solution);
         void ComputeUnitCurlCurlAction (const T& field);
+        void DefineSignalDiffusion (const T& state);
+        [[nodiscard]] amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM>
+        GetCellCenteredLinOpBC (bool a_high_side) const;
 };
 
 template <class T, class Ops>
@@ -189,6 +227,15 @@ MHDBlockPC<T, Ops>::ReadParameters ()
     utils::parser::queryWithParser(pp_mhd, "reference_ion_pressure", m_reference_ion_pressure);
     utils::parser::queryWithParser(pp_mhd, "gamma_e", m_gamma_e);
     utils::parser::queryWithParser(pp_mhd, "gamma_i", m_gamma_i);
+    // Same default as the ThetaImplicitMHD constructor: the reference Alfven
+    // speed when implicit_mhd.reference_velocity is not provided.
+    const bool has_reference_velocity =
+        utils::parser::queryWithParser(pp_mhd, "reference_velocity", m_reference_velocity);
+    if (!has_reference_velocity && m_reference_mass_density > 0.0)
+    {
+        m_reference_velocity = m_reference_magnetic_field_scale /
+                               std::sqrt(PhysConst::mu0 * m_reference_mass_density);
+    }
 
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_field_iterations > 0,
                                      "pc_mhd_block.field_iterations must be positive");
@@ -205,6 +252,8 @@ MHDBlockPC<T, Ops>::ReadParameters ()
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_gamma_e > 1.0,
                                      "implicit_mhd.gamma_e must be greater than one");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_gamma_i > 0.0, "implicit_mhd.gamma_i must be positive");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_reference_velocity > 0.0,
+                                     "implicit_mhd.reference_velocity must be positive");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_wave_relaxation > 0.0 && m_wave_relaxation <= 0.5,
                                      "pc_mhd_block.wave_relaxation must be in (0, 0.5]");
 }
@@ -219,8 +268,12 @@ MHDBlockPC<T, Ops>::Define (const T& state, Ops* const ops)
                                      "MHDBlockPC::Define() called on a defined object");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(ops != nullptr,
                                      "MHDBlockPC::Define() received a null operator");
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(state.getArrayVecType() == warpx::fields::FieldType::Efield_fp,
-                                     "pc_mhd_block requires Efield_fp as its vector block");
+    const warpx::fields::FieldType array_type = state.getArrayVecType();
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        array_type == warpx::fields::FieldType::Efield_fp ||
+            array_type == warpx::fields::FieldType::Bfield_fp,
+        "pc_mhd_block requires Efield_fp or Bfield_fp as its vector block");
+    m_hlld_state = (array_type == warpx::fields::FieldType::Bfield_fp);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(state.numAMRLevels() == 1 && ops->numAMRLevels() == 1,
                                      "pc_mhd_block currently supports one AMR level");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -241,6 +294,18 @@ MHDBlockPC<T, Ops>::Define (const T& state, Ops* const ops)
     m_info->setAgglomeration(m_agglomeration);
     m_info->setConsolidation(m_consolidation);
     m_info->setMaxCoarseningLevel(m_max_coarsening_level);
+
+    if (m_hlld_state)
+    {
+        // Conservative-form recast: the Faraday block is the identity and
+        // the cell-centered blocks share one signal-diffusion Helmholtz, so
+        // none of the E-based operators below are constructed (their domain
+        // boundary conversion also rejects Open/None boundaries, which the
+        // hlld residual supports).
+        DefineSignalDiffusion(state);
+        m_is_defined = true;
+        return;
+    }
 
     m_curl_curl = std::make_unique<amrex::MLCurlCurl>(
         amrex::Vector<amrex::Geometry>{m_geometry}, amrex::Vector<amrex::BoxArray>{m_cell_grids},
@@ -323,6 +388,264 @@ MHDBlockPC<T, Ops>::Define (const T& state, Ops* const ops)
 }
 
 template <class T, class Ops>
+amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM>
+MHDBlockPC<T, Ops>::GetCellCenteredLinOpBC (const bool a_high_side) const
+{
+    const amrex::Array<FieldBoundaryType, AMREX_SPACEDIM>& field_bc =
+        a_high_side ? m_ops->GetFieldBoundaryHi() : m_ops->GetFieldBoundaryLo();
+    amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM> linop_bc;
+    for (auto& bc : linop_bc)
+    {
+        bc = amrex::LinOpBCType::bogus;
+    }
+    for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+    {
+        if (field_bc[direction] == FieldBoundaryType::Periodic)
+        {
+            linop_bc[direction] = amrex::LinOpBCType::Periodic;
+        }
+        else if (field_bc[direction] == FieldBoundaryType::PEC ||
+                 field_bc[direction] == FieldBoundaryType::Open)
+        {
+            // Open is a preconditioner-only approximation: homogeneous
+            // Dirichlet stands in for the Green's-function coupling, which
+            // the nonlinear residual retains exactly.
+            linop_bc[direction] = amrex::LinOpBCType::Dirichlet;
+        }
+        else if (field_bc[direction] == FieldBoundaryType::Neumann ||
+                 field_bc[direction] == FieldBoundaryType::None)
+        {
+            // None marks solver-managed zero-gradient ghosts (the RZ axis
+            // and outflow z ends); the preconditioner treats them as
+            // homogeneous Neumann.
+            linop_bc[direction] = amrex::LinOpBCType::Neumann;
+        }
+        else
+        {
+            WARPX_ABORT_WITH_MESSAGE(
+                "pc_mhd_block has no cell-centered linear-operator boundary "
+                "for this field boundary type");
+        }
+    }
+    return linop_bc;
+}
+
+template <class T, class Ops>
+void
+MHDBlockPC<T, Ops>::DefineSignalDiffusion (const T& state)
+{
+    const amrex::MultiFab& density = state.getMultiFabBlock(MassDensityName, 0);
+
+    m_signal_components = 0;
+    for (const auto& spec : state.getMultiFabBlockSpecs())
+    {
+        m_signal_components += state.getMultiFabBlock(spec.name, 0).nComp();
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_signal_components > 0,
+                                     "pc_mhd_block found no cell-centered state blocks");
+
+    m_signal_rhs = std::make_unique<amrex::MultiFab>(density.boxArray(),
+                                                     density.DistributionMap(),
+                                                     m_signal_components, 0);
+    m_signal_solution = std::make_unique<amrex::MultiFab>(density.boxArray(),
+                                                          density.DistributionMap(),
+                                                          m_signal_components, 1);
+
+    m_signal_acoef =
+        std::make_unique<amrex::MultiFab>(density.boxArray(), density.DistributionMap(), 1, 0);
+    for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+    {
+        m_signal_bcoef[direction] = std::make_unique<amrex::MultiFab>(
+            amrex::convert(density.boxArray(), amrex::IntVect::TheDimensionVector(direction)),
+            density.DistributionMap(), 1, 0);
+    }
+
+    m_signal_operator = std::make_unique<amrex::MLABecLaplacian>(
+        amrex::Vector<amrex::Geometry>{m_geometry},
+        amrex::Vector<amrex::BoxArray>{density.boxArray()},
+        amrex::Vector<amrex::DistributionMapping>{density.DistributionMap()}, *m_info,
+        amrex::Vector<amrex::FabFactory<amrex::FArrayBox> const*>{}, m_signal_components);
+    m_signal_operator->setDomainBC(GetCellCenteredLinOpBC(false), GetCellCenteredLinOpBC(true));
+    // Homogeneous boundary values on every side the map produces.
+    m_signal_operator->setLevelBC(0, nullptr);
+    m_signal_operator->setScalars(1.0, 1.0);
+    m_signal_operator->setACoeffs(0, 1.0);
+    m_signal_operator->setBCoeffs(0, 0.0);
+
+    m_signal_solver = std::make_unique<amrex::MLMG>(*m_signal_operator);
+    m_signal_solver->setMaxIter(m_fluid_iterations);
+    m_signal_solver->setFixedIter(m_fluid_iterations);
+    m_signal_solver->setMaxFmgIter(0);
+    m_signal_solver->setBottomSolver(amrex::BottomSolver::smoother);
+    m_signal_solver->setVerbose(static_cast<int>(m_verbose));
+    m_signal_solver->setBottomVerbose(static_cast<int>(m_bottom_verbose));
+}
+
+template <class T, class Ops>
+void
+MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
+{
+    const amrex::MultiFab& density = state.getMultiFabBlock(MassDensityName, 0);
+    const amrex::MultiFab& electron_energy = state.getMultiFabBlock(ElectronEnergyName, 0);
+    const RT density_sum = density.sum(0, false);
+    const RT energy_sum = electron_energy.sum(0, false);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(density_sum > 0.0,
+                                     "pc_mhd_block encountered non-positive total mass density");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(energy_sum >= 0.0,
+                                     "pc_mhd_block encountered negative total electron energy");
+
+    const RT chi = m_gamma_e - 1.0;
+    m_electron_enthalpy = m_gamma_e * energy_sum / density_sum;
+    m_ion_sound_speed_squared = m_gamma_i * m_reference_ion_pressure / m_reference_mass_density;
+    m_sound_speed_squared = m_ion_sound_speed_squared + chi * m_electron_enthalpy;
+
+    // Domain-reference fast speed from the INPUT reference field scale: the
+    // domain-mean B is near zero for reversed-field states, which would
+    // deactivate the Alfven contribution exactly where it is stiff.
+    const RT alfven_speed_squared = m_reference_magnetic_field_scale *
+                                    m_reference_magnetic_field_scale /
+                                    (PhysConst::mu0 * m_reference_mass_density);
+    m_signal_speed =
+        m_reference_velocity + std::sqrt(m_sound_speed_squared + alfven_speed_squared);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        std::isfinite(m_signal_speed) && m_signal_speed > 0.0,
+        "pc_mhd_block requires a positive finite reference signal speed");
+
+    const auto cell_size = m_geometry.CellSizeArray();
+    for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+    {
+        m_signal_diffusion[direction] = m_h * m_signal_speed * RT(0.5) * cell_size[direction];
+    }
+
+    m_signal_operator->setScalars(1.0, 1.0);
+#if defined(WARPX_DIM_RZ)
+    // Cylindrical assembly: multiply [I + D (-lap_cyl)] u = b through by r,
+    // i.e. a = r_cell, b_r = r_face D_r, b_z = r_cell D_z (and r b on the
+    // right-hand side, applied when the RHS is loaded). The axis face has
+    // r = 0, which enforces the regularity (zero-flux) condition there.
+    const RT radial_lo = static_cast<RT>(m_geometry.ProbLo(0));
+    const RT radial_cell_size = cell_size[0];
+    const RT radial_diffusion = m_signal_diffusion[0];
+    const RT axial_diffusion = m_signal_diffusion[1];
+    for (amrex::MFIter mfi(*m_signal_acoef); mfi.isValid(); ++mfi)
+    {
+        const auto acoef = m_signal_acoef->array(mfi);
+        const auto bcoef_r = m_signal_bcoef[0]->array(mfi);
+        const auto bcoef_z = m_signal_bcoef[1]->array(mfi);
+        amrex::ParallelFor(
+            mfi.validbox(),
+            [=] AMREX_GPU_DEVICE(int i, int j, int k)
+            {
+                amrex::ignore_unused(j, k);
+                acoef(i, j, k) =
+                    radial_lo + (static_cast<RT>(i) + RT(0.5)) * radial_cell_size;
+            });
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect::TheDimensionVector(0)),
+            [=] AMREX_GPU_DEVICE(int i, int j, int k)
+            {
+                amrex::ignore_unused(j, k);
+                bcoef_r(i, j, k) =
+                    radial_diffusion * (radial_lo + static_cast<RT>(i) * radial_cell_size);
+            });
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect::TheDimensionVector(1)),
+            [=] AMREX_GPU_DEVICE(int i, int j, int k)
+            {
+                amrex::ignore_unused(j, k);
+                bcoef_z(i, j, k) =
+                    axial_diffusion *
+                    (radial_lo + (static_cast<RT>(i) + RT(0.5)) * radial_cell_size);
+            });
+    }
+    m_signal_operator->setACoeffs(0, *m_signal_acoef);
+#else
+    m_signal_operator->setACoeffs(0, 1.0);
+    for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+    {
+        m_signal_bcoef[direction]->setVal(m_signal_diffusion[direction]);
+    }
+#endif
+    amrex::Array<amrex::MultiFab const*, AMREX_SPACEDIM> face_coefficients;
+    for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+    {
+        face_coefficients[direction] = m_signal_bcoef[direction].get();
+    }
+    // Single-component coefficients broadcast across the stacked block
+    // components.
+    m_signal_operator->setBCoeffs(0, face_coefficients);
+
+    if (m_verbose)
+    {
+        amrex::Print() << "Updating pc_mhd_block (hlld state): h = " << m_h
+                       << ", a_e = " << m_electron_enthalpy
+                       << ", c^2 = " << m_sound_speed_squared
+                       << ", S_ref = " << m_signal_speed << "\n";
+    }
+}
+
+template <class T, class Ops>
+void
+MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
+{
+    // Faraday block: identity. TODO(Stage 2): triangular corrector
+    // bB - theta dt curl(dM/rho_ref x B_ref) on faces, which needs the
+    // solver's staggered curl and the RZ corner-EMF conventions.
+    auto const& rhs_fields = rhs.getArrayVec();
+    auto const& solution_fields = solution.getArrayVec();
+    for (int component = 0; component < 3; ++component)
+    {
+        amrex::MultiFab::Copy(*solution_fields[0][component], *rhs_fields[0][component], 0, 0, 1,
+                              0);
+    }
+
+    // Every cell-centered block (rho, M components, U_e, and the
+    // closure-dependent ion energies) sees the same reference Helmholtz:
+    // stack the block components and solve once.
+    int stacked_component = 0;
+    for (const auto& spec : rhs.getMultiFabBlockSpecs())
+    {
+        const amrex::MultiFab& block_rhs = rhs.getMultiFabBlock(spec.name, 0);
+        amrex::MultiFab::Copy(*m_signal_rhs, block_rhs, 0, stacked_component,
+                              block_rhs.nComp(), 0);
+        stacked_component += block_rhs.nComp();
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(stacked_component == m_signal_components,
+                                     "pc_mhd_block state block layout changed after Define()");
+
+#if defined(WARPX_DIM_RZ)
+    // The cylindrical operator assembly multiplied the equation by r.
+    const RT radial_lo = static_cast<RT>(m_geometry.ProbLo(0));
+    const RT radial_cell_size = static_cast<RT>(m_geometry.CellSize(0));
+    const int number_of_components = m_signal_components;
+    for (amrex::MFIter mfi(*m_signal_rhs); mfi.isValid(); ++mfi)
+    {
+        const auto signal_rhs = m_signal_rhs->array(mfi);
+        amrex::ParallelFor(
+            mfi.validbox(), number_of_components,
+            [=] AMREX_GPU_DEVICE(int i, int j, int k, int n)
+            {
+                const RT radius =
+                    radial_lo + (static_cast<RT>(i) + RT(0.5)) * radial_cell_size;
+                signal_rhs(i, j, k, n) *= radius;
+            });
+    }
+#endif
+
+    m_signal_solution->setVal(0.0);
+    m_signal_solver->solve({m_signal_solution.get()}, {m_signal_rhs.get()}, 0.0, 0.0);
+
+    stacked_component = 0;
+    for (const auto& spec : rhs.getMultiFabBlockSpecs())
+    {
+        amrex::MultiFab& block_solution = solution.getMultiFabBlock(spec.name, 0);
+        amrex::MultiFab::Copy(block_solution, *m_signal_solution, stacked_component, 0,
+                              block_solution.nComp(), 0);
+        stacked_component += block_solution.nComp();
+    }
+}
+
+template <class T, class Ops>
 void
 MHDBlockPC<T, Ops>::Update (const T& state)
 {
@@ -335,6 +658,12 @@ MHDBlockPC<T, Ops>::Update (const T& state)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(theta > 0.0,
                                      "pc_mhd_block requires a positive implicit theta");
     m_h = theta * this->m_dt;
+    if (m_hlld_state)
+    {
+        UpdateSignalDiffusion(state);
+        return;
+    }
+
     const RT evaluation_time = this->m_time + m_h;
     m_eta_reference = m_ops->GetMHDReferenceResistivityForPC(evaluation_time);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_eta_reference >= 0.0,
@@ -438,6 +767,14 @@ MHDBlockPC<T, Ops>::Apply (T& solution, const T& rhs)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(IsDefined(),
                                      "MHDBlockPC::Apply() called on an undefined object");
     solution.zero();
+    if (m_hlld_state)
+    {
+        // Every block is written (identity or Helmholtz-preconditioned):
+        // a zero write on an unknown block would make the operator singular.
+        ApplySignalDiffusionBlocks(solution, rhs);
+        return;
+    }
+
     if (!m_evolve_ion_fluid)
     {
         ApplyFrozenIonFluidBlock(solution, rhs);

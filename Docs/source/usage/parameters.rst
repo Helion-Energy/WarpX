@@ -431,20 +431,58 @@ Overall simulation parameters
             approximately the electron-energy row, as identities. It applies
             the Hall-aware field corrector without the ion-wave Schur solve.
 
+            With ``implicit_mhd.fluid_flux = hlld`` (the conservative-form
+            recast, where face-staggered :math:`\boldsymbol B^{n+\theta}` is
+            the JFNK array block), the preconditioner instead takes its
+            Stage-1 form: the Faraday block is the **identity** (the
+            triangular ideal-induction corrector is not yet implemented), and
+            every cell-centered block (:math:`\rho`, the three momentum
+            components, :math:`U_e`, and the ion-closure energies
+            :math:`E_i` or :math:`U_\parallel,U_\perp`) is preconditioned by
+            one scalar signal-diffusion Helmholtz solve,
+
+            .. math::
+
+               \left[\mathbb I
+                 + \theta\Delta t\, S_*\, \tfrac{h_d}{2}\,(-\nabla^2)\right]
+               \delta U = b_U ,
+
+            where :math:`h_d` is the cell size per direction and
+            :math:`S_* = |u|_* + \sqrt{c_{s,*}^2 + v_{A,*}^2}` is the
+            domain-reference signal speed built from
+            ``implicit_mhd.reference_velocity``,
+            ``implicit_mhd.reference_magnetic_field``,
+            ``implicit_mhd.reference_ion_pressure``, and the instantaneous
+            mean electron enthalpy. This approximates the
+            :math:`O(\theta\Delta t\,|S|/h)` HLLD upwind dissipation — the
+            stiffest near-wall Jacobian content — but not the wave couplings
+            or the advective (skew) part, so it targets robustness at large
+            signal CFL rather than a large iteration-count reduction on
+            resolved runs. In RZ the Helmholtz is assembled in cylindrical
+            form. Boundaries the recast residual manages itself are mapped to
+            preconditioner-only linear-operator types: ``open`` becomes
+            homogeneous Dirichlet and ``none`` (the RZ axis and outflow ends)
+            becomes homogeneous Neumann; the nonlinear residual keeps the
+            true boundary coupling. The hlld form supports any ion closure,
+            any resistivity, and uses ``pc_mhd_block.fluid_iterations``
+            fixed MLMG cycles for the single stacked solve.
+
             All MLMG solves use zero initial guesses, fixed cycle counts, and
             fixed bottom smoothing. This keeps the operation stationary to
             solver roundoff for standard right-preconditioned GMRES; MLMG can
             still stop early at its internal machine-precision residual
             threshold.
 
-            The prototype requires one Cartesian, periodic AMR level,
-            ``warpx.grid_type = staggered``,
-            ``implicit_mhd.fluid_flux = centered``, and
+            With the E-based state (``implicit_mhd.fluid_flux = centered``),
+            the prototype requires one Cartesian, periodic AMR level,
+            ``warpx.grid_type = staggered``, and
             zero ``hybrid_pic_model.plasma_hyper_resistivity``. Resistivity
             may be constant or time dependent; density, current, and
             per-species dependence is rejected because the field block uses a
             scalar reference value. Hall and electron-pressure physics may be
-            enabled, and ions may evolve or be frozen. The Hall preconditioner
+            enabled, and ions may evolve or be frozen. In RZ only the hlld
+            Stage-1 form is available (the E-based operators have no
+            cylindrical metric). The Hall preconditioner
             is currently an isotropic, constant-coefficient whistler-magnitude
             surrogate; it is not the full skew electron subsystem and does not
             retain multidimensional :math:`k k_\parallel` anisotropy. It does
