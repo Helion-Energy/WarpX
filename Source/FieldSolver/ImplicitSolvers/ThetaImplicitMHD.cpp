@@ -240,12 +240,16 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
                                    m_cgl_instability_scale);
     utils::parser::queryWithParser(pp, "cgl_instability_width",
                                    m_cgl_instability_width);
+    utils::parser::queryWithParser(pp, "cgl_null_scale", m_cgl_null_scale);
     if (m_ion_closure == "cgl") {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_cgl_instability_scale >= 0.0_rt &&
                 m_cgl_instability_width > 0.0_rt,
             "implicit_mhd.cgl_instability_scale cannot be negative and "
             "cgl_instability_width must be positive");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_cgl_null_scale >= 0.0_rt,
+            "implicit_mhd.cgl_null_scale cannot be negative");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_use_hlld,
             "implicit_mhd.ion_closure = cgl requires implicit_mhd.fluid_flux "
@@ -754,7 +758,8 @@ void ThetaImplicitMHD::PrintParameters () const
         amrex::Print() << "CGL relaxation scale:          " << m_cgl_relaxation_scale << "\n"
                        << "CGL Coulomb logarithm:         " << m_cgl_coulomb_log << "\n"
                        << "CGL instability scale/width:   " << m_cgl_instability_scale
-                       << " " << m_cgl_instability_width << "\n";
+                       << " " << m_cgl_instability_width << "\n"
+                       << "CGL null-blend scale:          " << m_cgl_null_scale << "\n";
     }
     PrintBaseImplicitSolverParameters();
     m_nlsolver->PrintParams();
@@ -2918,6 +2923,18 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     const amrex::Real cgl_inverse_mu0 = 1.0_rt / PhysConst::mu0;
     const amrex::Real cgl_instability_scale = m_cgl_instability_scale;
     const amrex::Real cgl_instability_width = m_cgl_instability_width;
+    // Magnetization-weighted null blend (Stage B+): w = 1/(1+(r_L/dx)^2)
+    // written as Omega_ci^2 dx^2 / (Omega_ci^2 dx^2 + v_thi^2), with dx
+    // the smallest resolved cell size (absent dimensions report inverse
+    // size 0). The denominator is strictly positive through the smooth
+    // pressure floor in v_thi^2, so w is C-infinity and exactly 0 at
+    // B = 0.
+    const amrex::Real cgl_null_scale = m_cgl_null_scale;
+    const amrex::Real cgl_null_inverse_length = std::max(
+        {inverse_cell_size[0], inverse_cell_size[1], inverse_cell_size[2]});
+    const amrex::Real cgl_null_omega2_coefficient =
+        (m_ion_charge_to_mass / cgl_null_inverse_length) *
+        (m_ion_charge_to_mass / cgl_null_inverse_length);
     // Braginskii ion-ion collision rate, nu_ii = sqrt(2) n_i e^4 lnLambda
     // / (12 pi^{3/2} sqrt(m_i) eps0^2 (k T_i)^{3/2}), scaled by
     // cgl_relaxation_scale; the kernel evaluates
@@ -3164,9 +3181,37 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
             }
 #endif
 
+            // Stage B+ magnetization weight of the gyrotropic closure,
+            // w = Omega_ci^2 dx^2 / (Omega_ci^2 dx^2 + v_thi^2), i.e.
+            // w = 1/(1 + (r_L/dx)^2): where the ion gyroradius is not
+            // resolved -- in particular at field nulls, where the RAW
+            // (unfloored) b2 drives w to exactly 0 -- the gyrotropic
+            // stress and work degenerate C-infinity-smoothly to
+            // isotropic MHD with p_eff. Only defined here; evaluated
+            // solely inside the cgl blocks below.
+            const auto null_weight = [=] (const int ic, const int jc,
+                                          const int kc) {
+                amrex::Real b2n = 0.0_rt;
+                for (int component = 0; component < 3; ++component) {
+                    b2n += b_cc(ic, jc, kc, component) *
+                           b_cc(ic, jc, kc, component);
+                }
+                const amrex::Real pressure_eff =
+                    (2.0_rt * upar(ic, jc, kc) +
+                     2.0_rt * uperp(ic, jc, kc)) / 3.0_rt;
+                const amrex::Real thermal_speed2 =
+                    theta_implicit_mhd::smooth_positive_floor(
+                        pressure_eff, ion_pressure_floor) /
+                    std::max(rho(ic, jc, kc), density_floor);
+                const amrex::Real magnetization2 =
+                    cgl_null_omega2_coefficient * b2n;
+                return magnetization2 / (magnetization2 + thermal_speed2);
+            };
+
             if (cgl_closure) {
-                // Anisotropic (CGL) deviation stress
-                // PI_dev = (p_par - p_perp)(bhat bhat - I/3): the fan's
+                // Anisotropic (CGL) deviation stress, magnetization
+                // weighted (Stage B+):
+                // PI_dev = w (p_par - p_perp)(bhat bhat - I/3): the fan's
                 // momentum flux already carries the EFFECTIVE isotropic
                 // pressure p_eff = (p_par + 2 p_perp)/3, so only the
                 // trace-free deviation enters here, as a pointwise
@@ -3178,7 +3223,9 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 // physically negligible and only the (arbitrary) field
                 // direction is smoothed away. p_par - p_perp uses the RAW
                 // energies (linear, hence smooth; the difference must not
-                // be distorted by one-sided floors).
+                // be distorted by one-sided floors). The weight w makes
+                // the momentum stress exactly the P_blend whose work the
+                // energy blocks integrate below.
                 const auto pi_dev = [=] (const int ic, const int jc,
                                          const int kc, const int a,
                                          const int b) {
@@ -3193,7 +3240,7 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                         b_cc(ic, jc, kc, a) * b_cc(ic, jc, kc, b) /
                         theta_implicit_mhd::smooth_positive_floor(b2,
                                                                   small_b2);
-                    return pressure_difference *
+                    return null_weight(ic, jc, kc) * pressure_difference *
                            (bhat_ab -
                             (a == b ? (1.0_rt / 3.0_rt) : 0.0_rt));
                 };
@@ -3453,20 +3500,42 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                            bz * gradient_z[2])) *
                     inverse_b2;
 #endif
-                // CGL work terms (internal-energy form, no heat flux):
-                //   dU_par/dt  + div(U_par u)  = -p_par (bb : grad u),
+                // CGL work terms (internal-energy form, no heat flux),
+                // magnetization blended (Stage B+):
+                //   dU_par/dt  + div(U_par u)  =
+                //       -w p_par (bb : grad u) - (1-w)(1/3) p_eff div u,
                 //   dU_perp/dt + div(U_perp u) =
-                //       -p_perp (div u - bb : grad u),
+                //       -w p_perp (div u - bb : grad u)
+                //       - (1-w)(2/3) p_eff div u,
                 // with p_par = 2 U_par and p_perp = U_perp taken RAW
-                // (linear, hence smooth, in the unknowns).
+                // (linear, hence smooth, in the unknowns). The total
+                // internal work is exactly -P_blend : grad u with
+                // P_blend = p_eff I + w (p_par - p_perp)(bhat bhat - I/3)
+                // -- the SAME weighted stress the momentum divergence
+                // integrates -- and the (1/3, 2/3) split keeps isotropy
+                // a fixed point of pure compression at w = 0.
                 const amrex::Real pressure_parallel =
                     2.0_rt * upar(i, j, k);
                 const amrex::Real pressure_perp = uperp(i, j, k);
+                const amrex::Real number_density =
+                    safe_density * inverse_ion_mass;
+                const amrex::Real pressure_effective =
+                    (pressure_parallel + 2.0_rt * pressure_perp) / 3.0_rt;
+                const amrex::Real magnetization_weight =
+                    null_weight(i, j, k);
+                const amrex::Real isotropic_work =
+                    -pressure_effective * divergence_velocity;
                 amrex::Real parallel_work =
-                    -pressure_parallel * parallel_gradient;
+                    magnetization_weight *
+                        (-pressure_parallel * parallel_gradient) +
+                    (1.0_rt - magnetization_weight) *
+                        (1.0_rt / 3.0_rt) * isotropic_work;
                 amrex::Real perp_work =
-                    -pressure_perp *
-                    (divergence_velocity - parallel_gradient);
+                    magnetization_weight *
+                        (-pressure_perp *
+                         (divergence_velocity - parallel_gradient)) +
+                    (1.0_rt - magnetization_weight) *
+                        (2.0_rt / 3.0_rt) * isotropic_work;
                 // Ion-ion isotropization at nu_iso = scale * nu_ii
                 // (Braginskii), with kT_eff = p_eff/n_i smooth-floored at
                 // the strictly positive floor-state anchor:
@@ -3474,10 +3543,6 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 // conserving U_par + U_perp exactly (up to the separate
                 // drain gates below, which only reduce a draining side
                 // near its floor).
-                const amrex::Real number_density =
-                    safe_density * inverse_ion_mass;
-                const amrex::Real pressure_effective =
-                    (pressure_parallel + 2.0_rt * pressure_perp) / 3.0_rt;
                 const amrex::Real temperature =
                     theta_implicit_mhd::smooth_positive_floor(
                         pressure_effective / number_density,
@@ -3525,10 +3590,26 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                                            cgl_instability_width));
                 const amrex::Real cyclotron_frequency =
                     charge_to_mass * std::sqrt(b2_floored);
+                // Stage B+ null relaxation: unmagnetized ions mix over a
+                // cell at their thermal transit rate v_thi/dx, so where
+                // w -> 0 (gyroradius unresolved, in particular field
+                // nulls, where the Omega_ci-scaled instability rates
+                // vanish by construction) the anisotropy relaxes at
+                // cgl_null_scale times that rate. Same smooth floors as
+                // the weight itself.
+                const amrex::Real thermal_speed = std::sqrt(
+                    theta_implicit_mhd::smooth_positive_floor(
+                        pressure_effective, ion_pressure_floor) /
+                    safe_density);
+                const amrex::Real nu_null =
+                    cgl_null_scale * thermal_speed *
+                    cgl_null_inverse_length *
+                    (1.0_rt - magnetization_weight);
                 const amrex::Real nu_iso =
                     nu_collisional +
                     cgl_instability_scale * cyclotron_frequency *
-                        (firehose_switch + mirror_switch);
+                        (firehose_switch + mirror_switch) +
+                    nu_null;
                 amrex::Real parallel_relaxation =
                     (nu_iso / 3.0_rt) *
                     (pressure_perp - pressure_parallel);

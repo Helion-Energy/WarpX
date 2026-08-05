@@ -1868,6 +1868,13 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
     require_convergence: bool, default True
         Whether convergence is required. If True and convergence is not obtained, the code will exit.
 
+    max_frozen_steps: integer, default=10
+        Maximum consecutive zero-progress solves (line search stagnated at
+        iteration 0, so the state is returned unchanged) before aborting:
+        without time-dependent drives such a state repeats identically
+        forever, silently freezing the simulation while time advances.
+        Only relevant when require_convergence is False.
+
     max_iterations: integer, default=100
         Maximum number of iterations
 
@@ -1932,6 +1939,7 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         verbose=None,
         linear_solver=None,
         require_convergence=None,
+        max_frozen_steps=None,
         max_iterations=None,
         relative_tolerance=None,
         absolute_tolerance=None,
@@ -1957,6 +1965,7 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         self.relative_tolerance = relative_tolerance
         self.absolute_tolerance = absolute_tolerance
         self.require_convergence = require_convergence
+        self.max_frozen_steps = max_frozen_steps
         self.diagnostic_file = diagnostic_file
         self.diagnostic_interval = diagnostic_interval
         self.max_particle_iterations = max_particle_iterations
@@ -1998,6 +2007,7 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         newton.relative_tolerance = self.relative_tolerance
         newton.max_iterations = self.max_iterations
         newton.require_convergence = self.require_convergence
+        newton.max_frozen_steps = self.max_frozen_steps
         newton.diagnostic_file = self.diagnostic_file
         newton.diagnostic_interval = self.diagnostic_interval
         newton.adaptive_forcing = self.adaptive_forcing
@@ -2256,6 +2266,14 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
     cgl_instability_width: float, default=0.1
         Relative C-infinity switch width of the instability bounds.
 
+    cgl_null_scale: float, default=1.0
+        Magnetization-weighted null blend: where the ion gyroradius
+        exceeds the smallest cell size (weight w = 1/(1 + (r_L/dx)^2),
+        exactly 0 at field nulls) the isotropization rate gains
+        cgl_null_scale * (v_thi/dx) * (1 - w), the cell-transit rate of
+        unmagnetized ions (0 disables the added rate; the w weighting of
+        the deviation stress and work terms always applies under cgl).
+
     ion_pressure_anisotropy: str or float, optional
         With ion_closure="cgl": initial p_perp/p_par ratio expression
         (default 1, isotropic), with the effective pressure pinned to
@@ -2325,6 +2343,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         cgl_coulomb_log=None,
         cgl_instability_scale=None,
         cgl_instability_width=None,
+        cgl_null_scale=None,
         ion_pressure_floor=None,
         positivity_safety=None,
         evolve_ion_fluid=None,
@@ -2367,6 +2386,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.cgl_coulomb_log = cgl_coulomb_log
         self.cgl_instability_scale = cgl_instability_scale
         self.cgl_instability_width = cgl_instability_width
+        self.cgl_null_scale = cgl_null_scale
         self.ion_pressure_floor = ion_pressure_floor
         self.positivity_safety = positivity_safety
         self.evolve_ion_fluid = evolve_ion_fluid
@@ -2416,6 +2436,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.cgl_coulomb_log = self.cgl_coulomb_log
         implicit_mhd.cgl_instability_scale = self.cgl_instability_scale
         implicit_mhd.cgl_instability_width = self.cgl_instability_width
+        implicit_mhd.cgl_null_scale = self.cgl_null_scale
         implicit_mhd.ion_pressure_floor = self.ion_pressure_floor
         implicit_mhd.positivity_safety = self.positivity_safety
         implicit_mhd.evolve_ion_fluid = self.evolve_ion_fluid

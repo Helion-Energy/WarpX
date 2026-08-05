@@ -465,6 +465,19 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Stage B+ null blend, calibrated: at B = 0 the magnetization weight is
+# exactly 0 and the same bi-Maxwellian decays at nu_ii + v_thi/dz
+# (~116x collisional), against the theta-discrete amplification
+add_warpx_test(
+    test_1d_theta_implicit_mhd_cgl_null  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_cgl_null  # inputs
+    "analysis_mhd_cgl_relaxation.py diags/diag000000 diags/diag000040 null"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # hlld variants of the closure/positivity suite: the recast must
 # reproduce the exact-Riemann plateaus, the exact static contact, and
 # the exact fluid-energy pairing of the hllc/rusanov paths

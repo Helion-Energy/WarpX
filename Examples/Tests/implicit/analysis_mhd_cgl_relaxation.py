@@ -10,6 +10,11 @@ The measured per-run log-decay must match the theta-discrete
 amplification computed from the Braginskii rate re-derived here from
 first principles -- this independently pins the implemented collision
 coefficient, the exchange antisymmetry, and the theta weighting.
+
+Modes: "collisional" (pure Braginskii rate), "bounded" (instability
+bounds pull a mirror-unstable state to marginal stability), "null"
+(B = 0 deck: the Stage B+ magnetization-weighted blend adds the
+unmagnetized cell-transit rate v_thi/dz, calibrated the same way).
 """
 
 import sys
@@ -22,7 +27,8 @@ from warpx_constants import elementary_charge as q_e
 
 yt.set_log_level(50)
 
-# Must match the input deck.
+# Must match the input decks (cgl_relaxation and cgl_null share all
+# state constants; they differ in B, dt, and the active rate).
 N0 = 1.0e20
 TI_EV = 100.0
 P0 = N0 * TI_EV * q_e
@@ -30,11 +36,14 @@ LNL = 10.0
 KT = P0 / N0
 NU = (np.sqrt(2.0) * q_e**4 * LNL * N0 /
       (12.0 * np.pi**1.5 * np.sqrt(m_p) * epsilon_0**2 * KT**1.5))
-DT = 0.1 / NU
+# Stage B+ null-blend rate of the cgl_null deck: at B = 0 the
+# magnetization weight is exactly 0 and the relaxation gains the full
+# unmagnetized cell-transit rate v_thi/dz.
+DZ = 0.2 / 16
+V_THI = np.sqrt(P0 / (N0 * m_p))
+NU_NULL = V_THI / DZ
 THETA = 0.5
 NSTEPS = 40
-
-GROWTH = (1.0 - (1.0 - THETA) * NU * DT) / (1.0 + THETA * NU * DT)
 
 
 def load(path):
@@ -50,7 +59,13 @@ def load(path):
 initial = load(sys.argv[1])
 final = load(sys.argv[2])
 mode = sys.argv[3] if len(sys.argv) > 3 else "collisional"
-assert mode in ("collisional", "bounded")
+assert mode in ("collisional", "bounded", "null")
+
+# The decks set dt = 0.1 / (active rate); the calibrated modes measure
+# against the theta-discrete amplification of that same rate.
+NU_EFF = NU + NU_NULL if mode == "null" else NU
+DT = 0.1 / NU_EFF
+GROWTH = (1.0 - (1.0 - THETA) * NU_EFF * DT) / (1.0 + THETA * NU_EFF * DT)
 
 
 def delta(state):
@@ -74,7 +89,9 @@ uniformity = np.max(np.abs(
     np.mean(final["implicit_mhd_ion_perp_energy"])
 )) / total(initial)
 
-print(f"nu_iso (first principles)  {NU:.6e} 1/s")
+print(f"nu_iso (first principles)  {NU_EFF:.6e} 1/s"
+      + (f"  [nu_null/nu_ii = {NU_NULL / NU:.1f}]" if mode == "null"
+         else ""))
 print(f"initial anisotropy Delta   {delta(initial):.6e}")
 print(f"final anisotropy Delta     {delta(final):.6e}")
 print(f"measured log decay         {measured_log_decay:.10f}")
@@ -87,7 +104,11 @@ assert delta(initial) > 0.9 * P0 * (3.0 / 5.0)
 assert conservation < 1.0e-12
 assert uniformity < 1.0e-12
 
-if mode == "collisional":
+if mode in ("collisional", "null"):
+    # null: at B = 0 the blend weight is exactly 0 and the decay runs
+    # at nu_ii + v_thi/dz (~116x collisional), so this also verifies
+    # the w -> 0 limit -- a silently vanished null rate would slow the
+    # log decay by that factor and fail spectacularly.
     assert relative_error < 1.0e-5, (
         f"isotropization rate off by {relative_error:.3e}"
     )

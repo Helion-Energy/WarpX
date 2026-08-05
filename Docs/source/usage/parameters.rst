@@ -272,6 +272,14 @@ Overall simulation parameters
             without converging — or whose residual-decreasing line search
             stagnates (for operators that request one) — is accepted with
             a warning instead of aborting the run.
+          - ``newton.max_frozen_steps`` (``int``, default: 10).
+            With ``require_convergence = false``, a line search that
+            stagnates at iteration 0 returns the state unchanged: the time
+            step is a no-op, and without time-dependent drives every later
+            solve repeats identically — the simulation silently freezes
+            while time advances. After this many *consecutive*
+            zero-progress solves the run aborts. Raise it only when
+            time-dependent sources can change the residual between steps.
           - ``newton.max_iterations`` (``int``, default: 100)
           - ``newton.relative_tolerance`` (``float``, default: 1.0e-6)
           - ``newton.absolute_tolerance`` (``float``, default: 0.0)
@@ -4106,6 +4114,30 @@ Jacobian probes.
     :default: ``0.1``
 
     Relative :math:`C^\infty` switch width of the instability bounds.
+
+.. pp:param:: implicit_mhd.cgl_null_scale
+    :type: ``float``
+    :default: ``1.0``
+
+    Magnetization-weighted null blend of the ``cgl`` closure: with the
+    :math:`C^\infty` weight
+    :math:`w = \Omega_{ci}^2\,\Delta x^2 / (\Omega_{ci}^2\,\Delta x^2 +
+    v_{th,i}^2) = 1/(1 + (r_L/\Delta x)^2)` (:math:`\Delta x` the
+    smallest cell size; :math:`w = 0` exactly at field nulls), the
+    deviation stress carries :math:`w\,(p_\parallel - p_\perp)`, the
+    work terms blend :math:`w` CGL :math:`+\,(1-w)` isotropic — the
+    total internal work stays exactly :math:`-P_\mathrm{blend} :
+    \nabla u` with :math:`P_\mathrm{blend} = p_\mathrm{eff} I +
+    w\,(p_\parallel - p_\perp)(\hat b \hat b - I/3)`, the same stress
+    the momentum equation integrates — and the relaxation rate gains
+    ``cgl_null_scale`` :math:`\times\,(v_{th,i}/\Delta x)(1-w)`, the
+    cell-transit rate of unmagnetized ions. The gyrotropic closure has
+    no meaning where the gyroradius is unresolved (in particular at
+    field nulls, where the :math:`\Omega_{ci}`-scaled instability
+    bounds vanish by construction); the blend degenerates it smoothly
+    to isotropic MHD there. ``0`` disables the added relaxation rate
+    (the :math:`w` weighting of stress and work always applies under
+    ``cgl``).
 
 .. pp:param:: implicit_mhd.mass_density_floor
     :type: ``float``

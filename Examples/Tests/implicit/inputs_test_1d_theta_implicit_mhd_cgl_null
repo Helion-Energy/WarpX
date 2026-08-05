@@ -8,25 +8,29 @@ my_constants.Ti = 100.0
 my_constants.P0 = n0 * Ti * q_e
 my_constants.pe0 = 0.5 * P0
 my_constants.gamma = 5.0/3.0
-my_constants.B0 = sqrt(mu0 * P0)
-# Uniform static bi-Maxwellian with p_perp/p_par = A0: every flux and
-# work term is exactly inert (uniform state, u = 0), so the ONLY
-# dynamics is the ion-ion isotropization exchange
-#   dU_par/dt = (nu/3)(p_perp - p_par) = -dU_perp/dt,
-# under which Delta = p_perp - p_par decays at exactly nu (the
-# effective pressure, density, and hence nu itself are conserved, so
-# the ODE is linear) and U_par + U_perp is conserved to round-off.
-# nu = sqrt(2) q_e^4 lnL n0 / (12 pi^1.5 sqrt(m_p) epsilon0^2 kT^1.5)
-# with kT = P0/n0; the theta scheme multiplies Delta per step by
+# Uniform static bi-Maxwellian with B = 0 EXACTLY: every flux, work,
+# and deviation-stress term is inert (uniform state, u = 0, and the
+# Stage B+ magnetization weight w = Omega_ci^2 dz^2/(Omega_ci^2 dz^2
+# + v_thi^2) is exactly 0 at the null), so the ONLY dynamics is the
+# isotropization exchange at the null-blended rate
+#   nu_total = nu_ii + cgl_null_scale * (v_thi/dz) * (1 - w),
+# with v_thi = sqrt(p_eff/rho) conserved (p_eff, rho, and B are all
+# invariant), so Delta = p_perp - p_par decays linearly and the theta
+# scheme multiplies it per step by
 #   g = (1 - (1-theta) nu dt)/(1 + theta nu dt).
+# Here nu_null/nu_ii ~ 115, so the measured decay discriminates the
+# null-blend channel, not the collisional baseline.
 my_constants.A0 = 2.0
 my_constants.lnL = 10.0
 my_constants.kT = P0 / n0
 my_constants.nu = sqrt(2) * q_e^4 * lnL * n0 / \
                   (12 * pi^1.5 * sqrt(m_p) * epsilon0^2 * kT^1.5)
-my_constants.dt = 0.1 / nu
 my_constants.nz = 16
 my_constants.Lz = 0.2
+my_constants.dz_cell = Lz / nz
+my_constants.v_thi = sqrt(P0 / rho0)
+my_constants.nu_null = v_thi / dz_cell
+my_constants.dt = 0.1 / (nu + nu_null)
 
 max_step = 40
 amr.n_cell = nz
@@ -79,20 +83,18 @@ hybrid_pic_model.include_electron_pressure_term = false
 #################################
 
 implicit_mhd.reference_mass_density = rho0
-implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.reference_magnetic_field = sqrt(mu0 * P0)
 implicit_mhd.gamma_e = gamma
 implicit_mhd.gamma_i = gamma
 implicit_mhd.reference_ion_pressure = P0
 implicit_mhd.ion_closure = cgl
 implicit_mhd.cgl_relaxation_scale = 1.0
 implicit_mhd.cgl_coulomb_log = lnL
-# collisional-rate calibration: the A0 = 2 state is mirror-unstable
-# (beta_perp (A - 1) = 2.4), so the instability-bounded enhancement
-# must be off for the measured decay to be the pure Braginskii rate;
-# likewise the magnetization null blend (B0 here gives r_L ~ 2 dz, so
-# the unmagnetized transit rate would swamp nu_ii by ~100x)
+# isolate the null-blend channel on top of the collisional baseline:
+# the instability bounds stay off (their Omega_ci scaling vanishes at
+# the null anyway; this keeps the expected rate a two-term sum)
 implicit_mhd.cgl_instability_scale = 0.0
-implicit_mhd.cgl_null_scale = 0.0
+implicit_mhd.cgl_null_scale = 1.0
 implicit_mhd.ion_pressure_floor = 1.0e-6 * P0
 implicit_mhd.mass_density_floor = 1.0e-6 * rho0
 implicit_mhd.electron_pressure_floor = 1.0e-9 * P0
@@ -101,9 +103,6 @@ implicit_mhd.mass_density(x,y,z) = "rho0"
 implicit_mhd.ion_pressure(x,y,z) = "P0"
 implicit_mhd.ion_pressure_anisotropy(x,y,z) = "A0"
 implicit_mhd.electron_pressure(x,y,z) = "pe0"
-
-warpx.B_ext_grid_init_style = constant
-warpx.B_external_grid = 0.0 0.0 B0
 
 #################################
 ########### DIAGNOSTICS #########

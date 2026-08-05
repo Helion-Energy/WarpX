@@ -248,6 +248,21 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // measures. 0 disables the bounds (pure collisional Stage A).
     amrex::Real m_cgl_instability_scale = 0.1;
     amrex::Real m_cgl_instability_width = 0.1;
+    // Magnetization-weighted null blend (Stage B+): the gyrotropic CGL
+    // closure loses meaning where the ion gyroradius exceeds the grid
+    // scale (field nulls: Omega_ci -> 0 while the instability bounds,
+    // being Omega_ci-scaled, vanish with it). With the C-infinity
+    // weight w = Omega_ci^2 dx^2 / (Omega_ci^2 dx^2 + v_thi^2)
+    // (w = 1/(1 + (r_L/dx)^2), dx the smallest cell size), the
+    // deviation stress carries w (p_par - p_perp), the work terms blend
+    // w * CGL + (1 - w) * isotropic split -- total internal work stays
+    // exactly -P_blend : grad u with P_blend = p_eff I
+    // + w (p_par - p_perp)(bhat bhat - I/3) -- and the relaxation rate
+    // gains cgl_null_scale * (v_thi/dx) * (1 - w), isotropizing at the
+    // cell-transit rate of unmagnetized ions. 0 disables the blend
+    // rate (the stress/work weighting still applies whenever the
+    // closure is cgl).
+    amrex::Real m_cgl_null_scale = 1.0;
     // Vacuum cell-switch threshold for the ion fluid (0 disables): cells
     // below it are passive dust with frozen momentum (Holmstrom-style).
     amrex::Real m_vacuum_mass_density = 0.0;
