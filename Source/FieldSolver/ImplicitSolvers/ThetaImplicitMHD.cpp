@@ -3669,8 +3669,15 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
         // insurance; the Newton admissibility bounds already hold the
         // extrapolated end state at or above the floors, and the CGL
         // blocks are pure internal energies so no kinetic-energy sync is
-        // needed): U_par >= p_i_floor/2 and U_perp >= p_i_floor. Outside
-        // the residual, so the hard max() cannot perturb Jacobian probes.
+        // needed): U_par >= p_i_floor/2 and U_perp >= p_i_floor. The
+        // restoration lands a SLACK MARGIN above the bound -- the same
+        // 1e-6 (|value| + floor) convention as the direction projection
+        // -- never exactly on it: a cell resting exactly on its floor
+        // makes the value-minus-bound distance zero at the next step, and
+        // once two such cells carry opposite-sign probe components BOTH
+        // probe signs become inadmissible and the matrix-free Jacobian
+        // aborts (measured on the bounded CGL free-boundary hold at
+        // 57 t_ci, where a violent transient floored a large population).
         const std::array<std::pair<const char*, amrex::Real>, 2> blocks = {
             {{IonParallelEnergyName, 0.5_rt * m_ion_pressure_floor},
              {IonPerpEnergyName, m_ion_pressure_floor}}};
@@ -3683,8 +3690,12 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
                 const auto energy_array = energy_block.array(mfi);
                 amrex::ParallelFor(
                     box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                        const amrex::Real margin =
+                            1.0e-6_rt *
+                            (std::abs(energy_array(i, j, k)) + block_floor);
                         energy_array(i, j, k) =
-                            std::max(energy_array(i, j, k), block_floor);
+                            std::max(energy_array(i, j, k),
+                                     block_floor + margin);
                     });
             }
             energy_block.FillBoundaryAndSync(
