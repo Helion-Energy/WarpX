@@ -89,6 +89,7 @@ public:
         amrex::Print()     << "Newton relative tolerance:  " << m_rtol << "\n";
         amrex::Print()     << "Newton absolute tolerance:  " << m_atol << "\n";
         amrex::Print()     << "Newton require convergence: " << (m_require_convergence?"true":"false") << "\n";
+        amrex::Print()     << "Newton max frozen steps:    " << m_max_frozen_steps << "\n";
         auto linsol_name = amrex::getEnumNameString(m_linear_solver_type);
         amrex::Print()     << "Newton linear solver:       " << linsol_name << "\n";
         amrex::Print()     << "Linear solver (" << linsol_name << ") verbose:            " << m_linsol_verbose_int << "\n";
@@ -122,6 +123,23 @@ private:
      * \brief Flag to determine whether convergence is required.
      */
     bool m_require_convergence = true;
+
+    /**
+     * \brief Maximum consecutive zero-progress solves before aborting.
+     * A line-search stagnation at iteration 0 returns the state the
+     * solve was handed: the step is a no-op and, for a system without
+     * time-dependent drives, every later solve is bit-identical -- the
+     * simulation silently freezes while time marches on. After this
+     * many consecutive frozen solves the run aborts instead. Raise it
+     * only when time-dependent sources can change the residual between
+     * steps.
+     */
+    int m_max_frozen_steps = 10;
+
+    /**
+     * \brief Consecutive zero-progress (frozen) solve counter.
+     */
+    mutable int m_frozen_steps = 0;
 
     /**
      * \brief Relative tolerance for the Newton solver.
@@ -315,6 +333,10 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
     pp_newton.query("relative_tolerance",  m_rtol);
     pp_newton.query("max_iterations",      m_maxits);
     pp_newton.query("require_convergence", m_require_convergence);
+    pp_newton.query("max_frozen_steps",    m_max_frozen_steps);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_max_frozen_steps > 0,
+        "newton.max_frozen_steps must be positive");
     pp_newton.query("diagnostic_file",     this->m_diagnostic_file);
     pp_newton.query("diagnostic_interval", this->m_diagnostic_interval);
     pp_newton.query("adaptive_forcing",    m_adaptive_forcing);
@@ -514,17 +536,41 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                 // that already tolerates a non-converged step): keep the
                 // current iterate -- which typically carries most of the
                 // step's residual reduction -- warn, and hand the state
-                // back to the time loop.
+                // back to the time loop. Stagnation at iteration 0 is
+                // different in kind: no update was ever accepted, so the
+                // solve returns the state it was handed and the time step
+                // is a no-op -- for a system without time-dependent
+                // drives every later solve then repeats bit-identically
+                // and the simulation silently freezes. Count consecutive
+                // frozen solves and abort past newton.max_frozen_steps.
                 WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                     !m_require_convergence,
                     "Newton line search failed to find a residual-decreasing "
                     "admissible step (newton.require_convergence = true)");
-                amrex::Print()
-                    << "WARNING: Newton line search stagnated at iter = "
-                    << iter << " (rel. norm " << norm_rel
-                    << "); accepting the current iterate and continuing\n";
+                if (iter == 0) {
+                    m_frozen_steps++;
+                    amrex::Print()
+                        << "WARNING: Newton line search stagnated at iter = 0 "
+                        << "with no residual reduction; the state is UNCHANGED "
+                        << "by this solve (frozen step " << m_frozen_steps
+                        << " of at most " << m_max_frozen_steps
+                        << " consecutive)\n";
+                    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                        m_frozen_steps < m_max_frozen_steps,
+                        "Newton made zero progress for "
+                        "newton.max_frozen_steps consecutive solves: the "
+                        "simulation state is frozen and, absent "
+                        "time-dependent drives, cannot recover. Aborting "
+                        "instead of silently advancing time.");
+                } else {
+                    amrex::Print()
+                        << "WARNING: Newton line search stagnated at iter = "
+                        << iter << " (rel. norm " << norm_rel
+                        << "); accepting the current iterate and continuing\n";
+                }
                 break;
             }
+            m_frozen_steps = 0;
         } else {
             a_U.increment(m_dU, solver_step);
             if (this->m_verbose && solver_step != -1.0_rt) {
