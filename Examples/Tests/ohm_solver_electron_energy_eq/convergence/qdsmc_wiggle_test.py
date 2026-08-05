@@ -119,6 +119,13 @@ parser.add_argument(
     help="scatter hat + bookkept Boris-Book FCT antidiffusion pass "
     "(requires --grad-deposit 0)",
 )
+parser.add_argument(
+    "--fct-limiter",
+    choices=["bb", "zalesak", "none"],
+    default="bb",
+    help="FCT limiter for --compensate: bb (Boris-Book), zalesak "
+    "(bounds include the pre-deposit field), none (unlimited control)",
+)
 parser.add_argument("--out", type=str, required=True)
 parser.add_argument("--verbose", type=int, default=0)
 args = parser.parse_args()
@@ -232,6 +239,7 @@ pywarpx.hybridpicmodel.qdsmc_conduction_interp = args.interp
 pywarpx.hybridpicmodel.qdsmc_conduction_curved_feet = args.curved_feet
 pywarpx.hybridpicmodel.qdsmc_conduction_deposit_kernel = args.deposit_kernel
 pywarpx.hybridpicmodel.qdsmc_conduction_compensate = args.compensate
+pywarpx.hybridpicmodel.qdsmc_conduction_fct_limiter = args.fct_limiter
 pywarpx.hybridpicmodel.qdsmc_conduction_conserve_fixup = args.conserve_fixup
 
 sim.initialize_warpx()
