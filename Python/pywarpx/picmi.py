@@ -2305,6 +2305,21 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Positive ion-pressure floor in Pa whose internal-energy equivalent
         bounds Newton updates. Required with ion_closure="total_energy".
 
+    ion_temperature_floor: float, default=300
+        Non-negative ion temperature floor in K (0 disables). Extends the
+        ion energy block's admissibility lower bound to the maximum of
+        the ion_pressure_floor equivalent and the density-dependent
+        n*kB*T_floor equivalent, so cells above the mass-density floor
+        cannot cool below this temperature. The bound is a one-way
+        ratchet: colder-than-floor initial data is never lifted and keeps
+        the absolute floors alone. Requires an ion closure that evolves
+        an ion energy block ("total_energy" or "cgl") when set
+        explicitly; the default is inert under the barotropic closure.
+
+    electron_temperature_floor: float, default=300
+        Non-negative electron temperature floor in K (0 disables).
+        Analogous to ion_temperature_floor for the electron energy block.
+
     positivity_safety: float, optional
         Safety factor in (0, 1) for density/electron-energy bounded Newton
         updates and matrix-free Jacobian probes.
@@ -2351,6 +2366,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         cgl_instability_width=None,
         cgl_null_scale=None,
         ion_pressure_floor=None,
+        ion_temperature_floor=None,
+        electron_temperature_floor=None,
         positivity_safety=None,
         evolve_ion_fluid=None,
         include_joule_heating=None,
@@ -2394,6 +2411,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.cgl_instability_width = cgl_instability_width
         self.cgl_null_scale = cgl_null_scale
         self.ion_pressure_floor = ion_pressure_floor
+        self.ion_temperature_floor = ion_temperature_floor
+        self.electron_temperature_floor = electron_temperature_floor
         self.positivity_safety = positivity_safety
         self.evolve_ion_fluid = evolve_ion_fluid
         self.include_joule_heating = include_joule_heating
@@ -2444,6 +2463,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.cgl_instability_width = self.cgl_instability_width
         implicit_mhd.cgl_null_scale = self.cgl_null_scale
         implicit_mhd.ion_pressure_floor = self.ion_pressure_floor
+        implicit_mhd.ion_temperature_floor = self.ion_temperature_floor
+        implicit_mhd.electron_temperature_floor = self.electron_temperature_floor
         implicit_mhd.positivity_safety = self.positivity_safety
         implicit_mhd.evolve_ion_fluid = self.evolve_ion_fluid
         implicit_mhd.include_joule_heating = self.include_joule_heating

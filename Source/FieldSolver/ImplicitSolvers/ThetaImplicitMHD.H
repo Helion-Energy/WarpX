@@ -13,6 +13,7 @@
 #include <AMReX_Parser.H>
 #include <AMReX_REAL.H>
 
+#include <array>
 #include <memory>
 #include <string>
 
@@ -233,6 +234,24 @@ class ThetaImplicitMHD final : public ImplicitSolver
     amrex::Real m_reference_ion_pressure = 0.0;
     amrex::Real m_mass_density_floor = 0.0;
     amrex::Real m_electron_pressure_floor = 0.0;
+    // Temperature floors [K] on the evolved energy blocks (default: room
+    // temperature; 0 disables). Each energy block's admissibility lower
+    // bound is the MAX of its absolute pressure/energy floor and the
+    // density-dependent n kB T_floor equivalent, with n evaluated from
+    // the STEP-OLD mass density (m_state_old), frozen for the whole
+    // nonlinear solve so the per-solve admissible set stays well-defined
+    // and the bounds stay linear in the unknowns. The end-of-step floor
+    // restoration in FinishStateUpdate instead uses the END-of-step
+    // density -- which becomes the next solve's frozen step-old density,
+    // so every solve starts admissible. The temperature bound is a
+    // one-way RATCHET, engaged per cell only where the step-old value
+    // already satisfied it: states at or above the floor can never cool
+    // through it, while colder-than-floor states (e.g. cold initial
+    // data) are never lifted and keep the absolute floors alone. The
+    // kernels' smooth positivity anchors (pressure recovery, CGL rates)
+    // keep their absolute pressure values.
+    amrex::Real m_ion_temperature_floor = 300.0;
+    amrex::Real m_electron_temperature_floor = 300.0;
     // Ion thermodynamic closure: "barotropic" (default; p_i from the
     // polytropic law), "total_energy" (E_i evolved as a JFNK block), or
     // "cgl" (bi-Maxwellian: U_par = p_par/2 and U_perp = p_perp evolved
@@ -354,6 +373,24 @@ class ThetaImplicitMHD final : public ImplicitSolver
     void SaveMagneticField ();
     void UpdateWarpXFields (const WarpXSolverVec& state, amrex::Real start_time);
     [[nodiscard]] theta_implicit_mhd::FluxParameters MakeFluxParameters () const;
+
+    /** Per-block admissibility lower bounds of the fluid blocks, in the
+     * order (rho, U_e, E_i or U_par, U_perp) used by LimitSolverStep and
+     * ProjectAndLimitSolverStep: the bound of block b at a cell with
+     * step-old density rho_old and step-old value u_old is
+     *
+     *     max(floors[b], temperature_coefficients[b] * rho_old)
+     *         where u_old >= temperature_coefficients[b] * rho_old
+     *     floors[b] otherwise (temperature ratchet not engaged),
+     *
+     * i.e. the absolute pressure/energy floors extended by the
+     * temperature floors' n kB T_floor equivalents (n = rho (q/m)/e for
+     * the quasi-neutral single-ion fluid). */
+    struct AdmissibilityBounds {
+        std::array<amrex::Real, 4> floors;
+        std::array<amrex::Real, 4> temperature_coefficients;
+    };
+    [[nodiscard]] AdmissibilityBounds MakeAdmissibilityBounds () const;
 
     /** Split-field external-A bookkeeping: add (sign = +1) or subtract
      * (sign = -1) the stored hybrid external E/B fields to/from

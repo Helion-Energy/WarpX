@@ -4275,6 +4275,47 @@ Jacobian probes.
     floor. Must be positive when ``implicit_mhd.ion_closure = total_energy``;
     unused otherwise.
 
+.. pp:param:: implicit_mhd.ion_temperature_floor
+    :type: ``float``
+    :unit: K
+    :default: ``300``
+
+    Non-negative ion temperature floor (default: room temperature; ``0``
+    disables). The absolute pressure floors alone leave the temperature
+    :math:`T = p/(n k_B)` unbounded below at densities above the
+    mass-density floor; with the temperature floor, the admissibility
+    lower bound of the evolved ion energy block becomes the maximum of
+    the :pp:param:`implicit_mhd.ion_pressure_floor` equivalent and the
+    density-dependent :math:`n k_B T_{i,\mathrm{floor}}` equivalent
+    (:math:`E_i \geq \max(\ldots)/(\gamma_i-1)` for ``total_energy``,
+    which bounds the internal part; :math:`U_\parallel \geq
+    \max(\ldots)/2` and :math:`U_\perp \geq \max(\ldots)` for ``cgl``).
+    The bound is evaluated with the beginning-of-step density, frozen for
+    the whole nonlinear solve, so the per-solve admissible set stays
+    linear in the unknowns; the end-of-step floor restoration instead
+    uses the end-of-step density, so every solve starts admissible.
+    The temperature bound is a one-way ratchet, engaged per cell only
+    where the beginning-of-step value already satisfied it: a state at or
+    above the floor can never cool through it, while colder-than-floor
+    initial data is never lifted (no heat injection) and remains governed
+    by the absolute floors alone. Requires an ion closure that evolves an
+    ion energy block (``total_energy`` or ``cgl``) when set explicitly;
+    the default is inert under the barotropic closure.
+
+.. pp:param:: implicit_mhd.electron_temperature_floor
+    :type: ``float``
+    :unit: K
+    :default: ``300``
+
+    Non-negative electron temperature floor (default: room temperature;
+    ``0`` disables). Analogous to
+    :pp:param:`implicit_mhd.ion_temperature_floor` for the electron
+    energy block: :math:`U_e \geq \max(p_{e,\mathrm{floor}},
+    n k_B T_{e,\mathrm{floor}})/(\gamma_e-1)` with the quasi-neutral
+    density :math:`n` frozen at its beginning-of-step value during the
+    nonlinear solve and re-evaluated at the end of the step for the
+    floor restoration.
+
 .. pp:param:: implicit_mhd.fluid_flux
     :type: ``string``
     :default: ``centered``

@@ -36,6 +36,7 @@
 #include <limits>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -138,6 +139,10 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         utils::parser::queryWithParser(pp, "mass_density_floor", m_mass_density_floor);
     utils::parser::queryWithParser(pp, "electron_pressure_floor", m_electron_pressure_floor);
     utils::parser::queryWithParser(pp, "ion_pressure_floor", m_ion_pressure_floor);
+    const bool has_ion_temperature_floor = utils::parser::queryWithParser(
+        pp, "ion_temperature_floor", m_ion_temperature_floor);
+    utils::parser::queryWithParser(pp, "electron_temperature_floor",
+                                   m_electron_temperature_floor);
     utils::parser::queryWithParser(pp, "vacuum_mass_density", m_vacuum_mass_density);
     utils::parser::queryWithParser(pp, "vacuum_drag_rate", m_vacuum_drag_rate);
     utils::parser::queryWithParser(pp, "positivity_safety", m_positivity_safety);
@@ -233,6 +238,24 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "implicit_mhd.ion_closure must be barotropic, total_energy, or cgl");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_ion_pressure_floor >= 0.0_rt,
                                      "implicit_mhd.ion_pressure_floor cannot be negative");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_ion_temperature_floor >= 0.0_rt,
+        "implicit_mhd.ion_temperature_floor cannot be negative");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_electron_temperature_floor >= 0.0_rt,
+        "implicit_mhd.electron_temperature_floor cannot be negative");
+    if (m_ion_closure != "total_energy" && m_ion_closure != "cgl") {
+        // The ion temperature floor bounds the evolved ion energy blocks;
+        // the barotropic closure ties the ion temperature to the density
+        // and evolves no such block, so the room-temperature default is
+        // inert and an explicit request is a configuration error.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !has_ion_temperature_floor || m_ion_temperature_floor == 0.0_rt,
+            "implicit_mhd.ion_temperature_floor requires an ion closure "
+            "that evolves an ion energy block (implicit_mhd.ion_closure = "
+            "total_energy or cgl)");
+        m_ion_temperature_floor = 0.0_rt;
+    }
     utils::parser::queryWithParser(pp, "cgl_relaxation_scale",
                                    m_cgl_relaxation_scale);
     utils::parser::queryWithParser(pp, "cgl_coulomb_log", m_cgl_coulomb_log);
@@ -743,6 +766,8 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "Electron gamma:                " << m_gamma_e << "\n"
                    << "Ion gamma:                     " << m_gamma_i << "\n"
                    << "Mass-density floor [kg/m^3]:   " << m_mass_density_floor << "\n"
+                   << "Ion temperature floor [K]:     " << m_ion_temperature_floor << "\n"
+                   << "Electron temp. floor [K]:      " << m_electron_temperature_floor << "\n"
                    << "Hall term:                     "
                    << m_hybrid_pic_model->m_include_hall_term
                    << "\n"
@@ -1420,6 +1445,38 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
     ComputeFluidRHS(rhs, theta_time);
 }
 
+ThetaImplicitMHD::AdmissibilityBounds
+ThetaImplicitMHD::MakeAdmissibilityBounds () const
+{
+    const bool total_energy_closure = m_ion_closure == "total_energy";
+    const bool cgl_closure = m_ion_closure == "cgl";
+    const amrex::Real energy_floor =
+        m_electron_pressure_floor / (m_gamma_e - 1.0_rt);
+    const amrex::Real ion_energy_floor =
+        total_energy_closure ? m_ion_pressure_floor / (m_gamma_i - 1.0_rt)
+                             : 0.0_rt;
+    // Temperature floors as pressure-per-mass-density coefficients,
+    // p_T(rho) = rho (q/m)/e kB T_floor = n kB T_floor for the
+    // quasi-neutral single-ion fluid (n_e = n_i = rho (q/m)/e).
+    const amrex::Real electron_pressure_per_density =
+        m_ion_charge_to_mass / PhysConst::q_e * PhysConst::kb *
+        m_electron_temperature_floor;
+    const amrex::Real ion_pressure_per_density =
+        m_ion_charge_to_mass / PhysConst::q_e * PhysConst::kb *
+        m_ion_temperature_floor;
+    return {
+        {m_mass_density_floor, energy_floor,
+         cgl_closure ? 0.5_rt * m_ion_pressure_floor : ion_energy_floor,
+         m_ion_pressure_floor},
+        {0.0_rt, electron_pressure_per_density / (m_gamma_e - 1.0_rt),
+         cgl_closure
+             ? 0.5_rt * ion_pressure_per_density
+             : (total_energy_closure
+                    ? ion_pressure_per_density / (m_gamma_i - 1.0_rt)
+                    : 0.0_rt),
+         ion_pressure_per_density}};
+}
+
 amrex::Real
 ThetaImplicitMHD::LimitSolverStep (const WarpXSolverVec& state,
                                    const WarpXSolverVec& direction,
@@ -1435,29 +1492,34 @@ ThetaImplicitMHD::LimitSolverStep (const WarpXSolverVec& state,
     // pressure clamp in load_cell_state protects the KE-dominated corner.
     // The CGL blocks are pure internal energies, so their bounds are exact:
     // U_par >= p_i_floor/2 and U_perp >= p_i_floor.
+    //
+    // Each energy block's floor is the max of the absolute value and the
+    // temperature floor's n kB T equivalent evaluated with the STEP-OLD
+    // density (frozen for the whole solve, keeping the bound linear even
+    // though the density is itself a Newton unknown). The temperature
+    // part is a one-way RATCHET: it binds exactly those cells whose
+    // step-old value already satisfied it, so colder-than-floor initial
+    // data is held by the absolute floors alone (never lifted or
+    // deadlocked) while any cell at or above the floor can never cool
+    // through it.
     const bool total_energy_closure = m_ion_closure == "total_energy";
     const bool cgl_closure = m_ion_closure == "cgl";
     const amrex::Real theta = m_theta;
-    const amrex::Real density_floor = m_mass_density_floor;
-    const amrex::Real energy_floor =
-        m_electron_pressure_floor / (m_gamma_e - 1.0_rt);
-    const amrex::Real ion_energy_floor =
-        total_energy_closure ? m_ion_pressure_floor / (m_gamma_i - 1.0_rt)
-                             : 0.0_rt;
 
     const int num_blocks = cgl_closure ? 4 : (total_energy_closure ? 3 : 2);
     const std::array<const char*, 4> block_names = {
         MassDensityName, ElectronEnergyName,
         cgl_closure ? IonParallelEnergyName : IonEnergyName,
         IonPerpEnergyName};
-    const std::array<amrex::Real, 4> block_floors = {
-        density_floor, energy_floor,
-        cgl_closure ? 0.5_rt * m_ion_pressure_floor : ion_energy_floor,
-        m_ion_pressure_floor};
+    const AdmissibilityBounds bounds = MakeAdmissibilityBounds();
+    const amrex::MultiFab& old_density_mf =
+        m_state_old.getMultiFabBlock(MassDensityName, 0);
 
     amrex::Real step_fraction = 1.0_rt;
     for (int block = 0; block < num_blocks; ++block) {
-        const amrex::Real floor = block_floors[block];
+        const amrex::Real floor = bounds.floors[block];
+        const amrex::Real temperature_coefficient =
+            bounds.temperature_coefficients[block];
         const amrex::MultiFab& value_mf =
             state.getMultiFabBlock(block_names[block], 0);
         const amrex::MultiFab& delta_mf =
@@ -1472,13 +1534,20 @@ ThetaImplicitMHD::LimitSolverStep (const WarpXSolverVec& state,
             const auto value = value_mf.const_array(mfi);
             const auto delta = delta_mf.const_array(mfi);
             const auto old_value = old_mf.const_array(mfi);
+            const auto old_density = old_density_mf.const_array(mfi);
             reduce_op.eval(
                 box, reduce_data,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
                 {
+                    const amrex::Real temperature_bound =
+                        temperature_coefficient * old_density(i, j, k);
+                    const amrex::Real cell_floor =
+                        old_value(i, j, k) >= temperature_bound
+                            ? std::max(floor, temperature_bound)
+                            : floor;
                     return {theta_implicit_mhd::admissible_step_fraction(
                         value(i, j, k), old_value(i, j, k), delta(i, j, k),
-                        requested_step, floor, theta)};
+                        requested_step, cell_floor, theta)};
                 });
         }
         step_fraction = std::min(
@@ -1497,7 +1566,9 @@ ThetaImplicitMHD::LimitSolverStep (const WarpXSolverVec& state,
         // (cgl), 3 = U_perp (cgl).
         constexpr amrex::Real report_threshold = 1.0e-8;
         for (int block = 0; block < num_blocks; ++block) {
-            const amrex::Real floor = block_floors[block];
+            const amrex::Real floor = bounds.floors[block];
+            const amrex::Real temperature_coefficient =
+                bounds.temperature_coefficients[block];
             const int block_id = block;
             const amrex::MultiFab& value_mf =
                 state.getMultiFabBlock(block_names[block], 0);
@@ -1510,11 +1581,18 @@ ThetaImplicitMHD::LimitSolverStep (const WarpXSolverVec& state,
                 const auto value = value_mf.const_array(mfi);
                 const auto delta = delta_mf.const_array(mfi);
                 const auto old_value = old_mf.const_array(mfi);
+                const auto old_density = old_density_mf.const_array(mfi);
                 amrex::ParallelFor(
                     box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                        const amrex::Real temperature_bound =
+                            temperature_coefficient * old_density(i, j, k);
+                        const amrex::Real cell_floor =
+                            old_value(i, j, k) >= temperature_bound
+                                ? std::max(floor, temperature_bound)
+                                : floor;
                         if (theta_implicit_mhd::admissible_step_fraction(
                                 value(i, j, k), old_value(i, j, k),
-                                delta(i, j, k), requested_step, floor,
+                                delta(i, j, k), requested_step, cell_floor,
                                 theta) <= report_threshold) {
                             AMREX_DEVICE_PRINTF(
                                 "LimitSolverStep: block %d pinned at "
@@ -1522,7 +1600,8 @@ ThetaImplicitMHD::LimitSolverStep (const WarpXSolverVec& state,
                                 "%.6e floor %.6e\n",
                                 block_id, i, j, k, value(i, j, k),
                                 old_value(i, j, k),
-                                delta(i, j, k) * requested_step, floor);
+                                delta(i, j, k) * requested_step,
+                                cell_floor);
                         }
                     });
             }
@@ -1562,27 +1641,22 @@ ThetaImplicitMHD::ProjectAndLimitSolverStep (const WarpXSolverVec& state,
     const bool total_energy_closure = m_ion_closure == "total_energy";
     const bool cgl_closure = m_ion_closure == "cgl";
     const amrex::Real theta = m_theta;
-    const amrex::Real density_floor = m_mass_density_floor;
-    const amrex::Real energy_floor =
-        m_electron_pressure_floor / (m_gamma_e - 1.0_rt);
-    const amrex::Real ion_energy_floor =
-        total_energy_closure ? m_ion_pressure_floor / (m_gamma_i - 1.0_rt)
-                             : 0.0_rt;
 
     const int num_blocks = cgl_closure ? 4 : (total_energy_closure ? 3 : 2);
     const std::array<const char*, 4> block_names = {
         MassDensityName, ElectronEnergyName,
         cgl_closure ? IonParallelEnergyName : IonEnergyName,
         IonPerpEnergyName};
-    const std::array<amrex::Real, 4> block_floors = {
-        density_floor, energy_floor,
-        cgl_closure ? 0.5_rt * m_ion_pressure_floor : ion_energy_floor,
-        m_ion_pressure_floor};
+    const AdmissibilityBounds bounds = MakeAdmissibilityBounds();
+    const amrex::MultiFab& old_density_mf =
+        m_state_old.getMultiFabBlock(MassDensityName, 0);
     const bool report_projections =
         (std::getenv("WARPX_MHD_REPORT_PROJECTIONS") != nullptr);
     amrex::Long projected_components = 0;
     for (int block = 0; block < num_blocks; ++block) {
-        const amrex::Real floor = block_floors[block];
+        const amrex::Real floor = bounds.floors[block];
+        const amrex::Real temperature_coefficient =
+            bounds.temperature_coefficients[block];
         const int block_id = block;
         const amrex::MultiFab& value_mf =
             state.getMultiFabBlock(block_names[block], 0);
@@ -1597,12 +1671,20 @@ ThetaImplicitMHD::ProjectAndLimitSolverStep (const WarpXSolverVec& state,
             const amrex::Box box = mfi.validbox();
             const auto value = value_mf.const_array(mfi);
             const auto old_value = old_mf.const_array(mfi);
+            const auto old_density = old_density_mf.const_array(mfi);
             const auto delta = delta_mf.array(mfi);
             reduce_op.eval(
                 box, reduce_data,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                    const amrex::Real temperature_bound =
+                        temperature_coefficient * old_density(i, j, k);
+                    const amrex::Real cell_floor =
+                        old_value(i, j, k) >= temperature_bound
+                            ? std::max(floor, temperature_bound)
+                            : floor;
                     const amrex::Real bound =
-                        (1.0 - theta) * old_value(i, j, k) + theta * floor;
+                        (1.0 - theta) * old_value(i, j, k) +
+                        theta * cell_floor;
                     // Clamp descending components to land a small MARGIN
                     // above the bound (never exactly on it): limited
                     // Jacobian probes then always retain an admissible
@@ -1611,7 +1693,7 @@ ThetaImplicitMHD::ProjectAndLimitSolverStep (const WarpXSolverVec& state,
                     // component is zeroed (no lifting: refill is the
                     // physics' job, not the projection's).
                     const amrex::Real margin =
-                        1.0e-6 * (std::abs(old_value(i, j, k)) + floor);
+                        1.0e-6 * (std::abs(old_value(i, j, k)) + cell_floor);
                     const amrex::Real target = std::min(
                         bound + margin - value(i, j, k), 0.0_rt);
                     const amrex::Real change =
@@ -1622,7 +1704,7 @@ ThetaImplicitMHD::ProjectAndLimitSolverStep (const WarpXSolverVec& state,
                                 "ProjectDirection: block %d at (%d,%d,%d): "
                                 "value %.6e old %.6e change %.6e floor %.6e\n",
                                 block_id, i, j, k, value(i, j, k),
-                                old_value(i, j, k), change, floor);
+                                old_value(i, j, k), change, cell_floor);
                         }
                         delta(i, j, k) = target / requested_step;
                         return {1};
@@ -3932,6 +4014,63 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
     const amrex::Real inverse_theta = 1.0_rt / m_theta;
     m_state.linComb(inverse_theta, m_state, 1.0_rt - inverse_theta, m_state_old);
 
+    // End-of-step floor restorations below evaluate the temperature
+    // floors' density-dependent bounds with the END-OF-STEP density: it is
+    // the next solve's frozen step-old density, so restoring onto ITS
+    // bound guarantees the next Newton solve starts admissible even where
+    // the density rose during this step (the in-solve bounds, frozen at
+    // this step's old density, cannot see that rise). Like the in-solve
+    // bounds, the temperature part is a one-way RATCHET, gated per cell
+    // on the STEP-OLD value satisfying the step-old bound: cells that
+    // were already colder than the floor (e.g. colder-than-floor initial
+    // data) are never lifted -- the floor prevents cooling through it,
+    // it does not inject heat.
+    const AdmissibilityBounds bounds = MakeAdmissibilityBounds();
+
+    if (m_electron_temperature_floor > 0.0_rt) {
+        // Electron-temperature floor restoration at the accepted step end:
+        // U_e >= max(p_e_floor, n kB T_e_floor)/(gamma_e - 1). The
+        // restoration lands the same 1e-6 (|value| + bound) SLACK MARGIN
+        // above the bound as the direction projection, never exactly on
+        // it (see the CGL restoration below for why).
+        const amrex::MultiFab& density_block =
+            m_state.getMultiFabBlock(MassDensityName, 0);
+        const amrex::MultiFab& old_density_block =
+            m_state_old.getMultiFabBlock(MassDensityName, 0);
+        const amrex::MultiFab& old_energy_block =
+            m_state_old.getMultiFabBlock(ElectronEnergyName, 0);
+        amrex::MultiFab& electron_energy_block =
+            m_state.getMultiFabBlock(ElectronEnergyName, 0);
+        const amrex::Real energy_per_density =
+            bounds.temperature_coefficients[1];
+        for (amrex::MFIter mfi(electron_energy_block); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox();
+            const auto rho = density_block.const_array(mfi);
+            const auto rho_old = old_density_block.const_array(mfi);
+            const auto energy_old = old_energy_block.const_array(mfi);
+            const auto energy_array = electron_energy_block.array(mfi);
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                if (energy_old(i, j, k) <
+                    energy_per_density * rho_old(i, j, k)) {
+                    return; // ratchet: was below the floor, do not lift
+                }
+                // Only the temperature part needs restoring: the CONSTANT
+                // absolute floor survives the theta extrapolation on its
+                // own, so it is left untouched here (near-absolute-floor
+                // cells keep their pre-temperature-floor behavior).
+                const amrex::Real cell_floor =
+                    energy_per_density * rho(i, j, k);
+                const amrex::Real margin =
+                    1.0e-6_rt *
+                    (std::abs(energy_array(i, j, k)) + cell_floor);
+                energy_array(i, j, k) = std::max(energy_array(i, j, k),
+                                                 cell_floor + margin);
+            });
+        }
+        electron_energy_block.FillBoundaryAndSync(
+            m_WarpX->Geom(0).periodicity());
+    }
+
     if (m_ion_closure == "total_energy") {
         // Dual-energy synchronization (the standard sync step, without the
         // auxiliary internal-energy equation): in kinetic-dominated cells
@@ -3949,24 +4088,54 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
             m_state.getMultiFabBlock(MomentumDensityName, 0);
         amrex::MultiFab& ion_energy_block =
             m_state.getMultiFabBlock(IonEnergyName, 0);
+        const amrex::MultiFab& old_density_block =
+            m_state_old.getMultiFabBlock(MassDensityName, 0);
+        const amrex::MultiFab& old_momentum_block =
+            m_state_old.getMultiFabBlock(MomentumDensityName, 0);
+        const amrex::MultiFab& old_ion_energy_block =
+            m_state_old.getMultiFabBlock(IonEnergyName, 0);
         const amrex::Real internal_floor =
             m_ion_pressure_floor / (m_gamma_i - 1.0_rt);
+        // Ion-temperature floor: the restored internal part is bounded by
+        // max(p_i_floor, n kB T_i_floor)/(gamma_i - 1); the temperature
+        // part is ratchet-gated on the step-old INTERNAL energy (the
+        // quantity this restoration bounds) having satisfied the step-old
+        // temperature bound.
+        const amrex::Real internal_floor_per_density =
+            bounds.temperature_coefficients[2];
         const amrex::Real density_floor = m_mass_density_floor;
         for (amrex::MFIter mfi(ion_energy_block); mfi.isValid(); ++mfi) {
             const amrex::Box box = mfi.validbox();
             const auto rho = density_block.const_array(mfi);
             const auto mom = momentum_block.const_array(mfi);
+            const auto rho_old = old_density_block.const_array(mfi);
+            const auto mom_old = old_momentum_block.const_array(mfi);
+            const auto ion_e_old = old_ion_energy_block.const_array(mfi);
             const auto ion_e = ion_energy_block.array(mfi);
             amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                 amrex::Real kinetic_energy = 0.0_rt;
+                amrex::Real kinetic_energy_old = 0.0_rt;
                 for (int component = 0; component < 3; ++component) {
                     kinetic_energy +=
                         mom(i, j, k, component) * mom(i, j, k, component);
+                    kinetic_energy_old +=
+                        mom_old(i, j, k, component) *
+                        mom_old(i, j, k, component);
                 }
                 kinetic_energy *=
                     0.5_rt / std::max(rho(i, j, k), density_floor);
+                kinetic_energy_old *=
+                    0.5_rt / std::max(rho_old(i, j, k), density_floor);
+                const bool ratchet_engaged =
+                    ion_e_old(i, j, k) - kinetic_energy_old >=
+                    internal_floor_per_density * rho_old(i, j, k);
+                const amrex::Real internal_bound =
+                    ratchet_engaged
+                        ? std::max(internal_floor,
+                                   internal_floor_per_density * rho(i, j, k))
+                        : internal_floor;
                 ion_e(i, j, k) = std::max(ion_e(i, j, k),
-                                          kinetic_energy + internal_floor);
+                                          kinetic_energy + internal_bound);
             });
         }
         ion_energy_block.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
@@ -3984,24 +4153,49 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
         // probe signs become inadmissible and the matrix-free Jacobian
         // aborts (measured on the bounded CGL free-boundary hold at
         // 57 t_ci, where a violent transient floored a large population).
-        const std::array<std::pair<const char*, amrex::Real>, 2> blocks = {
-            {{IonParallelEnergyName, 0.5_rt * m_ion_pressure_floor},
-             {IonPerpEnergyName, m_ion_pressure_floor}}};
-        for (const auto& [block_name, floor] : blocks) {
+        // The per-block floors carry the ion-temperature floor's
+        // density-dependent bound: U_par >= max(p_i_floor, n kB T_i)/2
+        // and U_perp >= max(p_i_floor, n kB T_i), with the temperature
+        // part ratchet-gated on the step-old value.
+        const amrex::MultiFab& density_block =
+            m_state.getMultiFabBlock(MassDensityName, 0);
+        const amrex::MultiFab& old_density_block =
+            m_state_old.getMultiFabBlock(MassDensityName, 0);
+        const std::array<std::tuple<const char*, amrex::Real, amrex::Real>, 2>
+            blocks = {{{IonParallelEnergyName, bounds.floors[2],
+                        bounds.temperature_coefficients[2]},
+                       {IonPerpEnergyName, bounds.floors[3],
+                        bounds.temperature_coefficients[3]}}};
+        for (const auto& [block_name, floor, temperature_coefficient] :
+             blocks) {
             amrex::MultiFab& energy_block =
                 m_state.getMultiFabBlock(block_name, 0);
+            const amrex::MultiFab& old_energy_block =
+                m_state_old.getMultiFabBlock(block_name, 0);
             const amrex::Real block_floor = floor;
+            const amrex::Real block_coefficient = temperature_coefficient;
             for (amrex::MFIter mfi(energy_block); mfi.isValid(); ++mfi) {
                 const amrex::Box box = mfi.validbox();
+                const auto rho = density_block.const_array(mfi);
+                const auto rho_old = old_density_block.const_array(mfi);
+                const auto energy_old = old_energy_block.const_array(mfi);
                 const auto energy_array = energy_block.array(mfi);
                 amrex::ParallelFor(
                     box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                        const bool ratchet_engaged =
+                            energy_old(i, j, k) >=
+                            block_coefficient * rho_old(i, j, k);
+                        const amrex::Real cell_floor =
+                            ratchet_engaged
+                                ? std::max(block_floor,
+                                           block_coefficient * rho(i, j, k))
+                                : block_floor;
                         const amrex::Real margin =
                             1.0e-6_rt *
-                            (std::abs(energy_array(i, j, k)) + block_floor);
+                            (std::abs(energy_array(i, j, k)) + cell_floor);
                         energy_array(i, j, k) =
                             std::max(energy_array(i, j, k),
-                                     block_floor + margin);
+                                     cell_floor + margin);
                     });
             }
             energy_block.FillBoundaryAndSync(

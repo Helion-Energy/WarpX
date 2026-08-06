@@ -193,6 +193,16 @@ add_warpx_test(
 )
 
 add_warpx_test(
+    test_1d_theta_implicit_mhd_temperature_floor  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_temperature_floor  # inputs
+    "analysis_mhd_temperature_floor.py diags/diag000000 diags/diag000200"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
     test_1d_theta_implicit_mhd_positivity  # name
     1  # dims
     1  # nprocs
