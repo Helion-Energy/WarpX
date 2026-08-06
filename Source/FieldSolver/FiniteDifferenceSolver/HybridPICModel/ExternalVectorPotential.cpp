@@ -312,11 +312,30 @@ ExternalVectorPotential::CalculateExternalCurlA (std::string& coil_name)
         warpx.m_fields.get_mr_levels_alldirs(curlAext_field, warpx.finestLevel());
 
     for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+        // Evaluate the curl into the guard region too (the parser fills A
+        // on every ghost cell, so the stencil is valid up to one cell short
+        // of the allocation): consumers add the external B to the state
+        // over its full ghost extent, and leaving physical-boundary ghosts
+        // at zero puts a spurious delta-B = B_ext seam at the domain edge
+        // whose Ampere current (~B_ext/(mu0 dr)) feeds the Ohm's-law Hall
+        // term at the wall. FillBoundary afterwards restores
+        // periodic/interior ghosts from valid data (the analytic guard
+        // values are not periodic images), leaving the physical-boundary
+        // ghosts on the analytic continuation.
+        amrex::IntVect ngrow = curlA_ext[lev][Direction{0}]->nGrowVect();
+        for (int idir = 0; idir < 3; ++idir) {
+            ngrow = amrex::min(ngrow,
+                curlA_ext[lev][Direction{idir}]->nGrowVect());
+            ngrow = amrex::min(ngrow,
+                A_ext[lev][Direction{idir}]->nGrowVect()
+                - amrex::IntVect::TheUnitVector());
+        }
+        ngrow.max(amrex::IntVect::TheZeroVector());
         warpx.get_pointer_fdtd_solver_fp(lev)->ComputeCurlA(
             curlA_ext[lev],
             A_ext[lev],
             warpx.GetEBUpdateBFlag()[lev],
-            lev);
+            lev, ngrow);
 
         for (int idir = 0; idir < 3; ++idir) {
             warpx.m_fields.get(curlAext_field, Direction{idir}, lev)->
@@ -356,10 +375,21 @@ ExternalVectorPotential::AddExternalFieldFromVectorPotential (
             update_Fz_arr = eb_update[2]->array(mfi);
         }
 
-        // Extract tileboxes for which to loop
-        Box const& tbx  = mfi.tilebox(dstField[0]->ixType().toIntVect());
-        Box const& tby  = mfi.tilebox(dstField[1]->ixType().toIntVect());
-        Box const& tbz  = mfi.tilebox(dstField[2]->ixType().toIntVect());
+        // Extract tileboxes for which to loop, grown to the ghost extent
+        // shared by source and destination: the summed external arrays are
+        // consumed over their full ghost region (state add/subtract,
+        // boundary-adjacent gathers, the Ampere ring of the open
+        // boundary), so the accumulation must cover the guards too. The
+        // caller's FillBoundary afterwards re-syncs periodic/interior
+        // ghosts.
+        amrex::IntVect ng = dstField[0]->nGrowVect();
+        for (int c = 0; c < 3; ++c) {
+            ng = amrex::min(ng, dstField[c]->nGrowVect());
+            ng = amrex::min(ng, srcField[c]->nGrowVect());
+        }
+        Box const& tbx  = mfi.tilebox(dstField[0]->ixType().toIntVect(), ng);
+        Box const& tby  = mfi.tilebox(dstField[1]->ixType().toIntVect(), ng);
+        Box const& tbz  = mfi.tilebox(dstField[2]->ixType().toIntVect(), ng);
 
         // Loop over the cells and update the fields
         amrex::ParallelFor(tbx, tby, tbz,

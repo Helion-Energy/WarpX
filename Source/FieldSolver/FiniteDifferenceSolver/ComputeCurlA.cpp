@@ -28,7 +28,7 @@ void FiniteDifferenceSolver::ComputeCurlA (
     ablastr::fields::VectorField& Bfield,
     ablastr::fields::VectorField const& Afield,
     std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_B,
-    int lev )
+    int lev, amrex::IntVect const& ngrow )
 {
     // Select algorithm (The choice of algorithm is a runtime option,
     // but we compile code for each algorithm, using templates)
@@ -36,10 +36,12 @@ void FiniteDifferenceSolver::ComputeCurlA (
         m_fdtd_algo == ElectromagneticSolverAlgo::HybridPIC) {
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
         ComputeCurlACylindrical <CylindricalYeeAlgorithm> (
-            Bfield, Afield, eb_update_B, lev
+            Bfield, Afield, eb_update_B, lev, ngrow
         );
 
 #elif defined(WARPX_DIM_RSPHERE)
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(ngrow == amrex::IntVect::TheZeroVector(),
+            "ComputeCurlA: ghost growth not implemented in spherical geometry");
         ComputeCurlASpherical <SphericalYeeAlgorithm> (
             Bfield, Afield, eb_update_B, lev
         );
@@ -48,11 +50,11 @@ void FiniteDifferenceSolver::ComputeCurlA (
     if (WarpX::grid_type == GridType::Staggered)
     {
         ComputeCurlACartesian <CartesianYeeAlgorithm> (
-            Bfield, Afield, eb_update_B, lev
+            Bfield, Afield, eb_update_B, lev, ngrow
         );
     } else {
         ComputeCurlACartesian <CartesianNodalAlgorithm> (
-            Bfield, Afield, eb_update_B, lev
+            Bfield, Afield, eb_update_B, lev, ngrow
         );
     }
 
@@ -79,7 +81,7 @@ void FiniteDifferenceSolver::ComputeCurlACylindrical (
     ablastr::fields::VectorField& Bfield,
     ablastr::fields::VectorField const& Afield,
     std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_B,
-    int lev
+    int lev, amrex::IntVect const& ngrow
 )
 {
     // for the profiler
@@ -129,10 +131,20 @@ void FiniteDifferenceSolver::ComputeCurlACylindrical (
         int const nmodes = m_nmodes;
         Real const rmin = m_rmin;
 
-        // Extract tileboxes for which to loop over
-        Box const& tbr  = mfi.tilebox(Bfield[0]->ixType().toIntVect());
-        Box const& tbt  = mfi.tilebox(Bfield[1]->ixType().toIntVect());
-        Box const& tbz  = mfi.tilebox(Bfield[2]->ixType().toIntVect());
+        // Extract tileboxes for which to loop over. An optional ghost
+        // growth (used for analytic external fields whose A is valid in
+        // the guard region) extends the evaluation into physical-boundary
+        // ghosts; the axis side is clipped since r < 0 has no meaning for
+        // the cylindrical stencils (axis ghosts are handled by the axis
+        // boundary treatment of the consumer).
+        Box tbr  = mfi.tilebox(Bfield[0]->ixType().toIntVect(), ngrow);
+        Box tbt  = mfi.tilebox(Bfield[1]->ixType().toIntVect(), ngrow);
+        Box tbz  = mfi.tilebox(Bfield[2]->ixType().toIntVect(), ngrow);
+        if (ngrow != amrex::IntVect::TheZeroVector() && m_rmin == 0._rt) {
+            for (Box* b : {&tbr, &tbt, &tbz}) {
+                b->setSmall(0, amrex::max(b->smallEnd(0), 0));
+            }
+        }
 
         // Calculate the B-field from the A-field
         amrex::ParallelFor(tbr, tbt, tbz,
@@ -319,7 +331,7 @@ void FiniteDifferenceSolver::ComputeCurlACartesian (
     ablastr::fields::VectorField & Bfield,
     ablastr::fields::VectorField const& Afield,
     std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_B,
-    int lev
+    int lev, amrex::IntVect const& ngrow
 )
 {
     using ablastr::fields::Direction;
@@ -367,10 +379,12 @@ void FiniteDifferenceSolver::ComputeCurlACartesian (
         Real const * const AMREX_RESTRICT coefs_z = m_stencil_coefs_z.dataPtr();
         auto const n_coefs_z = static_cast<int>(m_stencil_coefs_z.size());
 
-        // Extract tileboxes for which to loop
-        Box const& tbx  = mfi.tilebox(Bfield[0]->ixType().toIntVect());
-        Box const& tby  = mfi.tilebox(Bfield[1]->ixType().toIntVect());
-        Box const& tbz  = mfi.tilebox(Bfield[2]->ixType().toIntVect());
+        // Extract tileboxes for which to loop (optionally grown into the
+        // guard region for analytic external fields, see the cylindrical
+        // variant)
+        Box const& tbx  = mfi.tilebox(Bfield[0]->ixType().toIntVect(), ngrow);
+        Box const& tby  = mfi.tilebox(Bfield[1]->ixType().toIntVect(), ngrow);
+        Box const& tbz  = mfi.tilebox(Bfield[2]->ixType().toIntVect(), ngrow);
 
         // Calculate the curl of A
         amrex::ParallelFor(tbx, tby, tbz,
