@@ -425,6 +425,51 @@ WarpX::WarpX ()
     {
         // Create hybrid-PIC model object if needed
         m_hybrid_pic_model = std::make_unique<HybridPICModel>();
+
+        // PML boundaries are meaningless for the Ohm's-law solver: it does not
+        // integrate a vacuum wave equation, so there is nothing for a PML to
+        // absorb. Abort independent of mesh refinement.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !::isAnyBoundaryPML(field_boundary_lo, field_boundary_hi),
+            "The hybrid-PIC (Ohm's law) solver does not support PML field "
+            "boundaries: use periodic, PEC, PMC, or damped instead.");
+
+        // Restrictions that apply only when mesh refinement is enabled.
+        if (max_level > 0) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                grid_type == GridType::Staggered,
+                "The hybrid-PIC solver with mesh refinement (amr.max_level > 0) "
+                "requires staggered (Yee) grids (warpx.grid_type = staggered): "
+                "collocated hybrid MR is not implemented.");
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+            WARPX_ABORT_WITH_MESSAGE(
+                "The hybrid-PIC solver with mesh refinement is only implemented "
+                "for Cartesian geometries (RZ/RCYLINDER/RSPHERE are deferred).");
+#endif
+#if defined(WARPX_DIM_1D_Z)
+            // The divergence-free face prolongation used for the fine-level B
+            // ghost fill (amrex::FaceDivFree) is a no-op in 1D, so the
+            // coarse-fine B coupling has no valid 1D implementation yet.
+            WARPX_ABORT_WITH_MESSAGE(
+                "The hybrid-PIC solver with mesh refinement is not implemented "
+                "in 1D (no divergence-free face prolongation exists in 1D).");
+#endif
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !m_hybrid_pic_model->m_rkf45_intervals.isActivated(),
+                "The hybrid-PIC solver with mesh refinement does not support "
+                "adaptive RKF45 substepping (hybrid_pic_model.use_rkf45): all "
+                "levels advance in lockstep with fixed RK4 substeps.");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_do_subcycling == 0,
+                "The hybrid-PIC solver advances all refinement levels with the "
+                "same dt (lockstep): warpx.do_subcycling must be 0.");
+            for (int lev = 0; lev < max_level; ++lev) {
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    refRatio(lev) == amrex::IntVect(2),
+                    "The hybrid-PIC solver with mesh refinement requires a "
+                    "refinement ratio of 2 between all levels.");
+            }
+        }
     }
 
     current_buffer_masks.resize(nlevs_max);
