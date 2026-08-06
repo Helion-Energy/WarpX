@@ -767,6 +767,53 @@ public:
                                       amrex::MultiFab & Te,
                                       amrex::MultiFab const & rho) const;
 
+    /** Embedded-boundary conduction BC (Thrust D EB leg, staircase
+     *  per-line form — deliberately NO boundary normals: level-set
+     *  mirror normals are ill-posed at staircase corners (the covered-B
+     *  fill campaign's div instability), while per-sweep-line 1D folds
+     *  have no corners at all). Covered nodes (nodal distance_to_eb
+     *  <= 0) join the sweep mask. 0 = adiabatic (default): each sweep
+     *  line folds donor images specularly at its local mask-boundary
+     *  faces (method of images, same machinery as the domain walls;
+     *  mask-boundary faces carry zero flux) — exactly conservative.
+     *  1 = isothermal: the adiabatic fold PLUS the wall-adjacent fluid
+     *  ring (every fluid node with a covered face neighbor) pinned to
+     *  qdsmc_conduction_eb_Te(x,y,z) [eV] after each substep — the
+     *  per-line form of thermal-bath re-emission, the slab-validated
+     *  domain-pin semantics — with the exchange tallied exactly
+     *  (positive = energy into the plasma; Python:
+     *  warpx.get_qdsmc_eb_tally()). (A bath-DONOR formulation was
+     *  measured broken: masked donors carry zero displacement, so a
+     *  bath that never hops only absorbs — one-way drain.) Fluxform split
+     *  sweeps only; scatter/layer keep pre-EB behavior (control arms)
+     *  and the unsplit arm aborts when an EB is present. Prescribed-
+     *  flux EB and marker/advection EB reflection are recorded
+     *  follow-ups. Inputs: qdsmc_conduction_eb_bc = adiabatic |
+     *  isothermal, qdsmc_conduction_eb_Te(x,y,z). */
+    int m_cond_eb_bc = 0;
+
+    /** Isothermal-EB bath ring depth (Chebyshev distance from a covered
+     *  node, [1, 3]). Depth 1 leaves the deposition density ramp at the
+     *  wall OUTSIDE the bath: the flux form transports u = n T, and
+     *  across an unresolved n cliff the discrete Ito drift
+     *  under-corrects — u leaks toward the low-density band and the
+     *  pins eat it (measured: annulus interior settled BELOW both bath
+     *  temperatures, resolution-independent). Default 2 puts the ramp
+     *  inside the bath at the price of an O(dx)-convergent geometric
+     *  radius shift. Input: qdsmc_conduction_eb_ring. */
+    int m_cond_eb_ring = 2;
+
+    std::string m_cond_eb_Te_expression = "0.0";
+    std::unique_ptr<amrex::Parser> m_cond_eb_Te_parser;
+    amrex::ParserExecutor<3> m_cond_eb_Te;
+
+    /** Cumulative EB conduction tally (isothermal EB only), node-u
+     *  units [J/m^3] summed over fluid nodes, positive = energy added
+     *  to the plasma. */
+    mutable amrex::Real m_cond_eb_tally = 0.0;
+
+    amrex::Real GetQdsmcEbTally () const { return m_cond_eb_tally; }
+
     /** Scatter-form deposit kernel. 0 = hat (2^d CIC + the B1
      *  half-gradient correction). 1 = Keys cubic convolution (a = -1/2,
      *  4^d): partition of unity is exact (conservation stays exact) and
