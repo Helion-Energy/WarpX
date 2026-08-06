@@ -31,7 +31,10 @@
 #include <AMReX_BoxArray.H>
 #include <AMReX_IntVect.H>
 #include <AMReX_DistributionMapping.H>
+#include <AMReX_iMultiFab.H>
 
+#include <algorithm>
+#include <memory>
 #include <optional>
 
 /**
@@ -125,6 +128,12 @@ public:
         std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update_E,
         int lev, PatchType patch_type, bool solve_for_Faraday) const;
 
+    /**
+     * \brief Advance B (and the intermediate E) from t to t + dt_half on all
+     * levels in lockstep: every RK stage advances level 0 through
+     * finest_level (coarse first) before the next stage runs. With a single
+     * level this reduces exactly to the historic single-level substep loop.
+     */
     void BfieldEvolve (
         ablastr::fields::MultiLevelVectorField const& Bfield,
         ablastr::fields::MultiLevelVectorField const& Efield,
@@ -134,23 +143,14 @@ public:
         int step, amrex::Real dt_half, SubcyclingHalf subcycling_half,
         amrex::IntVect ng, std::optional<bool> nodal_sync);
 
-    void BfieldEvolve (
-        ablastr::fields::MultiLevelVectorField const& Bfield,
-        ablastr::fields::MultiLevelVectorField const& Efield,
-        ablastr::fields::MultiLevelVectorField const& Jfield,
-        ablastr::fields::MultiLevelScalarField const& rhofield,
-        amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E,
-        int step, amrex::Real dt_half, int lev, SubcyclingHalf subcycling_half,
-        amrex::IntVect ng, std::optional<bool> nodal_sync);
-
     void BfieldEvolveRK4 (
         ablastr::fields::MultiLevelVectorField const& Bfield,
         ablastr::fields::MultiLevelVectorField const& Efield,
         ablastr::fields::MultiLevelVectorField const& Jfield,
         ablastr::fields::MultiLevelScalarField const& rhofield,
         amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E,
-        std::array<amrex::MultiFab, 3>& B_old,
-        amrex::Real dt, int lev, SubcyclingHalf subcycling_half,
+        amrex::Vector<std::array<amrex::MultiFab, 3>>& B_old,
+        amrex::Real dt, SubcyclingHalf subcycling_half,
         amrex::IntVect ng, std::optional<bool> nodal_sync);
 
     amrex::Real BfieldEvolveRKF45 (
@@ -163,14 +163,55 @@ public:
         amrex::Real dt, int lev, SubcyclingHalf subcycling_half,
         amrex::IntVect ng, std::optional<bool> nodal_sync);
 
-    void FieldPush (
+    /**
+     * \brief One RK stage advance of all levels (E solve then Faraday push).
+     *
+     * The E phase runs coarse first: a fine level's coarse-fine B ghost fill
+     * always reads the coarse solution of the current stage (B is untouched
+     * during the E phase). The afterEpush/afterBpush Python callbacks fire
+     * once per stage, after the corresponding level loop.
+     */
+    void FieldPushStage (
         ablastr::fields::MultiLevelVectorField const& Bfield,
         ablastr::fields::MultiLevelVectorField const& Efield,
         ablastr::fields::MultiLevelVectorField const& Jfield,
         ablastr::fields::MultiLevelScalarField const& rhofield,
         amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E,
-        amrex::Real dt, int lev, SubcyclingHalf subcycling_half,
+        amrex::Real dt, SubcyclingHalf subcycling_half,
         amrex::IntVect ng, std::optional<bool> nodal_sync);
+
+    /**
+     * \brief Fill the fine-level (lev >= 1) B-field ghost cells at the
+     * coarse-fine boundary by divergence-free face prolongation
+     * (amrex::FaceDivFree) of the lev-1 solution. Interior valid data is not
+     * touched; ghost cells covered by same-level valid data are restored by a
+     * FillBoundary afterwards; ghost cells outside a non-periodic domain
+     * boundary are left to the domain boundary conditions.
+     * Cartesian staggered 2D/3D only.
+     */
+    void FillBfieldCoarseFineGhosts (
+        int lev, amrex::IntVect const& ng, std::optional<bool> nodal_sync);
+
+    /**
+     * \brief Restrict B fine->coarse (face average, cell average for the 2D
+     * out-of-plane component) on every coarse level, but only on the
+     * coarsened fine region shrunk by m_mr_restrict_setback coarse cells: the
+     * fine edge band is sacrificial (its moments are partial by design since
+     * buffer particles deposit to the coarse level).
+     */
+    void RestrictBfieldFineToCoarse (
+        amrex::IntVect const& ng, std::optional<bool> nodal_sync);
+
+    /** \brief div(B) audit after the coarse-fine ghost fill of level lev
+     * (active when m_mr_check_div_b is set). */
+    void CheckDivBAfterGhostFill (int lev, amrex::IntVect const& ng);
+
+    /** \brief div(B) audit of coarse level clev after restriction, split into
+     * the restricted interior and the seam/exterior region. */
+    void CheckDivBAfterRestriction (int clev);
+
+    /** \brief Print (and reset) the running div(B) audit maxima. */
+    void PrintDivBDiagnostics ();
 
     /**
      * \brief
@@ -214,6 +255,34 @@ public:
     int m_max_substep_attempts = 250;
 
     bool m_holmstrom_vacuum_region = false;
+
+    /** Mesh refinement: number of coarse cells by which the fine->coarse B
+     *  restriction region is shrunk from the coarse-fine boundary (the fine
+     *  edge band is sacrificial). */
+    int m_mr_restrict_setback = 2;
+    /** Mesh refinement: restrict B fine->coarse after every accepted substep
+     *  (true, default) or only once per half-step (false). */
+    bool m_mr_restrict_every_substep = true;
+    /** Mesh refinement: runtime div(B) audit of the coarse-fine ghost fill
+     *  and the restriction (debug diagnostic, off by default). */
+    bool m_mr_check_div_b = false;
+
+    /** Running maxima of the div(B) audit (raw value and value relative to
+     *  max|B|/dx), accumulated while m_mr_check_div_b is set. */
+    struct DivBStats {
+        amrex::Real raw = 0.;
+        amrex::Real rel = 0.;
+        void update (amrex::Real a_raw, amrex::Real a_rel) {
+            raw = std::max(raw, a_raw);
+            rel = std::max(rel, a_rel);
+        }
+    };
+    amrex::Vector<DivBStats> m_divb_fine_valid;    /**< fine valid region */
+    amrex::Vector<DivBStats> m_divb_fine_ring;     /**< first C-F ghost ring */
+    amrex::Vector<DivBStats> m_divb_fine_band;     /**< outer C-F ghost band */
+    amrex::Vector<DivBStats> m_divb_crse_interior; /**< restricted interior */
+    amrex::Vector<DivBStats> m_divb_crse_seam;     /**< seam ring (mixed faces) */
+    amrex::Vector<DivBStats> m_divb_crse_exterior; /**< freely evolved exterior */
 
     /** Electron temperature in eV */
     amrex::Real m_elec_temp;
@@ -269,6 +338,19 @@ public:
     amrex::GpuArray<int, 3> Ey_IndexType;
     /** Gpu Vector with index type of the Ez multifab */
     amrex::GpuArray<int, 3> Ez_IndexType;
+
+private:
+    /** \brief (Re)build the cached cell-centered keep-mask of coarse level
+     * clev used by RestrictBfieldFineToCoarse: 1 on the coarsened fine region
+     * eroded by m_mr_restrict_setback cells (Linf ball; non-periodic domain
+     * boundaries do not erode), 0 elsewhere. Cached until the box layout of
+     * either level changes. */
+    void EnsureRestrictKeepMask (int clev, amrex::IntVect const& ratio);
+
+    /** Cached restriction keep-masks, indexed by coarse level. */
+    amrex::Vector<std::unique_ptr<amrex::iMultiFab>> m_mr_keep_mask;
+    /** Fine-level cell BoxArray each cached keep-mask was built from. */
+    amrex::Vector<amrex::BoxArray> m_mr_keep_mask_fba;
 };
 
 /**

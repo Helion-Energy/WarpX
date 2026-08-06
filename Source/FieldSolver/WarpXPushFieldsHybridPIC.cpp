@@ -29,11 +29,6 @@ void WarpX::HybridPICEvolveFields ()
 
     ABLASTR_PROFILE("WarpX::HybridPICEvolveFields()");
 
-    // The below deposition is hard coded for a single level simulation
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        finest_level == 0,
-        "Ohm's law E-solve only works with a single level.");
-
     // Get flag to include external fields.
     const bool add_external_fields = m_hybrid_pic_model->m_add_external_fields;
 
@@ -167,6 +162,18 @@ void WarpX::HybridPICEvolveFields ()
             0.5_rt*dt[0]);
     }
 
+    // With mesh refinement: give the final E solve a consistent hierarchy --
+    // restrict the fine B solution onto the coarse levels one last time and
+    // refresh the fine-level coarse-fine B ghost cells from it.
+    if (finest_level > 0) {
+        m_hybrid_pic_model->RestrictBfieldFineToCoarse(
+            guard_cells.ng_FieldSolver, WarpX::sync_nodal_points);
+        for (int lev = 1; lev <= finest_level; ++lev) {
+            m_hybrid_pic_model->FillBfieldCoarseFineGhosts(
+                lev, guard_cells.ng_FieldSolver, WarpX::sync_nodal_points);
+        }
+    }
+
     // Update the E field to t=n+1 using the extrapolated J_i^n+1 value
     m_hybrid_pic_model->CalculatePlasmaCurrent(
         m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, finest_level),
@@ -210,6 +217,10 @@ void WarpX::HybridPICEvolveFields ()
             MultiFab::Copy(*current_fp_temp[lev][idim], *m_fields.get(FieldType::current_fp, Direction{idim}, lev),
                            0, 0, 1, current_fp_temp[lev][idim]->nGrowVect());
         }
+    }
+
+    if (finest_level > 0 && m_hybrid_pic_model->m_mr_check_div_b) {
+        m_hybrid_pic_model->PrintDivBDiagnostics();
     }
 }
 
