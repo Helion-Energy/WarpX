@@ -598,6 +598,25 @@ MultiParticleContainer::DepositCurrent (
         J_lev[2]->setVal(0.0_rt);
     }
 
+    // Reset the coarse-level deposition buffers as well (as Evolve does):
+    // this deposition path does not route buffered particles into them, and
+    // SyncCurrent both reads and mutates the buffers (it adds the coarse
+    // patch to them before communicating), so stale buffer data would
+    // otherwise be added to the coarser level again by the next SyncCurrent,
+    // accumulating current under the fine patch at every deposition.
+    {
+        auto& fields = WarpX::GetInstance().m_fields;
+        using ablastr::fields::Direction;
+        for (int lev = 1; lev < static_cast<int>(J.size()); ++lev)
+        {
+            if (fields.has_vector(FieldType::current_buf, lev)) {
+                fields.get(FieldType::current_buf, Direction{0}, lev)->setVal(0.0_rt);
+                fields.get(FieldType::current_buf, Direction{1}, lev)->setVal(0.0_rt);
+                fields.get(FieldType::current_buf, Direction{2}, lev)->setVal(0.0_rt);
+            }
+        }
+    }
+
     // Call the deposition kernel for each species
     for (auto& pc : allcontainers)
     {
@@ -622,6 +641,19 @@ MultiParticleContainer::DepositCharge (
     for (const auto& rho_lev : rho)
     {
         rho_lev->setVal(0.0_rt);
+    }
+
+    // Reset the coarse-level charge buffers as well (see the analogous reset
+    // in DepositCurrent: SyncRho adds the coarse patch to the buffer, so
+    // stale buffer data would accumulate on the coarser level otherwise).
+    {
+        auto& fields = WarpX::GetInstance().m_fields;
+        for (int lev = 1; lev < static_cast<int>(rho.size()); ++lev)
+        {
+            if (fields.has(FieldType::rho_buf, lev)) {
+                fields.get(FieldType::rho_buf, lev)->setVal(0.0_rt);
+            }
+        }
     }
 
     // Push the particles in time, if needed
