@@ -558,11 +558,15 @@ public:
      *  but has a per-step 4th-moment defect (conduction weak order 1 in dt);
      *  npts = 3 matches through the 5th moment (weak order 2). The counts
      *  are per-direction so npts_par can be raised alone for fast parallel
-     *  tails at large Spitzer chi_par. Input:
+     *  tails at large Spitzer chi_par. Default 3 (Eric, 2026-08-05): the
+     *  curvature leak is NON-monotone in npts and npts = 3 is
+     *  leak-optimal — its weight-2/3 zero-offset center branch pays no
+     *  fractional-redistribution cost, 5x below npts = 2 at the liftoff
+     *  point (plan doc C.7d closeout). Input:
      *  qdsmc_conduction_quadrature_points = <npts_par> [<npts_perp>]
      *  (a single value broadcasts to both). */
-    int m_cond_npts_par = 2;
-    int m_cond_npts_perp = 2;
+    int m_cond_npts_par = 3;
+    int m_cond_npts_perp = 3;
 
     /** Free-streaming flux-limit factor f (longitudinal channel only):
      *  kappa_eff = kappa / (1 + |q_Sp| / (f q_fs)) with
@@ -684,9 +688,15 @@ public:
      *  residual is the per-remap truncation error of the 1D PLM
      *  transport itself, differentially modulated across rows by the
      *  row-dependent fractional displacement (npts-sensitivity and the
-     *  clean eps=0 floor corroborate). Split sweeps only. Input:
+     *  clean eps=0 floor corroborate; the leak itself is a feature-
+     *  resolution property, C.7d closeout). Default ppm (Eric,
+     *  2026-08-05): full gauntlet green, aligned constant 6-7x below
+     *  plm, new campaign-best ZK front, no undershoot. Split sweeps
+     *  only; with qdsmc_conduction_fluxform_unsplit the default
+     *  silently reverts to plm (the unsplit piece bookkeeping is
+     *  PLM-exact) — explicitly requesting ppm + unsplit aborts. Input:
      *  qdsmc_conduction_reconstruction = plm | ppm. */
-    int m_cond_reconstruction = 0;
+    int m_cond_reconstruction = 1;
 
     /** Fluxform unsplit donor transport (plan doc C.7d GF3 rung, fork (b):
      *  CSLAM-style flux form). The dimensionally split sweeps remap the

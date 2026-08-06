@@ -1362,6 +1362,22 @@ conversation happens.
   pushforward fix structurally at once, and its face fluxes are the
   Thrust-D substrate (adiabatic walls = F=0 by construction, wall-flux
   tallies for free). (Eric)
+- **2026-08-05** — **Curvature leak ACCEPTED in the explicit production
+  arm; no implicit escalation.** Rationale: parallel quasi-shorting
+  keeps field lines near-isothermal, so cross-line leakage mostly
+  relabels heat among nearly-isothermal lines. Obligation:
+  quantification (delivered — C.7d closeout block, run_leakscan.py).
+  (Eric)
+- **2026-08-05** — **Defaults flipped: `qdsmc_conduction_reconstruction
+  = ppm` and `qdsmc_conduction_quadrature_points = 3 3`.** PPM: full
+  gauntlet green, aligned constant 6–7x below PLM, new campaign-best ZK
+  front, monotone. npts=3: leak-optimal (weight-2/3 zero-offset center
+  branch), 5x below npts=2 at the liftoff point; weak order 2 as a
+  bonus. The ppm default silently reverts to plm under the unsplit
+  control arm (its piece bookkeeping is PLM-exact); explicit ppm +
+  unsplit aborts. Old behavior: set `plm` / `2 2` explicitly. Verified:
+  no-knobs deck bit-reproduces explicit npts=3+ppm; CI matrix
+  unaffected (conduction off there). (Eric)
 
 ## Design questions — resolutions (2026-08-04 review)
 

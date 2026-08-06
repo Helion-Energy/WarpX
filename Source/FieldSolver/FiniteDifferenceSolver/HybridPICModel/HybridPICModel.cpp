@@ -207,8 +207,9 @@ void HybridPICModel::ReadParameters ()
         }
         pp_hybrid.query("qdsmc_conduction_fluxform_unsplit",
                         m_cond_ff_unsplit);
-        std::string recon = "plm";
-        pp_hybrid.query("qdsmc_conduction_reconstruction", recon);
+        std::string recon = "ppm";
+        bool const recon_given =
+            pp_hybrid.query("qdsmc_conduction_reconstruction", recon);
         if (recon == "plm") { m_cond_reconstruction = 0; }
         else if (recon == "ppm") { m_cond_reconstruction = 1; }
         else {
@@ -216,11 +217,17 @@ void HybridPICModel::ReadParameters ()
                 "hybrid_pic_model.qdsmc_conduction_reconstruction must be "
                 "'plm' or 'ppm'");
         }
+        if (m_cond_ff_unsplit && !recon_given) {
+            // the unsplit control arm's piece bookkeeping is PLM-exact;
+            // the ppm DEFAULT quietly steps aside rather than aborting
+            m_cond_reconstruction = 0;
+        }
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !(m_cond_reconstruction == 1 && m_cond_ff_unsplit),
             "hybrid_pic_model.qdsmc_conduction_reconstruction = ppm is "
             "implemented for the split fluxform sweeps only (the unsplit "
-            "donor piece bookkeeping is PLM-exact)");
+            "donor piece bookkeeping is PLM-exact); set it to 'plm' when "
+            "using qdsmc_conduction_fluxform_unsplit");
         std::string fctl = "bb";
         pp_hybrid.query("qdsmc_conduction_fct_limiter", fctl);
         if (fctl == "bb") { m_cond_fct_limiter = 0; }
