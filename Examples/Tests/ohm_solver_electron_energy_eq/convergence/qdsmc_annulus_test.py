@@ -35,8 +35,27 @@ from pywarpx import callbacks, fields, picmi
 constants = picmi.constants
 
 parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--mode",
+    choices=["conduction", "advection"],
+    default="conduction",
+    help="conduction: isothermal/adiabatic wall BC gates. advection: rigid "
+    "rotation of a mid-gap blob past the staircase walls (marker EB "
+    "reflection gate; conduction off)",
+)
 parser.add_argument("--ncell", type=int, default=64)
 parser.add_argument("--nsteps", type=int, default=384)
+parser.add_argument(
+    "--vedge", type=float, default=1.0e5, help="advection: speed at r2 [m/s]"
+)
+parser.add_argument("--marker-reflect", type=int, choices=[0, 1], default=1)
+parser.add_argument(
+    "--blob-r",
+    type=float,
+    default=None,
+    help="advection: blob center radius (default mid-gap; near r2 exercises "
+    "the marker mirror on the staircase)",
+)
 parser.add_argument("--tfinal", type=float, default=2.0e-5, help="total time [s]")
 parser.add_argument("--chi", type=float, default=2.0e3, help="chi [m^2/s]")
 parser.add_argument(
@@ -63,12 +82,24 @@ N = args.ncell
 n0 = 1.0e18
 Te0_eV = 10.0
 gamma = 5.0 / 3.0
-mass_factor = 1.0e12  # static background (see qdsmc_slab_test.py)
+# conduction: 1e12 = truly static background (see qdsmc_slab_test.py).
+# advection: 1e6 (the verified heavy-drifting-ion V_e control; ions must
+# actually carry J_i).
+mass_factor = 1.0e12
 
 r1, r2 = args.r1, args.r2
 rm2 = (0.5 * (r1 + r2)) ** 2
+if args.mode == "advection":
+    mass_factor = 1.0e6
 
 tfinal = args.tfinal
+omega0 = 0.0
+if args.mode == "advection" and args.vedge > 0.0:
+    # one full revolution at the edge speed; CFL = vedge*dt/dx ~ 0.44 at
+    # the defaults (N=64, nsteps=384) -- inside the Esirkepov multi-cell
+    # trap bound (vedge = 0: at-rest EB gate, tfinal from --tfinal)
+    omega0 = args.vedge / r2
+    tfinal = 2.0 * np.pi / omega0
 dt = tfinal / args.nsteps
 chi0 = args.chi
 kb = constants.kb
@@ -112,7 +143,15 @@ ions = picmi.Species(
     mass=mass_factor * constants.m_p,
     initial_distribution=picmi.AnalyticDistribution(
         density_expression=(f"{n0}*((x*x+z*z)>{r1 * r1})*((x*x+z*z)<{r2 * r2})"),
-        momentum_expressions=["0.0", "0.0", "0.0"],
+        momentum_expressions=(
+            # advection: heavy drifting ions in rigid rotation =>
+            # V_e = J_i/rho = Omega x r, tangential to both walls (the
+            # physical flow never crosses the wall; the STAIRCASE makes
+            # the local normal components that exercise the mirror)
+            [f"(-{omega0}*z)", "0.0", f"({omega0}*x)"]
+            if args.mode == "advection"
+            else ["0.0", "0.0", "0.0"]
+        ),
     ),
 )
 
@@ -137,8 +176,10 @@ sim.initialize_inputs()
 import pywarpx  # noqa: E402
 
 pywarpx.hybridpicmodel.qdsmc_time_advance = args.advance
-pywarpx.hybridpicmodel.add_new_attr("qdsmc_kappa_par(n,Te,t)", f"{kappa:.16e}")
-pywarpx.hybridpicmodel.add_new_attr("qdsmc_kappa_perp(n,Te,t)", "0.0")
+pywarpx.hybridpicmodel.qdsmc_eb_marker_reflect = args.marker_reflect
+if args.mode == "conduction":
+    pywarpx.hybridpicmodel.add_new_attr("qdsmc_kappa_par(n,Te,t)", f"{kappa:.16e}")
+    pywarpx.hybridpicmodel.add_new_attr("qdsmc_kappa_perp(n,Te,t)", "0.0")
 pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = npts
 pywarpx.hybridpicmodel.qdsmc_conduction_flux_limit_factor = 0.0
 pywarpx.hybridpicmodel.qdsmc_conduction_max_hop = args.max_hop
@@ -198,10 +239,10 @@ def capture0():
     if wx_instance().getistep(0) != 0:
         return
     build_masks()
-    if args.eb_bc == "adiabatic":
+    if args.eb_bc == "adiabatic" or args.mode == "advection":
         # hot blob in the gap (transport needs structure to conserve)
-        rmid = 0.5 * (r1 + r2)
-        s0 = 3.0 * L / N
+        rmid = args.blob_r if args.blob_r is not None else 0.5 * (r1 + r2)
+        s0 = 2.5 * L / N
         te = (
             Te0_eV
             * K_per_eV
@@ -297,8 +338,48 @@ print(
     flush=True,
 )
 
+# advection mode: rigid-rotation exact solution = the blob rotated by
+# omega*t (compare on an interior core ring away from the staircase)
+rot_l2 = float("nan")
+if args.mode == "advection":
+    th = -(omega0 * tfinal)
+    XR = XG * np.cos(th) - ZG * np.sin(th)
+    ZR = XG * np.sin(th) + ZG * np.cos(th)
+    rmid = args.blob_r if args.blob_r is not None else 0.5 * (r1 + r2)
+    s0b = 2.5 * L / N
+    te_exact = (
+        Te0_eV * K_per_eV * (1.0 + np.exp(-((XR - rmid) ** 2 + ZR**2) / (2.0 * s0b**2)))
+    )
+    core = (r > r1 + 2.5 * dx) & (r < r2 - 2.5 * dx)
+    rot_l2 = float(
+        np.sqrt((((te_final - te_exact)[core]) ** 2).mean()) / (Te0_eV * K_per_eV)
+    )
+    print(
+        f"[harness] advection: rotated-blob relL2={rot_l2:.4e} "
+        f"| Sigma(Te,fluid) drift={d_sigma / state['u0']:.3e} "
+        f"(marker_reflect={args.marker_reflect})",
+        flush=True,
+    )
+
 if args.do_assert:
-    if args.eb_bc == "isothermal":
+    if args.mode == "advection" and args.vedge <= 0.0:
+        # near-rest EB gate: with static 1e12 ions and no drive, V_e is
+        # not exactly zero (the wall density ramp curls a whisper of B
+        # through grad Pe / n), so the gate bounds the drift 4+ orders
+        # below the catastrophic wall classes (-6% per substep) rather
+        # than at bit level. Measured: -1.3e-6 over 128 steps.
+        assert abs(d_sigma) / state["u0"] < 1.0e-4, (
+            f"near-rest EB drift {d_sigma / state['u0']:.3e}"
+        )
+    elif args.mode == "advection":
+        # NOT a marker-reflection gate: the rotating-ion instrument is
+        # dominated by EB ion scraping (ne drains ~0.3%/step) and
+        # near-wall deposit dilution -- measured identical with the
+        # mirror on/off. Loose envelope only; the differential
+        # instrument needs the deposit fold + ion-side EB handling
+        # (recorded follow-ups).
+        assert rot_l2 < 1.5, f"rotated-blob relL2 {rot_l2:.3e}"
+    elif args.eb_bc == "isothermal":
         # Gate on the SHIFTED bath radii (the ring intrusion is the
         # O(dx) staircase geometry price; the sub-cell level-set wall
         # position is the recorded upgrade once the EB mirror

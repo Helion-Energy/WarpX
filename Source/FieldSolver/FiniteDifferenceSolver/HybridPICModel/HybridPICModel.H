@@ -813,6 +813,18 @@ public:
      *  isothermal, qdsmc_conduction_eb_Te(x,y,z). */
     int m_cond_eb_bc = 0;
 
+    /** Advection-marker EB handling (Thrust D, the E7-replacement at
+     *  embedded boundaries; dsmc-eb-reflection semantics at sub-cell
+     *  hop scale): markers homed at covered nodes (level set <= 0)
+     *  never move — V_e inside the conductor is not physical — and
+     *  fluid markers pushed into the conductor are specularly mirrored
+     *  back across the level set (x -> x - 2 phi n; a mirror that
+     *  lands covered again keeps the marker home). The midpoint
+     *  velocity sample is mirror-guarded the same way. Default ON;
+     *  only active when an embedded boundary exists. Input:
+     *  qdsmc_eb_marker_reflect. */
+    bool m_qdsmc_eb_marker_reflect = true;
+
     /** Isothermal-EB bath ring depth (Chebyshev distance from a covered
      *  node, [1, 3]). Depth 1 leaves the deposition density ramp at the
      *  wall OUTSIDE the bath: the flux form transports u = n T, and

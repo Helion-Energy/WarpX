@@ -9,6 +9,7 @@
 
 #include "QdsmcParticleContainer.H"
 
+#include "EmbeddedBoundary/DistanceToEB.H"
 #include "Particles/Deposition/ChargeDeposition.H"
 #include "Particles/Pusher/GetAndSetPosition.H"
 #include "Utils/TextMsg.H"
@@ -428,8 +429,57 @@ QdsmcParticleContainer::SetK (int lev,
 }
 
 
+namespace
+{
+    /** Nodal-interpolated signed distance to the embedded boundary at a
+     *  physical point (< 0 inside the conductor). */
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    amrex::Real qdsmc_eb_distance (
+        amrex::Real const x, amrex::Real const y, amrex::Real const z,
+        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const & plo,
+        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const & dxi,
+        amrex::Array4<amrex::Real const> const & phi_arr)
+    {
+        int i, j, k;
+        amrex::Real W[AMREX_SPACEDIM][2];
+        ablastr::particles::compute_weights<amrex::IndexType::NODE>(
+            x, y, z, plo, dxi, i, j, k, W);
+        return ablastr::particles::interp_field_nodal(i, j, k, W, phi_arr);
+    }
+
+    /** Specular level-set mirror of a point inside the conductor:
+     *  x -> x - 2 phi(x) n(x). Returns the post-mirror signed distance
+     *  (callers fall back to the home position when it is still <= 0,
+     *  e.g. deep in a staircase corner where the mirror overshoots). */
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    amrex::Real qdsmc_eb_mirror (
+        amrex::Real & x, amrex::Real & y, amrex::Real & z,
+        amrex::Real const dist,
+        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const & plo,
+        amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const & dxi,
+        amrex::Array4<amrex::Real const> const & phi_arr)
+    {
+        auto const n3 = DistanceToEB::interp_normal(
+            amrex::ParticleReal(x), amrex::ParticleReal(y),
+            amrex::ParticleReal(z), plo, dxi, phi_arr);
+        // interp_normal normalizes internally: a degenerate level-set
+        // gradient (distance-function ridge) arrives as inf/NaN — treat
+        // as unmirrorable so the caller keeps the marker home (a NaN
+        // position would crash Redistribute via floor() -> wild index)
+        if (!(std::isfinite(n3[0]) && std::isfinite(n3[1]) &&
+              std::isfinite(n3[2]))) {
+            return dist;
+        }
+        x -= amrex::Real(2.0) * dist * amrex::Real(n3[0]);
+        y -= amrex::Real(2.0) * dist * amrex::Real(n3[1]);
+        z -= amrex::Real(2.0) * dist * amrex::Real(n3[2]);
+        return qdsmc_eb_distance(x, y, z, plo, dxi, phi_arr);
+    }
+}
+
 void
 QdsmcParticleContainer::GatherVAtMidpoint (int lev, amrex::Real dt,
+                                           amrex::MultiFab const* eb_dist,
                                            const amrex::MultiFab & Ux,
                                            const amrex::MultiFab & Uy,
                                            const amrex::MultiFab & Uz)
@@ -477,6 +527,12 @@ QdsmcParticleContainer::GatherVAtMidpoint (int lev, amrex::Real dt,
         auto const uy_arr = Uy.const_array(pti);
         auto const uz_arr = Uz.const_array(pti);
 
+        bool const has_eb = (eb_dist != nullptr);
+        amrex::Array4<amrex::Real const> const phi_ls =
+            has_eb ? eb_dist->const_array(pti)
+                   : amrex::Array4<amrex::Real const>{};
+        auto const dxi_eb = dxi;
+
         amrex::ParallelFor(np, [=] AMREX_GPU_DEVICE (long ip)
         {
             // Midpoint of the would-be push, per the 3-vector home record.
@@ -511,8 +567,32 @@ QdsmcParticleContainer::GatherVAtMidpoint (int lev, amrex::Real dt,
             amrex::Real const zm = z_node[ip] + amrex::Real(0.5) * dt * vz[ip];
 #endif
 
+            amrex::Real xs = xm, ys = ym, zs = zm;
+            if (has_eb) {
+                // markers homed inside the conductor never move; a
+                // midpoint that dips into the conductor is mirrored
+                // back (still-covered mirror -> sample at home)
+                if (qdsmc_eb_distance(x_node[ip], y_node[ip], z_node[ip],
+                                      plo, dxi_eb, phi_ls)
+                        <= amrex::Real(0)) {
+                    vx[ip] = amrex::Real(0);
+                    vy[ip] = amrex::Real(0);
+                    vz[ip] = amrex::Real(0);
+                    return;
+                }
+                amrex::Real const dm =
+                    qdsmc_eb_distance(xs, ys, zs, plo, dxi_eb, phi_ls);
+                if (dm <= amrex::Real(0)) {
+                    if (qdsmc_eb_mirror(xs, ys, zs, dm,
+                                        plo, dxi_eb, phi_ls)
+                            <= amrex::Real(0)) {
+                        xs = x_node[ip]; ys = y_node[ip]; zs = z_node[ip];
+                    }
+                }
+            }
+
             auto const v = ablastr::particles::doGatherVectorFieldNodal(
-                xm, ym, zm, ux_arr, uy_arr, uz_arr, dxi, plo);
+                xs, ys, zs, ux_arr, uy_arr, uz_arr, dxi, plo);
 
             vx[ip] = v[0];
             vy[ip] = v[1];
@@ -525,7 +605,8 @@ QdsmcParticleContainer::GatherVAtMidpoint (int lev, amrex::Real dt,
 
 
 void
-QdsmcParticleContainer::PushX (int lev, amrex::Real dt)
+QdsmcParticleContainer::PushX (int lev, amrex::Real dt,
+                               amrex::MultiFab const* eb_dist)
 {
     ABLASTR_PROFILE("QdsmcParticleContainer::PushX()");
 
@@ -533,6 +614,7 @@ QdsmcParticleContainer::PushX (int lev, amrex::Real dt)
     auto const plo = geom.ProbLoArray();
     auto const phi = geom.ProbHiArray();
     auto const dx_arr = geom.CellSizeArray();
+    auto const dxi = geom.InvCellSizeArray();
 
     // Per-dimension domain clamp bounds. In non-periodic directions the
     // advected position is clamped just inside the domain (positions at or
@@ -593,6 +675,11 @@ QdsmcParticleContainer::PushX (int lev, amrex::Real dt)
         amrex::ParticleReal* const AMREX_RESTRICT pa_z =
             attribs[QdsmcPIdx::z].dataPtr();
 
+        bool const has_eb = (eb_dist != nullptr);
+        amrex::Array4<amrex::Real const> const phi_ls =
+            has_eb ? eb_dist->const_array(pti)
+                   : amrex::Array4<amrex::Real const>{};
+
         amrex::ParallelFor(np, [=] AMREX_GPU_DEVICE (long ip)
         {
             // Skip particles with no weight (e.g. just-reset particles
@@ -610,24 +697,83 @@ QdsmcParticleContainer::PushX (int lev, amrex::Real dt)
                                       : amrex::Clamp(xnew, lo_bnd[d], hi_bnd[d]);
             };
 
-            // Write the new position to the AMReX-tracked position slots.
-            // Axes not represented in the field have no enum slot and are
-            // simply not tracked (consistent with field dimensionality).
+            // Tentative new position (domain-clamped per axis; axes not
+            // represented in the field have no enum slot and are simply
+            // not tracked, consistent with field dimensionality).
 #if defined(WARPX_DIM_3D)
-            pa_x[ip] = push_clamp(x_node[ip], vx[ip], 0);
-            pa_y[ip] = push_clamp(y_node[ip], vy[ip], 1);
-            pa_z[ip] = push_clamp(z_node[ip], vz[ip], 2);
+            amrex::Real xn = push_clamp(x_node[ip], vx[ip], 0);
+            amrex::Real yn = push_clamp(y_node[ip], vy[ip], 1);
+            amrex::Real zn = push_clamp(z_node[ip], vz[ip], 2);
 #elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
-            pa_x[ip] = push_clamp(x_node[ip], vx[ip], 0);
-            pa_z[ip] = push_clamp(z_node[ip], vz[ip], 1);
+            amrex::Real xn = push_clamp(x_node[ip], vx[ip], 0);
+            amrex::Real yn = amrex::Real(0);   // home y is 0 off-plane
+            amrex::Real zn = push_clamp(z_node[ip], vz[ip], 1);
 #elif defined(WARPX_DIM_1D_Z)
-            pa_z[ip] = push_clamp(z_node[ip], vz[ip], 0);
+            amrex::Real zn = push_clamp(z_node[ip], vz[ip], 0);
 #else
             // WARPX_DIM_RCYLINDER / WARPX_DIM_RSPHERE: x (= r) is the single
             // tracked position (QDSMC is refused at runtime in these
             // geometries); z is a plain attribute, advanced unclamped.
-            pa_x[ip] = push_clamp(x_node[ip], vx[ip], 0);
-            pa_z[ip] = z_node[ip] + vz[ip] * dt;
+            amrex::Real xn = push_clamp(x_node[ip], vx[ip], 0);
+            amrex::Real yn = amrex::Real(0);
+            amrex::Real zn = z_node[ip] + vz[ip] * dt;
+#endif
+
+#if !defined(WARPX_DIM_1D_Z)
+            if (has_eb) {
+                // Markers homed inside the conductor never move (V_e is
+                // not physical there); fluid markers pushed into the
+                // conductor are specularly mirrored back across the
+                // level set (a mirror that lands covered again — deep
+                // staircase corner — keeps the marker home). This is
+                // the adiabatic E7-replacement at the EB, matching the
+                // conduction sweeps' fold-back.
+#if defined(WARPX_DIM_3D)
+                amrex::Real const hy_eb = y_node[ip];
+#else
+                amrex::Real const hy_eb = amrex::Real(0);
+#endif
+                if (qdsmc_eb_distance(x_node[ip], hy_eb, z_node[ip],
+                                      plo, dxi, phi_ls)
+                        <= amrex::Real(0)) {
+                    xn = x_node[ip]; yn = hy_eb; zn = z_node[ip];
+                } else {
+                    amrex::Real const dn =
+                        qdsmc_eb_distance(xn, yn, zn, plo, dxi, phi_ls);
+                    if (dn <= amrex::Real(0)) {
+                        amrex::Real xr = xn, yr = yn, zr = zn;
+                        if (qdsmc_eb_mirror(xr, yr, zr, dn,
+                                            plo, dxi, phi_ls)
+                                > amrex::Real(0)) {
+                            xn = xr; yn = yr; zn = zr;
+                        } else {
+                            xn = x_node[ip];
+                            yn = hy_eb;
+                            zn = z_node[ip];
+                        }
+                    }
+                }
+            }
+#else
+            amrex::ignore_unused(has_eb, phi_ls, dxi);
+#endif
+#if !defined(WARPX_DIM_1D_Z)
+            amrex::ignore_unused(yn);
+#endif
+
+            // Write the new position to the AMReX-tracked position slots.
+#if defined(WARPX_DIM_3D)
+            pa_x[ip] = xn;
+            pa_y[ip] = yn;
+            pa_z[ip] = zn;
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+            pa_x[ip] = xn;
+            pa_z[ip] = zn;
+#elif defined(WARPX_DIM_1D_Z)
+            pa_z[ip] = zn;
+#else
+            pa_x[ip] = xn;
+            pa_z[ip] = zn;
 #endif
         });
     }
