@@ -165,6 +165,7 @@ public:
      *        clamped just inside the domain (same guard as PushX).
      */
     void GatherVAtMidpoint (int lev, amrex::Real dt,
+                            amrex::MultiFab const* eb_dist,
                             const amrex::MultiFab & Ux,
                             const amrex::MultiFab & Uy,
                             const amrex::MultiFab & Uz);
@@ -177,7 +178,17 @@ public:
      *        Calls Redistribute() at the end so particles end up in the
      *        correct tile for their new position.
      */
-    void PushX (int lev, amrex::Real dt);
+    /** \param[in] eb_dist nodal signed distance to the embedded boundary
+     *        (nullptr = no EB marker handling). With it, markers homed at
+     *        covered nodes (distance <= 0) never move — V_e is not physical
+     *        inside the conductor — and markers pushed into the conductor
+     *        are specularly mirrored back across the level set,
+     *        x -> x - 2 phi(x) n(x) (the dsmc-eb-reflection semantics at
+     *        sub-cell hop scale); a mirror that lands covered again (deep
+     *        staircase corner) falls back to the home position. The same
+     *        mirror guards the midpoint velocity sample. */
+    void PushX (int lev, amrex::Real dt,
+                amrex::MultiFab const* eb_dist = nullptr);
 
     /**
      * @brief Scatter the per-particle entropy (K_e * N_e) onto Kfield via

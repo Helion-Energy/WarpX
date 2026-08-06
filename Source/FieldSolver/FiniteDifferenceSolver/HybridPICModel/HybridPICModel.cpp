@@ -230,6 +230,7 @@ void HybridPICModel::ReadParameters ()
             "using qdsmc_conduction_fluxform_unsplit");
         pp_hybrid.query("qdsmc_conduction_closed_floor_faces",
                         m_cond_closed_floor_faces);
+        pp_hybrid.query("qdsmc_eb_marker_reflect", m_qdsmc_eb_marker_reflect);
         std::string ebbc = "adiabatic";
         pp_hybrid.query("qdsmc_conduction_eb_bc", ebbc);
         pp_hybrid.query("qdsmc_conduction_eb_ring", m_cond_eb_ring);
@@ -1630,17 +1631,26 @@ void HybridPICModel::QdsmcTransportOnce (int const lev, amrex::Real const dt_adv
     m_qdsmc_pc->SetV(lev, Vex, Vey, Vez);
     m_qdsmc_pc->SetK(lev, Ke, rho);
 
+    // EB marker handling (adiabatic E7-replacement, matching the
+    // conduction sweeps' fold-back): covered-home markers freeze,
+    // markers pushed into the conductor mirror back across the level
+    // set, and the midpoint velocity sample is mirror-guarded too.
+    amrex::MultiFab const * eb_dist =
+        (EB::enabled() && m_qdsmc_eb_marker_reflect)
+            ? warpx.m_fields.get(FieldType::distance_to_eb, lev)
+            : nullptr;
+
     // Two-stage midpoint (RK2) evaluation: replace the home-gathered
     // velocity by V_e sampled at the trajectory midpoint
     // x_mid = home + (dt/2) v(home). With a time-centered V_e this makes
     // the advection globally second order in dt; conservation is untouched
     // (the deposit still moves the full carried content).
     if (midpoint) {
-        m_qdsmc_pc->GatherVAtMidpoint(lev, dt_adv, Vex, Vey, Vez);
+        m_qdsmc_pc->GatherVAtMidpoint(lev, dt_adv, eb_dist, Vex, Vey, Vez);
     }
 
     // Push by dt_adv; redistribute so particles end up in their new tile.
-    m_qdsmc_pc->PushX(lev, dt_adv);
+    m_qdsmc_pc->PushX(lev, dt_adv, eb_dist);
 
     // Scatter the carried entropy and weight onto the grid (each call
     // zeroes its target field, then deposits, then SumBoundary), with the
