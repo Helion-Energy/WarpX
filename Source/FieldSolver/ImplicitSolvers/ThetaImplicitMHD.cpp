@@ -1763,6 +1763,18 @@ theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
     // under cgl: load_cell_state_cgl overwrites the polytropic pressure
     // with p_eff and the E_i machinery stays dormant.
     flux_parameters.cgl_closure = (m_ion_closure == "cgl");
+    // Temperature-floor drain-gate anchors for the face_flux limiters:
+    // the same per-density coefficients as the admissibility bounds
+    // (zero whenever the corresponding temperature floor is off). The
+    // CGL blocks take their coefficients directly in the hlld kernels,
+    // so only the U_e and total-energy E_i entries are plumbed here.
+    const AdmissibilityBounds admissibility_bounds = MakeAdmissibilityBounds();
+    flux_parameters.electron_energy_temperature_coefficient =
+        admissibility_bounds.temperature_coefficients[1];
+    if (m_ion_closure == "total_energy") {
+        flux_parameters.ion_energy_temperature_coefficient =
+            admissibility_bounds.temperature_coefficients[2];
+    }
     return flux_parameters;
 }
 
@@ -2039,9 +2051,19 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                 // can otherwise demand sub-floor states in rarefactions.
                 // Gate on the theta-extrapolated end-of-step value, like
                 // the face limiters (the admissibility bound protects the
-                // end-of-step state, not the theta stage).
-                pressure_work *= theta_implicit_mhd::floor_outflow_limiter(
-                    energy_end, pressure_floor / gamma_e_minus_one);
+                // end-of-step state, not the theta stage). The threshold
+                // is the per-cell effective bound carrying the
+                // temperature floor (see ratcheted_drain_floor), so a
+                // cell pinned at the temperature anchor is not drained
+                // below the bound the projection enforces.
+                pressure_work *= theta_implicit_mhd::anchored_outflow_limiter(
+                    energy_end,
+                    theta_implicit_mhd::ratcheted_drain_floor(
+                        pressure_floor / gamma_e_minus_one,
+                        flux_parameters
+                            .electron_energy_temperature_coefficient,
+                        energy_old(i, j, k), rho_old(i, j, k)),
+                    pressure_floor / gamma_e_minus_one);
             }
             energy_increment(i, j, k) =
                 theta_dt * plasma_weight *
@@ -2059,21 +2081,35 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                 // End-of-step internal proxy for the sink gates, from the
                 // theta-extrapolated E_i, momentum, and density.
                 amrex::Real kinetic_end = 0.0_rt;
+                amrex::Real kinetic_old = 0.0_rt;
                 for (int component = 0; component < 3; ++component) {
                     const amrex::Real mom_end =
                         mom(i, j, k, component) *
                             (1.0_rt + extrapolation_weight) -
                         mom_old(i, j, k, component) * extrapolation_weight;
                     kinetic_end += mom_end * mom_end;
+                    kinetic_old += mom_old(i, j, k, component) *
+                                   mom_old(i, j, k, component);
                 }
                 kinetic_end *=
                     0.5_rt /
                     std::max(rho(i, j, k) * (1.0_rt + extrapolation_weight) -
                                  rho_old(i, j, k) * extrapolation_weight,
                              density_floor);
+                kinetic_old *=
+                    0.5_rt / std::max(rho_old(i, j, k), density_floor);
                 const amrex::Real internal_proxy_end =
                     ion_e(i, j, k) * (1.0_rt + extrapolation_weight) -
                     ion_e_old(i, j, k) * extrapolation_weight - kinetic_end;
+                // Per-cell effective bound on the internal proxy: the
+                // absolute floor, lifted to the temperature floor's
+                // step-old-density bound where the ratchet engages
+                // (see ratcheted_drain_floor).
+                const amrex::Real ion_floor_cell =
+                    theta_implicit_mhd::ratcheted_drain_floor(
+                        ion_energy_floor,
+                        flux_parameters.ion_energy_temperature_coefficient,
+                        ion_e_old(i, j, k) - kinetic_old, rho_old(i, j, k));
                 // Work done by the Lorentz force on the ion fluid, from the
                 // same cell-centered J x B the momentum equation uses, so
                 // field-to-fluid energy exchange is discretely consistent.
@@ -2099,8 +2135,9 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                     // close the compression sink as U_i approaches
                     // its floor, mirroring the electron pdV treatment.
                     ion_pressure_work *=
-                        theta_implicit_mhd::floor_outflow_limiter(
-                            internal_proxy_end, ion_energy_floor);
+                        theta_implicit_mhd::anchored_outflow_limiter(
+                            internal_proxy_end, ion_floor_cell,
+                            ion_energy_floor);
                 }
                 if (guard_floors && lorentz_work < 0.0_rt) {
                     // Likewise close a decelerating Lorentz sink near the
@@ -2109,8 +2146,9 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                     // force) otherwise demands sub-floor states that lock
                     // the Newton line search.
                     lorentz_work *=
-                        theta_implicit_mhd::floor_outflow_limiter(
-                            internal_proxy_end, ion_energy_floor);
+                        theta_implicit_mhd::anchored_outflow_limiter(
+                            internal_proxy_end, ion_floor_cell,
+                            ion_energy_floor);
                 }
                 ion_energy_increment(i, j, k) =
                     theta_dt * plasma_weight *
@@ -2182,6 +2220,16 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const theta_implicit_mhd::FluxParameters parameters = MakeFluxParameters();
     const bool add_external = (external_face != nullptr);
     const int normal = normal_direction;
+    // Temperature-floor drain-gate anchors for the CGL donor gates (the
+    // U_e and E_i coefficients ride inside parameters): the same
+    // per-density coefficients as the admissibility bounds.
+    const AdmissibilityBounds admissibility_bounds = MakeAdmissibilityBounds();
+    const amrex::Real parallel_temperature_coefficient =
+        parameters.cgl_closure ? admissibility_bounds.temperature_coefficients[2]
+                               : 0.0_rt;
+    const amrex::Real perp_temperature_coefficient =
+        parameters.cgl_closure ? admissibility_bounds.temperature_coefficients[3]
+                               : 0.0_rt;
 #if defined(WARPX_DIM_RZ)
     // The axis face has zero area: its fluid channels drop out of the
     // r-weighted divergence and the axis-corner EMF is set by parity, so
@@ -2337,16 +2385,30 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     donor_end(rho, rho_old, i, j, k),
                     parameters.density_floor),
                 0.5_rt * (left.safe_density + right.safe_density));
+            // Each donor limiter's threshold is that donor's per-cell
+            // effective bound max(absolute floor, c_b rho_old) -- the
+            // temperature floor's step-old-density admissibility bound,
+            // ratchet-gated on the step-old value (ratcheted_drain_floor)
+            // -- so a donor pinned at the temperature anchor closes its
+            // outflow there instead of draining below the bound.
             const amrex::Real electron_energy_floor =
                 parameters.electron_pressure_floor /
                 (parameters.gamma_e - 1.0_rt);
             flux.electron_energy *= donor_blend(
                 flux.electron_energy,
-                theta_implicit_mhd::floor_outflow_limiter(
+                theta_implicit_mhd::anchored_outflow_limiter(
                     donor_end(energy, energy_old, il, jl, kl),
+                    theta_implicit_mhd::ratcheted_drain_floor(
+                        electron_energy_floor,
+                        parameters.electron_energy_temperature_coefficient,
+                        energy_old(il, jl, kl), rho_old(il, jl, kl)),
                     electron_energy_floor),
-                theta_implicit_mhd::floor_outflow_limiter(
+                theta_implicit_mhd::anchored_outflow_limiter(
                     donor_end(energy, energy_old, i, j, k),
+                    theta_implicit_mhd::ratcheted_drain_floor(
+                        electron_energy_floor,
+                        parameters.electron_energy_temperature_coefficient,
+                        energy_old(i, j, k), rho_old(i, j, k)),
                     electron_energy_floor),
                 0.5_rt * (left.electron_energy + right.electron_energy) +
                     electron_energy_floor);
@@ -2370,12 +2432,32 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 const amrex::Real ion_energy_floor =
                     parameters.ion_pressure_floor /
                     (parameters.gamma_i - 1.0_rt);
+                // Donor bound on the internal proxy, ratchet-gated on the
+                // step-old internal energy (the quantity this gate
+                // anchors), like the FinishStateUpdate restoration.
+                const auto ion_floor_donor = [=] (const int id, const int jd,
+                                                  const int kd) {
+                    amrex::Real kinetic_old = 0.0_rt;
+                    for (int component = 0; component < 3; ++component) {
+                        kinetic_old += mom_old(id, jd, kd, component) *
+                                       mom_old(id, jd, kd, component);
+                    }
+                    kinetic_old *= 0.5_rt / std::max(rho_old(id, jd, kd),
+                                                     parameters.density_floor);
+                    return theta_implicit_mhd::ratcheted_drain_floor(
+                        ion_energy_floor,
+                        parameters.ion_energy_temperature_coefficient,
+                        ion_e_old(id, jd, kd) - kinetic_old,
+                        rho_old(id, jd, kd));
+                };
                 flux.ion_energy *= donor_blend(
                     flux.ion_energy,
-                    theta_implicit_mhd::floor_outflow_limiter(
-                        ion_internal_end(il, jl, kl), ion_energy_floor),
-                    theta_implicit_mhd::floor_outflow_limiter(
-                        ion_internal_end(i, j, k), ion_energy_floor),
+                    theta_implicit_mhd::anchored_outflow_limiter(
+                        ion_internal_end(il, jl, kl),
+                        ion_floor_donor(il, jl, kl), ion_energy_floor),
+                    theta_implicit_mhd::anchored_outflow_limiter(
+                        ion_internal_end(i, j, k), ion_floor_donor(i, j, k),
+                        ion_energy_floor),
                     0.5_rt * (left.ion_energy + right.ion_energy) +
                         ion_energy_floor);
             }
@@ -2388,21 +2470,36 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     0.5_rt * parameters.ion_pressure_floor;
                 flux.ion_parallel_energy *= donor_blend(
                     flux.ion_parallel_energy,
-                    theta_implicit_mhd::floor_outflow_limiter(
+                    theta_implicit_mhd::anchored_outflow_limiter(
                         donor_end(upar, upar_old, il, jl, kl),
+                        theta_implicit_mhd::ratcheted_drain_floor(
+                            parallel_floor, parallel_temperature_coefficient,
+                            upar_old(il, jl, kl), rho_old(il, jl, kl)),
                         parallel_floor),
-                    theta_implicit_mhd::floor_outflow_limiter(
-                        donor_end(upar, upar_old, i, j, k), parallel_floor),
+                    theta_implicit_mhd::anchored_outflow_limiter(
+                        donor_end(upar, upar_old, i, j, k),
+                        theta_implicit_mhd::ratcheted_drain_floor(
+                            parallel_floor, parallel_temperature_coefficient,
+                            upar_old(i, j, k), rho_old(i, j, k)),
+                        parallel_floor),
                     0.5_rt * (left.ion_parallel_energy +
                               right.ion_parallel_energy) +
                         parallel_floor);
                 const amrex::Real perp_floor = parameters.ion_pressure_floor;
                 flux.ion_perp_energy *= donor_blend(
                     flux.ion_perp_energy,
-                    theta_implicit_mhd::floor_outflow_limiter(
-                        donor_end(uperp, uperp_old, il, jl, kl), perp_floor),
-                    theta_implicit_mhd::floor_outflow_limiter(
-                        donor_end(uperp, uperp_old, i, j, k), perp_floor),
+                    theta_implicit_mhd::anchored_outflow_limiter(
+                        donor_end(uperp, uperp_old, il, jl, kl),
+                        theta_implicit_mhd::ratcheted_drain_floor(
+                            perp_floor, perp_temperature_coefficient,
+                            uperp_old(il, jl, kl), rho_old(il, jl, kl)),
+                        perp_floor),
+                    theta_implicit_mhd::anchored_outflow_limiter(
+                        donor_end(uperp, uperp_old, i, j, k),
+                        theta_implicit_mhd::ratcheted_drain_floor(
+                            perp_floor, perp_temperature_coefficient,
+                            uperp_old(i, j, k), rho_old(i, j, k)),
+                        perp_floor),
                     0.5_rt *
                             (left.ion_perp_energy + right.ion_perp_energy) +
                         perp_floor);
@@ -3137,15 +3234,25 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     const bool evolve_ion_fluid = m_evolve_ion_fluid;
     const bool include_joule_heating = m_include_joule_heating;
     const amrex::Real work_kappa = m_hlld_kappa_signal;
-    const amrex::Real electron_energy_floor_rate =
-        m_electron_pressure_floor / (m_gamma_e - 1.0_rt) / theta_dt;
-    const amrex::Real ion_energy_floor_rate = ion_energy_floor / theta_dt;
+    // Temperature-floor drain-gate anchors (same per-density coefficients
+    // as the admissibility bounds; zero when the floors are off): the
+    // pointwise gates below anchor at each cell's ratcheted effective
+    // bound, and their floor RATES (the strictly positive part of the
+    // smoothing widths) scale with the same per-cell bound so the gates
+    // stay comparably smooth at temperature-pinned cells.
+    const AdmissibilityBounds admissibility_bounds = MakeAdmissibilityBounds();
+    const amrex::Real electron_temperature_coefficient =
+        admissibility_bounds.temperature_coefficients[1];
+    const amrex::Real ion_temperature_coefficient =
+        total_energy_closure ? admissibility_bounds.temperature_coefficients[2]
+                             : 0.0_rt;
+    const amrex::Real parallel_temperature_coefficient =
+        cgl_closure ? admissibility_bounds.temperature_coefficients[2] : 0.0_rt;
+    const amrex::Real perp_temperature_coefficient =
+        cgl_closure ? admissibility_bounds.temperature_coefficients[3] : 0.0_rt;
     // --- CGL closure constants (all host-precomputed and strictly
     // positive, so every in-kernel regularization is C-infinity). ---
     const amrex::Real ion_pressure_floor = m_ion_pressure_floor;
-    const amrex::Real ion_parallel_floor_rate =
-        0.5_rt * m_ion_pressure_floor / theta_dt;
-    const amrex::Real ion_perp_floor_rate = m_ion_pressure_floor / theta_dt;
     const amrex::Real ion_mass = PhysConst::q_e / m_ion_charge_to_mass;
     const amrex::Real inverse_ion_mass = 1.0_rt / ion_mass;
     const amrex::Real cgl_inverse_mu0 = 1.0_rt / PhysConst::mu0;
@@ -3268,6 +3375,13 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                               flux_arr(i, j, k, flux_mass));
             amrex::Real divergence_momentum_flux[3];
             amrex::Real magnetic_force[3];
+            // Wall-band energy insulation: the wall face's contribution
+            // to the magnetic force (the retained OPEN normal
+            // Maxwell-stress channel of the zero-flux wall override;
+            // its tangential channels are already imaged to zero).
+            // Recorded separately at the wall-adjacent ring so its work
+            // can be drain-gated PER TERM below; zero everywhere else.
+            amrex::Real wall_magnetic_force[3] = {0.0_rt, 0.0_rt, 0.0_rt};
             for (int component = 0; component < 3; ++component) {
                 divergence_momentum_flux[component] =
                     inverse_dz *
@@ -3323,6 +3437,18 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                              rflux_arr(i + 1, j, k, flux_magnetic + component) -
                          weight_low *
                              rflux_arr(i, j, k, flux_magnetic + component));
+                }
+                if (wall_image && i == radial_domain_hi) {
+                    // Zero-flux wall: record the wall face's part of the
+                    // magnetic force (the retained open normal stress;
+                    // the overridden tangential channels are exactly
+                    // zero) for the per-term work gate below.
+                    for (int component = 0; component < 3; ++component) {
+                        wall_magnetic_force[component] =
+                            -inverse_dr * weight_high *
+                            rflux_arr(i + 1, j, k,
+                                      flux_magnetic + component);
+                    }
                 }
                 divergence_energy_flux +=
                     inverse_dr *
@@ -3653,11 +3779,20 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 return work * (positive_weight +
                                (1.0_rt - positive_weight) * limiter);
             };
+            // Per-cell effective anchor (absolute floor, lifted to the
+            // temperature floor's ratcheted step-old-density bound): both
+            // the limiter threshold and the width's floor rate follow it.
+            const amrex::Real electron_floor_cell =
+                theta_implicit_mhd::ratcheted_drain_floor(
+                    pressure_floor / gamma_e_minus_one,
+                    electron_temperature_coefficient, energy_old(i, j, k),
+                    rho_old(i, j, k));
             pressure_work = drain_gate(
                 pressure_work, divergence_energy_flux,
-                electron_energy_floor_rate,
-                theta_implicit_mhd::floor_outflow_limiter(
-                    energy_end, pressure_floor / gamma_e_minus_one));
+                electron_floor_cell / theta_dt,
+                theta_implicit_mhd::anchored_outflow_limiter(
+                    energy_end, electron_floor_cell,
+                    pressure_floor / gamma_e_minus_one));
             energy_increment(i, j, k) =
                 theta_dt * plasma_weight *
                 (-divergence_energy_flux + pressure_work + joule_heating);
@@ -3666,42 +3801,78 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 const amrex::Real safe_density =
                     std::max(rho(i, j, k), density_floor);
                 amrex::Real kinetic_end = 0.0_rt;
+                amrex::Real kinetic_old = 0.0_rt;
                 for (int component = 0; component < 3; ++component) {
                     const amrex::Real mom_end =
                         mom(i, j, k, component) *
                             (1.0_rt + extrapolation_weight) -
                         mom_old(i, j, k, component) * extrapolation_weight;
                     kinetic_end += mom_end * mom_end;
+                    kinetic_old += mom_old(i, j, k, component) *
+                                   mom_old(i, j, k, component);
                 }
                 kinetic_end *=
                     0.5_rt /
                     std::max(rho(i, j, k) * (1.0_rt + extrapolation_weight) -
                                  rho_old(i, j, k) * extrapolation_weight,
                              density_floor);
+                kinetic_old *=
+                    0.5_rt / std::max(rho_old(i, j, k), density_floor);
                 const amrex::Real internal_proxy_end =
                     ion_e(i, j, k) * (1.0_rt + extrapolation_weight) -
                     ion_e_old(i, j, k) * extrapolation_weight - kinetic_end;
                 // Work done by the magnetic force on the ion fluid, from
                 // the SAME discrete stress-flux difference the momentum
                 // equation uses, so field-to-fluid energy exchange is
-                // discretely consistent.
+                // discretely consistent. The wall face's part (the
+                // retained open normal-stress channel) is kept separate:
+                // gated PER TERM below, a wall drain cannot ride through
+                // the gate behind interior heating in the summed work.
                 amrex::Real lorentz_work = 0.0_rt;
+                amrex::Real wall_stress_work = 0.0_rt;
                 for (int component = 0; component < 3; ++component) {
                     lorentz_work +=
                         mom(i, j, k, component) * magnetic_force[component];
+                    wall_stress_work += mom(i, j, k, component) *
+                                        wall_magnetic_force[component];
                 }
                 lorentz_work /= safe_density;
+                wall_stress_work /= safe_density;
                 amrex::Real ion_pressure_work =
                     pressure_e * divergence_electron_velocity;
+                // Per-cell effective anchor on the internal proxy,
+                // ratchet-gated on the step-old internal energy (the
+                // FinishStateUpdate dual-energy convention); the floor
+                // rate in the gate widths follows the same anchor.
+                const amrex::Real ion_floor_cell =
+                    theta_implicit_mhd::ratcheted_drain_floor(
+                        ion_energy_floor, ion_temperature_coefficient,
+                        ion_e_old(i, j, k) - kinetic_old, rho_old(i, j, k));
+                const amrex::Real ion_floor_rate = ion_floor_cell / theta_dt;
                 const amrex::Real ion_limiter =
-                    theta_implicit_mhd::floor_outflow_limiter(
-                        internal_proxy_end, ion_energy_floor);
+                    theta_implicit_mhd::anchored_outflow_limiter(
+                        internal_proxy_end, ion_floor_cell,
+                        ion_energy_floor);
                 ion_pressure_work =
                     drain_gate(ion_pressure_work, divergence_ion_energy_flux,
-                               ion_energy_floor_rate, ion_limiter);
+                               ion_floor_rate, ion_limiter);
+                // Wall-band energy insulation: the interior work and the
+                // wall face's open normal-stress work pass through the
+                // SAME C^1 drain gate separately (their sum is exactly
+                // lorentz_work wherever the cell is healthy, and the
+                // wall register is zero away from the wall ring), so a
+                // wall-band cell at/near its E_i bound is not drained by
+                // the open-face stress work while cells above the bound
+                // keep full physics. The wall face's electron-pdV
+                // channel needs no counterpart here: the zero-flux
+                // override zeroes flux.electron_velocity at the wall
+                // face, so ion_pressure_work has no wall-face part.
                 lorentz_work =
-                    drain_gate(lorentz_work, divergence_ion_energy_flux,
-                               ion_energy_floor_rate, ion_limiter);
+                    drain_gate(lorentz_work - wall_stress_work,
+                               divergence_ion_energy_flux, ion_floor_rate,
+                               ion_limiter) +
+                    drain_gate(wall_stress_work, divergence_ion_energy_flux,
+                               ion_floor_rate, ion_limiter);
                 ion_energy_increment(i, j, k) =
                     theta_dt * plasma_weight *
                     (-divergence_ion_energy_flux + lorentz_work +
@@ -3931,24 +4102,42 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 const amrex::Real perp_end =
                     uperp(i, j, k) * (1.0_rt + extrapolation_weight) -
                     uperp_old(i, j, k) * extrapolation_weight;
+                // Per-cell effective anchors (ratcheted temperature
+                // bounds; the absolute floors when the floors are off),
+                // used for both the limiter thresholds and the widths'
+                // floor rates.
+                const amrex::Real parallel_floor_cell =
+                    theta_implicit_mhd::ratcheted_drain_floor(
+                        0.5_rt * ion_pressure_floor,
+                        parallel_temperature_coefficient,
+                        upar_old(i, j, k), rho_old(i, j, k));
+                const amrex::Real perp_floor_cell =
+                    theta_implicit_mhd::ratcheted_drain_floor(
+                        ion_pressure_floor, perp_temperature_coefficient,
+                        uperp_old(i, j, k), rho_old(i, j, k));
                 const amrex::Real parallel_limiter =
-                    theta_implicit_mhd::floor_outflow_limiter(
-                        parallel_end, 0.5_rt * ion_pressure_floor);
+                    theta_implicit_mhd::anchored_outflow_limiter(
+                        parallel_end, parallel_floor_cell,
+                        0.5_rt * ion_pressure_floor);
                 const amrex::Real perp_limiter =
-                    theta_implicit_mhd::floor_outflow_limiter(
-                        perp_end, ion_pressure_floor);
+                    theta_implicit_mhd::anchored_outflow_limiter(
+                        perp_end, perp_floor_cell, ion_pressure_floor);
+                const amrex::Real parallel_floor_rate =
+                    parallel_floor_cell / theta_dt;
+                const amrex::Real perp_floor_rate =
+                    perp_floor_cell / theta_dt;
                 parallel_work = drain_gate(
                     parallel_work, divergence_ion_parallel_flux,
-                    ion_parallel_floor_rate, parallel_limiter);
+                    parallel_floor_rate, parallel_limiter);
                 parallel_relaxation = drain_gate(
                     parallel_relaxation, divergence_ion_parallel_flux,
-                    ion_parallel_floor_rate, parallel_limiter);
+                    parallel_floor_rate, parallel_limiter);
                 perp_work =
                     drain_gate(perp_work, divergence_ion_perp_flux,
-                               ion_perp_floor_rate, perp_limiter);
+                               perp_floor_rate, perp_limiter);
                 perp_relaxation =
                     drain_gate(perp_relaxation, divergence_ion_perp_flux,
-                               ion_perp_floor_rate, perp_limiter);
+                               perp_floor_rate, perp_limiter);
                 ion_parallel_increment(i, j, k) =
                     theta_dt * plasma_weight *
                     (-divergence_ion_parallel_flux + parallel_work +

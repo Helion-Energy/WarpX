@@ -93,6 +93,15 @@ struct FluxParameters {
     // advection channels. Mutually exclusive with total_energy_closure
     // (MakeFluxParameters keeps the latter false under cgl).
     bool cgl_closure = false;
+    // Temperature-floor drain-gate anchors: per-mass-density energy-bound
+    // coefficients c_b such that the per-cell effective floor of an
+    // energy block is max(absolute floor, c_b rho_old) -- the SAME
+    // step-old-density bound the Newton admissibility machinery
+    // (MakeAdmissibilityBounds) enforces. Zero (the default, and always
+    // when the corresponding temperature floor is off) keeps the
+    // absolute anchors alone, bit-for-bit.
+    amrex::Real electron_energy_temperature_coefficient = 0.0;
+    amrex::Real ion_energy_temperature_coefficient = 0.0;
 };
 
 struct CellState {
@@ -180,6 +189,32 @@ admissible_step_fraction (const amrex::Real value, const amrex::Real old_value,
 }
 
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+ratcheted_drain_floor (const amrex::Real absolute_floor,
+                       const amrex::Real temperature_coefficient,
+                       const amrex::Real old_value,
+                       const amrex::Real old_density) noexcept {
+    // Per-cell drain-gate anchor carrying the temperature floor's
+    // density-dependent bound: max(absolute floor, c_b rho_old), the
+    // SAME frozen step-old-density bound the Newton admissibility
+    // machinery enforces (LimitSolverStep), with the SAME one-way
+    // RATCHET -- a cell whose step-old value already sat below the
+    // temperature bound keeps the absolute anchor alone (the floor
+    // prevents cooling through it, it does not inject heat). Anchoring
+    // the RHS drain gates here closes every drain as the cell reaches
+    // the bound the projection enforces, so a cell pinned at the
+    // temperature anchor has an RHS that respects its bound instead of
+    // an irreducible residual. rho_old is frozen for the whole solve,
+    // so the anchor is a per-cell CONSTANT for the Newton iteration.
+    // With temperature_coefficient = 0 this reduces bit-for-bit to the
+    // absolute floor.
+    const amrex::Real temperature_bound =
+        temperature_coefficient * old_density;
+    return old_value >= temperature_bound
+               ? std::max(absolute_floor, temperature_bound)
+               : absolute_floor;
+}
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
 floor_outflow_limiter (const amrex::Real value,
                        const amrex::Real floor) noexcept {
     // Smoothstep: 0 at value <= floor, 1 at value >= 2*floor (C^1, so
@@ -192,6 +227,29 @@ floor_outflow_limiter (const amrex::Real value,
         return 1.0;
     }
     const amrex::Real s = std::min(std::max(value / floor - 1.0, 0.0), 1.0);
+    return s * s * (3.0 - 2.0 * s);
+}
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+anchored_outflow_limiter (const amrex::Real value,
+                          const amrex::Real cell_floor,
+                          const amrex::Real absolute_floor) noexcept {
+    // floor_outflow_limiter with a per-cell anchor (ratcheted_drain_floor).
+    // Where the anchor is the absolute floor this IS floor_outflow_limiter
+    // (bit-for-bit; the branch is on frozen step-old data, so it is not a
+    // kink in the Newton unknowns). Where the temperature bound engages,
+    // the [floor, 2 floor] transition band of the absolute form would be
+    // physically wide -- it throttles legitimate cooling already at twice
+    // the floor temperature -- so the gate instead closes over a NARROW
+    // relative band, 10% above the bound: cells above the band keep full
+    // physics and pinned cells still see a C^1 closure resolved on the
+    // scale of the projection margins.
+    if (cell_floor <= absolute_floor) {
+        return floor_outflow_limiter(value, absolute_floor);
+    }
+    const amrex::Real width = 0.1 * cell_floor;
+    const amrex::Real s = std::min(
+        std::max((value - cell_floor) / width, 0.0), 1.0);
     return s * s * (3.0 - 2.0 * s);
 }
 
@@ -1329,9 +1387,21 @@ face_flux (const amrex::Array4<const amrex::Real>& density,
         const amrex::Real ue_end =
             electron_energy(ie, je, ke) * (1.0 + ext) -
             old_electron_energy(ie, je, ke) * ext;
-        flux.electron_energy *= floor_outflow_limiter(
+        // The limiter threshold is the donor's per-cell effective bound
+        // max(absolute floor, c_b rho_old) -- the same step-old-density
+        // temperature bound the admissibility machinery enforces --
+        // ratchet-gated on the step-old value (see ratcheted_drain_floor
+        // and anchored_outflow_limiter).
+        const amrex::Real electron_energy_floor =
+            parameters.electron_pressure_floor / (parameters.gamma_e - 1.0);
+        flux.electron_energy *= anchored_outflow_limiter(
             ue_end,
-            parameters.electron_pressure_floor / (parameters.gamma_e - 1.0));
+            ratcheted_drain_floor(
+                electron_energy_floor,
+                parameters.electron_energy_temperature_coefficient,
+                old_electron_energy(ie, je, ke),
+                old_density(ie, je, ke)),
+            electron_energy_floor);
         if (parameters.total_energy_closure) {
             const bool ei_from_left = (flux.ion_energy >= 0.0);
             const int ii = ei_from_left ? il : ir;
@@ -1341,20 +1411,36 @@ face_flux (const amrex::Array4<const amrex::Real>& density,
                 ion_energy(ii, ji, ki) * (1.0 + ext) -
                 old_ion_energy(ii, ji, ki) * ext;
             amrex::Real kinetic_end = 0.0;
+            amrex::Real kinetic_old = 0.0;
             for (int component = 0; component < 3; ++component) {
                 const amrex::Real mom_end =
                     momentum(ii, ji, ki, component) * (1.0 + ext) -
                     old_momentum(ii, ji, ki, component) * ext;
                 kinetic_end += mom_end * mom_end;
+                kinetic_old += old_momentum(ii, ji, ki, component) *
+                               old_momentum(ii, ji, ki, component);
             }
             const amrex::Real rho_end_donor = std::max(
                 density(ii, ji, ki) * (1.0 + ext) -
                     old_density(ii, ji, ki) * ext,
                 parameters.density_floor);
             kinetic_end *= 0.5 / rho_end_donor;
-            flux.ion_energy *= floor_outflow_limiter(
+            kinetic_old *= 0.5 / std::max(old_density(ii, ji, ki),
+                                          parameters.density_floor);
+            // Per-cell effective bound on the donor's INTERNAL proxy,
+            // ratchet-gated on the step-old internal energy (the
+            // quantity this gate anchors -- the FinishStateUpdate
+            // dual-energy restoration uses the same convention).
+            const amrex::Real ion_energy_floor =
+                parameters.ion_pressure_floor / (parameters.gamma_i - 1.0);
+            flux.ion_energy *= anchored_outflow_limiter(
                 ei_end - kinetic_end,
-                parameters.ion_pressure_floor / (parameters.gamma_i - 1.0));
+                ratcheted_drain_floor(
+                    ion_energy_floor,
+                    parameters.ion_energy_temperature_coefficient,
+                    old_ion_energy(ii, ji, ki) - kinetic_old,
+                    old_density(ii, ji, ki)),
+                ion_energy_floor);
         }
     }
     return flux;

@@ -202,6 +202,20 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# hlld (conservative-form) variant: the pinned halo exercises the SMOOTHED
+# drain_gate machinery and the donor-side face limiters, whose thresholds
+# must anchor at the per-cell temperature bound for Newton to converge
+# every step (newton.require_convergence = true aborts otherwise).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_temperature_floor_hlld  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_temperature_floor_hlld  # inputs
+    "analysis_mhd_temperature_floor.py diags/diag000000 diags/diag000200"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_positivity  # name
     1  # dims
@@ -633,6 +647,20 @@ add_warpx_test(
     2  # nprocs
     inputs_test_rz_theta_implicit_mhd_r_open_reflect_wall  # inputs
     "analysis_mhd_r_open_reflect_wall.py diags/diag000000 diags/diag000080"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Cold-column variant riding the ion-temperature floor at the same wall:
+# the RHS drain gates (wall-face stress work included) must anchor at the
+# per-cell effective bound max(absolute floor, n kB T_floor) or the floor
+# leaks through the kinetic-energy corner and Newton stagnates.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_r_open_reflect_wall_floor  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_r_open_reflect_wall_floor  # inputs
+    "analysis_mhd_r_open_reflect_wall_floor.py diags/diag000000 diags/diag000080"  # analysis
     OFF  # checksum
     OFF  # dependency
 )

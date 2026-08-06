@@ -19,10 +19,15 @@ my_constants.rho_floor = 1.0e-2 * rho0
 # Temperature-floor physics at CI scale: the halo of the supersonic
 # rarefaction cools adiabatically (the electron temperature follows the
 # adiabat, crossing T_floor at rho = 0.52 rho0; the ion temperature lags
-# it through HLLC dissipation but crosses by rho ~ 0.2 rho0), far above
-# the density floor. The temperature floors must hold both species at
-# T >= T_floor instead. The run ends while the halo is still draining
+# it through Riemann-fan dissipation but crosses by rho ~ 0.2 rho0), far
+# above the density floor. The temperature floors must hold both species
+# at T >= T_floor instead. The run ends while the halo is still draining
 # and pinned; past ~step 210 the shock reflux refills and reheats it.
+# HLLD variant of the hllc temperature-floor test: the conservative-form
+# face-flux path gates drains through the SMOOTHED drain_gate machinery
+# and the donor-side face limiters (a different code path from the hllc
+# pointwise guards), which must equally anchor at the per-cell
+# temperature bound for Newton to converge on the pinned halo.
 my_constants.T_floor = 7500.0
 
 #################################
@@ -68,10 +73,15 @@ newton.max_iterations = 20
 # bound the admissibility machinery enforces -- so cells pinned at the
 # temperature floor have an RHS that respects their bound and Newton must
 # converge EVERY step while riding the floor (the analysis asserts this
-# from the diagnostic file; before the anchored gates, 164 of these 200
-# steps stagnated with an irreducible residual).
+# from the diagnostic file; without the anchored gates the pinned halo
+# stagnates with an irreducible residual).
 newton.require_convergence = true
 newton.diagnostic_file = diags/newton.txt
+
+# The MHD block preconditioner keeps the conservative-form (hlld)
+# Jacobian solves CI-cheap (unpreconditioned GMRES needs ~110 iterations
+# per Newton step on this deck).
+jacobian.pc_type = pc_mhd_block
 
 gmres.verbose_int = 0
 gmres.relative_tolerance = 1.0e-10
@@ -105,7 +115,7 @@ implicit_mhd.ion_pressure_floor = 1.0e-8 * Pi0
 implicit_mhd.electron_pressure_floor = 1.0e-8 * Pi0
 implicit_mhd.ion_temperature_floor = T_floor
 implicit_mhd.electron_temperature_floor = T_floor
-implicit_mhd.fluid_flux = hllc
+implicit_mhd.fluid_flux = hlld
 implicit_mhd.mass_density(x,y,z) = rho0
 implicit_mhd.ion_pressure(x,y,z) = Pi0
 implicit_mhd.electron_pressure(x,y,z) = Pe0

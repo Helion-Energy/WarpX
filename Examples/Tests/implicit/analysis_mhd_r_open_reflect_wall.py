@@ -79,4 +79,16 @@ assert wall_ring_min > 0.5 * internal_0, (
     f"{0.5 * internal_0:.3e}): the zero-flux wall is leaking"
 )
 
+# Newton converged every step: the wall-face override and the (per-term
+# gated) open normal-stress work leave no irreducible residual in the
+# wall band. Columns of newton.txt: step, time, iters, total_iters,
+# norm_abs, norm_rel, ... (the file appends across reruns; take the
+# last run's rows). Tolerances must match the deck.
+newton_history = np.atleast_2d(np.loadtxt("diags/newton.txt"))
+last_run = newton_history[-int(newton_history[-1][0]) :]
+converged = (last_run[:, 4] < 1.0e-11) | (last_run[:, 5] < 1.0e-8)
+n_bad = int(np.count_nonzero(~converged))
+print(f"non-converged Newton solves: {n_bad} of {len(last_run)}")
+assert n_bad == 0, f"{n_bad} Newton solves failed to converge at the zero-flux wall"
+
 print("zero-flux reflecting wall checks passed")
