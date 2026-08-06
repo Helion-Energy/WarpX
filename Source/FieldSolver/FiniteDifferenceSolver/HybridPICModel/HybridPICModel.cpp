@@ -462,6 +462,43 @@ void HybridPICModel::CalculateElectronPressure(const int lev) const
         *rho_fp
     );
 
+    // With mesh refinement, evaluate the pressure closure pointwise on the
+    // ghost cells of refined levels as well: their coarse-fine ghost rho has
+    // just been filled by FillMomentsCoarseFineGhosts, and the grad-Pe
+    // stencil of the final Ohm's-law E solve (and any ghost-reading
+    // diagnostic) must see a consistent Pe there. Ghost cells covered by
+    // same-level valid data or by the domain boundary conditions are
+    // overwritten again below with identical/authoritative values.
+    if (lev > 0)
+    {
+        const auto n0_ref = m_n0_ref;
+        const auto elec_temp = m_elec_temp;
+        const auto gamma = m_gamma;
+        const amrex::IntVect ng = electron_pressure_fp->nGrowVect();
+        const amrex::Box allowed = amrex::convert(
+            warpx.Geom(lev).growPeriodicDomain(ng),
+            electron_pressure_fp->ixType());
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(*electron_pressure_fp, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            const Box vbx = mfi.validbox();
+            Box gbx = mfi.growntilebox(ng);
+            gbx &= allowed;
+            if (!gbx.ok()) { continue; }
+            Array4<Real const> const& rho = rho_fp->const_array(mfi);
+            Array4<Real> const& Pe = electron_pressure_fp->array(mfi);
+            ParallelFor(gbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                if (!vbx.contains(i, j, k)) {
+                    Pe(i, j, k) = ElectronPressure::get_pressure(
+                        n0_ref, elec_temp, gamma, rho(i, j, k)
+                    );
+                }
+            });
+        }
+    }
+
     warpx.ApplyElectronPressureBoundary(lev, PatchType::fine);
 
     // Mirror the closure's implied electron temperature,

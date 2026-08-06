@@ -276,6 +276,15 @@ void WarpX::HybridPICDepositRhoAndJ ()
             );
         }
     }
+
+    // With mesh refinement, fill the fine-level coarse-fine ghost cells of
+    // rho and J from the coarse level: the Ohm's-law E solve reads both in
+    // the ghost region at the fine-patch edge, and the time-interpolated
+    // moment scratch fields inherit these ghosts through their LinComb/Copy
+    // bookkeeping.
+    if (finest_level > 0) {
+        m_hybrid_pic_model->FillMomentsCoarseFineGhosts();
+    }
 }
 
 void WarpX::HybridPICInitializeRhoJandB ()
