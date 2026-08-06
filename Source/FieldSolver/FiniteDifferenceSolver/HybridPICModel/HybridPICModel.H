@@ -673,6 +673,40 @@ public:
      *  qdsmc_conduction_slope_limiter = mc | none. */
     int m_cond_slope_limiter = 0;
 
+    /** Fluxform reconstruction order. 0 = plm (MC-limited linear, the
+     *  original production reconstruction). 1 = ppm (Colella--Woodward
+     *  1984 piecewise parabolic: 4th-order face values from the limited
+     *  cell differences + parabola monotonization; ~3rd-order transport,
+     *  the same accuracy class as the layer form's monocubic/Keys
+     *  interpolant). Motivated by the GF3 curvature-leak attribution
+     *  (2026-08-05): the unsplit-donor experiment left the leak
+     *  unchanged, falsifying the splitting-error hypothesis -- the
+     *  residual is the per-remap truncation error of the 1D PLM
+     *  transport itself, differentially modulated across rows by the
+     *  row-dependent fractional displacement (npts-sensitivity and the
+     *  clean eps=0 floor corroborate). Split sweeps only. Input:
+     *  qdsmc_conduction_reconstruction = plm | ppm. */
+    int m_cond_reconstruction = 0;
+
+    /** Fluxform unsplit donor transport (plan doc C.7d GF3 rung, fork (b):
+     *  CSLAM-style flux form). The dimensionally split sweeps remap the
+     *  INTERMEDIATE field, which loses donor identity between sweeps --
+     *  the residual splitting error measured as the curvature leak
+     *  (liftoff point 1.13e-1 vs layer 2.56e-4). Unsplit instead
+     *  transports each donor dual cell through all sweep legs with its
+     *  OWN material-evaluated displacement (edge displacements read at
+     *  the donor's material centers of the earlier legs -- no pull-back,
+     *  no intermediate reconstruction): the composed per-donor map is the
+     *  bilinear corner image, so cross/corner transport is carried within
+     *  a single branch remap. Fluxes remain face-local first-class
+     *  objects (Thrust D) computed by deterministic recomputation from
+     *  both neighbors (race-free, no atomics), so conservation stays
+     *  telescoping-exact; each leg keeps the forward-donor fold rule
+     *  (degenerate image = point mass, positivity unconditional). The
+     *  split form remains as the cheap arm for gently-curved fields.
+     *  Input: qdsmc_conduction_fluxform_unsplit. */
+    bool m_cond_ff_unsplit = false;
+
     /** Scatter-form deposit kernel. 0 = hat (2^d CIC + the B1
      *  half-gradient correction). 1 = Keys cubic convolution (a = -1/2,
      *  4^d): partition of unity is exact (conservation stays exact) and

@@ -103,6 +103,19 @@ parser.add_argument(
     help="FCT limiter for --compensate: bb (Boris-Book), zalesak "
     "(bounds include the pre-deposit field), none (unlimited control)",
 )
+parser.add_argument(
+    "--recon",
+    choices=["plm", "ppm"],
+    default="plm",
+    help="fluxform sweep reconstruction (ppm = Colella-Woodward parabolic)",
+)
+parser.add_argument(
+    "--ff-unsplit",
+    type=int,
+    choices=[0, 1],
+    default=0,
+    help="fluxform: unsplit per-donor transport (C.7d fork (b), corner images)",
+)
 parser.add_argument("--out", type=str, required=True)
 parser.add_argument("--verbose", type=int, default=0)
 args = parser.parse_args()
@@ -203,6 +216,8 @@ pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = npts
 pywarpx.hybridpicmodel.qdsmc_conduction_flux_limit_factor = args.flux_limit
 pywarpx.hybridpicmodel.qdsmc_conduction_max_hop = args.max_hop
 pywarpx.hybridpicmodel.qdsmc_conduction_form = args.form
+pywarpx.hybridpicmodel.qdsmc_conduction_fluxform_unsplit = args.ff_unsplit
+pywarpx.hybridpicmodel.qdsmc_conduction_reconstruction = args.recon
 pywarpx.hybridpicmodel.qdsmc_conduction_interp = args.interp
 pywarpx.hybridpicmodel.qdsmc_conduction_curved_feet = args.curved_feet
 pywarpx.hybridpicmodel.qdsmc_conduction_deposit_kernel = args.deposit_kernel

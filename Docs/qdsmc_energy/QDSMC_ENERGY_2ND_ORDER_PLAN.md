@@ -766,28 +766,21 @@ fluxform_out/, logs fluxform_gauntlet*.log):**
   at SCATTER's error constant (7.16e-4 at N=32; 1.6x below layer);
   tilted-30deg orders 1.85/1.94 with raw chi_perp_num/chi0 1.7-2.0e-3 =
   the moment-estimator floor — the split remap carries the full tensor.
-- **GF3 OPEN — the one red gate**: wiggle eps=0.2 point 1.69e-2
+- **GF3 — RESOLVED as a resolution property, not a scheme defect (see
+  the 2026-08-05 addendum below)**: wiggle eps=0.2 point 1.69e-2
   (12x below scatter's 0.207, but 36x above layer's 4.7e-4); dt-growth
   mild (1.69e-2 -> 2.65e-2 for 4x steps: sub-linear, mixed
   per-remap/operator character); liftoff point npts=2 1.13e-1 / npts=3
   2.32e-2 (scatter 1.81/0.56, layer 2.56e-4). The pull-back cut the v1
-  leak 3.4x and collapsed adrift 9.7e-3 -> -1.7e-4; the residual is the
-  remaining splitting error of per-branch oblique hops swept
-  axis-by-axis. **Limiter-clipping ruled out by measurement
-  (2026-08-05)**: `qdsmc_conduction_slope_limiter = none` (unlimited
-  central slopes, diagnostic arm) moves the eps=0.2 point only
-  1.690e-2 -> 1.665e-2 and the liftoff npts=3 point 2.317e-2 ->
-  2.308e-2 — the leak is PURE SPLITTING ERROR. Remaining rung: UNSPLIT
-  2D donor images (corner transport): per branch, dual cells map to
-  bilinear quadrilaterals (corner-evaluated displacement). Design fork
-  to settle when building it: (a) overlap-gather deposit — race-free,
-  simplest, but conservation only to polygon-clipping roundoff unless
-  each destination also normalizes by the donor's total clipped area
-  (exactness restored at ~(rhop+2)^2 extra clips per pair); vs (b)
-  CSLAM-style flux-form swept areas per face — keeps telescoping-exact
-  conservation and the Thrust-D face fluxes, at more geometric
-  complexity. Note the split form stays valuable as the cheap arm for
-  gently-curved fields (it already beats scatter 12-16x everywhere).
+  leak 3.4x and collapsed adrift 9.7e-3 -> -1.7e-4. **Limiter-clipping
+  ruled out by measurement (2026-08-05)**:
+  `qdsmc_conduction_slope_limiter = none` (unlimited central slopes,
+  diagnostic arm) moves the eps=0.2 point only 1.690e-2 -> 1.665e-2 and
+  the liftoff npts=3 point 2.317e-2 -> 2.308e-2. The "pure splitting
+  error" attribution recorded here was subsequently FALSIFIED by the
+  unsplit-donor experiment (fork (b) built as designed, leak unchanged
+  to 3 digits) — the addendum below settles the mechanism by
+  measurement.
 - **GF4 PASS**: ZK front relL2 **1.98e-2** — best of the whole campaign
   (layer+fixup 4.2e-2, scatter plateau 1.32e-1) — with front exponent
   0.204 vs reference 0.206, min(Te) pinned at ambient (no undershoot,
@@ -807,6 +800,103 @@ max_hop large to park the chi soft-min cap); global branch-lattice
 collapse (zero sigma, or 2D in-plane b => e1 = yhat exactly) replaces
 the scatter form's per-node loop collapse; sweep order alternates by
 (istep + Strang-half) parity.
+
+#### C.7d addendum — GF3 escalation resolved (2026-08-05, session 2)
+
+**Eric selected fork (b)** (CSLAM-style flux form). Built as
+`qdsmc_conduction_fluxform_unsplit` (default OFF): per GH branch, each
+donor dual cell is carried through ALL sweep legs with its OWN
+displacement, edge-evaluated at the donor's material centers of the
+earlier legs — no pull-back, no intermediate-field reconstruction; the
+composed per-donor map is the bilinear corner image, so cross/corner
+transport happens within a single branch remap. Every leg keeps the
+forward-donor fold rule (degenerate image = point mass); the per-leg
+piece bookkeeping is EXACT for the PLM reconstruction (linear
+integrands, midpoint-exact), so the flux update reproduces the composed
+per-donor deposit to machine while fluxes stay face-local, deterministic
+from both neighbors, race-free, telescoping-exact. Donor windows shrink
+to the measured per-branch max |dsp| (global norm0 — deterministic
+across ranks) instead of the rhop clamp. Aligned decks are bit-identical
+to the split form (zero transverse displacement degenerates the
+composition); the split path itself bit-reproduces its cached numbers
+with the knob off.
+
+**Result: the leak is UNCHANGED to 3 digits on every GF3 instrument.**
+wiggle eps=0.2: 1.699e-2 (split 1.690e-2); dt-growth 2.654e-2 at 4x
+steps (split 2.652e-2); liftoff npts=2: 1.132e-1 (split 1.132e-1),
+npts=3: 2.329e-2 (split 2.317e-2); ZK bit-identical (front is aligned).
+**The splitting-error attribution is FALSIFIED by construction** — a
+genuinely unsplit corner-transport donor scheme reproduces the split
+leak exactly. The unsplit path is retained as the attribution control
+arm (and the only measured unsplit reference for future work); it is
+NOT a production rung.
+
+**PPM reconstruction** (`qdsmc_conduction_reconstruction = ppm`,
+Colella–Woodward 4th-order faces from the limited differences +
+extremum collapse/overshoot pull-back, split sweeps only, PLM-exact
+bookkeeping asserts against combining with unsplit): aligned N=32
+constant drops 6.1x (7.16e-4 -> 1.18e-4, PPM clearly engaged) — yet the
+wiggle point moves only 1.690e-2 -> 1.663e-2 (−1.6%). **Reconstruction
+order is not the binding term either.** Full-gauntlet scorecard
+(ff_unsplit_ppm_gauntlet.log): aligned orders 2.31/2.15/2.01/1.84 with
+the constant 6–7x below PLM at every N (N=128: 6.48e-6 vs 4.77e-5; the
+order easing toward 1.84 at N=128 is the Strang dt floor emerging under
+the much smaller spatial constant); tilted orders 2.04/2.17 at 2x
+better constant; eps=0 floors identical (3.59e-6); **ZK front relL2
+1.3066e-2 — NEW BEST OF THE CAMPAIGN** (PLM 1.98e-2, layer+fixup
+4.2e-2), front_exp 0.210 vs reference 0.206, min(Te) pinned at ambient
+(no undershoot — the CW monotonization holds at the chi cliff), sum
+drift −7.1e-6 = the deck floor. The unsplit control arm reproduces the
+split aligned/floors/ZK rows bit-identically and the tilted rows to
+~3% in constant at equal orders.
+
+**Mechanism settled by a blob-resolution scan** (wiggle point, eps=0.2,
+m=2, N=64, npts=3, sigma_blob/dx = 3.2 / 6.4 / 9.6 via
+`--blob-sigma 0.05/0.10/0.15`; npz cached as
+`fluxform_out/sbscan_*.npz`):
+
+| sigma/dx | fluxform PLM | fluxform PPM | layer-monocubic |
+|----------|--------------|--------------|-----------------|
+| 3.2      | 1.690e-2     | 1.663e-2     | 4.7e-4          |
+| 6.4      | 2.319e-3     | 2.270e-3     | 2.521e-4        |
+| 9.6      | 3.566e-4     | 2.781e-4     | 3.505e-4        |
+
+The conservative-remap leak falls at ~4th order in cross-field
+resolution and CONVERGES TO THE LAYER FLOOR at sigma/dx ~ 10 (3.57e-4
+vs 3.51e-4 — the common SDE/chord/estimator floor; PPM lands BELOW it,
+2.78e-4). Layer is flat across the scan: its immunity on narrow
+features is bought by NON-CONSERVATION — a monotone interpolating
+gather may locally clip what a conservative remap is forced to
+redistribute (its Sigma drift stays small, −2e-6 at sigma/dx = 6.4,
+because the clipping is sign-mixed — but the variance bookkeeping
+differs at 100x). **GF3 verdict: the "curvature leak" is the
+unavoidable cross-field redistribution cost of transporting
+cross-field-UNDER-RESOLVED features with any local conservative remap
+(fractional oblique displacement forces ~s(1−s) dx^2 per remap of
+added variance on a cell-scale filament — the E6 class reopened by
+curvature, as the C.7/G3a scatter campaign first measured). It is not
+splitting (unsplit null), not the limiter (null), not reconstruction
+order (PPM null until near-resolved).** The liftoff dimensionless
+point (sigma/dx = 0.84) sits deep in the under-resolved regime by
+construction; no scheme in the positive-conservative class will pass
+it at layer level.
+
+**Production guidance (pending Eric's read):** fluxform remains the
+production path — convergent (leak dies ~4th order in feature
+resolution, meeting the physical floor by sigma/dx ~ 8–10), exactly
+conservative, best-in-campaign at fronts. Cross-field cell-scale hot
+filaments on curved lines will isotropize at E6 rate in ANY
+conservative arm: mitigate by resolution where filaments matter, and
+for the stiff sub-grid-filament regime (FRC nulls) the honest
+escalation is the C.7 ladder's last rung (implicit parallel elliptic
+solve, Günter stencil), not further remap surgery. **PPM
+recommendation: flip `qdsmc_conduction_reconstruction` default to ppm
+(Eric's call pending)** — the monotonicity gate passed (ZK no
+undershoot, new campaign-best front) and it is at-or-better than PLM
+on every row measured; the code default stays plm until Eric flips
+it. CI matrix after all of the above (defaults untouched): 9/9 PASS,
+joule budgets at the pc baselines to the decimal (euler −6.71 /
+pc −6.74 / leapfrog −17.18%).
 
 ### C.8 Gate G3
 
