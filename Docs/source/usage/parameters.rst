@@ -3833,6 +3833,41 @@ Maxwell solver: kinetic-fluid hybrid
     If :pp:param:`hybrid_pic_model.use_rkf45` is active, this sets the maximum number of substep attempts
     (accepted and rejected combined) per half-step before the simulation aborts.
 
+.. pp:param:: hybrid_pic_model.mr_restrict_setback
+    :type: ``int``
+    :default: ``2``
+    :optional:
+
+    If :pp:param:`algo.maxwell_solver` is set to ``hybrid`` and mesh refinement is used (``amr.max_level > 0``),
+    this sets the number of coarse cells by which the fine-to-coarse B-field restriction region is shrunk
+    from the coarse-fine boundary. The fine-level band next to the refinement-patch edge is sacrificial:
+    its plasma moments are partial by design (particles in the buffer region deposit to the coarse level),
+    so the fine solution there is not fed back to the coarse level.
+
+.. pp:param:: hybrid_pic_model.mr_restrict_cadence
+    :type: ``string``
+    :default: ``substep``
+    :optional:
+
+    If :pp:param:`algo.maxwell_solver` is set to ``hybrid`` and mesh refinement is used, this selects how
+    often the fine B-field solution is restricted onto the coarse levels during the sub-stepped B-field
+    integration: ``substep`` (default) restricts after every accepted substep, so the next substep's coarse
+    E-field solve already sees the fine solution; ``half_step`` restricts only once at the end of each
+    half-step.
+
+.. pp:param:: hybrid_pic_model.mr_check_div_b
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If :pp:param:`algo.maxwell_solver` is set to ``hybrid`` and mesh refinement is used, this enables a
+    runtime :math:`\nabla \cdot \mathbf{B}` audit of the coarse-fine coupling operators: after every
+    fine-level ghost fill and after every restriction, the maximum :math:`|\nabla \cdot \mathbf{B}|` is
+    accumulated per region (fine valid region, coarse-fine ghost ring/band, restricted coarse interior,
+    and the seam ring) and printed at the end of each step. A warning is recorded if regions expected to
+    be divergence-free exceed :math:`10^{-12}` relative to :math:`\max|\mathbf{B}|/\Delta x`. Intended
+    for testing and debugging.
+
 .. pp:param:: hybrid_pic_model.holmstrom_vacuum_region
     :type: ``bool``
     :default: ``false``

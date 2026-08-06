@@ -57,6 +57,23 @@ void HybridPICModel::ReadParameters ()
 
     utils::parser::queryWithParser(pp_hybrid, "holmstrom_vacuum_region", m_holmstrom_vacuum_region);
 
+    // Mesh-refinement controls: restriction setback band width, restriction
+    // cadence, and the optional runtime div(B) audit.
+    utils::parser::queryWithParser(pp_hybrid, "mr_restrict_setback", m_mr_restrict_setback);
+    if (m_mr_restrict_setback < 0) {
+        Abort("hybrid_pic_model.mr_restrict_setback must be >= 0");
+    }
+    std::string mr_restrict_cadence = "substep";
+    pp_hybrid.query("mr_restrict_cadence", mr_restrict_cadence);
+    if (mr_restrict_cadence == "substep") {
+        m_mr_restrict_every_substep = true;
+    } else if (mr_restrict_cadence == "half_step") {
+        m_mr_restrict_every_substep = false;
+    } else {
+        Abort("hybrid_pic_model.mr_restrict_cadence must be 'substep' or 'half_step'");
+    }
+    pp_hybrid.query("mr_check_div_b", m_mr_check_div_b);
+
     // The hybrid model requires an electron temperature, reference density
     // and exponent to be given. These values will be used to calculate the
     // electron pressure according to p = n0 * Te * (n/n0)^gamma
@@ -397,11 +414,6 @@ void HybridPICModel::HybridPICSolveE (
         Efield, Jfield, Bfield, rhofield, eb_update_E, lev,
         PatchType::fine, solve_for_Faraday
     );
-    if (lev > 0)
-    {
-        amrex::Abort(Utils::TextMsg::Err(
-        "HybridPICSolveE: Only one level implemented for hybrid-PIC solver."));
-    }
 }
 
 void HybridPICModel::HybridPICSolveE (
@@ -449,6 +461,7 @@ void HybridPICModel::CalculateElectronPressure(const int lev) const
         *electron_pressure_fp,
         *rho_fp
     );
+
     warpx.ApplyElectronPressureBoundary(lev, PatchType::fine);
 
     // Mirror the closure's implied electron temperature,
@@ -526,39 +539,26 @@ void HybridPICModel::BfieldEvolve (
     IntVect ng, std::optional<bool> nodal_sync )
 {
     auto& warpx = WarpX::GetInstance();
-    for (int lev = 0; lev <= warpx.finestLevel(); ++lev)
-    {
-        BfieldEvolve(
-            Bfield, Efield, Jfield, rhofield, eb_update_E,
-            step, dt_half, lev, subcycling_half, ng, nodal_sync
-        );
-    }
-}
+    const int finest_level = warpx.finestLevel();
 
-void HybridPICModel::BfieldEvolve (
-    ablastr::fields::MultiLevelVectorField const& Bfield,
-    ablastr::fields::MultiLevelVectorField const& Efield,
-    ablastr::fields::MultiLevelVectorField const& Jfield,
-    ablastr::fields::MultiLevelScalarField const& rhofield,
-    amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E,
-    int step, amrex::Real dt_half, int lev, SubcyclingHalf subcycling_half,
-    IntVect ng, std::optional<bool> nodal_sync )
-{
     bool use_rkf45 = DoRKF45(step);
-    // Make copies of the current B-field multifabs (at t = n) since the
-    // starting B-field is needed for the integration logic.
+    // Make copies of the current B-field multifabs (at t = n) on every level,
+    // since the starting B-field is needed for the integration logic.
     // We also store the initial B-field from the start of this integration step
     // (i.e., a static copy) in case we need to fully reset the Bfield (needed
     // for RK4).
-    std::array< MultiFab, 3 > B_old;
-    for (int ii = 0; ii < 3; ii++)
+    amrex::Vector<std::array< MultiFab, 3 >> B_old(finest_level + 1);
+    for (int lev = 0; lev <= finest_level; ++lev)
     {
-        B_old[ii] = MultiFab(
-            Bfield[lev][ii]->boxArray(), Bfield[lev][ii]->DistributionMap(), 2, ng
-        );
-        MultiFab::Copy(B_old[ii], *Bfield[lev][ii], 0, 0, 1, ng);
-        // the values at index 1 will be kept static through the integration steps
-        MultiFab::Copy(B_old[ii], *Bfield[lev][ii], 0, 1, 1, ng);
+        for (int ii = 0; ii < 3; ii++)
+        {
+            B_old[lev][ii] = MultiFab(
+                Bfield[lev][ii]->boxArray(), Bfield[lev][ii]->DistributionMap(), 2, ng
+            );
+            MultiFab::Copy(B_old[lev][ii], *Bfield[lev][ii], 0, 0, 1, ng);
+            // the values at index 1 will be kept static through the integration steps
+            MultiFab::Copy(B_old[lev][ii], *Bfield[lev][ii], 0, 1, 1, ng);
+        }
     }
 
     amrex::Real dt_sub = dt_half / (m_substeps / 2._rt);
@@ -567,9 +567,11 @@ void HybridPICModel::BfieldEvolve (
     int n_accepted = 0;
 
     // Step the magnetic field forward (from t -> t + dt_half) using the user
-    // specified integration scheme. The loop is set up such that the timestep
-    // for a given step (dt_sub) can be modified within the loop, i.e.,
-    // adaptive timestepping.
+    // specified integration scheme. All levels advance in lockstep within
+    // each substep (substep-outer, RK-stage-inner, level-innermost). The loop
+    // is set up such that the timestep for a given step (dt_sub) can be
+    // modified within the loop, i.e., adaptive timestepping (single level
+    // only).
     while (t < dt_half)
     {
         // Adjust size of the last substep, so as to land exactly at t+dt_half.
@@ -578,9 +580,11 @@ void HybridPICModel::BfieldEvolve (
         amrex::Real step_change_factor = 1.0_rt;
 
         if (use_rkf45) {
+            // Adaptive RKF45 substepping is single-level only, enforced at
+            // input validation (and at the RK4 fallback below).
             const amrex::Real error = BfieldEvolveRKF45(
-                Bfield, Efield, Jfield, rhofield, eb_update_E, B_old,
-                dt_sub, lev, subcycling_half, ng, nodal_sync
+                Bfield, Efield, Jfield, rhofield, eb_update_E, B_old[0],
+                dt_sub, 0, subcycling_half, ng, nodal_sync
             );
 
             step_change_factor = m_substep_safety * std::pow(error + 1.e-10_rt, -0.2_rt);
@@ -589,16 +593,24 @@ void HybridPICModel::BfieldEvolve (
         } else {
             BfieldEvolveRK4(
                 Bfield, Efield, Jfield, rhofield, eb_update_E, B_old,
-                dt_sub, lev, subcycling_half, ng, nodal_sync
+                dt_sub, subcycling_half, ng, nodal_sync
             );
 
             // Check that the B-field does not have nan or inf values
-            for (int idim = 0; idim < 3; ++idim) {
-                step_succeeded = step_succeeded && Bfield[lev][idim]->is_finite(/*local=*/true);
+            for (int lev = 0; lev <= finest_level; ++lev) {
+                for (int idim = 0; idim < 3; ++idim) {
+                    step_succeeded = step_succeeded && Bfield[lev][idim]->is_finite(/*local=*/true);
+                }
             }
             amrex::ParallelDescriptor::ReduceBoolAnd(step_succeeded);
 
             if (!step_succeeded) {
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    finest_level == 0,
+                    "NaN or Inf value encountered in the B-field during RK4 "
+                    "substepping: the RKF45 fallback is not available with "
+                    "mesh refinement.");
+
                 ablastr::warn_manager::WMRecordWarning(
                     "HybridPIC",
                     "NaN or Inf value encountered in the B-field during RK4 "
@@ -610,7 +622,7 @@ void HybridPICModel::BfieldEvolve (
                 n_accepted = 0;
                 // reset B_old to original one
                 for (int ii = 0; ii < 3; ii++) {
-                    MultiFab::Copy(B_old[ii], B_old[ii], 1, 0, 1, ng);
+                    MultiFab::Copy(B_old[0][ii], B_old[0][ii], 1, 0, 1, ng);
                 }
                 use_rkf45 = true;
             }
@@ -620,20 +632,37 @@ void HybridPICModel::BfieldEvolve (
             // update time tracker and accepted steps number
             t += dt_sub;
             ++n_accepted;
+            // Restrict the fine solution onto the coarse levels (excluding
+            // the sacrificial setback band) so that the next substep's coarse
+            // stages already see it. B_old is updated afterwards so that it
+            // matches the restricted state.
+            if (finest_level > 0 && m_mr_restrict_every_substep) {
+                RestrictBfieldFineToCoarse(ng, nodal_sync);
+            }
             // update B_old to the current Bfield
-            for (int ii = 0; ii < 3; ii++) {
-                MultiFab::Copy(B_old[ii], *Bfield[lev][ii], 0, 0, 1, ng);
+            for (int lev = 0; lev <= finest_level; ++lev) {
+                for (int ii = 0; ii < 3; ii++) {
+                    MultiFab::Copy(B_old[lev][ii], *Bfield[lev][ii], 0, 0, 1, ng);
+                }
             }
             dt_sub *= std::min(m_substep_max_growth, step_change_factor);
         } else {
             // reset Bfield to B_old before trying the integration again
-            for (int ii = 0; ii < 3; ii++) {
-                MultiFab::Copy(*Bfield[lev][ii], B_old[ii], 0, 0, 1, ng);
+            for (int lev = 0; lev <= finest_level; ++lev) {
+                for (int ii = 0; ii < 3; ii++) {
+                    MultiFab::Copy(*Bfield[lev][ii], B_old[lev][ii], 0, 0, 1, ng);
+                }
             }
             dt_sub *= std::max(0.1_rt, step_change_factor);
         }
 
         if (++n_attempts > m_max_substep_attempts) { break; }
+    }
+
+    // With the "half_step" restriction cadence the coarse levels only receive
+    // the fine solution here, once the half-step is complete.
+    if (finest_level > 0 && !m_mr_restrict_every_substep) {
+        RestrictBfieldFineToCoarse(ng, nodal_sync);
     }
 
     // Adjust the number of substeps. This affects both the next RKF45 or RK4 step.
@@ -666,42 +695,51 @@ void HybridPICModel::BfieldEvolveRK4 (
     ablastr::fields::MultiLevelVectorField const& Jfield,
     ablastr::fields::MultiLevelScalarField const& rhofield,
     amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E,
-    std::array<amrex::MultiFab, 3>& B_old,
-    amrex::Real dt, int lev, SubcyclingHalf subcycling_half,
+    amrex::Vector<std::array<amrex::MultiFab, 3>>& B_old,
+    amrex::Real dt, SubcyclingHalf subcycling_half,
     IntVect ng, std::optional<bool> nodal_sync )
 {
-    // Create multifabs for each direction to store the Runge-Kutta intermediate terms.
-    // Each multifab has 2 components for the different terms that need to be stored.
-    std::array< MultiFab, 3 > K;
-    for (int ii = 0; ii < 3; ii++)
+    const int finest_level = WarpX::GetInstance().finestLevel();
+
+    // Create multifabs on each level and direction to store the Runge-Kutta
+    // intermediate terms. Each multifab has 2 components for the different
+    // terms that need to be stored.
+    amrex::Vector<std::array< MultiFab, 3 >> K(finest_level + 1);
+    for (int lev = 0; lev <= finest_level; ++lev)
     {
-        K[ii] = MultiFab(
-            Bfield[lev][ii]->boxArray(), Bfield[lev][ii]->DistributionMap(), 2,
-            Bfield[lev][ii]->nGrowVect()
-        );
+        for (int ii = 0; ii < 3; ii++)
+        {
+            K[lev][ii] = MultiFab(
+                Bfield[lev][ii]->boxArray(), Bfield[lev][ii]->DistributionMap(), 2,
+                Bfield[lev][ii]->nGrowVect()
+            );
+        }
     }
 
     // The Runge-Kutta scheme begins here.
     // Step 1:
-    FieldPush(
+    FieldPushStage(
         Bfield, Efield, Jfield, rhofield, eb_update_E,
-        0.5_rt*dt, lev, subcycling_half, ng, nodal_sync
+        0.5_rt*dt, subcycling_half, ng, nodal_sync
     );
 
     // The Bfield is now given by:
     // B_new = B_old + 0.5 * dt * [-curl x E(B_old)] = B_old + 0.5 * dt * K0.
-    for (int ii = 0; ii < 3; ii++)
+    for (int lev = 0; lev <= finest_level; ++lev)
     {
-        // Extract 0.5 * dt * K0 for each direction into index 0 of K.
-        MultiFab::LinComb(
-            K[ii], 1._rt, *Bfield[lev][ii], 0, -1._rt, B_old[ii], 0, 0, 1, ng
-        );
+        for (int ii = 0; ii < 3; ii++)
+        {
+            // Extract 0.5 * dt * K0 for each direction into index 0 of K.
+            MultiFab::LinComb(
+                K[lev][ii], 1._rt, *Bfield[lev][ii], 0, -1._rt, B_old[lev][ii], 0, 0, 1, ng
+            );
+        }
     }
 
     // Step 2:
-    FieldPush(
+    FieldPushStage(
         Bfield, Efield, Jfield, rhofield, eb_update_E,
-        0.5_rt*dt, lev, subcycling_half, ng, nodal_sync
+        0.5_rt*dt, subcycling_half, ng, nodal_sync
     );
 
     // The Bfield is now given by:
@@ -712,68 +750,74 @@ void HybridPICModel::BfieldEvolveRK4 (
     //   B_new = B_old + 0.5 * dt * K1.
     // Extract 0.5 * dt * K1 and write into index 1 of K.
 
+    for (int lev = 0; lev <= finest_level; ++lev)
+    {
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
-    for ( MFIter mfi(*Bfield[lev][0], TilingIfNotGPU()); mfi.isValid(); ++mfi ) {
+        for ( MFIter mfi(*Bfield[lev][0], TilingIfNotGPU()); mfi.isValid(); ++mfi ) {
 
-        // Extract field data for this grid/tile
-        Array4<Real> const &Bx = Bfield[lev][0]->array(mfi);
-        Array4<Real> const &By = Bfield[lev][1]->array(mfi);
-        Array4<Real> const &Bz = Bfield[lev][2]->array(mfi);
-        Array4<Real> const &Kx = K[0].array(mfi);
-        Array4<Real> const &Ky = K[1].array(mfi);
-        Array4<Real> const &Kz = K[2].array(mfi);
-        Array4<Real const> const &Bx_old = B_old[0].const_array(mfi);
-        Array4<Real const> const &By_old = B_old[1].const_array(mfi);
-        Array4<Real const> const &Bz_old = B_old[2].const_array(mfi);
+            // Extract field data for this grid/tile
+            Array4<Real> const &Bx = Bfield[lev][0]->array(mfi);
+            Array4<Real> const &By = Bfield[lev][1]->array(mfi);
+            Array4<Real> const &Bz = Bfield[lev][2]->array(mfi);
+            Array4<Real> const &Kx = K[lev][0].array(mfi);
+            Array4<Real> const &Ky = K[lev][1].array(mfi);
+            Array4<Real> const &Kz = K[lev][2].array(mfi);
+            Array4<Real const> const &Bx_old = B_old[lev][0].const_array(mfi);
+            Array4<Real const> const &By_old = B_old[lev][1].const_array(mfi);
+            Array4<Real const> const &Bz_old = B_old[lev][2].const_array(mfi);
 
-        // Extract tileboxes for which to loop
-        Box const& tjx  = mfi.tilebox(Bfield[lev][0]->ixType().toIntVect(), ng);
-        Box const& tjy  = mfi.tilebox(Bfield[lev][1]->ixType().toIntVect(), ng);
-        Box const& tjz  = mfi.tilebox(Bfield[lev][2]->ixType().toIntVect(), ng);
+            // Extract tileboxes for which to loop
+            Box const& tjx  = mfi.tilebox(Bfield[lev][0]->ixType().toIntVect(), ng);
+            Box const& tjy  = mfi.tilebox(Bfield[lev][1]->ixType().toIntVect(), ng);
+            Box const& tjz  = mfi.tilebox(Bfield[lev][2]->ixType().toIntVect(), ng);
 
-        amrex::ParallelFor(tjx, tjy, tjz,
-            // x calculation
-            [=] AMREX_GPU_DEVICE (int i, int j, int k){
-                Bx(i, j, k) -= Kx(i, j, k, 0);
-                Kx(i, j, k, 1) = Bx(i, j, k) - Bx_old(i, j, k);
-            },
+            amrex::ParallelFor(tjx, tjy, tjz,
+                // x calculation
+                [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                    Bx(i, j, k) -= Kx(i, j, k, 0);
+                    Kx(i, j, k, 1) = Bx(i, j, k) - Bx_old(i, j, k);
+                },
 
-            // y calculation
-            [=] AMREX_GPU_DEVICE (int i, int j, int k){
-                By(i, j, k) -= Ky(i, j, k, 0);
-                Ky(i, j, k, 1) = By(i, j, k) - By_old(i, j, k);
-            },
+                // y calculation
+                [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                    By(i, j, k) -= Ky(i, j, k, 0);
+                    Ky(i, j, k, 1) = By(i, j, k) - By_old(i, j, k);
+                },
 
-            // z calculation
-            [=] AMREX_GPU_DEVICE (int i, int j, int k){
-                Bz(i, j, k) -= Kz(i, j, k, 0);
-                Kz(i, j, k, 1) = Bz(i, j, k) - Bz_old(i, j, k);
-            }
-        );
+                // z calculation
+                [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                    Bz(i, j, k) -= Kz(i, j, k, 0);
+                    Kz(i, j, k, 1) = Bz(i, j, k) - Bz_old(i, j, k);
+                }
+            );
+        }
     }
 
     // Step 3:
-    FieldPush(
+    FieldPushStage(
         Bfield, Efield, Jfield, rhofield, eb_update_E,
-        dt, lev, subcycling_half, ng, nodal_sync
+        dt, subcycling_half, ng, nodal_sync
     );
 
     // The Bfield is now given by:
     // B_new = B_old + 0.5 * dt * K1 + dt * [-curl  x E(B_old + 0.5 * dt * K1)]
     //       = B_old + 0.5 * dt * K1 + dt * K2
-    for (int ii = 0; ii < 3; ii++)
+    for (int lev = 0; lev <= finest_level; ++lev)
     {
-        // Subtract 0.5 * dt * K1 from the Bfield for each direction to get
-        // B_new = B_old + dt * K2.
-        MultiFab::Subtract(*Bfield[lev][ii], K[ii], 1, 0, 1, ng);
+        for (int ii = 0; ii < 3; ii++)
+        {
+            // Subtract 0.5 * dt * K1 from the Bfield for each direction to get
+            // B_new = B_old + dt * K2.
+            MultiFab::Subtract(*Bfield[lev][ii], K[lev][ii], 1, 0, 1, ng);
+        }
     }
 
     // Step 4:
-    FieldPush(
+    FieldPushStage(
         Bfield, Efield, Jfield, rhofield, eb_update_E,
-        0.5_rt*dt, lev, subcycling_half, ng, nodal_sync
+        0.5_rt*dt, subcycling_half, ng, nodal_sync
     );
 
     // The Bfield is now given by:
@@ -788,46 +832,49 @@ void HybridPICModel::BfieldEvolveRK4 (
     // then update B with the Runge-Kutta sum:
     //   B = B_old + 1/3 * K
 
+    for (int lev = 0; lev <= finest_level; ++lev)
+    {
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
-    for ( MFIter mfi(*Bfield[lev][0], TilingIfNotGPU()); mfi.isValid(); ++mfi ) {
+        for ( MFIter mfi(*Bfield[lev][0], TilingIfNotGPU()); mfi.isValid(); ++mfi ) {
 
-        // Extract field data for this grid/tile
-        Array4<Real> const &Bx = Bfield[lev][0]->array(mfi);
-        Array4<Real> const &By = Bfield[lev][1]->array(mfi);
-        Array4<Real> const &Bz = Bfield[lev][2]->array(mfi);
-        Array4<Real> const &Kx = K[0].array(mfi);
-        Array4<Real> const &Ky = K[1].array(mfi);
-        Array4<Real> const &Kz = K[2].array(mfi);
-        Array4<Real const> const &Bx_old = B_old[0].const_array(mfi);
-        Array4<Real const> const &By_old = B_old[1].const_array(mfi);
-        Array4<Real const> const &Bz_old = B_old[2].const_array(mfi);
+            // Extract field data for this grid/tile
+            Array4<Real> const &Bx = Bfield[lev][0]->array(mfi);
+            Array4<Real> const &By = Bfield[lev][1]->array(mfi);
+            Array4<Real> const &Bz = Bfield[lev][2]->array(mfi);
+            Array4<Real> const &Kx = K[lev][0].array(mfi);
+            Array4<Real> const &Ky = K[lev][1].array(mfi);
+            Array4<Real> const &Kz = K[lev][2].array(mfi);
+            Array4<Real const> const &Bx_old = B_old[lev][0].const_array(mfi);
+            Array4<Real const> const &By_old = B_old[lev][1].const_array(mfi);
+            Array4<Real const> const &Bz_old = B_old[lev][2].const_array(mfi);
 
-        // Extract tileboxes for which to loop
-        Box const& tjx  = mfi.tilebox(Bfield[lev][0]->ixType().toIntVect(), ng);
-        Box const& tjy  = mfi.tilebox(Bfield[lev][1]->ixType().toIntVect(), ng);
-        Box const& tjz  = mfi.tilebox(Bfield[lev][2]->ixType().toIntVect(), ng);
+            // Extract tileboxes for which to loop
+            Box const& tjx  = mfi.tilebox(Bfield[lev][0]->ixType().toIntVect(), ng);
+            Box const& tjy  = mfi.tilebox(Bfield[lev][1]->ixType().toIntVect(), ng);
+            Box const& tjz  = mfi.tilebox(Bfield[lev][2]->ixType().toIntVect(), ng);
 
-        amrex::ParallelFor(tjx, tjy, tjz,
-            // Bx calculation
-            [=] AMREX_GPU_DEVICE (int i, int j, int k){
-                Kx(i, j, k, 0) += Bx(i, j, k) - Bx_old(i, j, k) + 2.0_rt * Kx(i, j, k, 1);
-                Bx(i, j, k) = Bx_old(i, j, k) + Kx(i, j, k, 0) / 3.0_rt;
-            },
+            amrex::ParallelFor(tjx, tjy, tjz,
+                // Bx calculation
+                [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                    Kx(i, j, k, 0) += Bx(i, j, k) - Bx_old(i, j, k) + 2.0_rt * Kx(i, j, k, 1);
+                    Bx(i, j, k) = Bx_old(i, j, k) + Kx(i, j, k, 0) / 3.0_rt;
+                },
 
-            // By calculation
-            [=] AMREX_GPU_DEVICE (int i, int j, int k){
-                Ky(i, j, k, 0) += By(i, j, k) - By_old(i, j, k) + 2.0_rt * Ky(i, j, k, 1);
-                By(i, j, k) = By_old(i, j, k) + Ky(i, j, k, 0) / 3.0_rt;
-            },
+                // By calculation
+                [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                    Ky(i, j, k, 0) += By(i, j, k) - By_old(i, j, k) + 2.0_rt * Ky(i, j, k, 1);
+                    By(i, j, k) = By_old(i, j, k) + Ky(i, j, k, 0) / 3.0_rt;
+                },
 
-            // Bz calculation
-            [=] AMREX_GPU_DEVICE (int i, int j, int k){
-                Kz(i, j, k, 0) += Bz(i, j, k) - Bz_old(i, j, k) + 2.0_rt * Kz(i, j, k, 1);
-                Bz(i, j, k) = Bz_old(i, j, k) + Kz(i, j, k, 0) / 3.0_rt;
-            }
-        );
+                // Bz calculation
+                [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                    Kz(i, j, k, 0) += Bz(i, j, k) - Bz_old(i, j, k) + 2.0_rt * Kz(i, j, k, 1);
+                    Bz(i, j, k) = Bz_old(i, j, k) + Kz(i, j, k, 0) / 3.0_rt;
+                }
+            );
+        }
     }
 }
 
@@ -874,8 +921,8 @@ amrex::Real HybridPICModel::BfieldEvolveRKF45 (
     }
 
     // ---- Stage 1: B = B_old, FieldPush, K[comp0] = h*k1 fused with Stage 2 B-update ----
-    FieldPush(Bfield, Efield, Jfield, rhofield, eb_update_E,
-                dt, lev, subcycling_half, ng, nodal_sync);
+    FieldPushStage(Bfield, Efield, Jfield, rhofield, eb_update_E,
+                dt, subcycling_half, ng, nodal_sync);
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -912,8 +959,8 @@ amrex::Real HybridPICModel::BfieldEvolveRKF45 (
     }
 
     // ---- Stage 2: FieldPush, K[comp1] = h*k2 fused with Stage 3 B-update ----
-    FieldPush(Bfield, Efield, Jfield, rhofield, eb_update_E,
-                dt, lev, subcycling_half, ng, nodal_sync);
+    FieldPushStage(Bfield, Efield, Jfield, rhofield, eb_update_E,
+                dt, subcycling_half, ng, nodal_sync);
     // Stage 2 K[1]-readback fused with Stage 3 B-update.
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -954,8 +1001,8 @@ amrex::Real HybridPICModel::BfieldEvolveRKF45 (
     }
 
     // ---- Stage 3: FieldPush, then K[comp2] = h*k3 fused with Stage 4 B-update ----
-    FieldPush(Bfield, Efield, Jfield, rhofield, eb_update_E,
-                dt, lev, subcycling_half, ng, nodal_sync);
+    FieldPushStage(Bfield, Efield, Jfield, rhofield, eb_update_E,
+                dt, subcycling_half, ng, nodal_sync);
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -998,8 +1045,8 @@ amrex::Real HybridPICModel::BfieldEvolveRKF45 (
     }
 
     // ---- Stage 4: FieldPush, then K[comp3] = h*k4 fused with Stage 5 B-update ----
-    FieldPush(Bfield, Efield, Jfield, rhofield, eb_update_E,
-                dt, lev, subcycling_half, ng, nodal_sync);
+    FieldPushStage(Bfield, Efield, Jfield, rhofield, eb_update_E,
+                dt, subcycling_half, ng, nodal_sync);
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -1048,8 +1095,8 @@ amrex::Real HybridPICModel::BfieldEvolveRKF45 (
     }
 
     // ---- Stage 5: FieldPush, then K[comp4] = h*k5 fused with Stage 6 B-update ----
-    FieldPush(Bfield, Efield, Jfield, rhofield, eb_update_E,
-                dt, lev, subcycling_half, ng, nodal_sync);
+    FieldPushStage(Bfield, Efield, Jfield, rhofield, eb_update_E,
+                dt, subcycling_half, ng, nodal_sync);
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -1104,8 +1151,8 @@ amrex::Real HybridPICModel::BfieldEvolveRKF45 (
     }
 
     // ---- Stage 6: FieldPush, then K[comp1] = h*k6 (overwrites h*k2) fused with B4 + error ----
-    FieldPush(Bfield, Efield, Jfield, rhofield, eb_update_E,
-                dt, lev, subcycling_half, ng, nodal_sync);
+    FieldPushStage(Bfield, Efield, Jfield, rhofield, eb_update_E,
+                dt, subcycling_half, ng, nodal_sync);
     // K[comp1] is overwritten here: reads h*k2 (old value) then writes h*k6 in each cell.
     // k6, B4 assembly (b2=0, so k2 is not needed for B4), and error assembly are fused into
     // one ParallelFor per direction. B4 is updated over ghost+valid cells; error is written
@@ -1191,36 +1238,53 @@ amrex::Real HybridPICModel::BfieldEvolveRKF45 (
 }
 
 
-void HybridPICModel::FieldPush (
+void HybridPICModel::FieldPushStage (
     ablastr::fields::MultiLevelVectorField const& Bfield,
     ablastr::fields::MultiLevelVectorField const& Efield,
     ablastr::fields::MultiLevelVectorField const& Jfield,
     ablastr::fields::MultiLevelScalarField const& rhofield,
     amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E,
-    amrex::Real dt, int lev, SubcyclingHalf subcycling_half,
+    amrex::Real dt, SubcyclingHalf subcycling_half,
     IntVect ng, std::optional<bool> nodal_sync )
 {
     auto& warpx = WarpX::GetInstance();
+    const int finest_level = warpx.finestLevel();
 
-    amrex::Real const t_old = warpx.gett_old(lev);
-
-    // Calculate J = curl x B / mu0 - J_ext
-    CalculatePlasmaCurrent(Bfield[lev], eb_update_E[lev], lev);
-    // Calculate the E-field from Ohm's law
-    HybridPICSolveE(
-        Efield[lev], Jfield[lev], Bfield[lev], *rhofield[lev],
-        eb_update_E[lev], lev, true
-    );
-    // Allow execution of Python callback after E-field push
+    // E phase, coarse level first. B is not modified during this loop, so
+    // every fine level's coarse-fine ghost fill reads the coarse solution at
+    // the current stage state.
+    for (int lev = 0; lev <= finest_level; ++lev)
+    {
+        if (lev > 0) {
+            FillBfieldCoarseFineGhosts(lev, ng, nodal_sync);
+            if (m_mr_check_div_b) { CheckDivBAfterGhostFill(lev, ng); }
+        }
+        // Calculate J = curl x B / mu0 - J_ext
+        CalculatePlasmaCurrent(Bfield[lev], eb_update_E[lev], lev);
+        // Calculate the E-field from Ohm's law
+        HybridPICSolveE(
+            Efield[lev], Jfield[lev], Bfield[lev], *rhofield[lev],
+            eb_update_E[lev], lev, true
+        );
+    }
+    // Allow execution of Python callback after E-field push (once per stage)
     ExecutePythonCallback("afterEpush");
     // Call FillBoundary if a collocated grid is used
     if (Bz_IndexType[0] == Ez_IndexType[0]) {
-        warpx.FillBoundaryE(lev, ng, nodal_sync);
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            warpx.FillBoundaryE(lev, ng, nodal_sync);
+        }
     }
 
-    // Push forward the B-field using Faraday's law
-    warpx.EvolveB(lev, dt, subcycling_half, t_old);
-    // Allow execution of Python callback after B-field push
+    // B phase: push forward the B-field using Faraday's law on every level.
+    for (int lev = 0; lev <= finest_level; ++lev)
+    {
+        warpx.EvolveB(lev, dt, subcycling_half, warpx.gett_old(lev));
+    }
+    // Allow execution of Python callback after B-field push (once per stage)
     ExecutePythonCallback("afterBpush");
-    warpx.FillBoundaryB(lev, ng, nodal_sync);
+    for (int lev = 0; lev <= finest_level; ++lev)
+    {
+        warpx.FillBoundaryB(lev, ng, nodal_sync);
+    }
 }
