@@ -385,6 +385,20 @@ namespace
                     warpx_interp(j, k, l, fz_aux, fz_fp, Fz_fp_stag);
                 });
             }
+            // Hybrid-PIC with gather buffers: fill the (nodal) coarse-aux
+            // copy with a plain import of the coarse level's aux field (no
+            // coarse-patch subtraction: the hybrid solver has no cp field).
+            if (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC &&
+                fields.has_vector(field_cax_type, lev))
+            {
+                for (int idim = 0; idim < 3; ++idim) {
+                    amrex::MultiFab* cax = fields.get(field_cax_type, Direction{idim}, lev);
+                    ablastr::utils::communication::ParallelCopy(
+                        *cax, *field_aux[lev - 1][idim], 0, 0, cax->nComp(),
+                        ng_src, cax->nGrowVect(),
+                        WarpX::do_single_precision_comms, cperiod);
+                }
+            }
         }
     }
 
@@ -495,6 +509,22 @@ namespace
                 MultiFab::Copy(
                     *field_aux[lev][idim], *field_fp[lev][idim],
                     0, 0, field_aux[lev][idim]->nComp(), field_aux[lev][idim]->nGrowVect());
+            }
+            // Hybrid-PIC with gather buffers: particles in the buffer region
+            // of a refined level gather from the coarse-aux copy (cax), which
+            // is a plain import of the coarse level's aux field here -- the
+            // hybrid solver has no coarse patch, so there is no cp
+            // subtraction as in the electromagnetic branch above.
+            if (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC &&
+                fields.has_vector(field_cax_type, lev))
+            {
+                for (int idim = 0; idim < 3; ++idim) {
+                    amrex::MultiFab* cax = fields.get(field_cax_type, Direction{idim}, lev);
+                    ablastr::utils::communication::ParallelCopy(
+                        *cax, *field_aux[lev - 1][idim], 0, 0, cax->nComp(),
+                        ng_src, cax->nGrowVect(),
+                        WarpX::do_single_precision_comms, crse_period);
+                }
             }
         }
     }
