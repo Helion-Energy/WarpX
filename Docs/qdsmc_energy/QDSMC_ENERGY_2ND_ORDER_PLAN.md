@@ -1136,8 +1136,13 @@ bath radii — fit T(r1+2dx) = 15.07 / T(r2-2dx) = 4.83 eV for pins
 azimuthal ripple included), budget closure 2.3e-11, fully steady (2x
 duration bit-reproduces). The ring intrusion is the O(dx)-convergent
 geometric price (nominal radii read 17.65/3.71 by extrapolation past
-the baths). No-EB decks bit-identical (aligned anchor re-verified after
-every rework); slab G4 re-passes; CI matrix 9/9 at baseline budgets.
+the baths). **Convergence confirmed at N=128**: T(r_eff) 14.94/4.96
+(offsets halved), relL2 8.8e-3 (halved), nominal-radius extrapolation
+offsets halve too — clean O(dx) everywhere. (The ring-1 arms do NOT
+converge — N=128 face-ring 9.88/3.17, diagonal 12.52/3.87 — the
+density-ramp drain again; ring 2 is the production default.) No-EB
+decks bit-identical (aligned anchor re-verified after every rework);
+slab G4 re-passes; CI matrix 9/9 at baseline budgets.
 
 *Open after this leg:* sub-cell per-line wall positions from the
 level-set crossing (needs cut-cell partial volumes — pairs with the
@@ -1146,6 +1151,39 @@ reflection (port `dsmc-eb-reflection`); scatter/layer EB;
 `qdsmc_conduction_eb_ring` sensitivity on resolved sheaths (a real
 density ramp WANTS to be outside the bath — revisit when n is not a
 deposition artifact).
+
+### Upstream PR #7128 MERGED as a branch prerequisite (2026-08-06)
+
+BLAST-WarpX **#7128 "Fix hybrid electron energy equation vacuum Te
+sink"** (open upstream, Prabhat) merged into the branch by Eric's call
+(merge, not cherry-pick, so review revisions re-merge cleanly). It is
+the ADVECTION-side sibling of our conduction-side vacuum-deletion
+fixes: `QDSMCInitializeKe`/`QDSMCUpdateTe` had left K_e = 0 in the
+floored halo and never wrote it back — a perfect heat sink (their FRC
+case drained 400 -> 7 eV in 3 us). Their fix makes the floor
+insulating (floored-density K<->T conversion, every deposited cell
+updated), seeds T_e on the floored adiabat, and gives the QDSMC-path
+Pe the closure's boundary treatment.
+
+*Merge adaptations (redo these if the PR changes and is re-merged):*
+1. **SeedTeAdiabat gated by a once-flag** (`m_qdsmc_te_seeded`): the PR
+   calls it unconditionally in `HybridPICInitializeRhoJandB`, which
+   runs at step == step_begin of EVERY Evolve() entry — on segmented
+   PICMI sim.step() the unconditional re-seed would wipe evolved T_e
+   (the same re-entry class as the closure Pe reset fixed earlier on
+   this branch). Pe is still re-emitted from the CURRENT T_e on every
+   entry.
+2. **Pe boundary treatment propagated to all three advance paths**
+   (euler / leapfrog register fill / pc) — the PR's single advance
+   site maps to three on this branch.
+3. The euler arm is therefore no longer bit-identical to #6982; it is
+   now bit-identical to #6982+#7128 (upstream is changing #6982
+   behavior itself). Post-merge: aligned anchor bit-identical, slab
+   and annulus G4 gates re-pass (annulus numbers bit-same), CI matrix
+   9/9 with RE-BASELINED joule budgets: euler -5.91 / pc -5.96 /
+   leapfrog -16.38% (from -6.71/-6.74/-17.18 — the insulating floor +
+   Pe boundary treatment improve the closure ~0.8 points across the
+   board).
 
 ---
 
