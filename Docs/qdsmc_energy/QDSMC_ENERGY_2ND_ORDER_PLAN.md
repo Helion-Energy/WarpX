@@ -1152,6 +1152,59 @@ reflection (port `dsmc-eb-reflection`); scatter/layer EB;
 density ramp WANTS to be outside the bath — revisit when n is not a
 deposition artifact).
 
+### InsulatingEB — callback prototype VALIDATED + standalone-PR scoping (2026-08-06)
+
+**Eric's decision**: production decks already avoid wall-density contact
+via a standoff; adopt that as the wall model — an INSULATING wall — and
+formalize it later as a new EB type. Prototype first as a deck
+callback, then scope **InsulatingEB** as a standalone upstream-shaped
+PR that becomes a branch prerequisite (like #7128).
+
+**Prototype (qdsmc_annulus_test.py `--standoff <cells>
+--n-floor-frac 0.05 --band-copy 1`)**: ions load only
+r1+s dx < r < r2-s dx (orbits never graze the EB — no scrape drain);
+the floored band between plasma edge and wall is insulating by the
+machinery already on this branch (closed floor faces + masked drifts +
+PR #7128's insulating advection floor); a per-step callback holds
+grad Te = 0 into the band (nearest-open-node radial copy — the
+zero-normal-gradient fill). The production-class density floor
+(0.05 n0, not the conduction-gate 1e-6) is REQUIRED: with a near-zero
+floor, E = -grad Pe/(q n) at the plasma edge is unbounded and scatters
+even 1e6-mass ions.
+
+**Measured holds (N=64, 384 steps)**:
+- conduction (adiabatic EB, blob diffusing against the band):
+  Sigma over the OPEN set (n_e > floor) drifts **-1.6e-7 absolute
+  (5e-11 relative)** — the insulating wall holds exactly.
+- at-rest advection: -2.6e-4 over 256 steps (~1e-6/step) = the marker
+  hat deposit splitting fractionally across the floor boundary — the
+  **deposit-fold follow-up** closes it (measured rate recorded).
+- Bookkeeping traps found and fixed in the instrument: (1) the
+  band-copy must touch only nodes the TRANSPORT treats as boundary
+  (below-floor or covered) — a radius-based band also rewrites
+  above-floor edge nodes and acts as an energy source/sink; (2) the
+  conserved set is the OPEN set, not a radius mask (an apparent -2.3%
+  "leak" was exactly conserved energy shared with above-floor edge
+  nodes); (3) rotating-heavy-ion V_e control is ballistic — the
+  pattern disperses in ~L/v (the known rotate-mode property), so
+  advection instruments must stay within that window.
+
+**InsulatingEB standalone-PR scope (branch prerequisite)**:
+1. New EB wall type (input naming per review, e.g.
+   `boundary.eb_type = insulating`): particle-COLLECTING wall
+   (standard absorbing scrape + collected-charge/energy tally);
+2. a maintained density standoff band (no rho within N_band cells of
+   the EB — the production standoff pattern promoted to a first-class
+   semantic, replacing per-deck Python scrapers);
+3. zero-normal-gradient Pe and Te into the band + covered region each
+   step (the C++ form of the band-copy: per-line or level-set
+   nearest-fluid fill), so grad Pe drives no edge E-cliff;
+4. the deposit FOLD at the floor boundary for K N (and rho-class)
+   deposits — the FoldEBDeposit analogue that closes the measured
+   1e-6/step advection leak (in the PR or as its fast-follow).
+Acceptance: the annulus insulating-wall hold (5e-11/384 steps here),
+the at-rest advection hold, and a liftoff-class slab.
+
 ### Upstream PR #7128 MERGED as a branch prerequisite (2026-08-06)
 
 BLAST-WarpX **#7128 "Fix hybrid electron energy equation vacuum Te
