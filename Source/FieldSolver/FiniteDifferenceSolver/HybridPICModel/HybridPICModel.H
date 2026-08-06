@@ -202,6 +202,23 @@ public:
     void RestrictBfieldFineToCoarse (
         amrex::IntVect const& ng, std::optional<bool> nodal_sync);
 
+    /**
+     * \brief Fill the fine-level (lev >= 1) ghost cells of rho_fp and
+     * current_fp at the coarse-fine boundary from the lev-1 valid data, and
+     * overwrite the sacrificial fine-edge band's valid moments with the same
+     * coarse-interpolated data (fine deposits there are partial by design --
+     * buffer particles deposit to the coarse level, whose moments are
+     * complete everywhere -- and evolving the Ohm's-law E with the partial
+     * band moments is nonlinearly unstable). Interpolation:
+     * bilinear nodal interpolation for rho, a hand-rolled staggering-aware
+     * linear interpolation for the edge-staggered current (AMReX offers no
+     * edge interpolater through FillPatch). Called once per step after
+     * SyncCurrentAndRho and the post-sync FillBoundary sweep, so the
+     * time-interpolated moment scratch fields inherit filled ghosts through
+     * their LinComb/Copy bookkeeping.
+     */
+    void FillMomentsCoarseFineGhosts ();
+
     /** \brief div(B) audit after the coarse-fine ghost fill of level lev
      * (active when m_mr_check_div_b is set). */
     void CheckDivBAfterGhostFill (int lev, amrex::IntVect const& ng);
@@ -340,6 +357,13 @@ public:
     amrex::GpuArray<int, 3> Ez_IndexType;
 
 private:
+    /** \brief (Re)build the cached cell-centered fine-edge mask of refined
+     * level lev used by FillMomentsCoarseFineGhosts: 0 on cells within the
+     * sacrificial band (within max(mr_restrict_setback * ratio,
+     * n_current_deposition_buffer + 2) cells of the coarse-fine edge), 1 on
+     * the trusted fine interior. Cached until the box layout changes. */
+    void EnsureFineEdgeMask (int lev, amrex::IntVect const& ratio);
+
     /** \brief (Re)build the cached cell-centered keep-mask of coarse level
      * clev used by RestrictBfieldFineToCoarse: 1 on the coarsened fine region
      * eroded by m_mr_restrict_setback cells (Linf ball; non-periodic domain
@@ -351,6 +375,11 @@ private:
     amrex::Vector<std::unique_ptr<amrex::iMultiFab>> m_mr_keep_mask;
     /** Fine-level cell BoxArray each cached keep-mask was built from. */
     amrex::Vector<amrex::BoxArray> m_mr_keep_mask_fba;
+
+    /** Cached fine-edge masks (0 = sacrificial band), indexed by fine level. */
+    amrex::Vector<std::unique_ptr<amrex::iMultiFab>> m_mr_fine_edge_mask;
+    /** Cell BoxArray each cached fine-edge mask was built from. */
+    amrex::Vector<amrex::BoxArray> m_mr_fine_edge_mask_ba;
 };
 
 /**

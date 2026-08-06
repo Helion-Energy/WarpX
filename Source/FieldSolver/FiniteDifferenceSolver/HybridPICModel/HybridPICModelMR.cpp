@@ -37,6 +37,60 @@
 using namespace amrex;
 using warpx::fields::FieldType;
 
+/** \brief Staggering-aware linear interpolation of a coarse array to the
+ * fine index (j,k,l), for data with the same staggering on both levels.
+ * Weight logic follows the same-type aux kernel in WarpXComm_K.H; reads
+ * beyond the coarse array are zero-padded. */
+AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+amrex::Real hybrid_mr_interp_from_coarse (
+    int j, int k, int l, int n,
+    amrex::Array4<amrex::Real const> const& arr_coarse,
+    amrex::IntVect const& arr_stag,
+    amrex::IntVect const& rr)
+{
+    using namespace amrex;
+
+    // Pad arr_coarse with zeros beyond ghost cells for out-of-bound accesses
+    const auto arr_coarse_zeropad = [arr_coarse, n] (const int jj, const int kk, const int ll) noexcept
+    {
+        return arr_coarse.contains(jj, kk, ll) ? arr_coarse(jj, kk, ll, n) : 0.0_rt;
+    };
+
+    // Refinement ratio and staggering (0: cell-centered; 1: nodal);
+    // unused dimensions are considered nodal.
+    const int rj = rr[0];
+    const int rk = (AMREX_SPACEDIM > 1) ? rr[1] : 1;
+    const int rl = (AMREX_SPACEDIM > 2) ? rr[2] : 1;
+    const int sj = arr_stag[0];
+    const int sk = (AMREX_SPACEDIM > 1) ? arr_stag[1] : 1;
+    const int sl = (AMREX_SPACEDIM > 2) ? arr_stag[2] : 1;
+
+    const int nj = 2;
+    const int nk = (AMREX_SPACEDIM > 1) ? 2 : 1;
+    const int nl = (AMREX_SPACEDIM > 2) ? 2 : 1;
+
+    const int jc = (sj == 0) ? amrex::coarsen(j - rj/2, rj) : amrex::coarsen(j, rj);
+    const int kc = (sk == 0) ? amrex::coarsen(k - rk/2, rk) : amrex::coarsen(k, rk);
+    const int lc = (sl == 0) ? amrex::coarsen(l - rl/2, rl) : amrex::coarsen(l, rl);
+
+    const amrex::Real hj = (sj == 0) ? 0.5_rt : 0._rt;
+    const amrex::Real hk = (sk == 0) ? 0.5_rt : 0._rt;
+    const amrex::Real hl = (sl == 0) ? 0.5_rt : 0._rt;
+
+    amrex::Real res = 0.0_rt;
+    for         (int jj = 0; jj < nj; jj++) {
+        for     (int kk = 0; kk < nk; kk++) {
+            for (int ll = 0; ll < nl; ll++) {
+                const amrex::Real wj = (rj - amrex::Math::abs(j + hj - (jc + jj + hj) * rj)) / static_cast<amrex::Real>(rj);
+                const amrex::Real wk = (rk - amrex::Math::abs(k + hk - (kc + kk + hk) * rk)) / static_cast<amrex::Real>(rk);
+                const amrex::Real wl = (rl - amrex::Math::abs(l + hl - (lc + ll + hl) * rl)) / static_cast<amrex::Real>(rl);
+                res += wj * wk * wl * arr_coarse_zeropad(jc+jj, kc+kk, lc+ll);
+            }
+        }
+    }
+    return res;
+}
+
 /** \brief True if the cell (i,j,k) counts as "covered" for the restriction
  * keep-mask: either its mask value is 1, or it lies outside the domain in a
  * non-periodic direction (physical boundaries neither erode the mask nor
@@ -54,6 +108,27 @@ bool hybrid_mr_cell_covered (amrex::Array4<int const> const& m,
         }
     }
     return m(i, j, k) == 1;
+}
+
+/** \brief True if the staggered point (j,k,l) touches a cell of the
+ * sacrificial fine-edge band (edge_mask == 0). Nodal directions touch the
+ * two adjacent cells, cell-centered directions only their own cell. */
+AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+bool hybrid_mr_point_in_band (int j, int k, int l,
+                              amrex::IntVect const& stag,
+                              amrex::Array4<int const> const& edge_mask)
+{
+    const int oj = (stag[0] == 1) ? 1 : 0;
+    const int ok = (AMREX_SPACEDIM > 1 && stag[1] == 1) ? 1 : 0;
+    const int ol = (AMREX_SPACEDIM > 2 && stag[2] == 1) ? 1 : 0;
+    for         (int dj = -oj; dj <= 0; ++dj) {
+        for     (int dk = -ok; dk <= 0; ++dk) {
+            for (int dl = -ol; dl <= 0; ++dl) {
+                if (edge_mask(j+dj, k+dk, l+dl) == 0) { return true; }
+            }
+        }
+    }
+    return false;
 }
 
 namespace
@@ -454,6 +529,211 @@ void HybridPICModel::RestrictBfieldFineToCoarse (
     }
 #else
     amrex::ignore_unused(ng, nodal_sync);
+    WARPX_ABORT_WITH_MESSAGE(
+        "Hybrid-PIC mesh refinement is only implemented for Cartesian 2D/3D.");
+#endif
+}
+
+void HybridPICModel::EnsureFineEdgeMask (const int lev, amrex::IntVect const& ratio)
+{
+    auto& warpx = WarpX::GetInstance();
+    const amrex::BoxArray& fba = warpx.boxArray(lev);
+    const amrex::DistributionMapping& fdm = warpx.DistributionMap(lev);
+
+    if (static_cast<int>(m_mr_fine_edge_mask.size()) <= lev) {
+        m_mr_fine_edge_mask.resize(lev + 1);
+        m_mr_fine_edge_mask_ba.resize(lev + 1);
+    }
+    if (m_mr_fine_edge_mask[lev] &&
+        m_mr_fine_edge_mask_ba[lev] == fba &&
+        m_mr_fine_edge_mask[lev]->DistributionMap() == fdm)
+    {
+        return;
+    }
+
+    // Band width: wide enough to cover both the restriction setback band and
+    // the deposition-buffer depletion zone (buffer particles deposit to the
+    // coarse level, plus one cell of shape-factor reach).
+    int width = m_mr_restrict_setback;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) { width = std::max(width, m_mr_restrict_setback * ratio[d]); }
+    width = std::max(width, WarpX::n_current_deposition_buffer + 2);
+
+    const amrex::Periodicity& period = warpx.Geom(lev).periodicity();
+    const amrex::Box domain = warpx.Geom(lev).Domain();
+    amrex::GpuArray<int, AMREX_SPACEDIM> is_per{};
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) { is_per[d] = warpx.Geom(lev).isPeriodic(d); }
+
+    // Start from 1 on the fine union (ghost cells covered by other fine
+    // boxes become 1 through FillBoundary; true coarse-fine ghosts stay 0),
+    // then erode by `width` cells. Non-periodic domain boundaries do not
+    // erode.
+    auto mask = std::make_unique<amrex::iMultiFab>(fba, fdm, 1, 1);
+    mask->setVal(0);
+    mask->setVal(1, 0, 1, amrex::IntVect(0));
+
+    amrex::iMultiFab tmp(fba, fdm, 1, 1);
+    for (int pass = 0; pass < width; ++pass)
+    {
+        mask->FillBoundary(period);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(*mask, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            const amrex::Box tbx = mfi.tilebox();
+            auto const& src = mask->const_array(mfi);
+            auto const& dst = tmp.array(mfi);
+            amrex::ParallelFor(tbx,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    int v = src(i, j, k);
+                    if (v == 1) {
+#if defined(WARPX_DIM_3D)
+                        for (int dk = -1; dk <= 1 && v; ++dk) {
+#else
+                        const int dk = 0;
+#endif
+                        for (int dj = -1; dj <= 1 && v; ++dj) {
+                        for (int di = -1; di <= 1 && v; ++di) {
+                            if (!hybrid_mr_cell_covered(src, i+di, j+dj, k+dk, domain, is_per)) {
+                                v = 0;
+                            }
+                        }}
+#if defined(WARPX_DIM_3D)
+                        }
+#endif
+                    }
+                    dst(i, j, k) = v;
+                });
+        }
+        amrex::iMultiFab::Copy(*mask, tmp, 0, 0, 1, 0);
+    }
+    mask->FillBoundary(period);
+
+    m_mr_fine_edge_mask[lev] = std::move(mask);
+    m_mr_fine_edge_mask_ba[lev] = fba;
+}
+
+void HybridPICModel::FillMomentsCoarseFineGhosts ()
+{
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    auto& warpx = WarpX::GetInstance();
+    using ablastr::fields::Direction;
+
+    for (int lev = 1; lev <= warpx.finestLevel(); ++lev)
+    {
+        const amrex::Geometry& cgeom = warpx.Geom(lev-1);
+        const amrex::Geometry& fgeom = warpx.Geom(lev);
+        const amrex::IntVect ratio = warpx.refRatio(lev-1);
+        EnsureFineEdgeMask(lev, ratio);
+        const amrex::iMultiFab& edge_mask = *m_mr_fine_edge_mask[lev];
+
+        // rho (nodal): interpolate the coarse charge density onto a scratch
+        // copy of the fine level with bilinear nodal interpolation, then copy
+        // back the coarse-fine ghost region only.
+        {
+            amrex::MultiFab& rho_f = *warpx.m_fields.get(FieldType::rho_fp, lev);
+            amrex::MultiFab& rho_c = *warpx.m_fields.get(FieldType::rho_fp, lev-1);
+            const amrex::IntVect ng = rho_f.nGrowVect();
+            const int ncomp = rho_f.nComp();
+
+            amrex::MultiFab rtmp(rho_f.boxArray(), rho_f.DistributionMap(), ncomp, ng);
+            rtmp.setVal(0.0_rt);
+            amrex::Vector<amrex::BCRec> bcrec(ncomp);
+            for (int n = 0; n < ncomp; ++n) {
+                for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                    bcrec[n].setLo(d, amrex::BCType::int_dir);
+                    bcrec[n].setHi(d, amrex::BCType::int_dir);
+                }
+            }
+            amrex::InterpFromCoarseLevel(
+                rtmp, ng, amrex::IntVect(0), rho_c, 0, 0, ncomp,
+                cgeom, fgeom, ratio, &amrex::node_bilinear_interp, bcrec, 0);
+            // Copy back the coarse-fine ghost region plus the valid cells of
+            // the sacrificial edge band (edge_mask == 0).
+            {
+                const amrex::IntVect stag = rho_f.ixType().toIntVect();
+                const amrex::Box allowed = amrex::convert(
+                    fgeom.growPeriodicDomain(ng), rho_f.ixType());
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+                for (MFIter mfi(rho_f, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+                {
+                    const amrex::Box vbx = mfi.validbox();
+                    amrex::Box gbx = mfi.growntilebox(ng);
+                    gbx &= allowed;
+                    if (!gbx.ok()) { continue; }
+                    auto const& d_arr = rho_f.array(mfi);
+                    auto const& s_arr = rtmp.const_array(mfi);
+                    auto const& e_arr = edge_mask.const_array(mfi);
+                    amrex::ParallelFor(gbx, ncomp,
+                        [=] AMREX_GPU_DEVICE (int j, int k, int l, int n)
+                        {
+                            if (!vbx.contains(j, k, l) ||
+                                hybrid_mr_point_in_band(j, k, l, stag, e_arr)) {
+                                d_arr(j, k, l, n) = s_arr(j, k, l, n);
+                            }
+                        });
+                }
+            }
+            ablastr::utils::communication::FillBoundary(
+                rho_f, ng, WarpX::do_single_precision_comms,
+                fgeom.periodicity(), true);
+        }
+
+        // J (edge-staggered): AMReX offers no edge interpolater usable through
+        // FillPatch (FaceLinear covers faces only, NodeBilinear nodes only),
+        // so import the coarse current onto the coarsened fine layout and
+        // apply a staggering-aware linear interpolation kernel by hand.
+        for (int idim = 0; idim < 3; ++idim)
+        {
+            amrex::MultiFab& J_f = *warpx.m_fields.get(FieldType::current_fp, Direction{idim}, lev);
+            const amrex::MultiFab& J_c = *warpx.m_fields.get(FieldType::current_fp, Direction{idim}, lev-1);
+            const amrex::IntVect ng = J_f.nGrowVect();
+
+            // Scratch on the coarsened fine layout with enough ghost cells
+            // for the interpolation stencil under the fine ghost region.
+            amrex::IntVect ngc;
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) { ngc[d] = ng[d]/ratio[d] + 2; }
+            amrex::MultiFab jtmp(
+                amrex::coarsen(J_f.boxArray(), ratio), J_f.DistributionMap(), 1, ngc);
+            jtmp.setVal(0.0_rt);
+            ablastr::utils::communication::ParallelCopy(
+                jtmp, J_c, 0, 0, 1, amrex::IntVect(0), ngc,
+                WarpX::do_single_precision_comms, cgeom.periodicity());
+
+            const amrex::IntVect stag = J_f.ixType().toIntVect();
+            const amrex::Box allowed = amrex::convert(
+                fgeom.growPeriodicDomain(ng), J_f.ixType());
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(J_f, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                const amrex::Box vbx = mfi.validbox();
+                amrex::Box gbx = mfi.growntilebox(ng);
+                gbx &= allowed;
+                if (!gbx.ok()) { continue; }
+                auto const& j_arr = J_f.array(mfi);
+                auto const& c_arr = jtmp.const_array(mfi);
+                auto const& e_arr = edge_mask.const_array(mfi);
+                amrex::ParallelFor(gbx,
+                    [=] AMREX_GPU_DEVICE (int j, int k, int l)
+                    {
+                        if (!vbx.contains(j, k, l) ||
+                            hybrid_mr_point_in_band(j, k, l, stag, e_arr)) {
+                            j_arr(j, k, l) = hybrid_mr_interp_from_coarse(
+                                j, k, l, 0, c_arr, stag, ratio);
+                        }
+                    });
+            }
+            ablastr::utils::communication::FillBoundary(
+                J_f, ng, WarpX::do_single_precision_comms,
+                fgeom.periodicity(), true);
+        }
+    }
+#else
     WARPX_ABORT_WITH_MESSAGE(
         "Hybrid-PIC mesh refinement is only implemented for Cartesian 2D/3D.");
 #endif
