@@ -392,24 +392,44 @@ void WarpX::HybridPICInitializeRhoJandB ()
     HybridPICDepositRhoAndJ();
 
     // Fill the electron pressure using the freshly deposited rho. On a fresh
-    // start this seeds Pe^0 for the iteration-0 diagnostics and the first
-    // step's B-substep E-solves; on restart it restores Pe(rho^n), which is
-    // not checkpointed and would otherwise be zero for the whole first
-    // restarted step. From the first step onward, HybridPICEvolveFields
-    // refreshes Pe right after each deposition.
+    // start this seeds Pe^0 for the first step's B-substep E-solves (the
+    // iteration-0 diagnostics were already written at the end of InitData,
+    // before this runs); on restart it restores Pe(rho^n), which is not
+    // checkpointed and would otherwise be zero for the whole first restarted
+    // step. From the first step onward, HybridPICEvolveFields refreshes Pe
+    // right after each deposition (via the closure, or via the QDSMC entropy
+    // transport when solve_electron_energy_equation is on).
     //
-    // With the energy equation on, Pe must come from the CURRENT T_e state,
-    // not the algebraic closure: this entry point also runs whenever Evolve
-    // is re-entered mid-run (e.g. PICMI sim.step() called in segments,
-    // step == step_begin each time), and the closure would silently reset
-    // the evolved T_e/Pe to the polytropic value. On a fresh start or
-    // restart T_e holds the uniform elec_temp seed from InitData (T_e is
-    // not checkpointed -- known gap), so this path reproduces the closure
-    // seed there anyway (up to the (n/n0)^(gamma-1) factor).
+    // With the energy equation on, seed T_e itself on the floored adiabat
+    // (uniform K_e -- the transport's zero-gradient state, PR #7128) and
+    // emit Pe = n_e k_B T_e from it, with the same boundary treatment
+    // CalculateElectronPressure applies. Calling the algebraic closure here
+    // instead would leave K_e ~ 0 across the floored halo (its T_e mirror
+    // divides by the floored density while the pressure uses the raw one),
+    // re-creating the absorbing edge on the first step. Note that T_e is not
+    // checkpointed either, so on restart the seed re-derives T_e from the
+    // restored rho: evolved T_e structure is not preserved across a restart.
+    //
+    // The adiabat seed runs ONCE per process: this entry point executes at
+    // step == step_begin of EVERY Evolve() entry (each segmented PICMI
+    // sim.step()), and an unconditional re-seed would wipe the evolved T_e
+    // mid-run — the same re-entry class as the closure Pe reset fixed
+    // earlier on this branch. Pe is still re-emitted from the CURRENT T_e
+    // on every entry.
     if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
         for (int lev = 0; lev <= finest_level; ++lev) {
+            if (!m_hybrid_pic_model->m_qdsmc_te_seeded) {
+                m_hybrid_pic_model->SeedTeAdiabat(lev);
+            }
             m_hybrid_pic_model->QDSMCFillElectronPressureFromTe(lev);
+            ApplyElectronPressureBoundary(lev, PatchType::fine);
+            ablastr::utils::communication::FillBoundary(
+                *m_fields.get(FieldType::hybrid_electron_pressure_fp, lev),
+                do_single_precision_comms,
+                Geom(lev).periodicity(),
+                true);
         }
+        m_hybrid_pic_model->m_qdsmc_te_seeded = true;
     } else {
         m_hybrid_pic_model->CalculateElectronPressure();
     }

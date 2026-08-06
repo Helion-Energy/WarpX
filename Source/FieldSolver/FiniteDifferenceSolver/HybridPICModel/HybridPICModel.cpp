@@ -1037,8 +1037,13 @@ void HybridPICModel::QDSMCInitializeKe (int const lev) const
 
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
-            if (rho_arr(i,j,k) <= rho_floor) { return; }
-            amrex::Real const ne = rho_arr(i,j,k) / PhysConst::q_e;
+            // Floor the density instead of skipping low-density cells:
+            // leaving K_e = 0 in the floored halo turns it into an absorbing
+            // boundary that drains the plasma's electron thermal energy via
+            // the remap diffusion (global exponential T_e collapse). With the
+            // floor, the halo keeps whatever T_e it holds and is insulating.
+            amrex::Real const ne =
+                amrex::max(rho_arr(i,j,k), rho_floor) / PhysConst::q_e;
             Ke_arr(i,j,k) = Te_arr(i,j,k) * std::pow(ne, 1.0_rt - gamma) * kb_over_qe;
         });
     }
@@ -1072,13 +1077,17 @@ void HybridPICModel::QDSMCUpdateTe (int const lev) const
     amrex::MultiFab const & weights = *warpx.m_fields.get(FieldType::hybrid_qdsmc_weights_fp,        lev);
     amrex::MultiFab const & rho     = *warpx.m_fields.get(FieldType::rho_fp,                         lev);
 
-    // Note: T_e is NOT zeroed here. Cells that received no QDSMC weight or
-    // are below the density floor keep their previous T_e -- zeroing them
-    // would erase valid state (and seed K_e = 0 into neighbors on the next
-    // step) whenever a cell momentarily receives no deposit.
+    // Note: T_e is NOT zeroed here. Cells that received no QDSMC weight
+    // keep their previous T_e -- zeroing them would erase valid state (and
+    // seed a wrong K_e into neighbors on the next step) whenever a cell
+    // momentarily receives no deposit.
 
     auto const gamma      = m_gamma;
-    auto const n_floor    = m_qdsmc_n_floor;
+    // Conversion floor: must match the floor QDSMCInitializeKe applies, so
+    // the K -> T_e round-trip is exact for a marker that stayed home.
+    auto const n_floor    = m_n_floor;
+    // Deposited-weight guard: cells no QDSMC marker reached keep their T_e.
+    auto const w_floor    = m_qdsmc_n_floor;
     auto const kb_over_qe = PhysConst::kb / PhysConst::q_e;
 
 #ifdef AMREX_USE_OMP
@@ -1097,10 +1106,15 @@ void HybridPICModel::QDSMCUpdateTe (int const lev) const
 
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
-            if (rho_arr(i,j,k) <= 0.0_rt) { return; }
-            amrex::Real const ne = rho_arr(i,j,k) / PhysConst::q_e;
-            amrex::Real const w  = weights_arr(i,j,k) * cell_volume;
-            if ((w <= 0.0_rt) || (ne <= n_floor)) { return; }
+            if (weights_arr(i,j,k) <= w_floor) { return; }
+            amrex::Real const w = weights_arr(i,j,k) * cell_volume;
+            // Floored density, mirroring QDSMCInitializeKe: below-floor
+            // cells are updated too (insulating halo), and the K <-> T_e
+            // conversion uses the same n_e^(gamma-1) factor on both sides of
+            // the step, so a cell whose marker did not move keeps its T_e
+            // exactly.
+            amrex::Real const ne =
+                amrex::max(rho_arr(i,j,k) / PhysConst::q_e, n_floor);
             Te_arr(i,j,k) = Ke_arr(i,j,k)
                           / std::pow(ne, 1.0_rt - gamma)
                           / w
@@ -4282,6 +4296,43 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
 }
 
 
+void HybridPICModel::SeedTeAdiabat (int const lev) const
+{
+    ABLASTR_PROFILE("HybridPICModel::SeedTeAdiabat()");
+
+    auto & warpx = WarpX::GetInstance();
+
+    amrex::MultiFab       & Te  = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+    amrex::MultiFab const & rho = *warpx.m_fields.get(FieldType::rho_fp, lev);
+
+    auto const n0_ref    = m_n0_ref;
+    auto const gamma     = m_gamma;
+    auto const rho_floor = PhysConst::q_e * m_n_floor;
+    // m_elec_temp is k_B T_e0 [J]; the T_e field is in K.
+    auto const Te0_K     = m_elec_temp / PhysConst::kb;
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(Te, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        amrex::Array4<amrex::Real>       const & Te_arr  = Te.array(mfi);
+        amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+
+        amrex::Box const tbox = amrex::convert(mfi.tilebox(), Te.ixType().toIntVect());
+        amrex::Box       box  = tbox;
+        box.grow(Te.nGrowVect());
+
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            amrex::Real const ne =
+                amrex::max(rho_arr(i,j,k), rho_floor) / PhysConst::q_e;
+            Te_arr(i,j,k) = Te0_K * std::pow(ne / n0_ref, gamma - 1.0_rt);
+        });
+    }
+}
+
+
 void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
 {
     ABLASTR_PROFILE("HybridPICModel::AdvanceElectronEnergyQDSMC()");
@@ -4324,6 +4375,14 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
             // to #6982).
             QdsmcConductionOnce(lev, dt, /*use_rho_new=*/true);
             QDSMCFillElectronPressureFromTe(lev);
+            // same Pe boundary treatment as the algebraic closure
+            // (PR #7128), mirrored in every advance path
+            warpx.ApplyElectronPressureBoundary(lev, PatchType::fine);
+            ablastr::utils::communication::FillBoundary(
+                *warpx.m_fields.get(FieldType::hybrid_electron_pressure_fp, lev),
+                WarpX::do_single_precision_comms,
+                warpx.Geom(lev).periodicity(),
+                true);
             m_qdsmc_pc->ResetParticles(lev);
         }
         return;
@@ -4366,6 +4425,14 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
         }
 
         QDSMCFillElectronPressureFromTe(lev);   // register <- Pe^{n+1/2}
+        // same Pe boundary treatment as the algebraic closure (PR
+        // #7128); the LinComb below is linear, so Pe_ext inherits it
+        warpx.ApplyElectronPressureBoundary(lev, PatchType::fine);
+        ablastr::utils::communication::FillBoundary(
+            *warpx.m_fields.get(FieldType::hybrid_electron_pressure_fp, lev),
+            WarpX::do_single_precision_comms,
+            warpx.Geom(lev).periodicity(),
+            true);
 
         // Linear extrapolation to t^{n+1}, mirroring the J_i^{n+1}
         // extrapolation: from (t^{n-1/2}, t^{n+1/2}) the coefficients are
@@ -4424,7 +4491,20 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
         ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true);
         QdsmcConductionOnce(lev, 0.5_rt * dt, /*use_rho_new=*/true);
 
+        // Emit P_e = n_e * k_B * T_e for the downstream Ohm's-law
+        // solve, with the same boundary treatment the algebraic closure gets
+        // in CalculateElectronPressure (grad P_e reads the ghost cells;
+        // PR #7128).
         QDSMCFillElectronPressureFromTe(lev);
+        warpx.ApplyElectronPressureBoundary(lev, PatchType::fine);
+        ablastr::utils::communication::FillBoundary(
+            *warpx.m_fields.get(FieldType::hybrid_electron_pressure_fp, lev),
+            WarpX::do_single_precision_comms,
+            warpx.Geom(lev).periodicity(),
+            true);
+
+        // Reset particles to home positions (and zero velocity / weight /
+        // entropy) so the next step starts with a clean grid.
         m_qdsmc_pc->ResetParticles(lev);
     }
 }
