@@ -2056,6 +2056,25 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const bool radial_faces = (normal_direction == 0);
     const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
     const amrex::Real radial_cell_size = m_WarpX->Geom(0).CellSize(0);
+    // Zero-flux wall (open FIELD boundary + reflect FLUID ghosts): the
+    // r_max domain face is a rigid no-flow wall for the fluid while the
+    // field stays free-space. The fan there otherwise mixes inconsistent
+    // ghosts -- mirror fluid states against the OPEN staggered B_n (the
+    // Green's-function face value, nonzero where a PEC image would pin
+    // B_n = 0) -- and the nonzero B_n opens the Alfven fan's tangential
+    // Maxwell stress -B_n B_t/mu0 and energy channels at the wall,
+    // a persistent unphysical E_i drain of the last cell ring that pins
+    // it on the energy floor (the i = i_max projection storm of the FRC
+    // open-wall hold). When reflect is selected, every ADVECTIVE fluid
+    // channel of the wall face is therefore set EXACTLY to zero and the
+    // tangential Maxwell stress takes its PEC-image value (zero) in both
+    // the momentum flux and the work register; the normal channel keeps
+    // the open fan (the free-space field acts through the face) and the
+    // induction and signal channels keep the OPEN-field fan: the Ohm/
+    // Faraday path retains the true open boundary condition.
+    const int radial_wall_face = m_WarpX->Geom(0).Domain().bigEnd(0) + 1;
+    const bool reflect_wall =
+        radial_faces && m_r_open && (m_r_open_fluid == "reflect");
 #endif
     constexpr int flux_mass = FaceFluxComponent::mass;
     constexpr int flux_momentum = FaceFluxComponent::momentum_x;
@@ -2256,6 +2275,40 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         perp_floor);
             }
 
+#if defined(WARPX_DIM_RZ)
+            if (reflect_wall && i == radial_wall_face) {
+                // Zero-flux wall (see the reflect_wall comment above):
+                // every ADVECTIVE fluid channel of the wall face -- mass,
+                // tangential momentum advection, electron/ion energies,
+                // U_par/U_perp, and the electron pdV velocity -- is
+                // EXACTLY zero, applied after the donor gating so no
+                // limiter can reintroduce a leak. The tangential Maxwell
+                // stress -B_n B_t/mu0 (the Alfven-fan torque channel the
+                // open B_n opens against the mirror states -- the E_i
+                // work drain of the last ring) takes its PEC-image value
+                // (zero) in BOTH the momentum flux and the magnetic work
+                // register, keeping the field-to-fluid work discretely
+                // paired. The NORMAL channel keeps the open fan in both
+                // registers: the free-space field genuinely acts on the
+                // wall band through the face (ram + total pressure -
+                // B_n^2 tension), and swapping it for the PEC image
+                // overcompresses the sealed last ring until the ring
+                // behind it deadlocks on the E_i floor (150-consecutive
+                // frozen Newton solves on the FRC open-wall wedge). The
+                // override is state-independent in structure, so the
+                // residual stays smooth for the JFNK probes.
+                flux.mass = 0.0_rt;
+                flux.momentum[1] = 0.0_rt;
+                flux.momentum[2] = 0.0_rt;
+                flux.momentum_magnetic[1] = 0.0_rt;
+                flux.momentum_magnetic[2] = 0.0_rt;
+                flux.electron_energy = 0.0_rt;
+                flux.ion_energy = 0.0_rt;
+                flux.ion_parallel_energy = 0.0_rt;
+                flux.ion_perp_energy = 0.0_rt;
+                flux.electron_velocity = 0.0_rt;
+            }
+#endif
             flux_arr(i, j, k, flux_mass) = flux.mass;
             for (int component = 0; component < 3; ++component) {
                 flux_arr(i, j, k, flux_momentum + component) =
@@ -3013,6 +3066,16 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     const amrex::Real inverse_mu0 = 1.0_rt / PhysConst::mu0;
     const theta_implicit_mhd::FluxParameters flux_parameters =
         MakeFluxParameters();
+    // Zero-flux wall (open field + reflect fluid): pointwise WORK/stress
+    // evaluations at the last cell ring that read the cell-centered
+    // radial B ghost use the PEC/reflecting image value (B_r odd, so the
+    // ghost B_r flips sign) instead of the open zero-gradient fill; the
+    // field itself keeps the true open boundary for the Ohm/Faraday
+    // path. Consumed by the CGL deviation-stress radial derivative
+    // below; the total-energy work terms are covered by the wall-face
+    // flux override in ComputeDirectionalFaceFluxes.
+    const int radial_domain_hi = m_WarpX->Geom(0).Domain().bigEnd(0);
+    const bool wall_image = m_r_open && (m_r_open_fluid == "reflect");
 #endif
     constexpr int flux_mass = FaceFluxComponent::mass;
     constexpr int flux_momentum = FaceFluxComponent::momentum_x;
@@ -3326,8 +3389,22 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                         b2 += b_cc(ic, jc, kc, component) *
                               b_cc(ic, jc, kc, component);
                     }
+                    amrex::Real field_a = b_cc(ic, jc, kc, a);
+                    amrex::Real field_b = b_cc(ic, jc, kc, b);
+#if defined(WARPX_DIM_RZ)
+                    // Zero-flux wall: the outer radial ghost's B_r takes
+                    // the PEC image sign for this STRESS evaluation only
+                    // (the open ghost fill is zero-gradient; the image
+                    // B_r is odd, tangentials even, and |B|^2 -- hence
+                    // the floor, the clamp, and the null weight -- is
+                    // sign-invariant).
+                    if (wall_image && ic > radial_domain_hi) {
+                        if (a == 0) { field_a = -field_a; }
+                        if (b == 0) { field_b = -field_b; }
+                    }
+#endif
                     const amrex::Real bhat_ab =
-                        b_cc(ic, jc, kc, a) * b_cc(ic, jc, kc, b) /
+                        field_a * field_b /
                         theta_implicit_mhd::smooth_positive_floor(b2,
                                                                   small_b2);
                     return null_weight(ic, jc, kc) * pressure_difference *

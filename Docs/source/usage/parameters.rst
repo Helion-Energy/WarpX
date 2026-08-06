@@ -4337,7 +4337,14 @@ Jacobian probes.
     keeps the no-normal-flow conducting-wall mirror for the fluid while
     the field remains open — useful when a violent boundary relaxation
     (e.g. releasing a wall-image-supported equilibrium) would otherwise
-    drain wall cells through their positivity floors.
+    drain wall cells through their positivity floors. Under
+    ``implicit_mhd.fluid_flux = hlld``, ``reflect`` is a true zero-flux
+    wall: every advective fluid channel of the :math:`r_{\max}` face flux
+    (mass, tangential momentum advection, electron/ion energies) is
+    exactly zero and the tangential Maxwell stress and the last ring's
+    magnetic work terms use the perfect-conductor image field
+    (:math:`B_n = 0` at the wall face), while the normal wall pressure
+    and the induction/Ohm path keep the open-field boundary values.
 
 .. pp:param:: implicit_mhd.hllc_signal_closure
     :type: ``string``

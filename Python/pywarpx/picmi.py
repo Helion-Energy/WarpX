@@ -2209,7 +2209,13 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Fluid ghost treatment at an open (Green's-function) upper radial
         boundary: zero-gradient outflow (default) or the no-normal-flow
         reflecting mirror (field stays free-space; removes the wall-cell
-        drainage channel during boundary relaxations).
+        drainage channel during boundary relaxations). With
+        fluid_flux="hlld", "reflect" is a true zero-flux wall: the r_max
+        face flux of every advective fluid channel is exactly zero and
+        the tangential Maxwell stress and last-ring magnetic work terms
+        use the perfect-conductor image field (B_n = 0), while the
+        normal wall pressure and the induction/Ohm path keep the
+        open-field boundary values.
 
     hllc_signal_closure: {"consistent", "barotropic"}, optional
         Ion pressure used in the HLLC wave-speed estimates. The default

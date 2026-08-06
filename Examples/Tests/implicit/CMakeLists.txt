@@ -611,6 +611,22 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# zero-flux reflecting wall at an OPEN radial field boundary (hlld +
+# r_open_fluid = reflect): a rotating column driven into the wall with a
+# nonzero external B_r through the open face must conserve total mass to
+# round-off and keep the wall-ring ion energy healthy (the unfixed wall
+# face leaks mass at the mirror-jump dissipation scale and drains E_i
+# through the open-B_n Maxwell-stress work channel)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_r_open_reflect_wall  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_r_open_reflect_wall  # inputs
+    "analysis_mhd_r_open_reflect_wall.py diags/diag000000 diags/diag000080"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_2d_theta_implicit_jfnk_vandb  # name
     2  # dims

@@ -1,0 +1,142 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.Te = 10.0
+my_constants.Ti = 10.0
+my_constants.Pe = n0 * Te * q_e
+my_constants.Pi = n0 * Ti * q_e
+my_constants.gamma = 5.0/3.0
+my_constants.B0 = 0.01
+my_constants.u0 = 1.0e4
+my_constants.ut = 1.0e4
+my_constants.Lr = 0.1
+my_constants.Lz = 0.4
+my_constants.nr = 16
+my_constants.nz = 32
+my_constants.sound_speed = sqrt(gamma*(Pe+Pi)/rho0)
+my_constants.alfven_speed = B0 / sqrt(mu0*rho0)
+my_constants.dt = 0.25 * (Lr/nr) / (sound_speed + alfven_speed + u0)
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+# Zero-flux wall at an OPEN field boundary (r_open_fluid = reflect, hlld):
+# a rotating column is driven INTO the r_max wall (u_r > 0 there) while
+# the external vector potential threads a nonzero B_r through the open
+# wall face -- exactly the field/fluid ghost mismatch that leaked. The
+# smoothed HLLD fan at a mirror interface is dissipative in the normal
+# velocity jump (an outward mass and energy leak proportional to the
+# compression) and the open-face B_n opens the tangential Maxwell stress
+# and Alfven energy channels; the reflect wall must instead keep the
+# total mass EXACTLY conserved (periodic z, axis, and zero-flux wall
+# leave no exit) and hold the wall-ring ion energy healthy.
+max_step = 80
+amr.n_cell = nr nz
+amr.max_grid_size = 24
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 -0.2
+geometry.prob_hi = Lr 0.2
+boundary.field_lo = none periodic
+boundary.field_hi = open periodic
+boundary.particle_lo = none periodic
+boundary.particle_hi = reflecting periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-11
+newton.relative_tolerance = 1.0e-8
+newton.max_iterations = 12
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-10
+gmres.max_iterations = 300
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_velocity = u0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = Pi
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.mass_density_floor = 1.0e-4 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-4 * Pe
+implicit_mhd.ion_pressure_floor = 1.0e-4 * Pi
+implicit_mhd.fluid_flux = hlld
+implicit_mhd.r_open_fluid = reflect
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.electron_pressure(x,y,z) = Pe
+implicit_mhd.ion_pressure(x,y,z) = Pi
+# Rigid-body-like rotation plus a radial drive INTO the wall: the wall
+# ring keeps a nonzero tangential velocity (the lever arm of the leaked
+# -B_n B_t/mu0 wall stress) and a compressive normal jump at the mirror.
+implicit_mhd.velocity_x(x,y,z) = u0 * x/Lr
+implicit_mhd.velocity_y(x,y,z) = ut * x/Lr
+implicit_mhd.velocity_z(x,y,z) = u0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 80
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Br Bt Bz implicit_mhd_mass_density \
+                       implicit_mhd_ion_energy implicit_mhd_electron_energy
+diag1.write_species = 0
+
+# Green's-function open boundary at r_hi: the fields see the free-space
+# continuation of the interior plasma currents while the FLUID sees a
+# zero-flux reflecting wall (implicit_mhd.r_open_fluid = reflect).
+boundary.open_bc_coarsening = 4
+boundary.open_bc_image_sum_rtol = 1.0e-6
+boundary.open_bc_max_images = 200
+
+# Split external vector potential: uniform Bz plus a periodic-in-z ripple
+# whose curl threads a NONZERO B_r through the open wall face,
+# adversarially opening the Alfven/Maxwell-stress channels the zero-flux
+# wall must keep closed for the fluid. A pure-theta axisymmetric A is
+# exactly divergence-free, so the MLMG cleaner (which rejects open BCs)
+# stays off.
+hybrid_pic_model.add_external_fields = 1
+external_vector_potential.fields = bore
+external_vector_potential.bore.Ay_external_grid_function(x,y,z) = "0.5*B0*x*(1 + 0.9*cos(2*pi*z/Lz))"
+external_vector_potential.do_diva_cleaning = 0
