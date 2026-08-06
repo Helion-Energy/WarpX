@@ -686,22 +686,27 @@ FlushFormatPlotfile::WriteAllRawFields(
 
         // Coarse path
         if (lev > 0) {
-            WriteCoarseVector( "E",
-                               warpx.m_fields.get(FieldType::Efield_cp, Direction{0}, lev),
-                               warpx.m_fields.get(FieldType::Efield_cp, Direction{1}, lev),
-                               warpx.m_fields.get(FieldType::Efield_cp, Direction{2}, lev),
-                               warpx.m_fields.get(FieldType::Efield_fp, Direction{0}, lev),
-                               warpx.m_fields.get(FieldType::Efield_fp, Direction{1}, lev),
-                               warpx.m_fields.get(FieldType::Efield_fp, Direction{2}, lev),
-                               dm, raw_pltname, default_level_prefix, lev, plot_raw_fields_guards);
-            WriteCoarseVector( "B",
-                               warpx.m_fields.get(FieldType::Bfield_cp, Direction{0}, lev),
-                               warpx.m_fields.get(FieldType::Bfield_cp, Direction{1}, lev),
-                               warpx.m_fields.get(FieldType::Bfield_cp, Direction{2}, lev),
-                               warpx.m_fields.get(FieldType::Bfield_fp, Direction{0}, lev),
-                               warpx.m_fields.get(FieldType::Bfield_fp, Direction{1}, lev),
-                               warpx.m_fields.get(FieldType::Bfield_fp, Direction{2}, lev),
-                               dm, raw_pltname, default_level_prefix, lev, plot_raw_fields_guards);
+            // The coarse-patch E/B fields are not registered with the hybrid-PIC solver
+            if (warpx.m_fields.has_vector(FieldType::Efield_cp, lev)) {
+                WriteCoarseVector( "E",
+                                   warpx.m_fields.get(FieldType::Efield_cp, Direction{0}, lev),
+                                   warpx.m_fields.get(FieldType::Efield_cp, Direction{1}, lev),
+                                   warpx.m_fields.get(FieldType::Efield_cp, Direction{2}, lev),
+                                   warpx.m_fields.get(FieldType::Efield_fp, Direction{0}, lev),
+                                   warpx.m_fields.get(FieldType::Efield_fp, Direction{1}, lev),
+                                   warpx.m_fields.get(FieldType::Efield_fp, Direction{2}, lev),
+                                   dm, raw_pltname, default_level_prefix, lev, plot_raw_fields_guards);
+            }
+            if (warpx.m_fields.has_vector(FieldType::Bfield_cp, lev)) {
+                WriteCoarseVector( "B",
+                                   warpx.m_fields.get(FieldType::Bfield_cp, Direction{0}, lev),
+                                   warpx.m_fields.get(FieldType::Bfield_cp, Direction{1}, lev),
+                                   warpx.m_fields.get(FieldType::Bfield_cp, Direction{2}, lev),
+                                   warpx.m_fields.get(FieldType::Bfield_fp, Direction{0}, lev),
+                                   warpx.m_fields.get(FieldType::Bfield_fp, Direction{1}, lev),
+                                   warpx.m_fields.get(FieldType::Bfield_fp, Direction{2}, lev),
+                                   dm, raw_pltname, default_level_prefix, lev, plot_raw_fields_guards);
+            }
             WriteCoarseVector( "j",
                                warpx.m_fields.get(FieldType::current_cp, Direction{0}, lev), warpx.m_fields.get(FieldType::current_cp, Direction{1}, lev), warpx.m_fields.get(FieldType::current_cp, Direction{2}, lev),
                                warpx.m_fields.get(FieldType::current_fp, Direction{0}, lev), warpx.m_fields.get(FieldType::current_fp, Direction{1}, lev), warpx.m_fields.get(FieldType::current_fp, Direction{2}, lev),

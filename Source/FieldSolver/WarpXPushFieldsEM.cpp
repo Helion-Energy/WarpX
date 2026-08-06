@@ -958,7 +958,8 @@ WarpX::EvolveB (int lev, amrex::Real a_dt, SubcyclingHalf subcycling_half, amrex
 {
     ABLASTR_PROFILE("WarpX::EvolveB()");
     EvolveB(lev, PatchType::fine, a_dt, subcycling_half, start_time);
-    if (lev > 0)
+    // Skip the coarse patch when no coarse-patch B field is registered (e.g. hybrid-PIC)
+    if (lev > 0 && m_fields.has_vector(FieldType::Bfield_cp, lev))
     {
         EvolveB(lev, PatchType::coarse, a_dt, subcycling_half, start_time);
     }
@@ -1013,7 +1014,8 @@ WarpX::EvolveE (int lev, amrex::Real a_dt, amrex::Real start_time)
 {
     ABLASTR_PROFILE("WarpX::EvolveE()");
     EvolveE(lev, PatchType::fine, a_dt, start_time);
-    if (lev > 0)
+    // Skip the coarse patch when no coarse-patch E field is registered (e.g. hybrid-PIC)
+    if (lev > 0 && m_fields.has_vector(FieldType::Efield_cp, lev))
     {
         EvolveE(lev, PatchType::coarse, a_dt, start_time);
     }

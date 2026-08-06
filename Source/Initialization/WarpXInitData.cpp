@@ -1032,7 +1032,12 @@ WarpX::InitPML ()
             do_pml_Hi[0][idim] = 1; // on level 0
         }
     }
-    if (max_level > 0) { do_pml = 1; }
+    // Mesh refinement forces PML damping of the fine-patch solution, except
+    // for the hybrid-PIC solver, which does not support (or need) PML.
+    if (max_level > 0 &&
+        electromagnetic_solver_id != ElectromagneticSolverAlgo::HybridPIC) {
+        do_pml = 1;
+    }
     if (do_pml)
     {
         bool const eb_enabled = EB::enabled();
@@ -1248,7 +1253,9 @@ WarpX::InitLevelData (int lev, Real /*time*/)
 
            if (lev > 0) {
                 m_fields.get(FieldType::Bfield_aux, Direction{i}, lev)->setVal(m_p_ext_field_params->B_external_grid[i]);
-                m_fields.get(FieldType::Bfield_cp, Direction{i}, lev)->setVal(m_p_ext_field_params->B_external_grid[i]);
+                if (m_fields.has(FieldType::Bfield_cp, Direction{i}, lev)) {
+                    m_fields.get(FieldType::Bfield_cp, Direction{i}, lev)->setVal(m_p_ext_field_params->B_external_grid[i]);
+                }
                 if (fft_do_time_averaging) {
                     m_fields.get(FieldType::Bfield_avg_cp, Direction{i}, lev)->setVal(m_p_ext_field_params->B_external_grid[i]);
                 }
@@ -1267,7 +1274,9 @@ WarpX::InitLevelData (int lev, Real /*time*/)
             }
             if (lev > 0) {
                 m_fields.get(FieldType::Efield_aux, Direction{i}, lev)->setVal(m_p_ext_field_params->E_external_grid[i]);
-                m_fields.get(FieldType::Efield_cp, Direction{i}, lev)->setVal(m_p_ext_field_params->E_external_grid[i]);
+                if (m_fields.has(FieldType::Efield_cp, Direction{i}, lev)) {
+                    m_fields.get(FieldType::Efield_cp, Direction{i}, lev)->setVal(m_p_ext_field_params->E_external_grid[i]);
+                }
                 if (fft_do_time_averaging) {
                     m_fields.get(FieldType::Efield_avg_cp, Direction{i}, lev)->setVal(m_p_ext_field_params->E_external_grid[i]);
                 }
@@ -1295,12 +1304,14 @@ WarpX::InitLevelData (int lev, Real /*time*/)
             m_p_ext_field_params->Bzfield_parser->compile<4>(),
             lev, PatchType::fine, m_eb_update_B);
 
-        ComputeExternalFieldOnGridUsingParser(
-            FieldType::Bfield_cp,
-            m_p_ext_field_params->Bxfield_parser->compile<4>(),
-            m_p_ext_field_params->Byfield_parser->compile<4>(),
-            m_p_ext_field_params->Bzfield_parser->compile<4>(),
-            lev, PatchType::coarse, m_eb_update_B);
+        if (m_fields.has_vector(FieldType::Bfield_cp, lev)) {
+            ComputeExternalFieldOnGridUsingParser(
+                FieldType::Bfield_cp,
+                m_p_ext_field_params->Bxfield_parser->compile<4>(),
+                m_p_ext_field_params->Byfield_parser->compile<4>(),
+                m_p_ext_field_params->Bzfield_parser->compile<4>(),
+                lev, PatchType::coarse, m_eb_update_B);
+        }
     }
 
     // if the input string for the E-field is "parse_e_ext_grid_function",
@@ -1333,12 +1344,14 @@ WarpX::InitLevelData (int lev, Real /*time*/)
                 m_p_ext_field_params->Ezfield_parser->compile<4>(),
                 lev, PatchType::fine, m_eb_update_E);
 
-            ComputeExternalFieldOnGridUsingParser(
-                FieldType::Efield_cp,
-                m_p_ext_field_params->Exfield_parser->compile<4>(),
-                m_p_ext_field_params->Eyfield_parser->compile<4>(),
-                m_p_ext_field_params->Ezfield_parser->compile<4>(),
-                lev, PatchType::coarse, m_eb_update_E);
+            if (m_fields.has_vector(FieldType::Efield_cp, lev)) {
+                ComputeExternalFieldOnGridUsingParser(
+                    FieldType::Efield_cp,
+                    m_p_ext_field_params->Exfield_parser->compile<4>(),
+                    m_p_ext_field_params->Eyfield_parser->compile<4>(),
+                    m_p_ext_field_params->Ezfield_parser->compile<4>(),
+                    lev, PatchType::coarse, m_eb_update_E);
+            }
 #ifdef AMREX_USE_EB
             if (eb_enabled) {
                 if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::ECT) {

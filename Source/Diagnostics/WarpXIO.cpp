@@ -307,8 +307,13 @@ WarpX::InitFromCheckpoint ()
                 m_fields.get(FieldType::Bfield_aux, Direction{i}, lev)->setVal(0.0);
 
                 m_fields.get(FieldType::current_cp, Direction{i}, lev)->setVal(0.0);
-                m_fields.get(FieldType::Efield_cp, Direction{i}, lev)->setVal(0.0);
-                m_fields.get(FieldType::Bfield_cp, Direction{i}, lev)->setVal(0.0);
+                // The coarse-patch E/B fields are not registered with the hybrid-PIC solver
+                if (m_fields.has(FieldType::Efield_cp, Direction{i}, lev)) {
+                    m_fields.get(FieldType::Efield_cp, Direction{i}, lev)->setVal(0.0);
+                }
+                if (m_fields.has(FieldType::Bfield_cp, Direction{i}, lev)) {
+                    m_fields.get(FieldType::Bfield_cp, Direction{i}, lev)->setVal(0.0);
+                }
             }
         }
 
@@ -363,19 +368,24 @@ WarpX::InitFromCheckpoint ()
 
         if (lev > 0)
         {
-            VisMF::Read(*m_fields.get(FieldType::Efield_cp, Direction{0}, lev),
-                        amrex::MultiFabFileFullPrefix(lev, restart_chkfile, level_prefix, "Ex_cp"));
-            VisMF::Read(*m_fields.get(FieldType::Efield_cp, Direction{1}, lev),
-                        amrex::MultiFabFileFullPrefix(lev, restart_chkfile, level_prefix, "Ey_cp"));
-            VisMF::Read(*m_fields.get(FieldType::Efield_cp, Direction{2}, lev),
-                        amrex::MultiFabFileFullPrefix(lev, restart_chkfile, level_prefix, "Ez_cp"));
+            // The coarse-patch E/B fields are not registered with the hybrid-PIC solver
+            if (m_fields.has_vector(FieldType::Efield_cp, lev)) {
+                VisMF::Read(*m_fields.get(FieldType::Efield_cp, Direction{0}, lev),
+                            amrex::MultiFabFileFullPrefix(lev, restart_chkfile, level_prefix, "Ex_cp"));
+                VisMF::Read(*m_fields.get(FieldType::Efield_cp, Direction{1}, lev),
+                            amrex::MultiFabFileFullPrefix(lev, restart_chkfile, level_prefix, "Ey_cp"));
+                VisMF::Read(*m_fields.get(FieldType::Efield_cp, Direction{2}, lev),
+                            amrex::MultiFabFileFullPrefix(lev, restart_chkfile, level_prefix, "Ez_cp"));
+            }
 
-            VisMF::Read(*m_fields.get(FieldType::Bfield_cp, Direction{0}, lev),
-                        amrex::MultiFabFileFullPrefix(lev, restart_chkfile, level_prefix, "Bx_cp"));
-            VisMF::Read(*m_fields.get(FieldType::Bfield_cp, Direction{1}, lev),
-                        amrex::MultiFabFileFullPrefix(lev, restart_chkfile, level_prefix, "By_cp"));
-            VisMF::Read(*m_fields.get(FieldType::Bfield_cp, Direction{2}, lev),
-                        amrex::MultiFabFileFullPrefix(lev, restart_chkfile, level_prefix, "Bz_cp"));
+            if (m_fields.has_vector(FieldType::Bfield_cp, lev)) {
+                VisMF::Read(*m_fields.get(FieldType::Bfield_cp, Direction{0}, lev),
+                            amrex::MultiFabFileFullPrefix(lev, restart_chkfile, level_prefix, "Bx_cp"));
+                VisMF::Read(*m_fields.get(FieldType::Bfield_cp, Direction{1}, lev),
+                            amrex::MultiFabFileFullPrefix(lev, restart_chkfile, level_prefix, "By_cp"));
+                VisMF::Read(*m_fields.get(FieldType::Bfield_cp, Direction{2}, lev),
+                            amrex::MultiFabFileFullPrefix(lev, restart_chkfile, level_prefix, "Bz_cp"));
+            }
 
             if (WarpX::fft_do_time_averaging)
             {
