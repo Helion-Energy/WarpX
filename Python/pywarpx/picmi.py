@@ -2305,7 +2305,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Positive ion-pressure floor in Pa whose internal-energy equivalent
         bounds Newton updates. Required with ion_closure="total_energy".
 
-    ion_temperature_floor: float, default=300
+    ion_temperature_floor: float, default=0 (off; set e.g. 300 for a room-temperature floor)
         Non-negative ion temperature floor in K (0 disables). Extends the
         ion energy block's admissibility lower bound to the maximum of
         the ion_pressure_floor equivalent and the density-dependent
@@ -2316,7 +2316,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         an ion energy block ("total_energy" or "cgl") when set
         explicitly; the default is inert under the barotropic closure.
 
-    electron_temperature_floor: float, default=300
+    electron_temperature_floor: float, default=0 (off; set e.g. 300 for a room-temperature floor)
         Non-negative electron temperature floor in K (0 disables).
         Analogous to ion_temperature_floor for the electron energy block.
 

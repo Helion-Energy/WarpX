@@ -4278,9 +4278,9 @@ Jacobian probes.
 .. pp:param:: implicit_mhd.ion_temperature_floor
     :type: ``float``
     :unit: K
-    :default: ``300``
+    :default: ``0`` (off)
 
-    Non-negative ion temperature floor (default: room temperature; ``0``
+    Non-negative ion temperature floor (opt-in; e.g. ``300`` = room temperature;
     disables). The absolute pressure floors alone leave the temperature
     :math:`T = p/(n k_B)` unbounded below at densities above the
     mass-density floor; with the temperature floor, the admissibility
@@ -4305,7 +4305,7 @@ Jacobian probes.
 .. pp:param:: implicit_mhd.electron_temperature_floor
     :type: ``float``
     :unit: K
-    :default: ``300``
+    :default: ``0`` (off)
 
     Non-negative electron temperature floor (default: room temperature;
     ``0`` disables). Analogous to

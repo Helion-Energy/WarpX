@@ -250,8 +250,8 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // data) are never lifted and keep the absolute floors alone. The
     // kernels' smooth positivity anchors (pressure recovery, CGL rates)
     // keep their absolute pressure values.
-    amrex::Real m_ion_temperature_floor = 300.0;
-    amrex::Real m_electron_temperature_floor = 300.0;
+    amrex::Real m_ion_temperature_floor = 0.0;
+    amrex::Real m_electron_temperature_floor = 0.0;
     // Ion thermodynamic closure: "barotropic" (default; p_i from the
     // polytropic law), "total_energy" (E_i evolved as a JFNK block), or
     // "cgl" (bi-Maxwellian: U_par = p_par/2 and U_perp = p_perp evolved
