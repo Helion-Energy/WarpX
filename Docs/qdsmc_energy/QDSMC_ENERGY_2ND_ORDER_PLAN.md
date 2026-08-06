@@ -1023,6 +1023,61 @@ Gate G4: slab with two isothermal walls -> steady linear T profile (const
 kappa) and correct q_wall; EB annulus with T(r_in)=T1, T(r_out)=T2 -> ln r
 profile; budget closure |dE_plasma/dt - Q_wall| at round-off-adjacent levels.
 
+### Thrust D results — domain-face leg BUILT + G4(domain) PASSED (2026-08-05)
+
+**Built** (all conduction forms; instrument `qdsmc_slab_test.py`):
+- Domain-face conduction BCs as boundary-row bath semantics, applied at
+  the end of every conduction substep: `qdsmc_conduction_bc_lo/_hi =
+  adiabatic | isothermal | flux` per grid dim, with
+  `qdsmc_conduction_bc_Te_lo/_hi` (eV) and `..._bc_q_lo/_hi` (W/m^2).
+  Isothermal = pin the boundary node row (grid form of thermal-bath
+  re-emission); flux = per-substep injection q dt/dx with a Te >= 0
+  clamp. Both are exactly TALLIED; cumulative per-(dim, side) wall
+  tallies exposed to Python as `warpx.get_qdsmc_wall_tally(dim, side)`
+  (node-u units, the G4 closure instrument).
+- **Fluxform wall treatment upgraded: hard clamp -> specular fold-back**
+  (method of images, split sweeps; single fold per side, all
+  reconstruction cases via one mass-beyond primitive). The clamp
+  measured as a WALL CONTACT RESISTANCE: the slab interior saw
+  effective wall temperatures ~9.7/4.3 eV instead of the pinned 15/5
+  (profile relL2 0.31, q at 0.64 of exact). Periodic decks are
+  bit-identical (verified) — every recorded gauntlet number stands.
+  The unsplit control arm keeps the clamp (its PLM-exact piece
+  bookkeeping does not extend to folded segments); scatter/layer wall
+  clamps also unfixed (control arms — scatter shows q/q_exact ~ 0.49
+  on the slab for exactly this reason).
+- **Closed-floor-faces rule** (`qdsmc_conduction_closed_floor_faces`,
+  default ON, fluxform): faces touching a floored node carry zero flux
+  and floored donors are excluded — closes the measured vacuum
+  deletion class (PEC rho=0 rows + vacuum_fast_front drift cliff
+  deleting Te(row+-1) in one substep, −6% Sigma at chi=0). No-op on
+  decks without floored nodes (all gauntlet arms bit-identical).
+
+**G4 (domain legs) PASSED** (N=32, fluxform+ppm+npts=3, defaults at
+sp/dx = 0.63): budget closure 8.8e-11 (isothermal) / 2.1e-10 (flux)
+in the gross-tally norm; steady profile relL2 3.96e-4 vs linear;
+q_lo/q_hi = +0.9974/−0.9974 of kappa (T1−T2)/L; flux mode q = 1.0000
+exactly. **Operating envelope: wall-flux fidelity follows the WING hop
+x_max sp** — q/q_exact = 0.9998 at sp/dx = 0.63 but 0.962 at 0.89 and
+0.746 at 1.26 (even-odd near-wall stagger: wing hops > 1 cell couple
+adjacent nodes weakly — the hop-aliasing family again; npts=2's
+shorter wings stay accurate, 1.0041 at 0.89). Keep x_max sp <~ 0.8 dx
+near walls.
+
+*Instrument traps recorded:* (1) the pinned wall rows hold a permanent
+sharp grad Pe whose E field slowly accelerates even 1e6-heavy ions —
+the rho/V_e drift pollutes the closure metric at ~1e-4/step (the slab
+uses mass_factor 1e12 for a truly static background); (2) a
+steady-state closure metric must normalize by the GROSS tally (net
+exchange -> 0 at steady state and inflates a net-normalized metric
+from round-off).
+
+*Open Thrust-D legs:* EB walls (level-set specular reflection +
+cut-face tallies — check the reference algorithm first per the house EB-BC standard);
+the annulus ln-r gate; advection-marker E7 clamp -> reflection;
+scatter/layer wall fold-back; wall tallies -> production reduced
+diagnostics; time/space-dependent T_wall/q_wall parsers.
+
 ---
 
 ## Verification harness (shared infrastructure, Phase 0)

@@ -717,6 +717,56 @@ public:
      *  Input: qdsmc_conduction_fluxform_unsplit. */
     bool m_cond_ff_unsplit = false;
 
+    /** Domain-face conduction BCs on T_e (Thrust D). Per grid dim and
+     *  side: 0 = adiabatic (default; the fluxform wall faces already
+     *  carry F = 0 = exact zero heat flux), 1 = isothermal (the
+     *  boundary node row is a thermal bath pinned to the wall
+     *  temperature after every conduction substep — the grid form of
+     *  bath re-emission; the exchanged energy is tallied), 2 = flux
+     *  (a prescribed heat flux q_wall [W/m^2, positive = into the
+     *  plasma] is injected into the boundary row each substep;
+     *  tallied). Only meaningful on non-periodic dims (asserted at
+     *  first use). Inputs (entries per grid dim):
+     *  qdsmc_conduction_bc_lo / _hi = adiabatic | isothermal | flux,
+     *  qdsmc_conduction_bc_Te_lo / _hi = <eV>,
+     *  qdsmc_conduction_bc_q_lo / _hi = <W/m^2>. */
+    int m_cond_bc[AMREX_SPACEDIM][2] = {};
+    amrex::Real m_cond_bc_Te[AMREX_SPACEDIM][2] = {};
+    amrex::Real m_cond_bc_q[AMREX_SPACEDIM][2] = {};
+
+    /** Cumulative wall-BC energy tallies per (grid dim, side 0=lo/
+     *  1=hi), in node-u units [J/m^3] summed over boundary nodes
+     *  (multiply by the node dual-cell volume for Joules; positive =
+     *  energy added to the plasma). The G4 budget-closure instrument;
+     *  exposed to Python as warpx.get_qdsmc_wall_tally(dim, side). */
+    mutable amrex::Real m_cond_wall_tally[AMREX_SPACEDIM][2] = {};
+
+    amrex::Real GetQdsmcWallTally (int const dim, int const side) const
+    {
+        return m_cond_wall_tally[dim][side];
+    }
+
+    /** Fluxform only: faces touching a floored node (n_e <= n_floor)
+     *  carry zero flux — conduction does not exchange energy with
+     *  effectively-electron-free regions. Closes the measured vacuum
+     *  deletion class (PEC rho=0 rows + vacuum_fast_front drift cliff
+     *  pushed u into floored nodes whose recovery skip then DROPPED
+     *  it: Te(row+-1) -> 0 in one substep, -6% Sigma even at chi = 0 —
+     *  ring-test record). No-op on decks with no floored nodes (all
+     *  gauntlet arms bit-identical). Input:
+     *  qdsmc_conduction_closed_floor_faces. */
+    bool m_cond_closed_floor_faces = true;
+
+    /** Apply the Thrust-D domain-face conduction BCs (isothermal pin /
+     *  prescribed-flux injection) to the boundary node rows and
+     *  accumulate the wall tallies. Called at the end of every
+     *  conduction substep, before the final T_e ghost fill, for all
+     *  conduction forms. rho must be the same density paired with T_e
+     *  in that substep. */
+    void ApplyQdsmcConductionWallBCs (int lev, amrex::Real dt_c,
+                                      amrex::MultiFab & Te,
+                                      amrex::MultiFab const & rho) const;
+
     /** Scatter-form deposit kernel. 0 = hat (2^d CIC + the B1
      *  half-gradient correction). 1 = Keys cubic convolution (a = -1/2,
      *  4^d): partition of unity is exact (conservation stays exact) and
