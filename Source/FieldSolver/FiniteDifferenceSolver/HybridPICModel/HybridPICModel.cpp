@@ -230,6 +230,26 @@ void HybridPICModel::ReadParameters ()
             "using qdsmc_conduction_fluxform_unsplit");
         pp_hybrid.query("qdsmc_conduction_closed_floor_faces",
                         m_cond_closed_floor_faces);
+        std::string ebbc = "adiabatic";
+        pp_hybrid.query("qdsmc_conduction_eb_bc", ebbc);
+        pp_hybrid.query("qdsmc_conduction_eb_ring", m_cond_eb_ring);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_cond_eb_ring >= 1 && m_cond_eb_ring <= 3,
+            "hybrid_pic_model.qdsmc_conduction_eb_ring must be in [1, 3]");
+        if (ebbc == "adiabatic") { m_cond_eb_bc = 0; }
+        else if (ebbc == "isothermal") {
+            m_cond_eb_bc = 1;
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                pp_hybrid.query("qdsmc_conduction_eb_Te(x,y,z)",
+                                m_cond_eb_Te_expression),
+                "hybrid_pic_model.qdsmc_conduction_eb_bc = isothermal "
+                "requires qdsmc_conduction_eb_Te(x,y,z) [eV]");
+        }
+        else {
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.qdsmc_conduction_eb_bc must be "
+                "'adiabatic' or 'isothermal'");
+        }
         // Thrust-D domain-face BCs (per grid dim, lo/hi)
         for (int side = 0; side < 2; ++side) {
             std::string const sfx = (side == 0) ? "_lo" : "_hi";
@@ -527,6 +547,12 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
     m_kappa_perp_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(m_kappa_perp_expression, {"n","Te","t"}));
     m_kappa_perp = m_kappa_perp_parser->compile<3>();
+
+    // Isothermal-EB bath temperature Te(x,y,z) [eV] for the conduction
+    // EB BC (evaluated at covered node positions).
+    m_cond_eb_Te_parser = std::make_unique<amrex::Parser>(
+        utils::parser::makeParser(m_cond_eb_Te_expression, {"x","y","z"}));
+    m_cond_eb_Te = m_cond_eb_Te_parser->compile<3>();
 
 
     // The Te-threshold Joule redirect only acts inside the Joule source.
@@ -2645,15 +2671,70 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
         bool const recon_ppm = (m_cond_reconstruction == 1);
         bool const closed_ff = m_cond_closed_floor_faces;
 
+        // Staircase EB conduction BC (per-sweep-line form, see the
+        // m_cond_eb_bc member doc): covered nodes (nodal level set
+        // <= 0) join the sweep mask.
+        amrex::MultiFab const * eb_dist = EB::enabled()
+            ? warpx.m_fields.get(FieldType::distance_to_eb, lev)
+            : nullptr;
+        bool const has_eb  = (eb_dist != nullptr);
+        bool const eb_adia = has_eb && (m_cond_eb_bc == 0);
+        bool const eb_iso  = has_eb && (m_cond_eb_bc == 1);
+        auto const plo_arr = geom.ProbLoArray();
+        auto const ebTe = m_cond_eb_Te;
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!(ff_unsplit && has_eb),
+            "qdsmc_conduction_fluxform_unsplit is a periodic-instrument "
+            "control arm and has no EB wall handling; use the split "
+            "sweeps with embedded boundaries");
+
         // Per-node branch kinematics: hop-clamped Ito drift (physical
         // axes), unit b, and the two quadrature sigmas. e1/e2 are rebuilt
         // from b wherever needed (deterministic), keeping the branch
         // displacement field single-valued across kernels.
         enum Kin : int { k_ax = 0, k_ay, k_az, k_bx, k_by, k_bz,
-                         k_sp, k_sq, k_msk, k_ncomp };
+                         k_sp, k_sq, k_msk, k_ebm, k_ncomp };
         amrex::MultiFab kin(Te.boxArray(), Te.DistributionMap(),
                             Kin::k_ncomp, ng_f);
         kin.setVal(0.0_rt);
+        // masks default OPEN so untouched domain ghosts never read as
+        // walls (FillBoundary does not fill non-periodic domain ghosts)
+        kin.setVal(1.0_rt, Kin::k_msk, 1, ng_f);
+        kin.setVal(1.0_rt, Kin::k_ebm, 1, ng_f);
+
+        // Mask pass first (floored + EB-covered), then a ghost fill, so
+        // the drift pass below can clamp its stencils one-sided at mask
+        // boundaries (the D/grad-ln-n cliff at floors and covered bands
+        // is the measured drift-kick class of the ring-test record).
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(kin, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            amrex::Box const box = mfi.tilebox();
+            amrex::Array4<amrex::Real>       const & kn      = kin.array(mfi);
+            amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+            if (has_eb) {
+                amrex::Array4<amrex::Real const> const & phi =
+                    eb_dist->const_array(mfi);
+                amrex::ParallelFor(box,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    kn(i,j,k,Kin::k_msk) =
+                        (rho_arr(i,j,k)/qe > n_floor) ? 1.0_rt : 0.0_rt;
+                    kn(i,j,k,Kin::k_ebm) =
+                        (phi(i,j,k) > 0.0_rt) ? 1.0_rt : 0.0_rt;
+                });
+            } else {
+                amrex::ParallelFor(box,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    kn(i,j,k,Kin::k_msk) =
+                        (rho_arr(i,j,k)/qe > n_floor) ? 1.0_rt : 0.0_rt;
+                });
+            }
+        }
+        ablastr::utils::communication::FillBoundary(
+            kin, WarpX::do_single_precision_comms, period, true);
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -2692,6 +2773,24 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                         if (!is_per[g]) {
                             cp = amrex::min(cp, dom_hi[g]);
                             cm = amrex::max(cm, dom_lo[g]);
+                        }
+                        // one-sided at mask boundaries: the parser chi
+                        // at floored/covered nodes is not physical, and
+                        // the cliff drift its central difference implies
+                        // is the measured wall-kick class (ring-test
+                        // record). Masks are stable pre-pass data.
+                        {
+                            int pmc[3] = {i, j, k};
+                            pmc[g] = cp;
+                            if (kn(pmc[0],pmc[1],pmc[2],Kin::k_msk) == 0.0_rt ||
+                                kn(pmc[0],pmc[1],pmc[2],Kin::k_ebm) == 0.0_rt) {
+                                cp = node[g];
+                            }
+                            pmc[g] = cm;
+                            if (kn(pmc[0],pmc[1],pmc[2],Kin::k_msk) == 0.0_rt ||
+                                kn(pmc[0],pmc[1],pmc[2],Kin::k_ebm) == 0.0_rt) {
+                                cm = node[g];
+                            }
                         }
                         if (cp == cm) {
                             for (int r = 0; r < 3; ++r) { dD[r][ax] = 0.0_rt; }
@@ -2735,9 +2834,6 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                     std::sqrt(2.0_rt*c_arr(i,j,k,Cond::c_chip)*dt_c);
                 kn(i,j,k,Kin::k_sq) =
                     std::sqrt(2.0_rt*c_arr(i,j,k,Cond::c_chiq)*dt_c);
-                // floored-node mask for the closed-floor-face rule
-                kn(i,j,k,Kin::k_msk) =
-                    (rho_arr(i,j,k)/qe > n_floor) ? 1.0_rt : 0.0_rt;
             });
         }
         ablastr::utils::communication::FillBoundary(
@@ -2838,6 +2934,17 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                 amrex::Array4<amrex::Real const> const & kn = kin.const_array(mfi);
                 amrex::ParallelFor(gbox, [=] AMREX_GPU_DEVICE (int i, int j, int k)
                 {
+                    // masked nodes (floored or EB-covered) carry no
+                    // displacement: their cap-sized fast-front hops
+                    // must not pollute the edge interpolation of
+                    // adjacent fluid donors
+                    if (kn(i,j,k,Kin::k_msk) == 0.0_rt ||
+                        kn(i,j,k,Kin::k_ebm) == 0.0_rt) {
+                        for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                            dv(i,j,k,dd) = 0.0_rt;
+                        }
+                        return;
+                    }
                     amrex::Real const bxv = kn(i,j,k,Kin::k_bx);
                     amrex::Real const byv = kn(i,j,k,Kin::k_by);
                     amrex::Real const bzv = kn(i,j,k,Kin::k_bz);
@@ -3273,15 +3380,49 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                             p[d] = clampd(c);
                             return us(p[0], p[1], p[2]);
                         };
+                        // EB staircase masks along the sweep line (see
+                        // the m_cond_eb_bc member doc); short-circuit to
+                        // the pre-EB path when no EB is present.
+                        auto covered = [&] (int const c) {
+                            if (!has_eb) { return false; }
+                            int p[3] = {i, j, k};
+                            p[d] = c;
+                            return kmk(p[0],p[1],p[2],Kin::k_ebm) == 0.0_rt;
+                        };
+                        auto floored_ln = [&] (int const c) {
+                            int p[3] = {i, j, k};
+                            p[d] = c;
+                            return kmk(p[0],p[1],p[2],Kin::k_msk) == 0.0_rt;
+                        };
+                        // faces closed by the floor rule: floored AND
+                        // not EB-covered (covered nodes are the wall's
+                        // business — the fold — not the floor's)
+                        auto blocked = [&] (int const c) {
+                            return floored_ln(c) && !covered(c);
+                        };
+                        // mask-aware stencil read from center cc:
+                        // covered reads become a zero-gradient ghost.
+                        // (A bath-DONOR formulation was measured broken:
+                        // masked donors carry zero displacement, so a
+                        // bath that never hops only absorbs — one-way
+                        // drain toward Te = 0. The isothermal EB instead
+                        // folds like the adiabatic wall and pins the
+                        // wall-adjacent fluid ring after recovery, the
+                        // slab-validated bath semantics.)
+                        auto u_rd = [&] (int const c, int const cc) {
+                            if (covered(c)) { return u_at(cc); }
+                            return u_at(c);
+                        };
                         // MC-limited PLM slope of u along the sweep axis
                         // (per index unit); one-sided wall stencils
                         // degenerate to zero slope via the index clamp.
                         // slim_off = unlimited central slopes (diagnostic
                         // control arm, see the knob doc).
                         auto slope_at = [&] (int const c) {
+                            if (covered(c)) { return 0.0_rt; }
                             amrex::Real const uc  = u_at(c);
-                            amrex::Real const dfp = u_at(c + 1) - uc;
-                            amrex::Real const dfm = uc - u_at(c - 1);
+                            amrex::Real const dfp = u_rd(c + 1, c) - uc;
+                            amrex::Real const dfm = uc - u_rd(c - 1, c);
                             if (slim_off) {
                                 return 0.5_rt*(dfp + dfm);
                             }
@@ -3308,9 +3449,9 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                                               amrex::Real & du6,
                                               amrex::Real & u6)
                         {
-                            amrex::Real const um1 = u_at(c - 1);
+                            amrex::Real const um1 = u_rd(c - 1, c);
                             amrex::Real const uc  = u_at(c);
-                            amrex::Real const up1 = u_at(c + 1);
+                            amrex::Real const up1 = u_rd(c + 1, c);
                             amrex::Real uR = uc + 0.5_rt*(up1 - uc)
                                 - (slope_at(c + 1) - slope_at(c))
                                   /6.0_rt;
@@ -3360,18 +3501,18 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                                 (fn < dom_lo[d] || fn >= dom_hi[d])) {
                                 return 0.0_rt;   // wall face: adiabatic
                             }
-                            if (closed_ff) {
-                                // faces touching a floored node carry no
-                                // flux (vacuum deletion class closed)
-                                int plo[3] = {i, j, k};
-                                int phi[3] = {i, j, k};
-                                plo[d] = fn; phi[d] = fn + 1;
-                                if (kmk(plo[0],plo[1],plo[2],Kin::k_msk)
-                                        == 0.0_rt ||
-                                    kmk(phi[0],phi[1],phi[2],Kin::k_msk)
-                                        == 0.0_rt) {
-                                    return 0.0_rt;
-                                }
+                            if (has_eb &&
+                                (covered(fn) || covered(fn + 1))) {
+                                // EB wall face (adiabatic): the fold
+                                // below returns everything, nothing
+                                // crosses
+                                return 0.0_rt;
+                            }
+                            if (closed_ff &&
+                                (blocked(fn) || blocked(fn + 1))) {
+                                // faces touching a floored (non-EB) node
+                                // carry no flux (vacuum deletion class)
+                                return 0.0_rt;
                             }
                             amrex::Real const sf = amrex::Real(fn) + 0.5_rt;
                             int const W =
@@ -3426,45 +3567,66 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                                     // floored donors carry no heat (their
                                     // cap-sized fast-front hops must not
                                     // flux sub-floor u into the interior)
-                                    int pd[3] = {i, j, k};
-                                    pd[d] = c;
-                                    skip = (kmk(pd[0],pd[1],pd[2],
-                                                Kin::k_msk) == 0.0_rt);
+                                    skip = blocked(c);
+                                }
+                                if (!skip && has_eb) {
+                                    // covered donors are the fold's
+                                    // mirror image, not mass
+                                    skip = covered(c);
                                 }
                                 if (!skip) {
                                     amrex::Real const L =
                                         amrex::Real(c) - 0.5_rt + dlo;
                                     amrex::Real const R =
                                         amrex::Real(c) + 0.5_rt + dhi;
-                                    amrex::Real mright;
-                                    if (is_per[d]) {
-                                        mright = mass_beyond(c, L, R, sf);
-                                    } else {
-                                        // specular fold-back at the
-                                        // walls (method of images). The
-                                        // former hard clamp squashed
-                                        // wing images against the wall
-                                        // and measured as a wall contact
-                                        // resistance: the slab interior
-                                        // saw effective wall
-                                        // temperatures ~9.7/4.3 eV
-                                        // instead of the pinned 15/5.
-                                        // beyond(sf) = direct + mass
-                                        // reflected back past sf at the
-                                        // hi wall + mass reflected
-                                        // forward past sf at the lo wall
-                                        amrex::Real const wlo =
-                                            amrex::Real(dom_lo[d]) - 0.5_rt;
-                                        amrex::Real const whi =
-                                            amrex::Real(dom_hi[d]) + 0.5_rt;
-                                        mright =
-                                            mass_beyond(c, L, R, sf)
-                                            - mass_beyond(c, L, R,
-                                                  2.0_rt*whi - sf)
-                                            + u_at(c)
-                                            - mass_beyond(c, L, R,
-                                                  2.0_rt*wlo - sf);
+                                    // Specular fold-back walls (method
+                                    // of images): domain walls on
+                                    // non-periodic dims, plus per-line
+                                    // EB walls at the covered-mask
+                                    // boundary (adiabatic EB only; the
+                                    // isothermal bath keeps its faces
+                                    // open). Sentinel walls at +-1e30
+                                    // reduce the 3-term formula to the
+                                    // plain mass-beyond bit-exactly.
+                                    // The former hard clamp measured as
+                                    // a wall contact resistance (slab
+                                    // interior saw ~9.7/4.3 eV instead
+                                    // of the pinned 15/5).
+                                    amrex::Real wlo = -1.0e30_rt;
+                                    amrex::Real whi =  1.0e30_rt;
+                                    if (!is_per[d]) {
+                                        wlo = amrex::Real(dom_lo[d])
+                                              - 0.5_rt;
+                                        whi = amrex::Real(dom_hi[d])
+                                              + 0.5_rt;
                                     }
+                                    if (has_eb) {
+                                        for (int cw = fn; cw >= fn - W;
+                                             --cw) {
+                                            if (covered(cw)) {
+                                                wlo = amrex::max(wlo,
+                                                    amrex::Real(cw)
+                                                    + 0.5_rt);
+                                                break;
+                                            }
+                                        }
+                                        for (int cw = fn + 1;
+                                             cw <= fn + W + 1; ++cw) {
+                                            if (covered(cw)) {
+                                                whi = amrex::min(whi,
+                                                    amrex::Real(cw)
+                                                    - 0.5_rt);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    amrex::Real mright =
+                                        (mass_beyond(c, L, R, sf)
+                                         - mass_beyond(c, L, R,
+                                               2.0_rt*whi - sf))
+                                        + (u_at(c)
+                                           - mass_beyond(c, L, R,
+                                                 2.0_rt*wlo - sf));
                                     if (c >= fn + 1) { mright -= u_at(c); }
                                     F += mright;
                                 }
@@ -3483,9 +3645,9 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
             amrex::MultiFab::Saxpy(u_acc, w_branch, *src, 0, 0, 1, 0);
         }}}
 
-        // Recovery (scatter Pass-3 semantics): floored nodes keep their
-        // previous T_e; dividing by the same n_e that built u keeps the
-        // zero-displacement identity exact.
+        // Recovery (scatter Pass-3 semantics): floored and EB-covered
+        // nodes keep their previous T_e; dividing by the same n_e that
+        // built u keeps the zero-displacement identity exact.
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -3495,14 +3657,104 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
             amrex::Array4<amrex::Real>       const & Te_arr  = Te.array(mfi);
             amrex::Array4<amrex::Real const> const & u_arr   = u_acc.const_array(mfi);
             amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+            amrex::Array4<amrex::Real const> const & kn      = kin.const_array(mfi);
 
             amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
+                if (has_eb && kn(i,j,k,Kin::k_ebm) == 0.0_rt) { return; }
                 if (rho_arr(i,j,k) <= 0.0_rt) { return; }
                 amrex::Real const ne = rho_arr(i,j,k) / qe;
                 if (ne <= n_floor) { return; }
                 Te_arr(i,j,k) = u_arr(i,j,k) / (1.5_rt * kb * ne);
             });
+        }
+
+        // Isothermal EB: pin the wall-adjacent fluid ring (every fluid
+        // node with a covered face neighbor) to the parser T_wall at
+        // its position — the per-line form of thermal-bath re-emission,
+        // the same slab-validated semantics as the domain pins — and
+        // tally the exchange (positive = energy into the plasma).
+        if (eb_iso) {
+            int const eb_ring = m_cond_eb_ring;
+            amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
+            amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+            using ReduceTuple = typename decltype(reduce_data)::Type;
+            for (MFIter mfi(Te, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                amrex::Box tile_box = mfi.tilebox();
+                {   // unique node ownership (fixup-loop seam trim)
+                    amrex::Box const box_nodes =
+                        amrex::surroundingNodes(mfi.validbox());
+                    for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                        if (tile_box.bigEnd(dd) == box_nodes.bigEnd(dd) &&
+                            (box_nodes.bigEnd(dd) != dom_nodes.bigEnd(dd) ||
+                             geom.isPeriodic(dd))) {
+                            tile_box.growHi(dd, -1);
+                        }
+                    }
+                }
+                amrex::Array4<amrex::Real>       const & Te_arr = Te.array(mfi);
+                amrex::Array4<amrex::Real const> const & rho_arr =
+                    rho.const_array(mfi);
+                amrex::Array4<amrex::Real const> const & kn =
+                    kin.const_array(mfi);
+                reduce_op.eval(tile_box, reduce_data,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
+                {
+                    if (kn(i,j,k,Kin::k_ebm) == 0.0_rt) { return {0.0_rt}; }
+                    amrex::Real const ne = rho_arr(i,j,k) / qe;
+                    if (ne <= 0.0_rt) { return {0.0_rt}; }
+                    // wall ring = any covered node within Chebyshev
+                    // distance eb_ring. Depth 1 with face adjacency
+                    // measured a big contact drop (staircase jags
+                    // block tangent lines); diagonals halved it; the
+                    // remaining non-convergent drain was the DEPOSITION
+                    // DENSITY RAMP at the wall — the flux form moves
+                    // u = n T, and across an unresolved n cliff the
+                    // discrete Ito drift under-corrects, so u leaks
+                    // toward the low-density band where the pins eat
+                    // it (interior measured BELOW both bath
+                    // temperatures). Default depth 2 puts the whole
+                    // ramp inside the bath; the O(dx)-convergent
+                    // geometric radius shift is the price.
+                    bool ring = false;
+                    int const node[3] = {i, j, k};
+                    int const rr = eb_ring;
+#if defined(WARPX_DIM_3D)
+                    for (int ok = -rr; ok <= rr; ++ok) {
+#else
+                    int const ok = 0;
+                    {
+#endif
+                    for (int oj = -rr; oj <= rr; ++oj) {
+                    for (int oi = -rr; oi <= rr; ++oi) {
+                        if (oi == 0 && oj == 0 && ok == 0) { continue; }
+                        ring = ring ||
+                            (kn(node[0]+oi, node[1]+oj, node[2]+ok,
+                                Kin::k_ebm) == 0.0_rt);
+                    }}}
+                    if (!ring) { return {0.0_rt}; }
+                    amrex::Real cx[3] = {0.0_rt, 0.0_rt, 0.0_rt};
+                    for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                        cx[dd] = plo_arr[dd]
+                            + amrex::Real(node[dd])*dx_arr[dd];
+                    }
+#if defined(WARPX_DIM_3D)
+                    amrex::Real const Te_eV = ebTe(cx[0], cx[1], cx[2]);
+#else
+                    amrex::Real const Te_eV = ebTe(cx[0], 0.0_rt, cx[1]);
+#endif
+                    amrex::Real const TwK = Te_eV * qe / kb;
+                    amrex::Real const du =
+                        1.5_rt * kb * ne * (TwK - Te_arr(i,j,k));
+                    Te_arr(i,j,k) = TwK;
+                    return {du};
+                });
+            }
+            auto tup = reduce_data.value(reduce_op);
+            amrex::Real tly = amrex::get<0>(tup);
+            amrex::ParallelDescriptor::ReduceRealSum(tly);
+            m_cond_eb_tally += tly;
         }
         ApplyQdsmcConductionWallBCs(lev, dt_c, Te, rho);
         ablastr::utils::communication::FillBoundary(

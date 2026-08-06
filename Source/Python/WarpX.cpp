@@ -292,5 +292,13 @@ void init_WarpX (py::module& m)
             "[J/m^3] summed over boundary nodes (positive = energy "
             "added to the plasma)."
         )
+        .def("get_qdsmc_eb_tally",
+            [](WarpX& wx) {
+                return wx.get_pointer_HybridPICModel()->GetQdsmcEbTally();
+            },
+            "Cumulative QDSMC conduction embedded-boundary energy tally "
+            "(isothermal EB BC), node-u units [J/m^3] summed over fluid "
+            "nodes (positive = energy added to the plasma)."
+        )
     ;
 }

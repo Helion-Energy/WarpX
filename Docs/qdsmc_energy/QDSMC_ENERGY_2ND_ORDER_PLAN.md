@@ -1078,6 +1078,75 @@ the annulus ln-r gate; advection-marker E7 clamp -> reflection;
 scatter/layer wall fold-back; wall tallies -> production reduced
 diagnostics; time/space-dependent T_wall/q_wall parsers.
 
+### Thrust D EB leg — per-line staircase BCs BUILT + G4(EB) PASSED (2026-08-06)
+
+**Provenance**: Eric pointed at the conformal/collocated EB branches;
+found there: `EBJBoundary.{H,cpp}` on the 7028 stack (`mirror_geom` /
+`mirror_combine` / `ApplyEBBoundaryToNodalScalar` even-odd nodal mirror
+/ `FoldEBDeposit*` + the corner-fan lesson that forced
+`DivFreeFixCoveredB`), and the `dsmc-eb-reflection` branch (bisected
+particle EB reflection + thermal re-emission functor — the future
+advection-marker leg). Decision (Eric): build the NO-DEPENDENCY
+per-line form now — the 7028 stack is unmerged, and per-sweep-line 1D
+folds need no boundary normals at all, sidestepping the staircase
+corner-fan pathology that the covered-B mirror campaign had to repair.
+
+**Built** (fluxform split sweeps; scatter/layer keep pre-EB behavior,
+unsplit aborts under EB; upstream nodal `distance_to_eb` is the only
+geometry input):
+- Covered nodes (level set <= 0) join the sweep masks (`k_ebm`,
+  separate from the floor mask). Per face, each sweep line scans its
+  window for the nearest covered node per side and folds donor images
+  specularly at that local wall face — the domain-wall method-of-images
+  machinery with per-line wall positions (sentinel walls at +-1e30
+  reduce the formula to the periodic path bit-exactly). Mask-boundary
+  faces carry zero flux; covered donors are skipped; covered stencil
+  reads become zero-gradient ghosts; masked nodes carry zero dsp (their
+  cap-sized fast-front hops must not pollute fluid edge interpolation);
+  the drift stencils go one-sided at mask boundaries (kills the D-cliff
+  wall-kick class of the ring-test record); recovery skips covered
+  nodes.
+- `qdsmc_conduction_eb_bc = adiabatic` (default): the fold alone —
+  exactly conservative (measured: Sigma drift 1e-11 RELATIVE over 384
+  steps with a blob diffusing along the curved staircase wall).
+- `qdsmc_conduction_eb_bc = isothermal`: the fold PLUS the wall ring
+  (fluid nodes within Chebyshev distance `qdsmc_conduction_eb_ring`,
+  default 2, of a covered node) pinned to the
+  `qdsmc_conduction_eb_Te(x,y,z)` parser [eV] each substep, exchange
+  tallied exactly (`warpx.get_qdsmc_eb_tally()`).
+
+**Two measured design dead-ends recorded:**
+1. *Bath DONORS* (covered donors carrying bath u): masked donors have
+   zero displacement, so the bath absorbs but never emits — one-way
+   drain, Te -> 0. Isothermal must be fold + pin.
+2. *Thin pin rings*: face-adjacent-only ring left a
+   resolution-INDEPENDENT contact drop (N=64 fit endpoints 10.61/3.13,
+   N=128 9.88/3.17 vs pins 15/5) — staircase jags block tangent lines,
+   and worse, the deposition DENSITY RAMP at the wall sits outside the
+   bath: the flux form moves u = n T, and across an unresolved n cliff
+   the discrete Ito drift under-corrects, so u leaks down-density and
+   the pins eat it (the interior settled BELOW both bath
+   temperatures — impossible for true bath diffusion). Diagonal
+   adjacency halved it; ring depth 2 (covering the ramp) removed it.
+
+**G4(EB) PASSED** (`qdsmc_annulus_test.py`, N=64, chi 2e3, ppm/npts=3,
+ring 2): the steady field is the ln-r solution between the RING-SHIFTED
+bath radii — fit T(r1+2dx) = 15.07 / T(r2-2dx) = 4.83 eV for pins
+15/5, relL2 vs the shifted analytic profile 1.61e-2 (staircase
+azimuthal ripple included), budget closure 2.3e-11, fully steady (2x
+duration bit-reproduces). The ring intrusion is the O(dx)-convergent
+geometric price (nominal radii read 17.65/3.71 by extrapolation past
+the baths). No-EB decks bit-identical (aligned anchor re-verified after
+every rework); slab G4 re-passes; CI matrix 9/9 at baseline budgets.
+
+*Open after this leg:* sub-cell per-line wall positions from the
+level-set crossing (needs cut-cell partial volumes — pairs with the
+7028 mirror-machinery merge); prescribed-flux EB; advection-marker EB
+reflection (port `dsmc-eb-reflection`); scatter/layer EB;
+`qdsmc_conduction_eb_ring` sensitivity on resolved sheaths (a real
+density ramp WANTS to be outside the bath — revisit when n is not a
+deposition artifact).
+
 ---
 
 ## Verification harness (shared infrastructure, Phase 0)
