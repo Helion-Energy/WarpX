@@ -205,6 +205,22 @@ void HybridPICModel::ReadParameters ()
                 "hybrid_pic_model.qdsmc_conduction_slope_limiter must be "
                 "'mc' or 'none'");
         }
+        pp_hybrid.query("qdsmc_conduction_fluxform_unsplit",
+                        m_cond_ff_unsplit);
+        std::string recon = "plm";
+        pp_hybrid.query("qdsmc_conduction_reconstruction", recon);
+        if (recon == "plm") { m_cond_reconstruction = 0; }
+        else if (recon == "ppm") { m_cond_reconstruction = 1; }
+        else {
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.qdsmc_conduction_reconstruction must be "
+                "'plm' or 'ppm'");
+        }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !(m_cond_reconstruction == 1 && m_cond_ff_unsplit),
+            "hybrid_pic_model.qdsmc_conduction_reconstruction = ppm is "
+            "implemented for the split fluxform sweeps only (the unsplit "
+            "donor piece bookkeeping is PLM-exact)");
         std::string fctl = "bb";
         pp_hybrid.query("qdsmc_conduction_fct_limiter", fctl);
         if (fctl == "bb") { m_cond_fct_limiter = 0; }
@@ -2486,6 +2502,8 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
         int constexpr ff_rmax = 6;
         int const ng_f = 3*ff_rmax + 4;
         bool const slim_off = (m_cond_slope_limiter == 1);
+        bool const ff_unsplit = m_cond_ff_unsplit;
+        bool const recon_ppm = (m_cond_reconstruction == 1);
 
         // Per-node branch kinematics: hop-clamped Ito drift (physical
         // axes), unit b, and the two quadrature sigmas. e1/e2 are rebuilt
@@ -2703,6 +2721,290 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                 });
             }
 
+            // --- Unsplit donor transport (C.7d fork (b), CSLAM-style) ---
+            // The split sweeps below remap the INTERMEDIATE field, losing
+            // donor identity between sweeps -- the residual splitting
+            // error measured as the curvature leak (GF3). Here each donor
+            // dual cell is instead carried through ALL sweep legs with
+            // its OWN displacement, edge-evaluated at the donor's
+            // material centers of the earlier legs (no pull-back, no
+            // intermediate reconstruction): the composed per-donor map is
+            // the bilinear corner image, so cross/corner transport
+            // happens within a single branch remap. Every leg keeps the
+            // forward-donor construction (fold = point mass, positivity
+            // unconditional, F = 0 exact at zero displacement), fluxes
+            // stay face-local and deterministic from both neighbors
+            // (telescoping-exact conservation, race-free, OMP-threaded),
+            // and the per-leg piece bookkeeping is exact for the PLM
+            // reconstruction (linear integrands, midpoint-exact), so the
+            // flux update reproduces the per-donor composed deposit to
+            // machine. All dims' fluxes act on the frozen u0 in one shot:
+            // u_branch = u0 - sum_p div_p F^p (no sweep ping-pong).
+            if (ff_unsplit)
+            {
+                // Donor windows scale with the measured branch
+                // displacement, not the rhop clamp (decks park the chi
+                // cap with a large max_hop; the actual hops are what
+                // bound the reach). norm0 is a global reduction, so the
+                // windows are identical on every rank (determinism).
+                amrex::GpuArray<int, 3> W3 = {0, 0, 0};
+                for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                    amrex::Real const wmax =
+                        amrex::min(rhop3[dd], dsp.norm0(dd, 0));
+                    W3[dd] = static_cast<int>(std::ceil(wmax)) + 1;
+                }
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+                for (MFIter mfi(u_b, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+                {
+                    amrex::Box const box = mfi.tilebox();
+                    amrex::Array4<amrex::Real>       const & ud = u_b.array(mfi);
+                    amrex::Array4<amrex::Real const> const & us = u0.const_array(mfi);
+                    amrex::Array4<amrex::Real const> const & dv = dsp.const_array(mfi);
+
+                    amrex::ParallelFor(box,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    {
+                        int const node[3] = {i, j, k};
+
+                        // multilinear read of a dsp component at the
+                        // fractional index position q (grid dims)
+                        auto dinterp = [&] (amrex::Real const * q, int const dc)
+                        {
+                            int ib[3] = {i, j, k};
+                            amrex::Real fb[3] = {0.0_rt, 0.0_rt, 0.0_rt};
+                            for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                                amrex::Real s = q[dd];
+                                if (!is_per[dd]) {
+                                    s = amrex::min(amrex::max(s,
+                                        amrex::Real(dom_lo[dd])),
+                                        amrex::Real(dom_hi[dd]));
+                                }
+                                auto const fl = std::floor(s);
+                                ib[dd] = static_cast<int>(fl);
+                                fb[dd] = s - fl;
+                            }
+                            amrex::Real acc = 0.0_rt;
+                            for (int cn = 0; cn < (1 << AMREX_SPACEDIM); ++cn) {
+                                int idx[3] = {ib[0], ib[1], ib[2]};
+                                amrex::Real w = 1.0_rt;
+                                for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                                    if (cn & (1 << dd)) { idx[dd] += 1; w *= fb[dd]; }
+                                    else                { w *= 1.0_rt - fb[dd]; }
+                                    if (!is_per[dd]) {
+                                        idx[dd] = amrex::min(
+                                            amrex::max(idx[dd], dom_lo[dd]),
+                                            dom_hi[dd]);
+                                    }
+                                }
+                                acc += w * dv(idx[0], idx[1], idx[2], dc);
+                            }
+                            return acc;
+                        };
+
+                        auto u_at = [&] (int const * c) {
+                            int p[3] = {c[0], c[1], c[2]};
+                            for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                                if (!is_per[dd]) {
+                                    p[dd] = amrex::min(
+                                        amrex::max(p[dd], dom_lo[dd]),
+                                        dom_hi[dd]);
+                                }
+                            }
+                            return us(p[0], p[1], p[2]);
+                        };
+                        // MC-limited PLM slope of u0 at donor c along
+                        // grid dim dd (per index unit); one-sided wall
+                        // stencils degenerate to zero via the clamp.
+                        auto slope_at = [&] (int const * c, int const dd) {
+                            int cp[3] = {c[0], c[1], c[2]};
+                            int cm[3] = {c[0], c[1], c[2]};
+                            cp[dd] += 1; cm[dd] -= 1;
+                            amrex::Real const uc  = u_at(c);
+                            amrex::Real const dfp = u_at(cp) - uc;
+                            amrex::Real const dfm = uc - u_at(cm);
+                            if (slim_off) {
+                                return 0.5_rt*(dfp + dfm);
+                            }
+                            amrex::Real g = 0.0_rt;
+                            if (dfp*dfm > 0.0_rt) {
+                                amrex::Real const sgn =
+                                    (dfp > 0.0_rt) ? 1.0_rt : -1.0_rt;
+                                g = sgn*amrex::min(2.0_rt*std::abs(dfp),
+                                                   2.0_rt*std::abs(dfm),
+                                                   0.5_rt*std::abs(dfp + dfm));
+                            }
+                            return g;
+                        };
+
+                        // 1D affine leg map of donor D along grid dim
+                        // dd, edges displaced at the material position
+                        // mpos (earlier legs' piece centers): the SAME
+                        // computation whether the leg is being fluxed
+                        // (final) or walked through (prior), which is
+                        // what makes the composed telescoping exact.
+                        auto leg_map = [&] (int const * D,
+                                            amrex::Real const * mpos,
+                                            int const dd,
+                                            amrex::Real & L, amrex::Real & R)
+                        {
+                            amrex::Real qe_[3] = {mpos[0], mpos[1], mpos[2]};
+                            qe_[dd] = amrex::Real(D[dd]) - 0.5_rt;
+                            L = qe_[dd] + dinterp(qe_, dd);
+                            qe_[dd] = amrex::Real(D[dd]) + 0.5_rt;
+                            R = qe_[dd] + dinterp(qe_, dd);
+                            if (!is_per[dd]) {
+                                // adiabatic: images stay inside
+                                amrex::Real const blo =
+                                    amrex::Real(dom_lo[dd]) - 0.5_rt
+                                    + 1.0e-6_rt;
+                                amrex::Real const bhi =
+                                    amrex::Real(dom_hi[dd]) + 0.5_rt
+                                    - 1.0e-6_rt;
+                                L = amrex::min(amrex::max(L, blo), bhi);
+                                R = amrex::min(amrex::max(R, blo), bhi);
+                            }
+                        };
+
+                        // Composed forward-donor contribution of donor D
+                        // to the flux through face fn+1/2 of pass p (dim
+                        // e): walk the prior legs to find the donor's
+                        // piece in the face's transverse columns (the
+                        // piece selection reproduces those legs' flux
+                        // telescoping exactly, fold rule included), then
+                        // apply the 1D forward-donor mass-beyond rule on
+                        // the final leg with the piece's marginal PLM
+                        // line density.
+                        auto donor_contrib = [&] (int const * D, int const p,
+                                                  int const e, int const fn)
+                        {
+                            amrex::Real mpos[3] = {amrex::Real(D[0]),
+                                                   amrex::Real(D[1]),
+                                                   amrex::Real(D[2])};
+                            amrex::Real fprod  = 1.0_rt;
+                            amrex::Real du_off = 0.0_rt;
+                            for (int qq = 0; qq < p; ++qq) {
+                                int const eq = order_arr[qq];
+                                amrex::Real L, R;
+                                leg_map(D, mpos, eq, L, R);
+                                amrex::Real const wid = R - L;
+                                amrex::Real const clo =
+                                    amrex::Real(node[eq]) - 0.5_rt;
+                                amrex::Real const chi_c =
+                                    amrex::Real(node[eq]) + 0.5_rt;
+                                if (wid <= 1.0e-10_rt) {
+                                    // folded donor: point mass; the
+                                    // (lo, hi] membership matches the
+                                    // telescoped (mid > sf) flux rule
+                                    amrex::Real const mid = 0.5_rt*(L + R);
+                                    if (!(mid > clo && mid <= chi_c)) {
+                                        return 0.0_rt;
+                                    }
+                                    // piece = whole donor, center kept
+                                } else {
+                                    amrex::Real const a = amrex::max(L, clo);
+                                    amrex::Real const b = amrex::min(R, chi_c);
+                                    if (b <= a) { return 0.0_rt; }
+                                    amrex::Real const xi1 =
+                                        amrex::Real(D[eq]) - 0.5_rt
+                                        + (a - L)/wid;
+                                    amrex::Real const xi2 =
+                                        amrex::Real(D[eq]) - 0.5_rt
+                                        + (b - L)/wid;
+                                    fprod *= (xi2 - xi1);
+                                    amrex::Real const cq =
+                                        0.5_rt*(xi1 + xi2)
+                                        - amrex::Real(D[eq]);
+                                    du_off += slope_at(D, eq) * cq;
+                                    mpos[eq] = amrex::Real(D[eq]) + cq;
+                                }
+                            }
+                            // final leg along e on the piece's marginal
+                            // line density (mean mbar, slope c1)
+                            amrex::Real L, R;
+                            leg_map(D, mpos, e, L, R);
+                            amrex::Real const mbar =
+                                fprod * (u_at(D) + du_off);
+                            amrex::Real const c1 = fprod * slope_at(D, e);
+                            amrex::Real const sf = amrex::Real(fn) + 0.5_rt;
+                            amrex::Real const wid = R - L;
+                            amrex::Real mright;
+                            if (wid <= 1.0e-10_rt) {
+                                mright = (0.5_rt*(L + R) > sf)
+                                    ? mbar : 0.0_rt;
+                            } else if (sf <= L) {
+                                mright = mbar;
+                            } else if (sf >= R) {
+                                mright = 0.0_rt;
+                            } else {
+                                amrex::Real const xs = amrex::Real(D[e])
+                                    - 0.5_rt + (sf - L)/wid;
+                                amrex::Real const dx_hi = 0.5_rt;
+                                amrex::Real const dx_lo =
+                                    xs - amrex::Real(D[e]);
+                                mright = (dx_hi - dx_lo)*mbar
+                                    + 0.5_rt*c1
+                                    *(dx_hi*dx_hi - dx_lo*dx_lo);
+                            }
+                            if (D[e] >= fn + 1) { mright -= mbar; }
+                            return mright;
+                        };
+
+                        // Flux through face fn+1/2 of pass p (dim e).
+                        // Windows are face/column-centered (never node-
+                        // centered), so both neighbors of a face run the
+                        // identical donor loop and get bit-identical F.
+                        auto face_flux = [&] (int const p, int const e,
+                                              int const fn)
+                        {
+                            if (!is_per[e] &&
+                                (fn < dom_lo[e] || fn >= dom_hi[e])) {
+                                return 0.0_rt;   // wall face: adiabatic
+                            }
+                            int wlo[3] = {node[0], node[1], node[2]};
+                            int whi[3] = {node[0], node[1], node[2]};
+                            wlo[e] = fn - W3[e];
+                            whi[e] = fn + W3[e] + 1;
+                            for (int qq = 0; qq < p; ++qq) {
+                                int const eq = order_arr[qq];
+                                wlo[eq] = node[eq] - W3[eq];
+                                whi[eq] = node[eq] + W3[eq];
+                            }
+                            amrex::Real F = 0.0_rt;
+                            int D[3];
+                            for (D[2] = wlo[2]; D[2] <= whi[2]; ++D[2]) {
+                            for (D[1] = wlo[1]; D[1] <= whi[1]; ++D[1]) {
+                            for (D[0] = wlo[0]; D[0] <= whi[0]; ++D[0]) {
+                                bool skip = false;
+                                for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                                    if (!is_per[dd] &&
+                                        (D[dd] < dom_lo[dd] ||
+                                         D[dd] > dom_hi[dd])) {
+                                        skip = true;
+                                    }
+                                }
+                                if (!skip) {
+                                    F += donor_contrib(D, p, e, fn);
+                                }
+                            }}}
+                            return F;
+                        };
+
+                        amrex::Real du = 0.0_rt;
+                        for (int p = 0; p < AMREX_SPACEDIM; ++p) {
+                            int const e = order_arr[p];
+                            du += face_flux(p, e, node[e])
+                                - face_flux(p, e, node[e] - 1);
+                        }
+                        ud(i,j,k) = us(i,j,k) - du;
+                    });
+                }
+                amrex::MultiFab::Saxpy(u_acc, w_branch, u_b, 0, 0, 1, 0);
+                continue;   // next branch (skip the split sweeps below)
+            }
+
             amrex::MultiFab::Copy(u_a, u0, 0, 0, 1, ng_f);
             amrex::MultiFab * src = &u_a;
             amrex::MultiFab * dst = &u_b;
@@ -2831,6 +3133,46 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                             return g;
                         };
 
+                        // PPM (Colella--Woodward 1984) parabola of donor
+                        // c: face values from the limited cell
+                        // differences (slope_at doubles as the CW
+                        // delta_m; unlimited central when slim_off),
+                        // then extremum collapse + overshoot pull-back
+                        // (skipped when slim_off). Mean is uc exactly,
+                        // so total-mass bookkeeping is untouched.
+                        auto ppm_coefs = [&] (int const c,
+                                              amrex::Real & uLf,
+                                              amrex::Real & du6,
+                                              amrex::Real & u6)
+                        {
+                            amrex::Real const um1 = u_at(c - 1);
+                            amrex::Real const uc  = u_at(c);
+                            amrex::Real const up1 = u_at(c + 1);
+                            amrex::Real uR = uc + 0.5_rt*(up1 - uc)
+                                - (slope_at(c + 1) - slope_at(c))
+                                  /6.0_rt;
+                            amrex::Real uL = um1 + 0.5_rt*(uc - um1)
+                                - (slope_at(c) - slope_at(c - 1))
+                                  /6.0_rt;
+                            if (!slim_off) {
+                                if ((uR - uc)*(uc - uL) <= 0.0_rt) {
+                                    uL = uc; uR = uc;
+                                } else {
+                                    amrex::Real const du = uR - uL;
+                                    amrex::Real const s6 = 6.0_rt
+                                        *(uc - 0.5_rt*(uL + uR));
+                                    if (du*s6 > du*du) {
+                                        uL = 3.0_rt*uc - 2.0_rt*uR;
+                                    } else if (-du*du > du*s6) {
+                                        uR = 3.0_rt*uc - 2.0_rt*uL;
+                                    }
+                                }
+                            }
+                            uLf = uL;
+                            u6  = 6.0_rt*(uc - 0.5_rt*(uL + uR));
+                            du6 = (uR - uL) + u6;
+                        };
+
                         // Flux through the face between nodes fn and fn+1
                         // (positive = mass toward +d), by FORWARD donor
                         // decomposition (the Esirkepov construction): each
@@ -2894,17 +3236,29 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                                         mright = 0.0_rt;
                                     } else {
                                         // affine preimage of the face in
-                                        // the donor; mass beyond = PLM
-                                        // integral over [xs, c+1/2]
+                                        // the donor; mass beyond =
+                                        // reconstruction integral over
+                                        // [xs, c+1/2]
                                         amrex::Real const xs = amrex::Real(c)
                                             - 0.5_rt + (sf - L)/wid;
-                                        amrex::Real const dx_hi =
-                                            0.5_rt;
-                                        amrex::Real const dx_lo =
-                                            xs - amrex::Real(c);
-                                        mright = (dx_hi - dx_lo)*u_at(c)
-                                            + 0.5_rt*slope_at(c)
-                                            *(dx_hi*dx_hi - dx_lo*dx_lo);
+                                        if (recon_ppm) {
+                                            amrex::Real uLf, du6, u6;
+                                            ppm_coefs(c, uLf, du6, u6);
+                                            amrex::Real const zs = xs
+                                                - (amrex::Real(c) - 0.5_rt);
+                                            mright = u_at(c)
+                                                - (uLf*zs
+                                                   + 0.5_rt*du6*zs*zs
+                                                   - u6*zs*zs*zs/3.0_rt);
+                                        } else {
+                                            amrex::Real const dx_hi =
+                                                0.5_rt;
+                                            amrex::Real const dx_lo =
+                                                xs - amrex::Real(c);
+                                            mright = (dx_hi - dx_lo)*u_at(c)
+                                                + 0.5_rt*slope_at(c)
+                                                *(dx_hi*dx_hi - dx_lo*dx_lo);
+                                        }
                                     }
                                     if (c >= fn + 1) { mright -= u_at(c); }
                                     F += mright;

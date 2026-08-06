@@ -5,6 +5,11 @@ Runs the same measurement points as the layer gauntlet (run_layer.py) with
 `qdsmc_conduction_form = fluxform`, so every row is directly comparable to
 the recorded layer/scatter references.
 
+Two arms per section: `fluxform` = dimensionally split sweeps (the cheap
+arm; cached tags predate the unsplit work), `ff-unsplit` = per-donor
+unsplit transport (`qdsmc_conduction_fluxform_unsplit = 1`, C.7d fork (b):
+corner images via material-evaluated legs -- the GF3 candidate).
+
 Sections
 --------
 aligned : straight-B parabolic N sweep (npts=3) -- order and constant vs
@@ -36,6 +41,14 @@ ENV = dict(
     LD_LIBRARY_PATH="/usr/local/openmpi5/lib:/usr/local/hdf5/lib",
     OMP_NUM_THREADS="2",
 )
+
+# (label, tag suffix, extra deck args) -- split tags keep their original
+# names so the pre-unsplit cache is reused verbatim as the control arm.
+ARMS = [
+    ("fluxform", "", {}),
+    ("ff-unsplit", "_u", {"ff_unsplit": 1}),
+    ("ff-ppm", "_p", {"recon": "ppm"}),
+]
 
 
 def run_case(script, tag, **kw):
@@ -83,124 +96,141 @@ def main(sections):
         print("\n## aligned straight-B order  [GF2: >= 1.9, constant vs layer 1.97]\n")
         print("| form | N | steps | rel L2 | order | chi/chi0 | sum drift |")
         print("|------|---|-------|--------|-------|----------|-----------|")
-        prev = None
-        for n in (32, 48, 64, 96, 128):
-            steps = max(8, round(32 * (n / 32) ** 2))
-            d = run_case(
-                "qdsmc_conduction_test.py",
-                f"al_N{n}",
-                mode="aligned",
-                ncell=n,
-                nsteps=steps,
-                npts=[3],
-                form="fluxform",
-            )
-            e = float(d["rel_l2"])
-            o = f"{np.log(prev[1] / e) / np.log(n / prev[0]):.2f}" if prev else ""
-            print(
-                f"| fluxform | {n} | {steps} | {e:.4e} | {o} "
-                f"| {float(d['chi_par_meas'] / d['chi0']):.4f} "
-                f"| {sumdrift(d):.2e} |"
-            )
-            prev = (n, e)
+        for arm, suf, extra in ARMS:
+            prev = None
+            for n in (32, 48, 64, 96, 128):
+                steps = max(8, round(32 * (n / 32) ** 2))
+                d = run_case(
+                    "qdsmc_conduction_test.py",
+                    f"al_N{n}{suf}",
+                    mode="aligned",
+                    ncell=n,
+                    nsteps=steps,
+                    npts=[3],
+                    form="fluxform",
+                    **extra,
+                )
+                e = float(d["rel_l2"])
+                o = f"{np.log(prev[1] / e) / np.log(n / prev[0]):.2f}" if prev else ""
+                print(
+                    f"| {arm} | {n} | {steps} | {e:.4e} | {o} "
+                    f"| {float(d['chi_par_meas'] / d['chi0']):.4f} "
+                    f"| {sumdrift(d):.2e} |"
+                )
+                prev = (n, e)
 
     if "tilted" in sections:
-        print("\n## tilted 30deg full tensor  [GF2: split remap on oblique branches]\n")
+        print("\n## tilted 30deg full tensor  [GF2: oblique branches]\n")
         print("| form | N | steps | rel L2 | order | chi_perp_num/chi0 | sum drift |")
         print("|------|---|-------|--------|-------|-------------------|-----------|")
-        prev = None
-        for n in (48, 64, 96):
-            steps = max(8, round(32 * (n / 32) ** 2))
-            d = run_case(
-                "qdsmc_conduction_test.py",
-                f"tl_N{n}",
-                mode="tilted",
-                ncell=n,
-                nsteps=steps,
-                npts=[3],
-                form="fluxform",
-            )
-            e = float(d["rel_l2"])
-            o = f"{np.log(prev[1] / e) / np.log(n / prev[0]):.2f}" if prev else ""
-            print(
-                f"| fluxform | {n} | {steps} | {e:.4e} | {o} "
-                f"| {float(d['chi_perp_meas'] / d['chi0']):.3e} "
-                f"| {sumdrift(d):.2e} |"
-            )
-            prev = (n, e)
+        for arm, suf, extra in ARMS:
+            prev = None
+            for n in (48, 64, 96):
+                steps = max(8, round(32 * (n / 32) ** 2))
+                d = run_case(
+                    "qdsmc_conduction_test.py",
+                    f"tl_N{n}{suf}",
+                    mode="tilted",
+                    ncell=n,
+                    nsteps=steps,
+                    npts=[3],
+                    form="fluxform",
+                    **extra,
+                )
+                e = float(d["rel_l2"])
+                o = f"{np.log(prev[1] / e) / np.log(n / prev[0]):.2f}" if prev else ""
+                print(
+                    f"| {arm} | {n} | {steps} | {e:.4e} | {o} "
+                    f"| {float(d['chi_perp_meas'] / d['chi0']):.3e} "
+                    f"| {sumdrift(d):.2e} |"
+                )
+                prev = (n, e)
         print("(scatter G3 raw reference at N=64: 1.7e-3 = the moment-estimator")
         print(" floor; score the exact field with the same estimator to subtract)")
 
     if "floors" in sections:
         print("\n## wiggle eps = 0 floor  [GF1: layer floor 3.6e-6]\n")
         print(WIG_HDR)
-        for n in (64, 128):
-            d = run_case(
-                "qdsmc_wiggle_test.py",
-                f"floor_N{n}",
-                ncell=n,
-                nsteps=64,
-                npts=[3],
-                eps=0.0,
-                mwiggle=2,
-                form="fluxform",
-            )
-            print(wig_row("fluxform", d))
+        for arm, suf, extra in ARMS:
+            for n in (64, 128):
+                d = run_case(
+                    "qdsmc_wiggle_test.py",
+                    f"floor_N{n}{suf}",
+                    ncell=n,
+                    nsteps=64,
+                    npts=[3],
+                    eps=0.0,
+                    mwiggle=2,
+                    form="fluxform",
+                    **extra,
+                )
+                print(wig_row(arm, d))
 
     if "wiggle" in sections:
         print("\n## curvature leak  [GF3; eps=0.2, m=2, N=64, ns=64]\n")
         print(WIG_HDR)
         base = dict(ncell=64, nsteps=64, npts=[3], eps=0.2, mwiggle=2)
-        d = run_case("qdsmc_wiggle_test.py", "wig_fluxform", form="fluxform", **base)
-        print(wig_row("fluxform", d))
+        for arm, suf, extra in ARMS:
+            d = run_case(
+                "qdsmc_wiggle_test.py",
+                f"wig_fluxform{suf}",
+                form="fluxform",
+                **{**base, **extra},
+            )
+            print(wig_row(arm, d))
         print("(references: layer-monocubic 4.7e-4 (curved 2.1e-1), scatter 2.072e-01)")
 
         print("\n## dt-growth signature  [GF3: must be FLAT]\n")
         print(WIG_HDR)
-        for ns in (64, 256):
-            d = run_case(
-                "qdsmc_wiggle_test.py",
-                f"wigdt_ns{ns}",
-                **{**base, "nsteps": ns, "form": "fluxform"},
-            )
-            print(wig_row("fluxform", d))
+        for arm, suf, extra in ARMS:
+            for ns in (64, 256):
+                d = run_case(
+                    "qdsmc_wiggle_test.py",
+                    f"wigdt_ns{ns}{suf}",
+                    **{**base, "nsteps": ns, "form": "fluxform", **extra},
+                )
+                print(wig_row(arm, d))
         print("(scatter grew 0.207 -> 0.344 over the same span; layer stayed flat)")
 
         print("\n## liftoff dimensionless point  [GF3; N=128, ns=224, eps=0.45, m=2]\n")
         print(WIG_HDR)
-        for np_ in (2, 3):
-            d = run_case(
-                "qdsmc_wiggle_test.py",
-                f"lift_np{np_}",
-                ncell=128,
-                nsteps=224,
-                npts=[np_],
-                eps=0.45,
-                mwiggle=2,
-                form="fluxform",
-            )
-            print(wig_row("fluxform", d))
+        for arm, suf, extra in ARMS:
+            for np_ in (2, 3):
+                d = run_case(
+                    "qdsmc_wiggle_test.py",
+                    f"lift_np{np_}{suf}",
+                    ncell=128,
+                    nsteps=224,
+                    npts=[np_],
+                    eps=0.45,
+                    mwiggle=2,
+                    form="fluxform",
+                    **extra,
+                )
+                print(wig_row(arm, d))
         print("(references at npts=2: layer-monocubic 2.56e-4, scatter 1.812e+00;")
         print(" chi_par ~ 0.89 here is the z-vs-arc estimator factor")
         print(" (1+eps^2/4)^-2 at eps=0.45, not a transport deficit)")
 
     if "zeld" in sections:
         print("\n## Zeldovich front  [GF4; N=128, ns=256, no fixup]\n")
-        d = run_case(
-            "qdsmc_zeldovich_test.py",
-            "zeld_fluxform",
-            ncell=128,
-            nsteps=256,
-            form="fluxform",
-        )
-        print(
-            f"relL2(prof) = {float(d['rel_l2']):.4e} "
-            f"(layer+fixup 4.2e-2, scatter plateau 1.32e-01), "
-            f"front_exp = {float(d['front_exp']):.3f} (reference 0.206), "
-            f"sum drift = {sumdrift(d):.3e}, "
-            f"min(Te_final) = {float(np.min(d['te_final'])):.3e} K "
-            f"(never-add: no undershoot below the ambient floor)"
-        )
+        for arm, suf, extra in ARMS:
+            d = run_case(
+                "qdsmc_zeldovich_test.py",
+                f"zeld_fluxform{suf}",
+                ncell=128,
+                nsteps=256,
+                form="fluxform",
+                **extra,
+            )
+            print(
+                f"{arm}: relL2(prof) = {float(d['rel_l2']):.4e} "
+                f"(layer+fixup 4.2e-2, scatter plateau 1.32e-01), "
+                f"front_exp = {float(d['front_exp']):.3f} (reference 0.206), "
+                f"sum drift = {sumdrift(d):.3e}, "
+                f"min(Te_final) = {float(np.min(d['te_final'])):.3e} K "
+                f"(never-add: no undershoot below the ambient floor)"
+            )
 
 
 if __name__ == "__main__":
