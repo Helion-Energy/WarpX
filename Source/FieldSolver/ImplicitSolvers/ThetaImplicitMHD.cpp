@@ -1015,6 +1015,51 @@ void ThetaImplicitMHD::ApplyNeumannZDomainGhosts (amrex::MultiFab& mf) const
 #endif
 }
 
+void ThetaImplicitMHD::ApplyScalarRadialDomainGhosts (amrex::MultiFab& mf) const
+{
+#if defined(WARPX_DIM_RZ)
+    // Radial domain-ghost fill for derived cell/nodal SCALARS (electron
+    // pressure and temperature): even (m = 0) mirror across the axis and,
+    // at r_max, the ghost recipe of the FLUID boundary -- the even
+    // reflect (Neumann) image for the conducting wall and the zero-flux
+    // reflect wall (so no spurious radial pressure gradient can reach the
+    // wall-ring Ohm/E evaluations), or zero-gradient clamp ghosts for
+    // open outflow. FillBoundaryAndSync leaves non-periodic domain ghosts
+    // untouched, so without this pass they hold stale values. Staggering
+    // aware: nodal-in-r data mirrors across the boundary NODE. Axial
+    // ghosts must already be filled (periodic or Neumann), so this pass
+    // also covers the corner ghosts.
+    const amrex::Box domain =
+        amrex::convert(m_WarpX->Geom(0).Domain(), mf.ixType().toIntVect());
+    const int domain_lo = domain.smallEnd(0);
+    const int domain_hi = domain.bigEnd(0);
+    // Nodal-in-r data mirrors across the boundary node itself (offset 0);
+    // cell-centered data mirrors across the face (offset 1).
+    const int cc_offset = mf.ixType().cellCentered(0) ? 1 : 0;
+    const bool r_outflow = m_r_open && (m_r_open_fluid == "outflow");
+    const int ncomp = mf.nComp();
+    for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
+        const amrex::Box grown = amrex::grow(mfi.validbox(), mf.nGrowVect());
+        if (grown.smallEnd(0) >= domain_lo && grown.bigEnd(0) <= domain_hi) {
+            continue;
+        }
+        const auto arr = mf.array(mfi);
+        amrex::ParallelFor(grown, ncomp,
+                           [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) {
+            if (i < domain_lo) {
+                arr(i, j, k, n) = arr(2 * domain_lo - cc_offset - i, j, k, n);
+            } else if (i > domain_hi) {
+                const int mirror =
+                    r_outflow ? domain_hi : 2 * domain_hi + cc_offset - i;
+                arr(i, j, k, n) = arr(mirror, j, k, n);
+            }
+        });
+    }
+#else
+    amrex::ignore_unused(mf);
+#endif
+}
+
 void ThetaImplicitMHD::AddExternalFieldsToTotals (const amrex::Real sign) const
 {
     using ablastr::fields::Direction;
@@ -1235,6 +1280,12 @@ void ThetaImplicitMHD::FillFluidSources (const WarpXSolverVec& state)
     electron_temperature.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
     ApplyNeumannZDomainGhosts(electron_pressure);
     ApplyNeumannZDomainGhosts(electron_temperature);
+    // Radial domain ghosts (axis parity; Neumann reflect image or outflow
+    // clamp at r_max) so every ghost the Ohm/E-field paths could read
+    // carries the zero-normal-gradient wall pressure instead of the stale
+    // values FillBoundaryAndSync leaves at non-periodic domain edges.
+    ApplyScalarRadialDomainGhosts(electron_pressure);
+    ApplyScalarRadialDomainGhosts(electron_temperature);
 }
 
 void ThetaImplicitMHD::FillCellCenteredElectromagneticFields ()

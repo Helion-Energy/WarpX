@@ -121,6 +121,7 @@ class ThetaImplicitMHD final : public ImplicitSolver
                                      amrex::MultiFab& ion_parallel_energy,
                                      amrex::MultiFab& ion_perp_energy) const;
     void ApplyNeumannZDomainGhosts (amrex::MultiFab& mf) const;
+    void ApplyScalarRadialDomainGhosts (amrex::MultiFab& mf) const;
     void FillCellCenteredElectromagneticFields ();
     void ComputeFluidRHS (WarpXSolverVec& rhs, amrex::Real time) const;
     void ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs, amrex::Real time) const;
