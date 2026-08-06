@@ -281,5 +281,16 @@ void init_WarpX (py::module& m)
             },
             "Gets the number of substeps to take in the hybrid solver."
         )
+        .def("get_qdsmc_wall_tally",
+            [](WarpX& wx, int dim, int side) {
+                return wx.get_pointer_HybridPICModel()
+                    ->GetQdsmcWallTally(dim, side);
+            },
+            py::arg("dim"), py::arg("side"),
+            "Cumulative QDSMC conduction wall-BC energy tally for the "
+            "domain face (dim, side: 0=lo, 1=hi), in node-u units "
+            "[J/m^3] summed over boundary nodes (positive = energy "
+            "added to the plasma)."
+        )
     ;
 }
