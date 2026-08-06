@@ -10,11 +10,10 @@ Each run dir must contain diags/diag1?????? plotfiles. Writes
 <OUT_PREFIX>_sigma_b.png and <OUT_PREFIX>_snapshot.png (default prefix
 "t_smoke").
 
-Note on the density panel: the plotfile "rho" is re-deposited per level at
-output time (RhoFunctor), so the level-0 values under the fine patch only
-contain the level-0 particles (a taper artifact of the diagnostic, not of
-the solver state). The mosaic therefore samples rho on a level-1 covering
-grid and the seam check should lean on the solver-state fields (B, j).
+Note on the density panel: with the hybrid solver and mesh refinement the
+plotfile "rho" is the solver's synchronized rho_fp (see RhoFunctor), so it
+is seam-clean on both levels; per-species rho diagnostics still re-deposit
+per level and would show a seam band.
 """
 
 import glob
@@ -57,11 +56,13 @@ def main():
     t_mr, s_mr = sigma_b_series(mr_dir)
     t_ctl, s_ctl = sigma_b_series(ctl_dir)
 
-    n = min(len(s_mr), len(s_ctl))
-    ratio = s_mr[:n] / np.where(s_ctl[:n] > 0, s_ctl[:n], np.nan)
+    # align the control on the MR output times (the two runs may use
+    # different plotfile intervals)
+    s_ctl_t = np.interp(t_mr, t_ctl, s_ctl)
+    ratio = s_mr / np.where(s_ctl_t > 0, s_ctl_t, np.nan)
     print("# time(ns)  sigmaB/B0(MR)  sigmaB/B0(ctl)  ratio")
-    for i in range(n):
-        print(f"{t_mr[i] * 1e9:8.4f}  {s_mr[i]:.6e}  {s_ctl[i]:.6e}  {ratio[i]:.3f}")
+    for i in range(len(t_mr)):
+        print(f"{t_mr[i] * 1e9:8.4f}  {s_mr[i]:.6e}  {s_ctl_t[i]:.6e}  {ratio[i]:.3f}")
     print(
         f"# final ratio MR/ctl = {ratio[-1]:.3f}, max ratio = {np.nanmax(ratio[1:]):.3f}"
     )
@@ -89,7 +90,7 @@ def main():
         float(ds.domain_right_edge[0]) * 1e3,
     ]
     fields = [
-        ("rho", "rho (diagnostic; per-level deposit)", "Blues", None),
+        ("rho", "rho (solver rho_fp with hybrid+MR)", "Blues", None),
         ("Bx", "Bx fluctuation (T)", "RdBu_r", "sym"),
         ("jz", "jz (A/m^2)", "RdBu_r", "sym"),
     ]
