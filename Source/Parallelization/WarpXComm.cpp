@@ -279,7 +279,12 @@ namespace
     {
         using ablastr::fields::Direction;
 
-        if (electromagnetic_solver_id != ElectromagneticSolverAlgo::None) {
+        // The hybrid-PIC solver does not use the coarse-patch substitution: E is
+        // recomputed on each level and B is interpolated into fine-patch ghost
+        // cells, so aux is obtained from the fine-patch data alone, as in the
+        // electrostatic case.
+        if (electromagnetic_solver_id != ElectromagneticSolverAlgo::None &&
+            electromagnetic_solver_id != ElectromagneticSolverAlgo::HybridPIC) {
             Array<std::unique_ptr<MultiFab>,3> Ftmp;
             if (fields.has_vector(field_cax_type, lev)) {
                 // Reuse the solver-provided coarse-aux buffers when they already exist on this level.
@@ -374,7 +379,7 @@ namespace
                 amrex::ParallelFor(bx,
                 [=] AMREX_GPU_DEVICE (int j, int k, int l) noexcept
                 {
-                    // Electrostatic fields only interpolate each component from its field layout to nodal aux.
+                    // Electrostatic and hybrid-PIC fields only interpolate each component from its field layout to nodal aux.
                     warpx_interp(j, k, l, fx_aux, fx_fp, Fx_fp_stag);
                     warpx_interp(j, k, l, fy_aux, fy_fp, Fy_fp_stag);
                     warpx_interp(j, k, l, fz_aux, fz_fp, Fz_fp_stag);
@@ -411,7 +416,12 @@ namespace
     {
         using ablastr::fields::Direction;
 
-        if (electromagnetic_solver_id != ElectromagneticSolverAlgo::None)
+        // The hybrid-PIC solver does not use the coarse-patch substitution: E is
+        // recomputed on each level and B is interpolated into fine-patch ghost
+        // cells, so aux is a plain per-level copy of the fine patch, as in the
+        // electrostatic case.
+        if (electromagnetic_solver_id != ElectromagneticSolverAlgo::None &&
+            electromagnetic_solver_id != ElectromagneticSolverAlgo::HybridPIC)
         {
             const IntVect& ng = fields.get(field_cp_type, Direction{0}, lev)->nGrowVect();
             const DistributionMapping& dm =
@@ -479,7 +489,7 @@ namespace
                 });
             }
         }
-        else // electrostatic
+        else // electrostatic and hybrid-PIC
         {
             for (int idim = 0; idim < 3; ++idim) {
                 MultiFab::Copy(
@@ -738,6 +748,8 @@ WarpX::FillBoundaryE (const int lev, const PatchType patch_type, const amrex::In
     }
     else // coarse patch
     {
+        // No coarse-patch E field is registered (e.g. hybrid-PIC): nothing to fill.
+        if (!m_fields.has_vector(FieldType::Efield_cp, lev)) { return; }
         mf     = {m_fields.get(FieldType::Efield_cp, Direction{0}, lev),
                   m_fields.get(FieldType::Efield_cp, Direction{1}, lev),
                   m_fields.get(FieldType::Efield_cp, Direction{2}, lev)};
@@ -820,6 +832,8 @@ WarpX::FillBoundaryB (const int lev, const PatchType patch_type, const amrex::In
     }
     else // coarse patch
     {
+        // No coarse-patch B field is registered (e.g. hybrid-PIC): nothing to fill.
+        if (!m_fields.has_vector(FieldType::Bfield_cp, lev)) { return; }
         mf     = {m_fields.get(FieldType::Bfield_cp, Direction{0}, lev),
                   m_fields.get(FieldType::Bfield_cp, Direction{1}, lev),
                   m_fields.get(FieldType::Bfield_cp, Direction{2}, lev)};
