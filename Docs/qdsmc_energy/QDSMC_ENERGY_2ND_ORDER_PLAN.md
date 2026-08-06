@@ -1205,6 +1205,67 @@ even 1e6-mass ions.
 Acceptance: the annulus insulating-wall hold (5e-11/384 steps here),
 the at-rest advection hold, and a liftoff-class slab.
 
+### InsulatingEB standalone PR BUILT — branch `hybrid_insulating_eb` (2026-08-06)
+
+**Branch**: `hybrid_insulating_eb` @ `~/src/wt-insulating-eb`, 4 commits
+on blast/development 123d03a78 (venv `~/.env/warpx-insulating-eb`;
+`LD_LIBRARY_PATH=/usr/local/openmpi5/lib` for mpi4py). All four scope
+items landed IN the PR (the fold did not need the fast-follow):
+
+1. `boundary.eb_type = absorbing|insulating` +
+   `boundary.eb_standoff_cells` (default 2): scrape threshold moves to
+   phi < standoff (per-level, cells x max dx); ParticleBoundaryBuffer
+   gather predicate AND `FindEmbeddedBoundaryIntersection` get the same
+   offset (the bisection would otherwise hunt a phi=0 crossing that a
+   shell-collected trajectory never made).
+2. Exact per-species collected charge/energy tallies at scrape time
+   (ReduceOps pass before invalidation; KE in the stable
+   m u^2/(gamma+1) form; global-summed per step) ->
+   `warpx.get_eb_collected_charge/energy(name)`. Measured exact to
+   9e-16 rel on 2 ranks; probe-in-band collected in full; standoff
+   never breached by bulk ions.
+3. Zero-normal-gradient Te fill (`QDSMCApplyInsulatingEBFill`): onion-
+   peel Moore-neighbor sweeps after QDSMCUpdateTe, mask = transport's
+   own boundary set (below qdsmc floor on rho^{n+1} OR covered) AND
+   within (standoff+1) cells — the prototype's radius-mask trap
+   respected. Measured budget-neutral (fill on/off bit-compatible drift).
+4. **Deposit fold (`QDSMCFoldInsulatingDeposits`) — K*N ONLY.** Two
+   measured dead-ends first: (a) the prototype's own-marker fold model
+   is INVALID on development — dev QDSMC markers live at CELL CENTERS
+   (`iv+0.5`, QdsmcParticleContainer.cpp:156), not nodes, so every
+   deposit splits across 2^D nodes even at rest and "own content"
+   bookkeeping is impossible; (b) folding N along with K*N imports
+   K-poor, N-rich material (SetK gathers Ke=0 from below-floor corners)
+   and DILUTES edge Te — at-rest drift −1.1e-1/16 steps, WORSE than the
+   −7.3e-2 no-fold baseline. The fix: fold the entropy K*N alone (N is
+   a marker-density estimate the recovery discards below floor anyway).
+   **At-rest open-set entropy drift: −1.1e-4, IDENTICAL at 16 and 48
+   steps — a saturating step-1 transient, per-step leak closed** (657x
+   vs baseline; dev's vacuum-Te-sink class at a free plasma edge,
+   measured here WITHOUT #7128). Compression drive: −1.5e-2/48 steps vs
+   −1.9e-1 baseline (12.7x; residual = marker/ion transport mismatch,
+   not a wall property).
+
+CI: `test_2d_ohm_solver_insulating_eb_{at_rest,compress}_picmi`
+(standoff-disc instrument, probe-species exact-tally asserts, entropy
+gates 5e-4/5e-2 from measurement; deck keeps `--eb-type absorbing` as
+the A/B control arm). 15/15 electron-energy suite green; EB
+`em_particle_absorption` tests untouched (absorbing path is a no-op);
+`test_2d_embedded_circle` fails only for the missing warpx-data
+checkout (environmental, pre-existing).
+
+*Interplay with #7128*: the K*N fold closes the deposit-DROP leg of the
+vacuum sink independently; #7128 fixes the K=0-halo GATHER-dilution leg
+(and restart seeding). They compose — re-measure the at-rest transient
+and the compress mismatch when #7128 lands and this PR is merged into
+the branch (where the annulus 5e-11 hold, which also uses the branch's
+closed floor faces + masked drifts, is the acceptance).
+
+*Next*: push + open the upstream PR; merge into this branch as a
+prerequisite (like #7128, merge not cherry-pick); retire the annulus
+deck's `--band-copy` callback in favor of the C++ fill and re-run the
+standoff holds.
+
 ### Upstream PR #7128 MERGED as a branch prerequisite (2026-08-06)
 
 BLAST-WarpX **#7128 "Fix hybrid electron energy equation vacuum Te
