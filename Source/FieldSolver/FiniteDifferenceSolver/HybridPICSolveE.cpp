@@ -554,8 +554,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     const amrex::Real t_new = warpx.gett_new(lev);
     ablastr::fields::VectorField Bfield_external, Efield_external;
     if (include_external_fields) {
-        Bfield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_external, 0); // lev=0
-        Efield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_E_fp_external, 0); // lev=0
+        Bfield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_external, lev);
+        Efield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_E_fp_external, lev);
     }
 
     // Index type required for interpolating fields from their respective
@@ -998,8 +998,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     const amrex::Real t_new = warpx.gett_new(lev);
     ablastr::fields::VectorField Bfield_external, Efield_external;
     if (include_external_fields) {
-        Bfield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_external, 0); // lev=0
-        Efield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_E_fp_external, 0); // lev=0
+        Bfield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_external, lev);
+        Efield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_E_fp_external, lev);
     }
 
     // Index type required for interpolating fields from their respective
