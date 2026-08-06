@@ -302,8 +302,10 @@ void FiniteDifferenceSolver::EvolveBCartesianECT (
             // Extract tileboxes for which to loop
             Box const &tb = mfi.tilebox(Bfield[idim]->ixType().toIntVect());
 
-            //Take care of the unstable cells
-            amrex::ParallelFor(tb, [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+            //Take care of the unstable cells.
+            // amrex::For: iterations scatter-add into neighboring faces of Venl
+            // (no SIMD pragma, see issue #7097)
+            amrex::For(tb, [=] AMREX_GPU_DEVICE(int i, int j, int k) {
 
                 if (S(i, j, k) <= 0) { return; }
 
