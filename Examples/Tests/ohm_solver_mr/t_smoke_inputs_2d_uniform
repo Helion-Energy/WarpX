@@ -1,0 +1,69 @@
+# Hybrid-PIC mesh-refinement T0.3-lite (P1 deliverable): quiet uniform
+# thermal plasma drifting along z through the static refinement patch.
+# Run the MR arm and the single-level control with
+#   <warpx.2d> t_smoke_inputs_2d_uniform                    # MR (max_level=1)
+#   <warpx.2d> t_smoke_inputs_2d_uniform amr.max_level=0    # control
+# and compare sigma(B)/B0 with t_smoke_sigma_b.py.
+
+max_step = 500
+warpx.const_dt = 5.685630111305193e-12
+warpx.verbose = 1
+
+amr.n_cell = 32 256
+amr.max_level = 1
+amr.blocking_factor = 4
+amr.max_grid_size = 128
+warpx.fine_tag_lo = -2.2840138279820255e-3 0.018
+warpx.fine_tag_hi =  2.2840138279820255e-3 0.055
+
+geometry.dims = 2
+geometry.prob_lo = -4.5680276559640510e-3 0.0
+geometry.prob_hi =  4.5680276559640510e-3 0.073088442495424816
+
+boundary.field_lo = periodic periodic
+boundary.field_hi = periodic periodic
+boundary.particle_lo = periodic periodic
+boundary.particle_hi = periodic periodic
+
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.particle_shape = 1
+
+hybrid_pic_model.elec_temp = 510.998950691753
+hybrid_pic_model.gamma = 1.0
+hybrid_pic_model.n0_ref = 9.623617654281555e20
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 1e-07
+hybrid_pic_model.substeps = 20
+
+# uniform background field (trivially divergence free)
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 0.1
+
+particles.species_names = ions
+ions.charge = q_e
+ions.mass = 9.1093837139e-29
+ions.injection_style = nrandompercell
+ions.num_particles_per_cell = 4
+ions.profile = constant
+ions.density = 9.623617654281555e20
+ions.momentum_distribution_type = gaussian
+ions.ux_th = 0.001
+ions.uy_th = 0.001
+ions.uz_th = 0.001
+# small drift along z (~2 v_A), so plasma flows through the patch seam
+ions.uz_m = 0.002
+
+diagnostics.diags_names = diag1
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.intervals = 25
+diag1.fields_to_plot = Bx By Bz Ex Ey Ez jx jy jz rho divB
+diag1.write_species = 0
+
+warpx.reduced_diags_names = field_energy part_energy
+field_energy.type = FieldEnergy
+field_energy.intervals = 5
+part_energy.type = ParticleEnergy
+part_energy.intervals = 5
+
+warpx.serialize_initial_conditions = 1
