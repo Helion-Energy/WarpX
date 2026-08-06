@@ -876,10 +876,16 @@ cross-field-UNDER-RESOLVED features with any local conservative remap
 added variance on a cell-scale filament — the E6 class reopened by
 curvature, as the C.7/G3a scatter campaign first measured). It is not
 splitting (unsplit null), not the limiter (null), not reconstruction
-order (PPM null until near-resolved).** The liftoff dimensionless
-point (sigma/dx = 0.84) sits deep in the under-resolved regime by
-construction; no scheme in the positive-conservative class will pass
-it at layer level.
+order (PPM null until near-resolved).** CORRECTION (2026-08-05, same
+session): in the liftoff point's label "sigma/dx = 0.84", sigma is the
+per-substep HOP (sqrt(2 chi dt_c)/dx = 0.86), not the feature width —
+the liftoff deck's blob is sb/dx = 6.4. Feature width is therefore ONE
+strong axis (the scan above, eps = 0.2: ~4th-order falloff meeting the
+floor by ~10 cells), but the liftoff point at 6.4 cells and eps = 0.45
+still sits ~90x above the layer floor: the eps (~quadratic) and
+remap-count dependences stack on top of resolution. The quantification
+scan below (run_leakscan.py) pins the full exponent set, including
+whether width-convergence survives at eps = 0.45.
 
 **Production guidance (pending Eric's read):** fluxform remains the
 production path — convergent (leak dies ~4th order in feature
@@ -897,6 +903,74 @@ on every row measured; the code default stays plm until Eric flips
 it. CI matrix after all of the above (defaults untouched): 9/9 PASS,
 joule budgets at the pc baselines to the decimal (euler −6.71 /
 pc −6.74 / leapfrog −17.18%).
+
+#### C.7d closeout — leak ACCEPTED and QUANTIFIED (Eric, 2026-08-05)
+
+**Decision (Eric):** the curvature leak is accepted in the explicit
+(fluxform) production arm — the parallel quasi-shorting condition
+keeps field lines near-isothermal, so modest cross-line leakage mostly
+relabels heat among nearly-isothermal lines. No implicit escalation
+now. Obligation: quantify. Instrument = `run_leakscan.py` (wiggle
+deck, per-axis scans, cached `leakscan_out/`, log `leakscan.log`).
+
+**Measured scaling** of leak = chi_perp_num/chi_par (fluxform/PLM,
+anchor point eps=0.2, m=2, sb/dx=3.2, sp/dx=0.80, npts=3 -> 1.69e-2;
+sb = feature cross-field sigma, sp = sqrt(2 chi dt_c) per-substep hop):
+
+- *Feature width* (the dominant axis): slope ~ −2 sub-cell steepening
+  to ~ −4 near the floor; eps=0.2 series 2.78e-1 / 7.46e-2 / 1.69e-2 /
+  2.32e-3 / 3.57e-4 at sb/dx = 0.8/1.6/3.2/6.4/9.6, floor by ~10
+  cells. (The sb/dx=12.8 point up-ticks — 3-sigma of that blob wraps
+  the periodic box in x and corrupts the unwrapped-A estimator;
+  instrument artifact, excluded.) **Width-convergence survives at the
+  liftoff point** (eps=0.45, 224 remaps): 2.32e-2 / 3.21e-3 / 4.85e-4
+  at sb/dx = 6.4/12.8/19.2 (npts=3; fitted exponent −3.45) — a
+  ~19-cell feature reaches the layer-floor class even there.
+- *Curvature amplitude*: **eps^2.01** — clean quadratic (matches the
+  scatter-era eps^2.07).
+- *Curvature wavenumber*: **k^1.6** (m = 1/2/4 -> 3.98e-3 / 1.69e-2 /
+  3.64e-2). Combined with eps^2, roughly (dx/R_c)^1.6 x eps^0.4.
+- *Hop size* (chi scan at fixed dt): NON-monotone aliasing plateau —
+  leak ratio ~ 7-8e-2 flat for sp/dx <= 0.57, dropping ~(sp/dx)^-1.6
+  overall (7.8e-2 -> 5.5e-3 across sp/dx 0.28 -> 2.26, with
+  oscillation). Small hops pay ~the full fractional-redistribution
+  cost per remap while transporting little — the RATIO is worst for
+  deep-sub-cell hops; the absolute chi_perp_num still grows with chi.
+- *Quadrature*: npts NON-monotone — np2 8.87e-2 / np3 1.69e-2 /
+  np5 2.93e-2 at the anchor; liftoff np2 1.13e-1 / np3 2.32e-2 /
+  np5 3.45e-2. **npts_par = 3 is the leak-optimal choice** (its
+  weight-2/3 zero-offset center branch pays no redistribution cost;
+  np2 puts ALL mass on sub-cell hops). Production decks with
+  conduction on curved fields should run npts = 3, not the global
+  default 2 — 5x less leak at the liftoff point for ~1.5x branch
+  cost.
+- *Remap count* (recorded earlier): sub-linear growth, 1.69e-2 ->
+  2.65e-2 for 4x steps at fixed t_final.
+
+**Engineering consequence (quasi-shorting bookkeeping).** The leak
+acts as an effective cross-field diffusivity chi_perp_num =
+leak x chi_par on cross-line Te CONTRASTS. A contrast structure of
+width w relaxes numerically in
+
+    tau_num / dt = (w/dx)^2 / (2 x leak x S_eff),
+    S_eff = chi_par dt / dx^2  (flux-limited: 0.5-23 at liftoff
+    parameters, regime survey C.7).
+
+Worked liftoff-class numbers (npts=3, ~6-cell filament, leak ~ 2e-2):
+a 10-cell contrast relaxes in ~110 steps where S_eff ~ 23 (hot
+regions) and ~5000 steps where S_eff ~ 0.5 — i.e. within a
+10^4-10^5-step liftoff run, numerical cross-field equalization of
+~10-cell contrasts is expected wherever conduction is strong and
+lines curve at the eps~0.45-equivalent rate. Since physical
+chi_perp/chi_par ~ 3e-9, ALL cross-field transport near such
+features is numerical; the accepted-risk argument is Eric's
+quasi-shorting point — the contrasts the leak acts on are themselves
+kept small by fast parallel equilibration. Mitigations in order of
+leverage: resolve filaments toward ~10-20 cells (leak dies at the
+−2.6..−4.5 width power measured above and reaches the physical
+floor), run npts_par = 3, and revisit the implicit parallel elliptic
+rung only if a production diagnostic shows contrast relaxation
+mattering at observable scale.
 
 ### C.8 Gate G3
 
