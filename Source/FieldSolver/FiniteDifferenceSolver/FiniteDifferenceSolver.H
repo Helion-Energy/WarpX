@@ -195,7 +195,8 @@ class FiniteDifferenceSolver
             ablastr::fields::VectorField& Bfield,
             ablastr::fields::VectorField const& Afield,
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_B,
-            int lev );
+            int lev ,
+            amrex::IntVect const& ngrow = amrex::IntVect::TheZeroVector() );
 
         /**
           * \brief Calculation of the gradient of the given scalar field.
@@ -330,7 +331,8 @@ class FiniteDifferenceSolver
             ablastr::fields::VectorField const& Afield,
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_B,
             int lev
-        );
+        ,
+            amrex::IntVect const& ngrow );
 
         template<typename T_Algo>
         void ComputeGradientCylindrical (
@@ -549,7 +551,8 @@ class FiniteDifferenceSolver
             ablastr::fields::VectorField const& Afield,
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_B,
             int lev
-        );
+        ,
+            amrex::IntVect const& ngrow );
 
         template<typename T_Algo>
         void ComputeGradientCartesian (
