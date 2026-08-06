@@ -105,3 +105,9 @@ diag1.file_prefix = diags/diag
 diag1.fields_to_plot = Bz jz Pe implicit_mhd_mass_density \
                        implicit_mhd_electron_energy
 diag1.write_species = 0
+
+# this test is CALIBRATED to drain electrons to the absolute pressure
+# floor (well below room temperature); the default 300 K temperature
+# floors would pin the rarefaction and stall Newton at the anchor
+implicit_mhd.ion_temperature_floor = 0.0
+implicit_mhd.electron_temperature_floor = 0.0
