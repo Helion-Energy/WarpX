@@ -229,13 +229,14 @@ void WarpX::HybridPICDepositRhoAndJ ()
 
     // Deposit cold-relativistic fluid charge and current
     if (do_fluid_species) {
-        int const lev = 0;
-        myfl->DepositCharge(m_fields, *m_fields.get(FieldType::rho_fp, lev), lev);
-        myfl->DepositCurrent(m_fields,
-            *m_fields.get(FieldType::current_fp, Direction{0}, lev),
-            *m_fields.get(FieldType::current_fp, Direction{1}, lev),
-            *m_fields.get(FieldType::current_fp, Direction{2}, lev),
-            lev);
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            myfl->DepositCharge(m_fields, *m_fields.get(FieldType::rho_fp, lev), lev);
+            myfl->DepositCurrent(m_fields,
+                *m_fields.get(FieldType::current_fp, Direction{0}, lev),
+                *m_fields.get(FieldType::current_fp, Direction{1}, lev),
+                *m_fields.get(FieldType::current_fp, Direction{2}, lev),
+                lev);
+        }
     }
 
     // Synchronize J and rho:
