@@ -169,7 +169,7 @@ public:
         ablastr::fields::MultiLevelVectorField const& Jfield,
         ablastr::fields::MultiLevelScalarField const& rhofield,
         amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E,
-        amrex::Real dt, SubcyclingHalf subcycling_half,
+        amrex::Real dt, int lev, SubcyclingHalf subcycling_half,
         amrex::IntVect ng, std::optional<bool> nodal_sync);
 
     /**

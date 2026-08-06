@@ -685,7 +685,7 @@ void HybridPICModel::BfieldEvolveRK4 (
     // Step 1:
     FieldPush(
         Bfield, Efield, Jfield, rhofield, eb_update_E,
-        0.5_rt*dt, subcycling_half, ng, nodal_sync
+        0.5_rt*dt, lev, subcycling_half, ng, nodal_sync
     );
 
     // The Bfield is now given by:
@@ -701,7 +701,7 @@ void HybridPICModel::BfieldEvolveRK4 (
     // Step 2:
     FieldPush(
         Bfield, Efield, Jfield, rhofield, eb_update_E,
-        0.5_rt*dt, subcycling_half, ng, nodal_sync
+        0.5_rt*dt, lev, subcycling_half, ng, nodal_sync
     );
 
     // The Bfield is now given by:
@@ -757,7 +757,7 @@ void HybridPICModel::BfieldEvolveRK4 (
     // Step 3:
     FieldPush(
         Bfield, Efield, Jfield, rhofield, eb_update_E,
-        dt, subcycling_half, ng, nodal_sync
+        dt, lev, subcycling_half, ng, nodal_sync
     );
 
     // The Bfield is now given by:
@@ -773,7 +773,7 @@ void HybridPICModel::BfieldEvolveRK4 (
     // Step 4:
     FieldPush(
         Bfield, Efield, Jfield, rhofield, eb_update_E,
-        0.5_rt*dt, subcycling_half, ng, nodal_sync
+        0.5_rt*dt, lev, subcycling_half, ng, nodal_sync
     );
 
     // The Bfield is now given by:
@@ -875,7 +875,7 @@ amrex::Real HybridPICModel::BfieldEvolveRKF45 (
 
     // ---- Stage 1: B = B_old, FieldPush, K[comp0] = h*k1 fused with Stage 2 B-update ----
     FieldPush(Bfield, Efield, Jfield, rhofield, eb_update_E,
-                dt, subcycling_half, ng, nodal_sync);
+                dt, lev, subcycling_half, ng, nodal_sync);
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -913,7 +913,7 @@ amrex::Real HybridPICModel::BfieldEvolveRKF45 (
 
     // ---- Stage 2: FieldPush, K[comp1] = h*k2 fused with Stage 3 B-update ----
     FieldPush(Bfield, Efield, Jfield, rhofield, eb_update_E,
-                dt, subcycling_half, ng, nodal_sync);
+                dt, lev, subcycling_half, ng, nodal_sync);
     // Stage 2 K[1]-readback fused with Stage 3 B-update.
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -955,7 +955,7 @@ amrex::Real HybridPICModel::BfieldEvolveRKF45 (
 
     // ---- Stage 3: FieldPush, then K[comp2] = h*k3 fused with Stage 4 B-update ----
     FieldPush(Bfield, Efield, Jfield, rhofield, eb_update_E,
-                dt, subcycling_half, ng, nodal_sync);
+                dt, lev, subcycling_half, ng, nodal_sync);
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -999,7 +999,7 @@ amrex::Real HybridPICModel::BfieldEvolveRKF45 (
 
     // ---- Stage 4: FieldPush, then K[comp3] = h*k4 fused with Stage 5 B-update ----
     FieldPush(Bfield, Efield, Jfield, rhofield, eb_update_E,
-                dt, subcycling_half, ng, nodal_sync);
+                dt, lev, subcycling_half, ng, nodal_sync);
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -1049,7 +1049,7 @@ amrex::Real HybridPICModel::BfieldEvolveRKF45 (
 
     // ---- Stage 5: FieldPush, then K[comp4] = h*k5 fused with Stage 6 B-update ----
     FieldPush(Bfield, Efield, Jfield, rhofield, eb_update_E,
-                dt, subcycling_half, ng, nodal_sync);
+                dt, lev, subcycling_half, ng, nodal_sync);
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -1105,7 +1105,7 @@ amrex::Real HybridPICModel::BfieldEvolveRKF45 (
 
     // ---- Stage 6: FieldPush, then K[comp1] = h*k6 (overwrites h*k2) fused with B4 + error ----
     FieldPush(Bfield, Efield, Jfield, rhofield, eb_update_E,
-                dt, subcycling_half, ng, nodal_sync);
+                dt, lev, subcycling_half, ng, nodal_sync);
     // K[comp1] is overwritten here: reads h*k2 (old value) then writes h*k6 in each cell.
     // k6, B4 assembly (b2=0, so k2 is not needed for B4), and error assembly are fused into
     // one ParallelFor per direction. B4 is updated over ghost+valid cells; error is written
@@ -1197,23 +1197,30 @@ void HybridPICModel::FieldPush (
     ablastr::fields::MultiLevelVectorField const& Jfield,
     ablastr::fields::MultiLevelScalarField const& rhofield,
     amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E,
-    amrex::Real dt, SubcyclingHalf subcycling_half,
+    amrex::Real dt, int lev, SubcyclingHalf subcycling_half,
     IntVect ng, std::optional<bool> nodal_sync )
 {
     auto& warpx = WarpX::GetInstance();
 
-    amrex::Real const t_old = warpx.gett_old(0);
+    amrex::Real const t_old = warpx.gett_old(lev);
 
     // Calculate J = curl x B / mu0 - J_ext
-    CalculatePlasmaCurrent(Bfield, eb_update_E);
+    CalculatePlasmaCurrent(Bfield[lev], eb_update_E[lev], lev);
     // Calculate the E-field from Ohm's law
-    HybridPICSolveE(Efield, Jfield, Bfield, rhofield, eb_update_E, true);
+    HybridPICSolveE(
+        Efield[lev], Jfield[lev], Bfield[lev], *rhofield[lev],
+        eb_update_E[lev], lev, true
+    );
+    // Allow execution of Python callback after E-field push
+    ExecutePythonCallback("afterEpush");
     // Call FillBoundary if a collocated grid is used
     if (Bz_IndexType[0] == Ez_IndexType[0]) {
-        warpx.FillBoundaryE(ng, nodal_sync);
+        warpx.FillBoundaryE(lev, ng, nodal_sync);
     }
 
     // Push forward the B-field using Faraday's law
-    warpx.EvolveB(dt, subcycling_half, t_old);
-    warpx.FillBoundaryB(ng, nodal_sync);
+    warpx.EvolveB(lev, dt, subcycling_half, t_old);
+    // Allow execution of Python callback after B-field push
+    ExecutePythonCallback("afterBpush");
+    warpx.FillBoundaryB(lev, ng, nodal_sync);
 }
