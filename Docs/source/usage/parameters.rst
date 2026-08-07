@@ -4298,14 +4298,9 @@ Jacobian probes.
     where the beginning-of-step value already satisfied it: a state at or
     above the floor can never cool through it, while colder-than-floor
     initial data is never lifted (no heat injection) and remains governed
-    by the absolute floors alone. The RHS drain gates (the pointwise work
-    sinks and the donor-side face-flux limiters) anchor at the same
-    per-cell effective bound, closing every energy drain smoothly as a
-    cell reaches its bound: a cell pinned at the temperature anchor has a
-    right-hand side that respects the bound, so Newton converges instead
-    of stagnating on an irreducible residual. Requires an ion closure
-    that evolves an ion energy block (``total_energy`` or ``cgl``) when
-    set explicitly; the default is inert under the barotropic closure.
+    by the absolute floors alone. Requires an ion closure that evolves an
+    ion energy block (``total_energy`` or ``cgl``) when set explicitly;
+    the default is inert under the barotropic closure.
 
 .. pp:param:: implicit_mhd.electron_temperature_floor
     :type: ``float``

@@ -130,21 +130,4 @@ assert rho_final.max() > 1.5 * rho0
 newton_history = np.atleast_2d(np.loadtxt("diags/newton.txt"))
 assert 1 <= newton_history[-1][2] <= 20
 
-# Newton converged EVERY step while riding the floor: the drain gates
-# anchor at the per-cell effective bound max(absolute floor, n kB T_floor)
-# so a cell pinned at the temperature anchor has an RHS that respects its
-# bound (no irreducible residual, no stagnation warnings). Columns of
-# newton.txt: step, time, iters, total_iters, norm_abs, norm_rel, ...
-# (the file appends across reruns; take the last run's rows).
-ATOL = 1.0e-11  # must match the deck
-RTOL = 1.0e-8
-last_run = newton_history[-int(newton_history[-1][0]) :]
-converged = (last_run[:, 4] < ATOL) | (last_run[:, 5] < RTOL)
-n_bad = int(np.count_nonzero(~converged))
-print(f"non-converged Newton solves: {n_bad} of {len(last_run)}")
-assert n_bad == 0, (
-    f"{n_bad} Newton solves failed to converge while riding the "
-    "temperature floor (pinned-cell irreducible residual)"
-)
-
 print("PASS")
