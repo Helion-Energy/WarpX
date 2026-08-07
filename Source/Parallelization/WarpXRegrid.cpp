@@ -464,6 +464,33 @@ WarpX::HybridPICRegrid (int step, amrex::Real time)
         + (level_relocated ? "; level(s) relocated" : "")
         + (level_removed   ? "; level(s) removed"   : ""));
 
+    // Any hierarchy change invalidates the cached coarse-fine masks (they
+    // are keyed to the layouts they were built from and rebuilt on demand).
+    m_hybrid_pic_model->ClearMRMaskCache();
+
+    // Seed the fields of created levels, coarsest first, so a multi-level
+    // cascade always prolongs from an already-seeded parent.
+    for (int lev = 1; lev <= finest_level; ++lev)
+    {
+        const bool is_created = std::find(
+            m_regrid_created_levels.begin(), m_regrid_created_levels.end(), lev)
+            != m_regrid_created_levels.end();
+        if (!is_created) { continue; }
+
+        // B: divergence-free prolongation of the coarse solution over the
+        // whole level (div(B) = 0 is inherited).
+        m_hybrid_pic_model->SeedBfieldFromCoarse(
+            lev, guard_cells.ng_FieldSolver, WarpX::sync_nodal_points);
+
+        // E: staggering-aware placeholder interpolation (recomputed from the
+        // moments and B in the first Ohm's-law solve of this step).
+        m_hybrid_pic_model->SeedEfieldFromCoarse(lev);
+
+        // External sources resident on the level (external current, external
+        // vector potential A and curl(A), electron-temperature fill value).
+        m_hybrid_pic_model->ReinitLevelData(lev);
+    }
+
     // Particles move to their new home levels by position (weights are
     // unchanged; on removal they drop to the coarse level automatically).
     mypc->Redistribute();

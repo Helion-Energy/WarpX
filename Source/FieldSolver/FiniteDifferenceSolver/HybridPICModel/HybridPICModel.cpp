@@ -328,6 +328,36 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
     }
 }
 
+void HybridPICModel::ReinitLevelData (const int lev)
+{
+    // Per-level re-initialization of the external-source data after a
+    // dynamic regrid created or relocated level lev: everything InitData
+    // evaluates onto the grids of a level has to be re-evaluated on the new
+    // layout. Time-dependent quantities are refreshed every step anyway
+    // (GetCurrentExternal, UpdateHybridExternalFields); this covers the
+    // time-independent ones, which are otherwise evaluated only once.
+    auto& warpx = WarpX::GetInstance();
+
+    if (m_has_external_current) {
+        warpx.ComputeExternalFieldOnGridUsingParser(
+            FieldType::hybrid_current_fp_external,
+            m_J_external[0],
+            m_J_external[1],
+            m_J_external[2],
+            lev, PatchType::fine,
+            warpx.GetEBUpdateEFlag());
+    }
+
+    // T_e fill value (overwritten by CalculateElectronPressure as soon as
+    // the moments are re-deposited; seeded for consistency with InitData).
+    warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev)
+        ->setVal(m_elec_temp / PhysConst::kb);
+
+    if (m_add_external_fields) {
+        m_external_vector_potential->ReinitLevelData(lev);
+    }
+}
+
 void HybridPICModel::GetCurrentExternal ()
 {
     if (!m_external_current_has_time_dependence) { return; }

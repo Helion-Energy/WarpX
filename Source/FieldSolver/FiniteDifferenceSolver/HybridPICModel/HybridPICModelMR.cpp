@@ -162,6 +162,33 @@ namespace
         }
     }
 
+    /** \brief Copy src into dst on every point (valid and ghost) inside the
+     * periodically grown domain; ghost cells outside a non-periodic domain
+     * boundary are left to the domain boundary conditions. Used to seed a
+     * freshly created level from the coarse-prolonged scratch copy. */
+    void CopyWholeRegion (amrex::MultiFab& dst, amrex::MultiFab const& src,
+                          amrex::Geometry const& geom, amrex::IntVect const& ng)
+    {
+        const amrex::Box allowed = amrex::convert(
+            geom.growPeriodicDomain(ng), dst.ixType());
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(dst, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            amrex::Box gbx = mfi.growntilebox(ng);
+            gbx &= allowed;
+            if (!gbx.ok()) { continue; }
+            auto const& d = dst.array(mfi);
+            auto const& s = src.const_array(mfi);
+            amrex::ParallelFor(gbx, dst.nComp(),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k, int n)
+                {
+                    d(i, j, k, n) = s(i, j, k, n);
+                });
+        }
+    }
+
     /** \brief Overwrite dst with src on the faces (or cells, for the 2D
      * out-of-plane cell-centered component) all of whose adjacent keep-mask
      * cells are covered. */
@@ -294,8 +321,8 @@ namespace
 #endif // Cartesian 2D/3D
 }
 
-void HybridPICModel::FillBfieldCoarseFineGhosts (
-    const int lev, amrex::IntVect const& ng, std::optional<bool> nodal_sync)
+void HybridPICModel::ProlongBfieldFromCoarse (
+    const int lev, amrex::IntVect const& ng, std::array<amrex::MultiFab, 3>& Btmp)
 {
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
     auto& warpx = WarpX::GetInstance();
@@ -308,16 +335,16 @@ void HybridPICModel::FillBfieldCoarseFineGhosts (
     const amrex::IntVect ratio = warpx.refRatio(lev-1);
 
     // Prolong the coarse solution onto a scratch copy of the fine patch;
-    // only the coarse-fine ghost region is copied back below. The fill
-    // region per fine box is its valid cell box grown by ng, padded up to
-    // coarse alignment (FaceDivFree writes every fine face of each covered
-    // coarse cell).
+    // the caller decides how much of the scratch is copied back (ghost
+    // region only for the coarse-fine ghost fill, the whole level for the
+    // seeding of a freshly created level). The fill region per fine box is
+    // its valid cell box grown by ng, padded up to coarse alignment
+    // (FaceDivFree writes every fine face of each covered coarse cell).
     amrex::IntVect ng_pad;
     for (int d = 0; d < AMREX_SPACEDIM; ++d) {
         ng_pad[d] = ((ng[d] + ratio[d] - 1) / ratio[d]) * ratio[d];
     }
     const amrex::BoxArray& fba_cell = warpx.boxArray(lev);
-    std::array<amrex::MultiFab, 3> Btmp;
     for (int idim = 0; idim < 3; ++idim) {
         Btmp[idim] = amrex::MultiFab(
             Bfine[idim]->boxArray(), Bfine[idim]->DistributionMap(), 1, ng_pad);
@@ -394,6 +421,24 @@ void HybridPICModel::FillBfieldCoarseFineGhosts (
             cgeom, fgeom, ratio, &amrex::cell_cons_interp, bcrec, 0);
 #endif
     }
+#else
+    amrex::ignore_unused(lev, ng, Btmp);
+    WARPX_ABORT_WITH_MESSAGE(
+        "Hybrid-PIC mesh refinement is only implemented for Cartesian 2D/3D.");
+#endif
+}
+
+void HybridPICModel::FillBfieldCoarseFineGhosts (
+    const int lev, amrex::IntVect const& ng, std::optional<bool> nodal_sync)
+{
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    auto& warpx = WarpX::GetInstance();
+
+    ablastr::fields::VectorField Bfine = warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev);
+    const amrex::Geometry& fgeom = warpx.Geom(lev);
+
+    std::array<amrex::MultiFab, 3> Btmp;
+    ProlongBfieldFromCoarse(lev, ng, Btmp);
 
     // Copy back the ghost region only: interior valid data must not be
     // touched. Ghost cells covered by same-level valid data (including
@@ -405,6 +450,99 @@ void HybridPICModel::FillBfieldCoarseFineGhosts (
     warpx.FillBoundaryB(lev, ng, nodal_sync);
 #else
     amrex::ignore_unused(lev, ng, nodal_sync);
+    WARPX_ABORT_WITH_MESSAGE(
+        "Hybrid-PIC mesh refinement is only implemented for Cartesian 2D/3D.");
+#endif
+}
+
+void HybridPICModel::SeedBfieldFromCoarse (
+    const int lev, amrex::IntVect const& ng, std::optional<bool> nodal_sync)
+{
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    auto& warpx = WarpX::GetInstance();
+
+    ablastr::fields::VectorField Bfine = warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev);
+    const amrex::Geometry& fgeom = warpx.Geom(lev);
+
+    std::array<amrex::MultiFab, 3> Btmp;
+    ProlongBfieldFromCoarse(lev, ng, Btmp);
+
+    // Seed the whole level: valid cells and every ghost cell inside the
+    // periodically grown domain get the divergence-free prolongation of the
+    // coarse solution (div(B) = 0 is inherited cell by cell). Same-level
+    // ghosts are then restored by the FillBoundary (identical values up to
+    // roundoff); ghost cells outside a non-periodic domain boundary are left
+    // to the domain boundary conditions.
+    for (int idim = 0; idim < 3; ++idim) {
+        ::CopyWholeRegion(*Bfine[idim], Btmp[idim], fgeom, ng);
+    }
+    warpx.FillBoundaryB(lev, ng, nodal_sync);
+#else
+    amrex::ignore_unused(lev, ng, nodal_sync);
+    WARPX_ABORT_WITH_MESSAGE(
+        "Hybrid-PIC mesh refinement is only implemented for Cartesian 2D/3D.");
+#endif
+}
+
+void HybridPICModel::SeedEfieldFromCoarse (const int lev)
+{
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    auto& warpx = WarpX::GetInstance();
+    using ablastr::fields::Direction;
+
+    const amrex::Geometry& cgeom = warpx.Geom(lev-1);
+    const amrex::Geometry& fgeom = warpx.Geom(lev);
+    const amrex::IntVect ratio = warpx.refRatio(lev-1);
+
+    // Placeholder staggering-aware linear interpolation of the coarse E onto
+    // the whole level (valid + ghost), reusing the same kernel as the
+    // coarse-fine moment fill. E carries no time history in the Ohm's-law
+    // solver -- it is recomputed from the moments and B in the first E solve
+    // after the regrid -- so the seeded values are only gathered by the
+    // particles for the first half-push on this level.
+    for (int idim = 0; idim < 3; ++idim)
+    {
+        amrex::MultiFab& E_f = *warpx.m_fields.get(FieldType::Efield_fp, Direction{idim}, lev);
+        const amrex::MultiFab& E_c = *warpx.m_fields.get(FieldType::Efield_fp, Direction{idim}, lev-1);
+        const amrex::IntVect ng = E_f.nGrowVect();
+
+        // Scratch on the coarsened fine layout with enough ghost cells for
+        // the interpolation stencil under the fine ghost region.
+        amrex::IntVect ngc;
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) { ngc[d] = ng[d]/ratio[d] + 2; }
+        amrex::MultiFab etmp(
+            amrex::coarsen(E_f.boxArray(), ratio), E_f.DistributionMap(), 1, ngc);
+        etmp.setVal(0.0_rt);
+        ablastr::utils::communication::ParallelCopy(
+            etmp, E_c, 0, 0, 1, amrex::IntVect(0), ngc,
+            WarpX::do_single_precision_comms, cgeom.periodicity());
+
+        const amrex::IntVect stag = E_f.ixType().toIntVect();
+        const amrex::Box allowed = amrex::convert(
+            fgeom.growPeriodicDomain(ng), E_f.ixType());
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(E_f, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            amrex::Box gbx = mfi.growntilebox(ng);
+            gbx &= allowed;
+            if (!gbx.ok()) { continue; }
+            auto const& e_arr = E_f.array(mfi);
+            auto const& c_arr = etmp.const_array(mfi);
+            amrex::ParallelFor(gbx,
+                [=] AMREX_GPU_DEVICE (int j, int k, int l)
+                {
+                    e_arr(j, k, l) = hybrid_mr_interp_from_coarse(
+                        j, k, l, 0, c_arr, stag, ratio);
+                });
+        }
+        ablastr::utils::communication::FillBoundary(
+            E_f, ng, WarpX::do_single_precision_comms,
+            fgeom.periodicity(), true);
+    }
+#else
+    amrex::ignore_unused(lev);
     WARPX_ABORT_WITH_MESSAGE(
         "Hybrid-PIC mesh refinement is only implemented for Cartesian 2D/3D.");
 #endif
@@ -532,6 +670,14 @@ void HybridPICModel::RestrictBfieldFineToCoarse (
     WARPX_ABORT_WITH_MESSAGE(
         "Hybrid-PIC mesh refinement is only implemented for Cartesian 2D/3D.");
 #endif
+}
+
+void HybridPICModel::ClearMRMaskCache ()
+{
+    m_mr_keep_mask.clear();
+    m_mr_keep_mask_fba.clear();
+    m_mr_fine_edge_mask.clear();
+    m_mr_fine_edge_mask_ba.clear();
 }
 
 void HybridPICModel::EnsureFineEdgeMask (const int lev, amrex::IntVect const& ratio)
