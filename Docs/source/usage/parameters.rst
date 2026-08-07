@@ -738,6 +738,28 @@ Setting up the field mesh
     Note: in development; only works with static mesh-refinement, specific
     to moving window plasma injection, and requires a single refined level.
 
+.. pp:param:: warpx.refine_plasma_init
+    :type: ``integer``
+    :default: ``0``
+    :optional:
+
+    With static mesh refinement, inject the plasma initialized at the start of the
+    simulation at the resolution of the refined level inside the region covered by
+    the fine patch: each coarse cell covered by the fine patch receives
+    ``num_particles_per_cell`` macro-particles *per fine cell* (i.e. the deck's
+    full number of particles per cell at the fine resolution), with
+    correspondingly reduced particle weights so that the physical density is
+    unchanged. Without this option, particles are injected per coarse cell
+    everywhere and then assigned to the finest available level, so the refined
+    level is sampled with only ``num_particles_per_cell/ratio^d`` particles per
+    cell on average. For the ``nrandompercell`` injection style the refined
+    injection is stratified: every fine cell receives exactly
+    ``num_particles_per_cell`` particles, placed randomly within the fine cell.
+
+    Note: in development; only works with static mesh refinement and requires a
+    single refined level. If the refined level consists of several boxes, the
+    refined-injection region is the smallest single box containing all of them.
+
 .. pp:param:: warpx.n_current_deposition_buffer
     :type: ``integer``
 

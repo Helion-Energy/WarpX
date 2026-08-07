@@ -1754,13 +1754,27 @@ PhysicalParticleContainer::findRefinedInjectionBox (amrex::Box& a_fine_injection
     static bool refine_injection = false;
     static Box fine_injection_box;
     static amrex::IntVect rrfac(AMREX_D_DECL(1,1,1));
-    if (!refine_injection and WarpX::moving_window_active(WarpX::GetInstance().getistep(0)+1) and WarpX::refine_plasma and do_continuous_injection and numLevels() == 2) {
-        refine_injection = true;
-        fine_injection_box = ParticleBoxArray(1).minimalBox();
-        fine_injection_box.setSmall(WarpX::moving_window_dir, std::numeric_limits<int>::lowest()/2);
-        fine_injection_box.setBig(WarpX::moving_window_dir, std::numeric_limits<int>::max()/2);
-        rrfac = m_gdb->refRatio(0);
-        fine_injection_box.coarsen(rrfac);
+    if (!refine_injection and numLevels() == 2) {
+        // Moving-window continuous injection: refine the injection "ahead" of the
+        // fine patch, i.e. extend the fine injection box along the window direction.
+        const bool moving_window_refine =
+            WarpX::moving_window_active(WarpX::GetInstance().getistep(0)+1) and
+            WarpX::refine_plasma and do_continuous_injection;
+        // Static-init refined injection (warpx.refine_plasma_init): inject at the
+        // fine-level resolution inside the region covered by the fine patch, so
+        // that fine-level cells receive the deck's full number of particles per
+        // cell (with correspondingly reduced weights) instead of the diluted
+        // per-coarse-cell sampling.
+        if (moving_window_refine or WarpX::refine_plasma_init) {
+            refine_injection = true;
+            fine_injection_box = ParticleBoxArray(1).minimalBox();
+            if (moving_window_refine) {
+                fine_injection_box.setSmall(WarpX::moving_window_dir, std::numeric_limits<int>::lowest()/2);
+                fine_injection_box.setBig(WarpX::moving_window_dir, std::numeric_limits<int>::max()/2);
+            }
+            rrfac = m_gdb->refRatio(0);
+            fine_injection_box.coarsen(rrfac);
+        }
     }
     a_fine_injection_box = fine_injection_box;
     a_rrfac = rrfac;

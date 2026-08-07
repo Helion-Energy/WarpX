@@ -18,13 +18,45 @@
 // random distribution inside a unit cell.
 struct InjectorPositionRandom
 {
+    // i_part: particle number within the cell.
+    // ref_fac: refined-injection factor. When ref_fac > 1, stratified sampling
+    // is used: the particles of the (coarse) cell are assigned round-robin to
+    // its ref_fac^d fine sub-cells and drawn uniformly within the assigned
+    // sub-cell, so that every fine cell receives the same number of particles.
+    // With ref_fac == 1 this reduces exactly to a uniform draw in the unit box.
+    // The mapping of the ref_fac components onto the (x, y, z) components of
+    // the returned vector matches getCellCoords in AddParticles.cpp.
     [[nodiscard]]
     AMREX_GPU_HOST_DEVICE
     amrex::XDim3
-    getPositionUnitBox (int /*i_part*/, amrex::IntVect const /*ref_fac*/,
+    getPositionUnitBox (int const i_part, amrex::IntVect const ref_fac,
                         amrex::RandomEngine const& engine) const noexcept
     {
-        return amrex::XDim3{amrex::Random(engine), amrex::Random(engine), amrex::Random(engine)};
+#if (defined WARPX_DIM_3D)
+        int const fx = ref_fac[0];
+        int const fy = ref_fac[1];
+        int const fz = ref_fac[2];
+#elif (defined WARPX_DIM_XZ)
+        int const fx = ref_fac[0];
+        int const fy = ref_fac[1]; // y is the second dimension (z) in 2D
+        int const fz = 1;
+#elif (defined WARPX_DIM_RZ)
+        int const fx = ref_fac[0];
+        int const fy = 1;          // y is the azimuthal angle theta: no refinement
+        int const fz = ref_fac[1];
+#elif (defined WARPX_DIM_1D_Z) || (defined WARPX_DIM_RCYLINDER) || (defined WARPX_DIM_RSPHERE)
+        int const fx = ref_fac[0]; // x is the only refined dimension
+        int const fy = 1;
+        int const fz = 1;
+#endif
+        int s = i_part % (fx*fy*fz);
+        int const sx = s % fx; s /= fx;
+        int const sy = s % fy; s /= fy;
+        int const sz = s;
+        amrex::Real const x = (sx + amrex::Random(engine)) / fx;
+        amrex::Real const y = (sy + amrex::Random(engine)) / fy;
+        amrex::Real const z = (sz + amrex::Random(engine)) / fz;
+        return amrex::XDim3{x, y, z};
     }
 };
 
