@@ -2402,6 +2402,12 @@ WarpX::MakeNewLevelFromCoarse (int lev, amrex::Real time, const amrex::BoxArray&
 void
 WarpX::ClearLevel (int lev)
 {
+    ClearLevelData(lev);
+}
+
+void
+WarpX::ClearLevelData (int lev)
+{
     m_fields.clear_level(lev);
 
     for (int i = 0; i < 3; ++i) {
@@ -2411,6 +2417,13 @@ WarpX::ClearLevel (int lev)
     }
 
     phi_dotMask[lev].reset();
+
+    // Gather/deposition buffer masks live on the level's BoxArray; drop them
+    // so a removed level cannot leak a stale layout into BuildBufferMasks.
+    if (lev > 0) {
+        current_buffer_masks[lev].reset();
+        gather_buffer_masks[lev].reset();
+    }
 
 #ifdef WARPX_USE_FFT
     if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::PSATD) {
