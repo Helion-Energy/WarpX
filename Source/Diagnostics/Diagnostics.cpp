@@ -363,12 +363,18 @@ Diagnostics::InitDataBeforeRestart ()
 void
 Diagnostics::InitDataAfterRestart (const MultiParticleContainer& mpc)
 {
+    auto& warpx = WarpX::GetInstance();
+    // With hybrid-PIC dynamic mesh refinement a checkpoint can hold fewer
+    // levels than amr.max_level allows (a deferred or removed fine level):
+    // functors can only be initialized for levels that exist.
+    const int nlev_functors = std::min(nmax_lev, warpx.finestLevel() + 1);
+
     for (int i_buffer = 0; i_buffer < m_num_buffers; ++i_buffer) {
         // loop over all levels
         // This includes full diagnostics and BTD as well as cell-center functors for BTD.
         // Note that the cell-centered data for BTD is computed for all levels and hence
         // the corresponding functor is also initialized for all the levels
-        for (int lev = 0; lev < nmax_lev; ++lev) {
+        for (int lev = 0; lev < nlev_functors; ++lev) {
             // allocate and initialize m_all_field_functors depending on diag type
             InitializeFieldFunctors(lev);
         }
