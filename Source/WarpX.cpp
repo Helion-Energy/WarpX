@@ -2368,10 +2368,35 @@ WarpX::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& new_grids,
 
 // This is a virtual function.
 void
-WarpX::MakeNewLevelFromCoarse (int /*lev*/, amrex::Real /*time*/, const amrex::BoxArray& /*ba*/,
-                                         const amrex::DistributionMapping& /*dm*/)
+WarpX::MakeNewLevelFromCoarse (int lev, amrex::Real time, const amrex::BoxArray& ba,
+                                         const amrex::DistributionMapping& dm)
 {
-    WARPX_ABORT_WITH_MESSAGE("MakeNewLevelFromCoarse: To be implemented");
+    // Only reached through AmrCore::regrid, which WarpX only invokes from
+    // HybridPICRegrid (hybrid-PIC dynamic mesh refinement). The EM and ES
+    // solvers are static-MR.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC &&
+        m_hybrid_regrid_in_progress,
+        "MakeNewLevelFromCoarse: creating a refinement level mid-run is only "
+        "implemented for the hybrid-PIC solver, through warpx.regrid_int "
+        "(the EM/ES solvers are static-MR).");
+
+    // Allocate the level exactly like initialization does: registry fields,
+    // hybrid-PIC scratch fields (HybridPICModel/ExternalVectorPotential
+    // AllocateLevelMFs), gather/deposition buffers, field factory, FDTD
+    // solver, costs, and accelerator lattice.
+    AllocLevelData(lev, ba, dm);
+
+    // This level starts its life at the current step boundary.
+    t_new[lev] = time;
+    t_old[lev] = time - dt[lev];
+
+    // The field data is seeded (and the particle/moment work runs) in
+    // HybridPICRegrid once AmrCore::regrid has published the new BoxArray,
+    // DistributionMapping and finest_level: the div-free B prolongation, the
+    // particle redistribution and the buffer masks all read the published
+    // hierarchy.
+    m_regrid_created_levels.push_back(lev);
 }
 
 void
