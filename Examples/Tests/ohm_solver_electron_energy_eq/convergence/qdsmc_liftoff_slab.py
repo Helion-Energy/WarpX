@@ -314,6 +314,15 @@ simulation.initialize_inputs()
 
 # branch-side energy-equation knobs (pywarpx bucket, annulus-deck pattern)
 pywarpx.hybridpicmodel.qdsmc_time_advance = args.advance
+# PRODUCTION conduction form: the code default ("scatter", #6982-compat
+# control arm) has no closed floor faces and no EB machinery -- with the
+# insulating wall's maintained band Te it acts as a perpetual bath donor
+# (measured on this deck: +12.8% open-set energy per 400 steps). The
+# fluxform split sweeps with ppm/npts=3 are the gate-passed defaults.
+pywarpx.hybridpicmodel.qdsmc_conduction_form = "fluxform"
+pywarpx.hybridpicmodel.qdsmc_conduction_reconstruction = "ppm"
+pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = 3
+pywarpx.hybridpicmodel.qdsmc_conduction_eb_bc = "adiabatic"
 if args.kappa == "spitzer":
     pywarpx.hybridpicmodel.__setattr__(
         "qdsmc_kappa_par(n,Te,t)", f"{KAPPA_C:.6e}*Te**2.5"

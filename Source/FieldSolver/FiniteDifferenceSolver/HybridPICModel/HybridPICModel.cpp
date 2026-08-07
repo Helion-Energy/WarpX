@@ -152,7 +152,15 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("qdsmc_conduction_vacuum_fast_front",
                     m_cond_vacuum_fast_front);
     {
-        std::string form = "scatter";
+        // Default = the production/gate-passed form: fluxform split sweeps
+        // with the closed floor faces and the per-line EB machinery.
+        // scatter/layer are the historical control arms -- they keep pre-EB
+        // behavior (no floor/EB masks), which next to a maintained wall
+        // band acts as a perpetual bath donor (measured on the liftoff
+        // slab: +12.8% open-set energy per 400 steps with the insulating
+        // wall's Te fill). Conduction itself is off unless the kappa_par
+        // parser is given, so decks without conduction are unaffected.
+        std::string form = "fluxform";
         pp_hybrid.query("qdsmc_conduction_form", form);
         if (form == "scatter") { m_cond_form = 0; }
         else if (form == "layer") { m_cond_form = 1; }
