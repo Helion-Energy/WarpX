@@ -88,8 +88,15 @@ VarianceAccumulationBuffer::ConvertVarianceToTemperatureAndFilter (
         auto const& periodicity = warpx.Geom(lev).periodicity();
 
         for (int idir = 0; idir < 3; ++idir) {
-            // Multiplies internal cells to convert variance to temperature
-            var_vf[lev][Direction{idir}]->mult(normalization_factor, 0, 1);
+            // Multiplies cells to convert variance to temperature.
+            // Include the guard cells: at physical/coarse-fine boundaries the
+            // guards hold one-sided deposited values with no valid-cell source
+            // for FillBoundary to refresh them from, and the filter below mixes
+            // them into the outermost valid row. Leaving them unscaled (raw
+            // velocity variance, ~1e5x larger than T in K) produced keV-MeV
+            // spikes in the outermost row at the MR patch boundary.
+            var_vf[lev][Direction{idir}]->mult(normalization_factor, 0, 1,
+                                               var_vf[lev][Direction{idir}]->nGrow());
 
             amrex::Gpu::streamSynchronize();
 
