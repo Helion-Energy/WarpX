@@ -510,6 +510,28 @@ Diagnostics::InitData (const MultiParticleContainer& mpc)
 
 
 void
+Diagnostics::HandleHierarchyChange ()
+{
+    auto& warpx = WarpX::GetInstance();
+
+    // Track the new level hierarchy (a hybrid-PIC dynamic regrid created,
+    // relocated, or removed refined levels).
+    nlev = warpx.finestLevel() + 1;
+    nlev_output = nlev;
+
+    for (int i_buffer = 0; i_buffer < m_num_buffers; ++i_buffer) {
+        for (int lev = 0; lev < nlev_output; ++lev) {
+            // Re-point the field functors at the (possibly re-allocated)
+            // fields of the level and rebuild the output buffer on the
+            // level's current BoxArray.
+            InitializeFieldFunctors(lev);
+            InitializeBufferData(i_buffer, lev);
+        }
+    }
+}
+
+
+void
 Diagnostics::InitBaseData ()
 {
     auto & warpx = WarpX::GetInstance();

@@ -36,6 +36,11 @@ public:
       * \param[in] lev level at this the field functors are initialized.
       */
     void InitializeFieldFunctors (int lev);
+    /** \brief Re-size every diagnostic to the current level hierarchy after
+     * a hybrid-PIC dynamic regrid created, relocated, or removed refined
+     * levels. Aborts for BackTransformed diagnostics (unsupported with
+     * dynamic mesh refinement). */
+    void HandleHierarchyChange ();
     /** Start a new iteration, i.e., dump has not been done yet. */
     void NewIteration ();
     Diagnostics& GetDiag(int idiag) {return *alldiags[idiag]; }
