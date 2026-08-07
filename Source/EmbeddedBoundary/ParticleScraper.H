@@ -51,6 +51,10 @@
  * \param distance_to_eb a set of MultiFabs that store the signed distance function
  * \param lev the mesh refinement level to work on.
  * \param f the callable that defines what to do when a particle hits the boundary.
+ * \param standoff_cells collect particles where the signed distance to the EB
+ *        falls below this many cells (times the largest cell size of the level);
+ *        0 (the default) collects at the surface itself. Used by the insulating
+ *        EB wall type's standoff band.
  *
  *        The form of the callable should model:
  *        template <typename PData>
@@ -101,6 +105,10 @@ scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& dista
  * \param pc the particle container to test for boundary interactions.
  * \param distance_to_eb a set of MultiFabs that store the signed distance function
  * \param f the callable that defines what to do when a particle hits the boundary.
+ * \param standoff_cells collect particles where the signed distance to the EB
+ *        falls below this many cells (times the largest cell size of the level);
+ *        0 (the default) collects at the surface itself. Used by the insulating
+ *        EB wall type's standoff band.
  *
  *        The form of the callable should model:
  *        template <typename PData>
@@ -153,6 +161,10 @@ scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& dista
  * \param lev_min the minimum mesh refinement level to work on.
  * \param lev_max the maximum mesh refinement level to work on.
  * \param f the callable that defines what to do when a particle hits the boundary.
+ * \param standoff_cells collect particles where the signed distance to the EB
+ *        falls below this many cells (times the largest cell size of the level);
+ *        0 (the default) collects at the surface itself. Used by the insulating
+ *        EB wall type's standoff band.
  *
  *        The form of the callable should model:
  *        template <typename PData>
