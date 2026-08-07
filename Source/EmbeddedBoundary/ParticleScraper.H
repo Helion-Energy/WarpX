@@ -20,6 +20,7 @@
 #include <AMReX_TypeTraits.H>
 #include <AMReX_Vector.H>
 
+#include <algorithm>
 #include <type_traits>
 #include <utility>
 
@@ -70,9 +71,10 @@
  */
 template <class PC, class F, std::enable_if_t<amrex::IsParticleContainer<PC>::value, int> foo = 0>
 void
-scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& distance_to_eb, int lev, F&& f)
+scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& distance_to_eb, int lev, F&& f,
+                     amrex::Real standoff_cells = 0.0)
 {
-    scrapeParticlesAtEB(pc, distance_to_eb, lev, lev, std::forward<F>(f));
+    scrapeParticlesAtEB(pc, distance_to_eb, lev, lev, std::forward<F>(f), standoff_cells);
 }
 
 /**
@@ -119,9 +121,10 @@ scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& dista
  */
 template <class PC, class F, std::enable_if_t<amrex::IsParticleContainer<PC>::value, int> foo = 0>
 void
-scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& distance_to_eb, F&& f)
+scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& distance_to_eb, F&& f,
+                     amrex::Real standoff_cells = 0.0)
 {
-    scrapeParticlesAtEB(pc, distance_to_eb, 0, pc.finestLevel(), std::forward<F>(f));
+    scrapeParticlesAtEB(pc, distance_to_eb, 0, pc.finestLevel(), std::forward<F>(f), standoff_cells);
 }
 
 /**
@@ -171,7 +174,7 @@ scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& dista
 template <class PC, class F, std::enable_if_t<amrex::IsParticleContainer<PC>::value, int> foo = 0>
 void
 scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& distance_to_eb,
-                 int lev_min, int lev_max, F&& f)
+                 int lev_min, int lev_max, F&& f, amrex::Real standoff_cells = 0.0)
 {
     BL_PROFILE("scrapeParticlesAtEB");
 
@@ -179,6 +182,15 @@ scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& dista
     {
         const auto plo = pc.Geom(lev).ProbLoArray();
         const auto dxi = pc.Geom(lev).InvCellSizeArray();
+
+        // Insulating-wall standoff: collect particles this far BEFORE the
+        // surface (signed distance in meters; "cells" measured with the
+        // largest cell size of the level).
+        amrex::Real dx_max = pc.Geom(lev).CellSize(0);
+        for (int d = 1; d < AMREX_SPACEDIM; ++d) {
+            dx_max = std::max(dx_max, pc.Geom(lev).CellSize(d));
+        }
+        amrex::Real const phi_threshold = standoff_cells * dx_max;
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -205,7 +217,7 @@ scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& dista
                     xp, yp, zp, plo, dxi, i, j, k, W);
                 amrex::Real const distance_to_eb_value = ablastr::particles::interp_field_nodal(i, j, k, W, distance_to_eb_arr);
 
-                if (distance_to_eb_value < 0.0)
+                if (distance_to_eb_value < phi_threshold)
                 {
                     f(ptd, ip, setPosition, xp, yp, zp, distance_to_eb_arr, plo, dxi, engine);
                 }
