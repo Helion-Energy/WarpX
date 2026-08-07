@@ -469,7 +469,47 @@ WarpX::WarpX ()
                     "The hybrid-PIC solver with mesh refinement requires a "
                     "refinement ratio of 2 between all levels.");
             }
+            // Restrictions on dynamic regridding (warpx.regrid_int): the
+            // refined levels can be created, relocated, and removed mid-run.
+            if (regrid_int > 0) {
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    !m_hybrid_pic_model->m_add_external_fields ||
+                    !m_hybrid_pic_model->m_external_vector_potential->UsesDivACleaning(),
+                    "Dynamic regridding (warpx.regrid_int) with an external "
+                    "vector potential requires "
+                    "external_vector_potential.do_diva_cleaning = 0: the "
+                    "projection div(A) cleaner runs once at initialization and "
+                    "cannot reproduce its solution on a level created mid-run.");
+            }
         }
+    }
+
+    // The dynamic-regrid knobs are implemented only for the hybrid-PIC
+    // solver: level creation/relocation/removal is keyed to the Ohm's-law
+    // update sequence. The EM and ES solvers remain static-MR.
+    if (WarpX::electromagnetic_solver_id != ElectromagneticSolverAlgo::HybridPIC) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            regrid_int <= 0,
+            "warpx.regrid_int (dynamic mesh refinement) is only implemented "
+            "for the hybrid-PIC solver (algo.maxwell_solver = hybrid); the "
+            "electromagnetic and electrostatic solvers are static-MR.");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            refinement_start_time == std::numeric_limits<amrex::Real>::lowest(),
+            "warpx.refinement_start_time is only implemented for the "
+            "hybrid-PIC solver (algo.maxwell_solver = hybrid).");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            ref_patch_parser_t == nullptr,
+            "warpx.ref_patch_function(x,y,z,t) is only implemented for the "
+            "hybrid-PIC solver (algo.maxwell_solver = hybrid).");
+    } else if (max_level > 0 &&
+               (refinement_start_time != std::numeric_limits<amrex::Real>::lowest() ||
+                ref_patch_parser_t != nullptr)) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            regrid_int > 0,
+            "warpx.refinement_start_time and warpx.ref_patch_function(x,y,z,t) "
+            "require warpx.regrid_int > 0: without regrids the refinement "
+            "tags are only ever evaluated at initialization and a deferred "
+            "level would never be created.");
     }
 
     current_buffer_masks.resize(nlevs_max);
@@ -736,6 +776,7 @@ WarpX::ReadParameters ()
         pp_warpx.query("verbose", verbose);
         pp_warpx.query("limit_verbose_step", m_limit_verbose_step);
         utils::parser::queryWithParser(pp_warpx, "regrid_int", regrid_int);
+        utils::parser::queryWithParser(pp_warpx, "refinement_start_time", refinement_start_time);
         pp_warpx.query("do_subcycling", m_do_subcycling);
         pp_warpx.query("use_hybrid_QED", use_hybrid_QED);
         pp_warpx.query("safe_guard_cells", m_safe_guard_cells);
@@ -1126,13 +1167,20 @@ WarpX::ReadParameters ()
             const bool fine_tag_hi_specified = utils::parser::queryArrWithParser(pp_warpx, "fine_tag_hi", hi);
             std::string ref_patch_function;
             const bool parser_specified = pp_warpx.query("ref_patch_function(x,y,z)",ref_patch_function);
+            std::string ref_patch_function_t;
+            const bool parser_t_specified = pp_warpx.query("ref_patch_function(x,y,z,t)",ref_patch_function_t);
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE( ((fine_tag_lo_specified && fine_tag_hi_specified) ||
-                                                parser_specified ),
+                                                parser_specified || parser_t_specified ),
                                                 "For max_level > 0, you need to either set\
                                                 warpx.fine_tag_lo and warpx.fine_tag_hi\
-                                                or warpx.ref_patch_function(x,y,z)");
+                                                or warpx.ref_patch_function(x,y,z)\
+                                                or warpx.ref_patch_function(x,y,z,t)");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !(parser_specified && parser_t_specified),
+                "warpx.ref_patch_function(x,y,z) and warpx.ref_patch_function(x,y,z,t) "
+                "are mutually exclusive.");
 
-            if ( (fine_tag_lo_specified && fine_tag_hi_specified) && parser_specified) {
+            if ( (fine_tag_lo_specified && fine_tag_hi_specified) && (parser_specified || parser_t_specified)) {
                ablastr::warn_manager::WMRecordWarning("Refined patch", "Both fine_tag_lo,fine_tag_hi\
                    and ref_patch_function(x,y,z) are provided. Note that fine_tag_lo/fine_tag_hi will\
                    override the ref_patch_function(x,y,z) for defining the refinement patches");
@@ -1140,6 +1188,10 @@ WarpX::ReadParameters ()
             if (fine_tag_lo_specified && fine_tag_hi_specified) {
                 fine_tag_lo = RealVect{lo};
                 fine_tag_hi = RealVect{hi};
+            } else if (parser_t_specified) {
+                utils::parser::Store_parserString(pp_warpx, "ref_patch_function(x,y,z,t)", ref_patch_function_t);
+                ref_patch_parser_t = std::make_unique<amrex::Parser>(
+                    utils::parser::makeParser(ref_patch_function_t,{"x","y","z","t"}));
             } else {
                 utils::parser::Store_parserString(pp_warpx, "ref_patch_function(x,y,z)", ref_patch_function);
                 ref_patch_parser = std::make_unique<amrex::Parser>(
@@ -3488,13 +3540,21 @@ WarpX::getLoadBalanceEfficiency (const int lev)
 
 
 void
-WarpX::ErrorEst (int lev, TagBoxArray& tags, Real /*time*/, int /*ngrow*/)
+WarpX::ErrorEst (int lev, TagBoxArray& tags, Real time, int /*ngrow*/)
 {
+    // Refinement is suppressed (no tags -> no refined level) until the
+    // simulation time reaches warpx.refinement_start_time. This is only
+    // reachable before that time through initialization (deferring the level)
+    // or through a hybrid-PIC dynamic regrid (creating it when due).
+    if (time < refinement_start_time) { return; }
+
     const auto problo = Geom(lev).ProbLoArray();
     const auto dx = Geom(lev).CellSizeArray();
 
     amrex::ParserExecutor<3> ref_parser;
     if (ref_patch_parser) { ref_parser = ref_patch_parser->compile<3>(); }
+    amrex::ParserExecutor<4> ref_parser_t;
+    if (ref_patch_parser_t) { ref_parser_t = ref_patch_parser_t->compile<4>(); }
     const auto ftlo = fine_tag_lo;
     const auto fthi = fine_tag_hi;
 #ifdef AMREX_USE_OMP
@@ -3522,6 +3582,19 @@ WarpX::ErrorEst (int lev, TagBoxArray& tags, Real /*time*/, int /*ngrow*/)
 #elif defined (WARPX_DIM_RCYLINDER) || defined (WARPX_DIM_RSPHERE)
                 const auto unused = 0.0_rt;
                 tag_val = (ref_parser(pos[0], unused, unused) == 1);
+#endif
+            } else if (ref_parser_t) {
+#if defined (WARPX_DIM_3D)
+                tag_val = (ref_parser_t(pos[0], pos[1], pos[2], time) == 1);
+#elif defined (WARPX_DIM_XZ) || defined (WARPX_DIM_RZ)
+                const auto unused = 0.0_rt;
+                tag_val = (ref_parser_t(pos[0], unused, pos[1], time) == 1);
+#elif defined (WARPX_DIM_1D_Z)
+                const auto unused = 0.0_rt;
+                tag_val = (ref_parser_t(unused, unused, pos[0], time) == 1);
+#elif defined (WARPX_DIM_RCYLINDER) || defined (WARPX_DIM_RSPHERE)
+                const auto unused = 0.0_rt;
+                tag_val = (ref_parser_t(pos[0], unused, unused, time) == 1);
 #endif
             } else {
                 tag_val = (pos > ftlo && pos < fthi);

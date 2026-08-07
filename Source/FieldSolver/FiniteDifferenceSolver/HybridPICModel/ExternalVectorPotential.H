@@ -85,6 +85,11 @@ public:
 
     void InitData ();
 
+    /** True when the projection div(A) cleaner post-processes the external
+     * vector potential at initialization (external_vector_potential.
+     * do_diva_cleaning); incompatible with dynamic regridding. */
+    [[nodiscard]] bool UsesDivACleaning () const { return m_do_clean_divA; }
+
     void CalculateExternalCurlA ();
     void CalculateExternalCurlA (std::string& coil_name);
 
