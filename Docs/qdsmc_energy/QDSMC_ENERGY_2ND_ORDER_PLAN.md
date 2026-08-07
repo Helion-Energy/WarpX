@@ -1297,6 +1297,46 @@ deck now takes `--load-margin` (default 1.5 cells with
 `--eb-insulating`) and prints `warpx.get_eb_collected_charge('ions')`
 — any nonzero ion tally means the load grazed the shell.
 
+### Liftoff-class slab: production stack DEMONSTRATED (2026-08-06)
+
+`qdsmc_liftoff_slab.py` (port of the ECT theta-pinch testbed; its
+Python install_wall_scraper quartz-liner stand-in replaced by the C++
+insulating wall) runs the full production stack in 3D: insulating wall
++ Joule heating (formation power-law eta) + Spitzer kappa_par =
+0.264 Te^2.5 (lnL=10, kappa_perp frac 1e-2) + spill-only fold + fill.
+
+**N=128 (design geometry, standoff 2), 400 steps, A/B**:
+- kappa OFF: te_max runs away 5.2 -> **89.7 eV** at the wall-band
+  current sheet (r=0.77) -- the production Ohmic-hotspot blocker
+  reproduced on demand.
+- Spitzer ON: same Joule input, te_max 5.1 -> **27.4 eV (3.3x lower
+  peak)**, comparable open-set budgets (+27% vs +22% -- real heating,
+  redistributed instead of spiked). Wall quiet in both arms (identical
+  6.7e-2 C tail-class collection).
+
+**Traps recorded on the way** (all self-diagnosing in the deck now):
+1. Load must clear the collection shell (--load-margin; a grazing load
+   amputates the annulus and the grad-Pe cliff drives ~0.3 C/step
+   runaway erosion with real-mass ions).
+2. `qdsmc_conduction_form` scatter default was a silent production
+   footgun: no floor/EB masks -> the maintained band Te is a perpetual
+   bath donor (+12.8% open-set energy/400 steps). **Code default
+   flipped to fluxform** (c73e1c09c); scatter/layer stay as explicit
+   control arms.
+3. N=64 squeezes the annulus tail against the shell (1-2 cell ramp):
+   the under-resolved-ramp class concentrates an artifact te_max spike
+   (14.4 eV) that INVERTS the A/B; at N=128 the geometry fits and the
+   physics ordering is restored. Cells-based standoffs need the
+   resolution to fit the annulus-wall gap.
+
+*Production recipe*: eb_type=insulating + eb_standoff_cells >= 2 (load
+clear of the shell), qdsmc_kappa_par(n,Te,t) Spitzer parser [W/(m K),
+Te in eV], kappa_perp for cross-field drains, fluxform default,
+f=0.1 flux limiter dominates above ~10 eV (the knob if peaks persist).
+*Open*: full-horizon ramp (7600+ steps) at N>=128 = the production
+campaign (GPU-node-class); ramp-aware band treatment if resolved-sheath
+regimes re-fire the ramp class.
+
 ### Upstream PR #7128 MERGED as a branch prerequisite (2026-08-06)
 
 BLAST-WarpX **#7128 "Fix hybrid electron energy equation vacuum Te
