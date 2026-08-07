@@ -13,10 +13,15 @@ compressed npz:
     t        (NT,)        output times (s)
     z0       (nz0,)       level-0 cell centers (m)
     bx0, by0 (NT, nz0)    x-averaged Bx, By on level 0 (float32)
+    bz0      (NT, nz0)    x-averaged Bz on level 0 (float32)
     amax0    (NT, 4)      max over level 0 of |Ex|, |Ey|, |Ez|, |Bz - B0|
     and, when a level 1 exists:
-    z1, bx1, by1, amax1   same for the level-1 (patch) region
+    z1, bx1, by1, bz1, amax1   same for the level-1 (patch) region
     patch_ilo, patch_ihi  level-1 z-index range (fine cells)
+
+The b0 argument is the background Bz subtracted in the amax monitor
+(0.25 T for the T1.1-T1.3 decks; 0.0 for the T1.4 tangential
+discontinuity, whose exact solution has Bz identically zero).
 """
 
 import glob
@@ -113,7 +118,7 @@ def convert_run(run_dir, b0=0.25, out_name="t1_lineouts.npz"):
     plts = sorted(glob.glob(os.path.join(run_dir, "diags", "diag1??????")))
     assert plts, f"no plotfiles under {run_dir}"
     t_list = []
-    lev_data = [dict(bx=[], by=[], amax=[]) for _ in range(2)]
+    lev_data = [dict(bx=[], by=[], bz=[], amax=[]) for _ in range(2)]
     nlev = None
     patch_lo = patch_hi = None
     dz = [None, None]
@@ -140,6 +145,7 @@ def convert_run(run_dir, b0=0.25, out_name="t1_lineouts.npz"):
             a = ld["arr"]
             lev_data[lev]["bx"].append(a["Bx"].mean(axis=1))
             lev_data[lev]["by"].append(a["By"].mean(axis=1))
+            lev_data[lev]["bz"].append(a["Bz"].mean(axis=1))
             lev_data[lev]["amax"].append(
                 [
                     np.abs(a["Ex"]).max(),
@@ -155,6 +161,7 @@ def convert_run(run_dir, b0=0.25, out_name="t1_lineouts.npz"):
         z0=zlo_dom + (np.arange(nz0) + 0.5) * dz[0],
         bx0=np.array(lev_data[0]["bx"], dtype=np.float32),
         by0=np.array(lev_data[0]["by"], dtype=np.float32),
+        bz0=np.array(lev_data[0]["bz"], dtype=np.float32),
         amax0=np.array(lev_data[0]["amax"], dtype=np.float32),
     )
     if nlev > 1:
@@ -163,6 +170,7 @@ def convert_run(run_dir, b0=0.25, out_name="t1_lineouts.npz"):
             z1=zlo_dom + (patch_lo + np.arange(nz1) + 0.5) * dz[1],
             bx1=np.array(lev_data[1]["bx"], dtype=np.float32),
             by1=np.array(lev_data[1]["by"], dtype=np.float32),
+            bz1=np.array(lev_data[1]["bz"], dtype=np.float32),
             amax1=np.array(lev_data[1]["amax"], dtype=np.float32),
             patch_ilo=patch_lo,
             patch_ihi=patch_hi,

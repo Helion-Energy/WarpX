@@ -1,0 +1,68 @@
+# Hybrid-PIC mesh-refinement functional smoke, 3D (P1-tail deliverable):
+# 3D port of t_smoke_inputs_2d — same grid spacing, same Landau-damping-style
+# physics (density perturbation along z, uniform background Bz), centered
+# static refinement patch; z-extent halved (2 perturbation periods) to stay
+# smoke-sized. Run with
+#   <warpx.3d> t_smoke_inputs_3d
+# Append hybrid_pic_model.mr_check_div_b = 1 for the div(B) audit run.
+
+max_step = 300
+warpx.const_dt = 5.685630111305193e-12
+warpx.verbose = 1
+
+amr.n_cell = 16 16 128
+amr.max_level = 1
+amr.blocking_factor = 4
+amr.max_grid_size = 64
+warpx.fine_tag_lo = -1.1420069139910128e-3 -1.1420069139910128e-3 0.009
+warpx.fine_tag_hi =  1.1420069139910128e-3  1.1420069139910128e-3 0.0275
+
+geometry.dims = 3
+geometry.prob_lo = -2.2840138279820255e-3 -2.2840138279820255e-3 0.0
+geometry.prob_hi =  2.2840138279820255e-3  2.2840138279820255e-3 0.036544221247712408
+
+boundary.field_lo = periodic periodic periodic
+boundary.field_hi = periodic periodic periodic
+boundary.particle_lo = periodic periodic periodic
+boundary.particle_hi = periodic periodic periodic
+
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.particle_shape = 1
+
+hybrid_pic_model.elec_temp = 510.998950691753
+hybrid_pic_model.gamma = 1.0
+hybrid_pic_model.n0_ref = 9.623617654281555e20
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 1e-07
+hybrid_pic_model.substeps = 20
+
+# uniform background field (trivially divergence free)
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 0.1
+
+particles.species_names = ions
+ions.charge = q_e
+ions.mass = 9.1093837139e-29
+ions.injection_style = nrandompercell
+ions.num_particles_per_cell = 4
+ions.profile = parse_density_function
+ions.density_function(x,y,z) = "9.623617654281555e20*(1+0.03*cos(343.86751681418855*z))"
+ions.momentum_distribution_type = gaussian
+ions.ux_th = 0.001
+ions.uy_th = 0.001
+ions.uz_th = 0.001
+
+diagnostics.diags_names = diag1
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.intervals = 50
+diag1.fields_to_plot = Bx By Bz Ex Ey Ez jx jy jz rho divB
+diag1.write_species = 0
+
+warpx.reduced_diags_names = field_energy part_energy
+field_energy.type = FieldEnergy
+field_energy.intervals = 5
+part_energy.type = ParticleEnergy
+part_energy.intervals = 5
+
+warpx.serialize_initial_conditions = 1
