@@ -333,6 +333,10 @@ public:
 
     static bool do_dynamic_scheduling;
     static bool refine_plasma;
+    //! If true, with static mesh refinement, the plasma initialized at the start of the
+    //! simulation is injected at the resolution of the refined level inside the region
+    //! covered by the fine patch (with correspondingly reduced particle weights)
+    static bool refine_plasma_init;
 
     static ablastr::utils::text::IntervalsParser sort_intervals;
     static amrex::IntVect sort_bin_size;

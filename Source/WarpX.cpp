@@ -160,6 +160,7 @@ bool WarpX::use_filter_compensation = false;
 
 bool WarpX::serialize_initial_conditions = false;
 bool WarpX::refine_plasma     = false;
+bool WarpX::refine_plasma_init = false;
 
 ablastr::utils::text::IntervalsParser WarpX::sort_intervals;
 amrex::IntVect WarpX::sort_bin_size(AMREX_D_DECL(1,1,1));
@@ -980,6 +981,7 @@ WarpX::ReadParameters ()
 
         pp_warpx.query("serialize_initial_conditions", serialize_initial_conditions);
         pp_warpx.query("refine_plasma", refine_plasma);
+        pp_warpx.query("refine_plasma_init", refine_plasma_init);
         pp_warpx.query("do_dive_cleaning", do_dive_cleaning);
         pp_warpx.query("do_divb_cleaning", do_divb_cleaning);
 
