@@ -685,8 +685,11 @@ public:
      *  continuously between nodes so the source-evaluated pushforward
      *  error of the deposit kernels is absent; wall faces carry zero flux
      *  = exact adiabatic default). Input: qdsmc_conduction_form =
-     *  scatter | layer | fluxform. */
-    int m_cond_form = 0;
+     *  scatter | layer | fluxform. DEFAULT fluxform (the gate-passed
+     *  production form; the only one with the closed floor faces and the
+     *  per-line EB machinery -- next to a maintained wall band the
+     *  mask-less control arms act as a perpetual bath donor). */
+    int m_cond_form = 2;
 
     /** Layer-form interpolant: 0 = linear (bilinear; the exact adjoint of
      *  the uncorrected hat scatter -- control arm, carries the full
