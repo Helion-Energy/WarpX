@@ -398,6 +398,39 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     // skipped inside.
     m_WarpX->GetPartContainer().DepositTemperatures(m_WarpX->m_fields, 0.0_rt);
 
+    // Leave hybrid_current_fp_plasma holding the delivered end-of-step
+    // Ampere closure, J_plasma^{n+1} = curl(B^{n+1})/mu0 - J_ext. The
+    // residual evaluations left the theta-stage value; everything that
+    // reads the register between steps must observe the same t^{n+1}
+    // state the explicit loop ends on: the coherent afterEpush /
+    // afterEsolve python callbacks (e.g. a segregated circuit coupler
+    // measuring the plasma flux linkage), the particle-level resistive
+    // drag (collisions run after OneStep under the implicit schemes),
+    // and the displacement-current diagnostic. Runs after
+    // QDSMCFinishImplicitStep, which consumes the theta-stage value.
+    m_hybrid_pic_model->CalculatePlasmaCurrent(
+        m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, m_num_amr_levels - 1),
+        m_WarpX->GetEBUpdateEFlag());
+    if (m_darwin) {
+        // Darwin retains the longitudinal displacement current in the
+        // plasma current, J = curl(B)/mu_0 - eps0 dE_L/dt (Hewett &
+        // Nielson 1978), same as the residual's J assembly. The
+        // end-of-step rate equals the theta-stage rate exactly (the
+        // extrapolation is linear): hybrid_E_long_fp holds E_L^{n+1}
+        // and hybrid_E_long_old_fp still holds E_L^n here.
+        using ablastr::fields::Direction;
+        amrex::Real const inv_dt = 1.0_rt / m_dt;
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            for (int dir = 0; dir < 3; ++dir) {
+                amrex::MultiFab & Jp = *m_WarpX->m_fields.get(FieldType::hybrid_current_fp_plasma, Direction{dir}, lev);
+                amrex::MultiFab const & EL = *m_WarpX->m_fields.get("hybrid_E_long_fp", Direction{dir}, lev);
+                amrex::MultiFab const & EL_old = *m_WarpX->m_fields.get("hybrid_E_long_old_fp", Direction{dir}, lev);
+                amrex::MultiFab::Saxpy(Jp, -PhysConst::epsilon_0 * inv_dt, EL, 0, 0, Jp.nComp(), Jp.nGrowVect());
+                amrex::MultiFab::Saxpy(Jp,  PhysConst::epsilon_0 * inv_dt, EL_old, 0, 0, Jp.nComp(), Jp.nGrowVect());
+            }
+        }
+    }
+
     return exit_status;
 }
 
@@ -680,12 +713,20 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     // solve_for_Faraday; here the full Ohm E is assembled by overriding the
     // resistive gate, and the resistive part is subtracted again from the
     // push field at the top of this function.
-    m_hybrid_pic_model->HybridPICSolveE(
-        Efield_fp, current_fp, Bfield_fp, rho_fp,
-        m_WarpX->GetEBUpdateEFlag(),
-        false,  // solve_for_Faraday (retain grad(Pe))
-        true    // include_resistivity (retain eta*J for the B-update)
-    );
+    //
+    // Use the per-level HybridPICSolveE: this runs inside every nonlinear
+    // residual evaluation (including Jacobian probes), so the multi-level
+    // variant's afterEpush python callback must not fire here. A single
+    // afterEpush is fired at the converged state after
+    // ImplicitSolver::OneStep completes (see WarpX::OneStep).
+    for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+        m_hybrid_pic_model->HybridPICSolveE(
+            Efield_fp[lev], current_fp[lev], Bfield_fp[lev], *rho_fp[lev],
+            m_WarpX->GetEBUpdateEFlag()[lev], lev,
+            false,  // solve_for_Faraday (retain grad(Pe))
+            true    // include_resistivity (retain eta*J for the B-update)
+        );
+    }
 
     // Refresh the resistive push-field correction from this evaluation's
     // fields: E_res = E_ohm(with resistivity) - E_ohm(without). The
@@ -699,12 +740,16 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
         using ablastr::fields::Direction;
         ablastr::fields::MultiLevelVectorField E_res_fp =
             m_WarpX->m_fields.get_mr_levels_alldirs("hybrid_E_resistive_fp", m_num_amr_levels - 1);
-        m_hybrid_pic_model->HybridPICSolveE(
-            E_res_fp, current_fp, Bfield_fp, rho_fp,
-            m_WarpX->GetEBUpdateEFlag(),
-            false,  // solve_for_Faraday (retain grad(Pe))
-            false   // include_resistivity: no-resistivity push field
-        );
+        // Per-level for the same reason as the full Ohm solve above: no
+        // callback fires inside residual evaluations.
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            m_hybrid_pic_model->HybridPICSolveE(
+                E_res_fp[lev], current_fp[lev], Bfield_fp[lev], *rho_fp[lev],
+                m_WarpX->GetEBUpdateEFlag()[lev], lev,
+                false,  // solve_for_Faraday (retain grad(Pe))
+                false   // include_resistivity: no-resistivity push field
+            );
+        }
         for (int lev = 0; lev < m_num_amr_levels; ++lev) {
             for (int dir = 0; dir < 3; ++dir) {
                 amrex::MultiFab & E_res = *m_WarpX->m_fields.get("hybrid_E_resistive_fp", Direction{dir}, lev);
