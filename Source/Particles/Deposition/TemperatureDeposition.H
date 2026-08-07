@@ -308,9 +308,10 @@ void doVarianceDepositionShapeNKernel(
         const amrex::Real wpy_var = static_cast<amrex::Real>(wp)*sz_jy[iz];
         const amrex::Real wpz_var = static_cast<amrex::Real>(wp)*sz_jz[iz];
 
-        const amrex::IntVectND<3> ixv{lo.z+l_jx+iz, 0, 0};
-        const amrex::IntVectND<3> iyv{lo.z+l_jy+iz, 0, 0};
-        const amrex::IntVectND<3> izv{lo.z+l_jz+iz, 0, 0};
+        // 1D: the z dimension is AMReX dimension 0, i.e. lo.x (matches CurrentDeposition.H)
+        const amrex::IntVectND<3> ixv{lo.x+l_jx+iz, 0, 0};
+        const amrex::IntVectND<3> iyv{lo.x+l_jy+iz, 0, 0};
+        const amrex::IntVectND<3> izv{lo.x+l_jz+iz, 0, 0};
 
         varianceDepositionSubKernel(
             vx, vy, vz,
@@ -351,9 +352,13 @@ void doVarianceDepositionShapeNKernel(
             const amrex::Real wpy_var = wp*sx_jy[ix]*sz_jy[iz];
             const amrex::Real wpz_var = wp*sx_jz[ix]*sz_jz[iz];
 
-            const amrex::IntVectND<3> ixv{lo.x+j_jx+ix, lo.z+l_jx+iz, 0};
-            const amrex::IntVectND<3> iyv{lo.x+j_jy+ix, lo.z+l_jy+iz, 0};
-            const amrex::IntVectND<3> izv{lo.x+j_jz+ix, lo.z+l_jz+iz, 0};
+            // 2D XZ/RZ: the z dimension is AMReX dimension 1, i.e. lo.y, NOT lo.z
+            // (lo.z is the dummy third dimension and is always 0 in 2D; using it
+            // collapsed all deposits onto each fab's z-origin rows and wrote out
+            // of bounds -- matches CurrentDeposition.H which uses lo.y here).
+            const amrex::IntVectND<3> ixv{lo.x+j_jx+ix, lo.y+l_jx+iz, 0};
+            const amrex::IntVectND<3> iyv{lo.x+j_jy+ix, lo.y+l_jy+iz, 0};
+            const amrex::IntVectND<3> izv{lo.x+j_jz+ix, lo.y+l_jz+iz, 0};
 
             varianceDepositionSubKernel(
                 vx, vy, vz,

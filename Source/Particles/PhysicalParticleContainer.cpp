@@ -2196,12 +2196,16 @@ PhysicalParticleContainer::AccumulateVelocitiesAndComputeTemperature (
         }
 
         amrex::Gpu::streamSynchronize();
-
-        // Multiply variance by species mass over the Boltzmann constant to convert to temperature in K
-        const amrex::Real Tnorm = this->getMass()/ablastr::constant::SI::kb;
-
-        // Sum boundaries for accumulation MFs, apply normalization, and filter to end up with
-        // temperature in K in T_vf
-        local_temperature_arrays->ConvertVarianceToTemperatureAndFilter(T_vf, Tnorm, WarpX::use_filter);
     }
+
+    // Multiply variance by species mass over the Boltzmann constant to convert to temperature in K
+    const amrex::Real Tnorm = this->getMass()/ablastr::constant::SI::kb;
+
+    // Sum boundaries for accumulation MFs, apply normalization, and filter to end up with
+    // temperature in K in T_vf.
+    // NOTE: this call loops over ALL levels internally, so it must live
+    // OUTSIDE the level loop above; calling it per level double-normalized
+    // (x m/kB twice) and double-filtered every level except the finest in
+    // multi-level (MR) runs.
+    local_temperature_arrays->ConvertVarianceToTemperatureAndFilter(T_vf, Tnorm, WarpX::use_filter);
 }
