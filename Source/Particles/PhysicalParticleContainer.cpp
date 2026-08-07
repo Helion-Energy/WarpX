@@ -1944,6 +1944,9 @@ PhysicalParticleContainer::DepositTemperature (
     auto & w2x_fab =   local_temperature_arrays->get("w2", Direction{0}, lev)->get(pti);
     auto & w2y_fab =   local_temperature_arrays->get("w2", Direction{1}, lev)->get(pti);
     auto & w2z_fab =   local_temperature_arrays->get("w2", Direction{2}, lev)->get(pti);
+    auto & wsqx_fab =  local_temperature_arrays->get("wsq", Direction{0}, lev)->get(pti);
+    auto & wsqy_fab =  local_temperature_arrays->get("wsq", Direction{1}, lev)->get(pti);
+    auto & wsqz_fab =  local_temperature_arrays->get("wsq", Direction{2}, lev)->get(pti);
     auto & vxbar_fab = local_temperature_arrays->get("vbar", Direction{0}, lev)->get(pti);
     auto & vybar_fab = local_temperature_arrays->get("vbar", Direction{1}, lev)->get(pti);
     auto & vzbar_fab = local_temperature_arrays->get("vbar", Direction{2}, lev)->get(pti);
@@ -1962,7 +1965,8 @@ PhysicalParticleContainer::DepositTemperature (
             uyp.dataPtr() + offset, uzp.dataPtr() + offset,
             Tx_fab, Ty_fab, Tz_fab,
             nx_iab, ny_iab, nz_iab, wx_fab, wy_fab, wz_fab,
-            w2x_fab, w2y_fab, w2z_fab, vxbar_fab, vybar_fab, vzbar_fab,
+            w2x_fab, w2y_fab, w2z_fab, wsqx_fab, wsqy_fab, wsqz_fab,
+            vxbar_fab, vybar_fab, vzbar_fab,
             type, pass, np_to_deposit, relative_time, dinv,
             xyzmin, lo, WarpX::n_rz_azimuthal_modes);
     } else if (WarpX::nox == 2){
@@ -1971,7 +1975,8 @@ PhysicalParticleContainer::DepositTemperature (
             uyp.dataPtr() + offset, uzp.dataPtr() + offset,
             Tx_fab, Ty_fab, Tz_fab,
             nx_iab, ny_iab, nz_iab, wx_fab, wy_fab, wz_fab,
-            w2x_fab, w2y_fab, w2z_fab, vxbar_fab, vybar_fab, vzbar_fab,
+            w2x_fab, w2y_fab, w2z_fab, wsqx_fab, wsqy_fab, wsqz_fab,
+            vxbar_fab, vybar_fab, vzbar_fab,
             type, pass, np_to_deposit, relative_time, dinv,
             xyzmin, lo, WarpX::n_rz_azimuthal_modes);
     } else if (WarpX::nox == 3){
@@ -1980,7 +1985,8 @@ PhysicalParticleContainer::DepositTemperature (
             uyp.dataPtr() + offset, uzp.dataPtr() + offset,
             Tx_fab, Ty_fab, Tz_fab,
             nx_iab, ny_iab, nz_iab, wx_fab, wy_fab, wz_fab,
-            w2x_fab, w2y_fab, w2z_fab, vxbar_fab, vybar_fab, vzbar_fab,
+            w2x_fab, w2y_fab, w2z_fab, wsqx_fab, wsqy_fab, wsqz_fab,
+            vxbar_fab, vybar_fab, vzbar_fab,
             type, pass, np_to_deposit, relative_time, dinv,
             xyzmin, lo, WarpX::n_rz_azimuthal_modes);
     } else if (WarpX::nox == 4){
@@ -1989,7 +1995,8 @@ PhysicalParticleContainer::DepositTemperature (
             uyp.dataPtr() + offset, uzp.dataPtr() + offset,
             Tx_fab, Ty_fab, Tz_fab,
             nx_iab, ny_iab, nz_iab, wx_fab, wy_fab, wz_fab,
-            w2x_fab, w2y_fab, w2z_fab, vxbar_fab, vybar_fab, vzbar_fab,
+            w2x_fab, w2y_fab, w2z_fab, wsqx_fab, wsqy_fab, wsqz_fab,
+            vxbar_fab, vybar_fab, vzbar_fab,
             type, pass, np_to_deposit, relative_time, dinv,
             xyzmin, lo, WarpX::n_rz_azimuthal_modes);
     }
@@ -2052,10 +2059,12 @@ PhysicalParticleContainer::AccumulateVelocitiesAndComputeTemperature (
         {
             amrex::iMultiFab* n_mf    = local_temperature_arrays->get_n(Direction{idir}, lev);
             amrex::MultiFab*  w_mf    = local_temperature_arrays->get("w", Direction{idir}, lev);
+            amrex::MultiFab*  wsq_mf  = local_temperature_arrays->get("wsq", Direction{idir}, lev);
             amrex::MultiFab*  vbar_mf = local_temperature_arrays->get("vbar", Direction{idir}, lev);
 
             n_mf->SumBoundary(0, 1, n_mf->nGrowVect(), n_mf->nGrowVect(), periodicity);
             WarpXSumGuardCells(*w_mf, periodicity, w_mf->nGrowVect(), 0, 1);
+            WarpXSumGuardCells(*wsq_mf, periodicity, wsq_mf->nGrowVect(), 0, 1);
             WarpXSumGuardCells(*vbar_mf, periodicity, vbar_mf->nGrowVect(), 0, 1);
         }
 
@@ -2115,6 +2124,9 @@ PhysicalParticleContainer::AccumulateVelocitiesAndComputeTemperature (
         amrex::MultiFab*  w2x_mf   = local_temperature_arrays->get("w2", Direction{0}, lev);
         amrex::MultiFab*  w2y_mf   = local_temperature_arrays->get("w2", Direction{1}, lev);
         amrex::MultiFab*  w2z_mf   = local_temperature_arrays->get("w2", Direction{2}, lev);
+        amrex::MultiFab*  wsqx_mf  = local_temperature_arrays->get("wsq", Direction{0}, lev);
+        amrex::MultiFab*  wsqy_mf  = local_temperature_arrays->get("wsq", Direction{1}, lev);
+        amrex::MultiFab*  wsqz_mf  = local_temperature_arrays->get("wsq", Direction{2}, lev);
         amrex::MultiFab*  vbarx_mf = local_temperature_arrays->get("vbar", Direction{0}, lev);
         amrex::MultiFab*  vbary_mf = local_temperature_arrays->get("vbar", Direction{1}, lev);
         amrex::MultiFab*  vbarz_mf = local_temperature_arrays->get("vbar", Direction{2}, lev);
@@ -2137,6 +2149,9 @@ PhysicalParticleContainer::AccumulateVelocitiesAndComputeTemperature (
             const amrex::Array4<const amrex::Real> & w2x_arr = w2x_mf->const_array(mfi);
             const amrex::Array4<const amrex::Real> & w2y_arr = w2y_mf->const_array(mfi);
             const amrex::Array4<const amrex::Real> & w2z_arr = w2z_mf->const_array(mfi);
+            const amrex::Array4<const amrex::Real> & wsqx_arr = wsqx_mf->const_array(mfi);
+            const amrex::Array4<const amrex::Real> & wsqy_arr = wsqy_mf->const_array(mfi);
+            const amrex::Array4<const amrex::Real> & wsqz_arr = wsqz_mf->const_array(mfi);
             amrex::Array4<amrex::Real> const& vxbar_arr = vbarx_mf->array(mfi);
             amrex::Array4<amrex::Real> const& vybar_arr = vbary_mf->array(mfi);
             amrex::Array4<amrex::Real> const& vzbar_arr = vbarz_mf->array(mfi);
@@ -2148,47 +2163,67 @@ PhysicalParticleContainer::AccumulateVelocitiesAndComputeTemperature (
 
             const bool single_pass = (depos_type == warpx::particles::deposition::TemperatureDepositionType::SINGLE_PASS);
 
+            // Reliability correction for the weighted variance:
+            // 1/(1 - sum(w^2)/W^2), with w the per-node effective weights
+            // (particle weight x shape factor) and W = sum(w). With equal
+            // effective weights this reduces to the classic n/(n-1); with
+            // continuous shape weights the n/(n-1) form under-corrects
+            // because the effective number of samples per node,
+            // n_eff = W^2/sum(w^2), is smaller than the raw count n.
+            // Nodes with sum(w^2)/W^2 -> 1 hold a single effective sample
+            // and carry no variance information; leave them at T = 0.
+            constexpr amrex::Real reliability_eps = 1.e-10_rt;
+
             // Update Mean and Variance values after running through weight deposition loop
             amrex::ParallelFor(tbx, tby, tbz,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                     if (nx_arr(i,j,k) > 1) {
                         const amrex::Real sumw = wx_arr(i,j,k);
+                        const amrex::Real sumwsq = wsqx_arr(i,j,k);
                         const amrex::Real sumwv = vxbar_arr(i,j,k);
-                        const auto n = static_cast<amrex::Real>(nx_arr(i,j,k));
-                        const amrex::Real norm = n/((n-1._rt)*sumw);
+                        const amrex::Real neff_inv = sumwsq/(sumw*sumw);
 
                         vxbar_arr(i,j,k) = sumwv/sumw;
-                        varx_arr(i,j,k) = norm*w2x_arr(i,j,k);
-                        if (single_pass){
-                            varx_arr(i,j,k) -= norm*sumwv*sumwv/sumw;
+                        if (neff_inv < 1._rt - reliability_eps) {
+                            const amrex::Real norm = 1._rt/((1._rt - neff_inv)*sumw);
+                            varx_arr(i,j,k) = norm*w2x_arr(i,j,k);
+                            if (single_pass){
+                                varx_arr(i,j,k) -= norm*sumwv*sumwv/sumw;
+                            }
                         }
                     }
                 },
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                     if (ny_arr(i,j,k) > 1) {
                         const amrex::Real sumw = wy_arr(i,j,k);
+                        const amrex::Real sumwsq = wsqy_arr(i,j,k);
                         const amrex::Real sumwv = vybar_arr(i,j,k);
-                        const auto n = static_cast<amrex::Real>(ny_arr(i,j,k));
-                        const amrex::Real norm = n/((n-1._rt)*sumw);
+                        const amrex::Real neff_inv = sumwsq/(sumw*sumw);
 
                         vybar_arr(i,j,k) = sumwv/sumw;
-                        vary_arr(i,j,k) = norm*w2y_arr(i,j,k);
-                        if (single_pass){
-                            vary_arr(i,j,k) -= norm*sumwv*sumwv/sumw;
+                        if (neff_inv < 1._rt - reliability_eps) {
+                            const amrex::Real norm = 1._rt/((1._rt - neff_inv)*sumw);
+                            vary_arr(i,j,k) = norm*w2y_arr(i,j,k);
+                            if (single_pass){
+                                vary_arr(i,j,k) -= norm*sumwv*sumwv/sumw;
+                            }
                         }
                     }
                 },
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                     if (nz_arr(i,j,k) > 1) {
                         const amrex::Real sumw = wz_arr(i,j,k);
+                        const amrex::Real sumwsq = wsqz_arr(i,j,k);
                         const amrex::Real sumwv = vzbar_arr(i,j,k);
-                        const auto n = static_cast<amrex::Real>(nz_arr(i,j,k));
-                        const amrex::Real norm = n/((n-1._rt)*sumw);
+                        const amrex::Real neff_inv = sumwsq/(sumw*sumw);
 
                         vzbar_arr(i,j,k) = sumwv/sumw;
-                        varz_arr(i,j,k) = norm*w2z_arr(i,j,k);
-                        if (single_pass) {
-                            varz_arr(i,j,k) -= norm*sumwv*sumwv/sumw;
+                        if (neff_inv < 1._rt - reliability_eps) {
+                            const amrex::Real norm = 1._rt/((1._rt - neff_inv)*sumw);
+                            varz_arr(i,j,k) = norm*w2z_arr(i,j,k);
+                            if (single_pass) {
+                                varz_arr(i,j,k) -= norm*sumwv*sumwv/sumw;
+                            }
                         }
                     }
                 });

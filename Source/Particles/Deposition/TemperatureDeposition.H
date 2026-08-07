@@ -51,6 +51,9 @@ void varianceDepositionSubKernel(
     const amrex::Array4<amrex::Real> & w2x_arr,
     const amrex::Array4<amrex::Real> & w2y_arr,
     const amrex::Array4<amrex::Real> & w2z_arr,
+    const amrex::Array4<amrex::Real> & wsqx_arr,
+    const amrex::Array4<amrex::Real> & wsqy_arr,
+    const amrex::Array4<amrex::Real> & wsqz_arr,
     const amrex::Array4<amrex::Real> & vxbar_arr,
     const amrex::Array4<amrex::Real> & vybar_arr,
     const amrex::Array4<amrex::Real> & vzbar_arr,
@@ -79,6 +82,15 @@ void varianceDepositionSubKernel(
             &wy_arr(iyv[0], iyv[1], iyv[2], 0), wpy_var);
         amrex::Gpu::Atomic::AddNoRet(
             &wz_arr(izv[0], izv[1], izv[2], 0), wpz_var);
+
+        // Update w^2 sum, needed for the unbiased weighted-variance
+        // reliability correction 1/(1 - sum(w^2)/W^2)
+        amrex::Gpu::Atomic::AddNoRet(
+            &wsqx_arr(ixv[0], ixv[1], ixv[2], 0), wpx_var*wpx_var);
+        amrex::Gpu::Atomic::AddNoRet(
+            &wsqy_arr(iyv[0], iyv[1], iyv[2], 0), wpy_var*wpy_var);
+        amrex::Gpu::Atomic::AddNoRet(
+            &wsqz_arr(izv[0], izv[1], izv[2], 0), wpz_var*wpz_var);
 
         // Update wv_sum to be normalized to vbar
         amrex::Gpu::Atomic::AddNoRet(
@@ -135,7 +147,8 @@ void varianceDepositionSubKernel(
  * \param vx,vy,vz      The particle velocities
  * \param nx_arr,ny_arr,nz_arr Array4<int> of velocity variance sample count, either full array or tile.
  * \param wx_arr,wy_arr,wz_arr Array4 of weight sums, either full array or tile.
- * \param w2x_arr,w2y_arr,w2z_arr Array4 of weight**2 sums, either full array or tile.
+ * \param w2x_arr,w2y_arr,w2z_arr Array4 of weighted squared velocity-deviation sums, either full array or tile.
+ * \param wsqx_arr,wsqy_arr,wsqz_arr Array4 of squared-weight sums, either full array or tile.
  * \param vxbar_arr,vybar_arr,vzbar_arr Array4 of current density, either full array or tile.
  * \param varx_type,vary_type,varz_type The grid types along each direction, either NODE or CELL
  * \param type The type of deposition routine, either SINGLE_PASS or DOUBLE_PASS
@@ -168,6 +181,9 @@ void doVarianceDepositionShapeNKernel(
     const amrex::Array4<amrex::Real> & w2x_arr,
     const amrex::Array4<amrex::Real> & w2y_arr,
     const amrex::Array4<amrex::Real> & w2z_arr,
+    const amrex::Array4<amrex::Real> & wsqx_arr,
+    const amrex::Array4<amrex::Real> & wsqy_arr,
+    const amrex::Array4<amrex::Real> & wsqz_arr,
     const amrex::Array4<amrex::Real> & vxbar_arr,
     const amrex::Array4<amrex::Real> & vybar_arr,
     const amrex::Array4<amrex::Real> & vzbar_arr,
@@ -320,6 +336,7 @@ void doVarianceDepositionShapeNKernel(
             nx_arr, ny_arr, nz_arr,
             wx_arr, wy_arr, wz_arr,
             w2x_arr, w2y_arr, w2z_arr,
+            wsqx_arr, wsqy_arr, wsqz_arr,
             vxbar_arr, vybar_arr, vzbar_arr,
             type, pass
         );
@@ -341,6 +358,7 @@ void doVarianceDepositionShapeNKernel(
             nx_arr, ny_arr, nz_arr,
             wx_arr, wy_arr, wz_arr,
             w2x_arr, w2y_arr, w2z_arr,
+            wsqx_arr, wsqy_arr, wsqz_arr,
             vxbar_arr, vybar_arr, vzbar_arr,
             type, pass
         );
@@ -367,6 +385,7 @@ void doVarianceDepositionShapeNKernel(
                 nx_arr, ny_arr, nz_arr,
                 wx_arr, wy_arr, wz_arr,
                 w2x_arr, w2y_arr, w2z_arr,
+                wsqx_arr, wsqy_arr, wsqz_arr,
                 vxbar_arr, vybar_arr, vzbar_arr,
                 type, pass
             );
@@ -391,6 +410,7 @@ void doVarianceDepositionShapeNKernel(
                     nx_arr, ny_arr, nz_arr,
                     wx_arr, wy_arr, wz_arr,
                     w2x_arr, w2y_arr, w2z_arr,
+                    wsqx_arr, wsqy_arr, wsqz_arr,
                     vxbar_arr, vybar_arr, vzbar_arr,
                     type, pass
                 );
@@ -413,7 +433,8 @@ void doVarianceDepositionShapeNKernel(
  * \param varx_fab,vary_fab,varz_fab FArrayBox of variance, either full array or tile.
  * \param nx_iab,ny_iab,nz_iab IArrayBox of sample count buffer, either full array or tile.
  * \param wx_fab,wy_fab,wz_fab FArrayBox for running weights buffer, either full array or tile.
- * \param w2x_fab,w2y_fab,w2z_fab FArrayBox for weights^2 buffer, either full array or tile.
+ * \param w2x_fab,w2y_fab,w2z_fab FArrayBox for weighted squared velocity-deviation buffer, either full array or tile.
+ * \param wsqx_fab,wsqy_fab,wsqz_fab FArrayBox for squared-weights buffer, either full array or tile.
  * \param vxbar_fab,vybar_fab,vzbar_fab FArrayBox of current density, either full array or tile.
  * \param type The type of deposition routine, either SINGLE_PASS or DOUBLE_PASS
  * \param pass The pass that is occurring, either FIRST or SECOND
@@ -445,6 +466,9 @@ void doVarianceDepositionShapeN (const GetParticlePosition<PIdx>& GetPosition,
                          amrex::FArrayBox& w2x_fab,
                          amrex::FArrayBox& w2y_fab,
                          amrex::FArrayBox& w2z_fab,
+                         amrex::FArrayBox& wsqx_fab,
+                         amrex::FArrayBox& wsqy_fab,
+                         amrex::FArrayBox& wsqz_fab,
                          amrex::FArrayBox& vxbar_fab,
                          amrex::FArrayBox& vybar_fab,
                          amrex::FArrayBox& vzbar_fab,
@@ -478,6 +502,9 @@ void doVarianceDepositionShapeN (const GetParticlePosition<PIdx>& GetPosition,
     const amrex::Array4<amrex::Real> & w2x_arr = w2x_fab.array();
     const amrex::Array4<amrex::Real> & w2y_arr = w2y_fab.array();
     const amrex::Array4<amrex::Real> & w2z_arr = w2z_fab.array();
+    const amrex::Array4<amrex::Real> & wsqx_arr = wsqx_fab.array();
+    const amrex::Array4<amrex::Real> & wsqy_arr = wsqy_fab.array();
+    const amrex::Array4<amrex::Real> & wsqz_arr = wsqz_fab.array();
     const amrex::Array4<amrex::Real> & vxbar_arr = vxbar_fab.array();
     const amrex::Array4<amrex::Real> & vybar_arr = vybar_fab.array();
     const amrex::Array4<amrex::Real> & vzbar_arr = vzbar_fab.array();
@@ -505,6 +532,7 @@ void doVarianceDepositionShapeN (const GetParticlePosition<PIdx>& GetPosition,
                 nx_arr, ny_arr, nz_arr,
                 wx_arr, wy_arr, wz_arr,
                 w2x_arr, w2y_arr, w2z_arr,
+                wsqx_arr, wsqy_arr, wsqz_arr,
                 vxbar_arr, vybar_arr, vzbar_arr,
                 varx_type, vary_type, varz_type,
                 type, pass,

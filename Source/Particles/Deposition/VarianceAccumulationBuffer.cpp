@@ -38,6 +38,7 @@ VarianceAccumulationBuffer::VarianceAccumulationBuffer (ablastr::fields::MultiLe
 
             warpx.m_fields.alloc_init("variance_buffer_w_" + m_species_name, Direction{idir}, lev, ba, dm, ncomps, ng, 0.0_rt);
             warpx.m_fields.alloc_init("variance_buffer_w2_" + m_species_name, Direction{idir}, lev, ba, dm, ncomps, ng, 0.0_rt);
+            warpx.m_fields.alloc_init("variance_buffer_wsq_" + m_species_name, Direction{idir}, lev, ba, dm, ncomps, ng, 0.0_rt);
             warpx.m_fields.alloc_init("variance_buffer_vbar_" + m_species_name, Direction{idir}, lev, ba, dm, ncomps, ng, 0.0_rt);
 
             m_nsamples[lev][idir] = std::make_unique<amrex::iMultiFab>(ba, dm, ncomps, ng);
@@ -56,6 +57,7 @@ VarianceAccumulationBuffer::reset ()
         for (int idir = 0; idir < 3; ++idir) {
             warpx.m_fields.get("variance_buffer_w_" + m_species_name, Direction{idir}, lev)->setVal(0._rt);
             warpx.m_fields.get("variance_buffer_w2_" + m_species_name, Direction{idir}, lev)->setVal(0._rt);
+            warpx.m_fields.get("variance_buffer_wsq_" + m_species_name, Direction{idir}, lev)->setVal(0._rt);
             warpx.m_fields.get("variance_buffer_vbar_" + m_species_name, Direction{idir}, lev)->setVal(0._rt);
             m_nsamples[lev][idir]->setVal(0);
         }

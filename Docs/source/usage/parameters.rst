@@ -2086,6 +2086,10 @@ Particle initialization
     When running with Ohm's Law Hybrid Solver, this will enable temperature deposition
     in each dimension with a matched shape function and filtering used for current deposition.
     This is required when using the electron energy solver with electron-ion temperature relaxation.
+    The deposited temperature is an unbiased weighted-variance estimate: the per-node velocity
+    variance is scaled by the reliability correction :math:`1/(1 - \sum_p w_p^2 / W^2)`, where
+    :math:`w_p` are the effective weights (particle weight times shape factor) of the
+    macroparticles contributing to the node and :math:`W = \sum_p w_p`.
 
 .. pp:param:: <species>.do_qed_virtual_photons
     :type: ``boolean``
