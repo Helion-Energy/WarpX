@@ -1,0 +1,9 @@
+# base input parameters
+FILE = inputs_test_rz_theta_implicit_mhd_vacuum_resistive
+
+# Preconditioned twin: identical stiff RZ vacuum-resistive physics, and the
+# analysis requires the final fields to match the unpreconditioned baseline
+# run to solver roundoff while the cumulative GMRES iteration count is
+# STRICTLY below the baseline's (measured ~1570 -> ~28 with the Chebyshev
+# resistive block at its automatic application count).
+jacobian.pc_type = pc_mhd_block

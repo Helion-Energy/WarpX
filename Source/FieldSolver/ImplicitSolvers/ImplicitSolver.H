@@ -237,6 +237,61 @@ public:
     }
 
     /**
+     * \brief Return the resistive-stage implicit fraction theta_r used by the
+     * MHD block preconditioner's resistive Helmholtz block.
+     *
+     * The dissipative Ohm terms of the theta-implicit MHD residual may be
+     * centered at theta_r != theta (resistive backward Euler); the
+     * preconditioner must weight its resistive approximation with the same
+     * fraction. The negative sentinel makes selecting the resistive block for
+     * an implicit scheme that does not expose it fail with a descriptive
+     * assertion.
+     */
+    [[nodiscard]] virtual amrex::Real
+    GetMHDResistiveThetaForPC () const
+    {
+        return -1.0;
+    }
+
+    /**
+     * \brief Return the cell-centered field resistivity eta_field (user
+     * resistivity through the density-keyed vacuum boost, with the Ohm floor
+     * guards) evaluated at the preconditioner update state, read by the MHD
+     * block preconditioner's resistive block gate under the
+     * conservative-form recast.
+     *
+     * The null default keeps that block inactive for implicit schemes that do
+     * not expose it.
+     */
+    [[nodiscard]] virtual const amrex::MultiFab*
+    GetMHDFieldResistivityCCForPC (amrex::Real a_time) const
+    {
+        amrex::ignore_unused(a_time);
+        return nullptr;
+    }
+
+    /**
+     * \brief Return eta_field evaluated on the electric-field staggerings
+     * (per physical component) at the preconditioner update state, with the
+     * SAME density interpolation the residual's Ohm assembly uses: the MHD
+     * block preconditioner's resistive block iterates on the discrete
+     * resistive curl-curl, and eta_field is strongly nonlinear in the
+     * density (the vacuum boost is quadratic in 1/rho), so averaging
+     * cell-centered eta instead of evaluating eta at the interpolated
+     * density misrepresents the operator by order unity across halo
+     * density gradients.
+     *
+     * The null defaults keep that block inactive for implicit schemes that
+     * do not expose it.
+     */
+    [[nodiscard]] virtual amrex::Array<const amrex::MultiFab*, 3>
+    GetMHDFieldResistivityEdgeForPC (amrex::Real a_time) const
+    {
+        amrex::ignore_unused(a_time);
+        return {nullptr, nullptr, nullptr};
+    }
+
+    /**
      * \brief Return the physical xyz reference magnetic field used by the MHD
      * wave preconditioner.
      *

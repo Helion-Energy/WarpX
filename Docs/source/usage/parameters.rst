@@ -485,7 +485,8 @@ Overall simulation parameters
                ``pc_mhd_block.wave_cfl_threshold``.
 
             3. **Triangular Faraday corrector**: the Faraday block is the
-               identity plus the ideal-induction coupling
+               identity (up to the gated resistive block below) plus
+               the ideal-induction coupling
                :math:`\delta B = b_B + \theta\Delta t\,
                \nabla\times(\delta\boldsymbol M/\rho_* \times
                \boldsymbol B_{cc})`, evaluated with the solver's staggered
@@ -497,6 +498,34 @@ Overall simulation parameters
                Alfvén CFL: correcting from an identity momentum block at
                stiff coupling amplifies the neglected
                :math:`J_{MB} J_{BM}` product quadratically.
+
+            4. **Resistive block**: the :math:`\theta_r`-implicit resistive
+               term of the B residual,
+               :math:`\delta B + \theta_r \Delta t\, \nabla\times
+               (\eta_\text{field}/\mu_0\, \nabla\times \delta B)` with
+               :math:`\eta_\text{field}` the density-keyed field resistivity
+               (including the ``implicit_mhd.vacuum_resistivity_diffusivity``
+               boost) frozen at the preconditioner update, is approximately
+               inverted by a fixed-count Chebyshev iteration on the exact
+               discrete operator :math:`\mathbb I + \theta_r \Delta t\,
+               \nabla\times(\eta_\text{field}/\mu_0\, \nabla\times\,\cdot\,)`,
+               applied matrix-free on the residual's Yee staggering with
+               :math:`\eta_\text{field}` evaluated at the electric-field
+               locations from the residual's own interpolated density and
+               tangential E zeroed on non-periodic domain boundary planes
+               (exact at PEC walls and the axis). Iterating on the exact
+               coupled operator is essential: every per-component scalar
+               Helmholtz surrogate tried instead measurably degraded
+               restarted GMRES on stiff RZ vacuum-eta states by 10–100x
+               relative to no preconditioner, because the resistive
+               curl-curl is dominated by its curl-free kernel and strong
+               cross-component coupling. It engages only when the
+               grid-scale resistive diffusion number
+               :math:`\theta_r \Delta t\, \max(\eta_\text{field})/\mu_0 /
+               \min(\Delta x)^2` reaches
+               ``pc_mhd_block.resistive_threshold``; below it the block is
+               the exact identity at zero cost. It is composed after the
+               Faraday corrector (the consistent triangular order).
 
             Boundaries the recast residual manages itself are mapped per
             component to preconditioner-only linear-operator types matching
@@ -564,6 +593,18 @@ Overall simulation parameters
             - ``pc_mhd_block.fluid_iterations`` (``int``, default: 2):
               fixed MLMG iteration count for the Hall-off three-component
               wave block, or for the scalar acoustic block.
+            - ``pc_mhd_block.resistive_iterations`` (``int``, default: 0):
+              hlld only; Chebyshev applications of the exact resistive
+              curl-curl per preconditioner application. The default 0
+              selects :math:`\lceil 2\sqrt{\lambda_\text{max}}\rceil`
+              automatically, which contracts the inner iteration to
+              :math:`\sim e^{-4}` independent of the stiffness; each
+              application costs one stencil sweep, far below the full
+              residual evaluation an outer Krylov iteration costs.
+            - ``pc_mhd_block.resistive_threshold`` (``float``, default: 1.0):
+              hlld only; grid-scale resistive diffusion number at which the
+              resistive block engages (below it the block is the exact
+              identity).
             - ``pc_mhd_block.wave_relaxation`` (``float``, default: 0.5):
               weighted block-Jacobi factor for the three-component wave
               smoother;

@@ -1,0 +1,9 @@
+# base input parameters
+FILE = inputs_test_1d_theta_implicit_mhd_vacuum_resistive
+
+# Preconditioned twin of the calibrated vacuum-resistive decay test: the
+# physics assertions are identical (same theta_r-discrete damping), and the
+# analysis additionally requires the cumulative GMRES iteration count to be
+# STRICTLY below the unpreconditioned baseline's (the pc_mhd_block resistive
+# block engages at grid diffusion number z ~ 104 here).
+jacobian.pc_type = pc_mhd_block

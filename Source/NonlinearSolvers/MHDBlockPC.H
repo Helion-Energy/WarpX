@@ -100,8 +100,7 @@
  *    fixed-cycle MLMG and zero initial guess, engaged when the reference
  *    fast CFL reaches pc_mhd_block.wave_cfl_threshold.
  *
- * 3. Triangular ideal-induction (Faraday) corrector on the otherwise
- *    identity B block:
+ * 3. Triangular ideal-induction (Faraday) corrector on the B block:
  *
  *        dB = bB + theta dt curl(dM/rho_ref x B_cc),
  *
@@ -116,6 +115,51 @@
  *    an active wave Schur or a sub-unity Alfven CFL: correcting from an
  *    identity momentum block at stiff coupling amplifies the neglected
  *    J_MB J_BM product quadratically.
+ *
+ * 4. Resistive block: the theta_r-implicit resistive term of the B
+ *    residual, dB + theta_r dt curl(eta_field/mu0 curl dB) with eta_field
+ *    the density-keyed field resistivity (including the vacuum boost)
+ *    frozen at the preconditioner update, is approximately inverted by a
+ *    FIXED-COUNT CHEBYSHEV iteration on the operator
+ *
+ *        I + A_cc,    A_cc = theta_r dt curl((eta_field/mu0) curl .),
+ *
+ *    applied matrix-free with the residual's exact Yee staggering,
+ *    eta_field evaluated AT the electric-field locations from the
+ *    residual's own interpolated density (the vacuum boost is quadratic
+ *    in 1/rho: averaging cell etas instead misrepresents the operator by
+ *    order unity across halo gradients), and tangential E zeroed on
+ *    non-periodic domain boundary planes (verified exact against the
+ *    residual's one-step map at PEC walls and the axis to roundoff on the
+ *    stiff z-modulated vacuum-eta deck). The eigenvalue interval is
+ *    [1, 1 + 1.5 theta_r dt (eta_max/mu0) sum_d 4/dx_d^2].
+ *
+ *    Iterating on the EXACT block operator is the load-bearing choice.
+ *    Every per-component scalar-Helmholtz approximation tried first
+ *    (isotropic, transverse-masked, r-weighted, radius-floored, with and
+ *    without cylindrical curvature terms, solved exactly or by fixed
+ *    V-cycles, applied directly or in the projector form
+ *    I - S A_cc) DEGRADED restarted GMRES on stiff RZ vacuum-eta states
+ *    by 10-100x relative to no preconditioner at all, both in situ and in
+ *    an offline replica with exact sparse solves: the resistive curl-curl
+ *    is spectrally dominated by its curl-free kernel (identity rows) and
+ *    strong cross-component coupling, and any per-component surrogate
+ *    misassigns order-one fractions of the stiff spectrum, filling the
+ *    preconditioned spectrum with slow clusters that restarted GMRES
+ *    grinds against (1D masks this: its compressive component Bz drops
+ *    out of the curl entirely). The same offline replica shows the exact
+ *    coupled inverse converging in one outer iteration, and k Chebyshev
+ *    applications of the exact operator converging the outer solve in
+ *    ~30/16/11 iterations for k = 10/20/30 against 306 unpreconditioned
+ *    on rough right-hand sides. Each Chebyshev application costs one
+ *    curl-curl stencil sweep -- far cheaper than the full HLLD residual
+ *    evaluation an outer Krylov iteration costs. The block engages only
+ *    when the grid-scale resistive diffusion number theta_r dt
+ *    max(eta_field)/mu0 / min(dx)^2 reaches
+ *    pc_mhd_block.resistive_threshold: below it the unpreconditioned
+ *    rows are benign and the block is the exact identity at zero cost.
+ *    It is composed AFTER the Faraday corrector, i.e.
+ *    dB = J_BB^{-1} (bB - J_BM dM), the consistent triangular order.
  *
  * Boundary types the residual handles itself are mapped per component to
  * preconditioner-only linear-operator types matching the residual's fluid
@@ -153,6 +197,9 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         void UpdateSignalDiffusion (const T& state);
         void ApplySignalDiffusionBlocks (T& solution, const T& rhs);
         void ApplyFaradayCorrector (T& solution);
+        void UpdateResistiveBlock ();
+        void ApplyResistiveBlock (T& solution);
+        void ApplyResistiveCurlCurl ();
 
         [[nodiscard]] bool
         IsDefined () const override
@@ -183,6 +230,7 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         bool m_wave_schur_active = false;
         bool m_signal_diffusion_active = false;
         bool m_faraday_active = false;
+        bool m_resistive_active = false;
         // Signal diffusion is opt-in (see UpdateSignalDiffusion): on every
         // benchmarked regime of the conservative-form recast it degraded
         // plain GMRES, because HLLD dissipates per characteristic channel
@@ -193,9 +241,27 @@ class MHDBlockPC : public Preconditioner<T, Ops>
 
         int m_field_iterations = 2;
         int m_fluid_iterations = 2;
+        // Chebyshev applications of the exact resistive curl-curl per
+        // preconditioner application; 0 (the default) selects
+        // ceil(2 sqrt(lambda_max)) automatically, the count at which the
+        // fixed Chebyshev contraction reaches ~e^-4 independent of the
+        // stiffness (measured on the z ~ 150 z-modulated vacuum-eta RZ
+        // deck: 16/32/64/96 applications give 862/55/28/20 outer
+        // iterations against 1570 unpreconditioned).
+        int m_resistive_iterations = 0;
+        int m_resistive_iteration_count = 0;
         int m_max_coarsening_level = 30;
         int m_signal_components = 0;
         int m_momentum_component = -1;
+
+        // Resistive-block gate: minimum resistive diffusion number
+        // theta_r dt max(eta_field)/mu0 / min(dx)^2 at which the resistive
+        // Helmholtz engages (below it the block is the exact identity).
+        RT m_resistive_threshold = 1.0;
+        RT m_resistive_h = 0.0;
+        RT m_resistive_diffusion_number = 0.0;
+        // Upper spectral bound of I + A_cc for the Chebyshev interval.
+        RT m_resistive_lambda_max = 1.0;
 
         RT m_gamma_e = RT(5.0 / 3.0);
         RT m_gamma_i = RT(5.0 / 3.0);
@@ -260,11 +326,42 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         // read by the triangular Faraday corrector.
         std::unique_ptr<amrex::MultiFab> m_faraday_field;
 
+        // Resistive block scratch (hlld state): the Chebyshev iterate,
+        // residual, direction (ghosted: the curl-curl stencils read one
+        // interior/periodic ghost), and operator action, one per
+        // participating magnetic-field component.
+        amrex::Array<std::unique_ptr<amrex::MultiFab>, 3> m_resistive_iterate;
+        amrex::Array<std::unique_ptr<amrex::MultiFab>, 3> m_resistive_residual;
+        amrex::Array<std::unique_ptr<amrex::MultiFab>, 3> m_resistive_direction;
+        amrex::Array<std::unique_ptr<amrex::MultiFab>, 3> m_resistive_action;
+        // eta_field on the electric-field staggerings, frozen at the
+        // preconditioner update (solver-owned scratch).
+        amrex::Array<const amrex::MultiFab*, 3> m_resistive_eta_edge = {nullptr, nullptr,
+                                                                        nullptr};
+
         void ReadParameters ();
         void ApplyFieldBlock (T& solution, const T& rhs);
         void SolveFieldBlock (T& solution);
         void ComputeUnitCurlCurlAction (const T& field);
         void DefineSignalDiffusion (const T& state);
+        void DefineResistiveBlock (const T& state);
+
+        /**
+         * \brief Whether this magnetic-field component participates in the
+         * resistive block (in 1D the curl reaches only the transverse
+         * components: the Bz row of the resistive curl-curl is exactly
+         * zero, so the Chebyshev iteration leaves it at its identity
+         * content).
+         */
+        [[nodiscard]] static constexpr bool
+        ResistiveComponentActive (const int a_component)
+        {
+#if defined(WARPX_DIM_1D_Z)
+            return a_component < 2;
+#else
+            return a_component < 3;
+#endif
+        }
         [[nodiscard]] amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM>
         GetCellCenteredLinOpBC (bool a_high_side, int a_momentum_component) const;
         [[nodiscard]] amrex::Vector<amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM>>
@@ -302,6 +399,8 @@ MHDBlockPC<T, Ops>::ReadParameters ()
     pp.query("include_wave_schur", m_include_wave_schur);
     utils::parser::queryWithParser(pp, "field_iterations", m_field_iterations);
     utils::parser::queryWithParser(pp, "fluid_iterations", m_fluid_iterations);
+    utils::parser::queryWithParser(pp, "resistive_iterations", m_resistive_iterations);
+    utils::parser::queryWithParser(pp, "resistive_threshold", m_resistive_threshold);
     utils::parser::queryWithParser(pp, "max_coarsening_level", m_max_coarsening_level);
     utils::parser::queryWithParser(pp, "wave_relaxation", m_wave_relaxation);
     utils::parser::queryWithParser(pp, "signal_diffusion_scale", m_signal_diffusion_scale);
@@ -336,6 +435,11 @@ MHDBlockPC<T, Ops>::ReadParameters ()
                                      "pc_mhd_block.field_iterations must be positive");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_fluid_iterations > 0,
                                      "pc_mhd_block.fluid_iterations must be positive");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_resistive_iterations >= 0,
+        "pc_mhd_block.resistive_iterations cannot be negative (0 = automatic)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_resistive_threshold > 0.0,
+                                     "pc_mhd_block.resistive_threshold must be positive");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_max_coarsening_level >= 0,
                                      "pc_mhd_block.max_coarsening_level cannot be negative");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_reference_mass_density > 0.0,
@@ -392,12 +496,14 @@ MHDBlockPC<T, Ops>::Define (const T& state, Ops* const ops)
 
     if (m_hlld_state)
     {
-        // Conservative-form recast: the Faraday block is the identity and
-        // the cell-centered blocks share one signal-diffusion Helmholtz, so
-        // none of the E-based operators below are constructed (their domain
-        // boundary conversion also rejects Open/None boundaries, which the
-        // hlld residual supports).
+        // Conservative-form recast: the Faraday block is the identity (up
+        // to the triangular Faraday corrector and the gated resistive
+        // Helmholtz) and the cell-centered blocks share one
+        // signal-diffusion Helmholtz, so none of the E-based operators
+        // below are constructed (their domain boundary conversion also
+        // rejects Open/None boundaries, which the hlld residual supports).
         DefineSignalDiffusion(state);
+        DefineResistiveBlock(state);
         m_is_defined = true;
         return;
     }
@@ -649,6 +755,108 @@ MHDBlockPC<T, Ops>::DefineSignalDiffusion (const T& state)
 
 template <class T, class Ops>
 void
+MHDBlockPC<T, Ops>::DefineResistiveBlock (const T& state)
+{
+    // Resistive-block scratch (see the class documentation, point 4): the
+    // Chebyshev iteration is matrix-free, so only per-component face
+    // vectors are needed.
+    auto const& state_fields = state.getArrayVec();
+    for (int component = 0; component < 3; ++component)
+    {
+        if (!ResistiveComponentActive(component))
+        {
+            continue;
+        }
+        const amrex::BoxArray& grids = state_fields[0][component]->boxArray();
+        const amrex::DistributionMapping& dmap =
+            state_fields[0][component]->DistributionMap();
+        m_resistive_iterate[component] =
+            std::make_unique<amrex::MultiFab>(grids, dmap, 1, 0);
+        m_resistive_residual[component] =
+            std::make_unique<amrex::MultiFab>(grids, dmap, 1, 0);
+        m_resistive_direction[component] =
+            std::make_unique<amrex::MultiFab>(grids, dmap, 1, 1);
+        m_resistive_direction[component]->setVal(0.0);
+        m_resistive_action[component] =
+            std::make_unique<amrex::MultiFab>(grids, dmap, 1, 0);
+    }
+}
+
+template <class T, class Ops>
+void
+MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
+{
+    m_resistive_active = false;
+    const RT evaluation_time = this->m_time + m_h;
+    const amrex::MultiFab* const eta_field =
+        m_ops->GetMHDFieldResistivityCCForPC(evaluation_time);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        eta_field != nullptr,
+        "pc_mhd_block requires the solver's cell-centered field resistivity "
+        "for the resistive block");
+    const RT resistive_theta = m_ops->GetMHDResistiveThetaForPC();
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        resistive_theta > 0.0,
+        "pc_mhd_block requires a positive resistive theta");
+    m_resistive_h = resistive_theta * this->m_dt;
+
+    // Gate on the grid-scale resistive diffusion number of the stiffest
+    // cell: below the threshold the unpreconditioned rows are benign and
+    // the block stands down to the exact identity at zero cost. The
+    // cell-centered maximum also bounds the edge values (eta_field is
+    // monotone decreasing in the interpolated density).
+    const RT eta_maximum = eta_field->max(0);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        std::isfinite(eta_maximum) && eta_maximum >= 0.0,
+        "pc_mhd_block requires a finite non-negative field resistivity");
+    const auto inverse_cell_size = m_geometry.InvCellSizeArray();
+    m_resistive_diffusion_number = 0.0;
+    RT laplacian_bound = 0.0;
+    for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+    {
+        m_resistive_diffusion_number = amrex::max(
+            m_resistive_diffusion_number,
+            m_resistive_h * eta_maximum / RT(PhysConst::mu0) *
+                inverse_cell_size[direction] * inverse_cell_size[direction]);
+        laplacian_bound += RT(4.0) * inverse_cell_size[direction] *
+                           inverse_cell_size[direction];
+    }
+    m_resistive_active = m_resistive_diffusion_number >= m_resistive_threshold;
+    if (!m_resistive_active)
+    {
+        return;
+    }
+
+    // Chebyshev interval: [1, 1 + safety * theta_r dt (eta_max/mu0)
+    // sum_d 4/dx_d^2]. The 1.5 safety absorbs the cylindrical metric
+    // ratios; overestimating the top of the spectrum only slows the
+    // fixed-count contraction, never destabilizes it.
+    m_resistive_lambda_max = RT(1.0) + RT(1.5) * m_resistive_h * eta_maximum /
+                                           RT(PhysConst::mu0) * laplacian_bound;
+    // Automatic application count: ceil(2 sqrt(lambda_max)) contracts the
+    // Chebyshev residual to ~e^-4 independent of the stiffness (bounded
+    // for pathological states; each application costs one stencil sweep,
+    // far below the full residual evaluation an outer Krylov iteration
+    // costs).
+    m_resistive_iteration_count =
+        m_resistive_iterations > 0
+            ? m_resistive_iterations
+            : amrex::min(512, static_cast<int>(std::ceil(
+                                  RT(2.0) * std::sqrt(m_resistive_lambda_max))));
+
+    m_resistive_eta_edge = m_ops->GetMHDFieldResistivityEdgeForPC(evaluation_time);
+    for (int component = 0; component < 3; ++component)
+    {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !ResistiveComponentActive(component) ||
+                m_resistive_eta_edge[component] != nullptr,
+            "pc_mhd_block requires the solver's edge field resistivity "
+            "for the resistive block");
+    }
+}
+
+template <class T, class Ops>
+void
 MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
 {
     const amrex::MultiFab& density = state.getMultiFabBlock(MassDensityName, 0);
@@ -863,7 +1071,10 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
         }
         amrex::Print() << ", Faraday = " << (m_faraday_active ? "active" : "inactive")
                        << ", wave Schur = " << (m_wave_schur_active ? "active" : "inactive")
-                       << "\n";
+                       << ", resistive = " << (m_resistive_active ? "active" : "inactive")
+                       << " (z = " << m_resistive_diffusion_number
+                       << ", lambda_max = " << m_resistive_lambda_max
+                       << ", chebyshev = " << m_resistive_iteration_count << ")\n";
     }
 }
 
@@ -871,8 +1082,9 @@ template <class T, class Ops>
 void
 MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
 {
-    // Faraday block: identity here; the triangular ideal-induction corrector
-    // needs the momentum solution and is added at the end.
+    // Faraday block: identity here; the triangular ideal-induction
+    // corrector needs the momentum solution and is added at the end, and
+    // the gated resistive Helmholtz then smooths the assembled B content.
     auto const& rhs_fields = rhs.getArrayVec();
     auto const& solution_fields = solution.getArrayVec();
     for (int component = 0; component < 3; ++component)
@@ -956,6 +1168,13 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
     if (m_faraday_active)
     {
         ApplyFaradayCorrector(solution);
+    }
+
+    if (m_resistive_active)
+    {
+        // Composed after the Faraday corrector: the B block then applies
+        // the consistent triangular product J_BB^{-1} (bB - J_BM dM).
+        ApplyResistiveBlock(solution);
     }
 }
 
@@ -1187,6 +1406,293 @@ MHDBlockPC<T, Ops>::ApplyFaradayCorrector (T& solution)
 
 template <class T, class Ops>
 void
+MHDBlockPC<T, Ops>::ApplyResistiveBlock (T& solution)
+{
+    // Fixed-count Chebyshev iteration on I + A_cc (see the class
+    // documentation, point 4) with the interval [1, m_resistive_lambda_max]
+    // and zero initial iterate: a stationary linear operation, standard
+    // right-preconditioned GMRES safe. The right-hand side is the CURRENT
+    // B content of the solution (the rhs plus any Faraday correction, so
+    // the block composes triangularly with the corrector).
+    auto const& solution_fields = solution.getArrayVec();
+
+    const RT lambda_low = RT(1.0);
+    const RT lambda_high = m_resistive_lambda_max;
+    const RT center = RT(0.5) * (lambda_high + lambda_low);
+    const RT half_width = RT(0.5) * (lambda_high - lambda_low);
+    const RT sigma_one = center / half_width;
+    RT rho = RT(1.0) / sigma_one;
+
+    for (int component = 0; component < 3; ++component)
+    {
+        if (!ResistiveComponentActive(component))
+        {
+            continue;
+        }
+        // x = 0, r = b, d = r / center.
+        m_resistive_iterate[component]->setVal(0.0);
+        amrex::MultiFab::Copy(*m_resistive_residual[component],
+                              *solution_fields[0][component], 0, 0, 1, 0);
+        amrex::MultiFab::LinComb(*m_resistive_direction[component],
+                                 RT(1.0) / center, *m_resistive_residual[component], 0,
+                                 RT(0.0), *m_resistive_residual[component], 0, 0, 1, 0);
+    }
+
+    for (int iteration = 0; iteration < m_resistive_iteration_count; ++iteration)
+    {
+        // x += d; r -= (I + A_cc) d.
+        for (int component = 0; component < 3; ++component)
+        {
+            if (!ResistiveComponentActive(component))
+            {
+                continue;
+            }
+            amrex::MultiFab::Saxpy(*m_resistive_iterate[component], RT(1.0),
+                                   *m_resistive_direction[component], 0, 0, 1, 0);
+            m_resistive_direction[component]->FillBoundary(m_geometry.periodicity());
+        }
+        ApplyResistiveCurlCurl();
+        const RT rho_next = RT(1.0) / (RT(2.0) * sigma_one - rho);
+        for (int component = 0; component < 3; ++component)
+        {
+            if (!ResistiveComponentActive(component))
+            {
+                continue;
+            }
+            amrex::MultiFab::Saxpy(*m_resistive_action[component], RT(1.0),
+                                   *m_resistive_direction[component], 0, 0, 1, 0);
+            amrex::MultiFab::Saxpy(*m_resistive_residual[component], RT(-1.0),
+                                   *m_resistive_action[component], 0, 0, 1, 0);
+            // d = rho_next rho d + (2 rho_next / half_width) r.
+            amrex::MultiFab::LinComb(*m_resistive_direction[component],
+                                     rho_next * rho, *m_resistive_direction[component],
+                                     0, RT(2.0) * rho_next / half_width,
+                                     *m_resistive_residual[component], 0, 0, 1, 0);
+        }
+        rho = rho_next;
+    }
+
+    for (int component = 0; component < 3; ++component)
+    {
+        if (!ResistiveComponentActive(component))
+        {
+            continue;
+        }
+        amrex::MultiFab::Copy(*solution_fields[0][component],
+                              *m_resistive_iterate[component], 0, 0, 1, 0);
+    }
+}
+
+template <class T, class Ops>
+void
+MHDBlockPC<T, Ops>::ApplyResistiveCurlCurl ()
+{
+    // A_cc d = theta_r dt curl((eta_field/mu0) curl d) on the residual's
+    // exact Yee staggering, reading the Chebyshev direction (ghosts
+    // filled by the caller) and the frozen eta at the electric-field
+    // locations. Tangential E on every non-periodic domain boundary
+    // plane is zeroed: exact for PEC walls and the residual's zero axis
+    // EMF, a benign identity-leaning approximation for Open/None ends;
+    // every other read then stays within one filled ghost.
+    const amrex::Box domain = m_geometry.Domain();
+    amrex::GpuArray<int, AMREX_SPACEDIM> domain_face_high;
+    amrex::GpuArray<bool, AMREX_SPACEDIM> periodic;
+    for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+    {
+        domain_face_high[direction] = domain.bigEnd(direction) + 1;
+        periodic[direction] = m_geometry.isPeriodic(direction);
+    }
+    const RT correction_scale = m_resistive_h / RT(PhysConst::mu0);
+    const auto inverse_cell_size = m_geometry.InvCellSizeArray();
+
+#if defined(WARPX_DIM_1D_Z)
+    const int domain_node_low = domain.smallEnd(0);
+    const int domain_node_high = domain_face_high[0];
+    const bool axial_periodic = periodic[0];
+    const RT inverse_dz = inverse_cell_size[0];
+
+    // (curl(eta curl d))_c = -d_z(eta d_z d_c) for the transverse
+    // components; the Bz row is exactly zero (d_z never enters the
+    // transverse curls) and keeps the identity.
+    for (int component = 0; component < 2; ++component)
+    {
+        for (amrex::MFIter mfi(*m_resistive_action[component]); mfi.isValid(); ++mfi)
+        {
+            const auto action = m_resistive_action[component]->array(mfi);
+            const auto b = m_resistive_direction[component]->const_array(mfi);
+            const auto eta = m_resistive_eta_edge[component]->const_array(mfi);
+            amrex::ParallelFor(
+                mfi.validbox(),
+                [=] AMREX_GPU_DEVICE(int i, int j, int k)
+                {
+                    // eta d_z d_c on the z-node between cells node-1 and
+                    // node; zero on non-periodic domain boundary nodes
+                    // (tangential E).
+                    const auto node_flux = [&] (const int node) -> RT
+                    {
+                        if (!axial_periodic &&
+                            (node == domain_node_low || node == domain_node_high))
+                        {
+                            return RT(0.0);
+                        }
+                        return eta(node, j, k) * (b(node, j, k) - b(node - 1, j, k)) *
+                               inverse_dz;
+                    };
+                    action(i, j, k) = -correction_scale * inverse_dz *
+                                      (node_flux(i + 1) - node_flux(i));
+                });
+        }
+    }
+#elif defined(WARPX_DIM_RZ)
+    const int domain_radial_face_low = domain.smallEnd(0);
+    const int domain_radial_face_high = domain_face_high[0];
+    const int domain_axial_face_low = domain.smallEnd(1);
+    const int domain_axial_face_high = domain_face_high[1];
+    const bool axial_periodic = periodic[1];
+    const RT inverse_dr = inverse_cell_size[0];
+    const RT inverse_dz = inverse_cell_size[1];
+    const RT radial_lo = static_cast<RT>(m_geometry.ProbLo(0));
+    const RT radial_cell_size = static_cast<RT>(m_geometry.CellSize(0));
+
+    for (amrex::MFIter mfi(*m_resistive_action[1]); mfi.isValid(); ++mfi)
+    {
+        const auto action_r = m_resistive_action[0]->array(mfi);
+        const auto action_t = m_resistive_action[1]->array(mfi);
+        const auto action_z = m_resistive_action[2]->array(mfi);
+        const auto b_r = m_resistive_direction[0]->const_array(mfi);
+        const auto b_t = m_resistive_direction[1]->const_array(mfi);
+        const auto b_z = m_resistive_direction[2]->const_array(mfi);
+        const auto eta_radial = m_resistive_eta_edge[0]->const_array(mfi);
+        const auto eta_azimuthal = m_resistive_eta_edge[1]->const_array(mfi);
+        const auto eta_axial = m_resistive_eta_edge[2]->const_array(mfi);
+
+        // (A_cc d)_r on (r-node, z-cell): (curl E)_r = -d_z E_theta, with
+        // E_theta = eta (d_z d_r - d_r d_z) on the (r-node, z-node)
+        // corner, zero on every non-periodic domain boundary plane (the
+        // r = 0 corner reproduces the residual's zero axis EMF).
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(1, 0)),
+            [=] AMREX_GPU_DEVICE(int i, int j, int k)
+            {
+                const auto corner_azimuthal = [&] (const int node_r,
+                                                   const int node_z) -> RT
+                {
+                    if (node_r == domain_radial_face_low ||
+                        node_r == domain_radial_face_high)
+                    {
+                        return RT(0.0);
+                    }
+                    if (!axial_periodic && (node_z == domain_axial_face_low ||
+                                            node_z == domain_axial_face_high))
+                    {
+                        return RT(0.0);
+                    }
+                    const RT current_theta =
+                        (b_r(node_r, node_z, k) - b_r(node_r, node_z - 1, k)) *
+                            inverse_dz -
+                        (b_z(node_r, node_z, k) - b_z(node_r - 1, node_z, k)) *
+                            inverse_dr;
+                    return eta_azimuthal(node_r, node_z, k) * current_theta;
+                };
+                action_r(i, j, k) = -correction_scale * inverse_dz *
+                                    (corner_azimuthal(i, j + 1) -
+                                     corner_azimuthal(i, j));
+            });
+        // (A_cc d)_t on (r-cell, z-cell): (curl E)_t = d_z E_r - d_r E_z,
+        // with E_r = -eta d_z d_theta on the (r-cell, z-node) face and
+        // E_z = eta (1/r) d_r(r d_theta) on the (r-node, z-cell) face,
+        // each zero on its non-periodic domain boundary planes
+        // (tangential E; on the axis this also removes the 1/r
+        // singularity).
+        amrex::ParallelFor(
+            mfi.validbox(),
+            [=] AMREX_GPU_DEVICE(int i, int j, int k)
+            {
+                const auto face_radial_electric = [&] (const int cell_r,
+                                                       const int node_z) -> RT
+                {
+                    if (!axial_periodic && (node_z == domain_axial_face_low ||
+                                            node_z == domain_axial_face_high))
+                    {
+                        return RT(0.0);
+                    }
+                    return -eta_radial(cell_r, node_z, k) *
+                           (b_t(cell_r, node_z, k) - b_t(cell_r, node_z - 1, k)) *
+                           inverse_dz;
+                };
+                const auto face_axial_electric = [&] (const int node_r,
+                                                      const int cell_z) -> RT
+                {
+                    if (node_r == domain_radial_face_low ||
+                        node_r == domain_radial_face_high)
+                    {
+                        return RT(0.0);
+                    }
+                    const RT radius_node =
+                        radial_lo + static_cast<RT>(node_r) * radial_cell_size;
+                    const RT radius_low =
+                        radial_lo + (static_cast<RT>(node_r) - RT(0.5)) * radial_cell_size;
+                    const RT radius_high =
+                        radial_lo + (static_cast<RT>(node_r) + RT(0.5)) * radial_cell_size;
+                    return eta_axial(node_r, cell_z, k) *
+                           (radius_high * b_t(node_r, cell_z, k) -
+                            radius_low * b_t(node_r - 1, cell_z, k)) *
+                           inverse_dr / radius_node;
+                };
+                action_t(i, j, k) =
+                    correction_scale *
+                    (inverse_dz * (face_radial_electric(i, j + 1) -
+                                   face_radial_electric(i, j)) -
+                     inverse_dr * (face_axial_electric(i + 1, j) -
+                                   face_axial_electric(i, j)));
+            });
+        // (A_cc d)_z on (r-cell, z-node): (curl E)_z = (1/r) d_r(r E_theta),
+        // the residual's r-weighted corner-EMF divergence.
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(0, 1)),
+            [=] AMREX_GPU_DEVICE(int i, int j, int k)
+            {
+                const auto corner_azimuthal = [&] (const int node_r,
+                                                   const int node_z) -> RT
+                {
+                    if (node_r == domain_radial_face_low ||
+                        node_r == domain_radial_face_high)
+                    {
+                        return RT(0.0);
+                    }
+                    if (!axial_periodic && (node_z == domain_axial_face_low ||
+                                            node_z == domain_axial_face_high))
+                    {
+                        return RT(0.0);
+                    }
+                    const RT current_theta =
+                        (b_r(node_r, node_z, k) - b_r(node_r, node_z - 1, k)) *
+                            inverse_dz -
+                        (b_z(node_r, node_z, k) - b_z(node_r - 1, node_z, k)) *
+                            inverse_dr;
+                    return eta_azimuthal(node_r, node_z, k) * current_theta;
+                };
+                const RT radius_center =
+                    radial_lo + (static_cast<RT>(i) + RT(0.5)) * radial_cell_size;
+                const RT radius_node_low =
+                    radial_lo + static_cast<RT>(i) * radial_cell_size;
+                const RT radius_node_high =
+                    radial_lo + (static_cast<RT>(i) + RT(1.0)) * radial_cell_size;
+                action_z(i, j, k) = correction_scale * inverse_dr / radius_center *
+                                    (radius_node_high * corner_azimuthal(i + 1, j) -
+                                     radius_node_low * corner_azimuthal(i, j));
+            });
+    }
+#else
+    amrex::ignore_unused(correction_scale, inverse_cell_size, domain_face_high,
+                         periodic);
+    WARPX_ABORT_WITH_MESSAGE(
+        "pc_mhd_block: the hlld resistive block supports 1D and RZ only");
+#endif
+}
+
+template <class T, class Ops>
+void
 MHDBlockPC<T, Ops>::Update (const T& state)
 {
     BL_PROFILE("MHDBlockPC::Update()");
@@ -1200,6 +1706,7 @@ MHDBlockPC<T, Ops>::Update (const T& state)
     m_h = theta * this->m_dt;
     if (m_hlld_state)
     {
+        UpdateResistiveBlock();
         UpdateSignalDiffusion(state);
         return;
     }
@@ -1876,6 +2383,8 @@ MHDBlockPC<T, Ops>::printParameters () const
                    << (m_include_hall_mhd_coupling ? "true" : "false") << "\n";
     amrex::Print() << name << " field iterations:     " << m_field_iterations << "\n";
     amrex::Print() << name << " fluid iterations:     " << m_fluid_iterations << "\n";
+    amrex::Print() << name << " resistive iterations: " << m_resistive_iterations << "\n";
+    amrex::Print() << name << " resistive threshold:  " << m_resistive_threshold << "\n";
     amrex::Print() << name << " wave relaxation:      " << m_wave_relaxation << "\n";
     amrex::Print() << name << " agglomeration:        " << (m_agglomeration ? "true" : "false")
                    << "\n";

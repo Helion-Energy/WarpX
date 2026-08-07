@@ -278,6 +278,20 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# preconditioned twin of the calibrated vacuum-resistive decay: identical
+# physics assertions, and the pc_mhd_block Chebyshev resistive block must
+# cut the cumulative GMRES iterations strictly (and by at least 3x; the
+# measured reduction is 90 -> 8) below the baseline run's
+add_warpx_test(
+    test_1d_theta_implicit_mhd_vacuum_resistive_pc  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_vacuum_resistive_pc  # inputs
+    "analysis_mhd_vacuum_resistive_pc.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_vacuum_resistive  # dependency
+)
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_sound  # name
     1  # dims
@@ -606,6 +620,34 @@ add_warpx_test(
     "analysis_mhd_radial_contact.py diags/diag000000 diags/diag000100 rusanov"  # analysis
     OFF  # checksum
     OFF  # dependency
+)
+
+# stiff RZ vacuum-resistive diffusion (grid diffusion number 150 at the
+# halo eta maximum): corner-EMF structural invariants (exactly zero
+# B_theta, conserved r-weighted axial flux, per-radius vanishing axial Br
+# sums) plus the z-modulated eta exciting Br
+add_warpx_test(
+    test_rz_theta_implicit_mhd_vacuum_resistive  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_vacuum_resistive  # inputs
+    "analysis_mhd_vacuum_resistive_rz.py diags/diag000000 diags/diag000002"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# preconditioned twin: identical structural physics, final fields matching
+# the baseline run to solver roundoff, and the pc_mhd_block Chebyshev
+# resistive block cutting the cumulative GMRES iterations strictly (and by
+# at least 10x; the measured reduction is ~1570 -> ~28) below the baseline
+add_warpx_test(
+    test_rz_theta_implicit_mhd_vacuum_resistive_pc  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_vacuum_resistive_pc  # inputs
+    "analysis_mhd_vacuum_resistive_rz_pc.py diags/diag000000 diags/diag000002"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_vacuum_resistive  # dependency
 )
 
 # static theta-pinch column (pe-balanced Bz(r), u = 0, B_n = 0): the

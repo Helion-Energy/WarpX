@@ -447,6 +447,25 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
 
     fields.alloc_init(TotalCurrentCCName, lev, ba, dm, 3, guard_cells, 0.0_rt);
     fields.alloc_init(MagneticFieldCCName, lev, ba, dm, 3, guard_cells, 0.0_rt);
+    fields.alloc_init(FieldResistivityCCName, lev, ba, dm, 1, amrex::IntVect(0), 0.0_rt);
+#if defined(WARPX_DIM_1D_Z)
+    // The transverse E components share the z-nodal staggering (and the
+    // same interpolated density), so one register serves both; the
+    // cell-centered Ez never enters the 1D resistive curl-curl.
+    fields.alloc_init(FieldResistivityE0Name, lev,
+                      amrex::convert(ba, amrex::IntVect(1)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
+#elif defined(WARPX_DIM_RZ)
+    fields.alloc_init(FieldResistivityE0Name, lev,
+                      amrex::convert(ba, amrex::IntVect(0, 1)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(FieldResistivityE1Name, lev,
+                      amrex::convert(ba, amrex::IntVect(1, 1)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(FieldResistivityE2Name, lev,
+                      amrex::convert(ba, amrex::IntVect(1, 0)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
+#endif
 
 #if defined(WARPX_DIM_1D_Z)
     // hlld face-flux register (z-faces = z-nodal in 1D). Allocated
@@ -802,6 +821,175 @@ ThetaImplicitMHD::GetMHDReferenceResistivityForPC (const amrex::Real time) const
     const amrex::Real reference_charge_density =
         m_ion_charge_to_mass * m_reference_mass_density;
     return m_hybrid_pic_model->m_eta(reference_charge_density, 0.0_rt, time);
+}
+
+const amrex::MultiFab*
+ThetaImplicitMHD::GetMHDFieldResistivityCCForPC (const amrex::Real time) const
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_hybrid_pic_model != nullptr,
+        "ThetaImplicitMHD field resistivity requested before Define()");
+    // Same eta_field formula as the residual's Ohm assembly (see
+    // AssembleOhmElectricField and vacuum_keyed_resistivity in
+    // ThetaImplicitMHD_K.H): the user eta floored at the Ohm charge-density
+    // guard, boosted by the density-keyed vacuum resistivity with divisions
+    // guarded at the positivity floor. Evaluated at zero current magnitude
+    // (the GetMHDReferenceResistivityForPC precedent; the stiff vacuum boost
+    // carries no J dependence) from the cell-centered mass density frozen at
+    // the preconditioner update state (rho_q = (q/m) rho for the
+    // quasi-neutral single-ion fluid).
+    const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
+    amrex::MultiFab& resistivity =
+        *m_WarpX->m_fields.get(FieldResistivityCCName, 0);
+    const auto eta = m_hybrid_pic_model->m_eta;
+    const amrex::Real charge_to_mass = m_ion_charge_to_mass;
+    const amrex::Real charge_density_floor =
+        m_ion_charge_to_mass * OhmMassDensityFloor();
+    const amrex::Real vacuum_division_guard =
+        m_ion_charge_to_mass * m_mass_density_floor;
+    const amrex::Real vacuum_eta_scale =
+        PhysConst::mu0 * m_vacuum_resistivity_diffusivity;
+    for (amrex::MFIter mfi(resistivity); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto eta_field = resistivity.array(mfi);
+        const auto rho = density.const_array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            const amrex::Real charge_density_raw =
+                charge_to_mass * rho(i, j, k);
+            const amrex::Real charge_density_value =
+                std::max(charge_density_raw, charge_density_floor);
+            eta_field(i, j, k) =
+                theta_implicit_mhd::vacuum_keyed_resistivity(
+                    eta(charge_density_value, 0.0_rt, time),
+                    charge_density_raw, charge_density_floor,
+                    vacuum_division_guard, vacuum_eta_scale);
+        });
+    }
+    return &resistivity;
+}
+
+amrex::Array<const amrex::MultiFab*, 3>
+ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_hybrid_pic_model != nullptr,
+        "ThetaImplicitMHD field resistivity requested before Define()");
+    // eta_field on the electric-field staggerings with the SAME density
+    // interpolation the residual's Ohm assembly uses: nodal rho_fp is the
+    // arithmetic average of the neighboring cell-centered densities, and
+    // the face values average the neighboring nodes (see
+    // AssembleOhmElectricField). Evaluating eta AT the interpolated
+    // density matters: the vacuum boost is quadratic in 1/rho, so
+    // averaging cell etas instead misrepresents the operator by order
+    // unity across halo density gradients. Evaluated at zero current
+    // magnitude like the cell-centered variant.
+    const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
+    const auto eta = m_hybrid_pic_model->m_eta;
+    const amrex::Real charge_to_mass = m_ion_charge_to_mass;
+    const amrex::Real charge_density_floor =
+        m_ion_charge_to_mass * OhmMassDensityFloor();
+    const amrex::Real vacuum_division_guard =
+        m_ion_charge_to_mass * m_mass_density_floor;
+    const amrex::Real vacuum_eta_scale =
+        PhysConst::mu0 * m_vacuum_resistivity_diffusivity;
+#if defined(WARPX_DIM_1D_Z)
+    amrex::MultiFab& node_resistivity =
+        *m_WarpX->m_fields.get(FieldResistivityE0Name, 0);
+    for (amrex::MFIter mfi(node_resistivity); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto eta_field = node_resistivity.array(mfi);
+        const auto rho = density.const_array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            const amrex::Real charge_density_raw =
+                charge_to_mass * 0.5_rt * (rho(i - 1, j, k) + rho(i, j, k));
+            const amrex::Real charge_density_value =
+                std::max(charge_density_raw, charge_density_floor);
+            eta_field(i, j, k) =
+                theta_implicit_mhd::vacuum_keyed_resistivity(
+                    eta(charge_density_value, 0.0_rt, time),
+                    charge_density_raw, charge_density_floor,
+                    vacuum_division_guard, vacuum_eta_scale);
+        });
+    }
+    // Ex and Ey share the z-nodal staggering and the same interpolated
+    // density; the cell-centered Ez never enters the 1D resistive
+    // curl-curl.
+    return {&node_resistivity, &node_resistivity, nullptr};
+#elif defined(WARPX_DIM_RZ)
+    amrex::MultiFab& radial_resistivity =
+        *m_WarpX->m_fields.get(FieldResistivityE0Name, 0);
+    amrex::MultiFab& azimuthal_resistivity =
+        *m_WarpX->m_fields.get(FieldResistivityE1Name, 0);
+    amrex::MultiFab& axial_resistivity =
+        *m_WarpX->m_fields.get(FieldResistivityE2Name, 0);
+    for (amrex::MFIter mfi(azimuthal_resistivity); mfi.isValid(); ++mfi) {
+        const auto eta_radial = radial_resistivity.array(mfi);
+        const auto eta_azimuthal = azimuthal_resistivity.array(mfi);
+        const auto eta_axial = axial_resistivity.array(mfi);
+        const auto rho = density.const_array(mfi);
+        // E_theta corners: the nodal rho_fp value itself.
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(1, 1)),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const auto node_density = [&] (const int in, const int jn) {
+                    return 0.25_rt * (rho(in - 1, jn - 1, k) + rho(in, jn - 1, k) +
+                                      rho(in - 1, jn, k) + rho(in, jn, k));
+                };
+                const amrex::Real charge_density_raw =
+                    charge_to_mass * node_density(i, j);
+                const amrex::Real charge_density_value =
+                    std::max(charge_density_raw, charge_density_floor);
+                eta_azimuthal(i, j, k) =
+                    theta_implicit_mhd::vacuum_keyed_resistivity(
+                        eta(charge_density_value, 0.0_rt, time),
+                        charge_density_raw, charge_density_floor,
+                        vacuum_division_guard, vacuum_eta_scale);
+            });
+        // Er z-faces: nodes averaged in r.
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(0, 1)),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const auto node_density = [&] (const int in, const int jn) {
+                    return 0.25_rt * (rho(in - 1, jn - 1, k) + rho(in, jn - 1, k) +
+                                      rho(in - 1, jn, k) + rho(in, jn, k));
+                };
+                const amrex::Real charge_density_raw =
+                    charge_to_mass * 0.5_rt *
+                    (node_density(i, j) + node_density(i + 1, j));
+                const amrex::Real charge_density_value =
+                    std::max(charge_density_raw, charge_density_floor);
+                eta_radial(i, j, k) =
+                    theta_implicit_mhd::vacuum_keyed_resistivity(
+                        eta(charge_density_value, 0.0_rt, time),
+                        charge_density_raw, charge_density_floor,
+                        vacuum_division_guard, vacuum_eta_scale);
+            });
+        // Ez r-faces: nodes averaged in z.
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(1, 0)),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const auto node_density = [&] (const int in, const int jn) {
+                    return 0.25_rt * (rho(in - 1, jn - 1, k) + rho(in, jn - 1, k) +
+                                      rho(in - 1, jn, k) + rho(in, jn, k));
+                };
+                const amrex::Real charge_density_raw =
+                    charge_to_mass * 0.5_rt *
+                    (node_density(i, j) + node_density(i, j + 1));
+                const amrex::Real charge_density_value =
+                    std::max(charge_density_raw, charge_density_floor);
+                eta_axial(i, j, k) =
+                    theta_implicit_mhd::vacuum_keyed_resistivity(
+                        eta(charge_density_value, 0.0_rt, time),
+                        charge_density_raw, charge_density_floor,
+                        vacuum_division_guard, vacuum_eta_scale);
+            });
+    }
+    return {&radial_resistivity, &azimuthal_resistivity, &axial_resistivity};
+#else
+    amrex::ignore_unused(density, eta, charge_to_mass, charge_density_floor,
+                         vacuum_division_guard, vacuum_eta_scale, time);
+    return {nullptr, nullptr, nullptr};
+#endif
 }
 
 amrex::GpuArray<amrex::Real, 3>

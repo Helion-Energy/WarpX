@@ -165,6 +165,18 @@ class ThetaImplicitMHD final : public ImplicitSolver
     [[nodiscard]] amrex::Real
     GetMHDReferenceResistivityForPC (amrex::Real time) const override;
 
+    [[nodiscard]] amrex::Real
+    GetMHDResistiveThetaForPC () const override
+    {
+        return m_resistive_theta;
+    }
+
+    [[nodiscard]] const amrex::MultiFab*
+    GetMHDFieldResistivityCCForPC (amrex::Real time) const override;
+
+    [[nodiscard]] amrex::Array<const amrex::MultiFab*, 3>
+    GetMHDFieldResistivityEdgeForPC (amrex::Real time) const override;
+
     [[nodiscard]] amrex::GpuArray<amrex::Real, 3>
     GetMHDReferenceMagneticFieldForPC () const override;
 
@@ -200,6 +212,20 @@ class ThetaImplicitMHD final : public ImplicitSolver
   private:
     inline static constexpr char TotalCurrentCCName[] = "implicit_mhd_total_current_cc";
     inline static constexpr char MagneticFieldCCName[] = "implicit_mhd_magnetic_field_cc";
+    // Field resistivity eta_field (user eta through the density-keyed
+    // vacuum boost) scratch, filled on demand for the MHD block
+    // preconditioner's resistive block: cell-centered (the activation
+    // gate) and on the electric-field staggerings (the discrete resistive
+    // curl-curl the block iterates on; per physical E component, with the
+    // residual's own density interpolation).
+    inline static constexpr char FieldResistivityCCName[] =
+        "implicit_mhd_field_resistivity_cc";
+    inline static constexpr char FieldResistivityE0Name[] =
+        "implicit_mhd_field_resistivity_e0";
+    inline static constexpr char FieldResistivityE1Name[] =
+        "implicit_mhd_field_resistivity_e1";
+    inline static constexpr char FieldResistivityE2Name[] =
+        "implicit_mhd_field_resistivity_e2";
     // Per-face-direction Riemann flux registers for the conservative-form
     // hlld path: one HLLD solution per face feeds the fluid divergences,
     // the Maxwell stress, the ion-energy magnetic work, and the ideal EMF.
