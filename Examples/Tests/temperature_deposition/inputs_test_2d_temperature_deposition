@@ -1,0 +1,76 @@
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+# A uniform, periodic, field-free Maxwellian proton plasma at a known
+# temperature. The hybrid-PIC solver is used only because the shape-matched
+# temperature deposition runs inside its deposit loop; with B = 0 and a
+# uniform density the plasma is inert over the 2-step horizon, so the
+# deposited Tx/Ty/Tz should read back the injected temperature.
+max_step = 2
+amr.n_cell = 128 128
+amr.max_level = 0
+geometry.dims = 2
+geometry.prob_lo = 0.0 0.0
+geometry.prob_hi = 1.0 1.0
+warpx.serialize_initial_conditions = 1
+warpx.verbose = 1
+
+#################################
+############ CONSTANTS ##########
+#################################
+my_constants.n0 = 1.e20          # plasma density, m^-3
+my_constants.Ti = 100.           # ion temperature, eV
+
+#################################
+###### BOUNDARY CONDITIONS ######
+#################################
+boundary.field_lo = periodic periodic
+boundary.field_hi = periodic periodic
+boundary.particle_lo = periodic periodic
+boundary.particle_hi = periodic periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.particle_shape = 2
+warpx.use_filter = 0
+# Time step chosen so that v_th*dt << dx: the plasma does not evolve over
+# the test horizon and the deposited temperature reflects the injected one.
+warpx.const_dt = 1.e-9
+
+hybrid_pic_model.elec_temp = 100.
+hybrid_pic_model.n0_ref = 1.e20
+hybrid_pic_model.gamma = 1.0
+hybrid_pic_model.n_floor = 1.e18
+
+#################################
+############ PLASMA #############
+#################################
+particles.species_names = ions
+
+ions.species_type = proton
+# Random in-cell positions: with regularly spaced particles the per-node
+# effective shape weights are degenerate and the weighted-variance
+# reliability correction reduces to the equal-weight case, which would not
+# exercise the estimator.
+ions.injection_style = "NRandomPerCell"
+ions.num_particles_per_cell = 4
+ions.profile = constant
+ions.density = n0
+ions.momentum_distribution_type = gaussian
+ions.ux_th = sqrt(Ti*q_e/m_p)/clight
+ions.uy_th = sqrt(Ti*q_e/m_p)/clight
+ions.uz_th = sqrt(Ti*q_e/m_p)/clight
+ions.do_temperature_deposition = 1
+
+#################################
+########## DIAGNOSTICS ##########
+#################################
+# The temperature deposition runs inside the hybrid-PIC deposit loop, so the
+# T_<species> fields are zero at step 0; dump at step >= 1 only.
+diagnostics.diags_names = diag1
+diag1.intervals = 2
+diag1.diag_type = Full
+diag1.fields_to_plot = rho_ions Tx_ions Ty_ions Tz_ions

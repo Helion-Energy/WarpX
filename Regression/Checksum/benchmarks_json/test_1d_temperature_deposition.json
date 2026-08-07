@@ -1,0 +1,15 @@
+{
+  "ions": {
+    "particle_momentum_x": 1.714575584193899e-17,
+    "particle_momentum_y": 1.7178166335344618e-17,
+    "particle_momentum_z": 1.6860568386367722e-17,
+    "particle_position_x": 65535.01825625232,
+    "particle_weight": 1e+20
+  },
+  "lev=0": {
+    "Tx_ions": 38099771536.13374,
+    "Ty_ions": 38249969638.97761,
+    "Tz_ions": 37620092255.997986,
+    "rho_ions": 525001.23942912
+  }
+}
