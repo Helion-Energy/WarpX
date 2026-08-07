@@ -48,7 +48,9 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <iomanip>
 #include <memory>
+#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -486,13 +488,16 @@ WarpX::HybridPICRegrid (int step, amrex::Real time)
         return;
     }
 
-    amrex::Print() << Utils::TextMsg::Info(
-        "Hybrid-PIC regrid at step " + std::to_string(step)
-        + " (t = " + std::to_string(time) + " s): finest_level "
-        + std::to_string(old_finest) + " -> " + std::to_string(finest_level)
-        + (level_created   ? "; level(s) created"   : "")
-        + (level_relocated ? "; level(s) relocated" : "")
-        + (level_removed   ? "; level(s) removed"   : ""));
+    {
+        std::ostringstream oss;
+        oss << "Hybrid-PIC regrid at step " << step
+            << " (t = " << std::scientific << std::setprecision(6) << time
+            << " s): finest_level " << old_finest << " -> " << finest_level
+            << (level_created   ? "; level(s) created"   : "")
+            << (level_relocated ? "; level(s) relocated" : "")
+            << (level_removed   ? "; level(s) removed"   : "");
+        amrex::Print() << Utils::TextMsg::Info(oss.str());
+    }
 
     // Any hierarchy change invalidates the cached coarse-fine masks (they
     // are keyed to the layouts they were built from and rebuilt on demand).
