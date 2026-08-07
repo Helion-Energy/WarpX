@@ -242,6 +242,17 @@ public:
      */
     void SeedEfieldFromCoarse (int lev);
 
+    /**
+     * \brief Final fine->coarse B restriction of level flev before it is
+     * removed by a dynamic regrid: the same face-averaged restriction as
+     * RestrictBfieldFineToCoarse but WITHOUT the sacrificial setback erosion,
+     * so the coarse cells under the (formerly sacrificial) fine edge band are
+     * not left holding never-restricted data. Only the outermost shared
+     * faces of the patch boundary itself keep the coarse solution.
+     */
+    void RestrictBfieldBeforeRemoval (
+        int flev, amrex::IntVect const& ng, std::optional<bool> nodal_sync);
+
     /** \brief Drop the cached coarse-fine masks (restriction keep-masks and
      * fine-edge band masks). They are rebuilt on demand and keyed to the
      * BoxArray/DistributionMapping they were built from; dropping them at
