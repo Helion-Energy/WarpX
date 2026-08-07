@@ -94,13 +94,21 @@ struct FluxParameters {
     // (MakeFluxParameters keeps the latter false under cgl).
     bool cgl_closure = false;
     // Offset-density halo pedestal (0 = off): the per-step frozen pedestal
-    // density rho_ped (see ThetaImplicitMHD::m_halo_pedestal_fraction).
-    // When active it replaces density_floor as the anchor of the MASS
-    // drain gates, so the halo band is dynamically held at rho_ped -- an
-    // interior point of the admissible set, far above the positivity
-    // bound -- and it anchors the C^1 taper of the reactive work and
-    // relaxation sources across the halo band.
+    // STATE (see ThetaImplicitMHD::m_halo_pedestal_fraction) -- an
+    // f-scaled image of the peak state, one value per fluid block. Each
+    // value replaces its block's floor as the anchor of the donor drain
+    // gates, so the halo band is dynamically held at the pedestal -- an
+    // interior point of the admissible set, far above every positivity
+    // bound. The density pedestal additionally anchors the C^1 taper of
+    // the reactive work and relaxation sources across the halo band.
     amrex::Real halo_pedestal = 0.0;
+    amrex::Real halo_pedestal_electron_energy = 0.0;
+    // Internal ion energy pedestal (total_energy closure): the E_i drain
+    // gate keys on the KE-subtracted internal part, so the pedestal is
+    // an internal-energy value.
+    amrex::Real halo_pedestal_ion_internal = 0.0;
+    amrex::Real halo_pedestal_ion_parallel = 0.0;
+    amrex::Real halo_pedestal_ion_perp = 0.0;
 };
 
 struct CellState {
@@ -1404,7 +1412,9 @@ face_flux (const amrex::Array4<const amrex::Real>& density,
             old_electron_energy(ie, je, ke) * ext;
         flux.electron_energy *= floor_outflow_limiter(
             ue_end,
-            parameters.electron_pressure_floor / (parameters.gamma_e - 1.0));
+            std::max(parameters.electron_pressure_floor /
+                         (parameters.gamma_e - 1.0),
+                     parameters.halo_pedestal_electron_energy));
         if (parameters.total_energy_closure) {
             const bool ei_from_left = (flux.ion_energy >= 0.0);
             const int ii = ei_from_left ? il : ir;
@@ -1427,7 +1437,9 @@ face_flux (const amrex::Array4<const amrex::Real>& density,
             kinetic_end *= 0.5 / rho_end_donor;
             flux.ion_energy *= floor_outflow_limiter(
                 ei_end - kinetic_end,
-                parameters.ion_pressure_floor / (parameters.gamma_i - 1.0));
+                std::max(parameters.ion_pressure_floor /
+                             (parameters.gamma_i - 1.0),
+                         parameters.halo_pedestal_ion_internal));
         }
     }
     return flux;

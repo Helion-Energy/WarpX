@@ -1885,9 +1885,14 @@ theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
     // under cgl: load_cell_state_cgl overwrites the polytropic pressure
     // with p_eff and the E_i machinery stays dormant.
     flux_parameters.cgl_closure = (m_ion_closure == "cgl");
-    // Per-step frozen pedestal (0 while the pedestal is off): anchors the
-    // mass drain gates and the halo source taper.
+    // Per-step frozen pedestal state (0 while the pedestal is off):
+    // anchors the per-block drain gates and the halo source taper.
     flux_parameters.halo_pedestal = m_halo_pedestal_density;
+    flux_parameters.halo_pedestal_electron_energy =
+        m_halo_pedestal_electron_energy;
+    flux_parameters.halo_pedestal_ion_internal = m_halo_pedestal_ion_internal;
+    flux_parameters.halo_pedestal_ion_parallel = m_halo_pedestal_ion_parallel;
+    flux_parameters.halo_pedestal_ion_perp = m_halo_pedestal_ion_perp;
     return flux_parameters;
 }
 
@@ -2485,9 +2490,15 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 theta_implicit_mhd::floor_outflow_limiter(
                     donor_end(rho, rho_old, i, j, k), mass_gate_floor),
                 0.5_rt * (left.safe_density + right.safe_density));
-            const amrex::Real electron_energy_floor =
+            // The energy gates anchor at their pedestal values when the
+            // pedestal is active (see FluxParameters::halo_pedestal*):
+            // the pedestal is an f-scaled image of the peak STATE, so
+            // every block's band is held off its bound the same way the
+            // mass band is.
+            const amrex::Real electron_energy_floor = std::max(
                 parameters.electron_pressure_floor /
-                (parameters.gamma_e - 1.0_rt);
+                    (parameters.gamma_e - 1.0_rt),
+                parameters.halo_pedestal_electron_energy);
             flux.electron_energy *= donor_blend(
                 flux.electron_energy,
                 theta_implicit_mhd::floor_outflow_limiter(
@@ -2515,9 +2526,10 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                           parameters.density_floor);
                     return ei_end - kinetic_end;
                 };
-                const amrex::Real ion_energy_floor =
+                const amrex::Real ion_energy_floor = std::max(
                     parameters.ion_pressure_floor /
-                    (parameters.gamma_i - 1.0_rt);
+                        (parameters.gamma_i - 1.0_rt),
+                    parameters.halo_pedestal_ion_internal);
                 flux.ion_energy *= donor_blend(
                     flux.ion_energy,
                     theta_implicit_mhd::floor_outflow_limiter(
@@ -2532,8 +2544,9 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 // gating on the U fields directly (U_par and U_perp are
                 // pure internal energies -- no kinetic subtraction), with
                 // U_par floored at p_i_floor/2 and U_perp at p_i_floor.
-                const amrex::Real parallel_floor =
-                    0.5_rt * parameters.ion_pressure_floor;
+                const amrex::Real parallel_floor = std::max(
+                    0.5_rt * parameters.ion_pressure_floor,
+                    parameters.halo_pedestal_ion_parallel);
                 flux.ion_parallel_energy *= donor_blend(
                     flux.ion_parallel_energy,
                     theta_implicit_mhd::floor_outflow_limiter(
@@ -2544,7 +2557,9 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     0.5_rt * (left.ion_parallel_energy +
                               right.ion_parallel_energy) +
                         parallel_floor);
-                const amrex::Real perp_floor = parameters.ion_pressure_floor;
+                const amrex::Real perp_floor =
+                    std::max(parameters.ion_pressure_floor,
+                             parameters.halo_pedestal_ion_perp);
                 flux.ion_perp_energy *= donor_blend(
                     flux.ion_perp_energy,
                     theta_implicit_mhd::floor_outflow_limiter(
@@ -4399,41 +4414,164 @@ void ThetaImplicitMHD::RefreshHaloPedestal ()
     if (m_halo_pedestal_fraction <= 0.0_rt) {
         return;
     }
+    const bool total_energy_closure = m_ion_closure == "total_energy";
+    const bool cgl_closure = m_ion_closure == "cgl";
     amrex::MultiFab& density_block = m_state.getMultiFabBlock(MassDensityName, 0);
-    // Dynamic pedestal: a fraction of the instantaneous density peak,
-    // never below the same fraction of the reference density (so a
-    // globally decaying state cannot drag the pedestal into the
-    // positivity guard). One global reduction per step; FROZEN for the
-    // whole nonlinear solve so the drain-gate anchors and the source
-    // taper are per-solve constants (no O(1/width) Jacobian coupling
-    // through the pedestal itself).
+    amrex::MultiFab& electron_energy_block =
+        m_state.getMultiFabBlock(ElectronEnergyName, 0);
+    // Dynamic pedestal STATE -- an f-scaled image of the instantaneous
+    // peak state, one value per fluid block; the density is never below
+    // the same fraction of the reference density (so a globally decaying
+    // state cannot drag the pedestal into the positivity guard). A few
+    // global reductions per step; FROZEN for the whole nonlinear solve
+    // so the drain-gate anchors and the source taper are per-solve
+    // constants (no O(1/width) Jacobian coupling through the pedestal
+    // itself).
     const amrex::Real density_peak = density_block.max(0);
     m_halo_pedestal_density =
         m_halo_pedestal_fraction *
         std::max(density_peak, m_reference_mass_density);
+    m_halo_pedestal_electron_energy =
+        m_halo_pedestal_fraction * electron_energy_block.max(0);
+    m_halo_pedestal_ion_internal = 0.0_rt;
+    m_halo_pedestal_ion_parallel = 0.0_rt;
+    m_halo_pedestal_ion_perp = 0.0_rt;
     const amrex::Real pedestal = m_halo_pedestal_density;
+    if (total_energy_closure) {
+        // Internal-energy peak: E_i is conservative, so subtract the
+        // kinetic part cell by cell before reducing.
+        const amrex::MultiFab& momentum_block =
+            m_state.getMultiFabBlock(MomentumDensityName, 0);
+        const amrex::MultiFab& ion_energy_block =
+            m_state.getMultiFabBlock(IonEnergyName, 0);
+        const amrex::Real density_floor = m_mass_density_floor;
+        amrex::ReduceOps<amrex::ReduceOpMax> reduce_op;
+        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        for (amrex::MFIter mfi(ion_energy_block); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox();
+            const auto rho = density_block.const_array(mfi);
+            const auto mom = momentum_block.const_array(mfi);
+            const auto ion_e = ion_energy_block.const_array(mfi);
+            reduce_op.eval(
+                box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                    amrex::Real kinetic_energy = 0.0_rt;
+                    for (int component = 0; component < 3; ++component) {
+                        kinetic_energy += mom(i, j, k, component) *
+                                          mom(i, j, k, component);
+                    }
+                    kinetic_energy *=
+                        0.5_rt / std::max(rho(i, j, k), density_floor);
+                    return {ion_e(i, j, k) - kinetic_energy};
+                });
+        }
+        amrex::Real internal_peak =
+            amrex::get<0>(reduce_data.value(reduce_op));
+        amrex::ParallelAllReduce::Max(
+            internal_peak, amrex::ParallelContext::CommunicatorSub());
+        m_halo_pedestal_ion_internal =
+            m_halo_pedestal_fraction * std::max(internal_peak, 0.0_rt);
+    } else if (cgl_closure) {
+        m_halo_pedestal_ion_parallel =
+            m_halo_pedestal_fraction *
+            m_state.getMultiFabBlock(IonParallelEnergyName, 0).max(0);
+        m_halo_pedestal_ion_perp =
+            m_halo_pedestal_fraction *
+            m_state.getMultiFabBlock(IonPerpEnergyName, 0).max(0);
+    }
     if (density_block.min(0) >= pedestal) {
+        // Nothing sub-pedestal: the per-block drain gates held the band
+        // (they anchor at the CURRENT pedestal values each solve, so a
+        // slowly moving pedestal needs no re-raise).
         return;
     }
-    // Raise every sub-pedestal cell ONTO the pedestal. The mass drain
-    // gates keep {rho >= rho_ped} dynamically invariant afterwards, so
-    // this raise re-triggers only where the dynamic pedestal itself
-    // rose (peak growth under compression) -- the injected mass is the
-    // same class of tracked non-conservation as the positivity floors,
-    // confined to sub-pedestal halo cells. Landing exactly ON the
-    // pedestal is safe (unlike the admissibility bounds, which get a
-    // slack margin): the pedestal is an RHS-level gate anchor, not a
-    // constraint of the bounded Newton solve -- the admissibility bound
-    // stays at the far-lower positivity floor, so raised cells are
-    // interior points with full two-sided probe headroom.
+    // Raise every sub-pedestal cell ONTO the pedestal STATE: density to
+    // rho_ped and, in the same (pre-raise sub-pedestal density) band,
+    // each energy block to at least its pedestal value -- pedestal
+    // plasma carries pedestal-consistent energies, never floor energies.
+    // A pedestal band whose energies rest on the sanitize floors is the
+    // same bound-resident population in different variables (measured:
+    // the mass-only pedestal left 16k U_e + 3k E_i components projected
+    // per solve and the line search frozen from step 2). The drain
+    // gates keep the band dynamically invariant afterwards, so this
+    // raise re-triggers only where the dynamic pedestal itself rose
+    // (peak growth under compression) -- the injected mass/energy is
+    // the same class of tracked non-conservation as the positivity
+    // floors, confined to sub-pedestal halo cells. Landing exactly ON
+    // the pedestal is safe (unlike the admissibility bounds, which get
+    // a slack margin): the pedestal is an RHS-level gate anchor, not a
+    // constraint of the bounded Newton solve -- the admissibility
+    // bounds stay at the far-lower positivity floors, so raised cells
+    // are interior points with full two-sided probe headroom.
+    amrex::MultiFab& momentum_block =
+        m_state.getMultiFabBlock(MomentumDensityName, 0);
+    // The ion energy blocks exist in the solver state only under their
+    // respective closures.
+    amrex::MultiFab* const ion_energy_block =
+        total_energy_closure ? &m_state.getMultiFabBlock(IonEnergyName, 0)
+                             : nullptr;
+    amrex::MultiFab* const ion_parallel_block =
+        cgl_closure ? &m_state.getMultiFabBlock(IonParallelEnergyName, 0)
+                    : nullptr;
+    amrex::MultiFab* const ion_perp_block =
+        cgl_closure ? &m_state.getMultiFabBlock(IonPerpEnergyName, 0)
+                    : nullptr;
+    const amrex::Real electron_energy_pedestal =
+        m_halo_pedestal_electron_energy;
+    const amrex::Real ion_internal_pedestal = m_halo_pedestal_ion_internal;
+    const amrex::Real ion_parallel_pedestal = m_halo_pedestal_ion_parallel;
+    const amrex::Real ion_perp_pedestal = m_halo_pedestal_ion_perp;
     for (amrex::MFIter mfi(density_block); mfi.isValid(); ++mfi) {
         const amrex::Box box = mfi.validbox();
         const auto rho = density_block.array(mfi);
+        const auto mom = momentum_block.const_array(mfi);
+        const auto energy = electron_energy_block.array(mfi);
+        const auto ion_e = ion_energy_block
+                               ? ion_energy_block->array(mfi)
+                               : amrex::Array4<amrex::Real>{};
+        const auto ion_par = ion_parallel_block
+                                 ? ion_parallel_block->array(mfi)
+                                 : amrex::Array4<amrex::Real>{};
+        const auto ion_perp = ion_perp_block
+                                  ? ion_perp_block->array(mfi)
+                                  : amrex::Array4<amrex::Real>{};
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-            rho(i, j, k) = std::max(rho(i, j, k), pedestal);
+            if (rho(i, j, k) >= pedestal) {
+                return;
+            }
+            rho(i, j, k) = pedestal;
+            energy(i, j, k) =
+                std::max(energy(i, j, k), electron_energy_pedestal);
+            if (total_energy_closure) {
+                // Pedestal E_i = kinetic part (at the RAISED density;
+                // momentum is untouched) + the internal pedestal.
+                amrex::Real kinetic_energy = 0.0_rt;
+                for (int component = 0; component < 3; ++component) {
+                    kinetic_energy += mom(i, j, k, component) *
+                                      mom(i, j, k, component);
+                }
+                kinetic_energy *= 0.5_rt / pedestal;
+                ion_e(i, j, k) =
+                    std::max(ion_e(i, j, k),
+                             kinetic_energy + ion_internal_pedestal);
+            } else if (cgl_closure) {
+                ion_par(i, j, k) =
+                    std::max(ion_par(i, j, k), ion_parallel_pedestal);
+                ion_perp(i, j, k) =
+                    std::max(ion_perp(i, j, k), ion_perp_pedestal);
+            }
         });
     }
-    density_block.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
+    const auto& periodicity = m_WarpX->Geom(0).periodicity();
+    density_block.FillBoundaryAndSync(periodicity);
+    electron_energy_block.FillBoundaryAndSync(periodicity);
+    if (total_energy_closure) {
+        ion_energy_block->FillBoundaryAndSync(periodicity);
+    } else if (cgl_closure) {
+        ion_parallel_block->FillBoundaryAndSync(periodicity);
+        ion_perp_block->FillBoundaryAndSync(periodicity);
+    }
     // Mirror the raise into the registered field MultiFabs: the ghosted
     // beginning-of-step copies (and the first residual's sources) are
     // built from those.

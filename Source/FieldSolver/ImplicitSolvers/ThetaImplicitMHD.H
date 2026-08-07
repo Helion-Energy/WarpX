@@ -381,9 +381,29 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // then stagnated SOLELY on the admissibility-bound-resident
     // population -- proving a state with NO bound-resident cells is the
     // fix. The pedestal absorbs the bound into the operating point.
+    // THE PEDESTAL IS A STATE, NOT A DENSITY: the raise and the drain
+    // gates cover the ENERGY blocks as well, each at f times its own
+    // instantaneous peak (U_e, the ion internal energy, and the CGL
+    // pair), so the pedestal band is an f-scaled image of the peak
+    // state. Measured motivation for the extension: with a mass-only
+    // pedestal the first FRC benchmark attempt still froze from step 2
+    // with ~19k projected direction components, and the projection
+    // report located them almost entirely in the energy blocks (16k U_e
+    // + 3k E_i components resting on the sanitize floors, vs 169 mass
+    // components -- the mass pedestal had collapsed the 40-60k mass
+    // population). A pedestal whose energies sit on their bounds is the
+    // same bound-resident population in different variables; the
+    // f-scaled-image rule displaces every block's operating point into
+    // the interior by the same argument as the density.
     amrex::Real m_halo_pedestal_fraction = 0.0;
-    // The frozen per-step pedestal density rho_ped (0 while inactive).
+    // The frozen per-step pedestal state (0 while inactive): density,
+    // electron energy, ion internal energy (total_energy closure), and
+    // the CGL pair.
     amrex::Real m_halo_pedestal_density = 0.0;
+    amrex::Real m_halo_pedestal_electron_energy = 0.0;
+    amrex::Real m_halo_pedestal_ion_internal = 0.0;
+    amrex::Real m_halo_pedestal_ion_parallel = 0.0;
+    amrex::Real m_halo_pedestal_ion_perp = 0.0;
     // ---- Density-keyed vacuum resistivity D_vac [m^2/s] (0 disables):
     // the FIELD advance sees eta >= mu0 * D_vac * (rho_ref_ohm/rho)^2
     // with rho_ref_ohm the Ohm density guard; Joule heating keeps the

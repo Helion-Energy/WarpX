@@ -2325,15 +2325,17 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         updates and matrix-free Jacobian probes.
 
     halo_pedestal_fraction: float, default=0 (off)
-        Offset-density halo pedestal (Riemann fluxes only): fraction f of
-        the instantaneous density peak defining the dynamic pedestal
-        rho_ped = f * max(rho_peak, rho_ref), recomputed once per step.
-        Sub-pedestal cells are raised onto rho_ped each step and the mass
-        drain gates anchor there, so the halo rides an interior point of
-        the admissible set instead of the positivity bound (no
+        Offset-density halo pedestal (Riemann fluxes only): fraction f
+        defining a dynamic pedestal STATE -- an f-scaled image of the
+        instantaneous peak state (density rho_ped = f * max(rho_peak,
+        rho_ref) plus f times each evolved energy block's peak),
+        recomputed once per step. Sub-pedestal cells are raised onto the
+        pedestal state each step and every block's drain gates anchor at
+        its pedestal value, so the halo rides an interior point of the
+        admissible set instead of the positivity bounds (no
         bound-resident cells for the bounded Newton solve to stagnate
         on). Reactive work/relaxation sources taper smoothly to zero
-        below twice the pedestal.
+        below twice the density pedestal.
 
     vacuum_resistivity_diffusivity: float, default=0 (off)
         Density-keyed vacuum resistivity of the field advance in m^2/s

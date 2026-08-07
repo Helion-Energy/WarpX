@@ -4261,24 +4261,31 @@ Jacobian probes.
 
     Offset-density (pedestal) treatment of the low-density halo, for
     Riemann fluid fluxes (``rusanov``, ``hllc``, ``hlld``). A positive
-    fraction :math:`f` defines the dynamic pedestal density
-    :math:`\rho_\mathrm{ped} = f\,\max(\rho_\mathrm{peak},
-    \rho_\mathrm{ref})`, recomputed once per step from the instantaneous
-    density peak and frozen for the whole nonlinear solve. Every step
-    starts by raising sub-pedestal cells onto :math:`\rho_\mathrm{ped}`
+    fraction :math:`f` defines a dynamic pedestal STATE -- an
+    :math:`f`-scaled image of the instantaneous peak state, recomputed
+    once per step and frozen for the whole nonlinear solve: the density
+    pedestal :math:`\rho_\mathrm{ped} = f\,\max(\rho_\mathrm{peak},
+    \rho_\mathrm{ref})` plus an energy pedestal per evolved block
+    (:math:`f` times the instantaneous peak of :math:`U_e`, of the ion
+    internal energy under ``total_energy``, and of
+    :math:`U_\parallel`/:math:`U_\perp` under ``cgl``). Every step
+    starts by raising sub-pedestal-density cells onto the pedestal state
     (tracked non-conservation of the same class as the positivity
-    floors), and the donor drain gates of the mass flux anchor at
-    :math:`\rho_\mathrm{ped}` instead of the positivity floor, making
-    the pedestal band dynamically invariant. This is an equivalent
-    reformulation of advecting the density *deviation* above a pedestal
-    with the pedestal restored arithmetically for all derived
-    quantities: in both forms the halo operates at a regular interior
-    point of the admissible set -- the Newton admissibility bound stays
-    at the (orders-of-magnitude lower) positivity floor and is strictly
+    floors), and the donor drain gates of each block anchor at its
+    pedestal value instead of its floor, making the pedestal band
+    dynamically invariant. This is an equivalent reformulation of
+    advecting the *deviation* above a pedestal with the pedestal
+    restored arithmetically for all derived quantities: in both forms
+    the halo operates at a regular interior point of the admissible set
+    -- the Newton admissibility bounds stay at the
+    (orders-of-magnitude lower) positivity floors and are strictly
     inactive there, so no cell rides a bound. Bounded-Newton solves on
     magnetized floor-riding halos otherwise clamp tens of thousands of
     direction components per solve and stagnate on the bound-resident
-    population. Requires
+    population; a mass-only pedestal merely moves that population into
+    the energy blocks (measured: ~16k electron-energy plus ~3k
+    ion-energy floor-resident components per solve, line search frozen),
+    which is why the pedestal is a full state. Requires
     :math:`f\,\rho_\mathrm{ref} >` :pp:param:`implicit_mhd.mass_density_floor`.
     Reactive work and relaxation sources additionally taper
     :math:`C^1`-smoothly to zero below :math:`2\rho_\mathrm{ped}` (the
