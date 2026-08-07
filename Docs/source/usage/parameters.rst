@@ -4247,11 +4247,13 @@ Jacobian probes.
     :unit: :math:`\mathrm{kg\,m^{-3}}`
     :default: ``1.e-12 * reference_mass_density``
 
-    Positive floor used in velocity, pressure, and charge-density divisions
-    and as the lower bound for nonlinear updates. The effective floor is the
-    stricter of this value and the mass-density equivalent of
-    :pp:param:`hybrid_pic_model.n_floor`; both operators then use that same
-    effective value.
+    Positive floor used as the admissibility lower bound for nonlinear
+    updates and as a pure div-by-zero guard in the fluid kernels. It is
+    deliberately independent of :pp:param:`hybrid_pic_model.n_floor`: the
+    Ohm's-law, resistivity, and electron-temperature evaluations floor
+    their density inputs at that hybrid guard instead, so a large Ohm
+    guard does not pin low-density halo cells at the Newton solver's
+    admissibility bound.
 
 .. pp:param:: implicit_mhd.electron_pressure_floor
     :type: ``float``

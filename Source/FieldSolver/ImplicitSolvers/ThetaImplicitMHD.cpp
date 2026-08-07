@@ -574,14 +574,15 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
             "threshold) must exceed implicit_mhd.mass_density_floor");
     }
 
-    // Ohm's law and the fluid equations must regularize the same charge
-    // density. Use the stricter requested floor and mirror it into both paths.
-    const amrex::Real hybrid_mass_density_floor =
-        m_hybrid_pic_model->m_n_floor * PhysConst::q_e / m_ion_charge_to_mass;
-    m_mass_density_floor =
-        std::max(m_mass_density_floor, hybrid_mass_density_floor);
-    m_hybrid_pic_model->m_n_floor =
-        m_ion_charge_to_mass * m_mass_density_floor / PhysConst::q_e;
+    // The Ohm's-law division guard (hybrid_pic_model.n_floor) and the fluid
+    // admissibility floor (implicit_mhd.mass_density_floor) are DELIBERATELY
+    // independent. Raising the fluid floor to the Ohm guard pins every cell
+    // of a no-pedestal halo at its admissibility bound, and the resulting
+    // tens of thousands of projected direction components stagnate the
+    // bounded Newton solve. Ohm's law, the eta/T_e evaluations, and the
+    // -(u x B) velocity reconstruction floor their own inputs at the hybrid
+    // n_floor (see OhmMassDensityFloor); the fluid floor stays a pure
+    // positivity/div-by-zero guard.
 
     if (m_hybrid_pic_model->m_include_hall_term !=
         m_hybrid_pic_model->m_include_electron_pressure_term)
@@ -712,6 +713,15 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
 }
 
 amrex::Real
+ThetaImplicitMHD::OhmMassDensityFloor () const
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_hybrid_pic_model != nullptr,
+        "ThetaImplicitMHD Ohm density guard requested before Define()");
+    return m_hybrid_pic_model->m_n_floor * PhysConst::q_e / m_ion_charge_to_mass;
+}
+
+amrex::Real
 ThetaImplicitMHD::GetMHDReferenceResistivityForPC (const amrex::Real time) const
 {
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -766,6 +776,7 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "Electron gamma:                " << m_gamma_e << "\n"
                    << "Ion gamma:                     " << m_gamma_i << "\n"
                    << "Mass-density floor [kg/m^3]:   " << m_mass_density_floor << "\n"
+                   << "Ohm density guard [kg/m^3]:    " << OhmMassDensityFloor() << "\n"
                    << "Ion temperature floor [K]:     " << m_ion_temperature_floor << "\n"
                    << "Electron temp. floor [K]:      " << m_electron_temperature_floor << "\n"
                    << "Hall term:                     "
@@ -1142,6 +1153,14 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
 
     m_state.Copy(m_use_hlld ? FieldType::Bfield_fp : FieldType::Efield_fp);
     m_state.CopyMultiFabBlocksFromFields();
+    if (!m_loaded_state_sanitized) {
+        // Python fluid loaders (beforeInitEsolve callbacks) overwrite the
+        // parser fill AFTER InitializeFluidState's floor clamp; raise a
+        // below-floor loaded state to admissibility once before the first
+        // bounded solve (see SanitizeLoadedState).
+        SanitizeLoadedState();
+        m_loaded_state_sanitized = true;
+    }
     m_state_old.Copy(m_state);
 
     // Ghosted beginning-of-step fluid state for the flux kernels' floor
@@ -1251,7 +1270,11 @@ void ThetaImplicitMHD::FillFluidSources (const WarpXSolverVec& state)
     const amrex::Real charge_to_mass = m_ion_charge_to_mass;
     const amrex::Real gamma_e_minus_one = m_gamma_e - 1.0_rt;
     const amrex::Real pressure_floor = m_electron_pressure_floor;
-    const amrex::Real charge_density_floor = m_mass_density_floor * m_ion_charge_to_mass;
+    // Ohm's-law guard: T_e feeds the eta("Te") evaluation, so its density
+    // denominator floors at the hybrid n_floor, not the (typically much
+    // lower) fluid positivity floor.
+    const amrex::Real charge_density_floor =
+        OhmMassDensityFloor() * m_ion_charge_to_mass;
 
     charge_density.setVal(0.0_rt);
     for (amrex::MFIter mfi(charge_density); mfi.isValid(); ++mfi) {
@@ -1837,6 +1860,9 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
     const amrex::Real vacuum_mass_density = m_vacuum_mass_density;
     const amrex::Real vacuum_drag_rate = m_vacuum_drag_rate;
     const auto eta = m_hybrid_pic_model->m_eta;
+    // Joule heating evaluates eta at the SAME hybrid-floored density as
+    // Ohm's law, so the electron heating rate matches the field's eta J.
+    const amrex::Real eta_density_floor = OhmMassDensityFloor();
     const theta_implicit_mhd::FluxParameters flux_parameters =
         MakeFluxParameters();
 
@@ -2020,7 +2046,7 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                 std::max(gamma_e_minus_one * energy(i, j, k), pressure_floor);
             const amrex::Real current_magnitude = std::sqrt(jx * jx + jy * jy + jz * jz);
             const amrex::Real charge_density =
-                charge_to_mass * std::max(rho(i, j, k), density_floor);
+                charge_to_mass * std::max(rho(i, j, k), eta_density_floor);
             const amrex::Real joule_heating = include_joule_heating
                                                   ? eta(charge_density, current_magnitude, time) *
                                                         current_magnitude * current_magnitude
@@ -2517,9 +2543,14 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
     const amrex::Real axial_cell_size = m_WarpX->Geom(0).CellSize(0);
     const amrex::Real inverse_dz2 =
         1.0_rt / (axial_cell_size * axial_cell_size);
+    // Ohm's-law division guards: the eta inputs and the -(u x B) velocity
+    // reconstruction floor at the hybrid n_floor (mass-density equivalent),
+    // independent of the fluid admissibility floor. In particular the dust
+    // regime relies on this: frozen dust momentum over the Ohm guard keeps
+    // u ~ 0 there, so E relaxes to eta J in the vacuum region.
+    const amrex::Real density_floor = OhmMassDensityFloor();
     const amrex::Real charge_density_floor =
-        m_ion_charge_to_mass * m_mass_density_floor;
-    const amrex::Real density_floor = m_mass_density_floor;
+        m_ion_charge_to_mass * density_floor;
     constexpr int flux_induction_t1 = FaceFluxComponent::induction_t1;
     constexpr int flux_induction_t2 = FaceFluxComponent::induction_t2;
 
@@ -2701,9 +2732,14 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
         m_hybrid_pic_model->m_include_hyper_resistivity_term;
     const bool hyper_resistivity_needs_b =
         m_hybrid_pic_model->m_hyper_resistivity_has_B_dependence;
+    // Ohm's-law division guards: the eta inputs and the -(u x B) velocity
+    // reconstruction floor at the hybrid n_floor (mass-density equivalent),
+    // independent of the fluid admissibility floor. In particular the dust
+    // regime relies on this: frozen dust momentum over the Ohm guard keeps
+    // u ~ 0 there, so E relaxes to eta J in the vacuum region.
+    const amrex::Real density_floor = OhmMassDensityFloor();
     const amrex::Real charge_density_floor =
-        m_ion_charge_to_mass * m_mass_density_floor;
-    const amrex::Real density_floor = m_mass_density_floor;
+        m_ion_charge_to_mass * density_floor;
     const amrex::Real kappa_signal = m_hlld_kappa_signal;
     const amrex::Real kappa_denominator = m_hlld_kappa_denominator;
     const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
@@ -3191,6 +3227,9 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     const amrex::Real vacuum_mass_density = m_vacuum_mass_density;
     const amrex::Real vacuum_drag_rate = m_vacuum_drag_rate;
     const auto eta = m_hybrid_pic_model->m_eta;
+    // Joule heating evaluates eta at the SAME hybrid-floored density as
+    // Ohm's law, so the electron heating rate matches the field's eta J.
+    const amrex::Real eta_density_floor = OhmMassDensityFloor();
 #if defined(WARPX_DIM_RZ)
     const amrex::Real inverse_dr = inverse_cell_size[0];
     const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
@@ -3620,7 +3659,7 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
             const amrex::Real current_magnitude =
                 std::sqrt(jx * jx + jy * jy + jz * jz);
             const amrex::Real charge_density =
-                charge_to_mass * std::max(rho(i, j, k), density_floor);
+                charge_to_mass * std::max(rho(i, j, k), eta_density_floor);
             const amrex::Real joule_heating =
                 include_joule_heating
                     ? eta(charge_density, current_magnitude, time) *
@@ -4007,6 +4046,100 @@ void ThetaImplicitMHD::ApplyMagneticCCDomainGhosts (amrex::MultiFab& mf) const
 #else
     amrex::ignore_unused(mf);
 #endif
+}
+
+void ThetaImplicitMHD::SanitizeLoadedState ()
+{
+    // One-time admissibility raise of the beginning-of-run fluid state.
+    //
+    // InitializeFluidState clamps the parser-filled state at the
+    // positivity floors, but Python fluid loaders (installed via the
+    // beforeInitEsolve callback, e.g. Grad-Shafranov equilibrium loads)
+    // overwrite the implicit_mhd_* fields AFTER that clamp and may load
+    // an unfloored state arbitrarily far below the floors (a natural
+    // halo decays tens of decades below any usable floor). The bounded
+    // Newton solve assumes an admissible start: below-bound cells make
+    // the direction projection pin huge populations and stagnate the
+    // first solve until FinishStateUpdate aborts on the positivity
+    // assertions. Raise below-floor cells to their bounds here, landing
+    // the same 1e-6 (|value| + bound) SLACK MARGIN above the bound as
+    // the direction projection and the end-of-step restorations (a cell
+    // resting exactly on its bound makes both Jacobian probe signs
+    // inadmissible). The added mass/energy is the same class of tracked
+    // non-conservation as the positivity floors, confined to loaded
+    // below-floor cells.
+    const auto& periodicity = m_WarpX->Geom(0).periodicity();
+
+    auto raise_scalar_block = [&](const char* block_name,
+                                  const amrex::Real block_floor) {
+        amrex::MultiFab& block = m_state.getMultiFabBlock(block_name, 0);
+        const amrex::Real before_min = block.min(0);
+        if (before_min >= block_floor) {
+            return;
+        }
+        for (amrex::MFIter mfi(block); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox();
+            const auto arr = block.array(mfi);
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const amrex::Real margin =
+                    1.0e-6_rt * (std::abs(arr(i, j, k)) + block_floor);
+                arr(i, j, k) = std::max(arr(i, j, k), block_floor + margin);
+            });
+        }
+        block.FillBoundaryAndSync(periodicity);
+        amrex::Print() << "ThetaImplicitMHD: raised loaded " << block_name
+                       << " (min " << before_min << ") to its floor "
+                       << block_floor << " + slack\n";
+    };
+
+    raise_scalar_block(MassDensityName, m_mass_density_floor);
+    raise_scalar_block(ElectronEnergyName,
+                       m_electron_pressure_floor / (m_gamma_e - 1.0_rt));
+
+    if (m_ion_closure == "total_energy") {
+        // E_i >= KE + U_i_floor with the (raised) density in the KE
+        // denominator -- the same bound FinishStateUpdate restores at
+        // every accepted step end.
+        amrex::MultiFab& ion_energy_block =
+            m_state.getMultiFabBlock(IonEnergyName, 0);
+        const amrex::MultiFab& density_block =
+            m_state.getMultiFabBlock(MassDensityName, 0);
+        const amrex::MultiFab& momentum_block =
+            m_state.getMultiFabBlock(MomentumDensityName, 0);
+        const amrex::Real internal_floor =
+            m_ion_pressure_floor / (m_gamma_i - 1.0_rt);
+        const amrex::Real density_floor = m_mass_density_floor;
+        const amrex::Real before_min = ion_energy_block.min(0);
+        for (amrex::MFIter mfi(ion_energy_block); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox();
+            const auto rho = density_block.const_array(mfi);
+            const auto mom = momentum_block.const_array(mfi);
+            const auto ion_e = ion_energy_block.array(mfi);
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                amrex::Real kinetic_energy = 0.0_rt;
+                for (int component = 0; component < 3; ++component) {
+                    kinetic_energy +=
+                        mom(i, j, k, component) * mom(i, j, k, component);
+                }
+                kinetic_energy *=
+                    0.5_rt / std::max(rho(i, j, k), density_floor);
+                const amrex::Real bound = kinetic_energy + internal_floor;
+                const amrex::Real margin =
+                    1.0e-6_rt * (std::abs(ion_e(i, j, k)) + bound);
+                ion_e(i, j, k) = std::max(ion_e(i, j, k), bound + margin);
+            });
+        }
+        ion_energy_block.FillBoundaryAndSync(periodicity);
+        amrex::Print() << "ThetaImplicitMHD: raised loaded " << IonEnergyName
+                       << " (min " << before_min
+                       << ") to KE + its internal floor + slack\n";
+    } else if (m_ion_closure == "cgl") {
+        raise_scalar_block(IonParallelEnergyName,
+                           0.5_rt * m_ion_pressure_floor);
+        raise_scalar_block(IonPerpEnergyName, m_ion_pressure_floor);
+    }
+
+    m_state.CopyMultiFabBlocksToFields();
 }
 
 void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)

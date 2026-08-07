@@ -114,6 +114,14 @@ class ThetaImplicitMHD final : public ImplicitSolver
     }
 
     void InitializeFluidState ();
+    void SanitizeLoadedState ();
+    /** Mass-density equivalent of the Ohm's-law division guard
+     * (hybrid_pic_model.n_floor). Deliberately independent of the fluid
+     * admissibility floor m_mass_density_floor: eta/T_e evaluations and
+     * the Ohm -(u x B) velocity reconstruction floor their inputs here,
+     * while the fluid floor stays a pure positivity guard. Computed from
+     * the live hybrid n_floor (Python can update it at runtime). */
+    [[nodiscard]] amrex::Real OhmMassDensityFloor () const;
     void FinishStateUpdate (amrex::Real end_time);
     void FillFluidSources (const WarpXSolverVec& state);
     void ApplyFluidDomainBoundaries (amrex::MultiFab& density, amrex::MultiFab& momentum,
@@ -234,6 +242,10 @@ class ThetaImplicitMHD final : public ImplicitSolver
     amrex::Real m_reference_ion_pressure = 0.0;
     amrex::Real m_mass_density_floor = 0.0;
     amrex::Real m_electron_pressure_floor = 0.0;
+    // One-time admissibility raise of the beginning-of-run fluid state
+    // (Python fluid loaders bypass InitializeFluidState's floor clamp);
+    // performed at the first OneStep, see SanitizeLoadedState.
+    bool m_loaded_state_sanitized = false;
     // Temperature floors [K] on the evolved energy blocks (default: room
     // temperature; 0 disables). Each energy block's admissibility lower
     // bound is the MAX of its absolute pressure/energy floor and the
