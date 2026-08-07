@@ -145,6 +145,13 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
                                    m_electron_temperature_floor);
     utils::parser::queryWithParser(pp, "vacuum_mass_density", m_vacuum_mass_density);
     utils::parser::queryWithParser(pp, "vacuum_drag_rate", m_vacuum_drag_rate);
+    utils::parser::queryWithParser(pp, "halo_pedestal_fraction",
+                                   m_halo_pedestal_fraction);
+    utils::parser::queryWithParser(pp, "vacuum_resistivity_diffusivity",
+                                   m_vacuum_resistivity_diffusivity);
+    // Sentinel -1 = "not set": defaulted to the global implicit_evolve.theta
+    // in Define(), where theta is parsed.
+    utils::parser::queryWithParser(pp, "resistive_theta", m_resistive_theta);
     utils::parser::queryWithParser(pp, "positivity_safety", m_positivity_safety);
     pp.query("external_field_iteration", m_external_field_iteration);
     pp.query("fluid_flux", m_fluid_flux);
@@ -232,6 +239,33 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_positivity_safety > 0.0_rt && m_positivity_safety < 1.0_rt,
         "implicit_mhd.positivity_safety must be greater than zero and less than one");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_halo_pedestal_fraction >= 0.0_rt && m_halo_pedestal_fraction < 1.0_rt,
+        "implicit_mhd.halo_pedestal_fraction must be in [0, 1)");
+    if (m_halo_pedestal_fraction > 0.0_rt) {
+        // The pedestal band is held by the donor drain gates of the
+        // Riemann fluxes; the centered flux has no such gates, so the
+        // pedestal would degenerate to a bare per-step mass injection.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_fluid_flux != "centered",
+            "implicit_mhd.halo_pedestal_fraction requires a Riemann fluid "
+            "flux (rusanov, hllc, or hlld): the pedestal band is held by "
+            "the donor drain gates, which the centered flux does not have");
+        // "Well above": the pedestal must displace the halo operating
+        // point off the Newton admissibility bound, so the pedestal base
+        // (its value when the reference density is the peak) must exceed
+        // the positivity floor.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_halo_pedestal_fraction * m_reference_mass_density >
+                m_mass_density_floor,
+            "implicit_mhd.halo_pedestal_fraction * reference_mass_density "
+            "must exceed implicit_mhd.mass_density_floor (the pedestal "
+            "must sit above the positivity guard so the halo band rides "
+            "an interior point of the admissible set)");
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_vacuum_resistivity_diffusivity >= 0.0_rt,
+        "implicit_mhd.vacuum_resistivity_diffusivity cannot be negative");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_ion_closure == "barotropic" || m_ion_closure == "total_energy" ||
             m_ion_closure == "cgl",
@@ -560,6 +594,13 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         "(implicit_mhd.vacuum_mass_density); the hybrid Holmstrom switch "
         "makes Ohm's law discontinuous, which breaks the JFNK Jacobian");
 
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_vacuum_resistivity_diffusivity == 0.0_rt || m_use_hlld,
+        "implicit_mhd.vacuum_resistivity_diffusivity requires "
+        "implicit_mhd.fluid_flux = hlld: the density-keyed vacuum "
+        "resistivity boosts the solver-assembled Ohm field advance only "
+        "(Joule heating keeps the un-boosted user resistivity)");
+
     if (m_vacuum_mass_density > 0.0_rt) {
         // Holmstrom-style vacuum cell switching for the ion fluid: cells
         // below the threshold are passive dust whose momentum is frozen
@@ -649,6 +690,37 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
     pp.query("theta", m_theta);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_theta >= 0.5_rt && m_theta <= 1.0_rt,
                                      "implicit_evolve.theta must be between 0.5 and 1");
+    if (m_resistive_theta < 0.0_rt) {
+        // Default: the dissipative Ohm terms keep the global centering.
+        m_resistive_theta = m_theta;
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_resistive_theta >= 0.5_rt && m_resistive_theta <= 1.0_rt,
+        "implicit_mhd.resistive_theta must be between 0.5 and 1");
+    if (m_resistive_theta != m_theta) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_use_hlld,
+            "implicit_mhd.resistive_theta different from "
+            "implicit_evolve.theta requires implicit_mhd.fluid_flux = "
+            "hlld (the resistive-stage current is wired into the "
+            "solver-assembled Ohm's law only)");
+        // Resistive-stage current registers: J^n captured once per step
+        // and the per-residual theta_r-weighted scratch, both at the
+        // native Yee staggering of the plasma current.
+        using ablastr::fields::Direction;
+        for (int direction = 0; direction < 3; ++direction) {
+            const auto& plasma_current = m_WarpX->m_fields.get(
+                FieldType::hybrid_current_fp_plasma, Direction{direction}, 0);
+            m_WarpX->m_fields.alloc_init(
+                OldPlasmaCurrentName, Direction{direction}, 0,
+                plasma_current->boxArray(), plasma_current->DistributionMap(),
+                plasma_current->nComp(), plasma_current->nGrowVect(), 0.0_rt);
+            m_WarpX->m_fields.alloc_init(
+                ResistiveStageCurrentName, Direction{direction}, 0,
+                plasma_current->boxArray(), plasma_current->DistributionMap(),
+                plasma_current->nComp(), plasma_current->nGrowVect(), 0.0_rt);
+        }
+    }
     parseNonlinearSolverParams(pp);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_nlsolver_type == NonlinearSolverType::newton,
@@ -802,7 +874,12 @@ void ThetaImplicitMHD::PrintParameters () const
     amrex::Print()
                    << "Ion closure:                   " << m_ion_closure << "\n"
                    << "Positivity step safety:        " << m_positivity_safety << "\n"
-                   << "Joule heating:                 " << m_include_joule_heating << "\n";
+                   << "Joule heating:                 " << m_include_joule_heating << "\n"
+                   << "Resistive theta:               " << m_resistive_theta << "\n"
+                   << "Vacuum eta diffusivity [m2/s]: "
+                   << m_vacuum_resistivity_diffusivity << "\n"
+                   << "Halo pedestal fraction:        " << m_halo_pedestal_fraction
+                   << "\n";
     if (m_ion_closure == "cgl") {
         amrex::Print() << "CGL relaxation scale:          " << m_cgl_relaxation_scale << "\n"
                        << "CGL Coulomb logarithm:         " << m_cgl_coulomb_log << "\n"
@@ -1151,6 +1228,27 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
 
     SaveMagneticField();
 
+    if (m_resistive_theta != m_theta) {
+        // Capture the beginning-of-step plasma current J^n = curl B^n/mu0
+        // for the resistive-stage extrapolation (see m_resistive_theta):
+        // under the split-field scheme Bfield_fp holds the plasma
+        // response here, matching the residual-time current computation.
+        using ablastr::fields::Direction;
+        const auto magnetic_field =
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, 0);
+        m_hybrid_pic_model->CalculatePlasmaCurrent(magnetic_field,
+                                                   m_WarpX->GetEBUpdateEFlag());
+        for (int direction = 0; direction < 3; ++direction) {
+            amrex::MultiFab& plasma_current = *m_WarpX->m_fields.get(
+                FieldType::hybrid_current_fp_plasma, Direction{direction}, 0);
+            ApplyNeumannZDomainGhosts(plasma_current);
+            amrex::MultiFab& old_current = *m_WarpX->m_fields.get(
+                OldPlasmaCurrentName, Direction{direction}, 0);
+            amrex::MultiFab::Copy(old_current, plasma_current, 0, 0, 1,
+                                  old_current.nGrowVect());
+        }
+    }
+
     m_state.Copy(m_use_hlld ? FieldType::Bfield_fp : FieldType::Efield_fp);
     m_state.CopyMultiFabBlocksFromFields();
     if (!m_loaded_state_sanitized) {
@@ -1161,6 +1259,7 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
         SanitizeLoadedState();
         m_loaded_state_sanitized = true;
     }
+    RefreshHaloPedestal();
     m_state_old.Copy(m_state);
 
     // Ghosted beginning-of-step fluid state for the flux kernels' floor
@@ -1442,7 +1541,7 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
         // update evaluated with the exact Yee curl (div B preserved to
         // round-off): rhs_B = (B_old - theta dt curl E) - B_old.
         ComputeFaceFluxes();
-        AssembleOhmElectricField(theta_time);
+        AssembleOhmElectricField(theta_time, true);
         const auto& magnetic_field_old =
             m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::B_old, 0);
         m_WarpX->UpdateMagneticFieldAndApplyBCs(magnetic_field_old,
@@ -1786,6 +1885,9 @@ theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
     // under cgl: load_cell_state_cgl overwrites the polytropic pressure
     // with p_eff and the E_i machinery stays dormant.
     flux_parameters.cgl_closure = (m_ion_closure == "cgl");
+    // Per-step frozen pedestal (0 while the pedestal is off): anchors the
+    // mass drain gates and the halo source taper.
+    flux_parameters.halo_pedestal = m_halo_pedestal_density;
     return flux_parameters;
 }
 
@@ -1859,6 +1961,10 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
     const bool holmstrom_vacuum = m_vacuum_mass_density > 0.0_rt;
     const amrex::Real vacuum_mass_density = m_vacuum_mass_density;
     const amrex::Real vacuum_drag_rate = m_vacuum_drag_rate;
+    // Halo source taper (see ComputeFluidRHSFromFaceFluxes): reactive
+    // work sources taper C^1-smoothly to zero below twice the pedestal;
+    // identically 1 when the pedestal is off.
+    const amrex::Real halo_pedestal = m_halo_pedestal_density;
     const auto eta = m_hybrid_pic_model->m_eta;
     // Joule heating evaluates eta at the SAME hybrid-floored density as
     // Ohm's law, so the electron heating rate matches the field's eta J.
@@ -2069,6 +2175,10 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                 pressure_work *= theta_implicit_mhd::floor_outflow_limiter(
                     energy_end, pressure_floor / gamma_e_minus_one);
             }
+            // Halo source taper: pedestal-band cells are numerical mass
+            // with no reactive response of their own.
+            pressure_work *= theta_implicit_mhd::floor_outflow_limiter(
+                rho_old(i, j, k), halo_pedestal);
             energy_increment(i, j, k) =
                 theta_dt * plasma_weight *
                 (-divergence_energy_flux + pressure_work + joule_heating);
@@ -2138,6 +2248,12 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                         theta_implicit_mhd::floor_outflow_limiter(
                             internal_proxy_end, ion_energy_floor);
                 }
+                // Halo source taper (see the electron pdV term above).
+                const amrex::Real halo_source_taper =
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        rho_old(i, j, k), halo_pedestal);
+                ion_pressure_work *= halo_source_taper;
+                lorentz_work *= halo_source_taper;
                 ion_energy_increment(i, j, k) =
                     theta_dt * plasma_weight *
                     (-divergence_ion_energy_flux + lorentz_work +
@@ -2354,14 +2470,20 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                         const int id, const int jd, const int kd) {
                 return now(id, jd, kd) * (1.0_rt + ext) - old(id, jd, kd) * ext;
             };
+            // The mass gate anchors at the halo pedestal when active
+            // (see FluxParameters::halo_pedestal): outflow from a donor
+            // closes smoothly at rho_ped, holding the pedestal band as a
+            // dynamically invariant set while the Newton admissibility
+            // bound stays at the far-lower positivity floor -- no cell
+            // ever operates on a bound.
+            const amrex::Real mass_gate_floor = std::max(
+                parameters.density_floor, parameters.halo_pedestal);
             flux.mass *= donor_blend(
                 flux.mass,
                 theta_implicit_mhd::floor_outflow_limiter(
-                    donor_end(rho, rho_old, il, jl, kl),
-                    parameters.density_floor),
+                    donor_end(rho, rho_old, il, jl, kl), mass_gate_floor),
                 theta_implicit_mhd::floor_outflow_limiter(
-                    donor_end(rho, rho_old, i, j, k),
-                    parameters.density_floor),
+                    donor_end(rho, rho_old, i, j, k), mass_gate_floor),
                 0.5_rt * (left.safe_density + right.safe_density));
             const amrex::Real electron_energy_floor =
                 parameters.electron_pressure_floor /
@@ -2499,7 +2621,40 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
 #endif
 }
 
-void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
+bool ThetaImplicitMHD::PrepareResistiveStageCurrents (
+    const bool at_resistive_stage) const
+{
+    if (!at_resistive_stage || m_resistive_theta == m_theta) {
+        return false;
+    }
+    // Resistive-stage current (see m_resistive_theta): J = curl B/mu0 is
+    // LINEAR in B, so the end-of-step current is the exact extrapolation
+    // J^{n+1} = (J^{n+theta} - (1-theta) J^n)/theta and the theta_r-stage
+    // current is the linear combination
+    //     J^{n+theta_r} = (theta_r/theta) J^{n+theta}
+    //                     + (1 - theta_r/theta) J^n,
+    // linear in the Newton iterate, so matrix-free Jacobian probes see
+    // the shifted centering exactly. Ghosts are combined too (the Ohm
+    // stencils read neighbor currents).
+    using ablastr::fields::Direction;
+    const amrex::Real new_weight = m_resistive_theta / m_theta;
+    const amrex::Real old_weight = 1.0_rt - new_weight;
+    for (int direction = 0; direction < 3; ++direction) {
+        const amrex::MultiFab& plasma_current = *m_WarpX->m_fields.get(
+            FieldType::hybrid_current_fp_plasma, Direction{direction}, 0);
+        const amrex::MultiFab& old_current = *m_WarpX->m_fields.get(
+            OldPlasmaCurrentName, Direction{direction}, 0);
+        amrex::MultiFab& stage_current = *m_WarpX->m_fields.get(
+            ResistiveStageCurrentName, Direction{direction}, 0);
+        amrex::MultiFab::LinComb(stage_current, new_weight, plasma_current, 0,
+                                 old_weight, old_current, 0, 0, 1,
+                                 stage_current.nGrowVect());
+    }
+    return true;
+}
+
+void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
+                                                 const bool at_resistive_stage) const
 {
 #if defined(WARPX_DIM_1D_Z)
     using ablastr::fields::Direction;
@@ -2518,12 +2673,27 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
         *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{1}, 0);
     amrex::MultiFab& electric_field_z =
         *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{2}, 0);
-    const amrex::MultiFab& current_x = *m_WarpX->m_fields.get(
-        FieldType::hybrid_current_fp_plasma, Direction{0}, 0);
-    const amrex::MultiFab& current_y = *m_WarpX->m_fields.get(
-        FieldType::hybrid_current_fp_plasma, Direction{1}, 0);
-    const amrex::MultiFab& current_z = *m_WarpX->m_fields.get(
-        FieldType::hybrid_current_fp_plasma, Direction{2}, 0);
+    // Dissipative terms read the resistive-stage current when the shifted
+    // centering is active (see PrepareResistiveStageCurrents); everything
+    // current-related in this assembly is dissipative, so the swap covers
+    // eta J, the vacuum boost's |J| argument, and the eta_H stencils.
+    const bool resistive_stage =
+        PrepareResistiveStageCurrents(at_resistive_stage);
+    const amrex::MultiFab& current_x =
+        *(resistive_stage
+              ? m_WarpX->m_fields.get(ResistiveStageCurrentName, Direction{0}, 0)
+              : m_WarpX->m_fields.get(FieldType::hybrid_current_fp_plasma,
+                                      Direction{0}, 0));
+    const amrex::MultiFab& current_y =
+        *(resistive_stage
+              ? m_WarpX->m_fields.get(ResistiveStageCurrentName, Direction{1}, 0)
+              : m_WarpX->m_fields.get(FieldType::hybrid_current_fp_plasma,
+                                      Direction{1}, 0));
+    const amrex::MultiFab& current_z =
+        *(resistive_stage
+              ? m_WarpX->m_fields.get(ResistiveStageCurrentName, Direction{2}, 0)
+              : m_WarpX->m_fields.get(FieldType::hybrid_current_fp_plasma,
+                                      Direction{2}, 0));
     const amrex::MultiFab& charge_density =
         *m_WarpX->m_fields.get(FieldType::rho_fp, 0);
     const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
@@ -2551,6 +2721,15 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
     const amrex::Real density_floor = OhmMassDensityFloor();
     const amrex::Real charge_density_floor =
         m_ion_charge_to_mass * density_floor;
+    // Density-keyed vacuum resistivity of the FIELD advance (see
+    // vacuum_keyed_resistivity in ThetaImplicitMHD_K.H): keyed to the Ohm
+    // guard, divisions guarded at the (far lower) positivity floor so the
+    // boost stays uncapped over the reachable density range. Joule
+    // heating keeps the un-boosted user eta.
+    const amrex::Real vacuum_eta_scale =
+        PhysConst::mu0 * m_vacuum_resistivity_diffusivity;
+    const amrex::Real vacuum_division_guard =
+        m_ion_charge_to_mass * m_mass_density_floor;
     constexpr int flux_induction_t1 = FaceFluxComponent::induction_t1;
     constexpr int flux_induction_t2 = FaceFluxComponent::induction_t2;
 
@@ -2574,7 +2753,10 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
             const amrex::Real charge_density_value =
                 std::max(rho_q(i, j, k), charge_density_floor);
             const amrex::Real resistivity =
-                eta(charge_density_value, current_magnitude, time);
+                theta_implicit_mhd::vacuum_keyed_resistivity(
+                    eta(charge_density_value, current_magnitude, time),
+                    rho_q(i, j, k), charge_density_floor,
+                    vacuum_division_guard, vacuum_eta_scale);
             electric_x(i, j, k) =
                 flux_arr(i, j, k, flux_induction_t2) + resistivity * jx;
             electric_y(i, j, k) =
@@ -2625,11 +2807,15 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
             const amrex::Real jz = j_z(i, j, k);
             const amrex::Real current_magnitude =
                 std::sqrt(jx * jx + jy * jy + jz * jz);
-            const amrex::Real charge_density_value = std::max(
-                0.5_rt * (rho_q(i, j, k) + rho_q(i + 1, j, k)),
-                charge_density_floor);
+            const amrex::Real charge_density_raw =
+                0.5_rt * (rho_q(i, j, k) + rho_q(i + 1, j, k));
+            const amrex::Real charge_density_value =
+                std::max(charge_density_raw, charge_density_floor);
             const amrex::Real resistivity =
-                eta(charge_density_value, current_magnitude, time);
+                theta_implicit_mhd::vacuum_keyed_resistivity(
+                    eta(charge_density_value, current_magnitude, time),
+                    charge_density_raw, charge_density_floor,
+                    vacuum_division_guard, vacuum_eta_scale);
             const amrex::Real safe_density =
                 std::max(rho(i, j, k), density_floor);
             const amrex::Real velocity_x = mom(i, j, k, 0) / safe_density;
@@ -2695,12 +2881,27 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
         *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{1}, 0);
     amrex::MultiFab& electric_field_z =
         *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{2}, 0);
-    const amrex::MultiFab& current_r = *m_WarpX->m_fields.get(
-        FieldType::hybrid_current_fp_plasma, Direction{0}, 0);
-    const amrex::MultiFab& current_theta = *m_WarpX->m_fields.get(
-        FieldType::hybrid_current_fp_plasma, Direction{1}, 0);
-    const amrex::MultiFab& current_z = *m_WarpX->m_fields.get(
-        FieldType::hybrid_current_fp_plasma, Direction{2}, 0);
+    // Dissipative terms read the resistive-stage current when the shifted
+    // centering is active (see PrepareResistiveStageCurrents); everything
+    // current-related in this assembly is dissipative, so the swap covers
+    // eta J, the vacuum boost's |J| argument, and the eta_H stencils.
+    const bool resistive_stage =
+        PrepareResistiveStageCurrents(at_resistive_stage);
+    const amrex::MultiFab& current_r =
+        *(resistive_stage
+              ? m_WarpX->m_fields.get(ResistiveStageCurrentName, Direction{0}, 0)
+              : m_WarpX->m_fields.get(FieldType::hybrid_current_fp_plasma,
+                                      Direction{0}, 0));
+    const amrex::MultiFab& current_theta =
+        *(resistive_stage
+              ? m_WarpX->m_fields.get(ResistiveStageCurrentName, Direction{1}, 0)
+              : m_WarpX->m_fields.get(FieldType::hybrid_current_fp_plasma,
+                                      Direction{1}, 0));
+    const amrex::MultiFab& current_z =
+        *(resistive_stage
+              ? m_WarpX->m_fields.get(ResistiveStageCurrentName, Direction{2}, 0)
+              : m_WarpX->m_fields.get(FieldType::hybrid_current_fp_plasma,
+                                      Direction{2}, 0));
     const amrex::MultiFab& charge_density =
         *m_WarpX->m_fields.get(FieldType::rho_fp, 0);
     const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
@@ -2740,6 +2941,15 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
     const amrex::Real density_floor = OhmMassDensityFloor();
     const amrex::Real charge_density_floor =
         m_ion_charge_to_mass * density_floor;
+    // Density-keyed vacuum resistivity of the FIELD advance (see
+    // vacuum_keyed_resistivity in ThetaImplicitMHD_K.H): keyed to the Ohm
+    // guard, divisions guarded at the (far lower) positivity floor so the
+    // boost stays uncapped over the reachable density range. Joule
+    // heating keeps the un-boosted user eta.
+    const amrex::Real vacuum_eta_scale =
+        PhysConst::mu0 * m_vacuum_resistivity_diffusivity;
+    const amrex::Real vacuum_division_guard =
+        m_ion_charge_to_mass * m_mass_density_floor;
     const amrex::Real kappa_signal = m_hlld_kappa_signal;
     const amrex::Real kappa_denominator = m_hlld_kappa_denominator;
     const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
@@ -2777,11 +2987,15 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
                            j_z(i, j - 1, k) + j_z(i + 1, j - 1, k));
             const amrex::Real current_magnitude =
                 std::sqrt(jr * jr + jt * jt + jz * jz);
-            const amrex::Real charge_density_value = std::max(
-                0.5_rt * (rho_q(i, j, k) + rho_q(i + 1, j, k)),
-                charge_density_floor);
+            const amrex::Real charge_density_raw =
+                0.5_rt * (rho_q(i, j, k) + rho_q(i + 1, j, k));
+            const amrex::Real charge_density_value =
+                std::max(charge_density_raw, charge_density_floor);
             const amrex::Real resistivity =
-                eta(charge_density_value, current_magnitude, time);
+                theta_implicit_mhd::vacuum_keyed_resistivity(
+                    eta(charge_density_value, current_magnitude, time),
+                    charge_density_raw, charge_density_floor,
+                    vacuum_division_guard, vacuum_eta_scale);
             electric_r(i, j, k) =
                 zface(i, j, k, flux_induction_t2) + resistivity * jr;
             if (include_hyper_resistivity) {
@@ -2843,11 +3057,15 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
             const amrex::Real jz = j_z(i, j, k);
             const amrex::Real current_magnitude =
                 std::sqrt(jr * jr + jt * jt + jz * jz);
-            const amrex::Real charge_density_value = std::max(
-                0.5_rt * (rho_q(i, j, k) + rho_q(i, j + 1, k)),
-                charge_density_floor);
+            const amrex::Real charge_density_raw =
+                0.5_rt * (rho_q(i, j, k) + rho_q(i, j + 1, k));
+            const amrex::Real charge_density_value =
+                std::max(charge_density_raw, charge_density_floor);
             const amrex::Real resistivity =
-                eta(charge_density_value, current_magnitude, time);
+                theta_implicit_mhd::vacuum_keyed_resistivity(
+                    eta(charge_density_value, current_magnitude, time),
+                    charge_density_raw, charge_density_floor,
+                    vacuum_division_guard, vacuum_eta_scale);
             electric_z(i, j, k) =
                 -rface(i, j, k, flux_induction_t1) + resistivity * jz;
             if (include_hyper_resistivity) {
@@ -3037,7 +3255,10 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
             const amrex::Real charge_density_value =
                 std::max(rho_q(i, j, k), charge_density_floor);
             const amrex::Real resistivity =
-                eta(charge_density_value, current_magnitude, time);
+                theta_implicit_mhd::vacuum_keyed_resistivity(
+                    eta(charge_density_value, current_magnitude, time),
+                    rho_q(i, j, k), charge_density_floor,
+                    vacuum_division_guard, vacuum_eta_scale);
             electric_theta(i, j, k) =
                 average + dissipation + resistivity * jt_corner;
             if (include_hyper_resistivity) {
@@ -3101,7 +3322,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time) const
         }
     }
 #else
-    amrex::ignore_unused(time);
+    amrex::ignore_unused(time, at_resistive_stage);
     WARPX_ABORT_WITH_MESSAGE(
         "ThetaImplicitMHD::AssembleOhmElectricField() requires 1D or RZ "
         "geometry");
@@ -3226,9 +3447,25 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     const bool holmstrom_vacuum = m_vacuum_mass_density > 0.0_rt;
     const amrex::Real vacuum_mass_density = m_vacuum_mass_density;
     const amrex::Real vacuum_drag_rate = m_vacuum_drag_rate;
+    // Halo source taper (inert at pedestal 0, where the limiter is
+    // identically 1): the reactive work terms and the CGL relaxation
+    // exchange taper C^1-smoothly to zero below twice the pedestal.
+    // Across the pedestal band those pointwise sources are noise driven
+    // -- the fight maps of the FRC benchmark ladder showed the
+    // floor-riding halo pinning tens of thousands of Newton-direction
+    // components per solve through exactly these channels -- while the
+    // physics there is numerical pedestal mass, so zeroing its reactive
+    // response is the consistent counterpart of the offset-density view
+    // (the pedestal carries no internal dynamics of its own). Keyed to
+    // the STEP-OLD density like the vacuum cell switch, so the taper is
+    // a per-solve constant mask.
+    const amrex::Real halo_pedestal = m_halo_pedestal_density;
     const auto eta = m_hybrid_pic_model->m_eta;
     // Joule heating evaluates eta at the SAME hybrid-floored density as
     // Ohm's law, so the electron heating rate matches the field's eta J.
+    // It deliberately does NOT see the vacuum resistivity boost
+    // (vacuum_keyed_resistivity): vacuum field diffusion never heats
+    // plasma.
     const amrex::Real eta_density_floor = OhmMassDensityFloor();
 #if defined(WARPX_DIM_RZ)
     const amrex::Real inverse_dr = inverse_cell_size[0];
@@ -3631,6 +3868,13 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                                              (rho_old(i, j, k) - vacuum_mass_density) /
                                              (0.3_rt * vacuum_mass_density)))
                     : 1.0_rt;
+            // C^1 halo source taper (see the halo_pedestal host constant):
+            // 1 above twice the pedestal, 0 at/below it, applied to the
+            // reactive work and relaxation sources below. Identically 1
+            // when the pedestal is off.
+            const amrex::Real halo_source_taper =
+                theta_implicit_mhd::floor_outflow_limiter(rho_old(i, j, k),
+                                                          halo_pedestal);
 
             rho_increment(i, j, k) =
                 evolve_ion_fluid
@@ -3692,11 +3936,12 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 return work * (positive_weight +
                                (1.0_rt - positive_weight) * limiter);
             };
-            pressure_work = drain_gate(
-                pressure_work, divergence_energy_flux,
-                electron_energy_floor_rate,
-                theta_implicit_mhd::floor_outflow_limiter(
-                    energy_end, pressure_floor / gamma_e_minus_one));
+            pressure_work = halo_source_taper *
+                            drain_gate(pressure_work, divergence_energy_flux,
+                                       electron_energy_floor_rate,
+                                       theta_implicit_mhd::floor_outflow_limiter(
+                                           energy_end,
+                                           pressure_floor / gamma_e_minus_one));
             energy_increment(i, j, k) =
                 theta_dt * plasma_weight *
                 (-divergence_energy_flux + pressure_work + joule_heating);
@@ -3736,9 +3981,11 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                     theta_implicit_mhd::floor_outflow_limiter(
                         internal_proxy_end, ion_energy_floor);
                 ion_pressure_work =
+                    halo_source_taper *
                     drain_gate(ion_pressure_work, divergence_ion_energy_flux,
                                ion_energy_floor_rate, ion_limiter);
                 lorentz_work =
+                    halo_source_taper *
                     drain_gate(lorentz_work, divergence_ion_energy_flux,
                                ion_energy_floor_rate, ion_limiter);
                 ion_energy_increment(i, j, k) =
@@ -3976,16 +4223,21 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 const amrex::Real perp_limiter =
                     theta_implicit_mhd::floor_outflow_limiter(
                         perp_end, ion_pressure_floor);
-                parallel_work = drain_gate(
-                    parallel_work, divergence_ion_parallel_flux,
-                    ion_parallel_floor_rate, parallel_limiter);
-                parallel_relaxation = drain_gate(
-                    parallel_relaxation, divergence_ion_parallel_flux,
-                    ion_parallel_floor_rate, parallel_limiter);
+                parallel_work =
+                    halo_source_taper *
+                    drain_gate(parallel_work, divergence_ion_parallel_flux,
+                               ion_parallel_floor_rate, parallel_limiter);
+                parallel_relaxation =
+                    halo_source_taper *
+                    drain_gate(parallel_relaxation,
+                               divergence_ion_parallel_flux,
+                               ion_parallel_floor_rate, parallel_limiter);
                 perp_work =
+                    halo_source_taper *
                     drain_gate(perp_work, divergence_ion_perp_flux,
                                ion_perp_floor_rate, perp_limiter);
                 perp_relaxation =
+                    halo_source_taper *
                     drain_gate(perp_relaxation, divergence_ion_perp_flux,
                                ion_perp_floor_rate, perp_limiter);
                 ion_parallel_increment(i, j, k) =
@@ -4139,6 +4391,52 @@ void ThetaImplicitMHD::SanitizeLoadedState ()
         raise_scalar_block(IonPerpEnergyName, m_ion_pressure_floor);
     }
 
+    m_state.CopyMultiFabBlocksToFields();
+}
+
+void ThetaImplicitMHD::RefreshHaloPedestal ()
+{
+    if (m_halo_pedestal_fraction <= 0.0_rt) {
+        return;
+    }
+    amrex::MultiFab& density_block = m_state.getMultiFabBlock(MassDensityName, 0);
+    // Dynamic pedestal: a fraction of the instantaneous density peak,
+    // never below the same fraction of the reference density (so a
+    // globally decaying state cannot drag the pedestal into the
+    // positivity guard). One global reduction per step; FROZEN for the
+    // whole nonlinear solve so the drain-gate anchors and the source
+    // taper are per-solve constants (no O(1/width) Jacobian coupling
+    // through the pedestal itself).
+    const amrex::Real density_peak = density_block.max(0);
+    m_halo_pedestal_density =
+        m_halo_pedestal_fraction *
+        std::max(density_peak, m_reference_mass_density);
+    const amrex::Real pedestal = m_halo_pedestal_density;
+    if (density_block.min(0) >= pedestal) {
+        return;
+    }
+    // Raise every sub-pedestal cell ONTO the pedestal. The mass drain
+    // gates keep {rho >= rho_ped} dynamically invariant afterwards, so
+    // this raise re-triggers only where the dynamic pedestal itself
+    // rose (peak growth under compression) -- the injected mass is the
+    // same class of tracked non-conservation as the positivity floors,
+    // confined to sub-pedestal halo cells. Landing exactly ON the
+    // pedestal is safe (unlike the admissibility bounds, which get a
+    // slack margin): the pedestal is an RHS-level gate anchor, not a
+    // constraint of the bounded Newton solve -- the admissibility bound
+    // stays at the far-lower positivity floor, so raised cells are
+    // interior points with full two-sided probe headroom.
+    for (amrex::MFIter mfi(density_block); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto rho = density_block.array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            rho(i, j, k) = std::max(rho(i, j, k), pedestal);
+        });
+    }
+    density_block.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
+    // Mirror the raise into the registered field MultiFabs: the ghosted
+    // beginning-of-step copies (and the first residual's sources) are
+    // built from those.
     m_state.CopyMultiFabBlocksToFields();
 }
 
@@ -4431,10 +4729,13 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
     if (m_use_hlld) {
         // Recompute the end-of-step Ohm E (diagnostics and coupling) from
         // the accepted final state: the same Riemann-EMF assembly the
-        // residual used, evaluated at t^{n+1}.
+        // residual used, evaluated at t^{n+1} -- with the INSTANTANEOUS
+        // current in the dissipative terms (at_resistive_stage = false),
+        // so the published E satisfies Ohm's law at t^{n+1} rather than
+        // retaining the intra-step resistive-stage weighting.
         FillCellCenteredElectromagneticFields();
         ComputeFaceFluxes();
-        AssembleOhmElectricField(end_time);
+        AssembleOhmElectricField(end_time, false);
     } else {
         const auto electric_field =
             m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, 0);

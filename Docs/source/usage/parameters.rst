@@ -4255,6 +4255,35 @@ Jacobian probes.
     guard does not pin low-density halo cells at the Newton solver's
     admissibility bound.
 
+.. pp:param:: implicit_mhd.halo_pedestal_fraction
+    :type: ``float``
+    :default: ``0`` (off)
+
+    Offset-density (pedestal) treatment of the low-density halo, for
+    Riemann fluid fluxes (``rusanov``, ``hllc``, ``hlld``). A positive
+    fraction :math:`f` defines the dynamic pedestal density
+    :math:`\rho_\mathrm{ped} = f\,\max(\rho_\mathrm{peak},
+    \rho_\mathrm{ref})`, recomputed once per step from the instantaneous
+    density peak and frozen for the whole nonlinear solve. Every step
+    starts by raising sub-pedestal cells onto :math:`\rho_\mathrm{ped}`
+    (tracked non-conservation of the same class as the positivity
+    floors), and the donor drain gates of the mass flux anchor at
+    :math:`\rho_\mathrm{ped}` instead of the positivity floor, making
+    the pedestal band dynamically invariant. This is an equivalent
+    reformulation of advecting the density *deviation* above a pedestal
+    with the pedestal restored arithmetically for all derived
+    quantities: in both forms the halo operates at a regular interior
+    point of the admissible set -- the Newton admissibility bound stays
+    at the (orders-of-magnitude lower) positivity floor and is strictly
+    inactive there, so no cell rides a bound. Bounded-Newton solves on
+    magnetized floor-riding halos otherwise clamp tens of thousands of
+    direction components per solve and stagnate on the bound-resident
+    population. Requires
+    :math:`f\,\rho_\mathrm{ref} >` :pp:param:`implicit_mhd.mass_density_floor`.
+    Reactive work and relaxation sources additionally taper
+    :math:`C^1`-smoothly to zero below :math:`2\rho_\mathrm{ped}` (the
+    pedestal is numerical mass with no reactive response of its own).
+
 .. pp:param:: implicit_mhd.electron_pressure_floor
     :type: ``float``
     :unit: Pa
@@ -4525,6 +4554,57 @@ Jacobian probes.
     ``hybrid_pic_model.include_joule_heating`` option. Hyper-resistive
     heating is not yet included, so total-energy accounting is incomplete
     when ``plasma_hyper_resistivity`` is nonzero.
+
+.. pp:param:: implicit_mhd.vacuum_resistivity_diffusivity
+    :type: ``float``
+    :unit: :math:`\mathrm{m^2\,s^{-1}}`
+    :default: ``0`` (off)
+
+    Density-keyed vacuum resistivity of the field advance
+    (``fluid_flux = hlld`` only). The solver-assembled Ohm's law sees
+    the smooth, uncapped resistivity floor
+
+    .. math::
+
+        \eta_\mathrm{field} = \max\!\big(\eta_\mathrm{user},\;
+        \mu_0 D_\mathrm{vac}\,(\rho_\mathrm{ref,\Omega}/\rho)^2\big),
+
+    with :math:`\rho_\mathrm{ref,\Omega}` the Ohm density guard
+    (:pp:param:`hybrid_pic_model.n_floor` equivalent) and the density
+    division guarded at the far-lower positivity floor. Below the Ohm
+    guard the "fluid" is a numerical halo/pedestal rather than plasma,
+    and the physically consistent field behavior is vacuum-like
+    diffusion of the response currents: the magnetic diffusivity grows
+    as :math:`\rho^{-2}` below the guard (reaching
+    :math:`D_\mathrm{vac}` at the guard) and vanishes as
+    :math:`\rho^{-2}` above it, so the bulk keeps the user resistivity.
+    The max is assembled :math:`C^\infty`-smoothly (quadrature form) for
+    matrix-free Jacobian probes. Joule heating keeps the un-boosted user
+    :math:`\eta`: vacuum field diffusion never heats plasma. Pairs
+    naturally with :pp:param:`implicit_mhd.resistive_theta` ``= 1``,
+    which damps the stiff halo field modes this term creates.
+
+.. pp:param:: implicit_mhd.resistive_theta
+    :type: ``float``
+    :default: :pp:param:`implicit_evolve.theta`
+
+    Time centering of the dissipative Ohm terms (:math:`\eta
+    \boldsymbol J`, including the vacuum-resistivity boost, and the
+    hyper-resistive term), in ``[0.5, 1]``; the ideal EMF keeps the
+    global :pp:param:`implicit_evolve.theta`. Since :math:`\boldsymbol J
+    = \nabla\times\boldsymbol B/\mu_0` is linear in the unknowns, the
+    dissipative terms are evaluated at the exactly extrapolated stage
+    current :math:`\boldsymbol J^{n+\theta_r} = (\theta_r/\theta)
+    \boldsymbol J^{n+\theta} + (1 - \theta_r/\theta) \boldsymbol J^n`,
+    which Jacobian probes see exactly. Motivation: a stiff resistive
+    mode with :math:`z = \eta \Delta t k^2/\mu_0 \gg 1` has trapezoidal
+    amplification :math:`(1 - z/2)/(1 + z/2) \to -1` -- marginally
+    damped and sign-flipping every step, measured as a never-decaying
+    halo residual plateau under strong vacuum resistivity -- while
+    backward Euler on the dissipative terms alone (``resistive_theta =
+    1``) gives :math:`1/(1+z) \to 0`, damping those modes in one step
+    with the ideal dynamics still second-order centered. Values other
+    than the global theta require ``fluid_flux = hlld``.
 
 .. pp:param:: implicit_mhd.evolve_ion_fluid
     :type: ``bool``

@@ -115,6 +115,11 @@ class ThetaImplicitMHD final : public ImplicitSolver
 
     void InitializeFluidState ();
     void SanitizeLoadedState ();
+    /** Recompute the dynamic halo pedestal density once per step (frozen
+     * for the whole nonlinear solve) and raise sub-pedestal cells onto
+     * it. No-op when halo_pedestal_fraction = 0. See
+     * m_halo_pedestal_fraction for the offset-density rationale. */
+    void RefreshHaloPedestal ();
     /** Mass-density equivalent of the Ohm's-law division guard
      * (hybrid_pic_model.n_floor). Deliberately independent of the fluid
      * admissibility floor m_mass_density_floor: eta/T_e evaluations and
@@ -137,7 +142,20 @@ class ThetaImplicitMHD final : public ImplicitSolver
     void ComputeFaceFluxes ();
     void ComputeDirectionalFaceFluxes (amrex::MultiFab& face_flux_mf,
                                        int normal_direction);
-    void AssembleOhmElectricField (amrex::Real time) const;
+    /** Assemble the solver-owned Ohm's law E = -u x B + eta J (hlld path).
+     * With at_resistive_stage = true (residual evaluations) the
+     * dissipative terms (eta J, the vacuum-eta boost, and the
+     * hyper-resistive term) are evaluated at the resistive-stage current
+     * J^{n+theta_r} (see m_resistive_theta); with false (the end-of-step
+     * recompute) they use the instantaneous current, so the published E
+     * satisfies Ohm's law at t^{n+1}. */
+    void AssembleOhmElectricField (amrex::Real time, bool at_resistive_stage) const;
+    /** When the resistive-stage weighting is active (at_resistive_stage
+     * and resistive_theta != theta), fill the resistive-stage current
+     * scratch J^{n+theta_r} = (theta_r/theta) J^{n+theta}
+     * + (1 - theta_r/theta) J^n and return true; return false otherwise
+     * (the caller then reads the plasma current directly). */
+    [[nodiscard]] bool PrepareResistiveStageCurrents (bool at_resistive_stage) const;
     void ApplyMagneticCCDomainGhosts (amrex::MultiFab& mf) const;
 
     [[nodiscard]] amrex::Real GetThetaForPC () const override { return 0.0; }
@@ -227,6 +245,17 @@ class ThetaImplicitMHD final : public ImplicitSolver
         "implicit_mhd_old_ion_parallel_energy";
     inline static constexpr char OldIonPerpEnergyName[] =
         "implicit_mhd_old_ion_perp_energy";
+    // Resistive backward-Euler option (m_resistive_theta): the
+    // beginning-of-step plasma current J^n (captured once per step) and
+    // the per-residual resistive-stage scratch
+    // J^{n+theta_r} = (theta_r/theta) J^{n+theta}
+    //                 + (1 - theta_r/theta) J^n,
+    // both allocated (per direction, at the Yee current staggering) only
+    // when resistive_theta differs from the global theta.
+    inline static constexpr char OldPlasmaCurrentName[] =
+        "implicit_mhd_old_plasma_current";
+    inline static constexpr char ResistiveStageCurrentName[] =
+        "implicit_mhd_resistive_stage_current";
 
     HybridPICModel* m_hybrid_pic_model = nullptr;
 
@@ -306,6 +335,75 @@ class ThetaImplicitMHD final : public ImplicitSolver
     amrex::Real m_vacuum_mass_density = 0.0;
     // Velocity relaxation rate [1/s] applied to vacuum dust (0 disables).
     amrex::Real m_vacuum_drag_rate = 0.0;
+    // ---- Offset-density (pedestal) halo formulation (0 disables). ----
+    //
+    // Fraction f of the instantaneous density peak defining the dynamic
+    // halo pedestal rho_ped = f * max(rho_peak, rho_ref), recomputed once
+    // per step and FROZEN for the whole nonlinear solve. Each step starts
+    // by raising every sub-pedestal cell onto rho_ped, and the mass drain
+    // gates of the Riemann fluxes anchor at rho_ped instead of the
+    // positivity floor, so the pedestal band {rho >= rho_ped} is
+    // dynamically invariant.
+    //
+    // EQUIVALENCE ARGUMENT (why this realizes the offset-density variable
+    // change without changing the unknown): write rho = rho_ped + delta.
+    // In the offset formulation the mass unknown is the deviation delta,
+    // the continuity system advects the (gated) deviation, and every
+    // derived quantity (velocity, pressures, Ohm inputs) restores the
+    // pedestal arithmetically -- so the positivity bound disappears from
+    // the neighborhood of the halo operating point: delta = 0 is a
+    // REGULAR interior point of the flow (all derived quantities are
+    // evaluated at rho = rho_ped > 0), not a constraint boundary, and no
+    // cell can sit ON a bound. The formulation here achieves the
+    // identical geometry in the original variable: (i) the halo is
+    // loaded/raised AT rho_ped, so derived quantities see rho >= rho_ped
+    // exactly as the offset form's arithmetic restoration would; (ii) the
+    // donor drain gate closes the mass outflow C^1-smoothly at rho_ped --
+    // the same gated deviation flux, since rho u = (rho_ped + delta) u
+    // gated to zero as delta -> 0 transports no mass out of an
+    // exhausted-deviation cell; and (iii) the Newton admissibility bound
+    // stays at the ORIGINAL positivity floor, orders of magnitude below
+    // rho_ped, so it is strictly inactive on the halo -- the same
+    // "no bound near the operating point" property the variable change
+    // provides (there the bound is displaced to delta = -(rho_ped -
+    // floor), equally unreachable). Both formulations therefore admit
+    // the same invariant set, the same derived-quantity evaluations, and
+    // a bound-free neighborhood of the halo band; they differ only in
+    // which variable carries the Newton update, which is a linear
+    // (constant-shift) reparameterization with identical Jacobians.
+    //
+    // MEASURED MOTIVATION: on the FRC free-boundary benchmark ladder
+    // (494/257/172/177/150 steps across five floor/dust configurations,
+    // all ending in frozen-solve aborts) the projection reports showed
+    // 40-60k Newton-direction components clamped per solve across the
+    // floor-riding halo, and the theta = 1 + vacuum-resistivity variant
+    // relaxed the halo residual two orders of magnitude in one step and
+    // then stagnated SOLELY on the admissibility-bound-resident
+    // population -- proving a state with NO bound-resident cells is the
+    // fix. The pedestal absorbs the bound into the operating point.
+    amrex::Real m_halo_pedestal_fraction = 0.0;
+    // The frozen per-step pedestal density rho_ped (0 while inactive).
+    amrex::Real m_halo_pedestal_density = 0.0;
+    // ---- Density-keyed vacuum resistivity D_vac [m^2/s] (0 disables):
+    // the FIELD advance sees eta >= mu0 * D_vac * (rho_ref_ohm/rho)^2
+    // with rho_ref_ohm the Ohm density guard; Joule heating keeps the
+    // un-boosted user eta. See vacuum_keyed_resistivity in
+    // ThetaImplicitMHD_K.H for the full rationale. hlld path only. ----
+    amrex::Real m_vacuum_resistivity_diffusivity = 0.0;
+    // ---- Resistive theta (default: the global implicit_evolve.theta).
+    // The dissipative Ohm terms (eta J including the vacuum boost, and
+    // the hyper-resistive term) are evaluated at the theta_r-weighted
+    // current J^{n+theta_r} while the ideal EMF keeps the global theta.
+    // Rationale from the theta-scheme amplification factor: for a stiff
+    // resistive mode with z = eta dt k^2/mu0 >> 1 the trapezoidal update
+    // has g = (1 - z/2)/(1 + z/2) -> -1, i.e. the mode is marginally
+    // damped and flips sign every step -- measured on the FRC halo as a
+    // never-decaying residual plateau under theta = 1/2 that a single
+    // theta = 1 step removed. Backward Euler on the resistive terms
+    // alone (theta_r = 1) gives g = 1/(1 + z) -> 0, damping the stiff
+    // halo modes in one step while the ideal dynamics keeps its
+    // second-order centering. ----
+    amrex::Real m_resistive_theta = -1.0;
     // Non-periodic z (RZ only): the solver fills axial domain ghosts with
     // zero-gradient (Neumann) values, giving outflow ends instead of the
     // periodic seam. Set automatically when the z geometry is non-periodic.

@@ -2323,6 +2323,34 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
     positivity_safety: float, optional
         Safety factor in (0, 1) for density/electron-energy bounded Newton
         updates and matrix-free Jacobian probes.
+
+    halo_pedestal_fraction: float, default=0 (off)
+        Offset-density halo pedestal (Riemann fluxes only): fraction f of
+        the instantaneous density peak defining the dynamic pedestal
+        rho_ped = f * max(rho_peak, rho_ref), recomputed once per step.
+        Sub-pedestal cells are raised onto rho_ped each step and the mass
+        drain gates anchor there, so the halo rides an interior point of
+        the admissible set instead of the positivity bound (no
+        bound-resident cells for the bounded Newton solve to stagnate
+        on). Reactive work/relaxation sources taper smoothly to zero
+        below twice the pedestal.
+
+    vacuum_resistivity_diffusivity: float, default=0 (off)
+        Density-keyed vacuum resistivity of the field advance in m^2/s
+        (fluid_flux="hlld" only): the Ohm's law sees the smooth, uncapped
+        floor eta >= mu0 * D_vac * (rho_ohm_guard/rho)^2, relaxing the
+        sub-guard halo field toward vacuum (curl B = 0) while the bulk
+        keeps the user resistivity. Joule heating keeps the un-boosted
+        user eta (vacuum field diffusion never heats plasma).
+
+    resistive_theta: float, optional
+        Time centering of the dissipative Ohm terms (eta J including the
+        vacuum boost, and the hyper-resistive term), in [0.5, 1]; the
+        ideal EMF keeps the global theta. Default: the global theta.
+        resistive_theta=1 (backward Euler) damps stiff resistive halo
+        modes in one step where the trapezoidal rule leaves them
+        marginal and sign-flipping. Values other than the global theta
+        require fluid_flux="hlld".
     """
 
     def __init__(
@@ -2346,6 +2374,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         vacuum_mass_density=None,
         external_field_iteration=None,
         vacuum_drag_rate=None,
+        halo_pedestal_fraction=None,
+        vacuum_resistivity_diffusivity=None,
+        resistive_theta=None,
         fluid_flux=None,
         r_open_fluid=None,
         hllc_signal_closure=None,
@@ -2391,6 +2422,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.vacuum_mass_density = vacuum_mass_density
         self.external_field_iteration = external_field_iteration
         self.vacuum_drag_rate = vacuum_drag_rate
+        self.halo_pedestal_fraction = halo_pedestal_fraction
+        self.vacuum_resistivity_diffusivity = vacuum_resistivity_diffusivity
+        self.resistive_theta = resistive_theta
         self.fluid_flux = fluid_flux
         self.r_open_fluid = r_open_fluid
         self.hllc_signal_closure = hllc_signal_closure
@@ -2442,6 +2476,11 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.vacuum_mass_density = self.vacuum_mass_density
         implicit_mhd.external_field_iteration = self.external_field_iteration
         implicit_mhd.vacuum_drag_rate = self.vacuum_drag_rate
+        implicit_mhd.halo_pedestal_fraction = self.halo_pedestal_fraction
+        implicit_mhd.vacuum_resistivity_diffusivity = (
+            self.vacuum_resistivity_diffusivity
+        )
+        implicit_mhd.resistive_theta = self.resistive_theta
         implicit_mhd.fluid_flux = self.fluid_flux
         implicit_mhd.r_open_fluid = self.r_open_fluid
         implicit_mhd.hllc_signal_closure = self.hllc_signal_closure
@@ -2456,7 +2495,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.ion_closure = self.ion_closure
         implicit_mhd.__setattr__("ion_pressure(x,y,z)", self.ion_pressure)
         implicit_mhd.__setattr__(
-            "ion_pressure_anisotropy(x,y,z)", self.ion_pressure_anisotropy)
+            "ion_pressure_anisotropy(x,y,z)", self.ion_pressure_anisotropy
+        )
         implicit_mhd.cgl_relaxation_scale = self.cgl_relaxation_scale
         implicit_mhd.cgl_coulomb_log = self.cgl_coulomb_log
         implicit_mhd.cgl_instability_scale = self.cgl_instability_scale

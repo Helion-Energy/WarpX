@@ -93,6 +93,14 @@ struct FluxParameters {
     // advection channels. Mutually exclusive with total_energy_closure
     // (MakeFluxParameters keeps the latter false under cgl).
     bool cgl_closure = false;
+    // Offset-density halo pedestal (0 = off): the per-step frozen pedestal
+    // density rho_ped (see ThetaImplicitMHD::m_halo_pedestal_fraction).
+    // When active it replaces density_floor as the anchor of the MASS
+    // drain gates, so the halo band is dynamically held at rho_ped -- an
+    // interior point of the admissible set, far above the positivity
+    // bound -- and it anchors the C^1 taper of the reactive work and
+    // relaxation sources across the halo band.
+    amrex::Real halo_pedestal = 0.0;
 };
 
 struct CellState {
@@ -253,6 +261,64 @@ smooth_positive_floor (const amrex::Real value,
     const amrex::Real excess = value - floor;
     return floor +
            0.5 * (excess + std::sqrt(excess * excess + floor * floor));
+}
+
+/**
+ * \brief Density-keyed vacuum resistivity of the FIELD advance:
+ * a smooth, uncapped resistivity floor
+ *
+ *     eta_field = smooth-max(eta_user, eta_vac),
+ *     eta_vac   = vacuum_scale * (rho_ref / rho)^2,
+ *
+ * with vacuum_scale = mu0 * D_vac (D_vac the magnetic diffusivity the
+ * boost reaches AT the Ohm reference density rho_ref, in m^2/s) and
+ * rho_ref the Ohm's-law division guard (hybrid n_floor equivalent) --
+ * the same density at which Ohm's law stops trusting the fluid.
+ *
+ * First-principles motivation: below the Ohm reference the "fluid" is a
+ * numerical halo/pedestal, not plasma; the physically correct field
+ * behavior there is vacuum-like diffusion of the response currents on a
+ * timescale short compared to the plasma dynamics. Keying eta to
+ * (rho_ref/rho)^2 makes the magnetic diffusivity grow quadratically as
+ * the density falls below rho_ref and vanish quadratically above it, so
+ * the bulk plasma keeps the user resistivity while the halo relaxes
+ * toward curl B = 0. Measured on the FRC free-boundary hold: a flat
+ * halo resistivity of this magnitude relaxed the halo residual two
+ * orders of magnitude in a single backward-Euler step, isolating the
+ * bound-resident population as the only remaining blocker.
+ *
+ * Smoothness: the density division is guarded with the strictly
+ * positive fluid positivity floor through smooth_positive_floor -- a
+ * pure div-by-zero guard, orders of magnitude below the Ohm reference,
+ * so the boost stays UNCAPPED over the whole physically reachable
+ * density range (in particular across a halo pedestal band sitting
+ * below the Ohm reference) while arbitrary Jacobian probe states remain
+ * finite and C-infinity. The smooth max is the quadrature combination
+ * sqrt(eta_user^2 + eta_vac^2): exact in both dominance limits (in
+ * particular eta_field = eta_vac exactly where the user resistivity
+ * vanishes, which the calibrated vacuum-diffusion test relies on), at
+ * most a factor sqrt(2) above the hard max at the crossover, and
+ * C-infinity wherever eta_vac > 0.
+ *
+ * FIELD advance only: Joule heating keeps the un-boosted user eta. In a
+ * true vacuum there is no plasma to heat; depositing eta_vac |J|^2 into
+ * the pedestal would pump unphysical energy into numerical mass.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+vacuum_keyed_resistivity (const amrex::Real user_resistivity,
+                          const amrex::Real density,
+                          const amrex::Real reference_density,
+                          const amrex::Real division_guard,
+                          const amrex::Real vacuum_scale) noexcept {
+    if (vacuum_scale <= 0.0) {
+        return user_resistivity;
+    }
+    const amrex::Real guarded_density =
+        smooth_positive_floor(density, division_guard);
+    const amrex::Real ratio = reference_density / guarded_density;
+    const amrex::Real vacuum_resistivity = vacuum_scale * ratio * ratio;
+    return std::sqrt(user_resistivity * user_resistivity +
+                     vacuum_resistivity * vacuum_resistivity);
 }
 
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
@@ -1321,7 +1387,14 @@ face_flux (const amrex::Array4<const amrex::Real>& density,
         const int km = mass_from_left ? kl : kr;
         const amrex::Real rho_end =
             density(im, jm, km) * (1.0 + ext) - old_density(im, jm, km) * ext;
-        flux.mass *= floor_outflow_limiter(rho_end, parameters.density_floor);
+        // With the halo pedestal active the mass drain gate anchors at the
+        // pedestal instead of the positivity floor: outflow from a donor
+        // closes smoothly as it approaches rho_ped, making the pedestal
+        // band {rho >= rho_ped} dynamically invariant while the Newton
+        // admissibility bound stays at the (far lower) positivity floor.
+        flux.mass *= floor_outflow_limiter(
+            rho_end,
+            std::max(parameters.density_floor, parameters.halo_pedestal));
         const bool ue_from_left = (flux.electron_energy >= 0.0);
         const int ie = ue_from_left ? il : ir;
         const int je = ue_from_left ? jl : jr;

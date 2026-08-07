@@ -202,6 +202,19 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# offset-density halo pedestal: the sub-pedestal halo of a static contact
+# is raised exactly onto the dynamic (peak-keyed) pedestal and rides
+# there, while the bulk state is exactly invariant
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_pedestal  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_halo_pedestal  # inputs
+    "analysis_mhd_halo_pedestal.py diags/diag000000 diags/diag000005"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_positivity  # name
     1  # dims
@@ -247,6 +260,20 @@ add_warpx_test(
     1  # nprocs
     inputs_test_1d_theta_implicit_mhd_resistive  # inputs
     "analysis_mhd_resistive.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# density-keyed vacuum resistivity + resistive backward-Euler centering:
+# one-step transverse-mode decay matches the theta_r-discrete prediction
+# 1/(1+z) (not the trapezoidal value), with no electron heating from the
+# boosted field-advance eta
+add_warpx_test(
+    test_1d_theta_implicit_mhd_vacuum_resistive  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_vacuum_resistive  # inputs
+    "analysis_mhd_vacuum_resistive.py diags/diag000000 diags/diag000001"  # analysis
     OFF  # checksum
     OFF  # dependency
 )
