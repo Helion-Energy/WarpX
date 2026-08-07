@@ -1133,28 +1133,39 @@ void HybridPICModel::QDSMCFoldInsulatingDeposits (int const lev) const
     ABLASTR_PROFILE("HybridPICModel::QDSMCFoldInsulatingDeposits()");
 
     auto & warpx = WarpX::GetInstance();
-    amrex::Periodicity const & period = warpx.Geom(lev).periodicity();
+    amrex::Geometry const & geom = warpx.Geom(lev);
+    amrex::Periodicity const & period = geom.periodicity();
 
-    amrex::MultiFab       & K     = *warpx.m_fields.get(FieldType::hybrid_entropy_fp,        lev);
-    amrex::MultiFab const & rho_n = *warpx.m_fields.get(FieldType::hybrid_rho_fp_temp,       lev);
-    amrex::MultiFab const & phi   = *warpx.m_fields.get(FieldType::distance_to_eb,           lev);
+    amrex::MultiFab       & K     = *warpx.m_fields.get(FieldType::hybrid_entropy_fp,              lev);
+    amrex::MultiFab const & Te    = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+    amrex::MultiFab const & rho_n = *warpx.m_fields.get(FieldType::hybrid_rho_fp_temp,             lev);
+    amrex::MultiFab const & phi   = *warpx.m_fields.get(FieldType::distance_to_eb,                 lev);
 
-    // Only the deposited entropy K*N is folded. The deposited weight N is a
-    // marker-density estimate that the recovery discards on below-floor
-    // nodes anyway (the true density is the ion-deposited rho); folding it
-    // would import weight without matching entropy and dilute the edge
-    // temperature (measured: the N+K*N fold made the at-rest open-set
-    // entropy drift WORSE than no fold, -1.1e-1 vs -7.3e-2 per 16 steps on
-    // the standoff-disc instrument, while the K*N-only fold reduces it to
-    // -1.1e-4).
+    // SPILL-ONLY fold (this branch): a below-floor node's own marker is
+    // static (the QDSMCInitializeUe floor guard leaves V_e = 0) and
+    // node-homed, so it deposits exactly its own content back on its home
+    // node -- bit-for-bit, including the half-gradient correction, whose
+    // (x_j - y_i) factor vanishes for an unmoved marker. Everything ABOVE
+    // that own content is spill from moving open markers whose deposit
+    // split across the floor boundary; without the fold it is dropped by
+    // the QDSMCUpdateTe weights guard and never re-enters the open set.
+    // The own content itself must NOT be folded: on this branch the #7128
+    // insulating floor seeds K_e in the floored halo (QDSMCInitializeKe's
+    // floored-density conversion regenerates it from the stale T_e every
+    // step), so folding it would pump halo entropy into the open set at
+    // every density ramp. Recomputing own = Ke(m) * N_own(m) with exactly
+    // the QDSMCInitializeKe / SetK formulas keeps the subtraction exact
+    // (spill = 0 to round-off at rest). Only the entropy K*N is folded;
+    // the deposited weight N is a marker-density estimate the recovery
+    // discards below the floor anyway (and the dev-side instrument
+    // measured N-folding to dilute the edge temperature).
     //
-    // Node classes: 0 = open (live plasma), 1 = foldable (below the floor:
-    // deposits here are dead weight, see the header doc), 2 = masked with
-    // unknown own content (covered but above the floor; only reachable
-    // through a pathological initial load -- neither folded from nor counted
-    // as a destination). Built once with two ghost nodes so the gather below
-    // never reads raw-field ghosts beyond their filled range;
-    // domain-exterior ghosts stay at class 2.
+    // Node classes: 0 = open (live plasma), 1 = foldable (below the
+    // floor), 2 = masked with unknown own content (covered but above the
+    // floor; only reachable through a pathological initial load -- neither
+    // folded from nor counted as a destination). Built once with two ghost
+    // nodes so the gather below never reads raw-field ghosts beyond their
+    // filled range; domain-exterior ghosts stay at class 2.
     amrex::iMultiFab imask(K.boxArray(), K.DistributionMap(), 1, 2);
     imask.setVal(2);
 
@@ -1186,6 +1197,12 @@ void HybridPICModel::QDSMCFoldInsulatingDeposits (int const lev) const
     // compute identical results from identical ghost data.
     amrex::MultiFab K_new(K.boxArray(), K.DistributionMap(), 1, 0);
 
+    auto const gamma      = m_gamma;
+    auto const kb_over_qe = PhysConst::kb / PhysConst::q_e;
+    auto const dx_arr     = geom.CellSizeArray();
+    amrex::Real cell_volume = 1.0_rt;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) { cell_volume *= dx_arr[d]; }
+
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -1193,6 +1210,8 @@ void HybridPICModel::QDSMCFoldInsulatingDeposits (int const lev) const
     {
         amrex::Array4<amrex::Real>       const & Kn_arr  = K_new.array(mfi);
         amrex::Array4<amrex::Real const> const & K_arr   = K.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & Te_arr  = Te.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & rho_arr = rho_n.const_array(mfi);
         amrex::Array4<int const>         const & m_arr   = imask.const_array(mfi);
 
         amrex::Box const box = amrex::convert(mfi.tilebox(), K.ixType().toIntVect());
@@ -1211,12 +1230,26 @@ void HybridPICModel::QDSMCFoldInsulatingDeposits (int const lev) const
             constexpr int klo =  0; constexpr int khi = 0;
 #endif
 
+            // Spill above the own-marker content of a foldable node,
+            // recomputed with the exact QDSMCInitializeKe (floored-density
+            // K_e) and SetK (N = rho^n V / q_e) formulas so the
+            // subtraction is bit-exact for a marker that stayed home.
+            auto const spill = [=] (int ii, int jj, int kk) {
+                amrex::Real const ne_fl =
+                    amrex::max(rho_arr(ii,jj,kk), rho_floor) / PhysConst::q_e;
+                amrex::Real const ke_own =
+                    Te_arr(ii,jj,kk) * std::pow(ne_fl, 1.0_rt - gamma) * kb_over_qe;
+                amrex::Real const n_own =
+                    rho_arr(ii,jj,kk) * cell_volume / PhysConst::q_e;
+                return amrex::max(K_arr(ii,jj,kk) - ke_own * n_own, 0.0_rt);
+            };
+
             if (m_arr(i,j,k) == 1) {
-                // The entropy deposited here would be dropped by the
-                // QDSMCUpdateTe floor guard and re-zeroed by the next
-                // QDSMCInitializeKe: move it to the open neighbors instead
-                // (the fold below) and clear this node.
-                Kn_arr(i,j,k) = 0.0_rt;
+                // Keep the own-marker (halo) content; only the spill moves
+                // to the open neighbors below. (The recovery's weights
+                // guard skips this node and the next QDSMCInitializeKe
+                // rewrites it, so this is bookkeeping hygiene, not state.)
+                Kn_arr(i,j,k) = K_arr(i,j,k) - spill(i,j,k);
                 return;
             }
             if (m_arr(i,j,k) == 2) {
@@ -1224,7 +1257,7 @@ void HybridPICModel::QDSMCFoldInsulatingDeposits (int const lev) const
                 return;
             }
 
-            // Open node: reclaim the entropy of every foldable neighbor,
+            // Open node: reclaim the spill of every foldable neighbor,
             // split equally over that neighbor's open nodes.
             amrex::Real k_gain = 0.0_rt;
             for         (int kk = k+klo; kk <= k+khi; ++kk) {
@@ -1243,7 +1276,7 @@ void HybridPICModel::QDSMCFoldInsulatingDeposits (int const lev) const
                             }
                         }
                         // n_open >= 1: this node is one of them
-                        k_gain += K_arr(ii,jj,kk) / n_open;
+                        k_gain += spill(ii,jj,kk) / n_open;
                     }
                 }
             }
@@ -1904,18 +1937,17 @@ void HybridPICModel::QdsmcTransportOnce (int const lev, amrex::Real const dt_adv
     m_qdsmc_pc->DepositK(lev, Karr_out, m_qdsmc_gradient_deposit);
     m_qdsmc_pc->DepositField(lev, weights_out, m_qdsmc_gradient_deposit);
 
-    // MERGE ADAPTATION (PR #7138 on this branch): the PR's
-    // QDSMCFoldInsulatingDeposits is NOT called here. Its premise --
-    // entropy deposited on below-floor nodes is dead weight -- holds on
-    // upstream development (the recovery floor-guards on rho and drops it)
-    // but NOT on this branch: the #7128 insulating floor seeds K_e in the
-    // floored halo and recovers it (weights-guarded), so the dev-form fold
-    // would move live, per-step-regenerated halo entropy into the open set
-    // -- a steady heater at every density ramp. The branch-correct form is
-    // a SPILL-ONLY fold (own-marker content subtracted; exact here since
-    // the markers are node-homed, but it must also account for the
-    // half-gradient deposit legs) -- follow-up, measured against the
-    // annulus at-rest instrument (~1e-6/step residual without it).
+    // Insulating EB wall (PR #7138, branch-adapted): SPILL-ONLY fold --
+    // the entropy that moving open markers spilled onto below-floor nodes
+    // is reclaimed for the open set before the recovery's weights guard
+    // drops it, while the halo's own (per-step-regenerated) content stays
+    // put. See the QDSMCFoldInsulatingDeposits body: the dev-form full
+    // fold of the standalone PR would pump halo entropy here.
+    bool const insulating_eb = EB::enabled() &&
+        (WarpX::eb_boundary_type == EmbeddedBoundaryType::Insulating);
+    if (insulating_eb) {
+        QDSMCFoldInsulatingDeposits(lev);
+    }
 
     // Recover the new T_e from (deposited K*N) / (deposited N) and the
     // updated n_e (from rho_fp = rho^{n+1}).
@@ -1926,8 +1958,7 @@ void HybridPICModel::QdsmcTransportOnce (int const lev, amrex::Real const dt_adv
     // annulus band-copy callback (the conduction sweeps and recovery skip
     // masked nodes, so the fill persists through the Strang bracket to the
     // Pe emission).
-    if (EB::enabled() &&
-        (WarpX::eb_boundary_type == EmbeddedBoundaryType::Insulating)) {
+    if (insulating_eb) {
         QDSMCApplyInsulatingEBFill(lev);
     }
 }
