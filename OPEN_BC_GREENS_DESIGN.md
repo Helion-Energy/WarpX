@@ -3,9 +3,9 @@
 
 (2026-07-30. Motivated by the Stage-3 finding that a PEC wall near
 in-domain coils produces a non-reciprocal image response — see
-INTERNAL-REF_WALL_TREATMENT.md Sec. 6 — but the deliverable is general: a
+an internal wall-treatment note — but the deliverable is general: a
 free-space boundary for the RZ hybrid/MHD field advance, matching the
-internal-ref vacuum-region closure. The same limitation affects the EXPLICIT
+reference vacuum-region closure. The same limitation affects the EXPLICIT
 hybrid solver, so this lands as its own PR with explicit-solver tests,
 before the implicit MHD/circuit work consumes it.)
 
@@ -22,7 +22,7 @@ of the interior sources — no image currents, no reflected flux:
     psi_ghost(x_b) = Int_domain G0(x_b; x') J_theta(x') dV',
 
 with G0 the axisymmetric ring-current kernel (the same one used by
-internal-ref and by hetools CurrentLoop),
+hetools CurrentLoop),
 
     G0 = (mu0/4pi) sqrt((z-z')^2 + (r+r')^2) [(2-k^2)K(k) - 2E(k)],
     k^2 = 4 r r' / ((z-z')^2 + (r+r')^2),
@@ -110,7 +110,7 @@ Green's reciprocity becomes VALID on the grid, so
   CurrentLoop / the planned coil-lattice reader) match the discrete
   model without calibration;
 - physical conducting walls, when wanted, are added back as EXPLICIT
-  shorted filament ports in the circuit (INTERNAL-REF_WALL_TREATMENT.md Sec.
+  shorted filament ports in the circuit (internal note, Sec.
   5/7) with geometry-computed mutuals — passive by construction — or as
   resistive-shell fluid regions, but never as an implicit image of the
   computational boundary.

@@ -1,7 +1,7 @@
 # Literature review: open / free-space boundary conditions for gridded axisymmetric
 # MHD / hybrid-PIC field advances via Green's-function and boundary-integral closures
 
-*(2026-07-30. Companion to OPEN_BC_GREENS_DESIGN.md and INTERNAL-REF_WALL_TREATMENT.md.
+*(2026-07-30. Companion to OPEN_BC_GREENS_DESIGN.md.
 Purpose: ground the WarpX RZ hybrid-PIC open-BC implementation in prior art;
 confirm or challenge the four load-bearing design decisions. References at the
 end; bracketed numbers cite that list.)*
@@ -56,7 +56,7 @@ with the ring-current kernel
     G0 = (mu0/4pi) sqrt((z-z')^2 + (r+r')^2) [(2-k^2) K(k) - 2 E(k)],
     k^2 = 4 r r' / ((z-z')^2 + (r+r')^2),
 
-— i.e., precisely the kernel in OPEN_BC_GREENS_DESIGN.md and internal-ref's `G0`.
+— i.e., precisely the kernel in OPEN_BC_GREENS_DESIGN.md.
 Jardin [5, Ch. 4] gives this kernel in Sec. 4.6.3 and von Hagenow's method in
 Sec. 4.6.4.
 
@@ -117,8 +117,8 @@ resistivity, integral-couple the far region and conductors. Cost: the
 boundary/conductor coupling is a dense but small precomputed matrix; the
 per-step cost is dominated by the interior solve. Coupling into the advance:
 implicit for the field/circuit system (the conductor circuit equations are
-folded into the same time level), which is essentially internal-ref's monolithic
-scheme (INTERNAL-REF_WALL_TREATMENT.md Sec. 3) — unsurprising, as internal-ref's
+folded into the same time level), which matches a monolithic
+scheme — unsurprising, as such a
 technical notes cite the same lineage.
 
 **Relevance**: TSC legitimizes both halves of our roadmap — Green's-table
@@ -202,7 +202,7 @@ methodology (code-to-code benchmarks of resistive-wall modes). Chance's VACUUM
 second identity + collocation for the exterior scalar potential in general
 axisymmetric geometry).
 
-**Common structure across 4.1–4.4** (and the internal-ref closure): what is gridded
+**Common structure across 4.1–4.4** (and equivalent internal closures): what is gridded
 is the plasma; what is integral is the exterior Laplace/vacuum response,
 reduced at setup to dense boundary matrices; the coupling enters the time
 advance linearly through boundary data, so implicit solvers see a smooth,
@@ -328,7 +328,7 @@ literature is multipole error analysis:
 | PIXIE3D [14] | plasma | thin wall + BIM scalar potential, singular quadrature | implicit BC rows | dense boundary op | quadrature assembly |
 | CARIDDI/BEM [19,20] | conductors (volumetric) | free-space kernel everywhere | implicit L/R dynamics | dense (or compressed) matvec | dense assembly |
 | James / H-E / VGF [21–23] | Poisson domain | boundary screening-charge convolution | inside each elliptic solve | FFT / boundary convolution | none |
-| internal-ref (internal ref) | plasma flux | segment L, K matrices; S = sym(K L^-1) | monolithic BE, unconditionally passive | small dense solve | dense assembly |
+| internal reference | plasma flux | segment L, K matrices; S = sym(K L^-1) | monolithic BE, unconditionally passive | small dense solve | dense assembly |
 | **This design** | **plasma (RZ Yee)** | **ring kernel: coarse J_theta -> ghost psi** | **explicit per substep; linear map, JFNK-safe** | **GEMV, few MB** | **kernel + coarsening op at init/regrid** |
 
 ---
@@ -341,7 +341,7 @@ methods require an interior elliptic solve to differentiate; a Faraday advance
 has none, and *manufacturing* one (an auxiliary Delta* psi = -mu0 r J_theta
 Dirichlet solve per application, then the surface integral) would cost an
 elliptic solve per substep — strictly worse than a precomputed few-MB GEMV.
-Every initial-value analog (GRIN, STARWALL, PIXIE3D, internal-ref) likewise reduces
+Every initial-value analog (GRIN, STARWALL, PIXIE3D) likewise reduces
 the vacuum response to a precomputed dense matrix applied per step; ours
 differs only in mapping *volume sources* rather than *boundary traces*, which
 is what removes all singular quadrature (source cells are separated from ghost
