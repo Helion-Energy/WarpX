@@ -78,6 +78,26 @@ parser.add_argument(
     "hold the band untouched)",
 )
 parser.add_argument(
+    "--eb-insulating",
+    type=int,
+    choices=[0, 1],
+    default=0,
+    help="use the C++ insulating EB wall (boundary.eb_type = insulating, "
+    "PR #7138) instead of the deck band-copy callback; pair with "
+    "--band-copy 0",
+)
+parser.add_argument(
+    "--load-margin",
+    type=float,
+    default=None,
+    help="extra load clearance beyond the standoff, in cells. The C++ wall "
+    "SCRAPES at the standoff shell, so loading the plasma edge exactly "
+    "there (the band-copy prototype pattern) steadily collects marginal "
+    "edge ions out of the frozen open set (measured: -2.1e-3 Sigma drift "
+    "over 384 steps from a 0.14% density loss). Defaults to 1.5 with "
+    "--eb-insulating, 0 otherwise",
+)
+parser.add_argument(
     "--blob-r",
     type=float,
     default=None,
@@ -149,8 +169,15 @@ grid = picmi.Cartesian2DGrid(
 )
 
 # conductor inside r1 and outside r2 (implicit function > 0 = body)
+# --eb-insulating 1: the C++ insulating wall (PR #7138 merged) replaces the
+# deck's band-copy callback -- standoff scrape + zero-normal-gradient Te fill
+# keyed off boundary.eb_type; pair with --band-copy 0.
+eb_kwargs = {}
+if args.eb_insulating:
+    eb_kwargs = dict(eb_type="insulating", eb_standoff_cells=args.standoff)
 embedded_boundary = picmi.EmbeddedBoundary(
     implicit_function=f"max({r1 * r1}-(x*x+z*z),(x*x+z*z)-{r2 * r2})",
+    **eb_kwargs,
 )
 
 solver = picmi.HybridPICSolver(
@@ -165,9 +192,14 @@ solver = picmi.HybridPICSolver(
 )
 
 # insulating-wall standoff: plasma edge pulled s cells off both walls
+# (plus the scrape-clearance margin when the C++ wall is collecting at the
+# standoff shell)
 dx_cell = L / N
-r1p = r1 + args.standoff * dx_cell
-r2p = r2 - args.standoff * dx_cell
+load_margin = args.load_margin
+if load_margin is None:
+    load_margin = 1.5 if args.eb_insulating else 0.0
+r1p = r1 + (args.standoff + load_margin) * dx_cell
+r2p = r2 - (args.standoff + load_margin) * dx_cell
 
 ions = picmi.Species(
     particle_type="H",
@@ -423,6 +455,15 @@ print(
     f"{fit_T1:.2f}/{fit_T2:.2f})",
     flush=True,
 )
+if args.eb_insulating:
+    # the C++ wall's collection tallies: any nonzero ion charge means the
+    # load edge grazed the standoff shell (the scrape-clearance trap)
+    print(
+        "[harness] eb collected: "
+        f"q_ions={wx_instance().get_eb_collected_charge('ions'):.4e} C  "
+        f"E_ions={wx_instance().get_eb_collected_energy('ions'):.4e} J",
+        flush=True,
+    )
 
 # advection mode: rigid-rotation exact solution = the blob rotated by
 # omega*t (compare on an interior core ring away from the staircase)

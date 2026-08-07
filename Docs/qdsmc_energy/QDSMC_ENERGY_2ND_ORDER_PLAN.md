@@ -1266,6 +1266,37 @@ prerequisite (like #7128, merge not cherry-pick); retire the annulus
 deck's `--band-copy` callback in favor of the C++ fill and re-run the
 standoff holds.
 
+### InsulatingEB merged + branch acceptance PASSED (2026-08-06, later)
+
+Pushed; **draft PR #7138** open upstream (cc prkkumar-he); merged into
+this branch at b518aff85 with three recorded adaptations (see the merge
+commit): fill call site moved into `QdsmcTransportOnce`; **the deposit
+fold is HELD BACK on this branch** (its dead-weight premise is
+dev-only — the #7128 insulating floor seeds/recovers halo K_e, so the
+dev-form fold would pump regenerated halo entropy into the open set at
+every density ramp; branch-correct form = spill-only fold with
+own-content subtraction, exact for node-homed markers, must handle the
+half-gradient legs — follow-up); pybind/test/doc union merges.
+
+**Annulus standoff acceptance (N=64)**:
+- prototype regression (band-copy callback): dSigma **-1.51e-7**/384
+  steps — the recorded 5e-11-relative hold reproduces post-merge.
+- C++ wall (`--eb-insulating 1 --band-copy 0`): dSigma **-1.62e-7**/384
+  steps — the C++ fill fully replaces the callback at the same hold
+  class. `--band-copy` retired for production use.
+- at-rest advection on the C++ wall: Sigma(Te,fluid) drift
+  **-7.6e-5**/256 steps (~3e-7/step) — 3.4x better than the callback
+  arm's recorded -2.6e-4.
+
+*Instrument trap recorded (self-diagnosing now)*: the C++ wall SCRAPES
+at the standoff shell — loading the plasma edge exactly at
+r1+s dx (the prototype pattern) lets marginal edge ions be collected
+out of the frozen open set (measured: 0.14% density loss = -2.1e-3
+apparent Sigma drain over 384 steps, ~4 orders above the hold). The
+deck now takes `--load-margin` (default 1.5 cells with
+`--eb-insulating`) and prints `warpx.get_eb_collected_charge('ions')`
+— any nonzero ion tally means the load grazed the shell.
+
 ### Upstream PR #7128 MERGED as a branch prerequisite (2026-08-06)
 
 BLAST-WarpX **#7128 "Fix hybrid electron energy equation vacuum Te
