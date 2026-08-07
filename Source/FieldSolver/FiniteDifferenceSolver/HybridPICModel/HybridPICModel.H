@@ -284,6 +284,36 @@ public:
      *  and the restriction (debug diagnostic, off by default). */
     bool m_mr_check_div_b = false;
 
+    /** Mesh refinement: width, in fine cells, of the graded seam
+     *  dissipation band inside the fine-patch edge. */
+    int m_mr_seam_band_width = 6;
+    /** Mesh refinement: target plasma resistivity (Ohm m) at the
+     *  coarse-fine patch edge (0 = no seam-band eta modulation). */
+    amrex::Real m_mr_seam_eta = 0.0;
+    /** Mesh refinement: literal target hyper-resistivity (Ohm m^3) at the
+     *  coarse-fine patch edge (used when m_mr_seam_eta_h_coarse_matched is
+     *  false). */
+    amrex::Real m_mr_seam_eta_h = 0.0;
+    /** Mesh refinement: seam eta_h target is "coarse-matched", i.e. the
+     *  bulk hyper-resistivity parser value at the same point times the
+     *  cumulative refinement ratio to the fourth power (the coarser
+     *  levels' effective, Nyquist-referenced eta_h). */
+    bool m_mr_seam_eta_h_coarse_matched = false;
+    /** Mesh refinement: any seam-band eta_h modulation requested. */
+    bool m_mr_seam_eta_h_active = false;
+    /** Mesh refinement: any seam-band modulation requested. */
+    bool m_mr_seam_band_active = false;
+
+    /** \brief Cell-centered seam-band ramp of refined level lev: 1 at the
+     * coarse-fine patch edge, half-cosine down to 0 at
+     * m_mr_seam_band_width cells inward. Returns nullptr when the band is
+     * inactive or the level has no cached ramp (e.g. level 0). */
+    [[nodiscard]] const amrex::MultiFab* SeamBandRamp (int lev) const
+    {
+        return (lev >= 0 && lev < static_cast<int>(m_mr_seam_ramp.size()))
+            ? m_mr_seam_ramp[lev].get() : nullptr;
+    }
+
     /** Running maxima of the div(B) audit (raw value and value relative to
      *  max|B|/dx), accumulated while m_mr_check_div_b is set. */
     struct DivBStats {
@@ -380,6 +410,15 @@ private:
     amrex::Vector<std::unique_ptr<amrex::iMultiFab>> m_mr_fine_edge_mask;
     /** Cell BoxArray each cached fine-edge mask was built from. */
     amrex::Vector<amrex::BoxArray> m_mr_fine_edge_mask_ba;
+
+    /** \brief (Re)build the cached cell-centered seam-band ramp of refined
+     * level lev (see SeamBandRamp). Cached until the box layout changes. */
+    void EnsureSeamBandRamp (int lev);
+
+    /** Cached seam-band ramps, indexed by fine level. */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_mr_seam_ramp;
+    /** Cell BoxArray each cached seam-band ramp was built from. */
+    amrex::Vector<amrex::BoxArray> m_mr_seam_ramp_ba;
 };
 
 /**

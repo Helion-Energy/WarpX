@@ -23,6 +23,7 @@
 #include <ablastr/warn_manager/WarnManager.H>
 
 #include <AMReX_BCRec.H>
+#include <AMReX_BCUtil.H>
 #include <AMReX_BC_TYPES.H>
 #include <AMReX_FillPatchUtil.H>
 #include <AMReX_Interpolater.H>
@@ -614,6 +615,119 @@ void HybridPICModel::EnsureFineEdgeMask (const int lev, amrex::IntVect const& ra
     m_mr_fine_edge_mask_ba[lev] = fba;
 }
 
+void HybridPICModel::EnsureSeamBandRamp (const int lev)
+{
+    auto& warpx = WarpX::GetInstance();
+    const amrex::BoxArray& fba = warpx.boxArray(lev);
+    const amrex::DistributionMapping& fdm = warpx.DistributionMap(lev);
+
+    if (static_cast<int>(m_mr_seam_ramp.size()) <= lev) {
+        m_mr_seam_ramp.resize(lev + 1);
+        m_mr_seam_ramp_ba.resize(lev + 1);
+    }
+    if (m_mr_seam_ramp[lev] &&
+        m_mr_seam_ramp_ba[lev] == fba &&
+        m_mr_seam_ramp[lev]->DistributionMap() == fdm)
+    {
+        return;
+    }
+
+    const int width = m_mr_seam_band_width;
+    const amrex::Periodicity& period = warpx.Geom(lev).periodicity();
+    const amrex::Box domain = warpx.Geom(lev).Domain();
+    amrex::GpuArray<int, AMREX_SPACEDIM> is_per{};
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) { is_per[d] = warpx.Geom(lev).isPeriodic(d); }
+
+    // Linf cell distance to the coarse-fine patch edge by repeated erosion
+    // (same construction as EnsureFineEdgeMask): after pass p the mask is 1
+    // only on cells more than p cells from the fine-union edge, so
+    // accumulating the mask gives dist = min(d - 1, width) with d >= 1 the
+    // cell distance to the nearest non-fine cell. Non-periodic domain
+    // boundaries do not erode (they are not coarse-fine seams).
+    amrex::iMultiFab mask(fba, fdm, 1, 1);
+    mask.setVal(0);
+    mask.setVal(1, 0, 1, amrex::IntVect(0));
+    amrex::iMultiFab dist(fba, fdm, 1, 0);
+    dist.setVal(0);
+    amrex::iMultiFab tmp(fba, fdm, 1, 1);
+    for (int pass = 0; pass < width; ++pass)
+    {
+        mask.FillBoundary(period);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(mask, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            const amrex::Box tbx = mfi.tilebox();
+            auto const& src = mask.const_array(mfi);
+            auto const& dst = tmp.array(mfi);
+            amrex::ParallelFor(tbx,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    int v = src(i, j, k);
+                    if (v == 1) {
+#if defined(WARPX_DIM_3D)
+                        for (int dk = -1; dk <= 1 && v; ++dk) {
+#else
+                        const int dk = 0;
+#endif
+                        for (int dj = -1; dj <= 1 && v; ++dj) {
+                        for (int di = -1; di <= 1 && v; ++di) {
+                            if (!hybrid_mr_cell_covered(src, i+di, j+dj, k+dk, domain, is_per)) {
+                                v = 0;
+                            }
+                        }}
+#if defined(WARPX_DIM_3D)
+                        }
+#endif
+                    }
+                    dst(i, j, k) = v;
+                });
+        }
+        amrex::iMultiFab::Copy(mask, tmp, 0, 0, 1, 0);
+        amrex::iMultiFab::Add(dist, mask, 0, 0, 1, 0);
+    }
+
+    // Half-cosine ramp: 1 at the patch-edge cells (dist = 0) falling to 0
+    // at `width` cells inward. Ghost cells start at 1 so true coarse-fine
+    // ghosts read as "at the edge"; ghosts covered by fine valid data are
+    // restored by the FillBoundary, and ghosts beyond a non-periodic
+    // domain boundary are filled by first-order extrapolation.
+    auto ramp = std::make_unique<amrex::MultiFab>(fba, fdm, 1, 1);
+    ramp->setVal(1.0_rt);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(*ramp, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        const amrex::Box tbx = mfi.tilebox();
+        auto const& d_arr = dist.const_array(mfi);
+        auto const& r_arr = ramp->array(mfi);
+        const auto winv = 1.0_rt / static_cast<amrex::Real>(width);
+        amrex::ParallelFor(tbx,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                const amrex::Real s = amrex::min(
+                    static_cast<amrex::Real>(d_arr(i, j, k)) * winv, 1.0_rt);
+                r_arr(i, j, k) = 0.5_rt * (1.0_rt + std::cos(MathConst::pi * s));
+            });
+    }
+    ramp->FillBoundary(period);
+    if (!warpx.Geom(lev).isAllPeriodic()) {
+        amrex::Vector<amrex::BCRec> bcr(1);
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            const auto bct = warpx.Geom(lev).isPeriodic(d)
+                ? amrex::BCType::int_dir : amrex::BCType::foextrap;
+            bcr[0].setLo(d, bct);
+            bcr[0].setHi(d, bct);
+        }
+        amrex::FillDomainBoundary(*ramp, warpx.Geom(lev), bcr);
+    }
+
+    m_mr_seam_ramp[lev] = std::move(ramp);
+    m_mr_seam_ramp_ba[lev] = fba;
+}
+
 void HybridPICModel::FillMomentsCoarseFineGhosts ()
 {
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
@@ -627,6 +741,7 @@ void HybridPICModel::FillMomentsCoarseFineGhosts ()
         const amrex::IntVect ratio = warpx.refRatio(lev-1);
         EnsureFineEdgeMask(lev, ratio);
         const amrex::iMultiFab& edge_mask = *m_mr_fine_edge_mask[lev];
+        if (m_mr_seam_band_active) { EnsureSeamBandRamp(lev); }
 
         // rho (nodal): interpolate the coarse charge density onto a scratch
         // copy of the fine level with bilinear nodal interpolation, then copy

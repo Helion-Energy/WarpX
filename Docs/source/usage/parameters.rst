@@ -3868,6 +3868,49 @@ Maxwell solver: kinetic-fluid hybrid
     be divergence-free exceed :math:`10^{-12}` relative to :math:`\max|\mathbf{B}|/\Delta x`. Intended
     for testing and debugging.
 
+.. pp:param:: hybrid_pic_model.mr_seam_band_width
+    :type: ``int``
+    :default: ``6``
+    :optional:
+
+    If :pp:param:`algo.maxwell_solver` is set to ``hybrid`` and mesh refinement is used, this sets the width
+    :math:`W`, in fine cells, of the graded seam dissipation band inside the fine-patch edge. A cell-centered
+    half-cosine ramp is built on each fine level from the distance to the coarse-fine patch edge: it is 1 at the
+    patch-edge cells and falls smoothly to 0 at :math:`W` cells inward. Inside the band the plasma resistivity
+    and hyper-resistivity used by the Ohm's-law E-field solve are modulated as
+    :math:`\eta_\mathrm{eff} = \eta_\mathrm{bulk} + \mathrm{ramp} \cdot (\eta_\mathrm{seam} - \eta_\mathrm{bulk})`
+    (and equivalently for :math:`\eta_h`), with the seam targets set by :pp:param:`hybrid_pic_model.mr_seam_eta`
+    and :pp:param:`hybrid_pic_model.mr_seam_eta_h`. The band only affects the E-field used to update B
+    (the resistivity terms are not applied to the E-field used for the particle push). The coarse side of the
+    seam is not modified. The band is inactive unless at least one seam target is set.
+
+.. pp:param:: hybrid_pic_model.mr_seam_eta
+    :type: ``float``
+    :default: ``0``
+    :optional:
+
+    If :pp:param:`algo.maxwell_solver` is set to ``hybrid`` and mesh refinement is used, this sets the target
+    plasma resistivity, in :math:`\Omega m`, at the coarse-fine patch edge of the seam dissipation band
+    (see :pp:param:`hybrid_pic_model.mr_seam_band_width`). ``0`` (default) disables the resistivity modulation.
+
+.. pp:param:: hybrid_pic_model.mr_seam_eta_h
+    :type: ``float`` or ``coarse-matched``
+    :default: ``0``
+    :optional:
+
+    If :pp:param:`algo.maxwell_solver` is set to ``hybrid`` and mesh refinement is used, this sets the target
+    plasma hyper-resistivity at the coarse-fine patch edge of the seam dissipation band
+    (see :pp:param:`hybrid_pic_model.mr_seam_band_width`). A literal value is in :math:`\Omega m^3`;
+    ``0`` (default) disables the hyper-resistivity modulation. The special value ``coarse-matched`` sets the
+    seam target per point to the bulk :pp:param:`hybrid_pic_model.plasma_hyper_resistivity` parser value times
+    the cumulative refinement ratio to the fourth power: with per-level Nyquist-scaled hyper-resistivity
+    (:math:`\eta_h \propto k_\mathrm{Nyquist}^{-4}`, so each level damps at its own Nyquist equally), a fixed
+    physical wavenumber is damped :math:`\mathrm{ratio}^4` (16x for ratio 2) harder on the coarse side of the
+    seam; ``coarse-matched`` restores the coarser level's effective :math:`\eta_h` at the seam so that the
+    hyper-resistive damping rate :math:`\gamma_h(k) = \eta_h k^4 / \mu_0` is continuous across it, and the
+    fine-only band :math:`k \in (k_\mathrm{Nc}, 2 k_\mathrm{Nc})` is damped at coarse strength before reaching
+    the seam. Note that ``coarse-matched`` is a no-op if the bulk hyper-resistivity is zero.
+
 .. pp:param:: hybrid_pic_model.holmstrom_vacuum_region
     :type: ``bool``
     :default: ``false``
