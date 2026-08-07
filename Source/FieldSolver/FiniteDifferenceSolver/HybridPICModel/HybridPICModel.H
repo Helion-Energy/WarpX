@@ -314,6 +314,30 @@ public:
             ? m_mr_seam_ramp[lev].get() : nullptr;
     }
 
+    /** Mesh refinement (experimental diagnostic): width, in coarse cells
+     *  per side, of the coarse-level seam band around the fine-patch edge
+     *  ring. */
+    int m_mr_coarse_seam_band_width = 4;
+    /** Mesh refinement (experimental diagnostic): target plasma
+     *  resistivity (Ohm m) on the coarse-level seam ring (0 = off). */
+    amrex::Real m_mr_coarse_seam_eta = 0.0;
+    /** Mesh refinement (experimental diagnostic): target hyper-resistivity
+     *  (Ohm m^3) on the coarse-level seam ring (0 = off). */
+    amrex::Real m_mr_coarse_seam_eta_h = 0.0;
+    /** Mesh refinement: any coarse-side seam-band modulation requested. */
+    bool m_mr_coarse_seam_band_active = false;
+
+    /** \brief Cell-centered coarse-side seam-band ramp of level lev (a
+     * level with a finer level above it): 1 on the cells adjacent to the
+     * fine-patch edge on BOTH sides, half-cosine down to 0 at
+     * m_mr_coarse_seam_band_width cells from the edge in each direction.
+     * Returns nullptr when inactive or not cached. */
+    [[nodiscard]] const amrex::MultiFab* CoarseSeamBandRamp (int lev) const
+    {
+        return (lev >= 0 && lev < static_cast<int>(m_mr_coarse_seam_ramp.size()))
+            ? m_mr_coarse_seam_ramp[lev].get() : nullptr;
+    }
+
     /** Running maxima of the div(B) audit (raw value and value relative to
      *  max|B|/dx), accumulated while m_mr_check_div_b is set. */
     struct DivBStats {
@@ -419,6 +443,16 @@ private:
     amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_mr_seam_ramp;
     /** Cell BoxArray each cached seam-band ramp was built from. */
     amrex::Vector<amrex::BoxArray> m_mr_seam_ramp_ba;
+
+    /** \brief (Re)build the cached coarse-side seam-band ramp of level
+     * clev (see CoarseSeamBandRamp). Cached until the box layout of
+     * either level changes. */
+    void EnsureCoarseSeamBandRamp (int clev, amrex::IntVect const& ratio);
+
+    /** Cached coarse-side seam-band ramps, indexed by coarse level. */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_mr_coarse_seam_ramp;
+    /** Fine-level cell BoxArray each cached coarse ramp was built from. */
+    amrex::Vector<amrex::BoxArray> m_mr_coarse_seam_ramp_fba;
 };
 
 /**

@@ -103,6 +103,22 @@ void HybridPICModel::ReadParameters ()
     }
     m_mr_seam_band_active = (m_mr_seam_eta > 0.0_rt) || m_mr_seam_eta_h_active;
 
+    // Coarse-side counterpart band (experimental diagnostic): a graded eta
+    // (and/or eta_h) band on the COARSE level, centered on the fine-patch
+    // edge ring and extending mr_coarse_seam_band_width cells to each side.
+    utils::parser::queryWithParser(pp_hybrid, "mr_coarse_seam_band_width",
+                                   m_mr_coarse_seam_band_width);
+    if (m_mr_coarse_seam_band_width <= 0) {
+        Abort("hybrid_pic_model.mr_coarse_seam_band_width must be > 0");
+    }
+    utils::parser::queryWithParser(pp_hybrid, "mr_coarse_seam_eta", m_mr_coarse_seam_eta);
+    utils::parser::queryWithParser(pp_hybrid, "mr_coarse_seam_eta_h", m_mr_coarse_seam_eta_h);
+    if (m_mr_coarse_seam_eta < 0.0_rt || m_mr_coarse_seam_eta_h < 0.0_rt) {
+        Abort("hybrid_pic_model.mr_coarse_seam_eta and mr_coarse_seam_eta_h must be >= 0");
+    }
+    m_mr_coarse_seam_band_active =
+        (m_mr_coarse_seam_eta > 0.0_rt) || (m_mr_coarse_seam_eta_h > 0.0_rt);
+
     // The hybrid model requires an electron temperature, reference density
     // and exponent to be given. These values will be used to calculate the
     // electron pressure according to p = n0 * Te * (n/n0)^gamma
@@ -246,11 +262,12 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
     const std::set<std::string> resistivity_symbols = m_resistivity_parser->symbols();
     m_resistivity_has_J_dependence += resistivity_symbols.count("J");
 
-    // The hyper-resistivity kernels must also run when only the seam-band
+    // The hyper-resistivity kernels must also run when only a seam-band
     // eta_h target is nonzero (bulk expression "0.0" evaluates to 0 and the
-    // band supplies the seam value on fine levels).
+    // band supplies the seam value).
     m_include_hyper_resistivity_term =
-        (m_eta_h_expression != "0.0") || m_mr_seam_eta_h_active;
+        (m_eta_h_expression != "0.0") || m_mr_seam_eta_h_active
+        || (m_mr_coarse_seam_eta_h > 0.0_rt);
     m_hyper_resistivity_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(m_eta_h_expression, {"rho","B"}));
     m_eta_h = m_hyper_resistivity_parser->compile<2>();

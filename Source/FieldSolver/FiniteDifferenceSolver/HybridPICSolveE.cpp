@@ -1027,6 +1027,17 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             * static_cast<Real>(rr) * static_cast<Real>(rr);
     }
 
+    // Coarse-side counterpart band (experimental diagnostic): a ramp on
+    // the coarse level around the fine-patch edge ring, both sides.
+    const amrex::MultiFab* cseam_ramp_mf = hybrid_model->CoarseSeamBandRamp(lev);
+    const bool cseam_mod_eta =
+        (cseam_ramp_mf != nullptr) && (hybrid_model->m_mr_coarse_seam_eta > 0._rt);
+    const bool cseam_mod_eta_h =
+        (cseam_ramp_mf != nullptr) && (hybrid_model->m_mr_coarse_seam_eta_h > 0._rt)
+        && include_hyper_resistivity_term;
+    const Real cseam_eta_target = hybrid_model->m_mr_coarse_seam_eta;
+    const Real cseam_eta_h_target = hybrid_model->m_mr_coarse_seam_eta_h;
+
     // Index type required for interpolating fields from their respective
     // staggering to the Ex, Ey, Ez locations
     amrex::GpuArray<int, 3> const& Ex_stag = hybrid_model->Ex_IndexType;
@@ -1188,10 +1199,14 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             Ez_ext = Efield_external[2]->array(mfi);
         }
 
-        // Seam-band ramp factor (null when the band is inactive)
+        // Seam-band ramp factors (null when the bands are inactive)
         Array4<Real const> seam_arr;
         if (seam_mod_eta || seam_mod_eta_h) {
             seam_arr = seam_ramp_mf->const_array(mfi);
+        }
+        Array4<Real const> cseam_arr;
+        if (cseam_mod_eta || cseam_mod_eta_h) {
+            cseam_arr = cseam_ramp_mf->const_array(mfi);
         }
 
         // Extract stencil coefficients
@@ -1250,6 +1265,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     const Real wr = Interp(seam_arr, cell_centered, Ex_stag, coarsen, i, j, k, 0);
                     eta_val += wr * (seam_eta_target - eta_val);
                 }
+                if (cseam_mod_eta) {
+                    const Real wr = Interp(cseam_arr, cell_centered, Ex_stag, coarsen, i, j, k, 0);
+                    eta_val += wr * (cseam_eta_target - eta_val);
+                }
                 Ex(i, j, k) += eta_val * Jx(i, j, k);
 
                 if (include_hyper_resistivity_term) {
@@ -1273,6 +1292,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         const Real target = seam_eta_h_cm ?
                             seam_eta_h_fac * eta_h_val : seam_eta_h_fac;
                         eta_h_val += wr * (target - eta_h_val);
+                    }
+                    if (cseam_mod_eta_h) {
+                        const Real wr = Interp(cseam_arr, cell_centered, Ex_stag, coarsen, i, j, k, 0);
+                        eta_h_val += wr * (cseam_eta_h_target - eta_h_val);
                     }
                     Ex(i, j, k) -= eta_h_val * nabla2Jx;
                 }
@@ -1326,6 +1349,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     const Real wr = Interp(seam_arr, cell_centered, Ey_stag, coarsen, i, j, k, 0);
                     eta_val += wr * (seam_eta_target - eta_val);
                 }
+                if (cseam_mod_eta) {
+                    const Real wr = Interp(cseam_arr, cell_centered, Ey_stag, coarsen, i, j, k, 0);
+                    eta_val += wr * (cseam_eta_target - eta_val);
+                }
                 Ey(i, j, k) += eta_val * Jy(i, j, k);
 
                 if (include_hyper_resistivity_term) {
@@ -1349,6 +1376,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         const Real target = seam_eta_h_cm ?
                             seam_eta_h_fac * eta_h_val : seam_eta_h_fac;
                         eta_h_val += wr * (target - eta_h_val);
+                    }
+                    if (cseam_mod_eta_h) {
+                        const Real wr = Interp(cseam_arr, cell_centered, Ey_stag, coarsen, i, j, k, 0);
+                        eta_h_val += wr * (cseam_eta_h_target - eta_h_val);
                     }
                     Ey(i, j, k) -= eta_h_val * nabla2Jy;
                 }
@@ -1402,6 +1433,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     const Real wr = Interp(seam_arr, cell_centered, Ez_stag, coarsen, i, j, k, 0);
                     eta_val += wr * (seam_eta_target - eta_val);
                 }
+                if (cseam_mod_eta) {
+                    const Real wr = Interp(cseam_arr, cell_centered, Ez_stag, coarsen, i, j, k, 0);
+                    eta_val += wr * (cseam_eta_target - eta_val);
+                }
                 Ez(i, j, k) += eta_val * Jz(i, j, k);
 
                 if (include_hyper_resistivity_term) {
@@ -1425,6 +1460,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         const Real target = seam_eta_h_cm ?
                             seam_eta_h_fac * eta_h_val : seam_eta_h_fac;
                         eta_h_val += wr * (target - eta_h_val);
+                    }
+                    if (cseam_mod_eta_h) {
+                        const Real wr = Interp(cseam_arr, cell_centered, Ez_stag, coarsen, i, j, k, 0);
+                        eta_h_val += wr * (cseam_eta_h_target - eta_h_val);
                     }
                     Ez(i, j, k) -= eta_h_val * nabla2Jz;
                 }

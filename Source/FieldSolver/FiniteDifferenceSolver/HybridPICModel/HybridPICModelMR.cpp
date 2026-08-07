@@ -728,6 +728,138 @@ void HybridPICModel::EnsureSeamBandRamp (const int lev)
     m_mr_seam_ramp_ba[lev] = fba;
 }
 
+void HybridPICModel::EnsureCoarseSeamBandRamp (const int clev, amrex::IntVect const& ratio)
+{
+    auto& warpx = WarpX::GetInstance();
+    const amrex::BoxArray& fba = warpx.boxArray(clev + 1);
+    const amrex::BoxArray& cba = warpx.boxArray(clev);
+    const amrex::DistributionMapping& cdm = warpx.DistributionMap(clev);
+
+    if (static_cast<int>(m_mr_coarse_seam_ramp.size()) <= clev) {
+        m_mr_coarse_seam_ramp.resize(clev + 1);
+        m_mr_coarse_seam_ramp_fba.resize(clev + 1);
+    }
+    if (m_mr_coarse_seam_ramp[clev] &&
+        m_mr_coarse_seam_ramp_fba[clev] == fba &&
+        m_mr_coarse_seam_ramp[clev]->boxArray() == cba &&
+        m_mr_coarse_seam_ramp[clev]->DistributionMap() == cdm)
+    {
+        return;
+    }
+
+    const int width = m_mr_coarse_seam_band_width;
+    const amrex::Periodicity& period = warpx.Geom(clev).periodicity();
+    const amrex::Box domain = warpx.Geom(clev).Domain();
+    amrex::GpuArray<int, AMREX_SPACEDIM> is_per{};
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) { is_per[d] = warpx.Geom(clev).isPeriodic(d); }
+
+    // Coarse cells covered by the fine patch (1) vs uncovered (0).
+    const amrex::iMultiFab covered(
+        amrex::makeFineMask(cba, cdm, amrex::IntVect(1), fba, ratio, period,
+                            /*crse_value=*/0, /*fine_value=*/1));
+
+    // Two-sided Linf distance to the patch-edge ring: erode the covered
+    // region (side 0) and its complement (side 1) width times, accumulating
+    // the survivors; a cell Linf-adjacent to the other side ends with
+    // dist = 0. Non-periodic domain boundaries do not erode.
+    amrex::iMultiFab dist(cba, cdm, 1, 0);
+    dist.setVal(0);
+    amrex::iMultiFab mask(cba, cdm, 1, 1);
+    amrex::iMultiFab tmp(cba, cdm, 1, 1);
+    for (int side = 0; side < 2; ++side)
+    {
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(mask, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            const amrex::Box tbx = mfi.growntilebox(1);
+            auto const& cov = covered.const_array(mfi);
+            auto const& m_arr = mask.array(mfi);
+            amrex::ParallelFor(tbx,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    m_arr(i, j, k) = (side == 0) ? cov(i, j, k) : 1 - cov(i, j, k);
+                });
+        }
+        for (int pass = 0; pass < width; ++pass)
+        {
+            mask.FillBoundary(period);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(mask, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                const amrex::Box tbx = mfi.tilebox();
+                auto const& src = mask.const_array(mfi);
+                auto const& dst = tmp.array(mfi);
+                amrex::ParallelFor(tbx,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    {
+                        int v = src(i, j, k);
+                        if (v == 1) {
+#if defined(WARPX_DIM_3D)
+                            for (int dk = -1; dk <= 1 && v; ++dk) {
+#else
+                            const int dk = 0;
+#endif
+                            for (int dj = -1; dj <= 1 && v; ++dj) {
+                            for (int di = -1; di <= 1 && v; ++di) {
+                                if (!hybrid_mr_cell_covered(src, i+di, j+dj, k+dk, domain, is_per)) {
+                                    v = 0;
+                                }
+                            }}
+#if defined(WARPX_DIM_3D)
+                            }
+#endif
+                        }
+                        dst(i, j, k) = v;
+                    });
+            }
+            amrex::iMultiFab::Copy(mask, tmp, 0, 0, 1, 0);
+            amrex::iMultiFab::Add(dist, mask, 0, 0, 1, 0);
+        }
+    }
+
+    // Half-cosine ramp: 1 on the ring-adjacent cells of BOTH sides
+    // (dist = 0), 0 from `width` cells away in each direction. Ghosts by
+    // FillBoundary plus first-order extrapolation at non-periodic domain
+    // boundaries.
+    auto ramp = std::make_unique<amrex::MultiFab>(cba, cdm, 1, 1);
+    ramp->setVal(0.0_rt);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(*ramp, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        const amrex::Box tbx = mfi.tilebox();
+        auto const& d_arr = dist.const_array(mfi);
+        auto const& r_arr = ramp->array(mfi);
+        const auto winv = 1.0_rt / static_cast<amrex::Real>(width);
+        amrex::ParallelFor(tbx,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                const amrex::Real s = amrex::min(
+                    static_cast<amrex::Real>(d_arr(i, j, k)) * winv, 1.0_rt);
+                r_arr(i, j, k) = 0.5_rt * (1.0_rt + std::cos(MathConst::pi * s));
+            });
+    }
+    ramp->FillBoundary(period);
+    if (!warpx.Geom(clev).isAllPeriodic()) {
+        amrex::Vector<amrex::BCRec> bcr(1);
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            const auto bct = warpx.Geom(clev).isPeriodic(d)
+                ? amrex::BCType::int_dir : amrex::BCType::foextrap;
+            bcr[0].setLo(d, bct);
+            bcr[0].setHi(d, bct);
+        }
+        amrex::FillDomainBoundary(*ramp, warpx.Geom(clev), bcr);
+    }
+
+    m_mr_coarse_seam_ramp[clev] = std::move(ramp);
+    m_mr_coarse_seam_ramp_fba[clev] = fba;
+}
+
 void HybridPICModel::FillMomentsCoarseFineGhosts ()
 {
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
@@ -742,6 +874,7 @@ void HybridPICModel::FillMomentsCoarseFineGhosts ()
         EnsureFineEdgeMask(lev, ratio);
         const amrex::iMultiFab& edge_mask = *m_mr_fine_edge_mask[lev];
         if (m_mr_seam_band_active) { EnsureSeamBandRamp(lev); }
+        if (m_mr_coarse_seam_band_active) { EnsureCoarseSeamBandRamp(lev-1, ratio); }
 
         // rho (nodal): interpolate the coarse charge density onto a scratch
         // copy of the fine level with bilinear nodal interpolation, then copy

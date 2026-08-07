@@ -113,6 +113,48 @@ def cases():
     # threshold, no band -- the coarse side is dissipative here
     cs.append(("e1_globaleta_ctl", E1_BASE + ["--eta", f"{SEAM_ETA:.6e}"]))
 
+    # ---------------- E4: coarse-side counterpart band -----------------
+    def cband(w, eta):
+        return [
+            "--extra-inputs",
+            f"hybrid_pic_model.mr_coarse_seam_band_width = {w}",
+            "--extra-inputs",
+            f"hybrid_pic_model.mr_coarse_seam_eta = {eta}",
+        ]
+
+    cs.append(("e4_cband_w4", E1_BASE + cband(4, f"{SEAM_ETA:.6e}")))
+    cs.append(("e4_cband_w2", E1_BASE + cband(2, f"{SEAM_ETA:.6e}")))
+    cs.append(("e4_cband_w4_eta1e8", E1_BASE + cband(4, "1.0e-8")))
+
+    # both-sides local dissipation and a wide coarse band (loop
+    # locality discriminators)
+    cs.append(
+        (
+            "e4_bothsides",
+            E1_BASE + band_args(6, eta=f"{SEAM_ETA:.6e}") + cband(4, f"{SEAM_ETA:.6e}"),
+        )
+    )
+    cs.append(("e4_cband_w16", E1_BASE + cband(16, f"{SEAM_ETA:.6e}")))
+
+    # ---------------- E5: restriction-setback A/B (bare) ---------------
+    for sb in (0, 4):  # setback 2 (default) = e1_bare
+        cs.append(
+            (
+                f"e5_setback{sb}",
+                E1_BASE
+                + ["--extra-inputs", f"hybrid_pic_model.mr_restrict_setback = {sb}"],
+            )
+        )
+
+    # ---------------- E6: restriction cadence A/B (bare) ---------------
+    cs.append(
+        (
+            "e6_halfstep",
+            E1_BASE
+            + ["--extra-inputs", "hybrid_pic_model.mr_restrict_cadence = half_step"],
+        )
+    )
+
     # ---------------- E2: reflection regression (winning band) --------
     for kf in (0.3, 0.6, 0.8):
         tag = f"t11b_k{int(round(kf * 1000)):04d}"

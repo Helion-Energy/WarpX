@@ -155,28 +155,10 @@ E1_ARMS = [
 ]
 
 
-def e1_analysis(results_md):
-    print("\n=== E1 instability kill test (dt = 0.012 t_ci, kfac 0.1) ===")
-    results_md.append("\n## E1 -- instability kill test\n")
-    results_md.append(
-        "T1 unstable configuration (dt = 0.012 t_ci, kfac 0.1 seed, bulk "
-        "eta = 1e-10 Ohm m, bulk eta_h = 0 unless noted), horizon 20 t_ci "
-        "(1667 steps). gamma_E: amplitude rate from the level-1 B-energy "
-        "excess; gamma_k: amplitude rate of the level-1 |k| in [1.02, 1.9] "
-        "k_Nc band. T1 bare-seam reference: gamma = 0.09 w_ci, blowup at "
-        "step ~419. Blowup manifests as the RK4 NaN guard (rc 6) or a "
-        "runaway-particle deposition segfault (rc 11); the eta band W=6 "
-        "arm instead entered a runaway-COMPUTE stall at step 519 (all "
-        "ranks spinning >8 min on one step, killed manually) -- the same "
-        "terminal event with a third face, counted here as its blowup "
-        "step.\n"
-    )
-    results_md.append(
-        "| arm | blowup step | t_blow (t_ci) | gamma_E/w_ci | gamma_k/w_ci | verdict |"
-    )
-    results_md.append("|---|---|---|---|---|---|")
+def kill_table(results_md, arms):
+    """Append one blowup/gamma table row per finished arm; return curves."""
     curves = []
-    for name, label in E1_ARMS:
+    for name, label in arms:
         run_dir = os.path.join(RUNS, name)
         if not os.path.isdir(run_dir):
             continue
@@ -219,6 +201,30 @@ def e1_analysis(results_md):
         )
         t, eb = load_field_energy(name)
         curves.append((label, t / p["t_ci"], np.maximum(eb - eb[0], 1e-12), name))
+    return curves
+
+
+def e1_analysis(results_md):
+    print("\n=== E1 instability kill test (dt = 0.012 t_ci, kfac 0.1) ===")
+    results_md.append("\n## E1 -- instability kill test\n")
+    results_md.append(
+        "T1 unstable configuration (dt = 0.012 t_ci, kfac 0.1 seed, bulk "
+        "eta = 1e-10 Ohm m, bulk eta_h = 0 unless noted), horizon 20 t_ci "
+        "(1667 steps). gamma_E: amplitude rate from the level-1 B-energy "
+        "excess; gamma_k: amplitude rate of the level-1 |k| in [1.02, 1.9] "
+        "k_Nc band. T1 bare-seam reference: gamma = 0.09 w_ci, blowup at "
+        "step ~419. Blowup manifests as the RK4 NaN guard (rc 6) or a "
+        "runaway-particle deposition segfault (rc 11); the eta band W=6 "
+        "arm instead entered a runaway-COMPUTE stall at step 519 (all "
+        "ranks spinning >8 min on one step, killed manually) -- the same "
+        "terminal event with a third face, counted here as its blowup "
+        "step.\n"
+    )
+    results_md.append(
+        "| arm | blowup step | t_blow (t_ci) | gamma_E/w_ci | gamma_k/w_ci | verdict |"
+    )
+    results_md.append("|---|---|---|---|---|---|")
+    curves = kill_table(results_md, E1_ARMS)
     # figure
     fig, ax = plt.subplots(figsize=(11.5, 7.5))
     palette = [
@@ -249,6 +255,72 @@ def e1_analysis(results_md):
     ax.legend(frameon=False, fontsize=9, loc="lower right")
     fig.savefig(os.path.join(HERE, "t1b_kill.png"), dpi=280)
     return curves
+
+
+# ----------------------------------------------------------------------
+# E4/E5/E6: coarse-side band, setback A/B, cadence A/B
+# ----------------------------------------------------------------------
+E456_ARMS = [
+    ("e1_bare", "bare seam (baseline, setback 2, substep cadence)"),
+    ("e4_cband_w4", "COARSE band, eta 3e-8, W_in=W_out=4"),
+    ("e4_cband_w2", "COARSE band, eta 3e-8, W_in=W_out=2"),
+    ("e4_cband_w4_eta1e8", "COARSE band, eta 1e-8, W_in=W_out=4"),
+    ("e4_cband_w16", "COARSE band, eta 3e-8, W_in=W_out=16"),
+    ("e4_bothsides", "fine band W=6 + COARSE band W=4, eta 3e-8 both"),
+    ("e5_setback0", "bare, mr_restrict_setback = 0"),
+    ("e5_setback4", "bare, mr_restrict_setback = 4"),
+    ("e6_halfstep", "bare, mr_restrict_cadence = half_step"),
+    ("e1_globaleta_ctl", "global eta 3e-8 (reference)"),
+]
+
+
+def e456_analysis(results_md):
+    print("\n=== E4/E5/E6 coarse-side band + operator A/Bs ===")
+    results_md.append("\n## E4/E5/E6 -- coarse-side band and coupling-operator A/Bs\n")
+    results_md.append(
+        "Same unstable configuration as E1. E4: the coarse-side "
+        "counterpart band (hybrid_pic_model.mr_coarse_seam_band_width / "
+        "mr_coarse_seam_eta) -- a half-cosine ramp on the COARSE level, "
+        "1 on the cells adjacent to the fine-patch edge on BOTH sides "
+        "(covering the seam-adjacent exterior ring and the interior "
+        "restricted/sacrificial mixed-face ring), 0 at W cells away per "
+        "side. E5: restriction-setback A/B (bare seam; setback 0 removes "
+        "the interior mixed-face ring entirely, restriction reaches the "
+        "patch edge). E6: restriction cadence A/B (bare seam, restrict "
+        "once per half-step instead of every accepted substep).\n"
+    )
+    results_md.append(
+        "| arm | blowup step | t_blow (t_ci) | gamma_E/w_ci | gamma_k/w_ci | verdict |"
+    )
+    results_md.append("|---|---|---|---|---|---|")
+    curves = kill_table(results_md, E456_ARMS)
+    # figure
+    fig, ax = plt.subplots(figsize=(11.5, 7.5))
+    palette = [
+        C_MR,
+        C_FINE,
+        C_CTL,
+        C_EXTRA,
+        "#b03060",
+        "#d02090",
+        "#2f7f7f",
+        "#7f7f2f",
+        "#404040",
+        "#111111",
+    ]
+    lss = ["-", "-", "--", ":", "-", "--", "-", "--", ":", "-"]
+    for (label, tt, dE, name), c, ls in zip(curves, palette, lss):
+        m = np.isfinite(dE)
+        lw = 3 if name in ("e1_bare", "e1_globaleta_ctl", "e4_cband_w4") else 1.8
+        ax.semilogy(tt[m], dE[m], color=c, ls=ls, lw=lw, label=label)
+    ax.set_xlabel(r"$t / t_{ci}$")
+    ax.set_ylabel(r"level-1 $\int B^2/2\mu_0$ above initial (J)")
+    ax.set_title(
+        "E4/E5/E6 coarse-side band and operator A/Bs "
+        "(dt = 0.012 $t_{ci}$, kfac 0.1 seed)"
+    )
+    ax.legend(frameon=False, fontsize=9, loc="lower right")
+    fig.savefig(os.path.join(HERE, "t1b_coarse_kill.png"), dpi=280)
 
 
 # ----------------------------------------------------------------------
@@ -430,35 +502,57 @@ def e3_note(results_md):
 def mechanism_note(results_md):
     results_md.append("\n## Mechanism: what the kill pattern says\n")
     results_md.append(
-        "Every fine-side dissipation configuration -- eta_h band at the "
-        "coarse-matched value and at 5x that value, eta band at the "
-        "global stabilization threshold (3e-8 Ohm m) and at 3x that "
-        "value, both together, widths W = 3, 6, and 24 (24 fine cells "
-        "covers the deposition-buffer band, the restriction setback and "
-        "the ghost-fill reach combined) -- only shifts the blowup step "
-        "by -6% to +66% (the steep W = 3 eta_h ramp is slightly WORSE "
-        "than bare), while GLOBAL eta = 3e-8 Ohm m (dissipation on both "
-        "sides of the seam, re-anchored with this binary as "
-        "e1_globaleta_ctl) stabilizes outright. Dissipation restricted "
-        "to the fine side of the seam, of any strength or width tested, "
-        "does not open the loop. Together with the T1 facts (independent "
-        "of ranks/layout/buffers/substeps, gamma proportional to dt, "
-        "i.e. a fixed per-STEP amplification), this localizes the "
-        "feedback's gain stage in the once-per-step coarse-fine coupling "
-        "acting on the COARSE side: the coarse moments/fields near the "
-        "seam (which the band does not touch, and which global eta "
-        "damps) feed the fine level through the ghost fill and moment "
-        "overwrite, and the fine level feeds back through the "
-        "restriction. The un-crossable fine-side band k in (k_Nc, "
-        "2 k_Nc), which the band damps at 10x the instability's growth "
-        "rate, is NOT the loop's energy carrier -- the E1 falsification "
-        "of predictions (b) and (c) rules out both the 'unmatched "
-        "above-k_Nc band' and the 'seam-local fine-side loop' pictures. "
-        "The practical corollary stands unchanged from T1: quiet-plasma "
-        "MR needs a global (or coarse-side-inclusive) resistive floor "
-        "eta >= 3e-8 Ohm m at dt = 0.012 t_ci; the seam band cannot "
-        "replace it, though it remains a cheap, reflection-free way to "
-        "add local dissipation (E2) without touching bulk physics (E3)."
+        "Round 1 (fine-side bands): every fine-side dissipation "
+        "configuration -- eta_h band at the coarse-matched value and at "
+        "5x that value, eta band at the global stabilization threshold "
+        "(3e-8 Ohm m) and at 3x that value, both together, widths W = 3, "
+        "6, and 24 (24 fine cells covers the deposition-buffer band, the "
+        "restriction setback and the ghost-fill reach combined) -- only "
+        "shifts the blowup step by -6% to +66% (the steep W = 3 eta_h "
+        "ramp is slightly WORSE than bare). Round 2 (coarse side and "
+        "operators): the coarse-side counterpart band FAILS TOO -- eta "
+        "3e-8 over +-4 coarse cells of the seam ring delays blowup only "
+        "to step 549 (bare 419), +-16 cells (+-8 l_i) to 566, and even "
+        "fine W=6 + coarse +-4 SIMULTANEOUSLY (dissipation of globally-"
+        "stabilizing strength on BOTH sides of both seams) only reaches "
+        "645 -- while global eta 3e-8 is stable past 1667 steps "
+        "(20 t_ci). The coarse-side-gain prediction is falsified along "
+        "with the fine-side one: NO localized dissipation opens the "
+        "loop.\n"
+    )
+    results_md.append(
+        "Operator A/Bs at the same configuration: mr_restrict_setback 0 "
+        "(no interior mixed restricted/free face ring; restriction "
+        "reaches the patch edge) is the strongest single structural "
+        "lever, delaying blowup to 723 (1.7x) with gamma_E dropping "
+        "~2x -- the mixed-face ring feeds the loop but is not its sole "
+        "gain stage. Setback 4 lands at 534 (non-monotonic in setback), "
+        "and half-step restriction cadence at 480 (weak coupling-"
+        "frequency dependence at this dt).\n"
+    )
+    results_md.append(
+        "Verdict: no minimal localized stabilizer exists in the "
+        "dissipation family -- local eta of globally-stabilizing "
+        "strength, applied on the fine side, the coarse side, or both "
+        "at once, and up to +-8 l_i wide, only rescales the onset time. "
+        "The per-step gain is therefore not a compact seam circuit that "
+        "resistive damping can sever; it is the once-per-step coupling "
+        "SEQUENCE itself (moment overwrite + B ghost fill + masked "
+        "restriction), whose mutual inconsistency re-injects near-and-"
+        "above-Nyquist power each step, fed by the domain-wide "
+        "fluctuation reservoir that only global damping suppresses. For "
+        "the structural fix this points at consistency, not "
+        "dissipation: the setback-0 result implicates the restriction "
+        "boundary's EMF mismatch as the largest single contributor, so "
+        "EMF matching (advancing the coarse faces under the patch with "
+        "the restricted fine EMF so restricted and freely-evolved faces "
+        "share circulations) is the first structural fix to try -- but "
+        "since even setback 0 remains unstable, it must be paired with "
+        "a consistent ghost-fill/moment path; no single-operator fix is "
+        "indicated to suffice. Practically, quiet-plasma hybrid MR "
+        "keeps the T1 prescription: a global resistive floor "
+        "eta >= 3e-8 Ohm m at dt = 0.012 t_ci (~1.5e-9 s), i.e. "
+        "gamma_eta(k_Nc) of a few x gamma_inst, scaled with dt.\n"
     )
 
 
@@ -482,6 +576,7 @@ def main():
         "t1_whistler.py + t1b_run_battery.py; runs in t1b_runs/.\n"
     )
     e1_analysis(results_md)
+    e456_analysis(results_md)
     e2_t11(results_md)
     e2_t12(results_md)
     e3_note(results_md)
@@ -490,6 +585,8 @@ def main():
     results_md.append(
         "\n## Figures\n\n"
         "- t1b_kill.png -- E1 level-1 magnetic-energy growth, all arms\n"
+        "- t1b_coarse_kill.png -- E4/E5/E6 coarse-side band and operator "
+        "A/Bs\n"
         "- t1b_packet.png -- E2 packet budget with the band\n"
         "- t1b_null_sigma.png -- E3 bulk null (written by "
         "t1b_smoke_null.py)\n"

@@ -3911,6 +3911,35 @@ Maxwell solver: kinetic-fluid hybrid
     fine-only band :math:`k \in (k_\mathrm{Nc}, 2 k_\mathrm{Nc})` is damped at coarse strength before reaching
     the seam. Note that ``coarse-matched`` is a no-op if the bulk hyper-resistivity is zero.
 
+.. pp:param:: hybrid_pic_model.mr_coarse_seam_band_width
+    :type: ``int``
+    :default: ``4``
+    :optional:
+
+    Experimental diagnostic. If :pp:param:`algo.maxwell_solver` is set to ``hybrid`` and mesh refinement is
+    used, this sets the per-side width, in coarse cells, of a graded dissipation band on the COARSE level,
+    centered on the fine-patch edge ring (half-cosine ramp equal to 1 on the cells adjacent to the patch edge
+    on both sides, falling to 0 this many cells away in each direction). The band modulates the coarse-level
+    Ohm's-law resistivity terms toward :pp:param:`hybrid_pic_model.mr_coarse_seam_eta` and
+    :pp:param:`hybrid_pic_model.mr_coarse_seam_eta_h`, exactly like the fine-level seam band; it is inactive
+    unless one of those targets is nonzero.
+
+.. pp:param:: hybrid_pic_model.mr_coarse_seam_eta
+    :type: ``float``
+    :default: ``0``
+    :optional:
+
+    Experimental diagnostic: target plasma resistivity, in :math:`\Omega m`, on the coarse-level seam ring
+    (see :pp:param:`hybrid_pic_model.mr_coarse_seam_band_width`). ``0`` (default) disables it.
+
+.. pp:param:: hybrid_pic_model.mr_coarse_seam_eta_h
+    :type: ``float``
+    :default: ``0``
+    :optional:
+
+    Experimental diagnostic: target plasma hyper-resistivity, in :math:`\Omega m^3`, on the coarse-level seam
+    ring (see :pp:param:`hybrid_pic_model.mr_coarse_seam_band_width`). ``0`` (default) disables it.
+
 .. pp:param:: hybrid_pic_model.holmstrom_vacuum_region
     :type: ``bool``
     :default: ``false``
