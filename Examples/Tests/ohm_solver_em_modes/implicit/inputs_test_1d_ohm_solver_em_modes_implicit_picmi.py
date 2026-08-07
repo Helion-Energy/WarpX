@@ -59,8 +59,18 @@ class EMModes(object):
     # Number of substeps used to update B
     substeps = 40
 
-    def __init__(self, test, dim, B_dir, verbose, darwin=False,
-                 inertia=False, inertia_seeded=False, mass_matrices=False):
+    def __init__(
+        self,
+        test,
+        dim,
+        B_dir,
+        verbose,
+        darwin=False,
+        inertia=False,
+        inertia_seeded=False,
+        mass_matrices=False,
+        callback_gating=False,
+    ):
         """Get input parameters for the specific case desired."""
         self.test = test
         self.dim = int(dim)
@@ -70,6 +80,7 @@ class EMModes(object):
         self.inertia_seeded = inertia_seeded
         self.inertia = inertia or inertia_seeded
         self.mass_matrices = mass_matrices
+        self.callback_gating = callback_gating
         assert not (self.inertia_seeded and B_dir != "z"), (
             "--inertia-seeded seeds a transverse mode on the Bz guide "
             "field and requires --bdir z"
@@ -148,6 +159,9 @@ class EMModes(object):
             )
 
         self.setup_run()
+
+        if self.callback_gating:
+            self._setup_callback_gating()
 
     def get_simulation_parameters(self):
         """Pick appropriate parameters from the defaults given the direction
@@ -439,6 +453,102 @@ class EMModes(object):
                     f"{Bx[ii]:+.10e} {By[ii]:+.10e}\n"
                 )
 
+    def _setup_callback_gating(self):
+        """Install the implicit-scheme callback-contract instrumentation.
+
+        Under the implicit evolve schemes the step-family python callbacks
+        must fire exactly once per step, at coherent states: beforeEsolve
+        with the t^n state, and afterEpush/afterBpush/afterEsolve with the
+        delivered t^{n+1} state -- never inside the nonlinear residual
+        evaluations (iterate states, Jacobian probes included). At
+        afterEpush, hybrid_current_fp_plasma must hold the end-of-step
+        Ampere closure curl(B^{n+1})/mu0: that is the read contract of a
+        segregated circuit coupler measuring the plasma flux linkage
+        between steps.
+        """
+        self._cb_counts = {
+            name: 0
+            for name in [
+                "beforestep",
+                "beforeEsolve",
+                "afterEpush",
+                "afterBpush",
+                "afterEsolve",
+                "afterstep",
+            ]
+        }
+        self._jp_max_rel_err = 0.0
+
+        def make_counter(name):
+            def count():
+                self._cb_counts[name] += 1
+
+            return count
+
+        for name in self._cb_counts:
+            if name != "afterEpush":
+                callbacks.installcallback(name, make_counter(name))
+        callbacks.installcallback("afterEpush", self._check_plasma_current)
+
+    def _check_plasma_current(self):
+        """Count afterEpush fires and check the plasma-current contract.
+
+        The comparison uses the same read path as a segregated circuit
+        coupler (the hybrid_current_fp_plasma wrappers) against a python
+        finite-difference curl of the B field observed at the same moment.
+        1D_Z staggering: Bx/By are cell-centered in z, Jx/Jy nodal, so
+        (curl B)_x = -dBy/dz and (curl B)_y = +dBx/dz land on the interior
+        nodes.
+        """
+        self._cb_counts["afterEpush"] += 1
+        if self.dim != 1:
+            return
+
+        def valid(name, direction):
+            # global valid-region array, z as the only remaining axis
+            return np.squeeze(simulation.fields.get(name, dir=direction, level=0)[...])
+
+        Jx = valid("hybrid_current_fp_plasma", "x")
+        Jy = valid("hybrid_current_fp_plasma", "y")
+        Bx = valid("Bfield_fp", "x")
+        By = valid("Bfield_fp", "y")
+        assert Jx.shape[0] == Bx.shape[0] + 1, (
+            f"unexpected staggering: J nodes {Jx.shape[0]} vs B cells {Bx.shape[0]}"
+        )
+        inv_mu0_dz = 1.0 / (constants.mu0 * self.dz)
+        Jx_pred = -(By[1:] - By[:-1]) * inv_mu0_dz
+        Jy_pred = (Bx[1:] - Bx[:-1]) * inv_mu0_dz
+        scale = max(np.abs(Jx).max(), np.abs(Jy).max())
+        err = (
+            max(
+                np.abs(Jx[1:-1] - Jx_pred).max(),
+                np.abs(Jy[1:-1] - Jy_pred).max(),
+            )
+            / scale
+        )
+        self._jp_max_rel_err = max(self._jp_max_rel_err, err)
+
+    def finalize_callback_gating(self):
+        """Assert the callback-firing and state contracts after the run."""
+        print(
+            f"Callback gating: counts over {self.total_steps} steps = "
+            f"{self._cb_counts}, max J_plasma rel err = "
+            f"{self._jp_max_rel_err:.3e}"
+        )
+        for name, count in self._cb_counts.items():
+            assert count == self.total_steps, (
+                f"callback '{name}' fired {count} times over "
+                f"{self.total_steps} steps: the implicit schemes must fire "
+                "the step-family callbacks exactly once per step, at the "
+                "converged state (never inside residual evaluations)"
+            )
+        assert self._jp_max_rel_err < 1e-9, (
+            "hybrid_current_fp_plasma observed at afterEpush is not the "
+            f"end-of-step curl(B^(n+1))/mu0 (max rel err "
+            f"{self._jp_max_rel_err:.3e}): the segregated-coupler "
+            "flux-linkage read contract is broken"
+        )
+
 
 ##########################
 # parse input parameters
@@ -489,6 +599,14 @@ parser.add_argument(
     "preconditioner in the Newton solve (implicit only)",
     action="store_true",
 )
+parser.add_argument(
+    "--callback-gating",
+    help="instrument the step-family python callbacks and assert the "
+    "implicit-scheme contract: exactly one fire per step, with "
+    "hybrid_current_fp_plasma at afterEpush holding the end-of-step "
+    "curl(B)/mu0 (the segregated circuit-coupler read contract)",
+    action="store_true",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
@@ -501,5 +619,9 @@ run = EMModes(
     inertia=args.inertia,
     inertia_seeded=args.inertia_seeded,
     mass_matrices=args.mass_matrices,
+    callback_gating=args.callback_gating,
 )
 simulation.step()
+
+if args.callback_gating:
+    run.finalize_callback_gating()

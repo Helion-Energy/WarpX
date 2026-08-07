@@ -21,6 +21,21 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Implicit-scheme python-callback contract: the step-family callbacks fire
+# exactly once per step (never inside residual evaluations), and afterEpush
+# observes hybrid_current_fp_plasma at the delivered end-of-step state
+# curl(B^{n+1})/mu0 -- the read contract of a segregated circuit coupler.
+# Assertions run inside the input script, so no analysis/checksum is needed.
+add_warpx_test(
+    test_1d_ohm_solver_em_modes_implicit_callbacks_picmi  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_ohm_solver_em_modes_implicit_picmi.py --test --dim 1 --bdir z --callback-gating"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_1d_ohm_solver_em_modes_implicit_inertia_picmi  # name
     1  # dims
