@@ -672,6 +672,59 @@ void HybridPICModel::RestrictBfieldFineToCoarse (
 #endif
 }
 
+void HybridPICModel::RestrictBfieldBeforeRemoval (
+    const int flev, amrex::IntVect const& ng, std::optional<bool> nodal_sync)
+{
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    auto& warpx = WarpX::GetInstance();
+
+    const int clev = flev - 1;
+    const amrex::IntVect ratio = warpx.refRatio(clev);
+    const amrex::Periodicity& period = warpx.Geom(clev).periodicity();
+
+    // Unerorded keep-mask (setback = 0), built locally rather than through
+    // the cache: the regular per-substep restriction keeps its eroded mask,
+    // this final handoff restricts every face interior to the fine union so
+    // the sacrificial setback ring is not left holding never-restricted
+    // coarse data. Only the outermost shared faces of the patch boundary
+    // (one covered and one uncovered neighbor cell) keep the coarse
+    // solution -- they were evolved consistently on the coarse level anyway.
+    const amrex::iMultiFab mask = amrex::makeFineMask(
+        warpx.boxArray(clev), warpx.DistributionMap(clev), amrex::IntVect(1),
+        warpx.boxArray(flev), ratio, period,
+        /*crse_value=*/0, /*fine_value=*/1);
+
+    ablastr::fields::VectorField Bfine = warpx.m_fields.get_alldirs(FieldType::Bfield_fp, flev);
+    ablastr::fields::VectorField Bcrse = warpx.m_fields.get_alldirs(FieldType::Bfield_fp, clev);
+
+    for (int idim = 0; idim < 3; ++idim)
+    {
+        amrex::MultiFab tmp_cf(
+            amrex::coarsen(Bfine[idim]->boxArray(), ratio),
+            Bfine[idim]->DistributionMap(), 1, 0);
+        if (Bfine[idim]->ixType().cellCentered()) {
+            amrex::average_down(*Bfine[idim], tmp_cf, 0, 1, ratio);
+        } else {
+            amrex::average_down_faces(*Bfine[idim], tmp_cf, ratio, 0);
+        }
+
+        amrex::MultiFab tmp_c(
+            Bcrse[idim]->boxArray(), Bcrse[idim]->DistributionMap(), 1, 0);
+        tmp_c.setVal(0.0_rt);
+        ablastr::utils::communication::ParallelCopy(
+            tmp_c, tmp_cf, 0, 0, 1, amrex::IntVect(0), amrex::IntVect(0),
+            WarpX::do_single_precision_comms);
+        ::MaskedCopyRestricted(*Bcrse[idim], tmp_c, mask, warpx.Geom(clev));
+    }
+
+    warpx.FillBoundaryB(clev, ng, nodal_sync);
+#else
+    amrex::ignore_unused(flev, ng, nodal_sync);
+    WARPX_ABORT_WITH_MESSAGE(
+        "Hybrid-PIC mesh refinement is only implemented for Cartesian 2D/3D.");
+#endif
+}
+
 void HybridPICModel::ClearMRMaskCache ()
 {
     m_mr_keep_mask.clear();

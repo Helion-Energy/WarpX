@@ -2402,6 +2402,20 @@ WarpX::MakeNewLevelFromCoarse (int lev, amrex::Real time, const amrex::BoxArray&
 void
 WarpX::ClearLevel (int lev)
 {
+    // Hybrid-PIC dynamic regrid, level removal: restrict the fine B solution
+    // onto the coarse level one final time WITHOUT the sacrificial setback
+    // erosion, so the coarse cells under the (formerly sacrificial) fine
+    // edge band are not left holding never-restricted data. The plasma
+    // moments need no separate handoff: SyncCurrentAndRho already restricted
+    // the fine deposits onto the coarse level at the last deposition, and
+    // the moment-history fabs were copied from those synced fields.
+    if (m_hybrid_regrid_in_progress && lev > 0 &&
+        electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC)
+    {
+        m_hybrid_pic_model->RestrictBfieldBeforeRemoval(
+            lev, guard_cells.ng_FieldSolver, WarpX::sync_nodal_points);
+    }
+
     ClearLevelData(lev);
 }
 
