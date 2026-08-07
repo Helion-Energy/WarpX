@@ -82,6 +82,16 @@ parser.add_argument(
     "survival point of the explicit-stiffness study",
 )
 parser.add_argument("--n-floor-frac", type=float, default=0.05)
+parser.add_argument(
+    "--load-margin",
+    type=float,
+    default=1.5,
+    help="load clearance beyond the collection shell [cells]: the annulus "
+    "outer radius is capped at R_WALL - (standoff+margin)*dx. Loading "
+    "into the shell amputates the annulus at step 1 and the resulting "
+    "grad-Pe cliff field drives runaway edge erosion into the collector "
+    "(measured: ~0.3 C/step, 90%% inventory loss in 20 steps)",
+)
 parser.add_argument("--fill-frac", type=float, default=0.2, help="n_fill/N_I")
 parser.add_argument(
     "--kappa",
@@ -116,6 +126,20 @@ vth = np.sqrt(constants.q_e * T_I0 / m_i)
 resolution = args.resolution
 dx = 2.0 / resolution
 annulus_w = ANNULUS_SMOOTH_CELLS * dx
+
+# cap the annulus outer radius clear of the collection shell (see
+# --load-margin help)
+r_outer_eff = min(R_OUTER, R_WALL - (args.standoff + args.load_margin) * dx)
+if comm.rank == 0 and r_outer_eff < R_OUTER:
+    print(
+        f"[liftoff] annulus outer radius capped {R_OUTER} -> "
+        f"{r_outer_eff:.4f} m (shell clearance at this resolution/standoff)",
+        flush=True,
+    )
+assert r_outer_eff > R_INNER + annulus_w, (
+    "standoff+margin leaves no room for the annulus at this resolution; "
+    "reduce --standoff or raise --resolution"
+)
 lz = NZ * dx
 zmin, zmax = 5.0 - lz / 2.0, 5.0 + lz / 2.0
 
@@ -217,13 +241,13 @@ simulation = picmi.Simulation(
 # equilibrium diamagnetic Bz seed (removes the startup transient; the
 # external add supplies the bias part -- see the ECT deck's double-count
 # note, upstream #6047)
-n_annulus = N_I * R_PART**2 / (R_OUTER**2 - R_INNER**2)
+n_annulus = N_I * R_PART**2 / (r_outer_eff**2 - R_INNER**2)
 if args.equilibrium_b:
     k_eq = 2.0 * constants.mu0 * (T_I0 + T_E0) * constants.q_e
     sgn = "" if BZ_BIAS >= 0 else "-"
     rr = "sqrt(x*x+y*y)"
     e_in = f"0.5*(1.0+tanh(({rr}-{R_INNER})/{annulus_w}))"
-    e_out = f"0.5*(1.0+tanh(({R_OUTER}-{rr})/{annulus_w}))"
+    e_out = f"0.5*(1.0+tanh(({r_outer_eff}-{rr})/{annulus_w}))"
     n_of_r = f"({n_fill}*(1.0-{e_in})+{n_annulus}*{e_in}*{e_out})"
     bz_seed = f"{sgn}sqrt({BZ_BIAS**2}+{k_eq}*({n_annulus}-{n_of_r}))-({BZ_BIAS})"
 else:
@@ -237,10 +261,10 @@ simulation.add_applied_field(
     )
 )
 
-# annular column + interior fill, tanh-softened edges; the outer edge sits
-# at R_OUTER = 0.75 vs the collection shell at R_WALL - standoff*dx -- the
-# smoothed tail that reaches the shell is COLLECTED (and tallied): that is
-# the wall model, not a leak.
+# annular column + interior fill, tanh-softened edges. The outer radius is
+# capped so the load (and its tanh tail) stays clear of the collection
+# shell; the R_PART inventory formula below rescales n_annulus so the
+# column carries the same line density regardless of the cap.
 r_expr = "sqrt(x*x+y*y)"
 edge_in = f"0.5*(1.0+tanh(({r_expr}-R_in)/sw))"
 edge_out = f"0.5*(1.0+tanh((R_out-{r_expr})/sw))"
@@ -256,7 +280,7 @@ ions = picmi.Species(
         n_a=n_annulus,
         n_f=n_fill,
         R_in=R_INNER,
-        R_out=R_OUTER,
+        R_out=r_outer_eff,
         sw=annulus_w,
     ),
 )
