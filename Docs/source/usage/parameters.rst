@@ -727,6 +727,48 @@ Setting up the field mesh
     the pml layer surrounding the patches should not overlap. For this reason, when defining
     distinct patches, please ensure that they are sufficiently separated.
 
+.. pp:param:: warpx.regrid_int
+    :type: ``integer``
+    :default: ``-1`` (no regridding)
+    :optional:
+
+    **Hybrid-PIC solver only** (:pp:param:`algo.maxwell_solver` = ``hybrid``, dynamic mesh refinement).
+    When set to a positive number with :pp:param:`amr.max_level` > 0, the refinement tags are
+    re-evaluated every ``regrid_int`` steps, at the step boundary (never inside the field
+    sub-step loop). Refined levels are then created, relocated (new grids), or removed to follow
+    the tags: a created level receives its magnetic field by divergence-free prolongation of the
+    coarse solution and re-deposits the plasma moments from its (re-homed) particles; a relocated
+    level keeps its fine solution on the overlap with the previous grids; before a level is
+    removed, its field is restricted onto the coarse level one final time without the sacrificial
+    setback band. If the tags are unchanged, the regrid is an exact no-op.
+    The electromagnetic and electrostatic solvers are static-MR and reject this parameter.
+    Not compatible with ``BackTransformed`` diagnostics, nor with
+    ``external_vector_potential.do_diva_cleaning = 1``.
+
+.. pp:param:: warpx.refinement_start_time
+    :type: ``float``
+    :unit: seconds
+    :optional:
+
+    **Hybrid-PIC solver only**, requires :pp:param:`warpx.regrid_int` > 0. Refinement tags are
+    suppressed while :math:`t <` ``refinement_start_time``: the refined levels do not exist at
+    initialization and are created by the first regrid whose time reaches this value. Composes
+    with :pp:param:`warpx.fine_tag_lo`/:pp:param:`warpx.fine_tag_hi` and with both
+    ``ref_patch_function`` forms.
+
+.. pp:param:: warpx.ref_patch_function(x,y,z,t)
+    :type: ``string``
+    :optional:
+
+    **Hybrid-PIC solver only**, requires :pp:param:`warpx.regrid_int` > 0; mutually exclusive
+    with :pp:param:`warpx.ref_patch_function(x,y,z)`. A time-dependent refinement-patch function,
+    re-evaluated at every regrid, so refined patches can appear, move, and disappear during the
+    run. For example,
+    ``warpx.ref_patch_function(x,y,z,t) = "(x>-1e-3)*(x<1e-3)*(z>(0.02+0.01*(t>=1e-9)))*(z<(0.05+0.01*(t>=1e-9)))"``
+    moves the patch up by one centimeter at :math:`t = 1` ns, and multiplying a patch function by
+    ``(t<t_off)`` removes the patch at :math:`t_{\mathrm{off}}`. When the function becomes zero
+    everywhere at a regrid, the refined level is removed and the coarse level carries on alone.
+
 .. pp:param:: warpx.refine_plasma
     :type: ``integer``
     :default: ``0``

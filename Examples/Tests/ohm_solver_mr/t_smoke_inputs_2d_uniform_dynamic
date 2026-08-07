@@ -1,0 +1,86 @@
+# Hybrid-PIC DYNAMIC mesh-refinement smoke (P1.5): the same quiet uniform
+# drifting plasma as t_smoke_inputs_2d_uniform, but the refined level does
+# not exist at t = 0 -- it is created mid-run by the first regrid whose time
+# reaches warpx.refinement_start_time (here 99.5*dt, i.e. the regrid at the
+# top of step 100).
+#
+#   <warpx.2d> t_smoke_inputs_2d_uniform_dynamic
+#
+# Compare against the always-on control
+#   <warpx.2d> t_smoke_inputs_2d_uniform max_step=400
+# with p15_gate_analysis.py (fielddiff / sigma / energy / levels).
+#
+# Relocation variant (patch moves up by 32 coarse cells at step 200; remove
+# the fine_tag and refinement_start_time lines, they would override/gate it):
+#   warpx.ref_patch_function(x,y,z,t) = "(x>-2.2840138279820255e-3)*(x<2.2840138279820255e-3)*(z>(0.018+9.13605531192729e-3*(t>=1.134283207205386e-9)))*(z<(0.055+9.13605531192729e-3*(t>=1.134283207205386e-9)))"
+#
+# Deactivation variant (patch removed at step 200):
+#   warpx.ref_patch_function(x,y,z,t) = "(x>-2.2840138279820255e-3)*(x<2.2840138279820255e-3)*(z>0.018)*(z<0.055)*(t<1.134283207205386e-9)"
+
+max_step = 400
+warpx.const_dt = 5.685630111305193e-12
+warpx.verbose = 1
+
+amr.n_cell = 32 256
+amr.max_level = 1
+amr.blocking_factor = 4
+amr.max_grid_size = 128
+warpx.fine_tag_lo = -2.2840138279820255e-3 0.018
+warpx.fine_tag_hi =  2.2840138279820255e-3 0.055
+
+# Dynamic MR: re-evaluate the refinement tags every 10 steps; keep the fine
+# level deferred until t >= 99.5*dt (created at the top of step 100).
+warpx.regrid_int = 10
+warpx.refinement_start_time = 5.657201960748667e-10
+
+geometry.dims = 2
+geometry.prob_lo = -4.5680276559640510e-3 0.0
+geometry.prob_hi =  4.5680276559640510e-3 0.073088442495424816
+
+boundary.field_lo = periodic periodic
+boundary.field_hi = periodic periodic
+boundary.particle_lo = periodic periodic
+boundary.particle_hi = periodic periodic
+
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.particle_shape = 1
+
+hybrid_pic_model.elec_temp = 510.998950691753
+hybrid_pic_model.gamma = 1.0
+hybrid_pic_model.n0_ref = 9.623617654281555e20
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 1e-07
+hybrid_pic_model.substeps = 20
+
+# uniform background field (trivially divergence free)
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 0.1
+
+particles.species_names = ions
+ions.charge = q_e
+ions.mass = 9.1093837139e-29
+ions.injection_style = nrandompercell
+ions.num_particles_per_cell = 4
+ions.profile = constant
+ions.density = 9.623617654281555e20
+ions.momentum_distribution_type = gaussian
+ions.ux_th = 0.001
+ions.uy_th = 0.001
+ions.uz_th = 0.001
+# small drift along z (~2 v_A), so plasma flows through the patch seam
+ions.uz_m = 0.002
+
+diagnostics.diags_names = diag1
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.intervals = 25
+diag1.fields_to_plot = Bx By Bz Ex Ey Ez jx jy jz rho divB
+diag1.write_species = 0
+
+warpx.reduced_diags_names = field_energy part_energy
+field_energy.type = FieldEnergy
+field_energy.intervals = 5
+part_energy.type = ParticleEnergy
+part_energy.intervals = 5
+
+warpx.serialize_initial_conditions = 1
