@@ -29,6 +29,7 @@
 #include <AMReX_Array.H>
 #include <AMReX_REAL.H>
 #include <AMReX_BoxArray.H>
+#include <AMReX_EdgeFluxRegister.H>
 #include <AMReX_IntVect.H>
 #include <AMReX_DistributionMapping.H>
 #include <AMReX_iMultiFab.H>
@@ -333,6 +334,13 @@ public:
      *  in-wall moments never overwrite the fine level's own frozen/starved
      *  values. Debug knob: disabling restores the EB-blind band fill. */
     bool m_mr_eb_gate_moments = true;
+    /** Mesh refinement: seam EMF matching (Balsara-style edge-EMF flux
+     *  register on the restriction commit boundary). Coarse faces sharing a
+     *  commit-boundary edge with the restricted region integrate the fine
+     *  level's edge-EMF history, so coarse div(B) at the seam is preserved to
+     *  machine precision by construction. Default on; disabling restores the
+     *  bare (unmatched) seam treatment. */
+    bool m_mr_emf_matching = true;
 
     /** Running maxima of the div(B) audit (raw value and value relative to
      *  max|B|/dx), accumulated while m_mr_check_div_b is set. */
@@ -422,6 +430,72 @@ private:
      * boundaries do not erode), 0 elsewhere. Cached until the box layout of
      * either level changes. */
     void EnsureRestrictKeepMask (int clev, amrex::IntVect const& ratio);
+
+    /** \brief (Re)build the cached seam EMF-matching edge-flux register of
+     * the (flev-1, flev) level pair. The register is defined on a SYNTHETIC
+     * fine BoxArray whose cell union equals the restriction keep region, so
+     * its registered edges are exactly the edges of the restriction commit
+     * boundary (where committed and freely evolved coarse faces meet). The
+     * keep region is derived from the authoritative eroded keep mask
+     * (EnsureRestrictKeepMask) as the bounding box of its covered cells and
+     * verified bitwise against the mask (single-rectangle keep regions only;
+     * any other geometry aborts with instructions to disable
+     * hybrid_pic_model.mr_emf_matching). With embedded boundaries the
+     * per-direction edge gates and E scratch space for the source gating are
+     * (re)built as well. Cached until any box layout or distribution map of
+     * the pair changes. */
+    void EnsureEmfMatchingRegister (int flev);
+
+    /** \brief Substep-start hook of the seam EMF matching: (re)build the
+     * registers if needed and zero their accumulators. */
+    void EmfMatchingReset ();
+
+    /** \brief Per-RK-stage hook of the seam EMF matching: accumulate the
+     * current stage EMFs (Efield_fp on every level, exactly the fields the
+     * stage's Faraday push consumed) into the edge-flux registers with the
+     * stage weight wdt = b_s * dt_sub. In 2D the accumulation weight is
+     * negated: the out-of-plane WarpX component is Ey while the register
+     * models dB/dt = -curl(Ez zhat) with its y axis equal to the WarpX z
+     * axis. With embedded boundaries both sources are gated by the coarse
+     * staircase edge mask (eb_update_E of the coarse level, valid region
+     * only), so the applied delta vanishes identically on frozen edges. */
+    void EmfMatchingAccumulate (
+        ablastr::fields::MultiLevelVectorField const& Efield, amrex::Real wdt);
+
+    /** \brief Substep-end hook of the seam EMF matching: apply the delta-form
+     * circulation correction to the coarse B faces around the registered
+     * edges. Must run before the masked restriction commit of the same
+     * substep (the restriction overwrites the covered-side keep faces; the
+     * correction owns the live-side faces). */
+    void EmfMatchingReflux (
+        ablastr::fields::MultiLevelVectorField const& Bfield,
+        amrex::IntVect const& ng, std::optional<bool> nodal_sync);
+
+    /** Seam EMF-matching state of one coarse-fine level pair (indexed by the
+     *  fine level). */
+    struct EmfMatchingLevel {
+        /** Edge-flux register on the synthetic (keep-region) fine layout. */
+        std::unique_ptr<amrex::EdgeFluxRegister> reg;
+        /** Synthetic box -> fine-level grid index (same rank by construction). */
+        amrex::Vector<int> orig;
+        /** Unallocated iteration helper on the synthetic layout (MFIter anchor
+         *  for FineAdd). */
+        std::unique_ptr<amrex::iMultiFab> iter;
+        /** True once the EB source gating of this pair is active. */
+        bool gated = false;
+        /** Fine-edge gates on the synthetic layout: parent coarse edge's
+         *  eb_update_E value (EB source gating). */
+        std::array<std::unique_ptr<amrex::iMultiFab>, 3> gate_f;
+        /** Gated fine-E stage scratch on the synthetic layout. */
+        std::array<std::unique_ptr<amrex::MultiFab>, 3> scratch_f;
+        /** Gated coarse-E stage scratch on the coarse layout. */
+        std::array<std::unique_ptr<amrex::MultiFab>, 3> scratch_c;
+        /** Cache keys: layouts the register was built from. */
+        amrex::BoxArray fba, cba;
+        amrex::DistributionMapping fdm, cdm;
+    };
+    /** Per-fine-level seam EMF-matching state. */
+    amrex::Vector<EmfMatchingLevel> m_mr_emf;
 
     /** \brief (Re)build the cached per-direction coarse-face staircase masks
      * of refined level lev on the per-box coarse patch layout used by

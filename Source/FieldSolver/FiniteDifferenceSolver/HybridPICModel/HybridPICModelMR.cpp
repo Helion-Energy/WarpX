@@ -10,7 +10,10 @@
  *  - divergence-free prolongation of B into fine-level coarse-fine ghosts,
  *  - fine->coarse face-averaged restriction of B with a sacrificial setback
  *    band under the fine-patch edge,
- *  - an optional runtime div(B) audit of both operators.
+ *  - seam EMF matching: an edge-EMF flux register on the restriction commit
+ *    boundary, so the coarse faces around the seam integrate the fine
+ *    edge-EMF history (coarse div(B) preserved by construction),
+ *  - an optional runtime div(B) audit of the transfer operators.
  */
 
 #include "HybridPICModel.H"
@@ -721,6 +724,349 @@ void HybridPICModel::RestrictBfieldFineToCoarse (
     }
 #else
     amrex::ignore_unused(ng, nodal_sync);
+    WARPX_ABORT_WITH_MESSAGE(
+        "Hybrid-PIC mesh refinement is only implemented for Cartesian 2D/3D.");
+#endif
+}
+
+void HybridPICModel::EnsureEmfMatchingRegister (const int flev)
+{
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    auto& warpx = WarpX::GetInstance();
+    const int clev = flev - 1;
+    const amrex::BoxArray& fba_cell = warpx.boxArray(flev);
+    const amrex::DistributionMapping& fdm = warpx.DistributionMap(flev);
+    const amrex::BoxArray& cba = warpx.boxArray(clev);
+    const amrex::DistributionMapping& cdm = warpx.DistributionMap(clev);
+    const amrex::IntVect ratio = warpx.refRatio(clev);
+
+    if (static_cast<int>(m_mr_emf.size()) <= flev) {
+        m_mr_emf.resize(flev + 1);
+    }
+    EmfMatchingLevel& L = m_mr_emf[flev];
+    if (L.reg && L.fba == fba_cell && L.fdm == fdm && L.cba == cba && L.cdm == cdm) {
+        return;
+    }
+    L = EmfMatchingLevel{};
+
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(fba_cell.coarsenable(ratio),
+        "Hybrid-PIC MR seam EMF matching: the fine-level BoxArray must be "
+        "coarsenable by the refinement ratio.");
+
+    // The commit boundary of the masked restriction is defined by the eroded
+    // keep mask; derive the keep region from it (authoritative for multi-box
+    // fine unions: the erosion acts on the union, never box by box).
+    EnsureRestrictKeepMask(clev, ratio);
+    const amrex::iMultiFab& kmask = *m_mr_keep_mask[clev];
+
+    // Bounding box of the keep cells.
+    amrex::ReduceOps<amrex::ReduceOpMin, amrex::ReduceOpMin, amrex::ReduceOpMin,
+                     amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpMax> rops;
+    amrex::ReduceData<int, int, int, int, int, int> rdata(rops);
+    using RTuple = typename decltype(rdata)::Type;
+    for (MFIter mfi(kmask, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        const amrex::Box tbx = mfi.tilebox();
+        auto const& m_arr = kmask.const_array(mfi);
+        rops.eval(tbx, rdata,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> RTuple
+            {
+                if (m_arr(i, j, k) == 1) { return {i, j, k, i, j, k}; }
+                constexpr int big = std::numeric_limits<int>::max();
+                constexpr int small = std::numeric_limits<int>::lowest();
+                return {big, big, big, small, small, small};
+            });
+    }
+    auto rv = rdata.value(rops);
+    int klo[3] = {amrex::get<0>(rv), amrex::get<1>(rv), amrex::get<2>(rv)};
+    int khi[3] = {amrex::get<3>(rv), amrex::get<4>(rv), amrex::get<5>(rv)};
+    amrex::ParallelDescriptor::ReduceIntMin(klo, 3);
+    amrex::ParallelDescriptor::ReduceIntMax(khi, 3);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(klo[0] <= khi[0],
+        "Hybrid-PIC MR seam EMF matching: the restriction keep region is "
+        "empty (the setback erosion consumed the whole patch); enlarge the "
+        "patch, reduce hybrid_pic_model.mr_restrict_setback, or set "
+        "hybrid_pic_model.mr_emf_matching = 0.");
+    const amrex::Box kbox(amrex::IntVect(AMREX_D_DECL(klo[0], klo[1], klo[2])),
+                          amrex::IntVect(AMREX_D_DECL(khi[0], khi[1], khi[2])));
+
+    // Register-basis safety check: the synthetic register basis below is
+    // sound only if the keep region is exactly this rectangle (single static
+    // rectangular patches -- all supported deck geometries). Verified bitwise
+    // against the authoritative mask on every (re)build.
+    amrex::ReduceOps<amrex::ReduceOpSum> vops;
+    amrex::ReduceData<amrex::Long> vdata(vops);
+    using VTuple = typename decltype(vdata)::Type;
+    for (MFIter mfi(kmask, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        const amrex::Box tbx = mfi.tilebox();
+        auto const& m_arr = kmask.const_array(mfi);
+        vops.eval(tbx, vdata,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> VTuple
+            {
+                const bool in = kbox.contains(i, j, k);
+                return {((m_arr(i, j, k) == 1) == in) ? amrex::Long(0) : amrex::Long(1)};
+            });
+    }
+    amrex::Long mismatch = amrex::get<0>(vdata.value(vops));
+    amrex::ParallelDescriptor::ReduceLongSum(mismatch);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(mismatch == 0,
+        "Hybrid-PIC MR seam EMF matching: the restriction keep region is not "
+        "a single rectangle, which the synthetic edge-flux register basis "
+        "requires (single static rectangular patches). Use one rectangular "
+        "refinement patch per level, or set "
+        "hybrid_pic_model.mr_emf_matching = 0.");
+
+    // Synthetic fine BoxArray whose cell union is the keep region: the
+    // register's "fine boundary" IS the commit boundary. Decompose along the
+    // actual fine grids so every synthetic box lives inside its fine grid on
+    // the same rank (FineAdd then reads the actual fine E fabs directly).
+    // Internal per-box seams only register edges adjacent to committed
+    // faces, which the restriction overwrites -- benign by construction.
+    const amrex::BoxArray cfba = amrex::coarsen(fba_cell, ratio);
+    amrex::BoxList sbl;
+    amrex::Vector<int> pmap;
+    for (int i = 0, N = static_cast<int>(cfba.size()); i < N; ++i) {
+        const amrex::Box b = cfba[i] & kbox;
+        if (b.ok()) {
+            sbl.push_back(amrex::refine(b, ratio));
+            pmap.push_back(fdm[i]);
+            L.orig.push_back(i);
+        }
+    }
+    const amrex::BoxArray sfba(std::move(sbl));
+    const amrex::DistributionMapping sdm(pmap);
+    L.reg = std::make_unique<amrex::EdgeFluxRegister>(
+        sfba, cba, sdm, cdm, warpx.Geom(flev), warpx.Geom(clev), 1);
+    L.iter = std::make_unique<amrex::iMultiFab>(
+        sfba, sdm, 1, 0, amrex::MFInfo().SetAlloc(false));
+
+    // EB source gating (applied delta must vanish identically on staircase-
+    // frozen coarse edges): cache the per-direction fine-edge gates (parent
+    // coarse edge's eb_update_E, imported from VALID coarse data only -- the
+    // coarse-fine ghost region of that mask is never marked, the documented
+    // trap) and the per-stage E scratch space.
+#ifdef AMREX_USE_EB
+    const bool gate_enabled = EB::enabled() &&
+        (warpx.GetEBUpdateEFlag()[clev][0] != nullptr);
+#else
+    const bool gate_enabled = false;
+#endif
+    if (gate_enabled) {
+        L.gated = true;
+        const amrex::BoxArray csba = amrex::coarsen(sfba, ratio);
+        for (int idim = 0; idim < 3; ++idim) {
+#if !defined(WARPX_DIM_3D)
+            // 2D: only the out-of-plane component (WarpX Ey) enters.
+            if (idim != 1) { continue; }
+#endif
+            const amrex::iMultiFab& ceb = *warpx.GetEBUpdateEFlag()[clev][idim];
+            const amrex::IndexType etype = ceb.ixType();
+            amrex::iMultiFab cgate(amrex::convert(csba, etype), sdm, 1, 0);
+            cgate.setVal(1);
+            cgate.ParallelCopy(ceb, 0, 0, 1, amrex::IntVect(0), amrex::IntVect(0),
+                               warpx.Geom(clev).periodicity());
+            L.gate_f[idim] = std::make_unique<amrex::iMultiFab>(
+                amrex::convert(sfba, etype), sdm, 1, 0);
+            L.scratch_f[idim] = std::make_unique<amrex::MultiFab>(
+                amrex::convert(sfba, etype), sdm, 1, 0);
+            L.scratch_c[idim] = std::make_unique<amrex::MultiFab>(
+                amrex::convert(cba, etype), cdm, 1, 0);
+            // Expand onto the fine edges: each fine edge inherits its parent
+            // coarse edge's gate. FineAdd only reads fine edges exactly
+            // overlying coarse edges (even transverse indices), where the
+            // floor-division coarsening is exact.
+            amrex::iMultiFab& gf = *L.gate_f[idim];
+            const amrex::IntVect rr = ratio;
+            for (MFIter mfi(gf, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                const amrex::Box tbx = mfi.tilebox();
+                auto const& g = gf.array(mfi);
+                auto const& cg = cgate.const_array(mfi);
+                amrex::ParallelFor(tbx,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    {
+                        const int ci = amrex::coarsen(i, rr[0]);
+                        const int cj = amrex::coarsen(j, rr[1]);
+#if defined(WARPX_DIM_3D)
+                        const int ck = amrex::coarsen(k, rr[2]);
+#else
+                        const int ck = k;
+#endif
+                        g(i, j, k) = cg(ci, cj, ck);
+                    });
+            }
+        }
+    }
+
+    L.fba = fba_cell;
+    L.fdm = fdm;
+    L.cba = cba;
+    L.cdm = cdm;
+#else
+    amrex::ignore_unused(flev);
+    WARPX_ABORT_WITH_MESSAGE(
+        "Hybrid-PIC mesh refinement is only implemented for Cartesian 2D/3D.");
+#endif
+}
+
+void HybridPICModel::EmfMatchingReset ()
+{
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    auto& warpx = WarpX::GetInstance();
+    for (int flev = 1; flev <= warpx.finestLevel(); ++flev) {
+        EnsureEmfMatchingRegister(flev);
+        m_mr_emf[flev].reg->reset();
+    }
+#else
+    WARPX_ABORT_WITH_MESSAGE(
+        "Hybrid-PIC mesh refinement is only implemented for Cartesian 2D/3D.");
+#endif
+}
+
+void HybridPICModel::EmfMatchingAccumulate (
+    ablastr::fields::MultiLevelVectorField const& Efield, amrex::Real wdt)
+{
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    auto& warpx = WarpX::GetInstance();
+#if defined(WARPX_DIM_3D)
+    const amrex::Real w = wdt;
+#else
+    // 2D sign: the out-of-plane WarpX component is Ey while the register
+    // models dB/dt = -curl(Ez zhat) with its y axis equal to the WarpX z
+    // axis (WarpX XZ Faraday: dBx/dt = +dEy/dz, dBz/dt = -dEy/dx).
+    const amrex::Real w = -wdt;
+#endif
+    for (int flev = 1; flev <= warpx.finestLevel(); ++flev)
+    {
+        EmfMatchingLevel& L = m_mr_emf[flev];
+        const int clev = flev - 1;
+
+        if (L.gated) {
+            // Refresh the gated stage sources: zero on staircase-frozen
+            // coarse edges, so both sides accumulate identical zeros there
+            // and the applied delta vanishes.
+            for (int idim = 0; idim < 3; ++idim) {
+                if (!L.scratch_c[idim]) { continue; }
+                amrex::MultiFab& sc = *L.scratch_c[idim];
+                const amrex::iMultiFab& ceb = *warpx.GetEBUpdateEFlag()[clev][idim];
+                const amrex::MultiFab& Ec = *Efield[clev][idim];
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+                for (MFIter mfi(sc, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+                {
+                    const amrex::Box tbx = mfi.tilebox();
+                    auto const& d = sc.array(mfi);
+                    auto const& g = ceb.const_array(mfi);
+                    auto const& s = Ec.const_array(mfi);
+                    amrex::ParallelFor(tbx,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                        {
+                            d(i, j, k) = (g(i, j, k) != 0) ? s(i, j, k) : 0.0_rt;
+                        });
+                }
+                amrex::MultiFab& sf = *L.scratch_f[idim];
+                const amrex::MultiFab& Ef = *Efield[flev][idim];
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+                for (MFIter mfi(sf, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+                {
+                    const amrex::Box tbx = mfi.tilebox();
+                    auto const& d = sf.array(mfi);
+                    auto const& g = L.gate_f[idim]->const_array(mfi);
+                    auto const& s = Ef[L.orig[mfi.index()]].const_array();
+                    amrex::ParallelFor(tbx,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                        {
+                            d(i, j, k) = (g(i, j, k) != 0) ? s(i, j, k) : 0.0_rt;
+                        });
+                }
+            }
+        }
+
+        // Coarse-side accumulation over the coarse grids (the register skips
+        // grids without a coarse-fine interface). CrseAdd/FineAdd require
+        // untiled MFIter loops and read valid regions only.
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(*Efield[clev][0], false); mfi.isValid(); ++mfi)
+        {
+#if defined(WARPX_DIM_3D)
+            const amrex::Array<amrex::FArrayBox const*, 3> ec{
+                L.gated ? &(*L.scratch_c[0])[mfi] : &(*Efield[clev][0])[mfi],
+                L.gated ? &(*L.scratch_c[1])[mfi] : &(*Efield[clev][1])[mfi],
+                L.gated ? &(*L.scratch_c[2])[mfi] : &(*Efield[clev][2])[mfi]};
+            L.reg->CrseAdd(mfi, ec, w);
+#else
+            L.reg->CrseAdd(
+                mfi,
+                L.gated ? (*L.scratch_c[1])[mfi] : (*Efield[clev][1])[mfi],
+                w);
+#endif
+        }
+
+        // Fine-side accumulation over the synthetic (keep-region) boxes;
+        // each lives inside its actual fine grid on the same rank, so the
+        // fine E fabs are read directly (no communication).
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(*L.iter, false); mfi.isValid(); ++mfi)
+        {
+            const int gi = L.orig[mfi.index()];
+#if defined(WARPX_DIM_3D)
+            const amrex::Array<amrex::FArrayBox const*, 3> ef{
+                L.gated ? &(*L.scratch_f[0])[mfi] : &(*Efield[flev][0])[gi],
+                L.gated ? &(*L.scratch_f[1])[mfi] : &(*Efield[flev][1])[gi],
+                L.gated ? &(*L.scratch_f[2])[mfi] : &(*Efield[flev][2])[gi]};
+            L.reg->FineAdd(mfi, ef, w);
+#else
+            L.reg->FineAdd(
+                mfi,
+                L.gated ? (*L.scratch_f[1])[mfi] : (*Efield[flev][1])[gi],
+                w);
+#endif
+        }
+    }
+    // CrseAdd/FineAdd are asynchronous on GPU builds; the stage E fields are
+    // overwritten by the next stage's solve, so synchronize here.
+    amrex::Gpu::streamSynchronize();
+#else
+    amrex::ignore_unused(Efield, wdt);
+    WARPX_ABORT_WITH_MESSAGE(
+        "Hybrid-PIC mesh refinement is only implemented for Cartesian 2D/3D.");
+#endif
+}
+
+void HybridPICModel::EmfMatchingReflux (
+    ablastr::fields::MultiLevelVectorField const& Bfield,
+    amrex::IntVect const& ng, std::optional<bool> nodal_sync)
+{
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    auto& warpx = WarpX::GetInstance();
+    for (int flev = warpx.finestLevel(); flev >= 1; --flev)
+    {
+        const int clev = flev - 1;
+#if defined(WARPX_DIM_3D)
+        m_mr_emf[flev].reg->Reflux(
+            {Bfield[clev][0], Bfield[clev][1], Bfield[clev][2]});
+#else
+        // 2D: the out-of-plane By is cell-centered and not part of div(B).
+        m_mr_emf[flev].reg->Reflux({Bfield[clev][0], Bfield[clev][2]});
+#endif
+        // With the per-substep restriction cadence (default) the restriction
+        // that follows immediately refreshes the coarse ghosts; otherwise
+        // refresh them here so the next stage's E solve sees the corrected
+        // seam faces.
+        if (!m_mr_restrict_every_substep) {
+            warpx.FillBoundaryB(clev, ng, nodal_sync);
+        }
+    }
+#else
+    amrex::ignore_unused(Bfield, ng, nodal_sync);
     WARPX_ABORT_WITH_MESSAGE(
         "Hybrid-PIC mesh refinement is only implemented for Cartesian 2D/3D.");
 #endif

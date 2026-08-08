@@ -108,6 +108,7 @@ class PlasmaCylinderCompression(object):
         mr_eb_gate_prolong=None,
         mr_eb_gate_restrict=None,
         mr_eb_gate_moments=None,
+        mr_emf_matching=None,
     ):
         self.test = test
         self.verbose = verbose or self.test
@@ -120,6 +121,7 @@ class PlasmaCylinderCompression(object):
         self.mr_eb_gate_prolong = mr_eb_gate_prolong
         self.mr_eb_gate_restrict = mr_eb_gate_restrict
         self.mr_eb_gate_moments = mr_eb_gate_moments
+        self.mr_emf_matching = mr_emf_matching
 
         if patch_mode in ("eb_inside", "crossing", "partial_core"):
             # EB-inside-patch arm: widen the domain so the level-1 patch
@@ -565,6 +567,8 @@ class PlasmaCylinderCompression(object):
                 pywarpx.hybridpicmodel.mr_eb_gate_restrict = self.mr_eb_gate_restrict
             if self.mr_eb_gate_moments is not None:
                 pywarpx.hybridpicmodel.mr_eb_gate_moments = self.mr_eb_gate_moments
+            if self.mr_emf_matching is not None:
+                pywarpx.hybridpicmodel.mr_emf_matching = self.mr_emf_matching
         if self.seed is not None:
             pywarpx.warpx.random_seed = self.seed
         simulation.initialize_warpx()
@@ -704,6 +708,13 @@ parser.add_argument(
     choices=[0, 1],
     default=None,
 )
+parser.add_argument(
+    "--mr-emf-matching",
+    help="seam EMF matching at the coarse-fine boundary (default: WarpX default, on)",
+    type=int,
+    choices=[0, 1],
+    default=None,
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
@@ -721,5 +732,6 @@ run = PlasmaCylinderCompression(
     mr_eb_gate_prolong=args.mr_eb_gate_prolong,
     mr_eb_gate_restrict=args.mr_eb_gate_restrict,
     mr_eb_gate_moments=args.mr_eb_gate_moments,
+    mr_emf_matching=args.mr_emf_matching,
 )
 simulation.step()
