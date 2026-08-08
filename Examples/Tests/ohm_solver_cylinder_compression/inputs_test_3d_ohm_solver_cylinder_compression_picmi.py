@@ -15,6 +15,7 @@ import numpy as np
 import openpmd_api as io
 from mpi4py import MPI as mpi
 
+import pywarpx
 from pywarpx import picmi
 
 constants = picmi.constants
@@ -62,6 +63,16 @@ class PlasmaCylinderCompression(object):
     # Number of substeps used to update B
     substeps = 60
 
+    # Refined-core mode (opt-in via --refined-core): half-width of the static
+    # level-1 tag box around the axis. Cells whose centers fall inside the box
+    # are tagged, so with the test-mode resolution (NX=32) this tags 16 coarse
+    # cells per direction which AMReX grows by one error-buffer cell to an
+    # 18-cell (0.59 m wide) patch containing the R_p=0.25 plasma column with
+    # margin while keeping the patch corners clear of the flux conserver wall.
+    # The patch spans the full (periodic) z extent since the equilibrium is
+    # z-uniform.
+    R_patch = 0.26
+
     def Bz(self, r):
         return np.sqrt(
             self.B0**2
@@ -73,9 +84,14 @@ class PlasmaCylinderCompression(object):
             / (1.0 + np.exp((r - self.R_p) / self.delta_p))
         )
 
-    def __init__(self, test, verbose):
+    def __init__(
+        self, test, verbose, refined_core=False, grid_type="collocated", seed=None
+    ):
         self.test = test
         self.verbose = verbose or self.test
+        self.refined_core = refined_core
+        self.grid_type = grid_type
+        self.seed = seed
 
         self.Lx = self.LX
         self.Ly = self.LY
@@ -216,20 +232,27 @@ class PlasmaCylinderCompression(object):
         self.rho_i = self.vi_th / self.w_ci
 
     def load_fields(self):
-        Bx = simulation.fields.get("Bfield_fp_external", dir="x", level=0)
-        By = simulation.fields.get("Bfield_fp_external", dir="y", level=0)
-        Bz = simulation.fields.get("Bfield_fp_external", dir="z", level=0)
+        # With a refined core the initial B field must be loaded on every
+        # level: the level-1 patch holds its own field data which is not
+        # initialized from the coarse level. This callback fires once per
+        # level during initialization (each time that level is the current
+        # finest), so only the levels that exist so far can be filled.
+        n_levels = pywarpx.libwarpx.warpx.finest_level + 1
+        for lev in range(n_levels):
+            Bx = simulation.fields.get("Bfield_fp_external", dir="x", level=lev)
+            By = simulation.fields.get("Bfield_fp_external", dir="y", level=lev)
+            Bz = simulation.fields.get("Bfield_fp_external", dir="z", level=lev)
 
-        Bx[:, :] = 0.0
-        By[:, :] = 0.0
+            Bx[:, :] = 0.0
+            By[:, :] = 0.0
 
-        XM, YM, ZM = np.meshgrid(
-            Bz.mesh("x"), Bz.mesh("y"), Bz.mesh("z"), indexing="ij"
-        )
+            XM, YM, ZM = np.meshgrid(
+                Bz.mesh("x"), Bz.mesh("y"), Bz.mesh("z"), indexing="ij"
+            )
 
-        RM = np.sqrt(XM**2 + YM**2)
+            RM = np.sqrt(XM**2 + YM**2)
 
-        Bz[:, :] = self.Bz(RM)
+            Bz[:, :] = self.Bz(RM)
         comm.Barrier()
 
     def setup_run(self):
@@ -240,6 +263,11 @@ class PlasmaCylinderCompression(object):
         #######################################################################
 
         # Create grid
+        grid_kw = {}
+        if self.refined_core:
+            # The level-1 boxes must stay small enough that the blocking
+            # factor does not round the patch out toward the wall.
+            grid_kw["warpx_blocking_factor"] = 4
         self.grid = picmi.Cartesian3DGrid(
             number_of_cells=[self.NX, self.NY, self.NZ],
             lower_bound=[-0.5 * self.Lx, -0.5 * self.Ly, -0.5 * self.Lz],
@@ -249,14 +277,23 @@ class PlasmaCylinderCompression(object):
             lower_boundary_conditions_particles=["absorbing", "absorbing", "periodic"],
             upper_boundary_conditions_particles=["absorbing", "absorbing", "periodic"],
             warpx_max_grid_size=self.NZ,
+            **grid_kw,
         )
+        if self.refined_core:
+            # Static level-1 patch covering the plasma core, spanning the
+            # full periodic z extent (the equilibrium is z-uniform).
+            self.grid.add_refined_region(
+                level=1,
+                lo=[-self.R_patch, -self.R_patch, -0.5 * self.Lz],
+                hi=[self.R_patch, self.R_patch, 0.5 * self.Lz],
+            )
         simulation.time_step_size = self.dt
         simulation.max_steps = self.total_steps
         simulation.current_deposition_algo = "direct"
         simulation.particle_shape = 1
         simulation.use_filter = True
         simulation.verbose = self.verbose
-        simulation.grid_type = "collocated"
+        simulation.grid_type = self.grid_type
 
         #######################################################################
         # Field solver and external field                                     #
@@ -383,7 +420,37 @@ class PlasmaCylinderCompression(object):
 
         # Initialize inputs and WarpX instance
         simulation.initialize_inputs()
+        if self.refined_core:
+            # Report the divergence of B at the coarse-fine interface after
+            # the ghost fill and restriction steps (printed diagnostics).
+            pywarpx.hybridpicmodel.mr_check_div_b = 1
+        if self.seed is not None:
+            pywarpx.warpx.random_seed = self.seed
         simulation.initialize_warpx()
+        if self.refined_core:
+            self.check_external_A_per_level()
+
+    def check_external_A_per_level(self):
+        """Verify that both external vector potentials (openPMD file and
+        analytical parser) landed on the refined level: fit the gradient of
+        the raw (unscaled) Ax fields along y on each level and compare with
+        the analytical value -0.25*dB."""
+        expected = -0.25 * self.dB
+        for name in ("uniform_file", "uniform_analytical"):
+            for lev in range(2):
+                Ax = simulation.fields.get(f"{name}_Aext", dir="x", level=lev)
+                yy = Ax.mesh("y")
+                len(yy)
+                # Column through the middle of the level's bounding box
+                data = Ax[len(Ax.mesh("x")) // 2, :, len(Ax.mesh("z")) // 2]
+                grad = np.polyfit(yy, np.squeeze(data), 1)[0]
+                if comm.rank == 0:
+                    print(
+                        f"External A check: {name} lev={lev} "
+                        f"dAx/dy = {grad:.6e} (expected {expected:.6e}, "
+                        f"ratio {grad / expected:.4f})",
+                        flush=True,
+                    )
 
 
 ##########################
@@ -403,8 +470,31 @@ parser.add_argument(
     help="Verbose output",
     action="store_true",
 )
+parser.add_argument(
+    "--refined-core",
+    help="add a static mesh-refinement patch (level 1) covering the plasma core",
+    action="store_true",
+)
+parser.add_argument(
+    "--grid-type",
+    help="field staggering; the refined-core mode requires 'staggered'",
+    choices=["collocated", "staggered"],
+    default="collocated",
+)
+parser.add_argument(
+    "--seed",
+    help="override the random seed (used to estimate run-to-run noise)",
+    type=int,
+    default=None,
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
-run = PlasmaCylinderCompression(test=args.test, verbose=args.verbose)
+run = PlasmaCylinderCompression(
+    test=args.test,
+    verbose=args.verbose,
+    refined_core=args.refined_core,
+    grid_type=args.grid_type,
+    seed=args.seed,
+)
 simulation.step()
