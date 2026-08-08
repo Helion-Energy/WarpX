@@ -215,6 +215,21 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Calibrated pedestal-band velocity relaxation: on a static tangential-
+# slip contact (identically zero HLLD fluxes) the drag is the only
+# dynamics -- the band decays at the exact theta-discretized rate with
+# a matched E_i kinetic drain, while the bulk (>= 2x pedestal) is
+# exactly invariant
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_pedestal_drag  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_halo_pedestal_drag  # inputs
+    "analysis_mhd_halo_pedestal_drag.py diags/diag000000 diags/diag000008"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_positivity  # name
     1  # dims

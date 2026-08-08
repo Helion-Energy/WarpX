@@ -147,6 +147,8 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     utils::parser::queryWithParser(pp, "vacuum_drag_rate", m_vacuum_drag_rate);
     utils::parser::queryWithParser(pp, "halo_pedestal_fraction",
                                    m_halo_pedestal_fraction);
+    utils::parser::queryWithParser(pp, "halo_pedestal_drag_rate",
+                                   m_halo_pedestal_drag_rate);
     utils::parser::queryWithParser(pp, "vacuum_resistivity_diffusivity",
                                    m_vacuum_resistivity_diffusivity);
     // Sentinel -1 = "not set": defaulted to the global implicit_evolve.theta
@@ -263,6 +265,18 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
             "must sit above the positivity guard so the halo band rides "
             "an interior point of the admissible set)");
     }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_halo_pedestal_drag_rate >= 0.0_rt,
+        "implicit_mhd.halo_pedestal_drag_rate cannot be negative");
+    // The drag weight is keyed to the density pedestal (identically zero
+    // without one), so an explicit positive rate without a pedestal is a
+    // configuration error.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_halo_pedestal_drag_rate == 0.0_rt ||
+            m_halo_pedestal_fraction > 0.0_rt,
+        "implicit_mhd.halo_pedestal_drag_rate requires a positive "
+        "implicit_mhd.halo_pedestal_fraction (the drag relaxes the "
+        "pedestal band, which does not exist without a pedestal)");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_vacuum_resistivity_diffusivity >= 0.0_rt,
         "implicit_mhd.vacuum_resistivity_diffusivity cannot be negative");
@@ -1067,6 +1081,8 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "Vacuum eta diffusivity [m2/s]: "
                    << m_vacuum_resistivity_diffusivity << "\n"
                    << "Halo pedestal fraction:        " << m_halo_pedestal_fraction
+                   << "\n"
+                   << "Halo pedestal drag rate [1/s]: " << m_halo_pedestal_drag_rate
                    << "\n";
     if (m_ion_closure == "cgl") {
         amrex::Print() << "CGL relaxation scale:          " << m_cgl_relaxation_scale << "\n"
@@ -2158,6 +2174,10 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
     // work sources taper C^1-smoothly to zero below twice the pedestal;
     // identically 1 when the pedestal is off.
     const amrex::Real halo_pedestal = m_halo_pedestal_density;
+    // Pedestal-band velocity relaxation (see m_halo_pedestal_drag_rate):
+    // engages with the complement of the halo source taper, i.e. full
+    // rate at the pedestal and exactly zero at/above twice it.
+    const amrex::Real halo_pedestal_drag_rate = m_halo_pedestal_drag_rate;
     const auto eta = m_hybrid_pic_model->m_eta;
     // Joule heating evaluates eta at the SAME hybrid-floored density as
     // Ohm's law, so the electron heating rate matches the field's eta J.
@@ -2331,13 +2351,25 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
             // terminal velocity F/(rho nu) instead.
             const amrex::Real vacuum_drag =
                 vacuum_drag_rate * (1.0_rt - plasma_weight);
+            // Pedestal-band drag (see m_halo_pedestal_drag_rate): the
+            // mass gates hold the band's density flux at zero, but its
+            // momentum rows still integrate the surrounding truncation
+            // forcing; the diagonal drag bounds the band at a terminal
+            // velocity instead of letting that inconsistency pin the
+            // Newton residual. Keyed to the step-old density like the
+            // halo source taper (a per-solve constant mask).
+            const amrex::Real halo_drag =
+                halo_pedestal_drag_rate *
+                (1.0_rt - theta_implicit_mhd::floor_outflow_limiter(
+                              rho_old(i, j, k), halo_pedestal));
             for (int component = 0; component < 3; ++component) {
                 momentum_increment(i, j, k, component) =
                     evolve_ion_fluid
                         ? theta_dt * (plasma_weight *
                                           (-divergence_momentum_flux[component] +
                                            j_cross_b[component]) -
-                                      vacuum_drag * mom(i, j, k, component))
+                                      (vacuum_drag + halo_drag) *
+                                          mom(i, j, k, component))
                         : 0.0_rt;
             }
 
@@ -2447,10 +2479,21 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                         rho_old(i, j, k), halo_pedestal);
                 ion_pressure_work *= halo_source_taper;
                 lorentz_work *= halo_source_taper;
+                // Kinetic-energy drain matched to the pedestal-band
+                // momentum drag: E_i carries the kinetic energy under
+                // this closure, so the drag must remove exactly the
+                // kinetic decay -nu |m|^2/rho it causes (at theta = 1/2
+                // the pairing is discretely exact) -- otherwise the
+                // relaxed band would read as spurious internal heating.
+                // Outside plasma_weight, like the momentum drag term.
+                const amrex::Real drag_kinetic_drain =
+                    halo_drag * 2.0_rt * kinetic_energy;
                 ion_energy_increment(i, j, k) =
-                    theta_dt * plasma_weight *
-                    (-divergence_ion_energy_flux + lorentz_work +
-                     ion_pressure_work);
+                    theta_dt *
+                    (plasma_weight *
+                         (-divergence_ion_energy_flux + lorentz_work +
+                          ion_pressure_work) -
+                     drag_kinetic_drain);
             }
         });
     }
@@ -3663,6 +3706,10 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     // the STEP-OLD density like the vacuum cell switch, so the taper is
     // a per-solve constant mask.
     const amrex::Real halo_pedestal = m_halo_pedestal_density;
+    // Pedestal-band velocity relaxation (see m_halo_pedestal_drag_rate):
+    // engages with weight 1 - halo_source_taper, i.e. full rate at the
+    // pedestal and exactly zero at/above twice it.
+    const amrex::Real halo_pedestal_drag_rate = m_halo_pedestal_drag_rate;
     const auto eta = m_hybrid_pic_model->m_eta;
     // Joule heating evaluates eta at the SAME hybrid-floored density as
     // Ohm's law, so the electron heating rate matches the field's eta J.
@@ -4086,6 +4133,14 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
 
             const amrex::Real vacuum_drag =
                 vacuum_drag_rate * (1.0_rt - plasma_weight);
+            // Pedestal-band drag (see m_halo_pedestal_drag_rate): the
+            // mass gates hold the band's density flux at zero, but its
+            // momentum rows still integrate the surrounding truncation
+            // forcing; the diagonal drag bounds the band at a terminal
+            // velocity instead of letting that inconsistency pin the
+            // Newton residual. Same pattern as the vacuum drag.
+            const amrex::Real halo_drag =
+                halo_pedestal_drag_rate * (1.0_rt - halo_source_taper);
             for (int component = 0; component < 3; ++component) {
                 // The Maxwell stress inside the total momentum flux
                 // replaces the pointwise J x B force.
@@ -4094,7 +4149,8 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                         ? theta_dt *
                               (plasma_weight *
                                    (-divergence_momentum_flux[component]) -
-                               vacuum_drag * mom(i, j, k, component))
+                               (vacuum_drag + halo_drag) *
+                                   mom(i, j, k, component))
                         : 0.0_rt;
             }
 
@@ -4191,10 +4247,26 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                     halo_source_taper *
                     drain_gate(lorentz_work, divergence_ion_energy_flux,
                                ion_energy_floor_rate, ion_limiter);
+                // Kinetic-energy drain matched to the pedestal-band
+                // momentum drag: E_i carries the kinetic energy under
+                // this closure, so the drag must remove exactly the
+                // kinetic decay -nu |m|^2/rho it causes (at theta = 1/2
+                // the pairing is discretely exact) -- otherwise the
+                // relaxed band would read as spurious internal heating.
+                // Outside plasma_weight, like the momentum drag term.
+                amrex::Real momentum_square = 0.0_rt;
+                for (int component = 0; component < 3; ++component) {
+                    momentum_square += mom(i, j, k, component) *
+                                       mom(i, j, k, component);
+                }
+                const amrex::Real drag_kinetic_drain =
+                    halo_drag * momentum_square / safe_density;
                 ion_energy_increment(i, j, k) =
-                    theta_dt * plasma_weight *
-                    (-divergence_ion_energy_flux + lorentz_work +
-                     ion_pressure_work);
+                    theta_dt *
+                    (plasma_weight *
+                         (-divergence_ion_energy_flux + lorentz_work +
+                          ion_pressure_work) -
+                     drag_kinetic_drain);
             }
 
             if (cgl_closure) {

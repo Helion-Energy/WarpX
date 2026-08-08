@@ -4359,7 +4359,29 @@ Jacobian probes.
     :math:`C^1`-smoothly to zero below :math:`2\rho_\mathrm{ped}` (the
     pedestal is numerical mass with no reactive response of its own).
 
-.. pp:param:: implicit_mhd.electron_pressure_floor
+.. pp:param:: implicit_mhd.halo_pedestal_drag_rate
+    :type: ``float``
+    :unit: 1/s
+    :default: ``0`` (off)
+
+    Velocity relaxation (drag) rate of the pedestal band. Requires a
+    positive :pp:param:`implicit_mhd.halo_pedestal_fraction`. The drag
+    engages :math:`C^1`-smoothly below twice the density pedestal --
+    full rate at :math:`\rho_\mathrm{ped}`, exactly zero at and above
+    :math:`2\rho_\mathrm{ped}`, keyed to the step-old density (a
+    per-solve constant mask) -- adding the diagonal, smooth momentum
+    sink :math:`-\nu\,\rho\mathbf{u}` of the vacuum-dust drag pattern.
+    Rationale: the pedestal's donor drain gates hold the band's mass
+    flux at zero, but the band's momentum rows still integrate the
+    discrete-stress truncation forcing of the surrounding plasma -- a
+    residual demand the gated mass cannot supply, which otherwise pins
+    the Newton solve at an irreducible least-squares plateau. The drag
+    bounds the band at the terminal velocity :math:`F/(\rho\nu)`
+    instead. Under the ``total_energy`` closure a matched
+    kinetic-energy drain (:math:`-\nu\,|\mathbf{m}|^2/\rho`) keeps the
+    ion internal energy invariant (discretely exact at
+    :math:`\theta = 1/2`). A sensible rate is the ion cyclotron scale
+    (of order :math:`0.1/\Delta t` for typical implicit MHD steps).
     :type: ``float``
     :unit: Pa
     :default: ``0``

@@ -422,6 +422,24 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // f-scaled-image rule displaces every block's operating point into
     // the interior by the same argument as the density.
     amrex::Real m_halo_pedestal_fraction = 0.0;
+    // Velocity relaxation rate [1/s] of the pedestal band (0 disables).
+    // The drag engages C^1-smoothly below TWICE the density pedestal
+    // (weight 1 - floor_outflow_limiter(rho_old, rho_ped): full rate at
+    // the pedestal, exactly zero at/above 2 rho_ped), keyed to the
+    // step-old density like the halo source taper, so it is a per-solve
+    // constant mask. Rationale: the pedestal's donor drain gates hold
+    // the band's MASS flux at zero, but the band's MOMENTUM rows still
+    // integrate the discrete-stress truncation forcing of the
+    // surrounding plasma -- a residual demand the gated mass can never
+    // supply, whose least-squares compromise is an irreducible Newton
+    // plateau (measured on the FRC benchmark ladder: iteration-0
+    // line-search death at a small constant residual). The diagonal,
+    // JFNK-friendly drag (same pattern as vacuum_drag_rate) bounds the
+    // band at the terminal velocity F/(rho nu) instead, so band momentum
+    // cannot demand mass the gates refuse. Under the total_energy
+    // closure the matched kinetic-energy drain keeps the ion INTERNAL
+    // energy invariant (exactly so at theta = 1/2).
+    amrex::Real m_halo_pedestal_drag_rate = 0.0;
     // The frozen per-step pedestal state (0 while inactive): density,
     // electron energy, ion internal energy (total_energy closure), and
     // the CGL pair.

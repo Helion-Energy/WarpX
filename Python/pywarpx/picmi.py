@@ -2337,6 +2337,16 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         on). Reactive work/relaxation sources taper smoothly to zero
         below twice the density pedestal.
 
+    halo_pedestal_drag_rate: float, default=0 (off)
+        Velocity relaxation rate in 1/s of the pedestal band (requires
+        halo_pedestal_fraction > 0). Engages C^1-smoothly below twice
+        the density pedestal (full rate at the pedestal, exactly zero
+        at/above twice it, keyed to the step-old density), bounding the
+        band at a terminal velocity so its momentum rows cannot demand
+        mass the pedestal drain gates refuse. Under the total_energy
+        closure a matched kinetic-energy drain keeps the ion internal
+        energy invariant.
+
     vacuum_resistivity_diffusivity: float, default=0 (off)
         Density-keyed vacuum resistivity of the field advance in m^2/s
         (fluid_flux="hlld" only): the Ohm's law sees the smooth, uncapped
@@ -2377,6 +2387,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         external_field_iteration=None,
         vacuum_drag_rate=None,
         halo_pedestal_fraction=None,
+        halo_pedestal_drag_rate=None,
         vacuum_resistivity_diffusivity=None,
         resistive_theta=None,
         fluid_flux=None,
@@ -2425,6 +2436,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.external_field_iteration = external_field_iteration
         self.vacuum_drag_rate = vacuum_drag_rate
         self.halo_pedestal_fraction = halo_pedestal_fraction
+        self.halo_pedestal_drag_rate = halo_pedestal_drag_rate
         self.vacuum_resistivity_diffusivity = vacuum_resistivity_diffusivity
         self.resistive_theta = resistive_theta
         self.fluid_flux = fluid_flux
@@ -2479,6 +2491,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.external_field_iteration = self.external_field_iteration
         implicit_mhd.vacuum_drag_rate = self.vacuum_drag_rate
         implicit_mhd.halo_pedestal_fraction = self.halo_pedestal_fraction
+        implicit_mhd.halo_pedestal_drag_rate = self.halo_pedestal_drag_rate
         implicit_mhd.vacuum_resistivity_diffusivity = (
             self.vacuum_resistivity_diffusivity
         )
