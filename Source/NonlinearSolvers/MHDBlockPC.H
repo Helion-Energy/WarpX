@@ -163,7 +163,7 @@
  *    It is composed AFTER the Faraday corrector, i.e.
  *    dB = J_BB^{-1} (bB - J_BM dM), the consistent triangular order.
  *
- *    pc_mhd_block.resistive_solver selects the inner solver. The default
+ *    pc_mhd_block.resistive_solver selects the inner solver.
  *    "chebyshev" is the portable fixed-count iteration above; its
  *    automatic application count grows as ceil(2 sqrt(lambda_max))
  *    (~50-67 stencil sweeps per application at the measured stiff
@@ -176,8 +176,10 @@
  *    -- and factorizes it exactly (NVIDIA cuDSS; CUDA builds configured
  *    with WarpX_CUDSS=ON), so every application is a single
  *    forward/backward substitution: the exact block inverse, with the
- *    factorization amortized over all applications in the update. On
- *    builds without the factorization backend "direct" aborts with a
+ *    factorization amortized over all applications in the update.
+ *    "direct" is the default wherever it is available (cuDSS compiled
+ *    and the CUDA backend active); every other build defaults to
+ *    "chebyshev", and an explicit "direct" request there aborts with a
  *    descriptive message (no heavy portable dependency is worth the
  *    default path).
  *
@@ -276,11 +278,20 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         int m_momentum_component = -1;
 
         // Resistive-block inner solver: "chebyshev" (the portable
-        // fixed-count iteration, the default) or "direct" (exact sparse
+        // fixed-count iteration) or "direct" (exact sparse
         // factorization of the frozen operator, one factorization per
         // preconditioner update amortized over all applications; requires
-        // a CUDA build configured with WarpX_CUDSS=ON).
+        // a CUDA build configured with WarpX_CUDSS=ON). Where the exact
+        // factorization is available -- the cuDSS path compiled AND the
+        // CUDA backend active -- it is the default (strictly stronger
+        // and cheaper per application than the Chebyshev iteration at
+        // every measured stiff regime); all other builds default to the
+        // portable Chebyshev iteration.
+#if defined(WARPX_USE_CUDSS) && defined(AMREX_USE_CUDA)
+        std::string m_resistive_solver = "direct";
+#else
         std::string m_resistive_solver = "chebyshev";
+#endif
         bool m_resistive_direct_enabled = false;
         // Roundoff matvec check of the assembled sparse rows against the
         // matrix-free operator at every active update (any build).

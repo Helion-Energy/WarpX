@@ -534,7 +534,9 @@ Overall simulation parameters
                matrix-free path applies, and every application is then a
                single forward/backward substitution instead of the
                :math:`\lceil 2\sqrt{\lambda_\text{max}}\rceil` stencil
-               sweeps of the automatic Chebyshev count.
+               sweeps of the automatic Chebyshev count. Builds with the
+               cuDSS backend default to ``direct``; all other builds
+               default to the portable ``chebyshev`` iteration.
 
             Boundaries the recast residual manages itself are mapped per
             component to preconditioner-only linear-operator types matching
@@ -615,12 +617,15 @@ Overall simulation parameters
               resistive block engages (below it the block is the exact
               identity).
             - ``pc_mhd_block.resistive_solver`` (``string``, default:
-              ``chebyshev``): hlld only; inner solver of the resistive
-              block. ``chebyshev`` is the portable fixed-count iteration;
-              ``direct`` factorizes the frozen operator exactly with
-              NVIDIA cuDSS once per preconditioner update (requires a
-              CUDA build configured with ``-DWarpX_CUDSS=ON``; other
-              builds abort with a descriptive message).
+              ``direct`` on CUDA builds configured with
+              ``-DWarpX_CUDSS=ON``, ``chebyshev`` otherwise): hlld only;
+              inner solver of the resistive block. ``chebyshev`` is the
+              portable fixed-count iteration; ``direct`` factorizes the
+              frozen operator exactly with NVIDIA cuDSS once per
+              preconditioner update, so it is the default wherever that
+              backend is available (requires a CUDA build configured
+              with ``-DWarpX_CUDSS=ON``; explicitly requesting it on
+              other builds aborts with a descriptive message).
             - ``pc_mhd_block.resistive_validate_assembly`` (``bool``,
               default: false): hlld only; at every active preconditioner
               update, assemble the direct solver's sparse rows and check
