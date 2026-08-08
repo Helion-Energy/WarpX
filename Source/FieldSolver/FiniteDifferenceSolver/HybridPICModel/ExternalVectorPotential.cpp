@@ -153,23 +153,23 @@ ExternalVectorPotential::InitData ()
 #if defined(WARPX_DIM_RZ)
                 warpx.ReadExternalFieldFromFile(m_external_file_path[i],
                     warpx.m_fields.get(Aext_field, Direction{0}, lev),
-                    "A", "r");
+                    "A", "r", 0, lev);
                 warpx.ReadExternalFieldFromFile(m_external_file_path[i],
                     warpx.m_fields.get(Aext_field, Direction{1}, lev),
-                    "A", "t");
+                    "A", "t", 0, lev);
                 warpx.ReadExternalFieldFromFile(m_external_file_path[i],
                     warpx.m_fields.get(Aext_field, Direction{2}, lev),
-                    "A", "z");
+                    "A", "z", 0, lev);
 #else
                 warpx.ReadExternalFieldFromFile(m_external_file_path[i],
                     warpx.m_fields.get(Aext_field, Direction{0}, lev),
-                    "A", "x");
+                    "A", "x", 0, lev);
                 warpx.ReadExternalFieldFromFile(m_external_file_path[i],
                     warpx.m_fields.get(Aext_field, Direction{1}, lev),
-                    "A", "y");
+                    "A", "y", 0, lev);
                 warpx.ReadExternalFieldFromFile(m_external_file_path[i],
                     warpx.m_fields.get(Aext_field, Direction{2}, lev),
-                    "A", "z");
+                    "A", "z", 0, lev);
 #endif
             }
         } else {

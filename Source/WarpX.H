@@ -867,11 +867,13 @@ public:
 
     /**
      * \brief Load field values from a user-specified openPMD file
-     * for a specific field (specified by `F_name`)
+     * for a specific field (specified by `F_name`) onto the MultiFab `mf`,
+     * which lives on mesh-refinement level `lev`.
      */
     void ReadExternalFieldFromFile (
          const std::string& read_fields_from_path, amrex::MultiFab* mf,
-         const std::string& F_name, const std::string& F_component, int dest_comp = 0);
+         const std::string& F_name, const std::string& F_component,
+         int dest_comp = 0, int lev = 0);
 
     /**
      * \brief
