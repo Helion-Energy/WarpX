@@ -110,6 +110,9 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("mr_eb_gate_prolong", m_mr_eb_gate_prolong);
     pp_hybrid.query("mr_eb_gate_restrict", m_mr_eb_gate_restrict);
     pp_hybrid.query("mr_eb_gate_moments", m_mr_eb_gate_moments);
+    // Seam EMF matching (edge-EMF flux register on the restriction commit
+    // boundary): default on; disabling restores the bare seam treatment.
+    pp_hybrid.query("mr_emf_matching", m_mr_emf_matching);
 
     // The hybrid model requires an electron temperature, reference density
     // and exponent to be given. These values will be used to calculate the
@@ -790,12 +793,23 @@ void HybridPICModel::BfieldEvolveRK4 (
         }
     }
 
+    // Seam EMF matching (mesh refinement): accumulate the per-stage edge EMFs
+    // of both levels of every coarse-fine pair into an edge-flux register and
+    // apply the delta-form circulation correction at the end of the substep,
+    // right before the masked restriction commit. The accepted per-substep
+    // delta-B is the b-weighted stage-EMF sum (b = 1/6, 1/3, 1/3, 1/6), so
+    // accumulating each stage's Efield_fp with weight b_s*dt reproduces the
+    // exact per-edge EMF time integral each level's Faraday update consumed.
+    const bool emf_matching = m_mr_emf_matching && (finest_level > 0);
+    if (emf_matching) { EmfMatchingReset(); }
+
     // The Runge-Kutta scheme begins here.
     // Step 1:
     FieldPushStage(
         Bfield, Efield, Jfield, rhofield, eb_update_E,
         0.5_rt*dt, subcycling_half, ng, nodal_sync
     );
+    if (emf_matching) { EmfMatchingAccumulate(Efield, dt/6.0_rt); }
 
     // The Bfield is now given by:
     // B_new = B_old + 0.5 * dt * [-curl x E(B_old)] = B_old + 0.5 * dt * K0.
@@ -815,6 +829,7 @@ void HybridPICModel::BfieldEvolveRK4 (
         Bfield, Efield, Jfield, rhofield, eb_update_E,
         0.5_rt*dt, subcycling_half, ng, nodal_sync
     );
+    if (emf_matching) { EmfMatchingAccumulate(Efield, dt/3.0_rt); }
 
     // The Bfield is now given by:
     //   B_new = B_old + 0.5 * dt * K0 + 0.5 * dt * [-curl x E(B_old + 0.5 * dt * K1)]
@@ -874,6 +889,7 @@ void HybridPICModel::BfieldEvolveRK4 (
         Bfield, Efield, Jfield, rhofield, eb_update_E,
         dt, subcycling_half, ng, nodal_sync
     );
+    if (emf_matching) { EmfMatchingAccumulate(Efield, dt/3.0_rt); }
 
     // The Bfield is now given by:
     // B_new = B_old + 0.5 * dt * K1 + dt * [-curl  x E(B_old + 0.5 * dt * K1)]
@@ -893,6 +909,7 @@ void HybridPICModel::BfieldEvolveRK4 (
         Bfield, Efield, Jfield, rhofield, eb_update_E,
         0.5_rt*dt, subcycling_half, ng, nodal_sync
     );
+    if (emf_matching) { EmfMatchingAccumulate(Efield, dt/6.0_rt); }
 
     // The Bfield is now given by:
     //   B_new = B_old + dt * K2 + 0.5 * dt * [-curl x E(B_old + dt * K2)]
@@ -950,8 +967,21 @@ void HybridPICModel::BfieldEvolveRK4 (
             );
         }
     }
+
+    // Apply the accumulated seam EMF correction to the coarse levels. This
+    // runs before the masked restriction commit of this substep (BfieldEvolve
+    // restricts right after an accepted RK4 substep): the correction owns the
+    // live-side coarse faces around the commit boundary, while the
+    // restriction overwrites the covered-side keep faces with the fine face
+    // averages -- both then carry the same (fine) edge-EMF history.
+    if (emf_matching) { EmfMatchingReflux(Bfield, ng, nodal_sync); }
 }
 
+// NOTE (mesh refinement): the adaptive RKF45 path carries no seam EMF
+// matching hooks -- MR + RKF45 aborts at input validation (all levels advance
+// in RK4 lockstep). If that combination is ever enabled, the register
+// accumulation must become scratch-then-commit so rejected substeps do not
+// pollute the edge-EMF time integrals.
 amrex::Real HybridPICModel::BfieldEvolveRKF45 (
     ablastr::fields::MultiLevelVectorField const& Bfield,
     ablastr::fields::MultiLevelVectorField const& Efield,

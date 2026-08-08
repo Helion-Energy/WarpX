@@ -3877,6 +3877,23 @@ Maxwell solver: kinetic-fluid hybrid
     E-field solve already sees the fine solution; ``half_step`` restricts only once at the end of each
     half-step.
 
+.. pp:param:: hybrid_pic_model.mr_emf_matching
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    If :pp:param:`algo.maxwell_solver` is set to ``hybrid`` and mesh refinement is used, this enables
+    seam EMF matching (Balsara-style constrained-transport refluxing adapted to the
+    Ohm's-law EMFs): the per-RK-stage edge EMFs of both levels are accumulated in an edge-flux register
+    on the restriction commit boundary, and after every substep the coarse B-field faces around that
+    boundary are corrected so they integrate the same (fine) edge-EMF history that the restricted faces
+    received. Coarse :math:`\nabla \cdot \mathbf{B}` at the seam is then preserved to machine precision
+    by construction. With an embedded boundary, edges frozen by the coarse staircase are excluded (the
+    correction vanishes there and frozen regions stay exactly static). Requires the refinement patch
+    (more precisely, the restriction keep region) to be a single rectangle per level. Disabling restores
+    the bare, unmatched seam treatment with its slowly accumulating seam-ring
+    :math:`\nabla \cdot \mathbf{B}` error.
+
 .. pp:param:: hybrid_pic_model.mr_check_div_b
     :type: ``bool``
     :default: ``false``
