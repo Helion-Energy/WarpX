@@ -181,6 +181,17 @@ void HybridPICModel::ReadParameters ()
                 "'monocubic' or 'keys'");
         }
         pp_hybrid.query("qdsmc_conduction_curved_feet", m_cond_curved_feet);
+        // Mehrstellen-style isotropized perpendicular launch: split
+        // chi_perp equally between the (e1, e2) quadrature lattice and its
+        // 45-degree-rotated pair (sigma/sqrt(2) each, half weight each).
+        // The equal variance split cancels the leading cos(4 theta)
+        // fourth-moment anisotropy of the axis-pair launch (the
+        // star-shaped diffusion pattern of point sources), and gives
+        // diagonal hops first-class per-axis clamping. Doubles the
+        // perpendicular branch count when on. Default off (bit-identical
+        // baselines).
+        pp_hybrid.query("qdsmc_conduction_isotropic_launch",
+                        m_cond_iso_launch);
         pp_hybrid.query("qdsmc_conduction_conserve_fixup",
                         m_cond_conserve_fixup);
         std::string depk = "hat";
@@ -331,6 +342,14 @@ void HybridPICModel::ReadParameters ()
     // drift J_plasma/(e n_e) and rho_fp(_s). Reduces to eta J^2 in single species.
     // Default off; only consulted when solve_electron_energy_equation is on.
     pp_hybrid.query("include_joule_heating", m_include_joule_heating);
+
+    // Biermann battery: keep -grad Pe/(e n) in the Faraday-solve E. The
+    // closure-era drop relies on curl(grad Pe/(e n)) = 0, i.e. grad Pe
+    // parallel to grad n -- guaranteed by a barotropic Pe(n) closure,
+    // broken by the electron energy equation (conduction/Joule/Q_ei
+    // decouple Te from n). The dropped physics is the battery term
+    // (grad Pe x grad n)/(e n^2). Default off (recorded baselines).
+    pp_hybrid.query("include_biermann_battery", m_include_biermann_battery);
 
     // Te-threshold Joule redirection: heat electrons where Te < threshold,
     // deposit the Joule energy to ions where Te >= threshold. Off by default
@@ -2455,6 +2474,7 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
     amrex::Real const qe = PhysConst::q_e;
     amrex::Real const me = PhysConst::m_e;
     auto const kappa_par_ex  = m_kappa_par;
+    bool const iso_launch    = m_cond_iso_launch;
     auto const kappa_perp_ex = m_kappa_perp;
     amrex::Real const n_floor  = m_qdsmc_n_floor;
     amrex::Real const f_lim    = m_cond_flux_limit_factor;
@@ -2785,10 +2805,13 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                 };
                 int const n0 = (sig_par  > 0.0_rt &&
                                 proj_sq(bxv, byv, bzv) > 1.0e-24_rt) ? nq_par  : 1;
-                int const n1 = (sig_perp > 0.0_rt &&
-                                proj_sq(e1x, e1y, e1z) > 1.0e-24_rt) ? nq_perp : 1;
-                int const n2 = (sig_perp > 0.0_rt &&
-                                proj_sq(e2x, e2y, e2z) > 1.0e-24_rt) ? nq_perp : 1;
+
+                // Isotropized launch: second, 45-degree-rotated perp
+                // lattice at half variance (see the scatter form).
+                int const n_lat = (iso_launch && sig_perp > 0.0_rt) ? 2 : 1;
+                // full sigma per lattice; see the scatter-form note
+                amrex::Real const sig_q = sig_perp;
+                amrex::Real const w_lat = (n_lat == 2) ? 0.5_rt : 1.0_rt;
 
                 // multilinear sample of a cond component at fractional
                 // index coords (curved-foot midpoint b), clamped into the
@@ -2820,19 +2843,34 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                 };
 
                 amrex::Real acc_T = 0.0_rt;
+                for (int lat = 0; lat < n_lat; ++lat) {
+                amrex::Real p1x = e1x, p1y = e1y, p1z = e1z;
+                amrex::Real p2x = e2x, p2y = e2y, p2z = e2z;
+                if (lat == 1) {
+                    amrex::Real const sr = 0.7071067811865475_rt;
+                    p1x = (e1x + e2x)*sr; p1y = (e1y + e2y)*sr;
+                    p1z = (e1z + e2z)*sr;
+                    p2x = (e2x - e1x)*sr; p2y = (e2y - e1y)*sr;
+                    p2z = (e2z - e1z)*sr;
+                }
+                int const n1 = (sig_q > 0.0_rt &&
+                                proj_sq(p1x, p1y, p1z) > 1.0e-24_rt) ? nq_perp : 1;
+                int const n2 = (sig_q > 0.0_rt &&
+                                proj_sq(p2x, p2y, p2z) > 1.0e-24_rt) ? nq_perp : 1;
                 for (int q0 = 0; q0 < n0; ++q0) {
                 for (int q1 = 0; q1 < n1; ++q1) {
                 for (int q2 = 0; q2 < n2; ++q2) {
-                    amrex::Real const o0 = (n0 > 1) ? xq_par[q0]*sig_par   : 0.0_rt;
-                    amrex::Real const o1 = (n1 > 1) ? xq_perp[q1]*sig_perp : 0.0_rt;
-                    amrex::Real const o2 = (n2 > 1) ? xq_perp[q2]*sig_perp : 0.0_rt;
-                    amrex::Real const wq = ((n0 > 1) ? wq_par[q0]  : 1.0_rt)
+                    amrex::Real const o0 = (n0 > 1) ? xq_par[q0]*sig_par : 0.0_rt;
+                    amrex::Real const o1 = (n1 > 1) ? xq_perp[q1]*sig_q  : 0.0_rt;
+                    amrex::Real const o2 = (n2 > 1) ? xq_perp[q2]*sig_q  : 0.0_rt;
+                    amrex::Real const wq = w_lat
+                                         * ((n0 > 1) ? wq_par[q0]  : 1.0_rt)
                                          * ((n1 > 1) ? wq_perp[q1] : 1.0_rt)
                                          * ((n2 > 1) ? wq_perp[q2] : 1.0_rt);
                     amrex::Real disp[3] = {
-                        drift[0] + o0*bxv + o1*e1x + o2*e2x,
-                        drift[1] + o0*byv + o1*e1y + o2*e2y,
-                        drift[2] + o0*bzv + o1*e1z + o2*e2z};
+                        drift[0] + o0*bxv + o1*p1x + o2*p2x,
+                        drift[1] + o0*byv + o1*p1y + o2*p2y,
+                        drift[2] + o0*bzv + o1*p1z + o2*p2z};
 
                     // curved foot: midpoint/RK2 rotation -- re-sample b at
                     // the half-displacement point, rebuild the frame there,
@@ -2878,9 +2916,21 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                             }
                             amrex::Real const f1i = 1.0_rt/std::sqrt(f1n);
                             f1x *= f1i; f1y *= f1i; f1z *= f1i;
-                            amrex::Real const f2x = uby*f1z - ubz*f1y;
-                            amrex::Real const f2y = ubz*f1x - ubx*f1z;
-                            amrex::Real const f2z = ubx*f1y - uby*f1x;
+                            amrex::Real f2x = uby*f1z - ubz*f1y;
+                            amrex::Real f2y = ubz*f1x - ubx*f1z;
+                            amrex::Real f2z = ubx*f1y - uby*f1x;
+                            if (lat == 1) {
+                                // rotated lattice: rotate the rebuilt
+                                // midpoint frame the same 45 degrees
+                                amrex::Real const sr = 0.7071067811865475_rt;
+                                amrex::Real const g1x = (f1x + f2x)*sr;
+                                amrex::Real const g1y = (f1y + f2y)*sr;
+                                amrex::Real const g1z = (f1z + f2z)*sr;
+                                f2x = (f2x - f1x)*sr;
+                                f2y = (f2y - f1y)*sr;
+                                f2z = (f2z - f1z)*sr;
+                                f1x = g1x; f1y = g1y; f1z = g1z;
+                            }
                             disp[0] = drift[0] + o0*ubx + o1*f1x + o2*f2x;
                             disp[1] = drift[1] + o0*uby + o1*f1y + o2*f2y;
                             disp[2] = drift[2] + o0*ubz + o1*f1z + o2*f2z;
@@ -2915,6 +2965,7 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                         i0[0], i0[1], i0[2], fr[0], fr[1], fr[2],
                         is_per, dom_lo, dom_hi);
                 }}}
+                }   // lat
                 tn(i,j,k) = acc_T;
             });
         }
@@ -3232,11 +3283,23 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
         amrex::Real const spmax = kin.max(Kin::k_sp, 0);
         amrex::Real const sqmax = kin.max(Kin::k_sq, 0);
         int const n0_eff = (spmax > 0.0_rt) ? nq_par : 1;
+
+        // Isotropized launch: second, 45-degree-rotated perp lattice at
+        // half variance (see the scatter form). The rotated lattice never
+        // takes the 2D in-plane-b collapse: its directions project into
+        // the plane by construction.
+        int const n_lat = (iso_launch && sqmax > 0.0_rt) ? 2 : 1;
+        // full sigma per lattice; see the scatter-form note
+        amrex::Real const sq_fac = 1.0_rt;
+        amrex::Real const w_lat_ff = (n_lat == 2) ? 0.5_rt : 1.0_rt;
+
+        for (int lat = 0; lat < n_lat; ++lat) {
         int n1_eff = (sqmax > 0.0_rt) ? nq_perp : 1;
         int const n2_eff = (sqmax > 0.0_rt) ? nq_perp : 1;
 #if !defined(WARPX_DIM_3D) && (AMREX_SPACEDIM == 2)
-        if (kin.norm0(Kin::k_by, 0, 0) == 0.0_rt) { n1_eff = 1; }
+        if (lat == 0 && kin.norm0(Kin::k_by, 0, 0) == 0.0_rt) { n1_eff = 1; }
 #endif
+        bool const lat_rot = (lat == 1);
 
         for (int q0 = 0; q0 < n0_eff; ++q0) {
         for (int q1 = 0; q1 < n1_eff; ++q1) {
@@ -3246,8 +3309,8 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
             amrex::Real const xq0 = (n0_eff > 1) ? xq_par[q0]  : 0.0_rt;
             amrex::Real const xq1 = (n1_eff > 1) ? xq_perp[q1] : 0.0_rt;
             amrex::Real const xq2 = (n2_eff > 1) ? xq_perp[q2] : 0.0_rt;
-            amrex::Real const w_branch =
-                  ((n0_eff > 1) ? wq_par[q0]  : 1.0_rt)
+            amrex::Real const w_branch = w_lat_ff
+                * ((n0_eff > 1) ? wq_par[q0]  : 1.0_rt)
                 * ((n1_eff > 1) ? wq_perp[q1] : 1.0_rt)
                 * ((n2_eff > 1) ? wq_perp[q2] : 1.0_rt);
 
@@ -3283,8 +3346,19 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                     amrex::Real e1x, e1y, e1z, e2x, e2y, e2z;
                     qdsmc_perp_frame(bxv, byv, bzv,
                                      e1x, e1y, e1z, e2x, e2y, e2z);
+                    if (lat_rot) {
+                        // rotated perp lattice (isotropized launch)
+                        amrex::Real const sr = 0.7071067811865475_rt;
+                        amrex::Real const g1x = (e1x + e2x)*sr;
+                        amrex::Real const g1y = (e1y + e2y)*sr;
+                        amrex::Real const g1z = (e1z + e2z)*sr;
+                        e2x = (e2x - e1x)*sr;
+                        e2y = (e2y - e1y)*sr;
+                        e2z = (e2z - e1z)*sr;
+                        e1x = g1x; e1y = g1y; e1z = g1z;
+                    }
                     amrex::Real const sp = kn(i,j,k,Kin::k_sp);
-                    amrex::Real const sq = kn(i,j,k,Kin::k_sq);
+                    amrex::Real const sq = kn(i,j,k,Kin::k_sq) * sq_fac;
                     amrex::Real const dphys[3] = {
                         kn(i,j,k,Kin::k_ax) + xq0*sp*bxv + xq1*sq*e1x + xq2*sq*e2x,
                         kn(i,j,k,Kin::k_ay) + xq0*sp*byv + xq1*sq*e1y + xq2*sq*e2y,
@@ -3976,6 +4050,7 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
             }
             amrex::MultiFab::Saxpy(u_acc, w_branch, *src, 0, 0, 1, 0);
         }}}
+        }   // lat
 
         // Recovery (scatter Pass-3 semantics): floored and EB-covered
         // nodes keep their previous T_e; dividing by the same n_e that
@@ -4252,24 +4327,45 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
             };
             int const n0 = (sig_par  > 0.0_rt &&
                             proj_sq(bxv, byv, bzv) > 1.0e-24_rt) ? nq_par  : 1;
-            int const n1 = (sig_perp > 0.0_rt &&
-                            proj_sq(e1x, e1y, e1z) > 1.0e-24_rt) ? nq_perp : 1;
-            int const n2 = (sig_perp > 0.0_rt &&
-                            proj_sq(e2x, e2y, e2z) > 1.0e-24_rt) ? nq_perp : 1;
+
+            // Isotropized launch: a second, 45-degree-rotated perp lattice
+            // at half variance (equal split cancels the cos(4 theta)
+            // fourth-moment anisotropy of the axis-pair launch).
+            int const n_lat = (iso_launch && sig_perp > 0.0_rt) ? 2 : 1;
+            // Each lattice carries the FULL sigma: the lattices are
+            // half-weight alternatives, so the weighted variance sums to
+            // sigma^2 and the equal fourth-moment weights cancel the
+            // cos(4 theta) anisotropy.
+            amrex::Real const sig_q = sig_perp;
+            amrex::Real const w_lat = (n_lat == 2) ? 0.5_rt : 1.0_rt;
+
+            for (int lat = 0; lat < n_lat; ++lat) {
+            amrex::Real p1x = e1x, p1y = e1y, p1z = e1z;
+            amrex::Real p2x = e2x, p2y = e2y, p2z = e2z;
+            if (lat == 1) {
+                amrex::Real const s = 0.7071067811865475_rt;
+                p1x = (e1x + e2x)*s; p1y = (e1y + e2y)*s; p1z = (e1z + e2z)*s;
+                p2x = (e2x - e1x)*s; p2y = (e2y - e1y)*s; p2z = (e2z - e1z)*s;
+            }
+            int const n1 = (sig_q > 0.0_rt &&
+                            proj_sq(p1x, p1y, p1z) > 1.0e-24_rt) ? nq_perp : 1;
+            int const n2 = (sig_q > 0.0_rt &&
+                            proj_sq(p2x, p2y, p2z) > 1.0e-24_rt) ? nq_perp : 1;
 
             for (int q0 = 0; q0 < n0; ++q0) {
             for (int q1 = 0; q1 < n1; ++q1) {
             for (int q2 = 0; q2 < n2; ++q2) {
-                amrex::Real const o0 = (n0 > 1) ? xq_par[q0]*sig_par   : 0.0_rt;
-                amrex::Real const o1 = (n1 > 1) ? xq_perp[q1]*sig_perp : 0.0_rt;
-                amrex::Real const o2 = (n2 > 1) ? xq_perp[q2]*sig_perp : 0.0_rt;
-                amrex::Real const wq = ((n0 > 1) ? wq_par[q0]  : 1.0_rt)
+                amrex::Real const o0 = (n0 > 1) ? xq_par[q0]*sig_par : 0.0_rt;
+                amrex::Real const o1 = (n1 > 1) ? xq_perp[q1]*sig_q  : 0.0_rt;
+                amrex::Real const o2 = (n2 > 1) ? xq_perp[q2]*sig_q  : 0.0_rt;
+                amrex::Real const wq = w_lat
+                                     * ((n0 > 1) ? wq_par[q0]  : 1.0_rt)
                                      * ((n1 > 1) ? wq_perp[q1] : 1.0_rt)
                                      * ((n2 > 1) ? wq_perp[q2] : 1.0_rt);
                 amrex::Real const disp[3] = {
-                    drift[0] + o0*bxv + o1*e1x + o2*e2x,
-                    drift[1] + o0*byv + o1*e1y + o2*e2y,
-                    drift[2] + o0*bzv + o1*e1z + o2*e2z};
+                    drift[0] + o0*bxv + o1*p1x + o2*p2x,
+                    drift[1] + o0*byv + o1*p1y + o2*p2y,
+                    drift[2] + o0*bzv + o1*p1z + o2*p2z};
 
                 // Continuous destination in grid-index space, hard-clamped
                 // to the deposit's guard reach and (E7-style, pending the
@@ -4417,6 +4513,7 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                 }
 #endif
             }}}
+            }   // lat
         });
     }
 

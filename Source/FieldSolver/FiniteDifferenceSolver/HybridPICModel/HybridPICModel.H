@@ -586,6 +586,13 @@ public:
      * m_solve_electron_energy_equation is also true. */
     bool m_include_joule_heating = false;
 
+    /** Keep -grad Pe/(e n) in the Faraday-solve E (the Biermann battery
+     *  term (grad Pe x grad n)/(e n^2), which the closure-era grad-Pe drop
+     *  discards; nonzero whenever Te decouples from n, i.e. with the
+     *  electron energy equation). Input include_biermann_battery,
+     *  default off. */
+    bool m_include_biermann_battery = false;
+
     /** Te-threshold Joule redirection. When active, the eta*J^2 Joule source in
      * QDSMCAddJouleHeating heats electrons in cells where Te < m_joule_redirect_Te_eV
      * and is instead deposited to the ions (as stochastic pure-diffusion heating in
@@ -713,6 +720,16 @@ public:
      *  Default OFF; kept for future consistently-paired weak-2 work.
      *  Input: qdsmc_conduction_curved_feet. */
     bool m_cond_curved_feet = false;
+
+    /** Mehrstellen-style isotropized perpendicular launch
+     *  (qdsmc_conduction_isotropic_launch, default off): split chi_perp
+     *  equally between the (e1, e2) quadrature lattice and its 45-degree
+     *  rotated pair. The equal variance split cancels the leading
+     *  cos(4 theta) fourth-moment anisotropy of the axis-pair launch (the
+     *  star-shaped point-source diffusion pattern) and gives diagonal hops
+     *  first-class per-axis clamping. Doubles the perpendicular branch
+     *  count when on. */
+    bool m_cond_iso_launch = false;
 
     /** Layer form: restore Sigma(u) after each gather with a global
      *  proportional rescale of T_e (the gather transfer is not exactly
