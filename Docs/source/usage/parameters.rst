@@ -3897,7 +3897,21 @@ Maxwell solver: kinetic-fluid hybrid
 
     Step interval for printing the cumulative dropped-Joule-energy tallies (heating gate, redirect gate,
     kick cap, in J) to stdout for the deck-side energy audit. The print only fires when at least one
-    decline channel is armed; ``0`` disables it.
+    decline channel is armed; ``0`` disables it. The contamination tally (below) shares this cadence.
+
+.. pp:param:: hybrid_pic_model.qdsmc_contamination_n_boundary
+    :type: ``float``
+    :default: ``-1`` (off)
+    :optional:
+
+    Quarantine-contamination instrument: cells with density at or below this boundary, in
+    :math:`m^{-3}`, form the quarantined class. Every electron-thermal-conduction split-sweep face flux
+    that carries energy from a quarantined cell into an open cell is accumulated into cumulative
+    per-grid-axis tallies (J), with a separate channel for the subset whose quarantined-side node is
+    below :pp:param:`hybrid_pic_model.n_floor` while ``qdsmc_conduction_vacuum_fast_front`` is active,
+    and another for redirected Joule energy staged as ion kicks inside quarantined cells. Set the
+    boundary above ``n_floor`` to watch the low-density ignition band; only the (production) split
+    fluxform conduction path is instrumented.
 
 .. pp:param:: hybrid_pic_model.electron_ion_relaxation_rate(rho,Te,Ti,t)
     :type: ``float`` or ``str``

@@ -211,6 +211,14 @@ parser.add_argument(
     "(hybrid_pic_model.Te_abort_threshold); <0 = off. Replaces the external "
     "te_watchdog.sh kill for arms that should stop themselves",
 )
+parser.add_argument(
+    "--contam-boundary-frac",
+    type=float,
+    default=-1.0,
+    help="quarantine-contamination tally class boundary as a fraction of N_I "
+    "(hybrid_pic_model.qdsmc_contamination_n_boundary = frac*N_I); set above "
+    "--n-floor-frac to watch the eta_vac ignition band; <0 = off",
+)
 parser.add_argument("--substeps", type=int, default=256)
 parser.add_argument("--substep-rtol", type=float, default=1.0e-3)
 parser.add_argument("--advance", choices=["euler", "leapfrog", "pc"], default="pc")
@@ -501,6 +509,10 @@ if args.redirect_kick_cap > 0.0:
     pywarpx.hybridpicmodel.joule_redirect_kick_cap_vth_frac = args.redirect_kick_cap
 if args.te_abort > 0.0:
     pywarpx.hybridpicmodel.Te_abort_threshold = args.te_abort
+if args.contam_boundary_frac > 0.0:
+    pywarpx.hybridpicmodel.qdsmc_contamination_n_boundary = (
+        args.contam_boundary_frac * N_I
+    )
 
 simulation.initialize_warpx()
 
