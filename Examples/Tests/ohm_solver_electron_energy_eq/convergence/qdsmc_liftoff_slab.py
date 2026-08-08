@@ -107,6 +107,110 @@ parser.add_argument(
     default=1.0e-2,
     help="kappa_perp / kappa_par (cross-field drain at nulls/current sheets)",
 )
+parser.add_argument(
+    "--kappa-mult",
+    type=float,
+    default=1.0,
+    help="multiplier on the Spitzer conduction coefficient (par and perp)",
+)
+parser.add_argument(
+    "--joule-redirect-te",
+    type=float,
+    default=-1.0,
+    help="Te threshold [eV] above which the eta*J^2 Joule source deposits on "
+    "ions instead of electrons (hybrid_pic_model.joule_redirect_Te_threshold); "
+    "<0 = off",
+)
+parser.add_argument(
+    "--resistivity",
+    choices=["powerlaw", "chodura"],
+    default="powerlaw",
+    help="E-solve resistivity: density-scaled power law (formation-run form), "
+    "or Chodura current-driven anomalous form capped at eta_vac",
+)
+parser.add_argument(
+    "--chodura-fc",
+    type=float,
+    default=0.1,
+    help="Chodura anomalous-collisionality fraction f_C of omega_pi",
+)
+parser.add_argument(
+    "--chodura-vcrit",
+    type=float,
+    default=0.0,
+    help="Chodura drift-speed threshold [m/s]; 0 = vA(BZ_REV, N_I)",
+)
+parser.add_argument(
+    "--tau-ramp",
+    type=float,
+    default=TAU_RAMP,
+    help="reversal-drive Hermite ramp time [s] (bias -0.01 T -> +0.5 T); "
+    "peak dB/dt = 1.5*dB/tau at tau/2",
+)
+parser.add_argument(
+    "--filter-passes",
+    type=int,
+    default=0,
+    help="binomial smoothing passes per direction on deposited rho/J "
+    "(warpx.use_filter + filter_npass_each_dir); 0 = off (the non-PSATD "
+    "WarpX default). J_plasma, the Ohm E-solve, and the Joule source all "
+    "consume the filtered deposits",
+)
+parser.add_argument(
+    "--filter-comp",
+    type=int,
+    choices=[0, 1],
+    default=1,
+    help="apply the filter compensation pass (warpx.use_filter_compensation)",
+)
+parser.add_argument(
+    "--relax-rate",
+    choices=["off", "spitzer"],
+    default="off",
+    help="electron-ion relaxation channel nu_ei(rho,Te): off, or Spitzer "
+    "(NRL nu_eps/2, lnL=10, Z=1, mu=M_AMU). Supplies the OU drag toward "
+    "u_e that pairs with the Joule-redirect ion kicks, plus the global "
+    "Q_ei Te<->Ti coupling",
+)
+parser.add_argument(
+    "--joule-heating-eta",
+    choices=["esolve", "plasma", "spitzer"],
+    default="esolve",
+    help="resistivity used by the Joule/redirect HEATING source "
+    "(hybrid_pic_model.joule_heating_resistivity(rho,J,Te,t)): esolve = the "
+    "E-solve eta incl. the numerical eta_vac ramp (legacy), plasma = constant "
+    "ETA_PLASMA, spitzer = Spitzer eta_par (lnL=10, Z=1) from the local Te, "
+    "capped at eta_vac. The E-solve resistivity is unchanged either way",
+)
+parser.add_argument(
+    "--joule-heating-n-min-frac",
+    type=float,
+    default=-1.0,
+    help="independent Joule-heating density gate as a fraction of N_I "
+    "(hybrid_pic_model.joule_heating_n_min); <0 = off (gate stays at n_floor)",
+)
+parser.add_argument(
+    "--redirect-n-min-factor",
+    type=float,
+    default=0.0,
+    help="redirect density gate factor g: redirected energy only staged at "
+    "n >= g*n_floor (hybrid_pic_model.joule_redirect_n_min_factor); 0 = off",
+)
+parser.add_argument(
+    "--redirect-kick-cap",
+    type=float,
+    default=-1.0,
+    help="per-particle redirect kick cap f: sigma_redir <= f*v_th,i "
+    "(hybrid_pic_model.joule_redirect_kick_cap_vth_frac); <0 = off",
+)
+parser.add_argument(
+    "--te-abort",
+    type=float,
+    default=-1.0,
+    help="graceful Te-runaway abort ceiling [eV] "
+    "(hybrid_pic_model.Te_abort_threshold); <0 = off. Replaces the external "
+    "te_watchdog.sh kill for arms that should stop themselves",
+)
 parser.add_argument("--substeps", type=int, default=256)
 parser.add_argument("--substep-rtol", type=float, default=1.0e-3)
 parser.add_argument("--advance", choices=["euler", "leapfrog", "pc"], default="pc")
@@ -186,18 +290,38 @@ A_ext = {
         "Ax_external_function": "-0.5*y",
         "Ay_external_function": "0.5*x",
         "Az_external_function": "0",
-        "A_time_external_function": hermite_ramp_expression(BZ_BIAS, BZ_REV, TAU_RAMP),
+        "A_time_external_function": hermite_ramp_expression(
+            BZ_BIAS, BZ_REV, args.tau_ramp
+        ),
     },
 }
 
 # density-scaled power-law resistivity (formation-run form)
 a_pl = (args.n_floor_frac / N_TRANSITION_FRAC) ** ETA_POWER
 eta_vac = ETA_VAC_FRAC * eta_max
-res_str = (
-    f"eta_plasma + (eta_vac - eta_plasma)"
-    f"*max(0.0, (rho_f/max(rho,rho_f))**({ETA_POWER:.6g}) - ({a_pl:.12g}))"
-    f"/({1.0 - a_pl:.12g})"
-)
+if args.resistivity == "powerlaw":
+    res_str = (
+        f"eta_plasma + (eta_vac - eta_plasma)"
+        f"*max(0.0, (rho_f/max(rho,rho_f))**({ETA_POWER:.6g}) - ({a_pl:.12g}))"
+        f"/({1.0 - a_pl:.12g})"
+    )
+else:
+    # Chodura current-driven anomalous resistivity:
+    #   eta_C = f_C * m_e nu_an / (n e^2), nu_an = w_pi(rho)*(1 - exp(-v_de/v_c)),
+    #   v_de = |J|/rho.  Capped at eta_vac so the RKF45 stability envelope of
+    #   the power-law scheme is an upper bound; grid-scale whistler damping in
+    #   true vacuum is left to plasma_hyper_resistivity.
+    v_crit = args.chodura_vcrit if args.chodura_vcrit > 0.0 else vA
+    chodura_pref = (
+        args.chodura_fc
+        * (constants.m_e / constants.q_e)
+        * np.sqrt(constants.q_e / (constants.ep0 * m_i))
+    )
+    res_str = (
+        f"eta_plasma + min(eta_vac - eta_plasma, "
+        f"{chodura_pref:.9e}/sqrt(max(rho,rho_f))"
+        f"*(1.0 - exp(-J/(max(rho,rho_f)*{v_crit:.9e}))))"
+    )
 
 solver = picmi.HybridPICSolver(
     grid=grid,
@@ -312,6 +436,11 @@ simulation.add_diagnostic(field_diag)
 
 simulation.initialize_inputs()
 
+if args.filter_passes > 0:
+    pywarpx.warpx.use_filter = 1
+    pywarpx.warpx.use_filter_compensation = args.filter_comp
+    pywarpx.warpx.filter_npass_each_dir = [args.filter_passes] * 3
+
 # branch-side energy-equation knobs (pywarpx bucket, annulus-deck pattern)
 pywarpx.hybridpicmodel.qdsmc_time_advance = args.advance
 # PRODUCTION conduction form: the code default ("scatter", #6982-compat
@@ -324,14 +453,54 @@ pywarpx.hybridpicmodel.qdsmc_conduction_reconstruction = "ppm"
 pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = 3
 pywarpx.hybridpicmodel.qdsmc_conduction_eb_bc = "adiabatic"
 if args.kappa == "spitzer":
+    kappa_c_eff = args.kappa_mult * KAPPA_C
     pywarpx.hybridpicmodel.__setattr__(
-        "qdsmc_kappa_par(n,Te,t)", f"{KAPPA_C:.6e}*Te**2.5"
+        "qdsmc_kappa_par(n,Te,t)", f"{kappa_c_eff:.6e}*Te**2.5"
     )
     if args.kappa_perp_frac > 0.0:
         pywarpx.hybridpicmodel.__setattr__(
             "qdsmc_kappa_perp(n,Te,t)",
-            f"{args.kappa_perp_frac * KAPPA_C:.6e}*Te**2.5",
+            f"{args.kappa_perp_frac * kappa_c_eff:.6e}*Te**2.5",
         )
+if args.joule_redirect_te >= 0.0:
+    pywarpx.hybridpicmodel.joule_redirect_Te_threshold = args.joule_redirect_te
+    if args.relax_rate == "off":
+        # The guard rail aborts the undamped redirect by default (measured
+        # anti-stabilizing, arm SR); keep the no-drag control arm launchable.
+        pywarpx.hybridpicmodel.joule_redirect_allow_undamped = 1
+if args.relax_rate == "spitzer":
+    # NRL equilibration nu_eps = 3.2e-9 Z^2 lnL n_i[cm^-3] / (mu Te[eV]^1.5);
+    # the branch relaxes Te -> Ti at rate 2 nu_ei, so nu_ei = nu_eps / 2.
+    # rho is the charge density [C/m^3]; Te floor guards the cold-cell pole
+    # (the OU update is exact/exp-form, so large nu is stable regardless).
+    nu_coef = 3.2e-9 * LN_LAMBDA / (2.0 * M_AMU * 1.0e6 * constants.q_e)
+    pywarpx.hybridpicmodel.__setattr__(
+        "electron_ion_relaxation_rate(rho,Te,Ti,t)",
+        f"{nu_coef:.6e}*rho/max(Te,0.1)**1.5",
+    )
+if args.joule_heating_eta == "plasma":
+    # Physical-eta heating: constant bulk eta. The E-solve keeps the
+    # numerical eta_vac ramp; only the heat source changes.
+    pywarpx.hybridpicmodel.__setattr__(
+        "joule_heating_resistivity(rho,J,Te,t)", f"{ETA_PLASMA:.6e}"
+    )
+elif args.joule_heating_eta == "spitzer":
+    # NRL Spitzer parallel resistivity eta_par = 5.25e-5 Z lnL / Te[eV]^1.5
+    # Ohm m; Te floored at 0.1 eV and capped at eta_vac (cold-cell sanity,
+    # same cap philosophy as the Chodura arm).
+    eta_sp_coef = 5.25e-5 * LN_LAMBDA
+    pywarpx.hybridpicmodel.__setattr__(
+        "joule_heating_resistivity(rho,J,Te,t)",
+        f"min({eta_vac:.6e}, {eta_sp_coef:.6e}/max(Te,0.1)**1.5)",
+    )
+if args.joule_heating_n_min_frac >= 0.0:
+    pywarpx.hybridpicmodel.joule_heating_n_min = args.joule_heating_n_min_frac * N_I
+if args.redirect_n_min_factor > 0.0:
+    pywarpx.hybridpicmodel.joule_redirect_n_min_factor = args.redirect_n_min_factor
+if args.redirect_kick_cap > 0.0:
+    pywarpx.hybridpicmodel.joule_redirect_kick_cap_vth_frac = args.redirect_kick_cap
+if args.te_abort > 0.0:
+    pywarpx.hybridpicmodel.Te_abort_threshold = args.te_abort
 
 simulation.initialize_warpx()
 
@@ -358,6 +527,14 @@ def probe():
         history["te_max"].append(float(te[open_mask].max()))
         history["te_med"].append(float(np.median(te[open_mask])))
         history["u_open"].append(float(np.sum(ne[open_mask] * te[open_mask])))
+        if step % 200 == 0:
+            # live line for watchdogs (the 2026-08 runaways were invisible
+            # between 400-step dumps)
+            print(
+                f"[liftoff] step {step} te_max={history['te_max'][-1]:.3e} eV "
+                f"te_med={history['te_med'][-1]:.3e} eV",
+                flush=True,
+            )
 
 
 callbacks.installafterstep(probe)
@@ -372,6 +549,14 @@ if comm.rank == 0:
     h = {k: np.asarray(v) for k, v in history.items()}
     print(
         f"[liftoff] done: N={resolution} steps={args.steps} kappa={args.kappa} "
+        f"kmult={args.kappa_mult:g} resist={args.resistivity} "
+        f"redirect={args.joule_redirect_te:g} relax={args.relax_rate} "
+        f"heateta={args.joule_heating_eta} "
+        f"heatnmin={args.joule_heating_n_min_frac:g} "
+        f"redirgate={args.redirect_n_min_factor:g} "
+        f"kickcap={args.redirect_kick_cap:g} teabort={args.te_abort:g} "
+        f"filter={args.filter_passes}p/c{args.filter_comp} "
+        f"tau={args.tau_ramp:.3g} "
         f"| Te max {h['te_max'][0]:.2f} -> {h['te_max'][-1]:.2f} eV "
         f"(median {h['te_med'][-1]:.2f}) "
         f"| collected q={q_col:.4e} C E={e_col:.4e} J",
@@ -384,6 +569,18 @@ if comm.rank == 0:
         dt=dt,
         kappa=args.kappa,
         kappa_C=KAPPA_C,
+        kappa_mult=args.kappa_mult,
+        resistivity=args.resistivity,
+        joule_redirect_te=args.joule_redirect_te,
+        relax_rate=args.relax_rate,
+        joule_heating_eta=args.joule_heating_eta,
+        joule_heating_n_min_frac=args.joule_heating_n_min_frac,
+        redirect_n_min_factor=args.redirect_n_min_factor,
+        redirect_kick_cap=args.redirect_kick_cap,
+        te_abort=args.te_abort,
+        filter_passes=args.filter_passes,
+        filter_comp=args.filter_comp,
+        tau_ramp=args.tau_ramp,
         kappa_perp_frac=args.kappa_perp_frac,
         standoff=args.standoff,
         te_final=Te_wrap[:, :, :] / K_PER_EV,
@@ -392,3 +589,7 @@ if comm.rank == 0:
         e_collected=e_col,
         **h,
     )
+
+# Hold every rank until the npz is on disk (GPU-node teardown race
+# killed rank 0 mid-savez on arm C, 2026-08-07).
+comm.Barrier()

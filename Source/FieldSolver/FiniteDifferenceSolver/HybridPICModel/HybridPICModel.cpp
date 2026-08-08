@@ -357,6 +357,27 @@ void HybridPICModel::ReadParameters ()
     utils::parser::queryWithParser(pp_hybrid, "joule_redirect_Te_threshold", m_joule_redirect_Te_eV);
     m_joule_redirect_to_ions = (m_joule_redirect_Te_eV >= 0._rt);
 
+    // Redirect hardening knobs (2026-08 liftoff runaway forensics; see the
+    // member docs): escape hatch for the undamped-redirect guard rail, the
+    // per-particle kick cap, and the redirect density gate.
+    pp_hybrid.query("joule_redirect_allow_undamped", m_joule_redirect_allow_undamped);
+    utils::parser::queryWithParser(pp_hybrid, "joule_redirect_kick_cap_vth_frac",
+                                   m_joule_redirect_kick_cap_vth_frac);
+    utils::parser::queryWithParser(pp_hybrid, "joule_redirect_n_min_factor",
+                                   m_joule_redirect_n_min_factor);
+
+    // Physical-eta Joule source: separate resistivity for the heating (the
+    // E-solve keeps plasma_resistivity with its numerical vacuum ramp), plus
+    // an independent density gate for where heating is permitted at all.
+    m_has_heating_resistivity =
+        pp_hybrid.query("joule_heating_resistivity(rho,J,Te,t)", m_eta_heating_expression);
+    utils::parser::queryWithParser(pp_hybrid, "joule_heating_n_min", m_joule_heating_n_min);
+
+    // Graceful Te-runaway abort ceiling [eV] and the dropped-energy tally
+    // print cadence (the print only fires when a decline channel is armed).
+    utils::parser::queryWithParser(pp_hybrid, "Te_abort_threshold", m_te_abort_threshold_eV);
+    pp_hybrid.query("joule_dropped_energy_print_interval", m_joule_dropped_print_interval);
+
     // Electron-ion thermal equilibration (Q_ei) on T_e:
     //   Q_ei = 3 n_e k_B nu_ei (T_e - T_i),  applied per ion species weighted by
     //   n_s/n_e, cooling T_e toward T_i. nu_ei[1/s] comes from the
@@ -582,6 +603,32 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
         utils::parser::makeParser(m_cond_eb_Te_expression, {"x","y","z"}));
     m_cond_eb_Te = m_cond_eb_Te_parser->compile<3>();
 
+
+    // Separate Joule-heating resistivity (physical eta; the E-solve keeps the
+    // numerical vacuum-regularizer ramp). Compiled unconditionally ("0.0"
+    // when unset) but only consulted when m_has_heating_resistivity.
+    m_heating_resistivity_parser = std::make_unique<amrex::Parser>(
+        utils::parser::makeParser(m_eta_heating_expression, {"rho","J","Te","t"}));
+    m_eta_heating = m_heating_resistivity_parser->compile<4>();
+
+    // Guard rail (2026-08 liftoff runaway forensics): without a relaxation
+    // channel the redirect's OU ion-heating operator has no drag leg and
+    // runs as pure undamped diffusion -- measured anti-stabilizing (arm SR
+    // ran 10x hotter than its bit-identical control within 600 steps of the
+    // redirect engaging, via the ion-kick current-noise feedback). Refuse to
+    // run this configuration unless the user explicitly opts back in.
+    if (m_joule_redirect_to_ions && !m_include_temperature_relaxation &&
+        !m_joule_redirect_allow_undamped) {
+        WARPX_ABORT_WITH_MESSAGE(
+            "hybrid_pic_model.joule_redirect_Te_threshold is set but no "
+            "electron-ion relaxation channel is active: without "
+            "hybrid_pic_model.electron_ion_relaxation_rate(rho,Te,Ti,t) the "
+            "redirected Joule energy lands on the ions as pure undamped "
+            "stochastic diffusion (no drag leg), which is anti-stabilizing "
+            "(runaway ion-kick feedback). Set the relaxation rate, or set "
+            "hybrid_pic_model.joule_redirect_allow_undamped = 1 to force the "
+            "legacy undamped behavior (control arms only).");
+    }
 
     // The Te-threshold Joule redirect only acts inside the Joule source.
     if (m_joule_redirect_to_ions &&
@@ -1462,6 +1509,13 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
     auto const gamma_minus_1 = m_gamma - 1.0_rt;
     auto const rho_floor     = PhysConst::q_e * m_n_floor;
     auto const eta           = m_eta;
+    // Physical-eta heating: when joule_heating_resistivity(rho,J,Te,t) is
+    // given, the heating source uses it instead of the E-solve eta (whose
+    // numerical vacuum-regularizer ramp was the liftoff runaway's ignition
+    // source). Different arity (Te in eV as an argument, so Spitzer eta(Te)
+    // is expressible), hence the in-kernel branch rather than a ternary.
+    bool const has_heat_eta  = m_has_heating_resistivity;
+    auto const eta_heat      = m_eta_heating;
     auto const t_new         = warpx.gett_new(0);
 
     amrex::GpuArray<int, 3> const & Jx_stag = Jx_IndexType;
@@ -1477,6 +1531,32 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
     bool const do_redirect = (redirect_E != nullptr);
     auto const K_per_eV    = PhysConst::q_e / PhysConst::kb;        // T[eV]*this = T[K]
     amrex::Real const Te_thresh_K = m_joule_redirect_Te_eV * K_per_eV;
+
+    // Decline gates (both default inactive): the decoupled heating gate
+    // joule_heating_n_min (heating permitted only above it, independent of
+    // the solver floor) and the redirect density gate
+    // joule_redirect_n_min_factor * n_floor (redirected energy only staged
+    // above it -- below, per-macro-ion kicks in nearly empty cells are the
+    // measured runaway feedback vector).
+    amrex::Real const rho_heat_gate =
+        PhysConst::q_e * std::max(m_joule_heating_n_min, m_n_floor);
+    bool const heat_gate_armed  = (rho_heat_gate > rho_floor);
+    amrex::Real const rho_redir_gate =
+        PhysConst::q_e * (m_joule_redirect_n_min_factor * m_n_floor);
+    bool const redir_gate_armed =
+        do_redirect && (m_joule_redirect_n_min_factor > 0._rt);
+
+    // Per-cell declined source-energy densities [J/m^3] for the audit tally
+    // (component 0 = heating gate, 1 = redirect gate), accumulated over
+    // species. Allocated only when a decline channel is armed. Nodal like
+    // Te: box-seam nodes carry redundant consistent copies, deduplicated by
+    // sum_unique below.
+    bool const any_drop_tally = heat_gate_armed || redir_gate_armed;
+    amrex::MultiFab dropped_mf;
+    if (any_drop_tally) {
+        dropped_mf.define(Te.boxArray(), Te.DistributionMap(), 2, 0);
+        dropped_mf.setVal(0.0_rt);
+    }
 
     auto & mypc = warpx.GetPartContainer();
 
@@ -1534,6 +1614,11 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
             amrex::Array4<amrex::Real> redirect_arr;
             if (do_redirect) { redirect_arr = redirect_E->array(mfi); }
 
+            // Dropped-energy tally (default Array4 when no decline channel is
+            // armed -> never indexed, the gate conditions cannot fire).
+            amrex::Array4<amrex::Real> dropped_arr;
+            if (any_drop_tally) { dropped_arr = dropped_mf.array(mfi); }
+
             amrex::Box const & tbox = mfi.tilebox();
             amrex::ParallelFor(tbox, [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
@@ -1556,10 +1641,12 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
                 auto const jz = ablastr::coarsen::sample::Interp(Jpz, Jz_stag, nodal, coarsen, i, j, k, 0);
                 amrex::Real const Jmag = std::sqrt(jx*jx + jy*jy + jz*jz);
 
-                // eta: same Ohm's-law parser the E-solve uses, evaluated
-                // per cell. This makes the per-cell heat reduce to eta J^2
-                // exactly in single species.
-                amrex::Real const eta_s_eff = eta(rho_val, Jmag, t_new);
+                // eta: the Ohm's-law E-solve parser by default (per-cell
+                // heat reduces to eta J^2 exactly in single species), or the
+                // separate physical heating resistivity when specified.
+                amrex::Real const eta_s_eff = has_heat_eta
+                    ? eta_heat(rho_val, Jmag, Te_arr(i,j,k) / K_per_eV, t_new)
+                    : eta(rho_val, Jmag, t_new);
 
                 // e-i relative drift = J_plasma/(e n_e), from the nodal plasma
                 // current and n_e. Energy-consistent with the eta*J dissipation
@@ -1577,18 +1664,50 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
                 amrex::Real const dTe_s = dt * gamma_minus_1
                                * Z_s * PhysConst::q_e * PhysConst::q_e
                                * eta_s_eff * ns * dv2 / PhysConst::kb;
+                // Source energy density this species would deposit [J/m^3]
+                // (= n_e kB dTe_s/(gamma-1); the redirect's eventual ion
+                // delivery (3/2) n_s E_s is the same quantity). Used only by
+                // the decline-tally branches below.
+                amrex::Real const du_s = dt * Z_s
+                               * PhysConst::q_e * PhysConst::q_e
+                               * eta_s_eff * ns * ne * dv2;
+                // Decoupled heating gate: between the solver floor and
+                // joule_heating_n_min no heat is created at all; the declined
+                // source goes to the audit tally (only reachable when armed).
+                if (rho_val <= rho_heat_gate) {
+                    dropped_arr(i,j,k,0) += du_s;
+                    return;
+                }
                 // Te-threshold redirection: below threshold heat electrons (the
                 // usual Joule deposit); at/above it write this species'
                 // m_i-independent redirected energy E_s = (2/3) n_e Z_s e^2 eta
-                // |dV|^2 dt [J] into its component for the ion-heating step.
+                // |dV|^2 dt [J] into its component for the ion-heating step --
+                // unless the cell is below the redirect density gate, in which
+                // case the source is dropped to the tally instead.
                 if (do_redirect && Te_arr(i,j,k) >= Te_thresh_K) {
-                    redirect_arr(i,j,k,ion_comp) = (2.0_rt/3.0_rt) * ne
-                        * Z_s * PhysConst::q_e * PhysConst::q_e * eta_s_eff * dv2 * dt;
+                    if (redir_gate_armed && rho_val <= rho_redir_gate) {
+                        dropped_arr(i,j,k,1) += du_s;
+                    } else {
+                        redirect_arr(i,j,k,ion_comp) = (2.0_rt/3.0_rt) * ne
+                            * Z_s * PhysConst::q_e * PhysConst::q_e * eta_s_eff * dv2 * dt;
+                    }
                 } else {
                     Te_arr(i,j,k) += dTe_s;
                 }
             });
         }
+    }
+
+    // Fold the declined per-cell energy densities into the cumulative audit
+    // tallies [J] (unique-node sum, periodic images deduplicated; the
+    // nodal control volume dV is uniform up to boundary halves, which the
+    // gates never straddle in practice).
+    if (any_drop_tally) {
+        auto const dx = warpx.Geom(lev).CellSizeArray();
+        amrex::Real dV = 1.0_rt;
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) { dV *= dx[d]; }
+        m_joule_dropped_heat_gate_J     += dropped_mf.sum_unique(0, false, period) * dV;
+        m_joule_dropped_redirect_gate_J += dropped_mf.sum_unique(1, false, period) * dV;
     }
 
     Te.FillBoundary(Te.nGrowVect(), period);
@@ -1747,6 +1866,23 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
     auto & mypc = warpx.GetPartContainer();
     auto const species_names = mypc.GetSpeciesNames();
 
+    // Per-particle kick cap (redirect hardening): clamp the redirect's OU
+    // variance so sigma_redir <= f v_th, i.e. E_s <= f^2 kB T (the ion mass
+    // cancels). Armed only when the redirect is active and
+    // joule_redirect_kick_cap_vth_frac > 0. The clipped remainder is dropped
+    // (not carried over) and accumulated in the audit tally: re-depositing it
+    // later in a still-hot cell would only defer the same unbounded kicks.
+    bool const kick_cap_armed =
+        do_redir && (m_joule_redirect_kick_cap_vth_frac > 0._rt);
+    amrex::Real const kick_cap_f2 =
+        m_joule_redirect_kick_cap_vth_frac * m_joule_redirect_kick_cap_vth_frac;
+    amrex::Real const Te_floor_K = Te_floor_eV * K_per_eV;
+    amrex::MultiFab dropped_cc;   // clipped energy density [J/m^3], cc grid
+    if (kick_cap_armed) {
+        dropped_cc.define(cc_ba, Te.DistributionMap(), 1, 0);
+        dropped_cc.setVal(0.0_rt);
+    }
+
     // Charged-species component index for redirect_E (matches QDSMCAddJouleHeating:
     // incremented for every charged species before the mass check).
     int ion_comp = -1;
@@ -1776,6 +1912,16 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
         amrex::MultiFab coef(cc_ba, Te.DistributionMap(), 6, 0);
         coef.setVal(0.0_rt);
 
+        // Per-species charge densities, needed only for the kick-cap tally's
+        // n_s = f_s n_e / Z_s at clipped cells.
+        amrex::MultiFab const * rho_s_mf    = nullptr;
+        amrex::MultiFab const * rhos_sum_mf = nullptr;
+        if (kick_cap_armed) {
+            rho_s_mf    = warpx.m_fields.get("rho_fp_" + spec_name, lev);
+            rhos_sum_mf = warpx.m_fields.get("hybrid_rho_species_sum_fp", lev);
+        }
+        amrex::Real const Z_s = pc.getCharge() / PhysConst::q_e;
+
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -1790,6 +1936,17 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
             amrex::Array4<amrex::Real const> const & Vez_arr  = Ve[2]->const_array(mfi);
             amrex::Array4<amrex::Real const> redirect_arr;
             if (do_redir) { redirect_arr = redirect_E->const_array(mfi); }
+
+            // Kick-cap inputs/outputs (default Array4 when the cap is off ->
+            // never indexed, kick_cap_armed gates every access).
+            amrex::Array4<amrex::Real>       dropped_arr;
+            amrex::Array4<amrex::Real const> rhos_arr;
+            amrex::Array4<amrex::Real const> rhosum_arr;
+            if (kick_cap_armed) {
+                dropped_arr = dropped_cc.array(mfi);
+                rhos_arr    = rho_s_mf->const_array(mfi);
+                rhosum_arr  = rhos_sum_mf->const_array(mfi);
+            }
 
             amrex::ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
@@ -1813,8 +1970,34 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
                 }
                 if (do_redir) {
                     // E_s for this species = redirect_E component ion_comp.
-                    coef_arr(i,j,k,5) = ablastr::coarsen::sample::Interp(
+                    amrex::Real E_s = ablastr::coarsen::sample::Interp(
                         redirect_arr, nodal_src, cc_dst, coarsen, i, j, k, ion_comp);
+                    if (kick_cap_armed && E_s > 0._rt) {
+                        // sigma_redir <= f v_th  <=>  E_s <= f^2 kB T, with
+                        // T the deposited T_i when relaxation is on (else the
+                        // local T_e sets the velocity scale). In evaporated
+                        // cells T_i ~ 0 -> the cap declines essentially the
+                        // whole kick, which is the quarantine intent.
+                        amrex::Real const T_cap_K = do_relax
+                            ? amrex::max(Ti_arr(i,j,k) * K_per_eV, Te_floor_K)
+                            : amrex::max(Te_K, Te_floor_K);
+                        amrex::Real const E_s_max = kick_cap_f2 * PhysConst::kb * T_cap_K;
+                        if (E_s > E_s_max) {
+                            // Clipped remainder -> dropped tally: the ions
+                            // will not receive (3/2) n_s (E_s - E_s_max).
+                            amrex::Real const rhos_v = ablastr::coarsen::sample::Interp(
+                                rhos_arr, nodal_src, cc_dst, coarsen, i, j, k, 0);
+                            amrex::Real const rhosum_v = amrex::max(
+                                ablastr::coarsen::sample::Interp(
+                                    rhosum_arr, nodal_src, cc_dst, coarsen, i, j, k, 0),
+                                rho_floor);
+                            amrex::Real const n_s =
+                                (rhos_v / rhosum_v) * (rho_val / PhysConst::q_e) / Z_s;
+                            dropped_arr(i,j,k) += 1.5_rt * n_s * (E_s - E_s_max);
+                            E_s = E_s_max;
+                        }
+                    }
+                    coef_arr(i,j,k,5) = E_s;
                 }
             });
         }
@@ -1869,6 +2052,15 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
                 uzp[ip] += -drag*(uzp[ip]-uez) + sig*amrex::RandomNormal(0._prt, 1._prt, engine);
             });
         }
+    }
+
+    // Fold the clipped kick energy into the cumulative audit tally [J]
+    // (cell-centered boxes are disjoint, a plain sum suffices).
+    if (kick_cap_armed) {
+        auto const dx = warpx.Geom(lev).CellSizeArray();
+        amrex::Real dV = 1.0_rt;
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) { dV *= dx[d]; }
+        m_joule_dropped_kick_cap_J += dropped_cc.sum(0, false) * dV;
     }
 }
 
@@ -2136,6 +2328,41 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
         amrex::MultiFab & Te =
             *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
         Te.FillBoundary(warpx.Geom(lev).periodicity());
+    }
+
+    // Dropped-energy tally print (rank 0), for the deck-side energy audit:
+    // fires only when a decline channel is armed and the cadence input is on.
+    bool const any_decline_armed =
+        (m_joule_heating_n_min > m_n_floor) ||
+        (m_joule_redirect_to_ions && m_joule_redirect_n_min_factor > 0._rt) ||
+        (m_joule_redirect_to_ions && m_joule_redirect_kick_cap_vth_frac > 0._rt);
+    if (any_decline_armed && m_joule_dropped_print_interval > 0 &&
+        warpx.getistep(0) % m_joule_dropped_print_interval == 0) {
+        amrex::Print() << "[qdsmc] step " << warpx.getistep(0)
+            << " joule_dropped_J: heat_gate=" << m_joule_dropped_heat_gate_J
+            << " redirect_gate=" << m_joule_dropped_redirect_gate_J
+            << " kick_cap=" << m_joule_dropped_kick_cap_J
+            << " (cumulative)\n";
+    }
+
+    // Graceful Te-runaway abort (>700 keV liftoff runaways otherwise ended
+    // in SEGV deep in the transport): check the post-source Te maximum
+    // against the ceiling and stop with a clear message instead.
+    if (m_te_abort_threshold_eV > 0._rt) {
+        amrex::MultiFab const & Te =
+            *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+        amrex::Real const K_per_eV = PhysConst::q_e / PhysConst::kb;
+        amrex::Real const te_max_eV = Te.max(0) / K_per_eV;
+        if (te_max_eV > m_te_abort_threshold_eV) {
+            WARPX_ABORT_WITH_MESSAGE(
+                "QDSMC electron energy equation: max(Te) = "
+                + std::to_string(te_max_eV)
+                + " eV exceeds hybrid_pic_model.Te_abort_threshold = "
+                + std::to_string(m_te_abort_threshold_eV)
+                + " eV at step " + std::to_string(warpx.getistep(0))
+                + " (t = " + std::to_string(warpx.gett_new(0))
+                + " s): electron-temperature runaway.");
+        }
     }
 }
 
