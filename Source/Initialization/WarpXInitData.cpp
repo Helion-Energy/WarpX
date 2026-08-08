@@ -1605,16 +1605,15 @@ void WarpX::CheckGuardCells()
 void WarpX::InitializeEBGridData (int lev)
 {
 #ifdef AMREX_USE_EB
-    if (lev == maxLevel()) {
+    auto const eb_fact = fieldEBFactory(lev);
 
-        auto const eb_fact = fieldEBFactory(lev);
+    if (WarpX::electromagnetic_solver_id != ElectromagneticSolverAlgo::PSATD )
+    {
+        using warpx::fields::FieldType;
 
-        if (WarpX::electromagnetic_solver_id != ElectromagneticSolverAlgo::PSATD )
-        {
-            using warpx::fields::FieldType;
+        if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::ECT) {
 
-            if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::ECT) {
-
+            if (lev == maxLevel()) {
                 auto edge_lengths_lev = m_fields.get_alldirs(FieldType::edge_lengths, lev);
                 warpx::embedded_boundary::ComputeEdgeLengths(edge_lengths_lev, eb_fact);
                 warpx::embedded_boundary::ScaleEdges(edge_lengths_lev, CellSize(lev));
@@ -1636,26 +1635,32 @@ void WarpX::InitializeEBGridData (int lev)
                 warpx::embedded_boundary::MarkUpdateECellsECT( m_eb_update_E[lev], edge_lengths_lev );
                 // Mark on which grid points B should be updated
                 warpx::embedded_boundary::MarkUpdateBCellsECT( m_eb_update_B[lev], face_areas_lev, edge_lengths_lev);
-
-            } else {
-                // Mark on which grid points E should be updated (stair-case approximation)
-                warpx::embedded_boundary::MarkUpdateCellsStairCase(
-                    m_eb_update_E[lev],
-                    m_fields.get_alldirs(FieldType::Efield_fp, lev),
-                    eb_fact, Geom(lev).periodicity() );
-                // Mark on which grid points B should be updated (stair-case approximation)
-                warpx::embedded_boundary::MarkUpdateCellsStairCase(
-                    m_eb_update_B[lev],
-                    m_fields.get_alldirs(FieldType::Bfield_fp, lev),
-                    eb_fact, Geom(lev).periodicity() );
             }
 
+        } else {
+            // The stair-case update flags are needed on every level: solvers
+            // that evolve fields on all levels (e.g. hybrid-PIC with mesh
+            // refinement) read them wherever fields are pushed, not only at
+            // the finest level.
+            // Mark on which grid points E should be updated (stair-case approximation)
+            warpx::embedded_boundary::MarkUpdateCellsStairCase(
+                m_eb_update_E[lev],
+                m_fields.get_alldirs(FieldType::Efield_fp, lev),
+                eb_fact, Geom(lev).periodicity() );
+            // Mark on which grid points B should be updated (stair-case approximation)
+            warpx::embedded_boundary::MarkUpdateCellsStairCase(
+                m_eb_update_B[lev],
+                m_fields.get_alldirs(FieldType::Bfield_fp, lev),
+                eb_fact, Geom(lev).periodicity() );
         }
 
-        ComputeDistanceToEB();
-        warpx::embedded_boundary::MarkReducedShapeCells( m_eb_reduce_particle_shape[lev], eb_fact, nox, Geom(0).periodicity());
-
     }
+
+    if (lev == maxLevel()) {
+        // Loops over all levels internally; called once all level factories exist
+        ComputeDistanceToEB();
+    }
+    warpx::embedded_boundary::MarkReducedShapeCells( m_eb_reduce_particle_shape[lev], eb_fact, nox, Geom(0).periodicity());
 #else
     amrex::ignore_unused(lev);
 #endif
