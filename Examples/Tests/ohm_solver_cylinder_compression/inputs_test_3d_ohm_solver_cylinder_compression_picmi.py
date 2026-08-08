@@ -84,6 +84,15 @@ class PlasmaCylinderCompression(object):
             / (1.0 + np.exp((r - self.R_p) / self.delta_p))
         )
 
+    # Crossing mode: fraction of the (periodic) z extent covered by the
+    # level-1 tag box. A partial-z patch with radial extent past R_c has the
+    # bore wall crossing its two z-faces -- the production crossing topology
+    # (Phase 2 of the EB+MR design). The crossings through the z-faces are
+    # waived via hybrid_pic_model.mr_eb_clearance_waive_dims = z (the
+    # EB-aware transfer gates own the crossing band); the guard stays active
+    # on the radial faces.
+    Z_patch_frac = 0.5
+
     def __init__(
         self,
         test,
@@ -93,6 +102,12 @@ class PlasmaCylinderCompression(object):
         seed=None,
         patch_mode="core",
         diag_period=None,
+        steps=None,
+        eta_factor=None,
+        b_init_style="analytic",
+        mr_eb_gate_prolong=None,
+        mr_eb_gate_restrict=None,
+        mr_eb_gate_moments=None,
     ):
         self.test = test
         self.verbose = verbose or self.test
@@ -100,8 +115,13 @@ class PlasmaCylinderCompression(object):
         self.grid_type = grid_type
         self.seed = seed
         self.patch_mode = patch_mode
+        self.eta_factor = eta_factor
+        self.b_init_style = b_init_style
+        self.mr_eb_gate_prolong = mr_eb_gate_prolong
+        self.mr_eb_gate_restrict = mr_eb_gate_restrict
+        self.mr_eb_gate_moments = mr_eb_gate_moments
 
-        if patch_mode == "eb_inside":
+        if patch_mode in ("eb_inside", "crossing", "partial_core"):
             # EB-inside-patch arm: widen the domain so the level-1 patch
             # fully contains the flux conserver with clearance on both sides
             # -- EB cut ring to patch face and patch face to domain boundary
@@ -112,6 +132,10 @@ class PlasmaCylinderCompression(object):
             # periodic-topology surrogate that exercises the cross-level wall
             # band (cut cells on both levels) without a patch boundary
             # crossing the wall.
+            # The 'crossing' mode reuses this sizing (so the eb_inside
+            # single-level control and contained-wall arm are references at
+            # identical parameters) but makes the patch PARTIAL in z: the
+            # wall then crosses the patch's two z-faces.
             self.LX = 2.0 * self.R_c * 2.1
             self.LY = 2.0 * self.R_c * 2.1
             if self.test:
@@ -124,6 +148,17 @@ class PlasmaCylinderCompression(object):
                 self.NX = 512
                 self.NY = 512
             self.R_patch = 0.72
+            if patch_mode == "partial_core":
+                # Discriminating control for the crossing arm: identical
+                # domain/sizing and the same PARTIAL-z patch, but radially
+                # strictly inside the wall with clearance (guard stays
+                # enabled and must pass). Isolates the plain live z-face
+                # seam (which any partial patch has, EB or not) from the
+                # wall-crossing itself. Tag 0.18 realizes a face at
+                # +-0.197 m: Linf 5 cells from the wall's diagonal cut band
+                # (0.26 realizes +-0.328 m -- 1 cell, guard-illegal, the
+                # same trap the MVP notes flagged for the core arm).
+                self.R_patch = 0.18
         elif patch_mode == "grazing":
             # Negative-test arm: the patch face realizes ~3 coarse cells
             # inside the wall cut band (and the patch corners cross the wall
@@ -208,11 +243,15 @@ class PlasmaCylinderCompression(object):
             self.diag_steps = (
                 diag_period if diag_period is not None else self.total_steps
             )
-            if self.patch_mode != "eb_inside":
+            if self.patch_mode not in ("eb_inside", "crossing", "partial_core"):
                 self.NX = 32
                 self.NY = 32
             self.NZ = 16
-            self.NPPC = 16 if self.patch_mode == "eb_inside" else 5
+            self.NPPC = (
+                16
+                if self.patch_mode in ("eb_inside", "crossing", "partial_core")
+                else 5
+            )
             if self.patch_mode == "core" and self.refined_core:
                 # Guard-legal core patch at the test resolution: the wall's
                 # cut band reaches Linf |x| = 0.328 m on the patch diagonal,
@@ -225,6 +264,10 @@ class PlasmaCylinderCompression(object):
         else:
             self.total_steps = int(self.LT / self.DT)
             self.diag_steps = 1000
+
+        if steps is not None:
+            # Horizon override (measurement campaigns: longer-than-CI arms)
+            self.total_steps = steps
 
         # print out plasma parameters
         if comm.rank == 0:
@@ -301,7 +344,20 @@ class PlasmaCylinderCompression(object):
 
             RM = np.sqrt(XM**2 + YM**2)
 
-            Bz[:, :] = self.Bz(RM)
+            Bz_init = self.Bz(RM)
+            if self.b_init_style == "covered-zero":
+                # Init-style A/B arm (Phase 2a gate H3): zero the analytic Bz
+                # ONLY in covered land, strictly beyond every wall-band
+                # (mixed) coarse cell of either staircase (those span up to
+                # r ~= R_c + 2 DX_coarse, so the step sits at 3 DX). A
+                # Bz(x,y) step carries no divergence (Bz is z-faced and
+                # z-uniform), so the external div(B) cleaning leaves the
+                # difference untouched: the two init styles differ ONLY in
+                # the values frozen into fully covered land. With the
+                # EB-aware coarse-fine gates the live side must be
+                # insensitive to this choice.
+                Bz_init = np.where(RM > self.R_c + 3.0 * self.DX, 0.0, Bz_init)
+            Bz[:, :] = Bz_init
         comm.Barrier()
 
     def setup_run(self):
@@ -329,12 +385,18 @@ class PlasmaCylinderCompression(object):
             **grid_kw,
         )
         if self.refined_core:
-            # Static level-1 patch covering the plasma core, spanning the
-            # full periodic z extent (the equilibrium is z-uniform).
+            # Static level-1 patch covering the plasma core. Default: full
+            # periodic z extent (the equilibrium is z-uniform). Crossing
+            # mode: partial z extent, so the flux-conserver wall crosses the
+            # patch's two z-faces.
+            if self.patch_mode in ("crossing", "partial_core"):
+                z_half = 0.5 * self.Z_patch_frac * self.Lz
+            else:
+                z_half = 0.5 * self.Lz
             self.grid.add_refined_region(
                 level=1,
-                lo=[-self.R_patch, -self.R_patch, -0.5 * self.Lz],
-                hi=[self.R_patch, self.R_patch, 0.5 * self.Lz],
+                lo=[-self.R_patch, -self.R_patch, -z_half],
+                hi=[self.R_patch, self.R_patch, z_half],
             )
         simulation.time_step_size = self.dt
         simulation.max_steps = self.total_steps
@@ -362,13 +424,17 @@ class PlasmaCylinderCompression(object):
             },
         }
 
+        eta0 = 1e-4 * constants.mu0 * self.R_c * self.vA
+        if self.eta_factor is not None:
+            # Resistivity-sensitivity arm (measurement campaigns)
+            eta0 *= self.eta_factor
         self.solver = picmi.HybridPICSolver(
             grid=self.grid,
             gamma=5.0 / 3.0,
             Te=self.T_e,
             n0=self.n0,
             n_floor=0.05 * self.n0,
-            plasma_resistivity=1e-4 * constants.mu0 * self.R_c * self.vA,
+            plasma_resistivity=eta0,
             plasma_hyper_resistivity=1e-9,
             substeps=self.substeps,
             A_external=A_ext,
@@ -479,6 +545,26 @@ class PlasmaCylinderCompression(object):
             # Report the divergence of B at the coarse-fine interface after
             # the ghost fill and restriction steps (printed diagnostics).
             pywarpx.hybridpicmodel.mr_check_div_b = 1
+            if self.patch_mode == "crossing":
+                # The wall crosses the patch's two z-faces (the production
+                # topology). Waive the clearance guard for z-face crossings
+                # only: the EB-aware coarse-fine gates (mr_eb_gate_prolong /
+                # mr_eb_gate_restrict, default on) own the crossing band,
+                # while the radial faces stay guarded.
+                pywarpx.hybridpicmodel.mr_eb_clearance_waive_dims = "z"
+            if self.patch_mode == "grazing":
+                # Negative test hardening: the z waiver must NOT disable the
+                # radial guarding this arm is designed to trip.
+                pywarpx.hybridpicmodel.mr_eb_clearance_waive_dims = "z"
+            # EB-aware coarse-fine transfer gates (attribution/debug arms;
+            # bucket writes are the ONLY reliable path -- leftover argv
+            # never reaches ParmParse). Verify in warpx_used_inputs.
+            if self.mr_eb_gate_prolong is not None:
+                pywarpx.hybridpicmodel.mr_eb_gate_prolong = self.mr_eb_gate_prolong
+            if self.mr_eb_gate_restrict is not None:
+                pywarpx.hybridpicmodel.mr_eb_gate_restrict = self.mr_eb_gate_restrict
+            if self.mr_eb_gate_moments is not None:
+                pywarpx.hybridpicmodel.mr_eb_gate_moments = self.mr_eb_gate_moments
         if self.seed is not None:
             pywarpx.warpx.random_seed = self.seed
         simulation.initialize_warpx()
@@ -561,12 +647,62 @@ parser.add_argument(
         "geometry of the refined-core arm: 'core' = patch inside the plasma "
         "column (default); 'eb_inside' = widened domain with the patch fully "
         "containing the flux-conserver EB (also sizes the single-level "
-        "control when --refined-core is omitted); 'grazing' = patch face "
-        "deliberately inside the wall cut band (negative test: the MR+EB "
-        "clearance guard must abort)"
+        "control when --refined-core is omitted); 'crossing' = eb_inside "
+        "sizing with a partial-z patch so the wall crosses the patch z-faces "
+        "(z-face crossings waived via mr_eb_clearance_waive_dims=z, radial "
+        "guard active -- Phase-2 arm); 'partial_core' = eb_inside sizing with the same "
+        "partial-z patch but radially inside the wall at clearance (guard "
+        "enabled -- discriminating control for 'crossing'); 'grazing' = "
+        "patch face deliberately inside the wall cut band (negative test: "
+        "the MR+EB clearance guard must abort)"
     ),
-    choices=["core", "eb_inside", "grazing"],
+    choices=["core", "eb_inside", "crossing", "partial_core", "grazing"],
     default="core",
+)
+parser.add_argument(
+    "--steps",
+    help="override the number of steps (measurement campaigns)",
+    type=int,
+    default=None,
+)
+parser.add_argument(
+    "--eta-factor",
+    help="multiply the plasma resistivity by this factor (sensitivity arms)",
+    type=float,
+    default=None,
+)
+parser.add_argument(
+    "--b-init-style",
+    help=(
+        "initial-B variant: 'analytic' (default) keeps the analytic Bz(r) "
+        "tail everywhere; 'covered-zero' zeroes it in covered land only "
+        "(r > R_c + 3 DX) -- init-style A/B discriminator for the EB-aware "
+        "coarse-fine gates (frozen covered values must not leak across "
+        "levels)"
+    ),
+    choices=["analytic", "covered-zero"],
+    default="analytic",
+)
+parser.add_argument(
+    "--mr-eb-gate-prolong",
+    help="EB-aware gating of the B coarse-fine ghost fill (default: WarpX default, on)",
+    type=int,
+    choices=[0, 1],
+    default=None,
+)
+parser.add_argument(
+    "--mr-eb-gate-restrict",
+    help="EB-aware gating of the B fine->coarse restriction (default: WarpX default, on)",
+    type=int,
+    choices=[0, 1],
+    default=None,
+)
+parser.add_argument(
+    "--mr-eb-gate-moments",
+    help="EB-aware gating of the moment band fill (default: WarpX default, on)",
+    type=int,
+    choices=[0, 1],
+    default=None,
 )
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
@@ -579,5 +715,11 @@ run = PlasmaCylinderCompression(
     seed=args.seed,
     patch_mode=args.patch_mode,
     diag_period=args.diag_period,
+    steps=args.steps,
+    eta_factor=args.eta_factor,
+    b_init_style=args.b_init_style,
+    mr_eb_gate_prolong=args.mr_eb_gate_prolong,
+    mr_eb_gate_restrict=args.mr_eb_gate_restrict,
+    mr_eb_gate_moments=args.mr_eb_gate_moments,
 )
 simulation.step()
