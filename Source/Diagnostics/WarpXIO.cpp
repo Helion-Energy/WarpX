@@ -433,7 +433,13 @@ WarpX::InitFromCheckpoint ()
         }
     }
 
-    if (EB::enabled()) { InitializeEBGridData(maxLevel()); }
+    if (EB::enabled()) {
+        // The EB grid data (update masks, reduced-shape cells, distance
+        // function) lives on every level; restore it on every level.
+        for (int lev = 0; lev <= finestLevel(); ++lev) {
+            InitializeEBGridData(lev);
+        }
+    }
 
     reduced_diags->ReadCheckpointData(restart_chkfile);
 

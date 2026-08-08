@@ -359,6 +359,13 @@ void WarpX::HybridPICInitializeRhoJandB ()
                         0, 0, 1, current_fp_temp[lev][idim]->nGrowVect());
         }
     }
+
+    // Warn (once, at startup) about fine-level cells starting at the density
+    // floor: fine resolution at the floor hosts a noise-seeded physical-rate
+    // instability that mesh refinement amplifies (T1.7).
+    if (finest_level > 0) {
+        m_hybrid_pic_model->CheckFineLevelDensityFloor();
+    }
 }
 
 void

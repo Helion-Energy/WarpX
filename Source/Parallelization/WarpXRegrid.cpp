@@ -217,6 +217,13 @@ WarpX::RemakeLevel (int lev, Real /*time*/, const BoxArray& ba, const Distributi
                                                            amrex::EBSupport::full);
 #endif
             InitializeEBGridData(lev);
+            if (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC
+                && max_level > 0) {
+                // Re-run the EB clearance guard after the level remake: a
+                // regrid that moves a fine patch into the wall band must
+                // fail loudly (the check is cheap; verbose at init only).
+                m_hybrid_pic_model->CheckMREBClearance(false);
+            }
         } else {
             m_field_factory[lev] = std::make_unique<FArrayBoxFactory>();
         }

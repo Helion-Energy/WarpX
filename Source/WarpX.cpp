@@ -2650,9 +2650,12 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
         amrex::IntVect const ng_ls(2);
         //EB level set
         m_fields.alloc_init(FieldType::distance_to_eb, lev, amrex::convert(ba, IntVect::TheNodeVector()), dm, nc_ls, ng_ls, 0.0_rt);
-        // Whether to reduce the particle shape to order 1 when close to the EB
+        // Whether to reduce the particle shape to order 1 when close to the EB.
+        // Initialize to 1 (reduce) so that a level that is never marked fails
+        // safe instead of exposing uninitialized memory to the deposition;
+        // MarkReducedShapeCells overwrites the entire array on marked levels.
         AllocInitMultiFab(m_eb_reduce_particle_shape[lev], amrex::convert(ba, IntVect::TheCellVector()), dm, ncomps,
-            ngRho, lev, "m_eb_reduce_particle_shape");
+            ngRho, lev, "m_eb_reduce_particle_shape", 1);
 
         // The update flags are needed on every level: solvers that evolve
         // fields on all levels (e.g. hybrid-PIC with mesh refinement) read

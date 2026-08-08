@@ -219,6 +219,31 @@ public:
      */
     void FillMomentsCoarseFineGhosts ();
 
+    /**
+     * \brief Mesh refinement + embedded boundary clearance guard: for every
+     * fine level, no EB cut (partially covered) cell of the parent level may
+     * lie within N_clear coarse cells (Linf metric, both sides) of the
+     * coarse-fine patch boundary. The coarse-fine interlevel operators
+     * (divergence-free B ghost fill, restriction, moment band fill, particle
+     * buffers) are EB-blind; a cut face inside their footprint is silent
+     * corruption, so a violation aborts with the offending cell and the
+     * measured clearance. Fully covered shell cells are legal: both levels
+     * freeze E/J there and curl E vanishes, so the transfers are trivially
+     * consistent (this makes an EB fully interior to the patch legal).
+     * N_clear is derived from the operator footprints (floor 4) or taken
+     * from hybrid_pic_model.mr_eb_clearance_cells if >= 0 (0 disables).
+     * No-op unless EB is enabled and a fine level exists.
+     *
+     * \param[in] verbose print the computed clearance and its components
+     */
+    void CheckMREBClearance (bool verbose) const;
+
+    /** \brief Warn-only check (run once after the initial deposition): flag
+     * fine-level cells whose initial ion density is at/below 1.05x the
+     * density floor. Fine cells at the floor host a noise-seeded
+     * physical-rate instability that mesh refinement amplifies (T1.7). */
+    void CheckFineLevelDensityFloor () const;
+
     /** \brief div(B) audit after the coarse-fine ghost fill of level lev
      * (active when m_mr_check_div_b is set). */
     void CheckDivBAfterGhostFill (int lev, amrex::IntVect const& ng);
@@ -283,6 +308,11 @@ public:
     /** Mesh refinement: runtime div(B) audit of the coarse-fine ghost fill
      *  and the restriction (debug diagnostic, off by default). */
     bool m_mr_check_div_b = false;
+    /** Mesh refinement + embedded boundary: required clearance (coarse
+     *  cells) between any fine-patch boundary and the nearest EB cut cell
+     *  (-1 = derive from the coarse-fine operator footprints, 0 = disable
+     *  the guard). See CheckMREBClearance(). */
+    int m_mr_eb_clearance_cells = -1;
 
     /** Running maxima of the div(B) audit (raw value and value relative to
      *  max|B|/dx), accumulated while m_mr_check_div_b is set. */

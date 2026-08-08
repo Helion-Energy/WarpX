@@ -3890,7 +3890,21 @@ Maxwell solver: kinetic-fluid hybrid
     be divergence-free exceed :math:`10^{-12}` relative to :math:`\max|\mathbf{B}|/\Delta x`. Intended
     for testing and debugging.
 
-.. pp:param:: hybrid_pic_model.holmstrom_vacuum_region
+.. pp:param:: hybrid_pic_model.mr_eb_clearance_cells
+    :type: ``int``
+    :default: ``-1``
+    :optional:
+
+    If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, mesh refinement is used and an embedded
+    boundary is present, this sets the required clearance (in coarse cells, Linf metric, both sides of
+    the boundary) between any fine-patch boundary and the nearest embedded-boundary *cut* cell of the
+    parent level. The coarse-fine coupling operators (divergence-free B ghost fill, restriction, moment
+    band fill, particle buffers) do not consult embedded-boundary data, so a cut cell inside their
+    footprint would corrupt fields silently; the simulation therefore aborts at initialization (and on
+    every regrid) if the clearance is violated. Fully covered cells are allowed at the patch boundary:
+    both levels freeze the fields there, so an embedded boundary strictly interior to a refinement patch
+    is legal. The default ``-1`` derives the clearance from the actual operator footprints (with a floor
+    of 4 cells) and prints the value at initialization; ``0`` disables the guard (at your own risk).
     :type: ``bool``
     :default: ``false``
     :optional:

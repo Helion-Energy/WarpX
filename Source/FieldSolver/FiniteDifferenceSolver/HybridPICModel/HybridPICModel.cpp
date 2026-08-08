@@ -73,6 +73,12 @@ void HybridPICModel::ReadParameters ()
         Abort("hybrid_pic_model.mr_restrict_cadence must be 'substep' or 'half_step'");
     }
     pp_hybrid.query("mr_check_div_b", m_mr_check_div_b);
+    utils::parser::queryWithParser(
+        pp_hybrid, "mr_eb_clearance_cells", m_mr_eb_clearance_cells);
+    if (m_mr_eb_clearance_cells < -1) {
+        Abort("hybrid_pic_model.mr_eb_clearance_cells must be >= -1 "
+              "(-1 = auto, 0 = disable the clearance guard)");
+    }
 
     // The hybrid model requires an electron temperature, reference density
     // and exponent to be given. These values will be used to calculate the
