@@ -85,13 +85,50 @@ class PlasmaCylinderCompression(object):
         )
 
     def __init__(
-        self, test, verbose, refined_core=False, grid_type="collocated", seed=None
+        self,
+        test,
+        verbose,
+        refined_core=False,
+        grid_type="collocated",
+        seed=None,
+        patch_mode="core",
+        diag_period=None,
     ):
         self.test = test
         self.verbose = verbose or self.test
         self.refined_core = refined_core
         self.grid_type = grid_type
         self.seed = seed
+        self.patch_mode = patch_mode
+
+        if patch_mode == "eb_inside":
+            # EB-inside-patch arm: widen the domain so the level-1 patch
+            # fully contains the flux conserver with clearance on both sides
+            # -- EB cut ring to patch face and patch face to domain boundary
+            # each >= the clearance guard's N_clear. The patch boundary then
+            # sits entirely in the covered exterior, where both levels freeze
+            # the fields. Note this containment is realizable only because
+            # the cylinder is closed by the periodic z boundary: the arm is a
+            # periodic-topology surrogate that exercises the cross-level wall
+            # band (cut cells on both levels) without a patch boundary
+            # crossing the wall.
+            self.LX = 2.0 * self.R_c * 2.1
+            self.LY = 2.0 * self.R_c * 2.1
+            if self.test:
+                # Same DX as the core test mode (0.0328125 m) on the doubled
+                # domain; more particles per cell since the fine level (ppc/8)
+                # carries the entire plasma column in this mode.
+                self.NX = 64
+                self.NY = 64
+            else:
+                self.NX = 512
+                self.NY = 512
+            self.R_patch = 0.72
+        elif patch_mode == "grazing":
+            # Negative-test arm: the patch face realizes ~3 coarse cells
+            # inside the wall cut band (and the patch corners cross the wall
+            # entirely), so the MR+EB clearance guard must abort at init.
+            self.R_patch = 0.35
 
         self.Lx = self.LX
         self.Ly = self.LY
@@ -168,11 +205,23 @@ class PlasmaCylinderCompression(object):
         # run very low resolution as a CI test
         if self.test:
             self.total_steps = 10
-            self.diag_steps = self.total_steps
-            self.NX = 32
-            self.NY = 32
+            self.diag_steps = (
+                diag_period if diag_period is not None else self.total_steps
+            )
+            if self.patch_mode != "eb_inside":
+                self.NX = 32
+                self.NY = 32
             self.NZ = 16
-            self.NPPC = 5
+            self.NPPC = 16 if self.patch_mode == "eb_inside" else 5
+            if self.patch_mode == "core" and self.refined_core:
+                # Guard-legal core patch at the test resolution: the wall's
+                # cut band reaches Linf |x| = 0.328 m on the patch diagonal,
+                # so the production patch (face 0.328 m) would sit only one
+                # cell from a cut cell. A tag half-width of 0.10 m realizes a
+                # face at +-4 coarse cells (0.131 m, blocking-4 aligned),
+                # 6 cells clear of the wall cut band, with the coarse-fine
+                # seam inside the dense plasma core.
+                self.R_patch = 0.10
         else:
             self.total_steps = int(self.LT / self.DT)
             self.diag_steps = 1000
@@ -388,11 +437,17 @@ class PlasmaCylinderCompression(object):
                 warpx_format="plotfile",
             )
             simulation.add_diagnostic(particle_diag)
+            # Refined runs also output J: the covered-region current freeze is
+            # a wall observable of the MR + EB coupling (the single-level test
+            # keeps its original field list and blessed checksums).
+            field_data_list = ["B", "E", "rho", "Tx_ions", "Ty_ions", "Tz_ions"]
+            if self.refined_core:
+                field_data_list.append("J")
             field_diag = picmi.FieldDiagnostic(
                 name="diag1",
                 grid=self.grid,
                 period=self.diag_steps,
-                data_list=["B", "E", "rho", "Tx_ions", "Ty_ions", "Tz_ions"],
+                data_list=field_data_list,
                 write_dir="diags",
                 warpx_format="plotfile",
             )
@@ -440,9 +495,12 @@ class PlasmaCylinderCompression(object):
             for lev in range(2):
                 Ax = simulation.fields.get(f"{name}_Aext", dir="x", level=lev)
                 yy = Ax.mesh("y")
-                len(yy)
                 # Column through the middle of the level's bounding box
-                data = Ax[len(Ax.mesh("x")) // 2, :, len(Ax.mesh("z")) // 2]
+                # (imesh gives global indices, so this works for patches
+                # that do not start at the domain corner)
+                ix_mid = int(Ax.imesh(0)[len(Ax.imesh(0)) // 2])
+                iz_mid = int(Ax.imesh(2)[len(Ax.imesh(2)) // 2])
+                data = Ax[ix_mid, :, iz_mid]
                 grad = np.polyfit(yy, np.squeeze(data), 1)[0]
                 if comm.rank == 0:
                     print(
@@ -487,6 +545,29 @@ parser.add_argument(
     type=int,
     default=None,
 )
+parser.add_argument(
+    "--diag-period",
+    help=(
+        "override the diagnostic period in test mode (default: one dump at "
+        "the final step); used by the mesh-refinement validation arms to "
+        "record per-step wall observables"
+    ),
+    type=int,
+    default=None,
+)
+parser.add_argument(
+    "--patch-mode",
+    help=(
+        "geometry of the refined-core arm: 'core' = patch inside the plasma "
+        "column (default); 'eb_inside' = widened domain with the patch fully "
+        "containing the flux-conserver EB (also sizes the single-level "
+        "control when --refined-core is omitted); 'grazing' = patch face "
+        "deliberately inside the wall cut band (negative test: the MR+EB "
+        "clearance guard must abort)"
+    ),
+    choices=["core", "eb_inside", "grazing"],
+    default="core",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
@@ -496,5 +577,7 @@ run = PlasmaCylinderCompression(
     refined_core=args.refined_core,
     grid_type=args.grid_type,
     seed=args.seed,
+    patch_mode=args.patch_mode,
+    diag_period=args.diag_period,
 )
 simulation.step()

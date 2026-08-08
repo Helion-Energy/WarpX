@@ -2,6 +2,16 @@
 #
 
 add_warpx_test(
+    test_3d_ohm_solver_cylinder_compression_mr_eb_clearance_abort_picmi  # name
+    3  # dims
+    1  # nprocs
+    "inputs_test_3d_ohm_solver_cylinder_compression_mr_eb_clearance_abort.py"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
     test_3d_ohm_solver_cylinder_compression_mr_picmi  # name
     3  # dims
     2  # nprocs
