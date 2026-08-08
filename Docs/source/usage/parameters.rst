@@ -3905,6 +3905,59 @@ Maxwell solver: kinetic-fluid hybrid
     both levels freeze the fields there, so an embedded boundary strictly interior to a refinement patch
     is legal. The default ``-1`` derives the clearance from the actual operator footprints (with a floor
     of 4 cells) and prints the value at initialization; ``0`` disables the guard (at your own risk).
+
+.. pp:param:: hybrid_pic_model.mr_eb_clearance_waive_dims
+    :type: list of ``string``
+    :default: empty
+    :optional:
+
+    If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, mesh refinement is used and an embedded
+    boundary is present, this waives the :pp:param:`hybrid_pic_model.mr_eb_clearance_cells` guard for
+    embedded-boundary crossings through refinement-patch faces *normal to* the listed dimensions
+    (e.g. ``z`` or ``2`` for a closed wall surface passing through the axial ends of a patch — the
+    topologically forced case for any patch containing a closed wall). Faces normal to the other
+    dimensions stay guarded, including patch corners near them. Crossings through waived faces rely on
+    the EB-aware coarse-fine transfer gates (see
+    :pp:param:`hybrid_pic_model.mr_eb_gate_prolong` and
+    :pp:param:`hybrid_pic_model.mr_eb_gate_restrict`): each level keeps its own staircase solution in
+    the wall band, and frozen faces are excluded from the interlevel B transfers.
+
+.. pp:param:: hybrid_pic_model.mr_eb_gate_prolong
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, mesh refinement is used and an embedded
+    boundary is present, this gates the divergence-free B-field coarse-fine ghost fill by the coarse
+    staircase masks: coarse faces frozen by the embedded boundary are never a source for fine ghost
+    faces (which instead retain the live fine-level solution). Debug knob — disabling restores the
+    EB-blind prolongation, which lets frozen coarse values leak into the live side of a wall band that
+    crosses the patch boundary and injects a secular :math:`\nabla \cdot \mathbf{B}` error there.
+
+.. pp:param:: hybrid_pic_model.mr_eb_gate_restrict
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, mesh refinement is used and an embedded
+    boundary is present, this gates the fine-to-coarse B-field restriction by the coarse staircase
+    masks: coarse faces frozen by the embedded boundary are never overwritten by fine face averages
+    (they stay coarse-owned). Debug knob — disabling restores the EB-blind restriction (same
+    consequence as for :pp:param:`hybrid_pic_model.mr_eb_gate_prolong`).
+
+.. pp:param:: hybrid_pic_model.mr_eb_gate_moments
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, mesh refinement is used and an embedded
+    boundary is present, this gates the coarse-fine moment band fill by the fine staircase masks:
+    current-density writes are skipped on fine edges frozen by the embedded boundary, and
+    charge-density writes are skipped on nodes with no uncovered adjacent cell, so coarse in-wall
+    (deposition-starved) moments never overwrite the fine level's own frozen values. Debug knob —
+    disabling restores the EB-blind band fill.
+
+.. pp:param:: hybrid_pic_model.holmstrom_vacuum_region
     :type: ``bool``
     :default: ``false``
     :optional:

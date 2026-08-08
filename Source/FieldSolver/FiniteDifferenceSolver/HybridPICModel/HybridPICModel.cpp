@@ -79,6 +79,37 @@ void HybridPICModel::ReadParameters ()
         Abort("hybrid_pic_model.mr_eb_clearance_cells must be >= -1 "
               "(-1 = auto, 0 = disable the clearance guard)");
     }
+    // Per-dimension clearance waiver: crossings through patch faces normal to
+    // a waived dimension do not trigger the guard (the EB-aware coarse-fine
+    // gates own the crossing band); the other faces stay guarded.
+    {
+        std::vector<std::string> waive_dims;
+        pp_hybrid.queryarr("mr_eb_clearance_waive_dims", waive_dims);
+        for (auto const& s : waive_dims) {
+            int d = -1;
+            if (s == "x" || s == "X") { d = 0; }
+#if defined(WARPX_DIM_3D)
+            else if (s == "y" || s == "Y") { d = 1; }
+            else if (s == "z" || s == "Z") { d = 2; }
+#elif defined(WARPX_DIM_XZ)
+            else if (s == "z" || s == "Z") { d = 1; }
+#endif
+            else if (s.size() == 1 && s[0] >= '0' && s[0] <= '9') {
+                d = s[0] - '0';
+            }
+            if (d < 0 || d >= AMREX_SPACEDIM) {
+                Abort("hybrid_pic_model.mr_eb_clearance_waive_dims: invalid "
+                      "dimension '" + s + "'");
+            }
+            m_mr_eb_clearance_waive[d] = 1;
+        }
+    }
+    // EB-aware coarse-fine transfer gates (debug knobs, default on): frozen
+    // coarse staircase faces are never a source (prolongation) nor a
+    // destination (restriction) of the interlevel B transfers.
+    pp_hybrid.query("mr_eb_gate_prolong", m_mr_eb_gate_prolong);
+    pp_hybrid.query("mr_eb_gate_restrict", m_mr_eb_gate_restrict);
+    pp_hybrid.query("mr_eb_gate_moments", m_mr_eb_gate_moments);
 
     // The hybrid model requires an electron temperature, reference density
     // and exponent to be given. These values will be used to calculate the

@@ -313,6 +313,26 @@ public:
      *  (-1 = derive from the coarse-fine operator footprints, 0 = disable
      *  the guard). See CheckMREBClearance(). */
     int m_mr_eb_clearance_cells = -1;
+    /** Mesh refinement + embedded boundary: per-dimension clearance waiver
+     *  (1 = crossings through patch faces normal to this dimension do not
+     *  trigger the clearance guard; the other faces stay guarded). */
+    amrex::IntVect m_mr_eb_clearance_waive = amrex::IntVect(0);
+    /** Mesh refinement + embedded boundary: gate the divergence-free B ghost
+     *  fill by the coarse staircase masks (frozen coarse faces are never a
+     *  source; the scratch is pre-seeded with live fine data). Debug knob:
+     *  disabling restores the EB-blind prolongation. */
+    bool m_mr_eb_gate_prolong = true;
+    /** Mesh refinement + embedded boundary: gate the fine->coarse B
+     *  restriction commit by the coarse staircase masks (frozen coarse faces
+     *  are never a destination). Debug knob: disabling restores the EB-blind
+     *  restriction. */
+    bool m_mr_eb_gate_restrict = true;
+    /** Mesh refinement + embedded boundary: gate the moment band fill by the
+     *  fine staircase masks (J writes skipped on frozen fine edges, rho
+     *  writes skipped on nodes with no uncovered adjacent cell), so coarse
+     *  in-wall moments never overwrite the fine level's own frozen/starved
+     *  values. Debug knob: disabling restores the EB-blind band fill. */
+    bool m_mr_eb_gate_moments = true;
 
     /** Running maxima of the div(B) audit (raw value and value relative to
      *  max|B|/dx), accumulated while m_mr_check_div_b is set. */
@@ -327,9 +347,11 @@ public:
     amrex::Vector<DivBStats> m_divb_fine_valid;    /**< fine valid region */
     amrex::Vector<DivBStats> m_divb_fine_ring;     /**< first C-F ghost ring */
     amrex::Vector<DivBStats> m_divb_fine_band;     /**< outer C-F ghost band */
+    amrex::Vector<DivBStats> m_divb_fine_wall;     /**< ghost cells in the EB wall band */
     amrex::Vector<DivBStats> m_divb_crse_interior; /**< restricted interior */
     amrex::Vector<DivBStats> m_divb_crse_seam;     /**< seam ring (mixed faces) */
     amrex::Vector<DivBStats> m_divb_crse_exterior; /**< freely evolved exterior */
+    amrex::Vector<DivBStats> m_divb_crse_wall;     /**< wall seam (frozen faces mixed in) */
 
     /** Electron temperature in eV */
     amrex::Real m_elec_temp;
@@ -401,10 +423,41 @@ private:
      * either level changes. */
     void EnsureRestrictKeepMask (int clev, amrex::IntVect const& ratio);
 
+    /** \brief (Re)build the cached per-direction coarse-face staircase masks
+     * of refined level lev on the per-box coarse patch layout used by
+     * FillBfieldCoarseFineGhosts (1 = live, 0 = frozen on the coarse
+     * staircase, from m_eb_update_B[lev-1]). Cached until the fine box layout
+     * changes; only built when EB is enabled and the prolongation gate is on.
+     *
+     * \param[in] lev fine level
+     * \param[in] cpatch_ba cell-centered per-box coarse patch BoxArray
+     * \param[in] fdm fine-level DistributionMapping */
+    void EnsureProlongGateMask (int lev, amrex::BoxArray const& cpatch_ba,
+                                amrex::DistributionMapping const& fdm);
+
     /** Cached restriction keep-masks, indexed by coarse level. */
     amrex::Vector<std::unique_ptr<amrex::iMultiFab>> m_mr_keep_mask;
     /** Fine-level cell BoxArray each cached keep-mask was built from. */
     amrex::Vector<amrex::BoxArray> m_mr_keep_mask_fba;
+
+    /** Cached prolongation gate masks (per direction, on the coarse patch
+     *  layout of FillBfieldCoarseFineGhosts), indexed by fine level. */
+    amrex::Vector<std::array<std::unique_ptr<amrex::iMultiFab>, 3>> m_mr_prolong_gate;
+    /** Cell BoxArray (coarse patch layout) each cached gate was built from. */
+    amrex::Vector<amrex::BoxArray> m_mr_prolong_gate_ba;
+    /** Per fine level: true right after a gate rebuild. The first fill after
+     *  a (re)build runs unmasked: the fine coarse-fine ghosts hold no live
+     *  data yet at init/restart, and a masked fill would freeze zeros into
+     *  the retained faces. */
+    amrex::Vector<char> m_mr_prolong_gate_fresh;
+    /** Cached frozen ghost-fill state (per direction, fine layout, padded
+     *  ghosts), captured at the first unmasked fill after a gate rebuild.
+     *  Later masked fills pre-seed their scratch from this cache: faces
+     *  overlying frozen coarse faces keep exactly this state (each level
+     *  owns its own frozen staircase solution), independent of transient
+     *  ghost values in Bfield_fp (the RK stage arithmetic manufactures
+     *  stale-B_old mixtures on ghost faces between fills). */
+    amrex::Vector<std::array<std::unique_ptr<amrex::MultiFab>, 3>> m_mr_prolong_frozen;
 
     /** Cached fine-edge masks (0 = sacrificial band), indexed by fine level. */
     amrex::Vector<std::unique_ptr<amrex::iMultiFab>> m_mr_fine_edge_mask;
