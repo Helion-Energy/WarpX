@@ -2411,17 +2411,42 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
     }
 
     // Graceful Te-runaway abort (>700 keV liftoff runaways otherwise ended
-    // in SEGV deep in the transport): check the post-source Te maximum
-    // against the ceiling and stop with a clear message instead.
+    // in SEGV deep in the transport): check the post-source OPEN-SET
+    // (n > n_floor) Te maximum against the ceiling and stop with a clear
+    // message instead. The open-set gate is load-bearing: quarantined
+    // sub-floor (marooned) cells legitimately carry keV after an S0-style
+    // self-quench -- evaporate, strand, decouple -- and a full-field max
+    // would abort exactly the runs the quarantine design counts as
+    // successes (measured: arm SH tripped at 1.75 keV open-set because a
+    // quarantined cell crossed the ceiling).
     if (m_te_abort_threshold_eV > 0._rt) {
         amrex::MultiFab const & Te =
             *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+        amrex::MultiFab const & rho_ab =
+            *warpx.m_fields.get(FieldType::rho_fp, lev);
+        amrex::Real const rho_floor_ab = PhysConst::q_e * m_n_floor;
+        amrex::ReduceOps<amrex::ReduceOpMax> reduce_op;
+        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        for (MFIter mfi(Te, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            amrex::Array4<amrex::Real const> const & te_arr  = Te.const_array(mfi);
+            amrex::Array4<amrex::Real const> const & rho_arr = rho_ab.const_array(mfi);
+            reduce_op.eval(mfi.tilebox(), reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
+            {
+                return {(rho_arr(i,j,k) > rho_floor_ab)
+                            ? te_arr(i,j,k) : 0.0_rt};
+            });
+        }
+        amrex::Real te_max_K = amrex::get<0>(reduce_data.value(reduce_op));
+        amrex::ParallelAllReduce::Max(
+            te_max_K, amrex::ParallelDescriptor::Communicator());
         amrex::Real const K_per_eV = PhysConst::q_e / PhysConst::kb;
-        amrex::Real const te_max_eV = Te.max(0) / K_per_eV;
+        amrex::Real const te_max_eV = te_max_K / K_per_eV;
         if (te_max_eV > m_te_abort_threshold_eV) {
             WARPX_ABORT_WITH_MESSAGE(
-                "QDSMC electron energy equation: max(Te) = "
-                + std::to_string(te_max_eV)
+                "QDSMC electron energy equation: open-set (n > n_floor) "
+                "max(Te) = " + std::to_string(te_max_eV)
                 + " eV exceeds hybrid_pic_model.Te_abort_threshold = "
                 + std::to_string(m_te_abort_threshold_eV)
                 + " eV at step " + std::to_string(warpx.getistep(0))
