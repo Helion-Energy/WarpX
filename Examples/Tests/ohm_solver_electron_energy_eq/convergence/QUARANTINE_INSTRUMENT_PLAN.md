@@ -1,4 +1,17 @@
-# Quarantine instrument: open-set contamination tally (design)
+# Quarantine instrument: open-set contamination tally
+
+**Status 2026-08-08: IMPLEMENTED** (`qdsmc_contamination_n_boundary`), with
+two design deltas from the original sketch: (1) the class boundary is a free
+density (not pinned to n_floor) because the production closed-floor-faces
+rule makes sub-floor conduction flux STRUCTURALLY ZERO — verified directly
+(smoke S5: all channels exactly 0 with a hot floored halo; opening the floor
+faces flips the fast-front channel to exactly the crossing total, smoke S4).
+Set the boundary INSIDE the ignition band (n of a few x n_floor) to measure
+the band -> bulk coupling. (2) Channel attribution is per grid axis (ax0/1/2,
+deck-side mapping: axial = kappa_par in a Bz slab) rather than per branch —
+branches are par/perp tensor products and don't decompose cleanly. The
+advection channel is deferred (phase 2); kicks channel live (verified against
+the known redirect delivery, 4 digits). Conduction taps: split-fluxform only.
 
 Item 6 of `DELIVERY_runaway_2026-08-08/prompts/redirect_drag_and_quarantine.md`.
 Goal: measure, per step and per channel, the energy flux from sub-floor /

@@ -378,6 +378,11 @@ void HybridPICModel::ReadParameters ()
     utils::parser::queryWithParser(pp_hybrid, "Te_abort_threshold", m_te_abort_threshold_eV);
     pp_hybrid.query("joule_dropped_energy_print_interval", m_joule_dropped_print_interval);
 
+    // Quarantine/contamination tally class boundary [m^-3] (see member doc;
+    // instrument arms only, off by default).
+    utils::parser::queryWithParser(pp_hybrid, "qdsmc_contamination_n_boundary",
+                                   m_contam_n_boundary);
+
     // Electron-ion thermal equilibration (Q_ei) on T_e:
     //   Q_ei = 3 n_e k_B nu_ei (T_e - T_i),  applied per ion species weighted by
     //   n_s/n_e, cooling T_e toward T_i. nu_ei[1/s] comes from the
@@ -628,6 +633,20 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
             "(runaway ion-kick feedback). Set the relaxation rate, or set "
             "hybrid_pic_model.joule_redirect_allow_undamped = 1 to force the "
             "legacy undamped behavior (control arms only).");
+    }
+
+    // The contamination tally taps the split-fluxform conduction sweeps
+    // only; warn when it is armed on an untapped control form.
+    if (m_contam_n_boundary > 0.0 && m_include_thermal_conduction &&
+        (m_cond_form != 2 || m_cond_ff_unsplit)) {
+        ablastr::warn_manager::WMRecordWarning(
+            "HybridPICModel",
+            "hybrid_pic_model.qdsmc_contamination_n_boundary is set, but the "
+            "conduction form is not the split fluxform path (the scatter/"
+            "layer/unsplit control arms are not tapped): the conduction "
+            "contamination channels will read zero. The ion-kick channel "
+            "still tallies.",
+            ablastr::warn_manager::WarnPriority::medium);
     }
 
     // The Te-threshold Joule redirect only acts inside the Joule source.
@@ -1883,6 +1902,19 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
         dropped_cc.setVal(0.0_rt);
     }
 
+    // Contamination-tally kicks channel: redirected energy staged for OU
+    // kicks inside QUAR cells (n <= qdsmc_contamination_n_boundary) -- the
+    // grid-side proxy for ion-carried energy injected into quarantined
+    // cells (QUARANTINE_INSTRUMENT_PLAN.md).
+    bool const contam_kicks_on =
+        do_redir && (m_contam_n_boundary > 0._rt);
+    amrex::Real const rho_contam_bnd = PhysConst::q_e * m_contam_n_boundary;
+    amrex::MultiFab contam_cc;    // staged kick energy density [J/m^3]
+    if (contam_kicks_on) {
+        contam_cc.define(cc_ba, Te.DistributionMap(), 1, 0);
+        contam_cc.setVal(0.0_rt);
+    }
+
     // Charged-species component index for redirect_E (matches QDSMCAddJouleHeating:
     // incremented for every charged species before the mass check).
     int ion_comp = -1;
@@ -1912,11 +1944,11 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
         amrex::MultiFab coef(cc_ba, Te.DistributionMap(), 6, 0);
         coef.setVal(0.0_rt);
 
-        // Per-species charge densities, needed only for the kick-cap tally's
-        // n_s = f_s n_e / Z_s at clipped cells.
+        // Per-species charge densities, needed only for the kick-cap and
+        // contamination tallies' n_s = f_s n_e / Z_s.
         amrex::MultiFab const * rho_s_mf    = nullptr;
         amrex::MultiFab const * rhos_sum_mf = nullptr;
-        if (kick_cap_armed) {
+        if (kick_cap_armed || contam_kicks_on) {
             rho_s_mf    = warpx.m_fields.get("rho_fp_" + spec_name, lev);
             rhos_sum_mf = warpx.m_fields.get("hybrid_rho_species_sum_fp", lev);
         }
@@ -1937,13 +1969,16 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
             amrex::Array4<amrex::Real const> redirect_arr;
             if (do_redir) { redirect_arr = redirect_E->const_array(mfi); }
 
-            // Kick-cap inputs/outputs (default Array4 when the cap is off ->
-            // never indexed, kick_cap_armed gates every access).
+            // Kick-cap / contamination inputs and outputs (default Array4
+            // when the feature is off -> never indexed, the armed flags
+            // gate every access).
             amrex::Array4<amrex::Real>       dropped_arr;
+            amrex::Array4<amrex::Real>       contam_arr;
             amrex::Array4<amrex::Real const> rhos_arr;
             amrex::Array4<amrex::Real const> rhosum_arr;
-            if (kick_cap_armed) {
-                dropped_arr = dropped_cc.array(mfi);
+            if (kick_cap_armed) { dropped_arr = dropped_cc.array(mfi); }
+            if (contam_kicks_on) { contam_arr = contam_cc.array(mfi); }
+            if (kick_cap_armed || contam_kicks_on) {
                 rhos_arr    = rho_s_mf->const_array(mfi);
                 rhosum_arr  = rhos_sum_mf->const_array(mfi);
             }
@@ -1972,6 +2007,18 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
                     // E_s for this species = redirect_E component ion_comp.
                     amrex::Real E_s = ablastr::coarsen::sample::Interp(
                         redirect_arr, nodal_src, cc_dst, coarsen, i, j, k, ion_comp);
+                    // Species density n_s = f_s n_e / Z_s, shared by the
+                    // kick-cap drop tally and the contamination channel
+                    // (rhos arrays are staged whenever either is armed).
+                    auto n_s_at = [&] () {
+                        amrex::Real const rhos_v = ablastr::coarsen::sample::Interp(
+                            rhos_arr, nodal_src, cc_dst, coarsen, i, j, k, 0);
+                        amrex::Real const rhosum_v = amrex::max(
+                            ablastr::coarsen::sample::Interp(
+                                rhosum_arr, nodal_src, cc_dst, coarsen, i, j, k, 0),
+                            rho_floor);
+                        return (rhos_v / rhosum_v) * (rho_val / PhysConst::q_e) / Z_s;
+                    };
                     if (kick_cap_armed && E_s > 0._rt) {
                         // sigma_redir <= f v_th  <=>  E_s <= f^2 kB T, with
                         // T the deposited T_i when relaxation is on (else the
@@ -1985,17 +2032,15 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
                         if (E_s > E_s_max) {
                             // Clipped remainder -> dropped tally: the ions
                             // will not receive (3/2) n_s (E_s - E_s_max).
-                            amrex::Real const rhos_v = ablastr::coarsen::sample::Interp(
-                                rhos_arr, nodal_src, cc_dst, coarsen, i, j, k, 0);
-                            amrex::Real const rhosum_v = amrex::max(
-                                ablastr::coarsen::sample::Interp(
-                                    rhosum_arr, nodal_src, cc_dst, coarsen, i, j, k, 0),
-                                rho_floor);
-                            amrex::Real const n_s =
-                                (rhos_v / rhosum_v) * (rho_val / PhysConst::q_e) / Z_s;
-                            dropped_arr(i,j,k) += 1.5_rt * n_s * (E_s - E_s_max);
+                            dropped_arr(i,j,k) += 1.5_rt * n_s_at() * (E_s - E_s_max);
                             E_s = E_s_max;
                         }
+                    }
+                    // Contamination kicks channel: energy the OU operator
+                    // will deliver to ions inside QUAR cells (post-cap).
+                    if (contam_kicks_on && E_s > 0._rt &&
+                        rho_val <= rho_contam_bnd) {
+                        contam_arr(i,j,k) += 1.5_rt * n_s_at() * E_s;
                     }
                     coef_arr(i,j,k,5) = E_s;
                 }
@@ -2054,13 +2099,19 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
         }
     }
 
-    // Fold the clipped kick energy into the cumulative audit tally [J]
-    // (cell-centered boxes are disjoint, a plain sum suffices).
-    if (kick_cap_armed) {
+    // Fold the clipped kick energy and the QUAR-staged kick energy into
+    // their cumulative audit tallies [J] (cell-centered boxes are
+    // disjoint, a plain sum suffices).
+    if (kick_cap_armed || contam_kicks_on) {
         auto const dx = warpx.Geom(lev).CellSizeArray();
         amrex::Real dV = 1.0_rt;
         for (int d = 0; d < AMREX_SPACEDIM; ++d) { dV *= dx[d]; }
-        m_joule_dropped_kick_cap_J += dropped_cc.sum(0, false) * dV;
+        if (kick_cap_armed) {
+            m_joule_dropped_kick_cap_J += dropped_cc.sum(0, false) * dV;
+        }
+        if (contam_kicks_on) {
+            m_contam_kicks_J += contam_cc.sum(0, false) * dV;
+        }
     }
 }
 
@@ -2342,6 +2393,20 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
             << " joule_dropped_J: heat_gate=" << m_joule_dropped_heat_gate_J
             << " redirect_gate=" << m_joule_dropped_redirect_gate_J
             << " kick_cap=" << m_joule_dropped_kick_cap_J
+            << " (cumulative)\n";
+    }
+
+    // Contamination tally print (same cadence; the conduction channels are
+    // accumulated in QdsmcConductionOnce, the kicks channel above -- this
+    // site runs every step whether or not conduction is enabled).
+    if (m_contam_n_boundary > 0._rt && m_joule_dropped_print_interval > 0 &&
+        warpx.getistep(0) % m_joule_dropped_print_interval == 0) {
+        amrex::Print() << "[qdsmc] step " << warpx.getistep(0)
+            << " contamination_J: ax0=" << m_contam_axis_J[0]
+            << " ax1=" << m_contam_axis_J[1]
+            << " ax2=" << m_contam_axis_J[2]
+            << " fast_front=" << m_contam_fast_front_J
+            << " kicks=" << m_contam_kicks_J
             << " (cumulative)\n";
     }
 
@@ -3311,6 +3376,36 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
         kin.setVal(1.0_rt, Kin::k_msk, 1, ng_f);
         kin.setVal(1.0_rt, Kin::k_ebm, 1, ng_f);
 
+        // Quarantine/contamination tally (instrument; see the member doc):
+        // class mask (1 = OPEN: n > boundary) with ghosts, and the per-face
+        // crossing accumulator (components 0..SPACEDIM-1 = QUAR->OPEN flux
+        // by sweep axis, 3 = the floored fast-front-donor subset). Ghosts
+        // default OPEN; wall faces carry zero flux so unset physical ghosts
+        // never contribute.
+        bool const contam_on = (m_contam_n_boundary > 0.0_rt) && !ff_unsplit;
+        amrex::MultiFab cls_mf, contam_mf;
+        if (contam_on) {
+            cls_mf.define(Te.boxArray(), Te.DistributionMap(), 1, ng_f);
+            cls_mf.setVal(1.0_rt);
+            contam_mf.define(Te.boxArray(), Te.DistributionMap(), 4, 0);
+            contam_mf.setVal(0.0_rt);
+            amrex::Real const n_bnd = m_contam_n_boundary;
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(cls_mf, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                amrex::Box const box = mfi.tilebox();
+                amrex::Array4<amrex::Real>       const & cl_arr  = cls_mf.array(mfi);
+                amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+                amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    cl_arr(i,j,k) = (rho_arr(i,j,k)/qe > n_bnd) ? 1.0_rt : 0.0_rt;
+                });
+            }
+            cls_mf.FillBoundary(period);
+        }
+
         // Mask pass first (floored + EB-covered), then a ghost fill, so
         // the drift pass below can clamp its stencils one-sided at mask
         // boundaries (the D/grad-ln-n cliff at floors and covered bands
@@ -3933,6 +4028,15 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                     amrex::Array4<amrex::Real const> const & dv = dsp.const_array(mfi);
                     amrex::Array4<amrex::Real const> const & kmk = kin.const_array(mfi);
 
+                    // Contamination tally I/O (default Array4 when off ->
+                    // never indexed, contam_on gates every access).
+                    amrex::Array4<amrex::Real const> cls_arr;
+                    amrex::Array4<amrex::Real>       ct_arr;
+                    if (contam_on) {
+                        cls_arr = cls_mf.const_array(mfi);
+                        ct_arr  = contam_mf.array(mfi);
+                    }
+
                     amrex::ParallelFor(box,
                         [=] AMREX_GPU_DEVICE (int i, int j, int k)
                     {
@@ -4271,6 +4375,40 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                         amrex::Real const Fhi = face_flux(node[d]);
                         amrex::Real const Flo = face_flux(node[d] - 1);
                         ud(i,j,k) = us(i,j,k) - (Fhi - Flo);
+
+                        // Contamination tally: the RIGHT face only (every
+                        // interior face is exactly one node's right face,
+                        // so each face is written once; box-seam copies
+                        // are redundant and consistent -- the deterministic
+                        // face recomputation guarantees bit-identical F --
+                        // and sum_unique dedups them). Positive tally =
+                        // energy crossing QUAR -> OPEN this pass.
+                        if (contam_on) {
+                            int pr[3] = {i, j, k};
+                            pr[d] += 1;
+                            amrex::Real const cl = cls_arr(i,j,k);
+                            amrex::Real const cr = cls_arr(pr[0],pr[1],pr[2]);
+                            if (cl != cr) {
+                                amrex::Real const Fq =
+                                    (cl == 0.0_rt) ? Fhi : -Fhi;
+                                if (Fq > 0.0_rt) {
+                                    ct_arr(i,j,k,d) += w_branch * Fq;
+                                    // fast-front subset: the QUAR-side
+                                    // node is floored while the vacuum
+                                    // fast front is boosting its chi
+                                    // (identically zero under
+                                    // closed_floor_faces -- that zero IS
+                                    // the S0->SK conduit verification)
+                                    int const * pq =
+                                        (cl == 0.0_rt) ? node : pr;
+                                    if (vac_fast &&
+                                        kmk(pq[0],pq[1],pq[2],Kin::k_msk)
+                                            == 0.0_rt) {
+                                        ct_arr(i,j,k,3) += w_branch * Fq;
+                                    }
+                                }
+                            }
+                        }
                     });
                 }
                 std::swap(src, dst);
@@ -4278,6 +4416,23 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
             amrex::MultiFab::Saxpy(u_acc, w_branch, *src, 0, 0, 1, 0);
         }}}
         }   // lat
+
+        // Fold the per-face class crossings into the cumulative
+        // contamination tallies [J] (unique-node sum; u is an energy
+        // density, so face flux x nodal dual-cell volume = energy moved).
+        if (contam_on) {
+            auto const dxc = geom.CellSizeArray();
+            amrex::Real dV = 1.0_rt;
+            for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) { dV *= dxc[dd]; }
+            for (int c = 0; c < AMREX_SPACEDIM; ++c) {
+                m_contam_axis_J[c] +=
+                    contam_mf.sum_unique(c, false, period) * dV;
+            }
+            m_contam_fast_front_J +=
+                contam_mf.sum_unique(3, false, period) * dV;
+            // (printed from ApplyQdsmcEnergySources, which runs every step
+            // whether or not conduction is enabled)
+        }
 
         // Recovery (scatter Pass-3 semantics): floored and EB-covered
         // nodes keep their previous T_e; dividing by the same n_e that

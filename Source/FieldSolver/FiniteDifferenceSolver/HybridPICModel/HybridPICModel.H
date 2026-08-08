@@ -674,6 +674,26 @@ public:
     mutable amrex::Real m_joule_dropped_kick_cap_J = 0.0;
     int m_joule_dropped_print_interval = 200;
 
+    /** Quarantine/contamination tally (QUARANTINE_INSTRUMENT_PLAN.md).
+     * Armed by qdsmc_contamination_n_boundary > 0 [m^-3]: nodes with
+     * n <= boundary form the QUAR class, n > boundary the OPEN class (set
+     * the boundary above n_floor to watch the eta_vac ignition band; at
+     * n_floor the production closed-floor-faces rule makes the conduction
+     * channels structurally zero, which is itself the verification). Every
+     * conduction split-sweep face flux crossing QUAR -> OPEN accumulates
+     * into a cumulative per-grid-axis tally [J] (axis attribution is done
+     * deck-side: in a Bz slab the axial axis is kappa_par, the in-plane
+     * axes kappa_perp); a fourth channel tallies the subset whose QUAR-side
+     * node is FLOORED while vacuum_fast_front is on (the S0->SK conduit
+     * hypothesis). The ion-kick channel tallies redirected energy staged in
+     * QUAR cells by QDSMCApplyIonHeating. Split-fluxform path only: the
+     * scatter/layer/unsplit control arms are not tapped (warned at init).
+     * Printed with the joule_dropped_energy_print_interval cadence. */
+    amrex::Real m_contam_n_boundary = -1.0;
+    mutable amrex::Real m_contam_axis_J[3] = {0.0, 0.0, 0.0};
+    mutable amrex::Real m_contam_fast_front_J = 0.0;
+    mutable amrex::Real m_contam_kicks_J = 0.0;
+
     /** Electron-ion thermal equilibration (Q_ei) on T_e:
      *   Q_ei = 3 n_e k_B nu_ei (T_e - T_i),   dU_e/dt += -Q_ei,
      * cooling T_e toward each ion species' T_i at the rate given by the
