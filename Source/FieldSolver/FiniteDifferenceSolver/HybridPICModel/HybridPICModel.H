@@ -605,6 +605,75 @@ public:
     bool m_joule_redirect_to_ions = false;
     amrex::Real m_joule_redirect_Te_eV = -1.0;   // threshold [eV]; < 0 -> off
 
+    /** Guard-rail escape hatch (2026-08 liftoff runaway forensics): without a
+     * relaxation channel the redirect's OU ion-heating operator has no drag
+     * leg and runs as pure undamped diffusion, measured anti-stabilizing on
+     * the liftoff slab (arm SR: ion-kick feedback -- unbounded Gaussian kicks
+     * on the few macro-ions in near-floor cells spray current noise into the
+     * eta_vac band, raising eta J^2, 10x hotter than its bit-identical
+     * control within 600 steps of engaging). Default off: the redirect
+     * ABORTS at init when electron_ion_relaxation_rate is not set. Input
+     * joule_redirect_allow_undamped = 1 restores the old (undamped) behavior
+     * for legacy control-arm reproduction only. */
+    bool m_joule_redirect_allow_undamped = false;
+
+    /** Per-particle redirect kick cap: clamp the redirect's per-cell OU kick
+     * variance so the per-application redirected energy per ion satisfies
+     * E_s <= f^2 kB T (T = the cell's deposited T_i when relaxation is on,
+     * else the local T_e as the velocity scale), i.e.
+     * sigma_redirect <= f * v_th = f * sqrt(kB T / m_i). The clipped
+     * remainder is NOT re-deposited; it accumulates in the dropped-energy
+     * tally (channel kick_cap). Input joule_redirect_kick_cap_vth_frac;
+     * default < 0 -> off (back-compat). */
+    amrex::Real m_joule_redirect_kick_cap_vth_frac = -1.0;
+
+    /** Density gate on the redirect deposit: only cells with
+     * n >= joule_redirect_n_min_factor * n_floor stage redirected energy
+     * (matching the Joule kernel's own floor-gate philosophy); below the
+     * gate the above-threshold source is dropped to the tally (channel
+     * redirect_gate) instead of heating anything. Input
+     * joule_redirect_n_min_factor (g ~ 2-4); default 0 -> off. */
+    amrex::Real m_joule_redirect_n_min_factor = 0.0;
+
+    /** Separate resistivity for the Joule HEATING source,
+     * joule_heating_resistivity(rho,J,Te,t) [Ohm m] (Te in eV, so Spitzer
+     * eta(Te) is expressible): the E-solve keeps plasma_resistivity
+     * (including any numerical eta_vac vacuum-regularizer ramp needed for
+     * stability), while the heating (and redirect) source is evaluated with
+     * this physical eta -- removing the numerical band heating at its root
+     * (the liftoff runaway ignited where the density-power-law eta was still
+     * ~eta_vac at n just above n_floor). Unset -> the heating uses the
+     * E-solve eta (back-compat). */
+    bool m_has_heating_resistivity = false;
+    std::string m_eta_heating_expression = "0.0";
+    std::unique_ptr<amrex::Parser> m_heating_resistivity_parser;
+    amrex::ParserExecutor<4> m_eta_heating;
+
+    /** Independent density gate for the Joule heating source [m^-3]: cells
+     * with n_e <= max(joule_heating_n_min, n_floor) receive no Joule heat
+     * (the declined source energy goes to the dropped tally, channel
+     * heat_gate), so heating can be restricted to the eta ~ eta_plasma
+     * region without moving the solver floor. Default < 0 -> n_floor
+     * (back-compat: gate inactive). */
+    amrex::Real m_joule_heating_n_min = -1.0;
+
+    /** Graceful failure mode for Te runaways: abort with a clear message
+     * when max(Te) exceeds this ceiling [eV] after the energy sources
+     * (>700 keV runaways otherwise end in SEGV). Checked at the end of
+     * ApplyQdsmcEnergySources. Input Te_abort_threshold; default < 0 -> off. */
+    amrex::Real m_te_abort_threshold_eV = -1.0;
+
+    /** Cumulative dropped-Joule-energy tallies [J] (globally reduced), one
+     * per decline channel: the joule_heating_n_min gate, the redirect
+     * density gate, and the per-particle kick cap. Only accumulated when the
+     * corresponding (opt-in) feature is armed; printed on rank 0 every
+     * joule_dropped_energy_print_interval steps (0 disables the print).
+     * Mutable: written by the const source kernels. */
+    mutable amrex::Real m_joule_dropped_heat_gate_J = 0.0;
+    mutable amrex::Real m_joule_dropped_redirect_gate_J = 0.0;
+    mutable amrex::Real m_joule_dropped_kick_cap_J = 0.0;
+    int m_joule_dropped_print_interval = 200;
+
     /** Electron-ion thermal equilibration (Q_ei) on T_e:
      *   Q_ei = 3 n_e k_B nu_ei (T_e - T_i),   dU_e/dt += -Q_ei,
      * cooling T_e toward each ion species' T_i at the rate given by the

@@ -3824,6 +3824,81 @@ Maxwell solver: kinetic-fluid hybrid
     electron heating at the threshold and allows :math:`T_i > T_e` to develop, mimicking regimes where the
     electrons radiate strongly.
 
+.. pp:param:: hybrid_pic_model.joule_redirect_allow_undamped
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    By default the Te-threshold Joule redirect refuses to run (aborts at initialization) when no
+    :pp:param:`hybrid_pic_model.electron_ion_relaxation_rate(rho,Te,Ti,t)` is specified: without the
+    relaxation channel the stochastic ion-heating operator has no drag leg, so the redirected energy
+    lands as pure undamped velocity diffusion, which is anti-stabilizing (fast ions generated in
+    low-density cells deposit current noise that feeds back into the Joule source). Set this flag to
+    force the legacy undamped behavior (intended for control-arm reproduction only).
+
+.. pp:param:: hybrid_pic_model.joule_redirect_kick_cap_vth_frac
+    :type: ``float``
+    :default: ``-1`` (off)
+    :optional:
+
+    If :math:`> 0`, clamps the redirect's per-particle stochastic kick so that
+    :math:`\sigma_\mathrm{redirect} \leq f\, v_\mathrm{th}` with :math:`v_\mathrm{th} = \sqrt{k_B T/m_i}`
+    (equivalently, the per-application redirected energy per ion satisfies :math:`E_s \leq f^2 k_B T`),
+    where :math:`T` is the cell's deposited ion temperature when the relaxation channel is on (otherwise
+    the local electron temperature sets the velocity scale). The clipped remainder is dropped (not
+    deposited later) and accumulated in the dropped-energy tally.
+
+.. pp:param:: hybrid_pic_model.joule_redirect_n_min_factor
+    :type: ``float``
+    :default: ``0`` (off)
+    :optional:
+
+    If :math:`> 0`, redirected Joule energy is only staged in cells with density
+    :math:`n \geq g\, n_\mathrm{floor}` (:math:`g` this factor, typically 2--4); below the gate the
+    above-threshold source is dropped to the dropped-energy tally instead of heating anything. This keeps
+    the redirect's per-macro-ion kicks out of nearly empty cells, where few macro-ions share the cell's
+    redirected energy.
+
+.. pp:param:: hybrid_pic_model.joule_heating_resistivity(rho,J,Te,t)
+    :type: ``float`` or ``str``
+    :optional:
+
+    Separate resistivity, in :math:`\Omega\,m`, used only to evaluate the Joule-heating (and redirect)
+    source. When set, the E-field solve keeps :pp:param:`hybrid_pic_model.plasma_resistivity(rho,J,t)`
+    (including any numerical vacuum-regularizer ramp needed for stability) while the heating uses this
+    physical resistivity, so the numerical resistivity does not heat the plasma edge. The expression can
+    depend on the total charge density ``rho`` (:math:`C/m^3`), the plasma-current magnitude ``J``
+    (:math:`A/m^2`), the local electron temperature ``Te`` (eV, permitting a Spitzer form) and the time
+    ``t`` (s). Defaults to the E-solve resistivity.
+
+.. pp:param:: hybrid_pic_model.joule_heating_n_min
+    :type: ``float``
+    :default: :pp:param:`hybrid_pic_model.n_floor`
+    :optional:
+
+    Independent density gate, in :math:`m^{-3}`, for the Joule-heating source: cells with density at or
+    below :math:`\max(\texttt{joule\_heating\_n\_min}, n_\mathrm{floor})` receive no Joule heat, and the
+    declined source energy is accumulated in the dropped-energy tally. This restricts heating to the
+    physical-resistivity region without moving the solver floor.
+
+.. pp:param:: hybrid_pic_model.Te_abort_threshold
+    :type: ``float``
+    :default: ``-1`` (off)
+    :optional:
+
+    Graceful failure mode for electron-temperature runaways: if :math:`\max(T_e)` exceeds this ceiling,
+    in eV, after the energy-equation sources, the simulation aborts with a clear message (instead of
+    eventually crashing inside the transport).
+
+.. pp:param:: hybrid_pic_model.joule_dropped_energy_print_interval
+    :type: ``int``
+    :default: ``200``
+    :optional:
+
+    Step interval for printing the cumulative dropped-Joule-energy tallies (heating gate, redirect gate,
+    kick cap, in J) to stdout for the deck-side energy audit. The print only fires when at least one
+    decline channel is armed; ``0`` disables it.
+
 .. pp:param:: hybrid_pic_model.electron_ion_relaxation_rate(rho,Te,Ti,t)
     :type: ``float`` or ``str``
     :optional:
