@@ -526,6 +526,15 @@ Overall simulation parameters
                ``pc_mhd_block.resistive_threshold``; below it the block is
                the exact identity at zero cost. It is composed after the
                Faraday corrector (the consistent triangular order).
+               ``pc_mhd_block.resistive_solver = direct`` replaces the
+               Chebyshev iteration with an exact sparse factorization of
+               the frozen operator (NVIDIA cuDSS; CUDA builds configured
+               with ``-DWarpX_CUDSS=ON``): the matrix rows are assembled
+               once per preconditioner update from the same stencil the
+               matrix-free path applies, and every application is then a
+               single forward/backward substitution instead of the
+               :math:`\lceil 2\sqrt{\lambda_\text{max}}\rceil` stencil
+               sweeps of the automatic Chebyshev count.
 
             Boundaries the recast residual manages itself are mapped per
             component to preconditioner-only linear-operator types matching
@@ -605,6 +614,19 @@ Overall simulation parameters
               hlld only; grid-scale resistive diffusion number at which the
               resistive block engages (below it the block is the exact
               identity).
+            - ``pc_mhd_block.resistive_solver`` (``string``, default:
+              ``chebyshev``): hlld only; inner solver of the resistive
+              block. ``chebyshev`` is the portable fixed-count iteration;
+              ``direct`` factorizes the frozen operator exactly with
+              NVIDIA cuDSS once per preconditioner update (requires a
+              CUDA build configured with ``-DWarpX_CUDSS=ON``; other
+              builds abort with a descriptive message).
+            - ``pc_mhd_block.resistive_validate_assembly`` (``bool``,
+              default: false): hlld only; at every active preconditioner
+              update, assemble the direct solver's sparse rows and check
+              them to roundoff against the matrix-free operator on a
+              deterministic pseudo-random vector, aborting on mismatch
+              (available on every build; used by the CI assembly tests).
             - ``pc_mhd_block.wave_relaxation`` (``float``, default: 0.5):
               weighted block-Jacobi factor for the three-component wave
               smoother;

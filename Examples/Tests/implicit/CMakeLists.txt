@@ -292,6 +292,20 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_vacuum_resistive  # dependency
 )
 
+# assembly-validation twin: the direct resistive solver's sparse rows are
+# checked to roundoff against the matrix-free operator at every active
+# preconditioner update (in-run abort on mismatch); physics assertions
+# are the calibrated baseline's
+add_warpx_test(
+    test_1d_theta_implicit_mhd_resistive_pc_assembly  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_resistive_pc_assembly  # inputs
+    "analysis_mhd_vacuum_resistive.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_sound  # name
     1  # dims
@@ -648,6 +662,21 @@ add_warpx_test(
     "analysis_mhd_vacuum_resistive_rz_pc.py diags/diag000000 diags/diag000002"  # analysis
     OFF  # checksum
     test_rz_theta_implicit_mhd_vacuum_resistive  # dependency
+)
+
+# assembly-validation twin: the direct resistive solver's sparse rows are
+# checked to roundoff against the matrix-free operator at every active
+# preconditioner update (in-run abort on mismatch); two ranks exercise the
+# owner-mask deduplication of shared box-interface faces, the periodic
+# z-nodal identification, and the gathered global pattern
+add_warpx_test(
+    test_rz_theta_implicit_mhd_resistive_pc_assembly  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_resistive_pc_assembly  # inputs
+    "analysis_mhd_vacuum_resistive_rz.py diags/diag000000 diags/diag000002"  # analysis
+    OFF  # checksum
+    OFF  # dependency
 )
 
 # static theta-pinch column (pe-balanced Bz(r), u = 0, B_n = 0): the

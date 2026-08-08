@@ -1,0 +1,10 @@
+# base input parameters
+FILE = inputs_test_1d_theta_implicit_mhd_vacuum_resistive_pc
+
+# Assembly-validation twin of the preconditioned calibrated vacuum-resistive
+# decay: at every active preconditioner update the sparse rows the direct
+# resistive solver would factor are assembled from the shared stencil
+# emission and checked to roundoff against the matrix-free operator on a
+# deterministic pseudo-random vector (the run aborts on any mismatch). The
+# physics assertions are the baseline's, unchanged.
+pc_mhd_block.resistive_validate_assembly = 1

@@ -72,6 +72,7 @@ include(CMakeDependentOption)
 option(WarpX_APP           "Build the WarpX executable application"     ON)
 option(WarpX_ASCENT        "Ascent in situ diagnostics"                 OFF)
 option(WarpX_CATALYST      "Catalyst in situ diagnostics"               OFF)
+option(WarpX_CUDSS         "Direct sparse solves via NVIDIA cuDSS (CUDA only)" OFF)
 option(WarpX_EB            "Embedded boundary support"                  ON)
 option(WarpX_PETSC         "PETSc linear/nonlinear solvers via AMReX"   OFF)
 option(WarpX_LIB           "Build WarpX as a library"                   OFF)
@@ -262,6 +263,14 @@ if(WarpX_FFT)
         find_package(lapackpp CONFIG REQUIRED)
         find_package(OpenMP REQUIRED)  # pulled by the two above
     endif()
+endif()
+
+# cuDSS (direct sparse factorization backend, CUDA builds only)
+if(WarpX_CUDSS)
+    if(NOT WarpX_COMPUTE STREQUAL CUDA)
+        message(FATAL_ERROR "WarpX_CUDSS requires WarpX_COMPUTE=CUDA")
+    endif()
+    find_package(cudss CONFIG REQUIRED)
 endif()
 
 # Python
@@ -567,6 +576,10 @@ foreach(D IN LISTS WarpX_DIMS)
         endif()
     endif()
 
+    if(WarpX_CUDSS)
+        target_link_libraries(ablastr_${SD} PUBLIC cudss)
+    endif()
+
     if(WarpX_PYTHON)
         target_link_libraries(pyWarpX_${SD} PRIVATE pybind11::module pybind11::windows_extras)
         if(WarpX_PYTHON_IPO)
@@ -659,6 +672,9 @@ foreach(D IN LISTS WarpX_DIMS)
     if(ABLASTR_FFT)
         # We need to enable FFT support in ABLASTR for PSATD solver
         target_compile_definitions(ablastr_${SD} PUBLIC ABLASTR_USE_FFT)
+    endif()
+    if(WarpX_CUDSS)
+        target_compile_definitions(ablastr_${SD} PUBLIC WARPX_USE_CUDSS)
     endif()
 
     if(WarpX_PYTHON AND pyWarpX_VERSION_INFO)

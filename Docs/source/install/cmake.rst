@@ -424,6 +424,7 @@ CMake Option                  Default & Values                             Descr
 ``WarpX_ASCENT``              ON/**OFF**                                   Ascent in situ visualization
 ``WarpX_CATALYST``            ON/**OFF**                                   Catalyst in situ visualization
 ``WarpX_COMPUTE``             NOACC/**OMP**/CUDA/SYCL/HIP                  On-node, accelerated computing backend
+``WarpX_CUDSS``               ON/**OFF**                                   Direct sparse solves via NVIDIA cuDSS (requires ``WarpX_COMPUTE=CUDA``)
 ``WarpX_DIMS``                **3**/2/1/RZ/RCYLINDER/RSPHERE               Simulation dimensionality. Use ``"1;2;3;RZ;RCYLINDER;RSPHERE"`` for all.
 ``WarpX_EB``                  **ON**/OFF                                   Embedded boundary support (not supported in RZ, RCYLINDER, and RSPHERE  yet)
 ``WarpX_PETSC``               ON/**OFF**                                   PETSc linear/nonlinear solvers via AMReX
