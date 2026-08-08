@@ -3886,9 +3886,11 @@ Maxwell solver: kinetic-fluid hybrid
     :default: ``-1`` (off)
     :optional:
 
-    Graceful failure mode for electron-temperature runaways: if :math:`\max(T_e)` exceeds this ceiling,
-    in eV, after the energy-equation sources, the simulation aborts with a clear message (instead of
-    eventually crashing inside the transport).
+    Graceful failure mode for electron-temperature runaways: if the open-set (:math:`n > n_\mathrm{floor}`)
+    :math:`\max(T_e)` exceeds this ceiling, in eV, after the energy-equation sources, the simulation
+    aborts with a clear message (instead of eventually crashing inside the transport). Quarantined
+    sub-floor cells may carry arbitrary temperature without tripping the abort — they are decoupled
+    by design.
 
 .. pp:param:: hybrid_pic_model.joule_dropped_energy_print_interval
     :type: ``int``
