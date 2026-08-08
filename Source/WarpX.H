@@ -797,6 +797,7 @@ public:
     void CalculateExternalCurlA ();
 
     [[nodiscard]] amrex::IntVect getngEB() const { return guard_cells.ng_alloc_EB; }
+    [[nodiscard]] amrex::IntVect getngFieldSolver() const { return guard_cells.ng_FieldSolver; }
     [[nodiscard]] amrex::IntVect getngF() const { return guard_cells.ng_alloc_F; }
     [[nodiscard]] amrex::IntVect getngUpdateAux() const { return guard_cells.ng_UpdateAux; }
     [[nodiscard]] amrex::IntVect get_ng_depos_J() const {return guard_cells.ng_depos_J;}

@@ -1244,18 +1244,23 @@ PhysicalParticleContainer::AddPlasmaFlux (PlasmaInjector const& plasma_injector,
     const auto dx = geom.CellSizeArray();
     const auto problo = geom.ProbLoArray();
 
+    // Flux injection creates all particles on level 0 (the grid loop below
+    // iterates the level-0 boxes; the caller redistributes to finer levels),
+    // so level 0 is the level of every data structure used here.
+    constexpr int level_zero = 0;
+
 #ifdef AMREX_USE_EB
     bool const inject_from_eb = plasma_injector.m_inject_from_eb; // whether to inject from EB or from a plane
-    // Extract data structures for embedded boundaries
+    // Extract data structures for embedded boundaries, on the injection level
     amrex::EBFArrayBoxFactory const* eb_factory = nullptr;
     amrex::FabArray<amrex::EBCellFlagFab> const* eb_flag = nullptr;
     if (inject_from_eb) {
-        eb_factory = &(WarpX::GetInstance().fieldEBFactory(0));
+        eb_factory = &(WarpX::GetInstance().fieldEBFactory(level_zero));
         eb_flag = &(eb_factory->getMultiEBCellFlagFab());
     }
 #endif
 
-    amrex::LayoutData<amrex::Real>* cost = WarpX::getCosts(0);
+    amrex::LayoutData<amrex::Real>* cost = WarpX::getCosts(level_zero);
 
     // Create temporary particle container to which particles will be added;
     // we will then call Redistribute on this new container and finally
@@ -1272,7 +1277,6 @@ PhysicalParticleContainer::AddPlasmaFlux (PlasmaInjector const& plasma_injector,
     InjectorPosition* flux_pos = plasma_injector.getInjectorFluxPosition();
     InjectorFlux*  inj_flux = plasma_injector.getInjectorFlux();
     InjectorMomentum* inj_mom = plasma_injector.getInjectorMomentumDevice();
-    constexpr int level_zero = 0;
     const amrex::Real t = WarpX::GetInstance().gett_new(level_zero);
 
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
@@ -1294,7 +1298,7 @@ PhysicalParticleContainer::AddPlasmaFlux (PlasmaInjector const& plasma_injector,
     info.SetDynamic(true);
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
-    for (MFIter mfi = MakeMFIter(0, info); mfi.isValid(); ++mfi)
+    for (MFIter mfi = MakeMFIter(level_zero, info); mfi.isValid(); ++mfi)
     {
         if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
         {

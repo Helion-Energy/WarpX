@@ -15,6 +15,7 @@
 
 #include "HybridPICModel.H"
 
+#include "EmbeddedBoundary/Enabled.H"
 #include "Fields.H"
 #include "Utils/TextMsg.H"
 #include "WarpX.H"
@@ -24,6 +25,10 @@
 
 #include <AMReX_BCRec.H>
 #include <AMReX_BC_TYPES.H>
+#ifdef AMREX_USE_EB
+#   include <AMReX_EBCellFlag.H>
+#   include <AMReX_EBFabFactory.H>
+#endif
 #include <AMReX_FillPatchUtil.H>
 #include <AMReX_Interpolater.H>
 #include <AMReX_MFInterpolater.H>
@@ -31,8 +36,11 @@
 #include <AMReX_Reduce.H>
 #include <AMReX_iMultiFab.H>
 
+#include <algorithm>
 #include <array>
+#include <limits>
 #include <memory>
+#include <sstream>
 
 using namespace amrex;
 using warpx::fields::FieldType;
@@ -858,4 +866,256 @@ void HybridPICModel::PrintDivBDiagnostics ()
     for (auto& s : m_divb_crse_interior) { s = DivBStats{}; }
     for (auto& s : m_divb_crse_seam)     { s = DivBStats{}; }
     for (auto& s : m_divb_crse_exterior) { s = DivBStats{}; }
+}
+
+void HybridPICModel::CheckMREBClearance (const bool verbose) const
+{
+#ifdef AMREX_USE_EB
+    if (!EB::enabled()) { return; }
+    auto& warpx = WarpX::GetInstance();
+    if (warpx.finestLevel() < 1) { return; }
+
+    // Refinement ratio (the MR validation block enforces 2 between all
+    // levels; keep the max over levels for generality).
+    int rmax = 2;
+    for (int lev = 0; lev < warpx.finestLevel(); ++lev) {
+        rmax = std::max(rmax, warpx.refRatio(lev).max());
+    }
+
+    // Required clearance (coarse cells): the max footprint, measured from the
+    // coarse-fine patch boundary, over every EB-blind interlevel operator.
+    //  - restriction: the sacrificial setback ring plus the face average
+    //    reaching one cell past it;
+    //  - moment band fill: the fine-edge band width, in coarse cells;
+    //  - B ghost fill: the coarse patch feeding FaceDivFree covers
+    //    coarsen(grow(fine box, ng_pad)) grown by one;
+    //  - particle buffers: buffer particles within the deposition/gather
+    //    buffer of the patch edge deposit to (gather from) the coarse level
+    //    with the full particle shape.
+    const int setback = m_mr_restrict_setback;
+    const int c_restrict = setback + 1;
+    const int dep_buf = std::max(WarpX::n_current_deposition_buffer, 0);
+    const int gat_buf = std::max(WarpX::n_field_gather_buffer, 0);
+    const int fine_band = std::max(setback * rmax, dep_buf + 2);
+    const int c_moment = (fine_band + rmax - 1) / rmax;
+    const int ng_fs = warpx.getngFieldSolver().max();
+    const int c_bfill = (ng_fs + rmax - 1) / rmax + 1;
+    const int c_buffers = (std::max(dep_buf, gat_buf) + WarpX::nox + rmax - 1) / rmax;
+    const int n_clear_auto = std::max({c_restrict, c_moment, c_bfill, c_buffers, 4});
+
+    const bool overridden = (m_mr_eb_clearance_cells >= 0);
+    const int n_clear = overridden ? m_mr_eb_clearance_cells : n_clear_auto;
+
+    if (verbose) {
+        amrex::Print() << "Hybrid-PIC MR + EB clearance guard: N_clear = "
+            << n_clear << " coarse cells"
+            << (overridden ? " (user override; auto value " : " (auto: restriction ")
+            << (overridden ? std::to_string(n_clear_auto)
+                           : std::to_string(c_restrict) + ", moment band " +
+                             std::to_string(c_moment) + ", B ghost fill " +
+                             std::to_string(c_bfill) + ", particle buffers " +
+                             std::to_string(c_buffers) + ", floor 4")
+            << ")\n";
+    }
+    if (n_clear == 0) {
+        if (verbose) {
+            ablastr::warn_manager::WMRecordWarning(
+                "HybridPIC",
+                "hybrid_pic_model.mr_eb_clearance_cells = 0: the EB clearance "
+                "guard is disabled. EB-blind coarse-fine operators touching a "
+                "cut cell corrupt fields silently.",
+                ablastr::warn_manager::WarnPriority::high);
+        }
+        return;
+    }
+
+    constexpr auto sentinel = std::numeric_limits<amrex::Long>::max();
+
+    for (int lev = 1; lev <= warpx.finestLevel(); ++lev)
+    {
+        const int clev = lev - 1;
+        const amrex::IntVect ratio = warpx.refRatio(clev);
+        const amrex::BoxArray cfba = amrex::coarsen(warpx.boxArray(lev), ratio);
+        const amrex::BoxArray& cba = warpx.boxArray(clev);
+        const amrex::DistributionMapping& cdm = warpx.DistributionMap(clev);
+        const amrex::Geometry& cgeom = warpx.Geom(clev);
+
+        // Indicator of the coarsened fine region on the coarse layout, with
+        // N_clear ghost cells; FillBoundary makes the ghosts correct across
+        // box seams and periodic boundaries. Ghost cells beyond a
+        // non-periodic domain boundary keep 0 ("not fine"), which can only
+        // make the check conservative.
+        amrex::iMultiFab fine_mask(cba, cdm, 1, n_clear);
+        fine_mask.setVal(0);
+        for (amrex::MFIter mfi(fine_mask); mfi.isValid(); ++mfi) {
+            for (const auto& is : cfba.intersections(mfi.validbox())) {
+                fine_mask[mfi].template setVal<amrex::RunOn::Device>(1, is.second, 0, 1);
+            }
+        }
+        fine_mask.FillBoundary(cgeom.periodicity());
+
+        auto const& flags = warpx.fieldEBFactory(clev).getMultiEBCellFlagFab();
+        const amrex::Box cdomain = cgeom.Domain();
+        const amrex::Long dnpts = cdomain.numPts();
+
+        // For every cut cell of the parent level, find the smallest radius
+        // r <= N_clear whose Linf ball contains both fine-region and
+        // non-fine-region cells (i.e. the distance to the patch boundary,
+        // from either side); encode (r, cell) and reduce to the worst
+        // offender. Regular and fully covered cells never violate.
+        amrex::ReduceOps<amrex::ReduceOpMin> reduce_op;
+        amrex::ReduceData<amrex::Long> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        for (amrex::MFIter mfi(fine_mask, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            const amrex::Box tbx = mfi.tilebox();
+            auto const& m_arr = fine_mask.const_array(mfi);
+            auto const& f_arr = flags.const_array(mfi);
+            const int nc = n_clear;
+            reduce_op.eval(tbx, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
+                {
+                    if (!f_arr(i,j,k).isSingleValued()) { return {sentinel}; }
+                    bool saw_fine = (m_arr(i,j,k) == 1);
+                    bool saw_crse = !saw_fine;
+                    for (int r = 1; r <= nc; ++r) {
+                        const int jr = (AMREX_SPACEDIM >= 2) ? r : 0;
+                        const int kr = (AMREX_SPACEDIM == 3) ? r : 0;
+                        for         (int kk = -kr; kk <= kr; ++kk) {
+                            for     (int jj = -jr; jj <= jr; ++jj) {
+                                for (int ii = -r;  ii <= r;  ++ii) {
+                                    if (m_arr(i+ii, j+jj, k+kk) == 1) { saw_fine = true; }
+                                    else                              { saw_crse = true; }
+                                }
+                            }
+                        }
+                        if (saw_fine && saw_crse) {
+                            return {static_cast<amrex::Long>(r) * dnpts
+                                    + cdomain.index(amrex::IntVect(AMREX_D_DECL(i,j,k)))};
+                        }
+                    }
+                    return {sentinel};
+                });
+        }
+        amrex::Long enc = amrex::get<0>(reduce_data.value(reduce_op));
+        amrex::ParallelDescriptor::ReduceLongMin(enc);
+
+        if (enc != sentinel) {
+            const int r_meas = static_cast<int>(enc / dnpts);
+            const amrex::IntVect iv = cdomain.atOffset(enc % dnpts);
+            // Nearest coarsened fine box (Linf), for the message.
+            amrex::Box near_box;
+            int near_d = std::numeric_limits<int>::max();
+            for (int ib = 0, nb = static_cast<int>(cfba.size()); ib < nb; ++ib) {
+                const amrex::Box b = cfba[ib];
+                int d = 0;
+                for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                    d = std::max({d, b.smallEnd(dd) - iv[dd], iv[dd] - b.bigEnd(dd)});
+                }
+                if (d < near_d) { near_d = d; near_box = b; }
+            }
+            std::stringstream ss;
+            ss << "Hybrid-PIC MR + EB clearance violation: EB cut cell " << iv
+               << " on level " << clev << " lies " << r_meas
+               << " coarse cell(s) (Linf) from the boundary of the level-" << lev
+               << " patch " << near_box << " (coarsened index space), closer than "
+               << "the required clearance of " << n_clear << " cells. The "
+               << "coarse-fine operators (B ghost fill/restriction, moment band "
+               << "fill, particle buffers) are EB-blind: keep every fine-patch "
+               << "boundary at least N_clear cells away from the embedded "
+               << "boundary (an EB strictly interior to the patch is fine). "
+               << "Move or resize the refinement patch, or override "
+               << "hybrid_pic_model.mr_eb_clearance_cells at your own risk.";
+            amrex::Abort(ss.str());
+        }
+    }
+#else
+    amrex::ignore_unused(verbose);
+#endif
+}
+
+void HybridPICModel::CheckFineLevelDensityFloor () const
+{
+    auto& warpx = WarpX::GetInstance();
+    if (warpx.finestLevel() < 1) { return; }
+
+    const amrex::Real rho_floor = PhysConst::q_e * m_n_floor;
+    const amrex::Real rho_thresh = 1.05_rt * rho_floor;
+#ifdef AMREX_USE_EB
+    const bool eb_enabled = EB::enabled();
+#endif
+
+    for (int lev = 1; lev <= warpx.finestLevel(); ++lev)
+    {
+        const amrex::MultiFab& rho = *warpx.m_fields.get(FieldType::rho_fp, lev);
+        const amrex::IndexType itype = rho.ixType();
+        const int si = itype.nodeCentered(0) ? 1 : 0;
+        const int sj = (AMREX_SPACEDIM >= 2 && itype.nodeCentered(1)) ? 1 : 0;
+        const int sk = (AMREX_SPACEDIM == 3 && itype.nodeCentered(2)) ? 1 : 0;
+#if !defined(AMREX_USE_EB)
+        amrex::ignore_unused(si, sj, sk);
+#endif
+
+#ifdef AMREX_USE_EB
+        const amrex::FabArray<amrex::EBCellFlagFab>* flags = eb_enabled ?
+            &(warpx.fieldEBFactory(lev).getMultiEBCellFlagFab()) : nullptr;
+#endif
+
+        amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpMin> reduce_op;
+        amrex::ReduceData<amrex::Long, amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        for (amrex::MFIter mfi(rho, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            const amrex::Box tbx = mfi.tilebox();
+            auto const& r_arr = rho.const_array(mfi);
+#ifdef AMREX_USE_EB
+            amrex::Array4<amrex::EBCellFlag const> f_arr = (flags != nullptr) ?
+                flags->const_array(mfi) : amrex::Array4<amrex::EBCellFlag const>{};
+#endif
+            reduce_op.eval(tbx, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
+                {
+                    constexpr auto rbig = std::numeric_limits<amrex::Real>::max();
+                    if (r_arr(i,j,k) > rho_thresh) { return {0, rbig}; }
+#ifdef AMREX_USE_EB
+                    if (f_arr) {
+                        // Skip points buried in the covered region: they are
+                        // frozen by the EB masks and never enter the E solve.
+                        bool any_uncovered = false;
+                        for         (int kk = k - sk; kk <= k; ++kk) {
+                            for     (int jj = j - sj; jj <= j; ++jj) {
+                                for (int ii = i - si; ii <= i; ++ii) {
+                                    if (!f_arr(ii,jj,kk).isCovered()) { any_uncovered = true; }
+                                }
+                            }
+                        }
+                        if (!any_uncovered) { return {0, rbig}; }
+                    }
+#endif
+                    return {1, r_arr(i,j,k)};
+                });
+        }
+        auto rv = reduce_data.value(reduce_op);
+        auto count = amrex::get<0>(rv);
+        auto rho_min = amrex::get<1>(rv);
+        amrex::ParallelDescriptor::ReduceLongSum(count);
+        amrex::ParallelDescriptor::ReduceRealMin(rho_min);
+
+        if (count > 0) {
+            std::stringstream ss;
+            ss << "Hybrid-PIC MR: " << count << " point(s) on refinement level "
+               << lev << " start at or below 1.05x the density floor "
+               << "hybrid_pic_model.n_floor (min n/n_floor = "
+               << rho_min / rho_floor << "). Fine-resolution cells at the "
+               << "density floor host a noise-seeded, physical-rate "
+               << "instability that mesh refinement amplifies 2-4x (T1.7 "
+               << "battery); stabilizing it required a plasma resistivity "
+               << "floor ~1e-6 normalized (10-30x the wave-quiet floors). "
+               << "Keep refinement patches out of floor regions, carry a "
+               << "sufficient plasma_resistivity floor, or raise n_floor.";
+            ablastr::warn_manager::WMRecordWarning(
+                "HybridPIC", ss.str(),
+                ablastr::warn_manager::WarnPriority::high);
+        }
+    }
 }

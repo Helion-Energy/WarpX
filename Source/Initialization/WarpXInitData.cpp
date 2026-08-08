@@ -862,6 +862,12 @@ WarpX::InitData ()
 
     if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) {
         m_hybrid_pic_model->InitData(m_fields);
+        if (max_level > 0) {
+            // EB + MR: abort before stepping if any fine-patch boundary is
+            // too close to an embedded-boundary cut cell (the coarse-fine
+            // operators are EB-blind). No-op without an EB or a fine level.
+            m_hybrid_pic_model->CheckMREBClearance(true);
+        }
     }
 
     if (ParallelDescriptor::IOProcessor()) {
@@ -1660,7 +1666,9 @@ void WarpX::InitializeEBGridData (int lev)
         // Loops over all levels internally; called once all level factories exist
         ComputeDistanceToEB();
     }
-    warpx::embedded_boundary::MarkReducedShapeCells( m_eb_reduce_particle_shape[lev], eb_fact, nox, Geom(0).periodicity());
+    // Reduced-shape cells are marked on every level (this function is called
+    // per level); use the level's own periodicity for the guard-cell fill.
+    warpx::embedded_boundary::MarkReducedShapeCells( m_eb_reduce_particle_shape[lev], eb_fact, nox, Geom(lev).periodicity());
 #else
     amrex::ignore_unused(lev);
 #endif
