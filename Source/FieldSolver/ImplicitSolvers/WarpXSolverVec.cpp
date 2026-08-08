@@ -7,6 +7,14 @@
 #include "FieldSolver/ImplicitSolvers/WarpXSolverVec.H"
 #include "WarpX.H"
 
+#include <AMReX_GpuContainers.H>
+#include <AMReX_Loop.H>
+
+#include <cmath>
+#include <cstddef>
+#include <iomanip>
+#include <sstream>
+
 using warpx::fields::FieldType;
 
 WarpXSolverVec::~WarpXSolverVec ()
@@ -507,4 +515,178 @@ void WarpXSolverVec::copyTo ( amrex::Real* const a_arr) const
     }
     amrex::ParallelAllReduce::Sum(result, amrex::ParallelContext::CommunicatorSub());
     return result;
+}
+
+namespace
+{
+    /**
+     * One entry of a fixed-capacity, descending-|value| cell list.
+     */
+    struct ResidualCell
+    {
+        amrex::Real value = 0.0;
+        int i = 0;
+        int j = 0;
+        int k = 0;
+        int comp = 0;
+    };
+
+    void InsertTopCell (std::vector<ResidualCell>& a_cells,
+                        const std::size_t a_capacity,
+                        const ResidualCell& a_cell)
+    {
+        if (a_cells.size() == a_capacity &&
+            std::abs(a_cell.value) <= std::abs(a_cells.back().value)) {
+            return;
+        }
+        auto const pos = std::find_if(
+            a_cells.begin(), a_cells.end(),
+            [&a_cell] (const ResidualCell& cell)
+            { return std::abs(a_cell.value) > std::abs(cell.value); });
+        a_cells.insert(pos, a_cell);
+        if (a_cells.size() > a_capacity) { a_cells.resize(a_capacity); }
+    }
+
+    /**
+     * Scan one MultiFab on the host (device data is staged through a host
+     * copy) and merge its largest-|value| cells into a_cells. a_comp_offset
+     * shifts the reported component index, so the three MultiFabs of an
+     * array-type block can share one component axis.
+     */
+    void CollectTopCells (const amrex::MultiFab& a_mf,
+                          const int a_comp_offset,
+                          const std::size_t a_capacity,
+                          std::vector<ResidualCell>& a_cells)
+    {
+        for (amrex::MFIter mfi(a_mf); mfi.isValid(); ++mfi) {
+            const auto& fab = a_mf[mfi];
+            const amrex::Box& box = fab.box();
+            const int ncomp = fab.nComp();
+            const auto npts = static_cast<std::size_t>(box.numPts()) *
+                              static_cast<std::size_t>(ncomp);
+            std::vector<amrex::Real> host_data(npts);
+            amrex::Gpu::copy(amrex::Gpu::deviceToHost, fab.dataPtr(),
+                             fab.dataPtr() + npts, host_data.data());
+            const auto host_arr = amrex::makeArray4<const amrex::Real>(
+                host_data.data(), box, ncomp);
+            amrex::LoopOnCpu(
+                box, ncomp,
+                [&] (int i, int j, int k, int n)
+                {
+                    InsertTopCell(a_cells, a_capacity,
+                                  {host_arr(i, j, k, n), i, j, k,
+                                   n + a_comp_offset});
+                });
+        }
+    }
+}
+
+void WarpXSolverVec::ReportBlockNorms (const RT a_share_threshold,
+                                       const int a_num_top_cells) const
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        IsDefined(),
+        "WarpXSolverVec::ReportBlockNorms() called on undefined WarpXSolverVec");
+
+    // Per-block squared scaled norms, matching the per-block contributions
+    // of dotProduct(*this) so the shares sum to one.
+    std::vector<std::string> names;
+    std::vector<amrex::Real> norms_sq;
+    const bool local = true;
+    for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+        if (m_array_type != FieldType::None) {
+            amrex::Real block_norm_sq = 0.0;
+            for (int n = 0; n < 3; ++n) {
+                const amrex::iMultiFab* dotMask = m_WarpX->getFieldDotMaskPointer(
+                    m_array_type, lev, ablastr::fields::Direction{n});
+                block_norm_sq += amrex::MultiFab::Dot(
+                    *dotMask, *m_array_vec[lev][n], 0,
+                    *m_array_vec[lev][n], 0, 1, 0, local) /
+                    (m_array_scale * m_array_scale);
+            }
+            names.push_back(m_vector_type_name);
+            norms_sq.push_back(block_norm_sq);
+        }
+        if (m_scalar_type != FieldType::None) {
+            const amrex::iMultiFab* dotMask = m_WarpX->getFieldDotMaskPointer(
+                m_scalar_type, lev, ablastr::fields::Direction{0});
+            names.push_back(m_scalar_type_name);
+            norms_sq.push_back(amrex::MultiFab::Dot(
+                *dotMask, *m_scalar_vec[lev], 0,
+                *m_scalar_vec[lev], 0, 1, 0, local) /
+                (m_scalar_scale * m_scalar_scale));
+        }
+        for (std::size_t iblock = 0; iblock < m_multifab_blocks.size(); ++iblock) {
+            auto const& block = m_multifab_blocks[iblock];
+            auto const& mask = *m_dofs->m_multifab_blocks[iblock].masks[lev];
+            names.push_back(block.spec.name);
+            norms_sq.push_back(amrex::MultiFab::Dot(
+                mask, *block.data[lev], 0, *block.data[lev], 0,
+                block.data[lev]->nComp(), 0, local) /
+                (block.spec.scale * block.spec.scale));
+        }
+    }
+    amrex::ParallelAllReduce::Sum(norms_sq.data(),
+                                  static_cast<int>(norms_sq.size()),
+                                  amrex::ParallelContext::CommunicatorSub());
+    amrex::Real total_sq = 0.0;
+    for (auto const norm_sq : norms_sq) { total_sq += norm_sq; }
+
+    std::stringstream report;
+    report << "Newton residual blocks: total "
+           << std::scientific << std::setprecision(5) << std::sqrt(total_sq);
+    for (std::size_t n = 0; n < names.size(); ++n) {
+        const amrex::Real share =
+            (total_sq > 0.0) ? norms_sq[n] / total_sq : 0.0;
+        report << " | " << names[n] << " "
+               << std::scientific << std::setprecision(3)
+               << std::sqrt(norms_sq[n])
+               << " (" << std::fixed << std::setprecision(4) << share << ")";
+    }
+    amrex::Print() << report.str() << "\n";
+
+    // For each dominant block, the largest-|value| cells (per rank; the
+    // scan skips the DOF ownership masks, so a cell on a shared box face
+    // can at most be reported twice).
+    if (a_num_top_cells <= 0) { return; }
+    const auto capacity = static_cast<std::size_t>(a_num_top_cells);
+    for (std::size_t n = 0; n < names.size(); ++n) {
+        if (total_sq <= 0.0 || norms_sq[n] / total_sq <= a_share_threshold) {
+            continue;
+        }
+        std::vector<ResidualCell> cells;
+        cells.reserve(capacity + 1);
+        amrex::Real block_scale = 1.0;
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            if (m_array_type != FieldType::None &&
+                names[n] == m_vector_type_name) {
+                block_scale = m_array_scale;
+                for (int dir = 0; dir < 3; ++dir) {
+                    CollectTopCells(*m_array_vec[lev][dir], dir,
+                                    capacity, cells);
+                }
+            }
+            if (m_scalar_type != FieldType::None &&
+                names[n] == m_scalar_type_name) {
+                block_scale = m_scalar_scale;
+                CollectTopCells(*m_scalar_vec[lev], 0, capacity, cells);
+            }
+            for (auto const& block : m_multifab_blocks) {
+                if (names[n] == block.spec.name) {
+                    block_scale = block.spec.scale;
+                    CollectTopCells(*block.data[lev], 0, capacity, cells);
+                }
+            }
+        }
+        std::stringstream top_report;
+        for (auto const& cell : cells) {
+            top_report << "Newton residual top cell: " << names[n]
+                       << "[" << cell.comp << "] (" << cell.i << ","
+                       << cell.j << "," << cell.k << ") value "
+                       << std::scientific << std::setprecision(5)
+                       << cell.value << " scaled "
+                       << cell.value / block_scale << "\n";
+        }
+        amrex::AllPrint() << top_report.str();
+    }
 }

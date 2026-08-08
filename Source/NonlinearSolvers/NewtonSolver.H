@@ -21,6 +21,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <string>
 #include <vector>
 #include <istream>
 #include <filesystem>
@@ -140,6 +142,17 @@ private:
      * \brief Consecutive zero-progress (frozen) solve counter.
      */
     mutable int m_frozen_steps = 0;
+
+    /**
+     * \brief Env-gated residual fingerprint: when the environment variable
+     * WARPX_MHD_REPORT_RESIDUAL_BLOCKS is set (and not "0"), print the
+     * per-solver-vec-block L2 norms of the residual at iteration 0 of every
+     * solve, and the top-|residual| cells of any block whose squared-norm
+     * share exceeds m_residual_block_share (environment variable
+     * WARPX_MHD_RESIDUAL_BLOCK_SHARE, default 0.5).
+     */
+    bool m_report_residual_blocks = false;
+    amrex::Real m_residual_block_share = 0.5;
 
     /**
      * \brief Relative tolerance for the Newton solver.
@@ -367,6 +380,19 @@ void NewtonSolver<Vec,Ops>::ParseParameters ()
 
     const amrex::ParmParse pp_jac("jacobian");
     pp_jac.query("pc_type", m_pc_type);
+
+    if (const char* const report_env =
+            std::getenv("WARPX_MHD_REPORT_RESIDUAL_BLOCKS")) {
+        m_report_residual_blocks = (std::string(report_env) != "0");
+    }
+    if (const char* const share_env =
+            std::getenv("WARPX_MHD_RESIDUAL_BLOCK_SHARE")) {
+        m_residual_block_share =
+            static_cast<amrex::Real>(std::atof(share_env));
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_residual_block_share > 0.0 && m_residual_block_share < 1.0,
+            "WARPX_MHD_RESIDUAL_BLOCK_SHARE must be in (0, 1)");
+    }
 }
 
 template <class Vec, class Ops>
@@ -416,6 +442,15 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
             amrex::Print() << "Newton: iteration = " << std::setw(3) << iter <<  ", norm = "
                            << std::scientific << std::setprecision(5) << norm_abs << " (abs.), "
                            << std::scientific << std::setprecision(5) << norm_rel << " (rel.)" << "\n";
+        }
+
+        // Env-gated residual fingerprint (WARPX_MHD_REPORT_RESIDUAL_BLOCKS):
+        // the per-block scaled L2 norms of the iteration-0 residual, plus
+        // the top-|residual| cells of any block holding more than the
+        // WARPX_MHD_RESIDUAL_BLOCK_SHARE fraction (default 0.5) of the
+        // squared norm. Host reductions; off by default.
+        if (iter == 0 && m_report_residual_blocks) {
+            m_F.ReportBlockNorms(m_residual_block_share, 5);
         }
 
         if (norm_abs < m_atol) {

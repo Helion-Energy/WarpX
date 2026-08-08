@@ -338,6 +338,17 @@ public:
         return std::sqrt(norm);
     }
 
+    /**
+     * \brief Print the scaled L2 norm of each field block of this vector
+     * (the per-block contributions to norm2()) on the I/O rank, and, for
+     * every block whose squared-norm share of the total exceeds
+     * a_share_threshold, the a_num_top_cells largest-|value| cells of that
+     * block with their (i,j,k,comp) indices (host reduction, per rank).
+     * Diagnostic only; intended for the residual vector of a nonlinear
+     * solve.
+     */
+    void ReportBlockNorms (RT a_share_threshold, int a_num_top_cells) const;
+
     [[nodiscard]] const ablastr::fields::MultiLevelVectorField& getArrayVec() const {return m_array_vec;}
     ablastr::fields::MultiLevelVectorField& getArrayVec() {return m_array_vec;}
 
