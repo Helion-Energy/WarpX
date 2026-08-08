@@ -2,6 +2,17 @@
 #
 
 add_warpx_test(
+    test_3d_ohm_solver_cylinder_compression_mr_picmi  # name
+    3  # dims
+    2  # nprocs
+    "inputs_test_3d_ohm_solver_cylinder_compression_picmi.py --test --refined-core --grid-type staggered"  # inputs
+    OFF  # analysis
+    "analysis_default_regression.py --path diags/diag1000010 --rtol 5e-4"  # checksum
+    OFF  # dependency
+)
+label_warpx_test(test_3d_ohm_solver_cylinder_compression_mr_picmi slow)
+
+add_warpx_test(
     test_3d_ohm_solver_cylinder_compression_picmi  # name
     3  # dims
     2  # nprocs
