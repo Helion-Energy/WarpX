@@ -2654,25 +2654,28 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
         AllocInitMultiFab(m_eb_reduce_particle_shape[lev], amrex::convert(ba, IntVect::TheCellVector()), dm, ncomps,
             ngRho, lev, "m_eb_reduce_particle_shape");
 
-        // EB info are needed only at the finest level
+        // The update flags are needed on every level: solvers that evolve
+        // fields on all levels (e.g. hybrid-PIC with mesh refinement) read
+        // them wherever fields are pushed, not only at the finest level.
+        if (WarpX::electromagnetic_solver_id != ElectromagneticSolverAlgo::PSATD) {
+
+            AllocInitMultiFab(m_eb_update_E[lev][0], amrex::convert(ba, Ex_nodal_flag), dm, ncomps,
+                              guard_cells.ng_FieldSolver, lev, "m_eb_update_E[x]");
+            AllocInitMultiFab(m_eb_update_E[lev][1], amrex::convert(ba, Ey_nodal_flag), dm, ncomps,
+                              guard_cells.ng_FieldSolver, lev, "m_eb_update_E[y]");
+            AllocInitMultiFab(m_eb_update_E[lev][2], amrex::convert(ba, Ez_nodal_flag), dm, ncomps,
+                              guard_cells.ng_FieldSolver, lev, "m_eb_update_E[z]");
+
+            AllocInitMultiFab(m_eb_update_B[lev][0], amrex::convert(ba, Bx_nodal_flag), dm, ncomps,
+                              guard_cells.ng_FieldSolver, lev, "m_eb_update_B[x]");
+            AllocInitMultiFab(m_eb_update_B[lev][1], amrex::convert(ba, By_nodal_flag), dm, ncomps,
+                              guard_cells.ng_FieldSolver, lev, "m_eb_update_B[y]");
+            AllocInitMultiFab(m_eb_update_B[lev][2], amrex::convert(ba, Bz_nodal_flag), dm, ncomps,
+                              guard_cells.ng_FieldSolver, lev, "m_eb_update_B[z]");
+        }
+
+        // The ECT geometry info is needed only at the finest level
         if (lev == maxLevel()) {
-
-            if (WarpX::electromagnetic_solver_id != ElectromagneticSolverAlgo::PSATD) {
-
-                AllocInitMultiFab(m_eb_update_E[lev][0], amrex::convert(ba, Ex_nodal_flag), dm, ncomps,
-                                  guard_cells.ng_FieldSolver, lev, "m_eb_update_E[x]");
-                AllocInitMultiFab(m_eb_update_E[lev][1], amrex::convert(ba, Ey_nodal_flag), dm, ncomps,
-                                  guard_cells.ng_FieldSolver, lev, "m_eb_update_E[y]");
-                AllocInitMultiFab(m_eb_update_E[lev][2], amrex::convert(ba, Ez_nodal_flag), dm, ncomps,
-                                  guard_cells.ng_FieldSolver, lev, "m_eb_update_E[z]");
-
-                AllocInitMultiFab(m_eb_update_B[lev][0], amrex::convert(ba, Bx_nodal_flag), dm, ncomps,
-                                  guard_cells.ng_FieldSolver, lev, "m_eb_update_B[x]");
-                AllocInitMultiFab(m_eb_update_B[lev][1], amrex::convert(ba, By_nodal_flag), dm, ncomps,
-                                  guard_cells.ng_FieldSolver, lev, "m_eb_update_B[y]");
-                AllocInitMultiFab(m_eb_update_B[lev][2], amrex::convert(ba, Bz_nodal_flag), dm, ncomps,
-                                  guard_cells.ng_FieldSolver, lev, "m_eb_update_B[z]");
-            }
             if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::ECT) {
 
                 //! EB: Lengths of the mesh edges
