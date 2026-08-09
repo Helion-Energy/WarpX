@@ -440,6 +440,32 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // closure the matched kinetic-energy drain keeps the ion INTERNAL
     // energy invariant (exactly so at theta = 1/2).
     amrex::Real m_halo_pedestal_drag_rate = 0.0;
+    // Ion-energy relaxation rate [1/s] of the pedestal band (0
+    // disables). Engages with EXACTLY the drag's C^1 mask
+    // (1 - floor_outflow_limiter(rho_old, rho_ped): full rate at the
+    // pedestal, exactly zero at/above 2 rho_ped, a per-solve constant
+    // keyed to the step-old density). Rationale (the last free band
+    // channel, after the mass gates and the momentum drag): under a
+    // ramping drive the band's rho sits gate-pinned at the pedestal
+    // while the E_i rows keep integrating the drive forcing (measured
+    // on the FRC benchmark ladder: wall-band scrape-off accretion grew
+    // E_i x350 and pinned an O(1)-abs irreducible ion-energy residual
+    // -- Newton's only admissible move, draining mass, is refused by
+    // the gates). The diagonal relaxation drains the band's ion energy
+    // toward its pedestal-consistent image instead, so the accretion
+    // never builds into an inadmissible demand. Coupling to the
+    // momentum drag (total_energy closure): E_i = e_int + |m|^2/(2rho)
+    // and the drag already OWNS the kinetic channel (it decays m and
+    // drains E_i by exactly the induced kinetic decay), so this term
+    // relaxes E_i toward (pedestal internal energy + CURRENT kinetic
+    // energy) -- it touches ONLY the internal part, the composition is
+    // triangular in (KE, e_int), and neither term double-counts the
+    // other: d(KE)/dt = -2 nu_drag KE, d(e_int)/dt =
+    // -nu_E (e_int - e_ped). Under the cgl closure U_par and U_perp
+    // (purely internal) relax toward their pedestal images directly.
+    // Targets are clamped from below at the corresponding positivity
+    // floors so the relaxation can never demand an inadmissible state.
+    amrex::Real m_halo_pedestal_energy_rate = 0.0;
     // The frozen per-step pedestal state (0 while inactive): density,
     // electron energy, ion internal energy (total_energy closure), and
     // the CGL pair.

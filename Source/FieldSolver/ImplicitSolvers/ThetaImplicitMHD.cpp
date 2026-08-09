@@ -149,6 +149,8 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
                                    m_halo_pedestal_fraction);
     utils::parser::queryWithParser(pp, "halo_pedestal_drag_rate",
                                    m_halo_pedestal_drag_rate);
+    utils::parser::queryWithParser(pp, "halo_pedestal_energy_rate",
+                                   m_halo_pedestal_energy_rate);
     utils::parser::queryWithParser(pp, "vacuum_resistivity_diffusivity",
                                    m_vacuum_resistivity_diffusivity);
     // Sentinel -1 = "not set": defaulted to the global implicit_evolve.theta
@@ -277,6 +279,26 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "implicit_mhd.halo_pedestal_drag_rate requires a positive "
         "implicit_mhd.halo_pedestal_fraction (the drag relaxes the "
         "pedestal band, which does not exist without a pedestal)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_halo_pedestal_energy_rate >= 0.0_rt,
+        "implicit_mhd.halo_pedestal_energy_rate cannot be negative");
+    // Same mask as the drag: identically zero without a pedestal, so an
+    // explicit positive rate without one is a configuration error.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_halo_pedestal_energy_rate == 0.0_rt ||
+            m_halo_pedestal_fraction > 0.0_rt,
+        "implicit_mhd.halo_pedestal_energy_rate requires a positive "
+        "implicit_mhd.halo_pedestal_fraction (the relaxation drains the "
+        "pedestal band's ion energy, which does not exist without a "
+        "pedestal)");
+    // The barotropic closure evolves no ion energy block: nothing to
+    // relax, so an explicit positive rate is a configuration error.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_halo_pedestal_energy_rate == 0.0_rt ||
+            m_ion_closure == "total_energy" || m_ion_closure == "cgl",
+        "implicit_mhd.halo_pedestal_energy_rate requires "
+        "implicit_mhd.ion_closure = total_energy or cgl (the barotropic "
+        "closure evolves no ion energy block to relax)");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_vacuum_resistivity_diffusivity >= 0.0_rt,
         "implicit_mhd.vacuum_resistivity_diffusivity cannot be negative");
@@ -1083,7 +1105,9 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "Halo pedestal fraction:        " << m_halo_pedestal_fraction
                    << "\n"
                    << "Halo pedestal drag rate [1/s]: " << m_halo_pedestal_drag_rate
-                   << "\n";
+                   << "\n"
+                   << "Halo pedestal energy rate [1/s]: "
+                   << m_halo_pedestal_energy_rate << "\n";
     if (m_ion_closure == "cgl") {
         amrex::Print() << "CGL relaxation scale:          " << m_cgl_relaxation_scale << "\n"
                        << "CGL Coulomb logarithm:         " << m_cgl_coulomb_log << "\n"
@@ -2178,6 +2202,14 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
     // engages with the complement of the halo source taper, i.e. full
     // rate at the pedestal and exactly zero at/above twice it.
     const amrex::Real halo_pedestal_drag_rate = m_halo_pedestal_drag_rate;
+    // Pedestal-band ion-energy relaxation (see
+    // m_halo_pedestal_energy_rate): same mask complement as the drag.
+    // The internal-energy target is the per-solve frozen pedestal image,
+    // clamped at the positivity floor so the drain can never demand an
+    // inadmissible state.
+    const amrex::Real halo_pedestal_energy_rate = m_halo_pedestal_energy_rate;
+    const amrex::Real halo_pedestal_ion_internal =
+        std::max(m_halo_pedestal_ion_internal, ion_energy_floor);
     const auto eta = m_hybrid_pic_model->m_eta;
     // Joule heating evaluates eta at the SAME hybrid-floored density as
     // Ohm's law, so the electron heating rate matches the field's eta J.
@@ -2488,12 +2520,25 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                 // Outside plasma_weight, like the momentum drag term.
                 const amrex::Real drag_kinetic_drain =
                     halo_drag * 2.0_rt * kinetic_energy;
+                // Pedestal-band ion-energy relaxation (see
+                // m_halo_pedestal_energy_rate): drains ONLY the internal
+                // part E_i - |m|^2/(2 rho) toward the frozen pedestal
+                // image -- the momentum drag owns the kinetic channel
+                // (its matched drain above), so the composition is
+                // triangular in (KE, e_int) and neither term
+                // double-counts the other. Same mask complement as the
+                // drag; outside plasma_weight, like the drag terms.
+                const amrex::Real energy_relax_drain =
+                    halo_pedestal_energy_rate *
+                    (1.0_rt - halo_source_taper) *
+                    (ion_e(i, j, k) - kinetic_energy -
+                     halo_pedestal_ion_internal);
                 ion_energy_increment(i, j, k) =
                     theta_dt *
                     (plasma_weight *
                          (-divergence_ion_energy_flux + lorentz_work +
                           ion_pressure_work) -
-                     drag_kinetic_drain);
+                     drag_kinetic_drain - energy_relax_drain);
             }
         });
     }
@@ -3710,6 +3755,19 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     // engages with weight 1 - halo_source_taper, i.e. full rate at the
     // pedestal and exactly zero at/above twice it.
     const amrex::Real halo_pedestal_drag_rate = m_halo_pedestal_drag_rate;
+    // Pedestal-band ion-energy relaxation (see
+    // m_halo_pedestal_energy_rate): same mask complement as the drag.
+    // The targets are the per-solve frozen pedestal images, clamped at
+    // the corresponding positivity floors so the drain can never demand
+    // an inadmissible state.
+    const amrex::Real halo_pedestal_energy_rate = m_halo_pedestal_energy_rate;
+    const amrex::Real halo_pedestal_ion_internal =
+        std::max(m_halo_pedestal_ion_internal, ion_energy_floor);
+    const amrex::Real halo_pedestal_ion_parallel =
+        std::max(m_halo_pedestal_ion_parallel,
+                 0.5_rt * m_ion_pressure_floor);
+    const amrex::Real halo_pedestal_ion_perp =
+        std::max(m_halo_pedestal_ion_perp, m_ion_pressure_floor);
     const auto eta = m_hybrid_pic_model->m_eta;
     // Joule heating evaluates eta at the SAME hybrid-floored density as
     // Ohm's law, so the electron heating rate matches the field's eta J.
@@ -4261,12 +4319,26 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 }
                 const amrex::Real drag_kinetic_drain =
                     halo_drag * momentum_square / safe_density;
+                // Pedestal-band ion-energy relaxation (see
+                // m_halo_pedestal_energy_rate): drains ONLY the internal
+                // part E_i - |m|^2/(2 rho) toward the frozen pedestal
+                // image -- the momentum drag owns the kinetic channel
+                // (its matched drain above), so the composition is
+                // triangular in (KE, e_int) and neither term
+                // double-counts the other. Same mask complement as the
+                // drag; outside plasma_weight, like the drag terms.
+                const amrex::Real energy_relax_drain =
+                    halo_pedestal_energy_rate *
+                    (1.0_rt - halo_source_taper) *
+                    (ion_e(i, j, k) -
+                     0.5_rt * momentum_square / safe_density -
+                     halo_pedestal_ion_internal);
                 ion_energy_increment(i, j, k) =
                     theta_dt *
                     (plasma_weight *
                          (-divergence_ion_energy_flux + lorentz_work +
                           ion_pressure_work) -
-                     drag_kinetic_drain);
+                     drag_kinetic_drain - energy_relax_drain);
             }
 
             if (cgl_closure) {
@@ -4515,14 +4587,31 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                     halo_source_taper *
                     drain_gate(perp_relaxation, divergence_ion_perp_flux,
                                ion_perp_floor_rate, perp_limiter);
+                // Pedestal-band ion-energy relaxation (see
+                // m_halo_pedestal_energy_rate): U_par and U_perp are
+                // purely internal under this closure (the kinetic energy
+                // lives in the momentum block alone), so they relax
+                // toward their frozen pedestal images directly -- no
+                // kinetic bookkeeping to share with the momentum drag.
+                // Same mask complement as the drag; outside
+                // plasma_weight, like the drag terms.
+                const amrex::Real halo_energy_relax =
+                    halo_pedestal_energy_rate *
+                    (1.0_rt - halo_source_taper);
                 ion_parallel_increment(i, j, k) =
-                    theta_dt * plasma_weight *
-                    (-divergence_ion_parallel_flux + parallel_work +
-                     parallel_relaxation);
+                    theta_dt *
+                    (plasma_weight *
+                         (-divergence_ion_parallel_flux + parallel_work +
+                          parallel_relaxation) -
+                     halo_energy_relax *
+                         (upar(i, j, k) - halo_pedestal_ion_parallel));
                 ion_perp_increment(i, j, k) =
-                    theta_dt * plasma_weight *
-                    (-divergence_ion_perp_flux + perp_work +
-                     perp_relaxation);
+                    theta_dt *
+                    (plasma_weight *
+                         (-divergence_ion_perp_flux + perp_work +
+                          perp_relaxation) -
+                     halo_energy_relax *
+                         (uperp(i, j, k) - halo_pedestal_ion_perp));
             }
         });
     }

@@ -2347,6 +2347,18 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         closure a matched kinetic-energy drain keeps the ion internal
         energy invariant.
 
+    halo_pedestal_energy_rate: float, default=0 (off)
+        Ion-energy relaxation rate in 1/s of the pedestal band (requires
+        halo_pedestal_fraction > 0 and ion_closure="total_energy" or
+        "cgl"). Same C^1 engagement mask as halo_pedestal_drag_rate.
+        Under the total_energy closure it relaxes E_i toward the
+        pedestal internal-energy image plus the CURRENT kinetic energy,
+        draining only the internal part (the momentum drag owns the
+        kinetic channel, so the two never double-count); under the cgl
+        closure U_par and U_perp relax toward their pedestal images
+        directly. Completes the band state so accreted drive forcing
+        cannot pin the ion-energy Newton residual.
+
     vacuum_resistivity_diffusivity: float, default=0 (off)
         Density-keyed vacuum resistivity of the field advance in m^2/s
         (fluid_flux="hlld" only): the Ohm's law sees the smooth, uncapped
@@ -2388,6 +2400,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         vacuum_drag_rate=None,
         halo_pedestal_fraction=None,
         halo_pedestal_drag_rate=None,
+        halo_pedestal_energy_rate=None,
         vacuum_resistivity_diffusivity=None,
         resistive_theta=None,
         fluid_flux=None,
@@ -2437,6 +2450,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.vacuum_drag_rate = vacuum_drag_rate
         self.halo_pedestal_fraction = halo_pedestal_fraction
         self.halo_pedestal_drag_rate = halo_pedestal_drag_rate
+        self.halo_pedestal_energy_rate = halo_pedestal_energy_rate
         self.vacuum_resistivity_diffusivity = vacuum_resistivity_diffusivity
         self.resistive_theta = resistive_theta
         self.fluid_flux = fluid_flux
@@ -2492,6 +2506,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.vacuum_drag_rate = self.vacuum_drag_rate
         implicit_mhd.halo_pedestal_fraction = self.halo_pedestal_fraction
         implicit_mhd.halo_pedestal_drag_rate = self.halo_pedestal_drag_rate
+        implicit_mhd.halo_pedestal_energy_rate = self.halo_pedestal_energy_rate
         implicit_mhd.vacuum_resistivity_diffusivity = (
             self.vacuum_resistivity_diffusivity
         )

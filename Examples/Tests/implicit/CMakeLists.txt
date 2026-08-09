@@ -230,6 +230,23 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Calibrated pedestal-band ion-energy relaxation: on the same static
+# tangential-slip contact (identically zero HLLD fluxes at t = 0, drag
+# OFF) the relaxation is the only dynamics -- the band's INTERNAL
+# energy decays toward the frozen pedestal image at the exact
+# theta-discretized rate while momentum (and with it the kinetic part
+# of E_i) stays invariant, and the bulk (>= 2x pedestal) is exactly
+# invariant
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_pedestal_energy  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_halo_pedestal_energy  # inputs
+    "analysis_mhd_halo_pedestal_energy.py diags/diag000000 diags/diag000008"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_positivity  # name
     1  # dims

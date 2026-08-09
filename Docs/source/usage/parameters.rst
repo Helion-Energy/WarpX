@@ -4382,6 +4382,40 @@ Jacobian probes.
     ion internal energy invariant (discretely exact at
     :math:`\theta = 1/2`). A sensible rate is the ion cyclotron scale
     (of order :math:`0.1/\Delta t` for typical implicit MHD steps).
+
+.. pp:param:: implicit_mhd.halo_pedestal_energy_rate
+    :type: ``float``
+    :unit: 1/s
+    :default: ``0`` (off)
+
+    Ion-energy relaxation rate of the pedestal band. Requires a
+    positive :pp:param:`implicit_mhd.halo_pedestal_fraction` and
+    ``implicit_mhd.ion_closure = total_energy`` or ``cgl``. Engages
+    with exactly the drag's :math:`C^1` mask (full rate at
+    :math:`\rho_\mathrm{ped}`, exactly zero at and above
+    :math:`2\rho_\mathrm{ped}`, keyed to the step-old density).
+    Rationale (the last free band channel, after the mass gates and
+    :pp:param:`implicit_mhd.halo_pedestal_drag_rate`): under a ramping
+    drive the band's density sits gate-pinned at the pedestal while
+    its ion-energy rows keep integrating the drive forcing; the
+    accreted energy demands a mass drain the gates refuse, which
+    otherwise pins the Newton solve at an irreducible ion-energy
+    residual. The diagonal relaxation drains the band's ion energy
+    toward its pedestal-consistent image instead. Under the
+    ``total_energy`` closure the target is the pedestal
+    internal-energy image plus the *current* kinetic energy
+    :math:`|\mathbf{m}|^2/(2\rho)`: the relaxation touches only the
+    internal part, while the momentum drag owns the kinetic channel
+    through its matched drain -- the composition is triangular in
+    (kinetic, internal) and the two terms never double-count. Under
+    the ``cgl`` closure :math:`U_\parallel` and :math:`U_\perp`
+    (purely internal) relax toward their pedestal images directly.
+    Targets are clamped from below at the corresponding positivity
+    floors. A sensible rate matches the drag rate (ion cyclotron
+    scale, of order :math:`0.1/\Delta t` for typical implicit MHD
+    steps).
+
+.. pp:param:: implicit_mhd.electron_pressure_floor
     :type: ``float``
     :unit: Pa
     :default: ``0``
