@@ -194,6 +194,24 @@ public:
         int lev, amrex::IntVect const& ng, std::optional<bool> nodal_sync);
 
     /**
+     * \brief One-time end-of-init overwrite of every fine level's B (valid
+     * region AND ghosts) by divergence-free face prolongation from the
+     * parent level (active when m_mr_prolong_b_init is set; fresh starts
+     * only -- on restart the fine B is the evolved checkpoint state). Both
+     * levels initialize B independently (per-level analytic evaluation), so
+     * without this the FIRST restriction commit mixes avg(fine analytic)
+     * with coarse analytic -- an O(dx^2) static div(B) imprint on the seam
+     * ring. FaceDivFree preserves the coarse face fluxes, so after the
+     * prolongation avg(fine) == coarse to roundoff and the imprint
+     * vanishes. EB masks are respected on both levels: coarse staircase-
+     * frozen faces are not sources (the fine init is retained above them)
+     * and fine staircase-frozen faces are never overwritten (each level
+     * keeps its own frozen staircase solution). Called by WarpX::InitData
+     * after all B initialization (analytic init + external-field adds).
+     */
+    void ProlongBfieldInitFromCoarse ();
+
+    /**
      * \brief Restrict B fine->coarse (face average, cell average for the 2D
      * out-of-plane component) on every coarse level, but only on the
      * coarsened fine region shrunk by m_mr_restrict_setback coarse cells: the
@@ -341,6 +359,37 @@ public:
      *  machine precision by construction. Default on; disabling restores the
      *  bare (unmatched) seam treatment. */
     bool m_mr_emf_matching = true;
+    /** Waived-crossing follow-up to the seam EMF matching, candidate (a),
+     *  DEBUG toggle (default off; measured HARMFUL as a default -- see
+     *  phase2c notes): skip the restriction commit of keep-faces bounded by
+     *  a keep-adjacent coarse edge that is staircase-frozen on the coarse
+     *  level but live on the fine level. The skipped faces stay
+     *  coarse-evolved; the coarse-vs-fine wall-band solution difference they
+     *  then carry against their committed neighbors grows with the drive and
+     *  measured LARGER than the frozen/live violation it replaces. Only
+     *  active when EMF matching is on, EB is enabled and
+     *  mr_eb_clearance_waive_dims is set. */
+    bool m_mr_emf_xing_commit_skip = false;
+    /** Waived-crossing follow-up, candidate (b), WINNER (default on): freeze
+     *  the fine edges exactly overlying keep-adjacent frozen-coarse/live-fine
+     *  coarse edges on the fine staircase (fine eb_update_E cleared there;
+     *  the fine E and plasma-current values on those edges are zeroed at
+     *  every substep start). The committed fine face averages then integrate
+     *  a zero EMF history through frozen coarse edges, matching the frozen
+     *  faces and the gated register: the wall-band coarse div(B) growth at
+     *  waived crossings is eliminated (static init-imprint residual only).
+     *  Cost: the fine staircase thickens by the overlying-edge ring. Only
+     *  active when EMF matching is on, EB is enabled and
+     *  mr_eb_clearance_waive_dims is set (no-op elsewhere: the
+     *  frozen-coarse/live-fine edge set is empty without a waived
+     *  crossing). */
+    bool m_mr_emf_xing_fine_freeze = true;
+    /** Mesh refinement: overwrite the fine levels' independently initialized
+     *  B by divergence-free prolongation from the coarse level at the end of
+     *  init (fresh starts only), so the first restriction commit is exact
+     *  and the O(dx^2) static seam-ring div(B) init imprint vanishes. See
+     *  ProlongBfieldInitFromCoarse(). */
+    bool m_mr_prolong_b_init = true;
 
     /** Running maxima of the div(B) audit (raw value and value relative to
      *  max|B|/dx), accumulated while m_mr_check_div_b is set. */
@@ -360,6 +409,7 @@ public:
     amrex::Vector<DivBStats> m_divb_crse_seam;     /**< seam ring (mixed faces) */
     amrex::Vector<DivBStats> m_divb_crse_exterior; /**< freely evolved exterior */
     amrex::Vector<DivBStats> m_divb_crse_wall;     /**< wall seam (frozen faces mixed in) */
+    amrex::Vector<DivBStats> m_divb_crse_wall_all; /**< all wall cells (incl. exterior) */
 
     /** Electron temperature in eV */
     amrex::Real m_elec_temp;
@@ -490,6 +540,17 @@ private:
         std::array<std::unique_ptr<amrex::MultiFab>, 3> scratch_f;
         /** Gated coarse-E stage scratch on the coarse layout. */
         std::array<std::unique_ptr<amrex::MultiFab>, 3> scratch_c;
+        /** Waived-crossing state: number of registered commit-boundary edges
+         *  frozen on the coarse staircase but live on the fine one (box-shared
+         *  edges may be counted more than once; only == 0, meaning the
+         *  candidates are inert, is load-bearing). */
+        amrex::Long n_bad_edges = 0;
+        /** Candidate (a): per-direction coarse face masks on the coarse
+         *  layout (1 = skip the restriction commit of this face). */
+        std::array<std::unique_ptr<amrex::iMultiFab>, 3> commit_skip;
+        /** Candidate (b): per-direction fine-edge freeze indicators on the
+         *  fine layout (1 = frozen by the candidate). */
+        std::array<std::unique_ptr<amrex::iMultiFab>, 3> fine_freeze;
         /** Cache keys: layouts the register was built from. */
         amrex::BoxArray fba, cba;
         amrex::DistributionMapping fdm, cdm;

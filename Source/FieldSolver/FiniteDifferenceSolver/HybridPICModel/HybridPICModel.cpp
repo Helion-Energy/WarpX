@@ -113,6 +113,16 @@ void HybridPICModel::ReadParameters ()
     // Seam EMF matching (edge-EMF flux register on the restriction commit
     // boundary): default on; disabling restores the bare seam treatment.
     pp_hybrid.query("mr_emf_matching", m_mr_emf_matching);
+    // Waived-crossing follow-up candidates for the frozen-coarse/live-fine
+    // edge residual (only active with EMF matching + EB + a clearance
+    // waiver): (b) fine-edge freeze (the measured winner, default on),
+    // (a) commit-skip (documented debug toggle, default off -- measured
+    // harmful; see the phase2c record).
+    pp_hybrid.query("mr_emf_xing_commit_skip", m_mr_emf_xing_commit_skip);
+    pp_hybrid.query("mr_emf_xing_fine_freeze", m_mr_emf_xing_fine_freeze);
+    // One-time end-of-init div-free prolongation of the fine-level B from
+    // the coarse level (kills the O(dx^2) init-restriction seam imprint).
+    pp_hybrid.query("mr_prolong_b_init", m_mr_prolong_b_init);
 
     // The hybrid model requires an electron temperature, reference density
     // and exponent to be given. These values will be used to calculate the

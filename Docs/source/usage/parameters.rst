@@ -3894,6 +3894,53 @@ Maxwell solver: kinetic-fluid hybrid
     the bare, unmatched seam treatment with its slowly accumulating seam-ring
     :math:`\nabla \cdot \mathbf{B}` error.
 
+.. pp:param:: hybrid_pic_model.mr_emf_xing_fine_freeze
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    Follow-up to :pp:param:`hybrid_pic_model.mr_emf_matching` for waived-crossing configurations
+    (embedded boundary crossing the patch through faces waived with
+    :pp:param:`hybrid_pic_model.mr_eb_clearance_waive_dims`). Coarse edges in the wall band that are
+    frozen by the *coarse* staircase but live on the *fine* one violate the matched-EMF invariant:
+    the restricted keep-faces carry the live fine EMF history through edges on which their frozen
+    face-mates (and the gated register) integrated zero, which accumulates a wall-band
+    :math:`\nabla \cdot \mathbf{B}` error at the crossing. With this option the fine edges exactly
+    overlying such coarse edges are frozen on the fine staircase as well (their E and plasma-current
+    values are pinned to zero), so the restricted fine face averages integrate the same zero EMF
+    history: the wall-band divergence growth is eliminated (a static t=0 residual remains). Cost: the
+    fine staircase thickens by the overlying-edge ring. No-op unless EMF matching is on, an embedded
+    boundary is enabled, a clearance waiver is set and frozen-coarse/live-fine edges actually exist.
+
+.. pp:param:: hybrid_pic_model.mr_emf_xing_commit_skip
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Debug alternative to :pp:param:`hybrid_pic_model.mr_emf_xing_fine_freeze` (same activation
+    conditions): instead of freezing the overlying fine edges, the restriction skips committing
+    keep-faces bounded by a frozen-coarse/live-fine edge; they stay coarse-evolved (and keep their
+    reflux correction). The coarse-vs-fine wall-band solution difference those faces then carry
+    against their committed neighbors grows with the drive and was measured *larger* than the
+    frozen/live violation it replaces — do not enable in production; retained as an attribution
+    tool. Cells adjacent to a skipped face are reported in the wall-seam class of the
+    :pp:param:`hybrid_pic_model.mr_check_div_b` audit.
+
+.. pp:param:: hybrid_pic_model.mr_prolong_b_init
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    If :pp:param:`algo.maxwell_solver` is set to ``hybrid`` and mesh refinement is used, overwrite
+    every fine level's initial B field (valid region and ghosts) by divergence-free face prolongation
+    from its parent level at the end of initialization (fresh starts only; a restart keeps the evolved
+    checkpoint state). The levels otherwise initialize B independently (per-level evaluation of the
+    analytic/external field), so the first restriction commit mixes fine averages with coarse point
+    values that differ at :math:`O(\Delta x^2)` — a static :math:`\nabla \cdot \mathbf{B}` imprint on
+    the restriction seam ring. The face prolongation preserves the coarse face fluxes, making the
+    first commit exact. With an embedded boundary, coarse staircase-frozen faces are not used as
+    sources and fine staircase-frozen faces keep the fine level's own initial values.
+
 .. pp:param:: hybrid_pic_model.mr_check_div_b
     :type: ``bool``
     :default: ``false``

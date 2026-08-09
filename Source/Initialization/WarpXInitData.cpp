@@ -921,6 +921,16 @@ WarpX::InitData ()
         for (int lev = 0; lev <= max_level; ++lev) {
             AddExternalFields(lev);
         }
+        // Hybrid-PIC mesh refinement: the levels initialize B independently
+        // (per-level analytic evaluation), so overwrite the fine levels' B by
+        // divergence-free prolongation from the coarse level now that all B
+        // initialization is complete. This makes the first restriction
+        // commit exact (no O(dx^2) init imprint on the seam ring). Fresh
+        // starts only: on restart the fine B is the evolved checkpoint state.
+        if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC
+            && finestLevel() > 0) {
+            m_hybrid_pic_model->ProlongBfieldInitFromCoarse();
+        }
     }
     else {
         ExecutePythonCallback("afterInitatRestart");

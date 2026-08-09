@@ -177,10 +177,16 @@ namespace
      * out-of-plane cell-centered component) all of whose adjacent keep-mask
      * cells are covered. If face_gate is given (same staggering/layout as
      * dst; 1 = live, 0 = frozen on the coarse staircase), frozen faces are
-     * never overwritten: they stay coarse-owned (EB ownership rule). */
+     * never overwritten: they stay coarse-owned (EB ownership rule). If
+     * commit_skip is given (same staggering/layout; 1 = skip), those faces
+     * are never overwritten either: they stay coarse-evolved (waived-crossing
+     * commit-skip candidate -- keep-faces bounded by a frozen-coarse/
+     * live-fine registered edge integrate the gated coarse EMF history like
+     * their live neighbors). */
     void MaskedCopyRestricted (amrex::MultiFab& dst, amrex::MultiFab const& src,
                                amrex::iMultiFab const& mask,
                                amrex::iMultiFab const* face_gate,
+                               amrex::iMultiFab const* commit_skip,
                                amrex::Geometry const& geom)
     {
         const amrex::IntVect itype = dst.ixType().toIntVect();
@@ -209,10 +215,13 @@ namespace
             auto const& m_arr = mask.const_array(mfi);
             amrex::Array4<int const> g_arr = (face_gate != nullptr) ?
                 face_gate->const_array(mfi) : amrex::Array4<int const>{};
+            amrex::Array4<int const> sk_arr = (commit_skip != nullptr) ?
+                commit_skip->const_array(mfi) : amrex::Array4<int const>{};
             amrex::ParallelFor(tbx,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k)
                 {
                     if (g_arr && g_arr(i, j, k) == 0) { return; }
+                    if (sk_arr && sk_arr(i, j, k) != 0) { return; }
                     if (hybrid_mr_cell_covered(m_arr, i-ilo, j-jlo, k-klo, domain, is_per) &&
                         hybrid_mr_cell_covered(m_arr, i, j, k, domain, is_per))
                     {
@@ -592,6 +601,196 @@ void HybridPICModel::FillBfieldCoarseFineGhosts (
 #endif
 }
 
+void HybridPICModel::ProlongBfieldInitFromCoarse ()
+{
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    if (!m_mr_prolong_b_init) { return; }
+    auto& warpx = WarpX::GetInstance();
+
+    for (int lev = 1; lev <= warpx.finestLevel(); ++lev)
+    {
+        ablastr::fields::VectorField Bfine =
+            warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev);
+        ablastr::fields::VectorField Bcrse =
+            warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev-1);
+
+        const amrex::Geometry& cgeom = warpx.Geom(lev-1);
+        const amrex::Geometry& fgeom = warpx.Geom(lev);
+        const amrex::IntVect ratio = warpx.refRatio(lev-1);
+
+#ifdef AMREX_USE_EB
+        const bool gate_enabled = EB::enabled() && m_mr_eb_gate_prolong &&
+            (warpx.GetEBUpdateBFlag()[lev-1][0] != nullptr);
+        const amrex::FabArray<amrex::EBCellFlagFab>* eb_flags = EB::enabled() ?
+            &(warpx.fieldEBFactory(lev).getMultiEBCellFlagFab()) : nullptr;
+#else
+        const bool gate_enabled = false;
+#endif
+
+        // Fill region per fine box: valid cells plus the widest coarse-
+        // aligned ghost band the fine B allocation covers (round DOWN, so no
+        // padding beyond the allocated ghosts is needed).
+        amrex::IntVect ngB = Bfine[0]->nGrowVect();
+        for (int idim = 1; idim < 3; ++idim) {
+            ngB = ngB.min(Bfine[idim]->nGrowVect());
+        }
+        amrex::IntVect ng;
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            ng[d] = (ngB[d] / ratio[d]) * ratio[d];
+        }
+
+        const amrex::BoxArray& fba_cell = warpx.boxArray(lev);
+        std::array<amrex::MultiFab, 3> Btmp;
+        for (int idim = 0; idim < 3; ++idim) {
+            Btmp[idim] = amrex::MultiFab(
+                Bfine[idim]->boxArray(), Bfine[idim]->DistributionMap(), 1, ng);
+            // Pre-seed with the fine level's own initial field: fine faces
+            // overlying a masked (staircase-frozen) coarse face are skipped
+            // by the face interpolation and retain exactly this state.
+            amrex::MultiFab::Copy(Btmp[idim], *Bfine[idim], 0, 0, 1, ng);
+        }
+
+        {
+            amrex::BoxList cbl;
+            for (int i = 0, N = static_cast<int>(fba_cell.size()); i < N; ++i) {
+                cbl.push_back(amrex::grow(
+                    amrex::coarsen(amrex::grow(fba_cell[i], ng), ratio), 1));
+            }
+            const amrex::BoxArray cpatch_ba(std::move(cbl));
+            const amrex::DistributionMapping& fdm = Bfine[0]->DistributionMap();
+
+            if (gate_enabled) {
+                // (Re)build the coarse-face staircase masks on this layout.
+                // The ghost-fill "fresh/cache" bookkeeping is deliberately
+                // not consumed here: the first regular ghost fill still runs
+                // unmasked and captures the frozen ghost cache, unchanged.
+                EnsureProlongGateMask(lev, cpatch_ba, fdm);
+            }
+
+            std::array<amrex::MultiFab, 3> cpatch;
+            for (int idim = 0; idim < 3; ++idim) {
+                cpatch[idim] = amrex::MultiFab(
+                    amrex::convert(cpatch_ba, Bcrse[idim]->ixType()), fdm, 1, 0);
+                cpatch[idim].setVal(0.0_rt);
+                cpatch[idim].ParallelCopy(*Bcrse[idim], 0, 0, 1,
+                                          cgeom.periodicity());
+            }
+
+            amrex::Vector<amrex::Array<amrex::BCRec, AMREX_SPACEDIM>> bcr(1);
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                    bcr[0][d].setLo(dd, amrex::BCType::int_dir);
+                    bcr[0][d].setHi(dd, amrex::BCType::int_dir);
+                }
+            }
+            const amrex::Array<amrex::IArrayBox*, AMREX_SPACEDIM> no_mask{
+                AMREX_D_DECL(nullptr, nullptr, nullptr)};
+            for (amrex::MFIter mfi(Btmp[0], false); mfi.isValid(); ++mfi)
+            {
+                const amrex::Box fine_region =
+                    amrex::grow(fba_cell[mfi.index()], ng);
+#if defined(WARPX_DIM_3D)
+                const amrex::Array<amrex::FArrayBox*, AMREX_SPACEDIM> crse_fabs{
+                    &cpatch[0][mfi], &cpatch[1][mfi], &cpatch[2][mfi]};
+                const amrex::Array<amrex::FArrayBox*, AMREX_SPACEDIM> fine_fabs{
+                    &Btmp[0][mfi], &Btmp[1][mfi], &Btmp[2][mfi]};
+#else
+                const amrex::Array<amrex::FArrayBox*, AMREX_SPACEDIM> crse_fabs{
+                    &cpatch[0][mfi], &cpatch[2][mfi]};
+                const amrex::Array<amrex::FArrayBox*, AMREX_SPACEDIM> fine_fabs{
+                    &Btmp[0][mfi], &Btmp[2][mfi]};
+#endif
+                amrex::Array<amrex::IArrayBox*, AMREX_SPACEDIM> mask_fabs = no_mask;
+                if (gate_enabled) {
+#if defined(WARPX_DIM_3D)
+                    mask_fabs = {&(*m_mr_prolong_gate[lev][0])[mfi],
+                                 &(*m_mr_prolong_gate[lev][1])[mfi],
+                                 &(*m_mr_prolong_gate[lev][2])[mfi]};
+#else
+                    mask_fabs = {&(*m_mr_prolong_gate[lev][0])[mfi],
+                                 &(*m_mr_prolong_gate[lev][2])[mfi]};
+#endif
+                }
+                amrex::face_divfree_interp.interp_arr(
+                    crse_fabs, 0, fine_fabs, 0, 1, fine_region, ratio, mask_fabs,
+                    cgeom, fgeom, bcr, 0, 0, amrex::RunOn::Gpu);
+            }
+
+#if !defined(WARPX_DIM_3D)
+            // 2D out-of-plane By (cell-centered, not in div(B)):
+            // conservative linear prolongation.
+            amrex::Vector<amrex::BCRec> bcrec(1);
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                bcrec[0].setLo(d, amrex::BCType::int_dir);
+                bcrec[0].setHi(d, amrex::BCType::int_dir);
+            }
+            amrex::InterpFromCoarseLevel(
+                Btmp[1], ng, amrex::IntVect(0), *Bcrse[1], 0, 0, 1,
+                cgeom, fgeom, ratio, &amrex::cell_cons_interp, bcrec, 0);
+#endif
+        }
+
+        // Copy back EVERYTHING (valid + ghosts inside the periodically grown
+        // domain); fine staircase-frozen faces keep the fine level's own
+        // init. The frozen rule is derived from the geometric flags (valid
+        // in the ghost region, unlike eb_update_B whose coarse-fine ghosts
+        // are never marked): identical to MarkUpdateCellsStairCase, any
+        // adjacent non-regular cell freezes the point; points beyond the
+        // flag arrays count regular.
+        for (int idim = 0; idim < 3; ++idim)
+        {
+            const amrex::IntVect stag = Bfine[idim]->ixType().toIntVect();
+            const amrex::Box allowed = amrex::convert(
+                fgeom.growPeriodicDomain(ng), Bfine[idim]->ixType());
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(*Bfine[idim], TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                amrex::Box gbx = mfi.growntilebox(ng);
+                gbx &= allowed;
+                if (!gbx.ok()) { continue; }
+                auto const& d_arr = Bfine[idim]->array(mfi);
+                auto const& s_arr = Btmp[idim].const_array(mfi);
+#ifdef AMREX_USE_EB
+                amrex::Array4<amrex::EBCellFlag const> f_arr =
+                    (eb_flags != nullptr) ? eb_flags->const_array(mfi)
+                                          : amrex::Array4<amrex::EBCellFlag const>{};
+                const int oi = stag[0];
+                const int oj = (AMREX_SPACEDIM > 1) ? stag[1] : 0;
+                const int ol = (AMREX_SPACEDIM > 2) ? stag[2] : 0;
+#endif
+                amrex::ParallelFor(gbx,
+                    [=] AMREX_GPU_DEVICE (int j, int k, int l)
+                    {
+#ifdef AMREX_USE_EB
+                        if (f_arr) {
+                            bool frozen = false;
+                            for         (int dl = -ol; dl <= 0; ++dl) {
+                                for     (int dk = -oj; dk <= 0; ++dk) {
+                                    for (int dj = -oi; dj <= 0; ++dj) {
+                                        if (f_arr.contains(j+dj, k+dk, l+dl) &&
+                                            !f_arr(j+dj, k+dk, l+dl).isRegular()) {
+                                            frozen = true;
+                                        }
+                                    }
+                                }
+                            }
+                            if (frozen) { return; }
+                        }
+#endif
+                        d_arr(j, k, l) = s_arr(j, k, l);
+                    });
+            }
+        }
+        warpx.FillBoundaryB(lev, ng, std::nullopt);
+        amrex::Print() << "Hybrid-PIC MR: initial fine-level " << lev
+            << " B overwritten by divergence-free prolongation from level "
+            << lev - 1 << " (hybrid_pic_model.mr_prolong_b_init)\n";
+    }
+#endif
+}
+
 void HybridPICModel::EnsureRestrictKeepMask (const int clev, amrex::IntVect const& ratio)
 {
     auto& warpx = WarpX::GetInstance();
@@ -715,8 +914,20 @@ void HybridPICModel::RestrictBfieldFineToCoarse (
                 WarpX::do_single_precision_comms);
             const amrex::iMultiFab* face_gate = use_eb_gate ?
                 warpx.GetEBUpdateBFlag()[clev][idim].get() : nullptr;
+            // Waived-crossing commit-skip (candidate a): built by
+            // EnsureEmfMatchingRegister, non-null only when EMF matching is
+            // gated, a clearance waiver is set and frozen/live registered
+            // edges exist.
+            const amrex::iMultiFab* commit_skip = nullptr;
+            if (m_mr_emf_matching && m_mr_emf_xing_commit_skip &&
+                flev < static_cast<int>(m_mr_emf.size()) &&
+                m_mr_emf[flev].n_bad_edges > 0 &&
+                m_mr_emf[flev].commit_skip[idim])
+            {
+                commit_skip = m_mr_emf[flev].commit_skip[idim].get();
+            }
             ::MaskedCopyRestricted(*Bcrse[idim], tmp_c, *m_mr_keep_mask[clev],
-                                   face_gate, warpx.Geom(clev));
+                                   face_gate, commit_skip, warpx.Geom(clev));
         }
 
         if (m_mr_check_div_b) { CheckDivBAfterRestriction(clev); }
@@ -899,6 +1110,324 @@ void HybridPICModel::EnsureEmfMatchingRegister (const int flev)
         }
     }
 
+    // Waived-crossing follow-up (design section 3): registered commit-
+    // boundary edges frozen on the coarse staircase but live on the fine one
+    // violate the matched-EMF invariant -- the gated register zeroes the
+    // applied delta there while the restricted keep-faces carry the live
+    // fine EMF history (measured: the crossing-ring residual keeps ~t^2 and
+    // concentrates in the adjacent live cells). Build the per-direction
+    // "bad edge" indicators and the candidate masks: (a) commit-skip and
+    // (b) fine-edge freeze. Only in waived-crossing configurations; wherever
+    // the wall respects the clearance ball the bad-edge set is empty and
+    // both candidates are inert.
+    L.n_bad_edges = 0;
+    if (L.gated && m_mr_eb_clearance_waive != amrex::IntVect(0) &&
+        (m_mr_emf_xing_commit_skip || m_mr_emf_xing_fine_freeze))
+    {
+        const amrex::Geometry& cgeom = warpx.Geom(clev);
+        const amrex::Box cdomain = cgeom.Domain();
+        amrex::GpuArray<int, AMREX_SPACEDIM> is_per{};
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) { is_per[d] = cgeom.isPeriodic(d); }
+
+        std::array<std::unique_ptr<amrex::iMultiFab>, 3> bad_edge;
+        amrex::Long nbad = 0;
+        for (int idim = 0; idim < 3; ++idim)
+        {
+#if !defined(WARPX_DIM_3D)
+            // 2D: only the out-of-plane (nodal) component enters.
+            if (idim != 1) { continue; }
+#endif
+            const amrex::iMultiFab& ceb = *warpx.GetEBUpdateEFlag()[clev][idim];
+            const amrex::iMultiFab& feb = *warpx.GetEBUpdateEFlag()[flev][idim];
+            const amrex::IndexType etype = ceb.ixType();
+
+            // OR-coarsen the fine-edge liveness onto the coarse edges (the
+            // overlying fine edges have even transverse indices, so the
+            // refinement is exact there; the ratio colinear fine edges along
+            // the edge direction are OR-combined). Fine VALID data only --
+            // the coarse-fine ghost region of eb_update_E is never marked
+            // (the documented trap).
+            amrex::iMultiFab fl_cf(amrex::convert(cfba, etype), fdm, 1, 0);
+            {
+                const amrex::IntVect rr = ratio;
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+                for (MFIter mfi(fl_cf, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+                {
+                    const amrex::Box tbx = mfi.tilebox();
+                    auto const& d_arr = fl_cf.array(mfi);
+                    auto const& f_arr = feb.const_array(mfi.index());
+#if defined(WARPX_DIM_3D)
+                    const int ed = idim;
+                    amrex::ParallelFor(tbx,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                        {
+                            int live = 0;
+                            for (int m = 0; m < rr[ed]; ++m) {
+                                const int fi = i * rr[0] + ((ed == 0) ? m : 0);
+                                const int fj = j * rr[1] + ((ed == 1) ? m : 0);
+                                const int fk = k * rr[2] + ((ed == 2) ? m : 0);
+                                if (f_arr(fi, fj, fk) != 0) { live = 1; }
+                            }
+                            d_arr(i, j, k) = live;
+                        });
+#else
+                    amrex::ParallelFor(tbx,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                        {
+                            d_arr(i, j, k) =
+                                (f_arr(i * rr[0], j * rr[1], k) != 0) ? 1 : 0;
+                        });
+#endif
+                }
+            }
+
+            // Import onto the coarse layout (edges outside the fine union
+            // default to "not live" and can never mark a bad edge).
+            amrex::iMultiFab fine_live(amrex::convert(cba, etype), cdm, 1, 1);
+            fine_live.setVal(0);
+            fine_live.ParallelCopy(fl_cf, 0, 0, 1, amrex::IntVect(0),
+                                   amrex::IntVect(1), cgeom.periodicity());
+
+            bad_edge[idim] = std::make_unique<amrex::iMultiFab>(
+                amrex::convert(cba, etype), cdm, 1, 1);
+            bad_edge[idim]->setVal(0);
+            amrex::ReduceOps<amrex::ReduceOpSum> rops_bad;
+            amrex::ReduceData<amrex::Long> rdata_bad(rops_bad);
+            using BTuple = typename decltype(rdata_bad)::Type;
+            for (MFIter mfi(*bad_edge[idim], TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                const amrex::Box tbx = mfi.tilebox();
+                auto const& b_arr = bad_edge[idim]->array(mfi);
+                auto const& k_arr = kmask.const_array(mfi);
+                auto const& c_arr = ceb.const_array(mfi);
+                auto const& l_arr = fine_live.const_array(mfi);
+#if defined(WARPX_DIM_3D)
+                const int t1 = (idim == 0) ? 1 : 0;
+                const int t2 = (idim == 2) ? 1 : 2;
+#endif
+                rops_bad.eval(tbx, rdata_bad,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) -> BTuple
+                    {
+                        // Keep-adjacent: the edge touches at least one
+                        // keep-covered cell (outside-domain-counts-covered
+                        // semantics of the masked commit), i.e. it can bound
+                        // a committed face. Deliberately NOT restricted to
+                        // the registered (keep-surface) edges: for a
+                        // z-uniform wall every keep-face bounded by a frozen
+                        // registered edge is itself staircase-frozen (already
+                        // P-2 gated), and the measured t^2 lives on the
+                        // INTERIOR frozen/live edges of the wall band
+                        // (round-1 falsification, phase2c_notes.md).
+                        int ncov = 0;
+                        for     (int a = -1; a <= 0; ++a) {
+                            for (int b = -1; b <= 0; ++b) {
+#if defined(WARPX_DIM_3D)
+                                const int ci = i + ((t1 == 0) ? a : ((t2 == 0) ? b : 0));
+                                const int cj = j + ((t1 == 1) ? a : ((t2 == 1) ? b : 0));
+                                const int ck = k + ((t1 == 2) ? a : ((t2 == 2) ? b : 0));
+#else
+                                const int ci = i + a;
+                                const int cj = j + b;
+                                const int ck = k;
+#endif
+                                if (hybrid_mr_cell_covered(k_arr, ci, cj, ck,
+                                                           cdomain, is_per)) {
+                                    ++ncov;
+                                }
+                            }
+                        }
+                        const bool bad = (ncov > 0) &&
+                            (c_arr(i, j, k) == 0) && (l_arr(i, j, k) != 0);
+                        b_arr(i, j, k) = bad ? 1 : 0;
+                        return {bad ? amrex::Long(1) : amrex::Long(0)};
+                    });
+            }
+            nbad += amrex::get<0>(rdata_bad.value(rops_bad));
+            bad_edge[idim]->FillBoundary(cgeom.periodicity());
+        }
+        amrex::ParallelDescriptor::ReduceLongSum(nbad);
+        L.n_bad_edges = nbad;
+        amrex::Print() << "Hybrid-PIC MR seam EMF matching: waived-crossing "
+            << "keep-adjacent frozen-coarse/live-fine edges: " << nbad
+            << (nbad > 0 ? " (candidates active: commit_skip="
+                           + std::to_string(int(m_mr_emf_xing_commit_skip))
+                           + ", fine_freeze="
+                           + std::to_string(int(m_mr_emf_xing_fine_freeze)) + ")"
+                         : " (candidates inert)")
+            << "\n";
+
+        // Candidate (a): coarse face masks -- skip the restriction commit of
+        // faces with a bad bounding edge.
+        if (m_mr_emf_xing_commit_skip && nbad > 0)
+        {
+            for (int fd = 0; fd < 3; ++fd)
+            {
+#if !defined(WARPX_DIM_3D)
+                if (fd == 1) { continue; } // out-of-plane By: not in div(B)
+#endif
+                const amrex::IndexType ftype =
+                    warpx.GetEBUpdateBFlag()[clev][fd]->ixType();
+                L.commit_skip[fd] = std::make_unique<amrex::iMultiFab>(
+                    amrex::convert(cba, ftype), cdm, 1, 0);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+                for (MFIter mfi(*L.commit_skip[fd], TilingIfNotGPU()); mfi.isValid(); ++mfi)
+                {
+                    const amrex::Box tbx = mfi.tilebox();
+                    auto const& s_arr = L.commit_skip[fd]->array(mfi);
+#if defined(WARPX_DIM_3D)
+                    const int e1 = (fd == 0) ? 1 : 0;
+                    const int e2 = (fd == 2) ? 1 : 2;
+                    auto const& b1 = bad_edge[e1]->const_array(mfi);
+                    auto const& b2 = bad_edge[e2]->const_array(mfi);
+                    // Bounding edges of face fd at (i,j,k): edge dir e1 at
+                    // offsets {0,1} along e2's transverse partner (= e2), and
+                    // edge dir e2 at offsets {0,1} along e1.
+                    amrex::ParallelFor(tbx,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                        {
+                            int skip = 0;
+                            // edges along e1, displaced along td1 = e2
+                            skip |= b1(i, j, k);
+                            skip |= b1(i + (e2 == 0), j + (e2 == 1), k + (e2 == 2));
+                            // edges along e2, displaced along td2 = e1
+                            skip |= b2(i, j, k);
+                            skip |= b2(i + (e1 == 0), j + (e1 == 1), k + (e1 == 2));
+                            s_arr(i, j, k) = skip;
+                        });
+#else
+                    auto const& b1 = bad_edge[1]->const_array(mfi);
+                    // 2D: the bounding "edges" of the in-plane faces are the
+                    // two out-of-plane nodes displaced along the transverse
+                    // in-plane dimension (Bx: dim 1; Bz: dim 0).
+                    const int td = (fd == 0) ? 1 : 0;
+                    amrex::ParallelFor(tbx,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                        {
+                            int skip = b1(i, j, k);
+                            skip |= b1(i + (td == 0), j + (td == 1), k);
+                            s_arr(i, j, k) = skip;
+                        });
+#endif
+                }
+            }
+
+            // Diagnostic: count EFFECTIVE skips -- marked faces that are
+            // live on the coarse staircase AND keep-committable (both
+            // adjacent cells covered), i.e. faces whose commit actually
+            // changes. Under the falsified registered-only rule this count
+            // was structurally zero for z-uniform walls.
+            amrex::Long neff = 0;
+            for (int fd = 0; fd < 3; ++fd)
+            {
+                if (!L.commit_skip[fd]) { continue; }
+                const int fdir = [&] {
+                    const amrex::IntVect it =
+                        L.commit_skip[fd]->ixType().toIntVect();
+                    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                        if (it[d] == 1) { return d; }
+                    }
+                    return -1;
+                }();
+                const amrex::iMultiFab& bgate =
+                    *warpx.GetEBUpdateBFlag()[clev][fd];
+                amrex::ReduceOps<amrex::ReduceOpSum> rops_eff;
+                amrex::ReduceData<amrex::Long> rdata_eff(rops_eff);
+                using ETuple = typename decltype(rdata_eff)::Type;
+                for (MFIter mfi(*L.commit_skip[fd], TilingIfNotGPU()); mfi.isValid(); ++mfi)
+                {
+                    const amrex::Box tbx = mfi.tilebox();
+                    auto const& s_arr = L.commit_skip[fd]->const_array(mfi);
+                    auto const& g_arr = bgate.const_array(mfi);
+                    auto const& k_arr = kmask.const_array(mfi);
+                    const int ilo = (fdir == 0) ? 1 : 0;
+                    const int jlo = (fdir == 1) ? 1 : 0;
+                    const int klo = (fdir == 2) ? 1 : 0;
+                    rops_eff.eval(tbx, rdata_eff,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ETuple
+                        {
+                            const bool eff = (s_arr(i, j, k) != 0) &&
+                                (g_arr(i, j, k) != 0) &&
+                                hybrid_mr_cell_covered(k_arr, i-ilo, j-jlo, k-klo,
+                                                       cdomain, is_per) &&
+                                hybrid_mr_cell_covered(k_arr, i, j, k,
+                                                       cdomain, is_per);
+                            return {eff ? amrex::Long(1) : amrex::Long(0)};
+                        });
+                }
+                neff += amrex::get<0>(rdata_eff.value(rops_eff));
+            }
+            amrex::ParallelDescriptor::ReduceLongSum(neff);
+            amrex::Print() << "Hybrid-PIC MR seam EMF matching: commit-skip "
+                << "effective (live, keep-committable) skipped faces: "
+                << neff << "\n";
+        }
+
+        // Candidate (b): freeze the fine edges exactly overlying bad coarse
+        // edges on the fine staircase (mask mutation; the E/J values on those
+        // edges are zeroed at every substep start by EmfMatchingReset).
+        if (m_mr_emf_xing_fine_freeze && nbad > 0)
+        {
+            for (int idim = 0; idim < 3; ++idim)
+            {
+#if !defined(WARPX_DIM_3D)
+                if (idim != 1) { continue; }
+#endif
+                const amrex::IndexType etype =
+                    warpx.GetEBUpdateEFlag()[clev][idim]->ixType();
+                amrex::iMultiFab bad_cf(amrex::convert(cfba, etype), fdm, 1, 0);
+                bad_cf.setVal(0);
+                bad_cf.ParallelCopy(*bad_edge[idim], 0, 0, 1, amrex::IntVect(0),
+                                    amrex::IntVect(0), cgeom.periodicity());
+                L.fine_freeze[idim] = std::make_unique<amrex::iMultiFab>(
+                    amrex::convert(fba_cell, etype), fdm, 1, 0);
+                amrex::iMultiFab& febm = *warpx.GetEBUpdateEFlag()[flev][idim];
+                const amrex::IntVect rr = ratio;
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+                for (MFIter mfi(*L.fine_freeze[idim], TilingIfNotGPU()); mfi.isValid(); ++mfi)
+                {
+                    const amrex::Box tbx = mfi.tilebox();
+                    auto const& z_arr = L.fine_freeze[idim]->array(mfi);
+                    auto const& b_arr = bad_cf.const_array(mfi);
+                    auto const& g_arr = febm.array(mfi);
+#if defined(WARPX_DIM_3D)
+                    const int ed = idim;
+#else
+                    const int ed = -1;
+#endif
+                    amrex::ParallelFor(tbx,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                        {
+                            // Only fine edges exactly overlying a coarse edge
+                            // (even transverse indices) inherit the freeze.
+                            const int ci = amrex::coarsen(i, rr[0]);
+                            const int cj = amrex::coarsen(j, rr[1]);
+#if defined(WARPX_DIM_3D)
+                            const int ck = amrex::coarsen(k, rr[2]);
+#else
+                            const int ck = k;
+#endif
+                            bool over = true;
+                            if (ed != 0 && ci * rr[0] != i) { over = false; }
+                            if (ed != 1 && cj * rr[1] != j) { over = false; }
+#if defined(WARPX_DIM_3D)
+                            if (ed != 2 && ck * rr[2] != k) { over = false; }
+#endif
+                            const int fr = (over && b_arr(ci, cj, ck) != 0) ? 1 : 0;
+                            z_arr(i, j, k) = fr;
+                            if (fr) { g_arr(i, j, k) = 0; }
+                        });
+                }
+                febm.FillBoundary(warpx.Geom(flev).periodicity());
+            }
+        }
+    }
+
     L.fba = fba_cell;
     L.fdm = fdm;
     L.cba = cba;
@@ -914,9 +1443,46 @@ void HybridPICModel::EmfMatchingReset ()
 {
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
     auto& warpx = WarpX::GetInstance();
+    using ablastr::fields::Direction;
     for (int flev = 1; flev <= warpx.finestLevel(); ++flev) {
         EnsureEmfMatchingRegister(flev);
         m_mr_emf[flev].reg->reset();
+
+        // Candidate (b) fine-edge freeze: pin the fine E (and plasma current)
+        // to exactly zero on the frozen-extension edges at every substep
+        // start. The gated fine solver never writes them, but external-field
+        // adds between substeps can park values there, and the values present
+        // at the first mutation (step 1) would otherwise be frozen in.
+        EmfMatchingLevel& L = m_mr_emf[flev];
+        if (m_mr_emf_xing_fine_freeze && L.n_bad_edges > 0)
+        {
+            for (int idim = 0; idim < 3; ++idim)
+            {
+                if (!L.fine_freeze[idim]) { continue; }
+                amrex::MultiFab& Ef = *warpx.m_fields.get(
+                    FieldType::Efield_fp, Direction{idim}, flev);
+                amrex::MultiFab& Jf = *warpx.m_fields.get(
+                    FieldType::hybrid_current_fp_plasma, Direction{idim}, flev);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+                for (MFIter mfi(*L.fine_freeze[idim], TilingIfNotGPU()); mfi.isValid(); ++mfi)
+                {
+                    const amrex::Box tbx = mfi.tilebox();
+                    auto const& z_arr = L.fine_freeze[idim]->const_array(mfi);
+                    auto const& e_arr = Ef.array(mfi);
+                    auto const& j_arr = Jf.array(mfi);
+                    amrex::ParallelFor(tbx,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                        {
+                            if (z_arr(i, j, k) != 0) {
+                                e_arr(i, j, k) = 0.0_rt;
+                                j_arr(i, j, k) = 0.0_rt;
+                            }
+                        });
+                }
+            }
+        }
     }
 #else
     WARPX_ABORT_WITH_MESSAGE(
@@ -1454,6 +2020,44 @@ void HybridPICModel::CheckDivBAfterRestriction (const int clev)
                 warpx.GetEBUpdateBFlag()[clev], warpx.boxArray(clev),
                 warpx.DistributionMap(clev), 0));
     }
+    // Waived-crossing commit-skip: cells adjacent to a skipped keep-face
+    // carry the coarse-vs-fine solution difference by design; fold them into
+    // the wall-seam class so the interior/seam statistics keep their
+    // divergence-consistency meaning (pre-registered audit amendment).
+    {
+        const int flev = clev + 1;
+        if (wall_cc && m_mr_emf_matching && m_mr_emf_xing_commit_skip &&
+            flev < static_cast<int>(m_mr_emf.size()) &&
+            m_mr_emf[flev].n_bad_edges > 0 && m_mr_emf[flev].commit_skip[0])
+        {
+            auto const& cs = m_mr_emf[flev].commit_skip;
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(*wall_cc, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                const amrex::Box tbx = mfi.tilebox();
+                auto const& w_arr = wall_cc->array(mfi);
+                auto const& sx = cs[0]->const_array(mfi);
+#if defined(WARPX_DIM_3D)
+                auto const& sy = cs[1]->const_array(mfi);
+#endif
+                auto const& sz = cs[2]->const_array(mfi);
+                amrex::ParallelFor(tbx,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    {
+                        int sk = sx(i, j, k) | sx(i+1, j, k);
+#if defined(WARPX_DIM_3D)
+                        sk |= sy(i, j, k) | sy(i, j+1, k)
+                            | sz(i, j, k) | sz(i, j, k+1);
+#else
+                        sk |= sz(i, j, k) | sz(i, j+1, k);
+#endif
+                        if (sk) { w_arr(i, j, k) = 1; }
+                    });
+            }
+        }
+    }
 #endif
 
     const amrex::Real bmax = ::MaxAbsB(B);
@@ -1479,11 +2083,20 @@ void HybridPICModel::CheckDivBAfterRestriction (const int clev)
     const amrex::Real vw = wall_cc ?
         ::MaxAbsDivB(B, geom, 0, -1, mask, -1, wall_cc.get(), unit_ratio, 2)
         : 0._rt;
+    // All wall cells regardless of the keep region (the exterior wall band is
+    // in no other class; the waived-crossing follow-up needs it audited).
+    const amrex::Real vwa = wall_cc ?
+        ::MaxAbsDivB(B, geom, 0, -1, nullptr, 0, wall_cc.get(), unit_ratio, 2)
+        : 0._rt;
 
+    if (static_cast<int>(m_divb_crse_wall_all.size()) <= clev) {
+        m_divb_crse_wall_all.resize(clev + 1);
+    }
     m_divb_crse_interior[clev].update(vi, vi * scale);
     m_divb_crse_seam[clev].update(vs, vs * scale);
     m_divb_crse_exterior[clev].update(ve, ve * scale);
     m_divb_crse_wall[clev].update(vw, vw * scale);
+    m_divb_crse_wall_all[clev].update(vwa, vwa * scale);
 
     if (vi * scale > 1.e-12_rt) {
         ablastr::warn_manager::WMRecordWarning(
@@ -1521,7 +2134,13 @@ void HybridPICModel::PrintDivBDiagnostics ()
             << " | exterior raw " << m_divb_crse_exterior[clev].raw
             << " rel " << m_divb_crse_exterior[clev].rel
             << " | wall seam raw " << m_divb_crse_wall[clev].raw
-            << " rel " << m_divb_crse_wall[clev].rel << "\n";
+            << " rel " << m_divb_crse_wall[clev].rel
+            << " | wall all raw "
+            << ((clev < static_cast<int>(m_divb_crse_wall_all.size()))
+                ? m_divb_crse_wall_all[clev].raw : 0.)
+            << " rel "
+            << ((clev < static_cast<int>(m_divb_crse_wall_all.size()))
+                ? m_divb_crse_wall_all[clev].rel : 0.) << "\n";
     }
     for (auto& s : m_divb_fine_valid)    { s = DivBStats{}; }
     for (auto& s : m_divb_fine_ring)     { s = DivBStats{}; }
@@ -1531,6 +2150,7 @@ void HybridPICModel::PrintDivBDiagnostics ()
     for (auto& s : m_divb_crse_seam)     { s = DivBStats{}; }
     for (auto& s : m_divb_crse_exterior) { s = DivBStats{}; }
     for (auto& s : m_divb_crse_wall)     { s = DivBStats{}; }
+    for (auto& s : m_divb_crse_wall_all) { s = DivBStats{}; }
 }
 
 void HybridPICModel::CheckMREBClearance (const bool verbose) const
