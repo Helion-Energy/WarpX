@@ -383,6 +383,9 @@ void HybridPICModel::ReadParameters ()
     utils::parser::queryWithParser(pp_hybrid, "qdsmc_contamination_n_boundary",
                                    m_contam_n_boundary);
 
+    // Per-stage open-set energy budget (instrument; pc scheme only).
+    pp_hybrid.query("qdsmc_energy_budget", m_energy_budget);
+
     // Electron-ion thermal equilibration (Q_ei) on T_e:
     //   Q_ei = 3 n_e k_B nu_ei (T_e - T_i),  applied per ion species weighted by
     //   n_s/n_e, cooling T_e toward T_i. nu_ei[1/s] comes from the
@@ -5273,6 +5276,51 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
 }
 
 
+std::array<amrex::Real, 2> HybridPICModel::QDSMCClassEnergy (int const lev) const
+{
+    // Class-summed thermal energy {bulk, band} [J] for the per-stage energy
+    // budget: u = 3/2 n_e k_B T_e on the nodal grid, class-masked into a
+    // temp MultiFab and reduced with sum_unique (box-seam nodes carry
+    // redundant consistent copies). Fixed rho_fp weights: within one Strang
+    // bracket rho does not change, so each stage's dU attributes that
+    // stage's T_e change alone.
+    auto & warpx = WarpX::GetInstance();
+    amrex::MultiFab const & Te =
+        *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+    amrex::MultiFab const & rho = *warpx.m_fields.get(FieldType::rho_fp, lev);
+
+    amrex::Real const n_flr = m_n_floor;
+    amrex::Real const n_bnd = amrex::max(m_contam_n_boundary, m_n_floor);
+
+    amrex::MultiFab u_cls(Te.boxArray(), Te.DistributionMap(), 2, 0);
+    u_cls.setVal(0.0_rt);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(u_cls, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        amrex::Box const box = mfi.tilebox();
+        amrex::Array4<amrex::Real>       const & u_arr   = u_cls.array(mfi);
+        amrex::Array4<amrex::Real const> const & te_arr  = Te.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            amrex::Real const ne = rho_arr(i,j,k) / PhysConst::q_e;
+            if (ne <= n_flr) { return; }
+            amrex::Real const u =
+                1.5_rt * ne * PhysConst::kb * te_arr(i,j,k);
+            u_arr(i,j,k, (ne > n_bnd) ? 0 : 1) = u;
+        });
+    }
+    amrex::Periodicity const & period = warpx.Geom(lev).periodicity();
+    auto const dxc = warpx.Geom(lev).CellSizeArray();
+    amrex::Real dV = 1.0_rt;
+    for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) { dV *= dxc[dd]; }
+    return {u_cls.sum_unique(0, false, period) * dV,
+            u_cls.sum_unique(1, false, period) * dV};
+}
+
+
 void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
 {
     ABLASTR_PROFILE("HybridPICModel::AdvanceElectronEnergyQDSMC_PC()");
@@ -5306,12 +5354,44 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
         // Strang: C(dt/2) . [S(dt/2) A(dt) S(dt/2)] . C(dt/2). The
         // conduction halves pair T_e with the rho of their time level
         // (rho^n before the transport, rho^{n+1} after); both no-op unless
-        // the kappa_par parser is set.
+        // the kappa_par parser is set. When the energy budget is armed,
+        // bracket every stage with the class-summed thermal energy and
+        // attribute each stage's dU (transport carries advection AND the
+        // polytropic compression signal).
+        bool const ebud = m_energy_budget;
+        std::array<amrex::Real, 2> ub0{}, ub1{}, ub2{}, ub3{}, ub4{}, ub5{};
+        if (ebud) { ub0 = QDSMCClassEnergy(lev); }
         QdsmcConductionOnce(lev, 0.5_rt * dt, /*use_rho_new=*/false);
+        if (ebud) { ub1 = QDSMCClassEnergy(lev); }
         ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true);
+        if (ebud) { ub2 = QDSMCClassEnergy(lev); }
         QdsmcTransportOnce(lev, dt, /*midpoint=*/true);
+        if (ebud) { ub3 = QDSMCClassEnergy(lev); }
         ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true);
+        if (ebud) { ub4 = QDSMCClassEnergy(lev); }
         QdsmcConductionOnce(lev, 0.5_rt * dt, /*use_rho_new=*/true);
+        if (ebud) {
+            ub5 = QDSMCClassEnergy(lev);
+            m_ebud_cond_bulk += (ub1[0] - ub0[0]) + (ub5[0] - ub4[0]);
+            m_ebud_cond_band += (ub1[1] - ub0[1]) + (ub5[1] - ub4[1]);
+            m_ebud_src_bulk  += (ub2[0] - ub1[0]) + (ub4[0] - ub3[0]);
+            m_ebud_src_band  += (ub2[1] - ub1[1]) + (ub4[1] - ub3[1]);
+            m_ebud_adv_bulk  += ub3[0] - ub2[0];
+            m_ebud_adv_band  += ub3[1] - ub2[1];
+            if (m_joule_dropped_print_interval > 0 &&
+                warpx.getistep(0) % m_joule_dropped_print_interval == 0) {
+                amrex::Print() << "[qdsmc] step " << warpx.getistep(0)
+                    << " energy_budget_J:"
+                    << " adv_bulk="  << m_ebud_adv_bulk
+                    << " cond_bulk=" << m_ebud_cond_bulk
+                    << " src_bulk="  << m_ebud_src_bulk
+                    << " adv_band="  << m_ebud_adv_band
+                    << " cond_band=" << m_ebud_cond_band
+                    << " src_band="  << m_ebud_src_band
+                    << " U_bulk=" << ub5[0] << " U_band=" << ub5[1]
+                    << " (dU cumulative)\n";
+            }
+        }
 
         // Emit P_e = n_e * k_B * T_e for the downstream Ohm's-law
         // solve, with the same boundary treatment the algebraic closure gets

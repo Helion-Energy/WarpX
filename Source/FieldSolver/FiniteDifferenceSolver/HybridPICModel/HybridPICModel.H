@@ -34,6 +34,7 @@
 #include <AMReX_IntVect.H>
 #include <AMReX_DistributionMapping.H>
 
+#include <array>
 #include <map>
 #include <memory>
 #include <optional>
@@ -693,6 +694,26 @@ public:
     mutable amrex::Real m_contam_axis_J[3] = {0.0, 0.0, 0.0};
     mutable amrex::Real m_contam_fast_front_J = 0.0;
     mutable amrex::Real m_contam_kicks_J = 0.0;
+
+    /** Per-stage open-set energy budget (instrument;
+     * qdsmc_energy_budget = 1, pc scheme only): brackets each stage of the
+     * Strang advance C(dt/2) S(dt/2) A(dt) S(dt/2) C(dt/2) with class-summed
+     * thermal energy U = 3/2 n_e k_B T_e (fixed rho^{n+1} weights, so each
+     * stage's dU attributes that stage's T_e change), split into BULK
+     * (n > max(qdsmc_contamination_n_boundary, n_floor)) and BAND
+     * (n_floor < n <= boundary). The transport stage's dU contains the
+     * advection AND the polytropic compression (pdV) signal -- the channel
+     * the 2026-08 cascade forensics could not see (arm SH2 cascaded to keV
+     * with its Joule source redirected and gated, implicating a non-Joule
+     * channel). Cumulative [J], printed on the shared tally cadence. */
+    bool m_energy_budget = false;
+    mutable amrex::Real m_ebud_cond_bulk = 0.0, m_ebud_cond_band = 0.0;
+    mutable amrex::Real m_ebud_src_bulk  = 0.0, m_ebud_src_band  = 0.0;
+    mutable amrex::Real m_ebud_adv_bulk  = 0.0, m_ebud_adv_band  = 0.0;
+
+    /** Class-summed thermal energy {bulk, band} [J] for the energy budget
+     * (nodal sum_unique; classes per the m_energy_budget doc). */
+    std::array<amrex::Real, 2> QDSMCClassEnergy (int lev) const;
 
     /** Electron-ion thermal equilibration (Q_ei) on T_e:
      *   Q_ei = 3 n_e k_B nu_ei (T_e - T_i),   dU_e/dt += -Q_ei,

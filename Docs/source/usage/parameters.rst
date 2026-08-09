@@ -3915,6 +3915,19 @@ Maxwell solver: kinetic-fluid hybrid
     boundary above ``n_floor`` to watch the low-density ignition band; only the (production) split
     fluxform conduction path is instrumented.
 
+.. pp:param:: hybrid_pic_model.qdsmc_energy_budget
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Per-stage open-set energy budget instrument (``pc`` time-advance only): brackets each stage of the
+    Strang advance (conduction / sources / transport / sources / conduction) with the class-summed
+    thermal energy :math:`U = \tfrac{3}{2} n_e k_B T_e` and accumulates each stage's :math:`\Delta U`
+    (cumulative, J), split into the bulk (:math:`n` above
+    :pp:param:`hybrid_pic_model.qdsmc_contamination_n_boundary`) and the band between ``n_floor`` and
+    that boundary. The transport channel carries both advection and the polytropic compression (pdV)
+    signal. Printed on the :pp:param:`hybrid_pic_model.joule_dropped_energy_print_interval` cadence.
+
 .. pp:param:: hybrid_pic_model.electron_ion_relaxation_rate(rho,Te,Ti,t)
     :type: ``float`` or ``str``
     :optional:
