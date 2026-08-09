@@ -109,6 +109,9 @@ class PlasmaCylinderCompression(object):
         mr_eb_gate_restrict=None,
         mr_eb_gate_moments=None,
         mr_emf_matching=None,
+        mr_emf_xing_commit_skip=None,
+        mr_emf_xing_fine_freeze=None,
+        mr_prolong_b_init=None,
     ):
         self.test = test
         self.verbose = verbose or self.test
@@ -122,6 +125,9 @@ class PlasmaCylinderCompression(object):
         self.mr_eb_gate_restrict = mr_eb_gate_restrict
         self.mr_eb_gate_moments = mr_eb_gate_moments
         self.mr_emf_matching = mr_emf_matching
+        self.mr_emf_xing_commit_skip = mr_emf_xing_commit_skip
+        self.mr_emf_xing_fine_freeze = mr_emf_xing_fine_freeze
+        self.mr_prolong_b_init = mr_prolong_b_init
 
         if patch_mode in ("eb_inside", "crossing", "partial_core"):
             # EB-inside-patch arm: widen the domain so the level-1 patch
@@ -569,6 +575,16 @@ class PlasmaCylinderCompression(object):
                 pywarpx.hybridpicmodel.mr_eb_gate_moments = self.mr_eb_gate_moments
             if self.mr_emf_matching is not None:
                 pywarpx.hybridpicmodel.mr_emf_matching = self.mr_emf_matching
+            if self.mr_emf_xing_commit_skip is not None:
+                pywarpx.hybridpicmodel.mr_emf_xing_commit_skip = (
+                    self.mr_emf_xing_commit_skip
+                )
+            if self.mr_emf_xing_fine_freeze is not None:
+                pywarpx.hybridpicmodel.mr_emf_xing_fine_freeze = (
+                    self.mr_emf_xing_fine_freeze
+                )
+            if self.mr_prolong_b_init is not None:
+                pywarpx.hybridpicmodel.mr_prolong_b_init = self.mr_prolong_b_init
         if self.seed is not None:
             pywarpx.warpx.random_seed = self.seed
         simulation.initialize_warpx()
@@ -715,6 +731,37 @@ parser.add_argument(
     choices=[0, 1],
     default=None,
 )
+parser.add_argument(
+    "--mr-emf-xing-commit-skip",
+    help=(
+        "waived-crossing candidate (a), debug: skip the restriction commit of "
+        "keep-faces bounded by a frozen-coarse/live-fine edge "
+        "(default: WarpX default, off)"
+    ),
+    type=int,
+    choices=[0, 1],
+    default=None,
+)
+parser.add_argument(
+    "--mr-emf-xing-fine-freeze",
+    help=(
+        "waived-crossing candidate (b), winner: freeze the fine edges overlying "
+        "frozen-coarse/live-fine edges (default: WarpX default, on)"
+    ),
+    type=int,
+    choices=[0, 1],
+    default=None,
+)
+parser.add_argument(
+    "--mr-prolong-b-init",
+    help=(
+        "overwrite the fine-level initial B by div-free prolongation from "
+        "the coarse level at the end of init (default: WarpX default, on)"
+    ),
+    type=int,
+    choices=[0, 1],
+    default=None,
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
@@ -733,5 +780,8 @@ run = PlasmaCylinderCompression(
     mr_eb_gate_restrict=args.mr_eb_gate_restrict,
     mr_eb_gate_moments=args.mr_eb_gate_moments,
     mr_emf_matching=args.mr_emf_matching,
+    mr_emf_xing_commit_skip=args.mr_emf_xing_commit_skip,
+    mr_emf_xing_fine_freeze=args.mr_emf_xing_fine_freeze,
+    mr_prolong_b_init=args.mr_prolong_b_init,
 )
 simulation.step()
