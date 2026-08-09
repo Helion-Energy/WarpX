@@ -17,19 +17,23 @@ rho_ped = f * rho0 outside. The pedestal-band ion-energy relaxation
 (implicit_mhd.halo_pedestal_energy_rate = nu, drag OFF) is then the
 ONLY leading-order dynamics:
 
-  * band cells (rho_old = rho_ped, mask weight exactly 1) relax their
+  * band cells (rho_old = rho_ped, mask weight exactly 1) drain their
     INTERNAL energy e = E_i - |m|^2/(2 rho) toward the frozen pedestal
     image e_ped = f * max_cell(e) as the theta-discretized linear
     decay, per step
         (e - e_ped) -> (e - e_ped) * A,
-        A = (1 - (1-theta) nu dt) / (1 + theta nu dt);
-  * the relaxation target FOLLOWS the current kinetic energy (the
-    momentum drag owns the kinetic channel; here it is off), so
-    momentum -- and with it the kinetic part of E_i -- must stay
-    invariant: E_i -> kinetic_0 + e_ped + (e_0 - e_ped) * A^N. A
-    wrong implementation that relaxed the TOTAL E_i would land ~4% of
-    E_i away from this prediction, orders of magnitude outside the
-    asserted tolerances;
+        A = (1 - (1-theta) nu dt) / (1 + theta nu dt),
+    exact in the fully-engaged regime of the one-sided gate (the band
+    stays >= 670 e_ped >> 2 e_ped here, where the rectifier is
+    identically 1; the drain-only companion test covers the closed
+    side);
+  * the drain acts on the internal part relative to the CURRENT
+    kinetic energy (the momentum drag owns the kinetic channel; here
+    it is off), so momentum -- and with it the kinetic part of E_i --
+    must stay invariant: E_i -> kinetic_0 + e_ped + (e_0 - e_ped) *
+    A^N. A wrong implementation that relaxed the TOTAL E_i would land
+    ~4% of E_i away from this prediction, orders of magnitude outside
+    the asserted tolerances;
   * bulk cells (rho0 = 1000 rho_ped >= 2 rho_ped, mask weight exactly
     zero) are invariant -- the C^1 engagement window closes at twice
     the pedestal;

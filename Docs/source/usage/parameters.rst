@@ -4402,18 +4402,22 @@ Jacobian probes.
     otherwise pins the Newton solve at an irreducible ion-energy
     residual. The diagonal relaxation drains the band's ion energy
     toward its pedestal-consistent image instead. Under the
-    ``total_energy`` closure the target is the pedestal
-    internal-energy image plus the *current* kinetic energy
-    :math:`|\mathbf{m}|^2/(2\rho)`: the relaxation touches only the
-    internal part, while the momentum drag owns the kinetic channel
-    through its matched drain -- the composition is triangular in
-    (kinetic, internal) and the two terms never double-count. Under
-    the ``cgl`` closure :math:`U_\parallel` and :math:`U_\perp`
-    (purely internal) relax toward their pedestal images directly.
-    Targets are clamped from below at the corresponding positivity
-    floors. A sensible rate matches the drag rate (ion cyclotron
-    scale, of order :math:`0.1/\Delta t` for typical implicit MHD
-    steps).
+    ``total_energy`` closure it acts only on the internal part
+    :math:`e = E_i - |\mathbf{m}|^2/(2\rho)`, while the momentum drag
+    owns the kinetic channel through its matched drain -- the
+    composition is triangular in (kinetic, internal) and the two terms
+    never double-count. The drain is one-sided (rectified): a
+    :math:`C^1` gate closes it where the internal part sits at or
+    below the pedestal image (full exact rate at and above twice it),
+    so the term can never act as an energy *source* -- a two-sided
+    KE-following form pumps kinetically dominated band cells toward
+    their growing kinetic target. Under the ``cgl`` closure
+    :math:`U_\parallel` and :math:`U_\perp` (purely internal) drain
+    toward their pedestal images directly, with the same one-sided
+    gates. Targets are clamped from below at the corresponding
+    positivity floors. A sensible rate matches the drag rate (ion
+    cyclotron scale, of order :math:`0.1/\Delta t` for typical
+    implicit MHD steps).
 
 .. pp:param:: implicit_mhd.electron_pressure_floor
     :type: ``float``

@@ -457,14 +457,21 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // momentum drag (total_energy closure): E_i = e_int + |m|^2/(2rho)
     // and the drag already OWNS the kinetic channel (it decays m and
     // drains E_i by exactly the induced kinetic decay), so this term
-    // relaxes E_i toward (pedestal internal energy + CURRENT kinetic
-    // energy) -- it touches ONLY the internal part, the composition is
-    // triangular in (KE, e_int), and neither term double-counts the
-    // other: d(KE)/dt = -2 nu_drag KE, d(e_int)/dt =
-    // -nu_E (e_int - e_ped). Under the cgl closure U_par and U_perp
-    // (purely internal) relax toward their pedestal images directly.
-    // Targets are clamped from below at the corresponding positivity
-    // floors so the relaxation can never demand an inadmissible state.
+    // acts ONLY on the internal part e_int = E_i - |m|^2/(2 rho), the
+    // composition is triangular in (KE, e_int), and neither term
+    // double-counts the other: d(KE)/dt = -2 nu_drag KE, d(e_int)/dt =
+    // -nu_E max(e_int - e_ped, 0)-like. ONE-SIDED (rectified): a C^1
+    // gate (floor_outflow_limiter(e_int, e_ped): zero at/below the
+    // pedestal image, full exact rate at/above twice it) closes the
+    // term from below, so it is a pure DRAIN and never a source --
+    // a two-sided KE-following form was measured to pump the
+    // KE-dominated wall-band cells (theta-stage E_i < KE) toward their
+    // growing kinetic target, a secular runaway of the band's
+    // conservative E_i stock. Under the cgl closure U_par and U_perp
+    // (purely internal) drain toward their pedestal images directly,
+    // with the same one-sided gates. Targets are clamped from below at
+    // the corresponding positivity floors so the drain can never
+    // demand an inadmissible state.
     amrex::Real m_halo_pedestal_energy_rate = 0.0;
     // The frozen per-step pedestal state (0 while inactive): density,
     // electron energy, ion internal energy (total_energy closure), and

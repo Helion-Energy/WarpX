@@ -247,6 +247,21 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Rectifier companion: with the band's internal energy loaded BELOW
+# the pedestal image (and E_i ~99.9% kinetic, mirroring the wall-band
+# population), the one-sided drain must do exactly nothing -- a
+# two-sided form would pump the band toward its kinetic-following
+# target at the exact theta rate (the measured FRC-ladder runaway)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_pedestal_energy_one_sided  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_halo_pedestal_energy_one_sided  # inputs
+    "analysis_mhd_halo_pedestal_energy_one_sided.py diags/diag000000 diags/diag000008"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_positivity  # name
     1  # dims

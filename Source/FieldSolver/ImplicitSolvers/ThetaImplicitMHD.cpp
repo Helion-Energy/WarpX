@@ -2526,13 +2526,25 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                 // image -- the momentum drag owns the kinetic channel
                 // (its matched drain above), so the composition is
                 // triangular in (KE, e_int) and neither term
-                // double-counts the other. Same mask complement as the
-                // drag; outside plasma_weight, like the drag terms.
+                // double-counts the other. ONE-SIDED (rectified): the
+                // C^1 gate closes the term where the internal part sits
+                // at or below the pedestal image, so it can never act as
+                // a SOURCE -- a two-sided form was measured to pump the
+                // KE-dominated wall-band cells (theta-stage E_i < KE,
+                // the big-minus-big corners) toward their growing
+                // KE-following target at the relaxation rate, a secular
+                // runaway of the band's conservative E_i stock. Full
+                // exact rate at/above twice the image, like the drain
+                // gates. Same mask complement as the drag; outside
+                // plasma_weight, like the drag terms.
+                const amrex::Real internal_energy =
+                    ion_e(i, j, k) - kinetic_energy;
                 const amrex::Real energy_relax_drain =
                     halo_pedestal_energy_rate *
                     (1.0_rt - halo_source_taper) *
-                    (ion_e(i, j, k) - kinetic_energy -
-                     halo_pedestal_ion_internal);
+                    (internal_energy - halo_pedestal_ion_internal) *
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        internal_energy, halo_pedestal_ion_internal);
                 ion_energy_increment(i, j, k) =
                     theta_dt *
                     (plasma_weight *
@@ -4325,14 +4337,28 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 // image -- the momentum drag owns the kinetic channel
                 // (its matched drain above), so the composition is
                 // triangular in (KE, e_int) and neither term
-                // double-counts the other. Same mask complement as the
-                // drag; outside plasma_weight, like the drag terms.
+                // double-counts the other. ONE-SIDED (rectified): the
+                // C^1 gate closes the term where the internal part sits
+                // at or below the pedestal image, so it can never act as
+                // a SOURCE -- a two-sided form was measured to pump the
+                // KE-dominated wall-band cells (theta-stage E_i < KE,
+                // the big-minus-big corners) toward their growing
+                // KE-following target at the relaxation rate, a secular
+                // runaway of the band's conservative E_i stock (ambient
+                // Newton norm x30 by step 660, NaN blow-up at 678 on the
+                // FRC benchmark ladder). Full exact rate at/above twice
+                // the image, like the drain gates. Same mask complement
+                // as the drag; outside plasma_weight, like the drag
+                // terms.
+                const amrex::Real internal_energy =
+                    ion_e(i, j, k) -
+                    0.5_rt * momentum_square / safe_density;
                 const amrex::Real energy_relax_drain =
                     halo_pedestal_energy_rate *
                     (1.0_rt - halo_source_taper) *
-                    (ion_e(i, j, k) -
-                     0.5_rt * momentum_square / safe_density -
-                     halo_pedestal_ion_internal);
+                    (internal_energy - halo_pedestal_ion_internal) *
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        internal_energy, halo_pedestal_ion_internal);
                 ion_energy_increment(i, j, k) =
                     theta_dt *
                     (plasma_weight *
@@ -4593,25 +4619,36 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 // lives in the momentum block alone), so they relax
                 // toward their frozen pedestal images directly -- no
                 // kinetic bookkeeping to share with the momentum drag.
-                // Same mask complement as the drag; outside
+                // ONE-SIDED (rectified) like the total_energy form: the
+                // C^1 gates close each drain where its energy sits at or
+                // below the pedestal image, so the term can never act as
+                // a source. Same mask complement as the drag; outside
                 // plasma_weight, like the drag terms.
                 const amrex::Real halo_energy_relax =
                     halo_pedestal_energy_rate *
                     (1.0_rt - halo_source_taper);
+                const amrex::Real parallel_relax_drain =
+                    halo_energy_relax *
+                    (upar(i, j, k) - halo_pedestal_ion_parallel) *
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        upar(i, j, k), halo_pedestal_ion_parallel);
+                const amrex::Real perp_relax_drain =
+                    halo_energy_relax *
+                    (uperp(i, j, k) - halo_pedestal_ion_perp) *
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        uperp(i, j, k), halo_pedestal_ion_perp);
                 ion_parallel_increment(i, j, k) =
                     theta_dt *
                     (plasma_weight *
                          (-divergence_ion_parallel_flux + parallel_work +
                           parallel_relaxation) -
-                     halo_energy_relax *
-                         (upar(i, j, k) - halo_pedestal_ion_parallel));
+                     parallel_relax_drain);
                 ion_perp_increment(i, j, k) =
                     theta_dt *
                     (plasma_weight *
                          (-divergence_ion_perp_flux + perp_work +
                           perp_relaxation) -
-                     halo_energy_relax *
-                         (uperp(i, j, k) - halo_pedestal_ion_perp));
+                     perp_relax_drain);
             }
         });
     }
