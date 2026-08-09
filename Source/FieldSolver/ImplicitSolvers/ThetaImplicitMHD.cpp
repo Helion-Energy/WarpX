@@ -2535,13 +2535,19 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                 // KE-following target at the relaxation rate, a secular
                 // runaway of the band's conservative E_i stock. Full
                 // exact rate at/above twice the image, like the drain
-                // gates. Same mask complement as the drag; outside
+                // gates. NARROW density window (see the face-flux path
+                // for the measurement): full at/below 1.125 rho_ped,
+                // exactly zero at/above 1.25 rho_ped -- an octave inside
+                // the drag mask, keyed to the step-old density. Outside
                 // plasma_weight, like the drag terms.
                 const amrex::Real internal_energy =
                     ion_e(i, j, k) - kinetic_energy;
                 const amrex::Real energy_relax_drain =
                     halo_pedestal_energy_rate *
-                    (1.0_rt - halo_source_taper) *
+                    (1.0_rt -
+                     theta_implicit_mhd::floor_outflow_limiter(
+                         rho_old(i, j, k) - halo_pedestal,
+                         0.125_rt * halo_pedestal)) *
                     (internal_energy - halo_pedestal_ion_internal) *
                     theta_implicit_mhd::floor_outflow_limiter(
                         internal_energy, halo_pedestal_ion_internal);
@@ -4347,15 +4353,30 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 // runaway of the band's conservative E_i stock (ambient
                 // Newton norm x30 by step 660, NaN blow-up at 678 on the
                 // FRC benchmark ladder). Full exact rate at/above twice
-                // the image, like the drain gates. Same mask complement
-                // as the drag; outside plasma_weight, like the drag
-                // terms.
+                // the image, like the drain gates. NARROW density
+                // window, an octave inside the drag mask: full at/below
+                // 1.125 rho_ped, exactly zero at/above 1.25 rho_ped,
+                // keyed to the step-old density. The drag's 2x window is
+                // WRONG for the energy channel: the fingerprinted
+                // gate-pinned accretion population sits at 1.0-1.2
+                // rho_ped, while the wall's LIVE hot boundary layer
+                // (E_i stock 20-400x the pedestal image) cycles through
+                // 1.3-1.8 rho_ped -- a 2x-window drain rips that layer
+                // down to the image cell-by-cell (measured: 100x
+                // cell-to-cell E_i contrast at the wall and a secularly
+                // growing ambient residual, realization-dependent
+                // ignition). Velocity relaxation is inert on the
+                // quasi-static layer, so the drag keeps its wide mask.
+                // Outside plasma_weight, like the drag terms.
                 const amrex::Real internal_energy =
                     ion_e(i, j, k) -
                     0.5_rt * momentum_square / safe_density;
                 const amrex::Real energy_relax_drain =
                     halo_pedestal_energy_rate *
-                    (1.0_rt - halo_source_taper) *
+                    (1.0_rt -
+                     theta_implicit_mhd::floor_outflow_limiter(
+                         rho_old(i, j, k) - halo_pedestal,
+                         0.125_rt * halo_pedestal)) *
                     (internal_energy - halo_pedestal_ion_internal) *
                     theta_implicit_mhd::floor_outflow_limiter(
                         internal_energy, halo_pedestal_ion_internal);
@@ -4622,11 +4643,17 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 // ONE-SIDED (rectified) like the total_energy form: the
                 // C^1 gates close each drain where its energy sits at or
                 // below the pedestal image, so the term can never act as
-                // a source. Same mask complement as the drag; outside
+                // a source. Same NARROW density window as the
+                // total_energy form (see above): full at/below 1.125
+                // rho_ped, exactly zero at/above 1.25 rho_ped -- the
+                // live wall boundary layer must not be drained. Outside
                 // plasma_weight, like the drag terms.
                 const amrex::Real halo_energy_relax =
                     halo_pedestal_energy_rate *
-                    (1.0_rt - halo_source_taper);
+                    (1.0_rt -
+                     theta_implicit_mhd::floor_outflow_limiter(
+                         rho_old(i, j, k) - halo_pedestal,
+                         0.125_rt * halo_pedestal));
                 const amrex::Real parallel_relax_drain =
                     halo_energy_relax *
                     (upar(i, j, k) - halo_pedestal_ion_parallel) *

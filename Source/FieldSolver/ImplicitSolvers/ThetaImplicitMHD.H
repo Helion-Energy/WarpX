@@ -441,10 +441,18 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // energy invariant (exactly so at theta = 1/2).
     amrex::Real m_halo_pedestal_drag_rate = 0.0;
     // Ion-energy relaxation rate [1/s] of the pedestal band (0
-    // disables). Engages with EXACTLY the drag's C^1 mask
-    // (1 - floor_outflow_limiter(rho_old, rho_ped): full rate at the
-    // pedestal, exactly zero at/above 2 rho_ped, a per-solve constant
-    // keyed to the step-old density). Rationale (the last free band
+    // disables). Engages with a C^1 density mask of the drag's form
+    // but an OCTAVE NARROWER window (full rate at/below 1.125
+    // rho_ped, exactly zero at/above 1.25 rho_ped, a per-solve
+    // constant keyed to the step-old density): the treatable
+    // population is the gate-PINNED band (measured at 1.0-1.2
+    // rho_ped), while the wall's live hot boundary layer -- E_i stock
+    // 20-400x the pedestal image -- cycles through 1.3-1.8 rho_ped
+    // and must not be drained (a 2x-window drain was measured to rip
+    // it down to the image cell-by-cell, a realization-dependent
+    // secular residual growth; the drag keeps its 2x window because
+    // velocity relaxation is inert on the quasi-static layer).
+    // Rationale (the last free band
     // channel, after the mass gates and the momentum drag): under a
     // ramping drive the band's rho sits gate-pinned at the pedestal
     // while the E_i rows keep integrating the drive forcing (measured

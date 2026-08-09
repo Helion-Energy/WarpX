@@ -34,9 +34,10 @@ ONLY leading-order dynamics:
     A^N. A wrong implementation that relaxed the TOTAL E_i would land
     ~4% of E_i away from this prediction, orders of magnitude outside
     the asserted tolerances;
-  * bulk cells (rho0 = 1000 rho_ped >= 2 rho_ped, mask weight exactly
-    zero) are invariant -- the C^1 engagement window closes at twice
-    the pedestal;
+  * bulk cells (rho0 = 1000 rho_ped, mask weight exactly zero) are
+    invariant -- the C^1 engagement window closes at 1.25x the
+    pedestal (an octave inside the drag's, so the live low-density
+    boundary layer above the pinned band is never drained);
   * density and electron energy are preserved (the relaxation is a
     pure ion-internal-energy sink; no mass is demanded from the gated
     band).

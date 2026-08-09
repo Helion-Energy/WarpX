@@ -2350,7 +2350,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
     halo_pedestal_energy_rate: float, default=0 (off)
         Ion-energy relaxation rate in 1/s of the pedestal band (requires
         halo_pedestal_fraction > 0 and ion_closure="total_energy" or
-        "cgl"). Same C^1 engagement mask as halo_pedestal_drag_rate.
+        "cgl"). C^1 density mask of the drag's form but an octave
+        narrower (full at/below 1.125x the pedestal, zero at/above
+        1.25x): only the gate-pinned band is treated, never the live
+        low-density boundary layer above it.
         Under the total_energy closure it drains only the internal part
         E_i - |m|^2/(2 rho) toward the pedestal internal-energy image
         (the momentum drag owns the kinetic channel, so the two never

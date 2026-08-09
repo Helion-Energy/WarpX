@@ -4391,9 +4391,14 @@ Jacobian probes.
     Ion-energy relaxation rate of the pedestal band. Requires a
     positive :pp:param:`implicit_mhd.halo_pedestal_fraction` and
     ``implicit_mhd.ion_closure = total_energy`` or ``cgl``. Engages
-    with exactly the drag's :math:`C^1` mask (full rate at
-    :math:`\rho_\mathrm{ped}`, exactly zero at and above
-    :math:`2\rho_\mathrm{ped}`, keyed to the step-old density).
+    with a :math:`C^1` density mask of the drag's form but an octave
+    narrower (full rate at and below :math:`1.125\rho_\mathrm{ped}`,
+    exactly zero at and above :math:`1.25\rho_\mathrm{ped}`, keyed to
+    the step-old density): the treatable population is the
+    gate-pinned band, while the wall's live hot boundary layer (which
+    cycles through :math:`1.3\text{-}1.8\,\rho_\mathrm{ped}` with an
+    ion-energy stock far above the pedestal image) must not be
+    drained.
     Rationale (the last free band channel, after the mass gates and
     :pp:param:`implicit_mhd.halo_pedestal_drag_rate`): under a ramping
     drive the band's density sits gate-pinned at the pedestal while
