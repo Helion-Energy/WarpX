@@ -219,6 +219,16 @@ parser.add_argument(
     "(hybrid_pic_model.qdsmc_contamination_n_boundary = frac*N_I); set above "
     "--n-floor-frac to watch the eta_vac ignition band; <0 = off",
 )
+parser.add_argument(
+    "--energy-budget",
+    type=int,
+    choices=[0, 1],
+    default=0,
+    help="per-stage open-set energy budget (hybrid_pic_model."
+    "qdsmc_energy_budget): cumulative dU per Strang stage "
+    "(advection+compression / conduction / sources), bulk vs band split at "
+    "the contamination boundary",
+)
 parser.add_argument("--substeps", type=int, default=256)
 parser.add_argument("--substep-rtol", type=float, default=1.0e-3)
 parser.add_argument("--advance", choices=["euler", "leapfrog", "pc"], default="pc")
@@ -513,6 +523,8 @@ if args.contam_boundary_frac > 0.0:
     pywarpx.hybridpicmodel.qdsmc_contamination_n_boundary = (
         args.contam_boundary_frac * N_I
     )
+if args.energy_budget:
+    pywarpx.hybridpicmodel.qdsmc_energy_budget = 1
 
 simulation.initialize_warpx()
 
