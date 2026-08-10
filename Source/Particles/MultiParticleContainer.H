@@ -591,6 +591,10 @@ private:
 
     void ReadParameters ();
 
+    /** Guards ReadParameters against running twice for this instance.
+     */
+    bool m_params_initialized = false;
+
     void mapSpeciesProduct ();
 
     bool m_do_back_transformed_particles = false;
