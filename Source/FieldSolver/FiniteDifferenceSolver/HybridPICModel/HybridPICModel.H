@@ -909,6 +909,25 @@ public:
     amrex::ParserExecutor<3> m_eta;
     bool m_resistivity_has_J_dependence = false;
 
+    /** Joule-heating resistivity split. The QDSMC electron Joule source
+     *  evaluates joule_heating_resistivity(rho,J,t) instead of the
+     *  E-solve resistivity; default (unset) aliases plasma_resistivity,
+     *  bit-identical. Decks whose plasma_resistivity carries a
+     *  density-ramped vacuum regularization should set this to the
+     *  physical (un-boosted) eta: the ramp exists to relax the vacuum
+     *  FIELD, and heating with it deposits eta_vac*J^2 into just-above-
+     *  floor cells whose heat capacity scales with n -- a numerical
+     *  electron-temperature source at the plasma edge. */
+    std::string m_eta_heating_expression;
+    std::unique_ptr<amrex::Parser> m_heating_resistivity_parser;
+    amrex::ParserExecutor<3> m_eta_heating;
+
+    /** Density gate (m^-3) below which the Joule source is dropped;
+     *  default (negative) = n_floor (the historical gate). Raise it to
+     *  keep heating out of the resistivity-ramp band without moving the
+     *  Ohm's-law floor. */
+    amrex::Real m_joule_heating_n_min = -1.0;
+
     /** Opt-in momentum-consistent particle push field for the
      *  theta-implicit hybrid solver: subtract the resistive part of the
      *  Ohm field from the field gathered by the ions (the explicit scheme

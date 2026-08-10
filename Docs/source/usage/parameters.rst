@@ -3911,6 +3911,29 @@ Maxwell solver: kinetic-fluid hybrid
     :math:`\eta_{s,\mathrm{eff}} = \eta + \eta_s`. For a single species this reduces to
     :math:`dT_e/dt = (\gamma - 1)\,\eta J^2/(n_e k_B)`.
 
+.. pp:param:: hybrid_pic_model.joule_heating_resistivity(rho,J,t)
+    :type: ``string``
+    :default: :pp:param:`hybrid_pic_model.plasma_resistivity(rho,J,t)`
+    :optional:
+
+    Resistivity expression evaluated by the Joule-heating source instead of the E-solve resistivity.
+    When :pp:param:`hybrid_pic_model.plasma_resistivity(rho,J,t)` carries a density-ramped vacuum
+    regularization (a large :math:`\eta` in the low-density limb, used to relax the vacuum magnetic
+    field toward its quasi-static solution), heating with that boosted :math:`\eta` deposits
+    :math:`\eta_\mathrm{vac} J^2` into cells just above the density floor, where the heat capacity
+    :math:`\propto n_e` is small — a spurious electron-temperature source at the plasma edge.
+    Setting this parameter to the physical (un-boosted) resistivity keeps the field-side
+    regularization while heating with the physical dissipation only.
+
+.. pp:param:: hybrid_pic_model.joule_heating_n_min
+    :type: ``float`` (m\ :sup:`-3`)
+    :default: :pp:param:`hybrid_pic_model.n_floor`
+    :optional:
+
+    Density below which the Joule-heating source is dropped. The default reproduces the historical
+    gate at the Ohm's-law floor; raising it confines heating to densities where the resistivity
+    ramp has decayed to its physical value, without moving the floor itself.
+
 .. pp:param:: hybrid_pic_model.redirect_joule_to_ions
     :type: ``bool``
     :default: ``false``

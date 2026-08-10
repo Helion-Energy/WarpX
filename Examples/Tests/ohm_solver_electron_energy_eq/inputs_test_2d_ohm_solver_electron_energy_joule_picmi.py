@@ -77,7 +77,13 @@ class ForceFreeJoule(object):
         implicit=False,
         nlsolver="picard",
         segregated=False,
+        heating_eta_scale=1.0,
     ):
+        # Heating-resistivity split (calibrated): the Joule source runs at
+        # heating_eta_scale * eta while the E-solve keeps eta, so the
+        # analysis' independent field-decay and Te-ramp eta fits must
+        # disagree by exactly this factor.
+        self.heating_eta_scale = heating_eta_scale
         self.implicit = implicit
         self.nlsolver = nlsolver
         self.segregated = segregated
@@ -199,6 +205,11 @@ class ForceFreeJoule(object):
             substeps=self.substeps,
             solve_electron_energy_equation=True,
             include_joule_heating=True,
+            joule_heating_resistivity=(
+                self.eta * self.heating_eta_scale
+                if self.heating_eta_scale != 1.0
+                else None
+            ),
         )
 
         simulation = picmi.Simulation(
@@ -358,6 +369,14 @@ parser.add_argument(
     action="store_true",
     help="segregated midpoint-iterated solve for the QDSMC stage (implicit only)",
 )
+parser.add_argument(
+    "--heating-eta-scale",
+    type=float,
+    default=1.0,
+    help="run the Joule source at this multiple of the E-solve eta via "
+    "hybrid_pic_model.joule_heating_resistivity (calibrated split check; "
+    "pass the same value to analysis_joule.py)",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
@@ -368,5 +387,6 @@ run = ForceFreeJoule(
     implicit=args.implicit,
     nlsolver=args.nlsolver,
     segregated=args.segregated,
+    heating_eta_scale=args.heating_eta_scale,
 )
 simulation.step()
