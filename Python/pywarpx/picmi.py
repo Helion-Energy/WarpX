@@ -2323,6 +2323,20 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         Reduces to ``eta * J**2`` for a single ion species. Only used when
         ``solve_electron_energy_equation`` is True.
 
+    joule_heating_resistivity: float or str, optional
+        Resistivity expression (of ``rho``, ``J``, ``t``) evaluated by the
+        Joule heating source instead of ``plasma_resistivity``. Default:
+        ``plasma_resistivity`` itself (identical behavior). Set this to the
+        physical (un-boosted) resistivity when ``plasma_resistivity``
+        carries a density-ramped vacuum regularization: the ramp exists to
+        relax the vacuum field and must not heat the near-floor plasma
+        edge, whose heat capacity scales with density.
+
+    joule_heating_n_min: float, optional
+        Density (m^-3) below which the Joule source is dropped. Default:
+        ``n_floor`` (the historical gate). Raise it to keep heating out of
+        the resistivity-ramp band without moving the Ohm's-law floor.
+
     redirect_joule_to_ions: bool, default=False
         Route the Joule heating of cells with
         ``Te >= joule_redirect_Te_threshold`` to the ions (as an
@@ -2480,6 +2494,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         plasma_resistivity=None,
         plasma_hyper_resistivity=None,
         plasma_resistivity_species=None,
+        joule_heating_resistivity=None,
+        joule_heating_n_min=None,
         solve_electron_energy_equation=None,
         implicit_push_excludes_resistive_field=None,
         darwin=None,
@@ -2551,6 +2567,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
             darwin_vacuum_recovery_relative_tolerance
         )
         self.include_joule_heating = include_joule_heating
+        self.joule_heating_resistivity = joule_heating_resistivity
+        self.joule_heating_n_min = joule_heating_n_min
         self.redirect_joule_to_ions = redirect_joule_to_ions
         self.joule_redirect_Te_threshold = joule_redirect_Te_threshold
         self.include_temperature_relaxation = include_temperature_relaxation
@@ -2631,6 +2649,14 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
                     f"plasma_resistivity_{name}(rho_s,rho,Te,J,J_s,B,t)",
                     pywarpx.my_constants.mangle_expression(expr, self.mangle_dict),
                 )
+        if self.joule_heating_resistivity is not None:
+            pywarpx.hybridpicmodel.__setattr__(
+                "joule_heating_resistivity(rho,J,t)",
+                pywarpx.my_constants.mangle_expression(
+                    self.joule_heating_resistivity, self.mangle_dict
+                ),
+            )
+        pywarpx.hybridpicmodel.joule_heating_n_min = self.joule_heating_n_min
         # Only assign the electron-energy-equation attributes when given, so
         # that scripts setting them directly on the hybridpicmodel bucket are
         # not clobbered with None here.

@@ -88,6 +88,10 @@ void HybridPICModel::ReadParameters ()
     }
 
     pp_hybrid.query("plasma_resistivity(rho,J,t)", m_eta_expression);
+    pp_hybrid.query("joule_heating_resistivity(rho,J,t)",
+                    m_eta_heating_expression);
+    utils::parser::queryWithParser(pp_hybrid, "joule_heating_n_min",
+                                   m_joule_heating_n_min);
     pp_hybrid.query("qdsmc_conduction", m_qdsmc_conduction);
     pp_hybrid.query("qdsmc_conduction_kappa(T,n)", m_qdsmc_kappa_expression);
     pp_hybrid.query("qdsmc_conduction_substeps", m_qdsmc_conduction_substeps);
@@ -579,6 +583,18 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
     m_resistivity_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(m_eta_expression, {"rho","J","t"}));
     m_eta = m_resistivity_parser->compile<3>();
+
+    // Joule-heating resistivity split (see the member doc): unset
+    // aliases the E-solve executor exactly -- the default path is
+    // bit-identical, including any J/t dependence.
+    if (m_eta_heating_expression.empty()) {
+        m_eta_heating = m_eta;
+    } else {
+        m_heating_resistivity_parser = std::make_unique<amrex::Parser>(
+            utils::parser::makeParser(m_eta_heating_expression,
+                                      {"rho","J","t"}));
+        m_eta_heating = m_heating_resistivity_parser->compile<3>();
+    }
 
     if (m_qdsmc_conduction != "off") {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -3278,7 +3294,12 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
 
     auto const gamma_minus_1 = m_gamma - 1.0_rt;
     auto const rho_floor     = PhysConst::q_e * m_n_floor;
-    auto const eta           = m_eta;
+    // Heating-side resistivity and gate (may differ from the E-solve
+    // eta and the Ohm floor; see the m_eta_heating member doc).
+    auto const eta           = m_eta_heating;
+    auto const rho_heat_gate = PhysConst::q_e *
+        (m_joule_heating_n_min >= 0.0_rt ? m_joule_heating_n_min
+                                         : m_n_floor);
     auto const t_new         = warpx.gett_new(0);
 
     amrex::GpuArray<int, 3> const & Jx_stag = Jx_IndexType;
@@ -3386,7 +3407,7 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
             amrex::ParallelFor(tbox, [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
                 amrex::Real const rho_val = rho_arr(i,j,k);
-                if (rho_val <= rho_floor) { return; }
+                if (rho_val <= rho_heat_gate) { return; }
                 // n_e (m^-3) from the volume-scaled total rho_fp.
                 amrex::Real const ne = rho_val / PhysConst::q_e;
                 // Species charge fraction f_s = rho_fp_s / Sigma_t rho_fp_t

@@ -76,17 +76,23 @@ def eta_from_field_decay(t, E_B):
     return MU0 * rate / (2.0 * KWAVE**2)
 
 
-def model_dTe(t, eta):
-    """Joule Te ramp [eV] with the resistive J decay folded in."""
-    tau = MU0 / (eta * KWAVE**2)
-    pref = (GAMMA - 1.0) * eta * J0**2 / (N0 * K_B)  # K/s at t=0
+def model_dTe(t, eta_heat, eta_field):
+    """Joule Te ramp [eV] with the resistive J decay folded in.
+
+    The J(t) decay time follows the E-solve resistivity (eta_field)
+    while the heating prefactor uses the heating-side resistivity
+    (eta_heat); identical unless the run splits them via
+    hybrid_pic_model.joule_heating_resistivity.
+    """
+    tau = MU0 / (eta_field * KWAVE**2)
+    pref = (GAMMA - 1.0) * eta_heat * J0**2 / (N0 * K_B)  # K/s at t=0
     return pref * (tau / 2.0) * (1.0 - np.exp(-2.0 * t / tau)) / K_PER_EV
 
 
-def eta_from_te_ramp(t, dTe, eta_input):
-    """1-parameter least-squares fit of eta (coarse scan)."""
-    grid = np.linspace(0.1 * eta_input, 3.0 * eta_input, 4001)
-    ssr = [np.sum((model_dTe(t, e) - dTe) ** 2) for e in grid]
+def eta_from_te_ramp(t, dTe, eta_center, eta_field):
+    """1-parameter least-squares fit of the heating eta (coarse scan)."""
+    grid = np.linspace(0.1 * eta_center, 3.0 * eta_center, 4001)
+    ssr = [np.sum((model_dTe(t, e, eta_field) - dTe) ** 2) for e in grid]
     return grid[int(np.argmin(ssr))]
 
 
@@ -101,6 +107,15 @@ def main(argv=None):
         type=float,
         default=1.0,
         help="multiplier on the base resistivity eta=1e-5; must match the run",
+    )
+    ap.add_argument(
+        "--heating-eta-scale",
+        type=float,
+        default=1.0,
+        help="heating-resistivity split factor (the run's "
+        "joule_heating_resistivity = heating-eta-scale * eta); the Te-ramp "
+        "fit is checked against eta * this factor while the field decay "
+        "stays at eta",
     )
     ap.add_argument(
         "--tol-field",
@@ -132,8 +147,9 @@ def main(argv=None):
     # Skip the iteration-0 dump in the Te-ramp fit (fields are written
     # before the first current deposition, so J = 0 there).
     t_fit, dTe = t[1:] - t[1], Te[1:] - Te[1]
-    eta_T = eta_from_te_ramp(t_fit, dTe, eta_input)
-    err_T = abs(eta_T - eta_input) / eta_input
+    eta_heat_expected = eta_input * args.heating_eta_scale
+    eta_T = eta_from_te_ramp(t_fit, dTe, eta_heat_expected, eta_input)
+    err_T = abs(eta_T - eta_heat_expected) / eta_heat_expected
 
     # Cumulative energy budget (each series relative to its first sample).
     dE_e = E_e - E_e[0]
@@ -151,7 +167,8 @@ def main(argv=None):
         f"({100 * err_B:+.2f}%, tol {100 * args.tol_field:.1f}%)"
     )
     print(
-        f"  eta (Te ramp)    = {eta_T:.4e} Ohm*m  "
+        f"  eta (Te ramp)    = {eta_T:.4e} Ohm*m  vs expected "
+        f"{eta_heat_expected:.4e} "
         f"({100 * err_T:+.2f}%, tol {100 * args.tol_te:.1f}%)"
     )
     print(
@@ -181,11 +198,15 @@ def main(argv=None):
     tm = np.linspace(0.0, t_fit[-1], 200)
     axT.plot(t_fit * 1e6, dTe, "o", ms=5, label="measured")
     axT.plot(
-        tm * 1e6, model_dTe(tm, eta_input), "-", lw=1.5, label=r"analytic, input $\eta$"
+        tm * 1e6,
+        model_dTe(tm, eta_heat_expected, eta_input),
+        "-",
+        lw=1.5,
+        label=r"analytic, expected heating $\eta$",
     )
     axT.plot(
         tm * 1e6,
-        model_dTe(tm, eta_T),
+        model_dTe(tm, eta_T, eta_input),
         "--",
         lw=1.2,
         label=rf"fit, $\eta$ = {eta_T:.3e}",
