@@ -1,3 +1,39 @@
+# CASCADE MECHANISM (closed 2026-08-10) + cliff-aware fix design
+
+The Te runaway is numerical, and one mechanism explains every arm death:
+**numerical diffusion of the entropy function K = Te n^(1-gamma) across an
+unresolved density gradient is a heat pump** — K leaking from a low-n cell
+that re-materializes in a higher-n cell returns Te amplified by
+(n_hi/n_lo)^(gamma-1) (~7.4x at the 20x liftoff cliff). Evidence chain:
+- Q0d comp-split budget: at ignition the band's transport dU is +5.60 J/200
+  steps of pure advection/remap RESIDUAL while the exact compression term is
+  NEGATIVE (-0.13 J, band expanding) and the bulk residual is -16.7 J — the
+  remap carries energy UP the cliff.
+- Marker kinematics: |V_e| dt/dx <= 0.017 cells/step at ignition — the
+  transport is all deposit tails, not trajectories.
+- Q0e (--grad-deposit 0): plain hat deposit -> 20.4 keV at step 192 (t=1 us).
+  The B1 antidiffusive correction was SUPPRESSING the pump (less K
+  diffusion), not causing it.
+- SPN2: burn-phase cascade has the same signature with band Joule exactly 0.
+
+## Fix design (option b, task #12): cliff-aware K-deposit
+
+Per-destination-node deposit rescale: a marker spilling onto node j with
+density n_j far from its home n_h deposits K_dep(j) = Te_home * n_j^(1-gamma)
+(isothermal spill: the Te contribution is invariant, no amplification)
+instead of its home entropy K_h (isentropic spill: correct physics for
+RESOLVED smooth compression, amplifying at unresolved cliffs). Blend by local
+resolvedness r = |ln(n_j/n_h)|: pure isentropic below r1, pure isothermal
+above r2 (inputs; e.g. r1 = 0.35, r2 = 1.4 -> engages only at >~4x jumps).
+Home-node deposits are UNTOUCHED (n_j = n_h): the at-rest identity stays
+machine-exact and the polytropic compression bookkeeping via the home-cell
+n^{n+1}/n^n survives. Applies to both the plain and B1-corrected deposit
+weights (the slope terms rescale the same way). Behind
+`qdsmc_cliff_limited_deposit` (off by default); gauntlet + Q0/SPN reruns
+decide the default with Eric's sign-off.
+
+---
+
 # Quarantine instrument: open-set contamination tally
 
 **Status 2026-08-08: IMPLEMENTED** (`qdsmc_contamination_n_boundary`), with
