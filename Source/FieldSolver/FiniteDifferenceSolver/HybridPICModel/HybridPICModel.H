@@ -695,6 +695,16 @@ public:
     mutable amrex::Real m_contam_fast_front_J = 0.0;
     mutable amrex::Real m_contam_kicks_J = 0.0;
 
+    /** Cliff-limited entropy deposit (the option-b fix for the K-diffusion
+     * heat pump; see QdsmcParticleContainer::CliffDeposit for the mechanism
+     * and blend definition). Off by default; requires
+     * qdsmc_gradient_deposit = 1. r1/r2 are |ln(n_dest/n_home)| blend
+     * bounds: with the defaults the correction only engages across >~1.4x
+     * single-hat density jumps and is fully isothermal beyond ~4x. */
+    bool m_cliff_limited_deposit = false;
+    amrex::Real m_cliff_deposit_r1 = 0.35;
+    amrex::Real m_cliff_deposit_r2 = 1.4;
+
     /** Per-stage open-set energy budget (instrument;
      * qdsmc_energy_budget = 1, pc scheme only): brackets each stage of the
      * Strang advance C(dt/2) S(dt/2) A(dt) S(dt/2) C(dt/2) with class-summed

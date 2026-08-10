@@ -204,6 +204,34 @@ public:
      *        limiter keeps deposited values within the local neighbor range
      *        (positivity).
      */
+    /** Cliff-aware entropy deposit options (HybridPICModel's
+     * qdsmc_cliff_limited_deposit). The K-diffusion heat pump: entropy
+     * K = Te n^(1-gamma) spilled onto a node of different density
+     * re-materializes through the polytropic recovery as Te scaled by
+     * (n_dest/n_home)^(gamma-1) -- physical for resolved smooth
+     * compression, an energy-manufacturing amplifier at unresolved
+     * density cliffs (measured: the liftoff cascade engine). When
+     * enabled, each destination node's entropy share is blended between
+     * the isentropic spill (factor 1) and the isothermal spill (factor
+     * (n_home/n_dest)^(gamma-1), temperature-invariant) keyed on
+     * r = |ln(n_dest/n_home)|: pure isentropic below r1, pure isothermal
+     * above r2. Home-node deposits keep factor exactly 1 whenever the
+     * cell's one-step density change stays below e^{r1} (the at-rest
+     * identity is bit-exact). Implemented for the gradient-corrected
+     * deposit path only. */
+    struct CliffDeposit
+    {
+        bool enabled = false;
+        amrex::MultiFab const* rho_new = nullptr;  //!< nodal rho^{n+1} [C/m^3]
+        amrex::Real n_floor = 1.0;                 //!< [m^-3], K<->Te floor
+        amrex::Real gamma = 5.0/3.0;
+        amrex::Real r1 = 0.35;                     //!< blend start, |ln ratio|
+        amrex::Real r2 = 1.4;                      //!< fully isothermal
+    };
+
+    void DepositK (int lev, amrex::MultiFab & Kfield,
+                   bool gradient_corrected,
+                   CliffDeposit const & cliff);
     void DepositK (int lev, amrex::MultiFab & Kfield,
                    bool gradient_corrected = false);
 
@@ -234,7 +262,8 @@ private:
      *        -1 for the plain point deposit.
      */
     void DepositScalar (int lev, int attr, int slope_attr0,
-                        amrex::Real scale, amrex::MultiFab & field);
+                        amrex::Real scale, amrex::MultiFab & field,
+                        CliffDeposit const & cliff);
 };
 
 #endif // WARPX_QDSMCPARTICLECONTAINER_H_

@@ -386,6 +386,20 @@ void HybridPICModel::ReadParameters ()
     // Per-stage open-set energy budget (instrument; pc scheme only).
     pp_hybrid.query("qdsmc_energy_budget", m_energy_budget);
 
+    // Cliff-limited entropy deposit (option-b K-diffusion heat-pump fix).
+    pp_hybrid.query("qdsmc_cliff_limited_deposit", m_cliff_limited_deposit);
+    utils::parser::queryWithParser(pp_hybrid, "qdsmc_cliff_deposit_r1",
+                                   m_cliff_deposit_r1);
+    utils::parser::queryWithParser(pp_hybrid, "qdsmc_cliff_deposit_r2",
+                                   m_cliff_deposit_r2);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_cliff_limited_deposit ||
+        (m_qdsmc_gradient_deposit &&
+         m_cliff_deposit_r2 > m_cliff_deposit_r1 &&
+         m_cliff_deposit_r1 >= 0.0),
+        "hybrid_pic_model.qdsmc_cliff_limited_deposit requires "
+        "qdsmc_gradient_deposit = 1 and 0 <= r1 < r2");
+
     // Electron-ion thermal equilibration (Q_ei) on T_e:
     //   Q_ei = 3 n_e k_B nu_ei (T_e - T_i),  applied per ion species weighted by
     //   n_s/n_e, cooling T_e toward T_i. nu_ei[1/s] comes from the
@@ -2206,8 +2220,20 @@ void HybridPICModel::QdsmcTransportOnce (int const lev, amrex::Real const dt_adv
 
     // Scatter the carried entropy and weight onto the grid (each call
     // zeroes its target field, then deposits, then SumBoundary), with the
-    // half-gradient correction when enabled.
-    m_qdsmc_pc->DepositK(lev, Karr_out, m_qdsmc_gradient_deposit);
+    // half-gradient correction when enabled. The cliff-limited option
+    // rescales each destination node's ENTROPY share toward the isothermal
+    // spill across unresolved density jumps (the K-diffusion heat-pump fix;
+    // the weight deposit is untouched -- N is a marker-count estimate).
+    QdsmcParticleContainer::CliffDeposit cliff{};
+    if (m_cliff_limited_deposit) {
+        cliff.enabled = true;
+        cliff.rho_new = warpx.m_fields.get(FieldType::rho_fp, lev);
+        cliff.n_floor = m_n_floor;
+        cliff.gamma   = m_gamma;
+        cliff.r1      = m_cliff_deposit_r1;
+        cliff.r2      = m_cliff_deposit_r2;
+    }
+    m_qdsmc_pc->DepositK(lev, Karr_out, m_qdsmc_gradient_deposit, cliff);
     m_qdsmc_pc->DepositField(lev, weights_out, m_qdsmc_gradient_deposit);
 
     // Insulating EB wall (PR #7138, branch-adapted): SPILL-ONLY fold --

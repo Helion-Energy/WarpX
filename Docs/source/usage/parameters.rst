@@ -3915,6 +3915,23 @@ Maxwell solver: kinetic-fluid hybrid
     boundary above ``n_floor`` to watch the low-density ignition band; only the (production) split
     fluxform conduction path is instrumented.
 
+.. pp:param:: hybrid_pic_model.qdsmc_cliff_limited_deposit
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Cliff-aware electron-entropy deposit. The QDSMC transport carries the entropy function
+    :math:`K = T_e n^{1-\gamma}`; entropy numerically spilled onto a node whose density differs from the
+    marker's home density re-materializes through the polytropic recovery with its temperature scaled by
+    :math:`(n_\mathrm{dest}/n_\mathrm{home})^{\gamma-1}` — correct for resolved smooth compression, but an
+    energy-manufacturing heat pump at unresolved density cliffs. When enabled, each destination node's
+    entropy share is blended from the isentropic value toward the temperature-invariant (isothermal)
+    value, keyed on :math:`r = |\ln(n_\mathrm{dest}/n_\mathrm{home})|`: pure isentropic below
+    :pp:param:`hybrid_pic_model.qdsmc_cliff_deposit_r1` (default 0.35), fully isothermal above
+    :pp:param:`hybrid_pic_model.qdsmc_cliff_deposit_r2` (default 1.4). Home-node deposits are bit-exact
+    whenever the cell's one-step density change stays below :math:`e^{r_1}`. Requires
+    ``qdsmc_gradient_deposit = 1``.
+
 .. pp:param:: hybrid_pic_model.qdsmc_energy_budget
     :type: ``bool``
     :default: ``false``
