@@ -5321,6 +5321,58 @@ std::array<amrex::Real, 2> HybridPICModel::QDSMCClassEnergy (int const lev) cons
 }
 
 
+std::array<amrex::Real, 2> HybridPICModel::QDSMCCompressionEnergy (
+    int const lev, amrex::MultiFab const & te_pre) const
+{
+    // Exact polytropic compression term of the transport-stage dU:
+    //   du = 3/2 kB n^{n+1} Te_pre [ (ne_{n+1}/ne_n)^{gamma-1} - 1 ],
+    // with both densities floored exactly as the K <-> Te conversions floor
+    // them (QDSMCInitializeKe / QDSMCUpdateTe), so a marker that stays home
+    // reproduces the recovery's Te change bit-consistently. Classes and
+    // weights match QDSMCClassEnergy (fixed rho_fp).
+    auto & warpx = WarpX::GetInstance();
+    amrex::MultiFab const & rho_new =
+        *warpx.m_fields.get(FieldType::rho_fp, lev);
+    amrex::MultiFab const & rho_old =
+        *warpx.m_fields.get(FieldType::hybrid_rho_fp_temp, lev);
+
+    amrex::Real const n_flr = m_n_floor;
+    amrex::Real const n_bnd = amrex::max(m_contam_n_boundary, m_n_floor);
+    amrex::Real const gm1   = m_gamma - 1.0_rt;
+
+    amrex::MultiFab u_cls(te_pre.boxArray(), te_pre.DistributionMap(), 2, 0);
+    u_cls.setVal(0.0_rt);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(u_cls, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        amrex::Box const box = mfi.tilebox();
+        amrex::Array4<amrex::Real>       const & u_arr  = u_cls.array(mfi);
+        amrex::Array4<amrex::Real const> const & te_arr = te_pre.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & rn_arr = rho_new.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & ro_arr = rho_old.const_array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            amrex::Real const ne = rn_arr(i,j,k) / PhysConst::q_e;
+            if (ne <= n_flr) { return; }
+            amrex::Real const ne_new_f = amrex::max(ne, n_flr);
+            amrex::Real const ne_old_f =
+                amrex::max(ro_arr(i,j,k) / PhysConst::q_e, n_flr);
+            amrex::Real const du = 1.5_rt * ne * PhysConst::kb * te_arr(i,j,k)
+                * (std::pow(ne_new_f / ne_old_f, gm1) - 1.0_rt);
+            u_arr(i,j,k, (ne > n_bnd) ? 0 : 1) = du;
+        });
+    }
+    amrex::Periodicity const & period = warpx.Geom(lev).periodicity();
+    auto const dxc = warpx.Geom(lev).CellSizeArray();
+    amrex::Real dV = 1.0_rt;
+    for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) { dV *= dxc[dd]; }
+    return {u_cls.sum_unique(0, false, period) * dV,
+            u_cls.sum_unique(1, false, period) * dV};
+}
+
+
 void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
 {
     ABLASTR_PROFILE("HybridPICModel::AdvanceElectronEnergyQDSMC_PC()");
@@ -5365,8 +5417,22 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
         if (ebud) { ub1 = QDSMCClassEnergy(lev); }
         ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true);
         if (ebud) { ub2 = QDSMCClassEnergy(lev); }
+        // Pre-transport Te snapshot for the compression split of the
+        // transport-stage dU (instrument only).
+        amrex::MultiFab te_pre;
+        if (ebud) {
+            amrex::MultiFab const & Te_now = *warpx.m_fields.get(
+                FieldType::hybrid_electron_temperature_fp, lev);
+            te_pre.define(Te_now.boxArray(), Te_now.DistributionMap(), 1, 0);
+            amrex::MultiFab::Copy(te_pre, Te_now, 0, 0, 1, 0);
+        }
         QdsmcTransportOnce(lev, dt, /*midpoint=*/true);
-        if (ebud) { ub3 = QDSMCClassEnergy(lev); }
+        if (ebud) {
+            ub3 = QDSMCClassEnergy(lev);
+            auto const comp = QDSMCCompressionEnergy(lev, te_pre);
+            m_ebud_comp_bulk += comp[0];
+            m_ebud_comp_band += comp[1];
+        }
         ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true);
         if (ebud) { ub4 = QDSMCClassEnergy(lev); }
         QdsmcConductionOnce(lev, 0.5_rt * dt, /*use_rho_new=*/true);
@@ -5383,13 +5449,15 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
                 amrex::Print() << "[qdsmc] step " << warpx.getistep(0)
                     << " energy_budget_J:"
                     << " adv_bulk="  << m_ebud_adv_bulk
+                    << " comp_bulk=" << m_ebud_comp_bulk
                     << " cond_bulk=" << m_ebud_cond_bulk
                     << " src_bulk="  << m_ebud_src_bulk
                     << " adv_band="  << m_ebud_adv_band
+                    << " comp_band=" << m_ebud_comp_band
                     << " cond_band=" << m_ebud_cond_band
                     << " src_band="  << m_ebud_src_band
                     << " U_bulk=" << ub5[0] << " U_band=" << ub5[1]
-                    << " (dU cumulative)\n";
+                    << " (dU cumulative; adv includes comp)\n";
             }
         }
 

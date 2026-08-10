@@ -710,10 +710,23 @@ public:
     mutable amrex::Real m_ebud_cond_bulk = 0.0, m_ebud_cond_band = 0.0;
     mutable amrex::Real m_ebud_src_bulk  = 0.0, m_ebud_src_band  = 0.0;
     mutable amrex::Real m_ebud_adv_bulk  = 0.0, m_ebud_adv_band  = 0.0;
+    /** Compression part of the transport-stage dU: the exact polytropic
+     * recovery term 3/2 kB n^{n+1} Te_pre [(n^{n+1}/n^n)^{gamma-1} - 1]
+     * (both densities floored as in the K <-> Te conversions), summed per
+     * class. The remainder adv - comp is the pure advection/remap residual
+     * -- the physical-vs-numerical discriminator for the cascade (marker
+     * CFL measured 0.017 cells/step at ignition, so motion is small). */
+    mutable amrex::Real m_ebud_comp_bulk = 0.0, m_ebud_comp_band = 0.0;
 
     /** Class-summed thermal energy {bulk, band} [J] for the energy budget
      * (nodal sum_unique; classes per the m_energy_budget doc). */
     std::array<amrex::Real, 2> QDSMCClassEnergy (int lev) const;
+
+    /** Class-summed polytropic compression energy {bulk, band} [J] of the
+     * current step's transport stage, from the pre-transport Te and the
+     * rho^n -> rho^{n+1} density change (see m_ebud_comp_* doc). */
+    std::array<amrex::Real, 2> QDSMCCompressionEnergy (
+        int lev, amrex::MultiFab const & te_pre) const;
 
     /** Electron-ion thermal equilibration (Q_ei) on T_e:
      *   Q_ei = 3 n_e k_B nu_ei (T_e - T_i),   dU_e/dt += -Q_ei,
