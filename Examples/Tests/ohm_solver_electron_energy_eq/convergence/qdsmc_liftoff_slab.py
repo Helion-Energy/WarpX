@@ -240,6 +240,20 @@ parser.add_argument(
     "across unresolved density jumps -- the K-diffusion heat-pump fix",
 )
 parser.add_argument(
+    "--cliff-r1",
+    type=float,
+    default=-1.0,
+    help="cliff-deposit blend start |ln(n_dest/n_home)| "
+    "(hybrid_pic_model.qdsmc_cliff_deposit_r1); <0 = C++ default 0.35",
+)
+parser.add_argument(
+    "--cliff-r2",
+    type=float,
+    default=-1.0,
+    help="cliff-deposit fully-isothermal bound "
+    "(hybrid_pic_model.qdsmc_cliff_deposit_r2); <0 = C++ default 1.4",
+)
+parser.add_argument(
     "--energy-budget",
     type=int,
     choices=[0, 1],
@@ -549,6 +563,10 @@ if args.grad_deposit == 0:
     pywarpx.hybridpicmodel.qdsmc_gradient_deposit = 0
 if args.cliff_deposit:
     pywarpx.hybridpicmodel.qdsmc_cliff_limited_deposit = 1
+    if args.cliff_r1 >= 0.0:
+        pywarpx.hybridpicmodel.qdsmc_cliff_deposit_r1 = args.cliff_r1
+    if args.cliff_r2 > 0.0:
+        pywarpx.hybridpicmodel.qdsmc_cliff_deposit_r2 = args.cliff_r2
 
 simulation.initialize_warpx()
 
