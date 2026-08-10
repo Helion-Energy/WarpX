@@ -2662,19 +2662,32 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
         // them wherever fields are pushed, not only at the finest level.
         if (WarpX::electromagnetic_solver_id != ElectromagneticSolverAlgo::PSATD) {
 
+            // Initialize the update flags to 1 ("update this point"):
+            // MarkUpdateCellsStairCase/MarkUpdate*CellsECT write the valid
+            // region and FillBoundary the same-level ghosts, but ghost
+            // entries not covered by same-level valid data (the coarse-fine
+            // ghost region of refined levels, and ghosts beyond a
+            // non-periodic domain boundary) are never marked. Consumers that
+            // loop with a guard ring (e.g. CalculateCurrentAmpere and the
+            // Ohm's-law E solve, tilebox grown by 1) would otherwise gate on
+            // uninitialized memory, giving rank-dependent skip-vs-compute
+            // decisions -- measured as a per-stage div(B) injection into the
+            // outermost valid fine-cell layer at a coarse-fine patch
+            // boundary under MPI (see
+            // Examples/Tests/ohm_solver_mr/divb_seam_diagnosis_notes.md).
             AllocInitMultiFab(m_eb_update_E[lev][0], amrex::convert(ba, Ex_nodal_flag), dm, ncomps,
-                              guard_cells.ng_FieldSolver, lev, "m_eb_update_E[x]");
+                              guard_cells.ng_FieldSolver, lev, "m_eb_update_E[x]", 1);
             AllocInitMultiFab(m_eb_update_E[lev][1], amrex::convert(ba, Ey_nodal_flag), dm, ncomps,
-                              guard_cells.ng_FieldSolver, lev, "m_eb_update_E[y]");
+                              guard_cells.ng_FieldSolver, lev, "m_eb_update_E[y]", 1);
             AllocInitMultiFab(m_eb_update_E[lev][2], amrex::convert(ba, Ez_nodal_flag), dm, ncomps,
-                              guard_cells.ng_FieldSolver, lev, "m_eb_update_E[z]");
+                              guard_cells.ng_FieldSolver, lev, "m_eb_update_E[z]", 1);
 
             AllocInitMultiFab(m_eb_update_B[lev][0], amrex::convert(ba, Bx_nodal_flag), dm, ncomps,
-                              guard_cells.ng_FieldSolver, lev, "m_eb_update_B[x]");
+                              guard_cells.ng_FieldSolver, lev, "m_eb_update_B[x]", 1);
             AllocInitMultiFab(m_eb_update_B[lev][1], amrex::convert(ba, By_nodal_flag), dm, ncomps,
-                              guard_cells.ng_FieldSolver, lev, "m_eb_update_B[y]");
+                              guard_cells.ng_FieldSolver, lev, "m_eb_update_B[y]", 1);
             AllocInitMultiFab(m_eb_update_B[lev][2], amrex::convert(ba, Bz_nodal_flag), dm, ncomps,
-                              guard_cells.ng_FieldSolver, lev, "m_eb_update_B[z]");
+                              guard_cells.ng_FieldSolver, lev, "m_eb_update_B[z]", 1);
         }
 
         // The ECT geometry info is needed only at the finest level
