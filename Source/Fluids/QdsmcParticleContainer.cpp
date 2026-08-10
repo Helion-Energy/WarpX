@@ -988,7 +988,15 @@ QdsmcParticleContainer::DepositScalar (int lev, int const attr,
                     if (ar <= cl_r1) { return 1.0_rt; }
                     amrex::Real const eta =
                         amrex::min((ar - cl_r1) * cl_inv_dr, 1.0_rt);
-                    return (1.0_rt - eta) + eta * std::exp(-cl_gm1 * lr);
+                    // One-sided: cap the isothermal factor at 1, so the
+                    // correction only ever REDUCES the deposited entropy
+                    // (kills the up-cliff Te amplification) and never
+                    // deposits more than the marker carried (the uncapped
+                    // down-cliff factor > 1 measured as a 10x band ENERGY
+                    // INJECTOR on the SPN4 arm -- isothermal down-spill
+                    // manufactures Sum(K N)).
+                    return (1.0_rt - eta)
+                        + eta * amrex::min(1.0_rt, std::exp(-cl_gm1 * lr));
                 };
 #if defined(WARPX_DIM_3D)
                 for (int kk = 0; kk < 2; ++kk) {
