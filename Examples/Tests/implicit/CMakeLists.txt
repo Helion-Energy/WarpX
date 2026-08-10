@@ -783,6 +783,16 @@ add_warpx_test(
 )
 
 add_warpx_test(
+    test_rz_theta_implicit_mhd_external_wall_ghost  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_external_wall_ghost  # inputs
+    "analysis_mhd_external_wall_ghost.py diags/diag000000 diags/diag000002"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
     test_2d_theta_implicit_jfnk_vandb  # name
     2  # dims
     2  # nprocs

@@ -1716,6 +1716,41 @@ void ThetaImplicitMHD::FillCellCenteredElectromagneticFields ()
     magnetic_field_cc.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
     ApplyNeumannZDomainGhosts(total_current_cc);
     ApplyNeumannZDomainGhosts(magnetic_field_cc);
+#if defined(WARPX_DIM_RZ)
+    {
+        // The r_max domain ghosts of the cell-centered total current are
+        // reachable by no fill above: FillBoundaryAndSync skips
+        // non-periodic domain edges and the Neumann pass only covers z,
+        // so they would keep their allocation value (zero) forever.
+        // Nothing reads them while the MHD Ohm's law runs Hall-off, but
+        // the Hall / electron-inertia extensions interpolate J_cc through
+        // the wall ring, and an alloc-zero ghost there would inject a
+        // spurious full-J wall jump -- the exact twin of the external-B
+        // ghost gap fixed in ExternalVectorPotential. Fill them with the
+        // staggering-aware even (zero-normal-gradient) clamp of the
+        // outermost valid ring; running after the axial pass makes the
+        // corner ghosts consistent too. The axis side is left to the
+        // kernels' own parity handling.
+        const amrex::Box current_domain = amrex::convert(
+            m_WarpX->Geom(0).Domain(), total_current_cc.ixType().toIntVect());
+        const int radial_domain_hi = current_domain.bigEnd(0);
+        const int ncomp = total_current_cc.nComp();
+        for (amrex::MFIter mfi(total_current_cc); mfi.isValid(); ++mfi) {
+            const amrex::Box grown =
+                amrex::grow(mfi.validbox(), total_current_cc.nGrowVect());
+            if (grown.bigEnd(0) <= radial_domain_hi) {
+                continue;
+            }
+            const auto arr = total_current_cc.array(mfi);
+            amrex::ParallelFor(grown, ncomp,
+                               [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) {
+                if (i > radial_domain_hi) {
+                    arr(i, j, k, n) = arr(radial_domain_hi, j, k, n);
+                }
+            });
+        }
+    }
+#endif
     if (m_use_hlld) {
         // The hlld face kernels read cell-centered B in the radial domain
         // ghosts (the wall face's outer donor cell, and the transverse

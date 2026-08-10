@@ -28,31 +28,38 @@ void FiniteDifferenceSolver::ComputeCurlA (
     ablastr::fields::VectorField& Bfield,
     ablastr::fields::VectorField const& Afield,
     std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_B,
-    int lev )
+    int lev, const amrex::IntVect& ngrow )
 {
+    // Domain-ghost growth is only supported away from embedded boundaries:
+    // the eb_update flags are not guaranteed to carry matching ghost data.
+    const amrex::IntVect ng = EB::enabled() ? amrex::IntVect(0) : ngrow;
+
     // Select algorithm (The choice of algorithm is a runtime option,
     // but we compile code for each algorithm, using templates)
     if (m_fdtd_algo == ElectromagneticSolverAlgo::Yee ||
         m_fdtd_algo == ElectromagneticSolverAlgo::HybridPIC) {
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
         ComputeCurlACylindrical <CylindricalYeeAlgorithm> (
-            Bfield, Afield, eb_update_B, lev
+            Bfield, Afield, eb_update_B, lev, ng
         );
 
 #elif defined(WARPX_DIM_RSPHERE)
         ComputeCurlASpherical <SphericalYeeAlgorithm> (
-            Bfield, Afield, eb_update_B, lev
+            Bfield, Afield, eb_update_B, lev, ng
         );
 
 #else
     if (WarpX::grid_type == GridType::Staggered)
     {
         ComputeCurlACartesian <CartesianYeeAlgorithm> (
-            Bfield, Afield, eb_update_B, lev
+            Bfield, Afield, eb_update_B, lev, ng
         );
     } else {
+        // The nodal algorithm uses centered stencils (reads one cell in
+        // both directions), so the outermost requested ghost ring would
+        // read past the ghost data of A: no domain-ghost growth here.
         ComputeCurlACartesian <CartesianNodalAlgorithm> (
-            Bfield, Afield, eb_update_B, lev
+            Bfield, Afield, eb_update_B, lev, amrex::IntVect(0)
         );
     }
 
@@ -79,7 +86,8 @@ void FiniteDifferenceSolver::ComputeCurlACylindrical (
     ablastr::fields::VectorField& Bfield,
     ablastr::fields::VectorField const& Afield,
     std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_B,
-    int lev
+    int lev,
+    const amrex::IntVect& ngrow
 )
 {
     // for the profiler
@@ -89,6 +97,26 @@ void FiniteDifferenceSolver::ComputeCurlACylindrical (
     Bfield[0]->setVal(0);
     Bfield[1]->setVal(0);
     Bfield[2]->setVal(0);
+
+    // Evaluation region: the valid cells plus the requested growth into the
+    // domain ghosts. A carries trusted ghost values (the analytic parser
+    // fill / file interpolation covers the full grown box) and the Yee curl
+    // reads at most one cell upward per direction while nodal-in-r/z A
+    // extends one index past cell-centered B, so every grown ring is exact.
+    // Non-periodic domain ghosts (e.g. the RZ r_max ring the theta-implicit
+    // MHD wall stencils read) are thereby computed instead of staying at
+    // the allocation value; grid-interior ghosts inside the growth are
+    // recomputed to the very values FillBoundary would copy anyway. Growth
+    // below the axis is suppressed: the mirrored A ghosts there carry no
+    // azimuthal parity information and r < 0 breaks the radial metric.
+    amrex::Box grow_region = WarpX::GetInstance().Geom(lev).Domain();
+    grow_region.grow(ngrow);
+    if (m_rmin == 0._rt) {
+        grow_region.setSmall(0, WarpX::GetInstance().Geom(lev).Domain().smallEnd(0));
+    }
+    const amrex::Box allowed_r = amrex::convert(grow_region, Bfield[0]->ixType());
+    const amrex::Box allowed_t = amrex::convert(grow_region, Bfield[1]->ixType());
+    const amrex::Box allowed_z = amrex::convert(grow_region, Bfield[2]->ixType());
 
     // Loop through the grids, and over the tiles within each grid
 #ifdef AMREX_USE_OMP
@@ -129,10 +157,12 @@ void FiniteDifferenceSolver::ComputeCurlACylindrical (
         int const nmodes = m_nmodes;
         Real const rmin = m_rmin;
 
-        // Extract tileboxes for which to loop over
-        Box const& tbr  = mfi.tilebox(Bfield[0]->ixType().toIntVect());
-        Box const& tbt  = mfi.tilebox(Bfield[1]->ixType().toIntVect());
-        Box const& tbz  = mfi.tilebox(Bfield[2]->ixType().toIntVect());
+        // Extract tileboxes for which to loop over (grown into the domain
+        // ghosts where requested; tiles only grow at valid-box edges, so
+        // no cell is visited twice within a FAB)
+        Box const tbr = mfi.tilebox(Bfield[0]->ixType().toIntVect(), ngrow) & allowed_r;
+        Box const tbt = mfi.tilebox(Bfield[1]->ixType().toIntVect(), ngrow) & allowed_t;
+        Box const tbz = mfi.tilebox(Bfield[2]->ixType().toIntVect(), ngrow) & allowed_z;
 
         // Calculate the B-field from the A-field
         amrex::ParallelFor(tbr, tbt, tbz,
@@ -223,7 +253,8 @@ void FiniteDifferenceSolver::ComputeCurlASpherical (
     ablastr::fields::VectorField& Bfield,
     ablastr::fields::VectorField const& Afield,
     std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_B,
-    int lev
+    int lev,
+    const amrex::IntVect& ngrow
 )
 {
     // for the profiler
@@ -233,6 +264,17 @@ void FiniteDifferenceSolver::ComputeCurlASpherical (
     Bfield[0]->setVal(0);
     Bfield[1]->setVal(0);
     Bfield[2]->setVal(0);
+
+    // Evaluation region grown into the domain ghosts (see the cylindrical
+    // variant for the rationale); no growth below the axis.
+    amrex::Box grow_region = WarpX::GetInstance().Geom(lev).Domain();
+    grow_region.grow(ngrow);
+    if (m_rmin == 0._rt) {
+        grow_region.setSmall(0, WarpX::GetInstance().Geom(lev).Domain().smallEnd(0));
+    }
+    const amrex::Box allowed_r = amrex::convert(grow_region, Bfield[0]->ixType());
+    const amrex::Box allowed_t = amrex::convert(grow_region, Bfield[1]->ixType());
+    const amrex::Box allowed_p = amrex::convert(grow_region, Bfield[2]->ixType());
 
     // Loop through the grids, and over the tiles within each grid
 #ifdef AMREX_USE_OMP
@@ -269,10 +311,11 @@ void FiniteDifferenceSolver::ComputeCurlASpherical (
         Real const dr = m_dr;
         Real const rmin = m_rmin;
 
-        // Extract tileboxes for which to loop over
-        Box const& tbr = mfi.tilebox(Bfield[0]->ixType().toIntVect());
-        Box const& tbt = mfi.tilebox(Bfield[1]->ixType().toIntVect());
-        Box const& tbp = mfi.tilebox(Bfield[2]->ixType().toIntVect());
+        // Extract tileboxes for which to loop over (grown into the domain
+        // ghosts where requested)
+        Box const tbr = mfi.tilebox(Bfield[0]->ixType().toIntVect(), ngrow) & allowed_r;
+        Box const tbt = mfi.tilebox(Bfield[1]->ixType().toIntVect(), ngrow) & allowed_t;
+        Box const tbp = mfi.tilebox(Bfield[2]->ixType().toIntVect(), ngrow) & allowed_p;
 
         // Calculate the B-field from the A-field
         amrex::ParallelFor(tbr, tbt, tbp,
@@ -319,7 +362,8 @@ void FiniteDifferenceSolver::ComputeCurlACartesian (
     ablastr::fields::VectorField & Bfield,
     ablastr::fields::VectorField const& Afield,
     std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_B,
-    int lev
+    int lev,
+    const amrex::IntVect& ngrow
 )
 {
     using ablastr::fields::Direction;
@@ -331,6 +375,14 @@ void FiniteDifferenceSolver::ComputeCurlACartesian (
     Bfield[0]->setVal(0);
     Bfield[1]->setVal(0);
     Bfield[2]->setVal(0);
+
+    // Evaluation region grown into the domain ghosts (see the cylindrical
+    // variant for the rationale).
+    amrex::Box grow_region = WarpX::GetInstance().Geom(lev).Domain();
+    grow_region.grow(ngrow);
+    const amrex::Box allowed_x = amrex::convert(grow_region, Bfield[0]->ixType());
+    const amrex::Box allowed_y = amrex::convert(grow_region, Bfield[1]->ixType());
+    const amrex::Box allowed_z = amrex::convert(grow_region, Bfield[2]->ixType());
 
     // Loop through the grids, and over the tiles within each grid
 #ifdef AMREX_USE_OMP
@@ -367,10 +419,11 @@ void FiniteDifferenceSolver::ComputeCurlACartesian (
         Real const * const AMREX_RESTRICT coefs_z = m_stencil_coefs_z.dataPtr();
         auto const n_coefs_z = static_cast<int>(m_stencil_coefs_z.size());
 
-        // Extract tileboxes for which to loop
-        Box const& tbx  = mfi.tilebox(Bfield[0]->ixType().toIntVect());
-        Box const& tby  = mfi.tilebox(Bfield[1]->ixType().toIntVect());
-        Box const& tbz  = mfi.tilebox(Bfield[2]->ixType().toIntVect());
+        // Extract tileboxes for which to loop (grown into the domain
+        // ghosts where requested)
+        Box const tbx = mfi.tilebox(Bfield[0]->ixType().toIntVect(), ngrow) & allowed_x;
+        Box const tby = mfi.tilebox(Bfield[1]->ixType().toIntVect(), ngrow) & allowed_y;
+        Box const tbz = mfi.tilebox(Bfield[2]->ixType().toIntVect(), ngrow) & allowed_z;
 
         // Calculate the curl of A
         amrex::ParallelFor(tbx, tby, tbz,
