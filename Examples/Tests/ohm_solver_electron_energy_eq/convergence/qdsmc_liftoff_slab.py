@@ -220,6 +220,17 @@ parser.add_argument(
     "--n-floor-frac to watch the eta_vac ignition band; <0 = off",
 )
 parser.add_argument(
+    "--grad-deposit",
+    type=int,
+    choices=[0, 1],
+    default=1,
+    help="half-gradient-corrected (antidiffusive B1) QDSMC deposit "
+    "(hybrid_pic_model.qdsmc_gradient_deposit; the branch default). 0 = "
+    "plain hat deposit -- the discriminating control for the up-cliff "
+    "remap-residual energy injection (Q0d budget: resid_band +5.6 J vs "
+    "comp_band -0.13 J at ignition)",
+)
+parser.add_argument(
     "--energy-budget",
     type=int,
     choices=[0, 1],
@@ -525,6 +536,8 @@ if args.contam_boundary_frac > 0.0:
     )
 if args.energy_budget:
     pywarpx.hybridpicmodel.qdsmc_energy_budget = 1
+if args.grad_deposit == 0:
+    pywarpx.hybridpicmodel.qdsmc_gradient_deposit = 0
 
 simulation.initialize_warpx()
 
