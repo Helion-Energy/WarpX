@@ -231,6 +231,15 @@ parser.add_argument(
     "comp_band -0.13 J at ignition)",
 )
 parser.add_argument(
+    "--cliff-deposit",
+    type=int,
+    choices=[0, 1],
+    default=0,
+    help="cliff-limited entropy deposit "
+    "(hybrid_pic_model.qdsmc_cliff_limited_deposit): isothermal spill "
+    "across unresolved density jumps -- the K-diffusion heat-pump fix",
+)
+parser.add_argument(
     "--energy-budget",
     type=int,
     choices=[0, 1],
@@ -538,6 +547,8 @@ if args.energy_budget:
     pywarpx.hybridpicmodel.qdsmc_energy_budget = 1
 if args.grad_deposit == 0:
     pywarpx.hybridpicmodel.qdsmc_gradient_deposit = 0
+if args.cliff_deposit:
+    pywarpx.hybridpicmodel.qdsmc_cliff_limited_deposit = 1
 
 simulation.initialize_warpx()
 

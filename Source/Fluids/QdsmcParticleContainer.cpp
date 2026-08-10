@@ -862,12 +862,33 @@ void
 QdsmcParticleContainer::DepositScalar (int lev, int const attr,
                                        int const slope_attr0,
                                        amrex::Real const scale,
-                                       amrex::MultiFab & field)
+                                       amrex::MultiFab & field,
+                                       CliffDeposit const & cliff)
 {
     auto & warpx = WarpX::GetInstance();
     amrex::Geometry const & geom = warpx.Geom(lev);
     amrex::Periodicity const & period = geom.periodicity();
     amrex::XDim3 const dinv = WarpX::InvCellSize(lev);
+
+    // Cliff-aware blend (see the CliffDeposit doc): only the
+    // gradient-corrected path is instrumented.
+    bool const cliff_on = cliff.enabled && (slope_attr0 >= 0);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !(cliff.enabled && slope_attr0 < 0),
+        "QdsmcParticleContainer::DepositScalar: the cliff-limited deposit "
+        "is implemented for the gradient-corrected path only "
+        "(qdsmc_gradient_deposit = 1)");
+    amrex::Real const cl_nfloor = cliff.n_floor;
+    amrex::Real const cl_gm1    = cliff.gamma - 1.0_rt;
+    amrex::Real const cl_r1     = cliff.r1;
+    amrex::Real const cl_inv_dr =
+        1.0_rt / amrex::max(cliff.r2 - cliff.r1, 1.0e-12_rt);
+    amrex::Real const inv_qe    = 1.0_rt / PhysConst::q_e;
+    amrex::Real cl_inv_vol = 1.0_rt;
+    {
+        auto const * dxs = geom.CellSize();
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) { cl_inv_vol /= dxs[d]; }
+    }
 
     field.setVal(0);
 
@@ -893,6 +914,15 @@ QdsmcParticleContainer::DepositScalar (int lev, int const attr,
             amrex::GpuArray<const amrex::ParticleReal*, AMREX_SPACEDIM> gp;
             for (int d = 0; d < AMREX_SPACEDIM; ++d) {
                 gp[d] = attribs[slope_attr0 + d].dataPtr();
+            }
+
+            // Cliff-aware blend inputs: destination density and the
+            // marker's home (seed-time) density n = N / V_cell.
+            amrex::Array4<amrex::Real const> cl_rho{};
+            const amrex::ParticleReal* AMREX_RESTRICT cl_np = nullptr;
+            if (cliff_on) {
+                cl_rho = cliff.rho_new->const_array(pti);
+                cl_np  = attribs[QdsmcPIdx::np_real].dataPtr();
             }
 
             // Pushed positions from the tracked slots, mapped to the
@@ -937,6 +967,29 @@ QdsmcParticleContainer::DepositScalar (int lev, int const attr,
                     xp, yp, zp, plo, dxi, i, j, k, W);
 
                 amrex::Real const a = ap[ip];
+
+                // Cliff-aware per-destination blend (CliffDeposit doc):
+                // factor 1 exactly (no transcendental evaluated) whenever
+                // |ln(n_dest/n_home)| <= r1, so the disengaged path is
+                // bit-identical; beyond r1 blend toward the isothermal
+                // spill factor (n_home/n_dest)^(gamma-1) = e^{-(gamma-1) lr}.
+                amrex::Real cl_nh = 1.0_rt;
+                if (cliff_on) {
+                    cl_nh = amrex::max(cl_np[ip] * cl_inv_vol, cl_nfloor);
+                }
+                auto const cl_factor = [&] (int const ci, int const cj,
+                                            int const ck)
+                {
+                    if (!cliff_on) { return 1.0_rt; }
+                    amrex::Real const nd = amrex::max(
+                        cl_rho(ci, cj, ck) * inv_qe, cl_nfloor);
+                    amrex::Real const lr = std::log(nd / cl_nh);
+                    amrex::Real const ar = amrex::Math::abs(lr);
+                    if (ar <= cl_r1) { return 1.0_rt; }
+                    amrex::Real const eta =
+                        amrex::min((ar - cl_r1) * cl_inv_dr, 1.0_rt);
+                    return (1.0_rt - eta) + eta * std::exp(-cl_gm1 * lr);
+                };
 #if defined(WARPX_DIM_3D)
                 for (int kk = 0; kk < 2; ++kk) {
                 for (int jj = 0; jj < 2; ++jj) {
@@ -947,7 +1000,8 @@ QdsmcParticleContainer::DepositScalar (int lev, int const attr,
                         gp[1][ip] * (jj - W[1][1]) * dx[1] +
                         gp[2][ip] * (kk - W[2][1]) * dx[2]);
                     amrex::Gpu::Atomic::AddNoRet(
-                        &out(i + ii, j + jj, k + kk), scale * w * val);
+                        &out(i + ii, j + jj, k + kk),
+                        scale * w * val * cl_factor(i + ii, j + jj, k + kk));
                 }}}
 #elif (AMREX_SPACEDIM == 2)
                 for (int jj = 0; jj < 2; ++jj) {
@@ -957,7 +1011,8 @@ QdsmcParticleContainer::DepositScalar (int lev, int const attr,
                         gp[0][ip] * (ii - W[0][1]) * dx[0] +
                         gp[1][ip] * (jj - W[1][1]) * dx[1]);
                     amrex::Gpu::Atomic::AddNoRet(
-                        &out(i + ii, j + jj, k), scale * w * val);
+                        &out(i + ii, j + jj, k),
+                        scale * w * val * cl_factor(i + ii, j + jj, k));
                 }}
 #else
                 for (int ii = 0; ii < 2; ++ii) {
@@ -965,7 +1020,8 @@ QdsmcParticleContainer::DepositScalar (int lev, int const attr,
                     amrex::Real const val = a + amrex::Real(0.5) *
                         gp[0][ip] * (ii - W[0][1]) * dx[0];
                     amrex::Gpu::Atomic::AddNoRet(
-                        &out(i + ii, j, k), scale * w * val);
+                        &out(i + ii, j, k),
+                        scale * w * val * cl_factor(i + ii, j, k));
                 }
 #endif
             });
@@ -1032,13 +1088,22 @@ QdsmcParticleContainer::DepositScalar (int lev, int const attr,
 
 void
 QdsmcParticleContainer::DepositK (int lev, amrex::MultiFab & Kfield,
-                                  bool const gradient_corrected)
+                                  bool const gradient_corrected,
+                                  CliffDeposit const & cliff)
 {
     ABLASTR_PROFILE("QdsmcParticleContainer::DepositK()");
 
     DepositScalar(lev, QdsmcPIdx::entropy,
                   gradient_corrected ? int(QdsmcPIdx::entropy_g0) : -1,
-                  1.0_rt, Kfield);
+                  1.0_rt, Kfield, cliff);
+}
+
+
+void
+QdsmcParticleContainer::DepositK (int lev, amrex::MultiFab & Kfield,
+                                  bool const gradient_corrected)
+{
+    DepositK(lev, Kfield, gradient_corrected, CliffDeposit{});
 }
 
 
@@ -1057,5 +1122,5 @@ QdsmcParticleContainer::DepositField (int lev, amrex::MultiFab & Field,
     }
     DepositScalar(lev, QdsmcPIdx::np_real,
                   gradient_corrected ? int(QdsmcPIdx::np_g0) : -1,
-                  1.0_rt / cell_volume, Field);
+                  1.0_rt / cell_volume, Field, CliffDeposit{});
 }
