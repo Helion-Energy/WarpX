@@ -664,6 +664,32 @@ public:
      * ApplyQdsmcEnergySources. Input Te_abort_threshold; default < 0 -> off. */
     amrex::Real m_te_abort_threshold_eV = -1.0;
 
+    /** General Te limiter with ion shunt (the any-channel generalization of
+     * #6982's Joule-scoped redirect): open-set cells with Te above this
+     * threshold [eV] are capped to it and the excess energy density
+     * 3/2 n_e kB (Te - Tcap) is staged into the per-species redirect_E for
+     * the stochastic ion-heating operator -- per-ion energy
+     * E_s = Z_s kB (Te - Tcap), which delivers the excess exactly (the
+     * density-fraction split collapses to a Z-weighted per-ion energy).
+     * Unlike the Joule redirect, this catches energy from EVERY channel
+     * (transport/recovery, conduction, reconnection exhaust), which the
+     * 2026-08 forensics showed is where the cascade energy actually
+     * arrives. The existing protections apply downstream: the undamped
+     * guard rail (requires the relaxation channel or
+     * joule_redirect_allow_undamped), the per-particle kick cap, and the
+     * redirect density gate (below the gate the excess is dropped to the
+     * tally -- quarantined cells are never shunted). Cumulative staged
+     * energy tallied in m_te_shunt_J. Input Te_shunt_threshold;
+     * default < 0 -> off. */
+    amrex::Real m_te_shunt_eV = -1.0;
+    mutable amrex::Real m_te_shunt_J = 0.0;
+
+    /** Cap open-set Te at m_te_shunt_eV and stage the excess into
+     * redirect_E (per charged species, ordered as in QDSMCAddJouleHeating).
+     * Runs inside ApplyQdsmcEnergySources between the Joule source and the
+     * ion-heating operator. */
+    void QDSMCShuntTeExcess (int lev, amrex::MultiFab * redirect_E) const;
+
     /** Cumulative dropped-Joule-energy tallies [J] (globally reduced), one
      * per decline channel: the joule_heating_n_min gate, the redirect
      * density gate, and the per-particle kick cap. Only accumulated when the

@@ -3881,6 +3881,21 @@ Maxwell solver: kinetic-fluid hybrid
     declined source energy is accumulated in the dropped-energy tally. This restricts heating to the
     physical-resistivity region without moving the solver floor.
 
+.. pp:param:: hybrid_pic_model.Te_shunt_threshold
+    :type: ``float``
+    :default: ``-1`` (off)
+    :optional:
+
+    General electron-temperature limiter with ion shunt (the any-channel generalization of the
+    Joule-scoped :pp:param:`hybrid_pic_model.joule_redirect_Te_threshold`): open-set cells whose
+    :math:`T_e` exceeds this threshold, in eV, are capped to it after the energy-equation sources, and
+    the excess energy :math:`\tfrac{3}{2} n_e k_B (T_e - T_\mathrm{cap})` is delivered to the kinetic
+    ions as stochastic kicks (per-ion energy :math:`Z_s k_B (T_e - T_\mathrm{cap})` per species). Unlike
+    the Joule redirect, this intercepts heating from every channel (transport, conduction, reconnection).
+    The relaxation-channel guard rail, per-particle kick cap, and redirect density gate all apply; below
+    the gate the excess is dropped to the tally. Staged energy is tallied (``te_shunt`` in the dropped
+    print). Must sit below :pp:param:`hybrid_pic_model.Te_abort_threshold` when both are set.
+
 .. pp:param:: hybrid_pic_model.Te_abort_threshold
     :type: ``float``
     :default: ``-1`` (off)

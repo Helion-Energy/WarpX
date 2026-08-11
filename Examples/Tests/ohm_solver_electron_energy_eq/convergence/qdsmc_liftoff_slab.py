@@ -213,6 +213,15 @@ parser.add_argument(
     "(hybrid_pic_model.joule_redirect_kick_cap_vth_frac); <0 = off",
 )
 parser.add_argument(
+    "--te-shunt",
+    type=float,
+    default=-1.0,
+    help="general Te limiter with ion shunt [eV] "
+    "(hybrid_pic_model.Te_shunt_threshold): any-channel excess above the "
+    "cap goes to the ions as stochastic kicks (kick cap / density gate / "
+    "relaxation guard apply); <0 = off",
+)
+parser.add_argument(
     "--te-abort",
     type=float,
     default=-1.0,
@@ -566,6 +575,8 @@ if args.redirect_n_min_factor > 0.0:
     pywarpx.hybridpicmodel.joule_redirect_n_min_factor = args.redirect_n_min_factor
 if args.redirect_kick_cap > 0.0:
     pywarpx.hybridpicmodel.joule_redirect_kick_cap_vth_frac = args.redirect_kick_cap
+if args.te_shunt > 0.0:
+    pywarpx.hybridpicmodel.Te_shunt_threshold = args.te_shunt
 if args.te_abort > 0.0:
     pywarpx.hybridpicmodel.Te_abort_threshold = args.te_abort
 if args.contam_boundary_frac > 0.0:
