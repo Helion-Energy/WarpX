@@ -588,11 +588,11 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
             "the Green's-function open BC to be active (RZ, hybrid solver)");
     }
     if (m_r_open_fluid == "absorb") {
-        // The absorbing wall is realized through the wall-face HLLD
-        // Riemann problem (absorber ghost image), so it exists on the
-        // conservative-form path only, and it is only meaningful when
-        // the field boundary is actually open (a PEC wall reflects the
-        // fluid by construction).
+        // The absorbing wall is realized through the wall-face HLLD flux
+        // registers (the one-way valve on the advective channels), so it
+        // exists on the conservative-form path only, and it is only
+        // meaningful when the field boundary is actually open (a PEC
+        // wall reflects the fluid by construction).
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_r_open && m_use_hlld,
             "implicit_mhd.r_open_fluid = absorb requires the open radial "
@@ -1296,36 +1296,36 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
     const amrex::Box& domain = m_WarpX->Geom(0).Domain();
     const int domain_lo = domain.smallEnd(0);
     const int domain_hi = domain.bigEnd(0);
-    const bool r_open = m_r_open && (m_r_open_fluid == "outflow");
-    // Absorbing wall (r_open_fluid = absorb): the outer fluid ghosts hold
-    // the resting pedestal absorber image -- density and energies at
-    // their halo-pedestal values (positivity floors when the pedestal is
-    // inactive), zero momentum -- i.e. the vacuum beyond the solid wall.
-    // The wall-face Riemann problem additionally gives this image its
-    // +v_A(local) normal velocity in ComputeDirectionalFaceFluxes (see
-    // make_absorber_state), where the current-iterate wall-cell B is
-    // available, so the residual stays a pure function of the iterate.
-    // The per-step frozen pedestal makes this fill a per-solve constant.
+    // The absorbing wall (r_open_fluid = absorb) keeps the outflow ghost
+    // recipe -- the zero-gradient clamp is the impedance-MATCHED image
+    // (no thermodynamic jump at the wall face, so the wall-face fan
+    // carries wall-plasma signal speeds only) -- with ONE difference:
+    // the ghost NORMAL momentum is C-infinity rectified to its outward
+    // part (the smoothed twin of the z-outflow no-reflux clamp), so the
+    // ghost image never advances toward the domain. Plasma incident on
+    // the wall is admitted at its signal-limited rate, but a wall band
+    // retreating from the wall separates from a HELD ghost instead of
+    // dragging a refilling one back in: absorbed, not stored, and never
+    // returned. The rectifier width is the acoustic momentum scale
+    // kappa_signal * sqrt(gamma_e p_e rho) of the wall cell, so genuine
+    // outflow passes asymptotically unchanged while the map stays
+    // smooth for the JFNK probes. (A vacuum-density absorber image
+    // receding at v_A was tried and retired: its pedestal-density fan
+    // speeds, ~30x the plasma Alfven speed, poison the wall-ring
+    // corner-EMF dissipation and the contact-speed estimate the moment
+    // the drain gates open -- the deterministic scrape-off-arrival
+    // blowup of the FRC mirror benchmark; a flux-register one-way valve
+    // was tried and retired too: its rectifier is non-monotone in the
+    // flux, an anti-dissipative response band that froze the Newton
+    // line search at scrape-off arrival. Both are reproduced by
+    // test_rz_theta_implicit_mhd_absorb_scrape_off.)
+    const bool r_open = m_r_open && (m_r_open_fluid != "reflect");
     const bool r_absorb = m_r_open && (m_r_open_fluid == "absorb");
-    const amrex::Real absorber_density =
-        std::max(m_halo_pedestal_density, m_mass_density_floor);
-    const amrex::Real absorber_electron_energy =
-        std::max(m_halo_pedestal_electron_energy,
-                 m_electron_pressure_floor / (m_gamma_e - 1.0_rt));
-    const amrex::Real absorber_ion_energy =
-        (m_ion_closure == "total_energy")
-            ? std::max(m_halo_pedestal_ion_internal,
-                       m_ion_pressure_floor / (m_gamma_i - 1.0_rt))
-            : 0.0_rt;
-    const amrex::Real absorber_ion_parallel =
-        (m_ion_closure == "cgl")
-            ? std::max(m_halo_pedestal_ion_parallel,
-                       0.5_rt * m_ion_pressure_floor)
-            : 0.0_rt;
-    const amrex::Real absorber_ion_perp =
-        (m_ion_closure == "cgl")
-            ? std::max(m_halo_pedestal_ion_perp, m_ion_pressure_floor)
-            : 0.0_rt;
+    const amrex::Real rectifier_kappa = m_hlld_kappa_signal;
+    const amrex::Real gamma_e = m_gamma_e;
+    const amrex::Real electron_energy_floor =
+        m_electron_pressure_floor / (m_gamma_e - 1.0_rt);
+    const amrex::Real density_floor = m_mass_density_floor;
     for (amrex::MFIter mfi(density); mfi.isValid(); ++mfi) {
         const amrex::Box grown = amrex::grow(mfi.validbox(), density.nGrowVect());
         if (grown.smallEnd(0) >= domain_lo && grown.bigEnd(0) <= domain_hi) {
@@ -1349,21 +1349,10 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
                 mom(i, j, k, 1) = -mom(mirror, j, k, 1);
                 mom(i, j, k, 2) = mom(mirror, j, k, 2);
             } else if (i > domain_hi) {
-                if (r_absorb) {
-                    // absorbing wall: resting pedestal absorber image
-                    // (see the r_absorb comment above)
-                    rho(i, j, k) = absorber_density;
-                    energy(i, j, k) = absorber_electron_energy;
-                    ion_e(i, j, k) = absorber_ion_energy;
-                    ion_par(i, j, k) = absorber_ion_parallel;
-                    ion_perp(i, j, k) = absorber_ion_perp;
-                    mom(i, j, k, 0) = 0.0_rt;
-                    mom(i, j, k, 1) = 0.0_rt;
-                    mom(i, j, k, 2) = 0.0_rt;
-                    return;
-                }
                 // open boundary: clamp to the edge cell (zero-gradient
-                // outflow); PEC wall: reflect with odd normal momentum
+                // outflow; the absorbing wall rectifies the clamp's
+                // normal momentum, see the r_absorb comment above); PEC
+                // wall: reflect with odd normal momentum
                 const int mirror =
                     r_open ? domain_hi : 2 * domain_hi + 1 - i;
                 rho(i, j, k) = rho(mirror, j, k);
@@ -1371,8 +1360,22 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
                 ion_e(i, j, k) = ion_e(mirror, j, k);
                 ion_par(i, j, k) = ion_par(mirror, j, k);
                 ion_perp(i, j, k) = ion_perp(mirror, j, k);
-                mom(i, j, k, 0) =
+                amrex::Real normal_momentum =
                     r_open ? mom(mirror, j, k, 0) : -mom(mirror, j, k, 0);
+                if (r_absorb) {
+                    const amrex::Real width =
+                        rectifier_kappa *
+                        std::sqrt(gamma_e * (gamma_e - 1.0_rt) *
+                                  std::max(energy(mirror, j, k),
+                                           electron_energy_floor) *
+                                  std::max(rho(mirror, j, k),
+                                           density_floor));
+                    normal_momentum =
+                        normal_momentum * 0.5_rt *
+                        (1.0_rt + theta_implicit_mhd::smooth_sign(
+                                      normal_momentum, width));
+                }
+                mom(i, j, k, 0) = normal_momentum;
                 mom(i, j, k, 1) = mom(mirror, j, k, 1);
                 mom(i, j, k, 2) = mom(mirror, j, k, 2);
             }
@@ -2759,21 +2762,17 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const int radial_wall_face = m_WarpX->Geom(0).Domain().bigEnd(0) + 1;
     const bool reflect_wall =
         radial_faces && m_r_open && (m_r_open_fluid == "reflect");
-    // Absorbing wall (open field + absorb fluid): the RIGHT state of the
-    // r_max wall face is the moving absorber image -- the resting
-    // pedestal ghost fill of ApplyFluidDomainBoundaries given its
-    // +v_A(local) normal velocity from the CURRENT-iterate wall-cell B
-    // (see make_absorber_state) -- so the wall-face fan exports mass,
-    // momentum, and energy at up to the local Alfven rate instead of the
-    // reflect wall's exactly-zero advective flux. The donor drain gates
-    // below apply unchanged: outflow closes smoothly at the pedestal
-    // band (the wall drains toward, never through, the pedestal) and
-    // inflow from the ghost is gated to zero by the pedestal-resident
-    // donor image. The reflect path's zero-flux override does NOT apply
-    // here -- the absorber is a physical sink by design, tallied by the
+    // Absorbing wall (open field + absorb fluid): the wall-face fan sees
+    // the impedance-matched (zero-gradient clamp) ghost image with a
+    // RECTIFIED normal velocity (see ApplyFluidDomainBoundaries) -- the
+    // same wall-plasma signal speeds as the outflow boundary, but the
+    // ghost never advances toward the domain, so the face admits
+    // incident plasma at its signal-limited rate and cannot drive a
+    // refill. No flux-register surgery here: the fan and the donor
+    // gates apply unchanged (the pedestal band still cannot drain), and
+    // the reflect path's zero-flux override does NOT apply -- the
+    // absorber is a physical sink by design, tallied by the
     // absorbed-mass/energy ledger (see AccumulateAbsorbedWallLedger).
-    const bool absorb_wall =
-        radial_faces && m_r_open && (m_r_open_fluid == "absorb");
 #endif
     constexpr int flux_mass = FaceFluxComponent::mass;
     constexpr int flux_momentum = FaceFluxComponent::momentum_x;
@@ -2845,7 +2844,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     : theta_implicit_mhd::load_cell_state_hlld(
                           rho, mom, energy, ion_e, j_cc, b_cc, il, jl, kl,
                           normal, parameters);
-            auto right =
+            const auto right =
                 parameters.cgl_closure
                     ? theta_implicit_mhd::load_cell_state_hlld_cgl(
                           rho, mom, energy, ion_e, upar, uperp, j_cc, b_cc,
@@ -2853,15 +2852,6 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     : theta_implicit_mhd::load_cell_state_hlld(
                           rho, mom, energy, ion_e, j_cc, b_cc, i, j, k,
                           normal, parameters);
-#if defined(WARPX_DIM_RZ)
-            if (absorb_wall && i == radial_wall_face) {
-                // Absorbing wall (see the absorb_wall comment above):
-                // the outer state is the pedestal absorber receding into
-                // the wall at the local Alfven speed of the wall cell.
-                right = theta_implicit_mhd::make_absorber_state(
-                    left, normal, parameters);
-            }
-#endif
             amrex::Real bn_face = bn_staggered(i, j, k);
             if (add_external) {
                 bn_face += bn_external(i, j, k);

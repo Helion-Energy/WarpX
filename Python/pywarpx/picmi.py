@@ -2216,13 +2216,14 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         use the perfect-conductor image field (B_n = 0), while the
         normal wall pressure and the induction/Ohm path keep the
         open-field boundary values. "absorb" (hlld only) is a
-        solid-conductor wall that swallows incident plasma: the outer
-        state of the wall-face Riemann problem is a halo-pedestal vacuum
-        image receding into the wall at the local Alfven speed
-        (worst-case sheath admission rate), so mass/momentum/energy
-        export at up to the Alfvenic rate; the absorbed mass and energy
-        are integrated into cumulative runtime counters (see
-        absorb_ledger_interval).
+        solid-conductor wall that swallows incident plasma instead of
+        storing it: outflow's impedance-matched zero-gradient ghosts
+        with the ghost's normal momentum smoothly rectified to its
+        outward part (the radial twin of the z-outflow no-reflux
+        clamp), so plasma leaves at its incident, signal-limited rate
+        (up to the local fast/Alfven speed) and the wall never feeds
+        plasma back; the absorbed mass and energy are integrated into
+        cumulative runtime counters (see absorb_ledger_interval).
 
     absorb_ledger_interval: integer, optional
         Print interval (steps) of the absorbing-wall ledger counters

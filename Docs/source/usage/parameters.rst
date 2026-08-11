@@ -4558,20 +4558,21 @@ Jacobian probes.
     (:math:`B_n = 0` at the wall face), while the normal wall pressure
     and the induction/Ohm path keep the open-field boundary values.
     ``absorb`` (``hlld`` only) models a solid conductor that absorbs
-    incident plasma instead of storing it: the outer state of the
-    :math:`r_{\max}` wall-face Riemann problem is a halo-pedestal
-    "vacuum" image (positivity-floor state when the pedestal is
-    inactive) receding into the wall at the local Alfvén speed
-    :math:`v_A = |B_{\mathrm{wall}}| / \sqrt{\mu_0\,
-    \max(\rho_{\mathrm{wall}}, \rho_{\mathrm{ped}})}` (smooth-guarded)
-    — the worst-case rate at which a magnetized wall sheath can swallow
-    plasma — so the fan exports mass, momentum, and energy at up to the
-    Alfvénic rate while the donor drain gates still close the export
-    smoothly at the pedestal band. The reflect path's zero-flux wall
-    override does not apply. The field-side boundary is unchanged
-    (Green's-function open). Because the wall is then a physical sink,
-    the solver integrates the r-weighted wall-face mass and
-    fluid-energy fluxes of every accepted step into two cumulative
+    incident plasma instead of storing it: the fluid keeps the outflow
+    recipe's impedance-matched zero-gradient ghosts (so the wall-face
+    Riemann fan carries wall-plasma signal speeds only), except that
+    the ghost image's NORMAL momentum is :math:`C^\infty` rectified to
+    its outward part — the smoothed radial twin of the z-outflow
+    no-reflux clamp. Plasma incident on the wall is admitted at its
+    signal-limited rate (up to the local fast/Alfvén speed, the
+    worst-case sheath admission rate), while a wall band retreating
+    from the wall separates from a held ghost instead of dragging a
+    refilling one back in. The donor drain gates apply unchanged (the
+    pedestal band still cannot drain), the reflect path's zero-flux
+    wall override does not apply, and the field-side boundary is
+    unchanged (Green's-function open). Because the wall is then a
+    physical sink, the solver integrates the r-weighted wall-face mass
+    and fluid-energy fluxes of every accepted step into two cumulative
     counters (see ``absorb_ledger_interval``).
 
 .. pp:param:: implicit_mhd.absorb_ledger_interval

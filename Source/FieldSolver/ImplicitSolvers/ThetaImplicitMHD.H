@@ -539,11 +539,13 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // the field is free-space -- removes the wall-cell drainage channel
     // during violent boundary relaxations; the wall face is then a true
     // zero-flux wall for every advective fluid channel), or "absorb"
-    // (solid-conductor wall that swallows incident plasma: the wall-face
-    // Riemann problem sees a pedestal absorber image receding into the
-    // wall at the local Alfven speed, so mass/momentum/energy export at
-    // up to the Alfvenic worst-case rate; hlld only, tallied by the
-    // absorbed-mass/energy ledger).
+    // (solid-conductor wall that swallows incident plasma, not stores
+    // it: outflow's impedance-matched clamp ghosts with the ghost's
+    // NORMAL momentum C-infinity rectified to its outward part, the
+    // smoothed radial twin of the z-outflow no-reflux clamp -- plasma
+    // leaves at its incident, signal-limited rate and the wall never
+    // feeds plasma back; hlld only, tallied by the absorbed-mass/energy
+    // ledger).
     std::string m_r_open_fluid = "outflow";
     // Absorbing-wall ledger (r_open_fluid = absorb): cumulative mass [kg]
     // and fluid energy [J] exported through the r_max wall face
