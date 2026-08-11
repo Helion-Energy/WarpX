@@ -2527,6 +2527,7 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
     bool const any_decline_armed =
         (m_joule_heating_n_min > m_n_floor) ||
         (m_te_shunt_eV > 0._rt) ||
+        (m_cond_eb_bc == 1) ||
         ((m_joule_redirect_to_ions || m_te_shunt_eV > 0._rt) &&
          (m_joule_redirect_n_min_factor > 0._rt ||
           m_joule_redirect_kick_cap_vth_frac > 0._rt));
@@ -2537,7 +2538,8 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
             << " redirect_gate=" << m_joule_dropped_redirect_gate_J
             << " kick_cap=" << m_joule_dropped_kick_cap_J
             << " te_shunt=" << m_te_shunt_J
-            << " (cumulative)\n";
+            << " wall_bath=" << m_cond_eb_tally
+            << " (cumulative; wall_bath > 0 = into plasma)\n";
     }
 
     // Contamination tally print (same cadence; the conduction channels are

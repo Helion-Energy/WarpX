@@ -213,6 +213,26 @@ parser.add_argument(
     "(hybrid_pic_model.joule_redirect_kick_cap_vth_frac); <0 = off",
 )
 parser.add_argument(
+    "--wall-te",
+    type=float,
+    default=-1.0,
+    help="dielectric-wall temperature Dirichlet BC for the conduction "
+    "energy equation [eV] (hybrid_pic_model.qdsmc_conduction_eb_bc = "
+    "isothermal + qdsmc_conduction_eb_Te): the wall-adjacent ring is held "
+    "at this temperature, so conduction drains into the dielectric -- a "
+    "cooling channel, exchange tallied (wall_bath in the dropped print). "
+    "<0 = adiabatic zero-wall-heat-flux (the default). Room temp = 0.025",
+)
+parser.add_argument(
+    "--wall-ring",
+    type=int,
+    default=2,
+    choices=[1, 2, 3],
+    help="isothermal wall-bath ring depth in cells "
+    "(hybrid_pic_model.qdsmc_conduction_eb_ring; depth 2 puts the "
+    "unresolved wall density ramp inside the bath)",
+)
+parser.add_argument(
     "--te-shunt",
     type=float,
     default=-1.0,
@@ -527,7 +547,16 @@ pywarpx.hybridpicmodel.qdsmc_time_advance = args.advance
 pywarpx.hybridpicmodel.qdsmc_conduction_form = "fluxform"
 pywarpx.hybridpicmodel.qdsmc_conduction_reconstruction = "ppm"
 pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = 3
-pywarpx.hybridpicmodel.qdsmc_conduction_eb_bc = "adiabatic"
+if args.wall_te > 0.0:
+    # Temperature (Dirichlet) wall: the dielectric absorbs conducted heat.
+    pywarpx.hybridpicmodel.qdsmc_conduction_eb_bc = "isothermal"
+    pywarpx.hybridpicmodel.__setattr__(
+        "qdsmc_conduction_eb_Te(x,y,z)", f"{args.wall_te:.6e}"
+    )
+    pywarpx.hybridpicmodel.qdsmc_conduction_eb_ring = args.wall_ring
+else:
+    # Zero wall heat flux (the campaign default).
+    pywarpx.hybridpicmodel.qdsmc_conduction_eb_bc = "adiabatic"
 if args.kappa == "spitzer":
     kappa_c_eff = args.kappa_mult * KAPPA_C
     pywarpx.hybridpicmodel.__setattr__(
