@@ -112,9 +112,13 @@ class PlasmaCylinderCompression(object):
         mr_emf_xing_commit_skip=None,
         mr_emf_xing_fine_freeze=None,
         mr_prolong_b_init=None,
+        conformal=False,
     ):
         self.test = test
         self.verbose = verbose or self.test
+        # Use the conformal (level-set) embedded-boundary treatment of the
+        # collocated hybrid solver instead of the stair-case approximation.
+        self.conformal = conformal
         self.refined_core = refined_core
         self.grid_type = grid_type
         self.seed = seed
@@ -448,6 +452,7 @@ class PlasmaCylinderCompression(object):
             A_external=A_ext,
             tau_ramp=20e-6,
             t0_ramp=5e-6,
+            use_conformal_eb=True if self.conformal else None,
         )
         simulation.solver = self.solver
 
@@ -458,7 +463,6 @@ class PlasmaCylinderCompression(object):
         # Add field loader callback
         B_ext = picmi.LoadInitialFieldFromPython(
             load_from_python=self.load_fields,
-            warpx_do_divb_cleaning_external=True,
             load_B=True,
             load_E=False,
         )
@@ -762,6 +766,12 @@ parser.add_argument(
     choices=[0, 1],
     default=None,
 )
+parser.add_argument(
+    "--conformal",
+    help="use the conformal (level-set) embedded-boundary treatment instead of "
+    "the stair-case approximation (collocated grid)",
+    action="store_true",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
@@ -783,5 +793,6 @@ run = PlasmaCylinderCompression(
     mr_emf_xing_commit_skip=args.mr_emf_xing_commit_skip,
     mr_emf_xing_fine_freeze=args.mr_emf_xing_fine_freeze,
     mr_prolong_b_init=args.mr_prolong_b_init,
+    conformal=args.conformal,
 )
 simulation.step()

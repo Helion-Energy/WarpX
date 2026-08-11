@@ -923,6 +923,15 @@ WarpX::InitData ()
         for (int lev = 0; lev <= finestLevel(); ++lev) {
             AddExternalFields(lev);
         }
+        // Make the initial B consistent with the collocated conformal magnetic
+        // wall treatment now that the grid B has been set: the direct mirror
+        // fill needs the covered band at its Neumann value, otherwise the first
+        // field-push substep sees it jump from the staircase-masked zero and
+        // stalls the RKF45 substepping. No-op for non-hybrid solvers and off the
+        // collocated embedded-boundary path.
+        if (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) {
+            m_hybrid_pic_model->InitialBEBFill();
+        }
         // Hybrid-PIC mesh refinement: the levels initialize B independently
         // (per-level analytic evaluation), so overwrite the fine levels' B by
         // divergence-free prolongation from the coarse level now that all B
@@ -1342,8 +1351,9 @@ WarpX::InitLevelData (int lev, Real /*time*/)
 
 #ifdef AMREX_USE_EB
         if (eb_enabled) {
-            // We initialize ECTRhofield consistently with the Efield
-            if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::ECT) {
+            // We initialize ECTRhofield consistently with the Efield (ECT is staggered-only;
+            // the collocated conformal solver has no ECT face circulations).
+            if (WarpX::UseConformalEBSolve() && grid_type != GridType::Collocated) {
                 m_fdtd_solver_fp[lev]->EvolveECTRho(
                     m_fields.get_alldirs(FieldType::Efield_fp, lev),
                     m_fields.get_alldirs(FieldType::edge_lengths, lev),
@@ -1372,8 +1382,9 @@ WarpX::InitLevelData (int lev, Real /*time*/)
             }
 #ifdef AMREX_USE_EB
             if (eb_enabled) {
-                if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::ECT) {
-                    // We initialize ECTRhofield consistently with the Efield
+                if (WarpX::UseConformalEBSolve() && grid_type != GridType::Collocated) {
+                    // We initialize ECTRhofield consistently with the Efield (ECT is
+                    // staggered-only; collocated has no ECT face circulations).
                     m_fdtd_solver_cp[lev]->EvolveECTRho(
                         m_fields.get_alldirs(FieldType::Efield_cp, lev),
                         m_fields.get_alldirs(FieldType::edge_lengths, lev),
@@ -1625,16 +1636,37 @@ void WarpX::InitializeEBGridData (int lev)
 #ifdef AMREX_USE_EB
     auto const eb_fact = fieldEBFactory(lev);
 
+    // Compute the nodal signed distance to the embedded boundary up front: the
+    // collocated conformal mask below is keyed off it, and it is also used by the
+    // level-set field boundary conditions and the particle scrapers. It does not
+    // depend on the (staggered) ECT geometry, so it is valid for every grid type.
+    // It loops over all levels internally, so run it once per hierarchy pass, at
+    // the finest level's call (by then every level factory exists).
+    if (lev == maxLevel()) {
+        ComputeDistanceToEB();
+    }
+
     if (WarpX::electromagnetic_solver_id != ElectromagneticSolverAlgo::PSATD )
     {
         using warpx::fields::FieldType;
 
-        if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::ECT) {
+        if (WarpX::UseConformalEBSolve() && grid_type != GridType::Collocated) {
 
+            // The staggered conformal (enlarged-cell/ECT) geometry lives only at
+            // the finest level (allocation is finest-locked); a conformal wall
+            // with max_level > 0 is rejected at init, so lower levels never
+            // reach this branch with a wall to represent.
             if (lev == maxLevel()) {
                 auto edge_lengths_lev = m_fields.get_alldirs(FieldType::edge_lengths, lev);
                 warpx::embedded_boundary::ComputeEdgeLengths(edge_lengths_lev, eb_fact);
                 warpx::embedded_boundary::ScaleEdges(edge_lengths_lev, CellSize(lev));
+
+                // Per-edge uncovered-segment centroid offsets for the conformal-ECT
+                // Faraday curvature correction (dimensionless cell fraction; NOT
+                // ScaleEdges-scaled). Inert (0 everywhere) unless the correction is
+                // enabled, and recomputed here on init/restart/regrid like edge_lengths.
+                auto edge_cent_offset_lev = m_fields.get_alldirs(FieldType::edge_cent_offset, lev);
+                warpx::embedded_boundary::ComputeEdgeCentroidOffsets(edge_cent_offset_lev, eb_fact);
 
                 auto face_areas_lev = m_fields.get_alldirs(FieldType::face_areas, lev);
                 warpx::embedded_boundary::ComputeFaceAreas(face_areas_lev, eb_fact);
@@ -1647,12 +1679,45 @@ void WarpX::InitializeEBGridData (int lev)
                     m_fields.get_alldirs(FieldType::Bfield_fp, maxLevel()),
                     face_areas_lev,
                     edge_lengths_lev, area_mod);
+
+                // Face owner masks: borrowing decisions are owner-unique so
+                // that multi-box layouts make each physical face's decision
+                // exactly once (rebuilt here on init, restart and regrid)
+                if (static_cast<int>(m_ect_face_owner_mask.size()) <= maxLevel()) {
+                    m_ect_face_owner_mask.resize(maxLevel()+1);
+                }
+                for (int idim = 0; idim < 3; ++idim) {
+                    m_ect_face_owner_mask[maxLevel()][idim] = amrex::OwnerMask(
+                        *m_fields.get(FieldType::Bfield_fp, ablastr::fields::Direction{idim}, maxLevel()),
+                        Geom(maxLevel()).periodicity());
+                }
+
                 ComputeFaceExtensions();
 
                 // Mark on which grid points E should be updated
                 warpx::embedded_boundary::MarkUpdateECellsECT( m_eb_update_E[lev], edge_lengths_lev );
                 // Mark on which grid points B should be updated
                 warpx::embedded_boundary::MarkUpdateBCellsECT( m_eb_update_B[lev], face_areas_lev, edge_lengths_lev);
+            }
+
+        } else if (WarpX::UseConformalEBSolve()) {
+
+            // Collocated conformal embedded boundary: there are no Yee cut edges/faces,
+            // so the update masks are keyed directly off the nodal signed level set.
+            // The ECT geometry (edge_lengths/face_areas/face extensions) is intrinsically
+            // staggered and is neither computed nor needed here. Finest-locked like the
+            // staggered conformal branch (a conformal wall with max_level > 0 is
+            // rejected at init; the nodal distance is only guaranteed computed by the
+            // finest level's pass).
+            if (lev == maxLevel()) {
+                warpx::embedded_boundary::MarkUpdateCellsNodalLevelSet(
+                    m_eb_update_E[lev],
+                    *m_fields.get(FieldType::distance_to_eb, lev),
+                    Geom(lev).periodicity() );
+                warpx::embedded_boundary::MarkUpdateCellsNodalLevelSet(
+                    m_eb_update_B[lev],
+                    *m_fields.get(FieldType::distance_to_eb, lev),
+                    Geom(lev).periodicity() );
             }
 
         } else {
@@ -1674,10 +1739,6 @@ void WarpX::InitializeEBGridData (int lev)
 
     }
 
-    if (lev == maxLevel()) {
-        // Loops over all levels internally; called once all level factories exist
-        ComputeDistanceToEB();
-    }
     // Reduced-shape cells are marked on every level (this function is called
     // per level); use the level's own periodicity for the guard-cell fill.
     warpx::embedded_boundary::MarkReducedShapeCells( m_eb_reduce_particle_shape[lev], eb_fact, nox, Geom(lev).periodicity());

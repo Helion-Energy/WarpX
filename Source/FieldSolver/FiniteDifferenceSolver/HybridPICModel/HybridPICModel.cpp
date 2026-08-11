@@ -13,12 +13,18 @@
 #include <ablastr/utils/Communication.H>
 #include <ablastr/warn_manager/WarnManager.H>
 
+#include <AMReX_Reduce.H>
+
+#include "EBJBoundary.H"
 #include "EmbeddedBoundary/Enabled.H"
 #include "Python/callbacks.H"
 #include "Fields.H"
 #include "Particles/MultiParticleContainer.H"
 #include "ExternalVectorPotential.H"
 #include "WarpX.H"
+
+#include <algorithm>
+#include <cmath>
 
 using namespace amrex;
 using warpx::fields::FieldType;
@@ -139,6 +145,24 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("plasma_resistivity(rho,J,t)", m_eta_expression);
     pp_hybrid.query("plasma_hyper_resistivity(rho,B)", m_eta_h_expression);
 
+    // isotropized stencil upgrades of the dissipative/gradient terms
+    // (Cartesian 2D/3D only; see IsotropicOperators.H). One flag enables the
+    // isotropic hyper-resistivity Laplacian, the resistive corner-curl
+    // correction, and the isotropized pressure gradient together: they cancel
+    // the same cos(4*theta) grid anisotropy and are meant to travel as a set.
+    {
+        bool isotropic_operators = false;
+        pp_hybrid.query("isotropic_operators", isotropic_operators);
+        m_isotropic_hyper_resistivity = isotropic_operators;
+        m_isotropic_resistivity = isotropic_operators;
+        m_isotropic_gradient = isotropic_operators;
+#if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_XZ)
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!isotropic_operators,
+            "hybrid_pic_model.isotropic_operators is only implemented for "
+            "the Cartesian 2D (XZ) and 3D geometries");
+#endif
+    }
+
     utils::parser::queryWithParser(pp_hybrid, "n_floor", m_n_floor);
 
     // convert electron temperature from eV to J
@@ -163,6 +187,165 @@ void HybridPICModel::ReadParameters ()
     if (m_add_external_fields) {
         m_external_vector_potential = std::make_unique<ExternalVectorPotential>();
     }
+
+    // conformal (level-set masked/mirrored, or staggered enlarged-cell/ECT)
+    // embedded-boundary wall treatment
+    pp_hybrid.query("use_conformal_eb", m_use_conformal_eb);
+    pp_hybrid.query("conformal_ect_curvature", m_conformal_ect_curvature);
+    if (m_conformal_ect_curvature
+        && (!m_use_conformal_eb
+            || WarpX::grid_type != ablastr::utils::enums::GridType::Staggered)) {
+        m_conformal_ect_curvature = false;
+        ablastr::warn_manager::WMRecordWarning(
+            "HybridPIC",
+            "hybrid_pic_model.conformal_ect_curvature applies the ECT Faraday "
+            "circulation curvature correction, which requires use_conformal_eb on a "
+            "staggered (Yee) grid; it is ignored here (only the staggered grid "
+            "uses ECT circulations).",
+            ablastr::warn_manager::WarnPriority::medium);
+    }
+    pp_hybrid.query("conformal_ect_j", m_conformal_ect_j);
+    pp_hybrid.query("conformal_ect_j_keep_mirror", m_conformal_ect_j_keep_mirror);
+    pp_hybrid.query("conformal_e_geometric_pec", m_conformal_e_geometric_pec);
+    pp_hybrid.query("conformal_pec_zero_ej", m_conformal_pec_zero_ej);
+    if (m_conformal_ect_j
+        && (!m_use_conformal_eb
+            || WarpX::grid_type != ablastr::utils::enums::GridType::Staggered)) {
+        m_conformal_ect_j = false;
+        ablastr::warn_manager::WMRecordWarning(
+            "HybridPIC",
+            "hybrid_pic_model.conformal_ect_j computes the Ampere current with the "
+            "flux-weighted (open-cut-face-area) ECT curl, which requires "
+            "use_conformal_eb (for the face_areas geometry) on a staggered (Yee) "
+            "grid; it is ignored here (only the staggered grid uses open-face "
+            "fluxes).",
+            ablastr::warn_manager::WarnPriority::medium);
+    }
+
+    utils::parser::queryWithParser(
+        pp_hybrid, "holmstrom_blend_pow", m_holmstrom_blend_pow);
+    utils::parser::queryWithParser(
+        pp_hybrid, "holmstrom_blend_width", m_holmstrom_blend_width);
+    {
+        std::string switch_mode_str = "edge";
+        pp_hybrid.query("holmstrom_switch_mode", switch_mode_str);
+        if (switch_mode_str == "edge") { m_holmstrom_switch_mode = 0; }
+        else if (switch_mode_str == "node") { m_holmstrom_switch_mode = 1; }
+        else if (switch_mode_str == "cell") { m_holmstrom_switch_mode = 2; }
+        else {
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.holmstrom_switch_mode must be one of "
+                "'edge', 'node', 'cell' (got '" + switch_mode_str + "')");
+        }
+    }
+    utils::parser::queryWithParser(pp_hybrid, "dive_seam_alpha", m_dive_seam_alpha);
+    utils::parser::queryWithParser(pp_hybrid, "dive_seam_iters", m_dive_seam_iters);
+    utils::parser::queryWithParser(pp_hybrid, "dive_seam_band", m_dive_seam_band);
+    // The compact Yee grad(div) sweep is stable for alpha <= 1/6 (cubic 3D
+    // cells; the 2D cap is higher). The clean runs every substage, so an
+    // over-cap value detonates within one ion step -- reject it up front.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_dive_seam_alpha <= 1.0_rt/6.0_rt,
+        "hybrid_pic_model.dive_seam_alpha must be <= 1/6 (the explicit "
+        "grad(div) stability cap for cubic 3D cells).");
+    // Renamed parameter guard: the short-lived bool was replaced by the
+    // string-valued holmstrom_switch_mode.
+    {
+        bool old_nodal_switch = false;
+        if (pp_hybrid.query("holmstrom_nodal_switch", old_nodal_switch)) {
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.holmstrom_nodal_switch was renamed: use "
+                "hybrid_pic_model.holmstrom_switch_mode = node (or cell/edge).");
+        }
+    }
+#if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_XZ)
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_holmstrom_switch_mode == 0,
+        "hybrid_pic_model.holmstrom_switch_mode is only supported in 3D and "
+        "2D (XZ) Cartesian geometry");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_dive_seam_alpha <= 0.0_rt,
+        "hybrid_pic_model.dive_seam_alpha is only supported in 3D and 2D (XZ) "
+        "Cartesian geometry");
+#endif
+
+    if (m_use_conformal_eb) {
+#if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_XZ)
+        WARPX_ABORT_WITH_MESSAGE(
+            "hybrid_pic_model.use_conformal_eb is only supported in 3D and 2D (XZ) "
+            "Cartesian geometry");
+#endif
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(EB::enabled(),
+            "hybrid_pic_model.use_conformal_eb requires embedded boundaries to be enabled");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            WarpX::grid_type != ablastr::utils::enums::GridType::Hybrid,
+            "hybrid_pic_model.use_conformal_eb supports warpx.grid_type = staggered "
+            "(enlarged-cell/ECT wall) or collocated (level-set mirror wall), not hybrid");
+        // Both grid types are supported: a staggered grid uses the enlarged-cell (ECT)
+        // Faraday update on Yee cut faces/edges, while a collocated grid uses the masked
+        // nodal Faraday update with the level-set mirror boundary condition. The nodal
+        // path is keyed off the signed level set rather than the (staggered) ECT geometry.
+        for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                WarpX::field_boundary_lo[idim] != FieldBoundaryType::PML &&
+                WarpX::field_boundary_hi[idim] != FieldBoundaryType::PML,
+                "hybrid_pic_model.use_conformal_eb is not compatible with PML boundaries");
+        }
+    }
+
+    // Near-wall downgrade of the isotropic stencils to the compact ones
+    // (staggered conformal path; see the header docs).
+    pp_hybrid.query("isotropic_hyper_wall_compact", m_isotropic_hyper_wall_compact);
+
+    // The isotropic hyper-resistivity Laplacian (parsed with the resistivity
+    // options above) reads the plasma current at its
+    // diagonal/corner neighbors (sqrt(2)*h in plane, sqrt(3)*h at a 3D cube
+    // corner). Widen the plasma-current EB mirror-fill band to that corner reach
+    // so the diagonal edges near a curved wall are mirror-filled rather than left
+    // in the zeroed deep interior (which would inject a spurious nabla^2 J there).
+    m_eb_fill_band_cells = m_isotropic_hyper_resistivity
+        ? std::sqrt(static_cast<amrex::Real>(AMREX_SPACEDIM))
+        : amrex::Real(1.0);
+
+    // Mirror-fill band width for the Bfield_fp EB fill, computed from the
+    // stencils that read covered B rather than exposed as an input. The
+    // particle field gather sets the reach: a particle against the wall reads
+    // nodes up to (nox+1)/2 cells away per axis, a level-set depth of at most
+    // sqrt(AMREX_SPACEDIM)*(nox+1)/2 <= nox+1 cells (in units of the max cell
+    // size), so band = nox+1 keeps every gathered covered node mirror-filled
+    // rather than zeroed. That also dominates the 1-cell curl(B) reach and
+    // the isotropic corner-curl's in-plane diagonal B taps (sqrt(2)*h), which
+    // govern only when no particles are loaded (nox = 0). The mirror's div(B)
+    // injection is removed at the source by the div-free correction that ends
+    // every collocated fill (DivFreeFixCoveredB), so widening the band
+    // carries no divergence-placement penalty.
+    m_eb_b_fill_band_cells = std::max(
+        static_cast<amrex::Real>(WarpX::nox + 1), amrex::Real(1.0));
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    // The corner-curl only compiles on Cartesian 3D/XZ; elsewhere the curl
+    // reach stays axis-aligned.
+    if (m_isotropic_resistivity) {
+        m_eb_b_fill_band_cells = std::max(m_eb_b_fill_band_cells, std::sqrt(2.0_rt));
+    }
+#endif
+    // Marder-like diffusive divergence clean of B / the total Ampere current in
+    // a near-wall band (MarderCleanDivergence), applied once per step from the
+    // hybrid field advance. Both alphas default to 0 = off (byte-identical).
+    utils::parser::queryWithParser(pp_hybrid, "divb_clean_alpha", m_divb_clean_alpha);
+    utils::parser::queryWithParser(pp_hybrid, "divj_clean_alpha", m_divj_clean_alpha);
+    utils::parser::queryWithParser(pp_hybrid, "divb_clean_iters", m_divb_clean_iters);
+    utils::parser::queryWithParser(pp_hybrid, "divb_clean_band_cells", m_divb_clean_band_cells);
+    utils::parser::queryWithParser(
+        pp_hybrid, "divb_clean_inner_div_cells", m_divb_clean_inner_div_cells);
+    utils::parser::queryWithParser(
+        pp_hybrid, "divb_clean_inner_corr_cells", m_divb_clean_inner_corr_cells);
+    pp_hybrid.query("divb_clean_cut_metric", m_divb_clean_cut_metric);
+#if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_XZ)
+    // The clean's gradient is the adjoint of the CARTESIAN divergence only;
+    // abort rather than silently no-op (1D) or apply a non-dissipative
+    // metric-inconsistent update (RZ).
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_divb_clean_alpha <= 0.0_rt && m_divj_clean_alpha <= 0.0_rt,
+        "hybrid_pic_model.divb_clean_alpha / divj_clean_alpha are only "
+        "supported in 3D and 2D (XZ) Cartesian geometry");
+#endif
 }
 
 void HybridPICModel::AllocateLevelMFs (
@@ -408,6 +591,30 @@ void HybridPICModel::ReinitLevelData (const int lev)
     }
 }
 
+void HybridPICModel::InitialBEBFill ()
+{
+#ifdef AMREX_USE_EB
+    using ablastr::utils::enums::GridType;
+    if (!EB::enabled()) { return; }
+    // Collocated conformal fill: the direct level-set magnetic mirror below.
+    bool const collocated_fill = m_use_conformal_eb
+        && WarpX::grid_type == GridType::Collocated;
+    if (!collocated_fill) { return; }
+    auto& warpx = WarpX::GetInstance();
+    auto const& eb_update_B = warpx.GetEBUpdateBFlag();
+    for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+        if (static_cast<int>(m_eb_bc_status_B.size()) <= lev) { m_eb_bc_status_B.resize(lev+1); }
+        warpx::hybrid::ApplyPECBoundaryToField(
+            warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev),
+            eb_update_B[lev],
+            *warpx.m_fields.get(FieldType::distance_to_eb, lev),
+            warpx.Geom(lev),
+            /*normal_odd=*/true, /*fill_covered_centers=*/false,
+            &m_eb_bc_status_B[lev], m_eb_b_fill_band_cells);
+    }
+#endif
+}
+
 void HybridPICModel::GetCurrentExternal ()
 {
     if (!m_external_current_has_time_dependence) { return; }
@@ -422,6 +629,90 @@ void HybridPICModel::GetCurrentExternal ()
             m_J_external[2],
             lev, PatchType::fine,
             warpx.GetEBUpdateEFlag());
+    }
+}
+
+void HybridPICModel::ZeroConductorEdges (
+    ablastr::fields::VectorField const& field,
+    std::array< std::unique_ptr<amrex::iMultiFab>,3 >& eb_update,
+    const int lev) const
+{
+    // Constitutive PEC for an edge-staggered field on the staggered conformal
+    // (ECT) path: zero every masked (fully covered) edge and every CUT edge
+    // (open length < full length). Cut faces then evolve only through their
+    // fully-open edges; there is no wall physics to represent on the zeroed
+    // set (E = 0 in a perfect conductor, and the hybrid carries no surface
+    // currents). See m_conformal_pec_zero_ej.
+    auto& warpx = WarpX::GetInstance();
+    const auto dx = warpx.Geom(lev).CellSizeArray();
+    const ablastr::fields::VectorField edge_lengths =
+        warpx.m_fields.get_alldirs(FieldType::edge_lengths, lev);
+    // Full edges carry exactly their cell size after ScaleEdges; anything
+    // shorter is cut. The tolerance absorbs round-off in the EB geometry.
+    amrex::GpuArray<amrex::Real, 3> l_full{0.0_rt, 0.0_rt, 0.0_rt};
+    for (int d = 0; d < 3; ++d) {
+        const int gd = amrex::min(d, AMREX_SPACEDIM - 1);
+        l_full[d] = (1.0_rt - 1.e-6_rt) * dx[gd];
+    }
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (amrex::MFIter mfi(*field[0], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        amrex::Array4<amrex::Real> const& Fx = field[0]->array(mfi);
+        amrex::Array4<amrex::Real> const& Fy = field[1]->array(mfi);
+        amrex::Array4<amrex::Real> const& Fz = field[2]->array(mfi);
+        amrex::Array4<amrex::Real const> const& lx = edge_lengths[0]->const_array(mfi);
+        amrex::Array4<amrex::Real const> const& ly = edge_lengths[1]->const_array(mfi);
+        amrex::Array4<amrex::Real const> const& lz = edge_lengths[2]->const_array(mfi);
+        amrex::Array4<int const> const& ux = eb_update[0]->const_array(mfi);
+        amrex::Array4<int const> const& uy = eb_update[1]->const_array(mfi);
+        amrex::Array4<int const> const& uz = eb_update[2]->const_array(mfi);
+        const amrex::Box tx = mfi.tilebox(field[0]->ixType().toIntVect());
+        const amrex::Box ty = mfi.tilebox(field[1]->ixType().toIntVect());
+        const amrex::Box tz = mfi.tilebox(field[2]->ixType().toIntVect());
+        amrex::ParallelFor(tx, ty, tz,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                if (ux(i,j,k) == 0 || lx(i,j,k) < l_full[0]) { Fx(i,j,k) = 0.0_rt; }
+            },
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                if (uy(i,j,k) == 0 || ly(i,j,k) < l_full[1]) { Fy(i,j,k) = 0.0_rt; }
+            },
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                if (uz(i,j,k) == 0 || lz(i,j,k) < l_full[2]) { Fz(i,j,k) = 0.0_rt; }
+            });
+    }
+}
+
+void HybridPICModel::ZeroCoveredFaces (
+    ablastr::fields::VectorField const& field,
+    const int lev) const
+{
+    auto& warpx = WarpX::GetInstance();
+    const ablastr::fields::VectorField face_areas =
+        warpx.m_fields.get_alldirs(FieldType::face_areas, lev);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (amrex::MFIter mfi(*field[0], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        amrex::Array4<amrex::Real> const& Fx = field[0]->array(mfi);
+        amrex::Array4<amrex::Real> const& Fy = field[1]->array(mfi);
+        amrex::Array4<amrex::Real> const& Fz = field[2]->array(mfi);
+        amrex::Array4<amrex::Real const> const& Sx = face_areas[0]->const_array(mfi);
+        amrex::Array4<amrex::Real const> const& Sy = face_areas[1]->const_array(mfi);
+        amrex::Array4<amrex::Real const> const& Sz = face_areas[2]->const_array(mfi);
+        const amrex::Box tx = mfi.tilebox(field[0]->ixType().toIntVect());
+        const amrex::Box ty = mfi.tilebox(field[1]->ixType().toIntVect());
+        const amrex::Box tz = mfi.tilebox(field[2]->ixType().toIntVect());
+        amrex::ParallelFor(tx, ty, tz,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                if (Sx(i,j,k) <= 0.0_rt) { Fx(i,j,k) = 0.0_rt; }
+            },
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                if (Sy(i,j,k) <= 0.0_rt) { Fy(i,j,k) = 0.0_rt; }
+            },
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                if (Sz(i,j,k) <= 0.0_rt) { Fz(i,j,k) = 0.0_rt; }
+            });
     }
 }
 
@@ -444,10 +735,25 @@ void HybridPICModel::CalculatePlasmaCurrent (
     ABLASTR_PROFILE("HybridPICModel::CalculatePlasmaCurrent()");
 
     auto& warpx = WarpX::GetInstance();
+
     ablastr::fields::VectorField current_fp_plasma = warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
-    warpx.get_pointer_fdtd_solver_fp(lev)->CalculateCurrentAmpere(
-        current_fp_plasma, Bfield, eb_update_E, lev
-    );
+    if (m_conformal_ect_j && m_use_conformal_eb && EB::enabled()
+        && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated) {
+        // Flux-weighted ("Form A") conformal-EB curl: J = curl(B)/mu0 with each B
+        // weighted by its open cut-face-area fraction (face_areas is only allocated
+        // with use_conformal_eb on a staggered grid; ReadParameters enforces this).
+        // Divergence-consistent across the wall, so it needs no covered-B mirror
+        // (skipped below).
+        warpx.get_pointer_fdtd_solver_fp(lev)->CalculateCurrentAmpereECT(
+            current_fp_plasma, Bfield,
+            warpx.m_fields.get_alldirs(FieldType::face_areas, lev),
+            eb_update_E, lev
+        );
+    } else {
+        warpx.get_pointer_fdtd_solver_fp(lev)->CalculateCurrentAmpere(
+            current_fp_plasma, Bfield, eb_update_E, lev
+        );
+    }
 
     if (m_has_external_current) {
         // Subtract external current from "Ampere" current calculated above. Note
@@ -457,6 +763,46 @@ void HybridPICModel::CalculatePlasmaCurrent (
         for (int i=0; i<3; i++) {
             current_fp_plasma[i]->minus(*current_fp_external[i], 0, 1, 1);
         }
+    }
+
+    // Constitutive PEC: J = 0 on every EB-touching edge (no surface currents
+    // in the hybrid; see m_conformal_pec_zero_ej) -- replaces the mirror fill.
+    if (m_conformal_pec_zero_ej && EB::enabled() && m_use_conformal_eb
+        && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated) {
+        ZeroConductorEdges(current_fp_plasma, eb_update_E, lev);
+        return;
+    }
+
+    // Enforce the PEC current boundary condition at the embedded boundary:
+    // tangential J vanishes at the surface, normal J has zero normal gradient
+    // and the deep conductor interior carries no volume current. Cut edges
+    // whose centers are on or inside the surface are filled too (the Ampere
+    // current is evaluated at the covered centers and is not meaningful
+    // there). The flux-weighted ECT curl above is already divergence-
+    // consistent at the wall (it reads only open-face fluxes, fully-covered
+    // edges are zeroed in the kernel). The mirror fill below INJECTS div(J)
+    // and would corrupt Form A's clean wall current, so it is skipped when
+    // conformal_ect_j is on.
+    if (EB::enabled() && (!m_conformal_ect_j || m_conformal_ect_j_keep_mirror)) {
+        // The plasma current uses its own (wider-band) fill classification when
+        // the isotropic hyper-resistivity Laplacian is enabled: that stencil
+        // reads diagonal/corner edges, so the band is widened to m_eb_fill_band_cells
+        // (see ReadParameters). Kept separate from m_eb_bc_status_E (the deposit
+        // fold's one-cell-band cache) and from m_eb_bc_status_Eohm (the Ohm's-law
+        // E fill, same band as this one but a different field/write set).
+        if (static_cast<int>(m_eb_bc_status_Jplasma.size()) <= lev) { m_eb_bc_status_Jplasma.resize(lev+1); }
+
+        // Covered-cell mirror fill of the Ampere current: the standard Yee curl
+        // zeroes fully-covered edges, so without this fill there is a large
+        // fluid->covered current JUMP at the wall (the unmasked wall div(J) runs
+        // ~10x the stable level, and the zeroed covered J contaminates the nodal
+        // J x B) which stiffens the RKF45 B-push to a crawl.
+        warpx::hybrid::ApplyPECBoundaryToField(
+            current_fp_plasma, eb_update_E,
+            *warpx.m_fields.get(FieldType::distance_to_eb, lev),
+            warpx.Geom(lev),
+            /*normal_odd=*/false, /*fill_covered_centers=*/true,
+            &m_eb_bc_status_Jplasma[lev], m_eb_fill_band_cells);
     }
 }
 
@@ -517,6 +863,108 @@ void HybridPICModel::HybridPICSolveE (
     );
     amrex::Real const time = warpx.gett_old(0) + warpx.getdt(0);
     warpx.ApplyEfieldBoundary(lev, patch_type, time);
+
+    // The Ohm's-law E is algebraic rather than integrated from B, so the PEC condition
+    // (tangential E zero at the surface, normal E with zero normal gradient, zero deep in
+    // the conductor) must be imposed directly on the masked edges, including cut edges with
+    // covered centers, where the floored interpolated density makes Ohm's law spurious.
+    //
+    // The opt-in conformal_e_geometric_pec research knob (staggered ECT path
+    // only) skips the covered-center cut edges, imposing the wall purely
+    // geometrically like the EM ECT solver. Measured to be explicitly UNSTABLE
+    // today (step-one RKF45 collapse from a round-off seed in the vacuum
+    // liftoff, with either J curl variant): the mirror overwrite is
+    // load-bearing damping for the explicit algebraic E(B) loop at small-S
+    // cut cells. See the knob's declaration for the full story.
+    if (EB::enabled()) {
+        const bool staggered_conformal = m_use_conformal_eb
+            && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated;
+        // Constitutive PEC: E = 0 on every EB-touching edge (see
+        // m_conformal_pec_zero_ej); replaces the mirror fill entirely.
+        if (m_conformal_pec_zero_ej && staggered_conformal) {
+            ZeroConductorEdges(Efield, eb_update_E, lev);
+            return;
+        }
+        const bool fill_cut_centers = !(m_conformal_e_geometric_pec
+            && staggered_conformal);
+        if (static_cast<int>(m_eb_bc_status_Eohm.size()) <= lev) { m_eb_bc_status_Eohm.resize(lev+1); }
+        warpx::hybrid::ApplyPECBoundaryToField(
+            Efield, eb_update_E,
+            *warpx.m_fields.get(FieldType::distance_to_eb, lev),
+            warpx.Geom(lev),
+            /*normal_odd=*/false, /*fill_covered_centers=*/fill_cut_centers,
+            // E fill band is PINNED to the J fill band: E = eta*J in the cut/
+            // covered region, so filling E beyond where J is filled leaves E != 0
+            // where J = 0 (an inconsistent source that blows up through the
+            // curl(E)->B->curl(B)->J->E loop). See m_eb_fill_band_cells.
+            // Own cache (m_eb_bc_status_Eohm): m_eb_bc_status_E is built at the
+            // one-cell band by the deposit fold and must not be reused here
+            // with the (possibly widened) m_eb_fill_band_cells.
+            &m_eb_bc_status_Eohm[lev], m_eb_fill_band_cells);
+    }
+}
+
+void HybridPICModel::WarnIfPlasmaAgainstWall (int lev) const
+{
+#ifdef AMREX_USE_EB
+    if (m_checked_plasma_at_wall) { return; }
+    m_checked_plasma_at_wall = true;
+    if (!EB::enabled()) { return; }
+
+    using namespace amrex::literals;
+    using warpx::fields::FieldType;
+
+    auto& warpx = WarpX::GetInstance();
+    amrex::MultiFab const& rho = *warpx.m_fields.get(FieldType::rho_fp, lev);
+    amrex::MultiFab const& phi_eb = *warpx.m_fields.get(FieldType::distance_to_eb, lev);
+    auto const dx = warpx.Geom(lev).CellSizeArray();
+#if defined(WARPX_DIM_3D)
+    amrex::Real const h_max = amrex::max(dx[0], amrex::max(dx[1], dx[2]));
+#else
+    amrex::Real const h_max = amrex::max(dx[0], dx[1]);
+#endif
+    // Deposition reaches nox cells, so this is the recommended standoff distance.
+    int const order = WarpX::nox;
+    amrex::Real const band = amrex::Real(order) * h_max;
+
+    // One masked pass: max|rho| in the near-wall fluid band (0 < phi <= band) and
+    // the global max|rho|, so the test is scale-free (near-wall vs peak density).
+    amrex::ReduceOps<amrex::ReduceOpMax, amrex::ReduceOpMax> reduce_op;
+    amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+    for (amrex::MFIter mfi(rho); mfi.isValid(); ++mfi) {
+        amrex::Box const bx = mfi.validbox();
+        auto const& r = rho.const_array(mfi);
+        auto const& p = phi_eb.const_array(mfi);
+        reduce_op.eval(bx, reduce_data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                amrex::Real const ar = std::abs(r(i, j, k));
+                amrex::Real const s = p(i, j, k);
+                amrex::Real const in_band = (s > 0._rt && s <= band) ? ar : 0._rt;
+                return {in_band, ar};
+            });
+    }
+    auto const hv = reduce_data.value(reduce_op);
+    amrex::Real band_max = amrex::get<0>(hv);
+    amrex::Real glob_max = amrex::get<1>(hv);
+    amrex::ParallelDescriptor::ReduceRealMax(band_max);
+    amrex::ParallelDescriptor::ReduceRealMax(glob_max);
+
+    if (glob_max > 0._rt && band_max > 0.05_rt * glob_max) {
+        ablastr::warn_manager::WMRecordWarning(
+            "HybridPIC",
+            "Plasma sits within the particle shape order (nox = " +
+            std::to_string(order) + " cell(s)) of the embedded-boundary wall. In the "
+            "hybrid Ohm's-law solver, current deposited onto wall-adjacent edges drives "
+            "near-wall current spikes (and an unmodelled sub-grid sheath where "
+            "quasineutrality breaks down), a likely wall-instability driver. Scrape "
+            "particles at least nox*dx cells off the wall (e.g. the liftoff deck's "
+            "--standoff-cells >= particle shape order).",
+            ablastr::warn_manager::WarnPriority::medium);
+    }
+#else
+    amrex::ignore_unused(lev);
+#endif
 }
 
 void HybridPICModel::CalculateElectronPressure() const
@@ -535,6 +983,9 @@ void HybridPICModel::CalculateElectronPressure(const int lev) const
     auto& warpx = WarpX::GetInstance();
     ablastr::fields::ScalarField electron_pressure_fp = warpx.m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
     ablastr::fields::ScalarField rho_fp = warpx.m_fields.get(FieldType::rho_fp, lev);
+
+    // Warn (once) if plasma is loaded up against the EB wall (rho^{n+1} is current).
+    WarnIfPlasmaAgainstWall(lev);
 
     // Calculate the electron pressure using rho^{n+1}.
     FillElectronPressureMF(
@@ -579,6 +1030,24 @@ void HybridPICModel::CalculateElectronPressure(const int lev) const
         }
     }
 
+    // Electron-pressure embedded-boundary condition at a PEC wall: Dirichlet
+    // (odd reflection -> Pe vanishes at the wall). A PEC supports a normal
+    // (radial) E via surface charge, and the resulting grad(Pe) across the wall
+    // supplies that allowable radial field in Ohm's law -- unlike a Neumann (even,
+    // zero-normal-gradient) reflection, which pins the pressure gradient to zero and
+    // suppresses the near-wall radial E. NOTE: this is NOT a physical sheath model;
+    // quasineutrality breaks down and a sub-grid sheath forms at the wall (a likely
+    // near-wall instability driver), to be revisited with a wall function under the
+    // implicit solver. The odd
+    // parity keeps grad(Pe) stencils straddling the wall off the nonpositive mirrored
+    // density inside the conductor.
+    if (EB::enabled()) {
+        warpx::hybrid::ApplyEBBoundaryToNodalScalar(
+            *electron_pressure_fp,
+            *warpx.m_fields.get(FieldType::distance_to_eb, lev),
+            warpx.Geom(lev),
+            /*odd=*/true);  // Dirichlet: Pe -> 0 at the PEC wall
+    }
     warpx.ApplyElectronPressureBoundary(lev, PatchType::fine);
 
     // Mirror the closure's implied electron temperature,
@@ -639,8 +1108,12 @@ void HybridPICModel::FillElectronPressureMF (
         const Box& tilebox  = mfi.tilebox();
 
         ParallelFor(tilebox, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            // The embedded-boundary Dirichlet condition mirrors the charge
+            // density to negative values inside the conductor: clamp the
+            // equation-of-state input to its physical domain (the covered
+            // nodes are subsequently overwritten by the even EB reflection)
             Pe(i, j, k) = ElectronPressure::get_pressure(
-                n0_ref, elec_temp, gamma, rho(i, j, k)
+                n0_ref, elec_temp, gamma, amrex::max(rho(i, j, k), 0._rt)
             );
         });
     }
@@ -1411,14 +1884,60 @@ void HybridPICModel::FieldPushStage (
             eb_update_E[lev], lev, true
         );
     }
+    // Density-banded Marder clean of the Ohm E at the n_floor seam (staggered
+    // grids): diffuse the divergence-carrying, per-component-inconsistent E
+    // content at the plasma/vacuum seam before Faraday integrates it into B.
+    // No-op unless dive_seam_alpha > 0; handles its own ghost exchanges.
+    if (Bz_IndexType[0] != Ez_IndexType[0]) {
+        MarderCleanESeam(Efield, rhofield, eb_update_E, ng, nodal_sync);
+    }
     // Allow execution of Python callback after E-field push (once per stage)
     ExecutePythonCallback("afterEpush");
-    // Call FillBoundary if a collocated grid is used
-    if (Bz_IndexType[0] == Ez_IndexType[0]) {
+    // Refresh the E ghosts before the Faraday push reads them. This is always
+    // required on a collocated grid (the masked nodal curl reads ghost E). On a
+    // staggered grid with the conformal embedded boundary, the ECT circulation
+    // (EvolveECTRho below) -- and its along-edge curvature correction when enabled --
+    // also reads cross-box ghost E edges, which the 1-ghost ECTRhofield
+    // FillBoundary only refreshes *after* each face's Rho is formed; fill the E
+    // ghosts here first so the per-face circulation is seam-consistent.
+#ifdef AMREX_USE_EB
+    const bool fill_E_pre_faraday = (Bz_IndexType[0] == Ez_IndexType[0]) ||
+        (m_use_conformal_eb &&
+         WarpX::grid_type != ablastr::utils::enums::GridType::Collocated);
+#else
+    const bool fill_E_pre_faraday = (Bz_IndexType[0] == Ez_IndexType[0]);
+#endif
+    if (fill_E_pre_faraday) {
         for (int lev = 0; lev <= finest_level; ++lev) {
             warpx.FillBoundaryE(lev, ng, nodal_sync);
         }
     }
+
+#ifdef AMREX_USE_EB
+    // With the conformal embedded-boundary update on a staggered grid, recompute the
+    // face-centered electromotive-force density (ECTRhofield) from the new E-field so
+    // that the following Faraday push uses circulations consistent with Ohm's law. The
+    // collocated conformal path uses the masked nodal Faraday curl instead (no ECT
+    // circulations), so this staggered-only precompute is skipped there.
+    // (The conformal wall is single-level: use_conformal_eb + max_level > 0 aborts
+    // at init, so this loop only ever sees the one wall-bearing level.)
+    if (m_use_conformal_eb &&
+        WarpX::grid_type != ablastr::utils::enums::GridType::Collocated) {
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            // Opt-in along-edge curvature correction of the circulation: shift each
+            // cut edge's E to the uncovered-segment centroid (see EvolveECTRho).
+            auto edge_cent_offset = warpx.m_fields.get_alldirs(FieldType::edge_cent_offset, lev);
+            warpx.get_pointer_fdtd_solver_fp(lev)->EvolveECTRho(
+                Efield[lev],
+                warpx.m_fields.get_alldirs(FieldType::edge_lengths, lev),
+                warpx.m_fields.get_alldirs(FieldType::face_areas, lev),
+                warpx.m_fields.get_alldirs(FieldType::ECTRhofield, lev),
+                lev,
+                &edge_cent_offset,
+                m_conformal_ect_curvature);
+        }
+    }
+#endif
 
     // B phase: push forward the B-field using Faraday's law on every level.
     for (int lev = 0; lev <= finest_level; ++lev)
@@ -1431,4 +1950,37 @@ void HybridPICModel::FieldPushStage (
     {
         warpx.FillBoundaryB(lev, ng, nodal_sync);
     }
+
+#ifdef AMREX_USE_EB
+    // The collocated push is the unmasked nodal curl, with no enlarged-cell
+    // extension to impose the wall condition on B during the Faraday push.
+    // Impose the wall condition on the freshly pushed B directly from the level
+    // set so the masked covered nodes are wall-consistent for the next substep's
+    // curl(B) plasma current. (The FillBoundaryB above gives the gather stencils
+    // valid ghost values; a second exchange below propagates the band/covered
+    // values.)
+    bool const collocated_fill = m_use_conformal_eb
+        && WarpX::grid_type == ablastr::utils::enums::GridType::Collocated;
+    if (EB::enabled() && collocated_fill) {
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            // The direct level-set mirror fill (magnetic parity, normal odd /
+            // tangential even, flux-excluding PEC). It is self-consistent with
+            // the Neumann-filled covered band set on the initial field
+            // (InitialBEBFill), so the covered band stays at its wall value
+            // through the substepping.
+            auto const& eb_update_B = warpx.GetEBUpdateBFlag();
+            if (static_cast<int>(m_eb_bc_status_B.size()) <= lev) { m_eb_bc_status_B.resize(lev+1); }
+            warpx::hybrid::ApplyPECBoundaryToField(
+                warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev),
+                eb_update_B[lev],
+                *warpx.m_fields.get(FieldType::distance_to_eb, lev),
+                warpx.Geom(lev),
+                /*normal_odd=*/true, /*fill_covered_centers=*/false,
+                &m_eb_bc_status_B[lev], m_eb_b_fill_band_cells);
+        }
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            warpx.FillBoundaryB(lev, ng, nodal_sync);
+        }
+    }
+#endif
 }

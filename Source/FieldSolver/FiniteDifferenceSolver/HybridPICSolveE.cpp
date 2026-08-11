@@ -20,13 +20,133 @@
 #   include "FiniteDifferenceAlgorithms/CartesianNodalAlgorithm.H"
 #endif
 #include "HybridPICModel/HybridPICModel.H"
+#include "IsotropicOperators.H"
 #include "Utils/TextMsg.H"
 #include "WarpX.H"
 
 #include <ablastr/coarsen/sample.H>
 
+#include <type_traits>
+
 using namespace amrex;
 using warpx::fields::FieldType;
+
+// The helpers below are only consumed by the Cartesian Ohm's-law solve.
+#if !defined(WARPX_DIM_RZ) && !defined(WARPX_DIM_RCYLINDER) && !defined(WARPX_DIM_RSPHERE)
+namespace {
+    /** EB-aware staggered->nodal interpolation for the hybrid Hall term.
+     *
+     * The plain ablastr::coarsen::Interp (coarsening ratio 1) averages the source
+     * edge/face values around a node with equal weights. At the embedded boundary that
+     * pulls COVERED-cell field values into the nodal J x B, polluting the near-wall Hall
+     * term (a covered edge/face carries no physical current/field, but the average reads
+     * it anyway). This variant averages only the UNCOVERED neighbours -- those whose
+     * update mask (same staggering as the source) is nonzero -- and renormalizes by the
+     * number kept, so covered edges/faces never enter the interpolation. Returns 0 only
+     * if every neighbour is covered. Mirrors Interp's stencil for coarsening ratio 1. */
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    amrex::Real InterpMasked (
+        amrex::Array4<amrex::Real const> const& arr,
+        amrex::Array4<int const> const& mask,
+        amrex::GpuArray<int,3> const& sf,
+        amrex::GpuArray<int,3> const& sc,
+        int i, int j, int k, int comp)
+    {
+        using namespace amrex::literals;
+        int const ic[3] = {i, j, k};
+        int np[3], idx_min[3];
+        for (int l = 0; l < 3; ++l) {
+            np[l] = 1 + amrex::Math::abs(sf[l]-sc[l]);
+            idx_min[l] = ic[l] - sc[l]*(1-sf[l]);
+        }
+        amrex::Real c = 0.0_rt, w = 0.0_rt;
+        for (int kr = 0; kr < np[2]; ++kr) {
+        for (int jr = 0; jr < np[1]; ++jr) {
+        for (int ir = 0; ir < np[0]; ++ir) {
+            int const ii = idx_min[0]+ir, jj = idx_min[1]+jr, kk = idx_min[2]+kr;
+            amrex::Real const ww = (mask(ii,jj,kk) != 0) ? 1.0_rt : 0.0_rt;
+            c += ww * arr(ii,jj,kk,comp);
+            w += ww;
+        }}}
+        return (w > 0.0_rt) ? (c / w) : 0.0_rt;
+    }
+
+    /** Nodal decision density for the holmstrom vacuum switch / blend weight
+     * (hybrid_pic_model.holmstrom_switch_mode = "node"): the MINIMUM of the nodal rho at
+     * the endpoints of the staggered E component's edge (the same nodes the
+     * standard edge average reads -- identical footprint, no extra ghost reads).
+     * Degenerates to the point value on collocated grids. Using the same nodal
+     * field for every component removes the per-component half-cell decision
+     * offsets at the plasma/vacuum seam. The endpoint min is vacuum-favoring:
+     * the Hall branch runs only where EVERY endpoint node is above the floor,
+     * so the stiff Hall physics never extends into sub-floor territory (the
+     * plasma-favoring endpoint-max variant was measured to DESTABILIZE, choking
+     * at step 734 vs 12000 -- it runs full Hall on edges whose own density is
+     * below the floor, the same poison as the below-floor blend ramp). */
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    amrex::Real NodalSwitchRho (
+        amrex::Array4<amrex::Real const> const& rho,
+        amrex::GpuArray<int,3> const& stag,
+        int i, int j, int k)
+    {
+        // 1 point in node-centered directions, 2 endpoints in the cell-centered
+        // direction (unused dimensions are marked nodal upstream).
+        const int ni = (stag[0] == 0) ? 2 : 1;
+        const int nj = (stag[1] == 0) ? 2 : 1;
+        const int nk = (stag[2] == 0) ? 2 : 1;
+        amrex::Real r = rho(i, j, k);
+        for (int kk = 0; kk < nk; ++kk) {
+        for (int jj = 0; jj < nj; ++jj) {
+        for (int ii = 0; ii < ni; ++ii) {
+            r = amrex::min(r, rho(i+ii, j+jj, k+kk));
+        }}}
+        return r;
+    }
+
+    /** Cell decision density for holmstrom_switch_mode = "cell": the MINIMUM
+     * over the component's ADJACENT cells of the cell-centered (node-averaged)
+     * rho. An edge is adjacent to one cell along its own (cell-centered)
+     * direction and to both neighbors in its transverse (nodal) directions;
+     * taking all of them keeps the edge-to-cell assignment reflection- and
+     * C4-equivariant (a single upper cell would carry a preferred grid
+     * diagonal), and the min is vacuum-favoring like the "node" mode. On a
+     * collocated grid this is the symmetric min over all cells sharing the
+     * node. Dummy dimensions (marked nodal beyond AMREX_SPACEDIM) take no
+     * offset and no averaging span. */
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    amrex::Real CellSwitchRho (
+        amrex::Array4<amrex::Real const> const& rho,
+        amrex::GpuArray<int,3> const& stag,
+        int i, int j, int k)
+    {
+        using namespace amrex::literals;
+        // dummy dimensions (beyond AMREX_SPACEDIM) keep no offset and no
+        // averaging span; the real dimensions are overwritten below
+        int off_lo[3] = {0, 0, 0};
+        int span[3] = {1, 1, 1};
+        int const ic[3] = {i, j, k};
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            off_lo[d] = (stag[d] == 1) ? -1 : 0;
+            span[d] = 2;
+        }
+        amrex::Real rmin = std::numeric_limits<amrex::Real>::max();
+        for (int ok = off_lo[2]; ok <= 0; ++ok) {
+        for (int oj = off_lo[1]; oj <= 0; ++oj) {
+        for (int oi = off_lo[0]; oi <= 0; ++oi) {
+            amrex::Real sum = 0.0_rt;
+            int cnt = 0;
+            for (int kk = 0; kk < span[2]; ++kk) {
+            for (int jj = 0; jj < span[1]; ++jj) {
+            for (int ii = 0; ii < span[0]; ++ii) {
+                sum += rho(ic[0]+oi+ii, ic[1]+oj+jj, ic[2]+ok+kk);
+                cnt += 1;
+            }}}
+            rmin = amrex::min(rmin, sum/static_cast<amrex::Real>(cnt));
+        }}}
+        return rmin;
+    }
+}
+#endif // Cartesian-only helpers
 
 void FiniteDifferenceSolver::CalculateCurrentAmpere (
     ablastr::fields::VectorField & Jfield,
@@ -63,6 +183,36 @@ void FiniteDifferenceSolver::CalculateCurrentAmpere (
     } else {
         amrex::Abort(Utils::TextMsg::Err(
             "CalculateCurrentAmpere: Unknown algorithm choice."));
+    }
+}
+
+void FiniteDifferenceSolver::CalculateCurrentAmpereECT (
+    ablastr::fields::VectorField & Jfield,
+    ablastr::fields::VectorField const& Bfield,
+    [[maybe_unused]] ablastr::fields::VectorField const& face_areas,
+    std::array< std::unique_ptr<amrex::iMultiFab>,3 > const& eb_update_E,
+    int lev )
+{
+    // The flux-weighted ECT curl is defined for the staggered Cartesian (Yee) grid
+    // only: ReadParameters downgrades conformal_ect_j on any other grid type and
+    // aborts use_conformal_eb outside 3D/XZ, so the fallbacks below are
+    // defense-in-depth for an unreachable configuration, not a supported mode.
+    if (m_fdtd_algo == ElectromagneticSolverAlgo::HybridPIC) {
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+        CalculateCurrentAmpere(Jfield, Bfield, eb_update_E, lev);
+#else
+        if (WarpX::grid_type == GridType::Staggered)
+        {
+            CalculateCurrentAmpereCartesianECT <CartesianYeeAlgorithm> (
+                Jfield, Bfield, face_areas, eb_update_E, lev
+            );
+        } else {
+            CalculateCurrentAmpere(Jfield, Bfield, eb_update_E, lev);
+        }
+#endif
+    } else {
+        amrex::Abort(Utils::TextMsg::Err(
+            "CalculateCurrentAmpereECT: Unknown algorithm choice."));
     }
 }
 
@@ -421,8 +571,9 @@ void FiniteDifferenceSolver::CalculateCurrentAmpereCartesian (
             // Jx calculation
             [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
-                // Skip field update in the embedded boundaries
-                if (update_Jx_arr && update_Jx_arr(i, j, k) == 0) { return; }
+                // Zero the current in fully-covered cells (eb_update flag == 0):
+                // no plasma current inside the conductor (follows the update_E flag).
+                if (update_Jx_arr && update_Jx_arr(i, j, k) == 0) { Jx(i, j, k) = 0._rt; return; }
 
                 Jx(i, j, k) = one_over_mu0 * (
                     - T_Algo::DownwardDz(By, coefs_z, n_coefs_z, i, j, k)
@@ -433,8 +584,8 @@ void FiniteDifferenceSolver::CalculateCurrentAmpereCartesian (
             // Jy calculation
             [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
-                // Skip field update in the embedded boundaries
-                if (update_Jy_arr && update_Jy_arr(i, j, k) == 0) { return; }
+                // Zero the current in fully-covered cells (eb_update flag == 0).
+                if (update_Jy_arr && update_Jy_arr(i, j, k) == 0) { Jy(i, j, k) = 0._rt; return; }
 
                 Jy(i, j, k) = one_over_mu0 * (
                     - T_Algo::DownwardDx(Bz, coefs_x, n_coefs_x, i, j, k)
@@ -445,8 +596,8 @@ void FiniteDifferenceSolver::CalculateCurrentAmpereCartesian (
             // Jz calculation
             [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
-                // Skip field update in the embedded boundaries
-                if (update_Jz_arr && update_Jz_arr(i, j, k) == 0) { return; }
+                // Zero the current in fully-covered cells (eb_update flag == 0).
+                if (update_Jz_arr && update_Jz_arr(i, j, k) == 0) { Jz(i, j, k) = 0._rt; return; }
 
                 Jz(i, j, k) = one_over_mu0 * (
                     - T_Algo::DownwardDy(Bx, coefs_y, n_coefs_y, i, j, k)
@@ -462,6 +613,162 @@ void FiniteDifferenceSolver::CalculateCurrentAmpereCartesian (
             amrex::HostDevice::Atomic::Add( &(*cost)[mfi.index()], wt);
         }
     }
+}
+
+template<typename T_Algo>
+void FiniteDifferenceSolver::CalculateCurrentAmpereCartesianECT (
+    ablastr::fields::VectorField& Jfield,
+    ablastr::fields::VectorField const& Bfield,
+    [[maybe_unused]] ablastr::fields::VectorField const& face_areas,
+    std::array< std::unique_ptr<amrex::iMultiFab>,3 > const& eb_update_E,
+    int lev
+)
+{
+    // Flux-weighted ("Form A") Ampere curl for the conformal embedded boundary.
+    // Each B value entering the standard Yee curl is scaled by the open-fluid
+    // fraction of the cut face it lives on, frac = face_areas / (full face area),
+    // so curl(B) = J is a signed sum of open-face fluxes. Covered faces have
+    // face_areas = 0 -> frac = 0 -> they drop out, so no separate covered-B fill
+    // is needed. On interior edges every frac = 1 and each weighted difference
+    // reduces termwise to the standard Yee stencil (inv_d * (B_a - B_b)), so this
+    // matches CalculateCurrentAmpereCartesian byte-for-byte away from the wall.
+    //
+    // The open-face-area weighting is only well defined with the face_areas field
+    // in 3D, where face_areas[0/1/2] are the genuine cut areas of the Bx/By/Bz
+    // faces. In 2D (WARPX_DIM_XZ) only face_areas[1] (the out-of-plane By face) is
+    // an area; the in-plane Bx/Bz live on edges whose open fraction lives in
+    // edge_lengths, not face_areas. Since the validated Form A scheme is 3D
+    // (Docs/eb_fill_review/cut_circulation_3d_poc.py) and the spec passes only
+    // face_areas, the weighted path is restricted to 3D; in 2D we fall back to the
+    // standard masked Yee curl so nothing spurious is emitted. See report notes.
+#if defined(WARPX_DIM_3D)
+    using namespace amrex::literals;
+
+    // Full (uncut) face areas for the open-fraction normalization, from the cell
+    // sizes at this level: Bx face = dy*dz, By face = dx*dz, Bz face = dx*dy.
+    amrex::GpuArray<amrex::Real, 3> dx_lev{};
+    {
+        const auto cs = WarpX::GetInstance().Geom(lev).CellSizeArray();
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) { dx_lev[d] = cs[d]; }
+    }
+    amrex::Real const inv_full_area_x = 1._rt / (dx_lev[1]*dx_lev[2]); // 1/(dy*dz)
+    amrex::Real const inv_full_area_y = 1._rt / (dx_lev[0]*dx_lev[2]); // 1/(dx*dz)
+    amrex::Real const inv_full_area_z = 1._rt / (dx_lev[0]*dx_lev[1]); // 1/(dx*dy)
+
+    // for the profiler
+    amrex::LayoutData<amrex::Real>* cost = WarpX::getCosts(lev);
+
+    // Loop through the grids, and over the tiles within each grid
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for ( MFIter mfi(*Jfield[0], TilingIfNotGPU()); mfi.isValid(); ++mfi ) {
+        if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers) {
+            amrex::Gpu::synchronize();
+        }
+        auto wt = static_cast<amrex::Real>(amrex::second());
+
+        // Extract field data for this grid/tile
+        Array4<Real> const &Jx = Jfield[0]->array(mfi);
+        Array4<Real> const &Jy = Jfield[1]->array(mfi);
+        Array4<Real> const &Jz = Jfield[2]->array(mfi);
+        Array4<Real const> const &Bx = Bfield[0]->const_array(mfi);
+        Array4<Real const> const &By = Bfield[1]->const_array(mfi);
+        Array4<Real const> const &Bz = Bfield[2]->const_array(mfi);
+
+        // Open cut-face areas (SI m^2), B-staggered like the B components above.
+        Array4<Real const> const &Sx = face_areas[0]->const_array(mfi);
+        Array4<Real const> const &Sy = face_areas[1]->const_array(mfi);
+        Array4<Real const> const &Sz = face_areas[2]->const_array(mfi);
+
+        // Extract structures indicating where the fields
+        // should be updated, given the position of the embedded boundaries.
+        // The plasma current is stored at the same locations as the E-field,
+        // therefore the `eb_update_E` multifab also appropriately specifies
+        // where the plasma current should be calculated.
+        amrex::Array4<int> update_Jx_arr, update_Jy_arr, update_Jz_arr;
+        if (EB::enabled()) {
+            update_Jx_arr = eb_update_E[0]->array(mfi);
+            update_Jy_arr = eb_update_E[1]->array(mfi);
+            update_Jz_arr = eb_update_E[2]->array(mfi);
+        }
+
+        // Inverse cell sizes (match the inv_d used by the Yee DownwardD stencils,
+        // i.e. coefs_*[0], so the unweighted reduction is bit-identical).
+        Real const inv_dx = 1._rt / dx_lev[0];
+        Real const inv_dy = 1._rt / dx_lev[1];
+        Real const inv_dz = 1._rt / dx_lev[2];
+
+        // Extract tileboxes for which to loop with 1 guard cell included
+        Box const& tjx = mfi.tilebox(Jfield[0]->ixType().toIntVect(), IntVect(1));
+        Box const& tjy = mfi.tilebox(Jfield[1]->ixType().toIntVect(), IntVect(1));
+        Box const& tjz = mfi.tilebox(Jfield[2]->ixType().toIntVect(), IntVect(1));
+
+        Real const one_over_mu0 = 1._rt / PhysConst::mu0;
+
+        // Calculate the total current, using the flux-weighted Ampere's law, on the
+        // same grid as the E-field.
+        amrex::ParallelFor(tjx, tjy, tjz,
+
+            // Jx calculation: circulates the open-face fluxes of Bz (along y) and
+            // By (along z). frac_z = Sz/(dx*dy), frac_y = Sy/(dx*dz).
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+
+                // Zero the current in fully-covered cells (eb_update flag == 0):
+                // no plasma current inside the conductor (follows the update_E flag).
+                if (update_Jx_arr && update_Jx_arr(i, j, k) == 0) { Jx(i, j, k) = 0._rt; return; }
+
+                Jx(i, j, k) = one_over_mu0 * (
+                      inv_dy * ( Sz(i, j  , k) * inv_full_area_z * Bz(i, j  , k)
+                               - Sz(i, j-1, k) * inv_full_area_z * Bz(i, j-1, k) )
+                    - inv_dz * ( Sy(i, j, k  ) * inv_full_area_y * By(i, j, k  )
+                               - Sy(i, j, k-1) * inv_full_area_y * By(i, j, k-1) )
+                );
+            },
+
+            // Jy calculation: circulates the open-face fluxes of Bx (along z) and
+            // Bz (along x). frac_x = Sx/(dy*dz), frac_z = Sz/(dx*dy).
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+
+                // Zero the current in fully-covered cells (eb_update flag == 0).
+                if (update_Jy_arr && update_Jy_arr(i, j, k) == 0) { Jy(i, j, k) = 0._rt; return; }
+
+                Jy(i, j, k) = one_over_mu0 * (
+                      inv_dz * ( Sx(i, j, k  ) * inv_full_area_x * Bx(i, j, k  )
+                               - Sx(i, j, k-1) * inv_full_area_x * Bx(i, j, k-1) )
+                    - inv_dx * ( Sz(i  , j, k) * inv_full_area_z * Bz(i  , j, k)
+                               - Sz(i-1, j, k) * inv_full_area_z * Bz(i-1, j, k) )
+                );
+            },
+
+            // Jz calculation: circulates the open-face fluxes of By (along x) and
+            // Bx (along y). frac_y = Sy/(dx*dz), frac_x = Sx/(dy*dz).
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+
+                // Zero the current in fully-covered cells (eb_update flag == 0).
+                if (update_Jz_arr && update_Jz_arr(i, j, k) == 0) { Jz(i, j, k) = 0._rt; return; }
+
+                Jz(i, j, k) = one_over_mu0 * (
+                      inv_dx * ( Sy(i  , j, k) * inv_full_area_y * By(i  , j, k)
+                               - Sy(i-1, j, k) * inv_full_area_y * By(i-1, j, k) )
+                    - inv_dy * ( Sx(i, j  , k) * inv_full_area_x * Bx(i, j  , k)
+                               - Sx(i, j-1, k) * inv_full_area_x * Bx(i, j-1, k) )
+                );
+            }
+        );
+
+        if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
+        {
+            amrex::Gpu::synchronize();
+            wt = static_cast<amrex::Real>(amrex::second()) - wt;
+            amrex::HostDevice::Atomic::Add( &(*cost)[mfi.index()], wt);
+        }
+    }
+#else
+    // 2D (XZ): face_areas alone does not carry the in-plane open fractions, so use
+    // the standard masked Yee curl (see comment above).
+    CalculateCurrentAmpereCartesian<T_Algo>(Jfield, Bfield, eb_update_E, lev);
+#endif
 }
 #endif
 
@@ -737,7 +1044,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 const Real rho_val = Interp(rho, nodal, Er_stag, coarsen, i, j, 0, 0);
 
                 if (rho_val < rho_floor && holmstrom_vacuum_region) {
-                    Er(i, j, 0) = 0._rt;
+                    if (include_external_fields) {
+                        Er(i, j, 0) = Er_ext(i, j, 0);
+                    } else {
+                        Er(i, j, 0) = 0._rt;
+                    }
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
                     // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
@@ -756,6 +1067,12 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                 // Add resistivity only if E field value is used to update B
                 if (solve_for_Faraday) {
+                    // the embedded-boundary Dirichlet mirror of rho is
+                    // negative inside the conductor: keep the resistivity
+                    // parsers on their physical domain
+                    // |rho|: eta on the covered/mirror side uses the reflected
+                    // plasma density and is never driven negative (see 3D notes).
+                    const Real rho_val_eta = std::abs(rho_val);
                     Real jtot_val = 0._rt;
                     if (resistivity_has_J_dependence) {
                         // Interpolate current to appropriate staggering to match E field
@@ -765,7 +1082,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         jtot_val = std::sqrt(jr_val*jr_val + jtheta_val*jtheta_val + jz_val*jz_val);
                     }
 
-                    Er(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jr(i, j, 0);
+                    Er(i, j, 0) += eta(rho_val_eta, jtot_val, t_new) * Jr(i, j, 0);
 
                     if (include_hyper_resistivity_term) {
 
@@ -783,11 +1100,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         auto nabla2Jr = T_Algo::Dr_rDr_over_r(Jr, r, dr, coefs_r, n_coefs_r, i, j, 0, 0)
                             + T_Algo::Dzz(Jr, coefs_z, n_coefs_z, i, j, 0, 0) - Jr(i, j, 0)/(r*r);
 
-                        Er(i, j, 0) -= eta_h(rho_val, btot_val) * nabla2Jr;
+                        Er(i, j, 0) -= eta_h(rho_val_eta, btot_val) * nabla2Jr;
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_external_fields) {
                     Er(i, j, 0) -= Er_ext(i, j, 0);
                 }
             },
@@ -810,7 +1127,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 const Real rho_val = Interp(rho, nodal, Etheta_stag, coarsen, i, j, 0, 0);
 
                 if (rho_val < rho_floor && holmstrom_vacuum_region) {
-                    Etheta(i, j, 0) = 0._rt;
+                    if (include_external_fields) {
+                        Etheta(i, j, 0) = Etheta_ext(i, j, 0);
+                    } else {
+                        Etheta(i, j, 0) = 0._rt;
+                    }
                 } else {
                     // Get the gradient of the electron pressure
                     // -> d/dt = 0 for m = 0
@@ -827,6 +1148,12 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                 // Add resistivity only if E field value is used to update B
                 if (solve_for_Faraday) {
+                    // the embedded-boundary Dirichlet mirror of rho is
+                    // negative inside the conductor: keep the resistivity
+                    // parsers on their physical domain
+                    // |rho|: eta on the covered/mirror side uses the reflected
+                    // plasma density and is never driven negative (see 3D notes).
+                    const Real rho_val_eta = std::abs(rho_val);
                     Real jtot_val = 0._rt;
                     if(resistivity_has_J_dependence) {
                         // Interpolate current to appropriate staggering to match E field
@@ -836,7 +1163,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         jtot_val = std::sqrt(jr_val*jr_val + jtheta_val*jtheta_val + jz_val*jz_val);
                     }
 
-                    Etheta(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jtheta(i, j, 0);
+                    Etheta(i, j, 0) += eta(rho_val_eta, jtot_val, t_new) * Jtheta(i, j, 0);
 
                     if (include_hyper_resistivity_term) {
 
@@ -857,11 +1184,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                                 + T_Algo::Dzz(Jtheta, coefs_z, n_coefs_z, i, j, 0, 0) - Jtheta(i, j, 0)/(r*r);
                         }
 
-                        Etheta(i, j, 0) -= eta_h(rho_val, btot_val) * nabla2Jtheta;
+                        Etheta(i, j, 0) -= eta_h(rho_val_eta, btot_val) * nabla2Jtheta;
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_external_fields) {
                     Etheta(i, j, 0) -= Etheta_ext(i, j, 0);
                 }
             },
@@ -876,7 +1203,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, 0, 0);
 
                 if (rho_val < rho_floor && holmstrom_vacuum_region) {
-                    Ez(i, j, 0) = 0._rt;
+                    if (include_external_fields) {
+                        Ez(i, j, 0) = Ez_ext(i, j, 0);
+                    } else {
+                        Ez(i, j, 0) = 0._rt;
+                    }
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
                     // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
@@ -895,6 +1226,12 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                 // Add resistivity only if E field value is used to update B
                 if (solve_for_Faraday) {
+                    // the embedded-boundary Dirichlet mirror of rho is
+                    // negative inside the conductor: keep the resistivity
+                    // parsers on their physical domain
+                    // |rho|: eta on the covered/mirror side uses the reflected
+                    // plasma density and is never driven negative (see 3D notes).
+                    const Real rho_val_eta = std::abs(rho_val);
                     Real jtot_val = 0._rt;
                     if (resistivity_has_J_dependence) {
                         // Interpolate current to appropriate staggering to match E field
@@ -904,7 +1241,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         jtot_val = std::sqrt(jr_val*jr_val + jtheta_val*jtheta_val + jz_val*jz_val);
                     }
 
-                    Ez(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jz(i, j, 0);
+                    Ez(i, j, 0) += eta(rho_val_eta, jtot_val, t_new) * Jz(i, j, 0);
 
                     if (include_hyper_resistivity_term) {
 
@@ -924,17 +1261,21 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         if (r > 0.5_rt*dr) {
                             nabla2Jz += T_Algo::Dr_rDr_over_r(Jz, r, dr, coefs_r, n_coefs_r, i, j, 0, 0);
                         } else {
-                            // Special handling of the hyper-resistivity term on axis to avoid division by zero
-                            // and ensure that Jz remains well-behaved on axis for m=0 mode
-                            // This works since there is a symmetry condition on axis that cancels the geometric 1/r term
-                            nabla2Jz += T_Algo::Drr(Jz, coefs_r, n_coefs_r, i, j, 0, 0);
+                            // On axis the geometric term does not cancel: by
+                            // L'Hopital, (1/r) d/dr(r dJz/dr) -> 2 d2Jz/dr2
+                            // as r -> 0 (dJz/dr vanishes on axis for m=0), so
+                            // the radial part is twice the second derivative.
+                            // The even axis parity Jz(-dr) = Jz(dr) gives the
+                            // ghost-free form 2 * 2*(Jz(dr) - Jz(0))/dr^2.
+                            const Real inv_dr2 = coefs_r[0]*coefs_r[0];
+                            nabla2Jz += 4._rt*(Jz(i+1, j, 0) - Jz(i, j, 0))*inv_dr2;
                         }
 
-                        Ez(i, j, 0) -= eta_h(rho_val, btot_val) * nabla2Jz;
+                        Ez(i, j, 0) -= eta_h(rho_val_eta, btot_val) * nabla2Jz;
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_external_fields) {
                     Ez(i, j, 0) -= Ez_ext(i, j, 0);
                 }
             }
@@ -994,8 +1335,97 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 
     const bool holmstrom_vacuum_region = hybrid_model->m_holmstrom_vacuum_region;
 
+    // isotropized hyper-resistivity Laplacian (Mehrstellen / Patra-Karttunen).
+    // LaplacianIsotropic is a centered compact stencil keyed off the field's own
+    // neighbours, so it is correct for both the Yee (edge-centered) and the
+    // collocated (nodal) staggerings with no change.
+    const bool iso_hyper = hybrid_model->m_isotropic_hyper_resistivity;
+    // Near-wall downgrade of the isotropic Laplacian (staggered conformal
+    // path): within a corner reach of the level set the Mehrstellen stencil's
+    // diagonal J reads land on EB-touching edges the constitutive PEC zeroes
+    // (and no mirror fill sets on this path); fall back to the compact
+    // cardinal-only stencil there. See m_isotropic_hyper_wall_compact.
+    const bool iso_wall_compact = hybrid_model->m_isotropic_hyper_wall_compact
+        && EB::enabled()
+        && WarpX::UseConformalEBSolve()
+        && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated;
+    // isotropized resistive diffusion (corner-curl E correction). Two stencils:
+    // the Yee corner (one-sided Faraday UpwardD) and the nodal corner (wide centered
+    // Faraday UpwardD); the call sites below select via T_Algo. Both isotropize the
+    // in-plane resistive diffusion of the out-of-plane B and preserve div(B) exactly.
+    const bool iso_resistivity = hybrid_model->m_isotropic_resistivity;
+    // isotropized electron-pressure gradient (transverse-smoothed staggered
+    // difference; Yee and nodal variants selected via T_Algo). Only evaluated
+    // on the !solve_for_Faraday path, so its O(h^2) discrete-curl defect can
+    // never feed the B integration (see IsotropicOperators.H).
+    const bool iso_gradient = hybrid_model->m_isotropic_gradient;
+    const bool nodal_grid = std::is_same_v<T_Algo, CartesianNodalAlgorithm>;
+    // Smooth holmstrom vacuum blend, ABOVE-floor window form: below the floor
+    // the legacy vacuum branch holds exactly (Hall fully off -- the binary
+    // cutoff is what protects the sub-floor region from whistler stiffness);
+    // on rho in [rho_floor, width*rho_floor] the Hall/pressure (divided-by-
+    // rho) content of E is ramped in with
+    //     w = ((rho - rho_floor) / ((width-1)*rho_floor))^pow,
+    // blending from the vacuum value to the full Ohm's law, so the staggered
+    // components no longer flip independently at the seam and the stiff Hall
+    // physics fades in over the low-density band (where the Yee liftoff
+    // erupts, n ~ 3x floor) instead of switching on at full strength one cell
+    // above the floor. The purely diffusive resistive/hyper-resistive terms
+    // (added below) are never gated. pow <= 0 keeps the legacy binary switch.
+    // (The below-floor ramp variant was measured to DESTABILIZE: it feeds
+    // partial Hall into the sub-floor region, choke 414 vs baseline 1594.)
+    const amrex::Real holmstrom_blend_pow = hybrid_model->m_holmstrom_blend_pow;
+    const amrex::Real holmstrom_blend_width = hybrid_model->m_holmstrom_blend_width;
+    const bool holmstrom_blend = holmstrom_vacuum_region && (holmstrom_blend_pow > 0._rt)
+        && (holmstrom_blend_width > 1._rt);
+    const amrex::Real inv_blend_range = 1._rt/((holmstrom_blend_width - 1._rt)*rho_floor);
+    // Sampling mode of the decision density for the vacuum switch/blend weight:
+    // 0 = per-edge average (legacy), 1 = endpoint-min nodal (single-valued per
+    // node, vacuum-favoring), 2 = cell-centered average (a single
+    // piecewise-constant-per-cell decision for all three E components of an
+    // index -- no per-component half-shifts at the plasma/vacuum seam).
+    const int switch_mode = hybrid_model->m_holmstrom_switch_mode;
+    const amrex::Real inv_mu0 = 1._rt/PhysConst::mu0;
+    amrex::GpuArray<amrex::Real, 3> dx_arr{};
+    amrex::GpuArray<amrex::Real, 3> h2{};
+    amrex::GpuArray<amrex::Real, 3> inv_h2{};
+    {
+        const auto dx_lev = WarpX::GetInstance().Geom(lev).CellSizeArray();
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            dx_arr[d] = dx_lev[d];
+            h2[d] = dx_lev[d]*dx_lev[d];
+            inv_h2[d] = 1._rt/h2[d];
+        }
+    }
+    // Near-EB fallback plumbing of the isotropic-operators PR (#7040): the
+    // per-point guards below downgrade to the standard compact stencils where
+    // iso_phi says the point is within a corner reach of the level set
+    // (diagonal reads reach sqrt(SPACEDIM) cells; +0.5 covers the half-cell
+    // staggering offset of the level-set sample at any E component). The
+    // mirror fills keep the wide reads valid near the wall (the upstream
+    // per-point compact fallback is permanently disabled on this lineage),
+    // but the staggered-conformal constitutive-PEC path ZEROES EB-touching
+    // edges instead of filling them, so there the downgrade engages via
+    // isotropic_hyper_wall_compact (default on; covering the corner-curl and
+    // gradient reads as well as the Laplacian).
+    amrex::Real h_max_iso = dx_arr[0];
+    for (int d = 1; d < AMREX_SPACEDIM; ++d) { h_max_iso = std::max(h_max_iso, dx_arr[d]); }
+    const amrex::Real d_iso_compact =
+        (std::sqrt(static_cast<amrex::Real>(AMREX_SPACEDIM)) + 0.5_rt) * h_max_iso;
+    const bool iso_any = iso_hyper || iso_resistivity || iso_gradient;
+    amrex::MultiFab const* iso_phi_mf =
+        (iso_any && EB::enabled() && iso_wall_compact)
+        ? WarpX::GetInstance().m_fields.get(FieldType::distance_to_eb, lev)
+        : nullptr;
+#if defined(WARPX_DIM_1D_Z)
+    // only consumed by the 3D / 2D XZ isotropic upgrades below
+    amrex::ignore_unused(iso_hyper, iso_resistivity, iso_gradient, nodal_grid,
+                         inv_mu0, dx_arr, h2, inv_h2, d_iso_compact);
+#endif
+
     auto & warpx = WarpX::GetInstance();
     const amrex::Real t_new = warpx.gett_new(lev);
+
     ablastr::fields::VectorField Bfield_external, Efield_external;
     if (include_external_fields) {
         Bfield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_external, lev);
@@ -1065,23 +1495,48 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             Bz_ext = Bfield_external[2]->array(mfi);
         }
 
+        // EB-aware nodal interpolation of the Hall J x B: exclude covered edges/faces
+        // (update mask == 0) so covered-cell J/B values do not pollute the near-wall
+        // nodal J x B (see InterpMasked). eb_update_E masks the currents (edge), the
+        // B-update flags mask the self magnetic field (face).
+        const bool hall_eb = EB::enabled();
+        amrex::Array4<int const> jxm, jym, jzm, bxm, bym, bzm;
+        if (hall_eb) {
+            jxm = eb_update_E[0]->const_array(mfi);
+            jym = eb_update_E[1]->const_array(mfi);
+            jzm = eb_update_E[2]->const_array(mfi);
+            auto const& eb_update_B = WarpX::GetInstance().GetEBUpdateBFlag()[lev];
+            bxm = eb_update_B[0]->const_array(mfi);
+            bym = eb_update_B[1]->const_array(mfi);
+            bzm = eb_update_B[2]->const_array(mfi);
+        }
+
         // Loop over the cells and update the nodal E field
         amrex::ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
             // interpolate the total plasma current to a nodal grid
-            auto const jx_interp = Interp(Jx, Jx_stag, nodal, coarsen, i, j, k, 0);
-            auto const jy_interp = Interp(Jy, Jy_stag, nodal, coarsen, i, j, k, 0);
-            auto const jz_interp = Interp(Jz, Jz_stag, nodal, coarsen, i, j, k, 0);
+            auto const jx_interp = hall_eb ? InterpMasked(Jx, jxm, Jx_stag, nodal, i, j, k, 0)
+                                           : Interp(Jx, Jx_stag, nodal, coarsen, i, j, k, 0);
+            auto const jy_interp = hall_eb ? InterpMasked(Jy, jym, Jy_stag, nodal, i, j, k, 0)
+                                           : Interp(Jy, Jy_stag, nodal, coarsen, i, j, k, 0);
+            auto const jz_interp = hall_eb ? InterpMasked(Jz, jzm, Jz_stag, nodal, i, j, k, 0)
+                                           : Interp(Jz, Jz_stag, nodal, coarsen, i, j, k, 0);
 
             // interpolate the ion current to a nodal grid
-            auto const jix_interp = Interp(Jix, Jx_stag, nodal, coarsen, i, j, k, 0);
-            auto const jiy_interp = Interp(Jiy, Jy_stag, nodal, coarsen, i, j, k, 0);
-            auto const jiz_interp = Interp(Jiz, Jz_stag, nodal, coarsen, i, j, k, 0);
+            auto const jix_interp = hall_eb ? InterpMasked(Jix, jxm, Jx_stag, nodal, i, j, k, 0)
+                                            : Interp(Jix, Jx_stag, nodal, coarsen, i, j, k, 0);
+            auto const jiy_interp = hall_eb ? InterpMasked(Jiy, jym, Jy_stag, nodal, i, j, k, 0)
+                                            : Interp(Jiy, Jy_stag, nodal, coarsen, i, j, k, 0);
+            auto const jiz_interp = hall_eb ? InterpMasked(Jiz, jzm, Jz_stag, nodal, i, j, k, 0)
+                                            : Interp(Jiz, Jz_stag, nodal, coarsen, i, j, k, 0);
 
-            // interpolate the B field to a nodal grid
-            auto Bx_interp = Interp(Bx, Bx_stag, nodal, coarsen, i, j, k, 0);
-            auto By_interp = Interp(By, By_stag, nodal, coarsen, i, j, k, 0);
-            auto Bz_interp = Interp(Bz, Bz_stag, nodal, coarsen, i, j, k, 0);
+            // interpolate the (self) B field to a nodal grid
+            auto Bx_interp = hall_eb ? InterpMasked(Bx, bxm, Bx_stag, nodal, i, j, k, 0)
+                                     : Interp(Bx, Bx_stag, nodal, coarsen, i, j, k, 0);
+            auto By_interp = hall_eb ? InterpMasked(By, bym, By_stag, nodal, i, j, k, 0)
+                                     : Interp(By, By_stag, nodal, coarsen, i, j, k, 0);
+            auto Bz_interp = hall_eb ? InterpMasked(Bz, bzm, Bz_stag, nodal, i, j, k, 0)
+                                     : Interp(Bz, Bz_stag, nodal, coarsen, i, j, k, 0);
 
             if (include_external_fields) {
                 Bx_interp += Interp(Bx_ext, Bx_stag, nodal, coarsen, i, j, k, 0);
@@ -1147,6 +1602,15 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             update_Ez_arr = eb_update_E[2]->array(mfi);
         }
 
+        // Level-set distance for the near-EB fallback of the isotropic
+        // stencils (empty Array4 when no EB or no isotropic option is on:
+        // the kernels then apply the isotropic stencils everywhere)
+        amrex::Array4<amrex::Real const> iso_phi;
+        if (iso_phi_mf) { iso_phi = iso_phi_mf->const_array(mfi); }
+#if defined(WARPX_DIM_1D_Z)
+        amrex::ignore_unused(iso_phi);
+#endif
+
         Array4<Real> Ex_ext, Ey_ext, Ez_ext;
         if (include_external_fields) {
             Ex_ext = Efield_external[0]->array(mfi);
@@ -1171,19 +1635,46 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         amrex::ParallelFor(tex, [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
             // Skip field update in the embedded boundaries
-            if (update_Ex_arr && update_Ex_arr(i, j, k) == 0) { return; }
+            //if (update_Ex_arr && update_Ex_arr(i, j, k) == 0) { return; }
 
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ex_stag, coarsen, i, j, k, 0);
+            // Decision density for the vacuum switch/blend (physics keeps rho_val)
+            const Real rho_dec =
+                (switch_mode == 1) ? NodalSwitchRho(rho, Ex_stag, i, j, k) :
+                (switch_mode == 2) ? CellSwitchRho(rho, Ex_stag, i, j, k) :
+                rho_val;
 
-            if (rho_val < rho_floor && holmstrom_vacuum_region) {
-                Ex(i, j, k) = 0._rt;
+            if (rho_dec < rho_floor && holmstrom_vacuum_region) {
+                if (include_external_fields) {
+                    Ex(i, j, k) = Ex_ext(i, j, k);
+                } else {
+                    Ex(i, j, k) = 0._rt;
+                }
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
-                // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
-                const Real grad_Pe = (!solve_for_Faraday) ?
-                    T_Algo::UpwardDx(Pe, coefs_x, n_coefs_x, i, j, k)
-                    : 0._rt;
+                // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0.
+                // (The isotropized gradient's discrete curl is only O(h^2) small rather
+                // than identically zero, which is benign precisely because this term is
+                // never evaluated on the Faraday path -- see IsotropicOperators.H.)
+                Real grad_Pe = 0._rt;
+                if (!solve_for_Faraday) {
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+                    if (iso_gradient && (!iso_phi || iso_phi(i, j, k) >= d_iso_compact)) {
+                        grad_Pe = nodal_grid
+#if defined(WARPX_DIM_3D)
+                            ? warpx::hybrid_isotropic::UpwardDxIsotropic_3D_Nodal(Pe, i, j, k, h2, inv_h2, coefs_x[0])
+                            : warpx::hybrid_isotropic::UpwardDxIsotropic_3D(Pe, i, j, k, h2, inv_h2, coefs_x[0]);
+#else
+                            ? warpx::hybrid_isotropic::UpwardDxIsotropic_XZ_Nodal(Pe, i, j, k, h2, inv_h2, coefs_x[0])
+                            : warpx::hybrid_isotropic::UpwardDxIsotropic_XZ(Pe, i, j, k, h2, inv_h2, coefs_x[0]);
+#endif
+                    } else
+#endif
+                    {
+                        grad_Pe = T_Algo::UpwardDx(Pe, coefs_x, n_coefs_x, i, j, k);
+                    }
+                }
 
                 // interpolate the nodal neE values to the Yee grid
                 const auto enE_x = Interp(enE, nodal, Ex_stag, coarsen, i, j, k, 0);
@@ -1192,10 +1683,30 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
 
                 Ex(i, j, k) = (enE_x - grad_Pe) / rho_val_limited;
+
+                if (holmstrom_blend) {
+                    // smooth above-floor transition: ramp the Hall/pressure
+                    // content in over [rho_floor, width*rho_floor] and blend
+                    // from the vacuum value (E_ext or 0); the diffusive
+                    // resistive terms added below stay fully on.
+                    const Real s = (rho_dec - rho_floor) * inv_blend_range;
+                    if (s < 1._rt) {
+                        const Real w = std::pow(std::max(s, 0._rt), holmstrom_blend_pow);
+                        const Real vac = include_external_fields ? Ex_ext(i, j, k) : 0._rt;
+                        Ex(i, j, k) = w * Ex(i, j, k) + (1._rt - w) * vac;
+                    }
+                }
             }
 
             // Add resistivity only if E field value is used to update B
             if (solve_for_Faraday) {
+                // The EB Dirichlet mirror of rho is negative inside the conductor.
+                // Feed |rho| (not max(rho,0)) to the resistivity parser so eta is
+                // evaluated at the reflected PLASMA density on the covered side --
+                // the physically correct eta for E = eta*J in the mirror region --
+                // and eta is never driven negative (which would invert the resistive
+                // term and pump energy into the wall).
+                const Real rho_val_eta = std::abs(rho_val);
                 Real jtot_val = 0._rt;
                 if (resistivity_has_J_dependence) {
                     // Interpolate current to appropriate staggering to match E field
@@ -1205,7 +1716,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
                 }
 
-                Ex(i, j, k) += eta(rho_val, jtot_val, t_new) * Jx(i, j, k);
+                // Evaluate the resistivity parser once: the same eta(rho,jtot,t)
+                // is reused below by the corner-curl (iso_resistivity) term.
+                const amrex::Real eta_val = eta(rho_val_eta, jtot_val, t_new);
+
+                Ex(i, j, k) += eta_val * Jx(i, j, k);
 
                 if (include_hyper_resistivity_term) {
 
@@ -1218,15 +1733,42 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         btot_val = std::sqrt(bx_val*bx_val + by_val*by_val + bz_val*bz_val);
                     }
 
-                    auto nabla2Jx = T_Algo::Dxx(Jx, coefs_x, n_coefs_x, i, j, k)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+                    const Real nabla2Jx =
+                        (iso_hyper && (!iso_phi || iso_phi(i, j, k) >= d_iso_compact))
+                        ? warpx::hybrid_isotropic::LaplacianIsotropic(Jx, i, j, k, h2, inv_h2)
+                        : T_Algo::Dxx(Jx, coefs_x, n_coefs_x, i, j, k)
+                          + T_Algo::Dyy(Jx, coefs_y, n_coefs_y, i, j, k)
+                          + T_Algo::Dzz(Jx, coefs_z, n_coefs_z, i, j, k);
+#else
+                    const Real nabla2Jx = T_Algo::Dxx(Jx, coefs_x, n_coefs_x, i, j, k)
                         + T_Algo::Dyy(Jx, coefs_y, n_coefs_y, i, j, k)
                         + T_Algo::Dzz(Jx, coefs_z, n_coefs_z, i, j, k);
+#endif
 
-                    Ex(i, j, k) -= eta_h(rho_val, btot_val) * nabla2Jx;
+                    Ex(i, j, k) -= eta_h(rho_val_eta, btot_val) * nabla2Jx;
                 }
+
+                // Isotropize the in-plane resistive diffusion of the
+                // out-of-plane B (Bz in 3D, By in 2D XZ) via the corner-curl
+                // correction; div(B) preserved (the correction enters only
+                // through E).
+#if defined(WARPX_DIM_3D)
+                if (iso_resistivity && (!iso_phi || iso_phi(i, j, k) >= d_iso_compact)) {
+                    Ex(i, j, k) += eta_val * (nodal_grid
+                        ? warpx::hybrid_isotropic::CornerResistiveEx_3D_Nodal(Bz, i, j, k, dx_arr, inv_mu0)
+                        : warpx::hybrid_isotropic::CornerResistiveEx_3D(Bz, i, j, k, h2, inv_h2, dx_arr, inv_mu0));
+                }
+#elif defined(WARPX_DIM_XZ)
+                if (iso_resistivity && (!iso_phi || iso_phi(i, j, k) >= d_iso_compact)) {
+                    Ex(i, j, k) += eta_val * (nodal_grid
+                        ? warpx::hybrid_isotropic::CornerResistiveEx_XZ_Nodal(By, i, j, k, dx_arr, inv_mu0)
+                        : warpx::hybrid_isotropic::CornerResistiveEx_XZ(By, i, j, k, h2, inv_h2, dx_arr, inv_mu0));
+                }
+#endif
             }
 
-            if (include_external_fields && (rho_val >= rho_floor)) {
+            if (include_external_fields) {
                 Ex(i, j, k) -= Ex_ext(i, j, k);
             }
         });
@@ -1235,19 +1777,40 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         amrex::ParallelFor(tey, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
 
             // Skip field update in the embedded boundaries
-            if (update_Ey_arr && update_Ey_arr(i, j, k) == 0) { return; }
+            //if (update_Ey_arr && update_Ey_arr(i, j, k) == 0) { return; }
 
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ey_stag, coarsen, i, j, k, 0);
+            // Decision density for the vacuum switch/blend (physics keeps rho_val)
+            const Real rho_dec =
+                (switch_mode == 1) ? NodalSwitchRho(rho, Ey_stag, i, j, k) :
+                (switch_mode == 2) ? CellSwitchRho(rho, Ey_stag, i, j, k) :
+                rho_val;
 
-            if (rho_val < rho_floor && holmstrom_vacuum_region) {
-                Ey(i, j, k) = 0._rt;
+            if (rho_dec < rho_floor && holmstrom_vacuum_region) {
+                if (include_external_fields) {
+                    Ey(i, j, k) = Ey_ext(i, j, k);
+                } else {
+                    Ey(i, j, k) = 0._rt;
+                }
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
-                // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
-                const Real grad_Pe = (!solve_for_Faraday) ?
-                    T_Algo::UpwardDy(Pe, coefs_y, n_coefs_y, i, j, k)
-                    : 0._rt;
+                // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0.
+                // (In 2D XZ there is no y derivative, so Ey keeps the plain stencil,
+                // which is identically zero there.)
+                Real grad_Pe = 0._rt;
+                if (!solve_for_Faraday) {
+#if defined(WARPX_DIM_3D)
+                    if (iso_gradient && (!iso_phi || iso_phi(i, j, k) >= d_iso_compact)) {
+                        grad_Pe = nodal_grid
+                            ? warpx::hybrid_isotropic::UpwardDyIsotropic_3D_Nodal(Pe, i, j, k, h2, inv_h2, coefs_y[0])
+                            : warpx::hybrid_isotropic::UpwardDyIsotropic_3D(Pe, i, j, k, h2, inv_h2, coefs_y[0]);
+                    } else
+#endif
+                    {
+                        grad_Pe = T_Algo::UpwardDy(Pe, coefs_y, n_coefs_y, i, j, k);
+                    }
+                }
 
                 // interpolate the nodal neE values to the Yee grid
                 const auto enE_y = Interp(enE, nodal, Ey_stag, coarsen, i, j, k, 1);
@@ -1256,10 +1819,30 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
 
                 Ey(i, j, k) = (enE_y - grad_Pe) / rho_val_limited;
+
+                if (holmstrom_blend) {
+                    // smooth above-floor transition: ramp the Hall/pressure
+                    // content in over [rho_floor, width*rho_floor] and blend
+                    // from the vacuum value (E_ext or 0); the diffusive
+                    // resistive terms added below stay fully on.
+                    const Real s = (rho_dec - rho_floor) * inv_blend_range;
+                    if (s < 1._rt) {
+                        const Real w = std::pow(std::max(s, 0._rt), holmstrom_blend_pow);
+                        const Real vac = include_external_fields ? Ey_ext(i, j, k) : 0._rt;
+                        Ey(i, j, k) = w * Ey(i, j, k) + (1._rt - w) * vac;
+                    }
+                }
             }
 
             // Add resistivity only if E field value is used to update B
             if (solve_for_Faraday) {
+                // The EB Dirichlet mirror of rho is negative inside the conductor.
+                // Feed |rho| (not max(rho,0)) to the resistivity parser so eta is
+                // evaluated at the reflected PLASMA density on the covered side --
+                // the physically correct eta for E = eta*J in the mirror region --
+                // and eta is never driven negative (which would invert the resistive
+                // term and pump energy into the wall).
+                const Real rho_val_eta = std::abs(rho_val);
                 Real jtot_val = 0._rt;
                 if (resistivity_has_J_dependence) {
                     // Interpolate current to appropriate staggering to match E field
@@ -1269,7 +1852,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
                 }
 
-                Ey(i, j, k) += eta(rho_val, jtot_val, t_new) * Jy(i, j, k);
+                // Evaluate the resistivity parser once: the same eta(rho,jtot,t)
+                // is reused below by the corner-curl (iso_resistivity) term.
+                const amrex::Real eta_val = eta(rho_val_eta, jtot_val, t_new);
+
+                Ey(i, j, k) += eta_val * Jy(i, j, k);
 
                 if (include_hyper_resistivity_term) {
 
@@ -1282,15 +1869,35 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         btot_val = std::sqrt(bx_val*bx_val + by_val*by_val + bz_val*bz_val);
                     }
 
-                    auto nabla2Jy = T_Algo::Dxx(Jy, coefs_x, n_coefs_x, i, j, k)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+                    const Real nabla2Jy =
+                        (iso_hyper && (!iso_phi || iso_phi(i, j, k) >= d_iso_compact))
+                        ? warpx::hybrid_isotropic::LaplacianIsotropic(Jy, i, j, k, h2, inv_h2)
+                        : T_Algo::Dxx(Jy, coefs_x, n_coefs_x, i, j, k)
+                          + T_Algo::Dyy(Jy, coefs_y, n_coefs_y, i, j, k)
+                          + T_Algo::Dzz(Jy, coefs_z, n_coefs_z, i, j, k);
+#else
+                    const Real nabla2Jy = T_Algo::Dxx(Jy, coefs_x, n_coefs_x, i, j, k)
                         + T_Algo::Dyy(Jy, coefs_y, n_coefs_y, i, j, k)
                         + T_Algo::Dzz(Jy, coefs_z, n_coefs_z, i, j, k);
+#endif
 
-                    Ey(i, j, k) -= eta_h(rho_val, btot_val) * nabla2Jy;
+                    Ey(i, j, k) -= eta_h(rho_val_eta, btot_val) * nabla2Jy;
                 }
+
+                // Corner-curl isotropization of the resistive diffusion of
+                // Bz (3D only: in 2D XZ the out-of-plane B is By and the
+                // correction is carried by Ex and Ez).
+#if defined(WARPX_DIM_3D)
+                if (iso_resistivity && (!iso_phi || iso_phi(i, j, k) >= d_iso_compact)) {
+                    Ey(i, j, k) += eta_val * (nodal_grid
+                        ? warpx::hybrid_isotropic::CornerResistiveEy_3D_Nodal(Bz, i, j, k, dx_arr, inv_mu0)
+                        : warpx::hybrid_isotropic::CornerResistiveEy_3D(Bz, i, j, k, h2, inv_h2, dx_arr, inv_mu0));
+                }
+#endif
             }
 
-            if (include_external_fields && (rho_val >= rho_floor)) {
+            if (include_external_fields) {
                 Ey(i, j, k) -= Ey_ext(i, j, k);
             }
         });
@@ -1299,19 +1906,43 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         amrex::ParallelFor(tez, [=] AMREX_GPU_DEVICE (int i, int j, int k){
 
             // Skip field update in the embedded boundaries
-            if (update_Ez_arr && update_Ez_arr(i, j, k) == 0) { return; }
+            //if (update_Ez_arr && update_Ez_arr(i, j, k) == 0) { return; }
 
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, k, 0);
+            // Decision density for the vacuum switch/blend (physics keeps rho_val)
+            const Real rho_dec =
+                (switch_mode == 1) ? NodalSwitchRho(rho, Ez_stag, i, j, k) :
+                (switch_mode == 2) ? CellSwitchRho(rho, Ez_stag, i, j, k) :
+                rho_val;
 
-            if (rho_val < rho_floor && holmstrom_vacuum_region) {
-                Ez(i, j, k) = 0._rt;
+            if (rho_dec < rho_floor && holmstrom_vacuum_region) {
+                if (include_external_fields) {
+                    Ez(i, j, k) = Ez_ext(i, j, k);
+                } else {
+                    Ez(i, j, k) = 0._rt;
+                }
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
                 // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
-                const Real grad_Pe = (!solve_for_Faraday) ?
-                    T_Algo::UpwardDz(Pe, coefs_z, n_coefs_z, i, j, k)
-                    : 0._rt;
+                Real grad_Pe = 0._rt;
+                if (!solve_for_Faraday) {
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+                    if (iso_gradient && (!iso_phi || iso_phi(i, j, k) >= d_iso_compact)) {
+                        grad_Pe = nodal_grid
+#if defined(WARPX_DIM_3D)
+                            ? warpx::hybrid_isotropic::UpwardDzIsotropic_3D_Nodal(Pe, i, j, k, h2, inv_h2, coefs_z[0])
+                            : warpx::hybrid_isotropic::UpwardDzIsotropic_3D(Pe, i, j, k, h2, inv_h2, coefs_z[0]);
+#else
+                            ? warpx::hybrid_isotropic::UpwardDzIsotropic_XZ_Nodal(Pe, i, j, k, h2, inv_h2, coefs_z[0])
+                            : warpx::hybrid_isotropic::UpwardDzIsotropic_XZ(Pe, i, j, k, h2, inv_h2, coefs_z[0]);
+#endif
+                    } else
+#endif
+                    {
+                        grad_Pe = T_Algo::UpwardDz(Pe, coefs_z, n_coefs_z, i, j, k);
+                    }
+                }
 
                 // interpolate the nodal neE values to the Yee grid
                 const auto enE_z = Interp(enE, nodal, Ez_stag, coarsen, i, j, k, 2);
@@ -1320,10 +1951,30 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
 
                 Ez(i, j, k) = (enE_z - grad_Pe) / rho_val_limited;
+
+                if (holmstrom_blend) {
+                    // smooth above-floor transition: ramp the Hall/pressure
+                    // content in over [rho_floor, width*rho_floor] and blend
+                    // from the vacuum value (E_ext or 0); the diffusive
+                    // resistive terms added below stay fully on.
+                    const Real s = (rho_dec - rho_floor) * inv_blend_range;
+                    if (s < 1._rt) {
+                        const Real w = std::pow(std::max(s, 0._rt), holmstrom_blend_pow);
+                        const Real vac = include_external_fields ? Ez_ext(i, j, k) : 0._rt;
+                        Ez(i, j, k) = w * Ez(i, j, k) + (1._rt - w) * vac;
+                    }
+                }
             }
 
             // Add resistivity only if E field value is used to update B
             if (solve_for_Faraday) {
+                // The EB Dirichlet mirror of rho is negative inside the conductor.
+                // Feed |rho| (not max(rho,0)) to the resistivity parser so eta is
+                // evaluated at the reflected PLASMA density on the covered side --
+                // the physically correct eta for E = eta*J in the mirror region --
+                // and eta is never driven negative (which would invert the resistive
+                // term and pump energy into the wall).
+                const Real rho_val_eta = std::abs(rho_val);
                 Real jtot_val = 0._rt;
                 if (resistivity_has_J_dependence) {
                     // Interpolate current to appropriate staggering to match E field
@@ -1333,7 +1984,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     jtot_val = std::sqrt(jx_val*jx_val + jy_val*jy_val + jz_val*jz_val);
                 }
 
-                Ez(i, j, k) += eta(rho_val, jtot_val, t_new) * Jz(i, j, k);
+                // Evaluate the resistivity parser once: the same eta(rho,jtot,t)
+                // is reused below by the corner-curl (iso_resistivity) term.
+                const amrex::Real eta_val = eta(rho_val_eta, jtot_val, t_new);
+
+                Ez(i, j, k) += eta_val * Jz(i, j, k);
 
                 if (include_hyper_resistivity_term) {
 
@@ -1346,15 +2001,35 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         btot_val = std::sqrt(bx_val*bx_val + by_val*by_val + bz_val*bz_val);
                     }
 
-                    auto nabla2Jz = T_Algo::Dxx(Jz, coefs_x, n_coefs_x, i, j, k)
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+                    const Real nabla2Jz =
+                        (iso_hyper && (!iso_phi || iso_phi(i, j, k) >= d_iso_compact))
+                        ? warpx::hybrid_isotropic::LaplacianIsotropic(Jz, i, j, k, h2, inv_h2)
+                        : T_Algo::Dxx(Jz, coefs_x, n_coefs_x, i, j, k)
+                          + T_Algo::Dyy(Jz, coefs_y, n_coefs_y, i, j, k)
+                          + T_Algo::Dzz(Jz, coefs_z, n_coefs_z, i, j, k);
+#else
+                    const Real nabla2Jz = T_Algo::Dxx(Jz, coefs_x, n_coefs_x, i, j, k)
                         + T_Algo::Dyy(Jz, coefs_y, n_coefs_y, i, j, k)
                         + T_Algo::Dzz(Jz, coefs_z, n_coefs_z, i, j, k);
+#endif
 
-                    Ez(i, j, k) -= eta_h(rho_val, btot_val) * nabla2Jz;
+                    Ez(i, j, k) -= eta_h(rho_val_eta, btot_val) * nabla2Jz;
                 }
+
+                // Corner-curl isotropization of the resistive diffusion of
+                // the out-of-plane By (2D XZ only: in 3D the out-of-plane B
+                // is Bz and the correction is carried by Ex and Ey).
+#if defined(WARPX_DIM_XZ)
+                if (iso_resistivity && (!iso_phi || iso_phi(i, j, k) >= d_iso_compact)) {
+                    Ez(i, j, k) += eta_val * (nodal_grid
+                        ? warpx::hybrid_isotropic::CornerResistiveEz_XZ_Nodal(By, i, j, k, dx_arr, inv_mu0)
+                        : warpx::hybrid_isotropic::CornerResistiveEz_XZ(By, i, j, k, h2, inv_h2, dx_arr, inv_mu0));
+                }
+#endif
             }
 
-            if (include_external_fields && (rho_val >= rho_floor)) {
+            if (include_external_fields) {
                 Ez(i, j, k) -= Ez_ext(i, j, k);
             }
         });

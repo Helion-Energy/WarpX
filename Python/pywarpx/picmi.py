@@ -2175,6 +2175,137 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         Flag to determine handling of vacuum region (where rho < n_floor*q_e). Setting to True will solve the simplified Generalized Ohm's Law dropping the Hall and pressure terms in the vacuum region. See `Holmstrom (2013) <https://arxiv.org/abs/1301.0272v1>`_.
         This flag is useful for suppressing vacuum region fluctuations. A large resistivity value must be used when rho <= rho_floor.
 
+    use_conformal_eb: bool, default=False
+        If True, use the conformal embedded-boundary wall treatment instead of
+        the stair-step approximation. On a **collocated** grid the update masks
+        are keyed off the nodal signed level set and the covered magnetic-field
+        nodes are rewritten after each Faraday push by level-set mirror-image
+        interpolation (normal odd, tangential even); the mirror band is sized
+        automatically to the particle-shape gather reach and every fill ends
+        with a built-in correction that zeroes the central-difference div(B)
+        at the fluid nodes reading the covered band. On a **staggered** (Yee)
+        grid the B-field push uses the enlarged-cell technique (ECT) Faraday
+        update on cut faces/edges instead. Requires an embedded boundary and a
+        3D or 2D (XZ) Cartesian grid.
+
+    conformal_ect_curvature: bool, default=False
+        If True, apply the along-edge curvature correction to the conformal-ECT
+        Faraday circulation: each cut edge's electric field is Taylor-shifted
+        from the full-edge center to the centroid of its uncovered segment
+        before forming the per-face EMF. Without it the circulation is a
+        1st-order midpoint quadrature over the curved contour, which caps the
+        conformal B push at ~1st order at a curved wall even when ``curl(B)``
+        feeding the plasma current is already 2nd order. Requires
+        ``use_conformal_eb`` and a staggered (Yee) grid; opt-in (default off is
+        byte-identical).
+
+    conformal_ect_j: bool, default=False
+        If True, compute the Ampere plasma current ``J = curl(B) / mu0`` with the
+        flux-weighted ("Form A") conformal-EB curl: each ``B`` value in the Yee
+        curl is scaled by the open-fluid fraction of the cut face it lives on
+        (``face_areas`` / full face area). The result is a signed sum of open-face
+        fluxes and is discretely divergence-consistent across the cut wall, so no
+        covered-B mirror fill is needed.
+        Covered faces (zero open area) drop out automatically. Requires
+        ``use_conformal_eb`` on a staggered (Yee) embedded-boundary grid; opt-in
+        (default off is byte-identical, the standard masked Yee curl is used).
+
+    conformal_pec_zero_ej: bool, default=False
+        If True, impose the perfect-conductor condition constitutively on the
+        staggered conformal (ECT) path: the Ohm's-law ``E`` and the Ampere
+        plasma current ``J`` are zeroed on every EB-touching edge, replacing
+        the level-set mirror fills; external vector-potential fields are
+        likewise zeroed inside the conductor. The stable, recommended wall for
+        this path; requires ``use_conformal_eb`` on a staggered (Yee) grid.
+
+
+    divb_clean_alpha: float, default=0
+        Coefficient of the Marder-like diffusive div(B) clean applied once per
+        step in a near-wall embedded-boundary band, as a fraction of the
+        explicit grad(div) CFL cap (stable below ~1/6 in 3D; ~0.15 is a
+        validated sweet spot). 0 (default) disables the clean.
+
+    divj_clean_alpha: float, default=0
+        Same diffusive divergence clean applied to the total Ampere current
+        (never an ion species). 0 (default) disables.
+
+    divb_clean_iters: int, default=5
+        Number of grad(div) sweeps per application of the divergence clean.
+
+    divb_clean_band_cells: float, default=4
+        Outer cutoff of the divergence-clean band, in cells from the wall.
+        <= 0 selects the unbounded mode (correction on every uncovered node;
+        strictly dissipative of the global divergence norm, no-op where the
+        field is already solenoidal). A hard cutoff transports divergence to
+        the band edge and accumulates it just outside, so unbounded is
+        preferred when the divergence source is strong.
+
+    divb_clean_inner_div_cells: float, default=1
+        Inner cutoff (in cells from the wall) below which the computed
+        divergence is dropped. The default trusts the divergence only where
+        its +/-1 stencil is fully in the fluid; 0 keeps it on every uncovered
+        node (the wall-layer mode).
+
+    divb_clean_inner_corr_cells: float, default=2
+        Inner cutoff (in cells from the wall) below which no correction is
+        applied. The default keeps the full +/-2 grad(div) stencil in the
+        fluid (order-preserving on a smooth wall); 0 corrects every uncovered
+        band node (the wall-layer mode, for damping the divergence instability
+        a sharp re-entrant wall corner pumps).
+
+    holmstrom_blend_pow: float, default=0 (off)
+        If > 0, smooth the Holmstrom vacuum switch with an above-floor power
+        window: on ``rho in [rho_floor, holmstrom_blend_width*rho_floor]`` the
+        Hall/pressure (divided-by-rho) content of the Ohm's-law E is weighted
+        by ``w = ((rho-rho_floor)/((width-1)*rho_floor))**pow`` and blended
+        from the vacuum value, so the stiff Hall physics fades in over the
+        low-density band instead of switching on at full strength one cell
+        above the floor. Below the floor the field stays purely diffusive.
+
+    holmstrom_blend_width: float, default=2
+        Upper edge of the blend window in units of the density floor.
+
+    holmstrom_switch_mode: {'edge', 'node', 'cell'}, default='edge'
+        Sampling mode of the density that decides the Holmstrom vacuum switch
+        and the blend weight. 'edge' (default): each staggered E component uses
+        its own half-cell-shifted edge average (the components of a cell can
+        take inconsistent branches at the plasma/vacuum seam). 'node': the
+        minimum of the nodal rho at the edge endpoints (vacuum-favoring; the
+        stiff Hall branch runs only where every endpoint is above the floor).
+        'cell': rho averaged to the cell center decides for all three E
+        components of that index (a single piecewise-constant-per-cell decision
+        field, no per-component half-shifts). The physics division by rho and
+        the resistivity evaluation are unchanged. Cartesian only.
+
+    dive_seam_alpha: float, default=0 (off)
+        Density-banded Marder clean of the Ohm's-law E at the n_floor seam,
+        applied per substage on staggered grids: E += alpha*grad(div(E))
+        restricted to edges with rho <= dive_seam_band*rho_floor, diffusing the
+        divergence-carrying per-component-inconsistent E content at the
+        plasma/vacuum seam before Faraday integrates it into B. Curl-preserving
+        away from the window edge. 3D/XZ Cartesian only.
+
+    dive_seam_iters: int, default=1
+        Sweeps of the seam E clean per substage.
+
+    dive_seam_band: float, default=4
+        Upper edge of the seam clean window in units of the density floor.
+
+
+    isotropic_operators: bool, default=False
+        Evaluate the dissipative/gradient operators of the Ohm's law with
+        their isotropized stencils: the hyper-resistivity Laplacian uses the
+        isotropic Mehrstellen (2D) / Patra-Karttunen (3D) stencil, the
+        resistive term gains the corner-curl correction (applied through E,
+        so the Faraday curl is unchanged and div(B) stays exactly zero), and
+        the electron-pressure gradient uses the transverse-smoothed staggered
+        difference. All three cancel the same fourfold (cos 4*theta) grid
+        anisotropy, which otherwise imprints an m=4 mode on diffusing or
+        pinching fields; they are enabled together (fully isotropic on cubic
+        cells; Cartesian geometries). Near an embedded boundary the hybrid EB
+        boundary layer mirror-fills the wide-stencil bands to the diagonal
+        reach, so the operators keep their isotropic form at the wall.
+
     Jx/y/z_external_function: str
         Function of space and time specifying external (non-plasma) currents.
 
@@ -2230,6 +2361,23 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         substep_max_growth=None,
         max_substep_attempts=None,
         holmstrom_vacuum_region=None,
+        use_conformal_eb=None,
+        conformal_ect_curvature=None,
+        conformal_ect_j=None,
+        conformal_pec_zero_ej=None,
+        divb_clean_alpha=None,
+        divj_clean_alpha=None,
+        divb_clean_iters=None,
+        divb_clean_band_cells=None,
+        divb_clean_inner_div_cells=None,
+        divb_clean_inner_corr_cells=None,
+        holmstrom_blend_pow=None,
+        holmstrom_blend_width=None,
+        holmstrom_switch_mode=None,
+        dive_seam_alpha=None,
+        dive_seam_iters=None,
+        dive_seam_band=None,
+        isotropic_operators=None,
         Jx_external_function=None,
         Jy_external_function=None,
         Jz_external_function=None,
@@ -2256,6 +2404,24 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.max_substep_attempts = max_substep_attempts
 
         self.holmstrom_vacuum_region = holmstrom_vacuum_region
+
+        self.use_conformal_eb = use_conformal_eb
+        self.conformal_ect_curvature = conformal_ect_curvature
+        self.conformal_ect_j = conformal_ect_j
+        self.conformal_pec_zero_ej = conformal_pec_zero_ej
+        self.divb_clean_alpha = divb_clean_alpha
+        self.divj_clean_alpha = divj_clean_alpha
+        self.divb_clean_iters = divb_clean_iters
+        self.divb_clean_band_cells = divb_clean_band_cells
+        self.divb_clean_inner_div_cells = divb_clean_inner_div_cells
+        self.divb_clean_inner_corr_cells = divb_clean_inner_corr_cells
+        self.holmstrom_blend_pow = holmstrom_blend_pow
+        self.holmstrom_blend_width = holmstrom_blend_width
+        self.holmstrom_switch_mode = holmstrom_switch_mode
+        self.dive_seam_alpha = dive_seam_alpha
+        self.dive_seam_iters = dive_seam_iters
+        self.dive_seam_band = dive_seam_band
+        self.isotropic_operators = isotropic_operators
 
         self.Jx_external_function = Jx_external_function
         self.Jy_external_function = Jy_external_function
@@ -2307,6 +2473,27 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         pywarpx.hybridpicmodel.substep_max_growth = self.substep_max_growth
         pywarpx.hybridpicmodel.max_substep_attempts = self.max_substep_attempts
         pywarpx.hybridpicmodel.holmstrom_vacuum_region = self.holmstrom_vacuum_region
+        pywarpx.hybridpicmodel.use_conformal_eb = self.use_conformal_eb
+        pywarpx.hybridpicmodel.conformal_ect_curvature = self.conformal_ect_curvature
+        pywarpx.hybridpicmodel.conformal_ect_j = self.conformal_ect_j
+        pywarpx.hybridpicmodel.conformal_pec_zero_ej = self.conformal_pec_zero_ej
+        pywarpx.hybridpicmodel.divb_clean_alpha = self.divb_clean_alpha
+        pywarpx.hybridpicmodel.divj_clean_alpha = self.divj_clean_alpha
+        pywarpx.hybridpicmodel.divb_clean_iters = self.divb_clean_iters
+        pywarpx.hybridpicmodel.divb_clean_band_cells = self.divb_clean_band_cells
+        pywarpx.hybridpicmodel.divb_clean_inner_div_cells = (
+            self.divb_clean_inner_div_cells
+        )
+        pywarpx.hybridpicmodel.divb_clean_inner_corr_cells = (
+            self.divb_clean_inner_corr_cells
+        )
+        pywarpx.hybridpicmodel.holmstrom_blend_pow = self.holmstrom_blend_pow
+        pywarpx.hybridpicmodel.holmstrom_blend_width = self.holmstrom_blend_width
+        pywarpx.hybridpicmodel.holmstrom_switch_mode = self.holmstrom_switch_mode
+        pywarpx.hybridpicmodel.dive_seam_alpha = self.dive_seam_alpha
+        pywarpx.hybridpicmodel.dive_seam_iters = self.dive_seam_iters
+        pywarpx.hybridpicmodel.dive_seam_band = self.dive_seam_band
+        pywarpx.hybridpicmodel.isotropic_operators = self.isotropic_operators
         pywarpx.hybridpicmodel.__setattr__(
             "Jx_external_grid_function(x,y,z,t)",
             pywarpx.my_constants.mangle_expression(

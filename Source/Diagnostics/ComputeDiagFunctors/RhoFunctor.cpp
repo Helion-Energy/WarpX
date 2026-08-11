@@ -4,8 +4,10 @@
 #if (defined WARPX_DIM_RZ) && (defined WARPX_USE_FFT)
     #include "FieldSolver/SpectralSolver/SpectralFieldData.H"
     #include "FieldSolver/SpectralSolver/SpectralSolverRZ.H"
-    #include "Utils/WarpXAlgorithmSelection.H"
 #endif
+#include "EmbeddedBoundary/Enabled.H"
+#include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/EBJBoundary.H"
+#include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "Fields.H"
 #include "Particles/MultiParticleContainer.H"
 #include "Fluids/MultiFluidContainer.H"
@@ -38,6 +40,7 @@ RhoFunctor::operator() ( amrex::MultiFab& mf_dst, const int dcomp, const int /*i
 {
     auto& warpx = WarpX::GetInstance();
     std::unique_ptr<amrex::MultiFab> rho;
+    bool fresh_deposit = false;
 
     // Total rho with the hybrid-PIC solver and mesh refinement: use the
     // solver's synchronized rho_fp instead of a fresh per-level deposit. The
@@ -64,6 +67,7 @@ RhoFunctor::operator() ( amrex::MultiFab& mf_dst, const int dcomp, const int /*i
     }
     else
     {
+        fresh_deposit = true;
         // Deposit charge density
         // Call this with local=true since the parallel transfers will be handled
         // by ApplyFilterandSumBoundaryRho
@@ -103,6 +107,28 @@ RhoFunctor::operator() ( amrex::MultiFab& mf_dst, const int dcomp, const int /*i
 #else
     amrex::ignore_unused(m_apply_rz_psatd_filter);
 #endif
+
+    // For the hybrid solver, fold the deposit collected by covered points
+    // back across the embedded surface and enforce the embedded-boundary
+    // Dirichlet condition on the freshly deposited charge density (the
+    // density vanishes at a conducting wall), after the filter and
+    // guard-cell sum so the mirrored values are not smeared into the
+    // conductor, matching the solver's own rho treatment in
+    // HybridPICDepositRhoAndJ. Skipped on the rho_fp copy path above: the
+    // solver already applied exactly this treatment to rho_fp.
+    if (fresh_deposit && EB::enabled() &&
+        WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC)
+    {
+        warpx::hybrid::FoldEBDepositToNodalScalar(
+            *rho,
+            *warpx.m_fields.get(warpx::fields::FieldType::distance_to_eb, m_lev),
+            warpx.Geom(m_lev));
+        warpx::hybrid::ApplyEBBoundaryToNodalScalar(
+            *rho,
+            *warpx.m_fields.get(warpx::fields::FieldType::distance_to_eb, m_lev),
+            warpx.Geom(m_lev),
+            /*odd=*/true);  // Dirichlet: rho -> 0 at the PEC wall
+    }
 
     InterpolateMFForDiag(mf_dst, *rho, dcomp, warpx.DistributionMap(m_lev),
                          m_convertRZmodes2cartesian);

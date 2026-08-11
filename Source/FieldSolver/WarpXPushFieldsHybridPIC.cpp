@@ -7,7 +7,9 @@
  *
  * License: BSD-3-Clause-LBNL
  */
+#include "EmbeddedBoundary/Enabled.H"
 #include "Fields.H"
+#include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/EBJBoundary.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "Particles/MultiParticleContainer.H"
 #include "Utils/TextMsg.H"
@@ -178,12 +180,17 @@ void WarpX::HybridPICEvolveFields ()
     m_hybrid_pic_model->CalculatePlasmaCurrent(
         m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, finest_level),
         m_eb_update_E);
+    // Once-per-step diffusive div(B)/div(J_total) clean in the near-wall band.
+    // Runs before the external-field add-back below, so it acts on the plasma
+    // field only. No-op unless hybrid_pic_model.div{b,j}_clean_alpha > 0.
+    m_hybrid_pic_model->MarderCleanFieldsPerStep();
     m_hybrid_pic_model->HybridPICSolveE(
         m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, finest_level),
         current_fp_temp,
         m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, finest_level),
         m_fields.get_mr_levels(FieldType::rho_fp, finest_level),
         m_eb_update_E, false);
+
     FillBoundaryE(guard_cells.ng_FieldSolver, WarpX::sync_nodal_points);
 
     // Handle field splitting for Hybrid field push
@@ -274,6 +281,42 @@ void WarpX::HybridPICDepositRhoAndJ ()
                 Geom(lev).periodicity(),
                 true
             );
+        }
+    }
+
+    // Fold the deposit collected by covered points back across the embedded
+    // surface before the boundary-condition fills overwrite it; without the
+    // fold, the shape-function charge and current of wall-adjacent particles
+    // would be discarded. The fold uses the PEC image parities (the embedded
+    // boundary is always a PEC). Runs before the coarse-fine moment fill so
+    // fine-level ghosts are interpolated from wall-treated coarse moments.
+    if (EB::enabled()) {
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            if (static_cast<int>(m_hybrid_pic_model->m_eb_bc_status_E.size()) <= lev) {
+                m_hybrid_pic_model->m_eb_bc_status_E.resize(lev+1);
+            }
+            warpx::hybrid::FoldEBDepositToField(
+                m_fields.get_alldirs(FieldType::current_fp, lev),
+                m_eb_update_E[lev],
+                *m_fields.get(FieldType::distance_to_eb, lev),
+                Geom(lev),
+                &m_hybrid_pic_model->m_eb_bc_status_E[lev]);
+            warpx::hybrid::ApplyPECBoundaryToField(
+                m_fields.get_alldirs(FieldType::current_fp, lev),
+                m_eb_update_E[lev],
+                *m_fields.get(FieldType::distance_to_eb, lev),
+                Geom(lev),
+                /*normal_odd=*/false, /*fill_covered_centers=*/true,
+                &m_hybrid_pic_model->m_eb_bc_status_E[lev]);
+            warpx::hybrid::FoldEBDepositToNodalScalar(
+                *m_fields.get(FieldType::rho_fp, lev),
+                *m_fields.get(FieldType::distance_to_eb, lev),
+                Geom(lev));
+            warpx::hybrid::ApplyEBBoundaryToNodalScalar(
+                *m_fields.get(FieldType::rho_fp, lev),
+                *m_fields.get(FieldType::distance_to_eb, lev),
+                Geom(lev),
+                /*odd=*/true);  // Dirichlet: rho -> 0 at the PEC wall
         }
     }
 

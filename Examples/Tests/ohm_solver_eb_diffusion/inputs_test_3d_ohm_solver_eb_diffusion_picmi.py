@@ -1,0 +1,515 @@
+#!/usr/bin/env python3
+#
+# --- Test script for the kinetic-fluid hybrid model in WarpX wherein the
+# --- embedded-boundary handling of the B-field push is exercised by simulating
+# --- resistive diffusion of a magnetic eigenmode inside a conducting square
+# --- cavity that is rotated with respect to the grid (a prism extruded along
+# --- y). With a uniform resistivity eta and no plasma (rho = 0 everywhere,
+# --- with hybrid_pic_model.holmstrom_vacuum_region=True), the generalized
+# --- Ohm's law reduces exactly to E = eta/mu0 * curl(B), so
+# ---     dBy/dt = eta/mu0 * laplacian(By),
+# --- and the Neumann eigenmode By = B1*cos(pi*(zr - a/2)/a) (zr the rotated
+# --- in-plane coordinate) decays at the analytic rate
+# ---     gamma = eta/mu0 * (pi/a)^2.
+# --- The L2 error of By against the analytic solution at fixed time, measured
+# --- at two resolutions, gives the order of accuracy of the embedded-boundary
+# --- treatment: ~1st order for the default stair-step approximation and
+# --- ~2nd order for the conformal (enlarged cell technique) update enabled
+# --- with hybrid_pic_model.use_conformal_eb.
+
+import argparse
+import sys
+
+import numpy as np
+
+from pywarpx import callbacks, fields, picmi
+
+constants = picmi.constants
+
+# Cavity geometry: square of side CAVITY_SIDE rotated by THETA about the
+# y-axis, extruded along y (same geometry family as the test in
+# Examples/Tests/embedded_boundary_rotated_cube)
+THETA = np.pi / 8
+CAVITY_SIDE = 1.06  # cavity side length (m)
+HALF_WIDTH = CAVITY_SIDE / 2.0
+R_CYL = (
+    0.6  # cylinder radius for --geometry cylinder (fluid r < R_CYL, fits [-0.8,0.8])
+)
+J11 = 3.8317059702075125  # first zero of J1 = first nonzero extremum of J0 (Neumann)
+ETA = 1.0e-3  # plasma resistivity (Ohm m)
+B1 = 0.01  # initial eigenmode amplitude (T)
+N_FLOOR = 1.0e18  # vacuum density floor (m^-3)
+MAX_STEPS = 200
+
+DIFFUSIVITY = ETA / constants.mu0  # magnetic diffusivity (m^2/s)
+DECAY_RATE = DIFFUSIVITY * (np.pi / CAVITY_SIDE) ** 2  # analytic decay rate (1/s)
+
+# Parameters for the --pec-j variant, which checks the PEC current boundary
+# condition at the embedded boundary: a uniform external current (inert for
+# the By diffusion away from the wall) plus a thermal proton fill that presses
+# against the conducting wall and spills deposited current onto interior edges
+J_EXT = 0.1 * B1 * np.pi / (CAVITY_SIDE * constants.mu0)  # A/m^2
+T_ION = 10.0  # eV
+N_PLASMA = 1.0e18  # m^-3
+PEC_J_STEPS = 24  # the boundary-condition variant needs no decay time
+
+# Depth (as a fraction of the peak pressure) the covered mirror band of the
+# electron pressure must reach BELOW zero in the --pec-j variant: the odd
+# (Dirichlet) fill sets each covered band node to minus the masked
+# interpolation of the (nonnegative) fluid pressure at its mirror image, so
+# the band is nonpositive everywhere and genuinely negative where the pressed
+# plasma holds a finite wall pressure. The even mirror flips the sign of the
+# whole band, so the sign assertions are parameter-free discriminators; this
+# constant only sets how much of the wall pressure must visibly mirror.
+# Calibrated at resolution 32 with at least 4x margin.
+TOL_PE_MIRROR_DEPTH = 0.05
+
+
+def init_cylinder_bessel_by(resolution, grid_type):
+    """afterinit hook: overwrite By with the lowest Neumann radial Bessel
+    eigenmode of the disk, By = B1 * J0(J11 * r / R_CYL) (dBy/dr = 0 at r = R,
+    the tangential/even-mirror parity), zero in the conductor. Written through
+    the field wrapper because the input parser has no Bessel function. Assumes a
+    single box (the cylinder decomposition forces it) so the wrapper spans the
+    full domain. By is evaluated at its TRUE staggered location: cell-centered in
+    x and z on a staggered (Yee) grid, nodal on a collocated grid. Using nodal
+    coordinates for the staggered grid misplaces By by O(h) and silently caps the
+    evolved convergence at 1st order, so the staggering must be respected here."""
+    from scipy.special import j0
+
+    By = fields.ByFPWrapper()
+    # Do NOT np.asarray() the wrapper: on a GPU build By[...] is a cupy (device)
+    # array and a host copy would segfault. Read only its shape/ndim here and
+    # match the wrapper's array module on assignment (cupy on device).
+    arr = By[...]
+    nx, nz = arr.shape[0], arr.shape[2]
+    if grid_type == "collocated":
+        x = np.linspace(-0.8, 0.8, nx)  # By is nodal in x and z
+        z = np.linspace(-0.8, 0.8, nz)
+    else:
+        h = 1.6 / resolution  # staggered: By is cell-centered in x and z
+        x = -0.8 + (np.arange(nx) + 0.5) * h
+        z = -0.8 + (np.arange(nz) + 0.5) * h
+    xx, zz = np.meshgrid(x, z, indexing="ij")
+    r = np.sqrt(xx * xx + zz * zz)
+    by2d = B1 * j0(J11 * r / R_CYL)
+    by2d[r > R_CYL] = 0.0
+    full = np.broadcast_to(by2d[:, None, :], (nx, arr.shape[1], nz))
+    full = full[..., None] if arr.ndim == 4 else full
+    try:
+        import cupy
+
+        on_gpu = isinstance(arr, cupy.ndarray)
+    except ImportError:
+        on_gpu = False
+    By[...] = cupy.asarray(full) if on_gpu else full
+
+
+def setup_simulation(
+    resolution,
+    substeps,
+    use_conformal_eb,
+    pec_j,
+    verbose,
+    split_z=False,
+    grid_type="staggered",
+    divb_clean=False,
+    geometry="square",
+):
+    """Create the PICMI simulation object.
+
+    Parameters
+    ----------
+    resolution: int
+        Number of cells along x and z (the y direction always has 8 cells).
+    substeps: int
+        Number of B-field substeps per step (must be even).
+    use_conformal_eb: bool
+        Use the conformal (enlarged cell technique) embedded-boundary update
+        instead of the default stair-step approximation. On a collocated grid
+        this selects the direct level-set mirror B fill (the staggered ECT is
+        Yee-only); the near-wall order of that mirror is the edge-order
+        diagnostic's target.
+    grid_type: str
+        "staggered" (Yee, default) or "collocated" (nodal). Collocated forces
+        direct current deposition (Esirkepov is unsupported there).
+    pec_j: bool
+        Add a uniform external current and a thermal proton fill, and output
+        the current densities, to test the embedded-boundary PEC current
+        boundary condition.
+    verbose: int
+        WarpX verbosity.
+    """
+    # Run to t_end = 0.5/gamma (mode decays to exp(-0.5) = 0.607 of its
+    # initial amplitude) with the same time step at every resolution so that
+    # the measured convergence is purely spatial
+    # End time = 0.5/gamma so the mode decays to exp(-0.5)=0.607 -- short enough
+    # that accumulated error stays below the spatial discretization error. The
+    # cylinder Bessel mode decays ~4.6x faster than the square cos mode, so it
+    # needs its own (shorter) end time or the order is swamped by accumulation.
+    decay_rate = (
+        ETA / constants.mu0 * (J11 / R_CYL) ** 2
+        if geometry == "cylinder"
+        else DECAY_RATE
+    )
+    t_end = 0.5 / decay_rate
+    dt = t_end / MAX_STEPS
+    max_steps = PEC_J_STEPS if pec_j else MAX_STEPS
+
+    if pec_j:
+        # Full-depth y (thin y boxes trip an OpenMP deposition issue with
+        # particles) and a z split for parallel runs; this variant uses the
+        # stair-step masks, so no conformal face borrowing occurs
+        n_cell = [resolution, resolution, resolution]
+        y_extent = 0.8
+        decomposition = dict(
+            warpx_max_grid_size=2048,
+            warpx_max_grid_size_z=max(resolution // 2, 8),
+            warpx_blocking_factor=8,
+        )
+    else:
+        # Thin periodic y. The default split is along y only, so the conformal
+        # face borrowing (acting within x-z planes) stays inside each box;
+        # split_z instead forces box seams across the borrowing planes to
+        # exercise the cross-box reduction of the face-extension passes.
+        n_cell = [resolution, 8, resolution]
+        y_extent = 0.2
+        if geometry == "cylinder":
+            # single box so the afterinit Bessel wrapper write spans the full
+            # nodal domain (no multi-box gather)
+            decomposition = dict(
+                warpx_max_grid_size=2048,
+                warpx_blocking_factor=8,
+            )
+        elif split_z:
+            decomposition = dict(
+                warpx_max_grid_size=2048,
+                warpx_max_grid_size_z=max(resolution // 2, 8),
+                warpx_blocking_factor=8,
+            )
+        else:
+            decomposition = dict(
+                warpx_max_grid_size=2048,
+                warpx_max_grid_size_y=4,
+                warpx_blocking_factor=8,
+                warpx_blocking_factor_y=4,
+            )
+
+    grid = picmi.Cartesian3DGrid(
+        number_of_cells=n_cell,
+        lower_bound=[-0.8, -y_extent, -0.8],
+        upper_bound=[0.8, y_extent, 0.8],
+        lower_boundary_conditions=["dirichlet", "periodic", "dirichlet"],
+        upper_boundary_conditions=["dirichlet", "periodic", "dirichlet"],
+        lower_boundary_conditions_particles=["absorbing", "periodic", "absorbing"],
+        upper_boundary_conditions_particles=["absorbing", "periodic", "absorbing"],
+        **decomposition,
+    )
+
+    sim = picmi.Simulation(
+        time_step_size=dt,
+        max_steps=max_steps,
+        particle_shape=1,
+        verbose=verbose,
+        # Managed memory so the afterinit field-wrapper Bessel write is
+        # host-accessible on a CUDA build (WarpX otherwise overrides the arena
+        # to non-managed device memory and the numpy gather in By[...] faults).
+        # No-op on CPU builds.
+        warpx_amrex_the_arena_is_managed=1,
+    )
+    sim.grid_type = grid_type
+    if grid_type == "collocated":
+        # the collocated (nodal) hybrid path forbids Esirkepov deposition
+        sim.current_deposition_algo = "direct"
+
+    sim.solver = picmi.HybridPICSolver(
+        grid=grid,
+        gamma=1.0,
+        Te=1.0,
+        n0=N_FLOOR,
+        n_floor=N_FLOOR,
+        plasma_resistivity=ETA,
+        substeps=substeps,
+        holmstrom_vacuum_region=True,
+        use_conformal_eb=True if use_conformal_eb else None,
+        # Yee-grid level-set mirror B wall fill (the staggered counterpart of
+        # use_conformal_eb). Must be passed HERE (the PICMI kwarg): a raw
+        # hybridpicmodel bucket attribute would be clobbered by
+        # initialize_inputs writing the (None) PICMI value over it.
+        Jy_external_function=f"{J_EXT}" if pec_j else None,
+        # Diffusive near-wall div(B)/div(J) clean (edge-order diagnostic knob)
+        # Production (annulus) wall-layer config: unbounded band + inner
+        # cutoffs 0 so the clean reaches the first fluid layers where the
+        # wall divergence lives (the default band/inner knobs confine it to
+        # a half-cell shell under the level-set roof -- a near-no-op).
+        divb_clean_alpha=0.15 if divb_clean else None,
+        divj_clean_alpha=0.15 if divb_clean else None,
+        divb_clean_iters=3 if divb_clean else None,
+        divb_clean_band_cells=0.0 if divb_clean else None,
+        divb_clean_inner_div_cells=0.0 if divb_clean else None,
+        divb_clean_inner_corr_cells=0.0 if divb_clean else None,
+    )
+
+    if geometry == "cylinder":
+        # Smooth circular wall (extruded along y): conductor at r > R_CYL. No
+        # corners -- isolates the curved-wall edge order of the mirror fill.
+        sim.embedded_boundary = picmi.EmbeddedBoundary(
+            implicit_function="sqrt(x*x+z*z)-rcyl",
+            rcyl=R_CYL,
+        )
+    else:
+        sim.embedded_boundary = picmi.EmbeddedBoundary(
+            implicit_function=(
+                "xr=x*cos(-theta)+z*sin(-theta);"
+                "zr=-x*sin(-theta)+z*cos(-theta);"
+                "max(max(xr-hw,-(xr+hw)),max(zr-hw,-(zr+hw)))"
+            ),
+            theta=THETA,
+            hw=HALF_WIDTH,
+        )
+
+    # Initial B field: the (0,1) Neumann eigenmode of the cavity. By depends
+    # only on the in-plane coordinates so it is exactly divergence free and
+    # the projection-based divergence cleaner can be skipped. The --pec-j
+    # variant starts from B=0 instead: parser-based B initialization combined
+    # with particles and the hybrid solver triggers a pre-existing OpenMP
+    # deposition crash, and the boundary-condition check is driven entirely
+    # by the external current and the deposited ion current
+    if not pec_j:
+        if geometry == "cylinder":
+            # Lowest Neumann radial Bessel eigenmode By = B1 J0(J11 r/R), which
+            # decays at the exact rate gamma = (eta/mu0)(J11/R)^2 -> an exact
+            # analytic for the interior-L2 edge order. The parser has no Bessel,
+            # so it is written via an afterinit field-wrapper hook.
+            callbacks.installafterinit(
+                lambda: init_cylinder_bessel_by(resolution, grid_type)
+            )
+        else:
+            B_init = picmi.AnalyticInitialField(
+                Bx_expression="0",
+                By_expression="B1*cos(pi/a*(-x*sin(-theta)+z*cos(-theta)-a/2))",
+                Bz_expression="0",
+                warpx_do_initial_div_cleaning=False,
+                B1=B1,
+                a=CAVITY_SIDE,
+                theta=THETA,
+            )
+            sim.add_applied_field(B_init)
+
+    if pec_j:
+        # Thermal protons filling the cavity (zero density inside the wall);
+        # particles stream against the conducting wall and their deposition
+        # would spill current onto interior edges without the PEC J boundary
+        # condition
+        vth = np.sqrt(T_ION * constants.q_e / constants.m_p)
+        ions = picmi.Species(
+            name="ions",
+            particle_type="proton",
+            initial_distribution=picmi.AnalyticDistribution(
+                density_expression=(
+                    "n_p*(abs(x*cos(-theta)+z*sin(-theta))<hw)"
+                    "*(abs(-x*sin(-theta)+z*cos(-theta))<hw)"
+                ),
+                momentum_expressions=["0", "0", "0"],
+                warpx_momentum_spread_expressions=[f"{vth}"] * 3,
+                warpx_density_min=0.5 * N_PLASMA,
+                n_p=N_PLASMA,
+                theta=THETA,
+                hw=HALF_WIDTH,
+            ),
+        )
+        sim.add_species(
+            ions,
+            layout=picmi.PseudoRandomLayout(grid=grid, n_macroparticles_per_cell=4),
+        )
+
+    field_diag = picmi.FieldDiagnostic(
+        name="diag1",
+        grid=grid,
+        period=max_steps,
+        data_list=["B", "E", "J", "J_displacement", "rho"]
+        if pec_j
+        else ["B", "J", "J_displacement"],
+        write_dir="diags",
+        warpx_format="plotfile",
+    )
+    sim.add_diagnostic(field_diag)
+
+    if pec_j:
+        # In-situ check of the electron-pressure embedded-boundary condition
+        # (the pressure field is internal to the solver and not written by
+        # any diagnostic): the wall is a PEC, so the odd (Dirichlet) mirror
+        # must interpolate the pressure to zero at the wall face and be
+        # antisymmetric across it, and the pressure deep inside the conductor
+        # is exactly zero.
+        state = {"step": 0}
+
+        def check_electron_pressure():
+            state["step"] += 1
+            if state["step"] < max_steps:
+                return
+
+            pe = fields.ElectronPressureFPWrapper()[...]
+            assert np.all(np.isfinite(pe)), (
+                "non-finite electron pressure (equation of state applied to "
+                "the mirrored charge density inside the conductor?)"
+            )
+
+            # nodal coordinates and the analytic rotated-frame wall distance
+            nx, ny, nz = pe.shape
+            x = np.linspace(-0.8, 0.8, nx)
+            z = np.linspace(-0.8, 0.8, nz)
+            h = x[1] - x[0]
+            hy = 2.0 * y_extent / (ny - 1)
+            X, Z = np.meshgrid(x, z, indexing="ij")
+            xr = X * np.cos(THETA) - Z * np.sin(THETA)
+            zr = X * np.sin(THETA) + Z * np.cos(THETA)
+            s = HALF_WIDTH - np.maximum(np.abs(xr), np.abs(zr))  # >0 in fluid
+
+            # deep inside the conductor the pressure is set exactly to zero
+            deep = np.broadcast_to((s < -2.5 * h)[:, None, :], pe.shape)
+            assert np.max(np.abs(pe[deep])) == 0.0, (
+                "nonzero electron pressure deep inside the conductor"
+            )
+
+            def trilinear(arr, px, py, pz):
+                fi = (px + 0.8) / h
+                fj = (py + y_extent) / hy
+                fk = (pz + 0.8) / h
+                i0 = np.clip(np.floor(fi).astype(int), 0, nx - 2)
+                j0 = np.clip(np.floor(fj).astype(int), 0, ny - 2)
+                k0 = np.clip(np.floor(fk).astype(int), 0, nz - 2)
+                wx, wy, wz = fi - i0, fj - j0, fk - k0
+                v = 0.0
+                for di in (0, 1):
+                    for dj in (0, 1):
+                        for dk in (0, 1):
+                            w = (
+                                (wx if di else 1.0 - wx)
+                                * (wy if dj else 1.0 - wy)
+                                * (wz if dk else 1.0 - wz)
+                            )
+                            v = v + w * arr[i0 + di, j0 + dj, k0 + dk]
+                return v
+
+            # odd (Dirichlet) parity of the covered mirror band, asserted
+            # NODE-wise (interpolated sampling would mix the mirror values
+            # with the zeroed deep interior in this rotated geometry): the
+            # fill sets each covered band node to MINUS the masked
+            # interpolation of the (nonnegative) fluid pressure at its
+            # image, so the band is nonpositive everywhere and genuinely
+            # negative where the pressed plasma holds a finite wall
+            # pressure. The even mirror flips the sign of the whole band.
+            # Margins keep the mask off the s ~ 0 discrete/analytic
+            # level-set mismatch, the deep-zeroed region past one cell, and
+            # the corner rings where two faces meet.
+            band2d = (s < -0.15 * h) & (s > -0.85 * h)
+            band2d &= HALF_WIDTH - np.minimum(np.abs(xr), np.abs(zr)) > 2.0 * h
+            band = np.broadcast_to(band2d[:, None, :], pe.shape)
+            pmax = float(np.max(pe))
+            band_max = float(np.max(pe[band]))
+            band_min = float(np.min(pe[band]))
+            print(
+                f"electron pressure mirror band: max={band_max:.3e} "
+                f"min={band_min:.3e} peak={pmax:.3e}"
+            )
+            assert band_max <= 1.0e-12 * pmax, (
+                f"positive electron pressure {band_max:.3e} in the covered "
+                "mirror band (the odd/Dirichlet fill makes it nonpositive; "
+                "an even mirror makes it positive)"
+            )
+            assert band_min < -TOL_PE_MIRROR_DEPTH * pmax, (
+                f"covered-band electron pressure minimum {band_min:.3e} "
+                f"never reaches -{TOL_PE_MIRROR_DEPTH}*peak: the odd mirror "
+                "does not appear to be active"
+            )
+
+        callbacks.installafterstep(check_electron_pressure)
+
+    return sim
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--test",
+        help="toggle whether this script is run as a short CI test",
+        action="store_true",
+    )
+    parser.add_argument(
+        "-n",
+        "--resolution",
+        help="number of cells along x and z",
+        type=int,
+        default=32,
+    )
+    parser.add_argument(
+        "--conformal",
+        help="use the conformal EB wall treatment (level-set mirror on "
+        "collocated grids, enlarged-cell ECT Faraday on staggered grids)",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--substeps",
+        help="number of B-field substeps per step (even)",
+        type=int,
+        default=4,
+    )
+    parser.add_argument(
+        "--pec-j",
+        help="test the embedded-boundary PEC current boundary condition",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--split-z",
+        help="decompose along z so box seams cross the conformal borrowing "
+        "planes (cross-box seam test)",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--grid-type",
+        choices=["staggered", "collocated"],
+        default="staggered",
+        help="field staggering: staggered (Yee, default) or collocated (nodal, "
+        "the level-set mirror B fill -- edge-order diagnostic)",
+    )
+    parser.add_argument(
+        "--divb-clean",
+        action="store_true",
+        help="enable the hybrid div(B)/div(J) Marder clean (alpha=0.1) -- "
+        "separates curved-wall div growth from the fill error in the "
+        "edge-order diagnosis",
+    )
+    parser.add_argument(
+        "--geometry",
+        choices=["square", "cylinder"],
+        default="square",
+        help="EB shape: square (rotated cavity, default) or cylinder (smooth "
+        "circular wall -- the curved-wall edge-order diagnostic)",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        help="WarpX verbosity",
+        type=int,
+        default=0,
+    )
+    args, left = parser.parse_known_args()
+    sys.argv = sys.argv[:1] + left
+
+    sim = setup_simulation(
+        args.resolution,
+        args.substeps,
+        args.conformal,
+        args.pec_j,
+        args.verbose,
+        args.split_z,
+        args.grid_type,
+        args.divb_clean,
+        args.geometry,
+    )
+    sim.step()
+
+
+if __name__ == "__main__":
+    main()

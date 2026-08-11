@@ -14,6 +14,8 @@
 #include "Fields.H"
 #include "Utils/TextMsg.H"
 
+#include <ablastr/utils/Communication.H>
+
 #include <AMReX.H>
 #include <AMReX_Array.H>
 #include <AMReX_Array4.H>
@@ -28,6 +30,8 @@
 #include <AMReX_Math.H>
 #include <AMReX_MFIter.H>
 #include <AMReX_MultiCutFab.H>
+
+#include <limits>
 
 namespace web = warpx::embedded_boundary;
 
@@ -339,6 +343,46 @@ web::MarkUpdateBCellsECT (
 }
 
 void
+web::MarkUpdateCellsNodalLevelSet (
+    std::array< std::unique_ptr<amrex::iMultiFab>,3> & eb_update,
+    amrex::MultiFab const& distance_to_eb,
+    const amrex::Periodicity& periodicity )
+{
+    using namespace amrex::literals;
+
+    // Collocated conformal embedded-boundary mask. On a fully-nodal grid every field
+    // component lives at the mesh node, so there is no Yee notion of a fully-covered
+    // cut edge/face. Instead we deactivate exactly the nodes inside the conductor,
+    // keyed off the nodal signed level set (distance_to_eb < 0 in the conductor, 0 on
+    // the surface), and leave every fluid-side node active so the level-set mirror
+    // boundary condition (EBJBoundary) can refine the near-wall values to sub-cell
+    // accuracy. This is the collocated analogue of MarkUpdate{E,B}CellsECT; unlike the
+    // staircase routine, it does not deactivate the whole near-wall band.
+    for (int idim = 0; idim < 3; ++idim) {
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (amrex::MFIter mfi(*eb_update[idim], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+
+            const amrex::Box& box = mfi.tilebox();
+            amrex::Array4<int> const & eb_update_arr = eb_update[idim]->array(mfi);
+            amrex::Array4<amrex::Real const> const & dist_arr = distance_to_eb.const_array(mfi);
+
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                // Do not update the field on nodes inside the conductor; those values
+                // are set instead by the level-set mirror boundary condition.
+                eb_update_arr(i, j, k) = (dist_arr(i, j, k) <= 0._rt)? 0 : 1;
+            });
+
+        }
+        // Populate guard cells. This mask is fully nodal, so go through the ablastr
+        // FillBoundary wrapper so a nodal seam sync is performed where required.
+        ablastr::utils::communication::FillBoundary(*eb_update[idim], periodicity);
+    }
+}
+
+void
 web::MarkExtensionCells (
     const std::array<amrex::Real,3>& cell_size,
     std::array< std::unique_ptr<amrex::iMultiFab>, 3 > & flag_info_face,
@@ -495,6 +539,66 @@ web::ComputeEdgeLengths (
                                                                         * edge_cent(i, j, k));
                     }
 
+                });
+            }
+        }
+    }
+}
+
+
+void
+web::ComputeEdgeCentroidOffsets (
+    ablastr::fields::VectorField& edge_cent_offset,
+    const amrex::EBFArrayBoxFactory& eb_fact)
+{
+    BL_PROFILE("ComputeEdgeCentroidOffsets");
+
+#if !defined(WARPX_DIM_3D) && !defined(WARPX_DIM_XZ) && !defined(WARPX_DIM_RZ)
+    WARPX_ABORT_WITH_MESSAGE("ComputeEdgeCentroidOffsets only implemented in 2D and 3D");
+#endif
+
+    // AMReX's edge centroid (intercept_to_edge_centroid) is the centroid of the
+    // uncovered edge segment, measured from the edge center, already in full-cell
+    // units (range [-0.5, 0.5]); +1/-1 are the fully-open/fully-covered sentinels.
+    // The Faraday curvature shift uses this offset directly (delta = edge_cent), so
+    // there is no ScaleEdges step here (the offset is dimensionless, not a length).
+    auto const &flags = eb_fact.getMultiEBCellFlagFab();
+    auto const &edge_centroid = eb_fact.getEdgeCent();
+    for (int idim = 0; idim < 3; ++idim){
+#if defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+        if (idim == 1) {
+            edge_cent_offset[1]->setVal(0.);
+            continue;
+        }
+#endif
+        for (amrex::MFIter mfi(flags); mfi.isValid(); ++mfi){
+            amrex::Box const box = mfi.tilebox(edge_cent_offset[idim]->ixType().toIntVect(),
+                                               edge_cent_offset[idim]->nGrowVect());
+            amrex::FabType const fab_type = flags[mfi].getType(box);
+            auto const &offset_dim = edge_cent_offset[idim]->array(mfi);
+
+            if (fab_type == amrex::FabType::regular || fab_type == amrex::FabType::covered) {
+                // Uncut (fully open) or fully covered: no centroid shift.
+                amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    offset_dim(i, j, k) = 0.;
+                });
+            } else {
+#if defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+                int idim_amrex = idim;
+                if (idim == 2) { idim_amrex = 1; }
+                auto const &edge_cent = edge_centroid[idim_amrex]->const_array(mfi);
+#elif defined(WARPX_DIM_3D)
+                auto const &edge_cent = edge_centroid[idim]->const_array(mfi);
+#endif
+                amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    amrex::Real const ec = edge_cent(i, j, k);
+                    if (ec == amrex::Real(-1.0) || ec == amrex::Real(1.0)) {
+                        // Fully covered or fully open: no shift.
+                        offset_dim(i, j, k) = 0.;
+                    } else {
+                        // Cut edge: ec is the uncovered-segment centroid offset.
+                        offset_dim(i, j, k) = ec;
+                    }
                 });
             }
         }

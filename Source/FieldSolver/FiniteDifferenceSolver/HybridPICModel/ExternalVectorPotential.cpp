@@ -8,12 +8,15 @@
  */
 
 #include "ExternalVectorPotential.H"
+#include "EmbeddedBoundary/Enabled.H"
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
+#include "HybridPICModel.H"
 #include "Initialization/DivCleaner/ProjectionDivCleaner.H"
 #include "Fields.H"
 #include "WarpX.H"
 
 #include <ablastr/fields/MultiFabRegister.H>
+#include <ablastr/warn_manager/WarnManager.H>
 
 using namespace amrex;
 using namespace warpx::fields;
@@ -318,11 +321,19 @@ ExternalVectorPotential::CalculateExternalCurlA (std::string& coil_name)
     ablastr::fields::MultiLevelVectorField curlA_ext =
         warpx.m_fields.get_mr_levels_alldirs(curlAext_field, warpx.finestLevel());
 
+    // The external vacuum field must fill through the wall on BOTH grid types
+    // (a uniform external then stays uniform and satisfies the Neumann condition
+    // at the level set), so compute curl(A) everywhere by passing no EB update
+    // flags. Masking curl(A) with the covered-cell exclusion flags zeroes the
+    // external B inside the conductor, which puts an O(B_ext) staircase jump at
+    // the wall; the unmasked Interp of B_ext in the Hall term (HybridPICSolveE)
+    // and the near-wall particle gather then read that jump every substep.
+    static const std::array<std::unique_ptr<amrex::iMultiFab>, 3> no_eb_update{};
     for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
         warpx.get_pointer_fdtd_solver_fp(lev)->ComputeCurlA(
             curlA_ext[lev],
             A_ext[lev],
-            warpx.GetEBUpdateBFlag()[lev],
+            no_eb_update,
             lev);
 
         for (int idir = 0; idir < 3; ++idir) {
@@ -338,7 +349,8 @@ ExternalVectorPotential::AddExternalFieldFromVectorPotential (
     ablastr::fields::VectorField const& dstField,
     amrex::Real scale_factor,
     ablastr::fields::VectorField const& srcField,
-    std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update)
+    std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update,
+    bool use_eb_flags)
 {
     // Loop through the grids, and over the tiles within each grid
 #ifdef AMREX_USE_OMP
@@ -356,8 +368,12 @@ ExternalVectorPotential::AddExternalFieldFromVectorPotential (
 
         // Extract structures indicating where the fields
         // should be updated, given the position of the embedded boundaries.
+        // When use_eb_flags is false (conformal EB: the external vacuum field
+        // should fill through the wall, not be staircase-zeroed in covered
+        // cells), leave the update arrays null so the per-cell skip below is a
+        // no-op and the external field is written everywhere.
         amrex::Array4<int> update_Fx_arr, update_Fy_arr, update_Fz_arr;
-        if (EB::enabled()) {
+        if (use_eb_flags && EB::enabled()) {
             update_Fx_arr = eb_update[0]->array(mfi);
             update_Fy_arr = eb_update[1]->array(mfi);
             update_Fz_arr = eb_update[2]->array(mfi);
@@ -432,9 +448,35 @@ ExternalVectorPotential::UpdateHybridExternalFields (const amrex::Real t, const 
         ablastr::fields::MultiLevelVectorField curlA_ext =
             warpx.m_fields.get_mr_levels_alldirs(curlAext_field, warpx.finestLevel());
 
+        // The external A is evaluated everywhere (including inside the conductor),
+        // so its E/B are valid in the covered region and should fill through the
+        // wall: a uniform external field then stays uniform, satisfying the Neumann
+        // level-set condition the collocated conformal fill expects. Do NOT mask the
+        // external E/B with the covered-cell EB flags.
+        const bool ext_use_eb_flags = false;
+        // Constitutive PEC (conformal_pec_zero_ej, staggered ECT path): the
+        // conductor excludes the time-varying external field, so zero the
+        // external E on every EB-touching edge and the external B on every
+        // FULLY COVERED face (cut faces keep their value: their open part
+        // carries real external flux). Leaving the through-wall ramp in the
+        // covered faces builds a growing, staircase-patterned B reservoir
+        // that every open-side curl stencil reads; the eb_hall_mask'd Hall
+        // interpolation never reads covered faces on this path, so the
+        // original through-wall motivation (the unmasked Interp jump) does
+        // not apply here.
+        auto const* hybrid = warpx.get_pointer_HybridPICModel();
+        const bool pec_zero_ext = hybrid && hybrid->m_conformal_pec_zero_ej
+            && hybrid->m_use_conformal_eb
+            && WarpX::grid_type != ablastr::utils::enums::GridType::Collocated
+            && EB::enabled();
         for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
-            AddExternalFieldFromVectorPotential(E_ext[lev], scale_factor_E, A_ext[lev], warpx.GetEBUpdateEFlag()[lev]);
-            AddExternalFieldFromVectorPotential(B_ext[lev], scale_factor_B, curlA_ext[lev], warpx.GetEBUpdateBFlag()[lev]);
+            AddExternalFieldFromVectorPotential(E_ext[lev], scale_factor_E, A_ext[lev], warpx.GetEBUpdateEFlag()[lev], ext_use_eb_flags);
+            AddExternalFieldFromVectorPotential(B_ext[lev], scale_factor_B, curlA_ext[lev], warpx.GetEBUpdateBFlag()[lev], ext_use_eb_flags);
+
+            if (pec_zero_ext) {
+                hybrid->ZeroConductorEdges(E_ext[lev], warpx.GetEBUpdateEFlag()[lev], lev);
+                hybrid->ZeroCoveredFaces(B_ext[lev], lev);
+            }
 
             for (int idir = 0; idir < 3; ++idir) {
                 E_ext[lev][Direction{idir}]->FillBoundary(warpx.Geom(lev).periodicity());

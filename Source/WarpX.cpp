@@ -442,6 +442,17 @@ WarpX::WarpX ()
                 "The hybrid-PIC solver with mesh refinement (amr.max_level > 0) "
                 "requires staggered (Yee) grids (warpx.grid_type = staggered): "
                 "collocated hybrid MR is not implemented.");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !m_hybrid_pic_model->m_use_conformal_eb,
+                "The hybrid-PIC solver with mesh refinement (amr.max_level > 0) "
+                "does not support the conformal embedded-boundary wall "
+                "(hybrid_pic_model.use_conformal_eb): the conformal geometry "
+                "data (edge_lengths/face_areas/face extensions) is allocated "
+                "and marked at the finest level only, while an MR wall lives "
+                "on level 0 -- running would dereference null geometry on the "
+                "wall-bearing level. Use the staircase wall (use_conformal_eb "
+                "= 0) with mesh refinement; per-level conformal geometry is a "
+                "named follow-up.");
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
             WARPX_ABORT_WITH_MESSAGE(
                 "The hybrid-PIC solver with mesh refinement is only implemented "
@@ -512,6 +523,17 @@ WarpX::WarpX ()
             "tags are only ever evaluated at initialization and a deferred "
             "level would never be created.");
     }
+
+    // On this branch use_conformal_eb supports BOTH grid types (staggered =
+    // enlarged-cell/ECT wall, collocated = level-set mirror wall), so the
+    // upstream collocated-only abort does not apply here.
+    // The conformal embedded-boundary field update is used by the ECT Maxwell
+    // solver and, optionally, by the hybrid-PIC solver on either grid type
+    // (hybrid_pic_model.use_conformal_eb).
+    m_eb_use_conformal_solve =
+        (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::ECT) ||
+        (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC &&
+         m_hybrid_pic_model->m_use_conformal_eb);
 
     current_buffer_masks.resize(nlevs_max);
     gather_buffer_masks.resize(nlevs_max);
@@ -2803,8 +2825,14 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
         }
 
         // The ECT geometry info is needed only at the finest level
+        // (the per-level m_eb_update_E/B staircase masks are allocated above)
         if (lev == maxLevel()) {
-            if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::ECT) {
+            // The conformal (enlarged-cell technique) EB MultiFabs below are used by
+            // the ECT Maxwell solver and by the hybrid-PIC solver's staggered
+            // conformal wall (the collocated conformal path is level-set based and
+            // does not read them).
+            if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::ECT ||
+                (WarpX::UseConformalEBSolve() && grid_type != GridType::Collocated)) {
 
                 //! EB: Lengths of the mesh edges
                 m_fields.alloc_init(FieldType::edge_lengths, Direction{0}, lev, amrex::convert(ba, Ex_nodal_flag),
@@ -2812,6 +2840,17 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
                 m_fields.alloc_init(FieldType::edge_lengths, Direction{1}, lev, amrex::convert(ba, Ey_nodal_flag),
                     dm, ncomps, guard_cells.ng_FieldSolver, 0.0_rt);
                 m_fields.alloc_init(FieldType::edge_lengths, Direction{2}, lev, amrex::convert(ba, Ez_nodal_flag),
+                    dm, ncomps, guard_cells.ng_FieldSolver, 0.0_rt);
+
+                //! EB: Per-edge offset of the uncovered-segment centroid from the
+                //! edge center (full-cell units), for the conformal-ECT hybrid
+                //! curvature correction. Same staggering as edge_lengths; init 0
+                //! (no shift) so it is inert until ComputeEdgeCentroidOffsets fills it.
+                m_fields.alloc_init(FieldType::edge_cent_offset, Direction{0}, lev, amrex::convert(ba, Ex_nodal_flag),
+                    dm, ncomps, guard_cells.ng_FieldSolver, 0.0_rt);
+                m_fields.alloc_init(FieldType::edge_cent_offset, Direction{1}, lev, amrex::convert(ba, Ey_nodal_flag),
+                    dm, ncomps, guard_cells.ng_FieldSolver, 0.0_rt);
+                m_fields.alloc_init(FieldType::edge_cent_offset, Direction{2}, lev, amrex::convert(ba, Ez_nodal_flag),
                     dm, ncomps, guard_cells.ng_FieldSolver, 0.0_rt);
 
                 //! EB: Areas of the mesh faces
@@ -3525,19 +3564,22 @@ WarpX::ComputeDivB (amrex::MultiFab& divB, int const dcomp,
 }
 
 void
-WarpX::ComputeDivE(amrex::MultiFab& divE, const int lev)
+WarpX::ComputeDivE(amrex::MultiFab& divE, const int lev, const bool use_fp_field)
 {
+    // The aux (gather) fields include the fields reconstructed from overlapping
+    // mesh-refinement levels, whereas the fp fields are the raw solver fields.
+    const ablastr::fields::VectorField Efield_lev = use_fp_field ?
+        m_fields.get_alldirs(FieldType::Efield_fp, lev) :
+        m_fields.get_alldirs(FieldType::Efield_aux, lev);
     if ( WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::PSATD ) {
 #ifdef WARPX_USE_FFT
-        const ablastr::fields::VectorField Efield_aux_lev = m_fields.get_alldirs(FieldType::Efield_aux, lev);
-        spectral_solver_fp[lev]->ComputeSpectralDivE(lev, Efield_aux_lev, divE);
+        spectral_solver_fp[lev]->ComputeSpectralDivE(lev, Efield_lev, divE);
 #else
         WARPX_ABORT_WITH_MESSAGE(
             "ComputeDivE: PSATD requested but not compiled");
 #endif
     } else {
-        const ablastr::fields::VectorField Efield_aux_lev = m_fields.get_alldirs(FieldType::Efield_aux, lev);
-        m_fdtd_solver_fp[lev]->ComputeDivE(Efield_aux_lev, divE);
+        m_fdtd_solver_fp[lev]->ComputeDivE(Efield_lev, divE);
     }
 }
 

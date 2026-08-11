@@ -91,6 +91,28 @@ namespace warpx::embedded_boundary
         ablastr::fields::VectorField const& face_areas,
         ablastr::fields::VectorField const& edge_lengths );
 
+    /** \brief Set a flag to indicate on which (nodal) grid points a field should be
+     *  updated, for the collocated conformal embedded-boundary solver.
+     *
+     * This is the collocated analogue of `MarkUpdateECellsECT`/`MarkUpdateBCellsECT`:
+     * on a fully-nodal grid there are no Yee cut edges/faces, so the mask is keyed
+     * directly off the nodal signed level set `distance_to_eb` (negative inside the
+     * conductor, zero on the surface). Unlike the staircase routine, every fluid-side
+     * node stays active; only nodes inside the conductor are deactivated, leaving the
+     * sub-cell wall treatment to the level-set mirror boundary condition (EBJBoundary).
+     *
+     * All three components share the same nodal IndexType on a collocated grid, so the
+     * same mask is written to each of `eb_update[0..2]`.
+     *
+     * \param[in,out] eb_update      the three (nodal) iMultiFabs to fill with 0/1
+     * \param[in]     distance_to_eb the nodal signed distance to the embedded boundary
+     * \param[in]     periodicity    used to populate the guard cells
+     */
+    void MarkUpdateCellsNodalLevelSet (
+        std::array< std::unique_ptr<amrex::iMultiFab>,3> & eb_update,
+        amrex::MultiFab const& distance_to_eb,
+        const amrex::Periodicity& periodicity );
+
    /**
     * \brief Initialize information for cell extensions.
     *        The flags convention for m_flag_info_face is as follows
@@ -114,6 +136,17 @@ namespace warpx::embedded_boundary
     */
     void ComputeEdgeLengths (
         ablastr::fields::VectorField& edge_lengths,
+        const amrex::EBFArrayBoxFactory& eb_fact);
+    /**
+    * \brief Compute the per-edge offset of the uncovered-segment centroid from the
+    *        edge center, in full-cell units (range [-0.5, 0.5]); 0 on uncut/covered
+    *        edges. Used by the conformal-ECT hybrid Faraday curvature correction.
+    *        Reads the same `eb_fact.getEdgeCent()` as ComputeEdgeLengths. NOTE: this
+    *        offset is a dimensionless cell fraction and must NOT be passed through
+    *        ScaleEdges (unlike edge_lengths).
+    */
+    void ComputeEdgeCentroidOffsets (
+        ablastr::fields::VectorField& edge_cent_offset,
         const amrex::EBFArrayBoxFactory& eb_fact);
     /**
     * \brief Compute the area of the mesh faces. Here the area is a value in [0, 1].

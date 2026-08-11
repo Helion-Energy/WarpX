@@ -11,6 +11,7 @@
 #include <BoundaryConditions/PML.H>
 #include <Diagnostics/MultiDiagnostics.H>
 #include <Diagnostics/ReducedDiags/MultiReducedDiags.H>
+#include <EmbeddedBoundary/Enabled.H>
 #include <EmbeddedBoundary/WarpXFaceInfoBox.H>
 #include <FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H>
 #include <FieldSolver/FiniteDifferenceSolver/MacroscopicProperties/MacroscopicProperties.H>
@@ -49,6 +50,7 @@
 #if defined(AMREX_DEBUG) || defined(DEBUG)
 #   include <cstdio>
 #endif
+#include <optional>
 #include <string>
 
 
@@ -192,6 +194,186 @@ void init_WarpX (py::module& m)
         .def("sync_rho",
             [](WarpX& wx){ wx.SyncRho(); }
         )
+
+        // Expose the hybrid solver's embedded-boundary fill operators (unit
+        // tests of the boundary application; see
+        // Examples/Tests/ohms_law_embedded_boundary)
+        .def("hybrid_apply_eb_boundary_to_edge_field",
+            [](WarpX& wx, std::string const& name, int const lev) {
+                using warpx::fields::FieldType;
+                auto* hybrid = wx.get_pointer_HybridPICModel();
+                if (!EB::enabled() || hybrid == nullptr) {
+                    throw std::runtime_error(
+                        "hybrid_apply_eb_boundary_to_edge_field requires "
+                        "embedded boundaries and the hybrid solver");
+                }
+                FieldType field_type;
+                if (name == "Efield_fp") { field_type = FieldType::Efield_fp; }
+                else if (name == "current_fp") { field_type = FieldType::current_fp; }
+                else if (name == "hybrid_current_fp_plasma") {
+                    field_type = FieldType::hybrid_current_fp_plasma;
+                }
+                else {
+                    throw std::runtime_error(
+                        "hybrid_apply_eb_boundary_to_edge_field: unknown field " + name);
+                }
+                if (static_cast<int>(hybrid->m_eb_bc_status_E.size()) <= lev) {
+                    hybrid->m_eb_bc_status_E.resize(lev+1);
+                }
+                warpx::hybrid::ApplyPECBoundaryToField(
+                    wx.m_fields.get_alldirs(field_type, lev),
+                    wx.GetEBUpdateEFlag()[lev],
+                    *wx.m_fields.get(FieldType::distance_to_eb, lev),
+                    wx.Geom(lev),
+                    /*normal_odd=*/false, /*fill_covered_centers=*/true,
+                    &hybrid->m_eb_bc_status_E[lev]);
+            },
+            py::arg("name"), py::arg("lev") = 0,
+            "Apply the hybrid embedded-boundary PEC fill (tangential odd / "
+            "normal even, covered-center cut edges included) to a registered "
+            "edge vector field: Efield_fp, current_fp or hybrid_current_fp_plasma."
+        )
+        .def("hybrid_apply_eb_boundary_to_face_field",
+            [](WarpX& wx, std::string const& name, int const lev,
+               bool const fill_covered_centers, amrex::Real const band_cells) {
+                using warpx::fields::FieldType;
+                auto* hybrid = wx.get_pointer_HybridPICModel();
+                if (!EB::enabled() || hybrid == nullptr) {
+                    throw std::runtime_error(
+                        "hybrid_apply_eb_boundary_to_face_field requires "
+                        "embedded boundaries and the hybrid solver");
+                }
+                if (name != "Bfield_fp") {
+                    throw std::runtime_error(
+                        "hybrid_apply_eb_boundary_to_face_field: unknown field " + name);
+                }
+                if (static_cast<int>(hybrid->m_eb_bc_status_B.size()) <= lev) {
+                    hybrid->m_eb_bc_status_B.resize(lev+1);
+                }
+                warpx::hybrid::ApplyPECBoundaryToField(
+                    wx.m_fields.get_alldirs(FieldType::Bfield_fp, lev),
+                    wx.GetEBUpdateBFlag()[lev],
+                    *wx.m_fields.get(FieldType::distance_to_eb, lev),
+                    wx.Geom(lev),
+                    /*normal_odd=*/true, fill_covered_centers,
+                    &hybrid->m_eb_bc_status_B[lev], band_cells);
+            },
+            py::arg("name"), py::arg("lev") = 0,
+            py::arg("fill_covered_centers") = false,
+            py::arg("band_cells") = 1.0,
+            "Apply the hybrid embedded-boundary PEC fill with magnetic parity "
+            "(normal odd / tangential even) to the registered face vector "
+            "field Bfield_fp. On a collocated grid the fill always ends with "
+            "the divergence-consistent covered-band correction. With "
+            "fill_covered_centers the covered-center faces are also extended "
+            "(the mirror B a near-wall curl(B) read needs)."
+        )
+        .def("hybrid_fold_eb_deposit_to_edge_field",
+            [](WarpX& wx, std::string const& name, int const lev) {
+                using warpx::fields::FieldType;
+                auto* hybrid = wx.get_pointer_HybridPICModel();
+                if (!EB::enabled() || hybrid == nullptr) {
+                    throw std::runtime_error(
+                        "hybrid_fold_eb_deposit_to_edge_field requires "
+                        "embedded boundaries and the hybrid solver");
+                }
+                if (name != "current_fp") {
+                    throw std::runtime_error(
+                        "hybrid_fold_eb_deposit_to_edge_field: unknown field " + name);
+                }
+                if (static_cast<int>(hybrid->m_eb_bc_status_E.size()) <= lev) {
+                    hybrid->m_eb_bc_status_E.resize(lev+1);
+                }
+                warpx::hybrid::FoldEBDepositToField(
+                    wx.m_fields.get_alldirs(FieldType::current_fp, lev),
+                    wx.GetEBUpdateEFlag()[lev],
+                    *wx.m_fields.get(FieldType::distance_to_eb, lev),
+                    wx.Geom(lev),
+                    &hybrid->m_eb_bc_status_E[lev]);
+            },
+            py::arg("name"), py::arg("lev") = 0,
+            "Fold the deposit collected by covered points of the registered "
+            "edge vector field current_fp back across the embedded surface "
+            "with the PEC image parities (tangential subtracted, normal added)."
+        )
+        .def("hybrid_fold_eb_deposit_to_nodal_scalar",
+            [](WarpX& wx, std::string const& name, int const lev) {
+                using warpx::fields::FieldType;
+                if (!EB::enabled()) {
+                    throw std::runtime_error(
+                        "hybrid_fold_eb_deposit_to_nodal_scalar requires "
+                        "embedded boundaries");
+                }
+                if (name != "rho_fp") {
+                    throw std::runtime_error(
+                        "hybrid_fold_eb_deposit_to_nodal_scalar: unknown field " + name);
+                }
+                warpx::hybrid::FoldEBDepositToNodalScalar(
+                    *wx.m_fields.get(FieldType::rho_fp, lev),
+                    *wx.m_fields.get(FieldType::distance_to_eb, lev),
+                    wx.Geom(lev));
+            },
+            py::arg("name"), py::arg("lev") = 0,
+            "Fold the deposit collected by covered points of the registered "
+            "nodal scalar field rho_fp back across the embedded surface with "
+            "the PEC image parity (subtracted: image charge of opposite sign)."
+        )
+        .def("hybrid_apply_eb_boundary_to_nodal_scalar",
+            [](WarpX& wx, std::string const& name, int const lev, bool const odd) {
+                using warpx::fields::FieldType;
+                if (!EB::enabled()) {
+                    throw std::runtime_error(
+                        "hybrid_apply_eb_boundary_to_nodal_scalar requires "
+                        "embedded boundaries");
+                }
+                FieldType field_type;
+                if (name == "rho_fp") { field_type = FieldType::rho_fp; }
+                else if (name == "hybrid_electron_pressure_fp") {
+                    field_type = FieldType::hybrid_electron_pressure_fp;
+                }
+                else {
+                    throw std::runtime_error(
+                        "hybrid_apply_eb_boundary_to_nodal_scalar: unknown field " + name);
+                }
+                warpx::hybrid::ApplyEBBoundaryToNodalScalar(
+                    *wx.m_fields.get(field_type, lev),
+                    *wx.m_fields.get(FieldType::distance_to_eb, lev),
+                    wx.Geom(lev),
+                    odd);
+            },
+            py::arg("name"), py::arg("lev") = 0, py::arg("odd") = true,
+            "Apply the embedded-boundary mirror fill to a registered nodal "
+            "scalar field (rho_fp or hybrid_electron_pressure_fp): odd "
+            "(Dirichlet 0 at the surface) or even (Neumann)."
+        )
+        .def("hybrid_calculate_plasma_current",
+            [](WarpX& wx) {
+                using warpx::fields::FieldType;
+                auto* hybrid = wx.get_pointer_HybridPICModel();
+                if (hybrid == nullptr) {
+                    throw std::runtime_error(
+                        "hybrid_calculate_plasma_current requires the hybrid solver");
+                }
+                // Refresh B ghosts so the Ampere curl reads valid halo cells,
+                // then compute hybrid_current_fp_plasma = curl(B)/mu0 - J_ext
+                // and apply the EB mirror fill -- the same operations as the
+                // in-step CalculatePlasmaCurrent driver, but without advancing
+                // any field (near-wall operator-order diagnostics).
+                for (int lev = 0; lev <= wx.finestLevel(); ++lev) {
+                    const auto& period = wx.Geom(lev).periodicity();
+                    for (auto* mf : wx.m_fields.get_alldirs(FieldType::Bfield_fp, lev)) {
+                        mf->FillBoundary(period);
+                    }
+                }
+                hybrid->CalculatePlasmaCurrent(
+                    wx.m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, wx.finestLevel()),
+                    wx.GetEBUpdateEFlag());
+            },
+            "Compute the hybrid Ampere/plasma current "
+            "(hybrid_current_fp_plasma = curl(B)/mu0 - J_ext) from the "
+            "registered Bfield_fp and apply the EB boundary fill, without "
+            "advancing any field (near-wall operator-order diagnostics)."
+        )
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
         .def("apply_inverse_volume_scaling_to_charge_density",
             [](WarpX& wx, amrex::MultiFab* rho, int const lev) {
@@ -285,6 +467,41 @@ void init_WarpX (py::module& m)
                 return wx.get_pointer_HybridPICModel()->m_n_floor;
             },
             "Gets the number of substeps to take in the hybrid solver."
+        )
+        .def("hybrid_solve_e",
+            [](WarpX& wx, bool const solve_for_faraday) {
+                using warpx::fields::FieldType;
+                auto* hybrid = wx.get_pointer_HybridPICModel();
+                if (hybrid == nullptr) {
+                    throw std::runtime_error("hybrid_solve_e requires the hybrid solver");
+                }
+                // the in-step path guarantees ghost-fresh inputs; fields
+                // poked through the wrappers only hold valid data
+                for (int lev = 0; lev <= wx.finestLevel(); ++lev) {
+                    const auto& period = wx.Geom(lev).periodicity();
+                    for (auto ft : {FieldType::hybrid_current_fp_plasma,
+                                    FieldType::current_fp, FieldType::Bfield_fp}) {
+                        for (auto* mf : wx.m_fields.get_alldirs(ft, lev)) {
+                            mf->FillBoundary(period);
+                        }
+                    }
+                    wx.m_fields.get(FieldType::rho_fp, lev)->FillBoundary(period);
+                    wx.m_fields.get(FieldType::hybrid_electron_pressure_fp, lev)
+                        ->FillBoundary(period);
+                }
+                hybrid->HybridPICSolveE(
+                    wx.m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, wx.finestLevel()),
+                    wx.m_fields.get_mr_levels_alldirs(FieldType::current_fp, wx.finestLevel()),
+                    wx.m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, wx.finestLevel()),
+                    wx.m_fields.get_mr_levels(FieldType::rho_fp, wx.finestLevel()),
+                    wx.GetEBUpdateEFlag(), solve_for_faraday);
+            },
+            py::arg("solve_for_faraday") = true,
+            "Evaluate the hybrid Ohm's-law E solve on the registered fields "
+            "(Efield_fp from current_fp/Bfield_fp/rho_fp and the registered "
+            "plasma current and electron pressure), including the resistive "
+            "and hyper-resistive terms when solve_for_faraday is True (unit "
+            "tests of the Ohm's-law stencils)."
         )
     ;
 
