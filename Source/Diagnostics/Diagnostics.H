@@ -55,6 +55,16 @@ public:
        on-the-fly using a functor. */
     void ComputeAndPack ();
 
+    /** \brief Re-size this diagnostic to the current level hierarchy after a
+     * dynamic regrid changed it (hybrid-PIC dynamic mesh refinement):
+     * refresh the level counts, re-initialize the field functors of every
+     * active level, and rebuild the per-level output buffers on the new
+     * BoxArrays. Only supported for diagnostics whose buffers live on the
+     * simulation grids (Full, TimeAveraged; BoundaryScraping is a no-op);
+     * the caller rejects BackTransformed diagnostics.
+     */
+    void HandleHierarchyChange ();
+
     /** \brief Flush particle and field buffers to file using the FlushFormat member variable.
      *
      * This function should belong to class Diagnostics and not be virtual, as it flushes

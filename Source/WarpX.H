@@ -505,6 +505,23 @@ public:
      */
     void HybridPICDepositRhoAndJ ();
 
+    /**
+     * \brief Hybrid-PIC dynamic regrid driver, called at the top of a step
+     * (before ``ExplicitFillBoundaryEBUpdateAux()``) whenever
+     * ``warpx.regrid_int`` divides the step index. Re-evaluates the
+     * refinement tags through ``AmrCore::regrid`` -- which drives the
+     * ``MakeNewLevelFromCoarse``/``RemakeLevel``/``ClearLevel`` hooks -- and,
+     * if the level hierarchy changed, finishes the transaction: field seeding
+     * of created/relocated levels, particle redistribution, buffer-mask and
+     * diagnostic rebuild, and re-seeding of the Ohm's-law moment history.
+     * Levels are only ever created, moved, or removed here, at a step
+     * boundary, never inside the substep loop.
+     *
+     * \param step current step index (top of step, not yet executed)
+     * \param time simulation time at the top of the step
+     */
+    void HybridPICRegrid (int step, amrex::Real time);
+
     /** apply QED correction on electric field
      *
      * \param dt vector of time steps (for all levels)
@@ -1004,10 +1021,12 @@ protected:
                                           const amrex::DistributionMapping& new_dmap) final;
 
     //! Make a new level using provided BoxArray and
-    //! DistributionMapping and fill with interpolated coarse level
-    //! data.  Called by AmrCore::regrid.
-    void MakeNewLevelFromCoarse (int /*lev*/, amrex::Real /*time*/, const amrex::BoxArray& /*ba*/,
-                                         const amrex::DistributionMapping& /*dm*/) final;
+    //! DistributionMapping. Called by AmrCore::regrid (only reached through
+    //! HybridPICRegrid): allocates the level's data; the field seeding and
+    //! particle/moment work run in HybridPICRegrid once AmrCore::regrid has
+    //! published the new hierarchy.
+    void MakeNewLevelFromCoarse (int lev, amrex::Real time, const amrex::BoxArray& ba,
+                                         const amrex::DistributionMapping& dm) final;
 
     //! Remake an existing level using provided BoxArray and
     //! DistributionMapping and fill with existing fine and coarse
@@ -1016,7 +1035,16 @@ protected:
                               const amrex::DistributionMapping& dm) final;
 
     //! Delete level data.  Called by AmrCore::regrid.
+    //! During a hybrid-PIC dynamic regrid (level deactivation) the fine B
+    //! solution is first restricted onto the coarse level without the
+    //! sacrificial setback band, so no coarse cell is left holding
+    //! never-restricted data.
     void ClearLevel (int lev) final;
+
+    //! Free the per-level data owned by WarpX (fields, buffer masks, field
+    //! factory, costs, dot masks, spectral solvers). Shared by ClearLevel and
+    //! by RemakeLevel with a changed BoxArray.
+    void ClearLevelData (int lev);
 
 private:
 
@@ -1376,6 +1404,34 @@ private:
 
     int regrid_int = -1;
 
+    //! Refinement tags are suppressed while time < refinement_start_time:
+    //! with the hybrid-PIC solver and warpx.regrid_int set, the refined
+    //! levels are created at the first regrid whose time reaches this value
+    //! (and do not exist before, including at initialization).
+    amrex::Real refinement_start_time = std::numeric_limits<amrex::Real>::lowest();
+
+    //! Set while AmrCore::regrid is running from HybridPICRegrid, so the
+    //! regrid hooks (MakeNewLevelFromCoarse, RemakeLevel with a changed
+    //! BoxArray, ClearLevel) can tell a dynamic hybrid-PIC regrid apart from
+    //! initialization, same-BoxArray load balancing, and finalization.
+    bool m_hybrid_regrid_in_progress = false;
+
+    //! Levels created by MakeNewLevelFromCoarse during the current
+    //! HybridPICRegrid transaction; their field data is seeded after
+    //! AmrCore::regrid returns (when the new BoxArray, DistributionMapping
+    //! and finest_level are all published).
+    amrex::Vector<int> m_regrid_created_levels;
+
+    //! Levels remade with a changed BoxArray during the current
+    //! HybridPICRegrid transaction (relocation); their B field is refilled
+    //! after AmrCore::regrid returns from the stashed old-layout copy plus
+    //! coarse prolongation of the newly uncovered region.
+    amrex::Vector<int> m_regrid_relocated_levels;
+
+    //! Old-layout B field of each relocated level, stashed by RemakeLevel
+    //! (indexed by level, components x/y/z on the old BoxArray).
+    std::map<int, std::array<std::unique_ptr<amrex::MultiFab>, 3>> m_regrid_stashed_B;
+
     amrex::Real cfl = amrex::Real(0.999);
 
     std::string restart_chkfile;
@@ -1395,6 +1451,11 @@ private:
     amrex::RealVect fine_tag_hi;
     //! User-defined parser to define refinement patches
     std::unique_ptr<amrex::Parser> ref_patch_parser;
+    //! Time-dependent variant of ref_patch_parser,
+    //! warpx.ref_patch_function(x,y,z,t): with the hybrid-PIC solver and
+    //! warpx.regrid_int set, it is re-evaluated at every regrid so refined
+    //! patches can appear, move, and disappear during the run.
+    std::unique_ptr<amrex::Parser> ref_patch_parser_t;
 
     bool m_is_synchronized = true;
 

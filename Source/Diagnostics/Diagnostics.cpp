@@ -363,12 +363,18 @@ Diagnostics::InitDataBeforeRestart ()
 void
 Diagnostics::InitDataAfterRestart (const MultiParticleContainer& mpc)
 {
+    auto& warpx = WarpX::GetInstance();
+    // With hybrid-PIC dynamic mesh refinement a checkpoint can hold fewer
+    // levels than amr.max_level allows (a deferred or removed fine level):
+    // functors can only be initialized for levels that exist.
+    const int nlev_functors = std::min(nmax_lev, warpx.finestLevel() + 1);
+
     for (int i_buffer = 0; i_buffer < m_num_buffers; ++i_buffer) {
         // loop over all levels
         // This includes full diagnostics and BTD as well as cell-center functors for BTD.
         // Note that the cell-centered data for BTD is computed for all levels and hence
         // the corresponding functor is also initialized for all the levels
-        for (int lev = 0; lev < nmax_lev; ++lev) {
+        for (int lev = 0; lev < nlev_functors; ++lev) {
             // allocate and initialize m_all_field_functors depending on diag type
             InitializeFieldFunctors(lev);
         }
@@ -504,6 +510,28 @@ Diagnostics::InitData (const MultiParticleContainer& mpc)
             warnMsg += "supported, yet! Therefore, particle I/O is disabled for this diagnostics: ";
             warnMsg += m_diag_name;
             ablastr::warn_manager::WMRecordWarning("Diagnostics", warnMsg);
+        }
+    }
+}
+
+
+void
+Diagnostics::HandleHierarchyChange ()
+{
+    auto& warpx = WarpX::GetInstance();
+
+    // Track the new level hierarchy (a hybrid-PIC dynamic regrid created,
+    // relocated, or removed refined levels).
+    nlev = warpx.finestLevel() + 1;
+    nlev_output = nlev;
+
+    for (int i_buffer = 0; i_buffer < m_num_buffers; ++i_buffer) {
+        for (int lev = 0; lev < nlev_output; ++lev) {
+            // Re-point the field functors at the (possibly re-allocated)
+            // fields of the level and rebuild the output buffer on the
+            // level's current BoxArray.
+            InitializeFieldFunctors(lev);
+            InitializeBufferData(i_buffer, lev);
         }
     }
 }

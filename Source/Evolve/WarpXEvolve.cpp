@@ -195,6 +195,18 @@ WarpX::Evolve (int numsteps)
 
         CheckLoadBalance(step);
 
+        // Hybrid-PIC dynamic mesh refinement: re-evaluate the refinement tags
+        // every regrid_int steps, at the step boundary (before the boundary
+        // fill/aux update and before any particle work), so refined levels are
+        // only ever created, relocated, or removed between steps -- never
+        // inside the substep loop. The EM/ES solvers remain static-MR
+        // (regrid_int is rejected for them at input validation).
+        if (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC &&
+            max_level > 0 && regrid_int > 0 && step % regrid_int == 0)
+        {
+            HybridPICRegrid(step, cur_time);
+        }
+
         // Update the timestep for solvers that support adaptive timestepping
         // (electrostatic and theta-implicit EM), provided const_dt is not specified.
         if (m_dt_update_interval.contains(step+1) || (step == 0 && m_max_dt.has_value())) {
@@ -316,7 +328,7 @@ WarpX::Evolve (int numsteps)
                 // Since the fields were reset above, the external fields are added
                 // back on to the fine patch fields. This make it so that the net fields
                 // are the sum of the field solution and any external field.
-                for (int lev = 0; lev <= max_level; ++lev) {
+                for (int lev = 0; lev <= finestLevel(); ++lev) {
                     AddExternalFields(lev);
                 }
             } else if (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) {

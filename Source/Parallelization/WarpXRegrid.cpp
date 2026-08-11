@@ -48,7 +48,9 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <iomanip>
 #include <memory>
+#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -340,7 +342,43 @@ WarpX::RemakeLevel (int lev, Real /*time*/, const BoxArray& ba, const Distributi
 
     } else
     {
-        WARPX_ABORT_WITH_MESSAGE("RemakeLevel: to be implemented");
+        // Changed BoxArray (relocation of a refined patch): only reachable
+        // through AmrCore::regrid, which WarpX only invokes from
+        // HybridPICRegrid (hybrid-PIC dynamic mesh refinement). The EM/ES
+        // solvers are static-MR and only support the same-BoxArray load
+        // balancing path above.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC &&
+            m_hybrid_regrid_in_progress && lev > 0,
+            "RemakeLevel with a changed BoxArray is only implemented for "
+            "refined levels of the hybrid-PIC solver, through "
+            "warpx.regrid_int (the EM/ES solvers are static-MR).");
+
+        // Stash the old-layout B solution: after the level is re-created on
+        // the new layout, HybridPICRegrid seeds B by div-free prolongation
+        // from the coarse level and copies this stash back over the overlap.
+        // Everything else is recomputed (E, electron pressure) or
+        // re-deposited and re-seeded (moments and their history fabs).
+        auto& stash = m_regrid_stashed_B[lev];
+        for (int idim = 0; idim < 3; ++idim) {
+            MultiFab* B = m_fields.get(FieldType::Bfield_fp, Direction{idim}, lev);
+            stash[idim] = std::make_unique<MultiFab>(std::move(*B));
+        }
+
+        // Tear the level down and re-create it on the new layout, exactly
+        // like a level created from scratch. AmrCore::regrid publishes the
+        // new BoxArray/DistributionMapping after this hook returns.
+        ClearLevelData(lev);
+        AllocLevelData(lev, ba, dm);
+
+#ifdef AMREX_USE_EB
+        // Same as MakeNewLevelFromCoarse: fill the freshly allocated EB
+        // solver masks of the re-created level (the load-balance branch
+        // above does this through its own InitializeEBGridData call).
+        if (eb_enabled) { InitializeEBGridData(lev); }
+#endif
+
+        m_regrid_relocated_levels.push_back(lev);
     }
 
     // Re-initialize diagnostic functors that stores pointers to the user-requested fields at level, lev.
@@ -409,7 +447,9 @@ WarpX::RescaleCosts (int step)
         return;
     }
 
-    AMREX_ALWAYS_ASSERT(costs.size() == finest_level + 1);
+    // costs is sized max_level+1; with hybrid-PIC dynamic mesh refinement
+    // finest_level can be smaller than max_level (deferred/removed levels).
+    AMREX_ALWAYS_ASSERT(costs.size() > finest_level);
 
     for (int lev = 0; lev <= finest_level; ++lev)
     {
@@ -423,6 +463,148 @@ WarpX::RescaleCosts (int step)
             {
                 (*costs[lev])[i] *= (1._rt - 2._rt/load_balance_intervals.localPeriod(step+1));
             }
+        }
+    }
+}
+
+void
+WarpX::HybridPICRegrid (int step, amrex::Real time)
+{
+    using ablastr::fields::Direction;
+    using warpx::fields::FieldType;
+
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC,
+        "HybridPICRegrid: dynamic regridding is only implemented for the "
+        "hybrid-PIC solver.");
+
+    ABLASTR_PROFILE("WarpX::HybridPICRegrid()");
+
+    const int old_finest = finest_level;
+
+    m_regrid_created_levels.clear();
+    m_regrid_relocated_levels.clear();
+    m_regrid_stashed_B.clear();
+
+    // Re-evaluate the refinement tags (ErrorEst at the current time) and let
+    // AmrCore::regrid drive the MakeNewLevelFromCoarse / RemakeLevel /
+    // ClearLevel hooks. Identical tags produce identical grids and the call
+    // is a no-op.
+    m_hybrid_regrid_in_progress = true;
+    regrid(0, time);
+    m_hybrid_regrid_in_progress = false;
+
+    const bool level_created   = !m_regrid_created_levels.empty();
+    const bool level_relocated = !m_regrid_relocated_levels.empty();
+    const bool level_removed   = (finest_level < old_finest);
+
+    if (!level_created && !level_relocated && !level_removed) {
+        return;
+    }
+
+    {
+        std::ostringstream oss;
+        oss << "Hybrid-PIC regrid at step " << step
+            << " (t = " << std::scientific << std::setprecision(6) << time
+            << " s): finest_level " << old_finest << " -> " << finest_level
+            << (level_created   ? "; level(s) created"   : "")
+            << (level_relocated ? "; level(s) relocated" : "")
+            << (level_removed   ? "; level(s) removed"   : "");
+        amrex::Print() << Utils::TextMsg::Info(oss.str());
+    }
+
+    // Any hierarchy change invalidates the cached coarse-fine masks (they
+    // are keyed to the layouts they were built from and rebuilt on demand).
+    m_hybrid_pic_model->ClearMRMaskCache();
+
+    // Re-run the EB clearance guard on the new hierarchy: a regrid that
+    // creates or relocates a fine patch into the wall band must fail loudly
+    // (no-op unless EB is enabled and a fine level exists).
+    m_hybrid_pic_model->CheckMREBClearance(false);
+
+    // Seed the fields of created/relocated levels, coarsest first, so a
+    // multi-level cascade always prolongs from an already-seeded parent.
+    for (int lev = 1; lev <= finest_level; ++lev)
+    {
+        const bool is_created = std::find(
+            m_regrid_created_levels.begin(), m_regrid_created_levels.end(), lev)
+            != m_regrid_created_levels.end();
+        const bool is_relocated = std::find(
+            m_regrid_relocated_levels.begin(), m_regrid_relocated_levels.end(), lev)
+            != m_regrid_relocated_levels.end();
+        if (!is_created && !is_relocated) { continue; }
+
+        // B: divergence-free prolongation of the coarse solution over the
+        // whole level (div(B) = 0 is inherited)...
+        m_hybrid_pic_model->SeedBfieldFromCoarse(
+            lev, guard_cells.ng_FieldSolver, WarpX::sync_nodal_points);
+
+        if (is_relocated) {
+            // ... overwritten with the old-layout fine solution wherever the
+            // new layout overlaps it (valid region to valid region).
+            auto& stash = m_regrid_stashed_B[lev];
+            for (int idim = 0; idim < 3; ++idim) {
+                MultiFab* B = m_fields.get(FieldType::Bfield_fp, Direction{idim}, lev);
+                B->ParallelCopy(*stash[idim], 0, 0, 1,
+                                IntVect(0), IntVect(0), Geom(lev).periodicity());
+            }
+            // Restore same-level ghosts around the copied overlap; the
+            // coarse-fine ghosts keep the prolonged values.
+            FillBoundaryB(lev, guard_cells.ng_FieldSolver, WarpX::sync_nodal_points);
+        }
+
+        // E: staggering-aware placeholder interpolation (recomputed from the
+        // moments and B in the first Ohm's-law solve of this step).
+        m_hybrid_pic_model->SeedEfieldFromCoarse(lev);
+
+        // External sources resident on the level (external current, external
+        // vector potential A and curl(A), electron-temperature fill value).
+        m_hybrid_pic_model->ReinitLevelData(lev);
+    }
+    m_regrid_stashed_B.clear();
+
+    // Particles move to their new home levels by position (weights are
+    // unchanged; on removal they drop to the coarse level automatically).
+    mypc->Redistribute();
+    mypc->defineAllParticleTiles();
+    m_particle_boundary_buffer->redistribute();
+
+    // Gather/deposition buffer masks for the new hierarchy (the masks of
+    // created/relocated levels were freshly allocated with the level).
+    if (n_field_gather_buffer > 0 || n_current_deposition_buffer > 0) {
+        BuildBufferMasks();
+    }
+
+    // Diagnostics follow the new hierarchy: level counts, per-level output
+    // buffers, and field functors (BackTransformed diagnostics abort).
+    multi_diags->HandleHierarchyChange();
+    reduced_diags->LoadBalance();
+
+    // Re-seed the Ohm's-law moment state on the new hierarchy, exactly like
+    // the restart path: deposit rho^n and J^{n-1/2} from the particles at
+    // (x^n, v^{n-1/2}) -- SyncCurrentAndRho and the coarse-fine ghost/band
+    // fill run inside the deposit -- recompute the electron pressure, and
+    // copy into the history fabs (hybrid_rho_fp_temp = rho^n,
+    // hybrid_current_fp_temp = J^{n-1/2}). The deposit uses the standard
+    // -dt/2 relative-time offset, so the seeded time centering matches the
+    // regular scheme; on a freshly created level the first step is
+    // nonetheless approximate: the particles that now populate it gathered
+    // coarse-resolution fields before the regrid.
+    HybridPICDepositRhoAndJ();
+    m_hybrid_pic_model->CalculateElectronPressure();
+
+    const ablastr::fields::MultiLevelScalarField rho_fp_temp =
+        m_fields.get_mr_levels(FieldType::hybrid_rho_fp_temp, finest_level);
+    const ablastr::fields::MultiLevelVectorField current_fp_temp =
+        m_fields.get_mr_levels_alldirs(FieldType::hybrid_current_fp_temp, finest_level);
+    for (int lev = 0; lev <= finest_level; ++lev)
+    {
+        MultiFab::Copy(*rho_fp_temp[lev], *m_fields.get(FieldType::rho_fp, lev),
+                       0, 0, 1, rho_fp_temp[lev]->nGrowVect());
+        for (int idim = 0; idim < 3; ++idim) {
+            MultiFab::Copy(*current_fp_temp[lev][idim],
+                           *m_fields.get(FieldType::current_fp, Direction{idim}, lev),
+                           0, 0, 1, current_fp_temp[lev][idim]->nGrowVect());
         }
     }
 }

@@ -227,6 +227,73 @@ ExternalVectorPotential::InitData ()
     UpdateHybridExternalFields(warpx.gett_new(0), warpx.getdt(0));
 }
 
+void
+ExternalVectorPotential::ReinitLevelData (const int lev)
+{
+    using ablastr::fields::Direction;
+    auto& warpx = WarpX::GetInstance();
+
+    // The projection div(A) cleaner runs once at initialization on the level
+    // hierarchy of that moment; its solution cannot be reproduced for a
+    // level created mid-run. Rejected at input validation, guarded here too.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_do_clean_divA,
+        "ExternalVectorPotential::ReinitLevelData: dynamic regridding "
+        "requires external_vector_potential.do_diva_cleaning = 0.");
+
+    for (int i = 0; i < m_nFields; ++i) {
+
+        const std::string Aext_field = m_field_names[i] + std::string{"_Aext"};
+
+        if (m_read_A_from_file[i]) {
+            // Re-read the A field of this level from file (same reader calls
+            // as InitData, restricted to the re-created level).
+#if defined(WARPX_DIM_RZ)
+            warpx.ReadExternalFieldFromFile(m_external_file_path[i],
+                warpx.m_fields.get(Aext_field, Direction{0}, lev),
+                "A", "r");
+            warpx.ReadExternalFieldFromFile(m_external_file_path[i],
+                warpx.m_fields.get(Aext_field, Direction{1}, lev),
+                "A", "t");
+            warpx.ReadExternalFieldFromFile(m_external_file_path[i],
+                warpx.m_fields.get(Aext_field, Direction{2}, lev),
+                "A", "z");
+#else
+            warpx.ReadExternalFieldFromFile(m_external_file_path[i],
+                warpx.m_fields.get(Aext_field, Direction{0}, lev),
+                "A", "x");
+            warpx.ReadExternalFieldFromFile(m_external_file_path[i],
+                warpx.m_fields.get(Aext_field, Direction{1}, lev),
+                "A", "y");
+            warpx.ReadExternalFieldFromFile(m_external_file_path[i],
+                warpx.m_fields.get(Aext_field, Direction{2}, lev),
+                "A", "z");
+#endif
+        } else {
+            // Re-evaluate the (time-independent) expression on the level's
+            // new grids; the parsers were compiled in InitData.
+            warpx.ComputeExternalFieldOnGridUsingParser(
+                Aext_field,
+                m_A_external[i][0],
+                m_A_external[i][1],
+                m_A_external[i][2],
+                lev, PatchType::fine,
+                warpx.GetEBUpdateEFlag(),
+                false);
+        }
+
+        amrex::Gpu::streamSynchronize();
+
+        // Recompute the reference curl(A) (all levels; the other levels are
+        // unchanged, this refreshes the re-created one).
+        CalculateExternalCurlA(m_field_names[i]);
+    }
+
+    // Refresh the external E/B fields at the current time so the new level
+    // holds consistent values immediately (they are re-evaluated at the
+    // sub-step times by the field push anyway).
+    UpdateHybridExternalFields(warpx.gett_new(0), warpx.getdt(0));
+}
 
 void
 ExternalVectorPotential::CalculateExternalCurlA ()

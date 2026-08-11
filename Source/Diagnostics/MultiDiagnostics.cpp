@@ -49,6 +49,18 @@ MultiDiagnostics::InitializeFieldFunctors ( int lev )
 }
 
 void
+MultiDiagnostics::HandleHierarchyChange ()
+{
+    for (int i = 0; i < ndiags; ++i) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            diags_types[i] != DiagTypes::BackTransformed,
+            "Dynamic mesh refinement (warpx.regrid_int) does not support "
+            "BackTransformed diagnostics.");
+        alldiags[i]->HandleHierarchyChange();
+    }
+}
+
+void
 MultiDiagnostics::ReadParameters ()
 {
     const ParmParse pp_diagnostics("diagnostics");

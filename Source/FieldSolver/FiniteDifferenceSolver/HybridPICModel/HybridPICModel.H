@@ -32,9 +32,11 @@
 #include <AMReX_EdgeFluxRegister.H>
 #include <AMReX_IntVect.H>
 #include <AMReX_DistributionMapping.H>
+#include <AMReX_MultiFab.H>
 #include <AMReX_iMultiFab.H>
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <optional>
 
@@ -263,6 +265,52 @@ public:
      * physical-rate instability that mesh refinement amplifies (T1.7). */
     void CheckFineLevelDensityFloor () const;
 
+    /**
+     * \brief Seed the full B field of level lev (valid cells and all ghost
+     * cells inside the periodically grown domain) by divergence-free face
+     * prolongation of the lev-1 solution -- the same operator as
+     * FillBfieldCoarseFineGhosts, applied to the whole level instead of the
+     * ghost region only. Used when a dynamic regrid has just created (or
+     * relocated) level lev. Ghost cells outside a non-periodic domain
+     * boundary are left at zero for the domain boundary conditions to fill.
+     */
+    void SeedBfieldFromCoarse (
+        int lev, amrex::IntVect const& ng, std::optional<bool> nodal_sync);
+
+    /**
+     * \brief Seed the full E field of level lev (valid + ghost) by
+     * staggering-aware linear interpolation of the lev-1 solution. This is a
+     * placeholder initialization: E is recomputed from the moments and B in
+     * the first Ohm's-law solve after the regrid, so the seeded values are
+     * only gathered by particles for the first half-push on the new level.
+     */
+    void SeedEfieldFromCoarse (int lev);
+
+    /**
+     * \brief Final fine->coarse B restriction of level flev before it is
+     * removed by a dynamic regrid: the same face-averaged restriction as
+     * RestrictBfieldFineToCoarse but WITHOUT the sacrificial setback erosion,
+     * so the coarse cells under the (formerly sacrificial) fine edge band are
+     * not left holding never-restricted data. Only the outermost shared
+     * faces of the patch boundary itself keep the coarse solution.
+     */
+    void RestrictBfieldBeforeRemoval (
+        int flev, amrex::IntVect const& ng, std::optional<bool> nodal_sync);
+
+    /** \brief Drop the cached coarse-fine masks (restriction keep-masks and
+     * fine-edge band masks). They are rebuilt on demand and keyed to the
+     * BoxArray/DistributionMapping they were built from; dropping them at
+     * every hierarchy change keeps a dynamic regrid from ever consulting a
+     * stale layout. */
+    void ClearMRMaskCache ();
+
+    /** \brief Re-initialize the level-resident external-source data of level
+     * lev after a dynamic regrid created or relocated it: re-evaluate the
+     * external current (if any) on the level, re-seed the electron
+     * temperature fill value, and re-read/re-evaluate the external vector
+     * potential and its curl. */
+    void ReinitLevelData (int lev);
+
     /** \brief div(B) audit after the coarse-fine ghost fill of level lev
      * (active when m_mr_check_div_b is set). */
     void CheckDivBAfterGhostFill (int lev, amrex::IntVect const& ng);
@@ -467,6 +515,17 @@ public:
     amrex::GpuArray<int, 3> Ez_IndexType;
 
 private:
+    /** \brief Prolong the lev-1 B solution onto a scratch copy of level lev
+     * by divergence-free face interpolation (amrex::FaceDivFree;
+     * conservative-linear for the 2D out-of-plane cell-centered component).
+     * The scratch MultiFabs are created on the level's layout with ng padded
+     * up to coarse alignment and are filled over each fine box grown by that
+     * padding; anything beyond a non-periodic domain boundary stays zero.
+     * Shared by FillBfieldCoarseFineGhosts (ghost-only copy-back) and
+     * SeedBfieldFromCoarse (whole-level copy-back). */
+    void ProlongBfieldFromCoarse (
+        int lev, amrex::IntVect const& ng, std::array<amrex::MultiFab, 3>& Btmp);
+
     /** \brief (Re)build the cached cell-centered fine-edge mask of refined
      * level lev used by FillMomentsCoarseFineGhosts: 0 on cells within the
      * sacrificial band (within max(mr_restrict_setback * ratio,

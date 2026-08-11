@@ -918,7 +918,9 @@ WarpX::InitData ()
         ExecutePythonCallback("afterInitEsolve");
         // Add external fields to the fine patch fields. This makes it so that the
         // net fields are the sum of the field solutions and any external fields.
-        for (int lev = 0; lev <= max_level; ++lev) {
+        // Only levels that exist: with hybrid-PIC dynamic mesh refinement
+        // (warpx.refinement_start_time) the finest level can be deferred.
+        for (int lev = 0; lev <= finestLevel(); ++lev) {
             AddExternalFields(lev);
         }
         // Hybrid-PIC mesh refinement: the levels initialize B independently
@@ -977,7 +979,7 @@ WarpX::AddExternalFields (int const lev)
 
     // FIXME: RZ multimode has more than one component for all these
     if (m_p_ext_field_params->E_ext_grid_type != ExternalFieldType::default_zero) {
-        ablastr::fields::MultiLevelVectorField Efield_fp = m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, max_level);
+        ablastr::fields::MultiLevelVectorField Efield_fp = m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, finest_level);
         if (m_p_ext_field_params->E_ext_grid_type == ExternalFieldType::constant) {
             Efield_fp[lev][0]->plus(m_p_ext_field_params->E_external_grid[0], guard_cells.ng_alloc_EB.min());
             Efield_fp[lev][1]->plus(m_p_ext_field_params->E_external_grid[1], guard_cells.ng_alloc_EB.min());
@@ -992,7 +994,7 @@ WarpX::AddExternalFields (int const lev)
         ApplyEfieldBoundary(lev, PatchType::fine, 0.0);
     }
     if (m_p_ext_field_params->B_ext_grid_type != ExternalFieldType::default_zero) {
-        ablastr::fields::MultiLevelVectorField const& Bfield_fp = m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, max_level);
+        ablastr::fields::MultiLevelVectorField const& Bfield_fp = m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, finest_level);
         if (m_p_ext_field_params->B_ext_grid_type == ExternalFieldType::constant) {
             Bfield_fp[lev][0]->plus(m_p_ext_field_params->B_external_grid[0], guard_cells.ng_alloc_EB.min());
             Bfield_fp[lev][1]->plus(m_p_ext_field_params->B_external_grid[1], guard_cells.ng_alloc_EB.min());

@@ -85,6 +85,20 @@ public:
 
     void InitData ();
 
+    /** \brief Re-initialize the reference vector potential (and its curl) of
+     * a single level after a dynamic regrid created or relocated that level:
+     * re-read from file or re-evaluate the parsed expression on the level's
+     * new grids, recompute curl(A), and refresh the external E/B fields.
+     * Incompatible with the projection div(A) cleaner (rejected at input
+     * validation), whose initialization-time solution cannot be reproduced
+     * on a level created mid-run. */
+    void ReinitLevelData (int lev);
+
+    /** True when the projection div(A) cleaner post-processes the external
+     * vector potential at initialization (external_vector_potential.
+     * do_diva_cleaning); incompatible with dynamic regridding. */
+    [[nodiscard]] bool UsesDivACleaning () const { return m_do_clean_divA; }
+
     void CalculateExternalCurlA ();
     void CalculateExternalCurlA (std::string& coil_name);
 
