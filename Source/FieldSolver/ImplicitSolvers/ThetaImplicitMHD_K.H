@@ -486,20 +486,13 @@ load_cell_state_cgl (const amrex::Array4<const amrex::Real>& density,
 }
 
 /**
- * \brief Load the cell-centered TOTAL magnetic field into the state and
- * upgrade the fast speeds (from the current state.sound_speed) to
- * fast-magnetosonic. Shared tail of load_cell_state_hlld and
- * load_cell_state_hlld_cgl.
+ * \brief Upgrade the fast speeds (from the current state.sound_speed) to
+ * fast-magnetosonic using the magnetic field already stored in the state.
+ * Shared by finish_magnetized_state and make_absorber_state.
  */
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE void
-finish_magnetized_state (CellState& state,
-                         const amrex::Array4<const amrex::Real>& magnetic,
-                         const int i, const int j, const int k,
-                         const int normal_direction,
-                         const FluxParameters& parameters) noexcept {
-    for (int component = 0; component < 3; ++component) {
-        state.magnetic[component] = magnetic(i, j, k, component);
-    }
+upgrade_fast_speeds (CellState& state, const int normal_direction,
+                     const FluxParameters& parameters) noexcept {
     const int tangent1 = (normal_direction + 1) % 3;
     const int tangent2 = (normal_direction + 2) % 3;
     // Rescaled-unit Alfven speeds (b = B/sqrt(mu0)): c_An^2 = b_n^2/rho,
@@ -526,6 +519,123 @@ finish_magnetized_state (CellState& state,
     state.fast_speed = std::sqrt(fast2);
     state.fast_wave_speed =
         std::abs(state.ion_velocity[normal_direction]) + state.fast_speed;
+}
+
+/**
+ * \brief Load the cell-centered TOTAL magnetic field into the state and
+ * upgrade the fast speeds (from the current state.sound_speed) to
+ * fast-magnetosonic. Shared tail of load_cell_state_hlld and
+ * load_cell_state_hlld_cgl.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE void
+finish_magnetized_state (CellState& state,
+                         const amrex::Array4<const amrex::Real>& magnetic,
+                         const int i, const int j, const int k,
+                         const int normal_direction,
+                         const FluxParameters& parameters) noexcept {
+    for (int component = 0; component < 3; ++component) {
+        state.magnetic[component] = magnetic(i, j, k, component);
+    }
+    upgrade_fast_speeds(state, normal_direction, parameters);
+}
+
+/**
+ * \brief Absorber ghost image of the r_max wall face
+ * (implicit_mhd.r_open_fluid = absorb, hlld path).
+ *
+ * A solid conductor behind an OPEN field boundary absorbs incident plasma
+ * rather than storing it: the outer state of the wall-face Riemann problem
+ * is a pedestal "vacuum" receding INTO the wall at the local Alfven speed
+ * -- the worst-case rate at which a magnetized wall sheath can swallow
+ * mass, momentum, and energy -- so the fan exports an Alfvenic-rate flux
+ * instead of the reflect wall's exactly-zero one. Construction:
+ *
+ *  - density and the energy blocks sit at their halo-pedestal images
+ *    (positivity floors when the pedestal is inactive): the same
+ *    pedestal-state convention as the drain-gate anchors, so the wall
+ *    band drains toward (and never through) the pedestal band;
+ *  - the normal (outward) velocity is +v_A,local, computed from the
+ *    WALL-CELL |B| (cell-centered total field) over the wall-cell
+ *    density smooth-guarded at the pedestal (C-infinity, so Jacobian
+ *    probes at evacuated wall cells stay finite); tangential velocities
+ *    vanish (no shear feed from the wall);
+ *  - the ghost magnetic field is the wall cell's own (the zero-gradient
+ *    clamp of the open field boundary, matching
+ *    ApplyMagneticCCDomainGhosts);
+ *  - under the total-energy closure the ghost E_i carries the pedestal
+ *    INTERNAL image plus its own kinetic energy (the pedestal-image
+ *    convention of the halo relaxation targets), so the ghost
+ *    temperature is the pedestal temperature; under cgl the U_par and
+ *    U_perp images are purely internal.
+ *
+ * The state is a smooth function of the wall-cell state (and the frozen
+ * per-step pedestal), so the JFNK residual sees the absorber exactly.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE CellState
+make_absorber_state (const CellState& wall, const int normal_direction,
+                     const FluxParameters& parameters) noexcept {
+    CellState state;
+    state.density =
+        std::max(parameters.halo_pedestal, parameters.density_floor);
+    state.safe_density = state.density;
+
+    amrex::Real wall_b2 = 0.0;
+    for (int component = 0; component < 3; ++component) {
+        wall_b2 += wall.magnetic[component] * wall.magnetic[component];
+        state.magnetic[component] = wall.magnetic[component];
+        state.momentum[component] = 0.0;
+        state.ion_velocity[component] = 0.0;
+    }
+    const amrex::Real guarded_density =
+        smooth_positive_floor(wall.density, state.density);
+    const amrex::Real alfven_speed =
+        std::sqrt(wall_b2 / (parameters.mu0 * guarded_density));
+    state.ion_velocity[normal_direction] = alfven_speed;
+    state.momentum[normal_direction] = state.density * alfven_speed;
+    state.electron_velocity_normal = alfven_speed;
+
+    state.electron_energy =
+        std::max(parameters.halo_pedestal_electron_energy,
+                 parameters.electron_pressure_floor /
+                     (parameters.gamma_e - 1.0));
+    state.electron_pressure =
+        std::max((parameters.gamma_e - 1.0) * state.electron_energy,
+                 parameters.electron_pressure_floor);
+    if (parameters.total_energy_closure) {
+        state.ion_internal =
+            std::max(parameters.halo_pedestal_ion_internal,
+                     parameters.ion_pressure_floor /
+                         (parameters.gamma_i - 1.0));
+        state.ion_energy =
+            state.ion_internal +
+            0.5 * state.density * alfven_speed * alfven_speed;
+        state.ion_pressure =
+            (parameters.gamma_i - 1.0) * state.ion_internal;
+    } else {
+        state.ion_energy = 0.0;
+        state.ion_internal = 0.0;
+        state.ion_pressure = ion_pressure(state.safe_density, parameters);
+    }
+    if (parameters.cgl_closure) {
+        state.ion_parallel_energy =
+            std::max(parameters.halo_pedestal_ion_parallel,
+                     0.5 * parameters.ion_pressure_floor);
+        state.ion_perp_energy =
+            std::max(parameters.halo_pedestal_ion_perp,
+                     parameters.ion_pressure_floor);
+        state.ion_internal =
+            state.ion_parallel_energy + state.ion_perp_energy;
+        const amrex::Real pressure_parallel = smooth_positive_floor(
+            2.0 * state.ion_parallel_energy, parameters.ion_pressure_floor);
+        const amrex::Real pressure_perp = smooth_positive_floor(
+            state.ion_perp_energy, parameters.ion_pressure_floor);
+        state.ion_pressure =
+            (pressure_parallel + 2.0 * pressure_perp) / 3.0;
+    }
+
+    finish_acoustic_speeds(state, normal_direction, parameters);
+    upgrade_fast_speeds(state, normal_direction, parameters);
+    return state;
 }
 
 /**

@@ -142,6 +142,18 @@ class ThetaImplicitMHD final : public ImplicitSolver
     void ComputeFaceFluxes ();
     void ComputeDirectionalFaceFluxes (amrex::MultiFab& face_flux_mf,
                                        int normal_direction);
+    /** Absorbing-wall bookkeeping (r_open_fluid = absorb, RZ hlld): the
+     * wall is a physical sink by design, so the conservation ledger
+     * tracks it explicitly. Recomputes the radial face fluxes of the
+     * ACCEPTED theta state (the same fluxes the step update integrated,
+     * so a converged solve books the export exactly), integrates the
+     * r-weighted wall-face mass and fluid-energy fluxes over the step,
+     * accumulates them into the cumulative absorbed-mass/energy
+     * counters, and prints (and optionally appends to
+     * implicit_mhd.absorb_ledger_file) every absorb_ledger_interval
+     * steps. Must be called after UpdateWarpXFields(m_state, ...) and
+     * before FinishStateUpdate extrapolates the state to t^{n+1}. */
+    void AccumulateAbsorbedWallLedger (amrex::Real dt, int step);
     /** Assemble the solver-owned Ohm's law E = -u x B + eta J (hlld path).
      * With at_resistive_stage = true (residual evaluations) the
      * dissipative terms (eta J, the vacuum-eta boost, and the
@@ -523,10 +535,29 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // instead of the reflecting conducting-wall mirror.
     bool m_r_open = false;
     // Fluid ghost treatment at an OPEN r_max: "outflow" (default;
-    // zero-gradient) or "reflect" (keep the no-normal-flow mirror while
+    // zero-gradient), "reflect" (keep the no-normal-flow mirror while
     // the field is free-space -- removes the wall-cell drainage channel
-    // during violent boundary relaxations).
+    // during violent boundary relaxations; the wall face is then a true
+    // zero-flux wall for every advective fluid channel), or "absorb"
+    // (solid-conductor wall that swallows incident plasma: the wall-face
+    // Riemann problem sees a pedestal absorber image receding into the
+    // wall at the local Alfven speed, so mass/momentum/energy export at
+    // up to the Alfvenic worst-case rate; hlld only, tallied by the
+    // absorbed-mass/energy ledger).
     std::string m_r_open_fluid = "outflow";
+    // Absorbing-wall ledger (r_open_fluid = absorb): cumulative mass [kg]
+    // and fluid energy [J] exported through the r_max wall face
+    // (r-weighted face-flux sums of the accepted theta-state fluxes,
+    // integrated per step), printed every absorb_ledger_interval steps
+    // (0 disables printing; accumulation always runs) and optionally
+    // appended to absorb_ledger_file as "step mass energy" rows.
+    // The counters restart at zero on a simulation restart.
+    amrex::Real m_absorbed_wall_mass = 0.0;
+    amrex::Real m_absorbed_wall_energy = 0.0;
+    int m_absorb_ledger_interval = 1;
+    std::string m_absorb_ledger_file;
+    // First ledger-file write of this run truncates a stale file.
+    bool m_absorb_ledger_started = false;
     amrex::Real m_positivity_safety = 0.99;
     std::string m_fluid_flux = "centered";
     // Conservative-form recast (fluid_flux = hlld): B replaces E as the

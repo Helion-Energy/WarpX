@@ -2205,7 +2205,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         quantity -u x B + eta J - eta_H laplacian(J). Requires no Hall
         term, no electron-pressure Ohm term, and no preconditioner.
 
-    r_open_fluid: {"outflow", "reflect"}, optional
+    r_open_fluid: {"outflow", "reflect", "absorb"}, optional
         Fluid ghost treatment at an open (Green's-function) upper radial
         boundary: zero-gradient outflow (default) or the no-normal-flow
         reflecting mirror (field stays free-space; removes the wall-cell
@@ -2215,7 +2215,24 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         the tangential Maxwell stress and last-ring magnetic work terms
         use the perfect-conductor image field (B_n = 0), while the
         normal wall pressure and the induction/Ohm path keep the
-        open-field boundary values.
+        open-field boundary values. "absorb" (hlld only) is a
+        solid-conductor wall that swallows incident plasma: the outer
+        state of the wall-face Riemann problem is a halo-pedestal vacuum
+        image receding into the wall at the local Alfven speed
+        (worst-case sheath admission rate), so mass/momentum/energy
+        export at up to the Alfvenic rate; the absorbed mass and energy
+        are integrated into cumulative runtime counters (see
+        absorb_ledger_interval).
+
+    absorb_ledger_interval: integer, optional
+        Print interval (steps) of the absorbing-wall ledger counters
+        (cumulative absorbed mass [kg] and fluid energy [J]); 0 disables
+        printing while the accumulation still runs. Default 1.
+
+    absorb_ledger_file: str, optional
+        Optional file to which the ledger rows
+        ("step absorbed_mass absorbed_energy") are appended at every
+        ledger print.
 
     hllc_signal_closure: {"consistent", "barotropic"}, optional
         Ion pressure used in the HLLC wave-speed estimates. The default
@@ -2410,6 +2427,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         resistive_theta=None,
         fluid_flux=None,
         r_open_fluid=None,
+        absorb_ledger_interval=None,
+        absorb_ledger_file=None,
         hllc_signal_closure=None,
         hllc_contact_blend=None,
         hlld_fan_closure=None,
@@ -2460,6 +2479,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.resistive_theta = resistive_theta
         self.fluid_flux = fluid_flux
         self.r_open_fluid = r_open_fluid
+        self.absorb_ledger_interval = absorb_ledger_interval
+        self.absorb_ledger_file = absorb_ledger_file
         self.hllc_signal_closure = hllc_signal_closure
         self.hllc_contact_blend = hllc_contact_blend
         self.hlld_fan_closure = hlld_fan_closure
@@ -2518,6 +2539,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.resistive_theta = self.resistive_theta
         implicit_mhd.fluid_flux = self.fluid_flux
         implicit_mhd.r_open_fluid = self.r_open_fluid
+        implicit_mhd.absorb_ledger_interval = self.absorb_ledger_interval
+        implicit_mhd.absorb_ledger_file = self.absorb_ledger_file
         implicit_mhd.hllc_signal_closure = self.hllc_signal_closure
         implicit_mhd.hllc_contact_blend = self.hllc_contact_blend
         implicit_mhd.hlld_fan_closure = self.hlld_fan_closure

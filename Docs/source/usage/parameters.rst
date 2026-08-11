@@ -4557,6 +4557,42 @@ Jacobian probes.
     magnetic work terms use the perfect-conductor image field
     (:math:`B_n = 0` at the wall face), while the normal wall pressure
     and the induction/Ohm path keep the open-field boundary values.
+    ``absorb`` (``hlld`` only) models a solid conductor that absorbs
+    incident plasma instead of storing it: the outer state of the
+    :math:`r_{\max}` wall-face Riemann problem is a halo-pedestal
+    "vacuum" image (positivity-floor state when the pedestal is
+    inactive) receding into the wall at the local Alfvén speed
+    :math:`v_A = |B_{\mathrm{wall}}| / \sqrt{\mu_0\,
+    \max(\rho_{\mathrm{wall}}, \rho_{\mathrm{ped}})}` (smooth-guarded)
+    — the worst-case rate at which a magnetized wall sheath can swallow
+    plasma — so the fan exports mass, momentum, and energy at up to the
+    Alfvénic rate while the donor drain gates still close the export
+    smoothly at the pedestal band. The reflect path's zero-flux wall
+    override does not apply. The field-side boundary is unchanged
+    (Green's-function open). Because the wall is then a physical sink,
+    the solver integrates the r-weighted wall-face mass and
+    fluid-energy fluxes of every accepted step into two cumulative
+    counters (see ``absorb_ledger_interval``).
+
+.. pp:param:: implicit_mhd.absorb_ledger_interval
+    :type: ``integer``
+    :default: ``1``
+
+    Print interval (in steps) of the absorbing-wall ledger: the
+    cumulative mass [kg] and fluid energy [J] exported through the
+    :math:`r_{\max}` wall face under ``r_open_fluid = absorb``,
+    integrated from the accepted theta-state face fluxes each step
+    (r-weighted, so a converged solve books the export to the nonlinear
+    tolerance). ``0`` disables the printing; the accumulation always
+    runs. The counters restart at zero on a simulation restart.
+
+.. pp:param:: implicit_mhd.absorb_ledger_file
+    :type: ``string``
+    :default: *none*
+
+    Optional file to which the absorbing-wall ledger rows
+    (``step  absorbed_mass  absorbed_energy``) are appended at every
+    ledger print.
 
 .. pp:param:: implicit_mhd.hllc_signal_closure
     :type: ``string``

@@ -33,6 +33,7 @@
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
 #include <limits>
 #include <set>
 #include <string>
@@ -161,8 +162,15 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     pp.query("fluid_flux", m_fluid_flux);
     pp.query("r_open_fluid", m_r_open_fluid);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        m_r_open_fluid == "outflow" || m_r_open_fluid == "reflect",
-        "implicit_mhd.r_open_fluid must be outflow or reflect");
+        m_r_open_fluid == "outflow" || m_r_open_fluid == "reflect" ||
+            m_r_open_fluid == "absorb",
+        "implicit_mhd.r_open_fluid must be outflow, reflect, or absorb");
+    utils::parser::queryWithParser(pp, "absorb_ledger_interval",
+                                   m_absorb_ledger_interval);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_absorb_ledger_interval >= 0,
+        "implicit_mhd.absorb_ledger_interval cannot be negative");
+    pp.query("absorb_ledger_file", m_absorb_ledger_file);
     pp.query("hllc_signal_closure", m_hllc_signal_closure);
     utils::parser::queryWithParser(pp, "hllc_contact_blend", m_hllc_contact_blend);
     pp.query("ion_closure", m_ion_closure);
@@ -578,6 +586,18 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
             GreensFunctionOpenBC::IsActive(),
             "theta_implicit_mhd with boundary.field_hi = open on r requires "
             "the Green's-function open BC to be active (RZ, hybrid solver)");
+    }
+    if (m_r_open_fluid == "absorb") {
+        // The absorbing wall is realized through the wall-face HLLD
+        // Riemann problem (absorber ghost image), so it exists on the
+        // conservative-form path only, and it is only meaningful when
+        // the field boundary is actually open (a PEC wall reflects the
+        // fluid by construction).
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_r_open && m_use_hlld,
+            "implicit_mhd.r_open_fluid = absorb requires the open radial "
+            "field boundary (boundary.field_hi = open on r) and "
+            "implicit_mhd.fluid_flux = hlld");
     }
     if (!m_WarpX->Geom(0).isPeriodic(1)) {
         // Outflow (Neumann) axial ends: the solver fills all z domain
@@ -1084,6 +1104,7 @@ void ThetaImplicitMHD::PrintParameters () const
                    << m_hybrid_pic_model->m_add_external_fields << "\n"
                    << "Evolve ion fluid:              " << m_evolve_ion_fluid << "\n"
                    << "Fluid flux:                    " << m_fluid_flux << "\n"
+                   << "Open-r fluid wall:             " << m_r_open_fluid << "\n"
                    << "HLLC signal closure:           " << m_hllc_signal_closure << "\n"
                    << "HLLC contact blend:            " << m_hllc_contact_blend << "\n";
     if (m_use_hlld) {
@@ -1276,6 +1297,35 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
     const int domain_lo = domain.smallEnd(0);
     const int domain_hi = domain.bigEnd(0);
     const bool r_open = m_r_open && (m_r_open_fluid == "outflow");
+    // Absorbing wall (r_open_fluid = absorb): the outer fluid ghosts hold
+    // the resting pedestal absorber image -- density and energies at
+    // their halo-pedestal values (positivity floors when the pedestal is
+    // inactive), zero momentum -- i.e. the vacuum beyond the solid wall.
+    // The wall-face Riemann problem additionally gives this image its
+    // +v_A(local) normal velocity in ComputeDirectionalFaceFluxes (see
+    // make_absorber_state), where the current-iterate wall-cell B is
+    // available, so the residual stays a pure function of the iterate.
+    // The per-step frozen pedestal makes this fill a per-solve constant.
+    const bool r_absorb = m_r_open && (m_r_open_fluid == "absorb");
+    const amrex::Real absorber_density =
+        std::max(m_halo_pedestal_density, m_mass_density_floor);
+    const amrex::Real absorber_electron_energy =
+        std::max(m_halo_pedestal_electron_energy,
+                 m_electron_pressure_floor / (m_gamma_e - 1.0_rt));
+    const amrex::Real absorber_ion_energy =
+        (m_ion_closure == "total_energy")
+            ? std::max(m_halo_pedestal_ion_internal,
+                       m_ion_pressure_floor / (m_gamma_i - 1.0_rt))
+            : 0.0_rt;
+    const amrex::Real absorber_ion_parallel =
+        (m_ion_closure == "cgl")
+            ? std::max(m_halo_pedestal_ion_parallel,
+                       0.5_rt * m_ion_pressure_floor)
+            : 0.0_rt;
+    const amrex::Real absorber_ion_perp =
+        (m_ion_closure == "cgl")
+            ? std::max(m_halo_pedestal_ion_perp, m_ion_pressure_floor)
+            : 0.0_rt;
     for (amrex::MFIter mfi(density); mfi.isValid(); ++mfi) {
         const amrex::Box grown = amrex::grow(mfi.validbox(), density.nGrowVect());
         if (grown.smallEnd(0) >= domain_lo && grown.bigEnd(0) <= domain_hi) {
@@ -1299,6 +1349,19 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
                 mom(i, j, k, 1) = -mom(mirror, j, k, 1);
                 mom(i, j, k, 2) = mom(mirror, j, k, 2);
             } else if (i > domain_hi) {
+                if (r_absorb) {
+                    // absorbing wall: resting pedestal absorber image
+                    // (see the r_absorb comment above)
+                    rho(i, j, k) = absorber_density;
+                    energy(i, j, k) = absorber_electron_energy;
+                    ion_e(i, j, k) = absorber_ion_energy;
+                    ion_par(i, j, k) = absorber_ion_parallel;
+                    ion_perp(i, j, k) = absorber_ion_perp;
+                    mom(i, j, k, 0) = 0.0_rt;
+                    mom(i, j, k, 1) = 0.0_rt;
+                    mom(i, j, k, 2) = 0.0_rt;
+                    return;
+                }
                 // open boundary: clamp to the edge cell (zero-gradient
                 // outflow); PEC wall: reflect with odd normal momentum
                 const int mirror =
@@ -1377,7 +1440,11 @@ void ThetaImplicitMHD::ApplyScalarRadialDomainGhosts (amrex::MultiFab& mf) const
     // Nodal-in-r data mirrors across the boundary node itself (offset 0);
     // cell-centered data mirrors across the face (offset 1).
     const int cc_offset = mf.ixType().cellCentered(0) ? 1 : 0;
-    const bool r_outflow = m_r_open && (m_r_open_fluid == "outflow");
+    // The absorbing wall keeps the outflow (zero-gradient clamp) recipe
+    // for the derived scalars: the wall-ring Ohm/E evaluations must see
+    // no spurious radial pressure gradient (the field-side boundary is
+    // unchanged by the fluid absorber).
+    const bool r_outflow = m_r_open && (m_r_open_fluid != "reflect");
     const int ncomp = mf.nComp();
     for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
         const amrex::Box grown = amrex::grow(mfi.validbox(), mf.nGrowVect());
@@ -1530,6 +1597,14 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
     }
 
     UpdateWarpXFields(m_state, start_time);
+#if defined(WARPX_DIM_RZ)
+    if (m_use_hlld && m_r_open && m_r_open_fluid == "absorb") {
+        // Book the absorbing wall's export from the accepted theta state
+        // (UpdateWarpXFields just refilled the theta-stage fields), before
+        // FinishStateUpdate extrapolates the state to t^{n+1}.
+        AccumulateAbsorbedWallLedger(m_dt, step);
+    }
+#endif
     m_WarpX->reduced_diags->ComputeDiagsMidStep(step);
     FinishStateUpdate(start_time + m_dt);
     ExecutePythonCallback("afterEpush");
@@ -2684,6 +2759,21 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const int radial_wall_face = m_WarpX->Geom(0).Domain().bigEnd(0) + 1;
     const bool reflect_wall =
         radial_faces && m_r_open && (m_r_open_fluid == "reflect");
+    // Absorbing wall (open field + absorb fluid): the RIGHT state of the
+    // r_max wall face is the moving absorber image -- the resting
+    // pedestal ghost fill of ApplyFluidDomainBoundaries given its
+    // +v_A(local) normal velocity from the CURRENT-iterate wall-cell B
+    // (see make_absorber_state) -- so the wall-face fan exports mass,
+    // momentum, and energy at up to the local Alfven rate instead of the
+    // reflect wall's exactly-zero advective flux. The donor drain gates
+    // below apply unchanged: outflow closes smoothly at the pedestal
+    // band (the wall drains toward, never through, the pedestal) and
+    // inflow from the ghost is gated to zero by the pedestal-resident
+    // donor image. The reflect path's zero-flux override does NOT apply
+    // here -- the absorber is a physical sink by design, tallied by the
+    // absorbed-mass/energy ledger (see AccumulateAbsorbedWallLedger).
+    const bool absorb_wall =
+        radial_faces && m_r_open && (m_r_open_fluid == "absorb");
 #endif
     constexpr int flux_mass = FaceFluxComponent::mass;
     constexpr int flux_momentum = FaceFluxComponent::momentum_x;
@@ -2755,7 +2845,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     : theta_implicit_mhd::load_cell_state_hlld(
                           rho, mom, energy, ion_e, j_cc, b_cc, il, jl, kl,
                           normal, parameters);
-            const auto right =
+            auto right =
                 parameters.cgl_closure
                     ? theta_implicit_mhd::load_cell_state_hlld_cgl(
                           rho, mom, energy, ion_e, upar, uperp, j_cc, b_cc,
@@ -2763,6 +2853,15 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     : theta_implicit_mhd::load_cell_state_hlld(
                           rho, mom, energy, ion_e, j_cc, b_cc, i, j, k,
                           normal, parameters);
+#if defined(WARPX_DIM_RZ)
+            if (absorb_wall && i == radial_wall_face) {
+                // Absorbing wall (see the absorb_wall comment above):
+                // the outer state is the pedestal absorber receding into
+                // the wall at the local Alfven speed of the wall cell.
+                right = theta_implicit_mhd::make_absorber_state(
+                    left, normal, parameters);
+            }
+#endif
             amrex::Real bn_face = bn_staggered(i, j, k);
             if (add_external) {
                 bn_face += bn_external(i, j, k);
@@ -2962,6 +3061,120 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     WARPX_ABORT_WITH_MESSAGE(
         "ThetaImplicitMHD::ComputeDirectionalFaceFluxes() requires 1D or RZ "
         "geometry");
+#endif
+}
+
+void ThetaImplicitMHD::AccumulateAbsorbedWallLedger (const amrex::Real dt,
+                                                     const int step)
+{
+#if defined(WARPX_DIM_RZ)
+    using ablastr::fields::Direction;
+    // The absorbing wall is a physical sink by design: integrate the
+    // r-weighted wall-face fluxes so the conservation ledger stays
+    // honest. The theta-state radial face fluxes are recomputed exactly
+    // as the residual computed them (the register may hold a rejected
+    // line-search trial or a Jacobian probe at solver exit):
+    // UpdateWarpXFields(m_state, ...) has just refilled the fluid
+    // sources and the theta-stage B, so only the plasma current, the
+    // cell-centered fields, and the radial flux pass need re-running.
+    // For a converged solve U^{n+1} - U^n = dt * RHS(theta state), so
+    // the counters match the domain's mass/energy change through the
+    // wall to the nonlinear solver tolerance (frozen/stagnated solves
+    // violate this at the residual level, as they do all conservation).
+    const auto magnetic_field =
+        m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, 0);
+    m_hybrid_pic_model->CalculatePlasmaCurrent(magnetic_field,
+                                               m_WarpX->GetEBUpdateEFlag());
+    if (m_z_neumann) {
+        for (int direction = 0; direction < 3; ++direction) {
+            ApplyNeumannZDomainGhosts(*m_WarpX->m_fields.get(
+                FieldType::hybrid_current_fp_plasma, Direction{direction}, 0));
+        }
+    }
+    FillCellCenteredElectromagneticFields();
+    amrex::MultiFab& face_flux_r = *m_WarpX->m_fields.get(FaceFluxRName, 0);
+    ComputeDirectionalFaceFluxes(face_flux_r, 0);
+
+    const amrex::Box face_domain = amrex::convert(
+        m_WarpX->Geom(0).Domain(), face_flux_r.ixType().toIntVect());
+    amrex::Box wall_plane = face_domain;
+    wall_plane.setSmall(0, face_domain.bigEnd(0));
+    constexpr int flux_mass = FaceFluxComponent::mass;
+    constexpr int flux_electron_energy = FaceFluxComponent::electron_energy;
+    constexpr int flux_ion_energy = FaceFluxComponent::ion_energy;
+    constexpr int flux_ion_parallel_energy =
+        FaceFluxComponent::ion_parallel_energy;
+    constexpr int flux_ion_perp_energy = FaceFluxComponent::ion_perp_energy;
+    // Fluid energy channels present under the active closure: U_e always;
+    // the conservative E_i (internal + kinetic) under total_energy; the
+    // purely internal U_par/U_perp pair under cgl. (Under barotropic the
+    // fan's E_i register is a dormant pseudo-channel and is excluded.)
+    const bool total_energy_closure = (m_ion_closure == "total_energy");
+    const bool cgl_closure = (m_ion_closure == "cgl");
+
+    amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+    amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+    for (amrex::MFIter mfi(face_flux_r); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox() & wall_plane;
+        if (box.isEmpty()) {
+            continue;
+        }
+        const auto flux_arr = face_flux_r.const_array(mfi);
+        reduce_op.eval(
+            box, reduce_data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                amrex::Real energy_flux =
+                    flux_arr(i, j, k, flux_electron_energy);
+                if (total_energy_closure) {
+                    energy_flux += flux_arr(i, j, k, flux_ion_energy);
+                } else if (cgl_closure) {
+                    energy_flux +=
+                        flux_arr(i, j, k, flux_ion_parallel_energy) +
+                        flux_arr(i, j, k, flux_ion_perp_energy);
+                }
+                return {flux_arr(i, j, k, flux_mass), energy_flux};
+            });
+    }
+    auto sums = reduce_data.value(reduce_op);
+    // Wall-face annulus area per z-cell, 2 pi r_wall dz: with the
+    // cylindrical divergence weights (r_face/r_center)/dr, the interior
+    // faces telescope out of the r-weighted domain totals and the change
+    // per step is exactly dt * sum_j 2 pi dz r_wall F_wall(j).
+    const amrex::Real wall_radius =
+        m_WarpX->Geom(0).ProbLo(0) +
+        face_domain.bigEnd(0) * m_WarpX->Geom(0).CellSize(0);
+    const amrex::Real face_area = 2.0_rt * MathConst::pi * wall_radius *
+                                  m_WarpX->Geom(0).CellSize(1);
+    amrex::Real step_totals[2] = {dt * face_area * amrex::get<0>(sums),
+                                  dt * face_area * amrex::get<1>(sums)};
+    amrex::ParallelAllReduce::Sum(step_totals, 2,
+                                  amrex::ParallelContext::CommunicatorSub());
+    m_absorbed_wall_mass += step_totals[0];
+    m_absorbed_wall_energy += step_totals[1];
+
+    if (m_absorb_ledger_interval > 0 &&
+        (step + 1) % m_absorb_ledger_interval == 0) {
+        amrex::Print().SetPrecision(17)
+            << "MHD absorb wall ledger: step " << step + 1
+            << " absorbed mass [kg] = " << m_absorbed_wall_mass
+            << " absorbed energy [J] = " << m_absorbed_wall_energy << "\n";
+        if (!m_absorb_ledger_file.empty() &&
+            amrex::ParallelDescriptor::IOProcessor()) {
+            // Truncate at the first write of the run (a stale file from a
+            // previous run in the same directory would otherwise keep
+            // accumulating appended rows), append afterwards.
+            std::ofstream ledger(m_absorb_ledger_file,
+                                 m_absorb_ledger_started ? std::ios::app
+                                                         : std::ios::trunc);
+            m_absorb_ledger_started = true;
+            ledger.precision(17);
+            ledger << step + 1 << " " << m_absorbed_wall_mass << " "
+                   << m_absorbed_wall_energy << "\n";
+        }
+    }
+#else
+    amrex::ignore_unused(dt, step);
 #endif
 }
 

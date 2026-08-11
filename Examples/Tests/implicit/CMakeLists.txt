@@ -783,6 +783,16 @@ add_warpx_test(
 )
 
 add_warpx_test(
+    test_rz_theta_implicit_mhd_r_open_absorb_wall  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_r_open_absorb_wall  # inputs
+    "analysis_mhd_r_open_absorb_wall.py diags/diag000000 diags/diag000080 diags/absorb_ledger.txt"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
     test_rz_theta_implicit_mhd_external_wall_ghost  # name
     RZ  # dims
     2  # nprocs
