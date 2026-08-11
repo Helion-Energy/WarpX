@@ -25,8 +25,6 @@
 #include <AMReX_RealVect.H>
 #include <AMReX_Random.H>
 
-#include <cmath>
-
 
 namespace ParticleBoundaryProcess {
 
@@ -75,16 +73,6 @@ struct Absorb {
  *       ApplyParticleBoundaries::thermalize_boundary_particle).
  *   - Advances the particle from the contact point with the new
  *     velocity for the remaining fraction of the timestep.
- *
- *  Corner cases where the interaction is ill-defined absorb the particle
- *  instead, so that it cannot accumulate inside the solid over long runs:
- *   - the particle did not start the step in the gas region (sharp corner,
- *     tunneling through a thin feature, bad initialization): there is no
- *     wall crossing to bracket for the bisection;
- *   - the level-set normal at the contact point is degenerate (ill-defined
- *     at a sharp corner);
- *   - the particle lands back inside the solid after the interaction
- *     (sharp concave corner).
  */
 struct ParticleBoundaryInteraction {
     amrex::Real m_dt;
@@ -108,32 +96,11 @@ struct ParticleBoundaryInteraction {
         amrex::ParticleReal const uy = ptd.m_rdata[PIdx::uy][i];
         amrex::ParticleReal const uz = ptd.m_rdata[PIdx::uz][i];
 
-        amrex::Real const dt = m_dt;
-        amrex::ParticleReal const mass = m_mass;
-
-        // If the particle did not start the step in the gas region (sharp
-        // corner, tunneling through a thin feature, bad initialization),
-        // there is no wall crossing to bracket for the bisection below:
-        // absorb it. (The position push moved the particle by v*dt with u
-        // unchanged, so walking backward by dt reconstructs the
-        // start-of-step position exactly.)
-        {
-            int bi, bj, bk;
-            amrex::Real bW[AMREX_SPACEDIM][2];
-            amrex::ParticleReal x_start = xp, y_start = yp, z_start = zp;
-            UpdatePosition(x_start, y_start, z_start, ux, uy, uz, -dt, mass);
-            ablastr::particles::compute_weights<amrex::IndexType::NODE>(
-                x_start, y_start, z_start, plo, dxi, bi, bj, bk, bW);
-            if (ablastr::particles::interp_field_nodal(
-                    bi, bj, bk, bW, distance_to_eb) < 0.0_rt) {
-                amrex::ParticleIDWrapper{ptd.m_idcpu[i]}.make_invalid();
-                return;
-            }
-        }
-
         // Find the point of contact with the EB surface
         // Bisect along trajectory to find the fraction of dt
         // to walk backward from end-of-step to reach distance_to_eb = 0.
+        amrex::Real const dt = m_dt;
+        amrex::ParticleReal const mass = m_mass;
         amrex::Real const dt_fraction = amrex::bisect(0.0, 1.0,
             [=] (amrex::Real dt_frac) {
                 int bi, bj, bk;
@@ -157,12 +124,6 @@ struct ParticleBoundaryInteraction {
         amrex::ParticleReal const n3d_x = n3d[0];
         amrex::ParticleReal const n3d_y = n3d[1];
         amrex::ParticleReal const n3d_z = n3d[2];
-        // A degenerate level-set gradient at a sharp corner makes the
-        // (internally normalized) normal non-finite: absorb.
-        if (!(std::isfinite(n3d_x) && std::isfinite(n3d_y) && std::isfinite(n3d_z))) {
-            amrex::ParticleIDWrapper{ptd.m_idcpu[i]}.make_invalid();
-            return;
-        }
 
         amrex::ParticleReal ux_new = 0._prt, uy_new = 0._prt, uz_new = 0._prt;
         if (m_boundary_type == ParticleBoundaryType::Thermal) {
@@ -204,19 +165,6 @@ struct ParticleBoundaryInteraction {
         amrex::ParticleReal x_new = x_c, y_new = y_c, z_new = z_c;
         UpdatePosition(x_new, y_new, z_new, ux_new, uy_new, uz_new,
                        dt_fraction * dt, mass);
-        // If the particle lands back inside the solid (sharp concave
-        // corner), absorb it rather than let it accumulate in the body.
-        {
-            int bi, bj, bk;
-            amrex::Real bW[AMREX_SPACEDIM][2];
-            ablastr::particles::compute_weights<amrex::IndexType::NODE>(
-                x_new, y_new, z_new, plo, dxi, bi, bj, bk, bW);
-            if (ablastr::particles::interp_field_nodal(
-                    bi, bj, bk, bW, distance_to_eb) < 0.0_rt) {
-                amrex::ParticleIDWrapper{ptd.m_idcpu[i]}.make_invalid();
-                return;
-            }
-        }
         // SetParticlePosition handles the conversion to the stored
         // (reduced-dimension) coordinates.
         setPosition(i, x_new, y_new, z_new);
