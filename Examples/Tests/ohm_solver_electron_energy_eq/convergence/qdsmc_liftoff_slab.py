@@ -148,6 +148,15 @@ parser.add_argument(
     "peak dB/dt = 1.5*dB/tau at tau/2",
 )
 parser.add_argument(
+    "--drive-scale",
+    type=float,
+    default=1.0,
+    help="scale BOTH the bias field and the reversal peak by this factor "
+    "(gentler drive). dt follows via w_ci(BZ_REV), so omega_ci*dt stays "
+    "fixed (0.5 -> dt doubles); vA, eta_vac, eta_hyper and the "
+    "pressure-balance equilibrium seed all rescale coherently",
+)
+parser.add_argument(
     "--filter-passes",
     type=int,
     default=0,
@@ -273,6 +282,12 @@ parser.add_argument("--out", type=str, default="liftoff_slab")
 parser.add_argument("--verbose", type=int, default=1)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
+
+# Gentler-drive scaling: everything downstream (w_ci -> dt, vA, eta_vac,
+# eta_hyper, the Hermite ramp, the diamagnetic equilibrium seed) derives
+# from these two constants, so scaling them here keeps the run coherent.
+BZ_BIAS *= args.drive_scale
+BZ_REV *= args.drive_scale
 
 m_i = M_AMU * constants.m_p
 n_floor = args.n_floor_frac * N_I
@@ -622,7 +637,7 @@ if comm.rank == 0:
         f"redirgate={args.redirect_n_min_factor:g} "
         f"kickcap={args.redirect_kick_cap:g} teabort={args.te_abort:g} "
         f"filter={args.filter_passes}p/c{args.filter_comp} "
-        f"tau={args.tau_ramp:.3g} "
+        f"tau={args.tau_ramp:.3g} drive={args.drive_scale:g} "
         f"| Te max {h['te_max'][0]:.2f} -> {h['te_max'][-1]:.2f} eV "
         f"(median {h['te_med'][-1]:.2f}) "
         f"| collected q={q_col:.4e} C E={e_col:.4e} J",
@@ -647,6 +662,7 @@ if comm.rank == 0:
         filter_passes=args.filter_passes,
         filter_comp=args.filter_comp,
         tau_ramp=args.tau_ramp,
+        drive_scale=args.drive_scale,
         kappa_perp_frac=args.kappa_perp_frac,
         standoff=args.standoff,
         te_final=Te_wrap[:, :, :] / K_PER_EV,
