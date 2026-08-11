@@ -230,11 +230,19 @@ private:
     void DarwinUpdateA_B ( amrex::Real a_thetadt, amrex::Real a_time,
                            bool a_from_jacobian );
 
+public:
+
     /** Unified external drive on the Darwin path: impose the (gauge-shifted)
      * external vector potential as the boundary value of the evolved A on
      * non-periodic domain boundaries, and hold A inside embedded-boundary
-     * bodies (frozen enclosed flux). Applied after every A update. */
+     * bodies (frozen enclosed flux). Applied after every A update.
+     *
+     * Public only for CUDA: the body defines extended __device__ lambdas
+     * (ParallelFor), and nvcc requires the enclosing member function of an
+     * extended lambda to have public access (hard error since CUDA 13). */
     void DarwinApplyABoundary ( amrex::Real a_time );
+
+private:
 
     /** Derive B = B_static + curl A (with the derived-field boundary
      * treatment) from the current A. Used by the circuit-in-the-residual
