@@ -1,0 +1,13 @@
+# Open (Green's-function) z caps variant of the z-outflow test: same
+# passive density pulse advecting out through z_hi, but the axial FIELD
+# ghosts are now the free-space Green's fill instead of the solver's
+# zero-gradient clamp (the fluid moments keep the Neumann outflow ghosts).
+# The quiescent electromagnetic state (uniform external Bz, zero plasma
+# response, E = -u x B = 0) has zero interior plasma current, so the
+# Green's cap ghosts are exactly zero in the plasma-response frame and the
+# pulse must exit exactly as it does through the Neumann ends: same
+# analysis, same acceptance.
+FILE = inputs_test_rz_theta_implicit_mhd_z_outflow_open
+
+boundary.field_lo = none open
+boundary.field_hi = open open

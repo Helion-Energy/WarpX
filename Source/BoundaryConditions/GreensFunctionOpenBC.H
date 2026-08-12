@@ -23,9 +23,10 @@
  * \brief Free-space ("open") field boundary condition for the RZ (m = 0)
  * hybrid-PIC B-field advance.
  *
- * The ghost values of B seen by the curl stencils at the r_hi domain edge
- * are set to the free-space field of the interior sources, so that the
- * boundary carries no image currents and no reflected flux:
+ * The ghost values of B seen by the curl stencils at the open domain edges
+ * (any combination of the r_hi face and the z_lo/z_hi cap faces) are set to
+ * the free-space field of the interior sources, so that the boundary
+ * carries no image currents and no reflected flux:
  *
  * - The poloidal ghost field (Br, Bz) is obtained by evaluating the
  *   poloidal flux function psi = r * A_theta at the ghost psi-points
@@ -44,8 +45,12 @@
  *
  * - The toroidal ghost field B_theta is closed with Ampere's law: with no
  *   poloidal current outside the domain, r * B_theta is constant beyond the
- *   boundary, so the ghost values continue r_c B_theta from the outermost
- *   valid cell (exactly mu0 I_enc / (2 pi r)).
+ *   r_hi boundary, so the ghost values continue r_c B_theta from the
+ *   outermost valid cell (exactly mu0 I_enc / (2 pi r)). On an open z cap
+ *   the same law reads d(r B_theta)/dz = mu0 r J_r = 0 (no radial current
+ *   beyond the cap): the ghost values continue B_theta z-invariantly from
+ *   the last valid plane at fixed radius, i.e. the enclosed axial-current
+ *   profile I_z(r) is frozen at its boundary-plane value.
  *
  * The azimuthal source current is the total (plasma + external) current
  * J_theta = (curl B)_theta / mu0, evaluated with the same discrete curl the
@@ -64,20 +69,30 @@
  * an O((h/d)^2) far-field error law with a fixed kernel
  * (Barnes-Hut/Salmon-Warren) that the grading extends up to the face.
  *
- * Because free space is translation-invariant in z, the kernel is stored
- * per radial bin as a table over the psi-point/bin z-offset rather than as
- * a dense matrix: O(n_radial_bins * nz) reals in total (tens of MB at
- * production RZ resolutions). Each application is one small GEMV whose
- * rows are distributed over the MPI ranks (followed by a reduction of the
- * psi vector). For periodic z the kernel is assembled with a
- * tolerance-driven image sum at setup time.
+ * Because free space is translation-invariant in z, the r_hi-band kernel
+ * is stored per radial bin as a table over the psi-point/bin z-offset
+ * rather than as a dense matrix: O(n_radial_bins * nz) reals in total
+ * (tens of MB at production RZ resolutions). Each application is one small
+ * GEMV whose rows are distributed over the MPI ranks (followed by a
+ * reduction of the psi vector). For periodic z the kernel is assembled
+ * with a tolerance-driven image sum at setup time.
+ *
+ * When a z cap is open, the psi table gains rows for the cap ghost bands
+ * at ALL interior radii (i in [0, nr-1], j in the two nodal ghost bands;
+ * the i >= nr corner rows are shared with the r_hi band, which resolves
+ * the corner-ghost double fill exactly). Those rows have no useful
+ * z-translation invariance -- the evaluation j is pinned to the band while
+ * the source bins span z -- so their kernel is a dense block of
+ * nr * (ngz+1) rows per open cap by 3*nbins columns, with the
+ * (G0, dG0/dr', dG0/dz') moments evaluated at each bin's actual center.
+ * Open z caps require non-periodic z, so no image sum is involved.
  *
  * Restrictions (checked with clear aborts): RZ geometry, m = 0 only,
- * hybrid-PIC solver, single level, Open selected on the r_hi face only,
- * domain including the axis (prob_lo[0] == 0), and no
- * warpx.B_ext_grid_init_style applied field (a curl-free field written
- * directly into the evolved B would be erased at the open face; use the
- * hybrid solver's split external fields instead).
+ * hybrid-PIC solver, single level, Open selected on the r_hi/z_lo/z_hi
+ * faces only (r_lo is the symmetry axis), domain including the axis
+ * (prob_lo[0] == 0), and no warpx.B_ext_grid_init_style applied field (a
+ * curl-free field written directly into the evolved B would be erased at
+ * the open faces; use the hybrid solver's split external fields instead).
  */
 class GreensFunctionOpenBC
 {
@@ -85,14 +100,14 @@ public:
     GreensFunctionOpenBC () = default;
 
     /** \brief Whether the Green's-function open BC is selected: RZ geometry,
-     * hybrid-PIC field solver, and `boundary.field_hi = open ...` on the
-     * radial face. Cheap; safe to call from any dimensionality (returns
-     * false outside RZ). */
+     * hybrid-PIC field solver, and `open` on the r_hi face and/or either z
+     * face. Cheap; safe to call from any dimensionality (returns false
+     * outside RZ). */
     [[nodiscard]] static bool IsActive ();
 
-    /** \brief Fill the r_hi ghost values of B with the free-space field of
-     * the interior sources. Collective (contains a global reduction of the
-     * coarse source moments); must be called on all ranks.
+    /** \brief Fill the open-face ghost values of B with the free-space
+     * field of the interior sources. Collective (contains a global
+     * reduction of the coarse source moments); must be called on all ranks.
      *
      * \param[in,out] Bfield  the (Br, Btheta, Bz) MultiFabs at level lev
      * \param[in] geom        geometry at level lev
@@ -131,10 +146,22 @@ private:
     amrex::Real m_zmin = 0.0;  //!< z of nodal index 0
     bool m_periodic_z = false;
 
-    // psi table layout: nodal points (i, j) with i in [m_nr, m_nr + m_ngr]
-    // and j in [-m_ngz, m_nz + m_ngz]
+    // Which faces are open (from boundary.field_lo/hi)
+    bool m_r_open = false;
+    bool m_z_lo_open = false;
+    bool m_z_hi_open = false;
+
+    // psi table, r_hi band: nodal points (i, j) with
+    // i in [m_nr, m_nr + m_ngr] (i = m_nr only when r_hi is not open) and
+    // j in [-m_ngz, m_nz + m_ngz]
     int m_psi_ni = 0;
     int m_psi_nj = 0;
+
+    // psi table, z cap bands (rows appended after the r_hi band): nodal
+    // points (i, j) with i in [0, m_nr - 1] and j in [-m_ngz, 0]
+    // (z_lo cap) or j in [m_nz, m_nz + m_ngz] (z_hi cap)
+    int m_ncaprows_lo = 0;
+    int m_ncaprows_hi = 0;
 
     // Graded source bins (over nodal source indices i in [1, m_nr-1],
     // j in [0, m_nz-1]): a list of radial bins, fine (single-node) next to
@@ -157,12 +184,17 @@ private:
     /** Per radial bin: offset of its kernel block (device) */
     amrex::Gpu::DeviceVector<amrex::Long> m_bin_koff;
 
-    /** Kernel tables, one block per radial bin. Free space is
-     * z-translation-invariant, so each block is laid out as
+    /** Kernel tables of the r_hi-band psi rows, one block per radial bin.
+     * Free space is z-translation-invariant, so each block is laid out as
      * [m_psi_ni][3][z-offset], with the (G0, dG0/dr', dG0/dz') moments
      * tabulated over the integer z-offset between the psi point and the
      * bin's nominal center. */
     amrex::Gpu::DeviceVector<amrex::Real> m_kernel;
+    /** Dense kernel block of the z-cap psi rows (only allocated when a z
+     * face is open): [cap row][3 * m_nbins], columns aligned with the
+     * source-moment vector, moments evaluated at each bin's actual
+     * center. */
+    amrex::Gpu::DeviceVector<amrex::Real> m_cap_kernel;
     /** Scratch: coarse source moments (device) and host mirror for the reduce */
     amrex::Gpu::DeviceVector<amrex::Real> m_src;
     amrex::Vector<amrex::Real> m_src_host;

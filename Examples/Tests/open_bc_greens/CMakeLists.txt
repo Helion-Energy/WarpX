@@ -21,6 +21,17 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# self-validating python driver (reads guard cells from the live grid)
+add_warpx_test(
+    test_rz_open_bc_greens_btheta_zcaps_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_open_bc_greens_btheta_zcaps_picmi.py  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # declared before test_rz_open_bc_greens_ring, which depends on it
 add_warpx_test(
     test_rz_open_bc_greens_ring_pec  # name
@@ -58,6 +69,28 @@ add_warpx_test(
     2  # nprocs
     inputs_test_rz_open_bc_greens_ring_offcenter  # inputs
     "analysis_ring.py diags/diag1000170 offcenter"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# self-validating python driver (reads guard cells from the live grid)
+add_warpx_test(
+    test_rz_open_bc_greens_zcaps_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_open_bc_greens_zcaps_picmi.py  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# self-validating python driver (reads guard cells from the live grid)
+add_warpx_test(
+    test_rz_open_bc_greens_zonly_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_open_bc_greens_zonly_picmi.py  # inputs
+    OFF  # analysis
     OFF  # checksum
     OFF  # dependency
 )

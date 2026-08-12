@@ -634,16 +634,32 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
             "implicit_mhd.fluid_flux = hlld or central");
     }
     if (!m_WarpX->Geom(0).isPeriodic(1)) {
-        // Outflow (Neumann) axial ends: the solver fills all z domain
-        // ghosts itself with zero-gradient values, so WarpX's own field
-        // boundary application must stay out of the way.
+        // Outflow (Neumann) axial ends: the solver fills the z domain
+        // ghosts itself with zero-gradient values. A z face may instead be
+        // open (Green's-function free-space cap): the FLUID moments keep
+        // the Neumann outflow ghosts, but the field/current z-ghost fills
+        // must not overwrite the Green's values on that face (the fill
+        // runs inside ApplyBfieldBoundary in every residual evaluation, so
+        // the ghost psi is an instantaneous LINEAR map of the
+        // current-iterate interior currents and JFNK probes see it
+        // exactly, same as the open radial face).
         m_z_neumann = true;
+        m_z_lo_open = (WarpX::field_boundary_lo[1] == FieldBoundaryType::Open);
+        m_z_hi_open = (WarpX::field_boundary_hi[1] == FieldBoundaryType::Open);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            WarpX::field_boundary_lo[1] == FieldBoundaryType::None &&
-                WarpX::field_boundary_hi[1] == FieldBoundaryType::None,
+            (WarpX::field_boundary_lo[1] == FieldBoundaryType::None || m_z_lo_open) &&
+                (WarpX::field_boundary_hi[1] == FieldBoundaryType::None || m_z_hi_open),
             "theta_implicit_mhd with non-periodic z requires "
             "boundary.field_lo/hi = none in z (the solver applies its own "
-            "Neumann outflow ghost fills)");
+            "Neumann outflow ghost fills) or open (Green's-function "
+            "free-space cap for the fields; the fluid keeps outflow ghosts)");
+        if (m_z_lo_open || m_z_hi_open) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                GreensFunctionOpenBC::IsActive(),
+                "theta_implicit_mhd with boundary.field_lo/hi = open on z "
+                "requires the Green's-function open BC to be active (RZ, "
+                "hybrid solver)");
+        }
     }
 #else
     for (int direction = 0; direction < AMREX_SPACEDIM; ++direction) {
@@ -1423,38 +1439,45 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
 #endif
 }
 
-void ThetaImplicitMHD::ApplyNeumannZDomainGhosts (amrex::MultiFab& mf) const
+void ThetaImplicitMHD::ApplyNeumannZDomainGhosts (amrex::MultiFab& mf,
+                                                  const int a_open_face_keep_rows) const
 {
 #if defined(WARPX_DIM_RZ)
     // Zero-gradient extrapolation into the axial domain ghosts, staggering
     // aware (nodal-in-z data clamps to the boundary node). Used for every
     // field the residual stencils read when the z ends are outflow rather
-    // than periodic; FillBoundary leaves those ghosts untouched.
+    // than periodic; FillBoundary leaves those ghosts untouched. On an
+    // OPEN z face the first a_open_face_keep_rows ghost rows already hold
+    // free-space (Green's-consistent) values and stay untouched; deeper
+    // rows clamp to the outermost kept row, so nothing re-imposes the
+    // z-invariant continuation the open cap replaces.
     if (!m_z_neumann) {
         return;
     }
     const amrex::Box domain =
         amrex::convert(m_WarpX->Geom(0).Domain(), mf.ixType().toIntVect());
-    const int domain_lo = domain.smallEnd(1);
-    const int domain_hi = domain.bigEnd(1);
+    const int clamp_lo =
+        domain.smallEnd(1) - (m_z_lo_open ? a_open_face_keep_rows : 0);
+    const int clamp_hi =
+        domain.bigEnd(1) + (m_z_hi_open ? a_open_face_keep_rows : 0);
     const int ncomp = mf.nComp();
     for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
         const amrex::Box grown = amrex::grow(mfi.validbox(), mf.nGrowVect());
-        if (grown.smallEnd(1) >= domain_lo && grown.bigEnd(1) <= domain_hi) {
+        if (grown.smallEnd(1) >= clamp_lo && grown.bigEnd(1) <= clamp_hi) {
             continue;
         }
         const auto arr = mf.array(mfi);
         amrex::ParallelFor(grown, ncomp,
                            [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) {
-            if (j < domain_lo) {
-                arr(i, j, k, n) = arr(i, domain_lo, k, n);
-            } else if (j > domain_hi) {
-                arr(i, j, k, n) = arr(i, domain_hi, k, n);
+            if (j < clamp_lo) {
+                arr(i, j, k, n) = arr(i, clamp_lo, k, n);
+            } else if (j > clamp_hi) {
+                arr(i, j, k, n) = arr(i, clamp_hi, k, n);
             }
         });
     }
 #else
-    amrex::ignore_unused(mf);
+    amrex::ignore_unused(mf, a_open_face_keep_rows);
 #endif
 }
 
@@ -1575,7 +1598,9 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
         for (int direction = 0; direction < 3; ++direction) {
             amrex::MultiFab& plasma_current = *m_WarpX->m_fields.get(
                 FieldType::hybrid_current_fp_plasma, Direction{direction}, 0);
-            ApplyNeumannZDomainGhosts(plasma_current);
+            // open z caps keep the curl-of-Green's-B ghost row (computed
+            // one row into the ghosts by CalculatePlasmaCurrent)
+            ApplyNeumannZDomainGhosts(plasma_current, 1);
             amrex::MultiFab& old_current = *m_WarpX->m_fields.get(
                 OldPlasmaCurrentName, Direction{direction}, 0);
             amrex::MultiFab::Copy(old_current, plasma_current, 0, 0, 1,
@@ -1669,10 +1694,18 @@ void ThetaImplicitMHD::UpdateWarpXFields (const WarpXSolverVec& state, const amr
     if (m_z_neumann) {
         using ablastr::fields::Direction;
         for (int direction = 0; direction < 3; ++direction) {
+            // E has no Green's-fill counterpart and its cap ghosts feed no
+            // residual stencil (the ghost-B rows a curl-E write could reach
+            // are overwritten by the Green's fill), so it keeps the plain
+            // Neumann clamp everywhere. B on an open cap was just filled by
+            // the Green's map inside ApplyBfieldBoundary: every ghost row is
+            // kept there (the fill covers the full ghost width).
             ApplyNeumannZDomainGhosts(
                 *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{direction}, 0));
-            ApplyNeumannZDomainGhosts(
-                *m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{direction}, 0));
+            amrex::MultiFab& magnetic_component =
+                *m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{direction}, 0);
+            ApplyNeumannZDomainGhosts(magnetic_component,
+                                      magnetic_component.nGrowVect()[1]);
         }
     }
 
@@ -1787,11 +1820,36 @@ void ThetaImplicitMHD::FillCellCenteredElectromagneticFields ()
 
     const auto cell_stag = cell_staggering();
     const auto coarsening = amrex::GpuArray<int, 3>{1, 1, 1};
+    // On an open z cap the face-flux/EMF kernels read the first
+    // cell-centered ghost row: interpolate it directly from the
+    // Green's-filled B and the curl-B plasma current (both carry
+    // free-space values one row into the cap ghosts, the current from
+    // CalculatePlasmaCurrent's grown tileboxes) instead of letting the
+    // Neumann pass clamp it from the interior plane.
+    const amrex::Box& cc_domain = m_WarpX->Geom(0).Domain();
+    auto grow_into_open_caps = [&] (amrex::Box box) {
+        bool grew = false;
+        if (m_z_lo_open && box.smallEnd(1) == cc_domain.smallEnd(1)) {
+            box.growLo(1, 1);
+            grew = true;
+        }
+        if (m_z_hi_open && box.bigEnd(1) == cc_domain.bigEnd(1)) {
+            box.growHi(1, 1);
+            grew = true;
+        }
+        if (grew) {
+            // the corner-EMF stencils read the computed ghost row one
+            // column past the box edges; the interp sources are defined
+            // there (grown-tilebox currents, boundary-filled B)
+            box.grow(0, 1);
+        }
+        return box;
+    };
     for (int component = 0; component < 3; ++component) {
         const auto current_stag = field_staggering(*total_current[component]);
         const auto magnetic_stag = field_staggering(*magnetic_field[component]);
         for (amrex::MFIter mfi(total_current_cc); mfi.isValid(); ++mfi) {
-            const amrex::Box box = mfi.validbox();
+            const amrex::Box box = grow_into_open_caps(mfi.validbox());
             const auto current_cc = total_current_cc.array(mfi);
             const auto magnetic_cc = magnetic_field_cc.array(mfi);
             const auto current = total_current[component]->const_array(mfi);
@@ -1815,7 +1873,7 @@ void ThetaImplicitMHD::FillCellCenteredElectromagneticFields ()
         for (int component = 0; component < 3; ++component) {
             const auto external_stag = field_staggering(*external_field[component]);
             for (amrex::MFIter mfi(magnetic_field_cc); mfi.isValid(); ++mfi) {
-                const amrex::Box box = mfi.validbox();
+                const amrex::Box box = grow_into_open_caps(mfi.validbox());
                 const auto magnetic_cc = magnetic_field_cc.array(mfi);
                 const auto external = external_field[component]->const_array(mfi);
                 amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) {
@@ -1828,8 +1886,8 @@ void ThetaImplicitMHD::FillCellCenteredElectromagneticFields ()
 
     total_current_cc.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
     magnetic_field_cc.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
-    ApplyNeumannZDomainGhosts(total_current_cc);
-    ApplyNeumannZDomainGhosts(magnetic_field_cc);
+    ApplyNeumannZDomainGhosts(total_current_cc, 1);
+    ApplyNeumannZDomainGhosts(magnetic_field_cc, 1);
 #if defined(WARPX_DIM_RZ)
     {
         // The r_max domain ghosts of the cell-centered total current are
@@ -1888,7 +1946,7 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
         using ablastr::fields::Direction;
         for (int direction = 0; direction < 3; ++direction) {
             ApplyNeumannZDomainGhosts(*m_WarpX->m_fields.get(
-                FieldType::hybrid_current_fp_plasma, Direction{direction}, 0));
+                FieldType::hybrid_current_fp_plasma, Direction{direction}, 0), 1);
         }
     }
 
@@ -3168,7 +3226,7 @@ void ThetaImplicitMHD::AccumulateAbsorbedWallLedger (const amrex::Real dt,
     if (m_z_neumann) {
         for (int direction = 0; direction < 3; ++direction) {
             ApplyNeumannZDomainGhosts(*m_WarpX->m_fields.get(
-                FieldType::hybrid_current_fp_plasma, Direction{direction}, 0));
+                FieldType::hybrid_current_fp_plasma, Direction{direction}, 0), 1);
         }
     }
     FillCellCenteredElectromagneticFields();
@@ -5570,8 +5628,10 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
     if (m_z_neumann) {
         using ablastr::fields::Direction;
         for (int direction = 0; direction < 3; ++direction) {
-            ApplyNeumannZDomainGhosts(
-                *m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{direction}, 0));
+            amrex::MultiFab& magnetic_component =
+                *m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{direction}, 0);
+            ApplyNeumannZDomainGhosts(magnetic_component,
+                                      magnetic_component.nGrowVect()[1]);
         }
     }
     FillFluidSources(m_state);
@@ -5588,7 +5648,7 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
         using ablastr::fields::Direction;
         for (int direction = 0; direction < 3; ++direction) {
             ApplyNeumannZDomainGhosts(*m_WarpX->m_fields.get(
-                FieldType::hybrid_current_fp_plasma, Direction{direction}, 0));
+                FieldType::hybrid_current_fp_plasma, Direction{direction}, 0), 1);
         }
     }
 

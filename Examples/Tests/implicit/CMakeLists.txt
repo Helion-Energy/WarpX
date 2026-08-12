@@ -481,6 +481,19 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# open (Green's-function) z caps: the axial FIELD ghosts defer to the
+# free-space fill while the fluid keeps the Neumann outflow ghosts; the
+# pulse must exit exactly as through the Neumann ends
+add_warpx_test(
+    test_rz_theta_implicit_mhd_z_open_caps  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_z_open_caps  # inputs
+    "analysis_mhd_z_outflow.py diags/diag000000 diags/diag000240 open"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # ---------------------------------------------------------------------
 # Conservative-form recast (fluid_flux = hlld): B is the JFNK array block
 # and one HLLD Riemann solution per face feeds the fluid divergences, the

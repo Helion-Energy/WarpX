@@ -159,3 +159,114 @@ the correct temporal treatment in each solver:
   against (a) the PEC baseline (~full reflection) and (b) the lagged
   Tier-0 variant. Acceptance: per-stage evaluation reflects <~ 1%;
   report the Tier-0 number for the record.
+
+## 7. Axial (z) cap faces (implemented 2026-08; extends Sec. 2 "the same
+## machinery applies verbatim")
+
+Motivation: the hetools free-boundary GS 2x2 showed the z-cap treatment
+is load-bearing -- a Neumann cap (the z-invariant-current asymptote)
+biased every coil-held racetrack solve to a ballooned attractor, while
+the Green's-matched cap recovered it. The WarpX time-domain analogs were
+the frozen loader ghosts (explicit hybrid) and the per-solve Neumann
+fill of ThetaImplicitMHD. `boundary.field_lo/hi[1] = open` (RZ hybrid)
+now selects the Green's fill for the caps; any combination of r_hi,
+z_lo, z_hi works.
+
+- Toroidal closure (the z-face analog of the r-face r*Bt continuation):
+  outside the cap J = 0, so d(r B_theta)/dz = mu0 r J_r = 0 at fixed r
+  -- B_theta(r, z_ghost) = B_theta(r, z_lastvalid). This IS Ampere's
+  law with the enclosed axial-current profile I_z(r) frozen at its
+  boundary-plane value; for m = 0 with no radial current beyond the cap
+  it is not an approximation. Exactness is asserted by
+  test_rz_open_bc_greens_btheta_zcaps_picmi (ghost row == valid plane,
+  bitwise).
+
+- psi-table cap rows: the shared psi table (nodal points, one value per
+  point regardless of which face's fill reads it) gains rows at ALL
+  interior radii, i in [0, nr-1], j in the two nodal cap ghost bands
+  [-ngz, 0] and [nz, nz+ngz]. The i >= nr corner columns are NOT
+  duplicated: they live in the r_hi band (which always spans the full
+  j range), so the corner ghosts of the r-face and cap fills difference
+  the SAME psi values -- corner-ghost div B is machine zero by
+  construction (measured 2.5e-18 relative at 32x32).
+
+- Cap-row kernel layout (the decision Sec. 2 left open): the cap rows
+  evaluate at a fixed nodal-j band while the source bins span all of z,
+  so the r-band's z-offset translation tables buy nothing for them.
+  Chosen: a DENSE block of nr * (ngz+1) rows per open cap by 3*nbins
+  columns, aligned with the source-moment vector, with the monopole +
+  dipole moments evaluated at each bin's actual (r_c, z_c) center --
+  preferred over widening the translation tables to all interior radii
+  (O(n_radial_bins * nr * nz), strictly larger and it re-imposes the
+  nominal-center offset convention on rows that do not need it). Open z
+  requires non-periodic z, so no image sum is involved. Measured cost
+  at the production hold resolution (128 x 512, coarsening 4): cap
+  kernel 18.5M reals = 141 MB (vs 2.7 MB for the r-band tables),
+  one-time assembly +0.9 s (OMP host), steady per-application cost
+  3.1 ms -> 9.4 ms per fill (8 ranks x 4 threads CPU). The memory
+  scales as nr^2 nz / coarsening^2; the escalation path if it ever
+  binds is radial aggregation of far bins for cap rows (Barnes-Hut in
+  r), not FMM.
+
+- Source support and the boundary-plane singularity: the j = 0 plane
+  node STAYS in the curl-B deposit (its stencil reads the cap ghost row,
+  i.e. the previous application's fill -- a per-stage-lagged contraction
+  in the sense of Sec. 6). Dropping it was tried and REJECTED: a real
+  boundary-plane current (the plugged racetrack's rotating
+  open-field-line column crossing the cap) then becomes invisible to
+  the fill while the plane-row curl and Ohm E keep acting on it -- an
+  unstable feedback channel (observed boundary-plane runaway). Keeping
+  it exposes the OTHER hazard: plane source nodes coincide with cap psi
+  points and the filament kernel is log-singular there (K(m -> 1); raw
+  entries reached 5e9 and the fill's own ghost-row seed exploded at
+  ~e^15 per application). The cap kernel therefore regularizes sub-cell
+  separations as an equivalent filament of minor radius
+  a = min(dr,dz)/2 (bounding the self entry at the standard
+  mu0 r (ln(8r/a) - 2) loop self-inductance scale). The r_hi band needs
+  neither: its face node i = nr stays excluded, which is what keeps the
+  translation tables singularity-free. Restarts are safe either way:
+  checkpoints store ghost cells (VisMF), so the first post-restart
+  deposit reads exactly the pre-checkpoint fill values.
+
+- Explicit-path stability at plasma-crossed caps: with real (floor-
+  density) plasma crossing an open cap, the explicit RK feedback of the
+  per-stage fill admits a grid-scale (odd-even in z) whistler boundary
+  layer that frozen ghosts do not (they pin the layer). It is inside
+  the reach of the standard hybrid grid-scale dissipation: the plugged
+  racetrack hold is clean at plasma_hyper_resistivity = 1e-6 (k^4
+  selective; FRC decay time untouched) where 1e-8 ran away in
+  ~0.5 t_ci. The theta-implicit path damps it natively (the implicit
+  z-open outflow test needs no extra dissipation).
+
+- Grading caveat (recorded, deliberate): the source binning stays
+  graded against the r_hi face only. Bins within ~coarsening cells of a
+  cap are up to coarsening wide in both directions, so a source
+  concentration hugging an open cap is coarse-grained at O(1) in-bin
+  phase there. The target physics (end-matched holds; separatrix ends
+  away from the caps) puts no current there; if a use case does, the
+  z-grading must mirror the radial one (bin-group machinery, kernel
+  memory unchanged for the translation tables).
+
+- Ordering: with a z cap open the fill runs at the TOP of
+  ApplyBfieldBoundary (it reads only valid data), so the PEC wall and
+  axis mirrors -- which read interior cap-ghost values at the corners
+  -- see this application's values. With r_hi-only open the original
+  tail position is kept bit-for-bit (verified: 32/32 plotfile binaries
+  identical across the existing suite).
+
+- Implicit path: the fluid moments keep the Neumann outflow ghosts; the
+  field/current z-ghost fills defer to the Green's values on an open
+  cap (ApplyNeumannZDomainGhosts keeps the outermost
+  `open_face_keep_rows` ghost rows: all of B, the curl-of-Green's-B
+  plasma-current row, the cell-centered interpolants' first ghost row,
+  which FillCellCenteredElectromagneticFields now computes directly
+  from the Green's-filled B). E keeps the plain Neumann clamp: it has
+  no Green's counterpart and its cap ghosts feed no residual stencil
+  (the ghost-B rows a curl-E write could reach are overwritten by the
+  fill). JFNK exactness is preserved: the fill runs inside every
+  residual evaluation, same as the r face.
+
+- Particle boundaries at the caps are intentionally untouched
+  (absorbing ends remain a separate physics decision), as is the fluid
+  Neumann semantics when z is not open. 3D matched caps stay out of
+  scope (vector kernel).

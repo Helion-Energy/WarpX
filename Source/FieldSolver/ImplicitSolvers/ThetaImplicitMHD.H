@@ -134,7 +134,16 @@ class ThetaImplicitMHD final : public ImplicitSolver
                                      amrex::MultiFab& ion_energy,
                                      amrex::MultiFab& ion_parallel_energy,
                                      amrex::MultiFab& ion_perp_energy) const;
-    void ApplyNeumannZDomainGhosts (amrex::MultiFab& mf) const;
+    /** Zero-gradient (Neumann) fill of the axial domain ghosts. On an OPEN
+     * z face (Green's-function boundary), the outermost
+     * a_open_face_keep_rows ghost rows are left untouched -- they carry
+     * free-space values written by the Green's fill (B) or computed from
+     * it (curl-B currents, cell-centered interpolants) -- and any deeper
+     * ghost rows clamp to the outermost kept row instead of the interior
+     * plane. The default (0) clamps every ghost row to the boundary plane
+     * on every face, which is the unconditional fluid-moment behavior. */
+    void ApplyNeumannZDomainGhosts (amrex::MultiFab& mf,
+                                    int a_open_face_keep_rows = 0) const;
     void ApplyScalarRadialDomainGhosts (amrex::MultiFab& mf) const;
     void FillCellCenteredElectromagneticFields ();
     void ComputeFluidRHS (WarpXSolverVec& rhs, amrex::Real time) const;
@@ -534,6 +543,13 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // fluid then gets zero-gradient (outflow) radial ghosts at r_max
     // instead of the reflecting conducting-wall mirror.
     bool m_r_open = false;
+    // Open axial cap faces (RZ only): boundary.field_lo/hi = open on z
+    // selects the Green's-function free-space fill for the field z ghosts
+    // of that cap; the fluid moments keep the Neumann outflow ghosts
+    // (m_z_neumann), but the field/current z-ghost fills defer to the
+    // Green's values instead of re-imposing the z-invariant clamp.
+    bool m_z_lo_open = false;
+    bool m_z_hi_open = false;
     // Fluid ghost treatment at an OPEN r_max: "outflow" (default;
     // zero-gradient), "reflect" (keep the no-normal-flow mirror while
     // the field is free-space -- removes the wall-cell drainage channel

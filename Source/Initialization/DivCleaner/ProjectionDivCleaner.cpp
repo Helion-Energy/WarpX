@@ -167,7 +167,11 @@ ProjectionDivCleaner::solve ()
         {FieldBoundaryType::PEC, LinOpBCType::Dirichlet},
         {FieldBoundaryType::Neumann, LinOpBCType::Neumann}, // Note that PMC is the same as Neumann
         {FieldBoundaryType::Periodic, LinOpBCType::Periodic},
-        {FieldBoundaryType::None, LinOpBCType::Neumann}
+        {FieldBoundaryType::None, LinOpBCType::Neumann},
+        // The Green's-function open boundary (RZ hybrid) manages its own
+        // ghost values; for the startup projection potential it is a
+        // free (zero-normal-gradient) face, same as None.
+        {FieldBoundaryType::Open, LinOpBCType::Neumann}
     };
 
     for (int idim=0; idim<AMREX_SPACEDIM; idim++){
