@@ -2358,30 +2358,15 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         (the density floor used in the entropy <-> temperature conversion
         itself is ``n_floor``). Defaults to ``n_floor``.
 
-    qdsmc_conduction: str, optional
-        Electron thermal conduction mode for the QDSMC energy equation:
-        "off" (default) or "isotropic". Requires
-        ``solve_electron_energy_equation``. Each Strang half-pass
-        transports the electron internal energy with deterministic
-        Gauss-Hermite samples of the Gaussian diffusion kernel
-        (Albright et al., Phys. Plasmas 9, 1898 (2002)); unconditionally
-        stable with no conduction CFL.
+    qdsmc_kappa_par: float or str, optional
+        Parallel electron thermal conductivity kappa_par(n, Te, t) in
+        W/(m K) (``n`` in m^-3, ``Te`` in eV, ``t`` in s). Specifying it
+        enables the Ito tensor-conduction substep of the QDSMC energy
+        equation. Requires ``solve_electron_energy_equation``.
 
-    qdsmc_conduction_kappa: str, optional
-        Electron thermal conductivity kappa(T, n) in W/(m K) as an
-        expression of ``T`` (electron temperature in Kelvin) and ``n``
-        (electron number density in m^-3).
-
-    qdsmc_conduction_substeps: int, default=1
-        Substeps per conduction half-pass. The Gaussian kernel is exact in
-        time for frozen coefficients; substeps only refine the coefficient
-        variation of a strongly nonlinear kappa(T).
-
-    qdsmc_conduction_flux_limiter: float, optional
-        Free-streaming flux-limiter coefficient alpha (off when omitted).
-        The conduction diffusivity is blended harmonically against the
-        free-streaming bound q_fs = alpha n k_B T v_th,e, limiting the
-        heat flux at steep temperature gradients.
+    qdsmc_kappa_perp: float or str, optional
+        Perpendicular electron thermal conductivity kappa_perp(n, Te, t)
+        in W/(m K); default 0 (the full tensor always ships).
 
     substeps: int, default=10
         Total number of substeps used to advance the B-field over one full
@@ -2508,10 +2493,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         joule_redirect_Te_threshold=None,
         electron_ion_relaxation_rate=None,
         qdsmc_n_floor=None,
-        qdsmc_conduction=None,
-        qdsmc_conduction_kappa=None,
-        qdsmc_conduction_substeps=None,
-        qdsmc_conduction_flux_limiter=None,
+        qdsmc_kappa_par=None,
+        qdsmc_kappa_perp=None,
         substeps=None,
         use_rkf45=None,
         substep_rtol=None,
@@ -2565,10 +2548,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.joule_redirect_Te_threshold = joule_redirect_Te_threshold
         self.electron_ion_relaxation_rate = electron_ion_relaxation_rate
         self.qdsmc_n_floor = qdsmc_n_floor
-        self.qdsmc_conduction = qdsmc_conduction
-        self.qdsmc_conduction_kappa = qdsmc_conduction_kappa
-        self.qdsmc_conduction_substeps = qdsmc_conduction_substeps
-        self.qdsmc_conduction_flux_limiter = qdsmc_conduction_flux_limiter
+        self.qdsmc_kappa_par = qdsmc_kappa_par
+        self.qdsmc_kappa_perp = qdsmc_kappa_perp
 
         self.solve_electron_energy_equation = solve_electron_energy_equation
 
@@ -2706,22 +2687,19 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
                     self.electron_ion_relaxation_rate, self.mangle_dict
                 ),
             )
-        if self.qdsmc_conduction is not None:
-            pywarpx.hybridpicmodel.qdsmc_conduction = self.qdsmc_conduction
-        if self.qdsmc_conduction_kappa is not None:
+        if self.qdsmc_kappa_par is not None:
             pywarpx.hybridpicmodel.__setattr__(
-                "qdsmc_conduction_kappa(T,n)",
+                "qdsmc_kappa_par(n,Te,t)",
                 pywarpx.my_constants.mangle_expression(
-                    self.qdsmc_conduction_kappa, self.mangle_dict
+                    self.qdsmc_kappa_par, self.mangle_dict
                 ),
             )
-        if self.qdsmc_conduction_substeps is not None:
-            pywarpx.hybridpicmodel.qdsmc_conduction_substeps = (
-                self.qdsmc_conduction_substeps
-            )
-        if self.qdsmc_conduction_flux_limiter is not None:
-            pywarpx.hybridpicmodel.qdsmc_conduction_flux_limiter = (
-                self.qdsmc_conduction_flux_limiter
+        if self.qdsmc_kappa_perp is not None:
+            pywarpx.hybridpicmodel.__setattr__(
+                "qdsmc_kappa_perp(n,Te,t)",
+                pywarpx.my_constants.mangle_expression(
+                    self.qdsmc_kappa_perp, self.mangle_dict
+                ),
             )
         if self.qdsmc_n_floor is not None:
             pywarpx.hybridpicmodel.qdsmc_n_floor = self.qdsmc_n_floor

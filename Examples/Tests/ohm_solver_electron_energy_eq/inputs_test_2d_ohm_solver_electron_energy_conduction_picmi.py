@@ -132,18 +132,16 @@ class ConductionTest(object):
             # exponent is set by scaling and conservation, not the kernel
             # prefactor); the run length keeps the front inside the box.
             D_peak = 0.2 * (2.3 * self.dx) ** 2 / self.DT
-            T_peak_K = (
-                (1.0 + self.bump_amp) * self.T_e * constants.q_e / constants.kb
-            )
+            T_peak_eV = (1.0 + self.bump_amp) * self.T_e
             kappa0 = 1.5 * self.n0 * constants.kb * D_peak
-            self.kappa = f"{kappa0}*(T/{T_peak_K})**2.5"
+            self.kappa = f"{kappa0}*(Te/{T_peak_eV})**2.5"
         else:
             self.kappa = f"{1.5 * self.n0 * constants.kb * self.D}"
 
         if comm.rank == 0:
             print(
                 f"Initializing QDSMC conduction test (front={self.front}):\n"
-                f"\tkappa(T,n) = {self.kappa} W/(m K)\n"
+                f"\tkappa_par(n,Te,t) = {self.kappa} W/(m K)\n"
                 f"\tsigma_0 = {self.bump_sigma:.3e} m\n"
                 f"\ttotal steps = {self.total_steps:d}\n"
             )
@@ -153,10 +151,9 @@ class ConductionTest(object):
     def load_bump(self):
         """Overwrite the uniform initial T_e with the Gaussian bump.
 
-        Runs after initialize_warpx (the hybrid model seeds a uniform T_e
-        during InitData, after the external-field hooks), so the step-0
-        diagnostic still shows the uniform seed; the analysis fits from
-        the later dumps.
+        Runs after the first step (the step-begin adiabat seed would
+        overwrite anything written earlier), so the step-0 diagnostic
+        shows the uniform seed; the analysis fits from the later dumps.
         """
         Te = simulation.fields.get("hybrid_electron_temperature_fp", level=0)
         # Nodal mesh coordinates spanning the (periodic) box.
@@ -251,13 +248,9 @@ class ConductionTest(object):
             plasma_resistivity=0.1,
             substeps=50 if self.circle else 4,
             solve_electron_energy_equation=True,
-            qdsmc_conduction="parallel" if self.circle else "isotropic",
-            qdsmc_conduction_kappa=self.kappa,
-            # Sub-kicks of ~1 dx: the 3-node Gauss-Hermite rule imprints
-            # its node triplet on the field when a single kick spans
-            # several cells; composing sub-cell kicks (central limit)
-            # recovers the smooth Gaussian kernel.
-            qdsmc_conduction_substeps=4,
+            # Ito tensor conduction; with B = 0 the kernel conducts
+            # isotropically at kappa_par (the unmagnetized limit).
+            qdsmc_kappa_par=self.kappa,
         )
         simulation.solver = self.solver
 
@@ -299,6 +292,11 @@ class ConductionTest(object):
 
         simulation.initialize_inputs()
         simulation.initialize_warpx()
+        # The step-begin T_e adiabat seed (once per run, latch-guarded)
+        # overwrites any T_e written before the first step: take one step
+        # first, then install the bump. The step-0 diagnostic shows the
+        # uniform seed either way; the analysis fits from the later dumps.
+        simulation.step(1)
         self.load_bump()
 
 
