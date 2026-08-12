@@ -310,5 +310,40 @@ void init_WarpX (py::module& m)
             },
             "Gets the number of substeps to take in the hybrid solver."
         )
+        .def("get_qdsmc_wall_tally",
+            [](WarpX& wx, int dim, int side) {
+                return wx.get_pointer_HybridPICModel()
+                    ->GetQdsmcWallTally(dim, side);
+            },
+            py::arg("dim"), py::arg("side"),
+            "Cumulative QDSMC conduction wall-BC energy tally for the "
+            "domain face (dim, side: 0=lo, 1=hi), in node-u units "
+            "[J/m^3] summed over boundary nodes (positive = energy "
+            "added to the plasma)."
+        )
+        .def("get_qdsmc_eb_tally",
+            [](WarpX& wx) {
+                return wx.get_pointer_HybridPICModel()->GetQdsmcEbTally();
+            },
+            "Cumulative QDSMC conduction embedded-boundary energy tally "
+            "(isothermal EB BC), node-u units [J/m^3] summed over fluid "
+            "nodes (positive = energy added to the plasma)."
+        )
+        .def("get_eb_collected_charge",
+            [](WarpX& wx, std::string const& species_name) {
+                return wx.GetPartContainer().GetEBCollectedCharge(species_name);
+            },
+            py::arg("species_name"),
+            "Gets the cumulative charge [C] the given species has deposited "
+            "on the embedded boundary (insulating EB wall type only)."
+        )
+        .def("get_eb_collected_energy",
+            [](WarpX& wx, std::string const& species_name) {
+                return wx.GetPartContainer().GetEBCollectedEnergy(species_name);
+            },
+            py::arg("species_name"),
+            "Gets the cumulative kinetic energy [J] the given species has "
+            "deposited on the embedded boundary (insulating EB wall type only)."
+        )
     ;
 }

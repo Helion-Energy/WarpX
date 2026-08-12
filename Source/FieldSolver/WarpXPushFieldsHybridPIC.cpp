@@ -136,6 +136,19 @@ void WarpX::HybridPICEvolveFields ()
         WarpX::sync_nodal_points
     );
 
+    // qdsmc_time_advance = pc: single mid-step corrector transport
+    // T_e^n -> T_e^{n+1} using V_e^{n+1/2}(J_i^{n+1/2}, B^{n+1/2},
+    // rho^{n+1/2}). Must run AFTER the first B half-push (B^{n+1/2} in the
+    // register) and BEFORE the rho averaging just below (the K_e / N_e load
+    // needs rho_fp_temp = rho^n). The first half-push above ran with the
+    // previous step's Pe^n; the Pe^{n+1} emitted here serves the second
+    // half-push and the final E-solve.
+    if (m_hybrid_pic_model->m_solve_electron_energy_equation &&
+        m_hybrid_pic_model->m_qdsmc_time_advance ==
+            HybridPICModel::QdsmcTimeAdvance::PC) {
+        m_hybrid_pic_model->AdvanceElectronEnergyQDSMC_PC(dt[0]);
+    }
+
     // Average rho^{n} and rho^{n+1} to get rho^{n+1/2} in rho_fp_temp
     for (int lev = 0; lev <= finest_level; ++lev)
     {
@@ -192,10 +205,17 @@ void WarpX::HybridPICEvolveFields ()
             0.5_rt*dt[0]);
     }
 
-    // Calculate the electron pressure at t=n+1. When QDSMC is enabled, Pe was
-    // already emitted earlier in this function by AdvanceElectronEnergyQDSMC,
-    // so the legacy algebraic adiabatic closure must NOT overwrite it here.
-    if (!m_hybrid_pic_model->m_solve_electron_energy_equation) {
+    // Electron pressure entering the final E-solve at t^{n+1}. With the
+    // energy equation on, Pe was already emitted by the QDSMC advance
+    // earlier in this function; qdsmc_time_advance = leapfrog additionally
+    // gets the linearly extrapolated Pe^{n+1} here (both half-pushes above
+    // consumed the time-centered Pe^{n+1/2}, mirroring the J_i^{n+1}
+    // extrapolation just above -- no-op for the other schemes). Otherwise
+    // the legacy algebraic adiabatic closure computes Pe(rho^{n+1}) at this
+    // same point (it must not overwrite a QDSMC-emitted Pe).
+    if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
+        m_hybrid_pic_model->ApplyQdsmcPeExtrapolation();
+    } else {
         m_hybrid_pic_model->CalculateElectronPressure();
     }
 
@@ -385,15 +405,51 @@ void WarpX::HybridPICInitializeRhoJandB ()
     // mid-run curl(B), which is catastrophically stiff (or, with the vacuum
     // treatment, silently wrong physics for one step).
     HybridPICDepositRhoAndJ();
-    if (restart_chkfile.empty()) {
-        // Seed the electron pressure from the adiabatic closure using the
-        // freshly deposited rho. When solve_electron_energy_equation is off,
-        // this is also recomputed every step inside HybridPICEvolveFields
-        // and is harmless. When on, this provides Pe^0 for the first QDSMC
-        // step (which will overwrite it via QDSMCFillElectronPressureFromTe
-        // after the first entropy transport).
-        m_hybrid_pic_model->CalculateElectronPressure();
 
+    // Fill the electron pressure using the freshly deposited rho. On a fresh
+    // start this seeds Pe^0 for the first step's B-substep E-solves (the
+    // iteration-0 diagnostics were already written at the end of InitData,
+    // before this runs); on restart it restores Pe(rho^n), which is not
+    // checkpointed and would otherwise be zero for the whole first restarted
+    // step. From the first step onward, HybridPICEvolveFields refreshes Pe
+    // right after each deposition (via the closure, or via the QDSMC entropy
+    // transport when solve_electron_energy_equation is on).
+    //
+    // With the energy equation on, seed T_e itself on the floored adiabat
+    // (uniform K_e -- the transport's zero-gradient state, PR #7128) and
+    // emit Pe = n_e k_B T_e from it, with the same boundary treatment
+    // CalculateElectronPressure applies. Calling the algebraic closure here
+    // instead would leave K_e ~ 0 across the floored halo (its T_e mirror
+    // divides by the floored density while the pressure uses the raw one),
+    // re-creating the absorbing edge on the first step. Note that T_e is not
+    // checkpointed either, so on restart the seed re-derives T_e from the
+    // restored rho: evolved T_e structure is not preserved across a restart.
+    //
+    // The adiabat seed runs ONCE per process: this entry point executes at
+    // step == step_begin of EVERY Evolve() entry (each segmented PICMI
+    // sim.step()), and an unconditional re-seed would wipe the evolved T_e
+    // mid-run — the same re-entry class as the closure Pe reset fixed
+    // earlier on this branch. Pe is still re-emitted from the CURRENT T_e
+    // on every entry.
+    if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            if (!m_hybrid_pic_model->m_qdsmc_te_seeded) {
+                m_hybrid_pic_model->SeedTeAdiabat(lev);
+            }
+            m_hybrid_pic_model->QDSMCFillElectronPressureFromTe(lev);
+            ApplyElectronPressureBoundary(lev, PatchType::fine);
+            ablastr::utils::communication::FillBoundary(
+                *m_fields.get(FieldType::hybrid_electron_pressure_fp, lev),
+                do_single_precision_comms,
+                Geom(lev).periodicity(),
+                true);
+        }
+        m_hybrid_pic_model->m_qdsmc_te_seeded = true;
+    } else {
+        m_hybrid_pic_model->CalculateElectronPressure();
+    }
+
+    if (restart_chkfile.empty()) {
         // Form the total initial field: add the t=0 external B on top of the
         // loaded initial condition, coil by coil, skipping coils whose flux
         // the initial condition already contains
@@ -404,11 +460,6 @@ void WarpX::HybridPICInitializeRhoJandB ()
         if (m_hybrid_pic_model->m_add_external_fields) {
             m_hybrid_pic_model->m_external_vector_potential->AddInitialExternalBField();
         }
-    } else {
-        // Restore Pe(rho^n): mid-run, the electron pressure entering a step
-        // holds the previous end-of-step value, but it is not checkpointed
-        // and would otherwise be zero for the whole first restarted step.
-        m_hybrid_pic_model->CalculateElectronPressure();
     }
 
     // Copy the rho_fp values to rho_fp_temp and the current_fp values to

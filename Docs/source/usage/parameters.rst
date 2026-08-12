@@ -1044,6 +1044,37 @@ additionally define the electric potential at the embedded boundary with an anal
 
     * ``Reflecting``: Particles that reach the embedded boundary are specularly reflected back into the simulation domain
 
+.. pp:param:: boundary.eb_type
+    :type: ``string``
+    :default: ``absorbing``
+    :optional:
+
+    The embedded-boundary wall type. Options are:
+
+    * ``absorbing``: Particles are collected where they reach the embedded boundary surface. This is the default behavior.
+
+    * ``insulating``: A collecting wall held off the plasma by a maintained density standoff band.
+      Particles are collected where the signed distance to the embedded boundary falls below
+      :pp:param:`boundary.eb_standoff_cells` cells, so no charge is ever deposited against the wall,
+      and the collected charge and kinetic energy are tallied per species (accessible from Python
+      through ``warpx.get_eb_collected_charge(species_name)`` and ``warpx.get_eb_collected_energy(species_name)``).
+      With the hybrid-PIC electron energy equation
+      (:pp:param:`hybrid_pic_model.solve_electron_energy_equation`), the electron temperature is
+      additionally filled with zero normal gradient into the standoff band and the covered region
+      each step (so :math:`\nabla P_e` drives no spurious electric field at the plasma edge), and
+      the electron entropy deposited on below-floor nodes by the transport markers is folded back
+      onto the neighboring live-plasma nodes instead of being dropped (which is otherwise a
+      one-way energy drain at every density-floor boundary).
+      Requires ``boundary.particle_eb = absorbing``.
+
+.. pp:param:: boundary.eb_standoff_cells
+    :type: ``float``
+    :default: ``2.``
+    :optional:
+
+    Width of the insulating wall's standoff band, in cells (measured with the largest cell size
+    of the level). Only used with ``boundary.eb_type = insulating``.
+
 .. _param-particle-thermalizer:
 
 Particle thermalizer
@@ -3898,8 +3929,11 @@ Maxwell solver: kinetic-fluid hybrid
     :default: ``1``
     :optional:
 
-    Density floor, in :math:`m^{-3}`, below which cells are excluded from the QDSMC electron-energy-equation
-    update (the electron temperature is left unchanged there).
+    Deposited-weight threshold, in :math:`m^{-3}`, for the QDSMC electron-energy-equation update: cells whose
+    deposited marker weight is at or below this value are skipped and keep their previous electron temperature
+    (guarding the division by the deposited weight in cells no QDSMC marker reached). The density floor used in
+    the :math:`K_e \leftrightarrow T_e` conversion itself is :pp:param:`hybrid_pic_model.n_floor`.
+    Defaults to :pp:param:`hybrid_pic_model.n_floor`.
 
 .. pp:param:: hybrid_pic_model.include_joule_heating
     :type: ``bool``
@@ -3911,67 +3945,167 @@ Maxwell solver: kinetic-fluid hybrid
     :math:`\eta_{s,\mathrm{eff}} = \eta + \eta_s`. For a single species this reduces to
     :math:`dT_e/dt = (\gamma - 1)\,\eta J^2/(n_e k_B)`.
 
-.. pp:param:: hybrid_pic_model.joule_heating_resistivity(rho,J,t)
-    :type: ``string``
-    :default: :pp:param:`hybrid_pic_model.plasma_resistivity(rho,J,t)`
+.. pp:param:: hybrid_pic_model.joule_redirect_Te_threshold
+    :type: ``float``
+    :default: ``-1`` (off)
     :optional:
 
-    Resistivity expression evaluated by the Joule-heating source instead of the E-solve resistivity.
-    When :pp:param:`hybrid_pic_model.plasma_resistivity(rho,J,t)` carries a density-ramped vacuum
-    regularization (a large :math:`\eta` in the low-density limb, used to relax the vacuum magnetic
-    field toward its quasi-static solution), heating with that boosted :math:`\eta` deposits
-    :math:`\eta_\mathrm{vac} J^2` into cells just above the density floor, where the heat capacity
-    :math:`\propto n_e` is small — a spurious electron-temperature source at the plasma edge.
-    Setting this parameter to the physical (un-boosted) resistivity keeps the field-side
-    regularization while heating with the physical dissipation only.
-
-.. pp:param:: hybrid_pic_model.joule_heating_n_min
-    :type: ``float`` (m\ :sup:`-3`)
-    :default: :pp:param:`hybrid_pic_model.n_floor`
-    :optional:
-
-    Density below which the Joule-heating source is dropped. The default reproduces the historical
-    gate at the Ohm's-law floor; raising it confines heating to densities where the resistivity
-    ramp has decayed to its physical value, without moving the floor itself.
-
-.. pp:param:: hybrid_pic_model.redirect_joule_to_ions
-    :type: ``bool``
-    :default: ``false``
-    :optional:
-
-    If :pp:param:`hybrid_pic_model.include_joule_heating` is on, cells with electron temperature at or above
-    :pp:param:`hybrid_pic_model.joule_redirect_Te_threshold` deposit their Joule heat to the kinetic ions
+    Electron temperature threshold, in eV, above which the Joule heat is redirected to the ions.
+    If :pp:param:`hybrid_pic_model.include_joule_heating` is on and a threshold :math:`\geq 0` is specified,
+    cells with electron temperature at or above the threshold deposit their Joule heat to the kinetic ions
     (as stochastic thermal-velocity kicks, bookkept per species) instead of the electron fluid. This caps the
     electron heating at the threshold and allows :math:`T_i > T_e` to develop, mimicking regimes where the
     electrons radiate strongly.
 
-.. pp:param:: hybrid_pic_model.joule_redirect_Te_threshold
-    :type: ``float``
-    :default: ``100``
-    :optional:
-
-    Electron temperature threshold, in eV, used by :pp:param:`hybrid_pic_model.redirect_joule_to_ions`.
-
-.. pp:param:: hybrid_pic_model.include_temperature_relaxation
+.. pp:param:: hybrid_pic_model.joule_redirect_allow_undamped
     :type: ``bool``
     :default: ``false``
     :optional:
 
-    If :pp:param:`hybrid_pic_model.solve_electron_energy_equation` is on, this adds the electron-ion
-    thermal-equilibration exchange :math:`Q_{ei} = \sum_s 3 n_s k_B \nu_{ei} (T_e - T_{i,s})` as a sink on the
-    electron fluid, paired with matching (energy-conserving) heating of the ion macro-particles. Requires the
-    ion species to activate ``<species>.do_temperature_deposition`` so that the deposited ion temperature is
-    available on the grid.
+    By default the Te-threshold Joule redirect refuses to run (aborts at initialization) when no
+    :pp:param:`hybrid_pic_model.electron_ion_relaxation_rate(rho,Te,Ti,t)` is specified: without the
+    relaxation channel the stochastic ion-heating operator has no drag leg, so the redirected energy
+    lands as pure undamped velocity diffusion, which is anti-stabilizing (fast ions generated in
+    low-density cells deposit current noise that feeds back into the Joule source). Set this flag to
+    force the legacy undamped behavior (intended for control-arm reproduction only).
+
+.. pp:param:: hybrid_pic_model.joule_redirect_kick_cap_vth_frac
+    :type: ``float``
+    :default: ``-1`` (off)
+    :optional:
+
+    If :math:`> 0`, clamps the redirect's per-particle stochastic kick so that
+    :math:`\sigma_\mathrm{redirect} \leq f\, v_\mathrm{th}` with :math:`v_\mathrm{th} = \sqrt{k_B T/m_i}`
+    (equivalently, the per-application redirected energy per ion satisfies :math:`E_s \leq f^2 k_B T`),
+    where :math:`T` is the cell's deposited ion temperature when the relaxation channel is on (otherwise
+    the local electron temperature sets the velocity scale). The clipped remainder is dropped (not
+    deposited later) and accumulated in the dropped-energy tally.
+
+.. pp:param:: hybrid_pic_model.joule_redirect_n_min_factor
+    :type: ``float``
+    :default: ``0`` (off)
+    :optional:
+
+    If :math:`> 0`, redirected Joule energy is only staged in cells with density
+    :math:`n \geq g\, n_\mathrm{floor}` (:math:`g` this factor, typically 2--4); below the gate the
+    above-threshold source is dropped to the dropped-energy tally instead of heating anything. This keeps
+    the redirect's per-macro-ion kicks out of nearly empty cells, where few macro-ions share the cell's
+    redirected energy.
+
+.. pp:param:: hybrid_pic_model.joule_heating_resistivity(rho,J,Te,t)
+    :type: ``float`` or ``str``
+    :optional:
+
+    Separate resistivity, in :math:`\Omega\,m`, used only to evaluate the Joule-heating (and redirect)
+    source. When set, the E-field solve keeps :pp:param:`hybrid_pic_model.plasma_resistivity(rho,J,t)`
+    (including any numerical vacuum-regularizer ramp needed for stability) while the heating uses this
+    physical resistivity, so the numerical resistivity does not heat the plasma edge. The expression can
+    depend on the total charge density ``rho`` (:math:`C/m^3`), the plasma-current magnitude ``J``
+    (:math:`A/m^2`), the local electron temperature ``Te`` (eV, permitting a Spitzer form) and the time
+    ``t`` (s). Defaults to the E-solve resistivity.
+
+.. pp:param:: hybrid_pic_model.joule_heating_n_min
+    :type: ``float``
+    :default: :pp:param:`hybrid_pic_model.n_floor`
+    :optional:
+
+    Independent density gate, in :math:`m^{-3}`, for the Joule-heating source: cells with density at or
+    below :math:`\max(\texttt{joule\_heating\_n\_min}, n_\mathrm{floor})` receive no Joule heat, and the
+    declined source energy is accumulated in the dropped-energy tally. This restricts heating to the
+    physical-resistivity region without moving the solver floor.
+
+.. pp:param:: hybrid_pic_model.Te_shunt_threshold
+    :type: ``float``
+    :default: ``-1`` (off)
+    :optional:
+
+    General electron-temperature limiter with ion shunt (the any-channel generalization of the
+    Joule-scoped :pp:param:`hybrid_pic_model.joule_redirect_Te_threshold`): open-set cells whose
+    :math:`T_e` exceeds this threshold, in eV, are capped to it after the energy-equation sources, and
+    the excess energy :math:`\tfrac{3}{2} n_e k_B (T_e - T_\mathrm{cap})` is delivered to the kinetic
+    ions as stochastic kicks (per-ion energy :math:`Z_s k_B (T_e - T_\mathrm{cap})` per species). Unlike
+    the Joule redirect, this intercepts heating from every channel (transport, conduction, reconnection).
+    The relaxation-channel guard rail, per-particle kick cap, and redirect density gate all apply; below
+    the gate the excess is dropped to the tally. Staged energy is tallied (``te_shunt`` in the dropped
+    print). Must sit below :pp:param:`hybrid_pic_model.Te_abort_threshold` when both are set.
+
+.. pp:param:: hybrid_pic_model.Te_abort_threshold
+    :type: ``float``
+    :default: ``-1`` (off)
+    :optional:
+
+    Graceful failure mode for electron-temperature runaways: if the open-set (:math:`n > n_\mathrm{floor}`)
+    :math:`\max(T_e)` exceeds this ceiling, in eV, after the energy-equation sources, the simulation
+    aborts with a clear message (instead of eventually crashing inside the transport). Quarantined
+    sub-floor cells may carry arbitrary temperature without tripping the abort — they are decoupled
+    by design.
+
+.. pp:param:: hybrid_pic_model.joule_dropped_energy_print_interval
+    :type: ``int``
+    :default: ``200``
+    :optional:
+
+    Step interval for printing the cumulative dropped-Joule-energy tallies (heating gate, redirect gate,
+    kick cap, in J) to stdout for the deck-side energy audit. The print only fires when at least one
+    decline channel is armed; ``0`` disables it. The contamination tally (below) shares this cadence.
+
+.. pp:param:: hybrid_pic_model.qdsmc_contamination_n_boundary
+    :type: ``float``
+    :default: ``-1`` (off)
+    :optional:
+
+    Quarantine-contamination instrument: cells with density at or below this boundary, in
+    :math:`m^{-3}`, form the quarantined class. Every electron-thermal-conduction split-sweep face flux
+    that carries energy from a quarantined cell into an open cell is accumulated into cumulative
+    per-grid-axis tallies (J), with a separate channel for the subset whose quarantined-side node is
+    below :pp:param:`hybrid_pic_model.n_floor` while ``qdsmc_conduction_vacuum_fast_front`` is active,
+    and another for redirected Joule energy staged as ion kicks inside quarantined cells. Set the
+    boundary above ``n_floor`` to watch the low-density ignition band; only the (production) split
+    fluxform conduction path is instrumented.
+
+.. pp:param:: hybrid_pic_model.qdsmc_cliff_limited_deposit
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Cliff-aware electron-entropy deposit. The QDSMC transport carries the entropy function
+    :math:`K = T_e n^{1-\gamma}`; entropy numerically spilled onto a node whose density differs from the
+    marker's home density re-materializes through the polytropic recovery with its temperature scaled by
+    :math:`(n_\mathrm{dest}/n_\mathrm{home})^{\gamma-1}` — correct for resolved smooth compression, but an
+    energy-manufacturing heat pump at unresolved density cliffs. When enabled, each destination node's
+    entropy share is blended from the isentropic value toward the temperature-invariant (isothermal)
+    value, keyed on :math:`r = |\ln(n_\mathrm{dest}/n_\mathrm{home})|`: pure isentropic below
+    :pp:param:`hybrid_pic_model.qdsmc_cliff_deposit_r1` (default 0.35), fully isothermal above
+    :pp:param:`hybrid_pic_model.qdsmc_cliff_deposit_r2` (default 1.4). Home-node deposits are bit-exact
+    whenever the cell's one-step density change stays below :math:`e^{r_1}`. Requires
+    ``qdsmc_gradient_deposit = 1``.
+
+.. pp:param:: hybrid_pic_model.qdsmc_energy_budget
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Per-stage open-set energy budget instrument (``pc`` time-advance only): brackets each stage of the
+    Strang advance (conduction / sources / transport / sources / conduction) with the class-summed
+    thermal energy :math:`U = \tfrac{3}{2} n_e k_B T_e` and accumulates each stage's :math:`\Delta U`
+    (cumulative, J), split into the bulk (:math:`n` above
+    :pp:param:`hybrid_pic_model.qdsmc_contamination_n_boundary`) and the band between ``n_floor`` and
+    that boundary. The transport channel carries both advection and the polytropic compression (pdV)
+    signal. Printed on the :pp:param:`hybrid_pic_model.joule_dropped_energy_print_interval` cadence.
 
 .. pp:param:: hybrid_pic_model.electron_ion_relaxation_rate(rho,Te,Ti,t)
     :type: ``float`` or ``str``
-    :default: ``0``
     :optional:
 
-    The electron-ion relaxation rate :math:`\nu_{ei}`, in :math:`s^{-1}`, used by
-    :pp:param:`hybrid_pic_model.include_temperature_relaxation`. The expression can depend on the total charge
-    density ``rho`` (:math:`C/m^3`), the electron and ion temperatures ``Te`` and ``Ti`` (both in eV) and the
-    time ``t`` (:math:`s`), which permits, e.g., the NRL-formulary Spitzer rate.
+    The electron-ion relaxation rate :math:`\nu_{ei}`, in :math:`s^{-1}`. If
+    :pp:param:`hybrid_pic_model.solve_electron_energy_equation` is on, specifying this rate enables the
+    electron-ion thermal-equilibration exchange :math:`Q_{ei} = \sum_s 3 n_s k_B \nu_{ei} (T_e - T_{i,s})`
+    as a sink on the electron fluid, paired with matching (energy-conserving) heating of the ion
+    macro-particles. The required shape-aware ion temperature deposition
+    (``<species>.do_temperature_deposition``) is enabled automatically on every charged species.
+    The expression can depend on the total charge density ``rho`` (:math:`C/m^3`), the electron and ion
+    temperatures ``Te`` and ``Ti`` (both in eV) and the time ``t`` (:math:`s`), which permits, e.g., the
+    NRL-formulary Spitzer rate.
 
 .. pp:param:: hybrid_pic_model.J[x/y/z]_external_grid_function(x,y,z,t)
     :type: ``float`` or ``str``

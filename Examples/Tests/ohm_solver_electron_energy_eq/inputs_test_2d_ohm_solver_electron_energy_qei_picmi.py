@@ -8,7 +8,7 @@
 # ---
 # ---     dU_e/dt = -Q_ei,   Q_ei = 3 n_e k_B nu_ei (T_e - T_i),
 # ---
-# --- enabled by hybrid_pic_model.include_temperature_relaxation with the
+# --- enabled by specifying the
 # --- parser hybrid_pic_model.electron_ion_relaxation_rate(rho,Te,Ti,t).  The
 # --- single flag enables BOTH the electron-side sink AND the conjugate ion
 # --- heating, so the exchange is energy-conserving (ion gain == electron loss).
@@ -151,7 +151,6 @@ class QeiRelaxation(object):
             substeps=self.substeps,
             solve_electron_energy_equation=True,
             include_joule_heating=False,
-            include_temperature_relaxation=True,
             electron_ion_relaxation_rate=f"{self.nu_ei}",
         )
 

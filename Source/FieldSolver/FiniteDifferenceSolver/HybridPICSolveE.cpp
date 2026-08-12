@@ -579,6 +579,20 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     const bool holmstrom_smooth =
         holmstrom_vacuum_region && (holmstrom_inv_width > 0._rt);
 
+    // Energy-equation-era gating (see the drag/battery ledger in the
+    // HybridPICModel docs):
+    //  * grad Pe stays in the FARADAY solves too when the Biermann battery
+    //    is kept (curl(grad Pe/(e n)) = (grad Pe x grad n)/(e n^2) != 0
+    //    once Te decouples from n);
+    //  * eta J enters the PUSH solve when the Q_ei drag operator is on --
+    //    dropping it is itself the single-species ion-side friction, so
+    //    E* + drag would book the friction twice. Hyper-resistivity is a
+    //    numerical B smoother and stays Faraday-only in either mode.
+    const bool add_grad_pe_faraday = hybrid_model->m_include_biermann_battery
+        && hybrid_model->m_include_electron_pressure_term;
+    const bool add_resistivity_push =
+        hybrid_model->m_include_temperature_relaxation;
+
     auto & warpx = WarpX::GetInstance();
     const amrex::Real t_new = warpx.gett_new(lev);
     // Nodal electron-inertia field, assembled by the caller each
@@ -804,7 +818,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     // Get the gradient of the electron pressure if the longitudinal part of
                     // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
                     const Real grad_Pe =
-                        (!solve_for_Faraday && include_electron_pressure_term) ?
+                        (solve_for_Faraday ? add_grad_pe_faraday
+                                           : include_electron_pressure_term) ?
                         T_Algo::UpwardDr(Pe, coefs_r, n_coefs_r, i, j, 0, 0)
                         : 0._rt;
 
@@ -826,8 +841,13 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 }
 
 
-                // Add resistivity only if E field value is used to update B
-                if (include_resistivity) {
+                // Resistivity: whenever the caller kept eta in this solve
+                // (always true for the Faraday solves; the push/stored-E
+                // solve follows the caller), or when the Q_ei drag operator
+                // carries the ion-side friction (dropping eta J from the
+                // push field IS the friction, so E* + drag would book it
+                // twice).
+                if (include_resistivity || add_resistivity_push) {
                     Real jtot_val = 0._rt;
                     if (resistivity_has_J_dependence) {
                         // Interpolate current to appropriate staggering to match E field
@@ -842,7 +862,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     // when no per-species eta is registered.
                     if (has_eta_overlay) { Er(i, j, 0) += eta_overlay_r(i, j, 0); }
 
-                    if (include_hyper_resistivity_term) {
+                    if (include_hyper_resistivity_term && solve_for_Faraday) {
 
                         // Interpolate B field to appropriate staggering to match E field
                         Real btot_val = 0._rt;
@@ -910,8 +930,13 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 }
 
 
-                // Add resistivity only if E field value is used to update B
-                if (include_resistivity) {
+                // Resistivity: whenever the caller kept eta in this solve
+                // (always true for the Faraday solves; the push/stored-E
+                // solve follows the caller), or when the Q_ei drag operator
+                // carries the ion-side friction (dropping eta J from the
+                // push field IS the friction, so E* + drag would book it
+                // twice).
+                if (include_resistivity || add_resistivity_push) {
                     Real jtot_val = 0._rt;
                     if(resistivity_has_J_dependence) {
                         // Interpolate current to appropriate staggering to match E field
@@ -924,7 +949,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     Etheta(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jtheta(i, j, 0);
                     if (has_eta_overlay) { Etheta(i, j, 0) += eta_overlay_t(i, j, 0); }
 
-                    if (include_hyper_resistivity_term) {
+                    if (include_hyper_resistivity_term && solve_for_Faraday) {
 
                         // Interpolate B field to appropriate staggering to match E field
                         Real btot_val = 0._rt;
@@ -968,7 +993,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     // Get the gradient of the electron pressure if the longitudinal part of
                     // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
                     const Real grad_Pe =
-                        (!solve_for_Faraday && include_electron_pressure_term) ?
+                        (solve_for_Faraday ? add_grad_pe_faraday
+                                           : include_electron_pressure_term) ?
                         T_Algo::UpwardDz(Pe, coefs_z, n_coefs_z, i, j, 0, 0)
                         : 0._rt;
 
@@ -990,8 +1016,13 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 }
 
 
-                // Add resistivity only if E field value is used to update B
-                if (include_resistivity) {
+                // Resistivity: whenever the caller kept eta in this solve
+                // (always true for the Faraday solves; the push/stored-E
+                // solve follows the caller), or when the Q_ei drag operator
+                // carries the ion-side friction (dropping eta J from the
+                // push field IS the friction, so E* + drag would book it
+                // twice).
+                if (include_resistivity || add_resistivity_push) {
                     Real jtot_val = 0._rt;
                     if (resistivity_has_J_dependence) {
                         // Interpolate current to appropriate staggering to match E field
@@ -1004,7 +1035,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     Ez(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jz(i, j, 0);
                     if (has_eta_overlay) { Ez(i, j, 0) += eta_overlay_z(i, j, 0); }
 
-                    if (include_hyper_resistivity_term) {
+                    if (include_hyper_resistivity_term && solve_for_Faraday) {
 
                         // Interpolate B field to appropriate staggering to match E field
                         Real btot_val = 0._rt;
@@ -1120,6 +1151,20 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         : 0._rt;
     const bool holmstrom_smooth =
         holmstrom_vacuum_region && (holmstrom_inv_width > 0._rt);
+
+    // Energy-equation-era gating (see the drag/battery ledger in the
+    // HybridPICModel docs):
+    //  * grad Pe stays in the FARADAY solves too when the Biermann battery
+    //    is kept (curl(grad Pe/(e n)) = (grad Pe x grad n)/(e n^2) != 0
+    //    once Te decouples from n);
+    //  * eta J enters the PUSH solve when the Q_ei drag operator is on --
+    //    dropping it is itself the single-species ion-side friction, so
+    //    E* + drag would book the friction twice. Hyper-resistivity is a
+    //    numerical B smoother and stays Faraday-only in either mode.
+    const bool add_grad_pe_faraday = hybrid_model->m_include_biermann_battery
+        && hybrid_model->m_include_electron_pressure_term;
+    const bool add_resistivity_push =
+        hybrid_model->m_include_temperature_relaxation;
 
     auto & warpx = WarpX::GetInstance();
     const amrex::Real t_new = warpx.gett_new(lev);
@@ -1341,7 +1386,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 // Get the gradient of the electron pressure if the longitudinal part of
                 // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
                 const Real grad_Pe =
-                    (!solve_for_Faraday && include_electron_pressure_term) ?
+                    (solve_for_Faraday ? add_grad_pe_faraday
+                                       : include_electron_pressure_term) ?
                     T_Algo::UpwardDx(Pe, coefs_x, n_coefs_x, i, j, k)
                     : 0._rt;
 
@@ -1363,8 +1409,13 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             }
 
 
-            // Add resistivity only if E field value is used to update B
-            if (include_resistivity) {
+            // Resistivity: whenever the caller kept eta in this solve
+            // (always true for the Faraday solves; the push/stored-E
+            // solve follows the caller), or when the Q_ei drag operator
+            // carries the ion-side friction (dropping eta J from the
+            // push field IS the friction, so E* + drag would book it
+            // twice).
+            if (include_resistivity || add_resistivity_push) {
                 Real jtot_val = 0._rt;
                 if (resistivity_has_J_dependence) {
                     // Interpolate current to appropriate staggering to match E field
@@ -1377,7 +1428,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 Ex(i, j, k) += eta(rho_val, jtot_val, t_new) * Jx(i, j, k);
                 if (has_eta_overlay) { Ex(i, j, k) += eta_overlay_x(i, j, k); }
 
-                if (include_hyper_resistivity_term) {
+                if (include_hyper_resistivity_term && solve_for_Faraday) {
 
                     // Interpolate B field to appropriate staggering to match E field
                     Real btot_val = 0._rt;
@@ -1417,7 +1468,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 // Get the gradient of the electron pressure if the longitudinal part of
                 // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
                 const Real grad_Pe =
-                    (!solve_for_Faraday && include_electron_pressure_term) ?
+                    (solve_for_Faraday ? add_grad_pe_faraday
+                                       : include_electron_pressure_term) ?
                     T_Algo::UpwardDy(Pe, coefs_y, n_coefs_y, i, j, k)
                     : 0._rt;
 
@@ -1439,8 +1491,13 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             }
 
 
-            // Add resistivity only if E field value is used to update B
-            if (include_resistivity) {
+            // Resistivity: whenever the caller kept eta in this solve
+            // (always true for the Faraday solves; the push/stored-E
+            // solve follows the caller), or when the Q_ei drag operator
+            // carries the ion-side friction (dropping eta J from the
+            // push field IS the friction, so E* + drag would book it
+            // twice).
+            if (include_resistivity || add_resistivity_push) {
                 Real jtot_val = 0._rt;
                 if (resistivity_has_J_dependence) {
                     // Interpolate current to appropriate staggering to match E field
@@ -1453,7 +1510,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 Ey(i, j, k) += eta(rho_val, jtot_val, t_new) * Jy(i, j, k);
                 if (has_eta_overlay) { Ey(i, j, k) += eta_overlay_y(i, j, k); }
 
-                if (include_hyper_resistivity_term) {
+                if (include_hyper_resistivity_term && solve_for_Faraday) {
 
                     // Interpolate B field to appropriate staggering to match E field
                     Real btot_val = 0._rt;
@@ -1493,7 +1550,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 // Get the gradient of the electron pressure if the longitudinal part of
                 // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
                 const Real grad_Pe =
-                    (!solve_for_Faraday && include_electron_pressure_term) ?
+                    (solve_for_Faraday ? add_grad_pe_faraday
+                                       : include_electron_pressure_term) ?
                     T_Algo::UpwardDz(Pe, coefs_z, n_coefs_z, i, j, k)
                     : 0._rt;
 
@@ -1515,8 +1573,13 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             }
 
 
-            // Add resistivity only if E field value is used to update B
-            if (include_resistivity) {
+            // Resistivity: whenever the caller kept eta in this solve
+            // (always true for the Faraday solves; the push/stored-E
+            // solve follows the caller), or when the Q_ei drag operator
+            // carries the ion-side friction (dropping eta J from the
+            // push field IS the friction, so E* + drag would book it
+            // twice).
+            if (include_resistivity || add_resistivity_push) {
                 Real jtot_val = 0._rt;
                 if (resistivity_has_J_dependence) {
                     // Interpolate current to appropriate staggering to match E field
@@ -1529,7 +1592,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 Ez(i, j, k) += eta(rho_val, jtot_val, t_new) * Jz(i, j, k);
                 if (has_eta_overlay) { Ez(i, j, k) += eta_overlay_z(i, j, k); }
 
-                if (include_hyper_resistivity_term) {
+                if (include_hyper_resistivity_term && solve_for_Faraday) {
 
                     // Interpolate B field to appropriate staggering to match E field
                     Real btot_val = 0._rt;

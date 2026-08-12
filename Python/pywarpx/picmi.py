@@ -2337,31 +2337,26 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         ``n_floor`` (the historical gate). Raise it to keep heating out of
         the resistivity-ramp band without moving the Ohm's-law floor.
 
-    redirect_joule_to_ions: bool, default=False
-        Route the Joule heating of cells with
-        ``Te >= joule_redirect_Te_threshold`` to the ions (as an
-        energy-conserving stochastic kick) instead of the electrons, allowing
-        ``Ti > Te`` to develop. Requires ``include_joule_heating``.
-
-    joule_redirect_Te_threshold: float, default=100
-        Electron temperature threshold in eV for ``redirect_joule_to_ions``.
-
-    include_temperature_relaxation: bool, default=False
-        Add the electron-ion thermal equilibration ``Q_ei`` to the electron
-        temperature, with the conjugate ion heating applied as an
-        energy-conserving drag-diffusion kick on each ion. Requires
-        ``do_temperature_deposition`` on every charged ion species. Only used
-        when ``solve_electron_energy_equation`` is True.
+    joule_redirect_Te_threshold: float, default=-1 (off)
+        Electron temperature threshold in eV above which the Joule heat is
+        routed to the ions (as an energy-conserving stochastic kick) instead
+        of the electrons, allowing ``Ti > Te`` to develop. Setting a
+        threshold >= 0 arms the redirect. Requires ``include_joule_heating``.
 
     electron_ion_relaxation_rate: float or str
         Value or expression for the electron-ion energy-equilibration rate
-        ``nu_ei`` in 1/s used by ``include_temperature_relaxation``. The
-        expression may depend on ``rho`` (charge density in C/m^3), ``Te``
-        and ``Ti`` (temperatures in eV) and ``t`` (time).
+        ``nu_ei`` in 1/s. Specifying it enables the ``Q_ei`` exchange on the
+        electron temperature, with the conjugate ion heating applied as an
+        energy-conserving drag-diffusion kick on each ion. The expression may
+        depend on ``rho`` (charge density in C/m^3), ``Te`` and ``Ti``
+        (temperatures in eV) and ``t`` (time).
 
     qdsmc_n_floor: float, optional
-        Minimum electron number density (in m^-3) used when recovering the
-        electron temperature from the QDSMC entropy deposit.
+        Deposited-weight threshold (in m^-3) for the QDSMC electron
+        temperature update: cells whose deposited marker weight is at or
+        below this value are skipped and keep their previous temperature
+        (the density floor used in the entropy <-> temperature conversion
+        itself is ``n_floor``). Defaults to ``n_floor``.
 
     qdsmc_conduction: str, optional
         Electron thermal conduction mode for the QDSMC energy equation:
@@ -2510,9 +2505,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         darwin_vacuum_recovery_relaxation_time=None,
         darwin_vacuum_recovery_relative_tolerance=None,
         include_joule_heating=None,
-        redirect_joule_to_ions=None,
         joule_redirect_Te_threshold=None,
-        include_temperature_relaxation=None,
         electron_ion_relaxation_rate=None,
         qdsmc_n_floor=None,
         qdsmc_conduction=None,
@@ -2569,9 +2562,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.include_joule_heating = include_joule_heating
         self.joule_heating_resistivity = joule_heating_resistivity
         self.joule_heating_n_min = joule_heating_n_min
-        self.redirect_joule_to_ions = redirect_joule_to_ions
         self.joule_redirect_Te_threshold = joule_redirect_Te_threshold
-        self.include_temperature_relaxation = include_temperature_relaxation
         self.electron_ion_relaxation_rate = electron_ion_relaxation_rate
         self.qdsmc_n_floor = qdsmc_n_floor
         self.qdsmc_conduction = qdsmc_conduction
@@ -2580,10 +2571,6 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.qdsmc_conduction_flux_limiter = qdsmc_conduction_flux_limiter
 
         self.solve_electron_energy_equation = solve_electron_energy_equation
-        self.include_joule_heating = include_joule_heating
-        self.joule_redirect_Te_threshold = joule_redirect_Te_threshold
-        self.electron_ion_relaxation_rate = electron_ion_relaxation_rate
-        self.qdsmc_n_floor = qdsmc_n_floor
 
         self.substeps = substeps
         self.use_rkf45 = use_rkf45
@@ -2651,7 +2638,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
                 )
         if self.joule_heating_resistivity is not None:
             pywarpx.hybridpicmodel.__setattr__(
-                "joule_heating_resistivity(rho,J,t)",
+                "joule_heating_resistivity(rho,J,Te,t)",
                 pywarpx.my_constants.mangle_expression(
                     self.joule_heating_resistivity, self.mangle_dict
                 ),
@@ -2708,15 +2695,9 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
             )
         if self.include_joule_heating is not None:
             pywarpx.hybridpicmodel.include_joule_heating = self.include_joule_heating
-        if self.redirect_joule_to_ions is not None:
-            pywarpx.hybridpicmodel.redirect_joule_to_ions = self.redirect_joule_to_ions
         if self.joule_redirect_Te_threshold is not None:
             pywarpx.hybridpicmodel.joule_redirect_Te_threshold = (
                 self.joule_redirect_Te_threshold
-            )
-        if self.include_temperature_relaxation is not None:
-            pywarpx.hybridpicmodel.include_temperature_relaxation = (
-                self.include_temperature_relaxation
             )
         if self.electron_ion_relaxation_rate is not None:
             pywarpx.hybridpicmodel.__setattr__(
@@ -3847,6 +3828,19 @@ class EmbeddedBoundary(picmistandard.base._ClassWithInit):
         Whether to cover cells with multiple cuts.
         (If False, this will raise an error if some cells have multiple cuts)
 
+    eb_type: string, default=None
+        The embedded-boundary wall type, "absorbing" (the default behavior:
+        particles are collected at the surface) or "insulating" (a collecting
+        wall held off the plasma by a density standoff band: particles are
+        collected eb_standoff_cells cells before the surface, the collected
+        charge/energy is tallied per species, and with the hybrid electron
+        energy equation on, T_e is filled with zero normal gradient into
+        the band and the covered region each step).
+
+    eb_standoff_cells: float, default=None
+        Width of the insulating wall's standoff band, in cells (WarpX
+        default 2). Only used with eb_type="insulating".
+
     Parameters used in the analytic expressions should be given as additional keyword arguments.
 
     """
@@ -3860,6 +3854,8 @@ class EmbeddedBoundary(picmistandard.base._ClassWithInit):
         stl_reverse_normal=False,
         potential=None,
         cover_multiple_cuts=None,
+        eb_type=None,
+        eb_standoff_cells=None,
         **kw,
     ):
         assert stl_file is None or implicit_function is None, Exception(
@@ -3887,6 +3883,9 @@ class EmbeddedBoundary(picmistandard.base._ClassWithInit):
         self.potential = potential
 
         self.cover_multiple_cuts = cover_multiple_cuts
+
+        self.eb_type = eb_type
+        self.eb_standoff_cells = eb_standoff_cells
 
         # Handle keyword arguments used in expressions
         self.user_defined_kw = {}
@@ -3921,6 +3920,11 @@ class EmbeddedBoundary(picmistandard.base._ClassWithInit):
             pywarpx.eb2.stl_reverse_normal = self.stl_reverse_normal
 
         pywarpx.eb2.cover_multiple_cuts = self.cover_multiple_cuts
+
+        if self.eb_type is not None:
+            pywarpx.boundary.eb_type = self.eb_type
+        if self.eb_standoff_cells is not None:
+            pywarpx.boundary.eb_standoff_cells = self.eb_standoff_cells
 
         if self.potential is not None:
             expression = pywarpx.my_constants.mangle_expression(
