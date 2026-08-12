@@ -790,6 +790,15 @@ public:
      * W/(m K)); kappa_perp has its own optional parser and defaults to 0.
      * Only consulted when m_solve_electron_energy_equation is on. */
     bool m_include_thermal_conduction = false;
+    /** Isotropic-conduction options (b-hat noise at small |B|; see the
+     * QdsmcConductionOnce kernel comment): qdsmc_conduction_isotropic
+     * conducts at the cross-field rate everywhere (chi_par := chi_perp, the
+     * field-aligned frame drops out exactly); qdsmc_conduction_iso_B [T]
+     * blends chi_par -> chi_perp smoothly below that |B|
+     * (s = B^2/(B^2+B_iso^2)) -- the surgical treatment of the
+     * reconnection-null region. Defaults off (anisotropic). */
+    bool m_cond_isotropic = false;
+    amrex::Real m_cond_iso_B = -1.0;
     std::string m_kappa_par_expression = "0.0";
     std::string m_kappa_perp_expression = "0.0";
     std::unique_ptr<amrex::Parser> m_kappa_par_parser;

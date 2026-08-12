@@ -128,6 +128,9 @@ void HybridPICModel::ReadParameters ()
     m_include_thermal_conduction =
         pp_hybrid.query("qdsmc_kappa_par(n,Te,t)", m_kappa_par_expression);
     pp_hybrid.query("qdsmc_kappa_perp(n,Te,t)", m_kappa_perp_expression);
+    pp_hybrid.query("qdsmc_conduction_isotropic", m_cond_isotropic);
+    utils::parser::queryWithParser(pp_hybrid, "qdsmc_conduction_iso_B",
+                                   m_cond_iso_B);
     {
         std::vector<int> npts;
         pp_hybrid.queryarr("qdsmc_conduction_quadrature_points", npts);
@@ -2943,6 +2946,9 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
     amrex::Real const f_lim    = m_cond_flux_limit_factor;
     bool const vac_fast        = m_cond_vacuum_fast_front;
     bool const grad_dep        = m_qdsmc_gradient_deposit;
+    bool const iso_full        = m_cond_isotropic;
+    amrex::Real const iso_B    = m_cond_iso_B;
+    bool const iso_any         = iso_full || (iso_B > 0.0_rt);
 
     amrex::GpuArray<amrex::Real, 8> xq_par, wq_par, xq_perp, wq_perp;
     qdsmc_gh_table(m_cond_npts_par,  xq_par,  wq_par);
@@ -3062,10 +3068,25 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
 
             amrex::Real chi_par =
                 kappa_par_ex(ne, Te_eV, t_now) / (1.5_rt * ne * kb);
-            amrex::Real chi_perp = unmag ? chi_par :
+            amrex::Real chi_perp = (unmag && !iso_any) ? chi_par :
                 kappa_perp_ex(ne, Te_eV, t_now) / (1.5_rt * ne * kb);
             chi_par  = amrex::max(chi_par,  0.0_rt);
             chi_perp = amrex::max(chi_perp, 0.0_rt);
+
+            // Isotropic-conduction options: where |B| is small, b-hat is
+            // noise and the field-aligned tensor points the (huge) chi_par
+            // in per-node random directions -- at the reconnection null
+            // this is spurious violent mixing exactly where the event
+            // lives. Full mode conducts at the cross-field rate everywhere
+            // (chi_par == chi_perp collapses D to chi_perp I: the frame
+            // drops out exactly). The |B|-threshold blend pulls chi_par
+            // smoothly to chi_perp below B_iso: s = B^2/(B^2 + B_iso^2).
+            if (iso_full) {
+                chi_par = chi_perp;
+            } else if (iso_B > 0.0_rt) {
+                amrex::Real const s = B2 / (B2 + iso_B*iso_B);
+                chi_par = chi_perp + (chi_par - chi_perp) * s;
+            }
 
             // Physical free-streaming limiter (longitudinal only):
             // kappa_eff = kappa / (1 + |q_Sp| / (f q_fs)), with

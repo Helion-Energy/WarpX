@@ -213,6 +213,23 @@ parser.add_argument(
     "(hybrid_pic_model.joule_redirect_kick_cap_vth_frac); <0 = off",
 )
 parser.add_argument(
+    "--iso-conduction",
+    type=int,
+    choices=[0, 1],
+    default=0,
+    help="single-temperature-style ISOTROPIC conduction at the cross-field "
+    "rate everywhere (hybrid_pic_model.qdsmc_conduction_isotropic): "
+    "sidesteps the b-hat-undefined problem at the reconnection null",
+)
+parser.add_argument(
+    "--iso-b",
+    type=float,
+    default=-1.0,
+    help="surgical isotropic blend below this |B| [T] "
+    "(hybrid_pic_model.qdsmc_conduction_iso_B): chi_par -> chi_perp where "
+    "b-hat is noise (the null region); <0 = off. Suggested ~4x the bias",
+)
+parser.add_argument(
     "--wall-te",
     type=float,
     default=-1.0,
@@ -547,6 +564,10 @@ pywarpx.hybridpicmodel.qdsmc_time_advance = args.advance
 pywarpx.hybridpicmodel.qdsmc_conduction_form = "fluxform"
 pywarpx.hybridpicmodel.qdsmc_conduction_reconstruction = "ppm"
 pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = 3
+if args.iso_conduction:
+    pywarpx.hybridpicmodel.qdsmc_conduction_isotropic = 1
+if args.iso_b > 0.0:
+    pywarpx.hybridpicmodel.qdsmc_conduction_iso_B = args.iso_b
 if args.wall_te > 0.0:
     # Temperature (Dirichlet) wall: the dielectric absorbs conducted heat.
     pywarpx.hybridpicmodel.qdsmc_conduction_eb_bc = "isothermal"

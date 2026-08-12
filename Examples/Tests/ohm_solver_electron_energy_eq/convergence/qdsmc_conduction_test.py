@@ -81,6 +81,21 @@ parser.add_argument(
     default=0.0,
     help="chi_perp [m^2/s] (converted to kappa internally)",
 )
+parser.add_argument(
+    "--iso-full",
+    type=int,
+    choices=[0, 1],
+    default=0,
+    help="isotropic conduction at the cross-field rate everywhere "
+    "(hybrid_pic_model.qdsmc_conduction_isotropic)",
+)
+parser.add_argument(
+    "--iso-b",
+    type=float,
+    default=-1.0,
+    help="isotropic blend below this |B| [T] "
+    "(hybrid_pic_model.qdsmc_conduction_iso_B); <0 = off",
+)
 parser.add_argument("--advance", choices=["euler", "leapfrog", "pc"], default="pc")
 parser.add_argument("--grad-deposit", type=int, choices=[0, 1], default=1)
 parser.add_argument(
@@ -252,6 +267,10 @@ pywarpx.hybridpicmodel.qdsmc_conduction_curved_feet = args.curved_feet
 pywarpx.hybridpicmodel.qdsmc_conduction_deposit_kernel = args.deposit_kernel
 pywarpx.hybridpicmodel.qdsmc_conduction_compensate = args.compensate
 pywarpx.hybridpicmodel.qdsmc_conduction_fct_limiter = args.fct_limiter
+if args.iso_full:
+    pywarpx.hybridpicmodel.qdsmc_conduction_isotropic = 1
+if args.iso_b > 0.0:
+    pywarpx.hybridpicmodel.qdsmc_conduction_iso_B = args.iso_b
 
 sim.initialize_warpx()
 
