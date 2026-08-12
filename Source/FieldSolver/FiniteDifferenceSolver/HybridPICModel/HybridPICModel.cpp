@@ -11,6 +11,8 @@
 
 #include "HybridPICModel.H"
 
+#include "QdsmcRKIntegrator.H"
+
 #include <ablastr/coarsen/sample.H>
 #include <ablastr/utils/Communication.H>
 #include <ablastr/warn_manager/WarnManager.H>
@@ -25,6 +27,7 @@
 
 #include <AMReX_Random.H>
 
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -164,6 +167,23 @@ void HybridPICModel::ReadParameters ()
                         m_cond_fd_max_subcycles);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_cond_fd_max_subcycles > 0,
             "hybrid_pic_model.qdsmc_conduction_fd_max_subcycles must be "
+            "positive");
+        std::string fdtime = "ssprk2";
+        pp_hybrid.query("qdsmc_conduction_fd_time", fdtime);
+        if (fdtime == "ssprk2") { m_cond_fd_time = 0; }
+        else if (fdtime == "rkf45") { m_cond_fd_time = 1; }
+        else {
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.qdsmc_conduction_fd_time must be "
+                "'ssprk2' or 'rkf45'");
+        }
+        utils::parser::queryWithParser(pp_hybrid,
+            "qdsmc_conduction_fd_rtol", m_cond_fd_rtol);
+        utils::parser::queryWithParser(pp_hybrid,
+            "qdsmc_conduction_fd_atol", m_cond_fd_atol);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_cond_fd_rtol > 0._rt && m_cond_fd_atol > 0._rt,
+            "hybrid_pic_model.qdsmc_conduction_fd_rtol/_atol must be "
             "positive");
     }
     {
@@ -3008,6 +3028,7 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
     int const fd_limiter      = m_cond_fd_limiter;
     amrex::Real const fd_cfl  = m_cond_fd_cfl;
     int const max_sub         = m_cond_fd_max_subcycles;
+    bool const use_rkf45      = (m_cond_fd_time == 1);
 
     // Grid-dim bookkeeping (same conventions as the SDE kernels).
 #if defined(WARPX_DIM_3D)
@@ -3085,9 +3106,7 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
     int constexpr ngT = 3;
     amrex::MultiFab xi(Te.boxArray(), Te.DistributionMap(), NXI, 2);
     amrex::MultiFab T_cur(Te.boxArray(), Te.DistributionMap(), 1, ngT);
-    amrex::MultiFab T_stage(Te.boxArray(), Te.DistributionMap(), 1, ngT);
     T_cur.setVal(0.0_rt);
-    T_stage.setVal(0.0_rt);
     amrex::MultiFab::Copy(T_cur, Te, 0, 0, 1, 0);
 
     // 4th-order coefficient tables (Chacon et al. Appendix A): face
@@ -3248,36 +3267,33 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
         return s_max;
     };
 
-    // --- one forward-Euler flux-divergence stage:
-    //     Tout = a Told + (1 - a) [Tin + dt_s du/(1.5 kB ne)],
-    // a = 0 is the SSP-RK2 predictor, a = 1/2 the corrector. Each stage is
-    // monotone under the CFL bound and the convex combination preserves
-    // the maximum principle. Face fluxes are evaluated inline per node
-    // (each interior face twice, once per neighbor, from identical inputs
-    // -> bitwise identical values, so Sigma(u) telescopes to round-off
-    // with no face storage and no seam sync).
-    auto apply_stage = [&] (amrex::MultiFab const & Tin,
-                            amrex::MultiFab const & Told,
-                            amrex::MultiFab & Tout,
-                            amrex::Real const a, amrex::Real const dt_s)
+    // --- RHS for the adaptive integrator: K = dTe/dt = du/dt / (1.5 kB
+    // ne), the flux divergence of the FD operator; ghost refresh of the
+    // state is this functor's job (QdsmcRKIntegrator contract). Face
+    // fluxes are evaluated inline per node (each interior face twice,
+    // once per neighbor, from identical inputs -> bitwise identical
+    // values, so Sigma(u) telescopes to round-off with no face storage
+    // and no seam sync).
+    auto eval_rhs = [&] (amrex::MultiFab & Tin, amrex::MultiFab & Kout)
     {
+        ablastr::utils::communication::FillBoundary(
+            Tin, WarpX::do_single_precision_comms, period, true);
+        build_xi(Tin);
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
-        for (MFIter mfi(Tout, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        for (MFIter mfi(Kout, TilingIfNotGPU()); mfi.isValid(); ++mfi)
         {
             amrex::Box const box = mfi.tilebox();
-            amrex::Array4<amrex::Real>       const & tn    = Tout.array(mfi);
+            amrex::Array4<amrex::Real>       const & tn    = Kout.array(mfi);
             amrex::Array4<amrex::Real const> const & tc    = Tin.const_array(mfi);
-            amrex::Array4<amrex::Real const> const & told  = Told.const_array(mfi);
             amrex::Array4<amrex::Real const> const & x_arr = xi.const_array(mfi);
             amrex::Array4<amrex::Real const> const & b_arr = bne.const_array(mfi);
 
             amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
                 if (b_arr(i,j,k,BNE::b_open) <= 0.5_rt) {
-                    // floored nodes keep their T_e
-                    tn(i,j,k) = a*told(i,j,k) + (1.0_rt - a)*tc(i,j,k);
+                    tn(i,j,k) = 0.0_rt;   // floored nodes keep their T_e
                     return;
                 }
 
@@ -3424,48 +3440,41 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                            * dxi_g[g];
                 }
                 amrex::Real const ne0 = b_arr(i,j,k,BNE::b_ne);
-                tn(i,j,k) = a*told(i,j,k) + (1.0_rt - a)*
-                    (tc(i,j,k) + dt_s*div/(1.5_rt*kb*ne0));
+                tn(i,j,k) = div/(1.5_rt*kb*ne0);
             });
         }
     };
 
-    amrex::Real t_done = 0.0_rt;
-    int nsub = 0;
-    bool clipped = false;
-
-    while (t_done < dt_c*(1.0_rt - 1.0e-12_rt))
+    // Stability ceiling for the adaptive integrator (valid after each
+    // RHS evaluation, which rebuilds xi). The Gershgorin normalization
+    // puts the forward-Euler/SSP-RK2 real-axis edge at dt = 1/s (z = -2);
+    // RKF45's edge sits at |z| ~ 3, hence the 3/2 scale. fd_cfl is the
+    // user fraction of the edge (default 0.4, Nyquist-damping margin).
+    amrex::Real const edge_scale = use_rkf45 ? 1.5_rt : 1.0_rt;
+    auto cap = [&] () -> amrex::Real
     {
-        if (nsub >= max_sub) { clipped = true; break; }
-
-        ablastr::utils::communication::FillBoundary(
-            T_cur, WarpX::do_single_precision_comms, period, true);
-        build_xi(T_cur);
         amrex::Real const s_max = stable_rate();
-        amrex::Real dt_sub = (s_max > 0.0_rt) ? fd_cfl/s_max
-                                              : (dt_c - t_done);
-        dt_sub = amrex::min(dt_sub, dt_c - t_done);
+        return (s_max > 0.0_rt) ? fd_cfl*edge_scale/s_max
+                                : std::numeric_limits<amrex::Real>::max();
+    };
 
-        // SSP-RK2 (Heun): u1 = u + dt L(u); u <- u/2 + [u1 + dt L(u1)]/2.
-        // Time error O(dt_sub^2) ~ O(dx^4), so the subcycle integrator
-        // does not cap the 4th-order spatial arm (plain Euler would).
-        apply_stage(T_cur, T_cur, T_stage, 0.0_rt, dt_sub);
-        ablastr::utils::communication::FillBoundary(
-            T_stage, WarpX::do_single_precision_comms, period, true);
-        build_xi(T_stage);
-        apply_stage(T_stage, T_cur, T_cur, 0.5_rt, dt_sub);
+    QdsmcRKIntegrator const integ(
+        use_rkf45 ? QdsmcRKIntegrator::Scheme::RKF45
+                  : QdsmcRKIntegrator::Scheme::SSPRK2,
+        eval_rhs, cap, m_cond_fd_rtol, m_cond_fd_atol,
+        m_substep_safety, m_substep_max_growth, max_sub);
+    QdsmcRKStats const st = integ.Advance(T_cur, dt_c);
 
-        t_done += dt_sub;
-        ++nsub;
-    }
-
-    if (clipped) {
+    if (st.t_done < dt_c*(1.0_rt - 1.0e-12_rt)) {
         amrex::Warning(
-            "[qdsmc] QdsmcConductionOnceFD: subcycle ceiling ("
+            "[qdsmc] QdsmcConductionOnceFD: attempts budget ("
             + std::to_string(max_sub) + ") hit; dropped "
-            + std::to_string(1.0 - t_done/dt_c)
-            + " of the conduction substep -- raise "
-            "qdsmc_conduction_fd_max_subcycles or qdsmc_conduction_fd_cfl");
+            + std::to_string(1.0 - st.t_done/dt_c)
+            + " of the conduction substep ("
+            + std::to_string(st.n_accepted) + "/"
+            + std::to_string(st.n_attempts)
+            + " accepted) -- raise qdsmc_conduction_fd_max_subcycles or "
+            "loosen qdsmc_conduction_fd_rtol");
     }
 
     amrex::MultiFab::Copy(Te, T_cur, 0, 0, 1, 0);

@@ -229,6 +229,14 @@ parser.add_argument(
     help="FD operator spatial order (hybrid_pic_model.qdsmc_conduction_fd_order)",
 )
 parser.add_argument(
+    "--fd-time",
+    choices=["ssprk2", "rkf45"],
+    default="ssprk2",
+    help="FD subcycle integrator (hybrid_pic_model.qdsmc_conduction_fd_time): "
+    "ssprk2 = monotone embedded 2(1) pair (keeps the max principle); "
+    "rkf45 = Fehlberg 4(5), NOT SSP",
+)
+parser.add_argument(
     "--fd-limiter",
     choices=["none", "upwind1", "smart"],
     default="smart",
@@ -589,6 +597,7 @@ pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = 3
 pywarpx.hybridpicmodel.qdsmc_conduction_operator = args.conduction_op
 pywarpx.hybridpicmodel.qdsmc_conduction_fd_order = args.fd_order
 pywarpx.hybridpicmodel.qdsmc_conduction_fd_limiter = args.fd_limiter
+pywarpx.hybridpicmodel.qdsmc_conduction_fd_time = args.fd_time
 if args.iso_conduction:
     pywarpx.hybridpicmodel.qdsmc_conduction_isotropic = 1
 if args.iso_b > 0.0:

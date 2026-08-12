@@ -849,10 +849,24 @@ public:
      *  being an upper bound. Do not run near 1. Input:
      *  qdsmc_conduction_fd_cfl. */
     amrex::Real m_cond_fd_cfl = 0.4;
-    /** FD subcycle count ceiling per conduction call; on hitting it the
-     *  remaining fraction of dt_c is dropped with a warning (visible, not
-     *  silent). Input: qdsmc_conduction_fd_max_subcycles. */
+    /** FD subcycle count ceiling per conduction call (attempts budget of
+     *  the adaptive integrator); on hitting it the remaining fraction of
+     *  dt_c is dropped with a warning (visible, not silent). Input:
+     *  qdsmc_conduction_fd_max_subcycles. */
     int m_cond_fd_max_subcycles = 10000;
+    /** FD subcycle time integrator (QdsmcRKIntegrator scheme): 0 = ssprk2
+     *  (embedded 2(1) Heun/Euler pair -- monotone, keeps the operator's
+     *  maximum principle; default), 1 = rkf45 (Fehlberg 4(5), the
+     *  whistler-validated pair shared with BfieldEvolve; NOT SSP -- gate
+     *  via the X-point stress arm before production use on monotone
+     *  operators). Both are error-adaptive on top of the stability
+     *  ceiling. Input: qdsmc_conduction_fd_time = ssprk2 | rkf45. */
+    int m_cond_fd_time = 0;
+    /** FD adaptive-integrator error tolerances (weighted max-norm,
+     *  accept at err <= 1): relative and absolute [K]. Inputs:
+     *  qdsmc_conduction_fd_rtol / _atol. */
+    amrex::Real m_cond_fd_rtol = 1.0e-4;
+    amrex::Real m_cond_fd_atol = 1.0e-3;
     std::string m_kappa_par_expression = "0.0";
     std::string m_kappa_perp_expression = "0.0";
     std::unique_ptr<amrex::Parser> m_kappa_par_parser;

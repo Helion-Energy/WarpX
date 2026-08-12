@@ -104,6 +104,14 @@ parser.add_argument(
     "none = unlimited QUICK control arm",
 )
 parser.add_argument(
+    "--fd-time",
+    choices=["ssprk2", "rkf45"],
+    default="ssprk2",
+    help="FD subcycle integrator (hybrid_pic_model.qdsmc_conduction_fd_time): "
+    "ssprk2 = monotone embedded 2(1) pair (keeps the max principle); "
+    "rkf45 = Fehlberg 4(5), NOT SSP",
+)
+parser.add_argument(
     "--fd-cfl",
     type=float,
     default=0.4,
@@ -301,6 +309,7 @@ pywarpx.hybridpicmodel.qdsmc_conduction_operator = args.conduction_op
 pywarpx.hybridpicmodel.qdsmc_conduction_fd_order = args.fd_order
 pywarpx.hybridpicmodel.qdsmc_conduction_fd_limiter = args.fd_limiter
 pywarpx.hybridpicmodel.qdsmc_conduction_fd_cfl = args.fd_cfl
+pywarpx.hybridpicmodel.qdsmc_conduction_fd_time = args.fd_time
 if args.iso_full:
     pywarpx.hybridpicmodel.qdsmc_conduction_isotropic = 1
 if args.iso_b > 0.0:
