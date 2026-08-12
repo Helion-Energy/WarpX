@@ -570,6 +570,27 @@ public:
      *  the register (B^{n+1/2} in the pc driver). */
     void QdsmcConductionOnce (int lev, amrex::Real dt_c, bool use_rho_new) const;
 
+    /** Grid finite-difference conduction operator (qdsmc_conduction_operator
+     *  = fd), dispatched from QdsmcConductionOnce in place of the SDE
+     *  daughter/remap forms. Conservative face-flux discretization of
+     *  du/dt = div(kappa_tensor grad T_e), u = (3/2) n_e k_B T_e, after
+     *  Chacon, Hamilton & Krasheninnikova, CPC 313 (2025) 109646:
+     *  co-derivative fluxes are centered (2nd order compact / 4th order
+     *  C-interpolated A-stencil node fluxes); cross-derivative fluxes are
+     *  recast as advective fluxes F = v* T_face with the fictitious face
+     *  velocity v* = Xi_gh (d_h T)/T_face (Du Toit et al., CPC 228 (2018)
+     *  61) and T_face reconstructed by the SMART monotonicity limiter --
+     *  the limited operator satisfies a discrete maximum principle, so
+     *  conduction cannot create new T_e extrema even where b-hat is noise
+     *  (the reconnection-null blowup class). Subcycled with SSP-RK2 stages
+     *  (a convex combination of forward-Euler stages -- monotone at the
+     *  same CFL, time error O(dt_sub^2) ~ O(dx^4)) to the Gershgorin
+     *  stability bound inside the same Strang half-steps; the
+     *  kappa parsers, free-streaming limiter, iso_B blend, closed floor
+     *  faces and wall BCs/tallies are shared with the SDE path. No hop
+     *  cap and no vacuum fast front (neither concept applies). */
+    void QdsmcConductionOnceFD (int lev, amrex::Real dt_c, bool use_rho_new) const;
+
     /** leapfrog self-start: false until the first advance has run (which
      *  advances by dt/2 to move T_e^0 to the half level). */
     mutable bool m_qdsmc_leapfrog_started = false;
@@ -799,6 +820,33 @@ public:
      * reconnection-null region. Defaults off (anisotropic). */
     bool m_cond_isotropic = false;
     amrex::Real m_cond_iso_B = -1.0;
+    /** Conduction operator selector: 0 = sde (the QDSMC daughter/remap
+     *  forms, production default), 1 = fd (grid finite-difference operator,
+     *  see QdsmcConductionOnceFD). Input: qdsmc_conduction_operator =
+     *  sde | fd. */
+    int m_cond_operator = 0;
+    /** FD operator spatial order: 2 (compact star co-derivative + SMART
+     *  cross-advective fluxes; strict positivity) or 4 (Chacon Appendix-A
+     *  C/A/D stencils; needed for physical-Braginskii anisotropy,
+     *  effective eps ~ 1e-7 at liftoff). Interior stencils only at 4th
+     *  order for now -- faces within 3 nodes of a non-periodic wall
+     *  degrade to the 2nd-order compact form. Input:
+     *  qdsmc_conduction_fd_order. */
+    int m_cond_fd_order = 2;
+    /** FD cross-flux transport reconstruction: 0 = none (unlimited QUICK,
+     *  attribution control -- can overshoot), 1 = upwind1 (1st-order
+     *  upwind, most diffusive), 2 = smart (Gaskell--Lau SMART, default:
+     *  up to 3rd order, locally monotone). Input:
+     *  qdsmc_conduction_fd_limiter = none | upwind1 | smart. */
+    int m_cond_fd_limiter = 2;
+    /** FD subcycle CFL fraction of the Gershgorin stability bound
+     *  (sum_gh 2 |Xi_gh| dxi_g dxi_h, n-ratio weighted). Input:
+     *  qdsmc_conduction_fd_cfl. */
+    amrex::Real m_cond_fd_cfl = 0.5;
+    /** FD subcycle count ceiling per conduction call; on hitting it the
+     *  remaining fraction of dt_c is dropped with a warning (visible, not
+     *  silent). Input: qdsmc_conduction_fd_max_subcycles. */
+    int m_cond_fd_max_subcycles = 10000;
     std::string m_kappa_par_expression = "0.0";
     std::string m_kappa_perp_expression = "0.0";
     std::unique_ptr<amrex::Parser> m_kappa_par_parser;

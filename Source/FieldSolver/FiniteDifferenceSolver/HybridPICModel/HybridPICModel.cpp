@@ -132,6 +132,41 @@ void HybridPICModel::ReadParameters ()
     utils::parser::queryWithParser(pp_hybrid, "qdsmc_conduction_iso_B",
                                    m_cond_iso_B);
     {
+        std::string op = "sde";
+        pp_hybrid.query("qdsmc_conduction_operator", op);
+        if (op == "sde") { m_cond_operator = 0; }
+        else if (op == "fd") { m_cond_operator = 1; }
+        else {
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.qdsmc_conduction_operator must be 'sde' "
+                "or 'fd'");
+        }
+        pp_hybrid.query("qdsmc_conduction_fd_order", m_cond_fd_order);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_cond_fd_order == 2 || m_cond_fd_order == 4,
+            "hybrid_pic_model.qdsmc_conduction_fd_order must be 2 or 4");
+        std::string fdlim = "smart";
+        pp_hybrid.query("qdsmc_conduction_fd_limiter", fdlim);
+        if (fdlim == "none") { m_cond_fd_limiter = 0; }
+        else if (fdlim == "upwind1") { m_cond_fd_limiter = 1; }
+        else if (fdlim == "smart") { m_cond_fd_limiter = 2; }
+        else {
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.qdsmc_conduction_fd_limiter must be "
+                "'none', 'upwind1' or 'smart'");
+        }
+        utils::parser::queryWithParser(pp_hybrid,
+            "qdsmc_conduction_fd_cfl", m_cond_fd_cfl);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_cond_fd_cfl > 0._rt && m_cond_fd_cfl <= 1._rt,
+            "hybrid_pic_model.qdsmc_conduction_fd_cfl must be in (0, 1]");
+        pp_hybrid.query("qdsmc_conduction_fd_max_subcycles",
+                        m_cond_fd_max_subcycles);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_cond_fd_max_subcycles > 0,
+            "hybrid_pic_model.qdsmc_conduction_fd_max_subcycles must be "
+            "positive");
+    }
+    {
         std::vector<int> npts;
         pp_hybrid.queryarr("qdsmc_conduction_quadrature_points", npts);
         if (npts.size() == 1) {
@@ -2810,6 +2845,33 @@ namespace
         e2y = bz*e1x - bx*e1z;
         e2z = bx*e1y - by*e1x;
     }
+
+    /** SMART-limited (Gaskell--Lau 1988) face value for the advective
+     *  cross-derivative fluxes of the FD conduction operator, in the
+     *  normalized-variable frame of the local upwind triple (tUU = far
+     *  upwind, tU = upwind, tD = downwind): QUICK where smooth, blended
+     *  to bounded legs near extrema, 1st-order upwind outside [0, 1] --
+     *  monotone by construction. limiter = 0 returns unlimited QUICK
+     *  (attribution control, can overshoot), 1 returns 1st-order upwind. */
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    amrex::Real qdsmc_fd_face_value (amrex::Real const tUU,
+                                     amrex::Real const tU,
+                                     amrex::Real const tD, int const limiter)
+    {
+        if (limiter == 1) { return tU; }
+        if (limiter == 0) {
+            return 0.375_rt*tD + 0.75_rt*tU - 0.125_rt*tUU;   // QUICK
+        }
+        amrex::Real const den = tD - tUU;
+        if (den == 0.0_rt) { return tU; }
+        amrex::Real const ph = (tU - tUU) / den;
+        amrex::Real phf;
+        if (ph <= 0.0_rt || ph >= 1.0_rt) { phf = ph; }
+        else if (ph < 1.0_rt/6.0_rt)      { phf = 3.0_rt*ph; }
+        else if (ph <= 5.0_rt/6.0_rt)     { phf = 0.375_rt + 0.75_rt*ph; }
+        else                              { phf = 1.0_rt; }
+        return tUU + phf*den;
+    }
 }
 
 
@@ -2899,10 +2961,528 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
     }}
 }
 
+void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_c,
+                                            bool const use_rho_new) const
+{
+    ABLASTR_PROFILE("HybridPICModel::QdsmcConductionOnceFD()");
+
+#ifdef WARPX_DIM_RZ
+    WARPX_ABORT_WITH_MESSAGE(
+        "qdsmc_conduction_operator = fd: RZ requires the curvilinear "
+        "J Xi^ij metric form and is not implemented");
+#endif
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!EB::enabled(),
+        "qdsmc_conduction_operator = fd: EB masks/BCs are not wired into "
+        "the FD operator yet (P2 of QDSMC_FD_CONDUCTION_PLAN.md)");
+
+    auto & warpx = WarpX::GetInstance();
+    using ablastr::fields::Direction;
+
+    amrex::Geometry const & geom = warpx.Geom(lev);
+    amrex::Periodicity const & period = geom.periodicity();
+    auto const dxi_arr = geom.InvCellSizeArray();
+
+    amrex::MultiFab & Te =
+        *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+    // Same time-level pairing as the SDE path: rho^n for the pre-transport
+    // Strang half, rho^{n+1} for the post-transport half.
+    amrex::MultiFab const & rho = use_rho_new
+        ? *warpx.m_fields.get(FieldType::rho_fp, lev)
+        : *warpx.m_fields.get(FieldType::hybrid_rho_fp_temp, lev);
+    amrex::MultiFab const & Bx = *warpx.m_fields.get(FieldType::Bfield_fp, Direction{0}, lev);
+    amrex::MultiFab const & By = *warpx.m_fields.get(FieldType::Bfield_fp, Direction{1}, lev);
+    amrex::MultiFab const & Bz = *warpx.m_fields.get(FieldType::Bfield_fp, Direction{2}, lev);
+
+    amrex::Real const t_now = warpx.gett_new(lev);
+    amrex::Real const kb = PhysConst::kb;
+    amrex::Real const qe = PhysConst::q_e;
+    amrex::Real const me = PhysConst::m_e;
+    auto const kappa_par_ex  = m_kappa_par;
+    auto const kappa_perp_ex = m_kappa_perp;
+    amrex::Real const n_floor = m_qdsmc_n_floor;
+    amrex::Real const f_lim   = m_cond_flux_limit_factor;
+    bool const iso_full       = m_cond_isotropic;
+    amrex::Real const iso_B   = m_cond_iso_B;
+    bool const iso_any        = iso_full || (iso_B > 0.0_rt);
+    bool const fd4            = (m_cond_fd_order == 4);
+    int const fd_limiter      = m_cond_fd_limiter;
+    amrex::Real const fd_cfl  = m_cond_fd_cfl;
+    int const max_sub         = m_cond_fd_max_subcycles;
+
+    // Grid-dim bookkeeping (same conventions as the SDE kernels).
+#if defined(WARPX_DIM_3D)
+    amrex::GpuArray<int, AMREX_SPACEDIM> const gd2ax = {0, 1, 2};
+#elif (AMREX_SPACEDIM == 2)
+    amrex::GpuArray<int, AMREX_SPACEDIM> const gd2ax = {0, 2};
+#else
+    amrex::GpuArray<int, AMREX_SPACEDIM> const gd2ax = {2};
+#endif
+    amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> dxi_g;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) { dxi_g[d] = dxi_arr[d]; }
+    amrex::Box const dom_nodes = amrex::surroundingNodes(geom.Domain());
+    amrex::GpuArray<int, AMREX_SPACEDIM> is_per, dom_lo, dom_hi;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        is_per[d] = geom.isPeriodic(d) ? 1 : 0;
+        dom_lo[d] = dom_nodes.smallEnd(d);
+        dom_hi[d] = dom_nodes.bigEnd(d);
+    }
+
+    amrex::GpuArray<int, 3> const Bx_stag = Bx_IndexType;
+    amrex::GpuArray<int, 3> const By_stag = By_IndexType;
+    amrex::GpuArray<int, 3> const Bz_stag = Bz_IndexType;
+    amrex::GpuArray<int, 3> nd_x = {1, 1, 1};
+    amrex::GpuArray<int, 3> nd_y = {1, 1, 1};
+    amrex::GpuArray<int, 3> nd_z = {1, 1, 1};
+    for (int d = AMREX_SPACEDIM; d < 3; ++d) {
+        nd_x[d] = Bx_stag[d]; nd_y[d] = By_stag[d]; nd_z[d] = Bz_stag[d];
+    }
+    amrex::GpuArray<int, 3> const coarsen = {1, 1, 1};
+
+    // --- Pass A (once per call): unit b, |B|^2, floored n_e, open mask ---
+    // b and n_e do not change across subcycles; only the chi tensor does.
+    enum BNE : int { b_bx = 0, b_by, b_bz, b_B2, b_ne, b_open, b_ncomp };
+    amrex::MultiFab bne(Te.boxArray(), Te.DistributionMap(), BNE::b_ncomp, 2);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(bne, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        amrex::Box const box = mfi.tilebox();
+        amrex::Array4<amrex::Real>       const & b_arr   = bne.array(mfi);
+        amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & Bx_arr  = Bx.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & By_arr  = By.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & Bz_arr  = Bz.const_array(mfi);
+
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            amrex::Real const ne_raw = rho_arr(i,j,k) / qe;
+            amrex::Real const bxv = ablastr::coarsen::sample::Interp(
+                Bx_arr, Bx_stag, nd_x, coarsen, i, j, k, 0);
+            amrex::Real const byv = ablastr::coarsen::sample::Interp(
+                By_arr, By_stag, nd_y, coarsen, i, j, k, 0);
+            amrex::Real const bzv = ablastr::coarsen::sample::Interp(
+                Bz_arr, Bz_stag, nd_z, coarsen, i, j, k, 0);
+            amrex::Real const B2 = bxv*bxv + byv*byv + bzv*bzv;
+            bool const unmag = (B2 <= 0.0_rt);
+            amrex::Real const Binv = unmag ? 0.0_rt : 1.0_rt/std::sqrt(B2);
+            b_arr(i,j,k,BNE::b_bx)   = unmag ? 0.0_rt : bxv*Binv;
+            b_arr(i,j,k,BNE::b_by)   = unmag ? 0.0_rt : byv*Binv;
+            b_arr(i,j,k,BNE::b_bz)   = unmag ? 1.0_rt : bzv*Binv;
+            b_arr(i,j,k,BNE::b_B2)   = B2;
+            b_arr(i,j,k,BNE::b_ne)   = amrex::max(ne_raw, n_floor);
+            b_arr(i,j,k,BNE::b_open) = (ne_raw > n_floor) ? 1.0_rt : 0.0_rt;
+        });
+    }
+    bne.FillBoundary(period);
+
+    // --- scratch: grid-projected chi tensor + T ping-pong ---------------
+    // Symmetric tensor comps, sym(g,h) = g*SPACEDIM - g(g-1)/2 + (h-g) for
+    // g <= h (2D: xx, xz, zz). ngT = 3 covers the widest face stencil (4th
+    // order window +-3) plus the tensor build on grown(2) boxes reading
+    // the flux-limiter gradient at +-1.
+    int constexpr NXI = AMREX_SPACEDIM*(AMREX_SPACEDIM + 1)/2;
+    int constexpr ngT = 3;
+    amrex::MultiFab xi(Te.boxArray(), Te.DistributionMap(), NXI, 2);
+    amrex::MultiFab T_cur(Te.boxArray(), Te.DistributionMap(), 1, ngT);
+    amrex::MultiFab T_stage(Te.boxArray(), Te.DistributionMap(), 1, ngT);
+    T_cur.setVal(0.0_rt);
+    T_stage.setVal(0.0_rt);
+    amrex::MultiFab::Copy(T_cur, Te, 0, 0, 1, 0);
+
+    // 4th-order coefficient tables (Chacon et al. Appendix A): face
+    // interpolation C0 over the middle-4 nodes of the 6-point window, and
+    // the A-matrix derivative rows at window positions 1..4.
+    amrex::GpuArray<amrex::Real, 4> const c0 =
+        {-1.0_rt/12.0_rt, 7.0_rt/12.0_rt, 7.0_rt/12.0_rt, -1.0_rt/12.0_rt};
+    amrex::GpuArray<amrex::Real, 24> A6{};   // rows 1..4 of A_6x6, flattened
+    {
+        amrex::Real const a[4][6] = {
+            {-12.0_rt, -65.0_rt, 120.0_rt,  -60.0_rt,  20.0_rt,  -3.0_rt},
+            {  3.0_rt, -30.0_rt, -20.0_rt,   60.0_rt, -15.0_rt,   2.0_rt},
+            { -2.0_rt,  15.0_rt, -60.0_rt,   20.0_rt,  30.0_rt,  -3.0_rt},
+            {  3.0_rt, -20.0_rt,  60.0_rt, -120.0_rt,  65.0_rt,  12.0_rt}};
+        for (int r = 0; r < 4; ++r) {
+            for (int m = 0; m < 6; ++m) { A6[6*r + m] = a[r][m]/60.0_rt; }
+        }
+    }
+    // D0 5-point 4th-order central first derivative (transverse cross term)
+    amrex::GpuArray<amrex::Real, 5> const d0 =
+        {1.0_rt/12.0_rt, -8.0_rt/12.0_rt, 0.0_rt, 8.0_rt/12.0_rt,
+         -1.0_rt/12.0_rt};
+
+    // --- chi tensor build on grown(2) boxes (per stage): the kappa
+    // parsers and the free-streaming limiter depend on the evolving T_e,
+    // so this is rebuilt for every SSP-RK2 stage. Computed straight into
+    // the ghost ring (no comm) from Tin/bne ghosts.
+    auto build_xi = [&] (amrex::MultiFab const & Tin)
+    {
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(xi, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            amrex::Box const box = mfi.growntilebox(2);
+            amrex::Array4<amrex::Real>       const & x_arr = xi.array(mfi);
+            amrex::Array4<amrex::Real const> const & b_arr = bne.const_array(mfi);
+            amrex::Array4<amrex::Real const> const & T_arr = Tin.const_array(mfi);
+
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                amrex::Real const ne  = b_arr(i,j,k,BNE::b_ne);
+                amrex::Real const TeK = amrex::max(T_arr(i,j,k), 0.0_rt);
+                amrex::Real const Te_eV = TeK * kb / qe;
+                amrex::Real const B2 = b_arr(i,j,k,BNE::b_B2);
+                bool const unmag = (B2 <= 0.0_rt);
+                amrex::Real const ubx = b_arr(i,j,k,BNE::b_bx);
+                amrex::Real const uby = b_arr(i,j,k,BNE::b_by);
+                amrex::Real const ubz = b_arr(i,j,k,BNE::b_bz);
+
+                amrex::Real chi_par =
+                    kappa_par_ex(ne, Te_eV, t_now) / (1.5_rt * ne * kb);
+                amrex::Real chi_perp = (unmag && !iso_any) ? chi_par :
+                    kappa_perp_ex(ne, Te_eV, t_now) / (1.5_rt * ne * kb);
+                chi_par  = amrex::max(chi_par,  0.0_rt);
+                chi_perp = amrex::max(chi_perp, 0.0_rt);
+
+                // iso options: same semantics as the SDE path
+                if (iso_full) {
+                    chi_par = chi_perp;
+                } else if (iso_B > 0.0_rt) {
+                    amrex::Real const s = B2 / (B2 + iso_B*iso_B);
+                    chi_par = chi_perp + (chi_par - chi_perp) * s;
+                }
+
+                // Free-streaming limiter (longitudinal), same form as the
+                // SDE path but on the subcycle-current T_e.
+                bool const open = (b_arr(i,j,k,BNE::b_open) > 0.5_rt);
+                if (f_lim > 0.0_rt && TeK > 0.0_rt && open &&
+                    chi_par > 0.0_rt)
+                {
+                    amrex::Real gT[3] = {0.0_rt, 0.0_rt, 0.0_rt};
+                    int const node[3] = {i, j, k};
+                    for (int g = 0; g < AMREX_SPACEDIM; ++g) {
+                        int cp = node[g] + 1, cm = node[g] - 1;
+                        if (!is_per[g]) {
+                            cp = amrex::min(cp, dom_hi[g]);
+                            cm = amrex::max(cm, dom_lo[g]);
+                        }
+                        if (cp == cm) { continue; }
+                        int p[3] = {i, j, k}, m[3] = {i, j, k};
+                        p[g] = cp; m[g] = cm;
+                        gT[gd2ax[g]] =
+                            (T_arr(p[0],p[1],p[2]) - T_arr(m[0],m[1],m[2]))
+                            * dxi_g[g] / amrex::Real(cp - cm);
+                    }
+                    amrex::Real const gparT =
+                        std::abs(ubx*gT[0] + uby*gT[1] + ubz*gT[2]);
+                    amrex::Real const q_sp = 1.5_rt*ne*kb*chi_par*gparT;
+                    amrex::Real const q_fs = ne*kb*TeK*std::sqrt(kb*TeK/me);
+                    chi_par /= (1.0_rt + q_sp / (f_lim * q_fs));
+                }
+                // No hop cap and no vacuum fast front here: subcycling
+                // handles stability and closed floor faces handle vacuum.
+
+                amrex::Real const dchi = chi_par - chi_perp;
+                amrex::Real const ub3[3] = {ubx, uby, ubz};
+                for (int g = 0; g < AMREX_SPACEDIM; ++g) {
+                    for (int h = g; h < AMREX_SPACEDIM; ++h) {
+                        int const sidx = g*AMREX_SPACEDIM - g*(g-1)/2 + (h-g);
+                        amrex::Real const del =
+                            (gd2ax[g] == gd2ax[h]) ? 1.0_rt : 0.0_rt;
+                        x_arr(i,j,k,sidx) = chi_perp*del
+                            + dchi*ub3[gd2ax[g]]*ub3[gd2ax[h]];
+                    }
+                }
+            });
+        }
+
+    };
+
+    // --- stability: Gershgorin bound, neighbor-max chi, n-ratio ----------
+    auto stable_rate = [&] () -> amrex::Real
+    {
+        amrex::Real s_max = 0.0_rt;
+        {
+            amrex::ReduceOps<amrex::ReduceOpMax> reduce_op;
+            amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+            using ReduceTuple = typename decltype(reduce_data)::Type;
+            for (MFIter mfi(xi, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                amrex::Box const box = mfi.tilebox();
+                amrex::Array4<amrex::Real const> const & x_arr = xi.const_array(mfi);
+                amrex::Array4<amrex::Real const> const & b_arr = bne.const_array(mfi);
+                reduce_op.eval(box, reduce_data,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
+                {
+                    if (b_arr(i,j,k,BNE::b_open) <= 0.5_rt) { return {0.0_rt}; }
+                    amrex::Real const ne0 = b_arr(i,j,k,BNE::b_ne);
+                    int const node[3] = {i, j, k};
+                    amrex::Real nrat = 1.0_rt;
+                    amrex::Real s = 0.0_rt;
+                    for (int g = 0; g < AMREX_SPACEDIM; ++g) {
+                        int p[3] = {i, j, k}, m[3] = {i, j, k};
+                        p[g] = node[g] + 1; m[g] = node[g] - 1;
+                        nrat = amrex::max(nrat,
+                            0.5_rt*(1.0_rt + b_arr(p[0],p[1],p[2],BNE::b_ne)/ne0),
+                            0.5_rt*(1.0_rt + b_arr(m[0],m[1],m[2],BNE::b_ne)/ne0));
+                        for (int h = 0; h < AMREX_SPACEDIM; ++h) {
+                            int const gg = amrex::min(g, h);
+                            int const hh = amrex::max(g, h);
+                            int const sidx =
+                                gg*AMREX_SPACEDIM - gg*(gg-1)/2 + (hh-gg);
+                            amrex::Real const xin = amrex::max(
+                                std::abs(x_arr(i,j,k,sidx)),
+                                std::abs(x_arr(p[0],p[1],p[2],sidx)),
+                                std::abs(x_arr(m[0],m[1],m[2],sidx)));
+                            s += 2.0_rt*xin*dxi_g[g]*dxi_g[h];
+                        }
+                    }
+                    return {s*nrat};
+                });
+            }
+            auto tup = reduce_data.value(reduce_op);
+            s_max = amrex::get<0>(tup);
+            amrex::ParallelDescriptor::ReduceRealMax(s_max);
+        }
+        return s_max;
+    };
+
+    // --- one forward-Euler flux-divergence stage:
+    //     Tout = a Told + (1 - a) [Tin + dt_s du/(1.5 kB ne)],
+    // a = 0 is the SSP-RK2 predictor, a = 1/2 the corrector. Each stage is
+    // monotone under the CFL bound and the convex combination preserves
+    // the maximum principle. Face fluxes are evaluated inline per node
+    // (each interior face twice, once per neighbor, from identical inputs
+    // -> bitwise identical values, so Sigma(u) telescopes to round-off
+    // with no face storage and no seam sync).
+    auto apply_stage = [&] (amrex::MultiFab const & Tin,
+                            amrex::MultiFab const & Told,
+                            amrex::MultiFab & Tout,
+                            amrex::Real const a, amrex::Real const dt_s)
+    {
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(Tout, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            amrex::Box const box = mfi.tilebox();
+            amrex::Array4<amrex::Real>       const & tn    = Tout.array(mfi);
+            amrex::Array4<amrex::Real const> const & tc    = Tin.const_array(mfi);
+            amrex::Array4<amrex::Real const> const & told  = Told.const_array(mfi);
+            amrex::Array4<amrex::Real const> const & x_arr = xi.const_array(mfi);
+            amrex::Array4<amrex::Real const> const & b_arr = bne.const_array(mfi);
+
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                if (b_arr(i,j,k,BNE::b_open) <= 0.5_rt) {
+                    // floored nodes keep their T_e
+                    tn(i,j,k) = a*told(i,j,k) + (1.0_rt - a)*tc(i,j,k);
+                    return;
+                }
+
+                auto Tat = [&] (int const p[3]) {
+                    return tc(p[0], p[1], p[2]);
+                };
+                // clamped shift along grid dim g (non-periodic walls)
+                auto shift = [&] (int const p[3], int const g, int const off,
+                                  int q[3]) {
+                    q[0] = p[0]; q[1] = p[1]; q[2] = p[2];
+                    int idx = p[g] + off;
+                    if (!is_per[g]) {
+                        idx = amrex::min(amrex::max(idx, dom_lo[g]),
+                                         dom_hi[g]);
+                    }
+                    q[g] = idx;
+                };
+                // central transverse derivative of T at node p along h
+                auto dTh2 = [&] (int const p[3], int const h) {
+                    int qp[3], qm[3];
+                    shift(p, h, +1, qp);
+                    shift(p, h, -1, qm);
+                    if (qp[h] == qm[h]) { return 0.0_rt; }
+                    return (Tat(qp) - Tat(qm)) * dxi_g[h]
+                           / amrex::Real(qp[h] - qm[h]);
+                };
+                // 4th-order D0 transverse derivative (interior only)
+                auto dTh4 = [&] (int const p[3], int const h) {
+                    amrex::Real der = 0.0_rt;
+                    for (int m = 0; m < 5; ++m) {
+                        if (m == 2) { continue; }
+                        int q[3] = {p[0], p[1], p[2]};
+                        q[h] += (m - 2);
+                        der += d0[m]*tc(q[0], q[1], q[2]);
+                    }
+                    return der*dxi_g[h];
+                };
+
+                // flux through the face between node m0 and m0 + e_g,
+                // positive along +g, in u units [W/m^2]
+                auto face_flux = [&] (int const m0[3], int const g) {
+                    // outside a non-periodic wall: no face (adiabatic)
+                    if (!is_per[g] &&
+                        (m0[g] < dom_lo[g] || m0[g] + 1 > dom_hi[g])) {
+                        return 0.0_rt;
+                    }
+                    int m1[3] = {m0[0], m0[1], m0[2]};
+                    m1[g] += 1;
+                    if (b_arr(m0[0],m0[1],m0[2],BNE::b_open) <= 0.5_rt ||
+                        b_arr(m1[0],m1[1],m1[2],BNE::b_open) <= 0.5_rt) {
+                        return 0.0_rt;   // closed floor faces
+                    }
+                    amrex::Real const ne_f = 0.5_rt*(
+                        b_arr(m0[0],m0[1],m0[2],BNE::b_ne) +
+                        b_arr(m1[0],m1[1],m1[2],BNE::b_ne));
+                    amrex::Real const kfac = 1.5_rt*kb*ne_f;
+                    int const sgg = g*AMREX_SPACEDIM - g*(g-1)/2;
+
+                    // 4th-order stencils need the full interior window;
+                    // near non-periodic walls fall back to 2nd order.
+                    bool use4 = fd4;
+                    if (use4 && !is_per[g]) {
+                        use4 = (m0[g] - 2 >= dom_lo[g]) &&
+                               (m0[g] + 3 <= dom_hi[g]);
+                    }
+                    if (use4) {
+                        for (int h = 0; h < AMREX_SPACEDIM; ++h) {
+                            if (h == g || is_per[h]) { continue; }
+                            use4 = use4 &&
+                                   (m0[h] - 2 >= dom_lo[h]) &&
+                                   (m0[h] + 2 <= dom_hi[h]);
+                        }
+                    }
+
+                    amrex::Real F = 0.0_rt;    // chi-units flux [K m/s]
+                    if (use4) {
+                        // co-derivative: C0 over A-row node fluxes
+                        for (int l = 0; l < 4; ++l) {
+                            int q[3] = {m0[0], m0[1], m0[2]};
+                            q[g] += (l - 1);
+                            amrex::Real der = 0.0_rt;
+                            for (int m = 0; m < 6; ++m) {
+                                int w[3] = {m0[0], m0[1], m0[2]};
+                                w[g] += (m - 2);
+                                der += A6[6*(l) + m]*tc(w[0], w[1], w[2]);
+                            }
+                            F += c0[l]*x_arr(q[0],q[1],q[2],sgg)
+                                 *der*dxi_g[g];
+                        }
+                    } else {
+                        F = 0.5_rt*(x_arr(m0[0],m0[1],m0[2],sgg) +
+                                    x_arr(m1[0],m1[1],m1[2],sgg))
+                            * (Tat(m1) - Tat(m0)) * dxi_g[g];
+                    }
+
+                    // cross-derivative fluxes as SMART-limited advection
+                    for (int h = 0; h < AMREX_SPACEDIM; ++h) {
+                        if (h == g) { continue; }
+                        int const gg = amrex::min(g, h);
+                        int const hh = amrex::max(g, h);
+                        int const sgh =
+                            gg*AMREX_SPACEDIM - gg*(gg-1)/2 + (hh-gg);
+                        amrex::Real raw;
+                        if (use4) {
+                            raw = 0.0_rt;
+                            for (int l = 0; l < 4; ++l) {
+                                int q[3] = {m0[0], m0[1], m0[2]};
+                                q[g] += (l - 1);
+                                raw += c0[l]*x_arr(q[0],q[1],q[2],sgh)
+                                       *dTh4(q, h);
+                            }
+                        } else {
+                            raw = 0.5_rt*(
+                                x_arr(m0[0],m0[1],m0[2],sgh)*dTh2(m0, h) +
+                                x_arr(m1[0],m1[1],m1[2],sgh)*dTh2(m1, h));
+                        }
+                        if (raw == 0.0_rt) { continue; }
+                        amrex::Real Tf = 0.5_rt*(Tat(m0) + Tat(m1));
+                        if (Tf <= 0.0_rt) { continue; }
+                        Tf = amrex::max(Tf,
+                            1.0e-4_rt*amrex::max(Tat(m0), Tat(m1)));
+                        amrex::Real const v = raw / Tf;
+                        int uu[3];
+                        amrex::Real tU, tD;
+                        if (v > 0.0_rt) {
+                            tU = Tat(m0); tD = Tat(m1);
+                            shift(m0, g, -1, uu);
+                        } else {
+                            tU = Tat(m1); tD = Tat(m0);
+                            shift(m1, g, +1, uu);
+                        }
+                        F += v*qdsmc_fd_face_value(Tat(uu), tU, tD,
+                                                   fd_limiter);
+                    }
+                    return kfac*F;
+                };
+
+                int const node[3] = {i, j, k};
+                amrex::Real div = 0.0_rt;
+                for (int g = 0; g < AMREX_SPACEDIM; ++g) {
+                    int lo[3] = {i, j, k};
+                    lo[g] -= 1;
+                    div += (face_flux(node, g) - face_flux(lo, g))
+                           * dxi_g[g];
+                }
+                amrex::Real const ne0 = b_arr(i,j,k,BNE::b_ne);
+                tn(i,j,k) = a*told(i,j,k) + (1.0_rt - a)*
+                    (tc(i,j,k) + dt_s*div/(1.5_rt*kb*ne0));
+            });
+        }
+    };
+
+    amrex::Real t_done = 0.0_rt;
+    int nsub = 0;
+    bool clipped = false;
+
+    while (t_done < dt_c*(1.0_rt - 1.0e-12_rt))
+    {
+        if (nsub >= max_sub) { clipped = true; break; }
+
+        ablastr::utils::communication::FillBoundary(
+            T_cur, WarpX::do_single_precision_comms, period, true);
+        build_xi(T_cur);
+        amrex::Real const s_max = stable_rate();
+        amrex::Real dt_sub = (s_max > 0.0_rt) ? fd_cfl/s_max
+                                              : (dt_c - t_done);
+        dt_sub = amrex::min(dt_sub, dt_c - t_done);
+
+        // SSP-RK2 (Heun): u1 = u + dt L(u); u <- u/2 + [u1 + dt L(u1)]/2.
+        // Time error O(dt_sub^2) ~ O(dx^4), so the subcycle integrator
+        // does not cap the 4th-order spatial arm (plain Euler would).
+        apply_stage(T_cur, T_cur, T_stage, 0.0_rt, dt_sub);
+        ablastr::utils::communication::FillBoundary(
+            T_stage, WarpX::do_single_precision_comms, period, true);
+        build_xi(T_stage);
+        apply_stage(T_stage, T_cur, T_cur, 0.5_rt, dt_sub);
+
+        t_done += dt_sub;
+        ++nsub;
+    }
+
+    if (clipped) {
+        amrex::Warning(
+            "[qdsmc] QdsmcConductionOnceFD: subcycle ceiling ("
+            + std::to_string(max_sub) + ") hit; dropped "
+            + std::to_string(1.0 - t_done/dt_c)
+            + " of the conduction substep -- raise "
+            "qdsmc_conduction_fd_max_subcycles or qdsmc_conduction_fd_cfl");
+    }
+
+    amrex::MultiFab::Copy(Te, T_cur, 0, 0, 1, 0);
+    ApplyQdsmcConductionWallBCs(lev, dt_c, Te, rho);
+    ablastr::utils::communication::FillBoundary(
+        Te, WarpX::do_single_precision_comms, period, true);
+}
+
 void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                                           bool const use_rho_new) const
 {
     if (!m_include_thermal_conduction) { return; }
+
+    if (m_cond_operator == 1) {
+        QdsmcConductionOnceFD(lev, dt_c, use_rho_new);
+        return;
+    }
 
     ABLASTR_PROFILE("HybridPICModel::QdsmcConductionOnce()");
 

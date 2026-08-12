@@ -213,6 +213,28 @@ parser.add_argument(
     "(hybrid_pic_model.joule_redirect_kick_cap_vth_frac); <0 = off",
 )
 parser.add_argument(
+    "--conduction-op",
+    choices=["sde", "fd"],
+    default="sde",
+    help="conduction operator (hybrid_pic_model.qdsmc_conduction_operator): "
+    "fd = grid FD operator with SMART-limited cross fluxes (max principle "
+    "-- cannot mint new Te extrema at the b-hat-noise null); sde = QDSMC "
+    "production default",
+)
+parser.add_argument(
+    "--fd-order",
+    type=int,
+    choices=[2, 4],
+    default=2,
+    help="FD operator spatial order (hybrid_pic_model.qdsmc_conduction_fd_order)",
+)
+parser.add_argument(
+    "--fd-limiter",
+    choices=["none", "upwind1", "smart"],
+    default="smart",
+    help="FD cross-flux limiter (hybrid_pic_model.qdsmc_conduction_fd_limiter)",
+)
+parser.add_argument(
     "--iso-conduction",
     type=int,
     choices=[0, 1],
@@ -564,6 +586,9 @@ pywarpx.hybridpicmodel.qdsmc_time_advance = args.advance
 pywarpx.hybridpicmodel.qdsmc_conduction_form = "fluxform"
 pywarpx.hybridpicmodel.qdsmc_conduction_reconstruction = "ppm"
 pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = 3
+pywarpx.hybridpicmodel.qdsmc_conduction_operator = args.conduction_op
+pywarpx.hybridpicmodel.qdsmc_conduction_fd_order = args.fd_order
+pywarpx.hybridpicmodel.qdsmc_conduction_fd_limiter = args.fd_limiter
 if args.iso_conduction:
     pywarpx.hybridpicmodel.qdsmc_conduction_isotropic = 1
 if args.iso_b > 0.0:
