@@ -852,6 +852,10 @@ private:
     void ProlongBfieldFromCoarse (
         int lev, amrex::IntVect const& ng, std::array<amrex::MultiFab, 3>& Btmp);
 
+    // CUDA >= 13 nvcc requires member functions whose bodies contain extended
+    // __device__ lambdas to be publicly accessible (device-lambda visibility
+    // rule); keep this block public.
+public:
     /** \brief (Re)build the cached cell-centered fine-edge mask of refined
      * level lev used by FillMomentsCoarseFineGhosts: 0 on cells within the
      * sacrificial band (within max(mr_restrict_setback * ratio,
@@ -896,6 +900,8 @@ private:
      * only), so the applied delta vanishes identically on frozen edges. */
     void EmfMatchingAccumulate (
         ablastr::fields::MultiLevelVectorField const& Efield, amrex::Real wdt);
+
+private:
 
     /** \brief Substep-end hook of the seam EMF matching: apply the delta-form
      * circulation correction to the coarse B faces around the registered
