@@ -2194,7 +2194,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Advance ion density and momentum. Set False with Hall physics enabled
         and zero ion velocity for an electron-MHD limit.
 
-    fluid_flux: {"centered", "rusanov", "hllc", "hlld"}, optional
+    fluid_flux: {"centered", "rusanov", "hllc", "hlld", "central"}, optional
         Cell-face fluid flux. Centered is low-dissipation for smooth flows;
         Rusanov adds local Lax--Friedrichs regularization; HLLC is a
         contact-preserving approximate Riemann flux. HLLD selects the
@@ -2204,6 +2204,21 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         (corner UCT-HLL E_theta in RZ); E is the derived Ohm's-law
         quantity -u x B + eta J - eta_H laplacian(J). Requires no Hall
         term, no electron-pressure Ohm term, and no preconditioner.
+        "central" is the same recast with a Chacon-style central
+        conservative flux (the zero-dissipation limit of the hlld fan; a
+        few flops per face, smoother residuals for GMRES) in place of the
+        Riemann solver; it requires a positive viscosity for nonlinear
+        stability and shares the hlld recast constraints (1D/RZ, no Hall
+        term, no electron-pressure Ohm term; cgl and the halo pedestal
+        are not supported).
+
+    viscosity: float, default=0 (off)
+        Explicit ion kinematic viscosity nu_i in m^2/s of the recast face
+        fluxes (fluid_flux="hlld" or "central"; required positive for
+        "central"). Adds the normal-gradient viscous momentum stress and
+        its exactly paired stress work on the ion total-energy channel to
+        the same face registers, keeping the discrete energy exchange
+        conservative. Not supported with ion_closure="cgl".
 
     r_open_fluid: {"outflow", "reflect", "absorb"}, optional
         Fluid ghost treatment at an open (Green's-function) upper radial
@@ -2427,6 +2442,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         vacuum_resistivity_diffusivity=None,
         resistive_theta=None,
         fluid_flux=None,
+        viscosity=None,
         r_open_fluid=None,
         absorb_ledger_interval=None,
         absorb_ledger_file=None,
@@ -2479,6 +2495,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.vacuum_resistivity_diffusivity = vacuum_resistivity_diffusivity
         self.resistive_theta = resistive_theta
         self.fluid_flux = fluid_flux
+        self.viscosity = viscosity
         self.r_open_fluid = r_open_fluid
         self.absorb_ledger_interval = absorb_ledger_interval
         self.absorb_ledger_file = absorb_ledger_file
@@ -2539,6 +2556,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         )
         implicit_mhd.resistive_theta = self.resistive_theta
         implicit_mhd.fluid_flux = self.fluid_flux
+        implicit_mhd.viscosity = self.viscosity
         implicit_mhd.r_open_fluid = self.r_open_fluid
         implicit_mhd.absorb_ledger_interval = self.absorb_ledger_interval
         implicit_mhd.absorb_ledger_file = self.absorb_ledger_file

@@ -565,6 +565,17 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // Conservative-form recast (fluid_flux = hlld): B replaces E as the
     // JFNK array block and E is derived from the Riemann EMF + eta J.
     bool m_use_hlld = false;
+    // fluid_flux = central: the SAME recast with the Chacon-style central
+    // conservative flux in place of the HLLD fan (explicit viscosity
+    // replaces the Riemann dissipation).
+    bool m_use_central = false;
+    // Either recast flux (hlld or central): gates all recast plumbing.
+    bool m_use_recast = false;
+    // Explicit ion kinematic viscosity nu_i [m^2/s] of the recast face
+    // fluxes (0 = off; required positive for fluid_flux = central). The
+    // normal-gradient viscous stress and its velocity-weighted work enter
+    // the face registers as an exactly conservative pair.
+    amrex::Real m_viscosity = 0.0;
     // C-infinity smoothing widths of the HLLD wave fan (see FluxParameters
     // in ThetaImplicitMHD_K.H); inputs implicit_mhd.hlld_kappa_*.
     amrex::Real m_hlld_kappa_signal = 0.05;

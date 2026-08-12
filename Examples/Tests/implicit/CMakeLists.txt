@@ -647,6 +647,32 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# central-flux recast (Chacon-style central conservative flux + explicit
+# viscosity in place of the Riemann fan): the sound-wave gate must land
+# on the same centered discrete acoustic phase (nu = 0.5 m^2/s damps the
+# mode by ~3e-7 over the one-step horizon, well inside the existing
+# tolerance), and a uniform magnetized state must stay uniform to
+# round-off (the viscous stress vanishes identically at u = 0)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_sound  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_sound implicit_mhd.fluid_flux=central implicit_mhd.viscosity=0.5 hybrid_pic_model.include_electron_pressure_term=false"  # inputs
+    "analysis_mhd_sound.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_uniform  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_uniform implicit_mhd.fluid_flux=central implicit_mhd.viscosity=0.5 hybrid_pic_model.include_hall_term=false hybrid_pic_model.include_electron_pressure_term=false"  # inputs
+    "analysis_mhd_uniform.py diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # RZ recast invariants: div B at round-off and B_theta EXACTLY zero
 # through 60 steps of corner-UCT-driven poloidal dynamics, on 2 ranks so
 # the corner EMF is exercised across MPI seams

@@ -1290,6 +1290,130 @@ hlld_flux (const CellState& left, const CellState& right,
 }
 
 /**
+ * \brief Central conservative flux for the conservative-form recast
+ * (Chacon-style co-located central FV with explicit dissipation, JCP 526
+ * (2025) 113789): every channel is the exact q, r -> 0 limit of
+ * hlld_flux's telescoped wave fan -- the arithmetic mean of the two
+ * sides' physical fluxes with NO Riemann dissipation and no fan algebra
+ * on the JFNK matvec hot path. Nonlinear stability must come from the
+ * explicit viscous face flux the caller adds (ComputeDirectionalFaceFluxes;
+ * implicit_mhd.viscosity > 0 is enforced for fluid_flux = central) and
+ * from resistivity on the field channels.
+ *
+ * Channel accounting matches hlld_flux exactly:
+ * - momentum[] is the TOTAL flux (hydro plus Maxwell stress, with the
+ *   total pressure p_i + p_e + |b|^2/2 and the single-valued face B_n in
+ *   every b_n factor); momentum_magnetic[] is the centered Maxwell-stress
+ *   state, so momentum - momentum_magnetic is the pure hydro flux and
+ *   -div(momentum_magnetic) is the discrete J x B whose work the
+ *   ion-energy equation integrates.
+ * - ion_energy carries the GAS enthalpy channel u_n (E_i + p_i + p_e)
+ *   ONLY: the magnetic work reaches E_i through the separate discrete
+ *   stress difference (ComputeFluidRHSFromFaceFluxes), never through this
+ *   flux, exactly as in the hlld star/llf channels.
+ * - induction_t1/t2 are the centered ideal induction fluxes
+ *   u_n B_t - u_t B_n (the face EMF ingredients of the Ohm assembly, same
+ *   sign convention as hlld_flux).
+ * - signal_left/right keep the smoothed Davis fast bounds: the donor
+ *   drain gates and the RZ corner-EMF upwind weights need a strictly
+ *   positive signal span for their C-infinity blend widths.
+ * - signal_alfven_left/right stay exactly zero: the RZ corner-EMF
+ *   dissipation coefficients built on them then vanish identically and
+ *   the corner E_theta reduces to the weighted average of the four ideal
+ *   EMF states (central, no field dissipation).
+ * The CGL channels are not populated (the input parser rejects
+ * fluid_flux = central with ion_closure = cgl), and u_e = u_i is assumed
+ * for the electron channels (Define() asserts no Hall term).
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE FaceFlux
+central_flux (const CellState& left, const CellState& right,
+              const amrex::Real bn_face, const int normal_direction,
+              const FluxParameters& parameters) noexcept {
+    const int tangent1 = (normal_direction + 1) % 3;
+    const int tangent2 = (normal_direction + 2) % 3;
+
+    // Rescaled field units b = B/sqrt(mu0), as in hlld_flux.
+    const amrex::Real sqrt_mu0 = std::sqrt(parameters.mu0);
+    const amrex::Real inv_sqrt_mu0 = 1.0 / sqrt_mu0;
+    const amrex::Real bn = bn_face * inv_sqrt_mu0;
+    const amrex::Real bn2 = bn * bn;
+
+    const amrex::Real u_left = left.ion_velocity[normal_direction];
+    const amrex::Real u_right = right.ion_velocity[normal_direction];
+    const amrex::Real bt1_left = left.magnetic[tangent1] * inv_sqrt_mu0;
+    const amrex::Real bt2_left = left.magnetic[tangent2] * inv_sqrt_mu0;
+    const amrex::Real bt1_right = right.magnetic[tangent1] * inv_sqrt_mu0;
+    const amrex::Real bt2_right = right.magnetic[tangent2] * inv_sqrt_mu0;
+    const amrex::Real p_gas_left =
+        left.ion_pressure + left.electron_pressure;
+    const amrex::Real p_gas_right =
+        right.ion_pressure + right.electron_pressure;
+    const amrex::Real p_total_left =
+        p_gas_left +
+        0.5 * (bn2 + bt1_left * bt1_left + bt2_left * bt2_left);
+    const amrex::Real p_total_right =
+        p_gas_right +
+        0.5 * (bn2 + bt1_right * bt1_right + bt2_right * bt2_right);
+
+    FaceFlux flux;
+    flux.mass = 0.5 * (left.momentum[normal_direction] +
+                       right.momentum[normal_direction]);
+    flux.momentum[normal_direction] =
+        0.5 * ((left.momentum[normal_direction] * u_left + p_total_left -
+                bn2) +
+               (right.momentum[normal_direction] * u_right + p_total_right -
+                bn2));
+    flux.momentum[tangent1] =
+        0.5 * ((left.momentum[normal_direction] *
+                    left.ion_velocity[tangent1] -
+                bn * bt1_left) +
+               (right.momentum[normal_direction] *
+                    right.ion_velocity[tangent1] -
+                bn * bt1_right));
+    flux.momentum[tangent2] =
+        0.5 * ((left.momentum[normal_direction] *
+                    left.ion_velocity[tangent2] -
+                bn * bt2_left) +
+               (right.momentum[normal_direction] *
+                    right.ion_velocity[tangent2] -
+                bn * bt2_right));
+    flux.electron_energy = 0.5 * (left.electron_energy * u_left +
+                                  right.electron_energy * u_right);
+    flux.ion_energy = 0.5 * (u_left * (left.ion_energy + p_gas_left) +
+                             u_right * (right.ion_energy + p_gas_right));
+    flux.electron_velocity =
+        0.5 * (left.electron_velocity_normal + right.electron_velocity_normal);
+    flux.induction_t1 =
+        sqrt_mu0 * 0.5 *
+        ((u_left * bt1_left - left.ion_velocity[tangent1] * bn) +
+         (u_right * bt1_right - right.ion_velocity[tangent1] * bn));
+    flux.induction_t2 =
+        sqrt_mu0 * 0.5 *
+        ((u_left * bt2_left - left.ion_velocity[tangent2] * bn) +
+         (u_right * bt2_right - right.ion_velocity[tangent2] * bn));
+
+    // Centered Maxwell-stress state (physical units: b_i b_j = B_i B_j/mu0).
+    flux.momentum_magnetic[normal_direction] =
+        0.5 * ((0.5 * (bt1_left * bt1_left + bt2_left * bt2_left) -
+                0.5 * bn2) +
+               (0.5 * (bt1_right * bt1_right + bt2_right * bt2_right) -
+                0.5 * bn2));
+    flux.momentum_magnetic[tangent1] =
+        0.5 * (-bn * bt1_left - bn * bt1_right);
+    flux.momentum_magnetic[tangent2] =
+        0.5 * (-bn * bt2_left - bn * bt2_right);
+
+    // Smoothed Davis fast bounds, identical to hlld_flux.
+    const amrex::Real signal_width =
+        parameters.hlld_kappa_signal * (left.fast_speed + right.fast_speed);
+    flux.signal_left = smooth_min(
+        u_left - left.fast_speed, u_right - right.fast_speed, signal_width);
+    flux.signal_right = smooth_max(
+        u_left + left.fast_speed, u_right + right.fast_speed, signal_width);
+    return flux;
+}
+
+/**
  * \brief Compute a centered or local Lax--Friedrichs flux at one cell face.
  *
  * The ion block is a conservative hydrodynamic flux with total fluid pressure

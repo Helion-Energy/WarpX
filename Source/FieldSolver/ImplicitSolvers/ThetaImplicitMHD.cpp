@@ -160,6 +160,7 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     utils::parser::queryWithParser(pp, "positivity_safety", m_positivity_safety);
     pp.query("external_field_iteration", m_external_field_iteration);
     pp.query("fluid_flux", m_fluid_flux);
+    utils::parser::queryWithParser(pp, "viscosity", m_viscosity);
     pp.query("r_open_fluid", m_r_open_fluid);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_r_open_fluid == "outflow" || m_r_open_fluid == "reflect" ||
@@ -204,15 +205,46 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
                                      "implicit_mhd.electron_pressure_floor cannot be negative");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_fluid_flux == "centered" || m_fluid_flux == "rusanov" ||
-            m_fluid_flux == "hllc" || m_fluid_flux == "hlld",
-        "implicit_mhd.fluid_flux must be centered, rusanov, hllc, or hlld");
+            m_fluid_flux == "hllc" || m_fluid_flux == "hlld" ||
+            m_fluid_flux == "central",
+        "implicit_mhd.fluid_flux must be centered, rusanov, hllc, hlld, "
+        "or central");
     m_use_hlld = (m_fluid_flux == "hlld");
+    m_use_central = (m_fluid_flux == "central");
+    m_use_recast = m_use_hlld || m_use_central;
 #if !defined(WARPX_DIM_1D_Z) && !defined(WARPX_DIM_RZ)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        !m_use_hlld,
-        "implicit_mhd.fluid_flux = hlld (the conservative-form recast) "
-        "currently supports 1D Cartesian and cylindrical RZ geometry only");
+        !m_use_recast,
+        "implicit_mhd.fluid_flux = hlld/central (the conservative-form "
+        "recast) currently supports 1D Cartesian and cylindrical RZ "
+        "geometry only");
 #endif
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_viscosity >= 0.0_rt,
+        "implicit_mhd.viscosity cannot be negative");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_viscosity == 0.0_rt || m_use_recast,
+        "implicit_mhd.viscosity requires the conservative-form recast "
+        "(implicit_mhd.fluid_flux = hlld or central): the viscous face "
+        "flux is only wired into the recast face-flux registers");
+    // The viscous work is paired into the conservative E_i channel; the
+    // cgl internal-energy blocks track no kinetic energy, so the heating
+    // the momentum diffusion implies would silently vanish there.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_viscosity == 0.0_rt || m_ion_closure != "cgl",
+        "implicit_mhd.viscosity is not supported with "
+        "implicit_mhd.ion_closure = cgl (the viscous stress work is only "
+        "paired into the total_energy ion-energy channel)");
+    if (m_use_central) {
+        // Central alone is nonlinearly unstable: the flux carries no
+        // Riemann dissipation, so explicit viscosity must supply it.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_viscosity > 0.0_rt,
+            "implicit_mhd.fluid_flux = central requires a positive "
+            "implicit_mhd.viscosity: the central flux has no Riemann "
+            "dissipation, so the explicit viscous face flux must provide "
+            "the nonlinear stabilization");
+    }
     utils::parser::queryWithParser(pp, "hlld_kappa_signal",
                                    m_hlld_kappa_signal);
     utils::parser::queryWithParser(pp, "hlld_kappa_contact",
@@ -256,13 +288,15 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "implicit_mhd.halo_pedestal_fraction must be in [0, 1)");
     if (m_halo_pedestal_fraction > 0.0_rt) {
         // The pedestal band is held by the donor drain gates of the
-        // Riemann fluxes; the centered flux has no such gates, so the
-        // pedestal would degenerate to a bare per-step mass injection.
+        // Riemann fluxes; the centered and central fluxes have no
+        // upwind donor structure to gate, so the pedestal would
+        // degenerate to a bare per-step mass injection.
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            m_fluid_flux != "centered",
+            m_fluid_flux != "centered" && m_fluid_flux != "central",
             "implicit_mhd.halo_pedestal_fraction requires a Riemann fluid "
             "flux (rusanov, hllc, or hlld): the pedestal band is held by "
-            "the donor drain gates, which the centered flux does not have");
+            "the donor drain gates of the Riemann fluxes, which the "
+            "centered and central fluxes do not have");
         // "Well above": the pedestal must displace the halo operating
         // point off the Newton admissibility bound, so the pedestal base
         // (its value when the reference density is the peak) must exceed
@@ -588,16 +622,16 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
             "the Green's-function open BC to be active (RZ, hybrid solver)");
     }
     if (m_r_open_fluid == "absorb") {
-        // The absorbing wall is realized through the wall-face HLLD flux
+        // The absorbing wall is realized through the wall-face flux
         // registers (the one-way valve on the advective channels), so it
         // exists on the conservative-form path only, and it is only
         // meaningful when the field boundary is actually open (a PEC
         // wall reflects the fluid by construction).
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            m_r_open && m_use_hlld,
+            m_r_open && m_use_recast,
             "implicit_mhd.r_open_fluid = absorb requires the open radial "
             "field boundary (boundary.field_hi = open on r) and "
-            "implicit_mhd.fluid_flux = hlld");
+            "implicit_mhd.fluid_flux = hlld or central");
     }
     if (!m_WarpX->Geom(0).isPeriodic(1)) {
         // Outflow (Neumann) axial ends: the solver fills all z domain
@@ -627,15 +661,15 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         "implicit_mhd.fluid_flux = hllc requires include_hall_term = false: "
         "the electron energy is advected with the ion contact wave, which "
         "assumes u_e = u_i at the fluid faces");
-    if (m_use_hlld) {
+    if (m_use_recast) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !m_hybrid_pic_model->m_include_hall_term,
-            "implicit_mhd.fluid_flux = hlld requires include_hall_term = "
-            "false: the ideal EMF is the single-fluid Riemann induction "
-            "flux, u x B with u_e = u_i");
+            "implicit_mhd.fluid_flux = hlld/central requires "
+            "include_hall_term = false: the ideal EMF is the single-fluid "
+            "face induction flux, u x B with u_e = u_i");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !m_hybrid_pic_model->m_include_electron_pressure_term,
-            "implicit_mhd.fluid_flux = hlld requires "
+            "implicit_mhd.fluid_flux = hlld/central requires "
             "include_electron_pressure_term = false: the solver-assembled "
             "Ohm's law is E = -u x B + eta J - eta_H laplacian(J)");
     }
@@ -670,11 +704,11 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         "makes Ohm's law discontinuous, which breaks the JFNK Jacobian");
 
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        m_vacuum_resistivity_diffusivity == 0.0_rt || m_use_hlld,
+        m_vacuum_resistivity_diffusivity == 0.0_rt || m_use_recast,
         "implicit_mhd.vacuum_resistivity_diffusivity requires "
-        "implicit_mhd.fluid_flux = hlld: the density-keyed vacuum "
-        "resistivity boosts the solver-assembled Ohm field advance only "
-        "(Joule heating keeps the un-boosted user resistivity)");
+        "implicit_mhd.fluid_flux = hlld or central: the density-keyed "
+        "vacuum resistivity boosts the solver-assembled Ohm field advance "
+        "only (Joule heating keeps the un-boosted user resistivity)");
 
     if (m_vacuum_mass_density > 0.0_rt) {
         // Holmstrom-style vacuum cell switching for the ion fluid: cells
@@ -738,9 +772,9 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         fluid_blocks.push_back({IonParallelEnergyName, energy_scale});
         fluid_blocks.push_back({IonPerpEnergyName, energy_scale});
     }
-    if (m_use_hlld) {
+    if (m_use_recast) {
         // Conservative-form recast: B^{n+theta} is the JFNK array block
-        // (E is derived from the Riemann EMF and eta J each residual).
+        // (E is derived from the face EMF and eta J each residual).
         m_state.Define(m_WarpX, "Bfield_fp", "none", fluid_blocks,
                        m_reference_magnetic_field);
     } else {
@@ -748,7 +782,7 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
                        electric_field_scale);
     }
     m_state_old.Define(m_state);
-    m_state.Copy(m_use_hlld ? FieldType::Bfield_fp : FieldType::Efield_fp);
+    m_state.Copy(m_use_recast ? FieldType::Bfield_fp : FieldType::Efield_fp);
     m_state.CopyMultiFabBlocksFromFields();
     m_state_old.Copy(m_state);
 
@@ -774,11 +808,11 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         "implicit_mhd.resistive_theta must be between 0.5 and 1");
     if (m_resistive_theta != m_theta) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            m_use_hlld,
+            m_use_recast,
             "implicit_mhd.resistive_theta different from "
             "implicit_evolve.theta requires implicit_mhd.fluid_flux = "
-            "hlld (the resistive-stage current is wired into the "
-            "solver-assembled Ohm's law only)");
+            "hlld or central (the resistive-stage current is wired into "
+            "the solver-assembled Ohm's law only)");
         // Resistive-stage current registers: J^n captured once per step
         // and the per-residual theta_r-weighted scratch, both at the
         // native Yee staggering of the plasma current.
@@ -813,12 +847,13 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         "theta_implicit_mhd supports jacobian.pc_type = none or pc_mhd_block");
 #if defined(WARPX_DIM_RZ)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        preconditioner_type == PreconditionerType::none || m_use_hlld,
-        "pc_mhd_block in RZ requires implicit_mhd.fluid_flux = hlld: the "
-        "E-based block preconditioner has no cylindrical metric terms");
+        preconditioner_type == PreconditionerType::none || m_use_recast,
+        "pc_mhd_block in RZ requires implicit_mhd.fluid_flux = hlld or "
+        "central: the E-based block preconditioner has no cylindrical "
+        "metric terms");
 #endif
     if (preconditioner_type == PreconditionerType::pc_mhd_block &&
-        !m_use_hlld) {
+        !m_use_recast) {
         // The E-based operators do not apply to the conservative-form
         // recast; under hlld the preconditioner is the Stage-1 identity-B +
         // signal-diffusion form, which handles any ion closure, any
@@ -1118,6 +1153,7 @@ void ThetaImplicitMHD::PrintParameters () const
     }
     amrex::Print()
                    << "Ion closure:                   " << m_ion_closure << "\n"
+                   << "Viscosity [m2/s]:              " << m_viscosity << "\n"
                    << "Positivity step safety:        " << m_positivity_safety << "\n"
                    << "Joule heating:                 " << m_include_joule_heating << "\n"
                    << "Resistive theta:               " << m_resistive_theta << "\n"
@@ -1547,7 +1583,7 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
         }
     }
 
-    m_state.Copy(m_use_hlld ? FieldType::Bfield_fp : FieldType::Efield_fp);
+    m_state.Copy(m_use_recast ? FieldType::Bfield_fp : FieldType::Efield_fp);
     m_state.CopyMultiFabBlocksFromFields();
     if (!m_loaded_state_sanitized) {
         // Python fluid loaders (beforeInitEsolve callbacks) overwrite the
@@ -1601,7 +1637,7 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
 
     UpdateWarpXFields(m_state, start_time);
 #if defined(WARPX_DIM_RZ)
-    if (m_use_hlld && m_r_open && m_r_open_fluid == "absorb") {
+    if (m_use_recast && m_r_open && m_r_open_fluid == "absorb") {
         // Book the absorbing wall's export from the accepted theta state
         // (UpdateWarpXFields just refilled the theta-stage fields), before
         // FinishStateUpdate extrapolates the state to t^{n+1}.
@@ -1617,9 +1653,9 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
 void ThetaImplicitMHD::UpdateWarpXFields (const WarpXSolverVec& state, const amrex::Real start_time)
 {
     const amrex::Real theta_time = start_time + m_theta * m_dt;
-    if (m_use_hlld) {
+    if (m_use_recast) {
         // Conservative form: the state array block IS B^{n+theta}; E is
-        // assembled from the Riemann EMF and eta J later in the residual.
+        // assembled from the face EMF and eta J later in the residual.
         m_WarpX->SetMagneticFieldAndApplyBCs(state, theta_time);
     } else {
         m_WarpX->SetElectricFieldAndApplyBCs(state, theta_time);
@@ -1829,10 +1865,10 @@ void ThetaImplicitMHD::FillCellCenteredElectromagneticFields ()
         }
     }
 #endif
-    if (m_use_hlld) {
-        // The hlld face kernels read cell-centered B in the radial domain
-        // ghosts (the wall face's outer donor cell, and the transverse
-        // ghost faces feeding the corner UCT EMF).
+    if (m_use_recast) {
+        // The recast face kernels read cell-centered B in the radial
+        // domain ghosts (the wall face's outer donor cell, and the
+        // transverse ghost faces feeding the corner UCT EMF).
         ApplyMagneticCCDomainGhosts(magnetic_field_cc);
     }
 }
@@ -1875,12 +1911,13 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
     FillCellCenteredElectromagneticFields();
 
     const amrex::Real theta_time = start_time + m_theta * m_dt;
-    if (m_use_hlld) {
-        // Conservative form: one HLLD Riemann solution per face feeds the
-        // fluid divergences AND the ideal EMF; E = EMF + eta J is derived,
-        // and the array-block residual is the theta-implicit Faraday
-        // update evaluated with the exact Yee curl (div B preserved to
-        // round-off): rhs_B = (B_old - theta dt curl E) - B_old.
+    if (m_use_recast) {
+        // Conservative form: one face-flux evaluation (HLLD fan or
+        // central) per face feeds the fluid divergences AND the ideal
+        // EMF; E = EMF + eta J is derived, and the array-block residual
+        // is the theta-implicit Faraday update evaluated with the exact
+        // Yee curl (div B preserved to round-off):
+        // rhs_B = (B_old - theta dt curl E) - B_old.
         ComputeFaceFluxes();
         AssembleOhmElectricField(theta_time, true);
         const auto& magnetic_field_old =
@@ -2239,9 +2276,9 @@ theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
 
 void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real time) const
 {
-    if (m_use_hlld) {
-        // Conservative form: read the precomputed per-face Riemann fluxes
-        // (one HLLD solution per face; the same solution feeds the ideal
+    if (m_use_recast) {
+        // Conservative form: read the precomputed per-face fluxes (one
+        // flux evaluation per face; the same evaluation feeds the ideal
         // EMF) instead of re-evaluating fluxes cell-by-cell.
         ComputeFluidRHSFromFaceFluxes(rhs, time);
         return;
@@ -2736,6 +2773,21 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const theta_implicit_mhd::FluxParameters parameters = MakeFluxParameters();
     const bool add_external = (external_face != nullptr);
     const int normal = normal_direction;
+    const bool use_central = m_use_central;
+    // Explicit ion viscosity of the recast face fluxes: the normal-
+    // gradient stress uses the plain cell spacing along the face normal
+    // (the cylindrical metric enters only through the r-weighted
+    // divergence that consumes these registers, exactly as for the
+    // advective channels).
+    const amrex::Real viscosity = m_viscosity;
+    const bool add_viscosity = (viscosity > 0.0_rt);
+#if defined(WARPX_DIM_1D_Z)
+    const amrex::Real inverse_normal_size =
+        1.0_rt / m_WarpX->Geom(0).CellSize(0);
+#else
+    const amrex::Real inverse_normal_size =
+        1.0_rt / m_WarpX->Geom(0).CellSize(normal_direction == 0 ? 0 : 1);
+#endif
 #if defined(WARPX_DIM_RZ)
     // The axis face has zero area: its fluid channels drop out of the
     // r-weighted divergence and the axis-corner EMF is set by parity, so
@@ -2856,8 +2908,12 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
             if (add_external) {
                 bn_face += bn_external(i, j, k);
             }
-            auto flux = theta_implicit_mhd::hlld_flux(left, right, bn_face,
-                                                      normal, parameters);
+            auto flux =
+                use_central
+                    ? theta_implicit_mhd::central_flux(left, right, bn_face,
+                                                       normal, parameters)
+                    : theta_implicit_mhd::hlld_flux(left, right, bn_face,
+                                                    normal, parameters);
 
             // Donor-gated positivity guards on the advected mass and
             // energy channels, gating on the theta-extrapolated
@@ -2987,6 +3043,40 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     0.5_rt *
                             (left.ion_perp_energy + right.ion_perp_energy) +
                         perp_floor);
+            }
+
+            // Explicit ion viscosity (implicit_mhd.viscosity): the
+            // normal-gradient viscous stress on the SAME face registers,
+            // evaluated at the theta-stage states like every other flux
+            // term. The momentum stress and its velocity-weighted work
+            // are added as an exactly conservative pair AFTER the donor
+            // gates (which only scale the advective channels): gating one
+            // member of the pair without the other converts stress work
+            // into a spurious energy source/sink. The reflect wall face
+            // passes no viscous flux either -- the override below zeroes
+            // the tangential pair, and the normal member must not survive
+            // alone.
+            if (add_viscosity
+#if defined(WARPX_DIM_RZ)
+                && !(reflect_wall && i == radial_wall_face)
+#endif
+            ) {
+                const amrex::Real face_density =
+                    0.5_rt * (left.density + right.density);
+                amrex::Real viscous_work = 0.0_rt;
+                for (int component = 0; component < 3; ++component) {
+                    const amrex::Real viscous_stress =
+                        -face_density * viscosity *
+                        (right.ion_velocity[component] -
+                         left.ion_velocity[component]) *
+                        inverse_normal_size;
+                    flux.momentum[component] += viscous_stress;
+                    viscous_work += 0.5_rt *
+                                    (left.ion_velocity[component] +
+                                     right.ion_velocity[component]) *
+                                    viscous_stress;
+                }
+                flux.ion_energy += viscous_work;
             }
 
 #if defined(WARPX_DIM_RZ)
@@ -5467,7 +5557,7 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
             "below its positivity floor");
     }
 
-    if (m_use_hlld) {
+    if (m_use_recast) {
         // The linComb above already extrapolated the state (including its
         // B array block) to t^{n+1}; publish it to Bfield_fp with BCs.
         m_WarpX->SetMagneticFieldAndApplyBCs(m_state, end_time);
@@ -5515,9 +5605,9 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
         m_hybrid_pic_model->m_external_vector_potential->UpdateHybridExternalFields(
             end_time, m_dt);
     }
-    if (m_use_hlld) {
+    if (m_use_recast) {
         // Recompute the end-of-step Ohm E (diagnostics and coupling) from
-        // the accepted final state: the same Riemann-EMF assembly the
+        // the accepted final state: the same face-EMF assembly the
         // residual used, evaluated at t^{n+1} -- with the INSTANTANEOUS
         // current in the dissipative terms (at_resistive_stage = false),
         // so the published E satisfies Ohm's law at t^{n+1} rather than
@@ -5543,7 +5633,7 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
                 *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{direction}, 0));
         }
     }
-    if (!m_use_hlld) {
+    if (!m_use_recast) {
         m_state.Copy(FieldType::Efield_fp);
     }
 

@@ -4538,6 +4538,46 @@ Jacobian probes.
     :math:`B_n \to 0` rotational layer); the widths are the
     ``implicit_mhd.hlld_kappa_*`` parameters below.
 
+    ``central`` selects the same conservative-form recast with a
+    Chacón-style central conservative flux (central co-located finite
+    volumes with explicit dissipation, JCP 526 (2025) 113789) in place
+    of the HLLD wave fan: every face channel — mass, total momentum
+    including the Maxwell stress, gas-enthalpy ion energy, electron
+    energy, and the ideal induction/EMF channel — is the arithmetic
+    mean of the two sides' physical fluxes (the exact zero-dissipation
+    limit of the ``hlld`` fan), a few flops per face with no wave-fan
+    algebra on the JFNK matvec hot path and a smoother residual for
+    GMRES. The central flux carries no Riemann dissipation, so a
+    positive :pp:param:`implicit_mhd.viscosity` is required for
+    nonlinear stability (field dissipation comes from resistivity; the
+    RZ corner-EMF dissipation coefficients vanish identically under
+    ``central``). ``central`` shares all recast plumbing and
+    constraints with ``hlld`` (1D/RZ only, no Hall term, no
+    electron-pressure Ohm term), is not supported with
+    ``ion_closure = cgl`` or a halo pedestal (the pedestal band is held
+    by the donor drain gates of the Riemann fluxes), and keeps the
+    donor-gated positivity guards of the recast face fluxes.
+
+.. pp:param:: implicit_mhd.viscosity
+    :type: ``float``
+    :default: ``0``
+
+    Explicit ion kinematic viscosity :math:`\nu_i` in m^2/s of
+    the conservative-form recast face fluxes (``fluid_flux = hlld`` or
+    ``central``; required positive for ``central``, where it provides
+    the nonlinear stabilization the central flux itself omits). Adds
+    the normal-gradient viscous stress
+    :math:`-\rho_f \nu_i (u_{c,R} - u_{c,L})/\Delta n` (with
+    :math:`\rho_f` the arithmetic face density) to each momentum flux
+    component and the exactly paired stress work
+    :math:`-\rho_f \nu_i \sum_c \bar{u}_c (u_{c,R} - u_{c,L})/\Delta n`
+    to the ion total-energy flux, evaluated at the theta-stage states
+    like the rest of the residual, so total energy exchange is
+    discretely conservative. Not supported with ``ion_closure = cgl``
+    (its internal-energy blocks track no kinetic energy to pair the
+    stress work against). The zero-flux reflecting wall passes no
+    viscous flux, matching the advective wall policy.
+
 .. pp:param:: implicit_mhd.r_open_fluid
     :type: ``string``
     :default: ``outflow``
@@ -4550,14 +4590,14 @@ Jacobian probes.
     the field remains open — useful when a violent boundary relaxation
     (e.g. releasing a wall-image-supported equilibrium) would otherwise
     drain wall cells through their positivity floors. Under
-    ``implicit_mhd.fluid_flux = hlld``, ``reflect`` is a true zero-flux
+    ``implicit_mhd.fluid_flux = hlld`` or ``central``, ``reflect`` is a true zero-flux
     wall: every advective fluid channel of the :math:`r_{\max}` face flux
     (mass, tangential momentum advection, electron/ion energies) is
     exactly zero and the tangential Maxwell stress and the last ring's
     magnetic work terms use the perfect-conductor image field
     (:math:`B_n = 0` at the wall face), while the normal wall pressure
     and the induction/Ohm path keep the open-field boundary values.
-    ``absorb`` (``hlld`` only) models a solid conductor that absorbs
+    ``absorb`` (``hlld``/``central`` only) models a solid conductor that absorbs
     incident plasma instead of storing it: the fluid keeps the outflow
     recipe's impedance-matched zero-gradient ghosts (so the wall-face
     Riemann fan carries wall-plasma signal speeds only), except that
@@ -4738,7 +4778,7 @@ Jacobian probes.
     :default: ``0`` (off)
 
     Density-keyed vacuum resistivity of the field advance
-    (``fluid_flux = hlld`` only). The solver-assembled Ohm's law sees
+    (``fluid_flux = hlld``/``central`` only). The solver-assembled Ohm's law sees
     the smooth, uncapped resistivity floor
 
     .. math::
@@ -4781,7 +4821,7 @@ Jacobian probes.
     backward Euler on the dissipative terms alone (``resistive_theta =
     1``) gives :math:`1/(1+z) \to 0`, damping those modes in one step
     with the ideal dynamics still second-order centered. Values other
-    than the global theta require ``fluid_flux = hlld``.
+    than the global theta require ``fluid_flux = hlld`` or ``central``.
 
 .. pp:param:: implicit_mhd.evolve_ion_fluid
     :type: ``bool``
