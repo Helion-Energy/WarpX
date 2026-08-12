@@ -106,8 +106,10 @@ parser.add_argument(
 parser.add_argument(
     "--fd-cfl",
     type=float,
-    default=0.5,
-    help="FD subcycle CFL fraction (hybrid_pic_model.qdsmc_conduction_fd_cfl)",
+    default=0.4,
+    help="FD subcycle CFL fraction (hybrid_pic_model.qdsmc_conduction_fd_cfl); "
+    "keep <= 0.5 -- SSP-RK2 Nyquist damping goes neutral at the edge "
+    "(deposit-noise persistence, the reference algorithm's alpha<=0.25 rule)",
 )
 parser.add_argument(
     "--iso-full",

@@ -840,9 +840,15 @@ public:
      *  qdsmc_conduction_fd_limiter = none | upwind1 | smart. */
     int m_cond_fd_limiter = 2;
     /** FD subcycle CFL fraction of the Gershgorin stability bound
-     *  (sum_gh 2 |Xi_gh| dxi_g dxi_h, n-ratio weighted). Input:
+     *  (sum_gh 2 |Xi_gh| dxi_g dxi_h, n-ratio weighted). Default 0.4:
+     *  under SSP-RK2 the Nyquist amplification G = 1 + z + z^2/2 never
+     *  flips sign but goes NEUTRAL (G -> 1, zero damping) at the
+     *  stability edge, so deposit-noise checkerboards persist instead of
+     *  damping -- the reference algorithm's ledger-40 lesson (alpha_sub <= 0.25, i.e.
+     *  cfl <= 0.5 in this normalization) plus margin for Gershgorin
+     *  being an upper bound. Do not run near 1. Input:
      *  qdsmc_conduction_fd_cfl. */
-    amrex::Real m_cond_fd_cfl = 0.5;
+    amrex::Real m_cond_fd_cfl = 0.4;
     /** FD subcycle count ceiling per conduction call; on hitting it the
      *  remaining fraction of dt_c is dropped with a warning (visible, not
      *  silent). Input: qdsmc_conduction_fd_max_subcycles. */
