@@ -591,6 +591,16 @@ public:
      *  cap and no vacuum fast front (neither concept applies). */
     void QdsmcConductionOnceFD (int lev, amrex::Real dt_c, bool use_rho_new) const;
 
+    /** Grid-transport arm of the energy-equation bake-off jig
+     *  (qdsmc_transport_operator = grid): advances the entropy pair
+     *  y = {n_e, K n_e} in conservative flux form dy/dt = -div(y V_e)
+     *  with SMART-limited upwind face values and the shared adaptive RK
+     *  integrator (V_e frozen over the transport slot, like the marker
+     *  push). Writes the marker-deposit convention (entropy_fp = K n_e,
+     *  weights = n_e) and calls QDSMCUpdateTe -- identical recovery, so
+     *  the bake-off isolates the transport operator alone. */
+    void QdsmcTransportOnceGrid (int lev, amrex::Real dt_adv) const;
+
     /** leapfrog self-start: false until the first advance has run (which
      *  advances by dt/2 to move T_e^0 to the half level). */
     mutable bool m_qdsmc_leapfrog_started = false;
@@ -867,6 +877,16 @@ public:
      *  qdsmc_conduction_fd_rtol / _atol. */
     amrex::Real m_cond_fd_rtol = 1.0e-4;
     amrex::Real m_cond_fd_atol = 1.0e-3;
+    /** Energy-equation TRANSPORT operator (bake-off jig): 0 = markers
+     *  (the QDSMC particle transport, production default), 1 = grid
+     *  (prototype: the entropy pair {n_e, K n_e} advanced in conservative
+     *  SMART-limited flux form through QdsmcRKIntegrator -- "integrate
+     *  the energy equation directly like the field equation"). The grid
+     *  arm shares QDSMCInitializeKe and QDSMCUpdateTe, so ONLY the
+     *  transport operator differs; it reuses the fd_time/fd_cfl/fd_rtol/
+     *  fd_atol integrator knobs. EB + RZ abort. Input:
+     *  qdsmc_transport_operator = markers | grid. */
+    int m_qdsmc_transport_operator = 0;
     std::string m_kappa_par_expression = "0.0";
     std::string m_kappa_perp_expression = "0.0";
     std::unique_ptr<amrex::Parser> m_kappa_par_parser;

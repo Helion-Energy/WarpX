@@ -185,6 +185,15 @@ void HybridPICModel::ReadParameters ()
             m_cond_fd_rtol > 0._rt && m_cond_fd_atol > 0._rt,
             "hybrid_pic_model.qdsmc_conduction_fd_rtol/_atol must be "
             "positive");
+        std::string top = "markers";
+        pp_hybrid.query("qdsmc_transport_operator", top);
+        if (top == "markers") { m_qdsmc_transport_operator = 0; }
+        else if (top == "grid") { m_qdsmc_transport_operator = 1; }
+        else {
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.qdsmc_transport_operator must be "
+                "'markers' or 'grid'");
+        }
     }
     {
         std::vector<int> npts;
@@ -2334,9 +2343,270 @@ void HybridPICModel::QDSMCFillElectronPressureFromTe (int const lev) const
 }
 
 
+namespace
+{
+    /** SMART-limited (Gaskell--Lau 1988) face value for the advective
+     *  cross-derivative fluxes of the FD conduction operator, in the
+     *  normalized-variable frame of the local upwind triple (tUU = far
+     *  upwind, tU = upwind, tD = downwind): QUICK where smooth, blended
+     *  to bounded legs near extrema, 1st-order upwind outside [0, 1] --
+     *  monotone by construction. limiter = 0 returns unlimited QUICK
+     *  (attribution control, can overshoot), 1 returns 1st-order upwind. */
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    amrex::Real qdsmc_fd_face_value (amrex::Real const tUU,
+                                     amrex::Real const tU,
+                                     amrex::Real const tD, int const limiter)
+    {
+        if (limiter == 1) { return tU; }
+        if (limiter == 0) {
+            return 0.375_rt*tD + 0.75_rt*tU - 0.125_rt*tUU;   // QUICK
+        }
+        amrex::Real const den = tD - tUU;
+        if (den == 0.0_rt) { return tU; }
+        amrex::Real const ph = (tU - tUU) / den;
+        amrex::Real phf;
+        if (ph <= 0.0_rt || ph >= 1.0_rt) { phf = ph; }
+        else if (ph < 1.0_rt/6.0_rt)      { phf = 3.0_rt*ph; }
+        else if (ph <= 5.0_rt/6.0_rt)     { phf = 0.375_rt + 0.75_rt*ph; }
+        else                              { phf = 1.0_rt; }
+        return tUU + phf*den;
+    }
+}
+
+void HybridPICModel::QdsmcTransportOnceGrid (int const lev,
+                                             amrex::Real const dt_adv) const
+{
+    ABLASTR_PROFILE("HybridPICModel::QdsmcTransportOnceGrid()");
+
+#ifdef WARPX_DIM_RZ
+    WARPX_ABORT_WITH_MESSAGE(
+        "qdsmc_transport_operator = grid: RZ metric not implemented");
+#endif
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!EB::enabled(),
+        "qdsmc_transport_operator = grid: EB masks are not wired into the "
+        "grid transport prototype");
+
+    auto & warpx = WarpX::GetInstance();
+    using ablastr::fields::Direction;
+
+    amrex::Geometry const & geom = warpx.Geom(lev);
+    amrex::Periodicity const & period = geom.periodicity();
+    auto const dxi_arr = geom.InvCellSizeArray();
+
+    // Same entry state as the marker path: K at nodes from T_e and rho^n.
+    QDSMCInitializeKe(lev);
+
+    amrex::MultiFab const & Vex = *warpx.m_fields.get(FieldType::hybrid_electron_velocity_fp, Direction{0}, lev);
+    amrex::MultiFab const & Vey = *warpx.m_fields.get(FieldType::hybrid_electron_velocity_fp, Direction{1}, lev);
+    amrex::MultiFab const & Vez = *warpx.m_fields.get(FieldType::hybrid_electron_velocity_fp, Direction{2}, lev);
+    amrex::MultiFab       & Ke  = *warpx.m_fields.get(FieldType::hybrid_entropy_fp, lev);
+    amrex::MultiFab       & wts = *warpx.m_fields.get(FieldType::hybrid_qdsmc_weights_fp, lev);
+    amrex::MultiFab const & rho = *warpx.m_fields.get(FieldType::hybrid_rho_fp_temp, lev);
+
+    amrex::Real const qe = PhysConst::q_e;
+    int const fd_limiter = m_cond_fd_limiter;
+    amrex::Real const fd_cfl = m_cond_fd_cfl;
+    bool const use_rkf45 = (m_cond_fd_time == 1);
+
+#if defined(WARPX_DIM_3D)
+    amrex::GpuArray<int, AMREX_SPACEDIM> const gd2ax = {0, 1, 2};
+#elif (AMREX_SPACEDIM == 2)
+    amrex::GpuArray<int, AMREX_SPACEDIM> const gd2ax = {0, 2};
+#else
+    amrex::GpuArray<int, AMREX_SPACEDIM> const gd2ax = {2};
+#endif
+    amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> dxi_g;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) { dxi_g[d] = dxi_arr[d]; }
+
+    // Nodal velocity components per grid dim, gathered once (V_e frozen
+    // over the transport slot, like the marker push's SetV).
+    amrex::MultiFab vel(Ke.boxArray(), Ke.DistributionMap(),
+                        AMREX_SPACEDIM, 2);
+    amrex::MultiFab const * vsrc[3] = {&Vex, &Vey, &Vez};
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(vel, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        amrex::Box const box = mfi.tilebox();
+        amrex::Array4<amrex::Real> const & v_arr = vel.array(mfi);
+        for (int g = 0; g < AMREX_SPACEDIM; ++g) {
+            amrex::Array4<amrex::Real const> const & s_arr =
+                vsrc[gd2ax[g]]->const_array(mfi);
+            amrex::ParallelFor(box,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                v_arr(i,j,k,g) = s_arr(i,j,k);
+            });
+        }
+    }
+    vel.FillBoundary(period);
+
+    // State y = {n_e, K n_e}: conservative pair under the common flow.
+    int constexpr ngT = 2;
+    amrex::MultiFab y(Ke.boxArray(), Ke.DistributionMap(), 2, ngT);
+    y.setVal(0.0_rt);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(y, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        amrex::Box const box = mfi.tilebox();
+        amrex::Array4<amrex::Real>       const & y_arr = y.array(mfi);
+        amrex::Array4<amrex::Real const> const & K_arr = Ke.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            amrex::Real const ne = amrex::max(rho_arr(i,j,k)/qe, 0.0_rt);
+            y_arr(i,j,k,0) = ne;
+            y_arr(i,j,k,1) = K_arr(i,j,k)*ne;
+        });
+    }
+
+    // RHS: K = -div(y v) per component, SMART-limited upwind face values
+    // on the face-averaged velocity. Same inline face-window discipline
+    // as the FD conduction operator (identical fluxes on both sides of
+    // every face -> Sigma(y) telescopes to round-off).
+    auto eval_rhs = [&] (amrex::MultiFab & Yin, amrex::MultiFab & Kout)
+    {
+        ablastr::utils::communication::FillBoundary(
+            Yin, WarpX::do_single_precision_comms, period, true);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(Kout, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            amrex::Box const box = mfi.tilebox();
+            amrex::Array4<amrex::Real>       const & ko = Kout.array(mfi);
+            amrex::Array4<amrex::Real const> const & yc = Yin.const_array(mfi);
+            amrex::Array4<amrex::Real const> const & v_arr = vel.const_array(mfi);
+
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                // flux of comp c through the face m0 -> m0 + e_g
+                auto face_flux = [&] (int const m0[3], int const g,
+                                      int const c)
+                {
+                    int m1[3] = {m0[0], m0[1], m0[2]};
+                    m1[g] += 1;
+                    amrex::Real const vf = 0.5_rt*(
+                        v_arr(m0[0],m0[1],m0[2],g) +
+                        v_arr(m1[0],m1[1],m1[2],g));
+                    if (vf == 0.0_rt) { return 0.0_rt; }
+                    int uu[3];
+                    amrex::Real tU, tD;
+                    if (vf > 0.0_rt) {
+                        tU = yc(m0[0],m0[1],m0[2],c);
+                        tD = yc(m1[0],m1[1],m1[2],c);
+                        uu[0] = m0[0]; uu[1] = m0[1]; uu[2] = m0[2];
+                        uu[g] -= 1;
+                    } else {
+                        tU = yc(m1[0],m1[1],m1[2],c);
+                        tD = yc(m0[0],m0[1],m0[2],c);
+                        uu[0] = m1[0]; uu[1] = m1[1]; uu[2] = m1[2];
+                        uu[g] += 1;
+                    }
+                    amrex::Real const tUU = yc(uu[0],uu[1],uu[2],c);
+                    return vf*qdsmc_fd_face_value(tUU, tU, tD, fd_limiter);
+                };
+                int const node[3] = {i, j, k};
+                for (int c = 0; c < 2; ++c) {
+                    amrex::Real div = 0.0_rt;
+                    for (int g = 0; g < AMREX_SPACEDIM; ++g) {
+                        int lo[3] = {i, j, k};
+                        lo[g] -= 1;
+                        div += (face_flux(node, g, c) - face_flux(lo, g, c))
+                               * dxi_g[g];
+                    }
+                    ko(i,j,k,c) = -div;
+                }
+            });
+        }
+    };
+
+    // Advective stability ceiling: dt <= cfl / max_node sum_g |v| dxi
+    // (upwind CFL; velocity is frozen, so this is computed once).
+    amrex::Real s_adv = 0.0_rt;
+    {
+        amrex::ReduceOps<amrex::ReduceOpMax> reduce_op;
+        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        for (MFIter mfi(vel, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            amrex::Box const box = mfi.tilebox();
+            amrex::Array4<amrex::Real const> const & v_arr = vel.const_array(mfi);
+            reduce_op.eval(box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
+            {
+                amrex::Real s = 0.0_rt;
+                for (int g = 0; g < AMREX_SPACEDIM; ++g) {
+                    s += std::abs(v_arr(i,j,k,g))*dxi_g[g];
+                }
+                return {s};
+            });
+        }
+        auto tup = reduce_data.value(reduce_op);
+        s_adv = amrex::get<0>(tup);
+        amrex::ParallelDescriptor::ReduceRealMax(s_adv);
+    }
+    auto cap = [&] () -> amrex::Real
+    {
+        return (s_adv > 0.0_rt) ? fd_cfl/s_adv
+                                : std::numeric_limits<amrex::Real>::max();
+    };
+
+    QdsmcRKIntegrator const integ(
+        use_rkf45 ? QdsmcRKIntegrator::Scheme::RKF45
+                  : QdsmcRKIntegrator::Scheme::SSPRK2,
+        eval_rhs, cap, m_cond_fd_rtol, m_cond_fd_atol,
+        m_substep_safety, m_substep_max_growth, m_cond_fd_max_subcycles);
+    QdsmcRKStats const st = integ.Advance(y, dt_adv);
+
+    if (st.t_done < dt_adv*(1.0_rt - 1.0e-12_rt)) {
+        amrex::Warning(
+            "[qdsmc] QdsmcTransportOnceGrid: attempts budget hit; dropped "
+            + std::to_string(1.0 - st.t_done/dt_adv)
+            + " of the transport step");
+    }
+
+    auto const dx_cv = geom.CellSizeArray();
+    amrex::Real cell_volume = 1.0_rt;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) { cell_volume *= dx_cv[d]; }
+
+    // Marker-deposit convention (QDSMCUpdateTe recovers K_e =
+    // entropy_fp / (weights_fp * V_cell)): weights carries the density
+    // n_e and entropy carries K times the electron COUNT, so the
+    // transported K n_e picks up one cell volume. Getting this wrong by
+    // 1/V_cell inflates T_e -> grad Pe -> E -> multi-cell ion crossings
+    // -> the documented Esirkepov segfault (measured).
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(Ke, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        amrex::Box const box = mfi.tilebox();
+        amrex::Array4<amrex::Real>       const & K_arr = Ke.array(mfi);
+        amrex::Array4<amrex::Real>       const & w_arr = wts.array(mfi);
+        amrex::Array4<amrex::Real const> const & y_arr = y.const_array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            w_arr(i,j,k) = y_arr(i,j,k,0);
+            K_arr(i,j,k) = y_arr(i,j,k,1)*cell_volume;
+        });
+    }
+
+    QDSMCUpdateTe(lev);
+}
+
 void HybridPICModel::QdsmcTransportOnce (int const lev, amrex::Real const dt_adv,
                                          bool const midpoint) const
 {
+    if (m_qdsmc_transport_operator == 1) {
+        amrex::ignore_unused(midpoint);   // adaptive RK supersedes it
+        QdsmcTransportOnceGrid(lev, dt_adv);
+        return;
+    }
+
     ABLASTR_PROFILE("HybridPICModel::QdsmcTransportOnce()");
 
     auto & warpx = WarpX::GetInstance();
@@ -2866,32 +3136,6 @@ namespace
         e2z = bx*e1y - by*e1x;
     }
 
-    /** SMART-limited (Gaskell--Lau 1988) face value for the advective
-     *  cross-derivative fluxes of the FD conduction operator, in the
-     *  normalized-variable frame of the local upwind triple (tUU = far
-     *  upwind, tU = upwind, tD = downwind): QUICK where smooth, blended
-     *  to bounded legs near extrema, 1st-order upwind outside [0, 1] --
-     *  monotone by construction. limiter = 0 returns unlimited QUICK
-     *  (attribution control, can overshoot), 1 returns 1st-order upwind. */
-    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
-    amrex::Real qdsmc_fd_face_value (amrex::Real const tUU,
-                                     amrex::Real const tU,
-                                     amrex::Real const tD, int const limiter)
-    {
-        if (limiter == 1) { return tU; }
-        if (limiter == 0) {
-            return 0.375_rt*tD + 0.75_rt*tU - 0.125_rt*tUU;   // QUICK
-        }
-        amrex::Real const den = tD - tUU;
-        if (den == 0.0_rt) { return tU; }
-        amrex::Real const ph = (tU - tUU) / den;
-        amrex::Real phf;
-        if (ph <= 0.0_rt || ph >= 1.0_rt) { phf = ph; }
-        else if (ph < 1.0_rt/6.0_rt)      { phf = 3.0_rt*ph; }
-        else if (ph <= 5.0_rt/6.0_rt)     { phf = 0.375_rt + 0.75_rt*ph; }
-        else                              { phf = 1.0_rt; }
-        return tUU + phf*den;
-    }
 }
 
 

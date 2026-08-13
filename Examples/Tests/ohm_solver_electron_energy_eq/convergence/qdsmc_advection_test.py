@@ -66,6 +66,26 @@ parser.add_argument(
     default=0,
     help="hybrid_pic_model.qdsmc_gradient_deposit (B1)",
 )
+parser.add_argument(
+    "--transport-op",
+    choices=["markers", "grid"],
+    default="markers",
+    help="hybrid_pic_model.qdsmc_transport_operator: markers = QDSMC "
+    "particles; grid = SMART flux-form pair through the adaptive RK "
+    "integrator (the energy-equation bake-off arm)",
+)
+parser.add_argument(
+    "--fd-time",
+    choices=["ssprk2", "rkf45"],
+    default="rkf45",
+    help="grid-arm integrator (hybrid_pic_model.qdsmc_conduction_fd_time)",
+)
+parser.add_argument(
+    "--fd-limiter",
+    choices=["none", "upwind1", "smart"],
+    default="smart",
+    help="grid-arm face limiter (hybrid_pic_model.qdsmc_conduction_fd_limiter)",
+)
 parser.add_argument("--out", type=str, required=True, help="output .npz path")
 parser.add_argument("--verbose", type=int, default=0)
 args = parser.parse_args()
@@ -179,6 +199,9 @@ import pywarpx  # noqa: E402
 
 pywarpx.hybridpicmodel.qdsmc_time_advance = args.advance
 pywarpx.hybridpicmodel.qdsmc_gradient_deposit = args.grad_deposit
+pywarpx.hybridpicmodel.qdsmc_transport_operator = args.transport_op
+pywarpx.hybridpicmodel.qdsmc_conduction_fd_time = args.fd_time
+pywarpx.hybridpicmodel.qdsmc_conduction_fd_limiter = args.fd_limiter
 
 sim.initialize_warpx()
 
@@ -229,7 +252,15 @@ callbacks.installparticleinjection(poke_te)
 # ----------------------------------------------------------------------
 # Run and save
 # ----------------------------------------------------------------------
+import time as _time
+
+_t0 = _time.perf_counter()
 sim.step(args.nsteps)
+_wall = _time.perf_counter() - _t0
+print(
+    f"[harness] perf: {_wall:.3f} s for {args.nsteps} steps "
+    f"({1e3 * _wall / args.nsteps:.2f} ms/step)"
+)
 
 te_final = Te_wrap[:, :]
 np.savez_compressed(

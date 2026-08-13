@@ -8,6 +8,7 @@
 #define WARPX_QDSMCRKINTEGRATOR_H_
 
 #include <AMReX_MultiFab.H>
+#include <AMReX_Vector.H>
 #include <AMReX_ParallelDescriptor.H>
 #include <AMReX_Reduce.H>
 #include <AMReX_REAL.H>
@@ -77,16 +78,18 @@ public:
      *  RHS functor's job; on return y's ghosts are stale. */
     QdsmcRKStats Advance (amrex::MultiFab & y, amrex::Real const t_end) const
     {
+        using namespace amrex::literals;
         QdsmcRKStats st;
         if (t_end <= 0.0_rt) { return st; }
 
         int const nk = (m_scheme == Scheme::RKF45) ? 6 : 2;
-        amrex::MultiFab y0(y.boxArray(), y.DistributionMap(), 1, 0);
+        int const nc = y.nComp();
+        amrex::MultiFab y0(y.boxArray(), y.DistributionMap(), nc, 0);
         amrex::Vector<amrex::MultiFab> k(nk);
         for (int s = 0; s < nk; ++s) {
-            k[s].define(y.boxArray(), y.DistributionMap(), 1, 0);
+            k[s].define(y.boxArray(), y.DistributionMap(), nc, 0);
         }
-        amrex::MultiFab::Copy(y0, y, 0, 0, 1, 0);
+        amrex::MultiFab::Copy(y0, y, 0, 0, nc, 0);
 
         amrex::Real const expo =
             (m_scheme == Scheme::RKF45) ? -0.2_rt : -0.5_rt;
@@ -115,10 +118,10 @@ public:
                 st.t_done += dt;
                 ++st.n_accepted;
                 st.dt_last = dt;
-                amrex::MultiFab::Copy(y0, y, 0, 0, 1, 0);
+                amrex::MultiFab::Copy(y0, y, 0, 0, nc, 0);
                 dt *= amrex::min(m_max_growth, fac);
             } else {
-                amrex::MultiFab::Copy(y, y0, 0, 0, 1, 0);
+                amrex::MultiFab::Copy(y, y0, 0, 0, nc, 0);
                 dt *= amrex::max(0.1_rt, fac);
             }
         }
@@ -130,7 +133,9 @@ private:
     amrex::Real ErrNorm (amrex::MultiFab const & e,
                          amrex::MultiFab const & y0) const
     {
+        using namespace amrex::literals;
         amrex::Real const rtol = m_rtol, atol = m_atol;
+        int const nc = e.nComp();
         amrex::ReduceOps<amrex::ReduceOpMax> reduce_op;
         amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
         using ReduceTuple = typename decltype(reduce_data)::Type;
@@ -141,8 +146,12 @@ private:
             reduce_op.eval(box, reduce_data,
                 [=] AMREX_GPU_DEVICE (int i, int j, int kk) -> ReduceTuple
             {
-                return {std::abs(e_arr(i,j,kk)) /
-                        (atol + rtol*std::abs(y_arr(i,j,kk)))};
+                amrex::Real r = 0.0_rt;
+                for (int c = 0; c < nc; ++c) {
+                    r = amrex::max(r, std::abs(e_arr(i,j,kk,c)) /
+                        (atol + rtol*std::abs(y_arr(i,j,kk,c))));
+                }
+                return {r};
             });
         }
         auto tup = reduce_data.value(reduce_op);
@@ -157,16 +166,18 @@ private:
                             amrex::Vector<amrex::MultiFab> & k,
                             amrex::Real const dt) const
     {
+        using namespace amrex::literals;
+        int const nc = y.nComp();
         // predictor y = y0 + dt k1 (also the embedded order-1 solution)
-        amrex::MultiFab::LinComb(y, 1.0_rt, y0, 0, dt, k[0], 0, 0, 1, 0);
+        amrex::MultiFab::LinComb(y, 1.0_rt, y0, 0, dt, k[0], 0, 0, nc, 0);
         m_rhs(y, k[1]);
         // corrector y = y0 + dt/2 (k1 + k2); error e = dt/2 (k2 - k1)
-        amrex::MultiFab e(y.boxArray(), y.DistributionMap(), 1, 0);
+        amrex::MultiFab e(y.boxArray(), y.DistributionMap(), nc, 0);
         amrex::MultiFab::LinComb(e, -0.5_rt*dt, k[0], 0, 0.5_rt*dt, k[1],
-                                 0, 0, 1, 0);
+                                 0, 0, nc, 0);
         amrex::MultiFab::LinComb(y, 1.0_rt, y0, 0, 0.5_rt*dt, k[0],
-                                 0, 0, 1, 0);
-        amrex::MultiFab::Saxpy(y, 0.5_rt*dt, k[1], 0, 0, 1, 0);
+                                 0, 0, nc, 0);
+        amrex::MultiFab::Saxpy(y, 0.5_rt*dt, k[1], 0, 0, nc, 0);
         return ErrNorm(e, y0);
     }
 
@@ -177,6 +188,7 @@ private:
                            amrex::Vector<amrex::MultiFab> & k,
                            amrex::Real const dt) const
     {
+        using namespace amrex::literals;
         constexpr amrex::Real a21 = 1._rt/4._rt;
         constexpr amrex::Real a31 = 3._rt/32._rt,      a32 = 9._rt/32._rt;
         constexpr amrex::Real a41 = 1932._rt/2197._rt, a42 = -7200._rt/2197._rt,
@@ -193,12 +205,13 @@ private:
         constexpr amrex::Real b41 = 25._rt/216._rt,    b43 = 1408._rt/2565._rt,
                               b44 = 2197._rt/4104._rt, b45 = -1._rt/5._rt;
 
+        int const nc = y.nComp();
         auto stage = [&] (std::initializer_list<std::pair<amrex::Real, int>>
                               terms, int const kout)
         {
-            amrex::MultiFab::Copy(y, y0, 0, 0, 1, 0);
+            amrex::MultiFab::Copy(y, y0, 0, 0, nc, 0);
             for (auto const & t : terms) {
-                amrex::MultiFab::Saxpy(y, dt*t.first, k[t.second], 0, 0, 1, 0);
+                amrex::MultiFab::Saxpy(y, dt*t.first, k[t.second], 0, 0, nc, 0);
             }
             m_rhs(y, k[kout]);
         };
@@ -209,17 +222,17 @@ private:
         stage({{a61, 0}, {a62, 1}, {a63, 2}, {a64, 3}, {a65, 4}}, 5);
 
         // 5th-order candidate and 4th/5th error in one pass each
-        amrex::MultiFab e(y.boxArray(), y.DistributionMap(), 1, 0);
-        amrex::MultiFab::LinComb(y, 1.0_rt, y0, 0, dt*b51, k[0], 0, 0, 1, 0);
-        amrex::MultiFab::Saxpy(y, dt*b53, k[2], 0, 0, 1, 0);
-        amrex::MultiFab::Saxpy(y, dt*b54, k[3], 0, 0, 1, 0);
-        amrex::MultiFab::Saxpy(y, dt*b55, k[4], 0, 0, 1, 0);
-        amrex::MultiFab::Saxpy(y, dt*b56, k[5], 0, 0, 1, 0);
+        amrex::MultiFab e(y.boxArray(), y.DistributionMap(), nc, 0);
+        amrex::MultiFab::LinComb(y, 1.0_rt, y0, 0, dt*b51, k[0], 0, 0, nc, 0);
+        amrex::MultiFab::Saxpy(y, dt*b53, k[2], 0, 0, nc, 0);
+        amrex::MultiFab::Saxpy(y, dt*b54, k[3], 0, 0, nc, 0);
+        amrex::MultiFab::Saxpy(y, dt*b55, k[4], 0, 0, nc, 0);
+        amrex::MultiFab::Saxpy(y, dt*b56, k[5], 0, 0, nc, 0);
         amrex::MultiFab::LinComb(e, dt*(b51 - b41), k[0], 0,
-                                 dt*(b53 - b43), k[2], 0, 0, 1, 0);
-        amrex::MultiFab::Saxpy(e, dt*(b54 - b44), k[3], 0, 0, 1, 0);
-        amrex::MultiFab::Saxpy(e, dt*(b55 - b45), k[4], 0, 0, 1, 0);
-        amrex::MultiFab::Saxpy(e, dt*b56, k[5], 0, 0, 1, 0);
+                                 dt*(b53 - b43), k[2], 0, 0, nc, 0);
+        amrex::MultiFab::Saxpy(e, dt*(b54 - b44), k[3], 0, 0, nc, 0);
+        amrex::MultiFab::Saxpy(e, dt*(b55 - b45), k[4], 0, 0, nc, 0);
+        amrex::MultiFab::Saxpy(e, dt*b56, k[5], 0, 0, nc, 0);
         return ErrNorm(e, y0);
     }
 
