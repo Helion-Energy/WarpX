@@ -1204,17 +1204,27 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
     }
 
     // Seed T_e with the uniform value parsed from <hybrid>.elec_temp (in
-    // Joules after ReadParameters, so dividing by k_B gives Kelvin). Done
-    // unconditionally so the iter-0 diag dump -- which WarpX::InitData()
-    // flushes BEFORE the first call to HybridPICInitializeRhoJandB -- sees
-    // a meaningful T_e rather than the zero-initialized allocation. With
-    // the energy equation on, this is the starting K_e value the QDSMC
-    // particles will read on the first step; with it off, the diagnostic
-    // value gets overwritten each step by CalculateElectronPressure.
-    for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
-        amrex::MultiFab & Te_mf = *warpx.m_fields.get(
-            FieldType::hybrid_electron_temperature_fp, lev);
-        Te_mf.setVal(m_elec_temp / PhysConst::kb);
+    // Joules after ReadParameters, so dividing by k_B gives Kelvin), so
+    // the iter-0 diag dump -- which WarpX::InitData() flushes BEFORE the
+    // first call to HybridPICInitializeRhoJandB -- sees a meaningful T_e
+    // rather than the zero-initialized allocation. With the energy
+    // equation on, this is the starting K_e value the QDSMC particles
+    // will read on the first step; with it off, the diagnostic value gets
+    // overwritten each step by CalculateElectronPressure.
+    //
+    // SKIP when the te_seeded latch is already set: this InitData runs
+    // AFTER InitFromCheckpoint in WarpX::InitData, and on a restart with
+    // the energy equation the checkpoint restore has already placed the
+    // EVOLVED T_e here (and pre-set the latch) -- the unconditional fill
+    // silently wiped it back to the uniform constant, making the restored
+    // and re-seeded restart arms measurably near-identical (the restore
+    // was dead code until this guard).
+    if (!m_qdsmc_te_seeded) {
+        for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+            amrex::MultiFab & Te_mf = *warpx.m_fields.get(
+                FieldType::hybrid_electron_temperature_fp, lev);
+            Te_mf.setVal(m_elec_temp / PhysConst::kb);
+        }
     }
 
     // QDSMC: lazy-construct the fictitious-particle container and lay one
