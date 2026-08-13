@@ -686,6 +686,38 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# ion thermal conduction on the central-flux face registers: a 1% sinusoidal
+# ion-temperature mode on a uniform static background, with chi_i stiff
+# against the acoustic response (chi k / c_s ~ 57), must decay at the
+# analytic q = -kappa grad T rate chi k^2 to 5% (the known discretization
+# corrections total ~0.3%) while the conservative conductive flux keeps the
+# fluid energy ledger closed to roundoff
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_conduction  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_central_conduction  # inputs
+    "analysis_mhd_central_conduction.py diags/diag000000 diags/diag000010"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# pressure-recovery corner width smoke check: a uniform magnetized state
+# under the total_energy closure with a uniform axial flow (so the local
+# kinetic energy is nonzero and pressure_corner_width_fraction genuinely
+# inflates the smooth-max corner width) must stay uniform to round-off --
+# the state never approaches the corner, and a uniform width inflation has
+# zero gradient
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_uniform_corner_width  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_uniform implicit_mhd.fluid_flux=central implicit_mhd.viscosity=0.5 hybrid_pic_model.include_hall_term=false hybrid_pic_model.include_electron_pressure_term=false implicit_mhd.ion_closure=total_energy implicit_mhd.ion_pressure(x,y,z)=Pe implicit_mhd.ion_pressure_floor=1.0e-6*Pe implicit_mhd.velocity_z(x,y,z)=1.0e4 implicit_mhd.pressure_corner_width_fraction=0.01"  # inputs
+    "analysis_mhd_uniform.py diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # RZ recast invariants: div B at round-off and B_theta EXACTLY zero
 # through 60 steps of corner-UCT-driven poloidal dynamics, on 2 ranks so
 # the corner EMF is exercised across MPI seams

@@ -592,6 +592,16 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // normal-gradient viscous stress and its velocity-weighted work enter
     // the face registers as an exactly conservative pair.
     amrex::Real m_viscosity = 0.0;
+    // Thermal diffusivities chi_i/chi_e [m^2/s] of the recast face fluxes
+    // (0 = off): conservative internal-energy diffusion
+    // -chi rho_f d(e_spec)/dn (q = -kappa grad T, Chacon JCP 526 (2025))
+    // on the ion total-energy and electron energy face channels.
+    amrex::Real m_thermal_diffusivity_ion = 0.0;
+    amrex::Real m_thermal_diffusivity_electron = 0.0;
+    // Floor-independent corner width of the C^1 smooth-max pressure
+    // recovery (see FluxParameters::pressure_corner_width_fraction;
+    // 0 = legacy width = internal-energy floor).
+    amrex::Real m_pressure_corner_width_fraction = 0.0;
     // C-infinity smoothing widths of the HLLD wave fan (see FluxParameters
     // in ThetaImplicitMHD_K.H); inputs implicit_mhd.hlld_kappa_*.
     amrex::Real m_hlld_kappa_signal = 0.05;

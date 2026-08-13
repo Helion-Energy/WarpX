@@ -161,6 +161,12 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     pp.query("external_field_iteration", m_external_field_iteration);
     pp.query("fluid_flux", m_fluid_flux);
     utils::parser::queryWithParser(pp, "viscosity", m_viscosity);
+    utils::parser::queryWithParser(pp, "thermal_diffusivity_ion",
+                                   m_thermal_diffusivity_ion);
+    utils::parser::queryWithParser(pp, "thermal_diffusivity_electron",
+                                   m_thermal_diffusivity_electron);
+    utils::parser::queryWithParser(pp, "pressure_corner_width_fraction",
+                                   m_pressure_corner_width_fraction);
     pp.query("r_open_fluid", m_r_open_fluid);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_r_open_fluid == "outflow" || m_r_open_fluid == "reflect" ||
@@ -235,6 +241,30 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "implicit_mhd.viscosity is not supported with "
         "implicit_mhd.ion_closure = cgl (the viscous stress work is only "
         "paired into the total_energy ion-energy channel)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_thermal_diffusivity_ion >= 0.0_rt &&
+            m_thermal_diffusivity_electron >= 0.0_rt,
+        "implicit_mhd.thermal_diffusivity_ion/electron cannot be negative");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        (m_thermal_diffusivity_ion == 0.0_rt &&
+         m_thermal_diffusivity_electron == 0.0_rt) ||
+            m_use_recast,
+        "implicit_mhd.thermal_diffusivity_ion/electron require the "
+        "conservative-form recast (implicit_mhd.fluid_flux = hlld or "
+        "central): the conductive face flux is only wired into the recast "
+        "face-flux registers");
+    // The conductive flux enters the total_energy ion-energy channel;
+    // under the barotropic and cgl closures that register is never
+    // consumed, so a positive chi_i would be a silent no-op.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_thermal_diffusivity_ion == 0.0_rt ||
+            m_ion_closure == "total_energy",
+        "implicit_mhd.thermal_diffusivity_ion requires "
+        "implicit_mhd.ion_closure = total_energy (the ion conductive flux "
+        "is only wired into the total_energy ion-energy channel)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_pressure_corner_width_fraction >= 0.0_rt,
+        "implicit_mhd.pressure_corner_width_fraction cannot be negative");
     if (m_use_central) {
         // Central alone is nonlinearly unstable: the flux carries no
         // Riemann dissipation, so explicit viscosity must supply it.
@@ -1170,6 +1200,11 @@ void ThetaImplicitMHD::PrintParameters () const
     amrex::Print()
                    << "Ion closure:                   " << m_ion_closure << "\n"
                    << "Viscosity [m2/s]:              " << m_viscosity << "\n"
+                   << "Thermal diffusivity i/e [m2/s]: "
+                   << m_thermal_diffusivity_ion << " "
+                   << m_thermal_diffusivity_electron << "\n"
+                   << "Pressure corner width fraction: "
+                   << m_pressure_corner_width_fraction << "\n"
                    << "Positivity step safety:        " << m_positivity_safety << "\n"
                    << "Joule heating:                 " << m_include_joule_heating << "\n"
                    << "Resistive theta:               " << m_resistive_theta << "\n"
@@ -2321,6 +2356,8 @@ theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
     // under cgl: load_cell_state_cgl overwrites the polytropic pressure
     // with p_eff and the E_i machinery stays dormant.
     flux_parameters.cgl_closure = (m_ion_closure == "cgl");
+    flux_parameters.pressure_corner_width_fraction =
+        m_pressure_corner_width_fraction;
     // Per-step frozen pedestal state (0 while the pedestal is off):
     // anchors the per-block drain gates and the halo source taper.
     flux_parameters.halo_pedestal = m_halo_pedestal_density;
@@ -2839,6 +2876,10 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     // advective channels).
     const amrex::Real viscosity = m_viscosity;
     const bool add_viscosity = (viscosity > 0.0_rt);
+    // Thermal conduction shares the viscous flux's spacing convention.
+    const amrex::Real chi_ion = m_thermal_diffusivity_ion;
+    const amrex::Real chi_electron = m_thermal_diffusivity_electron;
+    const bool add_conduction = (chi_ion > 0.0_rt || chi_electron > 0.0_rt);
 #if defined(WARPX_DIM_1D_Z)
     const amrex::Real inverse_normal_size =
         1.0_rt / m_WarpX->Geom(0).CellSize(0);
@@ -3135,6 +3176,45 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                     viscous_stress;
                 }
                 flux.ion_energy += viscous_work;
+            }
+
+            // Thermal conduction (implicit_mhd.thermal_diffusivity_*):
+            // the conductive internal-energy flux -chi rho_f d(e_spec)/dn
+            // (q = -kappa grad T with kappa = chi rho c_v) on the SAME
+            // face registers, placed exactly like the viscous terms --
+            // after the donor gates (which only scale the advective
+            // channels) and inside the zero-flux wall mask. Pure energy
+            // diffusion: unlike the viscous stress there is no momentum
+            // twin to pair, so no channel-splitting hazard exists. The
+            // specific internal energies come from the SAME CellState
+            // pressures the physical fluxes use (the smooth-floored
+            // recovered p_i(E_i) under total_energy: ion_internal is
+            // exactly p_i/(gamma_i - 1)).
+            if (add_conduction
+#if defined(WARPX_DIM_RZ)
+                && !(reflect_wall && i == radial_wall_face)
+#endif
+            ) {
+                const amrex::Real face_density =
+                    0.5_rt * (left.density + right.density);
+                if (chi_ion > 0.0_rt) {
+                    flux.ion_energy -=
+                        chi_ion * face_density *
+                        (right.ion_internal / right.safe_density -
+                         left.ion_internal / left.safe_density) *
+                        inverse_normal_size;
+                }
+                if (chi_electron > 0.0_rt) {
+                    const amrex::Real inverse_gamma_e_minus_one =
+                        1.0_rt / (parameters.gamma_e - 1.0_rt);
+                    flux.electron_energy -=
+                        chi_electron * face_density *
+                        (right.electron_pressure * inverse_gamma_e_minus_one /
+                             right.safe_density -
+                         left.electron_pressure * inverse_gamma_e_minus_one /
+                             left.safe_density) *
+                        inverse_normal_size;
+                }
             }
 
 #if defined(WARPX_DIM_RZ)

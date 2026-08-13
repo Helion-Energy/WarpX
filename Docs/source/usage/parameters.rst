@@ -4584,6 +4584,54 @@ Jacobian probes.
     stress work against). The zero-flux reflecting wall passes no
     viscous flux, matching the advective wall policy.
 
+.. pp:param:: implicit_mhd.thermal_diffusivity_ion
+    :type: ``float``
+    :default: ``0``
+
+    Ion thermal diffusivity :math:`\chi_i` in m^2/s of the
+    conservative-form recast face fluxes (``fluid_flux = hlld`` or
+    ``central``; 0 = off). Adds the conductive internal-energy flux
+    :math:`-\chi_i \rho_f \, \partial e_i / \partial n` (the
+    :math:`q = -\kappa \nabla T` heat flux of Chacón, JCP 526 (2025),
+    with :math:`\kappa = \chi_i \rho c_v`) to the ion total-energy face
+    channel, with :math:`\rho_f` the arithmetic face density and
+    :math:`e_i = p_i / ((\gamma_i - 1)\rho)` the specific internal
+    energy recovered from the same (smooth-floored) cell pressures the
+    physical fluxes use. Pure energy diffusion — there is no momentum
+    counterpart — added after the donor gates and inside the zero-flux
+    wall mask, exactly like the viscous terms. Requires
+    ``ion_closure = total_energy`` (the flux enters the total ion-energy
+    channel).
+
+.. pp:param:: implicit_mhd.thermal_diffusivity_electron
+    :type: ``float``
+    :default: ``0``
+
+    Electron thermal diffusivity :math:`\chi_e` in m^2/s of the
+    conservative-form recast face fluxes (0 = off): the electron
+    counterpart of :pp:param:`implicit_mhd.thermal_diffusivity_ion`,
+    diffusing :math:`e_e = p_e / ((\gamma_e - 1)\rho)` on the electron
+    energy face channel. Available under every ion closure (the electron
+    energy block is always evolved).
+
+.. pp:param:: implicit_mhd.pressure_corner_width_fraction
+    :type: ``float``
+    :default: ``0``
+
+    Corner width of the :math:`C^1` smooth-max internal-energy floor in
+    the recast's ion pressure recovery
+    :math:`p_i = (\gamma_i - 1)(E_i - \rho u^2/2)` under
+    ``ion_closure = total_energy``. The default 0 keeps the legacy width
+    (the internal-energy floor itself, bit-identical behavior), which at
+    production floor scales is tiny against the subtracted kinetic
+    energy: a compressed cell riding the corner then presents a
+    near-kink whose local Jacobian is near-singular. A positive fraction
+    widens the corner to
+    :math:`\max(\text{floor}, \text{fraction} \times \rho u^2/2)`,
+    keying the width to the local kinetic-energy scale. The asymptotes
+    stay exact (floor below, :math:`E_i - \rho u^2/2` above); the corner
+    inflation is width/2, confined to near-corner cells.
+
 .. pp:param:: implicit_mhd.r_open_fluid
     :type: ``string``
     :default: ``outflow``

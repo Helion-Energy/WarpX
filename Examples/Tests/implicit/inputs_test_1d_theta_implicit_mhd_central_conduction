@@ -1,0 +1,112 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.Ti = 50.0
+my_constants.Pi0 = n0 * Ti * q_e
+my_constants.Pe0 = 0.5 * Pi0
+my_constants.gamma = 5.0/3.0
+my_constants.B0 = sqrt(mu0 * Pi0)
+my_constants.nz = 64
+my_constants.Lz = 1.0
+my_constants.kz = 2*pi/Lz
+# ion thermal diffusivity, stiff against the acoustic response
+# (chi*kz/cs ~ 57): the ion temperature mode decays diffusively at the
+# analytic q = -kappa grad T rate chi kz^2 before sound can convert it
+my_constants.chi = 1.0e6
+# small temperature perturbation: linear decay, far above the 1e-6 floors
+my_constants.dTi = 0.01
+# ~0.2 diffusion decades per step: chi kz^2 dt = 0.2
+my_constants.dt = 0.2/(chi*kz*kz)
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 10
+amr.n_cell = nz
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 20
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-10
+gmres.max_iterations = 300
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = 0.5 * Ti
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = Pi0
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.ion_pressure_floor = 1.0e-6 * Pi0
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-6 * Pe0
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 0.5
+implicit_mhd.thermal_diffusivity_ion = chi
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.ion_pressure(x,y,z) = Pi0*(1.0 + dTi*sin(kz*z))
+implicit_mhd.electron_pressure(x,y,z) = Pe0
+
+# A uniform axial field keeps the electromagnetic subsystem quiescent
+# (u x B = 0 for the residual axial flow, eta = 0, J = 0), so the run
+# isolates the conductive channel of the ion energy equation.
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 B0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 10
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz jz implicit_mhd_mass_density \
+                       implicit_mhd_ion_energy implicit_mhd_electron_energy
+diag1.write_species = 0

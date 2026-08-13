@@ -2220,6 +2220,29 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         the same face registers, keeping the discrete energy exchange
         conservative. Not supported with ion_closure="cgl".
 
+    thermal_diffusivity_ion: float, default=0 (off)
+        Ion thermal diffusivity chi_i in m^2/s of the recast face fluxes
+        (fluid_flux="hlld" or "central"): the conductive internal-energy
+        flux -chi_i rho_f d(e_i)/dn (q = -kappa grad T) on the ion
+        total-energy face channel, with e_i = p_i/((gamma_i - 1) rho)
+        recovered from the same cell pressures the physical fluxes use.
+        Requires ion_closure="total_energy".
+
+    thermal_diffusivity_electron: float, default=0 (off)
+        Electron thermal diffusivity chi_e in m^2/s of the recast face
+        fluxes: the electron counterpart of thermal_diffusivity_ion,
+        diffusing e_e = p_e/((gamma_e - 1) rho) on the electron energy
+        face channel.
+
+    pressure_corner_width_fraction: float, default=0 (legacy width)
+        Corner width of the smooth-max internal-energy floor in the
+        recast's ion pressure recovery (ion_closure="total_energy"): a
+        positive fraction widens the corner to
+        max(floor, fraction * kinetic energy), keying the width to the
+        local kinetic-energy scale so compressed cells riding the corner
+        do not present a near-singular local Jacobian. 0 keeps the legacy
+        floor-width corner (bit-identical behavior).
+
     r_open_fluid: {"outflow", "reflect", "absorb"}, optional
         Fluid ghost treatment at an open (Green's-function) upper radial
         boundary: zero-gradient outflow (default) or the no-normal-flow
@@ -2443,6 +2466,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         resistive_theta=None,
         fluid_flux=None,
         viscosity=None,
+        thermal_diffusivity_ion=None,
+        thermal_diffusivity_electron=None,
+        pressure_corner_width_fraction=None,
         r_open_fluid=None,
         absorb_ledger_interval=None,
         absorb_ledger_file=None,
@@ -2496,6 +2522,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.resistive_theta = resistive_theta
         self.fluid_flux = fluid_flux
         self.viscosity = viscosity
+        self.thermal_diffusivity_ion = thermal_diffusivity_ion
+        self.thermal_diffusivity_electron = thermal_diffusivity_electron
+        self.pressure_corner_width_fraction = pressure_corner_width_fraction
         self.r_open_fluid = r_open_fluid
         self.absorb_ledger_interval = absorb_ledger_interval
         self.absorb_ledger_file = absorb_ledger_file
@@ -2557,6 +2586,13 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.resistive_theta = self.resistive_theta
         implicit_mhd.fluid_flux = self.fluid_flux
         implicit_mhd.viscosity = self.viscosity
+        implicit_mhd.thermal_diffusivity_ion = self.thermal_diffusivity_ion
+        implicit_mhd.thermal_diffusivity_electron = (
+            self.thermal_diffusivity_electron
+        )
+        implicit_mhd.pressure_corner_width_fraction = (
+            self.pressure_corner_width_fraction
+        )
         implicit_mhd.r_open_fluid = self.r_open_fluid
         implicit_mhd.absorb_ledger_interval = self.absorb_ledger_interval
         implicit_mhd.absorb_ledger_file = self.absorb_ledger_file

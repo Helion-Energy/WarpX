@@ -109,6 +109,16 @@ struct FluxParameters {
     amrex::Real halo_pedestal_ion_internal = 0.0;
     amrex::Real halo_pedestal_ion_parallel = 0.0;
     amrex::Real halo_pedestal_ion_perp = 0.0;
+    // Floor-independent corner width of the C^1 smooth-max internal-energy
+    // floor in load_cell_state (0 = legacy: width = internal floor). At
+    // production floor scales the legacy width is tiny, so a compressed
+    // cell riding the corner presents a near-kink to the pressure recovery
+    // and its local Jacobian is near-singular; a positive fraction widens
+    // the corner to max(internal_floor, fraction * kinetic_energy), keying
+    // the width to the LOCAL kinetic-energy scale of the recovery's
+    // subtraction. Asymptotes stay exact (floor below, E_i - KE above);
+    // the inflation is width/2, confined to near-corner cells.
+    amrex::Real pressure_corner_width_fraction = 0.0;
 };
 
 struct CellState {
@@ -404,16 +414,25 @@ load_cell_state (const amrex::Array4<const amrex::Real>& density,
             parameters.ion_pressure_floor / (parameters.gamma_i - 1.0);
         const amrex::Real excess =
             state.ion_energy - kinetic_energy - internal_floor;
-        // C^1 smooth max against the internal-energy floor (width =
-        // floor): a hard clamp's kink makes the pressure recovery
-        // non-differentiable exactly where floored halo cells sit, and
-        // the Newton line search then cannot find a residual decrease.
-        // Asymptotes are exact (floor below, E_i - KE above); the corner
-        // inflation is floor/2, confined to floored cells.
+        // C^1 smooth max against the internal-energy floor: a hard
+        // clamp's kink makes the pressure recovery non-differentiable
+        // exactly where floored halo cells sit, and the Newton line
+        // search then cannot find a residual decrease. The legacy width
+        // is the floor itself, which at production floor scales is tiny
+        // against the kinetic energy subtracted just above -- a
+        // compressed cell riding the corner then still presents a
+        // near-kink and a near-singular local Jacobian; a positive
+        // pressure_corner_width_fraction keys the width to the local
+        // kinetic-energy scale instead. Asymptotes are exact (floor
+        // below, E_i - KE above); the corner inflation is width/2,
+        // confined to near-corner cells.
+        const amrex::Real corner_width = std::max(
+            internal_floor,
+            parameters.pressure_corner_width_fraction * kinetic_energy);
         state.ion_internal =
             internal_floor +
             0.5 * (excess + std::sqrt(excess * excess +
-                                      internal_floor * internal_floor));
+                                      corner_width * corner_width));
         state.ion_pressure = (parameters.gamma_i - 1.0) * state.ion_internal;
     } else {
         state.ion_energy = 0.0;
