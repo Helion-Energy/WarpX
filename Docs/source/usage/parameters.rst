@@ -5472,6 +5472,21 @@ This shifts analysis from post-processing to runtime calculation of reduction op
            The FieldProbe reduced diagnostic does not yet add a Lorentz back transformation for boosted frame simulations.
            Thus, it records field data in the boosted frame, not (yet) in the lab frame.
 
+    * ``ScrapedParticleEnergy``
+        This type tallies the kinetic energy carried out of the domain by particles absorbed at the
+        domain (and, when compiled in, embedded) boundaries — the particle-outflow advection term of
+        a per-step energy ledger.
+
+        The output columns are, for each species and boundary, the kinetic energy scraped during the
+        step (in Joules), followed by the cumulative scraped energy since the start of the run (in
+        Joules). The cumulative sums are preserved across checkpoint/restart, and are integrated
+        every step regardless of the write interval.
+
+        The tally reads the particle boundary buffer, so ``<species>.save_particles_at_*`` must be
+        enabled for the species and boundaries of interest (boundaries without an enabled buffer
+        report zero). Each absorbed particle is counted exactly once, also when a
+        ``BoundaryScrapingDiagnostic`` clears the buffer between outputs.
+
     * ``RhoMaximum``
         This type computes the maximum and minimum values of the total charge density as well as
         the maximum absolute value of the charge density of each charged species.

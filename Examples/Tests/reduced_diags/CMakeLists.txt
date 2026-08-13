@@ -2,6 +2,16 @@
 #
 
 add_warpx_test(
+    test_2d_reduced_diags_scraped_energy_picmi  # name
+    2  # dims
+    2  # nprocs
+    inputs_test_2d_reduced_diags_scraped_energy_picmi.py  # inputs
+    "analysis_scraped_energy.py"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
     test_3d_reduced_diags  # name
     3  # dims
     2  # nprocs
