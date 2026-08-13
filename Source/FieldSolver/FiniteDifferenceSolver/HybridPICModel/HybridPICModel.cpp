@@ -1147,7 +1147,7 @@ void HybridPICModel::QDSMCApplyInsulatingEBFill (int const lev) const
     int const n_sweeps =
         static_cast<int>(std::ceil(WarpX::eb_standoff_cells)) + 3;
 
-    auto const n_floor = m_qdsmc_n_floor;
+    auto const n_floor = m_n_floor;
 
     // status = 1: valid fill source (live plasma, or filled in an earlier
     // sweep); 0: to fill. Ghosts outside the domain stay 0 and never donate.

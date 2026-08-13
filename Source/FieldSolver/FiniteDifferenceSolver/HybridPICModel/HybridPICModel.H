@@ -317,7 +317,7 @@ public:
      *
      *        The fill mask keys off the transport's own boundary set -- a
      *        node is filled only if it is below the density floor
-     *        (m_qdsmc_n_floor on rho_fp, the QDSMCUpdateTe guard) or
+     *        (m_n_floor on rho_fp, the QDSMCUpdateTe guard) or
      *        EB-covered (distance_to_eb <= 0), AND within
      *        (eb_standoff_cells + 1) cells of the surface. Live plasma nodes
      *        are never touched (a geometry-based mask would rewrite
