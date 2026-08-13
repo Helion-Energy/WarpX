@@ -1294,21 +1294,35 @@ void HybridPICModel::BfieldEvolveRK4 (
     ABLASTR_PROFILE("HybridPICModel::BfieldEvolveRK4");
     const int finest_level = WarpX::GetInstance().finestLevel();
 
-    // Create multifabs on each level and direction to store the Runge-Kutta
-    // intermediate terms. Each multifab has 2 components for the different
-    // terms that need to be stored.
+    // Persistent Runge-Kutta stage scratch (2 components per direction).
+    // Every component is written before it is read within one substep (K0 by
+    // the stage-1 LinComb, K1 by the stage-2 kernel), so reusing the scratch
+    // across substeps is bit-identical to a fresh allocation.
     ABLASTR_PROFILE_VAR("HybridPIC::RK4::K_alloc", prof_rk4_kalloc);
-    amrex::Vector<std::array< MultiFab, 3 >> K(finest_level + 1);
+    if (static_cast<int>(m_rk4_scratch.size()) <= finest_level) {
+        m_rk4_scratch.resize(finest_level + 1);
+        m_rk4_scratch_ba.resize(finest_level + 1);
+        m_rk4_scratch_ng.resize(finest_level + 1, amrex::IntVect(-1));
+    }
     for (int lev = 0; lev <= finest_level; ++lev)
     {
-        for (int ii = 0; ii < 3; ii++)
-        {
-            K[lev][ii] = MultiFab(
-                Bfield[lev][ii]->boxArray(), Bfield[lev][ii]->DistributionMap(), 2,
-                Bfield[lev][ii]->nGrowVect()
-            );
+        const bool stale = !m_rk4_scratch[lev][0].ok() ||
+            m_rk4_scratch_ba[lev] != Bfield[lev][0]->boxArray() ||
+            m_rk4_scratch[lev][0].DistributionMap() != Bfield[lev][0]->DistributionMap() ||
+            m_rk4_scratch_ng[lev] != Bfield[lev][0]->nGrowVect();
+        if (stale) {
+            for (int ii = 0; ii < 3; ii++)
+            {
+                m_rk4_scratch[lev][ii] = MultiFab(
+                    Bfield[lev][ii]->boxArray(), Bfield[lev][ii]->DistributionMap(), 2,
+                    Bfield[lev][ii]->nGrowVect()
+                );
+            }
+            m_rk4_scratch_ba[lev] = Bfield[lev][0]->boxArray();
+            m_rk4_scratch_ng[lev] = Bfield[lev][0]->nGrowVect();
         }
     }
+    amrex::Vector<std::array< MultiFab, 3 >>& K = m_rk4_scratch;
     ABLASTR_PROFILE_VAR_STOP(prof_rk4_kalloc);
 
     // Seam EMF matching (mesh refinement): accumulate the per-stage edge EMFs

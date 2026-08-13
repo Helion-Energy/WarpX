@@ -450,8 +450,8 @@ void HybridPICModel::EnsureProlongGateMask (const int lev,
     m_mr_prolong_gate_ba[lev] = cpatch_ba;
 }
 
-void HybridPICModel::ProlongBfieldFromCoarse (
-    const int lev, amrex::IntVect const& ng, std::array<amrex::MultiFab, 3>& Btmp)
+std::array<amrex::MultiFab, 3>& HybridPICModel::ProlongBfieldFromCoarse (
+    const int lev, amrex::IntVect const& ng)
 {
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
     ABLASTR_PROFILE("HybridMR::ProlongBfieldFromCoarse");
@@ -489,29 +489,60 @@ void HybridPICModel::ProlongBfieldFromCoarse (
         ng_pad[d] = ((ng[d] + ratio[d] - 1) / ratio[d]) * ratio[d];
     }
     const amrex::BoxArray& fba_cell = warpx.boxArray(lev);
+    const amrex::DistributionMapping& fdm = Bfine[0]->DistributionMap();
+
+    // Persistent scratch: the fine-layout target, the per-box coarse patches
+    // and their BoxArray are (re)built only when the layout or the ghost pad
+    // changes, and zeroed once at (re)allocation. Every point read downstream
+    // is rewritten on each fill (the interpolation covers the padded fill
+    // region, the ParallelCopy covers all in-domain coarse-patch cells, and
+    // the masked path pre-seeds the full scratch), while cells beyond a
+    // non-periodic domain boundary are never written and keep the initial
+    // zero -- so reuse is bit-identical to fresh zeroed scratch.
     ABLASTR_PROFILE_VAR("HybridMR::Prolong::scratch", prof_prolong_scratch);
-    for (int idim = 0; idim < 3; ++idim) {
-        Btmp[idim] = amrex::MultiFab(
-            Bfine[idim]->boxArray(), Bfine[idim]->DistributionMap(), 1, ng_pad);
-        Btmp[idim].setVal(0.0_rt);
+    if (static_cast<int>(m_mr_prolong_scratch.size()) <= lev) {
+        m_mr_prolong_scratch.resize(lev + 1);
+        m_mr_prolong_cpatch.resize(lev + 1);
+        m_mr_prolong_cpatch_ba.resize(lev + 1);
+        m_mr_prolong_scratch_fba.resize(lev + 1);
+        m_mr_prolong_scratch_ng.resize(lev + 1, amrex::IntVect(-1));
+    }
+    std::array<amrex::MultiFab, 3>& Btmp = m_mr_prolong_scratch[lev];
+    std::array<amrex::MultiFab, 3>& cpatch = m_mr_prolong_cpatch[lev];
+    const bool scratch_stale = !Btmp[0].ok() ||
+        m_mr_prolong_scratch_fba[lev] != fba_cell ||
+        m_mr_prolong_scratch_ng[lev] != ng_pad ||
+        Btmp[0].DistributionMap() != fdm;
+    if (scratch_stale) {
+        amrex::BoxList cbl;
+        for (int i = 0, N = static_cast<int>(fba_cell.size()); i < N; ++i) {
+            cbl.push_back(
+                amrex::grow(amrex::coarsen(amrex::grow(fba_cell[i], ng_pad), ratio), 1));
+        }
+        m_mr_prolong_cpatch_ba[lev] = amrex::BoxArray(std::move(cbl));
+        for (int idim = 0; idim < 3; ++idim) {
+            Btmp[idim] = amrex::MultiFab(
+                Bfine[idim]->boxArray(), fdm, 1, ng_pad);
+            Btmp[idim].setVal(0.0_rt);
+            cpatch[idim] = amrex::MultiFab(
+                amrex::convert(m_mr_prolong_cpatch_ba[lev], Bcrse[idim]->ixType()),
+                fdm, 1, 0);
+            cpatch[idim].setVal(0.0_rt);
+        }
+        m_mr_prolong_scratch_fba[lev] = fba_cell;
+        m_mr_prolong_scratch_ng[lev] = ng_pad;
     }
     ABLASTR_PROFILE_VAR_STOP(prof_prolong_scratch);
 
     {
-        // Import the coarse data onto per-box coarse patches covering
+        // Import the coarse data onto the per-box coarse patches covering
         // CoarseBox(fill region) = coarsen(fill region) grown by 1.
         // ParallelCopy with the coarse periodicity fills everything inside
         // the (periodically extended) domain; anything beyond a non-periodic
         // domain boundary stays zero, and the corresponding fine ghost cells
         // are excluded from the copy-back below (the domain BCs own them).
         ABLASTR_PROFILE_VAR("HybridMR::Prolong::cpatch", prof_prolong_cpatch);
-        amrex::BoxList cbl;
-        for (int i = 0, N = static_cast<int>(fba_cell.size()); i < N; ++i) {
-            cbl.push_back(
-                amrex::grow(amrex::coarsen(amrex::grow(fba_cell[i], ng_pad), ratio), 1));
-        }
-        const amrex::BoxArray cpatch_ba(std::move(cbl));
-        const amrex::DistributionMapping& fdm = Bfine[0]->DistributionMap();
+        const amrex::BoxArray& cpatch_ba = m_mr_prolong_cpatch_ba[lev];
 
         if (gate_enabled) {
             EnsureProlongGateMask(lev, cpatch_ba, fdm);
@@ -536,11 +567,7 @@ void HybridPICModel::ProlongBfieldFromCoarse (
             }
         }
 
-        std::array<amrex::MultiFab, 3> cpatch;
         for (int idim = 0; idim < 3; ++idim) {
-            cpatch[idim] = amrex::MultiFab(
-                amrex::convert(cpatch_ba, Bcrse[idim]->ixType()), fdm, 1, 0);
-            cpatch[idim].setVal(0.0_rt);
             cpatch[idim].ParallelCopy(*Bcrse[idim], 0, 0, 1, cgeom.periodicity());
         }
         ABLASTR_PROFILE_VAR_STOP(prof_prolong_cpatch);
@@ -621,10 +648,13 @@ void HybridPICModel::ProlongBfieldFromCoarse (
         }
         m_mr_prolong_gate_fresh[lev] = 0;
     }
+    return Btmp;
 #else
-    amrex::ignore_unused(lev, ng, Btmp);
+    amrex::ignore_unused(lev, ng);
     WARPX_ABORT_WITH_MESSAGE(
         "Hybrid-PIC mesh refinement is only implemented for Cartesian 2D/3D.");
+    if (m_mr_prolong_scratch.empty()) { m_mr_prolong_scratch.resize(1); }
+    return m_mr_prolong_scratch[0]; // unreachable
 #endif
 }
 
@@ -638,8 +668,7 @@ void HybridPICModel::FillBfieldCoarseFineGhosts (
     ablastr::fields::VectorField Bfine = warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev);
     const amrex::Geometry& fgeom = warpx.Geom(lev);
 
-    std::array<amrex::MultiFab, 3> Btmp;
-    ProlongBfieldFromCoarse(lev, ng, Btmp);
+    std::array<amrex::MultiFab, 3>& Btmp = ProlongBfieldFromCoarse(lev, ng);
 
     // Copy back the ghost region only: interior valid data must not be
     // touched. Ghost cells covered by same-level valid data (including
@@ -670,8 +699,7 @@ void HybridPICModel::SeedBfieldFromCoarse (
     ablastr::fields::VectorField Bfine = warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev);
     const amrex::Geometry& fgeom = warpx.Geom(lev);
 
-    std::array<amrex::MultiFab, 3> Btmp;
-    ProlongBfieldFromCoarse(lev, ng, Btmp);
+    std::array<amrex::MultiFab, 3>& Btmp = ProlongBfieldFromCoarse(lev, ng);
 
     // Seed the whole level: valid cells and every ghost cell inside the
     // periodically grown domain get the divergence-free prolongation of the
@@ -1045,14 +1073,39 @@ void HybridPICModel::RestrictBfieldFineToCoarse (
         const bool use_eb_gate = false;
 #endif
 
+        // Persistent restriction scratch: the coarsened-fine face-average
+        // target is fully rewritten by every average-down, and the masked
+        // commit reads only faces covered by the ParallelCopy import, so the
+        // reuse is bit-identical to fresh zeroed scratch (cells the import
+        // never writes keep the zero set once at allocation).
+        if (static_cast<int>(m_mr_restrict_cf.size()) <= flev) {
+            m_mr_restrict_cf.resize(flev + 1);
+            m_mr_restrict_c.resize(flev + 1);
+            m_mr_restrict_fba.resize(flev + 1);
+        }
+        const bool restrict_scratch_stale = !m_mr_restrict_cf[flev][0].ok() ||
+            m_mr_restrict_fba[flev] != warpx.boxArray(flev) ||
+            m_mr_restrict_cf[flev][0].DistributionMap() != Bfine[0]->DistributionMap() ||
+            m_mr_restrict_c[flev][0].boxArray() != Bcrse[0]->boxArray() ||
+            m_mr_restrict_c[flev][0].DistributionMap() != Bcrse[0]->DistributionMap();
+        if (restrict_scratch_stale) {
+            for (int idim = 0; idim < 3; ++idim) {
+                m_mr_restrict_cf[flev][idim] = amrex::MultiFab(
+                    amrex::coarsen(Bfine[idim]->boxArray(), ratio),
+                    Bfine[idim]->DistributionMap(), 1, 0);
+                m_mr_restrict_c[flev][idim] = amrex::MultiFab(
+                    Bcrse[idim]->boxArray(), Bcrse[idim]->DistributionMap(), 1, 0);
+                m_mr_restrict_c[flev][idim].setVal(0.0_rt);
+            }
+            m_mr_restrict_fba[flev] = warpx.boxArray(flev);
+        }
+
         for (int idim = 0; idim < 3; ++idim)
         {
             // Face-averaged (cell-averaged for the 2D out-of-plane component)
             // restriction onto the coarsened fine layout.
             ABLASTR_PROFILE_VAR("HybridMR::Restrict::avg_down", prof_rs_avg);
-            amrex::MultiFab tmp_cf(
-                amrex::coarsen(Bfine[idim]->boxArray(), ratio),
-                Bfine[idim]->DistributionMap(), 1, 0);
+            amrex::MultiFab& tmp_cf = m_mr_restrict_cf[flev][idim];
             if (Bfine[idim]->ixType().cellCentered()) {
                 amrex::average_down(*Bfine[idim], tmp_cf, 0, 1, ratio);
             } else {
@@ -1063,9 +1116,7 @@ void HybridPICModel::RestrictBfieldFineToCoarse (
             // Move onto the coarse-level layout, then overwrite the coarse
             // field only where the keep-mask allows it.
             ABLASTR_PROFILE_VAR("HybridMR::Restrict::pcopy", prof_rs_pc);
-            amrex::MultiFab tmp_c(
-                Bcrse[idim]->boxArray(), Bcrse[idim]->DistributionMap(), 1, 0);
-            tmp_c.setVal(0.0_rt);
+            amrex::MultiFab& tmp_c = m_mr_restrict_c[flev][idim];
             ablastr::utils::communication::ParallelCopy(
                 tmp_c, tmp_cf, 0, 0, 1, amrex::IntVect(0), amrex::IntVect(0),
                 WarpX::do_single_precision_comms);
@@ -1185,6 +1236,22 @@ void HybridPICModel::ClearMRMaskCache ()
     m_mr_prolong_gate_fresh.clear();
     m_mr_prolong_frozen.clear();
     m_mr_emf.clear();
+    // Persistent transfer scratch and cached audit wall indicators (all
+    // self-keyed on the layout, so this clear is belt-and-braces).
+    m_mr_prolong_scratch.clear();
+    m_mr_prolong_cpatch.clear();
+    m_mr_prolong_cpatch_ba.clear();
+    m_mr_prolong_scratch_fba.clear();
+    m_mr_prolong_scratch_ng.clear();
+    m_mr_restrict_cf.clear();
+    m_mr_restrict_c.clear();
+    m_mr_restrict_fba.clear();
+    m_rk4_scratch.clear();
+    m_rk4_scratch_ba.clear();
+    m_rk4_scratch_ng.clear();
+    m_divb_audit_wall_cf.clear();
+    m_divb_audit_wall_cc.clear();
+    m_divb_audit_wall_cc_folded.clear();
 }
 
 void HybridPICModel::EnsureEmfMatchingRegister (const int flev)
@@ -2185,23 +2252,35 @@ void HybridPICModel::CheckDivBAfterGhostFill (const int lev, amrex::IntVect cons
     // coarse cell has a staircase-frozen face. Cells there legitimately mix
     // retained (live fine) and prolonged faces and are reported in their own
     // class instead of polluting the ring/band statistics.
-    std::unique_ptr<amrex::iMultiFab> wall_cf;
+    const amrex::iMultiFab* wall_cf = nullptr;
     amrex::IntVect wall_ratio(1);
 #ifdef AMREX_USE_EB
     if (EB::enabled() && warpx.GetEBUpdateBFlag()[lev-1][0]) {
         const int clev = lev - 1;
         const amrex::IntVect ratio = warpx.refRatio(clev);
-        const amrex::iMultiFab wall_crse = ::MakeFrozenFaceCellIndicator(
-            warpx.GetEBUpdateBFlag()[clev], warpx.boxArray(clev),
-            warpx.DistributionMap(clev), 1);
         amrex::IntVect ngc;
         for (int d = 0; d < AMREX_SPACEDIM; ++d) { ngc[d] = ng[d]/ratio[d] + 2; }
-        wall_cf = std::make_unique<amrex::iMultiFab>(
-            amrex::coarsen(warpx.boxArray(lev), ratio),
-            warpx.DistributionMap(lev), 1, ngc);
-        wall_cf->setVal(0);
-        wall_cf->ParallelCopy(wall_crse, 0, 0, 1, amrex::IntVect(1), ngc,
-                              warpx.Geom(clev).periodicity());
+        // Static geometry (the frozen-face gates are fixed after init):
+        // build the coarsened wall indicator once per hierarchy layout.
+        if (static_cast<int>(m_divb_audit_wall_cf.size()) <= lev) {
+            m_divb_audit_wall_cf.resize(lev + 1);
+        }
+        auto& cached = m_divb_audit_wall_cf[lev];
+        const amrex::BoxArray cf_ba = amrex::coarsen(warpx.boxArray(lev), ratio);
+        if (!cached || cached->boxArray() != cf_ba ||
+            cached->DistributionMap() != warpx.DistributionMap(lev) ||
+            cached->nGrowVect() != ngc)
+        {
+            const amrex::iMultiFab wall_crse = ::MakeFrozenFaceCellIndicator(
+                warpx.GetEBUpdateBFlag()[clev], warpx.boxArray(clev),
+                warpx.DistributionMap(clev), 1);
+            cached = std::make_unique<amrex::iMultiFab>(
+                cf_ba, warpx.DistributionMap(lev), 1, ngc);
+            cached->setVal(0);
+            cached->ParallelCopy(wall_crse, 0, 0, 1, amrex::IntVect(1), ngc,
+                                 warpx.Geom(clev).periodicity());
+        }
+        wall_cf = cached.get();
         wall_ratio = ratio;
     }
 #endif
@@ -2217,16 +2296,16 @@ void HybridPICModel::CheckDivBAfterGhostFill (const int lev, amrex::IntVect cons
     // First ghost ring: cells mixing owned fine faces (patch boundary) with
     // prolonged faces; carries the coarse/fine face mismatch at the seam.
     const amrex::Real r1 = ::MaxAbsDivB(B, geom, 1, 0, nullptr, 0,
-                                        wall_cf.get(), wall_ratio, 1);
+                                        wall_cf, wall_ratio, 1);
     // Outer ghost band: fully prolonged cells, div(B) inherits the coarse
     // value (machine zero if the coarse level is divergence free).
     const amrex::Real rb = (ngmin >= 2) ?
         ::MaxAbsDivB(B, geom, ngmin - 1, 1, nullptr, 0,
-                     wall_cf.get(), wall_ratio, 1) : 0._rt;
+                     wall_cf, wall_ratio, 1) : 0._rt;
     // Wall band (ghost region only): mixed retained/prolonged faces.
     const amrex::Real rw = wall_cf ?
         ::MaxAbsDivB(B, geom, std::max(ngmin - 1, 1), 0, nullptr, 0,
-                     wall_cf.get(), wall_ratio, 2) : 0._rt;
+                     wall_cf, wall_ratio, 2) : 0._rt;
 
     m_divb_fine_valid[lev].update(v, v * scale);
     m_divb_fine_ring[lev].update(r1, r1 * scale);
@@ -2265,51 +2344,66 @@ void HybridPICModel::CheckDivBAfterRestriction (const int clev)
     // frozen (never-restricted) and restricted faces; they are reported in
     // their own class so the interior/seam-ring statistics keep their
     // divergence-consistency meaning.
-    std::unique_ptr<amrex::iMultiFab> wall_cc;
+    const amrex::iMultiFab* wall_cc = nullptr;
 #ifdef AMREX_USE_EB
     if (EB::enabled() && warpx.GetEBUpdateBFlag()[clev][0]) {
-        wall_cc = std::make_unique<amrex::iMultiFab>(
-            ::MakeFrozenFaceCellIndicator(
-                warpx.GetEBUpdateBFlag()[clev], warpx.boxArray(clev),
-                warpx.DistributionMap(clev), 0));
-    }
-    // Waived-crossing commit-skip: cells adjacent to a skipped keep-face
-    // carry the coarse-vs-fine solution difference by design; fold them into
-    // the wall-seam class so the interior/seam statistics keep their
-    // divergence-consistency meaning (pre-registered audit amendment).
-    {
+        // Static geometry: the frozen-face gates and the commit-skip faces
+        // are fixed after init, so the (folded) wall indicator is built once
+        // per hierarchy layout / fold applicability and cached.
         const int flev = clev + 1;
-        if (wall_cc && m_mr_emf_matching && m_mr_emf_xing_commit_skip &&
+        const bool fold = m_mr_emf_matching && m_mr_emf_xing_commit_skip &&
             flev < static_cast<int>(m_mr_emf.size()) &&
-            m_mr_emf[flev].n_bad_edges > 0 && m_mr_emf[flev].commit_skip[0])
+            m_mr_emf[flev].n_bad_edges > 0 && m_mr_emf[flev].commit_skip[0];
+        if (static_cast<int>(m_divb_audit_wall_cc.size()) <= clev) {
+            m_divb_audit_wall_cc.resize(clev + 1);
+            m_divb_audit_wall_cc_folded.resize(clev + 1, 0);
+        }
+        auto& cached = m_divb_audit_wall_cc[clev];
+        if (!cached || cached->boxArray() != warpx.boxArray(clev) ||
+            cached->DistributionMap() != warpx.DistributionMap(clev) ||
+            m_divb_audit_wall_cc_folded[clev] != static_cast<char>(fold))
         {
-            auto const& cs = m_mr_emf[flev].commit_skip;
+            cached = std::make_unique<amrex::iMultiFab>(
+                ::MakeFrozenFaceCellIndicator(
+                    warpx.GetEBUpdateBFlag()[clev], warpx.boxArray(clev),
+                    warpx.DistributionMap(clev), 0));
+            // Waived-crossing commit-skip: cells adjacent to a skipped
+            // keep-face carry the coarse-vs-fine solution difference by
+            // design; fold them into the wall-seam class so the interior/
+            // seam statistics keep their divergence-consistency meaning
+            // (pre-registered audit amendment).
+            if (fold)
+            {
+                auto const& cs = m_mr_emf[flev].commit_skip;
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
-            for (MFIter mfi(*wall_cc, TilingIfNotGPU()); mfi.isValid(); ++mfi)
-            {
-                const amrex::Box tbx = mfi.tilebox();
-                auto const& w_arr = wall_cc->array(mfi);
-                auto const& sx = cs[0]->const_array(mfi);
+                for (MFIter mfi(*cached, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+                {
+                    const amrex::Box tbx = mfi.tilebox();
+                    auto const& w_arr = cached->array(mfi);
+                    auto const& sx = cs[0]->const_array(mfi);
 #if defined(WARPX_DIM_3D)
-                auto const& sy = cs[1]->const_array(mfi);
+                    auto const& sy = cs[1]->const_array(mfi);
 #endif
-                auto const& sz = cs[2]->const_array(mfi);
-                amrex::ParallelFor(tbx,
-                    [=] AMREX_GPU_DEVICE (int i, int j, int k)
-                    {
-                        int sk = sx(i, j, k) | sx(i+1, j, k);
+                    auto const& sz = cs[2]->const_array(mfi);
+                    amrex::ParallelFor(tbx,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                        {
+                            int sk = sx(i, j, k) | sx(i+1, j, k);
 #if defined(WARPX_DIM_3D)
-                        sk |= sy(i, j, k) | sy(i, j+1, k)
-                            | sz(i, j, k) | sz(i, j, k+1);
+                            sk |= sy(i, j, k) | sy(i, j+1, k)
+                                | sz(i, j, k) | sz(i, j, k+1);
 #else
-                        sk |= sz(i, j, k) | sz(i, j+1, k);
+                            sk |= sz(i, j, k) | sz(i, j+1, k);
 #endif
-                        if (sk) { w_arr(i, j, k) = 1; }
-                    });
+                            if (sk) { w_arr(i, j, k) = 1; }
+                        });
+                }
             }
+            m_divb_audit_wall_cc_folded[clev] = static_cast<char>(fold);
         }
+        wall_cc = cached.get();
     }
 #endif
 
@@ -2323,23 +2417,23 @@ void HybridPICModel::CheckDivBAfterRestriction (const int clev)
     // Strict interior (all faces restricted): face averages of a
     // divergence-free fine field, expected machine zero.
     const amrex::Real vi = ::MaxAbsDivB(B, geom, 0, -1, mask, 2,
-                                        wall_cc.get(), unit_ratio, 1);
+                                        wall_cc, unit_ratio, 1);
     // Seam ring (outermost keep-mask layer): cells mixing restricted and
     // freely evolved coarse faces show O(dt)-accumulated div(B) without EMF
     // matching (reported, not hidden -- EMF flux matching is deliberately a
     // later phase).
     const amrex::Real vs = ::MaxAbsDivB(B, geom, 0, -1, mask, 1,
-                                        wall_cc.get(), unit_ratio, 1);
+                                        wall_cc, unit_ratio, 1);
     // Exterior (no restricted faces): freely evolved, divergence preserving.
     const amrex::Real ve = ::MaxAbsDivB(B, geom, 0, -1, mask, 0);
     // Wall seam (interior or seam-ring cells with a frozen face).
     const amrex::Real vw = wall_cc ?
-        ::MaxAbsDivB(B, geom, 0, -1, mask, -1, wall_cc.get(), unit_ratio, 2)
+        ::MaxAbsDivB(B, geom, 0, -1, mask, -1, wall_cc, unit_ratio, 2)
         : 0._rt;
     // All wall cells regardless of the keep region (the exterior wall band is
     // in no other class; the waived-crossing follow-up needs it audited).
     const amrex::Real vwa = wall_cc ?
-        ::MaxAbsDivB(B, geom, 0, -1, nullptr, 0, wall_cc.get(), unit_ratio, 2)
+        ::MaxAbsDivB(B, geom, 0, -1, nullptr, 0, wall_cc, unit_ratio, 2)
         : 0._rt;
 
     if (static_cast<int>(m_divb_crse_wall_all.size()) <= clev) {

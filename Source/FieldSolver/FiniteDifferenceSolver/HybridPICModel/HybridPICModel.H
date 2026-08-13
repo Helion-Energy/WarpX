@@ -844,13 +844,15 @@ private:
     /** \brief Prolong the lev-1 B solution onto a scratch copy of level lev
      * by divergence-free face interpolation (amrex::FaceDivFree;
      * conservative-linear for the 2D out-of-plane cell-centered component).
-     * The scratch MultiFabs are created on the level's layout with ng padded
-     * up to coarse alignment and are filled over each fine box grown by that
+     * The scratch MultiFabs live on the level's layout with ng padded up to
+     * coarse alignment and are filled over each fine box grown by that
      * padding; anything beyond a non-periodic domain boundary stays zero.
-     * Shared by FillBfieldCoarseFineGhosts (ghost-only copy-back) and
-     * SeedBfieldFromCoarse (whole-level copy-back). */
-    void ProlongBfieldFromCoarse (
-        int lev, amrex::IntVect const& ng, std::array<amrex::MultiFab, 3>& Btmp);
+     * Returns a reference to the persistent per-level scratch (reused across
+     * RK stages and substeps; reallocated only when the layout or the ghost
+     * pad changes). Shared by FillBfieldCoarseFineGhosts (ghost-only
+     * copy-back) and SeedBfieldFromCoarse (whole-level copy-back). */
+    std::array<amrex::MultiFab, 3>& ProlongBfieldFromCoarse (
+        int lev, amrex::IntVect const& ng);
 
     // CUDA >= 13 nvcc requires member functions whose bodies contain extended
     // __device__ lambdas to be publicly accessible (device-lambda visibility
@@ -989,6 +991,48 @@ private:
     amrex::Vector<std::unique_ptr<amrex::iMultiFab>> m_mr_fine_edge_mask;
     /** Cell BoxArray each cached fine-edge mask was built from. */
     amrex::Vector<amrex::BoxArray> m_mr_fine_edge_mask_ba;
+
+    /** Persistent scratch of the divergence-free prolongation, indexed by
+     *  fine level: the fine-layout target (padded ghosts) and the per-box
+     *  coarse patches, plus the coarse-patch BoxArray. Allocated (and zeroed,
+     *  once) on first use, reused across RK stages and substeps; every point
+     *  read downstream is rewritten on each fill (the coarse-patch import and
+     *  the face interpolation cover the read regions; cells beyond a
+     *  non-periodic domain boundary are never written and keep their initial
+     *  zero), so the reuse is bit-identical to fresh zeroed scratch. */
+    amrex::Vector<std::array<amrex::MultiFab, 3>> m_mr_prolong_scratch;
+    amrex::Vector<std::array<amrex::MultiFab, 3>> m_mr_prolong_cpatch;
+    amrex::Vector<amrex::BoxArray> m_mr_prolong_cpatch_ba;
+    /** Fine cell BoxArray + ghost pad each cached prolong scratch was built
+     *  from (the DistributionMapping is compared directly on the scratch). */
+    amrex::Vector<amrex::BoxArray> m_mr_prolong_scratch_fba;
+    amrex::Vector<amrex::IntVect> m_mr_prolong_scratch_ng;
+
+    /** Persistent scratch of the fine->coarse restriction, indexed by fine
+     *  level: the coarsened-fine face average target and its coarse-layout
+     *  copy. Same bit-identity argument as the prolongation scratch (the
+     *  average-down rewrites the full coarsened-fine layout; the masked
+     *  commit only reads faces covered by the ParallelCopy import). */
+    amrex::Vector<std::array<amrex::MultiFab, 3>> m_mr_restrict_cf;
+    amrex::Vector<std::array<amrex::MultiFab, 3>> m_mr_restrict_c;
+    amrex::Vector<amrex::BoxArray> m_mr_restrict_fba;
+
+    /** Persistent RK4 stage scratch (2 components per direction), indexed by
+     *  level. Every component is written before it is read within one
+     *  substep (K0/K1 via LinComb/stage kernels), so reuse is bit-identical. */
+    amrex::Vector<std::array<amrex::MultiFab, 3>> m_rk4_scratch;
+    amrex::Vector<amrex::BoxArray> m_rk4_scratch_ba;
+    amrex::Vector<amrex::IntVect> m_rk4_scratch_ng;
+
+    /** Cached wall indicators of the div(B) audits (static geometry: built
+     *  from the frozen-face gates, which are fixed after init), indexed by
+     *  fine level (ghost-fill audit, on the coarsened-fine layout) and by
+     *  coarse level (restriction audit, incl. the commit-skip fold). */
+    amrex::Vector<std::unique_ptr<amrex::iMultiFab>> m_divb_audit_wall_cf;
+    amrex::Vector<std::unique_ptr<amrex::iMultiFab>> m_divb_audit_wall_cc;
+    /** Whether the cached restriction-audit wall indicator includes the
+     *  commit-skip fold (rebuilt if the fold applicability changes). */
+    amrex::Vector<char> m_divb_audit_wall_cc_folded;
 };
 
 /**
