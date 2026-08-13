@@ -136,7 +136,7 @@ public:
         //   Slot 2: first true product species
         //   Slot 3: second true product species
         //
-        // For non-product producing collisions (elastic, back, forward scattering), only slots 0
+        // For non-product producing collisions (e.g. elastic, excitation), only slots 0
         // and 1 receive new macroparticles: one weight-split copy per reactant per colliding pair.
         // These are counted by `no_product_total` and NOT reflected in `m_num_products_host`.
         //
@@ -289,117 +289,81 @@ public:
                 // Set the weight of the new particles to p_pair_reaction_weight[i]
                 soa_products_data[1].m_rdata[PIdx::w][slot1_idx] = p_pair_reaction_weight[i];
 
-                // Set the child particle properties appropriately
-                auto& ux0 = soa_products_data[0].m_rdata[PIdx::ux][slot0_idx];
-                auto& uy0 = soa_products_data[0].m_rdata[PIdx::uy][slot0_idx];
-                auto& uz0 = soa_products_data[0].m_rdata[PIdx::uz][slot0_idx];
-                auto& ux1 = soa_products_data[1].m_rdata[PIdx::ux][slot1_idx];
-                auto& uy1 = soa_products_data[1].m_rdata[PIdx::uy][slot1_idx];
-                auto& uz1 = soa_products_data[1].m_rdata[PIdx::uz][slot1_idx];
+                // Particle-conserving scattering (e.g. elastic, excitation). Set the momenta of
+                // the two scattered particles using conservation of energy and momentum. The
+                // angular distribution in the center-of-mass frame is set by the process's
+                // scattering angle model, and any inelastic energy loss (e.g. for excitation) is
+                // passed as the (released) energy penalty.
+                const auto src0_idx = static_cast<int>(p_pair_indices_0[i]);
+                const auto src1_idx = static_cast<int>(p_pair_indices_1[i]);
 
-                // for simplicity (for now) we assume non-relativistic particles
-                // and simply calculate the center-of-momentum velocity from the
-                // rest masses
-                // TODO: this could be made relativistic by using TwoProductComputeProductMomenta
-                auto const uCOM_x = (m0 * ux0 + m1 * ux1) / (m0 + m1);
-                auto const uCOM_y = (m0 * uy0 + m1 * uy1) / (m0 + m1);
-                auto const uCOM_z = (m0 * uz0 + m1 * uz1) / (m0 + m1);
+                // Energy released to the relative translational motion [J]. For excitation this
+                // is (minus) the energy penalty, converted from eV to Joules; for elastic
+                // collisions the penalty is zero.
+                amrex::ParticleReal E_released = -scattering_process.m_energy_penalty*PhysConst::q_e;
 
-                // transform to COM frame
-                ux0 -= uCOM_x;
-                uy0 -= uCOM_y;
-                uz0 -= uCOM_z;
-                ux1 -= uCOM_x;
-                uy1 -= uCOM_y;
-                uz1 -= uCOM_z;
-
-                if (process_type == ScatteringProcessType::ELASTIC ||
-                    process_type == ScatteringProcessType::EXCITATION) {
-                    // Subtract the excitation energy penalty from the total COM
-                    // kinetic energy, then randomly rotate the velocity vector of
-                    // the first particle. For elastic collisions the energy penalty
-                    // is zero, so this reduces to a random rotation that conserves
-                    // the COM kinetic energy (unless Borgnakke-Larsen redistributes
-                    // energy to/from internal modes below).
-                    // Total KE in COM frame = 0.5 * m0 * u0^2 * (m0+m1)/m1
-                    const auto u0_sq = ux0*ux0 + uy0*uy0 + uz0*uz0;
-                    const auto E_com = 0.5_prt * m0 * u0_sq * (m0 + m1) / m1;
-                    const auto E_out = E_com - scattering_process.m_energy_penalty * PhysConst::q_e;
-                    amrex::ParticleReal speed0 = std::sqrt(u0_sq * E_out / E_com);
-
-                    // Borgnakke-Larsen: exchange energy between relative translation and the molecular
-                    // internal modes of either partner. Internal energies (eV) were copied parent->child
-                    // by SmartCopy; we read them from the product slot, redistribute, and write them back.
-                    if (do_internal_dof && process_type == ScatteringProcessType::ELASTIC) {
-                        const amrex::ParticleReal mu = m0 * m1 / (m0 + m1);
-                        // |u0_COM| = (m1/(m0+m1)) * g  =>  relative speed g, and E_trans = 1/2 mu g^2 [eV]
-                        const amrex::ParticleReal g = speed0 * (m0 + m1) / m1;
-                        amrex::ParticleReal E_t = 0.5_prt * mu * g * g / PhysConst::q_e;
-                        amrex::ParticleReal Er0 = (bl0.has_rot) ? soa_products_data[0].m_runtime_rdata[bl0.Erot_idx][slot0_idx] : 0._prt;
-                        amrex::ParticleReal Er1 = (bl1.has_rot) ? soa_products_data[1].m_runtime_rdata[bl1.Erot_idx][slot1_idx] : 0._prt;
-                        amrex::ParticleReal Ev0 = (bl0.has_vib) ? soa_products_data[0].m_runtime_rdata[bl0.Evib_idx][slot0_idx] : 0._prt;
-                        amrex::ParticleReal Ev1 = (bl1.has_vib) ? soa_products_data[1].m_runtime_rdata[bl1.Evib_idx][slot1_idx] : 0._prt;
-                        // Rotational exchange (classical), each partner relaxes with probability 1/Z_rot.
-                        if (bl0.has_rot && amrex::Random(engine) < bl0.inv_Zrot) {
-                            const amrex::ParticleReal Ec = E_t + Er0;
-                            Er0 = InternalDOF::sampleLB_continuous(Ec, bl0.zeta_rot, a_tr, engine);
-                            E_t = Ec - Er0;
-                        }
-                        if (bl1.has_rot && amrex::Random(engine) < bl1.inv_Zrot) {
-                            const amrex::ParticleReal Ec = E_t + Er1;
-                            Er1 = InternalDOF::sampleLB_continuous(Ec, bl1.zeta_rot, a_tr, engine);
-                            E_t = Ec - Er1;
-                        }
-                        // Vibrational exchange (quantum harmonic), each partner relaxes with prob 1/Z_vib.
-                        if (bl0.has_vib && amrex::Random(engine) < bl0.inv_Zvib) {
-                            const amrex::ParticleReal Ec = E_t + Ev0;
-                            Ev0 = InternalDOF::sampleLB_harmonic(Ec, bl0.theta_vib, a_tr, engine);
-                            E_t = Ec - Ev0;
-                        }
-                        if (bl1.has_vib && amrex::Random(engine) < bl1.inv_Zvib) {
-                            const amrex::ParticleReal Ec = E_t + Ev1;
-                            Ev1 = InternalDOF::sampleLB_harmonic(Ec, bl1.theta_vib, a_tr, engine);
-                            E_t = Ec - Ev1;
-                        }
-                        if (bl0.has_rot) { soa_products_data[0].m_runtime_rdata[bl0.Erot_idx][slot0_idx] = Er0; }
-                        if (bl1.has_rot) { soa_products_data[1].m_runtime_rdata[bl1.Erot_idx][slot1_idx] = Er1; }
-                        if (bl0.has_vib) { soa_products_data[0].m_runtime_rdata[bl0.Evib_idx][slot0_idx] = Ev0; }
-                        if (bl1.has_vib) { soa_products_data[1].m_runtime_rdata[bl1.Evib_idx][slot1_idx] = Ev1; }
-                        // New relative speed from the post-exchange translational energy.
-                        const amrex::ParticleReal E_t_pos = (E_t > 0._prt) ? E_t : 0._prt;
-                        const amrex::ParticleReal g_new = std::sqrt(2.0_prt * E_t_pos * PhysConst::q_e / mu);
-                        speed0 = g_new * m1 / (m0 + m1);
+                // Borgnakke-Larsen: exchange energy between relative translation and the molecular
+                // internal modes of either partner. Internal energies (eV) were copied parent->child
+                // by SmartCopy; we read them from the product slot, redistribute, and write them back.
+                // The net energy moved out of the internal modes is folded into E_released so that
+                // TwoProductComputeProductMomenta assigns the post-exchange translational energy.
+                if (do_internal_dof && process_type == ScatteringProcessType::ELASTIC) {
+                    // Relative translational energy of the pair (non-relativistic) [eV]
+                    const amrex::ParticleReal mu = m0 * m1 / (m0 + m1);
+                    const amrex::ParticleReal gx = soa_0.m_rdata[PIdx::ux][src0_idx] - soa_1.m_rdata[PIdx::ux][src1_idx];
+                    const amrex::ParticleReal gy = soa_0.m_rdata[PIdx::uy][src0_idx] - soa_1.m_rdata[PIdx::uy][src1_idx];
+                    const amrex::ParticleReal gz = soa_0.m_rdata[PIdx::uz][src0_idx] - soa_1.m_rdata[PIdx::uz][src1_idx];
+                    amrex::ParticleReal E_t = 0.5_prt * mu * (gx*gx + gy*gy + gz*gz) / PhysConst::q_e;
+                    const amrex::ParticleReal E_t_initial = E_t;
+                    amrex::ParticleReal Er0 = (bl0.has_rot) ? soa_products_data[0].m_runtime_rdata[bl0.Erot_idx][slot0_idx] : 0._prt;
+                    amrex::ParticleReal Er1 = (bl1.has_rot) ? soa_products_data[1].m_runtime_rdata[bl1.Erot_idx][slot1_idx] : 0._prt;
+                    amrex::ParticleReal Ev0 = (bl0.has_vib) ? soa_products_data[0].m_runtime_rdata[bl0.Evib_idx][slot0_idx] : 0._prt;
+                    amrex::ParticleReal Ev1 = (bl1.has_vib) ? soa_products_data[1].m_runtime_rdata[bl1.Evib_idx][slot1_idx] : 0._prt;
+                    // Rotational exchange (classical), each partner relaxes with probability 1/Z_rot.
+                    if (bl0.has_rot && amrex::Random(engine) < bl0.inv_Zrot) {
+                        const amrex::ParticleReal Ec = E_t + Er0;
+                        Er0 = InternalDOF::sampleLB_continuous(Ec, bl0.zeta_rot, a_tr, engine);
+                        E_t = Ec - Er0;
                     }
-
-                    // randomly rotate the velocity vector for the first particle (isotropic COM scatter)
-                    ParticleUtils::RandomizeVelocity(ux0, uy0, uz0, speed0, engine);
-                    // set the second particles velocity so that the total momentum
-                    // is zero
-                    ux1 = -ux0 * m0 / m1;
-                    uy1 = -uy0 * m0 / m1;
-                    uz1 = -uz0 * m0 / m1;
-                } else if (process_type == ScatteringProcessType::BACK) {
-                    // reverse the velocity vectors of both particles
-                    ux0 *= -1.0_prt;
-                    uy0 *= -1.0_prt;
-                    uz0 *= -1.0_prt;
-                    ux1 *= -1.0_prt;
-                    uy1 *= -1.0_prt;
-                    uz1 *= -1.0_prt;
-                } else if (process_type == ScatteringProcessType::FORWARD) {
-                    amrex::Abort("Forward scattering with DSMC not implemented yet.");
+                    if (bl1.has_rot && amrex::Random(engine) < bl1.inv_Zrot) {
+                        const amrex::ParticleReal Ec = E_t + Er1;
+                        Er1 = InternalDOF::sampleLB_continuous(Ec, bl1.zeta_rot, a_tr, engine);
+                        E_t = Ec - Er1;
+                    }
+                    // Vibrational exchange (quantum harmonic), each partner relaxes with prob 1/Z_vib.
+                    if (bl0.has_vib && amrex::Random(engine) < bl0.inv_Zvib) {
+                        const amrex::ParticleReal Ec = E_t + Ev0;
+                        Ev0 = InternalDOF::sampleLB_harmonic(Ec, bl0.theta_vib, a_tr, engine);
+                        E_t = Ec - Ev0;
+                    }
+                    if (bl1.has_vib && amrex::Random(engine) < bl1.inv_Zvib) {
+                        const amrex::ParticleReal Ec = E_t + Ev1;
+                        Ev1 = InternalDOF::sampleLB_harmonic(Ec, bl1.theta_vib, a_tr, engine);
+                        E_t = Ec - Ev1;
+                    }
+                    if (bl0.has_rot) { soa_products_data[0].m_runtime_rdata[bl0.Erot_idx][slot0_idx] = Er0; }
+                    if (bl1.has_rot) { soa_products_data[1].m_runtime_rdata[bl1.Erot_idx][slot1_idx] = Er1; }
+                    if (bl0.has_vib) { soa_products_data[0].m_runtime_rdata[bl0.Evib_idx][slot0_idx] = Ev0; }
+                    if (bl1.has_vib) { soa_products_data[1].m_runtime_rdata[bl1.Evib_idx][slot1_idx] = Ev1; }
+                    E_released += (E_t - E_t_initial) * PhysConst::q_e;
                 }
-                else {
-                    amrex::Abort("Unknown scattering process.");
-                }
-                // transform back to labframe
-                ux0 += uCOM_x;
-                uy0 += uCOM_y;
-                uz0 += uCOM_z;
-                ux1 += uCOM_x;
-                uy1 += uCOM_y;
-                uz1 += uCOM_z;
 
+                TwoProductComputeProductMomenta(
+                    soa_0.m_rdata[PIdx::ux][src0_idx],
+                    soa_0.m_rdata[PIdx::uy][src0_idx],
+                    soa_0.m_rdata[PIdx::uz][src0_idx], m0,
+                    soa_1.m_rdata[PIdx::ux][src1_idx],
+                    soa_1.m_rdata[PIdx::uy][src1_idx],
+                    soa_1.m_rdata[PIdx::uz][src1_idx], m1,
+                    soa_products_data[0].m_rdata[PIdx::ux][slot0_idx],
+                    soa_products_data[0].m_rdata[PIdx::uy][slot0_idx],
+                    soa_products_data[0].m_rdata[PIdx::uz][slot0_idx], m0,
+                    soa_products_data[1].m_rdata[PIdx::ux][slot1_idx],
+                    soa_products_data[1].m_rdata[PIdx::uy][slot1_idx],
+                    soa_products_data[1].m_rdata[PIdx::uz][slot1_idx], m1,
+                    E_released,
+                    scattering_process.m_scattering_angle_model,
+                    engine);
             }
 
             // Next perform all product-producing collisions
@@ -464,9 +428,9 @@ public:
                     -scattering_process.m_energy_penalty*PhysConst::q_e,
                     // TwoProductComputeProductMomenta expects the *released* energy here, hence the negative sign
                     // We also convert from eV to Joules
-                    ScatteringAngleModel::Forward,
-                    // no angular scattering: the products' momenta have the same direction
-                    // as that of the reactant particle, in the center-of-mass frame
+                    scattering_process.m_scattering_angle_model,
+                    // The angular distribution of the products in the center-of-mass frame is set by
+                    // the process's scattering angle model.
                     engine);
             }
             else if (process_type == ScatteringProcessType::IONIZATION)
@@ -507,24 +471,14 @@ public:
                 auto& uy3 = soa_products_data[3].m_rdata[PIdx::uy][slot3_idx];
                 auto& uz3 = soa_products_data[3].m_rdata[PIdx::uz][slot3_idx];
 
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-                /* In RZ and RCYLINDER geometry, macroparticles can collide with other macroparticles
-                * in the same *cylindrical* cell. For this reason, collisions between macroparticles
-                * are actually not local in space. In this case, the underlying assumption is that
-                * particles within the same cylindrical cell represent a cylindrically-symmetry
-                * momentum distribution function. Therefore, here, we temporarily rotate the
-                * momentum of one of the macroparticles in agreement with this cylindrical symmetry.
-                * (This is technically only valid if we use only the m=0 azimuthal mode in the simulation;
-                * there is a corresponding assert statement at initialization.)
-                */
-                amrex::ParticleReal const theta = (
-                    soa_products_data[2].m_rdata[PIdx::theta][slot2_idx]
-                    - soa_products_data[0].m_rdata[PIdx::theta][slot0_idx]
-                );
-                amrex::ParticleReal const ux0buf = ux0;
-                ux0 = ux0buf*std::cos(theta) - uy0*std::sin(theta);
-                uy0 = ux0buf*std::sin(theta) + uy0*std::cos(theta);
-#endif
+                // Note: in RZ/RCYLINDER geometry, ux0/uy0 and ux2,3/uy2,3 have already been
+                // rotated into each particle's own local curvilinear frame (theta = 0) by
+                // WarpXParticleContainer::TransformMomentumToCurvilinear(), called once for the
+                // whole particle container in CollisionHandler::doCollisions() before any collision
+                // routine runs. They are combined directly below, with no further per-pair rotation,
+                // for consistency with CollisionFilterFunc.H (which selects this pair for ionization
+                // using that same convention) and with TwoProductComputeProductMomenta (used by every
+                // other DSMC scattering process).
 
                 // for simplicity (for now) we assume non-relativistic particles
                 // and simply calculate the center-of-momentum velocity from the
@@ -547,9 +501,18 @@ public:
                 // calculate kinetic energy of the collision
                 const amrex::ParticleReal p_non_target_in = m0 * std::sqrt(ux0*ux0 + uy0*uy0 + uz0*uz0);
                 const amrex::ParticleReal E_coll = 0.5_prt * p_non_target_in * p_non_target_in * (1.0_prt/m0 + 1.0_prt/m1);
+
                 // subtract the energy cost for ionization (converted from eV to J)
-                const amrex::ParticleReal E_out =
-                    E_coll - scattering_process.m_energy_penalty * PhysConst::q_e;
+                amrex::ParticleReal E_out = E_coll - scattering_process.m_energy_penalty * PhysConst::q_e;
+
+                // clamp E_out to 0: CollisionFilterFunc.H selects this pair for ionization
+                // using  a differently-computed (relativistic, whole-pair) collision energy,
+                // so E_out can come out (slightly) negative here even though the pair cleared
+                // the ionization threshold there; without the floor, the sqrt() calls below
+                // would produce a NaN velocity in such cases.
+                // TODO: update the E_coll calculation above to match the calculation in
+                // CollisionFilterFunc.H
+                E_out = amrex::max(E_out, 0.0_prt);
 
                 // The kinematics of the ionization event (i.e. how the energy and momentum are
                 // distributed among the products) depend on the nature of the incident particle
@@ -661,13 +624,6 @@ public:
                 ux3 += uCOM_x;
                 uy3 += uCOM_y;
                 uz3 += uCOM_z;
-
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER)
-                /* Undo the earlier velocity rotation. */
-                amrex::ParticleReal const ux0buf_new = ux0;
-                ux0 = ux0buf_new*std::cos(-theta) - uy0*std::sin(-theta);
-                uy0 = ux0buf_new*std::sin(-theta) + uy0*std::cos(-theta);
-#endif
             }
         });
 
