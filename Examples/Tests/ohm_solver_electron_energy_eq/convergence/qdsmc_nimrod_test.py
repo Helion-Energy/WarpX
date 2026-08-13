@@ -45,12 +45,19 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--ncell", type=int, default=128)
 parser.add_argument("--nsteps", type=int, default=128)
 parser.add_argument("--tfinal", type=float, default=1.0e-5, help="total time [s]")
-parser.add_argument("--chi-perp", type=float, default=127.0, help="chi_perp [m^2/s]")
+parser.add_argument(
+    "--chi-par",
+    type=float,
+    default=1.27e4,
+    help="chi_par [m^2/s]; FIXED across the eps ladder (the explicit "
+    "subcycle budget scales with chi_par, and physically chi_par is set "
+    "by Te while eps drops with B) — chi_perp = eps * chi_par",
+)
 parser.add_argument(
     "--eps",
     type=float,
     default=1.0e-4,
-    help="anisotropy ratio chi_perp/chi_par (chi_par = chi_perp/eps)",
+    help="anisotropy ratio chi_perp/chi_par",
 )
 parser.add_argument("--amp", type=float, default=0.2, help="mode amplitude / Te0")
 parser.add_argument(
@@ -92,8 +99,8 @@ B0 = 2.0e-5
 kmode = 2.0 * np.pi / L
 tfinal = args.tfinal
 dt = tfinal / args.nsteps
-chi_perp = args.chi_perp
-chi_par = chi_perp / args.eps
+chi_par = args.chi_par
+chi_perp = args.eps * chi_par
 
 kb = constants.kb
 kappa_par_expr = f"{1.5 * n0 * kb * chi_par:.16e}"

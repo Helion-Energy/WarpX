@@ -267,6 +267,13 @@ def build_cases():
             )
 
     if "gfd2b" in SECTIONS:
+        # chi_par FIXED across the eps ladder (subcycle budget ~ chi_par *
+        # tfinal); stiff rows sized to chi_par*tfinal ~ 1.5 — the order-4
+        # pollution decay (~7e-5) still sits orders above the projection
+        # floor while each arm stays ~minutes-class
+        def _nim_time(eps):
+            return dict() if eps >= 1.0e-2 else dict(tfinal=1.2e-4, nsteps=128)
+
         for eps in (1.0e-2, 1.0e-4, 1.0e-6):
             for n in (64, 128):
                 for order in (2, 4):
@@ -275,7 +282,7 @@ def build_cases():
                             "gfd2b",
                             "qdsmc_nimrod_test.py",
                             f"nim_fd{order}_N{n}_e{eps:.0e}",
-                            dict(ncell=n, eps=eps, fd_order=order),
+                            dict(ncell=n, eps=eps, fd_order=order, **_nim_time(eps)),
                         )
                     )
         # null-semantics pair: iso_B blend at the on-grid nulls
@@ -285,7 +292,14 @@ def build_cases():
                     "gfd2b",
                     "qdsmc_nimrod_test.py",
                     f"nim_fd{order}_N128_e1e-06_isob",
-                    dict(ncell=128, eps=1.0e-6, fd_order=order, iso_b=4.0e-6),
+                    dict(
+                        ncell=128,
+                        eps=1.0e-6,
+                        fd_order=order,
+                        iso_b=4.0e-6,
+                        tfinal=1.2e-4,
+                        nsteps=128,
+                    ),
                 )
             )
         # SDE reference only at mild anisotropy (hop scale)
@@ -306,7 +320,13 @@ def build_cases():
                         "gfd2bhi",
                         "qdsmc_nimrod_test.py",
                         f"nim256_fd{order}_e{eps:.0e}",
-                        dict(ncell=256, nsteps=256, eps=eps, fd_order=order),
+                        dict(
+                            ncell=256,
+                            nsteps=128,
+                            eps=eps,
+                            fd_order=order,
+                            tfinal=6.0e-5,
+                        ),
                     )
                 )
 
