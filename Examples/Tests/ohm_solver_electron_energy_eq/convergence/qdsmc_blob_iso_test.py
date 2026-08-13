@@ -28,6 +28,13 @@ parser.add_argument(
     "--form", choices=["scatter", "layer", "fluxform"], default="fluxform"
 )
 parser.add_argument("--npts", type=int, default=3)
+parser.add_argument(
+    "--conduction-op",
+    choices=["sde", "fd"],
+    default="sde",
+    help="conduction operator (fd has no launch/deposit hop scale: the a4 "
+    "star-pattern class should be absent)",
+)
 parser.add_argument("--out", type=str, required=True)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
@@ -112,6 +119,7 @@ pywarpx.hybridpicmodel.qdsmc_conduction_reconstruction = "ppm"
 pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = args.npts
 pywarpx.hybridpicmodel.qdsmc_conduction_flux_limit_factor = 0.0
 pywarpx.hybridpicmodel.qdsmc_conduction_isotropic_launch = args.iso_launch
+pywarpx.hybridpicmodel.qdsmc_conduction_operator = args.conduction_op
 pywarpx.hybridpicmodel.__setattr__("qdsmc_kappa_par(n,Te,t)", f"{kappa_const:.8e}")
 pywarpx.hybridpicmodel.__setattr__("qdsmc_kappa_perp(n,Te,t)", f"{kappa_const:.8e}")
 
@@ -181,8 +189,9 @@ u1 = float(Te_wrap[:, :].sum())
 drift = (u1 - state["u0"]) / state["u0"]
 
 print(
-    f"[blob-iso] form={args.form} npts={args.npts} iso={args.iso_launch} "
-    f"| a4(r*={rstar:.3f}) = {a4:.4e} | Sigma(Te) drift {drift:+.3e}",
+    f"[blob-iso] op={args.conduction_op} form={args.form} npts={args.npts} "
+    f"iso={args.iso_launch} | a4(r*={rstar:.3f}) = {a4:.4e} "
+    f"| Sigma(Te) drift {drift:+.3e}",
     flush=True,
 )
 np.savez_compressed(
@@ -193,5 +202,6 @@ np.savez_compressed(
     drift=drift,
     iso=args.iso_launch,
     form=args.form,
+    conduction_op=args.conduction_op,
     chi=args.chi,
 )

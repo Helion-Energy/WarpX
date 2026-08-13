@@ -34,7 +34,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("sections", nargs="*", default=[])
 parser.add_argument("--jobs", type=int, default=8)
 args = parser.parse_args()
-SECTIONS = args.sections or ["gfd3", "gfd4", "gfd6", "cliff"]
+SECTIONS = args.sections or ["gfd3", "gfd4", "gfd6", "cliff", "a4"]
 
 # tolerances
 TOL_EXTREMUM = 1.0e-9  # max-principle violation threshold (rel Te0)
@@ -266,6 +266,20 @@ def build_cases():
                 )
             )
 
+    if "a4" in SECTIONS:
+        # m=4 conduction-anisotropy imprint (a4 star pattern): the FD
+        # operator has no launch/deposit hop scale — expect a4 at the
+        # iso-launch-corrected SDE level or below
+        for op, iso in (("sde", 0), ("sde", 1), ("fd", 0)):
+            cases.append(
+                (
+                    "a4",
+                    "qdsmc_blob_iso_test.py",
+                    f"a4_{op}_iso{iso}",
+                    dict(conduction_op=op, iso_launch=iso),
+                )
+            )
+
     if "cliff" in SECTIONS:
         ops = [
             ("fd", dict()),
@@ -306,7 +320,9 @@ def run_case(section, script, tag, kw):
     if os.path.exists(path):
         return tag, path, True
     log = os.path.join(OUT, f"{tag}.log")
-    cmd = [PY, os.path.join(HERE, script), "--out", path]
+    # qdsmc_blob_iso_test.py appends .npz to --out itself
+    out_arg = path[:-4] if script == "qdsmc_blob_iso_test.py" else path
+    cmd = [PY, os.path.join(HERE, script), "--out", out_arg]
     for key, val in kw.items():
         cmd.append("--" + key.replace("_", "-"))
         if isinstance(val, (list, tuple)):
@@ -458,6 +474,31 @@ def report_cliff():
         print(f"| {tag[:-4]} | {mint:.3e} | {ov:+.3e} | {un:+.3e} | {ud:+.2e} | {v} |")
 
 
+def report_a4():
+    print("\n## a4 conduction-anisotropy imprint (m=4 star pattern)\n")
+    print("| case | a4 | r* | sum drift | note |")
+    print("|---|---|---|---|---|")
+    vals = {}
+    for tag in sorted(
+        t for t in os.listdir(OUT) if t.startswith("a4_") and t.endswith(".npz")
+    ):
+        d = load(tag[:-4])
+        if d is None:
+            continue
+        vals[tag[:-4]] = float(d["a4"])
+        print(
+            f"| {tag[:-4]} | {float(d['a4']):.4e} | {float(d['rstar']):.3f} "
+            f"| {float(d['drift']):+.2e} | |"
+        )
+    if "a4_fd_iso0" in vals and "a4_sde_iso1" in vals:
+        ok = vals["a4_fd_iso0"] <= 1.5 * vals["a4_sde_iso1"]
+        print(
+            f"\nFD a4 = {vals['a4_fd_iso0']:.3e} vs corrected-SDE "
+            f"{vals['a4_sde_iso1']:.3e}: {'PASS' if ok else 'CHECK'} "
+            "(FD must be at or below the iso-launch-corrected level)"
+        )
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     cases = build_cases()
@@ -475,6 +516,8 @@ def main():
         report_gfd6()
     if "cliff" in SECTIONS:
         report_cliff()
+    if "a4" in SECTIONS:
+        report_a4()
 
 
 if __name__ == "__main__":
