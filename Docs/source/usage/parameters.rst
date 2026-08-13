@@ -3974,6 +3974,18 @@ Maxwell solver: kinetic-fluid hybrid
     first commit exact. With an embedded boundary, coarse staircase-frozen faces are not used as
     sources and fine staircase-frozen faces keep the fine level's own initial values.
 
+    The prolongation runs once, after *all* init-time field loading: after the external B field is
+    loaded (``warpx.B_ext_grid_init_style`` file/parser readers as well as the ``load_from_python``
+    callback), after :pp:param:`warpx.do_initial_div_cleaning`, and after the external fields are
+    folded into the solver B field — so the fine levels are seeded from the final coarse field.
+    The prolongation reproduces the coarse divergence cell-by-cell: the coarse field must be
+    divergence-free (load a solenoidal field or use the initial div cleaning), and a fine patch
+    that touches a domain boundary additionally inherits whatever
+    :math:`\nabla \cdot \mathbf{B}` the domain boundary condition forces into the coarse boundary
+    cell layer (e.g. a PEC face zeroing the normal component of a loaded field that violates it).
+    Fields written directly into ``Bfield_fp`` from Python *after* initialization are not
+    re-prolonged (and not re-cleaned).
+
 .. pp:param:: hybrid_pic_model.mr_check_div_b
     :type: ``bool``
     :default: ``false``

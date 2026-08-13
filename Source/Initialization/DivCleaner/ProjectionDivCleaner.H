@@ -54,7 +54,13 @@ protected:
     int m_bottom_verbose = 0;
     int m_max_iter = 5000;
     int m_max_fmg_iter = 1000;
-    int m_linop_maxorder = 3;
+    /** Boundary discretization order of the cell-centered solve. Kept at 2
+     *  so the operator's Dirichlet boundary flux is the linear two-point
+     *  form, which the plain Downward stencil of correctField() (plus the
+     *  odd-mirror ghost fill of fillSolutionBoundaryGhosts()) reproduces
+     *  exactly: the corrected field is then divergence free in the domain
+     *  boundary cells too. */
+    int m_linop_maxorder = 2;
     bool m_agglomeration = false;
     bool m_consolidation = false;
     bool m_semicoarsening = true;
@@ -128,6 +134,24 @@ public:
     void solve ();
     void setSourceFromField ();
     void correctField ();
+
+    /** \brief Fill the solution's domain-boundary ghost cells consistently
+     * with the linear operator's boundary conditions (even mirror for
+     * Neumann, odd mirror for homogeneous Dirichlet; periodic directions are
+     * already handled by FillBoundary).
+     *
+     * correctField() applies the plain two-point Downward derivative up to
+     * and including the domain boundary faces, which reads one ghost cell
+     * across each non-periodic domain face. Without this fill those ghosts
+     * hold stale zeros, so the boundary-face correction is garbage: it
+     * corrupts the on-face normal field component and leaves an
+     * O(|B|/dx)-scale div(B) layer in the boundary cells (which, in a
+     * mesh-refinement run, the init-time divergence-free prolongation then
+     * imprints onto any fine patch touching the domain boundary). */
+    void fillSolutionBoundaryGhosts (
+        int lev,
+        amrex::Array<amrex::LinOpBCType,AMREX_SPACEDIM> const& lobc,
+        amrex::Array<amrex::LinOpBCType,AMREX_SPACEDIM> const& hibc);
 
 };
 

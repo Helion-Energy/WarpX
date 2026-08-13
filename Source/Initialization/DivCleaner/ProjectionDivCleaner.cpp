@@ -214,6 +214,78 @@ ProjectionDivCleaner::solve ()
                                                 WarpX::do_single_precision_comms,
                                                 geom[ilev].periodicity(),
                                                 true);
+
+        // Fill the non-periodic domain-boundary ghosts consistently with the
+        // solver's boundary conditions, so that the two-point boundary-face
+        // corrections of correctField() reproduce the operator's boundary
+        // fluxes (see the declaration for the failure mode this prevents).
+        fillSolutionBoundaryGhosts(ilev, lobc, hibc);
+    }
+}
+
+void
+ProjectionDivCleaner::fillSolutionBoundaryGhosts (
+    int lev,
+    amrex::Array<LinOpBCType,AMREX_SPACEDIM> const& lobc,
+    amrex::Array<LinOpBCType,AMREX_SPACEDIM> const& hibc)
+{
+    auto& warpx = WarpX::GetInstance();
+    const amrex::Geometry& geom = warpx.Geom(lev);
+    amrex::MultiFab& sol = *m_solution[lev];
+    const amrex::Box domain = amrex::convert(geom.Domain(), sol.ixType());
+    const int ncomp = sol.nComp();
+
+    for (int idim = 0; idim < AMREX_SPACEDIM; ++idim)
+    {
+        if (geom.isPeriodic(idim)) { continue; }
+        // Even mirror (zero boundary flux) for Neumann, odd mirror about the
+        // homogeneous-Dirichlet boundary value for Dirichlet. For a
+        // cell-centered solution the mirror plane is the domain face, for a
+        // nodal solution it is the boundary node itself.
+        const amrex::Real slo =
+            (lobc[idim] == LinOpBCType::Dirichlet) ? -1.0_rt : 1.0_rt;
+        const amrex::Real shi =
+            (hibc[idim] == LinOpBCType::Dirichlet) ? -1.0_rt : 1.0_rt;
+        const int nodal = sol.ixType().nodeCentered(idim) ? 1 : 0;
+        const int dlo = domain.smallEnd(idim);
+        const int dhi = domain.bigEnd(idim);
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(sol); mfi.isValid(); ++mfi)
+        {
+            const amrex::Box gbx = mfi.fabbox();
+            amrex::Array4<Real> const& a = sol.array(mfi);
+
+            if (gbx.smallEnd(idim) < dlo) {
+                amrex::Box blo = gbx;
+                blo.setBig(idim, dlo - 1);
+                // nodal: mirror about node dlo; cell: about the domain face
+                const int mlo = 2*dlo - (1 - nodal);
+                amrex::ParallelFor(blo, ncomp,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k, int n)
+                    {
+                        const int ii = (idim == 0) ? mlo - i : i;
+                        const int jj = (idim == 1) ? mlo - j : j;
+                        const int kk = (idim == 2) ? mlo - k : k;
+                        a(i, j, k, n) = slo * a(ii, jj, kk, n);
+                    });
+            }
+            if (gbx.bigEnd(idim) > dhi) {
+                amrex::Box bhi = gbx;
+                bhi.setSmall(idim, dhi + 1);
+                const int mhi = 2*dhi + (1 - nodal);
+                amrex::ParallelFor(bhi, ncomp,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k, int n)
+                    {
+                        const int ii = (idim == 0) ? mhi - i : i;
+                        const int jj = (idim == 1) ? mhi - j : j;
+                        const int kk = (idim == 2) ? mhi - k : k;
+                        a(i, j, k, n) = shi * a(ii, jj, kk, n);
+                    });
+            }
+        }
     }
 }
 
