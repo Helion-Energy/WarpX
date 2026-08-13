@@ -400,6 +400,33 @@ namespace
         for (int c = 0; c < 3; ++c) {
             st.status[c]->FillBoundary(geom.periodicity());
         }
+
+        // Per-box work census: every fill pass writes only on non-solution
+        // points of the valid region, so boxes without any (and, if none
+        // exist anywhere, the whole level) are skipped without changing any
+        // result. Built once with the cached classification.
+        int n_work_local = 0;
+        for (int c = 0; c < 3; ++c) {
+            st.box_work[c] = std::make_unique<amrex::LayoutData<int>>(
+                st.status[c]->boxArray(), st.status[c]->DistributionMap());
+            for (amrex::MFIter mfi(*st.status[c], false); mfi.isValid(); ++mfi) {
+                amrex::Box const vb = mfi.validbox();
+                auto const& stat = st.status[c]->const_array(mfi);
+                amrex::ReduceOps<amrex::ReduceOpSum> rop;
+                amrex::ReduceData<int> rdata(rop);
+                using CensusTuple = typename decltype(rdata)::Type;
+                rop.eval(vb, rdata,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) -> CensusTuple
+                {
+                    return {stat(i, j, k) != S_SOLUTION ? 1 : 0};
+                });
+                const int nw = amrex::get<0>(rdata.value(rop));
+                (*st.box_work[c])[mfi] = nw;
+                n_work_local += nw;
+            }
+        }
+        amrex::ParallelDescriptor::ReduceIntSum(n_work_local);
+        st.n_work = n_work_local;
     }
 #endif
 
@@ -475,8 +502,17 @@ void warpx::hybrid::ApplyPECBoundaryToField (
                                 d_band, d_img_min, h_max, fill_covered_centers);
         }
 
-        for (int c = 0; c < 3; ++c) {
-            field[c]->FillBoundary(geom.periodicity());
+        const amrex::Vector<amrex::MultiFab*> field_vec{field[0], field[1], field[2]};
+
+        // Whole-level no-op (e.g. a wall-clear refined level): no pass writes
+        // anything, so only the closing ghost refresh below is kept (the
+        // valid data is untouched, so its result is identical with or
+        // without this pre-gather refresh).
+        if (st.n_work > 0) {
+            // One batched exchange instead of three: the image gathers below
+            // read cross-box ghosts of all components.
+            amrex::FillBoundary_nowait(field_vec, geom.periodicity());
+            amrex::FillBoundary_finish(field_vec);
         }
 
         // The cascade runs only when ill-posed targets exist; it is the only
@@ -493,6 +529,7 @@ void warpx::hybrid::ApplyPECBoundaryToField (
             auto const stag_z = stag[2];
 
             for (amrex::MFIter mfi(*field[c], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                if ((*st.box_work[c])[mfi] == 0) { continue; }
                 amrex::Box const tb = mfi.tilebox(field[c]->ixType().toIntVect());
                 int const ncomp = field[c]->nComp();
 
@@ -548,6 +585,7 @@ void warpx::hybrid::ApplyPECBoundaryToField (
         if (cascade) {
             for (int c = 0; c < 3; ++c) {
                 for (amrex::MFIter mfi(*st.status[c], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                    if ((*st.box_work[c])[mfi] == 0) { continue; }
                     amrex::Box const tb = mfi.tilebox(field[c]->ixType().toIntVect());
                     auto const& stat = st.status[c]->array(mfi);
                     amrex::ParallelFor(tb, [=] AMREX_GPU_DEVICE (int i, int j, int k)
@@ -561,12 +599,16 @@ void warpx::hybrid::ApplyPECBoundaryToField (
             // locks at least one point or stalls, so this is a backstop,
             // not a knob.
             constexpr int max_cascade_sweeps = 10;
+            const amrex::Vector<amrex::iMultiFab*> status_vec{
+                st.status[0].get(), st.status[1].get(), st.status[2].get()};
             int n_left = st.n_pending;
             for (int sweep = 0; sweep < max_cascade_sweeps && n_left > 0; ++sweep) {
-                for (int c = 0; c < 3; ++c) {
-                    field[c]->FillBoundary(geom.periodicity());
-                    st.status[c]->FillBoundary(geom.periodicity());
-                }
+                // Batched exchanges (one round for the fields, one for the
+                // status arrays) instead of six per-component rounds.
+                amrex::FillBoundary_nowait(field_vec, geom.periodicity());
+                amrex::FillBoundary_finish(field_vec);
+                amrex::FillBoundary_nowait(status_vec, geom.periodicity());
+                amrex::FillBoundary_finish(status_vec);
 
                 amrex::ReduceOps<amrex::ReduceOpSum> rop;
                 amrex::ReduceData<int> rdata(rop);
@@ -578,6 +620,7 @@ void warpx::hybrid::ApplyPECBoundaryToField (
                     auto const stag_y = stag[1];
                     auto const stag_z = stag[2];
                     for (amrex::MFIter mfi(*st.status[c], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                        if ((*st.box_work[c])[mfi] == 0) { continue; }
                         amrex::Box const tb = mfi.tilebox(field[c]->ixType().toIntVect());
                         int const ncomp = field[c]->nComp();
                         auto const& Jc = field[c]->array(mfi);
@@ -649,6 +692,7 @@ void warpx::hybrid::ApplyPECBoundaryToField (
                 // pending points never gather from values of the same sweep.
                 for (int c = 0; c < 3; ++c) {
                     for (amrex::MFIter mfi(*st.status[c], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                        if ((*st.box_work[c])[mfi] == 0) { continue; }
                         amrex::Box const tb = mfi.tilebox(field[c]->ixType().toIntVect());
                         auto const& stat = st.status[c]->array(mfi);
                         amrex::ParallelFor(tb, [=] AMREX_GPU_DEVICE (int i, int j, int k)
@@ -667,6 +711,7 @@ void warpx::hybrid::ApplyPECBoundaryToField (
                 // points; no meaningful mirror value exists, so zero them.
                 for (int c = 0; c < 3; ++c) {
                     for (amrex::MFIter mfi(*st.status[c], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                        if ((*st.box_work[c])[mfi] == 0) { continue; }
                         amrex::Box const tb = mfi.tilebox(field[c]->ixType().toIntVect());
                         int const ncomp = field[c]->nComp();
                         auto const& Jc = field[c]->array(mfi);
@@ -683,6 +728,7 @@ void warpx::hybrid::ApplyPECBoundaryToField (
             // restore the cached classification for the next call
             for (int c = 0; c < 3; ++c) {
                 for (amrex::MFIter mfi(*st.status[c], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                    if ((*st.box_work[c])[mfi] == 0) { continue; }
                     amrex::Box const tb = mfi.tilebox(field[c]->ixType().toIntVect());
                     auto const& stat = st.status[c]->array(mfi);
                     amrex::ParallelFor(tb, [=] AMREX_GPU_DEVICE (int i, int j, int k)
@@ -701,10 +747,10 @@ void warpx::hybrid::ApplyPECBoundaryToField (
             warpx::hybrid::DivFreeFixCoveredB(field, distance_to_eb, geom);
         }
 
-        // Leave ghost edges consistent for the stencils that consume the field
-        for (int c = 0; c < 3; ++c) {
-            field[c]->FillBoundary(geom.periodicity());
-        }
+        // Leave ghost edges consistent for the stencils that consume the
+        // field (one batched exchange instead of three).
+        amrex::FillBoundary_nowait(field_vec, geom.periodicity());
+        amrex::FillBoundary_finish(field_vec);
         return;
     }
 

@@ -13,6 +13,7 @@
 
 #include <AMReX_Geometry.H>
 #include <AMReX_GpuContainers.H>
+#include <AMReX_LayoutData.H>
 #include <AMReX_MultiFab.H>
 #include <AMReX_REAL.H>
 #include <AMReX_iMultiFab.H>
@@ -38,11 +39,21 @@ namespace warpx::hybrid
     {
         std::array<std::unique_ptr<amrex::iMultiFab>, 3> status;
         int n_pending = 0;
+        /** Per-box, per-component: number of non-solution points in the
+         *  valid region (fill targets, deep-zero points or pending points).
+         *  The fill passes write only on such points, so boxes with zero
+         *  work are skipped without changing any result. */
+        std::array<std::unique_ptr<amrex::LayoutData<int>>, 3> box_work;
+        /** Global (all ranks) count of non-solution points; 0 = the fill is
+         *  a whole-level no-op (e.g. a wall-clear refined level). */
+        int n_work = 0;
 
         [[nodiscard]] bool empty () const { return !status[0]; }
         void reset () {
             for (auto& s : status) { s.reset(); }
+            for (auto& w : box_work) { w.reset(); }
             n_pending = 0;
+            n_work = 0;
         }
     };
 
