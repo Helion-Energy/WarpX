@@ -1187,12 +1187,14 @@ void HybridPICModel::BfieldEvolve (
             );
 
             // Check that the B-field does not have nan or inf values
+            ABLASTR_PROFILE_VAR("HybridPIC::RK4::isfinite_check", prof_isfinite);
             for (int lev = 0; lev <= finest_level; ++lev) {
                 for (int idim = 0; idim < 3; ++idim) {
                     step_succeeded = step_succeeded && Bfield[lev][idim]->is_finite(/*local=*/true);
                 }
             }
             amrex::ParallelDescriptor::ReduceBoolAnd(step_succeeded);
+            ABLASTR_PROFILE_VAR_STOP(prof_isfinite);
 
             if (!step_succeeded) {
                 WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -1289,11 +1291,13 @@ void HybridPICModel::BfieldEvolveRK4 (
     amrex::Real dt, SubcyclingHalf subcycling_half,
     IntVect ng, std::optional<bool> nodal_sync )
 {
+    ABLASTR_PROFILE("HybridPICModel::BfieldEvolveRK4");
     const int finest_level = WarpX::GetInstance().finestLevel();
 
     // Create multifabs on each level and direction to store the Runge-Kutta
     // intermediate terms. Each multifab has 2 components for the different
     // terms that need to be stored.
+    ABLASTR_PROFILE_VAR("HybridPIC::RK4::K_alloc", prof_rk4_kalloc);
     amrex::Vector<std::array< MultiFab, 3 >> K(finest_level + 1);
     for (int lev = 0; lev <= finest_level; ++lev)
     {
@@ -1305,6 +1309,7 @@ void HybridPICModel::BfieldEvolveRK4 (
             );
         }
     }
+    ABLASTR_PROFILE_VAR_STOP(prof_rk4_kalloc);
 
     // Seam EMF matching (mesh refinement): accumulate the per-stage edge EMFs
     // of both levels of every coarse-fine pair into an edge-flux register and
@@ -1864,6 +1869,7 @@ void HybridPICModel::FieldPushStage (
     amrex::Real dt, SubcyclingHalf subcycling_half,
     IntVect ng, std::optional<bool> nodal_sync )
 {
+    ABLASTR_PROFILE("HybridPICModel::FieldPushStage");
     auto& warpx = WarpX::GetInstance();
     const int finest_level = warpx.finestLevel();
 

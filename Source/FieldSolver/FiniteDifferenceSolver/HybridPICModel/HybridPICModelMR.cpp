@@ -23,6 +23,7 @@
 #include "Utils/TextMsg.H"
 #include "WarpX.H"
 
+#include <ablastr/profiler/ProfilerWrapper.H>
 #include <ablastr/utils/Communication.H>
 #include <ablastr/warn_manager/WarnManager.H>
 
@@ -453,6 +454,7 @@ void HybridPICModel::ProlongBfieldFromCoarse (
     const int lev, amrex::IntVect const& ng, std::array<amrex::MultiFab, 3>& Btmp)
 {
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    ABLASTR_PROFILE("HybridMR::ProlongBfieldFromCoarse");
     auto& warpx = WarpX::GetInstance();
 
     // EB ownership rule (P-1): coarse faces frozen by the coarse staircase
@@ -487,11 +489,13 @@ void HybridPICModel::ProlongBfieldFromCoarse (
         ng_pad[d] = ((ng[d] + ratio[d] - 1) / ratio[d]) * ratio[d];
     }
     const amrex::BoxArray& fba_cell = warpx.boxArray(lev);
+    ABLASTR_PROFILE_VAR("HybridMR::Prolong::scratch", prof_prolong_scratch);
     for (int idim = 0; idim < 3; ++idim) {
         Btmp[idim] = amrex::MultiFab(
             Bfine[idim]->boxArray(), Bfine[idim]->DistributionMap(), 1, ng_pad);
         Btmp[idim].setVal(0.0_rt);
     }
+    ABLASTR_PROFILE_VAR_STOP(prof_prolong_scratch);
 
     {
         // Import the coarse data onto per-box coarse patches covering
@@ -500,6 +504,7 @@ void HybridPICModel::ProlongBfieldFromCoarse (
         // the (periodically extended) domain; anything beyond a non-periodic
         // domain boundary stays zero, and the corresponding fine ghost cells
         // are excluded from the copy-back below (the domain BCs own them).
+        ABLASTR_PROFILE_VAR("HybridMR::Prolong::cpatch", prof_prolong_cpatch);
         amrex::BoxList cbl;
         for (int i = 0, N = static_cast<int>(fba_cell.size()); i < N; ++i) {
             cbl.push_back(
@@ -538,6 +543,8 @@ void HybridPICModel::ProlongBfieldFromCoarse (
             cpatch[idim].setVal(0.0_rt);
             cpatch[idim].ParallelCopy(*Bcrse[idim], 0, 0, 1, cgeom.periodicity());
         }
+        ABLASTR_PROFILE_VAR_STOP(prof_prolong_cpatch);
+        ABLASTR_PROFILE_VAR("HybridMR::Prolong::interp", prof_prolong_interp);
 
         // Drive the divergence-free face interpolater FAB by FAB, on the
         // AMREX_SPACEDIM face-staggered components together (in 2D these are
@@ -596,6 +603,7 @@ void HybridPICModel::ProlongBfieldFromCoarse (
             Btmp[1], ng, amrex::IntVect(0), *Bcrse[1], 0, 0, 1,
             cgeom, fgeom, ratio, &amrex::cell_cons_interp, bcrec, 0);
 #endif
+        ABLASTR_PROFILE_VAR_STOP(prof_prolong_interp);
     }
 
     // Capture the frozen ghost cache at the first (unmasked) fill after a
@@ -624,6 +632,7 @@ void HybridPICModel::FillBfieldCoarseFineGhosts (
     const int lev, amrex::IntVect const& ng, std::optional<bool> nodal_sync)
 {
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    ABLASTR_PROFILE("HybridMR::FillBfieldCFGhosts");
     auto& warpx = WarpX::GetInstance();
 
     ablastr::fields::VectorField Bfine = warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev);
@@ -636,10 +645,14 @@ void HybridPICModel::FillBfieldCoarseFineGhosts (
     // touched. Ghost cells covered by same-level valid data (including
     // periodic images) are clobbered here and restored by the FillBoundary
     // below, so only true coarse-fine ghost cells keep prolonged data.
+    ABLASTR_PROFILE_VAR("HybridMR::CopyGhostRegion", prof_copy_ghost);
     for (int idim = 0; idim < 3; ++idim) {
         ::CopyGhostRegion(*Bfine[idim], Btmp[idim], fgeom, ng);
     }
+    ABLASTR_PROFILE_VAR_STOP(prof_copy_ghost);
+    ABLASTR_PROFILE_VAR("HybridMR::CFGhosts::FillBoundaryB", prof_cf_fbb);
     warpx.FillBoundaryB(lev, ng, nodal_sync);
+    ABLASTR_PROFILE_VAR_STOP(prof_cf_fbb);
 #else
     amrex::ignore_unused(lev, ng, nodal_sync);
     WARPX_ABORT_WITH_MESSAGE(
@@ -1010,6 +1023,7 @@ void HybridPICModel::RestrictBfieldFineToCoarse (
     amrex::IntVect const& ng, std::optional<bool> nodal_sync)
 {
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    ABLASTR_PROFILE("HybridMR::RestrictBfieldFineToCoarse");
     auto& warpx = WarpX::GetInstance();
 
     for (int flev = warpx.finestLevel(); flev >= 1; --flev)
@@ -1035,6 +1049,7 @@ void HybridPICModel::RestrictBfieldFineToCoarse (
         {
             // Face-averaged (cell-averaged for the 2D out-of-plane component)
             // restriction onto the coarsened fine layout.
+            ABLASTR_PROFILE_VAR("HybridMR::Restrict::avg_down", prof_rs_avg);
             amrex::MultiFab tmp_cf(
                 amrex::coarsen(Bfine[idim]->boxArray(), ratio),
                 Bfine[idim]->DistributionMap(), 1, 0);
@@ -1043,15 +1058,18 @@ void HybridPICModel::RestrictBfieldFineToCoarse (
             } else {
                 amrex::average_down_faces(*Bfine[idim], tmp_cf, ratio, 0);
             }
+            ABLASTR_PROFILE_VAR_STOP(prof_rs_avg);
 
             // Move onto the coarse-level layout, then overwrite the coarse
             // field only where the keep-mask allows it.
+            ABLASTR_PROFILE_VAR("HybridMR::Restrict::pcopy", prof_rs_pc);
             amrex::MultiFab tmp_c(
                 Bcrse[idim]->boxArray(), Bcrse[idim]->DistributionMap(), 1, 0);
             tmp_c.setVal(0.0_rt);
             ablastr::utils::communication::ParallelCopy(
                 tmp_c, tmp_cf, 0, 0, 1, amrex::IntVect(0), amrex::IntVect(0),
                 WarpX::do_single_precision_comms);
+            ABLASTR_PROFILE_VAR_STOP(prof_rs_pc);
             const amrex::iMultiFab* face_gate = use_eb_gate ?
                 warpx.GetEBUpdateBFlag()[clev][idim].get() : nullptr;
             // Waived-crossing commit-skip (candidate a): built by
@@ -1066,12 +1084,16 @@ void HybridPICModel::RestrictBfieldFineToCoarse (
             {
                 commit_skip = m_mr_emf[flev].commit_skip[idim].get();
             }
+            ABLASTR_PROFILE_VAR("HybridMR::Restrict::commit", prof_rs_cm);
             ::MaskedCopyRestricted(*Bcrse[idim], tmp_c, *m_mr_keep_mask[clev],
                                    face_gate, commit_skip, warpx.Geom(clev));
+            ABLASTR_PROFILE_VAR_STOP(prof_rs_cm);
         }
 
         if (m_mr_check_div_b) { CheckDivBAfterRestriction(clev); }
+        ABLASTR_PROFILE_VAR("HybridMR::Restrict::FillBoundaryB", prof_rs_fbb);
         warpx.FillBoundaryB(clev, ng, nodal_sync);
+        ABLASTR_PROFILE_VAR_STOP(prof_rs_fbb);
     }
 #else
     amrex::ignore_unused(ng, nodal_sync);
@@ -1667,6 +1689,7 @@ void HybridPICModel::EnsureEmfMatchingRegister (const int flev)
 void HybridPICModel::EmfMatchingReset ()
 {
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    ABLASTR_PROFILE("HybridMR::EmfMatchingReset");
     auto& warpx = WarpX::GetInstance();
     using ablastr::fields::Direction;
     for (int flev = 1; flev <= warpx.finestLevel(); ++flev) {
@@ -1719,6 +1742,7 @@ void HybridPICModel::EmfMatchingAccumulate (
     ablastr::fields::MultiLevelVectorField const& Efield, amrex::Real wdt)
 {
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    ABLASTR_PROFILE("HybridMR::EmfMatchingAccumulate");
     auto& warpx = WarpX::GetInstance();
 #if defined(WARPX_DIM_3D)
     const amrex::Real w = wdt;
@@ -1837,6 +1861,7 @@ void HybridPICModel::EmfMatchingReflux (
     amrex::IntVect const& ng, std::optional<bool> nodal_sync)
 {
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    ABLASTR_PROFILE("HybridMR::EmfMatchingReflux");
     auto& warpx = WarpX::GetInstance();
     for (int flev = warpx.finestLevel(); flev >= 1; --flev)
     {
@@ -1946,6 +1971,7 @@ void HybridPICModel::EnsureFineEdgeMask (const int lev, amrex::IntVect const& ra
 void HybridPICModel::FillMomentsCoarseFineGhosts ()
 {
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    ABLASTR_PROFILE("HybridMR::FillMomentsCFGhosts");
     auto& warpx = WarpX::GetInstance();
     using ablastr::fields::Direction;
 
@@ -2142,6 +2168,7 @@ void HybridPICModel::FillMomentsCoarseFineGhosts ()
 void HybridPICModel::CheckDivBAfterGhostFill (const int lev, amrex::IntVect const& ng)
 {
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    ABLASTR_PROFILE("HybridMR::divB_audit_ghostfill");
     auto& warpx = WarpX::GetInstance();
     ablastr::fields::VectorField B = warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev);
     const amrex::Geometry& geom = warpx.Geom(lev);
@@ -2222,6 +2249,7 @@ void HybridPICModel::CheckDivBAfterGhostFill (const int lev, amrex::IntVect cons
 void HybridPICModel::CheckDivBAfterRestriction (const int clev)
 {
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    ABLASTR_PROFILE("HybridMR::divB_audit_restrict");
     auto& warpx = WarpX::GetInstance();
     ablastr::fields::VectorField B = warpx.m_fields.get_alldirs(FieldType::Bfield_fp, clev);
     const amrex::Geometry& geom = warpx.Geom(clev);
