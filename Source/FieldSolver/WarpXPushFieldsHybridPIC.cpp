@@ -421,9 +421,15 @@ void WarpX::HybridPICInitializeRhoJandB ()
     // CalculateElectronPressure applies. Calling the algebraic closure here
     // instead would leave K_e ~ 0 across the floored halo (its T_e mirror
     // divides by the floored density while the pressure uses the raw one),
-    // re-creating the absorbing edge on the first step. Note that T_e is not
-    // checkpointed either, so on restart the seed re-derives T_e from the
-    // restored rho: evolved T_e structure is not preserved across a restart.
+    // re-creating the absorbing edge on the first step. T_e itself is
+    // checkpointed when the energy equation is on (checkpoint_restart flag
+    // on hybrid_electron_temperature_fp): InitFromCheckpoint restores it
+    // and pre-sets m_qdsmc_te_seeded, so the seed below is skipped and the
+    // evolved thermal structure survives the restart. Restarting from an
+    // older checkpoint without the T_e file falls back to the adiabat
+    // re-seed (with a warning). The non-default leapfrog Pe extrapolation
+    // carries no checkpointed history either way: it re-self-starts after
+    // a restart with a dt/2 transient (pc and euler carry no such state).
     //
     // The adiabat seed runs ONCE per process: this entry point executes at
     // step == step_begin of EVERY Evolve() entry (each segmented PICMI

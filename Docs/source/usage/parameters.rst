@@ -3847,6 +3847,14 @@ Maxwell solver: kinetic-fluid hybrid
     Joule redirect (:pp:param:`hybrid_pic_model.redirect_joule_to_ions`) and per-species resistivities
     are not yet supported with the implicit scheme.
 
+    With the energy equation on, the electron temperature is evolved state: it is written into
+    checkpoints and restored on restart together with the plasma current (restarting from an older
+    checkpoint without these fields falls back to re-seeding the temperature from the density
+    adiabat, with a warning). The non-default leapfrog time advance keeps no checkpointed history
+    and re-self-starts after a restart with a :math:`\Delta t/2` transient. Exact bitwise
+    continuation of the energy-equation evolution across a restart is not yet guaranteed (the
+    entropy-marker stage re-initializes on re-entry); field/particle restart is unaffected.
+
 .. pp:param:: implicit_evolve.qdsmc_segregated_solve
     :type: ``bool``
     :default: ``false``

@@ -629,9 +629,13 @@ void HybridPICModel::AllocateLevelMFs (
     // so the Te diagnostic functor can always read it: with the energy
     // equation on it is the QDSMC state variable, otherwise it mirrors the
     // algebraic closure's implied temperature (CalculateElectronPressure).
+    // With the energy equation on, T_e is flagged into checkpoint/restart:
+    // it is evolved state there and cannot be re-derived after a restart
+    // (the adiabat seed would discard the evolved thermal structure).
     fields.alloc_init(FieldType::hybrid_electron_temperature_fp,
         lev, amrex::convert(ba, rho_nodal_flag),
-        dm, ncomps, ngRho, 0.0_rt);
+        dm, ncomps, ngRho, 0.0_rt,
+        true, true, m_solve_electron_energy_equation);
 
     // QDSMC electron-energy-equation working fields, only touched (and
     // therefore only allocated) when the energy equation is solved:
@@ -786,16 +790,22 @@ void HybridPICModel::AllocateLevelMFs (
         dm, ncomps, ngJ, 0.0_rt);
 
     // The "hybrid_current_fp_plasma" multifab stores the total plasma current calculated
-    // as the curl of B minus any external current.
+    // as the curl of B minus any external current. Under the QDSMC energy
+    // equation it is carried state across steps (m_qdsmc_J_plasma_valid):
+    // checkpoint it so a restart continues with the carried value instead
+    // of a recompute (bit-consistent restart continuation).
     fields.alloc_init(FieldType::hybrid_current_fp_plasma, Direction{0},
         lev, amrex::convert(ba, jx_nodal_flag),
-        dm, ncomps, ngJ, 0.0_rt);
+        dm, ncomps, ngJ, 0.0_rt,
+        true, true, m_solve_electron_energy_equation);
     fields.alloc_init(FieldType::hybrid_current_fp_plasma, Direction{1},
         lev, amrex::convert(ba, jy_nodal_flag),
-        dm, ncomps, ngJ, 0.0_rt);
+        dm, ncomps, ngJ, 0.0_rt,
+        true, true, m_solve_electron_energy_equation);
     fields.alloc_init(FieldType::hybrid_current_fp_plasma, Direction{2},
         lev, amrex::convert(ba, jz_nodal_flag),
-        dm, ncomps, ngJ, 0.0_rt);
+        dm, ncomps, ngJ, 0.0_rt,
+        true, true, m_solve_electron_energy_equation);
 
     // Per-species ion fields - one set per charged species. current_fp_s
     // and rho_fp_s are deposited from particles and accumulated into the

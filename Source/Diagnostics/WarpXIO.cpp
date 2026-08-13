@@ -21,6 +21,7 @@
 #include "EmbeddedBoundary/Enabled.H"
 #include "Fields.H"
 #include "FieldIO.H"
+#include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "FieldSolver/ImplicitSolvers/ImplicitSolver.H"
 #include "Particles/MultiParticleContainer.H"
 #include "Particles/WarpXParticleContainer.H"
@@ -30,6 +31,7 @@
 #include <ablastr/fields/MultiFabRegister.H>
 #include <ablastr/profiler/ProfilerWrapper.H>
 #include <ablastr/utils/text/StreamUtils.H>
+#include <ablastr/warn_manager/WarnManager.H>
 
 #ifdef AMREX_USE_SENSEI_INSITU
 #   include <AMReX_AmrMeshInSituBridge.H>
@@ -292,6 +294,13 @@ WarpX::InitFromCheckpoint ()
 
     const int nlevs = finestLevel()+1;
 
+    // Count the levels on which the QDSMC electron temperature was restored
+    // from the checkpoint, to decide below whether the adiabat seed must be
+    // suppressed (see the m_qdsmc_te_seeded latch), and likewise the
+    // restored plasma-current components (see m_qdsmc_J_plasma_valid).
+    int n_levels_with_te_restored = 0;
+    int n_jplasma_components_restored = 0;
+
     // Initialize the field data
     for (int lev = 0; lev < nlevs; ++lev)
     {
@@ -404,8 +413,49 @@ WarpX::InitFromCheckpoint ()
             }
         }
 
-        m_fields.read_restarts(lev, amrex::MultiFabFileFullPrefix(lev, restart_chkfile, level_prefix, ""));
+        // Read any fields flagged checkpoint_restart in the field register
+        // (mirrors FlushFormatCheckpoint's write_checkpoints call). Flagged
+        // fields absent from older checkpoints are skipped, not errors.
+        auto const restored_names = m_fields.read_restarts(
+            lev, amrex::MultiFabFileFullPrefix(lev, restart_chkfile, level_prefix, ""));
+        std::string const te_name =
+            amrex::getEnumNameString(FieldType::hybrid_electron_temperature_fp);
+        // "[" excludes fields whose name merely extends this one (e.g.
+        // hybrid_current_fp_plasma_old): the register suffixes are
+        // [dir=..] and/or [level=..].
+        std::string const jplasma_name =
+            amrex::getEnumNameString(FieldType::hybrid_current_fp_plasma) + "[";
+        for (auto const& name : restored_names) {
+            if (name.rfind(te_name, 0) == 0) { ++n_levels_with_te_restored; }
+            if (name.rfind(jplasma_name, 0) == 0) { ++n_jplasma_components_restored; }
+        }
 
+    }
+
+    // With the electron energy equation on, T_e is evolved state restored
+    // just above: latch the adiabat seed off so the first Evolve() entry
+    // does not overwrite the restored field (the seed otherwise runs once
+    // per process, unconditionally, see WarpXPushFieldsHybridPIC.cpp).
+    if (m_hybrid_pic_model && m_hybrid_pic_model->m_solve_electron_energy_equation) {
+        // J_plasma is carried state under the QDSMC advance: with the full
+        // vector restored, continue with the carried value like the
+        // uninterrupted run instead of recomputing it from curl(B).
+        if (n_jplasma_components_restored == 3*nlevs) {
+            m_hybrid_pic_model->m_qdsmc_J_plasma_valid = true;
+        }
+        if (n_levels_with_te_restored == nlevs) {
+            m_hybrid_pic_model->m_qdsmc_te_seeded = true;
+            amrex::Print() << "restart: electron temperature restored from checkpoint "
+                              "(adiabat seed suppressed)\n";
+        } else {
+            ablastr::warn_manager::WMRecordWarning(
+                "HybridPIC",
+                "Restarting with the electron energy equation from a checkpoint "
+                "that does not contain the electron temperature: T_e will be "
+                "re-seeded from the density adiabat, so evolved electron thermal "
+                "structure from before the checkpoint is not preserved.",
+                ablastr::warn_manager::WarnPriority::high);
+        }
     }
 
     InitPML();
