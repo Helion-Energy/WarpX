@@ -494,9 +494,12 @@ void HybridPICModel::ReadParameters ()
         }
     }
 #if defined(WARPX_DIM_RZ)
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_include_thermal_conduction,
-        "hybrid_pic_model.qdsmc_kappa_par: QDSMC thermal conduction is not "
-        "supported in RZ geometry yet (the daughter deposit is Cartesian).");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_include_thermal_conduction || m_cond_operator == 1,
+        "hybrid_pic_model.qdsmc_kappa_par: in RZ geometry QDSMC thermal "
+        "conduction requires qdsmc_conduction_operator = fd (the SDE "
+        "daughter deposit is Cartesian; the FD operator carries the "
+        "cylindrical J Xi^ij metric form).");
 #endif
 #if defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -5146,6 +5149,11 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
     auto const dx_arr = geom.CellSizeArray();
     amrex::Real const kb = PhysConst::kb;
     amrex::Real const qe = PhysConst::q_e;
+#ifdef WARPX_DIM_RZ
+    amrex::Real const r_edge0 = geom.ProbLo(0);
+    amrex::Real const dr_rz = geom.CellSize(0);
+    int const dom_rlo = dom_nodes.smallEnd(0);
+#endif
 
     for (int d = 0; d < AMREX_SPACEDIM; ++d) {
     for (int s = 0; s < 2; ++s) {
@@ -5154,6 +5162,13 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!geom.isPeriodic(d),
             "qdsmc_conduction_bc_lo/_hi: non-adiabatic conduction BCs "
             "require a non-periodic domain dimension");
+#ifdef WARPX_DIM_RZ
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !(d == 0 && s == 0 && r_edge0 <= 0.0_rt),
+            "qdsmc_conduction_bc_lo: the RZ radial-lo boundary at r = 0 "
+            "is the symmetry axis, not a wall (only 'adiabatic' is "
+            "meaningful there)");
+#endif
         int const wall = (s == 0) ? dom_nodes.smallEnd(d)
                                   : dom_nodes.bigEnd(d);
         amrex::Real const Te_wall_K = m_cond_bc_Te[d][s] * qe / kb;
@@ -5193,12 +5208,23 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
             {
                 amrex::Real const ne = rho_arr(i,j,k) / qe;
                 if (ne <= 0.0_rt) { return {0.0_rt}; }
+#ifdef WARPX_DIM_RZ
+                // RZ: tally du weighted by 2 pi Vr/dr [J/m^2] -- the
+                // r-dependent part of the node dual-cell volume folded
+                // in, so multiplying by dr dz still gives Joules
+                amrex::Real const r_i =
+                    r_edge0 + amrex::Real(i - dom_rlo)*dr_rz;
+                amrex::Real const w_v = 2.0_rt*MathConst::pi*
+                    ((r_i > 0.0_rt) ? r_i : dr_rz/8.0_rt);
+#else
+                amrex::Real const w_v = 1.0_rt;
+#endif
                 if (bc == 1) {
                     // thermal bath: pin the row, tally the exchange
                     amrex::Real const du =
                         1.5_rt * kb * ne * (Te_wall_K - Te_arr(i,j,k));
                     Te_arr(i,j,k) = Te_wall_K;
-                    return {du};
+                    return {w_v*du};
                 }
                 // prescribed flux: inject, clamp cooling at Te = 0,
                 // tally what was actually applied
@@ -5206,7 +5232,7 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
                     amrex::max(du_flux / (1.5_rt * kb * ne),
                                -Te_arr(i,j,k));
                 Te_arr(i,j,k) += dTe;
-                return {1.5_rt * kb * ne * dTe};
+                return {w_v*(1.5_rt * kb * ne * dTe)};
             });
         }
         auto tup = reduce_data.value(reduce_op);
@@ -5221,11 +5247,6 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
 {
     ABLASTR_PROFILE("HybridPICModel::QdsmcConductionOnceFD()");
 
-#ifdef WARPX_DIM_RZ
-    WARPX_ABORT_WITH_MESSAGE(
-        "qdsmc_conduction_operator = fd: RZ requires the curvilinear "
-        "J Xi^ij metric form and is not implemented");
-#endif
     auto & warpx = WarpX::GetInstance();
     using ablastr::fields::Direction;
 
@@ -5287,6 +5308,27 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
         dom_lo[d] = dom_nodes.smallEnd(d);
         dom_hi[d] = dom_nodes.bigEnd(d);
     }
+
+#ifdef WARPX_DIM_RZ
+    // Cylindrical curvilinear form (the paper's J Xi^ij with J = r):
+    // radial node fluxes are built J-folded -- the face composites then
+    // approximate (r q_r) to their design order -- and the radial
+    // divergence divides by the dual-cell radial measure
+    // Vr = int_cell r dr: r_i dr for interior and wall nodes (the
+    // full-dx wall convention of the Cartesian form, which also keeps
+    // the wall-BC injection du = q dt/dr exact) and dr^2/8 for the
+    // axis node (half cell [0, dr/2]). The axis is regular by
+    // construction: its inner face carries no flux (the non-periodic
+    // wall guard = the q_r(0) = 0 symmetry condition) and the
+    // Vr-weighted whole-domain sum telescopes to the boundary fluxes
+    // exactly, as in Cartesian. z faces carry no metric factor (J is
+    // z-independent, so it cancels between face flux and volume),
+    // which keeps the axis column well-defined. 4th-order radial faces
+    // fall back to 2nd order within two nodes of the axis through the
+    // existing non-periodic window guard.
+    amrex::Real const r_edge0 = geom.ProbLo(0);
+    amrex::Real const dr_rz = geom.CellSize(0);
+#endif
 
     amrex::GpuArray<int, 3> const Bx_stag = Bx_IndexType;
     amrex::GpuArray<int, 3> const By_stag = By_IndexType;
@@ -5489,6 +5531,18 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                     if (b_arr(i,j,k,BNE::b_open) <= 0.5_rt) { return {0.0_rt}; }
                     amrex::Real const ne0 = b_arr(i,j,k,BNE::b_ne);
                     int const node[3] = {i, j, k};
+#ifdef WARPX_DIM_RZ
+                    // cylindrical row-sum amplification of the J-folded
+                    // radial fluxes: (r_face_lo + r_face_hi) dr/(2 Vr)
+                    // = 1 in the interior, 2 at the axis node
+                    amrex::Real const r_i =
+                        r_edge0 + amrex::Real(i - dom_lo[0])*dr_rz;
+                    amrex::Real const Vr_i = (r_i > 0.0_rt)
+                        ? r_i*dr_rz : dr_rz*dr_rz/8.0_rt;
+                    amrex::Real const fac_r =
+                        (amrex::max(r_i - 0.5_rt*dr_rz, 0.0_rt) +
+                         (r_i + 0.5_rt*dr_rz))*dr_rz/(2.0_rt*Vr_i);
+#endif
                     amrex::Real nrat = 1.0_rt;
                     amrex::Real s = 0.0_rt;
                     for (int g = 0; g < AMREX_SPACEDIM; ++g) {
@@ -5506,7 +5560,12 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                                 std::abs(x_arr(i,j,k,sidx)),
                                 std::abs(x_arr(p[0],p[1],p[2],sidx)),
                                 std::abs(x_arr(m[0],m[1],m[2],sidx)));
-                            s += 2.0_rt*xin*dxi_g[g]*dxi_g[h];
+                            amrex::Real term =
+                                2.0_rt*xin*dxi_g[g]*dxi_g[h];
+#ifdef WARPX_DIM_RZ
+                            if (g == 0 || h == 0) { term *= fac_r; }
+#endif
+                            s += term;
                         }
                     }
                     return {s*nrat};
@@ -5584,6 +5643,20 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                     return der*dxi_g[h];
                 };
 
+#ifdef WARPX_DIM_RZ
+                // J = r at a node index along grid dim g: folded into
+                // radial (g = 0) node fluxes; z fluxes carry J = 1
+                auto Jn = [&] (int const p[3], int const g) {
+                    return (g == 0)
+                        ? r_edge0 + amrex::Real(p[0] - dom_lo[0])*dr_rz
+                        : 1.0_rt;
+                };
+#else
+                auto Jn = [] (int const [3], int const) {
+                    return 1.0_rt;
+                };
+#endif
+
                 // flux through the face between node m0 and m0 + e_g,
                 // positive along +g, in u units [W/m^2]
                 auto face_flux = [&] (int const m0[3], int const g) {
@@ -5632,12 +5705,12 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                                 w[g] += (m - 2);
                                 der += A6[6*(l) + m]*tc(w[0], w[1], w[2]);
                             }
-                            F += c0[l]*x_arr(q[0],q[1],q[2],sgg)
+                            F += c0[l]*Jn(q,g)*x_arr(q[0],q[1],q[2],sgg)
                                  *der*dxi_g[g];
                         }
                     } else {
-                        F = 0.5_rt*(x_arr(m0[0],m0[1],m0[2],sgg) +
-                                    x_arr(m1[0],m1[1],m1[2],sgg))
+                        F = 0.5_rt*(Jn(m0,g)*x_arr(m0[0],m0[1],m0[2],sgg) +
+                                    Jn(m1,g)*x_arr(m1[0],m1[1],m1[2],sgg))
                             * (Tat(m1) - Tat(m0)) * dxi_g[g];
                     }
 
@@ -5654,13 +5727,17 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                             for (int l = 0; l < 4; ++l) {
                                 int q[3] = {m0[0], m0[1], m0[2]};
                                 q[g] += (l - 1);
-                                raw += c0[l]*x_arr(q[0],q[1],q[2],sgh)
+                                raw += c0[l]*Jn(q,g)
+                                       *x_arr(q[0],q[1],q[2],sgh)
                                        *dTh4(q, h);
                             }
                         } else {
-                            raw = 0.5_rt*(
-                                x_arr(m0[0],m0[1],m0[2],sgh)*dTh2(m0, h) +
-                                x_arr(m1[0],m1[1],m1[2],sgh)*dTh2(m1, h));
+                            raw = 0.5_rt*(Jn(m0,g)
+                                    *x_arr(m0[0],m0[1],m0[2],sgh)
+                                    *dTh2(m0, h) +
+                                Jn(m1,g)
+                                    *x_arr(m1[0],m1[1],m1[2],sgh)
+                                    *dTh2(m1, h));
                         }
                         if (raw == 0.0_rt) { continue; }
                         amrex::Real Tf = 0.5_rt*(Tat(m0) + Tat(m1));
@@ -5688,6 +5765,20 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                 for (int g = 0; g < AMREX_SPACEDIM; ++g) {
                     int lo[3] = {i, j, k};
                     lo[g] -= 1;
+#ifdef WARPX_DIM_RZ
+                    if (g == 0) {
+                        // radial: J-folded face fluxes over the dual-
+                        // cell measure Vr (finite-volume form; regular
+                        // at the axis, whose inner face is absent)
+                        amrex::Real const r_i =
+                            r_edge0 + amrex::Real(i - dom_lo[0])*dr_rz;
+                        amrex::Real const Vr = (r_i > 0.0_rt)
+                            ? r_i*dr_rz : dr_rz*dr_rz/8.0_rt;
+                        div += (face_flux(node, g) - face_flux(lo, g))
+                               / Vr;
+                        continue;
+                    }
+#endif
                     div += (face_flux(node, g) - face_flux(lo, g))
                            * dxi_g[g];
                 }
@@ -5778,7 +5869,15 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                 amrex::Real const du =
                     1.5_rt * kb * ne * (TwK - Te_arr(i,j,k));
                 Te_arr(i,j,k) = TwK;
+#ifdef WARPX_DIM_RZ
+                // RZ: tally weighted by 2 pi Vr/dr [J/m^2], as in the
+                // domain wall-BC tally (cx[0] is the node radius)
+                amrex::Real const w_v = 2.0_rt*MathConst::pi*
+                    ((cx[0] > 0.0_rt) ? cx[0] : dx_arr[0]/8.0_rt);
+                return {w_v*du};
+#else
                 return {du};
+#endif
             });
         }
         auto tup = reduce_data.value(reduce_op);

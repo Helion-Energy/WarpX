@@ -61,10 +61,26 @@ class ConductionTest(object):
         self.front = front
         self.rz = rz
         self.circle = circle
-        if self.rz and not self.front:
-            raise ValueError("the RZ variant runs the front mode")
+        self.fd = rz and not front
         if self.circle and (self.front or self.rz):
             raise ValueError("--circle is a standalone mode")
+
+        if self.fd:
+            # RZ radial mode on the grid-FD operator's curvilinear
+            # (J Xi^ij) form -- the SDE forms are Cartesian-only and
+            # parse-guarded in RZ. A radial Gaussian THROUGH THE AXIS
+            # spreads as planar 2D diffusion: peak(t) = A0 sigma_0^2 /
+            # sigma^2(t), sigma^2 = sigma_0^2 + 2 D t -- the same peak
+            # functional as the 2D blob, measured by
+            # analysis_conduction_rz.py with the r-weighted ledger.
+            # B = 0, so the operator conducts isotropically at kappa_par
+            # (the metric form is what is under test; the tensor branch
+            # is Cartesian-shared). D sized so 2 D t_run ~ sigma_0^2
+            # with ~1 FD subcycle per Strang half (resolved regime).
+            self.NX = 32  # radial
+            self.NZ = 8
+            self.L = 0.5  # r extent
+            self.D = 5.6e3
 
         if self.circle:
             # Parallel-conduction verification on circular in-plane field
@@ -114,10 +130,12 @@ class ConductionTest(object):
             self.total_steps = 300
             self.diag_steps = 25
         else:
-            self.Lz = self.L
+            self.Lz = (self.L / self.NX) * self.NZ if self.rz else self.L
             self.diag_steps = self.total_steps // 5
 
-        self.dx = (self.Lz / self.NZ) if self.rz else (self.L / self.NX)
+        self.dx = (
+            (self.Lz / self.NZ) if (self.rz and self.front) else (self.L / self.NX)
+        )
         self.bump_sigma = self.bump_sigma_cells * self.dx
         if self.circle:
             self.ring_r0 = self.ring_r0_cells * self.dx
@@ -169,10 +187,9 @@ class ConductionTest(object):
         elif self.front:
             r2 = Z**2 if self.rz else X**2
         else:
-            r2 = X**2 + Z**2
-        prof = T0_K * (
-            1.0 + self.bump_amp * np.exp(-r2 / (2.0 * self.bump_sigma**2))
-        )
+            # rz: radial bump centered on the axis, uniform in z
+            r2 = X**2 if self.rz else X**2 + Z**2
+        prof = T0_K * (1.0 + self.bump_amp * np.exp(-r2 / (2.0 * self.bump_sigma**2)))
         Te[:, :] = prof
         comm.Barrier()
 
@@ -218,8 +235,9 @@ class ConductionTest(object):
             r_e = 0.45 * self.L
             rr = f"max(sqrt(x*x+z*z),{0.01 * self.dx})"
             ramp = f"min({rr}/{r_c},1.0)"
-            taper = (f"cos(1.5707963267948966*"
-                     f"min(max(({rr}-{r_t})/{r_e - r_t},0.0),1.0))**2")
+            taper = (
+                f"cos(1.5707963267948966*min(max(({rr}-{r_t})/{r_e - r_t},0.0),1.0))**2"
+            )
             # 1 mT: the parallel kernel only consumes the field DIRECTION,
             # and the whistler frequency at this grid/dt must stay under
             # the explicit B-substepping stability limit
@@ -264,8 +282,7 @@ class ConductionTest(object):
             mass=1.0e5 * constants.m_p,
             initial_distribution=picmi.UniformDistribution(
                 density=self.n0,
-                rms_velocity=[np.sqrt(self.T_i * constants.q_e / constants.m_p)]
-                * 3,
+                rms_velocity=[np.sqrt(self.T_i * constants.q_e / constants.m_p)] * 3,
             ),
         )
         simulation.add_species(
@@ -291,6 +308,11 @@ class ConductionTest(object):
             Path("diags").mkdir(parents=True, exist_ok=True)
 
         simulation.initialize_inputs()
+        if self.fd:
+            # not a picmi kwarg: write the bucket after initialize_inputs
+            import pywarpx
+
+            pywarpx.hybridpicmodel.qdsmc_conduction_operator = "fd"
         simulation.initialize_warpx()
         # The step-begin T_e adiabat seed (once per run, latch-guarded)
         # overwrites any T_e written before the first step: take one step
@@ -320,7 +342,9 @@ parser.add_argument(
 )
 parser.add_argument(
     "--rz",
-    help="run the front variant on an RZ grid (front along z)",
+    help="RZ grid: with --front, the SDE front along z (unregistered, "
+    "see the KNOWN ISSUE note); alone, the grid-FD operator's radial "
+    "through-axis mode (curvilinear J Xi^ij form)",
     action="store_true",
 )
 parser.add_argument(
@@ -332,7 +356,10 @@ args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
 run = ConductionTest(
-    test=args.test, verbose=args.verbose, front=args.front, rz=args.rz,
+    test=args.test,
+    verbose=args.verbose,
+    front=args.front,
+    rz=args.rz,
     circle=args.circle,
 )
 simulation.step()

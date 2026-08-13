@@ -172,6 +172,21 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Grid-FD conduction on the RZ curvilinear (J Xi^ij) form: a radial
+# Gaussian THROUGH THE AXIS spreads as planar 2D diffusion (exact peak
+# decay), with the r-weighted energy ledger, the discrete maximum
+# principle, and z-uniformity (metric-leak guard) as gates. The SDE
+# conduction forms remain Cartesian-only (parse-guarded in RZ).
+add_warpx_test(
+    test_rz_ohm_solver_electron_energy_conduction_fd_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_2d_ohm_solver_electron_energy_conduction_picmi.py --test --rz"  # inputs
+    "analysis_conduction_rz.py"  # analysis
+    "analysis_default_regression.py --path diags/diag1000040"  # checksum
+    OFF  # dependency
+)
+
 # Segregated-variant notes:
 #   * The *_implicit_segregated_* tests exercise
 #     implicit_evolve.qdsmc_segregated_solve: the QDSMC stage runs once per

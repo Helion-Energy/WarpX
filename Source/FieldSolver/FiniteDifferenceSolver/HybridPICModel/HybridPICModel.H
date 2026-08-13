@@ -616,7 +616,7 @@ public:
     void AdvanceElectronEnergyQDSMCTheta (amrex::Real dt, amrex::Real theta,
                                           bool refresh_species_deposits) const;
 
-    
+
     /**
      * \brief Post-solve completion of the theta-implicit electron-energy
      *        step: apply the stochastic ion-heating realization (Q_ei
@@ -1002,7 +1002,15 @@ public:
      *  stability bound inside the same Strang half-steps; the
      *  kappa parsers, free-streaming limiter, iso_B blend, closed floor
      *  faces and wall BCs/tallies are shared with the SDE path. No hop
-     *  cap and no vacuum fast front (neither concept applies). */
+     *  cap and no vacuum fast front (neither concept applies).
+     *
+     *  In RZ geometry the operator carries the paper's curvilinear
+     *  J Xi^ij form with J = r: radial node fluxes are J-folded before
+     *  the face composites (preserving their design order) and the
+     *  radial divergence divides by the dual-cell measure
+     *  Vr = int r dr, which is regular at the axis (q_r(0) = 0 by
+     *  symmetry, Vr = dr^2/8 for the axis node); z faces are metric-
+     *  free. m = 0 fields only (b-hat is built from the m = 0 mode). */
     void QdsmcConductionOnceFD (int lev, amrex::Real dt_c, bool use_rho_new) const;
 
     /** Grid-transport arm of the energy-equation bake-off jig
@@ -1504,8 +1512,11 @@ public:
     /** Cumulative wall-BC energy tallies per (grid dim, side 0=lo/
      *  1=hi), in node-u units [J/m^3] summed over boundary nodes
      *  (multiply by the node dual-cell volume for Joules; positive =
-     *  energy added to the plasma). The G4 budget-closure instrument;
-     *  exposed to Python as warpx.get_qdsmc_wall_tally(dim, side). */
+     *  energy added to the plasma). In RZ each node's du is weighted
+     *  by 2 pi Vr/dr [J/m^2], the r-dependent part of the dual-cell
+     *  volume, so multiplying by dr dz gives Joules. The G4
+     *  budget-closure instrument; exposed to Python as
+     *  warpx.get_qdsmc_wall_tally(dim, side). */
     mutable amrex::Real m_cond_wall_tally[AMREX_SPACEDIM][2] = {};
 
     amrex::Real GetQdsmcWallTally (int const dim, int const side) const
@@ -1588,7 +1599,8 @@ public:
 
     /** Cumulative EB conduction tally (isothermal EB only), node-u
      *  units [J/m^3] summed over fluid nodes, positive = energy added
-     *  to the plasma. */
+     *  to the plasma. In RZ each node is weighted by 2 pi Vr/dr
+     *  [J/m^2]; multiply by dr dz for Joules. */
     mutable amrex::Real m_cond_eb_tally = 0.0;
 
     amrex::Real GetQdsmcEbTally () const { return m_cond_eb_tally; }
