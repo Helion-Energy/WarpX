@@ -20,6 +20,7 @@
 
 #include "EmbeddedBoundary/Enabled.H"
 #include "Fields.H"
+#include "Utils/Parser/ParserUtils.H"
 #include "Utils/TextMsg.H"
 #include "WarpX.H"
 
@@ -37,6 +38,7 @@
 #include <AMReX_Interpolater.H>
 #include <AMReX_MFInterpolater.H>
 #include <AMReX_MultiFabUtil.H>
+#include <AMReX_ParmParse.H>
 #include <AMReX_Reduce.H>
 #include <AMReX_iMultiFab.H>
 
@@ -2606,7 +2608,9 @@ void HybridPICModel::CheckMREBClearance (const bool verbose) const
         // dimensions, since no coarse-fine operator acts outside the domain
         // (with a stretched box reaching a non-periodic end, those default
         // ghosts would otherwise read as a false "crse" transition).
-        amrex::iMultiFab fine_mask(cba, cdm, 1, n_clear);
+        // One extra ghost cell so the grid-commensurate proximity scan below
+        // can look one cell past the guarded shell.
+        amrex::iMultiFab fine_mask(cba, cdm, 1, n_clear + 1);
         fine_mask.setVal(0);
         for (amrex::MFIter mfi(fine_mask); mfi.isValid(); ++mfi) {
             for (const auto& is : cfba.intersections(mfi.validbox())) {
@@ -2679,6 +2683,110 @@ void HybridPICModel::CheckMREBClearance (const bool verbose) const
         }
         amrex::Long enc = amrex::get<0>(reduce_data.value(reduce_op));
         amrex::ParallelDescriptor::ReduceLongMin(enc);
+
+        // Grid-commensurate EB proximity check (warning, not an abort): when
+        // the implicit function's zero crossing grazes a grid node inside
+        // (or one cell beyond) the clearance shell, the cut-cell
+        // classification there is floating-point knife-edge -- ULP-scale
+        // differences between builds or stacks can flip a marginal cell
+        // into (or out of) the guarded band. Count shell cells whose
+        // nearest node-sampled |phi| is below ~1e-9 of the function's
+        // variation across the cell (~ |grad phi| * dx). This evaluates the
+        // raw warpx.eb_implicit_function -- the quantity the EB generator
+        // thresholds; the facet-reconstructed signed distance does not
+        // preserve near-zero node values. Non-parser EB sources: skipped.
+        std::string eb_impf;
+        amrex::ParmParse("warpx").query("eb_implicit_function", eb_impf);
+        if (!eb_impf.empty()) {
+            auto eb_if_parser = utils::parser::makeParser(eb_impf, {"x", "y", "z"});
+            auto phi = eb_if_parser.compile<3>();
+            const auto dxc = cgeom.CellSizeArray();
+            const auto plo = cgeom.ProbLoArray();
+            const int nshell = n_clear + 1;
+            amrex::ReduceOps<amrex::ReduceOpSum> knife_op;
+            amrex::ReduceData<amrex::Long> knife_data(knife_op);
+            using KnifeTuple = typename decltype(knife_data)::Type;
+            for (amrex::MFIter mfi(fine_mask, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                const amrex::Box tbx = mfi.tilebox();
+                auto const& m_arr = fine_mask.const_array(mfi);
+                knife_op.eval(tbx, knife_data,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) -> KnifeTuple
+                    {
+                        // Node-sampled min |phi| and variation across the cell.
+                        amrex::Real amin = std::numeric_limits<amrex::Real>::max();
+                        amrex::Real fmin = std::numeric_limits<amrex::Real>::max();
+                        amrex::Real fmax = std::numeric_limits<amrex::Real>::lowest();
+                        const int jn = (AMREX_SPACEDIM >= 2) ? 1 : 0;
+                        const int kn = (AMREX_SPACEDIM == 3) ? 1 : 0;
+                        for         (int kk = 0; kk <= kn; ++kk) {
+                            for     (int jj = 0; jj <= jn; ++jj) {
+                                for (int ii = 0; ii <= 1;  ++ii) {
+#if defined(WARPX_DIM_3D)
+                                    const amrex::Real f = phi(
+                                        plo[0] + (i+ii)*dxc[0],
+                                        plo[1] + (j+jj)*dxc[1],
+                                        plo[2] + (k+kk)*dxc[2]);
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+                                    const amrex::Real f = phi(
+                                        plo[0] + (i+ii)*dxc[0],
+                                        0.0_rt,
+                                        plo[1] + (j+jj)*dxc[1]);
+#else
+                                    const amrex::Real f = phi(
+                                        plo[0] + (i+ii)*dxc[0], 0.0_rt, 0.0_rt);
+#endif
+                                    amin = amrex::min(amin, amrex::Math::abs(f));
+                                    fmin = amrex::min(fmin, f);
+                                    fmax = amrex::max(fmax, f);
+                                }
+                            }
+                        }
+                        if (amin >= 1.0e-9_rt * (fmax - fmin)) { return {0}; }
+                        // Inside (or one cell past) the clearance shell?
+                        bool saw_fine = (m_arr(i,j,k) == 1);
+                        bool saw_crse = !saw_fine;
+                        const int jr = (AMREX_SPACEDIM >= 2) ? nshell : 0;
+                        const int kr = (AMREX_SPACEDIM == 3) ? nshell : 0;
+                        for         (int kk = -kr; kk <= kr; ++kk) {
+                            for     (int jj = -jr; jj <= jr; ++jj) {
+                                for (int ii = -nshell; ii <= nshell; ++ii) {
+                                    const int i2 = i + ii;
+                                    const int j2 = j + jj;
+                                    const int k2 = k + kk;
+                                    bool outside =
+                                        (!is_per[0] && (i2 < dlo.x || i2 > dhi.x));
+#if (AMREX_SPACEDIM >= 2)
+                                    outside = outside ||
+                                        (!is_per[1] && (j2 < dlo.y || j2 > dhi.y));
+#endif
+#if (AMREX_SPACEDIM == 3)
+                                    outside = outside ||
+                                        (!is_per[2] && (k2 < dlo.z || k2 > dhi.z));
+#endif
+                                    if (outside) { continue; }
+                                    if (m_arr(i2, j2, k2) == 1) { saw_fine = true; }
+                                    else                        { saw_crse = true; }
+                                }
+                            }
+                        }
+                        return {(saw_fine && saw_crse) ? amrex::Long(1) : amrex::Long(0)};
+                    });
+            }
+            amrex::Long n_knife = amrex::get<0>(knife_data.value(knife_op));
+            amrex::ParallelDescriptor::ReduceLongSum(n_knife);
+            if (n_knife > 0) {
+                ablastr::warn_manager::WMRecordWarning(
+                    "HybridPIC",
+                    "EB geometry is grid-commensurate near the fine-patch "
+                    "clearance shell on level " + std::to_string(clev) + " (" +
+                    std::to_string(n_knife) + " cell(s) with a node-grazing "
+                    "implicit function): cut-cell classification is "
+                    "floating-point sensitive there -- consider offsetting "
+                    "the wall by a fraction of the cell size.",
+                    ablastr::warn_manager::WarnPriority::high);
+            }
+        }
 
         if (enc != sentinel) {
             const int r_meas = static_cast<int>(enc / dnpts);

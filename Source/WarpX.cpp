@@ -2386,6 +2386,18 @@ void
 WarpX::MakeNewLevelFromScratch (int lev, Real time, const BoxArray& new_grids,
                                 const DistributionMapping& new_dmap)
 {
+    // AmrCore::InitFromScratch may call this hook again for a level it
+    // already built: after adding the levels one at a time, AmrMesh iterates
+    // the tag-derived grids (amr.max_grid_iterations) and re-creates every
+    // level whose BoxArray the iteration revised (error-buffer/blocking
+    // rounding and proper-nesting feedback between levels). A hierarchy
+    // change must tear the existing level down before re-allocating it: the
+    // MultiFabRegister rejects alloc_init of a field that already exists.
+    // (The load-balance and dynamic-regrid paths get the same semantics
+    // through RemakeLevel.)
+    if (m_fields.has(FieldType::Bfield_fp, ablastr::fields::Direction{0}, lev)) {
+        ClearLevelData(lev);
+    }
     AllocLevelData(lev, new_grids, new_dmap);
     InitLevelData(lev, time);
 }
