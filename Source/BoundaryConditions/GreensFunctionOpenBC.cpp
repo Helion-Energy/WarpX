@@ -83,6 +83,33 @@ namespace
                * std::sqrt(d2) * ((2.0_rt - m) * K - 2.0_rt * E);
     }
 
+    /** Sum a device-resident vector across the MPI ranks. Single-rank
+     * runs return immediately (the data never leaves the device); with
+     * GPU-aware MPI the reduction operates on the device buffer in place;
+     * otherwise ONE small host staging round trip is used. The trailing
+     * copy back to the device is stream-ordered, so no synchronization is
+     * needed before subsequent same-stream kernels. */
+    void SumOverRanks (amrex::Real* device_data,
+                       amrex::Vector<amrex::Real>& host_staging, int n)
+    {
+        if (amrex::ParallelDescriptor::NProcs() == 1) { return; }
+#if defined(AMREX_USE_MPI) && defined(AMREX_USE_GPU)
+        if (amrex::ParallelDescriptor::UseGpuAwareMpi()) {
+            amrex::Gpu::streamSynchronize();
+            MPI_Allreduce(MPI_IN_PLACE, device_data, n,
+                          amrex::ParallelDescriptor::Mpi_typemap<amrex::Real>::type(),
+                          MPI_SUM, amrex::ParallelDescriptor::Communicator());
+            return;
+        }
+#endif
+        amrex::Gpu::copyAsync(amrex::Gpu::deviceToHost,
+            device_data, device_data + n, host_staging.begin());
+        amrex::Gpu::streamSynchronize();
+        amrex::ParallelDescriptor::ReduceRealSum(host_staging.data(), n);
+        amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
+            host_staging.begin(), host_staging.begin() + n, device_data);
+    }
+
     /** psi-table value of the nodal point (i, j): the r_hi band holds
      * i in [nr, nr+ngr] at every j, the appended cap bands hold
      * i in [0, nr-1] at the nodal-j ghost band of each open z face.
@@ -399,8 +426,10 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
             // nodal j of the psi point: [-ngz, 0] (lo cap), [nz, nz+ngz] (hi)
             const int j = hi_side ? nz + jj : jj - ngz;
             const amrex::Real rb = i * dr;
-            amrex::Real* const krow =
-                cap_kernel_h.data() + static_cast<amrex::Long>(row) * ncols;
+            // column-major layout, entry (row, c) at c * ncaprows + row:
+            // the GEMV's row-threads then read each column coalesced
+            amrex::Real* const kcol = cap_kernel_h.data() + row;
+            const auto stride = static_cast<amrex::Long>(ncaprows);
             for (int b = 0; b < nrbins; ++b) {
                 const amrex::Real rs = bin_rc_h[b];
                 const int wz = bin_wz_h[b];
@@ -412,13 +441,15 @@ void GreensFunctionOpenBC::Define (ablastr::fields::VectorField const& Bfield,
                         std::sqrt(zb * zb + (rb + rs) * (rb + rs));
                     const amrex::Real h = 1.0e-5_rt * d0;
                     const int c0 = 3 * (bin_col0_h[b] + bj);
-                    krow[c0    ] = ring_psi_reg(rb, zb, rs, 0.0_rt);
-                    krow[c0 + 1] = (ring_psi_reg(rb, zb, rs + h, 0.0_rt)
-                                    - ring_psi_reg(rb, zb, rs - h, 0.0_rt))
-                                   / (2.0_rt * h);
-                    krow[c0 + 2] = (ring_psi_reg(rb, zb, rs, h)
-                                    - ring_psi_reg(rb, zb, rs, -h))
-                                   / (2.0_rt * h);
+                    kcol[c0 * stride] = ring_psi_reg(rb, zb, rs, 0.0_rt);
+                    kcol[(c0 + 1) * stride] =
+                        (ring_psi_reg(rb, zb, rs + h, 0.0_rt)
+                         - ring_psi_reg(rb, zb, rs - h, 0.0_rt))
+                        / (2.0_rt * h);
+                    kcol[(c0 + 2) * stride] =
+                        (ring_psi_reg(rb, zb, rs, h)
+                         - ring_psi_reg(rb, zb, rs, -h))
+                        / (2.0_rt * h);
                 }
             }
         }
@@ -487,10 +518,14 @@ void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& Bf
     // current before differencing across box seams below (the caller
     // applies this BC right after the valid-cell Faraday update, before
     // its own FillBoundary).
-    for (int d = 0; d < 3; ++d) {
-        Bfield[d]->FillBoundary(geom.periodicity());
+    {
+        BL_PROFILE("GreensOpenBC::FillBoundary");
+        for (int d = 0; d < 3; ++d) {
+            Bfield[d]->FillBoundary(geom.periodicity());
+        }
     }
 
+    BL_PROFILE_VAR("GreensOpenBC::deposit", blp_deposit);
     // ---- 1. Deposit the coarse source moments (I, I dr, I dz) per bin ----
     amrex::Real* const AMREX_RESTRICT src = m_src.data();
     const int ncols = m_ncols;
@@ -555,14 +590,13 @@ void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& Bf
             });
     }
 
-    // ---- 2. Global reduction of the moments ----
-    amrex::Gpu::copyAsync(amrex::Gpu::deviceToHost,
-        m_src.begin(), m_src.end(), m_src_host.begin());
-    amrex::Gpu::streamSynchronize();
-    amrex::ParallelDescriptor::ReduceRealSum(m_src_host.data(), m_ncols);
-    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
-        m_src_host.begin(), m_src_host.end(), m_src.begin());
-    amrex::Gpu::streamSynchronize();
+    BL_PROFILE_VAR_STOP(blp_deposit);
+
+    // ---- 2. Global reduction of the moments (device-resident; see
+    // SumOverRanks: single-rank runs never leave the device) ----
+    SumOverRanks(m_src.data(), m_src_host, m_ncols);
+
+    BL_PROFILE_VAR("GreensOpenBC::gemv", blp_gemv);
 
     // ---- 3. GEMV: psi at the ghost psi-points ----
     // The rows (psi points) are distributed over the MPI ranks -- the
@@ -585,18 +619,65 @@ void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& Bf
     const int rows_per_rank = (nrows + nprocs - 1) / nprocs;
     const int row0 = std::min(myproc * rows_per_rank, nrows);
     const int nlocal = std::min(rows_per_rank, nrows - row0);
+    const int ncaprows_tot = m_ncaprows_lo + m_ncaprows_hi;
 
-    amrex::ParallelFor(nrows, [=] AMREX_GPU_DEVICE (int row) { psi[row] = 0.0_rt; });
-    amrex::ParallelFor(nlocal, [=] AMREX_GPU_DEVICE (int idx) {
-        const int row = row0 + idx;
-        if (row >= nrows_r) {
-            const amrex::Real* const AMREX_RESTRICT krow =
-                cap_kernel + static_cast<amrex::Long>(row - nrows_r) * ncols;
-            amrex::Real s = 0.0_rt;
-            for (int c = 0; c < ncols; ++c) { s += krow[c] * src[c]; }
-            psi[row] = s;
-            return;
+    if (nprocs > 1) {
+        // rows owned by other ranks must be zero under the summing reduce;
+        // a single rank overwrites every row below
+        amrex::ParallelFor(nrows,
+            [=] AMREX_GPU_DEVICE (int row) { psi[row] = 0.0_rt; });
+    }
+    BL_PROFILE_VAR("GreensOpenBC::gemv_rband", blp_rband);
+    const int nlocal_r = std::max(0, std::min(nlocal, nrows_r - row0));
+#if defined(AMREX_USE_GPU)
+    // GPU: one thread per (row, radial bin) with a deterministic ordered
+    // recombination (ascending b) -- the serial per-row loop leaves only
+    // ~psi_nj resident threads and runs latency-bound (measured
+    // 2.5 ms/fill at the 64x512 hold resolution). The regrouping shifts
+    // results by O(eps) relative to the serial chain; the CPU branch
+    // below keeps the exact original summation order, which the knob-off
+    // suite bit-checks.
+    if (nlocal_r > 0) {
+        if (m_rband_partial.size() <
+                static_cast<amrex::Long>(nlocal_r) * nrbins) {
+            m_rband_partial.resize(static_cast<amrex::Long>(nlocal_r) * nrbins);
         }
+        amrex::Real* const AMREX_RESTRICT rband_partial = m_rband_partial.data();
+        amrex::ParallelFor(nlocal_r * nrbins,
+            [=] AMREX_GPU_DEVICE (int idx) {
+                const int lrow = idx % nlocal_r;
+                const int b = idx / nlocal_r;
+                const int row = row0 + lrow;
+                const int ip = row / psi_nj;
+                const int jp = row % psi_nj;
+                const int wz = bin_wz[b];
+                const int nzb = bin_nzb[b];
+                const int L = psi_nj + wz * (nzb - 1);
+                const amrex::Real* const AMREX_RESTRICT blk =
+                    kernel + bin_koff[b] + (static_cast<amrex::Long>(ip) * 3) * L;
+                const amrex::Real* const AMREX_RESTRICT sb = src + 3 * bin_col0[b];
+                amrex::Real s = 0.0_rt;
+                for (int bj = 0; bj < nzb; ++bj) {
+                    // offset-table index of (psi row jp, z bin bj)
+                    const int oo = jp + wz * (nzb - 1 - bj);
+                    s += blk[oo] * sb[3 * bj]
+                         + blk[L + oo] * sb[3 * bj + 1]
+                         + blk[2 * L + oo] * sb[3 * bj + 2];
+                }
+                rband_partial[static_cast<amrex::Long>(b) * nlocal_r + lrow] = s;
+            });
+        amrex::ParallelFor(nlocal_r, [=] AMREX_GPU_DEVICE (int lrow) {
+            amrex::Real s = 0.0_rt;
+            for (int b = 0; b < nrbins; ++b) {
+                s += rband_partial[static_cast<amrex::Long>(b) * nlocal_r + lrow];
+            }
+            psi[row0 + lrow] = s;
+        });
+    }
+#else
+    // CPU: serial per-row contraction in the original summation order
+    amrex::ParallelFor(nlocal_r, [=] AMREX_GPU_DEVICE (int idx) {
+        const int row = row0 + idx;
         const int ip = row / psi_nj;
         const int jp = row % psi_nj;
         amrex::Real s = 0.0_rt;
@@ -617,16 +698,61 @@ void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& Bf
         }
         psi[row] = s;
     });
+#endif
+    BL_PROFILE_VAR_STOP(blp_rband);
+    BL_PROFILE_VAR("GreensOpenBC::gemv_cap", blp_cap);
+    // Cap rows stream the whole dense block from device memory each
+    // application: one thread per row cannot keep the memory system busy
+    // (901 threads reading 70+ MB ran latency-bound at ~4 ms/fill), so the
+    // contraction is chunked over the columns -- a deterministic two-phase
+    // reduction. Phase 1 tiles (row, column-chunk) with the row index
+    // fastest, so adjacent threads read adjacent entries of the
+    // column-major block (coalesced) at full occupancy; phase 2 sums the
+    // per-chunk partials in ascending chunk order (fixed grouping, results
+    // reproducible run to run).
+    const int cap_row0 = std::max(row0, nrows_r) - nrows_r;
+    const int ncap_local =
+        std::max(0, std::min(row0 + nlocal - nrows_r, ncaprows_tot) - cap_row0);
+    if (ncap_local > 0) {
+        constexpr int chunk = 128;
+        const int nchunks = (ncols + chunk - 1) / chunk;
+        if (m_cap_partial.size() <
+                static_cast<amrex::Long>(ncap_local) * nchunks) {
+            m_cap_partial.resize(static_cast<amrex::Long>(ncap_local) * nchunks);
+        }
+        amrex::Real* const AMREX_RESTRICT cap_partial = m_cap_partial.data();
+        amrex::ParallelFor(ncap_local * nchunks,
+            [=] AMREX_GPU_DEVICE (int idx) {
+                const int lrow = idx % ncap_local;
+                const int ch = idx / ncap_local;
+                const int crow = cap_row0 + lrow;
+                const amrex::Real* const AMREX_RESTRICT kcol = cap_kernel + crow;
+                const int c_end = amrex::min((ch + 1) * chunk, ncols);
+                amrex::Real s = 0.0_rt;
+                for (int c = ch * chunk; c < c_end; ++c) {
+                    s += kcol[static_cast<amrex::Long>(c) * ncaprows_tot] * src[c];
+                }
+                cap_partial[static_cast<amrex::Long>(ch) * ncap_local + lrow] = s;
+            });
+        amrex::ParallelFor(ncap_local, [=] AMREX_GPU_DEVICE (int lrow) {
+            amrex::Real s = 0.0_rt;
+            for (int ch = 0; ch < nchunks; ++ch) {
+                s += cap_partial[static_cast<amrex::Long>(ch) * ncap_local + lrow];
+            }
+            psi[nrows_r + cap_row0 + lrow] = s;
+        });
+    }
+    BL_PROFILE_VAR_STOP(blp_cap);
 
-    amrex::Gpu::copyAsync(amrex::Gpu::deviceToHost,
-        m_psi.begin(), m_psi.end(), m_psi_host.begin());
-    amrex::Gpu::streamSynchronize();
-    amrex::ParallelDescriptor::ReduceRealSum(m_psi_host.data(), nrows);
-    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice,
-        m_psi_host.begin(), m_psi_host.end(), m_psi.begin());
-    amrex::Gpu::streamSynchronize();
+    SumOverRanks(m_psi.data(), m_psi_host, nrows);
+    BL_PROFILE_VAR_STOP(blp_gemv);
 
     if (std::getenv("WARPX_GREENS_DEBUG") != nullptr) {
+        amrex::Gpu::copyAsync(amrex::Gpu::deviceToHost,
+            m_src.begin(), m_src.end(), m_src_host.begin());
+        amrex::Gpu::copyAsync(amrex::Gpu::deviceToHost,
+            m_psi.begin(), m_psi.end(), m_psi_host.begin());
+        amrex::Gpu::streamSynchronize();
         amrex::Real src_max = 0.0_rt, psi_r = 0.0_rt, psi_lo = 0.0_rt, psi_hi = 0.0_rt;
         for (int c = 0; c < m_ncols; ++c) {
             src_max = std::max(src_max, std::abs(m_src_host[c]));
@@ -657,6 +783,7 @@ void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& Bf
                           << " sum " << cap_sum << "\n";
     }
 
+    BL_PROFILE_VAR("GreensOpenBC::fill", blp_fill);
     // ---- 4. Fill the open-face ghost values of B ----
     // psi table lookup (device pointer): the r_hi band maps nodal (i, j)
     // with i in [m_nr, m_nr+m_ngr] to psi[(i - nr) * psi_nj + (j + ngz_psi)];
@@ -790,6 +917,7 @@ void GreensFunctionOpenBC::ApplyToBfield (ablastr::fields::VectorField const& Bf
                 });
         }
     }
+    BL_PROFILE_VAR_STOP(blp_fill);
 }
 
 #else  // not WARPX_DIM_RZ

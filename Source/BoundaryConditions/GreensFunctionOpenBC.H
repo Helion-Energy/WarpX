@@ -191,10 +191,17 @@ private:
      * bin's nominal center. */
     amrex::Gpu::DeviceVector<amrex::Real> m_kernel;
     /** Dense kernel block of the z-cap psi rows (only allocated when a z
-     * face is open): [cap row][3 * m_nbins], columns aligned with the
-     * source-moment vector, moments evaluated at each bin's actual
-     * center. */
+     * face is open): column-major, entry (row, c) at c * ncaprows + row
+     * so the GEMV's row-threads read each of the 3 * m_nbins columns
+     * coalesced; columns aligned with the source-moment vector, moments
+     * evaluated at each bin's actual center. */
     amrex::Gpu::DeviceVector<amrex::Real> m_cap_kernel;
+    /** Scratch: per-(cap row, column chunk) partial sums of the dense
+     * cap-row contraction (device; lazily sized) */
+    amrex::Gpu::DeviceVector<amrex::Real> m_cap_partial;
+    /** Scratch: per-(r-band row, radial bin) partial sums of the offset
+     * table contraction (device; GPU builds only, lazily sized) */
+    amrex::Gpu::DeviceVector<amrex::Real> m_rband_partial;
     /** Scratch: coarse source moments (device) and host mirror for the reduce */
     amrex::Gpu::DeviceVector<amrex::Real> m_src;
     amrex::Vector<amrex::Real> m_src_host;
