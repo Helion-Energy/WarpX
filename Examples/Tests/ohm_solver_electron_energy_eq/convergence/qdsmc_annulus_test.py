@@ -104,6 +104,12 @@ parser.add_argument(
     help="advection: blob center radius (default mid-gap; near r2 exercises "
     "the marker mirror on the staircase)",
 )
+parser.add_argument(
+    "--conduction-op",
+    choices=["sde", "fd"],
+    default="sde",
+    help="conduction operator (hybrid_pic_model.qdsmc_conduction_operator)",
+)
 parser.add_argument("--tfinal", type=float, default=2.0e-5, help="total time [s]")
 parser.add_argument("--chi", type=float, default=2.0e3, help="chi [m^2/s]")
 parser.add_argument(
@@ -249,6 +255,7 @@ pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = npts
 pywarpx.hybridpicmodel.qdsmc_conduction_flux_limit_factor = 0.0
 pywarpx.hybridpicmodel.qdsmc_conduction_max_hop = args.max_hop
 pywarpx.hybridpicmodel.qdsmc_conduction_form = "fluxform"
+pywarpx.hybridpicmodel.qdsmc_conduction_operator = args.conduction_op
 pywarpx.hybridpicmodel.qdsmc_conduction_reconstruction = args.recon
 pywarpx.hybridpicmodel.qdsmc_conduction_eb_bc = args.eb_bc
 if args.eb_bc == "isothermal":

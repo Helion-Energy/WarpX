@@ -213,6 +213,61 @@ parser.add_argument(
     "(hybrid_pic_model.joule_redirect_kick_cap_vth_frac); <0 = off",
 )
 parser.add_argument(
+    "--transport-op",
+    choices=["markers", "grid"],
+    default="markers",
+    help="energy-equation transport operator "
+    "(hybrid_pic_model.qdsmc_transport_operator): grid + --conduction-op fd "
+    "= fully grid-based Te path (no marker machinery)",
+)
+parser.add_argument(
+    "--conduction-op",
+    choices=["sde", "fd"],
+    default="sde",
+    help="conduction operator (hybrid_pic_model.qdsmc_conduction_operator): "
+    "fd = grid FD operator with SMART-limited cross fluxes (max principle "
+    "-- cannot mint new Te extrema at the b-hat-noise null); sde = QDSMC "
+    "production default",
+)
+parser.add_argument(
+    "--fd-order",
+    type=int,
+    choices=[2, 4],
+    default=2,
+    help="FD operator spatial order (hybrid_pic_model.qdsmc_conduction_fd_order)",
+)
+parser.add_argument(
+    "--fd-time",
+    choices=["ssprk2", "rkf45"],
+    default="ssprk2",
+    help="FD subcycle integrator (hybrid_pic_model.qdsmc_conduction_fd_time): "
+    "ssprk2 = monotone embedded 2(1) pair (keeps the max principle); "
+    "rkf45 = Fehlberg 4(5), NOT SSP",
+)
+parser.add_argument(
+    "--fd-limiter",
+    choices=["none", "upwind1", "smart"],
+    default="smart",
+    help="FD cross-flux limiter (hybrid_pic_model.qdsmc_conduction_fd_limiter)",
+)
+parser.add_argument(
+    "--iso-conduction",
+    type=int,
+    choices=[0, 1],
+    default=0,
+    help="single-temperature-style ISOTROPIC conduction at the cross-field "
+    "rate everywhere (hybrid_pic_model.qdsmc_conduction_isotropic): "
+    "sidesteps the b-hat-undefined problem at the reconnection null",
+)
+parser.add_argument(
+    "--iso-b",
+    type=float,
+    default=-1.0,
+    help="surgical isotropic blend below this |B| [T] "
+    "(hybrid_pic_model.qdsmc_conduction_iso_B): chi_par -> chi_perp where "
+    "b-hat is noise (the null region); <0 = off. Suggested ~4x the bias",
+)
+parser.add_argument(
     "--wall-te",
     type=float,
     default=-1.0,
@@ -547,6 +602,15 @@ pywarpx.hybridpicmodel.qdsmc_time_advance = args.advance
 pywarpx.hybridpicmodel.qdsmc_conduction_form = "fluxform"
 pywarpx.hybridpicmodel.qdsmc_conduction_reconstruction = "ppm"
 pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = 3
+pywarpx.hybridpicmodel.qdsmc_transport_operator = args.transport_op
+pywarpx.hybridpicmodel.qdsmc_conduction_operator = args.conduction_op
+pywarpx.hybridpicmodel.qdsmc_conduction_fd_order = args.fd_order
+pywarpx.hybridpicmodel.qdsmc_conduction_fd_limiter = args.fd_limiter
+pywarpx.hybridpicmodel.qdsmc_conduction_fd_time = args.fd_time
+if args.iso_conduction:
+    pywarpx.hybridpicmodel.qdsmc_conduction_isotropic = 1
+if args.iso_b > 0.0:
+    pywarpx.hybridpicmodel.qdsmc_conduction_iso_B = args.iso_b
 if args.wall_te > 0.0:
     # Temperature (Dirichlet) wall: the dielectric absorbs conducted heat.
     pywarpx.hybridpicmodel.qdsmc_conduction_eb_bc = "isothermal"

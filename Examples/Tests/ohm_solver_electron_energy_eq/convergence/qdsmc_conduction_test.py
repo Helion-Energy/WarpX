@@ -81,6 +81,59 @@ parser.add_argument(
     default=0.0,
     help="chi_perp [m^2/s] (converted to kappa internally)",
 )
+parser.add_argument(
+    "--conduction-op",
+    choices=["sde", "fd"],
+    default="sde",
+    help="conduction operator (hybrid_pic_model.qdsmc_conduction_operator): "
+    "sde = QDSMC daughter/remap forms; fd = grid finite-difference operator "
+    "(Chacon et al. CPC 313 (2025) 109646)",
+)
+parser.add_argument(
+    "--fd-order",
+    type=int,
+    choices=[2, 4],
+    default=2,
+    help="FD operator spatial order (hybrid_pic_model.qdsmc_conduction_fd_order)",
+)
+parser.add_argument(
+    "--fd-limiter",
+    choices=["none", "upwind1", "smart"],
+    default="smart",
+    help="FD cross-flux limiter (hybrid_pic_model.qdsmc_conduction_fd_limiter); "
+    "none = unlimited QUICK control arm",
+)
+parser.add_argument(
+    "--fd-time",
+    choices=["ssprk2", "rkf45"],
+    default="ssprk2",
+    help="FD subcycle integrator (hybrid_pic_model.qdsmc_conduction_fd_time): "
+    "ssprk2 = monotone embedded 2(1) pair (keeps the max principle); "
+    "rkf45 = Fehlberg 4(5), NOT SSP",
+)
+parser.add_argument(
+    "--fd-cfl",
+    type=float,
+    default=0.4,
+    help="FD subcycle CFL fraction (hybrid_pic_model.qdsmc_conduction_fd_cfl); "
+    "keep <= 0.5 -- SSP-RK2 Nyquist damping goes neutral at the edge "
+    "(deposit-noise persistence, the reference algorithm's alpha<=0.25 rule)",
+)
+parser.add_argument(
+    "--iso-full",
+    type=int,
+    choices=[0, 1],
+    default=0,
+    help="isotropic conduction at the cross-field rate everywhere "
+    "(hybrid_pic_model.qdsmc_conduction_isotropic)",
+)
+parser.add_argument(
+    "--iso-b",
+    type=float,
+    default=-1.0,
+    help="isotropic blend below this |B| [T] "
+    "(hybrid_pic_model.qdsmc_conduction_iso_B); <0 = off",
+)
 parser.add_argument("--advance", choices=["euler", "leapfrog", "pc"], default="pc")
 parser.add_argument("--grad-deposit", type=int, choices=[0, 1], default=1)
 parser.add_argument(
@@ -252,6 +305,15 @@ pywarpx.hybridpicmodel.qdsmc_conduction_curved_feet = args.curved_feet
 pywarpx.hybridpicmodel.qdsmc_conduction_deposit_kernel = args.deposit_kernel
 pywarpx.hybridpicmodel.qdsmc_conduction_compensate = args.compensate
 pywarpx.hybridpicmodel.qdsmc_conduction_fct_limiter = args.fct_limiter
+pywarpx.hybridpicmodel.qdsmc_conduction_operator = args.conduction_op
+pywarpx.hybridpicmodel.qdsmc_conduction_fd_order = args.fd_order
+pywarpx.hybridpicmodel.qdsmc_conduction_fd_limiter = args.fd_limiter
+pywarpx.hybridpicmodel.qdsmc_conduction_fd_cfl = args.fd_cfl
+pywarpx.hybridpicmodel.qdsmc_conduction_fd_time = args.fd_time
+if args.iso_full:
+    pywarpx.hybridpicmodel.qdsmc_conduction_isotropic = 1
+if args.iso_b > 0.0:
+    pywarpx.hybridpicmodel.qdsmc_conduction_iso_B = args.iso_b
 
 sim.initialize_warpx()
 

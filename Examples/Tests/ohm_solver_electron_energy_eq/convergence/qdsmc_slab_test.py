@@ -72,6 +72,12 @@ parser.add_argument("--advance", choices=["euler", "leapfrog", "pc"], default="p
 parser.add_argument("--assert", dest="do_assert", type=int, default=1)
 parser.add_argument("--out", type=str, required=True)
 parser.add_argument("--verbose", type=int, default=0)
+parser.add_argument(
+    "--conduction-op",
+    choices=["sde", "fd"],
+    default="sde",
+    help="conduction operator (hybrid_pic_model.qdsmc_conduction_operator)",
+)
 args = parser.parse_args()
 
 # ----------------------------------------------------------------------
@@ -166,6 +172,7 @@ pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = npts
 pywarpx.hybridpicmodel.qdsmc_conduction_flux_limit_factor = 0.0
 pywarpx.hybridpicmodel.qdsmc_conduction_max_hop = args.max_hop
 pywarpx.hybridpicmodel.qdsmc_conduction_form = args.form
+pywarpx.hybridpicmodel.qdsmc_conduction_operator = args.conduction_op
 pywarpx.hybridpicmodel.qdsmc_conduction_reconstruction = args.recon
 if args.bc == "isothermal":
     pywarpx.hybridpicmodel.qdsmc_conduction_bc_lo = ["isothermal", "adiabatic"]
