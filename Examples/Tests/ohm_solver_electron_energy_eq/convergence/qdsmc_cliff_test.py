@@ -95,7 +95,10 @@ n0 = 1.0e18
 Te0_eV = 10.0
 gamma = 5.0 / 3.0
 mass_factor = 1.0e6
-B0 = 2.0e-5
+# conduction reads only the field DIRECTION; scale |B| with the LOW-side
+# density so the whistler substep burden stays at the verified reference
+# point (om_wh ~ B/n) for any --ratio
+B0 = 2.0e-5 * (n0 / args.ratio) / 1.0e18
 
 dx = L / N
 w = args.width_cells * dx
