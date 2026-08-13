@@ -34,7 +34,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("sections", nargs="*", default=[])
 parser.add_argument("--jobs", type=int, default=8)
 args = parser.parse_args()
-SECTIONS = args.sections or ["gfd3", "gfd4", "gfd6", "cliff", "a4"]
+SECTIONS = args.sections or ["gfd3", "gfd4", "gfd6", "cliff", "a4", "gfd2b"]
 
 # tolerances
 TOL_EXTREMUM = 1.0e-9  # max-principle violation threshold (rel Te0)
@@ -266,6 +266,50 @@ def build_cases():
                 )
             )
 
+    if "gfd2b" in SECTIONS:
+        for eps in (1.0e-2, 1.0e-4, 1.0e-6):
+            for n in (64, 128):
+                for order in (2, 4):
+                    cases.append(
+                        (
+                            "gfd2b",
+                            "qdsmc_nimrod_test.py",
+                            f"nim_fd{order}_N{n}_e{eps:.0e}",
+                            dict(ncell=n, eps=eps, fd_order=order),
+                        )
+                    )
+        # null-semantics pair: iso_B blend at the on-grid nulls
+        for order in (2, 4):
+            cases.append(
+                (
+                    "gfd2b",
+                    "qdsmc_nimrod_test.py",
+                    f"nim_fd{order}_N128_e1e-06_isob",
+                    dict(ncell=128, eps=1.0e-6, fd_order=order, iso_b=4.0e-6),
+                )
+            )
+        # SDE reference only at mild anisotropy (hop scale)
+        cases.append(
+            (
+                "gfd2b",
+                "qdsmc_nimrod_test.py",
+                "nim_sde_N128_e1e-02",
+                dict(ncell=128, eps=1.0e-2, conduction_op="sde"),
+            )
+        )
+
+    if "gfd2bhi" in SECTIONS:
+        for eps in (1.0e-4, 1.0e-6):
+            for order in (2, 4):
+                cases.append(
+                    (
+                        "gfd2bhi",
+                        "qdsmc_nimrod_test.py",
+                        f"nim256_fd{order}_e{eps:.0e}",
+                        dict(ncell=256, nsteps=256, eps=eps, fd_order=order),
+                    )
+                )
+
     if "a4" in SECTIONS:
         # m=4 conduction-anisotropy imprint (a4 star pattern): the FD
         # operator has no launch/deposit hop scale — expect a4 at the
@@ -474,6 +518,26 @@ def report_cliff():
         print(f"| {tag[:-4]} | {mint:.3e} | {ov:+.3e} | {un:+.3e} | {ud:+.2e} | {v} |")
 
 
+def report_gfd2b():
+    print("\n## GFD2b anisotropy pollution (transient NIMROD class)\n")
+    print(
+        "delta_chi/chi_par is the paper's normalized pollution; read the "
+        "eps- and N-scaling and the order-2 vs order-4 separation.\n"
+    )
+    print("| case | chi_perp_eff/chi_perp | delta_chi/chi_par | sum drift |")
+    print("|---|---|---|---|")
+    for tag in sorted(
+        t for t in os.listdir(OUT) if t.startswith("nim") and t.endswith(".npz")
+    ):
+        d = load(tag[:-4])
+        if d is None:
+            continue
+        print(
+            f"| {tag[:-4]} | {float(d['chi_perp_eff']) / float(d['chi_perp']):.4f} "
+            f"| {float(d['delta_chi']):+.3e} | {float(d['sum_drift']):+.2e} |"
+        )
+
+
 def report_a4():
     print("\n## a4 conduction-anisotropy imprint (m=4 star pattern)\n")
     print("| case | a4 | r* | sum drift | note |")
@@ -518,6 +582,8 @@ def main():
         report_cliff()
     if "a4" in SECTIONS:
         report_a4()
+    if "gfd2b" in SECTIONS or "gfd2bhi" in SECTIONS:
+        report_gfd2b()
 
 
 if __name__ == "__main__":
