@@ -70,6 +70,8 @@ class EMModes(object):
         inertia_seeded=False,
         mass_matrices=False,
         callback_gating=False,
+        steps=None,
+        adaptive_forcing=False,
     ):
         """Get input parameters for the specific case desired."""
         self.test = test
@@ -81,6 +83,8 @@ class EMModes(object):
         self.inertia = inertia or inertia_seeded
         self.mass_matrices = mass_matrices
         self.callback_gating = callback_gating
+        self.steps_override = steps
+        self.adaptive_forcing = adaptive_forcing
         assert not (self.inertia_seeded and B_dir != "z"), (
             "--inertia-seeded seeds a transverse mode on the Bz guide "
             "field and requires --bdir z"
@@ -128,6 +132,13 @@ class EMModes(object):
         if self.inertia_seeded:
             self.total_steps = 100
             self.diag_steps = 1
+
+        # explicit step-count override (solver-knob smoke tests: run a few
+        # steps of an existing configuration without its analysis-grade
+        # duration; no dispersion analysis is meaningful at this length)
+        if self.steps_override is not None:
+            self.total_steps = self.steps_override
+            self.diag_steps = self.steps_override
 
         # dump all the current attributes to a dill pickle file
         if comm.rank == 0:
@@ -305,8 +316,9 @@ class EMModes(object):
             max_iterations=20,
             relative_tolerance=1.0e-6,
             absolute_tolerance=0.0,
-            require_convergence=False,
+            require_convergence=True if self.adaptive_forcing else False,
             linear_solver=gmres_solver,
+            adaptive_forcing=True if self.adaptive_forcing else None,
             max_particle_iterations=21,
             particle_tolerance=1.0e-10,
             use_mass_matrices_jacobian=True if self.mass_matrices else None,
@@ -600,6 +612,19 @@ parser.add_argument(
     action="store_true",
 )
 parser.add_argument(
+    "--adaptive-forcing",
+    help="use Eisenstat-Walker adaptive forcing for the GMRES tolerance "
+    "in the Newton solve (implicit only)",
+    action="store_true",
+)
+parser.add_argument(
+    "--steps",
+    help="override the number of steps (solver-knob smoke tests)",
+    required=False,
+    type=int,
+    default=None,
+)
+parser.add_argument(
     "--callback-gating",
     help="instrument the step-family python callbacks and assert the "
     "implicit-scheme contract: exactly one fire per step, with "
@@ -620,6 +645,8 @@ run = EMModes(
     inertia_seeded=args.inertia_seeded,
     mass_matrices=args.mass_matrices,
     callback_gating=args.callback_gating,
+    steps=args.steps,
+    adaptive_forcing=args.adaptive_forcing,
 )
 simulation.step()
 

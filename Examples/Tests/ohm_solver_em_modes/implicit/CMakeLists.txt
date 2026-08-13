@@ -36,6 +36,20 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Solver-knob smoke: Eisenstat-Walker adaptive forcing (newton.adaptive_forcing)
+# on a 10-step slice of the seeded-inertia configuration. Convergence is the
+# assertion (newton.require_convergence aborts on failure); no physics
+# analysis is meaningful at this length.
+add_warpx_test(
+    test_1d_ohm_solver_em_modes_implicit_forcing_picmi  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_ohm_solver_em_modes_implicit_picmi.py --test --dim 1 --bdir z --inertia-seeded --steps 10 --adaptive-forcing"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_1d_ohm_solver_em_modes_implicit_inertia_picmi  # name
     1  # dims
