@@ -315,13 +315,13 @@ Overall simulation parameters
 
         - ``implicit_evolve.use_mass_matrices_pc`` (``bool``, default: false).
           When ``true``, the plasma response is captured in the preconditioner.
-          Requires use of a preconditioner (``jacobian.pc_type = pc_curl_curl_mlmg``, ``pc_petsc``, or ``pc_jacobi``).
+          Requires use of a preconditioner (``jacobian.pc_type = pc_curl_curl_mlmg``, ``pc_petsc``, ``pc_jacobi``, or ``pc_hall_jacobi``).
 
         - ``implicit_evolve.mass_matrices_pc_width`` (``integer``, default: 0).
           If using ``jacobian.pc_type = pc_petsc``, this parameter specifies the width of the mass matrices included in the preconditioner.
           In most cases, a width of 1 is sufficient for good GMRES performance.
 
-        - ``jacobian.pc_type`` (``string``, default: None). A preconditioner can be used to minimize the number of linear GMRES iterations. There are three options:
+        - ``jacobian.pc_type`` (``string``, default: None). A preconditioner can be used to minimize the number of linear GMRES iterations. There are four options:
 
           - ``jacobian.pc_type = pc_curl_curl_mlmg``: Use the AMReX MLMG solver for the curl curl formulation of Maxwell's equations. This preconditioner solves the following equation:
 
@@ -349,6 +349,26 @@ Overall simulation parameters
             - ``pc_jacobi.max_iter`` (``int``, default: 10)
             - ``pc_jacobi.relative_tolerance`` (``float``, default: 1.0e-4)
             - ``pc_jacobi.absolute_tolerance`` (``float``, default: 1.0e-16)
+
+          - ``jacobian.pc_type = pc_hall_jacobi``: Point-block analytic Hall/whistler preconditioner for the theta-implicit hybrid (generalized Ohm's law) solver.
+            Per cell, the stiff Hall (whistler) leg of the Jacobian is approximated by the 3x3 block :math:`P = a\,I + \beta\,X(\hat{b}_0)`, where :math:`X(\hat{b}_0)\,r = r\times\hat{b}_0`,
+
+            .. math::
+
+               \beta = \frac{\theta \Delta t\, k_g^2\, |B_0|}{\mu_0 e n_0}, \qquad
+               a = 1 + M_\mathrm{diag} + \frac{\theta \Delta t\, k_g^2}{\mu_0}\left(\eta_0 + \eta_{H,0} k_g^2\right),
+
+            with :math:`k_g^2 = \sum_i 4/\Delta x_i^2` the grid-scale surrogate of the curl-curl operator, :math:`e n_0` the (floored) midpoint charge density, :math:`B_0` the theta-midpoint magnetic field, and :math:`M_\mathrm{diag}` the mass-matrix diagonal when ``implicit_evolve.use_mass_matrices_pc = true``.
+            The block is inverted per cell in closed form (a rotation inverse that decays like :math:`1/\beta`, so density-floored regions are handled robustly).
+            No boundary-condition information is used, so this preconditioner is usable with open (free-space) boundaries.
+            The frozen coefficients are refreshed once per Newton iteration.
+            :math:`\eta_0` and :math:`\eta_{H,0}` are evaluated per cell from the ``hybrid_pic_model`` resistivity parser at :math:`(\rho_0, |J|{=}0, t)` and the hyper-resistivity parser at :math:`(\rho_0, |B_0|)`, unless overridden by the knobs below.
+            The solver time-centering is read from ``implicit_evolve.theta``.
+
+            - ``pc_hall_jacobi.verbose`` (``bool``, default: false)
+            - ``precond.hall_eta0`` (``float``, optional): constant resistivity used in :math:`a` instead of the parser evaluation.
+            - ``precond.hall_etah0`` (``float``, optional): constant hyper-resistivity used in :math:`a` instead of the parser evaluation.
+            - ``precond.hall_jacobi_sweeps`` (``int``, default: 0): reserved for future defect-correction sweeps; currently parsed and ignored.
 
           - ``jacobian.pc_type = pc_petsc``: Use the PETSc solver.
 

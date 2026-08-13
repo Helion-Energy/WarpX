@@ -11,6 +11,7 @@
 #include "CurlCurlMLMGPC.H"
 #include "MatrixPC.H"
 #include "JacobiPC.H"
+#include "HallJacobiPC.H"
 #include "Utils/TextMsg.H"
 #include <AMReX_Config.H>
 #include <string>
@@ -166,6 +167,8 @@ void JacobianFunctionMF<T,Ops>::define ( const T& a_U,
             m_preCond = std::make_unique<CurlCurlMLMGPC<T,Ops>>();
         } else if (m_pc_type == PreconditionerType::pc_jacobi) {
             m_preCond = std::make_unique<JacobiPC<T,Ops>>();
+        } else if (m_pc_type == PreconditionerType::pc_hall_jacobi) {
+            m_preCond = std::make_unique<HallJacobiPC<T,Ops>>();
         } else {
             m_preCond = std::make_unique<MatrixPC<T,Ops>>();
             m_preCond->setName(amrex::getEnumNameString(m_pc_type));

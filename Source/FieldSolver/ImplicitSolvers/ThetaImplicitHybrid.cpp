@@ -935,6 +935,39 @@ void ThetaImplicitHybrid::DarwinUpdateA_B ( amrex::Real a_thetadt, amrex::Real a
     m_WarpX->FillBoundaryB(ngB, true /* sync nodal points */);
 }
 
+amrex::Array<const amrex::MultiFab*, 3>
+ThetaImplicitHybrid::GetBfieldThetaForPC ( const int lev ) const
+{
+    // During the nonlinear solve, UpdateWarpXFields (called from every
+    // residual evaluation) leaves the Bfield_fp registry holding the TOTAL
+    // theta-midpoint field B^{n+theta} of the current iterate: the
+    // Faraday-advanced plasma field with B_ext^{n+theta} assembled on top
+    // (split-field external drive), or B_static + curl A^{n+theta} on the
+    // Darwin path. Valid only after the first residual evaluation of the
+    // current Newton iterate; before that (and between steps) the registry
+    // holds the end-of-step totals B^{n+1} (= B^n at the next entry).
+    using ablastr::fields::Direction;
+    return { m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{0}, lev),
+             m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{1}, lev),
+             m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{2}, lev) };
+}
+
+const amrex::MultiFab*
+ThetaImplicitHybrid::GetRhoMidForPC ( const int lev ) const
+{
+    // The rho_fp registry carries two time slots of WarpX::ncomps components
+    // each: component 0 holds the pre-push deposit (rho(x^n) only in the
+    // first evaluation of a step; the previous evaluation's midpoint
+    // positions afterwards), and component nComp()/2 holds the
+    // midpoint-position deposit rho^{n+1/2} of the current iterate, written
+    // by PreRHSOp's PushParticlesandDeposit in every residual evaluation.
+    // Consumers should read component nComp()/2 (the same convention as
+    // rho_mid_comp in HybridPICModel and the Darwin rho_half alias in
+    // ComputeRHS). Valid only after the first residual evaluation of the
+    // current Newton iterate has deposited it.
+    return m_WarpX->m_fields.get(FieldType::rho_fp, lev);
+}
+
 void ThetaImplicitHybrid::DarwinDeriveB ()
 {
     using ablastr::fields::Direction;

@@ -101,6 +101,22 @@ public:
     // Hybrid model has no light waves, so return 0 for the PC theta parameter
     [[nodiscard]] amrex::Real GetThetaForPC () const override { return amrex::Real(0.0); }
 
+    /** The hybrid-PIC model (owned by WarpX, cached in Define): n_floor,
+     *  the resistivity and hyper-resistivity parsers, and the Hall flags
+     *  a Hall-aware preconditioner needs. */
+    const HybridPICModel* GetHybridPICModel () const override { return m_hybrid_pic_model; }
+
+    /** The theta-midpoint magnetic field B^{n+theta} (Bfield_fp registry;
+     *  see the implementation for the time-level bookkeeping). Valid only
+     *  after the first residual evaluation of the current Newton iterate. */
+    amrex::Array<const amrex::MultiFab*, 3> GetBfieldThetaForPC (int lev) const override;
+
+    /** The charge density holding the midpoint deposit rho^{n+1/2} in
+     *  component nComp()/2 (rho_fp registry; see the implementation for the
+     *  component convention). Valid only after the first residual evaluation
+     *  of the current Newton iterate. */
+    const amrex::MultiFab* GetRhoMidForPC (int lev) const override;
+
 private:
 
     /**

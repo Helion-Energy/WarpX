@@ -25,6 +25,7 @@
  */
 
 class WarpX;
+class HybridPICModel;
 enum class FieldBoundaryType;
 class ImplicitSolver
 {
@@ -133,6 +134,40 @@ public:
     // treatment of light waves in the curl-curl MLMG solver.
     // This function should return zero if light waves are not treated implicitly
     [[nodiscard]] virtual amrex::Real  GetThetaForPC () const = 0;
+
+    /**
+     * \brief Return the hybrid-PIC model for preconditioners that need the
+     * generalized Ohm's-law coefficients (n_floor, resistivity and
+     * hyper-resistivity parsers, Hall flags). Returns nullptr for solvers
+     * that do not carry a hybrid model.
+     */
+    virtual const HybridPICModel* GetHybridPICModel () const { return nullptr; }
+
+    /**
+     * \brief Return per-direction pointers to the theta-midpoint magnetic
+     * field B^{n+theta} on level lev for use in a preconditioner. Valid only
+     * after the first residual evaluation of the current Newton iterate has
+     * refreshed the field registry. Solvers that do not maintain a
+     * theta-midpoint B return nullptrs.
+     */
+    virtual amrex::Array<const amrex::MultiFab*, 3> GetBfieldThetaForPC (int lev) const
+    {
+        amrex::ignore_unused(lev);
+        return {nullptr, nullptr, nullptr};
+    }
+
+    /**
+     * \brief Return the charge density holding the midpoint deposit
+     * rho^{n+1/2} on level lev for use in a preconditioner (see the override
+     * for the component convention). Valid only after the first residual
+     * evaluation of the current Newton iterate has deposited it. Solvers
+     * that do not maintain a midpoint density return nullptr.
+     */
+    virtual const amrex::MultiFab* GetRhoMidForPC (int lev) const
+    {
+        amrex::ignore_unused(lev);
+        return nullptr;
+    }
 
     /**
      * \brief Apply deposited mass matrices to a vector field.
