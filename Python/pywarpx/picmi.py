@@ -2218,6 +2218,14 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         (Ohm's-law E and the Ampere current are zeroed on covered and cut
         edges). Requires embedded boundaries, a staggered (Yee) grid, and 3D
         or 2D Cartesian geometry.
+    vacuum_seam_switch_mode: str, default="edge"
+        Sampling of the density that decides the vacuum-seam treatment --
+        the Holmstrom vacuum branch when holmstrom_vacuum_region is True and
+        the density-floor selection of the guarded Hall term otherwise:
+        "edge" (legacy per-component edge average), "node" (endpoint
+        minimum), or "cell" (adjacent-cell minimum -- one decision for all
+        three E components of an index, removing the per-component half-cell
+        decision offsets at the plasma/vacuum seam). Cartesian only.
 
     Jx/y/z_external_function: str
         Function of space and time specifying external (non-plasma) currents.
@@ -2279,6 +2287,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         max_substep_attempts=None,
         holmstrom_vacuum_region=None,
         use_conformal_eb=None,
+        vacuum_seam_switch_mode=None,
         Jx_external_function=None,
         Jy_external_function=None,
         Jz_external_function=None,
@@ -2310,6 +2319,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.max_substep_attempts = max_substep_attempts
 
         self.holmstrom_vacuum_region = holmstrom_vacuum_region
+        self.vacuum_seam_switch_mode = vacuum_seam_switch_mode
 
         self.use_conformal_eb = use_conformal_eb
 
@@ -2384,6 +2394,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         pywarpx.hybridpicmodel.max_substep_attempts = self.max_substep_attempts
         pywarpx.hybridpicmodel.holmstrom_vacuum_region = self.holmstrom_vacuum_region
         pywarpx.hybridpicmodel.use_conformal_eb = self.use_conformal_eb
+        pywarpx.hybridpicmodel.vacuum_seam_switch_mode = self.vacuum_seam_switch_mode
         pywarpx.hybridpicmodel.__setattr__(
             "Jx_external_grid_function(x,y,z,t)",
             pywarpx.my_constants.mangle_expression(
