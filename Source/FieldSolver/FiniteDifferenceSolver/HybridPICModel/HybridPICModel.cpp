@@ -2382,16 +2382,21 @@ void HybridPICModel::QdsmcTransportOnceGrid (int const lev,
     WARPX_ABORT_WITH_MESSAGE(
         "qdsmc_transport_operator = grid: RZ metric not implemented");
 #endif
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!EB::enabled(),
-        "qdsmc_transport_operator = grid: EB masks are not wired into the "
-        "grid transport prototype");
-
     auto & warpx = WarpX::GetInstance();
     using ablastr::fields::Direction;
 
     amrex::Geometry const & geom = warpx.Geom(lev);
     amrex::Periodicity const & period = geom.periodicity();
     auto const dxi_arr = geom.InvCellSizeArray();
+
+    // EB + floor: covered (distance_to_eb <= 0) and sub-floor nodes close
+    // their faces and freeze -- the flux-form analog of the marker path's
+    // EB reflection + floored-node hold, matching the FD conduction
+    // operator's mask semantics.
+    bool const has_eb = EB::enabled();
+    amrex::MultiFab const * eb_dist = has_eb
+        ? warpx.m_fields.get(FieldType::distance_to_eb, lev) : nullptr;
+    amrex::Real const n_floor_t = m_qdsmc_n_floor;
 
     // Same entry state as the marker path: K at nodes from T_e and rho^n.
     QDSMCInitializeKe(lev);
@@ -2442,6 +2447,28 @@ void HybridPICModel::QdsmcTransportOnceGrid (int const lev,
     }
     vel.FillBoundary(period);
 
+    amrex::MultiFab opn(Ke.boxArray(), Ke.DistributionMap(), 1, 2);
+    opn.setVal(1.0_rt);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(opn, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        amrex::Box const box = mfi.tilebox();
+        amrex::Array4<amrex::Real>       const & o_arr   = opn.array(mfi);
+        amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & phi_arr = has_eb
+            ? eb_dist->const_array(mfi) : amrex::Array4<amrex::Real const>{};
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            bool const covered = has_eb && (phi_arr(i,j,k) <= 0.0_rt);
+            o_arr(i,j,k) = (!covered &&
+                            rho_arr(i,j,k)/PhysConst::q_e > n_floor_t)
+                           ? 1.0_rt : 0.0_rt;
+        });
+    }
+    opn.FillBoundary(period);
+
     // State y = {n_e, K n_e}: conservative pair under the common flow.
     int constexpr ngT = 2;
     amrex::MultiFab y(Ke.boxArray(), Ke.DistributionMap(), 2, ngT);
@@ -2480,6 +2507,7 @@ void HybridPICModel::QdsmcTransportOnceGrid (int const lev,
             amrex::Array4<amrex::Real>       const & ko = Kout.array(mfi);
             amrex::Array4<amrex::Real const> const & yc = Yin.const_array(mfi);
             amrex::Array4<amrex::Real const> const & v_arr = vel.const_array(mfi);
+            amrex::Array4<amrex::Real const> const & op = opn.const_array(mfi);
 
             amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
@@ -2489,6 +2517,10 @@ void HybridPICModel::QdsmcTransportOnceGrid (int const lev,
                 {
                     int m1[3] = {m0[0], m0[1], m0[2]};
                     m1[g] += 1;
+                    if (op(m0[0],m0[1],m0[2]) <= 0.5_rt ||
+                        op(m1[0],m1[1],m1[2]) <= 0.5_rt) {
+                        return 0.0_rt;   // closed floor/EB faces
+                    }
                     amrex::Real const vf = 0.5_rt*(
                         v_arr(m0[0],m0[1],m0[2],g) +
                         v_arr(m1[0],m1[1],m1[2],g));
@@ -2509,6 +2541,11 @@ void HybridPICModel::QdsmcTransportOnceGrid (int const lev,
                     amrex::Real const tUU = yc(uu[0],uu[1],uu[2],c);
                     return vf*qdsmc_fd_face_value(tUU, tU, tD, fd_limiter);
                 };
+                if (op(i,j,k) <= 0.5_rt) {
+                    ko(i,j,k,0) = 0.0_rt;   // frozen: closed nodes hold state
+                    ko(i,j,k,1) = 0.0_rt;
+                    return;
+                }
                 int const node[3] = {i, j, k};
                 for (int c = 0; c < 2; ++c) {
                     amrex::Real div = 0.0_rt;

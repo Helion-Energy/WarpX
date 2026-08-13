@@ -213,6 +213,14 @@ parser.add_argument(
     "(hybrid_pic_model.joule_redirect_kick_cap_vth_frac); <0 = off",
 )
 parser.add_argument(
+    "--transport-op",
+    choices=["markers", "grid"],
+    default="markers",
+    help="energy-equation transport operator "
+    "(hybrid_pic_model.qdsmc_transport_operator): grid + --conduction-op fd "
+    "= fully grid-based Te path (no marker machinery)",
+)
+parser.add_argument(
     "--conduction-op",
     choices=["sde", "fd"],
     default="sde",
@@ -594,6 +602,7 @@ pywarpx.hybridpicmodel.qdsmc_time_advance = args.advance
 pywarpx.hybridpicmodel.qdsmc_conduction_form = "fluxform"
 pywarpx.hybridpicmodel.qdsmc_conduction_reconstruction = "ppm"
 pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = 3
+pywarpx.hybridpicmodel.qdsmc_transport_operator = args.transport_op
 pywarpx.hybridpicmodel.qdsmc_conduction_operator = args.conduction_op
 pywarpx.hybridpicmodel.qdsmc_conduction_fd_order = args.fd_order
 pywarpx.hybridpicmodel.qdsmc_conduction_fd_limiter = args.fd_limiter
