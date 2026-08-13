@@ -3235,16 +3235,21 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
         "qdsmc_conduction_operator = fd: RZ requires the curvilinear "
         "J Xi^ij metric form and is not implemented");
 #endif
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!EB::enabled(),
-        "qdsmc_conduction_operator = fd: EB masks/BCs are not wired into "
-        "the FD operator yet (P2 of QDSMC_FD_CONDUCTION_PLAN.md)");
-
     auto & warpx = WarpX::GetInstance();
     using ablastr::fields::Direction;
 
     amrex::Geometry const & geom = warpx.Geom(lev);
     amrex::Periodicity const & period = geom.periodicity();
     auto const dxi_arr = geom.InvCellSizeArray();
+
+    // EB: covered nodes (distance_to_eb <= 0) close their faces -- the
+    // flux-form staircase-adiabatic wall -- and keep their T_e frozen;
+    // the isothermal option pins the wall-adjacent fluid ring after the
+    // integrate (same ring-2 semantics and tally as the SDE path).
+    bool const has_eb = EB::enabled();
+    amrex::MultiFab const * eb_dist = has_eb
+        ? warpx.m_fields.get(FieldType::distance_to_eb, lev) : nullptr;
+    bool const eb_iso = has_eb && (m_cond_eb_bc == 1);
 
     amrex::MultiFab & Te =
         *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
@@ -3303,10 +3308,17 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
     }
     amrex::GpuArray<int, 3> const coarsen = {1, 1, 1};
 
-    // --- Pass A (once per call): unit b, |B|^2, floored n_e, open mask ---
-    // b and n_e do not change across subcycles; only the chi tensor does.
-    enum BNE : int { b_bx = 0, b_by, b_bz, b_B2, b_ne, b_open, b_ncomp };
-    amrex::MultiFab bne(Te.boxArray(), Te.DistributionMap(), BNE::b_ncomp, 2);
+    // --- Pass A (once per call): unit b, |B|^2, floored n_e, open mask,
+    // EB coverage --- b and n_e do not change across subcycles; only the
+    // chi tensor does. Ghosts = 3 for the isothermal ring scan (eb_ring
+    // <= 3); mask comps default OPEN so unset non-periodic domain ghosts
+    // never read as walls (the SDE kin convention).
+    enum BNE : int { b_bx = 0, b_by, b_bz, b_B2, b_ne, b_open, b_ebm,
+                     b_ncomp };
+    amrex::MultiFab bne(Te.boxArray(), Te.DistributionMap(), BNE::b_ncomp, 3);
+    bne.setVal(0.0_rt);
+    bne.setVal(1.0_rt, BNE::b_open, 1, bne.nGrow());
+    bne.setVal(1.0_rt, BNE::b_ebm, 1, bne.nGrow());
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -3318,9 +3330,12 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
         amrex::Array4<amrex::Real const> const & Bx_arr  = Bx.const_array(mfi);
         amrex::Array4<amrex::Real const> const & By_arr  = By.const_array(mfi);
         amrex::Array4<amrex::Real const> const & Bz_arr  = Bz.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & phi_arr = has_eb
+            ? eb_dist->const_array(mfi) : amrex::Array4<amrex::Real const>{};
 
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
+            bool const covered = has_eb && (phi_arr(i,j,k) <= 0.0_rt);
             amrex::Real const ne_raw = rho_arr(i,j,k) / qe;
             amrex::Real const bxv = ablastr::coarsen::sample::Interp(
                 Bx_arr, Bx_stag, nd_x, coarsen, i, j, k, 0);
@@ -3336,7 +3351,9 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
             b_arr(i,j,k,BNE::b_bz)   = unmag ? 1.0_rt : bzv*Binv;
             b_arr(i,j,k,BNE::b_B2)   = B2;
             b_arr(i,j,k,BNE::b_ne)   = amrex::max(ne_raw, n_floor);
-            b_arr(i,j,k,BNE::b_open) = (ne_raw > n_floor) ? 1.0_rt : 0.0_rt;
+            b_arr(i,j,k,BNE::b_open) =
+                (ne_raw > n_floor && !covered) ? 1.0_rt : 0.0_rt;
+            b_arr(i,j,k,BNE::b_ebm)  = covered ? 0.0_rt : 1.0_rt;
         });
     }
     bne.FillBoundary(period);
@@ -3702,11 +3719,102 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                                 : std::numeric_limits<amrex::Real>::max();
     };
 
+    // Isothermal EB ring pin (Chebyshev distance
+    // <= eb_ring of a covered node) to the parser T_wall and tally the
+    // exchange -- identical semantics to the SDE path's ring pin (the
+    // ring-2 default covers the deposition density ramp; the FD operator
+    // has no deposit ramp, but the shared default keeps the arms
+    // comparable; positive tally = energy into the plasma).
+    auto pin_eb_ring = [&] (amrex::MultiFab & Tf)
+    {
+        auto const ebTe = m_cond_eb_Te;
+        auto const plo_arr = geom.ProbLoArray();
+        auto const dx_arr  = geom.CellSizeArray();
+        int const eb_ring = m_cond_eb_ring;
+        amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        for (MFIter mfi(Tf, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            amrex::Box tile_box = mfi.tilebox();
+            {   // unique node ownership (fixup-loop seam trim)
+                amrex::Box const box_nodes =
+                    amrex::surroundingNodes(mfi.validbox());
+                for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                    if (tile_box.bigEnd(dd) == box_nodes.bigEnd(dd) &&
+                        (box_nodes.bigEnd(dd) != dom_nodes.bigEnd(dd) ||
+                         geom.isPeriodic(dd))) {
+                        tile_box.growHi(dd, -1);
+                    }
+                }
+            }
+            amrex::Array4<amrex::Real>       const & Te_arr  = Tf.array(mfi);
+            amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+            amrex::Array4<amrex::Real const> const & b_arr   = bne.const_array(mfi);
+            reduce_op.eval(tile_box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
+            {
+                if (b_arr(i,j,k,BNE::b_ebm) == 0.0_rt) { return {0.0_rt}; }
+                amrex::Real const ne = rho_arr(i,j,k) / qe;
+                if (ne <= 0.0_rt) { return {0.0_rt}; }
+                bool ring = false;
+                int const node[3] = {i, j, k};
+                int const rr = eb_ring;
+#if defined(WARPX_DIM_3D)
+                for (int ok = -rr; ok <= rr; ++ok) {
+#else
+                int const ok = 0;
+                {
+#endif
+                for (int oj = -rr; oj <= rr; ++oj) {
+                for (int oi = -rr; oi <= rr; ++oi) {
+                    if (oi == 0 && oj == 0 && ok == 0) { continue; }
+                    ring = ring ||
+                        (b_arr(node[0]+oi, node[1]+oj, node[2]+ok,
+                               BNE::b_ebm) == 0.0_rt);
+                }}}
+                if (!ring) { return {0.0_rt}; }
+                amrex::Real cx[3] = {0.0_rt, 0.0_rt, 0.0_rt};
+                for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                    cx[dd] = plo_arr[dd] + amrex::Real(node[dd])*dx_arr[dd];
+                }
+#if defined(WARPX_DIM_3D)
+                amrex::Real const Te_eV = ebTe(cx[0], cx[1], cx[2]);
+#else
+                amrex::Real const Te_eV = ebTe(cx[0], 0.0_rt, cx[1]);
+#endif
+                amrex::Real const TwK = Te_eV * qe / kb;
+                amrex::Real const du =
+                    1.5_rt * kb * ne * (TwK - Te_arr(i,j,k));
+                Te_arr(i,j,k) = TwK;
+                return {du};
+            });
+        }
+        auto tup = reduce_data.value(reduce_op);
+        amrex::Real tly = amrex::get<0>(tup);
+        amrex::ParallelDescriptor::ReduceRealSum(tly);
+        m_cond_eb_tally += tly;
+        };
+
+    // Bath pins must track the SUBCYCLE cadence: applied once per call
+    // they are a contact resistance whose magnitude GROWS under
+    // refinement (bath-row heat capacity ~ dx; measured anti-convergent
+    // slab wall flux 0.986 -> 0.967 from N=64 -> 128). Re-pinning after
+    // every accepted subcycle makes the deficit ~ dt_sub ~ dx^2 -- the
+    // FD analog of the SDE fold-back's continuous bath sampling. The
+    // domain helper also handles flux-injection BCs, scaled by the
+    // accepted dt so the total injection sums to dt_c exactly.
+    auto post_step = [&] (amrex::MultiFab & yy, amrex::Real const dts)
+    {
+        ApplyQdsmcConductionWallBCs(lev, dts, yy, rho);
+        if (eb_iso) { pin_eb_ring(yy); }
+    };
+
     QdsmcRKIntegrator const integ(
         use_rkf45 ? QdsmcRKIntegrator::Scheme::RKF45
                   : QdsmcRKIntegrator::Scheme::SSPRK2,
         eval_rhs, cap, m_cond_fd_rtol, m_cond_fd_atol,
-        m_substep_safety, m_substep_max_growth, max_sub);
+        m_substep_safety, m_substep_max_growth, max_sub, post_step);
     QdsmcRKStats const st = integ.Advance(T_cur, dt_c);
 
     if (st.t_done < dt_c*(1.0_rt - 1.0e-12_rt)) {
@@ -3722,7 +3830,7 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
     }
 
     amrex::MultiFab::Copy(Te, T_cur, 0, 0, 1, 0);
-    ApplyQdsmcConductionWallBCs(lev, dt_c, Te, rho);
+
     ablastr::utils::communication::FillBoundary(
         Te, WarpX::do_single_precision_comms, period, true);
 }

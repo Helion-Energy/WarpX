@@ -64,12 +64,21 @@ public:
 
     using Rhs = std::function<void (amrex::MultiFab&, amrex::MultiFab&)>;
     using Cap = std::function<amrex::Real ()>;
+    /** Optional hook run on the state after every ACCEPTED step (before
+     *  the accepted state is latched for the next attempt), with the
+     *  accepted dt. Used for constraint enforcement that must track the
+     *  subcycle cadence -- e.g. Dirichlet bath pins, whose once-per-call
+     *  application is a contact resistance that GROWS under refinement
+     *  (bath-row heat capacity ~ dx; measured anti-convergent wall flux
+     *  0.986 -> 0.967 from N=64 -> 128 on the conduction slab). */
+    using PostStep = std::function<void (amrex::MultiFab&, amrex::Real)>;
 
     QdsmcRKIntegrator (Scheme scheme, Rhs rhs, Cap cap,
                        amrex::Real rtol, amrex::Real atol,
                        amrex::Real safety, amrex::Real max_growth,
-                       int max_attempts)
+                       int max_attempts, PostStep post_step = {})
         : m_scheme(scheme), m_rhs(std::move(rhs)), m_cap(std::move(cap)),
+          m_post_step(std::move(post_step)),
           m_rtol(rtol), m_atol(atol), m_safety(safety),
           m_max_growth(max_growth), m_max_attempts(max_attempts)
     {}
@@ -115,6 +124,7 @@ public:
             amrex::Real const fac =
                 m_safety * std::pow(err + 1.0e-10_rt, expo);
             if (err <= 1.0_rt) {
+                if (m_post_step) { m_post_step(y, dt); }
                 st.t_done += dt;
                 ++st.n_accepted;
                 st.dt_last = dt;
@@ -239,6 +249,7 @@ private:
     Scheme m_scheme;
     Rhs m_rhs;
     Cap m_cap;
+    PostStep m_post_step;
     amrex::Real m_rtol, m_atol, m_safety, m_max_growth;
     int m_max_attempts;
 };
