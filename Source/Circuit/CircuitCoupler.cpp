@@ -210,3 +210,11 @@ CircuitCoupler::CoilLinkage (std::string const& coil_name) const
         "' (unknown coil, or its probe is 'none')");
     return it->second;
 }
+
+amrex::Real
+CircuitCoupler::CoilLinkageOr (std::string const& coil_name,
+                               const amrex::Real fallback) const
+{
+    const auto it = m_lambda.find(coil_name);
+    return (it != m_lambda.end()) ? it->second : fallback;
+}
