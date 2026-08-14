@@ -14,6 +14,7 @@
 #include "BoundaryConditions/FieldBoundaries.H"
 #include "BoundaryConditions/GreensFunctionOpenBC.H"
 #include "BoundaryConditions/PEC_Insulator.H"
+#include "Circuit/CircuitCoupling.H"
 #include "BoundaryConditions/PML.H"
 #include "Diagnostics/MultiDiagnostics.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
@@ -426,6 +427,12 @@ WarpX::WarpX ()
     {
         // Create hybrid-PIC model object if needed
         m_hybrid_pic_model = std::make_unique<HybridPICModel>();
+    }
+
+    if (CircuitCoupling::IsConfigured())
+    {
+        // Coil / circuit-coupling subsystem (circuit.coils)
+        m_circuit_coupling = std::make_unique<CircuitCoupling>();
     }
 
     current_buffer_masks.resize(nlevs_max);
