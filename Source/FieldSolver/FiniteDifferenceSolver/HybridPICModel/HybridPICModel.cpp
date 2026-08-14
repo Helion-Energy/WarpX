@@ -78,6 +78,7 @@ void HybridPICModel::ReadParameters ()
     } else {
         Abort("hybrid_pic_model.mr_restrict_cadence must be 'substep' or 'half_step'");
     }
+    pp_hybrid.query("mr_prolong_shell_fill", m_mr_prolong_shell_fill);
     std::string mr_cf_fill_cadence = "stage";
     pp_hybrid.query("mr_cf_fill_cadence", mr_cf_fill_cadence);
     if (mr_cf_fill_cadence == "stage") {

@@ -687,8 +687,13 @@ void HybridPICModel::FillBfieldCoarseFineGhosts (
     ablastr::fields::VectorField Bfine = warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev);
     const amrex::Geometry& fgeom = warpx.Geom(lev);
 
+    // The shell-limited fill is opt-in: on GPU the full-box interpolation is
+    // bandwidth-cheap and the boxDiff decomposition multiplies the per-call
+    // launch/setup overhead across the substep-stage round count, which is
+    // the actual cost driver (measured slower on A100); on CPU the volume
+    // reduction can win.
     std::array<amrex::MultiFab, 3>& Btmp =
-        ProlongBfieldFromCoarse(lev, ng, /*ghosts_only=*/true);
+        ProlongBfieldFromCoarse(lev, ng, /*ghosts_only=*/m_mr_prolong_shell_fill);
 
     // Copy back the ghost region only: interior valid data must not be
     // touched. Ghost cells covered by same-level valid data (including

@@ -468,6 +468,14 @@ public:
      *  (true, default) or only once per half-step (false). */
     bool m_mr_restrict_every_substep = true;
 
+    /** Opt-in shell-limited coarse-fine ghost prolongation
+     *  (hybrid_pic_model.mr_prolong_shell_fill, default false): interpolate
+     *  only the ghost shell (boxDiff pieces) instead of the full grown box.
+     *  Bit-identical output; a volume win on CPU, but measured slower on GPU
+     *  where the extra per-piece call overhead beats the bandwidth saving
+     *  across the substep-stage round count. */
+    bool m_mr_prolong_shell_fill = false;
+
     /** Coarse-fine ghost-fill cadence within the RK4 substep loop
      *  (hybrid_pic_model.mr_cf_fill_cadence): true = full prolongation fill
      *  every RK stage ("stage", default, reads the coarse solution at the
