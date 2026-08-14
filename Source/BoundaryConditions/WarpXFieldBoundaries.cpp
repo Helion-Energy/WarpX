@@ -437,4 +437,34 @@ void WarpX::ApplyElectronPressureBoundary (const int lev, PatchType patch_type)
             "ApplyElectronPressureBoundary: Only one level implemented for hybrid solver."));
         }
     }
+
+    // Zero-gradient (staggering-aware even-mirror) domain-ghost fills for
+    // the nodal electron scalars at non-periodic boundaries: FillBoundary
+    // leaves non-periodic domain ghosts untouched, so without these any
+    // Ohm-path stencil reaching a domain-end ghost reads stale values --
+    // and a clamp would be no better for nodal data (a centered stencil
+    // at the end node would see half the interior gradient instead of
+    // zero, i.e. a spurious end-node grad Pe). The pressure keeps the
+    // legacy PEC image above on PEC sides (bit-identical; it also
+    // rewrites the boundary node) and gains the pure-ghost mirror on the
+    // remaining non-periodic sides; the temperature -- previously never
+    // ghost-filled at domain ends -- gets the pure-ghost mirror on every
+    // non-periodic side, so eta(Te)-class consumers see the zero-gradient
+    // image. 'none' sides (the RZ axis) keep their own parity handling.
+    if (patch_type == PatchType::fine) {
+        ablastr::fields::ScalarField electron_pressure_fp =
+            m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
+        PEC::ApplyZeroGradientToScalar(
+            electron_pressure_fp,
+            field_boundary_lo, field_boundary_hi,
+            Geom(lev), lev, patch_type, ref_ratio,
+            /*include_pec=*/false);
+        ablastr::fields::ScalarField electron_temperature_fp =
+            m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+        PEC::ApplyZeroGradientToScalar(
+            electron_temperature_fp,
+            field_boundary_lo, field_boundary_hi,
+            Geom(lev), lev, patch_type, ref_ratio,
+            /*include_pec=*/true);
+    }
 }
