@@ -1,0 +1,14 @@
+# Test 3: axial (poloidal) current column, Green's-function open boundary.
+# The relaxed B_theta must match Ampere's law, mu0 I_enc(r) / (2 pi r),
+# including at the outermost cells next to the open face (where the ghost
+# B_theta is the r*B_theta = const free-space continuation).
+FILE = inputs_base_rz_open_bc_greens
+
+geometry.prob_lo = 0.0 -0.5
+geometry.prob_hi = 1.0  0.5
+amr.n_cell = 32 32
+
+# Gaussian axial current column J_z(r) = J0 exp(-r^2/a^2), a = 0.15
+hybrid_pic_model.Jz_external_grid_function(x,y,z,t) = "1.0e3 * exp(-(x/0.15)^2)"
+
+boundary.open_bc_coarsening = 4

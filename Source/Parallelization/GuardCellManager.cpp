@@ -135,6 +135,14 @@ guardCellManager::Init (
     amrex::ignore_unused(ngy, ngJy, ngz, ngJz);
 #endif
 
+    // Ampere's-law current evaluation in the hybrid solver fills one guard
+    // cell before interpolating J to the grids used by Ohm's law. Particle
+    // shape normally supplies this allocation, but particle-free fluid modes
+    // must request it explicitly.
+    if (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) {
+        ng_alloc_J.max(IntVect::TheUnitVector());
+    }
+
     // TODO Adding one cell for rho should not be necessary, given that the number of guard cells
     // now takes into account the time step (see code block below). However, this does seem to be
     // necessary in order to avoid some remaining instances of out-of-bound array access in

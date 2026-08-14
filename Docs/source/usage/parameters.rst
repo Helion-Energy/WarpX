@@ -848,6 +848,23 @@ Domain Boundary Conditions
     * ``neumann``: For the electrostatic multigrid solver, a Neumann boundary condition (with gradient of the potential equal to 0) will be applied on the specified boundary.
 
     * ``open``: For the electrostatic Poisson solver based on a Integrated Green Function method.
+      In RZ geometry with the hybrid-PIC solver (:pp:param:`algo.maxwell_solver = hybrid`), ``open`` on the upper radial face
+      and/or the axial (z) faces selects a free-space (Green's-function) boundary for the B-field advance: the ghost values
+      of B on the open faces are filled with the free-space field of the interior sources through the axisymmetric
+      ring-current Green's function (poloidal components, differenced from one shared flux-function table so the ghost field
+      is discretely divergence-free, including the corner ghosts where open faces meet) and Ampere's law (toroidal
+      component: :math:`r B_\theta` continues radially beyond r_hi, and :math:`B_\theta` continues z-invariantly at fixed
+      radius beyond an open z cap, freezing the enclosed axial-current profile at its boundary-plane value). The boundary
+      then carries no image currents. Supported for m = 0 only, on the r_hi/z_lo/z_hi faces in any combination (r_lo is the
+      symmetry axis); open z faces require non-periodic z.
+      Applied fields must be loaded through the hybrid solver's split external fields
+      (:pp:param:`hybrid_pic_model.add_external_fields`); initializing the evolved B directly via
+      :pp:param:`warpx.B_ext_grid_init_style` is rejected (a curl-free applied field would be erased at the open faces).
+      Optional controls: ``boundary.open_bc_coarsening`` (interior linear source-binning factor of the precomputed kernel,
+      default ``4``; bins near the open face are automatically graded down to single nodes under a multipole acceptance
+      criterion), ``boundary.open_bc_image_sum_rtol`` (relative tolerance of the periodic-z image sum at kernel assembly,
+      default ``1e-6``, must be positive), ``boundary.open_bc_max_images`` (cap on image pairs, default ``200``, must be
+      at least 1).
 
 .. pp:param:: boundary.potential_lo/hi_x/y/z
     :link_aliases:

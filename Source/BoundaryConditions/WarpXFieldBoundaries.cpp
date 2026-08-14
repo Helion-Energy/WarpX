@@ -1,4 +1,5 @@
 #include "WarpX.H"
+#include "BoundaryConditions/GreensFunctionOpenBC.H"
 #include "BoundaryConditions/PEC_Insulator.H"
 #include "BoundaryConditions/PML.H"
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
@@ -177,6 +178,26 @@ void WarpX::ApplyBfieldBoundary (const int lev, PatchType patch_type, Subcycling
 {
     using ablastr::fields::Direction;
 
+#if defined(WARPX_DIM_RZ)
+    // Green's-function open (free-space) boundary with an open z (cap)
+    // face: the fill must run BEFORE the reflecting/axis fills, because
+    // the PEC and on-axis mirrors read interior cap-ghost values at the
+    // corners and must see this application's values (the Green's fill
+    // itself reads only valid data, so it is safe to run first). With
+    // r_hi-only open the original tail position below is kept unchanged.
+    const bool open_bc_greens_z =
+        (field_boundary_lo[1] == FieldBoundaryType::Open) ||
+        (field_boundary_hi[1] == FieldBoundaryType::Open);
+    if (GreensFunctionOpenBC::IsActive() && open_bc_greens_z &&
+        patch_type == PatchType::fine) {
+        if (!m_open_bc_greens) {
+            m_open_bc_greens = std::make_unique<GreensFunctionOpenBC>();
+        }
+        m_open_bc_greens->ApplyToBfield(
+            m_fields.get_alldirs(FieldType::Bfield_fp, lev), Geom(lev), lev);
+    }
+#endif
+
     if (::isAnyBoundary<FieldBoundaryType::PEC>(field_boundary_lo, field_boundary_hi)) {
         if (patch_type == PatchType::fine) {
             PEC::ApplyPECtoBfield(
@@ -250,6 +271,22 @@ void WarpX::ApplyBfieldBoundary (const int lev, PatchType patch_type, Subcycling
         ApplyFieldBoundaryOnAxis(m_fields.get(FieldType::Bfield_cp,Direction{0},lev),
                                  m_fields.get(FieldType::Bfield_cp,Direction{1},lev),
                                  m_fields.get(FieldType::Bfield_cp,Direction{2},lev), lev);
+    }
+#endif
+
+#if defined(WARPX_DIM_RZ)
+    // Green's-function open (free-space) boundary on the r_hi face for the
+    // hybrid-PIC B-field advance: fill the radial ghost values of B with
+    // the free-space field of the interior sources (default off; active
+    // only with boundary.field_hi[0] == open and the hybrid solver). When
+    // a z cap is open too, the fill already ran at the top of this method.
+    if (GreensFunctionOpenBC::IsActive() && !open_bc_greens_z &&
+        patch_type == PatchType::fine) {
+        if (!m_open_bc_greens) {
+            m_open_bc_greens = std::make_unique<GreensFunctionOpenBC>();
+        }
+        m_open_bc_greens->ApplyToBfield(
+            m_fields.get_alldirs(FieldType::Bfield_fp, lev), Geom(lev), lev);
     }
 #endif
 }

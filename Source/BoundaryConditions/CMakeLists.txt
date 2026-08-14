@@ -3,6 +3,7 @@ foreach(D IN LISTS WarpX_DIMS)
     target_sources(lib_${SD}
       PRIVATE
         FieldBoundaries.cpp
+        GreensFunctionOpenBC.cpp
         PEC_Insulator.cpp
         PML.cpp
         WarpXEvolvePML.cpp
