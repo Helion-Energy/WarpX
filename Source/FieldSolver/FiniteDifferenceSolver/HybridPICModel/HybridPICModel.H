@@ -266,7 +266,8 @@ public:
         ablastr::fields::MultiLevelScalarField const& rhofield,
         amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E,
         amrex::Real dt, SubcyclingHalf subcycling_half,
-        amrex::IntVect ng, std::optional<bool> nodal_sync);
+        amrex::IntVect ng, std::optional<bool> nodal_sync,
+        bool cf_fill = true);
 
     /**
      * \brief Fill the fine-level (lev >= 1) B-field ghost cells at the
@@ -466,6 +467,14 @@ public:
     /** Mesh refinement: restrict B fine->coarse after every accepted substep
      *  (true, default) or only once per half-step (false). */
     bool m_mr_restrict_every_substep = true;
+
+    /** Coarse-fine ghost-fill cadence within the RK4 substep loop
+     *  (hybrid_pic_model.mr_cf_fill_cadence): true = full prolongation fill
+     *  every RK stage ("stage", default, reads the coarse solution at the
+     *  current stage state); false = full fill on the first stage of each
+     *  substep only, light scratch re-copy on the others ("substep",
+     *  O(dt_sub) seam lag). */
+    bool m_mr_cf_fill_every_stage = true;
     /** Mesh refinement: runtime div(B) audit of the coarse-fine ghost fill
      *  and the restriction (debug diagnostic, off by default). */
     bool m_mr_check_div_b = false;
@@ -850,9 +859,30 @@ private:
      * Returns a reference to the persistent per-level scratch (reused across
      * RK stages and substeps; reallocated only when the layout or the ghost
      * pad changes). Shared by FillBfieldCoarseFineGhosts (ghost-only
-     * copy-back) and SeedBfieldFromCoarse (whole-level copy-back). */
+     * copy-back) and SeedBfieldFromCoarse (whole-level copy-back).
+     *
+     * With ghosts_only = true the interpolation is band-limited to the
+     * ghost shell (boxDiff of each grown fine box against its valid box):
+     * bit-identical for a ghost-only consumer — the interpolation is local
+     * per coarse cell and the interior result is discarded anyway — at a
+     * small fraction of the interp volume. The one full-region exception is
+     * the frozen-ghost-cache capture fill after an EB gate (re)build, which
+     * is handled internally. */
     std::array<amrex::MultiFab, 3>& ProlongBfieldFromCoarse (
-        int lev, amrex::IntVect const& ng);
+        int lev, amrex::IntVect const& ng, bool ghosts_only = false);
+
+    /** \brief Light per-stage refresh of the fine-level coarse-fine ghost
+     * region from the persistent prolongation scratch of the current
+     * substep's first stage (no interpolation, no coarse-level import).
+     * Used by the stages that skip the full fill under
+     * hybrid_pic_model.mr_cf_fill_cadence = "substep": the RK stage
+     * arithmetic manufactures stale-B_old mixtures on ghost faces between
+     * fills, so the skipped stages must still restore a coherent ghost
+     * state; re-copying the stage-1 prolongation lags the coarse solution
+     * by O(dt_sub) on the seam. Falls back to the full fill if the scratch
+     * does not match the current layout. */
+    void RefreshBfieldCFGhostsFromScratch (
+        int lev, amrex::IntVect const& ng, std::optional<bool> nodal_sync);
 
     // CUDA >= 13 nvcc requires member functions whose bodies contain extended
     // __device__ lambdas to be publicly accessible (device-lambda visibility

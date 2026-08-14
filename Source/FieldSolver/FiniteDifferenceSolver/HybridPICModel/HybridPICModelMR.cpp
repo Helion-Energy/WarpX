@@ -453,7 +453,7 @@ void HybridPICModel::EnsureProlongGateMask (const int lev,
 }
 
 std::array<amrex::MultiFab, 3>& HybridPICModel::ProlongBfieldFromCoarse (
-    const int lev, amrex::IntVect const& ng)
+    const int lev, amrex::IntVect const& ng, const bool ghosts_only)
 {
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
     ABLASTR_PROFILE("HybridMR::ProlongBfieldFromCoarse");
@@ -590,9 +590,24 @@ std::array<amrex::MultiFab, 3>& HybridPICModel::ProlongBfieldFromCoarse (
             }
         }
         const amrex::Array<amrex::IArrayBox*, AMREX_SPACEDIM> no_mask{AMREX_D_DECL(nullptr, nullptr, nullptr)};
+        // Band-limit the fill region to the ghost shell for a ghost-only
+        // consumer: the FaceDivFree interpolation is local per coarse cell,
+        // so restricting the region to boxDiff(grown box, valid box) yields
+        // bit-identical ghost values at a small fraction of the interp
+        // volume. The frozen-cache capture fill (the first fill after an EB
+        // gate rebuild) still runs the full region so the cache is complete.
+        const bool shell_only =
+            ghosts_only && !(gate_enabled && m_mr_prolong_gate_fresh[lev]);
         for (amrex::MFIter mfi(Btmp[0], false); mfi.isValid(); ++mfi)
         {
-            const amrex::Box fine_region = amrex::grow(fba_cell[mfi.index()], ng_pad);
+            const amrex::Box& fbox_valid = fba_cell[mfi.index()];
+            const amrex::Box full_region = amrex::grow(fbox_valid, ng_pad);
+            amrex::BoxList fill_regions;
+            if (shell_only) {
+                fill_regions = amrex::boxDiff(full_region, fbox_valid);
+            } else {
+                fill_regions.push_back(full_region);
+            }
 #if defined(WARPX_DIM_3D)
             const amrex::Array<amrex::FArrayBox*, AMREX_SPACEDIM> crse_fabs{
                 &cpatch[0][mfi], &cpatch[1][mfi], &cpatch[2][mfi]};
@@ -615,9 +630,11 @@ std::array<amrex::MultiFab, 3>& HybridPICModel::ProlongBfieldFromCoarse (
                              &(*m_mr_prolong_gate[lev][2])[mfi]};
 #endif
             }
-            amrex::face_divfree_interp.interp_arr(
-                crse_fabs, 0, fine_fabs, 0, 1, fine_region, ratio, mask_fabs,
-                cgeom, fgeom, bcr, 0, 0, amrex::RunOn::Gpu);
+            for (const amrex::Box& fine_region : fill_regions) {
+                amrex::face_divfree_interp.interp_arr(
+                    crse_fabs, 0, fine_fabs, 0, 1, fine_region, ratio, mask_fabs,
+                    cgeom, fgeom, bcr, 0, 0, amrex::RunOn::Gpu);
+            }
         }
 
 #if !defined(WARPX_DIM_3D)
@@ -670,7 +687,8 @@ void HybridPICModel::FillBfieldCoarseFineGhosts (
     ablastr::fields::VectorField Bfine = warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev);
     const amrex::Geometry& fgeom = warpx.Geom(lev);
 
-    std::array<amrex::MultiFab, 3>& Btmp = ProlongBfieldFromCoarse(lev, ng);
+    std::array<amrex::MultiFab, 3>& Btmp =
+        ProlongBfieldFromCoarse(lev, ng, /*ghosts_only=*/true);
 
     // Copy back the ghost region only: interior valid data must not be
     // touched. Ghost cells covered by same-level valid data (including
@@ -691,6 +709,46 @@ void HybridPICModel::FillBfieldCoarseFineGhosts (
 #endif
 }
 
+
+void HybridPICModel::RefreshBfieldCFGhostsFromScratch (
+    const int lev, amrex::IntVect const& ng, std::optional<bool> nodal_sync)
+{
+#if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ)
+    ABLASTR_PROFILE("HybridMR::RefreshBfieldCFGhosts");
+    auto& warpx = WarpX::GetInstance();
+
+    ablastr::fields::VectorField Bfine = warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev);
+    const amrex::Geometry& fgeom = warpx.Geom(lev);
+    const amrex::IntVect ratio = warpx.refRatio(lev-1);
+
+    // The scratch must hold this layout's prolongation from the current
+    // substep's first stage; anything else (fresh init, regrid) falls back
+    // to the full fill.
+    amrex::IntVect ng_pad;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        ng_pad[d] = ((ng[d] + ratio[d] - 1) / ratio[d]) * ratio[d];
+    }
+    const bool scratch_valid =
+        static_cast<int>(m_mr_prolong_scratch.size()) > lev &&
+        m_mr_prolong_scratch[lev][0].ok() &&
+        m_mr_prolong_scratch_fba[lev] == warpx.boxArray(lev) &&
+        m_mr_prolong_scratch_ng[lev] == ng_pad &&
+        m_mr_prolong_scratch[lev][0].DistributionMap() == Bfine[0]->DistributionMap();
+    if (!scratch_valid) {
+        FillBfieldCoarseFineGhosts(lev, ng, nodal_sync);
+        return;
+    }
+
+    for (int idim = 0; idim < 3; ++idim) {
+        ::CopyGhostRegion(*Bfine[idim], m_mr_prolong_scratch[lev][idim], fgeom, ng);
+    }
+    warpx.FillBoundaryB(lev, ng, nodal_sync);
+#else
+    amrex::ignore_unused(lev, ng, nodal_sync);
+    WARPX_ABORT_WITH_MESSAGE(
+        "Hybrid-PIC mesh refinement is only implemented for Cartesian 2D/3D.");
+#endif
+}
 
 void HybridPICModel::SeedBfieldFromCoarse (
     const int lev, amrex::IntVect const& ng, std::optional<bool> nodal_sync)

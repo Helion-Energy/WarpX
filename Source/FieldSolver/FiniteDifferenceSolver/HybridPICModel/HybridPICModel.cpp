@@ -78,6 +78,15 @@ void HybridPICModel::ReadParameters ()
     } else {
         Abort("hybrid_pic_model.mr_restrict_cadence must be 'substep' or 'half_step'");
     }
+    std::string mr_cf_fill_cadence = "stage";
+    pp_hybrid.query("mr_cf_fill_cadence", mr_cf_fill_cadence);
+    if (mr_cf_fill_cadence == "stage") {
+        m_mr_cf_fill_every_stage = true;
+    } else if (mr_cf_fill_cadence == "substep") {
+        m_mr_cf_fill_every_stage = false;
+    } else {
+        Abort("hybrid_pic_model.mr_cf_fill_cadence must be 'stage' or 'substep'");
+    }
     pp_hybrid.query("mr_check_div_b", m_mr_check_div_b);
     utils::parser::queryWithParser(
         pp_hybrid, "mr_eb_clearance_cells", m_mr_eb_clearance_cells);
@@ -1335,11 +1344,14 @@ void HybridPICModel::BfieldEvolveRK4 (
     const bool emf_matching = m_mr_emf_matching && (finest_level > 0);
     if (emf_matching) { EmfMatchingReset(); }
 
-    // The Runge-Kutta scheme begins here.
+    // The Runge-Kutta scheme begins here. The first stage always runs the
+    // full coarse-fine ghost prolongation; under mr_cf_fill_cadence =
+    // "substep" the later stages reuse its scratch instead.
+    const bool cf_fill_late_stages = m_mr_cf_fill_every_stage;
     // Step 1:
     FieldPushStage(
         Bfield, Efield, Jfield, rhofield, eb_update_E,
-        0.5_rt*dt, subcycling_half, ng, nodal_sync
+        0.5_rt*dt, subcycling_half, ng, nodal_sync, true
     );
     if (emf_matching) { EmfMatchingAccumulate(Efield, dt/6.0_rt); }
 
@@ -1359,7 +1371,7 @@ void HybridPICModel::BfieldEvolveRK4 (
     // Step 2:
     FieldPushStage(
         Bfield, Efield, Jfield, rhofield, eb_update_E,
-        0.5_rt*dt, subcycling_half, ng, nodal_sync
+        0.5_rt*dt, subcycling_half, ng, nodal_sync, cf_fill_late_stages
     );
     if (emf_matching) { EmfMatchingAccumulate(Efield, dt/3.0_rt); }
 
@@ -1419,7 +1431,7 @@ void HybridPICModel::BfieldEvolveRK4 (
     // Step 3:
     FieldPushStage(
         Bfield, Efield, Jfield, rhofield, eb_update_E,
-        dt, subcycling_half, ng, nodal_sync
+        dt, subcycling_half, ng, nodal_sync, cf_fill_late_stages
     );
     if (emf_matching) { EmfMatchingAccumulate(Efield, dt/3.0_rt); }
 
@@ -1439,7 +1451,7 @@ void HybridPICModel::BfieldEvolveRK4 (
     // Step 4:
     FieldPushStage(
         Bfield, Efield, Jfield, rhofield, eb_update_E,
-        0.5_rt*dt, subcycling_half, ng, nodal_sync
+        0.5_rt*dt, subcycling_half, ng, nodal_sync, cf_fill_late_stages
     );
     if (emf_matching) { EmfMatchingAccumulate(Efield, dt/6.0_rt); }
 
@@ -1881,7 +1893,7 @@ void HybridPICModel::FieldPushStage (
     ablastr::fields::MultiLevelScalarField const& rhofield,
     amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& eb_update_E,
     amrex::Real dt, SubcyclingHalf subcycling_half,
-    IntVect ng, std::optional<bool> nodal_sync )
+    IntVect ng, std::optional<bool> nodal_sync, const bool cf_fill )
 {
     ABLASTR_PROFILE("HybridPICModel::FieldPushStage");
     auto& warpx = WarpX::GetInstance();
@@ -1889,11 +1901,17 @@ void HybridPICModel::FieldPushStage (
 
     // E phase, coarse level first. B is not modified during this loop, so
     // every fine level's coarse-fine ghost fill reads the coarse solution at
-    // the current stage state.
+    // the current stage state. Stages with cf_fill = false (cadence
+    // "substep") restore the ghost state from the substep's first-stage
+    // prolongation scratch instead of re-prolonging.
     for (int lev = 0; lev <= finest_level; ++lev)
     {
         if (lev > 0) {
-            FillBfieldCoarseFineGhosts(lev, ng, nodal_sync);
+            if (cf_fill) {
+                FillBfieldCoarseFineGhosts(lev, ng, nodal_sync);
+            } else {
+                RefreshBfieldCFGhostsFromScratch(lev, ng, nodal_sync);
+            }
             if (m_mr_check_div_b) { CheckDivBAfterGhostFill(lev, ng); }
         }
         // Calculate J = curl x B / mu0 - J_ext
