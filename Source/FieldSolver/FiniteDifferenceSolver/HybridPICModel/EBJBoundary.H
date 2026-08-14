@@ -47,13 +47,32 @@ namespace warpx::hybrid
         /** Global (all ranks) count of non-solution points; 0 = the fill is
          *  a whole-level no-op (e.g. a wall-clear refined level). */
         int n_work = 0;
+        /** Precomputed cascade sweep label of every point: 0 on non-pending
+         *  points and on pending points that never resolve (which are zeroed
+         *  at call time), otherwise the 1-based sweep at which the pending
+         *  point is filled. The cascade's fill order depends only on the
+         *  classification (never on field values), so it is replayed once
+         *  here and the per-call cascade executes as straight fill kernels
+         *  with no status exchanges, reductions or promote/restore passes. */
+        std::array<std::unique_ptr<amrex::iMultiFab>, 3> sweep;
+        /** Number of cascade sweeps that fill at least one point. */
+        int n_sweeps = 0;
+        /** Global count of pending targets that never resolve. */
+        int n_never = 0;
+        /** Per-box, per-component: largest sweep label in the valid region
+         *  (0 = the box has no cascade work). */
+        std::array<std::unique_ptr<amrex::LayoutData<int>>, 3> box_sweep_max;
 
         [[nodiscard]] bool empty () const { return !status[0]; }
         void reset () {
             for (auto& s : status) { s.reset(); }
             for (auto& w : box_work) { w.reset(); }
+            for (auto& s : sweep) { s.reset(); }
+            for (auto& w : box_sweep_max) { w.reset(); }
             n_pending = 0;
             n_work = 0;
+            n_sweeps = 0;
+            n_never = 0;
         }
     };
 

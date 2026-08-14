@@ -167,9 +167,9 @@ namespace
     constexpr int S_FILL     = 1;  //!< fill target with a well-posed image stencil
     constexpr int S_PENDING  = 2;  //!< fill target with an ill-posed image stencil
     constexpr int S_DEEP     = 3;  //!< deep inside the conductor (or degenerate normal): zeroed
-    constexpr int S_RESOLVED = 4;  //!< well-posed target written and locked during this call
-    constexpr int S_JUSTDONE = 5;  //!< pending target written in the current cascade sweep
-    constexpr int S_RESOLVED_P = 6; //!< pending target written and locked during this call
+    // (The former per-call mutation states S_RESOLVED/S_JUSTDONE/S_RESOLVED_P
+    // are gone: the cascade order is precomputed into EBFillStatus::sweep at
+    // build time and the classification is read-only at call time.)
 
     // A fill target is well-posed when at least this fraction of every
     // component's image-interpolation weight lies in the solution domain
@@ -427,6 +427,137 @@ namespace
         }
         amrex::ParallelDescriptor::ReduceIntSum(n_work_local);
         st.n_work = n_work_local;
+
+        // Replay the ill-posed resolution cascade on the classification alone
+        // and record the sweep at which every pending target resolves. The
+        // per-call cascade's reach test reads only status values and mirror
+        // geometry -- never field values -- so its fill order is a property
+        // of the cached classification: labeling it here once turns the
+        // per-call cascade into straight fill kernels (no status exchanges,
+        // no blocking reductions, no promote/restore passes).
+        st.n_sweeps = 0;
+        st.n_never = 0;
+        for (int c = 0; c < 3; ++c) {
+            st.sweep[c] = std::make_unique<amrex::iMultiFab>(
+                st.status[c]->boxArray(), st.status[c]->DistributionMap(), 1,
+                st.status[c]->nGrowVect());
+            st.sweep[c]->setVal(0);
+        }
+        if (st.n_pending > 0) {
+            // Sweep cap of the cascade: each sweep labels at least one point
+            // or stalls, so this is a backstop, not a knob.
+            constexpr int max_cascade_sweeps = 10;
+            int n_left = st.n_pending;
+            for (int sweep_no = 1;
+                 sweep_no <= max_cascade_sweeps && n_left > 0; ++sweep_no) {
+                for (int c = 0; c < 3; ++c) {
+                    st.sweep[c]->FillBoundary(geom.periodicity());
+                }
+
+                amrex::ReduceOps<amrex::ReduceOpSum> rop;
+                amrex::ReduceData<int> rdata(rop);
+                using SweepTuple = typename decltype(rdata)::Type;
+
+                for (int c = 0; c < 3; ++c) {
+                    auto const stag_own = stag[c];
+                    auto const stag_x = stag[0];
+                    auto const stag_y = stag[1];
+                    auto const stag_z = stag[2];
+                    for (amrex::MFIter mfi(*st.status[c], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                        if ((*st.box_work[c])[mfi] == 0) { continue; }
+                        amrex::Box const tb = mfi.tilebox(field[c]->ixType().toIntVect());
+                        auto const& swp = st.sweep[c]->array(mfi);
+                        auto const& swp_x = st.sweep[0]->const_array(mfi);
+                        auto const& swp_y = st.sweep[1]->const_array(mfi);
+                        auto const& swp_z = st.sweep[2]->const_array(mfi);
+                        auto const& stat = st.status[c]->const_array(mfi);
+                        auto const& stat_x = st.status[0]->const_array(mfi);
+                        auto const& stat_y = st.status[1]->const_array(mfi);
+                        auto const& stat_z = st.status[2]->const_array(mfi);
+                        auto const& Jx_l = field[0]->const_array(mfi);
+                        auto const& Jy_l = field[1]->const_array(mfi);
+                        auto const& Jz_l = field[2]->const_array(mfi);
+                        auto const& phi = distance_to_eb.const_array(mfi);
+
+                        rop.eval(tb, rdata,
+                            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> SweepTuple
+                        {
+                            if (stat(i, j, k) != S_PENDING ||
+                                swp(i, j, k) != 0) { return {0}; }
+
+                            auto const g = ::mirror_geom(i, j, k, stag_own, phi,
+                                plo, dxi, dx_arr, d_band, d_img_min, h_max);
+
+                            // Locked at this sweep: solution domain, direct-pass
+                            // fill targets, and pending points labeled by any
+                            // earlier sweep -- exactly the runtime cascade's
+                            // S_SOLUTION | S_RESOLVED | S_RESOLVED_P set.
+                            auto const locked_x = [&] (int ig, int jg, int kg) {
+                                int const sl = stat_x(ig, jg, kg);
+                                return sl == S_SOLUTION || sl == S_FILL ||
+                                    (sl == S_PENDING && swp_x(ig, jg, kg) >= 1 &&
+                                     swp_x(ig, jg, kg) < sweep_no);
+                            };
+                            auto const locked_y = [&] (int ig, int jg, int kg) {
+                                int const sl = stat_y(ig, jg, kg);
+                                return sl == S_SOLUTION || sl == S_FILL ||
+                                    (sl == S_PENDING && swp_y(ig, jg, kg) >= 1 &&
+                                     swp_y(ig, jg, kg) < sweep_no);
+                            };
+                            auto const locked_z = [&] (int ig, int jg, int kg) {
+                                int const sl = stat_z(ig, jg, kg);
+                                return sl == S_SOLUTION || sl == S_FILL ||
+                                    (sl == S_PENDING && swp_z(ig, jg, kg) >= 1 &&
+                                     swp_z(ig, jg, kg) < sweep_no);
+                            };
+                            auto const [vx, wx] = gather_staggered_pred(Jx_l, locked_x, g.xim, stag_x, plo, dxi, 0);
+                            auto const [vy, wy] = gather_staggered_pred(Jy_l, locked_y, g.xim, stag_y, plo, dxi, 0);
+                            auto const [vz, wz] = gather_staggered_pred(Jz_l, locked_z, g.xim, stag_z, plo, dxi, 0);
+                            amrex::ignore_unused(vx, vy, vz);
+                            if ((wx > 0._rt) && (wy > 0._rt) && (wz > 0._rt)) {
+                                swp(i, j, k) = sweep_no;
+                                return {1};
+                            }
+                            return {0};
+                        });
+                    }
+                }
+
+                auto const sweep_result = rdata.value(rop);
+                int n_done = amrex::get<0>(sweep_result);
+                amrex::ParallelDescriptor::ReduceIntSum(n_done);
+                if (n_done == 0) { break; }
+                st.n_sweeps = sweep_no;
+                n_left -= n_done;
+            }
+            st.n_never = n_left;
+            for (int c = 0; c < 3; ++c) {
+                st.sweep[c]->FillBoundary(geom.periodicity());
+            }
+        }
+
+        // Per-box cascade depth: skip boxes past their own deepest label.
+        for (int c = 0; c < 3; ++c) {
+            st.box_sweep_max[c] = std::make_unique<amrex::LayoutData<int>>(
+                st.status[c]->boxArray(), st.status[c]->DistributionMap());
+            for (amrex::MFIter mfi(*st.status[c], false); mfi.isValid(); ++mfi) {
+                int smax = 0;
+                if (st.n_sweeps > 0 && (*st.box_work[c])[mfi] > 0) {
+                    amrex::Box const vb = mfi.validbox();
+                    auto const& swp = st.sweep[c]->const_array(mfi);
+                    amrex::ReduceOps<amrex::ReduceOpMax> rop;
+                    amrex::ReduceData<int> rdata(rop);
+                    using DepthTuple = typename decltype(rdata)::Type;
+                    rop.eval(vb, rdata,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k) -> DepthTuple
+                    {
+                        return {swp(i, j, k)};
+                    });
+                    smax = amrex::get<0>(rdata.value(rop));
+                }
+                (*st.box_sweep_max[c])[mfi] = smax;
+            }
+        }
     }
 #endif
 
@@ -579,40 +710,17 @@ void warpx::hybrid::ApplyPECBoundaryToField (
             }
         }
 
-        // Resolve the ill-posed targets by a deterministic cascade: lock the
-        // direct-pass values and, sweep by sweep, fill the pending points
-        // whose image stencils reach already locked values
+        // Resolve the ill-posed targets by the precomputed cascade: the sweep
+        // at which every pending point resolves is a property of the cached
+        // classification (labeled at build time), so each sweep is a straight
+        // fill kernel over its labeled points -- no status exchanges, no
+        // blocking reductions and no promote/restore passes. Only the field
+        // ghosts are refreshed between sweeps (cross-box gathers must see the
+        // previous sweep's values).
         if (cascade) {
-            for (int c = 0; c < 3; ++c) {
-                for (amrex::MFIter mfi(*st.status[c], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-                    if ((*st.box_work[c])[mfi] == 0) { continue; }
-                    amrex::Box const tb = mfi.tilebox(field[c]->ixType().toIntVect());
-                    auto const& stat = st.status[c]->array(mfi);
-                    amrex::ParallelFor(tb, [=] AMREX_GPU_DEVICE (int i, int j, int k)
-                    {
-                        if (stat(i, j, k) == S_FILL) { stat(i, j, k) = S_RESOLVED; }
-                    });
-                }
-            }
-
-            // Sweep cap of the ill-posed resolution cascade: each sweep
-            // locks at least one point or stalls, so this is a backstop,
-            // not a knob.
-            constexpr int max_cascade_sweeps = 10;
-            const amrex::Vector<amrex::iMultiFab*> status_vec{
-                st.status[0].get(), st.status[1].get(), st.status[2].get()};
-            int n_left = st.n_pending;
-            for (int sweep = 0; sweep < max_cascade_sweeps && n_left > 0; ++sweep) {
-                // Batched exchanges (one round for the fields, one for the
-                // status arrays) instead of six per-component rounds.
+            for (int sweep_no = 1; sweep_no <= st.n_sweeps; ++sweep_no) {
                 amrex::FillBoundary_nowait(field_vec, geom.periodicity());
                 amrex::FillBoundary_finish(field_vec);
-                amrex::FillBoundary_nowait(status_vec, geom.periodicity());
-                amrex::FillBoundary_finish(status_vec);
-
-                amrex::ReduceOps<amrex::ReduceOpSum> rop;
-                amrex::ReduceData<int> rdata(rop);
-                using SweepTuple = typename decltype(rdata)::Type;
 
                 for (int c = 0; c < 3; ++c) {
                     auto const stag_own = stag[c];
@@ -620,55 +728,55 @@ void warpx::hybrid::ApplyPECBoundaryToField (
                     auto const stag_y = stag[1];
                     auto const stag_z = stag[2];
                     for (amrex::MFIter mfi(*st.status[c], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-                        if ((*st.box_work[c])[mfi] == 0) { continue; }
+                        if ((*st.box_sweep_max[c])[mfi] < sweep_no) { continue; }
                         amrex::Box const tb = mfi.tilebox(field[c]->ixType().toIntVect());
                         int const ncomp = field[c]->nComp();
                         auto const& Jc = field[c]->array(mfi);
                         auto const& Jx_l = field[0]->const_array(mfi);
                         auto const& Jy_l = field[1]->const_array(mfi);
                         auto const& Jz_l = field[2]->const_array(mfi);
-                        auto const& stat = st.status[c]->array(mfi);
+                        auto const& stat = st.status[c]->const_array(mfi);
                         auto const& stat_x = st.status[0]->const_array(mfi);
                         auto const& stat_y = st.status[1]->const_array(mfi);
                         auto const& stat_z = st.status[2]->const_array(mfi);
+                        auto const& swp = st.sweep[c]->const_array(mfi);
+                        auto const& swp_x = st.sweep[0]->const_array(mfi);
+                        auto const& swp_y = st.sweep[1]->const_array(mfi);
+                        auto const& swp_z = st.sweep[2]->const_array(mfi);
                         auto const& phi = distance_to_eb.const_array(mfi);
 
-                        rop.eval(tb, rdata,
-                            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> SweepTuple
+                        amrex::ParallelFor(tb,
+                            [=] AMREX_GPU_DEVICE (int i, int j, int k)
                         {
-                            if (stat(i, j, k) != S_PENDING) { return {0}; }
+                            if (stat(i, j, k) != S_PENDING ||
+                                swp(i, j, k) != sweep_no) { return; }
 
                             auto const g = ::mirror_geom(i, j, k, stag_own, phi,
                                 plo, dxi, dx_arr, d_band, d_img_min, h_max);
 
+                            // Locked at this sweep: solution domain, direct-pass
+                            // fill targets, and pending points filled by any
+                            // earlier sweep -- the same set the labeling used.
                             auto const locked_x = [&] (int ig, int jg, int kg) {
                                 int const sl = stat_x(ig, jg, kg);
-                                return sl == S_SOLUTION || sl == S_RESOLVED || sl == S_RESOLVED_P;
+                                return sl == S_SOLUTION || sl == S_FILL ||
+                                    (sl == S_PENDING && swp_x(ig, jg, kg) >= 1 &&
+                                     swp_x(ig, jg, kg) < sweep_no);
                             };
                             auto const locked_y = [&] (int ig, int jg, int kg) {
                                 int const sl = stat_y(ig, jg, kg);
-                                return sl == S_SOLUTION || sl == S_RESOLVED || sl == S_RESOLVED_P;
+                                return sl == S_SOLUTION || sl == S_FILL ||
+                                    (sl == S_PENDING && swp_y(ig, jg, kg) >= 1 &&
+                                     swp_y(ig, jg, kg) < sweep_no);
                             };
                             auto const locked_z = [&] (int ig, int jg, int kg) {
                                 int const sl = stat_z(ig, jg, kg);
-                                return sl == S_SOLUTION || sl == S_RESOLVED || sl == S_RESOLVED_P;
+                                return sl == S_SOLUTION || sl == S_FILL ||
+                                    (sl == S_PENDING && swp_z(ig, jg, kg) >= 1 &&
+                                     swp_z(ig, jg, kg) < sweep_no);
                             };
 
-                            int const ncomp_l = ncomp;
-                            // Fill only once every component stencil reaches a
-                            // locked value; the weights do not depend on n, so
-                            // probing n = 0 suffices.
-                            bool reached = true;
-                            {
-                                auto const [v0x, w0x] = gather_staggered_pred(Jx_l, locked_x, g.xim, stag_x, plo, dxi, 0);
-                                auto const [v0y, w0y] = gather_staggered_pred(Jy_l, locked_y, g.xim, stag_y, plo, dxi, 0);
-                                auto const [v0z, w0z] = gather_staggered_pred(Jz_l, locked_z, g.xim, stag_z, plo, dxi, 0);
-                                amrex::ignore_unused(v0x, v0y, v0z);
-                                reached = (w0x > 0._rt) && (w0y > 0._rt) && (w0z > 0._rt);
-                            }
-                            if (!reached) { return {0}; }
-
-                            for (int n = 0; n < ncomp_l; ++n) {
+                            for (int n = 0; n < ncomp; ++n) {
                                 auto const [Jx_im, wx_im] = gather_staggered_pred(Jx_l, locked_x, g.xim, stag_x, plo, dxi, n);
                                 auto const [Jy_im, wy_im] = gather_staggered_pred(Jy_l, locked_y, g.xim, stag_y, plo, dxi, n);
                                 auto const [Jz_im, wz_im] = gather_staggered_pred(Jz_l, locked_z, g.xim, stag_z, plo, dxi, n);
@@ -678,36 +786,13 @@ void warpx::hybrid::ApplyPECBoundaryToField (
                                 Jc(i, j, k, n) = ::mirror_combine(c, Jx_im, Jy_im, Jz_im,
                                     g.nv, w_n, w_t);
                             }
-                            stat(i, j, k) = S_JUSTDONE;
-                            return {1};
                         });
                     }
                 }
-
-                auto const sweep_result = rdata.value(rop);
-                int n_done = amrex::get<0>(sweep_result);
-                amrex::ParallelDescriptor::ReduceIntSum(n_done);
-
-                // Promote this sweep's results to locked values only now, so
-                // pending points never gather from values of the same sweep.
-                for (int c = 0; c < 3; ++c) {
-                    for (amrex::MFIter mfi(*st.status[c], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-                        if ((*st.box_work[c])[mfi] == 0) { continue; }
-                        amrex::Box const tb = mfi.tilebox(field[c]->ixType().toIntVect());
-                        auto const& stat = st.status[c]->array(mfi);
-                        amrex::ParallelFor(tb, [=] AMREX_GPU_DEVICE (int i, int j, int k)
-                        {
-                            if (stat(i, j, k) == S_JUSTDONE) { stat(i, j, k) = S_RESOLVED_P; }
-                        });
-                    }
-                }
-
-                if (n_done == 0) { break; }
-                n_left -= n_done;
             }
 
-            if (n_left > 0) {
-                // Targets still pending are fully enclosed by other pending
+            if (st.n_never > 0) {
+                // Targets no sweep reaches are fully enclosed by other pending
                 // points; no meaningful mirror value exists, so zero them.
                 for (int c = 0; c < 3; ++c) {
                     for (amrex::MFIter mfi(*st.status[c], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
@@ -716,26 +801,14 @@ void warpx::hybrid::ApplyPECBoundaryToField (
                         int const ncomp = field[c]->nComp();
                         auto const& Jc = field[c]->array(mfi);
                         auto const& stat = st.status[c]->const_array(mfi);
+                        auto const& swp = st.sweep[c]->const_array(mfi);
                         amrex::ParallelFor(tb, ncomp,
                             [=] AMREX_GPU_DEVICE (int i, int j, int k, int n)
                         {
-                            if (stat(i, j, k) == S_PENDING) { Jc(i, j, k, n) = 0._rt; }
+                            if (stat(i, j, k) == S_PENDING &&
+                                swp(i, j, k) == 0) { Jc(i, j, k, n) = 0._rt; }
                         });
                     }
-                }
-            }
-
-            // restore the cached classification for the next call
-            for (int c = 0; c < 3; ++c) {
-                for (amrex::MFIter mfi(*st.status[c], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
-                    if ((*st.box_work[c])[mfi] == 0) { continue; }
-                    amrex::Box const tb = mfi.tilebox(field[c]->ixType().toIntVect());
-                    auto const& stat = st.status[c]->array(mfi);
-                    amrex::ParallelFor(tb, [=] AMREX_GPU_DEVICE (int i, int j, int k)
-                    {
-                        if (stat(i, j, k) == S_RESOLVED) { stat(i, j, k) = S_FILL; }
-                        else if (stat(i, j, k) == S_RESOLVED_P) { stat(i, j, k) = S_PENDING; }
-                    });
                 }
             }
         }
