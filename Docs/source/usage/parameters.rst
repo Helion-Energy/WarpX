@@ -6118,6 +6118,52 @@ Jacobian probes.
 
     This sets the relative strength of the external vector potential by a dimensionless implicit time function, which can compute the external B fields and E fields based on the value and first time derivative of the function.
 
+.. pp:param:: external_vector_potential.<field_name>.python_scale
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Drive this field's dimensionless scale through piecewise-linear segments pushed at runtime
+    (``warpx.set_external_vector_potential_scale(name, s_old, s_new, t_old, t_new)`` from Python,
+    e.g. from a circuit model in a callback) instead of the compiled
+    :pp:param:`external_vector_potential.<field_name>.A_time_external_grid_function(t)`.
+    The B field follows the linear interpolant of the segment and the E field carries its exact
+    constant slope (the discrete Faraday partner of the linear B scale). The segment is
+    extrapolated linearly past ``t_new``, so a fresh segment must be pushed every coupling
+    interval; a refresh well past ``t_new`` records a high-priority warning.
+
+.. pp:param:: external_vector_potential.<field_name>.initial_scale
+    :type: ``float``
+    :default: ``1.``
+    :optional:
+
+    With :pp:param:`external_vector_potential.<field_name>.python_scale` enabled, the constant
+    scale held (e.g. a coil at its pre-ramp current) until the first runtime segment is pushed.
+
+.. pp:param:: circuit.coils
+    :type: list of ``str``
+    :optional:
+
+    Names of circular filament coils whose fields drive the hybrid solver's split external
+    fields (requires :pp:param:`hybrid_pic_model.add_external_fields`). Each coil pairs with an
+    entry of :pp:param:`external_vector_potential.fields` (by default the entry with the coil's
+    own name) and, unless disabled, its ``<name>_Aext`` field is filled at initialization with
+    the coil's field at the reference amp-turns from the axisymmetric ring kernel (a direct
+    free-space evaluation; the coil may sit outside the domain). In RZ geometry the fill uses
+    the discrete mesh convention (quarter-cell filament offset, Legendre-parameter clip) whose
+    disk-flux self-inductance is the value a coupled circuit port must use; the discrete self-
+    and mutual-inductance table of the coil set on the run mesh is printed at initialization.
+    Per-coil parameters, prefixed ``circuit.<name>.``:
+
+    * ``r``, ``z`` (required): filament radius and axial position [m]; ``r`` must be positive.
+    * ``n_turns`` (default ``1``): turn count; the filled field and the inductances scale with it.
+    * ``I_ref`` (default ``1``): reference current [A]; a drive scale of 1 (see
+      :pp:param:`external_vector_potential.<field_name>.python_scale`) reproduces the coil at
+      ``I_ref``.
+    * ``field_name`` (default: the coil name): the paired external-field entry.
+    * ``fill_unit_field`` (default ``1``): fill ``<field_name>_Aext`` from the ring kernel;
+      disable to keep whatever the external-field initialization loaded (file or expressions).
+
 
 Grid types (collocated, staggered, hybrid)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
