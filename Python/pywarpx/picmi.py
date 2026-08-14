@@ -2263,6 +2263,26 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         plasma back; the absorbed mass and energy are integrated into
         cumulative runtime counters (see absorb_ledger_interval).
 
+    z_boundary_fluid: {"neumann", "wall_temperature", "outflow"}, optional
+        Fluid-moment ghost treatment at non-periodic z ends (RZ,
+        fluid_flux="hlld" or "central"). The default "neumann" keeps the
+        passive zero-gradient ghosts, which are a zero-flux end for the
+        energies (heat generated in the device cannot escape through the
+        exhaust). "wall_temperature" copies the end plane's density and
+        momentum but sets the ghost energies to z_wall_temperature at
+        the ghost density (ion internal energy plus the kinetic energy
+        of the copied momentum, so the condition acts on the thermal
+        content only): the end faces exchange advectively against a
+        T_wall reservoir, the z analog of the r-wall temperature
+        anchoring. "outflow" smoothly rectifies the ghost axial momentum
+        to its outgoing part (the exact recipe of the r_max absorbing
+        wall), so the ends advect mass/energy out at interior values but
+        never feed plasma back.
+
+    z_wall_temperature: float, optional
+        Wall temperature in eV of the z-end fluid ghosts; required with
+        (and only valid with) z_boundary_fluid="wall_temperature".
+
     absorb_ledger_interval: integer, optional
         Print interval (steps) of the absorbing-wall ledger counters
         (cumulative absorbed mass [kg] and fluid energy [J]); 0 disables
@@ -2470,6 +2490,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         thermal_diffusivity_electron=None,
         pressure_corner_width_fraction=None,
         r_open_fluid=None,
+        z_boundary_fluid=None,
+        z_wall_temperature=None,
         absorb_ledger_interval=None,
         absorb_ledger_file=None,
         hllc_signal_closure=None,
@@ -2526,6 +2548,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.thermal_diffusivity_electron = thermal_diffusivity_electron
         self.pressure_corner_width_fraction = pressure_corner_width_fraction
         self.r_open_fluid = r_open_fluid
+        self.z_boundary_fluid = z_boundary_fluid
+        self.z_wall_temperature = z_wall_temperature
         self.absorb_ledger_interval = absorb_ledger_interval
         self.absorb_ledger_file = absorb_ledger_file
         self.hllc_signal_closure = hllc_signal_closure
@@ -2587,13 +2611,13 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.fluid_flux = self.fluid_flux
         implicit_mhd.viscosity = self.viscosity
         implicit_mhd.thermal_diffusivity_ion = self.thermal_diffusivity_ion
-        implicit_mhd.thermal_diffusivity_electron = (
-            self.thermal_diffusivity_electron
-        )
+        implicit_mhd.thermal_diffusivity_electron = self.thermal_diffusivity_electron
         implicit_mhd.pressure_corner_width_fraction = (
             self.pressure_corner_width_fraction
         )
         implicit_mhd.r_open_fluid = self.r_open_fluid
+        implicit_mhd.z_boundary_fluid = self.z_boundary_fluid
+        implicit_mhd.z_wall_temperature = self.z_wall_temperature
         implicit_mhd.absorb_ledger_interval = self.absorb_ledger_interval
         implicit_mhd.absorb_ledger_file = self.absorb_ledger_file
         implicit_mhd.hllc_signal_closure = self.hllc_signal_closure

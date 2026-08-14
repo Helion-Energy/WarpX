@@ -4689,6 +4689,43 @@ Jacobian probes.
     (``step  absorbed_mass  absorbed_energy``) are appended at every
     ledger print.
 
+.. pp:param:: implicit_mhd.z_boundary_fluid
+    :type: ``string``
+    :default: ``neumann``
+
+    Fluid-moment ghost treatment at the non-periodic axial (z) ends
+    (RZ, ``implicit_mhd.fluid_flux = hlld`` or ``central``; the
+    field/current z-ghost handling — including the open Green's-function
+    cap deferral — is unaffected). ``neumann`` keeps the passive
+    zero-gradient ghosts: with identical states on both sides of the end
+    face the Riemann flux of every channel vanishes, so the ends are
+    zero-flux for the energies and heat generated in the device cannot
+    escape through the exhaust. ``wall_temperature`` copies the end
+    plane's density and momentum but sets the ghost ENERGIES to
+    ``z_wall_temperature`` at the ghost density — the electron ghost
+    carries the wall internal energy
+    :math:`\rho (q/m) T_\mathrm{wall} / (\gamma_e - 1)` and the ion
+    ghost the same-temperature internal energy plus the kinetic energy
+    of the copied ghost momentum, so the condition acts on the thermal
+    content only (under the CGL closure
+    :math:`U_\parallel = p_\mathrm{wall}/2`,
+    :math:`U_\perp = p_\mathrm{wall}`): the end faces then exchange
+    advectively against a :math:`T_\mathrm{wall}` reservoir, the z
+    analog of the r-wall temperature anchoring. ``outflow`` rectifies
+    the ghost AXIAL momentum :math:`C^\infty`-smoothly to its OUTGOING
+    part — the exact recipe of the ``r_open_fluid = absorb`` wall, the
+    smoothed twin of the ``z_outflow_no_reflux`` clamp (with which it is
+    mutually exclusive) — so the ends advect mass and energy out at
+    interior values but never feed plasma back. Both non-default modes
+    are applied identically in every JFNK residual evaluation and are
+    smooth in the state.
+
+.. pp:param:: implicit_mhd.z_wall_temperature
+    :type: ``float``, in eV
+
+    Wall temperature of the z-end fluid ghosts; required with (and only
+    valid with) ``implicit_mhd.z_boundary_fluid = wall_temperature``.
+
 .. pp:param:: implicit_mhd.hllc_signal_closure
     :type: ``string``
     :default: ``consistent``

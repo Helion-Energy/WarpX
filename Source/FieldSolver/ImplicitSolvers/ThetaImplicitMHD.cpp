@@ -172,6 +172,26 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         m_r_open_fluid == "outflow" || m_r_open_fluid == "reflect" ||
             m_r_open_fluid == "absorb",
         "implicit_mhd.r_open_fluid must be outflow, reflect, or absorb");
+    pp.query("z_boundary_fluid", m_z_boundary_fluid);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_z_boundary_fluid == "neumann" ||
+            m_z_boundary_fluid == "wall_temperature" ||
+            m_z_boundary_fluid == "outflow",
+        "implicit_mhd.z_boundary_fluid must be neumann, wall_temperature, "
+        "or outflow");
+    const bool has_z_wall_temperature = utils::parser::queryWithParser(
+        pp, "z_wall_temperature", m_z_wall_temperature);
+    if (m_z_boundary_fluid == "wall_temperature") {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            has_z_wall_temperature && m_z_wall_temperature > 0.0_rt,
+            "implicit_mhd.z_boundary_fluid = wall_temperature requires a "
+            "positive implicit_mhd.z_wall_temperature (in eV)");
+    } else {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !has_z_wall_temperature,
+            "implicit_mhd.z_wall_temperature requires "
+            "implicit_mhd.z_boundary_fluid = wall_temperature");
+    }
     utils::parser::queryWithParser(pp, "absorb_ledger_interval",
                                    m_absorb_ledger_interval);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -218,6 +238,11 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     m_use_hlld = (m_fluid_flux == "hlld");
     m_use_central = (m_fluid_flux == "central");
     m_use_recast = m_use_hlld || m_use_central;
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_z_boundary_fluid == "neumann" || m_use_recast,
+        "implicit_mhd.z_boundary_fluid = wall_temperature/outflow requires "
+        "the conservative-form recast (implicit_mhd.fluid_flux = hlld or "
+        "central)");
 #if !defined(WARPX_DIM_1D_Z) && !defined(WARPX_DIM_RZ)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !m_use_recast,
@@ -407,6 +432,15 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
                                    m_cgl_instability_width);
     utils::parser::queryWithParser(pp, "cgl_null_scale", m_cgl_null_scale);
     pp.query("z_outflow_no_reflux", m_z_outflow_no_reflux);
+    // The outflow mode is the smooth superset of the no-reflux clamp
+    // (and wall_temperature keeps the passive momentum copy by design),
+    // so stacking the hard clamp on top is a configuration error.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_z_outflow_no_reflux || m_z_boundary_fluid == "neumann",
+        "implicit_mhd.z_outflow_no_reflux requires "
+        "implicit_mhd.z_boundary_fluid = neumann (outflow is its "
+        "C-infinity superset; wall_temperature keeps the passive "
+        "momentum copy)");
     if (m_ion_closure == "cgl") {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_cgl_instability_scale >= 0.0_rt &&
@@ -552,6 +586,12 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
                       redistribute_on_remake, checkpoint_restart);
     fields.alloc_init(IonPerpEnergyName, lev, ba, dm, 1, guard_cells, 0.0_rt, remake,
                       redistribute_on_remake, checkpoint_restart);
+    // Single-component momentum views for field diagnostics (a
+    // 3-component register block cannot pass through fields_to_plot);
+    // refreshed by PublishMomentumComponents, never read by the solver.
+    fields.alloc_init(MomentumDiag0Name, lev, ba, dm, 1, amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(MomentumDiag1Name, lev, ba, dm, 1, amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(MomentumDiag2Name, lev, ba, dm, 1, amrex::IntVect(0), 0.0_rt);
 
     fields.alloc_init(TotalCurrentCCName, lev, ba, dm, 3, guard_cells, 0.0_rt);
     fields.alloc_init(MagneticFieldCCName, lev, ba, dm, 3, guard_cells, 0.0_rt);
@@ -691,12 +731,24 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
                 "hybrid solver)");
         }
     }
+    // The selectable z-end fluid ghosts only exist where the solver
+    // fills axial domain ghosts at all; on periodic z they would be a
+    // silent no-op.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_z_boundary_fluid == "neumann" || m_z_neumann,
+        "implicit_mhd.z_boundary_fluid = wall_temperature/outflow requires "
+        "non-periodic z boundaries (boundary.field_lo/hi = none or open "
+        "in z)");
 #else
     for (int direction = 0; direction < AMREX_SPACEDIM; ++direction) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_WarpX->Geom(0).isPeriodic(direction),
             "theta_implicit_mhd currently requires periodic field boundaries");
     }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_z_boundary_fluid == "neumann",
+        "implicit_mhd.z_boundary_fluid = wall_temperature/outflow requires "
+        "cylindrical RZ geometry (non-periodic z ends)");
 #endif
 
     m_hybrid_pic_model = m_WarpX->get_pointer_HybridPICModel();
@@ -1186,6 +1238,8 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "Evolve ion fluid:              " << m_evolve_ion_fluid << "\n"
                    << "Fluid flux:                    " << m_fluid_flux << "\n"
                    << "Open-r fluid wall:             " << m_r_open_fluid << "\n"
+                   << "Z-end fluid boundary:          " << m_z_boundary_fluid << "\n"
+                   << "Z wall temperature [eV]:       " << m_z_wall_temperature << "\n"
                    << "HLLC signal closure:           " << m_hllc_signal_closure << "\n"
                    << "HLLC contact blend:            " << m_hllc_contact_blend << "\n";
     if (m_use_hlld) {
@@ -1323,6 +1377,7 @@ void ThetaImplicitMHD::InitializeFluidState ()
     ion_perp_energy.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
     ApplyFluidDomainBoundaries(density, momentum, electron_energy, ion_energy,
                                ion_parallel_energy, ion_perp_energy);
+    PublishMomentumComponents();
 }
 
 void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
@@ -1379,6 +1434,121 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
         ApplyNeumannZDomainGhosts(ion_energy);
         ApplyNeumannZDomainGhosts(ion_parallel_energy);
         ApplyNeumannZDomainGhosts(ion_perp_energy);
+        if (m_z_boundary_fluid != "neumann") {
+            // Selectable z-end fluid ghosts (recast path). The Neumann
+            // fill above stays the base image -- same density and
+            // momentum, so the end-face fan carries interior signal
+            // speeds -- and the selected mode overrides the channel
+            // that makes the plain clamp unphysical:
+            //  * outflow: the ghost AXIAL momentum is C-infinity
+            //    rectified to its OUTGOING part -- the exact recipe of
+            //    the r_max absorbing wall, the smoothed twin of the
+            //    z_outflow_no_reflux clamp -- so the ends advect mass
+            //    and energy out at interior values but never feed
+            //    plasma back (the Neumann fill is zero-flux for the
+            //    energies and an injector under end-ward pull).
+            //  * wall_temperature: the ghost ENERGIES are set to
+            //    z_wall_temperature at the ghost density -- the
+            //    electron ghost carries the wall internal energy, the
+            //    ion ghost the wall internal energy PLUS the kinetic
+            //    energy of the copied ghost momentum, so the condition
+            //    acts on the THERMAL content only. The end faces then
+            //    exchange advectively against a T_wall reservoir (the
+            //    z analog of the r-wall temperature anchoring).
+            // Runs before the radial pass below so the corner ghosts
+            // inherit the overridden rows, in EVERY residual
+            // evaluation: the fill is part of the JFNK residual and
+            // must stay C-infinity in the state (no hard flow-
+            // direction branches; the rectifier exists for exactly
+            // that).
+            const bool z_outflow = (m_z_boundary_fluid == "outflow");
+            const bool total_energy_closure =
+                (m_ion_closure == "total_energy");
+            const bool cgl_closure = (m_ion_closure == "cgl");
+            // n kB T_wall = rho (q/m) T_wall[eV] for the quasi-neutral
+            // single-ion fluid (n = rho (q/m)/e and kB T = e T[eV]).
+            const amrex::Real wall_pressure_per_density =
+                m_ion_charge_to_mass * m_z_wall_temperature;
+            const amrex::Real z_gamma_e = m_gamma_e;
+            const amrex::Real z_gamma_i = m_gamma_i;
+            const amrex::Real z_rectifier_kappa = m_hlld_kappa_signal;
+            const amrex::Real z_electron_energy_floor =
+                m_electron_pressure_floor / (m_gamma_e - 1.0_rt);
+            const amrex::Real z_density_floor = m_mass_density_floor;
+            const amrex::Box& cc_domain = m_WarpX->Geom(0).Domain();
+            const int z_lo = cc_domain.smallEnd(1);
+            const int z_hi = cc_domain.bigEnd(1);
+            for (amrex::MFIter mfi(density); mfi.isValid(); ++mfi) {
+                const amrex::Box grown =
+                    amrex::grow(mfi.validbox(), density.nGrowVect());
+                if (grown.smallEnd(1) >= z_lo && grown.bigEnd(1) <= z_hi) {
+                    continue;
+                }
+                const auto rho = density.array(mfi);
+                const auto mom = momentum.array(mfi);
+                const auto energy = electron_energy.array(mfi);
+                const auto ion_e = ion_energy.array(mfi);
+                const auto ion_par = ion_parallel_energy.array(mfi);
+                const auto ion_perp = ion_perp_energy.array(mfi);
+                amrex::ParallelFor(grown,
+                                   [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    if (j >= z_lo && j <= z_hi) {
+                        return;
+                    }
+                    if (z_outflow) {
+                        // rectifier width = the acoustic momentum scale
+                        // kappa_signal sqrt(gamma_e p_e rho) of the
+                        // (copied) end cell, exactly as at the r_max
+                        // absorbing wall: genuine outflow passes
+                        // asymptotically unchanged and the map stays
+                        // smooth for the JFNK probes
+                        const amrex::Real width =
+                            z_rectifier_kappa *
+                            std::sqrt(z_gamma_e * (z_gamma_e - 1.0_rt) *
+                                      std::max(energy(i, j, k),
+                                               z_electron_energy_floor) *
+                                      std::max(rho(i, j, k),
+                                               z_density_floor));
+                        const amrex::Real outward =
+                            (j > z_hi) ? 1.0_rt : -1.0_rt;
+                        const amrex::Real axial = mom(i, j, k, 2);
+                        mom(i, j, k, 2) =
+                            axial * 0.5_rt *
+                            (1.0_rt +
+                             outward * theta_implicit_mhd::smooth_sign(
+                                           axial, width));
+                    } else {
+                        const amrex::Real wall_pressure =
+                            wall_pressure_per_density * rho(i, j, k);
+                        energy(i, j, k) =
+                            wall_pressure / (z_gamma_e - 1.0_rt);
+                        if (total_energy_closure) {
+                            amrex::Real kinetic_energy = 0.0_rt;
+                            for (int component = 0; component < 3;
+                                 ++component) {
+                                kinetic_energy +=
+                                    mom(i, j, k, component) *
+                                    mom(i, j, k, component);
+                            }
+                            kinetic_energy *=
+                                0.5_rt /
+                                std::max(rho(i, j, k), z_density_floor);
+                            ion_e(i, j, k) =
+                                wall_pressure / (z_gamma_i - 1.0_rt) +
+                                kinetic_energy;
+                        } else if (cgl_closure) {
+                            // isotropic wall state p_par = p_perp =
+                            // p_wall: U_par = p_par/2, U_perp = p_perp
+                            // (pure internal energies, no kinetic term
+                            // in the CGL blocks)
+                            ion_par(i, j, k) = 0.5_rt * wall_pressure;
+                            ion_perp(i, j, k) = wall_pressure;
+                        }
+                        // barotropic: no evolved ion energy block
+                    }
+                });
+            }
+        }
     }
     const amrex::Box& domain = m_WarpX->Geom(0).Domain();
     const int domain_lo = domain.smallEnd(0);
@@ -1479,13 +1649,21 @@ void ThetaImplicitMHD::ApplyNeumannZDomainGhosts (amrex::MultiFab& mf,
 {
 #if defined(WARPX_DIM_RZ)
     // Zero-gradient extrapolation into the axial domain ghosts, staggering
-    // aware (nodal-in-z data clamps to the boundary node). Used for every
-    // field the residual stencils read when the z ends are outflow rather
+    // aware: cell-centered-in-z data clamps to the boundary cell (zero
+    // gradient across the boundary face) while NODAL-in-z data mirrors
+    // EVENLY across the boundary node itself, ghost(j) = f(2 jb - j) --
+    // the clamp would leave a spurious half-gradient at the end node,
+    // where a centered derivative reads (f_1 - f_0)/(2 dz) instead of 0
+    // (feeding e.g. a spurious end-node grad_z of the nodal electron
+    // pressure/temperature, charge density, and currents). Same
+    // convention as the radial fill (ApplyScalarRadialDomainGhosts:
+    // nodal-in-r mirrors across the boundary node). Used for every field
+    // the residual stencils read when the z ends are outflow rather
     // than periodic; FillBoundary leaves those ghosts untouched. On an
     // OPEN z face the first a_open_face_keep_rows ghost rows already hold
     // free-space (Green's-consistent) values and stay untouched; deeper
-    // rows clamp to the outermost kept row, so nothing re-imposes the
-    // z-invariant continuation the open cap replaces.
+    // rows clamp/mirror about the outermost kept row, so nothing
+    // re-imposes the z-invariant continuation the open cap replaces.
     if (!m_z_neumann) {
         return;
     }
@@ -1495,6 +1673,7 @@ void ThetaImplicitMHD::ApplyNeumannZDomainGhosts (amrex::MultiFab& mf,
         domain.smallEnd(1) - (m_z_lo_open ? a_open_face_keep_rows : 0);
     const int clamp_hi =
         domain.bigEnd(1) + (m_z_hi_open ? a_open_face_keep_rows : 0);
+    const bool nodal_z = mf.ixType().nodeCentered(1);
     const int ncomp = mf.nComp();
     for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
         const amrex::Box grown = amrex::grow(mfi.validbox(), mf.nGrowVect());
@@ -1504,16 +1683,39 @@ void ThetaImplicitMHD::ApplyNeumannZDomainGhosts (amrex::MultiFab& mf,
         const auto arr = mf.array(mfi);
         amrex::ParallelFor(grown, ncomp,
                            [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) {
+            // mirror indices stay inside [clamp_lo, clamp_hi] (deep
+            // ghosts of a thin domain fall back to the far anchor row),
+            // so the written ghost rows never source each other
             if (j < clamp_lo) {
-                arr(i, j, k, n) = arr(i, clamp_lo, k, n);
+                const int source =
+                    nodal_z ? amrex::min(2 * clamp_lo - j, clamp_hi)
+                            : clamp_lo;
+                arr(i, j, k, n) = arr(i, source, k, n);
             } else if (j > clamp_hi) {
-                arr(i, j, k, n) = arr(i, clamp_hi, k, n);
+                const int source =
+                    nodal_z ? amrex::max(2 * clamp_hi - j, clamp_lo)
+                            : clamp_hi;
+                arr(i, j, k, n) = arr(i, source, k, n);
             }
         });
     }
 #else
     amrex::ignore_unused(mf, a_open_face_keep_rows);
 #endif
+}
+
+void ThetaImplicitMHD::PublishMomentumComponents () const
+{
+    // Diagnostic-only views; refreshed at initialization and at every
+    // accepted step end (never inside the nonlinear solve).
+    const amrex::MultiFab& momentum =
+        *m_WarpX->m_fields.get(MomentumDensityName, 0);
+    const std::array<const char*, 3> names = {
+        MomentumDiag0Name, MomentumDiag1Name, MomentumDiag2Name};
+    for (int component = 0; component < 3; ++component) {
+        amrex::MultiFab& view = *m_WarpX->m_fields.get(names[component], 0);
+        amrex::MultiFab::Copy(view, momentum, component, 0, 1, 0);
+    }
 }
 
 void ThetaImplicitMHD::ApplyScalarRadialDomainGhosts (amrex::MultiFab& mf) const
@@ -4438,14 +4640,24 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                                           mom(i, j, k, component);
                     }
                     kinetic_energy *= 0.5_rt / safe_density;
-                    // Same C-infinity smooth internal-energy floor as the
-                    // kernel's p_i(E_i) recovery: halo cells pinned at the
-                    // floor sit exactly on a hard max() kink otherwise.
+                    // Same C-infinity smooth internal-energy floor AND
+                    // the same KE-scaled corner width as the kernel's
+                    // p_i(E_i) recovery (pressure_corner_width_fraction;
+                    // fraction 0 keeps the legacy floor width): a
+                    // second, un-widened corner in the same cells would
+                    // undercut the widened kernel corner near the floor.
+                    const amrex::Real excess =
+                        ion_e(i, j, k) - kinetic_energy - ion_energy_floor;
+                    const amrex::Real corner_width = std::max(
+                        ion_energy_floor,
+                        flux_parameters.pressure_corner_width_fraction *
+                            kinetic_energy);
                     pressure_i =
                         gamma_i_minus_one *
-                        theta_implicit_mhd::smooth_positive_floor(
-                            ion_e(i, j, k) - kinetic_energy,
-                            ion_energy_floor);
+                        (ion_energy_floor +
+                         0.5_rt * (excess +
+                                   std::sqrt(excess * excess +
+                                             corner_width * corner_width)));
                 } else if (cgl_closure) {
                     // Effective isotropic pressure with the SAME smooth
                     // floors as the kernel's p_eff, so this geometric
@@ -5715,6 +5927,7 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
         }
     }
     FillFluidSources(m_state);
+    PublishMomentumComponents();
 
     // E is an algebraic Ohm-law variable rather than an independently evolved
     // endpoint state. Recompute it from final B, rho, momentum, and Ue instead

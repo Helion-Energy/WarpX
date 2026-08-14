@@ -134,17 +134,26 @@ class ThetaImplicitMHD final : public ImplicitSolver
                                      amrex::MultiFab& ion_energy,
                                      amrex::MultiFab& ion_parallel_energy,
                                      amrex::MultiFab& ion_perp_energy) const;
-    /** Zero-gradient (Neumann) fill of the axial domain ghosts. On an OPEN
-     * z face (Green's-function boundary), the outermost
+    /** Zero-gradient (Neumann) fill of the axial domain ghosts,
+     * staggering aware: cell-centered-in-z data clamps to the boundary
+     * cell (zero gradient across the boundary face) while NODAL-in-z
+     * data mirrors evenly across the boundary node itself (a clamp
+     * would leave a spurious half-gradient at the end node: the
+     * centered derivative there reads (f_1 - f_0)/(2 dz), not 0). On an
+     * OPEN z face (Green's-function boundary), the outermost
      * a_open_face_keep_rows ghost rows are left untouched -- they carry
      * free-space values written by the Green's fill (B) or computed from
      * it (curl-B currents, cell-centered interpolants) -- and any deeper
-     * ghost rows clamp to the outermost kept row instead of the interior
-     * plane. The default (0) clamps every ghost row to the boundary plane
-     * on every face, which is the unconditional fluid-moment behavior. */
+     * ghost rows clamp/mirror about the outermost kept row instead of
+     * the interior plane. The default (0) anchors every ghost row to the
+     * boundary plane on every face, which is the unconditional
+     * fluid-moment behavior. */
     void ApplyNeumannZDomainGhosts (amrex::MultiFab& mf,
                                     int a_open_face_keep_rows = 0) const;
     void ApplyScalarRadialDomainGhosts (amrex::MultiFab& mf) const;
+    /** Copy the three momentum-density components into their
+     * single-component diagnostic views (MomentumDiag*Name). */
+    void PublishMomentumComponents () const;
     void FillCellCenteredElectromagneticFields ();
     void ComputeFluidRHS (WarpXSolverVec& rhs, amrex::Real time) const;
     void ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs, amrex::Real time) const;
@@ -229,6 +238,19 @@ class ThetaImplicitMHD final : public ImplicitSolver
         "implicit_mhd_ion_parallel_energy";
     inline static constexpr char IonPerpEnergyName[] =
         "implicit_mhd_ion_perp_energy";
+    // Single-component cell-centered views of the momentum density for
+    // field diagnostics (the 3-component register block cannot pass
+    // through the generic fields_to_plot path; exact T_i reconstruction
+    // from dumps needs the kinetic energy). Refreshed at initialization
+    // and at every accepted step end; never read by the solver.
+#if defined(WARPX_DIM_RZ)
+    inline static constexpr char MomentumDiag0Name[] = "implicit_mhd_momentum_r";
+    inline static constexpr char MomentumDiag1Name[] = "implicit_mhd_momentum_t";
+#else
+    inline static constexpr char MomentumDiag0Name[] = "implicit_mhd_momentum_x";
+    inline static constexpr char MomentumDiag1Name[] = "implicit_mhd_momentum_y";
+#endif
+    inline static constexpr char MomentumDiag2Name[] = "implicit_mhd_momentum_z";
 
   private:
     inline static constexpr char TotalCurrentCCName[] = "implicit_mhd_total_current_cc";
@@ -538,6 +560,22 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // momentum clamped to the outward sign (drainage allowed, reflux
     // forbidden). Default keeps the passive zero-gradient behavior.
     bool m_z_outflow_no_reflux = false;
+    // Fluid-moment ghost treatment at the non-periodic z ends (recast
+    // path, RZ): "neumann" (default; the passive zero-gradient clamp,
+    // which is a zero-flux end for the energies -- device-generated heat
+    // cannot escape through the exhaust), "wall_temperature" (ghosts
+    // copy the end plane's density and momentum but their ENERGIES are
+    // set to z_wall_temperature at the ghost density, ion internal
+    // energy plus the kinetic energy of the copied momentum, so the end
+    // faces exchange advectively against a T_wall reservoir -- the z
+    // analog of the r-wall temperature anchoring), or "outflow" (the
+    // ghost AXIAL momentum is C-infinity rectified to its OUTGOING
+    // part, the exact recipe of the r_max absorbing wall: the ends
+    // advect mass/energy out at interior values but never feed plasma
+    // back).
+    std::string m_z_boundary_fluid = "neumann";
+    // Wall temperature [eV] of z_boundary_fluid = wall_temperature.
+    amrex::Real m_z_wall_temperature = 0.0;
     // Open upper radial boundary (RZ only): boundary.field_hi = open on r
     // selects the Green's-function free-space fill for the fields; the
     // fluid then gets zero-gradient (outflow) radial ghosts at r_max

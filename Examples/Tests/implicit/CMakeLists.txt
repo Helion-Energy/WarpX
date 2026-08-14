@@ -883,6 +883,72 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# selectable z-end fluid boundary, mode "outflow" (rectified outgoing-only
+# end ghosts): a hot slab with outward end flow drains mass and total
+# fluid energy strictly monotonically through the z faces
+add_warpx_test(
+    test_rz_theta_implicit_mhd_z_end_outflow  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_z_end_outflow  # inputs
+    "analysis_mhd_z_end_outflow.py diags drain"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# same configuration with the end flow reversed (interior pulls away from
+# the ends): the rectified ghosts must not inject -- the plain Neumann
+# clamp would feed plasma back in at interior values
+add_warpx_test(
+    test_rz_theta_implicit_mhd_z_end_outflow_noinject  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_z_end_outflow my_constants.u_dir=-1.0"  # inputs
+    "analysis_mhd_z_end_outflow.py diags noinject"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# selectable z-end fluid boundary, mode "wall_temperature": a hot static
+# slab against cold end walls loses energy monotonically through the ends
+# at an advective-exchange rate while the midplane stays hot
+add_warpx_test(
+    test_rz_theta_implicit_mhd_z_wall_temperature  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_z_wall_temperature  # inputs
+    "analysis_mhd_z_wall_temperature.py diags cold"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# equilibrium gate of the wall-temperature ends: a slab AT the wall
+# temperature has ghosts equal to the interior and must stay unchanged
+# to solver roundoff
+add_warpx_test(
+    test_rz_theta_implicit_mhd_z_wall_temperature_equilibrium  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_z_wall_temperature my_constants.Twall_ev=100.0"  # inputs
+    "analysis_mhd_z_wall_temperature.py diags equilibrium"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# staggering-aware Neumann z-ghost fill: nodal-in-z fields must mirror
+# evenly about the boundary node (zero centered end-node gradient under a
+# z-linear ramp) while cell-centered fields keep the bit-identical clamp;
+# the ghost rows are read back directly through the MultiFab register
+add_warpx_test(
+    test_rz_theta_implicit_mhd_z_nodal_ghost_picmi  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_z_nodal_ghost_picmi.py  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_2d_theta_implicit_jfnk_vandb  # name
     2  # dims
