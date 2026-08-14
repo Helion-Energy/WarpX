@@ -6011,6 +6011,15 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
             });
         }
         amrex::IntVect const loc = srate.maxIndex(0);
+        // IntVect has AMREX_SPACEDIM entries: loc[2] is out of bounds in
+        // 2D/RZ builds (wild reads through Array4 -> rank-silent SEGV).
+        // Under exact ties (e.g. kappa = 0 -> srate == 0) the argmax is
+        // owner-ambiguous across ranks and the summed readings below can
+        // mix nodes: forensic readings are only authoritative from
+        // single-rank probes.
+        int const l0 = loc[0];
+        int const l1 = (AMREX_SPACEDIM > 1) ? loc[1] : 0;
+        int const l2 = (AMREX_SPACEDIM > 2) ? loc[2] : 0;
         amrex::Real ne_loc = 0.0_rt, te_loc = 0.0_rt, op_loc = 0.0_rt,
                     xi0 = 0.0_rt, nrat_loc = 0.0_rt;
         for (MFIter mfi(srate); mfi.isValid(); ++mfi) {
@@ -6018,13 +6027,13 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                 auto const & b_arr = bne.const_array(mfi);
                 auto const & t_arr = T_cur.const_array(mfi);
                 auto const & x_arr = xi.const_array(mfi);
-                ne_loc = b_arr(loc[0], loc[1], loc[2], BNE::b_ne);
-                te_loc = t_arr(loc[0], loc[1], loc[2]);
-                op_loc = b_arr(loc[0], loc[1], loc[2], BNE::b_open);
-                xi0 = x_arr(loc[0], loc[1], loc[2], 0);
+                ne_loc = b_arr(l0, l1, l2, BNE::b_ne);
+                te_loc = t_arr(l0, l1, l2);
+                op_loc = b_arr(l0, l1, l2, BNE::b_open);
+                xi0 = x_arr(l0, l1, l2, 0);
                 for (int g = 0; g < AMREX_SPACEDIM; ++g) {
                     for (int sgn = -1; sgn <= 1; sgn += 2) {
-                        int q[3] = {loc[0], loc[1], loc[2]};
+                        int q[3] = {l0, l1, l2};
                         q[g] += sgn;
                         if (!is_per[g] &&
                             (q[g] < dom_lo[g] || q[g] > dom_hi[g])) {
@@ -6047,7 +6056,7 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
         amrex::ParallelDescriptor::ReduceRealSum(nrat_loc);
         amrex::AllPrint() << "[qdsmc-bound-debug] s_max=" << s_max
             << " max|xi|=" << max_xi
-            << " argmax=(" << loc[0] << "," << loc[1] << "," << loc[2]
+            << " argmax=(" << l0 << "," << l1 << "," << l2
             << ") ne=" << ne_loc << " Te[K]=" << te_loc
             << " open=" << op_loc << " xi00=" << xi0
             << " nrat=" << nrat_loc << "\n";
