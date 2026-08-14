@@ -114,6 +114,12 @@ circuit.engine = "callbacks"
 circuit.add_new_attr("coupling.corrector_iterations", 1)
 circuit.add_new_attr("coupling.corrector_rtol", 1.0e-6)
 
+# the coupling-power ledger (asserted against the double entry below)
+pywarpx.warpx.reduced_diags_names = "circdiag"
+circdiag = pywarpx.warpx.get_bucket("circdiag")
+circdiag.type = "CircuitCoupling"
+circdiag.intervals = 1
+
 simulation.initialize_warpx()
 
 libwarpx = simulation.extension
@@ -189,6 +195,25 @@ tail = lams[len(lams) // 2 :]
 assert np.all(np.diff(tail) < 0.0), (
     "screening linkage not monotonically strengthening: " + str(tail)
 )
+
+# The coupling-power double entry: with the constant ramp slope the two
+# ledger columns P_circuit = -sum (ds/dt) lambda and
+# P_field = Int J_p . E_ext dV are the same reciprocity sum evaluated two
+# ways, so they must agree to roundoff, and the power flows INTO the plasma
+# (positive) while the ramp drives screening currents.
+if comm.rank == 0:
+    data = np.loadtxt("diags/reducedfiles/circdiag.txt")
+    last = data[-1] if data.ndim > 1 else data
+    s_col, dsdt_col, lam_col, p_circ, p_field = last[2], last[3], last[4], last[5], last[6]
+    print(f"ledger: s {s_col:.6f} dsdt {dsdt_col:.3e} lambda {lam_col:+.6e} "
+          f"P_circuit {p_circ:+.6e} P_field {p_field:+.6e}")
+    assert p_field > 0.0, f"coupling power not into the plasma: {p_field}"
+    assert abs(p_circ - p_field) < 1.0e-9 * abs(p_field), (
+        f"coupling-power double entry broken: {p_circ} vs {p_field}"
+    )
+    assert abs(lam_col - lam_final) < 1.0e-12 * abs(lam_final) + 1.0e-30, (
+        f"ledger lambda disagrees with the register: {lam_col} vs {lam_final}"
+    )
 
 if comm.rank == 0:
     print("circuit Lenz test PASSED")

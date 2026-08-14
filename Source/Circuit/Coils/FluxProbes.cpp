@@ -131,4 +131,58 @@ ReciprocityLinkage (const amrex::MultiFab& A_theta,
 #endif
 }
 
+amrex::Real
+CouplingPowerIntegral (const std::array<const amrex::MultiFab*, 3>& J,
+                       const std::array<const amrex::MultiFab*, 3>& E)
+{
+#if !defined(WARPX_DIM_RZ)
+    amrex::ignore_unused(J, E);
+    WARPX_ABORT_WITH_MESSAGE(
+        "CouplingPowerIntegral is an RZ (m = 0) measurement");
+    return 0.0_rt;
+#else
+    auto& warpx = WarpX::GetInstance();
+    const auto& geom = warpx.Geom(0);
+    const double dr = geom.CellSize(0);
+    const double dz = geom.CellSize(1);
+    const double plo_r = geom.ProbLo(0);
+
+    const int nr = geom.Domain().length(0);
+    double total = 0.0;
+    for (int idir = 0; idir < 3; ++idir) {
+        const amrex::MultiFab& jmf = *J[idir];
+        const amrex::MultiFab& emf = *E[idir];
+        const auto owner = jmf.OwnerMask(geom.periodicity());
+        const bool r_nodal = jmf.ixType().nodeCentered(0);
+
+        ReduceOps<ReduceOpSum> reduce_op;
+        ReduceData<double> reduce_data(reduce_op);
+        for (MFIter mfi(jmf, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            const Box tb = mfi.tilebox();
+            const auto ja = jmf.const_array(mfi);
+            const auto ea = emf.const_array(mfi);
+            const auto msk = owner->const_array(mfi);
+            const int nr_l = nr;
+            reduce_op.eval(tb, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) -> GpuTuple<double>
+                {
+                    if (msk(i, j, 0) == 0) { return 0.0; }
+                    const double r = plo_r + (r_nodal ? i : (i + 0.5)) * dr;
+                    // the same trapezoid end-weights in r as the
+                    // reciprocity linkage, so the coupling-power double
+                    // entry closes exactly
+                    const double w_r =
+                        (r_nodal && (i == 0 || i == nr_l)) ? 0.5 : 1.0;
+                    return w_r * r * static_cast<double>(ja(i, j, 0, 0))
+                               * static_cast<double>(ea(i, j, 0, 0));
+                });
+        }
+        total += amrex::get<0>(reduce_data.value(reduce_op));
+    }
+    ParallelDescriptor::ReduceRealSum(total);
+    total *= 2.0 * ablastr::coils::pi_ring * dr * dz;
+    return static_cast<amrex::Real>(total);
+#endif
+}
+
 } // namespace warpx::circuit
