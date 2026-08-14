@@ -8,6 +8,7 @@
 #define MHD_BLOCK_PC_H_
 
 #include "Fields.H"
+#include "MHDResistiveBanded.H"
 #include "MHDResistiveDirect.H"
 #include "MHDResistiveStencil.H"
 #include "MHDWaveOp.H"
@@ -32,6 +33,7 @@
 #include <AMReX_Vector.H>
 
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <string>
 
@@ -96,7 +98,7 @@
  * 2. RZ (m = 0) momentum wave Schur: the momentum block is composed with
  *    the cylindrical wave operator MHDWaveOpRZ
  *    (I - h^2 c_s^2 grad div + h^2/(mu0 rho_ref) W_B with the INPUT
- *    reference field magnitude along zhat; the domain mean is near zero
+ *    Reference field magnitude along zhat; the domain mean is near zero
  *    for reversed-field states, and W_B is quadratic in B so the sign
  *    structure is immaterial), applied after the scalar diffusion with a
  *    fixed-cycle MLMG and zero initial guess, engaged when the reference
@@ -181,7 +183,19 @@
  *    and the CUDA backend active); every other build defaults to
  *    "chebyshev", and an explicit "direct" request there aborts with a
  *    descriptive message (no heavy portable dependency is worth the
- *    default path).
+ *    default path). "banded" is the Chacon block-banded LU
+ *    (MHDResistiveBanded.H): the same emission scattered into a
+ *    block-banded tensor along z (blocks dense over components and the
+ *    radial line; periodic z eliminated in folded ring order) and
+ *    factored/solved by dense kernels resident on the device -- an exact
+ *    inverse up to the selectable factorization precision, with no cuDSS
+ *    dependency and no rank-0 gather (single-rank only for now).
+ *
+ *    When the residual's Ohm law carries the hyper-resistive term, the
+ *    frozen chain -theta_r dt curl(eta_H lap(curl .))/mu0 joins the block
+ *    operator through the same emission (eta_H frozen at the residual's
+ *    interpolated arguments), the activation gate and the Chebyshev
+ *    interval gaining the corresponding kmax^4-scale bounds.
  *
  * Boundary types the residual handles itself are mapped per component to
  * preconditioner-only linear-operator types matching the residual's fluid
@@ -287,12 +301,35 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         // and cheaper per application than the Chebyshev iteration at
         // every measured stiff regime); all other builds default to the
         // portable Chebyshev iteration.
+        // "banded" is the Chacon block-banded LU along z
+        // (MHDResistiveBanded.H): a portable exact-inverse alternative to
+        // "direct" (no cuDSS dependency, no rank-0 gather; single-rank
+        // only for now). pc_mhd_block.banded_precision selects the
+        // factorization storage; "double" is the default because the
+        // unpivoted elimination at production stiffness (block condition
+        // numbers ~1e4-1e5 over hundreds of pivots) exhausts FP32
+        // headroom and was measured to break the Newton line search.
 #if defined(WARPX_USE_CUDSS) && defined(AMREX_USE_CUDA)
         std::string m_resistive_solver = "direct";
 #else
         std::string m_resistive_solver = "chebyshev";
 #endif
         bool m_resistive_direct_enabled = false;
+        bool m_resistive_banded_enabled = false;
+        std::string m_banded_precision = "double";
+        // Refreeze policy of the banded factorization: "step" (default)
+        // factors once per time step and reuses it across the step's
+        // Newton iterations (the standard frozen-coefficient PC lag;
+        // the factorization is the dominant banded cost), "newton"
+        // refactors at every preconditioner update.
+        std::string m_banded_refreeze = "step";
+        RT m_banded_frozen_time = std::numeric_limits<RT>::lowest();
+        // Whether the residual's Ohm law carries the hyper-resistive term
+        // (deck-static: sizes the stencil scratch and the banded
+        // bandwidth at Define) and whether the frozen eta_H content is in
+        // the current update's operator.
+        bool m_resistive_hyper = false;
+        bool m_resistive_hyper_active = false;
         // Roundoff matvec check of the assembled sparse rows against the
         // matrix-free operator at every active update (any build).
         bool m_resistive_validate_assembly = false;
@@ -377,14 +414,20 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         amrex::Array<std::unique_ptr<amrex::MultiFab>, 3> m_resistive_residual;
         amrex::Array<std::unique_ptr<amrex::MultiFab>, 3> m_resistive_direction;
         amrex::Array<std::unique_ptr<amrex::MultiFab>, 3> m_resistive_action;
-        // eta_field on the electric-field staggerings, frozen at the
-        // preconditioner update (solver-owned scratch).
+        // eta_field (and, with the hyper-resistive term, eta_H) on the
+        // electric-field staggerings, frozen at the preconditioner update
+        // (solver-owned scratch).
         amrex::Array<const amrex::MultiFab*, 3> m_resistive_eta_edge = {nullptr, nullptr,
                                                                         nullptr};
+        amrex::Array<const amrex::MultiFab*, 3> m_resistive_eta_h_edge = {nullptr, nullptr,
+                                                                          nullptr};
         // Exact sparse inverse of the frozen resistive block (direct
         // solver and assembly validation), built lazily at the first
         // active update that needs it.
         std::unique_ptr<warpx::mhd_pc::ResistiveDirectSolver> m_resistive_direct;
+        // Block-banded LU of the frozen resistive block (banded solver),
+        // built lazily at the first active update that needs it.
+        std::unique_ptr<warpx::mhd_pc::ResistiveBandedSolver> m_resistive_banded;
 
         void ReadParameters ();
         void ApplyFieldBlock (T& solution, const T& rhs);
@@ -449,6 +492,8 @@ MHDBlockPC<T, Ops>::ReadParameters ()
     utils::parser::queryWithParser(pp, "resistive_iterations", m_resistive_iterations);
     utils::parser::queryWithParser(pp, "resistive_threshold", m_resistive_threshold);
     pp.query("resistive_solver", m_resistive_solver);
+    pp.query("banded_precision", m_banded_precision);
+    pp.query("banded_refreeze", m_banded_refreeze);
     pp.query("resistive_validate_assembly", m_resistive_validate_assembly);
     utils::parser::queryWithParser(pp, "max_coarsening_level", m_max_coarsening_level);
     utils::parser::queryWithParser(pp, "wave_relaxation", m_wave_relaxation);
@@ -490,14 +535,26 @@ MHDBlockPC<T, Ops>::ReadParameters ()
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_resistive_threshold > 0.0,
                                      "pc_mhd_block.resistive_threshold must be positive");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        m_resistive_solver == "chebyshev" || m_resistive_solver == "direct",
-        "pc_mhd_block.resistive_solver must be chebyshev or direct");
+        m_resistive_solver == "chebyshev" || m_resistive_solver == "direct" ||
+            m_resistive_solver == "banded",
+        "pc_mhd_block.resistive_solver must be chebyshev, direct, or banded");
     m_resistive_direct_enabled = m_resistive_solver == "direct";
+    m_resistive_banded_enabled = m_resistive_solver == "banded";
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !m_resistive_direct_enabled ||
             warpx::mhd_pc::ResistiveDirectSolver::HaveFactorizationBackend(),
         "pc_mhd_block.resistive_solver = direct requires a CUDA build configured "
         "with WarpX_CUDSS=ON (NVIDIA cuDSS); chebyshev is the portable default");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_resistive_banded_enabled ||
+            warpx::mhd_pc::ResistiveBandedSolver::HaveBackend(),
+        "pc_mhd_block.resistive_solver = banded is not implemented for SYCL builds");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_banded_precision == "single" || m_banded_precision == "double",
+        "pc_mhd_block.banded_precision must be single or double");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_banded_refreeze == "step" || m_banded_refreeze == "newton",
+        "pc_mhd_block.banded_refreeze must be step or newton");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_max_coarsening_level >= 0,
                                      "pc_mhd_block.max_coarsening_level cannot be negative");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_reference_mass_density > 0.0,
@@ -817,7 +874,11 @@ MHDBlockPC<T, Ops>::DefineResistiveBlock (const T& state)
 {
     // Resistive-block scratch (see the class documentation, point 4): the
     // Chebyshev iteration is matrix-free, so only per-component face
-    // vectors are needed.
+    // vectors are needed. Two ghosts unconditionally: the hyper-resistive
+    // chain reaches two cells (curl of lap of curl), and whether the Ohm
+    // law carries it is only knowable after the hybrid model's InitData
+    // (the preconditioner is defined earlier).
+    constexpr int stencil_ghosts = 2;
     auto const& state_fields = state.getArrayVec();
     for (int component = 0; component < 3; ++component)
     {
@@ -833,7 +894,7 @@ MHDBlockPC<T, Ops>::DefineResistiveBlock (const T& state)
         m_resistive_residual[component] =
             std::make_unique<amrex::MultiFab>(grids, dmap, 1, 0);
         m_resistive_direction[component] =
-            std::make_unique<amrex::MultiFab>(grids, dmap, 1, 1);
+            std::make_unique<amrex::MultiFab>(grids, dmap, 1, stencil_ghosts);
         m_resistive_direction[component]->setVal(0.0);
         m_resistive_action[component] =
             std::make_unique<amrex::MultiFab>(grids, dmap, 1, 0);
@@ -858,6 +919,36 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
         "pc_mhd_block requires a positive resistive theta");
     m_resistive_h = resistive_theta * this->m_dt;
 
+    // The frozen eta_H staggerings (null when the Ohm law runs without
+    // the hyper-resistive term); their maximum feeds the gate and the
+    // Chebyshev interval below. The flag is queried per update: it is
+    // only valid after the hybrid model's InitData, which runs after the
+    // preconditioner is defined.
+    m_resistive_hyper = m_ops->GetMHDIncludeHyperResistivityForPC();
+    m_resistive_hyper_active = false;
+    RT eta_h_maximum = 0.0;
+    if (m_resistive_hyper)
+    {
+        m_resistive_eta_h_edge = m_ops->GetMHDHyperResistivityEdgeForPC(evaluation_time);
+        for (int component = 0; component < 3; ++component)
+        {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !ResistiveComponentActive(component) ||
+                    m_resistive_eta_h_edge[component] != nullptr,
+                "pc_mhd_block requires the solver's edge hyper-resistivity "
+                "for the resistive block");
+            if (m_resistive_eta_h_edge[component] != nullptr)
+            {
+                eta_h_maximum =
+                    amrex::max(eta_h_maximum, m_resistive_eta_h_edge[component]->max(0));
+            }
+        }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            std::isfinite(eta_h_maximum) && eta_h_maximum >= 0.0,
+            "pc_mhd_block requires a finite non-negative hyper-resistivity");
+        m_resistive_hyper_active = true;
+    }
+
     // Gate on the grid-scale resistive diffusion number of the stiffest
     // cell: below the threshold the unpreconditioned rows are benign and
     // the block stands down to the exact identity at zero cost. The
@@ -879,6 +970,13 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
         laplacian_bound += RT(4.0) * inverse_cell_size[direction] *
                            inverse_cell_size[direction];
     }
+    // The hyper-resistive grid number theta_r dt (eta_H/mu0) kmax^4-like
+    // scale joins the gate (kmax^4 ~ laplacian_bound^2 / 16 per
+    // direction-summed bound).
+    m_resistive_diffusion_number = amrex::max(
+        m_resistive_diffusion_number, m_resistive_h * eta_h_maximum /
+                                          RT(PhysConst::mu0) * laplacian_bound *
+                                          laplacian_bound / RT(16.0));
     m_resistive_active = m_resistive_diffusion_number >= m_resistive_threshold;
     if (!m_resistive_active)
     {
@@ -888,9 +986,13 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
     // Chebyshev interval: [1, 1 + safety * theta_r dt (eta_max/mu0)
     // sum_d 4/dx_d^2]. The 1.5 safety absorbs the cylindrical metric
     // ratios; overestimating the top of the spectrum only slows the
-    // fixed-count contraction, never destabilizes it.
+    // fixed-count contraction, never destabilizes it. The eta_H chain
+    // adds its curl lap curl bound, laplacian_bound^2.
     m_resistive_lambda_max = RT(1.0) + RT(1.5) * m_resistive_h * eta_maximum /
-                                           RT(PhysConst::mu0) * laplacian_bound;
+                                           RT(PhysConst::mu0) * laplacian_bound +
+                             RT(1.5) * m_resistive_h * eta_h_maximum /
+                                 RT(PhysConst::mu0) * laplacian_bound *
+                                 laplacian_bound;
     // Automatic application count: ceil(2 sqrt(lambda_max)) contracts the
     // Chebyshev residual to ~e^-4 independent of the stiffness (bounded
     // for pathological states; each application costs one stencil sweep,
@@ -912,6 +1014,18 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
             "for the resistive block");
     }
 
+    warpx::mhd_pc::ResistiveStencilConstants stencil_constants =
+        warpx::mhd_pc::MakeResistiveStencilConstants(m_geometry, m_resistive_h);
+    stencil_constants.include_hyper = m_resistive_hyper_active;
+    amrex::Array<const amrex::MultiFab*, 3> face_layout = {nullptr, nullptr, nullptr};
+    for (int component = 0; component < 3; ++component)
+    {
+        if (ResistiveComponentActive(component))
+        {
+            face_layout[component] = m_resistive_iterate[component].get();
+        }
+    }
+
     if (m_resistive_direct_enabled || m_resistive_validate_assembly)
     {
         // The frozen operator's sparse rows come from the SAME stencil
@@ -924,20 +1038,11 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
         }
         if (!m_resistive_direct->IsDefined())
         {
-            amrex::Array<const amrex::MultiFab*, 3> face_layout = {nullptr, nullptr,
-                                                                   nullptr};
-            for (int component = 0; component < 3; ++component)
-            {
-                if (ResistiveComponentActive(component))
-                {
-                    face_layout[component] = m_resistive_iterate[component].get();
-                }
-            }
-            m_resistive_direct->Define(m_geometry, face_layout, m_resistive_eta_edge);
+            m_resistive_direct->Define(m_geometry, face_layout, m_resistive_eta_edge,
+                                       m_resistive_eta_h_edge);
         }
-        const warpx::mhd_pc::ResistiveStencilConstants stencil_constants =
-            warpx::mhd_pc::MakeResistiveStencilConstants(m_geometry, m_resistive_h);
-        m_resistive_direct->AssembleValues(stencil_constants, m_resistive_eta_edge);
+        m_resistive_direct->AssembleValues(stencil_constants, m_resistive_eta_edge,
+                                           m_resistive_eta_h_edge);
         if (m_resistive_validate_assembly)
         {
             ValidateResistiveAssembly();
@@ -945,6 +1050,35 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
         if (m_resistive_direct_enabled)
         {
             m_resistive_direct->Factorize();
+        }
+    }
+
+    if (m_resistive_banded_enabled)
+    {
+        // The same emission scattered into the block-banded tensor and
+        // factored on the device (see MHDResistiveBanded.H). Under the
+        // "step" refreeze policy the factorization is reused across the
+        // step's Newton iterations (frozen-coefficient PC lag).
+        if (m_resistive_banded == nullptr)
+        {
+            m_resistive_banded =
+                std::make_unique<warpx::mhd_pc::ResistiveBandedSolver>();
+        }
+        const bool first_factorization = !m_resistive_banded->IsDefined();
+        if (first_factorization)
+        {
+            m_resistive_banded->Define(m_geometry, face_layout,
+                                       m_resistive_hyper ? 2 : 1,
+                                       m_banded_precision == "single");
+        }
+        if (first_factorization || m_banded_refreeze == "newton" ||
+            this->m_time != m_banded_frozen_time)
+        {
+            m_resistive_banded->AssembleValues(stencil_constants,
+                                               m_resistive_eta_edge,
+                                               m_resistive_eta_h_edge);
+            m_resistive_banded->Factorize();
+            m_banded_frozen_time = this->m_time;
         }
     }
 }
@@ -1060,7 +1194,7 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
             "pc_mhd_block requires positive finite reference signal speeds");
         // Precondition only the UNRESOLVED part of the upwind dissipation:
         // subtract signal_cfl_floor cells per implicit interval from the
-        // reference speed. Below the floor the diffusion switches off
+        // Reference speed. Below the floor the diffusion switches off
         // exactly: on resolved states the residuals are smooth and any
         // preconditioner content only injects structure that GMRES must
         // then resolve against the Jacobian's rough (grid-scale HLLD)
@@ -1212,9 +1346,16 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
                        << ", wave Schur = " << (m_wave_schur_active ? "active" : "inactive")
                        << ", resistive = " << (m_resistive_active ? "active" : "inactive")
                        << " (solver = " << m_resistive_solver
+                       << ", eta_H = " << (m_resistive_hyper_active ? "on" : "off")
                        << ", z = " << m_resistive_diffusion_number
                        << ", lambda_max = " << m_resistive_lambda_max
-                       << ", chebyshev = " << m_resistive_iteration_count << ")\n";
+                       << ", chebyshev = " << m_resistive_iteration_count;
+        if (m_resistive_banded_enabled && m_resistive_banded != nullptr)
+        {
+            amrex::Print() << ", banded dropped = "
+                           << m_resistive_banded->DroppedFraction();
+        }
+        amrex::Print() << ")\n";
     }
 }
 
@@ -1557,7 +1698,7 @@ MHDBlockPC<T, Ops>::ApplyResistiveBlock (T& solution)
     // operations, standard right-preconditioned GMRES safe.
     auto const& solution_fields = solution.getArrayVec();
 
-    if (m_resistive_direct_enabled)
+    if (m_resistive_direct_enabled || m_resistive_banded_enabled)
     {
         // Exact block inverse: one forward/backward substitution of the
         // factorization frozen at the preconditioner update.
@@ -1569,7 +1710,14 @@ MHDBlockPC<T, Ops>::ApplyResistiveBlock (T& solution)
                 faces[component] = solution_fields[0][component];
             }
         }
-        m_resistive_direct->Solve(faces);
+        if (m_resistive_banded_enabled)
+        {
+            m_resistive_banded->Solve(faces);
+        }
+        else
+        {
+            m_resistive_direct->Solve(faces);
+        }
         return;
     }
 
@@ -1659,8 +1807,9 @@ MHDBlockPC<T, Ops>::ApplyResistiveCurlCurl ()
     // approximation for Open/None ends), and every remaining read stays
     // within one filled ghost.
 #if defined(WARPX_DIM_1D_Z) || defined(WARPX_DIM_RZ)
-    const warpx::mhd_pc::ResistiveStencilConstants stencil_constants =
+    warpx::mhd_pc::ResistiveStencilConstants stencil_constants =
         warpx::mhd_pc::MakeResistiveStencilConstants(m_geometry, m_resistive_h);
+    stencil_constants.include_hyper = m_resistive_hyper_active;
 
     for (int component = 0; component < 3; ++component)
     {
@@ -1679,6 +1828,11 @@ MHDBlockPC<T, Ops>::ApplyResistiveCurlCurl ()
                 {
                     stencil_arrays.eta[field_component] =
                         m_resistive_eta_edge[field_component]->const_array(mfi);
+                }
+                if (m_resistive_eta_h_edge[field_component] != nullptr)
+                {
+                    stencil_arrays.eta_h[field_component] =
+                        m_resistive_eta_h_edge[field_component]->const_array(mfi);
                 }
                 if (ResistiveComponentActive(field_component))
                 {
@@ -2405,6 +2559,7 @@ MHDBlockPC<T, Ops>::printParameters () const
     amrex::Print() << name << " resistive iterations: " << m_resistive_iterations << "\n";
     amrex::Print() << name << " resistive threshold:  " << m_resistive_threshold << "\n";
     amrex::Print() << name << " resistive solver:     " << m_resistive_solver << "\n";
+    amrex::Print() << name << " banded precision:     " << m_banded_precision << "\n";
     amrex::Print() << name << " wave relaxation:      " << m_wave_relaxation << "\n";
     amrex::Print() << name << " agglomeration:        " << (m_agglomeration ? "true" : "false")
                    << "\n";

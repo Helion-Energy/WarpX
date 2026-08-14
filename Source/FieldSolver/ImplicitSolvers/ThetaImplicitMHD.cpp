@@ -655,6 +655,9 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
     fields.alloc_init(FieldResistivityE0Name, lev,
                       amrex::convert(ba, amrex::IntVect(1)), dm, 1,
                       amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(HyperResistivityE0Name, lev,
+                      amrex::convert(ba, amrex::IntVect(1)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
 #elif defined(WARPX_DIM_RZ)
     fields.alloc_init(FieldResistivityE0Name, lev,
                       amrex::convert(ba, amrex::IntVect(0, 1)), dm, 1,
@@ -663,6 +666,15 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
                       amrex::convert(ba, amrex::IntVect(1, 1)), dm, 1,
                       amrex::IntVect(0), 0.0_rt);
     fields.alloc_init(FieldResistivityE2Name, lev,
+                      amrex::convert(ba, amrex::IntVect(1, 0)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(HyperResistivityE0Name, lev,
+                      amrex::convert(ba, amrex::IntVect(0, 1)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(HyperResistivityE1Name, lev,
+                      amrex::convert(ba, amrex::IntVect(1, 1)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(HyperResistivityE2Name, lev,
                       amrex::convert(ba, amrex::IntVect(1, 0)), dm, 1,
                       amrex::IntVect(0), 0.0_rt);
 #endif
@@ -1268,6 +1280,170 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
     amrex::ignore_unused(density, temperature_cc, eta, charge_to_mass,
                          charge_density_floor,
                          vacuum_division_guard, vacuum_eta_scale, time);
+    return {nullptr, nullptr, nullptr};
+#endif
+}
+
+bool
+ThetaImplicitMHD::GetMHDIncludeHyperResistivityForPC () const
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_hybrid_pic_model != nullptr,
+        "ThetaImplicitMHD hyper-resistivity flag requested before Define()");
+    return m_hybrid_pic_model->m_include_hyper_resistivity_term;
+}
+
+amrex::Array<const amrex::MultiFab*, 3>
+ThetaImplicitMHD::GetMHDHyperResistivityEdgeForPC (const amrex::Real time) const
+{
+    // eta_H carries no explicit time argument in the (rho, B) parser.
+    amrex::ignore_unused(time);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_hybrid_pic_model != nullptr,
+        "ThetaImplicitMHD hyper-resistivity requested before Define()");
+    if (!m_hybrid_pic_model->m_include_hyper_resistivity_term) {
+        return {nullptr, nullptr, nullptr};
+    }
+    // eta_H(rho_q, |B|) evaluated AT the electric-field staggerings with
+    // the residual's own frozen arguments (see AssembleOhmElectricField):
+    // the charge density interpolated with the same stencils as the eta
+    // edge fill and floored at the Ohm guard, and |B| from the
+    // cell-centered field (including any external contribution) with the
+    // residual's averaging, read only when the parser depends on B.
+    const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
+    const amrex::MultiFab& magnetic_cc =
+        *m_WarpX->m_fields.get(MagneticFieldCCName, 0);
+    const auto eta_h = m_hybrid_pic_model->m_eta_h;
+    const bool needs_b = m_hybrid_pic_model->m_hyper_resistivity_has_B_dependence;
+    const amrex::Real charge_to_mass = m_ion_charge_to_mass;
+    const amrex::Real charge_density_floor =
+        m_ion_charge_to_mass * OhmMassDensityFloor();
+#if defined(WARPX_DIM_1D_Z)
+    amrex::MultiFab& node_hyper = *m_WarpX->m_fields.get(HyperResistivityE0Name, 0);
+    for (amrex::MFIter mfi(node_hyper); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto hyper = node_hyper.array(mfi);
+        const auto rho = density.const_array(mfi);
+        const auto b_cc = magnetic_cc.const_array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            const amrex::Real charge_density_value =
+                std::max(charge_to_mass * 0.5_rt * (rho(i - 1, j, k) + rho(i, j, k)),
+                         charge_density_floor);
+            amrex::Real magnetic_magnitude = 0.0_rt;
+            if (needs_b) {
+                amrex::Real magnetic_squared = 0.0_rt;
+                for (int component = 0; component < 3; ++component) {
+                    const amrex::Real value = 0.5_rt * (b_cc(i - 1, j, k, component) +
+                                                        b_cc(i, j, k, component));
+                    magnetic_squared += value * value;
+                }
+                magnetic_magnitude = std::sqrt(magnetic_squared);
+            }
+            hyper(i, j, k) = eta_h(charge_density_value, magnetic_magnitude);
+        });
+    }
+    // Ex and Ey share the z-nodal staggering; the cell-centered Ez never
+    // enters the 1D curl.
+    return {&node_hyper, &node_hyper, nullptr};
+#elif defined(WARPX_DIM_RZ)
+    amrex::MultiFab& radial_hyper = *m_WarpX->m_fields.get(HyperResistivityE0Name, 0);
+    amrex::MultiFab& azimuthal_hyper =
+        *m_WarpX->m_fields.get(HyperResistivityE1Name, 0);
+    amrex::MultiFab& axial_hyper = *m_WarpX->m_fields.get(HyperResistivityE2Name, 0);
+    for (amrex::MFIter mfi(azimuthal_hyper); mfi.isValid(); ++mfi) {
+        const auto hyper_radial = radial_hyper.array(mfi);
+        const auto hyper_azimuthal = azimuthal_hyper.array(mfi);
+        const auto hyper_axial = axial_hyper.array(mfi);
+        const auto rho = density.const_array(mfi);
+        const auto b_cc = magnetic_cc.const_array(mfi);
+        // E_theta corners: the nodal rho_fp value; |B| from the four
+        // surrounding cells (the residual's corner average).
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(1, 1)),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const auto node_density = [&] (const int in, const int jn) {
+                    return 0.25_rt * (rho(in - 1, jn - 1, k) + rho(in, jn - 1, k) +
+                                      rho(in - 1, jn, k) + rho(in, jn, k));
+                };
+                const amrex::Real charge_density_value =
+                    std::max(charge_to_mass * node_density(i, j),
+                             charge_density_floor);
+                amrex::Real magnetic_magnitude = 0.0_rt;
+                if (needs_b) {
+                    amrex::Real magnetic_squared = 0.0_rt;
+                    for (int component = 0; component < 3; ++component) {
+                        const amrex::Real value =
+                            0.25_rt * (b_cc(i - 1, j - 1, k, component) +
+                                       b_cc(i, j - 1, k, component) +
+                                       b_cc(i - 1, j, k, component) +
+                                       b_cc(i, j, k, component));
+                        magnetic_squared += value * value;
+                    }
+                    magnetic_magnitude = std::sqrt(magnetic_squared);
+                }
+                hyper_azimuthal(i, j, k) =
+                    eta_h(charge_density_value, magnetic_magnitude);
+            });
+        // Er z-faces: nodes averaged in r; |B| from the two axially
+        // adjacent cells (the residual's z-face average).
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(0, 1)),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const auto node_density = [&] (const int in, const int jn) {
+                    return 0.25_rt * (rho(in - 1, jn - 1, k) + rho(in, jn - 1, k) +
+                                      rho(in - 1, jn, k) + rho(in, jn, k));
+                };
+                const amrex::Real charge_density_value =
+                    std::max(charge_to_mass * 0.5_rt *
+                                 (node_density(i, j) + node_density(i + 1, j)),
+                             charge_density_floor);
+                amrex::Real magnetic_magnitude = 0.0_rt;
+                if (needs_b) {
+                    amrex::Real magnetic_squared = 0.0_rt;
+                    for (int component = 0; component < 3; ++component) {
+                        const amrex::Real value =
+                            0.5_rt * (b_cc(i, j - 1, k, component) +
+                                      b_cc(i, j, k, component));
+                        magnetic_squared += value * value;
+                    }
+                    magnetic_magnitude = std::sqrt(magnetic_squared);
+                }
+                hyper_radial(i, j, k) =
+                    eta_h(charge_density_value, magnetic_magnitude);
+            });
+        // Ez r-faces: nodes averaged in z; |B| from the two radially
+        // adjacent cells (the residual's r-face average; the below-axis
+        // cell-centered ghosts carry the fills of the recast).
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(1, 0)),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const auto node_density = [&] (const int in, const int jn) {
+                    return 0.25_rt * (rho(in - 1, jn - 1, k) + rho(in, jn - 1, k) +
+                                      rho(in - 1, jn, k) + rho(in, jn, k));
+                };
+                const amrex::Real charge_density_value =
+                    std::max(charge_to_mass * 0.5_rt *
+                                 (node_density(i, j) + node_density(i, j + 1)),
+                             charge_density_floor);
+                amrex::Real magnetic_magnitude = 0.0_rt;
+                if (needs_b) {
+                    amrex::Real magnetic_squared = 0.0_rt;
+                    for (int component = 0; component < 3; ++component) {
+                        const amrex::Real value =
+                            0.5_rt * (b_cc(i - 1, j, k, component) +
+                                      b_cc(i, j, k, component));
+                        magnetic_squared += value * value;
+                    }
+                    magnetic_magnitude = std::sqrt(magnetic_squared);
+                }
+                hyper_axial(i, j, k) =
+                    eta_h(charge_density_value, magnetic_magnitude);
+            });
+    }
+    return {&radial_hyper, &azimuthal_hyper, &axial_hyper};
+#else
+    amrex::ignore_unused(density, magnetic_cc, eta_h, needs_b, charge_to_mass,
+                         charge_density_floor);
     return {nullptr, nullptr, nullptr};
 #endif
 }

@@ -211,6 +211,11 @@ class ThetaImplicitMHD final : public ImplicitSolver
     [[nodiscard]] amrex::Array<const amrex::MultiFab*, 3>
     GetMHDFieldResistivityEdgeForPC (amrex::Real time) const override;
 
+    [[nodiscard]] bool GetMHDIncludeHyperResistivityForPC () const override;
+
+    [[nodiscard]] amrex::Array<const amrex::MultiFab*, 3>
+    GetMHDHyperResistivityEdgeForPC (amrex::Real time) const override;
+
     [[nodiscard]] amrex::GpuArray<amrex::Real, 3>
     GetMHDReferenceMagneticFieldForPC () const override;
 
@@ -281,6 +286,15 @@ class ThetaImplicitMHD final : public ImplicitSolver
         "implicit_mhd_field_resistivity_e1";
     inline static constexpr char FieldResistivityE2Name[] =
         "implicit_mhd_field_resistivity_e2";
+    // eta_H on the same electric-field staggerings (the preconditioner's
+    // frozen hyper-resistivity; zeroed and unused when the Ohm law runs
+    // without the hyper-resistive term).
+    inline static constexpr char HyperResistivityE0Name[] =
+        "implicit_mhd_hyper_resistivity_e0";
+    inline static constexpr char HyperResistivityE1Name[] =
+        "implicit_mhd_hyper_resistivity_e1";
+    inline static constexpr char HyperResistivityE2Name[] =
+        "implicit_mhd_hyper_resistivity_e2";
     // Per-face-direction Riemann flux registers for the conservative-form
     // hlld path: one HLLD solution per face feeds the fluid divergences,
     // the Maxwell stress, the ion-energy magnetic work, and the ideal EMF.

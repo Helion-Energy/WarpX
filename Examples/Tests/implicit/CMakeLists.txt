@@ -402,6 +402,20 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# banded twin: the same preconditioned physics with the resistive block
+# inverted by the block-banded LU along z (Chacon direct
+# preconditioner; periodic-z wraps PC-grade dropped); same GMRES margin
+# as the Chebyshev twin
+add_warpx_test(
+    test_1d_theta_implicit_mhd_vacuum_resistive_pc_banded  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_vacuum_resistive_pc_banded  # inputs
+    "analysis_mhd_vacuum_resistive_pc.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_vacuum_resistive  # dependency
+)
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_sound  # name
     1  # dims
@@ -611,6 +625,21 @@ add_warpx_test(
     "analysis_mhd_hyper_resistive.py diags/diag000000 diags/diag000040"  # analysis
     OFF  # checksum
     OFF  # dependency
+)
+
+# preconditioned banded twin: the pc_mhd_block resistive block carries the
+# frozen eta_H chain (banded LU at bandwidth 2), the calibrated decay is
+# unchanged, the cumulative GMRES count falls strictly (with margin) below
+# the baseline's, and every active update roundoff-validates the assembled
+# eta_H rows against the matrix-free operator
+add_warpx_test(
+    test_1d_theta_implicit_mhd_hyper_resistive_pc_banded  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_hyper_resistive_pc_banded  # inputs
+    "analysis_mhd_hyper_resistive_pc.py diags/diag000000 diags/diag000040"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_hyper_resistive  # dependency
 )
 
 # CGL bi-Maxwellian isotropization: a uniform static anisotropic state
@@ -844,6 +873,49 @@ add_warpx_test(
     "analysis_mhd_vacuum_resistive_rz.py diags/diag000000 diags/diag000002"  # analysis
     OFF  # checksum
     OFF  # dependency
+)
+
+# banded twin: the same preconditioned physics with the resistive block
+# inverted by the block-banded LU along z (dense radial blocks treat the
+# axis/wall/halo coupling exactly; periodic-z wraps PC-grade dropped); one
+# rank (the banded solver asserts single-rank), fields at solver tolerance
+# against the two-rank baseline, same 10x GMRES margin
+add_warpx_test(
+    test_rz_theta_implicit_mhd_vacuum_resistive_pc_banded  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_vacuum_resistive_pc_banded  # inputs
+    "analysis_mhd_vacuum_resistive_rz_pc_banded.py diags/diag000000 diags/diag000002"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_vacuum_resistive  # dependency
+)
+
+# stiff RZ density-keyed hyper-resistive diffusion (grid hyper number 100
+# at the halo minimum): the corner/face eta_H stencils with the axis
+# regularizations drive the only dynamics; corner-EMF structural
+# invariants plus the z-modulated eta_H exciting Br
+add_warpx_test(
+    test_rz_theta_implicit_mhd_hyper_resistive  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_hyper_resistive  # inputs
+    "analysis_mhd_hyper_resistive_rz.py diags/diag000000 diags/diag000002"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# preconditioned banded twin of the RZ hyper-resistive diffusion: fields
+# at solver tolerance against the baseline, cumulative GMRES strictly
+# (with margin) below it, and in-run roundoff validation of the assembled
+# cylindrical eta_H rows against the matrix-free operator
+add_warpx_test(
+    test_rz_theta_implicit_mhd_hyper_resistive_pc_banded  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_hyper_resistive_pc_banded  # inputs
+    "analysis_mhd_hyper_resistive_rz_pc.py diags/diag000000 diags/diag000002"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_hyper_resistive  # dependency
 )
 
 # static theta-pinch column (pe-balanced Bz(r), u = 0, B_n = 0): the

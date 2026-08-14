@@ -292,6 +292,32 @@ public:
     }
 
     /**
+     * \brief Return whether the generalized Ohm law includes the
+     * hyper-resistive term eta_H, for the MHD block preconditioner (static
+     * per run: sizes the resistive block's stencil scratch and the banded
+     * solver's bandwidth at Define time).
+     */
+    [[nodiscard]] virtual bool
+    GetMHDIncludeHyperResistivityForPC () const
+    {
+        return false;
+    }
+
+    /**
+     * \brief Return eta_H evaluated on the electric-field staggerings at
+     * the preconditioner update state, with the residual's interpolated
+     * charge-density and cell-centered |B| arguments frozen, read by the
+     * MHD block preconditioner's resistive block. Null components when
+     * the hyper-resistive term is off.
+     */
+    [[nodiscard]] virtual amrex::Array<const amrex::MultiFab*, 3>
+    GetMHDHyperResistivityEdgeForPC (amrex::Real a_time) const
+    {
+        amrex::ignore_unused(a_time);
+        return {nullptr, nullptr, nullptr};
+    }
+
+    /**
      * \brief Return the physical xyz reference magnetic field used by the MHD
      * wave preconditioner.
      *

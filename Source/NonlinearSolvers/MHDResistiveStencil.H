@@ -22,11 +22,16 @@ namespace warpx::mhd_pc
  * \brief Frozen geometric constants of the discrete resistive curl-curl
  *
  *     A d = theta_r dt curl((eta_field/mu0) curl d)
+ *          [- theta_r dt curl(eta_H lap(curl d)) / mu0 when include_hyper]
  *
  * on the residual's exact Yee staggering (see MHDBlockPC, resistive
  * block), with tangential E zeroed on every non-periodic domain boundary
  * plane (exact for PEC walls and the residual's zero axis EMF, the
- * identity-leaning convention for Open/None ends).
+ * identity-leaning convention for Open/None ends). The optional
+ * hyper-resistive chain reproduces the residual's E -= eta_H lap(J)
+ * stencils (J = curl B / mu0 on the electric-field staggerings, the m = 0
+ * cylindrical vector Laplacian with the residual's axis regularizations)
+ * with eta_H frozen at the update.
  *
  * The row emission below is the single source of truth for this stencil:
  * the matrix-free Chebyshev application and the direct-solver sparse-row
@@ -37,6 +42,15 @@ namespace warpx::mhd_pc
 struct ResistiveStencilConstants
 {
     amrex::Real scale = 0.0; //!< theta_r dt / mu0
+    // Emit the hyper-resistive chain E -= eta_H laplacian(J), J = curl B /
+    // mu0, alongside the resistive term (the same theta_r dt / mu0 scale
+    // carries the single 1/mu0 of the current). Any current evaluation
+    // whose curl-B stencil would read a magnetic-field ghost outside the
+    // canonical unknowns is treated as zero (whole-point drop): exact for
+    // the residual's Neumann-z current ghosts, the identity-leaning
+    // convention elsewhere (same philosophy as the boundary-plane
+    // tangential-E zeroing of the resistive term).
+    bool include_hyper = false;
 #if defined(WARPX_DIM_1D_Z)
     int axial_node_low = 0;
     int axial_node_high = 0;
@@ -64,6 +78,9 @@ struct ResistiveStencilConstants
 struct ResistiveStencilArrays
 {
     amrex::Array4<const amrex::Real> eta[3];
+    // eta_H on the same electric-field staggerings (frozen at the
+    // preconditioner update); read only when include_hyper is set.
+    amrex::Array4<const amrex::Real> eta_h[3];
 };
 
 /**
@@ -122,6 +139,19 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
     // Transverse components on z-cells; eta d_z d on the z-node between
     // cells node-1 and node (zero on non-periodic domain boundary nodes:
     // tangential E), then the row is -s d_z of the node flux.
+    //
+    // mu0-scaled current proxy g(m) = d_z d at node m (whole-point drop
+    // when its cell reads leave the canonical range, see include_hyper).
+    const auto emit_gradient = [&] (const int node, const amrex::Real weight)
+    {
+        if (!c.axial_periodic &&
+            (node <= c.axial_node_low || node >= c.axial_node_high))
+        {
+            return;
+        }
+        sink(a_component, node, j, k, weight * c.inverse_dz);
+        sink(a_component, node - 1, j, k, -weight * c.inverse_dz);
+    };
     const auto emit_node_flux = [&] (const int node, const amrex::Real multiplier)
     {
         if (!c.axial_periodic &&
@@ -133,10 +163,91 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
             multiplier * a.eta[a_component](node, j, k) * c.inverse_dz;
         sink(a_component, node, j, k, coefficient);
         sink(a_component, node - 1, j, k, -coefficient);
+        if (c.include_hyper)
+        {
+            // Flux gains -eta_H lap_z(g) at the node (both transverse
+            // components reduce to the same form, like the eta term).
+            const amrex::Real hyper_weight = -multiplier *
+                                             a.eta_h[a_component](node, j, k) *
+                                             c.inverse_dz * c.inverse_dz;
+            emit_gradient(node - 1, hyper_weight);
+            emit_gradient(node, amrex::Real(-2.0) * hyper_weight);
+            emit_gradient(node + 1, hyper_weight);
+        }
     };
     emit_node_flux(i + 1, -c.scale * c.inverse_dz);
     emit_node_flux(i, c.scale * c.inverse_dz);
 #elif defined(WARPX_DIM_RZ)
+    const amrex::Real inverse_dr2 = c.inverse_dr * c.inverse_dr;
+    const amrex::Real inverse_dz2 = c.inverse_dz * c.inverse_dz;
+    // Canonical-range guards of the hyper-resistive current reads: a
+    // derivative pair whose magnetic-field cells leave the canonical
+    // range is dropped whole (exactly zero under the residual's
+    // Neumann-z current ghosts, identity-leaning elsewhere).
+    const auto radial_cell_in_range = [&] (const int cell)
+    {
+        return cell >= c.radial_face_low && cell < c.radial_face_high;
+    };
+    const auto axial_cell_in_range = [&] (const int cell)
+    {
+        return c.axial_periodic ||
+               (cell >= c.axial_face_low && cell < c.axial_face_high);
+    };
+    // mu0 J_theta = -d_r Bz + d_z Br on the (r-node, z-node) corner
+    // (native staggering); zero on the axis node like the residual's
+    // on-axis current correction.
+    const auto emit_current_azimuthal =
+        [&] (const int node_r, const int node_z, const amrex::Real weight)
+    {
+        const amrex::Real radius =
+            c.radial_lo + static_cast<amrex::Real>(node_r) * c.radial_cell_size;
+        if (radius <= amrex::Real(0.5) * c.radial_cell_size)
+        {
+            return;
+        }
+        if (radial_cell_in_range(node_r) && radial_cell_in_range(node_r - 1))
+        {
+            sink(2, node_r, node_z, k, -weight * c.inverse_dr);
+            sink(2, node_r - 1, node_z, k, weight * c.inverse_dr);
+        }
+        if (axial_cell_in_range(node_z) && axial_cell_in_range(node_z - 1))
+        {
+            sink(0, node_r, node_z, k, weight * c.inverse_dz);
+            sink(0, node_r, node_z - 1, k, -weight * c.inverse_dz);
+        }
+    };
+    // E_theta -= eta_H lap J_theta at the corner (the m = 0 cylindrical
+    // vector Laplacian of the residual, J_theta native so the stencil
+    // needs no interpolation), dropped on every non-periodic domain
+    // boundary plane like the resistive corner term.
+    const auto emit_corner_hyper =
+        [&] (const int node_r, const int node_z, const amrex::Real multiplier)
+    {
+        if (node_r == c.radial_face_low || node_r == c.radial_face_high)
+        {
+            return;
+        }
+        if (!c.axial_periodic &&
+            (node_z == c.axial_face_low || node_z == c.axial_face_high))
+        {
+            return;
+        }
+        const amrex::Real weight = -multiplier * a.eta_h[1](node_r, node_z, k);
+        const amrex::Real radius =
+            c.radial_lo + static_cast<amrex::Real>(node_r) * c.radial_cell_size;
+        const amrex::Real radial_high =
+            (radius + amrex::Real(0.5) * c.radial_cell_size) * inverse_dr2 / radius;
+        const amrex::Real radial_low =
+            (radius - amrex::Real(0.5) * c.radial_cell_size) * inverse_dr2 / radius;
+        emit_current_azimuthal(node_r + 1, node_z, weight * radial_high);
+        emit_current_azimuthal(node_r - 1, node_z, weight * radial_low);
+        emit_current_azimuthal(node_r, node_z + 1, weight * inverse_dz2);
+        emit_current_azimuthal(node_r, node_z - 1, weight * inverse_dz2);
+        emit_current_azimuthal(node_r, node_z,
+                               weight * (-radial_high - radial_low -
+                                         amrex::Real(2.0) * inverse_dz2 -
+                                         amrex::Real(1.0) / (radius * radius)));
+    };
     // E_theta = eta (d_z d_r - d_r d_z) on the (r-node, z-node) corner,
     // zero on every non-periodic domain boundary plane (the r = 0 corner
     // reproduces the residual's zero axis EMF).
@@ -164,6 +275,11 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
         // Br on (r-node, z-cell): (curl E)_r = -d_z E_theta.
         emit_corner_azimuthal(i, j + 1, -c.scale * c.inverse_dz);
         emit_corner_azimuthal(i, j, c.scale * c.inverse_dz);
+        if (c.include_hyper)
+        {
+            emit_corner_hyper(i, j + 1, -c.scale * c.inverse_dz);
+            emit_corner_hyper(i, j, c.scale * c.inverse_dz);
+        }
     }
     else if (a_component == 1)
     {
@@ -207,10 +323,113 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
             sink(1, node_r, cell_z, k, coefficient * radius_high);
             sink(1, node_r - 1, cell_z, k, -coefficient * radius_low);
         };
+        // mu0 J_r = -d_z Btheta on the (r-cell, z-node) face.
+        const auto emit_current_radial =
+            [&] (const int cell_r, const int node_z, const amrex::Real weight)
+        {
+            if (!radial_cell_in_range(cell_r) || !axial_cell_in_range(node_z) ||
+                !axial_cell_in_range(node_z - 1))
+            {
+                return;
+            }
+            sink(1, cell_r, node_z, k, -weight * c.inverse_dz);
+            sink(1, cell_r, node_z - 1, k, weight * c.inverse_dz);
+        };
+        // mu0 J_z = (1/r) d_r(r Btheta) on the (r-node, z-cell) face, with
+        // the residual's on-axis regularization mu0 J_z = 4 Btheta / dr.
+        const auto emit_current_axial =
+            [&] (const int node_r, const int cell_z, const amrex::Real weight)
+        {
+            if (!axial_cell_in_range(cell_z))
+            {
+                return;
+            }
+            const amrex::Real radius =
+                c.radial_lo + static_cast<amrex::Real>(node_r) * c.radial_cell_size;
+            if (radius <= amrex::Real(0.5) * c.radial_cell_size)
+            {
+                if (radial_cell_in_range(node_r))
+                {
+                    sink(1, node_r, cell_z, k,
+                         weight * amrex::Real(4.0) * c.inverse_dr);
+                }
+                return;
+            }
+            if (radial_cell_in_range(node_r) && radial_cell_in_range(node_r - 1))
+            {
+                const amrex::Real radius_high =
+                    radius + amrex::Real(0.5) * c.radial_cell_size;
+                const amrex::Real radius_low =
+                    radius - amrex::Real(0.5) * c.radial_cell_size;
+                sink(1, node_r, cell_z, k,
+                     weight * c.inverse_dr * radius_high / radius);
+                sink(1, node_r - 1, cell_z, k,
+                     -weight * c.inverse_dr * radius_low / radius);
+            }
+        };
+        // E_r -= eta_H lap J_r on the (r-cell, z-node) face (radial part
+        // of the m = 0 cylindrical vector Laplacian carries -1/r^2).
+        const auto emit_face_radial_hyper =
+            [&] (const int cell_r, const int node_z, const amrex::Real multiplier)
+        {
+            if (!c.axial_periodic &&
+                (node_z == c.axial_face_low || node_z == c.axial_face_high))
+            {
+                return;
+            }
+            const amrex::Real weight = -multiplier * a.eta_h[0](cell_r, node_z, k);
+            const amrex::Real radius =
+                c.radial_lo + (static_cast<amrex::Real>(cell_r) + amrex::Real(0.5)) *
+                                  c.radial_cell_size;
+            const amrex::Real radial_high =
+                (radius + amrex::Real(0.5) * c.radial_cell_size) * inverse_dr2 / radius;
+            const amrex::Real radial_low =
+                (radius - amrex::Real(0.5) * c.radial_cell_size) * inverse_dr2 / radius;
+            emit_current_radial(cell_r + 1, node_z, weight * radial_high);
+            emit_current_radial(cell_r - 1, node_z, weight * radial_low);
+            emit_current_radial(cell_r, node_z + 1, weight * inverse_dz2);
+            emit_current_radial(cell_r, node_z - 1, weight * inverse_dz2);
+            emit_current_radial(cell_r, node_z,
+                                weight * (-radial_high - radial_low -
+                                          amrex::Real(2.0) * inverse_dz2 -
+                                          amrex::Real(1.0) / (radius * radius)));
+        };
+        // E_z -= eta_H lap J_z on the (r-node, z-cell) face (scalar-like
+        // radial part, no -1/r^2; the node is interior here, and the
+        // residual's axis form enters through the J_z(axis) neighbor).
+        const auto emit_face_axial_hyper =
+            [&] (const int node_r, const int cell_z, const amrex::Real multiplier)
+        {
+            if (node_r == c.radial_face_low || node_r == c.radial_face_high)
+            {
+                return;
+            }
+            const amrex::Real weight = -multiplier * a.eta_h[2](node_r, cell_z, k);
+            const amrex::Real radius =
+                c.radial_lo + static_cast<amrex::Real>(node_r) * c.radial_cell_size;
+            const amrex::Real radial_high =
+                (radius + amrex::Real(0.5) * c.radial_cell_size) * inverse_dr2 / radius;
+            const amrex::Real radial_low =
+                (radius - amrex::Real(0.5) * c.radial_cell_size) * inverse_dr2 / radius;
+            emit_current_axial(node_r + 1, cell_z, weight * radial_high);
+            emit_current_axial(node_r - 1, cell_z, weight * radial_low);
+            emit_current_axial(node_r, cell_z + 1, weight * inverse_dz2);
+            emit_current_axial(node_r, cell_z - 1, weight * inverse_dz2);
+            emit_current_axial(node_r, cell_z,
+                               weight * (-radial_high - radial_low -
+                                         amrex::Real(2.0) * inverse_dz2));
+        };
         emit_face_radial_electric(i, j + 1, c.scale * c.inverse_dz);
         emit_face_radial_electric(i, j, -c.scale * c.inverse_dz);
         emit_face_axial_electric(i + 1, j, -c.scale * c.inverse_dr);
         emit_face_axial_electric(i, j, c.scale * c.inverse_dr);
+        if (c.include_hyper)
+        {
+            emit_face_radial_hyper(i, j + 1, c.scale * c.inverse_dz);
+            emit_face_radial_hyper(i, j, -c.scale * c.inverse_dz);
+            emit_face_axial_hyper(i + 1, j, -c.scale * c.inverse_dr);
+            emit_face_axial_hyper(i, j, c.scale * c.inverse_dr);
+        }
     }
     else
     {
@@ -228,6 +447,13 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
                               c.scale * c.inverse_dr * radius_node_high / radius_center);
         emit_corner_azimuthal(i, j,
                               -c.scale * c.inverse_dr * radius_node_low / radius_center);
+        if (c.include_hyper)
+        {
+            emit_corner_hyper(i + 1, j,
+                              c.scale * c.inverse_dr * radius_node_high / radius_center);
+            emit_corner_hyper(i, j,
+                              -c.scale * c.inverse_dr * radius_node_low / radius_center);
+        }
     }
 #else
     amrex::ignore_unused(c, a, a_component, i, j, k, sink);

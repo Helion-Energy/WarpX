@@ -1,0 +1,10 @@
+# base input parameters
+FILE = inputs_test_1d_theta_implicit_mhd_vacuum_resistive_pc
+
+# Banded twin of the preconditioned calibrated vacuum-resistive decay: the
+# resistive block is inverted by the block-banded LU along z (the
+# Chacon direct preconditioner reproduced on the WarpX staggering;
+# the periodic z is eliminated in folded ring order). Physics assertions
+# and the GMRES margin against the unpreconditioned baseline are the
+# Chebyshev twin's, unchanged.
+pc_mhd_block.resistive_solver = banded

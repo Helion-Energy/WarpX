@@ -1,0 +1,15 @@
+# base input parameters
+FILE = inputs_test_rz_theta_implicit_mhd_hyper_resistive
+
+# Preconditioned banded twin of the stiff RZ hyper-resistive diffusion:
+# the pc_mhd_block resistive block carries the frozen density-keyed eta_H
+# chain (all three m = 0 cylindrical stencils, including the axis
+# regularizations), inverted by the block-banded LU at bandwidth 2. The
+# structural physics assertions are the baseline's, unchanged, the final
+# fields must match the baseline run to solver tolerance, the cumulative
+# GMRES count must fall strictly below the baseline's, and every active
+# update roundoff-validates the assembled eta_H rows against the
+# matrix-free operator (in-run abort on mismatch).
+jacobian.pc_type = pc_mhd_block
+pc_mhd_block.resistive_solver = banded
+pc_mhd_block.resistive_validate_assembly = 1

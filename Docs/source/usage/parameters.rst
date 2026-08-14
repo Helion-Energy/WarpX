@@ -537,6 +537,26 @@ Overall simulation parameters
                sweeps of the automatic Chebyshev count. Builds with the
                cuDSS backend default to ``direct``; all other builds
                default to the portable ``chebyshev`` iteration.
+               ``pc_mhd_block.resistive_solver = banded`` instead factors
+               the same frozen operator as a block-banded LU along z
+               (blocks dense over the components and, in RZ, the full
+               radial line; bandwidth 1, or 2 with the hyper-resistive
+               chain, doubled by the folded ring ordering that treats a
+               periodic z exactly), with the factorization and sweeps
+               resident on the device and no external dependency. It is
+               exact up to the selectable
+               ``pc_mhd_block.banded_precision`` and is currently
+               restricted to single-rank runs.
+
+               When the Ohm law carries
+               ``hybrid_pic_model.plasma_hyper_resistivity``, the frozen
+               chain :math:`-\theta_r \Delta t\, \nabla\times(\eta_H\,
+               \nabla^2(\nabla\times\,\cdot\,))/\mu_0` joins the block
+               operator through the same stencil emission (with
+               :math:`\eta_H` frozen at the residual's interpolated
+               arguments), and the activation gate and Chebyshev interval
+               gain the corresponding :math:`k_\text{max}^4`-scale
+               bounds.
 
             Boundaries the recast residual manages itself are mapped per
             component to preconditioner-only linear-operator types matching
@@ -626,6 +646,25 @@ Overall simulation parameters
               backend is available (requires a CUDA build configured
               with ``-DWarpX_CUDSS=ON``; explicitly requesting it on
               other builds aborts with a descriptive message).
+              ``banded`` factorizes the frozen operator as a block-banded
+              LU along z on the device (portable on CPU and CUDA/HIP
+              builds, no external dependency; single-rank runs only;
+              periodic z is treated exactly through a folded ring
+              ordering at twice the bandwidth).
+            - ``pc_mhd_block.banded_precision`` (``string``, default:
+              ``double``): hlld only; storage precision of the banded
+              factorization and sweeps. ``double`` matches the
+              exact-inverse behavior of ``direct``; ``single`` buys the
+              large FP32/FP64 throughput ratio of workstation GPUs but is
+              only safe at mild stiffness (the unpivoted elimination at
+              production condition numbers exhausts FP32 headroom).
+            - ``pc_mhd_block.banded_refreeze`` (``string``, default:
+              ``step``): hlld only; ``step`` factors the banded operator
+              once per time step and reuses the factorization across the
+              step-internal Newton iterations (the standard
+              frozen-coefficient preconditioner lag; the factorization
+              dominates the banded cost), ``newton`` refactors at every
+              preconditioner update.
             - ``pc_mhd_block.resistive_validate_assembly`` (``bool``,
               default: false): hlld only; at every active preconditioner
               update, assemble the direct solver's sparse rows and check

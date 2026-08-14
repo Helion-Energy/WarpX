@@ -1,0 +1,132 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Stiff density-keyed hyper-resistive diffusion in RZ (hlld path, frozen
+# ions): the same plasma-column-with-halo geometry as the vacuum-resistive
+# test, but with eta = 0 and a density-keyed eta_H, so the ONLY dynamics
+# is E = -eta_H laplacian(J) through the m = 0 cylindrical stencils
+# (corner E_theta from J_theta, z-face E_r from J_r, r-face E_z from J_z
+# with the axis regularization). The z modulation of the density bends
+# the axisymmetric Bz(r) decay into Br, and the time step is chosen so
+# the grid-scale hyper-resistive number (eta_H,max/mu0) dt / dr^4 = 100.
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+my_constants.Te = 1.0
+my_constants.Pe = n0 * Te * q_e
+my_constants.B0 = 1.0e-3
+my_constants.dB = 1.0e-4
+my_constants.nr = 16
+my_constants.nz = 32
+my_constants.Lr = 0.1
+my_constants.Lz = 0.4
+my_constants.kz = 2*pi/Lz
+my_constants.r0 = 0.05
+my_constants.halo = 0.25
+my_constants.zmod = 0.3
+# The Ohm guard sits BELOW the halo minimum, so the floored charge
+# density the eta_H parser sees keeps the full r and z structure.
+my_constants.n_floor_ohm = 1.0e17
+my_constants.D4_vac = 1.0
+# Stiffest cell: the halo density minimum n_min = n0*halo*(1-zmod).
+my_constants.etaH_max = mu0 * D4_vac * (n0/(n0*halo*(1-zmod)))^2
+my_constants.dr = Lr/nr
+# Grid-scale hyper-resistive number z = (etaH_max/mu0) dt / dr^4, kept
+# CI-affordable: the unpreconditioned baseline GMRES cost grows steeply
+# with the hyper number (z = 500 already maxes out gmres.max_iterations
+# on every Newton iteration).
+my_constants.stiffness = 100.0
+my_constants.dt = stiffness * dr^4 * mu0 / etaH_max
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 2
+amr.n_cell = nr nz
+amr.max_grid_size = 16
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 0.0
+geometry.prob_hi = Lr Lz
+boundary.field_lo = none periodic
+boundary.field_hi = pec periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-14
+newton.relative_tolerance = 1.0e-11
+newton.max_iterations = 12
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-11
+gmres.max_iterations = 1000
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = 5.0/3.0
+hybrid_pic_model.n_floor = n_floor_ohm
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+# Density-keyed hyper-resistivity (rho is the floored charge density).
+hybrid_pic_model.plasma_hyper_resistivity(rho,B) = "mu0*D4_vac*(n0*q_e/rho)^2"
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = 5.0/3.0
+implicit_mhd.gamma_i = 5.0/3.0
+implicit_mhd.reference_ion_pressure = 0.0
+# Plasma column with a halo and a z modulation (so the density-keyed
+# eta_H gradient excites Br through d_z E_theta).
+implicit_mhd.mass_density(x,y,z) = rho0*(halo + (1-halo)*exp(-(x/r0)^4))*(1 + zmod*cos(kz*z))
+implicit_mhd.electron_pressure(x,y,z) = Pe
+implicit_mhd.evolve_ion_fluid = false
+implicit_mhd.fluid_flux = hlld
+implicit_mhd.include_joule_heating = false
+implicit_mhd.resistive_theta = 1.0
+
+# Radial Bz profile: J_theta = -dBz/dr diffuses hyper-resistively
+# (through the corner E_theta), and the z-varying eta_H bends the decay
+# into Br.
+warpx.B_ext_grid_init_style = parse_b_ext_grid_function
+warpx.Bx_external_grid_function(x,y,z) = 0.0
+warpx.By_external_grid_function(x,y,z) = 0.0
+warpx.Bz_external_grid_function(x,y,z) = B0 + dB*cos(0.5*pi*x/Lr)
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 2
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Br Bt Bz jr jt jz implicit_mhd_mass_density \
+                       implicit_mhd_momentum_density implicit_mhd_electron_energy
+diag1.write_species = 0

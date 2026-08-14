@@ -1,0 +1,11 @@
+# base input parameters
+FILE = inputs_test_rz_theta_implicit_mhd_vacuum_resistive_pc
+
+# Banded twin of the preconditioned stiff RZ vacuum-resistive test: the
+# resistive block is inverted by the block-banded LU along z (blocks dense
+# over the components and the radial line, so the axis/wall/halo radial
+# coupling is exact; the periodic z is eliminated in folded ring order).
+# Runs on one rank (the banded solver asserts single-rank for now); the
+# analysis compares the fields against the two-rank unpreconditioned
+# baseline at solver tolerance and requires the same 10x GMRES margin.
+pc_mhd_block.resistive_solver = banded

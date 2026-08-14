@@ -62,6 +62,8 @@ newton.verbose = true
 newton.absolute_tolerance = 1.0e-12
 newton.relative_tolerance = 1.0e-10
 newton.max_iterations = 20
+# Read by the preconditioned twin's GMRES-margin comparison.
+newton.diagnostic_file = diags/newton.txt
 
 gmres.verbose_int = 0
 gmres.relative_tolerance = 1.0e-10

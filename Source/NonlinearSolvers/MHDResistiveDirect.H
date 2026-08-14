@@ -102,7 +102,9 @@ class ResistiveDirectSolver
          */
         void Define (const amrex::Geometry& a_geometry,
                      const amrex::Array<const amrex::MultiFab*, 3>& a_faces,
-                     const amrex::Array<const amrex::MultiFab*, 3>& a_eta_edge);
+                     const amrex::Array<const amrex::MultiFab*, 3>& a_eta_edge,
+                     const amrex::Array<const amrex::MultiFab*, 3>& a_eta_h_edge = {
+                         nullptr, nullptr, nullptr});
 
         [[nodiscard]] bool IsDefined () const { return m_is_defined; }
 
@@ -113,7 +115,9 @@ class ResistiveDirectSolver
          * global matrix.
          */
         void AssembleValues (const ResistiveStencilConstants& a_constants,
-                             const amrex::Array<const amrex::MultiFab*, 3>& a_eta_edge);
+                             const amrex::Array<const amrex::MultiFab*, 3>& a_eta_edge,
+                             const amrex::Array<const amrex::MultiFab*, 3>& a_eta_h_edge = {
+                                 nullptr, nullptr, nullptr});
 
         /** \brief Numeric factorization of the assembled matrix (cuDSS). */
         void Factorize ();
@@ -224,8 +228,10 @@ class ResistiveDirectSolver
         // eta_field staggerings, and face-component transfer buffers.
         amrex::Array<std::unique_ptr<amrex::iMultiFab>, 3> m_owner_host;
         amrex::Array<std::unique_ptr<amrex::MultiFab>, 3> m_eta_host;
+        amrex::Array<std::unique_ptr<amrex::MultiFab>, 3> m_eta_h_host;
         amrex::Array<std::unique_ptr<amrex::MultiFab>, 3> m_face_host;
         amrex::Array<const amrex::MultiFab*, 3> m_eta_source = {nullptr, nullptr, nullptr};
+        amrex::Array<const amrex::MultiFab*, 3> m_eta_h_source = {nullptr, nullptr, nullptr};
 
         // Locally owned rows in fixed emission order.
         amrex::Long m_local_owned_rows = 0;
@@ -294,7 +300,8 @@ ResistiveDirectSolver::~ResistiveDirectSolver ()
 inline void
 ResistiveDirectSolver::Define (const amrex::Geometry& a_geometry,
                                const amrex::Array<const amrex::MultiFab*, 3>& a_faces,
-                               const amrex::Array<const amrex::MultiFab*, 3>& a_eta_edge)
+                               const amrex::Array<const amrex::MultiFab*, 3>& a_eta_edge,
+                               const amrex::Array<const amrex::MultiFab*, 3>& a_eta_h_edge)
 {
     BL_PROFILE("ResistiveDirect::Define()");
 
@@ -364,6 +371,14 @@ ResistiveDirectSolver::Define (const amrex::Geometry& a_geometry,
         m_eta_host[component] = std::make_unique<amrex::MultiFab>(
             eta.boxArray(), eta.DistributionMap(), 1, eta.nGrowVect(),
             amrex::MFInfo().SetArena(amrex::The_Pinned_Arena()));
+        if (a_eta_h_edge[component] != nullptr)
+        {
+            m_eta_h_source[component] = a_eta_h_edge[component];
+            const amrex::MultiFab& eta_h = *a_eta_h_edge[component];
+            m_eta_h_host[component] = std::make_unique<amrex::MultiFab>(
+                eta_h.boxArray(), eta_h.DistributionMap(), 1, eta_h.nGrowVect(),
+                amrex::MFInfo().SetArena(amrex::The_Pinned_Arena()));
+        }
     }
 
     m_rhs.resize(m_num_rows);
@@ -409,6 +424,11 @@ ResistiveDirectSolver::EmitLocalRows (const ResistiveStencilConstants& a_constan
                 {
                     arrays.eta[eta_component] =
                         m_eta_host[eta_component]->const_array(mfi);
+                }
+                if (m_eta_h_host[eta_component])
+                {
+                    arrays.eta_h[eta_component] =
+                        m_eta_h_host[eta_component]->const_array(mfi);
                 }
             }
             amrex::LoopOnCpu(
@@ -593,12 +613,19 @@ ResistiveDirectSolver::FoldGlobalValues ()
 inline void
 ResistiveDirectSolver::AssembleValues (
     const ResistiveStencilConstants& a_constants,
-    const amrex::Array<const amrex::MultiFab*, 3>& a_eta_edge)
+    const amrex::Array<const amrex::MultiFab*, 3>& a_eta_edge,
+    const amrex::Array<const amrex::MultiFab*, 3>& a_eta_h_edge)
 {
     BL_PROFILE("ResistiveDirect::AssembleValues()");
 
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         IsDefined(), "ResistiveDirectSolver::AssembleValues() called before Define()");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !a_constants.include_hyper ||
+            (m_eta_h_host[0] != nullptr || m_eta_h_host[1] != nullptr ||
+             m_eta_h_host[2] != nullptr),
+        "ResistiveDirectSolver hyper-resistive assembly requires the eta_H "
+        "staggerings at Define()");
     for (int component = 0; component < 3; ++component)
     {
         if (!m_component_map[component].active)
@@ -609,6 +636,13 @@ ResistiveDirectSolver::AssembleValues (
             a_eta_edge[component] == m_eta_source[component],
             "ResistiveDirectSolver eta_field staggerings changed after Define()");
         amrex::dtoh_memcpy(*m_eta_host[component], *a_eta_edge[component]);
+        if (m_eta_h_host[component])
+        {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                a_eta_h_edge[component] == m_eta_h_source[component],
+                "ResistiveDirectSolver eta_H staggerings changed after Define()");
+            amrex::dtoh_memcpy(*m_eta_h_host[component], *a_eta_h_edge[component]);
+        }
     }
     amrex::Gpu::streamSynchronize();
 
