@@ -252,11 +252,25 @@ ExternalVectorPotential::CalculateExternalCurlA (std::string& coil_name)
         warpx.m_fields.get_mr_levels_alldirs(curlAext_field, warpx.finestLevel());
 
     for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+        // Compute the curl on the boxes grown into the domain ghosts as
+        // well: A carries trusted ghost values (the analytic parser fill
+        // and the file reader both cover the full grown box), so the ghost
+        // curls are exact. FillBoundary below cannot reach non-periodic
+        // domain ghosts -- without the growth, e.g. the RZ r_max ring of
+        // the external B field would keep its allocation value (zero) and
+        // inject a spurious drive-scaled field jump into every wall
+        // stencil that reads it.
+        amrex::IntVect ngrow = A_ext[lev][0]->nGrowVect();
+        for (int idir = 0; idir < 3; ++idir) {
+            ngrow = amrex::min(ngrow, A_ext[lev][idir]->nGrowVect());
+            ngrow = amrex::min(ngrow, curlA_ext[lev][idir]->nGrowVect());
+        }
         warpx.get_pointer_fdtd_solver_fp(lev)->ComputeCurlA(
             curlA_ext[lev],
             A_ext[lev],
             warpx.GetEBUpdateBFlag()[lev],
-            lev);
+            lev,
+            ngrow);
 
         for (int idir = 0; idir < 3; ++idir) {
             warpx.m_fields.get(curlAext_field, Direction{idir}, lev)->
@@ -271,8 +285,43 @@ ExternalVectorPotential::AddExternalFieldFromVectorPotential (
     ablastr::fields::VectorField const& dstField,
     amrex::Real scale_factor,
     ablastr::fields::VectorField const& srcField,
-    std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update)
+    std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update,
+    int lev)
 {
+    auto& warpx = WarpX::GetInstance();
+
+    // Accumulate over the boxes grown into the domain ghosts as well: the
+    // source ghosts are trusted there (the analytic A fill and its exact
+    // ghost curls), which is what fills e.g. the RZ r_max ring of the
+    // external E/B fields that wall-adjacent stencils read; FillBoundary
+    // cannot reach non-periodic domain ghosts. No growth below the axis
+    // in curvilinear geometries (no trusted parity data there), and none
+    // when embedded boundaries are enabled (the eb_update flags are not
+    // guaranteed to carry matching ghost data). There is no
+    // double-counting of the += on shared box faces: MFIter::tilebox(nodal,
+    // ngrow) grows only the tiles touching the valid-box edge, ghost
+    // regions are per-FAB storage, and the nodal points shared between
+    // neighboring FABs receive the same contribution in each FAB's own
+    // array.
+    amrex::IntVect ngrow = dstField[0]->nGrowVect();
+    for (int idir = 0; idir < 3; ++idir) {
+        ngrow = amrex::min(ngrow, dstField[idir]->nGrowVect());
+        ngrow = amrex::min(ngrow, srcField[idir]->nGrowVect());
+    }
+    if (EB::enabled()) {
+        ngrow = amrex::IntVect(0);
+    }
+    amrex::Box grow_region = warpx.Geom(lev).Domain();
+    grow_region.grow(ngrow);
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+    if (warpx.Geom(lev).ProbLo(0) == 0.0_rt) {
+        grow_region.setSmall(0, warpx.Geom(lev).Domain().smallEnd(0));
+    }
+#endif
+    const amrex::Box allowed_x = amrex::convert(grow_region, dstField[0]->ixType());
+    const amrex::Box allowed_y = amrex::convert(grow_region, dstField[1]->ixType());
+    const amrex::Box allowed_z = amrex::convert(grow_region, dstField[2]->ixType());
+
     // Loop through the grids, and over the tiles within each grid
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -296,10 +345,11 @@ ExternalVectorPotential::AddExternalFieldFromVectorPotential (
             update_Fz_arr = eb_update[2]->array(mfi);
         }
 
-        // Extract tileboxes for which to loop
-        Box const& tbx  = mfi.tilebox(dstField[0]->ixType().toIntVect());
-        Box const& tby  = mfi.tilebox(dstField[1]->ixType().toIntVect());
-        Box const& tbz  = mfi.tilebox(dstField[2]->ixType().toIntVect());
+        // Extract tileboxes for which to loop (grown into the domain
+        // ghosts where allowed)
+        Box const tbx = mfi.tilebox(dstField[0]->ixType().toIntVect(), ngrow) & allowed_x;
+        Box const tby = mfi.tilebox(dstField[1]->ixType().toIntVect(), ngrow) & allowed_y;
+        Box const tbz = mfi.tilebox(dstField[2]->ixType().toIntVect(), ngrow) & allowed_z;
 
         // Loop over the cells and update the fields
         amrex::ParallelFor(tbx, tby, tbz,
@@ -366,8 +416,8 @@ ExternalVectorPotential::UpdateHybridExternalFields (const amrex::Real t, const 
             warpx.m_fields.get_mr_levels_alldirs(curlAext_field, warpx.finestLevel());
 
         for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
-            AddExternalFieldFromVectorPotential(E_ext[lev], scale_factor_E, A_ext[lev], warpx.GetEBUpdateEFlag()[lev]);
-            AddExternalFieldFromVectorPotential(B_ext[lev], scale_factor_B, curlA_ext[lev], warpx.GetEBUpdateBFlag()[lev]);
+            AddExternalFieldFromVectorPotential(E_ext[lev], scale_factor_E, A_ext[lev], warpx.GetEBUpdateEFlag()[lev], lev);
+            AddExternalFieldFromVectorPotential(B_ext[lev], scale_factor_B, curlA_ext[lev], warpx.GetEBUpdateBFlag()[lev], lev);
 
             for (int idir = 0; idir < 3; ++idir) {
                 E_ext[lev][Direction{idir}]->FillBoundary(warpx.Geom(lev).periodicity());

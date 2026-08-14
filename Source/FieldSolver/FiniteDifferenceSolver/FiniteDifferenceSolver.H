@@ -190,12 +190,20 @@ class FiniteDifferenceSolver
           * \param[in] Afield   vector of magnetic field MultiFabs at a given level
           * \param[in] eb_update_B  array indicating where the field should be updated with respect to the position of the embedded boundary
           * \param[in] lev  level number for the calculation
+          * \param[in] ngrow  growth of the evaluation boxes into the domain
+          *                   ghosts (per direction). Requires A to carry
+          *                   trusted ghost values over the grown region plus
+          *                   one upward cell (e.g. the analytic parser fill);
+          *                   growth below the axis is suppressed in
+          *                   curvilinear geometries and the request is
+          *                   ignored when embedded boundaries are enabled.
           */
         void ComputeCurlA (
             ablastr::fields::VectorField& Bfield,
             ablastr::fields::VectorField const& Afield,
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_B,
-            int lev );
+            int lev,
+            const amrex::IntVect& ngrow = amrex::IntVect(0) );
 
         /**
           * \brief Calculation of the gradient of the given scalar field.
@@ -328,7 +336,8 @@ class FiniteDifferenceSolver
             ablastr::fields::VectorField& Bfield,
             ablastr::fields::VectorField const& Afield,
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_B,
-            int lev
+            int lev,
+            const amrex::IntVect& ngrow
         );
 
         template<typename T_Algo>
@@ -409,7 +418,8 @@ class FiniteDifferenceSolver
             ablastr::fields::VectorField& Bfield,
             ablastr::fields::VectorField const& Afield,
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_B,
-            int lev
+            int lev,
+            const amrex::IntVect& ngrow
         );
 
         template<typename T_Algo>
@@ -545,7 +555,8 @@ class FiniteDifferenceSolver
             ablastr::fields::VectorField & Bfield,
             ablastr::fields::VectorField const& Afield,
             std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update_B,
-            int lev
+            int lev,
+            const amrex::IntVect& ngrow
         );
 
         template<typename T_Algo>

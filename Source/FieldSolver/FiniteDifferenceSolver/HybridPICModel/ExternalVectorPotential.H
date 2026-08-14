@@ -93,7 +93,8 @@ public:
         ablastr::fields::VectorField const& dstField,
         amrex::Real scale_factor,
         ablastr::fields::VectorField const& srcField,
-        std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update);
+        std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update,
+        int lev);
 
     void UpdateHybridExternalFields (
         amrex::Real t,
