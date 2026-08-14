@@ -32,6 +32,7 @@
 
 #include <AMReX_Random.H>
 
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <string>
@@ -5661,13 +5662,19 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                         hi = hi && (b_arr(p[0],p[1],p[2],BNE::b_open) > 0.5_rt);
                         lo = lo && (b_arr(m[0],m[1],m[2],BNE::b_open) > 0.5_rt);
                         if (!hi && !lo) { continue; }
+                        // harmonic face density over local capacity,
+                        // mirroring face_flux's kfac: <= 2 by construction
                         if (hi) {
-                            nrat = amrex::max(nrat, 0.5_rt*(1.0_rt +
-                                b_arr(p[0],p[1],p[2],BNE::b_ne)/ne0));
+                            amrex::Real const nn =
+                                b_arr(p[0],p[1],p[2],BNE::b_ne);
+                            nrat = amrex::max(nrat,
+                                2.0_rt*nn/(ne0 + nn));
                         }
                         if (lo) {
-                            nrat = amrex::max(nrat, 0.5_rt*(1.0_rt +
-                                b_arr(m[0],m[1],m[2],BNE::b_ne)/ne0));
+                            amrex::Real const nn =
+                                b_arr(m[0],m[1],m[2],BNE::b_ne);
+                            nrat = amrex::max(nrat,
+                                2.0_rt*nn/(ne0 + nn));
                         }
                         for (int h = 0; h < AMREX_SPACEDIM; ++h) {
                             int const gg = amrex::min(g, h);
@@ -5794,9 +5801,19 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                         b_arr(m1[0],m1[1],m1[2],BNE::b_open) <= 0.5_rt) {
                         return 0.0_rt;   // closed floor faces
                     }
-                    amrex::Real const ne_f = 0.5_rt*(
-                        b_arr(m0[0],m0[1],m0[2],BNE::b_ne) +
-                        b_arr(m1[0],m1[1],m1[2],BNE::b_ne));
+                    // Harmonic (series-conductance) face density: with the
+                    // n-proportional kappa cap the face conductance then
+                    // scales with the SMALL side across a density cliff,
+                    // capping the tail-node rate at 2 chi/dx^2 -- the
+                    // arithmetic mean carries the dense side's kappa into
+                    // the tiny heat capacity (rate ~ nrat chi/dx^2, an
+                    // explicit-stability wall at deposit-tail nodes).
+                    amrex::Real const ne_0 =
+                        b_arr(m0[0],m0[1],m0[2],BNE::b_ne);
+                    amrex::Real const ne_1 =
+                        b_arr(m1[0],m1[1],m1[2],BNE::b_ne);
+                    amrex::Real const ne_f = (ne_0 + ne_1 > 0.0_rt)
+                        ? 2.0_rt*ne_0*ne_1/(ne_0 + ne_1) : 0.0_rt;
                     amrex::Real const kfac = 1.5_rt*kb*ne_f;
                     int const sgg = g*AMREX_SPACEDIM - g*(g-1)/2;
 
@@ -5995,7 +6012,7 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
         }
         amrex::IntVect const loc = srate.maxIndex(0);
         amrex::Real ne_loc = 0.0_rt, te_loc = 0.0_rt, op_loc = 0.0_rt,
-                    xi0 = 0.0_rt;
+                    xi0 = 0.0_rt, nrat_loc = 0.0_rt;
         for (MFIter mfi(srate); mfi.isValid(); ++mfi) {
             if (mfi.validbox().contains(loc)) {
                 auto const & b_arr = bne.const_array(mfi);
@@ -6005,17 +6022,35 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                 te_loc = t_arr(loc[0], loc[1], loc[2]);
                 op_loc = b_arr(loc[0], loc[1], loc[2], BNE::b_open);
                 xi0 = x_arr(loc[0], loc[1], loc[2], 0);
+                for (int g = 0; g < AMREX_SPACEDIM; ++g) {
+                    for (int sgn = -1; sgn <= 1; sgn += 2) {
+                        int q[3] = {loc[0], loc[1], loc[2]};
+                        q[g] += sgn;
+                        if (!is_per[g] &&
+                            (q[g] < dom_lo[g] || q[g] > dom_hi[g])) {
+                            continue;
+                        }
+                        if (b_arr(q[0],q[1],q[2],BNE::b_open) > 0.5_rt) {
+                            amrex::Real const nn =
+                                b_arr(q[0],q[1],q[2],BNE::b_ne);
+                            nrat_loc = amrex::max(nrat_loc,
+                                2.0_rt*nn/(ne_loc + nn));
+                        }
+                    }
+                }
             }
         }
         amrex::ParallelDescriptor::ReduceRealSum(ne_loc);
         amrex::ParallelDescriptor::ReduceRealSum(te_loc);
         amrex::ParallelDescriptor::ReduceRealSum(op_loc);
         amrex::ParallelDescriptor::ReduceRealSum(xi0);
+        amrex::ParallelDescriptor::ReduceRealSum(nrat_loc);
         amrex::AllPrint() << "[qdsmc-bound-debug] s_max=" << s_max
             << " max|xi|=" << max_xi
             << " argmax=(" << loc[0] << "," << loc[1] << "," << loc[2]
             << ") ne=" << ne_loc << " Te[K]=" << te_loc
-            << " open=" << op_loc << " xi00=" << xi0 << "\n";
+            << " open=" << op_loc << " xi00=" << xi0
+            << " nrat=" << nrat_loc << "\n";
     };
     auto cap = [&] () -> amrex::Real
     {
@@ -6139,7 +6174,11 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
             + " of the conduction substep ("
             + std::to_string(st.n_accepted) + "/"
             + std::to_string(st.n_attempts)
-            + " accepted) -- raise qdsmc_conduction_fd_max_subcycles or "
+            + " accepted; dt first/min/max/last = "
+            + [&] { char b[96]; std::snprintf(b, sizeof(b),
+                    "%.3e/%.3e/%.3e/%.3e", st.dt_first, st.dt_min,
+                    st.dt_max, st.dt_last); return std::string(b); }()
+            + ") -- raise qdsmc_conduction_fd_max_subcycles or "
             "loosen qdsmc_conduction_fd_rtol");
     }
 

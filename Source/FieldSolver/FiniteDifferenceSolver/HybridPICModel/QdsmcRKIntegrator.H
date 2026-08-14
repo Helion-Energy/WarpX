@@ -25,6 +25,12 @@ struct QdsmcRKStats
     int n_accepted = 0;
     amrex::Real t_done = 0.0;
     amrex::Real dt_last = 0.0;
+    // dt trajectory (accepted steps): discriminates a cap/physics-bound
+    // crawl (flat at the cap) from controller decay or a frozen-growth
+    // defect (see the attempts-budget warnings that print these).
+    amrex::Real dt_first = 0.0;
+    amrex::Real dt_min = 0.0;
+    amrex::Real dt_max = 0.0;
 };
 
 /** Adaptive explicit Runge--Kutta stepper over a single-component
@@ -128,6 +134,12 @@ public:
                 st.t_done += dt;
                 ++st.n_accepted;
                 st.dt_last = dt;
+                if (st.n_accepted == 1) {
+                    st.dt_first = dt; st.dt_min = dt; st.dt_max = dt;
+                } else {
+                    st.dt_min = amrex::min(st.dt_min, dt);
+                    st.dt_max = amrex::max(st.dt_max, dt);
+                }
                 amrex::MultiFab::Copy(y0, y, 0, 0, nc, 0);
                 dt *= amrex::min(m_max_growth, fac);
             } else {
