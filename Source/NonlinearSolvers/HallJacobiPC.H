@@ -333,12 +333,33 @@ void HallJacobiPC<T,Ops>::Update (const T& a_U)
 
     for (int n = 0; n < m_num_amr_levels; n++) {
 
-        // Grid-scale curl-curl surrogate diagonal kg2 = sum_d 4/dx_d^2
-        // (uniform-cell approximation; RZ axis metric correction deferred).
+        // Grid-scale curl-curl surrogate diagonal, PER E COMPONENT:
+        // (curl curl E)_mu carries no d^2/dmu^2 action on E_mu, so the
+        // spectral edge for component mu excludes its own direction,
+        // kg2_mu = sum_{grid dirs d != dir(mu)} 4/dx_d^2. A uniform sum
+        // over-estimates beta on the in-plane components (2x at dr = dz)
+        // and over-rotates their rows -- measured as a GMRES regression
+        // on the RZ EM-modes ladder (harmless in 1D, where the transverse
+        // components' edge happens to equal the uniform sum).
+        // Component -> grid-direction map: 3D d->d; 2D/RZ comp0->0,
+        // comp1->none (out-of-plane), comp2->1; 1D comp0/1->none, comp2->0.
+        // (Uniform-cell approximation; RZ 1/r^2 theta-metric and axis-row
+        // corrections still deferred.)
         const auto dx = m_ops->GetGeometry(n).CellSizeArray();
-        RT kg2 = RT(0.0);
-        for (int d = 0; d < AMREX_SPACEDIM; d++) {
-            kg2 += RT(4.0)/(dx[d]*dx[d]);
+        GpuArray<RT,3> kg2_c;
+        for (int c = 0; c < 3; c++) {
+#if defined(WARPX_DIM_3D)
+            const int own = c;
+#elif (AMREX_SPACEDIM == 2)
+            const int own = (c == 0) ? 0 : ((c == 2) ? 1 : -1);
+#else
+            const int own = (c == 2) ? 0 : -1;
+#endif
+            kg2_c[c] = RT(0.0);
+            for (int d = 0; d < AMREX_SPACEDIM; d++) {
+                if (d == own) { continue; }
+                kg2_c[c] += RT(4.0)/(dx[d]*dx[d]);
+            }
         }
 
         const auto B_mfs = m_ops->GetBfieldThetaForPC(n);
@@ -368,6 +389,7 @@ void HallJacobiPC<T,Ops>::Update (const T& a_U)
 
         for (int dim = 0; dim < 3; dim++) {
 
+            const RT kg2 = kg2_c[dim];
             auto& c_mf = m_coefs[n][dim];
             const GpuArray<int,3> dst_stag = Stag(c_mf);
 
@@ -458,7 +480,8 @@ void HallJacobiPC<T,Ops>::Update (const T& a_U)
             amrex::Print() << "Updating "
                 << amrex::getEnumNameString(PreconditionerType::pc_hall_jacobi)
                 << ": level " << n << ", theta*dt = " << theta_dt
-                << ", kg2 = " << kg2
+                << ", kg2 per comp = " << kg2_c[0] << "/" << kg2_c[1]
+                << "/" << kg2_c[2]
                 << ", hall data " << (have_hall ? "present" : "absent") << "\n";
         }
     }
