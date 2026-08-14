@@ -282,12 +282,6 @@ void ExternalFieldReader::load_data (amrex::RealBox const& pbox)
 
     // Respect the component's openPMD in-cell position (staggering): file
     // lattice point i sits at gridGlobalOffset + (i + position)*gridSpacing.
-    // Files written at the reader's target staggering are then sampled
-    // exactly (the interpolation weights collapse to identity) instead of
-    // being resampled through a half-cell average whose per-component,
-    // axis-aligned smoothing imprints a fourfold (m=4) anisotropy on an
-    // axisymmetric input. Nodal files (position = 0, the previous implicit
-    // assumption) are unchanged.
     {
         const auto pos = FC.position<double>();
         constexpr auto ndim = static_cast<std::size_t>(AMREX_SPACEDIM);
