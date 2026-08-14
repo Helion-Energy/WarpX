@@ -330,6 +330,29 @@ def build_cases():
                     )
                 )
 
+    if "nimsteady" in SECTIONS:
+        # steady Sovinec form (paper Fig. 2 overlay), explicit-feasible
+        # at eps >= ~1e-3
+        for eps in (1.0e-2, 1.0e-3):
+            for n in (32, 64):
+                for order in (2, 4):
+                    cases.append(
+                        (
+                            "nimsteady",
+                            "qdsmc_nimrod_steady_test.py",
+                            f"nimss_fd{order}_N{n}_e{eps:.0e}",
+                            dict(ncell=n, eps=eps, fd_order=order),
+                        )
+                    )
+        cases.append(
+            (
+                "nimsteady",
+                "qdsmc_nimrod_steady_test.py",
+                "nimss_fd2_N64_e1e-03_isob",
+                dict(ncell=64, eps=1.0e-3, fd_order=2, iso_b=8.0e-7),
+            )
+        )
+
     if "a4" in SECTIONS:
         # m=4 conduction-anisotropy imprint (a4 star pattern): the FD
         # operator has no launch/deposit hop scale — expect a4 at the
@@ -558,6 +581,22 @@ def report_gfd2b():
         )
 
 
+def report_nimsteady():
+    print("\n## Steady Sovinec pollution (paper 1/T(0,0) overlay)\n")
+    print("| case | chi_eff/chi_perp | delta_chi/chi_par |")
+    print("|---|---|---|")
+    for tag in sorted(
+        t for t in os.listdir(OUT) if t.startswith("nimss") and t.endswith(".npz")
+    ):
+        d = load(tag[:-4])
+        if d is None:
+            continue
+        print(
+            f"| {tag[:-4]} | {float(d['chi_ratio']):.4f} "
+            f"| {float(d['delta_chi']):+.3e} |"
+        )
+
+
 def report_a4():
     print("\n## a4 conduction-anisotropy imprint (m=4 star pattern)\n")
     print("| case | a4 | r* | sum drift | note |")
@@ -604,6 +643,8 @@ def main():
         report_a4()
     if "gfd2b" in SECTIONS or "gfd2bhi" in SECTIONS:
         report_gfd2b()
+    if "nimsteady" in SECTIONS:
+        report_nimsteady()
 
 
 if __name__ == "__main__":
