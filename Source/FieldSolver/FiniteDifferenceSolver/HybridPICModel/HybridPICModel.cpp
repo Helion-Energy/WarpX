@@ -5453,6 +5453,24 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
             amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
                 amrex::Real const ne  = b_arr(i,j,k,BNE::b_ne);
+                // Closed (floored/covered) nodes carry a ZERO tensor: their
+                // faces carry no flux, so no consumer may ever see a value
+                // there -- and this is also the guard that keeps unfilled
+                // non-periodic domain ghosts (b_ne = 0 setVal default, T
+                // ghosts unspecified on integrator stage arrays) from
+                // minting inf/nan chi that the stability bound could read.
+                // With a constant-kappa parser over a floored region the
+                // old build produced chi = kappa/(1.5 n_floor kB) there
+                // (huge) and chi = kappa/0 = inf at unfilled ghosts, which
+                // pinned the Gershgorin cap to zero: the integrator then
+                // accepted its whole attempts budget in zero-length
+                // substeps and dropped the entire conduction step
+                // (measured on the RZ cylinder-compression EE deck;
+                // kappa ~ n parsers masked the same defect as 0/0 = nan).
+                if (ne <= 0.0_rt || b_arr(i,j,k,BNE::b_open) <= 0.5_rt) {
+                    for (int c = 0; c < NXI; ++c) { x_arr(i,j,k,c) = 0.0_rt; }
+                    return;
+                }
                 amrex::Real const TeK = amrex::max(T_arr(i,j,k), 0.0_rt);
                 amrex::Real const Te_eV = TeK * kb / qe;
                 amrex::Real const B2 = b_arr(i,j,k,BNE::b_B2);
@@ -5542,40 +5560,65 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                     amrex::Real const ne0 = b_arr(i,j,k,BNE::b_ne);
                     int const node[3] = {i, j, k};
 #ifdef WARPX_DIM_RZ
-                    // cylindrical row-sum amplification of the J-folded
-                    // radial fluxes: (r_face_lo + r_face_hi) dr/(2 Vr)
-                    // = 1 in the interior, 2 at the axis node
+                    // per-side cylindrical amplification of the J-folded
+                    // radial faces: r_face dr / Vr (interior sides sum to
+                    // the Cartesian 2; the axis hi face alone gives the
+                    // exact 4 chi/dr^2 axis diagonal). z faces carry no
+                    // metric factor, matching the divergence.
                     amrex::Real const r_i =
                         r_edge0 + amrex::Real(i - dom_lo[0])*dr_rz;
                     amrex::Real const Vr_i = (r_i > 0.0_rt)
                         ? r_i*dr_rz : dr_rz*dr_rz/8.0_rt;
-                    amrex::Real const fac_r =
-                        (amrex::max(r_i - 0.5_rt*dr_rz, 0.0_rt) +
-                         (r_i + 0.5_rt*dr_rz))*dr_rz/(2.0_rt*Vr_i);
+                    amrex::Real const fac_hi_r =
+                        (r_i + 0.5_rt*dr_rz)*dr_rz/Vr_i;
+                    amrex::Real const fac_lo_r =
+                        amrex::max(r_i - 0.5_rt*dr_rz, 0.0_rt)*dr_rz/Vr_i;
 #endif
+                    // The row mirrors the flux structure EXACTLY: faces
+                    // beyond a non-periodic wall do not exist, and faces
+                    // whose far node is closed carry zero flux -- neither
+                    // may contribute to the bound, and their xi (possibly
+                    // an unfilled domain ghost) is never read. Counting
+                    // them pinned the cap to zero on decks with large or
+                    // inf/nan chi at floored/ghost nodes (see build_xi).
                     amrex::Real nrat = 1.0_rt;
                     amrex::Real s = 0.0_rt;
                     for (int g = 0; g < AMREX_SPACEDIM; ++g) {
                         int p[3] = {i, j, k}, m[3] = {i, j, k};
                         p[g] = node[g] + 1; m[g] = node[g] - 1;
-                        nrat = amrex::max(nrat,
-                            0.5_rt*(1.0_rt + b_arr(p[0],p[1],p[2],BNE::b_ne)/ne0),
-                            0.5_rt*(1.0_rt + b_arr(m[0],m[1],m[2],BNE::b_ne)/ne0));
+                        bool hi = is_per[g] || (p[g] <= dom_hi[g]);
+                        bool lo = is_per[g] || (m[g] >= dom_lo[g]);
+                        hi = hi && (b_arr(p[0],p[1],p[2],BNE::b_open) > 0.5_rt);
+                        lo = lo && (b_arr(m[0],m[1],m[2],BNE::b_open) > 0.5_rt);
+                        if (!hi && !lo) { continue; }
+                        if (hi) {
+                            nrat = amrex::max(nrat, 0.5_rt*(1.0_rt +
+                                b_arr(p[0],p[1],p[2],BNE::b_ne)/ne0));
+                        }
+                        if (lo) {
+                            nrat = amrex::max(nrat, 0.5_rt*(1.0_rt +
+                                b_arr(m[0],m[1],m[2],BNE::b_ne)/ne0));
+                        }
                         for (int h = 0; h < AMREX_SPACEDIM; ++h) {
                             int const gg = amrex::min(g, h);
                             int const hh = amrex::max(g, h);
                             int const sidx =
                                 gg*AMREX_SPACEDIM - gg*(gg-1)/2 + (hh-gg);
-                            amrex::Real const xin = amrex::max(
-                                std::abs(x_arr(i,j,k,sidx)),
-                                std::abs(x_arr(p[0],p[1],p[2],sidx)),
-                                std::abs(x_arr(m[0],m[1],m[2],sidx)));
-                            amrex::Real term =
-                                2.0_rt*xin*dxi_g[g]*dxi_g[h];
+                            amrex::Real const xc =
+                                std::abs(x_arr(i,j,k,sidx));
+                            amrex::Real s_hi = hi ? amrex::max(xc,
+                                std::abs(x_arr(p[0],p[1],p[2],sidx)))
+                                : 0.0_rt;
+                            amrex::Real s_lo = lo ? amrex::max(xc,
+                                std::abs(x_arr(m[0],m[1],m[2],sidx)))
+                                : 0.0_rt;
 #ifdef WARPX_DIM_RZ
-                            if (g == 0 || h == 0) { term *= fac_r; }
+                            if (g == 0) {
+                                s_hi *= fac_hi_r;
+                                s_lo *= fac_lo_r;
+                            }
 #endif
-                            s += term;
+                            s += (s_hi + s_lo)*dxi_g[g]*dxi_g[h];
                         }
                     }
                     return {s*nrat};
