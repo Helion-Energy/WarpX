@@ -15,6 +15,7 @@
 #include "BoundaryConditions/GreensFunctionOpenBC_fwd.H"
 #include "BoundaryConditions/PEC_Insulator_fwd.H"
 #include "BoundaryConditions/PML_fwd.H"
+#include "Circuit/CircuitCoupling_fwd.H"
 #include "Diagnostics/MultiDiagnostics_fwd.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags_fwd.H"
 #include "EmbeddedBoundary/WarpXFaceInfoBox_fwd.H"
@@ -1322,6 +1323,11 @@ private:
      * hybrid-PIC B-field advance; lazily constructed in
      * ApplyBfieldBoundary when active (boundary.field_hi[0] == open). */
     std::unique_ptr<GreensFunctionOpenBC> m_open_bc_greens;
+
+    /** Coil / circuit-coupling subsystem (circuit.coils): unit coil fields
+     * and discrete inductances driving the hybrid solver's split external
+     * fields. */
+    std::unique_ptr<CircuitCoupling> m_circuit_coupling;
 
     // External fields parameters
     std::unique_ptr<ExternalFieldParams> m_p_ext_field_params;
