@@ -43,9 +43,25 @@ phase = 2.0 * np.arctan(0.5 * sound_speed * effective_wavenumber * dt)
 z = (np.arange(number_of_cells) + 0.5) * cell_size
 initial_mode = relative_amplitude * np.sin(wavenumber * z)
 final_mode = relative_amplitude * np.sin(wavenumber * z - phase)
-# Pe is interpolated from cell centers to the hybrid pressure grid and then
-# back to cell centers for plotfile output, giving this Fourier response.
+# The nodal Pe diagnostic is TEMPERATURE-primary: Te = p/(n kB) is formed
+# natively on the cell grid, node-interpolated, remultiplied by the
+# node-interpolated density (floors inactive here), and cell-averaged
+# again for plotfile output. To first order in the amplitude this is the
+# cos^2(k dz/2) smoothing of the old product interpolation (kept below
+# for the looser final-state assert), but the ratio's O(amplitude^2)
+# harmonics survive the tight initial assert, so the initial expected
+# value is built through the exact discrete pipeline.
 pressure_diagnostic_factor = np.cos(0.5 * wavenumber * cell_size) ** 2
+
+n_cell = 1.0 + relative_amplitude * np.sin(wavenumber * z)
+p_cell = 1.0 + gamma * relative_amplitude * np.sin(wavenumber * z)
+te_cell = p_cell / n_cell
+# cell -> node (periodic; node j sits between cells j-1 and j), the
+# co-located nodal product, then node -> cell for the plotfile
+te_nodal = 0.5 * (te_cell + np.roll(te_cell, 1))
+n_nodal = 0.5 * (n_cell + np.roll(n_cell, 1))
+pe_nodal = n_nodal * te_nodal
+pe_diagnostic = 0.5 * (pe_nodal + np.roll(pe_nodal, -1))
 
 initial_density = initial["boxlib", "implicit_mhd_mass_density"].value.ravel()
 final_density = final["boxlib", "implicit_mhd_mass_density"].value.ravel()
@@ -60,7 +76,7 @@ np.testing.assert_allclose(
 )
 np.testing.assert_allclose(
     initial_pressure / pressure0 - 1.0,
-    pressure_diagnostic_factor * gamma * initial_mode,
+    pe_diagnostic - 1.0,
     rtol=2.0e-9,
     atol=2.0e-13,
 )

@@ -595,6 +595,11 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
 
     fields.alloc_init(TotalCurrentCCName, lev, ba, dm, 3, guard_cells, 0.0_rt);
     fields.alloc_init(MagneticFieldCCName, lev, ba, dm, 3, guard_cells, 0.0_rt);
+    // Cell-centered T_e scratch of the temperature-primary nodal closure
+    // fill (FillFluidSources); ghosts computed in place from the ghosted
+    // moments, never FillBoundary'd.
+    fields.alloc_init(ElectronTemperatureCCName, lev, ba, dm, 1, guard_cells,
+                      0.0_rt);
     fields.alloc_init(FieldResistivityCCName, lev, ba, dm, 1, amrex::IntVect(0), 0.0_rt);
 #if defined(WARPX_DIM_1D_Z)
     // The transverse E components share the z-nodal staggering (and the
@@ -2000,6 +2005,12 @@ void ThetaImplicitMHD::FillFluidSources (const WarpXSolverVec& state)
     }
     charge_density.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
     ApplyNeumannZDomainGhosts(charge_density);
+    // Radial domain ghosts too (axis parity mirror; wall reflect or open
+    // clamp at r_max): the electron-pressure ghost rebuild below reads the
+    // nodal density in every domain-ghost ring, and Pe = n_f kB Te must
+    // hold there against the SAME mirrored/clamped n image the fills give
+    // the temperature.
+    ApplyScalarRadialDomainGhosts(charge_density);
 
     for (int component = 0; component < 3; ++component) {
         const auto current_stag = field_staggering(*ion_current[component]);
@@ -2018,33 +2029,113 @@ void ThetaImplicitMHD::FillFluidSources (const WarpXSolverVec& state)
         ApplyNeumannZDomainGhosts(*ion_current[component]);
     }
 
+    // TEMPERATURE-primary nodal electron closure fields:
+    //   (1) T_e is formed NATIVELY on the cell grid, Te_cell =
+    //       p_cell/(n_cell_f kB), from the SAME floored pressure recovery
+    //       as the flux kernels (p_cell = max((gamma_e - 1) U_e, p_floor),
+    //       see load_cell_state) over the Ohm-floored cell density -- no
+    //       interpolation enters the ratio;
+    //   (2) Te_nodal = Interp(Te_cell -> node): the interpolant acts on
+    //       the smooth bounded RATIO. The previous pressure-primary fill
+    //       interpolated the n T product and divided by the interpolated
+    //       density, but Interp(n T) != Interp(n) Interp(T) and the
+    //       mismatch does not cancel at density gradients -- a spurious
+    //       Ohm grad-Pe electric field wherever n has structure
+    //       (separatrix, exhaust, wall bands);
+    //   (3) Pe_nodal = n_nodal_f kB Te_nodal, rebuilt co-located with the
+    //       SAME floored discrete density image the Ohm grad-Pe/(e n)
+    //       denominator uses (the OhmMassDensityFloor convention), so the
+    //       isothermal limit reduces discretely to E = -kB Te grad(n_f)/
+    //       (e n_f) INCLUDING the floor band. Matches the hybrid trees'
+    //       QDSMCFillElectronPressureFromTe convention (Pe derived from
+    //       n and Te, never the reverse).
+    amrex::MultiFab& electron_temperature_cc =
+        *m_WarpX->m_fields.get(ElectronTemperatureCCName, 0);
+    for (amrex::MFIter mfi(electron_temperature_cc); mfi.isValid(); ++mfi) {
+        // Ghosts computed in place from the ghosted moments (filled by
+        // ApplyFluidDomainBoundaries above), so the node interpolation and
+        // the ghost passes below see boundary-consistent cell temperatures
+        // without a FillBoundary of the scratch.
+        const amrex::Box grown =
+            amrex::grow(mfi.validbox(), electron_temperature_cc.nGrowVect());
+        const auto temperature_cc = electron_temperature_cc.array(mfi);
+        const auto energy = electron_energy.const_array(mfi);
+        const auto rho_cell = density.const_array(mfi);
+        amrex::ParallelFor(grown, [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+            const amrex::Real cell_pressure = std::max(
+                gamma_e_minus_one * energy(i, j, k), pressure_floor);
+            const amrex::Real number_density =
+                std::max(charge_to_mass * rho_cell(i, j, k),
+                         charge_density_floor) /
+                PhysConst::q_e;
+            temperature_cc(i, j, k) =
+                cell_pressure / (number_density * PhysConst::kb);
+        });
+    }
+
     for (amrex::MFIter mfi(electron_pressure); mfi.isValid(); ++mfi) {
         const amrex::Box box = mfi.tilebox(electron_pressure.ixType().toIntVect());
         const auto pressure = electron_pressure.array(mfi);
         const auto temperature = electron_temperature.array(mfi);
-        const auto energy = electron_energy.const_array(mfi);
+        const auto temperature_cc = electron_temperature_cc.const_array(mfi);
         const auto rho = charge_density.const_array(mfi);
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) {
-            const amrex::Real pressure_value = std::max(
-                gamma_e_minus_one * ablastr::coarsen::sample::Interp(
-                                        energy, cell_stag, pressure_stag, coarsening, i, j, k, 0),
-                pressure_floor);
-            pressure(i, j, k) = pressure_value;
+            const amrex::Real temperature_value =
+                ablastr::coarsen::sample::Interp(temperature_cc, cell_stag,
+                                                 pressure_stag, coarsening, i,
+                                                 j, k, 0);
+            temperature(i, j, k) = temperature_value;
             const amrex::Real number_density =
                 std::max(rho(i, j, k), charge_density_floor) / PhysConst::q_e;
-            temperature(i, j, k) = pressure_value / (number_density * PhysConst::kb);
+            pressure(i, j, k) =
+                number_density * PhysConst::kb * temperature_value;
         });
     }
     electron_pressure.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
     electron_temperature.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
-    ApplyNeumannZDomainGhosts(electron_pressure);
     ApplyNeumannZDomainGhosts(electron_temperature);
     // Radial domain ghosts (axis parity; Neumann reflect image or outflow
     // clamp at r_max) so every ghost the Ohm/E-field paths could read
-    // carries the zero-normal-gradient wall pressure instead of the stale
-    // values FillBoundaryAndSync leaves at non-periodic domain edges.
-    ApplyScalarRadialDomainGhosts(electron_pressure);
+    // carries the zero-normal-gradient wall temperature instead of the
+    // stale values FillBoundaryAndSync leaves at non-periodic domain edges.
     ApplyScalarRadialDomainGhosts(electron_temperature);
+    // The PRESSURE domain ghosts are REBUILT as Pe = n_f kB Te from the
+    // mirrored/clamped temperature and density images (never mirrored
+    // directly), so the co-location identity of step (3) holds exactly in
+    // every ghost ring too. With identical fill recipes for n and Te this
+    // equals the direct mirror value-for-value; rebuilding makes the
+    // contract structural rather than coincidental.
+#if defined(WARPX_DIM_RZ)
+    if (m_z_neumann || !m_WarpX->Geom(0).isPeriodic(0)) {
+        const amrex::Box nodal_domain = amrex::convert(
+            m_WarpX->Geom(0).Domain(), electron_pressure.ixType().toIntVect());
+        const int r_lo = nodal_domain.smallEnd(0);
+        const int r_hi = nodal_domain.bigEnd(0);
+        const int z_lo = nodal_domain.smallEnd(1);
+        const int z_hi = nodal_domain.bigEnd(1);
+        const bool fill_z = m_z_neumann;
+        for (amrex::MFIter mfi(electron_pressure); mfi.isValid(); ++mfi) {
+            const amrex::Box grown =
+                amrex::grow(mfi.validbox(), electron_pressure.nGrowVect());
+            const auto pressure = electron_pressure.array(mfi);
+            const auto temperature = electron_temperature.const_array(mfi);
+            const auto rho = charge_density.const_array(mfi);
+            amrex::ParallelFor(grown,
+                               [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const bool outside_r = (i < r_lo || i > r_hi);
+                const bool outside_z = fill_z && (j < z_lo || j > z_hi);
+                if (!outside_r && !outside_z) {
+                    return;
+                }
+                const amrex::Real number_density =
+                    std::max(rho(i, j, k), charge_density_floor) /
+                    PhysConst::q_e;
+                pressure(i, j, k) =
+                    number_density * PhysConst::kb * temperature(i, j, k);
+            });
+        }
+    }
+#endif
 }
 
 void ThetaImplicitMHD::FillCellCenteredElectromagneticFields ()

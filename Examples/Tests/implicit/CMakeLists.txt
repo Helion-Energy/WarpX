@@ -950,6 +950,16 @@ add_warpx_test(
 )
 
 add_warpx_test(
+    test_rz_theta_implicit_mhd_te_primary_cliff_picmi  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_te_primary_cliff_picmi.py  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
     test_2d_theta_implicit_jfnk_vandb  # name
     2  # dims
     2  # nprocs

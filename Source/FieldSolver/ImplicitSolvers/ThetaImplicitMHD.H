@@ -254,6 +254,14 @@ class ThetaImplicitMHD final : public ImplicitSolver
 
   private:
     inline static constexpr char TotalCurrentCCName[] = "implicit_mhd_total_current_cc";
+    /** Cell-centered electron temperature scratch of the temperature-primary
+     * nodal closure fill (see FillFluidSources): T_e = p_e/(n_f kB) is formed
+     * NATIVELY on the cell grid (the same floored pressure recovery as the
+     * flux kernels over the Ohm-floored density) and then interpolated, so
+     * the node interpolant acts on the smooth bounded ratio rather than the
+     * n T product. */
+    inline static constexpr char ElectronTemperatureCCName[] =
+        "implicit_mhd_electron_temperature_cc";
     inline static constexpr char MagneticFieldCCName[] = "implicit_mhd_magnetic_field_cc";
     // Field resistivity eta_field (user eta through the density-keyed
     // vacuum boost) scratch, filled on demand for the MHD block
