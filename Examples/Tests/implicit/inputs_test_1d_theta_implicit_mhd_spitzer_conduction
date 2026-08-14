@@ -1,0 +1,129 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Live Spitzer-keyed electron conduction: chi_e = chiC * Te^2.5 on the
+# PARSER Te symbol. A small electron-temperature ripple at k2 relaxes
+# diffusively at gamma_chi(t) = chi_e(Te(t)) k2_eff^2 while a
+# circularly-polarized transverse B mode at k1 decays under a CONSTANT
+# eta, heating the electrons UNIFORMLY (|J|^2 = const on the k1 pair)
+# and roughly doubling the base Te over the run. The ripple relaxation
+# must therefore SPEED UP by (Te/Te0)^2.5 -- the live-coupling
+# signature the analysis asserts interval by interval (the exact
+# conduction analog of the eta = Te^-1.5 decay test).
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+my_constants.Te0 = 2.0
+my_constants.Pe0 = n0 * Te0 * q_e
+my_constants.gamma_e = 5.0/3.0
+my_constants.dB = sqrt(mu0 * Pe0 / (gamma_e - 1.0))
+my_constants.nz = 64
+my_constants.Lz = 1.0
+my_constants.dz = Lz/nz
+my_constants.k1 = 2*pi/Lz
+my_constants.k2 = 2*k1
+my_constants.k1_eff = 2*sin(k1*dz/2)/dz
+my_constants.k2_eff = 2*sin(k2*dz/2)/dz
+# Kelvin per eV (the parser Te symbol is in K)
+my_constants.K_per_eV = 11604.51812
+my_constants.Tf_eV = 0.02
+# heating driver: constant eta, gamma_B = eta k1_eff^2/mu0
+my_constants.eta0 = 1.0e-6
+my_constants.gamma_B = eta0*k1_eff^2/mu0
+# conduction: chi_e(Te0) k2_eff^2 = 2 gamma_B, so the ripple stays
+# resolvable while the base Te doubles
+my_constants.chiC = 2.0*gamma_B/(k2_eff^2*Te0^2.5)
+# ripple amplitude: linear regime, far above the floors
+my_constants.dTe = 1.0e-3
+# resolve the FASTEST late-time ripple rate (~5.7x the initial one)
+my_constants.dt = 0.1/(2.0*gamma_B*5.7)
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 136
+amr.n_cell = nz
+amr.max_grid_size = nz
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-11
+newton.max_iterations = 12
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-11
+gmres.max_iterations = 200
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te0
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma_e
+hybrid_pic_model.n_floor = 1.0e8
+hybrid_pic_model.plasma_resistivity(rho,J,t) = eta0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = dB
+implicit_mhd.gamma_e = gamma_e
+implicit_mhd.gamma_i = gamma_e
+implicit_mhd.reference_ion_pressure = 0.0
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.electron_pressure(x,y,z) = Pe0*(1.0 + dTe*sin(k2*z))
+implicit_mhd.evolve_ion_fluid = false
+implicit_mhd.fluid_flux = central
+# required by the central flux; inert here (u = 0, frozen ions)
+implicit_mhd.viscosity = 0.5
+implicit_mhd.include_joule_heating = true
+# LIVE Spitzer conduction on the parser Te (in K): C-infinity smooth
+# floor, (Te_eV^2 + Tf^2)^(1.25) -> Te^2.5 for Te >> Tf (never max()).
+# NOTE: one quoted ParmParse token.
+implicit_mhd.thermal_diffusivity_electron(rho,Te,Ti,J,t) = "chiC*((Te/K_per_eV)^2 + Tf_eV^2)^(1.25)"
+
+warpx.B_ext_grid_init_style = parse_B_ext_grid_function
+warpx.Bx_external_grid_function(x,y,z) = dB*sin(k1*z)
+warpx.By_external_grid_function(x,y,z) = dB*cos(k1*z)
+warpx.Bz_external_grid_function(x,y,z) = 0.0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 8
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bx By Bz implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy
+diag1.write_species = 0

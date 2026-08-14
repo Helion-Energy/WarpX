@@ -4614,6 +4614,44 @@ Jacobian probes.
     energy face channel. Available under every ion closure (the electron
     energy block is always evolved).
 
+.. pp:param:: implicit_mhd.thermal_diffusivity_ion(rho,Te,Ti,J,t)
+    :type: ``str``
+    :optional:
+
+    Parser form of :pp:param:`implicit_mhd.thermal_diffusivity_ion`
+    (supply one or the other, not both; an electron twin
+    ``thermal_diffusivity_electron(rho,Te,Ti,J,t)`` exists with the same
+    conventions). Evaluated at the conduction faces (the
+    :math:`e`-gradient faces: z-faces in 1D, r- and z-faces in RZ) from
+    the donor-averaged face state, with the same symbol conventions as
+    :pp:param:`hybrid_pic_model.plasma_resistivity(rho,Te,J,t)`:
+    ``rho`` the Ohm-floored face charge density (:math:`C/m^3`), ``Te``
+    and ``Ti`` in Kelvin — the temperature-primary face ratios
+    :math:`p_\mathrm{face}/(n_f k_B)` built from the same
+    recovered/floored cell pressures the physical fluxes use (``Ti`` is
+    0 outside ``ion_closure = total_energy``) — ``J`` the magnitude of
+    the face-averaged cell-centered total current (:math:`A/m^2`), and
+    ``t`` the residual (theta-stage) time (:math:`s`). Expressions must
+    be :math:`C^\infty` in the state symbols (smooth floors such as
+    ``(Te^2 + Tf^2)^(1.25)``, never ``max()``) for the matrix-free JFNK
+    probes.
+
+.. pp:param:: implicit_mhd.conduction_flux_limit_factor
+    :type: ``float``
+    :default: ``0`` (off)
+
+    Free-streaming limiter of BOTH conductive face fluxes:
+    :math:`\chi_\mathrm{eff} = \chi / (1 + |q| / (f\, q_\mathrm{fs}))`
+    with :math:`q` the unlimited conductive face flux and
+    :math:`q_\mathrm{fs} = n k_B T v_\mathrm{th}` the free-streaming
+    heat flux of the channel's species
+    (:math:`v_\mathrm{th} = \sqrt{k_B T/m}`, electron :math:`T_e` for
+    :math:`\chi_e`, ion :math:`T_i` for :math:`\chi_i`, from the
+    donor-averaged face state). ``0`` disables the limiter exactly
+    (bit-identical); a positive factor applies the smooth harmonic cap
+    with no branches. The limiter never runs silent: its factor is
+    printed in the solver banner.
+
 .. pp:param:: implicit_mhd.pressure_corner_width_fraction
     :type: ``float``
     :default: ``0``

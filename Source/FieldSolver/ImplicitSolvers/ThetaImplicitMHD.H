@@ -157,9 +157,12 @@ class ThetaImplicitMHD final : public ImplicitSolver
     void FillCellCenteredElectromagneticFields ();
     void ComputeFluidRHS (WarpXSolverVec& rhs, amrex::Real time) const;
     void ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs, amrex::Real time) const;
-    void ComputeFaceFluxes ();
+    /** \param a_time the residual (theta-stage) time, forwarded to the
+     * parser thermal diffusivities' t symbol. */
+    void ComputeFaceFluxes (amrex::Real a_time);
     void ComputeDirectionalFaceFluxes (amrex::MultiFab& face_flux_mf,
-                                       int normal_direction);
+                                       int normal_direction,
+                                       amrex::Real a_time);
     /** Absorbing-wall bookkeeping (r_open_fluid = absorb, RZ hlld): the
      * wall is a physical sink by design, so the conservation ledger
      * tracks it explicitly. Recomputes the radial face fluxes of the
@@ -171,7 +174,8 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * implicit_mhd.absorb_ledger_file) every absorb_ledger_interval
      * steps. Must be called after UpdateWarpXFields(m_state, ...) and
      * before FinishStateUpdate extrapolates the state to t^{n+1}. */
-    void AccumulateAbsorbedWallLedger (amrex::Real dt, int step);
+    void AccumulateAbsorbedWallLedger (amrex::Real dt, int step,
+                                       amrex::Real a_time);
     /** Assemble the solver-owned Ohm's law E = -u x B + eta J (hlld path).
      * With at_resistive_stage = true (residual evaluations) the
      * dissipative terms (eta J, the vacuum-eta boost, and the
@@ -642,8 +646,41 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // (0 = off): conservative internal-energy diffusion
     // -chi rho_f d(e_spec)/dn (q = -kappa grad T, Chacon JCP 526 (2025))
     // on the ion total-energy and electron energy face channels.
+    //
+    // Each channel takes EITHER the legacy numeric key
+    // (implicit_mhd.thermal_diffusivity_ion/electron, bit-identical
+    // constant fast path) OR a parser expression
+    // implicit_mhd.thermal_diffusivity_*(rho,Te,Ti,J,t), evaluated at the
+    // e_spec-gradient FACES (z-faces in 1D; r- and z-faces in RZ -- the
+    // same normal-gradient faces the conductive flux lives on) from the
+    // donor-averaged face state: rho = the Ohm-floored face charge
+    // density max((q/m) rho_f, rho_q_floor); Te [K] and Ti [K] the
+    // temperature-primary face ratios p_face/(n_f kB) built from the SAME
+    // recovered/floored CellState pressures the physical fluxes use (Ti
+    // is 0 outside the total_energy closure, where no recovered ion
+    // pressure exists); J the |.| of the face-averaged cell-centered
+    // total current; t the residual (theta-stage) time. Expressions must
+    // be C-infinity in the state symbols (smooth floors, no max()), like
+    // the resistivity parser.
     amrex::Real m_thermal_diffusivity_ion = 0.0;
     amrex::Real m_thermal_diffusivity_electron = 0.0;
+    std::unique_ptr<amrex::Parser> m_chi_ion_parser;
+    std::unique_ptr<amrex::Parser> m_chi_electron_parser;
+    std::string m_chi_ion_expression;
+    std::string m_chi_electron_expression;
+    amrex::ParserExecutor<5> m_chi_ion;
+    amrex::ParserExecutor<5> m_chi_electron;
+    bool m_chi_ion_is_parser = false;
+    bool m_chi_electron_is_parser = false;
+    // Free-streaming limiter of the conductive face fluxes (BOTH
+    // channels): chi_eff = chi / (1 + |q|/(f q_fs)) with q the unlimited
+    // conductive face flux and q_fs = n kB T v_th the free-streaming flux
+    // of the channel's species (v_th = sqrt(kB T/m), evaluated from the
+    // same donor-averaged face state as the parser symbols). f = 0
+    // (default) disables the limiter EXACTLY (bit-identical); f > 0
+    // applies the smooth harmonic cap with no branches. NEVER silent:
+    // the factor is printed in the solver banner.
+    amrex::Real m_conduction_flux_limit_factor = 0.0;
     // Floor-independent corner width of the C^1 smooth-max pressure
     // recovery (see FluxParameters::pressure_corner_width_fraction;
     // 0 = legacy width = internal-energy floor).

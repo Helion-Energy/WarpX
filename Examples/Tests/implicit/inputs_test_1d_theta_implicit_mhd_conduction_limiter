@@ -1,0 +1,120 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Free-streaming conduction limiter on a steep electron-temperature
+# cliff: chi_e is sized so the UNLIMITED conductive face flux at the
+# cliff is ~100x the free-streaming cap f q_fs, so the applied flux must
+# sit on the harmonic limit q = q_unl/(1 + |q_unl|/(f q_fs)) ~ f q_fs.
+# One backward-Euler step with a small dt; the analysis reconstructs the
+# applied face flux from the energy update of the cells adjacent to the
+# cliff and matches it against the analytic harmonic value (and against
+# the unlimited flux to confirm the cap genuinely engaged ~100x).
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+my_constants.Te_hot = 20.0
+my_constants.Te_cold = 2.0
+my_constants.gamma_e = 5.0/3.0
+my_constants.Pe_hot = n0 * Te_hot * q_e
+my_constants.Pe_cold = n0 * Te_cold * q_e
+my_constants.nz = 64
+my_constants.Lz = 1.0
+my_constants.dz = Lz/nz
+my_constants.zc = 0.5
+# free-streaming scale at the face (donor-avg Te = 11 eV):
+# q_fs = n kB T sqrt(kB T/m_e); f = 0.1
+my_constants.f_lim = 0.1
+my_constants.Te_face = 0.5*(Te_hot + Te_cold)
+my_constants.q_fs = n0 * q_e * Te_face * sqrt(q_e*Te_face/m_e)
+# unlimited flux q_unl = chi rho_f d(e_spec)/dz = 100 f q_fs
+my_constants.de_spec = q_e*(Te_hot - Te_cold)/((gamma_e - 1.0)*m_p)
+my_constants.chi0 = 100.0*f_lim*q_fs*dz/(rho0*de_spec)
+# small step: the capped flux moves the adjacent cells' energy by ~1%
+my_constants.Ue_cold = Pe_cold/(gamma_e - 1.0)
+my_constants.dt = 0.01*Ue_cold*dz/(f_lim*q_fs)
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 1
+amr.n_cell = nz
+amr.max_grid_size = nz
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-11
+newton.max_iterations = 20
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-11
+gmres.max_iterations = 300
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te_cold
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma_e
+hybrid_pic_model.n_floor = 1.0e8
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = 1.0e-4
+implicit_mhd.gamma_e = gamma_e
+implicit_mhd.gamma_i = gamma_e
+implicit_mhd.reference_ion_pressure = 0.0
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.electron_pressure(x,y,z) = "Pe_cold + (Pe_hot - Pe_cold)*if(z<zc, 1.0, 0.0)"
+implicit_mhd.evolve_ion_fluid = false
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 0.5
+implicit_mhd.include_joule_heating = false
+implicit_mhd.thermal_diffusivity_electron = chi0
+implicit_mhd.conduction_flux_limit_factor = f_lim
+
+warpx.B_ext_grid_init_style = parse_B_ext_grid_function
+warpx.Bx_external_grid_function(x,y,z) = 0.0
+warpx.By_external_grid_function(x,y,z) = 0.0
+warpx.Bz_external_grid_function(x,y,z) = 0.0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 1
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = implicit_mhd_mass_density implicit_mhd_electron_energy
+diag1.write_species = 0

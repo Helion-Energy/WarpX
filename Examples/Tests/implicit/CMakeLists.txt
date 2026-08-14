@@ -335,6 +335,31 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# live Spitzer chi_e(Te) on the parser Te symbol: a temperature ripple's
+# diffusive relaxation speeds up by (Te/Te0)^2.5 as uniform Joule
+# heating raises the base Te (the conduction analog of spitzer_decay)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_spitzer_conduction  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_spitzer_conduction  # inputs
+    "analysis_mhd_spitzer_conduction.py diags"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# free-streaming conduction limiter: the cliff face flux saturates at
+# the analytic harmonic cap q_unl/(1 + q_unl/(f q_fs))
+add_warpx_test(
+    test_1d_theta_implicit_mhd_conduction_limiter  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_conduction_limiter  # inputs
+    "analysis_mhd_conduction_limiter.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # density-keyed vacuum resistivity + resistive backward-Euler centering:
 # one-step transverse-mode decay matches the theta_r-discrete prediction
 # 1/(1+z) (not the trapezoidal value), with no electron heating from the

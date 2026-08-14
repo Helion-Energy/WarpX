@@ -39,7 +39,9 @@ def get_data(plotfile):
     return ds, data
 
 
-plotfiles = sorted(glob.glob(os.path.join(sys.argv[1], "diag[0-9]*")))
+plotfiles = sorted(
+    glob.glob(os.path.join(sys.argv[1], "diag" + "[0-9]" * 6))
+)  # exactly diagNNNNNN: skip the diag*.old.* dirs WarpX leaves on reruns
 assert len(plotfiles) >= 10, "need the full snapshot series"
 
 n0 = 1.0e18

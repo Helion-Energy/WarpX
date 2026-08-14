@@ -2220,19 +2220,36 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         the same face registers, keeping the discrete energy exchange
         conservative. Not supported with ion_closure="cgl".
 
-    thermal_diffusivity_ion: float, default=0 (off)
+    thermal_diffusivity_ion: float or str, default=0 (off)
         Ion thermal diffusivity chi_i in m^2/s of the recast face fluxes
         (fluid_flux="hlld" or "central"): the conductive internal-energy
         flux -chi_i rho_f d(e_i)/dn (q = -kappa grad T) on the ion
         total-energy face channel, with e_i = p_i/((gamma_i - 1) rho)
         recovered from the same cell pressures the physical fluxes use.
-        Requires ion_closure="total_energy".
+        Requires ion_closure="total_energy". A string is a parser
+        expression chi_i(rho, Te, Ti, J, t) evaluated at the conduction
+        faces from the donor-averaged state (rho the Ohm-floored face
+        charge density in C/m^3; Te and Ti in Kelvin from the
+        temperature-primary face ratios; J the face |J| in A/m^2; t in
+        s). State-dependent expressions must be C-infinity (smooth
+        floors, no max()), like plasma_resistivity. A numeric value
+        keeps the bit-identical constant fast path.
 
-    thermal_diffusivity_electron: float, default=0 (off)
+    thermal_diffusivity_electron: float or str, default=0 (off)
         Electron thermal diffusivity chi_e in m^2/s of the recast face
         fluxes: the electron counterpart of thermal_diffusivity_ion,
         diffusing e_e = p_e/((gamma_e - 1) rho) on the electron energy
-        face channel.
+        face channel. Same float/str convention as
+        thermal_diffusivity_ion.
+
+    conduction_flux_limit_factor: float, default=0 (off)
+        Free-streaming limiter of BOTH conductive face fluxes:
+        chi_eff = chi/(1 + |q|/(f q_fs)) with q the unlimited conductive
+        face flux and q_fs = n kB T v_th of the channel's species
+        (v_th = sqrt(kB T/m), donor-averaged face state). 0 disables the
+        limiter exactly; a positive factor applies the smooth harmonic
+        cap (no branches) and is printed in the solver banner (the
+        limiter never runs silent).
 
     pressure_corner_width_fraction: float, default=0 (legacy width)
         Corner width of the smooth-max internal-energy floor in the
@@ -2488,6 +2505,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         viscosity=None,
         thermal_diffusivity_ion=None,
         thermal_diffusivity_electron=None,
+        conduction_flux_limit_factor=None,
         pressure_corner_width_fraction=None,
         r_open_fluid=None,
         z_boundary_fluid=None,
@@ -2546,6 +2564,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.viscosity = viscosity
         self.thermal_diffusivity_ion = thermal_diffusivity_ion
         self.thermal_diffusivity_electron = thermal_diffusivity_electron
+        self.conduction_flux_limit_factor = conduction_flux_limit_factor
         self.pressure_corner_width_fraction = pressure_corner_width_fraction
         self.r_open_fluid = r_open_fluid
         self.z_boundary_fluid = z_boundary_fluid
@@ -2610,8 +2629,25 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.resistive_theta = self.resistive_theta
         implicit_mhd.fluid_flux = self.fluid_flux
         implicit_mhd.viscosity = self.viscosity
-        implicit_mhd.thermal_diffusivity_ion = self.thermal_diffusivity_ion
-        implicit_mhd.thermal_diffusivity_electron = self.thermal_diffusivity_electron
+        # strings route to the parser signature; numbers keep the
+        # bit-identical constant fast path
+        if isinstance(self.thermal_diffusivity_ion, str):
+            implicit_mhd.__setattr__(
+                "thermal_diffusivity_ion(rho,Te,Ti,J,t)",
+                self.thermal_diffusivity_ion,
+            )
+        else:
+            implicit_mhd.thermal_diffusivity_ion = self.thermal_diffusivity_ion
+        if isinstance(self.thermal_diffusivity_electron, str):
+            implicit_mhd.__setattr__(
+                "thermal_diffusivity_electron(rho,Te,Ti,J,t)",
+                self.thermal_diffusivity_electron,
+            )
+        else:
+            implicit_mhd.thermal_diffusivity_electron = (
+                self.thermal_diffusivity_electron
+            )
+        implicit_mhd.conduction_flux_limit_factor = self.conduction_flux_limit_factor
         implicit_mhd.pressure_corner_width_fraction = (
             self.pressure_corner_width_fraction
         )

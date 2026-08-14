@@ -161,10 +161,50 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     pp.query("external_field_iteration", m_external_field_iteration);
     pp.query("fluid_flux", m_fluid_flux);
     utils::parser::queryWithParser(pp, "viscosity", m_viscosity);
-    utils::parser::queryWithParser(pp, "thermal_diffusivity_ion",
-                                   m_thermal_diffusivity_ion);
-    utils::parser::queryWithParser(pp, "thermal_diffusivity_electron",
-                                   m_thermal_diffusivity_electron);
+    // Thermal diffusivities: legacy numeric key (bit-identical constant
+    // fast path) or the parser signature (rho,Te,Ti,J,t), not both. Same
+    // symbol conventions as plasma_resistivity(rho,Te,J,t) plus Ti [K]
+    // from the recovered ion pressure (0 outside total_energy); see the
+    // header for the face evaluation points.
+    {
+        const bool has_ion_const = utils::parser::queryWithParser(
+            pp, "thermal_diffusivity_ion", m_thermal_diffusivity_ion);
+        std::string expression;
+        if (pp.query("thermal_diffusivity_ion(rho,Te,Ti,J,t)", expression)) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !has_ion_const,
+                "Specify either implicit_mhd.thermal_diffusivity_ion or "
+                "thermal_diffusivity_ion(rho,Te,Ti,J,t), not both");
+            m_chi_ion_expression = expression;
+            m_chi_ion_parser =
+                std::make_unique<amrex::Parser>(utils::parser::makeParser(
+                    expression, {"rho", "Te", "Ti", "J", "t"}));
+            m_chi_ion = m_chi_ion_parser->compile<5>();
+            m_chi_ion_is_parser = true;
+        }
+        const bool has_electron_const = utils::parser::queryWithParser(
+            pp, "thermal_diffusivity_electron",
+            m_thermal_diffusivity_electron);
+        if (pp.query("thermal_diffusivity_electron(rho,Te,Ti,J,t)",
+                     expression)) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !has_electron_const,
+                "Specify either implicit_mhd.thermal_diffusivity_electron "
+                "or thermal_diffusivity_electron(rho,Te,Ti,J,t), not both");
+            m_chi_electron_expression = expression;
+            m_chi_electron_parser =
+                std::make_unique<amrex::Parser>(utils::parser::makeParser(
+                    expression, {"rho", "Te", "Ti", "J", "t"}));
+            m_chi_electron = m_chi_electron_parser->compile<5>();
+            m_chi_electron_is_parser = true;
+        }
+    }
+    utils::parser::queryWithParser(pp, "conduction_flux_limit_factor",
+                                   m_conduction_flux_limit_factor);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_conduction_flux_limit_factor >= 0.0_rt,
+        "implicit_mhd.conduction_flux_limit_factor cannot be negative "
+        "(0 disables the free-streaming conduction limiter)");
     utils::parser::queryWithParser(pp, "pressure_corner_width_fraction",
                                    m_pressure_corner_width_fraction);
     pp.query("r_open_fluid", m_r_open_fluid);
@@ -270,23 +310,30 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         m_thermal_diffusivity_ion >= 0.0_rt &&
             m_thermal_diffusivity_electron >= 0.0_rt,
         "implicit_mhd.thermal_diffusivity_ion/electron cannot be negative");
+    const bool has_ion_conduction =
+        m_chi_ion_is_parser || m_thermal_diffusivity_ion > 0.0_rt;
+    const bool has_electron_conduction =
+        m_chi_electron_is_parser || m_thermal_diffusivity_electron > 0.0_rt;
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        (m_thermal_diffusivity_ion == 0.0_rt &&
-         m_thermal_diffusivity_electron == 0.0_rt) ||
-            m_use_recast,
+        (!has_ion_conduction && !has_electron_conduction) || m_use_recast,
         "implicit_mhd.thermal_diffusivity_ion/electron require the "
         "conservative-form recast (implicit_mhd.fluid_flux = hlld or "
         "central): the conductive face flux is only wired into the recast "
         "face-flux registers");
     // The conductive flux enters the total_energy ion-energy channel;
     // under the barotropic and cgl closures that register is never
-    // consumed, so a positive chi_i would be a silent no-op.
+    // consumed, so a positive chi_i would be a silent no-op (and the Ti
+    // parser symbol needs the recovered ion pressure).
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        m_thermal_diffusivity_ion == 0.0_rt ||
-            m_ion_closure == "total_energy",
+        !has_ion_conduction || m_ion_closure == "total_energy",
         "implicit_mhd.thermal_diffusivity_ion requires "
         "implicit_mhd.ion_closure = total_energy (the ion conductive flux "
         "is only wired into the total_energy ion-energy channel)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_conduction_flux_limit_factor == 0.0_rt ||
+            (has_ion_conduction || has_electron_conduction),
+        "implicit_mhd.conduction_flux_limit_factor requires a nonzero "
+        "thermal diffusivity (nothing to limit)");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_pressure_corner_width_fraction >= 0.0_rt,
         "implicit_mhd.pressure_corner_width_fraction cannot be negative");
@@ -1299,8 +1346,23 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "Ion closure:                   " << m_ion_closure << "\n"
                    << "Viscosity [m2/s]:              " << m_viscosity << "\n"
                    << "Thermal diffusivity i/e [m2/s]: "
-                   << m_thermal_diffusivity_ion << " "
-                   << m_thermal_diffusivity_electron << "\n"
+                   << (m_chi_ion_is_parser
+                           ? std::string("chi_i(rho,Te,Ti,J,t) = ") +
+                                 m_chi_ion_expression
+                           : std::to_string(m_thermal_diffusivity_ion))
+                   << " | "
+                   << (m_chi_electron_is_parser
+                           ? std::string("chi_e(rho,Te,Ti,J,t) = ") +
+                                 m_chi_electron_expression
+                           : std::to_string(m_thermal_diffusivity_electron))
+                   << "\n"
+                   << "Conduction flux limiter:       "
+                   << (m_conduction_flux_limit_factor > 0.0_rt
+                           ? "ON, chi/(1 + |q|/(f q_fs)), f = " +
+                                 std::to_string(
+                                     m_conduction_flux_limit_factor)
+                           : std::string("OFF (factor 0)"))
+                   << "\n"
                    << "Pressure corner width fraction: "
                    << m_pressure_corner_width_fraction << "\n"
                    << "Positivity step safety:        " << m_positivity_safety << "\n"
@@ -1947,7 +2009,8 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
         // Book the absorbing wall's export from the accepted theta state
         // (UpdateWarpXFields just refilled the theta-stage fields), before
         // FinishStateUpdate extrapolates the state to t^{n+1}.
-        AccumulateAbsorbedWallLedger(m_dt, step);
+        AccumulateAbsorbedWallLedger(m_dt, step,
+                                     start_time + m_theta * m_dt);
     }
 #endif
     m_WarpX->reduced_diags->ComputeDiagsMidStep(step);
@@ -2343,7 +2406,7 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
         // is the theta-implicit Faraday update evaluated with the exact
         // Yee curl (div B preserved to round-off):
         // rhs_B = (B_old - theta dt curl E) - B_old.
-        ComputeFaceFluxes();
+        ComputeFaceFluxes(theta_time);
         AssembleOhmElectricField(theta_time, true);
         const auto& magnetic_field_old =
             m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::B_old, 0);
@@ -3146,21 +3209,26 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
     }
 }
 
-void ThetaImplicitMHD::ComputeFaceFluxes ()
+void ThetaImplicitMHD::ComputeFaceFluxes (const amrex::Real a_time)
 {
 #if defined(WARPX_DIM_1D_Z)
-    ComputeDirectionalFaceFluxes(*m_WarpX->m_fields.get(FaceFluxZName, 0), 2);
+    ComputeDirectionalFaceFluxes(*m_WarpX->m_fields.get(FaceFluxZName, 0), 2,
+                                 a_time);
 #elif defined(WARPX_DIM_RZ)
-    ComputeDirectionalFaceFluxes(*m_WarpX->m_fields.get(FaceFluxRName, 0), 0);
-    ComputeDirectionalFaceFluxes(*m_WarpX->m_fields.get(FaceFluxZName, 0), 2);
+    ComputeDirectionalFaceFluxes(*m_WarpX->m_fields.get(FaceFluxRName, 0), 0,
+                                 a_time);
+    ComputeDirectionalFaceFluxes(*m_WarpX->m_fields.get(FaceFluxZName, 0), 2,
+                                 a_time);
 #else
+    amrex::ignore_unused(a_time);
     WARPX_ABORT_WITH_MESSAGE(
         "ThetaImplicitMHD::ComputeFaceFluxes() requires 1D or RZ geometry");
 #endif
 }
 
 void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
-    amrex::MultiFab& face_flux_mf, const int normal_direction)
+    amrex::MultiFab& face_flux_mf, const int normal_direction,
+    const amrex::Real a_time)
 {
 #if defined(WARPX_DIM_1D_Z) || defined(WARPX_DIM_RZ)
     using ablastr::fields::Direction;
@@ -3218,7 +3286,28 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     // Thermal conduction shares the viscous flux's spacing convention.
     const amrex::Real chi_ion = m_thermal_diffusivity_ion;
     const amrex::Real chi_electron = m_thermal_diffusivity_electron;
-    const bool add_conduction = (chi_ion > 0.0_rt || chi_electron > 0.0_rt);
+    // Parser diffusivities chi(rho, Te, Ti, J, t) and the free-streaming
+    // limiter share a donor-averaged face state (see the header): the
+    // Ohm-floored face charge density, the temperature-primary face
+    // Te/Ti ratios from the SAME CellState pressures the physical fluxes
+    // use, and the face-averaged cell-centered total current. The
+    // constant, limiter-off path is bit-identical to the legacy code.
+    const bool chi_ion_is_parser = m_chi_ion_is_parser;
+    const bool chi_electron_is_parser = m_chi_electron_is_parser;
+    const auto chi_ion_parser = m_chi_ion;
+    const auto chi_electron_parser = m_chi_electron;
+    const bool chi_any_parser = chi_ion_is_parser || chi_electron_is_parser;
+    const amrex::Real conduction_limit = m_conduction_flux_limit_factor;
+    const bool chi_needs_state = chi_any_parser || conduction_limit > 0.0_rt;
+    const amrex::Real chi_charge_to_mass = m_ion_charge_to_mass;
+    const amrex::Real chi_charge_floor =
+        m_ion_charge_to_mass * OhmMassDensityFloor();
+    const amrex::Real conduction_ion_mass =
+        PhysConst::q_e / m_ion_charge_to_mass;
+    const bool chi_total_energy = (m_ion_closure == "total_energy");
+    const amrex::Real face_time = a_time;
+    const bool add_conduction =
+        (chi_ion > 0.0_rt || chi_electron > 0.0_rt || chi_any_parser);
 #if defined(WARPX_DIM_1D_Z)
     const amrex::Real inverse_normal_size =
         1.0_rt / m_WarpX->Geom(0).CellSize(0);
@@ -3536,23 +3625,98 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
             ) {
                 const amrex::Real face_density =
                     0.5_rt * (left.density + right.density);
-                if (chi_ion > 0.0_rt) {
-                    flux.ion_energy -=
-                        chi_ion * face_density *
+                // Donor-averaged face state for the parser diffusivities
+                // and the free-streaming limiter (unused, and skipped, on
+                // the constant/limiter-off path). Temperatures are the
+                // temperature-primary face ratios p_face/(n_f kB); Ti is
+                // 0 outside total_energy (where the ion channel is
+                // disallowed anyway).
+                amrex::Real face_charge_density = 0.0_rt;
+                amrex::Real face_te = 0.0_rt;
+                amrex::Real face_ti = 0.0_rt;
+                amrex::Real face_jmag = 0.0_rt;
+                if (chi_needs_state) {
+                    face_charge_density =
+                        std::max(chi_charge_to_mass * face_density,
+                                 chi_charge_floor);
+                    const amrex::Real inverse_nkb =
+                        PhysConst::q_e /
+                        (face_charge_density * PhysConst::kb);
+                    face_te = 0.5_rt *
+                              (left.electron_pressure +
+                               right.electron_pressure) *
+                              inverse_nkb;
+                    if (chi_total_energy) {
+                        face_ti = 0.5_rt *
+                                  (left.ion_pressure + right.ion_pressure) *
+                                  inverse_nkb;
+                    }
+                    if (chi_any_parser) {
+                        amrex::Real jsq = 0.0_rt;
+                        for (int component = 0; component < 3; ++component) {
+                            const amrex::Real face_current =
+                                0.5_rt * (j_cc(il, jl, kl, component) +
+                                          j_cc(i, j, k, component));
+                            jsq += face_current * face_current;
+                        }
+                        face_jmag = std::sqrt(jsq);
+                    }
+                }
+                if (chi_ion > 0.0_rt || chi_ion_is_parser) {
+                    const amrex::Real chi_ion_face =
+                        chi_ion_is_parser
+                            ? chi_ion_parser(face_charge_density, face_te,
+                                             face_ti, face_jmag, face_time)
+                            : chi_ion;
+                    amrex::Real conductive_flux =
+                        -chi_ion_face * face_density *
                         (right.ion_internal / right.safe_density -
                          left.ion_internal / left.safe_density) *
                         inverse_normal_size;
+                    if (conduction_limit > 0.0_rt) {
+                        // free-streaming cap q_fs = n kB Ti v_ti,
+                        // v_ti = sqrt(kB Ti/m_i): the smooth harmonic
+                        // form q/(1 + |q|/(f q_fs)), no branches
+                        const amrex::Real thermal_speed = std::sqrt(
+                            PhysConst::kb * face_ti / conduction_ion_mass);
+                        const amrex::Real free_streaming_flux =
+                            face_charge_density / PhysConst::q_e *
+                            PhysConst::kb * face_ti * thermal_speed;
+                        conductive_flux /=
+                            1.0_rt + std::abs(conductive_flux) /
+                                         (conduction_limit *
+                                          free_streaming_flux);
+                    }
+                    flux.ion_energy += conductive_flux;
                 }
-                if (chi_electron > 0.0_rt) {
+                if (chi_electron > 0.0_rt || chi_electron_is_parser) {
+                    const amrex::Real chi_electron_face =
+                        chi_electron_is_parser
+                            ? chi_electron_parser(face_charge_density,
+                                                  face_te, face_ti,
+                                                  face_jmag, face_time)
+                            : chi_electron;
                     const amrex::Real inverse_gamma_e_minus_one =
                         1.0_rt / (parameters.gamma_e - 1.0_rt);
-                    flux.electron_energy -=
-                        chi_electron * face_density *
+                    amrex::Real conductive_flux =
+                        -chi_electron_face * face_density *
                         (right.electron_pressure * inverse_gamma_e_minus_one /
                              right.safe_density -
                          left.electron_pressure * inverse_gamma_e_minus_one /
                              left.safe_density) *
                         inverse_normal_size;
+                    if (conduction_limit > 0.0_rt) {
+                        const amrex::Real thermal_speed = std::sqrt(
+                            PhysConst::kb * face_te / PhysConst::m_e);
+                        const amrex::Real free_streaming_flux =
+                            face_charge_density / PhysConst::q_e *
+                            PhysConst::kb * face_te * thermal_speed;
+                        conductive_flux /=
+                            1.0_rt + std::abs(conductive_flux) /
+                                         (conduction_limit *
+                                          free_streaming_flux);
+                    }
+                    flux.electron_energy += conductive_flux;
                 }
             }
 
@@ -3622,7 +3786,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
 }
 
 void ThetaImplicitMHD::AccumulateAbsorbedWallLedger (const amrex::Real dt,
-                                                     const int step)
+                                                     const int step,
+                                                     const amrex::Real a_time)
 {
 #if defined(WARPX_DIM_RZ)
     using ablastr::fields::Direction;
@@ -3650,7 +3815,7 @@ void ThetaImplicitMHD::AccumulateAbsorbedWallLedger (const amrex::Real dt,
     }
     FillCellCenteredElectromagneticFields();
     amrex::MultiFab& face_flux_r = *m_WarpX->m_fields.get(FaceFluxRName, 0);
-    ComputeDirectionalFaceFluxes(face_flux_r, 0);
+    ComputeDirectionalFaceFluxes(face_flux_r, 0, a_time);
 
     const amrex::Box face_domain = amrex::convert(
         m_WarpX->Geom(0).Domain(), face_flux_r.ixType().toIntVect());
@@ -6135,7 +6300,7 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
         // so the published E satisfies Ohm's law at t^{n+1} rather than
         // retaining the intra-step resistive-stage weighting.
         FillCellCenteredElectromagneticFields();
-        ComputeFaceFluxes();
+        ComputeFaceFluxes(end_time);
         AssembleOhmElectricField(end_time, false);
     } else {
         const auto electric_field =
