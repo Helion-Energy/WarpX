@@ -7513,6 +7513,25 @@ This shifts analysis from post-processing to runtime calculation of reduction op
         1 or 0, it is possible to compute the charge on only some part of the
         embedded boundary.
 
+    * ``CircuitCoupling``
+        This type writes the per-step ledger of the coil / circuit coupling
+        (requires :pp:param:`circuit.coils`; RZ): for every coil the realized
+        drive scale :math:`s = I/I_\mathrm{ref}`, its segment slope
+        :math:`ds/dt`, and the measured plasma flux linkage
+        :math:`\lambda = \lambda_\mathrm{phys} I_\mathrm{ref} n` (zero for
+        unmeasured coils or without a coupling engine), followed by the two
+        sides of the coupling-power double entry
+
+        .. math::
+
+            P_\mathrm{circuit} = -\sum_k \frac{ds_k}{dt} \lambda_k,
+            \qquad
+            P_\mathrm{field} = \int J_p \cdot E_\mathrm{ext}\, dV,
+
+        which agree to roundoff whenever the drive slopes are constant over
+        the step (no power is created or lost in the exchange); in coupled
+        runs the imbalance measures the within-step slope variation.
+
     * ``ColliderRelevant``
         This diagnostics computes properties of two colliding beams that are relevant for particle colliders.
         Two species must be specified. Photon species are not supported yet.

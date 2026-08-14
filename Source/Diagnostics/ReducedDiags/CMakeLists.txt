@@ -4,6 +4,7 @@ foreach(D IN LISTS WarpX_DIMS)
       PRIVATE
         BeamRelevant.cpp
         ChargeOnEB.cpp
+        CircuitCouplingDiag.cpp
         ColliderRelevant.cpp
         DifferentialLuminosity.cpp
         DifferentialLuminosity2D.cpp

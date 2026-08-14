@@ -13,6 +13,8 @@
 
 #include <AMReX_MultiFab.H>
 
+#include <array>
+
 namespace warpx::circuit
 {
     /** Which linkage measurement a coil's back-EMF port uses. */
@@ -64,6 +66,19 @@ namespace warpx::circuit
      */
     amrex::Real ReciprocityLinkage (const amrex::MultiFab& A_theta,
                                     const amrex::MultiFab& J_theta);
+
+    /** The coupling power Int J . E dV over the RZ (m = 0) domain, summed
+     * component-wise on matched (E/J) staggerings with owner-masked nodal
+     * points and volume weights 2 pi r dr dz (r at each sample position).
+     * Used for the field side of the coupling-power double entry against
+     * -sum_k (ds_k/dt) lambda_k. Collective; level 0.
+     *
+     * \param[in] J  the three plasma-current components (E/J staggering)
+     * \param[in] E  the three field components on the same staggerings
+     */
+    amrex::Real CouplingPowerIntegral (
+        const std::array<const amrex::MultiFab*, 3>& J,
+        const std::array<const amrex::MultiFab*, 3>& E);
 
 } // namespace warpx::circuit
 

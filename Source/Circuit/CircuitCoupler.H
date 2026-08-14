@@ -112,6 +112,11 @@ public:
      * for the Python engine. */
     [[nodiscard]] amrex::Real CoilLinkage (std::string const& coil_name) const;
 
+    /** As CoilLinkage, but returning fallback for unmeasured coils
+     * (probe = none) instead of aborting -- for diagnostics. */
+    [[nodiscard]] amrex::Real CoilLinkageOr (std::string const& coil_name,
+                                             amrex::Real fallback) const;
+
 private:
     void MeasureLinkages ();
     void RefreshCircuitFields (amrex::Real t0, amrex::Real t1);
