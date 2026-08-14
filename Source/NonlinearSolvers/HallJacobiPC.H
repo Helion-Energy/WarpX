@@ -70,8 +70,12 @@
  *                   -> (Lap -> -kg2) -(theta*dt*eta_H*kg2^2/mu0) delta_E
  *                   -> +theta*dt*eta_H*kg2^2/mu0 on the diagonal.
  *  Hence the scalar diagonal
- *      a = 1 + MM_diag + (theta*dt*kg2/mu0) * (eta0 + etaH0*kg2),
- *  with MM_diag the mass-matrix PC diagonal when available (zero if the
+ *      a = 1 + MM_diag + (theta*dt*kg2/mu0) * (eta0 + etaH0*kg2)
+ *            + ((2 theta + 1)/2) * kg2 * d_e^2,
+ *  where d_e^2 = m_e_eff/(mu0 e^2 n0) is the electron-inertia leg (present
+ *  only when the model runs electron inertia; no theta*dt factor because
+ *  the dJe/dt derivative cancels it), and
+ *  MM_diag is the mass-matrix PC diagonal when available (zero if the
  *  mass-matrix PC is off).
  *
  *  CLOSED-FORM INVERSE (Chacon Eq. C.4 generalized) and its verification:
@@ -313,6 +317,20 @@ void HallJacobiPC<T,Ops>::Update (const T& a_U)
     const bool eta0_set = m_eta0_set;
     const bool etah0_set = m_etah0_set;
 
+    // Electron-inertia diagonal leg: the inertial field contributes a
+    // s*(k d_e)^2 curl-curl block to the Jacobian with s = (2 theta + 1)/2
+    // (the theta-stage dJe/dt stencil factor; the theta*dt from delta_B
+    // cancels against the time derivative, so the leg carries no theta_dt).
+    // Under the kg2 surrogate: a += s * kg2 * d_e^2 with
+    // d_e^2 = m_e_eff/(mu0 e^2 n0) = m_e_eff/(mu0 qe rho_lim). d_e grows
+    // like 1/sqrt(n) into floored bands, where this diagonal arrests the
+    // whistler k^2 growth exactly where beta is largest.
+    const bool inertia_on =
+        (hybrid != nullptr) && hybrid->m_include_electron_inertia;
+    const RT me_eff = inertia_on
+        ? static_cast<RT>(hybrid->m_electron_inertia_mass) : RT(0.0);
+    const RT s_inertia = (RT(2.0)*static_cast<RT>(m_theta) + RT(1.0))/RT(2.0);
+
     for (int n = 0; n < m_num_amr_levels; n++) {
 
         // Grid-scale curl-curl surrogate diagonal kg2 = sum_d 4/dx_d^2
@@ -424,7 +442,10 @@ void HallJacobiPC<T,Ops>::Update (const T& a_U)
 
                     c_arr(i,j,k,0) = RT(1.0) + mm_diag
                         + theta_dt*kg2/static_cast<RT>(PhysConst::mu0)
-                          * (eta0 + etah0*kg2);
+                          * (eta0 + etah0*kg2)
+                        + s_inertia*kg2*me_eff
+                          / (static_cast<RT>(PhysConst::mu0)
+                             * static_cast<RT>(PhysConst::q_e) * rho_lim);
                     c_arr(i,j,k,1) = beta;
                     c_arr(i,j,k,2) = bhx;
                     c_arr(i,j,k,3) = bhy;
