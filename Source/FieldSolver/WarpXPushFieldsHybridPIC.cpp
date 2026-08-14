@@ -7,6 +7,7 @@
  *
  * License: BSD-3-Clause-LBNL
  */
+#include "Circuit/CircuitCoupling.H"
 #include "Fields.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "Particles/MultiParticleContainer.H"
@@ -53,6 +54,12 @@ void WarpX::HybridPICEvolveFields ()
                     0, 0, 1,
                     m_fields.get(FieldType::Bfield_fp, Direction{idim}, lev)->nGrowVect());
             }
+        }
+
+        // Open the circuit-coupling step on the plasma-frame fields: the
+        // engine seeds its linkage registers at t^n and snapshots its state.
+        if (m_circuit_coupling && m_circuit_coupling->Coupler()) {
+            m_circuit_coupling->Coupler()->BeginStep(gett_old(0), dt[0]);
         }
     }
 
@@ -186,6 +193,12 @@ void WarpX::HybridPICEvolveFields ()
         m_fields.get_mr_levels(FieldType::rho_fp, finest_level),
         m_eb_update_E, false);
     FillBoundaryE(guard_cells.ng_FieldSolver, WarpX::sync_nodal_points);
+
+    // Close the circuit-coupling step on the accepted plasma-frame fields
+    // (the engine commits its histories and per-step bookkeeping).
+    if (add_external_fields && m_circuit_coupling && m_circuit_coupling->Coupler()) {
+        m_circuit_coupling->Coupler()->FinishStep();
+    }
 
     // Handle field splitting for Hybrid field push
     if (add_external_fields) {

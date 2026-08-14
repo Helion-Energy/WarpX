@@ -4,5 +4,6 @@ foreach(D IN LISTS WarpX_DIMS)
       PRIVATE
         CoilFieldSolver.cpp
         CoilSet.cpp
+        FluxProbes.cpp
     )
 endforeach()

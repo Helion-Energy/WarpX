@@ -11,7 +11,9 @@
 #include "Coils/CoilFieldSolver.H"
 #include "Coils/LoopInductance.H"
 
+#include "BoundaryConditions/GreensFunctionOpenBC.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
+#include "Utils/Parser/ParserUtils.H"
 #include "Utils/TextMsg.H"
 #include "WarpX.H"
 
@@ -21,7 +23,40 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <utility>
 #include <vector>
+
+#if !defined(_WIN32)
+#   include <dlfcn.h>
+#endif
+
+namespace
+{
+    /** Load a compiled ExternalCircuit engine from a shared library
+     * exporting the C factory symbol warpx_create_external_circuit. */
+    std::unique_ptr<ExternalCircuit>
+    LoadExternalCircuitPlugin (std::string const& path)
+    {
+#if defined(_WIN32)
+        amrex::ignore_unused(path);
+        WARPX_ABORT_WITH_MESSAGE(
+            "circuit.engine = external is not supported on Windows");
+        return nullptr;
+#else
+        void* handle = dlopen(path.c_str(), RTLD_NOW);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(handle != nullptr,
+            "circuit.plugin_library: could not load '" + path + "': " +
+            std::string(dlerror()));
+        // NOLINTNEXTLINE(performance-no-int-to-ptr)
+        auto factory = reinterpret_cast<warpx_create_external_circuit_t>(
+            dlsym(handle, "warpx_create_external_circuit"));
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(factory != nullptr,
+            "circuit.plugin_library: '" + path + "' does not export "
+            "warpx_create_external_circuit");
+        return std::unique_ptr<ExternalCircuit>(factory());
+#endif
+    }
+}
 
 bool
 CircuitCoupling::IsConfigured ()
@@ -35,6 +70,22 @@ CircuitCoupling::IsConfigured ()
 CircuitCoupling::CircuitCoupling ()
 {
     m_coils.ReadParameters();
+
+    const amrex::ParmParse pp_circuit("circuit");
+    pp_circuit.query("engine", m_engine);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_engine == "none" || m_engine == "callbacks" || m_engine == "external",
+        "circuit.engine must be one of: none, callbacks, external");
+    if (m_engine == "external") {
+        pp_circuit.get("plugin_library", m_plugin_library);
+    }
+    utils::parser::queryWithParser(pp_circuit,
+        "coupling.corrector_iterations", m_coupler_params.corrector_iterations);
+    utils::parser::queryWithParser(pp_circuit,
+        "coupling.corrector_rtol", m_coupler_params.corrector_rtol);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_coupler_params.corrector_iterations >= 0,
+        "circuit.coupling.corrector_iterations must be >= 0");
 }
 
 void
@@ -148,4 +199,75 @@ CircuitCoupling::InitData ()
                        << "geometry)\n";
     }
 #endif
+
+    // Resolve the per-coil linkage probes. The reciprocity probe is exact
+    // only in free space: it requires the Green's-function open boundary
+    // (a conducting wall's image response is not in the unit A).
+    const bool open_bc = GreensFunctionOpenBC::IsActive();
+    const amrex::ParmParse pp_circuit("circuit");
+    m_probes.assign(m_coils.size(), ProbeKind::none);
+    for (int ic = 0; ic < m_coils.size(); ++ic) {
+        const Coil& c = m_coils.coil(ic);
+        std::string probe = "default";
+        pp_circuit.query((c.name + ".probe").c_str(), probe);
+        if (probe == "default") {
+            probe = open_bc ? "reciprocity" : "disk";
+        }
+        if (probe == "none") {
+            m_probes[ic] = ProbeKind::none;
+        } else if (probe == "disk") {
+            m_probes[ic] = ProbeKind::disk;
+        } else if (probe == "reciprocity") {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(open_bc,
+                "circuit." + c.name + ".probe = reciprocity requires the "
+                "Green's-function open field boundary (free-space "
+                "reciprocity is invalid against a conducting wall); use "
+                "the disk probe instead");
+            m_probes[ic] = ProbeKind::reciprocity;
+        } else {
+            WARPX_ABORT_WITH_MESSAGE(
+                "circuit." + c.name + ".probe must be one of: default, "
+                "disk, reciprocity, none");
+        }
+    }
+
+    // Construct the coupling engine.
+    if (m_engine != "none") {
+#if !defined(WARPX_DIM_RZ)
+        WARPX_ABORT_WITH_MESSAGE(
+            "the circuit coupling engine (circuit.engine) is implemented "
+            "for RZ geometry");
+#else
+        // The coupled (measured) coils must be scale-driven: the engine
+        // pushes their segments every coupling interval.
+        for (int ic = 0; ic < m_coils.size(); ++ic) {
+            if (m_probes[ic] == ProbeKind::none) { continue; }
+            const Coil& c = m_coils.coil(ic);
+            bool scale_driven = false;
+            for (int i = 0; i < ext.nFields(); ++i) {
+                if (ext.FieldName(i) == c.field_name) {
+                    scale_driven = ext.UsesPythonScale(i);
+                    break;
+                }
+            }
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(scale_driven,
+                "coupled circuit coil '" + c.name + "' requires "
+                "external_vector_potential." + c.field_name +
+                ".python_scale = 1 (the engine drives its scale segments)");
+        }
+
+        std::unique_ptr<ExternalCircuit> plugin;
+        if (m_engine == "external") {
+            plugin = LoadExternalCircuitPlugin(m_plugin_library);
+        }
+        m_coupler = std::make_unique<CircuitCoupler>(
+            m_coils, m_probes, m_coupler_params, std::move(plugin));
+        amrex::Print() << "Circuit coupling engine: " << m_engine
+                       << " (corrector_iterations = "
+                       << m_coupler_params.corrector_iterations
+                       << ", corrector_rtol = "
+                       << m_coupler_params.corrector_rtol << ")\n";
+#endif
+    }
 }
+
