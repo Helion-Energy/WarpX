@@ -311,6 +311,30 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# live Spitzer sweep on the parser Te symbol: circularly-polarized mode
+# decay slows by (Te/Te0)^-1.5 as its own Joule heat raises Te
+add_warpx_test(
+    test_1d_theta_implicit_mhd_spitzer_decay  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_spitzer_decay  # inputs
+    "analysis_mhd_spitzer_decay.py diags"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# run32-form Chodura anomalous resistivity (J/rho-keyed, smooth
+# saturation and guards) on the tangential-discontinuity current sheets
+add_warpx_test(
+    test_1d_theta_implicit_mhd_chodura_sheet  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_chodura_sheet  # inputs
+    "analysis_mhd_chodura_sheet.py diags/diag000000 diags/diag000100"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # density-keyed vacuum resistivity + resistive backward-Euler centering:
 # one-step transverse-mode decay matches the theta_r-discrete prediction
 # 1/(1+z) (not the trapezoidal value), with no electron heating from the

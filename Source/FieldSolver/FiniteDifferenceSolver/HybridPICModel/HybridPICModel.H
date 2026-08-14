@@ -534,11 +534,18 @@ public:
     /** Include -grad(P_e)/(e n_e) in generalized Ohm's law. */
     bool m_include_electron_pressure_term = true;
 
-    /** Plasma resistivity */
+    /** Plasma resistivity eta(rho, Te, J, t): charge density rho (C/m^3),
+     *  electron temperature Te (K, from hybrid_electron_temperature_fp at
+     *  the density argument's location), current magnitude J (A/m^2), and
+     *  time t (s). Accepted input keys: plasma_resistivity(rho,J,t)
+     *  (legacy) or plasma_resistivity(rho,Te,J,t). Expressions must be
+     *  C-infinity in the state symbols (rho, Te, J) -- smooth floors, no
+     *  max()/if() -- for the implicit solvers' matrix-free Jacobians. */
     std::string m_eta_expression = "0.0";
     std::unique_ptr<amrex::Parser> m_resistivity_parser;
-    amrex::ParserExecutor<3> m_eta;
+    amrex::ParserExecutor<4> m_eta;
     bool m_resistivity_has_J_dependence = false;
+    bool m_resistivity_has_Te_dependence = false;
 
     /** Per-species resistivity overlay (see Phys. Plasmas 31, 012902 (2024), Eq. 10).
      *  Optional. For any charged species {spec} for which the user provides
@@ -549,7 +556,7 @@ public:
      *  effective resistivity used by Ohm's law, the Joule-heating source,
      *  and the resistive-drag operator is
      *
-     *      eta_s_eff = eta_global(rho, |J|, t)              [the global m_eta]
+     *      eta_s_eff = eta_global(rho, Te, |J|, t)          [the global m_eta]
      *                + eta_per_species_s(rho_s, rho, Te,    [this map]
      *                                    |J|, |J_s|, |B|, t)
      *

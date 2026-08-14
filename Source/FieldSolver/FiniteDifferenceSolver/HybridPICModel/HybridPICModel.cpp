@@ -79,7 +79,22 @@ void HybridPICModel::ReadParameters ()
         Abort("hybrid_pic_model.n0_ref should be specified if hybrid_pic_model.gamma != 1");
     }
 
-    pp_hybrid.query("plasma_resistivity(rho,J,t)", m_eta_expression);
+    // Global resistivity parser. Two input keys are accepted: the legacy
+    // signature (rho,J,t) and the extended (rho,Te,J,t) which adds the
+    // electron temperature symbol Te [K] (the same symbol and unit
+    // convention as the per-species overlay parsers and nu_ei). Both
+    // compile against the full symbol set; supplying both keys is an
+    // input error.
+    {
+        const bool has_legacy_eta =
+            pp_hybrid.query("plasma_resistivity(rho,J,t)", m_eta_expression);
+        const bool has_te_eta = pp_hybrid.query(
+            "plasma_resistivity(rho,Te,J,t)", m_eta_expression);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !(has_legacy_eta && has_te_eta),
+            "Specify either hybrid_pic_model.plasma_resistivity(rho,J,t) or "
+            "plasma_resistivity(rho,Te,J,t), not both");
+    }
     pp_hybrid.query("plasma_hyper_resistivity(rho,B)", m_eta_h_expression);
     pp_hybrid.query("include_hall_term", m_include_hall_term);
     pp_hybrid.query("include_electron_pressure_term", m_include_electron_pressure_term);
@@ -377,11 +392,19 @@ void HybridPICModel::AllocateLevelMFs (
 
 void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
 {
+    // Symbol order (rho, Te, J, t): Te is the electron temperature in
+    // KELVIN, read from hybrid_electron_temperature_fp at the same
+    // locations/staggering the density argument is evaluated (matching
+    // the per-species overlay and nu_ei conventions). Expressions must
+    // stay C-infinity in every state symbol for the matrix-free JFNK
+    // Jacobian probes of the implicit solvers: use smooth floors, e.g.
+    // (Te^2 + Tf^2)^(-0.75) instead of max(Te,Tf)^(-1.5).
     m_resistivity_parser = std::make_unique<amrex::Parser>(
-        utils::parser::makeParser(m_eta_expression, {"rho","J","t"}));
-    m_eta = m_resistivity_parser->compile<3>();
+        utils::parser::makeParser(m_eta_expression, {"rho","Te","J","t"}));
+    m_eta = m_resistivity_parser->compile<4>();
     const std::set<std::string> resistivity_symbols = m_resistivity_parser->symbols();
     m_resistivity_has_J_dependence += resistivity_symbols.count("J");
+    m_resistivity_has_Te_dependence += resistivity_symbols.count("Te");
 
     // Electron-ion energy-equilibration rate nu_ei(rho,Te,Ti,t) for the Q_ei term.
     m_nu_ei_parser = std::make_unique<amrex::Parser>(
@@ -426,7 +449,7 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
         // eta, and which additionally have a per-species overlay.
         if (amrex::ParallelDescriptor::IOProcessor()) {
             amrex::Print() << "\n[HybridPICModel] Resistivity configuration\n";
-            amrex::Print() << "  global plasma_resistivity(rho,J,t) = "
+            amrex::Print() << "  global plasma_resistivity(rho,Te,J,t) = "
                            << m_eta_expression << "\n";
             if (m_has_per_species_eta) {
                 amrex::Print() << "  per-species overlays (eta_s_eff = "
@@ -1571,7 +1594,7 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
                 // eta_global: same Ohm's-law parser the E-solve uses, evaluated
                 // per cell. This makes the per-cell heat reduce to eta J^2
                 // exactly in single species (when no per-species overlay).
-                amrex::Real eta_s_eff = eta(rho_val, Jmag, t_new);
+                amrex::Real eta_s_eff = eta(rho_val, Te_arr(i,j,k), Jmag, t_new);
 
                 // e-i relative drift = J_plasma/(e n_e), from the nodal plasma
                 // current and n_e. Energy-consistent with the eta*J dissipation

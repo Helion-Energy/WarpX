@@ -4961,6 +4961,29 @@ Jacobian probes.
     :optional:
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the plasma resistivity in :math:`\Omega m`.
+    The expression may use the charge density ``rho`` (:math:`C/m^3`), the
+    current-density magnitude ``J`` (:math:`A/m^2`), and the time ``t``
+    (:math:`s`).
+
+.. pp:param:: hybrid_pic_model.plasma_resistivity(rho,Te,J,t)
+    :type: ``float`` or ``str``
+    :default: ``0``
+    :optional:
+
+    Extended signature of :pp:param:`hybrid_pic_model.plasma_resistivity(rho,J,t)`
+    (supply one or the other, not both) adding the electron temperature
+    ``Te`` in Kelvin, read from the nodal electron-temperature register at
+    the same locations and staggering as the density argument (for
+    ``theta_implicit_mhd`` this is the temperature-primary
+    :math:`T_e = p_e/(n_f k_B)` of the evolving solver state, so
+    e.g. Spitzer :math:`\eta \propto T_e^{-3/2}` sweeps respond live to
+    Joule heating). All state symbols (``rho``, ``Te``, ``J``) must enter
+    through smooth (:math:`C^\infty`) expressions for the implicit solvers'
+    matrix-free Jacobian probes: use smooth floors such as
+    ``(Te^2 + Tf^2)^(-0.75)`` instead of ``max(Te, Tf)^(-1.5)``. The
+    implicit preconditioners evaluate the same parser with the state frozen
+    at the preconditioner update (the standard lagged-coefficient
+    treatment).
 
 .. pp:param:: hybrid_pic_model.plasma_hyper_resistivity(rho,B)
     :type: ``float`` or ``str``

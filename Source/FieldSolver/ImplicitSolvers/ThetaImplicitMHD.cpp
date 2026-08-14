@@ -1014,7 +1014,13 @@ ThetaImplicitMHD::GetMHDReferenceResistivityForPC (const amrex::Real time) const
         "ThetaImplicitMHD reference resistivity requested before Define()");
     const amrex::Real reference_charge_density =
         m_ion_charge_to_mass * m_reference_mass_density;
-    return m_hybrid_pic_model->m_eta(reference_charge_density, 0.0_rt, time);
+    // Reference Te [K] for the (rho, Te, J, t) parser: the hybrid seed
+    // temperature (hybrid_pic_model.elec_temp, stored in J), matching the
+    // uniform value hybrid_electron_temperature_fp is initialized with.
+    const amrex::Real reference_temperature =
+        m_hybrid_pic_model->m_elec_temp / PhysConst::kb;
+    return m_hybrid_pic_model->m_eta(reference_charge_density,
+                                     reference_temperature, 0.0_rt, time);
 }
 
 const amrex::MultiFab*
@@ -1043,10 +1049,16 @@ ThetaImplicitMHD::GetMHDFieldResistivityCCForPC (const amrex::Real time) const
         m_ion_charge_to_mass * m_mass_density_floor;
     const amrex::Real vacuum_eta_scale =
         PhysConst::mu0 * m_vacuum_resistivity_diffusivity;
+    // Te [K] frozen at the preconditioner update state: the cell-centered
+    // temperature-primary scratch, refreshed by the last FillFluidSources
+    // (the PC never differentiates eta; the standard frozen-eta lag).
+    const amrex::MultiFab& temperature_cc =
+        *m_WarpX->m_fields.get(ElectronTemperatureCCName, 0);
     for (amrex::MFIter mfi(resistivity); mfi.isValid(); ++mfi) {
         const amrex::Box box = mfi.validbox();
         const auto eta_field = resistivity.array(mfi);
         const auto rho = density.const_array(mfi);
+        const auto te_cc = temperature_cc.const_array(mfi);
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
             const amrex::Real charge_density_raw =
                 charge_to_mass * rho(i, j, k);
@@ -1054,7 +1066,7 @@ ThetaImplicitMHD::GetMHDFieldResistivityCCForPC (const amrex::Real time) const
                 std::max(charge_density_raw, charge_density_floor);
             eta_field(i, j, k) =
                 theta_implicit_mhd::vacuum_keyed_resistivity(
-                    eta(charge_density_value, 0.0_rt, time),
+                    eta(charge_density_value, te_cc(i, j, k), 0.0_rt, time),
                     charge_density_raw, charge_density_floor,
                     vacuum_division_guard, vacuum_eta_scale);
         });
@@ -1078,6 +1090,11 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
     // unity across halo density gradients. Evaluated at zero current
     // magnitude like the cell-centered variant.
     const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
+    // Te [K] frozen at the preconditioner update state, interpolated to the
+    // staggering points with the same stencils as the density (eta AT the
+    // interpolated arguments, matching the residual's Ohm assembly).
+    const amrex::MultiFab& temperature_cc =
+        *m_WarpX->m_fields.get(ElectronTemperatureCCName, 0);
     const auto eta = m_hybrid_pic_model->m_eta;
     const amrex::Real charge_to_mass = m_ion_charge_to_mass;
     const amrex::Real charge_density_floor =
@@ -1093,14 +1110,17 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
         const amrex::Box box = mfi.validbox();
         const auto eta_field = node_resistivity.array(mfi);
         const auto rho = density.const_array(mfi);
+        const auto te_cc = temperature_cc.const_array(mfi);
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
             const amrex::Real charge_density_raw =
                 charge_to_mass * 0.5_rt * (rho(i - 1, j, k) + rho(i, j, k));
             const amrex::Real charge_density_value =
                 std::max(charge_density_raw, charge_density_floor);
+            const amrex::Real temperature =
+                0.5_rt * (te_cc(i - 1, j, k) + te_cc(i, j, k));
             eta_field(i, j, k) =
                 theta_implicit_mhd::vacuum_keyed_resistivity(
-                    eta(charge_density_value, 0.0_rt, time),
+                    eta(charge_density_value, temperature, 0.0_rt, time),
                     charge_density_raw, charge_density_floor,
                     vacuum_division_guard, vacuum_eta_scale);
         });
@@ -1121,6 +1141,7 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
         const auto eta_azimuthal = azimuthal_resistivity.array(mfi);
         const auto eta_axial = axial_resistivity.array(mfi);
         const auto rho = density.const_array(mfi);
+        const auto te_cc = temperature_cc.const_array(mfi);
         // E_theta corners: the nodal rho_fp value itself.
         amrex::ParallelFor(
             amrex::convert(mfi.validbox(), amrex::IntVect(1, 1)),
@@ -1129,13 +1150,18 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
                     return 0.25_rt * (rho(in - 1, jn - 1, k) + rho(in, jn - 1, k) +
                                       rho(in - 1, jn, k) + rho(in, jn, k));
                 };
+                const auto node_temperature = [&] (const int in, const int jn) {
+                    return 0.25_rt * (te_cc(in - 1, jn - 1, k) + te_cc(in, jn - 1, k) +
+                                      te_cc(in - 1, jn, k) + te_cc(in, jn, k));
+                };
                 const amrex::Real charge_density_raw =
                     charge_to_mass * node_density(i, j);
                 const amrex::Real charge_density_value =
                     std::max(charge_density_raw, charge_density_floor);
                 eta_azimuthal(i, j, k) =
                     theta_implicit_mhd::vacuum_keyed_resistivity(
-                        eta(charge_density_value, 0.0_rt, time),
+                        eta(charge_density_value, node_temperature(i, j),
+                            0.0_rt, time),
                         charge_density_raw, charge_density_floor,
                         vacuum_division_guard, vacuum_eta_scale);
             });
@@ -1147,14 +1173,20 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
                     return 0.25_rt * (rho(in - 1, jn - 1, k) + rho(in, jn - 1, k) +
                                       rho(in - 1, jn, k) + rho(in, jn, k));
                 };
+                const auto node_temperature = [&] (const int in, const int jn) {
+                    return 0.25_rt * (te_cc(in - 1, jn - 1, k) + te_cc(in, jn - 1, k) +
+                                      te_cc(in - 1, jn, k) + te_cc(in, jn, k));
+                };
                 const amrex::Real charge_density_raw =
                     charge_to_mass * 0.5_rt *
                     (node_density(i, j) + node_density(i + 1, j));
                 const amrex::Real charge_density_value =
                     std::max(charge_density_raw, charge_density_floor);
+                const amrex::Real temperature = 0.5_rt *
+                    (node_temperature(i, j) + node_temperature(i + 1, j));
                 eta_radial(i, j, k) =
                     theta_implicit_mhd::vacuum_keyed_resistivity(
-                        eta(charge_density_value, 0.0_rt, time),
+                        eta(charge_density_value, temperature, 0.0_rt, time),
                         charge_density_raw, charge_density_floor,
                         vacuum_division_guard, vacuum_eta_scale);
             });
@@ -1166,21 +1198,28 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
                     return 0.25_rt * (rho(in - 1, jn - 1, k) + rho(in, jn - 1, k) +
                                       rho(in - 1, jn, k) + rho(in, jn, k));
                 };
+                const auto node_temperature = [&] (const int in, const int jn) {
+                    return 0.25_rt * (te_cc(in - 1, jn - 1, k) + te_cc(in, jn - 1, k) +
+                                      te_cc(in - 1, jn, k) + te_cc(in, jn, k));
+                };
                 const amrex::Real charge_density_raw =
                     charge_to_mass * 0.5_rt *
                     (node_density(i, j) + node_density(i, j + 1));
                 const amrex::Real charge_density_value =
                     std::max(charge_density_raw, charge_density_floor);
+                const amrex::Real temperature = 0.5_rt *
+                    (node_temperature(i, j) + node_temperature(i, j + 1));
                 eta_axial(i, j, k) =
                     theta_implicit_mhd::vacuum_keyed_resistivity(
-                        eta(charge_density_value, 0.0_rt, time),
+                        eta(charge_density_value, temperature, 0.0_rt, time),
                         charge_density_raw, charge_density_floor,
                         vacuum_division_guard, vacuum_eta_scale);
             });
     }
     return {&radial_resistivity, &azimuthal_resistivity, &axial_resistivity};
 #else
-    amrex::ignore_unused(density, eta, charge_to_mass, charge_density_floor,
+    amrex::ignore_unused(density, temperature_cc, eta, charge_to_mass,
+                         charge_density_floor,
                          vacuum_division_guard, vacuum_eta_scale, time);
     return {nullptr, nullptr, nullptr};
 #endif
@@ -2948,10 +2987,17 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
             const amrex::Real current_magnitude = std::sqrt(jx * jx + jy * jy + jz * jz);
             const amrex::Real charge_density =
                 charge_to_mass * std::max(rho(i, j, k), eta_density_floor);
-            const amrex::Real joule_heating = include_joule_heating
-                                                  ? eta(charge_density, current_magnitude, time) *
-                                                        current_magnitude * current_magnitude
-                                                  : 0.0_rt;
+            // Te [K] of the (rho, Te, J, t) parser: the same
+            // temperature-primary cell ratio as FillFluidSources, from the
+            // already-recovered pressure over the already-floored density.
+            const amrex::Real temperature_e =
+                pressure_e * PhysConst::q_e / (charge_density * PhysConst::kb);
+            const amrex::Real joule_heating =
+                include_joule_heating
+                    ? eta(charge_density, temperature_e, current_magnitude,
+                          time) *
+                          current_magnitude * current_magnitude
+                    : 0.0_rt;
             amrex::Real pressure_work =
                 -pressure_e * divergence_electron_velocity;
             const bool guard_floors =
@@ -3764,6 +3810,11 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                                       Direction{2}, 0));
     const amrex::MultiFab& charge_density =
         *m_WarpX->m_fields.get(FieldType::rho_fp, 0);
+    // Te [K] of the (rho, Te, J, t) parser: the temperature-primary nodal
+    // register (same staggering as rho_fp), read/averaged with exactly the
+    // rho_q stencils at every eta evaluation point of this assembly.
+    const amrex::MultiFab& electron_temperature =
+        *m_WarpX->m_fields.get(FieldType::hybrid_electron_temperature_fp, 0);
     const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
     const amrex::MultiFab& momentum =
         *m_WarpX->m_fields.get(MomentumDensityName, 0);
@@ -3810,6 +3861,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto j_y = current_y.const_array(mfi);
         const auto j_z = current_z.const_array(mfi);
         const auto rho_q = charge_density.const_array(mfi);
+        const auto te_nodal = electron_temperature.const_array(mfi);
         const auto b_cc = magnetic_cc.const_array(mfi);
         const auto flux_arr = face_flux_mf.const_array(mfi);
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
@@ -3822,7 +3874,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 std::max(rho_q(i, j, k), charge_density_floor);
             const amrex::Real resistivity =
                 theta_implicit_mhd::vacuum_keyed_resistivity(
-                    eta(charge_density_value, current_magnitude, time),
+                    eta(charge_density_value, te_nodal(i, j, k),
+                        current_magnitude, time),
                     rho_q(i, j, k), charge_density_floor,
                     vacuum_division_guard, vacuum_eta_scale);
             electric_x(i, j, k) =
@@ -3866,6 +3919,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto j_y = current_y.const_array(mfi);
         const auto j_z = current_z.const_array(mfi);
         const auto rho_q = charge_density.const_array(mfi);
+        const auto te_nodal = electron_temperature.const_array(mfi);
         const auto rho = density.const_array(mfi);
         const auto mom = momentum.const_array(mfi);
         const auto b_cc = magnetic_cc.const_array(mfi);
@@ -3879,9 +3933,12 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 0.5_rt * (rho_q(i, j, k) + rho_q(i + 1, j, k));
             const amrex::Real charge_density_value =
                 std::max(charge_density_raw, charge_density_floor);
+            const amrex::Real temperature_e =
+                0.5_rt * (te_nodal(i, j, k) + te_nodal(i + 1, j, k));
             const amrex::Real resistivity =
                 theta_implicit_mhd::vacuum_keyed_resistivity(
-                    eta(charge_density_value, current_magnitude, time),
+                    eta(charge_density_value, temperature_e,
+                        current_magnitude, time),
                     charge_density_raw, charge_density_floor,
                     vacuum_division_guard, vacuum_eta_scale);
             const amrex::Real safe_density =
@@ -3972,6 +4029,11 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                                       Direction{2}, 0));
     const amrex::MultiFab& charge_density =
         *m_WarpX->m_fields.get(FieldType::rho_fp, 0);
+    // Te [K] of the (rho, Te, J, t) parser: the temperature-primary nodal
+    // register (same staggering as rho_fp), read/averaged with exactly the
+    // rho_q stencils at every eta evaluation point of this assembly.
+    const amrex::MultiFab& electron_temperature =
+        *m_WarpX->m_fields.get(FieldType::hybrid_electron_temperature_fp, 0);
     const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
     const amrex::MultiFab& momentum =
         *m_WarpX->m_fields.get(MomentumDensityName, 0);
@@ -4044,6 +4106,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto j_theta = current_theta.const_array(mfi);
         const auto j_z = current_z.const_array(mfi);
         const auto rho_q = charge_density.const_array(mfi);
+        const auto te_nodal = electron_temperature.const_array(mfi);
         const auto b_cc = magnetic_cc.const_array(mfi);
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
             const amrex::Real jr = j_r(i, j, k);
@@ -4059,9 +4122,12 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 0.5_rt * (rho_q(i, j, k) + rho_q(i + 1, j, k));
             const amrex::Real charge_density_value =
                 std::max(charge_density_raw, charge_density_floor);
+            const amrex::Real temperature_e =
+                0.5_rt * (te_nodal(i, j, k) + te_nodal(i + 1, j, k));
             const amrex::Real resistivity =
                 theta_implicit_mhd::vacuum_keyed_resistivity(
-                    eta(charge_density_value, current_magnitude, time),
+                    eta(charge_density_value, temperature_e,
+                        current_magnitude, time),
                     charge_density_raw, charge_density_floor,
                     vacuum_division_guard, vacuum_eta_scale);
             electric_r(i, j, k) =
@@ -4110,6 +4176,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto j_theta = current_theta.const_array(mfi);
         const auto j_z = current_z.const_array(mfi);
         const auto rho_q = charge_density.const_array(mfi);
+        const auto te_nodal = electron_temperature.const_array(mfi);
         const auto b_cc = magnetic_cc.const_array(mfi);
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
             // r-index of the lower cell column; clamped at the physical
@@ -4129,9 +4196,12 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 0.5_rt * (rho_q(i, j, k) + rho_q(i, j + 1, k));
             const amrex::Real charge_density_value =
                 std::max(charge_density_raw, charge_density_floor);
+            const amrex::Real temperature_e =
+                0.5_rt * (te_nodal(i, j, k) + te_nodal(i, j + 1, k));
             const amrex::Real resistivity =
                 theta_implicit_mhd::vacuum_keyed_resistivity(
-                    eta(charge_density_value, current_magnitude, time),
+                    eta(charge_density_value, temperature_e,
+                        current_magnitude, time),
                     charge_density_raw, charge_density_floor,
                     vacuum_division_guard, vacuum_eta_scale);
             electric_z(i, j, k) =
@@ -4195,6 +4265,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto j_theta = current_theta.const_array(mfi);
         const auto j_z = current_z.const_array(mfi);
         const auto rho_q = charge_density.const_array(mfi);
+        const auto te_nodal = electron_temperature.const_array(mfi);
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
             const amrex::Real corner_radius =
                 radial_lower + i * radial_cell_size;
@@ -4324,7 +4395,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 std::max(rho_q(i, j, k), charge_density_floor);
             const amrex::Real resistivity =
                 theta_implicit_mhd::vacuum_keyed_resistivity(
-                    eta(charge_density_value, current_magnitude, time),
+                    eta(charge_density_value, te_nodal(i, j, k),
+                        current_magnitude, time),
                     rho_q(i, j, k), charge_density_floor,
                     vacuum_division_guard, vacuum_eta_scale);
             electric_theta(i, j, k) =
@@ -5008,9 +5080,15 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 std::sqrt(jx * jx + jy * jy + jz * jz);
             const amrex::Real charge_density =
                 charge_to_mass * std::max(rho(i, j, k), eta_density_floor);
+            // Te [K] of the (rho, Te, J, t) parser: the same
+            // temperature-primary cell ratio as FillFluidSources, from the
+            // already-recovered pressure over the already-floored density.
+            const amrex::Real temperature_e =
+                pressure_e * PhysConst::q_e / (charge_density * PhysConst::kb);
             const amrex::Real joule_heating =
                 include_joule_heating
-                    ? eta(charge_density, current_magnitude, time) *
+                    ? eta(charge_density, temperature_e, current_magnitude,
+                          time) *
                           current_magnitude * current_magnitude
                     : 0.0_rt;
             amrex::Real pressure_work =

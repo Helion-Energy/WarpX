@@ -1,0 +1,122 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Live Spitzer-keyed resistive decay: eta = etaC * Te^-1.5 evaluated on
+# the PARSER Te symbol (the evolving temperature-primary electron
+# temperature), on a warm uniform state carrying a circularly-polarized
+# transverse B mode. |J|^2 is exactly uniform (sin^2 + cos^2 on the same
+# staggering), so Joule heating keeps Te uniform and the decay stays a
+# clean single mode: gamma(t) = eta(Te(t)) k_eff^2 / mu0. As the
+# resistive loss heats the electrons the decay SLOWS by (Te/Te0)^-1.5 --
+# the live-coupling signature the analysis asserts window by window.
+# The magnetic energy reservoir dB^2/mu0 equals the initial thermal
+# energy, so Te roughly doubles over the run.
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+my_constants.Te0 = 2.0
+my_constants.Pe0 = n0 * Te0 * q_e
+my_constants.gamma_e = 5.0/3.0
+my_constants.dB = sqrt(mu0 * Pe0 / (gamma_e - 1.0))
+my_constants.nz = 64
+my_constants.Lz = 1.0
+my_constants.dz = Lz/nz
+my_constants.k = 2*pi/Lz
+my_constants.k_eff = 2*sin(k*dz/2)/dz
+# Kelvin per eV (the parser Te symbol is in K)
+my_constants.K_per_eV = 11604.51812
+# smooth Te floor far below the operating range: pure Te^-1.5 regime
+my_constants.Tf_eV = 0.02
+# eta(Te0) = 1.0e-6 Ohm m
+my_constants.etaC = 1.0e-6 * Te0^1.5
+my_constants.gamma0 = etaC * Te0^(-1.5) * k_eff^2 / mu0
+my_constants.dt = 0.1 / gamma0
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 80
+amr.n_cell = nz
+amr.max_grid_size = nz
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-11
+newton.max_iterations = 12
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-11
+gmres.max_iterations = 200
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te0
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma_e
+hybrid_pic_model.n_floor = 1.0e8
+# LIVE Spitzer sweep on the parser Te (in K): C-infinity smooth floor,
+# (Te_eV^2 + Tf^2)^(-3/4) -> Te^-1.5 for Te >> Tf (never max()).
+# NOTE: the expression must be a single ParmParse token (quoted).
+hybrid_pic_model.plasma_resistivity(rho,Te,J,t) = "etaC*((Te/K_per_eV)^2 + Tf_eV^2)^(-0.75)"
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = dB
+implicit_mhd.gamma_e = gamma_e
+implicit_mhd.gamma_i = gamma_e
+implicit_mhd.reference_ion_pressure = 0.0
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.electron_pressure(x,y,z) = Pe0
+implicit_mhd.evolve_ion_fluid = false
+implicit_mhd.fluid_flux = central
+# required by the central flux; inert here (u = 0, frozen ions)
+implicit_mhd.viscosity = 0.5
+implicit_mhd.include_joule_heating = true
+
+warpx.B_ext_grid_init_style = parse_B_ext_grid_function
+warpx.Bx_external_grid_function(x,y,z) = dB*sin(k*z)
+warpx.By_external_grid_function(x,y,z) = dB*cos(k*z)
+warpx.Bz_external_grid_function(x,y,z) = 0.0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 4
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bx By Bz implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy
+diag1.write_species = 0

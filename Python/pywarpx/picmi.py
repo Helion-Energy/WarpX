@@ -2678,7 +2678,12 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
     plasma_resistivity: float or str
         Value or expression to use for the plasma resistivity in Ohm*m.
         Can be a constant value or an expression depending on ``rho`` (charge density),
-        ``J`` (current density magnitude), and ``t`` (simulation time).
+        ``Te`` (electron temperature in Kelvin, from the nodal temperature
+        register), ``J`` (current density magnitude), and ``t`` (simulation
+        time). State-dependent expressions (``rho``, ``Te``, ``J``) must be
+        smooth (C-infinity) for the implicit solvers' matrix-free Jacobians:
+        use smooth floors like ``(Te**2 + Tf**2)**(-0.75)`` rather than
+        ``max()``.
 
     plasma_hyper_resistivity: float or str
         Value or expression to use for the plasma hyper-resistivity in Ohm*m^3.
@@ -2925,7 +2930,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
             self.include_electron_pressure_term
         )
         pywarpx.hybridpicmodel.__setattr__(
-            "plasma_resistivity(rho,J,t)",
+            "plasma_resistivity(rho,Te,J,t)",
             pywarpx.my_constants.mangle_expression(
                 self.plasma_resistivity, self.mangle_dict
             ),

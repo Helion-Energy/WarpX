@@ -54,6 +54,8 @@ HybridResistiveDrag::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, Mul
         "HybridResistiveDrag requires the hybrid-PIC solver to be active.");
 
     auto const eta_func = hybrid_model->m_eta;
+    bool const resistivity_has_Te_dependence =
+        hybrid_model->m_resistivity_has_Te_dependence;
     auto const t_now    = warpx.gett_new(0);
 
     // Per-species resistivity overlay (Phys. Plasmas 31, 012902 (2024), Eq. 10):
@@ -181,7 +183,14 @@ HybridResistiveDrag::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, Mul
                 if (rho_val <= rho_floor) { return; }
 
                 amrex::Real const Jmag = std::sqrt(Jxp*Jxp + Jyp*Jyp + Jzp*Jzp);
-                amrex::Real eta_s_eff = eta_func(rho_val, Jmag, t_now);
+                // T_e (K) gathered from the nodal register wherever any
+                // active resistivity parser carries the Te symbol.
+                amrex::Real const Te_val =
+                    (resistivity_has_Te_dependence || has_eta_per)
+                        ? ablastr::particles::doGatherScalarFieldNodal(
+                              xp, yp, zp, Te_arr, dxi, plo)
+                        : 0.0_rt;
+                amrex::Real eta_s_eff = eta_func(rho_val, Te_val, Jmag, t_now);
 
                 // Per-species overlay: add eta_s_per(rho_s, rho, Te, |J|,
                 // |J_s|, |B|, t) to eta_s_eff when registered for this
@@ -191,8 +200,6 @@ HybridResistiveDrag::doCollisions (amrex::Real /*cur_time*/, amrex::Real dt, Mul
                 if (has_eta_per) {
                     amrex::Real const rhos_val = ablastr::particles::doGatherScalarFieldNodal(
                         xp, yp, zp, rhos_arr, dxi, plo);
-                    amrex::Real const Te_val   = ablastr::particles::doGatherScalarFieldNodal(
-                        xp, yp, zp, Te_arr, dxi, plo);
                     amrex::ParticleReal Jsxp = 0._prt, Jsyp = 0._prt, Jszp = 0._prt;
                     amrex::ParticleReal _dx = 0._prt, _dy = 0._prt, _dz = 0._prt;
                     doGatherShapeN(xp, yp, zp, Jsxp, Jsyp, Jszp, _dx, _dy, _dz,
