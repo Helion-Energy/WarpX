@@ -32,6 +32,7 @@
 
 #include <AMReX_Random.H>
 
+#include <cstdlib>
 #include <limits>
 #include <string>
 #include <vector>
@@ -5916,9 +5917,110 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
     // RKF45's edge sits at |z| ~ 3, hence the 3/2 scale. fd_cfl is the
     // user fraction of the edge (default 0.4, Nyquist-damping margin).
     amrex::Real const edge_scale = use_rkf45 ? 1.5_rt : 1.0_rt;
+    // WARPX_QDSMC_BOUND_DEBUG: per-cap diagnostic of the stability bound
+    // -- the per-node rate is written to a scratch field, the argmax node
+    // is located, and its local ingredients (b_ne, open, xi comps, T_e)
+    // are printed alongside the global max |xi|. Debug-only (env-gated).
+    static bool const bound_debug = (std::getenv("WARPX_QDSMC_BOUND_DEBUG") != nullptr);
+    auto debug_bound = [&] (amrex::Real const s_max)
+    {
+        int constexpr NXI_D = AMREX_SPACEDIM*(AMREX_SPACEDIM + 1)/2;
+        amrex::Real max_xi = 0.0_rt;
+        for (int c = 0; c < NXI_D; ++c) {
+            max_xi = amrex::max(max_xi, xi.max(c), -xi.min(c));
+        }
+        // per-node rate into a scratch (replays the stable_rate row)
+        amrex::MultiFab srate(Te.boxArray(), Te.DistributionMap(), 1, 0);
+        srate.setVal(0.0_rt);
+        for (MFIter mfi(srate, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            amrex::Box const box = mfi.tilebox();
+            amrex::Array4<amrex::Real>       const & s_arr = srate.array(mfi);
+            amrex::Array4<amrex::Real const> const & x_arr = xi.const_array(mfi);
+            amrex::Array4<amrex::Real const> const & b_arr = bne.const_array(mfi);
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                if (b_arr(i,j,k,BNE::b_open) <= 0.5_rt) { return; }
+                amrex::Real const ne0 = b_arr(i,j,k,BNE::b_ne);
+                int const node[3] = {i, j, k};
+#ifdef WARPX_DIM_RZ
+                amrex::Real const r_i =
+                    r_edge0 + amrex::Real(i - dom_lo[0])*dr_rz;
+                amrex::Real const Vr_i = (r_i > 0.0_rt)
+                    ? r_i*dr_rz : dr_rz*dr_rz/8.0_rt;
+                amrex::Real const fac_hi_r =
+                    (r_i + 0.5_rt*dr_rz)*dr_rz/Vr_i;
+                amrex::Real const fac_lo_r =
+                    amrex::max(r_i - 0.5_rt*dr_rz, 0.0_rt)*dr_rz/Vr_i;
+#endif
+                amrex::Real nrat = 1.0_rt;
+                amrex::Real s = 0.0_rt;
+                for (int g = 0; g < AMREX_SPACEDIM; ++g) {
+                    int p[3] = {i, j, k}, m[3] = {i, j, k};
+                    p[g] = node[g] + 1; m[g] = node[g] - 1;
+                    bool hi = is_per[g] || (p[g] <= dom_hi[g]);
+                    bool lo = is_per[g] || (m[g] >= dom_lo[g]);
+                    hi = hi && (b_arr(p[0],p[1],p[2],BNE::b_open) > 0.5_rt);
+                    lo = lo && (b_arr(m[0],m[1],m[2],BNE::b_open) > 0.5_rt);
+                    if (!hi && !lo) { continue; }
+                    if (hi) {
+                        nrat = amrex::max(nrat, 0.5_rt*(1.0_rt +
+                            b_arr(p[0],p[1],p[2],BNE::b_ne)/ne0));
+                    }
+                    if (lo) {
+                        nrat = amrex::max(nrat, 0.5_rt*(1.0_rt +
+                            b_arr(m[0],m[1],m[2],BNE::b_ne)/ne0));
+                    }
+                    for (int h = 0; h < AMREX_SPACEDIM; ++h) {
+                        int const gg = amrex::min(g, h);
+                        int const hh = amrex::max(g, h);
+                        int const sidx =
+                            gg*AMREX_SPACEDIM - gg*(gg-1)/2 + (hh-gg);
+                        amrex::Real const xc = std::abs(x_arr(i,j,k,sidx));
+                        amrex::Real s_hi = hi ? amrex::max(xc,
+                            std::abs(x_arr(p[0],p[1],p[2],sidx))) : 0.0_rt;
+                        amrex::Real s_lo = lo ? amrex::max(xc,
+                            std::abs(x_arr(m[0],m[1],m[2],sidx))) : 0.0_rt;
+#ifdef WARPX_DIM_RZ
+                        if (g == 0) {
+                            s_hi *= fac_hi_r;
+                            s_lo *= fac_lo_r;
+                        }
+#endif
+                        s += (s_hi + s_lo)*dxi_g[g]*dxi_g[h];
+                    }
+                }
+                s_arr(i,j,k) = s*nrat;
+            });
+        }
+        amrex::IntVect const loc = srate.maxIndex(0);
+        amrex::Real ne_loc = 0.0_rt, te_loc = 0.0_rt, op_loc = 0.0_rt,
+                    xi0 = 0.0_rt;
+        for (MFIter mfi(srate); mfi.isValid(); ++mfi) {
+            if (mfi.validbox().contains(loc)) {
+                auto const & b_arr = bne.const_array(mfi);
+                auto const & t_arr = T_cur.const_array(mfi);
+                auto const & x_arr = xi.const_array(mfi);
+                ne_loc = b_arr(loc[0], loc[1], loc[2], BNE::b_ne);
+                te_loc = t_arr(loc[0], loc[1], loc[2]);
+                op_loc = b_arr(loc[0], loc[1], loc[2], BNE::b_open);
+                xi0 = x_arr(loc[0], loc[1], loc[2], 0);
+            }
+        }
+        amrex::ParallelDescriptor::ReduceRealSum(ne_loc);
+        amrex::ParallelDescriptor::ReduceRealSum(te_loc);
+        amrex::ParallelDescriptor::ReduceRealSum(op_loc);
+        amrex::ParallelDescriptor::ReduceRealSum(xi0);
+        amrex::AllPrint() << "[qdsmc-bound-debug] s_max=" << s_max
+            << " max|xi|=" << max_xi
+            << " argmax=(" << loc[0] << "," << loc[1] << "," << loc[2]
+            << ") ne=" << ne_loc << " Te[K]=" << te_loc
+            << " open=" << op_loc << " xi00=" << xi0 << "\n";
+    };
     auto cap = [&] () -> amrex::Real
     {
         amrex::Real const s_max = stable_rate();
+        if (bound_debug) { debug_bound(s_max); }
         return (s_max > 0.0_rt) ? fd_cfl*edge_scale/s_max
                                 : std::numeric_limits<amrex::Real>::max();
     };
