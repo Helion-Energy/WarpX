@@ -11,7 +11,13 @@
 
 #include "CircuitCoupling_fwd.H"
 
+#include "CircuitCoupler.H"
 #include "Coils/CoilSet.H"
+#include "Coils/FluxProbes.H"
+
+#include <memory>
+#include <string>
+#include <vector>
 
 /**
  * \brief Coil / circuit-coupling subsystem of the hybrid-PIC solver.
@@ -40,15 +46,31 @@ public:
     CircuitCoupling ();
 
     /** Validate the coil/external-field pairing, fill the unit fields,
-     * refresh the curls and split-field registers, and compute + print the
-     * discrete inductance table (RZ). Must run after the hybrid model's
-     * external-field initialization. */
+     * refresh the curls and split-field registers, compute + print the
+     * discrete inductance table (RZ), resolve the per-coil linkage probes
+     * and construct the coupling engine (circuit.engine). Must run after
+     * the hybrid model's external-field initialization. */
     void InitData ();
 
     [[nodiscard]] const warpx::circuit::CoilSet& GetCoilSet () const { return m_coils; }
 
+    /** The coupling engine's coupler, or nullptr when no engine is
+     * configured (circuit.engine = none). */
+    [[nodiscard]] CircuitCoupler* Coupler () { return m_coupler.get(); }
+    [[nodiscard]] const CircuitCoupler* Coupler () const { return m_coupler.get(); }
+
 private:
     warpx::circuit::CoilSet m_coils;
+
+    /** Per-coil linkage probe kind (parallel to the coil set); resolved at
+     * InitData ("default" -> reciprocity with the Green's-function open
+     * boundary active, disk otherwise). */
+    std::vector<warpx::circuit::ProbeKind> m_probes;
+
+    std::string m_engine = "none";          //!< none | callbacks | external
+    std::string m_plugin_library;           //!< engine = external only
+    CircuitCoupler::Params m_coupler_params;
+    std::unique_ptr<CircuitCoupler> m_coupler;
 };
 
 #endif // WARPX_CIRCUIT_CIRCUITCOUPLING_H_

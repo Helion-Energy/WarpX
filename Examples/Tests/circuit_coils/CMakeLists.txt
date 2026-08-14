@@ -20,3 +20,13 @@ add_warpx_test(
     OFF  # checksum
     OFF  # dependency
 )
+
+add_warpx_test(
+    test_rz_circuit_rl_discharge_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_circuit_rl_discharge_picmi.py"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
