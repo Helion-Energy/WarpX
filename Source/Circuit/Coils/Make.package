@@ -1,4 +1,5 @@
 CEXE_sources += CoilFieldSolver.cpp
 CEXE_sources += CoilSet.cpp
+CEXE_sources += FluxProbes.cpp
 
 VPATH_LOCATIONS += $(WARPX_HOME)/Source/Circuit/Coils

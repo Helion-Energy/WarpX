@@ -1,3 +1,4 @@
+CEXE_sources += CircuitCoupler.cpp
 CEXE_sources += CircuitCoupling.cpp
 
 include $(WARPX_HOME)/Source/Circuit/Coils/Make.package

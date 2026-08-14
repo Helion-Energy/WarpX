@@ -6163,6 +6163,55 @@ Jacobian probes.
     * ``field_name`` (default: the coil name): the paired external-field entry.
     * ``fill_unit_field`` (default ``1``): fill ``<field_name>_Aext`` from the ring kernel;
       disable to keep whatever the external-field initialization loaded (file or expressions).
+    * ``probe`` (default ``default``): the coil's plasma flux-linkage measurement for the
+      coupling engine — ``disk`` (plasma-frame :math:`B_z` through the coil circle, the same
+      staircase rules as the discrete self-inductance; valid with conducting walls),
+      ``reciprocity`` (:math:`\int A^\mathrm{unit} \cdot J_p\, dV`; exact in free space,
+      requires the Green's-function open boundary), or ``none`` (drive-only).
+      ``default`` selects reciprocity when the open boundary is active, disk otherwise.
+
+.. pp:param:: circuit.engine
+    :type: ``str``
+    :default: ``none``
+    :optional:
+
+    The external circuit engine coupled to the coils per B-field substep (RZ):
+    ``callbacks`` drives the coupling through the Python hooks ``circuitbeginstep`` /
+    ``circuitpredict`` / ``circuitcorrect`` / ``circuitfinish`` (the handlers read the coupling
+    interval and the flux-linkage registers via ``get_coupling_interval`` /
+    ``get_coil_flux_linkage`` and push scale segments via
+    ``set_external_vector_potential_scale``); ``external`` loads a compiled engine from
+    :pp:param:`circuit.plugin_library` (a shared library exporting
+    ``warpx_create_external_circuit``). Every measured coil's paired field must be declared
+    with :pp:param:`external_vector_potential.<field_name>.python_scale`. Each accepted
+    substep of the (possibly adaptive) B-field advance is one predictor-corrector coupling
+    interval: the engine advances the circuit from the interval entry with held EMF
+    estimates, the substep integrates on the refreshed circuit-driven fields, and each
+    corrector pass re-advances the circuit with the measured
+    :math:`\varepsilon = \Delta\lambda_p/\Delta t` and re-integrates the substep until the
+    realized scales settle. The lagged variant (``corrector_iterations = 0``) is unstable
+    for strong coil-plasma coupling.
+
+.. pp:param:: circuit.plugin_library
+    :type: ``str``
+    :optional:
+
+    With :pp:param:`circuit.engine` = ``external``, the path of the engine's shared library.
+
+.. pp:param:: circuit.coupling.corrector_iterations
+    :type: ``int``
+    :default: ``1``
+    :optional:
+
+    Corrector passes per coupling substep (``0`` = lagged predictor only).
+
+.. pp:param:: circuit.coupling.corrector_rtol
+    :type: ``float``
+    :default: ``1.e-6``
+    :optional:
+
+    Early-exit tolerance of the corrector: converged when the re-advanced coil scales move
+    by less than this relative amount.
 
 
 Grid types (collocated, staggered, hybrid)

@@ -32,6 +32,7 @@
 #include <Fluids/WarpXFluidContainer.H>
 #include <Particles/ParticleBoundaryBuffer.H>
 #include <AcceleratorLattice/AcceleratorLattice.H>
+#include <Circuit/CircuitCoupling.H>
 #include <Utils/TextMsg.H>
 #include <Utils/WarpXAlgorithmSelection.H>
 #include <Utils/WarpXConst.H>
@@ -301,6 +302,30 @@ void init_WarpX (py::module& m)
             },
             py::arg("name"), py::arg("t"),
             "Gets the scale of an external vector potential field at time t."
+        )
+        .def("get_coupling_interval",
+            [](WarpX& wx) {
+                auto * cc = wx.get_pointer_CircuitCoupling();
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(cc && cc->Coupler(),
+                    "get_coupling_interval requires an active circuit "
+                    "coupling engine (circuit.engine)");
+                auto const& iv = cc->Coupler()->CurrentInterval();
+                return py::make_tuple(iv.t0, iv.t1, iv.substep, iv.iteration);
+            },
+            "Gets the circuit coupling interval as (t0, t1, substep, "
+            "iteration); iteration 0 is the predictor."
+        )
+        .def("get_coil_flux_linkage",
+            [](WarpX& wx, std::string const & name) {
+                auto * cc = wx.get_pointer_CircuitCoupling();
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(cc && cc->Coupler(),
+                    "get_coil_flux_linkage requires an active circuit "
+                    "coupling engine (circuit.engine)");
+                return cc->Coupler()->CoilLinkage(name);
+            },
+            py::arg("name"),
+            "Gets the latest measured plasma flux linkage of a circuit "
+            "coil (lambda_phys * I_ref * n_turns)."
         )
         .def("set_hybrid_pic_density_floor",
             [](WarpX& wx, amrex::Real n_floor) {
