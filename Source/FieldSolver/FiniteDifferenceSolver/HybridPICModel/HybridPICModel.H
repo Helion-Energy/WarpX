@@ -1020,7 +1020,17 @@ public:
      *  integrator (V_e frozen over the transport slot, like the marker
      *  push). Writes the marker-deposit convention (entropy_fp = K n_e,
      *  weights = n_e) and calls QDSMCUpdateTe -- identical recovery, so
-     *  the bake-off isolates the transport operator alone. */
+     *  the bake-off isolates the transport operator alone.
+     *
+     *  In RZ geometry the operator carries the same curvilinear form as
+     *  QdsmcConductionOnceFD: radial face fluxes are J = r folded
+     *  (analytic face radius), the radial divergence divides by the
+     *  dual-cell measure Vr = int r dr (dr^2/8 at the regular axis node,
+     *  whose inner face is absent), z faces are metric-free, and the
+     *  advective CFL carries the largest existing face's r_face/Vr
+     *  amplification. Faces beyond non-periodic walls do not exist and
+     *  the CFL reduce counts open nodes only (the bound mirrors the flux
+     *  structure). */
     void QdsmcTransportOnceGrid (int lev, amrex::Real dt_adv) const;
 
     /** leapfrog self-start: false until the first advance has run (which

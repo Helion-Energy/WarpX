@@ -4345,10 +4345,6 @@ void HybridPICModel::QdsmcTransportOnceGrid (int const lev,
 {
     ABLASTR_PROFILE("HybridPICModel::QdsmcTransportOnceGrid()");
 
-#ifdef WARPX_DIM_RZ
-    WARPX_ABORT_WITH_MESSAGE(
-        "qdsmc_transport_operator = grid: RZ metric not implemented");
-#endif
     auto & warpx = WarpX::GetInstance();
     using ablastr::fields::Direction;
 
@@ -4389,6 +4385,25 @@ void HybridPICModel::QdsmcTransportOnceGrid (int const lev,
 #endif
     amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> dxi_g;
     for (int d = 0; d < AMREX_SPACEDIM; ++d) { dxi_g[d] = dxi_arr[d]; }
+    amrex::Box const dom_nodes = amrex::surroundingNodes(geom.Domain());
+    amrex::GpuArray<int, AMREX_SPACEDIM> is_per, dom_lo, dom_hi;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        is_per[d] = geom.isPeriodic(d) ? 1 : 0;
+        dom_lo[d] = dom_nodes.smallEnd(d);
+        dom_hi[d] = dom_nodes.bigEnd(d);
+    }
+#ifdef WARPX_DIM_RZ
+    // Cylindrical curvilinear form, same conventions as the FD conduction
+    // operator (QdsmcConductionOnceFD): radial face fluxes carry the
+    // analytic face radius (J = r fold; both neighbors compute the
+    // identical folded value, so the Vr-weighted sum telescopes exactly),
+    // the radial divergence divides by the dual-cell measure Vr = int r dr
+    // (r_i dr interior/wall, dr^2/8 for the axis node), and z faces are
+    // metric-free. The axis is regular: its inner face does not exist
+    // (the wall guard = the q_r(0) = 0 symmetry condition).
+    amrex::Real const r_edge0 = geom.ProbLo(0);
+    amrex::Real const dr_rz = geom.CellSize(0);
+#endif
 
     // Nodal velocity components per grid dim, gathered once (V_e frozen
     // over the transport slot, like the marker push's SetV).
@@ -4482,6 +4497,14 @@ void HybridPICModel::QdsmcTransportOnceGrid (int const lev,
                 auto face_flux = [&] (int const m0[3], int const g,
                                       int const c)
                 {
+                    // faces beyond a non-periodic wall do not exist
+                    // (previously fluxed against stale/garbage domain
+                    // ghosts -- masked on the liftoff decks by the
+                    // closed vacuum band, mandatory for the RZ axis)
+                    if (!is_per[g] &&
+                        (m0[g] < dom_lo[g] || m0[g] + 1 > dom_hi[g])) {
+                        return 0.0_rt;
+                    }
                     int m1[3] = {m0[0], m0[1], m0[2]};
                     m1[g] += 1;
                     if (op(m0[0],m0[1],m0[2]) <= 0.5_rt ||
@@ -4505,8 +4528,22 @@ void HybridPICModel::QdsmcTransportOnceGrid (int const lev,
                         uu[0] = m1[0]; uu[1] = m1[1]; uu[2] = m1[2];
                         uu[g] += 1;
                     }
+                    if (!is_per[g]) {
+                        // clamp the upwind foot into the domain at walls
+                        uu[g] = amrex::min(amrex::max(uu[g], dom_lo[g]),
+                                           dom_hi[g]);
+                    }
                     amrex::Real const tUU = yc(uu[0],uu[1],uu[2],c);
-                    return vf*qdsmc_fd_face_value(tUU, tU, tD, fd_limiter);
+                    amrex::Real F =
+                        vf*qdsmc_fd_face_value(tUU, tU, tD, fd_limiter);
+#ifdef WARPX_DIM_RZ
+                    if (g == 0) {
+                        // J = r fold on radial faces (analytic face radius)
+                        F *= r_edge0 +
+                             (amrex::Real(m0[0] - dom_lo[0]) + 0.5_rt)*dr_rz;
+                    }
+#endif
+                    return F;
                 };
                 if (op(i,j,k) <= 0.5_rt) {
                     ko(i,j,k,0) = 0.0_rt;   // frozen: closed nodes hold state
@@ -4519,6 +4556,20 @@ void HybridPICModel::QdsmcTransportOnceGrid (int const lev,
                     for (int g = 0; g < AMREX_SPACEDIM; ++g) {
                         int lo[3] = {i, j, k};
                         lo[g] -= 1;
+#ifdef WARPX_DIM_RZ
+                        if (g == 0) {
+                            // finite-volume radial divergence over the
+                            // dual-cell measure Vr (regular at the axis,
+                            // whose inner face is absent)
+                            amrex::Real const r_i =
+                                r_edge0 + amrex::Real(i - dom_lo[0])*dr_rz;
+                            amrex::Real const Vr = (r_i > 0.0_rt)
+                                ? r_i*dr_rz : dr_rz*dr_rz/8.0_rt;
+                            div += (face_flux(node, g, c) -
+                                    face_flux(lo, g, c)) / Vr;
+                            continue;
+                        }
+#endif
                         div += (face_flux(node, g, c) - face_flux(lo, g, c))
                                * dxi_g[g];
                     }
@@ -4530,6 +4581,12 @@ void HybridPICModel::QdsmcTransportOnceGrid (int const lev,
 
     // Advective stability ceiling: dt <= cfl / max_node sum_g |v| dxi
     // (upwind CFL; velocity is frozen, so this is computed once).
+    // OPEN nodes only: closed floor/EB nodes carry no faces, and their
+    // V_e = -J/(e n_floored) can be junk-large in vacuum -- counting it
+    // would pin the cap with physically-irrelevant rates (the same
+    // bound-mirrors-the-flux-structure rule as the conduction operator's
+    // stable_rate). In RZ the radial term carries the largest existing
+    // face's amplification r_face/Vr (interior ~ dxi, axis = 4 dxi).
     amrex::Real s_adv = 0.0_rt;
     {
         amrex::ReduceOps<amrex::ReduceOpMax> reduce_op;
@@ -4539,12 +4596,24 @@ void HybridPICModel::QdsmcTransportOnceGrid (int const lev,
         {
             amrex::Box const box = mfi.tilebox();
             amrex::Array4<amrex::Real const> const & v_arr = vel.const_array(mfi);
+            amrex::Array4<amrex::Real const> const & op = opn.const_array(mfi);
             reduce_op.eval(box, reduce_data,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
             {
+                if (op(i,j,k) <= 0.5_rt) { return {0.0_rt}; }
                 amrex::Real s = 0.0_rt;
                 for (int g = 0; g < AMREX_SPACEDIM; ++g) {
-                    s += std::abs(v_arr(i,j,k,g))*dxi_g[g];
+                    amrex::Real coeff = dxi_g[g];
+#ifdef WARPX_DIM_RZ
+                    if (g == 0) {
+                        amrex::Real const r_i =
+                            r_edge0 + amrex::Real(i - dom_lo[0])*dr_rz;
+                        amrex::Real const Vr = (r_i > 0.0_rt)
+                            ? r_i*dr_rz : dr_rz*dr_rz/8.0_rt;
+                        coeff = (r_i + 0.5_rt*dr_rz)/Vr;
+                    }
+#endif
+                    s += std::abs(v_arr(i,j,k,g))*coeff;
                 }
                 return {s};
             });
