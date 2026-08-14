@@ -491,6 +491,28 @@ public:
     bool m_add_external_fields = false;
     std::unique_ptr<ExternalVectorPotential> m_external_vector_potential;
 
+    /** How external fields enter the Ohm's-law kernels.
+     *
+     * Split (default, the explicit hybrid advance): the evolved fields hold
+     * the plasma response inside the field advance and the kernels add
+     * B_ext for the J x B term (and subtract E_ext from the solved E)
+     * themselves. TotalAssembled: the caller hands the kernels total fields
+     * already and only the E_ext subtraction applies (theta-implicit
+     * consumers). UnifiedA: external fields enter through boundary values
+     * of an evolved vector potential and the kernels must not touch the
+     * external-field registers at all. Solvers select their convention in
+     * their initialization; there is no user-facing input.
+     */
+    enum class ExternalFieldMode { Split, TotalAssembled, UnifiedA };
+    ExternalFieldMode m_external_field_mode = ExternalFieldMode::Split;
+
+    /** Subtract E_ext from the solved E everywhere instead of only where
+     * rho >= rho_floor. The per-cell density gate is a state-dependent
+     * discontinuity that breaks matrix-free Jacobian probes, so implicit
+     * consumers enable the unconditional form; the explicit advance keeps
+     * the gated default. */
+    bool m_subtract_E_ext_everywhere = false;
+
     /** Gpu Vector with index type of the Jx multifab */
     amrex::GpuArray<int, 3> Jx_IndexType;
     /** Gpu Vector with index type of the Jy multifab */

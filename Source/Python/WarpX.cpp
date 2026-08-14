@@ -275,6 +275,35 @@ void init_WarpX (py::module& m)
             },
             "Gets the number of substeps taken in the hybrid solver."
         )
+        .def("set_external_vector_potential_scale",
+            [](WarpX& wx, std::string const & name, amrex::Real s_old,
+               amrex::Real s_new, amrex::Real t_old, amrex::Real t_new) {
+                auto * hybrid_pic_model = wx.get_pointer_HybridPICModel();
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    hybrid_pic_model && hybrid_pic_model->m_add_external_fields,
+                    "set_external_vector_potential_scale requires the hybrid "
+                    "solver with external fields enabled");
+                hybrid_pic_model->m_external_vector_potential->SetScale(
+                    name, s_old, s_new, t_old, t_new);
+            },
+            py::arg("name"), py::arg("s_old"), py::arg("s_new"),
+            py::arg("t_old"), py::arg("t_new"),
+            "Sets the piecewise-linear scale segment of a scale-driven "
+            "external vector potential field for the upcoming interval."
+        )
+        .def("get_external_vector_potential_scale",
+            [](WarpX& wx, std::string const & name, amrex::Real t) {
+                auto * hybrid_pic_model = wx.get_pointer_HybridPICModel();
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    hybrid_pic_model && hybrid_pic_model->m_add_external_fields,
+                    "get_external_vector_potential_scale requires the hybrid "
+                    "solver with external fields enabled");
+                return hybrid_pic_model->m_external_vector_potential->GetScale(
+                    name, t);
+            },
+            py::arg("name"), py::arg("t"),
+            "Gets the scale of an external vector potential field at time t."
+        )
         .def("set_hybrid_pic_density_floor",
             [](WarpX& wx, amrex::Real n_floor) {
                 wx.get_pointer_HybridPICModel()->m_n_floor = n_floor;

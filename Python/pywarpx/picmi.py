@@ -2223,6 +2223,11 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         'Az_external_function', plus 'A_time_external_function' with (t) dependence, or
         alternatively 'load_from_file': True with a 'path' to an OpenPMD file along with
         'A_time_external_function'.
+        Alternatively to a compiled time function, a field entry may set
+        'python_scale': True (optionally with 'initial_scale') to drive the
+        field's scale through piecewise-linear segments pushed at runtime via
+        ``warpx.set_external_vector_potential_scale`` (e.g. from a circuit
+        model in a callback).
 
     do_external_diva_cleaning: bool (default=True)
         This flag can be used to disable divA cleaning. This may be necessary when using a non-periodic
@@ -2435,12 +2440,26 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
                             field_dict["Az_external_function"], self.mangle_dict
                         ),
                     )
-                pywarpx.external_vector_potential.__setattr__(
-                    f"{field_name}.A_time_external_function(t)",
-                    pywarpx.my_constants.mangle_expression(
-                        field_dict["A_time_external_function"], self.mangle_dict
-                    ),
-                )
+                if field_dict.get("python_scale", False):
+                    # Piecewise-linear scale segments pushed from python
+                    # (warpx.set_external_vector_potential_scale) instead of
+                    # a compiled time function.
+                    pywarpx.external_vector_potential.__setattr__(
+                        f"{field_name}.python_scale", 1
+                    )
+                    if "initial_scale" in field_dict:
+                        pywarpx.external_vector_potential.__setattr__(
+                            f"{field_name}.initial_scale",
+                            field_dict["initial_scale"],
+                        )
+                else:
+                    pywarpx.external_vector_potential.__setattr__(
+                        f"{field_name}.A_time_external_function(t)",
+                        pywarpx.my_constants.mangle_expression(
+                            field_dict["A_time_external_function"],
+                            self.mangle_dict,
+                        ),
+                    )
 
 
 class ElectrostaticSolver(picmistandard.PICMI_ElectrostaticSolver):

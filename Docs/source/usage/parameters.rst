@@ -3990,6 +3990,28 @@ Maxwell solver: kinetic-fluid hybrid
 
     This sets the relative strength of the external vector potential by a dimensionless implicit time function, which can compute the external B fields and E fields based on the value and first time derivative of the function.
 
+.. pp:param:: external_vector_potential.<field_name>.python_scale
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Drive this field's dimensionless scale through piecewise-linear segments pushed at runtime
+    (``warpx.set_external_vector_potential_scale(name, s_old, s_new, t_old, t_new)`` from Python,
+    e.g. from a circuit model in a callback) instead of the compiled
+    :pp:param:`external_vector_potential.<field_name>.A_time_external_grid_function(t)`.
+    The B field follows the linear interpolant of the segment and the E field carries its exact
+    constant slope (the discrete Faraday partner of the linear B scale). The segment is
+    extrapolated linearly past ``t_new``, so a fresh segment must be pushed every coupling
+    interval; a refresh well past ``t_new`` records a high-priority warning.
+
+.. pp:param:: external_vector_potential.<field_name>.initial_scale
+    :type: ``float``
+    :default: ``1.``
+    :optional:
+
+    With :pp:param:`external_vector_potential.<field_name>.python_scale` enabled, the constant
+    scale held (e.g. a coil at its pre-ramp current) until the first runtime segment is pushed.
+
 
 Grid types (collocated, staggered, hybrid)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -548,6 +548,21 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
     const bool include_external_fields = hybrid_model->m_add_external_fields;
 
+    // External-field convention (see HybridPICModel::ExternalFieldMode):
+    // only the Split mode assembles totals inside the kernels by adding
+    // B_ext; TotalAssembled consumers hand the kernels total B already, and
+    // UnifiedA consumers never touch the external-field registers. The
+    // E_ext subtraction is gated per cell on rho >= rho_floor unless the
+    // consumer requires the smooth unconditional form (matrix-free
+    // implicit residuals).
+    const bool external_b_split = include_external_fields &&
+        (hybrid_model->m_external_field_mode ==
+         HybridPICModel::ExternalFieldMode::Split);
+    const bool include_E_ext = include_external_fields &&
+        (hybrid_model->m_external_field_mode !=
+         HybridPICModel::ExternalFieldMode::UnifiedA);
+    const bool subtract_E_ext_everywhere = hybrid_model->m_subtract_E_ext_everywhere;
+
     const bool holmstrom_vacuum_region = hybrid_model->m_holmstrom_vacuum_region;
 
     auto & warpx = WarpX::GetInstance();
@@ -615,7 +630,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         Array4<Real const> const& Bz = Bfield[2]->const_array(mfi);
 
         Array4<Real> Br_ext, Btheta_ext, Bz_ext;
-        if (include_external_fields) {
+        if (external_b_split) {
             Br_ext = Bfield_external[0]->array(mfi);
             Btheta_ext = Bfield_external[1]->array(mfi);
             Bz_ext = Bfield_external[2]->array(mfi);
@@ -639,7 +654,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
             auto Btheta_interp = Interp(Btheta, Btheta_stag, nodal, coarsen, i, j, 0, 0);
             auto Bz_interp = Interp(Bz, Bz_stag, nodal, coarsen, i, j, 0, 0);
 
-            if (include_external_fields) {
+            if (external_b_split) {
                 Br_interp += Interp(Br_ext, Br_stag, nodal, coarsen, i, j, 0, 0);
                 Btheta_interp += Interp(Btheta_ext, Btheta_stag, nodal, coarsen, i, j, 0, 0);
                 Bz_interp += Interp(Bz_ext, Bz_stag, nodal, coarsen, i, j, 0, 0);
@@ -704,7 +719,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         }
 
         Array4<Real> Er_ext, Etheta_ext, Ez_ext;
-        if (include_external_fields) {
+        if (include_E_ext) {
             Er_ext = Efield_external[0]->array(mfi);
             Etheta_ext = Efield_external[1]->array(mfi);
             Ez_ext = Efield_external[2]->array(mfi);
@@ -787,7 +802,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_E_ext && (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                     Er(i, j, 0) -= Er_ext(i, j, 0);
                 }
             },
@@ -861,7 +876,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_E_ext && (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                     Etheta(i, j, 0) -= Etheta_ext(i, j, 0);
                 }
             },
@@ -934,7 +949,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_E_ext && (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                     Ez(i, j, 0) -= Ez_ext(i, j, 0);
                 }
             }
@@ -991,6 +1006,21 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
 
     const bool include_external_fields = hybrid_model->m_add_external_fields;
+
+    // External-field convention (see HybridPICModel::ExternalFieldMode):
+    // only the Split mode assembles totals inside the kernels by adding
+    // B_ext; TotalAssembled consumers hand the kernels total B already, and
+    // UnifiedA consumers never touch the external-field registers. The
+    // E_ext subtraction is gated per cell on rho >= rho_floor unless the
+    // consumer requires the smooth unconditional form (matrix-free
+    // implicit residuals).
+    const bool external_b_split = include_external_fields &&
+        (hybrid_model->m_external_field_mode ==
+         HybridPICModel::ExternalFieldMode::Split);
+    const bool include_E_ext = include_external_fields &&
+        (hybrid_model->m_external_field_mode !=
+         HybridPICModel::ExternalFieldMode::UnifiedA);
+    const bool subtract_E_ext_everywhere = hybrid_model->m_subtract_E_ext_everywhere;
 
     const bool holmstrom_vacuum_region = hybrid_model->m_holmstrom_vacuum_region;
 
@@ -1059,7 +1089,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         Array4<Real const> const& Bz = Bfield[2]->const_array(mfi);
 
         Array4<Real> Bx_ext, By_ext, Bz_ext;
-        if (include_external_fields) {
+        if (external_b_split) {
             Bx_ext = Bfield_external[0]->array(mfi);
             By_ext = Bfield_external[1]->array(mfi);
             Bz_ext = Bfield_external[2]->array(mfi);
@@ -1083,7 +1113,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             auto By_interp = Interp(By, By_stag, nodal, coarsen, i, j, k, 0);
             auto Bz_interp = Interp(Bz, Bz_stag, nodal, coarsen, i, j, k, 0);
 
-            if (include_external_fields) {
+            if (external_b_split) {
                 Bx_interp += Interp(Bx_ext, Bx_stag, nodal, coarsen, i, j, k, 0);
                 By_interp += Interp(By_ext, By_stag, nodal, coarsen, i, j, k, 0);
                 Bz_interp += Interp(Bz_ext, Bz_stag, nodal, coarsen, i, j, k, 0);
@@ -1148,7 +1178,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         }
 
         Array4<Real> Ex_ext, Ey_ext, Ez_ext;
-        if (include_external_fields) {
+        if (include_E_ext) {
             Ex_ext = Efield_external[0]->array(mfi);
             Ey_ext = Efield_external[1]->array(mfi);
             Ez_ext = Efield_external[2]->array(mfi);
@@ -1226,7 +1256,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields && (rho_val >= rho_floor)) {
+            if (include_E_ext && (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                 Ex(i, j, k) -= Ex_ext(i, j, k);
             }
         });
@@ -1290,7 +1320,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields && (rho_val >= rho_floor)) {
+            if (include_E_ext && (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                 Ey(i, j, k) -= Ey_ext(i, j, k);
             }
         });
@@ -1354,7 +1384,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields && (rho_val >= rho_floor)) {
+            if (include_E_ext && (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                 Ez(i, j, k) -= Ez_ext(i, j, k);
             }
         });
