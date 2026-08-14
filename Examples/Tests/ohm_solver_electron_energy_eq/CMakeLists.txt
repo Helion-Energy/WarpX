@@ -2,6 +2,16 @@
 #
 
 add_warpx_test(
+    test_2d_ohm_solver_conduction_fd_picmi  # name
+    2  # dims
+    2  # nprocs
+    "inputs_test_2d_ohm_solver_conduction_fd_picmi.py --test"  # inputs
+    "analysis_conduction_fd.py"  # analysis
+    "analysis_default_regression.py --path diags/field_diags"  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
     test_2d_ohm_solver_electron_energy_adiabat_picmi  # name
     2  # dims
     2  # nprocs
