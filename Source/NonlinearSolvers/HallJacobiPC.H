@@ -166,6 +166,7 @@ class HallJacobiPC : public Preconditioner<T,Ops>
         /** Constant-eta overrides; parser evaluation is used when unset. */
         RT m_eta0 = 0.0;
         bool m_eta0_set = false;
+        RT m_beta_scale = 0.4;
         RT m_etah0 = 0.0;
         bool m_etah0_set = false;
 
@@ -233,6 +234,15 @@ void HallJacobiPC<T,Ops>::readParameters()
     m_eta0_set = pp_precond.query("hall_eta0", m_eta0);
     m_etah0_set = pp_precond.query("hall_etah0", m_etah0);
     pp_precond.query("hall_jacobi_sweeps", m_sweeps);
+    // Damping of the whistler rotation strength beta. The kg2 surrogate
+    // is the spectral-EDGE beta; applying it undamped over-rotates the
+    // moderate-k content that dominates the Krylov error (measured: RZ
+    // EM-modes dt x8 GMRES/step = 44 baseline / 60 at scale 1 / 31.9 at
+    // 0.25 / 35 at 0.5 / 180 at -1; 1D dispersion optimum ~0.5). The
+    // 0.4 default is the broad two-deck optimum -- the classic damped-
+    // Jacobi factor. 0 = pure-diagonal PC; negative = flipped rotation
+    // sense (forensic only).
+    pp_precond.query("hall_beta_scale", m_beta_scale);
 
     // The hybrid solver's GetThetaForPC() returns 0 (no implicit light
     // waves); read the actual time-centering directly.
@@ -316,6 +326,7 @@ void HallJacobiPC<T,Ops>::Update (const T& a_U)
     const RT etah0_const = m_etah0;
     const bool eta0_set = m_eta0_set;
     const bool etah0_set = m_etah0_set;
+    const RT beta_scale = m_beta_scale;
 
     // Electron-inertia diagonal leg: the inertial field contributes a
     // s*(k d_e)^2 curl-curl block to the Jacobian with s = (2 theta + 1)/2
@@ -433,11 +444,12 @@ void HallJacobiPC<T,Ops>::Update (const T& a_U)
 
                     RT beta = RT(0.0);
                     RT bhx = RT(0.0), bhy = RT(0.0), bhz = RT(0.0);
-                    if (have_hall && (B0mag > RT(0.0))) {
+                    if (have_hall && (B0mag > RT(0.0)) &&
+                        (beta_scale != RT(0.0))) {
                         // min() guards beta*beta overflow when the user
                         // disables the density floor (n_floor = 0) in cells
                         // with rho0 <= 0 (adversarial-review finding F1).
-                        beta = std::min(
+                        beta = beta_scale * std::min(
                             theta_dt*kg2*B0mag
                                 / (static_cast<RT>(PhysConst::mu0)*rho_lim),
                             RT(1.0e30));
