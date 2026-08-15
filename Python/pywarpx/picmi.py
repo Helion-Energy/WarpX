@@ -2099,6 +2099,127 @@ class SemiImplicitEMEvolveScheme(picmistandard.base._ClassWithInit):
         self.nonlinear_solver.nonlinear_solver_initialize_inputs()
 
 
+class CircuitCoil(object):
+    """One circular filament coil of the circuit-coupling subsystem
+    (circuit.<name>.*).
+
+    Parameters
+    ----------
+    name: str
+        Unique coil name; by default also the paired entry of
+        external_vector_potential.fields.
+
+    r, z: float
+        Filament radius and axial position [m]; r must be positive.
+
+    n_turns: float, optional
+        Turn count (the filled field and the inductances scale with it).
+
+    I_ref: float, optional
+        Reference current [A]: a drive scale of 1 reproduces the coil at
+        I_ref.
+
+    field_name: str, optional
+        The paired external-field entry (default: the coil name).
+
+    fill_unit_field: bool, optional
+        Fill <field_name>_Aext from the ring kernel at initialization
+        (default true).
+
+    probe: str, optional
+        The coil's plasma flux-linkage measurement: 'default', 'disk',
+        'reciprocity' or 'none'.
+    """
+
+    def __init__(
+        self,
+        name,
+        r,
+        z,
+        n_turns=None,
+        I_ref=None,
+        field_name=None,
+        fill_unit_field=None,
+        probe=None,
+    ):
+        self.name = name
+        self.r = r
+        self.z = z
+        self.n_turns = n_turns
+        self.I_ref = I_ref
+        self.field_name = field_name
+        self.fill_unit_field = fill_unit_field
+        self.probe = probe
+
+
+class CircuitCoupling(object):
+    """The coil set and coupling engine of the circuit-coupling subsystem
+    (circuit.*), passed to HybridPICSolver as circuit=...
+
+    Parameters
+    ----------
+    coils: list of CircuitCoil
+        The coil set.
+
+    engine: str, optional
+        'none' (default; the coils are static or driven per step from
+        Python), 'callbacks' (the per-substep Python hook contract:
+        circuitbeginstep / circuitpredict / circuitcorrect /
+        circuitfinish), or 'external' (a compiled ExternalCircuit plugin).
+
+    plugin_library: str, optional
+        With engine='external', the plugin's shared-library path.
+
+    corrector_iterations: int, optional
+        Predictor-corrector passes per coupling substep (default 1;
+        0 = lagged predictor only).
+
+    corrector_rtol: float, optional
+        Early-exit tolerance of the corrector on the realized coil scales.
+    """
+
+    def __init__(
+        self,
+        coils,
+        engine=None,
+        plugin_library=None,
+        corrector_iterations=None,
+        corrector_rtol=None,
+    ):
+        self.coils = coils
+        self.engine = engine
+        self.plugin_library = plugin_library
+        self.corrector_iterations = corrector_iterations
+        self.corrector_rtol = corrector_rtol
+
+    def coupling_initialize_inputs(self):
+        pywarpx.circuit.coils = [coil.name for coil in self.coils]
+        for coil in self.coils:
+            for attr, key in (
+                (coil.r, "r"),
+                (coil.z, "z"),
+                (coil.n_turns, "n_turns"),
+                (coil.I_ref, "I_ref"),
+                (coil.field_name, "field_name"),
+                (coil.fill_unit_field, "fill_unit_field"),
+                (coil.probe, "probe"),
+            ):
+                if attr is not None:
+                    pywarpx.circuit.add_new_attr(f"{coil.name}.{key}", attr)
+        if self.engine is not None:
+            pywarpx.circuit.engine = self.engine
+        if self.plugin_library is not None:
+            pywarpx.circuit.plugin_library = self.plugin_library
+        if self.corrector_iterations is not None:
+            pywarpx.circuit.add_new_attr(
+                "coupling.corrector_iterations", self.corrector_iterations
+            )
+        if self.corrector_rtol is not None:
+            pywarpx.circuit.add_new_attr(
+                "coupling.corrector_rtol", self.corrector_rtol
+            )
+
+
 class HybridPICSolver(picmistandard.base._ClassWithInit):
     """
     Hybrid-PIC solver based on Ohm's law.
@@ -2281,6 +2402,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         Jz_external_function=None,
         A_external=None,
         do_external_diva_cleaning=None,
+        circuit=None,
         **kw,
     ):
         self.grid = grid
@@ -2315,6 +2437,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.A_external = A_external
 
         self.do_external_diva_cleaning = do_external_diva_cleaning
+
+        self.circuit = circuit
 
         # Handle keyword arguments used in expressions
         self.user_defined_kw = {}
@@ -2460,6 +2584,9 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
                             self.mangle_dict,
                         ),
                     )
+
+        if self.circuit is not None:
+            self.circuit.coupling_initialize_inputs()
 
 
 class ElectrostaticSolver(picmistandard.PICMI_ElectrostaticSolver):

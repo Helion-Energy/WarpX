@@ -73,6 +73,21 @@ A_ext = {
     },
 }
 
+coil = picmi.CircuitCoil(
+    name="drive",
+    r=R_COIL,
+    z=Z_COIL,
+    n_turns=N_TURNS,
+    I_ref=I_REF,
+    probe="disk",
+)
+circuit = picmi.CircuitCoupling(
+    coils=[coil],
+    engine="callbacks",
+    corrector_iterations=1,
+    corrector_rtol=1.0e-6,
+)
+
 solver = picmi.HybridPICSolver(
     grid=grid,
     gamma=5.0 / 3.0,
@@ -82,6 +97,7 @@ solver = picmi.HybridPICSolver(
     plasma_resistivity=1.0e-6,
     substeps=4,
     A_external=A_ext,
+    circuit=circuit,
 )
 simulation.solver = solver
 
@@ -100,20 +116,6 @@ simulation.add_species(
 )
 
 simulation.initialize_inputs()
-
-import pywarpx  # noqa: E402
-
-circuit = pywarpx.warpx.get_bucket("circuit")
-circuit.coils = "drive"
-circuit.add_new_attr("drive.r", R_COIL)
-circuit.add_new_attr("drive.z", Z_COIL)
-circuit.add_new_attr("drive.n_turns", N_TURNS)
-circuit.add_new_attr("drive.I_ref", I_REF)
-circuit.add_new_attr("drive.probe", "disk")
-circuit.engine = "callbacks"
-circuit.add_new_attr("coupling.corrector_iterations", 1)
-circuit.add_new_attr("coupling.corrector_rtol", 1.0e-6)
-
 simulation.initialize_warpx()
 
 libwarpx = simulation.extension
