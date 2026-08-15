@@ -59,6 +59,19 @@ public:
     [[nodiscard]] CircuitCoupler* Coupler () { return m_coupler.get(); }
     [[nodiscard]] const CircuitCoupler* Coupler () const { return m_coupler.get(); }
 
+    /** Persist the live scale segments of the scale-driven external fields
+     * into the checkpoint (IO rank; the drive state would otherwise reset
+     * to initial_scale on restart and silently jump). A compiled engine's
+     * own state is delegated to ExternalCircuit::WriteCheckpoint; the
+     * Python engine re-seeds its own state (its linkage registers are
+     * re-measured from the restored fields). */
+    void WriteCheckpointData (std::string const& dir) const;
+
+    /** Restore the scale segments on restart (all ranks read; the segments
+     * are rank-replicated state). Tolerant of checkpoints from before the
+     * circuit subsystem (no file: keeps initial_scale). */
+    void ReadCheckpointData (std::string const& dir);
+
 private:
     warpx::circuit::CoilSet m_coils;
 
