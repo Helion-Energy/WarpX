@@ -100,6 +100,19 @@ public:
     /** Whether external field i is scale-driven through SetScale. */
     [[nodiscard]] bool UsesPythonScale (int i) const { return m_use_python_scale[i]; }
 
+    /** The live scale segment of field i (for checkpointing); returns
+     * false for parser-driven fields. */
+    bool GetScaleSegment (int i, amrex::Real& s_old, amrex::Real& s_new,
+                          amrex::Real& t_old, amrex::Real& t_new) const
+    {
+        if (!m_use_python_scale[i]) { return false; }
+        s_old = m_python_scale[i].s_old;
+        s_new = m_python_scale[i].s_new;
+        t_old = m_python_scale[i].t_old;
+        t_new = m_python_scale[i].t_new;
+        return true;
+    }
+
     /** Set the piecewise-linear scale segment of a scale-driven field for
      * the upcoming coupling interval. Must be called before the interval's
      * field refresh (e.g. from a "beforestep" callback or the circuit

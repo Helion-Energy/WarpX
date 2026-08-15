@@ -5,6 +5,7 @@
 #   include "BoundaryConditions/PML_RZ.H"
 #endif
 #include "Diagnostics/ParticleDiag/ParticleDiag.H"
+#include "Circuit/CircuitCoupling.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
 #include "Fields.H"
 #include "Particles/WarpXParticleContainer.H"
@@ -292,8 +293,12 @@ FlushFormatCheckpoint::WriteDMaps (const std::string& dir, int nlev) const
 void
 FlushFormatCheckpoint::WriteReducedDiagsData (std::string const & dir) const
 {
+    auto & warpx = WarpX::GetInstance();
     if (ParallelDescriptor::IOProcessor()) {
-        auto & warpx = WarpX::GetInstance();
         warpx.reduced_diags->WriteCheckpointData(dir);
+    }
+    if (warpx.get_pointer_CircuitCoupling() != nullptr) {
+        // self-guards on the IO rank
+        warpx.get_pointer_CircuitCoupling()->WriteCheckpointData(dir);
     }
 }

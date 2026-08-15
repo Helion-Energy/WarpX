@@ -22,6 +22,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <iomanip>
 #include <string>
 #include <utility>
 #include <vector>
@@ -271,3 +273,55 @@ CircuitCoupling::InitData ()
     }
 }
 
+
+void
+CircuitCoupling::WriteCheckpointData (std::string const& dir) const
+{
+    if (!amrex::ParallelDescriptor::IOProcessor()) { return; }
+    auto& warpx = WarpX::GetInstance();
+    auto* hybrid = warpx.get_pointer_HybridPICModel();
+    if (hybrid == nullptr || !hybrid->m_add_external_fields) { return; }
+    auto& ext = *hybrid->m_external_vector_potential;
+
+    std::ofstream ofs{dir + "/circuit_coupling.dat", std::ofstream::out};
+    ofs << std::setprecision(17);
+    ofs << "version 1\n";
+    for (int i = 0; i < ext.nFields(); ++i) {
+        amrex::Real s_old, s_new, t_old, t_new;
+        if (ext.GetScaleSegment(i, s_old, s_new, t_old, t_new)) {
+            ofs << ext.FieldName(i) << " " << s_old << " " << s_new
+                << " " << t_old << " " << t_new << "\n";
+        }
+    }
+    ofs.close();
+}
+
+void
+CircuitCoupling::ReadCheckpointData (std::string const& dir)
+{
+    // Tolerate checkpoints from before the circuit subsystem.
+    std::ifstream ifs{dir + "/circuit_coupling.dat", std::ifstream::in};
+    if (!ifs.good()) { return; }
+
+    auto& warpx = WarpX::GetInstance();
+    auto* hybrid = warpx.get_pointer_HybridPICModel();
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        hybrid != nullptr && hybrid->m_add_external_fields,
+        "restarting a checkpoint with circuit_coupling.dat requires the "
+        "hybrid solver with external fields");
+    auto& ext = *hybrid->m_external_vector_potential;
+
+    std::string token;
+    int version = 0;
+    ifs >> token >> version;
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(token == "version" && version == 1,
+        "unsupported circuit_coupling.dat checkpoint format");
+
+    std::string name;
+    amrex::Real s_old, s_new, t_old, t_new;
+    while (ifs >> name >> s_old >> s_new >> t_old >> t_new) {
+        // Aborts with a clear message if the restart inputs dropped the
+        // field or its python_scale declaration.
+        ext.SetScale(name, s_old, s_new, t_old, t_new);
+    }
+}
