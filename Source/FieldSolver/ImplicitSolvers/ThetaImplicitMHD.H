@@ -743,13 +743,17 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // segregated one-step-lagged alternative is unstable whenever the
     // coil-plasma mutual coupling is strong.
     bool m_external_field_iteration = false;
-    // Stair-step PEC shaped-wall mask (implicit_mhd.wall_model = pec, RZ
-    // recast path only; default none = bit-identical): projects the total
-    // tangential E to zero on/outside the revolved wall polyline in every
-    // Ohm assembly, freezing the total flux inside the metal (the
-    // perfect-conductor eddy response). The preconditioner sees the same
-    // mask through GetMHDWallMaskForPC. The fluid is untouched (the
-    // dust/vacuum fill is the fluid-side wall analog).
+    // Stair-step conducting shaped-wall mask (implicit_mhd.wall_model,
+    // RZ recast path only; default none = bit-identical): projects the
+    // tangential E to the conductor condition on/outside the revolved
+    // wall polyline in every Ohm assembly -- "pec" pins the TOTAL field
+    // (freezes total flux inside the metal: the honest perfect-conductor
+    // response, for raw waveforms), "pec_response" pins the PLASMA-
+    // RESPONSE field only (plasma flux cannot leak, the prescribed drive
+    // is transparent: run32 EB parity for fitted waveform composites).
+    // The preconditioner sees the same mask through GetMHDWallMaskForPC
+    // (identical row drops in both contracts). The fluid is untouched
+    // (the dust/vacuum fill is the fluid-side wall analog).
     ImplicitMHDWallMask m_wall_mask;
 
     std::unique_ptr<amrex::Parser> m_mass_density_parser;

@@ -803,12 +803,13 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         "implicit_mhd.z_boundary_fluid = wall_temperature/outflow requires "
         "non-periodic z boundaries (boundary.field_lo/hi = none or open "
         "in z)");
-    // Stair-step PEC shaped wall (implicit_mhd.wall_model = pec): a static
-    // mask built from the revolved wall polyline (run32's EB analog for
-    // the implicit path), applied as an affine projection of the assembled
-    // Ohm E in every residual evaluation (JFNK-exact) and mirrored by the
-    // preconditioner's resistive stencil emission. Default none is
-    // bit-identical to no wall.
+    // Stair-step conducting shaped wall (implicit_mhd.wall_model =
+    // pec | pec_response): a static mask built from the revolved wall
+    // polyline (run32's EB analog for the implicit path), applied as an
+    // affine projection of the assembled Ohm E in every residual
+    // evaluation (JFNK-exact) and mirrored by the preconditioner's
+    // resistive stencil emission. Default none is bit-identical to no
+    // wall.
     {
         using ablastr::fields::Direction;
         m_wall_mask.Define(
@@ -817,9 +818,10 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
                 ->nGrowVect());
         if (m_wall_mask.IsActive()) {
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_use_recast,
-                "implicit_mhd.wall_model = pec requires the conservative-form "
-                "recast (implicit_mhd.fluid_flux = hlld or central): the wall "
-                "is a projection of the solver-assembled Ohm electric field");
+                "implicit_mhd.wall_model = pec/pec_response requires the "
+                "conservative-form recast (implicit_mhd.fluid_flux = hlld or "
+                "central): the wall is a projection of the solver-assembled "
+                "Ohm electric field");
         }
     }
 #else
@@ -1523,10 +1525,8 @@ void ThetaImplicitMHD::PrintParameters () const
                    << m_hybrid_pic_model->m_add_external_fields << "\n"
                    << "Evolve ion fluid:              " << m_evolve_ion_fluid << "\n"
                    << "Fluid flux:                    " << m_fluid_flux << "\n"
-                   << "Shaped PEC wall mask:          "
-                   << (m_wall_mask.IsActive() ? "pec (stair-step polyline)"
-                                              : "none")
-                   << "\n"
+                   << "Shaped conducting-wall mask:   "
+                   << m_wall_mask.ModeName() << "\n"
                    << "Open-r fluid wall:             " << m_r_open_fluid << "\n"
                    << "Z-end fluid boundary:          " << m_z_boundary_fluid << "\n"
                    << "Z wall temperature [eV]:       " << m_z_wall_temperature << "\n"
@@ -4826,16 +4826,22 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         }
     }
     if (m_wall_mask.IsActive()) {
-        // Stair-step PEC shaped wall: project the conductor condition onto
-        // the assembled E LAST, so no other boundary fill overwrites it.
-        // The condition acts on the TOTAL field -- under the split-field
-        // external-A scheme the plasma-response E is set to -E_ext at every
-        // masked location (total tangential E = 0), so the masked-cell
-        // Faraday update cancels the external drive exactly and the TOTAL
-        // flux through every contour inside the metal stays frozen at its
-        // initial value (the perfect-conductor eddy response). The map is
-        // affine in the state: matrix-free Jacobian probes see exactly the
-        // zeroed rows the preconditioner's stencil emission drops.
+        // Stair-step conducting shaped wall: project the conductor
+        // condition onto the assembled E LAST, so no other boundary fill
+        // overwrites it. wall_model = pec acts on the TOTAL field --
+        // under the split-field external-A scheme the plasma-response E
+        // is set to -E_ext at every masked location (total tangential
+        // E = 0), so the masked-cell Faraday update cancels the external
+        // drive exactly and the TOTAL flux through every contour inside
+        // the metal stays frozen at its initial value (the perfect-
+        // conductor eddy response). wall_model = pec_response pins the
+        // PLASMA-RESPONSE field only (E_plasma = 0 at masked locations,
+        // the prescribed drive is transparent): the run32 EB parity
+        // contract for fitted waveform composites that already embed the
+        // machine's wall response. Both maps are affine in the state:
+        // matrix-free Jacobian probes see exactly the zeroed rows the
+        // preconditioner's stencil emission drops (the masked values are
+        // state-independent constants in either contract).
         const ablastr::fields::VectorField efield =
             m_WarpX->m_fields.get_alldirs(FieldType::Efield_fp, 0);
         ablastr::fields::VectorField efield_external{};

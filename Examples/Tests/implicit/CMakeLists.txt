@@ -1015,7 +1015,22 @@ add_warpx_test(
     RZ  # dims
     2  # nprocs
     inputs_test_rz_theta_implicit_mhd_wall_pec_ramp  # inputs
-    "analysis_mhd_wall_pec_ramp.py diags/diag000000 diags/diag000040"  # analysis
+    "analysis_mhd_wall_pec_ramp.py diags/diag000000 diags/diag000040 pec"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# plasma-response conductor contract (run32 EB parity): the same mask
+# pins the plasma field only -- the programmed drives are transparent
+# (pocket ratio 1 vs < 0.2 for pec) while the plasma flux through every
+# masked corner ring is pinned to solver precision against the analytic
+# external r*A_theta reference
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_pec_response_ramp  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_pec_ramp implicit_mhd.wall_model=pec_response"  # inputs
+    "analysis_mhd_wall_pec_ramp.py diags/diag000000 diags/diag000040 pec_response"  # analysis
     OFF  # checksum
     OFF  # dependency
 )

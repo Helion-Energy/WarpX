@@ -2300,7 +2300,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Wall temperature in eV of the z-end fluid ghosts; required with
         (and only valid with) z_boundary_fluid="wall_temperature".
 
-    wall_model: {"none", "pec"}, optional
+    wall_model: {"none", "pec", "pec_response"}, optional
         Shaped conducting-wall model (RZ, fluid_flux="hlld" or
         "central", non-periodic z). "none" (default) is bit-identical
         to no wall. "pec" builds a static stair-step perfect-conductor
@@ -2309,12 +2309,19 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         every residual evaluation (with split external fields the
         plasma-response E is set to -E_ext there), freezing the total
         flux inside the metal: the perfect-conductor eddy response,
-        including transient shielding of programmed coil ramps. The
-        preconditioner sees the identical mask; the fluid is untouched
-        (the dust/vacuum fill is the fluid-side wall analog). NOTE:
-        coil waveforms whose calibration was fitted against composites
-        that already embed the machine's wall response double-count the
-        wall when combined with wall_model="pec".
+        including transient shielding of programmed coil ramps.
+        "pec_response" uses the identical mask but pins the
+        PLASMA-RESPONSE field only (plasma E zeroed at masked
+        locations; the prescribed external drive is transparent): the
+        embedded-boundary parity contract for fitted coil-waveform
+        composites that already embed the machine's wall response;
+        requires split external fields. The preconditioner sees the
+        identical mask in both modes; the fluid is untouched (the
+        dust/vacuum fill is the fluid-side wall analog). NOTE: coil
+        waveforms whose calibration was fitted against composites that
+        already embed the machine's wall response double-count the wall
+        when combined with wall_model="pec" — use "pec_response" for
+        those, and raw waveforms for "pec".
 
     wall_polyline_file: str, optional
         CSV of "z, r" [m] rows (z non-decreasing, single-valued;

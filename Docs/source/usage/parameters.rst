@@ -4752,9 +4752,11 @@ Jacobian probes.
 
     Shaped conducting-wall model of the theta-implicit MHD solver (RZ,
     ``implicit_mhd.fluid_flux = hlld`` or ``central``; non-periodic z).
-    ``none`` (default) is bit-identical to no wall. ``pec`` builds a
-    static stair-step perfect-conductor mask from the revolved poloidal
-    polyline of ``wall_polyline_file``: every electric-field component
+    ``none`` (default) is bit-identical to no wall. ``pec`` and
+    ``pec_response`` build the same static stair-step perfect-conductor
+    mask from the revolved poloidal polyline of ``wall_polyline_file``
+    and differ only in which field the conductor condition pins (see
+    below). For ``pec``: every electric-field component
     located on or outside the polyline (:math:`r \ge r_\mathrm{wall}(z)`;
     by the Yee staggering an E component exactly ON a stair face is
     always tangential to it) is projected onto the conductor condition
@@ -4776,11 +4778,28 @@ Jacobian probes.
     the fluid-side analog of an embedded-boundary particle scraper.
     Composes with the Green's-function open boundary (the wall's surface
     eddy sheet is an interior ``curl B`` current the open-boundary source
-    deposit sees like any other). NOTE when driving with FITTED coil
-    waveforms: calibration factors fitted to composites that already
-    embed the real machine's wall response will double-count the wall
-    when combined with ``wall_model = pec`` — refit toward raw waveforms
-    for quantitative use.
+    deposit sees like any other).
+
+    ``pec_response`` uses the identical mask but pins the PLASMA-RESPONSE
+    field only: at masked locations the plasma E is zeroed while the
+    prescribed external drive passes through the wall untouched. This is
+    the embedded-boundary parity contract for FITTED coil-waveform
+    composites that already embed the real machine's wall response
+    (one-way coupling): plasma-generated flux cannot leak through the
+    wall, while the drive acts everywhere as measured. Requires the
+    split external fields (``hybrid_pic_model.add_external_fields = 1``);
+    aborts otherwise. The preconditioner treatment is identical in both
+    modes (the masked E values are state-independent constants either
+    way).
+
+    NOTE when driving with FITTED coil waveforms: calibration factors
+    fitted to composites that already embed the real machine's wall
+    response will double-count the wall when combined with
+    ``wall_model = pec`` (measured on the FRC formation deck: with
+    33/48 coil filaments on/outside the polyline, the total-field wall
+    excludes essentially the whole programmed drive) — use
+    ``pec_response`` with fitted composites, and refit toward raw
+    waveforms before using ``pec`` quantitatively.
 
 .. pp:param:: implicit_mhd.wall_polyline_file
     :type: ``string``

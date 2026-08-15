@@ -113,11 +113,29 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
     std::string wall_model = "none";
     pp.query("wall_model", wall_model);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        wall_model == "none" || wall_model == "pec",
-        "implicit_mhd.wall_model must be 'none' or 'pec'");
+        wall_model == "none" || wall_model == "pec" ||
+            wall_model == "pec_response",
+        "implicit_mhd.wall_model must be 'none', 'pec' or 'pec_response'");
     if (wall_model == "none") {
         m_active = false;
         return;
+    }
+    m_total_field = (wall_model == "pec");
+    if (!m_total_field) {
+        // pec_response pins the PLASMA-RESPONSE field only: the prescribed
+        // drive passes through the wall as-is because the fitted waveforms
+        // already embed the machine's wall response (the run32 one-way
+        // coupling contract). Without the split external registers there
+        // is no plasma/external split and the mode is meaningless.
+        const amrex::ParmParse pp_hybrid("hybrid_pic_model");
+        bool add_external_fields = false;
+        pp_hybrid.query("add_external_fields", add_external_fields);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(add_external_fields,
+            "implicit_mhd.wall_model = pec_response requires the split "
+            "external fields (hybrid_pic_model.add_external_fields = 1): "
+            "the mode pins the plasma-response field only, which is not "
+            "defined without the plasma/external split. Use wall_model = "
+            "pec for the total-field conductor.");
     }
 
 #if !defined(WARPX_DIM_RZ)
@@ -206,7 +224,8 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
 
     const auto [rw_min, rw_max] =
         std::minmax_element(r_points.begin(), r_points.end());
-    amrex::Print() << "ImplicitMHDWallMask: stair-step PEC wall active from '"
+    amrex::Print() << "ImplicitMHDWallMask: stair-step conducting wall ("
+                   << wall_model << ") active from '"
                    << polyline_file << "' (" << z_points.size()
                    << " polyline points, r in [" << *rw_min << ", " << *rw_max
                    << "], z in [" << z_points.front() << ", "
@@ -243,8 +262,13 @@ void ImplicitMHDWallMask::ProjectElectricField (
 
     for (int d = 0; d < 3; ++d) {
         amrex::MultiFab& mf = *efield[d];
+        // pec (total-field contract): masked plasma E = -E_ext, so the
+        // total tangential E vanishes. pec_response (plasma-response
+        // contract, run32 EB parity): masked plasma E = 0, the external
+        // drive is transparent -- the external register is not read.
         const amrex::MultiFab* const ext =
-            (efield_external != nullptr) ? (*efield_external)[d] : nullptr;
+            (m_total_field && efield_external != nullptr)
+                ? (*efield_external)[d] : nullptr;
 
         // Cover the domain ghosts as far as the mask tables and (when
         // present) the external register reach: the split external E
