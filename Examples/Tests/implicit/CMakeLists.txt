@@ -1004,6 +1004,22 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# stair-step PEC shaped wall (implicit_mhd.wall_model = pec) under a
+# programmed external uniform-Bz ramp: total flux inside the metal frozen
+# to solver precision, interior ramp exclusion to the analytic
+# infinite-cylinder-shell image solution; the resistive-block assembly
+# validation asserts the wall-masked PC rows against the matrix-free
+# operator at every update
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_pec_ramp  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_wall_pec_ramp  # inputs
+    "analysis_mhd_wall_pec_ramp.py diags/diag000000 diags/diag000040"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # selectable z-end fluid boundary, mode "outflow" (rectified outgoing-only
 # end ghosts): a hot slab with outward end flow drains mass and total
 # fluid energy strictly monotonically through the z faces

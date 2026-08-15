@@ -19,6 +19,30 @@ namespace warpx::mhd_pc
 {
 
 /**
+ * \brief Device view of the static stair-step PEC wall mask of the
+ * theta-implicit MHD solver (implicit_mhd.wall_model = pec, RZ only): a
+ * shaped conducting wall represented by zeroing every tangential
+ * electric-field component located on or outside the revolved wall
+ * polyline (r >= r_wall(z)).
+ *
+ * Per electric-field staggering, the mask is the first masked radial
+ * index at each axial index; a row (i, j) is masked iff
+ * i >= first_masked_*[j]. The pointers are pre-offset so the axial index
+ * j (nodal for er/et, cell for ez) is valid over the ghost-extended
+ * range the owner built the mask for. The residual applies the same mask
+ * as a linear projection of the assembled Ohm E, so dropping the masked
+ * emissions here keeps the preconditioner rows exact for the wall (the
+ * same convention as the non-periodic domain boundary planes).
+ */
+struct WallMaskView
+{
+    bool active = false;
+    const int* first_masked_er = nullptr; //!< E_r rows: (r-cell, z-node)
+    const int* first_masked_et = nullptr; //!< E_theta rows: (r-node, z-node)
+    const int* first_masked_ez = nullptr; //!< E_z rows: (r-node, z-cell)
+};
+
+/**
  * \brief Frozen geometric constants of the discrete resistive curl-curl
  *
  *     A d = theta_r dt curl((eta_field/mu0) curl d)
@@ -66,6 +90,8 @@ struct ResistiveStencilConstants
     amrex::Real inverse_dz = 0.0;
     amrex::Real radial_lo = 0.0;
     amrex::Real radial_cell_size = 0.0;
+    /** Stair-step PEC wall mask (inactive by default: identical rows). */
+    WallMaskView wall;
 #endif
 };
 
@@ -232,6 +258,10 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
         {
             return;
         }
+        if (c.wall.active && node_r >= c.wall.first_masked_et[node_z])
+        {
+            return;
+        }
         const amrex::Real weight = -multiplier * a.eta_h[1](node_r, node_z, k);
         const amrex::Real radius =
             c.radial_lo + static_cast<amrex::Real>(node_r) * c.radial_cell_size;
@@ -260,6 +290,10 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
         }
         if (!c.axial_periodic &&
             (node_z == c.axial_face_low || node_z == c.axial_face_high))
+        {
+            return;
+        }
+        if (c.wall.active && node_r >= c.wall.first_masked_et[node_z])
         {
             return;
         }
@@ -297,6 +331,10 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
             {
                 return;
             }
+            if (c.wall.active && cell_r >= c.wall.first_masked_er[node_z])
+            {
+                return;
+            }
             const amrex::Real coefficient =
                 multiplier * a.eta[0](cell_r, node_z, k) * c.inverse_dz;
             sink(1, cell_r, node_z, k, -coefficient);
@@ -306,6 +344,10 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
             [&] (const int node_r, const int cell_z, const amrex::Real multiplier)
         {
             if (node_r == c.radial_face_low || node_r == c.radial_face_high)
+            {
+                return;
+            }
+            if (c.wall.active && node_r >= c.wall.first_masked_ez[cell_z])
             {
                 return;
             }
@@ -377,6 +419,10 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
             {
                 return;
             }
+            if (c.wall.active && cell_r >= c.wall.first_masked_er[node_z])
+            {
+                return;
+            }
             const amrex::Real weight = -multiplier * a.eta_h[0](cell_r, node_z, k);
             const amrex::Real radius =
                 c.radial_lo + (static_cast<amrex::Real>(cell_r) + amrex::Real(0.5)) *
@@ -401,6 +447,10 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
             [&] (const int node_r, const int cell_z, const amrex::Real multiplier)
         {
             if (node_r == c.radial_face_low || node_r == c.radial_face_high)
+            {
+                return;
+            }
+            if (c.wall.active && node_r >= c.wall.first_masked_ez[cell_z])
             {
                 return;
             }

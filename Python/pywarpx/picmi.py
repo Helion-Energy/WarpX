@@ -2300,6 +2300,27 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Wall temperature in eV of the z-end fluid ghosts; required with
         (and only valid with) z_boundary_fluid="wall_temperature".
 
+    wall_model: {"none", "pec"}, optional
+        Shaped conducting-wall model (RZ, fluid_flux="hlld" or
+        "central", non-periodic z). "none" (default) is bit-identical
+        to no wall. "pec" builds a static stair-step perfect-conductor
+        mask from the revolved poloidal polyline of wall_polyline_file
+        and projects the total tangential E to zero on/outside it in
+        every residual evaluation (with split external fields the
+        plasma-response E is set to -E_ext there), freezing the total
+        flux inside the metal: the perfect-conductor eddy response,
+        including transient shielding of programmed coil ramps. The
+        preconditioner sees the identical mask; the fluid is untouched
+        (the dust/vacuum fill is the fluid-side wall analog). NOTE:
+        coil waveforms whose calibration was fitted against composites
+        that already embed the machine's wall response double-count the
+        wall when combined with wall_model="pec".
+
+    wall_polyline_file: str, optional
+        CSV of "z, r" [m] rows (z non-decreasing, single-valued;
+        near-vertical faces via epsilon-offset duplicate z) defining
+        the wall polyline for wall_model="pec".
+
     absorb_ledger_interval: integer, optional
         Print interval (steps) of the absorbing-wall ledger counters
         (cumulative absorbed mass [kg] and fluid energy [J]); 0 disables
@@ -2510,6 +2531,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         r_open_fluid=None,
         z_boundary_fluid=None,
         z_wall_temperature=None,
+        wall_model=None,
+        wall_polyline_file=None,
         absorb_ledger_interval=None,
         absorb_ledger_file=None,
         hllc_signal_closure=None,
@@ -2569,6 +2592,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.r_open_fluid = r_open_fluid
         self.z_boundary_fluid = z_boundary_fluid
         self.z_wall_temperature = z_wall_temperature
+        self.wall_model = wall_model
+        self.wall_polyline_file = wall_polyline_file
         self.absorb_ledger_interval = absorb_ledger_interval
         self.absorb_ledger_file = absorb_ledger_file
         self.hllc_signal_closure = hllc_signal_closure
@@ -2654,6 +2679,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.r_open_fluid = self.r_open_fluid
         implicit_mhd.z_boundary_fluid = self.z_boundary_fluid
         implicit_mhd.z_wall_temperature = self.z_wall_temperature
+        implicit_mhd.wall_model = self.wall_model
+        implicit_mhd.wall_polyline_file = self.wall_polyline_file
         implicit_mhd.absorb_ledger_interval = self.absorb_ledger_interval
         implicit_mhd.absorb_ledger_file = self.absorb_ledger_file
         implicit_mhd.hllc_signal_closure = self.hllc_signal_closure

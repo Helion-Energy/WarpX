@@ -7,6 +7,7 @@
 #ifndef THETA_IMPLICIT_MHD_H_
 #define THETA_IMPLICIT_MHD_H_
 
+#include "FieldSolver/ImplicitSolvers/ImplicitMHDWallMask.H"
 #include "FieldSolver/ImplicitSolvers/ImplicitSolver.H"
 #include "FieldSolver/ImplicitSolvers/WarpXSolverVec.H"
 
@@ -235,6 +236,12 @@ class ThetaImplicitMHD final : public ImplicitSolver
 
     [[nodiscard]] const amrex::MultiFab*
     GetMHDMagneticFieldCCForPC () const override;
+
+    [[nodiscard]] warpx::mhd_pc::WallMaskView
+    GetMHDWallMaskForPC () const override
+    {
+        return m_wall_mask.View();
+    }
 
     inline static constexpr char MassDensityName[] = "implicit_mhd_mass_density";
     inline static constexpr char MomentumDensityName[] = "implicit_mhd_momentum_density";
@@ -736,6 +743,14 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // segregated one-step-lagged alternative is unstable whenever the
     // coil-plasma mutual coupling is strong.
     bool m_external_field_iteration = false;
+    // Stair-step PEC shaped-wall mask (implicit_mhd.wall_model = pec, RZ
+    // recast path only; default none = bit-identical): projects the total
+    // tangential E to zero on/outside the revolved wall polyline in every
+    // Ohm assembly, freezing the total flux inside the metal (the
+    // perfect-conductor eddy response). The preconditioner sees the same
+    // mask through GetMHDWallMaskForPC. The fluid is untouched (the
+    // dust/vacuum fill is the fluid-side wall analog).
+    ImplicitMHDWallMask m_wall_mask;
 
     std::unique_ptr<amrex::Parser> m_mass_density_parser;
     std::unique_ptr<amrex::Parser> m_velocity_x_parser;

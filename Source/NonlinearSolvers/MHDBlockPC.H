@@ -1017,6 +1017,12 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
     warpx::mhd_pc::ResistiveStencilConstants stencil_constants =
         warpx::mhd_pc::MakeResistiveStencilConstants(m_geometry, m_resistive_h);
     stencil_constants.include_hyper = m_resistive_hyper_active;
+#if defined(WARPX_DIM_RZ)
+    // Stair-step PEC wall mask (implicit_mhd.wall_model = pec): the
+    // assemblies drop the same masked tangential-E rows the residual
+    // projects (inactive default leaves the emission unchanged).
+    stencil_constants.wall = m_ops->GetMHDWallMaskForPC();
+#endif
     amrex::Array<const amrex::MultiFab*, 3> face_layout = {nullptr, nullptr, nullptr};
     for (int component = 0; component < 3; ++component)
     {
@@ -1810,6 +1816,11 @@ MHDBlockPC<T, Ops>::ApplyResistiveCurlCurl ()
     warpx::mhd_pc::ResistiveStencilConstants stencil_constants =
         warpx::mhd_pc::MakeResistiveStencilConstants(m_geometry, m_resistive_h);
     stencil_constants.include_hyper = m_resistive_hyper_active;
+#if defined(WARPX_DIM_RZ)
+    // Same wall-mask row drops as the frozen assemblies (see
+    // UpdateResistiveBlock): matrix-free application == assembled operator.
+    stencil_constants.wall = m_ops->GetMHDWallMaskForPC();
+#endif
 
     for (int component = 0; component < 3; ++component)
     {

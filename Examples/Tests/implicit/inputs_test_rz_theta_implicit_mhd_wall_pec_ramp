@@ -1,0 +1,162 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Stair-step PEC shaped-wall test (RZ, central recast flux, frozen
+# ions): a
+# straight-cylinder wall polyline at r_w = 0.3 m (implicit_mhd.wall_model
+# = pec masks everything at r >= r_w) sits in a resistive vacuum, with
+# TWO programmed split-field external drives ramping together (exactly
+# linear time scale): a uniform-Bz ramp (A_theta = 0.5*B0ext*r) and an
+# in-domain coil blob INSIDE the wall
+# (A_theta = A0 exp(-((r-r0)^2+z^2)/a0^2), the formation decks'
+# in-domain-coil mechanism), whose flux DOES reach the wall
+# (psi_coil(r_eff)/psi_coil(r0) ~ 0.2).
+#
+# Perfect-conductor physics under test (see analysis_mhd_wall_pec_ramp.py):
+# 1. TOTAL flux freeze in the metal to SOLVER precision: the wall
+#    projection sets the plasma E to -E_ext at every masked location, so
+#    the masked Faraday rows cancel BOTH programmed drives exactly, and
+#    the plasma image response the interior develops has zero exterior
+#    field -- every fully masked cell must retain its initial (zero)
+#    total field bit-near-exactly.
+# 2. The defining property of the analytic cylinder-shell image
+#    solution: the total poloidal flux through the disk bounded by the
+#    FIRST MASKED corner ring r_eff (the stair surface) is pinned at its
+#    initial value (zero) for EVERY z row, to solver precision -- the
+#    discrete Faraday telescoping makes this exactly the invariant the
+#    masked E_theta ring enforces, for the z-dependent coil drive as
+#    well as the uniform ramp. A mask that leaks or sits at the wrong
+#    radius fails it (the vacuum field between the expected and actual
+#    stair radius breaks the per-row sum).
+# 3. Coil presence + ramp exclusion in the interior: the relaxed
+#    (tau ~ 3e-4 s << t_end) field near the coil must carry the
+#    prescribed analytic coil field (Bz_coil(r0, 0) = A0/r0) plus the
+#    wall-image correction -- an over-covering mask (the interior then
+#    tracks -B_ext pointwise: NO coil field survives) and a missing
+#    wall (the uniform ramp penetrates on top) both fail.
+#
+# The run is preconditioned with the MHD block PC's resistive block
+# (grid diffusion number ~100) WITH assembly validation: every active
+# update checks the direct-solver sparse rows -- including the wall-mask
+# row drops -- against the matrix-free operator to roundoff, so the
+# residual/PC wall consistency is asserted inside the run itself.
+
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+my_constants.Te = 1.0
+my_constants.Pe = n0 * Te * q_e
+my_constants.B0ext = 1.0e-6
+my_constants.A0 = 2.0e-7
+my_constants.r0 = 0.2
+my_constants.a0 = 0.08
+my_constants.D = 50.0
+my_constants.nr = 32
+my_constants.nz = 64
+my_constants.Lr = 0.5
+my_constants.Lz = 1.0
+my_constants.dt = 5.0e-4
+my_constants.T_ramp = 0.02
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 40
+amr.n_cell = nr nz
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 -0.5*Lz
+geometry.prob_hi = Lr 0.5*Lz
+boundary.field_lo = none none
+boundary.field_hi = pec none
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-14
+newton.relative_tolerance = 1.0e-11
+newton.max_iterations = 12
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-11
+gmres.max_iterations = 1000
+
+jacobian.pc_type = pc_mhd_block
+pc_mhd_block.resistive_validate_assembly = 1
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = 5.0/3.0
+hybrid_pic_model.n_floor = 1.0e16
+hybrid_pic_model.plasma_resistivity(rho,J,t) = mu0*D
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+# Split-field external drives, both scaled by the exactly linear time
+# function t/T_ramp (its centered-FD E slope is exact, so the discrete
+# Faraday pair E_ext/B_ext is consistent to roundoff -- the metal-freeze
+# check is then a pure solver-precision measurement): a uniform-Bz ramp
+# and an in-domain coil blob inside the wall. Pure-theta axisymmetric A
+# fields are exactly divergence-free.
+hybrid_pic_model.add_external_fields = 1
+external_vector_potential.fields = ramp coil
+external_vector_potential.ramp.Ay_external_grid_function(x,y,z) = "0.5*B0ext*x"
+external_vector_potential.ramp.A_time_external_function(t) = "t/T_ramp"
+external_vector_potential.coil.Ay_external_grid_function(x,y,z) = "A0*exp(-((x-r0)^2 + z^2)/a0^2)"
+external_vector_potential.coil.A_time_external_function(t) = "t/T_ramp"
+external_vector_potential.do_diva_cleaning = 0
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0ext
+implicit_mhd.gamma_e = 5.0/3.0
+implicit_mhd.gamma_i = 5.0/3.0
+implicit_mhd.reference_ion_pressure = 0.0
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.electron_pressure(x,y,z) = Pe
+implicit_mhd.evolve_ion_fluid = false
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 1.0
+implicit_mhd.include_joule_heating = false
+implicit_mhd.resistive_theta = 1.0
+
+# Shaped conducting wall: straight cylinder at r_w = 0.3 (polyline spans
+# beyond the domain ends; constant continuation covers the z ghosts).
+implicit_mhd.wall_model = pec
+implicit_mhd.wall_polyline_file = wall_cylinder_r30.csv
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 40
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Br Bt Bz jt
+diag1.write_species = 0

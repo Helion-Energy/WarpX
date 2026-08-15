@@ -4746,6 +4746,55 @@ Jacobian probes.
     and fluid-energy fluxes of every accepted step into two cumulative
     counters (see ``absorb_ledger_interval``).
 
+.. pp:param:: implicit_mhd.wall_model
+    :type: ``string``
+    :default: ``none``
+
+    Shaped conducting-wall model of the theta-implicit MHD solver (RZ,
+    ``implicit_mhd.fluid_flux = hlld`` or ``central``; non-periodic z).
+    ``none`` (default) is bit-identical to no wall. ``pec`` builds a
+    static stair-step perfect-conductor mask from the revolved poloidal
+    polyline of ``wall_polyline_file``: every electric-field component
+    located on or outside the polyline (:math:`r \ge r_\mathrm{wall}(z)`;
+    by the Yee staggering an E component exactly ON a stair face is
+    always tangential to it) is projected onto the conductor condition
+    at the end of every Ohm's-law assembly, i.e. inside every JFNK
+    residual evaluation. The condition acts on the TOTAL field: with the
+    split external vector potential
+    (``hybrid_pic_model.add_external_fields``) the plasma-response E is
+    set to :math:`-E_\mathrm{ext}` at masked locations, so the total
+    tangential E vanishes and the TOTAL magnetic flux through every
+    closed contour inside the metal stays frozen at its initial value —
+    the perfect-conductor eddy response, including the transient
+    shielding of programmed coil ramps that pure flux programming
+    misses. The projection is affine in the state (JFNK-exact), and the
+    MHD block preconditioner's resistive stencil drops the same masked
+    rows, so the matrix-free application, the banded factorization and
+    the direct sparse assembly all see the wall consistently. The FLUID
+    is deliberately untouched: the wall region is expected to lie in the
+    dust/vacuum fill (frozen momentum, :math:`E \to \eta J`), which is
+    the fluid-side analog of an embedded-boundary particle scraper.
+    Composes with the Green's-function open boundary (the wall's surface
+    eddy sheet is an interior ``curl B`` current the open-boundary source
+    deposit sees like any other). NOTE when driving with FITTED coil
+    waveforms: calibration factors fitted to composites that already
+    embed the real machine's wall response will double-count the wall
+    when combined with ``wall_model = pec`` — refit toward raw waveforms
+    for quantitative use.
+
+.. pp:param:: implicit_mhd.wall_polyline_file
+    :type: ``string``
+
+    CSV file of the wall polyline for ``implicit_mhd.wall_model = pec``:
+    rows of ``z, r`` [m] (optional header row), z non-decreasing and
+    single-valued (express near-vertical wall faces with epsilon-offset
+    duplicate z values). The polyline is interpolated linearly in z and
+    continued constantly beyond its axial range; everything at
+    :math:`r \ge r_\mathrm{wall}(z)` is conductor (the surface sits AT
+    the polyline). A relative path is also resolved against the
+    ``AMREX_INPUTS_FILE_PREFIX`` environment variable, like the inputs
+    file itself.
+
 .. pp:param:: implicit_mhd.absorb_ledger_interval
     :type: ``integer``
     :default: ``1``
