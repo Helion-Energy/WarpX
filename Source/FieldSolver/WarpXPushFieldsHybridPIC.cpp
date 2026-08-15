@@ -407,20 +407,30 @@ void WarpX::HybridPICInitializeRhoJandB ()
                 gett_new(0),
                 0.5_rt*dt[0]);
 
-            // If using split fields, add the external field at t=0
-            for (int lev = 0; lev <= finest_level; ++lev) {
-                for (int idim = 0; idim < 3; ++idim) {
-                    // Check to make sure field only contains numeric values
-                    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                        m_fields.get(FieldType::hybrid_B_fp_external, Direction{idim}, lev)->is_finite(),
-                        "Non-finite value detected in external B-field at t=0."
-                    );
+            // If using split fields, add the external field at t=0. This must
+            // happen exactly once per fresh run: Bfield_fp holds the TOTAL
+            // field between steps (each step subtracts the external part on
+            // entry and adds it back on exit), so it contains no external
+            // contribution only before the very first step. This function
+            // runs at the first step of EVERY Evolve() call (Python drivers
+            // legitimately call sim.step(n) repeatedly); re-adding here would
+            // grow the total by one external field per call -- a runaway that
+            // drives the substepped B advance unstable.
+            if (istep[0] == 0) {
+                for (int lev = 0; lev <= finest_level; ++lev) {
+                    for (int idim = 0; idim < 3; ++idim) {
+                        // Check to make sure field only contains numeric values
+                        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                            m_fields.get(FieldType::hybrid_B_fp_external, Direction{idim}, lev)->is_finite(),
+                            "Non-finite value detected in external B-field at t=0."
+                        );
 
-                    MultiFab::Add(
-                        *m_fields.get(FieldType::Bfield_fp, Direction{idim}, lev),
-                        *m_fields.get(FieldType::hybrid_B_fp_external, Direction{idim}, lev),
-                        0, 0, 1,
-                        m_fields.get(FieldType::Bfield_fp, Direction{idim}, lev)->nGrowVect());
+                        MultiFab::Add(
+                            *m_fields.get(FieldType::Bfield_fp, Direction{idim}, lev),
+                            *m_fields.get(FieldType::hybrid_B_fp_external, Direction{idim}, lev),
+                            0, 0, 1,
+                            m_fields.get(FieldType::Bfield_fp, Direction{idim}, lev)->nGrowVect());
+                    }
                 }
             }
         }
