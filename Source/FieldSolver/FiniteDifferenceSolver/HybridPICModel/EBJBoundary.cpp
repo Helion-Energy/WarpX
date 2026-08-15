@@ -571,7 +571,8 @@ void warpx::hybrid::ApplyPECBoundaryToField (
     bool normal_odd,
     bool fill_covered_centers,
     EBFillStatus* status_cache,
-    amrex::Real band_cells)
+    amrex::Real band_cells,
+    bool constitutive)
 {
 #if defined(WARPX_DIM_3D) || defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
     using namespace amrex::literals;
@@ -634,6 +635,37 @@ void warpx::hybrid::ApplyPECBoundaryToField (
         }
 
         const amrex::Vector<amrex::MultiFab*> field_vec{field[0], field[1], field[2]};
+
+        // Constitutive PEC: zero every fill target outright (well- and
+        // ill-posed alike; deep points were always zeroed). No image gathers
+        // means no pre-gather exchange and no cascade -- the whole boundary
+        // condition is one kernel per component. The magnetic parities need
+        // the mirror (a zeroed covered band injects central-difference
+        // div(B) into the fluid stencils), so constitutive is edge-field only.
+        if (constitutive) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!normal_odd,
+                "ApplyPECBoundaryToField: constitutive mode supports only the "
+                "edge-field parities (E, J), not the magnetic fill");
+            if (st.n_work > 0) {
+                for (int c = 0; c < 3; ++c) {
+                    for (amrex::MFIter mfi(*field[c], amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                        if ((*st.box_work[c])[mfi] == 0) { continue; }
+                        amrex::Box const tb = mfi.tilebox(field[c]->ixType().toIntVect());
+                        int const ncomp = field[c]->nComp();
+                        auto const& Jc = field[c]->array(mfi);
+                        auto const& stat = st.status[c]->const_array(mfi);
+                        amrex::ParallelFor(tb, ncomp,
+                            [=] AMREX_GPU_DEVICE (int i, int j, int k, int n)
+                        {
+                            if (stat(i, j, k) != S_SOLUTION) { Jc(i, j, k, n) = 0._rt; }
+                        });
+                    }
+                }
+            }
+            amrex::FillBoundary_nowait(field_vec, geom.periodicity());
+            amrex::FillBoundary_finish(field_vec);
+            return;
+        }
 
         // Whole-level no-op (e.g. a wall-clear refined level): no pass writes
         // anything, so only the closing ghost refresh below is kept (the

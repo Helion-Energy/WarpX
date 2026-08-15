@@ -307,7 +307,9 @@ void WarpX::HybridPICDepositRhoAndJ ()
                 *m_fields.get(FieldType::distance_to_eb, lev),
                 Geom(lev),
                 /*normal_odd=*/false, /*fill_covered_centers=*/true,
-                &m_hybrid_pic_model->m_eb_bc_status_E[lev]);
+                &m_hybrid_pic_model->m_eb_bc_status_E[lev], /*band_cells=*/1.0,
+                /*constitutive=*/m_hybrid_pic_model->m_eb_pec_zero_ej &&
+                    WarpX::grid_type != ablastr::utils::enums::GridType::Collocated);
             warpx::hybrid::FoldEBDepositToNodalScalar(
                 *m_fields.get(FieldType::rho_fp, lev),
                 *m_fields.get(FieldType::distance_to_eb, lev),

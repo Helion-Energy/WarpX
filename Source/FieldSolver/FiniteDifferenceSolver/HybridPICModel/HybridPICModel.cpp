@@ -218,6 +218,7 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("conformal_ect_j_keep_mirror", m_conformal_ect_j_keep_mirror);
     pp_hybrid.query("conformal_e_geometric_pec", m_conformal_e_geometric_pec);
     pp_hybrid.query("conformal_pec_zero_ej", m_conformal_pec_zero_ej);
+    pp_hybrid.query("eb_pec_zero_ej", m_eb_pec_zero_ej);
     if (m_conformal_ect_j
         && (!m_use_conformal_eb
             || WarpX::grid_type != ablastr::utils::enums::GridType::Staggered)) {
@@ -812,7 +813,9 @@ void HybridPICModel::CalculatePlasmaCurrent (
             *warpx.m_fields.get(FieldType::distance_to_eb, lev),
             warpx.Geom(lev),
             /*normal_odd=*/false, /*fill_covered_centers=*/true,
-            &m_eb_bc_status_Jplasma[lev], m_eb_fill_band_cells);
+            &m_eb_bc_status_Jplasma[lev], m_eb_fill_band_cells,
+            /*constitutive=*/m_eb_pec_zero_ej &&
+                WarpX::grid_type != ablastr::utils::enums::GridType::Collocated);
     }
 }
 
@@ -910,7 +913,9 @@ void HybridPICModel::HybridPICSolveE (
             // Own cache (m_eb_bc_status_Eohm): m_eb_bc_status_E is built at the
             // one-cell band by the deposit fold and must not be reused here
             // with the (possibly widened) m_eb_fill_band_cells.
-            &m_eb_bc_status_Eohm[lev], m_eb_fill_band_cells);
+            &m_eb_bc_status_Eohm[lev], m_eb_fill_band_cells,
+            /*constitutive=*/m_eb_pec_zero_ej &&
+                WarpX::grid_type != ablastr::utils::enums::GridType::Collocated);
     }
 }
 

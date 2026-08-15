@@ -132,6 +132,12 @@ namespace warpx::hybrid
      *            the particle field gather) passes the corresponding reach so
      *            those points are mirror-filled instead of left in the zeroed
      *            deep interior.
+     * \param[in] constitutive write 0 on every fill target instead of the
+     *            mirror image (the staircase analog of the ECT constitutive
+     *            wall: no fields or currents on EB-touching points). Uses the
+     *            same cached classification and write set as the mirror fill,
+     *            skips the image gathers and the cascade entirely, and is not
+     *            supported for the magnetic parities (normal_odd).
      *
      * A magnetic fill on a collocated grid (\c normal_odd with a fully nodal
      * field) always ends with the divergence-consistent covered-band
@@ -146,7 +152,8 @@ namespace warpx::hybrid
         bool normal_odd = false,
         bool fill_covered_centers = false,
         EBFillStatus* status_cache = nullptr,
-        amrex::Real band_cells = 1.0);
+        amrex::Real band_cells = 1.0,
+        bool constitutive = false);
 
     /** \brief One-pass divergence-consistent correction of the mirror-filled
      * covered B band (collocated grid only).

@@ -710,6 +710,18 @@ public:
      *  cannot write. Takes precedence over conformal_e_geometric_pec and the
      *  covered-J mirror. */
     bool m_conformal_pec_zero_ej = false;
+    /** Staircase-general constitutive PEC (hybrid_pic_model.eb_pec_zero_ej,
+     *  opt-in, staggered grids only): write 0 instead of the level-set mirror
+     *  on every fill target of the Ohm's-law E, the Ampere plasma current and
+     *  the deposited ion current. The mirror fill regenerates the wall-band
+     *  E/J from interior values AFTER the dissipative terms have acted, so a
+     *  wall-band mode driven through the fill is invisible to resistivity and
+     *  hyper-resistivity; the constitutive wall (the ECT campaign's stable
+     *  arm) closes that loop at the source. The magnetic fill (collocated
+     *  path) keeps the mirror. On the conformal path prefer
+     *  conformal_pec_zero_ej, which also zeroes cut edges by open length and
+     *  the covered external-B faces. */
+    bool m_eb_pec_zero_ej = false;
     /** If > 0 (opt-in), smooth the holmstrom vacuum switch with an
      *  above-floor power-law window: on rho in [rho_floor,
      *  holmstrom_blend_width*rho_floor] the Hall/pressure (divided-by-rho)
