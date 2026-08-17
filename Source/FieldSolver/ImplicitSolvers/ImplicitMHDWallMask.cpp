@@ -277,6 +277,11 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
     std::copy(ez_h.begin(), ez_h.end(), m_first_masked_ez.begin());
     std::copy(cc_h.begin(), cc_h.end(), m_first_masked_cc.begin());
 
+    // Active BEFORE the banner: ThermalBCName()/GetThermalBC() gate on
+    // m_active, so printing first reports "thermal BC none" for an
+    // engaged mode (caught by the RR12 boot-banner gate).
+    m_active = true;
+
     const auto [rw_min, rw_max] =
         std::minmax_element(r_points.begin(), r_points.end());
     amrex::Print() << "ImplicitMHDWallMask: stair-step conducting wall ("
@@ -292,8 +297,6 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
         amrex::Print() << " (T_wall = " << m_wall_temperature << " eV)";
     }
     amrex::Print() << "\n";
-
-    m_active = true;
 #endif
 }
 
