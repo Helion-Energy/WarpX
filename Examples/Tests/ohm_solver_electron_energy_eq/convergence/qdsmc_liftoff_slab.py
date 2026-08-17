@@ -324,6 +324,18 @@ parser.add_argument(
     "comp_band -0.13 J at ignition)",
 )
 parser.add_argument(
+    "--ve-midpoint",
+    type=int,
+    choices=[0, 1],
+    default=1,
+    help="sub-cell midpoint V_e re-gather for the marker push "
+    "(hybrid_pic_model.qdsmc_ve_midpoint_gather; the branch default). 0 = "
+    "markers advect with their home-node V_e for the whole step "
+    "(piecewise-constant velocity sampling) -- the discriminating control "
+    "for sub-cell interpolation of the 1/rho-amplified V_e field at "
+    "floor-band cliff edges",
+)
+parser.add_argument(
     "--cliff-deposit",
     type=int,
     choices=[0, 1],
@@ -680,6 +692,8 @@ if args.energy_budget:
     pywarpx.hybridpicmodel.qdsmc_energy_budget = 1
 if args.grad_deposit == 0:
     pywarpx.hybridpicmodel.qdsmc_gradient_deposit = 0
+if args.ve_midpoint == 0:
+    pywarpx.hybridpicmodel.qdsmc_ve_midpoint_gather = 0
 if args.cliff_deposit:
     pywarpx.hybridpicmodel.qdsmc_cliff_limited_deposit = 1
     if args.cliff_r1 >= 0.0:

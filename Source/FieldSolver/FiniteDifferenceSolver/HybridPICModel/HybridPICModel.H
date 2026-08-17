@@ -530,6 +530,15 @@ public:
      *  recover #6982 bit-for-bit. Input: hybrid_pic_model.qdsmc_gradient_deposit. */
     bool m_qdsmc_gradient_deposit = true;
 
+    /** Sub-cell midpoint re-gather of V_e for the marker push (the RK2
+     *  spatial midpoint sample). Default on. Off = markers advect with the
+     *  V_e of their home node for the whole step (piecewise-constant/nodal
+     *  velocity sampling; spatially first-order but free of any sub-cell
+     *  interpolation of the V_e field, whose 1/rho scaling makes node-to-node
+     *  contrast large near the density floor). Attribution knob, not a
+     *  production setting. Input: hybrid_pic_model.qdsmc_ve_midpoint_gather. */
+    bool m_qdsmc_ve_midpoint_gather = true;
+
     /** One entropy-transport pass on level lev over dt_adv: K_e init ->
      *  SetV -> SetK [-> midpoint velocity re-gather] -> PushX -> deposits ->
      *  T_e recovery. V_e must already be filled (QDSMCInitializeUe) and

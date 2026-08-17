@@ -124,6 +124,10 @@ void HybridPICModel::ReadParameters ()
     // euler to recover the #6982 scheme bit-for-bit.
     pp_hybrid.query("qdsmc_gradient_deposit", m_qdsmc_gradient_deposit);
 
+    // Midpoint sub-cell V_e re-gather for the marker push (see the member
+    // doc). Default on; off pins the push velocity to the home-node V_e.
+    pp_hybrid.query("qdsmc_ve_midpoint_gather", m_qdsmc_ve_midpoint_gather);
+
     // Ito tensor thermal conduction (split substep on u = 3/2 n_e k_B T_e;
     // see QdsmcConductionOnce). Enabled by specifying the parallel
     // conductivity parser; kappa_perp is optional (default 0 -- the full
@@ -2680,7 +2684,7 @@ void HybridPICModel::QdsmcTransportOnce (int const lev, amrex::Real const dt_adv
     // x_mid = home + (dt/2) v(home). With a time-centered V_e this makes
     // the advection globally second order in dt; conservation is untouched
     // (the deposit still moves the full carried content).
-    if (midpoint) {
+    if (midpoint && m_qdsmc_ve_midpoint_gather) {
         m_qdsmc_pc->GatherVAtMidpoint(lev, dt_adv, eb_dist, Vex, Vey, Vez);
     }
 

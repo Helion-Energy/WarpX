@@ -67,6 +67,14 @@ parser.add_argument(
     help="hybrid_pic_model.qdsmc_gradient_deposit (B1)",
 )
 parser.add_argument(
+    "--ve-midpoint",
+    type=int,
+    choices=[0, 1],
+    default=1,
+    help="hybrid_pic_model.qdsmc_ve_midpoint_gather: 0 = push with the "
+    "home-node V_e (no sub-cell midpoint re-gather)",
+)
+parser.add_argument(
     "--transport-op",
     choices=["markers", "grid"],
     default="markers",
@@ -199,6 +207,7 @@ import pywarpx  # noqa: E402
 
 pywarpx.hybridpicmodel.qdsmc_time_advance = args.advance
 pywarpx.hybridpicmodel.qdsmc_gradient_deposit = args.grad_deposit
+pywarpx.hybridpicmodel.qdsmc_ve_midpoint_gather = args.ve_midpoint
 pywarpx.hybridpicmodel.qdsmc_transport_operator = args.transport_op
 pywarpx.hybridpicmodel.qdsmc_conduction_fd_time = args.fd_time
 pywarpx.hybridpicmodel.qdsmc_conduction_fd_limiter = args.fd_limiter
