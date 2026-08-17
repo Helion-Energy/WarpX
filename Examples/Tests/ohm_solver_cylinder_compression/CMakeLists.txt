@@ -22,3 +22,16 @@ add_warpx_test(
     OFF  # dependency
 )
 label_warpx_test(test_rz_ohm_solver_cylinder_compression_picmi slow)
+
+# Defined after its dependency: add_warpx_test drops any test whose
+# dependency is not yet defined, so this entry must follow the base test.
+add_warpx_test(
+    test_rz_circuit_cylinder_compression_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_circuit_cylinder_compression_picmi.py --test"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_rz_ohm_solver_cylinder_compression_picmi  # dependency
+)
+label_warpx_test(test_rz_circuit_cylinder_compression_picmi slow)
