@@ -2356,6 +2356,13 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         wall_thermal_bc="temperature" (required there; an error in the
         other modes). Applied to both conduction channels.
 
+    wall_ledger_file: str, optional
+        File for the shaped-wall deposition ledger (active with any
+        wall_thermal_bc): cumulative mass [kg] and fluid energy [J]
+        deposited through the stair interface into the wall — the wall
+        heat-load instrument. Rows of "step mass energy" on the
+        absorb_ledger_interval cadence.
+
     absorb_ledger_interval: integer, optional
         Print interval (steps) of the absorbing-wall ledger counters
         (cumulative absorbed mass [kg] and fluid energy [J]); 0 disables
@@ -2570,6 +2577,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         wall_polyline_file=None,
         wall_thermal_bc=None,
         wall_temperature=None,
+        wall_ledger_file=None,
         absorb_ledger_interval=None,
         absorb_ledger_file=None,
         hllc_signal_closure=None,
@@ -2633,6 +2641,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.wall_polyline_file = wall_polyline_file
         self.wall_thermal_bc = wall_thermal_bc
         self.wall_temperature = wall_temperature
+        self.wall_ledger_file = wall_ledger_file
         self.absorb_ledger_interval = absorb_ledger_interval
         self.absorb_ledger_file = absorb_ledger_file
         self.hllc_signal_closure = hllc_signal_closure
@@ -2722,6 +2731,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.wall_polyline_file = self.wall_polyline_file
         implicit_mhd.wall_thermal_bc = self.wall_thermal_bc
         implicit_mhd.wall_temperature = self.wall_temperature
+        implicit_mhd.wall_ledger_file = self.wall_ledger_file
         implicit_mhd.absorb_ledger_interval = self.absorb_ledger_interval
         implicit_mhd.absorb_ledger_file = self.absorb_ledger_file
         implicit_mhd.hllc_signal_closure = self.hllc_signal_closure

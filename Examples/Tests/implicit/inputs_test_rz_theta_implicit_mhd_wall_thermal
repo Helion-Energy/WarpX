@@ -119,6 +119,7 @@ implicit_mhd.electron_pressure(x,y,z) = "n0 * q_e * (Tmin_ev + (T0_ev - Tmin_ev)
 implicit_mhd.wall_model = pec
 implicit_mhd.wall_polyline_file = wall_step_r30_r22.csv
 implicit_mhd.wall_thermal_bc = zero_flux
+implicit_mhd.wall_ledger_file = diags/wall_ledger.txt
 
 warpx.B_ext_grid_init_style = constant
 warpx.B_external_grid = 0.0 0.0 B0

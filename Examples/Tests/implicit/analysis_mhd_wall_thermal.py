@@ -187,13 +187,33 @@ for name, field in (("Te", te_end),):
 
 # ---- mode-specific checks --------------------------------------------
 
+# Shaped-wall deposition ledger (implicit_mhd.wall_ledger_file): rows of
+# "step mass energy" in true kg/J. The booked energy must CLOSE against
+# the interior's measured loss: zero exactly under zero_flux (frozen
+# ions, no conduction through the interface), and equal to the interior
+# drop under temperature (theta = 1, so the accepted-state booking
+# matches the update to the nonlinear tolerance).
+ledger_rows = np.loadtxt(f"{diag_dir}/wall_ledger.txt", ndmin=2)
+ledger_mass, ledger_energy = ledger_rows[-1, 1], ledger_rows[-1, 2]
+interior_drop_joules = (
+    (interior_energy[0] - interior_energy[-1]) * 2.0 * np.pi * dz
+)
+print(f"ledger: deposited mass {ledger_mass:.3e} kg, "
+      f"energy {ledger_energy:.6e} J vs interior drop "
+      f"{interior_drop_joules:.6e} J")
+assert abs(ledger_mass) < 1.0e-25, "ledger booked mass with frozen ions"
+
 if mode == "zero_flux":
     # The interface passes exactly nothing: interior energy conserved to
-    # solver tolerance.
+    # solver tolerance...
     interior_drift = np.max(np.abs(interior_energy / interior_energy[0] - 1.0))
     print(f"interior-energy drift: {interior_drift:.3e}")
     assert interior_drift < 1.0e-6, (
         f"zero-flux wall leaked ({interior_drift:.3e})"
+    )
+    # ...and the ledger books exactly nothing.
+    assert abs(ledger_energy) < 1.0e-20, (
+        f"zero-flux wall ledger booked energy ({ledger_energy:.3e} J)"
     )
 else:
     # The interior drains strictly monotonically through the interface
@@ -205,6 +225,14 @@ else:
     print(f"interior drained fraction: {drained_fraction:.3f}")
     assert 0.05 < drained_fraction < 0.60, (
         f"unphysical drain fraction {drained_fraction:.3f}"
+    )
+    # ...and the ledger closes against the measured interior loss.
+    ledger_closure = abs(ledger_energy - interior_drop_joules) / (
+        interior_drop_joules
+    )
+    print(f"ledger closure error: {ledger_closure:.3e}")
+    assert ledger_closure < 1.0e-5, (
+        f"wall ledger does not close ({ledger_closure:.3e})"
     )
     # ...the wall-adjacent interior ring hugs T_wall without undershoot
     # (the Dirichlet exchange reverses sign at the reservoir). The last

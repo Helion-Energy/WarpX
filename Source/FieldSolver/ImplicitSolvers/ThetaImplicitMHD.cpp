@@ -234,6 +234,7 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     }
     utils::parser::queryWithParser(pp, "absorb_ledger_interval",
                                    m_absorb_ledger_interval);
+    pp.query("wall_ledger_file", m_wall_ledger_file);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_absorb_ledger_interval >= 0,
         "implicit_mhd.absorb_ledger_interval cannot be negative");
@@ -2229,9 +2230,13 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
 
     UpdateWarpXFields(m_state, start_time);
 #if defined(WARPX_DIM_RZ)
-    if (m_use_recast && m_r_open && m_r_open_fluid == "absorb") {
-        // Book the absorbing wall's export from the accepted theta state
-        // (UpdateWarpXFields just refilled the theta-stage fields), before
+    if (m_use_recast &&
+        ((m_r_open && m_r_open_fluid == "absorb") ||
+         m_wall_mask.GetThermalBC() !=
+             ImplicitMHDWallMask::ThermalBC::none)) {
+        // Book the absorbing wall's export and/or the shaped wall's
+        // deposition from the accepted theta state (UpdateWarpXFields
+        // just refilled the theta-stage fields), before
         // FinishStateUpdate extrapolates the state to t^{n+1}.
         AccumulateAbsorbedWallLedger(m_dt, step,
                                      start_time + m_theta * m_dt);
@@ -3546,13 +3551,17 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     // Inactive (nullptr table) outside RZ and under wall_thermal_bc =
     // none, where this block compiles to dead constants.
     const auto wall_thermal_mode = m_wall_mask.GetThermalBC();
-    const bool wall_thermal =
-        add_conduction &&
+    // wall_mechanics: the rigid-conductor contract is active -- interface
+    // faces present the ABSORB IMAGE of the interior state (see the
+    // kernel), independent of whether conduction is on. wall_thermal
+    // additionally routes the interface conduction (skip/drain).
+    const bool wall_mechanics =
         (wall_thermal_mode != ImplicitMHDWallMask::ThermalBC::none);
+    const bool wall_thermal = add_conduction && wall_mechanics;
     const bool wall_dirichlet =
         (wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::temperature);
     const int* const AMREX_RESTRICT wall_first_masked_cc =
-        wall_thermal ? m_wall_mask.FirstMaskedCellCentered() : nullptr;
+        wall_mechanics ? m_wall_mask.FirstMaskedCellCentered() : nullptr;
     // The table covers z cells [-ng, nz - 1 + ng] of the MASK's ghost
     // width; kernel boxes may reach one cell past it at the z ends, so
     // reads are clamped (constant continuation, like the polyline).
@@ -3694,7 +3703,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 }
             }
 #endif
-            const auto left =
+            auto left =
                 parameters.cgl_closure
                     ? theta_implicit_mhd::load_cell_state_hlld_cgl(
                           rho, mom, energy, ion_e, upar, uperp, j_cc, b_cc,
@@ -3702,7 +3711,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     : theta_implicit_mhd::load_cell_state_hlld(
                           rho, mom, energy, ion_e, j_cc, b_cc, il, jl, kl,
                           normal, parameters);
-            const auto right =
+            auto right =
                 parameters.cgl_closure
                     ? theta_implicit_mhd::load_cell_state_hlld_cgl(
                           rho, mom, energy, ion_e, upar, uperp, j_cc, b_cc,
@@ -3710,6 +3719,90 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     : theta_implicit_mhd::load_cell_state_hlld(
                           rho, mom, energy, ion_e, j_cc, b_cc, i, j, k,
                           normal, parameters);
+
+            // Wall face classification against the cell-centered mask
+            // (see the host constants above the loop): exactly one
+            // masked cell = stair-step interface face, both masked =
+            // interior metal. The table's z index is clamped to its
+            // stored range (constant continuation, like the polyline).
+            // Always false when the thermal wall is off (nullptr table
+            // never read); the mask is static geometry, so every branch
+            // below is C-infinity in the state.
+            bool wall_left_masked = false;
+            bool wall_right_masked = false;
+            if (wall_mechanics) {
+                const int jzl = std::max(wall_mask_z_lo,
+                                         std::min(wall_mask_z_hi, jl));
+                const int jzr = std::max(wall_mask_z_lo,
+                                         std::min(wall_mask_z_hi, j));
+                wall_left_masked = (il >= wall_first_masked_cc[jzl]);
+                wall_right_masked = (i >= wall_first_masked_cc[jzr]);
+            }
+            const bool wall_interface =
+                (wall_left_masked != wall_right_masked);
+            // Donor indices for the positivity gates: interface faces
+            // gate BOTH sides on the interior donor (the masked side
+            // presents the interior's absorb image below, so its frozen
+            // band arrays are not this face's donor).
+            int donor_il = il, donor_jl = jl, donor_kl = kl;
+            int donor_ir = i, donor_jr = j, donor_kr = k;
+            if (wall_interface) {
+                if (wall_right_masked) {
+                    donor_ir = il; donor_jr = jl; donor_kr = kl;
+                } else {
+                    donor_il = i; donor_jl = j; donor_kl = k;
+                }
+                // Absorb image (the r_max absorbing-wall recipe applied
+                // per stair face): the masked side presents the INTERIOR
+                // state with its normal momentum C-infinity rectified to
+                // the INTO-WALL part -- the stair admits incident plasma
+                // at its signal-limited rate and never feeds back. A
+                // frozen-dust image instead stagnates a supersonic
+                // contact jet against a rigid corner, converting ram
+                // into a keV-scale E_i pocket at the stair steps (the
+                // rr12 v2 S0w corpse: 116 keV one cell inside the cone
+                // step corner at first wall contact). E_i is copied
+                // verbatim (the r_max absorber's ghost carries the
+                // incident kinetic energy unadjusted, its production-
+                // proven contract); the thermal reservoir acts ONLY
+                // through the conduction drain below.
+                auto& image = wall_right_masked ? right : left;
+                const auto& interior_state =
+                    wall_right_masked ? left : right;
+                image = interior_state;
+                const amrex::Real rectifier_width =
+                    parameters.hlld_kappa_signal *
+                    std::sqrt(
+                        parameters.gamma_e *
+                        (parameters.gamma_e - 1.0_rt) *
+                        std::max(interior_state.electron_energy,
+                                 parameters.electron_pressure_floor /
+                                     (parameters.gamma_e - 1.0_rt)) *
+                        interior_state.safe_density);
+                const amrex::Real into_wall_sign =
+                    wall_right_masked ? 1.0_rt : -1.0_rt;
+                const amrex::Real normal_momentum =
+                    interior_state.momentum[normal] * 0.5_rt *
+                    (1.0_rt +
+                     theta_implicit_mhd::smooth_sign(
+                         into_wall_sign * interior_state.momentum[normal],
+                         rectifier_width));
+                image.momentum[normal] = normal_momentum;
+                image.ion_velocity[normal] =
+                    normal_momentum / image.safe_density;
+                image.electron_velocity_normal =
+                    interior_state.electron_velocity_normal +
+                    (image.ion_velocity[normal] -
+                     interior_state.ion_velocity[normal]);
+                image.wave_speed =
+                    std::max(std::abs(image.ion_velocity[normal]) +
+                                 image.sound_speed,
+                             std::abs(image.electron_velocity_normal));
+                image.fast_wave_speed =
+                    std::abs(image.ion_velocity[normal]) +
+                    image.fast_speed;
+            }
+
             amrex::Real bn_face = bn_staggered(i, j, k);
             if (add_external) {
                 bn_face += bn_external(i, j, k);
@@ -3766,9 +3859,11 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
             flux.mass *= donor_blend(
                 flux.mass,
                 theta_implicit_mhd::floor_outflow_limiter(
-                    donor_end(rho, rho_old, il, jl, kl), mass_gate_floor),
+                    donor_end(rho, rho_old, donor_il, donor_jl, donor_kl),
+                    mass_gate_floor),
                 theta_implicit_mhd::floor_outflow_limiter(
-                    donor_end(rho, rho_old, i, j, k), mass_gate_floor),
+                    donor_end(rho, rho_old, donor_ir, donor_jr, donor_kr),
+                    mass_gate_floor),
                 0.5_rt * (left.safe_density + right.safe_density));
             // The energy gates anchor at their pedestal values when the
             // pedestal is active (see FluxParameters::halo_pedestal*):
@@ -3782,10 +3877,12 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
             flux.electron_energy *= donor_blend(
                 flux.electron_energy,
                 theta_implicit_mhd::floor_outflow_limiter(
-                    donor_end(energy, energy_old, il, jl, kl),
+                    donor_end(energy, energy_old, donor_il, donor_jl,
+                              donor_kl),
                     electron_energy_floor),
                 theta_implicit_mhd::floor_outflow_limiter(
-                    donor_end(energy, energy_old, i, j, k),
+                    donor_end(energy, energy_old, donor_ir, donor_jr,
+                              donor_kr),
                     electron_energy_floor),
                 0.5_rt * (left.electron_energy + right.electron_energy) +
                     electron_energy_floor);
@@ -3813,9 +3910,11 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 flux.ion_energy *= donor_blend(
                     flux.ion_energy,
                     theta_implicit_mhd::floor_outflow_limiter(
-                        ion_internal_end(il, jl, kl), ion_energy_floor),
+                        ion_internal_end(donor_il, donor_jl, donor_kl),
+                        ion_energy_floor),
                     theta_implicit_mhd::floor_outflow_limiter(
-                        ion_internal_end(i, j, k), ion_energy_floor),
+                        ion_internal_end(donor_ir, donor_jr, donor_kr),
+                        ion_energy_floor),
                     0.5_rt * (left.ion_energy + right.ion_energy) +
                         ion_energy_floor);
             }
@@ -3830,10 +3929,13 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 flux.ion_parallel_energy *= donor_blend(
                     flux.ion_parallel_energy,
                     theta_implicit_mhd::floor_outflow_limiter(
-                        donor_end(upar, upar_old, il, jl, kl),
+                        donor_end(upar, upar_old, donor_il, donor_jl,
+                                  donor_kl),
                         parallel_floor),
                     theta_implicit_mhd::floor_outflow_limiter(
-                        donor_end(upar, upar_old, i, j, k), parallel_floor),
+                        donor_end(upar, upar_old, donor_ir, donor_jr,
+                                  donor_kr),
+                        parallel_floor),
                     0.5_rt * (left.ion_parallel_energy +
                               right.ion_parallel_energy) +
                         parallel_floor);
@@ -3843,9 +3945,13 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 flux.ion_perp_energy *= donor_blend(
                     flux.ion_perp_energy,
                     theta_implicit_mhd::floor_outflow_limiter(
-                        donor_end(uperp, uperp_old, il, jl, kl), perp_floor),
+                        donor_end(uperp, uperp_old, donor_il, donor_jl,
+                                  donor_kl),
+                        perp_floor),
                     theta_implicit_mhd::floor_outflow_limiter(
-                        donor_end(uperp, uperp_old, i, j, k), perp_floor),
+                        donor_end(uperp, uperp_old, donor_ir, donor_jr,
+                                  donor_kr),
+                        perp_floor),
                     0.5_rt *
                             (left.ion_perp_energy + right.ion_perp_energy) +
                         perp_floor);
@@ -3897,28 +4003,15 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
             // pressures the physical fluxes use (the smooth-floored
             // recovered p_i(E_i) under total_energy: ion_internal is
             // exactly p_i/(gamma_i - 1)).
-            // Wall thermal BC face classification (see the host
-            // constants above the loop): exactly one masked cell =
-            // stair-step interface face, both masked = interior metal.
-            // The mask table's z index is clamped to its stored range
-            // (constant continuation, like the polyline itself). Always
-            // false when wall_thermal is off (nullptr table never read).
-            bool wall_left_masked = false;
-            bool wall_right_masked = false;
-            if (wall_thermal) {
-                const int jzl = std::max(wall_mask_z_lo,
-                                         std::min(wall_mask_z_hi, jl));
-                const int jzr = std::max(wall_mask_z_lo,
-                                         std::min(wall_mask_z_hi, j));
-                wall_left_masked = (il >= wall_first_masked_cc[jzl]);
-                wall_right_masked = (i >= wall_first_masked_cc[jzr]);
-            }
             // Interior-metal faces never conduct; interface faces
-            // conduct only in the temperature (Dirichlet) mode.
+            // conduct only in the temperature (Dirichlet) mode (the
+            // masked flags were classified above, before the absorb
+            // image). wall_thermal is false when conduction is off, so
+            // the skip only ever engages alongside an active channel.
             const bool wall_skip_conduction =
-                (wall_left_masked && wall_right_masked) ||
-                ((wall_left_masked || wall_right_masked) &&
-                 !wall_dirichlet);
+                wall_thermal &&
+                ((wall_left_masked && wall_right_masked) ||
+                 (wall_interface && !wall_dirichlet));
 
             if (add_conduction && !wall_skip_conduction
 #if defined(WARPX_DIM_RZ)
@@ -4229,66 +4322,212 @@ void ThetaImplicitMHD::AccumulateAbsorbedWallLedger (const amrex::Real dt,
     // fan's E_i register is a dormant pseudo-channel and is excluded.)
     const bool total_energy_closure = (m_ion_closure == "total_energy");
     const bool cgl_closure = (m_ion_closure == "cgl");
+    const bool book_absorb = m_r_open && (m_r_open_fluid == "absorb");
+    const bool book_wall = m_wall_mask.GetThermalBC() !=
+                           ImplicitMHDWallMask::ThermalBC::none;
 
-    amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
-    amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
-    using ReduceTuple = typename decltype(reduce_data)::Type;
-    for (amrex::MFIter mfi(face_flux_r); mfi.isValid(); ++mfi) {
-        const amrex::Box box = mfi.validbox() & wall_plane;
-        if (box.isEmpty()) {
-            continue;
+    if (book_absorb) {
+        amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        for (amrex::MFIter mfi(face_flux_r); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox() & wall_plane;
+            if (box.isEmpty()) {
+                continue;
+            }
+            const auto flux_arr = face_flux_r.const_array(mfi);
+            reduce_op.eval(
+                box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                    amrex::Real energy_flux =
+                        flux_arr(i, j, k, flux_electron_energy);
+                    if (total_energy_closure) {
+                        energy_flux += flux_arr(i, j, k, flux_ion_energy);
+                    } else if (cgl_closure) {
+                        energy_flux +=
+                            flux_arr(i, j, k, flux_ion_parallel_energy) +
+                            flux_arr(i, j, k, flux_ion_perp_energy);
+                    }
+                    return {flux_arr(i, j, k, flux_mass), energy_flux};
+                });
         }
-        const auto flux_arr = face_flux_r.const_array(mfi);
-        reduce_op.eval(
-            box, reduce_data,
-            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
-                amrex::Real energy_flux =
-                    flux_arr(i, j, k, flux_electron_energy);
-                if (total_energy_closure) {
-                    energy_flux += flux_arr(i, j, k, flux_ion_energy);
-                } else if (cgl_closure) {
-                    energy_flux +=
-                        flux_arr(i, j, k, flux_ion_parallel_energy) +
-                        flux_arr(i, j, k, flux_ion_perp_energy);
-                }
-                return {flux_arr(i, j, k, flux_mass), energy_flux};
-            });
+        auto sums = reduce_data.value(reduce_op);
+        // Wall-face annulus area per z-cell, 2 pi r_wall dz: with the
+        // cylindrical divergence weights (r_face/r_center)/dr, the
+        // interior faces telescope out of the r-weighted domain totals
+        // and the change per step is exactly
+        // dt * sum_j 2 pi dz r_wall F_wall(j).
+        const amrex::Real wall_radius =
+            m_WarpX->Geom(0).ProbLo(0) +
+            face_domain.bigEnd(0) * m_WarpX->Geom(0).CellSize(0);
+        const amrex::Real face_area = 2.0_rt * MathConst::pi * wall_radius *
+                                      m_WarpX->Geom(0).CellSize(1);
+        amrex::Real step_totals[2] = {dt * face_area * amrex::get<0>(sums),
+                                      dt * face_area * amrex::get<1>(sums)};
+        amrex::ParallelAllReduce::Sum(
+            step_totals, 2, amrex::ParallelContext::CommunicatorSub());
+        m_absorbed_wall_mass += step_totals[0];
+        m_absorbed_wall_energy += step_totals[1];
     }
-    auto sums = reduce_data.value(reduce_op);
-    // Wall-face annulus area per z-cell, 2 pi r_wall dz: with the
-    // cylindrical divergence weights (r_face/r_center)/dr, the interior
-    // faces telescope out of the r-weighted domain totals and the change
-    // per step is exactly dt * sum_j 2 pi dz r_wall F_wall(j).
-    const amrex::Real wall_radius =
-        m_WarpX->Geom(0).ProbLo(0) +
-        face_domain.bigEnd(0) * m_WarpX->Geom(0).CellSize(0);
-    const amrex::Real face_area = 2.0_rt * MathConst::pi * wall_radius *
-                                  m_WarpX->Geom(0).CellSize(1);
-    amrex::Real step_totals[2] = {dt * face_area * amrex::get<0>(sums),
-                                  dt * face_area * amrex::get<1>(sums)};
-    amrex::ParallelAllReduce::Sum(step_totals, 2,
-                                  amrex::ParallelContext::CommunicatorSub());
-    m_absorbed_wall_mass += step_totals[0];
-    m_absorbed_wall_energy += step_totals[1];
+
+    if (book_wall) {
+        // Shaped-wall deposition: what crosses a stair-step interface
+        // face is gone from the fluid (the masked band's increments are
+        // zero), so the interface fluxes ARE the wall load -- advective
+        // capture plus the one-sided conductive drain, booked with the
+        // exact per-face annulus areas (2 pi r_face dz for r-normal
+        // faces, 2 pi r_center dr for z-normal faces). Signs are taken
+        // INTO the wall. The z-direction register is recomputed at the
+        // same accepted theta state.
+        amrex::MultiFab& face_flux_z =
+            *m_WarpX->m_fields.get(FaceFluxZName, 0);
+        ComputeDirectionalFaceFluxes(face_flux_z, 2, a_time);
+
+        const int* const AMREX_RESTRICT fm =
+            m_wall_mask.FirstMaskedCellCentered();
+        const int mask_z_lo = -m_wall_mask.GhostCells();
+        const int mask_z_hi =
+            m_wall_mask.AxialCells() - 1 + m_wall_mask.GhostCells();
+        const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
+        const amrex::Real dr = m_WarpX->Geom(0).CellSize(0);
+        const amrex::Real dz = m_WarpX->Geom(0).CellSize(1);
+        const amrex::Real two_pi = 2.0_rt * MathConst::pi;
+
+        amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        // Face-type validboxes SHARE their boundary faces between
+        // adjacent boxes: without unique ownership a stair interface
+        // face sitting on a grid seam is booked once per box (caught by
+        // the ctest closure gate with the seam parked on the step
+        // ledge). The nodal owner masks give each face to exactly one
+        // box.
+        const auto owner_r =
+            face_flux_r.OwnerMask(m_WarpX->Geom(0).periodicity());
+        for (amrex::MFIter mfi(face_flux_r); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox() & face_domain;
+            if (box.isEmpty()) {
+                continue;
+            }
+            const auto flux_arr = face_flux_r.const_array(mfi);
+            const auto own = owner_r->const_array(mfi);
+            reduce_op.eval(
+                box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                    const int jc =
+                        std::max(mask_z_lo, std::min(mask_z_hi, j));
+                    const bool left_masked = (i - 1 >= fm[jc]);
+                    const bool right_masked = (i >= fm[jc]);
+                    if (left_masked == right_masked || !own(i, j, k)) {
+                        return {0.0_rt, 0.0_rt};
+                    }
+                    // +n flux enters a right-side wall; -n a left-side.
+                    const amrex::Real sign =
+                        right_masked ? 1.0_rt : -1.0_rt;
+                    const amrex::Real area =
+                        two_pi * (radial_lower + i * dr) * dz;
+                    amrex::Real energy_flux =
+                        flux_arr(i, j, k, flux_electron_energy);
+                    if (total_energy_closure) {
+                        energy_flux += flux_arr(i, j, k, flux_ion_energy);
+                    } else if (cgl_closure) {
+                        energy_flux +=
+                            flux_arr(i, j, k, flux_ion_parallel_energy) +
+                            flux_arr(i, j, k, flux_ion_perp_energy);
+                    }
+                    return {sign * area * flux_arr(i, j, k, flux_mass),
+                            sign * area * energy_flux};
+                });
+        }
+        const amrex::Box z_face_domain = amrex::convert(
+            m_WarpX->Geom(0).Domain(), face_flux_z.ixType().toIntVect());
+        const auto owner_z =
+            face_flux_z.OwnerMask(m_WarpX->Geom(0).periodicity());
+        for (amrex::MFIter mfi(face_flux_z); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox() & z_face_domain;
+            if (box.isEmpty()) {
+                continue;
+            }
+            const auto flux_arr = face_flux_z.const_array(mfi);
+            const auto own = owner_z->const_array(mfi);
+            reduce_op.eval(
+                box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                    const int jl =
+                        std::max(mask_z_lo, std::min(mask_z_hi, j - 1));
+                    const int jr =
+                        std::max(mask_z_lo, std::min(mask_z_hi, j));
+                    const bool left_masked = (i >= fm[jl]);
+                    const bool right_masked = (i >= fm[jr]);
+                    if (left_masked == right_masked || !own(i, j, k)) {
+                        return {0.0_rt, 0.0_rt};
+                    }
+                    const amrex::Real sign =
+                        right_masked ? 1.0_rt : -1.0_rt;
+                    const amrex::Real area =
+                        two_pi * (radial_lower + (i + 0.5_rt) * dr) * dr;
+                    amrex::Real energy_flux =
+                        flux_arr(i, j, k, flux_electron_energy);
+                    if (total_energy_closure) {
+                        energy_flux += flux_arr(i, j, k, flux_ion_energy);
+                    } else if (cgl_closure) {
+                        energy_flux +=
+                            flux_arr(i, j, k, flux_ion_parallel_energy) +
+                            flux_arr(i, j, k, flux_ion_perp_energy);
+                    }
+                    return {sign * area * flux_arr(i, j, k, flux_mass),
+                            sign * area * energy_flux};
+                });
+        }
+        auto sums = reduce_data.value(reduce_op);
+        amrex::Real step_totals[2] = {dt * amrex::get<0>(sums),
+                                      dt * amrex::get<1>(sums)};
+        amrex::ParallelAllReduce::Sum(
+            step_totals, 2, amrex::ParallelContext::CommunicatorSub());
+        m_shaped_wall_mass += step_totals[0];
+        m_shaped_wall_energy += step_totals[1];
+    }
 
     if (m_absorb_ledger_interval > 0 &&
         (step + 1) % m_absorb_ledger_interval == 0) {
-        amrex::Print().SetPrecision(17)
-            << "MHD absorb wall ledger: step " << step + 1
-            << " absorbed mass [kg] = " << m_absorbed_wall_mass
-            << " absorbed energy [J] = " << m_absorbed_wall_energy << "\n";
-        if (!m_absorb_ledger_file.empty() &&
-            amrex::ParallelDescriptor::IOProcessor()) {
+        if (book_absorb) {
+            amrex::Print().SetPrecision(17)
+                << "MHD absorb wall ledger: step " << step + 1
+                << " absorbed mass [kg] = " << m_absorbed_wall_mass
+                << " absorbed energy [J] = " << m_absorbed_wall_energy
+                << "\n";
+        }
+        if (book_wall) {
+            amrex::Print().SetPrecision(17)
+                << "MHD shaped wall ledger: step " << step + 1
+                << " deposited mass [kg] = " << m_shaped_wall_mass
+                << " deposited energy [J] = " << m_shaped_wall_energy
+                << "\n";
+        }
+        if (amrex::ParallelDescriptor::IOProcessor()) {
             // Truncate at the first write of the run (a stale file from a
             // previous run in the same directory would otherwise keep
             // accumulating appended rows), append afterwards.
-            std::ofstream ledger(m_absorb_ledger_file,
-                                 m_absorb_ledger_started ? std::ios::app
-                                                         : std::ios::trunc);
-            m_absorb_ledger_started = true;
-            ledger.precision(17);
-            ledger << step + 1 << " " << m_absorbed_wall_mass << " "
-                   << m_absorbed_wall_energy << "\n";
+            if (book_absorb && !m_absorb_ledger_file.empty()) {
+                std::ofstream ledger(m_absorb_ledger_file,
+                                     m_absorb_ledger_started
+                                         ? std::ios::app
+                                         : std::ios::trunc);
+                m_absorb_ledger_started = true;
+                ledger.precision(17);
+                ledger << step + 1 << " " << m_absorbed_wall_mass << " "
+                       << m_absorbed_wall_energy << "\n";
+            }
+            if (book_wall && !m_wall_ledger_file.empty()) {
+                std::ofstream ledger(m_wall_ledger_file,
+                                     m_wall_ledger_started
+                                         ? std::ios::app
+                                         : std::ios::trunc);
+                m_wall_ledger_started = true;
+                ledger.precision(17);
+                ledger << step + 1 << " " << m_shaped_wall_mass << " "
+                       << m_shaped_wall_energy << "\n";
+            }
         }
     }
 #else

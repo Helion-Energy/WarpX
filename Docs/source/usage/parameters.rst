@@ -4862,6 +4862,22 @@ Jacobian probes.
     eV; an error in the other modes). Applied to both the electron and
     ion conduction channels.
 
+.. pp:param:: implicit_mhd.wall_ledger_file
+    :type: ``string``
+
+    Optional file for the shaped-wall deposition ledger (active
+    whenever ``wall_thermal_bc`` is not ``none``): the cumulative mass
+    [kg] and fluid energy [J] deposited through the stair-step
+    interface faces into the rigid-conductor band — the advective
+    capture plus the one-sided conductive drain, integrated from the
+    accepted theta-state face fluxes with exact per-face annulus areas
+    (both r- and z-normal interfaces). Rows of ``step mass energy``,
+    written and printed on the ``absorb_ledger_interval`` cadence; the
+    accumulation always runs and the printed line appears even without
+    a file. This is the wall heat-load instrument: for a converged
+    solve the booked energy matches the interior's loss through the
+    wall to the nonlinear tolerance.
+
 .. pp:param:: implicit_mhd.absorb_ledger_interval
     :type: ``integer``
     :default: ``1``

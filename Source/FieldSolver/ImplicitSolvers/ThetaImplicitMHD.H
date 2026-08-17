@@ -647,6 +647,17 @@ class ThetaImplicitMHD final : public ImplicitSolver
     std::string m_absorb_ledger_file;
     // First ledger-file write of this run truncates a stale file.
     bool m_absorb_ledger_started = false;
+    // Shaped-wall deposition ledger (wall_thermal_bc != none): cumulative
+    // mass [kg] and fluid energy [J] deposited through the stair-step
+    // interface faces into the rigid-conductor band (conductive drain +
+    // advective capture, r-weighted accepted theta-state face fluxes,
+    // both r- and z-normal interfaces), printed on the absorb ledger's
+    // cadence and optionally appended to wall_ledger_file as
+    // "step mass energy" rows. Counters restart at zero on restart.
+    amrex::Real m_shaped_wall_mass = 0.0;
+    amrex::Real m_shaped_wall_energy = 0.0;
+    std::string m_wall_ledger_file;
+    bool m_wall_ledger_started = false;
     amrex::Real m_positivity_safety = 0.99;
     std::string m_fluid_flux = "centered";
     // Conservative-form recast (fluid_flux = hlld): B replaces E as the
