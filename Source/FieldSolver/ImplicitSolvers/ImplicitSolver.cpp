@@ -794,6 +794,15 @@ void ImplicitSolver::PreRHSOp ( const amrex::Real  a_cur_time,
         m_WarpX->ApplyFilterMF(m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, finest_level), 0);
     }
 
+    // Particles gather from Efield_aux/Bfield_aux. The step loop only refreshes
+    // aux inside WarpX::ExplicitFillBoundaryEBUpdateAux, which is guarded on
+    // evolve_scheme == Explicit, so whenever aux is not an alias of fp -- which
+    // is the case for external particle field maps read from file -- the
+    // particles would gather stale or zero fields. Refresh aux here from the
+    // current n+theta iterate of Efield_fp/Bfield_fp and re-apply those maps.
+    m_WarpX->UpdateAuxilaryData();
+    m_WarpX->FillBoundaryAux(m_WarpX->getngUpdateAux());
+
     // Advance the particle positions by 1/2 dt,
     // particle velocities by dt, then take average of old and new v,
     // deposit currents, giving J at n+1/2
