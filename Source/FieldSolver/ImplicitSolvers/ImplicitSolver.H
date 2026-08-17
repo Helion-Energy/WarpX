@@ -170,6 +170,20 @@ public:
     }
 
     /**
+     * \brief Return per-direction pointers to the ion (particle) current
+     * deposit consumed by the Ohm solve on level lev, for preconditioners
+     * that model the frozen motional/drift response (J - J_i) x delta_B.
+     * During Jacobian probes the deposits are frozen, so this is exactly
+     * the coefficient the linear solve sees. Solvers without an ion
+     * current return nullptrs.
+     */
+    virtual amrex::Array<const amrex::MultiFab*, 3> GetIonCurrentForPC (int lev) const
+    {
+        amrex::ignore_unused(lev);
+        return {nullptr, nullptr, nullptr};
+    }
+
+    /**
      * \brief Apply deposited mass matrices to a vector field.
      * Computes a_out += a_scale * S * (a_in - a_in_ref) [+ a_baseline],
      * where S is the mass matrix, accumulating into a_out.

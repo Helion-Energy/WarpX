@@ -117,6 +117,11 @@ public:
      *  of the current Newton iterate. */
     const amrex::MultiFab* GetRhoMidForPC (int lev) const override;
 
+    /** The ion current deposit consumed by the Ohm solve (current_fp
+     *  registry) -- frozen during Jacobian probes, so it is the exact
+     *  drift-leg coefficient of the linear solve. */
+    amrex::Array<const amrex::MultiFab*, 3> GetIonCurrentForPC (int lev) const override;
+
 private:
 
     /**

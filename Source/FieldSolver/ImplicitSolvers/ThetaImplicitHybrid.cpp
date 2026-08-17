@@ -952,6 +952,20 @@ ThetaImplicitHybrid::GetBfieldThetaForPC ( const int lev ) const
              m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{2}, lev) };
 }
 
+amrex::Array<const amrex::MultiFab*, 3>
+ThetaImplicitHybrid::GetIonCurrentForPC ( const int lev ) const
+{
+    // The Ohm solve consumes current_fp as the ion (particle) current
+    // (see the HybridPICSolveE call in ComputeRHS). PreRHSOp deposits it
+    // each residual evaluation and freezes it during Jacobian probes, so
+    // between updatePreCondMat and the GMRES solve it holds exactly the
+    // frozen drift-leg coefficient (J - J_i) x delta_B needs.
+    using ablastr::fields::Direction;
+    return { m_WarpX->m_fields.get(FieldType::current_fp, Direction{0}, lev),
+             m_WarpX->m_fields.get(FieldType::current_fp, Direction{1}, lev),
+             m_WarpX->m_fields.get(FieldType::current_fp, Direction{2}, lev) };
+}
+
 const amrex::MultiFab*
 ThetaImplicitHybrid::GetRhoMidForPC ( const int lev ) const
 {
