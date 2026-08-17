@@ -16,6 +16,7 @@
 #include <AMReX_Geometry.H>
 #include <AMReX_GpuContainers.H>
 #include <AMReX_IntVect.H>
+#include <AMReX_REAL.H>
 
 /**
  * \brief Stair-step PEC (perfectly conducting) shaped-wall mask for the
@@ -62,31 +63,95 @@
  *   (JFNK-exact), and both share the identical preconditioner treatment
  *   (the masked E values are state-independent constants either way).
  *
- * - The fluid is deliberately untouched: the wall region is expected to
- *   sit in the dust/vacuum fill (frozen momentum, E -> eta J), which is
- *   the fluid-side analog of run32's wall particle scraper.
+ * - The fluid is deliberately untouched by default: the wall region is
+ *   expected to sit in the dust/vacuum fill (frozen momentum,
+ *   E -> eta J). The optional THERMAL wall boundary (wall_thermal_bc)
+ *   upgrades the band to an actual rigid conductor: it closes the
+ *   spurious heat channels the default leaves open (the conduction
+ *   operator exchanging blindly across the stair-step interface, and
+ *   the cell-centered Joule heating eta J^2 of the PEC surface current
+ *   meeting the -- possibly anomalous -- plasma resistivity at the
+ *   near-floor wall-band density, an unbounded heat source inside the
+ *   metal):
+ *
+ *   * In BOTH modes every fluid increment inside a masked cell is
+ *     zero: the metal is a rigid absorbing body, not fluid. The band
+ *     keeps its bounded load state forever (no Joule pile-up, no
+ *     drained-heat accumulation, no runaway signal speeds feeding the
+ *     interface fans), and the stair interface faces drain the
+ *     INTERIOR one-sidedly -- what crosses is gone (mass, momentum,
+ *     enthalpy), the fluid analog of run32's wall particle scraper.
+ *     Faces between two masked cells carry no conduction (interior
+ *     metal).
+ *   * wall_thermal_bc = zero_flux: additionally, the interface faces
+ *     carry exactly zero conductive flux (adiabatic wall).
+ *   * wall_thermal_bc = temperature: the interface faces exchange
+ *     conductively against a T_wall reservoir (wall_temperature, eV) --
+ *     the masked side of the face presents the wall specific internal
+ *     energies, the EB analog of the z_boundary_fluid =
+ *     wall_temperature ghost fill.
+ *
+ *   The default none keeps wall_model bit-identical to the
+ *   electromagnetic-only wall.
  *
  * The preconditioner sees the identical mask: the resistive stencil
  * emission (MHDResistiveStencil.H) drops the same masked E rows through
  * the WallMaskView, so the matrix-free Chebyshev application and the
  * banded/direct assemblies stay consistent with the residual.
  *
+ * The wall polyline must stay clear of the axis (first masked radial
+ * index >= 1 everywhere): the r = 0 reflecting boundary is handled by
+ * the m = 0 parity ghosts and the axis-corner EMF parities, which
+ * assume plasma at the axis; a polyline pinching to r = 0 would fight
+ * those fills, so Define aborts loudly instead.
+ *
  * Inputs (all under implicit_mhd.):
  * - wall_model = none (default; bit-identical to no wall) | pec |
  *   pec_response
  * - wall_polyline_file = <csv path> ("z, r" rows; resolved against
  *   AMREX_INPUTS_FILE_PREFIX like the inputs file itself when relative)
+ * - wall_thermal_bc = none (default) | zero_flux | temperature
+ * - wall_temperature = <eV> (temperature mode only)
  */
 class ImplicitMHDWallMask
 {
 public:
+    /** Thermal wall boundary at the stair-step fluid interface
+     * (implicit_mhd.wall_thermal_bc); see the class comment. */
+    enum class ThermalBC { none, zero_flux, temperature };
+
     /** Parse the wall inputs and, when active, build the static
      * first-masked-radial-index tables per electric-field staggering over
      * the ghost-extended axial range. Aborts outside RZ, on periodic z,
-     * or on a malformed polyline. */
+     * on a malformed polyline, or on a polyline that reaches the axis. */
     void Define (const amrex::Geometry& geom, const amrex::IntVect& ngrow);
 
     [[nodiscard]] bool IsActive () const { return m_active; }
+
+    [[nodiscard]] ThermalBC GetThermalBC () const
+    {
+        return m_active ? m_thermal_bc : ThermalBC::none;
+    }
+
+    /** Human-readable thermal mode for banners. */
+    [[nodiscard]] const char* ThermalBCName () const;
+
+    /** Wall reservoir temperature [eV] (temperature mode). */
+    [[nodiscard]] amrex::Real WallTemperature_eV () const
+    {
+        return m_wall_temperature;
+    }
+
+    /** Cell-centered (r-cell, z-cell) first-masked-radial-index table,
+     * pre-offset like the View() pointers (valid over the z-cell range
+     * [-GhostCells(), AxialCells() - 1 + GhostCells()]); consumers must
+     * clamp their axial index to that range (constant continuation,
+     * like the polyline itself). Non-null only when a thermal wall BC
+     * is active. */
+    [[nodiscard]] const int* FirstMaskedCellCentered () const;
+
+    [[nodiscard]] int GhostCells () const { return m_ng; }
+    [[nodiscard]] int AxialCells () const { return m_nz; }
 
     /** Human-readable mode for banners: "none", "pec" or "pec_response". */
     [[nodiscard]] const char* ModeName () const
@@ -117,6 +182,8 @@ private:
     /** true: pec (conductor condition on the TOTAL field); false:
      * pec_response (plasma-response field only, run32 EB parity). */
     bool m_total_field = true;
+    ThermalBC m_thermal_bc = ThermalBC::none;
+    amrex::Real m_wall_temperature = 0.0; //!< [eV], temperature mode
     int m_ng = 0;   //!< axial ghost extension of the index tables
     int m_nz = 0;   //!< axial cells
 
@@ -129,6 +196,7 @@ private:
     amrex::Gpu::ManagedVector<int> m_first_masked_er; //!< (r-cell, z-node)
     amrex::Gpu::ManagedVector<int> m_first_masked_et; //!< (r-node, z-node)
     amrex::Gpu::ManagedVector<int> m_first_masked_ez; //!< (r-node, z-cell)
+    amrex::Gpu::ManagedVector<int> m_first_masked_cc; //!< (r-cell, z-cell)
 };
 
 #endif // WARPX_IMPLICIT_MHD_WALL_MASK_H_

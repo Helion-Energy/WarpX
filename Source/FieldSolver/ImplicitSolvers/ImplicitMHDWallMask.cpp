@@ -9,6 +9,7 @@
 
 #include "ImplicitMHDWallMask.H"
 
+#include "Utils/Parser/ParserUtils.H"
 #include "Utils/TextMsg.H"
 
 #include <AMReX.H>
@@ -116,6 +117,39 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
         wall_model == "none" || wall_model == "pec" ||
             wall_model == "pec_response",
         "implicit_mhd.wall_model must be 'none', 'pec' or 'pec_response'");
+
+    // Thermal wall boundary at the stair-step fluid interface (see the
+    // class comment): parsed BEFORE the early return so a thermal BC
+    // without a wall model is a loud input error, never a silent no-op.
+    std::string thermal_bc = "none";
+    pp.query("wall_thermal_bc", thermal_bc);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        thermal_bc == "none" || thermal_bc == "zero_flux" ||
+            thermal_bc == "temperature",
+        "implicit_mhd.wall_thermal_bc must be 'none', 'zero_flux' or "
+        "'temperature'");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        thermal_bc == "none" || wall_model != "none",
+        "implicit_mhd.wall_thermal_bc requires implicit_mhd.wall_model = "
+        "pec or pec_response (the thermal wall lives on the shaped-wall "
+        "mask)");
+    const bool has_wall_temperature = utils::parser::queryWithParser(
+        pp, "wall_temperature", m_wall_temperature);
+    if (thermal_bc == "temperature") {
+        m_thermal_bc = ThermalBC::temperature;
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            has_wall_temperature && m_wall_temperature > 0.0,
+            "implicit_mhd.wall_thermal_bc = temperature requires a "
+            "positive implicit_mhd.wall_temperature (in eV)");
+    } else {
+        m_thermal_bc = (thermal_bc == "zero_flux") ? ThermalBC::zero_flux
+                                                   : ThermalBC::none;
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !has_wall_temperature,
+            "implicit_mhd.wall_temperature requires "
+            "implicit_mhd.wall_thermal_bc = temperature");
+    }
+
     if (wall_model == "none") {
         m_active = false;
         return;
@@ -198,7 +232,9 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
     amrex::Vector<int> er_h(n_nodal);
     amrex::Vector<int> et_h(n_nodal);
     amrex::Vector<int> ez_h(n_cell);
+    amrex::Vector<int> cc_h(n_cell);
     long masked_corner_rows = 0;
+    int min_first_masked = never_masked;
     for (int jj = 0; jj < n_nodal; ++jj) {
         const double z_node = plo_z + (jj - m_ng) * dz;
         er_h[jj] = first_masked(z_node, false);  // E_r: r-cell, z-node
@@ -206,21 +242,40 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
         if (jj >= m_ng && jj <= m_ng + m_nz && et_h[jj] <= nr) {
             masked_corner_rows += nr + 1 - et_h[jj];
         }
+        min_first_masked =
+            std::min({min_first_masked, er_h[jj], et_h[jj]});
     }
     for (int jj = 0; jj < n_cell; ++jj) {
         const double z_cell = plo_z + (jj - m_ng + 0.5) * dz;
         ez_h[jj] = first_masked(z_cell, true);   // E_z: r-node, z-cell
+        cc_h[jj] = first_masked(z_cell, false);  // fluid: r-cell, z-cell
+        min_first_masked =
+            std::min({min_first_masked, ez_h[jj], cc_h[jj]});
     }
 
+    // Axis clearance guard: the r = 0 reflecting boundary is the m = 0
+    // parity ghost fill plus the axis-corner EMF parities, which assume
+    // plasma at the axis. A polyline pinching to r = 0 would put masked
+    // conductor rows in direct conflict with those fills (and swallow
+    // whole radial rows of the thermal wall), so it is a loud input
+    // error rather than a silent mis-composition.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(min_first_masked >= 1,
+        "implicit_mhd.wall_model: the wall polyline reaches the r = 0 "
+        "axis (first masked radial index 0); the shaped wall must stay "
+        "clear of the axis parity boundary");
+
     // Managed storage: read by device kernels (residual projection,
-    // Chebyshev/banded stencil emission) and by the direct solver's
-    // host-side sparse-row assembly through the same pointers.
+    // Chebyshev/banded stencil emission, wall thermal BC) and by the
+    // direct solver's host-side sparse-row assembly through the same
+    // pointers.
     m_first_masked_er.resize(n_nodal);
     m_first_masked_et.resize(n_nodal);
     m_first_masked_ez.resize(n_cell);
+    m_first_masked_cc.resize(n_cell);
     std::copy(er_h.begin(), er_h.end(), m_first_masked_er.begin());
     std::copy(et_h.begin(), et_h.end(), m_first_masked_et.begin());
     std::copy(ez_h.begin(), ez_h.end(), m_first_masked_ez.begin());
+    std::copy(cc_h.begin(), cc_h.end(), m_first_masked_cc.begin());
 
     const auto [rw_min, rw_max] =
         std::minmax_element(r_points.begin(), r_points.end());
@@ -230,10 +285,29 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
                    << " polyline points, r in [" << *rw_min << ", " << *rw_max
                    << "], z in [" << z_points.front() << ", "
                    << z_points.back() << "]); " << masked_corner_rows
-                   << " masked corner (E_theta) rows in the valid domain\n";
+                   << " masked corner (E_theta) rows in the valid domain; "
+                   << "axis clearance " << min_first_masked
+                   << " cells; thermal BC " << ThermalBCName();
+    if (m_thermal_bc == ThermalBC::temperature) {
+        amrex::Print() << " (T_wall = " << m_wall_temperature << " eV)";
+    }
+    amrex::Print() << "\n";
 
     m_active = true;
 #endif
+}
+
+const char* ImplicitMHDWallMask::ThermalBCName () const
+{
+    if (!m_active || m_thermal_bc == ThermalBC::none) { return "none"; }
+    return (m_thermal_bc == ThermalBC::temperature) ? "temperature"
+                                                    : "zero_flux";
+}
+
+const int* ImplicitMHDWallMask::FirstMaskedCellCentered () const
+{
+    if (GetThermalBC() == ThermalBC::none) { return nullptr; }
+    return m_first_masked_cc.data() + m_ng;
 }
 
 warpx::mhd_pc::WallMaskView ImplicitMHDWallMask::View () const

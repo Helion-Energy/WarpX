@@ -823,6 +823,21 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
                 "central): the wall is a projection of the solver-assembled "
                 "Ohm electric field");
         }
+        // The temperature wall exchanges heat conductively: without a
+        // conduction channel the reservoir is unreachable and the mode
+        // would be a silent no-op (zero_flux without conduction is
+        // trivially satisfied and stays legal -- the masked-cell Joule
+        // gate still applies).
+        if (m_wall_mask.GetThermalBC() ==
+            ImplicitMHDWallMask::ThermalBC::temperature) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_chi_ion_is_parser || m_chi_electron_is_parser ||
+                    m_thermal_diffusivity_ion > 0.0_rt ||
+                    m_thermal_diffusivity_electron > 0.0_rt,
+                "implicit_mhd.wall_thermal_bc = temperature requires a "
+                "nonzero thermal_diffusivity_ion/electron (constant or "
+                "parser): the wall reservoir exchanges conductively");
+        }
     }
 #else
     for (int direction = 0; direction < AMREX_SPACEDIM; ++direction) {
@@ -1527,6 +1542,16 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "Fluid flux:                    " << m_fluid_flux << "\n"
                    << "Shaped conducting-wall mask:   "
                    << m_wall_mask.ModeName() << "\n"
+                   << "Wall thermal BC:               "
+                   << m_wall_mask.ThermalBCName()
+                   << (m_wall_mask.GetThermalBC() ==
+                               ImplicitMHDWallMask::ThermalBC::temperature
+                           ? " (T_wall = " +
+                                 std::to_string(
+                                     m_wall_mask.WallTemperature_eV()) +
+                                 " eV)"
+                           : std::string{})
+                   << "\n"
                    << "Open-r fluid wall:             " << m_r_open_fluid << "\n"
                    << "Z-end fluid boundary:          " << m_z_boundary_fluid << "\n"
                    << "Z wall temperature [eV]:       " << m_z_wall_temperature << "\n"
@@ -3507,6 +3532,44 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const amrex::Real face_time = a_time;
     const bool add_conduction =
         (chi_ion > 0.0_rt || chi_electron > 0.0_rt || chi_any_parser);
+    // Stair-step wall thermal boundary (implicit_mhd.wall_thermal_bc):
+    // the conducting-wall mask is electromagnetic only, so without this
+    // the conduction operator exchanges blindly across the stair-step
+    // interface against conductor cells riding the floor. zero_flux
+    // insulates the interface faces exactly; temperature exchanges
+    // against a T_wall reservoir by presenting the wall specific
+    // internal energies on the masked side (the EB analog of the
+    // z_boundary_fluid = wall_temperature ghost fill). Faces between
+    // two masked cells are interior metal and carry no conduction in
+    // either mode. The mask is static geometry (never a function of the
+    // state), so the branches are C-infinity for the JFNK probes.
+    // Inactive (nullptr table) outside RZ and under wall_thermal_bc =
+    // none, where this block compiles to dead constants.
+    const auto wall_thermal_mode = m_wall_mask.GetThermalBC();
+    const bool wall_thermal =
+        add_conduction &&
+        (wall_thermal_mode != ImplicitMHDWallMask::ThermalBC::none);
+    const bool wall_dirichlet =
+        (wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::temperature);
+    const int* const AMREX_RESTRICT wall_first_masked_cc =
+        wall_thermal ? m_wall_mask.FirstMaskedCellCentered() : nullptr;
+    // The table covers z cells [-ng, nz - 1 + ng] of the MASK's ghost
+    // width; kernel boxes may reach one cell past it at the z ends, so
+    // reads are clamped (constant continuation, like the polyline).
+    const int wall_mask_z_lo = -m_wall_mask.GhostCells();
+    const int wall_mask_z_hi =
+        m_wall_mask.AxialCells() - 1 + m_wall_mask.GhostCells();
+    // n kB T_wall = rho (q/m) T_wall[eV] for the quasi-neutral
+    // single-ion fluid (see the z wall_temperature ghost fill): the
+    // wall-reservoir SPECIFIC internal energies are density-free.
+    const amrex::Real wall_e_spec_electron =
+        m_ion_charge_to_mass * m_wall_mask.WallTemperature_eV() /
+        (m_gamma_e - 1.0_rt);
+    const amrex::Real wall_e_spec_ion =
+        m_ion_charge_to_mass * m_wall_mask.WallTemperature_eV() /
+        (m_gamma_i - 1.0_rt);
+    const amrex::Real wall_te_kelvin = m_wall_mask.WallTemperature_eV() *
+                                       PhysConst::q_e / PhysConst::kb;
 #if defined(WARPX_DIM_1D_Z)
     const amrex::Real inverse_normal_size =
         1.0_rt / m_WarpX->Geom(0).CellSize(0);
@@ -3817,19 +3880,53 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
             // pressures the physical fluxes use (the smooth-floored
             // recovered p_i(E_i) under total_energy: ion_internal is
             // exactly p_i/(gamma_i - 1)).
-            if (add_conduction
+            // Wall thermal BC face classification (see the host
+            // constants above the loop): exactly one masked cell =
+            // stair-step interface face, both masked = interior metal.
+            // The mask table's z index is clamped to its stored range
+            // (constant continuation, like the polyline itself). Always
+            // false when wall_thermal is off (nullptr table never read).
+            bool wall_left_masked = false;
+            bool wall_right_masked = false;
+            if (wall_thermal) {
+                const int jzl = std::max(wall_mask_z_lo,
+                                         std::min(wall_mask_z_hi, jl));
+                const int jzr = std::max(wall_mask_z_lo,
+                                         std::min(wall_mask_z_hi, j));
+                wall_left_masked = (il >= wall_first_masked_cc[jzl]);
+                wall_right_masked = (i >= wall_first_masked_cc[jzr]);
+            }
+            // Interior-metal faces never conduct; interface faces
+            // conduct only in the temperature (Dirichlet) mode.
+            const bool wall_skip_conduction =
+                (wall_left_masked && wall_right_masked) ||
+                ((wall_left_masked || wall_right_masked) &&
+                 !wall_dirichlet);
+
+            if (add_conduction && !wall_skip_conduction
 #if defined(WARPX_DIM_RZ)
                 && !(reflect_wall && i == radial_wall_face)
 #endif
             ) {
+                // Inside this block a masked side implies a Dirichlet
+                // interface face (interior metal and zero_flux faces
+                // were skipped above): the masked side presents the
+                // wall reservoir, and the face density is the INTERIOR
+                // side's -- chi rho is the exchange conductivity and
+                // the conductor's near-floor fill must not choke it.
                 const amrex::Real face_density =
-                    0.5_rt * (left.density + right.density);
+                    wall_left_masked
+                        ? right.density
+                        : (wall_right_masked
+                               ? left.density
+                               : 0.5_rt * (left.density + right.density));
                 // Donor-averaged face state for the parser diffusivities
                 // and the free-streaming limiter (unused, and skipped, on
                 // the constant/limiter-off path). Temperatures are the
                 // temperature-primary face ratios p_face/(n_f kB); Ti is
                 // 0 outside total_energy (where the ion channel is
-                // disallowed anyway).
+                // disallowed anyway). Dirichlet interface faces average
+                // the interior side against the T_wall reservoir.
                 amrex::Real face_charge_density = 0.0_rt;
                 amrex::Real face_te = 0.0_rt;
                 amrex::Real face_ti = 0.0_rt;
@@ -3841,14 +3938,30 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     const amrex::Real inverse_nkb =
                         PhysConst::q_e /
                         (face_charge_density * PhysConst::kb);
-                    face_te = 0.5_rt *
-                              (left.electron_pressure +
-                               right.electron_pressure) *
-                              inverse_nkb;
-                    if (chi_total_energy) {
-                        face_ti = 0.5_rt *
-                                  (left.ion_pressure + right.ion_pressure) *
+                    if (wall_left_masked || wall_right_masked) {
+                        const amrex::Real interior_pe =
+                            wall_left_masked ? right.electron_pressure
+                                             : left.electron_pressure;
+                        face_te = 0.5_rt * (interior_pe * inverse_nkb +
+                                            wall_te_kelvin);
+                        if (chi_total_energy) {
+                            const amrex::Real interior_pi =
+                                wall_left_masked ? right.ion_pressure
+                                                 : left.ion_pressure;
+                            face_ti = 0.5_rt * (interior_pi * inverse_nkb +
+                                                wall_te_kelvin);
+                        }
+                    } else {
+                        face_te = 0.5_rt *
+                                  (left.electron_pressure +
+                                   right.electron_pressure) *
                                   inverse_nkb;
+                        if (chi_total_energy) {
+                            face_ti =
+                                0.5_rt *
+                                (left.ion_pressure + right.ion_pressure) *
+                                inverse_nkb;
+                        }
                     }
                     if (chi_any_parser) {
                         amrex::Real jsq = 0.0_rt;
@@ -3867,10 +3980,17 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             ? chi_ion_parser(face_charge_density, face_te,
                                              face_ti, face_jmag, face_time)
                             : chi_ion;
+                    const amrex::Real ion_e_spec_left =
+                        wall_left_masked
+                            ? wall_e_spec_ion
+                            : left.ion_internal / left.safe_density;
+                    const amrex::Real ion_e_spec_right =
+                        wall_right_masked
+                            ? wall_e_spec_ion
+                            : right.ion_internal / right.safe_density;
                     amrex::Real conductive_flux =
                         -chi_ion_face * face_density *
-                        (right.ion_internal / right.safe_density -
-                         left.ion_internal / left.safe_density) *
+                        (ion_e_spec_right - ion_e_spec_left) *
                         inverse_normal_size;
                     if (conduction_limit > 0.0_rt) {
                         // free-streaming cap q_fs = n kB Ti v_ti,
@@ -3897,12 +4017,21 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             : chi_electron;
                     const amrex::Real inverse_gamma_e_minus_one =
                         1.0_rt / (parameters.gamma_e - 1.0_rt);
+                    const amrex::Real electron_e_spec_left =
+                        wall_left_masked
+                            ? wall_e_spec_electron
+                            : left.electron_pressure *
+                                  inverse_gamma_e_minus_one /
+                                  left.safe_density;
+                    const amrex::Real electron_e_spec_right =
+                        wall_right_masked
+                            ? wall_e_spec_electron
+                            : right.electron_pressure *
+                                  inverse_gamma_e_minus_one /
+                                  right.safe_density;
                     amrex::Real conductive_flux =
                         -chi_electron_face * face_density *
-                        (right.electron_pressure * inverse_gamma_e_minus_one /
-                             right.safe_density -
-                         left.electron_pressure * inverse_gamma_e_minus_one /
-                             left.safe_density) *
+                        (electron_e_spec_right - electron_e_spec_left) *
                         inverse_normal_size;
                     if (conduction_limit > 0.0_rt) {
                         const amrex::Real thermal_speed = std::sqrt(
@@ -5016,6 +5145,26 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     // (vacuum_keyed_resistivity): vacuum field diffusion never heats
     // plasma.
     const amrex::Real eta_density_floor = OhmMassDensityFloor();
+    // Rigid-conductor fluid freeze (implicit_mhd.wall_thermal_bc): under
+    // either thermal wall mode the masked conductor cells are NOT fluid
+    // -- every increment inside them is zero, so the band keeps its
+    // bounded load state forever and the stair interface faces drain the
+    // interior one-sidedly (the fluid analog of run32's wall particle
+    // scraper). This is what keeps the wall band from running away: the
+    // PEC surface current otherwise meets the (anomalous) plasma
+    // resistivity at near-floor density -- an unbounded Joule source
+    // inside the metal (the wall-on ladder crash mechanism) -- and a
+    // conservative booking of the interface conduction drain would
+    // recreate the same hot-band signal-speed spike from the other
+    // side. Opt-in with the thermal BC: wall_model alone stays
+    // bit-identical to the electromagnetic-only wall.
+    const bool wall_thermal_freeze =
+        (m_wall_mask.GetThermalBC() != ImplicitMHDWallMask::ThermalBC::none);
+    const int* const AMREX_RESTRICT wall_first_masked_cc =
+        wall_thermal_freeze ? m_wall_mask.FirstMaskedCellCentered() : nullptr;
+    const int wall_mask_z_lo = -m_wall_mask.GhostCells();
+    const int wall_mask_z_hi =
+        m_wall_mask.AxialCells() - 1 + m_wall_mask.GhostCells();
 #if defined(WARPX_DIM_RZ)
     const amrex::Real inverse_dr = inverse_cell_size[0];
     const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
@@ -5435,9 +5584,31 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 theta_implicit_mhd::floor_outflow_limiter(rho_old(i, j, k),
                                                           halo_pedestal);
 
+            // Thermal-wall fluid freeze (see the host constants above):
+            // under wall_thermal_bc every fluid increment inside a masked
+            // conductor cell is zero -- the metal is a rigid absorbing
+            // body, not fluid. The stair interface faces then drain the
+            // INTERIOR one-sidedly (what crosses is gone: mass, momentum,
+            // enthalpy -- the fluid analog of run32's wall particle
+            // scraper) while the band keeps its bounded load state
+            // forever: no Joule pile-up of the PEC surface current
+            // against the anomalous resistivity at near-floor density,
+            // no drained-heat accumulation, no E_i-minus-KE corner. A
+            // static-geometry 0/1 scale, C-infinity for the JFNK probes
+            // like every wall projection.
+            amrex::Real wall_live = 1.0_rt;
+            if (wall_thermal_freeze) {
+                const int mask_jz = std::max(wall_mask_z_lo,
+                                             std::min(wall_mask_z_hi, j));
+                if (i >= wall_first_masked_cc[mask_jz]) {
+                    wall_live = 0.0_rt;
+                }
+            }
+
             rho_increment(i, j, k) =
                 evolve_ion_fluid
-                    ? -theta_dt * plasma_weight * divergence_momentum
+                    ? wall_live * -theta_dt * plasma_weight *
+                          divergence_momentum
                     : 0.0_rt;
 
             const amrex::Real vacuum_drag =
@@ -5455,7 +5626,7 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 // replaces the pointwise J x B force.
                 momentum_increment(i, j, k, component) =
                     evolve_ion_fluid
-                        ? theta_dt *
+                        ? wall_live * theta_dt *
                               (plasma_weight *
                                    (-divergence_momentum_flux[component]) -
                                (vacuum_drag + halo_drag) *
@@ -5517,7 +5688,7 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                                            energy_end,
                                            pressure_floor / gamma_e_minus_one));
             energy_increment(i, j, k) =
-                theta_dt * plasma_weight *
+                wall_live * theta_dt * plasma_weight *
                 (-divergence_energy_flux + pressure_work + joule_heating);
 
             if (total_energy_closure) {
@@ -5620,7 +5791,7 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                     theta_implicit_mhd::floor_outflow_limiter(
                         internal_energy, halo_pedestal_ion_internal);
                 ion_energy_increment(i, j, k) =
-                    theta_dt *
+                    wall_live * theta_dt *
                     (plasma_weight *
                          (-divergence_ion_energy_flux + lorentz_work +
                           ion_pressure_work) -
@@ -5904,13 +6075,13 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                     theta_implicit_mhd::floor_outflow_limiter(
                         uperp(i, j, k), halo_pedestal_ion_perp);
                 ion_parallel_increment(i, j, k) =
-                    theta_dt *
+                    wall_live * theta_dt *
                     (plasma_weight *
                          (-divergence_ion_parallel_flux + parallel_work +
                           parallel_relaxation) -
                      parallel_relax_drain);
                 ion_perp_increment(i, j, k) =
-                    theta_dt *
+                    wall_live * theta_dt *
                     (plasma_weight *
                          (-divergence_ion_perp_flux + perp_work +
                           perp_relaxation) -

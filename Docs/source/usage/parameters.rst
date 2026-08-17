@@ -4810,9 +4810,49 @@ Jacobian probes.
     duplicate z values). The polyline is interpolated linearly in z and
     continued constantly beyond its axial range; everything at
     :math:`r \ge r_\mathrm{wall}(z)` is conductor (the surface sits AT
-    the polyline). A relative path is also resolved against the
-    ``AMREX_INPUTS_FILE_PREFIX`` environment variable, like the inputs
-    file itself.
+    the polyline). The polyline must stay clear of the :math:`r = 0`
+    axis (at least one unmasked radial cell everywhere): the axis is
+    handled by the m = 0 parity reflecting boundary, and a polyline
+    pinching to the axis aborts at setup. A relative path is also
+    resolved against the ``AMREX_INPUTS_FILE_PREFIX`` environment
+    variable, like the inputs file itself.
+
+.. pp:param:: implicit_mhd.wall_thermal_bc
+    :type: ``string``
+    :default: ``none``
+
+    Thermal boundary condition at the stair-step interface of the shaped
+    conducting wall (requires ``implicit_mhd.wall_model = pec`` or
+    ``pec_response``). The conducting-wall mask is electromagnetic only:
+    with the default ``none`` the conduction operator
+    (``thermal_diffusivity_ion/electron``) exchanges heat blindly across
+    the wall interface against conductor cells riding the density floor,
+    and the cell-centered Joule heating :math:`\eta J^2` of the PEC
+    surface current meets the (possibly anomalous) plasma resistivity at
+    the near-floor wall-band density — an unbounded spurious heat source
+    inside the metal. Either active mode upgrades the masked band to a
+    RIGID conductor: every fluid increment inside masked cells is zero
+    (the band keeps its bounded load state forever — no Joule pile-up,
+    no drained-heat accumulation), the stair interface faces drain the
+    interior one-sidedly (what crosses is gone: mass, momentum,
+    enthalpy — the fluid analog of an embedded-boundary particle
+    scraper), and faces between two masked cells carry no conduction.
+    ``zero_flux`` additionally makes the wall adiabatic: interface faces
+    carry exactly zero conductive flux. ``temperature`` makes the wall a
+    Dirichlet reservoir instead: interface faces exchange conductively
+    against ``wall_temperature``, with the masked side of each face
+    presenting the wall specific internal energies (the shaped-wall
+    analog of the ``z_boundary_fluid = wall_temperature`` ghost fill;
+    requires a nonzero thermal diffusivity). The mask is static
+    geometry, so all of this is smooth in the state for the JFNK probes.
+
+.. pp:param:: implicit_mhd.wall_temperature
+    :type: ``float`` (eV)
+
+    Wall reservoir temperature of
+    ``implicit_mhd.wall_thermal_bc = temperature`` (required there, in
+    eV; an error in the other modes). Applied to both the electron and
+    ion conduction channels.
 
 .. pp:param:: implicit_mhd.absorb_ledger_interval
     :type: ``integer``

@@ -2326,7 +2326,31 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
     wall_polyline_file: str, optional
         CSV of "z, r" [m] rows (z non-decreasing, single-valued;
         near-vertical faces via epsilon-offset duplicate z) defining
-        the wall polyline for wall_model="pec".
+        the wall polyline for wall_model="pec". Must stay clear of the
+        r = 0 axis (the parity origin owns it); pinching to the axis
+        aborts at setup.
+
+    wall_thermal_bc: {"none", "zero_flux", "temperature"}, optional
+        Thermal boundary at the stair-step wall interface (requires an
+        active wall_model). The default "none" keeps the wall
+        electromagnetic-only: conduction exchanges blindly across the
+        stair interface and the PEC surface current's Joule heating
+        eta J^2 meets the (possibly anomalous) resistivity at the
+        near-floor wall-band density — an unbounded spurious heat
+        source inside the metal. Either active mode upgrades the
+        masked band to a RIGID conductor (every fluid increment inside
+        masked cells is zero; the band keeps its bounded load state
+        and the interface drains the interior one-sidedly — the
+        embedded-boundary scraper analog) and drops conduction between
+        masked cells. "zero_flux" additionally insulates the interface
+        (adiabatic wall); "temperature" exchanges conductively against
+        the wall_temperature reservoir instead (requires a nonzero
+        thermal diffusivity).
+
+    wall_temperature: float, optional
+        Wall reservoir temperature [eV] of
+        wall_thermal_bc="temperature" (required there; an error in the
+        other modes). Applied to both conduction channels.
 
     absorb_ledger_interval: integer, optional
         Print interval (steps) of the absorbing-wall ledger counters
@@ -2540,6 +2564,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         z_wall_temperature=None,
         wall_model=None,
         wall_polyline_file=None,
+        wall_thermal_bc=None,
+        wall_temperature=None,
         absorb_ledger_interval=None,
         absorb_ledger_file=None,
         hllc_signal_closure=None,
@@ -2601,6 +2627,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.z_wall_temperature = z_wall_temperature
         self.wall_model = wall_model
         self.wall_polyline_file = wall_polyline_file
+        self.wall_thermal_bc = wall_thermal_bc
+        self.wall_temperature = wall_temperature
         self.absorb_ledger_interval = absorb_ledger_interval
         self.absorb_ledger_file = absorb_ledger_file
         self.hllc_signal_closure = hllc_signal_closure
@@ -2688,6 +2716,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.z_wall_temperature = self.z_wall_temperature
         implicit_mhd.wall_model = self.wall_model
         implicit_mhd.wall_polyline_file = self.wall_polyline_file
+        implicit_mhd.wall_thermal_bc = self.wall_thermal_bc
+        implicit_mhd.wall_temperature = self.wall_temperature
         implicit_mhd.absorb_ledger_interval = self.absorb_ledger_interval
         implicit_mhd.absorb_ledger_file = self.absorb_ledger_file
         implicit_mhd.hllc_signal_closure = self.hllc_signal_closure

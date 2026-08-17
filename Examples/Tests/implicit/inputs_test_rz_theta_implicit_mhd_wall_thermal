@@ -1,0 +1,139 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Stair-step shaped-wall THERMAL boundary test (RZ, central recast flux,
+# frozen ions): a static uniform-density plasma with a Gaussian
+# temperature core sits inside a STEPPED cylinder wall (r_w = 0.30 m for
+# z < 0, 0.22 m for z > 0), so the mask presents r-normal AND z-normal
+# stair interface faces plus interior-metal faces. Ions are frozen
+# (evolve_ion_fluid = false, so the ion conduction channel -- which
+# requires the total_energy closure and live ions -- is exercised by the
+# formation decks instead; it shares the electron channel's code
+# template), eta = 0, no Hall, no electron-pressure Ohm term and no
+# Joule heating: the ONLY active physics is isotropic electron thermal
+# conduction (chi_e = chi) -- a pure heat equation against the
+# wall_thermal_bc contract.
+#
+# Base mode zero_flux (see analysis_mhd_wall_thermal.py): the interface
+# passes exactly nothing (interior energy conserved, every masked cell
+# bit-static) while the Gaussian core measurably flattens (interior
+# conduction alive). The temperature-mode ctest overrides
+# implicit_mhd.wall_thermal_bc=temperature wall_temperature=2.0 on the
+# CLI: the interface exchanges against the T_wall reservoir (interior
+# energy drains strictly monotonically through the one-sided wall sink,
+# the wall-adjacent ring hugs T_wall without undershoot, the step ledge
+# drains through its z-normal faces too). Both modes also gate the r = 0
+# axis health (the reflecting parity origin must compose cleanly with
+# the shaped wall).
+
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.T0_ev = 100.0
+my_constants.Tmin_ev = 2.0
+my_constants.w = 0.25
+my_constants.chi = 20.0
+my_constants.gamma = 5.0/3.0
+my_constants.B0 = 0.01
+my_constants.Lr = 0.5
+my_constants.Lz = 0.5
+my_constants.nr = 32
+my_constants.nz = 16
+my_constants.dt = 2.0e-6
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 60
+amr.n_cell = nr nz
+amr.max_grid_size = 8
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 -0.5*Lz
+geometry.prob_hi = Lr 0.5*Lz
+boundary.field_lo = none none
+boundary.field_hi = pec none
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-11
+newton.relative_tolerance = 1.0e-8
+newton.max_iterations = 12
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-10
+gmres.max_iterations = 300
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = T0_ev
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = 0.0
+implicit_mhd.mass_density_floor = 1.0e-4 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-4 * n0 * Tmin_ev * q_e
+implicit_mhd.evolve_ion_fluid = false
+implicit_mhd.fluid_flux = central
+# central-flux stabilization guard; inert here (frozen ions, u = 0)
+implicit_mhd.viscosity = 1.0
+implicit_mhd.include_joule_heating = false
+implicit_mhd.thermal_diffusivity_electron = chi
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.electron_pressure(x,y,z) = "n0 * q_e * (Tmin_ev + (T0_ev - Tmin_ev) * exp(-(x*x)/(w*w)))"
+
+# Stepped conducting wall (constant continuation covers the z ghosts);
+# base thermal mode zero_flux, overridden to temperature on the CLI by
+# the second ctest.
+implicit_mhd.wall_model = pec
+implicit_mhd.wall_polyline_file = wall_step_r30_r22.csv
+implicit_mhd.wall_thermal_bc = zero_flux
+
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 B0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 20
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy \
+                       implicit_mhd_momentum_r implicit_mhd_momentum_t \
+                       implicit_mhd_momentum_z
+diag1.write_species = 0

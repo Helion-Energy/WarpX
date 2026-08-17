@@ -1035,6 +1035,40 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# stair-step wall THERMAL boundary, mode "zero_flux": conduction must
+# pass exactly nothing through the shaped-wall interface (interior
+# unmasked energy conserved) while every masked cell stays bit-static
+# (the rigid-conductor fluid freeze) and interior conduction stays alive
+# (the Gaussian core measurably flattens); the STEPPED polyline
+# exercises r- AND z-normal interface faces plus the interior-metal
+# face drop, and the axis column gates the r = 0 parity origin
+# composing with the shaped wall
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_thermal_zero_flux  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_wall_thermal  # inputs
+    "analysis_mhd_wall_thermal.py diags zero_flux"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# mode "temperature": the interface faces exchange conductively against
+# the T_wall reservoir, draining the interior strictly monotonically
+# through a one-sided sink (the scraper-analog wall) -- the
+# wall-adjacent ring hugs T_wall without undershoot, the step ledge
+# drains through its z-normal interface faces too, the masked band
+# stays bit-static, and the axis column stays clean
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_thermal_temperature  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_thermal implicit_mhd.wall_thermal_bc=temperature implicit_mhd.wall_temperature=2.0"  # inputs
+    "analysis_mhd_wall_thermal.py diags temperature"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # selectable z-end fluid boundary, mode "outflow" (rectified outgoing-only
 # end ghosts): a hot slab with outward end flow drains mass and total
 # fluid energy strictly monotonically through the z faces
