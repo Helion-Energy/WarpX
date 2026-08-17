@@ -2249,7 +2249,40 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         (v_th = sqrt(kB T/m), donor-averaged face state). 0 disables the
         limiter exactly; a positive factor applies the smooth harmonic
         cap (no branches) and is printed in the solver banner (the
-        limiter never runs silent).
+        limiter never runs silent). Under
+        thermal_conduction_model="braginskii" the cap applies to the
+        total (normal + tangential) tensor flux.
+
+    thermal_conduction_model: {"isotropic", "braginskii"}, optional
+        Closure of the conductive face fluxes. "isotropic" (default)
+        keeps the scalar thermal_diffusivity_* path bit-identically.
+        "braginskii" replaces it with the anisotropic tensor flux
+        q_n = -rho_f [chi_perp de/dn
+        + (chi_par - chi_perp) bhat_n (bhat . grad e)] per channel
+        (electron always; ion under ion_closure="total_energy"), with
+        chi_par/chi_perp the Braginskii (1965) Z=1
+        parallel/perpendicular thermal diffusivities evaluated from the
+        donor-averaged face state (n, Te, Ti) and the face-averaged
+        total B, and bhat regularized smoothly at B -> 0 (where
+        chi_perp -> chi_par recovers the isotropic flux exactly).
+        Mutually exclusive with thermal_diffusivity_ion/electron;
+        requires fluid_flux="hlld" or "central" and a positive
+        electron_pressure_floor.
+
+    conduction_coulomb_log: float, default=10
+        Coulomb logarithm of the Braginskii collision times tau_e/tau_i
+        (thermal_conduction_model="braginskii").
+
+    conduction_chi_min: float, default=0 (off)
+        Optional absolute floor [m^2/s] on the Braginskii chi_par and
+        chi_perp (smooth-max, applied per channel before the
+        free-streaming limiter).
+
+    conduction_chi_max: float, default=0 (off)
+        Optional absolute cap [m^2/s] on the Braginskii chi_par and
+        chi_perp: a C^2 soft clip with knee width chi_max/10 (exact
+        pass-through below 0.9 chi_max), applied per channel before the
+        free-streaming limiter.
 
     pressure_corner_width_fraction: float, default=0 (legacy width)
         Corner width of the smooth-max internal-energy floor in the
@@ -2569,6 +2602,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         thermal_diffusivity_ion=None,
         thermal_diffusivity_electron=None,
         conduction_flux_limit_factor=None,
+        thermal_conduction_model=None,
+        conduction_coulomb_log=None,
+        conduction_chi_min=None,
+        conduction_chi_max=None,
         pressure_corner_width_fraction=None,
         r_open_fluid=None,
         z_boundary_fluid=None,
@@ -2633,6 +2670,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.thermal_diffusivity_ion = thermal_diffusivity_ion
         self.thermal_diffusivity_electron = thermal_diffusivity_electron
         self.conduction_flux_limit_factor = conduction_flux_limit_factor
+        self.thermal_conduction_model = thermal_conduction_model
+        self.conduction_coulomb_log = conduction_coulomb_log
+        self.conduction_chi_min = conduction_chi_min
+        self.conduction_chi_max = conduction_chi_max
         self.pressure_corner_width_fraction = pressure_corner_width_fraction
         self.r_open_fluid = r_open_fluid
         self.z_boundary_fluid = z_boundary_fluid
@@ -2721,6 +2762,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
                 self.thermal_diffusivity_electron
             )
         implicit_mhd.conduction_flux_limit_factor = self.conduction_flux_limit_factor
+        implicit_mhd.thermal_conduction_model = self.thermal_conduction_model
+        implicit_mhd.conduction_coulomb_log = self.conduction_coulomb_log
+        implicit_mhd.conduction_chi_min = self.conduction_chi_min
+        implicit_mhd.conduction_chi_max = self.conduction_chi_max
         implicit_mhd.pressure_corner_width_fraction = (
             self.pressure_corner_width_fraction
         )

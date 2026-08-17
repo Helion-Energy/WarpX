@@ -4689,7 +4689,71 @@ Jacobian probes.
     donor-averaged face state). ``0`` disables the limiter exactly
     (bit-identical); a positive factor applies the smooth harmonic cap
     with no branches. The limiter never runs silent: its factor is
-    printed in the solver banner.
+    printed in the solver banner. Under
+    ``thermal_conduction_model = braginskii`` the cap applies to the
+    total (normal + tangential) tensor flux.
+
+.. pp:param:: implicit_mhd.thermal_conduction_model
+    :type: ``string``
+    :default: ``isotropic``
+
+    Closure of the conductive face fluxes. ``isotropic`` (default) keeps
+    the scalar :pp:param:`implicit_mhd.thermal_diffusivity_ion`/electron
+    path bit-identically. ``braginskii`` replaces it with the
+    anisotropic tensor flux
+
+    .. math::
+
+        q_n = -\rho_f \left[\chi_\perp \frac{\partial e}{\partial n}
+        + (\chi_\parallel - \chi_\perp)\, \hat{b}_n\,
+        (\hat{b} \cdot \nabla e)\right]
+
+    per channel (electron always; ion under
+    ``ion_closure = total_energy``), with :math:`e` the same specific
+    internal energies the isotropic path diffuses,
+    :math:`\hat{b}` the face unit field (single-valued staggered
+    :math:`B_n` plus cell-averaged tangential total :math:`B`,
+    regularized smoothly at :math:`B \to 0`), and
+    :math:`\chi_\parallel/\chi_\perp` the Braginskii (1965) Z = 1
+    thermal diffusivities
+    :math:`\chi_{\parallel,e} = 3.16\, k_B T_e \tau_e / m_e`,
+    :math:`\chi_{\parallel,i} = 3.9\, k_B T_i \tau_i / m_i` with the
+    standard collision times, and the Braginskii magnetization fits for
+    :math:`\chi_\perp` in :math:`x = (\Omega\tau)^2` (exactly
+    :math:`\chi_\parallel` at :math:`x = 0`, so the unmagnetized limit
+    reproduces the isotropic flux). The tangential gradient uses the
+    standard 4-cell corner stencil. Mutually exclusive with the
+    constant/parser diffusivities; requires ``fluid_flux = hlld`` or
+    ``central`` and a positive ``electron_pressure_floor``. At a shaped
+    thermal wall the interface faces keep the one-sided isotropic drain
+    (with the tensor's nn projection as its scalar :math:`\chi`); the
+    tensor is never extended across the wall interface.
+
+.. pp:param:: implicit_mhd.conduction_coulomb_log
+    :type: ``float``
+    :default: ``10``
+
+    Coulomb logarithm of the Braginskii collision times
+    :math:`\tau_e/\tau_i`
+    (``thermal_conduction_model = braginskii``).
+
+.. pp:param:: implicit_mhd.conduction_chi_min
+    :type: ``float``
+    :default: ``0`` (off)
+
+    Optional absolute floor in m^2/s on the Braginskii
+    :math:`\chi_\parallel` and :math:`\chi_\perp` (smooth-max, applied
+    per channel before the free-streaming limiter).
+
+.. pp:param:: implicit_mhd.conduction_chi_max
+    :type: ``float``
+    :default: ``0`` (off)
+
+    Optional absolute cap in m^2/s on the Braginskii
+    :math:`\chi_\parallel` and :math:`\chi_\perp`: a :math:`C^2` soft
+    clip with knee width ``chi_max/10`` (exact pass-through below
+    ``0.9 chi_max``), applied per channel before the free-streaming
+    limiter.
 
 .. pp:param:: implicit_mhd.pressure_corner_width_fraction
     :type: ``float``

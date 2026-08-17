@@ -713,6 +713,29 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // applies the smooth harmonic cap with no branches. NEVER silent:
     // the factor is printed in the solver banner.
     amrex::Real m_conduction_flux_limit_factor = 0.0;
+    // Thermal-conduction closure of the conductive face fluxes
+    // (implicit_mhd.thermal_conduction_model): "isotropic" (default;
+    // bit-identical to the scalar thermal_diffusivity_* path) or
+    // "braginskii" -- the anisotropic tensor flux
+    //   q_n = -rho_f [chi_perp de/dn
+    //                 + (chi_par - chi_perp) bhat_n (bhat . grad e)]
+    // per channel, with e the SAME specific internal energies the
+    // isotropic path diffuses, bhat from the face-averaged TOTAL B, and
+    // chi_par/chi_perp the Braginskii (1965) Z = 1 parallel/perpendicular
+    // thermal diffusivities evaluated from the donor-averaged face state
+    // (electron channel always; ion channel under ion_closure =
+    // total_energy). Mutually exclusive with the constant/parser
+    // diffusivities above: braginskii computes its own coefficients.
+    std::string m_thermal_conduction_model = "isotropic";
+    bool m_conduction_braginskii = false;
+    // Coulomb logarithm of the Braginskii collision times tau_e/tau_i.
+    amrex::Real m_conduction_coulomb_log = 10.0;
+    // Optional absolute clamps [m^2/s] on the Braginskii chi_par and
+    // chi_perp (0 = off): C-infinity smooth-max floor at chi_min and C^2
+    // soft cap at chi_max (exact pass-through below 0.9 chi_max), applied
+    // per channel BEFORE the free-streaming limiter.
+    amrex::Real m_conduction_chi_min = 0.0;
+    amrex::Real m_conduction_chi_max = 0.0;
     // Floor-independent corner width of the C^1 smooth-max pressure
     // recovery (see FluxParameters::pressure_corner_width_fraction;
     // 0 = legacy width = internal-energy floor).

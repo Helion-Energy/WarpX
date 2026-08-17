@@ -1,0 +1,126 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Braginskii conduction in the UNMAGNETIZED limit (B = 0 everywhere):
+# chi_perp = chi_par exactly, so both channels must reproduce the
+# isotropic conductive decay at the analytic Braginskii parallel
+# diffusivities -- the same chi k^2 operator the isotropic model is
+# verified against by test_1d_theta_implicit_mhd_central_conduction.
+# Small ion and electron temperature ripples relax diffusively (chi
+# stiff against the acoustic response, chi k / c_s ~ 400) at
+#   chi_par_e(Te0, n0) k^2 = 3.16 kB Te tau_e / m_e * k^2  (electron)
+#   clip(chi_par_i(Ti0, n0)) k^2                           (ion),
+# where the ion chi (~7.88e6 m^2/s at 40 eV) exceeds the
+# conduction_chi_max soft cap below (knee 6.3e6, width 7e5 -> effective
+# ~6.98e6) while the electron chi (~6.05e6 m^2/s at 10 eV) sits below
+# the knee and must pass through EXACTLY -- one run verifies the raw
+# coefficient, the cap, and the cap's exact pass-through.
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+my_constants.Te0 = 10.0
+my_constants.Ti0 = 40.0
+my_constants.Pe0 = n0 * Te0 * q_e
+my_constants.Pi0 = n0 * Ti0 * q_e
+my_constants.gamma = 5.0/3.0
+my_constants.B0 = sqrt(mu0 * Pi0)
+my_constants.nz = 64
+my_constants.Lz = 1.0
+my_constants.kz = 2*pi/Lz
+# small ripples: linear decay, far above the 1e-6 floors
+my_constants.dTe = 0.005
+my_constants.dTi = 0.005
+# ~0.2 diffusion decades per step at the FASTER (capped ion) rate
+# chi_i_eff kz^2 ~ 2.76e8 1/s
+my_constants.dt = 7.25e-10
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 10
+amr.n_cell = nz
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 20
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-10
+gmres.max_iterations = 300
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te0
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = Pi0
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.ion_pressure_floor = 1.0e-6 * Pi0
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-6 * Pe0
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 0.5
+implicit_mhd.thermal_conduction_model = braginskii
+implicit_mhd.conduction_coulomb_log = 10.0
+# inert floor (far below both chi) + active soft cap on the ion channel
+implicit_mhd.conduction_chi_min = 100.0
+implicit_mhd.conduction_chi_max = 7.0e6
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.ion_pressure(x,y,z) = Pi0*(1.0 + dTi*sin(kz*z))
+implicit_mhd.electron_pressure(x,y,z) = Pe0*(1.0 + dTe*sin(kz*z))
+
+# NO magnetic field anywhere: the unmagnetized Braginskii limit
+# (x = (Omega tau)^2 = 0, chi_perp = chi_par exactly)
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 10
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz jz implicit_mhd_mass_density \
+                       implicit_mhd_ion_energy implicit_mhd_electron_energy
+diag1.write_species = 0

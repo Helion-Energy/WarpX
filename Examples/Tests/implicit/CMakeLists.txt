@@ -373,6 +373,22 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Braginskii conduction in the unmagnetized limit (B = 0): both channels
+# must decay at the first-principles chi_par k^2 rates (chi_perp =
+# chi_par exactly at x = 0), with the conduction_chi_max soft cap armed
+# BETWEEN the two channel values -- the ion chi lands on the cap (-11%
+# shift the 5% gate must see applied) while the electron chi passes the
+# knee untouched
+add_warpx_test(
+    test_1d_theta_implicit_mhd_braginskii_isolimit  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_braginskii_isolimit  # inputs
+    "analysis_mhd_braginskii_isolimit.py diags/diag000000 diags/diag000010"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # density-keyed vacuum resistivity + resistive backward-Euler centering:
 # one-step transverse-mode decay matches the theta_r-discrete prediction
 # 1/(1+z) (not the trapezoidal value), with no electron heating from the
@@ -831,6 +847,22 @@ add_warpx_test(
     1  # nprocs
     inputs_test_rz_theta_implicit_mhd_radial_contact  # inputs
     "analysis_mhd_radial_contact.py diags/diag000000 diags/diag000100 hlld"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# anisotropic Braginskii spreading: a hot Gaussian electron spot in a
+# strongly magnetized uniform Bz (Omega_e tau_e ~ 9.6e3) spreads along
+# the field at the Braginskii parallel rate (z-variance growth
+# 2 chi_par t) while the r-variance stays frozen (chi_perp/chi_par ~
+# 1.6e-8); 2 ranks split z through the spot so the tangential corner
+# stencil crosses the MPI seam at peak gradient
+add_warpx_test(
+    test_rz_theta_implicit_mhd_braginskii_spreading  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_braginskii_spreading  # inputs
+    "analysis_mhd_braginskii_anisotropy.py diags/diag000000 diags/diag000010"  # analysis
     OFF  # checksum
     OFF  # dependency
 )
