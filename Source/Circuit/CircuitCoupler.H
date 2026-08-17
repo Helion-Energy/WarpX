@@ -117,6 +117,10 @@ public:
     [[nodiscard]] amrex::Real CoilLinkageOr (std::string const& coil_name,
                                              amrex::Real fallback) const;
 
+    /** The compiled engine, if one is attached (engine = external), for
+     * configuration and checkpoint delegation. */
+    [[nodiscard]] ExternalCircuit* Plugin () const { return m_plugin.get(); }
+
 private:
     void MeasureLinkages ();
     void RefreshCircuitFields (amrex::Real t0, amrex::Real t1);

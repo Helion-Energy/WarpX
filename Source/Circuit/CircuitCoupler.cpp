@@ -113,17 +113,47 @@ CircuitCoupler::FireEngine (char const* hook, const bool accept)
     } else if (h == "circuitfinish") {
         m_plugin->FinishStep();
     } else {
+        // Per-coil EMF estimates in volts: the linkage registers hold
+        // lambda_phys * I_ref * n_turns, so the port EMF is
+        // d lambda / dt / (I_ref * n_turns). Unmeasured (probe = none)
+        // coils get zero; engines keep their own held/smoothed EMF.
         std::vector<amrex::Real> eps;
         const amrex::Real dt_sub = m_interval.t1 - m_interval.t0;
         for (int ic = 0; ic < m_coils.size(); ++ic) {
-            if (m_probes[ic] == warpx::circuit::ProbeKind::none) { continue; }
-            const std::string& name = m_coils.coil(ic).name;
-            const amrex::Real lam0 = m_lambda_start.count(name)
-                ? m_lambda_start.at(name) : m_lambda.at(name);
-            eps.push_back(dt_sub > 0.0_rt
-                          ? (m_lambda.at(name) - lam0) / dt_sub : 0.0_rt);
+            const warpx::circuit::Coil& c = m_coils.coil(ic);
+            amrex::Real e = 0.0_rt;
+            if (m_probes[ic] != warpx::circuit::ProbeKind::none &&
+                dt_sub > 0.0_rt && m_lambda.count(c.name) > 0) {
+                const amrex::Real lam0 = m_lambda_start.count(c.name)
+                    ? m_lambda_start.at(c.name) : m_lambda.at(c.name);
+                e = (m_lambda.at(c.name) - lam0) / dt_sub
+                    / (c.I_ref * c.n_turns);
+            }
+            eps.push_back(e);
         }
-        m_plugin->AdvanceInterval(m_interval.t0, m_interval.t1, eps, accept);
+
+        std::vector<amrex::Real> scales;
+        m_plugin->AdvanceInterval(m_interval.t0, m_interval.t1, eps, accept,
+                                  scales);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            static_cast<int>(scales.size()) == m_coils.size(),
+            "ExternalCircuit::AdvanceInterval returned " +
+            std::to_string(scales.size()) + " scales for " +
+            std::to_string(m_coils.size()) + " coils");
+
+        // Realize the engine's scales on the field registers as linear
+        // segments over the interval (the plugin ABI is self-contained:
+        // the engine calls no WarpX symbols). GetScale(t0) of the live
+        // segment is the interval-entry scale and stays fixed across
+        // repeated (corrector) re-pushes of the same interval.
+        auto& ext = *WarpX::GetInstance().get_pointer_HybridPICModel()
+                         ->m_external_vector_potential;
+        for (int ic = 0; ic < m_coils.size(); ++ic) {
+            const std::string& fname = m_coils.coil(ic).field_name;
+            const amrex::Real s_old = ext.GetScale(fname, m_interval.t0);
+            ext.SetScale(fname, s_old, scales[ic],
+                         m_interval.t0, m_interval.t1);
+        }
     }
 }
 

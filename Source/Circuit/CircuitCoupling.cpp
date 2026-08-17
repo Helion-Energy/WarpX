@@ -49,6 +49,22 @@ namespace
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(handle != nullptr,
             "circuit.plugin_library: could not load '" + path + "': " +
             std::string(dlerror()));
+        // The ABI stamp first: a plugin built against a different revision
+        // of ExternalCircuit.H must fail loudly here, not misbehave later.
+        // NOLINTNEXTLINE(performance-no-int-to-ptr)
+        auto version = reinterpret_cast<warpx_external_circuit_abi_version_t>(
+            dlsym(handle, "warpx_external_circuit_abi_version"));
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(version != nullptr,
+            "circuit.plugin_library: '" + path + "' does not export "
+            "warpx_external_circuit_abi_version (required since ABI 2)");
+        const int abi = version();
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            abi == WARPX_EXTERNAL_CIRCUIT_ABI_VERSION,
+            "circuit.plugin_library: '" + path + "' was built against "
+            "ExternalCircuit ABI " + std::to_string(abi) + " but this WarpX "
+            "expects ABI " +
+            std::to_string(WARPX_EXTERNAL_CIRCUIT_ABI_VERSION) +
+            "; rebuild the plugin against the matching headers");
         // NOLINTNEXTLINE(performance-no-int-to-ptr)
         auto factory = reinterpret_cast<warpx_create_external_circuit_t>(
             dlsym(handle, "warpx_create_external_circuit"));
@@ -80,6 +96,7 @@ CircuitCoupling::CircuitCoupling ()
         "circuit.engine must be one of: none, callbacks, external");
     if (m_engine == "external") {
         pp_circuit.get("plugin_library", m_plugin_library);
+        pp_circuit.query("plugin_config", m_plugin_config);
     }
     utils::parser::queryWithParser(pp_circuit,
         "coupling.corrector_iterations", m_coupler_params.corrector_iterations);
@@ -261,6 +278,21 @@ CircuitCoupling::InitData ()
         std::unique_ptr<ExternalCircuit> plugin;
         if (m_engine == "external") {
             plugin = LoadExternalCircuitPlugin(m_plugin_library);
+            // One-time port configuration: coil order fixes the eps/scale
+            // vector indexing of every AdvanceInterval call.
+            std::vector<std::string> names;
+            std::vector<amrex::Real> i_ref;
+            for (int ic = 0; ic < m_coils.size(); ++ic) {
+                names.push_back(m_coils.coil(ic).name);
+                i_ref.push_back(m_coils.coil(ic).I_ref);
+            }
+            plugin->Define(names, i_ref, m_plugin_config);
+            // On restart, restore the engine's own state on every rank
+            // (the engine runs replicated in lockstep, exactly like the
+            // Python-callback engine).
+            if (!m_restart_dir.empty()) {
+                plugin->ReadCheckpoint(m_restart_dir);
+            }
         }
         m_coupler = std::make_unique<CircuitCoupler>(
             m_coils, m_probes, m_coupler_params, std::move(plugin));
@@ -294,6 +326,12 @@ CircuitCoupling::WriteCheckpointData (std::string const& dir) const
         }
     }
     ofs.close();
+
+    // A compiled engine checkpoints its own state (I/O rank only, like the
+    // segments above); the Python engine re-seeds itself on restart.
+    if (m_coupler && m_coupler->Plugin() != nullptr) {
+        m_coupler->Plugin()->WriteCheckpoint(dir);
+    }
 }
 
 void
@@ -324,4 +362,8 @@ CircuitCoupling::ReadCheckpointData (std::string const& dir)
         // field or its python_scale declaration.
         ext.SetScale(name, s_old, s_new, t_old, t_new);
     }
+
+    // A compiled engine's own state is restored in InitData: this runs
+    // from InitFromCheckpoint, before the coupler (and the plugin) exist.
+    m_restart_dir = dir;
 }

@@ -82,6 +82,10 @@ private:
 
     std::string m_engine = "none";          //!< none | callbacks | external
     std::string m_plugin_library;           //!< engine = external only
+    std::string m_plugin_config;            //!< opaque config for the plugin
+    std::string m_restart_dir;              //!< set by ReadCheckpointData; the
+                                            //!< plugin restore is deferred to
+                                            //!< InitData (coupler exists then)
     CircuitCoupler::Params m_coupler_params;
     std::unique_ptr<CircuitCoupler> m_coupler;
 };

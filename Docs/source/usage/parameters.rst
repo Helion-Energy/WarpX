@@ -6197,6 +6197,20 @@ Jacobian probes.
     :optional:
 
     With :pp:param:`circuit.engine` = ``external``, the path of the engine's shared library.
+    The library must export ``warpx_create_external_circuit`` and
+    ``warpx_external_circuit_abi_version`` (checked against the
+    ``WARPX_EXTERNAL_CIRCUIT_ABI_VERSION`` of the running WarpX at load time; see
+    ``Source/Circuit/ExternalCircuit.H``, whose plugin ABI is self-contained: the engine
+    receives per-coil EMF estimates and returns realized coil scales, calling no WarpX
+    symbols).
+
+.. pp:param:: circuit.plugin_config
+    :type: ``str``
+    :optional:
+
+    With :pp:param:`circuit.engine` = ``external``, a free-form string handed to the
+    engine's ``Define`` (typically the path of the engine's own configuration file; its
+    format is entirely the engine's business).
 
 .. pp:param:: circuit.coupling.corrector_iterations
     :type: ``int``
