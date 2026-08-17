@@ -4839,12 +4839,20 @@ Jacobian probes.
     scraper), and faces between two masked cells carry no conduction.
     ``zero_flux`` additionally makes the wall adiabatic: interface faces
     carry exactly zero conductive flux. ``temperature`` makes the wall a
-    Dirichlet reservoir instead: interface faces exchange conductively
-    against ``wall_temperature``, with the masked side of each face
-    presenting the wall specific internal energies (the shaped-wall
-    analog of the ``z_boundary_fluid = wall_temperature`` ghost fill;
-    requires a nonzero thermal diffusivity). The mask is static
-    geometry, so all of this is smooth in the state for the JFNK probes.
+    heat SINK instead: interface faces drain conductively toward
+    ``wall_temperature`` (requires a nonzero thermal diffusivity). The
+    drain is ONE-SIDED — smoothly gated to zero at/below the wall value
+    and fully open above twice it, so the reservoir cools the interior
+    toward T_wall but never heats plasma (or the near-floor dust rim)
+    above it — and ALWAYS free-streaming limited at the wall face
+    (factor = ``conduction_flux_limit_factor`` when set, else 1). A
+    two-sided, un-capped Dirichlet exchange was measured fatal on the
+    FRC formation ladder: the reservoir heats the machine's entire
+    near-floor wall rim on the sub-step cell-diffusion time while the
+    contact hot spots drain at many times the free-streaming flux —
+    conduction-type Newton hostility on every wall face at once. The
+    mask is static geometry, so all of this is smooth in the state for
+    the JFNK probes.
 
 .. pp:param:: implicit_mhd.wall_temperature
     :type: ``float`` (eV)

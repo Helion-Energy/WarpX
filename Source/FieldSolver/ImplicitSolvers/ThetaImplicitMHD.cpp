@@ -3570,6 +3570,23 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
         (m_gamma_i - 1.0_rt);
     const amrex::Real wall_te_kelvin = m_wall_mask.WallTemperature_eV() *
                                        PhysConst::q_e / PhysConst::kb;
+    // The interface exchange is ONE-SIDED (a drain toward T_wall, C^1
+    // gated on the interior specific energy against the wall value) and
+    // ALWAYS free-streaming limited (factor = the global
+    // conduction_flux_limit_factor when set, else 1). A two-sided,
+    // unlimited Dirichlet exchange was measured fatal on the formation
+    // ladder (rr12_S0w, frozen at the 13.3 us contact epoch): the
+    // reservoir HEATED the entire near-floor dust rim of the machine
+    // toward T_wall on the sub-dt cell-diffusion time (median ring Te
+    // 2.5 -> 47 eV, a moving hot boundary layer on every wall face),
+    // while the un-capped drain ran at ~18x the electron free-streaming
+    // flux at the 6 keV contact hot spots -- both are exactly the
+    // conduction-type Newton hostility the TC arms die of, switched on
+    // at every wall face at once.
+    const amrex::Real wall_conduction_limit =
+        (m_conduction_flux_limit_factor > 0.0_rt)
+            ? m_conduction_flux_limit_factor
+            : 1.0_rt;
 #if defined(WARPX_DIM_1D_Z)
     const amrex::Real inverse_normal_size =
         1.0_rt / m_WarpX->Geom(0).CellSize(0);
@@ -3927,18 +3944,23 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 // 0 outside total_energy (where the ion channel is
                 // disallowed anyway). Dirichlet interface faces average
                 // the interior side against the T_wall reservoir.
+                // Interface faces need the face state even when the
+                // parser/limiter path is globally off: the wall drain is
+                // always free-streaming limited.
+                const bool wall_face =
+                    wall_left_masked || wall_right_masked;
                 amrex::Real face_charge_density = 0.0_rt;
                 amrex::Real face_te = 0.0_rt;
                 amrex::Real face_ti = 0.0_rt;
                 amrex::Real face_jmag = 0.0_rt;
-                if (chi_needs_state) {
+                if (chi_needs_state || wall_face) {
                     face_charge_density =
                         std::max(chi_charge_to_mass * face_density,
                                  chi_charge_floor);
                     const amrex::Real inverse_nkb =
                         PhysConst::q_e /
                         (face_charge_density * PhysConst::kb);
-                    if (wall_left_masked || wall_right_masked) {
+                    if (wall_face) {
                         const amrex::Real interior_pe =
                             wall_left_masked ? right.electron_pressure
                                              : left.electron_pressure;
@@ -3980,31 +4002,56 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             ? chi_ion_parser(face_charge_density, face_te,
                                              face_ti, face_jmag, face_time)
                             : chi_ion;
-                    const amrex::Real ion_e_spec_left =
-                        wall_left_masked
-                            ? wall_e_spec_ion
-                            : left.ion_internal / left.safe_density;
-                    const amrex::Real ion_e_spec_right =
-                        wall_right_masked
-                            ? wall_e_spec_ion
-                            : right.ion_internal / right.safe_density;
-                    amrex::Real conductive_flux =
-                        -chi_ion_face * face_density *
-                        (ion_e_spec_right - ion_e_spec_left) *
-                        inverse_normal_size;
-                    if (conduction_limit > 0.0_rt) {
-                        // free-streaming cap q_fs = n kB Ti v_ti,
-                        // v_ti = sqrt(kB Ti/m_i): the smooth harmonic
-                        // form q/(1 + |q|/(f q_fs)), no branches
+                    amrex::Real conductive_flux;
+                    if (wall_face) {
+                        // One-sided rectified wall drain (see the host
+                        // constants): zero at/below the wall value, C^1
+                        // full above twice it -- the reservoir cools the
+                        // interior toward T_wall but never heats it.
+                        const amrex::Real interior_e_spec =
+                            wall_left_masked
+                                ? right.ion_internal / right.safe_density
+                                : left.ion_internal / left.safe_density;
+                        amrex::Real drain =
+                            chi_ion_face * face_density *
+                            (interior_e_spec - wall_e_spec_ion) *
+                            theta_implicit_mhd::floor_outflow_limiter(
+                                interior_e_spec, wall_e_spec_ion) *
+                            inverse_normal_size;
+                        // free-streaming cap, ALWAYS on at the wall face
                         const amrex::Real thermal_speed = std::sqrt(
                             PhysConst::kb * face_ti / conduction_ion_mass);
                         const amrex::Real free_streaming_flux =
                             face_charge_density / PhysConst::q_e *
                             PhysConst::kb * face_ti * thermal_speed;
-                        conductive_flux /=
-                            1.0_rt + std::abs(conductive_flux) /
-                                         (conduction_limit *
-                                          free_streaming_flux);
+                        drain /= 1.0_rt +
+                                 std::abs(drain) / (wall_conduction_limit *
+                                                    free_streaming_flux);
+                        // +n flux toward a right-side wall, -n toward a
+                        // left-side wall (matches the two-sided sign).
+                        conductive_flux =
+                            wall_right_masked ? drain : -drain;
+                    } else {
+                        conductive_flux =
+                            -chi_ion_face * face_density *
+                            (right.ion_internal / right.safe_density -
+                             left.ion_internal / left.safe_density) *
+                            inverse_normal_size;
+                        if (conduction_limit > 0.0_rt) {
+                            // free-streaming cap q_fs = n kB Ti v_ti,
+                            // v_ti = sqrt(kB Ti/m_i): the smooth harmonic
+                            // form q/(1 + |q|/(f q_fs)), no branches
+                            const amrex::Real thermal_speed = std::sqrt(
+                                PhysConst::kb * face_ti /
+                                conduction_ion_mass);
+                            const amrex::Real free_streaming_flux =
+                                face_charge_density / PhysConst::q_e *
+                                PhysConst::kb * face_ti * thermal_speed;
+                            conductive_flux /=
+                                1.0_rt + std::abs(conductive_flux) /
+                                             (conduction_limit *
+                                              free_streaming_flux);
+                        }
                     }
                     flux.ion_energy += conductive_flux;
                 }
@@ -4017,32 +4064,53 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             : chi_electron;
                     const amrex::Real inverse_gamma_e_minus_one =
                         1.0_rt / (parameters.gamma_e - 1.0_rt);
-                    const amrex::Real electron_e_spec_left =
-                        wall_left_masked
-                            ? wall_e_spec_electron
-                            : left.electron_pressure *
-                                  inverse_gamma_e_minus_one /
-                                  left.safe_density;
-                    const amrex::Real electron_e_spec_right =
-                        wall_right_masked
-                            ? wall_e_spec_electron
-                            : right.electron_pressure *
-                                  inverse_gamma_e_minus_one /
-                                  right.safe_density;
-                    amrex::Real conductive_flux =
-                        -chi_electron_face * face_density *
-                        (electron_e_spec_right - electron_e_spec_left) *
-                        inverse_normal_size;
-                    if (conduction_limit > 0.0_rt) {
+                    amrex::Real conductive_flux;
+                    if (wall_face) {
+                        // One-sided rectified wall drain (see the ion
+                        // channel above).
+                        const auto& interior =
+                            wall_left_masked ? right : left;
+                        const amrex::Real interior_e_spec =
+                            interior.electron_pressure *
+                            inverse_gamma_e_minus_one /
+                            interior.safe_density;
+                        amrex::Real drain =
+                            chi_electron_face * face_density *
+                            (interior_e_spec - wall_e_spec_electron) *
+                            theta_implicit_mhd::floor_outflow_limiter(
+                                interior_e_spec, wall_e_spec_electron) *
+                            inverse_normal_size;
                         const amrex::Real thermal_speed = std::sqrt(
                             PhysConst::kb * face_te / PhysConst::m_e);
                         const amrex::Real free_streaming_flux =
                             face_charge_density / PhysConst::q_e *
                             PhysConst::kb * face_te * thermal_speed;
-                        conductive_flux /=
-                            1.0_rt + std::abs(conductive_flux) /
-                                         (conduction_limit *
-                                          free_streaming_flux);
+                        drain /= 1.0_rt +
+                                 std::abs(drain) / (wall_conduction_limit *
+                                                    free_streaming_flux);
+                        conductive_flux =
+                            wall_right_masked ? drain : -drain;
+                    } else {
+                        conductive_flux =
+                            -chi_electron_face * face_density *
+                            (right.electron_pressure *
+                                 inverse_gamma_e_minus_one /
+                                 right.safe_density -
+                             left.electron_pressure *
+                                 inverse_gamma_e_minus_one /
+                                 left.safe_density) *
+                            inverse_normal_size;
+                        if (conduction_limit > 0.0_rt) {
+                            const amrex::Real thermal_speed = std::sqrt(
+                                PhysConst::kb * face_te / PhysConst::m_e);
+                            const amrex::Real free_streaming_flux =
+                                face_charge_density / PhysConst::q_e *
+                                PhysConst::kb * face_te * thermal_speed;
+                            conductive_flux /=
+                                1.0_rt + std::abs(conductive_flux) /
+                                             (conduction_limit *
+                                              free_streaming_flux);
+                        }
                     }
                     flux.electron_energy += conductive_flux;
                 }

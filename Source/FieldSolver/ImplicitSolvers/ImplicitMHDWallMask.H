@@ -85,11 +85,14 @@
  *     metal).
  *   * wall_thermal_bc = zero_flux: additionally, the interface faces
  *     carry exactly zero conductive flux (adiabatic wall).
- *   * wall_thermal_bc = temperature: the interface faces exchange
- *     conductively against a T_wall reservoir (wall_temperature, eV) --
- *     the masked side of the face presents the wall specific internal
- *     energies, the EB analog of the z_boundary_fluid =
- *     wall_temperature ghost fill.
+ *   * wall_thermal_bc = temperature: the interface faces DRAIN
+ *     conductively toward a T_wall reservoir (wall_temperature, eV).
+ *     The drain is one-sided (C^1 gated off at/below the wall value:
+ *     the reservoir cools the interior toward T_wall, never heats it)
+ *     and always free-streaming limited at the wall face -- a
+ *     two-sided, un-capped exchange heats the machine's entire
+ *     near-floor wall rim on the sub-step cell-diffusion time and was
+ *     measured fatal on the formation ladder (rr12_S0w).
  *
  *   The default none keeps wall_model bit-identical to the
  *   electromagnetic-only wall.

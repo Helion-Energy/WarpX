@@ -2343,9 +2343,13 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         and the interface drains the interior one-sidedly — the
         embedded-boundary scraper analog) and drops conduction between
         masked cells. "zero_flux" additionally insulates the interface
-        (adiabatic wall); "temperature" exchanges conductively against
-        the wall_temperature reservoir instead (requires a nonzero
-        thermal diffusivity).
+        (adiabatic wall); "temperature" drains conductively toward the
+        wall_temperature reservoir instead (requires a nonzero thermal
+        diffusivity). The drain is one-sided (smoothly gated off
+        at/below the wall value: the reservoir cools the interior
+        toward T_wall, never heats it) and always free-streaming
+        limited at the wall face (factor = conduction_flux_limit_factor
+        when set, else 1).
 
     wall_temperature: float, optional
         Wall reservoir temperature [eV] of
