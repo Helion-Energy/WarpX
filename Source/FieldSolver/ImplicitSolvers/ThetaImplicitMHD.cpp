@@ -3752,20 +3752,27 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 } else {
                     donor_il = i; donor_jl = j; donor_kl = k;
                 }
-                // Absorb image (the r_max absorbing-wall recipe applied
-                // per stair face): the masked side presents the INTERIOR
-                // state with its normal momentum C-infinity rectified to
-                // the INTO-WALL part -- the stair admits incident plasma
-                // at its signal-limited rate and never feeds back. A
+                // Absorbing DIELECTRIC image (the r_max absorbing-wall
+                // idea applied per stair face, with a no-injection
+                // amendment): the masked side presents the INTERIOR
+                // state with its normal momentum replaced by the
+                // INTO-WALL smooth absolute value m |m|/(|m|+...) --
+                // C-infinity, exactly zero at stagnation. On approach
+                // the image matches the interior (the stair admits
+                // incident plasma at its signal-limited rate: a
                 // frozen-dust image instead stagnates a supersonic
                 // contact jet against a rigid corner, converting ram
-                // into a keV-scale E_i pocket at the stair steps (the
-                // rr12 v2 S0w corpse: 116 keV one cell inside the cone
-                // step corner at first wall contact). E_i is copied
-                // verbatim (the r_max absorber's ghost carries the
-                // incident kinetic energy unadjusted, its production-
-                // proven contract); the thermal reservoir acts ONLY
-                // through the conduction drain below.
+                // into a keV-scale E_i pocket at the stair steps -- the
+                // rr12 v2 S0w corpse, 116 keV one cell inside the cone
+                // step corner at first wall contact). On RETREAT the
+                // image MIRRORS the interior, so the face flux closes:
+                // a dielectric machine wall supplies no plasma, ever --
+                // the held-ghost exhaust recipe would inject at half
+                // the retreat rate through the central average. E_i is
+                // copied verbatim (the r_max absorber's ghost carries
+                // the incident kinetic energy unadjusted); the thermal
+                // reservoir acts ONLY through the conduction drain
+                // below.
                 auto& image = wall_right_masked ? right : left;
                 const auto& interior_state =
                     wall_right_masked ? left : right;
@@ -3781,12 +3788,13 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         interior_state.safe_density);
                 const amrex::Real into_wall_sign =
                     wall_right_masked ? 1.0_rt : -1.0_rt;
+                // m * smooth_sign(m, w) is the C-infinity |m| with an
+                // exact zero at m = 0 (no spurious O(w) suction on
+                // quiescent faces).
                 const amrex::Real normal_momentum =
-                    interior_state.momentum[normal] * 0.5_rt *
-                    (1.0_rt +
-                     theta_implicit_mhd::smooth_sign(
-                         into_wall_sign * interior_state.momentum[normal],
-                         rectifier_width));
+                    into_wall_sign * interior_state.momentum[normal] *
+                    theta_implicit_mhd::smooth_sign(
+                        interior_state.momentum[normal], rectifier_width);
                 image.momentum[normal] = normal_momentum;
                 image.ion_velocity[normal] =
                     normal_momentum / image.safe_density;
