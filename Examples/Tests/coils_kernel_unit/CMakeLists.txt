@@ -5,6 +5,17 @@
 list(GET WarpX_DIMS 0 _coils_unit_dim)
 warpx_set_suffix_dims(_coils_unit_sd ${_coils_unit_dim})
 
+# On GPU builds the AMREX_GPU_HOST_DEVICE markers in RingKernel.H expand
+# to CUDA/HIP qualifiers, so these host test sources must be compiled by
+# the device-capable compiler.
+if(WarpX_COMPUTE STREQUAL CUDA)
+    set_source_files_properties(coils_unit_kernel.cpp coils_unit_L_disc.cpp
+        PROPERTIES LANGUAGE CUDA)
+elseif(WarpX_COMPUTE STREQUAL HIP)
+    set_source_files_properties(coils_unit_kernel.cpp coils_unit_L_disc.cpp
+        PROPERTIES LANGUAGE HIP)
+endif()
+
 add_executable(coils_unit_kernel coils_unit_kernel.cpp)
 target_link_libraries(coils_unit_kernel PRIVATE ablastr_${_coils_unit_sd})
 
