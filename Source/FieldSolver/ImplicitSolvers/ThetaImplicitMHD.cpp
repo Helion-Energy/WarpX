@@ -390,16 +390,20 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         m_halo_pedestal_fraction >= 0.0_rt && m_halo_pedestal_fraction < 1.0_rt,
         "implicit_mhd.halo_pedestal_fraction must be in [0, 1)");
     if (m_halo_pedestal_fraction > 0.0_rt) {
-        // The pedestal band is held by the donor drain gates of the
-        // Riemann fluxes; the centered and central fluxes have no
-        // upwind donor structure to gate, so the pedestal would
-        // degenerate to a bare per-step mass injection.
+        // The pedestal band is held by the donor drain gates, which the
+        // conservative-form recast applies to EVERY face flux -- the
+        // gate machinery itself imposes the C-infinity smoothed donor
+        // selection post-flux, so the central flux is gated exactly
+        // like the Riemann fluxes (the historical Riemann-only assert
+        // predated the shared recast kernel; the central invariance is
+        // gated by test_1d_theta_implicit_mhd_halo_pedestal_central).
+        // Only the legacy non-recast centered flux lacks the gates.
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            m_fluid_flux != "centered" && m_fluid_flux != "central",
-            "implicit_mhd.halo_pedestal_fraction requires a Riemann fluid "
-            "flux (rusanov, hllc, or hlld): the pedestal band is held by "
-            "the donor drain gates of the Riemann fluxes, which the "
-            "centered and central fluxes do not have");
+            m_fluid_flux != "centered",
+            "implicit_mhd.halo_pedestal_fraction requires a recast fluid "
+            "flux (central, rusanov, hllc, or hlld): the pedestal band is "
+            "held by the recast face-flux donor drain gates, which the "
+            "legacy centered flux does not have");
         // "Well above": the pedestal must displace the halo operating
         // point off the Newton admissibility bound, so the pedestal base
         // (its value when the reference density is the peak) must exceed

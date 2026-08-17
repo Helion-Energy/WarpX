@@ -215,6 +215,19 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# the same pedestal invariance under the CENTRAL recast flux: the donor
+# drain gates are shared by every recast face flux, so the pedestal band
+# must be held identically (gates the lifted Riemann-only assert)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_pedestal_central  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_halo_pedestal implicit_mhd.fluid_flux=central implicit_mhd.viscosity=1.0"  # inputs
+    "analysis_mhd_halo_pedestal.py diags/diag000000 diags/diag000005"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # Calibrated pedestal-band velocity relaxation: on a static tangential-
 # slip contact (identically zero HLLD fluxes) the drag is the only
 # dynamics -- the band decays at the exact theta-discretized rate with
