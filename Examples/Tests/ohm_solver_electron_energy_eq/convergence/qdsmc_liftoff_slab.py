@@ -324,6 +324,36 @@ parser.add_argument(
     "comp_band -0.13 J at ignition)",
 )
 parser.add_argument(
+    "--chi-vac",
+    type=float,
+    default=0.0,
+    help="halo/band conductivity boost [m^2/s]: isotropic chi -> chi_vac in "
+    "a smooth exp(-(n/4n_floor)^2) window around the density floor "
+    "(MHD-halo-port experiment). 0 = off (parsers unchanged)",
+)
+parser.add_argument(
+    "--band-drain-rate",
+    type=float,
+    default=0.0,
+    help="band-scoped rectified Te drain rate [1/s] "
+    "(hybrid_pic_model.qdsmc_band_drain_rate; MHD halo-relaxation port). "
+    "0 = off",
+)
+parser.add_argument(
+    "--band-drain-te",
+    type=float,
+    default=-1.0,
+    help="band drain target Te [eV] (hybrid_pic_model.qdsmc_band_drain_Te)",
+)
+parser.add_argument(
+    "--band-drain-nhi",
+    type=float,
+    default=-1.0,
+    help="band window top in units of n_floor "
+    "(hybrid_pic_model.qdsmc_band_drain_n_hi_factor); <0 = C++ default 1.25. "
+    "The liftoff ignition band is (1,4)x floor -- use ~4 here",
+)
+parser.add_argument(
     "--ve-midpoint",
     type=int,
     choices=[0, 1],
@@ -635,14 +665,26 @@ else:
     pywarpx.hybridpicmodel.qdsmc_conduction_eb_bc = "adiabatic"
 if args.kappa == "spitzer":
     kappa_c_eff = args.kappa_mult * KAPPA_C
+    # Optional halo/band conductivity boost (MHD-halo-port experiment):
+    # isotropic chi -> chi_vac in a smooth exp(-(n/(4 n_floor))^2) window
+    # around the floor band; 0 = off (parser strings unchanged exactly).
+    boost = ""
+    if args.chi_vac > 0.0:
+        kvac = 1.5 * constants.kb * args.chi_vac
+        boost = f" + {kvac:.6e}*n*exp(-(n/{4.0 * n_floor:.6e})**2)"
     pywarpx.hybridpicmodel.__setattr__(
-        "qdsmc_kappa_par(n,Te,t)", f"{kappa_c_eff:.6e}*Te**2.5"
+        "qdsmc_kappa_par(n,Te,t)", f"{kappa_c_eff:.6e}*Te**2.5" + boost
     )
-    if args.kappa_perp_frac > 0.0:
+    if args.kappa_perp_frac > 0.0 or boost:
         pywarpx.hybridpicmodel.__setattr__(
             "qdsmc_kappa_perp(n,Te,t)",
-            f"{args.kappa_perp_frac * kappa_c_eff:.6e}*Te**2.5",
+            f"{args.kappa_perp_frac * kappa_c_eff:.6e}*Te**2.5" + boost,
         )
+if args.band_drain_rate > 0.0:
+    pywarpx.hybridpicmodel.qdsmc_band_drain_rate = args.band_drain_rate
+    pywarpx.hybridpicmodel.qdsmc_band_drain_Te = args.band_drain_te
+    if args.band_drain_nhi > 0.0:
+        pywarpx.hybridpicmodel.qdsmc_band_drain_n_hi_factor = args.band_drain_nhi
 if args.joule_redirect_te >= 0.0:
     pywarpx.hybridpicmodel.joule_redirect_Te_threshold = args.joule_redirect_te
     if args.relax_rate == "off":
