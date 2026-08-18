@@ -351,6 +351,21 @@ add_warpx_test(
 # live Spitzer chi_e(Te) on the parser Te symbol: a temperature ripple's
 # diffusive relaxation speeds up by (Te/Te0)^2.5 as uniform Joule
 # heating raises the base Te (the conduction analog of spitzer_decay)
+# the same Spitzer conduction physics with the coefficient inputs
+# FROZEN at the step-old state (conduction_coefficient_state =
+# step_old): the chi(T) coefficient lags one step, which the same
+# analysis tolerances must absorb -- gates the frozen-coefficient
+# option's physics fidelity
+add_warpx_test(
+    test_1d_theta_implicit_mhd_spitzer_conduction_frozen_coeff  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_spitzer_conduction implicit_mhd.conduction_coefficient_state=step_old"  # inputs
+    "analysis_mhd_spitzer_conduction.py diags"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_spitzer_conduction  # name
     1  # dims

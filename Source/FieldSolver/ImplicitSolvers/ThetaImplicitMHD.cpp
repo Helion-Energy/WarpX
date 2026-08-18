@@ -201,6 +201,20 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     }
     utils::parser::queryWithParser(pp, "conduction_flux_limit_factor",
                                    m_conduction_flux_limit_factor);
+    {
+        std::string conduction_coefficient_state = "theta";
+        pp.query("conduction_coefficient_state",
+                 conduction_coefficient_state);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            conduction_coefficient_state == "theta" ||
+                conduction_coefficient_state == "step_old",
+            "implicit_mhd.conduction_coefficient_state must be 'theta' "
+            "(coefficients live at the theta stage, the default) or "
+            "'step_old' (coefficients frozen at the step-old state, a "
+            "per-solve constant -- Newton sees linear diffusion)");
+        m_conduction_coefficient_step_old =
+            (conduction_coefficient_state == "step_old");
+    }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_conduction_flux_limit_factor >= 0.0_rt,
         "implicit_mhd.conduction_flux_limit_factor cannot be negative "
@@ -1658,6 +1672,10 @@ void ThetaImplicitMHD::PrintParameters () const
                                  std::to_string(
                                      m_conduction_flux_limit_factor)
                            : std::string("OFF (factor 0)"))
+                   << "\n"
+                   << "Conduction coefficient state:  "
+                   << (m_conduction_coefficient_step_old ? "step_old"
+                                                         : "theta")
                    << "\n"
                    << "Thermal conduction model:      "
                    << m_thermal_conduction_model
@@ -3622,6 +3640,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
         PhysConst::q_e / m_ion_charge_to_mass;
     const bool chi_total_energy = (m_ion_closure == "total_energy");
     const amrex::Real face_time = a_time;
+    const bool chi_coeff_old = m_conduction_coefficient_step_old;
     const bool add_conduction =
         braginskii ||
         (chi_ion > 0.0_rt || chi_electron > 0.0_rt || chi_any_parser);
@@ -4175,6 +4194,68 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 && !(reflect_wall && i == radial_wall_face)
 #endif
             ) {
+                // Frozen-coefficient option (implicit_mhd.
+                // conduction_coefficient_state = step_old): the chi
+                // COEFFICIENT inputs -- the rho_f multiplier, the face
+                // charge density, and the face temperatures feeding the
+                // parser diffusivities, the Braginskii coefficients,
+                // and the free-streaming caps -- come from the STEP-OLD
+                // fields, per-solve constants like the rho_old-keyed
+                // source masks: Newton then sees LINEAR diffusion in
+                // the energies. Probe-measured motivation: every
+                // Newton-hostile conduction incident on the formation
+                // ladder is a state-dependent chi inside the residual
+                // (30 vs 322 steps/min in the isolation probes);
+                // constant coefficients are cheap at any amplitude.
+                // The FLUX keeps the live theta-state specific-energy
+                // gradient; the parser J input stays live (theta j_cc,
+                // no old-current register). Hard floors are fine here:
+                // frozen inputs are constants w.r.t. the Newton state,
+                // so residual smoothness is unaffected. Default theta
+                // is bit-identical.
+                amrex::Real coeff_density_left = left.density;
+                amrex::Real coeff_density_right = right.density;
+                amrex::Real coeff_pe_left = left.electron_pressure;
+                amrex::Real coeff_pe_right = right.electron_pressure;
+                amrex::Real coeff_pi_left = left.ion_pressure;
+                amrex::Real coeff_pi_right = right.ion_pressure;
+                if (chi_coeff_old) {
+                    coeff_density_left = rho_old(il, jl, kl);
+                    coeff_density_right = rho_old(i, j, k);
+                    coeff_pe_left = std::max(
+                        (parameters.gamma_e - 1.0_rt) *
+                            energy_old(il, jl, kl),
+                        parameters.electron_pressure_floor);
+                    coeff_pe_right = std::max(
+                        (parameters.gamma_e - 1.0_rt) *
+                            energy_old(i, j, k),
+                        parameters.electron_pressure_floor);
+                    if (chi_total_energy) {
+                        amrex::Real ke_left = 0.0_rt;
+                        amrex::Real ke_right = 0.0_rt;
+                        for (int component = 0; component < 3;
+                             ++component) {
+                            ke_left += mom_old(il, jl, kl, component) *
+                                       mom_old(il, jl, kl, component);
+                            ke_right += mom_old(i, j, k, component) *
+                                        mom_old(i, j, k, component);
+                        }
+                        ke_left *= 0.5_rt /
+                                   std::max(rho_old(il, jl, kl),
+                                            parameters.density_floor);
+                        ke_right *= 0.5_rt /
+                                    std::max(rho_old(i, j, k),
+                                             parameters.density_floor);
+                        coeff_pi_left = std::max(
+                            (parameters.gamma_i - 1.0_rt) *
+                                (ion_e_old(il, jl, kl) - ke_left),
+                            parameters.ion_pressure_floor);
+                        coeff_pi_right = std::max(
+                            (parameters.gamma_i - 1.0_rt) *
+                                (ion_e_old(i, j, k) - ke_right),
+                            parameters.ion_pressure_floor);
+                    }
+                }
                 // Inside this block a masked side implies a Dirichlet
                 // interface face (interior metal and zero_flux faces
                 // were skipped above): the masked side presents the
@@ -4183,10 +4264,11 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 // the conductor's near-floor fill must not choke it.
                 const amrex::Real face_density =
                     wall_left_masked
-                        ? right.density
+                        ? coeff_density_right
                         : (wall_right_masked
-                               ? left.density
-                               : 0.5_rt * (left.density + right.density));
+                               ? coeff_density_left
+                               : 0.5_rt * (coeff_density_left +
+                                           coeff_density_right));
                 // Donor-averaged face state for the parser diffusivities
                 // and the free-streaming limiter (unused, and skipped, on
                 // the constant/limiter-off path). Temperatures are the
@@ -4212,26 +4294,25 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         (face_charge_density * PhysConst::kb);
                     if (wall_face) {
                         const amrex::Real interior_pe =
-                            wall_left_masked ? right.electron_pressure
-                                             : left.electron_pressure;
+                            wall_left_masked ? coeff_pe_right
+                                             : coeff_pe_left;
                         face_te = 0.5_rt * (interior_pe * inverse_nkb +
                                             wall_te_kelvin);
                         if (chi_total_energy) {
                             const amrex::Real interior_pi =
-                                wall_left_masked ? right.ion_pressure
-                                                 : left.ion_pressure;
+                                wall_left_masked ? coeff_pi_right
+                                                 : coeff_pi_left;
                             face_ti = 0.5_rt * (interior_pi * inverse_nkb +
                                                 wall_te_kelvin);
                         }
                     } else {
                         face_te = 0.5_rt *
-                                  (left.electron_pressure +
-                                   right.electron_pressure) *
+                                  (coeff_pe_left + coeff_pe_right) *
                                   inverse_nkb;
                         if (chi_total_energy) {
                             face_ti =
                                 0.5_rt *
-                                (left.ion_pressure + right.ion_pressure) *
+                                (coeff_pi_left + coeff_pi_right) *
                                 inverse_nkb;
                         }
                     }
@@ -7075,6 +7156,19 @@ void ThetaImplicitMHD::RefreshHaloPedestal ()
     const amrex::Real ion_internal_pedestal = m_halo_pedestal_ion_internal;
     const amrex::Real ion_parallel_pedestal = m_halo_pedestal_ion_parallel;
     const amrex::Real ion_perp_pedestal = m_halo_pedestal_ion_perp;
+    // The rigid-conductor band is NOT fluid: under an active thermal
+    // wall the masked cells keep their frozen load state, so the raise
+    // must skip them -- without this the refresh repopulates the band
+    // onto the peak-keyed pedestal image every step (measured on the
+    // recalibrated formation ladder: the band tracked ~36 eV instead
+    // of its load value; bounded but a contract violation).
+    const bool wall_freeze = m_wall_mask.GetThermalBC() !=
+                             ImplicitMHDWallMask::ThermalBC::none;
+    const int* const AMREX_RESTRICT wall_fm =
+        wall_freeze ? m_wall_mask.FirstMaskedCellCentered() : nullptr;
+    const int wall_mz_lo = -m_wall_mask.GhostCells();
+    const int wall_mz_hi =
+        m_wall_mask.AxialCells() - 1 + m_wall_mask.GhostCells();
     for (amrex::MFIter mfi(density_block); mfi.isValid(); ++mfi) {
         const amrex::Box box = mfi.validbox();
         const auto rho = density_block.array(mfi);
@@ -7090,6 +7184,13 @@ void ThetaImplicitMHD::RefreshHaloPedestal ()
                                   ? ion_perp_block->array(mfi)
                                   : amrex::Array4<amrex::Real>{};
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            if (wall_freeze) {
+                const int jz = std::max(wall_mz_lo,
+                                        std::min(wall_mz_hi, j));
+                if (i >= wall_fm[jz]) {
+                    return;
+                }
+            }
             if (rho(i, j, k) >= pedestal) {
                 return;
             }

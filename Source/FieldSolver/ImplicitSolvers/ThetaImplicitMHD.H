@@ -713,6 +713,13 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // applies the smooth harmonic cap with no branches. NEVER silent:
     // the factor is printed in the solver banner.
     amrex::Real m_conduction_flux_limit_factor = 0.0;
+    /** conduction_coefficient_state = step_old: the conduction
+     * COEFFICIENT inputs (face rho_f, charge density, temperatures --
+     * feeding the parser chi, the Braginskii coefficients, and the
+     * free-streaming caps) are evaluated from the step-old fields,
+     * per-solve constants, so Newton sees linear diffusion in the
+     * energies. The flux keeps the live theta-state gradient. */
+    bool m_conduction_coefficient_step_old = false;
     // Thermal-conduction closure of the conductive face fluxes
     // (implicit_mhd.thermal_conduction_model): "isotropic" (default;
     // bit-identical to the scalar thermal_diffusivity_* path) or

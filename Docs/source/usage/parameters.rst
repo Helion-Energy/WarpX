@@ -4926,6 +4926,25 @@ Jacobian probes.
     eV; an error in the other modes). Applied to both the electron and
     ion conduction channels.
 
+.. pp:param:: implicit_mhd.conduction_coefficient_state
+    :type: ``string``
+    :default: ``theta``
+
+    Evaluation state of the thermal-conduction COEFFICIENT inputs (the
+    face :math:`\rho_f` multiplier, charge density, and temperatures
+    feeding the parser diffusivities, the Braginskii coefficients, and
+    the free-streaming caps). ``theta`` evaluates them at the theta
+    stage inside the residual (bit-identical default). ``step_old``
+    freezes them at the step-old fields — per-solve constants, so
+    Newton sees LINEAR diffusion in the energies while the flux keeps
+    the live theta-state specific-energy gradient. Isolation probes on
+    the formation ladder measured state-dependent diffusivities inside
+    the residual as the dominant Newton-hostility class (an ~11x
+    step-rate cost by themselves); freezing the coefficients removes
+    it at the price of a one-step lag on the coefficient, irrelevant
+    for subgrid transport models. The parser J input stays live (there
+    is no step-old current register).
+
 .. pp:param:: implicit_mhd.wall_ledger_file
     :type: ``string``
 

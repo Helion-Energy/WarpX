@@ -2396,6 +2396,22 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         heat-load instrument. Rows of "step mass energy" on the
         absorb_ledger_interval cadence.
 
+    conduction_coefficient_state: {"theta", "step_old"}, optional
+        Evaluation state of the conduction COEFFICIENT inputs (face
+        rho_f, charge density, and temperatures feeding the parser
+        diffusivities, the Braginskii coefficients, and the
+        free-streaming caps). "theta" (default) evaluates them at the
+        theta stage inside the residual — bit-identical to the legacy
+        behavior. "step_old" freezes them at the step-old fields, a
+        per-solve constant: Newton then sees linear diffusion in the
+        energies while the flux keeps the live theta-state gradient.
+        Isolation-probe measured: state-dependent diffusivities inside
+        the residual are the dominant Newton-hostility class (30 vs
+        322 steps/min); frozen coefficients buy them back at
+        constant-chi prices, with a one-step lag on the coefficient
+        (irrelevant for subgrid transport models). The parser J input
+        stays live.
+
     absorb_ledger_interval: integer, optional
         Print interval (steps) of the absorbing-wall ledger counters
         (cumulative absorbed mass [kg] and fluid energy [J]); 0 disables
@@ -2615,6 +2631,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         wall_thermal_bc=None,
         wall_temperature=None,
         wall_ledger_file=None,
+        conduction_coefficient_state=None,
         absorb_ledger_interval=None,
         absorb_ledger_file=None,
         hllc_signal_closure=None,
@@ -2683,6 +2700,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.wall_thermal_bc = wall_thermal_bc
         self.wall_temperature = wall_temperature
         self.wall_ledger_file = wall_ledger_file
+        self.conduction_coefficient_state = conduction_coefficient_state
         self.absorb_ledger_interval = absorb_ledger_interval
         self.absorb_ledger_file = absorb_ledger_file
         self.hllc_signal_closure = hllc_signal_closure
@@ -2777,6 +2795,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.wall_thermal_bc = self.wall_thermal_bc
         implicit_mhd.wall_temperature = self.wall_temperature
         implicit_mhd.wall_ledger_file = self.wall_ledger_file
+        implicit_mhd.conduction_coefficient_state = (
+            self.conduction_coefficient_state)
         implicit_mhd.absorb_ledger_interval = self.absorb_ledger_interval
         implicit_mhd.absorb_ledger_file = self.absorb_ledger_file
         implicit_mhd.hllc_signal_closure = self.hllc_signal_closure
