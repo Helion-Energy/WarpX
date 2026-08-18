@@ -1341,8 +1341,11 @@ hlld_flux (const CellState& left, const CellState& right,
  *   the corner E_theta reduces to the weighted average of the four ideal
  *   EMF states (central, no field dissipation).
  * The CGL channels are not populated (the input parser rejects
- * fluid_flux = central with ion_closure = cgl), and u_e = u_i is assumed
- * for the electron channels (Define() asserts no Hall term).
+ * fluid_flux = central with ion_closure = cgl). The electron channels
+ * (U_e advection and the div(u_e) velocity flux) use the electron
+ * velocity, which carries -J/(rho_q) under the Hall term: central is the
+ * Hall-capable recast flux, the induction channels staying in the ION
+ * frame with the edge Hall EMF added by the Ohm assembly.
  */
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE FaceFlux
 central_flux (const CellState& left, const CellState& right,
@@ -1396,8 +1399,12 @@ central_flux (const CellState& left, const CellState& right,
                (right.momentum[normal_direction] *
                     right.ion_velocity[tangent2] -
                 bn * bt2_right));
-    flux.electron_energy = 0.5 * (left.electron_energy * u_left +
-                                  right.electron_energy * u_right);
+    // Electron thermal energy advects with the ELECTRON velocity (Hall:
+    // u_e = u_i - J/(rho_q); reduces bitwise to the ion velocity when the
+    // Hall term is off), consistent with the div(u_e) pressure work below.
+    flux.electron_energy =
+        0.5 * (left.electron_energy * left.electron_velocity_normal +
+               right.electron_energy * right.electron_velocity_normal);
     flux.ion_energy = 0.5 * (u_left * (left.ion_energy + p_gas_left) +
                              u_right * (right.ion_energy + p_gas_right));
     flux.electron_velocity =

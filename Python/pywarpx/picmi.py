@@ -2203,14 +2203,17 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         supplies the fluid fluxes, the Maxwell stress, and the ideal EMF
         (corner UCT-HLL E_theta in RZ); E is the derived Ohm's-law
         quantity -u x B + eta J - eta_H laplacian(J). Requires no Hall
-        term, no electron-pressure Ohm term, and no preconditioner.
+        term and no electron-pressure Ohm term.
         "central" is the same recast with a Chacon-style central
         conservative flux (the zero-dissipation limit of the hlld fan; a
         few flops per face, smoother residuals for GMRES) in place of the
         Riemann solver; it requires a positive viscosity for nonlinear
-        stability and shares the hlld recast constraints (1D/RZ, no Hall
-        term, no electron-pressure Ohm term; cgl and the halo pedestal
-        are not supported).
+        stability and shares the hlld recast constraints (1D/RZ, no
+        electron-pressure Ohm term; cgl is not supported). Unlike hlld,
+        "central" supports Hall MHD (include_hall_term on the
+        HybridPICSolver): the solver-assembled Ohm's law gains the edge
+        Hall EMF (J x B)/rho_q, converting the ion-frame ideal EMF to
+        the electron frame.
 
     viscosity: float, default=0 (off)
         Explicit ion kinematic viscosity nu_i in m^2/s of the recast face

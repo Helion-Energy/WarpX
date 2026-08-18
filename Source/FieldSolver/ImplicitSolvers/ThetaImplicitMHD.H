@@ -222,6 +222,9 @@ class ThetaImplicitMHD final : public ImplicitSolver
 
     [[nodiscard]] bool GetMHDIncludeHallTermForPC () const override;
 
+    [[nodiscard]] amrex::Array<const amrex::MultiFab*, 3>
+    GetMHDHallCoefficientEdgeForPC () const override;
+
     [[nodiscard]] bool
     GetMHDEvolveIonFluidForPC () const override
     {
@@ -302,6 +305,17 @@ class ThetaImplicitMHD final : public ImplicitSolver
         "implicit_mhd_hyper_resistivity_e1";
     inline static constexpr char HyperResistivityE2Name[] =
         "implicit_mhd_hyper_resistivity_e2";
+    // Frozen Hall coefficient vector Hb = B/rho_q (three physical
+    // components) on the same electric-field staggerings: the
+    // preconditioner's whistler-rotation coefficients (zeroed and unused
+    // when the Ohm law runs without the Hall term). In 1D the transverse
+    // components share the z-nodal register.
+    inline static constexpr char HallCoefficientE0Name[] =
+        "implicit_mhd_hall_coefficient_e0";
+    inline static constexpr char HallCoefficientE1Name[] =
+        "implicit_mhd_hall_coefficient_e1";
+    inline static constexpr char HallCoefficientE2Name[] =
+        "implicit_mhd_hall_coefficient_e2";
     // Per-face-direction Riemann flux registers for the conservative-form
     // hlld path: one HLLD solution per face feeds the fluid divergences,
     // the Maxwell stress, the ion-energy magnetic work, and the ideal EMF.

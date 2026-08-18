@@ -558,6 +558,32 @@ Overall simulation parameters
                gain the corresponding :math:`k_\text{max}^4`-scale
                bounds.
 
+               When the Ohm law carries the Hall term
+               (``fluid_flux = central`` with
+               ``hybrid_pic_model.include_hall_term = true``) and
+               ``pc_mhd_block.include_hall_mhd_coupling`` is on (the
+               default), the whistler rows :math:`+\theta\Delta t\,
+               \nabla\times((\nabla\times\,\cdot\,/\mu_0)\times
+               \boldsymbol{Hb})` join the same emission, linearized about
+               the frozen Hall coefficient vector
+               :math:`\boldsymbol{Hb} = \boldsymbol B/\rho_q` on the
+               electric-field staggerings (the B-form of the Hall-MHD
+               field block of Chacón, JCP 526 (2025) 113789) at the
+               REACTIVE :math:`\theta\Delta t` staging of the ideal EMF
+               (the resistive rows keep :math:`\theta_r\Delta t`). The
+               grid whistler number :math:`\theta\Delta t\,
+               \max|\boldsymbol{Hb}|/\mu_0/\min(\Delta x)^2` joins the
+               activation gate. The whistler coupling is first-order and
+               skew between the B components -- its spectrum is the
+               complex conjugate pairs :math:`1 \pm i\,\theta\Delta t\,
+               D_H k^2`, outside any real Chebyshev interval -- so the
+               Hall rows require ``pc_mhd_block.resistive_solver =
+               banded`` or ``direct`` (asserted), whose exact LU inverts
+               the non-symmetric frozen block directly;
+               ``pc_mhd_block.resistive_validate_assembly`` checks the
+               assembled Hall rows against the matrix-free operator to
+               roundoff exactly like the resistive rows.
+
             Boundaries the recast residual manages itself are mapped per
             component to preconditioner-only linear-operator types matching
             the residual's fluid ghosts: ``pec`` (a reflecting wall) becomes
@@ -615,7 +641,10 @@ Overall simulation parameters
               If false, use the acoustic block without either ideal coupling.
             - ``pc_mhd_block.include_hall_mhd_coupling`` (``bool``,
               default: true): when Hall physics is enabled, include its
-              spectral-magnitude coefficient in the field curl--curl block.
+              spectral-magnitude coefficient in the field curl--curl block
+              (E-based state) or the exact frozen whistler rows in the
+              recast B block (see point 4 above; requires
+              ``resistive_solver = banded`` or ``direct``).
               This changes only the preconditioner, not the nonlinear Hall
               residual.
             - ``pc_mhd_block.field_iterations`` (``int``, default: 2):
@@ -4575,9 +4604,12 @@ Jacobian probes.
     (:math:`E_\theta` is zero on axis by :math:`m = 0` parity). The
     cylindrical geometric source terms carry the Maxwell-stress parts
     consistently in both the momentum and ion-energy equations.
-    ``hlld`` requires ``include_hall_term = false``,
-    ``include_electron_pressure_term = false``, and
-    ``jacobian.pc_type = none``. The wave fan is assembled
+    ``hlld`` requires ``include_hall_term = false`` (like ``hllc``, its
+    electron energy is advected with the ion contact wave of the star
+    construction, and its corner-EMF dissipation is scaled by the ion
+    fan's rotational speeds; use ``central`` for Hall MHD in the
+    recast) and ``include_electron_pressure_term = false``. The wave
+    fan is assembled
     :math:`C^\infty`-smooth for matrix-free Jacobian probes (smoothed
     signal bounds, telescoped region form without if-chains, blended
     :math:`B_n \to 0` rotational layer); the widths are the
@@ -4597,11 +4629,30 @@ Jacobian probes.
     nonlinear stability (field dissipation comes from resistivity; the
     RZ corner-EMF dissipation coefficients vanish identically under
     ``central``). ``central`` shares all recast plumbing and
-    constraints with ``hlld`` (1D/RZ only, no Hall term, no
-    electron-pressure Ohm term), is not supported with
-    ``ion_closure = cgl`` or a halo pedestal (the pedestal band is held
-    by the donor drain gates of the Riemann fluxes), and keeps the
+    constraints with ``hlld`` (1D/RZ only, no electron-pressure Ohm
+    term), is not supported with ``ion_closure = cgl``, and keeps the
     donor-gated positivity guards of the recast face fluxes.
+
+    ``central`` additionally supports Hall MHD
+    (``hybrid_pic_model.include_hall_term = true``): the solver-assembled
+    Ohm's law becomes :math:`E = -u \times B + (J \times B)/\rho_q +
+    \eta J - \eta_H \nabla^2 J`, with the Hall EMF added at the same
+    edge/staggered :math:`E` locations as the :math:`\eta J` terms (edge
+    currents interpolated with the same stencils as the :math:`|J|`
+    resistivity argument, the cell-centered total :math:`B` averaged with
+    the :math:`\eta_H` stencils, and the charge-density division guarded
+    by a :math:`C^\infty` smooth floor at the Ohm guard; the :math:`m=0`
+    axis parities are preserved exactly, :math:`E_\theta` and the Hall
+    part of :math:`E_z` vanishing on axis). The face induction fluxes
+    keep the ION velocity, so the edge term converts the ideal EMF to the
+    electron frame, :math:`E = -u_e \times B`, without double counting;
+    the electron thermal channels (:math:`U_e` advection and the
+    :math:`\nabla\cdot u_e` pressure work) use the electron velocity. The
+    Hall term is reactive and keeps the global ``implicit_evolve.theta``
+    staging of the ideal EMF -- it always reads the theta-stage plasma
+    current, never the shifted ``implicit_mhd.resistive_theta`` stage of
+    the dissipative terms (an over-implicit stage would numerically damp
+    whistlers first-order in :math:`\Delta t`).
 
 .. pp:param:: implicit_mhd.viscosity
     :type: ``float``

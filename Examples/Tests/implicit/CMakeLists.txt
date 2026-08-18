@@ -81,6 +81,19 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Whistler under the conservative-form recast: Hall EMF in the solver
+# Ohm assembly + block-banded Hall/whistler preconditioner rows
+# (single-rank: the banded factorization is sequential along z).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_stiff_whistler_central  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_stiff_whistler_central  # inputs
+    "analysis_mhd_stiff_whistler_central.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_stiff_whistler_preconditioner_mpi  # name
     1  # dims

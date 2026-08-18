@@ -197,6 +197,18 @@
  *    interpolated arguments), the activation gate and the Chebyshev
  *    interval gaining the corresponding kmax^4-scale bounds.
  *
+ *    When the residual's Ohm law carries the Hall term
+ *    (pc_mhd_block.include_hall_mhd_coupling, default on), the whistler
+ *    rows + theta dt curl((curl . / mu0) x Hb) join the same emission,
+ *    linearized about the frozen Hall coefficient vector Hb = B/rho_q on
+ *    the electric-field staggerings (Chacon, JCP 526 (2025) 113789, in
+ *    B-form) at the REACTIVE theta dt staging of the ideal EMF. The
+ *    coupling is first-order and skew (whistler): its complex spectrum
+ *    sits outside any real Chebyshev interval, so the Hall rows require
+ *    resistive_solver = banded or direct (asserted), whose exact LU
+ *    inverts the non-symmetric frozen block directly. The grid whistler
+ *    number theta dt max|Hb|/mu0 / min(dx)^2 joins the activation gate.
+ *
  * Boundary types the residual handles itself are mapped per component to
  * preconditioner-only linear-operator types matching the residual's fluid
  * ghosts: PEC (reflecting wall) -> Neumann for scalars and tangential
@@ -330,6 +342,12 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         // the current update's operator.
         bool m_resistive_hyper = false;
         bool m_resistive_hyper_active = false;
+        // Whether the recast B block carries the Hall/whistler rows
+        // (deck-static: the Ohm law's Hall term gated by
+        // include_hall_mhd_coupling) and their reactive scale
+        // theta dt / mu0 (the resistive rows keep theta_r dt / mu0).
+        bool m_resistive_hall_active = false;
+        RT m_resistive_hall_scale = 0.0;
         // Roundoff matvec check of the assembled sparse rows against the
         // matrix-free operator at every active update (any build).
         bool m_resistive_validate_assembly = false;
@@ -421,6 +439,11 @@ class MHDBlockPC : public Preconditioner<T, Ops>
                                                                         nullptr};
         amrex::Array<const amrex::MultiFab*, 3> m_resistive_eta_h_edge = {nullptr, nullptr,
                                                                           nullptr};
+        // Frozen Hall coefficient vector Hb = B/rho_q on the
+        // electric-field staggerings (three components per register),
+        // read by the Hall/whistler rows of the emission.
+        amrex::Array<const amrex::MultiFab*, 3> m_resistive_hall_edge = {nullptr, nullptr,
+                                                                         nullptr};
         // Exact sparse inverse of the frozen resistive block (direct
         // solver and assembly validation), built lazily at the first
         // active update that needs it.
@@ -949,6 +972,55 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
         m_resistive_hyper_active = true;
     }
 
+    // Hall/whistler rows of the recast B block (Chacon, JCP 526 (2025)
+    // 113789, in B-form -- see MHDResistiveStencil.H): the whistler
+    // rotation linearized about the frozen Hb = B/rho_q joins the same
+    // emission as the resistive term, at the REACTIVE theta dt / mu0
+    // scale of the ideal EMF. Requested per update: the Hall flag is
+    // only valid after the hybrid model's InitData.
+    m_resistive_hall_active = false;
+    m_resistive_hall_scale = 0.0;
+    RT hall_maximum = 0.0;
+    if (m_include_hall_mhd_coupling && m_ops->GetMHDIncludeHallTermForPC())
+    {
+        // The whistler block is first-order and SKEW: its spectrum is
+        // the complex conjugate pairs 1 +/- i h D_H k^2, outside the
+        // real interval the fixed-count Chebyshev iteration assumes
+        // (it would amplify, not contract). Only the exact inverses may
+        // consume the Hall rows.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_resistive_direct_enabled || m_resistive_banded_enabled,
+            "pc_mhd_block.include_hall_mhd_coupling with the "
+            "conservative-form recast requires pc_mhd_block.resistive_solver "
+            "= banded or direct: the Hall/whistler B block is first-order "
+            "and skew (complex eigenvalue pairs), outside the real Chebyshev "
+            "interval. Set pc_mhd_block.include_hall_mhd_coupling = false to "
+            "run the B block without the whistler rows.");
+        m_resistive_hall_edge = m_ops->GetMHDHallCoefficientEdgeForPC();
+        for (int component = 0; component < 3; ++component)
+        {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !ResistiveComponentActive(component) ||
+                    m_resistive_hall_edge[component] != nullptr,
+                "pc_mhd_block requires the solver's edge Hall coefficients "
+                "for the recast Hall coupling");
+            if (m_resistive_hall_edge[component] != nullptr)
+            {
+                for (int direction = 0; direction < 3; ++direction)
+                {
+                    hall_maximum = amrex::max(
+                        hall_maximum,
+                        m_resistive_hall_edge[component]->norm0(direction));
+                }
+            }
+        }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            std::isfinite(hall_maximum) && hall_maximum >= 0.0,
+            "pc_mhd_block requires finite Hall coefficients");
+        m_resistive_hall_active = true;
+        m_resistive_hall_scale = m_h / RT(PhysConst::mu0);
+    }
+
     // Gate on the grid-scale resistive diffusion number of the stiffest
     // cell: below the threshold the unpreconditioned rows are benign and
     // the block stands down to the exact identity at zero cost. The
@@ -967,6 +1039,13 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
             m_resistive_diffusion_number,
             m_resistive_h * eta_maximum / RT(PhysConst::mu0) *
                 inverse_cell_size[direction] * inverse_cell_size[direction]);
+        // Grid whistler number theta dt D_H / dx^2 with D_H = |Hb|/mu0:
+        // the same first-order-in-k^2 stiffness scale as the resistive
+        // number, at the reactive theta staging of the Hall rows.
+        m_resistive_diffusion_number = amrex::max(
+            m_resistive_diffusion_number,
+            m_h * hall_maximum / RT(PhysConst::mu0) *
+                inverse_cell_size[direction] * inverse_cell_size[direction]);
         laplacian_bound += RT(4.0) * inverse_cell_size[direction] *
                            inverse_cell_size[direction];
     }
@@ -978,6 +1057,18 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
                                           RT(PhysConst::mu0) * laplacian_bound *
                                           laplacian_bound / RT(16.0));
     m_resistive_active = m_resistive_diffusion_number >= m_resistive_threshold;
+    if (m_verbose)
+    {
+        amrex::Print() << "Updating pc_mhd_block (recast B block): "
+                       << "theta_r dt = " << m_resistive_h
+                       << ", grid number = " << m_resistive_diffusion_number
+                       << " (threshold " << m_resistive_threshold << "), block = "
+                       << (m_resistive_active ? m_resistive_solver : std::string("identity"))
+                       << ", Hall rows = "
+                       << (m_resistive_hall_active ? "active" : "inactive")
+                       << ", hyper-resistive rows = "
+                       << (m_resistive_hyper_active ? "active" : "inactive") << "\n";
+    }
     if (!m_resistive_active)
     {
         return;
@@ -1017,6 +1108,8 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
     warpx::mhd_pc::ResistiveStencilConstants stencil_constants =
         warpx::mhd_pc::MakeResistiveStencilConstants(m_geometry, m_resistive_h);
     stencil_constants.include_hyper = m_resistive_hyper_active;
+    stencil_constants.include_hall = m_resistive_hall_active;
+    stencil_constants.hall_scale = m_resistive_hall_scale;
 #if defined(WARPX_DIM_RZ)
     // Stair-step PEC wall mask (implicit_mhd.wall_model = pec): the
     // assemblies drop the same masked tangential-E rows the residual
@@ -1045,10 +1138,10 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
         if (!m_resistive_direct->IsDefined())
         {
             m_resistive_direct->Define(m_geometry, face_layout, m_resistive_eta_edge,
-                                       m_resistive_eta_h_edge);
+                                       m_resistive_eta_h_edge, m_resistive_hall_edge);
         }
         m_resistive_direct->AssembleValues(stencil_constants, m_resistive_eta_edge,
-                                           m_resistive_eta_h_edge);
+                                           m_resistive_eta_h_edge, m_resistive_hall_edge);
         if (m_resistive_validate_assembly)
         {
             ValidateResistiveAssembly();
@@ -1082,7 +1175,8 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
         {
             m_resistive_banded->AssembleValues(stencil_constants,
                                                m_resistive_eta_edge,
-                                               m_resistive_eta_h_edge);
+                                               m_resistive_eta_h_edge,
+                                               m_resistive_hall_edge);
             m_resistive_banded->Factorize();
             m_banded_frozen_time = this->m_time;
         }
@@ -1816,6 +1910,8 @@ MHDBlockPC<T, Ops>::ApplyResistiveCurlCurl ()
     warpx::mhd_pc::ResistiveStencilConstants stencil_constants =
         warpx::mhd_pc::MakeResistiveStencilConstants(m_geometry, m_resistive_h);
     stencil_constants.include_hyper = m_resistive_hyper_active;
+    stencil_constants.include_hall = m_resistive_hall_active;
+    stencil_constants.hall_scale = m_resistive_hall_scale;
 #if defined(WARPX_DIM_RZ)
     // Same wall-mask row drops as the frozen assemblies (see
     // UpdateResistiveBlock): matrix-free application == assembled operator.
@@ -1844,6 +1940,12 @@ MHDBlockPC<T, Ops>::ApplyResistiveCurlCurl ()
                 {
                     stencil_arrays.eta_h[field_component] =
                         m_resistive_eta_h_edge[field_component]->const_array(mfi);
+                }
+                if (m_resistive_hall_active &&
+                    m_resistive_hall_edge[field_component] != nullptr)
+                {
+                    stencil_arrays.hall[field_component] =
+                        m_resistive_hall_edge[field_component]->const_array(mfi);
                 }
                 if (ResistiveComponentActive(field_component))
                 {
@@ -2571,6 +2673,7 @@ MHDBlockPC<T, Ops>::printParameters () const
     amrex::Print() << name << " resistive threshold:  " << m_resistive_threshold << "\n";
     amrex::Print() << name << " resistive solver:     " << m_resistive_solver << "\n";
     amrex::Print() << name << " banded precision:     " << m_banded_precision << "\n";
+    amrex::Print() << name << " banded refreeze:      " << m_banded_refreeze << "\n";
     amrex::Print() << name << " wave relaxation:      " << m_wave_relaxation << "\n";
     amrex::Print() << name << " agglomeration:        " << (m_agglomeration ? "true" : "false")
                    << "\n";

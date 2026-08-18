@@ -47,6 +47,7 @@ struct WallMaskView
  *
  *     A d = theta_r dt curl((eta_field/mu0) curl d)
  *          [- theta_r dt curl(eta_H lap(curl d)) / mu0 when include_hyper]
+ *          [+ theta dt curl((curl d / mu0) x Hb) when include_hall]
  *
  * on the residual's exact Yee staggering (see MHDBlockPC, resistive
  * block), with tangential E zeroed on every non-periodic domain boundary
@@ -75,6 +76,21 @@ struct ResistiveStencilConstants
     // convention elsewhere (same philosophy as the boundary-plane
     // tangential-E zeroing of the resistive term).
     bool include_hyper = false;
+    // Emit the Hall/whistler coupling of the recast Ohm's law,
+    // E += (curl dB / mu0) x Hb, linearized about the frozen coefficient
+    // vector Hb = B/rho_q on the electric-field staggerings (see
+    // ResistiveStencilArrays::hall) -- the whistler rotation of Chacon,
+    // JCP 526 (2025) 113789, in B-form. The neglected (J0 x dB)/rho_q
+    // piece of the exact Jacobian is O(|J0|/|B0| dx) smaller at whistler
+    // stiffness (standard frozen-rotation linearization). The term is
+    // REACTIVE, so its rows carry the global theta staging of the ideal
+    // EMF through hall_scale = theta dt / mu0 (never the shifted
+    // resistive theta_r of `scale`). First-order and skew: the resulting
+    // block has complex conjugate eigenvalue pairs 1 +/- i h D_H kt^2,
+    // outside any real Chebyshev interval -- consumers must invert it
+    // directly (banded/direct LU).
+    bool include_hall = false;
+    amrex::Real hall_scale = 0.0; //!< theta dt / mu0
 #if defined(WARPX_DIM_1D_Z)
     int axial_node_low = 0;
     int axial_node_high = 0;
@@ -107,6 +123,13 @@ struct ResistiveStencilArrays
     // eta_H on the same electric-field staggerings (frozen at the
     // preconditioner update); read only when include_hyper is set.
     amrex::Array4<const amrex::Real> eta_h[3];
+    // Frozen Hall coefficient vector Hb = B/rho_q (three physical
+    // components per array) on the same electric-field staggerings,
+    // interpolated with the residual assembly's own stencils (total
+    // cell-centered B averaged to the edge, Ohm-floored charge density);
+    // read only when include_hall is set. In 1D the transverse
+    // components share the z-node array and only Hb_z enters the curl.
+    amrex::Array4<const amrex::Real> hall[3];
 };
 
 /**
@@ -189,6 +212,25 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
             multiplier * a.eta[a_component](node, j, k) * c.inverse_dz;
         sink(a_component, node, j, k, coefficient);
         sink(a_component, node - 1, j, k, -coefficient);
+        if (c.include_hall)
+        {
+            // Hall EMF at the node: E = (curl dB x Hb)/mu0 couples the
+            // transverse pair through Hb_z with the whistler skew sign
+            // ((curl dB)_z is identically zero in 1D, so the Hb_x/Hb_y
+            // content never enters). E_y = Hb_z d_z(dB_y)/mu0 feeds the
+            // B_x row and E_x = Hb_z d_z(dB_x)/mu0 feeds the B_y row:
+            // same node-flux form as the eta term, cross-component, with
+            // opposite row signs (Chacon (2025) whistler rotation) and
+            // the reactive theta staging of hall_scale.
+            const int other_component = 1 - a_component;
+            const amrex::Real hall_sign =
+                (a_component == 0) ? amrex::Real(1.0) : amrex::Real(-1.0);
+            const amrex::Real hall_coefficient =
+                hall_sign * (c.hall_scale / c.scale) * multiplier *
+                a.hall[a_component](node, j, k, 2) * c.inverse_dz;
+            sink(other_component, node, j, k, hall_coefficient);
+            sink(other_component, node - 1, j, k, -hall_coefficient);
+        }
         if (c.include_hyper)
         {
             // Flux gains -eta_H lap_z(g) at the node (both transverse
@@ -241,6 +283,148 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
             sink(0, node_r, node_z, k, weight * c.inverse_dz);
             sink(0, node_r, node_z - 1, k, -weight * c.inverse_dz);
         }
+    };
+    // mu0 J_r = -d_z Btheta on the (r-cell, z-node) face.
+    const auto emit_current_radial =
+        [&] (const int cell_r, const int node_z, const amrex::Real weight)
+    {
+        if (!radial_cell_in_range(cell_r) || !axial_cell_in_range(node_z) ||
+            !axial_cell_in_range(node_z - 1))
+        {
+            return;
+        }
+        sink(1, cell_r, node_z, k, -weight * c.inverse_dz);
+        sink(1, cell_r, node_z - 1, k, weight * c.inverse_dz);
+    };
+    // mu0 J_z = (1/r) d_r(r Btheta) on the (r-node, z-cell) face, with
+    // the residual's on-axis regularization mu0 J_z = 4 Btheta / dr.
+    const auto emit_current_axial =
+        [&] (const int node_r, const int cell_z, const amrex::Real weight)
+    {
+        if (!axial_cell_in_range(cell_z))
+        {
+            return;
+        }
+        const amrex::Real radius =
+            c.radial_lo + static_cast<amrex::Real>(node_r) * c.radial_cell_size;
+        if (radius <= amrex::Real(0.5) * c.radial_cell_size)
+        {
+            if (radial_cell_in_range(node_r))
+            {
+                sink(1, node_r, cell_z, k,
+                     weight * amrex::Real(4.0) * c.inverse_dr);
+            }
+            return;
+        }
+        if (radial_cell_in_range(node_r) && radial_cell_in_range(node_r - 1))
+        {
+            const amrex::Real radius_high =
+                radius + amrex::Real(0.5) * c.radial_cell_size;
+            const amrex::Real radius_low =
+                radius - amrex::Real(0.5) * c.radial_cell_size;
+            sink(1, node_r, cell_z, k,
+                 weight * c.inverse_dr * radius_high / radius);
+            sink(1, node_r - 1, cell_z, k,
+                 -weight * c.inverse_dr * radius_low / radius);
+        }
+    };
+    // --- Hall/whistler edge EMFs (see include_hall): E += (g x Hb)/mu0
+    // with g = mu0 J = curl dB, the frozen Hb read at the edge, and the
+    // residual assembly's own cross-staggering current interpolations.
+    // Each helper honors the SAME boundary-plane drops and wall-mask row
+    // drops as its resistive counterpart. Callers pass multipliers built
+    // on c.hall_scale (the reactive theta staging).
+    //
+    // E_theta += (g_z Hb_r - g_r Hb_z)/mu0 on the corner; the residual's
+    // corner currents are the half-sums of the two adjacent native faces.
+    const auto emit_corner_hall =
+        [&] (const int node_r, const int node_z, const amrex::Real multiplier)
+    {
+        if (node_r == c.radial_face_low || node_r == c.radial_face_high)
+        {
+            return;
+        }
+        if (!c.axial_periodic &&
+            (node_z == c.axial_face_low || node_z == c.axial_face_high))
+        {
+            return;
+        }
+        if (c.wall.active && node_r >= c.wall.first_masked_et[node_z])
+        {
+            return;
+        }
+        const amrex::Real hall_radial = a.hall[1](node_r, node_z, k, 0);
+        const amrex::Real hall_axial = a.hall[1](node_r, node_z, k, 2);
+        emit_current_axial(node_r, node_z - 1,
+                           multiplier * amrex::Real(0.5) * hall_radial);
+        emit_current_axial(node_r, node_z,
+                           multiplier * amrex::Real(0.5) * hall_radial);
+        emit_current_radial(node_r - 1, node_z,
+                            -multiplier * amrex::Real(0.5) * hall_axial);
+        emit_current_radial(node_r, node_z,
+                            -multiplier * amrex::Real(0.5) * hall_axial);
+    };
+    // E_r += (g_theta Hb_z - g_z Hb_theta)/mu0 on the (r-cell, z-node)
+    // face; corner J_theta half-sum, four-point J_z average.
+    const auto emit_face_radial_hall =
+        [&] (const int cell_r, const int node_z, const amrex::Real multiplier)
+    {
+        if (!c.axial_periodic &&
+            (node_z == c.axial_face_low || node_z == c.axial_face_high))
+        {
+            return;
+        }
+        if (c.wall.active && cell_r >= c.wall.first_masked_er[node_z])
+        {
+            return;
+        }
+        const amrex::Real hall_azimuthal = a.hall[0](cell_r, node_z, k, 1);
+        const amrex::Real hall_axial = a.hall[0](cell_r, node_z, k, 2);
+        emit_current_azimuthal(cell_r, node_z,
+                               multiplier * amrex::Real(0.5) * hall_axial);
+        emit_current_azimuthal(cell_r + 1, node_z,
+                               multiplier * amrex::Real(0.5) * hall_axial);
+        emit_current_axial(cell_r, node_z,
+                           -multiplier * amrex::Real(0.25) * hall_azimuthal);
+        emit_current_axial(cell_r + 1, node_z,
+                           -multiplier * amrex::Real(0.25) * hall_azimuthal);
+        emit_current_axial(cell_r, node_z - 1,
+                           -multiplier * amrex::Real(0.25) * hall_azimuthal);
+        emit_current_axial(cell_r + 1, node_z - 1,
+                           -multiplier * amrex::Real(0.25) * hall_azimuthal);
+    };
+    // E_z += (g_r Hb_theta - g_theta Hb_r)/mu0 on the (r-node, z-cell)
+    // face; four-point J_r average with the residual's axis clamp (the
+    // clamp is exact there: Hb_theta and Hb_r vanish on the axis by the
+    // m = 0 parities of the frozen coefficient fill) and corner J_theta
+    // half-sum.
+    const auto emit_face_axial_hall =
+        [&] (const int node_r, const int cell_z, const amrex::Real multiplier)
+    {
+        if (node_r == c.radial_face_low || node_r == c.radial_face_high)
+        {
+            return;
+        }
+        if (c.wall.active && node_r >= c.wall.first_masked_ez[cell_z])
+        {
+            return;
+        }
+        const amrex::Real hall_radial = a.hall[2](node_r, cell_z, k, 0);
+        const amrex::Real hall_azimuthal = a.hall[2](node_r, cell_z, k, 1);
+        const int clamped_cell =
+            (node_r - 1 < c.radial_face_low) ? node_r : node_r - 1;
+        emit_current_radial(clamped_cell, cell_z,
+                            multiplier * amrex::Real(0.25) * hall_azimuthal);
+        emit_current_radial(node_r, cell_z,
+                            multiplier * amrex::Real(0.25) * hall_azimuthal);
+        emit_current_radial(clamped_cell, cell_z + 1,
+                            multiplier * amrex::Real(0.25) * hall_azimuthal);
+        emit_current_radial(node_r, cell_z + 1,
+                            multiplier * amrex::Real(0.25) * hall_azimuthal);
+        emit_current_azimuthal(node_r, cell_z,
+                               -multiplier * amrex::Real(0.5) * hall_radial);
+        emit_current_azimuthal(node_r, cell_z + 1,
+                               -multiplier * amrex::Real(0.5) * hall_radial);
     };
     // E_theta -= eta_H lap J_theta at the corner (the m = 0 cylindrical
     // vector Laplacian of the residual, J_theta native so the stencil
@@ -309,6 +493,11 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
         // Br on (r-node, z-cell): (curl E)_r = -d_z E_theta.
         emit_corner_azimuthal(i, j + 1, -c.scale * c.inverse_dz);
         emit_corner_azimuthal(i, j, c.scale * c.inverse_dz);
+        if (c.include_hall)
+        {
+            emit_corner_hall(i, j + 1, -c.hall_scale * c.inverse_dz);
+            emit_corner_hall(i, j, c.hall_scale * c.inverse_dz);
+        }
         if (c.include_hyper)
         {
             emit_corner_hyper(i, j + 1, -c.scale * c.inverse_dz);
@@ -364,50 +553,6 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
                                             c.inverse_dr / radius_node;
             sink(1, node_r, cell_z, k, coefficient * radius_high);
             sink(1, node_r - 1, cell_z, k, -coefficient * radius_low);
-        };
-        // mu0 J_r = -d_z Btheta on the (r-cell, z-node) face.
-        const auto emit_current_radial =
-            [&] (const int cell_r, const int node_z, const amrex::Real weight)
-        {
-            if (!radial_cell_in_range(cell_r) || !axial_cell_in_range(node_z) ||
-                !axial_cell_in_range(node_z - 1))
-            {
-                return;
-            }
-            sink(1, cell_r, node_z, k, -weight * c.inverse_dz);
-            sink(1, cell_r, node_z - 1, k, weight * c.inverse_dz);
-        };
-        // mu0 J_z = (1/r) d_r(r Btheta) on the (r-node, z-cell) face, with
-        // the residual's on-axis regularization mu0 J_z = 4 Btheta / dr.
-        const auto emit_current_axial =
-            [&] (const int node_r, const int cell_z, const amrex::Real weight)
-        {
-            if (!axial_cell_in_range(cell_z))
-            {
-                return;
-            }
-            const amrex::Real radius =
-                c.radial_lo + static_cast<amrex::Real>(node_r) * c.radial_cell_size;
-            if (radius <= amrex::Real(0.5) * c.radial_cell_size)
-            {
-                if (radial_cell_in_range(node_r))
-                {
-                    sink(1, node_r, cell_z, k,
-                         weight * amrex::Real(4.0) * c.inverse_dr);
-                }
-                return;
-            }
-            if (radial_cell_in_range(node_r) && radial_cell_in_range(node_r - 1))
-            {
-                const amrex::Real radius_high =
-                    radius + amrex::Real(0.5) * c.radial_cell_size;
-                const amrex::Real radius_low =
-                    radius - amrex::Real(0.5) * c.radial_cell_size;
-                sink(1, node_r, cell_z, k,
-                     weight * c.inverse_dr * radius_high / radius);
-                sink(1, node_r - 1, cell_z, k,
-                     -weight * c.inverse_dr * radius_low / radius);
-            }
         };
         // E_r -= eta_H lap J_r on the (r-cell, z-node) face (radial part
         // of the m = 0 cylindrical vector Laplacian carries -1/r^2).
@@ -473,6 +618,13 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
         emit_face_radial_electric(i, j, -c.scale * c.inverse_dz);
         emit_face_axial_electric(i + 1, j, -c.scale * c.inverse_dr);
         emit_face_axial_electric(i, j, c.scale * c.inverse_dr);
+        if (c.include_hall)
+        {
+            emit_face_radial_hall(i, j + 1, c.hall_scale * c.inverse_dz);
+            emit_face_radial_hall(i, j, -c.hall_scale * c.inverse_dz);
+            emit_face_axial_hall(i + 1, j, -c.hall_scale * c.inverse_dr);
+            emit_face_axial_hall(i, j, c.hall_scale * c.inverse_dr);
+        }
         if (c.include_hyper)
         {
             emit_face_radial_hyper(i, j + 1, c.scale * c.inverse_dz);
@@ -497,6 +649,15 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
                               c.scale * c.inverse_dr * radius_node_high / radius_center);
         emit_corner_azimuthal(i, j,
                               -c.scale * c.inverse_dr * radius_node_low / radius_center);
+        if (c.include_hall)
+        {
+            emit_corner_hall(i + 1, j,
+                             c.hall_scale * c.inverse_dr * radius_node_high /
+                                 radius_center);
+            emit_corner_hall(i, j,
+                             -c.hall_scale * c.inverse_dr * radius_node_low /
+                                 radius_center);
+        }
         if (c.include_hyper)
         {
             emit_corner_hyper(i + 1, j,

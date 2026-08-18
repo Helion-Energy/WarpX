@@ -781,6 +781,7 @@ ScatterComponent (const ResistiveStencilConstants& a_constants,
                   const int a_component,
                   const amrex::Array<const amrex::MultiFab*, 3>& a_eta_edge,
                   const amrex::Array<const amrex::MultiFab*, 3>& a_eta_h_edge,
+                  const amrex::Array<const amrex::MultiFab*, 3>& a_hall_edge,
                   TS* const a_bands, amrex::Real* const a_accounting)
 {
     for (amrex::MFIter mfi(a_owner); mfi.isValid(); ++mfi)
@@ -796,6 +797,10 @@ ScatterComponent (const ResistiveStencilConstants& a_constants,
             if (a_eta_h_edge[field] != nullptr)
             {
                 arrays.eta_h[field] = a_eta_h_edge[field]->const_array(mfi);
+            }
+            if (a_hall_edge[field] != nullptr)
+            {
+                arrays.hall[field] = a_hall_edge[field]->const_array(mfi);
             }
         }
         const BandedIndexMap map = a_map;
@@ -1070,7 +1075,9 @@ class ResistiveBandedSolver
         void
         AssembleValues (const ResistiveStencilConstants& a_constants,
                         const amrex::Array<const amrex::MultiFab*, 3>& a_eta_edge,
-                        const amrex::Array<const amrex::MultiFab*, 3>& a_eta_h_edge)
+                        const amrex::Array<const amrex::MultiFab*, 3>& a_eta_h_edge,
+                        const amrex::Array<const amrex::MultiFab*, 3>& a_hall_edge = {
+                            nullptr, nullptr, nullptr})
         {
             BL_PROFILE("ResistiveBanded::AssembleValues()");
 
@@ -1092,8 +1099,8 @@ class ResistiveBandedSolver
                     }
                     banded_detail::ScatterComponent(
                         a_constants, m_map, *m_owner[component], component,
-                        a_eta_edge, a_eta_h_edge, m_engine_single->m_bands.data(),
-                        accounting.data());
+                        a_eta_edge, a_eta_h_edge, a_hall_edge,
+                        m_engine_single->m_bands.data(), accounting.data());
                 }
                 else
                 {
@@ -1103,8 +1110,8 @@ class ResistiveBandedSolver
                     }
                     banded_detail::ScatterComponent(
                         a_constants, m_map, *m_owner[component], component,
-                        a_eta_edge, a_eta_h_edge, m_engine_double->m_bands.data(),
-                        accounting.data());
+                        a_eta_edge, a_eta_h_edge, a_hall_edge,
+                        m_engine_double->m_bands.data(), accounting.data());
                 }
             }
 

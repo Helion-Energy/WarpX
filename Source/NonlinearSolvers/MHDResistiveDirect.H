@@ -104,6 +104,8 @@ class ResistiveDirectSolver
                      const amrex::Array<const amrex::MultiFab*, 3>& a_faces,
                      const amrex::Array<const amrex::MultiFab*, 3>& a_eta_edge,
                      const amrex::Array<const amrex::MultiFab*, 3>& a_eta_h_edge = {
+                         nullptr, nullptr, nullptr},
+                     const amrex::Array<const amrex::MultiFab*, 3>& a_hall_edge = {
                          nullptr, nullptr, nullptr});
 
         [[nodiscard]] bool IsDefined () const { return m_is_defined; }
@@ -117,6 +119,8 @@ class ResistiveDirectSolver
         void AssembleValues (const ResistiveStencilConstants& a_constants,
                              const amrex::Array<const amrex::MultiFab*, 3>& a_eta_edge,
                              const amrex::Array<const amrex::MultiFab*, 3>& a_eta_h_edge = {
+                                 nullptr, nullptr, nullptr},
+                             const amrex::Array<const amrex::MultiFab*, 3>& a_hall_edge = {
                                  nullptr, nullptr, nullptr});
 
         /** \brief Numeric factorization of the assembled matrix (cuDSS). */
@@ -229,9 +233,11 @@ class ResistiveDirectSolver
         amrex::Array<std::unique_ptr<amrex::iMultiFab>, 3> m_owner_host;
         amrex::Array<std::unique_ptr<amrex::MultiFab>, 3> m_eta_host;
         amrex::Array<std::unique_ptr<amrex::MultiFab>, 3> m_eta_h_host;
+        amrex::Array<std::unique_ptr<amrex::MultiFab>, 3> m_hall_host;
         amrex::Array<std::unique_ptr<amrex::MultiFab>, 3> m_face_host;
         amrex::Array<const amrex::MultiFab*, 3> m_eta_source = {nullptr, nullptr, nullptr};
         amrex::Array<const amrex::MultiFab*, 3> m_eta_h_source = {nullptr, nullptr, nullptr};
+        amrex::Array<const amrex::MultiFab*, 3> m_hall_source = {nullptr, nullptr, nullptr};
 
         // Locally owned rows in fixed emission order.
         amrex::Long m_local_owned_rows = 0;
@@ -301,7 +307,8 @@ inline void
 ResistiveDirectSolver::Define (const amrex::Geometry& a_geometry,
                                const amrex::Array<const amrex::MultiFab*, 3>& a_faces,
                                const amrex::Array<const amrex::MultiFab*, 3>& a_eta_edge,
-                               const amrex::Array<const amrex::MultiFab*, 3>& a_eta_h_edge)
+                               const amrex::Array<const amrex::MultiFab*, 3>& a_eta_h_edge,
+                               const amrex::Array<const amrex::MultiFab*, 3>& a_hall_edge)
 {
     BL_PROFILE("ResistiveDirect::Define()");
 
@@ -379,6 +386,17 @@ ResistiveDirectSolver::Define (const amrex::Geometry& a_geometry,
                 eta_h.boxArray(), eta_h.DistributionMap(), 1, eta_h.nGrowVect(),
                 amrex::MFInfo().SetArena(amrex::The_Pinned_Arena()));
         }
+        if (a_hall_edge[component] != nullptr)
+        {
+            // Frozen Hall coefficient vector Hb = B/rho_q (three
+            // components) on this edge staggering.
+            m_hall_source[component] = a_hall_edge[component];
+            const amrex::MultiFab& hall = *a_hall_edge[component];
+            m_hall_host[component] = std::make_unique<amrex::MultiFab>(
+                hall.boxArray(), hall.DistributionMap(), hall.nComp(),
+                hall.nGrowVect(),
+                amrex::MFInfo().SetArena(amrex::The_Pinned_Arena()));
+        }
     }
 
     m_rhs.resize(m_num_rows);
@@ -429,6 +447,11 @@ ResistiveDirectSolver::EmitLocalRows (const ResistiveStencilConstants& a_constan
                 {
                     arrays.eta_h[eta_component] =
                         m_eta_h_host[eta_component]->const_array(mfi);
+                }
+                if (m_hall_host[eta_component])
+                {
+                    arrays.hall[eta_component] =
+                        m_hall_host[eta_component]->const_array(mfi);
                 }
             }
             amrex::LoopOnCpu(
@@ -614,7 +637,8 @@ inline void
 ResistiveDirectSolver::AssembleValues (
     const ResistiveStencilConstants& a_constants,
     const amrex::Array<const amrex::MultiFab*, 3>& a_eta_edge,
-    const amrex::Array<const amrex::MultiFab*, 3>& a_eta_h_edge)
+    const amrex::Array<const amrex::MultiFab*, 3>& a_eta_h_edge,
+    const amrex::Array<const amrex::MultiFab*, 3>& a_hall_edge)
 {
     BL_PROFILE("ResistiveDirect::AssembleValues()");
 
@@ -625,6 +649,12 @@ ResistiveDirectSolver::AssembleValues (
             (m_eta_h_host[0] != nullptr || m_eta_h_host[1] != nullptr ||
              m_eta_h_host[2] != nullptr),
         "ResistiveDirectSolver hyper-resistive assembly requires the eta_H "
+        "staggerings at Define()");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !a_constants.include_hall ||
+            (m_hall_host[0] != nullptr || m_hall_host[1] != nullptr ||
+             m_hall_host[2] != nullptr),
+        "ResistiveDirectSolver Hall assembly requires the Hall-coefficient "
         "staggerings at Define()");
     for (int component = 0; component < 3; ++component)
     {
@@ -642,6 +672,13 @@ ResistiveDirectSolver::AssembleValues (
                 a_eta_h_edge[component] == m_eta_h_source[component],
                 "ResistiveDirectSolver eta_H staggerings changed after Define()");
             amrex::dtoh_memcpy(*m_eta_h_host[component], *a_eta_h_edge[component]);
+        }
+        if (m_hall_host[component])
+        {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                a_hall_edge[component] == m_hall_source[component],
+                "ResistiveDirectSolver Hall staggerings changed after Define()");
+            amrex::dtoh_memcpy(*m_hall_host[component], *a_hall_edge[component]);
         }
     }
     amrex::Gpu::streamSynchronize();

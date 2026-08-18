@@ -742,6 +742,9 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
     fields.alloc_init(HyperResistivityE0Name, lev,
                       amrex::convert(ba, amrex::IntVect(1)), dm, 1,
                       amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(HallCoefficientE0Name, lev,
+                      amrex::convert(ba, amrex::IntVect(1)), dm, 3,
+                      amrex::IntVect(0), 0.0_rt);
 #elif defined(WARPX_DIM_RZ)
     fields.alloc_init(FieldResistivityE0Name, lev,
                       amrex::convert(ba, amrex::IntVect(0, 1)), dm, 1,
@@ -760,6 +763,15 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
                       amrex::IntVect(0), 0.0_rt);
     fields.alloc_init(HyperResistivityE2Name, lev,
                       amrex::convert(ba, amrex::IntVect(1, 0)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(HallCoefficientE0Name, lev,
+                      amrex::convert(ba, amrex::IntVect(0, 1)), dm, 3,
+                      amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(HallCoefficientE1Name, lev,
+                      amrex::convert(ba, amrex::IntVect(1, 1)), dm, 3,
+                      amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(HallCoefficientE2Name, lev,
+                      amrex::convert(ba, amrex::IntVect(1, 0)), dm, 3,
                       amrex::IntVect(0), 0.0_rt);
 #endif
 
@@ -946,16 +958,29 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         "the electron energy is advected with the ion contact wave, which "
         "assumes u_e = u_i at the fluid faces");
     if (m_use_recast) {
+        // Hall MHD in the recast: the ideal face induction flux keeps the
+        // ION velocity and the solver-assembled Ohm's law adds the edge
+        // Hall EMF (J x B)/rho_q, so E = -u_e x B exactly (see
+        // AssembleOhmElectricField). The central flux supports it (its
+        // electron-energy channel advects with u_e, reducing bitwise to
+        // the ion velocity when Hall is off); the HLLD fan does not:
+        // like hllc, its electron energy rides the ION contact wave of
+        // the star construction, and its corner-EMF dissipation is
+        // scaled by the ion fan's rotational speeds, which know nothing
+        // of whistlers.
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            !m_hybrid_pic_model->m_include_hall_term,
-            "implicit_mhd.fluid_flux = hlld/central requires "
-            "include_hall_term = false: the ideal EMF is the single-fluid "
-            "face induction flux, u x B with u_e = u_i");
+            !(m_use_hlld && m_hybrid_pic_model->m_include_hall_term),
+            "implicit_mhd.fluid_flux = hlld requires include_hall_term = "
+            "false: the electron energy is advected with the ion contact "
+            "wave of the HLLD star construction, which assumes u_e = u_i "
+            "(fluid_flux = central supports Hall MHD in the recast)");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !m_hybrid_pic_model->m_include_electron_pressure_term,
             "implicit_mhd.fluid_flux = hlld/central requires "
             "include_electron_pressure_term = false: the solver-assembled "
-            "Ohm's law is E = -u x B + eta J - eta_H laplacian(J)");
+            "Ohm's law is E = -u x B [+ J x B/rho_q] + eta J "
+            "- eta_H laplacian(J) (the electron pressure acts through the "
+            "fluid work terms, not an Ohm gradient)");
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !m_hybrid_pic_model->m_solve_electron_energy_equation,
@@ -1018,9 +1043,14 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
     // n_floor (see OhmMassDensityFloor); the fluid floor stays a pure
     // positivity/div-by-zero guard.
 
-    if (m_hybrid_pic_model->m_include_hall_term !=
-        m_hybrid_pic_model->m_include_electron_pressure_term)
+    if (!m_use_recast &&
+        m_hybrid_pic_model->m_include_hall_term !=
+            m_hybrid_pic_model->m_include_electron_pressure_term)
     {
+        // E-state path only: the recast asserts the Ohm electron-pressure
+        // term off and carries the electron pressure through the fluid
+        // work terms instead, so Hall-on there is the standard recast
+        // Hall-MHD exchange, not this exploratory split.
         ablastr::warn_manager::WMRecordWarning(
             "ThetaImplicitMHD",
             "Using different Hall and electron-pressure switches is an "
@@ -1598,6 +1628,139 @@ ThetaImplicitMHD::GetMHDIncludeHallTermForPC () const
         m_hybrid_pic_model != nullptr,
         "ThetaImplicitMHD Hall configuration requested before Define()");
     return m_hybrid_pic_model->m_include_hall_term;
+}
+
+amrex::Array<const amrex::MultiFab*, 3>
+ThetaImplicitMHD::GetMHDHallCoefficientEdgeForPC () const
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_hybrid_pic_model != nullptr,
+        "ThetaImplicitMHD Hall coefficients requested before Define()");
+    if (!m_hybrid_pic_model->m_include_hall_term) {
+        return {nullptr, nullptr, nullptr};
+    }
+    // Frozen Hall coefficient vector Hb = B/rho_q on the electric-field
+    // staggerings, with the residual Ohm assembly's OWN interpolations
+    // (see the Hall blocks of AssembleOhmElectricField): the
+    // cell-centered TOTAL B (external included, below-axis ghosts
+    // carrying the m = 0 parities) averaged with the eta_H stencils, over
+    // the charge density interpolated with the eta stencils and guarded
+    // by the same C-infinity smooth floor at the Ohm guard. Read by the
+    // preconditioner's Hall/whistler rows (MHDResistiveStencil.H).
+    const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
+    const amrex::MultiFab& magnetic_cc =
+        *m_WarpX->m_fields.get(MagneticFieldCCName, 0);
+    const amrex::Real charge_to_mass = m_ion_charge_to_mass;
+    const amrex::Real charge_density_floor =
+        m_ion_charge_to_mass * OhmMassDensityFloor();
+#if defined(WARPX_DIM_1D_Z)
+    amrex::MultiFab& node_hall = *m_WarpX->m_fields.get(HallCoefficientE0Name, 0);
+    for (amrex::MFIter mfi(node_hall); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto hall = node_hall.array(mfi);
+        const auto rho = density.const_array(mfi);
+        const auto b_cc = magnetic_cc.const_array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            const amrex::Real charge_density_raw =
+                charge_to_mass * 0.5_rt * (rho(i - 1, j, k) + rho(i, j, k));
+            const amrex::Real hall_charge_density =
+                theta_implicit_mhd::smooth_positive_floor(
+                    charge_density_raw, charge_density_floor);
+            for (int component = 0; component < 3; ++component) {
+                hall(i, j, k, component) =
+                    0.5_rt * (b_cc(i - 1, j, k, component) +
+                              b_cc(i, j, k, component)) /
+                    hall_charge_density;
+            }
+        });
+    }
+    // Ex and Ey share the z-nodal staggering; the cell-centered Ez never
+    // enters the 1D curl.
+    return {&node_hall, &node_hall, nullptr};
+#elif defined(WARPX_DIM_RZ)
+    amrex::MultiFab& radial_hall = *m_WarpX->m_fields.get(HallCoefficientE0Name, 0);
+    amrex::MultiFab& azimuthal_hall =
+        *m_WarpX->m_fields.get(HallCoefficientE1Name, 0);
+    amrex::MultiFab& axial_hall = *m_WarpX->m_fields.get(HallCoefficientE2Name, 0);
+    for (amrex::MFIter mfi(azimuthal_hall); mfi.isValid(); ++mfi) {
+        const auto hall_radial = radial_hall.array(mfi);
+        const auto hall_azimuthal = azimuthal_hall.array(mfi);
+        const auto hall_axial = axial_hall.array(mfi);
+        const auto rho = density.const_array(mfi);
+        const auto b_cc = magnetic_cc.const_array(mfi);
+        // E_theta corners: the nodal charge density; B from the four
+        // surrounding cells (the residual's corner average).
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(1, 1)),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const auto node_density = [&] (const int in, const int jn) {
+                    return 0.25_rt * (rho(in - 1, jn - 1, k) + rho(in, jn - 1, k) +
+                                      rho(in - 1, jn, k) + rho(in, jn, k));
+                };
+                const amrex::Real hall_charge_density =
+                    theta_implicit_mhd::smooth_positive_floor(
+                        charge_to_mass * node_density(i, j),
+                        charge_density_floor);
+                for (int component = 0; component < 3; ++component) {
+                    hall_azimuthal(i, j, k, component) =
+                        0.25_rt * (b_cc(i - 1, j - 1, k, component) +
+                                   b_cc(i, j - 1, k, component) +
+                                   b_cc(i - 1, j, k, component) +
+                                   b_cc(i, j, k, component)) /
+                        hall_charge_density;
+                }
+            });
+        // Er z-faces: nodes averaged in r; B from the two axially
+        // adjacent cells (the residual's z-face average).
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(0, 1)),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const auto node_density = [&] (const int in, const int jn) {
+                    return 0.25_rt * (rho(in - 1, jn - 1, k) + rho(in, jn - 1, k) +
+                                      rho(in - 1, jn, k) + rho(in, jn, k));
+                };
+                const amrex::Real hall_charge_density =
+                    theta_implicit_mhd::smooth_positive_floor(
+                        charge_to_mass * 0.5_rt *
+                            (node_density(i, j) + node_density(i + 1, j)),
+                        charge_density_floor);
+                for (int component = 0; component < 3; ++component) {
+                    hall_radial(i, j, k, component) =
+                        0.5_rt * (b_cc(i, j - 1, k, component) +
+                                  b_cc(i, j, k, component)) /
+                        hall_charge_density;
+                }
+            });
+        // Ez r-faces: nodes averaged in z; B from the two radially
+        // adjacent cells (the residual's r-face average; the below-axis
+        // cell-centered ghosts carry the m = 0 parities, so Hb_r and
+        // Hb_theta vanish exactly on the axis face).
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(1, 0)),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const auto node_density = [&] (const int in, const int jn) {
+                    return 0.25_rt * (rho(in - 1, jn - 1, k) + rho(in, jn - 1, k) +
+                                      rho(in - 1, jn, k) + rho(in, jn, k));
+                };
+                const amrex::Real hall_charge_density =
+                    theta_implicit_mhd::smooth_positive_floor(
+                        charge_to_mass * 0.5_rt *
+                            (node_density(i, j) + node_density(i, j + 1)),
+                        charge_density_floor);
+                for (int component = 0; component < 3; ++component) {
+                    hall_axial(i, j, k, component) =
+                        0.5_rt * (b_cc(i - 1, j, k, component) +
+                                  b_cc(i, j, k, component)) /
+                        hall_charge_density;
+                }
+            });
+    }
+    return {&radial_hall, &azimuthal_hall, &axial_hall};
+#else
+    amrex::ignore_unused(density, magnetic_cc, charge_to_mass,
+                         charge_density_floor);
+    return {nullptr, nullptr, nullptr};
+#endif
 }
 
 void ThetaImplicitMHD::PrintParameters () const
@@ -5076,8 +5239,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
 {
 #if defined(WARPX_DIM_1D_Z)
     using ablastr::fields::Direction;
-    // Standard resistive-MHD Ohm's law, E = -u x B + eta J, assembled at
-    // the native Yee staggering. The ideal part of the tangential
+    // Resistive/Hall-MHD Ohm's law, E = -u x B [+ J x B/rho_q] + eta J,
+    // assembled at the native Yee staggering. The ideal part of the tangential
     // components is the SAME Riemann induction flux that closes the fluid
     // update (Ex and Ey live on z-faces in 1D): F_{B_t1} = -EMF_t2 and
     // F_{B_t2} = +EMF_t1, so Ey = -F_Bx and Ex = +F_By. Ez (cell
@@ -5112,6 +5275,20 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
               ? m_WarpX->m_fields.get(ResistiveStageCurrentName, Direction{2}, 0)
               : m_WarpX->m_fields.get(FieldType::hybrid_current_fp_plasma,
                                       Direction{2}, 0));
+    // The Hall EMF is REACTIVE (it rotates B without dissipating energy),
+    // so it keeps the global theta staging of the ideal EMF: it reads the
+    // theta-stage plasma current directly, never the resistive-stage
+    // extrapolation above (that shift exists to over-center the
+    // DISSIPATIVE channels; applied to the whistler rotation it would add
+    // first-order numerical damping exactly where the theta method is
+    // chosen for its energy-conserving centering).
+    const bool include_hall = m_hybrid_pic_model->m_include_hall_term;
+    const amrex::MultiFab& hall_current_x = *m_WarpX->m_fields.get(
+        FieldType::hybrid_current_fp_plasma, Direction{0}, 0);
+    const amrex::MultiFab& hall_current_y = *m_WarpX->m_fields.get(
+        FieldType::hybrid_current_fp_plasma, Direction{1}, 0);
+    const amrex::MultiFab& hall_current_z = *m_WarpX->m_fields.get(
+        FieldType::hybrid_current_fp_plasma, Direction{2}, 0);
     const amrex::MultiFab& charge_density =
         *m_WarpX->m_fields.get(FieldType::rho_fp, 0);
     // Te [K] of the (rho, Te, J, t) parser: the temperature-primary nodal
@@ -5164,6 +5341,9 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto j_x = current_x.const_array(mfi);
         const auto j_y = current_y.const_array(mfi);
         const auto j_z = current_z.const_array(mfi);
+        const auto jh_x = hall_current_x.const_array(mfi);
+        const auto jh_y = hall_current_y.const_array(mfi);
+        const auto jh_z = hall_current_z.const_array(mfi);
         const auto rho_q = charge_density.const_array(mfi);
         const auto te_nodal = electron_temperature.const_array(mfi);
         const auto b_cc = magnetic_cc.const_array(mfi);
@@ -5186,6 +5366,35 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 flux_arr(i, j, k, flux_induction_t2) + resistivity * jx;
             electric_y(i, j, k) =
                 -flux_arr(i, j, k, flux_induction_t1) + resistivity * jy;
+            if (include_hall) {
+                // Hall EMF E += (J x B)/rho_q at the theta stage (see the
+                // staging note at the register captures): the face
+                // Riemann induction flux keeps the ION velocity, so this
+                // edge term completes E = -u_e x B exactly. Same
+                // staggered current interpolations as the |J|
+                // regularization, same cell-centered B averaging as the
+                // eta_H evaluation (total field, external included), and
+                // a C-infinity smooth floor on the charge-density
+                // division at the Ohm guard (no hard state branches on
+                // the Jacobian probe path).
+                const amrex::Real jhx = jh_x(i, j, k);
+                const amrex::Real jhy = jh_y(i, j, k);
+                const amrex::Real jhz =
+                    0.5_rt * (jh_z(i - 1, j, k) + jh_z(i, j, k));
+                const amrex::Real bx =
+                    0.5_rt * (b_cc(i - 1, j, k, 0) + b_cc(i, j, k, 0));
+                const amrex::Real by =
+                    0.5_rt * (b_cc(i - 1, j, k, 1) + b_cc(i, j, k, 1));
+                const amrex::Real bz =
+                    0.5_rt * (b_cc(i - 1, j, k, 2) + b_cc(i, j, k, 2));
+                const amrex::Real hall_charge_density =
+                    theta_implicit_mhd::smooth_positive_floor(
+                        rho_q(i, j, k), charge_density_floor);
+                electric_x(i, j, k) +=
+                    (jhy * bz - jhz * by) / hall_charge_density;
+                electric_y(i, j, k) +=
+                    (jhz * bx - jhx * bz) / hall_charge_density;
+            }
             if (include_hyper_resistivity) {
                 // E -= eta_H laplacian(J), same operator as the hybrid
                 // solver; the floored charge density keeps the eta_H
@@ -5222,6 +5431,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto j_x = current_x.const_array(mfi);
         const auto j_y = current_y.const_array(mfi);
         const auto j_z = current_z.const_array(mfi);
+        const auto jh_x = hall_current_x.const_array(mfi);
+        const auto jh_y = hall_current_y.const_array(mfi);
         const auto rho_q = charge_density.const_array(mfi);
         const auto te_nodal = electron_temperature.const_array(mfi);
         const auto rho = density.const_array(mfi);
@@ -5253,6 +5464,21 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 -(velocity_x * b_cc(i, j, k, 1) -
                   velocity_y * b_cc(i, j, k, 0)) +
                 resistivity * jz;
+            if (include_hall) {
+                // Hall EMF (diagnostic in 1D like the ideal part above):
+                // theta-stage plasma current, native cell-centered B,
+                // smooth-floored charge density (see the Ex/Ey kernel).
+                const amrex::Real jhx =
+                    0.5_rt * (jh_x(i, j, k) + jh_x(i + 1, j, k));
+                const amrex::Real jhy =
+                    0.5_rt * (jh_y(i, j, k) + jh_y(i + 1, j, k));
+                const amrex::Real hall_charge_density =
+                    theta_implicit_mhd::smooth_positive_floor(
+                        charge_density_raw, charge_density_floor);
+                electric_z(i, j, k) +=
+                    (jhx * b_cc(i, j, k, 1) - jhy * b_cc(i, j, k, 0)) /
+                    hall_charge_density;
+            }
             if (include_hyper_resistivity) {
                 amrex::Real magnetic_magnitude = 0.0_rt;
                 if (hyper_resistivity_needs_b) {
@@ -5291,7 +5517,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
     }
 #elif defined(WARPX_DIM_RZ)
     using ablastr::fields::Direction;
-    // Standard resistive-MHD Ohm's law at the native RZ (m = 0) Yee
+    // Resistive/Hall-MHD Ohm's law at the native RZ (m = 0) Yee
     // staggering. Er and Ez are DIRECT Riemann induction fluxes: Er lives
     // on z-faces (F_{B_theta} = +EMF_r there) and Ez on r-faces
     // (F_{B_theta} = -EMF_z there), so the Btheta update
@@ -5331,6 +5557,20 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
               ? m_WarpX->m_fields.get(ResistiveStageCurrentName, Direction{2}, 0)
               : m_WarpX->m_fields.get(FieldType::hybrid_current_fp_plasma,
                                       Direction{2}, 0));
+    // The Hall EMF is REACTIVE (it rotates B without dissipating energy),
+    // so it keeps the global theta staging of the ideal EMF: it reads the
+    // theta-stage plasma current directly, never the resistive-stage
+    // extrapolation above (that shift exists to over-center the
+    // DISSIPATIVE channels; applied to the whistler rotation it would add
+    // first-order numerical damping exactly where the theta method is
+    // chosen for its energy-conserving centering).
+    const bool include_hall = m_hybrid_pic_model->m_include_hall_term;
+    const amrex::MultiFab& hall_current_r = *m_WarpX->m_fields.get(
+        FieldType::hybrid_current_fp_plasma, Direction{0}, 0);
+    const amrex::MultiFab& hall_current_theta = *m_WarpX->m_fields.get(
+        FieldType::hybrid_current_fp_plasma, Direction{1}, 0);
+    const amrex::MultiFab& hall_current_z = *m_WarpX->m_fields.get(
+        FieldType::hybrid_current_fp_plasma, Direction{2}, 0);
     const amrex::MultiFab& charge_density =
         *m_WarpX->m_fields.get(FieldType::rho_fp, 0);
     // Te [K] of the (rho, Te, J, t) parser: the temperature-primary nodal
@@ -5409,6 +5649,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto j_r = current_r.const_array(mfi);
         const auto j_theta = current_theta.const_array(mfi);
         const auto j_z = current_z.const_array(mfi);
+        const auto jh_theta = hall_current_theta.const_array(mfi);
+        const auto jh_z = hall_current_z.const_array(mfi);
         const auto rho_q = charge_density.const_array(mfi);
         const auto te_nodal = electron_temperature.const_array(mfi);
         const auto b_cc = magnetic_cc.const_array(mfi);
@@ -5436,6 +5678,30 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                     vacuum_division_guard, vacuum_eta_scale);
             electric_r(i, j, k) =
                 zface(i, j, k, flux_induction_t2) + resistivity * jr;
+            if (include_hall) {
+                // Hall EMF E_r += (J_theta B_z - J_z B_theta)/rho_q at the
+                // theta stage (see the staging note at the register
+                // captures): the face Riemann induction flux keeps the
+                // ION velocity, so the edge term completes E = -u_e x B
+                // exactly. Same staggered current interpolations as the
+                // |J| regularization above, the eta_H z-face averaging of
+                // the cell-centered TOTAL B, and a C-infinity smooth
+                // floor on the charge-density division at the Ohm guard.
+                const amrex::Real jht =
+                    0.5_rt * (jh_theta(i, j, k) + jh_theta(i + 1, j, k));
+                const amrex::Real jhz =
+                    0.25_rt * (jh_z(i, j, k) + jh_z(i + 1, j, k) +
+                               jh_z(i, j - 1, k) + jh_z(i + 1, j - 1, k));
+                const amrex::Real bt =
+                    0.5_rt * (b_cc(i, j - 1, k, 1) + b_cc(i, j, k, 1));
+                const amrex::Real bz =
+                    0.5_rt * (b_cc(i, j - 1, k, 2) + b_cc(i, j, k, 2));
+                const amrex::Real hall_charge_density =
+                    theta_implicit_mhd::smooth_positive_floor(
+                        charge_density_raw, charge_density_floor);
+                electric_r(i, j, k) +=
+                    (jht * bz - jhz * bt) / hall_charge_density;
+            }
             if (include_hyper_resistivity) {
                 // E_r -= eta_H (laplacian J)_r with the m = 0 cylindrical
                 // vector Laplacian, discretely matching the hybrid solver;
@@ -5479,6 +5745,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto j_r = current_r.const_array(mfi);
         const auto j_theta = current_theta.const_array(mfi);
         const auto j_z = current_z.const_array(mfi);
+        const auto jh_r = hall_current_r.const_array(mfi);
+        const auto jh_theta = hall_current_theta.const_array(mfi);
         const auto rho_q = charge_density.const_array(mfi);
         const auto te_nodal = electron_temperature.const_array(mfi);
         const auto b_cc = magnetic_cc.const_array(mfi);
@@ -5510,6 +5778,30 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                     vacuum_division_guard, vacuum_eta_scale);
             electric_z(i, j, k) =
                 -rface(i, j, k, flux_induction_t1) + resistivity * jz;
+            if (include_hall) {
+                // Hall EMF E_z += (J_r B_theta - J_theta B_r)/rho_q at
+                // the theta stage (see the Er kernel). The eta_H r-face
+                // averaging of the cell-centered TOTAL B carries the
+                // below-axis parity ghosts, so B_theta and B_r vanish
+                // EXACTLY on the axis face and the parity-exact
+                // Ez(axis) = eta J_z of the recast is preserved (the
+                // clamped J_r average below is multiplied by that exact
+                // zero there).
+                const amrex::Real jhr =
+                    0.25_rt * (jh_r(il, j, k) + jh_r(i, j, k) +
+                               jh_r(il, j + 1, k) + jh_r(i, j + 1, k));
+                const amrex::Real jht =
+                    0.5_rt * (jh_theta(i, j, k) + jh_theta(i, j + 1, k));
+                const amrex::Real br =
+                    0.5_rt * (b_cc(i - 1, j, k, 0) + b_cc(i, j, k, 0));
+                const amrex::Real bt =
+                    0.5_rt * (b_cc(i - 1, j, k, 1) + b_cc(i, j, k, 1));
+                const amrex::Real hall_charge_density =
+                    theta_implicit_mhd::smooth_positive_floor(
+                        charge_density_raw, charge_density_floor);
+                electric_z(i, j, k) +=
+                    (jhr * bt - jht * br) / hall_charge_density;
+            }
             if (include_hyper_resistivity) {
                 // E_z -= eta_H (laplacian J)_z. On axis the geometric
                 // radial part reduces to Drr by the m = 0 symmetry of
@@ -5568,6 +5860,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto j_r = current_r.const_array(mfi);
         const auto j_theta = current_theta.const_array(mfi);
         const auto j_z = current_z.const_array(mfi);
+        const auto jh_r = hall_current_r.const_array(mfi);
+        const auto jh_z = hall_current_z.const_array(mfi);
         const auto rho_q = charge_density.const_array(mfi);
         const auto te_nodal = electron_temperature.const_array(mfi);
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
@@ -5705,6 +5999,30 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                     vacuum_division_guard, vacuum_eta_scale);
             electric_theta(i, j, k) =
                 average + dissipation + resistivity * jt_corner;
+            if (include_hall) {
+                // Hall EMF E_theta += (J_z B_r - J_r B_z)/rho_q at the
+                // theta stage (see the Er kernel): half-sum corner
+                // currents (the |J| regularization's own stencils), the
+                // eta_H four-cell corner averaging of the cell-centered
+                // TOTAL B, the nodal charge density with the C-infinity
+                // smooth Ohm floor. The axis corner returned exactly
+                // zero above, preserving the m = 0 parity.
+                const amrex::Real jhr =
+                    0.5_rt * (jh_r(i - 1, j, k) + jh_r(i, j, k));
+                const amrex::Real jhz =
+                    0.5_rt * (jh_z(i, j - 1, k) + jh_z(i, j, k));
+                const amrex::Real br = 0.25_rt *
+                    (b_cc(i - 1, j - 1, k, 0) + b_cc(i, j - 1, k, 0) +
+                     b_cc(i - 1, j, k, 0) + b_cc(i, j, k, 0));
+                const amrex::Real bz = 0.25_rt *
+                    (b_cc(i - 1, j - 1, k, 2) + b_cc(i, j - 1, k, 2) +
+                     b_cc(i - 1, j, k, 2) + b_cc(i, j, k, 2));
+                const amrex::Real hall_charge_density =
+                    theta_implicit_mhd::smooth_positive_floor(
+                        rho_q(i, j, k), charge_density_floor);
+                electric_theta(i, j, k) +=
+                    (jhz * br - jhr * bz) / hall_charge_density;
+            }
             if (include_hyper_resistivity) {
                 // E_theta -= eta_H (laplacian J)_theta at the corner
                 // (J_theta's native staggering, so the stencil needs no

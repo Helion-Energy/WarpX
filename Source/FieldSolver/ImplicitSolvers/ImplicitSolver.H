@@ -342,6 +342,21 @@ public:
     }
 
     /**
+     * \brief Return the frozen Hall coefficient vector Hb = B/rho_q (the
+     * cell-centered total magnetic field over the Ohm-floored charge
+     * density) evaluated on the electric-field staggerings with the
+     * residual Ohm assembly's own interpolation stencils, read by the MHD
+     * block preconditioner's Hall/whistler rows under the
+     * conservative-form recast. Null components when the Hall term is off
+     * (or for implicit schemes that do not expose it).
+     */
+    [[nodiscard]] virtual amrex::Array<const amrex::MultiFab*, 3>
+    GetMHDHallCoefficientEdgeForPC () const
+    {
+        return {nullptr, nullptr, nullptr};
+    }
+
+    /**
      * \brief Return whether the implicit MHD state advances the ion fluid.
      *
      * When false, the MHD block preconditioner treats the ion density and
