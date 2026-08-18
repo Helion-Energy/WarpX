@@ -1,0 +1,141 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Conduction-stage L-stability (implicit_mhd.conduction_theta): a hot
+# Gaussian Te spike sitting over a low-density halo band (rho dips to
+# 0.1 rho0; Te = Te0 (1 + spike_amp gauss) rides the band) with a
+# seeded grid-Nyquist Te ripple, run at a stiff grid diffusion number
+#   theta dt chi / dx^2 = 1e3.
+# The trapezoidal rule (conduction_theta = theta = 0.5) is A-stable but
+# not L-stable: the Nyquist conduction mode has amplification
+#   g = (1 - z/2)/(1 + z/2) -> -1,  z = 4 dt chi/dx^2 = 8e3,
+# i.e. it survives with |amplification| ~ 1 and flips sign every step
+# (the production halo temperature checkerboard). Backward-Euler
+# conduction (conduction_theta = 1, this deck's default) damps it as
+# g = 1/(1 + z) -> 0 in a single step and relaxes the whole profile to
+# the analytic fully-diffused limit (uniform specific internal energy)
+# while conserving sum(U_e) to round-off. The ion fluid is frozen
+# (evolve_ion_fluid = false, barotropic ions) so the electron energy
+# sees the conduction operator in isolation: u = 0, J = 0, eta = 0.
+# The spike amplitude is chosen so the trapezoidal mirror state
+# 2 e_infinity - e_spec stays far above the positivity bounds: the CN
+# twin must RUN (and keep its checkerboard) rather than lock the
+# Newton line search on the floor.
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+my_constants.Te0 = 10.0
+my_constants.Pe0 = n0 * Te0 * q_e
+my_constants.gamma = 5.0/3.0
+my_constants.B0 = sqrt(mu0 * Pe0)
+my_constants.nz = 64
+my_constants.Lz = 1.0
+# low-density halo band, and the hot spike riding it
+my_constants.halo_depth = 0.9
+my_constants.halo_width = 0.08
+my_constants.spike_amp = 0.6
+# seeded grid-Nyquist Te ripple: cos(pi*(z*nz/Lz - 0.5)) = (-1)^i at
+# the cell centers z_i = (i + 0.5) Lz/nz
+my_constants.dPeN = 0.02
+# production-halo electron thermal diffusivity
+my_constants.chi = 3.0e4
+# stiff conduction: theta dt chi/dx^2 = 1e3 at theta = 0.5
+my_constants.dt = 2000.0*(Lz/nz)*(Lz/nz)/chi
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 10
+amr.n_cell = nz
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+# the profile flattens to round-off within a few backward-Euler steps:
+# tighter tolerances stall the line search on the noise floor
+newton.absolute_tolerance = 1.0e-11
+newton.relative_tolerance = 1.0e-8
+newton.max_iterations = 20
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-12
+gmres.max_iterations = 500
+# unpreconditioned Krylov on a kappa ~ 4 theta_c dt chi/dx^2 ~ 1e4
+# operator: the default restart length 30 stagnates
+gmres.restart_length = 200
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te0
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-6 * Pe0
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 0.5
+implicit_mhd.evolve_ion_fluid = false
+implicit_mhd.thermal_diffusivity_electron = chi
+# Backward-Euler conduction stage; the CTest CN twin overrides this to
+# 0.5 (= theta, the bit-identical default path) to document the
+# surviving Nyquist checkerboard.
+implicit_mhd.conduction_theta = 1.0
+# e_spec = e0 (1 + spike_amp gauss)(1 + dPeN (-1)^i): the hot spike
+# and the Nyquist ripple live on the diffused quantity directly
+implicit_mhd.mass_density(x,y,z) = rho0*(1.0 - halo_depth*exp(-((z-0.5*Lz)/halo_width)^2))
+implicit_mhd.electron_pressure(x,y,z) = Pe0*(1.0 - halo_depth*exp(-((z-0.5*Lz)/halo_width)^2))*(1.0 + spike_amp*exp(-((z-0.5*Lz)/halo_width)^2))*(1.0 + dPeN*cos(pi*(z*nz/Lz - 0.5)))
+
+# A uniform axial field keeps the electromagnetic subsystem quiescent
+# (u = 0 frozen, J = 0, eta = 0): the run isolates the conductive
+# channel of the electron energy equation.
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 B0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 10
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz jz implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy
+diag1.write_species = 0

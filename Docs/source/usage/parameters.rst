@@ -4806,6 +4806,49 @@ Jacobian probes.
     ``0.9 chi_max``), applied per channel before the free-streaming
     limiter.
 
+.. pp:param:: implicit_mhd.conduction_qs_chi
+    :type: ``float``
+    :default: ``0`` (off)
+
+    Quasi-shorting cross-field boost amplitude in m^2/s of the
+    Braginskii :math:`\chi_\perp` (requires
+    ``thermal_conduction_model = braginskii``; with the parser
+    diffusivities, carry the equivalent physics inside the deck-level
+    ``thermal_diffusivity_*`` expressions instead): subgrid turbulence
+    on broken flux surfaces shorts the channel across surfaces, modeled
+    as an ADDITIVE cross-field diffusivity keyed to the pseudo-entropy
+    excess :math:`s = (T/T_0)\,(\rho_0/\rho)^{2/3}` above the load
+    envelope (:math:`T_0` =
+    :pp:param:`implicit_mhd.conduction_qs_reference_temperature`,
+    :math:`\rho_0` = :pp:param:`implicit_mhd.reference_mass_density`,
+    :math:`\rho` smoothly guarded at the Ohm density scale), ramped by
+    the :math:`C^\infty` smooth-max :math:`\chi_\mathrm{add} =
+    \chi_\mathrm{qs}\, \tfrac{1}{2}\big[(s - s_\mathrm{on}) + \sqrt{(s
+    - s_\mathrm{on})^2 + w^2}\big]` with :math:`w = 0.3\,(s_\mathrm{on}
+    - 1)`. The ramp is centered ABOVE the envelope
+    (:math:`s_\mathrm{on} > 1` enforced): a ramp centered on the
+    envelope leaks :math:`w/2` of the amplitude onto every on-adiabat
+    cell. Electron channel always; ion channel under ``ion_closure =
+    total_energy``, keyed on the ion temperature with the same
+    :math:`T_0`. The :math:`s` inputs follow
+    :pp:param:`implicit_mhd.conduction_coefficient_state` like every
+    other Braginskii coefficient input; the ``conduction_chi_min/max``
+    clamp applies AFTER the addition.
+
+.. pp:param:: implicit_mhd.conduction_qs_onset
+    :type: ``float``
+    :default: ``1.5``
+
+    Pseudo-entropy onset :math:`s_\mathrm{on}` of the quasi-shorting
+    ramp; must exceed 1.
+
+.. pp:param:: implicit_mhd.conduction_qs_reference_temperature
+    :type: ``float``
+    :unit: eV
+
+    Load-envelope temperature :math:`T_0` of the quasi-shorting
+    pseudo-entropy. Required (positive) when ``conduction_qs_chi > 0``.
+
 .. pp:param:: implicit_mhd.pressure_corner_width_fraction
     :type: ``float``
     :default: ``0``
@@ -5256,6 +5299,35 @@ Jacobian probes.
     1``) gives :math:`1/(1+z) \to 0`, damping those modes in one step
     with the ideal dynamics still second-order centered. Values other
     than the global theta require ``fluid_flux = hlld`` or ``central``.
+
+.. pp:param:: implicit_mhd.conduction_theta
+    :type: ``float``
+    :default: :pp:param:`implicit_evolve.theta`
+
+    Time centering of the thermal-conduction stage, in ``[0.5, 1]``;
+    the wave/advective dynamics keep the global
+    :pp:param:`implicit_evolve.theta`. The conductive-flux ENERGY
+    arguments -- the specific internal energies whose
+    differences/gradients drive the flux, the Braginskii tangential
+    stencil samples, the wall thermal-drain interior energy, and the
+    free-streaming-cap temperatures -- are evaluated at the exact stage
+    extrapolation :math:`e^{n+\theta_c} = (\theta_c/\theta)
+    e^{n+\theta} + (1 - \theta_c/\theta) e^n`, linear in the Newton
+    iterate, so matrix-free Jacobian probes see the shifted centering
+    exactly (the conduction twin of
+    :pp:param:`implicit_mhd.resistive_theta`). Motivation
+    (L-stability): the trapezoidal rule is A-stable but not L-stable --
+    at halo diffusion numbers :math:`\theta \Delta t \chi/\Delta x^2
+    \gg 1` grid-Nyquist conduction modes come through with
+    amplification :math:`(1 - z/2)/(1 + z/2) \to -1` (amplitude
+    :math:`\sim 1`, sign flipped every step), measured in production as
+    a halo temperature checkerboard preceding Newton freeze-guard
+    aborts, while backward-Euler conduction (``conduction_theta = 1``)
+    damps them as :math:`1/(1 + z) \to 0` in one step. The conduction
+    COEFFICIENTS keep their own
+    :pp:param:`implicit_mhd.conduction_coefficient_state` rule. Values
+    other than the global theta require an active thermal-conduction
+    channel.
 
 .. pp:param:: implicit_mhd.evolve_ion_fluid
     :type: ``bool``

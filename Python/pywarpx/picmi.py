@@ -2402,6 +2402,31 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         pass-through below 0.9 chi_max), applied per channel before the
         free-streaming limiter.
 
+    conduction_qs_chi: float, default=0 (off)
+        Quasi-shorting cross-field boost amplitude [m^2/s] of the
+        Braginskii chi_perp (thermal_conduction_model="braginskii"
+        required): subgrid turbulence on broken flux surfaces shorts
+        the channel across surfaces, modeled as an ADDITIVE chi_perp
+        keyed to the pseudo-entropy excess
+        s = (T/T0) (rho0/rho)^(2/3) above the load envelope
+        (T0 = conduction_qs_reference_temperature,
+        rho0 = reference_mass_density), ramped by the C-infinity
+        smooth-max chi_add = qs_chi * smoothmax(s - onset, 0; w) with
+        w = 0.3 (onset - 1) -- centered ABOVE the envelope so
+        on-adiabat cells see essentially zero boost. Electron channel
+        always; ion channel under ion_closure="total_energy", keyed on
+        the ion temperature with the same T0. The chi_min/max clamp
+        applies after the addition.
+
+    conduction_qs_onset: float, default=1.5
+        Pseudo-entropy onset of the quasi-shorting ramp (must exceed 1:
+        a ramp centered on the envelope leaks half its width onto every
+        on-adiabat cell).
+
+    conduction_qs_reference_temperature: float, optional
+        Load-envelope temperature T0 [eV] of the quasi-shorting
+        pseudo-entropy. Required (positive) when conduction_qs_chi > 0.
+
     pressure_corner_width_fraction: float, default=0 (legacy width)
         Corner width of the smooth-max internal-energy floor in the
         recast's ion pressure recovery (ion_closure="total_energy"): a
@@ -2703,6 +2728,23 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         modes in one step where the trapezoidal rule leaves them
         marginal and sign-flipping. Values other than the global theta
         require fluid_flux="hlld".
+
+    conduction_theta: float, optional
+        Time centering of the thermal-conduction stage, in [0.5, 1];
+        everything else keeps the global theta. Default: the global
+        theta (bit-identical). The conductive-flux ENERGY arguments are
+        evaluated at the exact stage extrapolation
+        e_stage = (theta_c/theta) e_theta + (1 - theta_c/theta) e_old,
+        linear in the Newton iterate, so matrix-free Jacobian probes
+        see the shifted centering exactly. Rationale (L-stability): at
+        halo diffusion numbers theta dt chi/dx^2 >> 1 the trapezoidal
+        rule leaves grid-Nyquist conduction modes at amplification
+        g -> -1 -- the measured production halo temperature
+        checkerboard preceding Newton freeze-guard aborts.
+        conduction_theta=1 (backward Euler conduction) damps them as
+        g = 1/(1 + z) -> 0 while waves/advection keep second-order
+        centering. The conduction coefficients keep their own
+        conduction_coefficient_state rule.
     """
 
     def __init__(
@@ -2731,6 +2773,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         halo_pedestal_energy_rate=None,
         vacuum_resistivity_diffusivity=None,
         resistive_theta=None,
+        conduction_theta=None,
         fluid_flux=None,
         viscosity=None,
         thermal_diffusivity_ion=None,
@@ -2740,6 +2783,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         conduction_coulomb_log=None,
         conduction_chi_min=None,
         conduction_chi_max=None,
+        conduction_qs_chi=None,
+        conduction_qs_onset=None,
+        conduction_qs_reference_temperature=None,
         pressure_corner_width_fraction=None,
         r_open_fluid=None,
         z_boundary_fluid=None,
@@ -2800,6 +2846,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.halo_pedestal_energy_rate = halo_pedestal_energy_rate
         self.vacuum_resistivity_diffusivity = vacuum_resistivity_diffusivity
         self.resistive_theta = resistive_theta
+        self.conduction_theta = conduction_theta
         self.fluid_flux = fluid_flux
         self.viscosity = viscosity
         self.thermal_diffusivity_ion = thermal_diffusivity_ion
@@ -2809,6 +2856,11 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.conduction_coulomb_log = conduction_coulomb_log
         self.conduction_chi_min = conduction_chi_min
         self.conduction_chi_max = conduction_chi_max
+        self.conduction_qs_chi = conduction_qs_chi
+        self.conduction_qs_onset = conduction_qs_onset
+        self.conduction_qs_reference_temperature = (
+            conduction_qs_reference_temperature
+        )
         self.pressure_corner_width_fraction = pressure_corner_width_fraction
         self.r_open_fluid = r_open_fluid
         self.z_boundary_fluid = z_boundary_fluid
@@ -2877,6 +2929,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
             self.vacuum_resistivity_diffusivity
         )
         implicit_mhd.resistive_theta = self.resistive_theta
+        implicit_mhd.conduction_theta = self.conduction_theta
         implicit_mhd.fluid_flux = self.fluid_flux
         implicit_mhd.viscosity = self.viscosity
         # strings route to the parser signature; numbers keep the
@@ -2902,6 +2955,11 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.conduction_coulomb_log = self.conduction_coulomb_log
         implicit_mhd.conduction_chi_min = self.conduction_chi_min
         implicit_mhd.conduction_chi_max = self.conduction_chi_max
+        implicit_mhd.conduction_qs_chi = self.conduction_qs_chi
+        implicit_mhd.conduction_qs_onset = self.conduction_qs_onset
+        implicit_mhd.conduction_qs_reference_temperature = (
+            self.conduction_qs_reference_temperature
+        )
         implicit_mhd.pressure_corner_width_fraction = (
             self.pressure_corner_width_fraction
         )

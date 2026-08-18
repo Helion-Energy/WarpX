@@ -1,0 +1,138 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Braginskii quasi-shorting cross-field boost (implicit_mhd.
+# conduction_qs_*): a strongly magnetized 1D column (uniform Bx
+# PERPENDICULAR to z, Omega_e tau_e ~ 1e4) so all z conduction is
+# cross-field. The state carries
+#   - an entropy-excess POCKET in a rarefied band at z = Lz/2:
+#     density dips to 0.25 rho0 and a hot factor takes the electron
+#     pseudo-entropy s = (Te/T0)(rho0/rho)^(2/3) to s = hot = 8, far
+#     above the onset -> chi_add ~ qs_chi (s - onset) >> chi_perp;
+#   - an ON-ADIABAT background ripple (mode 4): Te ~ rho^(2/3) so
+#     s = 1 EXACTLY along the ripple -- it may only decay through the
+#     shifted-ramp leak chi_add(s = 1), bounded < 1% of qs_chi.
+# The ion fluid is frozen (barotropic, evolve_ion_fluid = false),
+# u = 0, J = 0, eta = 0: the electron energy sees the anisotropic
+# conduction operator in isolation, and the pocket/leak measurements
+# compare against a no-QS twin (conduction_qs_chi = 0 override).
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+my_constants.T0 = 10.0
+my_constants.Pe0 = n0 * T0 * q_e
+my_constants.gamma = 5.0/3.0
+# Bx = 0.05 T: Omega_e tau_e ~ 9.6e3 at (T0, n0) -> chi_perp_e ~ 0.1
+# m2/s, negligible against the quasi-shorting amplitude
+my_constants.B0 = 0.05
+my_constants.nz = 64
+my_constants.Lz = 1.0
+my_constants.kz4 = 8*pi/Lz
+# on-adiabat ripple amplitude (density); Te rides rho^(2/3)
+my_constants.drho = 0.05
+# rarefied pocket: rho -> 0.25 rho0 over ~3 cells, entropy excess
+# boost s -> hot at the center (the pocket sits on a ripple node)
+my_constants.dip = 0.75
+my_constants.wp = 0.05
+my_constants.hot = 8.0
+# quasi-shorting: amplitude 2e4 m2/s above onset s = 1.25
+# (analytic on-adiabat leak 0.5*(-0.25 + sqrt(0.25^2 + w^2)) with
+# w = 0.3*(onset-1) = 0.075: 5.5e-3 of the amplitude, < 1%)
+my_constants.chi_qs = 2.0e4
+my_constants.qs_onset = 1.25
+# ~20% pocket relaxation over 10 steps at chi_add ~ 1.35e5 m2/s
+my_constants.dt = 4.0e-10
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 10
+amr.n_cell = nz
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 20
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-10
+gmres.max_iterations = 300
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = T0
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-6 * Pe0
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 0.5
+implicit_mhd.evolve_ion_fluid = false
+implicit_mhd.thermal_conduction_model = braginskii
+implicit_mhd.conduction_coulomb_log = 10.0
+implicit_mhd.conduction_qs_chi = chi_qs
+implicit_mhd.conduction_qs_onset = qs_onset
+implicit_mhd.conduction_qs_reference_temperature = T0
+# rho = rho0 * ripple * pocket-dip; Te = T0 (rho/rho0)^(2/3) * boost
+# -> Pe = n Te q_e = Pe0 (ripple*dip)^(5/3) * boost and s = boost
+# exactly (s = 1 on the rippled background, s = hot in the pocket)
+implicit_mhd.mass_density(x,y,z) = rho0*(1.0 + drho*sin(kz4*z))*(1.0 - dip*exp(-((z-0.5*Lz)/wp)^2))
+implicit_mhd.electron_pressure(x,y,z) = Pe0*((1.0 + drho*sin(kz4*z))*(1.0 - dip*exp(-((z-0.5*Lz)/wp)^2)))^(5.0/3.0)*(1.0 + (hot-1.0)*exp(-((z-0.5*Lz)/wp)^2))
+
+# Uniform TANGENTIAL field: bhat_n = 0 on every z face, so the
+# Braginskii tensor reduces to pure chi_perp (+ chi_add) along z; the
+# electromagnetic subsystem is quiescent (u = 0 frozen, J = 0, eta = 0).
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = B0 0.0 0.0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 10
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bx jz implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy
+diag1.write_species = 0

@@ -417,6 +417,65 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Braginskii quasi-shorting twin (conduction_qs_chi = 0): the no-QS
+# Reference the braginskii_qs gates difference against
+add_warpx_test(
+    test_1d_theta_implicit_mhd_braginskii_qs_twin  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_braginskii_qs my_constants.chi_qs=0.0"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Braginskii quasi-shorting cross-field boost: an entropy-excess pocket
+# in a rarefied magnetized band must drain across the flux surfaces at
+# the additive chi_add rate (>1e3 x the no-QS twin, matching the
+# initial-profile face-flux prediction), while an ON-ADIABAT (s = 1)
+# background ripple sees the shifted-ramp leak only -- measured
+# < 1% of the amplitude (a ramp centered on the envelope leaks 3.75%
+# and fails)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_braginskii_qs  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_braginskii_qs  # inputs
+    "analysis_mhd_braginskii_qs.py diags/diag000000 diags/diag000010"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_braginskii_qs_twin  # dependency
+)
+
+# conduction-stage L-stability (implicit_mhd.conduction_theta):
+# backward-Euler conduction (theta_c = 1) must obliterate a seeded
+# grid-Nyquist Te ripple at theta dt chi/dx^2 = 1e3 (one-step factor
+# 1/(1 + 8e3)), land the analytic fully-diffused profile, and close
+# sum(U_e) to round-off
+add_warpx_test(
+    test_1d_theta_implicit_mhd_conduction_theta  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_conduction_theta  # inputs
+    "analysis_mhd_conduction_theta.py diags/diag000000 diags/diag000010 backward_euler"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# the same deck at conduction_theta = theta = 0.5 (the bit-identical
+# default Crank-Nicolson path): documents the L-stability failure the
+# stage shift exists for -- the Nyquist checkerboard survives with
+# |amplification| ~ 1 and its fluctuation-power share grows (the
+# production halo signature)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_conduction_theta_cn  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_conduction_theta implicit_mhd.conduction_theta=0.5"  # inputs
+    "analysis_mhd_conduction_theta.py diags/diag000000 diags/diag000010 crank_nicolson"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # density-keyed vacuum resistivity + resistive backward-Euler centering:
 # one-step transverse-mode decay matches the theta_r-discrete prediction
 # 1/(1+z) (not the trapezoidal value), with no electron heating from the

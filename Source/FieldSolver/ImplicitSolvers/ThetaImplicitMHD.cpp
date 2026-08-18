@@ -157,6 +157,8 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     // Sentinel -1 = "not set": defaulted to the global implicit_evolve.theta
     // in Define(), where theta is parsed.
     utils::parser::queryWithParser(pp, "resistive_theta", m_resistive_theta);
+    // Same sentinel convention for the conduction-stage centering.
+    utils::parser::queryWithParser(pp, "conduction_theta", m_conduction_theta);
     utils::parser::queryWithParser(pp, "positivity_safety", m_positivity_safety);
     pp.query("external_field_iteration", m_external_field_iteration);
     pp.query("fluid_flux", m_fluid_flux);
@@ -251,6 +253,43 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         m_conduction_chi_max == 0.0_rt ||
             m_conduction_chi_max > m_conduction_chi_min,
         "implicit_mhd.conduction_chi_max must exceed conduction_chi_min");
+    // Quasi-shorting cross-field boost (see the header): additive
+    // chi_perp keyed to the pseudo-entropy excess above the load
+    // envelope. Braginskii only -- the parser diffusivities carry the
+    // equivalent physics in their own chi_qs expressions.
+    utils::parser::queryWithParser(pp, "conduction_qs_chi",
+                                   m_conduction_qs_chi);
+    utils::parser::queryWithParser(pp, "conduction_qs_onset",
+                                   m_conduction_qs_onset);
+    const bool has_conduction_qs_reference_temperature =
+        utils::parser::queryWithParser(
+            pp, "conduction_qs_reference_temperature",
+            m_conduction_qs_reference_temperature);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_conduction_qs_chi >= 0.0_rt,
+        "implicit_mhd.conduction_qs_chi cannot be negative "
+        "(0 disables the quasi-shorting boost)");
+    if (m_conduction_qs_chi > 0.0_rt) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_conduction_braginskii,
+            "implicit_mhd.conduction_qs_chi requires "
+            "implicit_mhd.thermal_conduction_model = braginskii (with "
+            "the parser diffusivities, carry the quasi-shorting term "
+            "inside the deck-level thermal_diffusivity_* chi_qs "
+            "expressions instead)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_conduction_qs_onset > 1.0_rt,
+            "implicit_mhd.conduction_qs_onset must exceed 1: the ramp "
+            "is centered ABOVE the load envelope (a ramp centered on "
+            "the envelope leaks half its width onto every on-adiabat "
+            "cell)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            has_conduction_qs_reference_temperature &&
+                m_conduction_qs_reference_temperature > 0.0_rt,
+            "implicit_mhd.conduction_qs_chi requires a positive "
+            "implicit_mhd.conduction_qs_reference_temperature (the "
+            "load-envelope temperature T0, in eV)");
+    }
     utils::parser::queryWithParser(pp, "pressure_corner_width_fraction",
                                    m_pressure_corner_width_fraction);
     pp.query("r_open_fluid", m_r_open_fluid);
@@ -1144,6 +1183,27 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
                 plasma_current->nComp(), plasma_current->nGrowVect(), 0.0_rt);
         }
     }
+    if (m_conduction_theta < 0.0_rt) {
+        // Default: the conductive fluxes keep the global centering.
+        m_conduction_theta = m_theta;
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_conduction_theta >= 0.5_rt && m_conduction_theta <= 1.0_rt,
+        "implicit_mhd.conduction_theta must be between 0.5 and 1");
+    if (m_conduction_theta != m_theta) {
+        // No stage registers needed (unlike resistive_theta): the stage
+        // energies are extrapolated in-kernel from arrays the conductive
+        // flux already reads. Guard silent no-ops only.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_conduction_braginskii || m_chi_ion_is_parser ||
+                m_chi_electron_is_parser ||
+                m_thermal_diffusivity_ion > 0.0_rt ||
+                m_thermal_diffusivity_electron > 0.0_rt,
+            "implicit_mhd.conduction_theta different from "
+            "implicit_evolve.theta requires an active thermal-conduction "
+            "channel (only the conductive face fluxes consume the "
+            "shifted centering)");
+    }
     parseNonlinearSolverParams(pp);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_nlsolver_type == NonlinearSolverType::newton,
@@ -1851,6 +1911,14 @@ void ThetaImplicitMHD::PrintParameters () const
                                  (m_conduction_chi_max > 0.0_rt
                                       ? std::to_string(m_conduction_chi_max)
                                       : std::string("off")) +
+                                 (m_conduction_qs_chi > 0.0_rt
+                                      ? ", qs chi = " +
+                                            std::to_string(
+                                                m_conduction_qs_chi) +
+                                            " @ onset " +
+                                            std::to_string(
+                                                m_conduction_qs_onset)
+                                      : std::string{}) +
                                  ")"
                            : std::string{})
                    << "\n"
@@ -1859,6 +1927,8 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "Positivity step safety:        " << m_positivity_safety << "\n"
                    << "Joule heating:                 " << m_include_joule_heating << "\n"
                    << "Resistive theta:               " << m_resistive_theta << "\n"
+                   << "Conduction theta:              " << m_conduction_theta
+                   << "\n"
                    << "Vacuum eta diffusivity [m2/s]: "
                    << m_vacuum_resistivity_diffusivity << "\n"
                    << "Halo pedestal fraction:        " << m_halo_pedestal_fraction
@@ -3804,6 +3874,17 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const bool chi_total_energy = (m_ion_closure == "total_energy");
     const amrex::Real face_time = a_time;
     const bool chi_coeff_old = m_conduction_coefficient_step_old;
+    // Conduction-stage centering (implicit_mhd.conduction_theta): every
+    // ENERGY argument whose difference/gradient drives a conductive flux
+    // is the exact extrapolation
+    //     e^{n+theta_c} = (theta_c/theta) e^{n+theta}
+    //                     + (1 - theta_c/theta) e^n,
+    // the conduction twin of the resistive-stage current (see
+    // PrepareResistiveStageCurrents). conduction_stage = false keeps the
+    // theta path bit-identical (no stage arithmetic is performed).
+    const bool conduction_stage = (m_conduction_theta != m_theta);
+    const amrex::Real stage_new_weight = m_conduction_theta / m_theta;
+    const amrex::Real stage_old_weight = 1.0_rt - stage_new_weight;
     const bool add_conduction =
         braginskii ||
         (chi_ion > 0.0_rt || chi_electron > 0.0_rt || chi_any_parser);
@@ -3860,6 +3941,24 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
         (m_electron_pressure_floor + m_ion_pressure_floor);
     const amrex::Real brag_chi_min = m_conduction_chi_min;
     const amrex::Real brag_chi_max = m_conduction_chi_max;
+    // Quasi-shorting cross-field boost (implicit_mhd.conduction_qs_*):
+    // an ADDITIVE Braginskii chi_perp keyed to the pseudo-entropy excess
+    // above the load envelope (see the header and the qs_boost lambda in
+    // the kernel). T0 is stored in eV; the face temperatures are kelvin.
+    const bool add_qs =
+        m_conduction_braginskii && m_conduction_qs_chi > 0.0_rt;
+    const amrex::Real qs_chi = m_conduction_qs_chi;
+    const amrex::Real qs_onset = m_conduction_qs_onset;
+    const amrex::Real qs_width = 0.3_rt * (m_conduction_qs_onset - 1.0_rt);
+    const amrex::Real qs_inverse_t0 =
+        (m_conduction_qs_reference_temperature > 0.0_rt)
+            ? PhysConst::kb / (m_conduction_qs_reference_temperature *
+                               PhysConst::q_e)
+            : 0.0_rt;
+    const amrex::Real qs_envelope_density = m_reference_mass_density;
+    // Smooth density guard of the entropy argument, at the same Ohm
+    // density scale the Braginskii coefficient inputs are floored at.
+    const amrex::Real qs_density_guard = OhmMassDensityFloor();
     // Stair-step wall thermal boundary (implicit_mhd.wall_thermal_bc):
     // the conducting-wall mask is electromagnetic only, so without this
     // the conduction operator exchanges blindly across the stair-step
@@ -4490,6 +4589,135 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         face_jmag = std::sqrt(jsq);
                     }
                 }
+                // Conduction-stage energy arguments (implicit_mhd.
+                // conduction_theta != implicit_evolve.theta): the
+                // per-side specific internal energies that drive every
+                // conductive flux below -- the normal gradients, the
+                // wall-drain interior energy, and (with the weights
+                // folded into the gradient) the Braginskii tangential
+                // stencil -- are the exact extrapolation
+                //     e^{n+theta_c} = (theta_c/theta) e^{n+theta}
+                //                     + (1 - theta_c/theta) e^n.
+                // The old terms use the chi_coeff_old recipes (hard
+                // floors are fine on per-solve constants); the theta
+                // terms are the SAME CellState values the default path
+                // reads, so the stage value is LINEAR in the theta-stage
+                // energy arguments and matrix-free Jacobian probes see
+                // the shifted centering exactly -- nothing is
+                // re-evaluated nonlinearly at the stage value. The
+                // free-streaming caps and the wall-drain gate consume
+                // the SAME stage energies (one consistent conduction
+                // stage): with theta_c != theta the limiter inputs are
+                // stage values, NOT theta or end-of-step values. The chi
+                // COEFFICIENTS keep conduction_coefficient_state.
+                const amrex::Real inverse_gamma_e_minus_one =
+                    1.0_rt / (parameters.gamma_e - 1.0_rt);
+                amrex::Real e_spec_electron_left =
+                    left.electron_pressure * inverse_gamma_e_minus_one /
+                    left.safe_density;
+                amrex::Real e_spec_electron_right =
+                    right.electron_pressure * inverse_gamma_e_minus_one /
+                    right.safe_density;
+                amrex::Real e_spec_ion_left =
+                    left.ion_internal / left.safe_density;
+                amrex::Real e_spec_ion_right =
+                    right.ion_internal / right.safe_density;
+                // Free-streaming-cap temperatures: the coefficient-state
+                // face values by default; stage values (from the stage
+                // pressures over the SAME coefficient-state face charge
+                // density) when the conduction stage is shifted. Wall
+                // faces keep the coefficient-state reservoir average --
+                // the drain's sign/cap structure is unchanged, only its
+                // e_int argument shifts.
+                amrex::Real cap_te = face_te;
+                amrex::Real cap_ti = face_ti;
+                if (conduction_stage) {
+                    const amrex::Real rho_old_left = std::max(
+                        rho_old(il, jl, kl), parameters.density_floor);
+                    const amrex::Real rho_old_right = std::max(
+                        rho_old(i, j, k), parameters.density_floor);
+                    const amrex::Real pe_old_left = std::max(
+                        (parameters.gamma_e - 1.0_rt) *
+                            energy_old(il, jl, kl),
+                        parameters.electron_pressure_floor);
+                    const amrex::Real pe_old_right = std::max(
+                        (parameters.gamma_e - 1.0_rt) * energy_old(i, j, k),
+                        parameters.electron_pressure_floor);
+                    e_spec_electron_left =
+                        stage_new_weight * e_spec_electron_left +
+                        stage_old_weight *
+                            (pe_old_left * inverse_gamma_e_minus_one /
+                             rho_old_left);
+                    e_spec_electron_right =
+                        stage_new_weight * e_spec_electron_right +
+                        stage_old_weight *
+                            (pe_old_right * inverse_gamma_e_minus_one /
+                             rho_old_right);
+                    amrex::Real pi_old_left = 0.0_rt;
+                    amrex::Real pi_old_right = 0.0_rt;
+                    if (chi_total_energy) {
+                        amrex::Real ke_left = 0.0_rt;
+                        amrex::Real ke_right = 0.0_rt;
+                        for (int component = 0; component < 3;
+                             ++component) {
+                            ke_left += mom_old(il, jl, kl, component) *
+                                       mom_old(il, jl, kl, component);
+                            ke_right += mom_old(i, j, k, component) *
+                                        mom_old(i, j, k, component);
+                        }
+                        ke_left *= 0.5_rt / rho_old_left;
+                        ke_right *= 0.5_rt / rho_old_right;
+                        pi_old_left = std::max(
+                            (parameters.gamma_i - 1.0_rt) *
+                                (ion_e_old(il, jl, kl) - ke_left),
+                            parameters.ion_pressure_floor);
+                        pi_old_right = std::max(
+                            (parameters.gamma_i - 1.0_rt) *
+                                (ion_e_old(i, j, k) - ke_right),
+                            parameters.ion_pressure_floor);
+                        const amrex::Real inverse_gamma_i_minus_one =
+                            1.0_rt / (parameters.gamma_i - 1.0_rt);
+                        e_spec_ion_left =
+                            stage_new_weight * e_spec_ion_left +
+                            stage_old_weight *
+                                (pi_old_left * inverse_gamma_i_minus_one /
+                                 rho_old_left);
+                        e_spec_ion_right =
+                            stage_new_weight * e_spec_ion_right +
+                            stage_old_weight *
+                                (pi_old_right * inverse_gamma_i_minus_one /
+                                 rho_old_right);
+                    }
+                    if (!wall_face && chi_needs_state) {
+                        // Stage cap temperatures: face-averaged stage
+                        // pressures, hard-floored so the thermal speeds
+                        // stay defined on extrapolated probe states.
+                        const amrex::Real inverse_nkb =
+                            PhysConst::q_e /
+                            (face_charge_density * PhysConst::kb);
+                        cap_te =
+                            std::max(0.5_rt * (stage_new_weight *
+                                                   (left.electron_pressure +
+                                                    right.electron_pressure) +
+                                               stage_old_weight *
+                                                   (pe_old_left +
+                                                    pe_old_right)),
+                                     parameters.electron_pressure_floor) *
+                            inverse_nkb;
+                        if (chi_total_energy) {
+                            cap_ti =
+                                std::max(0.5_rt *
+                                             (stage_new_weight *
+                                                  (left.ion_pressure +
+                                                   right.ion_pressure) +
+                                              stage_old_weight *
+                                                  (pi_old_left +
+                                                   pi_old_right)),
+                                         parameters.ion_pressure_floor) *
+                                inverse_nkb;
+                        }
+                    }
+                }
                 // Braginskii face geometry (static branch on the host
                 // model flag): the face field takes the single-valued
                 // staggered B_n and the cell-averaged tangential TOTAL
@@ -4560,6 +4788,38 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                              electron_e_spec(ipr, jpr, kpr) -
                              electron_e_spec(iml, jml, kml) -
                              electron_e_spec(imr, jmr, kmr));
+                        if (conduction_stage) {
+                            // Stage extrapolation of the tangential
+                            // samples, folded into the gradient (the
+                            // stencil is linear in the samples); the
+                            // old samples use the chi_coeff_old
+                            // hard-floored recipe, per-solve constants.
+                            const auto electron_e_spec_old =
+                                [=] (const int ic, const int jc,
+                                     const int kc) {
+                                    const amrex::Real pressure = std::max(
+                                        (parameters.gamma_e - 1.0_rt) *
+                                            energy_old(ic, jc, kc),
+                                        parameters
+                                            .electron_pressure_floor);
+                                    return pressure /
+                                           ((parameters.gamma_e -
+                                             1.0_rt) *
+                                            std::max(
+                                                rho_old(ic, jc, kc),
+                                                parameters
+                                                    .density_floor));
+                                };
+                            brag_grad_t_electron =
+                                stage_new_weight * brag_grad_t_electron +
+                                stage_old_weight *
+                                    (0.25_rt * inverse_tangential_size *
+                                     (electron_e_spec_old(ipl, jpl, kpl) +
+                                      electron_e_spec_old(ipr, jpr, kpr) -
+                                      electron_e_spec_old(iml, jml, kml) -
+                                      electron_e_spec_old(imr, jmr,
+                                                          kmr)));
+                        }
                         if (chi_total_energy) {
                             const auto ion_e_spec =
                                 [=] (const int ic, const int jc,
@@ -4603,6 +4863,47 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                  ion_e_spec(ipr, jpr, kpr) -
                                  ion_e_spec(iml, jml, kml) -
                                  ion_e_spec(imr, jmr, kmr));
+                            if (conduction_stage) {
+                                // Stage extrapolation (see the electron
+                                // stencil above).
+                                const auto ion_e_spec_old =
+                                    [=] (const int ic, const int jc,
+                                         const int kc) {
+                                        const amrex::Real
+                                            safe_density_old = std::max(
+                                                rho_old(ic, jc, kc),
+                                                parameters.density_floor);
+                                        amrex::Real kinetic = 0.0_rt;
+                                        for (int component = 0;
+                                             component < 3; ++component) {
+                                            kinetic +=
+                                                mom_old(ic, jc, kc,
+                                                        component) *
+                                                mom_old(ic, jc, kc,
+                                                        component);
+                                        }
+                                        kinetic *=
+                                            0.5_rt / safe_density_old;
+                                        const amrex::Real internal_floor =
+                                            parameters.ion_pressure_floor /
+                                            (parameters.gamma_i - 1.0_rt);
+                                        return std::max(
+                                                   ion_e_old(ic, jc, kc) -
+                                                       kinetic,
+                                                   internal_floor) /
+                                               safe_density_old;
+                                    };
+                                brag_grad_t_ion =
+                                    stage_new_weight * brag_grad_t_ion +
+                                    stage_old_weight *
+                                        (0.25_rt *
+                                         inverse_tangential_size *
+                                         (ion_e_spec_old(ipl, jpl, kpl) +
+                                          ion_e_spec_old(ipr, jpr, kpr) -
+                                          ion_e_spec_old(iml, jml, kml) -
+                                          ion_e_spec_old(imr, jmr,
+                                                         kmr)));
+                            }
                         }
                     }
 #endif
@@ -4621,6 +4922,36 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     }
                     return chi_value;
                 };
+                // Quasi-shorting cross-field boost (implicit_mhd.
+                // conduction_qs_chi, braginskii only): ADDITIVE chi_perp
+                // keyed to the pseudo-entropy excess
+                //     s = (T/T0) (rho0/rho_guarded)^{2/3},
+                //     rho_guarded = sqrt(rho^2 + rho_guard^2),
+                // above the load envelope, ramped by the C-infinity
+                // smooth-max 0.5 ((s - onset) + sqrt((s - onset)^2 +
+                // w^2)) with w = 0.3 (onset - 1) -- centered ABOVE the
+                // envelope (onset > 1): a ramp centered ON it leaks w/2
+                // of the amplitude onto every on-adiabat cell (measured
+                // fatal in production). The s inputs (the face
+                // temperature and the coefficient-state face density)
+                // follow conduction_coefficient_state like every other
+                // Braginskii coefficient input; the chi_min/max clamp
+                // applies AFTER the addition.
+                const auto qs_boost =
+                    [=] (const amrex::Real face_temperature) {
+                        const amrex::Real guarded_density = std::sqrt(
+                            face_density * face_density +
+                            qs_density_guard * qs_density_guard);
+                        const amrex::Real density_ratio =
+                            qs_envelope_density / guarded_density;
+                        const amrex::Real entropy =
+                            face_temperature * qs_inverse_t0 *
+                            std::cbrt(density_ratio * density_ratio);
+                        const amrex::Real excess = entropy - qs_onset;
+                        return qs_chi * 0.5_rt *
+                               (excess + std::sqrt(excess * excess +
+                                                   qs_width * qs_width));
+                    };
                 if ((braginskii && chi_total_energy) || chi_ion > 0.0_rt ||
                     chi_ion_is_parser) {
                     amrex::Real chi_ion_face =
@@ -4653,7 +4984,15 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                  x +
                              1.0_rt);
                         brag_chi_par_ion = brag_clamp(chi_par_raw);
-                        brag_chi_perp_ion = brag_clamp(chi_perp_raw);
+                        // Quasi-shorting boost of the ION channel: s is
+                        // keyed on the ion temperature with the SAME
+                        // envelope T0 -- the broken-surface shorting
+                        // acts on the channel whose own thermal content
+                        // breaks the envelope, and a separate ion T0
+                        // would be an uncalibratable second knob.
+                        brag_chi_perp_ion = brag_clamp(
+                            add_qs ? chi_perp_raw + qs_boost(face_ti)
+                                   : chi_perp_raw);
                         // Wall interface faces keep the one-sided
                         // isotropic drain with the tensor's nn
                         // projection as its scalar chi.
@@ -4668,10 +5007,12 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         // constants): zero at/below the wall value, C^1
                         // full above twice it -- the reservoir cools the
                         // interior toward T_wall but never heats it.
+                        // The interior e_int is the conduction-stage
+                        // value; the drain's sign/cap structure is
+                        // unchanged.
                         const amrex::Real interior_e_spec =
-                            wall_left_masked
-                                ? right.ion_internal / right.safe_density
-                                : left.ion_internal / left.safe_density;
+                            wall_left_masked ? e_spec_ion_right
+                                             : e_spec_ion_left;
                         amrex::Real drain =
                             chi_ion_face * face_density *
                             (interior_e_spec - wall_e_spec_ion) *
@@ -4693,12 +5034,11 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             wall_right_masked ? drain : -drain;
                     } else if (braginskii) {
                         // Anisotropic tensor flux: the normal gradient
-                        // uses the SAME CellState specific energies as
-                        // the isotropic path; the tangential gradient
-                        // is the corner-stencil value above.
+                        // uses the SAME (conduction-stage) specific
+                        // energies as the isotropic path; the tangential
+                        // gradient is the corner-stencil value above.
                         const amrex::Real gradient_normal =
-                            (right.ion_internal / right.safe_density -
-                             left.ion_internal / left.safe_density) *
+                            (e_spec_ion_right - e_spec_ion_left) *
                             inverse_normal_size;
                         conductive_flux =
                             -face_density *
@@ -4711,13 +5051,15 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         if (conduction_limit > 0.0_rt) {
                             // the same free-streaming harmonic cap as
                             // the isotropic path, applied to the TOTAL
-                            // (normal + tangential) conductive flux
+                            // (normal + tangential) conductive flux;
+                            // the cap temperature is the conduction-
+                            // stage value (see cap_ti above)
                             const amrex::Real thermal_speed = std::sqrt(
-                                PhysConst::kb * face_ti /
+                                PhysConst::kb * cap_ti /
                                 conduction_ion_mass);
                             const amrex::Real free_streaming_flux =
                                 face_charge_density / PhysConst::q_e *
-                                PhysConst::kb * face_ti * thermal_speed;
+                                PhysConst::kb * cap_ti * thermal_speed;
                             conductive_flux /=
                                 1.0_rt + std::abs(conductive_flux) /
                                              (conduction_limit *
@@ -4726,19 +5068,19 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     } else {
                         conductive_flux =
                             -chi_ion_face * face_density *
-                            (right.ion_internal / right.safe_density -
-                             left.ion_internal / left.safe_density) *
+                            (e_spec_ion_right - e_spec_ion_left) *
                             inverse_normal_size;
                         if (conduction_limit > 0.0_rt) {
                             // free-streaming cap q_fs = n kB Ti v_ti,
                             // v_ti = sqrt(kB Ti/m_i): the smooth harmonic
-                            // form q/(1 + |q|/(f q_fs)), no branches
+                            // form q/(1 + |q|/(f q_fs)), no branches;
+                            // Ti is the conduction-stage cap value
                             const amrex::Real thermal_speed = std::sqrt(
-                                PhysConst::kb * face_ti /
+                                PhysConst::kb * cap_ti /
                                 conduction_ion_mass);
                             const amrex::Real free_streaming_flux =
                                 face_charge_density / PhysConst::q_e *
-                                PhysConst::kb * face_ti * thermal_speed;
+                                PhysConst::kb * cap_ti * thermal_speed;
                             conductive_flux /=
                                 1.0_rt + std::abs(conductive_flux) /
                                              (conduction_limit *
@@ -4782,7 +5124,12 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                  x +
                              1.0_rt);
                         brag_chi_par_electron = brag_clamp(chi_par_raw);
-                        brag_chi_perp_electron = brag_clamp(chi_perp_raw);
+                        // Quasi-shorting boost (see the ion channel and
+                        // the qs_boost lambda): additive chi_perp, keyed
+                        // on the electron temperature, clamped after.
+                        brag_chi_perp_electron = brag_clamp(
+                            add_qs ? chi_perp_raw + qs_boost(face_te)
+                                   : chi_perp_raw);
                         // Wall interface faces keep the one-sided
                         // isotropic drain with the tensor's nn
                         // projection as its scalar chi.
@@ -4792,18 +5139,15 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                              brag_chi_perp_electron) *
                                 brag_bn * brag_bn / brag_b2_dir;
                     }
-                    const amrex::Real inverse_gamma_e_minus_one =
-                        1.0_rt / (parameters.gamma_e - 1.0_rt);
                     amrex::Real conductive_flux;
                     if (wall_face) {
                         // One-sided rectified wall drain (see the ion
-                        // channel above).
-                        const auto& interior =
-                            wall_left_masked ? right : left;
+                        // channel above): the interior e_int is the
+                        // conduction-stage value, the structure is
+                        // unchanged.
                         const amrex::Real interior_e_spec =
-                            interior.electron_pressure *
-                            inverse_gamma_e_minus_one /
-                            interior.safe_density;
+                            wall_left_masked ? e_spec_electron_right
+                                             : e_spec_electron_left;
                         amrex::Real drain =
                             chi_electron_face * face_density *
                             (interior_e_spec - wall_e_spec_electron) *
@@ -4823,12 +5167,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     } else if (braginskii) {
                         // Anisotropic tensor flux (see the ion channel).
                         const amrex::Real gradient_normal =
-                            (right.electron_pressure *
-                                 inverse_gamma_e_minus_one /
-                                 right.safe_density -
-                             left.electron_pressure *
-                                 inverse_gamma_e_minus_one /
-                                 left.safe_density) *
+                            (e_spec_electron_right -
+                             e_spec_electron_left) *
                             inverse_normal_size;
                         conductive_flux =
                             -face_density *
@@ -4840,11 +5180,12 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                   brag_bt * brag_grad_t_electron) /
                                  brag_b2_dir);
                         if (conduction_limit > 0.0_rt) {
+                            // cap at the conduction-stage temperature
                             const amrex::Real thermal_speed = std::sqrt(
-                                PhysConst::kb * face_te / PhysConst::m_e);
+                                PhysConst::kb * cap_te / PhysConst::m_e);
                             const amrex::Real free_streaming_flux =
                                 face_charge_density / PhysConst::q_e *
-                                PhysConst::kb * face_te * thermal_speed;
+                                PhysConst::kb * cap_te * thermal_speed;
                             conductive_flux /=
                                 1.0_rt + std::abs(conductive_flux) /
                                              (conduction_limit *
@@ -4853,19 +5194,16 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     } else {
                         conductive_flux =
                             -chi_electron_face * face_density *
-                            (right.electron_pressure *
-                                 inverse_gamma_e_minus_one /
-                                 right.safe_density -
-                             left.electron_pressure *
-                                 inverse_gamma_e_minus_one /
-                                 left.safe_density) *
+                            (e_spec_electron_right -
+                             e_spec_electron_left) *
                             inverse_normal_size;
                         if (conduction_limit > 0.0_rt) {
+                            // cap at the conduction-stage temperature
                             const amrex::Real thermal_speed = std::sqrt(
-                                PhysConst::kb * face_te / PhysConst::m_e);
+                                PhysConst::kb * cap_te / PhysConst::m_e);
                             const amrex::Real free_streaming_flux =
                                 face_charge_density / PhysConst::q_e *
-                                PhysConst::kb * face_te * thermal_speed;
+                                PhysConst::kb * cap_te * thermal_speed;
                             conductive_flux /=
                                 1.0_rt + std::abs(conductive_flux) /
                                              (conduction_limit *

@@ -599,6 +599,27 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // halo modes in one step while the ideal dynamics keeps its
     // second-order centering. ----
     amrex::Real m_resistive_theta = -1.0;
+    // ---- Conduction theta (default: the global implicit_evolve.theta).
+    // The conductive-flux ENERGY arguments -- the per-side specific
+    // internal energies whose normal/tangential differences drive the
+    // flux, the wall thermal-drain interior energy, and the
+    // free-streaming-cap temperatures -- are evaluated at the theta_c
+    // stage
+    //     e^{n+theta_c} = (theta_c/theta) e^{n+theta}
+    //                     + (1 - theta_c/theta) e^n,
+    // the conduction twin of m_resistive_theta: the extrapolation is
+    // linear in the theta-stage values, so matrix-free Jacobian probes
+    // see the shifted centering exactly. Rationale from the theta-scheme
+    // amplification factor: at halo diffusion numbers
+    // theta dt chi / dx^2 >> 1 the trapezoidal update leaves the
+    // grid-Nyquist conduction modes at g -> -1 (amplitude ~1, sign
+    // flipped every step) -- measured on production arms as a halo
+    // temperature checkerboard (Nyquist fluctuation-power fraction 0.6,
+    // unphysical Ti spikes) preceding Newton freeze-guard aborts.
+    // conduction_theta = 1 damps them as g = 1/(1 + z) -> 0 while the
+    // wave/advective dynamics keep the global centering. The conduction
+    // COEFFICIENTS keep their own conduction_coefficient_state rule. ----
+    amrex::Real m_conduction_theta = -1.0;
     // Non-periodic z (RZ only): the solver fills axial domain ghosts with
     // zero-gradient (Neumann) values, giving outflow ends instead of the
     // periodic seam. Set automatically when the z geometry is non-periodic.
@@ -757,6 +778,29 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // per channel BEFORE the free-streaming limiter.
     amrex::Real m_conduction_chi_min = 0.0;
     amrex::Real m_conduction_chi_max = 0.0;
+    // Quasi-shorting cross-field boost of the Braginskii chi_perp
+    // (implicit_mhd.conduction_qs_*, braginskii only; qs_chi = 0
+    // disables): subgrid turbulence on broken flux surfaces shorts the
+    // channel across surfaces, modeled as an ADDITIVE cross-field
+    // diffusivity keyed to the pseudo-entropy excess
+    //     s = (T/T0) (rho0 / rho_guarded)^{2/3},
+    //     rho_guarded = sqrt(rho^2 + rho_guard^2),
+    // above the load envelope (T0 = conduction_qs_reference_temperature
+    // [eV], rho0 = reference_mass_density, rho_guard the Ohm density
+    // guard), ramped by the C-infinity smooth-max
+    //     chi_add = qs_chi * 0.5 ((s - onset)
+    //                             + sqrt((s - onset)^2 + w^2)),
+    //     w = 0.3 (onset - 1),
+    // CENTERED ABOVE the envelope (onset > 1 enforced): a ramp centered
+    // ON the envelope leaks w/2 of the amplitude onto every on-adiabat
+    // cell (measured fatal in production). Electron channel always; ion
+    // channel under total_energy, keyed on the ion temperature with the
+    // same T0. The s inputs follow conduction_coefficient_state like
+    // every other Braginskii coefficient input; the chi_min/max perp
+    // clamp applies AFTER the addition.
+    amrex::Real m_conduction_qs_chi = 0.0;
+    amrex::Real m_conduction_qs_onset = 1.5;
+    amrex::Real m_conduction_qs_reference_temperature = 0.0;
     // Floor-independent corner width of the C^1 smooth-max pressure
     // recovery (see FluxParameters::pressure_corner_width_fraction;
     // 0 = legacy width = internal-energy floor).
