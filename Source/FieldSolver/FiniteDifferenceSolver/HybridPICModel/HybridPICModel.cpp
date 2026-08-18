@@ -449,6 +449,26 @@ void HybridPICModel::ReadParameters ()
     // machinery (kick cap / density gate / guard rail all apply).
     utils::parser::queryWithParser(pp_hybrid, "Te_shunt_threshold", m_te_shunt_eV);
 
+    // Band-scoped rectified Te drain (see member doc): one-sided
+    // relaxation of the open-set floor band toward a reference, tracked
+    // non-conservation. Default rate 0 = off.
+    utils::parser::queryWithParser(pp_hybrid, "qdsmc_band_drain_rate", m_band_drain_rate);
+    utils::parser::queryWithParser(pp_hybrid, "qdsmc_band_drain_Te", m_band_drain_Te_eV);
+    utils::parser::queryWithParser(pp_hybrid, "qdsmc_band_drain_n_hi_factor", m_band_drain_n_hi);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_band_drain_rate >= 0.0_rt,
+        "hybrid_pic_model.qdsmc_band_drain_rate cannot be negative");
+    if (m_band_drain_rate > 0.0_rt) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_band_drain_Te_eV > 0.0_rt,
+            "hybrid_pic_model.qdsmc_band_drain_rate requires a positive "
+            "hybrid_pic_model.qdsmc_band_drain_Te [eV] (the drain target)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_band_drain_n_hi > 1.0_rt,
+            "hybrid_pic_model.qdsmc_band_drain_n_hi_factor must exceed 1 "
+            "(the band window top, in units of n_floor)");
+    }
+
     // Graceful Te-runaway abort ceiling [eV] and the dropped-energy tally
     // print cadence (the print only fires when a decline channel is armed).
     utils::parser::queryWithParser(pp_hybrid, "Te_abort_threshold", m_te_abort_threshold_eV);
@@ -1925,6 +1945,71 @@ void HybridPICModel::QDSMCShuntTeExcess (int const lev,
 }
 
 
+void HybridPICModel::QDSMCBandDrainTe (int const lev, amrex::Real const dt) const
+{
+    ABLASTR_PROFILE("HybridPICModel::QDSMCBandDrainTe()");
+
+    using warpx::fields::FieldType;
+
+    // Band-scoped rectified Te drain (see member doc). Exact exponential
+    // relaxation toward the target inside the C^1 density window
+    //   w(n): 1 at n -> n_floor+, 0 at n >= n_hi * n_floor (smoothstep),
+    // applied only where Te > target (drain-only rectifier -- the operator
+    // can never heat, matching the measured MHD lesson that a two-sided
+    // exchange becomes an energy source at big-minus-big corners).
+    // Sub-floor cells are never touched (quarantine).
+    auto & warpx = WarpX::GetInstance();
+    amrex::Periodicity const & period = warpx.Geom(lev).periodicity();
+
+    amrex::MultiFab       & Te  = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+    amrex::MultiFab const & rho = *warpx.m_fields.get(FieldType::rho_fp, lev);
+
+    amrex::Real const rho_floor = PhysConst::q_e * m_n_floor;
+    amrex::Real const rho_hi    = m_band_drain_n_hi * rho_floor;
+    amrex::Real const inv_span  = 1.0_rt / (rho_hi - rho_floor);
+    amrex::Real const K_per_eV  = PhysConst::q_e / PhysConst::kb;
+    amrex::Real const T_ref_K   = m_band_drain_Te_eV * K_per_eV;
+    amrex::Real const nu_dt     = m_band_drain_rate * dt;
+
+    // Drained energy density [J/m^3] for the audit tally; nodal like Te.
+    amrex::MultiFab tally_mf(Te.boxArray(), Te.DistributionMap(), 1, 0);
+    tally_mf.setVal(0.0_rt);
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(Te, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        amrex::Array4<amrex::Real>       const & Te_arr  = Te.array(mfi);
+        amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+        amrex::Array4<amrex::Real>       const & tly_arr = tally_mf.array(mfi);
+
+        amrex::ParallelFor(mfi.tilebox(), [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            amrex::Real const rho_val = rho_arr(i,j,k);
+            if (rho_val <= rho_floor || rho_val >= rho_hi) { return; }
+            amrex::Real const Te_K = Te_arr(i,j,k);
+            if (Te_K <= T_ref_K) { return; }               // drain-only
+            // C^1 window: 1 at the floor, 0 at the band top.
+            amrex::Real const s = (rho_val - rho_floor) * inv_span;
+            amrex::Real const w = 1.0_rt - s * s * (3.0_rt - 2.0_rt * s);
+            amrex::Real const Te_new =
+                T_ref_K + (Te_K - T_ref_K) * std::exp(-nu_dt * w);
+            amrex::Real const ne = rho_val / PhysConst::q_e;
+            tly_arr(i,j,k) += 1.5_rt * ne * PhysConst::kb * (Te_K - Te_new);
+            Te_arr(i,j,k) = Te_new;
+        });
+    }
+
+    Te.FillBoundary(Te.nGrowVect(), period);
+
+    auto const dxc = warpx.Geom(lev).CellSizeArray();
+    amrex::Real dV = 1.0_rt;
+    for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) { dV *= dxc[dd]; }
+    m_band_drain_J += tally_mf.sum_unique(0, false, period) * dV;
+}
+
+
 void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real const dt,
     std::map<std::string, amrex::MultiFab*> const & Ti_dep_by_species) const
 {
@@ -2773,6 +2858,12 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
     if (shunt_active) {
         QDSMCShuntTeExcess(lev, &ion_redirect_E);
     }
+    // Band-scoped rectified Te drain (MHD halo-relaxation port): runs after
+    // the cap/shunt so the band sees the already-limited Te; rate-based, so
+    // each Strang half applies its own dt_src exactly.
+    if (m_band_drain_rate > 0._rt) {
+        QDSMCBandDrainTe(lev, dt_src);
+    }
 
     // Steps 6b/6c both need each charged species' T_i when Q_ei relaxation is
     // on. Deposit it ONCE here (the expensive per-particle NGP temperature
@@ -2896,6 +2987,7 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
     bool const any_decline_armed =
         (m_joule_heating_n_min > m_n_floor) ||
         (m_te_shunt_eV > 0._rt) ||
+        (m_band_drain_rate > 0._rt) ||
         (m_cond_eb_bc == 1) ||
         ((m_joule_redirect_to_ions || m_te_shunt_eV > 0._rt) &&
          (m_joule_redirect_n_min_factor > 0._rt ||
@@ -2907,6 +2999,7 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
             << " redirect_gate=" << m_joule_dropped_redirect_gate_J
             << " kick_cap=" << m_joule_dropped_kick_cap_J
             << " te_shunt=" << m_te_shunt_J
+            << " band_drain=" << m_band_drain_J
             << " wall_bath=" << m_cond_eb_tally
             << " (cumulative; wall_bath > 0 = into plasma)\n";
     }

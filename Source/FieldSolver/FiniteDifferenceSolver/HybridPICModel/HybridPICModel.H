@@ -730,6 +730,26 @@ public:
      * ion-heating operator. */
     void QDSMCShuntTeExcess (int lev, amrex::MultiFab * redirect_E) const;
 
+    /** Band-scoped rectified Te drain (port of the theta-implicit MHD
+     * halo-pedestal energy relaxation to the explicit energy equation):
+     * one-sided exponential relaxation of Te toward
+     * qdsmc_band_drain_Te [eV] at rate qdsmc_band_drain_rate [1/s],
+     * applied only on the open-set floor band
+     * n in (n_floor, qdsmc_band_drain_n_hi_factor * n_floor), weighted by
+     * a C^1 smoothstep window that is 1 at the floor and 0 at the top of
+     * the band (the MHD campaign measured a wide window biting the live
+     * hot boundary layer -- default top 1.25x). Drain-only: cells at or
+     * below the target are never touched, so the operator can never heat.
+     * The exact exponential update is unconditionally stable (no dt
+     * restriction; a rate mechanism, not a diffusion). Removed energy is
+     * tracked non-conservation, tallied in m_band_drain_J (printed with
+     * the dropped-energy audit). Default rate 0 = off, bit-identical. */
+    void QDSMCBandDrainTe (int lev, amrex::Real dt) const;
+    amrex::Real m_band_drain_rate = 0.0;
+    amrex::Real m_band_drain_Te_eV = -1.0;
+    amrex::Real m_band_drain_n_hi = 1.25;
+    mutable amrex::Real m_band_drain_J = 0.0;
+
     /** Cumulative dropped-Joule-energy tallies [J] (globally reduced), one
      * per decline channel: the joule_heating_n_min gate, the redirect
      * density gate, and the per-particle kick cap. Only accumulated when the
