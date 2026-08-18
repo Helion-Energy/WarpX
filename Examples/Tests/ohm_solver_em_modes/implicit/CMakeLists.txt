@@ -83,6 +83,46 @@ add_warpx_test(
 )
 label_warpx_test(test_rz_ohm_solver_em_modes_implicit_picmi slow)
 
+# Block-banded direct preconditioner (pc_block_banded) arm of the RZ deck
+# (declared after its dependency, which must already be registered). Two
+# ranks split the BoxArray, which routes the preconditioner through the
+# replicated-global solve with the duplicate-DOF pass-through in the
+# write-back. The solver-internal verification gates (extraction self-check
+# against the frozen apply, LU and Apply round-trips, FD Jacobian-vector
+# product comparison against the true residual) run at every rebuild via
+# precond.bb_verify and abort on failure, and newton.require_convergence
+# aborts on any unconverged step. The analysis then asserts physics
+# agreement with the unpreconditioned parent test and iteration-count
+# regression bounds from the Newton diagnostic files of both arms.
+add_warpx_test(
+    test_rz_ohm_solver_em_modes_implicit_bb_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_ohm_solver_em_modes_implicit_picmi.py --test --pc-bb --steps 30"  # inputs
+    "analysis_rz_bb.py"  # analysis
+    OFF  # checksum
+    test_rz_ohm_solver_em_modes_implicit_picmi  # dependency
+)
+label_warpx_test(test_rz_ohm_solver_em_modes_implicit_bb_picmi slow)
+
+# Whistler-stiff smoke of the same preconditioner arm: dt x8 puts the
+# grid-scale whistler CFL where the unpreconditioned solve costs ~44-60
+# GMRES iterations/step, so the analysis iteration ceiling is a sharp
+# tripwire for preconditioner quality (at dt x1 the linear solve is cheap
+# either way and the bound discriminates weakly). Ten steps, Newton line
+# search on (rescues the large-dt basin independently of the PC),
+# convergence required, verification gates active on the rebuild.
+add_warpx_test(
+    test_rz_ohm_solver_em_modes_implicit_bb_stiff_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_ohm_solver_em_modes_implicit_picmi.py --test --pc-bb --dt-mult 8 --steps 10"  # inputs
+    "analysis_rz_bb_stiff.py"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+label_warpx_test(test_rz_ohm_solver_em_modes_implicit_bb_stiff_picmi slow)
+
 # 3D Cartesian coverage of the theta-implicit hybrid solver and its Darwin
 # variant (CI-sized column: Nz = 128, NPPC = 32 in test mode; the physics
 # dispersion analyses live in the 1D tests).
