@@ -1849,6 +1849,121 @@ class PETScPreconditioner(PreconditionerBase):
         pc_petsc.euclid_factor_levels = self.euclid_factor_levels
 
 
+class MHDBlockPreconditioner(PreconditionerBase):
+    """
+    Sets up the physics-based block preconditioner for the theta-implicit
+    MHD evolve scheme (``jacobian.pc_type = pc_mhd_block``). See the
+    ``pc_mhd_block.*`` entries in the parameters documentation for the
+    meaning of each option; unset options keep the solver defaults.
+
+    Parameters
+    ----------
+    verbose: bool, optional
+        Whether there is verbose output from the preconditioner
+
+    bottom_verbose: bool, optional
+        Whether there is verbose output from the bottom solver
+
+    agglomeration: bool, optional
+
+    consolidation: bool, optional
+
+    include_ideal_mhd_coupling: bool, optional
+        Include the ideal-MHD wave coupling rows
+
+    include_hall_mhd_coupling: bool, optional
+        Include the Hall/whistler rows (requires the banded or direct
+        resistive solver; the whistler operator is skew and sits outside
+        the real Chebyshev interval)
+
+    include_wave_schur: bool, optional
+        Use the Schur-complement form of the wave block
+
+    field_iterations: int, optional
+        Fixed iteration count of the field block
+
+    fluid_iterations: int, optional
+        Fixed iteration count of the fluid block
+
+    resistive_iterations: int, optional
+        Fixed iteration count of the resistive block (0 = automatic)
+
+    resistive_threshold: float, optional
+        Grid-scale resistive diffusion number below which the resistive
+        block is the exact identity at zero cost
+
+    resistive_solver: {"chebyshev", "direct", "banded"}, optional
+        Backend applying the frozen resistive/Hall operator
+
+    banded_precision: string, optional
+        Floating-point precision of the banded LU factorization
+
+    banded_refreeze: string, optional
+        When the banded factorization is refrozen (e.g. "step")
+
+    resistive_validate_assembly: bool, optional
+        Check the emitted matrix rows against the matrix-free operator
+        to roundoff at every refreeze (diagnostic; costly)
+    """
+
+    def __init__(
+        self,
+        verbose=None,
+        bottom_verbose=None,
+        agglomeration=None,
+        consolidation=None,
+        include_ideal_mhd_coupling=None,
+        include_hall_mhd_coupling=None,
+        include_wave_schur=None,
+        field_iterations=None,
+        fluid_iterations=None,
+        resistive_iterations=None,
+        resistive_threshold=None,
+        resistive_solver=None,
+        banded_precision=None,
+        banded_refreeze=None,
+        resistive_validate_assembly=None,
+    ):
+        self.verbose = verbose
+        self.bottom_verbose = bottom_verbose
+        self.agglomeration = agglomeration
+        self.consolidation = consolidation
+        self.include_ideal_mhd_coupling = include_ideal_mhd_coupling
+        self.include_hall_mhd_coupling = include_hall_mhd_coupling
+        self.include_wave_schur = include_wave_schur
+        self.field_iterations = field_iterations
+        self.fluid_iterations = fluid_iterations
+        self.resistive_iterations = resistive_iterations
+        self.resistive_threshold = resistive_threshold
+        self.resistive_solver = resistive_solver
+        self.banded_precision = banded_precision
+        self.banded_refreeze = banded_refreeze
+        self.resistive_validate_assembly = resistive_validate_assembly
+
+    def preconditioner_type_initialize_inputs(self):
+        # The Newton solver engages the preconditioner through
+        # jacobian.pc_type; without it the pc_mhd_block options land in an
+        # unread bucket and the solve silently runs unpreconditioned.
+        jacobian = pywarpx.warpx.get_bucket("jacobian")
+        jacobian.pc_type = "pc_mhd_block"
+        pc_mhd_block = pywarpx.warpx.get_bucket("pc_mhd_block")
+        pc_mhd_block.verbose = self.verbose
+        pc_mhd_block.bottom_verbose = self.bottom_verbose
+        pc_mhd_block.agglomeration = self.agglomeration
+        pc_mhd_block.consolidation = self.consolidation
+        pc_mhd_block.include_ideal_mhd_coupling = self.include_ideal_mhd_coupling
+        pc_mhd_block.include_hall_mhd_coupling = self.include_hall_mhd_coupling
+        pc_mhd_block.include_wave_schur = self.include_wave_schur
+        pc_mhd_block.field_iterations = self.field_iterations
+        pc_mhd_block.fluid_iterations = self.fluid_iterations
+        pc_mhd_block.resistive_iterations = self.resistive_iterations
+        pc_mhd_block.resistive_threshold = self.resistive_threshold
+        pc_mhd_block.resistive_solver = self.resistive_solver
+        pc_mhd_block.banded_precision = self.banded_precision
+        pc_mhd_block.banded_refreeze = self.banded_refreeze
+        pc_mhd_block.resistive_validate_assembly = self.resistive_validate_assembly
+
+
 class NonlinearSolverBase(picmistandard.base._ClassWithInit):
     pass
 
