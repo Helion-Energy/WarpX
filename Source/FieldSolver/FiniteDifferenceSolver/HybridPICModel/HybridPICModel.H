@@ -1310,6 +1310,19 @@ public:
      *  the vacuum field diffuses fast but the B push stays stable for
      *  any requested D_vac. Input: vacuum_resistivity_cfl_factor. */
     amrex::Real m_vacuum_resistivity_cfl_factor = 0.01;
+
+    /** Density-keyed vacuum HYPER-resistivity boost (the halo
+     *  "viscosity" damper: grid-scale in-plane field turbulence in the
+     *  under-resolved halo is unphysical wall/staircase debris — damp it
+     *  where it lives). Same shape and discipline as the eta boost:
+     *  eta_H gains mu0 * D4_vac * (rho_ref/rho_smooth)^2 in quadrature,
+     *  soft-min-capped at min(mu0 D4_vac, f4 * biharmonic stability
+     *  limit of the configured B substep). Faraday-only by construction
+     *  (hyper-resistivity never enters the heating). Defaults 0 = off,
+     *  bit-identical. Inputs: vacuum_hyper_resistivity_diffusivity
+     *  [m^4/s], vacuum_hyper_resistivity_cfl_factor (default 0.01). */
+    amrex::Real m_vacuum_hyper_resistivity_diffusivity = 0.0;
+    amrex::Real m_vacuum_hyper_resistivity_cfl_factor = 0.01;
     std::unique_ptr<amrex::Parser> m_resistivity_raw_parser;
     amrex::ParserExecutor<3> m_eta_raw;
 

@@ -474,6 +474,16 @@ void HybridPICModel::ReadParameters ()
                                    m_vacuum_resistivity_n_ref);
     utils::parser::queryWithParser(pp_hybrid, "vacuum_resistivity_cfl_factor",
                                    m_vacuum_resistivity_cfl_factor);
+    utils::parser::queryWithParser(pp_hybrid,
+                                   "vacuum_hyper_resistivity_diffusivity",
+                                   m_vacuum_hyper_resistivity_diffusivity);
+    utils::parser::queryWithParser(pp_hybrid,
+                                   "vacuum_hyper_resistivity_cfl_factor",
+                                   m_vacuum_hyper_resistivity_cfl_factor);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_vacuum_hyper_resistivity_diffusivity >= 0.0_rt,
+        "hybrid_pic_model.vacuum_hyper_resistivity_diffusivity cannot be "
+        "negative");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_vacuum_resistivity_diffusivity >= 0.0_rt,
         "hybrid_pic_model.vacuum_resistivity_diffusivity cannot be negative");
@@ -946,9 +956,53 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
             ablastr::warn_manager::WarnPriority::medium);
     }
 
-    m_include_hyper_resistivity_term = (m_eta_h_expression != "0.0");
+    // Vacuum hyper-resistivity boost (see member doc): the halo damper
+    // for grid-scale field turbulence, composed like the eta boost with a
+    // biharmonic-CFL ceiling; Faraday-only by construction.
+    std::string eta_h_solve_expression = m_eta_h_expression;
+    if (m_vacuum_hyper_resistivity_diffusivity > 0.0_rt) {
+        amrex::Real const n_ref4 = (m_vacuum_resistivity_n_ref > 0.0_rt)
+            ? m_vacuum_resistivity_n_ref : m_n_floor;
+        amrex::Real const rho_ref4 = PhysConst::q_e * n_ref4;
+        amrex::Real const eps4     = 1.0e-3_rt * rho_ref4;
+        amrex::Real const eta4_c   =
+            PhysConst::mu0 * m_vacuum_hyper_resistivity_diffusivity;
+        auto & warpx_i = WarpX::GetInstance();
+        amrex::Real const dt0 = warpx_i.getdt(0);
+        auto const dx_i = warpx_i.Geom(0).CellSizeArray();
+        amrex::Real dx2_min = dx_i[0] * dx_i[0];
+        for (int dd = 1; dd < AMREX_SPACEDIM; ++dd) {
+            dx2_min = amrex::min(dx2_min, dx_i[dd] * dx_i[dd]);
+        }
+        amrex::Real const dt_sub_B =
+            0.5_rt * dt0 / amrex::Real(amrex::max(m_substeps, 1));
+        // Biharmonic explicit limit ~ mu0 dx^4/(8 D^2 dt): fourth-order
+        // operator, so the dx^2 of the diffusive bound squares.
+        amrex::Real const eta4_cfl_cap =
+            m_vacuum_hyper_resistivity_cfl_factor * PhysConst::mu0
+            * dx2_min * dx2_min
+            / (8.0_rt * AMREX_SPACEDIM * AMREX_SPACEDIM * dt_sub_B);
+        amrex::Real const eta4_ceiling = amrex::min(eta4_c, eta4_cfl_cap);
+        amrex::Print() << "[qdsmc] vacuum hyper-eta boost: requested "
+            << eta4_c << " Ohm m^3, CFL cap (f = "
+            << m_vacuum_hyper_resistivity_cfl_factor << ") = "
+            << eta4_cfl_cap << " -> ceiling " << eta4_ceiling << "\n";
+        std::string const rho_s4 =
+            "(0.5*(rho+sqrt(rho**2+" + num_lit(eps4 * eps4) + ")))";
+        std::string const ev4 =
+            "(" + num_lit(eta4_c) + "*(" + num_lit(rho_ref4) + "/" + rho_s4
+            + ")**2)";
+        std::string const ev4_cap =
+            "(" + ev4 + "*" + num_lit(eta4_ceiling) + "/(" + ev4 + "+"
+            + num_lit(eta4_ceiling) + "))";
+        eta_h_solve_expression =
+            "sqrt((" + m_eta_h_expression + ")**2 + " + ev4_cap + "**2)";
+    }
+    m_include_hyper_resistivity_term =
+        (m_eta_h_expression != "0.0") ||
+        (m_vacuum_hyper_resistivity_diffusivity > 0.0_rt);
     m_hyper_resistivity_parser = std::make_unique<amrex::Parser>(
-        utils::parser::makeParser(m_eta_h_expression, {"rho","B"}));
+        utils::parser::makeParser(eta_h_solve_expression, {"rho","B"}));
     m_eta_h = m_hyper_resistivity_parser->compile<2>();
     const std::set<std::string> hyper_resistivity_symbols = m_hyper_resistivity_parser->symbols();
     m_hyper_resistivity_has_B_dependence += hyper_resistivity_symbols.count("B");

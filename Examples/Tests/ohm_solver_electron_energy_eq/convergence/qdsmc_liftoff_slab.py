@@ -357,6 +357,14 @@ parser.add_argument(
     "parser. 0 = off",
 )
 parser.add_argument(
+    "--hyper-vac-d",
+    type=float,
+    default=0.0,
+    help="vacuum hyper-resistivity boost D4 [m^4/s] "
+    "(hybrid_pic_model.vacuum_hyper_resistivity_diffusivity): halo damper "
+    "for grid-scale field turbulence, biharmonic-CFL-capped. 0 = off",
+)
+parser.add_argument(
     "--band-drain-rate",
     type=float,
     default=0.0,
@@ -711,6 +719,8 @@ if args.eta_vac_d > 0.0:
     # this deck's plasma_resistivity still carries its own legacy ramp --
     # migrating that to this knob is a deliberate deck change, not implied.
     pywarpx.hybridpicmodel.vacuum_resistivity_diffusivity = args.eta_vac_d
+if args.hyper_vac_d > 0.0:
+    pywarpx.hybridpicmodel.vacuum_hyper_resistivity_diffusivity = args.hyper_vac_d
 if args.band_drain_rate > 0.0:
     pywarpx.hybridpicmodel.qdsmc_band_drain_rate = args.band_drain_rate
     pywarpx.hybridpicmodel.qdsmc_band_drain_Te = args.band_drain_te
