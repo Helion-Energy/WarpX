@@ -176,11 +176,14 @@ else:
     plt.close()
 
     # check if power spectrum sampling match earlier results
-    # (baseline last regenerated at the upstream 26.08 merge -- the
-    # flux-form RZ binomial filter (#7059) changes every filtered deposit
-    # at the smoothing level, which decorrelates the noise realization
-    # behind these near-noise spectral bins; the dispersion-curve physics
-    # checks above are the discriminating asserts)
+    # (baseline last regenerated at the implicit_evolve.hybrid_e_finisher
+    # default flip to 'reevaluate' -- the diagnostics now record the
+    # generalized Ohm's law evaluated at the delivered state instead of
+    # the theta-extrapolated field, which carried a marginal period-2
+    # recursion artifact; the theta-stage physics is unchanged but every
+    # output E sample shifts, redistributing these near-noise spectral
+    # bins; the dispersion-curve physics checks above are the
+    # discriminating asserts)
     amps = np.abs(F_kw[2, 1, len(kz) // 2 - 2 : len(kz) // 2 + 2])
     print("Amplitude sample: ", repr(amps))
-    assert np.allclose(amps, np.array([16.79716509, 6.59353623, 9.15999897, 5.52081282]))
+    assert np.allclose(amps, np.array([96.62119368, 69.85262757, 6.89043943, 59.49453324]))

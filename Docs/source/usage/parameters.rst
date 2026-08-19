@@ -3406,6 +3406,15 @@ Filtering
     Number of passes along each direction for the bilinear filter.
     In 2D simulations, only the first two values are read.
 
+    .. warning::
+
+       In RZ geometry with the FDTD/hybrid solvers, the default single pass
+       (``1 1``) is currently a silent no-op: ``warpx.use_filter = 1`` with
+       the default ``filter_npass_each_dir`` leaves every deposit and field
+       bit-identical to the unfiltered run. Set
+       ``warpx.filter_npass_each_dir = 2 2`` (or higher) for the filter to
+       engage in RZ.
+
 .. pp:param:: warpx.use_filter_compensation
     :type: ``0`` or ``1``
     :default: ``0``
@@ -4057,12 +4066,13 @@ Maxwell solver: kinetic-fluid hybrid
 
 .. pp:param:: implicit_evolve.hybrid_e_finisher
     :type: ``string``
-    :default: ``extrapolate``
+    :default: ``reevaluate`` (``extrapolate`` with the Darwin field split)
     :optional:
 
     How the theta-implicit hybrid scheme forms the delivered end-of-step electric field.
-    ``extrapolate`` (legacy) uses :math:`E^{n+1} = (E^{\theta} - (1-\theta) E^n)/\theta`; because the hybrid :math:`E` is algebraic (not evolved), this is a :math:`-(1-\theta)/\theta` recursion on the stored field -- marginal at :math:`\theta = 1/2` -- whose error grows linearly under a steady drift.
-    ``reevaluate`` recomputes the generalized Ohm's law at the delivered end-of-step state instead, as the explicit hybrid loop does (one extra Ohm solve per step; not yet implemented for the Darwin field split).
+    ``reevaluate`` (default) recomputes the generalized Ohm's law at the delivered end-of-step state, as the explicit hybrid loop does (one extra Ohm solve per step).
+    ``extrapolate`` (legacy) uses :math:`E^{n+1} = (E^{\theta} - (1-\theta) E^n)/\theta`; because the hybrid :math:`E` is algebraic (not evolved), this is a :math:`-(1-\theta)/\theta` recursion on the stored field -- marginal at :math:`\theta = 1/2` -- whose error grows linearly under a steady drift and pollutes the delivered field.
+    The Darwin field split falls back to ``extrapolate`` (the re-evaluated finisher is not implemented there).
 
 .. pp:param:: hybrid_pic_model.electron_inertia_extrapolated_history
     :type: ``bool``

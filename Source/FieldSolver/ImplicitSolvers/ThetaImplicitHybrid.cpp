@@ -137,13 +137,27 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
         "theta parameter must be between 0.5 and 1.0");
 
     {
-        std::string e_finisher = "extrapolate";
-        pp.query("hybrid_e_finisher", e_finisher);
+        // Default: re-evaluate the generalized Ohm's law at the delivered
+        // end-of-step state. The theta extrapolation of the ALGEBRAIC E is
+        // a -(1-theta)/theta recursion on the stored field (marginal at
+        // theta = 1/2) whose error grows linearly under a steady drift.
+        std::string e_finisher = "reevaluate";
+        const bool user_set = pp.query("hybrid_e_finisher", e_finisher);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             e_finisher == "extrapolate" || e_finisher == "reevaluate",
             "implicit_evolve.hybrid_e_finisher must be 'extrapolate' or "
             "'reevaluate'");
         m_e_finisher_reevaluate = (e_finisher == "reevaluate");
+        if (m_darwin && m_e_finisher_reevaluate) {
+            // Not implemented for the Darwin field split (E_L comes from
+            // the ambipolar constraint, E_T from the vector potential);
+            // fall back to the legacy extrapolation unless the user asked
+            // for the re-evaluated finisher explicitly.
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!user_set,
+                "implicit_evolve.hybrid_e_finisher = reevaluate is not "
+                "implemented for the Darwin field split");
+            m_e_finisher_reevaluate = false;
+        }
     }
 
     // Segregated midpoint-iterated solve for the QDSMC electron-energy
@@ -454,12 +468,27 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
         if (!m_hybrid_pic_model->m_solve_electron_energy_equation) {
             m_hybrid_pic_model->CalculateElectronPressure();
         }
-        m_hybrid_pic_model->HybridPICSolveE(
-            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, m_num_amr_levels - 1),
-            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::current_fp, m_num_amr_levels - 1),
-            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, m_num_amr_levels - 1),
-            m_WarpX->m_fields.get_mr_levels(FieldType::rho_fp, m_num_amr_levels - 1),
-            m_WarpX->GetEBUpdateEFlag(), false);
+        // per-level variant: the multi-level HybridPICSolveE fires the
+        // afterEpush python callback, which the implicit step already
+        // fires exactly once at the delivered state (WarpX::OneStep) --
+        // the finisher solve must not add a second firing per step
+        {
+            ablastr::fields::MultiLevelVectorField E_fp =
+                m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, m_num_amr_levels - 1);
+            ablastr::fields::MultiLevelVectorField J_fp =
+                m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::current_fp, m_num_amr_levels - 1);
+            ablastr::fields::MultiLevelVectorField B_fp =
+                m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, m_num_amr_levels - 1);
+            ablastr::fields::MultiLevelScalarField r_fp =
+                m_WarpX->m_fields.get_mr_levels(FieldType::rho_fp, m_num_amr_levels - 1);
+            for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+                m_hybrid_pic_model->HybridPICSolveE(
+                    E_fp[lev], J_fp[lev], B_fp[lev], *r_fp[lev],
+                    m_WarpX->GetEBUpdateEFlag()[lev], lev,
+                    false /* solve_for_Faraday */,
+                    true /* include_resistivity */);
+            }
+        }
         {
             using ablastr::fields::Direction;
             amrex::IntVect const ngE = m_WarpX->m_fields.get(
