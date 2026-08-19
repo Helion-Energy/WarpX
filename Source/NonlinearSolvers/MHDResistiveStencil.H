@@ -33,6 +33,23 @@ namespace warpx::mhd_pc
  * as a linear projection of the assembled Ohm E, so dropping the masked
  * emissions here keeps the preconditioner rows exact for the wall (the
  * same convention as the non-periodic domain boundary planes).
+ *
+ * The SEAM-GUARD tables extend the mask to the live rows next to it: a
+ * row (i, j) is seam-adjacent iff i >= first_guarded_*[j] (with
+ * first_guarded <= first_masked always, so masked rows are trivially
+ * seam-adjacent too). A live row is seam-adjacent when any cell-centered
+ * cell of its Hall/electron-inertia/hyper-resistive stencil footprint --
+ * including the curl-B provenance of the interpolated currents and the
+ * nodal inertia assembly -- lies inside the masked band, i.e. when those
+ * stencils would ingest the conductor's SURFACE current (curl B across
+ * the stair seam) or masked-band field values over the Ohm-floored
+ * near-wall density. The residual zeroes the Hall EMF, the
+ * electron-inertia field contribution and the hyper-resistive term at
+ * seam-adjacent rows (the ideal and eta J parts are untouched), and the
+ * row emission below drops the same contributions through these tables,
+ * so residual and preconditioner stay exact twins at the seam. Both
+ * tables are geometry-static (built once at wall Define), so matrix-free
+ * Jacobian probes see constant structure.
  */
 struct WallMaskView
 {
@@ -40,6 +57,13 @@ struct WallMaskView
     const int* first_masked_er = nullptr; //!< E_r rows: (r-cell, z-node)
     const int* first_masked_et = nullptr; //!< E_theta rows: (r-node, z-node)
     const int* first_masked_ez = nullptr; //!< E_z rows: (r-node, z-cell)
+    /** First seam-adjacent radial index per axial index (same layout and
+     * pre-offset as the masked tables; <= the masked index everywhere):
+     * the Hall/inertia/hyper Ohm contributions are dropped at and beyond
+     * it. */
+    const int* first_guarded_er = nullptr; //!< E_r rows: (r-cell, z-node)
+    const int* first_guarded_et = nullptr; //!< E_theta rows: (r-node, z-node)
+    const int* first_guarded_ez = nullptr; //!< E_z rows: (r-node, z-cell)
 };
 
 /**
@@ -362,9 +386,12 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
     // --- Hall/whistler edge EMFs (see include_hall): E += (g x Hb)/mu0
     // with g = mu0 J = curl dB, the frozen Hb read at the edge, and the
     // residual assembly's own cross-staggering current interpolations.
-    // Each helper honors the SAME boundary-plane drops and wall-mask row
-    // drops as its resistive counterpart. Callers pass multipliers built
-    // on c.hall_scale (the reactive theta staging).
+    // Each helper honors the SAME boundary-plane drops as its resistive
+    // counterpart, and the wall SEAM-GUARD tables (first_guarded_*, a
+    // superset of the masked rows): the residual zeroes the Hall EMF at
+    // every seam-adjacent row, so the rows are dropped here identically.
+    // Callers pass multipliers built on c.hall_scale (the reactive theta
+    // staging).
     //
     // E_theta += (g_z Hb_r - g_r Hb_z)/mu0 on the corner; the residual's
     // corner currents are the half-sums of the two adjacent native faces.
@@ -380,7 +407,7 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
         {
             return;
         }
-        if (c.wall.active && node_r >= c.wall.first_masked_et[node_z])
+        if (c.wall.active && node_r >= c.wall.first_guarded_et[node_z])
         {
             return;
         }
@@ -405,7 +432,7 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
         {
             return;
         }
-        if (c.wall.active && cell_r >= c.wall.first_masked_er[node_z])
+        if (c.wall.active && cell_r >= c.wall.first_guarded_er[node_z])
         {
             return;
         }
@@ -436,7 +463,7 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
         {
             return;
         }
-        if (c.wall.active && node_r >= c.wall.first_masked_ez[cell_z])
+        if (c.wall.active && node_r >= c.wall.first_guarded_ez[cell_z])
         {
             return;
         }
@@ -460,7 +487,9 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
     // E_theta -= eta_H lap J_theta at the corner (the m = 0 cylindrical
     // vector Laplacian of the residual, J_theta native so the stencil
     // needs no interpolation), dropped on every non-periodic domain
-    // boundary plane like the resistive corner term.
+    // boundary plane like the resistive corner term and at every
+    // wall-seam-adjacent row (first_guarded_*, matching the residual's
+    // seam guard on the hyper-resistive term).
     const auto emit_corner_hyper =
         [&] (const int node_r, const int node_z, const amrex::Real multiplier)
     {
@@ -473,7 +502,7 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
         {
             return;
         }
-        if (c.wall.active && node_r >= c.wall.first_masked_et[node_z])
+        if (c.wall.active && node_r >= c.wall.first_guarded_et[node_z])
         {
             return;
         }
@@ -513,9 +542,12 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
             return;
         }
         // Electron-inertia fold: eta + (inertia_scale/scale) C_i (an
-        // exact stencil twin; see include_inertia).
+        // exact stencil twin; see include_inertia). Skipped at wall-
+        // seam-adjacent rows (first_guarded_*): the residual zeroes the
+        // inertial field contribution there while keeping eta J.
         amrex::Real edge_coefficient = a.eta[1](node_r, node_z, k);
-        if (c.include_inertia)
+        if (c.include_inertia &&
+            !(c.wall.active && node_r >= c.wall.first_guarded_et[node_z]))
         {
             edge_coefficient +=
                 (c.inertia_scale / c.scale) * a.inertia[1](node_r, node_z, k);
@@ -563,9 +595,12 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
             {
                 return;
             }
-            // Electron-inertia fold (see include_inertia).
+            // Electron-inertia fold (see include_inertia); skipped at
+            // wall-seam-adjacent rows like the corner emission.
             amrex::Real edge_coefficient = a.eta[0](cell_r, node_z, k);
-            if (c.include_inertia)
+            if (c.include_inertia &&
+                !(c.wall.active &&
+                  cell_r >= c.wall.first_guarded_er[node_z]))
             {
                 edge_coefficient += (c.inertia_scale / c.scale) *
                                     a.inertia[0](cell_r, node_z, k);
@@ -594,9 +629,12 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
             const amrex::Real radius_high =
                 c.radial_lo +
                 (static_cast<amrex::Real>(node_r) + amrex::Real(0.5)) * c.radial_cell_size;
-            // Electron-inertia fold (see include_inertia).
+            // Electron-inertia fold (see include_inertia); skipped at
+            // wall-seam-adjacent rows like the corner emission.
             amrex::Real edge_coefficient = a.eta[2](node_r, cell_z, k);
-            if (c.include_inertia)
+            if (c.include_inertia &&
+                !(c.wall.active &&
+                  node_r >= c.wall.first_guarded_ez[cell_z]))
             {
                 edge_coefficient += (c.inertia_scale / c.scale) *
                                     a.inertia[2](node_r, cell_z, k);
@@ -607,7 +645,9 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
             sink(1, node_r - 1, cell_z, k, -coefficient * radius_low);
         };
         // E_r -= eta_H lap J_r on the (r-cell, z-node) face (radial part
-        // of the m = 0 cylindrical vector Laplacian carries -1/r^2).
+        // of the m = 0 cylindrical vector Laplacian carries -1/r^2);
+        // dropped at wall-seam-adjacent rows (first_guarded_*) like the
+        // residual's seam guard.
         const auto emit_face_radial_hyper =
             [&] (const int cell_r, const int node_z, const amrex::Real multiplier)
         {
@@ -616,7 +656,7 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
             {
                 return;
             }
-            if (c.wall.active && cell_r >= c.wall.first_masked_er[node_z])
+            if (c.wall.active && cell_r >= c.wall.first_guarded_er[node_z])
             {
                 return;
             }
@@ -647,7 +687,7 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
             {
                 return;
             }
-            if (c.wall.active && node_r >= c.wall.first_masked_ez[cell_z])
+            if (c.wall.active && node_r >= c.wall.first_guarded_ez[cell_z])
             {
                 return;
             }

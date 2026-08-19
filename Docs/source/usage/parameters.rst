@@ -5184,6 +5184,26 @@ Jacobian probes.
     modes (the masked E values are state-independent constants either
     way).
 
+    In both modes the non-ideal Ohm edge terms (the Hall EMF, the
+    electron-inertia field contribution, and the hyper-resistive term)
+    carry a WALL-SEAM GUARD: they are zeroed at every live E row whose
+    stencil footprint reaches into the masked band. Those stencils
+    would otherwise ingest the conducting wall's SURFACE current
+    (:math:`\mathrm{curl}\,B/\mu_0` across the stair seam is
+    drive-scale, not plasma) and masked-band field values over the
+    Ohm-floored near-wall density — a spurious, drive-powered EMF pump
+    at the seam, measured as the global :math:`E_\theta` maximum
+    growing at a formation-section step corner. Physically,
+    electron-frame boundary-layer physics at a rigid conductor is below
+    grid resolution, so the ideal + resistive Ohm law is the correct
+    wall-adjacent contract (the :math:`\eta J` and :math:`-u \times B`
+    parts are untouched). The guard is geometry-static (built once from
+    the polyline, JFNK probes see constant structure), the
+    preconditioner's stencil emission drops the identical contributions
+    (validated in-run by ``pc_mhd_block.resistive_validate_assembly``),
+    and the setup banner reports the per-family count of seam-guarded
+    rows whenever the wall composes with any of the guarded terms.
+
     NOTE when driving with FITTED coil waveforms: calibration factors
     fitted to composites that already embed the real machine's wall
     response will double-count the wall when combined with

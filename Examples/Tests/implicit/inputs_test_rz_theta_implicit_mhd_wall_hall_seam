@@ -1,0 +1,161 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Stair-step shaped-wall HALL-SEAM guard test (RZ, central recast flux,
+# frozen ions, Hall MHD): a stepped cylinder wall (r_w = 0.30 m for
+# z < 0, 0.22 m for z > 0, the wall_thermal step polyline) presents a
+# step corner at (r = 0.22, z = 0). The drive is the wall_pec_ramp
+# mechanism aimed at the step: a programmed split-field external
+# A_theta blob centered just inside the step corner ramps linearly
+# (exactly linear time scale), over a uniform initial B_z embedded in
+# the plasma and frozen into the masked band. The pec wall screens the
+# ramp with an image current SHEET along the stair surface -- exactly
+# the drive-scale seam configuration of the measured formation-deck bug
+# (rr14f_S0w): at the first LIVE rows inside the step the Hall EMF
+# stencils (half-sum/four-point corner currents, multi-cell b_cc
+# averages) read straight across the stair seam, where curl B / mu0 is
+# the conductor's SURFACE current, and an UNGUARDED Hall term turns
+# that into a spurious, drive-powered E pump far above the eta J scale
+# (the E_r/E_z pumps feed seam B_theta, whose poloidal curl then powers
+# the E_theta pump -- the production growth curve in miniature;
+# measured on this deck: seam-band |E_theta| 6.4 -> 33.0 V/m over
+# steps 1..10, the GLOBAL E_theta max throughout, and seam |E_r| up to
+# 69 V/m, vs 2.2 / 0.09 V/m guarded at an eta J scale of ~0.9 V/m).
+#
+# With the wall-seam guard (see ImplicitMHDWallMask) the
+# Hall/inertia/hyper Ohm terms are zeroed at every seam-adjacent row,
+# so the seam band must hold at the eta J scale while the interior
+# Hall physics stays alive (see analysis_mhd_wall_hall_seam.py). The
+# run is preconditioned with the MHD block PC (banded resistive block
+# carrying the Hall rows) WITH assembly validation: every active
+# update checks the sparse rows -- including the seam-guard row drops
+# -- against the matrix-free operator to roundoff, so residual/PC seam
+# consistency is asserted inside the run itself.
+
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+my_constants.Te = 1.0
+my_constants.Pe = n0 * Te * q_e
+my_constants.B0z = 2.0e-3
+my_constants.A0 = 1.0e-4
+my_constants.r0 = 0.20
+my_constants.a0 = 0.08
+my_constants.D = 50.0
+my_constants.nr = 32
+my_constants.nz = 16
+my_constants.Lr = 0.5
+my_constants.Lz = 0.5
+my_constants.dt = 1.0e-7
+my_constants.T_ramp = 2.0e-6
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 10
+amr.n_cell = nr nz
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 -0.5*Lz
+geometry.prob_hi = Lr 0.5*Lz
+boundary.field_lo = none none
+boundary.field_hi = pec none
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-8
+newton.max_iterations = 20
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-9
+gmres.max_iterations = 500
+
+jacobian.pc_type = pc_mhd_block
+pc_mhd_block.include_ideal_mhd_coupling = true
+pc_mhd_block.include_hall_mhd_coupling = true
+pc_mhd_block.resistive_solver = banded
+pc_mhd_block.resistive_validate_assembly = 1
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = 5.0/3.0
+hybrid_pic_model.n_floor = 1.0e16
+hybrid_pic_model.plasma_resistivity(rho,J,t) = mu0*D
+hybrid_pic_model.include_hall_term = true
+hybrid_pic_model.include_electron_pressure_term = false
+
+# Split-field external drive (exactly linear time scale, so the
+# discrete Faraday pair E_ext/B_ext is consistent to roundoff): an
+# in-domain A_theta coil blob just inside the step corner, whose flux
+# reaches the stair surface and forces the pec image-current sheet
+# along the seam. Pure-theta axisymmetric A is exactly divergence-free.
+hybrid_pic_model.add_external_fields = 1
+external_vector_potential.fields = coil
+external_vector_potential.coil.Ay_external_grid_function(x,y,z) = "A0*exp(-((x-r0)^2 + z^2)/a0^2)"
+external_vector_potential.coil.A_time_external_function(t) = "t/T_ramp"
+external_vector_potential.do_diva_cleaning = 0
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0z
+implicit_mhd.gamma_e = 5.0/3.0
+implicit_mhd.gamma_i = 5.0/3.0
+implicit_mhd.reference_ion_pressure = 0.0
+implicit_mhd.mass_density_floor = 1.0e-4 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-4 * Pe
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.electron_pressure(x,y,z) = Pe
+implicit_mhd.evolve_ion_fluid = false
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 1.0
+implicit_mhd.include_joule_heating = false
+implicit_mhd.resistive_theta = 1.0
+
+# Stepped conducting wall with the step corner the seeded blob straddles
+# (constant continuation covers the z ghosts).
+implicit_mhd.wall_model = pec
+implicit_mhd.wall_polyline_file = wall_step_r30_r22.csv
+
+# Uniform initial B_z embedded in the plasma (frozen into the masked
+# band by the wall projection): the poloidal field the seam Hall
+# stencils multiply against the image-sheet currents.
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 B0z
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 10
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Br Bt Bz Er Et Ez jr jt jz
+diag1.write_species = 0

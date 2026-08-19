@@ -264,18 +264,79 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
         "axis (first masked radial index 0); the shaped wall must stay "
         "clear of the axis parity boundary");
 
-    // Managed storage: read by device kernels (residual projection,
-    // Chebyshev/banded stencil emission, wall thermal BC) and by the
-    // direct solver's host-side sparse-row assembly through the same
+    // --- Seam-guard tables (see the class comment): first radial index
+    // per axial row at which the Hall/electron-inertia/hyper-resistive
+    // Ohm stencils reach into the masked band. Footprint of the widest
+    // chains (the nodal-inertia advection and the hyper
+    // Laplacian-of-current both read currents whose own curl-B cells sit
+    // one more cell out): TWO cells of radial reach outward, and the
+    // axial cell windows [j-2, j+1] around a z-node row and [j-2, j+2]
+    // around a z-cell row. Derived purely from the cell-centered masked
+    // table (geometry-only, so JFNK probes see constant structure), then
+    // clipped by the family's own masked table so first_guarded <=
+    // first_masked everywhere (masked rows are trivially seam-adjacent).
+    constexpr int guard_radial_reach = 2;
+    const auto cc_masked_at = [&] (const int jc) {
+        // Clamp to the ghost-extended cell table (constant continuation,
+        // like the polyline itself).
+        const int clamped = std::clamp(jc, -m_ng, m_nz - 1 + m_ng);
+        return cc_h[clamped + m_ng];
+    };
+    const auto guard_from_cells = [&] (const int jlo, const int jhi) {
+        int first_cc = never_masked;
+        for (int jc = jlo; jc <= jhi; ++jc) {
+            first_cc = std::min(first_cc, cc_masked_at(jc));
+        }
+        return (first_cc == never_masked)
+                   ? never_masked
+                   : first_cc - guard_radial_reach;
+    };
+    amrex::Vector<int> er_g(n_nodal);
+    amrex::Vector<int> et_g(n_nodal);
+    amrex::Vector<int> ez_g(n_cell);
+    for (int jj = 0; jj < n_nodal; ++jj) {
+        const int j = jj - m_ng;
+        const int guard = guard_from_cells(j - 2, j + 1);
+        er_g[jj] = std::min(er_h[jj], guard);
+        et_g[jj] = std::min(et_h[jj], guard);
+    }
+    for (int jj = 0; jj < n_cell; ++jj) {
+        const int j = jj - m_ng;
+        ez_g[jj] = std::min(ez_h[jj], guard_from_cells(j - 2, j + 2));
+    }
+    // Live seam-guarded rows per family in the valid domain (banner
+    // reporting): rows i with first_guarded <= i < first_masked. E_r
+    // rows are r-cells 0..nr-1; E_theta and E_z rows are r-nodes 0..nr.
+    m_seam_guarded_rows = {0, 0, 0};
+    for (int jj = m_ng; jj <= m_ng + m_nz; ++jj) {
+        m_seam_guarded_rows[0] +=
+            std::max(0, std::min(er_h[jj], nr) - std::max(er_g[jj], 0));
+        m_seam_guarded_rows[1] +=
+            std::max(0, std::min(et_h[jj], nr + 1) - std::max(et_g[jj], 0));
+    }
+    for (int jj = m_ng; jj < m_ng + m_nz; ++jj) {
+        m_seam_guarded_rows[2] +=
+            std::max(0, std::min(ez_h[jj], nr + 1) - std::max(ez_g[jj], 0));
+    }
+
+    // Managed storage: read by device kernels (residual projection, seam
+    // guard, Chebyshev/banded stencil emission, wall thermal BC) and by
+    // the direct solver's host-side sparse-row assembly through the same
     // pointers.
     m_first_masked_er.resize(n_nodal);
     m_first_masked_et.resize(n_nodal);
     m_first_masked_ez.resize(n_cell);
     m_first_masked_cc.resize(n_cell);
+    m_first_guarded_er.resize(n_nodal);
+    m_first_guarded_et.resize(n_nodal);
+    m_first_guarded_ez.resize(n_cell);
     std::copy(er_h.begin(), er_h.end(), m_first_masked_er.begin());
     std::copy(et_h.begin(), et_h.end(), m_first_masked_et.begin());
     std::copy(ez_h.begin(), ez_h.end(), m_first_masked_ez.begin());
     std::copy(cc_h.begin(), cc_h.end(), m_first_masked_cc.begin());
+    std::copy(er_g.begin(), er_g.end(), m_first_guarded_er.begin());
+    std::copy(et_g.begin(), et_g.end(), m_first_guarded_et.begin());
+    std::copy(ez_g.begin(), ez_g.end(), m_first_guarded_ez.begin());
 
     // Active BEFORE the banner: ThermalBCName()/GetThermalBC() gate on
     // m_active, so printing first reports "thermal BC none" for an
@@ -321,6 +382,9 @@ warpx::mhd_pc::WallMaskView ImplicitMHDWallMask::View () const
         view.first_masked_er = m_first_masked_er.data() + m_ng;
         view.first_masked_et = m_first_masked_et.data() + m_ng;
         view.first_masked_ez = m_first_masked_ez.data() + m_ng;
+        view.first_guarded_er = m_first_guarded_er.data() + m_ng;
+        view.first_guarded_et = m_first_guarded_et.data() + m_ng;
+        view.first_guarded_ez = m_first_guarded_ez.data() + m_ng;
     }
     return view;
 }

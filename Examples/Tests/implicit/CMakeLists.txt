@@ -1349,6 +1349,27 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# wall-seam guard on the Hall/inertia/hyper Ohm terms: a ramped coil
+# blob against the STEP corner of the pec stair wall forces the image
+# current sheet along the seam; the seam band (rows whose non-ideal Ohm
+# stencils read across the stair) must stay at the eta J /
+# ideal-dissipation scale instead of the measured drive-powered Hall
+# pump (unguarded: seam E_theta 33 V/m = the global max, seam E_r
+# 69 V/m; guarded: 2.2 / 0.09 V/m), the interior Hall response must
+# stay alive (over-covering guard fails), the masked band stays frozen
+# to solver precision, and the in-run resistive-block assembly
+# validation asserts the seam-guard row drops of the banded PC against
+# the matrix-free operator to roundoff at every update
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_hall_seam  # name
+    RZ  # dims
+    1  # nprocs (the banded resistive solver is single-rank)
+    inputs_test_rz_theta_implicit_mhd_wall_hall_seam  # inputs
+    "analysis_mhd_wall_hall_seam.py diags/diag000000 diags/diag000010"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # selectable z-end fluid boundary, mode "outflow" (rectified outgoing-only
 # end ghosts): a hot slab with outward end flow drains mass and total
 # fluid energy strictly monotonically through the z faces

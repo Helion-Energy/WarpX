@@ -1104,6 +1104,22 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         }
         amrex::Print() << "\n";
     }
+    // Wall-mask banner, seam-guard line: report the per-family count of
+    // live rows at which the Hall/inertia/hyper Ohm terms are zeroed
+    // (see ImplicitMHDWallMask and the seam guard in
+    // AssembleOhmElectricField), whenever any of the guarded terms is
+    // active alongside the shaped wall.
+    if (m_wall_mask.IsActive() &&
+        (m_hybrid_pic_model->m_include_hall_term ||
+         m_hybrid_pic_model->m_include_electron_inertia ||
+         m_hybrid_pic_model->m_include_hyper_resistivity_term)) {
+        const auto guarded = m_wall_mask.SeamGuardedRowCounts();
+        amrex::Print() << "ImplicitMHDWallMask: seam guard active "
+                          "(Hall/inertia/hyper Ohm terms zeroed at "
+                          "wall-seam-adjacent live rows): "
+                       << guarded[0] << " E_r, " << guarded[1]
+                       << " E_theta, " << guarded[2] << " E_z rows\n";
+    }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !m_hybrid_pic_model->m_solve_electron_energy_equation,
         "theta_implicit_mhd advances electron energy inside JFNK; "
@@ -6572,6 +6588,24 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
     const amrex::Real inverse_dz2 =
         1.0_rt / (axial_cell_size * axial_cell_size);
     const int domain_lo_r = m_WarpX->Geom(0).Domain().smallEnd(0);
+    // Wall-seam guard on the non-ideal Ohm edge terms (see
+    // ImplicitMHDWallMask): at live rows whose Hall/inertia/hyper
+    // stencils reach into the masked band those stencils ingest the
+    // conducting wall's SURFACE current (curl B across the stair seam is
+    // drive-scale, not plasma) and masked-band field values over the
+    // Ohm-floored near-wall density -- a spurious drive-powered EMF pump
+    // at the seam. The three terms are zeroed at seam-adjacent rows (the
+    // ideal and eta J parts are untouched: electron-frame boundary-layer
+    // physics at a rigid conductor is below grid, so ideal + resistive is
+    // the correct wall-adjacent Ohm contract). The tables are
+    // geometry-static (JFNK probes see constant structure) and the
+    // preconditioner's stencil emission drops the same contributions
+    // through the same tables. Null when no shaped wall is active
+    // (bit-identical to no guard).
+    const warpx::mhd_pc::WallMaskView wall_seam_view = m_wall_mask.View();
+    const int* const seam_guard_er = wall_seam_view.first_guarded_er;
+    const int* const seam_guard_et = wall_seam_view.first_guarded_et;
+    const int* const seam_guard_ez = wall_seam_view.first_guarded_ez;
     constexpr int flux_induction_t1 = FaceFluxComponent::induction_t1;
     constexpr int flux_induction_t2 = FaceFluxComponent::induction_t2;
     constexpr int flux_signal_left = FaceFluxComponent::signal_left;
@@ -6618,7 +6652,12 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                     vacuum_division_guard, vacuum_eta_scale);
             electric_r(i, j, k) =
                 zface(i, j, k, flux_induction_t2) + resistivity * jr;
-            if (include_hall) {
+            // Wall-seam guard (see the capture comment): the Hall,
+            // electron-inertia and hyper-resistive edge terms are zeroed
+            // at rows whose stencils reach into the masked band.
+            const bool seam_guarded =
+                (seam_guard_er != nullptr) && (i >= seam_guard_er[j]);
+            if (include_hall && !seam_guarded) {
                 // Hall EMF E_r += (J_theta B_z - J_z B_theta)/rho_q at the
                 // theta stage (see the staging note at the register
                 // captures): the face Riemann induction flux keeps the
@@ -6642,14 +6681,14 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 electric_r(i, j, k) +=
                     (jht * bz - jhz * bt) / hall_charge_density;
             }
-            if (include_inertia) {
+            if (include_inertia && !seam_guarded) {
                 // Electron-inertia field: the corner (nodal) assembly
                 // averaged in r to the z-face (the rho_q stencil of this
                 // kernel).
                 electric_r(i, j, k) += 0.5_rt *
                     (ei_nodal(i, j, k, 0) + ei_nodal(i + 1, j, k, 0));
             }
-            if (include_hyper_resistivity) {
+            if (include_hyper_resistivity && !seam_guarded) {
                 // E_r -= eta_H (laplacian J)_r with the m = 0 cylindrical
                 // vector Laplacian, discretely matching the hybrid solver;
                 // r is cell centered here, so no axis special case.
@@ -6727,7 +6766,10 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                     vacuum_division_guard, vacuum_eta_scale);
             electric_z(i, j, k) =
                 -rface(i, j, k, flux_induction_t1) + resistivity * jz;
-            if (include_hall) {
+            // Wall-seam guard (see the capture comment).
+            const bool seam_guarded =
+                (seam_guard_ez != nullptr) && (i >= seam_guard_ez[j]);
+            if (include_hall && !seam_guarded) {
                 // Hall EMF E_z += (J_r B_theta - J_theta B_r)/rho_q at
                 // the theta stage (see the Er kernel). The eta_H r-face
                 // averaging of the cell-centered TOTAL B carries the
@@ -6751,14 +6793,14 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 electric_z(i, j, k) +=
                     (jhr * bt - jht * br) / hall_charge_density;
             }
-            if (include_inertia) {
+            if (include_inertia && !seam_guarded) {
                 // Electron-inertia field: the corner (nodal) assembly
                 // averaged in z to the r-face (the rho_q stencil of this
                 // kernel).
                 electric_z(i, j, k) += 0.5_rt *
                     (ei_nodal(i, j, k, 2) + ei_nodal(i, j + 1, k, 2));
             }
-            if (include_hyper_resistivity) {
+            if (include_hyper_resistivity && !seam_guarded) {
                 // E_z -= eta_H (laplacian J)_z. On axis the geometric
                 // radial part reduces to Drr by the m = 0 symmetry of
                 // J_z (same treatment as the hybrid solver); the b_cc
@@ -6957,7 +6999,15 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                     vacuum_division_guard, vacuum_eta_scale);
             electric_theta(i, j, k) =
                 average + dissipation + resistivity * jt_corner;
-            if (include_hall) {
+            // Wall-seam guard (see the capture comment): at the first
+            // live corner rows inside a wall step corner the half-sum
+            // corner currents and the four-cell b_cc average below read
+            // straight across the stair seam -- the measured
+            // drive-powered E_theta pump of the formation-section exit
+            // step (rr14f).
+            const bool seam_guarded =
+                (seam_guard_et != nullptr) && (i >= seam_guard_et[j]);
+            if (include_hall && !seam_guarded) {
                 // Hall EMF E_theta += (J_z B_r - J_r B_z)/rho_q at the
                 // theta stage (see the Er kernel): half-sum corner
                 // currents (the |J| regularization's own stencils), the
@@ -6981,13 +7031,13 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 electric_theta(i, j, k) +=
                     (jhz * br - jhr * bz) / hall_charge_density;
             }
-            if (include_inertia) {
+            if (include_inertia && !seam_guarded) {
                 // Electron-inertia field, NATIVE on the corner staggering
                 // (the nodal assembly grid); the axis corner returned
                 // exactly zero above, preserving the m = 0 parity.
                 electric_theta(i, j, k) += ei_nodal(i, j, k, 1);
             }
-            if (include_hyper_resistivity) {
+            if (include_hyper_resistivity && !seam_guarded) {
                 // E_theta -= eta_H (laplacian J)_theta at the corner
                 // (J_theta's native staggering, so the stencil needs no
                 // interpolation); the axis corner returned zero above.

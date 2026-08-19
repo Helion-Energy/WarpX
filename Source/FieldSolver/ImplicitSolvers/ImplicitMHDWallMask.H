@@ -13,6 +13,7 @@
 
 #include <ablastr/fields/MultiFabRegister.H>
 
+#include <AMReX_Array.H>
 #include <AMReX_Geometry.H>
 #include <AMReX_GpuContainers.H>
 #include <AMReX_IntVect.H>
@@ -102,6 +103,34 @@
  * the WallMaskView, so the matrix-free Chebyshev application and the
  * banded/direct assemblies stay consistent with the residual.
  *
+ * SEAM GUARD on the non-ideal Ohm edge terms: the Hall EMF, the
+ * electron-inertia field contribution and the hyper-resistive term of
+ * the Ohm assembly read currents and cell-centered fields ACROSS the
+ * stair seam -- at live rows adjacent to the masked band those stencils
+ * ingest the conducting wall's SURFACE current (curl B across the seam
+ * is drive-scale, not plasma) and masked-band field values, divided by
+ * the Ohm-floored near-wall density: a spurious, drive-powered EMF pump
+ * at the seam (measured as the global E_theta maximum at the first live
+ * corner row inside a formation-section step corner, growing with the
+ * drive). The eta J term at the same rows is protected by the
+ * vacuum-keyed resistivity; the reactive terms have no such key.
+ * Physically, electron-frame boundary-layer physics at a rigid conductor
+ * is below grid resolution, so the ideal + resistive Ohm law is the
+ * correct wall-adjacent contract (the flux kernels' donor-redirection
+ * discipline, applied to the Ohm edge terms). Define therefore also
+ * builds per-family FIRST-GUARDED radial index tables marking every E
+ * row whose Hall/inertia/hyper stencil footprint (radial reach two
+ * cells outward -- the widest chain: the nodal inertia advection and the
+ * hyper Laplacian-of-current both reach two cells -- and the matching
+ * axial windows: cells [j-2, j+1] for the z-nodal E_r/E_theta rows,
+ * [j-2, j+2] for the z-cell E_z rows) touches a masked cell-centered
+ * cell; the assembly zeroes the three terms at those rows and the
+ * preconditioner's stencil emission drops the same contributions through
+ * the same tables (residual/PC exact twins). The tables are
+ * geometry-static (computed once here), so JFNK probes see constant
+ * structure; first_guarded <= first_masked always, and with
+ * wall_model = none nothing changes anywhere.
+ *
  * The wall polyline must stay clear of the axis (first masked radial
  * index >= 1 everywhere): the r = 0 reflecting boundary is handled by
  * the m = 0 parity ghosts and the axis-corner EMF parities, which
@@ -162,13 +191,22 @@ public:
         return m_active ? (m_total_field ? "pec" : "pec_response") : "none";
     }
 
-    /** Device view consumed by the preconditioner stencil emission; the
-     * pointers are pre-offset so the axial index of the residual grid is
-     * used directly (valid over [-ng, nz+ng] nodal, [-ng, nz-1+ng] cell).
-     * Mode-independent: the masked E values are state-independent
-     * constants in both conductor contracts, so the Jacobian row drops
-     * are identical. */
+    /** Device view consumed by the preconditioner stencil emission AND
+     * by the residual's seam guard on the Hall/inertia/hyper Ohm terms;
+     * the pointers are pre-offset so the axial index of the residual
+     * grid is used directly (valid over [-ng, nz+ng] nodal,
+     * [-ng, nz-1+ng] cell). Mode-independent: the masked E values are
+     * state-independent constants in both conductor contracts, so the
+     * Jacobian row drops are identical. */
     [[nodiscard]] warpx::mhd_pc::WallMaskView View () const;
+
+    /** Count of LIVE (unmasked) seam-guarded rows per electric-field
+     * family in the valid domain, for banners: [E_r, E_theta, E_z].
+     * Zero everywhere when the wall is inactive. */
+    [[nodiscard]] amrex::Array<long, 3> SeamGuardedRowCounts () const
+    {
+        return m_seam_guarded_rows;
+    }
 
     /** Apply the conductor projection to the assembled electric field.
      * wall_model = pec (total-field contract): at every masked location
@@ -200,6 +238,16 @@ private:
     amrex::Gpu::ManagedVector<int> m_first_masked_et; //!< (r-node, z-node)
     amrex::Gpu::ManagedVector<int> m_first_masked_ez; //!< (r-node, z-cell)
     amrex::Gpu::ManagedVector<int> m_first_masked_cc; //!< (r-cell, z-cell)
+    /** First SEAM-GUARDED radial index per axial index (see the class
+     * comment: rows whose Hall/inertia/hyper stencil footprint touches a
+     * masked cell; <= the masked index everywhere), same layout and
+     * memory contract as the masked tables. */
+    amrex::Gpu::ManagedVector<int> m_first_guarded_er; //!< (r-cell, z-node)
+    amrex::Gpu::ManagedVector<int> m_first_guarded_et; //!< (r-node, z-node)
+    amrex::Gpu::ManagedVector<int> m_first_guarded_ez; //!< (r-node, z-cell)
+    /** Live seam-guarded rows per family in the valid domain
+     * [E_r, E_theta, E_z] (banner reporting). */
+    amrex::Array<long, 3> m_seam_guarded_rows = {0, 0, 0};
 };
 
 #endif // WARPX_IMPLICIT_MHD_WALL_MASK_H_
