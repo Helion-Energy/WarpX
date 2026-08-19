@@ -557,6 +557,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     const bool include_hall_term = hybrid_model->m_include_hall_term;
     const bool include_electron_pressure_term =
         hybrid_model->m_include_electron_pressure_term;
+    const bool include_electron_inertia = hybrid_model->m_include_electron_inertia;
 
     const bool include_external_fields = hybrid_model->m_add_external_fields;
     const bool subtract_E_ext_everywhere =
@@ -574,6 +575,10 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     // symbol, interpolated to the E staggerings exactly like the density.
     amrex::MultiFab const& Te_mf =
         *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+    // Nodal electron-inertia field, assembled by the caller each
+    // evaluation (theta-implicit hybrid only; stays zero elsewhere).
+    amrex::MultiFab const * Ei_nodal_mf = include_electron_inertia
+        ? warpx.m_fields.get("hybrid_E_inertial_nodal", lev) : nullptr;
 
     // Index type required for interpolating fields from their respective
     // staggering to the Ex, Ey, Ez locations
@@ -722,6 +727,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         Array4<Real const> const& Jtheta = Jfield[1]->const_array(mfi);
         Array4<Real const> const& Jz = Jfield[2]->const_array(mfi);
         Array4<Real const> const& enE = enE_nodal_mf.const_array(mfi);
+        Array4<Real const> eiN;
+        if (Ei_nodal_mf) { eiN = Ei_nodal_mf->const_array(mfi); }
         Array4<Real const> const& rho = rhofield.const_array(mfi);
         Array4<Real const> const& Pe = Pefield.const_array(mfi);
         Array4<Real const> const& Te = Te_mf.const_array(mfi);
@@ -797,6 +804,9 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto rho_val_limited = std::max(rho_val, rho_floor);
 
                     Er(i, j, 0) = (enE_r - grad_Pe) / rho_val_limited;
+                }
+                if (include_electron_inertia) {
+                    Er(i, j, 0) += Interp(eiN, nodal, Er_stag, coarsen, i, j, 0, 0);
                 }
 
                 // Add resistivity only if E field value is used to update B
@@ -876,6 +886,9 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                     Etheta(i, j, 0) = (enE_t - grad_Pe) / rho_val_limited;
                 }
+                if (include_electron_inertia) {
+                    Etheta(i, j, 0) += Interp(eiN, nodal, Etheta_stag, coarsen, i, j, 0, 1);
+                }
 
                 // Add resistivity only if E field value is used to update B
                 if (include_resistive_terms) {
@@ -949,6 +962,9 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto rho_val_limited = std::max(rho_val, rho_floor);
 
                     Ez(i, j, 0) = (enE_z - grad_Pe) / rho_val_limited;
+                }
+                if (include_electron_inertia) {
+                    Ez(i, j, 0) += Interp(eiN, nodal, Ez_stag, coarsen, i, j, 0, 2);
                 }
 
                 // Add resistivity only if E field value is used to update B
@@ -1060,6 +1076,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     const bool include_hall_term = hybrid_model->m_include_hall_term;
     const bool include_electron_pressure_term =
         hybrid_model->m_include_electron_pressure_term;
+    const bool include_electron_inertia = hybrid_model->m_include_electron_inertia;
 
     const bool include_external_fields = hybrid_model->m_add_external_fields;
     const bool subtract_E_ext_everywhere =
@@ -1077,6 +1094,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     // symbol, interpolated to the E staggerings exactly like the density.
     amrex::MultiFab const& Te_mf =
         *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+    // Nodal electron-inertia field, assembled by the caller each
+    // evaluation (theta-implicit hybrid only; stays zero elsewhere).
+    amrex::MultiFab const * Ei_nodal_mf = include_electron_inertia
+        ? warpx.m_fields.get("hybrid_E_inertial_nodal", lev) : nullptr;
 
     // Index type required for interpolating fields from their respective
     // staggering to the Ex, Ey, Ez locations
@@ -1224,6 +1245,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         Array4<Real const> const& Jy = Jfield[1]->const_array(mfi);
         Array4<Real const> const& Jz = Jfield[2]->const_array(mfi);
         Array4<Real const> const& enE = enE_nodal_mf.const_array(mfi);
+        Array4<Real const> eiN;
+        if (Ei_nodal_mf) { eiN = Ei_nodal_mf->const_array(mfi); }
         Array4<Real const> const& rho = rhofield.const_array(mfi);
         Array4<Real const> const& Pe = Pefield.array(mfi);
         Array4<Real const> const& Te = Te_mf.const_array(mfi);
@@ -1296,6 +1319,9 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 
                 Ex(i, j, k) = (enE_x - grad_Pe) / rho_val_limited;
             }
+            if (include_electron_inertia) {
+                Ex(i, j, k) += Interp(eiN, nodal, Ex_stag, coarsen, i, j, k, 0);
+            }
 
             // Add resistivity only if E field value is used to update B
             if (include_resistive_terms) {
@@ -1365,6 +1391,9 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 
                 Ey(i, j, k) = (enE_y - grad_Pe) / rho_val_limited;
             }
+            if (include_electron_inertia) {
+                Ey(i, j, k) += Interp(eiN, nodal, Ey_stag, coarsen, i, j, k, 1);
+            }
 
             // Add resistivity only if E field value is used to update B
             if (include_resistive_terms) {
@@ -1433,6 +1462,9 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
 
                 Ez(i, j, k) = (enE_z - grad_Pe) / rho_val_limited;
+            }
+            if (include_electron_inertia) {
+                Ez(i, j, k) += Interp(eiN, nodal, Ez_stag, coarsen, i, j, k, 2);
             }
 
             // Add resistivity only if E field value is used to update B

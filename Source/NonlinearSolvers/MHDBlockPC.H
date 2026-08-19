@@ -348,6 +348,14 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         // theta dt / mu0 (the resistive rows keep theta_r dt / mu0).
         bool m_resistive_hall_active = false;
         RT m_resistive_hall_scale = 0.0;
+        // Whether the recast B block carries the electron-inertia rows
+        // (the Ohm law's inertia term gated by
+        // include_electron_inertia_coupling) and their dt-independent
+        // scale s/mu0 (s = the residual's active dJe/dt stencil factor;
+        // see MHDResistiveStencil.H).
+        bool m_include_electron_inertia_coupling = true;
+        bool m_resistive_inertia_active = false;
+        RT m_resistive_inertia_scale = 0.0;
         // Roundoff matvec check of the assembled sparse rows against the
         // matrix-free operator at every active update (any build).
         bool m_resistive_validate_assembly = false;
@@ -444,6 +452,11 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         // read by the Hall/whistler rows of the emission.
         amrex::Array<const amrex::MultiFab*, 3> m_resistive_hall_edge = {nullptr, nullptr,
                                                                          nullptr};
+        // Frozen electron-inertia coefficient C_i = m_e_eff/(e rho_q) on
+        // the electric-field staggerings, read by the inertia rows of the
+        // emission.
+        amrex::Array<const amrex::MultiFab*, 3> m_resistive_inertia_edge = {nullptr, nullptr,
+                                                                            nullptr};
         // Exact sparse inverse of the frozen resistive block (direct
         // solver and assembly validation), built lazily at the first
         // active update that needs it.
@@ -509,6 +522,8 @@ MHDBlockPC<T, Ops>::ReadParameters ()
     pp.query("consolidation", m_consolidation);
     pp.query("include_ideal_mhd_coupling", m_include_ideal_mhd_coupling);
     pp.query("include_hall_mhd_coupling", m_include_hall_mhd_coupling);
+    pp.query("include_electron_inertia_coupling",
+             m_include_electron_inertia_coupling);
     pp.query("include_wave_schur", m_include_wave_schur);
     utils::parser::queryWithParser(pp, "field_iterations", m_field_iterations);
     utils::parser::queryWithParser(pp, "fluid_iterations", m_fluid_iterations);
@@ -1021,6 +1036,57 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
         m_resistive_hall_scale = m_h / RT(PhysConst::mu0);
     }
 
+    // Electron-inertia rows of the recast B block (see
+    // MHDResistiveStencil.H): the frozen theta-stage dJe/dt response
+    // folded into the resistive emission at the dt-INDEPENDENT scale
+    // s/mu0 (s from the residual's active stencil), with the frozen
+    // coefficient C_i = m_e_eff/(e rho_q) on the electric-field
+    // staggerings. The block is SPD and BOUNDS the skew whistler part
+    // (capped branch 1 + s k^2 d_e^2 +/- i h D_H k^2), but it joins the
+    // Hall rows' consumers: the residual's inertia term requires the
+    // Hall term, whose rows already require the exact inverses.
+    m_resistive_inertia_active = false;
+    m_resistive_inertia_scale = 0.0;
+    RT inertia_maximum = 0.0;
+    if (m_include_electron_inertia_coupling &&
+        m_ops->GetMHDIncludeElectronInertiaForPC())
+    {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_resistive_direct_enabled || m_resistive_banded_enabled,
+            "pc_mhd_block.include_electron_inertia_coupling with the "
+            "conservative-form recast requires pc_mhd_block.resistive_solver "
+            "= banded or direct (the inertia rows join the Hall/whistler "
+            "block, which the fixed-count Chebyshev iteration cannot "
+            "invert). Set pc_mhd_block.include_electron_inertia_coupling = "
+            "false to run the B block without them.");
+        m_resistive_inertia_edge =
+            m_ops->GetMHDElectronInertiaCoefficientEdgeForPC();
+        for (int component = 0; component < 3; ++component)
+        {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !ResistiveComponentActive(component) ||
+                    m_resistive_inertia_edge[component] != nullptr,
+                "pc_mhd_block requires the solver's edge electron-inertia "
+                "coefficients for the recast inertia coupling");
+            if (m_resistive_inertia_edge[component] != nullptr)
+            {
+                inertia_maximum = amrex::max(
+                    inertia_maximum,
+                    m_resistive_inertia_edge[component]->max(0));
+            }
+        }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            std::isfinite(inertia_maximum) && inertia_maximum >= 0.0,
+            "pc_mhd_block requires finite electron-inertia coefficients");
+        const RT stencil_scale = m_ops->GetMHDElectronInertiaStencilScaleForPC();
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            stencil_scale > 0.0,
+            "pc_mhd_block requires a positive electron-inertia stencil "
+            "scale");
+        m_resistive_inertia_active = true;
+        m_resistive_inertia_scale = stencil_scale / RT(PhysConst::mu0);
+    }
+
     // Gate on the grid-scale resistive diffusion number of the stiffest
     // cell: below the threshold the unpreconditioned rows are benign and
     // the block stands down to the exact identity at zero cost. The
@@ -1046,6 +1112,12 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
             m_resistive_diffusion_number,
             m_h * hall_maximum / RT(PhysConst::mu0) *
                 inverse_cell_size[direction] * inverse_cell_size[direction]);
+        // Grid electron-inertia number s C_i/mu0 / dx^2 = s (d_e/dx)^2:
+        // dt-independent, O(1) exactly where the inertial cap matters.
+        m_resistive_diffusion_number = amrex::max(
+            m_resistive_diffusion_number,
+            m_resistive_inertia_scale * inertia_maximum *
+                inverse_cell_size[direction] * inverse_cell_size[direction]);
         laplacian_bound += RT(4.0) * inverse_cell_size[direction] *
                            inverse_cell_size[direction];
     }
@@ -1066,6 +1138,8 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
                        << (m_resistive_active ? m_resistive_solver : std::string("identity"))
                        << ", Hall rows = "
                        << (m_resistive_hall_active ? "active" : "inactive")
+                       << ", inertia rows = "
+                       << (m_resistive_inertia_active ? "active" : "inactive")
                        << ", hyper-resistive rows = "
                        << (m_resistive_hyper_active ? "active" : "inactive") << "\n";
     }
@@ -1110,6 +1184,8 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
     stencil_constants.include_hyper = m_resistive_hyper_active;
     stencil_constants.include_hall = m_resistive_hall_active;
     stencil_constants.hall_scale = m_resistive_hall_scale;
+    stencil_constants.include_inertia = m_resistive_inertia_active;
+    stencil_constants.inertia_scale = m_resistive_inertia_scale;
 #if defined(WARPX_DIM_RZ)
     // Stair-step PEC wall mask (implicit_mhd.wall_model = pec): the
     // assemblies drop the same masked tangential-E rows the residual
@@ -1138,10 +1214,12 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
         if (!m_resistive_direct->IsDefined())
         {
             m_resistive_direct->Define(m_geometry, face_layout, m_resistive_eta_edge,
-                                       m_resistive_eta_h_edge, m_resistive_hall_edge);
+                                       m_resistive_eta_h_edge, m_resistive_hall_edge,
+                                       m_resistive_inertia_edge);
         }
         m_resistive_direct->AssembleValues(stencil_constants, m_resistive_eta_edge,
-                                           m_resistive_eta_h_edge, m_resistive_hall_edge);
+                                           m_resistive_eta_h_edge, m_resistive_hall_edge,
+                                           m_resistive_inertia_edge);
         if (m_resistive_validate_assembly)
         {
             ValidateResistiveAssembly();
@@ -1176,7 +1254,8 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
             m_resistive_banded->AssembleValues(stencil_constants,
                                                m_resistive_eta_edge,
                                                m_resistive_eta_h_edge,
-                                               m_resistive_hall_edge);
+                                               m_resistive_hall_edge,
+                                               m_resistive_inertia_edge);
             m_resistive_banded->Factorize();
             m_banded_frozen_time = this->m_time;
         }
@@ -1912,6 +1991,8 @@ MHDBlockPC<T, Ops>::ApplyResistiveCurlCurl ()
     stencil_constants.include_hyper = m_resistive_hyper_active;
     stencil_constants.include_hall = m_resistive_hall_active;
     stencil_constants.hall_scale = m_resistive_hall_scale;
+    stencil_constants.include_inertia = m_resistive_inertia_active;
+    stencil_constants.inertia_scale = m_resistive_inertia_scale;
 #if defined(WARPX_DIM_RZ)
     // Same wall-mask row drops as the frozen assemblies (see
     // UpdateResistiveBlock): matrix-free application == assembled operator.
@@ -1946,6 +2027,12 @@ MHDBlockPC<T, Ops>::ApplyResistiveCurlCurl ()
                 {
                     stencil_arrays.hall[field_component] =
                         m_resistive_hall_edge[field_component]->const_array(mfi);
+                }
+                if (m_resistive_inertia_active &&
+                    m_resistive_inertia_edge[field_component] != nullptr)
+                {
+                    stencil_arrays.inertia[field_component] =
+                        m_resistive_inertia_edge[field_component]->const_array(mfi);
                 }
                 if (ResistiveComponentActive(field_component))
                 {

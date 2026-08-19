@@ -357,6 +357,43 @@ public:
     }
 
     /**
+     * \brief Return whether the generalized Ohm law includes the
+     * electron-inertia term for the MHD block preconditioner.
+     */
+    [[nodiscard]] virtual bool
+    GetMHDIncludeElectronInertiaForPC () const
+    {
+        return false;
+    }
+
+    /**
+     * \brief Return the dt-independent stencil factor s = dt c_p1 of the
+     * frozen electron-inertia response ((2 theta + 1)/2 with the
+     * three-point dJe/dt stencil engaged, 1 for the two-point form), read
+     * by the MHD block preconditioner's inertia rows.
+     */
+    [[nodiscard]] virtual amrex::Real
+    GetMHDElectronInertiaStencilScaleForPC () const
+    {
+        return 0.0;
+    }
+
+    /**
+     * \brief Return the frozen electron-inertia coefficient
+     * C_i = m_e_eff/(e rho_q) (= mu0 d_e^2 at the Ohm-floored charge
+     * density) evaluated on the electric-field staggerings with the
+     * residual Ohm assembly's own interpolation stencils, read by the MHD
+     * block preconditioner's inertia rows under the conservative-form
+     * recast. Null components when the term is off (or for implicit
+     * schemes that do not expose it).
+     */
+    [[nodiscard]] virtual amrex::Array<const amrex::MultiFab*, 3>
+    GetMHDElectronInertiaCoefficientEdgeForPC () const
+    {
+        return {nullptr, nullptr, nullptr};
+    }
+
+    /**
      * \brief Return whether the implicit MHD state advances the ion fluid.
      *
      * When false, the MHD block preconditioner treats the ion density and

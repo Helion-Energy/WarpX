@@ -25,6 +25,8 @@
 
 #include <AMReX_Random.H>
 
+#include <algorithm>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -98,6 +100,25 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("plasma_hyper_resistivity(rho,B)", m_eta_h_expression);
     pp_hybrid.query("include_hall_term", m_include_hall_term);
     pp_hybrid.query("include_electron_pressure_term", m_include_electron_pressure_term);
+
+    // Electron inertia in the generalized Ohm's law (see the member
+    // documentation in HybridPICModel.H).
+    pp_hybrid.query("include_electron_inertia", m_include_electron_inertia);
+    if (m_include_electron_inertia) {
+        utils::parser::queryWithParser(
+            pp_hybrid, "reduced_electron_mass_ratio",
+            m_reduced_electron_mass_ratio);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_reduced_electron_mass_ratio >= 0.0,
+            "hybrid_pic_model.reduced_electron_mass_ratio must be >= 0 "
+            "(0 selects the physical electron mass)");
+        pp_hybrid.query("electron_inertia_bdf2", m_electron_inertia_bdf2);
+#if defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+        WARPX_ABORT_WITH_MESSAGE(
+            "hybrid_pic_model.include_electron_inertia is not supported in "
+            "the 1D radial geometries.");
+#endif
+    }
 
     utils::parser::queryWithParser(pp_hybrid, "n_floor", m_n_floor);
 
@@ -264,6 +285,29 @@ void HybridPICModel::AllocateLevelMFs (
         fields.alloc_init(FieldType::hybrid_electron_velocity_fp, Direction{2},
             lev, amrex::convert(ba, rho_nodal_flag),
             dm, ncomps, ngRho, 0.0_rt);
+    }
+
+    // Electron inertia: nodal 3-component Je history (per-step levels;
+    // zero init = the exact pre-history for quiescent starts), the
+    // per-evaluation nodal scratch for the assembled inertial field, the
+    // converged theta-stage save feeding the end-of-step rotation, and
+    // the per-step frozen rho^n leg of drho/dt. One ghost cell
+    // throughout: the histories are read at valid nodes only and the
+    // assembled field is consumed by valid-contained Interp stencils --
+    // wider ghosts would never be maintained.
+    if (m_include_electron_inertia) {
+        const amrex::IntVect nd = amrex::IntVect::TheNodeVector();
+        const amrex::IntVect ng1 = amrex::IntVect(1);
+        fields.alloc_init("hybrid_Je_n_nodal",
+            lev, amrex::convert(ba, nd), dm, 3, ng1, 0.0_rt);
+        fields.alloc_init("hybrid_Je_nm1_nodal",
+            lev, amrex::convert(ba, nd), dm, 3, ng1, 0.0_rt);
+        fields.alloc_init("hybrid_Je_theta_nodal",
+            lev, amrex::convert(ba, nd), dm, 3, ng1, 0.0_rt);
+        fields.alloc_init("hybrid_E_inertial_nodal",
+            lev, amrex::convert(ba, nd), dm, 3, ng1, 0.0_rt);
+        fields.alloc_init("hybrid_rho_n_frozen",
+            lev, amrex::convert(ba, rho_nodal_flag), dm, 1, ng1, 0.0_rt);
     }
 
     // The "hybrid_rho_fp_temp" multifab is used to store the ion charge density
@@ -2857,4 +2901,388 @@ void HybridPICModel::FieldPush (
     // Push forward the B-field using Faraday's law
     warpx.EvolveB(dt, subcycling_half, t_old);
     warpx.FillBoundaryB(ng, nodal_sync);
+}
+
+void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
+                                                  amrex::Real a_dt,
+                                                  bool a_from_jacobian)
+{
+#if defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+    amrex::ignore_unused(a_theta, a_dt, a_from_jacobian);
+    WARPX_ABORT_WITH_MESSAGE(
+        "hybrid_pic_model.include_electron_inertia is not supported in 1D "
+        "radial geometries.");
+#else
+    ABLASTR_PROFILE("HybridPICModel::ComputeElectronInertiaNodal()");
+
+#if defined(WARPX_DIM_RZ)
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(WarpX::ncomps == 1,
+        "hybrid_pic_model.include_electron_inertia supports only the m = 0 "
+        "azimuthal mode in RZ");
+#endif
+
+    using ablastr::fields::Direction;
+    using namespace ablastr::coarsen::sample;
+
+    auto & warpx = WarpX::GetInstance();
+    constexpr int lev = 0;
+    amrex::Geometry const & geom = warpx.Geom(lev);
+    auto const dx_arr = geom.CellSizeArray();
+
+    // Effective electron mass, resolved on first use: the lightest charged
+    // ion species divided by the reduced mass ratio (physical m_e when the
+    // ratio is unset). The ratio moves the effective electron skin depth
+    // d_e = c/omega_pe(m_e_eff) relative to the grid. The theta-implicit
+    // MHD solver pre-resolves the mass from its fluid charge-to-mass ratio
+    // in Define() (nonzero here), so the lazy species scan never runs on
+    // the recast path.
+    if (m_electron_inertia_mass == 0.0_rt) {
+        if (m_reduced_electron_mass_ratio > 0.0_rt) {
+            amrex::Real m_ion_min = std::numeric_limits<amrex::Real>::max();
+            auto & mypc = warpx.GetPartContainer();
+            for (int isp = 0; isp < mypc.nSpecies(); ++isp) {
+                auto & pc = mypc.GetParticleContainer(isp);
+                if (pc.getCharge() != 0.0_rt) {
+                    m_ion_min = std::min(m_ion_min, pc.getMass());
+                }
+            }
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_ion_min < std::numeric_limits<amrex::Real>::max(),
+                "reduced_electron_mass_ratio requires at least one charged "
+                "ion species");
+            m_electron_inertia_mass = m_ion_min / m_reduced_electron_mass_ratio;
+        } else {
+            m_electron_inertia_mass = PhysConst::m_e;
+        }
+        amrex::Print() << "[HybridPICModel] electron inertia: m_e_eff = "
+            << m_electron_inertia_mass << " kg (mass ratio "
+            << m_reduced_electron_mass_ratio << ")\n";
+    }
+    amrex::Real const me_over_e = m_electron_inertia_mass / PhysConst::q_e;
+
+    amrex::MultiFab const & rho = *warpx.m_fields.get(FieldType::rho_fp, lev);
+    // Stage density and drho/dt rate (see m_inertia_recast_mode): the
+    // recast reads the theta-stage fluid charge density (component 0,
+    // filled from the state each evaluation) against the solver-frozen
+    // step-start image, EXACT rate (rho^theta - rho^n)/(theta dt). The
+    // hybrid deposit path reads the MIDPOINT deposit (component nComp/2)
+    // against the first-evaluation capture, rate 2/dt -- deposits are
+    // consumed raw, never divided by theta dt (only correct at
+    // theta = 1/2; theta > 1/2 would time-extrapolate deposit noise).
+    int rho_stage_comp = 0;
+    amrex::Real drho_rate = 1.0_rt / (a_theta * a_dt);
+    if (!m_inertia_recast_mode) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(rho.nComp() >= 2,
+            "hybrid_pic_model.include_electron_inertia requires the "
+            "theta-implicit hybrid evolve scheme (two charge-density time "
+            "levels)");
+        rho_stage_comp = rho.nComp() / 2;
+        drho_rate = 2.0_rt / a_dt;
+    }
+    amrex::Real const rho_floor = PhysConst::q_e * m_n_floor;
+
+    // Per-step frozen rho^n (hybrid deposit mode): rho_fp component 0 is a
+    // PRE-push deposit -- only the first evaluation of a step sees the
+    // true step-start density there. Capture it once per step on the
+    // first non-Jacobian evaluation (probe states are perturbed); the
+    // recast solver fills the register itself, exactly, each step.
+    amrex::MultiFab const & rho_n =
+        *warpx.m_fields.get("hybrid_rho_n_frozen", lev);
+    if (!m_inertia_recast_mode && !m_inertia_rho_n_captured &&
+        !a_from_jacobian) {
+        amrex::MultiFab & rho_n_mut =
+            *warpx.m_fields.get("hybrid_rho_n_frozen", lev);
+        amrex::MultiFab::Copy(rho_n_mut, rho, 0, 0, 1,
+                              amrex::min(rho_n_mut.nGrowVect(),
+                                         rho.nGrowVect()));
+        m_inertia_rho_n_captured = true;
+    }
+
+    ablastr::fields::VectorField Jp =
+        warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
+    ablastr::fields::VectorField Ji =
+        warpx.m_fields.get_alldirs(FieldType::current_fp, lev);
+    amrex::MultiFab const & Je_n =
+        *warpx.m_fields.get("hybrid_Je_n_nodal", lev);
+    amrex::MultiFab const & Je_nm1 =
+        *warpx.m_fields.get("hybrid_Je_nm1_nodal", lev);
+    amrex::MultiFab & Ei = *warpx.m_fields.get("hybrid_E_inertial_nodal", lev);
+
+    amrex::GpuArray<int, 3> const coarsen_rr = {1, 1, 1};
+    amrex::GpuArray<int, 3> const nodal = {1, 1, 1};
+    const amrex::GpuArray<int, 3> J_stag[3] =
+        {Jx_IndexType, Jy_IndexType, Jz_IndexType};
+
+    // Scratch: the theta-stage nodal electron current (with one ghost for
+    // the advection differences).
+    amrex::MultiFab Je_th(Ei.boxArray(), Ei.DistributionMap(), 3,
+                          amrex::IntVect(1));
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(Je_th, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        auto const & je   = Je_th.array(mfi);
+        auto const & jpx  = Jp[0]->const_array(mfi);
+        auto const & jpy  = Jp[1]->const_array(mfi);
+        auto const & jpz  = Jp[2]->const_array(mfi);
+        auto const & jix  = Ji[0]->const_array(mfi);
+        auto const & jiy  = Ji[1]->const_array(mfi);
+        auto const & jiz  = Ji[2]->const_array(mfi);
+        amrex::GpuArray<int, 3> const sx = J_stag[0];
+        amrex::GpuArray<int, 3> const sy = J_stag[1];
+        amrex::GpuArray<int, 3> const sz = J_stag[2];
+        amrex::ParallelFor(mfi.tilebox(),
+        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            je(i,j,k,0) = Interp(jpx, sx, nodal, coarsen_rr, i, j, k, 0)
+                        - Interp(jix, sx, nodal, coarsen_rr, i, j, k, 0);
+            je(i,j,k,1) = Interp(jpy, sy, nodal, coarsen_rr, i, j, k, 0)
+                        - Interp(jiy, sy, nodal, coarsen_rr, i, j, k, 0);
+            je(i,j,k,2) = Interp(jpz, sz, nodal, coarsen_rr, i, j, k, 0)
+                        - Interp(jiz, sz, nodal, coarsen_rr, i, j, k, 0);
+        });
+    }
+    // Zero-extend past physical boundaries; interior/periodic ghosts from
+    // the exchange.
+    Je_th.setBndry(0.0_rt);
+    Je_th.FillBoundary(geom.periodicity());
+
+    // Save the theta-stage assembly for the end-of-step history rotation
+    // (non-Jacobian evaluations only: probe states are perturbed). The last
+    // write before the end-of-step update is the converged iterate's
+    // assembly.
+    if (!a_from_jacobian) {
+        amrex::MultiFab & Je_sv =
+            *warpx.m_fields.get("hybrid_Je_theta_nodal", lev);
+        amrex::MultiFab::Copy(Je_sv, Je_th, 0, 0, 3,
+                              amrex::min(Je_sv.nGrowVect(),
+                                         Je_th.nGrowVect()));
+    }
+
+    // First evaluation ever: seed the history with the initial electron
+    // current (see m_inertia_history_initialized) so the quiescent start
+    // carries no fake dJe/dt impulse. Never seed from a perturbed
+    // Jacobian-probe state.
+    if (!m_inertia_history_initialized && !a_from_jacobian) {
+        amrex::MultiFab & Je_n_mut =
+            *warpx.m_fields.get("hybrid_Je_n_nodal", lev);
+        amrex::MultiFab & Je_nm1_mut =
+            *warpx.m_fields.get("hybrid_Je_nm1_nodal", lev);
+        amrex::MultiFab::Copy(Je_n_mut, Je_th, 0, 0, 3,
+                              amrex::min(Je_n_mut.nGrowVect(),
+                                         Je_th.nGrowVect()));
+        amrex::MultiFab::Copy(Je_nm1_mut, Je_th, 0, 0, 3,
+                              amrex::min(Je_nm1_mut.nGrowVect(),
+                                         Je_th.nGrowVect()));
+        m_inertia_history_initialized = true;
+        m_inertia_history_levels = 1;
+    }
+
+    // Assemble E_inertial = +(m_e_eff/(e rho)) [ dJe/dt - (Je/rho) drho/dt
+    //                                           - (Je.grad)(Je/rho) ],
+    // the Je-form of -(m_e_eff/e) D u_e/Dt with u_e = -Je/rho (the
+    // implicit-PIC formulation of Angus et al.). The sign and the 1/rho
+    // are fixed by the cold-electron limit of the electron momentum
+    // equation, E = (m_e/(e^2 n_e)) dJe/dt (the collisionless inertial
+    // reactance): the POSITIVE sign caps the whistler branch at
+    // k d_e ~ 1 -- flipped, it manufactures the spurious resonance branch
+    // instead, and only a dispersion test at k_eff d_e ~ 1 can tell the
+    // two apart. dJe/dt uses the theta-extrapolated iterate
+    // Je^{n+1} = (Je^theta - (1-theta) Je^n)/theta and the per-step-frozen
+    // history {Je^n, Je^{n-1}}; the first step after seeding uses the
+    // two-point form.
+    const bool bdf2 = m_electron_inertia_bdf2
+        && (m_inertia_history_levels >= 2);
+    amrex::Real const inv_th = 1.0_rt / a_theta;
+    amrex::Real const inv_dt = 1.0_rt / a_dt;
+    // Three-point (second-order) time-derivative stencil for dJe/dt,
+    // centered at the theta stage where Ohm's law is imposed: the
+    // quadratic through {Je^{n-1}, Je^n, Je^{n+1}} differentiated at
+    // t^{n+theta}. At theta = 1 this is classic BDF2; at theta = 1/2 the
+    // Je^{n-1} weight vanishes exactly and it reduces to the two-point
+    // midpoint form. An endpoint-BDF2 stencil here (centered at t^{n+1})
+    // would be mis-centered by (1-theta) dt relative to the stage and
+    // pumps reactive (whistler) modes: for dJ/dt = i w J it amplifies by
+    // |zeta| ~ 1 + (w dt)^2 / 2 per step at theta = 1/2.
+    amrex::Real const c_p1 = (2.0_rt * a_theta + 1.0_rt) * 0.5_rt * inv_dt;
+    amrex::Real const c_0  = -2.0_rt * a_theta * inv_dt;
+    amrex::Real const c_m1 = (2.0_rt * a_theta - 1.0_rt) * 0.5_rt * inv_dt;
+
+    // Nodal index bounds for one-sided differences at non-periodic edges
+    // (periodic dimensions keep the central stencil through the ghosts --
+    // clamping there would make the seam images inconsistent).
+    const amrex::Box dom_nd = amrex::convert(geom.Domain(),
+                                             amrex::IntVect::TheNodeVector());
+    amrex::GpuArray<int, 3> is_per{{1, 1, 1}};
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        is_per[d] = geom.isPeriodic(d) ? 1 : 0;
+    }
+#if defined(WARPX_DIM_RZ)
+    amrex::Real const dr = dx_arr[0];
+    amrex::Real const rmin = geom.ProbLo(0);
+#endif
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(Ei, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        auto const & ei     = Ei.array(mfi);
+        auto const & je     = Je_th.const_array(mfi);
+        auto const & jen    = Je_n.const_array(mfi);
+        auto const & jenm1  = Je_nm1.const_array(mfi);
+        auto const & rhoa   = rho.const_array(mfi);
+        auto const & rhon   = rho_n.const_array(mfi);
+        const int stage = rho_stage_comp;
+        auto const dlo = amrex::lbound(dom_nd);
+        auto const dhi = amrex::ubound(dom_nd);
+        amrex::ParallelFor(mfi.tilebox(),
+        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            amrex::Real const rho_stage = rhoa(i, j, k, stage);
+            // True vacuum carries no electron fluid: zero the term there
+            // (density-floored cells KEEP their inertia; the fluid recast
+            // never reaches this branch -- its density is floored
+            // positive).
+            if (rho_stage <= 0.0_rt) {
+                ei(i,j,k,0) = 0.0_rt;
+                ei(i,j,k,1) = 0.0_rt;
+                ei(i,j,k,2) = 0.0_rt;
+                return;
+            }
+            amrex::Real const rho_lim = amrex::max(rho_stage, rho_floor);
+            amrex::Real const drhodt =
+                (rho_stage - rhon(i, j, k)) * drho_rate;
+
+            // Central differences of u = Je/rho at nodes (one-sided at
+            // non-periodic edges); rho ghosts follow the fill exchange.
+            amrex::Real u[3], dudx[3], dudz[3];
+#if defined(WARPX_DIM_3D)
+            amrex::Real dudy[3];
+#endif
+            for (int c = 0; c < 3; ++c) {
+                u[c] = je(i,j,k,c) / rho_lim;
+            }
+            // Plain nested lambda: implicitly a device lambda in this
+            // context (an annotated nested extended lambda is illegal
+            // under nvcc).
+            auto ucomp = [&] (int ii, int jj, int kk,
+                              int c) -> amrex::Real
+            {
+                amrex::Real const rl = amrex::max(
+                    amrex::max(rhoa(ii,jj,kk,stage), 0.0_rt), rho_floor);
+                return je(ii,jj,kk,c) / rl;
+            };
+#if defined(WARPX_DIM_3D)
+            for (int c = 0; c < 3; ++c) {
+                const int im = (is_per[0] || i > dlo.x) ? i-1 : i;
+                const int ip = (is_per[0] || i < dhi.x) ? i+1 : i;
+                dudx[c] = (ucomp(ip,j,k,c) - ucomp(im,j,k,c))
+                          / ((ip - im) * dx_arr[0]);
+                const int jm = (is_per[1] || j > dlo.y) ? j-1 : j;
+                const int jp = (is_per[1] || j < dhi.y) ? j+1 : j;
+                dudy[c] = (ucomp(i,jp,k,c) - ucomp(i,jm,k,c))
+                          / ((jp - jm) * dx_arr[1]);
+                const int km = (is_per[2] || k > dlo.z) ? k-1 : k;
+                const int kp = (is_per[2] || k < dhi.z) ? k+1 : k;
+                dudz[c] = (ucomp(i,j,kp,c) - ucomp(i,j,km,c))
+                          / ((kp - km) * dx_arr[2]);
+            }
+#elif defined(WARPX_DIM_1D_Z)
+            for (int c = 0; c < 3; ++c) {
+                dudx[c] = 0.0_rt;
+                const int im = (is_per[0] || i > dlo.x) ? i-1 : i;
+                const int ip = (is_per[0] || i < dhi.x) ? i+1 : i;
+                dudz[c] = (ucomp(ip,j,k,c) - ucomp(im,j,k,c))
+                          / ((ip - im) * dx_arr[0]);
+            }
+#else
+            for (int c = 0; c < 3; ++c) {
+                const int im = (is_per[0] || i > dlo.x) ? i-1 : i;
+                const int ip = (is_per[0] || i < dhi.x) ? i+1 : i;
+                dudx[c] = (ucomp(ip,j,k,c) - ucomp(im,j,k,c))
+                          / ((ip - im) * dx_arr[0]);
+                const int jm = (is_per[1] || j > dlo.y) ? j-1 : j;
+                const int jp = (is_per[1] || j < dhi.y) ? j+1 : j;
+                dudz[c] = (ucomp(i,jp,k,c) - ucomp(i,jm,k,c))
+                          / ((jp - jm) * dx_arr[1]);
+            }
+#endif
+            // (Je.grad)u, with the cylindrical metric terms in RZ (m = 0):
+            //   (A.grad B)_r     += -A_t B_t / r
+            //   (A.grad B)_theta += +A_t B_r / r
+            // both zero on the axis by m = 0 regularity (A_t, B_t ~ r).
+            amrex::Real adv[3];
+#if defined(WARPX_DIM_3D)
+            for (int c = 0; c < 3; ++c) {
+                adv[c] = je(i,j,k,0)*dudx[c] + je(i,j,k,1)*dudy[c]
+                       + je(i,j,k,2)*dudz[c];
+            }
+#elif defined(WARPX_DIM_RZ)
+            for (int c = 0; c < 3; ++c) {
+                adv[c] = je(i,j,k,0)*dudx[c] + je(i,j,k,2)*dudz[c];
+            }
+            {
+                amrex::Real const r = rmin + i * dr;
+                if (r > 0.0_rt) {
+                    adv[0] -= je(i,j,k,1) * u[1] / r;
+                    adv[1] += je(i,j,k,1) * u[0] / r;
+                }
+            }
+#else // WARPX_DIM_XZ
+            for (int c = 0; c < 3; ++c) {
+                adv[c] = je(i,j,k,0)*dudx[c] + je(i,j,k,2)*dudz[c];
+            }
+#endif
+
+            for (int c = 0; c < 3; ++c) {
+                // Je^{n+1} from the theta-stage iterate:
+                // Je1 = (Je^theta - (1-theta) Je^n)/theta.
+                // dJe/dt: the stage-centered three-point stencil (BDF2 at
+                // theta = 1, two-point midpoint form at theta = 1/2), or
+                // the two-point form when electron_inertia_bdf2 = 0.
+                amrex::Real const je1 =
+                    (je(i,j,k,c) - (1.0_rt - a_theta) * jen(i,j,k,c)) * inv_th;
+                amrex::Real const djedt = bdf2
+                    ? (c_p1 * je1 + c_0 * jen(i,j,k,c)
+                       + c_m1 * jenm1(i,j,k,c))
+                    : (je1 - jen(i,j,k,c)) * inv_dt;
+                ei(i,j,k,c) = me_over_e
+                    * (djedt - u[c] * drhodt - adv[c]) / rho_lim;
+            }
+        });
+    }
+    Ei.setBndry(0.0_rt);
+    Ei.FillBoundary(geom.periodicity());
+#endif
+}
+
+void HybridPICModel::RotateElectronInertiaHistory (amrex::Real a_theta)
+{
+#if defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+    amrex::ignore_unused(a_theta);
+    WARPX_ABORT_WITH_MESSAGE(
+        "hybrid_pic_model.include_electron_inertia is not supported in 1D "
+        "radial geometries.");
+#else
+    auto & warpx = WarpX::GetInstance();
+    constexpr int lev = 0;
+
+    amrex::MultiFab & Je_n = *warpx.m_fields.get("hybrid_Je_n_nodal", lev);
+    amrex::MultiFab & Je_nm1 =
+        *warpx.m_fields.get("hybrid_Je_nm1_nodal", lev);
+    amrex::MultiFab const & Je_th =
+        *warpx.m_fields.get("hybrid_Je_theta_nodal", lev);
+
+    amrex::MultiFab::Copy(Je_nm1, Je_n, 0, 0, 3, Je_nm1.nGrowVect());
+    if (m_inertia_history_levels < 2) { ++m_inertia_history_levels; }
+    // Je^{n+1} = (Je^theta - (1-theta) Je^n)/theta -- the same
+    // extrapolation family as the other end-of-step fields.
+    amrex::MultiFab::LinComb(Je_n,
+        1.0_rt / a_theta, Je_th, 0,
+        1.0_rt - 1.0_rt / a_theta, Je_nm1, 0,
+        0, 3, Je_n.nGrowVect());
+    // Re-arm the per-step frozen rho^n capture (hybrid deposit mode; the
+    // recast solver refills its exact image every step regardless).
+    m_inertia_rho_n_captured = false;
+#endif
 }

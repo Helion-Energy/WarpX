@@ -48,6 +48,7 @@ struct WallMaskView
  *     A d = theta_r dt curl((eta_field/mu0) curl d)
  *          [- theta_r dt curl(eta_H lap(curl d)) / mu0 when include_hyper]
  *          [+ theta dt curl((curl d / mu0) x Hb) when include_hall]
+ *          [+ s curl((C_i/mu0) curl d) when include_inertia]
  *
  * on the residual's exact Yee staggering (see MHDBlockPC, resistive
  * block), with tangential E zeroed on every non-periodic domain boundary
@@ -91,6 +92,22 @@ struct ResistiveStencilConstants
     // directly (banded/direct LU).
     bool include_hall = false;
     amrex::Real hall_scale = 0.0; //!< theta dt / mu0
+    // Emit the electron-inertia response of the recast Ohm's law: with
+    // frozen density and ion current the theta-stage dJe/dt stencil
+    // linearizes to dE = (C_i/mu0) (c_p1/theta) curl dB with
+    // C_i = m_e_eff/(e rho_q) (see ResistiveStencilArrays::inertia), so
+    // the frozen B-row gains s/mu0 curl(C_i curl dB) with the
+    // dt-INDEPENDENT stencil factor s = dt c_p1 = (2 theta + 1)/2 (BDF2
+    // engaged) or 1 (two-point form). An exact stencil twin of the
+    // resistive rows -- the emission folds C_i into the eta coefficient
+    // at inertia_scale, inheriting every boundary-plane and wall-mask
+    // drop. The block is SPD and BOUNDS the skew whistler part: the
+    // preconditioned symbol is the CAPPED branch,
+    // (1 + s k^2 d_e^2) +/- i h D_H k^2 with d_e^2 = C_i/mu0. Reactive
+    // like the Hall rows (never the shifted resistive theta_r), and
+    // consumed with them by the exact banded/direct inverses.
+    bool include_inertia = false;
+    amrex::Real inertia_scale = 0.0; //!< s / mu0 (dt-independent)
 #if defined(WARPX_DIM_1D_Z)
     int axial_node_low = 0;
     int axial_node_high = 0;
@@ -130,6 +147,11 @@ struct ResistiveStencilArrays
     // read only when include_hall is set. In 1D the transverse
     // components share the z-node array and only Hb_z enters the curl.
     amrex::Array4<const amrex::Real> hall[3];
+    // Frozen electron-inertia coefficient C_i = m_e_eff/(e rho_q) on the
+    // same electric-field staggerings (the Ohm-floored charge density
+    // with the eta stencils); read only when include_inertia is set. In
+    // 1D the transverse components share the z-node array.
+    amrex::Array4<const amrex::Real> inertia[3];
 };
 
 /**
@@ -208,8 +230,17 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
         {
             return;
         }
+        // Electron inertia: an exact stencil twin of the eta term, folded
+        // as the effective coefficient eta + (inertia_scale/scale) C_i
+        // (see include_inertia) so it inherits the identical drops.
+        amrex::Real edge_coefficient = a.eta[a_component](node, j, k);
+        if (c.include_inertia)
+        {
+            edge_coefficient += (c.inertia_scale / c.scale) *
+                                a.inertia[a_component](node, j, k);
+        }
         const amrex::Real coefficient =
-            multiplier * a.eta[a_component](node, j, k) * c.inverse_dz;
+            multiplier * edge_coefficient * c.inverse_dz;
         sink(a_component, node, j, k, coefficient);
         sink(a_component, node - 1, j, k, -coefficient);
         if (c.include_hall)
@@ -481,7 +512,15 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
         {
             return;
         }
-        const amrex::Real scaled_eta = multiplier * a.eta[1](node_r, node_z, k);
+        // Electron-inertia fold: eta + (inertia_scale/scale) C_i (an
+        // exact stencil twin; see include_inertia).
+        amrex::Real edge_coefficient = a.eta[1](node_r, node_z, k);
+        if (c.include_inertia)
+        {
+            edge_coefficient +=
+                (c.inertia_scale / c.scale) * a.inertia[1](node_r, node_z, k);
+        }
+        const amrex::Real scaled_eta = multiplier * edge_coefficient;
         sink(0, node_r, node_z, k, scaled_eta * c.inverse_dz);
         sink(0, node_r, node_z - 1, k, -scaled_eta * c.inverse_dz);
         sink(2, node_r, node_z, k, -scaled_eta * c.inverse_dr);
@@ -524,8 +563,15 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
             {
                 return;
             }
+            // Electron-inertia fold (see include_inertia).
+            amrex::Real edge_coefficient = a.eta[0](cell_r, node_z, k);
+            if (c.include_inertia)
+            {
+                edge_coefficient += (c.inertia_scale / c.scale) *
+                                    a.inertia[0](cell_r, node_z, k);
+            }
             const amrex::Real coefficient =
-                multiplier * a.eta[0](cell_r, node_z, k) * c.inverse_dz;
+                multiplier * edge_coefficient * c.inverse_dz;
             sink(1, cell_r, node_z, k, -coefficient);
             sink(1, cell_r, node_z - 1, k, coefficient);
         };
@@ -548,8 +594,14 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
             const amrex::Real radius_high =
                 c.radial_lo +
                 (static_cast<amrex::Real>(node_r) + amrex::Real(0.5)) * c.radial_cell_size;
-            const amrex::Real coefficient = multiplier *
-                                            a.eta[2](node_r, cell_z, k) *
+            // Electron-inertia fold (see include_inertia).
+            amrex::Real edge_coefficient = a.eta[2](node_r, cell_z, k);
+            if (c.include_inertia)
+            {
+                edge_coefficient += (c.inertia_scale / c.scale) *
+                                    a.inertia[2](node_r, cell_z, k);
+            }
+            const amrex::Real coefficient = multiplier * edge_coefficient *
                                             c.inverse_dr / radius_node;
             sink(1, node_r, cell_z, k, coefficient * radius_high);
             sink(1, node_r - 1, cell_z, k, -coefficient * radius_low);

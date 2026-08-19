@@ -3030,6 +3030,23 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
     include_electron_pressure_term: bool, default=True
         Include the electron-pressure-gradient term in generalized Ohm's law.
 
+    include_electron_inertia: bool, default=False
+        Add the electron-inertia term to the generalized Ohm's law (the
+        Je-form material derivative of the electron fluid velocity, per the
+        implicit-PIC formulation of Angus et al.), rolling the whistler
+        branch over at the effective electron skin depth. Implicit evolve
+        schemes only (``theta_implicit_hybrid`` or ``theta_implicit_mhd``
+        with ``fluid_flux = central`` and the Hall term on).
+
+    reduced_electron_mass_ratio: float, default=0
+        When > 0, the effective electron mass is the ion mass divided by
+        this ratio (0 selects the physical electron mass), moving the
+        electron-scale dispersion relative to the grid.
+
+    electron_inertia_bdf2: bool, default=True
+        Use the second-order three-point stencil, centered at the theta
+        stage, for the inertial time derivative (two-point form when off).
+
     plasma_resistivity: float or str
         Value or expression to use for the plasma resistivity in Ohm*m.
         Can be a constant value or an expression depending on ``rho`` (charge density),
@@ -3192,6 +3209,9 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         n_floor=None,
         include_hall_term=None,
         include_electron_pressure_term=None,
+        include_electron_inertia=None,
+        reduced_electron_mass_ratio=None,
+        electron_inertia_bdf2=None,
         plasma_resistivity=None,
         plasma_hyper_resistivity=None,
         plasma_resistivity_species=None,
@@ -3224,6 +3244,9 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.n_floor = n_floor
         self.include_hall_term = include_hall_term
         self.include_electron_pressure_term = include_electron_pressure_term
+        self.include_electron_inertia = include_electron_inertia
+        self.reduced_electron_mass_ratio = reduced_electron_mass_ratio
+        self.electron_inertia_bdf2 = electron_inertia_bdf2
         self.plasma_resistivity = plasma_resistivity
         self.plasma_hyper_resistivity = plasma_hyper_resistivity
         self.plasma_resistivity_species = plasma_resistivity_species
@@ -3284,6 +3307,21 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         pywarpx.hybridpicmodel.include_electron_pressure_term = (
             self.include_electron_pressure_term
         )
+        # Only emit the electron-inertia attributes that were explicitly
+        # set, so the generated input deck contains only user-specified
+        # parameters.
+        if self.include_electron_inertia is not None:
+            pywarpx.hybridpicmodel.include_electron_inertia = (
+                self.include_electron_inertia
+            )
+        if self.reduced_electron_mass_ratio is not None:
+            pywarpx.hybridpicmodel.reduced_electron_mass_ratio = (
+                self.reduced_electron_mass_ratio
+            )
+        if self.electron_inertia_bdf2 is not None:
+            pywarpx.hybridpicmodel.electron_inertia_bdf2 = (
+                self.electron_inertia_bdf2
+            )
         pywarpx.hybridpicmodel.__setattr__(
             "plasma_resistivity(rho,Te,J,t)",
             pywarpx.my_constants.mangle_expression(

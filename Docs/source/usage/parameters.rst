@@ -584,6 +584,27 @@ Overall simulation parameters
                assembled Hall rows against the matrix-free operator to
                roundoff exactly like the resistive rows.
 
+               When the Ohm law additionally carries the electron-inertia
+               term (``hybrid_pic_model.include_electron_inertia``) and
+               ``pc_mhd_block.include_electron_inertia_coupling`` is on
+               (the default), the frozen inertia response
+               :math:`+s\,\nabla\times((C_i/\mu_0)\,\nabla\times\,\cdot\,)`
+               with :math:`C_i = m_{e,\mathrm{eff}}/(e\rho_q)` (=
+               :math:`\mu_0 d_e^2` at the Ohm-floored charge density) and
+               the dt-INDEPENDENT stencil factor :math:`s = (2\theta+1)/2`
+               (three-point) or 1 (two-point) joins the same emission as
+               an exact stencil twin of the resistive rows -- the
+               push-through of the theta-stage :math:`\partial\vec{J}_e/
+               \partial t` at frozen density and ion current
+               (:math:`\delta\vec{J}_e = \nabla\times\delta\vec{B}/\mu_0`).
+               The block is SPD and BOUNDS the skew whistler part: the
+               frozen symbol becomes the capped branch
+               :math:`(1 + s k^2 d_e^2) \pm i\,\theta\Delta t\,D_H k^2`,
+               and the grid inertia number :math:`s\,(d_e/\Delta x)^2`
+               joins the activation gate. The inertia rows require the
+               same exact inverses as the Hall rows (asserted) and are
+               covered by ``resistive_validate_assembly`` identically.
+
             Boundaries the recast residual manages itself are mapped per
             component to preconditioner-only linear-operator types matching
             the residual's fluid ghosts: ``pec`` (a reflecting wall) becomes
@@ -647,6 +668,12 @@ Overall simulation parameters
               ``resistive_solver = banded`` or ``direct``).
               This changes only the preconditioner, not the nonlinear Hall
               residual.
+            - ``pc_mhd_block.include_electron_inertia_coupling`` (``bool``,
+              default: true): when the electron-inertia Ohm term is
+              enabled, include its frozen SPD mass in the recast B block
+              (see point 4 above; requires ``resistive_solver = banded``
+              or ``direct``). This changes only the preconditioner, not
+              the nonlinear inertia residual.
             - ``pc_mhd_block.field_iterations`` (``int``, default: 2):
               fixed MLMG iteration count for the resistive/Hall-magnitude
               curl--curl block.
@@ -4170,6 +4197,71 @@ Maxwell solver: kinetic-fluid hybrid
     Controls the electron-pressure contribution
     :math:`-\nabla P_e/(e n_e)` in generalized Ohm's law independently of
     the Hall and resistive terms.
+
+.. pp:param:: hybrid_pic_model.include_electron_inertia
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Add the electron-inertia term to the generalized Ohm's law, following
+    the implicit-PIC formulation of Angus et al.:
+
+    .. math::
+
+        \vec{E}_\mathrm{inertial} = \frac{m_{e,\mathrm{eff}}}{e\rho}
+        \left[ \frac{\partial \vec{J}_e}{\partial t}
+        - \frac{\vec{J}_e}{\rho}\frac{\partial \rho}{\partial t}
+        - (\vec{J}_e\cdot\nabla)\frac{\vec{J}_e}{\rho} \right],
+
+    the :math:`\vec{J}_e`-form of the material derivative
+    :math:`-(m_{e,\mathrm{eff}}/e)\,D\vec{u}_e/Dt` with
+    :math:`\vec{u}_e = -\vec{J}_e/\rho` (cold-electron limit:
+    :math:`\vec{E} = (m_e/(e^2 n_e))\,\partial\vec{J}_e/\partial t`, the
+    collisionless electron inductance). The term is REACTIVE: it rolls the
+    whistler branch over at the effective electron skin depth
+    :math:`d_e = c/\omega_{pe}(m_{e,\mathrm{eff}})` --
+    :math:`\omega \to \omega/(1 + k^2 d_e^2)` -- so under-resolved
+    grid-scale whistlers saturate instead of stiffening as :math:`k^2`.
+    The time derivative is assembled at the theta stage from the
+    theta-extrapolated iterate and two per-step-frozen electron-current
+    history levels, seeded from the first evaluated state. Density-floored
+    cells keep their inertia (the Ohm density floor bounds the
+    :math:`1/n_e`); true vacuum drops it. Requires an implicit evolve
+    scheme (``theta_implicit_hybrid``, or ``theta_implicit_mhd`` with
+    ``implicit_mhd.fluid_flux = central`` and ``include_hall_term = true``,
+    where the term also joins the ``pc_mhd_block`` preconditioner rows).
+    Restarts are not supported yet (the current history is not
+    checkpointed). GMRES guidance for heavy effective mass ratios: the
+    inertia Jacobian block scales as :math:`(2\theta + 1)/2\,(k d_e)^2`
+    and is dt-independent, so decks with large :math:`d_e/\Delta x`
+    (small ``reduced_electron_mass_ratio``) want a matched restart length
+    -- ``gmres.restart_length = 200`` with ``gmres.max_iterations = 400``
+    measured well on the hybrid side; the defaults are not changed.
+
+.. pp:param:: hybrid_pic_model.reduced_electron_mass_ratio
+    :type: ``float``
+    :default: ``0``
+    :optional:
+
+    When > 0, the effective electron mass of the inertia term is the ion
+    mass divided by this ratio (the lightest charged particle species on
+    the hybrid path; the fluid ion mass :math:`q_e/(q/m)` under
+    ``theta_implicit_mhd``). 0 selects the physical electron mass. The
+    ratio tunes where the electron-scale dispersion acts relative to the
+    grid: :math:`d_e \propto 1/\sqrt{R}` grows as the ratio shrinks.
+
+.. pp:param:: hybrid_pic_model.electron_inertia_bdf2
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    Use the second-order three-point stencil
+    :math:`\{(2\theta-1)/2,\,-2\theta,\,(2\theta+1)/2\}/\Delta t` on
+    :math:`\{\vec{J}_e^{n-1}, \vec{J}_e^n, \vec{J}_e^{n+1}\}`, centered at
+    the theta stage where Ohm's law is imposed (classic BDF2 at
+    :math:`\theta = 1`, exactly the two-point midpoint form at
+    :math:`\theta = 1/2`), for the inertial time derivative. ``false``
+    selects the two-point form at every theta.
 
 .. _running-cpp-parameters-implicit-mhd:
 

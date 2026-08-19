@@ -784,6 +784,9 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
     fields.alloc_init(HallCoefficientE0Name, lev,
                       amrex::convert(ba, amrex::IntVect(1)), dm, 3,
                       amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(InertiaCoefficientE0Name, lev,
+                      amrex::convert(ba, amrex::IntVect(1)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
 #elif defined(WARPX_DIM_RZ)
     fields.alloc_init(FieldResistivityE0Name, lev,
                       amrex::convert(ba, amrex::IntVect(0, 1)), dm, 1,
@@ -811,6 +814,15 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
                       amrex::IntVect(0), 0.0_rt);
     fields.alloc_init(HallCoefficientE2Name, lev,
                       amrex::convert(ba, amrex::IntVect(1, 0)), dm, 3,
+                      amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(InertiaCoefficientE0Name, lev,
+                      amrex::convert(ba, amrex::IntVect(0, 1)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(InertiaCoefficientE1Name, lev,
+                      amrex::convert(ba, amrex::IntVect(1, 1)), dm, 1,
+                      amrex::IntVect(0), 0.0_rt);
+    fields.alloc_init(InertiaCoefficientE2Name, lev,
+                      amrex::convert(ba, amrex::IntVect(1, 0)), dm, 1,
                       amrex::IntVect(0), 0.0_rt);
 #endif
 
@@ -1020,6 +1032,48 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
             "Ohm's law is E = -u x B [+ J x B/rho_q] + eta J "
             "- eta_H laplacian(J) (the electron pressure acts through the "
             "fluid work terms, not an Ohm gradient)");
+    }
+    if (m_hybrid_pic_model->m_include_electron_inertia) {
+        // Electron inertia (the reactive whistler cap, Angus et al.):
+        // rides the solver-assembled Ohm's law and completes
+        // E = -u_e x B - (m_e_eff/e) D u_e/Dt, so it requires the Hall
+        // term (without J x B/rho_q the Ohm law carries no
+        // electron-scale branch for the cap to regularize) and the
+        // central recast flux (the same u_e-consistency argument that
+        // gates Hall out of the hlld fan).
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_hybrid_pic_model->m_include_hall_term,
+            "hybrid_pic_model.include_electron_inertia requires "
+            "include_hall_term = true under theta_implicit_mhd: the "
+            "inertial cap regularizes the Hall/whistler branch");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_use_central,
+            "hybrid_pic_model.include_electron_inertia requires "
+            "implicit_mhd.fluid_flux = central (the Hall-capable recast "
+            "flux; hlld/hllc advect the electron energy with the ion "
+            "contact wave)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !from_restart,
+            "hybrid_pic_model.include_electron_inertia does not support "
+            "restarts yet (the electron-current history is not "
+            "checkpointed)");
+        // Recast-mode inertia assembly (see HybridPICModel.H): the
+        // effective electron mass resolves from the FLUID ion mass
+        // m_ion = q_e/(q/m) of the quasi-neutral single-ion fluid --
+        // the state has no particle species for the hybrid path's
+        // lightest-ion scan.
+        m_hybrid_pic_model->m_inertia_recast_mode = true;
+        const amrex::Real ion_mass = PhysConst::q_e / m_ion_charge_to_mass;
+        m_hybrid_pic_model->m_electron_inertia_mass =
+            (m_hybrid_pic_model->m_reduced_electron_mass_ratio > 0.0_rt)
+                ? ion_mass /
+                      m_hybrid_pic_model->m_reduced_electron_mass_ratio
+                : PhysConst::m_e;
+        amrex::Print() << "[ThetaImplicitMHD] electron inertia: m_e_eff = "
+                       << m_hybrid_pic_model->m_electron_inertia_mass
+                       << " kg (mass ratio "
+                       << m_hybrid_pic_model->m_reduced_electron_mass_ratio
+                       << ")\n";
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !m_hybrid_pic_model->m_solve_electron_energy_equation,
@@ -1823,6 +1877,128 @@ ThetaImplicitMHD::GetMHDHallCoefficientEdgeForPC () const
 #endif
 }
 
+bool
+ThetaImplicitMHD::GetMHDIncludeElectronInertiaForPC () const
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_hybrid_pic_model != nullptr,
+        "ThetaImplicitMHD electron-inertia flag requested before Define()");
+    return m_hybrid_pic_model->m_include_electron_inertia;
+}
+
+amrex::Real
+ThetaImplicitMHD::GetMHDElectronInertiaStencilScaleForPC () const
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_hybrid_pic_model != nullptr,
+        "ThetaImplicitMHD electron-inertia scale requested before Define()");
+    return m_hybrid_pic_model->ElectronInertiaStencilScale(m_theta);
+}
+
+amrex::Array<const amrex::MultiFab*, 3>
+ThetaImplicitMHD::GetMHDElectronInertiaCoefficientEdgeForPC () const
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_hybrid_pic_model != nullptr,
+        "ThetaImplicitMHD electron-inertia coefficients requested before "
+        "Define()");
+    if (!m_hybrid_pic_model->m_include_electron_inertia) {
+        return {nullptr, nullptr, nullptr};
+    }
+    // Frozen electron-inertia coefficient C_i = m_e_eff/(e rho_q) on the
+    // electric-field staggerings: the local (diagonal-like) inertial mass
+    // of the frozen dJe/dt response (see MHDResistiveStencil.H), with the
+    // charge density interpolated by the eta stencils and floored at the
+    // Ohm guard exactly like the residual's nodal 1/rho division (a hard
+    // max, matching ComputeElectronInertiaNodal). In 1D the transverse
+    // edges ARE the assembly nodes, so the emitted rows carry the exact
+    // frozen response.
+    const amrex::MultiFab& density = *m_WarpX->m_fields.get(MassDensityName, 0);
+    const amrex::Real charge_to_mass = m_ion_charge_to_mass;
+    const amrex::Real charge_density_floor =
+        m_ion_charge_to_mass * OhmMassDensityFloor();
+    const amrex::Real me_over_e =
+        m_hybrid_pic_model->m_electron_inertia_mass / PhysConst::q_e;
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        me_over_e > 0.0_rt,
+        "ThetaImplicitMHD electron-inertia mass not resolved (Define() "
+        "order)");
+#if defined(WARPX_DIM_1D_Z)
+    amrex::MultiFab& node_inertia =
+        *m_WarpX->m_fields.get(InertiaCoefficientE0Name, 0);
+    for (amrex::MFIter mfi(node_inertia); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto inertia = node_inertia.array(mfi);
+        const auto rho = density.const_array(mfi);
+        amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            const amrex::Real charge_density_raw =
+                charge_to_mass * 0.5_rt * (rho(i - 1, j, k) + rho(i, j, k));
+            inertia(i, j, k) = me_over_e /
+                amrex::max(charge_density_raw, charge_density_floor);
+        });
+    }
+    // Ex and Ey share the z-nodal staggering; the cell-centered Ez never
+    // enters the 1D curl.
+    return {&node_inertia, &node_inertia, nullptr};
+#elif defined(WARPX_DIM_RZ)
+    amrex::MultiFab& radial_inertia =
+        *m_WarpX->m_fields.get(InertiaCoefficientE0Name, 0);
+    amrex::MultiFab& azimuthal_inertia =
+        *m_WarpX->m_fields.get(InertiaCoefficientE1Name, 0);
+    amrex::MultiFab& axial_inertia =
+        *m_WarpX->m_fields.get(InertiaCoefficientE2Name, 0);
+    for (amrex::MFIter mfi(azimuthal_inertia); mfi.isValid(); ++mfi) {
+        const auto inertia_radial = radial_inertia.array(mfi);
+        const auto inertia_azimuthal = azimuthal_inertia.array(mfi);
+        const auto inertia_axial = axial_inertia.array(mfi);
+        const auto rho = density.const_array(mfi);
+        // E_theta corners: the nodal charge density.
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(1, 1)),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const auto node_density = [&] (const int in, const int jn) {
+                    return 0.25_rt * (rho(in - 1, jn - 1, k) + rho(in, jn - 1, k) +
+                                      rho(in - 1, jn, k) + rho(in, jn, k));
+                };
+                inertia_azimuthal(i, j, k) = me_over_e /
+                    amrex::max(charge_to_mass * node_density(i, j),
+                               charge_density_floor);
+            });
+        // Er z-faces: nodes averaged in r.
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(0, 1)),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const auto node_density = [&] (const int in, const int jn) {
+                    return 0.25_rt * (rho(in - 1, jn - 1, k) + rho(in, jn - 1, k) +
+                                      rho(in - 1, jn, k) + rho(in, jn, k));
+                };
+                inertia_radial(i, j, k) = me_over_e /
+                    amrex::max(charge_to_mass * 0.5_rt *
+                                   (node_density(i, j) + node_density(i + 1, j)),
+                               charge_density_floor);
+            });
+        // Ez r-faces: nodes averaged in z.
+        amrex::ParallelFor(
+            amrex::convert(mfi.validbox(), amrex::IntVect(1, 0)),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const auto node_density = [&] (const int in, const int jn) {
+                    return 0.25_rt * (rho(in - 1, jn - 1, k) + rho(in, jn - 1, k) +
+                                      rho(in - 1, jn, k) + rho(in, jn, k));
+                };
+                inertia_axial(i, j, k) = me_over_e /
+                    amrex::max(charge_to_mass * 0.5_rt *
+                                   (node_density(i, j) + node_density(i, j + 1)),
+                               charge_density_floor);
+            });
+    }
+    return {&radial_inertia, &azimuthal_inertia, &axial_inertia};
+#else
+    amrex::ignore_unused(density, charge_to_mass, charge_density_floor,
+                         me_over_e);
+    return {nullptr, nullptr, nullptr};
+#endif
+}
+
 void ThetaImplicitMHD::PrintParameters () const
 {
     if (!m_WarpX->Verbose()) {
@@ -1843,6 +2019,10 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "Hall term:                     "
                    << m_hybrid_pic_model->m_include_hall_term
                    << "\n"
+                   << "Electron-inertia Ohm term:     "
+                   << m_hybrid_pic_model->m_include_electron_inertia << "\n"
+                   << "Effective electron mass [kg]:  "
+                   << m_hybrid_pic_model->m_electron_inertia_mass << "\n"
                    << "Electron-pressure Ohm term:    "
                    << m_hybrid_pic_model->m_include_electron_pressure_term << "\n"
                    << "External vector potential:     "
@@ -2558,6 +2738,36 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
             *m_WarpX->m_fields.get(OldIonPerpEnergyName, 0));
     }
 
+    if (m_hybrid_pic_model->m_include_electron_inertia) {
+        // Electron-inertia drho/dt leg: freeze the step-start NODAL charge
+        // density EXACTLY from the continuity state -- the ghosted step-old
+        // density through rho_fp's own cell-to-node interpolation (see
+        // FillFluidSources) -- rather than capturing a first-evaluation
+        // image; the recast state is exact where hybrid deposits are not.
+        const amrex::MultiFab& old_density =
+            *m_WarpX->m_fields.get(OldMassDensityName, 0);
+        amrex::MultiFab& rho_n_frozen =
+            *m_WarpX->m_fields.get("hybrid_rho_n_frozen", 0);
+        const auto cell_stag = cell_staggering();
+        const auto rho_stag = field_staggering(rho_n_frozen);
+        const auto coarsening = amrex::GpuArray<int, 3>{1, 1, 1};
+        const amrex::Real charge_to_mass = m_ion_charge_to_mass;
+        for (amrex::MFIter mfi(rho_n_frozen); mfi.isValid(); ++mfi) {
+            const amrex::Box box =
+                mfi.tilebox(rho_n_frozen.ixType().toIntVect());
+            const auto destination = rho_n_frozen.array(mfi);
+            const auto source = old_density.const_array(mfi);
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+                destination(i, j, k) =
+                    charge_to_mass *
+                    ablastr::coarsen::sample::Interp(source, cell_stag,
+                                                     rho_stag, coarsening,
+                                                     i, j, k, 0);
+            });
+        }
+        rho_n_frozen.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
+    }
+
     m_nlsolver->Solve(m_state, m_state_old, start_time, m_dt, step);
     const int exit_status = m_nlsolver->GetExitStatus();
     if (exit_status < 0) {
@@ -2931,7 +3141,7 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
                                    const bool from_jacobian)
 {
     BL_PROFILE("ThetaImplicitMHD::ComputeRHS()");
-    amrex::ignore_unused(nonlinear_iteration, from_jacobian);
+    amrex::ignore_unused(nonlinear_iteration);
 
     UpdateWarpXFields(state, start_time);
 
@@ -2971,6 +3181,21 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
         // is the theta-implicit Faraday update evaluated with the exact
         // Yee curl (div B preserved to round-off):
         // rhs_B = (B_old - theta dt curl E) - B_old.
+        if (m_hybrid_pic_model->m_include_electron_inertia) {
+            // Electron inertia: assemble the nodal inertial field from the
+            // theta-stage state ahead of the Ohm assembly (which adds it
+            // per E component). REACTIVE staging: it reads the theta-stage
+            // plasma/ion currents and the theta-stage continuity density --
+            // never the resistive_theta extrapolation, and it is NOT
+            // shifted by conduction_theta (both shifts over-center
+            // DISSIPATIVE channels; applied to the inertial reactance they
+            // would damp the capped whistler first order in dt). Refreshed
+            // on EVERY evaluation including Jacobian probes, so the term is
+            // exactly linear-consistent for JFNK (the Je histories and the
+            // rho^n leg are per-step frozen).
+            m_hybrid_pic_model->ComputeElectronInertiaNodal(m_theta, m_dt,
+                                                            from_jacobian);
+        }
         ComputeFaceFluxes(theta_time);
         AssembleOhmElectricField(theta_time, true);
         const auto& magnetic_field_old =
@@ -5627,6 +5852,14 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         FieldType::hybrid_current_fp_plasma, Direction{1}, 0);
     const amrex::MultiFab& hall_current_z = *m_WarpX->m_fields.get(
         FieldType::hybrid_current_fp_plasma, Direction{2}, 0);
+    // Electron inertia: the nodal inertial field assembled by
+    // ComputeElectronInertiaNodal from the SAME theta-stage state
+    // (reactive like the Hall EMF: never the resistive-stage
+    // extrapolation, never the conduction_theta shift).
+    const bool include_inertia =
+        m_hybrid_pic_model->m_include_electron_inertia;
+    const amrex::MultiFab* const inertia_nodal_mf = include_inertia
+        ? m_WarpX->m_fields.get("hybrid_E_inertial_nodal", 0) : nullptr;
     const amrex::MultiFab& charge_density =
         *m_WarpX->m_fields.get(FieldType::rho_fp, 0);
     // Te [K] of the (rho, Te, J, t) parser: the temperature-primary nodal
@@ -5682,6 +5915,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto jh_x = hall_current_x.const_array(mfi);
         const auto jh_y = hall_current_y.const_array(mfi);
         const auto jh_z = hall_current_z.const_array(mfi);
+        amrex::Array4<const amrex::Real> ei_nodal;
+        if (inertia_nodal_mf) { ei_nodal = inertia_nodal_mf->const_array(mfi); }
         const auto rho_q = charge_density.const_array(mfi);
         const auto te_nodal = electron_temperature.const_array(mfi);
         const auto b_cc = magnetic_cc.const_array(mfi);
@@ -5733,6 +5968,14 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 electric_y(i, j, k) +=
                     (jhz * bx - jhx * bz) / hall_charge_density;
             }
+            if (include_inertia) {
+                // Electron-inertia field, NATIVE on the transverse z-node
+                // staggering (the nodal assembly grid is the Ex/Ey grid in
+                // 1D, so the emitted PC rows carry the exact frozen
+                // response).
+                electric_x(i, j, k) += ei_nodal(i, j, k, 0);
+                electric_y(i, j, k) += ei_nodal(i, j, k, 1);
+            }
             if (include_hyper_resistivity) {
                 // E -= eta_H laplacian(J), same operator as the hybrid
                 // solver; the floored charge density keeps the eta_H
@@ -5771,6 +6014,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto j_z = current_z.const_array(mfi);
         const auto jh_x = hall_current_x.const_array(mfi);
         const auto jh_y = hall_current_y.const_array(mfi);
+        amrex::Array4<const amrex::Real> ei_nodal;
+        if (inertia_nodal_mf) { ei_nodal = inertia_nodal_mf->const_array(mfi); }
         const auto rho_q = charge_density.const_array(mfi);
         const auto te_nodal = electron_temperature.const_array(mfi);
         const auto rho = density.const_array(mfi);
@@ -5816,6 +6061,13 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 electric_z(i, j, k) +=
                     (jhx * b_cc(i, j, k, 1) - jhy * b_cc(i, j, k, 0)) /
                     hall_charge_density;
+            }
+            if (include_inertia) {
+                // Diagnostic in 1D like the ideal part above: the
+                // cell-centered Ez averages the two adjacent nodes (the
+                // rho_q stencil of this kernel).
+                electric_z(i, j, k) += 0.5_rt *
+                    (ei_nodal(i, j, k, 2) + ei_nodal(i + 1, j, k, 2));
             }
             if (include_hyper_resistivity) {
                 amrex::Real magnetic_magnitude = 0.0_rt;
@@ -5909,6 +6161,14 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         FieldType::hybrid_current_fp_plasma, Direction{1}, 0);
     const amrex::MultiFab& hall_current_z = *m_WarpX->m_fields.get(
         FieldType::hybrid_current_fp_plasma, Direction{2}, 0);
+    // Electron inertia: the nodal (corner) inertial field assembled by
+    // ComputeElectronInertiaNodal from the SAME theta-stage state
+    // (reactive like the Hall EMF: never the resistive-stage
+    // extrapolation, never the conduction_theta shift).
+    const bool include_inertia =
+        m_hybrid_pic_model->m_include_electron_inertia;
+    const amrex::MultiFab* const inertia_nodal_mf = include_inertia
+        ? m_WarpX->m_fields.get("hybrid_E_inertial_nodal", 0) : nullptr;
     const amrex::MultiFab& charge_density =
         *m_WarpX->m_fields.get(FieldType::rho_fp, 0);
     // Te [K] of the (rho, Te, J, t) parser: the temperature-primary nodal
@@ -5989,6 +6249,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto j_z = current_z.const_array(mfi);
         const auto jh_theta = hall_current_theta.const_array(mfi);
         const auto jh_z = hall_current_z.const_array(mfi);
+        amrex::Array4<const amrex::Real> ei_nodal;
+        if (inertia_nodal_mf) { ei_nodal = inertia_nodal_mf->const_array(mfi); }
         const auto rho_q = charge_density.const_array(mfi);
         const auto te_nodal = electron_temperature.const_array(mfi);
         const auto b_cc = magnetic_cc.const_array(mfi);
@@ -6040,6 +6302,13 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 electric_r(i, j, k) +=
                     (jht * bz - jhz * bt) / hall_charge_density;
             }
+            if (include_inertia) {
+                // Electron-inertia field: the corner (nodal) assembly
+                // averaged in r to the z-face (the rho_q stencil of this
+                // kernel).
+                electric_r(i, j, k) += 0.5_rt *
+                    (ei_nodal(i, j, k, 0) + ei_nodal(i + 1, j, k, 0));
+            }
             if (include_hyper_resistivity) {
                 // E_r -= eta_H (laplacian J)_r with the m = 0 cylindrical
                 // vector Laplacian, discretely matching the hybrid solver;
@@ -6085,6 +6354,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto j_z = current_z.const_array(mfi);
         const auto jh_r = hall_current_r.const_array(mfi);
         const auto jh_theta = hall_current_theta.const_array(mfi);
+        amrex::Array4<const amrex::Real> ei_nodal;
+        if (inertia_nodal_mf) { ei_nodal = inertia_nodal_mf->const_array(mfi); }
         const auto rho_q = charge_density.const_array(mfi);
         const auto te_nodal = electron_temperature.const_array(mfi);
         const auto b_cc = magnetic_cc.const_array(mfi);
@@ -6139,6 +6410,13 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                         charge_density_raw, charge_density_floor);
                 electric_z(i, j, k) +=
                     (jhr * bt - jht * br) / hall_charge_density;
+            }
+            if (include_inertia) {
+                // Electron-inertia field: the corner (nodal) assembly
+                // averaged in z to the r-face (the rho_q stencil of this
+                // kernel).
+                electric_z(i, j, k) += 0.5_rt *
+                    (ei_nodal(i, j, k, 2) + ei_nodal(i, j + 1, k, 2));
             }
             if (include_hyper_resistivity) {
                 // E_z -= eta_H (laplacian J)_z. On axis the geometric
@@ -6200,6 +6478,8 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         const auto j_z = current_z.const_array(mfi);
         const auto jh_r = hall_current_r.const_array(mfi);
         const auto jh_z = hall_current_z.const_array(mfi);
+        amrex::Array4<const amrex::Real> ei_nodal;
+        if (inertia_nodal_mf) { ei_nodal = inertia_nodal_mf->const_array(mfi); }
         const auto rho_q = charge_density.const_array(mfi);
         const auto te_nodal = electron_temperature.const_array(mfi);
         amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
@@ -6360,6 +6640,12 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                         rho_q(i, j, k), charge_density_floor);
                 electric_theta(i, j, k) +=
                     (jhz * br - jhr * bz) / hall_charge_density;
+            }
+            if (include_inertia) {
+                // Electron-inertia field, NATIVE on the corner staggering
+                // (the nodal assembly grid); the axis corner returned
+                // exactly zero above, preserving the m = 0 parity.
+                electric_theta(i, j, k) += ei_nodal(i, j, k, 1);
             }
             if (include_hyper_resistivity) {
                 // E_theta -= eta_H (laplacian J)_theta at the corner
@@ -8186,7 +8472,19 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
         // retaining the intra-step resistive-stage weighting.
         FillCellCenteredElectromagneticFields();
         ComputeFaceFluxes(end_time);
+        // NOTE: the end-of-step assembly reads the SAVED theta-stage
+        // inertial field (never reassembled here), so the published E's
+        // inertia contribution is half-step stale -- diagnostic only, the
+        // B advance never consumes the published E. The history rotation
+        // below must therefore run AFTER this assembly.
         AssembleOhmElectricField(end_time, false);
+        if (m_hybrid_pic_model->m_include_electron_inertia) {
+            // Rotate the per-step nodal Je history via the
+            // theta-extrapolation of the converged theta-stage assembly
+            // (one assembly family end to end: differencing across
+            // assembly conventions injects spurious derivatives at 1/dt).
+            m_hybrid_pic_model->RotateElectronInertiaHistory(m_theta);
+        }
     } else {
         const auto electric_field =
             m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, 0);

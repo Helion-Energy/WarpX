@@ -32,6 +32,10 @@ void ThetaImplicitHybrid::Define (WarpX* const a_WarpX, bool a_from_restart)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_hybrid_pic_model != nullptr,
         "ThetaImplicitHybrid solver requires hybrid PIC model to be defined");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !(m_hybrid_pic_model->m_include_electron_inertia && a_from_restart),
+        "hybrid_pic_model.include_electron_inertia does not support "
+        "restarts yet (the electron-current history is not checkpointed)");
 
     m_E.Define( m_WarpX, "Efield_fp" );
     m_Eold.Define( m_E );
@@ -163,6 +167,16 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     // Compute J_plasma = curl(B^{n+theta})/mu_0
     m_hybrid_pic_model->CalculatePlasmaCurrent(Bfield_fp, m_WarpX->GetEBUpdateEFlag());
 
+    // Electron inertia: assemble the nodal inertial field from the
+    // theta-stage state ahead of the Ohm E-solve (which adds it per
+    // component). Refreshed in every evaluation including Jacobian probes
+    // -- a smooth function of the state; the Je histories are frozen per
+    // step.
+    if (m_hybrid_pic_model->m_include_electron_inertia) {
+        m_hybrid_pic_model->ComputeElectronInertiaNodal(m_theta, m_dt,
+                                                        a_from_jacobian);
+    }
+
     // Compute electron pressure
     m_hybrid_pic_model->CalculateElectronPressure();
 
@@ -217,4 +231,12 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
     ablastr::fields::MultiLevelVectorField const& B_old =
         m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::B_old, 0);
     m_WarpX->FinishMagneticFieldAndApplyBCs( B_old, m_theta, end_time );
+
+    // Electron inertia: rotate the per-step nodal Je history via the
+    // theta-extrapolation of the converged theta-stage assembly (one
+    // assembly family end to end -- differencing across assembly
+    // conventions injects deposit-noise derivatives at 1/dt).
+    if (m_hybrid_pic_model->m_include_electron_inertia) {
+        m_hybrid_pic_model->RotateElectronInertiaHistory(m_theta);
+    }
 }

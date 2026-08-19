@@ -225,6 +225,14 @@ class ThetaImplicitMHD final : public ImplicitSolver
     [[nodiscard]] amrex::Array<const amrex::MultiFab*, 3>
     GetMHDHallCoefficientEdgeForPC () const override;
 
+    [[nodiscard]] bool GetMHDIncludeElectronInertiaForPC () const override;
+
+    [[nodiscard]] amrex::Real
+    GetMHDElectronInertiaStencilScaleForPC () const override;
+
+    [[nodiscard]] amrex::Array<const amrex::MultiFab*, 3>
+    GetMHDElectronInertiaCoefficientEdgeForPC () const override;
+
     [[nodiscard]] bool
     GetMHDEvolveIonFluidForPC () const override
     {
@@ -316,6 +324,17 @@ class ThetaImplicitMHD final : public ImplicitSolver
         "implicit_mhd_hall_coefficient_e1";
     inline static constexpr char HallCoefficientE2Name[] =
         "implicit_mhd_hall_coefficient_e2";
+    // Frozen electron-inertia coefficient C_i = m_e_eff/(e rho_q) on the
+    // same electric-field staggerings: the preconditioner's inertia-mass
+    // coefficients (zeroed and unused when the Ohm law runs without the
+    // electron-inertia term). In 1D the transverse components share the
+    // z-nodal register.
+    inline static constexpr char InertiaCoefficientE0Name[] =
+        "implicit_mhd_inertia_coefficient_e0";
+    inline static constexpr char InertiaCoefficientE1Name[] =
+        "implicit_mhd_inertia_coefficient_e1";
+    inline static constexpr char InertiaCoefficientE2Name[] =
+        "implicit_mhd_inertia_coefficient_e2";
     // Per-face-direction Riemann flux registers for the conservative-form
     // hlld path: one HLLD solution per face feeds the fluid divergences,
     // the Maxwell stress, the ion-energy magnetic work, and the ideal EMF.
