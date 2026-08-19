@@ -4426,8 +4426,17 @@ class Simulation(picmistandard.PICMI_Simulation):
 
         self.inputs_initialized = False
         self.warpx_initialized = False
+        self.finalized = False
+
+    def _check_not_finalized(self):
+        if self.finalized:
+            raise RuntimeError(
+                "This Simulation was finalized. Create new PICMI objects to "
+                "set up another simulation."
+            )
 
     def initialize_inputs(self):
+        self._check_not_finalized()
         if self.inputs_initialized:
             return
 
@@ -4596,6 +4605,7 @@ class Simulation(picmistandard.PICMI_Simulation):
             pywarpx.warpx.do_device_synchronize = self.do_device_synchronize
 
     def initialize_warpx(self, mpi_comm=None):
+        self._check_not_finalized()
         if self.warpx_initialized:
             return
 
@@ -4619,9 +4629,11 @@ class Simulation(picmistandard.PICMI_Simulation):
         pywarpx.warpx.step(nsteps)
 
     def finalize(self):
-        if self.warpx_initialized:
-            self.warpx_initialized = False
-            pywarpx.warpx.finalize()
+        # unconditional: tearing down WarpX is a no-op if it was never
+        # initialized, but the input state still needs to be cleared
+        self.warpx_initialized = False
+        self.finalized = True
+        pywarpx.warpx.finalize()
 
     @property
     def fields(self):
