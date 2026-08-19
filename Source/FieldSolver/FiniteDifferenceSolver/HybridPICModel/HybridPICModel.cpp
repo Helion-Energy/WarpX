@@ -472,6 +472,8 @@ void HybridPICModel::ReadParameters ()
                                    m_vacuum_resistivity_diffusivity);
     utils::parser::queryWithParser(pp_hybrid, "vacuum_resistivity_n_ref",
                                    m_vacuum_resistivity_n_ref);
+    utils::parser::queryWithParser(pp_hybrid, "vacuum_resistivity_cfl_factor",
+                                   m_vacuum_resistivity_cfl_factor);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_vacuum_resistivity_diffusivity >= 0.0_rt,
         "hybrid_pic_model.vacuum_resistivity_diffusivity cannot be negative");
@@ -481,6 +483,9 @@ void HybridPICModel::ReadParameters ()
                                    m_cond_vacuum_chi);
     utils::parser::queryWithParser(pp_hybrid, "qdsmc_conduction_vacuum_n_scale",
                                    m_cond_vacuum_n_scale);
+    utils::parser::queryWithParser(pp_hybrid,
+                                   "qdsmc_conduction_vacuum_chi_budget_factor",
+                                   m_cond_vacuum_chi_budget_factor);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_cond_vacuum_chi >= 0.0_rt && m_cond_vacuum_n_scale > 0.0_rt,
         "hybrid_pic_model.qdsmc_conduction_vacuum_chi must be >= 0 and "
@@ -760,21 +765,41 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
         amrex::Real const eps     = 1.0e-3_rt * rho_ref;
         amrex::Real const eta_c   = PhysConst::mu0 * m_vacuum_resistivity_diffusivity;
         // Unlike the implicit MHD form (backward-Euler-staged, uncapped),
-        // the explicit B push must own a finite ceiling: the raw
-        // (rho_ref/rho)^2 term is folded through a C-infinity harmonic
-        // soft-min so eta_vac saturates at mu0 * D_vac deep in the vacuum
-        // (D_vac IS the vacuum diffusivity ceiling; the quadratic shape
-        // only governs the onset above rho_ref). Without this, sub-floor
-        // cells mint eta ~ 1e6 x the ceiling and detonate the explicit
-        // substep budget (measured at first smoke).
+        // the explicit B push must own a finite ceiling (without one,
+        // sub-floor cells mint eta ~ 1e6 x the reference and detonate the
+        // explicit substep budget -- measured at first smoke). The ceiling
+        // is CFL-DERIVED: a prefactor (vacuum_resistivity_cfl_factor,
+        // default 0.01) times the explicit resistive-diffusion stability
+        // limit of the configured B substep, so the vacuum field still
+        // diffuses fast but the B push stays unconditionally stable
+        // regardless of the requested D_vac. The raw (rho_ref/rho)^2 term
+        // is folded through a C-infinity harmonic soft-min at
+        // min(mu0 * D_vac, eta_cfl_cap).
+        auto & warpx_i = WarpX::GetInstance();
+        amrex::Real const dt0 = warpx_i.getdt(0);
+        auto const dx_i = warpx_i.Geom(0).CellSizeArray();
+        amrex::Real dx2_min = dx_i[0] * dx_i[0];
+        for (int dd = 1; dd < AMREX_SPACEDIM; ++dd) {
+            dx2_min = amrex::min(dx2_min, dx_i[dd] * dx_i[dd]);
+        }
+        amrex::Real const dt_sub_B =
+            0.5_rt * dt0 / amrex::Real(amrex::max(m_substeps, 1));
+        amrex::Real const eta_cfl_cap =
+            m_vacuum_resistivity_cfl_factor * PhysConst::mu0 * dx2_min
+            / (2.0_rt * AMREX_SPACEDIM * dt_sub_B);
+        amrex::Real const eta_ceiling = amrex::min(eta_c, eta_cfl_cap);
+        amrex::Print() << "[qdsmc] vacuum eta boost: requested mu0*D_vac = "
+            << eta_c << " Ohm m, CFL cap (f = "
+            << m_vacuum_resistivity_cfl_factor << ") = " << eta_cfl_cap
+            << " -> ceiling " << eta_ceiling << " Ohm m\n";
         std::string const rho_s =
             "(0.5*(rho+sqrt(rho**2+" + num_lit(eps * eps) + ")))";
         std::string const ev =
             "(" + num_lit(eta_c) + "*(" + num_lit(rho_ref) + "/" + rho_s
             + ")**2)";
         std::string const ev_cap =
-            "(" + ev + "*" + num_lit(eta_c) + "/(" + ev + "+"
-            + num_lit(eta_c) + "))";
+            "(" + ev + "*" + num_lit(eta_ceiling) + "/(" + ev + "+"
+            + num_lit(eta_ceiling) + "))";
         eta_solve_expression =
             "sqrt((" + m_eta_expression + ")**2 + " + ev_cap + "**2)";
     }
@@ -804,7 +829,31 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
     std::string kpar_expression  = m_kappa_par_expression;
     std::string kperp_expression = m_kappa_perp_expression;
     if (m_cond_vacuum_chi > 0.0_rt) {
-        amrex::Real const kvac = 1.5_rt * PhysConst::kb * m_cond_vacuum_chi;
+        // Explicit-conduction CFL cap: the largest chi the CONFIGURED
+        // subcycle budget can integrate stably (fd_cfl * dx^2/(2D) per
+        // substep, max_subcycles substeps per conduction call, times the
+        // budget prefactor). Raising qdsmc_conduction_fd_max_subcycles
+        // buys a higher cap -- the explicit trade Eric named: live with
+        // the cap, or subcycle more.
+        auto & warpx_i = WarpX::GetInstance();
+        amrex::Real const dt0 = warpx_i.getdt(0);
+        auto const dx_i = warpx_i.Geom(0).CellSizeArray();
+        amrex::Real dx2_min = dx_i[0] * dx_i[0];
+        for (int dd = 1; dd < AMREX_SPACEDIM; ++dd) {
+            dx2_min = amrex::min(dx2_min, dx_i[dd] * dx_i[dd]);
+        }
+        amrex::Real const chi_cfl_cap =
+            m_cond_vacuum_chi_budget_factor
+            * m_cond_fd_cfl * dx2_min / (2.0_rt * AMREX_SPACEDIM)
+            * amrex::Real(m_cond_fd_max_subcycles) / (0.5_rt * dt0);
+        amrex::Real const chi_used =
+            amrex::min(m_cond_vacuum_chi, chi_cfl_cap);
+        amrex::Print() << "[qdsmc] vacuum chi boost: requested "
+            << m_cond_vacuum_chi << " m^2/s, budget cap (factor = "
+            << m_cond_vacuum_chi_budget_factor << ", max_subcycles = "
+            << m_cond_fd_max_subcycles << ") = " << chi_cfl_cap
+            << " -> using " << chi_used << " m^2/s\n";
+        amrex::Real const kvac = 1.5_rt * PhysConst::kb * chi_used;
         std::string const boost =
             " + " + num_lit(kvac) + "*n*exp(-(n/"
             + num_lit(m_cond_vacuum_n_scale * m_n_floor) + ")**2)";

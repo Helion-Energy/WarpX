@@ -932,6 +932,12 @@ public:
      *  qdsmc_conduction_vacuum_n_scale [x n_floor, default 4]. */
     amrex::Real m_cond_vacuum_chi = 0.0;
     amrex::Real m_cond_vacuum_n_scale = 4.0;
+    /** Budget prefactor on the explicit-conduction cap: chi_vac is
+     *  clipped at factor * (fd_cfl dx_min^2/(2D)) * max_subcycles/dt_c —
+     *  the largest chi the configured subcycle budget integrates stably.
+     *  Raise qdsmc_conduction_fd_max_subcycles to buy a higher cap.
+     *  Input: qdsmc_conduction_vacuum_chi_budget_factor (default 0.5). */
+    amrex::Real m_cond_vacuum_chi_budget_factor = 0.5;
 
     std::string m_kappa_par_expression = "0.0";
     std::string m_kappa_perp_expression = "0.0";
@@ -1277,6 +1283,12 @@ public:
      *  cannot be split out — migrate such decks to this knob. */
     amrex::Real m_vacuum_resistivity_diffusivity = 0.0;
     amrex::Real m_vacuum_resistivity_n_ref = -1.0;
+    /** Ceiling prefactor on the explicit resistive-diffusion stability
+     *  limit of the configured B substep (the vacuum boost saturates at
+     *  min(mu0 D_vac, f * mu0 dx_min^2/(2 D dt_sub_B))). Default 0.01:
+     *  the vacuum field diffuses fast but the B push stays stable for
+     *  any requested D_vac. Input: vacuum_resistivity_cfl_factor. */
+    amrex::Real m_vacuum_resistivity_cfl_factor = 0.01;
     std::unique_ptr<amrex::Parser> m_resistivity_raw_parser;
     amrex::ParserExecutor<3> m_eta_raw;
 
