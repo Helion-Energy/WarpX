@@ -1,0 +1,143 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Dust-band effectiveness deck for the electron-inertia dust gate
+# (hybrid_pic_model.electron_inertia_linear_below): a wide low-density
+# band at 1.5x the Ohm floor carries a whistler packet at
+# kappa = (k_eff d_e)^2 ~ 1 (m_e_eff = m_p puts d_e ~ 2 cells at the band
+# density -- the production dust regime, where d_e is grid-scale at the
+# floor), embedded in a 10x denser background. A frozen z-drift streams
+# the electrons through the band, activating the inertia term's advective
+# piece -(Je.grad)(Je/rho) -- the PC-unrepresentable Doppler physics the
+# gate removes below threshold. Everything is frozen except the
+# transverse B, so both the FULL (Doppler-capped) and LINEAR (capped)
+# whistler advances are analytic per Fourier mode of the band.
+my_constants.n_band = 2.0e20
+my_constants.n_hi = 2.0e21
+# Gate density (mass) for the gated twin (command-line override
+# rho_gate = 1.0e21*m_p): 5x the band (w = 0 exactly in double precision
+# below ~0.24x the gate) and half the background (w = 1 exactly above
+# ~1.77x the gate). This baseline runs UNGATED (0).
+my_constants.rho_gate = 0.0
+# Band = 1.5x the Ohm floor density (hybrid n_floor).
+my_constants.nfl = n_band/1.5
+my_constants.rho_band = n_band * m_p
+my_constants.rho_hi = n_hi * m_p
+my_constants.Te = 10.0
+my_constants.B0 = 0.1
+my_constants.dB = 1.0e-4
+my_constants.nz = 128
+my_constants.Lz = 1.0
+my_constants.dz = Lz/nz
+# Band geometry: [z1, z2] with smooth (tanh) edges; the packet envelope
+# decays to ~5e-6 of its peak at the edges so the band-uniform analytic
+# advance is clean in the comparison window.
+my_constants.z1 = 0.15
+my_constants.z2 = 0.85
+my_constants.wedge = 0.02
+my_constants.zc = 0.5
+my_constants.sigma = 0.1
+my_constants.mode = 10
+my_constants.kw = 2*pi*mode/Lz
+# Whistler CFL at the BAND density.
+my_constants.hall_diffusivity = B0/(mu0*q_e*n_band)
+my_constants.whistler_cfl = 5.0
+my_constants.dt = whistler_cfl*dz**2/hall_diffusivity
+# Frozen electron/ion z-drift through the band (see the drift deck).
+my_constants.u0 = 1.0e5
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 1
+amr.n_cell = nz
+amr.max_grid_size = 64
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 8
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-10
+gmres.max_iterations = 100
+
+jacobian.pc_type = pc_mhd_block
+pc_mhd_block.include_ideal_mhd_coupling = true
+pc_mhd_block.include_hall_mhd_coupling = true
+pc_mhd_block.include_electron_inertia_coupling = true
+pc_mhd_block.resistive_solver = banded
+pc_mhd_block.resistive_validate_assembly = true
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te
+hybrid_pic_model.n0_ref = n_band
+hybrid_pic_model.gamma = 5.0/3.0
+hybrid_pic_model.n_floor = nfl
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = true
+hybrid_pic_model.include_electron_pressure_term = false
+hybrid_pic_model.include_electron_inertia = true
+hybrid_pic_model.reduced_electron_mass_ratio = 1.0
+hybrid_pic_model.electron_inertia_linear_below = rho_gate
+
+#################################
+######## IMPLICIT MHD STATE ######
+#################################
+
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 1.0
+implicit_mhd.reference_mass_density = rho_band
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = 5.0/3.0
+implicit_mhd.gamma_i = 5.0/3.0
+implicit_mhd.reference_ion_pressure = n_band*Te*q_e
+implicit_mhd.mass_density(x,y,z) = rho_hi + (rho_band - rho_hi)*0.5*(tanh((z-z1)/wedge) - tanh((z-z2)/wedge))
+implicit_mhd.electron_pressure(x,y,z) = (rho_hi + (rho_band - rho_hi)*0.5*(tanh((z-z1)/wedge) - tanh((z-z2)/wedge)))/m_p*Te*q_e
+implicit_mhd.velocity_z(x,y,z) = u0
+implicit_mhd.evolve_ion_fluid = false
+
+warpx.B_ext_grid_init_style = parse_B_ext_grid_function
+warpx.Bx_external_grid_function(x,y,z) = dB*exp(-((z-zc)/sigma)**2)*cos(kw*z)
+warpx.By_external_grid_function(x,y,z) = dB*exp(-((z-zc)/sigma)**2)*sin(kw*z)
+warpx.Bz_external_grid_function(x,y,z) = B0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 1
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Ex Ey Ez Bx By Bz implicit_mhd_mass_density \
+                       implicit_mhd_momentum_density implicit_mhd_electron_energy
+diag1.write_species = 0

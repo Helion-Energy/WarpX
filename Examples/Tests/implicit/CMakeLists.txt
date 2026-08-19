@@ -108,6 +108,66 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Advective electron-inertia coverage: a frozen z-drift Dopplers the
+# capped whistler by (1+kappa) k_c u0 (ideal + kappa-weighted advective
+# piece) -- the only 1D state where -(Je.grad)(Je/rho) is nonzero. Also
+# the ungated baseline the armed-but-inactive dust-gate twin must
+# reproduce bit for bit.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_stiff_whistler_inertia_drift  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_stiff_whistler_inertia_drift  # inputs
+    "analysis_mhd_stiff_whistler_inertia_drift.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Dust-gate bit-identity (electron_inertia_linear_below armed BELOW the
+# uniform density, rho0/4): the blend weight is exactly 1.0 in double
+# precision above ~1.77x the gate, so this run must match the ungated
+# drift baseline BIT FOR BIT -- and must still land on the tight FULL
+# drift-Doppler dispersion (a flipped blend would run the linear form
+# and fail that gate by ~7e-5 T against a ~4e-15 T pass residual).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_stiff_whistler_inertia_drift_gated  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_stiff_whistler_inertia_drift my_constants.rho_gate=rho0/4"  # inputs
+    "analysis_mhd_stiff_whistler_inertia_drift_gated.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_stiff_whistler_inertia_drift  # dependency
+)
+
+# Dust-band effectiveness baseline (UNGATED): a kappa ~ 1 whistler packet
+# in a band at 1.5x the Ohm floor (grid-scale d_e -- the production dust
+# regime) with electrons streaming through; must follow the FULL
+# drift-Doppler capped advance of the band parameters.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_inertia_dustband  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_inertia_dustband  # inputs
+    "analysis_mhd_inertia_dustband.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Dust-gate effectiveness: gate at 5x the band density (weight exactly 0
+# in the band, exactly 1 in the 2x-gate background) -- the band packet
+# must follow the LINEAR capped advance instead (the PC-unrepresentable
+# advective Doppler removed) and the GMRES count must not exceed the
+# ungated baseline's.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_inertia_dustband_gated  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_inertia_dustband my_constants.rho_gate=1.0e21*m_p"  # inputs
+    "analysis_mhd_inertia_dustband_gated.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_inertia_dustband  # dependency
+)
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_stiff_whistler_preconditioner_mpi  # name
     1  # dims

@@ -4298,6 +4298,45 @@ Maxwell solver: kinetic-fluid hybrid
     :math:`\theta = 1/2`), for the inertial time derivative. ``false``
     selects the two-point form at every theta.
 
+.. pp:param:: hybrid_pic_model.electron_inertia_linear_below
+    :type: ``float``
+    :unit: :math:`\mathrm{kg\,m^{-3}}`
+    :default: ``0``
+    :optional:
+
+    Dust gate for the electron-inertia assembly: below this mass density
+    the term keeps ONLY its linear :math:`\partial\vec{J}_e/\partial t`
+    history-stencil piece -- exactly the response the ``pc_mhd_block``
+    inertia rows fold, so residual and preconditioner agree there by
+    construction -- and drops the nonlinear density-convection
+    :math:`-(\vec{J}_e/\rho)\,\partial\rho/\partial t` and advection
+    :math:`-(\vec{J}_e\cdot\nabla)(\vec{J}_e/\rho)` pieces. Full form
+    above the threshold, C-infinity blend
+    :math:`w = (1 + \tanh(s(1+s^2)))/2` with
+    :math:`s = (\rho - \rho_c)/(0.3\rho_c)` between (central width
+    :math:`0.3\rho_c`; the cubic-sharpened tail leaves the full-form
+    weight within :math:`e^{-606}` of 1 at :math:`3\rho_c`, and exactly 1
+    in double precision beyond :math:`{\sim}1.77\rho_c`, so
+    above-threshold physics is bit-identical to the ungated assembly).
+    The gate is evaluated on the same theta-stage density the term
+    already divides by, keeping the residual smooth for the matrix-free
+    Jacobian probes. ``0`` disables the gate.
+
+    Rationale: at the Ohm floor density the effective electron skin depth
+    is grid-scale (:math:`d_e \sim 1.2\,\Delta x` at
+    :math:`\rho/m_i \sim 3\times 10^{17}\,\mathrm{m}^{-3}` on a
+    formation-class deck), so the inertia term is :math:`O(1)` across the
+    entire near-floor dust halo -- where the nonlinear pieces scale like
+    :math:`1/\rho^2`, are NOT representable in the preconditioner's
+    frozen linear fold, and carry no physics (the dust has no meaningful
+    electron fluid). Measured on such a deck the ungated nonlinear pieces
+    grow the preconditioned GMRES solve cost monotonically from 0.5 s to
+    a 78 s peak (5.2 s median) per solve and Newton iteration counts from
+    3-4 to 14 as the drive ramp expands the dust sea; gating them
+    restores PC/residual agreement below the threshold. Set the gate at
+    or a few times above the Ohm-floor mass density, well below the
+    plasma densities whose electron dynamics matter.
+
 .. _running-cpp-parameters-implicit-mhd:
 
 .. rubric:: Theta-implicit ion-fluid MHD

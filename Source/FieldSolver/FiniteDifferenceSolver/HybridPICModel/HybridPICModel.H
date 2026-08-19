@@ -562,6 +562,21 @@ public:
      *  MHD solver pre-resolves it from the fluid ion charge-to-mass ratio
      *  in its Define() (the single-fluid state has no particle species). */
     amrex::Real m_electron_inertia_mass = 0.0;
+    /** Dust gate (electron_inertia_linear_below, mass density kg/m^3,
+     *  0 = off): below this density the inertia assembly keeps ONLY the
+     *  linear dJe/dt history-stencil piece -- exactly the response the
+     *  pc_mhd_block inertia rows represent -- and drops the nonlinear
+     *  density-convection and advection pieces, which scale like 1/rho^2
+     *  at the Ohm floor where no physically meaningful electron fluid
+     *  exists. Full form above, C-infinity tanh blend of width
+     *  0.3 x threshold between (see ComputeElectronInertiaNodal). */
+    amrex::Real m_electron_inertia_linear_below = 0.0;
+    /** Charge-density image [C/m^3] of the dust gate, resolved with the
+     *  effective electron mass: from the fluid ion charge-to-mass ratio
+     *  in ThetaImplicitMHD::Define() (recast), or from the lightest
+     *  charged particle species on the hybrid path -- the same convention
+     *  that fills rho_fp from the mass density. */
+    amrex::Real m_electron_inertia_gate_rhoq = 0.0;
     /** NOTE on the theta-stage save feeding the history rotation: the
      *  last non-Jacobian residual evaluation is the accepted iterate for
      *  every converged Newton/Picard exit (convergence is checked on a

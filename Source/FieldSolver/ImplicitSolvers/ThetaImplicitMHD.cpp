@@ -36,6 +36,7 @@
 #include <fstream>
 #include <limits>
 #include <set>
+#include <sstream>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -1069,11 +1070,26 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
                 ? ion_mass /
                       m_hybrid_pic_model->m_reduced_electron_mass_ratio
                 : PhysConst::m_e;
+        // Dust gate (electron_inertia_linear_below): the recast converts
+        // the mass-density threshold to the charge-density image the
+        // nodal assembly compares against with the SAME fluid
+        // charge-to-mass ratio FillFluidSources uses to fill rho_fp from
+        // the mass-density state.
+        m_hybrid_pic_model->m_electron_inertia_gate_rhoq =
+            m_hybrid_pic_model->m_electron_inertia_linear_below *
+            m_ion_charge_to_mass;
         amrex::Print() << "[ThetaImplicitMHD] electron inertia: m_e_eff = "
                        << m_hybrid_pic_model->m_electron_inertia_mass
                        << " kg (mass ratio "
                        << m_hybrid_pic_model->m_reduced_electron_mass_ratio
-                       << ")\n";
+                       << ")";
+        if (m_hybrid_pic_model->m_electron_inertia_linear_below > 0.0_rt) {
+            amrex::Print()
+                << " (linear below rho = "
+                << m_hybrid_pic_model->m_electron_inertia_linear_below
+                << " kg/m3)";
+        }
+        amrex::Print() << "\n";
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !m_hybrid_pic_model->m_solve_electron_energy_equation,
@@ -2004,6 +2020,16 @@ void ThetaImplicitMHD::PrintParameters () const
     if (!m_WarpX->Verbose()) {
         return;
     }
+    // Dust-gate note on the electron-inertia banner line (see
+    // hybrid_pic_model.electron_inertia_linear_below), only when active.
+    std::string inertia_gate_note;
+    if (m_hybrid_pic_model->m_electron_inertia_linear_below > 0.0_rt) {
+        std::ostringstream gate_stream;
+        gate_stream << " (linear below rho = "
+                    << m_hybrid_pic_model->m_electron_inertia_linear_below
+                    << " kg/m3)";
+        inertia_gate_note = gate_stream.str();
+    }
     amrex::Print() << "\n"
                    << "-----------------------------------------------------------\n"
                    << "-------- THETA IMPLICIT SINGLE-FLUID MHD PARAMETERS -------\n"
@@ -2020,7 +2046,8 @@ void ThetaImplicitMHD::PrintParameters () const
                    << m_hybrid_pic_model->m_include_hall_term
                    << "\n"
                    << "Electron-inertia Ohm term:     "
-                   << m_hybrid_pic_model->m_include_electron_inertia << "\n"
+                   << m_hybrid_pic_model->m_include_electron_inertia
+                   << inertia_gate_note << "\n"
                    << "Effective electron mass [kg]:  "
                    << m_hybrid_pic_model->m_electron_inertia_mass << "\n"
                    << "Electron-pressure Ohm term:    "

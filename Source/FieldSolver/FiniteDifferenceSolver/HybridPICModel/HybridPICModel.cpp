@@ -26,6 +26,7 @@
 #include <AMReX_Random.H>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <string>
 #include <vector>
@@ -113,6 +114,15 @@ void HybridPICModel::ReadParameters ()
             "hybrid_pic_model.reduced_electron_mass_ratio must be >= 0 "
             "(0 selects the physical electron mass)");
         pp_hybrid.query("electron_inertia_bdf2", m_electron_inertia_bdf2);
+        // Dust gate: mass density below which the assembly is linearized
+        // (see the member documentation in HybridPICModel.H).
+        utils::parser::queryWithParser(
+            pp_hybrid, "electron_inertia_linear_below",
+            m_electron_inertia_linear_below);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_electron_inertia_linear_below >= 0.0,
+            "hybrid_pic_model.electron_inertia_linear_below must be >= 0 "
+            "(0 disables the dust gate)");
 #if defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
         WARPX_ABORT_WITH_MESSAGE(
             "hybrid_pic_model.include_electron_inertia is not supported in "
@@ -2937,26 +2947,47 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
     // in Define() (nonzero here), so the lazy species scan never runs on
     // the recast path.
     if (m_electron_inertia_mass == 0.0_rt) {
-        if (m_reduced_electron_mass_ratio > 0.0_rt) {
-            amrex::Real m_ion_min = std::numeric_limits<amrex::Real>::max();
+        // The lightest-charged-species scan feeds BOTH the reduced-mass
+        // resolution and the dust gate's mass-to-charge-density
+        // conversion (electron_inertia_linear_below), so run it when
+        // either needs it.
+        amrex::Real m_ion_min = std::numeric_limits<amrex::Real>::max();
+        amrex::Real q_ion_min = 0.0_rt;
+        if (m_reduced_electron_mass_ratio > 0.0_rt ||
+            m_electron_inertia_linear_below > 0.0_rt) {
             auto & mypc = warpx.GetPartContainer();
             for (int isp = 0; isp < mypc.nSpecies(); ++isp) {
                 auto & pc = mypc.GetParticleContainer(isp);
-                if (pc.getCharge() != 0.0_rt) {
-                    m_ion_min = std::min(m_ion_min, pc.getMass());
+                if (pc.getCharge() != 0.0_rt && pc.getMass() < m_ion_min) {
+                    m_ion_min = pc.getMass();
+                    q_ion_min = std::abs(pc.getCharge());
                 }
             }
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 m_ion_min < std::numeric_limits<amrex::Real>::max(),
-                "reduced_electron_mass_ratio requires at least one charged "
-                "ion species");
+                "reduced_electron_mass_ratio / "
+                "electron_inertia_linear_below require at least one "
+                "charged ion species");
+        }
+        if (m_reduced_electron_mass_ratio > 0.0_rt) {
             m_electron_inertia_mass = m_ion_min / m_reduced_electron_mass_ratio;
         } else {
             m_electron_inertia_mass = PhysConst::m_e;
         }
+        if (m_electron_inertia_linear_below > 0.0_rt) {
+            // Same mass -> charge-density convention the deposits give
+            // rho_fp: the lightest charged species' q/m.
+            m_electron_inertia_gate_rhoq =
+                m_electron_inertia_linear_below * q_ion_min / m_ion_min;
+        }
         amrex::Print() << "[HybridPICModel] electron inertia: m_e_eff = "
             << m_electron_inertia_mass << " kg (mass ratio "
-            << m_reduced_electron_mass_ratio << ")\n";
+            << m_reduced_electron_mass_ratio << ")";
+        if (m_electron_inertia_linear_below > 0.0_rt) {
+            amrex::Print() << " (linear below rho = "
+                << m_electron_inertia_linear_below << " kg/m3)";
+        }
+        amrex::Print() << "\n";
     }
     amrex::Real const me_over_e = m_electron_inertia_mass / PhysConst::q_e;
 
@@ -2980,6 +3011,14 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
         drho_rate = 2.0_rt / a_dt;
     }
     amrex::Real const rho_floor = PhysConst::q_e * m_n_floor;
+    // Dust gate (electron_inertia_linear_below): charge-density image of
+    // the mass-density threshold below which the assembly keeps ONLY the
+    // linear dJe/dt piece -- the response the pc_mhd_block inertia rows
+    // fold exactly -- and drops the density-convection and advection
+    // pieces, whose 1/rho^2 scaling at the Ohm floor is numerical
+    // hostility with no electron fluid behind it. 0 = off (the ungated
+    // assembly, bit-identical: the weight then multiplies by exactly 1).
+    amrex::Real const gate_rhoq = m_electron_inertia_gate_rhoq;
 
     // Per-step frozen rho^n (hybrid deposit mode): rho_fp component 0 is a
     // PRE-push deposit -- only the first evaluation of a step sees the
@@ -3153,6 +3192,31 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
             amrex::Real const drhodt =
                 (rho_stage - rhon(i, j, k)) * drho_rate;
 
+            // Dust-gate weight of the NONLINEAR inertia pieces: 1 (full
+            // form) above the gate density, 0 (linear dJe/dt only) below,
+            // blended by w = (1 + tanh(s (1 + s^2)))/2 with
+            // s = (rho - rho_c)/(0.3 rho_c) -- the house tanh blend of
+            // 0.3 x threshold central width, cubic-sharpened so the
+            // above-threshold tail 1 - w <= exp(-2 s (1 + s^2)) is
+            // ~1e-263 at 3 rho_c (a plain 0.3-width tanh would leave
+            // 1.6e-6 there); in double precision w is exactly 1 beyond
+            // ~1.77 rho_c and exactly 0 below ~0.24 rho_c, so gated
+            // above-threshold physics is bit-identical to the ungated
+            // assembly. The gate is evaluated on the SAME theta-stage
+            // interpolated density the term already divides by
+            // (rho_stage), so the residual stays C-infinity (analytic) in
+            // the Newton iterate and matrix-free JFNK probes see exactly
+            // the function they differentiate -- a per-step frozen gate
+            // density would also be smooth, but would let the weight
+            // disagree with the term's own staging conventions.
+            amrex::Real gate_weight = 1.0_rt;
+            if (gate_rhoq > 0.0_rt) {
+                amrex::Real const s =
+                    (rho_stage - gate_rhoq) / (0.3_rt * gate_rhoq);
+                gate_weight = 0.5_rt
+                    * (1.0_rt + std::tanh(s * (1.0_rt + s * s)));
+            }
+
             // Central differences of u = Je/rho at nodes (one-sided at
             // non-periodic edges); rho ghosts follow the fill exchange.
             amrex::Real u[3], dudx[3], dudz[3];
@@ -3246,8 +3310,13 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
                     ? (c_p1 * je1 + c_0 * jen(i,j,k,c)
                        + c_m1 * jenm1(i,j,k,c))
                     : (je1 - jen(i,j,k,c)) * inv_dt;
+                // gate_weight scales each nonlinear piece SEPARATELY (not
+                // their sum) so the gate-off/full-weight path keeps the
+                // exact rounding order of the ungated assembly
+                // (1.0 * x == x bitwise).
                 ei(i,j,k,c) = me_over_e
-                    * (djedt - u[c] * drhodt - adv[c]) / rho_lim;
+                    * (djedt - gate_weight * (u[c] * drhodt)
+                       - gate_weight * adv[c]) / rho_lim;
             }
         });
     }

@@ -3047,6 +3047,15 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         Use the second-order three-point stencil, centered at the theta
         stage, for the inertial time derivative (two-point form when off).
 
+    electron_inertia_linear_below: float, default=0
+        Mass density (kg/m^3) below which the electron-inertia assembly
+        keeps only its linear dJe/dt history-stencil piece (exactly the
+        response the ``pc_mhd_block`` inertia rows represent), dropping
+        the nonlinear density-convection and advection pieces that scale
+        like 1/rho^2 in near-floor dust. Full form above the threshold,
+        C-infinity smooth blend of width 0.3x the threshold between;
+        0 disables the gate (bit-identical to the ungated assembly).
+
     plasma_resistivity: float or str
         Value or expression to use for the plasma resistivity in Ohm*m.
         Can be a constant value or an expression depending on ``rho`` (charge density),
@@ -3212,6 +3221,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         include_electron_inertia=None,
         reduced_electron_mass_ratio=None,
         electron_inertia_bdf2=None,
+        electron_inertia_linear_below=None,
         plasma_resistivity=None,
         plasma_hyper_resistivity=None,
         plasma_resistivity_species=None,
@@ -3247,6 +3257,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.include_electron_inertia = include_electron_inertia
         self.reduced_electron_mass_ratio = reduced_electron_mass_ratio
         self.electron_inertia_bdf2 = electron_inertia_bdf2
+        self.electron_inertia_linear_below = electron_inertia_linear_below
         self.plasma_resistivity = plasma_resistivity
         self.plasma_hyper_resistivity = plasma_hyper_resistivity
         self.plasma_resistivity_species = plasma_resistivity_species
@@ -3321,6 +3332,10 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         if self.electron_inertia_bdf2 is not None:
             pywarpx.hybridpicmodel.electron_inertia_bdf2 = (
                 self.electron_inertia_bdf2
+            )
+        if self.electron_inertia_linear_below is not None:
+            pywarpx.hybridpicmodel.electron_inertia_linear_below = (
+                self.electron_inertia_linear_below
             )
         pywarpx.hybridpicmodel.__setattr__(
             "plasma_resistivity(rho,Te,J,t)",
