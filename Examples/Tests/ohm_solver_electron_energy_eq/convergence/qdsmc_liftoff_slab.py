@@ -332,6 +332,15 @@ parser.add_argument(
     "(MHD-halo-port experiment). 0 = off (parsers unchanged)",
 )
 parser.add_argument(
+    "--eta-vac-d",
+    type=float,
+    default=0.0,
+    help="code-side vacuum resistivity boost D_vac [m^2/s] "
+    "(hybrid_pic_model.vacuum_resistivity_diffusivity); the E-solve eta "
+    "gains mu0*D_vac*(rho_ref/rho)^2 in quadrature, heating keeps the raw "
+    "parser. 0 = off",
+)
+parser.add_argument(
     "--band-drain-rate",
     type=float,
     default=0.0,
@@ -665,21 +674,24 @@ else:
     pywarpx.hybridpicmodel.qdsmc_conduction_eb_bc = "adiabatic"
 if args.kappa == "spitzer":
     kappa_c_eff = args.kappa_mult * KAPPA_C
-    # Optional halo/band conductivity boost (MHD-halo-port experiment):
-    # isotropic chi -> chi_vac in a smooth exp(-(n/(4 n_floor))^2) window
-    # around the floor band; 0 = off (parser strings unchanged exactly).
-    boost = ""
-    if args.chi_vac > 0.0:
-        kvac = 1.5 * constants.kb * args.chi_vac
-        boost = f" + {kvac:.6e}*n*exp(-(n/{4.0 * n_floor:.6e})**2)"
     pywarpx.hybridpicmodel.__setattr__(
-        "qdsmc_kappa_par(n,Te,t)", f"{kappa_c_eff:.6e}*Te**2.5" + boost
+        "qdsmc_kappa_par(n,Te,t)", f"{kappa_c_eff:.6e}*Te**2.5"
     )
-    if args.kappa_perp_frac > 0.0 or boost:
+    if args.kappa_perp_frac > 0.0:
         pywarpx.hybridpicmodel.__setattr__(
             "qdsmc_kappa_perp(n,Te,t)",
-            f"{args.kappa_perp_frac * kappa_c_eff:.6e}*Te**2.5" + boost,
+            f"{args.kappa_perp_frac * kappa_c_eff:.6e}*Te**2.5",
         )
+    # First-class halo/band conductivity boost (composed into the compiled
+    # parsers code-side; window 4 x n_floor by default). 0 = off.
+    if args.chi_vac > 0.0:
+        pywarpx.hybridpicmodel.qdsmc_conduction_vacuum_chi = args.chi_vac
+if args.eta_vac_d > 0.0:
+    # Code-side vacuum resistivity boost (eta split): E-solve eta gains the
+    # density-keyed vacuum term; Joule heating keeps the raw parser. NOTE:
+    # this deck's plasma_resistivity still carries its own legacy ramp --
+    # migrating that to this knob is a deliberate deck change, not implied.
+    pywarpx.hybridpicmodel.vacuum_resistivity_diffusivity = args.eta_vac_d
 if args.band_drain_rate > 0.0:
     pywarpx.hybridpicmodel.qdsmc_band_drain_rate = args.band_drain_rate
     pywarpx.hybridpicmodel.qdsmc_band_drain_Te = args.band_drain_te

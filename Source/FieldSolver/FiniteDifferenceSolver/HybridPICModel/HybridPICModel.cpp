@@ -27,7 +27,9 @@
 
 #include <AMReX_Random.H>
 
+#include <iomanip>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -328,18 +330,22 @@ void HybridPICModel::ReadParameters ()
             m_cond_eb_ring >= 1 && m_cond_eb_ring <= 3,
             "hybrid_pic_model.qdsmc_conduction_eb_ring must be in [1, 3]");
         if (ebbc == "adiabatic") { m_cond_eb_bc = 0; }
-        else if (ebbc == "isothermal") {
-            m_cond_eb_bc = 1;
+        else if (ebbc == "isothermal" || ebbc == "drain") {
+            // isothermal = two-sided ring pin; drain = one-sided
+            // free-streaming-limited temperature drain toward the same
+            // eb_Te target (MHD wall_thermal_bc port: a rectified sink
+            // that can never heat the plasma).
+            m_cond_eb_bc = (ebbc == "isothermal") ? 1 : 2;
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 pp_hybrid.query("qdsmc_conduction_eb_Te(x,y,z)",
                                 m_cond_eb_Te_expression),
-                "hybrid_pic_model.qdsmc_conduction_eb_bc = isothermal "
+                "hybrid_pic_model.qdsmc_conduction_eb_bc = isothermal/drain "
                 "requires qdsmc_conduction_eb_Te(x,y,z) [eV]");
         }
         else {
             WARPX_ABORT_WITH_MESSAGE(
                 "hybrid_pic_model.qdsmc_conduction_eb_bc must be "
-                "'adiabatic' or 'isothermal'");
+                "'adiabatic', 'isothermal' or 'drain'");
         }
         // Thrust-D domain-face BCs (per grid dim, lo/hi)
         for (int side = 0; side < 2; ++side) {
@@ -377,10 +383,25 @@ void HybridPICModel::ReadParameters ()
                         "entry per grid dimension)");
                     m_cond_bc_q[d][side] = vq[d];
                 }
+                else if (types[d] == "drain") {
+                    // One-sided free-streaming-limited temperature drain
+                    // toward bc_Te (MHD wall_thermal_bc = temperature
+                    // port): a rectified sink -- never heats the wall row,
+                    // always flux-limited. Needs the same bc_Te as
+                    // isothermal.
+                    m_cond_bc[d][side] = 3;
+                    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                        vte.size() == AMREX_SPACEDIM,
+                        "drain qdsmc conduction BC needs "
+                        "qdsmc_conduction_bc_Te_lo/_hi (eV, one entry "
+                        "per grid dimension)");
+                    m_cond_bc_Te[d][side] = vte[d];
+                }
                 else {
                     WARPX_ABORT_WITH_MESSAGE(
                         "hybrid_pic_model.qdsmc_conduction_bc entries "
-                        "must be 'adiabatic', 'isothermal' or 'flux'");
+                        "must be 'adiabatic', 'isothermal', 'flux' or "
+                        "'drain'");
                 }
             }
         }
@@ -443,6 +464,31 @@ void HybridPICModel::ReadParameters ()
     m_has_heating_resistivity =
         pp_hybrid.query("joule_heating_resistivity(rho,J,Te,t)", m_eta_heating_expression);
     utils::parser::queryWithParser(pp_hybrid, "joule_heating_n_min", m_joule_heating_n_min);
+
+    // Code-side vacuum resistivity boost (see member doc): the E-solve eta
+    // gains the density-keyed vacuum term; heating always evaluates the raw
+    // user parser.
+    utils::parser::queryWithParser(pp_hybrid, "vacuum_resistivity_diffusivity",
+                                   m_vacuum_resistivity_diffusivity);
+    utils::parser::queryWithParser(pp_hybrid, "vacuum_resistivity_n_ref",
+                                   m_vacuum_resistivity_n_ref);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_vacuum_resistivity_diffusivity >= 0.0_rt,
+        "hybrid_pic_model.vacuum_resistivity_diffusivity cannot be negative");
+
+    // First-class band/vacuum conductivity boost (see member doc).
+    utils::parser::queryWithParser(pp_hybrid, "qdsmc_conduction_vacuum_chi",
+                                   m_cond_vacuum_chi);
+    utils::parser::queryWithParser(pp_hybrid, "qdsmc_conduction_vacuum_n_scale",
+                                   m_cond_vacuum_n_scale);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_cond_vacuum_chi >= 0.0_rt && m_cond_vacuum_n_scale > 0.0_rt,
+        "hybrid_pic_model.qdsmc_conduction_vacuum_chi must be >= 0 and "
+        "qdsmc_conduction_vacuum_n_scale must be positive");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_cond_vacuum_chi == 0.0_rt || m_include_thermal_conduction,
+        "hybrid_pic_model.qdsmc_conduction_vacuum_chi requires the thermal "
+        "conduction machinery (set qdsmc_kappa_par)");
 
     // General Te limiter with ion shunt (see member doc): any-channel
     // excess above the threshold goes to the ions through the redirect
@@ -695,11 +741,42 @@ void HybridPICModel::AllocateLevelMFs (
 
 void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
 {
+    // Scientific-notation literal for parser-string composition (std::to_string
+    // truncates to 6 fixed decimals, which destroys small coefficients).
+    auto const num_lit = [] (amrex::Real v) {
+        std::ostringstream os;
+        os << std::scientific << std::setprecision(12) << v;
+        return os.str();
+    };
+
+    // E-solve resistivity: the raw user expression, plus the code-side
+    // vacuum boost when armed (see the member doc; the C-infinity smooth
+    // density floor keeps Jacobian-probe and ghost states finite).
+    std::string eta_solve_expression = m_eta_expression;
+    if (m_vacuum_resistivity_diffusivity > 0.0_rt) {
+        amrex::Real const n_ref = (m_vacuum_resistivity_n_ref > 0.0_rt)
+            ? m_vacuum_resistivity_n_ref : m_n_floor;
+        amrex::Real const rho_ref = PhysConst::q_e * n_ref;
+        amrex::Real const eps     = 1.0e-3_rt * rho_ref;
+        amrex::Real const eta_c   = PhysConst::mu0 * m_vacuum_resistivity_diffusivity;
+        std::string const rho_s =
+            "(0.5*(rho+sqrt(rho**2+" + num_lit(eps * eps) + ")))";
+        eta_solve_expression =
+            "sqrt((" + m_eta_expression + ")**2 + (" + num_lit(eta_c) + "*("
+            + num_lit(rho_ref) + "/" + rho_s + ")**2)**2)";
+    }
     m_resistivity_parser = std::make_unique<amrex::Parser>(
-        utils::parser::makeParser(m_eta_expression, {"rho","J","t"}));
+        utils::parser::makeParser(eta_solve_expression, {"rho","J","t"}));
     m_eta = m_resistivity_parser->compile<3>();
     const std::set<std::string> resistivity_symbols = m_resistivity_parser->symbols();
     m_resistivity_has_J_dependence += resistivity_symbols.count("J");
+
+    // Raw user resistivity (no code-side boost): the Joule-heating fallback
+    // when no joule_heating_resistivity override is given — vacuum field
+    // diffusion never heats plasma. Identical to m_eta when the boost is off.
+    m_resistivity_raw_parser = std::make_unique<amrex::Parser>(
+        utils::parser::makeParser(m_eta_expression, {"rho","J","t"}));
+    m_eta_raw = m_resistivity_raw_parser->compile<3>();
 
     // Electron-ion energy-equilibration rate nu_ei(rho,Te,Ti,t) for the Q_ei term.
     m_nu_ei_parser = std::make_unique<amrex::Parser>(
@@ -707,12 +784,25 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
     m_nu_ei = m_nu_ei_parser->compile<4>();
 
     // Thermal conductivities kappa(n [m^-3], Te [eV], t [s]) in W/(m K) for
-    // the Ito conduction substep (chi = kappa / (3/2 n_e k_B)).
+    // the Ito conduction substep (chi = kappa / (3/2 n_e k_B)). The
+    // first-class vacuum-chi boost (see member doc) composes an additive
+    // isotropic band term into BOTH expressions so every consumer (both FD
+    // orders, the SDE arm, the stability bounds) sees it consistently.
+    std::string kpar_expression  = m_kappa_par_expression;
+    std::string kperp_expression = m_kappa_perp_expression;
+    if (m_cond_vacuum_chi > 0.0_rt) {
+        amrex::Real const kvac = 1.5_rt * PhysConst::kb * m_cond_vacuum_chi;
+        std::string const boost =
+            " + " + num_lit(kvac) + "*n*exp(-(n/"
+            + num_lit(m_cond_vacuum_n_scale * m_n_floor) + ")**2)";
+        kpar_expression  += boost;
+        kperp_expression += boost;
+    }
     m_kappa_par_parser = std::make_unique<amrex::Parser>(
-        utils::parser::makeParser(m_kappa_par_expression, {"n","Te","t"}));
+        utils::parser::makeParser(kpar_expression, {"n","Te","t"}));
     m_kappa_par = m_kappa_par_parser->compile<3>();
     m_kappa_perp_parser = std::make_unique<amrex::Parser>(
-        utils::parser::makeParser(m_kappa_perp_expression, {"n","Te","t"}));
+        utils::parser::makeParser(kperp_expression, {"n","Te","t"}));
     m_kappa_perp = m_kappa_perp_parser->compile<3>();
 
     // Isothermal-EB bath temperature Te(x,y,z) [eV] for the conduction
@@ -1648,7 +1738,9 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
 
     auto const gamma_minus_1 = m_gamma - 1.0_rt;
     auto const rho_floor     = PhysConst::q_e * m_n_floor;
-    auto const eta           = m_eta;
+    // Heating fallback = the RAW user resistivity (never the code-side
+    // vacuum-boosted E-solve parser; identical when the boost is off).
+    auto const eta           = m_eta_raw;
     // Physical-eta heating: when joule_heating_resistivity(rho,J,Te,t) is
     // given, the heating source uses it instead of the E-solve eta (whose
     // numerical vacuum-regularizer ramp was the liftoff runaway's ignition
@@ -3290,6 +3382,18 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
     amrex::Real const kb = PhysConst::kb;
     amrex::Real const qe = PhysConst::q_e;
 
+    // Drain-mode captures (bc == 3): the one-sided drain evaluates the
+    // parallel-kappa parser for the wall-normal conductive flux and is
+    // ALWAYS free-streaming-limited (global factor when set, else 1 --
+    // the MHD wall lesson: an uncapped exchange ran ~18x free-streaming
+    // at hot contact spots).
+    auto const kappa_par_ex = m_kappa_par;
+    amrex::Real const f_fs = (m_cond_flux_limit_factor > 0.0_rt)
+        ? m_cond_flux_limit_factor : 1.0_rt;
+    amrex::Real const m_el = PhysConst::m_e;
+    amrex::Real const t_now = warpx.gett_new(0);
+    amrex::Real const eV_per_K = kb / qe;
+
     for (int d = 0; d < AMREX_SPACEDIM; ++d) {
     for (int s = 0; s < 2; ++s) {
         int const bc = m_cond_bc[d][s];
@@ -3300,6 +3404,7 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
         int const wall = (s == 0) ? dom_nodes.smallEnd(d)
                                   : dom_nodes.bigEnd(d);
         amrex::Real const Te_wall_K = m_cond_bc_Te[d][s] * qe / kb;
+        amrex::Real const dx_d = dx_arr[d];
         // prescribed flux: u injected per substep into the boundary
         // row's dual cells, q A dt / V = q dt / dx  [J/m^3]
         amrex::Real const du_flux = m_cond_bc_q[d][s] * dt_c / dx_arr[d];
@@ -3343,6 +3448,27 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
                     Te_arr(i,j,k) = Te_wall_K;
                     return {du};
                 }
+                if (bc == 3) {
+                    // One-sided free-streaming-limited temperature drain
+                    // toward the wall value (MHD wall_thermal_bc port):
+                    // fires only when the row is HOTTER than the wall, so
+                    // it can never heat the plasma; the harmonic cap
+                    // bounds the drain at f * the electron free-streaming
+                    // flux; the final clamp forbids undershoot.
+                    amrex::Real const Te_K = Te_arr(i,j,k);
+                    if (Te_K <= Te_wall_K) { return {0.0_rt}; }
+                    amrex::Real const kap =
+                        kappa_par_ex(ne, Te_K * eV_per_K, t_now);
+                    amrex::Real q = kap * (Te_K - Te_wall_K) / dx_d;
+                    amrex::Real const q_fs =
+                        ne * kb * Te_K * std::sqrt(kb * Te_K / m_el);
+                    q = q / (1.0_rt + q / (f_fs * q_fs));
+                    amrex::Real dTe =
+                        q * dt_c / (dx_d * 1.5_rt * kb * ne);
+                    dTe = amrex::min(dTe, Te_K - Te_wall_K);
+                    Te_arr(i,j,k) = Te_K - dTe;
+                    return {-1.5_rt * kb * ne * dTe};
+                }
                 // prescribed flux: inject, clamp cooling at Te = 0,
                 // tally what was actually applied
                 amrex::Real const dTe =
@@ -3383,7 +3509,8 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
     bool const has_eb = EB::enabled();
     amrex::MultiFab const * eb_dist = has_eb
         ? warpx.m_fields.get(FieldType::distance_to_eb, lev) : nullptr;
-    bool const eb_iso = has_eb && (m_cond_eb_bc == 1);
+    bool const eb_iso   = has_eb && (m_cond_eb_bc == 1);
+    bool const eb_drain = has_eb && (m_cond_eb_bc == 2);
 
     amrex::MultiFab & Te =
         *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
@@ -3859,12 +3986,25 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
     // ring-2 default covers the deposition density ramp; the FD operator
     // has no deposit ramp, but the shared default keeps the arms
     // comparable; positive tally = energy into the plasma).
-    auto pin_eb_ring = [&] (amrex::MultiFab & Tf)
+    auto pin_eb_ring = [&] (amrex::MultiFab & Tf, amrex::Real const dts,
+                            bool const drain)
     {
         auto const ebTe = m_cond_eb_Te;
         auto const plo_arr = geom.ProbLoArray();
         auto const dx_arr  = geom.CellSizeArray();
         int const eb_ring = m_cond_eb_ring;
+        // Drain-mode captures (see the domain-BC drain: one-sided,
+        // kappa-driven, always free-streaming-limited; the ring has no
+        // unique wall face so the smallest cell size is the drain gap).
+        auto const kappa_par_ex = m_kappa_par;
+        amrex::Real const f_fs = (m_cond_flux_limit_factor > 0.0_rt)
+            ? m_cond_flux_limit_factor : 1.0_rt;
+        amrex::Real const m_el = PhysConst::m_e;
+        amrex::Real const t_now = warpx.gett_new(0);
+        amrex::Real dx_min = dx_arr[0];
+        for (int dd = 1; dd < AMREX_SPACEDIM; ++dd) {
+            dx_min = amrex::min(dx_min, dx_arr[dd]);
+        }
         amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
         amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
         using ReduceTuple = typename decltype(reduce_data)::Type;
@@ -3918,6 +4058,23 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                 amrex::Real const Te_eV = ebTe(cx[0], 0.0_rt, cx[1]);
 #endif
                 amrex::Real const TwK = Te_eV * qe / kb;
+                if (drain) {
+                    // One-sided free-streaming-limited drain (rectified
+                    // sink; see the domain-BC drain branch).
+                    amrex::Real const Te_K = Te_arr(i,j,k);
+                    if (Te_K <= TwK) { return {0.0_rt}; }
+                    amrex::Real const kap =
+                        kappa_par_ex(ne, Te_K * kb / qe, t_now);
+                    amrex::Real q = kap * (Te_K - TwK) / dx_min;
+                    amrex::Real const q_fs =
+                        ne * kb * Te_K * std::sqrt(kb * Te_K / m_el);
+                    q = q / (1.0_rt + q / (f_fs * q_fs));
+                    amrex::Real dTe =
+                        q * dts / (dx_min * 1.5_rt * kb * ne);
+                    dTe = amrex::min(dTe, Te_K - TwK);
+                    Te_arr(i,j,k) = Te_K - dTe;
+                    return {-1.5_rt * kb * ne * dTe};
+                }
                 amrex::Real const du =
                     1.5_rt * kb * ne * (TwK - Te_arr(i,j,k));
                 Te_arr(i,j,k) = TwK;
@@ -3941,7 +4098,8 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
     auto post_step = [&] (amrex::MultiFab & yy, amrex::Real const dts)
     {
         ApplyQdsmcConductionWallBCs(lev, dts, yy, rho);
-        if (eb_iso) { pin_eb_ring(yy); }
+        if (eb_iso)        { pin_eb_ring(yy, dts, false); }
+        else if (eb_drain) { pin_eb_ring(yy, dts, true); }
     };
 
     QdsmcRKIntegrator const integ(
@@ -4622,6 +4780,10 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
         bool const has_eb  = (eb_dist != nullptr);
         bool const eb_adia = has_eb && (m_cond_eb_bc == 0);
         bool const eb_iso  = has_eb && (m_cond_eb_bc == 1);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!(has_eb && m_cond_eb_bc == 2),
+            "qdsmc_conduction_eb_bc = drain requires "
+            "qdsmc_conduction_operator = fd (the SDE arm keeps "
+            "adiabatic/isothermal)");
         auto const plo_arr = geom.ProbLoArray();
         auto const ebTe = m_cond_eb_Te;
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!(ff_unsplit && has_eb),

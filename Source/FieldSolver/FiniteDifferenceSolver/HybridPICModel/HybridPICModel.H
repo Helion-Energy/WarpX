@@ -916,6 +916,23 @@ public:
      *  fd_atol integrator knobs. EB + RZ abort. Input:
      *  qdsmc_transport_operator = markers | grid. */
     int m_qdsmc_transport_operator = 0;
+
+    /** First-class band/vacuum conductivity boost (promoted from the
+     *  deck-parser experiment): when chi_vac > 0, both kappa parsers gain
+     *  the additive isotropic term
+     *      1.5 * kB * chi_vac * n * exp(-(n / (n_scale * n_floor))^2)
+     *  at compile time, i.e. chi -> chi_vac inside a smooth density window
+     *  around the floor band, decaying to nothing in the bulk. Composed
+     *  into the compiled parsers only, so every consumer (both FD orders,
+     *  the SDE arm, the stability bounds) sees it consistently. Default
+     *  chi_vac = 0 leaves the expressions untouched (bit-identical).
+     *  Cost note: dt_sub is a global min — explicit subcycles scale with
+     *  chi_vac (measured ~27x CPU / ~4x GPU at 10x the campaign cap).
+     *  Inputs: qdsmc_conduction_vacuum_chi [m^2/s],
+     *  qdsmc_conduction_vacuum_n_scale [x n_floor, default 4]. */
+    amrex::Real m_cond_vacuum_chi = 0.0;
+    amrex::Real m_cond_vacuum_n_scale = 4.0;
+
     std::string m_kappa_par_expression = "0.0";
     std::string m_kappa_perp_expression = "0.0";
     std::unique_ptr<amrex::Parser> m_kappa_par_parser;
@@ -1245,6 +1262,23 @@ public:
     std::unique_ptr<amrex::Parser> m_resistivity_parser;
     amrex::ParserExecutor<3> m_eta;
     bool m_resistivity_has_J_dependence = false;
+
+    /** Code-side additive vacuum resistivity boost (the theta-implicit MHD
+     *  vacuum_resistivity_diffusivity port): when D_vac > 0 the E-SOLVE eta
+     *  becomes sqrt(eta_user^2 + eta_vac^2) (C-infinity quadrature max) with
+     *      eta_vac = mu0 * D_vac * (rho_ref / rho_smooth)^2,
+     *  rho_ref = q_e * vacuum_resistivity_n_ref (default n_floor) and
+     *  rho_smooth a C-infinity positive floor of rho. The boost is composed
+     *  into the compiled E-solve parser only; Joule heating always evaluates
+     *  the RAW user parser (m_eta_raw) unless joule_heating_resistivity
+     *  overrides it — vacuum field diffusion never heats plasma. Default
+     *  D_vac = 0 leaves both parsers as the user expression (bit-identical).
+     *  NOTE: a ramp written INSIDE plasma_resistivity itself (legacy decks)
+     *  cannot be split out — migrate such decks to this knob. */
+    amrex::Real m_vacuum_resistivity_diffusivity = 0.0;
+    amrex::Real m_vacuum_resistivity_n_ref = -1.0;
+    std::unique_ptr<amrex::Parser> m_resistivity_raw_parser;
+    amrex::ParserExecutor<3> m_eta_raw;
 
     /** False until the first AdvanceElectronEnergyQDSMC of the run has
      *  filled hybrid_current_fp_plasma. On later steps J_plasma is already
