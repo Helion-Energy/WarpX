@@ -2315,4 +2315,11 @@ void HybridPICModel::FieldPush (
     // Push forward the B-field using Faraday's law
     warpx.EvolveB(dt, subcycling_half, t_old);
     warpx.FillBoundaryB(ng, nodal_sync);
+    // Reflecting (PMC) faces need the B parity enforced after every
+    // substepped advance; the standard push path applies it in
+    // ApplyBfieldBoundary, which this solver does not call.
+    for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+        warpx.ApplyBfieldBoundarySubstep(lev, PatchType::fine);
+        if (lev > 0) { warpx.ApplyBfieldBoundarySubstep(lev, PatchType::coarse); }
+    }
 }

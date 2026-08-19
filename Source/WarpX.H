@@ -608,6 +608,10 @@ public:
 
     void ApplyEfieldBoundary (int lev, PatchType patch_type, amrex::Real cur_time);
     void ApplyBfieldBoundary (int lev, PatchType patch_type, SubcyclingHalf subcycling_half, amrex::Real cur_time);
+    /** Apply only the reflecting (PMC) condition to the B-field, for field
+     * solvers that update B outside the standard push (e.g. the hybrid
+     * solver's substepped Faraday advance). */
+    void ApplyBfieldBoundarySubstep (int lev, PatchType patch_type);
 
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     // Applies the boundary conditions that are specific to the axis when in RZ.

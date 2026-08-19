@@ -289,6 +289,20 @@ void WarpX::ApplyBfieldBoundary (const int lev, PatchType patch_type, Subcycling
             m_fields.get_alldirs(FieldType::Bfield_fp, lev), Geom(lev), lev);
     }
 #endif
+
+}
+
+void WarpX::ApplyBfieldBoundarySubstep (const int lev, PatchType patch_type)
+{
+    if (::isAnyBoundary<FieldBoundaryType::PMC>(field_boundary_lo, field_boundary_hi)) {
+        PEC::ApplyPECtoEfield(
+            m_fields.get_alldirs(
+                patch_type == PatchType::fine ? FieldType::Bfield_fp
+                                              : FieldType::Bfield_cp, lev),
+            field_boundary_lo, field_boundary_hi, FieldBoundaryType::PMC,
+            get_ng_fieldgather(), Geom(lev),
+            lev, patch_type, ref_ratio);
+    }
 }
 
 void WarpX::ApplyRhofieldBoundary (const int lev, MultiFab* rho,
