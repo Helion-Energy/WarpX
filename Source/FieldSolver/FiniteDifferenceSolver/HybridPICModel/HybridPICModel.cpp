@@ -108,6 +108,14 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("plasma_hyper_resistivity(rho,B)", m_eta_h_expression);
 
     utils::parser::queryWithParser(pp_hybrid, "n_floor", m_n_floor);
+    utils::parser::queryWithParser(pp_hybrid, "n_floor_smooth_width",
+                                   m_n_floor_smooth_width);
+    utils::parser::queryWithParser(pp_hybrid, "electron_inertia_floor_taper",
+                                   m_electron_inertia_floor_taper);
+    pp_hybrid.query("electron_inertia_extrapolated_history",
+                    m_electron_inertia_extrapolated_history);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_n_floor_smooth_width >= 0.,
+        "hybrid_pic_model.n_floor_smooth_width must be >= 0");
 
     // Master gate for the electron-energy equation. When enabled, K_e is
     // advected each step by fictitious Lagrangian particles moving with V_e
@@ -2164,6 +2172,17 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
         "levels)");
     const int rho_mid_comp = rho.nComp() / 2;
     amrex::Real const rho_floor = PhysConst::q_e * m_n_floor;
+    amrex::Real const floor_w = m_n_floor_smooth_width * rho_floor;
+    // Electron-inertia fluid-validity taper: the inertia term is the
+    // electron-fluid momentum response, which does not exist at deposit
+    // granularity -- in a density-floored cell holding O(1) particles,
+    // (m_e/e) dJe/dt / rho_lim couples a particle's own current back
+    // onto itself with gain ~ m_e_eff/rho_lim and runs away on a
+    // physical (dt-independent) clock. Taper the term to zero through
+    // the floor band (the sub-floor halo reverts to the massless-
+    // electron model); width in units of rho_floor, 0 disables the
+    // taper (legacy behavior).
+    amrex::Real const taper_w = m_electron_inertia_floor_taper * rho_floor;
 
     // Freeze rho(x^n) for the drho/dt leg on the first non-Jacobian
     // evaluation of the step: rho_fp component 0 is a PRE-push deposit, so
@@ -2330,7 +2349,7 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
                 ei(i,j,k,2) = 0.0_rt;
                 return;
             }
-            amrex::Real const rho_lim = amrex::max(rho_mid, rho_floor);
+            amrex::Real const rho_lim = HybridSmoothFloor(rho_mid, rho_floor, floor_w);
             // rho_mid is the MIDPOINT deposit for every theta (the implicit
             // particle push advances positions by dt/2), so the rate is the
             // half-step difference quotient -- dividing by theta*dt instead
@@ -2352,8 +2371,8 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
             auto ucomp = [&] (int ii, int jj, int kk,
                               int c) -> amrex::Real
             {
-                amrex::Real const rl = amrex::max(
-                    amrex::max(rhoa(ii,jj,kk,mid), 0.0_rt), rho_floor);
+                amrex::Real const rl = HybridSmoothFloor(
+                    amrex::max(rhoa(ii,jj,kk,mid), 0.0_rt), rho_floor, floor_w);
                 return je(ii,jj,kk,c) / rl;
             };
 #if defined(WARPX_DIM_3D)
@@ -2419,6 +2438,9 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
             }
 #endif
 
+            amrex::Real const w_taper = (taper_w > 0.0_rt)
+                ? 0.5_rt*(1.0_rt + std::tanh((rho_mid - rho_floor)/taper_w))
+                : 1.0_rt;
             for (int c = 0; c < 3; ++c) {
                 // Je^{n+1} from the theta-stage iterate:
                 // Je1 = (Je^theta - (1-theta) Je^n)/theta.
@@ -2431,7 +2453,7 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
                     ? (c_p1 * je1 + c_0 * jen(i,j,k,c)
                        + c_m1 * jenm1(i,j,k,c))
                     : (je1 - jen(i,j,k,c)) * inv_dt;
-                ei(i,j,k,c) = me_over_e
+                ei(i,j,k,c) = w_taper * me_over_e
                     * (djedt - u[c] * drhodt - adv[c]) / rho_lim;
             }
         });
@@ -2455,17 +2477,76 @@ void HybridPICModel::RotateElectronInertiaHistory (amrex::Real a_theta)
     amrex::MultiFab & Je_n = *warpx.m_fields.get("hybrid_Je_n_nodal", lev);
     amrex::MultiFab & Je_nm1 =
         *warpx.m_fields.get("hybrid_Je_nm1_nodal", lev);
-    amrex::MultiFab const & Je_th =
-        *warpx.m_fields.get("hybrid_Je_theta_nodal", lev);
 
     amrex::MultiFab::Copy(Je_nm1, Je_n, 0, 0, 3, Je_nm1.nGrowVect());
     if (m_inertia_history_levels < 2) { ++m_inertia_history_levels; }
-    // Je^{n+1} = (Je^theta - (1-theta) Je^n)/theta -- the same
-    // extrapolation family as the other end-of-step fields.
-    amrex::MultiFab::LinComb(Je_n,
-        1.0_rt / a_theta, Je_th, 0,
-        1.0_rt - 1.0_rt / a_theta, Je_nm1, 0,
-        0, 3, Je_n.nGrowVect());
+
+    if (m_electron_inertia_extrapolated_history) {
+        // Legacy store: Je^{n+1} = (Je^theta - (1-theta) Je^n)/theta.
+        // DEFECTIVE at theta = 1/2: the stored value is a function of the
+        // previously stored value with eigenvalue -(1-theta)/theta = -1
+        // (marginal), and the E_inertial feedback destabilizes it into a
+        // period-2 ringing of the near-null-region field that breaks the
+        // step on a physical (dt-independent) clock. Kept only as an
+        // opt-in comparison knob.
+        amrex::MultiFab const & Je_th =
+            *warpx.m_fields.get("hybrid_Je_theta_nodal", lev);
+        amrex::MultiFab::LinComb(Je_n,
+            1.0_rt / a_theta, Je_th, 0,
+            1.0_rt - 1.0_rt / a_theta, Je_nm1, 0,
+            0, 3, Je_n.nGrowVect());
+    } else {
+        // Measured store (default): assemble Je^{n+1} from the DELIVERED
+        // end-of-step state -- the caller runs this after the delivered
+        // plasma-current refresh, so hybrid_current_fp_plasma holds
+        // J_plasma^{n+1} = curl(B^{n+1})/mu0 (- J_ext, - the Darwin
+        // displacement piece), and current_fp holds the same ion-deposit
+        // family every theta-stage assembly used. The stored history is
+        // never a function of previously stored values, so no recursion
+        // exists to ring. The theta extrapolation survives only INSIDE
+        // the residual evaluation (Je^{n+1} from Je^theta), recomputed
+        // fresh each evaluation and never fed back.
+        amrex::ignore_unused(a_theta);
+        ablastr::fields::VectorField Jp =
+            warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
+        ablastr::fields::VectorField Ji =
+            warpx.m_fields.get_alldirs(FieldType::current_fp, lev);
+        auto const & geom = warpx.Geom(lev);
+        amrex::GpuArray<int, 3> const coarsen_rr = {1, 1, 1};
+        amrex::GpuArray<int, 3> const nodal = {1, 1, 1};
+        const amrex::GpuArray<int, 3> J_stag[3] =
+            {Jx_IndexType, Jy_IndexType, Jz_IndexType};
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(Je_n, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const & je   = Je_n.array(mfi);
+            auto const & jpx  = Jp[0]->const_array(mfi);
+            auto const & jpy  = Jp[1]->const_array(mfi);
+            auto const & jpz  = Jp[2]->const_array(mfi);
+            auto const & jix  = Ji[0]->const_array(mfi);
+            auto const & jiy  = Ji[1]->const_array(mfi);
+            auto const & jiz  = Ji[2]->const_array(mfi);
+            amrex::GpuArray<int, 3> const sx = J_stag[0];
+            amrex::GpuArray<int, 3> const sy = J_stag[1];
+            amrex::GpuArray<int, 3> const sz = J_stag[2];
+            using ablastr::coarsen::sample::Interp;
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                je(i,j,k,0) = Interp(jpx, sx, nodal, coarsen_rr, i, j, k, 0)
+                            - Interp(jix, sx, nodal, coarsen_rr, i, j, k, 0);
+                je(i,j,k,1) = Interp(jpy, sy, nodal, coarsen_rr, i, j, k, 0)
+                            - Interp(jiy, sy, nodal, coarsen_rr, i, j, k, 0);
+                je(i,j,k,2) = Interp(jpz, sz, nodal, coarsen_rr, i, j, k, 0)
+                            - Interp(jiz, sz, nodal, coarsen_rr, i, j, k, 0);
+            });
+        }
+        // Same boundary conventions as the theta-stage assembly.
+        Je_n.setBndry(0.0_rt);
+        Je_n.FillBoundary(geom.periodicity());
+    }
+
     // Re-arm the step-start density capture for the next step's first
     // evaluation (see ComputeElectronInertiaNodal).
     m_inertia_rho_n_captured = false;

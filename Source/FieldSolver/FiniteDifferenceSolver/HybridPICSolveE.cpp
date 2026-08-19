@@ -543,6 +543,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     const auto eta = hybrid_model->m_eta;
     const auto eta_h = hybrid_model->m_eta_h;
     const auto rho_floor = hybrid_model->m_n_floor * PhysConst::q_e;
+    const auto floor_w = hybrid_model->m_n_floor_smooth_width * rho_floor;
     const auto resistivity_has_J_dependence = hybrid_model->m_resistivity_has_J_dependence;
     const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
@@ -812,7 +813,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto enE_r = Interp(enE, nodal, Er_stag, coarsen, i, j, 0, 0);
 
                     // safety condition since we divide by rho
-                    const auto rho_val_limited = std::max(rho_val, rho_floor);
+                    const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
 
                     Real ohm_val = (enE_r - grad_Pe) / rho_val_limited;
                     if (holmstrom_smooth) {
@@ -862,9 +863,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields &&
-                    (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
-                    Er(i, j, 0) -= Er_ext(i, j, 0);
+                if (include_external_fields) {
+                    const amrex::Real w_ext = subtract_E_ext_everywhere
+                        ? 1._rt
+                        : HybridExtSubWeight(rho_val, rho_floor, floor_w);
+                    Er(i, j, 0) -= w_ext * Er_ext(i, j, 0);
                 }
             },
 
@@ -896,7 +899,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto enE_t = Interp(enE, nodal, Etheta_stag, coarsen, i, j, 0, 1);
 
                     // safety condition since we divide by rho
-                    const auto rho_val_limited = std::max(rho_val, rho_floor);
+                    const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
 
                     Real ohm_val = (enE_t - grad_Pe) / rho_val_limited;
                     if (holmstrom_smooth) {
@@ -947,9 +950,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields &&
-                    (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
-                    Etheta(i, j, 0) -= Etheta_ext(i, j, 0);
+                if (include_external_fields) {
+                    const amrex::Real w_ext = subtract_E_ext_everywhere
+                        ? 1._rt
+                        : HybridExtSubWeight(rho_val, rho_floor, floor_w);
+                    Etheta(i, j, 0) -= w_ext * Etheta_ext(i, j, 0);
                 }
             },
 
@@ -976,7 +981,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto enE_z = Interp(enE, nodal, Ez_stag, coarsen, i, j, 0, 2);
 
                     // safety condition since we divide by rho
-                    const auto rho_val_limited = std::max(rho_val, rho_floor);
+                    const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
 
                     Real ohm_val = (enE_z - grad_Pe) / rho_val_limited;
                     if (holmstrom_smooth) {
@@ -1032,9 +1037,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields &&
-                    (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
-                    Ez(i, j, 0) -= Ez_ext(i, j, 0);
+                if (include_external_fields) {
+                    const amrex::Real w_ext = subtract_E_ext_everywhere
+                        ? 1._rt
+                        : HybridExtSubWeight(rho_val, rho_floor, floor_w);
+                    Ez(i, j, 0) -= w_ext * Ez_ext(i, j, 0);
                 }
             }
         );
@@ -1085,6 +1092,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     const auto eta = hybrid_model->m_eta;
     const auto eta_h = hybrid_model->m_eta_h;
     const auto rho_floor = hybrid_model->m_n_floor * PhysConst::q_e;
+    const auto floor_w = hybrid_model->m_n_floor_smooth_width * rho_floor;
     const auto resistivity_has_J_dependence = hybrid_model->m_resistivity_has_J_dependence;
     const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
@@ -1349,7 +1357,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto enE_x = Interp(enE, nodal, Ex_stag, coarsen, i, j, k, 0);
 
                 // safety condition since we divide by rho
-                const auto rho_val_limited = std::max(rho_val, rho_floor);
+                const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
 
                 Real ohm_val = (enE_x - grad_Pe) / rho_val_limited;
                 if (holmstrom_smooth) {
@@ -1396,9 +1404,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields &&
-                (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
-                Ex(i, j, k) -= Ex_ext(i, j, k);
+            if (include_external_fields) {
+                const amrex::Real w_ext = subtract_E_ext_everywhere
+                    ? 1._rt
+                    : HybridExtSubWeight(rho_val, rho_floor, floor_w);
+                Ex(i, j, k) -= w_ext * Ex_ext(i, j, k);
             }
         });
 
@@ -1425,7 +1435,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto enE_y = Interp(enE, nodal, Ey_stag, coarsen, i, j, k, 1);
 
                 // safety condition since we divide by rho
-                const auto rho_val_limited = std::max(rho_val, rho_floor);
+                const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
 
                 Real ohm_val = (enE_y - grad_Pe) / rho_val_limited;
                 if (holmstrom_smooth) {
@@ -1472,9 +1482,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields &&
-                (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
-                Ey(i, j, k) -= Ey_ext(i, j, k);
+            if (include_external_fields) {
+                const amrex::Real w_ext = subtract_E_ext_everywhere
+                    ? 1._rt
+                    : HybridExtSubWeight(rho_val, rho_floor, floor_w);
+                Ey(i, j, k) -= w_ext * Ey_ext(i, j, k);
             }
         });
 
@@ -1501,7 +1513,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 const auto enE_z = Interp(enE, nodal, Ez_stag, coarsen, i, j, k, 2);
 
                 // safety condition since we divide by rho
-                const auto rho_val_limited = std::max(rho_val, rho_floor);
+                const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
 
                 Real ohm_val = (enE_z - grad_Pe) / rho_val_limited;
                 if (holmstrom_smooth) {
@@ -1548,9 +1560,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields &&
-                (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
-                Ez(i, j, k) -= Ez_ext(i, j, k);
+            if (include_external_fields) {
+                const amrex::Real w_ext = subtract_E_ext_everywhere
+                    ? 1._rt
+                    : HybridExtSubWeight(rho_val, rho_floor, floor_w);
+                Ez(i, j, k) -= w_ext * Ez_ext(i, j, k);
             }
         });
 

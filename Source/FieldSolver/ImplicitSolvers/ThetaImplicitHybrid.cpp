@@ -431,6 +431,16 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
         }
     }
 
+    // Electron inertia: rotate the per-step nodal Je history from the
+    // MEASURED delivered state -- hybrid_current_fp_plasma now holds
+    // J_plasma^{n+1} (including the Darwin displacement piece above), and
+    // current_fp still holds the same ion-deposit family the theta-stage
+    // assemblies used. Runs here (not in FinishFieldUpdate) so the stored
+    // value is a measurement, not an extrapolation of a stored value.
+    if (m_hybrid_pic_model->m_include_electron_inertia) {
+        m_hybrid_pic_model->RotateElectronInertiaHistory(m_theta);
+    }
+
     return exit_status;
 }
 
@@ -1243,13 +1253,13 @@ void ThetaImplicitHybrid::FinishFieldUpdate( amrex::Real end_time )
         ExtLedgerPrint(m_WarpX, "finish post-extrap");
     }
 
-    // Electron inertia: rotate the per-step nodal Je history via the
-    // theta-extrapolation of the converged theta-stage assembly (one
-    // assembly family end to end -- differencing across assembly
-    // conventions injects deposit-noise derivatives at 1/dt).
-    if (m_hybrid_pic_model->m_include_electron_inertia) {
-        m_hybrid_pic_model->RotateElectronInertiaHistory(m_theta);
-    }
+    // (The electron-inertia Je history rotates in Advance, AFTER the
+    // delivered-state plasma-current refresh: the stored history values
+    // must be MEASURED end-of-step assemblies, never extrapolations --
+    // storing the extrapolation (Je^theta - (1-theta) Je^n)/theta feeds
+    // the stored value back into itself with eigenvalue -(1-theta)/theta,
+    // which is marginal (-1) at theta = 1/2 and rings at period 2 where
+    // the inertia term dominates the Ohm law.)
 
     // Restore end-of-step totals: the analytic external flux advance means
     // Bfield_fp = B_plasma^{n+1} + f(t^{n+1}) curl A_ext exactly, for any

@@ -4038,6 +4038,32 @@ Maxwell solver: kinetic-fluid hybrid
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the plasma density floor, in :math:`m^{-3}`, which is useful since the generalized Ohm's law used to calculate the E-field includes a :math:`1/n` term.
 
+.. pp:param:: hybrid_pic_model.n_floor_smooth_width
+    :type: ``float``
+    :default: ``0``
+    :optional:
+
+    Width, in units of :pp:param:`hybrid_pic_model.n_floor`, of a :math:`C^1` smooth-max blend of the density-floor guard (0 keeps the exact hard ``max(rho, rho_floor)``).
+    The blend stays bounded below by the floor everywhere (the halo response remains floored -- this is not a response mask), but removes the kink that deposit noise chatters across when cells sit near the floor threshold.
+    The same width smooths the conditional external-``E`` subtraction across the floor.
+
+.. pp:param:: hybrid_pic_model.electron_inertia_floor_taper
+    :type: ``float``
+    :default: ``0``
+    :optional:
+
+    Width, in units of :pp:param:`hybrid_pic_model.n_floor`, of a taper that fades the electron-inertia term to zero through the floor band (0 keeps the term active in all density-floored cells).
+    The inertia term is the electron-fluid momentum response, which has no meaning at deposit granularity; in floored cells holding few macroparticles it couples a particle's own current back onto itself.
+
+.. pp:param:: hybrid_pic_model.electron_inertia_extrapolated_history
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Opt-in legacy behavior of the electron-inertia time history: store the theta-extrapolated end-of-step electron current instead of the measured delivered-state assembly.
+    The extrapolated store makes each stored value a function of the previously stored value with amplification :math:`-(1-\theta)/\theta` -- marginal at :math:`\theta = 1/2` -- and rings at period 2 where the inertia term dominates the Ohm law.
+    Comparison knob only; the measured store is the default.
+
 .. pp:param:: hybrid_pic_model.implicit_push_excludes_resistive_field
     :type: ``bool``
     :default: ``false``
