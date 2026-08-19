@@ -486,6 +486,17 @@ void HybridPICModel::ReadParameters ()
     utils::parser::queryWithParser(pp_hybrid,
                                    "qdsmc_conduction_vacuum_chi_budget_factor",
                                    m_cond_vacuum_chi_budget_factor);
+
+    // MHD-shaped conduction pedestal (see member doc).
+    utils::parser::queryWithParser(pp_hybrid, "qdsmc_conduction_pedestal_fraction",
+                                   m_cond_pedestal_fraction);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_cond_pedestal_fraction >= 0.0_rt && m_cond_pedestal_fraction < 1.0_rt,
+        "hybrid_pic_model.qdsmc_conduction_pedestal_fraction must be in [0, 1)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_cond_pedestal_fraction == 0.0_rt || m_cond_operator == 1,
+        "hybrid_pic_model.qdsmc_conduction_pedestal_fraction requires "
+        "qdsmc_conduction_operator = fd");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_cond_vacuum_chi >= 0.0_rt && m_cond_vacuum_n_scale > 0.0_rt,
         "hybrid_pic_model.qdsmc_conduction_vacuum_chi must be >= 0 and "
@@ -3455,6 +3466,10 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
     amrex::Real const m_el = PhysConst::m_e;
     amrex::Real const t_now = warpx.gett_new(0);
     amrex::Real const eV_per_K = kb / qe;
+    // Conduction pedestal (0 when off): the wall rows act at the same
+    // effective density the FD operator conducts with, so a wall drain
+    // exhausts pedestal-halo heat even where the raw deposit is zero.
+    amrex::Real const n_ped = m_cond_n_ped;
 
     for (int d = 0; d < AMREX_SPACEDIM; ++d) {
     for (int s = 0; s < 2; ++s) {
@@ -3501,7 +3516,8 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
             reduce_op.eval(wall_plane, reduce_data,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
             {
-                amrex::Real const ne = rho_arr(i,j,k) / qe;
+                amrex::Real const ne =
+                    amrex::max(rho_arr(i,j,k) / qe, n_ped);
                 if (ne <= 0.0_rt) { return {0.0_rt}; }
                 if (bc == 1) {
                     // thermal bath: pin the row, tally the exchange
@@ -3636,6 +3652,19 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
     // chi tensor does. Ghosts = 3 for the isothermal ring scan (eb_ring
     // <= 3); mask comps default OPEN so unset non-periodic domain ghosts
     // never read as walls (the SDE kin convention).
+    // MHD-shaped conduction pedestal (see member doc): the f-scaled
+    // per-call image of the domain peak density, never below n_floor.
+    // Published in m_cond_n_ped for the wall-BC kernels' n_eff.
+    m_cond_n_ped = 0.0_rt;
+    if (m_cond_pedestal_fraction > 0.0_rt) {
+        amrex::Real const peak_ne =
+            rho.max(0) / PhysConst::q_e;   // global reduce
+        m_cond_n_ped =
+            amrex::max(m_cond_pedestal_fraction * peak_ne, m_n_floor);
+    }
+    amrex::Real const n_ped = m_cond_n_ped;
+    bool const pedestal = (n_ped > 0.0_rt);
+
     enum BNE : int { b_bx = 0, b_by, b_bz, b_B2, b_ne, b_open, b_ebm,
                      b_ncomp };
     amrex::MultiFab bne(Te.boxArray(), Te.DistributionMap(), BNE::b_ncomp, 3);
@@ -3673,9 +3702,17 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
             b_arr(i,j,k,BNE::b_by)   = unmag ? 0.0_rt : byv*Binv;
             b_arr(i,j,k,BNE::b_bz)   = unmag ? 1.0_rt : bzv*Binv;
             b_arr(i,j,k,BNE::b_B2)   = B2;
-            b_arr(i,j,k,BNE::b_ne)   = amrex::max(ne_raw, n_floor);
-            b_arr(i,j,k,BNE::b_open) =
-                (ne_raw > n_floor && !covered) ? 1.0_rt : 0.0_rt;
+            // Pedestal: the operator's density is n_eff = max(n, n_ped)
+            // and every uncovered node is open -- the quarantine opens
+            // inside the pedestal so boosted-chi halo heat conducts
+            // through the floor to the wall drain. Off: original
+            // floor/open semantics, bit-identical.
+            b_arr(i,j,k,BNE::b_ne)   = pedestal
+                ? amrex::max(ne_raw, n_ped)
+                : amrex::max(ne_raw, n_floor);
+            b_arr(i,j,k,BNE::b_open) = pedestal
+                ? (covered ? 0.0_rt : 1.0_rt)
+                : ((ne_raw > n_floor && !covered) ? 1.0_rt : 0.0_rt);
             b_arr(i,j,k,BNE::b_ebm)  = covered ? 0.0_rt : 1.0_rt;
         });
     }
@@ -4063,6 +4100,7 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
             ? m_cond_flux_limit_factor : 1.0_rt;
         amrex::Real const m_el = PhysConst::m_e;
         amrex::Real const t_now = warpx.gett_new(0);
+        amrex::Real const n_ped_eb = m_cond_n_ped;
         amrex::Real dx_min = dx_arr[0];
         for (int dd = 1; dd < AMREX_SPACEDIM; ++dd) {
             dx_min = amrex::min(dx_min, dx_arr[dd]);
@@ -4091,7 +4129,8 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
             {
                 if (b_arr(i,j,k,BNE::b_ebm) == 0.0_rt) { return {0.0_rt}; }
-                amrex::Real const ne = rho_arr(i,j,k) / qe;
+                amrex::Real const ne =
+                    amrex::max(rho_arr(i,j,k) / qe, n_ped_eb);
                 if (ne <= 0.0_rt) { return {0.0_rt}; }
                 bool ring = false;
                 int const node[3] = {i, j, k};

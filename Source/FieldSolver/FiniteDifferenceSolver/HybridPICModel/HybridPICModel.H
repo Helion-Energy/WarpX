@@ -939,6 +939,27 @@ public:
      *  Input: qdsmc_conduction_vacuum_chi_budget_factor (default 0.5). */
     amrex::Real m_cond_vacuum_chi_budget_factor = 0.5;
 
+    /** MHD-shaped conduction pedestal (the theta-implicit MHD
+     *  halo_pedestal_fraction port, conduction-side only): when f > 0,
+     *  every FD-conduction call computes n_ped = f * max_domain(n_e)
+     *  (never below n_floor) and the operator's density field becomes
+     *  n_eff = max(n, n_ped) with ALL uncovered faces open — the
+     *  quarantine (closed floor faces) opens inside the pedestal so a
+     *  vacuum-boosted chi conducts halo heat through the density floor
+     *  and out the wall drain (Eric 2026-08-18: "with boosted chi it
+     *  should just drain out through the wall through the density
+     *  floor"). The f-scaled per-call peak image tracks compression like
+     *  the MHD pedestal (not a flat floor). Conduction/wall-BC side
+     *  only: Ohm dynamics, transport, and sources are untouched; the
+     *  operator conserves u_eff = 1.5 n_eff kB Te and the wall tallies
+     *  account the exhaust. Default 0 = off, bit-identical (the
+     *  quarantine stands). Input: qdsmc_conduction_pedestal_fraction. */
+    amrex::Real m_cond_pedestal_fraction = 0.0;
+    /** Per-call pedestal density [m^-3] (0 when off), published by the
+     *  FD conduction call for the wall-BC kernels' n_eff. Mutable: set
+     *  inside the const conduction call chain. */
+    mutable amrex::Real m_cond_n_ped = 0.0;
+
     std::string m_kappa_par_expression = "0.0";
     std::string m_kappa_perp_expression = "0.0";
     std::unique_ptr<amrex::Parser> m_kappa_par_parser;
