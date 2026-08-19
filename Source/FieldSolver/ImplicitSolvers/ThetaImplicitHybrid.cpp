@@ -136,6 +136,16 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
         m_theta >= 0.5 && m_theta <= 1.0,
         "theta parameter must be between 0.5 and 1.0");
 
+    {
+        std::string e_finisher = "extrapolate";
+        pp.query("hybrid_e_finisher", e_finisher);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            e_finisher == "extrapolate" || e_finisher == "reevaluate",
+            "implicit_evolve.hybrid_e_finisher must be 'extrapolate' or "
+            "'reevaluate'");
+        m_e_finisher_reevaluate = (e_finisher == "reevaluate");
+    }
+
     // Segregated midpoint-iterated solve for the QDSMC electron-energy
     // stage (see the member documentation in the header).
     pp.query("qdsmc_segregated_solve", m_qdsmc_segregated_solve);
@@ -429,6 +439,35 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
                 amrex::MultiFab::Saxpy(Jp,  PhysConst::epsilon_0 * inv_dt, EL_old, 0, 0, Jp.nComp(), Jp.nGrowVect());
             }
         }
+    }
+
+    // Re-evaluated E finisher: overwrite the extrapolated E^{n+1} with the
+    // generalized Ohm's law evaluated at the DELIVERED end-of-step state
+    // (total B^{n+1}, the delivered plasma current refreshed above, the
+    // same ion-deposit family the theta-stage used), as the explicit
+    // hybrid loop finishes its step. The extrapolated finisher is a
+    // -(1-theta)/theta recursion on the stored algebraic field.
+    if (m_e_finisher_reevaluate) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_darwin,
+            "implicit_evolve.hybrid_e_finisher = reevaluate is not "
+            "implemented for the Darwin field split");
+        if (!m_hybrid_pic_model->m_solve_electron_energy_equation) {
+            m_hybrid_pic_model->CalculateElectronPressure();
+        }
+        m_hybrid_pic_model->HybridPICSolveE(
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, m_num_amr_levels - 1),
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::current_fp, m_num_amr_levels - 1),
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, m_num_amr_levels - 1),
+            m_WarpX->m_fields.get_mr_levels(FieldType::rho_fp, m_num_amr_levels - 1),
+            m_WarpX->GetEBUpdateEFlag(), false);
+        {
+            using ablastr::fields::Direction;
+            amrex::IntVect const ngE = m_WarpX->m_fields.get(
+                FieldType::Efield_fp, Direction{0}, 0)->nGrowVect();
+            m_WarpX->FillBoundaryE(ngE, true /* sync nodal points */);
+        }
+        // keep the solver vector consistent with the delivered field
+        m_E.Copy(FieldType::Efield_fp);
     }
 
     // Electron inertia: rotate the per-step nodal Je history from the

@@ -167,6 +167,15 @@ private:
      *  once per nonlinear iteration. */
     bool m_darwin = false;
 
+    /** End-of-step E finisher: false (default) extrapolates the algebraic
+     *  field, E^{n+1} = (E^theta - (1-theta) E^n)/theta -- a -(1-theta)/
+     *  theta recursion on the stored E (marginal at theta = 1/2; its error
+     *  grows linearly under a steady drift and pollutes the delivered
+     *  field). True re-evaluates the generalized Ohm's law at the
+     *  delivered end-of-step state instead, as the explicit hybrid loop
+     *  does (implicit_evolve.hybrid_e_finisher = reevaluate). */
+    bool m_e_finisher_reevaluate = false;
+
     /** One-time Darwin state capture (B_static = B(t=0), A = 0), performed
      *  at the top of the first OneStep when all fields are initialized. */
     bool m_darwin_initialized = false;

@@ -4055,6 +4055,15 @@ Maxwell solver: kinetic-fluid hybrid
     Width, in units of :pp:param:`hybrid_pic_model.n_floor`, of a taper that fades the electron-inertia term to zero through the floor band (0 keeps the term active in all density-floored cells).
     The inertia term is the electron-fluid momentum response, which has no meaning at deposit granularity; in floored cells holding few macroparticles it couples a particle's own current back onto itself.
 
+.. pp:param:: implicit_evolve.hybrid_e_finisher
+    :type: ``string``
+    :default: ``extrapolate``
+    :optional:
+
+    How the theta-implicit hybrid scheme forms the delivered end-of-step electric field.
+    ``extrapolate`` (legacy) uses :math:`E^{n+1} = (E^{\theta} - (1-\theta) E^n)/\theta`; because the hybrid :math:`E` is algebraic (not evolved), this is a :math:`-(1-\theta)/\theta` recursion on the stored field -- marginal at :math:`\theta = 1/2` -- whose error grows linearly under a steady drift.
+    ``reevaluate`` recomputes the generalized Ohm's law at the delivered end-of-step state instead, as the explicit hybrid loop does (one extra Ohm solve per step; not yet implemented for the Darwin field split).
+
 .. pp:param:: hybrid_pic_model.electron_inertia_extrapolated_history
     :type: ``bool``
     :default: ``false``
