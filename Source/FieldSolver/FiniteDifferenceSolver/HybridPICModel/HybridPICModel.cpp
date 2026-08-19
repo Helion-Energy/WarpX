@@ -759,11 +759,24 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
         amrex::Real const rho_ref = PhysConst::q_e * n_ref;
         amrex::Real const eps     = 1.0e-3_rt * rho_ref;
         amrex::Real const eta_c   = PhysConst::mu0 * m_vacuum_resistivity_diffusivity;
+        // Unlike the implicit MHD form (backward-Euler-staged, uncapped),
+        // the explicit B push must own a finite ceiling: the raw
+        // (rho_ref/rho)^2 term is folded through a C-infinity harmonic
+        // soft-min so eta_vac saturates at mu0 * D_vac deep in the vacuum
+        // (D_vac IS the vacuum diffusivity ceiling; the quadratic shape
+        // only governs the onset above rho_ref). Without this, sub-floor
+        // cells mint eta ~ 1e6 x the ceiling and detonate the explicit
+        // substep budget (measured at first smoke).
         std::string const rho_s =
             "(0.5*(rho+sqrt(rho**2+" + num_lit(eps * eps) + ")))";
+        std::string const ev =
+            "(" + num_lit(eta_c) + "*(" + num_lit(rho_ref) + "/" + rho_s
+            + ")**2)";
+        std::string const ev_cap =
+            "(" + ev + "*" + num_lit(eta_c) + "/(" + ev + "+"
+            + num_lit(eta_c) + "))";
         eta_solve_expression =
-            "sqrt((" + m_eta_expression + ")**2 + (" + num_lit(eta_c) + "*("
-            + num_lit(rho_ref) + "/" + rho_s + ")**2)**2)";
+            "sqrt((" + m_eta_expression + ")**2 + " + ev_cap + "**2)";
     }
     m_resistivity_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(eta_solve_expression, {"rho","J","t"}));
