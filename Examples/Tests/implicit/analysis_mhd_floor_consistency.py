@@ -94,12 +94,20 @@ initial_ds, initial = get_data(sys.argv[1])
 mid_ds, mid = get_data(sys.argv[2])
 final_ds, final = get_data(sys.argv[3])
 
-history = np.atleast_2d(np.loadtxt("diags/newton.txt"))
+def last_session(rows, step_col=0):
+    # newton.txt / floor_ledger.txt APPEND across reruns of a test
+    # directory; keep only the most recent session (rows after the last
+    # step-number reset).
+    resets = np.nonzero(np.diff(rows[:, step_col]) < 0)[0]
+    return rows[(resets[-1] + 1) if len(resets) else 0 :]
+
+
+history = last_session(np.atleast_2d(np.loadtxt("diags/newton.txt")))
 steps = history[:, 0]
 iters = history[:, 2]
 norm_abs = history[:, 4]
 
-ledger = np.atleast_2d(np.loadtxt("diags/floor_ledger.txt"))
+ledger = last_session(np.atleast_2d(np.loadtxt("diags/floor_ledger.txt")))
 ledger_steps = ledger[:, 0]
 booked_mass = ledger[:, 1]
 booked_energy = ledger[:, 2]
@@ -120,8 +128,8 @@ assert np.all(np.diff(ledger_steps) == 1), "ledger rows are not per-step"
 # plateau (the dependency's measured deadlock signature). The rescue
 # baseline plateaus at ~2.13e-2; with the supply the solves converge to
 # machine precision instead (measured max ~1e-11).
-baseline_history = np.atleast_2d(
-    np.loadtxt(f"{baseline_directory}/diags/newton.txt")
+baseline_history = last_session(
+    np.atleast_2d(np.loadtxt(f"{baseline_directory}/diags/newton.txt"))
 )
 baseline_plateau = baseline_history[:, 4].max()
 assert baseline_plateau > 5.0e-3, (

@@ -78,17 +78,17 @@ print(f"bit-identity: {len(FIELDS)} fields match the rate-off twin exactly")
 # 2. Bit-identical Newton history: identical residuals converge
 # identically, so every logged column must match. newton.txt APPENDS
 # across reruns of a test directory (long-lived dev trees accumulate
-# many sessions in the baseline file), so compare against the TRAILING
-# window — the rows the baseline's most recent run wrote.
-history = np.atleast_2d(np.loadtxt("diags/newton.txt"))
-history = history[-int(history.shape[0]) :]
-baseline_history = np.atleast_2d(
-    np.loadtxt(f"{baseline_directory}/diags/newton.txt")
+# many sessions), so compare only the most recent session on each side
+# (rows after the last step-number reset).
+def last_session(rows, step_col=0):
+    resets = np.nonzero(np.diff(rows[:, step_col]) < 0)[0]
+    return rows[(resets[-1] + 1) if len(resets) else 0 :]
+
+
+history = last_session(np.atleast_2d(np.loadtxt("diags/newton.txt")))
+baseline_history = last_session(
+    np.atleast_2d(np.loadtxt(f"{baseline_directory}/diags/newton.txt"))
 )
-assert baseline_history.shape[0] >= history.shape[0], (
-    "baseline newton.txt shorter than the armed run's history"
-)
-baseline_history = baseline_history[-history.shape[0] :]
 assert np.array_equal(history, baseline_history), (
     "newton.txt differs from the rate-off twin: the armed source "
     "perturbed the solve"
