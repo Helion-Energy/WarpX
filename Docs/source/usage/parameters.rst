@@ -865,6 +865,10 @@ Domain Boundary Conditions
       criterion), ``boundary.open_bc_image_sum_rtol`` (relative tolerance of the periodic-z image sum at kernel assembly,
       default ``1e-6``, must be positive), ``boundary.open_bc_max_images`` (cap on image pairs, default ``200``, must be
       at least 1).
+      When the Green's-function machinery is not active, ``open`` instead applies an uncoupled zero-gradient
+      continuation: the ghost values of E and B on the open faces copy the nearest valid plane (staggering-aware),
+      so a field with no normal gradient passes through the boundary unaltered and no conducting-wall image is
+      imposed. The initial projection-based divergence cleaner treats these faces as Neumann.
 
 .. pp:param:: boundary.potential_lo/hi_x/y/z
     :link_aliases:

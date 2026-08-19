@@ -47,6 +47,60 @@ namespace
                std::any_of(particle_boundary_hi.begin(), particle_boundary_hi.end(), isPT);
     }
 
+    /** Zero-gradient continuation of a field into the domain ghost cells
+     * on every face marked Open: ghost values copy the nearest valid
+     * plane (staggering-aware). */
+    void ApplyOpenBoundaryExtrapolation (
+        ablastr::fields::VectorField const& field,
+        const amrex::Array<FieldBoundaryType,AMREX_SPACEDIM>& field_boundary_lo,
+        const amrex::Array<FieldBoundaryType,AMREX_SPACEDIM>& field_boundary_hi,
+        const amrex::Geometry& geom, const amrex::IntVect& ng)
+    {
+        for (int icomp = 0; icomp < 3; ++icomp) {
+            amrex::MultiFab* mf = field[icomp];
+            const amrex::Box domain = amrex::convert(geom.Domain(),
+                                                     mf->ixType().toIntVect());
+            const auto dlo = domain.smallEnd();
+            const auto dhi = domain.bigEnd();
+            amrex::GpuArray<int, 3> lo_open{0, 0, 0};
+            amrex::GpuArray<int, 3> hi_open{0, 0, 0};
+            for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+                lo_open[idim] =
+                    (field_boundary_lo[idim] == FieldBoundaryType::Open);
+                hi_open[idim] =
+                    (field_boundary_hi[idim] == FieldBoundaryType::Open);
+            }
+            amrex::GpuArray<int, 3> dlo_a{0, 0, 0};
+            amrex::GpuArray<int, 3> dhi_a{0, 0, 0};
+            for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+                dlo_a[idim] = dlo[idim];
+                dhi_a[idim] = dhi[idim];
+            }
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (amrex::MFIter mfi(*mf, amrex::TilingIfNotGPU());
+                 mfi.isValid(); ++mfi) {
+                const amrex::Box gbx = mfi.growntilebox(ng);
+                auto const& arr = mf->array(mfi);
+                amrex::ParallelFor(gbx,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                        int src[3] = {i, j, k};
+                        bool outside = false;
+                        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                            if (src[d] < dlo_a[d] && lo_open[d]) {
+                                src[d] = dlo_a[d]; outside = true;
+                            } else if (src[d] > dhi_a[d] && hi_open[d]) {
+                                src[d] = dhi_a[d]; outside = true;
+                            }
+                        }
+                        if (outside) {
+                            arr(i, j, k) = arr(src[0], src[1], src[2]);
+                        }
+                    });
+            }
+        }
+    }
 }
 
 void WarpX::ApplyEfieldBoundary(const int lev, PatchType patch_type, amrex::Real time)
@@ -123,6 +177,20 @@ void WarpX::ApplyEfieldBoundary(const int lev, PatchType patch_type, amrex::Real
                     split_pml_field);
             }
         }
+    }
+
+    bool open_extrap_e =
+        ::isAnyBoundary<FieldBoundaryType::Open>(field_boundary_lo, field_boundary_hi);
+#if defined(WARPX_DIM_RZ)
+    open_extrap_e = open_extrap_e && !GreensFunctionOpenBC::IsActive();
+#endif
+    if (open_extrap_e) {
+        ::ApplyOpenBoundaryExtrapolation(
+            m_fields.get_alldirs(patch_type == PatchType::fine
+                                     ? FieldType::Efield_fp
+                                     : FieldType::Efield_cp, lev),
+            field_boundary_lo, field_boundary_hi, Geom(lev),
+            get_ng_fieldgather());
     }
 
     if (::isAnyBoundary<FieldBoundaryType::PEC_Insulator>(field_boundary_lo, field_boundary_hi)) {
@@ -290,6 +358,20 @@ void WarpX::ApplyBfieldBoundary (const int lev, PatchType patch_type, Subcycling
     }
 #endif
 
+    bool open_extrap =
+        ::isAnyBoundary<FieldBoundaryType::Open>(field_boundary_lo, field_boundary_hi);
+#if defined(WARPX_DIM_RZ)
+    // The Green's-function fill provides the physical open-face ghosts.
+    open_extrap = open_extrap && !GreensFunctionOpenBC::IsActive();
+#endif
+    if (open_extrap) {
+        ::ApplyOpenBoundaryExtrapolation(
+            m_fields.get_alldirs(patch_type == PatchType::fine
+                                     ? FieldType::Bfield_fp
+                                     : FieldType::Bfield_cp, lev),
+            field_boundary_lo, field_boundary_hi, Geom(lev),
+            get_ng_fieldgather());
+    }
 }
 
 void WarpX::ApplyBfieldBoundarySubstep (const int lev, PatchType patch_type)
@@ -302,6 +384,19 @@ void WarpX::ApplyBfieldBoundarySubstep (const int lev, PatchType patch_type)
             field_boundary_lo, field_boundary_hi, FieldBoundaryType::PMC,
             get_ng_fieldgather(), Geom(lev),
             lev, patch_type, ref_ratio);
+    }
+#if defined(WARPX_DIM_RZ)
+    // The Green's-function open boundary provides the physical B ghost
+    // fill when active; the plain continuation applies otherwise.
+    if (GreensFunctionOpenBC::IsActive()) { return; }
+#endif
+    if (::isAnyBoundary<FieldBoundaryType::Open>(field_boundary_lo, field_boundary_hi)) {
+        ::ApplyOpenBoundaryExtrapolation(
+            m_fields.get_alldirs(
+                patch_type == PatchType::fine ? FieldType::Bfield_fp
+                                              : FieldType::Bfield_cp, lev),
+            field_boundary_lo, field_boundary_hi, Geom(lev),
+            get_ng_fieldgather());
     }
 }
 

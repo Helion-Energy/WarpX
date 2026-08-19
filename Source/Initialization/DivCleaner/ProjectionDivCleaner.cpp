@@ -167,7 +167,8 @@ ProjectionDivCleaner::solve ()
         {FieldBoundaryType::PEC, LinOpBCType::Dirichlet},
         {FieldBoundaryType::Neumann, LinOpBCType::Neumann}, // Note that PMC is the same as Neumann
         {FieldBoundaryType::Periodic, LinOpBCType::Periodic},
-        {FieldBoundaryType::None, LinOpBCType::Neumann}
+        {FieldBoundaryType::None, LinOpBCType::Neumann},
+        {FieldBoundaryType::Open, LinOpBCType::Neumann} // zero-gradient continuation
     };
 
     for (int idim=0; idim<AMREX_SPACEDIM; idim++){
