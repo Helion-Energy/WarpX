@@ -1784,6 +1784,21 @@ void BlockBandedPC<T,Ops>::VerifyFD (const T& a_U)
     const RT eps = (normU > RT(0.0)) ? RT(1.0e-6)*normU/normdU : RT(1.0e-6)/normdU;
 
     m_ops->ComputeRHS(R0, a_U, this->m_time, -1, true);
+    {
+        // Determinism probe: evaluate the residual twice at the IDENTICAL
+        // state and report the difference. On a deterministic backend this
+        // is exactly zero; any nonzero value is the per-evaluation
+        // stochasticity of the residual (e.g. deposit-order effects) and
+        // sets the floor below which FD Jacobian probes lose coherence.
+        T R0b;
+        R0b.Define(a_U);
+        m_ops->ComputeRHS(R0b, a_U, this->m_time, -1, true);
+        R0b.increment(R0, -RT(1.0));
+        const RT n0 = R0.norm2();
+        const RT dd = R0b.norm2();
+        amrex::Print() << "pc_block_banded DETERMINISM: ||R(U)-R(U)|| = "
+            << dd << "  rel = " << (n0 > RT(0.0) ? dd/n0 : dd) << "\n";
+    }
     Z.Copy(a_U);
     Z.increment(dU, eps);
     m_ops->ComputeRHS(R1, Z, this->m_time, -1, true);
