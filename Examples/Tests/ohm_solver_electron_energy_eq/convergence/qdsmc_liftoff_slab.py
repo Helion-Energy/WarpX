@@ -288,6 +288,14 @@ parser.add_argument(
     "unresolved wall density ramp inside the bath)",
 )
 parser.add_argument(
+    "--wall-bc",
+    choices=["isothermal", "drain"],
+    default="isothermal",
+    help="wall thermal mode when --wall-te is set: isothermal = two-sided "
+    "ring pin (legacy); drain = one-sided free-streaming-limited "
+    "temperature drain (MHD wall_thermal_bc port -- never heats plasma)",
+)
+parser.add_argument(
     "--te-shunt",
     type=float,
     default=-1.0,
@@ -671,8 +679,9 @@ if args.iso_conduction:
 if args.iso_b > 0.0:
     pywarpx.hybridpicmodel.qdsmc_conduction_iso_B = args.iso_b
 if args.wall_te > 0.0:
-    # Temperature (Dirichlet) wall: the dielectric absorbs conducted heat.
-    pywarpx.hybridpicmodel.qdsmc_conduction_eb_bc = "isothermal"
+    # Temperature wall: the dielectric absorbs conducted heat (two-sided
+    # pin, or the one-sided limited drain that can never heat plasma).
+    pywarpx.hybridpicmodel.qdsmc_conduction_eb_bc = args.wall_bc
     pywarpx.hybridpicmodel.__setattr__(
         "qdsmc_conduction_eb_Te(x,y,z)", f"{args.wall_te:.6e}"
     )
