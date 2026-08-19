@@ -1798,6 +1798,28 @@ void BlockBandedPC<T,Ops>::VerifyFD (const T& a_U)
         const RT dd = R0b.norm2();
         amrex::Print() << "pc_block_banded DETERMINISM: ||R(U)-R(U)|| = "
             << dd << "  rel = " << (n0 > RT(0.0) ? dd/n0 : dd) << "\n";
+        // localize: worst row per component (residual-map address of the
+        // statefulness/stochasticity)
+        for (int dim = 0; dim < 3; dim++) {
+            const amrex::MultiFab& d_mf = *R0b.getArrayVec()[0][dim];
+            RT dmax = RT(0.0);
+            int imax = -1, jmax = -1;
+            for (amrex::MFIter mfi(d_mf); mfi.isValid(); ++mfi) {
+                HostFab hd;
+                CopyFabToHost(d_mf, mfi, hd);
+                const amrex::Box vb = mfi.validbox();
+                const auto lo = vb.smallEnd(); const auto hi = vb.bigEnd();
+                for (int i = lo[0]; i <= hi[0]; i++) {
+                    for (int j = lo[1]; j <= hi[1]; j++) {
+                        const RT v = std::abs(hd.get(i,j));
+                        if (v > dmax) { dmax = v; imax = i; jmax = j; }
+                    }
+                }
+            }
+            amrex::AllPrint() << "  det comp " << dim << ": max |dR| = "
+                << dmax << " at (r,z idx) = (" << imax << "," << jmax
+                << ")\n";
+        }
     }
     Z.Copy(a_U);
     Z.increment(dU, eps);
