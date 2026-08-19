@@ -4664,6 +4664,74 @@ Jacobian probes.
     cyclotron scale, of order :math:`0.1/\Delta t` for typical
     implicit MHD steps).
 
+.. pp:param:: implicit_mhd.floor_consistency_rate
+    :type: ``float``
+    :unit: 1/s
+    :default: ``0`` (off, bit-identical)
+
+    Floor-consistency relaxation rate: the consistency *completion* of
+    the fluid admissibility floors. Every bounded fluid block (the same
+    blocks the bounded Newton projection clamps: mass density, electron
+    energy, ion energy under ``total_energy``, :math:`U_\parallel` and
+    :math:`U_\perp` under ``cgl``) gains the one-sided per-cell residual
+    source
+
+    .. math:: S = \min(\nu, 1/(\theta\,\Delta t)) \,
+        \mathrm{rect}_w(b - u),
+
+    where :math:`u` is the theta-stage block value, :math:`b` is the
+    *same* theta-stage admissibility image the projection enforces
+    (:math:`(1-\theta)\,u^n + \theta\,\mathrm{floor}_\mathrm{cell}`,
+    including the one-way temperature-coefficient ratchet), and
+    :math:`\mathrm{rect}_w` is the smooth-max one-sided rectifier of
+    width :math:`w = 0.1\,b`, closed by an exact-zero :math:`C^1` gate
+    beyond :math:`b + 2w`. Guarantees: the source only *supplies* (never
+    drains); it is linear in the Newton iterate through the engaged
+    regime with per-solve-constant bound and rate (JFNK-exact); it is
+    identically zero for any cell at or above :math:`(1+2\cdot 0.1)\,b`
+    -- at :math:`\theta = 1/2` every cell at or above 1.5x its cell
+    floor, so healthy cells and healthy runs are bit-identical, beyond
+    the documented sub-``1e-12`` tail requirement; and the internal rate
+    cap :math:`1/(\theta\,\Delta t)` bounds the per-solve supplied
+    increment by the deficit plus :math:`w/2` (no overshoot past
+    :math:`b + w`).
+
+    Rationale (measured on production run rr13e_C1w, the annihilation
+    endgame of a weak-anomalous-eta formation arm): a persistent active
+    set of 240--241 pure ion-energy components -- the live-plasma /
+    floor-sea interface ring -- was projected onto its admissibility
+    bounds every solve; the free-subspace line-search rescue engaged (7
+    accepted rescue steps) but the pinned-row defect *grew*
+    monotonically 0.468 :math:`\rightarrow` 1.004 (count 157
+    :math:`\rightarrow` 241) until no admissible step reduced even the
+    free subspace and the freeze guard fired at 43.97 us. There the
+    discrete equations continuously demand sub-floor ion-energy
+    evolution: a consistency gap between the residual and the admissible
+    set that no line-search policy can close. With the source, a
+    bound-riding cell whose equations demand drain finds an equilibrium
+    a fraction of a rectifier width above its bound where the reservoir
+    supplies exactly the demanded deficit -- the residual closes, the
+    active set empties, and the supplied mass/energy is *booked* (see
+    :pp:param:`implicit_mhd.floor_ledger_file`). The per-solve supply
+    capacity at a bound-riding cell is
+    :math:`\min(\nu\theta\Delta t, 1) \cdot w/2 = 5\%` of the bound: set
+    the rate so this covers the local drain demand per step (rates at or
+    above :math:`1/(\theta\,\Delta t)` saturate the cap).
+
+.. pp:param:: implicit_mhd.floor_ledger_file
+    :type: ``string``
+    :default: none (no file)
+
+    File for the floor-consistency supply ledger (requires a positive
+    :pp:param:`implicit_mhd.floor_consistency_rate`): rows of
+    ``step mass energy`` appended every step, holding the *cumulative*
+    supplied mass [kg] and fluid energy [J] (per unit cross-section in
+    1D), evaluated at the accepted theta state exactly as the residual
+    applied them -- the conservation instrument of the reservoir, the
+    floor-side sibling of :pp:param:`implicit_mhd.wall_ledger_file`.
+    The first write of a run truncates a stale file; the counters
+    restart at zero on a simulation restart.
+
 .. pp:param:: implicit_mhd.electron_pressure_floor
     :type: ``float``
     :unit: Pa

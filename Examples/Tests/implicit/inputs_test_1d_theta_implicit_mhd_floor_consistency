@@ -1,0 +1,148 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+my_constants.pedestal_fraction = 1.0e-3
+# Halo loaded EXACTLY at the dynamic pedestal rho_ped = f * rho_peak.
+my_constants.rho_halo = pedestal_fraction * rho0
+my_constants.Te = 0.01
+my_constants.Pe = n0 * Te * q_e
+my_constants.Pi = Pe
+my_constants.B0 = 1.0e-4
+# Gentle standing sound wave: the genuinely-evolving FREE subspace of the
+# rescue baseline. Kept identical so the two runs differ ONLY in the
+# floor-consistency source.
+my_constants.dv = 100.0
+my_constants.energy_rate = 5.0e7
+my_constants.nz = 64
+my_constants.Lz = 1.0
+my_constants.dt = 1.0e-9
+# THE DEADLOCK KNOB (identical to the active_set_rescue deck): an ion
+# temperature floor whose admissibility bound at the halo density,
+# n_halo kB T_floor / (gamma_i - 1) = 0.5 * Pi/(gamma-1), sits ~500x
+# ABOVE the pedestal relaxation target. T_floor = 58022 K.
+my_constants.T_floor = 58022.0
+# THE ESCALATION KNOB: the floor-consistency supply rate, sized AT the
+# internal per-solve cap 1/(theta dt) (calibrated by running; theta dt =
+# 5e-10 s). The bound-riding supply capacity is then w/2 = 5% of the
+# bound per solve (rectifier width fraction 0.1) against the sink's
+# demand theta dt * energy_rate = 2.5% of the bound per solve -- 2x
+# headroom, so the band finds the supply == sink equilibrium a fraction
+# of a width ABOVE its bound instead of wedging the projection.
+my_constants.supply_rate = 2.0e9
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+# FLOOR-CONSISTENCY COMPLETION OF THE ENGINEERED ACTIVE-SET DEADLOCK
+# (escalation of the active_set_rescue test; the rr13e_C1w production
+# mechanism, where the pinned defect GREW 0.468 -> 1.004 over 157 -> 241
+# components until the freeze guard fired at 43.97 us). The SAME deck as
+# inputs_test_1d_theta_implicit_mhd_active_set_rescue, with
+# implicit_mhd.floor_consistency_rate armed: the partnerless ion-energy
+# sink that previously pinned ~32 E_i direction components on their
+# temperature-floor admissibility bounds every solve (defect plateau
+# 2.13e-2) now meets the one-sided reservoir supply at the bound. The
+# band settles at 1.144x the temperature-floor image (the theta stage
+# rides ~0.7 rectifier widths above its bound, where the supply tail
+# balances the sink) -- MEASURED: zero projection events, zero rescues,
+# zero frozen steps, every solve at machine precision (max post-solve
+# norm 7e-13 vs the rescue twin's 2.13e-2 plateau) -- while the
+# rescue-only twin drains THROUGH the bound once its density drifts
+# (terminal band internal energy ~130x lower). Every supplied Joule is
+# booked in diags/floor_ledger.txt; the analysis closes the ledger
+# against the analytic sink demand (measured 3.2e-5 relative).
+max_step = 120
+amr.n_cell = nz
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 8
+# Tolerant policy kept from the rescue baseline: with the supply active
+# the solve should now genuinely converge (the analysis asserts the
+# defect never plateaus), but the policy must not mask a regression by
+# aborting differently.
+newton.require_convergence = false
+newton.max_frozen_steps = 20
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-11
+gmres.max_iterations = 200
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = 5.0/3.0
+hybrid_pic_model.n_floor = 1.0e8
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = 0.5 * rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = 5.0/3.0
+implicit_mhd.gamma_i = 5.0/3.0
+implicit_mhd.reference_ion_pressure = Pi
+implicit_mhd.mass_density(x,y,z) = if((z>0.25)*(z<0.75), rho0, rho_halo)
+implicit_mhd.electron_pressure(x,y,z) = Pe
+implicit_mhd.velocity_z(x,y,z) = dv * sin(2*pi*z/Lz)
+implicit_mhd.evolve_ion_fluid = true
+implicit_mhd.fluid_flux = hlld
+implicit_mhd.include_joule_heating = true
+implicit_mhd.halo_pedestal_fraction = pedestal_fraction
+implicit_mhd.halo_pedestal_energy_rate = energy_rate
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.ion_pressure(x,y,z) = Pi
+implicit_mhd.ion_pressure_floor = 1.0e-8
+implicit_mhd.ion_temperature_floor = T_floor
+implicit_mhd.electron_temperature_floor = 0.0
+implicit_mhd.floor_consistency_rate = supply_rate
+implicit_mhd.floor_ledger_file = diags/floor_ledger.txt
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 60
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz jz implicit_mhd_mass_density \
+                       implicit_mhd_momentum_density \
+                       implicit_mhd_electron_energy implicit_mhd_ion_energy
+diag1.write_species = 0

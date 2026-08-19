@@ -281,6 +281,103 @@ smooth_positive_floor (const amrex::Real value,
            0.5 * (excess + std::sqrt(excess * excess + floor * floor));
 }
 
+// Rectifier width of the floor-consistency relaxation source, as a
+// fraction of the cell's theta-stage admissibility bound. Together with
+// the supply-rate cap 1/(theta dt) it fixes the source's per-solve
+// supply capacity at width_fraction/2 of the bound (see
+// floor_consistency_deficit below), and through the exact-zero gate it
+// fixes the guarantee that any state at or above (1 + 2 f) times its
+// bound feels IDENTICALLY nothing -- at theta = 1/2 that is every cell
+// at or above 1.5x its cell floor, so healthy decks are bit-identical
+// with the source armed.
+constexpr amrex::Real floor_consistency_width_fraction = 0.1;
+
+/**
+ * \brief Rectified deficit of the floor-consistency relaxation source
+ * (implicit_mhd.floor_consistency_rate): the one-sided measure of how
+ * far a bounded fluid block's theta-stage value sits BELOW its
+ * admissibility bound, smoothly engaged so the residual source
+ * S = rate_eff * floor_consistency_deficit(...) supplies the equations'
+ * demanded sub-bound drain at bound-riding cells.
+ *
+ * The bound is the SAME theta-stage admissibility image the Newton
+ * projection uses (ProjectAndLimitSolverStep):
+ *     bound = (1 - theta) u_old + theta cell_floor,
+ * with cell_floor the absolute floor extended by the one-way
+ * temperature-coefficient ratchet (engaged only where the step-old
+ * value already satisfied it) -- both per-solve constants of the
+ * frozen step-old state.
+ *
+ * Construction (w = width_fraction * bound, x = bound - u):
+ *     deficit = smooth_max(x, 0, w) * gate(x),
+ *     gate    = floor_outflow_limiter(x + 3 w, w)
+ * (1 for x >= -w, exactly 0 for x <= -2 w, C^1 between).
+ *
+ * Guarantees, stated once here for every caller:
+ *  (a) ONE-SIDED: deficit >= 0 always, so the source only SUPPLIES the
+ *      block (never drains). The gate dies before smooth_max's odd part
+ *      could matter, and smooth_max(x, 0, w) >= 0 for all x.
+ *  (b) NEWTON-LINEAR / JFNK-EXACT: the bound, width, and rate are
+ *      per-solve constants (frozen-coefficient idiom), so the source
+ *      depends on the Newton iterate only through u itself; it is
+ *      exactly linear with slope -rate_eff throughout the engaged
+ *      regime x >= w and a C^1 (C-infinity smooth-max times C^1 gate)
+ *      diagonal blend elsewhere -- the matrix-free probes differentiate
+ *      it exactly, with no hidden state dependence.
+ *  (c) EXACT ZERO ABOVE THE BOUND: identically zero for u >= bound + 2w
+ *      (the gate is exactly 0 there), i.e. for every cell at or above
+ *      (1 + 2 * width_fraction) * bound. This EXCEEDS the documented
+ *      sub-1e-12 tail requirement: healthy cells (>= 1.5x their cell
+ *      floor at theta = 1/2) and healthy runs are bit-identical, not
+ *      merely unchanged to round-off. Within (bound, bound + 2w) the
+ *      engagement is bounded by w/2 -- the smooth on-bound handoff.
+ *  (d) NO OVERSHOOT (with the caller's rate cap
+ *      rate_eff = min(rate, 1/(theta dt))): deficit <= max(x, 0) + w/2
+ *      (smooth_max widens by at most w/2), so the per-solve supplied
+ *      increment theta dt * rate_eff * deficit <= max(bound - u, 0)
+ *      + w/2 -- at most the deficit scale plus half a width. A
+ *      sub-bound cell cannot be pushed above bound + w/2 in a single
+ *      application, and the user's rate is an exact per-second cap on
+ *      the supply rate below the 1/(theta dt) ceiling.
+ *
+ * The supply capacity at a bound-riding cell is rate_eff * w/2 per
+ * second (the rectifier's value at x = 0 is w/2): a persistent sink
+ * demand below that capacity finds a consistent equilibrium a fraction
+ * of a width ABOVE the bound where supply balances sink -- the cell
+ * rides the bound smoothly, unpinned, and the Newton residual closes
+ * instead of wedging on the projection.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+floor_consistency_deficit (const amrex::Real value,
+                           const amrex::Real old_value,
+                           const amrex::Real old_density,
+                           const amrex::Real floor,
+                           const amrex::Real temperature_coefficient,
+                           const amrex::Real theta) noexcept {
+    // The projection's cell bound, term for term (see
+    // ProjectAndLimitSolverStep): one-way temperature ratchet on the
+    // step-old value, then the theta-stage image of the cell floor.
+    const amrex::Real temperature_bound =
+        temperature_coefficient * old_density;
+    const amrex::Real cell_floor = old_value >= temperature_bound
+                                       ? std::max(floor, temperature_bound)
+                                       : floor;
+    const amrex::Real bound = (1.0 - theta) * old_value + theta * cell_floor;
+    if (bound <= 0.0) {
+        // A non-positive bound never binds a non-negative block.
+        return 0.0;
+    }
+    const amrex::Real width = floor_consistency_width_fraction * bound;
+    const amrex::Real deficit = bound - value;
+    if (deficit <= -2.0 * width) {
+        // Exact-zero fast path == the gate's own zero (guarantee (c)).
+        return 0.0;
+    }
+    const amrex::Real gate =
+        floor_outflow_limiter(deficit + 3.0 * width, width);
+    return gate * smooth_max(deficit, 0.0, width);
+}
+
 /**
  * \brief Density-keyed vacuum resistivity of the FIELD advance:
  * a smooth, uncapped resistivity floor

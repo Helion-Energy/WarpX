@@ -153,6 +153,9 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
                                    m_halo_pedestal_drag_rate);
     utils::parser::queryWithParser(pp, "halo_pedestal_energy_rate",
                                    m_halo_pedestal_energy_rate);
+    utils::parser::queryWithParser(pp, "floor_consistency_rate",
+                                   m_floor_consistency_rate);
+    pp.query("floor_ledger_file", m_floor_ledger_file);
     utils::parser::queryWithParser(pp, "vacuum_resistivity_diffusivity",
                                    m_vacuum_resistivity_diffusivity);
     // Sentinel -1 = "not set": defaulted to the global implicit_evolve.theta
@@ -567,6 +570,16 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "implicit_mhd.halo_pedestal_energy_rate requires "
         "implicit_mhd.ion_closure = total_energy or cgl (the barotropic "
         "closure evolves no ion energy block to relax)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_floor_consistency_rate >= 0.0_rt,
+        "implicit_mhd.floor_consistency_rate cannot be negative");
+    // The ledger is the source's conservation instrument: a file without
+    // the source is a configuration error, not a silent no-op.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_floor_ledger_file.empty() || m_floor_consistency_rate > 0.0_rt,
+        "implicit_mhd.floor_ledger_file requires a positive "
+        "implicit_mhd.floor_consistency_rate (the ledger books the "
+        "floor-consistency supply, which does not exist without it)");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_vacuum_resistivity_diffusivity >= 0.0_rt,
         "implicit_mhd.vacuum_resistivity_diffusivity cannot be negative");
@@ -2144,6 +2157,15 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "\n"
                    << "Halo pedestal energy rate [1/s]: "
                    << m_halo_pedestal_energy_rate << "\n";
+    if (m_floor_consistency_rate > 0.0_rt) {
+        amrex::Print() << "Floor consistency rate [1/s]:  "
+                       << m_floor_consistency_rate
+                       << " (per-solve cap 1/(theta dt))\n"
+                       << "Floor consistency ledger:      "
+                       << (m_floor_ledger_file.empty() ? "(none)"
+                                                       : m_floor_ledger_file)
+                       << "\n";
+    }
     if (m_ion_closure == "cgl") {
         amrex::Print() << "CGL relaxation scale:          " << m_cgl_relaxation_scale << "\n"
                        << "CGL Coulomb logarithm:         " << m_cgl_coulomb_log << "\n"
@@ -2815,6 +2837,11 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
                                      start_time + m_theta * m_dt);
     }
 #endif
+    if (m_floor_consistency_rate > 0.0_rt) {
+        // Book the floor-consistency supply from the accepted theta state
+        // (m_state), before FinishStateUpdate extrapolates it to t^{n+1}.
+        AccumulateFloorConsistencySupplyLedger(m_dt, step);
+    }
     m_WarpX->reduced_diags->ComputeDiagsMidStep(step);
     FinishStateUpdate(start_time + m_dt);
     ExecutePythonCallback("afterEpush");
@@ -3782,6 +3809,28 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
     const amrex::Real halo_pedestal_energy_rate = m_halo_pedestal_energy_rate;
     const amrex::Real halo_pedestal_ion_internal =
         std::max(m_halo_pedestal_ion_internal, ion_energy_floor);
+    // Floor-consistency relaxation source (see m_floor_consistency_rate
+    // and floor_consistency_deficit): one-sided per-cell supply at the
+    // SAME theta-stage admissibility bounds the Newton projection
+    // enforces, per bounded block, capped at 1/(theta dt) so the
+    // per-solve supplied increment never exceeds the deficit scale plus
+    // half a rectifier width (no overshoot). Bounds and rate are
+    // per-solve constants (frozen-coefficient idiom): JFNK-exact. The
+    // OFF path adds nothing at all -- bit-identical by construction.
+    const bool floor_consistency = m_floor_consistency_rate > 0.0_rt;
+    const amrex::Real floor_supply_rate =
+        std::min(m_floor_consistency_rate, 1.0_rt / theta_dt);
+    const amrex::Real theta = m_theta;
+    const AdmissibilityBounds admissibility = MakeAdmissibilityBounds();
+    const amrex::Real fc_mass_floor = admissibility.floors[0];
+    const amrex::Real fc_mass_coefficient =
+        admissibility.temperature_coefficients[0];
+    const amrex::Real fc_electron_floor = admissibility.floors[1];
+    const amrex::Real fc_electron_coefficient =
+        admissibility.temperature_coefficients[1];
+    const amrex::Real fc_ion_floor = admissibility.floors[2];
+    const amrex::Real fc_ion_coefficient =
+        admissibility.temperature_coefficients[2];
     const auto eta = m_hybrid_pic_model->m_eta;
     // Joule heating evaluates eta at the SAME hybrid-floored density as
     // Ohm's law, so the electron heating rate matches the field's eta J.
@@ -4136,6 +4185,39 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                          (-divergence_ion_energy_flux + lorentz_work +
                           ion_pressure_work) -
                      drag_kinetic_drain - energy_relax_drain);
+            }
+
+            // Floor-consistency supply (see the host constants above and
+            // floor_consistency_deficit for the one-sidedness /
+            // JFNK-exactness / exact-zero-above-bound / no-overshoot
+            // guarantees): appended AFTER the base increments under a
+            // per-solve-uniform branch, so the OFF path performs no
+            // arithmetic at all -- bit-identical including the sign of
+            // zero. Booked per step by
+            // AccumulateFloorConsistencySupplyLedger.
+            if (floor_consistency) {
+                if (evolve_ion_fluid) {
+                    rho_increment(i, j, k) +=
+                        theta_dt * floor_supply_rate *
+                        theta_implicit_mhd::floor_consistency_deficit(
+                            rho(i, j, k), rho_old(i, j, k),
+                            rho_old(i, j, k), fc_mass_floor,
+                            fc_mass_coefficient, theta);
+                }
+                energy_increment(i, j, k) +=
+                    theta_dt * floor_supply_rate *
+                    theta_implicit_mhd::floor_consistency_deficit(
+                        energy(i, j, k), energy_old(i, j, k),
+                        rho_old(i, j, k), fc_electron_floor,
+                        fc_electron_coefficient, theta);
+                if (total_energy_closure) {
+                    ion_energy_increment(i, j, k) +=
+                        theta_dt * floor_supply_rate *
+                        theta_implicit_mhd::floor_consistency_deficit(
+                            ion_e(i, j, k), ion_e_old(i, j, k),
+                            rho_old(i, j, k), fc_ion_floor,
+                            fc_ion_coefficient, theta);
+                }
             }
         });
     }
@@ -5907,6 +5989,122 @@ void ThetaImplicitMHD::AccumulateAbsorbedWallLedger (const amrex::Real dt,
 #endif
 }
 
+void ThetaImplicitMHD::AccumulateFloorConsistencySupplyLedger (
+    const amrex::Real dt, const int step)
+{
+    // The supply is a pure state-local source: unlike the wall ledgers no
+    // flux recompute is needed -- re-evaluate the SAME rectified deficit
+    // the residual kernels applied, at the accepted theta state (m_state)
+    // against the frozen step-old state (m_state_old). For a converged
+    // solve U^{n+1} - U^n = dt * RHS(theta state), so the booked amounts
+    // dt * rate_eff * deficit match the supply's share of the state
+    // change to the nonlinear solver tolerance (frozen/stagnated solves
+    // violate this at the residual level, as they do all conservation).
+    const bool total_energy_closure = m_ion_closure == "total_energy";
+    const bool cgl_closure = m_ion_closure == "cgl";
+    const int num_blocks = cgl_closure ? 4 : (total_energy_closure ? 3 : 2);
+    const std::array<const char*, 4> block_names = {
+        MassDensityName, ElectronEnergyName,
+        cgl_closure ? IonParallelEnergyName : IonEnergyName,
+        IonPerpEnergyName};
+    const AdmissibilityBounds bounds = MakeAdmissibilityBounds();
+    const amrex::Real theta = m_theta;
+    const amrex::Real theta_dt = m_theta * dt;
+    const amrex::Real rate_eff =
+        std::min(m_floor_consistency_rate, 1.0_rt / theta_dt);
+    const amrex::MultiFab& old_density_mf =
+        m_state_old.getMultiFabBlock(MassDensityName, 0);
+    // A frozen ion fluid gets no mass increment in the kernels, so
+    // nothing is supplied to it either.
+    const int first_block = m_evolve_ion_fluid ? 0 : 1;
+
+    // Geometry cell measure: product of the cell sizes, with the RZ
+    // radial annulus weight 2 pi r_center applied per cell in-kernel, so
+    // the booked units are kg and J (in 1D per unit cross-section,
+    // kg/m^2 and J/m^2 -- the geometry's own measure).
+    amrex::Real cell_volume = 1.0_rt;
+    for (int dim = 0; dim < AMREX_SPACEDIM; ++dim) {
+        cell_volume *= m_WarpX->Geom(0).CellSize(dim);
+    }
+#if defined(WARPX_DIM_RZ)
+    const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
+    const amrex::Real radial_cell_size = m_WarpX->Geom(0).CellSize(0);
+#endif
+    // Rigid-conductor wall exclusion, mirroring the residual kernels'
+    // wall_live factor.
+    const bool wall_thermal_freeze =
+        (m_wall_mask.GetThermalBC() != ImplicitMHDWallMask::ThermalBC::none);
+    const int* const AMREX_RESTRICT wall_first_masked_cc =
+        wall_thermal_freeze ? m_wall_mask.FirstMaskedCellCentered() : nullptr;
+    const int wall_mask_z_lo = -m_wall_mask.GhostCells();
+    const int wall_mask_z_hi =
+        m_wall_mask.AxialCells() - 1 + m_wall_mask.GhostCells();
+
+    amrex::Real step_totals[2] = {0.0_rt, 0.0_rt}; // supplied mass, energy
+    for (int block = first_block; block < num_blocks; ++block) {
+        const amrex::Real floor = bounds.floors[block];
+        const amrex::Real temperature_coefficient =
+            bounds.temperature_coefficients[block];
+        const amrex::MultiFab& value_mf =
+            m_state.getMultiFabBlock(block_names[block], 0);
+        const amrex::MultiFab& old_mf =
+            m_state_old.getMultiFabBlock(block_names[block], 0);
+        amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        for (amrex::MFIter mfi(value_mf); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox();
+            const auto value = value_mf.const_array(mfi);
+            const auto old_value = old_mf.const_array(mfi);
+            const auto old_density = old_density_mf.const_array(mfi);
+            reduce_op.eval(
+                box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                    if (wall_thermal_freeze) {
+                        const int mask_jz = std::max(
+                            wall_mask_z_lo, std::min(wall_mask_z_hi, j));
+                        if (i >= wall_first_masked_cc[mask_jz]) {
+                            return {0.0_rt};
+                        }
+                    }
+                    amrex::Real measure = 1.0_rt;
+#if defined(WARPX_DIM_RZ)
+                    measure = 2.0_rt * MathConst::pi *
+                              (radial_lower +
+                               (i + 0.5_rt) * radial_cell_size);
+#endif
+                    return {measure *
+                            theta_implicit_mhd::floor_consistency_deficit(
+                                value(i, j, k), old_value(i, j, k),
+                                old_density(i, j, k), floor,
+                                temperature_coefficient, theta)};
+                });
+        }
+        const amrex::Real block_total =
+            dt * rate_eff * cell_volume *
+            amrex::get<0>(reduce_data.value(reduce_op));
+        step_totals[block == 0 ? 0 : 1] += block_total;
+    }
+    amrex::ParallelAllReduce::Sum(step_totals, 2,
+                                  amrex::ParallelContext::CommunicatorSub());
+    m_floor_supplied_mass += step_totals[0];
+    m_floor_supplied_energy += step_totals[1];
+
+    if (!m_floor_ledger_file.empty() &&
+        amrex::ParallelDescriptor::IOProcessor()) {
+        // Truncate at the first write of the run (a stale file from a
+        // previous run in the same directory would otherwise keep
+        // accumulating appended rows), append afterwards.
+        std::ofstream ledger(m_floor_ledger_file, m_floor_ledger_started
+                                                      ? std::ios::app
+                                                      : std::ios::trunc);
+        m_floor_ledger_started = true;
+        ledger.precision(17);
+        ledger << step + 1 << " " << m_floor_supplied_mass << " "
+               << m_floor_supplied_energy << "\n";
+    }
+}
+
 bool ThetaImplicitMHD::PrepareResistiveStageCurrents (
     const bool at_resistive_stage) const
 {
@@ -7033,6 +7231,34 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                  0.5_rt * m_ion_pressure_floor);
     const amrex::Real halo_pedestal_ion_perp =
         std::max(m_halo_pedestal_ion_perp, m_ion_pressure_floor);
+    // Floor-consistency relaxation source (see m_floor_consistency_rate
+    // and floor_consistency_deficit): one-sided per-cell supply at the
+    // SAME theta-stage admissibility bounds the Newton projection
+    // enforces, per bounded block (rho, U_e, E_i under total_energy,
+    // U_par and U_perp under cgl), capped at 1/(theta dt) so the
+    // per-solve supplied increment never exceeds the deficit scale plus
+    // half a rectifier width (no overshoot). Bounds and rate are
+    // per-solve constants (frozen-coefficient idiom): JFNK-exact. The
+    // OFF path adds nothing at all -- bit-identical by construction.
+    // Wall-masked cells are excluded through wall_live, like every
+    // other source.
+    const bool floor_consistency = m_floor_consistency_rate > 0.0_rt;
+    const amrex::Real floor_supply_rate =
+        std::min(m_floor_consistency_rate, 1.0_rt / theta_dt);
+    const amrex::Real theta = m_theta;
+    const AdmissibilityBounds admissibility = MakeAdmissibilityBounds();
+    const amrex::Real fc_mass_floor = admissibility.floors[0];
+    const amrex::Real fc_mass_coefficient =
+        admissibility.temperature_coefficients[0];
+    const amrex::Real fc_electron_floor = admissibility.floors[1];
+    const amrex::Real fc_electron_coefficient =
+        admissibility.temperature_coefficients[1];
+    const amrex::Real fc_ion_floor = admissibility.floors[2];
+    const amrex::Real fc_ion_coefficient =
+        admissibility.temperature_coefficients[2];
+    const amrex::Real fc_perp_floor = admissibility.floors[3];
+    const amrex::Real fc_perp_coefficient =
+        admissibility.temperature_coefficients[3];
     const auto eta = m_hybrid_pic_model->m_eta;
     // Joule heating evaluates eta at the SAME hybrid-floored density as
     // Ohm's law, so the electron heating rate matches the field's eta J.
@@ -7981,6 +8207,58 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                          (-divergence_ion_perp_flux + perp_work +
                           perp_relaxation) -
                      perp_relax_drain);
+            }
+
+            // Floor-consistency supply (see the host constants above and
+            // floor_consistency_deficit for the one-sidedness /
+            // JFNK-exactness / exact-zero-above-bound / no-overshoot
+            // guarantees): appended AFTER the base increments under a
+            // per-solve-uniform branch, so the OFF path performs no
+            // arithmetic at all -- bit-identical including the sign of
+            // zero. Wall-frozen cells are excluded (wall_live), like
+            // every other source. Booked per step by
+            // AccumulateFloorConsistencySupplyLedger. The block-2 bound
+            // constants are closure-keyed by MakeAdmissibilityBounds
+            // (E_i under total_energy, U_par under cgl).
+            if (floor_consistency) {
+                const amrex::Real supply_scale =
+                    wall_live * theta_dt * floor_supply_rate;
+                if (evolve_ion_fluid) {
+                    rho_increment(i, j, k) +=
+                        supply_scale *
+                        theta_implicit_mhd::floor_consistency_deficit(
+                            rho(i, j, k), rho_old(i, j, k),
+                            rho_old(i, j, k), fc_mass_floor,
+                            fc_mass_coefficient, theta);
+                }
+                energy_increment(i, j, k) +=
+                    supply_scale *
+                    theta_implicit_mhd::floor_consistency_deficit(
+                        energy(i, j, k), energy_old(i, j, k),
+                        rho_old(i, j, k), fc_electron_floor,
+                        fc_electron_coefficient, theta);
+                if (total_energy_closure) {
+                    ion_energy_increment(i, j, k) +=
+                        supply_scale *
+                        theta_implicit_mhd::floor_consistency_deficit(
+                            ion_e(i, j, k), ion_e_old(i, j, k),
+                            rho_old(i, j, k), fc_ion_floor,
+                            fc_ion_coefficient, theta);
+                }
+                if (cgl_closure) {
+                    ion_parallel_increment(i, j, k) +=
+                        supply_scale *
+                        theta_implicit_mhd::floor_consistency_deficit(
+                            upar(i, j, k), upar_old(i, j, k),
+                            rho_old(i, j, k), fc_ion_floor,
+                            fc_ion_coefficient, theta);
+                    ion_perp_increment(i, j, k) +=
+                        supply_scale *
+                        theta_implicit_mhd::floor_consistency_deficit(
+                            uperp(i, j, k), uperp_old(i, j, k),
+                            rho_old(i, j, k), fc_perp_floor,
+                            fc_perp_coefficient, theta);
+                }
             }
         });
     }

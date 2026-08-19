@@ -189,6 +189,21 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * before FinishStateUpdate extrapolates the state to t^{n+1}. */
     void AccumulateAbsorbedWallLedger (amrex::Real dt, int step,
                                        amrex::Real a_time);
+    /** Floor-consistency supply bookkeeping (floor_consistency_rate > 0):
+     * the relaxation source creates mass/energy at bound-riding cells by
+     * design, so the conservation ledger tracks it explicitly. Evaluates
+     * the source at the ACCEPTED theta state (m_state vs m_state_old --
+     * for a converged solve U^{n+1} - U^n = dt * RHS(theta state), so the
+     * booked amounts match the state change to the nonlinear solver
+     * tolerance, exactly the wall-ledger contract), integrates
+     * dt * rate_eff * deficit over the domain per bounded block with the
+     * geometry's cell measure (2 pi r dr dz in RZ), accumulates the
+     * cumulative supplied-mass/energy counters, and appends a
+     * "step mass energy" row to implicit_mhd.floor_ledger_file when set.
+     * Wall-masked (rigid-conductor) cells are excluded, mirroring the
+     * residual kernels. Must be called after the nonlinear solve and
+     * before FinishStateUpdate extrapolates the state to t^{n+1}. */
+    void AccumulateFloorConsistencySupplyLedger (amrex::Real dt, int step);
     /** Assemble the solver-owned Ohm's law E = -u x B + eta J (hlld path).
      * With at_resistive_stage = true (residual evaluations) the
      * dissipative terms (eta J, the vacuum-eta boost, and the
@@ -615,6 +630,42 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // the corresponding positivity floors so the drain can never
     // demand an inadmissible state.
     amrex::Real m_halo_pedestal_energy_rate = 0.0;
+    // ---- Floor-consistency relaxation rate [1/s] (0 = off, bit-identical
+    // when off): the consistency completion of the admissibility floors.
+    // Measured escalation trigger (production rr13e_C1w, the annihilation
+    // endgame of a weak-anomalous-eta formation arm): a persistent active
+    // set of 240-241 pure ion-energy components -- the live-plasma /
+    // floor-sea interface ring -- was projected onto its admissibility
+    // bounds every solve; the free-subspace rescue engaged (7 accepted
+    // rescue steps) but the pinned-row defect GREW monotonically
+    // 0.468 -> 1.004 (count 157 -> 241) until no admissible step reduced
+    // even the free subspace and the freeze guard fired at 43.97 us. The
+    // discrete equations there CONTINUOUSLY demand sub-floor evolution: a
+    // consistency gap between the residual and the admissible set that no
+    // line-search policy can close. This source closes it: every bounded
+    // fluid block (the blocks ProjectAndLimitSolverStep clamps) gains the
+    // one-sided per-cell residual source
+    //     S = rate_eff * floor_consistency_deficit(u, ...),
+    //     rate_eff = min(rate, 1/(theta dt)),
+    // which supplies (never drains) exactly the demanded sub-bound drain
+    // at bound-riding cells -- see floor_consistency_deficit in
+    // ThetaImplicitMHD_K.H for the rectifier construction and the
+    // one-sidedness / JFNK-exactness / exact-zero-above-bound /
+    // no-overshoot guarantees. The reservoir's supplied mass and energy
+    // are BOOKED per step (AccumulateFloorConsistencySupplyLedger) so the
+    // non-conservation is tracked, like the wall ledgers. Wall-masked
+    // (rigid-conductor) cells are excluded like every other source. ----
+    amrex::Real m_floor_consistency_rate = 0.0;
+    // Floor-consistency supply ledger: cumulative supplied mass [kg] and
+    // fluid energy [J] ([kg/m^2], [J/m^2] in 1D: the cell measure is the
+    // geometry's), evaluated at the accepted theta state each step and
+    // optionally appended to floor_ledger_file as "step mass energy"
+    // rows (every step; first write of a run truncates a stale file).
+    // Counters restart at zero on a simulation restart.
+    amrex::Real m_floor_supplied_mass = 0.0;
+    amrex::Real m_floor_supplied_energy = 0.0;
+    std::string m_floor_ledger_file;
+    bool m_floor_ledger_started = false;
     // The frozen per-step pedestal state (0 while inactive): density,
     // electron energy, ion internal energy (total_energy closure), and
     // the CGL pair.

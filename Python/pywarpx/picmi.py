@@ -2712,6 +2712,30 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         accreted drive forcing cannot pin the ion-energy Newton
         residual.
 
+    floor_consistency_rate: float, default=0 (off, bit-identical)
+        Floor-consistency relaxation rate in 1/s: the consistency
+        completion of the admissibility floors. Adds to every bounded
+        fluid block the one-sided residual source
+        S = min(rate, 1/(theta dt)) * rect(bound - u) at the SAME
+        theta-stage admissibility bound the bounded Newton projection
+        enforces (temperature ratchet included), so cells whose
+        equations continuously demand sub-floor drain (the pinned
+        active set of the rr13e production freeze) ride their bound
+        smoothly with the reservoir supplying exactly the demanded
+        deficit. One-sided (only supplies), JFNK-exact
+        (per-solve-constant bound and rate), identically zero for
+        cells at/above 1.2x their bound (healthy runs bit-identical),
+        no overshoot (rate cap 1/(theta dt)). The supplied mass and
+        energy are booked (see floor_ledger_file).
+
+    floor_ledger_file: str, optional
+        File for the floor-consistency supply ledger (requires
+        floor_consistency_rate > 0): "step mass energy" rows appended
+        every step with the cumulative supplied mass [kg] and fluid
+        energy [J] evaluated at the accepted theta state — the
+        conservation instrument of the reservoir, the floor-side
+        sibling of wall_ledger_file.
+
     vacuum_resistivity_diffusivity: float, default=0 (off)
         Density-keyed vacuum resistivity of the field advance in m^2/s
         (fluid_flux="hlld" only): the Ohm's law sees the smooth, uncapped
@@ -2771,6 +2795,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         halo_pedestal_fraction=None,
         halo_pedestal_drag_rate=None,
         halo_pedestal_energy_rate=None,
+        floor_consistency_rate=None,
+        floor_ledger_file=None,
         vacuum_resistivity_diffusivity=None,
         resistive_theta=None,
         conduction_theta=None,
@@ -2844,6 +2870,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.halo_pedestal_fraction = halo_pedestal_fraction
         self.halo_pedestal_drag_rate = halo_pedestal_drag_rate
         self.halo_pedestal_energy_rate = halo_pedestal_energy_rate
+        self.floor_consistency_rate = floor_consistency_rate
+        self.floor_ledger_file = floor_ledger_file
         self.vacuum_resistivity_diffusivity = vacuum_resistivity_diffusivity
         self.resistive_theta = resistive_theta
         self.conduction_theta = conduction_theta
@@ -2925,6 +2953,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.halo_pedestal_fraction = self.halo_pedestal_fraction
         implicit_mhd.halo_pedestal_drag_rate = self.halo_pedestal_drag_rate
         implicit_mhd.halo_pedestal_energy_rate = self.halo_pedestal_energy_rate
+        implicit_mhd.floor_consistency_rate = self.floor_consistency_rate
+        implicit_mhd.floor_ledger_file = self.floor_ledger_file
         implicit_mhd.vacuum_resistivity_diffusivity = (
             self.vacuum_resistivity_diffusivity
         )

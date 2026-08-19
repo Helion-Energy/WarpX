@@ -390,6 +390,52 @@ if(TEST test_1d_theta_implicit_mhd_active_set_rescue.run)
     )
 endif()
 
+# Floor-consistency completion of the engineered deadlock (the designed
+# escalation of the rescue, motivated by rr13e_C1w where the pinned
+# defect grew 0.468 -> 1.004 until the freeze guard fired): the SAME
+# deck with floor_consistency_rate armed at the 1/(theta dt) cap. The
+# reservoir supplies the partnerless sink's demand at the bound, the
+# band rides the admissibility image instead of wedging (no persistent
+# projections, no rescues, no frozen steps), and the supplied energy is
+# booked and closed against the analytic sink demand by the analysis.
+# Depends on the rescue baseline for its newton.txt defect plateau and
+# its drained-through terminal state.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_floor_consistency  # name
+    1  # dims
+    2  # nprocs
+    inputs_test_1d_theta_implicit_mhd_floor_consistency  # inputs
+    "analysis_mhd_floor_consistency.py diags/diag000000 diags/diag000060 diags/diag000120"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_active_set_rescue  # dependency
+)
+if(TEST test_1d_theta_implicit_mhd_floor_consistency.run)
+    # ZERO frozen-step warnings and ZERO pinned components: the supply
+    # keeps the equations consistent at the bound, so the line search
+    # never freezes ("(frozen step" only prints in the iteration-0
+    # zero-progress warning; the banner's "max frozen steps" must not
+    # trip this) and the projection never clamps a direction component
+    set_property(
+        TEST test_1d_theta_implicit_mhd_floor_consistency.run
+        PROPERTY FAIL_REGULAR_EXPRESSION
+        "[(]frozen step;Newton: projected"
+    )
+endif()
+
+# Do-no-harm twin: the quiet static contact with the source armed at the
+# rate cap and a ledger file must be BIT-IDENTICAL to the rate-off twin
+# (fields and newton.txt) with an all-zero ledger -- the rectifier's
+# exact-zero gate above 1.2x the bound, proven on a live deck
+add_warpx_test(
+    test_1d_theta_implicit_mhd_floor_consistency_noharm  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_static_contact implicit_mhd.floor_consistency_rate=1.0e10 implicit_mhd.floor_ledger_file=diags/floor_ledger.txt"  # inputs
+    "analysis_mhd_floor_consistency_noharm.py diags/diag000000 diags/diag000100"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_static_contact_hllc  # dependency
+)
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_positivity  # name
     1  # dims
