@@ -77,7 +77,9 @@
  *      J*delta_E = delta_E - [ Interp(delta_enE)/rho_lim (Holmstrom-masked)
  *                              + eta(rho,|J0|,t) * delta_J
  *                              - eta_H(rho,|B0|) * Lap(delta_J)
- *                              - (inertia diagonal surrogate) ]
+ *                              + Interp(ci * delta_J_nodal)  (electron
+ *                                inertia: ci = (m_e_eff/e) s_dt / rho_lim,
+ *                                zero in true vacuum) ]
  *
  *  mirroring HybridPICSolveECylindrical's nodal assembly and per-component
  *  stagger interpolations, with m=0 axis parity folds (B_theta, B_r, J_r
@@ -88,8 +90,9 @@
  *  Chacon JCP 526 (2025): unnecessary for convergence-in-first-restart):
  *  the mass-matrix ion response, the continuity/density response, the
  *  grad-Pe closure response (frozen deposits => frozen Pe during probes),
- *  Darwin E_L rows, and the electron-inertia nodal chain (replaced by the
- *  validated pc_hall_jacobi diagonal surrogate when inertia is active).
+ *  Darwin E_L rows, and the delta-legs of the inertia term's advective
+ *  (Je.grad)u and u*drho/dt pieces (electron-drift-CFL small; the exact
+ *  dJe/dt chain above is the stiff piece and is carried in full).
  *
  *  ASSEMBLY BY PROBING (no hand-derived composite stencils): the chain
  *  above is implemented as a host-side "frozen apply" that mirrors the
@@ -156,6 +159,10 @@ class BlockBandedPC : public Preconditioner<T,Ops>
 
         bool m_is_defined = false;
         bool m_verbose = false;
+        /** Electron inertia active in the frozen operator (set at each
+         *  coefficient fill from the hybrid model; routes the exact nodal
+         *  inertia chain in the frozen apply). */
+        bool m_inertia_exact = false;
         RT m_theta = 0.5;
         int m_update_interval = 1;
         bool m_include_drift = true;
@@ -310,13 +317,17 @@ class BlockBandedPC : public Preconditioner<T,Ops>
             PArr etaEr, etaEt, etaEz;       // eta at row points
             PArr etahEr, etahEt, etahEz;    // eta_H at row points
             PArr irhoEr, irhoEt, irhoEz;    // Holmstrom-masked 1/rho_lim
-            PArr adEr, adEt, adEz;          // extra diagonal (inertia surrogate)
+            PArr adEr, adEt, adEz;          // extra diagonal (reserved; zero)
+            PArr ciN;                       // nodal inertia coefficient
+                                            //   (m_e_eff/e) s_dt / rho_lim,
+                                            //   zero in true vacuum
 
             // scratch for the frozen apply
             PArr inEr, inEt, inEz;
             PArr dBr, dBt, dBz;
             PArr dJr, dJt, dJz;
             PArr enR, enT, enZ;
+            PArr eiR, eiT, eiZ;             // nodal inertia response ci*dJe
             PArr oEr, oEt, oEz;
             std::vector<RT> x;
         };
@@ -653,6 +664,7 @@ void BlockBandedPC<T,Ops>::BuildSystems (const T& a_U)
         S.Je0rn.define(S.rlo_s, S.rhi_s+1, znlo, znhi, zw, zn, 0, RT(1.0), false);
         S.Je0tn.define(S.rlo_s, S.rhi_s+1, znlo, znhi, zw, zn, 0, RT(1.0), false);
         S.Je0zn.define(S.rlo_s, S.rhi_s+1, znlo, znhi, zw, zn, 0, RT(1.0), false);
+        S.ciN.define  (S.rlo_s, S.rhi_s+1, znlo, znhi, zw, zn, 0, RT(1.0), false);
 
         // row coefficient windows (per E-component stagger)
         S.etaEr.define (S.rlo_s, S.rhi_s,   znlo, znhi, zw, zn, 0, RT(1.0), false);
@@ -689,6 +701,7 @@ void BlockBandedPC<T,Ops>::BuildSystems (const T& a_U)
         // nodal enE over row-reachable nodes
         S.enR.define(S.rlo_s, S.rhi_s+1, znlo, znhi, zw, zn, 0, RT(1.0), false);
         S.enT = S.enR; S.enZ = S.enR;
+        S.eiR = S.enR; S.eiT = S.enR; S.eiZ = S.enR;
         // outputs = row windows
         S.oEr.define(S.rlo_s, S.rhi_s,   zw ? S.zlo : S.zlo, zw ? S.zhi : S.zhi+1, zw, zn, 0, RT(1.0), false);
         S.oEt.define(S.rlo_s, S.rhi_s+1, zw ? S.zlo : S.zlo, zw ? S.zhi : S.zhi+1, zw, zn, 0, RT(1.0), false);
@@ -869,6 +882,15 @@ void BlockBandedPC<T,Ops>::ApplyFrozenBox (BoxSys& S) const
             S.enR.ref(i,j) = er;
             S.enT.ref(i,j) = et;
             S.enZ.ref(i,j) = ez;
+            if (m_inertia_exact) {
+                // exact nodal inertia response: delta-E_inertial =
+                // ci * delta-Je(nodal), delta-Je = the same nodal delta-J
+                // (frozen ion current drops out of the delta)
+                const RT ci = S.ciN.get(i,j);
+                S.eiR.ref(i,j) = ci*jr;
+                S.eiT.ref(i,j) = ci*jt;
+                S.eiZ.ref(i,j) = ci*jz;
+            }
         }
     }
 
@@ -879,6 +901,9 @@ void BlockBandedPC<T,Ops>::ApplyFrozenBox (BoxSys& S) const
         for (int j = S.oEr.jlo; j <= S.oEr.jhi; j++) {
             const RT enE = RT(0.5)*(S.enR.get(i,j) + S.enR.get(i+1,j));
             RT ohm = enE*S.irhoEr.get(i,j) + S.etaEr.get(i,j)*S.dJr.get(i,j);
+            if (m_inertia_exact) {
+                ohm += RT(0.5)*(S.eiR.get(i,j) + S.eiR.get(i+1,j));
+            }
             const RT etah = S.etahEr.get(i,j);
             if (etah != RT(0.0)) {
                 const RT lap =
@@ -902,6 +927,9 @@ void BlockBandedPC<T,Ops>::ApplyFrozenBox (BoxSys& S) const
             }
             RT ohm = S.enT.get(i,j)*S.irhoEt.get(i,j)
                    + S.etaEt.get(i,j)*S.dJt.get(i,j);
+            if (m_inertia_exact) {
+                ohm += S.eiT.get(i,j);
+            }
             const RT etah = S.etahEt.get(i,j);
             if (etah != RT(0.0)) {
                 const RT lap =
@@ -923,6 +951,9 @@ void BlockBandedPC<T,Ops>::ApplyFrozenBox (BoxSys& S) const
         for (int j = S.oEz.jlo; j <= S.oEz.jhi; j++) {
             const RT enE = RT(0.5)*(S.enZ.get(i,j) + S.enZ.get(i,j+1));
             RT ohm = enE*S.irhoEz.get(i,j) + S.etaEz.get(i,j)*S.dJz.get(i,j);
+            if (m_inertia_exact) {
+                ohm += RT(0.5)*(S.eiZ.get(i,j) + S.eiZ.get(i,j+1));
+            }
             const RT etah = S.etahEz.get(i,j);
             if (etah != RT(0.0)) {
                 RT lap = (S.dJz.get(i,j-1) - RT(2.0)*S.dJz.get(i,j) + S.dJz.get(i,j+1))/(dz*dz);
@@ -1062,6 +1093,9 @@ void BlockBandedPC<T,Ops>::FillCoeffs (BoxSys& S,
 
     const HybridPICModel* hybrid = m_ops->GetHybridPICModel();
     const RT rho_floor = static_cast<RT>(hybrid->m_n_floor * PhysConst::q_e);
+    const RT floor_w = static_cast<RT>(hybrid->m_n_floor_smooth_width)*rho_floor;
+    const RT taper_w =
+        static_cast<RT>(hybrid->m_electron_inertia_floor_taper)*rho_floor;
     const bool hall_on = hybrid->m_include_hall_term;
     const bool has_eta = (hybrid->m_eta_expression != "0.0");
     const bool has_J_dep = hybrid->m_resistivity_has_J_dependence;
@@ -1072,8 +1106,24 @@ void BlockBandedPC<T,Ops>::FillCoeffs (BoxSys& S,
     const bool holm_smooth = holm && (holm_iw > RT(0.0));
     const bool inertia_on = hybrid->m_include_electron_inertia;
     const RT me_eff = inertia_on ? static_cast<RT>(hybrid->m_electron_inertia_mass) : RT(0.0);
-    const RT s_inertia = (RT(2.0)*m_theta + RT(1.0))/RT(2.0);
-    const RT kg2 = RT(4.0)/(m_dr*m_dr) + RT(4.0)/(m_dz*m_dz);
+    // Stage-centered time-derivative factor of the linearized inertia leg:
+    // dJe/dt responds to the theta-stage iterate through
+    // c_p1/theta = (2 theta + 1)/(2 theta dt) (three-point stencil) or
+    // 1/(theta dt) (two-point form / first step after seeding); mirrors
+    // ComputeElectronInertiaNodal. The theta*dt of the Faraday stage
+    // cancels it back to the dimensionless (2 theta + 1)/2 class.
+    m_inertia_exact = inertia_on;
+    RT s_dt = RT(0.0);
+    if (inertia_on) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(this->m_dt > RT(0.0),
+            "pc_block_banded: inertia coefficients need the time step "
+            "(CurTimeStep not called before Update)");
+        const bool bdf2 = hybrid->m_electron_inertia_bdf2
+            && (hybrid->m_inertia_history_levels >= 2);
+        s_dt = bdf2
+            ? (RT(2.0)*m_theta + RT(1.0))/(RT(2.0)*m_theta*this->m_dt)
+            : RT(1.0)/(m_theta*this->m_dt);
+    }
     ParserExecutor<3> eta_exec{};
     ParserExecutor<2> etah_exec{};
     if (has_eta) { eta_exec = hybrid->m_eta; }
@@ -1171,6 +1221,28 @@ void BlockBandedPC<T,Ops>::FillCoeffs (BoxSys& S,
                 S.Je0rn.ref(i,j) = (hall_on ? j0r : RT(0.0)) - jir;
                 S.Je0tn.ref(i,j) = (hall_on ? j0t : RT(0.0)) - jit;
                 S.Je0zn.ref(i,j) = (hall_on ? j0z : RT(0.0)) - jiz;
+                // nodal inertia coefficient: (m_e_eff/e) s_dt / rho_lim on
+                // the RAW midpoint deposit, zeroed in true vacuum (the
+                // kernel zeroes E_inertial where rho_mid <= 0; floored
+                // cells keep their inertia). The delta-legs of the
+                // advective (Je.grad)u term and of u drho/dt are omitted
+                // (electron-drift-CFL small; priced by the FD gate).
+                RT ci = RT(0.0);
+                if (inertia_on) {
+                    const RT rho_mid_n = hRho.get(i, j, 0);
+                    if (rho_mid_n > RT(0.0)) {
+                        const RT rho_lim_n =
+                            HybridSmoothFloor(rho_mid_n, rho_floor, floor_w);
+                        ci = me_eff*s_dt
+                            / (static_cast<RT>(PhysConst::q_e)*rho_lim_n);
+                        if (taper_w > RT(0.0)) {
+                            // fluid-validity taper (mirrors the kernel)
+                            ci *= RT(0.5)*(RT(1.0) + std::tanh(
+                                (rho_mid_n - rho_floor)/taper_w));
+                        }
+                    }
+                }
+                S.ciN.ref(i,j) = ci;
             }
         }
 
@@ -1191,7 +1263,8 @@ void BlockBandedPC<T,Ops>::FillCoeffs (BoxSys& S,
             } else {                // Ez (node r, cell z)
                 rho_val = RT(0.5)*(rho_nodal(i,j) + rho_nodal(i,j+1));
             }
-            const RT rho_lim = std::max(rho_val, std::max(rho_floor, RT(1.0e-300)));
+            const RT rho_lim = HybridSmoothFloor(rho_val,
+                std::max(rho_floor, RT(1.0e-300)), floor_w);
             RT irho = RT(1.0)/rho_lim;
             if (holm && !holm_smooth && rho_val < rho_floor) { irho = RT(0.0); }
             if (holm_smooth) {
@@ -1249,11 +1322,9 @@ void BlockBandedPC<T,Ops>::FillCoeffs (BoxSys& S,
                 etah_a.ref(i,j) = RT(0.0);
             }
 
-            // electron-inertia diagonal surrogate (same leg as
-            // pc_hall_jacobi; the exact nodal inertia chain is a follow-up)
-            ad_a.ref(i,j) = inertia_on
-                ? s_inertia*kg2*me_eff/(mu0*static_cast<RT>(PhysConst::q_e)*rho_lim)
-                : RT(0.0);
+            // (the electron-inertia response is carried exactly by the
+            // nodal ciN chain in the frozen apply; no diagonal surrogate)
+            ad_a.ref(i,j) = RT(0.0);
         };
 
         for (int i = S.oEr.ilo; i <= S.oEr.ihi; i++) {
