@@ -332,6 +332,14 @@ parser.add_argument(
     "(MHD-halo-port experiment). 0 = off (parsers unchanged)",
 )
 parser.add_argument(
+    "--pedestal-frac",
+    type=float,
+    default=0.0,
+    help="MHD-shaped conduction pedestal fraction "
+    "(hybrid_pic_model.qdsmc_conduction_pedestal_fraction); pair with "
+    "--chi-vac and a wall drain for the halo exhaust chain. 0 = off",
+)
+parser.add_argument(
     "--eta-vac-d",
     type=float,
     default=0.0,
@@ -686,6 +694,8 @@ if args.kappa == "spitzer":
     # parsers code-side; window 4 x n_floor by default). 0 = off.
     if args.chi_vac > 0.0:
         pywarpx.hybridpicmodel.qdsmc_conduction_vacuum_chi = args.chi_vac
+    if args.pedestal_frac > 0.0:
+        pywarpx.hybridpicmodel.qdsmc_conduction_pedestal_fraction = args.pedestal_frac
 if args.eta_vac_d > 0.0:
     # Code-side vacuum resistivity boost (eta split): E-solve eta gains the
     # density-keyed vacuum term; Joule heating keeps the raw parser. NOTE:
