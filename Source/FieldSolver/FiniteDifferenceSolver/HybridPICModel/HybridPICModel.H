@@ -932,6 +932,18 @@ public:
      *  qdsmc_conduction_vacuum_n_scale [x n_floor, default 4]. */
     amrex::Real m_cond_vacuum_chi = 0.0;
     amrex::Real m_cond_vacuum_n_scale = 4.0;
+
+    /** Global conduction diffusivity ceiling (the MHD conduction_chi_max
+     *  port): when chi_max > 0 both kappa parsers are folded through the
+     *  C-infinity harmonic soft-min kappa_eff = kappa * cap/(kappa + cap)
+     *  with cap = 1.5 kB chi_max n, i.e. chi never exceeds chi_max at any
+     *  density. THE explicit-stability guard the flux limiter does not
+     *  provide (the limiter caps the FLUX; the Gershgorin subcycle bound
+     *  reads chi — measured: uncapped Spitzer at keV Te on pedestal-open
+     *  near-floor cells hit chi ~ 1e12 m^2/s and starved the integrator,
+     *  dropping 99.9996%% of every conduction step). Default 0 = off,
+     *  bit-identical. Input: qdsmc_conduction_chi_max [m^2/s]. */
+    amrex::Real m_cond_chi_max = 0.0;
     /** Budget prefactor on the explicit-conduction cap: chi_vac is
      *  clipped at factor * (fd_cfl dx_min^2/(2D)) * max_subcycles/dt_c —
      *  the largest chi the configured subcycle budget integrates stably.

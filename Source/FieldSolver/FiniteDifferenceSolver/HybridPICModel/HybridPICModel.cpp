@@ -497,6 +497,13 @@ void HybridPICModel::ReadParameters ()
                                    "qdsmc_conduction_vacuum_chi_budget_factor",
                                    m_cond_vacuum_chi_budget_factor);
 
+    // Global conduction chi ceiling (see member doc).
+    utils::parser::queryWithParser(pp_hybrid, "qdsmc_conduction_chi_max",
+                                   m_cond_chi_max);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_cond_chi_max >= 0.0_rt,
+        "hybrid_pic_model.qdsmc_conduction_chi_max cannot be negative");
+
     // MHD-shaped conduction pedestal (see member doc).
     utils::parser::queryWithParser(pp_hybrid, "qdsmc_conduction_pedestal_fraction",
                                    m_cond_pedestal_fraction);
@@ -880,6 +887,24 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
             + num_lit(m_cond_vacuum_n_scale * m_n_floor) + ")**2)";
         kpar_expression  += boost;
         kperp_expression += boost;
+    }
+    if (m_cond_chi_max > 0.0_rt) {
+        // Global chi ceiling (see member doc): fold each kappa through a
+        // hard min against cap(n) = 1.5 kB chi_max n, so chi =
+        // kappa/(1.5 kB n) never exceeds chi_max anywhere the subcycle
+        // bound reads it. Hard min (the validated campaign parser form)
+        // rather than a soft-min: the hop-cap study measured harmonic
+        // soft-mins biting 20% at cap/4, and the explicit path needs no
+        // C-infinity here (no Jacobian probes).
+        amrex::Real const kcap_c = 1.5_rt * PhysConst::kb * m_cond_chi_max;
+        amrex::Print() << "[qdsmc] conduction chi ceiling: "
+            << m_cond_chi_max << " m^2/s (hard min on both kappa "
+            "parsers)\n";
+        auto hard_cap = [&] (std::string const & expr) {
+            return "min(" + expr + ", " + num_lit(kcap_c) + "*n)";
+        };
+        kpar_expression  = hard_cap(kpar_expression);
+        kperp_expression = hard_cap(kperp_expression);
     }
     m_kappa_par_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(kpar_expression, {"n","Te","t"}));

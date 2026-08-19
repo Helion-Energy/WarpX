@@ -357,6 +357,16 @@ parser.add_argument(
     "parser. 0 = off",
 )
 parser.add_argument(
+    "--chi-max",
+    type=float,
+    default=0.0,
+    help="global conduction diffusivity ceiling [m^2/s] "
+    "(hybrid_pic_model.qdsmc_conduction_chi_max, hard min on both kappa "
+    "parsers): the explicit stability guard the flux limiter does not "
+    "provide -- REQUIRED with --pedestal-frac (uncapped Spitzer at keV Te "
+    "on pedestal-open cells starves the subcycle budget). 0 = off",
+)
+parser.add_argument(
     "--hyper-vac-d",
     type=float,
     default=0.0,
@@ -713,6 +723,8 @@ if args.kappa == "spitzer":
         pywarpx.hybridpicmodel.qdsmc_conduction_vacuum_chi = args.chi_vac
     if args.pedestal_frac > 0.0:
         pywarpx.hybridpicmodel.qdsmc_conduction_pedestal_fraction = args.pedestal_frac
+    if args.chi_max > 0.0:
+        pywarpx.hybridpicmodel.qdsmc_conduction_chi_max = args.chi_max
 if args.eta_vac_d > 0.0:
     # Code-side vacuum resistivity boost (eta split): E-solve eta gains the
     # density-keyed vacuum term; Joule heating keeps the raw parser. NOTE:
