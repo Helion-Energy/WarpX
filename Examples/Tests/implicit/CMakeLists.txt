@@ -302,6 +302,34 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Engineered Newton active-set deadlock (the rr13d_C1 production-corpse
+# mechanism): a partnerless ion-energy sink pinned at a temperature-floor
+# admissibility bound dominates the residual norm and stagnates the
+# full-norm Armijo search at iteration 0 from ~step 15 -- without the
+# free-subspace line-search rescue the run aborts on the frozen-step
+# guard at ~step 33; with it every pinned solve accepts a free-subspace
+# step, the ratchet releases, and the run completes with the defect
+# bounded and finally resolved
+add_warpx_test(
+    test_1d_theta_implicit_mhd_active_set_rescue  # name
+    1  # dims
+    2  # nprocs
+    inputs_test_1d_theta_implicit_mhd_active_set_rescue  # inputs
+    "analysis_mhd_active_set_rescue.py diags/diag000000 diags/diag000060 diags/diag000120"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+if(TEST test_1d_theta_implicit_mhd_active_set_rescue.run)
+    # the rescue MUST fire: this line only prints when the full-norm
+    # Armijo search exhausted its backtracks and the free-subspace
+    # ladder accepted a step (the unfixed solver aborts instead)
+    set_property(
+        TEST test_1d_theta_implicit_mhd_active_set_rescue.run
+        PROPERTY PASS_REGULAR_EXPRESSION
+        "Newton: accepted free-subspace step"
+    )
+endif()
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_positivity  # name
     1  # dims

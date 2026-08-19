@@ -13,6 +13,7 @@
 
 #include <AMReX_Parser.H>
 #include <AMReX_REAL.H>
+#include <AMReX_iMultiFab.H>
 
 #include <array>
 #include <memory>
@@ -93,6 +94,17 @@ class ThetaImplicitMHD final : public ImplicitSolver
     {
         return true;
     }
+
+    /** Free-subspace residual norm over the complement of the clamp
+     * masks recorded by the last ProjectAndLimitSolverStep call, with
+     * the pinned-defect norm and clamped-component count (see the base
+     * declaration). Public for the NVCC extended-lambda requirement. */
+    [[nodiscard]] amrex::Real
+    FreeResidualNorm (const WarpXSolverVec& residual,
+                      amrex::Real& pinned_defect,
+                      amrex::Long& num_pinned) const override;
+
+    [[nodiscard]] std::string PinnedComponentReport () const override;
 
     /**
      * \brief The MHD residual is evaluable for ARBITRARY real states by
@@ -396,6 +408,19 @@ class ThetaImplicitMHD final : public ImplicitSolver
 
     WarpXSolverVec m_state;
     WarpXSolverVec m_state_old;
+
+    // Newton active set of the most recent ProjectAndLimitSolverStep
+    // call, one cell-centered mask per fluid block in the block order
+    // (rho, U_e, E_i or U_par, U_perp): 1 = this solve's Newton
+    // direction component was clamped onto its admissibility bound,
+    // 0 = free. Allocated once on first use (the box layout is fixed
+    // after Define), overwritten by every projection call, and consumed
+    // by FreeResidualNorm / PinnedComponentReport on the line-search
+    // failure path. The counts are the GLOBAL (all-rank) sums. Mutable:
+    // the projection and the norms are const observers of the solve.
+    mutable std::array<amrex::iMultiFab, 4> m_projection_masks;
+    mutable std::array<amrex::Long, 4> m_projected_per_block = {0, 0, 0, 0};
+    mutable amrex::Long m_projected_components = 0;
 
     amrex::Real m_ion_charge_to_mass;
     amrex::Real m_gamma_e = 5.0 / 3.0;

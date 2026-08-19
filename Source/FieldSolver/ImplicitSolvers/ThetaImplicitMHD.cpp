@@ -3430,7 +3430,13 @@ ThetaImplicitMHD::ProjectAndLimitSolverStep (const WarpXSolverVec& state,
         m_state_old.getMultiFabBlock(MassDensityName, 0);
     const bool report_projections =
         (std::getenv("WARPX_MHD_REPORT_PROJECTIONS") != nullptr);
-    amrex::Long projected_components = 0;
+    // Record this solve's Newton active set: a per-block clamp mask (1 =
+    // this component was projected onto its bound) plus global per-block
+    // counts, overwritten on every call. FreeResidualNorm and
+    // PinnedComponentReport consume them on the line-search failure
+    // path; the counts also feed the always-on projection report below.
+    m_projected_components = 0;
+    m_projected_per_block = {0, 0, 0, 0};
     for (int block = 0; block < num_blocks; ++block) {
         const amrex::Real floor = bounds.floors[block];
         const amrex::Real temperature_coefficient =
@@ -3442,6 +3448,13 @@ ThetaImplicitMHD::ProjectAndLimitSolverStep (const WarpXSolverVec& state,
             m_state_old.getMultiFabBlock(block_names[block], 0);
         amrex::MultiFab& delta_mf =
             direction.getMultiFabBlock(block_names[block], 0);
+        amrex::iMultiFab& mask_mf = m_projection_masks[block];
+        if (!mask_mf.ok()) {
+            // Allocated once: the fluid box layout is fixed after Define.
+            mask_mf.define(value_mf.boxArray(), value_mf.DistributionMap(),
+                           1, 0);
+        }
+        mask_mf.setVal(0);
         amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
         amrex::ReduceData<amrex::Long> reduce_data(reduce_op);
         using ReduceTuple = typename decltype(reduce_data)::Type;
@@ -3451,6 +3464,7 @@ ThetaImplicitMHD::ProjectAndLimitSolverStep (const WarpXSolverVec& state,
             const auto old_value = old_mf.const_array(mfi);
             const auto old_density = old_density_mf.const_array(mfi);
             const auto delta = delta_mf.array(mfi);
+            const auto mask = mask_mf.array(mfi);
             reduce_op.eval(
                 box, reduce_data,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
@@ -3485,20 +3499,121 @@ ThetaImplicitMHD::ProjectAndLimitSolverStep (const WarpXSolverVec& state,
                                 old_value(i, j, k), change, cell_floor);
                         }
                         delta(i, j, k) = target / requested_step;
+                        mask(i, j, k) = 1;
                         return {1};
                     }
                     return {0};
                 });
         }
-        projected_components += amrex::get<0>(reduce_data.value(reduce_op));
+        m_projected_per_block[block] =
+            amrex::get<0>(reduce_data.value(reduce_op));
     }
-    amrex::ParallelAllReduce::Sum(projected_components,
-                                  amrex::ParallelContext::CommunicatorSub());
-    if (projected_components > 0) {
-        amrex::Print() << "Newton: projected " << projected_components
-                       << " direction components onto admissibility bounds\n";
+    amrex::ParallelAllReduce::Sum(
+        m_projected_per_block.data(),
+        static_cast<int>(m_projected_per_block.size()),
+        amrex::ParallelContext::CommunicatorSub());
+    for (int block = 0; block < num_blocks; ++block) {
+        m_projected_components += m_projected_per_block[block];
+    }
+    if (m_projected_components > 0) {
+        amrex::Print() << "Newton: projected " << m_projected_components
+                       << " direction components onto admissibility bounds ("
+                       << PinnedComponentReport() << ")\n";
     }
     return LimitSolverStep(state, direction, requested_step);
+}
+
+amrex::Real
+ThetaImplicitMHD::FreeResidualNorm (const WarpXSolverVec& residual,
+                                    amrex::Real& pinned_defect,
+                                    amrex::Long& num_pinned) const
+{
+    // Fast path -- empty active set: the free norm IS the full norm.
+    // This guarantees bit-identical failure-path behavior whenever the
+    // last projection clamped nothing.
+    num_pinned = m_projected_components;
+    pinned_defect = 0.0_rt;
+    if (m_projected_components == 0) {
+        return residual.norm2();
+    }
+
+    const bool total_energy_closure = m_ion_closure == "total_energy";
+    const bool cgl_closure = m_ion_closure == "cgl";
+    const int num_blocks = cgl_closure ? 4 : (total_energy_closure ? 3 : 2);
+    const std::array<const char*, 4> block_names = {
+        MassDensityName, ElectronEnergyName,
+        cgl_closure ? IonParallelEnergyName : IonEnergyName,
+        IonPerpEnergyName};
+
+    // Pinned-defect squared norm: the residual restricted to the clamped
+    // components, in the SAME per-block scaling as
+    // WarpXSolverVec::dotProduct, so free^2 + pinned^2 = norm2()^2
+    // exactly. The fluid blocks are cell centered -- the valid boxes
+    // partition the domain, so no DOF ownership mask is needed.
+    amrex::Real pinned_sq = 0.0_rt;
+    for (int block = 0; block < num_blocks; ++block) {
+        const amrex::iMultiFab& mask_mf = m_projection_masks[block];
+        if (!mask_mf.ok()) {
+            continue;
+        }
+        const amrex::MultiFab& residual_mf =
+            residual.getMultiFabBlock(block_names[block], 0);
+        amrex::Real block_scale = 1.0_rt;
+        for (const auto& spec : residual.getMultiFabBlockSpecs()) {
+            if (spec.name == block_names[block]) {
+                block_scale = spec.scale;
+            }
+        }
+        amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        for (amrex::MFIter mfi(residual_mf); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox();
+            const auto residual_arr = residual_mf.const_array(mfi);
+            const auto mask = mask_mf.const_array(mfi);
+            reduce_op.eval(
+                box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                    return {mask(i, j, k) != 0
+                                ? residual_arr(i, j, k) * residual_arr(i, j, k)
+                                : 0.0_rt};
+                });
+        }
+        const amrex::Real inverse_scale = 1.0_rt / block_scale;
+        pinned_sq += inverse_scale * inverse_scale *
+                     amrex::get<0>(reduce_data.value(reduce_op));
+    }
+    amrex::ParallelAllReduce::Sum(pinned_sq,
+                                  amrex::ParallelContext::CommunicatorSub());
+
+    const amrex::Real full_sq = residual.dotProduct(residual);
+    pinned_defect = std::sqrt(pinned_sq);
+    // max() guards round-off: the pinned part is a subset of the full sum.
+    return std::sqrt(std::max(full_sq - pinned_sq, 0.0_rt));
+}
+
+std::string ThetaImplicitMHD::PinnedComponentReport () const
+{
+    if (m_projected_components == 0) {
+        return {};
+    }
+    const bool total_energy_closure = m_ion_closure == "total_energy";
+    const bool cgl_closure = m_ion_closure == "cgl";
+    const int num_blocks = cgl_closure ? 4 : (total_energy_closure ? 3 : 2);
+    const std::array<const char*, 4> block_labels = {
+        "mass", "electron_energy",
+        cgl_closure ? "ion_par_energy" : "ion_energy",
+        "ion_perp_energy"};
+    std::string report;
+    for (int block = 0; block < num_blocks; ++block) {
+        if (!report.empty()) {
+            report += ", ";
+        }
+        report += block_labels[block];
+        report += ' ';
+        report += std::to_string(m_projected_per_block[block]);
+    }
+    return report;
 }
 
 theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const

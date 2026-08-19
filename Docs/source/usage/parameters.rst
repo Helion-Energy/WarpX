@@ -280,6 +280,41 @@ Overall simulation parameters
             while time advances. After this many *consecutive*
             zero-progress solves the run aborts. Raise it only when
             time-dependent sources can change the residual between steps.
+
+            Operators that project Newton directions onto admissibility
+            bounds (currently the theta-implicit MHD solver, whose
+            positivity/temperature floors clamp descending direction
+            components at floor-resident cells) report every projection as
+            ``Newton: projected N direction components onto admissibility
+            bounds (mass <n>, electron_energy <n>, ion_energy <n>)`` with
+            per-block counts. When the clamped (pinned) residual rows come
+            to dominate the norm — a persistent active set, e.g. a
+            floor-resident band under a sustained drain — the full-norm
+            Armijo line search can stagnate even though every free
+            component still has a productive update, because the test
+            grades each trial on rows whose variables the projection just
+            froze. Before counting such an iteration-0 stagnation as a
+            frozen step, the solver retries the same backtracking ladder
+            against the *free-subspace* residual norm (excluding the pinned
+            components); an accepted rescue prints ``Newton: accepted
+            free-subspace step = <s> (pinned defect = <d>, <N> pinned)``,
+            where the pinned defect is the residual L2 norm over the
+            pinned components alone. Only if even the free norm cannot be
+            reduced does the frozen-step counter advance (the warning and
+            the eventual abort message carry the pinned defect and the
+            per-block pinned counts). The rescue never runs on the normal
+            acceptance path and never with ``require_convergence = true``
+            (which aborts on the first full-norm stagnation, as before);
+            with an empty active set the behavior is bit-identical to the
+            plain Armijo search. A free residual at round-off relative to
+            the full norm (below :math:`10^{-12}` of it) counts as no free
+            dynamics: the rescue is skipped so a fully frozen state still
+            trips the freeze guard instead of silently advancing time on
+            noise-level acceptances. The pinned defect is reported, not
+            repaired: if it grows without bound in production, the
+            documented escalation is a floor-consistency relaxation source
+            (mass/energy creation at floor cells), deliberately not
+            implemented here.
           - ``newton.max_iterations`` (``int``, default: 100)
           - ``newton.relative_tolerance`` (``float``, default: 1.0e-6)
           - ``newton.absolute_tolerance`` (``float``, default: 0.0)

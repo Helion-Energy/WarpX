@@ -21,6 +21,8 @@
 #include <AMReX_REAL.H>
 #include <AMReX_LO_BCTYPES.H>
 
+#include <string>
+
 /**
  * \brief Base class for implicit time solvers. The base functions are those
  *  needed by an implicit solver to be used through WarpX and those needed
@@ -150,6 +152,46 @@ public:
     UseNewtonLineSearch () const
     {
         return false;
+    }
+
+    /**
+     * \brief L2 norm of a_residual restricted to the FREE subspace: every
+     * component EXCEPT those whose direction components the most recent
+     * ProjectAndLimitSolverStep call clamped onto their admissibility
+     * bounds (the Newton active set). Also returns the complementary
+     * PINNED-defect norm (the residual L2 norm over the clamped
+     * components alone) and the global clamped-component count. The
+     * Newton line search consults this ONLY after the full-norm Armijo
+     * backtracking of iteration 0 has failed every backtrack: the full
+     * norm can then be dominated by rows whose variables the projection
+     * froze, which no admissible step is allowed to reduce, and the
+     * solve would otherwise count a frozen step despite productive free
+     * updates being available. The base implementation has
+     * no projection, so its active set is empty by construction: the
+     * free norm IS the full norm and the defect is zero -- solvers
+     * without a projecting override keep bit-identical behavior.
+     */
+    [[nodiscard]] virtual amrex::Real
+    FreeResidualNorm (const WarpXSolverVec& a_residual,
+                      amrex::Real& a_pinned_defect,
+                      amrex::Long& a_num_pinned) const
+    {
+        a_pinned_defect = 0.0;
+        a_num_pinned = 0;
+        return a_residual.norm2();
+    }
+
+    /**
+     * \brief Human-readable per-block counts of the direction components
+     * the most recent ProjectAndLimitSolverStep call clamped (e.g.
+     * "mass 12, electron_energy 3, ion_energy 230"), for the Newton
+     * freeze diagnostics. Empty when nothing was clamped or the solver
+     * has no projection.
+     */
+    [[nodiscard]] virtual std::string
+    PinnedComponentReport () const
+    {
+        return {};
     }
 
     /**

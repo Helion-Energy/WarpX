@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <sstream>
 #include <string>
 #include <vector>
 #include <istream>
@@ -564,24 +565,99 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                 }
                 step_length *= reduction;
             }
+            // Full-norm backtracking exhausted. With require_convergence
+            // the solve aborts here -- BEFORE any rescue is attempted, so
+            // the strict policy is unchanged.
             if (!accepted) {
-                // No admissible step decreased the residual. With
-                // require_convergence the solve aborts; otherwise this is
-                // treated like the max-iteration exit (the same policy
-                // that already tolerates a non-converged step): keep the
-                // current iterate -- which typically carries most of the
-                // step's residual reduction -- warn, and hand the state
-                // back to the time loop. Stagnation at iteration 0 is
-                // different in kind: no update was ever accepted, so the
-                // solve returns the state it was handed and the time step
-                // is a no-op -- for a system without time-dependent
-                // drives every later solve then repeats bit-identically
-                // and the simulation silently freezes. Count consecutive
-                // frozen solves and abort past newton.max_frozen_steps.
                 WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                     !m_require_convergence,
                     "Newton line search failed to find a residual-decreasing "
                     "admissible step (newton.require_convergence = true)");
+            }
+
+            // Active-set-aware line-search rescue, iteration 0 ONLY. The
+            // admissibility projection can clamp direction components at
+            // cells resting on their bounds (a persistent active set at
+            // floor-resident cells with a sustained drain). The full-norm
+            // Armijo test above then grades every trial on residual rows
+            // whose VARIABLES the projection just froze: the free
+            // subspace cannot reduce what it is not allowed to touch,
+            // and once the pinned rows dominate the norm the search
+            // stagnates at iteration 0 forever even though every free
+            // cell still has a productive update. Rescue: retry the same
+            // backtracking ladder against the FREE-subspace norm (the
+            // residual excluding the clamped components). A pass on that
+            // ladder is genuine progress on every row the solver may
+            // still act on, so accept it -- the state changed, no frozen
+            // step. The full-norm test remains the primary criterion:
+            // this pass runs only after it exhausted all backtracks, and
+            // only when the projection clamped something (with an empty
+            // active set the free norm IS the full norm and the ladder
+            // would fail identically, so it is skipped). Later-iteration
+            // stagnations keep the unchanged tolerant policy below --
+            // the iterate already carries this solve's accepted progress,
+            // there is no freeze to prevent, and extending the rescue
+            // there was measured to overdrive bound-riding drains (the
+            // temperature-floor CI trajectory).
+            amrex::Real pinned_defect = 0.0_rt;
+            amrex::Long num_pinned = 0;
+            if (!accepted && iter == 0) {
+                const amrex::Real free_norm0 =
+                    m_ops->FreeResidualNorm(m_F, pinned_defect, num_pinned);
+                // Noise gate: when the free residual sits at round-off
+                // relative to the full norm, "reducing" it is meaningless
+                // and would defeat the freeze guard -- a fully frozen
+                // state (everything pinned, no free dynamics) must still
+                // abort rather than silently advance time on noise-level
+                // acceptances (measured: an all-pedestal uniform variant
+                // of the CI deck rode 106 such acceptances to completion
+                // with its 0.03 defect never resolving). 1e-12 sits four
+                // orders above double round-off and eight below any
+                // physically meaningful free/pinned split observed (CI
+                // deck ~1.4e-4, production corpse ~4e-3).
+                const amrex::Real free_noise_floor = 1.0e-12_rt * norm_abs;
+                if (num_pinned > 0 && free_norm0 > free_noise_floor) {
+                    amrex::Real rescue_step = -solver_step;
+                    for (int backtrack = 0; backtrack <= max_backtracks;
+                         ++backtrack) {
+                        m_trial_U.Copy(a_U);
+                        m_trial_U.increment(m_dU, -rescue_step);
+                        EvalResidual(m_trial_F, m_trial_U, a_b, a_time, iter);
+                        amrex::Real trial_defect = 0.0_rt;
+                        amrex::Long trial_pinned = 0;
+                        const amrex::Real free_trial =
+                            m_ops->FreeResidualNorm(m_trial_F, trial_defect,
+                                                    trial_pinned);
+                        if (free_trial <=
+                            (1.0_rt - armijo * rescue_step) * free_norm0) {
+                            a_U.Copy(m_trial_U);
+                            accepted = true;
+                            amrex::Print()
+                                << "Newton: accepted free-subspace step = "
+                                << rescue_step << " (pinned defect = "
+                                << trial_defect << ", " << num_pinned
+                                << " pinned)\n";
+                            break;
+                        }
+                        rescue_step *= reduction;
+                    }
+                }
+            }
+
+            if (!accepted) {
+                // Not even the free-subspace norm could be decreased.
+                // This is treated like the max-iteration exit (the same
+                // policy that already tolerates a non-converged step):
+                // keep the current iterate -- which typically carries
+                // most of the step's residual reduction -- warn, and
+                // hand the state back to the time loop. Stagnation at
+                // iteration 0 is different in kind: no update was ever
+                // accepted, so the solve returns the state it was handed
+                // and the time step is a no-op -- for a system without
+                // time-dependent drives every later solve then repeats
+                // bit-identically and the simulation silently freezes.
+                // Count consecutive frozen solves and abort past
+                // newton.max_frozen_steps.
                 if (iter == 0) {
                     m_frozen_steps++;
                     amrex::Print()
@@ -589,14 +665,27 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                         << "with no residual reduction; the state is UNCHANGED "
                         << "by this solve (frozen step " << m_frozen_steps
                         << " of at most " << m_max_frozen_steps
-                        << " consecutive)\n";
-                    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                        m_frozen_steps < m_max_frozen_steps,
-                        "Newton made zero progress for "
-                        "newton.max_frozen_steps consecutive solves: the "
-                        "simulation state is frozen and, absent "
-                        "time-dependent drives, cannot recover. Aborting "
-                        "instead of silently advancing time.");
+                        << " consecutive; pinned defect = " << pinned_defect
+                        << ", " << num_pinned << " pinned)\n";
+                    if (m_frozen_steps >= m_max_frozen_steps) {
+                        std::stringstream freeze_msg;
+                        freeze_msg
+                            << "Newton made zero progress for "
+                            << "newton.max_frozen_steps consecutive solves "
+                            << "(pinned defect = " << pinned_defect << ", "
+                            << num_pinned << " pinned components";
+                        const std::string pinned_report =
+                            m_ops->PinnedComponentReport();
+                        if (!pinned_report.empty()) {
+                            freeze_msg << ": " << pinned_report;
+                        }
+                        freeze_msg
+                            << "): the simulation state is frozen and, "
+                               "absent time-dependent drives, cannot "
+                               "recover. Aborting instead of silently "
+                               "advancing time.";
+                        WARPX_ABORT_WITH_MESSAGE(freeze_msg.str());
+                    }
                 } else {
                     amrex::Print()
                         << "WARNING: Newton line search stagnated at iter = "

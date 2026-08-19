@@ -1,0 +1,142 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+my_constants.pedestal_fraction = 1.0e-3
+# Halo loaded EXACTLY at the dynamic pedestal rho_ped = f * rho_peak.
+my_constants.rho_halo = pedestal_fraction * rho0
+my_constants.Te = 0.01
+my_constants.Pe = n0 * Te * q_e
+my_constants.Pi = Pe
+my_constants.B0 = 1.0e-4
+# Gentle standing sound wave: the genuinely-evolving FREE subspace. Its
+# per-step residual (~1e-6 scaled) sits ORDERS below the pinned defect
+# (~1e-2 scaled) but orders above round-off, so the full-norm Armijo test
+# fails while the free-subspace ladder has honest work to accept.
+my_constants.dv = 100.0
+my_constants.energy_rate = 5.0e7
+my_constants.nz = 64
+my_constants.Lz = 1.0
+my_constants.dt = 1.0e-9
+# THE DEADLOCK KNOB: an ion temperature floor whose admissibility bound at
+# the halo density, n_halo kB T_floor / (gamma_i - 1) = 0.5 * Pi/(gamma-1),
+# sits ~500x ABOVE the pedestal relaxation target (1e-3 of the internal
+# peak). The band starts at Pi (bound satisfied -> the one-way ratchet
+# engages); the live region's bound is 1000x its own energy (ratchet
+# disengaged, never pinned). T_floor = 0.5 * Pi / (n_halo kB) = 58022 K.
+my_constants.T_floor = 58022.0
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+# ENGINEERED NEWTON ACTIVE-SET DEADLOCK (the rr13d_C1 production-corpse
+# mechanism, distilled to 1D). A static contact (uniform pressures, zero
+# B) holds a pedestal-resident halo band whose ion-energy relaxation
+# (halo_pedestal_energy_rate) drains E_i toward the pedestal image -- a
+# pure SINK with no conservation partner in the residual. The ion
+# temperature floor above pins the drain at the admissibility bound: the
+# projection clamps the same ~32 E_i direction components EVERY solve, the
+# drain demand (theta dt rate (U_bound - target), constant) dominates the
+# residual norm, and the free subspace (the small sound wave) cannot buy
+# the full-norm Armijo decrease -- for an in-domain ADVECTIVE drain the
+# accepting neighbor is a free row whose iteration-0 update pays the
+# Armijo bill, which is why a partnerless sink is required. WITHOUT the
+# free-subspace rescue the line search stagnates at iter 0 from the step
+# the band hits the bound (~step 15) and the run ABORTS after
+# newton.max_frozen_steps = 20 consecutive frozen solves (measured: step
+# 33, defect plateau 2.13e-2, bit-identical frozen solves). WITH the
+# rescue the pinned solves accept free-subspace steps (measured: 7), the
+# band density drifts, the per-solve temperature ratchet disengages, the
+# drain completes, and the run finishes all 120 steps with the pinned
+# defect bounded (constant demand) and finally resolved to round-off.
+max_step = 120
+amr.n_cell = nz
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 8
+# Tolerant policy: cells pinned at the temperature bound carry an
+# irreducible residual (the drain has no closure at the bound), so the
+# solve cannot fully converge once the band is pinned.
+newton.require_convergence = false
+newton.max_frozen_steps = 20
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-11
+gmres.max_iterations = 200
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = 5.0/3.0
+hybrid_pic_model.n_floor = 1.0e8
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = 0.5 * rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = 5.0/3.0
+implicit_mhd.gamma_i = 5.0/3.0
+implicit_mhd.reference_ion_pressure = Pi
+implicit_mhd.mass_density(x,y,z) = if((z>0.25)*(z<0.75), rho0, rho_halo)
+implicit_mhd.electron_pressure(x,y,z) = Pe
+implicit_mhd.velocity_z(x,y,z) = dv * sin(2*pi*z/Lz)
+implicit_mhd.evolve_ion_fluid = true
+implicit_mhd.fluid_flux = hlld
+implicit_mhd.include_joule_heating = true
+implicit_mhd.halo_pedestal_fraction = pedestal_fraction
+implicit_mhd.halo_pedestal_energy_rate = energy_rate
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.ion_pressure(x,y,z) = Pi
+implicit_mhd.ion_pressure_floor = 1.0e-8
+implicit_mhd.ion_temperature_floor = T_floor
+implicit_mhd.electron_temperature_floor = 0.0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 60
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz jz implicit_mhd_mass_density \
+                       implicit_mhd_momentum_density \
+                       implicit_mhd_electron_energy implicit_mhd_ion_energy
+diag1.write_species = 0
