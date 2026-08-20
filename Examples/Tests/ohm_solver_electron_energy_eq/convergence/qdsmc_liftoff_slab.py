@@ -382,6 +382,21 @@ parser.add_argument(
     "no CFL). 0 = off",
 )
 parser.add_argument(
+    "--gol-form",
+    choices=["jacobi", "relax"],
+    default="jacobi",
+    help="GOL solve form (hybrid_pic_model.gol_form): jacobi = screened "
+    "elliptic sweeps, relax = semi-implicit E/J_e advance (Angus 2019; "
+    "vacuum carried by CFL-set waves, requires the RK4 substep path)",
+)
+parser.add_argument(
+    "--gol-c-frac",
+    type=float,
+    default=0.5,
+    help="relax form: artificial-light-speed CFL fraction "
+    "(hybrid_pic_model.gol_c_frac)",
+)
+parser.add_argument(
     "--chi-max",
     type=float,
     default=0.0,
@@ -596,7 +611,11 @@ solver = picmi.HybridPICSolver(
     rho_f=constants.q_e * n_floor,
     plasma_hyper_resistivity=eta_hyper,
     substeps=args.substeps,
-    use_rkf45=True,
+    # the relax GOL form advances (E, J_e) once per accepted substep and
+    # asserts the adaptive RKF45 path off (frozen-field split: the error
+    # estimator sees a linear B push and a rejected substep could not
+    # roll the E/J_e state back) -- fixed-step RK4 there
+    use_rkf45=(args.gol_form != "relax"),
     substep_rtol=args.substep_rtol,
     substep_atol=1.0e-8,
     max_substep_attempts=1000,
@@ -766,6 +785,9 @@ if args.esolve == "gol":
     pywarpx.hybridpicmodel.gol_n_min = n_one_count
     if args.gol_vac_gamma > 0.0:
         pywarpx.hybridpicmodel.gol_vacuum_gamma_frac = args.gol_vac_gamma
+    if args.gol_form == "relax":
+        pywarpx.hybridpicmodel.gol_form = "relax"
+        pywarpx.hybridpicmodel.gol_c_frac = args.gol_c_frac
 if args.band_drain_rate > 0.0:
     pywarpx.hybridpicmodel.qdsmc_band_drain_rate = args.band_drain_rate
     pywarpx.hybridpicmodel.qdsmc_band_drain_Te = args.band_drain_te
