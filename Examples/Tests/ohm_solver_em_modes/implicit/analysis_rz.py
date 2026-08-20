@@ -175,15 +175,39 @@ if not sim.test:
 else:
     plt.close()
 
-    # check if power spectrum sampling match earlier results
-    # (baseline last regenerated at the implicit_evolve.hybrid_e_finisher
-    # default flip to 'reevaluate' -- the diagnostics now record the
-    # generalized Ohm's law evaluated at the delivered state instead of
-    # the theta-extrapolated field, which carried a marginal period-2
-    # recursion artifact; the theta-stage physics is unchanged but every
-    # output E sample shifts, redistributing these near-noise spectral
-    # bins; the dispersion-curve physics checks above are the
-    # discriminating asserts)
+    # CI gates on realization-robust spectral statistics.
+    #
+    # Why not exact amplitudes: individual spectral bins here are a
+    # same-binary checksum, not a physics observable -- the smallest
+    # fitted mode moved 11.6x from the RNG seed alone (identical binary,
+    # identical inputs), and platform implies realization (GPU RNG draws
+    # a different particle noise sample even with serialized initial
+    # conditions). Why not a dispersion-ridge gate: at CI length the
+    # frequency resolution is 2*pi/T ~ 8 Omega_ci per bin, while the
+    # mode structure of interest lies below 1.6 Omega_ci -- the
+    # dispersion plots above are only meaningful for full-length runs.
+    #
+    # The statistics below were selected empirically from independent
+    # same-binary realizations (seed A/B); tolerances are >= 5x the
+    # measured seed-to-seed spread. The Nyquist-bin fraction is a
+    # mechanistic tripwire: any period-2 time-axis recursion (the
+    # extrapolated-history / algebraic-E-finisher disease class) pumps
+    # the Nyquist row toward O(0.5) against a healthy level of ~0.03.
+    P2 = np.abs(F_kw) ** 2
+    total_power = P2.sum()
+    kz_lo_frac = P2[:, :, np.abs(kz) < 0.5 * np.abs(kz).max()].sum() / total_power
+    dc_frac = P2[P2.shape[0] // 2, :, :].sum() / total_power
+    nyquist_frac = P2[0, :, :].sum() / total_power
+    m03_frac = P2[:, :4, :].sum() / total_power
     amps = np.abs(F_kw[2, 1, len(kz) // 2 - 2 : len(kz) // 2 + 2])
-    print("Amplitude sample: ", repr(amps))
-    assert np.allclose(amps, np.array([96.62119368, 69.85262757, 6.89043943, 59.49453324]))
+    print("Amplitude sample (diagnostic only): ", repr(amps))
+    print(
+        f"total_power {total_power:.5e}  kz_lo_frac {kz_lo_frac:.5f}  "
+        f"dc_frac {dc_frac:.5f}  nyquist_frac {nyquist_frac:.5e}  "
+        f"m03_frac {m03_frac:.5f}"
+    )
+    assert 0.5 * 8.08e7 < total_power < 2.0 * 8.08e7
+    assert abs(kz_lo_frac - 0.8963) < 0.02
+    assert abs(dc_frac - 0.529) < 0.08
+    assert nyquist_frac < 0.15
+    assert abs(m03_frac - 0.680) < 0.17
