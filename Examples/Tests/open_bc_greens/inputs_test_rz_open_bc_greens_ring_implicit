@@ -1,0 +1,22 @@
+# Theta-implicit arm of the static-ring open-boundary test: the Green's
+# ghost fill runs inside every residual evaluation (open-BC design Sec. 6:
+# the fill is an instantaneous linear map of the current-iterate interior
+# currents, so JFNK sees the boundary coupling exactly). The relaxed field
+# must match the analytic free-space loop field like the explicit arm;
+# newton.require_convergence asserts the boundary-consistent solve.
+FILE = inputs_test_rz_open_bc_greens_ring
+
+algo.evolve_scheme = "theta_implicit_hybrid"
+implicit_evolve.theta = 0.5
+
+implicit_evolve.nonlinear_solver = "newton"
+newton.verbose = true
+newton.max_iterations = 20
+newton.relative_tolerance = 1.0e-6
+newton.absolute_tolerance = 0.0
+newton.require_convergence = true
+
+gmres.verbose_int = 1
+gmres.max_iterations = 100
+gmres.relative_tolerance = 1.0e-4
+gmres.absolute_tolerance = 0.0

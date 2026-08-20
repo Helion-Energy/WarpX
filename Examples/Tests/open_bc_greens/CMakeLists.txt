@@ -81,3 +81,17 @@ add_warpx_test(
     OFF  # checksum
     test_rz_open_bc_greens_transient_sub20  # dependency
 )
+
+# Theta-implicit arm: the Green's ghost fill runs inside every residual
+# evaluation (design Sec. 6), so the implicit solve must relax to the same
+# analytic free-space loop field as the explicit arm, with convergence
+# required (a lagged fill stagnates Newton on the boundary rows).
+add_warpx_test(
+    test_rz_open_bc_greens_ring_implicit  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_open_bc_greens_ring_implicit  # inputs
+    "analysis_ring.py diags/diag1000170 centered ../test_rz_open_bc_greens_ring_pec/diags/diag1000170"  # analysis
+    OFF  # checksum
+    test_rz_open_bc_greens_ring_pec  # dependency
+)

@@ -6,6 +6,7 @@
  */
 #include "WarpX.H"
 
+#include "BoundaryConditions/GreensFunctionOpenBC.H"
 #include "BoundaryConditions/PML.H"
 #include "Diagnostics/MultiDiagnostics.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
@@ -102,6 +103,26 @@ WarpX::UpdateMagneticFieldAndApplyBCs( ablastr::fields::MultiLevelVectorField co
         EvolveB(lev, a_thetadt, SubcyclingHalf::None, start_time);
     }
     FillBoundaryB(guard_cells.ng_alloc_EB, WarpX::sync_nodal_points);
+
+#if defined(WARPX_DIM_RZ)
+    // Green's-function open boundary: the ghost fill is an instantaneous
+    // linear map of the current-iterate interior currents (open-BC design
+    // Sec. 6), so it runs inside every residual evaluation -- Newton then
+    // converges boundary and interior self-consistently and the matrix-free
+    // Jacobian probes see the coupling exactly. Filling only at the
+    // delivered state would make the open face a lagged, partially
+    // reflecting surface with phantom Jacobian error on the boundary rows.
+    if (GreensFunctionOpenBC::IsActive()) {
+        if (!m_open_bc_greens) {
+            m_open_bc_greens = std::make_unique<GreensFunctionOpenBC>();
+        }
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            m_open_bc_greens->ApplyToBfield(
+                m_fields.get_alldirs(warpx::fields::FieldType::Bfield_fp, lev),
+                Geom(lev), lev);
+        }
+    }
+#endif
 }
 
 void
