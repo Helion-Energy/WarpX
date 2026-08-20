@@ -529,6 +529,14 @@ void HybridPICModel::ReadParameters ()
         utils::parser::queryWithParser(pp_hybrid, "gol_c_max", m_gol_c_max);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_gol_c_max >= 0.0_rt,
             "hybrid_pic_model.gol_c_max cannot be negative");
+        utils::parser::queryWithParser(pp_hybrid, "gol_qn_frac", m_gol_qn_frac);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_gol_qn_frac >= 0.0_rt,
+            "hybrid_pic_model.gol_qn_frac cannot be negative");
+        utils::parser::queryWithParser(pp_hybrid, "gol_div_clean_frac",
+                                       m_gol_div_clean_frac);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_gol_div_clean_frac >= 0.0_rt && m_gol_div_clean_frac <= 1.0_rt,
+            "hybrid_pic_model.gol_div_clean_frac must be in [0, 1]");
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_vacuum_resistivity_diffusivity >= 0.0_rt,

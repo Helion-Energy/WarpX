@@ -398,6 +398,23 @@ parser.add_argument(
     "(hybrid_pic_model.gol_c_frac)",
 )
 parser.add_argument(
+    "--gol-div-clean-frac",
+    type=float,
+    default=-1.0,
+    help="relax form: vacuum-blended Marder divergence-cleaning strength "
+    "(hybrid_pic_model.gol_div_clean_frac, diffusion-CFL fraction). "
+    "<0 = C++ default (0.5); 0 = off",
+)
+parser.add_argument(
+    "--gol-qn-frac",
+    type=float,
+    default=-1.0,
+    help="relax form: quasineutral relaxation rate as a fraction of 1/dt "
+    "(hybrid_pic_model.gol_qn_frac; pins the longitudinal sector to the "
+    "one-count-guarded Ohm value, plasma-blended). <0 = C++ default (1.0); "
+    "0 = off (unstable honest-E_L dynamics, study only)",
+)
+parser.add_argument(
     "--gol-c-max",
     type=float,
     default=0.0,
@@ -801,6 +818,11 @@ if args.esolve in ("gol", "amano_form"):
         pywarpx.hybridpicmodel.gol_c_frac = args.gol_c_frac
         if args.gol_c_max > 0.0:
             pywarpx.hybridpicmodel.gol_c_max = args.gol_c_max
+        if args.gol_qn_frac >= 0.0:
+            pywarpx.hybridpicmodel.gol_qn_frac = args.gol_qn_frac
+        if args.gol_div_clean_frac >= 0.0:
+            pywarpx.hybridpicmodel.gol_div_clean_frac = args.gol_div_clean_frac
+
 if args.band_drain_rate > 0.0:
     pywarpx.hybridpicmodel.qdsmc_band_drain_rate = args.band_drain_rate
     pywarpx.hybridpicmodel.qdsmc_band_drain_Te = args.band_drain_te

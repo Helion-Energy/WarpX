@@ -1436,6 +1436,41 @@ public:
      *  falls as c_art^2. 0 = no ceiling (legacy min(c, CFL)).
      *  Input: gol_c_max. */
     amrex::Real m_gol_c_max = 0.0;
+    /** Quasineutral relaxation rate of the relax form, as a fraction
+     *  of 1/dt (gamma_qn = gol_qn_frac/dt, applied implicitly per
+     *  substep, plasma-blended: full above the one-count density,
+     *  off below it). WHY: the E-form hybrid never evolves the
+     *  longitudinal field -- quasineutrality is imposed
+     *  algebraically -- but the relax form integrates charge
+     *  separation honestly against kinetic ions pushed explicitly at
+     *  an unresolvable omega_pi dt >> 1: the ion-Langmuir loop pumps
+     *  E_L into a slowly growing bath (measured ~10x per 400 steps,
+     *  c_art-INDEPENDENT, with B and Te cold -- the longitudinal
+     *  signature). Fix per the Hewett-Nielson split: transverse
+     *  dynamics ride free (the inertia-limited whistler ceiling
+     *  omega_ce dt >> gamma_qn dt = O(1) is far above the relaxation)
+     *  while E relaxes toward the one-count-guarded generalized-Ohm
+     *  value, pinning the slow/longitudinal sector algebraically
+     *  without any projection or elliptic machinery. In vacuum the
+     *  blend is zero and the wave physics is untouched. Default 1;
+     *  0 = off (the unstable honest-E_L dynamics, for study).
+     *  Input: gol_qn_frac. */
+    amrex::Real m_gol_qn_frac = 1.0;
+    /** Marder divergence cleaning of the relax form's E, restricted to
+     *  the vacuum side of the one-count blend (complement of the qn
+     *  blend): dE/dt += d_M grad(div E), d_M = frac/(2 dt_sub
+     *  sum(dx_i^-2)) (the explicit diffusion CFL). WHY: the reproducer
+     *  localized the residual E bath to the LONGITUDINAL field in the
+     *  vacuum gap — electrostatic noise from unresolved edge
+     *  charge-separation accumulating where both the qn relaxation
+     *  (plasma-only) and the Eq-30 current damping (acts on J_e, not
+     *  E) are silent. Marder cleaning diffuses divergence noise while
+     *  the PHYSICAL vacuum continuation is exactly in its kernel
+     *  (harmonic fields have div E = 0) and transverse waves are
+     *  untouched — gap tracking is preserved by construction. Local
+     *  stencil, no projection, no elliptic machinery. Default 0.5;
+     *  0 = off. Input: gol_div_clean_frac. */
+    amrex::Real m_gol_div_clean_frac = 0.5;
     /** Lazy one-time J_e seed from the Ampere closure (J_plasma - J_i)
      *  on the first relax call. Mutable: set inside the const solve.
      *  NOTE: single flag -- multi-level relax untested in v1. */

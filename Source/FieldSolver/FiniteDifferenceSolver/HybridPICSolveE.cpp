@@ -1217,6 +1217,12 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             if (hybrid_model->m_gol_c_max > 0.0_rt) {
                 c_art = amrex::min(c_art, hybrid_model->m_gol_c_max);
             }
+            // Quasineutral relaxation toward the one-count-guarded Ohm
+            // value (see the m_gol_qn_frac member doc): pins the slow/
+            // longitudinal sector algebraically, plasma-blended.
+            amrex::Real const gam_qn =
+                hybrid_model->m_gol_qn_frac / dt_full;
+            bool const use_qn = (gam_qn > 0.0_rt);
             amrex::Real const inv_eps_art =
                 PhysConst::mu0 * c_art * c_art;
             amrex::Real const qm = PhysConst::q_e / PhysConst::m_e;
@@ -1226,6 +1232,15 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 *warpx.m_fields.get("hybrid_gol_je_fp", lev);
             bool const seed_je = !hybrid_model->m_gol_je_init;
             hybrid_model->m_gol_je_init = true;
+            if (seed_je) {
+                amrex::Print() << "[gol] relax boot: c_art = " << c_art
+                    << " m/s (CFL value "
+                    << hybrid_model->m_gol_c_frac
+                           / (dt_gol * std::sqrt(sum_inv_dx2))
+                    << ", cap " << hybrid_model->m_gol_c_max
+                    << "), gamma_qn = " << gam_qn
+                    << " 1/s, dt_sub = " << dt_gol << " s\n";
+            }
 
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -1236,6 +1251,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 Array4<Real> const& Ey = Efield[1]->array(mfi);
                 Array4<Real> const& Ez = Efield[2]->array(mfi);
                 Array4<Real> const& Je = Je_mf.array(mfi);
+                Array4<Real const> const& enE =
+                    enE_nodal_mf.const_array(mfi);
                 Array4<Real const> const& rho = rhofield.const_array(mfi);
                 Array4<Real const> const& Pe  = Pefield.const_array(mfi);
                 Array4<Real const> const& Jx = Jfield[0]->const_array(mfi);
@@ -1363,19 +1380,149 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         (a*a*ry + a*(bez*rx - bex*rz) + bdotr*bey) * inv;
                     amrex::Real const jnz =
                         (a*a*rz + a*(bex*ry - bey*rx) + bdotr*bez) * inv;
-                    if (!skip_x) {
-                        Je(i,j,k,0) = jnx;
-                        Ex(i,j,k) += dt_r * inv_eps_art * (rcx - jnx);
+                    amrex::Real exn = Ex(i,j,k)
+                        + dt_r * inv_eps_art * (rcx - jnx);
+                    amrex::Real eyn = Ey(i,j,k)
+                        + dt_r * inv_eps_art * (rcy - jny);
+                    amrex::Real ezn = Ez(i,j,k)
+                        + dt_r * inv_eps_art * (rcz - jnz);
+                    if (use_qn) {
+                        // implicit relaxation toward the one-count-
+                        // guarded Ohm value, plasma-blended: pins the
+                        // slow/longitudinal sector (the transverse
+                        // whistler ceiling sits far above gam_qn)
+                        amrex::Real const w_qn = 0.5_rt
+                            * (1.0_rt + std::tanh(
+                                  (rho_v - rho_1c) / (0.5_rt * rho_1c)));
+                        amrex::Real const lam = dt_r * gam_qn * w_qn;
+                        amrex::Real const rho_gq =
+                            amrex::max(rho_v, rho_1c);
+                        amrex::Real const inv_l = 1.0_rt / (1.0_rt + lam);
+                        exn = (exn + lam * ((enE(i,j,k,0) - gpx
+                            + rho_v * eta_v * Jx(i,j,k)) / rho_gq))
+                            * inv_l;
+                        eyn = (eyn + lam * ((enE(i,j,k,1) - gpy
+                            + rho_v * eta_v * Jy(i,j,k)) / rho_gq))
+                            * inv_l;
+                        ezn = (ezn + lam * ((enE(i,j,k,2) - gpz
+                            + rho_v * eta_v * Jz(i,j,k)) / rho_gq))
+                            * inv_l;
                     }
-                    if (!skip_y) {
-                        Je(i,j,k,1) = jny;
-                        Ey(i,j,k) += dt_r * inv_eps_art * (rcy - jny);
-                    }
-                    if (!skip_z) {
-                        Je(i,j,k,2) = jnz;
-                        Ez(i,j,k) += dt_r * inv_eps_art * (rcz - jnz);
-                    }
+                    if (!skip_x) { Je(i,j,k,0) = jnx; Ex(i,j,k) = exn; }
+                    if (!skip_y) { Je(i,j,k,1) = jny; Ey(i,j,k) = eyn; }
+                    if (!skip_z) { Je(i,j,k,2) = jnz; Ez(i,j,k) = ezn; }
                 });
+            }
+
+            // Marder divergence cleaning on the vacuum side of the
+            // one-count blend (see the m_gol_div_clean_frac member
+            // doc): a separate snapshot pass — the grad(div E) stencil
+            // reads neighbors, so it cannot run inside the updating
+            // kernel. Ghost values are one substep stale at box seams,
+            // which a diffusive damping term tolerates.
+            if (hybrid_model->m_gol_div_clean_frac > 0.0_rt) {
+                amrex::Real const dM_dt =
+                    hybrid_model->m_gol_div_clean_frac
+                    / (2.0_rt * sum_inv_dx2);   // d_M * dt_r
+                amrex::GpuArray<amrex::Real, 3> inv_dx = {0., 0., 0.};
+                for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                    inv_dx[d] = 1.0_rt / dx_arr[d];
+                }
+                // Pass A: centered div E at the nodes (reach +-1 into
+                // E's filled ghosts), then fill the divE ghosts.
+                MultiFab divE_mf(ba, rhofield.DistributionMap(), 1,
+                                 amrex::IntVect(1));
+                divE_mf.setVal(0.0_rt);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+                for (MFIter mfi(divE_mf, TilingIfNotGPU());
+                     mfi.isValid(); ++mfi) {
+                    Array4<Real> const& dv = divE_mf.array(mfi);
+                    Array4<Real const> const& Ex =
+                        Efield[0]->const_array(mfi);
+                    Array4<Real const> const& Ey =
+                        Efield[1]->const_array(mfi);
+                    Array4<Real const> const& Ez =
+                        Efield[2]->const_array(mfi);
+                    amrex::ParallelFor(mfi.tilebox(),
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                        amrex::Real v = 0.5_rt * inv_dx[0]
+                            * (Ex(i+1,j,k) - Ex(i-1,j,k));
+#if defined(WARPX_DIM_3D)
+                        v += 0.5_rt * inv_dx[1]
+                            * (Ey(i,j+1,k) - Ey(i,j-1,k));
+                        v += 0.5_rt * inv_dx[2]
+                            * (Ez(i,j,k+1) - Ez(i,j,k-1));
+#elif (AMREX_SPACEDIM == 2)
+                        v += 0.5_rt * inv_dx[1]
+                            * (Ez(i,j+1,k) - Ez(i,j-1,k));
+                        amrex::ignore_unused(Ey);
+#else
+                        v = 0.5_rt * inv_dx[0]
+                            * (Ez(i+1,j,k) - Ez(i-1,j,k));
+                        amrex::ignore_unused(Ey);
+#endif
+                        dv(i,j,k) = v;
+                    });
+                }
+                divE_mf.FillBoundary(warpx.Geom(lev).periodicity());
+                // Pass B: E += dt d_M grad(div E), vacuum-blended.
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+                for (MFIter mfi(*Efield[0], TilingIfNotGPU());
+                     mfi.isValid(); ++mfi) {
+                    Array4<Real> const& Ex = Efield[0]->array(mfi);
+                    Array4<Real> const& Ey = Efield[1]->array(mfi);
+                    Array4<Real> const& Ez = Efield[2]->array(mfi);
+                    Array4<Real const> const& dv =
+                        divE_mf.const_array(mfi);
+                    Array4<Real const> const& rho =
+                        rhofield.const_array(mfi);
+                    amrex::Array4<int> upd_x, upd_y, upd_z;
+                    if (EB::enabled()) {
+                        upd_x = eb_update_E[0]->array(mfi);
+                        upd_y = eb_update_E[1]->array(mfi);
+                        upd_z = eb_update_E[2]->array(mfi);
+                    }
+                    amrex::ParallelFor(mfi.tilebox(),
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                        amrex::Real const rho_v =
+                            amrex::max(rho(i,j,k), 0.0_rt);
+                        // vacuum blend = complement of the qn blend
+                        amrex::Real const w_vac = 0.5_rt
+                            * (1.0_rt - std::tanh(
+                                  (rho_v - rho_1c) / (0.5_rt * rho_1c)));
+                        if (w_vac < 1.0e-6_rt) { return; }
+                        amrex::Real const fac = dM_dt * w_vac;
+                        if (!(upd_x && upd_x(i,j,k) == 0)) {
+                            Ex(i,j,k) += fac * 0.5_rt * inv_dx[0]
+                                * (dv(i+1,j,k) - dv(i-1,j,k));
+                        }
+#if defined(WARPX_DIM_3D)
+                        if (!(upd_y && upd_y(i,j,k) == 0)) {
+                            Ey(i,j,k) += fac * 0.5_rt * inv_dx[1]
+                                * (dv(i,j+1,k) - dv(i,j-1,k));
+                        }
+                        if (!(upd_z && upd_z(i,j,k) == 0)) {
+                            Ez(i,j,k) += fac * 0.5_rt * inv_dx[2]
+                                * (dv(i,j,k+1) - dv(i,j,k-1));
+                        }
+#elif (AMREX_SPACEDIM == 2)
+                        if (!(upd_z && upd_z(i,j,k) == 0)) {
+                            Ez(i,j,k) += fac * 0.5_rt * inv_dx[1]
+                                * (dv(i,j+1,k) - dv(i,j-1,k));
+                        }
+#else
+                        if (!(upd_z && upd_z(i,j,k) == 0)) {
+                            Ez(i,j,k) += fac * 0.5_rt * inv_dx[0]
+                                * (dv(i+1,j,k) - dv(i-1,j,k));
+                        }
+#endif
+                        amrex::ignore_unused(upd_y);
+                    });
+                }
             }
             return;
         }
