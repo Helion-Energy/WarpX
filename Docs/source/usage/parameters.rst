@@ -4415,7 +4415,23 @@ Maxwell solver: kinetic-fluid hybrid
     current are zeroed on every covered and cut edge, and cut faces evolve
     through their fully-open edges. Second-order at curved walls where the
     stair-step degrades to first order. Requires embedded boundaries, a
-    staggered (Yee) grid, and 3D or 2D (XZ) Cartesian geometry.
+    staggered (Yee) grid, and 3D or 2D (XZ) Cartesian geometry. With the
+    theta-implicit hybrid solver the projection is applied inside every
+    residual evaluation (it lives in the per-level Ohm solve), so the JFNK
+    Jacobian sees the wall exactly; the electron-inertia curl-curl
+    preconditioner mirrors the projected edges as identity rows.
+
+.. pp:param:: hybrid_pic_model.conformal_wall_model
+    :type: ``string``
+    :default: ``conductor``
+    :optional:
+
+    Constitutive model of the conformal wall: ``conductor`` (the
+    perfect-conductor closure above) or ``transparent`` (an EM-transparent
+    standoff: the embedded-boundary geometry and particle handling are
+    unchanged but the fields ignore the wall entirely). The transparent mode
+    is a validation instrument -- comparing the two separates wall-plasma
+    interaction effects from wall-field (shorting) effects.
 
 .. pp:param:: hybrid_pic_model.add_external_fields
     :type: ``bool``

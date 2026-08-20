@@ -94,6 +94,13 @@ void HybridPICModel::ReadParameters ()
                 WarpX::field_boundary_hi[idim] != FieldBoundaryType::PML,
                 "hybrid_pic_model.use_conformal_eb is not compatible with PML boundaries");
         }
+        pp_hybrid.query("conformal_wall_model", m_conformal_wall_model);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_conformal_wall_model == "conductor"
+                || m_conformal_wall_model == "transparent",
+            "hybrid_pic_model.conformal_wall_model must be 'conductor' or "
+            "'transparent'");
+        m_conformal_wall_conductor = (m_conformal_wall_model == "conductor");
     }
 
     // The hybrid model requires an electron temperature, reference density
@@ -975,7 +982,7 @@ void HybridPICModel::CalculatePlasmaCurrent (
     // Conformal wall, constitutive PEC: the hybrid carries no wall (surface)
     // currents, so J = 0 on every covered and cut edge; cut faces evolve only
     // through their fully-open edges.
-    if (EB::enabled() && m_use_conformal_eb) {
+    if (EB::enabled() && m_use_conformal_eb && m_conformal_wall_conductor) {
         ZeroConductorEdges(current_fp_plasma, eb_update_E, lev);
     }
 }
@@ -1054,7 +1061,7 @@ void HybridPICModel::HybridPICSolveE (
     // Conformal wall, constitutive PEC: the Ohm E is algebraic in B, so the
     // wall condition is imposed directly -- E = 0 on every covered and cut
     // edge (tangential E vanishes at the wall at the cut-edge level).
-    if (EB::enabled() && m_use_conformal_eb) {
+    if (EB::enabled() && m_use_conformal_eb && m_conformal_wall_conductor) {
         ZeroConductorEdges(Efield, eb_update_E, lev);
     }
 }
@@ -1095,7 +1102,7 @@ void HybridPICModel::CalculateElectronPressure(const int lev,
     // Conformal wall: Dirichlet Pe at the PEC surface (odd reflection). The
     // resulting grad(Pe) across the wall supplies the allowable normal E in
     // Ohm's law, unlike a Neumann fill, which would pin it to zero.
-    if (EB::enabled() && m_use_conformal_eb) {
+    if (EB::enabled() && m_use_conformal_eb && m_conformal_wall_conductor) {
         warpx::hybrid::ApplyEBBoundaryToNodalScalar(
             *electron_pressure_fp,
             *warpx.m_fields.get(FieldType::distance_to_eb, lev),

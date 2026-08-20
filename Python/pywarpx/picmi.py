@@ -2645,6 +2645,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         max_substep_attempts=None,
         holmstrom_vacuum_region=None,
         use_conformal_eb=None,
+        conformal_wall_model=None,
         Jx_external_function=None,
         Jy_external_function=None,
         Jz_external_function=None,
@@ -2714,6 +2715,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.holmstrom_vacuum_region = holmstrom_vacuum_region
 
         self.use_conformal_eb = use_conformal_eb
+        self.conformal_wall_model = conformal_wall_model
 
         self.Jx_external_function = Jx_external_function
         self.Jy_external_function = Jy_external_function
@@ -2873,6 +2875,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         pywarpx.hybridpicmodel.max_substep_attempts = self.max_substep_attempts
         pywarpx.hybridpicmodel.holmstrom_vacuum_region = self.holmstrom_vacuum_region
         pywarpx.hybridpicmodel.use_conformal_eb = self.use_conformal_eb
+        pywarpx.hybridpicmodel.conformal_wall_model = self.conformal_wall_model
         pywarpx.hybridpicmodel.__setattr__(
             "Jx_external_grid_function(x,y,z,t)",
             pywarpx.my_constants.mangle_expression(

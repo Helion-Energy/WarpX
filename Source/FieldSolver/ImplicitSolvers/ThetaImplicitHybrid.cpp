@@ -7,6 +7,7 @@
 #include "Fields.H"
 #include "ThetaImplicitHybrid.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
+#include "EmbeddedBoundary/Enabled.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "Particles/MultiParticleContainer.H"
 #include "Python/callbacks.H"
@@ -1175,6 +1176,14 @@ ThetaImplicitHybrid::FillInertiaBetaCoeff ()
         const Real beta_id =
             beta_fac*amrex::max(rho_max, rho_floor)*Real(1.0e4);
 
+        // conformal-wall mirror: the residual zeroes E on covered and cut
+        // edges (ZeroConductorEdges inside every Ohm solve), making those
+        // Jacobian rows identity -- mirror them with the identity-row beta
+        const bool eb_mirror = EB::enabled()
+            && hybrid->m_use_conformal_eb
+            && hybrid->m_conformal_wall_conductor;
+        const auto& eb_update_E = m_WarpX->GetEBUpdateEFlag();
+
         for (int c = 0; c < 3; c++) {
             MultiFab& bmf = *m_inertia_beta[lev][c];
             // this E component is cell-centered in at most one direction;
@@ -1194,8 +1203,15 @@ ThetaImplicitHybrid::FillInertiaBetaCoeff ()
                 const Box bx = mfi.tilebox();
                 const auto beta_arr = bmf.array(mfi);
                 const auto rho_arr = rho_mf->const_array(mfi, rho_comp);
+                const auto eb_arr = eb_mirror
+                    ? eb_update_E[lev][c]->const_array(mfi)
+                    : amrex::Array4<int const>{};
                 ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
                 {
+                    if (eb_mirror && eb_arr(i,j,k) == 0) {
+                        beta_arr(i,j,k) = beta_id;
+                        return;
+                    }
                     const Real ba = InertiaBetaNode(rho_arr(i,j,k),
                         rho_floor, floor_w, taper_w, beta_fac, beta_id);
                     Real bv = ba;

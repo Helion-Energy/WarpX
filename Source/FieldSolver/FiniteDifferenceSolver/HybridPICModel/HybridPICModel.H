@@ -1140,6 +1140,15 @@ public:
      *  staggered (Yee) grid, and 3D or 2D (XZ) Cartesian geometry. */
     bool m_use_conformal_eb = false;
 
+    /** Wall constitutive model for the conformal EB wall: "conductor"
+     *  (default; E and J zeroed on covered and cut edges, Dirichlet Pe)
+     *  or "transparent" (EM-transparent standoff: the fields ignore the
+     *  wall entirely while the EB geometry and particle handling stay
+     *  identical -- a validation mode that separates "wall eats plasma"
+     *  from "wall shorts fields"). */
+    std::string m_conformal_wall_model = "conductor";
+    bool m_conformal_wall_conductor = true;
+
     /** Cached EB fill classification for the deposited edge fields (ion
      *  current fill + deposit fold), one entry per level; reset on regrid.
      *  Mutable: (re)built inside const solver calls. */
