@@ -1177,7 +1177,10 @@ public:
      *  1=hi), in node-u units [J/m^3] summed over boundary nodes
      *  (multiply by the node dual-cell volume for Joules; positive =
      *  energy added to the plasma). The G4 budget-closure instrument;
-     *  exposed to Python as warpx.get_qdsmc_wall_tally(dim, side). */
+     *  exposed to Python as warpx.get_qdsmc_wall_tally(dim, side).
+     *  Booked at the LEDGER convention (raw density, zero at or below
+     *  m_n_floor); the pedestal/sub-floor remainder of each exchange
+     *  goes to m_cond_halo_exhaust. */
     mutable amrex::Real m_cond_wall_tally[AMREX_SPACEDIM][2] = {};
 
     amrex::Real GetQdsmcWallTally (int const dim, int const side) const
@@ -1264,6 +1267,21 @@ public:
     mutable amrex::Real m_cond_eb_tally = 0.0;
 
     amrex::Real GetQdsmcEbTally () const { return m_cond_eb_tally; }
+
+    /** Halo-exhaust remainder of every wall/EB bath, drain, and flux
+     *  exchange: the part booked ABOVE the plasma energy ledger's
+     *  convention (QDSMCClassEnergy counts u at the raw density and
+     *  holds ZERO at or below m_n_floor, while the exchange kernels act
+     *  at n_eff = max(n_raw, n_ped)). With the conduction pedestal on,
+     *  the drains grind noise-minted halo T_e at pedestal density where
+     *  the ledger holds no energy — that grind lands here, keeping the
+     *  wall/EB tallies bankable against the ledger. Same node-u units
+     *  [J/m^3] and sign convention as the wall/EB tallies; the split is
+     *  exact per node (ledger part + halo part = the previous
+     *  single-channel booking). */
+    mutable amrex::Real m_cond_halo_exhaust = 0.0;
+
+    amrex::Real GetQdsmcHaloExhaustTally () const { return m_cond_halo_exhaust; }
 
     /** Scatter-form deposit kernel. 0 = hat (2^d CIC + the B1
      *  half-gradient correction). 1 = Keys cubic convolution (a = -1/2,

@@ -3255,7 +3255,7 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
         (m_joule_heating_n_min > m_n_floor) ||
         (m_te_shunt_eV > 0._rt) ||
         (m_band_drain_rate > 0._rt) ||
-        (m_cond_eb_bc == 1) ||
+        (m_cond_eb_bc == 1) || (m_cond_eb_bc == 2) ||
         ((m_joule_redirect_to_ions || m_te_shunt_eV > 0._rt) &&
          (m_joule_redirect_n_min_factor > 0._rt ||
           m_joule_redirect_kick_cap_vth_frac > 0._rt));
@@ -3268,7 +3268,9 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
             << " te_shunt=" << m_te_shunt_J
             << " band_drain=" << m_band_drain_J
             << " wall_bath=" << m_cond_eb_tally
-            << " (cumulative; wall_bath > 0 = into plasma)\n";
+            << " halo_exhaust=" << m_cond_halo_exhaust
+            << " (cumulative; wall_bath > 0 = into plasma; halo_exhaust "
+               "= wall/EB exchange booked above the ledger convention)\n";
     }
 
     // Contamination tally print (same cadence; the conduction channels are
@@ -3572,6 +3574,11 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
     // effective density the FD operator conducts with, so a wall drain
     // exhausts pedestal-halo heat even where the raw deposit is zero.
     amrex::Real const n_ped = m_cond_n_ped;
+    // Ledger-convention booking floor: QDSMCClassEnergy counts u at the
+    // raw density and holds ZERO at or below this, so the part of each
+    // exchange above that convention must not pollute the bankable wall
+    // tally — it goes to the halo-exhaust channel instead.
+    amrex::Real const n_led_flr = m_n_floor;
 
     for (int d = 0; d < AMREX_SPACEDIM; ++d) {
     for (int s = 0; s < 2; ++s) {
@@ -3588,8 +3595,8 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
         // row's dual cells, q A dt / V = q dt / dx  [J/m^3]
         amrex::Real const du_flux = m_cond_bc_q[d][s] * dt_c / dx_arr[d];
 
-        amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
-        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+        amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
         using ReduceTuple = typename decltype(reduce_data)::Type;
 
         for (MFIter mfi(Te, TilingIfNotGPU()); mfi.isValid(); ++mfi)
@@ -3618,17 +3625,19 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
             reduce_op.eval(wall_plane, reduce_data,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
             {
-                amrex::Real const ne =
-                    amrex::max(rho_arr(i,j,k) / qe, n_ped);
-                if (ne <= 0.0_rt) { return {0.0_rt}; }
+                amrex::Real const ne_raw = rho_arr(i,j,k) / qe;
+                amrex::Real const ne = amrex::max(ne_raw, n_ped);
+                if (ne <= 0.0_rt) { return {0.0_rt, 0.0_rt}; }
+                // The exchange DYNAMICS act at ne; the booking splits at
+                // the ledger convention (n_led): {ledger, halo-exhaust}.
+                amrex::Real const n_led =
+                    (ne_raw > n_led_flr) ? ne_raw : 0.0_rt;
+                amrex::Real dTe_app = 0.0_rt;   // applied signed Te change
                 if (bc == 1) {
                     // thermal bath: pin the row, tally the exchange
-                    amrex::Real const du =
-                        1.5_rt * kb * ne * (Te_wall_K - Te_arr(i,j,k));
+                    dTe_app = Te_wall_K - Te_arr(i,j,k);
                     Te_arr(i,j,k) = Te_wall_K;
-                    return {du};
-                }
-                if (bc == 3) {
+                } else if (bc == 3) {
                     // One-sided free-streaming-limited temperature drain
                     // toward the wall value (MHD wall_thermal_bc port):
                     // fires only when the row is HOTTER than the wall, so
@@ -3636,7 +3645,7 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
                     // bounds the drain at f * the electron free-streaming
                     // flux; the final clamp forbids undershoot.
                     amrex::Real const Te_K = Te_arr(i,j,k);
-                    if (Te_K <= Te_wall_K) { return {0.0_rt}; }
+                    if (Te_K <= Te_wall_K) { return {0.0_rt, 0.0_rt}; }
                     amrex::Real const kap =
                         kappa_par_ex(ne, Te_K * eV_per_K, t_now);
                     amrex::Real q = kap * (Te_K - Te_wall_K) / dx_d;
@@ -3647,21 +3656,25 @@ void HybridPICModel::ApplyQdsmcConductionWallBCs (
                         q * dt_c / (dx_d * 1.5_rt * kb * ne);
                     dTe = amrex::min(dTe, Te_K - Te_wall_K);
                     Te_arr(i,j,k) = Te_K - dTe;
-                    return {-1.5_rt * kb * ne * dTe};
+                    dTe_app = -dTe;
+                } else {
+                    // prescribed flux: inject, clamp cooling at Te = 0,
+                    // tally what was actually applied
+                    dTe_app = amrex::max(du_flux / (1.5_rt * kb * ne),
+                                         -Te_arr(i,j,k));
+                    Te_arr(i,j,k) += dTe_app;
                 }
-                // prescribed flux: inject, clamp cooling at Te = 0,
-                // tally what was actually applied
-                amrex::Real const dTe =
-                    amrex::max(du_flux / (1.5_rt * kb * ne),
-                               -Te_arr(i,j,k));
-                Te_arr(i,j,k) += dTe;
-                return {1.5_rt * kb * ne * dTe};
+                return {1.5_rt * kb * n_led * dTe_app,
+                        1.5_rt * kb * (ne - n_led) * dTe_app};
             });
         }
         auto tup = reduce_data.value(reduce_op);
         amrex::Real tally = amrex::get<0>(tup);
+        amrex::Real halo  = amrex::get<1>(tup);
         amrex::ParallelDescriptor::ReduceRealSum(tally);
+        amrex::ParallelDescriptor::ReduceRealSum(halo);
         m_cond_wall_tally[d][s] += tally;
+        m_cond_halo_exhaust    += halo;
     }}
 }
 
@@ -4203,12 +4216,14 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
         amrex::Real const m_el = PhysConst::m_e;
         amrex::Real const t_now = warpx.gett_new(0);
         amrex::Real const n_ped_eb = m_cond_n_ped;
+        // Ledger-convention booking floor (see the domain-BC kernel).
+        amrex::Real const n_led_flr = m_n_floor;
         amrex::Real dx_min = dx_arr[0];
         for (int dd = 1; dd < AMREX_SPACEDIM; ++dd) {
             dx_min = amrex::min(dx_min, dx_arr[dd]);
         }
-        amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
-        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+        amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
         using ReduceTuple = typename decltype(reduce_data)::Type;
         for (MFIter mfi(Tf, TilingIfNotGPU()); mfi.isValid(); ++mfi)
         {
@@ -4230,10 +4245,14 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
             reduce_op.eval(tile_box, reduce_data,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
             {
-                if (b_arr(i,j,k,BNE::b_ebm) == 0.0_rt) { return {0.0_rt}; }
-                amrex::Real const ne =
-                    amrex::max(rho_arr(i,j,k) / qe, n_ped_eb);
-                if (ne <= 0.0_rt) { return {0.0_rt}; }
+                if (b_arr(i,j,k,BNE::b_ebm) == 0.0_rt) {
+                    return {0.0_rt, 0.0_rt};
+                }
+                amrex::Real const ne_raw = rho_arr(i,j,k) / qe;
+                amrex::Real const ne = amrex::max(ne_raw, n_ped_eb);
+                if (ne <= 0.0_rt) { return {0.0_rt, 0.0_rt}; }
+                amrex::Real const n_led =
+                    (ne_raw > n_led_flr) ? ne_raw : 0.0_rt;
                 bool ring = false;
                 int const node[3] = {i, j, k};
                 int const rr = eb_ring;
@@ -4250,7 +4269,7 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                         (b_arr(node[0]+oi, node[1]+oj, node[2]+ok,
                                BNE::b_ebm) == 0.0_rt);
                 }}}
-                if (!ring) { return {0.0_rt}; }
+                if (!ring) { return {0.0_rt, 0.0_rt}; }
                 amrex::Real cx[3] = {0.0_rt, 0.0_rt, 0.0_rt};
                 for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
                     cx[dd] = plo_arr[dd] + amrex::Real(node[dd])*dx_arr[dd];
@@ -4261,11 +4280,12 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                 amrex::Real const Te_eV = ebTe(cx[0], 0.0_rt, cx[1]);
 #endif
                 amrex::Real const TwK = Te_eV * qe / kb;
+                amrex::Real dTe_app = 0.0_rt;   // applied signed Te change
                 if (drain) {
                     // One-sided free-streaming-limited drain (rectified
                     // sink; see the domain-BC drain branch).
                     amrex::Real const Te_K = Te_arr(i,j,k);
-                    if (Te_K <= TwK) { return {0.0_rt}; }
+                    if (Te_K <= TwK) { return {0.0_rt, 0.0_rt}; }
                     amrex::Real const kap =
                         kappa_par_ex(ne, Te_K * kb / qe, t_now);
                     amrex::Real q = kap * (Te_K - TwK) / dx_min;
@@ -4276,18 +4296,22 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                         q * dts / (dx_min * 1.5_rt * kb * ne);
                     dTe = amrex::min(dTe, Te_K - TwK);
                     Te_arr(i,j,k) = Te_K - dTe;
-                    return {-1.5_rt * kb * ne * dTe};
+                    dTe_app = -dTe;
+                } else {
+                    dTe_app = TwK - Te_arr(i,j,k);
+                    Te_arr(i,j,k) = TwK;
                 }
-                amrex::Real const du =
-                    1.5_rt * kb * ne * (TwK - Te_arr(i,j,k));
-                Te_arr(i,j,k) = TwK;
-                return {du};
+                return {1.5_rt * kb * n_led * dTe_app,
+                        1.5_rt * kb * (ne - n_led) * dTe_app};
             });
         }
         auto tup = reduce_data.value(reduce_op);
-        amrex::Real tly = amrex::get<0>(tup);
+        amrex::Real tly  = amrex::get<0>(tup);
+        amrex::Real halo = amrex::get<1>(tup);
         amrex::ParallelDescriptor::ReduceRealSum(tly);
-        m_cond_eb_tally += tly;
+        amrex::ParallelDescriptor::ReduceRealSum(halo);
+        m_cond_eb_tally     += tly;
+        m_cond_halo_exhaust += halo;
         };
 
     // Bath pins must track the SUBCYCLE cadence: applied once per call
@@ -6097,8 +6121,12 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
         // tally the exchange (positive = energy into the plasma).
         if (eb_iso) {
             int const eb_ring = m_cond_eb_ring;
-            amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
-            amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+            // Ledger-convention booking floor (see the domain-BC kernel;
+            // no pedestal on the SDE path, so the halo channel catches
+            // only sub-floor rows).
+            amrex::Real const n_led_flr = m_n_floor;
+            amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+            amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
             using ReduceTuple = typename decltype(reduce_data)::Type;
             for (MFIter mfi(Te, TilingIfNotGPU()); mfi.isValid(); ++mfi)
             {
@@ -6122,9 +6150,13 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                 reduce_op.eval(tile_box, reduce_data,
                     [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
                 {
-                    if (kn(i,j,k,Kin::k_ebm) == 0.0_rt) { return {0.0_rt}; }
+                    if (kn(i,j,k,Kin::k_ebm) == 0.0_rt) {
+                        return {0.0_rt, 0.0_rt};
+                    }
                     amrex::Real const ne = rho_arr(i,j,k) / qe;
-                    if (ne <= 0.0_rt) { return {0.0_rt}; }
+                    if (ne <= 0.0_rt) { return {0.0_rt, 0.0_rt}; }
+                    amrex::Real const n_led =
+                        (ne > n_led_flr) ? ne : 0.0_rt;
                     // wall ring = any covered node within Chebyshev
                     // distance eb_ring. Depth 1 with face adjacency
                     // measured a big contact drop (staircase jags
@@ -6154,7 +6186,7 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                             (kn(node[0]+oi, node[1]+oj, node[2]+ok,
                                 Kin::k_ebm) == 0.0_rt);
                     }}}
-                    if (!ring) { return {0.0_rt}; }
+                    if (!ring) { return {0.0_rt, 0.0_rt}; }
                     amrex::Real cx[3] = {0.0_rt, 0.0_rt, 0.0_rt};
                     for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
                         cx[dd] = plo_arr[dd]
@@ -6166,16 +6198,19 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                     amrex::Real const Te_eV = ebTe(cx[0], 0.0_rt, cx[1]);
 #endif
                     amrex::Real const TwK = Te_eV * qe / kb;
-                    amrex::Real const du =
-                        1.5_rt * kb * ne * (TwK - Te_arr(i,j,k));
+                    amrex::Real const dTe_app = TwK - Te_arr(i,j,k);
                     Te_arr(i,j,k) = TwK;
-                    return {du};
+                    return {1.5_rt * kb * n_led * dTe_app,
+                            1.5_rt * kb * (ne - n_led) * dTe_app};
                 });
             }
             auto tup = reduce_data.value(reduce_op);
-            amrex::Real tly = amrex::get<0>(tup);
+            amrex::Real tly  = amrex::get<0>(tup);
+            amrex::Real halo = amrex::get<1>(tup);
             amrex::ParallelDescriptor::ReduceRealSum(tly);
-            m_cond_eb_tally += tly;
+            amrex::ParallelDescriptor::ReduceRealSum(halo);
+            m_cond_eb_tally     += tly;
+            m_cond_halo_exhaust += halo;
         }
         ApplyQdsmcConductionWallBCs(lev, dt_c, Te, rho);
         ablastr::utils::communication::FillBoundary(

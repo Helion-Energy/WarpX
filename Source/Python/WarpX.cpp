@@ -300,6 +300,19 @@ void init_WarpX (py::module& m)
             "(isothermal EB BC), node-u units [J/m^3] summed over fluid "
             "nodes (positive = energy added to the plasma)."
         )
+        .def("get_qdsmc_halo_exhaust_tally",
+            [](WarpX& wx) {
+                return wx.get_pointer_HybridPICModel()
+                    ->GetQdsmcHaloExhaustTally();
+            },
+            "Cumulative halo-exhaust remainder of the QDSMC wall/EB "
+            "conduction exchanges: the part booked above the plasma "
+            "energy ledger's convention (raw density, zero at or below "
+            "the density floor), e.g. the pedestal-density grind at "
+            "sub-floor wall rows. Node-u units [J/m^3], same sign "
+            "convention as the wall/EB tallies; wall+EB tallies plus "
+            "this channel reproduce the previous single-channel booking."
+        )
         .def("get_eb_collected_charge",
             [](WarpX& wx, std::string const& species_name) {
                 return wx.GetPartContainer().GetEBCollectedCharge(species_name);
