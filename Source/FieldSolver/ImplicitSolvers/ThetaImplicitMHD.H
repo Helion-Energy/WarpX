@@ -656,6 +656,9 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // non-conservation is tracked, like the wall ledgers. Wall-masked
     // (rigid-conductor) cells are excluded like every other source. ----
     amrex::Real m_floor_consistency_rate = 0.0;
+    // Must match theta_implicit_mhd::floor_consistency_width_fraction
+    // (ThetaImplicitMHD_K.H) so the default stays bit-identical.
+    amrex::Real m_floor_consistency_width_fraction = 0.1;
     // Floor-consistency supply ledger: cumulative supplied mass [kg] and
     // fluid energy [J] ([kg/m^2], [J/m^2] in 1D: the cell measure is the
     // geometry's), evaluated at the accepted theta state each step and

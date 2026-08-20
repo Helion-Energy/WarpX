@@ -155,6 +155,8 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
                                    m_halo_pedestal_energy_rate);
     utils::parser::queryWithParser(pp, "floor_consistency_rate",
                                    m_floor_consistency_rate);
+    utils::parser::queryWithParser(pp, "floor_consistency_width_fraction",
+                                   m_floor_consistency_width_fraction);
     pp.query("floor_ledger_file", m_floor_ledger_file);
     utils::parser::queryWithParser(pp, "vacuum_resistivity_diffusivity",
                                    m_vacuum_resistivity_diffusivity);
@@ -573,6 +575,13 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_floor_consistency_rate >= 0.0_rt,
         "implicit_mhd.floor_consistency_rate cannot be negative");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_floor_consistency_width_fraction > 0.0_rt &&
+            m_floor_consistency_width_fraction <= 0.5_rt,
+        "implicit_mhd.floor_consistency_width_fraction must be in "
+        "(0, 0.5]: the bound-riding supply capacity is rate_eff * "
+        "width/2 and the exact-zero guarantee moves to "
+        "(1 + 2 f) x bound");
     // The ledger is the source's conservation instrument: a file without
     // the source is a configuration error, not a silent no-op.
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -2177,6 +2186,9 @@ void ThetaImplicitMHD::PrintParameters () const
         amrex::Print() << "Floor consistency rate [1/s]:  "
                        << m_floor_consistency_rate
                        << " (per-solve cap 1/(theta dt))\n"
+                       << "Floor consistency width:       "
+                       << m_floor_consistency_width_fraction
+                       << " of the bound (capacity rate_eff*w/2)\n"
                        << "Floor consistency ledger:      "
                        << (m_floor_ledger_file.empty() ? "(none)"
                                                        : m_floor_ledger_file)
@@ -3836,6 +3848,7 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
     const bool floor_consistency = m_floor_consistency_rate > 0.0_rt;
     const amrex::Real floor_supply_rate =
         std::min(m_floor_consistency_rate, 1.0_rt / theta_dt);
+    const amrex::Real fc_width = m_floor_consistency_width_fraction;
     const amrex::Real theta = m_theta;
     const AdmissibilityBounds admissibility = MakeAdmissibilityBounds();
     const amrex::Real fc_mass_floor = admissibility.floors[0];
@@ -4218,21 +4231,21 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                         theta_implicit_mhd::floor_consistency_deficit(
                             rho(i, j, k), rho_old(i, j, k),
                             rho_old(i, j, k), fc_mass_floor,
-                            fc_mass_coefficient, theta);
+                            fc_mass_coefficient, theta, fc_width);
                 }
                 energy_increment(i, j, k) +=
                     theta_dt * floor_supply_rate *
                     theta_implicit_mhd::floor_consistency_deficit(
                         energy(i, j, k), energy_old(i, j, k),
                         rho_old(i, j, k), fc_electron_floor,
-                        fc_electron_coefficient, theta);
+                        fc_electron_coefficient, theta, fc_width);
                 if (total_energy_closure) {
                     ion_energy_increment(i, j, k) +=
                         theta_dt * floor_supply_rate *
                         theta_implicit_mhd::floor_consistency_deficit(
                             ion_e(i, j, k), ion_e_old(i, j, k),
                             rho_old(i, j, k), fc_ion_floor,
-                            fc_ion_coefficient, theta);
+                            fc_ion_coefficient, theta, fc_width);
                 }
             }
         });
@@ -6042,6 +6055,7 @@ void ThetaImplicitMHD::AccumulateFloorConsistencySupplyLedger (
     for (int dim = 0; dim < AMREX_SPACEDIM; ++dim) {
         cell_volume *= m_WarpX->Geom(0).CellSize(dim);
     }
+    const amrex::Real fc_width = m_floor_consistency_width_fraction;
 #if defined(WARPX_DIM_RZ)
     const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
     const amrex::Real radial_cell_size = m_WarpX->Geom(0).CellSize(0);
@@ -6093,7 +6107,7 @@ void ThetaImplicitMHD::AccumulateFloorConsistencySupplyLedger (
                             theta_implicit_mhd::floor_consistency_deficit(
                                 value(i, j, k), old_value(i, j, k),
                                 old_density(i, j, k), floor,
-                                temperature_coefficient, theta)};
+                                temperature_coefficient, theta, fc_width)};
                 });
         }
         const amrex::Real block_total =
@@ -7295,6 +7309,7 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     const bool floor_consistency = m_floor_consistency_rate > 0.0_rt;
     const amrex::Real floor_supply_rate =
         std::min(m_floor_consistency_rate, 1.0_rt / theta_dt);
+    const amrex::Real fc_width = m_floor_consistency_width_fraction;
     const amrex::Real theta = m_theta;
     const AdmissibilityBounds admissibility = MakeAdmissibilityBounds();
     const amrex::Real fc_mass_floor = admissibility.floors[0];
@@ -8279,21 +8294,21 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                         theta_implicit_mhd::floor_consistency_deficit(
                             rho(i, j, k), rho_old(i, j, k),
                             rho_old(i, j, k), fc_mass_floor,
-                            fc_mass_coefficient, theta);
+                            fc_mass_coefficient, theta, fc_width);
                 }
                 energy_increment(i, j, k) +=
                     supply_scale *
                     theta_implicit_mhd::floor_consistency_deficit(
                         energy(i, j, k), energy_old(i, j, k),
                         rho_old(i, j, k), fc_electron_floor,
-                        fc_electron_coefficient, theta);
+                        fc_electron_coefficient, theta, fc_width);
                 if (total_energy_closure) {
                     ion_energy_increment(i, j, k) +=
                         supply_scale *
                         theta_implicit_mhd::floor_consistency_deficit(
                             ion_e(i, j, k), ion_e_old(i, j, k),
                             rho_old(i, j, k), fc_ion_floor,
-                            fc_ion_coefficient, theta);
+                            fc_ion_coefficient, theta, fc_width);
                 }
                 if (cgl_closure) {
                     ion_parallel_increment(i, j, k) +=
@@ -8301,13 +8316,13 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                         theta_implicit_mhd::floor_consistency_deficit(
                             upar(i, j, k), upar_old(i, j, k),
                             rho_old(i, j, k), fc_ion_floor,
-                            fc_ion_coefficient, theta);
+                            fc_ion_coefficient, theta, fc_width);
                     ion_perp_increment(i, j, k) +=
                         supply_scale *
                         theta_implicit_mhd::floor_consistency_deficit(
                             uperp(i, j, k), uperp_old(i, j, k),
                             rho_old(i, j, k), fc_perp_floor,
-                            fc_perp_coefficient, theta);
+                            fc_perp_coefficient, theta, fc_width);
                 }
             }
         });

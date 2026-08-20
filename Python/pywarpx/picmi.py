@@ -2712,6 +2712,12 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         accreted drive forcing cannot pin the ion-energy Newton
         residual.
 
+    floor_consistency_width_fraction: float, default=0.1
+        Rectifier width of the floor-consistency source as a fraction of
+        the cell bound; the bound-riding supply capacity is
+        rate_eff * width/2, so raising it raises how much demand the
+        source can meet per solve (range (0, 0.5]).
+
     floor_consistency_rate: float, default=0 (off, bit-identical)
         Floor-consistency relaxation rate in 1/s: the consistency
         completion of the admissibility floors. Adds to every bounded
@@ -2796,6 +2802,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         halo_pedestal_drag_rate=None,
         halo_pedestal_energy_rate=None,
         floor_consistency_rate=None,
+        floor_consistency_width_fraction=None,
         floor_ledger_file=None,
         vacuum_resistivity_diffusivity=None,
         resistive_theta=None,
@@ -2871,6 +2878,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.halo_pedestal_drag_rate = halo_pedestal_drag_rate
         self.halo_pedestal_energy_rate = halo_pedestal_energy_rate
         self.floor_consistency_rate = floor_consistency_rate
+        self.floor_consistency_width_fraction = floor_consistency_width_fraction
         self.floor_ledger_file = floor_ledger_file
         self.vacuum_resistivity_diffusivity = vacuum_resistivity_diffusivity
         self.resistive_theta = resistive_theta
@@ -2954,6 +2962,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.halo_pedestal_drag_rate = self.halo_pedestal_drag_rate
         implicit_mhd.halo_pedestal_energy_rate = self.halo_pedestal_energy_rate
         implicit_mhd.floor_consistency_rate = self.floor_consistency_rate
+        implicit_mhd.floor_consistency_width_fraction = (
+            self.floor_consistency_width_fraction
+        )
         implicit_mhd.floor_ledger_file = self.floor_ledger_file
         implicit_mhd.vacuum_resistivity_diffusivity = (
             self.vacuum_resistivity_diffusivity

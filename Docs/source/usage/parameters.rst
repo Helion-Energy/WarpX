@@ -4664,6 +4664,17 @@ Jacobian probes.
     cyclotron scale, of order :math:`0.1/\Delta t` for typical
     implicit MHD steps).
 
+.. pp:param:: implicit_mhd.floor_consistency_width_fraction
+    :type: ``float``
+    :default: ``0.1``
+
+    Rectifier width of the floor-consistency source as a fraction of
+    each cell's bound (range ``(0, 0.5]``). The bound-riding supply
+    capacity is :math:`\nu_\text{eff}\, w/2`, so raising the width
+    raises how much persistent sub-bound demand the source can meet per
+    solve, at the cost of a wider smooth engagement band (the
+    exact-zero guarantee moves to :math:`(1 + 2f)` times the bound).
+
 .. pp:param:: implicit_mhd.floor_consistency_rate
     :type: ``float``
     :unit: 1/s

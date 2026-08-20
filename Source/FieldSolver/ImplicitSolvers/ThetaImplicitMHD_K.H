@@ -290,6 +290,11 @@ smooth_positive_floor (const amrex::Real value,
 // bound feels IDENTICALLY nothing -- at theta = 1/2 that is every cell
 // at or above 1.5x its cell floor, so healthy decks are bit-identical
 // with the source armed.
+// Default for implicit_mhd.floor_consistency_width_fraction: the
+// runtime value is a per-solve constant passed into
+// floor_consistency_deficit; raising it raises the bound-riding supply
+// CAPACITY (rate_eff * w/2) at the cost of a wider engagement band
+// (the exact-zero guarantee moves to (1 + 2 f) x bound).
 constexpr amrex::Real floor_consistency_width_fraction = 0.1;
 
 /**
@@ -353,7 +358,8 @@ floor_consistency_deficit (const amrex::Real value,
                            const amrex::Real old_density,
                            const amrex::Real floor,
                            const amrex::Real temperature_coefficient,
-                           const amrex::Real theta) noexcept {
+                           const amrex::Real theta,
+                           const amrex::Real width_fraction) noexcept {
     // The projection's cell bound, term for term (see
     // ProjectAndLimitSolverStep): one-way temperature ratchet on the
     // step-old value, then the theta-stage image of the cell floor.
@@ -367,7 +373,7 @@ floor_consistency_deficit (const amrex::Real value,
         // A non-positive bound never binds a non-negative block.
         return 0.0;
     }
-    const amrex::Real width = floor_consistency_width_fraction * bound;
+    const amrex::Real width = width_fraction * bound;
     const amrex::Real deficit = bound - value;
     if (deficit <= -2.0 * width) {
         // Exact-zero fast path == the gate's own zero (guarantee (c)).
