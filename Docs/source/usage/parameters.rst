@@ -4218,8 +4218,10 @@ Maxwell solver: kinetic-fluid hybrid
     term, dropping the advective and :math:`\partial\rho/\partial t` legs. Combined with
     ``electron_inertia_bdf2 = false``, the two-point stencil with measured current history is
     algebraically identical to the operator form :math:`-d_e^2\,\nabla\times\nabla\times
-    \mathbf{E}` of Amano et al., J. Comput. Phys. **275**, 197 (2014), which regularizes the
-    Ohm solve in depleted and vacuum regions without any bare density division. The added
+    \mathbf{E}` of Amano et al., J. Comput. Phys. **275**, 197 (2014) — the **Amano form** of
+    the generalized Ohm's law, as opposed to the legacy algebraic **E-form** with its density
+    division — which regularizes the Ohm solve in depleted and vacuum regions without any bare
+    density division. The added
     elliptic character makes preconditioning of the implicit solve essential:
     ``jacobian.pc_type = pc_block_banded`` in RZ, or ``pc_curl_curl_mlmg`` (which switches
     automatically to the divided inertia operator with this form) elsewhere.
