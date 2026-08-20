@@ -1935,6 +1935,41 @@ Particle initialization
     axes (4 particles in 2D, 6 particles in 3D). When ``1``, particles are split
     along the diagonals (4 particles in 2D, 8 particles in 3D).
 
+.. pp:param:: <species_name>.hybrid_split_interval
+    :type: ``int``
+    :default: ``0``
+    :optional:
+
+    With the hybrid-PIC (Ohm's law) solver: every ``hybrid_split_interval`` steps, split
+    particles (via the ``split_type`` scheme) in cells whose macroparticle count has dropped
+    below ``hybrid_split_target_ppc`` and whose charge density lies inside the band
+    ``[hybrid_split_band_lo, hybrid_split_band_hi]`` (in units of the Ohm's-law density floor).
+    Restores deposition statistics in transport-depleted low-density cells, where hybrid-PIC
+    field noise is largest. ``0`` disables. The trigger is self-limiting (cells at or above the
+    target count stop splitting), but the band must exclude true vacuum: a band reaching density
+    zero pumps the entire floored exterior toward the target count.
+
+.. pp:param:: <species_name>.hybrid_split_target_ppc
+    :type: ``int``
+    :default: ``0``
+    :optional:
+
+    Macroparticle count per cell below which in-band cells are eligible for splitting.
+
+.. pp:param:: <species_name>.hybrid_split_band_lo
+    :type: ``float``
+    :default: ``0.0``
+    :optional:
+
+    Lower edge of the splitting density band, in units of the Ohm's-law density floor.
+
+.. pp:param:: <species_name>.hybrid_split_band_hi
+    :type: ``float``
+    :default: ``4.0``
+    :optional:
+
+    Upper edge of the splitting density band, in units of the Ohm's-law density floor.
+
 .. pp:param:: <species_name>.do_not_deposit
     :type: ``0`` or ``1``
     :default: ``0``
@@ -4171,6 +4206,19 @@ Maxwell solver: kinetic-fluid hybrid
     law is imposed: classic BDF2 for :math:`\theta = 1`, reducing exactly to the two-point midpoint
     difference at :math:`\theta = 1/2` (an endpoint-BDF2 stencil at :math:`\theta < 1` would be
     mis-centered and pumps reactive modes). When off, always use the two-point form.
+
+.. pp:param:: hybrid_pic_model.electron_inertia_djedt_only
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Retain only the :math:`\partial\mathbf{J}_e/\partial t` leg of the electron-inertia
+    term, dropping the advective and :math:`\partial\rho/\partial t` legs. Combined with
+    ``electron_inertia_bdf2 = false``, the two-point stencil with measured current history is
+    algebraically identical to the operator form :math:`-d_e^2\,\nabla\times\nabla\times
+    \mathbf{E}` of Amano et al., J. Comput. Phys. **275**, 197 (2014), which regularizes the
+    Ohm solve in depleted and vacuum regions without any bare density division. The added
+    elliptic character makes preconditioning of the implicit solve essential.
 
 .. pp:param:: hybrid_pic_model.darwin_vacuum_recovery
     :type: ``bool``

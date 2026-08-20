@@ -730,6 +730,17 @@ public:
     bool m_include_electron_inertia = false;
     amrex::Real m_reduced_electron_mass_ratio = 0.0;
     bool m_electron_inertia_bdf2 = true;
+
+    /** Drop the advective (Je.grad)u and u drho/dt legs of the inertia
+     *  term, keeping only the dJe/dt leg. With electron_inertia_bdf2 = 0
+     *  and the measured history store, the remaining term is algebraically
+     *  the operator form -d_e^2 curl curl E (the two-point dJe/dt with the
+     *  measured Je^n equals (Je^theta - Je^n)/(theta dt), which is exactly
+     *  the theta-stage Faraday-Ampere identity): the generalized Ohm's law
+     *  then rolls the whistler over at the electron skin depth with no
+     *  bare 1/n on a deposit [Amano, Higashimori & Shirakawa, J. Comput.
+     *  Phys. 275, 197 (2014)]. */
+    bool m_electron_inertia_djedt_only = false;
     /** Effective electron mass, resolved lazily on first use (needs the
      *  ion species list). */
     amrex::Real m_electron_inertia_mass = 0.0;

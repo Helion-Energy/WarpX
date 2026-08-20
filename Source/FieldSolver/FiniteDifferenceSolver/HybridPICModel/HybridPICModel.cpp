@@ -114,6 +114,8 @@ void HybridPICModel::ReadParameters ()
                                    m_electron_inertia_floor_taper);
     pp_hybrid.query("electron_inertia_extrapolated_history",
                     m_electron_inertia_extrapolated_history);
+    pp_hybrid.query("electron_inertia_djedt_only",
+                    m_electron_inertia_djedt_only);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_n_floor_smooth_width >= 0.,
         "hybrid_pic_model.n_floor_smooth_width must be >= 0");
 
@@ -2293,6 +2295,7 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
     // two-point form.
     const bool bdf2 = m_electron_inertia_bdf2
         && (m_inertia_history_levels >= 2);
+    const bool djedt_only = m_electron_inertia_djedt_only;
     amrex::Real const inv_th = 1.0_rt / a_theta;
     amrex::Real const inv_dt = 1.0_rt / a_dt;
     // Three-point (second-order) time-derivative stencil for dJe/dt,
@@ -2454,7 +2457,9 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
                        + c_m1 * jenm1(i,j,k,c))
                     : (je1 - jen(i,j,k,c)) * inv_dt;
                 ei(i,j,k,c) = w_taper * me_over_e
-                    * (djedt - u[c] * drhodt - adv[c]) / rho_lim;
+                    * (djedt_only ? djedt
+                                  : (djedt - u[c] * drhodt - adv[c]))
+                    / rho_lim;
             }
         });
     }

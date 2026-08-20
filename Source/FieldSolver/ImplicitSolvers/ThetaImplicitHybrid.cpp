@@ -499,6 +499,30 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
         m_E.Copy(FieldType::Efield_fp);
     }
 
+    // Density-band statistics feeding (DSMC-style split in depleted
+    // cells): runs at step boundaries only, never inside the residual.
+    // Band limits are configured per species in units of the hybrid
+    // n_floor; the merge relief valve is the stock velocity-coincidence
+    // resampler.
+    {
+        auto& mpc = m_WarpX->GetPartContainer();
+        const amrex::Real rho_floor =
+            m_hybrid_pic_model->m_n_floor * PhysConst::q_e;
+        for (int isp = 0; isp < mpc.nSpecies(); ++isp) {
+            auto* pc = dynamic_cast<PhysicalParticleContainer*>(
+                &mpc.GetParticleContainer(isp));
+            if (pc == nullptr) { continue; }
+            const int interval = pc->HybridSplitInterval();
+            if (interval <= 0 || ((a_step + 1) % interval != 0)) { continue; }
+            const amrex::MultiFab& rho0 =
+                *m_WarpX->m_fields.get(FieldType::rho_fp, 0);
+            pc->SplitDepletedBand(rho0,
+                pc->HybridSplitBandLo()*rho_floor,
+                pc->HybridSplitBandHi()*rho_floor, 0);
+            pc->Redistribute();
+        }
+    }
+
     // Electron inertia: rotate the per-step nodal Je history from the
     // MEASURED delivered state -- hybrid_current_fp_plasma now holds
     // J_plasma^{n+1} (including the Darwin displacement piece above), and
