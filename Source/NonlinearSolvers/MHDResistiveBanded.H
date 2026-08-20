@@ -204,7 +204,9 @@ PanelGemm (TS* const c_panel, const TS* const a_panel, const TS* const b_panel,
     if (row < m && col < n && (row < skip_low || row >= skip_high))
     {
         const int flat = row * ld_c + col;
-        c_panel[flat] = beta * c_panel[flat] + alpha * accumulator;
+        // BLAS beta = 0 contract: C is write-only (see BlockGemm).
+        c_panel[flat] = (beta == TS(0.0)) ? alpha * accumulator
+                                          : beta * c_panel[flat] + alpha * accumulator;
     }
 }
 
@@ -256,7 +258,11 @@ BlockGemm (TS* const c_block, const TS* const a_block, const TS* const b_block,
     if (row < size && col < size)
     {
         const int flat = row * size + col;
-        c_block[flat] = beta * c_block[flat] + alpha * accumulator;
+        // BLAS beta = 0 contract: C is write-only (never read), so a
+        // freshly allocated (uninitialized) output block cannot poison
+        // the product through 0 * garbage.
+        c_block[flat] = (beta == TS(0.0)) ? alpha * accumulator
+                                          : beta * c_block[flat] + alpha * accumulator;
     }
 }
 
@@ -385,6 +391,23 @@ struct ResistiveBandedEngine
         m_rhs.resize(padded);
         m_solution.resize(padded);
         m_defect.resize(static_cast<std::size_t>(a_block_size));
+        // Zero-fill every engine buffer once: the arena does not zero,
+        // and slots no gather/scatter ever touches (rhs padding, the
+        // identity rows of block-local slots with no stored face) must
+        // read as zero, never as reused-heap garbage -- 0 * NaN = NaN
+        // would poison the sweep (measured as a heap-history-dependent
+        // NaN factorization on the mirror-plane test).
+        for (auto* vec : {&m_bands, &m_inverse_diagonal, &m_scratch, &m_rhs,
+                          &m_solution, &m_defect})
+        {
+            TS* const data = vec->data();
+            amrex::ParallelFor(static_cast<amrex::Long>(vec->size()),
+                               [=] AMREX_GPU_DEVICE (amrex::Long flat)
+                               {
+                                   data[flat] = TS(0.0);
+                               });
+        }
+        amrex::Gpu::streamSynchronize();
     }
 
     [[nodiscard]] static constexpr TS
@@ -759,7 +782,14 @@ struct ResistiveBandedEngine
                                    b_block[static_cast<std::size_t>(k) * size + c];
                 }
                 const std::size_t flat = static_cast<std::size_t>(r) * size + c;
-                c_block[flat] = beta * c_block[flat] + alpha * accumulator;
+                // BLAS beta = 0 contract: C is write-only (never read),
+                // so the uninitialized scratch block cannot poison the
+                // product through 0 * garbage (the arena does not zero;
+                // measured as a heap-history-dependent NaN factorization
+                // on the mirror-plane test).
+                c_block[flat] = (beta == TS(0.0))
+                                    ? alpha * accumulator
+                                    : beta * c_block[flat] + alpha * accumulator;
             }
         }
     }
