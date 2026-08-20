@@ -5029,7 +5029,6 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
             ? warpx.m_fields.get(FieldType::distance_to_eb, lev)
             : nullptr;
         bool const has_eb  = (eb_dist != nullptr);
-        bool const eb_adia = has_eb && (m_cond_eb_bc == 0);
         bool const eb_iso  = has_eb && (m_cond_eb_bc == 1);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!(has_eb && m_cond_eb_bc == 2),
             "qdsmc_conduction_eb_bc = drain requires "

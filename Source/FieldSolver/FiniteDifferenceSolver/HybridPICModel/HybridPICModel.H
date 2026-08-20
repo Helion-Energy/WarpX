@@ -1439,7 +1439,10 @@ public:
         amrex::Real const va2_me =
             B2 * PhysConst::q_e / (PhysConst::mu0 * rho_e_guarded);
         amrex::Real const s = dt / (amrex::Real(2.0) * alpha * dx_min);
-        return amrex::max(PhysConst::m_e, va2_me * s * s);
+        // local copy: amrex::max binds const references and the
+        // namespace constexpr has no device definition (nvcc ODR-use)
+        amrex::Real const m_e_v = PhysConst::m_e;
+        return amrex::max(m_e_v, va2_me * s * s);
     }
     std::unique_ptr<amrex::Parser> m_resistivity_raw_parser;
     amrex::ParserExecutor<3> m_eta_raw;
