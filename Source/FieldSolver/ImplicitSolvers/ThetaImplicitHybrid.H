@@ -117,6 +117,13 @@ public:
      *  of the current Newton iterate. */
     const amrex::MultiFab* GetRhoMidForPC (int lev) const override;
 
+    /** E-staggered beta = 1/d_e^2 coefficients for the electron-inertia
+     *  curl-curl preconditioner (divided Amano operator form), assembled
+     *  from the midpoint density with the Ohm floor and taper mirrored
+     *  from the E-solve kernel. Non-null only with electron inertia in the
+     *  two-point dJe/dt-only (operator) form; aborts in RZ. */
+    const amrex::Vector<amrex::Array<amrex::MultiFab*,3>>* FillInertiaBetaCoeff () override;
+
     /** The ion current deposit consumed by the Ohm solve (current_fp
      *  registry) -- frozen during Jacobian probes, so it is the exact
      *  drift-leg coefficient of the linear solve. */
@@ -129,6 +136,12 @@ private:
      * This is owned by WarpX, not by this class.
      */
     HybridPICModel* m_hybrid_pic_model = nullptr;
+
+    /** Owned storage and pointer view for the electron-inertia beta
+     *  coefficients served by FillInertiaBetaCoeff (E-staggered, one
+     *  component each, no ghosts; allocated lazily on first fill). */
+    amrex::Vector<amrex::Array<std::unique_ptr<amrex::MultiFab>,3>> m_inertia_beta_owned;
+    amrex::Vector<amrex::Array<amrex::MultiFab*,3>> m_inertia_beta;
 
     /**
      * \brief Solver vectors for the electric field.

@@ -334,6 +334,7 @@ Overall simulation parameters
 
               - Default: :math:`\boldsymbol\beta = \mathbb{I}`, giving implicit Maxwell equations, suitable for time steps that under-resolve light waves (:math:`c\Delta t > 1/\sqrt{\left(\sum_i1/\Delta x_i^2\right)}`).
               - ``implicit_evolve.use_mass_matrices_pc = true``: :math:`\boldsymbol\beta` also includes plasma response via the diagonal mass matrices, enabling time steps that under-resolve the plasma period (:math:`\omega_{pe}\Delta t > 1`).
+              - With the hybrid-PIC (Ohm's law) solver and the electron-inertia operator form (``hybrid_pic_model.electron_inertia_djedt_only = 1`` with ``electron_inertia_bdf2 = 0``), the preconditioner switches automatically to the divided inertia operator :math:`\beta(\textbf{x})\,\textbf{E} + \nabla\times\nabla\times\textbf{E} = \beta(\textbf{x})\,\textbf{b}` with :math:`\beta = 1/d_e^2 = \mu_0 e^2 n_\mathrm{lim}/m_e` assembled on the E-field staggering from the midpoint density (harmonic averaging at density-contrast edges; the Ohm floor and inertia taper are mirrored from the E-solve kernel). This is the elliptic part of the operator form of Amano et al., J. Comput. Phys. **275**, 197 (2014), whose preconditioning is essential to the implicit solve. Not available in RZ (use ``pc_block_banded``).
 
             - ``pc_curl_curl_mlmg.verbose`` (``bool``, default: true)
             - ``pc_curl_curl_mlmg.bottom_verbose`` (``bool``, default: false)
@@ -4219,7 +4220,9 @@ Maxwell solver: kinetic-fluid hybrid
     algebraically identical to the operator form :math:`-d_e^2\,\nabla\times\nabla\times
     \mathbf{E}` of Amano et al., J. Comput. Phys. **275**, 197 (2014), which regularizes the
     Ohm solve in depleted and vacuum regions without any bare density division. The added
-    elliptic character makes preconditioning of the implicit solve essential.
+    elliptic character makes preconditioning of the implicit solve essential:
+    ``jacobian.pc_type = pc_block_banded`` in RZ, or ``pc_curl_curl_mlmg`` (which switches
+    automatically to the divided inertia operator with this form) elsewhere.
 
 .. pp:param:: hybrid_pic_model.darwin_vacuum_recovery
     :type: ``bool``

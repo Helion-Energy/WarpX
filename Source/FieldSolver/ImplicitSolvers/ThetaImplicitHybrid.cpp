@@ -1084,6 +1084,136 @@ ThetaImplicitHybrid::GetRhoMidForPC ( const int lev ) const
     return m_WarpX->m_fields.get(FieldType::rho_fp, lev);
 }
 
+namespace
+{
+    /** Per-node beta = 1/d_e^2 for the divided electron-inertia curl-curl
+     *  operator, mirroring the E-solve kernel's floor and taper. Rows where
+     *  the kernel zeroes the inertia term (no deposit, or fully tapered)
+     *  are identity rows, approximated with the finite ceiling a_beta_id. */
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    amrex::Real InertiaBetaNode (amrex::Real a_rho, amrex::Real a_rho_floor,
+                                 amrex::Real a_floor_w, amrex::Real a_taper_w,
+                                 amrex::Real a_beta_fac, amrex::Real a_beta_id)
+    {
+        using amrex::Real;
+        if (a_rho <= Real(0.0)) { return a_beta_id; }
+        const Real rho_lim = HybridSmoothFloor(a_rho, a_rho_floor, a_floor_w);
+        Real b = a_beta_fac*rho_lim;
+        if (a_taper_w > Real(0.0)) {
+            const Real tp = Real(0.5)*(Real(1.0)
+                + std::tanh((a_rho - a_rho_floor)/a_taper_w));
+            b /= amrex::max(tp, Real(1.0e-4));
+        }
+        // the physical branch needs no ceiling (finite rho -> finite beta;
+        // the taper amplification is already capped at 1e4x local); the
+        // identity ceiling a_beta_id applies only to the rho <= 0 rows
+        return b;
+    }
+}
+
+const amrex::Vector<amrex::Array<amrex::MultiFab*,3>>*
+ThetaImplicitHybrid::FillInertiaBetaCoeff ()
+{
+    using namespace amrex;
+
+    const HybridPICModel* hybrid = m_hybrid_pic_model;
+    if (hybrid == nullptr || !hybrid->m_include_electron_inertia) {
+        return nullptr;
+    }
+
+#if defined(WARPX_DIM_RZ)
+    WARPX_ABORT_WITH_MESSAGE(
+        "jacobian.pc_type = pc_curl_curl_mlmg is not available for the "
+        "hybrid solver in RZ (the curl-curl operator carries no cylindrical "
+        "metric) - use jacobian.pc_type = pc_block_banded instead.");
+    return nullptr; // unreachable
+#else
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        hybrid->m_electron_inertia_djedt_only
+            && !hybrid->m_electron_inertia_bdf2,
+        "pc_curl_curl_mlmg with the hybrid solver models the operator form "
+        "of the electron-inertia term: set "
+        "hybrid_pic_model.electron_inertia_djedt_only = 1 and "
+        "hybrid_pic_model.electron_inertia_bdf2 = 0 (the form of Amano et "
+        "al., J. Comput. Phys. 275, 197 (2014)), or use another "
+        "preconditioner.");
+
+    const Real rho_floor = static_cast<Real>(hybrid->m_n_floor)*PhysConst::q_e;
+    const Real floor_w =
+        static_cast<Real>(hybrid->m_n_floor_smooth_width)*rho_floor;
+    const Real taper_w =
+        static_cast<Real>(hybrid->m_electron_inertia_floor_taper)*rho_floor;
+    const Real me_eff = static_cast<Real>(hybrid->m_electron_inertia_mass);
+    // divided operator: beta(x) E + curl curl E = beta(x) b with
+    // beta = 1/d_e^2 = mu0 q_e rho_lim / m_e_eff
+    const Real beta_fac = PhysConst::mu0*PhysConst::q_e/me_eff;
+
+    if (m_inertia_beta.empty()) {
+        m_inertia_beta_owned.resize(m_num_amr_levels);
+        m_inertia_beta.resize(m_num_amr_levels);
+        const auto& e_mfarrvec = m_E.getArrayVec();
+        for (int lev = 0; lev < m_num_amr_levels; lev++) {
+            for (int c = 0; c < 3; c++) {
+                const MultiFab& emf = *e_mfarrvec[lev][c];
+                m_inertia_beta_owned[lev][c] = std::make_unique<MultiFab>(
+                    emf.boxArray(), emf.DistributionMap(), 1, 0);
+                m_inertia_beta[lev][c] = m_inertia_beta_owned[lev][c].get();
+            }
+        }
+    }
+
+    for (int lev = 0; lev < m_num_amr_levels; lev++) {
+        const MultiFab* rho_mf = GetRhoMidForPC(lev);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(rho_mf != nullptr,
+            "FillInertiaBetaCoeff: no midpoint density available");
+        const int rho_comp = rho_mf->nComp()/2;
+        // identity-row ceiling: anchored on the LARGEST density present
+        // (anchoring on the floor breaks on decks whose n_floor is tiny
+        // relative to the plasma - the ceiling must sit above every
+        // physical beta on the level)
+        const Real rho_max = rho_mf->max(rho_comp);
+        const Real beta_id =
+            beta_fac*amrex::max(rho_max, rho_floor)*Real(1.0e4);
+
+        for (int c = 0; c < 3; c++) {
+            MultiFab& bmf = *m_inertia_beta[lev][c];
+            // this E component is cell-centered in at most one direction;
+            // there the edge value is the harmonic mean of the two
+            // neighboring density nodes (harmonic: the depleted node
+            // dominates at the density-contrast edge)
+            const IntVect etype = bmf.ixType().toIntVect();
+            const int ox = (etype[0] == 0) ? 1 : 0;
+            const int oy = (AMREX_SPACEDIM >= 2 && etype[1] == 0) ? 1 : 0;
+            const int oz = (AMREX_SPACEDIM == 3 && etype[2] == 0) ? 1 : 0;
+            const bool has_cc = (ox + oy + oz > 0);
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(bmf, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                const Box bx = mfi.tilebox();
+                const auto beta_arr = bmf.array(mfi);
+                const auto rho_arr = rho_mf->const_array(mfi, rho_comp);
+                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    const Real ba = InertiaBetaNode(rho_arr(i,j,k),
+                        rho_floor, floor_w, taper_w, beta_fac, beta_id);
+                    Real bv = ba;
+                    if (has_cc) {
+                        const Real bb = InertiaBetaNode(
+                            rho_arr(i+ox, j+oy, k+oz),
+                            rho_floor, floor_w, taper_w, beta_fac, beta_id);
+                        bv = Real(2.0)*ba*bb/(ba + bb);
+                    }
+                    beta_arr(i,j,k) = bv;
+                });
+            }
+        }
+    }
+    return &m_inertia_beta;
+#endif
+}
+
 void ThetaImplicitHybrid::DarwinDeriveB ()
 {
     using ablastr::fields::Direction;

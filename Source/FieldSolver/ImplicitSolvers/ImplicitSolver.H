@@ -170,6 +170,21 @@ public:
     }
 
     /**
+     * \brief Fill and return E-staggered beta coefficients for the
+     * electron-inertia curl-curl preconditioner. The inertia operator in
+     * divided form is beta(x) E + curl curl E = beta(x) b with
+     * beta = 1/d_e^2 = mu0 e^2 n_lim / m_e_eff, so a non-null return puts
+     * CurlCurlMLMGPC into hybrid-inertia mode (unit curl-curl coefficient,
+     * MultiFab beta, RHS scaled by beta). Called by CurlCurlMLMGPC::Update()
+     * at every preconditioner rebuild; solvers without an inertia operator
+     * return nullptr (the default), keeping the electromagnetic behavior.
+     */
+    virtual const amrex::Vector<amrex::Array<amrex::MultiFab*,3>>* FillInertiaBetaCoeff ()
+    {
+        return nullptr;
+    }
+
+    /**
      * \brief Return per-direction pointers to the ion (particle) current
      * deposit consumed by the Ohm solve on level lev, for preconditioners
      * that model the frozen motional/drift response (J - J_i) x delta_B.
