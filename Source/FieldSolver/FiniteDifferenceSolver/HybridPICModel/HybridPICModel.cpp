@@ -1597,6 +1597,7 @@ void HybridPICModel::BfieldEvolve (
         if (t + dt_sub > dt_half) { dt_sub = dt_half - t; }
         bool step_succeeded = true;
         amrex::Real step_change_factor = 1.0_rt;
+        amrex::Real last_error = -1.0_rt;  // debug telemetry
 
         // Predictor: the engine advances the circuit over this substep
         // with its held EMF estimates and pushes the scale segments; the
@@ -1615,6 +1616,7 @@ void HybridPICModel::BfieldEvolve (
 
             step_change_factor = m_substep_safety * std::pow(error + 1.e-10_rt, -0.2_rt);
             step_succeeded = (error <= 1._rt);
+            last_error = error;
 
         } else {
             BfieldEvolveRK4(
@@ -1675,6 +1677,7 @@ void HybridPICModel::BfieldEvolve (
                     step_change_factor =
                         m_substep_safety * std::pow(error + 1.e-10_rt, -0.2_rt);
                     step_succeeded = (error <= 1._rt);
+                    last_error = error;
                 } else {
                     BfieldEvolveRK4(
                         Bfield, Efield, Jfield, rhofield, eb_update_E, B_old,
@@ -1707,6 +1710,27 @@ void HybridPICModel::BfieldEvolve (
             }
             dt_sub *= std::min(m_substep_max_growth, step_change_factor);
         } else {
+            // Debug telemetry (debug/run020-substep-telemetry): on the
+            // first rejects, report the raw error ratio and the state of
+            // the REJECTED candidate before it is rolled back, so a
+            // corrupted-field reject (nonfinite/absurd B) is
+            // distinguishable from a large-but-finite error estimate.
+            if (n_attempts < 3) {
+                for (int ii = 0; ii < 3; ii++) {
+                    const bool fin = Bfield[lev][ii]->is_finite();
+                    const amrex::Real bmax =
+                        Bfield[lev][ii]->norm0(0, 0, /*local=*/false);
+                    const amrex::Real omax = B_old[ii].norm0(0, 0, false);
+                    amrex::Print() << "[substep-telemetry] attempt "
+                        << n_attempts + 1 << " REJECT comp " << ii
+                        << ": err_ratio = " << last_error
+                        << ", |B_cand|max = " << bmax
+                        << " (finite " << (fin ? 1 : 0) << ")"
+                        << ", |B_old|max = " << omax
+                        << ", dt_sub = " << dt_sub
+                        << ", t = " << t << "\n";
+                }
+            }
             // reset Bfield to B_old before trying the integration again
             for (int ii = 0; ii < 3; ii++) {
                 MultiFab::Copy(*Bfield[lev][ii], B_old[ii], 0, 0, 1, ng);
