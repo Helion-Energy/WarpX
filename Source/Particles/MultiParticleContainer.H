@@ -564,10 +564,14 @@ private:
      *  subsequent scrape pass will collect (signed distance to the EB below
      *  standoff_cells cells) into the per-species EB tallies. Must be called
      *  BEFORE the scrape invalidates the particles. Collective (global sum).
+     *  Public access: the body holds an extended device lambda, which
+     *  nvcc >= 13 rejects inside private/protected members.
      */
+public:
     void TallyParticlesToBeCollectedAtEB (
         ablastr::fields::MultiLevelScalarField const& distance_to_eb,
         amrex::Real standoff_cells);
+private:
 
     void ReadParameters ();
 
