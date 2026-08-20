@@ -316,8 +316,11 @@ void WarpX::MakeWarpX ()
             utils::parser::queryWithParser(
                 pp_boundary, "eb_standoff_cells", eb_standoff_cells);
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                eb_standoff_cells >= 0.0,
-                "boundary.eb_standoff_cells must be >= 0");
+                eb_standoff_cells >= 0.0 && eb_standoff_cells <= 4.0,
+                "boundary.eb_standoff_cells must be in [0, 4]: the EB "
+                "signed-distance field saturates at (ngrow+1) smallest "
+                "cells from the surface, and a standoff beyond the "
+                "saturation roof collects every fluid cell");
         }
     }
 

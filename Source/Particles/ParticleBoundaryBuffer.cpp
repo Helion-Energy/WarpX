@@ -525,11 +525,13 @@ void ParticleBoundaryBuffer::gatherParticlesFromEmbeddedBoundaries (
                 // with the scraper's.
                 amrex::Real phi_offset = 0.0_rt;
                 if (WarpX::eb_boundary_type == EmbeddedBoundaryType::Insulating) {
-                    amrex::Real dx_max = warpx_instance.Geom(lev).CellSize(0);
+                    // smallest cell size: must stay below the
+                    // signed-distance roof (see ParticleScraper.H)
+                    amrex::Real dx_min = warpx_instance.Geom(lev).CellSize(0);
                     for (int d = 1; d < AMREX_SPACEDIM; ++d) {
-                        dx_max = amrex::max(dx_max, warpx_instance.Geom(lev).CellSize(d));
+                        dx_min = amrex::min(dx_min, warpx_instance.Geom(lev).CellSize(d));
                     }
-                    phi_offset = WarpX::eb_standoff_cells * dx_max;
+                    phi_offset = WarpX::eb_standoff_cells * dx_min;
                 }
 
 #ifdef AMREX_USE_OMP

@@ -200,12 +200,17 @@ scrapeParticlesAtEB (PC& pc, ablastr::fields::MultiLevelScalarField const& dista
 
         // Insulating-wall standoff: collect particles this far BEFORE the
         // surface (signed distance in meters; "cells" measured with the
-        // largest cell size of the level).
-        amrex::Real dx_max = pc.Geom(lev).CellSize(0);
+        // SMALLEST cell size of the level). The smallest is load-bearing:
+        // the EB signed-distance field saturates at min(dx)*(ngrow+1)
+        // (the FillSignedDistance roof), so an offset measured in the
+        // LARGEST cell size exceeds the roof on anisotropic grids and
+        // the predicate collects every fluid cell (measured: an RZ grid
+        // with dz/dr ~ 3 scraped the entire plasma at startup).
+        amrex::Real dx_min = pc.Geom(lev).CellSize(0);
         for (int d = 1; d < AMREX_SPACEDIM; ++d) {
-            dx_max = std::max(dx_max, pc.Geom(lev).CellSize(d));
+            dx_min = std::min(dx_min, pc.Geom(lev).CellSize(d));
         }
-        amrex::Real const phi_threshold = standoff_cells * dx_max;
+        amrex::Real const phi_threshold = standoff_cells * dx_min;
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif

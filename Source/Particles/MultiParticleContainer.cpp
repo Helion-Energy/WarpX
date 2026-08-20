@@ -1307,11 +1307,13 @@ void MultiParticleContainer::TallyParticlesToBeCollectedAtEB (
         {
             const auto plo = pc.Geom(lev).ProbLoArray();
             const auto dxi = pc.Geom(lev).InvCellSizeArray();
-            amrex::Real dx_max = pc.Geom(lev).CellSize(0);
+            // smallest cell size: must stay below the signed-distance
+            // roof (see ParticleScraper.H)
+            amrex::Real dx_min = pc.Geom(lev).CellSize(0);
             for (int d = 1; d < AMREX_SPACEDIM; ++d) {
-                dx_max = std::max(dx_max, pc.Geom(lev).CellSize(d));
+                dx_min = std::min(dx_min, pc.Geom(lev).CellSize(d));
             }
-            amrex::Real const phi_threshold = standoff_cells * dx_max;
+            amrex::Real const phi_threshold = standoff_cells * dx_min;
 
             // No OpenMP here: the tiles share one ReduceData.
             for (WarpXParIter pti(pc, lev); pti.isValid(); ++pti)

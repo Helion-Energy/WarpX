@@ -1089,8 +1089,10 @@ additionally define the electric potential at the embedded boundary with an anal
     :default: ``2.``
     :optional:
 
-    Width of the insulating wall's standoff band, in cells (measured with the largest cell size
-    of the level). Only used with ``boundary.eb_type = insulating``.
+    Width of the insulating wall's standoff band, in cells (measured with the smallest cell size
+    of the level — the embedded boundary's signed-distance field saturates a few smallest-cells
+    from the surface, so the band must be measured in the same unit or an anisotropic grid
+    collects the entire domain). Must be at most 4. Only used with ``boundary.eb_type = insulating``.
 
 .. _param-particle-thermalizer:
 
