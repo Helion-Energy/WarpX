@@ -485,14 +485,22 @@ void HybridPICModel::ReadParameters ()
         "hybrid_pic_model.vacuum_hyper_resistivity_diffusivity cannot be "
         "negative");
 
-    // Generalized-Ohm's-law E solve (see member doc).
+    // Generalized-Ohm's-law (GOL) E solve form (see member doc).
+    // Terminology: both paths solve the generalized Ohm's law; the
+    // distinction is the FORM. "e_form" (alias "ohm") = the legacy
+    // algebraic solve for E with its density division; "amano_form"
+    // (alias "gol") = the inertia-screened division-free form of
+    // Amano 2014 / Hewett-Nielson 1978.
     {
-        std::string esolve = "ohm";
+        std::string esolve = "e_form";
         pp_hybrid.query("esolve", esolve);
-        if (esolve == "gol") { m_esolve_gol = true; }
-        else {
-            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(esolve == "ohm",
-                "hybrid_pic_model.esolve must be 'ohm' or 'gol'");
+        if (esolve == "amano_form" || esolve == "gol") {
+            m_esolve_gol = true;
+        } else {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                esolve == "e_form" || esolve == "ohm",
+                "hybrid_pic_model.esolve must be 'e_form' (alias 'ohm') "
+                "or 'amano_form' (alias 'gol')");
         }
         pp_hybrid.query("gol_sweeps", m_gol_sweeps);
         utils::parser::queryWithParser(pp_hybrid, "gol_cfl_alpha", m_gol_alpha);

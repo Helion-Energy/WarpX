@@ -1354,11 +1354,16 @@ public:
     amrex::Real m_vacuum_hyper_resistivity_diffusivity = 0.0;
     amrex::Real m_vacuum_hyper_resistivity_cfl_factor = 0.01;
 
-    /** Generalized-Ohm's-law E solve (Amano, Higashimori & Shirakawa,
-     *  JCP 275 (2014) 197; the elliptic form is the Hewett-Nielson
-     *  Darwin transverse-field solve, JCP 29 (1978) 219, in
-     *  generalized-Ohm clothing): instead of the algebraic Ohm's law
-     *  with its density division, solve the screened equation
+    /** Generalized-Ohm's-law (GOL) E-solve FORM. Terminology: the
+     *  hybrid solver always solves the generalized Ohm's law; what
+     *  this selects is the form. E-FORM (esolve = e_form, alias ohm,
+     *  the default): the legacy algebraic solve for E with its density
+     *  division. AMANO-FORM (esolve = amano_form, alias gol): the
+     *  inertia-screened division-free form (Amano, Higashimori &
+     *  Shirakawa, JCP 275 (2014) 197; the elliptic version is the
+     *  Hewett-Nielson Darwin transverse-field solve, JCP 29 (1978)
+     *  219, in generalized-Ohm clothing): instead of the algebraic
+     *  solve, treat the screened equation
      *      (rho_e - eps grad^2) E = F,
      *      F = enE - grad Pe + (rho_e eta)_eff J,   eps = m_e'/(mu0 e),
      *  whose RHS is division-free (every term ~ density moments), so the
@@ -1393,7 +1398,8 @@ public:
      *  Mutable: set inside the const substep loop; 0 -> full-step dt. */
     mutable amrex::Real m_gol_dt_sub = 0.0;
 
-    /** GOL solve form. 0 = jacobi: the screened elliptic solve above,
+    /** Amano-form advance (how the screened equation is treated).
+     *  0 = jacobi: the screened elliptic solve above,
      *  warm-started stationary sweeps -- converges only where plasma
      *  makes the operator diagonally dominant; across wide vacuum gaps
      *  the Laplace limit is irreducibly elliptic (measured: per-sweep

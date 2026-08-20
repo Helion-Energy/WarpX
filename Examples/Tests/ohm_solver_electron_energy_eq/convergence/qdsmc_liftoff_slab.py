@@ -358,10 +358,11 @@ parser.add_argument(
 )
 parser.add_argument(
     "--esolve",
-    choices=["ohm", "gol"],
+    choices=["e_form", "ohm", "amano_form", "gol"],
     default="ohm",
-    help="E-field solve: ohm = algebraic Ohm's law (floored division, "
-    "legacy); gol = Amano+2014 generalized Ohm's law with electron "
+    help="generalized-Ohm's-law E-solve FORM: e_form (alias ohm) = legacy "
+    "algebraic solve (floored division); amano_form (alias gol) = "
+    "Amano+2014 inertia-screened division-free form "
     "inertia (screened solve, division-free, vacuum -> Laplace; "
     "collocated only)",
 )
@@ -787,8 +788,8 @@ if args.eta_vac_d > 0.0:
     pywarpx.hybridpicmodel.vacuum_resistivity_diffusivity = args.eta_vac_d
 if args.hyper_vac_d > 0.0:
     pywarpx.hybridpicmodel.vacuum_hyper_resistivity_diffusivity = args.hyper_vac_d
-if args.esolve == "gol":
-    pywarpx.hybridpicmodel.esolve = "gol"
+if args.esolve in ("gol", "amano_form"):
+    pywarpx.hybridpicmodel.esolve = "amano_form"
     n_one_count = (
         args.gol_n_min if args.gol_n_min > 0.0 else args.fill_frac * N_I / args.nppc
     )
