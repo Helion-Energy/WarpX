@@ -310,6 +310,11 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
             m_z_boundary_fluid == "outflow",
         "implicit_mhd.z_boundary_fluid must be neumann, wall_temperature, "
         "or outflow");
+    pp.query("z_lo_boundary_fluid", m_z_lo_boundary_fluid);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_z_lo_boundary_fluid.empty() || m_z_lo_boundary_fluid == "symmetry",
+        "implicit_mhd.z_lo_boundary_fluid must be empty (inherit "
+        "z_boundary_fluid) or symmetry");
     const bool has_z_wall_temperature = utils::parser::queryWithParser(
         pp, "z_wall_temperature", m_z_wall_temperature);
     if (m_z_boundary_fluid == "wall_temperature") {
@@ -374,6 +379,11 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         m_z_boundary_fluid == "neumann" || m_use_recast,
         "implicit_mhd.z_boundary_fluid = wall_temperature/outflow requires "
         "the conservative-form recast (implicit_mhd.fluid_flux = hlld or "
+        "central)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_z_lo_boundary_fluid.empty() || m_use_recast,
+        "implicit_mhd.z_lo_boundary_fluid = symmetry requires the "
+        "conservative-form recast (implicit_mhd.fluid_flux = hlld or "
         "central)");
 #if !defined(WARPX_DIM_1D_Z) && !defined(WARPX_DIM_RZ)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -950,13 +960,25 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         m_z_neumann = true;
         m_z_lo_open = (WarpX::field_boundary_lo[1] == FieldBoundaryType::Open);
         m_z_hi_open = (WarpX::field_boundary_hi[1] == FieldBoundaryType::Open);
+        // A z_lo PMC face is the mirror-symmetry plane: tangential B and
+        // normal E vanish there, which is exactly the electromagnetic
+        // parity of the z-mirror (Br, B_theta odd; Bz even; E_r, E_theta
+        // even; E_z odd). The solver applies the parity ghost fills
+        // itself (the upstream PMC apply only reaches ng_fieldgather
+        // ghosts, zero in particle-free MHD runs, and no Yee component
+        // is nodal-normal at a z face); the fluid pairing is asserted
+        // below.
+        m_z_lo_pmc = (WarpX::field_boundary_lo[1] == FieldBoundaryType::PMC);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            (WarpX::field_boundary_lo[1] == FieldBoundaryType::None || m_z_lo_open) &&
+            (WarpX::field_boundary_lo[1] == FieldBoundaryType::None ||
+             m_z_lo_open || m_z_lo_pmc) &&
                 (WarpX::field_boundary_hi[1] == FieldBoundaryType::None || m_z_hi_open),
             "theta_implicit_mhd with non-periodic z requires "
             "boundary.field_lo/hi = none in z (the solver applies its own "
             "Neumann outflow ghost fills) or open (Green's-function "
-            "free-space cap for the fields; the fluid keeps outflow ghosts)");
+            "free-space cap for the fields; the fluid keeps outflow "
+            "ghosts); z_lo may instead be pmc (mirror-symmetry plane, "
+            "paired with implicit_mhd.z_lo_boundary_fluid = symmetry)");
         if (m_z_lo_open || m_z_hi_open) {
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 GreensFunctionOpenBC::IsActive(),
@@ -965,6 +987,15 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
                 "hybrid solver)");
         }
     }
+    // The mirror plane must be configured whole or not at all: fluid
+    // symmetry ghosts against non-PMC fields (or PMC fields against
+    // outflow fluid ghosts) would leak through the plane.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        (m_z_lo_boundary_fluid == "symmetry") == m_z_lo_pmc,
+        "the z_lo mirror is a pairing: implicit_mhd.z_lo_boundary_fluid = "
+        "symmetry requires boundary.field_lo = pmc on z, and a z_lo pmc "
+        "field boundary requires implicit_mhd.z_lo_boundary_fluid = "
+        "symmetry");
     // The selectable z-end fluid ghosts only exist where the solver
     // fills axial domain ghosts at all; on periodic z they would be a
     // silent no-op.
@@ -1024,6 +1055,10 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         m_z_boundary_fluid == "neumann",
         "implicit_mhd.z_boundary_fluid = wall_temperature/outflow requires "
         "cylindrical RZ geometry (non-periodic z ends)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_z_lo_boundary_fluid.empty(),
+        "implicit_mhd.z_lo_boundary_fluid = symmetry requires cylindrical "
+        "RZ geometry (a non-periodic z_lo end)");
 #endif
 
     m_hybrid_pic_model = m_WarpX->get_pointer_HybridPICModel();
@@ -2113,6 +2148,11 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "\n"
                    << "Open-r fluid wall:             " << m_r_open_fluid << "\n"
                    << "Z-end fluid boundary:          " << m_z_boundary_fluid << "\n"
+                   // Boot-gate line of the z_lo mirror (verbatim contract).
+                   << (m_z_lo_pmc
+                           ? "Z-lo fluid boundary:           symmetry "
+                             "(mirror; PMC fields)\n"
+                           : "")
                    << "Z wall temperature [eV]:       " << m_z_wall_temperature << "\n"
                    << "HLLC signal closure:           " << m_hllc_signal_closure << "\n"
                    << "HLLC contact blend:            " << m_hllc_contact_blend << "\n";
@@ -2341,6 +2381,10 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
                 m_WarpX->Geom(0).Domain(), momentum.ixType().toIntVect());
             const int domain_lo = domain.smallEnd(1);
             const int domain_hi = domain.bigEnd(1);
+            // The z_lo mirror face is a zero-flux symmetry plane, not an
+            // outflow end: its ghost rows carry the parity image (filled
+            // below) and must not be sign-clamped.
+            const bool skip_z_lo = m_z_lo_pmc;
             for (amrex::MFIter mfi(momentum); mfi.isValid(); ++mfi) {
                 const amrex::Box grown =
                     amrex::grow(mfi.validbox(), momentum.nGrowVect());
@@ -2351,7 +2395,7 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
                 const auto arr = momentum.array(mfi);
                 amrex::ParallelFor(grown,
                                    [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-                    if (j < domain_lo) {
+                    if (j < domain_lo && !skip_z_lo) {
                         arr(i, j, k, 2) = std::min(arr(i, j, k, 2), 0.0_rt);
                     } else if (j > domain_hi) {
                         arr(i, j, k, 2) = std::max(arr(i, j, k, 2), 0.0_rt);
@@ -2407,6 +2451,10 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
             const amrex::Box& cc_domain = m_WarpX->Geom(0).Domain();
             const int z_lo = cc_domain.smallEnd(1);
             const int z_hi = cc_domain.bigEnd(1);
+            // On a z_lo mirror the override applies at z_hi only: the
+            // z_lo ghost rows keep the symmetry-plane parity image
+            // (filled below), never an outflow/reservoir state.
+            const bool skip_z_lo = m_z_lo_pmc;
             for (amrex::MFIter mfi(density); mfi.isValid(); ++mfi) {
                 const amrex::Box grown =
                     amrex::grow(mfi.validbox(), density.nGrowVect());
@@ -2421,7 +2469,7 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
                 const auto ion_perp = ion_perp_energy.array(mfi);
                 amrex::ParallelFor(grown,
                                    [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-                    if (j >= z_lo && j <= z_hi) {
+                    if ((j >= z_lo && j <= z_hi) || (skip_z_lo && j < z_lo)) {
                         return;
                     }
                     if (z_outflow) {
@@ -2477,6 +2525,27 @@ void ThetaImplicitMHD::ApplyFluidDomainBoundaries (amrex::MultiFab& density,
                     }
                 });
             }
+        }
+        if (m_z_lo_pmc) {
+            // Mirror-symmetry plane at z_lo (z_lo_boundary_fluid =
+            // symmetry, paired with the pmc field boundary): the z_lo
+            // ghost rows are replaced by the exact linear reflection of
+            // the interior -- even scalars and tangential momentum, ODD
+            // axial momentum -- INSTEAD of the Neumann base image, so
+            // the z_lo boundary faces see symmetric Riemann states (zero
+            // mass/energy advective flux, pure pressure normal-momentum
+            // flux) and the conduction stage sees a zero normal
+            // temperature gradient. The fill is linear in the state
+            // (C-infinity for the JFNK probes), runs in EVERY residual
+            // evaluation, and precedes the radial pass below so the
+            // corner ghosts inherit the mirrored rows. z_hi keeps the
+            // Neumann image and the z_boundary_fluid override above.
+            ApplyMirrorZLoDomainGhosts(density, {1, 1, 1});
+            ApplyMirrorZLoDomainGhosts(momentum, {1, 1, -1});
+            ApplyMirrorZLoDomainGhosts(electron_energy, {1, 1, 1});
+            ApplyMirrorZLoDomainGhosts(ion_energy, {1, 1, 1});
+            ApplyMirrorZLoDomainGhosts(ion_parallel_energy, {1, 1, 1});
+            ApplyMirrorZLoDomainGhosts(ion_perp_energy, {1, 1, 1});
         }
     }
     const amrex::Box& domain = m_WarpX->Geom(0).Domain();
@@ -2633,6 +2702,58 @@ void ThetaImplicitMHD::ApplyNeumannZDomainGhosts (amrex::MultiFab& mf,
 #endif
 }
 
+void ThetaImplicitMHD::ApplyMirrorZLoDomainGhosts (
+    amrex::MultiFab& mf, const amrex::GpuArray<int, 3>& a_component_parity) const
+{
+#if defined(WARPX_DIM_RZ)
+    // Mirror-parity fill of the z_lo (PMC/symmetry-plane) domain ghosts:
+    // the exact linear reflection of the interior, so the flux/EMF/Ohm
+    // stencils see the half domain as the upper half of a mirror-
+    // symmetric full domain. Staggering aware: cell-centered-in-z data
+    // reflects across the boundary FACE (ghost z_lo - 1 - g takes
+    // parity * value at z_lo + g; the Neumann pass's clamp is only the
+    // g = 0 image), nodal-in-z data reflects across the boundary NODE
+    // (ghost z_lo - g takes parity * value at z_lo + g, identical to
+    // the Neumann pass's even mirror for parity +1) and an odd nodal
+    // component is zeroed ON the plane node. Runs AFTER the Neumann
+    // pass of the same field, which keeps ownership of z_hi. Deep
+    // ghosts of a degenerate-thin domain fall back to the far anchor
+    // row like the Neumann fill (never sourcing other written ghosts).
+    if (!m_z_lo_pmc) {
+        return;
+    }
+    const amrex::Box domain =
+        amrex::convert(m_WarpX->Geom(0).Domain(), mf.ixType().toIntVect());
+    const int plane = domain.smallEnd(1);
+    const int domain_hi = domain.bigEnd(1);
+    const bool nodal_z = mf.ixType().nodeCentered(1);
+    const int ncomp = mf.nComp();
+    AMREX_ALWAYS_ASSERT(ncomp <= 3);
+    const amrex::GpuArray<int, 3> parity = a_component_parity;
+    for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
+        const amrex::Box grown = amrex::grow(mfi.validbox(), mf.nGrowVect());
+        if (grown.smallEnd(1) > plane) {
+            continue;
+        }
+        const auto arr = mf.array(mfi);
+        amrex::ParallelFor(grown, ncomp,
+                           [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) {
+            if (j < plane) {
+                const int source =
+                    nodal_z ? amrex::min(2 * plane - j, domain_hi)
+                            : amrex::min(2 * plane - 1 - j, domain_hi);
+                arr(i, j, k, n) =
+                    static_cast<amrex::Real>(parity[n]) * arr(i, source, k, n);
+            } else if (nodal_z && j == plane && parity[n] < 0) {
+                arr(i, j, k, n) = 0.0_rt;
+            }
+        });
+    }
+#else
+    amrex::ignore_unused(mf, a_component_parity);
+#endif
+}
+
 void ThetaImplicitMHD::PublishMomentumComponents () const
 {
     // Diagnostic-only views; refreshed at initialization and at every
@@ -2767,6 +2888,10 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
             // open z caps keep the curl-of-Green's-B ghost row (computed
             // one row into the ghosts by CalculatePlasmaCurrent)
             ApplyNeumannZDomainGhosts(plasma_current, 1);
+            if (direction == 2) {
+                // z_lo mirror: J_z is ODD (see ComputeRHS).
+                ApplyMirrorZLoDomainGhosts(plasma_current, {-1, -1, -1});
+            }
             amrex::MultiFab& old_current = *m_WarpX->m_fields.get(
                 OldPlasmaCurrentName, Direction{direction}, 0);
             amrex::MultiFab::Copy(old_current, plasma_current, 0, 0, 1,
@@ -2905,13 +3030,25 @@ void ThetaImplicitMHD::UpdateWarpXFields (const WarpXSolverVec& state, const amr
             // are overwritten by the Green's fill), so it keeps the plain
             // Neumann clamp everywhere. B on an open cap was just filled by
             // the Green's map inside ApplyBfieldBoundary: every ghost row is
-            // kept there (the fill covers the full ghost width).
-            ApplyNeumannZDomainGhosts(
-                *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{direction}, 0));
+            // kept there (the fill covers the full ghost width). On a z_lo
+            // PMC (mirror) face the Neumann image is replaced by the
+            // parity image: E_z is ODD cell-centered in z; Br and B_theta
+            // are ODD cell-centered in z; the remaining components are
+            // EVEN and nodal in z, where the Neumann fill already IS the
+            // even mirror.
+            amrex::MultiFab& electric_component =
+                *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{direction}, 0);
+            ApplyNeumannZDomainGhosts(electric_component);
+            if (direction == 2) {
+                ApplyMirrorZLoDomainGhosts(electric_component, {-1, -1, -1});
+            }
             amrex::MultiFab& magnetic_component =
                 *m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{direction}, 0);
             ApplyNeumannZDomainGhosts(magnetic_component,
                                       magnetic_component.nGrowVect()[1]);
+            if (direction != 2) {
+                ApplyMirrorZLoDomainGhosts(magnetic_component, {-1, -1, -1});
+            }
         }
     }
 
@@ -2968,6 +3105,9 @@ void ThetaImplicitMHD::FillFluidSources (const WarpXSolverVec& state)
         });
     }
     charge_density.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
+    // Nodal-in-z EVEN scalar: on a z_lo mirror face the Neumann nodal
+    // fill is already the exact even reflection (same for the nodal Te
+    // and rebuilt Pe below), so no parity pass is needed.
     ApplyNeumannZDomainGhosts(charge_density);
     // Radial domain ghosts too (axis parity mirror; wall reflect or open
     // clamp at r_max): the electron-pressure ghost rebuild below reads the
@@ -2991,6 +3131,12 @@ void ThetaImplicitMHD::FillFluidSources (const WarpXSolverVec& state)
         }
         ion_current[component]->FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
         ApplyNeumannZDomainGhosts(*ion_current[component]);
+        if (component == 2) {
+            // z_lo mirror: J is a polar vector, so J_z (cell-centered in
+            // z) is ODD across the plane; J_r and J_theta are EVEN and
+            // nodal in z, already exact under the Neumann nodal mirror.
+            ApplyMirrorZLoDomainGhosts(*ion_current[component], {-1, -1, -1});
+        }
     }
 
     // TEMPERATURE-primary nodal electron closure fields:
@@ -3180,6 +3326,15 @@ void ThetaImplicitMHD::FillCellCenteredElectromagneticFields ()
     magnetic_field_cc.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
     ApplyNeumannZDomainGhosts(total_current_cc, 1);
     ApplyNeumannZDomainGhosts(magnetic_field_cc, 1);
+    // z_lo mirror: the cell-centered interpolants take the parity image
+    // instead of the Neumann clamp -- J is a polar vector (J_r, J_theta
+    // even; J_z odd), B an axial vector (Br, B_theta odd; Bz even). With
+    // the split-field external drive folded into B_cc above, the deck's
+    // external field must itself respect the z = 0 mirror (symmetric
+    // coil set); the fill imposes the parity on the total. Runs before
+    // the radial passes below so the corner ghosts inherit.
+    ApplyMirrorZLoDomainGhosts(total_current_cc, {1, 1, -1});
+    ApplyMirrorZLoDomainGhosts(magnetic_field_cc, {-1, -1, 1});
 #if defined(WARPX_DIM_RZ)
     {
         // The r_max domain ghosts of the cell-centered total current are
@@ -3237,8 +3392,15 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
     if (m_z_neumann) {
         using ablastr::fields::Direction;
         for (int direction = 0; direction < 3; ++direction) {
-            ApplyNeumannZDomainGhosts(*m_WarpX->m_fields.get(
-                FieldType::hybrid_current_fp_plasma, Direction{direction}, 0), 1);
+            amrex::MultiFab& current_component = *m_WarpX->m_fields.get(
+                FieldType::hybrid_current_fp_plasma, Direction{direction}, 0);
+            ApplyNeumannZDomainGhosts(current_component, 1);
+            if (direction == 2) {
+                // z_lo mirror: J_z (cell-centered in z) is ODD; J_r and
+                // J_theta are even nodal-in-z, exact under the Neumann
+                // nodal mirror.
+                ApplyMirrorZLoDomainGhosts(current_component, {-1, -1, -1});
+            }
         }
     }
 
@@ -5786,8 +5948,13 @@ void ThetaImplicitMHD::AccumulateAbsorbedWallLedger (const amrex::Real dt,
                                                m_WarpX->GetEBUpdateEFlag());
     if (m_z_neumann) {
         for (int direction = 0; direction < 3; ++direction) {
-            ApplyNeumannZDomainGhosts(*m_WarpX->m_fields.get(
-                FieldType::hybrid_current_fp_plasma, Direction{direction}, 0), 1);
+            amrex::MultiFab& current_component = *m_WarpX->m_fields.get(
+                FieldType::hybrid_current_fp_plasma, Direction{direction}, 0);
+            ApplyNeumannZDomainGhosts(current_component, 1);
+            if (direction == 2) {
+                // z_lo mirror: J_z is ODD (see ComputeRHS).
+                ApplyMirrorZLoDomainGhosts(current_component, {-1, -1, -1});
+            }
         }
     }
     FillCellCenteredElectromagneticFields();
@@ -7116,8 +7283,15 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
     m_WarpX->ApplyEfieldBoundary(0, PatchType::fine, time);
     if (m_z_neumann) {
         for (int direction = 0; direction < 3; ++direction) {
-            ApplyNeumannZDomainGhosts(*m_WarpX->m_fields.get(
-                FieldType::Efield_fp, Direction{direction}, 0));
+            amrex::MultiFab& electric_component = *m_WarpX->m_fields.get(
+                FieldType::Efield_fp, Direction{direction}, 0);
+            ApplyNeumannZDomainGhosts(electric_component);
+            if (direction == 2) {
+                // z_lo mirror: E_z (cell-centered in z) is ODD; E_r and
+                // E_theta are even nodal-in-z, exact under the Neumann
+                // nodal mirror.
+                ApplyMirrorZLoDomainGhosts(electric_component, {-1, -1, -1});
+            }
         }
     }
     if (m_wall_mask.IsActive()) {
@@ -8927,6 +9101,12 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
                 *m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{direction}, 0);
             ApplyNeumannZDomainGhosts(magnetic_component,
                                       magnetic_component.nGrowVect()[1]);
+            if (direction != 2) {
+                // z_lo mirror: Br and B_theta (cell-centered in z) are
+                // ODD; Bz is even nodal-in-z, exact under the Neumann
+                // nodal mirror.
+                ApplyMirrorZLoDomainGhosts(magnetic_component, {-1, -1, -1});
+            }
         }
     }
     FillFluidSources(m_state);
@@ -8943,8 +9123,13 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
     if (m_z_neumann) {
         using ablastr::fields::Direction;
         for (int direction = 0; direction < 3; ++direction) {
-            ApplyNeumannZDomainGhosts(*m_WarpX->m_fields.get(
-                FieldType::hybrid_current_fp_plasma, Direction{direction}, 0), 1);
+            amrex::MultiFab& current_component = *m_WarpX->m_fields.get(
+                FieldType::hybrid_current_fp_plasma, Direction{direction}, 0);
+            ApplyNeumannZDomainGhosts(current_component, 1);
+            if (direction == 2) {
+                // z_lo mirror: J_z is ODD (see ComputeRHS).
+                ApplyMirrorZLoDomainGhosts(current_component, {-1, -1, -1});
+            }
         }
     }
 
@@ -8997,8 +9182,13 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
     if (m_z_neumann) {
         using ablastr::fields::Direction;
         for (int direction = 0; direction < 3; ++direction) {
-            ApplyNeumannZDomainGhosts(
-                *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{direction}, 0));
+            amrex::MultiFab& electric_component = *m_WarpX->m_fields.get(
+                FieldType::Efield_fp, Direction{direction}, 0);
+            ApplyNeumannZDomainGhosts(electric_component);
+            if (direction == 2) {
+                // z_lo mirror: E_z is ODD (see AssembleOhmElectricField).
+                ApplyMirrorZLoDomainGhosts(electric_component, {-1, -1, -1});
+            }
         }
     }
     if (!m_use_recast) {

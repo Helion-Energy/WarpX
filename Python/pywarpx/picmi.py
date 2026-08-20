@@ -2476,6 +2476,20 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Wall temperature in eV of the z-end fluid ghosts; required with
         (and only valid with) z_boundary_fluid="wall_temperature".
 
+    z_lo_boundary_fluid: {"symmetry"}, optional
+        Fluid-moment ghost treatment at the z_lo end only (RZ,
+        fluid_flux="hlld" or "central"). Unset, z_lo inherits
+        z_boundary_fluid. "symmetry" makes z = z_lo a mirror-symmetry
+        plane: the z_lo ghost rows are the exact linear reflection of
+        the interior (even scalars and tangential momentum, odd axial
+        momentum), yielding zero advective mass/energy flux and zero
+        conductive heat flux through the plane. Requires (and is
+        required by) the PMC field boundary at z_lo
+        (``boundary.field_lo = ... pmc``), whose parities (odd
+        tangential B, even normal B, even tangential E, odd normal E)
+        are the mirror parities of the electromagnetic subsystem. z_hi
+        keeps z_boundary_fluid.
+
     wall_model: {"none", "pec", "pec_response", "dielectric"}, optional
         Shaped-wall model (RZ, fluid_flux="hlld" or
         "central", non-periodic z). "none" (default) is bit-identical
@@ -2836,6 +2850,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         r_open_fluid=None,
         z_boundary_fluid=None,
         z_wall_temperature=None,
+        z_lo_boundary_fluid=None,
         wall_model=None,
         wall_polyline_file=None,
         wall_thermal_bc=None,
@@ -2914,6 +2929,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.r_open_fluid = r_open_fluid
         self.z_boundary_fluid = z_boundary_fluid
         self.z_wall_temperature = z_wall_temperature
+        self.z_lo_boundary_fluid = z_lo_boundary_fluid
         self.wall_model = wall_model
         self.wall_polyline_file = wall_polyline_file
         self.wall_thermal_bc = wall_thermal_bc
@@ -3020,6 +3036,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.r_open_fluid = self.r_open_fluid
         implicit_mhd.z_boundary_fluid = self.z_boundary_fluid
         implicit_mhd.z_wall_temperature = self.z_wall_temperature
+        implicit_mhd.z_lo_boundary_fluid = self.z_lo_boundary_fluid
         implicit_mhd.wall_model = self.wall_model
         implicit_mhd.wall_polyline_file = self.wall_polyline_file
         implicit_mhd.wall_thermal_bc = self.wall_thermal_bc

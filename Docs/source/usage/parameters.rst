@@ -5408,6 +5408,37 @@ Jacobian probes.
     Wall temperature of the z-end fluid ghosts; required with (and only
     valid with) ``implicit_mhd.z_boundary_fluid = wall_temperature``.
 
+.. pp:param:: implicit_mhd.z_lo_boundary_fluid
+    :type: ``string``
+    :default: *none* (inherit ``z_boundary_fluid``)
+
+    Fluid-moment ghost treatment at the LOWER axial end only (RZ,
+    ``implicit_mhd.fluid_flux = hlld`` or ``central``). Unset, the
+    z_lo face keeps ``z_boundary_fluid``. The only accepted value,
+    ``symmetry``, makes :math:`z = z_{\mathrm{lo}}` a mirror-symmetry
+    plane: the z_lo ghost rows are the exact linear reflection of the
+    interior — even mass density and energies, even radial/azimuthal
+    momentum, ODD axial momentum — so the boundary faces see symmetric
+    Riemann states (zero advective mass/energy/normal-momentum flux;
+    the normal momentum feels only the symmetric pressure) and the
+    even-temperature mirror ghosts make the conductive heat flux
+    through the plane vanish identically. It must be paired with the
+    PMC field boundary at z_lo (``boundary.field_lo = ... pmc``), and a
+    z_lo ``pmc`` field boundary in turn requires
+    ``z_lo_boundary_fluid = symmetry`` — the PMC parities (tangential
+    :math:`B_r`, :math:`B_\theta` odd, normal :math:`B_z` even;
+    tangential :math:`E_r`, :math:`E_\theta` even, normal :math:`E_z`
+    odd; :math:`J_r`, :math:`J_\theta` even, :math:`J_z` odd) are
+    exactly the z-mirror parities of the electromagnetic subsystem, so
+    field, current, and fluid see one consistent half-domain image of a
+    mirror-symmetric full domain. The z_hi face keeps
+    ``z_boundary_fluid`` (production: ``outflow`` at z_hi with the
+    mirror at z_lo). With split external fields the deck's coil set
+    must itself respect the :math:`z = 0` mirror. Applied identically
+    in every JFNK residual evaluation; the MHD block preconditioner's
+    resistive/whistler end rows fold their ghost columns with the same
+    parities.
+
 .. pp:param:: implicit_mhd.hllc_signal_closure
     :type: ``string``
     :default: ``consistent``

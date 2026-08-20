@@ -11,6 +11,7 @@
 #include "FieldSolver/ImplicitSolvers/ImplicitSolver.H"
 #include "FieldSolver/ImplicitSolvers/WarpXSolverVec.H"
 
+#include <AMReX_Array.H>
 #include <AMReX_Parser.H>
 #include <AMReX_REAL.H>
 #include <AMReX_iMultiFab.H>
@@ -163,6 +164,20 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * fluid-moment behavior. */
     void ApplyNeumannZDomainGhosts (amrex::MultiFab& mf,
                                     int a_open_face_keep_rows = 0) const;
+    /** Mirror-parity fill of the z_lo domain ghosts (the PMC/symmetry
+     * face, m_z_lo_pmc): every ghost row is the exact linear reflection
+     * of the interior with the per-component parity a_component_parity
+     * (+1 even, -1 odd; entries beyond nComp are ignored), staggering
+     * aware -- cell-centered-in-z data reflects across the boundary
+     * FACE (ghost z_lo - 1 - g takes +/- the value at z_lo + g) and
+     * nodal-in-z data reflects across the boundary NODE (ghost z_lo - g
+     * takes +/- the value at z_lo + g, and an odd component is zeroed
+     * ON the plane node). Runs after the Neumann pass of the same field
+     * (which owns z_hi) and overwrites its z_lo image; even nodal-in-z
+     * data is unchanged by construction (the Neumann nodal fill is
+     * already the even mirror). */
+    void ApplyMirrorZLoDomainGhosts (amrex::MultiFab& mf,
+                                     const amrex::GpuArray<int, 3>& a_component_parity) const;
     void ApplyScalarRadialDomainGhosts (amrex::MultiFab& mf) const;
     /** Copy the three momentum-density components into their
      * single-component diagnostic views (MomentumDiag*Name). */
@@ -279,6 +294,11 @@ class ThetaImplicitMHD final : public ImplicitSolver
     GetMHDWallMaskForPC () const override
     {
         return m_wall_mask.View();
+    }
+
+    [[nodiscard]] bool GetMHDZLoMirrorForPC () const override
+    {
+        return m_z_lo_pmc;
     }
 
     inline static constexpr char MassDensityName[] = "implicit_mhd_mass_density";
@@ -742,6 +762,17 @@ class ThetaImplicitMHD final : public ImplicitSolver
     std::string m_z_boundary_fluid = "neumann";
     // Wall temperature [eV] of z_boundary_fluid = wall_temperature.
     amrex::Real m_z_wall_temperature = 0.0;
+    // Fluid-moment ghost treatment at the z_lo end ONLY (RZ, recast
+    // path): empty (default) inherits z_boundary_fluid; "symmetry" makes
+    // z = z_lo a mirror-symmetry plane -- the z_lo ghost rows are the
+    // exact linear reflection of the interior (even scalars and
+    // tangential momentum, odd axial momentum), which yields zero mass/
+    // energy/normal-momentum advective flux and zero conductive heat
+    // flux through the plane. Requires (and is required by)
+    // boundary.field_lo = pmc on z: the PMC field parities (Br, B_theta
+    // odd; Bz even; E_r, E_theta even; E_z odd) are the mirror parities
+    // of the electromagnetic subsystem. z_hi keeps z_boundary_fluid.
+    std::string m_z_lo_boundary_fluid;
     // Open upper radial boundary (RZ only): boundary.field_hi = open on r
     // selects the Green's-function free-space fill for the fields; the
     // fluid then gets zero-gradient (outflow) radial ghosts at r_max
@@ -754,6 +785,14 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // Green's values instead of re-imposing the z-invariant clamp.
     bool m_z_lo_open = false;
     bool m_z_hi_open = false;
+    // Mirror-symmetry z_lo face (RZ only): boundary.field_lo = pmc on z,
+    // paired 1:1 with implicit_mhd.z_lo_boundary_fluid = symmetry (both
+    // asserted at Define). Every solver z-ghost fill then replaces the
+    // zero-gradient image at z_lo with the PARITY image: even fields
+    // keep the staggering-aware mirror (identical to the Neumann fill
+    // for nodal-in-z data), odd fields get the sign-flipped mirror, and
+    // the z_hi face keeps its configured behavior.
+    bool m_z_lo_pmc = false;
     // Fluid ghost treatment at an OPEN r_max: "outflow" (default;
     // zero-gradient), "reflect" (keep the no-normal-flow mirror while
     // the field is free-space -- removes the wall-cell drainage channel

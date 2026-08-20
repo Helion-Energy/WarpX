@@ -793,6 +793,58 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# z_lo mirror-symmetry boundary (boundary.field_lo = pmc on z +
+# implicit_mhd.z_lo_boundary_fluid = symmetry), full-domain reference: a
+# z-symmetric blob on z in [-L, L] whose evolution must PRESERVE the
+# mirror parity of every field to solver roundoff (the operator commutes
+# with the mirror), with an odd Btheta seed and an even azimuthal flow
+# so every parity channel is live. Single rank: the half-domain twin
+# must match it to the nonlinear-solver tolerance, so the runs keep the
+# reduction order deterministic.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_mirror_full  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_mirror_full  # inputs
+    "analysis_mhd_mirror_full.py diags/diag000000 diags/diag000032"  # analysis
+    "analysis_default_regression.py --path diags/diag000032"  # checksum
+    OFF  # dependency
+)
+
+# half-domain twin on z in [0, L] with the mirror at z_lo: the gold
+# standard -- fields and moments must match the full run's upper half to
+# solver roundoff, the half-domain mass change must be roundoff before
+# anything reaches the z_hi outflow end, tangential B on the plane must
+# vanish, and the first-row axial momentum must be
+# antisymmetry-consistent with the full run
+add_warpx_test(
+    test_rz_theta_implicit_mhd_mirror_half  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_mirror_half  # inputs
+    "analysis_mhd_mirror_half.py diags/diag000000 diags/diag000032"  # analysis
+    "analysis_default_regression.py --path diags/diag000032"  # checksum
+    test_rz_theta_implicit_mhd_mirror_full  # dependency
+)
+
+# preconditioned twin of the half-domain mirror test: the MHD block PC's
+# z_lo end rows must carry the mirror fold (ghost B columns folded with
+# the tangential-odd/normal-even parities) instead of the Neumann-end
+# tangential-E-zero convention -- resistive_validate_assembly checks the
+# folded sparse assembly against the matrix-free application to
+# roundoff, the banded scatter asserts the folded columns stay in-band,
+# and right preconditioning must leave the converged answer on the full
+# run's upper half (the same mirror-equivalence analysis runs unchanged)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_mirror_half_pc  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_mirror_half jacobian.pc_type=pc_mhd_block pc_mhd_block.resistive_solver=banded pc_mhd_block.resistive_validate_assembly=true pc_mhd_block.resistive_threshold=1.0e-6"  # inputs
+    "analysis_mhd_mirror_half.py diags/diag000000 diags/diag000032"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_mirror_full  # dependency
+)
+
 # Green's-function open r_hi boundary through the implicit residual: the
 # same outflow physics with the uniform Bz supplied by the split external
 # vector potential; the ghost fill (a linear map of the interior J_theta)

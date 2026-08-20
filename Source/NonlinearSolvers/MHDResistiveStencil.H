@@ -143,6 +143,15 @@ struct ResistiveStencilConstants
     int axial_face_low = 0;
     int axial_face_high = 0;
     bool axial_periodic = false;
+    /** z_lo mirror-symmetry plane (boundary.field_lo = pmc on z paired
+     * with implicit_mhd.z_lo_boundary_fluid = symmetry): instead of
+     * dropping the z_lo boundary-plane tangential-E emissions, the row
+     * emission keeps them and FOLDS every ghost magnetic-field column to
+     * its interior mirror image with the z-mirror parities (Br and
+     * B_theta odd cell-centered, Bz even nodal) -- the boundary analog
+     * of the periodic wrap, matching the residual's parity ghost fills
+     * exactly. The z_hi plane keeps the tangential-E-zero convention. */
+    bool axial_lo_mirror = false;
     amrex::Real inverse_dr = 0.0;
     amrex::Real inverse_dz = 0.0;
     amrex::Real radial_lo = 0.0;
@@ -214,7 +223,7 @@ MakeResistiveStencilConstants (const amrex::Geometry& a_geometry,
 /**
  * \brief Emit the off-identity entries of one row of A (the resistive
  * curl-curl without the identity) as (column component, column index,
- * coefficient) pairs: sink(component, i, j, k, coefficient).
+ * coefficient) pairs: emit(component, i, j, k, coefficient).
  *
  * The row is the magnetic-field face a_component at (i, j, k) on the
  * residual's staggering. Boundary-zeroed electric-field contributions are
@@ -303,10 +312,54 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
 #elif defined(WARPX_DIM_RZ)
     const amrex::Real inverse_dr2 = c.inverse_dr * c.inverse_dr;
     const amrex::Real inverse_dz2 = c.inverse_dz * c.inverse_dz;
+    // Column emission: under the z_lo mirror (axial_lo_mirror) a
+    // magnetic-field column below the canonical axial range is folded to
+    // its interior mirror image with the z-mirror parity of its
+    // component -- Br and B_theta are cell-centered in z and ODD (ghost
+    // cell g maps to cell 2 lo - 1 - g with a sign flip), Bz is nodal in
+    // z and EVEN (ghost node g maps to node 2 lo - g) -- so every
+    // emitted column stays canonical, exactly like the periodic wrap.
+    const auto emit = [&] (const int column_component, const int column_r,
+                           const int column_z, const int column_k,
+                           const amrex::Real column_coefficient)
+    {
+        int axial = column_z;
+        amrex::Real value = column_coefficient;
+        if (c.axial_lo_mirror && axial < c.axial_face_low)
+        {
+            if (column_component == 2)
+            {
+                axial = 2 * c.axial_face_low - axial;
+            }
+            else
+            {
+                axial = 2 * c.axial_face_low - 1 - axial;
+                value = -value;
+            }
+        }
+        sink(column_component, column_r, axial, column_k, value);
+    };
+    // Tangential E on a non-periodic axial boundary plane is zeroed
+    // (dropped), EXCEPT on a z_lo mirror plane, where the plane EMF is
+    // live and its ghost reads fold (see emit above).
+    const auto axial_plane_drop = [&] (const int node_z)
+    {
+        if (c.axial_periodic)
+        {
+            return false;
+        }
+        if (node_z == c.axial_face_high)
+        {
+            return true;
+        }
+        return node_z == c.axial_face_low && !c.axial_lo_mirror;
+    };
     // Canonical-range guards of the hyper-resistive current reads: a
     // derivative pair whose magnetic-field cells leave the canonical
     // range is dropped whole (exactly zero under the residual's
-    // Neumann-z current ghosts, identity-leaning elsewhere).
+    // Neumann-z current ghosts, identity-leaning elsewhere) -- except
+    // below a z_lo mirror plane, where the fold makes the ghost reads
+    // exact and the pair is kept.
     const auto radial_cell_in_range = [&] (const int cell)
     {
         return cell >= c.radial_face_low && cell < c.radial_face_high;
@@ -314,7 +367,8 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
     const auto axial_cell_in_range = [&] (const int cell)
     {
         return c.axial_periodic ||
-               (cell >= c.axial_face_low && cell < c.axial_face_high);
+               ((cell >= c.axial_face_low || c.axial_lo_mirror) &&
+                cell < c.axial_face_high);
     };
     // mu0 J_theta = -d_r Bz + d_z Br on the (r-node, z-node) corner
     // (native staggering); zero on the axis node like the residual's
@@ -330,13 +384,13 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
         }
         if (radial_cell_in_range(node_r) && radial_cell_in_range(node_r - 1))
         {
-            sink(2, node_r, node_z, k, -weight * c.inverse_dr);
-            sink(2, node_r - 1, node_z, k, weight * c.inverse_dr);
+            emit(2, node_r, node_z, k, -weight * c.inverse_dr);
+            emit(2, node_r - 1, node_z, k, weight * c.inverse_dr);
         }
         if (axial_cell_in_range(node_z) && axial_cell_in_range(node_z - 1))
         {
-            sink(0, node_r, node_z, k, weight * c.inverse_dz);
-            sink(0, node_r, node_z - 1, k, -weight * c.inverse_dz);
+            emit(0, node_r, node_z, k, weight * c.inverse_dz);
+            emit(0, node_r, node_z - 1, k, -weight * c.inverse_dz);
         }
     };
     // mu0 J_r = -d_z Btheta on the (r-cell, z-node) face.
@@ -348,8 +402,8 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
         {
             return;
         }
-        sink(1, cell_r, node_z, k, -weight * c.inverse_dz);
-        sink(1, cell_r, node_z - 1, k, weight * c.inverse_dz);
+        emit(1, cell_r, node_z, k, -weight * c.inverse_dz);
+        emit(1, cell_r, node_z - 1, k, weight * c.inverse_dz);
     };
     // mu0 J_z = (1/r) d_r(r Btheta) on the (r-node, z-cell) face, with
     // the residual's on-axis regularization mu0 J_z = 4 Btheta / dr.
@@ -366,7 +420,7 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
         {
             if (radial_cell_in_range(node_r))
             {
-                sink(1, node_r, cell_z, k,
+                emit(1, node_r, cell_z, k,
                      weight * amrex::Real(4.0) * c.inverse_dr);
             }
             return;
@@ -377,9 +431,9 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
                 radius + amrex::Real(0.5) * c.radial_cell_size;
             const amrex::Real radius_low =
                 radius - amrex::Real(0.5) * c.radial_cell_size;
-            sink(1, node_r, cell_z, k,
+            emit(1, node_r, cell_z, k,
                  weight * c.inverse_dr * radius_high / radius);
-            sink(1, node_r - 1, cell_z, k,
+            emit(1, node_r - 1, cell_z, k,
                  -weight * c.inverse_dr * radius_low / radius);
         }
     };
@@ -402,8 +456,7 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
         {
             return;
         }
-        if (!c.axial_periodic &&
-            (node_z == c.axial_face_low || node_z == c.axial_face_high))
+        if (axial_plane_drop(node_z))
         {
             return;
         }
@@ -427,8 +480,7 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
     const auto emit_face_radial_hall =
         [&] (const int cell_r, const int node_z, const amrex::Real multiplier)
     {
-        if (!c.axial_periodic &&
-            (node_z == c.axial_face_low || node_z == c.axial_face_high))
+        if (axial_plane_drop(node_z))
         {
             return;
         }
@@ -497,8 +549,7 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
         {
             return;
         }
-        if (!c.axial_periodic &&
-            (node_z == c.axial_face_low || node_z == c.axial_face_high))
+        if (axial_plane_drop(node_z))
         {
             return;
         }
@@ -532,8 +583,7 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
         {
             return;
         }
-        if (!c.axial_periodic &&
-            (node_z == c.axial_face_low || node_z == c.axial_face_high))
+        if (axial_plane_drop(node_z))
         {
             return;
         }
@@ -553,10 +603,10 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
                 (c.inertia_scale / c.scale) * a.inertia[1](node_r, node_z, k);
         }
         const amrex::Real scaled_eta = multiplier * edge_coefficient;
-        sink(0, node_r, node_z, k, scaled_eta * c.inverse_dz);
-        sink(0, node_r, node_z - 1, k, -scaled_eta * c.inverse_dz);
-        sink(2, node_r, node_z, k, -scaled_eta * c.inverse_dr);
-        sink(2, node_r - 1, node_z, k, scaled_eta * c.inverse_dr);
+        emit(0, node_r, node_z, k, scaled_eta * c.inverse_dz);
+        emit(0, node_r, node_z - 1, k, -scaled_eta * c.inverse_dz);
+        emit(2, node_r, node_z, k, -scaled_eta * c.inverse_dr);
+        emit(2, node_r - 1, node_z, k, scaled_eta * c.inverse_dr);
     };
 
     if (a_component == 0)
@@ -586,8 +636,7 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
         const auto emit_face_radial_electric =
             [&] (const int cell_r, const int node_z, const amrex::Real multiplier)
         {
-            if (!c.axial_periodic &&
-                (node_z == c.axial_face_low || node_z == c.axial_face_high))
+            if (axial_plane_drop(node_z))
             {
                 return;
             }
@@ -607,8 +656,8 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
             }
             const amrex::Real coefficient =
                 multiplier * edge_coefficient * c.inverse_dz;
-            sink(1, cell_r, node_z, k, -coefficient);
-            sink(1, cell_r, node_z - 1, k, coefficient);
+            emit(1, cell_r, node_z, k, -coefficient);
+            emit(1, cell_r, node_z - 1, k, coefficient);
         };
         const auto emit_face_axial_electric =
             [&] (const int node_r, const int cell_z, const amrex::Real multiplier)
@@ -641,8 +690,8 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
             }
             const amrex::Real coefficient = multiplier * edge_coefficient *
                                             c.inverse_dr / radius_node;
-            sink(1, node_r, cell_z, k, coefficient * radius_high);
-            sink(1, node_r - 1, cell_z, k, -coefficient * radius_low);
+            emit(1, node_r, cell_z, k, coefficient * radius_high);
+            emit(1, node_r - 1, cell_z, k, -coefficient * radius_low);
         };
         // E_r -= eta_H lap J_r on the (r-cell, z-node) face (radial part
         // of the m = 0 cylindrical vector Laplacian carries -1/r^2);
@@ -651,8 +700,7 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
         const auto emit_face_radial_hyper =
             [&] (const int cell_r, const int node_z, const amrex::Real multiplier)
         {
-            if (!c.axial_periodic &&
-                (node_z == c.axial_face_low || node_z == c.axial_face_high))
+            if (axial_plane_drop(node_z))
             {
                 return;
             }

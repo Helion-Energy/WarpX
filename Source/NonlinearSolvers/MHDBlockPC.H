@@ -749,13 +749,17 @@ MHDBlockPC<T, Ops>::GetCellCenteredLinOpBC (const bool a_high_side,
     // Match the residual's fluid domain ghosts (ApplyFluidDomainBoundaries):
     // a PEC wall is a reflecting no-normal-flow wall (even scalars and
     // tangential momentum -> Neumann; odd normal momentum -> homogeneous
-    // Dirichlet), Open is zero-gradient fluid outflow (-> Neumann; the
-    // Green's-function coupling lives on the face-staggered field block,
-    // not here), and None marks solver-managed zero-gradient ghosts (the RZ
-    // axis and outflow z ends -> Neumann; the axis parity of the odd
-    // components is inert because the r-weighted radial fluxes vanish on
-    // the r = 0 face). a_momentum_component is the physical component a
-    // momentum row carries, or -1 for scalar blocks.
+    // Dirichlet), and a PMC face -- admitted by theta_implicit_mhd only as
+    // the z_lo mirror-symmetry plane, paired with
+    // implicit_mhd.z_lo_boundary_fluid = symmetry -- carries the identical
+    // fluid parity contract, so it maps like PEC. Open is zero-gradient
+    // fluid outflow (-> Neumann; the Green's-function coupling lives on
+    // the face-staggered field block, not here), and None marks
+    // solver-managed zero-gradient ghosts (the RZ axis and outflow z ends
+    // -> Neumann; the axis parity of the odd components is inert because
+    // the r-weighted radial fluxes vanish on the r = 0 face).
+    // a_momentum_component is the physical component a momentum row
+    // carries, or -1 for scalar blocks.
     const amrex::Array<FieldBoundaryType, AMREX_SPACEDIM>& field_bc =
         a_high_side ? m_ops->GetFieldBoundaryHi() : m_ops->GetFieldBoundaryLo();
     amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM> linop_bc;
@@ -769,15 +773,18 @@ MHDBlockPC<T, Ops>::GetCellCenteredLinOpBC (const bool a_high_side,
         {
             linop_bc[direction] = amrex::LinOpBCType::Periodic;
         }
-        else if (field_bc[direction] == FieldBoundaryType::PEC)
+        else if (field_bc[direction] == FieldBoundaryType::PEC ||
+                 field_bc[direction] == FieldBoundaryType::PMC)
         {
+            // FieldBoundaryType::Neumann aliases PMC and lands here too;
+            // theta_implicit_mhd rejects it everywhere except the z_lo
+            // mirror plane, where the PEC-like parity map is exact.
             linop_bc[direction] =
                 a_momentum_component == PhysicalNormalComponent(direction)
                     ? amrex::LinOpBCType::Dirichlet
                     : amrex::LinOpBCType::Neumann;
         }
         else if (field_bc[direction] == FieldBoundaryType::Open ||
-                 field_bc[direction] == FieldBoundaryType::Neumann ||
                  field_bc[direction] == FieldBoundaryType::None)
         {
             linop_bc[direction] = amrex::LinOpBCType::Neumann;
@@ -1191,6 +1198,10 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
     // assemblies drop the same masked tangential-E rows the residual
     // projects (inactive default leaves the emission unchanged).
     stencil_constants.wall = m_ops->GetMHDWallMaskForPC();
+    // z_lo mirror plane (pmc + fluid symmetry): the end rows fold their
+    // ghost columns with the mirror parities instead of keeping the
+    // tangential-E-zero Neumann-end convention.
+    stencil_constants.axial_lo_mirror = m_ops->GetMHDZLoMirrorForPC();
 #endif
     amrex::Array<const amrex::MultiFab*, 3> face_layout = {nullptr, nullptr, nullptr};
     for (int component = 0; component < 3; ++component)
@@ -1994,9 +2005,11 @@ MHDBlockPC<T, Ops>::ApplyResistiveCurlCurl ()
     stencil_constants.include_inertia = m_resistive_inertia_active;
     stencil_constants.inertia_scale = m_resistive_inertia_scale;
 #if defined(WARPX_DIM_RZ)
-    // Same wall-mask row drops as the frozen assemblies (see
-    // UpdateResistiveBlock): matrix-free application == assembled operator.
+    // Same wall-mask row drops and z_lo mirror fold as the frozen
+    // assemblies (see UpdateResistiveBlock): matrix-free application ==
+    // assembled operator.
     stencil_constants.wall = m_ops->GetMHDWallMaskForPC();
+    stencil_constants.axial_lo_mirror = m_ops->GetMHDZLoMirrorForPC();
 #endif
 
     for (int component = 0; component < 3; ++component)

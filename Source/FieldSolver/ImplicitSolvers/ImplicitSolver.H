@@ -489,6 +489,21 @@ public:
     }
 
     /**
+     * \brief Return true when the z_lo domain face is the theta-implicit
+     * MHD mirror-symmetry plane (boundary.field_lo = pmc on z paired with
+     * implicit_mhd.z_lo_boundary_fluid = symmetry): the MHD block
+     * preconditioner's resistive stencil emission then keeps the z_lo
+     * boundary-plane tangential-E rows and folds their ghost
+     * magnetic-field columns with the mirror parities (tangential B odd,
+     * normal B even) instead of dropping them. The default keeps the
+     * tangential-E-zero end-row convention.
+     */
+    [[nodiscard]] virtual bool GetMHDZLoMirrorForPC () const
+    {
+        return false;
+    }
+
+    /**
      * \brief Apply deposited mass matrices to a vector field.
      * Computes a_out += a_scale * S * (a_in - a_in_ref) [+ a_baseline],
      * where S is the mass matrix, accumulating into a_out.
