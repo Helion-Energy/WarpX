@@ -518,6 +518,9 @@ void HybridPICModel::ReadParameters ()
             m_gol_form == 0 ||
                 (m_gol_c_frac > 0.0_rt && m_gol_c_frac <= 1.0_rt),
             "hybrid_pic_model.gol_c_frac must be in (0, 1]");
+        utils::parser::queryWithParser(pp_hybrid, "gol_c_max", m_gol_c_max);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_gol_c_max >= 0.0_rt,
+            "hybrid_pic_model.gol_c_max cannot be negative");
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_vacuum_resistivity_diffusivity >= 0.0_rt,

@@ -397,6 +397,16 @@ parser.add_argument(
     "(hybrid_pic_model.gol_c_frac)",
 )
 parser.add_argument(
+    "--gol-c-max",
+    type=float,
+    default=0.0,
+    help="relax form: absolute artificial-light-speed ceiling [m/s] "
+    "(hybrid_pic_model.gol_c_max). The CFL formula alone saturates at "
+    "the real c at high substep counts, and at real c the substep-noise "
+    "E bath grows until particles over-jump; cap at a few x the "
+    "electron-Alfven/grid-whistler speed. 0 = no ceiling (legacy)",
+)
+parser.add_argument(
     "--chi-max",
     type=float,
     default=0.0,
@@ -788,6 +798,8 @@ if args.esolve == "gol":
     if args.gol_form == "relax":
         pywarpx.hybridpicmodel.gol_form = "relax"
         pywarpx.hybridpicmodel.gol_c_frac = args.gol_c_frac
+        if args.gol_c_max > 0.0:
+            pywarpx.hybridpicmodel.gol_c_max = args.gol_c_max
 if args.band_drain_rate > 0.0:
     pywarpx.hybridpicmodel.qdsmc_band_drain_rate = args.band_drain_rate
     pywarpx.hybridpicmodel.qdsmc_band_drain_Te = args.band_drain_te

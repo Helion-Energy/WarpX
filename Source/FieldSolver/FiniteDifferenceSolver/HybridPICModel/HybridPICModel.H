@@ -1408,6 +1408,20 @@ public:
      *  gol_form = jacobi|relax, gol_c_frac (default 0.5). */
     int m_gol_form = 0;
     amrex::Real m_gol_c_frac = 0.5;
+    /** Absolute ceiling on the relax form's artificial light speed
+     *  [m/s]. The CFL formula alone saturates at the REAL c when
+     *  dt_sub is small relative to dx (measured on a compression
+     *  slab: 256 substeps put the CFL value above c), and at real c
+     *  the artificial permittivity is the real eps0 -- every
+     *  substep's deposition shot noise then kicks an undamped
+     *  light-branch bath that grows exponentially-slowly (~11x per
+     *  400 steps measured, backend-independent) until particles
+     *  over-jump cells and deposition faults. c_art only needs to
+     *  exceed the fastest RESOLVED signal (electron-Alfven /
+     *  grid-whistler scale) with margin; the E-per-noise response
+     *  falls as c_art^2. 0 = no ceiling (legacy min(c, CFL)).
+     *  Input: gol_c_max. */
+    amrex::Real m_gol_c_max = 0.0;
     /** Lazy one-time J_e seed from the Ampere closure (J_plasma - J_i)
      *  on the first relax call. Mutable: set inside the const solve.
      *  NOTE: single flag -- multi-level relax untested in v1. */

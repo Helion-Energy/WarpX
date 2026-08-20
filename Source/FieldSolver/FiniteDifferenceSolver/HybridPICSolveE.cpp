@@ -1210,10 +1210,13 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             for (int d = 0; d < AMREX_SPACEDIM; ++d) {
                 sum_inv_dx2 += inv_dx2[d];
             }
-            amrex::Real const c_art = amrex::min(
+            amrex::Real c_art = amrex::min(
                 PhysConst::c,
                 hybrid_model->m_gol_c_frac
                     / (dt_gol * std::sqrt(sum_inv_dx2)));
+            if (hybrid_model->m_gol_c_max > 0.0_rt) {
+                c_art = amrex::min(c_art, hybrid_model->m_gol_c_max);
+            }
             amrex::Real const inv_eps_art =
                 PhysConst::mu0 * c_art * c_art;
             amrex::Real const qm = PhysConst::q_e / PhysConst::m_e;
