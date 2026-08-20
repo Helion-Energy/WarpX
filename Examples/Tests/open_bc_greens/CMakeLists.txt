@@ -95,3 +95,19 @@ add_warpx_test(
     OFF  # checksum
     test_rz_open_bc_greens_ring_pec  # dependency
 )
+
+# Theta-implicit arm of the temporal-coupling guard: with the ghost fill
+# inside every residual evaluation, the theta-midpoint transient lands on
+# the explicit subcycled trajectory at truncation level (measured bulk
+# 4.3e-5 / wall 6.8e-6; gated at 5e-4, 1-2 orders below the lagged-fill
+# failure class). A delivered-state-only fill fails the wall rows by
+# orders of magnitude.
+add_warpx_test(
+    test_rz_open_bc_greens_transient_implicit  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_open_bc_greens_transient_implicit  # inputs
+    "analysis_transient.py diags/diag1000030 ../test_rz_open_bc_greens_transient_sub80/diags/diag1000030 5.0e-4"  # analysis
+    OFF  # checksum
+    test_rz_open_bc_greens_transient_sub80  # dependency
+)
