@@ -506,6 +506,18 @@ void HybridPICModel::ReadParameters ()
             "hybrid_pic_model.esolve = gol requires gol_n_min > 0 (the "
             "one-count density level), gol_sweeps >= 1 and "
             "gol_cfl_alpha > 0");
+        std::string gol_form = "jacobi";
+        pp_hybrid.query("gol_form", gol_form);
+        if (gol_form == "relax") { m_gol_form = 1; }
+        else {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(gol_form == "jacobi",
+                "hybrid_pic_model.gol_form must be 'jacobi' or 'relax'");
+        }
+        utils::parser::queryWithParser(pp_hybrid, "gol_c_frac", m_gol_c_frac);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_gol_form == 0 ||
+                (m_gol_c_frac > 0.0_rt && m_gol_c_frac <= 1.0_rt),
+            "hybrid_pic_model.gol_c_frac must be in (0, 1]");
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_vacuum_resistivity_diffusivity >= 0.0_rt,
@@ -742,6 +754,18 @@ void HybridPICModel::AllocateLevelMFs (
     fields.alloc_init(FieldType::hybrid_current_fp_plasma, Direction{2},
         lev, amrex::convert(ba, jz_nodal_flag),
         dm, ncomps, ngJ, 0.0_rt);
+
+    // Persistent electron-current state for the GOL relaxation form
+    // (esolve = gol, gol_form = relax): J_e evolves semi-implicitly in
+    // lock-step with the B substeps instead of being eliminated into
+    // the screened E solve. Pointwise use only (no stencil reads J_e)
+    // -- no ghosts. Collocated-only (asserted at solve time), so all
+    // three components live on the all-nodal staggering.
+    if (m_esolve_gol && m_gol_form == 1) {
+        fields.alloc_init("hybrid_gol_je_fp", lev,
+            amrex::convert(ba, amrex::IntVect::TheNodeVector()),
+            dm, 3, amrex::IntVect(0), 0.0_rt);
+    }
 
     // Per-species charge densities - one per charged species, deposited
     // from particles and accumulated into the global rho_fp. Only
@@ -7162,6 +7186,11 @@ void HybridPICModel::BfieldEvolve (
     IntVect ng, std::optional<bool> nodal_sync )
 {
     bool use_rkf45 = DoRKF45(step);
+    bool const gol_relax = (m_esolve_gol && m_gol_form == 1);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!(gol_relax && use_rkf45),
+        "hybrid_pic_model.gol_form = relax requires the fixed-step RK4 "
+        "substep path: under the frozen-E/frozen-B split the RKF45 "
+        "error estimator sees a linear B push and is meaningless");
     // Make copies of the current B-field multifabs (at t = n) since the
     // starting B-field is needed for the integration logic.
     // We also store the initial B-field from the start of this integration step
@@ -7221,6 +7250,10 @@ void HybridPICModel::BfieldEvolve (
             amrex::ParallelDescriptor::ReduceBoolAnd(step_succeeded);
 
             if (!step_succeeded) {
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!gol_relax,
+                    "gol_form = relax: NaN/Inf B during RK4 substepping "
+                    "-- the RKF45 fallback cannot roll back the E/J_e "
+                    "state, aborting instead of silently switching");
                 ablastr::warn_manager::WMRecordWarning(
                     "HybridPIC",
                     "NaN or Inf value encountered in the B-field during RK4 "
@@ -7245,6 +7278,21 @@ void HybridPICModel::BfieldEvolve (
             // update B_old to the current Bfield
             for (int ii = 0; ii < 3; ii++) {
                 MultiFab::Copy(B_old[ii], *Bfield[lev][ii], 0, 0, 1, ng);
+            }
+            if (gol_relax) {
+                // Relax form: the RK stages read the frozen E state --
+                // advance (E, J_e) exactly once here, by the accepted
+                // dt_sub (still published in m_gol_dt_sub), against the
+                // updated B and its refreshed Ampere current.
+                auto & warpx = WarpX::GetInstance();
+                CalculatePlasmaCurrent(Bfield, eb_update_E);
+                m_gol_relax_advance = true;
+                HybridPICSolveE(Efield, Jfield, Bfield, rhofield,
+                                eb_update_E, true);
+                m_gol_relax_advance = false;
+                if (Bz_IndexType[0] == Ez_IndexType[0]) {
+                    warpx.FillBoundaryE(ng, nodal_sync);
+                }
             }
             dt_sub *= std::min(m_substep_max_growth, step_change_factor);
         } else {

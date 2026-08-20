@@ -1385,6 +1385,44 @@ public:
      *  Mutable: set inside the const substep loop; 0 -> full-step dt. */
     mutable amrex::Real m_gol_dt_sub = 0.0;
 
+    /** GOL solve form. 0 = jacobi: the screened elliptic solve above,
+     *  warm-started stationary sweeps -- converges only where plasma
+     *  makes the operator diagonally dominant; across wide vacuum gaps
+     *  the Laplace limit is irreducibly elliptic (measured: per-sweep
+     *  contraction 0.991 over an 85-cell gap, error ~ sweeps^-1.3).
+     *  1 = relax: the semi-implicit E/J_e relaxation of Angus, Dorf &
+     *  Geyko (PoP 26, 072505 (2019) Sec. V.A; Harned & Mikic JCP 83, 1
+     *  (1989) lineage): J_e is kept as a persistent dynamical field
+     *  ("hybrid_gol_je_fp", division-free electron momentum with the
+     *  stiff local terms -- E coupling, gyration, friction -- solved
+     *  pointwise implicitly, closed form) and E advances by
+     *  Ampere-Maxwell with displacement current at the CFL-set
+     *  artificial light speed c_art = min(c, gol_c_frac/(dt_sub
+     *  sqrt(sum dx_i^-2))). The elliptic vacuum continuation is then
+     *  paid in RETARDATION (waves cross the gap at c_art, ~1 cell per
+     *  substep) instead of iterations: ballistic O(N_gap) information
+     *  transport per step vs the diffusive O(N_gap^2) of stationary
+     *  sweeps. Steady state recovers generalized Ohm + Ampere exactly.
+     *  State advances ONLY on solve_for_Faraday calls (once per
+     *  substep); non-Faraday calls return the current state. Inputs:
+     *  gol_form = jacobi|relax, gol_c_frac (default 0.5). */
+    int m_gol_form = 0;
+    amrex::Real m_gol_c_frac = 0.5;
+    /** Lazy one-time J_e seed from the Ampere closure (J_plasma - J_i)
+     *  on the first relax call. Mutable: set inside the const solve.
+     *  NOTE: single flag -- multi-level relax untested in v1. */
+    mutable bool m_gol_je_init = false;
+    /** Relax-form advance gate. The RK substep STAGES call the E solve
+     *  4-6x per substep with intermediate B states; a stateful update
+     *  there would over-advance (and a rejected RKF45 substep could not
+     *  roll the E/J_e state back). So under gol_form = relax every
+     *  ordinary solve call returns immediately (the stages read the
+     *  frozen E state -- frozen-E/frozen-B splitting, FDTD-leapfrog
+     *  class) and BfieldEvolve raises this gate to advance (E, J_e)
+     *  exactly once per ACCEPTED substep against the updated B.
+     *  Mutable: toggled inside the const substep loop. */
+    mutable bool m_gol_relax_advance = false;
+
     /** Amano Eq (27) effective electron mass, multiplied through by m_i
      *  (the ion mass cancels): m_e' = max(m_e, B^2 q_e/(mu0 rho_e) *
      *  (dt/(2 alpha dx))^2), which pins the electron-Alfven phase

@@ -1182,6 +1182,201 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             / PhysConst::q_e;
         bool const use_vac_damping = (vac_gamma > 0.0_rt);
 
+        if (hybrid_model->m_gol_form == 1) {
+            // --- Semi-implicit E/J_e relaxation (Angus, Dorf & Geyko,
+            // PoP 26, 072505 (2019) Sec. V.A; Harned & Mikic lineage).
+            // J_e is a persistent dynamical field and E advances by
+            // Ampere-Maxwell with displacement current at the CFL-set
+            // artificial light speed: the elliptic vacuum continuation
+            // is paid in retardation (ballistic, ~1 cell/substep)
+            // instead of stationary-iteration sweeps (diffusive).
+            // Steady state recovers generalized Ohm + Ampere exactly.
+            // The stiff LOCAL terms of the electron momentum (E
+            // coupling, gyration, friction, vacuum decay) are solved
+            // pointwise implicitly in closed form -- division-free, no
+            // linear algebra, no density floor. E here is the full
+            // physical field state (grad Pe always included); with
+            // external fields the state stays internal-only and the
+            // physics uses E_state + E_ext (E_ext quasi-static over a
+            // substep). The state advances ONLY on Faraday calls (once
+            // per substep) -- a non-Faraday call already holds the
+            // latest state in Efield.
+            // Stage calls and particle-E calls both return immediately:
+            // only the once-per-accepted-substep advance raised by
+            // BfieldEvolve mutates the state (see m_gol_relax_advance).
+            if (!hybrid_model->m_gol_relax_advance) { return; }
+
+            amrex::Real sum_inv_dx2 = 0.0_rt;
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                sum_inv_dx2 += inv_dx2[d];
+            }
+            amrex::Real const c_art = amrex::min(
+                PhysConst::c,
+                hybrid_model->m_gol_c_frac
+                    / (dt_gol * std::sqrt(sum_inv_dx2)));
+            amrex::Real const inv_eps_art =
+                PhysConst::mu0 * c_art * c_art;
+            amrex::Real const qm = PhysConst::q_e / PhysConst::m_e;
+            auto const eta_raw = hybrid_model->m_eta_raw;
+
+            MultiFab & Je_mf =
+                *warpx.m_fields.get("hybrid_gol_je_fp", lev);
+            bool const seed_je = !hybrid_model->m_gol_je_init;
+            hybrid_model->m_gol_je_init = true;
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(*Efield[0], TilingIfNotGPU()); mfi.isValid();
+                 ++mfi) {
+                Array4<Real> const& Ex = Efield[0]->array(mfi);
+                Array4<Real> const& Ey = Efield[1]->array(mfi);
+                Array4<Real> const& Ez = Efield[2]->array(mfi);
+                Array4<Real> const& Je = Je_mf.array(mfi);
+                Array4<Real const> const& rho = rhofield.const_array(mfi);
+                Array4<Real const> const& Pe  = Pefield.const_array(mfi);
+                Array4<Real const> const& Jx = Jfield[0]->const_array(mfi);
+                Array4<Real const> const& Jy = Jfield[1]->const_array(mfi);
+                Array4<Real const> const& Jz = Jfield[2]->const_array(mfi);
+                Array4<Real const> const& Jix = Jifield[0]->const_array(mfi);
+                Array4<Real const> const& Jiy = Jifield[1]->const_array(mfi);
+                Array4<Real const> const& Jiz = Jifield[2]->const_array(mfi);
+                Array4<Real const> const& Bx = Bfield[0]->const_array(mfi);
+                Array4<Real const> const& By = Bfield[1]->const_array(mfi);
+                Array4<Real const> const& Bz = Bfield[2]->const_array(mfi);
+                Array4<Real> Bx_e, By_e, Bz_e, Ex_e, Ey_e, Ez_e;
+                if (include_external_fields) {
+                    Bx_e = Bfield_external[0]->array(mfi);
+                    By_e = Bfield_external[1]->array(mfi);
+                    Bz_e = Bfield_external[2]->array(mfi);
+                    Ex_e = Efield_external[0]->array(mfi);
+                    Ey_e = Efield_external[1]->array(mfi);
+                    Ez_e = Efield_external[2]->array(mfi);
+                }
+                amrex::Array4<int> upd_x, upd_y, upd_z;
+                if (EB::enabled()) {
+                    upd_x = eb_update_E[0]->array(mfi);
+                    upd_y = eb_update_E[1]->array(mfi);
+                    upd_z = eb_update_E[2]->array(mfi);
+                }
+                Real const * const AMREX_RESTRICT coefs_x =
+                    m_stencil_coefs_x.dataPtr();
+                auto const n_coefs_x =
+                    static_cast<int>(m_stencil_coefs_x.size());
+                Real const * const AMREX_RESTRICT coefs_y =
+                    m_stencil_coefs_y.dataPtr();
+                auto const n_coefs_y =
+                    static_cast<int>(m_stencil_coefs_y.size());
+                Real const * const AMREX_RESTRICT coefs_z =
+                    m_stencil_coefs_z.dataPtr();
+                auto const n_coefs_z =
+                    static_cast<int>(m_stencil_coefs_z.size());
+                amrex::Real const dt_r = dt_gol;
+                amrex::ParallelFor(mfi.tilebox(),
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    bool const skip_x = upd_x && upd_x(i,j,k) == 0;
+                    bool const skip_y = upd_y && upd_y(i,j,k) == 0;
+                    bool const skip_z = upd_z && upd_z(i,j,k) == 0;
+                    if (skip_x && skip_y && skip_z) { return; }
+                    amrex::Real const rho_v =
+                        amrex::max(rho(i,j,k), 0.0_rt);
+                    amrex::Real const kE = qm * rho_v;
+                    amrex::Real bx = Bx(i,j,k), by = By(i,j,k),
+                                bz = Bz(i,j,k);
+                    amrex::Real etx = Ex(i,j,k), ety = Ey(i,j,k),
+                                etz = Ez(i,j,k);
+                    if (include_external_fields) {
+                        bx += Bx_e(i,j,k); by += By_e(i,j,k);
+                        bz += Bz_e(i,j,k);
+                        etx += Ex_e(i,j,k); ety += Ey_e(i,j,k);
+                        etz += Ez_e(i,j,k);
+                    }
+                    amrex::Real const gpx = T_Algo::UpwardDx(
+                        Pe, coefs_x, n_coefs_x, i, j, k);
+#if defined(WARPX_DIM_3D)
+                    amrex::Real const gpy = T_Algo::UpwardDy(
+                        Pe, coefs_y, n_coefs_y, i, j, k);
+#else
+                    amrex::Real const gpy = 0.0_rt;
+                    amrex::ignore_unused(coefs_y, n_coefs_y);
+#endif
+                    amrex::Real const gpz = T_Algo::UpwardDz(
+                        Pe, coefs_z, n_coefs_z, i, j, k);
+                    amrex::Real jtot_val = 0.0_rt;
+                    if (resistivity_has_J_dependence) {
+                        jtot_val = std::sqrt(
+                            Jx(i,j,k)*Jx(i,j,k) + Jy(i,j,k)*Jy(i,j,k)
+                            + Jz(i,j,k)*Jz(i,j,k));
+                    }
+                    amrex::Real const eta_v =
+                        eta_raw(rho_v, jtot_val, t_new);
+                    amrex::Real gam_v = 0.0_rt;
+                    if (use_vac_damping) {
+                        gam_v = vac_gamma * 0.5_rt * (1.0_rt - std::tanh(
+                            (rho_v - rho_1c) / (0.5_rt * rho_1c)));
+                    }
+                    // Ampere drive Jc - J_i (Jfield = curl B/mu0 - J_ext)
+                    amrex::Real const rcx = Jx(i,j,k) - Jix(i,j,k);
+                    amrex::Real const rcy = Jy(i,j,k) - Jiy(i,j,k);
+                    amrex::Real const rcz = Jz(i,j,k) - Jiz(i,j,k);
+                    // previous J_e (seeded from the Ampere closure on
+                    // the first call)
+                    amrex::Real const jox =
+                        seed_je ? rcx : Je(i,j,k,0);
+                    amrex::Real const joy =
+                        seed_je ? rcy : Je(i,j,k,1);
+                    amrex::Real const joz =
+                        seed_je ? rcz : Je(i,j,k,2);
+                    // implicit local solve:
+                    //   (a I - [beta]x) Je' = r,  beta = qm dt B_tot
+                    //   inverse = (a^2 I + a [beta]x + beta beta^T)
+                    //             / (a (a^2 + |beta|^2))
+                    amrex::Real const a = 1.0_rt
+                        + dt_r * (dt_r * kE * inv_eps_art
+                                  + kE * eta_v + gam_v);
+                    amrex::Real const bex = qm * dt_r * bx;
+                    amrex::Real const bey = qm * dt_r * by;
+                    amrex::Real const bez = qm * dt_r * bz;
+                    amrex::Real const b2 = bex*bex + bey*bey + bez*bez;
+                    amrex::Real const rx = jox
+                        + dt_r * kE * (etx + dt_r * inv_eps_art * rcx)
+                        - dt_r * kE * eta_v * Jix(i,j,k)
+                        + qm * dt_r * gpx;
+                    amrex::Real const ry = joy
+                        + dt_r * kE * (ety + dt_r * inv_eps_art * rcy)
+                        - dt_r * kE * eta_v * Jiy(i,j,k)
+                        + qm * dt_r * gpy;
+                    amrex::Real const rz = joz
+                        + dt_r * kE * (etz + dt_r * inv_eps_art * rcz)
+                        - dt_r * kE * eta_v * Jiz(i,j,k)
+                        + qm * dt_r * gpz;
+                    amrex::Real const bdotr =
+                        bex*rx + bey*ry + bez*rz;
+                    amrex::Real const inv =
+                        1.0_rt / (a * (a*a + b2));
+                    amrex::Real const jnx =
+                        (a*a*rx + a*(bey*rz - bez*ry) + bdotr*bex) * inv;
+                    amrex::Real const jny =
+                        (a*a*ry + a*(bez*rx - bex*rz) + bdotr*bey) * inv;
+                    amrex::Real const jnz =
+                        (a*a*rz + a*(bex*ry - bey*rx) + bdotr*bez) * inv;
+                    if (!skip_x) {
+                        Je(i,j,k,0) = jnx;
+                        Ex(i,j,k) += dt_r * inv_eps_art * (rcx - jnx);
+                    }
+                    if (!skip_y) {
+                        Je(i,j,k,1) = jny;
+                        Ey(i,j,k) += dt_r * inv_eps_art * (rcy - jny);
+                    }
+                    if (!skip_z) {
+                        Je(i,j,k,2) = jnz;
+                        Ez(i,j,k) += dt_r * inv_eps_art * (rcz - jnz);
+                    }
+                });
+            }
+            return;
+        }
+
         // F assembly (nodal, no ghosts needed).
         MultiFab F_mf(ba, rhofield.DistributionMap(), 3,
                       IntVect::TheZeroVector());
@@ -1300,7 +1495,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
 #if defined(WARPX_DIM_3D)
                         off += inv_dx2[1] * (Eo(i,j+1,k,c) + Eo(i,j-1,k,c));
                         off += inv_dx2[2] * (Eo(i,j,k+1,c) + Eo(i,j,k-1,c));
-#else
+#elif (AMREX_SPACEDIM == 2)
                         off += inv_dx2[1] * (Eo(i,j+1,k,c) + Eo(i,j-1,k,c));
 #endif
                         amrex::Real const val =
@@ -1310,6 +1505,52 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         else             { Ez(i,j,k) = val; }
                     }
                 });
+            }
+            if (warpx.Verbose() > 1) {
+                // Per-sweep Jacobi increment norms (instrumented runs
+                // only): the increment's geometric decay rate is the
+                // iteration's convergence factor, and the vacuum-
+                // restricted norm tracks the screened-Laplace gap where
+                // warm-started sweeps under-converge first. Box-seam
+                // nodes count once per owning box — consistent sweep to
+                // sweep, so decay rates are unaffected.
+                amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum,
+                                 amrex::ReduceOpMax> r_op;
+                amrex::ReduceData<Real, Real, Real> r_data(r_op);
+                using RT = typename decltype(r_data)::Type;
+                for (MFIter mfi(*Efield[0], TilingIfNotGPU());
+                     mfi.isValid(); ++mfi) {
+                    Array4<Real const> const& Ex =
+                        Efield[0]->const_array(mfi);
+                    Array4<Real const> const& Ey =
+                        Efield[1]->const_array(mfi);
+                    Array4<Real const> const& Ez =
+                        Efield[2]->const_array(mfi);
+                    Array4<Real const> const& Eo = Eold_mf.const_array(mfi);
+                    Array4<Real const> const& rho =
+                        rhofield.const_array(mfi);
+                    r_op.eval(mfi.tilebox(), r_data,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k) -> RT
+                    {
+                        amrex::Real const dex = Ex(i,j,k) - Eo(i,j,k,0);
+                        amrex::Real const dey = Ey(i,j,k) - Eo(i,j,k,1);
+                        amrex::Real const dez = Ez(i,j,k) - Eo(i,j,k,2);
+                        amrex::Real const d2 = dex*dex + dey*dey + dez*dez;
+                        bool const vac = (rho(i,j,k) < rho_1c);
+                        return {d2, vac ? d2 : 0.0_rt, std::sqrt(d2)};
+                    });
+                }
+                auto tup = r_data.value(r_op);
+                amrex::Real g2 = amrex::get<0>(tup);
+                amrex::Real v2 = amrex::get<1>(tup);
+                amrex::Real mx = amrex::get<2>(tup);
+                amrex::ParallelDescriptor::ReduceRealSum(g2);
+                amrex::ParallelDescriptor::ReduceRealSum(v2);
+                amrex::ParallelDescriptor::ReduceRealMax(mx);
+                amrex::Print() << "[gol] sweep " << sweep
+                    << " dE_l2 " << std::sqrt(g2)
+                    << " dE_l2_vac " << std::sqrt(v2)
+                    << " dE_max " << mx << "\n";
             }
         }
 
