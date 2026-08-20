@@ -474,11 +474,13 @@ public:
     }
 
     /**
-     * \brief Return the device view of the stair-step PEC wall mask
-     * (implicit_mhd.wall_model = pec) so the MHD block preconditioner's
-     * resistive stencil emission drops the same masked tangential-E rows
-     * the residual projects. The inactive default keeps the emission
-     * unchanged for implicit schemes without a wall.
+     * \brief Return the device view of the stair-step conducting wall
+     * mask (implicit_mhd.wall_model = pec/pec_response) so the MHD block
+     * preconditioner's resistive stencil emission drops the same masked
+     * tangential-E rows the residual projects. The inactive default
+     * keeps the emission unchanged for implicit schemes without a wall
+     * -- and for wall_model = dielectric, whose EM-transparent standoff
+     * reports an inactive view by design (no rows to drop).
      */
     [[nodiscard]] virtual warpx::mhd_pc::WallMaskView
     GetMHDWallMaskForPC () const

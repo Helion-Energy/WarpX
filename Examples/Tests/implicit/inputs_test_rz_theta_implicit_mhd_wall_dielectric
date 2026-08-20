@@ -1,0 +1,184 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Dielectric shaped-wall TRANSPARENCY test (RZ, central recast flux,
+# frozen ions, hyper-resistivity on): a seeded on-axis plasma-response
+# flux column
+# (z-uniform Bz = B0*exp(-(r/w0)^2), radially well inside the stepped
+# wall polyline r_w = 0.30 m for z < 0 / 0.22 m for z > 0; only Bz
+# supports an RZ grid parser, and a pure Bz(r) is exactly
+# divergence-free) spreads through the uniform resistivity eta = mu0*D
+# toward the r_max PEC boundary. The spreading REDISTRIBUTES poloidal
+# flux across every ring, so the per-z-row disk-flux CHANGE dpsi
+# through probe rings deep inside the masked band (r ~ 0.34 and 0.41 m,
+# the coil-radius stand-ins) is a large fraction of the seeded flux --
+# dpsi is exactly the flux swing a wall-mounted coil contour integrates
+# as back-EMF, the quantity the pec_response one-way glass pins to
+# zero.
+#
+# Contract under test (see analysis_mhd_wall_dielectric.py):
+# - wall_model = dielectric (this deck): the EM-transparent standoff --
+#   the probe-ring flux change is FINITE and matches the wall_model=none
+#   twin (run from this same deck by CLI override) to solver precision:
+#   no response pinning, no PC row drops, no wall-seam guard (the
+#   HYPER-RESISTIVE Ohm term -- one of the three seam-guarded terms,
+#   acting directly on the induction path -- is ON at a grid-scale
+#   weight ~25% of eta, precisely so a wrongly-engaged seam guard would
+#   zero it at seam-adjacent rows and break the none-twin match).
+#   Meanwhile the masked-band FLUID state stays bit-static (the
+#   pec_response rigid-freeze contract, zero_flux thermal wall) while
+#   interior conduction stays alive.
+# - wall_model = pec_response (CLI override, the adversarial contrast):
+#   the same probe-ring flux change is pinned at zero/roundoff -- the
+#   measured one-way-glass behavior that kills two-way circuit coupling.
+#
+# The run is preconditioned with the MHD block PC's resistive block WITH
+# assembly validation, so the residual/PC wall-mask consistency (row
+# drops in the conductor contrast, NO drops under dielectric/none) is
+# asserted inside the run itself.
+
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+my_constants.T0_ev = 100.0
+my_constants.Tmin_ev = 2.0
+my_constants.w = 0.25
+my_constants.chi = 20.0
+my_constants.B0 = 1.0e-5
+my_constants.w0 = 0.08
+my_constants.D = 100.0
+# Hyper-resistive diffusivity [m^4/s]: grid-scale hyper number
+# (D4/dr^4) dt = 2 and a grid-scale weight (D4/dr^2)/D ~ 25% of eta --
+# strong enough that a wrongly-engaged seam guard visibly breaks the
+# dielectric/none twin match, mild enough for the Chebyshev resistive
+# block.
+my_constants.D4 = 6.0e-3
+my_constants.nr = 32
+my_constants.nz = 16
+my_constants.Lr = 0.5
+my_constants.Lz = 0.5
+my_constants.dt = 2.0e-5
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 30
+amr.n_cell = nr nz
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 -0.5*Lz
+geometry.prob_hi = Lr 0.5*Lz
+boundary.field_lo = none none
+boundary.field_hi = pec none
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-14
+newton.relative_tolerance = 1.0e-11
+newton.max_iterations = 12
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-11
+gmres.max_iterations = 1000
+
+jacobian.pc_type = pc_mhd_block
+pc_mhd_block.resistive_validate_assembly = 1
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = T0_ev
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = 5.0/3.0
+hybrid_pic_model.n_floor = 1.0e16
+hybrid_pic_model.plasma_resistivity(rho,J,t) = mu0*D
+# The hyper-resistive Ohm term is one of the three wall-seam-guarded
+# terms (Hall/inertia/hyper) and the one that acts directly on the
+# induction path: the teeth of the "no seam guard under dielectric"
+# assertion (the Hall term is dynamically inert on this z-uniform
+# poloidal seed, so it stays off).
+hybrid_pic_model.plasma_hyper_resistivity(rho,B) = mu0*D4
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+# Split external fields: required by wall_model = dielectric (and by the
+# pec_response contrast override), which act on the plasma-response side
+# of the split. The drive itself is ZERO here -- the transparency
+# measurement isolates the seeded plasma response, so the plotfile total
+# field IS the response.
+hybrid_pic_model.add_external_fields = 1
+external_vector_potential.fields = hold
+external_vector_potential.hold.Ay_external_grid_function(x,y,z) = "0.0"
+external_vector_potential.hold.A_time_external_function(t) = "1.0"
+external_vector_potential.do_diva_cleaning = 0
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = 5.0/3.0
+implicit_mhd.gamma_i = 5.0/3.0
+implicit_mhd.reference_ion_pressure = 0.0
+implicit_mhd.mass_density(x,y,z) = rho0
+# Gaussian electron-temperature core: keeps interior conduction alive so
+# the masked-band bit-static check has teeth (the none twin's band DOES
+# evolve; the dielectric band must not).
+implicit_mhd.electron_pressure(x,y,z) = "n0 * q_e * (Tmin_ev + (T0_ev - Tmin_ev) * exp(-(x*x)/(w*w)))"
+implicit_mhd.evolve_ion_fluid = false
+implicit_mhd.fluid_flux = central
+# central-flux stabilization guard; inert here (frozen ions, u = 0)
+implicit_mhd.viscosity = 1.0
+implicit_mhd.include_joule_heating = false
+implicit_mhd.thermal_diffusivity_electron = chi
+implicit_mhd.resistive_theta = 1.0
+
+# Dielectric standoff on the stepped wall polyline; the CTest twins
+# override wall_model (none / pec_response) on the CLI.
+implicit_mhd.wall_model = dielectric
+implicit_mhd.wall_polyline_file = wall_step_r30_r22.csv
+implicit_mhd.wall_thermal_bc = zero_flux
+
+# Seeded on-axis plasma-response flux column (z-uniform; only Bz
+# supports an RZ grid parser, and a pure Bz(r) is exactly
+# divergence-free). Its resistive spreading toward the r_max PEC
+# boundary drives the probe-ring flux swing under test.
+warpx.B_ext_grid_init_style = parse_b_ext_grid_function
+warpx.Bx_external_grid_function(x,y,z) = 0.0
+warpx.By_external_grid_function(x,y,z) = 0.0
+warpx.Bz_external_grid_function(x,y,z) = "B0*exp(-(x*x)/(w0*w0))"
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 30
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Br Bt Bz jt implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy \
+                       implicit_mhd_momentum_r implicit_mhd_momentum_t \
+                       implicit_mhd_momentum_z
+diag1.write_species = 0

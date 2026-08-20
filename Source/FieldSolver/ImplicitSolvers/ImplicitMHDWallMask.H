@@ -64,6 +64,40 @@
  *   (JFNK-exact), and both share the identical preconditioner treatment
  *   (the masked E values are state-independent constants either way).
  *
+ *   * wall_model = dielectric: the formation-tube standoff. The shaped
+ *     wall between the plasma and the drive coils in the real machine
+ *     is a quartz-class DIELECTRIC tube: it absorbs plasma and holds a
+ *     temperature boundary, but it is electromagnetically TRANSPARENT
+ *     (no eddy screening, no response-field pinning; represent the
+ *     machine's actual metal structures separately, e.g. as
+ *     circuit-side eddy rings). The FLUID contract is bit-identical to
+ *     pec_response -- the same mask tables, rigid freeze, no-injection
+ *     absorb image, thermal BC/drains/ledger, pedestal exclusion and
+ *     axis guard, and the same split-field-drive requirement; an
+ *     active wall_thermal_bc is REQUIRED (the standoff's entire wall
+ *     action is the fluid contract, so without it the mode would be a
+ *     silent no-op) -- while
+ *     the FIELD side imposes NO constraint on the plasma-response
+ *     field: ProjectElectricField performs nothing, the preconditioner
+ *     drops no rows (View() reports an inactive mask), and the
+ *     wall-seam guard is inactive (nothing to guard: the Ohm stencils
+ *     see a continuous live field -- the seam-contamination mechanism
+ *     was specific to the pinned-response contract's drive-scale
+ *     surface current at the stair seam). The band's frozen
+ *     floor-density dust plus the vacuum-keyed resistivity already
+ *     make the region current-free in the response solve: the
+ *     physically correct insulator interior. The semantics follow
+ *     WarpX's mixed PEC/insulator domain boundary
+ *     (Source/BoundaryConditions/PEC_Insulator.{H,cpp}): on the
+ *     insulator side, tangential fields are left UNCHANGED unless a
+ *     value is prescribed and the normal B stays evolved -- nothing is
+ *     prescribed here, so the response field lives everywhere.
+ *     pec_response is one-way glass by comparison (the drive passes,
+ *     but the pinned response makes the plasma flux linkage of every
+ *     in-band coil contour exactly zero, killing two-way circuit
+ *     coupling); the dielectric mode restores the finite, physical
+ *     response linkage at coil radii inside the (former) metal band.
+ *
  * - The fluid is deliberately untouched by default: the wall region is
  *   expected to sit in the dust/vacuum fill (frozen momentum,
  *   E -> eta J). The optional THERMAL wall boundary (wall_thermal_bc)
@@ -139,7 +173,7 @@
  *
  * Inputs (all under implicit_mhd.):
  * - wall_model = none (default; bit-identical to no wall) | pec |
- *   pec_response
+ *   pec_response | dielectric
  * - wall_polyline_file = <csv path> ("z, r" rows; resolved against
  *   AMREX_INPUTS_FILE_PREFIX like the inputs file itself when relative)
  * - wall_thermal_bc = none (default) | zero_flux | temperature
@@ -159,6 +193,15 @@ public:
     void Define (const amrex::Geometry& geom, const amrex::IntVect& ngrow);
 
     [[nodiscard]] bool IsActive () const { return m_active; }
+
+    /** Dielectric standoff (wall_model = dielectric): the fluid contract
+     * of pec_response with an EM-transparent field side; see the class
+     * comment. Gates the field-only machinery (projection, PC row
+     * drops, seam guard, seam banner) off. */
+    [[nodiscard]] bool IsDielectric () const
+    {
+        return m_active && m_dielectric;
+    }
 
     [[nodiscard]] ThermalBC GetThermalBC () const
     {
@@ -185,27 +228,35 @@ public:
     [[nodiscard]] int GhostCells () const { return m_ng; }
     [[nodiscard]] int AxialCells () const { return m_nz; }
 
-    /** Human-readable mode for banners: "none", "pec" or "pec_response". */
+    /** Human-readable mode for banners: "none", "pec", "pec_response"
+     * or "dielectric". */
     [[nodiscard]] const char* ModeName () const
     {
-        return m_active ? (m_total_field ? "pec" : "pec_response") : "none";
+        if (!m_active) { return "none"; }
+        if (m_dielectric) { return "dielectric"; }
+        return m_total_field ? "pec" : "pec_response";
     }
 
     /** Device view consumed by the preconditioner stencil emission AND
      * by the residual's seam guard on the Hall/inertia/hyper Ohm terms;
      * the pointers are pre-offset so the axial index of the residual
      * grid is used directly (valid over [-ng, nz+ng] nodal,
-     * [-ng, nz-1+ng] cell). Mode-independent: the masked E values are
-     * state-independent constants in both conductor contracts, so the
-     * Jacobian row drops are identical. */
+     * [-ng, nz-1+ng] cell). Identical in both CONDUCTOR contracts (the
+     * masked E values are state-independent constants either way, so
+     * the Jacobian row drops match); the DIELECTRIC standoff reports an
+     * inactive view instead -- the band imposes no field constraint, so
+     * the preconditioner drops no rows and the seam guard never
+     * engages (the stencils see a continuous live field). */
     [[nodiscard]] warpx::mhd_pc::WallMaskView View () const;
 
     /** Count of LIVE (unmasked) seam-guarded rows per electric-field
      * family in the valid domain, for banners: [E_r, E_theta, E_z].
-     * Zero everywhere when the wall is inactive. */
+     * Zero everywhere when the wall is inactive or dielectric (the
+     * EM-transparent standoff guards nothing). */
     [[nodiscard]] amrex::Array<long, 3> SeamGuardedRowCounts () const
     {
-        return m_seam_guarded_rows;
+        return m_dielectric ? amrex::Array<long, 3>{0, 0, 0}
+                            : m_seam_guarded_rows;
     }
 
     /** Apply the conductor projection to the assembled electric field.
@@ -213,7 +264,10 @@ public:
      * set E = -E_external (when the split external fields are present)
      * or E = 0. wall_model = pec_response (plasma-response contract):
      * set E = 0 (the external drive is transparent). Covers the domain
-     * ghosts (the external registers carry trusted domain-ghost values). */
+     * ghosts (the external registers carry trusted domain-ghost values).
+     * wall_model = dielectric: performs NOTHING -- the EM-transparent
+     * standoff imposes no condition on the response field (the
+     * PEC_Insulator insulator-side convention; see the class comment). */
     void ProjectElectricField (ablastr::fields::VectorField const& efield,
                                ablastr::fields::VectorField const* efield_external,
                                const amrex::Geometry& geom) const;
@@ -221,8 +275,13 @@ public:
 private:
     bool m_active = false;
     /** true: pec (conductor condition on the TOTAL field); false:
-     * pec_response (plasma-response field only, run32 EB parity). */
+     * pec_response (plasma-response field only, run32 EB parity) or
+     * dielectric (no field condition at all; see m_dielectric). */
     bool m_total_field = true;
+    /** wall_model = dielectric: EM-transparent standoff -- pec_response's
+     * fluid contract with NO field-side machinery (see the class
+     * comment). */
+    bool m_dielectric = false;
     ThermalBC m_thermal_bc = ThermalBC::none;
     amrex::Real m_wall_temperature = 0.0; //!< [eV], temperature mode
     int m_ng = 0;   //!< axial ghost extension of the index tables

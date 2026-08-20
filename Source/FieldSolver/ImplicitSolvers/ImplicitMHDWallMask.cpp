@@ -115,8 +115,16 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
     pp.query("wall_model", wall_model);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         wall_model == "none" || wall_model == "pec" ||
-            wall_model == "pec_response",
-        "implicit_mhd.wall_model must be 'none', 'pec' or 'pec_response'");
+            wall_model == "pec_response" || wall_model == "dielectric",
+        "implicit_mhd.wall_model must be 'none', 'pec', 'pec_response' or "
+        "'dielectric'");
+
+    // Consumed BEFORE the early return so a deck that switches
+    // wall_model off (e.g. a CTest twin overriding to none on the CLI)
+    // does not trip the unused-ParmParse finalize check on the polyline
+    // path; validated below only when a wall is active.
+    std::string polyline_file;
+    pp.query("wall_polyline_file", polyline_file);
 
     // Thermal wall boundary at the stair-step fluid interface (see the
     // class comment): parsed BEFORE the early return so a thermal BC
@@ -131,8 +139,8 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         thermal_bc == "none" || wall_model != "none",
         "implicit_mhd.wall_thermal_bc requires implicit_mhd.wall_model = "
-        "pec or pec_response (the thermal wall lives on the shaped-wall "
-        "mask)");
+        "pec, pec_response or dielectric (the thermal wall lives on the "
+        "shaped-wall mask)");
     const bool has_wall_temperature = utils::parser::queryWithParser(
         pp, "wall_temperature", m_wall_temperature);
     if (thermal_bc == "temperature") {
@@ -155,37 +163,49 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
         return;
     }
     m_total_field = (wall_model == "pec");
+    m_dielectric = (wall_model == "dielectric");
+    // The standoff's ENTIRE wall action is the fluid contract (the field
+    // side is deliberately transparent), so without a thermal wall the
+    // mode would be a complete silent no-op -- a loud input error
+    // instead. The conductor modes stay legal without it (they are
+    // electromagnetic walls first).
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_dielectric || m_thermal_bc != ThermalBC::none,
+        "implicit_mhd.wall_model = dielectric requires an active "
+        "implicit_mhd.wall_thermal_bc (zero_flux or temperature): the "
+        "EM-transparent standoff acts on the fluid only");
     if (!m_total_field) {
         // pec_response pins the PLASMA-RESPONSE field only: the prescribed
         // drive passes through the wall as-is because the fitted waveforms
         // already embed the machine's wall response (the run32 one-way
-        // coupling contract). Without the split external registers there
-        // is no plasma/external split and the mode is meaningless.
+        // coupling contract). The dielectric standoff likewise acts on the
+        // response side of the split (its fluid contract absorbs the
+        // plasma while the prescribed drive supplies the programmed
+        // fields). Without the split external registers there is no
+        // plasma/external split and either mode is meaningless.
         const amrex::ParmParse pp_hybrid("hybrid_pic_model");
         bool add_external_fields = false;
         pp_hybrid.query("add_external_fields", add_external_fields);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(add_external_fields,
-            "implicit_mhd.wall_model = pec_response requires the split "
-            "external fields (hybrid_pic_model.add_external_fields = 1): "
-            "the mode pins the plasma-response field only, which is not "
-            "defined without the plasma/external split. Use wall_model = "
-            "pec for the total-field conductor.");
+            "implicit_mhd.wall_model = " + wall_model + " requires the "
+            "split external fields (hybrid_pic_model.add_external_fields "
+            "= 1): the mode acts on the plasma-response side of the "
+            "plasma/external split, which is not defined without it. Use "
+            "wall_model = pec for the total-field conductor.");
     }
 
 #if !defined(WARPX_DIM_RZ)
     amrex::ignore_unused(geom, ngrow);
     WARPX_ABORT_WITH_MESSAGE(
-        "implicit_mhd.wall_model = pec requires cylindrical RZ geometry "
+        "implicit_mhd.wall_model requires cylindrical RZ geometry "
         "(the wall is a revolved poloidal polyline)");
 #else
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!geom.isPeriodic(1),
-        "implicit_mhd.wall_model = pec requires non-periodic z (the shaped "
+        "implicit_mhd.wall_model requires non-periodic z (the shaped "
         "wall is not an axially periodic structure)");
 
-    std::string polyline_file;
-    pp.query("wall_polyline_file", polyline_file);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!polyline_file.empty(),
-        "implicit_mhd.wall_model = pec requires implicit_mhd.wall_polyline_file "
+        "implicit_mhd.wall_model requires implicit_mhd.wall_polyline_file "
         "(CSV of 'z, r' rows)");
 
     std::vector<double> z_points;
@@ -345,9 +365,15 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
 
     const auto [rw_min, rw_max] =
         std::minmax_element(r_points.begin(), r_points.end());
-    amrex::Print() << "ImplicitMHDWallMask: stair-step conducting wall ("
-                   << wall_model << ") active from '"
-                   << polyline_file << "' (" << z_points.size()
+    if (m_dielectric) {
+        amrex::Print() << "ImplicitMHDWallMask: stair-step shaped wall "
+                          "dielectric (EM-transparent standoff; fluid "
+                          "contract = pec_response) active from '";
+    } else {
+        amrex::Print() << "ImplicitMHDWallMask: stair-step conducting wall ("
+                       << wall_model << ") active from '";
+    }
+    amrex::Print() << polyline_file << "' (" << z_points.size()
                    << " polyline points, r in [" << *rw_min << ", " << *rw_max
                    << "], z in [" << z_points.front() << ", "
                    << z_points.back() << "]); " << masked_corner_rows
@@ -377,8 +403,14 @@ const int* ImplicitMHDWallMask::FirstMaskedCellCentered () const
 warpx::mhd_pc::WallMaskView ImplicitMHDWallMask::View () const
 {
     warpx::mhd_pc::WallMaskView view;
-    view.active = m_active;
-    if (m_active) {
+    // Dielectric standoff: the band imposes no field constraint, so the
+    // preconditioner's stencil emission drops no rows and the residual's
+    // seam guard never engages -- the view reports no wall at all,
+    // keeping residual and PC exact twins of the wall_model = none field
+    // operator. (The FLUID contract does not read this view: it goes
+    // through FirstMaskedCellCentered().)
+    view.active = m_active && !m_dielectric;
+    if (view.active) {
         view.first_masked_er = m_first_masked_er.data() + m_ng;
         view.first_masked_et = m_first_masked_et.data() + m_ng;
         view.first_masked_ez = m_first_masked_ez.data() + m_ng;
@@ -396,6 +428,15 @@ void ImplicitMHDWallMask::ProjectElectricField (
 {
 #if defined(WARPX_DIM_RZ)
     if (!m_active) { return; }
+    // Dielectric standoff: an insulator imposes no condition on the
+    // evolved fields (the PEC_Insulator insulator-side convention:
+    // tangential fields are left unchanged unless a value is prescribed,
+    // and the normal B stays evolved -- nothing is prescribed here), so
+    // the plasma-response E lives everywhere and the projection performs
+    // NOTHING. The band's frozen floor-density dust plus the vacuum-keyed
+    // resistivity already keep the region current-free in the response
+    // solve: the physically correct insulator interior.
+    if (m_dielectric) { return; }
 
     const warpx::mhd_pc::WallMaskView view = View();
     const amrex::Array<const int*, 3> first_masked = {

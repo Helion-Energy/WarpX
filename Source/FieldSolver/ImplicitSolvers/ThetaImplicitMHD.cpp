@@ -973,13 +973,15 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         "implicit_mhd.z_boundary_fluid = wall_temperature/outflow requires "
         "non-periodic z boundaries (boundary.field_lo/hi = none or open "
         "in z)");
-    // Stair-step conducting shaped wall (implicit_mhd.wall_model =
-    // pec | pec_response): a static mask built from the revolved wall
-    // polyline (run32's EB analog for the implicit path), applied as an
-    // affine projection of the assembled Ohm E in every residual
-    // evaluation (JFNK-exact) and mirrored by the preconditioner's
-    // resistive stencil emission. Default none is bit-identical to no
-    // wall.
+    // Stair-step shaped wall (implicit_mhd.wall_model = pec |
+    // pec_response | dielectric): a static mask built from the revolved
+    // wall polyline (run32's EB analog for the implicit path). The
+    // conductor modes apply an affine projection of the assembled Ohm E
+    // in every residual evaluation (JFNK-exact), mirrored by the
+    // preconditioner's resistive stencil emission; the dielectric
+    // standoff shares the identical FLUID contract but leaves the field
+    // untouched (EM-transparent; see ImplicitMHDWallMask). Default none
+    // is bit-identical to no wall.
     {
         using ablastr::fields::Direction;
         m_wall_mask.Define(
@@ -988,10 +990,11 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
                 ->nGrowVect());
         if (m_wall_mask.IsActive()) {
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_use_recast,
-                "implicit_mhd.wall_model = pec/pec_response requires the "
-                "conservative-form recast (implicit_mhd.fluid_flux = hlld or "
-                "central): the wall is a projection of the solver-assembled "
-                "Ohm electric field");
+                "implicit_mhd.wall_model = pec/pec_response/dielectric "
+                "requires the conservative-form recast "
+                "(implicit_mhd.fluid_flux = hlld or central): the wall acts "
+                "on the solver-assembled Ohm electric field and the recast "
+                "flux kernels");
         }
         // The temperature wall exchanges heat conductively: without a
         // conduction channel the reservoir is unreachable and the mode
@@ -1117,8 +1120,10 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
     // live rows at which the Hall/inertia/hyper Ohm terms are zeroed
     // (see ImplicitMHDWallMask and the seam guard in
     // AssembleOhmElectricField), whenever any of the guarded terms is
-    // active alongside the shaped wall.
-    if (m_wall_mask.IsActive() &&
+    // active alongside the shaped CONDUCTING wall. The dielectric
+    // standoff never guards (nothing is pinned, so the stencils see a
+    // continuous live field): no seam-guard line prints there.
+    if (m_wall_mask.IsActive() && !m_wall_mask.IsDielectric() &&
         (m_hybrid_pic_model->m_include_hall_term ||
          m_hybrid_pic_model->m_include_electron_inertia ||
          m_hybrid_pic_model->m_include_hyper_resistivity_term)) {
@@ -6614,8 +6619,12 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
     // the correct wall-adjacent Ohm contract). The tables are
     // geometry-static (JFNK probes see constant structure) and the
     // preconditioner's stencil emission drops the same contributions
-    // through the same tables. Null when no shaped wall is active
-    // (bit-identical to no guard).
+    // through the same tables. Null when no shaped wall is active AND
+    // under wall_model = dielectric (bit-identical to no guard): the
+    // EM-transparent standoff pins nothing, so the stencils see a
+    // continuous live field and there is no drive-scale surface current
+    // to guard against -- the seam-contamination mechanism was specific
+    // to the pinned-response conductor contracts.
     const warpx::mhd_pc::WallMaskView wall_seam_view = m_wall_mask.View();
     const int* const seam_guard_er = wall_seam_view.first_guarded_er;
     const int* const seam_guard_et = wall_seam_view.first_guarded_et;
@@ -7127,7 +7136,11 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
         // machine's wall response. Both maps are affine in the state:
         // matrix-free Jacobian probes see exactly the zeroed rows the
         // preconditioner's stencil emission drops (the masked values are
-        // state-independent constants in either contract).
+        // state-independent constants in either contract). wall_model =
+        // dielectric performs NOTHING inside this call (the
+        // EM-transparent standoff pins no field; only its FLUID
+        // contract is active), so the assembled E is identical to the
+        // wall_model = none field operator.
         const ablastr::fields::VectorField efield =
             m_WarpX->m_fields.get_alldirs(FieldType::Efield_fp, 0);
         ablastr::fields::VectorField efield_external{};

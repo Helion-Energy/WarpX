@@ -1349,6 +1349,23 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# dielectric standoff, FLUID-contract regression: the temperature-mode
+# thermal wall run again under wall_model=dielectric (which requires the
+# split external fields; the drive is zero) must satisfy the identical
+# assertions -- rigid bit-static masked band, strictly monotonic
+# one-sided interior drain, ledger closure, T_wall anchoring, z-normal
+# ledge drain, axis health -- proving the pec_response fluid contract
+# carried over unchanged while the field side went EM-transparent
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_thermal_dielectric  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_thermal implicit_mhd.wall_model=dielectric implicit_mhd.wall_thermal_bc=temperature implicit_mhd.wall_temperature=2.0 hybrid_pic_model.add_external_fields=1 external_vector_potential.fields=hold external_vector_potential.do_diva_cleaning=0"  # inputs
+    "analysis_mhd_wall_thermal.py diags temperature"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # wall-seam guard on the Hall/inertia/hyper Ohm terms: a ramped coil
 # blob against the STEP corner of the pec stair wall forces the image
 # current sheet along the seam; the seam band (rows whose non-ideal Ohm
@@ -1366,6 +1383,52 @@ add_warpx_test(
     1  # nprocs (the banded resistive solver is single-rank)
     inputs_test_rz_theta_implicit_mhd_wall_hall_seam  # inputs
     "analysis_mhd_wall_hall_seam.py diags/diag000000 diags/diag000010"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# dielectric standoff, transparency reference twin: the seeded-loop deck
+# with NO wall at all -- the probe-ring flux linkage deep inside the
+# (would-be) band must come out finite, and the band region's fluid must
+# evolve (the teeth of the dielectric run's bit-static check)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_transparency_none  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_dielectric implicit_mhd.wall_model=none implicit_mhd.wall_thermal_bc=none"  # inputs
+    "analysis_mhd_wall_dielectric.py diags/diag000000 diags/diag000030 none"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# dielectric standoff (EM-transparent formation tube), the headline
+# transparency test: the seeded plasma-response loop must link the probe
+# rings deep inside the masked band FINITELY and identically to the
+# wall_model=none twin (no response pinning, no PC row drops -- asserted
+# in-run by the resistive assembly validation -- and no wall-seam guard:
+# Hall is on, so a wrongly-engaged guard breaks the twin match), while
+# the masked-band FLUID state stays bit-static (the pec_response rigid
+# freeze, zero_flux thermal wall)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_dielectric  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_wall_dielectric  # inputs
+    "analysis_mhd_wall_dielectric.py diags/diag000000 diags/diag000030 dielectric ../test_rz_theta_implicit_mhd_wall_transparency_none/diags/diag000030"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_transparency_none  # dependency
+)
+
+# pec_response contrast on the same deck (the adversarial twin): the
+# one-way-glass conductor pins the identical probe-ring linkage at
+# zero/roundoff -- the measured coil-contour back-EMF kill the
+# dielectric mode exists to remove
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_dielectric_pinned_contrast  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_dielectric implicit_mhd.wall_model=pec_response"  # inputs
+    "analysis_mhd_wall_dielectric.py diags/diag000000 diags/diag000030 pec_response"  # analysis
     OFF  # checksum
     OFF  # dependency
 )

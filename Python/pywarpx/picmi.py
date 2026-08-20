@@ -2476,8 +2476,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Wall temperature in eV of the z-end fluid ghosts; required with
         (and only valid with) z_boundary_fluid="wall_temperature".
 
-    wall_model: {"none", "pec", "pec_response"}, optional
-        Shaped conducting-wall model (RZ, fluid_flux="hlld" or
+    wall_model: {"none", "pec", "pec_response", "dielectric"}, optional
+        Shaped-wall model (RZ, fluid_flux="hlld" or
         "central", non-periodic z). "none" (default) is bit-identical
         to no wall. "pec" builds a static stair-step perfect-conductor
         mask from the revolved poloidal polyline of wall_polyline_file
@@ -2493,7 +2493,20 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         composites that already embed the machine's wall response;
         requires split external fields. The preconditioner sees the
         identical mask in both modes; the fluid is untouched (the
-        dust/vacuum fill is the fluid-side wall analog). NOTE: coil
+        dust/vacuum fill is the fluid-side wall analog). "dielectric"
+        is the formation-tube standoff (quartz-class dielectric tube
+        between plasma and drive coils): the FLUID contract of
+        "pec_response" — rigid frozen band, one-sided stair-face
+        drains and no-injection image, wall_thermal_bc/ledger — with
+        an EM-TRANSPARENT field side (no response pinning, no
+        preconditioner row drops, no wall-seam guard; the
+        PEC_Insulator insulator-side convention applied to the shaped
+        interior band). Requires split external fields and an active
+        wall_thermal_bc (without one it would be a no-op); pair it with
+        separately represented metal structures (e.g. circuit-side
+        eddy rings) — unlike "pec_response" it keeps the plasma flux
+        linkage of in-band coil contours finite for two-way circuit
+        coupling. NOTE: coil
         waveforms whose calibration was fitted against composites that
         already embed the machine's wall response double-count the wall
         when combined with wall_model="pec" — use "pec_response" for

@@ -5153,13 +5153,13 @@ Jacobian probes.
     :type: ``string``
     :default: ``none``
 
-    Shaped conducting-wall model of the theta-implicit MHD solver (RZ,
+    Shaped-wall model of the theta-implicit MHD solver (RZ,
     ``implicit_mhd.fluid_flux = hlld`` or ``central``; non-periodic z).
-    ``none`` (default) is bit-identical to no wall. ``pec`` and
-    ``pec_response`` build the same static stair-step perfect-conductor
+    ``none`` (default) is bit-identical to no wall. ``pec``,
+    ``pec_response`` and ``dielectric`` build the same static stair-step
     mask from the revolved poloidal polyline of ``wall_polyline_file``
-    and differ only in which field the conductor condition pins (see
-    below). For ``pec``: every electric-field component
+    and differ only in the field-side condition the masked band imposes
+    (see below). For ``pec``: every electric-field component
     located on or outside the polyline (:math:`r \ge r_\mathrm{wall}(z)`;
     by the Yee staggering an E component exactly ON a stair face is
     always tangential to it) is projected onto the conductor condition
@@ -5195,7 +5195,37 @@ Jacobian probes.
     modes (the masked E values are state-independent constants either
     way).
 
-    In both modes the non-ideal Ohm edge terms (the Hall EMF, the
+    ``dielectric`` is the formation-tube standoff: in the real machine
+    the shaped wall between the plasma and the drive coils is a
+    quartz-class dielectric tube — it absorbs plasma and holds a
+    temperature boundary, but it is electromagnetically TRANSPARENT (no
+    eddy screening, no response-field pinning). The FLUID contract is
+    identical to ``pec_response`` (same mask, rigid freeze of the masked
+    band, one-sided stair-face drains and no-injection absorb image,
+    ``wall_thermal_bc``/``wall_temperature``/ledger, halo-pedestal
+    exclusion, axis guard; requires the split external fields like
+    ``pec_response`` and an ACTIVE ``wall_thermal_bc`` — the standoff's
+    entire wall action is the fluid contract, so without one the mode
+    would be a silent no-op), while the FIELD side imposes no constraint at
+    all: the plasma-response E is never projected in the band, the
+    preconditioner drops no rows, and the wall-seam guard below is
+    inactive (nothing is pinned, so there is no drive-scale surface
+    current for the Ohm edge stencils to ingest). The semantics follow
+    WarpX's mixed PEC/insulator domain boundary
+    (``Source/BoundaryConditions/PEC_Insulator``): on the insulator side
+    tangential fields are left unchanged unless prescribed and the
+    normal B stays evolved — nothing is prescribed here. The band's
+    frozen floor-density dust plus the vacuum-keyed resistivity already
+    keep the region current-free in the response solve, which is the
+    physically correct insulator interior. Use this mode when the
+    machine's metal structures are represented separately (e.g. as
+    circuit-side eddy rings coupled through the programmed drive):
+    unlike ``pec_response`` — whose pinned response makes the plasma
+    flux linkage of every in-band coil contour exactly zero, killing
+    two-way circuit coupling — ``dielectric`` gives the finite, physical
+    response linkage at coil radii inside the (former) metal band.
+
+    In both CONDUCTOR modes the non-ideal Ohm edge terms (the Hall EMF, the
     electron-inertia field contribution, and the hyper-resistive term)
     carry a WALL-SEAM GUARD: they are zeroed at every live E row whose
     stencil footprint reaches into the masked band. Those stencils
@@ -5227,7 +5257,8 @@ Jacobian probes.
 .. pp:param:: implicit_mhd.wall_polyline_file
     :type: ``string``
 
-    CSV file of the wall polyline for ``implicit_mhd.wall_model = pec``:
+    CSV file of the wall polyline for the active
+    ``implicit_mhd.wall_model`` modes:
     rows of ``z, r`` [m] (optional header row), z non-decreasing and
     single-valued (express near-vertical wall faces with epsilon-offset
     duplicate z values). The polyline is interpolated linearly in z and
@@ -5245,8 +5276,8 @@ Jacobian probes.
     :default: ``none``
 
     Thermal boundary condition at the stair-step interface of the shaped
-    conducting wall (requires ``implicit_mhd.wall_model = pec`` or
-    ``pec_response``). The conducting-wall mask is electromagnetic only:
+    wall (requires ``implicit_mhd.wall_model = pec``, ``pec_response`` or
+    ``dielectric``). The conducting-wall mask is electromagnetic only:
     with the default ``none`` the conduction operator
     (``thermal_diffusivity_ion/electron``) exchanges heat blindly across
     the wall interface against conductor cells riding the density floor,
