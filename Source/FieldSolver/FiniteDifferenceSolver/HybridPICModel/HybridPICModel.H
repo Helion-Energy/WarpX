@@ -1355,18 +1355,26 @@ public:
     amrex::Real m_vacuum_hyper_resistivity_cfl_factor = 0.01;
 
     /** Generalized-Ohm's-law E solve (Amano, Higashimori & Shirakawa,
-     *  JCP 275 (2014) 197): instead of the algebraic Ohm's law with its
-     *  density division, solve the screened equation
+     *  JCP 275 (2014) 197; the elliptic form is the Hewett-Nielson
+     *  Darwin transverse-field solve, JCP 29 (1978) 219, in
+     *  generalized-Ohm clothing): instead of the algebraic Ohm's law
+     *  with its density division, solve the screened equation
      *      (rho_e - eps grad^2) E = F,
      *      F = enE - grad Pe + (rho_e eta)_eff J,   eps = m_e'/(mu0 e),
      *  whose RHS is division-free (every term ~ density moments), so the
      *  vacuum limit is Laplace's equation -- no floor, no eta_vac ramp,
      *  no pedestal needed for the FIELD solve. Solved with
      *  qdsmc-warm-started Jacobi sweeps per B-substep stage (lock-step;
-     *  the operator is diagonally dominant where d_e < dx). NOTE: this is
-     *  the component-wise grad^2 form of Amano Eq (14) (assumes
-     *  div E ~ 0), NOT the exact curl-curl form -- they differ by a
-     *  grad-div term where charge separation matters. m_e' is the Eq-(27)
+     *  the operator is diagonally dominant where d_e < dx). SECTOR
+     *  CAVEAT: the true inertia screening operator is PURE CURL-CURL
+     *  (dJe/dt = -curlcurl E/mu0 - dJi/dt) and annihilates the
+     *  longitudinal field identically; this component-wise grad^2 form
+     *  (Amano Eq (14), div E ~ 0) spuriously screens E_L -- invisible
+     *  for 1D transverse modes, but in 2D/3D it damps the
+     *  grad-Pe-driven longitudinal field at density-contrast edges.
+     *  Multi-D users of the jacobi form should prefer a curl-curl
+     *  operator (which passes E_L through untouched); the relax form
+     *  below has no grad^2 and is unaffected. m_e' is the Eq-(27)
      *  variable electron mass evaluated at the CURRENT substep dt
      *  (published in m_gol_dt_sub by the substep loop), so subcycling
      *  directly reduces the artificial inertia. gol_vacuum_gamma_frac
