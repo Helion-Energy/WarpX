@@ -1004,7 +1004,7 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_sod_hlld  # name
     1  # dims
     1  # nprocs
-    "inputs_test_1d_theta_implicit_mhd_sod implicit_mhd.fluid_flux=hlld"  # inputs
+    "inputs_test_1d_theta_implicit_mhd_sod implicit_mhd.fluid_flux=hlld implicit_mhd.allow_hlld=true"  # inputs
     "analysis_mhd_sod.py diags/diag000000 diags/diag000200 total_energy"  # analysis
     OFF  # checksum
     OFF  # dependency
@@ -1018,7 +1018,7 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_sod_hlld_pc  # name
     1  # dims
     1  # nprocs
-    "inputs_test_1d_theta_implicit_mhd_sod implicit_mhd.fluid_flux=hlld jacobian.pc_type=pc_mhd_block"  # inputs
+    "inputs_test_1d_theta_implicit_mhd_sod implicit_mhd.fluid_flux=hlld implicit_mhd.allow_hlld=true jacobian.pc_type=pc_mhd_block"  # inputs
     "analysis_mhd_hlld_preconditioner.py diags/diag000000 diags/diag000200 total_energy"  # analysis
     OFF  # checksum
     OFF  # dependency
@@ -1028,7 +1028,7 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_sod_pe_dominated_hlld  # name
     1  # dims
     1  # nprocs
-    "inputs_test_1d_theta_implicit_mhd_sod_pe_dominated implicit_mhd.fluid_flux=hlld"  # inputs
+    "inputs_test_1d_theta_implicit_mhd_sod_pe_dominated implicit_mhd.fluid_flux=hlld implicit_mhd.allow_hlld=true"  # inputs
     "analysis_mhd_sod_pe_dominated.py diags/diag000000 diags/diag000200"  # analysis
     OFF  # checksum
     OFF  # dependency
@@ -1038,7 +1038,7 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_static_contact_hlld  # name
     1  # dims
     1  # nprocs
-    "inputs_test_1d_theta_implicit_mhd_static_contact implicit_mhd.fluid_flux=hlld"  # inputs
+    "inputs_test_1d_theta_implicit_mhd_static_contact implicit_mhd.fluid_flux=hlld implicit_mhd.allow_hlld=true"  # inputs
     "analysis_mhd_static_contact.py diags/diag000000 diags/diag000100 hlld"  # analysis
     OFF  # checksum
     OFF  # dependency
@@ -1048,7 +1048,7 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_energy_conservation_hlld  # name
     1  # dims
     1  # nprocs
-    "inputs_test_1d_theta_implicit_mhd_energy_conservation implicit_mhd.fluid_flux=hlld"  # inputs
+    "inputs_test_1d_theta_implicit_mhd_energy_conservation implicit_mhd.fluid_flux=hlld implicit_mhd.allow_hlld=true"  # inputs
     "analysis_mhd_energy_conservation.py diags/diag000000 diags/diag000100"  # analysis
     OFF  # checksum
     OFF  # dependency
@@ -1269,7 +1269,7 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_z_outflow_hlld  # name
     RZ  # dims
     2  # nprocs
-    "inputs_test_rz_theta_implicit_mhd_z_outflow implicit_mhd.fluid_flux=hlld"  # inputs
+    "inputs_test_rz_theta_implicit_mhd_z_outflow implicit_mhd.fluid_flux=hlld implicit_mhd.allow_hlld=true"  # inputs
     "analysis_mhd_z_outflow.py diags/diag000000 diags/diag000240 pec"  # analysis
     OFF  # checksum
     OFF  # dependency
@@ -1284,7 +1284,7 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_z_outflow_hlld_pc  # name
     RZ  # dims
     2  # nprocs
-    "inputs_test_rz_theta_implicit_mhd_z_outflow implicit_mhd.fluid_flux=hlld jacobian.pc_type=pc_mhd_block"  # inputs
+    "inputs_test_rz_theta_implicit_mhd_z_outflow implicit_mhd.fluid_flux=hlld implicit_mhd.allow_hlld=true jacobian.pc_type=pc_mhd_block"  # inputs
     "analysis_mhd_z_outflow_pc.py diags/diag000000 diags/diag000240 pec"  # analysis
     OFF  # checksum
     OFF  # dependency

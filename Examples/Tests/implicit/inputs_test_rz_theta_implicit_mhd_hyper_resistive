@@ -107,6 +107,7 @@ implicit_mhd.mass_density(x,y,z) = rho0*(halo + (1-halo)*exp(-(x/r0)^4))*(1 + zm
 implicit_mhd.electron_pressure(x,y,z) = Pe
 implicit_mhd.evolve_ion_fluid = false
 implicit_mhd.fluid_flux = hlld
+implicit_mhd.allow_hlld = true   # kernel regression coverage; central is production
 implicit_mhd.include_joule_heating = false
 implicit_mhd.resistive_theta = 1.0
 

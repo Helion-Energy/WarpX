@@ -94,6 +94,7 @@ implicit_mhd.mass_density(x,y,z) = rho0
 implicit_mhd.electron_pressure(x,y,z) = Pe
 implicit_mhd.evolve_ion_fluid = false
 implicit_mhd.fluid_flux = hlld
+implicit_mhd.allow_hlld = true   # kernel regression coverage; central is production
 implicit_mhd.include_joule_heating = true
 implicit_mhd.vacuum_resistivity_diffusivity = D_vac
 implicit_mhd.resistive_theta = theta_resistive

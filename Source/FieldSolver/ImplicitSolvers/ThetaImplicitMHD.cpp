@@ -375,6 +375,16 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     m_use_hlld = (m_fluid_flux == "hlld");
     m_use_central = (m_fluid_flux == "central");
     m_use_recast = m_use_hlld || m_use_central;
+    // hlld is NOT a production flux (central + viscosity is): the hlld
+    // path stays only as kernel regression coverage and must be opted
+    // into explicitly, so no production deck can reach it silently.
+    pp.query("allow_hlld", m_allow_hlld);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_use_hlld || m_allow_hlld,
+        "implicit_mhd.fluid_flux = hlld is not a production flux (use "
+        "central, with implicit_mhd.viscosity); it remains available for "
+        "kernel regression tests only -- set implicit_mhd.allow_hlld = "
+        "true to opt in");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_z_boundary_fluid == "neumann" || m_use_recast,
         "implicit_mhd.z_boundary_fluid = wall_temperature/outflow requires "

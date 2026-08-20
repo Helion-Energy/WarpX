@@ -2310,6 +2310,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         and zero ion velocity for an electron-MHD limit.
 
     fluid_flux: {"centered", "rusanov", "hllc", "hlld", "central"}, optional
+        hlld is not a production flux (central + viscosity is) and
+        requires the explicit opt-in allow_hlld=True (kernel regression
+        coverage only).
         Cell-face fluid flux. Centered is low-dissipation for smooth flows;
         Rusanov adds local Lax--Friedrichs regularization; HLLC is a
         contact-preserving approximate Riemann flux. HLLD selects the
@@ -2835,6 +2838,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         resistive_theta=None,
         conduction_theta=None,
         fluid_flux=None,
+        allow_hlld=None,
         viscosity=None,
         thermal_diffusivity_ion=None,
         thermal_diffusivity_electron=None,
@@ -2912,6 +2916,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.resistive_theta = resistive_theta
         self.conduction_theta = conduction_theta
         self.fluid_flux = fluid_flux
+        self.allow_hlld = allow_hlld
         self.viscosity = viscosity
         self.thermal_diffusivity_ion = thermal_diffusivity_ion
         self.thermal_diffusivity_electron = thermal_diffusivity_electron
@@ -3001,6 +3006,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.resistive_theta = self.resistive_theta
         implicit_mhd.conduction_theta = self.conduction_theta
         implicit_mhd.fluid_flux = self.fluid_flux
+        implicit_mhd.allow_hlld = self.allow_hlld
         implicit_mhd.viscosity = self.viscosity
         # strings route to the parser signature; numbers keep the
         # bit-identical constant fast path

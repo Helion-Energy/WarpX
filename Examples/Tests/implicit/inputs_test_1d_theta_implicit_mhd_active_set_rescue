@@ -118,6 +118,7 @@ implicit_mhd.electron_pressure(x,y,z) = Pe
 implicit_mhd.velocity_z(x,y,z) = dv * sin(2*pi*z/Lz)
 implicit_mhd.evolve_ion_fluid = true
 implicit_mhd.fluid_flux = hlld
+implicit_mhd.allow_hlld = true   # kernel regression coverage; central is production
 implicit_mhd.include_joule_heating = true
 implicit_mhd.halo_pedestal_fraction = pedestal_fraction
 implicit_mhd.halo_pedestal_energy_rate = energy_rate

@@ -97,6 +97,7 @@ evolve_scheme = picmi.ThetaImplicitMHDEvolveScheme(
     mass_density_floor=1.0e-4 * rho0,
     electron_pressure_floor=1.0e-4 * Pe0,
     fluid_flux="hlld",
+    allow_hlld=True,  # kernel regression coverage; central is production
 )
 
 sim = picmi.Simulation(

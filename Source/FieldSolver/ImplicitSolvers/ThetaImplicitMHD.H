@@ -835,6 +835,9 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // Conservative-form recast (fluid_flux = hlld): B replaces E as the
     // JFNK array block and E is derived from the Riemann EMF + eta J.
     bool m_use_hlld = false;
+    // hlld is non-production (kernel regression coverage only) and must
+    // be opted into explicitly via implicit_mhd.allow_hlld.
+    bool m_allow_hlld = false;
     // fluid_flux = central: the SAME recast with the Chacon-style central
     // conservative flux in place of the HLLD fan (explicit viscosity
     // replaces the Riemann dissipation).

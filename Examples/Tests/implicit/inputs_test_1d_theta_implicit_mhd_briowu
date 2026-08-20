@@ -89,6 +89,7 @@ implicit_mhd.ion_pressure_floor = 1.0e-6 * P0
 implicit_mhd.mass_density_floor = 1.0e-6 * rho0
 implicit_mhd.electron_pressure_floor = 1.0e-9 * P0
 implicit_mhd.fluid_flux = hlld
+implicit_mhd.allow_hlld = true   # kernel regression coverage; central is production
 # Robustness configuration for the 180-degree rotational/compound
 # structure (B_t through zero at finite B_n): the wave fan sees the
 # polytropic p_i(rho) -- physical fluxes stay consistent -- and the

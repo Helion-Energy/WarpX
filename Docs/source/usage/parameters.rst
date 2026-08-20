@@ -4825,7 +4825,11 @@ Jacobian probes.
     remains in the staggered Ohm/Faraday update.
 
     ``hlld`` selects the conservative-form recast (1D Cartesian and
-    cylindrical RZ): :math:`B^{n+\theta}` replaces :math:`E` as the JFNK
+    cylindrical RZ). It is **not a production flux** (``central`` with
+    ``implicit_mhd.viscosity`` is) and is kept only as kernel regression
+    coverage: selecting it requires the explicit opt-in
+    ``implicit_mhd.allow_hlld = true`` or the solver aborts at setup.
+    In this form :math:`B^{n+\theta}` replaces :math:`E` as the JFNK
     field unknown, and one smoothed HLLD (Miyoshi--Kusano) Riemann
     solution per cell face supplies the fluid fluxes, the Maxwell-stress
     momentum coupling (replacing the pointwise :math:`J \times B` force),

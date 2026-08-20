@@ -118,6 +118,7 @@ implicit_mhd.mass_density_floor = 1.0e-5 * rho0
 implicit_mhd.electron_pressure_floor = 1.0e-5 * Pe
 implicit_mhd.ion_pressure_floor = 1.0e-5 * Pi
 implicit_mhd.fluid_flux = hlld
+implicit_mhd.allow_hlld = true   # kernel regression coverage; central is production
 implicit_mhd.r_open_fluid = absorb
 implicit_mhd.halo_pedestal_fraction = 1.0e-3
 implicit_mhd.absorb_ledger_interval = 10

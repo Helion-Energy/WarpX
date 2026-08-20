@@ -96,6 +96,7 @@ implicit_mhd.mass_density_floor = 1.0e-4 * rho0
 implicit_mhd.electron_pressure_floor = 1.0e-4 * Pe0
 implicit_mhd.ion_pressure_floor = 1.0e-4 * Pi0
 implicit_mhd.fluid_flux = hlld
+implicit_mhd.allow_hlld = true   # kernel regression coverage; central is production
 implicit_mhd.ion_closure = total_energy
 implicit_mhd.z_boundary_fluid = wall_temperature
 implicit_mhd.z_wall_temperature = Twall_ev
