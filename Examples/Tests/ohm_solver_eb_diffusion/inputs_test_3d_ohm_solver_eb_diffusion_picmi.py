@@ -41,7 +41,9 @@ DIFFUSIVITY = ETA / constants.mu0  # magnetic diffusivity (m^2/s)
 DECAY_RATE = DIFFUSIVITY * (np.pi / CAVITY_SIDE) ** 2  # analytic decay rate (1/s)
 
 
-def setup_simulation(resolution, substeps, use_conformal_eb, verbose, split_z=False):
+def setup_simulation(
+    resolution, substeps, use_conformal_eb, verbose, split_z=False, implicit=False
+):
     """Create the PICMI simulation object.
 
     Parameters
@@ -115,6 +117,31 @@ def setup_simulation(resolution, substeps, use_conformal_eb, verbose, split_z=Fa
         use_conformal_eb=True if use_conformal_eb else None,
     )
 
+    if implicit:
+        # Theta-implicit arm: the conformal wall projection runs inside the
+        # per-level Ohm solve, so every residual evaluation carries it and
+        # newton.require_convergence is the wall-contract assertion.
+        gmres_solver = picmi.GMRESLinearSolver(
+            verbose_int=1,
+            max_iterations=100,
+            relative_tolerance=1.0e-4,
+            absolute_tolerance=0.0,
+        )
+        nonlinear_solver = picmi.NewtonNonlinearSolver(
+            verbose=True,
+            max_iterations=20,
+            relative_tolerance=1.0e-6,
+            absolute_tolerance=0.0,
+            require_convergence=True,
+            linear_solver=gmres_solver,
+            max_particle_iterations=21,
+            particle_tolerance=1.0e-10,
+        )
+        sim.evolve_scheme = picmi.ThetaImplicitHybridEvolveScheme(
+            theta=0.5,
+            nonlinear_solver=nonlinear_solver,
+        )
+
     sim.embedded_boundary = picmi.EmbeddedBoundary(
         implicit_function=(
             "xr=x*cos(-theta)+z*sin(-theta);"
@@ -180,6 +207,12 @@ def main():
         default=4,
     )
     parser.add_argument(
+        "--implicit",
+        help="advance with the theta-implicit hybrid solver (Newton/JFNK, "
+        "convergence required) instead of the explicit subcycled push",
+        action="store_true",
+    )
+    parser.add_argument(
         "--split-z",
         help="decompose along z so box seams cross the conformal borrowing "
         "planes (cross-box seam test)",
@@ -201,6 +234,7 @@ def main():
         args.conformal,
         args.verbose,
         args.split_z,
+        args.implicit,
     )
     sim.step()
 

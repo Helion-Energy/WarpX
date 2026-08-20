@@ -74,6 +74,25 @@ WarpX::UpdateMagneticFieldAndApplyBCs( ablastr::fields::MultiLevelVectorField co
         amrex::MultiFab::Copy(*Bfp[1], *a_Bn[lev][1], 0, 0, ncomps, a_Bn[lev][1]->nGrowVect());
         amrex::MultiFab::Copy(*Bfp[2], *a_Bn[lev][2], 0, 0, ncomps, a_Bn[lev][2]->nGrowVect());
     }
+#ifdef AMREX_USE_EB
+    // Conformal (ECT) wall: recompute the per-face EMF circulations
+    // (ECTRhofield) from the current-iterate E before the ECT Faraday
+    // push. This runs inside every residual evaluation, so the Jacobian
+    // sees the wall-consistent B^theta map exactly -- without it the ECT
+    // push integrates stale (initially zero) circulations and B never
+    // advances. E ghosts are fresh here: UpdateElectricFieldAndApplyBCs
+    // filled them, and the ECT circulation reads cross-box ghost E edges.
+    if (UseConformalEBSolve()) {
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            get_pointer_fdtd_solver_fp(lev)->EvolveECTRho(
+                m_fields.get_alldirs(FieldType::Efield_fp, lev),
+                m_fields.get_alldirs(FieldType::edge_lengths, lev),
+                m_fields.get_alldirs(FieldType::face_areas, lev),
+                m_fields.get_alldirs(FieldType::ECTRhofield, lev),
+                lev);
+        }
+    }
+#endif
     // Use the per-level EvolveB: this runs inside every nonlinear residual
     // evaluation (including Jacobian probes), so the multi-level variant's
     // afterBpush python callback must not fire here. A single afterBpush is
