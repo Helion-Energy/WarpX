@@ -1335,6 +1335,56 @@ public:
      *  [m^4/s], vacuum_hyper_resistivity_cfl_factor (default 0.01). */
     amrex::Real m_vacuum_hyper_resistivity_diffusivity = 0.0;
     amrex::Real m_vacuum_hyper_resistivity_cfl_factor = 0.01;
+
+    /** Generalized-Ohm's-law E solve (Amano, Higashimori & Shirakawa,
+     *  JCP 275 (2014) 197): instead of the algebraic Ohm's law with its
+     *  density division, solve the screened equation
+     *      (rho_e - eps grad^2) E = F,
+     *      F = enE - grad Pe + (rho_e eta)_eff J,   eps = m_e'/(mu0 e),
+     *  whose RHS is division-free (every term ~ density moments), so the
+     *  vacuum limit is Laplace's equation -- no floor, no eta_vac ramp,
+     *  no pedestal needed for the FIELD solve. Solved with
+     *  qdsmc-warm-started Jacobi sweeps per B-substep stage (lock-step;
+     *  the operator is diagonally dominant where d_e < dx). NOTE: this is
+     *  the component-wise grad^2 form of Amano Eq (14) (assumes
+     *  div E ~ 0), NOT the exact curl-curl form -- they differ by a
+     *  grad-div term where charge separation matters. m_e' is the Eq-(27)
+     *  variable electron mass evaluated at the CURRENT substep dt
+     *  (published in m_gol_dt_sub by the substep loop), so subcycling
+     *  directly reduces the artificial inertia. gol_vacuum_gamma_frac
+     *  arms the Eq-(30) vacuum-resistivity-as-LOCAL-DAMPING term
+     *  (gamma_max = frac/dt): in the GOL form vacuum current decays
+     *  exponentially with NO diffusion CFL. v1: collocated Cartesian
+     *  only. Inputs: hybrid_pic_model.esolve = ohm|gol, gol_sweeps,
+     *  gol_cfl_alpha, gol_n_min [m^-3, the one-count level],
+     *  gol_vacuum_gamma_frac. */
+    bool m_esolve_gol = false;
+    int  m_gol_sweeps = 4;
+    amrex::Real m_gol_alpha = 0.5;
+    amrex::Real m_gol_n_min = 0.0;
+    amrex::Real m_gol_vac_gamma_frac = 0.0;
+    /** Current B-substep dt, published for the Eq-(27) mass evaluation.
+     *  Mutable: set inside the const substep loop; 0 -> full-step dt. */
+    mutable amrex::Real m_gol_dt_sub = 0.0;
+
+    /** Amano Eq (27) effective electron mass, multiplied through by m_i
+     *  (the ion mass cancels): m_e' = max(m_e, B^2 q_e/(mu0 rho_e) *
+     *  (dt/(2 alpha dx))^2), which pins the electron-Alfven phase
+     *  velocity at the local CFL. Shared helper by design -- the
+     *  implicit path consumes the same formula (keep callable, do not
+     *  inline into loops). rho_e must be guarded positive by the caller
+     *  (one-count level). */
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    static amrex::Real GolEffectiveElectronMass (
+        amrex::Real const B2, amrex::Real const rho_e_guarded,
+        amrex::Real const dt, amrex::Real const dx_min,
+        amrex::Real const alpha)
+    {
+        amrex::Real const va2_me =
+            B2 * PhysConst::q_e / (PhysConst::mu0 * rho_e_guarded);
+        amrex::Real const s = dt / (amrex::Real(2.0) * alpha * dx_min);
+        return amrex::max(PhysConst::m_e, va2_me * s * s);
+    }
     std::unique_ptr<amrex::Parser> m_resistivity_raw_parser;
     amrex::ParserExecutor<3> m_eta_raw;
 

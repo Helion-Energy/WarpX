@@ -484,6 +484,29 @@ void HybridPICModel::ReadParameters ()
         m_vacuum_hyper_resistivity_diffusivity >= 0.0_rt,
         "hybrid_pic_model.vacuum_hyper_resistivity_diffusivity cannot be "
         "negative");
+
+    // Generalized-Ohm's-law E solve (see member doc).
+    {
+        std::string esolve = "ohm";
+        pp_hybrid.query("esolve", esolve);
+        if (esolve == "gol") { m_esolve_gol = true; }
+        else {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(esolve == "ohm",
+                "hybrid_pic_model.esolve must be 'ohm' or 'gol'");
+        }
+        pp_hybrid.query("gol_sweeps", m_gol_sweeps);
+        utils::parser::queryWithParser(pp_hybrid, "gol_cfl_alpha", m_gol_alpha);
+        utils::parser::queryWithParser(pp_hybrid, "gol_n_min", m_gol_n_min);
+        utils::parser::queryWithParser(pp_hybrid, "gol_vacuum_gamma_frac",
+                                       m_gol_vac_gamma_frac);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_esolve_gol ||
+                (m_gol_n_min > 0.0_rt && m_gol_sweeps >= 1 &&
+                 m_gol_alpha > 0.0_rt),
+            "hybrid_pic_model.esolve = gol requires gol_n_min > 0 (the "
+            "one-count density level), gol_sweeps >= 1 and "
+            "gol_cfl_alpha > 0");
+    }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_vacuum_resistivity_diffusivity >= 0.0_rt,
         "hybrid_pic_model.vacuum_resistivity_diffusivity cannot be negative");
@@ -7135,6 +7158,11 @@ void HybridPICModel::BfieldEvolve (
         if (t + dt_sub > dt_half) { dt_sub = dt_half - t; }
         bool step_succeeded = true;
         amrex::Real step_change_factor = 1.0_rt;
+
+        // Publish the current substep dt for the GOL variable-mass
+        // evaluation (Amano Eq 27 at dt_sub: subcycling directly reduces
+        // the artificial electron inertia).
+        m_gol_dt_sub = dt_sub;
 
         if (use_rkf45) {
             const amrex::Real error = BfieldEvolveRKF45(

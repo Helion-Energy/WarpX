@@ -357,6 +357,31 @@ parser.add_argument(
     "parser. 0 = off",
 )
 parser.add_argument(
+    "--esolve",
+    choices=["ohm", "gol"],
+    default="ohm",
+    help="E-field solve: ohm = algebraic Ohm's law (floored division, "
+    "legacy); gol = Amano+2014 generalized Ohm's law with electron "
+    "inertia (screened solve, division-free, vacuum -> Laplace; "
+    "collocated only)",
+)
+parser.add_argument(
+    "--gol-n-min",
+    type=float,
+    default=-1.0,
+    help="GOL one-count density level [m^-3] (hybrid_pic_model.gol_n_min); "
+    "<0 with --esolve gol = one macro-particle per cell, computed from "
+    "nppc and the fill density",
+)
+parser.add_argument(
+    "--gol-vac-gamma",
+    type=float,
+    default=1.0,
+    help="GOL vacuum current-damping strength gamma_max*dt "
+    "(hybrid_pic_model.gol_vacuum_gamma_frac; Amano Eq 30, local decay, "
+    "no CFL). 0 = off",
+)
+parser.add_argument(
     "--chi-max",
     type=float,
     default=0.0,
@@ -733,6 +758,14 @@ if args.eta_vac_d > 0.0:
     pywarpx.hybridpicmodel.vacuum_resistivity_diffusivity = args.eta_vac_d
 if args.hyper_vac_d > 0.0:
     pywarpx.hybridpicmodel.vacuum_hyper_resistivity_diffusivity = args.hyper_vac_d
+if args.esolve == "gol":
+    pywarpx.hybridpicmodel.esolve = "gol"
+    n_one_count = (
+        args.gol_n_min if args.gol_n_min > 0.0 else args.fill_frac * N_I / args.nppc
+    )
+    pywarpx.hybridpicmodel.gol_n_min = n_one_count
+    if args.gol_vac_gamma > 0.0:
+        pywarpx.hybridpicmodel.gol_vacuum_gamma_frac = args.gol_vac_gamma
 if args.band_drain_rate > 0.0:
     pywarpx.hybridpicmodel.qdsmc_band_drain_rate = args.band_drain_rate
     pywarpx.hybridpicmodel.qdsmc_band_drain_Te = args.band_drain_te

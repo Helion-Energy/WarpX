@@ -1144,6 +1144,202 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         }
     }
 
+    // ---------------------------------------------------------------------
+    // Generalized-Ohm's-law E solve (Amano+2014; see the member doc):
+    // (rho_e - eps grad^2) E = F with F = enE - grad Pe + (rho eta)_eff J,
+    // warm-started Jacobi sweeps. Division-free RHS; vacuum -> Laplace.
+    // v1: collocated Cartesian only (all fields nodal -> direct reads).
+    if (hybrid_model->m_esolve_gol) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            WarpX::grid_type == GridType::Collocated,
+            "hybrid_pic_model.esolve = gol (v1) requires "
+            "warpx.grid_type = collocated");
+
+        auto const dx_arr = warpx.Geom(lev).CellSizeArray();
+        amrex::GpuArray<amrex::Real, 3> inv_dx2 = {0.0_rt, 0.0_rt, 0.0_rt};
+        amrex::Real dx_min = dx_arr[0];
+        amrex::Real diag_fac = 0.0_rt;
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            inv_dx2[d] = 1.0_rt / (dx_arr[d] * dx_arr[d]);
+            diag_fac += 2.0_rt * inv_dx2[d];
+            dx_min = amrex::min(dx_min, dx_arr[d]);
+        }
+        amrex::Real const dt_full = warpx.getdt(lev);
+        amrex::Real const dt_gol =
+            (hybrid_model->m_gol_dt_sub > 0.0_rt)
+                ? hybrid_model->m_gol_dt_sub : dt_full;
+        amrex::Real const gol_alpha  = hybrid_model->m_gol_alpha;
+        amrex::Real const rho_1c     =
+            PhysConst::q_e * hybrid_model->m_gol_n_min;
+        amrex::Real const inv_mu0e   =
+            1.0_rt / (PhysConst::mu0 * PhysConst::q_e);
+        // Eq-(30) vacuum damping: (rho eta)_eff blends to gamma_max m_e/e
+        // below the one-count level -- LOCAL current decay, no CFL.
+        amrex::Real const vac_gamma =
+            (hybrid_model->m_gol_vac_gamma_frac > 0.0_rt)
+                ? hybrid_model->m_gol_vac_gamma_frac / dt_full : 0.0_rt;
+        amrex::Real const vac_rho_eta = vac_gamma * PhysConst::m_e
+            / PhysConst::q_e;
+        bool const use_vac_damping = (vac_gamma > 0.0_rt);
+
+        // F assembly (nodal, no ghosts needed).
+        MultiFab F_mf(ba, rhofield.DistributionMap(), 3,
+                      IntVect::TheZeroVector());
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(F_mf, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            Array4<Real> const& F = F_mf.array(mfi);
+            Array4<Real const> const& enE = enE_nodal_mf.const_array(mfi);
+            Array4<Real const> const& rho = rhofield.const_array(mfi);
+            Array4<Real const> const& Pe  = Pefield.const_array(mfi);
+            Array4<Real const> const& Jx = Jfield[0]->const_array(mfi);
+            Array4<Real const> const& Jy = Jfield[1]->const_array(mfi);
+            Array4<Real const> const& Jz = Jfield[2]->const_array(mfi);
+            Real const * const AMREX_RESTRICT coefs_x = m_stencil_coefs_x.dataPtr();
+            auto const n_coefs_x = static_cast<int>(m_stencil_coefs_x.size());
+            Real const * const AMREX_RESTRICT coefs_y = m_stencil_coefs_y.dataPtr();
+            auto const n_coefs_y = static_cast<int>(m_stencil_coefs_y.size());
+            Real const * const AMREX_RESTRICT coefs_z = m_stencil_coefs_z.dataPtr();
+            auto const n_coefs_z = static_cast<int>(m_stencil_coefs_z.size());
+            bool const gradpe_on = (!solve_for_Faraday || add_grad_pe_faraday);
+            bool const eta_on = (solve_for_Faraday || add_resistivity_push);
+            amrex::ParallelFor(mfi.tilebox(),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                amrex::Real const rho_val = amrex::max(rho(i,j,k), 0.0_rt);
+                amrex::Real gpx = 0.0_rt, gpy = 0.0_rt, gpz = 0.0_rt;
+                if (gradpe_on) {
+                    gpx = T_Algo::UpwardDx(Pe, coefs_x, n_coefs_x, i, j, k);
+#if defined(WARPX_DIM_3D)
+                    gpy = T_Algo::UpwardDy(Pe, coefs_y, n_coefs_y, i, j, k);
+#endif
+                    gpz = T_Algo::UpwardDz(Pe, coefs_z, n_coefs_z, i, j, k);
+                }
+                amrex::Real rho_eta = 0.0_rt;
+                if (eta_on) {
+                    amrex::Real jtot_val = 0.0_rt;
+                    if (resistivity_has_J_dependence) {
+                        jtot_val = std::sqrt(
+                            Jx(i,j,k)*Jx(i,j,k) + Jy(i,j,k)*Jy(i,j,k)
+                            + Jz(i,j,k)*Jz(i,j,k));
+                    }
+                    rho_eta = rho_val * eta(rho_val, jtot_val, t_new);
+                    if (use_vac_damping) {
+                        // Amano Eq (30): smooth blend to the vacuum
+                        // damping coefficient below the one-count level.
+                        amrex::Real const w = 0.5_rt * (1.0_rt - std::tanh(
+                            (rho_val - rho_1c) / (0.5_rt * rho_1c)));
+                        rho_eta += (vac_rho_eta - rho_eta) * w;
+                    }
+                }
+                F(i,j,k,0) = enE(i,j,k,0) - gpx + rho_eta * Jx(i,j,k);
+                F(i,j,k,1) = enE(i,j,k,1) - gpy + rho_eta * Jy(i,j,k);
+                F(i,j,k,2) = enE(i,j,k,2) - gpz + rho_eta * Jz(i,j,k);
+            });
+        }
+
+        // Warm-started Jacobi sweeps on (rho_e - eps grad^2) E = F.
+        amrex::IntVect const ngE = Efield[0]->nGrowVect();
+        MultiFab Eold_mf(ba, rhofield.DistributionMap(), 3, ngE);
+        amrex::Periodicity const & period_g =
+            warpx.Geom(lev).periodicity();
+        for (int sweep = 0; sweep < hybrid_model->m_gol_sweeps; ++sweep) {
+            for (int d = 0; d < 3; ++d) {
+                Efield[d]->FillBoundary(period_g);
+                MultiFab::Copy(Eold_mf, *Efield[d], 0, d, 1, ngE);
+            }
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(*Efield[0], TilingIfNotGPU()); mfi.isValid();
+                 ++mfi) {
+                Array4<Real> const& Ex = Efield[0]->array(mfi);
+                Array4<Real> const& Ey = Efield[1]->array(mfi);
+                Array4<Real> const& Ez = Efield[2]->array(mfi);
+                Array4<Real const> const& Eo = Eold_mf.const_array(mfi);
+                Array4<Real const> const& F = F_mf.const_array(mfi);
+                Array4<Real const> const& rho = rhofield.const_array(mfi);
+                Array4<Real const> const& Bx = Bfield[0]->const_array(mfi);
+                Array4<Real const> const& By = Bfield[1]->const_array(mfi);
+                Array4<Real const> const& Bz = Bfield[2]->const_array(mfi);
+                Array4<Real> Bx_e, By_e, Bz_e;
+                if (include_external_fields) {
+                    Bx_e = Bfield_external[0]->array(mfi);
+                    By_e = Bfield_external[1]->array(mfi);
+                    Bz_e = Bfield_external[2]->array(mfi);
+                }
+                amrex::Array4<int> upd_x, upd_y, upd_z;
+                if (EB::enabled()) {
+                    upd_x = eb_update_E[0]->array(mfi);
+                    upd_y = eb_update_E[1]->array(mfi);
+                    upd_z = eb_update_E[2]->array(mfi);
+                }
+                amrex::ParallelFor(mfi.tilebox(),
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    amrex::Real bx = Bx(i,j,k), by = By(i,j,k),
+                                bz = Bz(i,j,k);
+                    if (include_external_fields) {
+                        bx += Bx_e(i,j,k); by += By_e(i,j,k);
+                        bz += Bz_e(i,j,k);
+                    }
+                    amrex::Real const B2 = bx*bx + by*by + bz*bz;
+                    amrex::Real const rho_g =
+                        amrex::max(rho(i,j,k), rho_1c);
+                    amrex::Real const eps =
+                        HybridPICModel::GolEffectiveElectronMass(
+                            B2, rho_g, dt_gol, dx_min, gol_alpha)
+                        * inv_mu0e;
+                    amrex::Real const denom =
+                        amrex::max(rho(i,j,k), 0.0_rt) + eps * diag_fac;
+                    for (int c = 0; c < 3; ++c) {
+                        if (c == 0 && upd_x && upd_x(i,j,k) == 0) { continue; }
+                        if (c == 1 && upd_y && upd_y(i,j,k) == 0) { continue; }
+                        if (c == 2 && upd_z && upd_z(i,j,k) == 0) { continue; }
+                        amrex::Real off =
+                            inv_dx2[0] * (Eo(i+1,j,k,c) + Eo(i-1,j,k,c));
+#if defined(WARPX_DIM_3D)
+                        off += inv_dx2[1] * (Eo(i,j+1,k,c) + Eo(i,j-1,k,c));
+                        off += inv_dx2[2] * (Eo(i,j,k+1,c) + Eo(i,j,k-1,c));
+#else
+                        off += inv_dx2[1] * (Eo(i,j+1,k,c) + Eo(i,j-1,k,c));
+#endif
+                        amrex::Real const val =
+                            (F(i,j,k,c) + eps * off) / denom;
+                        if      (c == 0) { Ex(i,j,k) = val; }
+                        else if (c == 1) { Ey(i,j,k) = val; }
+                        else             { Ez(i,j,k) = val; }
+                    }
+                });
+            }
+        }
+
+        // External-field subtraction, mirroring the Ohm path's convention
+        // (above the ohm floor only; the GOL vacuum E is the Laplace
+        // solution and must not have the external field removed).
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(*Efield[0], TilingIfNotGPU());
+             include_external_fields && mfi.isValid(); ++mfi) {
+            Array4<Real> const& Ex = Efield[0]->array(mfi);
+            Array4<Real> const& Ey = Efield[1]->array(mfi);
+            Array4<Real> const& Ez = Efield[2]->array(mfi);
+            Array4<Real const> const& rho = rhofield.const_array(mfi);
+            Array4<Real> const& Ex_e = Efield_external[0]->array(mfi);
+            Array4<Real> const& Ey_e = Efield_external[1]->array(mfi);
+            Array4<Real> const& Ez_e = Efield_external[2]->array(mfi);
+            amrex::ParallelFor(mfi.tilebox(),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                if (rho(i,j,k) >= rho_floor) {
+                    Ex(i,j,k) -= Ex_e(i,j,k);
+                    Ey(i,j,k) -= Ey_e(i,j,k);
+                    Ez(i,j,k) -= Ez_e(i,j,k);
+                }
+            });
+        }
+        return;
+    }
+
     // Loop through the grids, and over the tiles within each grid again
     // for the Yee grid calculation of the E field
 #ifdef AMREX_USE_OMP
