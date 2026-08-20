@@ -45,6 +45,23 @@ void WarpX::HybridPICEvolveFields ()
             gett_old(0),
             0.5_rt*dt[0]);
 
+        // Debug telemetry (debug/run020-substep-telemetry): the first
+        // step's external/total field norms bracket the step-begin
+        // subtract — the injection window of the step-1 abort class.
+        if (istep[0] <= 1) {
+            for (int idim = 0; idim < 3; ++idim) {
+                amrex::Print() << "[window-telemetry] step " << istep[0]
+                    << " pre-subtract comp " << idim
+                    << ": |B_ext|max = "
+                    << m_fields.get(FieldType::hybrid_B_fp_external,
+                                    Direction{idim}, 0)->norm0(0, 0)
+                    << ", |B_tot|max = "
+                    << m_fields.get(FieldType::Bfield_fp,
+                                    Direction{idim}, 0)->norm0(0, 0)
+                    << "\n";
+            }
+        }
+
         // If using split fields, subtract the external field at the old time
         for (int lev = 0; lev <= finest_level; ++lev) {
             for (int idim = 0; idim < 3; ++idim) {
@@ -53,6 +70,15 @@ void WarpX::HybridPICEvolveFields ()
                     *m_fields.get(FieldType::hybrid_B_fp_external, Direction{idim}, lev),
                     0, 0, 1,
                     m_fields.get(FieldType::Bfield_fp, Direction{idim}, lev)->nGrowVect());
+            }
+        }
+        if (istep[0] <= 1) {
+            for (int idim = 0; idim < 3; ++idim) {
+                amrex::Print() << "[window-telemetry] step " << istep[0]
+                    << " post-subtract comp " << idim << ": |B_plasma|max = "
+                    << m_fields.get(FieldType::Bfield_fp,
+                                    Direction{idim}, 0)->norm0(0, 0)
+                    << "\n";
             }
         }
 
@@ -424,6 +450,16 @@ void WarpX::HybridPICInitializeRhoJandB ()
                             m_fields.get(FieldType::hybrid_B_fp_external, Direction{idim}, lev)->is_finite(),
                             "Non-finite value detected in external B-field at t=0."
                         );
+
+                        amrex::Print() << "[window-telemetry] istep0 "
+                            "add-back comp " << idim << ": |B_ext|max = "
+                            << m_fields.get(
+                                   FieldType::hybrid_B_fp_external,
+                                   Direction{idim}, lev)->norm0(0, 0)
+                            << ", |B_tot|max pre-add = "
+                            << m_fields.get(FieldType::Bfield_fp,
+                                   Direction{idim}, lev)->norm0(0, 0)
+                            << "\n";
 
                         MultiFab::Add(
                             *m_fields.get(FieldType::Bfield_fp, Direction{idim}, lev),

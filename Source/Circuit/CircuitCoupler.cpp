@@ -84,6 +84,36 @@ CircuitCoupler::RefreshCircuitFields (const amrex::Real t0, const amrex::Real t1
                      ->m_external_vector_potential;
     ext.UpdateHybridExternalFields(0.5_rt * (t0 + t1), t1 - t0,
         ExternalVectorPotential::RefreshMode::CircuitOnly);
+
+    // Debug telemetry (debug/run020-substep-telemetry): scale extrema
+    // and the refreshed external field on the first few refreshes —
+    // the third candidate of the step-1 injection window.
+    static int s_refresh_prints = 0;
+    if (s_refresh_prints < 3) {
+        ++s_refresh_prints;
+        amrex::Real s_max = 0.0_rt;
+        std::string s_name = "-";
+        for (int ic = 0; ic < m_coils.size(); ++ic) {
+            const amrex::Real s =
+                ext.GetScale(m_coils.coil(ic).field_name,
+                             0.5_rt * (t0 + t1));
+            if (std::abs(s) > std::abs(s_max)) {
+                s_max = s;
+                s_name = m_coils.coil(ic).name;
+            }
+        }
+        auto& warpx = WarpX::GetInstance();
+        amrex::Print() << "[window-telemetry] refresh " << s_refresh_prints
+            << " [" << t0 << ", " << t1 << "]: max |s| = " << s_max
+            << " (" << s_name << "), |B_ext|max = ("
+            << warpx.m_fields.get(FieldType::hybrid_B_fp_external,
+                   ablastr::fields::Direction{0}, 0)->norm0(0, 0) << ", "
+            << warpx.m_fields.get(FieldType::hybrid_B_fp_external,
+                   ablastr::fields::Direction{1}, 0)->norm0(0, 0) << ", "
+            << warpx.m_fields.get(FieldType::hybrid_B_fp_external,
+                   ablastr::fields::Direction{2}, 0)->norm0(0, 0)
+            << ")\n";
+    }
 }
 
 std::vector<amrex::Real>
