@@ -72,6 +72,7 @@ class EMModes(object):
         callback_gating=False,
         steps=None,
         adaptive_forcing=False,
+        pc_curl_curl=False,
     ):
         """Get input parameters for the specific case desired."""
         self.test = test
@@ -85,6 +86,11 @@ class EMModes(object):
         self.callback_gating = callback_gating
         self.steps_override = steps
         self.adaptive_forcing = adaptive_forcing
+        self.pc_curl_curl = pc_curl_curl
+        assert not (self.pc_curl_curl and not self.inertia), (
+            "--pc-curl-curl preconditions the electron-inertia operator "
+            "form and requires an inertia variant"
+        )
         assert not (self.inertia_seeded and B_dir != "z"), (
             "--inertia-seeded seeds a transverse mode on the Bz guide "
             "field and requires --bdir z"
@@ -301,7 +307,12 @@ class EMModes(object):
         # iterations). With the exact mass-matrix Jacobian and the Jacobi
         # preconditioner the default budget suffices (2-iteration Newton),
         # which is exactly what the mass-matrices variant exercises.
-        boost_gmres = self.inertia_seeded and not self.mass_matrices
+        # The curl-curl MLMG arm runs at the DEFAULT Krylov budget with
+        # convergence required: the preconditioner replacing the boosted
+        # restart length is the assertion.
+        boost_gmres = (
+            self.inertia_seeded and not self.mass_matrices and not self.pc_curl_curl
+        )
         gmres_solver = picmi.GMRESLinearSolver(
             verbose_int=1,
             max_iterations=400 if boost_gmres else 100,
@@ -310,27 +321,50 @@ class EMModes(object):
             absolute_tolerance=0.0,
         )
 
+        pc = None
+        if self.mass_matrices:
+            pc = picmi.JacobiPreconditioner(
+                verbose=False,
+                max_iter=200,
+                relative_tolerance=1.0e-4,
+                absolute_tolerance=0.0,
+            )
+        if self.pc_curl_curl:
+            pc = picmi.CurlCurlMLMGPreconditioner(
+                verbose=False,
+                bottom_verbose=False,
+                agglomeration=True,
+                consolidation=True,
+                max_iter=10,
+                max_coarsening_level=30,
+                relative_tolerance=1.0e-4,
+                absolute_tolerance=0.0,
+            )
+            # The hybrid inertia mode of pc_curl_curl_mlmg models the
+            # operator form -d_e^2 curl curl E (Amano et al., JCP 275, 197
+            # (2014)): two-point dJe/dt stencil, dJe/dt leg only. These are
+            # not picmi-owned keys, so the bucket writes survive.
+            import pywarpx
+
+            pywarpx.hybridpicmodel.electron_inertia_bdf2 = 0
+            pywarpx.hybridpicmodel.electron_inertia_djedt_only = 1
+
         # Create nonlinear solver using Newton (JFNK)
         nonlinear_solver = picmi.NewtonNonlinearSolver(
             verbose=True,
             max_iterations=20,
             relative_tolerance=1.0e-6,
             absolute_tolerance=0.0,
-            require_convergence=True if self.adaptive_forcing else False,
+            require_convergence=True
+            if (self.adaptive_forcing or self.pc_curl_curl)
+            else False,
             linear_solver=gmres_solver,
             adaptive_forcing=True if self.adaptive_forcing else None,
             max_particle_iterations=21,
             particle_tolerance=1.0e-10,
             use_mass_matrices_jacobian=True if self.mass_matrices else None,
             use_mass_matrices_pc=True if self.mass_matrices else None,
-            pc_type=picmi.JacobiPreconditioner(
-                verbose=False,
-                max_iter=200,
-                relative_tolerance=1.0e-4,
-                absolute_tolerance=0.0,
-            )
-            if self.mass_matrices
-            else None,
+            pc_type=pc,
         )
         if self.inertia_seeded:
             import pywarpx
@@ -618,6 +652,13 @@ parser.add_argument(
     action="store_true",
 )
 parser.add_argument(
+    "--pc-curl-curl",
+    help="precondition with pc_curl_curl_mlmg in its hybrid electron-inertia "
+    "mode (switches the inertia term to the Amano operator form and runs "
+    "the default Krylov budget with convergence required)",
+    action="store_true",
+)
+parser.add_argument(
     "--steps",
     help="override the number of steps (solver-knob smoke tests)",
     required=False,
@@ -647,6 +688,7 @@ run = EMModes(
     callback_gating=args.callback_gating,
     steps=args.steps,
     adaptive_forcing=args.adaptive_forcing,
+    pc_curl_curl=args.pc_curl_curl,
 )
 simulation.step()
 

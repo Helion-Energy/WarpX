@@ -72,6 +72,36 @@ add_warpx_test(
 )
 label_warpx_test(test_1d_ohm_solver_em_modes_implicit_inertia_mm_picmi slow)
 
+# Curl-curl MLMG preconditioner in its hybrid electron-inertia mode (the
+# Amano operator form): runs the seeded-inertia dispersion variant at the
+# DEFAULT Krylov budget with newton.require_convergence -- the plain
+# inertia variant needs a boosted GMRES restart length to converge, so the
+# preconditioner replacing that crutch is itself the solver assertion, and
+# the two-branch dispersion fit is the physics assertion.
+add_warpx_test(
+    test_1d_ohm_solver_em_modes_implicit_inertia_ccpc_picmi  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_ohm_solver_em_modes_implicit_picmi.py --test --dim 1 --bdir z --inertia-seeded --pc-curl-curl"  # inputs
+    "analysis_inertia.py"  # analysis
+    "analysis_default_regression.py --path diags/field_diag000100 --rtol 2e-4"  # checksum
+    OFF  # dependency
+)
+label_warpx_test(test_1d_ohm_solver_em_modes_implicit_inertia_ccpc_picmi slow)
+
+# 3D smoke of the same arm: exercises the 3D MLCurlCurl path and the
+# 3D edge-staggered beta assembly (convergence is the assertion; no
+# physics analysis is meaningful at this length).
+add_warpx_test(
+    test_3d_ohm_solver_em_modes_implicit_inertia_ccpc_picmi  # name
+    3  # dims
+    2  # nprocs
+    "inputs_test_1d_ohm_solver_em_modes_implicit_picmi.py --test --dim 3 --bdir z --inertia-seeded --pc-curl-curl --steps 10"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_rz_ohm_solver_em_modes_implicit_picmi  # name
     RZ  # dims
