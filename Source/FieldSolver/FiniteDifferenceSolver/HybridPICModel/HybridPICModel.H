@@ -1538,8 +1538,23 @@ public:
      *  cells in one step and the crash surfaces as an out-of-bounds
      *  gather/deposition access (bounds-check verified) instead of
      *  the assert. Both are the same upstream instability in an
-     *  already-fatal regime. 0 = the legacy Lie split (for A/B
-     *  study). Input: gol_centered_split. */
+     *  already-fatal regime. ACCEPTED LIMIT (fine substep dt,
+     *  measured on the same stress case): late in a driven ramp the
+     *  two splits fail through DIFFERENT channels — the Lie split's
+     *  off-centering incidentally damps (~900x in local J^2) a
+     *  sub-floor current structure at vacuum-resistivity-regularized
+     *  densities, so it runs slightly longer and dies through the
+     *  field rail; the centered split lets that structure grow
+     *  honestly and its eta*J^2 heating in tiny-heat-capacity cells
+     *  can reach a thermal rail somewhat earlier. Neither split
+     *  removes the underlying drive; production configurations
+     *  survive the full profile on either. For envelope-critical
+     *  stress cases the Lie split stays selectable, and decoupling
+     *  the Joule HEATING resistivity from the E-solve's vacuum-ramp
+     *  eta (the joule_heating_resistivity(rho,J,Te,t) parser, e.g. a
+     *  Te-based Spitzer form) starves the thermal channel's
+     *  injector. 0 = the legacy Lie split.
+     *  Input: gol_centered_split. */
     bool m_gol_centered_split = true;
 
     /** Amano Eq (27) effective electron mass, multiplied through by m_i
