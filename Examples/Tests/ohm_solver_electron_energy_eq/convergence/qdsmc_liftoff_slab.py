@@ -406,6 +406,14 @@ parser.add_argument(
     "<0 = C++ default (0.5); 0 = off",
 )
 parser.add_argument(
+    "--gol-cfl-alpha",
+    type=float,
+    default=-1.0,
+    help="Eq-27 CFL prefactor alpha (hybrid_pic_model.gol_cfl_alpha): sets "
+    "both the variable-mass whistler cap (capped speed ~ alpha) and the "
+    "jacobi screening dt scale. <0 = C++ default (0.5)",
+)
+parser.add_argument(
     "--gol-var-mass",
     type=int,
     choices=[0, 1],
@@ -833,6 +841,8 @@ if args.esolve in ("gol", "amano_form"):
             pywarpx.hybridpicmodel.gol_qn_frac = args.gol_qn_frac
         if args.gol_var_mass >= 0:
             pywarpx.hybridpicmodel.gol_var_mass = args.gol_var_mass
+        if args.gol_cfl_alpha > 0.0:
+            pywarpx.hybridpicmodel.gol_cfl_alpha = args.gol_cfl_alpha
         if args.gol_div_clean_frac >= 0.0:
             pywarpx.hybridpicmodel.gol_div_clean_frac = args.gol_div_clean_frac
 
