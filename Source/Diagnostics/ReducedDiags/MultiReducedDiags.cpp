@@ -9,6 +9,7 @@
 #include "BeamRelevant.H"
 #include "ChargeOnEB.H"
 #include "CircuitCouplingDiag.H"
+#include "HybridDissipation.H"
 #include "ColliderRelevant.H"
 #include "DifferentialLuminosity.H"
 #include "DifferentialLuminosity2D.H"
@@ -59,6 +60,7 @@ MultiReducedDiags::MultiReducedDiags ()
             {"BeamRelevant",          [](CS s){return std::make_unique<BeamRelevant>(s);}},
             {"ChargeOnEB",            [](CS s){return std::make_unique<ChargeOnEB>(s);}},
             {"CircuitCoupling",       [](CS s){return std::make_unique<CircuitCouplingDiag>(s);}},
+            {"HybridDissipation",     [](CS s){return std::make_unique<HybridDissipation>(s);}},
             {"ColliderRelevant",      [](CS s){return std::make_unique<ColliderRelevant>(s);}},
             {"DifferentialLuminosity",[](CS s){return std::make_unique<DifferentialLuminosity>(s);}},
             {"DifferentialLuminosity2D",[](CS s){return std::make_unique<DifferentialLuminosity2D>(s);}},

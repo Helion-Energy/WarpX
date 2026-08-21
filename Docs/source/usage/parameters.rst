@@ -5466,6 +5466,28 @@ This shifts analysis from post-processing to runtime calculation of reduction op
         the step (no power is created or lost in the exchange); in coupled
         runs the imbalance measures the within-step slope variation.
 
+    * ``HybridDissipation``
+        This type integrates the Ohmic and hyper-resistive dissipation power
+        of the hybrid (Ohm's law) solver (RZ),
+
+        .. math::
+
+            P_\eta = \int \eta\, |J|^2\, dV,
+            \qquad
+            P_{\eta_H} = -\int \eta_H\, J \cdot \nabla^2 J\, dV,
+
+        evaluated with the same staggering, interpolations, and cylindrical
+        vector-Laplacian stencils as the Ohm's-law kernels, on the plasma
+        current of the step's final field solve. Under a polytropic electron
+        closure these powers leave the system entirely (there is no Ohmic
+        heating channel), so they must be booked as a sink in any energy
+        conservation statement; with an electron energy equation the
+        :math:`\eta` term is instead the transfer rate into the electron
+        internal energy. Embedded-boundary-frozen cells are skipped exactly
+        as in the solver, and the hyper-resistive integrand is not evaluated
+        on the outermost cell ring of the domain. Columns:
+        :math:`P_\eta` [W], :math:`P_{\eta_H}` [W], and their sum.
+
     * ``ColliderRelevant``
         This diagnostics computes properties of two colliding beams that are relevant for particle colliders.
         Two species must be specified. Photon species are not supported yet.
