@@ -111,3 +111,70 @@ add_warpx_test(
     OFF  # checksum
     test_rz_open_bc_greens_transient_sub80  # dependency
 )
+
+# Coil-set drive against the open boundary: an out-of-domain filament pair
+# ramps through the split-field external vector potential (parser A_time
+# path, Hann engagement). Speciesless vacuum ride-through: the total field
+# must equal s(t) * (discrete Yee curl of the sampled analytic loop A) to
+# roundoff at every dump -- the analytic external advance must pass the
+# Green's face untouched while the ghost fill acts on the (zero) response.
+add_warpx_test(
+    test_rz_open_bc_greens_coil_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_open_bc_greens_coil_picmi.py --test"  # inputs
+    "analysis_coil.py vacuum diags/diag1000025 diags/diag1000050 diags/diag1000100"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Theta-implicit arm of the ride-through gate. Guards the response-frame
+# plasma-current contract: J_plasma computed from the total field would
+# deposit the coil field's O(h^2) discrete curl as a spurious near-face
+# current whose Ohm response integrates secularly (measured 4e-7 and
+# growing linearly before the UpdateWarpXFields response-frame fix;
+# 9e-10 flat after).
+add_warpx_test(
+    test_rz_open_bc_greens_coil_implicit_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_open_bc_greens_coil_picmi.py --test --implicit"  # inputs
+    "analysis_coil.py vacuum diags/diag1000025 diags/diag1000050 diags/diag1000100"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Lenz arm: a super-floor plasma column (standoff from the open face)
+# excludes the ramped coil flux (skin time >> ramp). Gates the response
+# sign and the exclusion fraction of the eddy shield.
+add_warpx_test(
+    test_rz_open_bc_greens_coil_lenz_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_open_bc_greens_coil_picmi.py --test --plasma"  # inputs
+    "analysis_coil.py lenz diags/diag1000025 diags/diag1000100"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Theta-implicit Lenz arm: gates the drive contract (Lenz sign and the
+# mid-ramp exclusion window) only. The PLATEAU evolution of this deck is a
+# KNOWN scheme-level divergence and is deliberately not gated: the
+# theta-coupled ion/field system deterministically ejects marginal edge
+# ions outward (a super-floor shell whose screening boundary marches
+# toward the face and collapses the pile-up ring), where the explicit
+# staggering sweeps them inward and quenches. Established by discriminator
+# ladder: dt/4-converged (not truncation), PEC-vs-open bit-identical (not
+# the boundary), heavy-ion (m x1000) arms agree to ~1% (the ion channel is
+# the driver), density_min at the floor does not remove it (the marginal
+# band n ~ n_floor suffices). Do not add an implicit-vs-explicit end-state
+# cross-check here until that physics call is resolved.
+add_warpx_test(
+    test_rz_open_bc_greens_coil_lenz_implicit_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_open_bc_greens_coil_picmi.py --test --plasma --implicit"  # inputs
+    "analysis_coil.py lenz diags/diag1000025 diags/diag1000100"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
