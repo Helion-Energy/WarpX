@@ -1471,6 +1471,35 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_wall_transparency_none  # dependency
 )
 
+# shaped-wall LIVE-fluid preconditioner parity, the unpreconditioned
+# Reference twin: healthy Newton on the freeze contract without a PC
+# (every other wall test runs frozen ions; the freeze/PC interaction
+# only exists with a live fluid)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_live_fluid_nopc  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_live_fluid_pc jacobian.pc_type=none"  # inputs
+    "analysis_mhd_wall_live_fluid_pc.py diags/newton.txt diags/diag000005 reference"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# shaped-wall LIVE-fluid preconditioner parity, the headline:
+# pc_mhd_block must mirror the rigid-conductor fluid freeze (masked-band
+# identity rows) -- a PC that feeds the band into its fluid sweeps
+# stalls GMRES at the iteration cap on every wall solve and the
+# stagnated updates imprint a drive-scale B seam along the wall contour
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_live_fluid_pc  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_wall_live_fluid_pc  # inputs
+    "analysis_mhd_wall_live_fluid_pc.py diags/newton.txt diags/diag000005 pc ../test_rz_theta_implicit_mhd_wall_live_fluid_nopc/diags/diag000005"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_live_fluid_nopc  # dependency
+)
+
 # pec_response contrast on the same deck (the adversarial twin): the
 # one-way-glass conductor pins the identical probe-ring linkage at
 # zero/roundoff -- the measured coil-contour back-EMF kill the

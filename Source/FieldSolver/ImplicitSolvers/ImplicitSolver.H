@@ -489,6 +489,21 @@ public:
     }
 
     /**
+     * \brief Return the device view of the shaped wall's rigid-conductor
+     * FLUID freeze (implicit_mhd.wall_thermal_bc) so the MHD block
+     * preconditioner's cell-centered fluid sweeps mirror the residual's
+     * masked-band identity rows (wall_live). Active in EVERY wall_model
+     * with a thermal wall BC -- including dielectric, whose FIELD-side
+     * WallMaskView is inactive by design. The inactive default keeps the
+     * fluid sweeps unchanged for schemes without a shaped wall.
+     */
+    [[nodiscard]] virtual warpx::mhd_pc::WallFluidFreezeView
+    GetMHDWallFluidFreezeForPC () const
+    {
+        return {};
+    }
+
+    /**
      * \brief Return true when the z_lo domain face is the theta-implicit
      * MHD mirror-symmetry plane (boundary.field_lo = pmc on z paired with
      * implicit_mhd.z_lo_boundary_fluid = symmetry): the MHD block

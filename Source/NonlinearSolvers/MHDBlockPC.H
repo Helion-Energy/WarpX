@@ -1578,6 +1578,45 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(stacked_component == m_signal_components,
                                      "pc_mhd_block state block layout changed after Define()");
 
+    // Rigid-conductor fluid freeze of the shaped wall
+    // (implicit_mhd.wall_thermal_bc, every wall_model including
+    // dielectric): the residual's masked-band fluid rows are exact
+    // identities (wall_live) with no fluid coupling across the stair
+    // interface (the interface faces present the interior's absorb
+    // image), so the band must pass through this preconditioner as
+    // identity rows too. Feeding the band into the sweeps instead
+    // divides its identity rows by the signal/wave inverses, collapsing
+    // their preconditioned eigenvalues by the squared wave CFL --
+    // measured as a hard GMRES stall (iteration-capped with no residual
+    // reduction) and a 20-50x Newton degradation on every shaped-wall
+    // live-fluid solve, whose stagnated updates imprint the leftover
+    // residual as a drive-scale B seam along the wall contour. Mask the
+    // band OUT of the sweep inputs here and restore the identity rows
+    // after the copy-back below.
+    const warpx::mhd_pc::WallFluidFreezeView wall_freeze =
+        m_ops->GetMHDWallFluidFreezeForPC();
+    if (wall_freeze.active)
+    {
+        const int* const AMREX_RESTRICT first_masked = wall_freeze.first_masked_cc;
+        const int mask_z_lo = wall_freeze.z_lo;
+        const int mask_z_hi = wall_freeze.z_hi;
+        const int number_of_components = m_signal_components;
+        for (amrex::MFIter mfi(*m_signal_rhs); mfi.isValid(); ++mfi)
+        {
+            const auto signal_rhs = m_signal_rhs->array(mfi);
+            amrex::ParallelFor(
+                mfi.validbox(), number_of_components,
+                [=] AMREX_GPU_DEVICE(int i, int j, int k, int n)
+                {
+                    const int jc = amrex::max(mask_z_lo, amrex::min(mask_z_hi, j));
+                    if (i >= first_masked[jc])
+                    {
+                        signal_rhs(i, j, k, n) = RT(0.0);
+                    }
+                });
+        }
+    }
+
     if (m_signal_diffusion_active)
     {
 #if defined(WARPX_DIM_RZ)
@@ -1633,6 +1672,34 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
         amrex::MultiFab& block_solution = solution.getMultiFabBlock(spec.name, 0);
         amrex::MultiFab::Copy(block_solution, *m_signal_solution, stacked_component, 0,
                               block_solution.nComp(), 0);
+        if (wall_freeze.active)
+        {
+            // Identity restore of the masked band (see the wall_freeze
+            // comment above): the residual's frozen rows are exact
+            // identities, so their preconditioned update is the RHS
+            // itself. The Faraday corrector below re-reads the momentum
+            // block, so the ideal-induction coupling sees the corrected
+            // band values consistently.
+            const amrex::MultiFab& block_rhs = rhs.getMultiFabBlock(spec.name, 0);
+            const int* const AMREX_RESTRICT first_masked = wall_freeze.first_masked_cc;
+            const int mask_z_lo = wall_freeze.z_lo;
+            const int mask_z_hi = wall_freeze.z_hi;
+            for (amrex::MFIter mfi(block_solution); mfi.isValid(); ++mfi)
+            {
+                const auto block_out = block_solution.array(mfi);
+                const auto block_in = block_rhs.const_array(mfi);
+                amrex::ParallelFor(
+                    mfi.validbox(), block_solution.nComp(),
+                    [=] AMREX_GPU_DEVICE(int i, int j, int k, int n)
+                    {
+                        const int jc = amrex::max(mask_z_lo, amrex::min(mask_z_hi, j));
+                        if (i >= first_masked[jc])
+                        {
+                            block_out(i, j, k, n) = block_in(i, j, k, n);
+                        }
+                    });
+            }
+        }
         stacked_component += block_solution.nComp();
     }
 

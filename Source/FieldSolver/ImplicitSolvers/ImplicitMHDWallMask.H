@@ -249,6 +249,14 @@ public:
      * engages (the stencils see a continuous live field). */
     [[nodiscard]] warpx::mhd_pc::WallMaskView View () const;
 
+    /** Device view of the rigid-conductor FLUID freeze for the
+     * preconditioner's cell-centered fluid sweeps: active whenever a
+     * thermal wall BC is active (the same gate as the residual's
+     * wall_live masked-row identities), in EVERY wall_model -- in
+     * particular under dielectric, whose FIELD-side View() is inactive
+     * by design. */
+    [[nodiscard]] warpx::mhd_pc::WallFluidFreezeView FluidFreezeView () const;
+
     /** Count of LIVE (unmasked) seam-guarded rows per electric-field
      * family in the valid domain, for banners: [E_r, E_theta, E_z].
      * Zero everywhere when the wall is inactive or dielectric (the

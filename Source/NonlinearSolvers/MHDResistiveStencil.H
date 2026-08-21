@@ -67,6 +67,34 @@ struct WallMaskView
 };
 
 /**
+ * \brief Device view of the rigid-conductor FLUID freeze of the stair-step
+ * shaped wall (implicit_mhd.wall_thermal_bc = zero_flux/temperature, any
+ * wall_model including dielectric): every cell-centered fluid row inside
+ * the masked band is an exact identity in the residual (wall_live zeroes
+ * all its increments) and carries NO fluid coupling across the stair
+ * interface (the interface faces present the interior's absorb image, so
+ * live rows never read band values). The preconditioner's cell-centered
+ * fluid sweeps must mirror that structure: band rows pass through as
+ * identities and contribute nothing to the sweeps -- otherwise the fluid
+ * inverses divide the band's identity rows by the wave/diffusion response
+ * and the preconditioned spectrum collapses there (measured as a hard
+ * GMRES stall on every shaped-wall live-fluid solve).
+ *
+ * A cell-centered row (i, j) is masked iff i >= first_masked_cc[jc] with
+ * jc = clamp(j, z_lo, z_hi) (constant continuation, like the polyline).
+ * The pointer is pre-offset for physical axial indices. Distinct from
+ * WallMaskView: the FIELD-side view is inactive under wall_model =
+ * dielectric while this fluid freeze stays active there.
+ */
+struct WallFluidFreezeView
+{
+    bool active = false;
+    const int* first_masked_cc = nullptr; //!< fluid rows: (r-cell, z-cell)
+    int z_lo = 0; //!< lowest valid table index (-ng)
+    int z_hi = 0; //!< highest valid table index (nz - 1 + ng)
+};
+
+/**
  * \brief Frozen geometric constants of the discrete resistive curl-curl
  *
  *     A d = theta_r dt curl((eta_field/mu0) curl d)

@@ -421,6 +421,22 @@ warpx::mhd_pc::WallMaskView ImplicitMHDWallMask::View () const
     return view;
 }
 
+warpx::mhd_pc::WallFluidFreezeView ImplicitMHDWallMask::FluidFreezeView () const
+{
+    warpx::mhd_pc::WallFluidFreezeView view;
+    // Active with the residual's wall_live gate exactly: any thermal wall
+    // BC freezes the masked band's fluid rows to identities, in every
+    // wall_model (the dielectric standoff keeps the field-side View()
+    // inactive but its fluid contract still freezes the band).
+    view.active = (GetThermalBC() != ThermalBC::none);
+    if (view.active) {
+        view.first_masked_cc = m_first_masked_cc.data() + m_ng;
+        view.z_lo = -m_ng;
+        view.z_hi = m_nz - 1 + m_ng;
+    }
+    return view;
+}
+
 void ImplicitMHDWallMask::ProjectElectricField (
     ablastr::fields::VectorField const& efield,
     ablastr::fields::VectorField const* efield_external,

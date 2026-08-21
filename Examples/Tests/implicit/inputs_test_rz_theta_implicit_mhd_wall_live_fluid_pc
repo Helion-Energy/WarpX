@@ -1,0 +1,165 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Shaped-wall LIVE-FLUID preconditioner-parity test (RZ, central recast
+# flux, dielectric standoff on the stepped polyline, uniform external Bz
+# drive ramp): the rigid-conductor fluid freeze
+# (implicit_mhd.wall_thermal_bc) turns every masked wall-band fluid row
+# into an exact identity in the residual, in EVERY wall_model --
+# including dielectric, whose FIELD-side mask view is inactive by
+# design. pc_mhd_block's cell-centered fluid sweeps must mirror that
+# structure (band rows pass through as identities and contribute nothing
+# to the signal/wave inverses). Without it the preconditioned spectrum
+# collapses on the band's identity rows and GMRES stalls hard on every
+# shaped-wall live-fluid solve (measured: iteration-capped GMRES with no
+# residual reduction and a 20-50x Newton degradation, whose stagnated
+# updates imprint the leftover residual as a drive-scale B seam along
+# the wall contour -- the formation-ladder wall-seam signature).
+#
+# Contract under test (see analysis_mhd_wall_live_fluid_pc.py):
+# - Newton converges in a few iterations per step at a tight tolerance
+#   (newton.require_convergence aborts the run otherwise);
+# - every GMRES call CONVERGES well inside its iteration cap (the broken
+#   PC pegs the cap exactly, with a final linear residual at the scale
+#   of its RHS);
+# - the end state matches the jacobian.pc_type = none twin pointwise to
+#   solver precision: the preconditioner must not change the answer at
+#   the wall.
+#
+# All other shaped-wall CTests run frozen ions; this is the only
+# live-fluid wall coverage, which is exactly where the freeze/PC
+# interaction lives.
+
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+my_constants.T0_ev = 100.0
+my_constants.Tmin_ev = 2.0
+my_constants.w = 0.25
+my_constants.chi = 20.0
+my_constants.B0 = 1.0e-3
+my_constants.D = 100.0
+my_constants.D4 = 6.0e-3
+my_constants.nr = 16
+my_constants.nz = 8
+my_constants.Lr = 0.5
+my_constants.Lz = 0.5
+my_constants.dt = 2.0e-5
+my_constants.tau = 2.0e-4
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 5
+amr.n_cell = nr nz
+amr.max_grid_size = 8
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 -0.5*Lz
+geometry.prob_hi = Lr 0.5*Lz
+boundary.field_lo = none none
+boundary.field_hi = pec none
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 0.0
+newton.relative_tolerance = 1.0e-8
+newton.max_iterations = 10
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-11
+gmres.max_iterations = 1000
+
+jacobian.pc_type = pc_mhd_block
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = T0_ev
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = 5.0/3.0
+hybrid_pic_model.n_floor = 1.0e16
+hybrid_pic_model.plasma_resistivity(rho,J,t) = mu0*D
+hybrid_pic_model.plasma_hyper_resistivity(rho,B) = mu0*D4
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+# Uniform external Bz drive ramp through the split-field scheme
+# (A_theta = (r/2) B0, scaled by t/tau): the shielding response pushes
+# the LIVE fluid against the frozen wall band, arming the freeze/PC
+# coupling this test guards.
+hybrid_pic_model.add_external_fields = 1
+external_vector_potential.fields = drive
+external_vector_potential.drive.Ay_external_grid_function(x,y,z) = "0.5 * x * B0"
+external_vector_potential.drive.A_time_external_function(t) = "t/tau"
+external_vector_potential.do_diva_cleaning = 0
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.mass_density_floor = 5.0e-4*rho0
+implicit_mhd.electron_pressure_floor = 1.0e-4*n0*q_e*Tmin_ev
+# Drag-bounded fluid (the halo vacuum-drag knob over the whole domain):
+# keeps the 100 eV acoustic-CFL ~ 80 deck Newton-tame at the CI budget
+# so both twins converge in a few iterations -- the PC structure defect
+# under test is regime-independent (the wave Schur engages on the
+# REFERENCE fast-wave CFL, and the broken PC pegged the GMRES cap in
+# exactly this regime).
+implicit_mhd.vacuum_mass_density = 2.0*rho0
+implicit_mhd.vacuum_drag_rate = 1.0e7
+implicit_mhd.gamma_e = 5.0/3.0
+implicit_mhd.gamma_i = 5.0/3.0
+implicit_mhd.reference_ion_pressure = 0.0
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.electron_pressure(x,y,z) = "n0 * q_e * (Tmin_ev + (T0_ev - Tmin_ev) * exp(-(x*x)/(w*w)))"
+implicit_mhd.evolve_ion_fluid = true
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 1.0
+implicit_mhd.include_joule_heating = false
+implicit_mhd.thermal_diffusivity_electron = chi
+implicit_mhd.resistive_theta = 1.0
+
+implicit_mhd.wall_model = dielectric
+implicit_mhd.wall_polyline_file = wall_step_r30_r22.csv
+implicit_mhd.wall_thermal_bc = zero_flux
+
+warpx.B_ext_grid_init_style = parse_b_ext_grid_function
+warpx.Bx_external_grid_function(x,y,z) = 0.0
+warpx.By_external_grid_function(x,y,z) = 0.0
+warpx.Bz_external_grid_function(x,y,z) = 0.0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 5
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Br Bt Bz Er Et Ez implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy \
+                       implicit_mhd_momentum_r implicit_mhd_momentum_t \
+                       implicit_mhd_momentum_z
+diag1.write_species = 0

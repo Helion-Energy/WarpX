@@ -296,6 +296,12 @@ class ThetaImplicitMHD final : public ImplicitSolver
         return m_wall_mask.View();
     }
 
+    [[nodiscard]] warpx::mhd_pc::WallFluidFreezeView
+    GetMHDWallFluidFreezeForPC () const override
+    {
+        return m_wall_mask.FluidFreezeView();
+    }
+
     [[nodiscard]] bool GetMHDZLoMirrorForPC () const override
     {
         return m_z_lo_pmc;
