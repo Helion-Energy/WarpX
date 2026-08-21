@@ -30,6 +30,7 @@ BC_map = {
     "damped": "damped",
     "absorbing_silver_mueller": "absorbing_silver_mueller",
     "neumann": "neumann",
+    "pmc": "pmc",
     "none": "none",
     None: "none",
 }
