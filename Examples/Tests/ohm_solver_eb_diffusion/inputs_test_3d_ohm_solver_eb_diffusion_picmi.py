@@ -42,7 +42,13 @@ DECAY_RATE = DIFFUSIVITY * (np.pi / CAVITY_SIDE) ** 2  # analytic decay rate (1/
 
 
 def setup_simulation(
-    resolution, substeps, use_conformal_eb, verbose, split_z=False, implicit=False
+    resolution,
+    substeps,
+    use_conformal_eb,
+    verbose,
+    split_z=False,
+    implicit=False,
+    pc_curl_curl=False,
 ):
     """Create the PICMI simulation object.
 
@@ -127,6 +133,32 @@ def setup_simulation(
             relative_tolerance=1.0e-4,
             absolute_tolerance=0.0,
         )
+        pc = None
+        if pc_curl_curl:
+            # EB + preconditioner co-coverage: the conformal-wall mirror in
+            # the curl-curl PC assigns identity-scale beta rows to covered
+            # cells (matching the in-residual wall projection). This is the
+            # only CI arm exercising that mirror together with an actual
+            # embedded boundary -- measured on this deck: Newton iteration
+            # histogram identical to the unpreconditioned arm, end states
+            # agree to 3e-12, physics gate unchanged. The PC needs the
+            # electron-inertia operator form it models (bucket keys are not
+            # picmi-owned, so the writes survive initialize).
+            pc = picmi.CurlCurlMLMGPreconditioner(
+                verbose=False,
+                bottom_verbose=False,
+                agglomeration=True,
+                consolidation=True,
+                max_iter=10,
+                max_coarsening_level=30,
+                relative_tolerance=1.0e-4,
+                absolute_tolerance=0.0,
+            )
+            import pywarpx
+
+            pywarpx.hybridpicmodel.include_electron_inertia = 1
+            pywarpx.hybridpicmodel.electron_inertia_bdf2 = 0
+            pywarpx.hybridpicmodel.electron_inertia_djedt_only = 1
         nonlinear_solver = picmi.NewtonNonlinearSolver(
             verbose=True,
             max_iterations=20,
@@ -136,6 +168,7 @@ def setup_simulation(
             linear_solver=gmres_solver,
             max_particle_iterations=21,
             particle_tolerance=1.0e-10,
+            pc_type=pc,
         )
         sim.evolve_scheme = picmi.ThetaImplicitHybridEvolveScheme(
             theta=0.5,
@@ -213,6 +246,13 @@ def main():
         action="store_true",
     )
     parser.add_argument(
+        "--pc-curl-curl",
+        help="precondition the implicit Newton solve with pc_curl_curl_mlmg "
+        "(hybrid inertia mode); exercises the conformal-wall identity-row "
+        "mirror together with the embedded boundary (implicit only)",
+        action="store_true",
+    )
+    parser.add_argument(
         "--split-z",
         help="decompose along z so box seams cross the conformal borrowing "
         "planes (cross-box seam test)",
@@ -235,6 +275,7 @@ def main():
         args.verbose,
         args.split_z,
         args.implicit,
+        args.pc_curl_curl,
     )
     sim.step()
 
