@@ -140,6 +140,7 @@ public:
 
 private:
     /** Weighted max-norm error ratio of e against y0 (globally reduced). */
+    public:
     amrex::Real ErrNorm (amrex::MultiFab const & e,
                          amrex::MultiFab const & y0) const
     {
@@ -169,6 +170,7 @@ private:
         amrex::ParallelDescriptor::ReduceRealMax(err);
         return err;
     }
+    private:
 
     /** One SSPRK2 attempt: y <- candidate; returns the error ratio from
      *  the embedded Euler solution (e = dt/2 (k2 - k1)). */

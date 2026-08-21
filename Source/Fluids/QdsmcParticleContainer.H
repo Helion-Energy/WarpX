@@ -261,9 +261,11 @@ private:
      *        slope attributes for the half-gradient-corrected deposit, or
      *        -1 for the plain point deposit.
      */
+    public:
     void DepositScalar (int lev, int attr, int slope_attr0,
                         amrex::Real scale, amrex::MultiFab & field,
                         CliffDeposit const & cliff);
+    private:
 };
 
 #endif // WARPX_QDSMCPARTICLECONTAINER_H_
