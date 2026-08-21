@@ -31,6 +31,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--gol-sweeps", type=int, default=4)
 parser.add_argument("--nppc", type=int, default=256)
 parser.add_argument("--gol-form", choices=["jacobi", "relax"], default="jacobi")
+parser.add_argument("--gol-cfl-alpha", type=float, default=-1.0)
 parser.add_argument("--gol-c-frac", type=float, default=0.5)
 parser.add_argument(
     "--substeps",
@@ -172,6 +173,8 @@ pywarpx.hybridpicmodel.gol_sweeps = args.gol_sweeps
 pywarpx.hybridpicmodel.gol_n_min = n_plasma / NPPC
 if args.gol_form == "relax":
     pywarpx.hybridpicmodel.gol_form = "relax"
+    if args.gol_cfl_alpha > 0.0:
+        pywarpx.hybridpicmodel.gol_cfl_alpha = args.gol_cfl_alpha
     pywarpx.hybridpicmodel.gol_c_frac = args.gol_c_frac
     if args.gol_qn_frac >= 0.0:
         pywarpx.hybridpicmodel.gol_qn_frac = args.gol_qn_frac

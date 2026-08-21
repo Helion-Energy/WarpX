@@ -1226,6 +1226,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             amrex::Real const inv_eps_art =
                 PhysConst::mu0 * c_art * c_art;
             amrex::Real const qm = PhysConst::q_e / PhysConst::m_e;
+            bool const use_vm = hybrid_model->m_gol_var_mass;
+            amrex::Real const vm_alpha = hybrid_model->m_gol_alpha;
             auto const eta_raw = hybrid_model->m_eta_raw;
 
             MultiFab & Je_mf =
@@ -1239,7 +1241,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                            / (dt_gol * std::sqrt(sum_inv_dx2))
                     << ", cap " << hybrid_model->m_gol_c_max
                     << "), gamma_qn = " << gam_qn
-                    << " 1/s, dt_sub = " << dt_gol << " s\n";
+                    << " 1/s, dt_sub = " << dt_gol
+                    << " s, var_mass = "
+                    << (hybrid_model->m_gol_var_mass ? "on" : "off")
+                    << " (alpha " << hybrid_model->m_gol_alpha
+                    << ")\n";
             }
 
 #ifdef AMREX_USE_OMP
@@ -1300,7 +1306,6 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     if (skip_x && skip_y && skip_z) { return; }
                     amrex::Real const rho_v =
                         amrex::max(rho(i,j,k), 0.0_rt);
-                    amrex::Real const kE = qm * rho_v;
                     amrex::Real bx = Bx(i,j,k), by = By(i,j,k),
                                 bz = Bz(i,j,k);
                     amrex::Real etx = Ex(i,j,k), ety = Ey(i,j,k),
@@ -1311,6 +1316,22 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         etx += Ex_e(i,j,k); ety += Ey_e(i,j,k);
                         etz += Ez_e(i,j,k);
                     }
+                    // Eq-(27) variable electron mass (see member doc):
+                    // per-cell inflation where the grid-whistler speed
+                    // would violate the substep CFL; inert (== m_e)
+                    // wherever the physics is resolved. Applies to
+                    // every 1/m_e in the J_e update below.
+                    amrex::Real qm_c = qm;
+                    if (use_vm) {
+                        amrex::Real const B2t =
+                            bx*bx + by*by + bz*bz;
+                        amrex::Real const me_v =
+                            HybridPICModel::GolEffectiveElectronMass(
+                                B2t, amrex::max(rho_v, rho_1c),
+                                dt_r, dx_min, vm_alpha);
+                        qm_c = PhysConst::q_e / me_v;
+                    }
+                    amrex::Real const kE = qm_c * rho_v;
                     amrex::Real const gpx = T_Algo::UpwardDx(
                         Pe, coefs_x, n_coefs_x, i, j, k);
 #if defined(WARPX_DIM_3D)
@@ -1354,22 +1375,22 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     amrex::Real const a = 1.0_rt
                         + dt_r * (dt_r * kE * inv_eps_art
                                   + kE * eta_v + gam_v);
-                    amrex::Real const bex = qm * dt_r * bx;
-                    amrex::Real const bey = qm * dt_r * by;
-                    amrex::Real const bez = qm * dt_r * bz;
+                    amrex::Real const bex = qm_c * dt_r * bx;
+                    amrex::Real const bey = qm_c * dt_r * by;
+                    amrex::Real const bez = qm_c * dt_r * bz;
                     amrex::Real const b2 = bex*bex + bey*bey + bez*bez;
                     amrex::Real const rx = jox
                         + dt_r * kE * (etx + dt_r * inv_eps_art * rcx)
                         - dt_r * kE * eta_v * Jix(i,j,k)
-                        + qm * dt_r * gpx;
+                        + qm_c * dt_r * gpx;
                     amrex::Real const ry = joy
                         + dt_r * kE * (ety + dt_r * inv_eps_art * rcy)
                         - dt_r * kE * eta_v * Jiy(i,j,k)
-                        + qm * dt_r * gpy;
+                        + qm_c * dt_r * gpy;
                     amrex::Real const rz = joz
                         + dt_r * kE * (etz + dt_r * inv_eps_art * rcz)
                         - dt_r * kE * eta_v * Jiz(i,j,k)
-                        + qm * dt_r * gpz;
+                        + qm_c * dt_r * gpz;
                     amrex::Real const bdotr =
                         bex*rx + bey*ry + bez*rz;
                     amrex::Real const inv =

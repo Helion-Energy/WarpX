@@ -406,6 +406,17 @@ parser.add_argument(
     "<0 = C++ default (0.5); 0 = off",
 )
 parser.add_argument(
+    "--gol-var-mass",
+    type=int,
+    choices=[0, 1],
+    default=-1,
+    help="relax form: Amano Eq-27 variable electron mass "
+    "(hybrid_pic_model.gol_var_mass) — per-cell inflation where the "
+    "grid-whistler speed violates the substep CFL, inert where resolved. "
+    "-1 = C++ default (on); 0 = true m_e (the measured-unstable "
+    "configuration, study only)",
+)
+parser.add_argument(
     "--gol-qn-frac",
     type=float,
     default=-1.0,
@@ -820,6 +831,8 @@ if args.esolve in ("gol", "amano_form"):
             pywarpx.hybridpicmodel.gol_c_max = args.gol_c_max
         if args.gol_qn_frac >= 0.0:
             pywarpx.hybridpicmodel.gol_qn_frac = args.gol_qn_frac
+        if args.gol_var_mass >= 0:
+            pywarpx.hybridpicmodel.gol_var_mass = args.gol_var_mass
         if args.gol_div_clean_frac >= 0.0:
             pywarpx.hybridpicmodel.gol_div_clean_frac = args.gol_div_clean_frac
 

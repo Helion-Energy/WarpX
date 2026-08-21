@@ -1471,6 +1471,32 @@ public:
      *  stencil, no projection, no elliptic machinery. Default 0.5;
      *  0 = off. Input: gol_div_clean_frac. */
     amrex::Real m_gol_div_clean_frac = 0.5;
+    /** Amano Eq-(27) variable electron mass in the RELAX advance
+     *  (default on). The relax form's true-m_e J_e dynamics carry the
+     *  grid-whistler branch honestly, and the frozen-field split has
+     *  an explicit stability edge in the control variable B^2/n at a
+     *  dt_sub-scaled bound — measured on the compression slab as a
+     *  deterministic threshold (three arms; ignition at the
+     *  floor-density band, correlate on the near-vacuum reservoir)
+     *  with a finite-time blow-up past it. Per-cell inflation
+     *  m_e' = max(m_e, B^2 q_e/(mu0 rho_g) (dt_sub/(2 alpha dx))^2)
+     *  (the shared GolEffectiveElectronMass helper, alpha =
+     *  gol_cfl_alpha, rho_g one-count-guarded) slows exactly the
+     *  cells whose grid-whistler speed would violate the substep CFL
+     *  and is INERT wherever the physics is resolved (max with the
+     *  true m_e — the dispersion gates measure the physical branch
+     *  unchanged). Applies to every 1/m_e in the J_e update: E
+     *  coupling, gyration, friction, grad-Pe. 0 = true m_e (the
+     *  measured-unstable configuration, for study). KNOWN LIMIT
+     *  (separate from the whistler edge, alpha- and mass-cap-
+     *  insensitive): at very coarse substep counts the split itself
+     *  destabilizes — measured onset on the 1D slab-gap deck at
+     *  substeps 8/16/24 dying in 17/221/382 steps, while 40+ (every
+     *  production configuration) is stable across the full campaign.
+     *  Keep substeps at the whistler-resolving counts the adaptive
+     *  E-form runs already selected (O(100+) on compression decks).
+     *  Input: gol_var_mass. */
+    bool m_gol_var_mass = true;
     /** Lazy one-time J_e seed from the Ampere closure (J_plasma - J_i)
      *  on the first relax call. Mutable: set inside the const solve.
      *  NOTE: single flag -- multi-level relax untested in v1. */

@@ -537,6 +537,7 @@ void HybridPICModel::ReadParameters ()
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_gol_div_clean_frac >= 0.0_rt && m_gol_div_clean_frac <= 1.0_rt,
             "hybrid_pic_model.gol_div_clean_frac must be in [0, 1]");
+        pp_hybrid.query("gol_var_mass", m_gol_var_mass);
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_vacuum_resistivity_diffusivity >= 0.0_rt,
