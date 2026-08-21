@@ -169,7 +169,7 @@ gradient-corrected `DepositScalar`.
 2. **Thrust D — boundary conditions** (domain + EB): daughter/marker
    specular reflection (adiabatic, default), isothermal T_wall re-emission
    with wall-flux tally, prescribed-flux injection; replace the E7 clamp;
-   EB via level-set reflection ([[eb-bc-design-preferences]]: check the reference algorithm
+   EB via level-set reflection ([[eb-bc-design-preferences]]: check Helion's internal hybrid python prototype
    first). MUST handle the measured PEC-wall pairing: dirichlet/PEC zeroes
    rho on wall rows, vacuum_fast_front (default ON) boosts their χ to the
    hop cap, and the D-cliff drift kicks row-1 daughters into the wall

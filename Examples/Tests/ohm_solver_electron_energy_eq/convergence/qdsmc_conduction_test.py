@@ -117,7 +117,7 @@ parser.add_argument(
     default=0.4,
     help="FD subcycle CFL fraction (hybrid_pic_model.qdsmc_conduction_fd_cfl); "
     "keep <= 0.5 -- SSP-RK2 Nyquist damping goes neutral at the edge "
-    "(deposit-noise persistence, the reference algorithm's alpha<=0.25 rule)",
+    "(deposit-noise persistence, alpha<=0.25 rule from Helion's internal hybrid python prototype)",
 )
 parser.add_argument(
     "--iso-full",

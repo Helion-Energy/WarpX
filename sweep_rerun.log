@@ -1,0 +1,87 @@
+Internal ctest changing into directory: /home/st247c/src/wt-o2-merge/build
+Test project /home/st247c/src/wt-o2-merge/build
+      Start 533: test_1d_ohm_solver_em_modes_implicit_inertia_picmi.run
+      Start 529: test_1d_ohm_solver_em_modes_implicit_picmi.run
+      Start 563: test_rz_ohm_solver_vacuum_ramp_darwin_recovery_picmi.run
+ 1/34 Test #563: test_rz_ohm_solver_vacuum_ramp_darwin_recovery_picmi.run .........   Passed   42.39 sec
+      Start 536: test_1d_ohm_solver_em_modes_implicit_inertia_mm_picmi.run
+ 2/34 Test #536: test_1d_ohm_solver_em_modes_implicit_inertia_mm_picmi.run ........   Passed   39.45 sec
+      Start 526: test_1d_ohm_solver_em_modes_darwin_picmi.run
+ 3/34 Test #533: test_1d_ohm_solver_em_modes_implicit_inertia_picmi.run ...........   Passed  185.40 sec
+      Start 539: test_rz_ohm_solver_em_modes_implicit_picmi.run
+ 4/34 Test #529: test_1d_ohm_solver_em_modes_implicit_picmi.run ...................   Passed  890.91 sec
+      Start 546: test_1d_ohm_solver_ion_beam_picmi.run
+ 5/34 Test #526: test_1d_ohm_solver_em_modes_darwin_picmi.run .....................***Timeout 900.07 sec
+      Start 560: test_rz_ohm_solver_vacuum_ramp_darwin_picmi.run
+ 6/34 Test #539: test_rz_ohm_solver_em_modes_implicit_picmi.run ...................***Timeout 900.08 sec
+      Start 844: test_3d_ion_beam_extraction.run
+ 7/34 Test #844: test_3d_ion_beam_extraction.run ..................................   Passed   48.01 sec
+      Start 566: test_rz_ohm_solver_vacuum_ramp_darwin_circuit_picmi.run
+ 8/34 Test #566: test_rz_ohm_solver_vacuum_ramp_darwin_circuit_picmi.run ..........   Passed  116.12 sec
+      Start 564: test_rz_ohm_solver_vacuum_ramp_darwin_recovery_picmi.analysis
+ 9/34 Test #564: test_rz_ohm_solver_vacuum_ramp_darwin_recovery_picmi.analysis ....   Passed    2.82 sec
+      Start 527: test_1d_ohm_solver_em_modes_darwin_picmi.analysis
+10/34 Test #527: test_1d_ohm_solver_em_modes_darwin_picmi.analysis ................   Passed    0.91 sec
+      Start 530: test_1d_ohm_solver_em_modes_implicit_picmi.analysis
+11/34 Test #530: test_1d_ohm_solver_em_modes_implicit_picmi.analysis ..............   Passed    0.96 sec
+      Start 534: test_1d_ohm_solver_em_modes_implicit_inertia_picmi.analysis
+12/34 Test #534: test_1d_ohm_solver_em_modes_implicit_inertia_picmi.analysis ......   Passed    0.22 sec
+      Start 537: test_1d_ohm_solver_em_modes_implicit_inertia_mm_picmi.analysis
+13/34 Test #537: test_1d_ohm_solver_em_modes_implicit_inertia_mm_picmi.analysis ...   Passed    0.22 sec
+      Start 540: test_rz_ohm_solver_em_modes_implicit_picmi.analysis
+14/34 Test #540: test_rz_ohm_solver_em_modes_implicit_picmi.analysis ..............***Failed    2.84 sec
+      Start 542: test_3d_ohm_solver_em_modes_implicit_picmi.run
+15/34 Test #560: test_rz_ohm_solver_vacuum_ramp_darwin_picmi.run ..................   Passed  475.24 sec
+      Start 561: test_rz_ohm_solver_vacuum_ramp_darwin_picmi.analysis
+16/34 Test #561: test_rz_ohm_solver_vacuum_ramp_darwin_picmi.analysis .............   Passed    2.78 sec
+      Start 544: test_3d_ohm_solver_em_modes_darwin_picmi.run
+17/34 Test #546: test_1d_ohm_solver_ion_beam_picmi.run ............................   Passed  858.30 sec
+      Start 547: test_1d_ohm_solver_ion_beam_picmi.analysis
+18/34 Test #547: test_1d_ohm_solver_ion_beam_picmi.analysis .......................   Passed    1.11 sec
+      Start 845: test_3d_ion_beam_extraction.analysis
+19/34 Test #845: test_3d_ion_beam_extraction.analysis .............................   Passed    0.87 sec
+      Start 567: test_rz_ohm_solver_vacuum_ramp_darwin_circuit_picmi.analysis
+20/34 Test #567: test_rz_ohm_solver_vacuum_ramp_darwin_circuit_picmi.analysis .....   Passed    2.94 sec
+      Start 535: test_1d_ohm_solver_em_modes_implicit_inertia_picmi.checksum
+21/34 Test #535: test_1d_ohm_solver_em_modes_implicit_inertia_picmi.checksum ......   Passed    1.79 sec
+      Start 531: test_1d_ohm_solver_em_modes_implicit_picmi.checksum
+22/34 Test #531: test_1d_ohm_solver_em_modes_implicit_picmi.checksum ..............   Passed    1.95 sec
+      Start 538: test_1d_ohm_solver_em_modes_implicit_inertia_mm_picmi.checksum
+23/34 Test #538: test_1d_ohm_solver_em_modes_implicit_inertia_mm_picmi.checksum ...   Passed    1.94 sec
+      Start 565: test_rz_ohm_solver_vacuum_ramp_darwin_recovery_picmi.checksum
+24/34 Test #565: test_rz_ohm_solver_vacuum_ramp_darwin_recovery_picmi.checksum ....   Passed    1.82 sec
+      Start 528: test_1d_ohm_solver_em_modes_darwin_picmi.checksum
+25/34 Test #528: test_1d_ohm_solver_em_modes_darwin_picmi.checksum ................***Failed    1.45 sec
+      Start 532: test_1d_ohm_solver_em_modes_implicit_callbacks_picmi.run
+26/34 Test #542: test_3d_ohm_solver_em_modes_implicit_picmi.run ...................   Passed  535.06 sec
+      Start 541: test_rz_ohm_solver_em_modes_implicit_picmi.checksum
+27/34 Test #541: test_rz_ohm_solver_em_modes_implicit_picmi.checksum ..............***Failed    1.58 sec
+      Start 543: test_3d_ohm_solver_em_modes_implicit_picmi.checksum
+28/34 Test #543: test_3d_ohm_solver_em_modes_implicit_picmi.checksum ..............   Passed    2.04 sec
+      Start 548: test_1d_ohm_solver_ion_beam_picmi.checksum
+29/34 Test #548: test_1d_ohm_solver_ion_beam_picmi.checksum .......................   Passed    2.11 sec
+      Start 562: test_rz_ohm_solver_vacuum_ramp_darwin_picmi.checksum
+30/34 Test #562: test_rz_ohm_solver_vacuum_ramp_darwin_picmi.checksum .............   Passed    1.71 sec
+      Start 846: test_3d_ion_beam_extraction.checksum
+31/34 Test #846: test_3d_ion_beam_extraction.checksum .............................   Passed    1.64 sec
+32/34 Test #544: test_3d_ohm_solver_em_modes_darwin_picmi.run .....................   Passed  470.83 sec
+      Start 545: test_3d_ohm_solver_em_modes_darwin_picmi.checksum
+33/34 Test #545: test_3d_ohm_solver_em_modes_darwin_picmi.checksum ................   Passed    2.03 sec
+34/34 Test #532: test_1d_ohm_solver_em_modes_implicit_callbacks_picmi.run .........   Passed  527.42 sec
+
+85% tests passed, 5 tests failed out of 34
+
+Label Time Summary:
+slow    = 3635.81 sec*proc (16 tests)
+
+Total Test time (real) = 2290.56 sec
+
+The following tests FAILED:
+	526 - test_1d_ohm_solver_em_modes_darwin_picmi.run (Timeout)
+	528 - test_1d_ohm_solver_em_modes_darwin_picmi.checksum (Failed)
+	539 - test_rz_ohm_solver_em_modes_implicit_picmi.run (Timeout)
+	540 - test_rz_ohm_solver_em_modes_implicit_picmi.analysis (Failed)
+	541 - test_rz_ohm_solver_em_modes_implicit_picmi.checksum (Failed)
+Errors while running CTest
+Output from these tests are in: /home/st247c/src/wt-o2-merge/build/Testing/Temporary/LastTest.log
+Use "--rerun-failed --output-on-failure" to re-run the failed cases verbosely.

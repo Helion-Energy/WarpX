@@ -1285,7 +1285,7 @@ public:
      *  under SSP-RK2 the Nyquist amplification G = 1 + z + z^2/2 never
      *  flips sign but goes NEUTRAL (G -> 1, zero damping) at the
      *  stability edge, so deposit-noise checkerboards persist instead of
-     *  damping -- the reference algorithm's ledger-40 lesson (alpha_sub <= 0.25, i.e.
+     *  damping -- the ledger-40 lesson from Helion's internal hybrid python prototype (alpha_sub <= 0.25, i.e.
      *  cfl <= 0.5 in this normalization) plus margin for Gershgorin
      *  being an upper bound. Do not run near 1. Input:
      *  qdsmc_conduction_fd_cfl. */

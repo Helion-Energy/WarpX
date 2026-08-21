@@ -351,7 +351,7 @@ Smooth both caps (soft-min) to avoid kinks in div D feeding the drift term.
 
 Answers, with measurements, whether the explicit stack can carry Spitzer
 parallel conduction or the parallel channel needs an implicit/elliptic solve.
-Prior-art datum: the reference algorithm's implicit solver absorbed the full conductivity
+Prior-art datum: the implicit solver in Helion's internal hybrid python prototype absorbed the full conductivity
 stiffness in JFNK without trouble; the question is what the explicit hybrid
 stack tolerates.
 
@@ -402,7 +402,7 @@ are:
     Guenter-style symmetric anisotropic stencil to bound perpendicular
     pollution; AMReX GMRES with MLMG preconditioning (plain MLABecLaplacian
     is diagonal-beta only, so the b b cross terms need the custom stencil) or
-    a JFNK port of the reference algorithm's approach. Perpendicular conduction and the
+    a JFNK port of the approach in Helion's internal hybrid python prototype. Perpendicular conduction and the
     flux limiter stay in the SDE arm; the split-substep decision (C.4) makes
     the handover a clean seam. Until G3a, the accepted answer to
     over-stiffness is the capped/limited fast-front transport, not an
@@ -1011,7 +1011,7 @@ Notes:
 - **EB geometry:** use the existing level set phi and distance machinery;
   reflection = mirror across the local normal, iterate the intersection to
   second order per the house EB-BC standard (level-set mirror ghosts). Check
-  the reference algorithm for an existing marker-reflection implementation to port before
+  Helion's internal hybrid python prototype for an existing marker-reflection implementation to port before
   writing a new one.
 - **Cut-face areas** for EB flux injection can reuse the conformal-EB area
   fractions when `use_conformal_eb` is active; staircase areas otherwise.
@@ -1073,7 +1073,7 @@ exchange -> 0 at steady state and inflates a net-normalized metric
 from round-off).
 
 *Open Thrust-D legs:* EB walls (level-set specular reflection +
-cut-face tallies — check the reference algorithm first per the house EB-BC standard);
+cut-face tallies — check Helion's internal hybrid python prototype first per the house EB-BC standard);
 the annulus ln-r gate; advection-marker E7 clamp -> reflection;
 scatter/layer wall fold-back; wall tallies -> production reduced
 diagnostics; time/space-dependent T_wall/q_wall parsers.
@@ -1666,7 +1666,7 @@ conversation happens.
 - **2026-08-04** — Added C.7 stiffness analysis / gate G3a: measure whether
   the explicit stack (quiet daughters, field-line hops, subcycling,
   RKF45-embedded grid form) carries Spitzer parallel conduction, or the
-  parallel channel needs an elliptic implicit solve. The reference algorithm's JFNK precedent:
+  parallel channel needs an elliptic implicit solve. JFNK precedent from Helion's internal hybrid python prototype:
   the conductivity stiffness was acceptable implicitly. (Eric)
 - **2026-08-04** — GO for Phase 0. Elliptic parallel solve demoted to last
   resort: avoid elliptic solves in the explicit advance at all costs; do not
