@@ -538,6 +538,7 @@ void HybridPICModel::ReadParameters ()
             m_gol_div_clean_frac >= 0.0_rt && m_gol_div_clean_frac <= 1.0_rt,
             "hybrid_pic_model.gol_div_clean_frac must be in [0, 1]");
         pp_hybrid.query("gol_var_mass", m_gol_var_mass);
+        pp_hybrid.query("gol_centered_split", m_gol_centered_split);
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_vacuum_resistivity_diffusivity >= 0.0_rt,
@@ -7256,6 +7257,40 @@ void HybridPICModel::BfieldEvolve (
             step_change_factor = m_substep_safety * std::pow(error + 1.e-10_rt, -0.2_rt);
             step_succeeded = (error <= 1._rt);
 
+        } else if (gol_relax && m_gol_centered_split) {
+            // Centered (Strang) split, see the m_gol_centered_split
+            // member doc: half Faraday push with the frozen E^n, the
+            // full-dt (E, J_e) advance against the half-level B and
+            // its Ampere current, half Faraday push with the updated
+            // E. Under the relax gate the E solve is a no-op inside
+            // the RK stages, so the plain EvolveB call IS the exact
+            // (linear) half push.
+            auto& warpx = WarpX::GetInstance();
+            amrex::Real const t_old = warpx.gett_old(0);
+            warpx.EvolveB(0.5_rt*dt_sub, subcycling_half, t_old);
+            warpx.FillBoundaryB(ng, nodal_sync);
+
+            CalculatePlasmaCurrent(Bfield, eb_update_E);
+            m_gol_relax_advance = true;
+            HybridPICSolveE(Efield, Jfield, Bfield, rhofield,
+                            eb_update_E, true);
+            m_gol_relax_advance = false;
+            if (Bz_IndexType[0] == Ez_IndexType[0]) {
+                warpx.FillBoundaryE(ng, nodal_sync);
+            }
+
+            warpx.EvolveB(0.5_rt*dt_sub, subcycling_half, t_old);
+            warpx.FillBoundaryB(ng, nodal_sync);
+
+            for (int idim = 0; idim < 3; ++idim) {
+                step_succeeded = step_succeeded && Bfield[lev][idim]->is_finite(/*local=*/true);
+            }
+            amrex::ParallelDescriptor::ReduceBoolAnd(step_succeeded);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(step_succeeded,
+                "gol_form = relax (centered split): NaN/Inf B during "
+                "substepping -- the mid-step E/J_e state cannot be "
+                "rolled back, aborting");
+
         } else {
             BfieldEvolveRK4(
                 Bfield, Efield, Jfield, rhofield, eb_update_E, B_old,
@@ -7298,11 +7333,13 @@ void HybridPICModel::BfieldEvolve (
             for (int ii = 0; ii < 3; ii++) {
                 MultiFab::Copy(B_old[ii], *Bfield[lev][ii], 0, 0, 1, ng);
             }
-            if (gol_relax) {
-                // Relax form: the RK stages read the frozen E state --
-                // advance (E, J_e) exactly once here, by the accepted
-                // dt_sub (still published in m_gol_dt_sub), against the
-                // updated B and its refreshed Ampere current.
+            if (gol_relax && !m_gol_centered_split) {
+                // Legacy Lie split: the RK stages read the frozen E
+                // state -- advance (E, J_e) exactly once here, by the
+                // accepted dt_sub (still published in m_gol_dt_sub),
+                // against the updated B and its refreshed Ampere
+                // current. (The centered split already advanced the
+                // state mid-substep.)
                 auto & warpx = WarpX::GetInstance();
                 CalculatePlasmaCurrent(Bfield, eb_update_E);
                 m_gol_relax_advance = true;

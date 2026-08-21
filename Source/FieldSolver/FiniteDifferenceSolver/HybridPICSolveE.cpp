@@ -1245,7 +1245,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     << " s, var_mass = "
                     << (hybrid_model->m_gol_var_mass ? "on" : "off")
                     << " (alpha " << hybrid_model->m_gol_alpha
-                    << ")\n";
+                    << "), split = "
+                    << (hybrid_model->m_gol_centered_split
+                            ? "centered" : "lie")
+                    << "\n";
             }
 
 #ifdef AMREX_USE_OMP

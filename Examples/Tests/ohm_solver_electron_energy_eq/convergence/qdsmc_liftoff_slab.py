@@ -425,6 +425,16 @@ parser.add_argument(
     "configuration, study only)",
 )
 parser.add_argument(
+    "--gol-centered-split",
+    type=int,
+    choices=[0, 1],
+    default=-1,
+    help="relax form: time centering of the frozen-E/frozen-B split "
+    "(hybrid_pic_model.gol_centered_split) — Strang half-B/(E,Je)/half-B "
+    "sequencing so each operator samples the other at the substep half "
+    "level. -1 = C++ default (on); 0 = legacy Lie split (study only)",
+)
+parser.add_argument(
     "--gol-qn-frac",
     type=float,
     default=-1.0,
@@ -843,6 +853,8 @@ if args.esolve in ("gol", "amano_form"):
             pywarpx.hybridpicmodel.gol_var_mass = args.gol_var_mass
         if args.gol_cfl_alpha > 0.0:
             pywarpx.hybridpicmodel.gol_cfl_alpha = args.gol_cfl_alpha
+        if args.gol_centered_split >= 0:
+            pywarpx.hybridpicmodel.gol_centered_split = args.gol_centered_split
         if args.gol_div_clean_frac >= 0.0:
             pywarpx.hybridpicmodel.gol_div_clean_frac = args.gol_div_clean_frac
 

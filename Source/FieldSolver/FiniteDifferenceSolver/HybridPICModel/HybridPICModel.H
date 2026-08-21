@@ -1511,6 +1511,35 @@ public:
      *  exactly once per ACCEPTED substep against the updated B.
      *  Mutable: toggled inside the const substep loop. */
     mutable bool m_gol_relax_advance = false;
+    /** Time centering of the relax form's frozen-E/frozen-B split
+     *  (default on). The legacy (Lie) sequencing per substep is
+     *  B^{n+1} = B^n - dt curl E^n followed by the (E, J_e) advance
+     *  against B^{n+1}: each operator samples the other a full
+     *  substep off-center (B sees stale E, the electron advance sees
+     *  future B), the first-order splitting error class the
+     *  Harned-Mikic stability analysis flags for the whistler branch
+     *  at coarse omega dt. Centered (Strang) sequencing symmetrizes
+     *  both couplings at zero extra solves: a half Faraday push with
+     *  E^n, the full-dt (E, J_e) advance against the HALF-LEVEL B
+     *  and its Ampere current, then a half Faraday push with the
+     *  updated E — B integrates the time-centered average of E and
+     *  the electron advance reads time-centered B. MEASURED: the
+     *  dispersion gates are unchanged (whistler inertia branch to
+     *  the same 0.7%), and the coarse-substep floor (see the
+     *  gol_var_mass known limit) is INVARIANT under centering --
+     *  slab-gap deaths at substeps 8/16/24 land within 3 steps of
+     *  the Lie split's at every rung, so that floor is a property of
+     *  the coarse-dt_sub (E, J_e) relax dynamics themselves, not of
+     *  the split's time centering. The DEATH MODE at that floor does
+     *  differ: the Lie split diverges through NaN and takes the
+     *  designed substep assert, while the centered split can blow up
+     *  huge-but-finite -- particles then leave the domain by O(100)
+     *  cells in one step and the crash surfaces as an out-of-bounds
+     *  gather/deposition access (bounds-check verified) instead of
+     *  the assert. Both are the same upstream instability in an
+     *  already-fatal regime. 0 = the legacy Lie split (for A/B
+     *  study). Input: gol_centered_split. */
+    bool m_gol_centered_split = true;
 
     /** Amano Eq (27) effective electron mass, multiplied through by m_i
      *  (the ion mass cancels): m_e' = max(m_e, B^2 q_e/(mu0 rho_e) *
