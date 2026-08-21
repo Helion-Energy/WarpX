@@ -433,9 +433,19 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
     // drag (collisions run after OneStep under the implicit schemes),
     // and the displacement-current diagnostic. Runs after
     // QDSMCFinishImplicitStep, which consumes the theta-stage value.
+    // Split-field externals: Bfield_fp holds end-of-step TOTALS here, so
+    // strip the external field around the curl -- the plasma-current
+    // register must stay response-only (the explicit loop's final refresh
+    // runs before its external add-back; a totals-frame curl would leak
+    // the coil field's O(h^2) discrete curl into the circuit flux-linkage
+    // probes and the resistive drag).
+    const bool strip_ext =
+        m_hybrid_pic_model->m_add_external_fields && !m_darwin;
+    if (strip_ext) { AddSplitExternalFields(-1.0_rt); }
     m_hybrid_pic_model->CalculatePlasmaCurrent(
         m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, m_num_amr_levels - 1),
         m_WarpX->GetEBUpdateEFlag());
+    if (strip_ext) { AddSplitExternalFields(1.0_rt); }
     if (m_darwin) {
         // Darwin retains the longitudinal displacement current in the
         // plasma current, J = curl(B)/mu_0 - eps0 dE_L/dt (Hewett &
@@ -647,9 +657,9 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     // boundary pin) would make the gathered E_ext lag the iterate by one
     // evaluation -- hidden history that shows up as an
     // epsilon-independent noise floor in Jacobian secants once the drive
-    // is active. Reciprocity (J-based) probes see the PREVIOUS
-    // evaluation's plasma current here (refreshed below); the circuit
-    // ports in use are disk-flux based.
+    // is active. Reciprocity (J-based) probes see THIS evaluation's
+    // plasma current (refreshed in UpdateWarpXFields from the response
+    // field); the circuit ports in use are disk-flux based.
     if (m_external_field_iteration && !m_darwin) {
         AddSplitExternalFields(-1.0_rt);
         ExecutePythonCallback("externalcoiltheta");
@@ -706,8 +716,16 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     ablastr::fields::MultiLevelScalarField rho_fp =
         m_WarpX->m_fields.get_mr_levels(FieldType::rho_fp, m_num_amr_levels - 1);
 
-    // Compute J_plasma = curl(B^{n+theta})/mu_0
-    m_hybrid_pic_model->CalculatePlasmaCurrent(Bfield_fp, m_WarpX->GetEBUpdateEFlag());
+    // Compute J_plasma = curl(B^{n+theta})/mu_0. The split-field (non-
+    // darwin) branch computed it in UpdateWarpXFields from the plasma-
+    // response field, BEFORE the external assembly -- recomputing it here
+    // from the total field would re-introduce the spurious O(h^2) external
+    // curl. The darwin branch computes it here from its derived
+    // B = B_static + curl A, whose curl is discretely consistent (the
+    // external flux enters through the evolved A, not a sampled field).
+    if (m_darwin) {
+        m_hybrid_pic_model->CalculatePlasmaCurrent(Bfield_fp, m_WarpX->GetEBUpdateEFlag());
+    }
 
     // Darwin: the total current retains the longitudinal displacement
     // current, J = curl(B)/mu_0 - eps0 dE_L/dt, which preserves charge
@@ -982,6 +1000,21 @@ void ThetaImplicitHybrid::UpdateWarpXFields ( const WarpXSolverVec&  a_E,
         ablastr::fields::MultiLevelVectorField const& B_old =
             m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::B_old, m_num_amr_levels - 1);
         m_WarpX->UpdateMagneticFieldAndApplyBCs( B_old, m_theta * m_dt, start_time );
+
+        // Plasma current from the RESPONSE field, before the external
+        // assembly below: J_plasma = curl(B_plasma)/mu0, matching the
+        // explicit advance (which computes it from the stripped field).
+        // The discrete curl of the stored external field is only O(h^2)
+        // zero for a spatially varying coil field, so computing the plasma
+        // current from the total field deposits that truncation artifact
+        // as a spurious near-boundary current, proportional to the coil
+        // scale, whose Hall/resistive Ohm response integrates secularly
+        // through Faraday (measured as a linear ride-through drift on the
+        // coil-pair vacuum deck; a uniform external A is blind to the
+        // defect since its discrete curl vanishes identically).
+        m_hybrid_pic_model->CalculatePlasmaCurrent(
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, m_num_amr_levels - 1),
+            m_WarpX->GetEBUpdateEFlag());
     }
 
     if (has_external && !m_darwin) {
