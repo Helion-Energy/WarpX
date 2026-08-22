@@ -565,9 +565,11 @@ private:
      *  standoff_cells cells) into the per-species EB tallies. Must be called
      *  BEFORE the scrape invalidates the particles. Collective (global sum).
      */
+    public:
     void TallyParticlesToBeCollectedAtEB (
         ablastr::fields::MultiLevelScalarField const& distance_to_eb,
         amrex::Real standoff_cells);
+    private:
 
     void ReadParameters ();
 
