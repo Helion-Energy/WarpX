@@ -7,6 +7,7 @@
 #ifndef WARPX_QDSMCRKINTEGRATOR_H_
 #define WARPX_QDSMCRKINTEGRATOR_H_
 
+#include <AMReX_GpuContainers.H>
 #include <AMReX_MultiFab.H>
 #include <AMReX_Vector.H>
 #include <AMReX_ParallelDescriptor.H>
@@ -14,6 +15,7 @@
 #include <AMReX_REAL.H>
 
 #include <cmath>
+#include <cstdlib>
 #include <functional>
 #include <utility>
 
@@ -180,6 +182,60 @@ private:
         auto tup = reduce_data.value(reduce_op);
         amrex::Real err = amrex::get<0>(tup);
         amrex::ParallelDescriptor::ReduceRealMax(err);
+        // WARPX_QDSMC_ERR_DEBUG: on rejecting evaluations, locate and
+        // print the error-ratio argmax cell with its ingredients
+        // (device-safe single-cell gather; the caller's attempts-budget
+        // warning supplies the dt context). Zero cost when unset.
+        static bool const err_debug =
+            (std::getenv("WARPX_QDSMC_ERR_DEBUG") != nullptr);
+        if (err_debug && !(err <= 1.0_rt)) {
+            amrex::MultiFab ratio(e.boxArray(), e.DistributionMap(), 1, 0);
+            for (amrex::MFIter mfi(ratio); mfi.isValid(); ++mfi) {
+                amrex::Box const box = mfi.validbox();
+                auto const & r_arr = ratio.array(mfi);
+                auto const & e_arr = e.const_array(mfi);
+                auto const & y_arr = y0.const_array(mfi);
+                amrex::ParallelFor(box,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int kk)
+                {
+                    amrex::Real r = 0.0_rt;
+                    for (int c = 0; c < nc; ++c) {
+                        r = amrex::max(r, std::abs(e_arr(i,j,kk,c)) /
+                            (atol + rtol*std::abs(y_arr(i,j,kk,c))));
+                    }
+                    r_arr(i,j,kk) = r;
+                });
+            }
+            amrex::IntVect const loc = ratio.maxIndex(0);
+            amrex::Real ev = 0.0_rt, yv = 0.0_rt;
+            for (amrex::MFIter mfi(ratio); mfi.isValid(); ++mfi) {
+                if (mfi.validbox().contains(loc)) {
+                    amrex::Gpu::DeviceVector<amrex::Real> dv(2, 0.0_rt);
+                    amrex::Real * const dvp = dv.data();
+                    auto const & e_arr = e.const_array(mfi);
+                    auto const & y_arr = y0.const_array(mfi);
+                    amrex::Box const one(loc, loc);
+                    amrex::ParallelFor(one,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int kk)
+                    {
+                        dvp[0] = e_arr(i,j,kk,0);
+                        dvp[1] = y_arr(i,j,kk,0);
+                    });
+                    amrex::Gpu::streamSynchronize();
+                    amrex::Vector<amrex::Real> hv(2, 0.0_rt);
+                    amrex::Gpu::copy(amrex::Gpu::deviceToHost,
+                        dv.begin(), dv.end(), hv.begin());
+                    ev = hv[0]; yv = hv[1];
+                }
+            }
+            amrex::ParallelDescriptor::ReduceRealSum(ev);
+            amrex::ParallelDescriptor::ReduceRealSum(yv);
+            amrex::AllPrint() << "[qdsmc-err-debug] err=" << err
+                << " argmax=(" << loc[0] << ","
+                << ((AMREX_SPACEDIM > 1) ? loc[1] : 0) << ","
+                << ((AMREX_SPACEDIM > 2) ? loc[2] : 0)
+                << ") e=" << ev << " y0=" << yv << "\n";
+        }
         return err;
     }
     private:
