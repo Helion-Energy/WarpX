@@ -34,7 +34,9 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <iomanip>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -252,6 +254,11 @@ void HybridPICModel::ReadParameters ()
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_cond_fd_order == 2 || m_cond_fd_order == 4,
             "hybrid_pic_model.qdsmc_conduction_fd_order must be 2 or 4");
+        utils::parser::queryWithParser(pp_hybrid, "qdsmc_conduction_chi_max",
+                                       m_cond_chi_max);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_cond_chi_max >= 0.0_rt,
+            "hybrid_pic_model.qdsmc_conduction_chi_max must be >= 0");
         std::string fdlim = "smart";
         pp_hybrid.query("qdsmc_conduction_fd_limiter", fdlim);
         if (fdlim == "none") { m_cond_fd_limiter = 0; }
@@ -979,11 +986,33 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
 
     // Thermal conductivities kappa(n [m^-3], Te [eV], t [s]) in W/(m K) for
     // the Ito conduction substep (chi = kappa / (3/2 n_e k_B)).
+    std::string kpar_expression = m_kappa_par_expression;
+    std::string kperp_expression = m_kappa_perp_expression;
+    if (m_cond_chi_max > 0.0_rt) {
+        // Global chi ceiling (see member doc): fold each kappa through a
+        // hard min against cap(n) = 1.5 kB chi_max n, so chi never
+        // exceeds chi_max anywhere the subcycle bound reads it.
+        amrex::Real const kcap_c = 1.5_rt * PhysConst::kb * m_cond_chi_max;
+        auto num_lit = [] (amrex::Real v) {
+            std::ostringstream os;
+            os << std::setprecision(std::numeric_limits<
+                   amrex::Real>::max_digits10) << v;
+            return os.str();
+        };
+        amrex::Print() << "[qdsmc] conduction chi ceiling: "
+            << m_cond_chi_max << " m^2/s (hard min on both kappa "
+            "parsers)\n";
+        auto hard_cap = [&] (std::string const & expr) {
+            return "min(" + expr + ", " + num_lit(kcap_c) + "*n)";
+        };
+        kpar_expression  = hard_cap(kpar_expression);
+        kperp_expression = hard_cap(kperp_expression);
+    }
     m_kappa_par_parser = std::make_unique<amrex::Parser>(
-        utils::parser::makeParser(m_kappa_par_expression, {"n","Te","t"}));
+        utils::parser::makeParser(kpar_expression, {"n","Te","t"}));
     m_kappa_par = m_kappa_par_parser->compile<3>();
     m_kappa_perp_parser = std::make_unique<amrex::Parser>(
-        utils::parser::makeParser(m_kappa_perp_expression, {"n","Te","t"}));
+        utils::parser::makeParser(kperp_expression, {"n","Te","t"}));
     m_kappa_perp = m_kappa_perp_parser->compile<3>();
 
     // Isothermal-EB bath temperature Te(x,y,z) [eV] for the conduction

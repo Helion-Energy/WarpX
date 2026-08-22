@@ -1274,6 +1274,15 @@ public:
      *  degrade to the 2nd-order compact form. Input:
      *  qdsmc_conduction_fd_order. */
     int m_cond_fd_order = 2;
+    /** Global conduction diffusivity ceiling: when chi_max > 0 both
+     *  kappa parsers are folded through a hard min at parser-build
+     *  time with cap = 1.5 kB chi_max n, i.e. chi = kappa/(1.5 kB n)
+     *  never exceeds chi_max at any (n, Te) the subcycle bound reads.
+     *  Hard min rather than a soft-min: harmonic soft-mins read low
+     *  near the cap (20% at cap/4), and the explicit path needs no
+     *  C-infinity here. Off (0) is bit-identical to unset. Input:
+     *  qdsmc_conduction_chi_max [m^2/s]. */
+    amrex::Real m_cond_chi_max = 0.0;
     /** FD cross-flux transport reconstruction: 0 = none (unlimited QUICK,
      *  attribution control -- can overshoot), 1 = upwind1 (1st-order
      *  upwind, most diffusive), 2 = smart (Gaskell--Lau SMART, default:
