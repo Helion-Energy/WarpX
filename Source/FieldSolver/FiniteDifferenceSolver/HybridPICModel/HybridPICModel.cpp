@@ -16,6 +16,7 @@
 #include <ablastr/coarsen/sample.H>
 #include <ablastr/utils/Communication.H>
 
+#include <AMReX_GpuContainers.H>
 #include <AMReX_MLEBNodeFDLaplacian.H>
 #include <AMReX_MLMG.H>
 #include <AMReX_MLNodeTensorLaplacian.H>
@@ -6010,12 +6011,16 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                     lo = lo && (b_arr(m[0],m[1],m[2],BNE::b_open) > 0.5_rt);
                     if (!hi && !lo) { continue; }
                     if (hi) {
-                        nrat = amrex::max(nrat, 0.5_rt*(1.0_rt +
-                            b_arr(p[0],p[1],p[2],BNE::b_ne)/ne0));
+                        // harmonic, matching the live bound (the old
+                        // arithmetic form skewed argmax toward cliffs)
+                        amrex::Real const nn =
+                            b_arr(p[0],p[1],p[2],BNE::b_ne);
+                        nrat = amrex::max(nrat, 2.0_rt*nn/(ne0 + nn));
                     }
                     if (lo) {
-                        nrat = amrex::max(nrat, 0.5_rt*(1.0_rt +
-                            b_arr(m[0],m[1],m[2],BNE::b_ne)/ne0));
+                        amrex::Real const nn =
+                            b_arr(m[0],m[1],m[2],BNE::b_ne);
+                        nrat = amrex::max(nrat, 2.0_rt*nn/(ne0 + nn));
                     }
                     for (int h = 0; h < AMREX_SPACEDIM; ++h) {
                         int const gg = amrex::min(g, h);
@@ -6053,29 +6058,51 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                     xi0 = 0.0_rt, nrat_loc = 0.0_rt;
         for (MFIter mfi(srate); mfi.isValid(); ++mfi) {
             if (mfi.validbox().contains(loc)) {
+                // Gather the argmax node's ingredients ON DEVICE: these
+                // MultiFabs live in device memory on GPU builds, so the
+                // former host-side Array4 reads here segfaulted at the
+                // first cap evaluation (unmanaged arenas).
+                amrex::Gpu::DeviceVector<amrex::Real> dv(5, 0.0_rt);
+                amrex::Real * const dvp = dv.data();
                 auto const & b_arr = bne.const_array(mfi);
                 auto const & t_arr = T_cur.const_array(mfi);
                 auto const & x_arr = xi.const_array(mfi);
-                ne_loc = b_arr(l0, l1, l2, BNE::b_ne);
-                te_loc = t_arr(l0, l1, l2);
-                op_loc = b_arr(l0, l1, l2, BNE::b_open);
-                xi0 = x_arr(l0, l1, l2, 0);
-                for (int g = 0; g < AMREX_SPACEDIM; ++g) {
-                    for (int sgn = -1; sgn <= 1; sgn += 2) {
-                        int q[3] = {l0, l1, l2};
-                        q[g] += sgn;
-                        if (!is_per[g] &&
-                            (q[g] < dom_lo[g] || q[g] > dom_hi[g])) {
-                            continue;
-                        }
-                        if (b_arr(q[0],q[1],q[2],BNE::b_open) > 0.5_rt) {
-                            amrex::Real const nn =
-                                b_arr(q[0],q[1],q[2],BNE::b_ne);
-                            nrat_loc = amrex::max(nrat_loc,
-                                2.0_rt*nn/(ne_loc + nn));
+                amrex::Box const one(loc, loc);
+                amrex::ParallelFor(one,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    amrex::Real const ne0 = b_arr(i,j,k,BNE::b_ne);
+                    dvp[0] = ne0;
+                    dvp[1] = t_arr(i,j,k);
+                    dvp[2] = b_arr(i,j,k,BNE::b_open);
+                    dvp[3] = x_arr(i,j,k,0);
+                    amrex::Real nr = 0.0_rt;
+                    int const node[3] = {i, j, k};
+                    for (int g = 0; g < AMREX_SPACEDIM; ++g) {
+                        for (int sgn = -1; sgn <= 1; sgn += 2) {
+                            int q[3] = {node[0], node[1], node[2]};
+                            q[g] += sgn;
+                            if (!is_per[g] &&
+                                (q[g] < dom_lo[g] || q[g] > dom_hi[g])) {
+                                continue;
+                            }
+                            if (b_arr(q[0],q[1],q[2],BNE::b_open)
+                                    > 0.5_rt) {
+                                amrex::Real const nn =
+                                    b_arr(q[0],q[1],q[2],BNE::b_ne);
+                                nr = amrex::max(nr,
+                                    2.0_rt*nn/(ne0 + nn));
+                            }
                         }
                     }
-                }
+                    dvp[4] = nr;
+                });
+                amrex::Gpu::streamSynchronize();
+                amrex::Vector<amrex::Real> hv(5, 0.0_rt);
+                amrex::Gpu::copy(amrex::Gpu::deviceToHost,
+                    dv.begin(), dv.end(), hv.begin());
+                ne_loc = hv[0]; te_loc = hv[1]; op_loc = hv[2];
+                xi0 = hv[3]; nrat_loc = hv[4];
             }
         }
         amrex::ParallelDescriptor::ReduceRealSum(ne_loc);
