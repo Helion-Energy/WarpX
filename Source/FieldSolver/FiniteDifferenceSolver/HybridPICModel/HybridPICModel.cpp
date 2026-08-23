@@ -3147,6 +3147,26 @@ void HybridPICModel::QDSMCInitializeKe (int const lev, amrex::MultiFab const & r
 }
 
 
+void HybridPICModel::QdsmcPhaseMinTe (int const lev, char const * phase) const
+{
+    // WARPX_QDSMC_PHASE_MINTE: per-phase minimum-T_e tracer (see header
+    // doc). MultiFab::min/minIndex are collective and device-safe; both
+    // reduce over the valid region, so ghost-only writes do not register.
+    static bool const phase_minte =
+        (std::getenv("WARPX_QDSMC_PHASE_MINTE") != nullptr);
+    if (!phase_minte) { return; }
+    auto & warpx = WarpX::GetInstance();
+    amrex::MultiFab const & Te =
+        *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+    amrex::Real const mn = Te.min(0);
+    amrex::IntVect const loc = Te.minIndex(0);
+    amrex::Print() << "[qdsmc-phase-minte] step=" << warpx.getistep(lev)
+        << " phase=" << phase << " minTe=" << mn
+        << " at (" << loc[0] << ","
+        << ((AMREX_SPACEDIM > 1) ? loc[1] : 0) << ","
+        << ((AMREX_SPACEDIM > 2) ? loc[2] : 0) << ")\n";
+}
+
 void HybridPICModel::QDSMCUpdateTe (int const lev) const
 {
     auto & warpx = WarpX::GetInstance();
@@ -4709,6 +4729,7 @@ void HybridPICModel::QdsmcTransportOnce (int const lev, amrex::Real const dt_adv
     if (m_qdsmc_transport_operator == 1) {
         amrex::ignore_unused(midpoint);   // adaptive RK supersedes it
         QdsmcTransportOnceGrid(lev, dt_adv);
+        QdsmcPhaseMinTe(lev, "transport_grid");
         return;
     }
 
@@ -4729,10 +4750,13 @@ void HybridPICModel::QdsmcTransportOnce (int const lev, amrex::Real const dt_adv
     amrex::MultiFab       & Karr_out    = *warpx.m_fields.get(FieldType::hybrid_entropy_fp,        lev);
     amrex::MultiFab       & weights_out = *warpx.m_fields.get(FieldType::hybrid_qdsmc_weights_fp, lev);
 
+    QdsmcPhaseMinTe(lev, "transport_init_ke");
+
     // Load each QDSMC particle with V_e and (K_e * N_e, N_e) from its home
     // node.
     m_qdsmc_pc->SetV(lev, Vex, Vey, Vez);
     m_qdsmc_pc->SetK(lev, Ke, rho);
+    QdsmcPhaseMinTe(lev, "transport_set_vk");
 
     // EB marker handling (adiabatic E7-replacement, matching the
     // conduction sweeps' fold-back): covered-home markers freeze,
@@ -4750,10 +4774,12 @@ void HybridPICModel::QdsmcTransportOnce (int const lev, amrex::Real const dt_adv
     // (the deposit still moves the full carried content).
     if (midpoint) {
         m_qdsmc_pc->GatherVAtMidpoint(lev, dt_adv, eb_dist, Vex, Vey, Vez);
+        QdsmcPhaseMinTe(lev, "transport_midpoint_gather");
     }
 
     // Push by dt_adv; redistribute so particles end up in their new tile.
     m_qdsmc_pc->PushX(lev, dt_adv, 1.0_rt, eb_dist);
+    QdsmcPhaseMinTe(lev, "transport_push_x");
 
     // Scatter the carried entropy and weight onto the grid (each call
     // zeroes its target field, then deposits, then SumBoundary), with the
@@ -4772,6 +4798,7 @@ void HybridPICModel::QdsmcTransportOnce (int const lev, amrex::Real const dt_adv
     }
     m_qdsmc_pc->DepositK(lev, Karr_out, m_qdsmc_gradient_deposit, cliff);
     m_qdsmc_pc->DepositField(lev, weights_out, m_qdsmc_gradient_deposit);
+    QdsmcPhaseMinTe(lev, "transport_deposit");
 
     // Insulating EB wall (PR #7138, branch-adapted): SPILL-ONLY fold --
     // the entropy that moving open markers spilled onto below-floor nodes
@@ -4788,6 +4815,7 @@ void HybridPICModel::QdsmcTransportOnce (int const lev, amrex::Real const dt_adv
     // Recover the new T_e from (deposited K*N) / (deposited N) and the
     // updated n_e (from rho_fp = rho^{n+1}).
     QDSMCUpdateTe(lev);
+    QdsmcPhaseMinTe(lev, "transport_update_te");
 
     // Insulating EB wall (PR #7138): zero-normal-gradient T_e into the
     // standoff band and the covered region -- the C++ form of the validated
@@ -4796,6 +4824,7 @@ void HybridPICModel::QdsmcTransportOnce (int const lev, amrex::Real const dt_adv
     // Pe emission).
     if (insulating_eb) {
         QDSMCApplyInsulatingEBFill(lev);
+        QdsmcPhaseMinTe(lev, "transport_eb_fill");
     }
 }
 
@@ -4830,12 +4859,14 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
     }
     if (m_include_joule_heating) {
         QDSMCAddJouleHeating(lev, dt_src, redirect_active ? &ion_redirect_E : nullptr);
+        QdsmcPhaseMinTe(lev, "sources_joule");
     }
     // General Te limiter with ion shunt (any-channel excess -> ions; runs
     // after the Joule source so the staging merges into one OU kick
     // application).
     if (shunt_active) {
         QDSMCShuntTeExcess(lev, &ion_redirect_E);
+        QdsmcPhaseMinTe(lev, "sources_shunt");
     }
 
     // Steps 6b/6c both need each charged species' T_i when Q_ei relaxation is
@@ -4933,6 +4964,7 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
     // (cools T_e toward each ion species' T_i).
     if (m_include_temperature_relaxation) {
         QDSMCAddTemperatureRelaxation(lev, dt_src, Ti_dep_by_species);
+        QdsmcPhaseMinTe(lev, "sources_relaxation");
     }
 
     // Step 6c: stochastic drag-diffusion ion-heating operator -- delivers the Q_ei
@@ -4942,6 +4974,7 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
         QDSMCApplyIonHeating(lev, dt_src,
                              (redirect_active || shunt_active) ? &ion_redirect_E : nullptr,
                              m_include_temperature_relaxation ? &Ti_dep_by_species : nullptr);
+        QdsmcPhaseMinTe(lev, "sources_ion_heating");
     }
 
     // The source kernels write valid cells only; the Strang pre-half runs
@@ -8716,12 +8749,16 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
         // (post-transport, full-dt) sources.
         for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
             QDSMCInitializeUe(lev, QdsmcUeMode::JiOld);
+            QdsmcPhaseMinTe(lev, "euler_enter");
             QdsmcTransportOnce(lev, dt, /*midpoint=*/false);
+            QdsmcPhaseMinTe(lev, "euler_transport");
             ApplyQdsmcEnergySources(lev, dt, /*fill_te_ghosts=*/false);
+            QdsmcPhaseMinTe(lev, "euler_sources");
             // Lie conduction, matching euler's Lie sources (no-op unless
             // the kappa_par parser is set, keeping the control bit-identical
             // to #6982).
             QdsmcConductionOnce(lev, dt, /*use_rho_new=*/true);
+            QdsmcPhaseMinTe(lev, "euler_conduction");
             QDSMCFillElectronPressureFromTe(lev);
             // same Pe boundary treatment as the algebraic closure
             // (PR #7128), mirrored in every advance path
@@ -8750,14 +8787,20 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
     for (int lev = 0; lev <= warpx.finestLevel(); ++lev)
     {
         QDSMCInitializeUe(lev, QdsmcUeMode::JiAvg);
+        QdsmcPhaseMinTe(lev, "lf_enter");
 
         // Strang bracket as in the pc driver (the rho pairing is
         // half-integer-staggered here, accepted for the non-default scheme).
         QdsmcConductionOnce(lev, 0.5_rt * dt_adv, /*use_rho_new=*/false);
+        QdsmcPhaseMinTe(lev, "lf_conduction_half1");
         ApplyQdsmcEnergySources(lev, 0.5_rt * dt_adv, /*fill_te_ghosts=*/true);
+        QdsmcPhaseMinTe(lev, "lf_sources1");
         QdsmcTransportOnce(lev, dt_adv, /*midpoint=*/true);
+        QdsmcPhaseMinTe(lev, "lf_transport");
         ApplyQdsmcEnergySources(lev, 0.5_rt * dt_adv, /*fill_te_ghosts=*/true);
+        QdsmcPhaseMinTe(lev, "lf_sources2");
         QdsmcConductionOnce(lev, 0.5_rt * dt_adv, /*use_rho_new=*/true);
+        QdsmcPhaseMinTe(lev, "lf_conduction_half2");
 
         // Pe bookkeeping for the integer-time extrapolation (consumed by
         // ApplyQdsmcPeExtrapolation right before the final E-solve). The
@@ -8925,6 +8968,7 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
     for (int lev = 0; lev <= warpx.finestLevel(); ++lev)
     {
         QDSMCInitializeUe(lev, QdsmcUeMode::JiNewRhoHalf);
+        QdsmcPhaseMinTe(lev, "pc_enter");
 
         // Strang: C(dt/2) . [S(dt/2) A(dt) S(dt/2)] . C(dt/2). The
         // conduction halves pair T_e with the rho of their time level
@@ -8937,8 +8981,10 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
         std::array<amrex::Real, 2> ub0{}, ub1{}, ub2{}, ub3{}, ub4{}, ub5{};
         if (ebud) { ub0 = QDSMCClassEnergy(lev); }
         QdsmcConductionOnce(lev, 0.5_rt * dt, /*use_rho_new=*/false);
+        QdsmcPhaseMinTe(lev, "pc_conduction_half1");
         if (ebud) { ub1 = QDSMCClassEnergy(lev); }
         ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true);
+        QdsmcPhaseMinTe(lev, "pc_sources1");
         if (ebud) { ub2 = QDSMCClassEnergy(lev); }
         // Pre-transport Te snapshot for the compression split of the
         // transport-stage dU (instrument only).
@@ -8950,6 +8996,7 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
             amrex::MultiFab::Copy(te_pre, Te_now, 0, 0, 1, 0);
         }
         QdsmcTransportOnce(lev, dt, /*midpoint=*/true);
+        QdsmcPhaseMinTe(lev, "pc_transport");
         if (ebud) {
             ub3 = QDSMCClassEnergy(lev);
             auto const comp = QDSMCCompressionEnergy(lev, te_pre);
@@ -8957,8 +9004,10 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
             m_ebud_comp_band += comp[1];
         }
         ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true);
+        QdsmcPhaseMinTe(lev, "pc_sources2");
         if (ebud) { ub4 = QDSMCClassEnergy(lev); }
         QdsmcConductionOnce(lev, 0.5_rt * dt, /*use_rho_new=*/true);
+        QdsmcPhaseMinTe(lev, "pc_conduction_half2");
         if (ebud) {
             ub5 = QDSMCClassEnergy(lev);
             m_ebud_cond_bulk += (ub1[0] - ub0[0]) + (ub5[0] - ub4[0]);

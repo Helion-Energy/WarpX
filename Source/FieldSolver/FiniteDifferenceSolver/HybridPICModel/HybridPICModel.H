@@ -337,6 +337,16 @@ public:
      */
     void QDSMCUpdateTe (int lev, amrex::MultiFab const & rho_new) const;
 
+    /** \brief Per-phase minimum-T_e tracer (WARPX_QDSMC_PHASE_MINTE):
+     *         when the env var is set, print the global min of
+     *         hybrid_electron_temperature_fp and its cell after the labeled
+     *         step-phase. Locates which phase first writes a given T_e
+     *         extremum when per-subsystem toggles cannot separate the
+     *         writers (phases probed but not toggleable individually).
+     *         Two global reductions per call when armed; no work unset.
+     */
+    void QdsmcPhaseMinTe (int lev, char const * phase) const;
+
     /**
      * \brief Insulating EB wall: after the QDSMC scatter and before
      *        QDSMCUpdateTe, fold the entropy deposit (K*N) that landed on
