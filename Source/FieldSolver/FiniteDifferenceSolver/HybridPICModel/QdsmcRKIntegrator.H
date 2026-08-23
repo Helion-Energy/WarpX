@@ -8,6 +8,7 @@
 #define WARPX_QDSMCRKINTEGRATOR_H_
 
 #include <AMReX_GpuContainers.H>
+#include <AMReX_iMultiFab.H>
 #include <AMReX_MultiFab.H>
 #include <AMReX_Vector.H>
 #include <AMReX_ParallelDescriptor.H>
@@ -81,14 +82,27 @@ public:
      *  0.986 -> 0.967 from N=64 -> 128 on the conduction slab). */
     using PostStep = std::function<void (amrex::MultiFab&, amrex::Real)>;
 
+    /** err_mask (optional): cells with a nonzero mask value are excluded
+     *  from the error-norm reduction. For states owned by a post-step
+     *  projection (e.g. a positivity floor): the projection re-creates a
+     *  grid-scale kink at its cells every accepted step, the embedded
+     *  pair correctly flags it, and the controller collapses dt to
+     *  resolve dynamics the projection immediately overwrites -- a
+     *  clamp/controller limit cycle. Masking the projected cells
+     *  restores error control over the cells the integrator actually
+     *  owns. The pointee must outlive the integrator; the caller updates
+     *  it (post-step) so each attempt's norm sees the LAST accepted
+     *  step's projection set. nullptr = today's behavior exactly. */
     QdsmcRKIntegrator (Scheme scheme, Rhs rhs, Cap cap,
                        amrex::Real rtol, amrex::Real atol,
                        amrex::Real safety, amrex::Real max_growth,
-                       int max_attempts, PostStep post_step = {})
+                       int max_attempts, PostStep post_step = {},
+                       amrex::iMultiFab const * err_mask = nullptr)
         : m_scheme(scheme), m_rhs(std::move(rhs)), m_cap(std::move(cap)),
           m_post_step(std::move(post_step)),
           m_rtol(rtol), m_atol(atol), m_safety(safety),
-          m_max_growth(max_growth), m_max_attempts(max_attempts)
+          m_max_growth(max_growth), m_max_attempts(max_attempts),
+          m_err_mask(err_mask)
     {}
 
     /** Advance y in place from t = 0 to t_end. y's ghost refresh is the
@@ -164,13 +178,17 @@ private:
         amrex::ReduceOps<amrex::ReduceOpMax> reduce_op;
         amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
         using ReduceTuple = typename decltype(reduce_data)::Type;
+        bool const has_mask = (m_err_mask != nullptr);
         for (amrex::MFIter mfi(e); mfi.isValid(); ++mfi) {
             amrex::Box const box = mfi.validbox();
             auto const & e_arr = e.const_array(mfi);
             auto const & y_arr = y0.const_array(mfi);
+            amrex::Array4<int const> const m_arr = has_mask
+                ? m_err_mask->const_array(mfi) : amrex::Array4<int const>{};
             reduce_op.eval(box, reduce_data,
                 [=] AMREX_GPU_DEVICE (int i, int j, int kk) -> ReduceTuple
             {
+                if (has_mask && m_arr(i,j,kk) != 0) { return {0.0_rt}; }
                 amrex::Real r = 0.0_rt;
                 for (int c = 0; c < nc; ++c) {
                     r = amrex::max(r, std::abs(e_arr(i,j,kk,c)) /
@@ -195,9 +213,16 @@ private:
                 auto const & r_arr = ratio.array(mfi);
                 auto const & e_arr = e.const_array(mfi);
                 auto const & y_arr = y0.const_array(mfi);
+                amrex::Array4<int const> const m_arr = has_mask
+                    ? m_err_mask->const_array(mfi)
+                    : amrex::Array4<int const>{};
                 amrex::ParallelFor(box,
                     [=] AMREX_GPU_DEVICE (int i, int j, int kk)
                 {
+                    if (has_mask && m_arr(i,j,kk) != 0) {
+                        r_arr(i,j,kk) = 0.0_rt;   // excluded from the norm
+                        return;
+                    }
                     amrex::Real r = 0.0_rt;
                     for (int c = 0; c < nc; ++c) {
                         r = amrex::max(r, std::abs(e_arr(i,j,kk,c)) /
@@ -322,6 +347,9 @@ private:
     PostStep m_post_step;
     amrex::Real m_rtol, m_atol, m_safety, m_max_growth;
     int m_max_attempts;
+    /** Optional error-norm exclusion set (see the constructor doc);
+     *  not owned. */
+    amrex::iMultiFab const * m_err_mask = nullptr;
 };
 
 #endif // WARPX_QDSMCRKINTEGRATOR_H_

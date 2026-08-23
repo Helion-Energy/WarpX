@@ -1653,6 +1653,20 @@ public:
      *  Input: qdsmc_conduction_Te_floor. */
     amrex::Real m_cond_te_floor = 0.0;
 
+    /** Exclude floor-clamped nodes from the conduction error norm
+     *  (meaningful only with the floor armed; silently inert
+     *  otherwise). A projection inside an error-controlled loop pins
+     *  the embedded error at its own kinks: under sustained undershoot
+     *  pressure the clamp re-fires every accepted substep, the
+     *  controller collapses dt to resolve dynamics the projection
+     *  immediately overwrites, and the attempts budget burns marching
+     *  (a clamp/controller limit cycle). Masking the last accepted
+     *  substep's clamp set restores error control over the nodes the
+     *  integrator actually owns; the floor itself bounds the local
+     *  error at the clamped nodes. Off (the default) is bit-identical.
+     *  Input: qdsmc_conduction_Te_floor_mask_err. */
+    bool m_cond_te_floor_mask = false;
+
     /** Cumulative conduction-floor tally, same units and weighting as
      *  m_cond_eb_tally (node-u [J/m^3] summed over fluid nodes; in RZ
      *  each node weighted by 2 pi Vr/dr [J/m^2] -- multiply by dr dz

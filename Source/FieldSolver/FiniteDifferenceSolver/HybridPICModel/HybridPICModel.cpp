@@ -265,6 +265,8 @@ void HybridPICModel::ReadParameters ()
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_cond_te_floor >= 0.0_rt,
             "hybrid_pic_model.qdsmc_conduction_Te_floor must be >= 0");
+        pp_hybrid.query("qdsmc_conduction_Te_floor_mask_err",
+                        m_cond_te_floor_mask);
         std::string fdlim = "smart";
         pp_hybrid.query("qdsmc_conduction_fd_limiter", fdlim);
         if (fdlim == "none") { m_cond_fd_limiter = 0; }
@@ -1017,7 +1019,9 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
     if (m_cond_te_floor > 0.0_rt) {
         amrex::Print() << "[qdsmc] conduction Te floor: "
             << m_cond_te_floor << " eV (clamp + tally per accepted "
-            "substep)\n";
+            "substep"
+            << (m_cond_te_floor_mask ? "; clamped nodes err-masked" : "")
+            << ")\n";
     }
     m_kappa_par_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(kpar_expression, {"n","Te","t"}));
@@ -6286,8 +6290,18 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
     amrex::Real const te_floor_K = m_cond_te_floor * qe / kb;
     amrex::Real call_floor_tly = 0.0_rt;
     amrex::Real call_floor_cnt = 0.0_rt;
+    // Error-norm exclusion set (see m_cond_te_floor_mask): the LAST
+    // accepted substep's clamp set, zeroed at call entry and rebuilt by
+    // each floor pass, consumed by the integrator's error reduction.
+    bool const mask_err = m_cond_te_floor_mask && (te_floor_K > 0.0_rt);
+    amrex::iMultiFab floor_mask;
+    if (mask_err) {
+        floor_mask.define(Te.boxArray(), Te.DistributionMap(), 1, 0);
+        floor_mask.setVal(0);
+    }
     auto apply_te_floor = [&] (amrex::MultiFab & Tf)
     {
+        if (mask_err) { floor_mask.setVal(0); }
         amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
         amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
         using ReduceTuple = typename decltype(reduce_data)::Type;
@@ -6308,6 +6322,8 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
             amrex::Array4<amrex::Real>       const & Te_arr = Tf.array(mfi);
             amrex::Array4<amrex::Real const> const & b_arr =
                 bne.const_array(mfi);
+            amrex::Array4<int> const fm_arr = mask_err
+                ? floor_mask.array(mfi) : amrex::Array4<int>{};
             reduce_op.eval(tile_box, reduce_data,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
             {
@@ -6316,6 +6332,7 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                 amrex::Real const ne = b_arr(i,j,k,BNE::b_ne);
                 amrex::Real const du = 1.5_rt*kb*ne*(te_floor_K - T0);
                 Te_arr(i,j,k) = te_floor_K;
+                if (fm_arr) { fm_arr(i,j,k) = 1; }
 #ifdef WARPX_DIM_RZ
                 amrex::Real const r_i =
                     r_edge0 + amrex::Real(i - dom_lo[0])*dr_rz;
@@ -6355,7 +6372,8 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
         use_rkf45 ? QdsmcRKIntegrator::Scheme::RKF45
                   : QdsmcRKIntegrator::Scheme::SSPRK2,
         eval_rhs, cap, m_cond_fd_rtol, m_cond_fd_atol,
-        m_substep_safety, m_substep_max_growth, max_sub, post_step);
+        m_substep_safety, m_substep_max_growth, max_sub, post_step,
+        mask_err ? &floor_mask : nullptr);
     QdsmcRKStats const st = integ.Advance(T_cur, dt_c);
 
     // WARPX_QDSMC_COND_STATS: one line per integrator call from the stats
@@ -6405,7 +6423,8 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
         amrex::Print() << "[qdsmc] conduction Te floor: clamped "
             << static_cast<long>(call_floor_cnt)
             << " cells, injected " << call_floor_tly*to_J
-            << " J (cumulative " << m_cond_floor_tally*to_J << " J)\n";
+            << " J (cumulative " << m_cond_floor_tally*to_J << " J)"
+            << (mask_err ? " err-masked" : "") << "\n";
     }
 
     amrex::MultiFab::Copy(Te, T_cur, 0, 0, 1, 0);
