@@ -260,6 +260,11 @@ void HybridPICModel::ReadParameters ()
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_cond_chi_max >= 0.0_rt,
             "hybrid_pic_model.qdsmc_conduction_chi_max must be >= 0");
+        utils::parser::queryWithParser(pp_hybrid,
+            "qdsmc_conduction_Te_floor", m_cond_te_floor);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_cond_te_floor >= 0.0_rt,
+            "hybrid_pic_model.qdsmc_conduction_Te_floor must be >= 0");
         std::string fdlim = "smart";
         pp_hybrid.query("qdsmc_conduction_fd_limiter", fdlim);
         if (fdlim == "none") { m_cond_fd_limiter = 0; }
@@ -1008,6 +1013,11 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
         };
         kpar_expression  = hard_cap(kpar_expression);
         kperp_expression = hard_cap(kperp_expression);
+    }
+    if (m_cond_te_floor > 0.0_rt) {
+        amrex::Print() << "[qdsmc] conduction Te floor: "
+            << m_cond_te_floor << " eV (clamp + tally per accepted "
+            "substep)\n";
     }
     m_kappa_par_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(kpar_expression, {"n","Te","t"}));
@@ -6243,6 +6253,66 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
         m_cond_eb_tally += tly;
         };
 
+    // Positivity floor (see m_cond_te_floor): the anisotropic tensor
+    // update is not monotone -- its off-diagonal cross-term fluxes can
+    // drive T_e below zero at grid-sharp field-direction rotations, and
+    // the embedded temporal error accepts the undershoot because both
+    // stages share it. Clamp after every accepted substep (last in the
+    // post-step chain, so nothing downstream can undo it) and book the
+    // injected energy in the pin_eb_ring tally convention.
+    amrex::Real const te_floor_K = m_cond_te_floor * qe / kb;
+    amrex::Real call_floor_tly = 0.0_rt;
+    amrex::Real call_floor_cnt = 0.0_rt;
+    auto apply_te_floor = [&] (amrex::MultiFab & Tf)
+    {
+        amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+        for (MFIter mfi(Tf, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            amrex::Box tile_box = mfi.tilebox();
+            {   // unique node ownership (fixup-loop seam trim)
+                amrex::Box const box_nodes =
+                    amrex::surroundingNodes(mfi.validbox());
+                for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) {
+                    if (tile_box.bigEnd(dd) == box_nodes.bigEnd(dd) &&
+                        (box_nodes.bigEnd(dd) != dom_nodes.bigEnd(dd) ||
+                         geom.isPeriodic(dd))) {
+                        tile_box.growHi(dd, -1);
+                    }
+                }
+            }
+            amrex::Array4<amrex::Real>       const & Te_arr = Tf.array(mfi);
+            amrex::Array4<amrex::Real const> const & b_arr =
+                bne.const_array(mfi);
+            reduce_op.eval(tile_box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
+            {
+                amrex::Real const T0 = Te_arr(i,j,k);
+                if (T0 >= te_floor_K) { return {0.0_rt, 0.0_rt}; }
+                amrex::Real const ne = b_arr(i,j,k,BNE::b_ne);
+                amrex::Real const du = 1.5_rt*kb*ne*(te_floor_K - T0);
+                Te_arr(i,j,k) = te_floor_K;
+#ifdef WARPX_DIM_RZ
+                amrex::Real const r_i =
+                    r_edge0 + amrex::Real(i - dom_lo[0])*dr_rz;
+                amrex::Real const w_v = 2.0_rt*MathConst::pi*
+                    ((r_i > 0.0_rt) ? r_i : dr_rz/8.0_rt);
+                return {w_v*du, 1.0_rt};
+#else
+                return {du, 1.0_rt};
+#endif
+            });
+        }
+        auto tup = reduce_data.value(reduce_op);
+        amrex::Real tly = amrex::get<0>(tup);
+        amrex::Real cnt = amrex::get<1>(tup);
+        amrex::ParallelDescriptor::ReduceRealSum(tly);
+        amrex::ParallelDescriptor::ReduceRealSum(cnt);
+        call_floor_tly += tly;
+        call_floor_cnt += cnt;
+    };
+
     // Bath pins must track the SUBCYCLE cadence: applied once per call
     // they are a contact resistance whose magnitude GROWS under
     // refinement (bath-row heat capacity ~ dx; measured anti-convergent
@@ -6255,6 +6325,7 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
     {
         ApplyQdsmcConductionWallBCs(lev, dts, yy, rho);
         if (eb_iso) { pin_eb_ring(yy); }
+        if (te_floor_K > 0.0_rt) { apply_te_floor(yy); }
     };
 
     QdsmcRKIntegrator const integ(
@@ -6278,6 +6349,24 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                     st.dt_max, st.dt_last); return std::string(b); }()
             + ") -- raise qdsmc_conduction_fd_max_subcycles or "
             "loosen qdsmc_conduction_fd_rtol");
+    }
+
+    if (call_floor_cnt > 0.0_rt) {
+        m_cond_floor_tally += call_floor_tly;
+        // Joules for the report line only; the tally member keeps the
+        // pin_eb_ring convention (see the member doc).
+#ifdef WARPX_DIM_RZ
+        amrex::Real const to_J = dr_rz * geom.CellSize(1);
+#else
+        amrex::Real to_J = 1.0_rt;
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            to_J *= geom.CellSize(d);
+        }
+#endif
+        amrex::Print() << "[qdsmc] conduction Te floor: clamped "
+            << static_cast<long>(call_floor_cnt)
+            << " cells, injected " << call_floor_tly*to_J
+            << " J (cumulative " << m_cond_floor_tally*to_J << " J)\n";
     }
 
     amrex::MultiFab::Copy(Te, T_cur, 0, 0, 1, 0);

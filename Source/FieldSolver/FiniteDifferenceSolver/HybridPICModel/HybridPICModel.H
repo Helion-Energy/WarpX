@@ -1634,6 +1634,27 @@ public:
 
     amrex::Real GetQdsmcEbTally () const { return m_cond_eb_tally; }
 
+    /** Positivity floor on T_e, applied after every ACCEPTED conduction
+     *  substep of the FD operator, in eV; 0 (the default) disables it
+     *  and is bit-identical to the unfloored update. The anisotropic
+     *  tensor update is not a monotone scheme: its off-diagonal
+     *  cross-term fluxes can drive T_e below zero at grid-sharp
+     *  rotations of the field direction, and the embedded temporal
+     *  error estimate accepts the undershoot because both stages share
+     *  it (a spatial-discretization property, not a time-step one).
+     *  The floor clamps such nodes to the given value and books the
+     *  injected energy so conservation diagnostics see it.
+     *  Input: qdsmc_conduction_Te_floor. */
+    amrex::Real m_cond_te_floor = 0.0;
+
+    /** Cumulative conduction-floor tally, same units and weighting as
+     *  m_cond_eb_tally (node-u [J/m^3] summed over fluid nodes; in RZ
+     *  each node weighted by 2 pi Vr/dr [J/m^2] -- multiply by dr dz
+     *  for Joules). Positive = energy added by the floor. */
+    mutable amrex::Real m_cond_floor_tally = 0.0;
+
+    amrex::Real GetQdsmcCondFloorTally () const { return m_cond_floor_tally; }
+
     /** Scatter-form deposit kernel. 0 = hat (2^d CIC + the B1
      *  half-gradient correction). 1 = Keys cubic convolution (a = -1/2,
      *  4^d): partition of unity is exact (conservation stays exact) and
