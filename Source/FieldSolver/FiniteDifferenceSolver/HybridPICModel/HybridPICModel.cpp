@@ -3159,22 +3159,45 @@ void HybridPICModel::QDSMCInitializeKe (int const lev, amrex::MultiFab const & r
 
 void HybridPICModel::QdsmcPhaseMinTe (int const lev, char const * phase) const
 {
-    // WARPX_QDSMC_PHASE_MINTE: per-phase minimum-T_e tracer (see header
+    // WARPX_QDSMC_PHASE_MINTE=N: per-phase minimum-T_e tracer (see header
     // doc). MultiFab::min/minIndex are collective and device-safe; both
     // reduce over the valid region, so ghost-only writes do not register.
-    static bool const phase_minte =
-        (std::getenv("WARPX_QDSMC_PHASE_MINTE") != nullptr);
-    if (!phase_minte) { return; }
+    // The value is a step cadence: the full min+minIndex+print runs on
+    // steps with step % N == 0 (N = 1 is every step, the prior behavior).
+    // On the other steps a min()-only first-negative latch preserves the
+    // no-silent-negative gate at half the reduction count: the first
+    // negative prints once (with its argmin, suffixed LATCHED) and the
+    // latch disarms, so post-detection cost is zero. Each probe forces a
+    // device sync and the measured cost is pipeline drain, not reduction
+    // time -- the cadence exists for long strokes. Unparsable values
+    // behave as N = 1.
+    static int const cadence = [] () {
+        char const * s = std::getenv("WARPX_QDSMC_PHASE_MINTE");
+        if (s == nullptr) { return 0; }
+        char * end = nullptr;
+        long const v = std::strtol(s, &end, 10);
+        return (end != s && v >= 1) ? static_cast<int>(v) : 1;
+    }();
+    if (cadence == 0) { return; }
+    static bool latch_armed = true;
     auto & warpx = WarpX::GetInstance();
+    int const step = warpx.getistep(lev);
+    bool const full = (step % cadence == 0);
+    if (!full && !latch_armed) { return; }
     amrex::MultiFab const & Te =
         *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
     amrex::Real const mn = Te.min(0);
+    if (!full) {
+        if (mn >= 0.0_rt) { return; }
+        latch_armed = false;
+    }
     amrex::IntVect const loc = Te.minIndex(0);
-    amrex::Print() << "[qdsmc-phase-minte] step=" << warpx.getistep(lev)
+    amrex::Print() << "[qdsmc-phase-minte] step=" << step
         << " phase=" << phase << " minTe=" << mn
         << " at (" << loc[0] << ","
         << ((AMREX_SPACEDIM > 1) ? loc[1] : 0) << ","
-        << ((AMREX_SPACEDIM > 2) ? loc[2] : 0) << ")\n";
+        << ((AMREX_SPACEDIM > 2) ? loc[2] : 0) << ")"
+        << (full ? "" : " LATCHED") << "\n";
 }
 
 void HybridPICModel::QDSMCUpdateTe (int const lev) const
@@ -6334,6 +6357,22 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
         eval_rhs, cap, m_cond_fd_rtol, m_cond_fd_atol,
         m_substep_safety, m_substep_max_growth, max_sub, post_step);
     QdsmcRKStats const st = integ.Advance(T_cur, dt_c);
+
+    // WARPX_QDSMC_COND_STATS: one line per integrator call from the stats
+    // the call already returns (no added reductions; zero cost unset) --
+    // runtime substep-count attribution without waiting on the profiler.
+    static bool const cond_stats =
+        (std::getenv("WARPX_QDSMC_COND_STATS") != nullptr);
+    if (cond_stats) {
+        amrex::Print() << "[qdsmc] cond rk stats: half="
+            << (use_rho_new ? 2 : 1)
+            << " accepted=" << st.n_accepted
+            << " attempts=" << st.n_attempts
+            << " dt_first=" << st.dt_first
+            << " dt_last=" << st.dt_last
+            << " t_done_frac="
+            << ((dt_c > 0.0_rt) ? st.t_done/dt_c : 0.0_rt) << "\n";
+    }
 
     if (st.t_done < dt_c*(1.0_rt - 1.0e-12_rt)) {
         amrex::Warning(

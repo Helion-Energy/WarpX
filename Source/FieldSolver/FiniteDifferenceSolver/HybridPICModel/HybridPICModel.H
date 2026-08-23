@@ -337,13 +337,19 @@ public:
      */
     void QDSMCUpdateTe (int lev, amrex::MultiFab const & rho_new) const;
 
-    /** \brief Per-phase minimum-T_e tracer (WARPX_QDSMC_PHASE_MINTE):
+    /** \brief Per-phase minimum-T_e tracer (WARPX_QDSMC_PHASE_MINTE=N):
      *         when the env var is set, print the global min of
      *         hybrid_electron_temperature_fp and its cell after the labeled
      *         step-phase. Locates which phase first writes a given T_e
      *         extremum when per-subsystem toggles cannot separate the
      *         writers (phases probed but not toggleable individually).
-     *         Two global reductions per call when armed; no work unset.
+     *         The value is a step cadence: full probes run on steps with
+     *         step % N == 0; the other steps carry a min()-only
+     *         first-negative latch (one reduction) that prints the first
+     *         negative it sees (suffix LATCHED) and then disarms, so no
+     *         negative passes silently at any step while steady-state cost
+     *         drops by the cadence factor. Unparsable values act as N = 1;
+     *         no work unset.
      */
     void QdsmcPhaseMinTe (int lev, char const * phase) const;
 
