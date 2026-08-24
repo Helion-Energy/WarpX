@@ -169,16 +169,10 @@ void HybridPICModel::ReadParameters ()
                 "hybrid_pic_model.esolve must be 'e_form' (alias 'ohm') "
                 "or 'amano_form' (alias 'gol')");
         }
-        // Port guard: foundations only (helper, inputs, field, guards).
-        // The relax solve kernel and its substep-loop integration land
-        // next; until then the selection must fail LOUDLY here -- the
-        // solve dispatch would otherwise silently run the legacy
-        // divided Ohm form against gol expectations.
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_esolve_gol,
-            "hybrid_pic_model.esolve = gol: the GOL/relax E-solve is "
-            "not yet wired on this fork's RZ path (port in progress); "
-            "the legacy divided Ohm solve would silently run. Use the "
-            "default esolve = e_form until the port lands.");
+        // The relax solve is wired on the RZ path with the Lie split.
+        // Two pieces stay gated behind parse-time aborts below: the
+        // Marder cleaning pass (needs its RZ div/grad forms) and the
+        // centered (Strang) split (needs the half-dt B push plumbing).
         pp_hybrid.query("gol_sweeps", m_gol_sweeps);
         utils::parser::queryWithParser(pp_hybrid, "gol_cfl_alpha", m_gol_alpha);
         utils::parser::queryWithParser(pp_hybrid, "gol_n_min", m_gol_n_min);
@@ -221,8 +215,17 @@ void HybridPICModel::ReadParameters ()
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_gol_div_clean_frac >= 0.0_rt && m_gol_div_clean_frac <= 1.0_rt,
             "hybrid_pic_model.gol_div_clean_frac must be in [0, 1]");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_esolve_gol || m_gol_div_clean_frac == 0.0_rt,
+            "Marder cleaning is not yet ported to the RZ path; set "
+            "hybrid_pic_model.gol_div_clean_frac = 0");
         pp_hybrid.query("gol_var_mass", m_gol_var_mass);
         pp_hybrid.query("gol_centered_split", m_gol_centered_split);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_esolve_gol || !m_gol_centered_split,
+            "The centered (Strang) split is not yet wired on this "
+            "fork's substep loop; set hybrid_pic_model."
+            "gol_centered_split = 0 (Lie split)");
     }
 }
 
@@ -1957,6 +1960,11 @@ void HybridPICModel::BfieldEvolve (
         bool step_succeeded = true;
         amrex::Real step_change_factor = 1.0_rt;
 
+        // Publish the current substep dt for the GOL relax advance: the
+        // Eq-(27) variable-mass evaluation and the c_art CFL both read
+        // it (subcycling directly reduces the artificial inertia).
+        if (gol_relax) { m_gol_dt_sub = dt_sub; }
+
         // Predictor: the engine advances the circuit over this substep
         // with its held EMF estimates and pushes the scale segments; the
         // engine always advances from its interval-entry state, so a
@@ -2068,6 +2076,23 @@ void HybridPICModel::BfieldEvolve (
             // update B_old to the current Bfield
             for (int ii = 0; ii < 3; ii++) {
                 MultiFab::Copy(B_old[ii], *Bfield[lev][ii], 0, 0, 1, ng);
+            }
+            if (gol_relax) {
+                // Lie split (see the m_gol_centered_split member doc):
+                // the RK stages read the frozen E state -- advance
+                // (E, J_e) exactly once here, by the accepted dt_sub
+                // (still published in m_gol_dt_sub), against the
+                // updated B and its refreshed Ampere current. Runs
+                // after the coupling interval closes, so the advance
+                // sees the settled external scale segments.
+                CalculatePlasmaCurrent(Bfield, eb_update_E);
+                m_gol_relax_advance = true;
+                HybridPICSolveE(Efield, Jfield, Bfield, rhofield,
+                                eb_update_E, true);
+                m_gol_relax_advance = false;
+                if (Bz_IndexType[0] == Ez_IndexType[0]) {
+                    warpx.FillBoundaryE(ng, nodal_sync);
+                }
             }
             dt_sub *= std::min(m_substep_max_growth, step_change_factor);
         } else {

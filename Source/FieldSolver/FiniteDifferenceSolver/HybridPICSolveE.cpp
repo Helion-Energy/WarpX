@@ -527,19 +527,37 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     int lev, HybridPICModel const* hybrid_model,
     const bool solve_for_Faraday )
 {
-    // Port guard (belt to the parse-time abort): this cylindrical path
-    // computes the legacy divided-Ohm E only. If the GOL selection ever
-    // reaches here half-wired, fail loudly rather than silently solving
-    // the wrong form.
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!hybrid_model->m_esolve_gol,
-        "GOL/relax E-solve not yet wired on this fork's RZ path (port "
-        "in progress); the legacy divided Ohm solve would silently run.");
-
     // Both steps below do not currently support m > 0 and should be
     // modified if such support wants to be added
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         (m_nmodes == 1),
         "Ohm's law solver only support m = 0 azimuthal mode at present.");
+
+    // GOL relax form (esolve = gol): the division-free electron-momentum
+    // E advance (see the m_gol_form member doc). Requirements are checked
+    // here; the advance itself runs after the nodal enE assembly below
+    // and returns before the legacy divided-Ohm path.
+    bool const gol_relax_solve =
+        hybrid_model->m_esolve_gol && (hybrid_model->m_gol_form == 1);
+    if (gol_relax_solve) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            WarpX::grid_type == ablastr::utils::enums::GridType::Collocated,
+            "hybrid_pic_model.esolve = gol (v1) requires "
+            "warpx.grid_type = collocated");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !hybrid_model->m_add_external_fields ||
+                hybrid_model->m_external_field_mode ==
+                    HybridPICModel::ExternalFieldMode::Split,
+            "esolve = gol with external fields supports the Split "
+            "external-field mode only on this fork (TotalAssembled and "
+            "UnifiedA are untested with the relax advance)");
+        // The RK substep STAGES and particle-E calls return the frozen
+        // state (see the m_gol_relax_advance member doc): only the
+        // once-per-accepted-substep advance raised by BfieldEvolve
+        // mutates (E, J_e). Returning here also skips the enE assembly
+        // below on every no-op call.
+        if (!hybrid_model->m_gol_relax_advance) { return; }
+    }
 
     // for the profiler
     amrex::LayoutData<amrex::Real>* cost = WarpX::getCosts(lev);
@@ -689,6 +707,264 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
             wt = static_cast<Real>(amrex::second()) - wt;
             amrex::HostDevice::Atomic::Add( &(*cost)[mfi.index()], wt);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // GOL relax advance (esolve = gol, gol_form = relax): J_e is a
+    // persistent dynamical field and E advances by Ampere-Maxwell with
+    // displacement current at the CFL-set artificial light speed; the
+    // stiff LOCAL electron-momentum terms (E coupling, gyration,
+    // friction, vacuum decay) are solved pointwise implicitly in closed
+    // form -- division-free, no linear algebra, no density floor. E is
+    // the full physical field state (grad Pe always included); with
+    // Split external fields the state stays internal-only and the
+    // physics uses E_state + E_ext (quasi-static over a substep).
+    // Steady state recovers generalized Ohm + Ampere exactly. Reached
+    // once per ACCEPTED substep (the advance gate was checked at entry);
+    // returns before the legacy divided-Ohm path below. RZ mode 0: the
+    // axis nodes carry the parity conditions E_r = E_theta = J_e,r =
+    // J_e,theta = 0 (only the z components are regular at r = 0).
+    if (gol_relax_solve) {
+        auto const dx_arr = warpx.Geom(lev).CellSizeArray();
+        amrex::Real sum_inv_dx2 = 0.0_rt;
+        amrex::Real dx_min = dx_arr[0];
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            sum_inv_dx2 += 1.0_rt / (dx_arr[d] * dx_arr[d]);
+            dx_min = amrex::min(dx_min, dx_arr[d]);
+        }
+        amrex::Real const dt_full = warpx.getdt(lev);
+        amrex::Real const dt_gol =
+            (hybrid_model->m_gol_dt_sub > 0.0_rt)
+                ? hybrid_model->m_gol_dt_sub : dt_full;
+        amrex::Real const rho_1c =
+            PhysConst::q_e * hybrid_model->m_gol_n_min;
+        // Eq-(30) vacuum damping: LOCAL current decay below the
+        // one-count level, no CFL (see the member doc).
+        amrex::Real const vac_gamma =
+            (hybrid_model->m_gol_vac_gamma_frac > 0.0_rt)
+                ? hybrid_model->m_gol_vac_gamma_frac / dt_full : 0.0_rt;
+        bool const use_vac_damping = (vac_gamma > 0.0_rt);
+        amrex::Real c_art = amrex::min(
+            PhysConst::c,
+            hybrid_model->m_gol_c_frac
+                / (dt_gol * std::sqrt(sum_inv_dx2)));
+        if (hybrid_model->m_gol_c_max > 0.0_rt) {
+            c_art = amrex::min(c_art, hybrid_model->m_gol_c_max);
+        }
+        // Quasineutral relaxation toward the one-count-guarded Ohm
+        // value (see the m_gol_qn_frac member doc): pins the slow/
+        // longitudinal sector algebraically, plasma-blended.
+        amrex::Real const gam_qn =
+            hybrid_model->m_gol_qn_frac / dt_full;
+        bool const use_qn = (gam_qn > 0.0_rt);
+        amrex::Real const inv_eps_art = PhysConst::mu0 * c_art * c_art;
+        amrex::Real const qm = PhysConst::q_e / PhysConst::m_e;
+        bool const use_vm = hybrid_model->m_gol_var_mass;
+        amrex::Real const vm_alpha = hybrid_model->m_gol_alpha;
+
+        MultiFab & Je_mf = *warpx.m_fields.get("hybrid_gol_je_fp", lev);
+        bool const seed_je = !hybrid_model->m_gol_je_init;
+        hybrid_model->m_gol_je_init = true;
+        if (seed_je) {
+            amrex::Print() << "[gol] relax boot: c_art = " << c_art
+                << " m/s (CFL value "
+                << hybrid_model->m_gol_c_frac
+                       / (dt_gol * std::sqrt(sum_inv_dx2))
+                << ", cap " << hybrid_model->m_gol_c_max
+                << "), gamma_qn = " << gam_qn
+                << " 1/s, dt_sub = " << dt_gol
+                << " s, var_mass = "
+                << (hybrid_model->m_gol_var_mass ? "on" : "off")
+                << " (alpha " << hybrid_model->m_gol_alpha
+                << "), split = "
+                << (hybrid_model->m_gol_centered_split
+                        ? "centered" : "lie")
+                << "\n";
+        }
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(*Efield[0], TilingIfNotGPU()); mfi.isValid();
+             ++mfi) {
+            Array4<Real> const& Er = Efield[0]->array(mfi);
+            Array4<Real> const& Et = Efield[1]->array(mfi);
+            Array4<Real> const& Ez = Efield[2]->array(mfi);
+            Array4<Real> const& Je = Je_mf.array(mfi);
+            Array4<Real const> const& enE = enE_nodal_mf.const_array(mfi);
+            Array4<Real const> const& rho = rhofield.const_array(mfi);
+            Array4<Real const> const& Pe  = Pefield.const_array(mfi);
+            Array4<Real const> const& Jr = Jfield[0]->const_array(mfi);
+            Array4<Real const> const& Jt = Jfield[1]->const_array(mfi);
+            Array4<Real const> const& Jz = Jfield[2]->const_array(mfi);
+            Array4<Real const> const& Jir = Jifield[0]->const_array(mfi);
+            Array4<Real const> const& Jit = Jifield[1]->const_array(mfi);
+            Array4<Real const> const& Jiz = Jifield[2]->const_array(mfi);
+            Array4<Real const> const& Br = Bfield[0]->const_array(mfi);
+            Array4<Real const> const& Bt = Bfield[1]->const_array(mfi);
+            Array4<Real const> const& Bz = Bfield[2]->const_array(mfi);
+            Array4<Real> Br_e, Bt_e, Bz_e;
+            if (external_b_split) {
+                Br_e = Bfield_external[0]->array(mfi);
+                Bt_e = Bfield_external[1]->array(mfi);
+                Bz_e = Bfield_external[2]->array(mfi);
+            }
+            Array4<Real> Er_e, Et_e, Ez_e;
+            if (include_E_ext) {
+                Er_e = Efield_external[0]->array(mfi);
+                Et_e = Efield_external[1]->array(mfi);
+                Ez_e = Efield_external[2]->array(mfi);
+            }
+            amrex::Array4<int> upd_r, upd_t, upd_z;
+            if (EB::enabled()) {
+                upd_r = eb_update_E[0]->array(mfi);
+                upd_t = eb_update_E[1]->array(mfi);
+                upd_z = eb_update_E[2]->array(mfi);
+            }
+            Real const * const AMREX_RESTRICT coefs_r =
+                m_stencil_coefs_r.dataPtr();
+            auto const n_coefs_r =
+                static_cast<int>(m_stencil_coefs_r.size());
+            Real const * const AMREX_RESTRICT coefs_z =
+                m_stencil_coefs_z.dataPtr();
+            auto const n_coefs_z =
+                static_cast<int>(m_stencil_coefs_z.size());
+            Real const dr_l = m_dr;
+            Real const rmin_l = m_rmin;
+            amrex::Real const dt_r = dt_gol;
+            amrex::ParallelFor(mfi.tilebox(),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                bool const skip_r = upd_r && upd_r(i,j,k) == 0;
+                bool const skip_t = upd_t && upd_t(i,j,k) == 0;
+                bool const skip_z = upd_z && upd_z(i,j,k) == 0;
+                if (skip_r && skip_t && skip_z) { return; }
+                // RZ mode-0 axis parity (nodal r index): E_r, E_theta
+                // and the J_e r/theta components vanish at r = 0.
+                bool const on_axis =
+                    (rmin_l + i*dr_l) < 0.5_rt*dr_l;
+                amrex::Real const rho_v =
+                    amrex::max(rho(i,j,k), 0.0_rt);
+                amrex::Real br = Br(i,j,k), bt = Bt(i,j,k),
+                            bz = Bz(i,j,k);
+                amrex::Real etr = Er(i,j,k), ett = Et(i,j,k),
+                            etz = Ez(i,j,k);
+                if (external_b_split) {
+                    br += Br_e(i,j,k); bt += Bt_e(i,j,k);
+                    bz += Bz_e(i,j,k);
+                }
+                if (include_E_ext) {
+                    etr += Er_e(i,j,k); ett += Et_e(i,j,k);
+                    etz += Ez_e(i,j,k);
+                }
+                // Eq-(27) variable electron mass (see member doc):
+                // per-cell inflation where the grid-whistler speed
+                // would violate the substep CFL; inert (== m_e)
+                // wherever the physics is resolved. Applies to every
+                // 1/m_e in the J_e update below.
+                amrex::Real qm_c = qm;
+                if (use_vm) {
+                    amrex::Real const B2t = br*br + bt*bt + bz*bz;
+                    amrex::Real const me_v =
+                        HybridPICModel::GolEffectiveElectronMass(
+                            B2t, amrex::max(rho_v, rho_1c),
+                            dt_r, dx_min, vm_alpha);
+                    qm_c = PhysConst::q_e / me_v;
+                }
+                amrex::Real const kE = qm_c * rho_v;
+                amrex::Real const gpr = T_Algo::UpwardDr(
+                    Pe, coefs_r, n_coefs_r, i, j, 0, 0);
+                amrex::Real const gpt = 0.0_rt;   // mode 0
+                amrex::Real const gpz = T_Algo::UpwardDz(
+                    Pe, coefs_z, n_coefs_z, i, j, 0, 0);
+                amrex::Real jtot_val = 0.0_rt;
+                if (resistivity_has_J_dependence) {
+                    jtot_val = std::sqrt(
+                        Jr(i,j,k)*Jr(i,j,k) + Jt(i,j,k)*Jt(i,j,k)
+                        + Jz(i,j,k)*Jz(i,j,k));
+                }
+                amrex::Real const eta_v = eta(rho_v, jtot_val, t_new);
+                amrex::Real gam_v = 0.0_rt;
+                if (use_vac_damping) {
+                    gam_v = vac_gamma * 0.5_rt * (1.0_rt - std::tanh(
+                        (rho_v - rho_1c) / (0.5_rt * rho_1c)));
+                }
+                // Ampere drive Jc - J_i (Jfield = curl B/mu0 - J_ext)
+                amrex::Real const rcr = Jr(i,j,k) - Jir(i,j,k);
+                amrex::Real const rct = Jt(i,j,k) - Jit(i,j,k);
+                amrex::Real const rcz = Jz(i,j,k) - Jiz(i,j,k);
+                // previous J_e (seeded from the Ampere closure on the
+                // first call)
+                amrex::Real const jor = seed_je ? rcr : Je(i,j,k,0);
+                amrex::Real const jot = seed_je ? rct : Je(i,j,k,1);
+                amrex::Real const joz = seed_je ? rcz : Je(i,j,k,2);
+                // implicit local solve:
+                //   (a I - [beta]x) Je' = r,  beta = qm dt B_tot
+                //   inverse = (a^2 I + a [beta]x + beta beta^T)
+                //             / (a (a^2 + |beta|^2))
+                amrex::Real const a = 1.0_rt
+                    + dt_r * (dt_r * kE * inv_eps_art
+                              + kE * eta_v + gam_v);
+                amrex::Real const ber = qm_c * dt_r * br;
+                amrex::Real const bet = qm_c * dt_r * bt;
+                amrex::Real const bez = qm_c * dt_r * bz;
+                amrex::Real const b2 = ber*ber + bet*bet + bez*bez;
+                amrex::Real const rr = jor
+                    + dt_r * kE * (etr + dt_r * inv_eps_art * rcr)
+                    - dt_r * kE * eta_v * Jir(i,j,k)
+                    + qm_c * dt_r * gpr;
+                amrex::Real const rt = jot
+                    + dt_r * kE * (ett + dt_r * inv_eps_art * rct)
+                    - dt_r * kE * eta_v * Jit(i,j,k)
+                    + qm_c * dt_r * gpt;
+                amrex::Real const rz = joz
+                    + dt_r * kE * (etz + dt_r * inv_eps_art * rcz)
+                    - dt_r * kE * eta_v * Jiz(i,j,k)
+                    + qm_c * dt_r * gpz;
+                amrex::Real const bdotr = ber*rr + bet*rt + bez*rz;
+                amrex::Real const inv = 1.0_rt / (a * (a*a + b2));
+                amrex::Real jnr =
+                    (a*a*rr + a*(bet*rz - bez*rt) + bdotr*ber) * inv;
+                amrex::Real jnt =
+                    (a*a*rt + a*(bez*rr - ber*rz) + bdotr*bet) * inv;
+                amrex::Real const jnz =
+                    (a*a*rz + a*(ber*rt - bet*rr) + bdotr*bez) * inv;
+                amrex::Real ern = Er(i,j,k)
+                    + dt_r * inv_eps_art * (rcr - jnr);
+                amrex::Real etn = Et(i,j,k)
+                    + dt_r * inv_eps_art * (rct - jnt);
+                amrex::Real ezn = Ez(i,j,k)
+                    + dt_r * inv_eps_art * (rcz - jnz);
+                if (use_qn) {
+                    // implicit relaxation toward the one-count-guarded
+                    // Ohm value, plasma-blended (the OPTIONAL floored
+                    // division of the qn pin -- see the member doc)
+                    amrex::Real const w_qn = 0.5_rt
+                        * (1.0_rt + std::tanh(
+                              (rho_v - rho_1c) / (0.5_rt * rho_1c)));
+                    amrex::Real const lam = dt_r * gam_qn * w_qn;
+                    amrex::Real const rho_gq =
+                        amrex::max(rho_v, rho_1c);
+                    amrex::Real const inv_l = 1.0_rt / (1.0_rt + lam);
+                    ern = (ern + lam * ((enE(i,j,k,0) - gpr
+                        + rho_v * eta_v * Jr(i,j,k)) / rho_gq))
+                        * inv_l;
+                    etn = (etn + lam * ((enE(i,j,k,1) - gpt
+                        + rho_v * eta_v * Jt(i,j,k)) / rho_gq))
+                        * inv_l;
+                    ezn = (ezn + lam * ((enE(i,j,k,2) - gpz
+                        + rho_v * eta_v * Jz(i,j,k)) / rho_gq))
+                        * inv_l;
+                }
+                if (on_axis) {
+                    jnr = 0.0_rt; jnt = 0.0_rt;
+                    ern = 0.0_rt; etn = 0.0_rt;
+                }
+                if (!skip_r) { Je(i,j,k,0) = jnr; Er(i,j,k) = ern; }
+                if (!skip_t) { Je(i,j,k,1) = jnt; Et(i,j,k) = etn; }
+                if (!skip_z) { Je(i,j,k,2) = jnz; Ez(i,j,k) = ezn; }
+            });
+        }
+        return;
     }
 
     // Loop through the grids, and over the tiles within each grid again

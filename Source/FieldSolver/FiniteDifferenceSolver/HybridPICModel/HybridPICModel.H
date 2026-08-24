@@ -566,9 +566,13 @@ public:
      *  the PHYSICAL vacuum continuation is exactly in its kernel
      *  (harmonic fields have div E = 0) and transverse waves are
      *  untouched -- gap tracking is preserved by construction. Local
-     *  stencil, no projection, no elliptic machinery. Default 0.5;
-     *  0 = off. Input: gol_div_clean_frac. */
-    amrex::Real m_gol_div_clean_frac = 0.5;
+     *  stencil, no projection, no elliptic machinery. Source default
+     *  0.5; 0 = off. THIS FORK: the Marder pass still needs its RZ
+     *  forms ((1/r) d(r Er)/dr divergence and the vector-Laplacian
+     *  components) -- default 0 and a nonzero selection under
+     *  esolve = gol aborts at parse until it lands.
+     *  Input: gol_div_clean_frac. */
+    amrex::Real m_gol_div_clean_frac = 0.0;
     /** Amano Eq-(27) variable electron mass in the RELAX advance
      *  (default on). The relax form's true-m_e J_e dynamics carry the
      *  grid-whistler branch honestly, and the frozen-field split has
@@ -636,8 +640,13 @@ public:
      *  gather/deposition access (bounds-check verified) instead of
      *  the assert. Both are the same upstream instability in an
      *  already-fatal regime. 0 = the legacy Lie split.
+     *  THIS FORK: the centered split still needs the half-dt B push
+     *  plumbing in the substep loop -- default 0 (Lie) and selecting
+     *  it under esolve = gol aborts at parse until it lands (the
+     *  dispersion gates measured Lie and centered identical, so Lie
+     *  is a valid production configuration, not a downgrade).
      *  Input: gol_centered_split. */
-    bool m_gol_centered_split = true;
+    bool m_gol_centered_split = false;
 
     /** Amano Eq (27) effective electron mass, multiplied through by m_i
      *  (the ion mass cancels): m_e' = max(m_e, B^2 q_e/(mu0 rho_e) *
