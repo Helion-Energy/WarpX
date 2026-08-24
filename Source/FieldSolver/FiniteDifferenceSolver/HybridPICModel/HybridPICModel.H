@@ -444,6 +444,223 @@ public:
 
     bool m_holmstrom_vacuum_region = false;
 
+    /** Generalized-Ohm's-law (GOL) E-solve FORM. Terminology: the
+     *  hybrid solver always solves the generalized Ohm's law; what
+     *  this selects is the form. E-FORM (esolve = e_form, alias ohm,
+     *  the default): the legacy algebraic solve for E with its density
+     *  division. AMANO-FORM (esolve = amano_form, alias gol): the
+     *  inertia-screened division-free form (Amano, Higashimori &
+     *  Shirakawa, JCP 275 (2014) 197; the elliptic version is the
+     *  Hewett-Nielson Darwin transverse-field solve, JCP 29 (1978)
+     *  219, in generalized-Ohm clothing): instead of the algebraic
+     *  solve, treat the screened equation
+     *      (rho_e - eps grad^2) E = F,
+     *      F = enE - grad Pe + (rho_e eta)_eff J,   eps = m_e'/(mu0 e),
+     *  whose RHS is division-free (every term ~ density moments), so the
+     *  vacuum limit is Laplace's equation -- no floor, no eta_vac ramp,
+     *  no pedestal needed for the FIELD solve. Solved with
+     *  warm-started Jacobi sweeps per B-substep stage (lock-step;
+     *  the operator is diagonally dominant where d_e < dx). SECTOR
+     *  CAVEAT: the true inertia screening operator is PURE CURL-CURL
+     *  (dJe/dt = -curlcurl E/mu0 - dJi/dt) and annihilates the
+     *  longitudinal field identically; this component-wise grad^2 form
+     *  (Amano Eq (14), div E ~ 0) spuriously screens E_L -- invisible
+     *  for 1D transverse modes, but in 2D/3D it damps the
+     *  grad-Pe-driven longitudinal field at density-contrast edges.
+     *  Multi-D users of the jacobi form should prefer a curl-curl
+     *  operator (which passes E_L through untouched); the relax form
+     *  below has no grad^2 and is unaffected. m_e' is the Eq-(27)
+     *  variable electron mass evaluated at the CURRENT substep dt
+     *  (published in m_gol_dt_sub by the substep loop), so subcycling
+     *  directly reduces the artificial inertia. gol_vacuum_gamma_frac
+     *  arms the Eq-(30) vacuum-resistivity-as-LOCAL-DAMPING term
+     *  (gamma_max = frac/dt): in the GOL form vacuum current decays
+     *  exponentially with NO diffusion CFL. v1: collocated Cartesian
+     *  only. Inputs: hybrid_pic_model.esolve = ohm|gol, gol_sweeps,
+     *  gol_cfl_alpha, gol_n_min [m^-3, the one-count level],
+     *  gol_vacuum_gamma_frac. */
+    bool m_esolve_gol = false;
+    int  m_gol_sweeps = 4;
+    amrex::Real m_gol_alpha = 0.5;
+    amrex::Real m_gol_n_min = 0.0;
+    amrex::Real m_gol_vac_gamma_frac = 0.0;
+    /** Current B-substep dt, published for the Eq-(27) mass evaluation.
+     *  Mutable: set inside the const substep loop; 0 -> full-step dt. */
+    mutable amrex::Real m_gol_dt_sub = 0.0;
+
+    /** Amano-form advance (how the screened equation is treated).
+     *  0 = jacobi: the screened elliptic solve above,
+     *  warm-started stationary sweeps -- converges only where plasma
+     *  makes the operator diagonally dominant; across wide vacuum gaps
+     *  the Laplace limit is irreducibly elliptic (measured: per-sweep
+     *  contraction 0.991 over an 85-cell gap, error ~ sweeps^-1.3).
+     *  1 = relax: the semi-implicit E/J_e relaxation of Angus, Dorf &
+     *  Geyko (PoP 26, 072505 (2019) Sec. V.A; Harned & Mikic JCP 83, 1
+     *  (1989) lineage): J_e is kept as a persistent dynamical field
+     *  ("hybrid_gol_je_fp", division-free electron momentum with the
+     *  stiff local terms -- E coupling, gyration, friction -- solved
+     *  pointwise implicitly, closed form) and E advances by
+     *  Ampere-Maxwell with displacement current at the CFL-set
+     *  artificial light speed c_art = min(c, gol_c_frac/(dt_sub
+     *  sqrt(sum dx_i^-2))). The elliptic vacuum continuation is then
+     *  paid in RETARDATION (waves cross the gap at c_art, ~1 cell per
+     *  substep) instead of iterations: ballistic O(N_gap) information
+     *  transport per step vs the diffusive O(N_gap^2) of stationary
+     *  sweeps. Steady state recovers generalized Ohm + Ampere exactly.
+     *  State advances ONLY on solve_for_Faraday calls (once per
+     *  substep); non-Faraday calls return the current state. Inputs:
+     *  gol_form = jacobi|relax, gol_c_frac (default 0.5).
+     *  THIS FORK: only the relax form is ported (default 1 = relax,
+     *  a deliberate deviation from the source default); gol_form =
+     *  jacobi aborts at parse. */
+    int m_gol_form = 1;
+    amrex::Real m_gol_c_frac = 0.5;
+    /** Absolute ceiling on the relax form's artificial light speed
+     *  [m/s]. The CFL formula alone saturates at the REAL c when
+     *  dt_sub is small relative to dx (measured on a compression
+     *  slab: 256 substeps put the CFL value above c), and at real c
+     *  the artificial permittivity is the real eps0 -- every
+     *  substep's deposition shot noise then kicks an undamped
+     *  light-branch bath that grows exponentially-slowly (~11x per
+     *  400 steps measured, backend-independent) until particles
+     *  over-jump cells and deposition faults. c_art only needs to
+     *  exceed the fastest RESOLVED signal (electron-Alfven /
+     *  grid-whistler scale) with margin; the E-per-noise response
+     *  falls as c_art^2. 0 = no ceiling (legacy min(c, CFL)).
+     *  Input: gol_c_max. */
+    amrex::Real m_gol_c_max = 0.0;
+    /** Quasineutral relaxation rate of the relax form, as a fraction
+     *  of 1/dt (gamma_qn = gol_qn_frac/dt, applied implicitly per
+     *  substep, plasma-blended: full above the one-count density,
+     *  off below it). WHY: the E-form hybrid never evolves the
+     *  longitudinal field -- quasineutrality is imposed
+     *  algebraically -- but the relax form integrates charge
+     *  separation honestly against kinetic ions pushed explicitly at
+     *  an unresolvable omega_pi dt >> 1: the ion-Langmuir loop pumps
+     *  E_L into a slowly growing bath (measured ~10x per 400 steps,
+     *  c_art-INDEPENDENT, with B and Te cold -- the longitudinal
+     *  signature). Fix per the Hewett-Nielson split: transverse
+     *  dynamics ride free (the inertia-limited whistler ceiling
+     *  omega_ce dt >> gamma_qn dt = O(1) is far above the relaxation)
+     *  while E relaxes toward the one-count-guarded generalized-Ohm
+     *  value, pinning the slow/longitudinal sector algebraically
+     *  without any projection or elliptic machinery. In vacuum the
+     *  blend is zero and the wave physics is untouched. Default 1;
+     *  0 = off (the unstable honest-E_L dynamics, for study).
+     *  NOTE: the blended generalized-Ohm target retains a
+     *  one-count-floored density division -- the core Ampere-Maxwell
+     *  update is division-free, the OPTIONAL qn pin is not (its tanh
+     *  weight is ~0.018 at rho = 0, not 0). Set gol_qn_frac = 0 for
+     *  a strictly division-free solve, at the documented cost of the
+     *  longitudinal bath. Input: gol_qn_frac. */
+    amrex::Real m_gol_qn_frac = 1.0;
+    /** Marder divergence cleaning of the relax form's E, restricted to
+     *  the vacuum side of the one-count blend (complement of the qn
+     *  blend): dE/dt += d_M grad(div E), d_M = frac/(2 dt_sub
+     *  sum(dx_i^-2)) (the explicit diffusion CFL). WHY: the reproducer
+     *  localized the residual E bath to the LONGITUDINAL field in the
+     *  vacuum gap -- electrostatic noise from unresolved edge
+     *  charge-separation accumulating where both the qn relaxation
+     *  (plasma-only) and the Eq-30 current damping (acts on J_e, not
+     *  E) are silent. Marder cleaning diffuses divergence noise while
+     *  the PHYSICAL vacuum continuation is exactly in its kernel
+     *  (harmonic fields have div E = 0) and transverse waves are
+     *  untouched -- gap tracking is preserved by construction. Local
+     *  stencil, no projection, no elliptic machinery. Default 0.5;
+     *  0 = off. Input: gol_div_clean_frac. */
+    amrex::Real m_gol_div_clean_frac = 0.5;
+    /** Amano Eq-(27) variable electron mass in the RELAX advance
+     *  (default on). The relax form's true-m_e J_e dynamics carry the
+     *  grid-whistler branch honestly, and the frozen-field split has
+     *  an explicit stability edge in the control variable B^2/n at a
+     *  dt_sub-scaled bound -- measured on the compression slab as a
+     *  deterministic threshold (three arms; ignition at the
+     *  floor-density band, correlate on the near-vacuum reservoir)
+     *  with a finite-time blow-up past it. Per-cell inflation
+     *  m_e' = max(m_e, B^2 q_e/(mu0 rho_g) (dt_sub/(2 alpha dx))^2)
+     *  (the shared GolEffectiveElectronMass helper, alpha =
+     *  gol_cfl_alpha, rho_g one-count-guarded) slows exactly the
+     *  cells whose grid-whistler speed would violate the substep CFL
+     *  and is INERT wherever the physics is resolved (max with the
+     *  true m_e -- the dispersion gates measure the physical branch
+     *  unchanged). Applies to every 1/m_e in the J_e update: E
+     *  coupling, gyration, friction, grad-Pe. 0 = true m_e (the
+     *  measured-unstable configuration, for study). KNOWN LIMIT
+     *  (separate from the whistler edge, alpha- and mass-cap-
+     *  insensitive): at very coarse substep counts the split itself
+     *  destabilizes -- measured onset on the 1D slab-gap deck at
+     *  substeps 8/16/24 dying in 17/221/382 steps, while 40+ (every
+     *  production configuration) is stable across the full campaign.
+     *  Keep substeps at the whistler-resolving counts the adaptive
+     *  E-form runs already selected (O(100+) on compression decks).
+     *  Input: gol_var_mass. */
+    bool m_gol_var_mass = true;
+    /** Lazy one-time J_e seed from the Ampere closure (J_plasma - J_i)
+     *  on the first relax call. Mutable: set inside the const solve.
+     *  NOTE: single flag -- multi-level relax untested in v1. */
+    mutable bool m_gol_je_init = false;
+    /** Relax-form advance gate. The RK substep STAGES call the E solve
+     *  4-6x per substep with intermediate B states; a stateful update
+     *  there would over-advance (and a rejected adaptive substep could
+     *  not roll the E/J_e state back). So under gol_form = relax every
+     *  ordinary solve call returns immediately (the stages read the
+     *  frozen E state -- frozen-E/frozen-B splitting, FDTD-leapfrog
+     *  class) and BfieldEvolve raises this gate to advance (E, J_e)
+     *  exactly once per ACCEPTED substep against the updated B.
+     *  Mutable: toggled inside the const substep loop. */
+    mutable bool m_gol_relax_advance = false;
+    /** Time centering of the relax form's frozen-E/frozen-B split
+     *  (default on). The legacy (Lie) sequencing per substep is
+     *  B^{n+1} = B^n - dt curl E^n followed by the (E, J_e) advance
+     *  against B^{n+1}: each operator samples the other a full
+     *  substep off-center (B sees stale E, the electron advance sees
+     *  future B), the first-order splitting error class the
+     *  Harned-Mikic stability analysis flags for the whistler branch
+     *  at coarse omega dt. Centered (Strang) sequencing symmetrizes
+     *  both couplings at zero extra solves: a half Faraday push with
+     *  E^n, the full-dt (E, J_e) advance against the HALF-LEVEL B
+     *  and its Ampere current, then a half Faraday push with the
+     *  updated E -- B integrates the time-centered average of E and
+     *  the electron advance reads time-centered B. MEASURED: the
+     *  dispersion gates are unchanged (whistler inertia branch to
+     *  the same 0.7%), and the coarse-substep floor (see the
+     *  gol_var_mass known limit) is INVARIANT under centering --
+     *  slab-gap deaths at substeps 8/16/24 land within 3 steps of
+     *  the Lie split's at every rung, so that floor is a property of
+     *  the coarse-dt_sub (E, J_e) relax dynamics themselves, not of
+     *  the split's time centering. The DEATH MODE at that floor does
+     *  differ: the Lie split diverges through NaN and takes the
+     *  designed substep assert, while the centered split can blow up
+     *  huge-but-finite -- particles then leave the domain by O(100)
+     *  cells in one step and the crash surfaces as an out-of-bounds
+     *  gather/deposition access (bounds-check verified) instead of
+     *  the assert. Both are the same upstream instability in an
+     *  already-fatal regime. 0 = the legacy Lie split.
+     *  Input: gol_centered_split. */
+    bool m_gol_centered_split = true;
+
+    /** Amano Eq (27) effective electron mass, multiplied through by m_i
+     *  (the ion mass cancels): m_e' = max(m_e, B^2 q_e/(mu0 rho_e) *
+     *  (dt/(2 alpha dx))^2), which pins the electron-Alfven phase
+     *  velocity at the local CFL. Shared helper by design -- the
+     *  implicit path consumes the same formula (keep callable, do not
+     *  inline into loops). rho_e must be guarded positive by the caller
+     *  (one-count level). */
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    static amrex::Real GolEffectiveElectronMass (
+        amrex::Real const B2, amrex::Real const rho_e_guarded,
+        amrex::Real const dt, amrex::Real const dx_min,
+        amrex::Real const alpha)
+    {
+        amrex::Real const va2_me =
+            B2 * PhysConst::q_e / (PhysConst::mu0 * rho_e_guarded);
+        amrex::Real const s = dt / (amrex::Real(2.0) * alpha * dx_min);
+        // local copy: amrex::max binds const references and the
+        // namespace constexpr has no device definition (nvcc ODR-use)
+        amrex::Real const m_e_v = PhysConst::m_e;
+        return amrex::max(m_e_v, va2_me * s * s);
+    }
+
     /** Electron temperature: read from the input in eV, converted to
      * k_B T_e in J at the end of ReadParameters. */
     amrex::Real m_elec_temp;

@@ -527,6 +527,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     int lev, HybridPICModel const* hybrid_model,
     const bool solve_for_Faraday )
 {
+    // Port guard (belt to the parse-time abort): this cylindrical path
+    // computes the legacy divided-Ohm E only. If the GOL selection ever
+    // reaches here half-wired, fail loudly rather than silently solving
+    // the wrong form.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!hybrid_model->m_esolve_gol,
+        "GOL/relax E-solve not yet wired on this fork's RZ path (port "
+        "in progress); the legacy divided Ohm solve would silently run.");
+
     // Both steps below do not currently support m > 0 and should be
     // modified if such support wants to be added
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(

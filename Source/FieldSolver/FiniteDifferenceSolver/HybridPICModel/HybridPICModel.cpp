@@ -151,6 +151,79 @@ void HybridPICModel::ReadParameters ()
     if (m_add_external_fields) {
         m_external_vector_potential = std::make_unique<ExternalVectorPotential>();
     }
+
+    // Generalized-Ohm's-law (GOL) E solve form (see member doc).
+    // Terminology: both paths solve the generalized Ohm's law; the
+    // distinction is the FORM. "e_form" (alias "ohm") = the legacy
+    // algebraic solve for E with its density division; "amano_form"
+    // (alias "gol") = the inertia-screened division-free form of
+    // Amano 2014 / Hewett-Nielson 1978.
+    {
+        std::string esolve = "e_form";
+        pp_hybrid.query("esolve", esolve);
+        if (esolve == "amano_form" || esolve == "gol") {
+            m_esolve_gol = true;
+        } else {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                esolve == "e_form" || esolve == "ohm",
+                "hybrid_pic_model.esolve must be 'e_form' (alias 'ohm') "
+                "or 'amano_form' (alias 'gol')");
+        }
+        // Port guard: foundations only (helper, inputs, field, guards).
+        // The relax solve kernel and its substep-loop integration land
+        // next; until then the selection must fail LOUDLY here -- the
+        // solve dispatch would otherwise silently run the legacy
+        // divided Ohm form against gol expectations.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_esolve_gol,
+            "hybrid_pic_model.esolve = gol: the GOL/relax E-solve is "
+            "not yet wired on this fork's RZ path (port in progress); "
+            "the legacy divided Ohm solve would silently run. Use the "
+            "default esolve = e_form until the port lands.");
+        pp_hybrid.query("gol_sweeps", m_gol_sweeps);
+        utils::parser::queryWithParser(pp_hybrid, "gol_cfl_alpha", m_gol_alpha);
+        utils::parser::queryWithParser(pp_hybrid, "gol_n_min", m_gol_n_min);
+        utils::parser::queryWithParser(pp_hybrid, "gol_vacuum_gamma_frac",
+                                       m_gol_vac_gamma_frac);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_esolve_gol ||
+                (m_gol_n_min > 0.0_rt && m_gol_sweeps >= 1 &&
+                 m_gol_alpha > 0.0_rt),
+            "hybrid_pic_model.esolve = gol requires gol_n_min > 0 (the "
+            "one-count density level), gol_sweeps >= 1 and "
+            "gol_cfl_alpha > 0");
+        // This fork ports the relax form only (see the m_gol_form
+        // member doc): relax is the default here, and an explicit
+        // jacobi selection aborts rather than running unported code.
+        std::string gol_form = "relax";
+        pp_hybrid.query("gol_form", gol_form);
+        if (gol_form == "relax") { m_gol_form = 1; }
+        else {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(gol_form != "jacobi",
+                "hybrid_pic_model.gol_form = jacobi is not ported on "
+                "this fork; use relax");
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(false,
+                "hybrid_pic_model.gol_form must be 'relax' ('jacobi' "
+                "is not ported on this fork)");
+        }
+        utils::parser::queryWithParser(pp_hybrid, "gol_c_frac", m_gol_c_frac);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_gol_form == 0 ||
+                (m_gol_c_frac > 0.0_rt && m_gol_c_frac <= 1.0_rt),
+            "hybrid_pic_model.gol_c_frac must be in (0, 1]");
+        utils::parser::queryWithParser(pp_hybrid, "gol_c_max", m_gol_c_max);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_gol_c_max >= 0.0_rt,
+            "hybrid_pic_model.gol_c_max cannot be negative");
+        utils::parser::queryWithParser(pp_hybrid, "gol_qn_frac", m_gol_qn_frac);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_gol_qn_frac >= 0.0_rt,
+            "hybrid_pic_model.gol_qn_frac cannot be negative");
+        utils::parser::queryWithParser(pp_hybrid, "gol_div_clean_frac",
+                                       m_gol_div_clean_frac);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_gol_div_clean_frac >= 0.0_rt && m_gol_div_clean_frac <= 1.0_rt,
+            "hybrid_pic_model.gol_div_clean_frac must be in [0, 1]");
+        pp_hybrid.query("gol_var_mass", m_gol_var_mass);
+        pp_hybrid.query("gol_centered_split", m_gol_centered_split);
+    }
 }
 
 void HybridPICModel::AllocateLevelMFs (
@@ -245,6 +318,18 @@ void HybridPICModel::AllocateLevelMFs (
     fields.alloc_init(FieldType::hybrid_current_fp_plasma, Direction{2},
         lev, amrex::convert(ba, jz_nodal_flag),
         dm, ncomps, ngJ, 0.0_rt);
+
+    // Persistent electron-current state for the GOL relaxation form
+    // (esolve = gol, gol_form = relax): J_e evolves semi-implicitly in
+    // lock-step with the B substeps instead of being eliminated into
+    // the screened E solve. Pointwise use only (no stencil reads J_e)
+    // -- no ghosts. Collocated-only (asserted at solve time), so all
+    // three components live on the all-nodal staggering.
+    if (m_esolve_gol && m_gol_form == 1) {
+        fields.alloc_init("hybrid_gol_je_fp", lev,
+            amrex::convert(ba, amrex::IntVect::TheNodeVector()),
+            dm, 3, amrex::IntVect(0), 0.0_rt);
+    }
 
     // Per-species charge densities - one per charged species, deposited
     // from particles and accumulated into the global rho_fp. Only
@@ -1815,6 +1900,19 @@ void HybridPICModel::BfieldEvolve (
     IntVect ng, std::optional<bool> nodal_sync )
 {
     bool use_rkf45 = DoRKF45(step);
+    // GOL relax integration contract (see the m_gol_relax_advance
+    // member doc): under the frozen-E/frozen-B split the B push within
+    // a substep is LINEAR, so the RKF45 embedded error estimator
+    // measures nothing -- and a rejected adaptive substep could not
+    // roll the persistent (E, J_e) state back. The relax form requires
+    // the fixed-step RK4 substep path.
+    bool const gol_relax = (m_esolve_gol && m_gol_form == 1);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!(gol_relax && use_rkf45),
+        "hybrid_pic_model.esolve = gol (relax form) requires the "
+        "fixed-step RK4 substep path: under the frozen-E/frozen-B "
+        "split the RKF45 error estimator sees a linear B push and is "
+        "meaningless, and a rejected substep cannot roll back the "
+        "(E, J_e) state. Disable use_rkf45.");
     // Make copies of the current B-field multifabs (at t = n) since the
     // starting B-field is needed for the integration logic.
     // We also store the initial B-field from the start of this integration step
@@ -1905,6 +2003,11 @@ void HybridPICModel::BfieldEvolve (
                     ablastr::warn_manager::WarnPriority::medium);
 
                 // restart this full step and this time use RKF45
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!gol_relax,
+                    "The RK4 NaN-recovery restart cannot switch to "
+                    "RKF45 under the GOL relax form: the (E, J_e) "
+                    "state advanced by earlier accepted substeps "
+                    "cannot be rolled back.");
                 t = 0._rt;
                 n_accepted = 0;
                 // reset B_old to original one
