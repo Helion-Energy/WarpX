@@ -20,3 +20,13 @@ add_warpx_test(
     "analysis_default_regression.py --path diags/diag1000010"  # checksum
     OFF  # dependency
 )
+
+add_warpx_test(
+    test_rz_subcycled_gyro_ring  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_subcycled_gyro_ring  # inputs
+    "analysis_gyro_ring_rz.py diags/diag1000010"  # analysis
+    "analysis_default_regression.py --path diags/diag1000010"  # checksum
+    OFF  # dependency
+)

@@ -1,0 +1,78 @@
+# Subcycled particle push with orbit-averaged deposition: RZ gyro-ring test
+#
+# The RZ twin of the 2D gyro-ring test. A single alpha particle gyrates in a
+# uniform AXIAL field B = B_z about a gyrocenter ON THE AXIS: the orbit is a
+# circle of radius r_L centered on r = 0, so in RZ coordinates the particle
+# sits at constant radius r = r_L with purely azimuthal velocity. Ten global
+# steps cover exactly one gyroperiod. The orbit-averaged deposits then probe
+# exactly the RZ-specific machinery of the SubcycledParticleContainer:
+#   - the inverse-volume scaling of the orbit-averaged charge and current
+#     (per-step deposited charge must integrate to exactly q*w over
+#     dV = 2 pi r dr dz),
+#   - the azimuthal decomposition of the deposited current (the ring current
+#     is purely j_theta with signed integral q*w*v_theta; j_r and j_z vanish),
+#   - the ring geometry (charge annulus at r = r_L, motionless in z).
+#
+# Parameters match the 2D test: B = 1 T (axial), v = 1e6 m/s, alpha particle:
+#   omega_c = q B / m  = 4.82249e7 rad/s
+#   T_gyro  = 2 pi / omega_c = 1.302859e-7 s
+#   r_L     = m v / (q B) = 2.073645e-2 m
+# With B = +z and q > 0, launching from (x, y) = (r_L, 0) with u = -v y_hat
+# gives clockwise gyration (viewed from +z) about the axis through r_L.
+
+max_step = 10
+warpx.const_dt = 1.302859e-8
+warpx.serialize_initial_conditions = 1
+warpx.verbose = 1
+
+amr.n_cell = 128 128
+amr.max_grid_size = 64
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 -0.05
+geometry.prob_hi = 0.1  0.05
+
+boundary.field_lo = none periodic
+boundary.field_hi = pec periodic
+
+# Hybrid (Ohm's law) field solver with an exactly inert field advance: the
+# density floor is set above any deposited density and the Holmstrom vacuum
+# treatment zeroes E in below-floor cells, so E = 0 identically, B stays at
+# its uniform initial value, and the alpha undergoes textbook gyration while
+# its orbit-averaged moments are deposited.
+algo.maxwell_solver = hybrid
+algo.particle_shape = 1
+hybrid_pic_model.elec_temp = 1.0
+hybrid_pic_model.gamma = 1.0
+hybrid_pic_model.n_floor = 1.0e30
+hybrid_pic_model.holmstrom_vacuum_region = 1
+
+# Uniform initial axial magnetic field
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 1.0
+
+particles.species_names = alpha
+
+alpha.species_type = helium4
+alpha.charge = 3.20435324e-19
+alpha.mass = 6.64465751e-27
+alpha.injection_style = singleparticle
+# Start at (x, y, z) = (r_L, 0, 0), moving in -y: with B = +z the orbit is a
+# circle of radius r_L centered on the axis, i.e. r(t) = r_L identically.
+alpha.single_particle_pos = 2.073645e-2 0.0 0.0
+# proper velocity u/c = gamma*v/c with v = 1e6 m/s
+alpha.single_particle_u = 0.0 -3.335640952e-3 0.0
+alpha.single_particle_weight = 1.0e6
+
+# Subcycled push with orbit-averaged deposition
+alpha.do_subcycled_push = 1
+alpha.subcycling_cfl_cyclotron = 0.1
+alpha.subcycling_cfl_grid = 0.4
+alpha.do_orbit_averaged_deposition = 1
+
+diagnostics.diags_names = diag1
+diag1.intervals = 1
+diag1.diag_type = Full
+diag1.fields_to_plot = rho jr jt jz Br Bt Bz
