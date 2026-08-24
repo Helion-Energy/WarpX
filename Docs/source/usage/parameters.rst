@@ -4110,10 +4110,26 @@ Maxwell solver: kinetic-fluid hybrid
     electron-ion thermal-equilibration exchange :math:`Q_{ei} = \sum_s 3 n_s k_B \nu_{ei} (T_e - T_{i,s})`
     as a sink on the electron fluid, paired with matching (energy-conserving) heating of the ion
     macro-particles. The required shape-aware ion temperature deposition
-    (``<species>.do_temperature_deposition``) is enabled automatically on every charged species.
+    (``<species>.do_temperature_deposition``) is enabled automatically on every charged species not
+    listed in :pp:param:`hybrid_pic_model.electron_ion_relaxation_excluded_species`.
     The expression can depend on the total charge density ``rho`` (:math:`C/m^3`), the electron and ion
     temperatures ``Te`` and ``Ti`` (both in eV) and the time ``t`` (:math:`s`), which permits, e.g., the
     NRL-formulary Spitzer rate.
+
+.. pp:param:: hybrid_pic_model.electron_ion_relaxation_excluded_species
+    :type: list of ``str``
+    :optional:
+
+    Space-separated list of species names excluded from the electron-ion relaxation exchange. A fast
+    non-thermal species (e.g. fusion products) carries a velocity spread whose deposited "temperature"
+    is not a temperature, and the relaxation would drag :math:`T_e` toward it. Excluded species do not
+    enter the electron-side :math:`Q_{ei}` sink, receive no ion-side heating kicks, and are skipped by
+    the automatic ``do_temperature_deposition`` arming (setting
+    ``<species>.do_temperature_deposition = 1`` explicitly still enables the deposit itself). Their
+    charge density still counts in the species-fraction denominators, so the remaining species exchange
+    with their physical weights. Every listed name must be a defined particle species. When the Joule
+    redirect or the :math:`T_e` shunt is active, energy staged for an excluded species is declined
+    rather than delivered.
 
 .. pp:param:: hybrid_pic_model.J[x/y/z]_external_grid_function(x,y,z,t)
     :type: ``float`` or ``str``

@@ -38,6 +38,8 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <string>
+#include <vector>
 
 class PoissonBoundaryHandler;
 
@@ -1258,6 +1260,22 @@ public:
     std::string m_nu_ei_expression = "0.0";
     std::unique_ptr<amrex::Parser> m_nu_ei_parser;
     amrex::ParserExecutor<4> m_nu_ei;
+
+    /** Species excluded from the Q_ei exchange, input
+     * electron_ion_relaxation_excluded_species (space-separated species
+     * names, validated at input parsing). A fast non-thermal species'
+     * deposited 'temperature' is a drift artifact, not a temperature, and
+     * the relaxation would drag T_e toward it. Excluded species are skipped
+     * by the electron-side sink, the T_i deposit build, the ion-side OU
+     * heating operator (their redirect/shunt component is declined, not
+     * delivered) and the automatic do_temperature_deposition arming at
+     * species construction. Their charge still counts in the species-
+     * fraction denominators: the excluded share simply does not relax. */
+    std::vector<std::string> m_relaxation_excluded_species;
+
+    /** True when species_name is listed in
+     * m_relaxation_excluded_species. */
+    [[nodiscard]] bool IsRelaxationExcluded (std::string const & species_name) const;
 
     /** Ito-process tensor thermal conduction on T_e (Thrust C):
      *   dU_e/dt += div(kappa grad T_e),

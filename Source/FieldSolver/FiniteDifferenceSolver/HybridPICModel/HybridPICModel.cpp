@@ -33,6 +33,7 @@
 
 #include <AMReX_Random.H>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <iomanip>
@@ -621,6 +622,15 @@ void HybridPICModel::ReadParameters ()
     m_include_temperature_relaxation =
         pp_hybrid.query("electron_ion_relaxation_rate(rho,Te,Ti,t)", m_nu_ei_expression);
 
+    // Per-species exclusion from the Q_ei exchange: a fast non-thermal
+    // species' deposited 'temperature' is a drift artifact, not a
+    // temperature, and the relaxation would drag T_e toward it. Excluded
+    // species are skipped by the electron-side sink, the ion-side heating
+    // operator and the automatic do_temperature_deposition arming.
+    // Validated against the defined species names below.
+    pp_hybrid.queryarr("electron_ion_relaxation_excluded_species",
+                       m_relaxation_excluded_species);
+
     // Determine, from the input deck alone, which optional per-species
     // machinery is needed (the particle containers do not exist yet at
     // parameter-parse time, but the species names are available):
@@ -635,6 +645,18 @@ void HybridPICModel::ReadParameters ()
         std::vector<std::string> species_names;
         const ParmParse pp_particles("particles");
         pp_particles.queryarr("species_names", species_names);
+
+        // Define-time validation of the relaxation exclusion list: every
+        // listed name must be a defined particle species.
+        for (auto const & excluded_name : m_relaxation_excluded_species) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                std::find(species_names.begin(), species_names.end(),
+                          excluded_name) != species_names.end(),
+                "hybrid_pic_model.electron_ion_relaxation_excluded_species "
+                "lists '" + excluded_name + "', which is not a defined "
+                "particle species (see particles.species_names).");
+        }
+
         for (auto const & spec_name : species_names) {
             std::string expr;
             if (pp_hybrid.query(
@@ -991,6 +1013,16 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
     m_nu_ei_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(m_nu_ei_expression, {"rho","Te","Ti","t"}));
     m_nu_ei = m_nu_ei_parser->compile<4>();
+
+    if (m_include_temperature_relaxation &&
+        !m_relaxation_excluded_species.empty()) {
+        std::string excluded_list;
+        for (auto const & nm : m_relaxation_excluded_species) {
+            excluded_list += " " + nm;
+        }
+        amrex::Print() << "[qdsmc] e-i relaxation excluded species:"
+            << excluded_list << "\n";
+    }
 
     // Thermal conductivities kappa(n [m^-3], Te [eV], t [s]) in W/(m K) for
     // the Ito conduction substep (chi = kappa / (3/2 n_e k_B)).
@@ -3955,6 +3987,14 @@ void HybridPICModel::QDSMCShuntTeExcess (int const lev,
 }
 
 
+bool HybridPICModel::IsRelaxationExcluded (std::string const & species_name) const
+{
+    return std::find(m_relaxation_excluded_species.begin(),
+                     m_relaxation_excluded_species.end(),
+                     species_name) != m_relaxation_excluded_species.end();
+}
+
+
 void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real const dt,
     std::map<std::string, amrex::MultiFab*> const & Ti_dep_by_species) const
 {
@@ -4017,6 +4057,11 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
     for (auto const & spec_name : species_names) {
         auto & pc = mypc.GetParticleContainerFromName(spec_name);
         if (pc.getCharge() == 0._prt) { continue; }
+        // Excluded species neither cool T_e nor appear in Ti_dep_by_species
+        // (their charge still counts in rhos_sum: the species-fraction split
+        // is over the full charge density, the excluded share just does not
+        // relax).
+        if (IsRelaxationExcluded(spec_name)) { continue; }
         amrex::Real const Z_s = pc.getCharge() / PhysConst::q_e;
 
         amrex::MultiFab const & rho_s = *warpx.m_fields.get("rho_fp_" + spec_name, lev);
@@ -4158,6 +4203,12 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
         auto & pc = mypc.GetParticleContainerFromName(spec_name);
         if (pc.getCharge() == 0._prt) { continue; }
         ++ion_comp;
+        // Excluded species receive no OU update at all (the drag leg toward
+        // u_e would decimate a fast non-thermal distribution). Skipped AFTER
+        // the component increment so the redirect_E component alignment is
+        // preserved; any redirect/shunt energy staged in this species'
+        // component is declined (not delivered).
+        if (IsRelaxationExcluded(spec_name)) { continue; }
         auto const m_i = pc.getMass();
         if (m_i <= 0._prt) { continue; }
 
@@ -4936,6 +4987,9 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
         for (auto const & nm : mpc_ti.GetSpeciesNames()) {
             auto & pc = mpc_ti.GetParticleContainerFromName(nm);
             if (pc.getCharge() == 0._prt) { continue; }
+            // Excluded species have no auto-armed temperature deposit and
+            // take no part in the exchange -- no T_i entry is built.
+            if (IsRelaxationExcluded(nm)) { continue; }
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(pc.getTemperatureDepositionFlag(),
                 "The Q_ei temperature relaxation requires do_temperature_deposition "
                 "on every charged ion species; it is enabled automatically at species "
@@ -9227,6 +9281,9 @@ void HybridPICModel::QDSMCBuildTiDeposits (int const lev,
     for (auto const & nm : mpc_ti.GetSpeciesNames()) {
         auto & pc = mpc_ti.GetParticleContainerFromName(nm);
         if (pc.getCharge() == 0._prt) { continue; }
+        // Excluded species have no auto-armed temperature deposit and take
+        // no part in the exchange -- no T_i entry is built.
+        if (IsRelaxationExcluded(nm)) { continue; }
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(pc.getTemperatureDepositionFlag(),
             "QDSMC include_temperature_relaxation requires the ion species to set "
             "do_temperature_deposition = 1 (for shape-consistent T_i).");
