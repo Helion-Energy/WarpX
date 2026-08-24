@@ -4240,6 +4240,37 @@ Maxwell solver: kinetic-fluid hybrid
     ``jacobian.pc_type = pc_block_banded`` in RZ, or ``pc_curl_curl_mlmg`` (which switches
     automatically to the divided inertia operator with this form) elsewhere.
 
+.. pp:param:: hybrid_pic_model.esolve
+    :type: ``string``
+    :default: ``e_form``
+    :optional:
+
+    Form of the generalized Ohm's law solve. ``e_form`` (default) is the legacy algebraic
+    solve: every term is divided by the (floored) density, so a density pedestal
+    (``n_floor``) regularizes depleted regions and the fields there follow the floored
+    vacuum branch. ``amano_form`` is the division-free multiplied-through solve (Amano,
+    J. Comput. Phys. **275**, 197 (2014); the transverse Darwin solve of Hewett & Nielson,
+    J. Comput. Phys. **29**, 219 (1978)): the equation is multiplied by :math:`en` and the
+    :math:`\partial\mathbf{J}_e/\partial t` leg's dependence on :math:`\mathbf{E}` becomes
+    the elliptic operator :math:`(\mu_0 e^2 n(\mathbf{x})/m_e +
+    \nabla\times\nabla\times)\,\mathbf{E} = \mu_0 (e/m_e)\,\mathrm{num}` with the
+    **unfloored** density — no pedestal exists anywhere in the E assembly, and depleted
+    regions are regularized by the electron-inertia screening instead (:math:`d_e \to
+    \infty` as :math:`n \to 0`). The measured part of :math:`\partial\mathbf{J}_e/\partial
+    t` is differenced against the step-start plasma current
+    (:math:`\nabla\times\mathbf{B}^n/\mu_0`), which keeps the iterate's curl-curl content
+    on the operator side of the solve. Currently implemented in RZ :math:`m = 0`, where
+    the vector Helmholtz system decouples per component: the toroidal (:math:`E_\theta`)
+    sector is a scalar nodal Helmholtz solve and the poloidal (:math:`E_r`, :math:`E_z`)
+    sectors are staggering-native scalar solves, each handled by a Jacobi-preconditioned
+    CG iteration per residual evaluation; the longitudinal (:math:`E_L`) recovery stage
+    follows. Requires
+    ``algo.evolve_scheme = theta_implicit_hybrid`` (the elliptic solve is amortized over
+    the large implicit step) and ``include_electron_inertia = 1`` with
+    ``electron_inertia_djedt_only = 1`` and ``electron_inertia_bdf2 = 0``. With external
+    vector-potential coils the inductive :math:`\mathbf{E}_\mathrm{ext}` subtraction is
+    unconditional on this path (no vacuum branch exists to gate it).
+
 .. pp:param:: hybrid_pic_model.darwin_vacuum_recovery
     :type: ``bool``
     :default: ``false``

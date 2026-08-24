@@ -743,6 +743,45 @@ public:
      *  with the theta-extrapolated iterate Je^{n+1}; the term is zeroed
      *  only where rho <= 0 (density-floored cells keep their inertia --
      *  that is what regularizes the floored-halo response). */
+    /** E-solve form: false = legacy algebraic solve with the floored
+     *  density division ("e_form"); true = the division-free
+     *  multiplied-through solve ("amano_form"): the dJe/dt leg's
+     *  E-dependence becomes the elliptic operator (beta + curl curl) with
+     *  beta = mu0 e^2 n / m_e_eff unfloored, solved per residual
+     *  evaluation (theta-implicit only). Toroidal RZ m=0 sector first. */
+    bool m_esolve_amano = false;
+
+    /** \brief Division-free (amano_form) toroidal E-solve, RZ m = 0.
+     *
+     * Solves the multiplied-through generalized Ohm's law for E_theta:
+     *
+     *     (beta(x) + curlcurl_theta) E_theta = (mu0 e / m_e_eff) num_theta,
+     *
+     * with beta = mu0 e^2 n / m_e_eff evaluated from the UNfloored
+     * midpoint density and curlcurl_theta = -(1/r) d_r (r d_r .) - d_z^2 .
+     * + 1/r^2 (the theta component of the vector curl-curl). The RZ
+     * metric is absorbed into a Cartesian-form nodal ABec operator by
+     * multiplying the equation by r:
+     *
+     *     [r beta + 1/r] E - div( r grad E ) = r * rhs,
+     *
+     * i.e. MLNodeABecLaplacian with nodal acoef = r beta + 1/r (>= 1/r,
+     * never singular; the axis row is a Dirichlet regularity boundary)
+     * and cell-centered bcoef = r. E_theta's RZ Yee staggering is nodal
+     * in (r, z), so the solve operates on the field's native staggering.
+     *
+     * \param[in,out] Etheta   E_theta MultiFab (nodal); solution in place
+     * \param[in]     num      multiplied-through numerator (nodal, no
+     *                         density division anywhere)
+     * \param[in]     rho      charge density (cell-centered) for beta
+     * \param[in]     rho_comp component of rho to use (midpoint)
+     * \param[in]     lev      level (must be 0)
+     */
+    void SolveEThetaAmanoRZ (amrex::MultiFab& Etheta,
+                             amrex::MultiFab const& num,
+                             amrex::MultiFab const& rho,
+                             int rho_comp, int lev) const;
+
     bool m_include_electron_inertia = false;
     amrex::Real m_reduced_electron_mass_ratio = 0.0;
     bool m_electron_inertia_bdf2 = true;
@@ -786,6 +825,40 @@ public:
      *  and cleared by RotateElectronInertiaHistory at the end of the
      *  step, alongside the equally per-step-frozen Je histories. */
     bool m_inertia_rho_n_captured = false;
+
+    /** amano_form scratch (see m_esolve_amano): the step-start plasma
+     *  current (staggered, from curl B_old) and its nodal theta component
+     *  -- the "measured" reference the dJe/dt leg differences against so
+     *  that the current iterate's curl-curl-E content stays on the
+     *  operator side of the solve (differencing against the iterate's own
+     *  B(theta) would cancel the operator at the fixed point and
+     *  degenerate the solve to an unfloored pointwise division). Captured
+     *  once per step (same latch discipline as the frozen rho^n). */
+    std::array<std::unique_ptr<amrex::MultiFab>, 3> m_jp_old_stag;
+    std::unique_ptr<amrex::MultiFab> m_jp_old_nodal;
+    /** amano_form: the division-free measured inertia numerator for the
+     *  toroidal solve, (m_e/e) dJe_meas/dt (nodal, one component). */
+    std::unique_ptr<amrex::MultiFab> m_ei_amano_theta;
+    /** amano_form: the multiplied-through toroidal numerator captured by
+     *  the Ohm kernel (nodal, one component; the elliptic solve's RHS). */
+    std::unique_ptr<amrex::MultiFab> m_num_theta;
+    /** amano_form stage 2: the poloidal numerators on the E_r and E_z
+     *  staggerings (the grad-div-completed vector-Helmholtz RHS). */
+    std::array<std::unique_ptr<amrex::MultiFab>, 2> m_num_pol;
+
+    /** rief amano_form stage 2: staggering-native scalar Helmholtz solve
+     *  for one poloidal component of the grad-div-completed system,
+     *  (beta(x) [+ 1/r^2 for E_r] - lap) E = (mu0 e/m_e) num, RZ metric
+     *  absorbed by multiplying through with the component's staggered r.
+     *  BCs per the PEC-wall physics: E_r (comp 0): axis face natural
+     *  (zero-area), r_hi Neumann (normal free), z Dirichlet-0/periodic;
+     *  E_z (comp 1): axis Neumann (regularity), r_hi Dirichlet 0
+     *  (tangential), z natural/periodic. Jacobi-preconditioned CG. */
+    void SolveEPolAmanoRZ (amrex::MultiFab& E,
+                           amrex::MultiFab const& num,
+                           amrex::MultiFab const& rho,
+                           int rho_comp, int comp, int lev) const;
+    bool m_inertia_jpold_captured = false;
 
     /** Assemble E_inertial on the nodal scratch "hybrid_E_inertial_nodal"
      *  from the current theta-stage state (see m_include_electron_inertia).

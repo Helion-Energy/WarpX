@@ -742,6 +742,19 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         Array4<Real const> const& enE = enE_nodal_mf.const_array(mfi);
         Array4<Real const> eiN;
         if (Ei_nodal_mf) { eiN = Ei_nodal_mf->const_array(mfi); }
+        // amano_form (division-free) toroidal sector: the numerator
+        // capture target and the measured inertia numerator (see
+        // HybridPICModel::SolveEThetaAmanoRZ; both nodal). The arrays stay
+        // default-constructed on the e_form path and gate the kernel
+        // branches.
+        Array4<Real> amano_num, amano_num_r, amano_num_z;
+        Array4<Real const> eiA;
+        if (hybrid_model->m_esolve_amano) {
+            amano_num = hybrid_model->m_num_theta->array(mfi);
+            amano_num_r = hybrid_model->m_num_pol[0]->array(mfi);
+            amano_num_z = hybrid_model->m_num_pol[1]->array(mfi);
+            eiA = hybrid_model->m_ei_amano_theta->const_array(mfi);
+        }
         Array4<Real const> const& rho = rhofield.const_array(mfi);
         Array4<Real const> const& Pe = Pefield.const_array(mfi);
         Array4<Real> const& Br = Bfield[0]->array(mfi);
@@ -794,10 +807,28 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
             [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
 
                 // Skip field update in the embedded boundaries
-                if (update_Er_arr && update_Er_arr(i, j, 0) == 0) { return; }
+                if (update_Er_arr && update_Er_arr(i, j, 0) == 0) {
+                    if (amano_num_r) { amano_num_r(i, j, 0) = 0._rt; }
+                    return;
+                }
 
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Er_stag, coarsen, i, j, 0, 0);
+
+                // amano_form poloidal sector: capture the multiplied-through
+                // numerator (division-free) for the grad-div-completed
+                // vector-Helmholtz solve; Er is zeroed so the resistive
+                // blocks accumulate cleanly for the caller's fold.
+                if (amano_num_r) {
+                    const Real grad_Pe_a =
+                        (!solve_for_Faraday && include_electron_pressure_term) ?
+                        T_Algo::UpwardDr(Pe, coefs_r, n_coefs_r, i, j, 0, 0)
+                        : 0._rt;
+                    const auto enE_ra = Interp(enE, nodal, Er_stag, coarsen, i, j, 0, 0);
+                    amano_num_r(i, j, 0) = enE_ra - grad_Pe_a
+                        + Interp(eiA, nodal, Er_stag, coarsen, i, j, 0, 0);
+                    Er(i, j, 0) = 0._rt;
+                } else {
 
                 if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                     Er(i, j, 0) = 0._rt;
@@ -825,6 +856,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 if (include_electron_inertia) {
                     Er(i, j, 0) += Interp(eiN, nodal, Er_stag, coarsen, i, j, 0, 0);
                 }
+
+                } // end !amano_num_r
 
 
                 // Add resistivity only if E field value is used to update B
@@ -863,7 +896,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields) {
+                if (include_external_fields && !amano_num_r) {
                     const amrex::Real w_ext = subtract_E_ext_everywhere
                         ? 1._rt
                         : HybridExtSubWeight(rho_val, rho_floor, floor_w);
@@ -875,18 +908,37 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
             [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
 
                 // Skip field update in the embedded boundaries
-                if (update_Etheta_arr && update_Etheta_arr(i, j, 0) == 0) { return; }
+                if (update_Etheta_arr && update_Etheta_arr(i, j, 0) == 0) {
+                    if (amano_num) { amano_num(i, j, 0) = 0._rt; }
+                    return;
+                }
 
                 // r on a nodal grid (Etheta is nodal in r)
                 Real const r = rmin + i*dr;
                 // Mode m=0: // Ensure that Etheta remains 0 on axis
                 if (r < 0.5_rt*dr) {
                     Etheta(i, j, 0, 0) = 0.;
+                    if (amano_num) { amano_num(i, j, 0) = 0._rt; }
                     return;
                 }
 
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Etheta_stag, coarsen, i, j, 0, 0);
+
+                // amano_form (division-free) toroidal sector: assemble the
+                // multiplied-through numerator e n E_theta_num = the
+                // (J - J_i) x B numerator plus the measured inertia
+                // numerator (both division-free); Etheta is zeroed so the
+                // resistive/hyper-resistive blocks below accumulate their
+                // E-valued terms cleanly for the caller to fold into the
+                // numerator (times e rho) ahead of the elliptic solve.
+                // No vacuum branch and no floor exist on this path.
+                if (amano_num) {
+                    const auto enE_t = Interp(enE, nodal, Etheta_stag,
+                                              coarsen, i, j, 0, 1);
+                    amano_num(i, j, 0) = enE_t + eiA(i, j, 0, 1);
+                    Etheta(i, j, 0) = 0._rt;
+                } else {
 
                 if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                     Etheta(i, j, 0) = 0._rt;
@@ -911,6 +963,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 if (include_electron_inertia) {
                     Etheta(i, j, 0) += Interp(eiN, nodal, Etheta_stag, coarsen, i, j, 0, 1);
                 }
+
+                } // end !amano_num
 
 
                 // Add resistivity only if E field value is used to update B
@@ -950,7 +1004,10 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields) {
+                if (include_external_fields && !amano_num) {
+                    // amano_form defers the (unconditional) E_ext_theta
+                    // subtraction to after the elliptic solve -- there is
+                    // no vacuum branch to gate on.
                     const amrex::Real w_ext = subtract_E_ext_everywhere
                         ? 1._rt
                         : HybridExtSubWeight(rho_val, rho_floor, floor_w);
@@ -962,10 +1019,26 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
             [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/){
 
                 // Skip field update in the embedded boundaries
-                if (update_Ez_arr && update_Ez_arr(i, j, 0) == 0) { return; }
+                if (update_Ez_arr && update_Ez_arr(i, j, 0) == 0) {
+                    if (amano_num_z) { amano_num_z(i, j, 0) = 0._rt; }
+                    return;
+                }
 
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, 0, 0);
+
+                // amano_form poloidal sector: numerator capture (see the
+                // Er branch).
+                if (amano_num_z) {
+                    const Real grad_Pe_a =
+                        (!solve_for_Faraday && include_electron_pressure_term) ?
+                        T_Algo::UpwardDz(Pe, coefs_z, n_coefs_z, i, j, 0, 0)
+                        : 0._rt;
+                    const auto enE_za = Interp(enE, nodal, Ez_stag, coarsen, i, j, 0, 2);
+                    amano_num_z(i, j, 0) = enE_za - grad_Pe_a
+                        + Interp(eiA, nodal, Ez_stag, coarsen, i, j, 0, 2);
+                    Ez(i, j, 0) = 0._rt;
+                } else {
 
                 if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                     Ez(i, j, 0) = 0._rt;
@@ -993,6 +1066,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 if (include_electron_inertia) {
                     Ez(i, j, 0) += Interp(eiN, nodal, Ez_stag, coarsen, i, j, 0, 2);
                 }
+
+                } // end !amano_num_z
 
 
                 // Add resistivity only if E field value is used to update B
@@ -1037,7 +1112,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields) {
+                if (include_external_fields && !amano_num_z) {
                     const amrex::Real w_ext = subtract_E_ext_everywhere
                         ? 1._rt
                         : HybridExtSubWeight(rho_val, rho_floor, floor_w);

@@ -16,6 +16,7 @@
 
 #include <AMReX_MLEBNodeFDLaplacian.H>
 #include <AMReX_MLMG.H>
+#include <AMReX_MLNodeABecLaplacian.H>
 #include <AMReX_MLNodeTensorLaplacian.H>
 #include <ablastr/warn_manager/WarnManager.H>
 
@@ -30,6 +31,7 @@
 
 #include <AMReX_Random.H>
 
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -160,6 +162,46 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("implicit_push_excludes_resistive_field",
                     m_implicit_push_excludes_resistive_field);
 
+    // E-solve form: "e_form" (default) = the legacy algebraic solve with
+    // the floored density division; "amano_form" = the division-free
+    // multiplied-through solve (Amano, J. Comput. Phys. 275, 197 (2014);
+    // Hewett & Nielson, J. Comput. Phys. 29, 219 (1978)) in which the
+    // dJe/dt leg's dependence on E becomes the elliptic operator
+    // (beta + curl curl) E = beta-scaled numerator, with beta =
+    // mu0 e^2 n / m_e_eff UNfloored -- no density pedestal anywhere in
+    // the E assembly. Currently the toroidal (E_theta) sector in RZ m=0
+    // (a scalar nodal Helmholtz; the poloidal stream-scalar and E_L
+    // recovery stages follow). Requires the theta-implicit hybrid scheme
+    // (the elliptic solve is amortized over the large implicit step; the
+    // explicit advance never runs elliptic solves) and electron inertia
+    // in the djedt_only form (whose derivation this solve shares with
+    // the pc_curl_curl_mlmg hybrid mode).
+    {
+        std::string esolve = "e_form";
+        pp_hybrid.query("esolve", esolve);
+        if (esolve == "amano_form") { m_esolve_amano = true; }
+        else if (esolve != "e_form") {
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.esolve must be 'e_form' or 'amano_form'");
+        }
+        if (m_esolve_amano) {
+#if !defined(WARPX_DIM_RZ)
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.esolve = amano_form is currently "
+                "RZ-only (the toroidal m = 0 sector)");
+#endif
+            std::string scheme;
+            const amrex::ParmParse pp_algo("algo");
+            pp_algo.query("evolve_scheme", scheme);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                scheme == "theta_implicit_hybrid",
+                "hybrid_pic_model.esolve = amano_form requires "
+                "algo.evolve_scheme = theta_implicit_hybrid (the elliptic "
+                "solve is amortized over the large implicit step; the "
+                "explicit advance does not run elliptic solves)");
+        }
+    }
+
     // Electron inertia in the generalized Ohm's law (see the member
     // documentation in HybridPICModel.H).
     pp_hybrid.query("include_electron_inertia", m_include_electron_inertia);
@@ -177,6 +219,16 @@ void HybridPICModel::ReadParameters ()
             "hybrid_pic_model.include_electron_inertia is not supported in "
             "the 1D radial geometries.");
 #endif
+    }
+    if (m_esolve_amano) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_include_electron_inertia && m_electron_inertia_djedt_only
+                && !m_electron_inertia_bdf2,
+            "hybrid_pic_model.esolve = amano_form requires "
+            "include_electron_inertia = 1 with electron_inertia_djedt_only "
+            "= 1 and electron_inertia_bdf2 = 0 (the dJe/dt leg IS the "
+            "elliptic operator; the derivation is shared with the "
+            "pc_curl_curl_mlmg hybrid mode)");
     }
 
     // Darwin (magnetoinductive) field split, consumed by the theta-implicit
@@ -1055,6 +1107,125 @@ void HybridPICModel::HybridPICSolveE (
         *electron_pressure_fp, eb_update_E, lev, this, solve_for_Faraday,
         incl_eta
     );
+
+    // amano_form (division-free) toroidal sector: the kernel above left
+    // the multiplied-through numerator in m_num_theta and only the
+    // E-valued resistive/hyper-resistive accumulations in E_theta. Fold
+    // those into the numerator (times e n, unfloored), solve the
+    // multiplied-through Helmholtz system for E_theta, and apply the
+    // deferred external-field subtraction unconditionally (no vacuum
+    // branch exists on this path).
+    if (m_esolve_amano) {
+        amrex::MultiFab & Etheta = *Efield[1];
+        amrex::MultiFab & num = *m_num_theta;
+        const int mid = rhofield.nComp()/2;
+        // Response-frame source: transform the multiplied-through equation
+        // BEFORE solving, (beta + curlcurl) E_p = rhs - (beta + curlcurl)
+        // E_ext. In-domain curlcurl E_ext = -s'(t) curlcurl A = mu0 J_coil
+        // = 0 exactly (the filaments are outside the domain), so the
+        // transform reduces to subtracting rho(x) E_ext from the numerator
+        // -- division-free, floor-free, and vanishing in vacuum: the
+        // inductive drive pushes electrons only where electrons exist. The
+        // solved field IS the plasma response (the solver-state frame); a
+        // post-solve subtraction would instead force the response to
+        // -E_ext across the vacuum region, where the screened solve
+        // correctly returns ~0 but E_ext is curl-full.
+        amrex::MultiFab const * Et_ext = nullptr;
+        if (m_add_external_fields && !m_external_unified) {
+            Et_ext = warpx.m_fields.get(FieldType::hybrid_E_fp_external,
+                                        ablastr::fields::Direction{1}, lev);
+        }
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (amrex::MFIter mfi(num, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            auto const & n_arr = num.array(mfi);
+            auto const & e_arr = Etheta.const_array(mfi);
+            auto const & r_arr = rhofield.const_array(mfi);
+            amrex::Array4<amrex::Real const> xt;
+            if (Et_ext) { xt = Et_ext->const_array(mfi); }
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                // nodal density from the cell-centered midpoint deposit
+                amrex::Real const rho_n = amrex::max(0.0_rt,
+                    0.25_rt*(r_arr(i, j, k, mid)
+                           + r_arr(i-1, j, k, mid)
+                           + r_arr(i, j-1, k, mid)
+                           + r_arr(i-1, j-1, k, mid)));
+                n_arr(i, j, k) += rho_n * e_arr(i, j, k);
+                if (xt) { n_arr(i, j, k) -= rho_n * xt(i, j, k); }
+            });
+        }
+        SolveEThetaAmanoRZ(Etheta, num, rhofield, mid, lev);
+
+        // Stage 2: the poloidal pair through the grad-div-completed
+        // vector-Helmholtz solves (decoupled per component in RZ m = 0).
+        // Fold the kernel's E-valued resistive accumulations into each
+        // numerator with the staggering-consistent unfloored density,
+        // subtract the (usually zero: A_theta drives have no poloidal
+        // E_ext) response-frame external term, and solve on the native
+        // staggerings.
+        for (int c = 0; c < 2; ++c) {
+            const int dir = (c == 0) ? 0 : 2;
+            amrex::MultiFab & Ec = *Efield[dir];
+            amrex::MultiFab & numc = *m_num_pol[c];
+            amrex::MultiFab const * Ex_ext = nullptr;
+            if (m_add_external_fields && !m_external_unified) {
+                Ex_ext = warpx.m_fields.get(
+                    FieldType::hybrid_E_fp_external,
+                    ablastr::fields::Direction{dir}, lev);
+            }
+            const bool is_er = (c == 0);
+            // Clamp the staggered density average into the cell-centered
+            // domain: boundary-node rows otherwise read unfilled rho
+            // ghosts (the E_z axis node is a LIVE row; the clamp mirrors
+            // SolveEPolAmanoRZ's own coefficient assembly). Periodic z
+            // ghosts ARE validly filled, so the z clamp disarms there.
+            amrex::Box const dom_cc = warpx.Geom(lev).Domain();
+            const int ilo_cc = dom_cc.smallEnd(0);
+            const int ihi_cc = dom_cc.bigEnd(0);
+            const bool z_per_fold = warpx.Geom(lev).isPeriodic(1);
+            const int jlo_cc = z_per_fold
+                ? std::numeric_limits<int>::lowest()/2 : dom_cc.smallEnd(1);
+            const int jhi_cc = z_per_fold
+                ? std::numeric_limits<int>::max()/2 : dom_cc.bigEnd(1);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (amrex::MFIter mfi(numc, TilingIfNotGPU());
+                 mfi.isValid(); ++mfi)
+            {
+                auto const & n_arr = numc.array(mfi);
+                auto const & e_arr = Ec.const_array(mfi);
+                auto const & r_arr = rhofield.const_array(mfi);
+                amrex::Array4<amrex::Real const> xt;
+                if (Ex_ext) { xt = Ex_ext->const_array(mfi); }
+                amrex::ParallelFor(mfi.tilebox(),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    amrex::Real rho_p;
+                    if (is_er) {
+                        int const jm = amrex::max(j - 1, jlo_cc);
+                        int const jp = amrex::min(j, jhi_cc);
+                        rho_p = 0.5_rt*(r_arr(i, jp, k, mid)
+                                      + r_arr(i, jm, k, mid));
+                    } else {
+                        int const im = amrex::max(i - 1, ilo_cc);
+                        int const ip = amrex::min(i, ihi_cc);
+                        rho_p = 0.5_rt*(r_arr(ip, j, k, mid)
+                                      + r_arr(im, j, k, mid));
+                    }
+                    rho_p = amrex::max(0.0_rt, rho_p);
+                    n_arr(i, j, k) += rho_p * e_arr(i, j, k);
+                    if (xt) { n_arr(i, j, k) -= rho_p * xt(i, j, k); }
+                });
+            }
+            SolveEPolAmanoRZ(Ec, numc, rhofield, mid, c, lev);
+        }
+    }
+
     amrex::Real const time = warpx.gett_old(0) + warpx.getdt(0);
     warpx.ApplyEfieldBoundary(lev, patch_type, time);
 
@@ -1565,6 +1736,466 @@ void HybridPICModel::FillElectronPressureMF (
 // =============================================================================
 // Darwin longitudinal-field constraint
 // =============================================================================
+
+void HybridPICModel::SolveEThetaAmanoRZ (amrex::MultiFab& Etheta,
+                                         amrex::MultiFab const& num,
+                                         amrex::MultiFab const& rho,
+                                         int const rho_comp,
+                                         int const lev) const
+{
+#if !defined(WARPX_DIM_RZ)
+    amrex::ignore_unused(Etheta, num, rho, rho_comp, lev);
+    WARPX_ABORT_WITH_MESSAGE(
+        "SolveEThetaAmanoRZ: the amano_form toroidal solve is RZ-only");
+#else
+    ABLASTR_PROFILE("HybridPICModel::SolveEThetaAmanoRZ()");
+
+    using namespace amrex;
+
+    auto & warpx = WarpX::GetInstance();
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(lev == 0,
+        "hybrid_pic_model.esolve = amano_form supports a single level");
+    Geometry const & geom = warpx.Geom(lev);
+    auto const dx_arr = geom.CellSizeArray();
+    Real const dr = dx_arr[0];
+    Real const rmin = geom.ProbLo(0);
+
+    Real const me_eff = m_electron_inertia_mass;
+    // operator scale: beta = mu0 e^2 n / m_e_eff = mu0 e rho / m_e_eff
+    Real const beta_fac = PhysConst::mu0 * PhysConst::q_e / me_eff;
+    // rhs scale applied by the caller convention: rhs = mu0 e/m_e * num;
+    // the metric multiply-through by r happens here for both sides.
+    Real const rhs_fac = PhysConst::mu0 * PhysConst::q_e / me_eff;
+
+    // Coefficients: nodal acoef = r*beta + 1/r (the 1/r is the metric-
+    // absorbed 1/r^2 vector-Helmholtz term; at the axis node the row is a
+    // Dirichlet regularity boundary -- cap r away from zero only to keep
+    // the masked row finite), cell-centered bcoef = r.
+    BoxArray const & ba = warpx.boxArray(lev);
+    DistributionMapping const & dm = warpx.DistributionMap(lev);
+    MultiFab acoef(amrex::convert(ba, IntVect::TheNodeVector()), dm, 1, 0);
+    MultiFab bcoef(ba, dm, 1, 1);
+    MultiFab rhs(amrex::convert(ba, IntVect::TheNodeVector()), dm, 1, 0);
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(acoef, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        Box const nbx = mfi.tilebox();
+        auto const & a_arr = acoef.array(mfi);
+        auto const & r_arr = rhs.array(mfi);
+        auto const & rho_arr = rho.const_array(mfi);
+        auto const & num_arr = num.const_array(mfi);
+        Real const rcap = 0.125_rt * dr;
+        amrex::ParallelFor(nbx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            Real const r = amrex::max(rmin + i*dr, rcap);
+            // node-interpolated midpoint density, UNfloored (clamped at
+            // zero: negative deposits must not flip the operator sign)
+            Real const rho_n = amrex::max(0.0_rt,
+                0.25_rt*(rho_arr(i, j, k, rho_comp)
+                       + rho_arr(i-1, j, k, rho_comp)
+                       + rho_arr(i, j-1, k, rho_comp)
+                       + rho_arr(i-1, j-1, k, rho_comp)));
+            a_arr(i, j, k) = r*beta_fac*rho_n + 1.0_rt/r;
+            r_arr(i, j, k) = r*rhs_fac*num_arr(i, j, k);
+        });
+    }
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(bcoef, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        Box const cbx = mfi.growntilebox(1);
+        auto const & b_arr = bcoef.array(mfi);
+        amrex::ParallelFor(cbx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            b_arr(i, j, k) = rmin + (i + 0.5_rt)*dr;
+        });
+    }
+
+    // Boundary types: axis = Dirichlet 0 (m = 0 regularity of a theta
+    // vector component), r_hi = Dirichlet 0 (PEC tangential E); z periodic
+    // or PEC-class Dirichlet. The Green's open face has no mapping yet --
+    // documented follow-up.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        WarpX::field_boundary_hi[0] == FieldBoundaryType::PEC,
+        "hybrid_pic_model.esolve = amano_form currently requires a PEC "
+        "wall at r_hi (the Green's open face mapping is a follow-up)");
+    const bool z_periodic = geom.isPeriodic(1);
+    if (!z_periodic) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            WarpX::field_boundary_lo[1] == FieldBoundaryType::PEC
+                && WarpX::field_boundary_hi[1] == FieldBoundaryType::PEC,
+            "hybrid_pic_model.esolve = amano_form: non-periodic z requires "
+            "PEC z boundaries");
+    }
+
+    // Preconditioned conjugate gradients on the exact nodal stencil.
+    // (MLNodeABecLaplacian hard-aborts in EB-enabled builds and no AMReX
+    // nodal operator carries a varying zeroth-order coefficient there, so
+    // the operator is applied by hand: it is SPD -- acoef >= 1/r > 0 and
+    // the conservative 5-point r-sigma Laplacian with Dirichlet rows --
+    // and Jacobi-preconditioned CG converges in O(N_r) iterations at the
+    // validation scales this stage targets. A factored (block-banded
+    // direct) backend is the production follow-up.)
+    Box const dom_nd = amrex::convert(geom.Domain(), IntVect::TheNodeVector());
+    auto const dlo = amrex::lbound(dom_nd);
+    auto const dhi = amrex::ubound(dom_nd);
+    Real const inv_dr2 = 1.0_rt/(dr*dr);
+    Real const dz = dx_arr[1];
+    Real const inv_dz2 = 1.0_rt/(dz*dz);
+
+    // A p (with Dirichlet rows as identity), reading p's ghosts
+    auto apply_op = [&](MultiFab& out, MultiFab& in)
+    {
+        in.FillBoundary(geom.periodicity());
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(out, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            auto const & o = out.array(mfi);
+            auto const & p = in.const_array(mfi);
+            auto const & a = acoef.const_array(mfi);
+            auto const & b = bcoef.const_array(mfi);
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                const bool dir_row = (i <= dlo.x) || (i >= dhi.x)
+                    || (!z_periodic && (j <= dlo.y || j >= dhi.y));
+                if (dir_row) { o(i,j,k) = p(i,j,k); return; }
+                Real const lap =
+                    (b(i, j, k)*(p(i+1,j,k) - p(i,j,k))
+                     - b(i-1, j, k)*(p(i,j,k) - p(i-1,j,k)))*inv_dr2
+                  + (0.5_rt*(b(i,j,k) + b(i-1,j,k)))
+                    *((p(i,j+1,k) - p(i,j,k)) - (p(i,j,k) - p(i,j-1,k)))
+                    *inv_dz2;
+                o(i,j,k) = a(i,j,k)*p(i,j,k) - lap;
+            });
+        }
+    };
+
+    // Dirichlet rows of the RHS carry the boundary values (zero), and the
+    // initial guess is the incoming E_theta (warm start from the previous
+    // evaluation) with its Dirichlet rows zeroed.
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(rhs, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        auto const & r_arr = rhs.array(mfi);
+        auto const & e_arr = Etheta.array(mfi);
+        amrex::ParallelFor(mfi.tilebox(),
+        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            const bool dir_row = (i <= dlo.x) || (i >= dhi.x)
+                || (!z_periodic && (j <= dlo.y || j >= dhi.y));
+            if (dir_row) { r_arr(i,j,k) = 0.0_rt; e_arr(i,j,k) = 0.0_rt; }
+        });
+    }
+
+    auto const ng0 = IntVect(0);
+    MultiFab Ax(rhs.boxArray(), dm, 1, 0);
+    MultiFab res(rhs.boxArray(), dm, 1, 0);
+    MultiFab z_mf(rhs.boxArray(), dm, 1, 0);
+    MultiFab p_mf(rhs.boxArray(), dm, 1, IntVect(1));
+    MultiFab diag(rhs.boxArray(), dm, 1, 0);
+
+    // Jacobi diagonal: a + 2 sigma_avg (1/dr^2 + 1/dz^2)-form
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(diag, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        auto const & d = diag.array(mfi);
+        auto const & a = acoef.const_array(mfi);
+        auto const & b = bcoef.const_array(mfi);
+        amrex::ParallelFor(mfi.tilebox(),
+        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            Real const bs = b(i,j,k) + b(i-1,j,k);
+            d(i,j,k) = a(i,j,k) + bs*inv_dr2 + bs*inv_dz2;
+        });
+    }
+
+    // r0 = rhs - A x0
+    apply_op(Ax, Etheta);
+    MultiFab::LinComb(res, 1.0_rt, rhs, 0, -1.0_rt, Ax, 0, 0, 1, ng0);
+    MultiFab::Copy(z_mf, res, 0, 0, 1, ng0);
+    MultiFab::Divide(z_mf, diag, 0, 0, 1, 0);
+    p_mf.setVal(0.0_rt);
+    MultiFab::Copy(p_mf, z_mf, 0, 0, 1, ng0);
+    Real rz_old = MultiFab::Dot(res, 0, z_mf, 0, 1, 0);
+    Real const rhs_norm = std::sqrt(MultiFab::Dot(rhs, 0, rhs, 0, 1, 0));
+    // Tight tolerance: this solve runs inside every residual evaluation
+    // including finite-difference Jacobian probes (the Darwin E_L
+    // precedent) -- solver noise above the probe scale poisons secants.
+    Real const tol = 1.0e-11_rt * amrex::max(rhs_norm, 1.0e-300_rt);
+    int const max_cg = 2000;
+    int it = 0;
+    for (; it < max_cg; ++it) {
+        Real const res_norm = std::sqrt(MultiFab::Dot(res, 0, res, 0, 1, 0));
+        if (res_norm <= tol) { break; }
+        apply_op(Ax, p_mf);
+        Real const pAp = MultiFab::Dot(p_mf, 0, Ax, 0, 1, 0);
+        Real const alpha = rz_old / pAp;
+        MultiFab::Saxpy(Etheta, alpha, p_mf, 0, 0, 1, ng0);
+        MultiFab::Saxpy(res, -alpha, Ax, 0, 0, 1, ng0);
+        MultiFab::Copy(z_mf, res, 0, 0, 1, ng0);
+        MultiFab::Divide(z_mf, diag, 0, 0, 1, 0);
+        Real const rz_new = MultiFab::Dot(res, 0, z_mf, 0, 1, 0);
+        Real const beta_cg = rz_new / rz_old;
+        rz_old = rz_new;
+        MultiFab::LinComb(p_mf, 1.0_rt, z_mf, 0, beta_cg, p_mf, 0, 0, 1, ng0);
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(it < max_cg,
+        "SolveEThetaAmanoRZ: CG failed to converge");
+
+    Etheta.FillBoundary(geom.periodicity());
+#endif
+}
+
+void HybridPICModel::SolveEPolAmanoRZ (amrex::MultiFab& E,
+                                       amrex::MultiFab const& num,
+                                       amrex::MultiFab const& rho,
+                                       int const rho_comp,
+                                       int const comp,
+                                       int const lev) const
+{
+#if !defined(WARPX_DIM_RZ)
+    amrex::ignore_unused(E, num, rho, rho_comp, comp, lev);
+    WARPX_ABORT_WITH_MESSAGE(
+        "SolveEPolAmanoRZ: the amano_form poloidal solve is RZ-only");
+#else
+    ABLASTR_PROFILE("HybridPICModel::SolveEPolAmanoRZ()");
+    using namespace amrex;
+
+    auto & warpx = WarpX::GetInstance();
+    Geometry const & geom = warpx.Geom(lev);
+    auto const dx_arr = geom.CellSizeArray();
+    Real const dr = dx_arr[0];
+    Real const dz = dx_arr[1];
+    Real const rmin = geom.ProbLo(0);
+    Real const beta_fac = PhysConst::mu0 * PhysConst::q_e
+        / m_electron_inertia_mass;
+    Real const rhs_fac = beta_fac;
+    const bool z_periodic = geom.isPeriodic(1);
+    // comp 0 = E_r (cc r, nodal z, +1/r^2 term, r_hi Neumann-free,
+    //           z-cap Dirichlet 0);
+    // comp 1 = E_z (nodal r, cc z, no 1/r^2, axis Neumann-regular,
+    //           r_hi Dirichlet 0, z-cap natural)
+    const bool is_er = (comp == 0);
+    Real const roff = is_er ? 0.5_rt : 0.0_rt;
+
+    Box const dom_st = amrex::convert(geom.Domain(), E.ixType().toIntVect());
+    auto const dlo = amrex::lbound(dom_st);
+    auto const dhi = amrex::ubound(dom_st);
+    Real const inv_dr = 1.0_rt/dr;
+    Real const inv_dz2 = 1.0_rt/(dz*dz);
+
+    // Finite-volume row: beta V E - [sig_+ (E_+ - E) - sig_- (E - E_-)]/dr
+    //                    - V d2z E (+ V E / r^2 for E_r) = V rhs,
+    // with V = r dr (axis node of E_z: dr^2/8) and sig = face r. The axis
+    // face of E_r has r = 0 (zero flux by metric); the outer Neumann face
+    // of E_r carries zero flux; Dirichlet rows are identity.
+    MultiFab acoef(E.boxArray(), E.DistributionMap(), 1, 0);
+    MultiFab rhs(E.boxArray(), E.DistributionMap(), 1, 0);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(acoef, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        auto const & a_arr = acoef.array(mfi);
+        auto const & r_arr = rhs.array(mfi);
+        auto const & rho_arr = rho.const_array(mfi);
+        auto const & num_arr = num.const_array(mfi);
+        amrex::ParallelFor(mfi.tilebox(),
+        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            Real const r = rmin + (i + roff)*dr;
+            Real const V = (!is_er && i == dlo.x)
+                ? 0.125_rt*dr*dr : r*dr;
+            // staggering-consistent density (unfloored, clamped at 0)
+            Real rho_p;
+            if (is_er) {
+                // (cc r, nodal z): average the two z-neighbors
+                rho_p = 0.5_rt*(rho_arr(i, j, k, rho_comp)
+                              + rho_arr(i, j-1, k, rho_comp));
+            } else {
+                // (nodal r, cc z): average the two r-neighbors
+                rho_p = 0.5_rt*(rho_arr(i, j, k, rho_comp)
+                              + rho_arr(amrex::max(i-1, dlo.x), j, k,
+                                        rho_comp));
+            }
+            rho_p = amrex::max(0.0_rt, rho_p);
+            Real a = beta_fac*rho_p*V;
+            if (is_er) { a += V/(r*r); }
+            a_arr(i, j, k) = a;
+            r_arr(i, j, k) = V*rhs_fac*num_arr(i, j, k);
+        });
+    }
+
+    // Dirichlet rows (inlined per kernel below -- a nested extended
+    // lambda is CUDA-illegal): E_r -> z-cap nodes (tangential E at PEC)
+    // unless periodic; E_z -> the PEC wall node at r_hi.
+
+    auto apply_op = [&](MultiFab& out, MultiFab& in)
+    {
+        in.FillBoundary(geom.periodicity());
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(out, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            auto const & o = out.array(mfi);
+            auto const & p = in.const_array(mfi);
+            auto const & a = acoef.const_array(mfi);
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                const bool dir_row = is_er
+                    ? (!z_periodic && (j <= dlo.y || j >= dhi.y))
+                    : (i >= dhi.x);
+                if (dir_row) { o(i,j,k) = p(i,j,k); return; }
+                Real const r = rmin + (i + roff)*dr;
+                Real const V = (!is_er && i == dlo.x)
+                    ? 0.125_rt*dr*dr : r*dr;
+                // radial faces (face r; zero flux where the face is a
+                // free/regularity boundary)
+                Real const rfm = rmin + (i + roff - 0.5_rt)*dr;
+                Real const rfp = rmin + (i + roff + 0.5_rt)*dr;
+                Real fm = 0.0_rt, fp = 0.0_rt;
+                const bool at_ilo = (i <= dlo.x);
+                const bool at_ihi = (i >= dhi.x);
+                if (!at_ilo || is_er) {
+                    // E_r's inner face at the axis has rfm = 0 (metric
+                    // kills it automatically when i = 0)
+                    Real const rf = (is_er && i == dlo.x) ? 0.0_rt
+                        : amrex::max(rfm, 0.0_rt);
+                    fm = rf*(p(i,j,k) - p(i-1,j,k))*inv_dr;
+                }
+                if (!(is_er && at_ihi)) {
+                    // E_r outer Neumann face: zero flux at the wall
+                    fp = rfp*(p(i+1,j,k) - p(i,j,k))*inv_dr;
+                }
+                // z second difference (periodic through ghosts; E_z cap
+                // faces natural = zero flux; E_r cap nodes are Dirichlet
+                // rows and never reach here when non-periodic)
+                Real d2z;
+                if (!z_periodic && !is_er
+                    && (j <= dlo.y || j >= dhi.y)) {
+                    if (j <= dlo.y) {
+                        d2z = (p(i,j+1,k) - p(i,j,k))*inv_dz2;
+                    } else {
+                        d2z = (p(i,j-1,k) - p(i,j,k))*inv_dz2;
+                    }
+                } else {
+                    d2z = (p(i,j+1,k) - 2.0_rt*p(i,j,k) + p(i,j-1,k))
+                          *inv_dz2;
+                }
+                // FV row: the radial term is the flux DIFFERENCE (the
+                // [r dE/dr] surface term of the r-integrated cell), not a
+                // divided difference -- everything else in the row carries
+                // V = r dr. (An extra 1/dr here overweighted the radial
+                // Laplacian by 1/dr relative to beta/z/rhs: invisible on
+                // radially uniform configs, structurally wrong under a
+                // radially driven one.)
+                o(i,j,k) = a(i,j,k)*p(i,j,k)
+                    - (fp - fm) - V*d2z;
+            });
+        }
+    };
+
+    // Dirichlet rows: zero RHS and initial guess
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(rhs, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        auto const & r_arr = rhs.array(mfi);
+        auto const & e_arr = E.array(mfi);
+        amrex::ParallelFor(mfi.tilebox(),
+        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            const bool dir_row = is_er
+                ? (!z_periodic && (j <= dlo.y || j >= dhi.y))
+                : (i >= dhi.x);
+            if (dir_row) {
+                r_arr(i,j,k) = 0.0_rt; e_arr(i,j,k) = 0.0_rt;
+            }
+        });
+    }
+
+    // Jacobi diagonal
+    MultiFab diag(E.boxArray(), E.DistributionMap(), 1, 0);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(diag, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        auto const & d = diag.array(mfi);
+        auto const & a = acoef.const_array(mfi);
+        amrex::ParallelFor(mfi.tilebox(),
+        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            Real const V = (!is_er && i == dlo.x)
+                ? 0.125_rt*dr*dr : (rmin + (i + roff)*dr)*dr;
+            // exact diagonal of the FV row: sum of the ACTIVE face radii
+            // (mirrors apply_op's face gating, incl. the E_z axis half
+            // cell and the one-sided natural z rows)
+            Real rdiag = 0.0_rt;
+            if (!(i <= dlo.x) || is_er) {
+                rdiag += (is_er && i == dlo.x) ? 0.0_rt
+                    : amrex::max(rmin + (i + roff - 0.5_rt)*dr, 0.0_rt);
+            }
+            if (!(is_er && i >= dhi.x)) {
+                rdiag += rmin + (i + roff + 0.5_rt)*dr;
+            }
+            Real const zdiag = (!z_periodic && !is_er
+                && (j <= dlo.y || j >= dhi.y)) ? 1.0_rt : 2.0_rt;
+            d(i,j,k) = a(i,j,k) + rdiag*inv_dr + zdiag*V*inv_dz2;
+        });
+    }
+
+    auto const ng0 = IntVect(0);
+    MultiFab Ax(E.boxArray(), E.DistributionMap(), 1, 0);
+    MultiFab res(E.boxArray(), E.DistributionMap(), 1, 0);
+    MultiFab z_mf(E.boxArray(), E.DistributionMap(), 1, 0);
+    MultiFab p_mf(E.boxArray(), E.DistributionMap(), 1, IntVect(1));
+
+    apply_op(Ax, E);
+    MultiFab::LinComb(res, 1.0_rt, rhs, 0, -1.0_rt, Ax, 0, 0, 1, ng0);
+    MultiFab::Copy(z_mf, res, 0, 0, 1, ng0);
+    MultiFab::Divide(z_mf, diag, 0, 0, 1, 0);
+    p_mf.setVal(0.0_rt);
+    MultiFab::Copy(p_mf, z_mf, 0, 0, 1, ng0);
+    Real rz_old = MultiFab::Dot(res, 0, z_mf, 0, 1, 0);
+    Real const rhs_norm = std::sqrt(MultiFab::Dot(rhs, 0, rhs, 0, 1, 0));
+    Real const tol = 1.0e-11_rt * amrex::max(rhs_norm, 1.0e-300_rt);
+    int const max_cg = 2000;
+    int it = 0;
+    for (; it < max_cg; ++it) {
+        Real const res_norm = std::sqrt(MultiFab::Dot(res, 0, res, 0, 1, 0));
+        if (res_norm <= tol) { break; }
+        apply_op(Ax, p_mf);
+        Real const pAp = MultiFab::Dot(p_mf, 0, Ax, 0, 1, 0);
+        Real const alpha = rz_old / pAp;
+        MultiFab::Saxpy(E, alpha, p_mf, 0, 0, 1, ng0);
+        MultiFab::Saxpy(res, -alpha, Ax, 0, 0, 1, ng0);
+        MultiFab::Copy(z_mf, res, 0, 0, 1, ng0);
+        MultiFab::Divide(z_mf, diag, 0, 0, 1, 0);
+        Real const rz_new = MultiFab::Dot(res, 0, z_mf, 0, 1, 0);
+        Real const beta_cg = rz_new / rz_old;
+        rz_old = rz_new;
+        MultiFab::LinComb(p_mf, 1.0_rt, z_mf, 0, beta_cg, p_mf, 0, 0, 1, ng0);
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(it < max_cg,
+        "SolveEPolAmanoRZ: CG failed to converge");
+    E.FillBoundary(geom.periodicity());
+#endif
+}
 
 void HybridPICModel::ComputeDarwinELong (
     ablastr::fields::MultiLevelScalarField const& rho,
@@ -2422,6 +3053,72 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
         m_inertia_history_levels = 1;
     }
 
+    // amano_form: capture the step-start plasma current (curl B_old) once
+    // per step and keep its nodal theta component as the measured
+    // reference of the dJe/dt leg. Differencing against B_old (rather
+    // than the iterate's B(theta)) is what leaves the iterate's
+    // curl-curl-E content on the operator side of the toroidal solve.
+    if (m_esolve_amano) {
+        if (!m_jp_old_nodal) {
+            for (int c = 0; c < 3; ++c) {
+                m_jp_old_stag[c] = std::make_unique<amrex::MultiFab>(
+                    Jp[c]->boxArray(), Jp[c]->DistributionMap(), 1,
+                    Jp[c]->nGrowVect());
+            }
+            m_jp_old_nodal = std::make_unique<amrex::MultiFab>(
+                Ei.boxArray(), Ei.DistributionMap(), 3, amrex::IntVect(1));
+            m_ei_amano_theta = std::make_unique<amrex::MultiFab>(
+                Ei.boxArray(), Ei.DistributionMap(), 3, amrex::IntVect(1));
+            m_num_theta = std::make_unique<amrex::MultiFab>(
+                Ei.boxArray(), Ei.DistributionMap(), 1, amrex::IntVect(1));
+            amrex::MultiFab const & Er_mf = *warpx.m_fields.get(
+                FieldType::Efield_fp, Direction{0}, lev);
+            amrex::MultiFab const & Ez_mf = *warpx.m_fields.get(
+                FieldType::Efield_fp, Direction{2}, lev);
+            m_num_pol[0] = std::make_unique<amrex::MultiFab>(
+                Er_mf.boxArray(), Er_mf.DistributionMap(), 1,
+                amrex::IntVect(1));
+            m_num_pol[1] = std::make_unique<amrex::MultiFab>(
+                Ez_mf.boxArray(), Ez_mf.DistributionMap(), 1,
+                amrex::IntVect(1));
+        }
+        if (!a_from_jacobian && !m_inertia_jpold_captured) {
+            ablastr::fields::VectorField B_old =
+                warpx.m_fields.get_alldirs(FieldType::B_old, lev);
+            ablastr::fields::VectorField jp_old =
+                {m_jp_old_stag[0].get(), m_jp_old_stag[1].get(),
+                 m_jp_old_stag[2].get()};
+            warpx.get_pointer_fdtd_solver_fp(lev)->CalculateCurrentAmpere(
+                jp_old, B_old, warpx.GetEBUpdateEFlag()[lev], lev);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(*m_jp_old_nodal, TilingIfNotGPU());
+                 mfi.isValid(); ++mfi) {
+                auto const & jo  = m_jp_old_nodal->array(mfi);
+                auto const & jor = m_jp_old_stag[0]->const_array(mfi);
+                auto const & jot = m_jp_old_stag[1]->const_array(mfi);
+                auto const & joz = m_jp_old_stag[2]->const_array(mfi);
+                amrex::GpuArray<int, 3> const sx = J_stag[0];
+                amrex::GpuArray<int, 3> const sy = J_stag[1];
+                amrex::GpuArray<int, 3> const sz = J_stag[2];
+                amrex::ParallelFor(mfi.tilebox(),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    jo(i,j,k,0) =
+                        Interp(jor, sx, nodal, coarsen_rr, i, j, k, 0);
+                    jo(i,j,k,1) =
+                        Interp(jot, sy, nodal, coarsen_rr, i, j, k, 0);
+                    jo(i,j,k,2) =
+                        Interp(joz, sz, nodal, coarsen_rr, i, j, k, 0);
+                });
+            }
+            m_jp_old_nodal->setBndry(0.0_rt);
+            m_jp_old_nodal->FillBoundary(geom.periodicity());
+            m_inertia_jpold_captured = true;
+        }
+    }
+
     // Assemble E_inertial = +(m_e_eff/(e rho)) [ dJe/dt - (Je/rho) drho/dt
     //                                           - (Je.grad)(Je/rho) ],
     // the Je-form of -(m_e_eff/e) D u_e/Dt with u_e = -Je/rho. The sign
@@ -2464,6 +3161,7 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
     amrex::Real const rmin = geom.ProbLo(0);
 #endif
 
+    const bool amano = m_esolve_amano;
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -2474,6 +3172,18 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
         auto const & jenm1  = Je_nm1.const_array(mfi);
         auto const & rhoa   = rho.const_array(mfi);
         auto const & rhona  = rho_n_frozen.const_array(mfi);
+        amrex::Array4<amrex::Real> eia;
+        amrex::Array4<amrex::Real const> jpr, jpth, jpz, jold;
+        amrex::GpuArray<int, 3> const sx_th = J_stag[0];
+        amrex::GpuArray<int, 3> const sy_th = J_stag[1];
+        amrex::GpuArray<int, 3> const sz_th = J_stag[2];
+        if (amano) {
+            eia  = m_ei_amano_theta->array(mfi);
+            jpr  = Jp[0]->const_array(mfi);
+            jpth = Jp[1]->const_array(mfi);
+            jpz  = Jp[2]->const_array(mfi);
+            jold = m_jp_old_nodal->const_array(mfi);
+        }
         const int mid = rho_mid_comp;
         auto const dlo = amrex::lbound(dom_nd);
         auto const dhi = amrex::ubound(dom_nd);
@@ -2482,6 +3192,42 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
         {
             amrex::Real const rho_n   = rhona(i, j, k, 0);
             amrex::Real const rho_mid = rhoa(i, j, k, mid);
+            // amano_form: the division-free measured inertia numerator for
+            // the toroidal solve, (m_e/e) dJe_meas/dt, with the measured
+            // electron current differenced against the STEP-START plasma
+            // current (curl B_old) so the iterate's curl-curl-E content
+            // stays on the operator side. The SOURCE is tapered by
+            // electron presence: the Ampere-closure Je = curl B/mu0 - J_i
+            // is a grid fiction in vacuum (discrete fringing curl with no
+            // electrons to carry it -- measured as a wall-corner Newton
+            // stall at the 700 V/m scale on the driven Lenz deck), and the
+            // Hewett-Nielson source is the REAL electron current, zero in
+            // vacuum by construction. The taper touches only this
+            // fictional source; the operator's screening beta stays
+            // unfloored (no pedestal in the dynamics) and nothing divides.
+            if (amano) {
+                amrex::Real const w_src = (taper_w > 0.0_rt)
+                    ? 0.5_rt*(1.0_rt + std::tanh(
+                        (amrex::max(rho_mid, 0.0_rt) - rho_floor)/taper_w))
+                    : ((rho_mid > 0.0_rt) ? 1.0_rt : 0.0_rt);
+                amrex::Real djop[3];
+                djop[0] = Interp(jpr, sx_th, nodal, coarsen_rr, i, j, k, 0)
+                        - jold(i, j, k, 0);
+                djop[1] = Interp(jpth, sy_th, nodal, coarsen_rr, i, j, k, 0)
+                        - jold(i, j, k, 1);
+                djop[2] = Interp(jpz, sz_th, nodal, coarsen_rr, i, j, k, 0)
+                        - jold(i, j, k, 2);
+                for (int c = 0; c < 3; ++c) {
+                    amrex::Real const je_meas = je(i,j,k,c) - djop[c];
+                    amrex::Real const je1m =
+                        (je_meas - (1.0_rt - a_theta) * jen(i,j,k,c)) * inv_th;
+                    amrex::Real const djedt_m = bdf2
+                        ? (c_p1 * je1m + c_0 * jen(i,j,k,c)
+                           + c_m1 * jenm1(i,j,k,c))
+                        : (je1m - jen(i,j,k,c)) * inv_dt;
+                    eia(i, j, k, c) = w_src * me_over_e * djedt_m;
+                }
+            }
             // True vacuum carries no electron fluid: zero the term there
             // (density-floored cells keep their inertia).
             if (rho_mid <= 0.0_rt) {
@@ -2603,6 +3349,10 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
     }
     Ei.setBndry(0.0_rt);
     Ei.FillBoundary(geom.periodicity());
+    if (m_esolve_amano) {
+        m_ei_amano_theta->setBndry(0.0_rt);
+        m_ei_amano_theta->FillBoundary(geom.periodicity());
+    }
 #endif
 }
 
@@ -2691,8 +3441,10 @@ void HybridPICModel::RotateElectronInertiaHistory (amrex::Real a_theta)
     }
 
     // Re-arm the step-start density capture for the next step's first
-    // evaluation (see ComputeElectronInertiaNodal).
+    // evaluation (see ComputeElectronInertiaNodal), and the amano_form
+    // step-start plasma-current capture with it.
     m_inertia_rho_n_captured = false;
+    m_inertia_jpold_captured = false;
 #endif
 }
 
