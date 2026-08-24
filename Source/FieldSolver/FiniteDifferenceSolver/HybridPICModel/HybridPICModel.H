@@ -1132,6 +1132,33 @@ public:
     std::unique_ptr<amrex::Parser> m_heating_resistivity_parser;
     amrex::ParserExecutor<4> m_eta_heating;
 
+    /** Volumetric electron-energy sink, input qdsmc_energy_sink(rho,Te,B,t)
+     * [W/m^3] (rho = total charge density [C/m^3], Te in eV, B = |B| in T,
+     * t in s; armed by presence). S > 0 REMOVES energy: each source
+     * application subtracts dTe = dt (gamma-1) S / (n_e kB) per cell,
+     * mirroring the Joule source's dTe conversion with the opposite sign
+     * and the same solver-floor density gate (no sink below the floor).
+     * The per-cell decrement is clamped so Te lands no lower than the
+     * conduction Te floor (m_cond_te_floor; plain positivity when unset);
+     * the clamped-away energy accumulates in m_energy_sink_declined_J and
+     * is printed on the joule_dropped_energy_print_interval cadence.
+     * Intended for radiative-loss closures (e.g. n^2 sqrt(Te) or
+     * n Te B^2 forms) expressed through rho, Te and |B|. */
+    bool m_has_energy_sink = false;
+    std::string m_energy_sink_expression = "0.0";
+    std::unique_ptr<amrex::Parser> m_energy_sink_parser;
+    amrex::ParserExecutor<4> m_energy_sink;
+
+    /** Cumulative energy declined by the sink's Te-floor clamp [J]
+     * (globally reduced; mutable: written by the const source kernel). */
+    mutable amrex::Real m_energy_sink_declined_J = 0.0;
+
+    /** Apply the volumetric electron-energy sink to T_e over dt_src (see
+     * m_has_energy_sink). Runs inside ApplyQdsmcEnergySources between the
+     * Q_ei relaxation (6b) and the ion-heating operator (6c), so one call
+     * site covers every explicit time-advance scheme. */
+    void QDSMCApplyEnergySink (int lev, amrex::Real dt_src) const;
+
     /** Independent density gate for the Joule heating source [m^-3]: cells
      * with n_e <= max(joule_heating_n_min, n_floor) receive no Joule heat
      * (the declined source energy goes to the dropped tally, channel
@@ -1235,6 +1262,10 @@ public:
      * -- the physical-vs-numerical discriminator for the cascade (marker
      * CFL measured 0.017 cells/step at ignition, so motion is small). */
     mutable amrex::Real m_ebud_comp_bulk = 0.0, m_ebud_comp_band = 0.0;
+    /** Energy-sink part of the source-stage dU (a sub-account of src: the
+     * sink runs inside ApplyQdsmcEnergySources, whose brackets set the src
+     * channel), bracketed separately when the instrument is armed. */
+    mutable amrex::Real m_ebud_sink_bulk = 0.0, m_ebud_sink_band = 0.0;
 
     /** Class-summed thermal energy {bulk, band} [J] for the energy budget
      * (nodal sum_unique; classes per the m_energy_budget doc). */

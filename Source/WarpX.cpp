@@ -1463,6 +1463,11 @@ WarpX::ReadParameters ()
                 WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!joule_redirect,
                     "hybrid_pic_model.redirect_joule_to_ions is not yet supported with "
                     "algo.evolve_scheme = theta_implicit_hybrid");
+                std::string energy_sink_tmp;
+                pp_hybrid.query("qdsmc_energy_sink(rho,Te,B,t)", energy_sink_tmp);
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(energy_sink_tmp.empty(),
+                    "hybrid_pic_model.qdsmc_energy_sink(rho,Te,B,t) is not yet supported "
+                    "with algo.evolve_scheme = theta_implicit_hybrid");
                 std::vector<std::string> species_names_tmp;
                 const amrex::ParmParse pp_particles_tmp("particles");
                 pp_particles_tmp.queryarr("species_names", species_names_tmp);

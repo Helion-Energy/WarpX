@@ -4022,6 +4022,27 @@ Maxwell solver: kinetic-fluid hybrid
     declined source energy is accumulated in the dropped-energy tally. This restricts heating to the
     physical-resistivity region without moving the solver floor.
 
+.. pp:param:: hybrid_pic_model.qdsmc_energy_sink(rho,Te,B,t)
+    :type: ``float`` or ``str``
+    :optional:
+
+    Volumetric electron-energy loss-density rate :math:`S`, in :math:`W/m^3`, subtracted from the
+    electron energy at every energy-equation source application (sign convention: :math:`S > 0`
+    removes energy). Each application updates
+    :math:`T_e \mathrel{-}= \Delta t \, (\gamma - 1) S / (n_e k_B)` per cell, mirroring the
+    Joule-heating conversion; cells at or below the solver density floor are untouched. The expression
+    can depend on the total charge density ``rho`` (:math:`C/m^3`, as in
+    :pp:param:`hybrid_pic_model.plasma_resistivity(rho,J,t)`), the local electron temperature ``Te``
+    (eV), the local magnetic-field magnitude ``B`` (T) and the time ``t`` (s) — intended for
+    radiative-loss closures such as bremsstrahlung-like :math:`n^2 \sqrt{T_e}` or synchrotron-like
+    :math:`n T_e B^2` forms, expressed through ``rho`` and ``Te``. The per-cell decrement is clamped so
+    :math:`T_e` never lands below :pp:param:`hybrid_pic_model.qdsmc_conduction_Te_floor` (plain
+    positivity when that floor is unset); the clamped-away energy accumulates in a cumulative tally
+    (``sink_floor`` in the dropped-energy print, on the
+    :pp:param:`hybrid_pic_model.joule_dropped_energy_print_interval` cadence). Requires
+    :pp:param:`hybrid_pic_model.solve_electron_energy_equation`; supported on the explicit
+    (``euler``/``leapfrog``/``pc``) time-advance schemes.
+
 .. pp:param:: hybrid_pic_model.Te_shunt_threshold
     :type: ``float``
     :default: ``-1`` (off)

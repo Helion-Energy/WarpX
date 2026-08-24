@@ -572,6 +572,12 @@ void HybridPICModel::ReadParameters ()
         pp_hybrid.query("joule_heating_resistivity(rho,J,Te,t)", m_eta_heating_expression);
     utils::parser::queryWithParser(pp_hybrid, "joule_heating_n_min", m_joule_heating_n_min);
 
+    // Volumetric electron-energy sink S(rho,Te,B,t) [W/m^3] (armed by
+    // presence; S > 0 removes energy -- radiative-loss closures expressed
+    // through rho, Te and |B|).
+    m_has_energy_sink =
+        pp_hybrid.query("qdsmc_energy_sink(rho,Te,B,t)", m_energy_sink_expression);
+
     // General Te limiter with ion shunt (see member doc): any-channel
     // excess above the threshold goes to the ions through the redirect
     // machinery (kick cap / density gate / guard rail all apply).
@@ -1075,6 +1081,17 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
     m_heating_resistivity_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(m_eta_heating_expression, {"rho","J","Te","t"}));
     m_eta_heating = m_heating_resistivity_parser->compile<4>();
+
+    // Volumetric electron-energy sink S(rho,Te,B,t) [W/m^3]. Compiled
+    // unconditionally ("0.0" when unset) but only consulted when
+    // m_has_energy_sink.
+    m_energy_sink_parser = std::make_unique<amrex::Parser>(
+        utils::parser::makeParser(m_energy_sink_expression, {"rho","Te","B","t"}));
+    m_energy_sink = m_energy_sink_parser->compile<4>();
+    if (m_has_energy_sink) {
+        amrex::Print() << "[qdsmc] volumetric electron energy sink: S = "
+            << m_energy_sink_expression << " [W/m^3]\n";
+    }
 
     // Guard rail (2026-08 liftoff runaway forensics): without a relaxation
     // channel the redirect's OU ion-heating operator has no drag leg and
@@ -3987,6 +4004,106 @@ void HybridPICModel::QDSMCShuntTeExcess (int const lev,
 }
 
 
+void HybridPICModel::QDSMCApplyEnergySink (int const lev, amrex::Real const dt_src) const
+{
+    ABLASTR_PROFILE("HybridPICModel::QDSMCApplyEnergySink()");
+
+    using warpx::fields::FieldType;
+
+    // Parser-driven volumetric electron-energy sink S(rho,Te,B,t) [W/m^3]
+    // (S > 0 removes energy). With U_e = n_e k_B T_e/(gamma-1) the per-cell
+    // update is T_e -= dt (gamma-1) S / (n_e k_B) -- the Joule source's dTe
+    // conversion with the opposite sign. Sub-floor cells are never touched
+    // (the Joule kernel's solver-floor gate discipline); the decrement is
+    // clamped so T_e lands no lower than the conduction Te floor (nor is a
+    // cell already below the floor ever lifted by the clamp), with the
+    // declined energy accumulated in the audit tally.
+    auto & warpx = WarpX::GetInstance();
+    amrex::Periodicity const & period = warpx.Geom(lev).periodicity();
+
+    amrex::MultiFab       & Te  = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+    amrex::MultiFab const & rho = *warpx.m_fields.get(FieldType::rho_fp, lev);
+    // B field on Yee staggering, interpolated to the nodal Te grid inside
+    // the kernel (|B| is the parser's B argument).
+    ablastr::fields::VectorField B_fp =
+        warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev);
+
+    auto const gamma_minus_1 = m_gamma - 1.0_rt;
+    auto const rho_floor     = PhysConst::q_e * m_n_floor;
+    auto const sink          = m_energy_sink;
+    auto const t_new         = warpx.gett_new(0);
+    auto const K_per_eV      = PhysConst::q_e / PhysConst::kb;   // T[eV]*this = T[K]
+    // Positivity backstop: the qdsmc conduction Te floor (0 when unset,
+    // giving plain positivity).
+    amrex::Real const te_floor_K = m_cond_te_floor * K_per_eV;
+
+    amrex::GpuArray<int, 3> const & Bx_stag = Bx_IndexType;
+    amrex::GpuArray<int, 3> const & By_stag = By_IndexType;
+    amrex::GpuArray<int, 3> const & Bz_stag = Bz_IndexType;
+    amrex::GpuArray<int, 3> const nodal     = {1, 1, 1};
+    amrex::GpuArray<int, 3> const coarsen   = {1, 1, 1};
+
+    // Per-cell declined (clamped-away) energy density [J/m^3] for the audit
+    // tally. Nodal like Te: box-seam nodes carry redundant consistent
+    // copies, deduplicated by sum_unique below.
+    amrex::MultiFab declined_mf(Te.boxArray(), Te.DistributionMap(), 1, 0);
+    declined_mf.setVal(0.0_rt);
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(Te, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        amrex::Array4<amrex::Real>       const & Te_arr   = Te.array(mfi);
+        amrex::Array4<amrex::Real const> const & rho_arr  = rho.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & Bx_arr   = B_fp[0]->const_array(mfi);
+        amrex::Array4<amrex::Real const> const & By_arr   = B_fp[1]->const_array(mfi);
+        amrex::Array4<amrex::Real const> const & Bz_arr   = B_fp[2]->const_array(mfi);
+        amrex::Array4<amrex::Real>       const & decl_arr = declined_mf.array(mfi);
+
+        amrex::Box const & tbox = mfi.tilebox();
+        amrex::ParallelFor(tbox, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            amrex::Real const rho_val = rho_arr(i,j,k);
+            if (rho_val <= rho_floor) { return; }
+            amrex::Real const ne = rho_val / PhysConst::q_e;
+
+            // |B| at the nodal grid (where Te lives), Yee -> nodal interp
+            // as in the per-species-resistivity kernel.
+            auto const bx = ablastr::coarsen::sample::Interp(Bx_arr, Bx_stag, nodal, coarsen, i, j, k, 0);
+            auto const by = ablastr::coarsen::sample::Interp(By_arr, By_stag, nodal, coarsen, i, j, k, 0);
+            auto const bz = ablastr::coarsen::sample::Interp(Bz_arr, Bz_stag, nodal, coarsen, i, j, k, 0);
+            amrex::Real const Bmag = std::sqrt(bx*bx + by*by + bz*bz);
+
+            amrex::Real const Te_K = Te_arr(i,j,k);
+            amrex::Real const S = sink(rho_val, Te_K / K_per_eV, Bmag, t_new);
+
+            // dTe = dt (gamma-1) S / (n_e k_B), subtracted.
+            amrex::Real Te_new = Te_K
+                - dt_src * gamma_minus_1 * S / (ne * PhysConst::kb);
+            // Clamp at the floor without ever lifting a cell that already
+            // sits below it (that would manufacture energy).
+            amrex::Real const te_min_K = amrex::min(Te_K, te_floor_K);
+            if (Te_new < te_min_K) {
+                decl_arr(i,j,k) += ne * PhysConst::kb
+                    * (te_min_K - Te_new) / gamma_minus_1;
+                Te_new = te_min_K;
+            }
+            Te_arr(i,j,k) = Te_new;
+        });
+    }
+
+    // Fold the declined per-cell energy density into the cumulative audit
+    // tally [J] (unique-node sum, periodic images deduplicated).
+    auto const dx = warpx.Geom(lev).CellSizeArray();
+    amrex::Real dV = 1.0_rt;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) { dV *= dx[d]; }
+    m_energy_sink_declined_J += declined_mf.sum_unique(0, false, period) * dV;
+
+    Te.FillBoundary(Te.nGrowVect(), period);
+}
+
+
 bool HybridPICModel::IsRelaxationExcluded (std::string const & species_name) const
 {
     return std::find(m_relaxation_excluded_species.begin(),
@@ -5058,6 +5175,23 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
         QdsmcPhaseMinTe(lev, "sources_relaxation");
     }
 
+    // Step 6b': parser-driven volumetric electron-energy sink (S > 0
+    // removes energy); this single call site covers the euler/leapfrog/pc
+    // schemes. When the budget instrument is armed the sink is bracketed as
+    // its own class -- a sub-account of the source stage, whose brackets
+    // span this whole function.
+    if (m_has_energy_sink) {
+        std::array<amrex::Real, 2> us0{}, us1{};
+        if (m_energy_budget) { us0 = QDSMCClassEnergy(lev); }
+        QDSMCApplyEnergySink(lev, dt_src);
+        if (m_energy_budget) {
+            us1 = QDSMCClassEnergy(lev);
+            m_ebud_sink_bulk += us1[0] - us0[0];
+            m_ebud_sink_band += us1[1] - us0[1];
+        }
+        QdsmcPhaseMinTe(lev, "sources_energy_sink");
+    }
+
     // Step 6c: stochastic drag-diffusion ion-heating operator -- delivers the Q_ei
     // conjugate (when relaxation is on) and/or the redirected Joule energy
     // (when the redirect is on), so the ions are heated by one mechanism.
@@ -5073,7 +5207,8 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
     // refresh them here (the euler control path skips this to stay
     // bit-identical to #6982).
     if (fill_te_ghosts &&
-        (m_include_joule_heating || m_include_temperature_relaxation)) {
+        (m_include_joule_heating || m_include_temperature_relaxation ||
+         m_has_energy_sink)) {
         amrex::MultiFab & Te =
             *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
         Te.FillBoundary(warpx.Geom(lev).periodicity());
@@ -5085,6 +5220,7 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
         (m_joule_heating_n_min > m_n_floor) ||
         (m_te_shunt_eV > 0._rt) ||
         (m_cond_eb_bc == 1) ||
+        m_has_energy_sink ||
         ((m_joule_redirect_to_ions || m_te_shunt_eV > 0._rt) &&
          (m_joule_redirect_n_min_factor > 0._rt ||
           m_joule_redirect_kick_cap_vth_frac > 0._rt));
@@ -5095,6 +5231,7 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
             << " redirect_gate=" << m_joule_dropped_redirect_gate_J
             << " kick_cap=" << m_joule_dropped_kick_cap_J
             << " te_shunt=" << m_te_shunt_J
+            << " sink_floor=" << m_energy_sink_declined_J
             << " wall_bath=" << m_cond_eb_tally
             << " (cumulative; wall_bath > 0 = into plasma)\n";
     }
@@ -9229,8 +9366,10 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
                     << " comp_band=" << m_ebud_comp_band
                     << " cond_band=" << m_ebud_cond_band
                     << " src_band="  << m_ebud_src_band
+                    << " sink_bulk=" << m_ebud_sink_bulk
+                    << " sink_band=" << m_ebud_sink_band
                     << " U_bulk=" << ub5[0] << " U_band=" << ub5[1]
-                    << " (dU cumulative; adv includes comp)\n";
+                    << " (dU cumulative; adv includes comp; src includes sink)\n";
             }
         }
 
