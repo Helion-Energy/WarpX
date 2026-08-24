@@ -12,6 +12,7 @@ CEXE_sources += FieldPoyntingFlux.cpp
 CEXE_sources += FieldProbe.cpp
 CEXE_sources += FieldProbeParticleContainer.cpp
 CEXE_sources += FieldReduction.cpp
+CEXE_sources += HybridDissipation.cpp
 CEXE_sources += LoadBalanceCosts.cpp
 CEXE_sources += LoadBalanceEfficiency.cpp
 CEXE_sources += ParticleEnergy.cpp

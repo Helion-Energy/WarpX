@@ -17,6 +17,7 @@
 #include "FieldPoyntingFlux.H"
 #include "FieldProbe.H"
 #include "FieldReduction.H"
+#include "HybridDissipation.H"
 #include "LoadBalanceCosts.H"
 #include "LoadBalanceEfficiency.H"
 #include "ParticleEnergy.H"
@@ -61,6 +62,7 @@ MultiReducedDiags::MultiReducedDiags ()
             {"ColliderRelevant",      [](CS s){return std::make_unique<ColliderRelevant>(s);}},
             {"DifferentialLuminosity",[](CS s){return std::make_unique<DifferentialLuminosity>(s);}},
             {"DifferentialLuminosity2D",[](CS s){return std::make_unique<DifferentialLuminosity2D>(s);}},
+            {"HybridDissipation",     [](CS s){return std::make_unique<HybridDissipation>(s);}},
             {"ParticleEnergy",        [](CS s){return std::make_unique<ParticleEnergy>(s);}},
             {"ParticleExtrema",       [](CS s){return std::make_unique<ParticleExtrema>(s);}},
             {"ParticleHistogram",     [](CS s){return std::make_unique<ParticleHistogram>(s);}},
