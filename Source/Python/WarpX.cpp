@@ -212,6 +212,13 @@ void init_WarpX (py::module& m)
             py::arg("lev"),
             "Get the current physical time step size on mesh-refinement level ``lev``."
         )
+        .def("setdt",
+            [](WarpX & wx, amrex::Real dt_new){ wx.setdt(dt_new); },
+            py::arg("dt"),
+            "Set the physical time step size on all mesh-refinement levels. "
+            "Requires synchronized particle velocities: call "
+            "``synchronize_velocity_with_position()`` first."
+        )
 
         .def("set_potential_on_domain_boundary",
             [](WarpX& wx,

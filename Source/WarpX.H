@@ -745,6 +745,13 @@ public:
     void sett_new (int lev, amrex::Real time) {t_new[lev] = time;}
     [[nodiscard]] amrex::Vector<amrex::Real> getdt () const {return dt;}
     [[nodiscard]] amrex::Real getdt (int lev) const {return dt.at(lev);}
+    /** Set the physical time step to \c dt_new on every mesh-refinement
+     * level (the uniform-dt invariant of non-subcycled runs; aborts under
+     * AMR subcycling). Requires the particle velocities to be synchronized
+     * with the positions (SynchronizeVelocityWithPosition) so the next
+     * step's leapfrog re-stagger uses the new step size consistently.
+     */
+    void setdt (amrex::Real dt_new);
     [[nodiscard]] int getdo_moving_window() const {return do_moving_window;}
     [[nodiscard]] amrex::Real getmoving_window_x() const {return moving_window_x;}
     [[nodiscard]] bool getis_synchronized() const {return m_is_synchronized;}
