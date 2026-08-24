@@ -4269,7 +4269,11 @@ Maxwell solver: kinetic-fluid hybrid
     the large implicit step) and ``include_electron_inertia = 1`` with
     ``electron_inertia_djedt_only = 1`` and ``electron_inertia_bdf2 = 0``. With external
     vector-potential coils the inductive :math:`\mathbf{E}_\mathrm{ext}` subtraction is
-    unconditional on this path (no vacuum branch exists to gate it).
+    unconditional on this path (no vacuum branch exists to gate it). Run with
+    ``jacobian.pc_type = none``: ``pc_block_banded`` assembles the ``e_form`` (divided)
+    Jacobian rows, which do not model this residual — measured convergence is identical to
+    the unpreconditioned solve while paying the factorization cost (a boot-time warning is
+    recorded).
 
 .. pp:param:: hybrid_pic_model.darwin_vacuum_recovery
     :type: ``bool``

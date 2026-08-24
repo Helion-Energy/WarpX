@@ -199,6 +199,20 @@ void HybridPICModel::ReadParameters ()
                 "algo.evolve_scheme = theta_implicit_hybrid (the elliptic "
                 "solve is amortized over the large implicit step; the "
                 "explicit advance does not run elliptic solves)");
+            std::string pc_type;
+            const amrex::ParmParse pp_jac("jacobian");
+            pp_jac.query("pc_type", pc_type);
+            if (pc_type == "pc_block_banded") {
+                ablastr::warn_manager::WMRecordWarning(
+                    "HybridPICModel",
+                    "jacobian.pc_type = pc_block_banded assembles the e_form "
+                    "(divided) Jacobian rows, which do not model the "
+                    "amano_form residual: measured convergence is identical "
+                    "to running with no preconditioner while paying the "
+                    "factor/apply cost. Prefer pc_type = none with "
+                    "esolve = amano_form until an amano-aware variant lands.",
+                    ablastr::warn_manager::WarnPriority::high);
+            }
         }
     }
 
