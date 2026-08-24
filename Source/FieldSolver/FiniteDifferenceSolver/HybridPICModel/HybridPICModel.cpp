@@ -681,9 +681,12 @@ void HybridPICModel::ReadParameters ()
             std::string coll_type;
             pp_coll.query("type", coll_type);
             if (coll_type == "hybrid_resistive_drag") { has_resistive_drag = true; }
+            if (coll_type == "hybrid_electron_stopping") { m_has_electron_stopping = true; }
         }
 
-        m_need_fluid_velocities   = m_has_per_species_eta || has_resistive_drag;
+        // The stopping drag also targets the electron fluid velocity Ve_fp.
+        m_need_fluid_velocities   = m_has_per_species_eta || has_resistive_drag
+                                  || m_has_electron_stopping;
         m_need_per_species_fields = m_need_fluid_velocities
                                   || m_solve_electron_energy_equation;
     }
@@ -4104,6 +4107,128 @@ void HybridPICModel::QDSMCApplyEnergySink (int const lev, amrex::Real const dt_s
 }
 
 
+amrex::MultiFab & HybridPICModel::GetFastIonHeatingStaging (int const lev) const
+{
+    // Lazily allocated when the hybrid_electron_stopping collision first
+    // deposits (nodal, on the T_e layout, no ghosts: the conjugate linear
+    // deposit from a particle in a valid cell only touches that cell's
+    // corner nodes, all of which are valid nodes of the box).
+    if (lev >= static_cast<int>(m_fast_ion_heating_mf.size())) {
+        m_fast_ion_heating_mf.resize(lev + 1);
+    }
+    if (!m_fast_ion_heating_mf[lev]) {
+        auto & warpx = WarpX::GetInstance();
+        amrex::MultiFab const & Te =
+            *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+        m_fast_ion_heating_mf[lev] = std::make_unique<amrex::MultiFab>(
+            Te.boxArray(), Te.DistributionMap(), 1, 0);
+        m_fast_ion_heating_mf[lev]->setVal(0.0_rt);
+    }
+    return *m_fast_ion_heating_mf[lev];
+}
+
+
+void HybridPICModel::QDSMCApplyFastIonHeating (int const lev) const
+{
+    ABLASTR_PROFILE("HybridPICModel::QDSMCApplyFastIonHeating()");
+
+    using warpx::fields::FieldType;
+
+    // Consume the fast-ion stopping heat staged by the
+    // hybrid_electron_stopping collision earlier THIS step (the collision
+    // stage precedes the field/source stage): with U_e = n_e k_B T_e /
+    // (gamma-1), the staged energy density E [J/m^3] becomes the per-cell
+    // increment T_e += (gamma-1) E / (n_e k_B) -- the energy sink's
+    // conversion with the opposite sign, the same solver-floor density
+    // gate, and the same Te-floor clamp discipline (a negative deposit, a
+    // particle dragged UP to a faster electron fluid, may cool). The
+    // staging field is zeroed afterwards, so on the twice-per-step source
+    // schemes the second call is a no-op.
+    if (lev >= static_cast<int>(m_fast_ion_heating_mf.size()) ||
+        !m_fast_ion_heating_mf[lev]) {
+        return;
+    }
+    amrex::MultiFab & Estage = *m_fast_ion_heating_mf[lev];
+
+    auto & warpx = WarpX::GetInstance();
+    amrex::Periodicity const & period = warpx.Geom(lev).periodicity();
+
+    // Box-seam handling: the collision deposits only into the local box's
+    // copy of a shared seam node, so the nodal redundant copies hold
+    // PARTIAL sums. SumBoundary folds every copy (and periodic images)
+    // into the same consistent total before the per-node update below, so
+    // the seam copies of T_e stay consistent.
+    Estage.SumBoundary(period);
+
+    amrex::MultiFab       & Te  = *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+    amrex::MultiFab const & rho = *warpx.m_fields.get(FieldType::rho_fp, lev);
+
+    auto const gamma_minus_1 = m_gamma - 1.0_rt;
+    auto const rho_floor     = PhysConst::q_e * m_n_floor;
+    auto const K_per_eV      = PhysConst::q_e / PhysConst::kb;   // T[eV]*this = T[K]
+    amrex::Real const te_floor_K = m_cond_te_floor * K_per_eV;
+
+    // Per-cell declined energy density [J/m^3] (sub-floor cells and the
+    // Te-floor clamp) for the audit tally. Nodal like Te: box-seam nodes
+    // carry redundant consistent copies, deduplicated by sum_unique below.
+    amrex::MultiFab declined_mf(Te.boxArray(), Te.DistributionMap(), 1, 0);
+    declined_mf.setVal(0.0_rt);
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(Te, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        amrex::Array4<amrex::Real>       const & Te_arr   = Te.array(mfi);
+        amrex::Array4<amrex::Real>       const & E_arr    = Estage.array(mfi);
+        amrex::Array4<amrex::Real const> const & rho_arr  = rho.const_array(mfi);
+        amrex::Array4<amrex::Real>       const & decl_arr = declined_mf.array(mfi);
+
+        amrex::Box const & tbox = mfi.tilebox();
+        amrex::ParallelFor(tbox, [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            amrex::Real const E_val = E_arr(i,j,k);
+            if (E_val == 0.0_rt) { return; }
+
+            amrex::Real const rho_val = rho_arr(i,j,k);
+            if (rho_val <= rho_floor) {
+                // Below the solver floor there is no fluid to heat: decline
+                // (the drag kernel skips sub-floor gathers, so this only
+                // catches partial shape overlap at density edges).
+                decl_arr(i,j,k) += E_val;
+                return;
+            }
+            amrex::Real const ne = rho_val / PhysConst::q_e;
+
+            amrex::Real const Te_K = Te_arr(i,j,k);
+            // dTe = (gamma-1) E / (n_e k_B), added.
+            amrex::Real Te_new = Te_K
+                + gamma_minus_1 * E_val / (ne * PhysConst::kb);
+            // Clamp at the floor without ever lifting a cell that already
+            // sits below it (only reachable for a negative deposit).
+            amrex::Real const te_min_K = amrex::min(Te_K, te_floor_K);
+            if (Te_new < te_min_K) {
+                decl_arr(i,j,k) += ne * PhysConst::kb
+                    * (Te_new - te_min_K) / gamma_minus_1;
+                Te_new = te_min_K;
+            }
+            Te_arr(i,j,k) = Te_new;
+        });
+    }
+
+    // Fold the declined per-cell energy density into the cumulative audit
+    // tally [J] (unique-node sum, periodic images deduplicated), then zero
+    // the staging field for the next step's deposits.
+    auto const dx = warpx.Geom(lev).CellSizeArray();
+    amrex::Real dV = 1.0_rt;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) { dV *= dx[d]; }
+    m_stopping_declined_J += declined_mf.sum_unique(0, false, period) * dV;
+    Estage.setVal(0.0_rt);
+
+    Te.FillBoundary(Te.nGrowVect(), period);
+}
+
+
 bool HybridPICModel::IsRelaxationExcluded (std::string const & species_name) const
 {
     return std::find(m_relaxation_excluded_species.begin(),
@@ -5192,6 +5317,28 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
         QdsmcPhaseMinTe(lev, "sources_energy_sink");
     }
 
+    // Step 6b'': fast-ion stopping heat. The hybrid_electron_stopping
+    // collision dragged its species toward u_e in the COLLISION stage of
+    // this step and staged the weighted kinetic-energy loss per cell; here
+    // the SOURCE stage of the same step converts it into a T_e increment
+    // (one-step staging, no energy lost). Applied in full on the first
+    // source call and zeroed, so the twice-per-step (Strang) schemes do not
+    // double-deliver; bracketed as its own budget class, a sub-account of
+    // src like the sink. The Te_shunt_threshold machinery is not bypassed:
+    // the shunt runs earlier in this sequence, so any Te excess this heat
+    // creates is capped at the next source application.
+    if (m_has_electron_stopping) {
+        std::array<amrex::Real, 2> up0{}, up1{};
+        if (m_energy_budget) { up0 = QDSMCClassEnergy(lev); }
+        QDSMCApplyFastIonHeating(lev);
+        if (m_energy_budget) {
+            up1 = QDSMCClassEnergy(lev);
+            m_ebud_stopping_bulk += up1[0] - up0[0];
+            m_ebud_stopping_band += up1[1] - up0[1];
+        }
+        QdsmcPhaseMinTe(lev, "sources_fast_ion_stopping");
+    }
+
     // Step 6c: stochastic drag-diffusion ion-heating operator -- delivers the Q_ei
     // conjugate (when relaxation is on) and/or the redirected Joule energy
     // (when the redirect is on), so the ions are heated by one mechanism.
@@ -5208,7 +5355,7 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
     // bit-identical to #6982).
     if (fill_te_ghosts &&
         (m_include_joule_heating || m_include_temperature_relaxation ||
-         m_has_energy_sink)) {
+         m_has_energy_sink || m_has_electron_stopping)) {
         amrex::MultiFab & Te =
             *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
         Te.FillBoundary(warpx.Geom(lev).periodicity());
@@ -5221,6 +5368,7 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
         (m_te_shunt_eV > 0._rt) ||
         (m_cond_eb_bc == 1) ||
         m_has_energy_sink ||
+        m_has_electron_stopping ||
         ((m_joule_redirect_to_ions || m_te_shunt_eV > 0._rt) &&
          (m_joule_redirect_n_min_factor > 0._rt ||
           m_joule_redirect_kick_cap_vth_frac > 0._rt));
@@ -5232,6 +5380,7 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
             << " kick_cap=" << m_joule_dropped_kick_cap_J
             << " te_shunt=" << m_te_shunt_J
             << " sink_floor=" << m_energy_sink_declined_J
+            << " stopping_floor=" << m_stopping_declined_J
             << " wall_bath=" << m_cond_eb_tally
             << " (cumulative; wall_bath > 0 = into plasma)\n";
     }
@@ -9368,8 +9517,10 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
                     << " src_band="  << m_ebud_src_band
                     << " sink_bulk=" << m_ebud_sink_bulk
                     << " sink_band=" << m_ebud_sink_band
+                    << " stopping_bulk=" << m_ebud_stopping_bulk
+                    << " stopping_band=" << m_ebud_stopping_band
                     << " U_bulk=" << ub5[0] << " U_band=" << ub5[1]
-                    << " (dU cumulative; adv includes comp; src includes sink)\n";
+                    << " (dU cumulative; adv includes comp; src includes sink+stopping)\n";
             }
         }
 

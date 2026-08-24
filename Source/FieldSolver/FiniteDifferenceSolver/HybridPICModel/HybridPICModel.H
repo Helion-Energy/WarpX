@@ -1159,6 +1159,42 @@ public:
      * site covers every explicit time-advance scheme. */
     void QDSMCApplyEnergySink (int lev, amrex::Real dt_src) const;
 
+    /** True when a hybrid_electron_stopping collision is registered: fast
+     * ions drag against the electron fluid (Goldston & Rutherford
+     * slowing-down on the self-consistent n_e, T_e, u_e) and their
+     * kinetic-energy loss heats T_e through the staging field below. Also
+     * arms m_need_fluid_velocities (the drag target is Ve_fp). */
+    bool m_has_electron_stopping = false;
+
+    /** Per-cell staged fast-ion heating energy density [J/m^3], nodal like
+     * T_e (one MultiFab per level, allocated lazily on first access). The
+     * hybrid_electron_stopping collision scatter-adds each particle's
+     * weighted kinetic-energy loss here during the collision stage of the
+     * step; QDSMCApplyFastIonHeating consumes (and zeroes) it in the source
+     * stage of the SAME step -- one-step staging, no energy lost. Mutable:
+     * written through the const model pointer the collision holds. */
+    mutable amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_fast_ion_heating_mf;
+
+    /** Lazily allocate (zero-initialized, nodal on the T_e layout) and
+     * return the fast-ion heating staging field for this level. */
+    amrex::MultiFab & GetFastIonHeatingStaging (int lev) const;
+
+    /** Cumulative fast-ion heating energy declined by the solver-floor gate
+     * or the Te-floor clamp [J] (globally reduced; printed with the
+     * dropped-energy channels as stopping_floor). */
+    mutable amrex::Real m_stopping_declined_J = 0.0;
+
+    /** Consume the staged fast-ion heating: SumBoundary the staging field
+     * (the deposit writes each box's own copy of shared seam nodes, so the
+     * nodal redundant copies hold partial sums that must be folded into
+     * consistent totals first), add dTe = (gamma-1) E / (n_e kB) per cell
+     * (the energy sink's conversion with the opposite sign, same
+     * solver-floor gate and Te-floor clamp discipline), then zero the
+     * staging field. Runs inside ApplyQdsmcEnergySources after the energy
+     * sink; on the twice-per-step source schemes the second call finds the
+     * staging already zeroed and no-ops. */
+    void QDSMCApplyFastIonHeating (int lev) const;
+
     /** Independent density gate for the Joule heating source [m^-3]: cells
      * with n_e <= max(joule_heating_n_min, n_floor) receive no Joule heat
      * (the declined source energy goes to the dropped tally, channel
@@ -1266,6 +1302,10 @@ public:
      * sink runs inside ApplyQdsmcEnergySources, whose brackets set the src
      * channel), bracketed separately when the instrument is armed. */
     mutable amrex::Real m_ebud_sink_bulk = 0.0, m_ebud_sink_band = 0.0;
+    /** Fast-ion stopping heat part of the source-stage dU (a sub-account of
+     * src, like the sink), bracketed separately when the instrument is
+     * armed. */
+    mutable amrex::Real m_ebud_stopping_bulk = 0.0, m_ebud_stopping_band = 0.0;
 
     /** Class-summed thermal energy {bulk, band} [J] for the energy budget
      * (nodal sum_unique; classes per the m_energy_budget doc). */

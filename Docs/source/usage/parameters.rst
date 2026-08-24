@@ -2975,6 +2975,25 @@ Details about the collision models can be found in the :ref:`theory section <mul
     - ``background_stopping`` for slowing of ions due to collisions with electrons or ions.
       This implements the approximate formulae as derived in Introduction to Plasma Physics,
       from Goldston and Rutherford, section 14.2.
+    - ``hybrid_electron_stopping`` for slowing of fast ions on the self-consistent electron
+      fluid of the hybrid-PIC solver, with the lost kinetic energy heating the electron
+      temperature. This applies the same Goldston and Rutherford ion-on-electron slowing-down
+      rate as ``background_stopping`` with ``background_type = electrons`` (their equation 14.12,
+      with the Coulomb logarithm supplied by :pp:param:`<collision_name>.coulomb_log`), but
+      evaluates it from the hybrid solver's own fields -- :math:`n_e` from the deposited charge
+      density and :math:`T_e` from the electron-energy-equation temperature field -- and drags
+      each particle's velocity exponentially toward the local electron fluid velocity
+      :math:`u_e` (drag only, no diffusion), handling the relativistic proper-velocity
+      conversion exactly. Each particle's weighted kinetic-energy loss is deposited per cell
+      and added to :math:`T_e` in the source stage of the same step, so the channel conserves
+      energy (when the energy-budget instrument is armed it is bracketed as its own classes,
+      ``stopping_bulk``/``stopping_band``, a sub-account of the source stage). This collision
+      requires :pp:param:`hybrid_pic_model.solve_electron_energy_equation` to be enabled;
+      stopping on a prescribed (non-evolving) background remains ``background_stopping``'s job,
+      and ion stopping (drag on background ions) is out of scope here (use
+      ``background_stopping`` with ``background_type = ions``). For a species pushed with
+      ``<species>.do_subcycled_push`` the drag is still applied once per global time step
+      (the exponential update is unconditionally stable at any :math:`\nu_s \Delta t`).
     - ``bremsstrahlung`` for slowing of electrons due to Bremsstrahlung collisions with ions.
       This uses the cross sections as given by `Seltzer and Berger <https://doi.org/10.1016/0092-640X(86)90014-8>`__.
     - ``inverse_bremsstrahlung`` for inverse bremstrahlung absorption of photons from the collisions of electrons and ions.
@@ -3004,8 +3023,10 @@ Details about the collision models can be found in the :ref:`theory section <mul
     Wtih ``inverse_bremsstrahlung``, this is the photon species being absorbed and the electron species they are colliding with, in that order.
     If using ``background_mcc`` or ``background_stopping`` type this should be the name of the
     species for which collisions with a background will be included.
+    If using ``hybrid_electron_stopping`` this should be the name of the fast ion species
+    slowed on the electron fluid.
     If using ``pulsed_decay`` type this should be the name of the parent species.
-    In these three cases, only one species name should be given.
+    In these four cases, only one species name should be given.
     If using ``linear_breit_wheeler`` these should be two photon species.
     If using ``linear_compton``, these should be two species: first, a photon species, and second, a lepton species, in this exact order.
 
@@ -3158,6 +3179,14 @@ Details about the collision models can be found in the :ref:`theory section <mul
 
     Only for ``background_stopping``, where it is required when ``background_type`` is set to ``ions``.
     This specifies the charge state of the background ions.
+
+.. pp:param:: <collision_name>.coulomb_log
+    :type: ``float``
+
+    Only for ``hybrid_electron_stopping``, where it is required and must be positive.
+    The Coulomb logarithm :math:`\log\Lambda` used in the slowing-down rate (unlike
+    ``background_stopping``, which computes it from the background parameters, the
+    self-consistent-fluid operator takes it as an input).
 
 .. pp:param:: <collision_name>.background_type
     :type: ``string``

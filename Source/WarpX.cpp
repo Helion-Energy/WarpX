@@ -1468,6 +1468,22 @@ WarpX::ReadParameters ()
                 WARPX_ALWAYS_ASSERT_WITH_MESSAGE(energy_sink_tmp.empty(),
                     "hybrid_pic_model.qdsmc_energy_sink(rho,Te,B,t) is not yet supported "
                     "with algo.evolve_scheme = theta_implicit_hybrid");
+                // The fast-ion stopping heat is consumed inside
+                // ApplyQdsmcEnergySources, which the theta-implicit energy
+                // stage does not run -- the staged energy would silently
+                // accumulate and never land on T_e.
+                std::vector<std::string> collision_names_tmp;
+                const amrex::ParmParse pp_collisions_tmp("collisions");
+                pp_collisions_tmp.queryarr("collision_names", collision_names_tmp);
+                for (auto const& coll_nm : collision_names_tmp) {
+                    const amrex::ParmParse pp_coll_tmp(coll_nm);
+                    std::string coll_type_tmp;
+                    pp_coll_tmp.query("type", coll_type_tmp);
+                    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                        coll_type_tmp != "hybrid_electron_stopping",
+                        "The hybrid_electron_stopping collision is not yet supported "
+                        "with algo.evolve_scheme = theta_implicit_hybrid");
+                }
                 std::vector<std::string> species_names_tmp;
                 const amrex::ParmParse pp_particles_tmp("particles");
                 pp_particles_tmp.queryarr("species_names", species_names_tmp);
