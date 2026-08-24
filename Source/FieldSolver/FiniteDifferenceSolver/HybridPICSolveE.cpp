@@ -779,7 +779,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 << "), split = "
                 << (hybrid_model->m_gol_centered_split
                         ? "centered" : "lie")
-                << "\n";
+                << ", n_min = " << hybrid_model->m_gol_n_min
+                << " m^-3 (must be the one-count level)\n";
         }
 
 #ifdef AMREX_USE_OMP

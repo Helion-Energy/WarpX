@@ -478,7 +478,21 @@ public:
      *  exponentially with NO diffusion CFL. v1: collocated Cartesian
      *  only. Inputs: hybrid_pic_model.esolve = ohm|gol, gol_sweeps,
      *  gol_cfl_alpha, gol_n_min [m^-3, the one-count level],
-     *  gol_vacuum_gamma_frac. */
+     *  gol_vacuum_gamma_frac.
+     *
+     *  gol_n_min is a CONTRACT, not a tuning knob: it must be the
+     *  one-macroparticle-per-cell density (n_plasma / NPPC, evaluated
+     *  where cells are smallest). The quasineutral blend treats cells
+     *  above ~n_min as plasma and pins their E toward the DIVIDED-Ohm
+     *  target (the 1/rho this solver otherwise eliminates); a value
+     *  set far below the one-count level therefore hands deposit-noise
+     *  void cells (density >> n_min but a tiny fraction of the local
+     *  plasma) an O(1)-weighted 1/rho pin, and E runs away at isolated
+     *  cells within a few substeps (symptom: NaN in B in the first
+     *  steps, placement varying with the particle-noise realization,
+     *  e.g. with rank count). Measured: n_min 4000x under one-count
+     *  ran away at substep 17; the one-count value is stable at every
+     *  tested rank count. */
     bool m_esolve_gol = false;
     int  m_gol_sweeps = 4;
     amrex::Real m_gol_alpha = 0.5;
