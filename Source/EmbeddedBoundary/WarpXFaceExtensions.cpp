@@ -738,8 +738,8 @@ WarpX::ComputeOneWayExtensions ()
                                     [=] (amrex::Real rem) {
                                         const int flag_neigh = ::GetNeigh(flag_info_face, i, j, k, i_n, j_n, idim);
                                         return rem > amrex::Real(0.)
-                                            && (flag_neigh == FaceInfo::available 
-                                                || flag_neigh == FaceInfo::intruded)   
+                                            && (flag_neigh == FaceInfo::available
+                                                || flag_neigh == FaceInfo::intruded)
                                             && flag_ext_face(i, j, k);
                                     });
 
