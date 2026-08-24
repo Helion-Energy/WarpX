@@ -105,6 +105,21 @@ SubcycledParticleContainer::ComputeSubcycleCount (ablastr::fields::MultiFabRegis
     // The small tolerance avoids an extra (zero-length) subcycle when
     // dt/dt_sub is an exact integer up to roundoff.
     m_n_subcycles = amrex::max(1, static_cast<int>(std::ceil(dt/dt_sub * (1._rt - 1.e-12))));
+
+    if (!m_boot_printed)
+    {
+        amrex::Print() << "[subcycle] " << species_name << ": "
+                       << m_n_subcycles << " subcycles/step (dt_sub = "
+                       << m_dt_subcycle << " s, |B|max = " << bmax
+                       << " T, cyclotron CFL " << m_cfl_cyclotron
+                       << ", grid CFL " << m_cfl_grid
+                       << ", v_ref = " << v_ref
+                       << " m/s, cap " << m_max_subcycles
+                       << ", orbit-averaged deposition "
+                       << (m_do_orbit_averaged_deposition ? "on" : "off")
+                       << ")\n";
+        m_boot_printed = true;
+    }
 }
 
 amrex::Real
@@ -377,7 +392,14 @@ SubcycledParticleContainer::DepositCurrent (ablastr::fields::MultiLevelVectorFie
         return;
     }
 
-    WarpXParticleContainer::DepositCurrent(J, dt, relative_time);
+    // Raw fallback (bootstrap deposit before the first subcycled Evolve, or
+    // orbit-averaged deposition disabled): a subcycled species can cross many
+    // cells per global step, so honoring a global-step relative_time here
+    // would shift the deposit positions beyond the guard cells (out-of-bounds
+    // writes) while linearly back-extrapolating a strongly curved orbit.
+    // Deposit at the instantaneous positions instead.
+    amrex::ignore_unused(relative_time);
+    WarpXParticleContainer::DepositCurrent(J, dt, 0._rt);
 }
 
 void

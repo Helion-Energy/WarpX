@@ -182,6 +182,9 @@ protected:
     int m_n_subcycles = 1;
     amrex::Real m_dt_subcycle = 0.0;
 
+    /** One-time boot print of the subcycle configuration (first Evolve) */
+    bool m_boot_printed = false;
+
     /** Orbit-averaged moment accumulators and per-subcycle scratch (level 0
      * only; multi-level runs are not supported) */
     std::unique_ptr<amrex::MultiFab> m_rho_avg;
