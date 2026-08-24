@@ -199,7 +199,7 @@ namespace
                     // Modify the area according to the BCK algorithm
                     S(i, j, k) = ::ComputeSStab<idim>(i, j, k, lx, ly, lz, dx, dy, dz);
                     // Update the face info so that the solver doesn't think that this face is being extended
-                    flag_info_face_max_lev_idim(i, j, k) = -1;
+                    flag_info_face_max_lev_idim(i, j, k) = FaceInfo::bck_stabilized;
                 }
             });
         }
@@ -444,9 +444,10 @@ namespace
                     // has given away already some area, so we use Sz_red rather than Sz.
                     // If no face is available we don't do anything and we will need to use the
                     // multi-face extensions.
+                    const int flag_neigh = GetNeigh(flag_info_face, i, j, k, i_n, j_n, idim);
                     if (GetNeigh(S_red, i, j, k, i_n, j_n, idim) > S_ext
-                        && (GetNeigh(flag_info_face, i, j, k, i_n, j_n, idim) == 1
-                        || GetNeigh(flag_info_face, i, j, k, i_n, j_n, idim) == 2)
+                        && (flag_neigh == FaceInfo::available
+                            || flag_neigh == FaceInfo::intruded)
                         && flag_ext_face(i, j, k) && ! stop) {
                         n_borrow += 1;
                         stop = true;
@@ -487,7 +488,8 @@ namespace
         for(int i_loc = 0; i_loc <= 2; i_loc++){
             for(int j_loc = 0; j_loc <= 2; j_loc++){
                 const int flag = GetNeigh(flag_info_face, i, j, k, i_loc - 1, j_loc - 1, idim);
-                local_avail(i_loc, j_loc) = flag == 1 || flag == 2;
+                local_avail(i_loc, j_loc) = flag == FaceInfo::available
+                                            || flag == FaceInfo::intruded;
             }
         }
 
@@ -734,9 +736,10 @@ WarpX::ComputeOneWayExtensions ()
                                     ::GetNeighPtr(S_mod, i, j, k, i_n, j_n, idim),
                                     S_ext, amrex::Minus<amrex::Real>(),
                                     [=] (amrex::Real rem) {
+                                        const int flag_neigh = ::GetNeigh(flag_info_face, i, j, k, i_n, j_n, idim);
                                         return rem > amrex::Real(0.)
-                                            && (::GetNeigh(flag_info_face, i, j, k, i_n, j_n, idim) == 1
-                                                || ::GetNeigh(flag_info_face, i, j, k, i_n, j_n, idim) == 2)
+                                            && (flag_neigh == FaceInfo::available 
+                                                || flag_neigh == FaceInfo::intruded)   
                                             && flag_ext_face(i, j, k);
                                     });
 
@@ -749,7 +752,9 @@ WarpX::ComputeOneWayExtensions ()
                                                                       borrowing_neigh_faces);
                                     borrowing_area[ps] = S_ext;
 
-                                    ::SetNeigh(flag_info_face, 2, i, j, k, i_n, j_n, idim);
+                                    ::SetNeigh(flag_info_face,
+                                               static_cast<int>(FaceInfo::intruded),
+                                               i, j, k, i_n, j_n, idim);
                                     // Add the area to the intruding face.
                                     S_mod(i, j, k) = S(i, j, k) + S_ext;
                                     flag_ext_face(i, j, k) = false;
@@ -872,7 +877,8 @@ WarpX::ComputeEightWaysExtensions ()
                     for(int i_loc = 0; i_loc <= 2; i_loc++){
                         for(int j_loc = 0; j_loc <= 2; j_loc++){
                             auto const flag = ::GetNeigh(flag_info_face, i, j, k, i_loc - 1, j_loc - 1, idim);
-                            local_avail(i_loc, j_loc) = flag == 1 || flag == 2;
+                            local_avail(i_loc, j_loc) = flag == FaceInfo::available
+                                                        || flag == FaceInfo::intruded;
                         }
                     }
 
@@ -938,7 +944,9 @@ WarpX::ComputeEightWaysExtensions ()
                                                                       borrowing_neigh_faces);
                                     borrowing_area[ps + count] = patch;
 
-                                    ::SetNeigh(flag_info_face, 2, i, j, k, i_n, j_n, idim);
+                                    ::SetNeigh(flag_info_face,
+                                               static_cast<int>(FaceInfo::intruded),
+                                               i, j, k, i_n, j_n, idim);
 
                                     S_mod(i, j, k) += patch;
                                     count +=1;

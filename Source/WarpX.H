@@ -61,6 +61,7 @@
 #include <AMReX_Array.H>
 #include <AMReX_Config.H>
 #ifdef AMREX_USE_EB
+#   include <AMReX_EB2.H>
 #   include <AMReX_EBFabFactory.H>
 #endif
 #include <AMReX_GpuContainers.H>
@@ -140,6 +141,7 @@ public:
     // Functions used by implicit solvers
     //
     void SyncMassMatricesPC ();
+    void SyncMassMatrices ();
     void SaveParticlesAtImplicitStepStart ();
     void FinishImplicitParticleUpdate (amrex::Real a_time);
     void SetElectricFieldAndApplyBCs ( const WarpXSolverVec& a_E, amrex::Real a_time );
@@ -429,7 +431,6 @@ public:
     /**
      * Determine the simulation timestep from the time step limiters
      */
-    amrex::Real ParticleGridSpeedMax ();
     amrex::Real GlobalPlasmaFrequencyMax ();
     amrex::Real GlobalCyclotronFrequencyMax ();
     void ApplyDtLimiters ();
@@ -987,6 +988,16 @@ public:
     //! This function is called in amrex::AmrCore::InitFromScratch.
     void PostProcessBaseGrids (amrex::BoxArray& ba0) const final;
 
+#ifdef AMREX_USE_EB
+    amrex::EB2::IndexSpace const* GetEBIndexSpace (int lev) const {
+        // If EB data was built separately for each mesh-refinement level, return the one for
+        // this level; otherwise return the single global EB data (built at the finest level
+        // and coarsened for coarser levels).
+        return (m_build_eb_data_per_level && lev < m_eb_index_space.size())
+            ? m_eb_index_space[lev] : &(amrex::EB2::IndexSpace::top());
+    }
+#endif
+
 protected:
 
     /**
@@ -1261,10 +1272,12 @@ private:
      */
     amrex::Vector<  std::unique_ptr<amrex::iMultiFab> > m_eb_reduce_particle_shape;
 
-    /** EB: for every mesh face flag_info_face contains a:
-     *          * 0 if the face needs to be extended
-     *          * 1 if the face is large enough to lend area to other faces
-     *          * 2 if the face is actually intruded by other face
+    /** EB: for every mesh face flag_info_face contains one of the FaceInfo::Flag values:
+     *          * FaceInfo::extended if the face needs to be extended
+     *          * FaceInfo::available if the face is large enough to lend area to other faces
+     *          * FaceInfo::intruded if the face is actually intruded by other face
+     *          * FaceInfo::bck_stabilized if the face could not be extended and was stabilized
+     *            with the BCK correction instead
      * It is initialized in WarpX::MarkExtensionCells
      * This is only used for the ECT solver.*/
     amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>, 3 > > m_flag_info_face;
@@ -1657,6 +1670,15 @@ private:
      *        is set in WarpX::ReadParameters().
      */
     bool m_collisions_split_momentum_push;
+
+#ifdef AMREX_USE_EB
+    /** Whether to build the EB data separately for each mesh-refinement level (true, default),
+     *  instead of building it once at the finest level and coarsening it down for coarser levels.
+     *  Set via the runtime parameter "warpx.build_eb_data_per_level".
+     */
+    bool m_build_eb_data_per_level = true;
+    amrex::Vector<amrex::EB2::IndexSpace const*> m_eb_index_space;
+#endif
 };
 
 #endif
