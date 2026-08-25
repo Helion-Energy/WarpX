@@ -339,6 +339,27 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("qdsmc_conduction_vacuum_fast_front",
                     m_cond_vacuum_fast_front);
     {
+        // The qdsmc_advection_* family configures the SDE conduction
+        // operator's advective sweep/remap machinery ONLY
+        // (qdsmc_conduction_operator = sde). It is inert under the
+        // production fd operator and does NOT affect the Te transport
+        // step. Formerly named qdsmc_conduction_*, which invited
+        // misreading it as the conduction-operator selection; the old
+        // keys abort below.
+        for (auto const & old_key : {
+                 "qdsmc_conduction_form",
+                 "qdsmc_conduction_reconstruction",
+                 "qdsmc_conduction_slope_limiter",
+                 "qdsmc_conduction_fluxform_unsplit",
+                 "qdsmc_conduction_compensate"}) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !pp_hybrid.contains(old_key),
+                "hybrid_pic_model." + std::string(old_key) + " was renamed: "
+                "use the qdsmc_advection_* spelling (these knobs configure "
+                "the SDE conduction operator's advective sweep/remap, not "
+                "the conduction operator selection — see "
+                "qdsmc_conduction_operator).");
+        }
         // Default = the production/gate-passed form: fluxform split sweeps
         // with the closed floor faces and the per-line EB machinery.
         // scatter/layer are the historical control arms -- they keep pre-EB
@@ -348,13 +369,13 @@ void HybridPICModel::ReadParameters ()
         // wall's Te fill). Conduction itself is off unless the kappa_par
         // parser is given, so decks without conduction are unaffected.
         std::string form = "fluxform";
-        pp_hybrid.query("qdsmc_conduction_form", form);
-        if (form == "scatter") { m_cond_form = 0; }
-        else if (form == "layer") { m_cond_form = 1; }
-        else if (form == "fluxform") { m_cond_form = 2; }
+        pp_hybrid.query("qdsmc_advection_form", form);
+        if (form == "scatter") { m_adv_form = 0; }
+        else if (form == "layer") { m_adv_form = 1; }
+        else if (form == "fluxform") { m_adv_form = 2; }
         else {
             WARPX_ABORT_WITH_MESSAGE(
-                "hybrid_pic_model.qdsmc_conduction_form must be 'scatter', "
+                "hybrid_pic_model.qdsmc_advection_form must be 'scatter', "
                 "'layer' or 'fluxform'");
         }
         std::string interp = "monocubic";
@@ -390,50 +411,50 @@ void HybridPICModel::ReadParameters ()
                 "hybrid_pic_model.qdsmc_conduction_deposit_kernel must be "
                 "'hat' or 'keys'");
         }
-        pp_hybrid.query("qdsmc_conduction_compensate", m_cond_compensate);
+        pp_hybrid.query("qdsmc_advection_compensate", m_adv_compensate);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            !m_cond_compensate ||
+            !m_adv_compensate ||
             (m_cond_deposit_kernel == 0 && !m_qdsmc_gradient_deposit),
-            "hybrid_pic_model.qdsmc_conduction_compensate requires the hat "
+            "hybrid_pic_model.qdsmc_advection_compensate requires the hat "
             "deposit kernel and qdsmc_gradient_deposit = 0 (the FCT pass "
             "replaces the B1 correction)");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            !(m_cond_form == 2 && m_cond_compensate),
-            "hybrid_pic_model.qdsmc_conduction_compensate is a scatter-form "
+            !(m_adv_form == 2 && m_adv_compensate),
+            "hybrid_pic_model.qdsmc_advection_compensate is a scatter-form "
             "option; the fluxform remap is conservative and monotone by "
             "construction");
         std::string slim = "mc";
-        pp_hybrid.query("qdsmc_conduction_slope_limiter", slim);
-        if (slim == "mc") { m_cond_slope_limiter = 0; }
-        else if (slim == "none") { m_cond_slope_limiter = 1; }
+        pp_hybrid.query("qdsmc_advection_slope_limiter", slim);
+        if (slim == "mc") { m_adv_slope_limiter = 0; }
+        else if (slim == "none") { m_adv_slope_limiter = 1; }
         else {
             WARPX_ABORT_WITH_MESSAGE(
-                "hybrid_pic_model.qdsmc_conduction_slope_limiter must be "
+                "hybrid_pic_model.qdsmc_advection_slope_limiter must be "
                 "'mc' or 'none'");
         }
-        pp_hybrid.query("qdsmc_conduction_fluxform_unsplit",
-                        m_cond_ff_unsplit);
+        pp_hybrid.query("qdsmc_advection_fluxform_unsplit",
+                        m_adv_ff_unsplit);
         std::string recon = "ppm";
         bool const recon_given =
-            pp_hybrid.query("qdsmc_conduction_reconstruction", recon);
-        if (recon == "plm") { m_cond_reconstruction = 0; }
-        else if (recon == "ppm") { m_cond_reconstruction = 1; }
+            pp_hybrid.query("qdsmc_advection_reconstruction", recon);
+        if (recon == "plm") { m_adv_reconstruction = 0; }
+        else if (recon == "ppm") { m_adv_reconstruction = 1; }
         else {
             WARPX_ABORT_WITH_MESSAGE(
-                "hybrid_pic_model.qdsmc_conduction_reconstruction must be "
+                "hybrid_pic_model.qdsmc_advection_reconstruction must be "
                 "'plm' or 'ppm'");
         }
-        if (m_cond_ff_unsplit && !recon_given) {
+        if (m_adv_ff_unsplit && !recon_given) {
             // the unsplit control arm's piece bookkeeping is PLM-exact;
             // the ppm DEFAULT quietly steps aside rather than aborting
-            m_cond_reconstruction = 0;
+            m_adv_reconstruction = 0;
         }
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            !(m_cond_reconstruction == 1 && m_cond_ff_unsplit),
-            "hybrid_pic_model.qdsmc_conduction_reconstruction = ppm is "
+            !(m_adv_reconstruction == 1 && m_adv_ff_unsplit),
+            "hybrid_pic_model.qdsmc_advection_reconstruction = ppm is "
             "implemented for the split fluxform sweeps only (the unsplit "
             "donor piece bookkeeping is PLM-exact); set it to 'plm' when "
-            "using qdsmc_conduction_fluxform_unsplit");
+            "using qdsmc_advection_fluxform_unsplit");
         pp_hybrid.query("qdsmc_conduction_closed_floor_faces",
                         m_cond_closed_floor_faces);
         pp_hybrid.query("qdsmc_eb_marker_reflect", m_qdsmc_eb_marker_reflect);
@@ -1126,7 +1147,7 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
     // The contamination tally taps the split-fluxform conduction sweeps
     // only; warn when it is armed on an untapped control form.
     if (m_contam_n_boundary > 0.0 && m_include_thermal_conduction &&
-        (m_cond_form != 2 || m_cond_ff_unsplit)) {
+        (m_adv_form != 2 || m_adv_ff_unsplit)) {
         ablastr::warn_manager::WMRecordWarning(
             "HybridPICModel",
             "hybrid_pic_model.qdsmc_contamination_n_boundary is set, but the "
@@ -6891,14 +6912,14 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                       c_dxx, c_dxy, c_dxz, c_dyy, c_dyz, c_dzz, c_ncomp };
     // The layer form's curved-foot trace samples b at the half-displacement
     // point, up to ~max_hop cells away; the scatter form only reads +-1.
-    int const ng_cond = (m_cond_form == 1 && m_cond_curved_feet)
+    int const ng_cond = (m_adv_form == 1 && m_cond_curved_feet)
         ? static_cast<int>(std::ceil(m_cond_max_hop)) + 2 : 1;
     amrex::MultiFab cond(Te.boxArray(), Te.DistributionMap(), Cond::c_ncomp,
                          ng_cond);
 
     // Deposit target: guard reach must cover the clamped hop.
     bool const dep_keys = (m_cond_deposit_kernel == 1);
-    bool const compensate = m_cond_compensate;
+    bool const compensate = m_adv_compensate;
     int const ng_dep = static_cast<int>(std::ceil(m_cond_max_hop))
                        + (dep_keys ? 3 : 2);
     // comps 1..SPACEDIM (compensated deposit only): the bookkept per-axis
@@ -7042,7 +7063,7 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
     // scatter deposit. TODO(Thrust D): reflected feet at walls replace the
     // E7-style clamp; vacuum_fast_front semantics differ here (floored
     // nodes keep their Te and are only read, never updated).
-    if (m_cond_form == 1)
+    if (m_adv_form == 1)
     {
         int const ng_gather =
             static_cast<int>(std::ceil(m_cond_max_hop)) + 3;
@@ -7400,7 +7421,7 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
     // scratch, no atomics, race-free -> OMP-threaded. Wall faces carry
     // zero flux = exact adiabatic default (replaces the E7 clamp;
     // Thrust D adds tallies/isothermal variants on the same faces).
-    if (m_cond_form == 2)
+    if (m_adv_form == 2)
     {
         // The sweeps clamp the per-axis displacement at
         // min(max_hop, ff_rmax) cells -- a fixed safety independent of the
@@ -7412,9 +7433,9 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
         // 3*ff_rmax+4 covers every read below.
         int constexpr ff_rmax = 6;
         int const ng_f = 3*ff_rmax + 4;
-        bool const slim_off = (m_cond_slope_limiter == 1);
-        bool const ff_unsplit = m_cond_ff_unsplit;
-        bool const recon_ppm = (m_cond_reconstruction == 1);
+        bool const slim_off = (m_adv_slope_limiter == 1);
+        bool const ff_unsplit = m_adv_ff_unsplit;
+        bool const recon_ppm = (m_adv_reconstruction == 1);
         bool const closed_ff = m_cond_closed_floor_faces;
 
         // Staircase EB conduction BC (per-sweep-line form, see the
@@ -7429,7 +7450,7 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
         auto const plo_arr = geom.ProbLoArray();
         auto const ebTe = m_cond_eb_Te;
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!(ff_unsplit && has_eb),
-            "qdsmc_conduction_fluxform_unsplit is a periodic-instrument "
+            "qdsmc_advection_fluxform_unsplit is a periodic-instrument "
             "control arm and has no EB wall handling; use the split "
             "sweeps with embedded boundaries");
 

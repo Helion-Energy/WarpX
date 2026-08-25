@@ -1492,12 +1492,12 @@ public:
      *  (limited reconstruction), and the displacement field interpolates
      *  continuously between nodes so the source-evaluated pushforward
      *  error of the deposit kernels is absent; wall faces carry zero flux
-     *  = exact adiabatic default). Input: qdsmc_conduction_form =
+     *  = exact adiabatic default). Input: qdsmc_advection_form =
      *  scatter | layer | fluxform. DEFAULT fluxform (the gate-passed
      *  production form; the only one with the closed floor faces and the
      *  per-line EB machinery -- next to a maintained wall band the
      *  mask-less control arms act as a perpetual bath donor). */
-    int m_cond_form = 2;
+    int m_adv_form = 2;
 
     /** Layer-form interpolant: 0 = linear (bilinear; the exact adjoint of
      *  the uncorrected hat scatter -- control arm, carries the full
@@ -1552,8 +1552,8 @@ public:
      *  exact (flux-form) conservation. Requires the hat kernel and
      *  qdsmc_gradient_deposit = 0 (B1 would partially cancel the variance
      *  the tally then over-compensates). Input:
-     *  qdsmc_conduction_compensate. */
-    bool m_cond_compensate = false;
+     *  qdsmc_advection_compensate. */
+    bool m_adv_compensate = false;
 
     /** FCT limiter for the compensated deposit. 0 = bb (Boris--Book,
      *  bounds from post-deposit neighbors only: provably clips the
@@ -1573,8 +1573,8 @@ public:
      *  slopes -- DIAGNOSTIC control arm: separates limiter-clipping at
      *  filament crests from splitting error in the curvature-leak
      *  metric; can ring at fronts). Input:
-     *  qdsmc_conduction_slope_limiter = mc | none. */
-    int m_cond_slope_limiter = 0;
+     *  qdsmc_advection_slope_limiter = mc | none. */
+    int m_adv_slope_limiter = 0;
 
     /** Fluxform reconstruction order. 0 = plm (MC-limited linear, the
      *  original production reconstruction). 1 = ppm (Colella--Woodward
@@ -1591,11 +1591,11 @@ public:
      *  resolution property, C.7d closeout). Default ppm (Eric,
      *  2026-08-05): full gauntlet green, aligned constant 6-7x below
      *  plm, new campaign-best ZK front, no undershoot. Split sweeps
-     *  only; with qdsmc_conduction_fluxform_unsplit the default
+     *  only; with qdsmc_advection_fluxform_unsplit the default
      *  silently reverts to plm (the unsplit piece bookkeeping is
      *  PLM-exact) — explicitly requesting ppm + unsplit aborts. Input:
-     *  qdsmc_conduction_reconstruction = plm | ppm. */
-    int m_cond_reconstruction = 1;
+     *  qdsmc_advection_reconstruction = plm | ppm. */
+    int m_adv_reconstruction = 1;
 
     /** Fluxform unsplit donor transport (plan doc C.7d GF3 rung, fork (b):
      *  CSLAM-style flux form). The dimensionally split sweeps remap the
@@ -1613,8 +1613,8 @@ public:
      *  telescoping-exact; each leg keeps the forward-donor fold rule
      *  (degenerate image = point mass, positivity unconditional). The
      *  split form remains as the cheap arm for gently-curved fields.
-     *  Input: qdsmc_conduction_fluxform_unsplit. */
-    bool m_cond_ff_unsplit = false;
+     *  Input: qdsmc_advection_fluxform_unsplit. */
+    bool m_adv_ff_unsplit = false;
 
     /** Domain-face conduction BCs on T_e (Thrust D). Per grid dim and
      *  side: 0 = adiabatic (default; the fluxform wall faces already
