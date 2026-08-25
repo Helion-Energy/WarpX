@@ -10140,6 +10140,58 @@ void HybridPICModel::ApplyQdsmcPeExtrapolation () const
     }
 }
 
+namespace
+{
+    /** Copy one component of three (possibly differently staggered) MultiFabs
+     *  sharing a box layout in a single fused pass.
+     *
+     *  Bit-identical to three separate MultiFab::Copy calls (each element is
+     *  read once and stored unchanged), but issues one fused launch (a single
+     *  OpenMP parallel region on CPU) instead of three. With n_dcomp > 1 the
+     *  source component is additionally broadcast into n_dcomp consecutive
+     *  destination components while still reading the source only once.
+     *  Aliasing dst[n] == src[n] is safe as long as the source and
+     *  destination components differ (each element is read and written at
+     *  distinct addresses).
+     */
+    void FusedCopy3 (
+        std::array<amrex::MultiFab*, 3> const& dst,
+        std::array<amrex::MultiFab const*, 3> const& src,
+        int scomp, int dcomp, int n_dcomp, amrex::IntVect const& ngrow)
+    {
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (amrex::MFIter mfi(*dst[0], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            amrex::Array4<amrex::Real> const& d0 = dst[0]->array(mfi);
+            amrex::Array4<amrex::Real> const& d1 = dst[1]->array(mfi);
+            amrex::Array4<amrex::Real> const& d2 = dst[2]->array(mfi);
+            amrex::Array4<amrex::Real const> const& s0 = src[0]->const_array(mfi);
+            amrex::Array4<amrex::Real const> const& s1 = src[1]->const_array(mfi);
+            amrex::Array4<amrex::Real const> const& s2 = src[2]->const_array(mfi);
+
+            amrex::Box const& t0 = mfi.tilebox(dst[0]->ixType().toIntVect(), ngrow);
+            amrex::Box const& t1 = mfi.tilebox(dst[1]->ixType().toIntVect(), ngrow);
+            amrex::Box const& t2 = mfi.tilebox(dst[2]->ixType().toIntVect(), ngrow);
+
+            amrex::ParallelFor(t0, t1, t2,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                    amrex::Real const v = s0(i, j, k, scomp);
+                    for (int n = 0; n < n_dcomp; ++n) { d0(i, j, k, dcomp + n) = v; }
+                },
+                [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                    amrex::Real const v = s1(i, j, k, scomp);
+                    for (int n = 0; n < n_dcomp; ++n) { d1(i, j, k, dcomp + n) = v; }
+                },
+                [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                    amrex::Real const v = s2(i, j, k, scomp);
+                    for (int n = 0; n < n_dcomp; ++n) { d2(i, j, k, dcomp + n) = v; }
+                }
+            );
+        }
+    }
+}
+
 void HybridPICModel::BfieldEvolve (
     ablastr::fields::MultiLevelVectorField const& Bfield,
     ablastr::fields::MultiLevelVectorField const& Efield,
@@ -10180,10 +10232,17 @@ void HybridPICModel::BfieldEvolve (
         B_old[ii] = MultiFab(
             Bfield[lev][ii]->boxArray(), Bfield[lev][ii]->DistributionMap(), 2, ng
         );
-        MultiFab::Copy(B_old[ii], *Bfield[lev][ii], 0, 0, 1, ng);
-        // the values at index 1 will be kept static through the integration steps
-        MultiFab::Copy(B_old[ii], *Bfield[lev][ii], 0, 1, 1, ng);
     }
+    // Fill the working copy (component 0) and the static t = n copy (component
+    // 1, kept unchanged through the integration steps for the cold RKF45
+    // restart) in one fused pass: B is read once and broadcast into both
+    // components, instead of six MultiFab::Copy passes (two per direction).
+    // A single copy does not suffice: the restart path rewinds from component
+    // 1 after component 0 has advanced with the accepted substeps.
+    FusedCopy3(
+        {&B_old[0], &B_old[1], &B_old[2]},
+        {Bfield[lev][0], Bfield[lev][1], Bfield[lev][2]},
+        0, 0, 2, ng);
 
     amrex::Real dt_sub = dt_half / (m_substeps / 2._rt);
     amrex::Real t = 0._rt;
@@ -10253,10 +10312,12 @@ void HybridPICModel::BfieldEvolve (
                 // restart this full step and this time use RKF45
                 t = 0._rt;
                 n_accepted = 0;
-                // reset B_old to original one
-                for (int ii = 0; ii < 3; ii++) {
-                    MultiFab::Copy(B_old[ii], B_old[ii], 1, 0, 1, ng);
-                }
+                // reset B_old to the original one, stored in component 1
+                // (one fused pass over the three directions)
+                FusedCopy3(
+                    {&B_old[0], &B_old[1], &B_old[2]},
+                    {&B_old[0], &B_old[1], &B_old[2]},
+                    1, 0, 1, ng);
                 use_rkf45 = true;
             }
         }
@@ -10265,16 +10326,21 @@ void HybridPICModel::BfieldEvolve (
             // update time tracker and accepted steps number
             t += dt_sub;
             ++n_accepted;
-            // update B_old to the current Bfield
-            for (int ii = 0; ii < 3; ii++) {
-                MultiFab::Copy(B_old[ii], *Bfield[lev][ii], 0, 0, 1, ng);
-            }
+            // update B_old to the current Bfield (one fused pass over the
+            // three directions instead of three MultiFab::Copy passes; this
+            // runs once per accepted substep)
+            FusedCopy3(
+                {&B_old[0], &B_old[1], &B_old[2]},
+                {Bfield[lev][0], Bfield[lev][1], Bfield[lev][2]},
+                0, 0, 1, ng);
             dt_sub *= std::min(m_substep_max_growth, step_change_factor);
         } else {
             // reset Bfield to B_old before trying the integration again
-            for (int ii = 0; ii < 3; ii++) {
-                MultiFab::Copy(*Bfield[lev][ii], B_old[ii], 0, 0, 1, ng);
-            }
+            // (one fused pass over the three directions)
+            FusedCopy3(
+                {Bfield[lev][0], Bfield[lev][1], Bfield[lev][2]},
+                {&B_old[0], &B_old[1], &B_old[2]},
+                0, 0, 1, ng);
             dt_sub *= std::max(0.1_rt, step_change_factor);
         }
         prev_attempt_failed = !step_succeeded;
@@ -10354,11 +10420,47 @@ void HybridPICModel::BfieldEvolveRK4 (
 
     // The Bfield is now given by:
     // B_new = B_old + 0.5 * dt * [-curl x E(B_old)] = B_old + 0.5 * dt * K0.
-    for (int ii = 0; ii < 3; ii++)
-    {
-        // Extract 0.5 * dt * K0 for each direction into index 0 of K.
-        MultiFab::LinComb(
-            K[ii], 1._rt, *Bfield[lev][ii], 0, -1._rt, B_old[ii], 0, 0, 1, ng
+    //
+    // Extract 0.5 * dt * K0 = B - B_old for each direction into index 0 of K
+    // in one fused pass (a single launch instead of three LinComb passes).
+    // Per element this is the same IEEE subtraction that
+    // LinComb(1, B, -1, B_old) performs, so the values are bit-identical.
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for ( MFIter mfi(*Bfield[lev][0], TilingIfNotGPU()); mfi.isValid(); ++mfi ) {
+
+        // Extract field data for this grid/tile
+        Array4<Real const> const &Bx = Bfield[lev][0]->const_array(mfi);
+        Array4<Real const> const &By = Bfield[lev][1]->const_array(mfi);
+        Array4<Real const> const &Bz = Bfield[lev][2]->const_array(mfi);
+        Array4<Real> const &Kx = K[0].array(mfi);
+        Array4<Real> const &Ky = K[1].array(mfi);
+        Array4<Real> const &Kz = K[2].array(mfi);
+        Array4<Real const> const &Bx_old = B_old[0].const_array(mfi);
+        Array4<Real const> const &By_old = B_old[1].const_array(mfi);
+        Array4<Real const> const &Bz_old = B_old[2].const_array(mfi);
+
+        // Extract tileboxes for which to loop
+        Box const& tjx  = mfi.tilebox(Bfield[lev][0]->ixType().toIntVect(), ng);
+        Box const& tjy  = mfi.tilebox(Bfield[lev][1]->ixType().toIntVect(), ng);
+        Box const& tjz  = mfi.tilebox(Bfield[lev][2]->ixType().toIntVect(), ng);
+
+        amrex::ParallelFor(tjx, tjy, tjz,
+            // x calculation
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                Kx(i, j, k, 0) = Bx(i, j, k) - Bx_old(i, j, k);
+            },
+
+            // y calculation
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                Ky(i, j, k, 0) = By(i, j, k) - By_old(i, j, k);
+            },
+
+            // z calculation
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                Kz(i, j, k, 0) = Bz(i, j, k) - Bz_old(i, j, k);
+            }
         );
     }
 
@@ -10427,11 +10529,45 @@ void HybridPICModel::BfieldEvolveRK4 (
     // The Bfield is now given by:
     // B_new = B_old + 0.5 * dt * K1 + dt * [-curl  x E(B_old + 0.5 * dt * K1)]
     //       = B_old + 0.5 * dt * K1 + dt * K2
-    for (int ii = 0; ii < 3; ii++)
-    {
-        // Subtract 0.5 * dt * K1 from the Bfield for each direction to get
-        // B_new = B_old + dt * K2.
-        MultiFab::Subtract(*Bfield[lev][ii], K[ii], 1, 0, 1, ng);
+    //
+    // Subtract 0.5 * dt * K1 from the Bfield for each direction to get
+    // B_new = B_old + dt * K2, in one fused pass (a single launch instead of
+    // three MultiFab::Subtract passes; the per-element subtraction is
+    // unchanged, so the values are bit-identical).
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for ( MFIter mfi(*Bfield[lev][0], TilingIfNotGPU()); mfi.isValid(); ++mfi ) {
+
+        // Extract field data for this grid/tile
+        Array4<Real> const &Bx = Bfield[lev][0]->array(mfi);
+        Array4<Real> const &By = Bfield[lev][1]->array(mfi);
+        Array4<Real> const &Bz = Bfield[lev][2]->array(mfi);
+        Array4<Real const> const &Kx = K[0].const_array(mfi);
+        Array4<Real const> const &Ky = K[1].const_array(mfi);
+        Array4<Real const> const &Kz = K[2].const_array(mfi);
+
+        // Extract tileboxes for which to loop
+        Box const& tjx  = mfi.tilebox(Bfield[lev][0]->ixType().toIntVect(), ng);
+        Box const& tjy  = mfi.tilebox(Bfield[lev][1]->ixType().toIntVect(), ng);
+        Box const& tjz  = mfi.tilebox(Bfield[lev][2]->ixType().toIntVect(), ng);
+
+        amrex::ParallelFor(tjx, tjy, tjz,
+            // x calculation
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                Bx(i, j, k) -= Kx(i, j, k, 1);
+            },
+
+            // y calculation
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                By(i, j, k) -= Ky(i, j, k, 1);
+            },
+
+            // z calculation
+            [=] AMREX_GPU_DEVICE (int i, int j, int k){
+                Bz(i, j, k) -= Kz(i, j, k, 1);
+            }
+        );
     }
 
     // Step 4:
