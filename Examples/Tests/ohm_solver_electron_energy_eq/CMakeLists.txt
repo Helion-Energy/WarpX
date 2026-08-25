@@ -41,6 +41,21 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Grid-FD conduction on circular field lines with the Sharma-Hammett
+# cross-flux limiter (qdsmc_conduction_fd_limiter = sh): the anisotropic
+# cross-term stress case, b-hat rotating against the grid everywhere.
+# Gates the flux-level extrema bound (global Te max non-increasing, no
+# background undershoot) plus a parallel-spreading sanity check.
+add_warpx_test(
+    test_2d_ohm_solver_electron_energy_conduction_circle_sh_picmi  # name
+    2  # dims
+    2  # nprocs
+    "inputs_test_2d_ohm_solver_electron_energy_conduction_picmi.py --test --circle --fd --fd-limiter sh"  # inputs
+    "analysis_conduction_circle_fd.py"  # analysis
+    "analysis_default_regression.py --path diags/diag1000040"  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_2d_ohm_solver_electron_energy_conduction_front_picmi  # name
     2  # dims

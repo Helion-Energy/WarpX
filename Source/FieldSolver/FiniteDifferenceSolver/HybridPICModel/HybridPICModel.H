@@ -1391,8 +1391,20 @@ public:
     /** FD cross-flux transport reconstruction: 0 = none (unlimited QUICK,
      *  attribution control -- can overshoot), 1 = upwind1 (1st-order
      *  upwind, most diffusive), 2 = smart (Gaskell--Lau SMART, default:
-     *  up to 3rd order, locally monotone). Input:
-     *  qdsmc_conduction_fd_limiter = none | upwind1 | smart. */
+     *  up to 3rd order, locally monotone face VALUES -- which does NOT
+     *  bound the flux divergence under sharp field-line rotation, so
+     *  composites of NVD-bounded faces can still mint new extrema),
+     *  3 = sh (Sharma--Hammett, JCP 227 (2007): nested-limited
+     *  transverse face gradient, MC inner / minmod outer -- the cross
+     *  flux through a face vanishes when either adjacent node is a
+     *  transverse local extremum, so cross transport cannot amplify
+     *  extrema; 2nd-order in smooth regions), 4 = sh_minmod (minmod
+     *  inner, maximally diffusive bracket arm). The sh modes replace
+     *  the pseudo-advection recast of the cross terms entirely (see
+     *  QdsmcFluxLimiters.H) and are conduction-only: combining them
+     *  with qdsmc_transport_operator = grid aborts at parse. Input:
+     *  qdsmc_conduction_fd_limiter = none | upwind1 | smart | sh |
+     *  sh_minmod. */
     int m_cond_fd_limiter = 2;
     /** FD subcycle CFL fraction of the Gershgorin stability bound
      *  (sum_gh 2 |Xi_gh| dxi_g dxi_h, n-ratio weighted). Default 0.4:

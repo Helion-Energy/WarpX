@@ -274,10 +274,12 @@ void HybridPICModel::ReadParameters ()
         if (fdlim == "none") { m_cond_fd_limiter = 0; }
         else if (fdlim == "upwind1") { m_cond_fd_limiter = 1; }
         else if (fdlim == "smart") { m_cond_fd_limiter = 2; }
+        else if (fdlim == "sh") { m_cond_fd_limiter = 3; }
+        else if (fdlim == "sh_minmod") { m_cond_fd_limiter = 4; }
         else {
             WARPX_ABORT_WITH_MESSAGE(
                 "hybrid_pic_model.qdsmc_conduction_fd_limiter must be "
-                "'none', 'upwind1' or 'smart'");
+                "'none', 'upwind1', 'smart', 'sh' or 'sh_minmod'");
         }
         utils::parser::queryWithParser(pp_hybrid,
             "qdsmc_conduction_fd_cfl", m_cond_fd_cfl);
@@ -315,6 +317,16 @@ void HybridPICModel::ReadParameters ()
                 "hybrid_pic_model.qdsmc_transport_operator must be "
                 "'markers' or 'grid'");
         }
+        // The sh modes bound the CONDUCTION operator's transverse
+        // cross-flux gradient; they have no meaning for the grid
+        // transport operator's advective face values, which share this
+        // knob. Fail loud rather than silently remap.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !(m_qdsmc_transport_operator == 1 && m_cond_fd_limiter >= 3),
+            "hybrid_pic_model.qdsmc_conduction_fd_limiter = "
+            "'sh'/'sh_minmod' is conduction-only: with "
+            "qdsmc_transport_operator = 'grid' use 'none', 'upwind1' or "
+            "'smart'");
     }
     {
         std::vector<int> npts;
@@ -1085,6 +1097,15 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
             "substep"
             << (m_cond_te_floor_mask ? "; clamped nodes err-masked" : "")
             << ")\n";
+    }
+    if (m_solve_electron_energy_equation && m_cond_operator == 1) {
+        static char const * const lim_names[] =
+            {"none (unlimited QUICK)", "upwind1", "smart",
+             "sh (MC inner, minmod outer)", "sh_minmod"};
+        amrex::Print() << "[qdsmc] conduction fd limiter: "
+            << lim_names[m_cond_fd_limiter]
+            << (m_cond_fd_limiter >= 3
+                ? " -- cross-flux extrema bound armed\n" : "\n");
     }
     m_kappa_par_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(kpar_expression, {"n","Te","t"}));
@@ -6286,13 +6307,45 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
                             * (Tat(m1) - Tat(m0)) * dxi_g[g];
                     }
 
-                    // cross-derivative fluxes as SMART-limited advection
+                    // cross-derivative fluxes: Sharma-Hammett limited
+                    // transverse face gradient (sh modes) or the
+                    // SMART-limited pseudo-advection recast
                     for (int h = 0; h < AMREX_SPACEDIM; ++h) {
                         if (h == g) { continue; }
                         int const gg = amrex::min(g, h);
                         int const hh = amrex::max(g, h);
                         int const sgh =
                             gg*AMREX_SPACEDIM - gg*(gg-1)/2 + (hh-gg);
+                        if (fd_limiter >= 3) {
+                            // Sharma-Hammett (JCP 227, 2007) flux-level
+                            // extrema bound: nested-limited combination
+                            // of the one-sided transverse differences at
+                            // the two face nodes (2nd-order form
+                            // regardless of fd_order). A shift clamped
+                            // at a non-periodic wall contributes a zero
+                            // one-sided difference, which zeroes the
+                            // face's cross flux (adiabatic-consistent).
+                            // Reads only face-adjacent values, so both
+                            // neighbors compute the identical flux and
+                            // the telescoping sum is preserved.
+                            auto osd = [&] (int const p[3], int const sgn)
+                                -> amrex::Real {
+                                int q[3];
+                                shift(p, h, sgn, q);
+                                if (q[h] == p[h]) { return 0.0_rt; }
+                                return amrex::Real(sgn)*(Tat(q) - Tat(p))
+                                       *dxi_g[h];
+                            };
+                            amrex::Real const gf = qdsmc_sh_face_gradient(
+                                osd(m0, +1), osd(m0, -1),
+                                osd(m1, +1), osd(m1, -1),
+                                fd_limiter == 3);
+                            F += 0.5_rt*(Jn(m0,g)
+                                    *x_arr(m0[0],m0[1],m0[2],sgh) +
+                                Jn(m1,g)
+                                    *x_arr(m1[0],m1[1],m1[2],sgh)) * gf;
+                            continue;
+                        }
                         amrex::Real raw;
                         if (use4) {
                             raw = 0.0_rt;

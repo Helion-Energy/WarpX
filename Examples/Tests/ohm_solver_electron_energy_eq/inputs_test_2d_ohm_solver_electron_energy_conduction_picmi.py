@@ -55,17 +55,22 @@ class ConductionTest(object):
     DT = 2.0e-8  # s
     total_steps = 40
 
-    def __init__(self, test, verbose, front=False, rz=False, circle=False):
+    def __init__(self, test, verbose, front=False, rz=False, circle=False,
+                 fd=False, fd_limiter=None):
         self.test = test
         self.verbose = verbose or self.test
         self.front = front
         self.rz = rz
         self.circle = circle
-        self.fd = rz and not front
+        # --fd runs the grid-FD conduction operator on the Cartesian
+        # variants too (with --circle: the anisotropic cross-term
+        # stress case on rotating field lines)
+        self.fd = (rz and not front) or fd
+        self.fd_limiter = fd_limiter
         if self.circle and (self.front or self.rz):
             raise ValueError("--circle is a standalone mode")
 
-        if self.fd:
+        if self.fd and self.rz:
             # RZ radial mode on the grid-FD operator's curvilinear
             # (J Xi^ij) form -- the SDE forms are Cartesian-only and
             # parse-guarded in RZ. A radial Gaussian THROUGH THE AXIS
@@ -313,6 +318,10 @@ class ConductionTest(object):
             import pywarpx
 
             pywarpx.hybridpicmodel.qdsmc_conduction_operator = "fd"
+            if self.fd_limiter is not None:
+                pywarpx.hybridpicmodel.qdsmc_conduction_fd_limiter = (
+                    self.fd_limiter
+                )
         simulation.initialize_warpx()
         # The step-begin T_e adiabat seed (once per run, latch-guarded)
         # overwrites any T_e written before the first step: take one step
@@ -352,6 +361,17 @@ parser.add_argument(
     help="parallel conduction on circular field lines",
     action="store_true",
 )
+parser.add_argument(
+    "--fd",
+    help="run the grid-FD conduction operator (with --circle: the "
+    "anisotropic cross-term stress case)",
+    action="store_true",
+)
+parser.add_argument(
+    "--fd-limiter",
+    help="qdsmc_conduction_fd_limiter value for the FD operator",
+    default=None,
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
@@ -361,5 +381,7 @@ run = ConductionTest(
     front=args.front,
     rz=args.rz,
     circle=args.circle,
+    fd=args.fd,
+    fd_limiter=args.fd_limiter,
 )
 simulation.step()
