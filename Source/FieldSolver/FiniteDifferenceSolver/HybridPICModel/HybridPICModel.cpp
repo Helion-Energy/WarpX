@@ -11,6 +11,7 @@
 
 #include "HybridPICModel.H"
 
+#include "QdsmcFluxLimiters.H"
 #include "QdsmcRKIntegrator.H"
 
 #include <ablastr/coarsen/sample.H>
@@ -4712,36 +4713,6 @@ void HybridPICModel::QDSMCFillElectronPressureFromTe (int const lev,
         warpx.Geom(lev).periodicity(), true);
 }
 
-
-namespace
-{
-    /** SMART-limited (Gaskell--Lau 1988) face value for the advective
-     *  cross-derivative fluxes of the FD conduction operator, in the
-     *  normalized-variable frame of the local upwind triple (tUU = far
-     *  upwind, tU = upwind, tD = downwind): QUICK where smooth, blended
-     *  to bounded legs near extrema, 1st-order upwind outside [0, 1] --
-     *  monotone by construction. limiter = 0 returns unlimited QUICK
-     *  (attribution control, can overshoot), 1 returns 1st-order upwind. */
-    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
-    amrex::Real qdsmc_fd_face_value (amrex::Real const tUU,
-                                     amrex::Real const tU,
-                                     amrex::Real const tD, int const limiter)
-    {
-        if (limiter == 1) { return tU; }
-        if (limiter == 0) {
-            return 0.375_rt*tD + 0.75_rt*tU - 0.125_rt*tUU;   // QUICK
-        }
-        amrex::Real const den = tD - tUU;
-        if (den == 0.0_rt) { return tU; }
-        amrex::Real const ph = (tU - tUU) / den;
-        amrex::Real phf;
-        if (ph <= 0.0_rt || ph >= 1.0_rt) { phf = ph; }
-        else if (ph < 1.0_rt/6.0_rt)      { phf = 3.0_rt*ph; }
-        else if (ph <= 5.0_rt/6.0_rt)     { phf = 0.375_rt + 0.75_rt*ph; }
-        else                              { phf = 1.0_rt; }
-        return tUU + phf*den;
-    }
-}
 
 void HybridPICModel::QdsmcTransportOnceGrid (int const lev,
                                              amrex::Real const dt_adv) const
