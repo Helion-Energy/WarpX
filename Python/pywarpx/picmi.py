@@ -2418,6 +2418,18 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         half-step before the simulation aborts. Only used when
         ``use_rkf45`` is active.
 
+    substep_finite_check_interval: int, default=1
+        On timesteps using the fixed-step RK4 integrator (``use_rkf45`` not
+        active), run the per-substep B-field finiteness check (one
+        device-wide reduction per field component) only on every N-th
+        substep attempt, plus always on the final substep of each half-step
+        and on the attempt immediately following a failed attempt. With
+        N > 1 a NaN born on an unchecked substep is accepted and only caught
+        up to N-1 substeps later, at which point the run aborts there
+        instead of retrying at the substep where the NaN was born. The
+        checks are pure reads, so a NaN-free run is bit-identical for any N.
+        The default 1 checks every attempt.
+
     holmstrom_vacuum_region: bool, default=False
         Flag to determine handling of vacuum region (where rho < n_floor*q_e). Setting to True will solve the simplified Generalized Ohm's Law dropping the Hall and pressure terms in the vacuum region. See `Holmstrom (2013) <https://arxiv.org/abs/1301.0272v1>`_.
         This flag is useful for suppressing vacuum region fluctuations. A large resistivity value must be used when rho <= rho_floor.
@@ -2502,6 +2514,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         substep_safety=None,
         substep_max_growth=None,
         max_substep_attempts=None,
+        substep_finite_check_interval=None,
         holmstrom_vacuum_region=None,
         Jx_external_function=None,
         Jy_external_function=None,
@@ -2560,6 +2573,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.substep_safety = substep_safety
         self.substep_max_growth = substep_max_growth
         self.max_substep_attempts = max_substep_attempts
+        self.substep_finite_check_interval = substep_finite_check_interval
 
         self.holmstrom_vacuum_region = holmstrom_vacuum_region
 
@@ -2710,6 +2724,9 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         pywarpx.hybridpicmodel.substep_safety = self.substep_safety
         pywarpx.hybridpicmodel.substep_max_growth = self.substep_max_growth
         pywarpx.hybridpicmodel.max_substep_attempts = self.max_substep_attempts
+        pywarpx.hybridpicmodel.substep_finite_check_interval = (
+            self.substep_finite_check_interval
+        )
         pywarpx.hybridpicmodel.holmstrom_vacuum_region = self.holmstrom_vacuum_region
         pywarpx.hybridpicmodel.__setattr__(
             "Jx_external_grid_function(x,y,z,t)",

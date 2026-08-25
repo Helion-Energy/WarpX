@@ -729,6 +729,11 @@ public:
     amrex::Real m_substep_max_growth = 5.0;
     /** Maximum number of substep attempts (accepted + rejected) before abort */
     int m_max_substep_attempts = 250;
+    /** Run the per-substep B-field finiteness check (RK4 path) only on every
+     *  N-th substep attempt, plus always on the final substep of each
+     *  half-step and on the attempt immediately following a failed attempt.
+     *  Default 1 checks every attempt (the historical behavior). */
+    int m_substep_finite_check_interval = 1;
 
     bool m_holmstrom_vacuum_region = false;
 

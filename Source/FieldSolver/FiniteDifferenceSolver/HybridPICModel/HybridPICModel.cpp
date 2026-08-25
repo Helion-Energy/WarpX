@@ -79,6 +79,10 @@ void HybridPICModel::ReadParameters ()
     utils::parser::queryWithParser(pp_hybrid, "substep_safety", m_substep_safety);
     utils::parser::queryWithParser(pp_hybrid, "substep_max_growth", m_substep_max_growth);
     pp_hybrid.query("max_substep_attempts", m_max_substep_attempts);
+    pp_hybrid.query("substep_finite_check_interval", m_substep_finite_check_interval);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_substep_finite_check_interval >= 1,
+        "hybrid_pic_model.substep_finite_check_interval must be >= 1");
 
     utils::parser::queryWithParser(pp_hybrid, "holmstrom_vacuum_region", m_holmstrom_vacuum_region);
     utils::parser::queryWithParser(pp_hybrid, "holmstrom_transition_width", m_holmstrom_transition_width);
@@ -10185,6 +10189,7 @@ void HybridPICModel::BfieldEvolve (
     amrex::Real t = 0._rt;
     int n_attempts = 0;
     int n_accepted = 0;
+    bool prev_attempt_failed = false;
 
     // Step the magnetic field forward (from t -> t + dt_half) using the user
     // specified integration scheme. The loop is set up such that the timestep
@@ -10212,11 +10217,31 @@ void HybridPICModel::BfieldEvolve (
                 dt_sub, lev, subcycling_half, ng, nodal_sync
             );
 
-            // Check that the B-field does not have nan or inf values
-            for (int idim = 0; idim < 3; ++idim) {
-                step_succeeded = step_succeeded && Bfield[lev][idim]->is_finite(/*local=*/true);
+            // The finiteness check below feeds the accept/retry decision but
+            // costs one device-wide reduction per component. With
+            // hybrid_pic_model.substep_finite_check_interval = N > 1 it runs
+            // only on every N-th attempt, plus always on the final substep of
+            // the half-step and on the attempt immediately following a failed
+            // one. A NaN born on an unchecked substep is accepted and only
+            // caught up to N-1 substeps later, at which point the retry
+            // restarts from an already-poisoned B_old and the run aborts
+            // there instead of retrying at the birth substep. The checks are
+            // pure reads, so skipping them cannot change the field values of
+            // a NaN-free run. N = 1 (default) checks every attempt.
+            const bool last_substep = (t + dt_sub >= dt_half);
+            const bool check_finite =
+                (m_substep_finite_check_interval <= 1)
+                || prev_attempt_failed
+                || last_substep
+                || (n_attempts % m_substep_finite_check_interval == 0);
+
+            if (check_finite) {
+                // Check that the B-field does not have nan or inf values
+                for (int idim = 0; idim < 3; ++idim) {
+                    step_succeeded = step_succeeded && Bfield[lev][idim]->is_finite(/*local=*/true);
+                }
+                amrex::ParallelDescriptor::ReduceBoolAnd(step_succeeded);
             }
-            amrex::ParallelDescriptor::ReduceBoolAnd(step_succeeded);
 
             if (!step_succeeded) {
                 ablastr::warn_manager::WMRecordWarning(
@@ -10252,6 +10277,7 @@ void HybridPICModel::BfieldEvolve (
             }
             dt_sub *= std::max(0.1_rt, step_change_factor);
         }
+        prev_attempt_failed = !step_succeeded;
 
         if (++n_attempts > m_max_substep_attempts) { break; }
     }

@@ -4494,6 +4494,27 @@ Maxwell solver: kinetic-fluid hybrid
     If :pp:param:`hybrid_pic_model.use_rkf45` is active, this sets the maximum number of substep attempts
     (accepted and rejected combined) per half-step before the simulation aborts.
 
+.. pp:param:: hybrid_pic_model.substep_finite_check_interval
+    :type: ``int``
+    :default: ``1``
+    :optional:
+
+    On timesteps where the fixed-step RK4 integrator is used (i.e. where
+    :pp:param:`hybrid_pic_model.use_rkf45` is not active), each B-field substep ends with a finiteness
+    check (one device-wide reduction per field component) that feeds the accept/retry decision.
+    With a value ``N > 1`` the check runs only on every ``N``-th substep attempt, plus always on the
+    final substep of each half-step and on the attempt immediately following a failed attempt.
+
+    Note the trade-off this makes: a NaN or Inf born on an unchecked substep is accepted and only
+    caught up to ``N - 1`` substeps later, at which point the retry restarts from an
+    already-poisoned saved state and the run aborts there, instead of retrying (and switching to
+    RKF45) at the substep where the NaN was born. In practice a mid-run NaN indicates a
+    configuration problem either way; setting ``N > 1`` trades that rarely-successful retry for
+    removing a device-wide reduction per component per substep. The checks are pure reads, so a
+    NaN-free run produces bit-identical results for any ``N``. The default ``1`` checks every
+    attempt (the historical behavior). The RKF45 integrator is unaffected: its error control
+    already rejects non-finite substeps.
+
 .. pp:param:: hybrid_pic_model.holmstrom_vacuum_region
     :type: ``bool``
     :default: ``false``
