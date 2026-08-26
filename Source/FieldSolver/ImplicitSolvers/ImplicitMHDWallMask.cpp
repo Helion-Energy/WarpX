@@ -540,9 +540,33 @@ WallBandEtaOverrideView ImplicitMHDWallMask::BandEtaOverrideView () const
     view.active = m_active && (m_band_eta_override > 0.0);
     if (view.active) {
         view.eta_override = m_band_eta_override;
-        view.first_band_er = m_first_band_er.data() + m_ng;
-        view.first_band_et = m_first_band_et.data() + m_ng;
-        view.first_band_ez = m_first_band_ez.data() + m_ng;
+        if (m_dielectric) {
+            // Dielectric standoff: the override covers ALL masked E
+            // rows INCLUDING the interface node on the contour. The
+            // interface row's composed (plasma-keyed) eta is the
+            // conductor-mode convention; on an EM-transparent
+            // dielectric it turns the contour node into a
+            // near-superconducting ring whenever plasma abuts the
+            // wall (the nodal rho average has no wall exclusion, the
+            // vacuum boost never engages, eta -> Spitzer at the
+            // wall-cooled edge): E_theta ~ 0 on the contour freezes
+            // the response flux through the wall -- a PEC in
+            // dielectric clothing. Measured signature: bias Bz
+            // collapsed to ~0 in the last interior cell while the
+            // bulk carried the full soak value, driving an outward
+            // B^2/2mu0 edge force and a self-sustaining scrape-off
+            // inflow. A dielectric surface carries no current: the
+            // constant override on the contour rows restores flux
+            // transparency (the residual and the PC edge fills
+            // consume this same view, so they stay exact twins).
+            view.first_band_er = m_first_masked_er.data() + m_ng;
+            view.first_band_et = m_first_masked_et.data() + m_ng;
+            view.first_band_ez = m_first_masked_ez.data() + m_ng;
+        } else {
+            view.first_band_er = m_first_band_er.data() + m_ng;
+            view.first_band_et = m_first_band_et.data() + m_ng;
+            view.first_band_ez = m_first_band_ez.data() + m_ng;
+        }
         view.first_band_cc = m_first_masked_cc.data() + m_ng;
     }
     return view;
