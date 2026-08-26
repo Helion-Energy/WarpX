@@ -141,6 +141,16 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
         "implicit_mhd.wall_model (the override acts on the masked wall "
         "band)");
 
+    // Field-side freeze of the masked band (work item B, see the class
+    // comment): parsed before the early return so a freeze without a
+    // wall model is a loud input error, never a silent no-op.
+    pp.query("wall_field_freeze", m_field_freeze);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_field_freeze || wall_model != "none",
+        "implicit_mhd.wall_field_freeze requires an active "
+        "implicit_mhd.wall_model (the freeze acts on the masked wall "
+        "band's magnetic-field faces)");
+
     // Thermal wall boundary at the stair-step fluid interface (see the
     // class comment): parsed BEFORE the early return so a thermal BC
     // without a wall model is a loud input error, never a silent no-op.
@@ -365,6 +375,39 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
     for (int jj = 0; jj < n_cell; ++jj) {
         ez_b[jj] = nodal_shift(cc_h[jj]);
     }
+    // --- Field-freeze tables (wall_field_freeze, see the class comment):
+    // first FROZEN radial index per axial row -- a magnetic-field face is
+    // frozen iff ALL curl-E edges of its Faraday update are masked, so a
+    // face with even one live edge stays live (the last live Faraday row
+    // closes against the surface E). INT_MAX-safe max composition like
+    // the band tables. Per staggering: Br (r-node i, z-cell j) reads
+    // E_theta (i, j) and (i, j+1); Bt (r-cell i, z-cell j) reads E_r
+    // (i, j), (i, j+1) and the E_z nodes (i, j), (i+1, j) -- both nodes
+    // masked iff i >= first_masked_ez[j]; Bz (r-cell i, z-node j) reads
+    // the E_theta nodes (i, j) and (i+1, j) -- both masked iff
+    // i >= first_masked_et[j]. Built in every active wall_model
+    // (geometry-static); consumed only when the freeze is requested.
+    amrex::Vector<int> br_f(n_cell);
+    amrex::Vector<int> bt_f(n_cell);
+    amrex::Vector<int> bz_f(n_nodal);
+    for (int jj = 0; jj < n_cell; ++jj) {
+        br_f[jj] = std::max(et_h[jj], et_h[jj + 1]);
+        bt_f[jj] = std::max({er_h[jj], er_h[jj + 1], ez_h[jj]});
+    }
+    for (int jj = 0; jj < n_nodal; ++jj) {
+        bz_f[jj] = et_h[jj];
+    }
+    // Frozen faces per family in the valid domain (banner reporting):
+    // Br rows are r-nodes 0..nr; Bt and Bz rows are r-cells 0..nr-1.
+    m_frozen_faces = {0, 0, 0};
+    for (int jj = m_ng; jj < m_ng + m_nz; ++jj) {
+        m_frozen_faces[0] +=
+            std::max(0, nr + 1 - std::max(br_f[jj], 0));
+        m_frozen_faces[1] += std::max(0, nr - std::max(bt_f[jj], 0));
+    }
+    for (int jj = m_ng; jj <= m_ng + m_nz; ++jj) {
+        m_frozen_faces[2] += std::max(0, nr - std::max(bz_f[jj], 0));
+    }
 
     // Live seam-guarded rows per family in the valid domain (banner
     // reporting): rows i with first_guarded <= i < first_masked. E_r
@@ -395,6 +438,9 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
     m_first_band_er.resize(n_nodal);
     m_first_band_et.resize(n_nodal);
     m_first_band_ez.resize(n_cell);
+    m_first_frozen_br.resize(n_cell);
+    m_first_frozen_bt.resize(n_cell);
+    m_first_frozen_bz.resize(n_nodal);
     std::copy(er_h.begin(), er_h.end(), m_first_masked_er.begin());
     std::copy(et_h.begin(), et_h.end(), m_first_masked_et.begin());
     std::copy(ez_h.begin(), ez_h.end(), m_first_masked_ez.begin());
@@ -405,6 +451,9 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
     std::copy(er_b.begin(), er_b.end(), m_first_band_er.begin());
     std::copy(et_b.begin(), et_b.end(), m_first_band_et.begin());
     std::copy(ez_b.begin(), ez_b.end(), m_first_band_ez.begin());
+    std::copy(br_f.begin(), br_f.end(), m_first_frozen_br.begin());
+    std::copy(bt_f.begin(), bt_f.end(), m_first_frozen_bt.begin());
+    std::copy(bz_f.begin(), bz_f.end(), m_first_frozen_bz.begin());
 
     // Active BEFORE the banner: ThermalBCName()/GetThermalBC() gate on
     // m_active, so printing first reports "thermal BC none" for an
@@ -434,6 +483,13 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
     if (m_band_eta_override > 0.0) {
         amrex::Print() << "; band eta override " << m_band_eta_override
                        << " ohm m (constant at band-interior E rows)";
+    }
+    if (m_field_freeze) {
+        amrex::Print() << "; field freeze active (exterior evolved-B "
+                          "identity rows: "
+                       << m_frozen_faces[0] << " B_r, " << m_frozen_faces[1]
+                       << " B_theta, " << m_frozen_faces[2]
+                       << " B_z faces in the valid domain)";
     }
     amrex::Print() << "\n";
 #endif
@@ -488,6 +544,22 @@ WallBandEtaOverrideView ImplicitMHDWallMask::BandEtaOverrideView () const
         view.first_band_et = m_first_band_et.data() + m_ng;
         view.first_band_ez = m_first_band_ez.data() + m_ng;
         view.first_band_cc = m_first_masked_cc.data() + m_ng;
+    }
+    return view;
+}
+
+warpx::mhd_pc::WallFieldFreezeView ImplicitMHDWallMask::FieldFreezeView () const
+{
+    warpx::mhd_pc::WallFieldFreezeView view;
+    // Active only on explicit request (implicit_mhd.wall_field_freeze):
+    // the default keeps every wall_model bit-identical to the pre-freeze
+    // field advance. The tables themselves exist in every active mode
+    // (geometry-static).
+    view.active = m_active && m_field_freeze;
+    if (view.active) {
+        view.first_frozen_br = m_first_frozen_br.data() + m_ng;
+        view.first_frozen_bt = m_first_frozen_bt.data() + m_ng;
+        view.first_frozen_bz = m_first_frozen_bz.data() + m_ng;
     }
     return view;
 }

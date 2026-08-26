@@ -504,6 +504,22 @@ public:
     }
 
     /**
+     * \brief Return the device view of the shaped wall's FIELD freeze
+     * (implicit_mhd.wall_field_freeze) so the MHD block preconditioner
+     * mirrors the residual's frozen magnetic-field identity rows: the
+     * resistive stencil emission drops the frozen rows (keeping their
+     * columns in live rows -- the exact block-triangular Jacobian
+     * structure) and the preconditioner restores dB = r_B on the frozen
+     * faces after the field-block inverses. The inactive default keeps
+     * schemes without the freeze unchanged.
+     */
+    [[nodiscard]] virtual warpx::mhd_pc::WallFieldFreezeView
+    GetMHDWallFieldFreezeForPC () const
+    {
+        return {};
+    }
+
+    /**
      * \brief Return true when the z_lo domain face is the theta-implicit
      * MHD mirror-symmetry plane (boundary.field_lo = pmc on z paired with
      * implicit_mhd.z_lo_boundary_fluid = symmetry): the MHD block

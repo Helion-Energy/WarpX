@@ -5363,6 +5363,42 @@ Jacobian probes.
     Under the conductor contracts the overridden rows are subsequently
     pinned by the projection, making the override redundant there.
 
+.. pp:param:: implicit_mhd.wall_field_freeze
+    :type: ``bool``
+    :default: ``0`` (off, bit-identical)
+
+    FIELD-side freeze of the shaped-wall band (requires an active
+    ``implicit_mhd.wall_model``; aimed at ``dielectric``): when on,
+    every EVOLVED magnetic-field face whose complete Faraday update
+    stencil (its curl-E edges) lies in the masked region becomes an
+    exact identity row of the residual (:math:`F = B - B^n`, unit
+    Jacobian diagonal — the field twin of the wall's fluid identity
+    rows), so the plasma-response B on/outside the wall contour stays
+    bit-frozen at its boot/restart value (physically ~0: the response
+    starts zero and the exterior carries no fluid) and the discrete
+    curl of the evolved field — the band current — is exactly zero at
+    every strictly-exterior location from the first step. Faces with
+    even one live E edge stay live, so the last live Faraday row still
+    closes against the surface E and interior induction is untouched.
+    The painted EXTERNAL fields (the split registers) are unaffected:
+    the coil drive penetrates by prescription. This closes the wall's
+    consistency triangle — scraped fluid outside the contour (the
+    exterior clamp), frozen exterior response field, and
+    :math:`J \to 0` at the boundary — and supersedes
+    ``wall_band_eta_override`` for the FIELD advance (the band-interior
+    E rows no longer influence any live B row; both knobs stay
+    independent). Under ``pec_response`` the freeze is an exact no-op
+    (the pinned E already freezes fully-masked faces); under ``pec`` it
+    overrides the eddy-response closure of fully-masked faces (the
+    metal then no longer shields the drive there — not recommended).
+    The preconditioner mirrors the freeze exactly (identity rows in the
+    resistive stencil emission plus a post-inverse restore; validated
+    in-run by ``pc_mhd_block.resistive_validate_assembly``), and
+    checkpoint/restart carries the frozen faces unchanged. A
+    Green's-contour exterior fill (a response-consistent exterior field
+    instead of a frozen one) is a documented future upgrade of this
+    hook.
+
 .. pp:param:: implicit_mhd.conduction_coefficient_state
     :type: ``string``
     :default: ``theta``

@@ -3532,6 +3532,39 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
     for (int component = 0; component < 3; ++component) {
         rhs.getArrayVec()[0][component]->minus(*m_state_old.getArrayVec()[0][component], 0, 1, 0);
     }
+    // Shaped-wall FIELD freeze (implicit_mhd.wall_field_freeze): every
+    // evolved magnetic-field face whose complete Faraday stencil lies in
+    // the masked band is an exact identity row, F = B - B^n -- the field
+    // twin of the fluid wall_live identities. Zeroing the rhs here (after
+    // the m_state_old subtraction, above) makes the row's Jacobian
+    // diagonal exactly one with no state coupling; the tables are
+    // geometry-static, so JFNK probes see constant structure, and with
+    // the Newton initial guess at m_state_old the Krylov vectors stay
+    // exactly zero on the frozen faces -- the exterior plasma-response B
+    // is bit-frozen at its boot/restart value. The recast is guaranteed
+    // here: wall_model requires it at Define, and the freeze requires an
+    // active wall_model.
+    const warpx::mhd_pc::WallFieldFreezeView field_freeze =
+        m_wall_mask.FieldFreezeView();
+    if (field_freeze.active) {
+        const amrex::Array<const int*, 3> first_frozen = {
+            field_freeze.first_frozen_br, field_freeze.first_frozen_bt,
+            field_freeze.first_frozen_bz};
+        for (int component = 0; component < 3; ++component) {
+            amrex::MultiFab& rhs_component =
+                *rhs.getArrayVec()[0][component];
+            const int* const AMREX_RESTRICT first = first_frozen[component];
+            for (amrex::MFIter mfi(rhs_component); mfi.isValid(); ++mfi) {
+                const auto rhs_array = rhs_component.array(mfi);
+                amrex::ParallelFor(mfi.validbox(),
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                        if (i >= first[j]) {
+                            rhs_array(i, j, k) = 0.0_rt;
+                        }
+                    });
+            }
+        }
+    }
     ComputeFluidRHS(rhs, theta_time);
 }
 
@@ -9145,6 +9178,41 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
 {
     const amrex::Real inverse_theta = 1.0_rt / m_theta;
     m_state.linComb(inverse_theta, m_state, 1.0_rt - inverse_theta, m_state_old);
+
+    // Shaped-wall FIELD freeze: carry the frozen exterior faces through
+    // the theta -> t^{n+1} extrapolation bit-exactly. The converged state
+    // already holds B^theta = B^n there (exact identity rows), and the
+    // linComb above maps identical values back to themselves bit-exactly
+    // for theta in {1/2, 1} -- but can round an ULP at other theta
+    // values, a per-step ratchet on faces that must stay bit-static.
+    // Restore the step-old values outright.
+    {
+        const warpx::mhd_pc::WallFieldFreezeView field_freeze =
+            m_wall_mask.FieldFreezeView();
+        if (field_freeze.active) {
+            const amrex::Array<const int*, 3> first_frozen = {
+                field_freeze.first_frozen_br, field_freeze.first_frozen_bt,
+                field_freeze.first_frozen_bz};
+            for (int component = 0; component < 3; ++component) {
+                amrex::MultiFab& face_block =
+                    *m_state.getArrayVec()[0][component];
+                const amrex::MultiFab& face_block_old =
+                    *m_state_old.getArrayVec()[0][component];
+                const int* const AMREX_RESTRICT first =
+                    first_frozen[component];
+                for (amrex::MFIter mfi(face_block); mfi.isValid(); ++mfi) {
+                    const auto face = face_block.array(mfi);
+                    const auto face_old = face_block_old.const_array(mfi);
+                    amrex::ParallelFor(mfi.validbox(),
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                            if (i >= first[j]) {
+                                face(i, j, k) = face_old(i, j, k);
+                            }
+                        });
+                }
+            }
+        }
+    }
 
     // End-of-step floor restorations below evaluate the temperature
     // floors' density-dependent bounds with the END-OF-STEP density: it is
