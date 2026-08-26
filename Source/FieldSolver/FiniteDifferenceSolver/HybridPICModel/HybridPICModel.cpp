@@ -10384,6 +10384,32 @@ void HybridPICModel::BfieldEvolve (
     const amrex::Real t_half_start = warpx.gett_old(0)
         + ((subcycling_half == SubcyclingHalf::SecondHalf) ? dt_half : 0.0_rt);
 
+    // Under the je relax advance every RK stage reads a FROZEN E (the
+    // (E, J_e) advance runs once per ACCEPTED substep, below), so all
+    // four RK4 stage derivatives are identical and the substep reduces
+    // EXACTLY to one forward-Euler Faraday push (equal to summation
+    // roundoff). The four FieldPush calls -- each a curl B for a J the
+    // stage never consumes, a gated-off E-solve, an E exchange of an
+    // unchanged field, and the B push -- collapse to a single EvolveB
+    // plus its B exchange.
+    auto je_relax_b_push = [&] (amrex::Real dt_push) -> bool
+    {
+        warpx.EvolveB(dt_push, subcycling_half, warpx.gett_old(0));
+        warpx.FillBoundaryB(ng, nodal_sync);
+        for (int ilev = 0; ilev <= warpx.finestLevel(); ++ilev) {
+            warpx.ApplyBfieldBoundarySubstep(ilev, PatchType::fine);
+            if (ilev > 0) {
+                warpx.ApplyBfieldBoundarySubstep(ilev, PatchType::coarse);
+            }
+        }
+        bool ok = true;
+        for (int idim = 0; idim < 3; ++idim) {
+            ok = ok && Bfield[lev][idim]->is_finite(/*local=*/true);
+        }
+        amrex::ParallelDescriptor::ReduceBoolAnd(ok);
+        return ok;
+    };
+
     // Step the magnetic field forward (from t -> t + dt_half) using the user
     // specified integration scheme. The loop is set up such that the timestep
     // for a given step (dt_sub) can be modified within the loop, i.e.,
@@ -10418,6 +10444,16 @@ void HybridPICModel::BfieldEvolve (
             step_change_factor = m_substep_safety * std::pow(error + 1.e-10_rt, -0.2_rt);
             step_succeeded = (error <= 1._rt);
 
+        } else if (je_relax) {
+            step_succeeded = je_relax_b_push(dt_sub);
+            if (!step_succeeded) {
+                WARPX_ABORT_WITH_MESSAGE(
+                    "NaN or Inf value encountered in the B-field during the "
+                    "Je-form relax substep. The (E, J_e) state advanced by "
+                    "earlier accepted substeps cannot be rolled back, so no "
+                    "restart is possible; reduce the timestep or raise "
+                    "hybrid_pic_model.substeps.");
+            }
         } else {
             BfieldEvolveRK4(
                 Bfield, Efield, Jfield, rhofield, eb_update_E, B_old,
@@ -10445,12 +10481,9 @@ void HybridPICModel::BfieldEvolve (
                     "substepping. Restarting this step using RKF45.",
                     ablastr::warn_manager::WarnPriority::medium);
 
-                // restart this full step and this time use RKF45
-                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!je_relax,
-                    "The RK4 NaN-recovery restart cannot switch to "
-                    "RKF45 under the Je-form relax advance: the (E, J_e) "
-                    "state advanced by earlier accepted substeps "
-                    "cannot be rolled back.");
+                // restart this full step and this time use RKF45 (the
+                // je relax advance never reaches this branch -- it has
+                // its own single-push path above, which aborts on NaN)
                 t = 0._rt;
                 n_accepted = 0;
                 // reset B_old to original one
@@ -10482,6 +10515,12 @@ void HybridPICModel::BfieldEvolve (
                     step_change_factor =
                         m_substep_safety * std::pow(error + 1.e-10_rt, -0.2_rt);
                     step_succeeded = (error <= 1._rt);
+                } else if (je_relax) {
+                    // corrector re-integration from the substep entry
+                    // state: E and J_e are still frozen (their advance
+                    // runs only after the coupling interval settles), so
+                    // the same single-push reduction applies
+                    step_succeeded = je_relax_b_push(dt_sub);
                 } else {
                     BfieldEvolveRK4(
                         Bfield, Efield, Jfield, rhofield, eb_update_E, B_old,
