@@ -1211,8 +1211,13 @@ public:
      *  in the push, eta*J does net positive work on the deposited ion
      *  current and the resistive term becomes an energy source of the
      *  advance rather than a sink (1D periodic energy-ledger campaign,
-     *  2026-08-25). Opt-in. */
-    bool m_implicit_push_excludes_resistive_field = false;
+     *  2026-08-25). Default ON: the correction is assembled per residual
+     *  evaluation with both Ohm passes through the identical boundary
+     *  stack (see ThetaImplicitHybrid::ComputeRHS); the old opt-in
+     *  default's Newton-stability caution traced to a boundary-asymmetric,
+     *  lagged assembly, fixed alongside this flip. Set false to reproduce
+     *  pre-fix trajectories. */
+    bool m_implicit_push_excludes_resistive_field = true;
 
     /** True when any resistive term is configured: a non-trivial global
      *  resistivity parser, per-species overlays, or hyper-resistivity. */

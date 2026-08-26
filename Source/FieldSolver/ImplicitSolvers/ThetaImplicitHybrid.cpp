@@ -114,8 +114,8 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
         }
     }
 
-    // Resistive part of the Ohm's-law field, subtracted from the
-    // particle-push field (see ComputeRHS). Only allocated when the opt-in
+    // Scratch for the resistive push-field correction assembled in every
+    // residual evaluation (see ComputeRHS). Only allocated when the opt-in
     // momentum-consistent push field is enabled and a resistive term is
     // configured.
     m_use_resistive_push_correction = m_hybrid_pic_model->HasResistivity()
@@ -673,19 +673,87 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
     // (Faraday's law needs it), but the resistive friction must not
     // accelerate the ions through E -- the explicit scheme pushes ions with
     // the no-resistivity Ohm field, and the resistive electron-ion friction
-    // is a separate (optional) collision operator. Subtract the resistive
-    // part (refreshed from the previous residual evaluation at the bottom
-    // of this function; exact at convergence). B above already used the
+    // is a separate (optional) collision operator. B above already used the
     // full E.
+    //
+    // The correction is assembled HERE, in every residual evaluation, from
+    // THIS iterate: E_push = E_iterate - (E_full - E_nores), with both Ohm
+    // solves running INTO Efield_fp so the solve wrapper's boundary stack
+    // (PEC image, conformal-EB conductor edges, resistive-shell wall rows)
+    // lands identically on both passes -- every term except eta*J (and the
+    // hyper-resistive term) then cancels exactly in the difference,
+    // including all boundary-controlled rows. Solving the no-resistivity
+    // pass into a scratch field instead would leave those rows untreated
+    // (the wrapper applies the field boundary to the registered Efield_fp,
+    // not to the passed output) and the difference would carry O(1)
+    // boundary-row garbage at any eta. A correction lagged from the
+    // previous residual evaluation is hidden state that shifts the residual
+    // between the base and probe evaluations of the difference Jacobian and
+    // stalls Newton at an O(1) relative norm. The pre-push moments feeding
+    // the two passes enter the difference only through the eta(rho, |J|)
+    // and eta_h(rho, |B|) parametrizations (|J| is the Ampere current, a
+    // pure function of the iterate); constant coefficients make the
+    // correction a pure function of the iterate.
     if (m_use_resistive_push_correction) {
         using ablastr::fields::Direction;
+
+        // The Darwin branch computes the plasma current after the particle
+        // stage; the correction needs it at the iterate's B (already
+        // rebuilt above). The later recomputation sees the same B.
+        if (m_darwin) {
+            m_hybrid_pic_model->CalculatePlasmaCurrent(
+                m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, m_num_amr_levels - 1),
+                m_WarpX->GetEBUpdateEFlag());
+        }
+
+        ablastr::fields::MultiLevelVectorField E_fp =
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, m_num_amr_levels - 1);
+        ablastr::fields::MultiLevelVectorField J_fp =
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::current_fp, m_num_amr_levels - 1);
+        ablastr::fields::MultiLevelVectorField B_fp =
+            m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, m_num_amr_levels - 1);
+        ablastr::fields::MultiLevelScalarField rho_pre =
+            m_WarpX->m_fields.get_mr_levels(FieldType::rho_fp, m_num_amr_levels - 1);
+
         for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            // Park the assembled push field (iterate + BCs + E_ext).
             for (int dir = 0; dir < 3; ++dir) {
-                amrex::MultiFab& E_push = *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{dir}, lev);
-                amrex::MultiFab const& E_res = *m_WarpX->m_fields.get("hybrid_E_resistive_fp", Direction{dir}, lev);
-                amrex::MultiFab::Subtract(E_push, E_res, 0, 0, E_push.nComp(), E_push.nGrowVect());
+                amrex::MultiFab & E_res = *m_WarpX->m_fields.get(
+                    "hybrid_E_resistive_fp", Direction{dir}, lev);
+                amrex::MultiFab const& E = *E_fp[lev][dir];
+                amrex::MultiFab::Copy(E_res, E, 0, 0, E.nComp(), E.nGrowVect());
+            }
+            // Per-level solves: no callback fires inside residual
+            // evaluations (see the RHS Ohm solve below).
+            m_hybrid_pic_model->HybridPICSolveE(
+                E_fp[lev], J_fp[lev], B_fp[lev], *rho_pre[lev],
+                m_WarpX->GetEBUpdateEFlag()[lev], lev,
+                false,  // solve_for_Faraday (retain grad(Pe))
+                true    // include_resistivity
+            );
+            for (int dir = 0; dir < 3; ++dir) {
+                amrex::MultiFab & E_res = *m_WarpX->m_fields.get(
+                    "hybrid_E_resistive_fp", Direction{dir}, lev);
+                amrex::MultiFab const& E = *E_fp[lev][dir];
+                amrex::MultiFab::Subtract(E_res, E, 0, 0, E.nComp(), E.nGrowVect());
+            }
+            m_hybrid_pic_model->HybridPICSolveE(
+                E_fp[lev], J_fp[lev], B_fp[lev], *rho_pre[lev],
+                m_WarpX->GetEBUpdateEFlag()[lev], lev,
+                false,  // solve_for_Faraday (retain grad(Pe))
+                false   // include_resistivity: no-resistivity push field
+            );
+            for (int dir = 0; dir < 3; ++dir) {
+                amrex::MultiFab & E_push = *E_fp[lev][dir];
+                amrex::MultiFab const& E_res = *m_WarpX->m_fields.get(
+                    "hybrid_E_resistive_fp", Direction{dir}, lev);
+                amrex::MultiFab::Add(E_push, E_res, 0, 0, E_push.nComp(), E_push.nGrowVect());
             }
         }
+        // The Ohm kernels write valid cells only, so box-boundary ghosts
+        // still hold the uncorrected iterate; the gather reads those ghosts.
+        amrex::IntVect const ngE = E_fp[0][0]->nGrowVect();
+        m_WarpX->FillBoundaryE(ngE, true /* sync nodal points */);
     }
 
     if (m_darwin && m_hybrid_pic_model->m_darwin_poisson_verbosity > 1) {
@@ -847,41 +915,6 @@ void ThetaImplicitHybrid::ComputeRHS ( WarpXSolverVec&        a_RHS,
             false,  // solve_for_Faraday (retain grad(Pe))
             true    // include_resistivity (retain eta*J for the B-update)
         );
-    }
-
-    // Refresh the resistive push-field correction from this evaluation's
-    // fields: E_res = E_ohm(with resistivity) - E_ohm(without). The
-    // no-resistivity solve writes directly into the E_res fabs, so
-    // Efield_fp (holding the full Ohm field for the RHS below) is never
-    // clobbered. Like the Darwin E_L refresh above, this runs in every
-    // residual evaluation (Jacobian probes included): the correction is a
-    // smooth function of the state and freezing it degrades the Newton
-    // linearization.
-    if (m_use_resistive_push_correction) {
-        using ablastr::fields::Direction;
-        ablastr::fields::MultiLevelVectorField E_res_fp =
-            m_WarpX->m_fields.get_mr_levels_alldirs("hybrid_E_resistive_fp", m_num_amr_levels - 1);
-        // Per-level for the same reason as the full Ohm solve above: no
-        // callback fires inside residual evaluations.
-        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
-            m_hybrid_pic_model->HybridPICSolveE(
-                E_res_fp[lev], current_fp[lev], Bfield_fp[lev], *rho_fp[lev],
-                m_WarpX->GetEBUpdateEFlag()[lev], lev,
-                false,  // solve_for_Faraday (retain grad(Pe))
-                false   // include_resistivity: no-resistivity push field
-            );
-        }
-        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
-            for (int dir = 0; dir < 3; ++dir) {
-                amrex::MultiFab & E_res = *m_WarpX->m_fields.get("hybrid_E_resistive_fp", Direction{dir}, lev);
-                amrex::MultiFab const & E_full = *m_WarpX->m_fields.get(FieldType::Efield_fp, Direction{dir}, lev);
-                amrex::MultiFab::LinComb(E_res, 1.0_rt, E_full, 0, -1.0_rt, E_res, 0,
-                                         0, E_res.nComp(), E_res.nGrowVect());
-                // The push-field subtraction at the top of this function
-                // includes the ghosts the particle gather reads.
-                E_res.FillBoundary(m_WarpX->Geom(lev).periodicity());
-            }
-        }
     }
 
     // The Ohm kernels above returned the stored (plasma) field convention:
