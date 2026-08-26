@@ -1695,19 +1695,17 @@ void HybridPICModel::CalculateElectronFluidVelocity (const int lev) const
     // the same binomial filter used on J (suppresses grid-scale noise that
     // would otherwise be injected into particles by the gather inside the
     // drag operator). Final FillBoundary refreshes ghosts after filtering.
-    for (int idim = 0; idim < 3; ++idim) {
-        ablastr::utils::communication::FillBoundary(
-            *Ve[idim], WarpX::do_single_precision_comms,
-            warpx.Geom(lev).periodicity(), true);
-    }
+    // The three component exchanges are independent, so batch each group
+    // into one grouped call.
+    ablastr::utils::communication::FillBoundary(
+        {Ve[0], Ve[1], Ve[2]}, WarpX::do_single_precision_comms,
+        warpx.Geom(lev).periodicity(), true);
     if (WarpX::use_filter) {
         warpx.ApplyFilterMF(
             warpx.m_fields.get_mr_levels_alldirs("Ve_fp", warpx.finestLevel()), lev);
-        for (int idim = 0; idim < 3; ++idim) {
-            ablastr::utils::communication::FillBoundary(
-                *Ve[idim], WarpX::do_single_precision_comms,
-                warpx.Geom(lev).periodicity(), true);
-        }
+        ablastr::utils::communication::FillBoundary(
+            {Ve[0], Ve[1], Ve[2]}, WarpX::do_single_precision_comms,
+            warpx.Geom(lev).periodicity(), true);
     }
 }
 
@@ -1773,21 +1771,19 @@ void HybridPICModel::CalculateIonFluidVelocity (const int lev) const
             );
         }
 
-        for (int idim = 0; idim < 3; ++idim) {
-            ablastr::utils::communication::FillBoundary(
-                *Vs[idim], WarpX::do_single_precision_comms,
-                warpx.Geom(lev).periodicity(), true);
-        }
+        // The three component exchanges are independent, so batch each group
+        // into one grouped call.
+        ablastr::utils::communication::FillBoundary(
+            {Vs[0], Vs[1], Vs[2]}, WarpX::do_single_precision_comms,
+            warpx.Geom(lev).periodicity(), true);
         // Same J-style binomial filter as in CalculateElectronFluidVelocity.
         if (WarpX::use_filter) {
             warpx.ApplyFilterMF(
                 warpx.m_fields.get_mr_levels_alldirs("Vs_fp_" + spec, warpx.finestLevel()),
                 lev);
-            for (int idim = 0; idim < 3; ++idim) {
-                ablastr::utils::communication::FillBoundary(
-                    *Vs[idim], WarpX::do_single_precision_comms,
-                    warpx.Geom(lev).periodicity(), true);
-            }
+            ablastr::utils::communication::FillBoundary(
+                {Vs[0], Vs[1], Vs[2]}, WarpX::do_single_precision_comms,
+                warpx.Geom(lev).periodicity(), true);
         }
     }
 }
@@ -3199,9 +3195,10 @@ void HybridPICModel::QDSMCInitializeUe (int const lev,
         });
     }
 
-    Vex.FillBoundary(Vex.nGrowVect(), period);
-    Vey.FillBoundary(Vey.nGrowVect(), period);
-    Vez.FillBoundary(Vez.nGrowVect(), period);
+    // Batched ghost exchange for the three independent components (all
+    // communication is posted before any of it is waited on; all ghost
+    // cells of each MultiFab are filled, as before).
+    amrex::FillBoundary(amrex::Vector<amrex::MultiFab*>{&Vex, &Vey, &Vez}, period);
 }
 
 

@@ -364,24 +364,20 @@ void WarpX::HybridPICDepositRhoAndJ ()
 
     // SyncCurrent does not include a call to FillBoundary, but it is needed
     // for the hybrid-PIC solver since current values are interpolated to
-    // a nodal grid
+    // a nodal grid.
+    // The four exchanges (rho and the three current components) are
+    // independent and share the level periodicity, so batch them into one
+    // grouped call (all ghost cells of each MultiFab are filled, as before).
     for (int lev = 0; lev <= finest_level; ++lev) {
         ablastr::utils::communication::FillBoundary(
-            *m_fields.get(FieldType::rho_fp, lev),
-            m_fields.get(FieldType::rho_fp, lev)->nGrowVect(),
+            {m_fields.get(FieldType::rho_fp, lev),
+             m_fields.get(FieldType::current_fp, Direction{0}, lev),
+             m_fields.get(FieldType::current_fp, Direction{1}, lev),
+             m_fields.get(FieldType::current_fp, Direction{2}, lev)},
             WarpX::do_single_precision_comms,
             Geom(lev).periodicity(),
             true
         );
-        for (int idim = 0; idim < 3; ++idim) {
-            ablastr::utils::communication::FillBoundary(
-                *m_fields.get(FieldType::current_fp, Direction{idim}, lev),
-                m_fields.get(FieldType::current_fp, Direction{idim}, lev)->nGrowVect(),
-                WarpX::do_single_precision_comms,
-                Geom(lev).periodicity(),
-                true
-            );
-        }
     }
 }
 

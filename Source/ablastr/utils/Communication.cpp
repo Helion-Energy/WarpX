@@ -124,8 +124,34 @@ void
 FillBoundary (amrex::Vector<amrex::MultiFab *> const &mf, bool do_single_precision_comms,
              const amrex::Periodicity &period, std::optional<bool> nodal_sync)
 {
-    for (auto *x : mf) {
-        ablastr::utils::communication::FillBoundary(*x, do_single_precision_comms, period, nodal_sync);
+    if (do_single_precision_comms) {
+        // Mixed-precision comms stage each MultiFab through its own float
+        // buffer, so keep the per-MultiFab path in that case.
+        for (auto *x : mf) {
+            ablastr::utils::communication::FillBoundary(
+                *x, do_single_precision_comms, period, nodal_sync);
+        }
+        return;
+    }
+
+    BL_PROFILE("ablastr::utils::communication::FillBoundary(Vector)");
+
+    // Same nodal-sync decision logic as the single-MultiFab overload above.
+    const bool do_nodal_sync_arg = nodal_sync.value_or(false);
+    const amrex::ParmParse pp_ablastr("ablastr");
+    bool do_nodal_sync_input = false;
+    pp_ablastr.query("fillboundary_always_sync", do_nodal_sync_input);
+    bool const do_nodal_sync = do_nodal_sync_arg || do_nodal_sync_input;
+
+    // Batch the ghost exchanges: every MultiFab's communication is posted
+    // before any of them is waited on (one coordinated exchange instead of a
+    // blocking round-trip per MultiFab). All components and all ghost cells
+    // of each MultiFab are filled, exactly like the per-MultiFab calls this
+    // replaces; only the posting order changes, not the exchanged data.
+    if (do_nodal_sync) {
+        amrex::FillBoundaryAndSync(mf, period);
+    } else {
+        amrex::FillBoundary(mf, period);
     }
 }
 
