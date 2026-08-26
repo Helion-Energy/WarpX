@@ -880,6 +880,28 @@ public:
      *  a strictly division-free solve, at the documented cost of the
      *  longitudinal bath. Input: je_qn_frac. */
     amrex::Real m_je_qn_frac = 1.0;
+    /** Density anchor of the qn-pin blend and its guarded division
+     *  [m^-3]: a PHYSICS reference (fraction-of-n0 class), decoupled
+     *  from the statistics-anchored one-count je_n_min. WHY: a
+     *  one-count anchor RETREATS as particle quality improves --
+     *  measured at NPPC 8000 on the annulus, where the pin-off arm's
+     *  unprotected cliff E_L escapes at ~step 3000 and the pin-on
+     *  arm's rho_gq division (floored at the 40x-smaller one-count)
+     *  NaNs within the first substeps. Statistics guards that guard
+     *  statistics failures (Eq-27 mass, Eq-30 vacuum blend, the
+     *  viscous CFL and heating floors) correctly stay on je_n_min.
+     *  Default 0 = fall back to je_n_min (bit-identical legacy
+     *  behavior). MEASURED LIMIT: re-anchoring alone does NOT rescue
+     *  the pin at a diamagnetic sheet -- the 0.02 n0 arm also NaNs
+     *  within the first steps at NPPC 8000, so the pin FORM
+     *  (per-substep relaxation toward the divided-Ohm target) is
+     *  itself the wrong tool at that feature, at any anchor
+     *  (consistent with the earlier arm matrix). The knob remains
+     *  correct design for configurations where the pin is
+     *  appropriate; the sheet-class fix is a separate decision
+     *  (vacuum-side E_L treatment or the implicit advance).
+     *  Input: je_qn_n_ref. */
+    amrex::Real m_je_qn_n_ref = 0.0;
     /** Marder divergence cleaning of the relax form's E, restricted to
      *  the vacuum side of the one-count blend (complement of the qn
      *  blend): dE/dt += d_M grad(div E), d_M = frac/(2 dt_sub

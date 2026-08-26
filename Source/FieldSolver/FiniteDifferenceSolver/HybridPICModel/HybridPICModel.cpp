@@ -821,6 +821,7 @@ void HybridPICModel::ReadParameters ()
             "hybrid_pic_model.je_c_max cannot be negative");
         utils::parser::queryWithParser(pp_hybrid, "gol_qn_frac", m_je_qn_frac);
         utils::parser::queryWithParser(pp_hybrid, "je_qn_frac", m_je_qn_frac);
+        utils::parser::queryWithParser(pp_hybrid, "je_qn_n_ref", m_je_qn_n_ref);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_je_qn_frac >= 0.0_rt,
             "hybrid_pic_model.je_qn_frac cannot be negative");
         utils::parser::queryWithParser(pp_hybrid, "gol_div_clean_frac",

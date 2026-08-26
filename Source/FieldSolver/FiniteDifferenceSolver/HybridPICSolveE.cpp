@@ -801,6 +801,15 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 ? hybrid_model->m_je_dt_sub : dt_full;
         amrex::Real const rho_1c =
             PhysConst::q_e * hybrid_model->m_je_n_min;
+        // qn-pin anchor: physics-referenced (je_qn_n_ref,
+        // fraction-of-n0 class), NOT the statistics-anchored
+        // one-count -- a one-count anchor RETREATS as NPPC improves
+        // (both the pin-off production-noise escape and the pin-on
+        // instant NaN were measured at NPPC 8000; see the member doc)
+        amrex::Real const rho_qn_ref = PhysConst::q_e *
+            ((hybrid_model->m_je_qn_n_ref > 0.0_rt)
+                 ? hybrid_model->m_je_qn_n_ref
+                 : hybrid_model->m_je_n_min);
         // Eq-(30) vacuum damping: LOCAL current decay below the
         // one-count level, no CFL (see the member doc).
         amrex::Real const vac_gamma =
@@ -1066,10 +1075,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     // division of the qn pin -- see the member doc)
                     amrex::Real const w_qn = 0.5_rt
                         * (1.0_rt + std::tanh(
-                              (rho_v - rho_1c) / (0.5_rt * rho_1c)));
+                              (rho_v - rho_qn_ref)
+                              / (0.5_rt * rho_qn_ref)));
                     amrex::Real const lam = dt_r * gam_qn * w_qn;
                     amrex::Real const rho_gq =
-                        amrex::max(rho_v, rho_1c);
+                        amrex::max(rho_v, rho_qn_ref);
                     amrex::Real const inv_l = 1.0_rt / (1.0_rt + lam);
                     ern = (ern + lam * ((enE(i,j,k,0) - gpr
                         + rho_v * eta_v * Jr(i,j,k)) / rho_gq))
@@ -1740,6 +1750,15 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 ? hybrid_model->m_je_dt_sub : dt_full;
         amrex::Real const rho_1c =
             PhysConst::q_e * hybrid_model->m_je_n_min;
+        // qn-pin anchor: physics-referenced (je_qn_n_ref,
+        // fraction-of-n0 class), NOT the statistics-anchored
+        // one-count -- a one-count anchor RETREATS as NPPC improves
+        // (both the pin-off production-noise escape and the pin-on
+        // instant NaN were measured at NPPC 8000; see the member doc)
+        amrex::Real const rho_qn_ref = PhysConst::q_e *
+            ((hybrid_model->m_je_qn_n_ref > 0.0_rt)
+                 ? hybrid_model->m_je_qn_n_ref
+                 : hybrid_model->m_je_n_min);
         // Eq-(30) vacuum damping: LOCAL current decay below the
         // one-count level, no CFL (see the member doc).
         amrex::Real const vac_gamma =
@@ -2009,10 +2028,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     // division of the qn pin -- see the member doc)
                     amrex::Real const w_qn = 0.5_rt
                         * (1.0_rt + std::tanh(
-                              (rho_v - rho_1c) / (0.5_rt * rho_1c)));
+                              (rho_v - rho_qn_ref)
+                              / (0.5_rt * rho_qn_ref)));
                     amrex::Real const lam = dt_r * gam_qn * w_qn;
                     amrex::Real const rho_gq =
-                        amrex::max(rho_v, rho_1c);
+                        amrex::max(rho_v, rho_qn_ref);
                     amrex::Real const inv_l = 1.0_rt / (1.0_rt + lam);
                     exn = (exn + lam * ((enE(i,j,k,0) - gpx
                         + rho_v * eta_v * Jx(i,j,k)) / rho_gq))
