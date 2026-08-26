@@ -214,12 +214,20 @@ SubcycledParticleContainer::HandleBoundariesSubcycle (amrex::Real cur_time, amre
         // Match the order of WarpX::HandleParticlesAtBoundaries: mark/reflect
         // at the embedded boundary, record the scraped particles, then remove
         // the absorbed ones.
-        if (WarpX::eb_particle_boundary == ParticleBoundaryType::Reflecting)
+        if (WarpX::eb_particle_boundary == ParticleBoundaryType::Reflecting ||
+            WarpX::eb_particle_boundary == ParticleBoundaryType::Thermal)
         {
+            // Markers reflect specularly under BOTH wall types: they carry
+            // entropy content, not kinetic momentum, so thermal re-emission
+            // has no meaning for them -- and absorbing them at a thermal
+            // wall would leak K_e from the transport.
             for (int lev = 0; lev <= finestLevel(); ++lev)
             {
                 scrapeParticlesAtEB(*this, distance_to_eb, lev,
-                    ParticleBoundaryProcess::Reflect{dt_sub, getMass()});
+                    ParticleBoundaryProcess::ParticleBoundaryInteraction{
+                        dt_sub, getMass(),
+                        ParticleBoundaryType::Reflecting,
+                        amrex::ParticleReal(0.)});
             }
             boundary_buffer.gatherParticlesFromEmbeddedBoundaries(
                 *this, getSpeciesId(), distance_to_eb, cur_time, dt_sub);
