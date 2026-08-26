@@ -61,10 +61,12 @@ parser.add_argument(
     "(warpx.use_filter)",
 )
 parser.add_argument(
-    "--je-stagger",
-    action="store_true",
-    help="staggered-leapfrog relax advance with the Crank-Nicolson J_e "
-    "update (hybrid_pic_model.je_time_stagger)",
+    "--je-advance",
+    choices=["cn", "be"],
+    default="cn",
+    help="relax advance: cn = the time-centered Crank-Nicolson default "
+    "(hybrid_pic_model.je_time_stagger = 1), be = the legacy "
+    "backward-Euler Lie advance",
 )
 parser.add_argument(
     "--steps", type=int, default=100, help="number of steps (dumped every step)"
@@ -195,8 +197,7 @@ if args.esolve == "je_form":
     # damping blend touches the mode
     pywarpx.hybridpicmodel.je_n_min = 1e-6 * n_plasma
     pywarpx.hybridpicmodel.je_c_frac = args.je_c_frac
-    if args.je_stagger:
-        pywarpx.hybridpicmodel.je_time_stagger = 1
+    pywarpx.hybridpicmodel.je_time_stagger = 1 if args.je_advance == "cn" else 0
     if args.je_qn_frac >= 0.0:
         pywarpx.hybridpicmodel.je_qn_frac = args.je_qn_frac
 

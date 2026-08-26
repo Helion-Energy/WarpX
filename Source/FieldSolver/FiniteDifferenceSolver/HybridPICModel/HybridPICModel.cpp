@@ -849,9 +849,10 @@ void HybridPICModel::ReadParameters ()
         pp_hybrid.query("je_time_stagger", m_je_time_stagger);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !(m_je_time_stagger && m_je_centered_split),
-            "hybrid_pic_model.je_time_stagger and je_centered_split "
-            "are mutually exclusive (the staggering IS the time "
-            "centering)");
+            "hybrid_pic_model.je_centered_split is redundant with the "
+            "CN advance (je_time_stagger, default 1) which already "
+            "runs the centered pushes; set je_time_stagger = 0 to "
+            "combine the BE advance with the centered split");
         pp_hybrid.query("je_conduction_lockstep", m_je_cond_lockstep);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !m_je_cond_lockstep || m_esolve_je,

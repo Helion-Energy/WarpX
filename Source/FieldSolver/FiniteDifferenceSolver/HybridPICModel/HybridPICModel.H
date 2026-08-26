@@ -1020,10 +1020,14 @@ public:
      *  it requires omega_pe_art dt_sub < 2, i.e. d_e resolved by the
      *  grid -- the 1D gate satisfies that by construction, real
      *  mass-ratio decks (d_e << dx) blow up on the first substep.
-     *  Default 0 (the validated BE Lie advance); redundant with
-     *  je_centered_split (it implies those pushes) and unsupported
-     *  with circuit coupling. Input: je_time_stagger. */
-    bool m_je_time_stagger = false;
+     *  DEFAULT 1 (flipped 2026-08-25 on the gate/energy/annulus
+     *  measurements above, contingent on the full test battery):
+     *  je_time_stagger = 0 restores the BE-Lie advance. Redundant
+     *  with je_centered_split (it implies those pushes; set
+     *  je_time_stagger = 0 to combine the BE advance with the
+     *  centered split) and unsupported with circuit coupling.
+     *  Input: je_time_stagger. */
+    bool m_je_time_stagger = true;
 
     /** Move the FD-conduction advance of T_e into the je relax
      *  substep loop: one QdsmcConductionOnce(dt_sub) per accepted

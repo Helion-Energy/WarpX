@@ -320,6 +320,14 @@ if args.esolve == "je_form":
     # the one-count density level (one macroparticle's deposit): the
     # contract value for je_n_min -- never lower
     pywarpx.hybridpicmodel.je_n_min = run.n_plasma / run.NPPC
+    # honest-E_L (qn pin off) with the detuned artificial light speed:
+    # the edge-sheet runaway is mediated by the artificial fast branch
+    # at the edge impedance step, and je_c_frac = 0.2 detunes it with
+    # no added dissipation (measured 2x2: BE or CN at the default 0.5
+    # run away by ~step 600 at this scale; either advance is bounded
+    # at 0.2, the CN advance saturating smoothly at ~14% B0)
+    pywarpx.hybridpicmodel.je_qn_frac = 0.0
+    pywarpx.hybridpicmodel.je_c_frac = 0.2
     if args.je_vacuum == "gamma":
         pywarpx.hybridpicmodel.je_vacuum_gamma_frac = 0.5
 simulation.initialize_warpx()
