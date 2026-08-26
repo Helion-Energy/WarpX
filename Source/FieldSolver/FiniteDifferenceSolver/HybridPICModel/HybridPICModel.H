@@ -1716,6 +1716,16 @@ public:
      *  qdsmc_conduction_fd_rtol / _atol. */
     amrex::Real m_cond_fd_rtol = 1.0e-4;
     amrex::Real m_cond_fd_atol = 1.0e-3;
+    /** FD-conduction participation floor (m^-3): nodes whose deposited
+     *  n_e is at or below it are closed to the conduction operator
+     *  (zero tensor, no fluxes, T_e frozen), exactly like the
+     *  no-marker-weight sentinel. Default 0 keeps sentinel-only
+     *  closing. On decks with a near-vacuum region (e.g. the je-form
+     *  annulus) the sub-one-count cells otherwise dominate the
+     *  subcycler's error norm with marker noise and grind the adaptive
+     *  dt against the stability ceiling. Input:
+     *  qdsmc_conduction_n_open. */
+    amrex::Real m_cond_n_open = 0.0;
     /** Energy-equation TRANSPORT operator (bake-off jig): 0 = markers
      *  (the QDSMC particle transport, production default), 1 = grid
      *  (prototype: the entropy pair {n_e, K n_e} advanced in conservative

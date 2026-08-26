@@ -309,6 +309,8 @@ void HybridPICModel::ReadParameters ()
             m_cond_fd_rtol > 0._rt && m_cond_fd_atol > 0._rt,
             "hybrid_pic_model.qdsmc_conduction_fd_rtol/_atol must be "
             "positive");
+        utils::parser::queryWithParser(pp_hybrid,
+            "qdsmc_conduction_n_open", m_cond_n_open);
         std::string top = "markers";
         pp_hybrid.query("qdsmc_transport_operator", top);
         if (top == "markers") { m_qdsmc_transport_operator = 0; }
@@ -5987,7 +5989,10 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
     amrex::Real const me = PhysConst::m_e;
     auto const kappa_par_ex  = m_kappa_par;
     auto const kappa_perp_ex = m_kappa_perp;
-    amrex::Real const n_floor = m_qdsmc_n_floor;
+    // participation floor: the no-marker-weight sentinel, raised by the
+    // optional qdsmc_conduction_n_open (see the member doc)
+    amrex::Real const n_floor =
+        amrex::max(m_qdsmc_n_floor, m_cond_n_open);
     amrex::Real const f_lim   = m_cond_flux_limit_factor;
     bool const iso_full       = m_cond_isotropic;
     amrex::Real const iso_B   = m_cond_iso_B;
