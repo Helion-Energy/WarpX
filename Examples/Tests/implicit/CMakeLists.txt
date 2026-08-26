@@ -1567,6 +1567,69 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_wall_band_eta_conductive  # dependency
 )
 
+# shaped-wall FIELD freeze (implicit_mhd.wall_field_freeze, work item
+# B), the headline T-B1: the conductive contrast deck (band-eta
+# override OFF -- band |j_theta| ~3.2e4 dominating the interior) with
+# the freeze armed must book a deep-band current that is exactly zero
+# (round-off; bit-frozen Br/Bt at the zero boot response) at every
+# post-boot snapshot while the interior response RECOVERS the
+# shielding; the in-run resistive assembly validation gates the
+# frozen-identity-row residual/PC twin-ness at every update
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_field_freeze  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_band_eta implicit_mhd.wall_field_freeze=1 implicit_mhd.wall_band_eta_override=0.0 diag1.intervals=2"  # inputs
+    "analysis_mhd_wall_field_freeze.py diags ../test_rz_theta_implicit_mhd_wall_band_eta_conductive/diags/diag000006"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_band_eta_conductive  # dependency
+)
+
+# shaped-wall FIELD freeze no-op twin (T-B2): quiescent no-drive
+# conduction-drain run (the pec thermal deck -- every masked E row is
+# already projected to zero, so every frozen face's Faraday rhs is
+# exactly zero before the freeze zeroes it) with the freeze armed must
+# stay BIT-IDENTICAL to the freeze-off reference at every snapshot and
+# every plotted field: the freeze must never touch a live row
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_field_freeze_noop  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_thermal implicit_mhd.wall_field_freeze=1"  # inputs
+    "analysis_mhd_wall_field_freeze_noop.py diags ../test_rz_theta_implicit_mhd_wall_thermal_zero_flux/diags"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_thermal_zero_flux  # dependency
+)
+
+# shaped-wall FIELD freeze live-fluid PC parity, the unpreconditioned
+# truth (T-B3 reference): the live-fluid wall deck with the freeze
+# armed and no preconditioner
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_field_freeze_live_nopc  # name
+    RZ  # dims
+    1  # nprocs (matches the banded single-rank twin)
+    "inputs_test_rz_theta_implicit_mhd_wall_live_fluid_pc jacobian.pc_type=none implicit_mhd.wall_field_freeze=1"  # inputs
+    "analysis_mhd_wall_live_fluid_pc.py diags/newton.txt diags/diag000005 reference"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# shaped-wall FIELD freeze live-fluid PC parity (T-B3): pc_mhd_block
+# with the BANDED resistive block and in-run assembly validation must
+# mirror the residual's frozen-face identity rows (identity stencil
+# rows + the post-inverse dB = r_B restore, the field twin of the
+# fluid wall_live restore) -- healthy GMRES, and the converged answer
+# matches the unpreconditioned truth pointwise
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_field_freeze_live_pc  # name
+    RZ  # dims
+    1  # nprocs (the banded elimination is sequential along z: single rank)
+    "inputs_test_rz_theta_implicit_mhd_wall_live_fluid_pc implicit_mhd.wall_field_freeze=1 pc_mhd_block.resistive_solver=banded pc_mhd_block.resistive_validate_assembly=1"  # inputs
+    "analysis_mhd_wall_live_fluid_pc.py diags/newton.txt diags/diag000005 pc ../test_rz_theta_implicit_mhd_wall_field_freeze_live_nopc/diags/diag000005"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_field_freeze_live_nopc  # dependency
+)
+
 # selectable z-end fluid boundary, mode "outflow" (rectified outgoing-only
 # end ghosts): a hot slab with outward end flow drains mass and total
 # fluid energy strictly monotonically through the z faces
