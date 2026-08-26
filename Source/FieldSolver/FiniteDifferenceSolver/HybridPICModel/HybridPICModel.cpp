@@ -10411,18 +10411,6 @@ void HybridPICModel::BfieldEvolve (
         "coupling engine: the corrector re-integration cannot re-run "
         "the interleaved electron/conduction advances.");
 
-    // Staggered-advance scratch (see the m_je_time_stagger member
-    // doc): holders for B^{k+1/2} and B^{k+3/2} so the registry can
-    // carry the substep-average B^{k+1} through the CN J_e phase.
-    std::array<MultiFab, 3> B_sta, B_stb;
-    if (je_relax && m_je_time_stagger) {
-        for (int ii = 0; ii < 3; ii++) {
-            B_sta[ii] = MultiFab(Bfield[lev][ii]->boxArray(),
-                Bfield[lev][ii]->DistributionMap(), 1, ng);
-            B_stb[ii] = MultiFab(Bfield[lev][ii]->boxArray(),
-                Bfield[lev][ii]->DistributionMap(), 1, ng);
-        }
-    }
     const amrex::Real t_half_start = warpx.gett_old(0)
         + ((subcycling_half == SubcyclingHalf::SecondHalf) ? dt_half : 0.0_rt);
 
@@ -10486,58 +10474,17 @@ void HybridPICModel::BfieldEvolve (
             step_change_factor = m_substep_safety * std::pow(error + 1.e-10_rt, -0.2_rt);
             step_succeeded = (error <= 1._rt);
 
-        } else if (je_relax && m_je_time_stagger) {
-            // Staggered leapfrog (see the m_je_time_stagger member
-            // doc): E^k -> E^{k+1} by Ampere-Maxwell with the
-            // half-level rc(B^{k+1/2}) and J_e^{k+1/2}; then
-            // B^{k+1/2} -> B^{k+3/2} by Faraday with E^{k+1}; then
-            // J_e^{k+1/2} -> J_e^{k+3/2} by the CN local solve
-            // against E^{k+1} and the substep-average B^{k+1}.
-            CalculatePlasmaCurrent(Bfield, eb_update_E);
-            m_je_relax_advance = true;
-            m_je_stagger_phase = 1;
-            HybridPICSolveE(Efield, Jfield, Bfield, rhofield,
-                            eb_update_E, true);
-            if (Bz_IndexType[0] == Ez_IndexType[0]) {
-                warpx.FillBoundaryE(ng, nodal_sync);
-            }
-            for (int ii = 0; ii < 3; ii++) {
-                MultiFab::Copy(B_sta[ii], *Bfield[lev][ii],
-                               0, 0, 1, ng);
-            }
-            step_succeeded = je_relax_b_push(dt_sub);
-            if (!step_succeeded) {
-                WARPX_ABORT_WITH_MESSAGE(
-                    "NaN or Inf value encountered in the B-field "
-                    "during the staggered Je-form relax substep.");
-            }
-            // registry <- (B^{k+1/2} + B^{k+3/2})/2 for the CN phase,
-            // B^{k+3/2} parked in B_stb (ghosts of both operands are
-            // filled, so the average needs no fresh exchange)
-            for (int ii = 0; ii < 3; ii++) {
-                MultiFab::Copy(B_stb[ii], *Bfield[lev][ii],
-                               0, 0, 1, ng);
-                MultiFab::LinComb(*Bfield[lev][ii],
-                    0.5_rt, B_sta[ii], 0, 0.5_rt, B_stb[ii], 0,
-                    0, 1, ng);
-            }
-            m_je_stagger_phase = 2;
-            HybridPICSolveE(Efield, Jfield, Bfield, rhofield,
-                            eb_update_E, true);
-            m_je_stagger_phase = 0;
-            m_je_relax_advance = false;
-            for (int ii = 0; ii < 3; ii++) {
-                MultiFab::Copy(*Bfield[lev][ii], B_stb[ii],
-                               0, 0, 1, ng);
-            }
         } else if (je_relax) {
             // Lie split: one full Faraday push with the frozen E^n.
-            // Centered (Strang) split: half push here -- the (E, J_e)
-            // advance in the accepted branch then reads the HALF-LEVEL
-            // B, and the second half push (with E^{n+1}) follows it
-            // (the m_je_centered_split member doc's sequence).
+            // Centered (Strang) split -- also the B staggering of the
+            // CN advance (je_time_stagger): half push here, the
+            // (E, J_e) advance in the accepted branch then reads the
+            // HALF-LEVEL B (its interval midpoint), and the second
+            // half push (with E^{n+1}) follows it (the
+            // m_je_centered_split member doc's sequence).
             step_succeeded = je_relax_b_push(
-                m_je_centered_split ? 0.5_rt*dt_sub : dt_sub);
+                (m_je_centered_split || m_je_time_stagger)
+                    ? 0.5_rt*dt_sub : dt_sub);
             if (!step_succeeded) {
                 WARPX_ABORT_WITH_MESSAGE(
                     "NaN or Inf value encountered in the B-field during the "
@@ -10643,16 +10590,16 @@ void HybridPICModel::BfieldEvolve (
             for (int ii = 0; ii < 3; ii++) {
                 MultiFab::Copy(B_old[ii], *Bfield[lev][ii], 0, 0, 1, ng);
             }
-            if (je_relax && !m_je_time_stagger) {
+            if (je_relax) {
                 // The (E, J_e) advance (see the m_je_centered_split
-                // member doc): exactly once per accepted substep, by
-                // the accepted dt_sub (still published in m_je_dt_sub),
-                // against the current B and its refreshed Ampere
-                // current -- the full-level B under the Lie split, the
-                // half-level B under the centered split. Runs after
-                // the coupling interval closes, so the advance sees
-                // the settled external scale segments. (The staggered
-                // advance ran entirely in the attempt branch above.)
+                // and m_je_time_stagger member docs): exactly once per
+                // accepted substep, by the accepted dt_sub (still
+                // published in m_je_dt_sub), against the current B and
+                // its refreshed Ampere current -- the full-level B
+                // under the Lie split, the half-level (midpoint) B
+                // under the centered split and the CN advance. Runs
+                // after the coupling interval closes, so the advance
+                // sees the settled external scale segments.
                 CalculatePlasmaCurrent(Bfield, eb_update_E);
                 m_je_relax_advance = true;
                 HybridPICSolveE(Efield, Jfield, Bfield, rhofield,
@@ -10661,7 +10608,7 @@ void HybridPICModel::BfieldEvolve (
                 if (Bz_IndexType[0] == Ez_IndexType[0]) {
                     warpx.FillBoundaryE(ng, nodal_sync);
                 }
-                if (m_je_centered_split) {
+                if (m_je_centered_split || m_je_time_stagger) {
                     // second half Faraday push with the updated E:
                     // B integrates the time-centered average of E and
                     // the electron advance read time-centered B

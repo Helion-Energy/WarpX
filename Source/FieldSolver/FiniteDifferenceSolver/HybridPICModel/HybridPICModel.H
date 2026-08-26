@@ -994,33 +994,36 @@ public:
      *  Input: je_centered_split. */
     bool m_je_centered_split = false;
 
-    /** Staggered-leapfrog relax advance (je_time_stagger = 1): J_e
-     *  lives at HALF-INTEGER substep times (the same staggering as
-     *  the deposited ion current), B at the other half, and each
-     *  substep advances E^k -> E^{k+1} by Ampere-Maxwell with the
-     *  midpoint rc(B^{k+1/2}) and J_e^{k+1/2}, then B by Faraday
-     *  with E^{k+1}, then J_e^{k+1/2} -> J_e^{k+3/2} by a
-     *  CRANK-NICOLSON local solve against the midpoint E^{k+1} and
-     *  the substep-average B^{k+1}. Every coupling is time-centered
-     *  and the CN gyration is a Cayley rotation (|J_e|-preserving
-     *  where backward Euler damps at O((qm dt B)^2)); the BE scheme's
-     *  dt^2 kE/eps_art implicit E-feedback term disappears -- the
-     *  staggering replaces it, stable at the design omega_pe_art
-     *  dt_sub < 2. Motivated by the 1D energy testbed: the
-     *  substep-scaling residual drift is centering-invariant, i.e.
-     *  the BE bias of the local solve, not the splitting. Default 0
-     *  (the validated BE Lie advance); mutually exclusive with
-     *  je_centered_split (staggering IS the centering) and
-     *  unsupported with circuit coupling. J_e seeds from the Ampere
-     *  closure at integer time on the first call (an O(dt_sub)
-     *  half-shift, once). Input: je_time_stagger. */
+    /** Time-centered Crank-Nicolson relax advance (je_time_stagger =
+     *  1): the coupled local (E, J_e) system advances with
+     *  TRAPEZOIDAL (theta = 1/2) coefficients in place of backward
+     *  Euler -- the gyration becomes a Cayley rotation
+     *  (|J_e|-preserving where BE damps at O((qm dt B)^2)), the
+     *  E-coupling stays implicit (unconditionally stable at any
+     *  omega_pe_art dt), and E' finishes on the time-average J_e --
+     *  while B runs the centered-split half pushes, so the advance
+     *  reads its interval-midpoint B: every coupling is second-order
+     *  time-centered. Motivated by the 1D energy testbed (the
+     *  substep-scaling drift is centering-invariant = the BE bias of
+     *  the local solve) and measured on the whistler gate at 0.287 -
+     *  0.303% on the inertia branch, gap fraction 1.00 (the BE-Lie
+     *  record is 0.696%/0.99). Being neutral, the scheme exposes
+     *  dynamics BE silently damped: with the qn pin off, a
+     *  c_art-resonant parametric decay of the artificial longitudinal
+     *  E_L branch (three-wave, spectrally identified on the 1D
+     *  testbed) -- stabilized WITHOUT dissipation by detuning c_art
+     *  (je_c_frac/je_c_max; measured: frac 0.5 -> 0.2 at substeps 40
+     *  restores 2000-step stability and slightly improves the gate).
+     *  The pin damps E_L by design, so pinned configs need nothing.
+     *  A FULLY EXPLICIT staggered E<->J_e exchange (J_e at
+     *  half-integer substep times) was tried first and is REJECTED:
+     *  it requires omega_pe_art dt_sub < 2, i.e. d_e resolved by the
+     *  grid -- the 1D gate satisfies that by construction, real
+     *  mass-ratio decks (d_e << dx) blow up on the first substep.
+     *  Default 0 (the validated BE Lie advance); redundant with
+     *  je_centered_split (it implies those pushes) and unsupported
+     *  with circuit coupling. Input: je_time_stagger. */
     bool m_je_time_stagger = false;
-
-    /** Runtime phase of the staggered relax advance (not an input):
-     *  0 = the combined BE advance (je_time_stagger off), 1 = the E
-     *  (Ampere-Maxwell + qn pin) update, 2 = the CN J_e update. Set
-     *  around the HybridPICSolveE calls by BfieldEvolve. */
-    int m_je_stagger_phase = 0;
 
     /** Move the FD-conduction advance of T_e into the je relax
      *  substep loop: one QdsmcConductionOnce(dt_sub) per accepted
