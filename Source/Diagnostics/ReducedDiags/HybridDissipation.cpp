@@ -311,6 +311,24 @@ HybridDissipation::ComputeDiags (const int step)
                                ablastr::fields::Direction{1}, lev),
             warpx.m_fields.get(FieldType::Efield_fp,
                                ablastr::fields::Direction{2}, lev)};
+        // Split-field convention: the stored E in cells BELOW the
+        // solver density floor still contains the analytic inductive
+        // drive E_ext (the per-cell subtraction is gated on
+        // rho >= rho_floor) -- exactly the gated cells. Square the
+        // wave part E - E_ext, or the column reads the imposed drive
+        // (measured: P*eta_vac invariant across 8 decades of the pin
+        // = pure drive signature, up to 3e16 W of fiction at 1e-8).
+        const bool sub_ext = hybrid->m_add_external_fields;
+        std::array<const amrex::MultiFab*, 3> Eext =
+            {nullptr, nullptr, nullptr};
+        if (sub_ext) {
+            Eext = {warpx.m_fields.get(FieldType::hybrid_E_fp_external,
+                                       ablastr::fields::Direction{0}, lev),
+                    warpx.m_fields.get(FieldType::hybrid_E_fp_external,
+                                       ablastr::fields::Direction{1}, lev),
+                    warpx.m_fields.get(FieldType::hybrid_E_fp_external,
+                                       ablastr::fields::Direction{2}, lev)};
+        }
         const auto mask = amrex::OwnerMask(*E[0], geom.periodicity());
         amrex::ReduceOps<amrex::ReduceOpSum> rop;
         amrex::ReduceData<amrex::Real> rdata(rop);
@@ -321,6 +339,12 @@ HybridDissipation::ComputeDiags (const int step)
             const auto Er = E[0]->const_array(mfi);
             const auto Et = E[1]->const_array(mfi);
             const auto Ez = E[2]->const_array(mfi);
+            const auto Xr = sub_ext ? Eext[0]->const_array(mfi)
+                : amrex::Array4<const amrex::Real>{};
+            const auto Xt = sub_ext ? Eext[1]->const_array(mfi)
+                : amrex::Array4<const amrex::Real>{};
+            const auto Xz = sub_ext ? Eext[2]->const_array(mfi)
+                : amrex::Array4<const amrex::Real>{};
             const auto rho_arr = rho->const_array(mfi);
             const auto m_arr = mask->const_array(mfi);
             rop.eval(box, rdata,
@@ -335,10 +359,14 @@ HybridDissipation::ComputeDiags (const int step)
                 const amrex::Real g_v =
                     std::exp(-amrex::max(rho_arr(i, j, 0), 0.0_rt)
                              * rho_vgate);
+                const amrex::Real ewr = Er(i, j, 0)
+                    - (sub_ext ? Xr(i, j, 0) : 0.0_rt);
+                const amrex::Real ewt = Et(i, j, 0)
+                    - (sub_ext ? Xt(i, j, 0) : 0.0_rt);
+                const amrex::Real ewz = Ez(i, j, 0)
+                    - (sub_ext ? Xz(i, j, 0) : 0.0_rt);
                 const amrex::Real e2 =
-                    Er(i, j, 0)*Er(i, j, 0)
-                    + Et(i, j, 0)*Et(i, j, 0)
-                    + Ez(i, j, 0)*Ez(i, j, 0);
+                    ewr*ewr + ewt*ewt + ewz*ewz;
                 return {g_v / eta_vac * e2 * dV};
             });
         }

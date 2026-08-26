@@ -896,7 +896,18 @@ public:
      *  steady state recovers the e-form's floored-eta Ohm limit
      *  E -> eta_vac curl B / mu0; the gate g = exp(-rho /
      *  (rho_gate/3)) makes it < 5% by the gate density so plasma
-     *  physics is untouched. Input: je_vacuum_eta. */
+     *  physics is untouched.
+     *  TWO REGIMES, distinct jobs: a SMALL value (stability scale,
+     *  ~1e-8) leaves the hyperbolic branch at c_art as the
+     *  gap-crossing mechanism and acts purely as an absorber on the
+     *  resonant E_L accumulation (the gap stays
+     *  magnetoquasistatic); a BOOSTED value (Ohm-m class and up)
+     *  supplants the hyperbolic wave with elliptic B diffusion
+     *  (D = eta/mu0) as the transport across the gap -- the
+     *  legacy-form-style mechanism for schemes without a
+     *  displacement term. This solver carries displacement, so the
+     *  boosted regime is never needed for transport: intend the
+     *  small-value regime. Input: je_vacuum_eta. */
     amrex::Real m_je_vacuum_eta = 0.0;
     /** Gate density [m^-3] of the vacuum-eta floor (g = exp(-n/
      *  (n_gate/3))). DECOUPLED from the solver n_floor and from the
