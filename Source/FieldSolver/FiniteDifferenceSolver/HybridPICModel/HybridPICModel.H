@@ -994,6 +994,34 @@ public:
      *  Input: je_centered_split. */
     bool m_je_centered_split = false;
 
+    /** Staggered-leapfrog relax advance (je_time_stagger = 1): J_e
+     *  lives at HALF-INTEGER substep times (the same staggering as
+     *  the deposited ion current), B at the other half, and each
+     *  substep advances E^k -> E^{k+1} by Ampere-Maxwell with the
+     *  midpoint rc(B^{k+1/2}) and J_e^{k+1/2}, then B by Faraday
+     *  with E^{k+1}, then J_e^{k+1/2} -> J_e^{k+3/2} by a
+     *  CRANK-NICOLSON local solve against the midpoint E^{k+1} and
+     *  the substep-average B^{k+1}. Every coupling is time-centered
+     *  and the CN gyration is a Cayley rotation (|J_e|-preserving
+     *  where backward Euler damps at O((qm dt B)^2)); the BE scheme's
+     *  dt^2 kE/eps_art implicit E-feedback term disappears -- the
+     *  staggering replaces it, stable at the design omega_pe_art
+     *  dt_sub < 2. Motivated by the 1D energy testbed: the
+     *  substep-scaling residual drift is centering-invariant, i.e.
+     *  the BE bias of the local solve, not the splitting. Default 0
+     *  (the validated BE Lie advance); mutually exclusive with
+     *  je_centered_split (staggering IS the centering) and
+     *  unsupported with circuit coupling. J_e seeds from the Ampere
+     *  closure at integer time on the first call (an O(dt_sub)
+     *  half-shift, once). Input: je_time_stagger. */
+    bool m_je_time_stagger = false;
+
+    /** Runtime phase of the staggered relax advance (not an input):
+     *  0 = the combined BE advance (je_time_stagger off), 1 = the E
+     *  (Ampere-Maxwell + qn pin) update, 2 = the CN J_e update. Set
+     *  around the HybridPICSolveE calls by BfieldEvolve. */
+    int m_je_stagger_phase = 0;
+
     /** Move the FD-conduction advance of T_e into the je relax
      *  substep loop: one QdsmcConductionOnce(dt_sub) per accepted
      *  substep, each rebuilding the anisotropy tensor from the

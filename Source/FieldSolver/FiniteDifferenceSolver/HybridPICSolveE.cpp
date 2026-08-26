@@ -841,6 +841,10 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         }
 
         MultiFab & Je_mf = *warpx.m_fields.get("hybrid_je_fp", lev);
+        // Staggered-leapfrog phase (see the m_je_time_stagger member
+        // doc): 0 = the combined BE advance, 1 = the E update, 2 =
+        // the CN J_e update.
+        int const stagger_phase = hybrid_model->m_je_stagger_phase;
         bool const seed_je = !hybrid_model->m_je_init;
         hybrid_model->m_je_init = true;
         if (seed_je) {
@@ -855,8 +859,9 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 << (hybrid_model->m_je_var_mass ? "on" : "off")
                 << " (alpha " << hybrid_model->m_je_alpha
                 << "), split = "
-                << (hybrid_model->m_je_centered_split
-                        ? "centered" : "lie")
+                << (hybrid_model->m_je_time_stagger ? "stagger-cn"
+                    : (hybrid_model->m_je_centered_split
+                        ? "centered" : "lie"))
                 << ", visc_frac = " << hybrid_model->m_je_visc_frac
                 << ", n_min = " << hybrid_model->m_je_n_min
                 << " m^-3 (must be the one-count level)\n";
@@ -995,6 +1000,97 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 amrex::Real const jor = seed_je ? rcr : Je(i,j,k,0);
                 amrex::Real const jot = seed_je ? rct : Je(i,j,k,1);
                 amrex::Real const joz = seed_je ? rcz : Je(i,j,k,2);
+                if (stagger_phase == 1) {
+                    // staggered E push (see the m_je_time_stagger
+                    // member doc): E^k -> E^{k+1} by Ampere-Maxwell
+                    // with the midpoint drive rc(B^{k+1/2}) and
+                    // J_e^{k+1/2} -- no implicit solve, the
+                    // staggering replaces the BE E-feedback. The qn
+                    // pin acts on E and so lives in this phase.
+                    if (seed_je) {
+                        Je(i,j,k,0) = jor; Je(i,j,k,1) = jot;
+                        Je(i,j,k,2) = joz;
+                    }
+                    amrex::Real ern = Er(i,j,k)
+                        + dt_r * inv_eps_art * (rcr - jor);
+                    amrex::Real etn = Et(i,j,k)
+                        + dt_r * inv_eps_art * (rct - jot);
+                    amrex::Real ezn = Ez(i,j,k)
+                        + dt_r * inv_eps_art * (rcz - joz);
+                    if (use_qn) {
+                        amrex::Real const w_qn = 0.5_rt
+                            * (1.0_rt + std::tanh(
+                                  (rho_v - rho_1c) / (0.5_rt * rho_1c)));
+                        amrex::Real const lam = dt_r * gam_qn * w_qn;
+                        amrex::Real const rho_gq =
+                            amrex::max(rho_v, rho_1c);
+                        amrex::Real const inv_l =
+                            1.0_rt / (1.0_rt + lam);
+                        ern = (ern + lam * ((enE(i,j,k,0) - gpr
+                            + rho_v * eta_v * Jr(i,j,k)) / rho_gq))
+                            * inv_l;
+                        etn = (etn + lam * ((enE(i,j,k,1) - gpt
+                            + rho_v * eta_v * Jt(i,j,k)) / rho_gq))
+                            * inv_l;
+                        ezn = (ezn + lam * ((enE(i,j,k,2) - gpz
+                            + rho_v * eta_v * Jz(i,j,k)) / rho_gq))
+                            * inv_l;
+                    }
+                    if (on_axis) { ern = 0.0_rt; etn = 0.0_rt; }
+                    if (!skip_r) { Er(i,j,k) = ern; }
+                    if (!skip_t) { Et(i,j,k) = etn; }
+                    if (!skip_z) { Ez(i,j,k) = ezn; }
+                    return;
+                }
+                if (stagger_phase == 2) {
+                    // staggered CN (Cayley) J_e update against the
+                    // midpoint E^{k+1} (etr/ett/etz: the registry E,
+                    // just advanced, with E_ext folded above) and the
+                    // substep-average B^{k+1} (the registry B; see
+                    // BfieldEvolve). Gyration is |J_e|-preserving;
+                    // damping and drive are trapezoidal.
+                    amrex::Real const gam_sum =
+                        kE * eta_v + gam_v + gam_vis;
+                    amrex::Real const acn =
+                        1.0_rt + 0.5_rt * dt_r * gam_sum;
+                    amrex::Real const am =
+                        1.0_rt - 0.5_rt * dt_r * gam_sum;
+                    amrex::Real const chr = 0.5_rt * qm_c * dt_r * br;
+                    amrex::Real const cht = 0.5_rt * qm_c * dt_r * bt;
+                    amrex::Real const chz = 0.5_rt * qm_c * dt_r * bz;
+                    amrex::Real const cb2 = chr*chr + cht*cht + chz*chz;
+                    amrex::Real const srr = am*jor + (cht*joz - chz*jot)
+                        + dt_r * (kE * etr - kE * eta_v * Jir(i,j,k)
+                                  + qm_c * gpr);
+                    amrex::Real const srt = am*jot + (chz*jor - chr*joz)
+                        + dt_r * (kE * ett - kE * eta_v * Jit(i,j,k)
+                                  + qm_c * gpt);
+                    amrex::Real const srz = am*joz + (chr*jot - cht*jor)
+                        + dt_r * (kE * etz - kE * eta_v * Jiz(i,j,k)
+                                  + qm_c * gpz);
+                    amrex::Real const cbd = chr*srr + cht*srt + chz*srz;
+                    amrex::Real const cinv =
+                        1.0_rt / (acn * (acn*acn + cb2));
+                    amrex::Real jnr = (acn*acn*srr
+                        + acn*(cht*srz - chz*srt) + cbd*chr) * cinv;
+                    amrex::Real jnt = (acn*acn*srt
+                        + acn*(chz*srr - chr*srz) + cbd*cht) * cinv;
+                    amrex::Real const jnz = (acn*acn*srz
+                        + acn*(chr*srt - cht*srr) + cbd*chz) * cinv;
+                    if (on_axis) { jnr = 0.0_rt; jnt = 0.0_rt; }
+                    if (qv) {
+                        amrex::Real const j2 =
+                            (skip_r ? 0.0_rt : jnr*jnr)
+                            + (skip_t ? 0.0_rt : jnt*jnt)
+                            + (skip_z ? 0.0_rt : jnz*jnz);
+                        qv(i,j,k) += gam_vis * dt_r * j2
+                            / (qm_c * amrex::max(rho_v, rho_1c));
+                    }
+                    if (!skip_r) { Je(i,j,k,0) = jnr; }
+                    if (!skip_t) { Je(i,j,k,1) = jnt; }
+                    if (!skip_z) { Je(i,j,k,2) = jnz; }
+                    return;
+                }
                 // implicit local solve:
                 //   (a I - [beta]x) Je' = r,  beta = qm dt B_tot
                 //   inverse = (a^2 I + a [beta]x + beta beta^T)
@@ -1752,6 +1848,10 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         }
 
         MultiFab & Je_mf = *warpx.m_fields.get("hybrid_je_fp", lev);
+        // Staggered-leapfrog phase (see the m_je_time_stagger member
+        // doc): 0 = the combined BE advance, 1 = the E update, 2 =
+        // the CN J_e update.
+        int const stagger_phase = hybrid_model->m_je_stagger_phase;
         bool const seed_je = !hybrid_model->m_je_init;
         hybrid_model->m_je_init = true;
         if (seed_je) {
@@ -1766,8 +1866,9 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 << (hybrid_model->m_je_var_mass ? "on" : "off")
                 << " (alpha " << hybrid_model->m_je_alpha
                 << "), split = "
-                << (hybrid_model->m_je_centered_split
-                        ? "centered" : "lie")
+                << (hybrid_model->m_je_time_stagger ? "stagger-cn"
+                    : (hybrid_model->m_je_centered_split
+                        ? "centered" : "lie"))
                 << ", visc_frac = " << hybrid_model->m_je_visc_frac
                 << ", n_min = " << hybrid_model->m_je_n_min
                 << " m^-3 (must be the one-count level)\n";
@@ -1910,6 +2011,95 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 amrex::Real const jox = seed_je ? rcx : Je(i,j,k,0);
                 amrex::Real const joy = seed_je ? rcy : Je(i,j,k,1);
                 amrex::Real const joz = seed_je ? rcz : Je(i,j,k,2);
+                if (stagger_phase == 1) {
+                    // staggered E push (see the m_je_time_stagger
+                    // member doc): E^k -> E^{k+1} by Ampere-Maxwell
+                    // with the midpoint drive rc(B^{k+1/2}) and
+                    // J_e^{k+1/2} -- no implicit solve, the
+                    // staggering replaces the BE E-feedback. The qn
+                    // pin acts on E and so lives in this phase.
+                    if (seed_je) {
+                        Je(i,j,k,0) = jox; Je(i,j,k,1) = joy;
+                        Je(i,j,k,2) = joz;
+                    }
+                    amrex::Real exn = Ex(i,j,k)
+                        + dt_r * inv_eps_art * (rcx - jox);
+                    amrex::Real eyn = Ey(i,j,k)
+                        + dt_r * inv_eps_art * (rcy - joy);
+                    amrex::Real ezn = Ez(i,j,k)
+                        + dt_r * inv_eps_art * (rcz - joz);
+                    if (use_qn) {
+                        amrex::Real const w_qn = 0.5_rt
+                            * (1.0_rt + std::tanh(
+                                  (rho_v - rho_1c) / (0.5_rt * rho_1c)));
+                        amrex::Real const lam = dt_r * gam_qn * w_qn;
+                        amrex::Real const rho_gq =
+                            amrex::max(rho_v, rho_1c);
+                        amrex::Real const inv_l =
+                            1.0_rt / (1.0_rt + lam);
+                        exn = (exn + lam * ((enE(i,j,k,0) - gpx
+                            + rho_v * eta_v * Jx(i,j,k)) / rho_gq))
+                            * inv_l;
+                        eyn = (eyn + lam * ((enE(i,j,k,1) - gpy
+                            + rho_v * eta_v * Jy(i,j,k)) / rho_gq))
+                            * inv_l;
+                        ezn = (ezn + lam * ((enE(i,j,k,2) - gpz
+                            + rho_v * eta_v * Jz(i,j,k)) / rho_gq))
+                            * inv_l;
+                    }
+                    if (!skip_x) { Ex(i,j,k) = exn; }
+                    if (!skip_y) { Ey(i,j,k) = eyn; }
+                    if (!skip_z) { Ez(i,j,k) = ezn; }
+                    return;
+                }
+                if (stagger_phase == 2) {
+                    // staggered CN (Cayley) J_e update against the
+                    // midpoint E^{k+1} (etx/ety/etz: the registry E,
+                    // just advanced, with E_ext folded above) and the
+                    // substep-average B^{k+1} (the registry B; see
+                    // BfieldEvolve). Gyration is |J_e|-preserving;
+                    // damping and drive are trapezoidal.
+                    amrex::Real const gam_sum =
+                        kE * eta_v + gam_v + gam_vis;
+                    amrex::Real const acn =
+                        1.0_rt + 0.5_rt * dt_r * gam_sum;
+                    amrex::Real const am =
+                        1.0_rt - 0.5_rt * dt_r * gam_sum;
+                    amrex::Real const chx = 0.5_rt * qm_c * dt_r * bx;
+                    amrex::Real const chy = 0.5_rt * qm_c * dt_r * by;
+                    amrex::Real const chz = 0.5_rt * qm_c * dt_r * bz;
+                    amrex::Real const cb2 = chx*chx + chy*chy + chz*chz;
+                    amrex::Real const srx = am*jox + (chy*joz - chz*joy)
+                        + dt_r * (kE * etx - kE * eta_v * Jix(i,j,k)
+                                  + qm_c * gpx);
+                    amrex::Real const sry = am*joy + (chz*jox - chx*joz)
+                        + dt_r * (kE * ety - kE * eta_v * Jiy(i,j,k)
+                                  + qm_c * gpy);
+                    amrex::Real const srz = am*joz + (chx*joy - chy*jox)
+                        + dt_r * (kE * etz - kE * eta_v * Jiz(i,j,k)
+                                  + qm_c * gpz);
+                    amrex::Real const cbd = chx*srx + chy*sry + chz*srz;
+                    amrex::Real const cinv =
+                        1.0_rt / (acn * (acn*acn + cb2));
+                    amrex::Real const jnxs = (acn*acn*srx
+                        + acn*(chy*srz - chz*sry) + cbd*chx) * cinv;
+                    amrex::Real const jnys = (acn*acn*sry
+                        + acn*(chz*srx - chx*srz) + cbd*chy) * cinv;
+                    amrex::Real const jnzs = (acn*acn*srz
+                        + acn*(chx*sry - chy*srx) + cbd*chz) * cinv;
+                    if (qv) {
+                        amrex::Real const j2 =
+                            (skip_x ? 0.0_rt : jnxs*jnxs)
+                            + (skip_y ? 0.0_rt : jnys*jnys)
+                            + (skip_z ? 0.0_rt : jnzs*jnzs);
+                        qv(i,j,k) += gam_vis * dt_r * j2
+                            / (qm_c * amrex::max(rho_v, rho_1c));
+                    }
+                    if (!skip_x) { Je(i,j,k,0) = jnxs; }
+                    if (!skip_y) { Je(i,j,k,1) = jnys; }
+                    if (!skip_z) { Je(i,j,k,2) = jnzs; }
+                    return;
+                }
                 // implicit local solve:
                 //   (a I - [beta]x) Je' = r,  beta = qm dt B_tot
                 //   inverse = (a^2 I + a [beta]x + beta beta^T)

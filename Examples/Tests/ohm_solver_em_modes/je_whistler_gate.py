@@ -55,6 +55,12 @@ parser.add_argument(
     "(1.0); 0 = off (unstable honest-E_L dynamics, study only)",
 )
 parser.add_argument(
+    "--je-stagger",
+    action="store_true",
+    help="staggered-leapfrog relax advance with the Crank-Nicolson J_e "
+    "update (hybrid_pic_model.je_time_stagger)",
+)
+parser.add_argument(
     "--steps", type=int, default=100, help="number of steps (dumped every step)"
 )
 parser.add_argument("-v", "--verbose", action="store_true")
@@ -182,6 +188,8 @@ if args.esolve == "je_form":
     # damping blend touches the mode
     pywarpx.hybridpicmodel.je_n_min = 1e-6 * n_plasma
     pywarpx.hybridpicmodel.je_c_frac = args.je_c_frac
+    if args.je_stagger:
+        pywarpx.hybridpicmodel.je_time_stagger = 1
     if args.je_qn_frac >= 0.0:
         pywarpx.hybridpicmodel.je_qn_frac = args.je_qn_frac
 
