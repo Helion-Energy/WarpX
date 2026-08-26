@@ -44,7 +44,7 @@ HybridDissipation::HybridDissipation (const std::string& rd_name)
         "geometry");
 #endif
 
-    m_data.resize(3, 0.0_rt);
+    m_data.resize(4, 0.0_rt);
 
     if (amrex::ParallelDescriptor::IOProcessor() && m_write_header) {
         std::ofstream ofs{m_path + m_rd_name + "." + m_extension,
@@ -56,6 +56,7 @@ HybridDissipation::HybridDissipation (const std::string& rd_name)
         ofs << m_sep << "[" << c++ << "]P_eta(W)";
         ofs << m_sep << "[" << c++ << "]P_etaH(W)";
         ofs << m_sep << "[" << c++ << "]P_diss(W)";
+        ofs << m_sep << "[" << c++ << "]P_sigma_vac(W)";
         ofs << "\n";
         ofs.close();
     }
@@ -291,12 +292,67 @@ HybridDissipation::ComputeDiags (const int step)
         p_eta_h += amrex::get<1>(rv);
     }
 
+    // Vacuum-eta-floor conduction loss (see m_je_vacuum_eta): the
+    // sigma E channel of the relax advance, P_sigma = Int g(rho)/
+    // eta_vac |E|^2 dV. Zero unless the floor is active. E is
+    // collocated (nodal) under the je contract; the owner mask keeps
+    // shared nodes counted once.
+    amrex::Real p_sigma = 0.0_rt;
+    const amrex::Real eta_vac = hybrid->m_je_vacuum_eta;
+    if (eta_vac > 0.0_rt) {
+        const amrex::Real rho_vgate = 3.0_rt / (PhysConst::q_e *
+            ((hybrid->m_je_vacuum_eta_n_gate > 0.0_rt)
+                 ? hybrid->m_je_vacuum_eta_n_gate
+                 : hybrid->m_je_n_min));
+        const std::array<const amrex::MultiFab*, 3> E = {
+            warpx.m_fields.get(FieldType::Efield_fp,
+                               ablastr::fields::Direction{0}, lev),
+            warpx.m_fields.get(FieldType::Efield_fp,
+                               ablastr::fields::Direction{1}, lev),
+            warpx.m_fields.get(FieldType::Efield_fp,
+                               ablastr::fields::Direction{2}, lev)};
+        const auto mask = amrex::OwnerMask(*E[0], geom.periodicity());
+        amrex::ReduceOps<amrex::ReduceOpSum> rop;
+        amrex::ReduceData<amrex::Real> rdata(rop);
+        using RT = typename decltype(rdata)::Type;
+        for (amrex::MFIter mfi(*E[0], amrex::TilingIfNotGPU());
+             mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.tilebox();
+            const auto Er = E[0]->const_array(mfi);
+            const auto Et = E[1]->const_array(mfi);
+            const auto Ez = E[2]->const_array(mfi);
+            const auto rho_arr = rho->const_array(mfi);
+            const auto m_arr = mask->const_array(mfi);
+            rop.eval(box, rdata,
+                [=] AMREX_GPU_DEVICE (int i, int j, int) -> RT
+            {
+                if (!m_arr(i, j, 0)) { return {0.0_rt}; }
+                const amrex::Real r = rmin + i*dr;
+                const amrex::Real r_vol =
+                    (r > 0.0_rt) ? r : dr/8.0_rt;
+                const amrex::Real dV =
+                    2.0_rt*MathConst::pi*r_vol*dr*dz;
+                const amrex::Real g_v =
+                    std::exp(-amrex::max(rho_arr(i, j, 0), 0.0_rt)
+                             * rho_vgate);
+                const amrex::Real e2 =
+                    Er(i, j, 0)*Er(i, j, 0)
+                    + Et(i, j, 0)*Et(i, j, 0)
+                    + Ez(i, j, 0)*Ez(i, j, 0);
+                return {g_v / eta_vac * e2 * dV};
+            });
+        }
+        p_sigma = amrex::get<0>(rdata.value(rop));
+    }
+
     amrex::ParallelDescriptor::ReduceRealSum(p_eta);
     amrex::ParallelDescriptor::ReduceRealSum(p_eta_h);
+    amrex::ParallelDescriptor::ReduceRealSum(p_sigma);
 
     m_data[0] = p_eta;
     m_data[1] = p_eta_h;
-    m_data[2] = p_eta + p_eta_h;
+    m_data[2] = p_eta + p_eta_h + p_sigma;
+    m_data[3] = p_sigma;
 #else
     amrex::ignore_unused(step);
 #endif

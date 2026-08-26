@@ -810,6 +810,15 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
             ((hybrid_model->m_je_qn_n_ref > 0.0_rt)
                  ? hybrid_model->m_je_qn_n_ref
                  : hybrid_model->m_je_n_min);
+        // vacuum eta floor (see the m_je_vacuum_eta member doc): a
+        // conduction current sigma = g(rho)/eta_vac in the E update,
+        // gate g = exp(-rho/(rho_gate/3))
+        amrex::Real const eta_vac = hybrid_model->m_je_vacuum_eta;
+        bool const use_eta_vac = (eta_vac > 0.0_rt);
+        amrex::Real const rho_vgate = 3.0_rt / (PhysConst::q_e *
+            ((hybrid_model->m_je_vacuum_eta_n_gate > 0.0_rt)
+                 ? hybrid_model->m_je_vacuum_eta_n_gate
+                 : hybrid_model->m_je_n_min));
         // Eq-(30) vacuum damping: LOCAL current decay below the
         // one-count level, no CFL (see the member doc).
         amrex::Real const vac_gamma =
@@ -1069,6 +1078,15 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     + dt_r * inv_eps_art * (rct - fjt);
                 amrex::Real ezn = Ez(i,j,k)
                     + dt_r * inv_eps_art * (rcz - fjz);
+                if (use_eta_vac) {
+                    // implicit vacuum conduction: deep-vacuum steady
+                    // state = the floored-eta Ohm limit
+                    amrex::Real const g_v =
+                        std::exp(-rho_v * rho_vgate);
+                    amrex::Real const s_f = 1.0_rt / (1.0_rt
+                        + dt_r * inv_eps_art * g_v / eta_vac);
+                    ern *= s_f; etn *= s_f; ezn *= s_f;
+                }
                 if (use_qn) {
                     // implicit relaxation toward the one-count-guarded
                     // Ohm value, plasma-blended (the OPTIONAL floored
@@ -1759,6 +1777,15 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             ((hybrid_model->m_je_qn_n_ref > 0.0_rt)
                  ? hybrid_model->m_je_qn_n_ref
                  : hybrid_model->m_je_n_min);
+        // vacuum eta floor (see the m_je_vacuum_eta member doc): a
+        // conduction current sigma = g(rho)/eta_vac in the E update,
+        // gate g = exp(-rho/(rho_gate/3))
+        amrex::Real const eta_vac = hybrid_model->m_je_vacuum_eta;
+        bool const use_eta_vac = (eta_vac > 0.0_rt);
+        amrex::Real const rho_vgate = 3.0_rt / (PhysConst::q_e *
+            ((hybrid_model->m_je_vacuum_eta_n_gate > 0.0_rt)
+                 ? hybrid_model->m_je_vacuum_eta_n_gate
+                 : hybrid_model->m_je_n_min));
         // Eq-(30) vacuum damping: LOCAL current decay below the
         // one-count level, no CFL (see the member doc).
         amrex::Real const vac_gamma =
@@ -2022,6 +2049,15 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     + dt_r * inv_eps_art * (rcy - fjy);
                 amrex::Real ezn = Ez(i,j,k)
                     + dt_r * inv_eps_art * (rcz - fjz);
+                if (use_eta_vac) {
+                    // implicit vacuum conduction: deep-vacuum steady
+                    // state = the floored-eta Ohm limit
+                    amrex::Real const g_v =
+                        std::exp(-rho_v * rho_vgate);
+                    amrex::Real const s_f = 1.0_rt / (1.0_rt
+                        + dt_r * inv_eps_art * g_v / eta_vac);
+                    exn *= s_f; eyn *= s_f; ezn *= s_f;
+                }
                 if (use_qn) {
                     // implicit relaxation toward the one-count-guarded
                     // Ohm value, plasma-blended (the OPTIONAL floored

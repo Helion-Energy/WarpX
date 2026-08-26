@@ -880,6 +880,33 @@ public:
      *  a strictly division-free solve, at the documented cost of the
      *  longitudinal bath. Input: je_qn_frac. */
     amrex::Real m_je_qn_frac = 1.0;
+    /** Vacuum resistivity floor for the relax advance [Ohm m]
+     *  (je_vacuum_eta > 0 activates): a conduction current sigma E
+     *  with sigma = g(rho)/je_vacuum_eta enters the Ampere-Maxwell E
+     *  update, applied implicitly (unconditionally stable, division-
+     *  free). WHY: an evolved-E scheme at eta -> 0 against a
+     *  reflecting conducting wall is the classic undamped FDTD
+     *  curl-curl cavity -- longitudinal E minted at a vacuum gap has
+     *  no loss channel and accumulates without bound (the algebraic
+     *  e-form is immune by statelessness). The eta floor is the
+     *  standard cure, and it is PHYSICAL ohmic loss: it books as
+     *  dissipation (P_sigma_vac in the HybridDissipation reduced
+     *  diagnostic), distinct from divergence-cleaning constraint
+     *  cleanup, which is deliberately not used here. Deep-vacuum
+     *  steady state recovers the e-form's floored-eta Ohm limit
+     *  E -> eta_vac curl B / mu0; the gate g = exp(-rho /
+     *  (rho_gate/3)) makes it < 5% by the gate density so plasma
+     *  physics is untouched. Input: je_vacuum_eta. */
+    amrex::Real m_je_vacuum_eta = 0.0;
+    /** Gate density [m^-3] of the vacuum-eta floor (g = exp(-n/
+     *  (n_gate/3))). DECOUPLED from the solver n_floor and from the
+     *  one-count by design (the e-form separability lesson: tying
+     *  the gate to the solver floor and lowering both together blew
+     *  substep budgets); default 0 falls back to the one-count
+     *  je_n_min, and decks with a background fill must set it well
+     *  below that fill. Input: je_vacuum_eta_n_gate. */
+    amrex::Real m_je_vacuum_eta_n_gate = 0.0;
+
     /** Density anchor of the qn-pin blend and its guarded division
      *  [m^-3]: a PHYSICS reference (fraction-of-n0 class), decoupled
      *  from the statistics-anchored one-count je_n_min. WHY: a

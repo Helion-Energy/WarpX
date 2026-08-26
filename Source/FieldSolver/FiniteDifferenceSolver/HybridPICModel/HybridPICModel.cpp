@@ -822,6 +822,12 @@ void HybridPICModel::ReadParameters ()
         utils::parser::queryWithParser(pp_hybrid, "gol_qn_frac", m_je_qn_frac);
         utils::parser::queryWithParser(pp_hybrid, "je_qn_frac", m_je_qn_frac);
         utils::parser::queryWithParser(pp_hybrid, "je_qn_n_ref", m_je_qn_n_ref);
+        utils::parser::queryWithParser(pp_hybrid, "je_vacuum_eta",
+                                       m_je_vacuum_eta);
+        utils::parser::queryWithParser(pp_hybrid, "je_vacuum_eta_n_gate",
+                                       m_je_vacuum_eta_n_gate);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_je_vacuum_eta >= 0.0_rt,
+            "hybrid_pic_model.je_vacuum_eta cannot be negative");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_je_qn_frac >= 0.0_rt,
             "hybrid_pic_model.je_qn_frac cannot be negative");
         utils::parser::queryWithParser(pp_hybrid, "gol_div_clean_frac",
