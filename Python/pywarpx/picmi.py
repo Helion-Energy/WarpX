@@ -2861,6 +2861,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         wall_thermal_bc=None,
         wall_temperature=None,
         wall_ledger_file=None,
+        wall_band_eta_override=None,
         conduction_coefficient_state=None,
         absorb_ledger_interval=None,
         absorb_ledger_file=None,
@@ -2941,6 +2942,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.wall_thermal_bc = wall_thermal_bc
         self.wall_temperature = wall_temperature
         self.wall_ledger_file = wall_ledger_file
+        self.wall_band_eta_override = wall_band_eta_override
         self.conduction_coefficient_state = conduction_coefficient_state
         self.absorb_ledger_interval = absorb_ledger_interval
         self.absorb_ledger_file = absorb_ledger_file
@@ -3049,6 +3051,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.wall_thermal_bc = self.wall_thermal_bc
         implicit_mhd.wall_temperature = self.wall_temperature
         implicit_mhd.wall_ledger_file = self.wall_ledger_file
+        implicit_mhd.wall_band_eta_override = self.wall_band_eta_override
         implicit_mhd.conduction_coefficient_state = (
             self.conduction_coefficient_state)
         implicit_mhd.absorb_ledger_interval = self.absorb_ledger_interval
