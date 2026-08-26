@@ -846,11 +846,12 @@ void HybridPICModel::ReadParameters ()
             "(the Eq-27 cap is the under-resolved-cell detector)");
         pp_hybrid.query("gol_centered_split", m_je_centered_split);
         pp_hybrid.query("je_centered_split", m_je_centered_split);
+        pp_hybrid.query("je_conduction_lockstep", m_je_cond_lockstep);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            !m_esolve_je || !m_je_centered_split,
-            "The centered (Strang) split is not yet wired on this "
-            "fork's substep loop; set hybrid_pic_model."
-            "je_centered_split = 0 (Lie split)");
+            !m_je_cond_lockstep || m_esolve_je,
+            "hybrid_pic_model.je_conduction_lockstep requires "
+            "esolve = je_form (it moves the conduction advance into "
+            "the relax substep loop)");
     }
 }
 
@@ -9466,8 +9467,11 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
             QdsmcPhaseMinTe(lev, "euler_sources");
             // Lie conduction, matching euler's Lie sources (no-op unless
             // the kappa_par parser is set, keeping the control bit-identical
-            // to #6982).
-            QdsmcConductionOnce(lev, dt, /*use_rho_new=*/true);
+            // to #6982). Skipped under je_conduction_lockstep, which owns
+            // the conduction advance in the relax substep loop.
+            if (!m_je_cond_lockstep) {
+                QdsmcConductionOnce(lev, dt, /*use_rho_new=*/true);
+            }
             QdsmcPhaseMinTe(lev, "euler_conduction");
             QDSMCFillElectronPressureFromTe(lev);
             // same Pe boundary treatment as the algebraic closure
@@ -9501,7 +9505,11 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
 
         // Strang bracket as in the pc driver (the rho pairing is
         // half-integer-staggered here, accepted for the non-default scheme).
-        QdsmcConductionOnce(lev, 0.5_rt * dt_adv, /*use_rho_new=*/false);
+        // Under je_conduction_lockstep the conduction halves live in the
+        // relax substep loop instead (see the member doc).
+        if (!m_je_cond_lockstep) {
+            QdsmcConductionOnce(lev, 0.5_rt * dt_adv, /*use_rho_new=*/false);
+        }
         QdsmcPhaseMinTe(lev, "lf_conduction_half1");
         ApplyQdsmcEnergySources(lev, 0.5_rt * dt_adv, /*fill_te_ghosts=*/true);
         QdsmcPhaseMinTe(lev, "lf_sources1");
@@ -9509,7 +9517,9 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
         QdsmcPhaseMinTe(lev, "lf_transport");
         ApplyQdsmcEnergySources(lev, 0.5_rt * dt_adv, /*fill_te_ghosts=*/true);
         QdsmcPhaseMinTe(lev, "lf_sources2");
-        QdsmcConductionOnce(lev, 0.5_rt * dt_adv, /*use_rho_new=*/true);
+        if (!m_je_cond_lockstep) {
+            QdsmcConductionOnce(lev, 0.5_rt * dt_adv, /*use_rho_new=*/true);
+        }
         QdsmcPhaseMinTe(lev, "lf_conduction_half2");
 
         // Pe bookkeeping for the integer-time extrapolation (consumed by
@@ -10386,6 +10396,13 @@ void HybridPICModel::BfieldEvolve (
     if (lev == 0 && warpx.get_pointer_CircuitCoupling() != nullptr) {
         coupler = warpx.get_pointer_CircuitCoupling()->Coupler();
     }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !(je_relax && coupler &&
+          (m_je_centered_split || m_je_cond_lockstep)),
+        "The centered Je-form split and the conduction lockstep are "
+        "not supported with an active circuit coupling engine: the "
+        "corrector re-integration cannot re-run the interleaved "
+        "electron/conduction advances.");
     const amrex::Real t_half_start = warpx.gett_old(0)
         + ((subcycling_half == SubcyclingHalf::SecondHalf) ? dt_half : 0.0_rt);
 
@@ -10450,7 +10467,13 @@ void HybridPICModel::BfieldEvolve (
             step_succeeded = (error <= 1._rt);
 
         } else if (je_relax) {
-            step_succeeded = je_relax_b_push(dt_sub);
+            // Lie split: one full Faraday push with the frozen E^n.
+            // Centered (Strang) split: half push here -- the (E, J_e)
+            // advance in the accepted branch then reads the HALF-LEVEL
+            // B, and the second half push (with E^{n+1}) follows it
+            // (the m_je_centered_split member doc's sequence).
+            step_succeeded = je_relax_b_push(
+                m_je_centered_split ? 0.5_rt*dt_sub : dt_sub);
             if (!step_succeeded) {
                 WARPX_ABORT_WITH_MESSAGE(
                     "NaN or Inf value encountered in the B-field during the "
@@ -10557,13 +10580,14 @@ void HybridPICModel::BfieldEvolve (
                 MultiFab::Copy(B_old[ii], *Bfield[lev][ii], 0, 0, 1, ng);
             }
             if (je_relax) {
-                // Lie split (see the m_je_centered_split member doc):
-                // the RK stages read the frozen E state -- advance
-                // (E, J_e) exactly once here, by the accepted dt_sub
-                // (still published in m_je_dt_sub), against the
-                // updated B and its refreshed Ampere current. Runs
-                // after the coupling interval closes, so the advance
-                // sees the settled external scale segments.
+                // The (E, J_e) advance (see the m_je_centered_split
+                // member doc): exactly once per accepted substep, by
+                // the accepted dt_sub (still published in m_je_dt_sub),
+                // against the current B and its refreshed Ampere
+                // current -- the full-level B under the Lie split, the
+                // half-level B under the centered split. Runs after
+                // the coupling interval closes, so the advance sees
+                // the settled external scale segments.
                 CalculatePlasmaCurrent(Bfield, eb_update_E);
                 m_je_relax_advance = true;
                 HybridPICSolveE(Efield, Jfield, Bfield, rhofield,
@@ -10571,6 +10595,35 @@ void HybridPICModel::BfieldEvolve (
                 m_je_relax_advance = false;
                 if (Bz_IndexType[0] == Ez_IndexType[0]) {
                     warpx.FillBoundaryE(ng, nodal_sync);
+                }
+                if (m_je_centered_split) {
+                    // second half Faraday push with the updated E:
+                    // B integrates the time-centered average of E and
+                    // the electron advance read time-centered B
+                    if (!je_relax_b_push(0.5_rt*dt_sub)) {
+                        WARPX_ABORT_WITH_MESSAGE(
+                            "NaN or Inf value encountered in the "
+                            "B-field during the second half push of "
+                            "the centered Je-form relax substep.");
+                    }
+                }
+                if (m_je_cond_lockstep) {
+                    // tight T_e <-> (J_e, B) coupling (see the member
+                    // doc): advance conduction by this substep against
+                    // the substep-level B and hand the refreshed Pe to
+                    // the next substep's electron advance
+                    QdsmcConductionOnce(lev, dt_sub,
+                        /*use_rho_new=*/(subcycling_half ==
+                                         SubcyclingHalf::SecondHalf));
+                    QDSMCFillElectronPressureFromTe(lev);
+                    warpx.ApplyElectronPressureBoundary(
+                        lev, PatchType::fine);
+                    ablastr::utils::communication::FillBoundary(
+                        *warpx.m_fields.get(
+                            FieldType::hybrid_electron_pressure_fp,
+                            lev),
+                        WarpX::do_single_precision_comms,
+                        warpx.Geom(lev).periodicity(), true);
                 }
             }
             dt_sub *= std::min(m_substep_max_growth, step_change_factor);

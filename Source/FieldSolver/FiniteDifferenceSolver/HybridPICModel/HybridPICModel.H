@@ -985,13 +985,29 @@ public:
      *  gather/deposition access (bounds-check verified) instead of
      *  the assert. Both are the same upstream instability in an
      *  already-fatal regime. 0 = the legacy Lie split.
-     *  THIS FORK: the centered split still needs the half-dt B push
-     *  plumbing in the substep loop -- default 0 (Lie) and selecting
-     *  it under esolve = je_form aborts at parse until it lands (the
-     *  dispersion gates measured Lie and centered identical, so Lie
-     *  is a valid production configuration, not a downgrade).
+     *  Wired on this fork as half-dt Faraday pushes bracketing the
+     *  (E, J_e) advance in the substep loop; unsupported with an
+     *  active circuit coupling engine (the corrector re-integration
+     *  cannot re-run the interleaved electron advance). Default 0
+     *  (Lie) -- the dispersion gates measured Lie and centered
+     *  identical, so Lie remains a valid production configuration.
      *  Input: je_centered_split. */
     bool m_je_centered_split = false;
+
+    /** Move the FD-conduction advance of T_e into the je relax
+     *  substep loop: one QdsmcConductionOnce(dt_sub) per accepted
+     *  substep, each rebuilding the anisotropy tensor from the
+     *  SUBSTEP-level B and refreshing Pe for the next substep's
+     *  (E, J_e) advance -- instead of the global-dt Strang bracket's
+     *  two dt/2 conduction halves against the midpoint-frozen B^n
+     *  (which stay skipped while this is on; transport and sources
+     *  keep their global-dt bracket). The prototype knob for the
+     *  tight T_e <-> (J_e, B) leapfrog hypothesis: the loose
+     *  global-dt coupling is a candidate driver of the annulus edge
+     *  sheet's late-time energy growth. Total conduction time per
+     *  step is identical (sum of dt_sub = dt). Requires esolve =
+     *  je_form; default off. Input: je_conduction_lockstep. */
+    bool m_je_cond_lockstep = false;
 
     /** Amano Eq (27) effective electron mass, multiplied through by m_i
      *  (the ion mass cancels): m_e' = max(m_e, B^2 q_e/(mu0 rho_e) *
