@@ -314,6 +314,14 @@ Overall simulation parameters
             This can enhance the overall efficiency of the Newton solver.
             Default is true if ``implicit_evolve.particle_suborbits = true``.
 
+          - ``implicit_evolve.mass_matrices_boundary_rows`` (``bool``, default: false).
+            When ``true`` and ``implicit_evolve.use_mass_matrices_jacobian = true``, the physical-boundary response is folded into the mass-matrix bands themselves:
+            band entries with rows or columns in the guard region of a reflecting wall are folded onto their interior mirrors with the same parities the deposited current fold and the field-gather ghost image apply
+            (currently implemented for RZ geometry at the r-max boundary with ``boundary.field_hi = pec`` and ``boundary.particle_hi = reflecting``).
+            The mass-matrix Jacobian *action* is unchanged (the guard-current fold and ghost-image fill already act on the mass-matrix matvec), but the stored bands then represent the true interior operator,
+            which is required by any consumer that reads band entries directly rather than acting through the folded matvec.
+            The wall-node row of components nodal in *r* is stored half-normalized, in the same convention as a raw current deposit before its guard fold; see the comments in ``ImplicitSolver::ApplyMassMatricesBoundaryRows``.
+
         - ``implicit_evolve.use_mass_matrices_pc`` (``bool``, default: false).
           When ``true``, the plasma response is captured in the preconditioner.
           Requires use of a preconditioner (``jacobian.pc_type = pc_curl_curl_mlmg``, ``pc_petsc``, ``pc_jacobi``, ``pc_hall_jacobi``, or ``pc_block_banded``).

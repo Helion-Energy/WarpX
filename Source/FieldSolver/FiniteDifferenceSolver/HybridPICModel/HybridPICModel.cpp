@@ -76,6 +76,26 @@ void HybridPICModel::ReadParameters ()
     utils::parser::queryWithParser(pp_hybrid, "holmstrom_transition_width", m_holmstrom_transition_width);
     pp_hybrid.query("include_hall_term", m_include_hall_term);
     pp_hybrid.query("include_electron_pressure_term", m_include_electron_pressure_term);
+    pp_hybrid.query("pec_conductor_wall_rows", m_pec_conductor_wall_rows);
+
+    // Thin resistive-shell wall at the RZ r-max PEC boundary (see the
+    // member documentation of m_resistive_wall for the model and the
+    // shell L/R timescale). Independent of pec_conductor_wall_rows.
+    pp_hybrid.query("resistive_wall", m_resistive_wall);
+    utils::parser::queryWithParser(pp_hybrid, "wall_resistivity",
+                                   m_wall_resistivity);
+    utils::parser::queryWithParser(pp_hybrid, "wall_thickness",
+                                   m_wall_thickness);
+    utils::parser::queryWithParser(pp_hybrid, "wall_bz_ext", m_wall_bz_ext);
+#if !defined(WARPX_DIM_RZ)
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_resistive_wall,
+        "hybrid_pic_model.resistive_wall is only implemented for the RZ "
+        "r-max wall");
+#endif
+    if (m_resistive_wall) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_wall_resistivity > 0.,
+            "hybrid_pic_model.wall_resistivity must be > 0");
+    }
 
     // Opt-in conformal (enlarged-cell/ECT) embedded-boundary wall.
     pp_hybrid.query("use_conformal_eb", m_use_conformal_eb);
@@ -1111,6 +1131,79 @@ void HybridPICModel::HybridPICSolveE (
     ablastr::fields::VectorField current_fp_plasma = warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
     auto* const electron_pressure_fp = warpx.m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
 
+#if defined(WARPX_DIM_RZ)
+    // Conductor-row treatment of the r-max PEC wall: the conductor row
+    // carries no plasma moments (see the m_pec_conductor_wall_rows member
+    // documentation for the full closure stack). Zero the tangential
+    // current components on the wall node plane (and beyond) for BOTH the
+    // Ampere and ion currents, so the electron current J_e = J - J_i the
+    // Ohm kernels assemble carries no wall sheet from the deposit-fold /
+    // one-sided-curl parity mismatch. Conductor-surface current lives in
+    // the conductor, not in the plasma Ohm terms.
+    //
+    // Ordering: this block runs inside every residual evaluation of the
+    // theta-implicit solver, strictly AFTER the moment deposition and its
+    // guard folds (ThetaImplicitHybrid::ComputeRHS -> PreRHSOp:
+    // PushParticlesandDeposit -> ApplyInverseVolumeScalingTo{Current,
+    // Charge}Density -> SyncCurrentAndRho, whose SyncRho/SyncCurrent
+    // SumBoundary and ApplyRhofieldBoundary/ApplyJfieldBoundary PEC
+    // reflect-folds are the last writers of the wall rows) and immediately
+    // BEFORE the Ohm kernels consume the moments -- so no fold can
+    // re-populate the conductor row behind this treatment. The explicit
+    // hybrid's subcycled E-solves route through this same wrapper.
+    if (m_pec_conductor_wall_rows
+        && WarpX::field_boundary_hi[0] == FieldBoundaryType::PEC)
+    {
+        const int iwall = warpx.Geom(lev).Domain().bigEnd(0) + 1;
+        for (auto* J : {current_fp_plasma[1], current_fp_plasma[2],
+                        Jfield[1], Jfield[2]}) {
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (amrex::MFIter mfi(*J, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                amrex::Box bx = mfi.growntilebox();
+                if (bx.bigEnd(0) < iwall) { continue; }
+                bx.setSmall(0, iwall);
+                auto const& arr = J->array(mfi);
+                amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    arr(i, j, k) = 0.0_rt;
+                });
+            }
+        }
+
+        // ne-Dirichlet wall moment: the conductor row carries no plasma
+        // charge either. Zero the deposited (nodal) charge density the Ohm
+        // divide consumes (comp 0 of the rhofield handed to the kernels) on
+        // the wall node plane, and odd-image the ghost rows beyond it
+        // (ghost = -interior mirror), so any staggered interpolation at or
+        // beyond the wall row sees a raw density <= 0 and the gate-on-raw
+        // divide in the Ohm kernel returns zero Hall/motional force there
+        // instead of enE/rho_floor (the floored divide alone would turn the
+        // zeroed numerator row into a 1/rho_floor-amplified response).
+        // The deposit is re-made in every residual evaluation, so this
+        // mutation never leaks across evaluations; the const_cast marks the
+        // wall-moment boundary-condition application point on a field the
+        // kernels otherwise consume read-only.
+        auto& rho_mut = const_cast<amrex::MultiFab&>(rhofield);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (amrex::MFIter mfi(rho_mut, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            amrex::Box bx = mfi.growntilebox();
+            if (bx.bigEnd(0) < iwall) { continue; }
+            bx.setSmall(0, iwall);
+            auto const& arr = rho_mut.array(mfi);
+            // Writes land at i >= iwall only and reads mirror rows at
+            // i < iwall only, so the loop body is race-free; overlapping
+            // grown tiles re-write identical values (idempotent).
+            amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                arr(i, j, k, 0) = (i == iwall)
+                    ? 0.0_rt : -arr(2*iwall - i, j, k, 0);
+            });
+        }
+    }
+#endif
+
     // Solve E field in regular cells
     // The resistive (and hyper-resistive) terms default to the historical
     // coupling with solve_for_Faraday; the theta-implicit solver overrides
@@ -1249,6 +1342,145 @@ void HybridPICModel::HybridPICSolveE (
     if (EB::enabled() && m_use_conformal_eb && m_conformal_wall_conductor) {
         ZeroConductorEdges(Efield, eb_update_E, lev);
     }
+
+    // Thin resistive-shell wall (RZ r-max): overwrite the tangential wall
+    // rows the PEC kernel just zeroed with the shell value computed from
+    // THIS evaluation's B iterate (the Bfield handed to the Ohm kernels),
+    // ghosts imaged odd about that value. Composition order at this site:
+    // pec_conductor_wall_rows moment-zeroing (Ohm INPUTS, top of this
+    // function) -> Ohm kernels -> ApplyEfieldBoundary (PEC image) ->
+    // resistive wall LAST, so it owns the tangential wall row + r-hi ghosts
+    // while E_r keeps the PEC normal image. This runs inside every residual
+    // evaluation of the theta-implicit solver, making the wall a relaxation
+    // (Robin) row of the residual by construction; the explicit hybrid's
+    // subcycled E-solves route through this same wrapper and get the
+    // per-substep shell value.
+    ApplyResistiveWallE(Efield, Bfield, lev);
+}
+
+void HybridPICModel::ApplyResistiveWallE (
+    ablastr::fields::VectorField const& Efield,
+    ablastr::fields::VectorField const& Bfield,
+    const int lev) const
+{
+#if defined(WARPX_DIM_RZ)
+    if (!m_resistive_wall
+        || WarpX::field_boundary_hi[0] != FieldBoundaryType::PEC) {
+        return;
+    }
+
+    auto& warpx = WarpX::GetInstance();
+    // Wall node plane (E_theta and E_z are nodal in r).
+    const int iwall = warpx.Geom(lev).Domain().bigEnd(0) + 1;
+    const amrex::Real dr = warpx.Geom(lev).CellSize(0);
+    const amrex::Real delta = (m_wall_thickness > 0.) ? m_wall_thickness : dr;
+    // E_t(wall) = (eta_w/delta) K_t with K from the tangential-B jump:
+    //   K_theta = +(B_z(in) - B_z,ext)/mu0,  K_z = -B_theta(in)/mu0,
+    // so E_t = fac * (jump), fac = eta_w/(delta*mu0)  [m/s].
+    const amrex::Real fac =
+        m_wall_resistivity / (delta * PhysConst::mu0);
+    const amrex::Real bz_ext = m_wall_bz_ext;
+
+    // comp 1 (E_theta) reads B_z; comp 2 (E_z) reads B_theta. Both B
+    // sources are cell-centered in r (last interior row at iwall-1) and
+    // share the E component's z staggering (B_z node-in-z with E_theta,
+    // B_theta cell-in-z with E_z), so the j index passes through.
+    for (int comp : {1, 2}) {
+        amrex::MultiFab& E = *Efield[comp];
+        amrex::MultiFab const& B = (comp == 1) ? *Bfield[2] : *Bfield[1];
+        const amrex::Real sgn = (comp == 1) ? 1.0_rt : -1.0_rt;
+        const amrex::Real sub = (comp == 1) ? bz_ext : 0.0_rt;
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (amrex::MFIter mfi(E, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            amrex::Box bx = mfi.growntilebox();
+            if (bx.bigEnd(0) < iwall) { continue; }
+            // Guard against fabs whose E ghosts reach the wall but whose B
+            // fab box does not contain the last interior B row.
+            if (B[mfi].box().bigEnd(0) < iwall - 1) { continue; }
+            bx.setSmall(0, iwall);
+            auto const& E_arr = E.array(mfi);
+            auto const& B_arr = B.const_array(mfi);
+            // Writes land at i >= iwall only; reads come from B (untouched)
+            // and from E interior mirrors at i < iwall only, so iterations
+            // are independent; overlapping grown tiles re-write identical
+            // values (idempotent).
+            amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                const amrex::Real ew =
+                    sgn * fac * (B_arr(iwall - 1, j, k, 0) - sub);
+                E_arr(i, j, k, 0) = (i == iwall)
+                    ? ew : 2.0_rt * ew - E_arr(2*iwall - i, j, k, 0);
+            });
+        }
+    }
+#else
+    amrex::ignore_unused(Efield, Bfield, lev);
+#endif
+}
+
+void HybridPICModel::ImposeResistiveWallIterateRowsE (
+    ablastr::fields::VectorField const& Efield,
+    ablastr::fields::VectorField const& Esrc,
+    const int lev) const
+{
+#if defined(WARPX_DIM_RZ)
+    if (!m_resistive_wall
+        || WarpX::field_boundary_hi[0] != FieldBoundaryType::PEC) {
+        return;
+    }
+
+    auto& warpx = WarpX::GetInstance();
+    const int iwall = warpx.Geom(lev).Domain().bigEnd(0) + 1;
+
+    for (int comp : {1, 2}) {
+        amrex::MultiFab& E = *Efield[comp];
+        amrex::MultiFab const& Es = *Esrc[comp];
+
+        // Pass 1: restore the VALID wall-node row from the source iterate.
+        // Only valid rows are read from Esrc -- its ghost layers are not
+        // guaranteed current (solver-vector linear algebra touches valid
+        // data only).
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (amrex::MFIter mfi(E, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            amrex::Box bx = mfi.tilebox();
+            if (bx.bigEnd(0) < iwall) { continue; }
+            bx.setSmall(0, iwall);
+            auto const& E_arr = E.array(mfi);
+            auto const& Es_arr = Es.const_array(mfi);
+            amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                E_arr(i, j, k, 0) = Es_arr(i, j, k, 0);
+            });
+        }
+
+        // Propagate the restored wall row into the z-periodic ghost columns
+        // (the PEC kernel zeroed the wall node there too, and the ghost
+        // image below reads the wall value at ghost j).
+        E.FillBoundary(warpx.Geom(lev).periodicity());
+
+        // Pass 2: image the r-hi ghost band odd about the wall value
+        // (ghost = 2*E_wall - interior mirror). Writes land at i > iwall
+        // only; reads come from i <= iwall only, so iterations are
+        // independent; overlapping grown tiles re-write identical values.
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (amrex::MFIter mfi(E, amrex::TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            amrex::Box bx = mfi.growntilebox();
+            if (bx.bigEnd(0) < iwall + 1) { continue; }
+            bx.setSmall(0, iwall + 1);
+            auto const& E_arr = E.array(mfi);
+            amrex::ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                E_arr(i, j, k, 0) = 2.0_rt * E_arr(iwall, j, k, 0)
+                                  - E_arr(2*iwall - i, j, k, 0);
+            });
+        }
+    }
+#else
+    amrex::ignore_unused(Efield, Esrc, lev);
+#endif
 }
 
 void HybridPICModel::CalculateElectronPressure() const

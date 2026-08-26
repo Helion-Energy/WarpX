@@ -556,6 +556,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     const bool include_hall_term = hybrid_model->m_include_hall_term;
     const bool include_electron_pressure_term =
         hybrid_model->m_include_electron_pressure_term;
+
+    // Conductor-row treatment of the r-max PEC wall: the wall node plane
+    // carries no plasma Hall/motional force (see the member documentation
+    // of m_pec_conductor_wall_rows).
+    const bool conductor_wall_row = hybrid_model->m_pec_conductor_wall_rows
+        && (WarpX::field_boundary_hi[0] == FieldBoundaryType::PEC);
+    const int iwall_node =
+        WarpX::GetInstance().Geom(lev).Domain().bigEnd(0) + 1;
     // The stored electric field follows the split-field convention in both
     // schemes: the inductive E_ext is subtracted from plasma cells (where
     // the generalized Ohm's law itself is the electric field and the
@@ -710,6 +718,12 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 jer * Btheta_interp
                 - jet * Br_interp
             );
+
+            if (conductor_wall_row && i == iwall_node) {
+                enE_nodal(i, j, 0, 0) = 0._rt;
+                enE_nodal(i, j, 0, 1) = 0._rt;
+                enE_nodal(i, j, 0, 2) = 0._rt;
+            }
         });
 
         if (cost && WarpX::load_balance_costs_update_algo == LoadBalanceCostsUpdateAlgo::Timers)
@@ -847,6 +861,17 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
 
                     Real ohm_val = (enE_r - grad_Pe) / rho_val_limited;
+                    // Conductor-wall stack, gate-on-raw / divide-by-floored:
+                    // where the RAW (unfloored) rho at this stencil location
+                    // is not positive -- the wall node row is zeroed by
+                    // convention and its ghosts odd-imaged, so interpolations
+                    // at/beyond the wall land <= 0 -- the Hall/motional and
+                    // grad-Pe force is identically zero instead of the
+                    // 1/rho_floor-amplified enE/max(rho, rho_floor):
+                    // where(rho_raw > 0, enE/max(rho, rho_floor), 0).
+                    if (conductor_wall_row && !(rho_val > 0._rt)) {
+                        ohm_val = 0._rt;
+                    }
                     if (holmstrom_smooth) {
                         ohm_val *= 0.5_rt * (1._rt + std::tanh(
                             (rho_val - rho_floor) * holmstrom_inv_width));
@@ -954,6 +979,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
 
                     Real ohm_val = (enE_t - grad_Pe) / rho_val_limited;
+                    // Conductor-wall stack, gate-on-raw / divide-by-floored
+                    // (see the Er branch).
+                    if (conductor_wall_row && !(rho_val > 0._rt)) {
+                        ohm_val = 0._rt;
+                    }
                     if (holmstrom_smooth) {
                         ohm_val *= 0.5_rt * (1._rt + std::tanh(
                             (rho_val - rho_floor) * holmstrom_inv_width));
@@ -1057,6 +1087,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     const auto rho_val_limited = HybridSmoothFloor(rho_val, rho_floor, floor_w);
 
                     Real ohm_val = (enE_z - grad_Pe) / rho_val_limited;
+                    // Conductor-wall stack, gate-on-raw / divide-by-floored
+                    // (see the Er branch).
+                    if (conductor_wall_row && !(rho_val > 0._rt)) {
+                        ohm_val = 0._rt;
+                    }
                     if (holmstrom_smooth) {
                         ohm_val *= 0.5_rt * (1._rt + std::tanh(
                             (rho_val - rho_floor) * holmstrom_inv_width));

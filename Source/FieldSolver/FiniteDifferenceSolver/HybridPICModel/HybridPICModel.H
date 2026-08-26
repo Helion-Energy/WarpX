@@ -194,6 +194,41 @@ public:
         ablastr::fields::VectorField const& field,
         int lev) const;
 
+    /** Thin resistive-shell wall (RZ r-max, see m_resistive_wall): overwrite
+     *  the tangential wall-node rows of Efield with the shell value computed
+     *  from the CURRENT Bfield iterate,
+     *      E_theta(wall) = (eta_w/delta) * K_theta
+     *                    = (eta_w/delta) * (B_z(inside) - B_z,ext) / mu0,
+     *      E_z(wall)     = (eta_w/delta) * K_z
+     *                    = -(eta_w/delta) * B_theta(inside) / mu0,
+     *  with B(inside) read at the last interior cell-centered-in-r row, and
+     *  image the r-hi tangential ghosts odd ABOUT that value
+     *  (ghost = 2*E_wall - interior mirror: the nonzero-Dirichlet image).
+     *  E_r (normal) is left with its PEC treatment. Must run AFTER
+     *  ApplyEfieldBoundary (it owns the wall row + tangential r-hi ghosts;
+     *  composition order is stated at the call sites). No-op unless
+     *  m_resistive_wall is set and the r-hi field boundary is PEC. */
+    void ApplyResistiveWallE (
+        ablastr::fields::VectorField const& Efield,
+        ablastr::fields::VectorField const& Bfield,
+        int lev) const;
+
+    /** Thin resistive-shell wall, iterate-conditioning leg (RZ r-max, see
+     *  m_resistive_wall): restore the tangential wall-node rows of Efield
+     *  from the unconditioned source Esrc (the nonlinear-solver iterate,
+     *  which ApplyEfieldBoundary's PEC kernel has just zeroed) and image the
+     *  r-hi tangential ghosts odd about that value. Keeping the ITERATE's
+     *  wall value -- rather than recomputing the shell value from the stale
+     *  Bfield_fp of the previous residual evaluation -- makes the residual
+     *  map a deterministic function of the iterate (no hidden one-evaluation
+     *  B lag in Jacobian probes); the wall row converges to the shell value
+     *  through the residual, whose Ohm output imposes it via
+     *  ApplyResistiveWallE. E_r (normal) unchanged. */
+    void ImposeResistiveWallIterateRowsE (
+        ablastr::fields::VectorField const& Efield,
+        ablastr::fields::VectorField const& Esrc,
+        int lev) const;
+
     void BfieldEvolve (
         ablastr::fields::MultiLevelVectorField const& Bfield,
         ablastr::fields::MultiLevelVectorField const& Efield,
@@ -690,6 +725,86 @@ public:
     bool m_include_hall_term = true;
     bool m_include_electron_pressure_term = true;
 
+    /** Treat the r-max PEC wall node row as a conductor row in the Ohm
+     *  solve (RZ): the conductor row carries no plasma moments -- ne,
+     *  tangential J, and the Hall force are all zero there. The full
+     *  wall-moment closure stack applied under this knob is
+     *   (a) the nodal (J - J_i) x B force is zeroed on the wall node plane
+     *       (HybridPICSolveECylindrical pass 1), so the last interior
+     *       half-cell of E_r receives no Hall/motional contribution
+     *       interpolated from the conductor surface;
+     *   (b) the tangential (theta, z) components of BOTH the Ampere and
+     *       ion currents are zeroed on the wall node plane and its ghost
+     *       rows (HybridPICSolveE wrapper, after the SyncCurrentAndRho
+     *       guard folds), removing the spurious electron current sheet
+     *       J_e = J - J_i built from the deposit-fold / one-sided-curl
+     *       parity mismatch;
+     *   (c) ne-Dirichlet wall moment: the deposited charge density the
+     *       Ohm divide consumes is zeroed on the wall node plane with
+     *       odd-imaged ghost rows (ghost = -interior mirror), in the same
+     *       wrapper, immediately before the Ohm solve;
+     *   (d) gate-on-raw / divide-by-floored Hall (HybridPICSolveE Yee
+     *       pass): where the raw (unfloored) rho at the E stencil location
+     *       is not positive, the Hall/motional term is identically zero --
+     *       where(rho_raw > 0, enE/max(rho, rho_floor), 0) -- so with (c)
+     *       the wall row's zeroed numerator is NOT amplified into an
+     *       enE/rho_floor response by the floored divide, at and beyond
+     *       the wall row.
+     *  Without the stack, the tangential Ampere current's cylindrical
+     *  curvature remnant at the wall (J_z = B_theta/(mu0 r), a genuine
+     *  surface current) and the reflecting-fold ion-deposit parity combine
+     *  into a spurious electron-current sheet whose Hall response the
+     *  theta = 1/2 advance integrates without damping - a secularly
+     *  growing whistler-polarized wall layer whenever plasma touches the
+     *  wall. Conductor-surface rows are not plasma Ohm unknowns and carry
+     *  no plasma moments or Hall force. */
+    bool m_pec_conductor_wall_rows = false;
+
+    /** Thin resistive-shell wall at the RZ r-max PEC boundary. The hard PEC
+     *  identity row E_t(wall) = 0 responds instantaneously within each
+     *  implicit solve; this knob replaces it with a finite-response-time
+     *  conducting shell of resistivity eta_w (m_wall_resistivity) and
+     *  thickness delta (m_wall_thickness), carrying surface current K
+     *  determined by the tangential-B jump across the shell,
+     *      r_hat x (B_out - B_in) = mu0 K, with
+     *      B_out = B_z,ext z_hat (the shell is the flux boundary:
+     *              B_theta(outside) = 0, B_z(outside) = the applied uniform
+     *              field, m_wall_bz_ext), giving
+     *      K_z     = -B_theta(inside) / mu0,
+     *      K_theta = +(B_z(inside) - B_z,ext) / mu0,
+     *  and Ohm's law in the shell sets the tangential electric field there,
+     *      E_t(wall) = (eta_w / delta) * K_t.
+     *  This is a relaxation (Robin) row computed from the B iterate inside
+     *  every residual evaluation of the theta-implicit hybrid -- in-residual
+     *  by construction -- instead of the hard Dirichlet identity row. The
+     *  shell L/R decay time for a mode of wavenumber k is
+     *      tau = mu0 * delta / (2 * k * eta_w);
+     *  at copper resistivity (the default, 1.68e-8 Ohm m) and delta = dr the
+     *  grid-scale-mode tau is ~1e4 ion-cyclotron periods on typical hybrid
+     *  decks: physically near-PEC but structurally relaxational. Ghost rows
+     *  beyond the wall are imaged odd about the wall value
+     *  (ghost = 2*E_wall - interior mirror). E_r (normal) keeps the PEC
+     *  treatment. Independent of (and composable with)
+     *  m_pec_conductor_wall_rows, which edits the Ohm-solve INPUT moments,
+     *  not the wall E row. Only implemented for RZ r-max with a PEC r-hi
+     *  field boundary; applied at both E boundary-application sites of the
+     *  theta-implicit residual (see ApplyResistiveWallE /
+     *  ImposeResistiveWallIterateRowsE). */
+    bool m_resistive_wall = false;
+    /** Shell resistivity eta_w [Ohm m]; default = copper (1.68e-8). */
+    amrex::Real m_wall_resistivity = 1.68e-8;
+    /** Shell thickness delta [m]; <= 0 (default) means use the radial cell
+     *  size dr of the level the wall row is applied on. */
+    amrex::Real m_wall_thickness = -1.0;
+    /** Applied uniform external B_z [T] outside the shell, subtracted in
+     *  K_theta = (B_z(inside) - B_z,ext)/mu0. The applied field of this
+     *  class of decks is loaded directly into Bfield_fp (grid init style),
+     *  not into the hybrid external-field registry, so it is not
+     *  recoverable from m_add_external_fields here; decks must pass their
+     *  applied B0 explicitly (default 0: the shell then relaxes the TOTAL
+     *  enclosed B_z flux). */
+    amrex::Real m_wall_bz_ext = 0.0;
+
     /** Electron temperature in eV */
     amrex::Real m_elec_temp;
     /** Reference electron density */
@@ -1088,14 +1203,15 @@ public:
      *  Ohm's-law floor. */
     amrex::Real m_joule_heating_n_min = -1.0;
 
-    /** Opt-in momentum-consistent particle push field for the
-     *  theta-implicit hybrid solver: subtract the resistive part of the
-     *  Ohm field from the field gathered by the ions (the explicit scheme
-     *  pushes ions with the no-resistivity Ohm field; ion-side resistive
-     *  friction is the separate drag operator). Off by default: the
-     *  correction couples the resistive field into the particle response
-     *  and can destabilize the Newton iteration in whistler-marginal
-     *  configurations. */
+    /** Momentum-consistent particle push field for the theta-implicit
+     *  hybrid solver: subtract the resistive part of the Ohm field from
+     *  the field gathered by the ions (the explicit scheme pushes ions
+     *  with the no-resistivity Ohm field; ion-side resistive friction is
+     *  the separate drag operator). Default ON: with the full Ohm field
+     *  in the push, eta*J does net positive work on the deposited ion
+     *  current and the resistive term becomes an energy source of the
+     *  advance rather than a sink (1D periodic energy-ledger campaign,
+     *  2026-08-25). Opt-in. */
     bool m_implicit_push_excludes_resistive_field = false;
 
     /** True when any resistive term is configured: a non-trivial global
