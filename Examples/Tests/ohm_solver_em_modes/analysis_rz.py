@@ -177,6 +177,13 @@ else:
 
     # check if power spectrum sampling match earlier results
     amps = np.abs(F_kw[2, 1, len(kz) // 2 - 2 : len(kz) // 2 + 2])
-    amps_ref = np.array([55.6719968, 31.26152007, 70.14344043, 15.4179245])
+    if getattr(sim, "esolve", "e_form") == "je_form":
+        # the je_form arm (the time-centered CN relax advance default),
+        # pinned at the test's 2-process decomposition
+        amps_ref = np.array(
+            [60.3726458, 37.96502086, 68.12849516, 23.09369916]
+        )
+    else:
+        amps_ref = np.array([55.6719968, 31.26152007, 70.14344043, 15.4179245])
     print("Amplitude sample: ", repr(amps))
     assert np.allclose(amps, amps_ref, rtol=1e-5, atol=1e-8)
