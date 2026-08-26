@@ -55,6 +55,12 @@ parser.add_argument(
     "(1.0); 0 = off (unstable honest-E_L dynamics, study only)",
 )
 parser.add_argument(
+    "--use-filter",
+    action="store_true",
+    help="bilinear (binomial) filtering of the deposited J/rho "
+    "(warpx.use_filter)",
+)
+parser.add_argument(
     "--je-stagger",
     action="store_true",
     help="staggered-leapfrog relax advance with the Crank-Nicolson J_e "
@@ -144,6 +150,7 @@ simulation = picmi.Simulation(
     warpx_serialize_initial_conditions=True,
     warpx_current_deposition_algo="direct",
     warpx_grid_type="collocated",
+    warpx_use_filter=1 if args.use_filter else None,
 )
 
 B_ext = picmi.AnalyticInitialField(
