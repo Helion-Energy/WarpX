@@ -129,6 +129,20 @@ class ThetaImplicitMHD final : public ImplicitSolver
 
     void InitializeFluidState ();
     void SanitizeLoadedState ();
+    /** Rigid-vacuum exterior clamp of the shaped-wall band (see the
+     * band-hygiene note in ImplicitMHDWallMask): in every
+     * wall_live-freezing mode (an active wall_thermal_bc), SET every
+     * masked fluid cell to the fixed clamp image -- mass density at the
+     * positivity floor, zero momentum, floor-consistent energies at
+     * the background temperature (T_wall under the temperature-mode
+     * thermal wall, so the interface drain starts at zero gradient) --
+     * once at first-step sanitize time (after SanitizeLoadedState, so
+     * Python-loaded exteriors are scraped too). Bit-exactly idempotent
+     * by construction: restarted states that already carry the clamp
+     * are unchanged. Reports clamped-cell count and net scraped mass
+     * (rank-0 banner + a '#'-comment header row of wall_ledger_file).
+     * No-op without the freeze. */
+    void ClampWallExteriorState ();
     /** Recompute the dynamic halo pedestal density once per step (frozen
      * for the whole nonlinear solve) and raise sub-pedestal cells onto
      * it. No-op when halo_pedestal_fraction = 0. See

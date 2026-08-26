@@ -98,6 +98,87 @@
  *     coupling); the dielectric mode restores the finite, physical
  *     response linkage at coil radii inside the (former) metal band.
  *
+ *     BAND HYGIENE. Because the dielectric band imposes no field
+ *     constraint, whatever fluid the mask freezes outside the contour
+ *     stays electrically live in the response Ohm's law: a loaded IC
+ *     that leaves above-vacuum-threshold density there produces a
+ *     frozen CONDUCTING shell (measured on the formation ladder:
+ *     band |J_theta| 20x the interior median, current-keyed anomalous
+ *     eta blow-up, Newton soft-caps, partial screening of the coil
+ *     drive). Two solver-side guarantees close this:
+ *
+ *     - EXTERIOR CLAMP (automatic in every wall_live-freezing mode,
+ *       i.e. whenever a thermal wall BC is active): at first-step
+ *       sanitize time every masked fluid cell is SET to the rigid
+ *       vacuum image -- mass density at the solver's positivity floor,
+ *       zero momentum, electron/ion energies at their floor-consistent
+ *       values at the configured background temperature (T_wall itself
+ *       under wall_thermal_bc = temperature, so the one-sided
+ *       interface drain starts at exactly zero gradient; else the
+ *       temperature floors when set, else the pressure floors), each
+ *       with the standard admissibility slack margin. The clamp is a
+ *       fixed image (idempotent bit-exactly),
+ *       so restarted states that already carry it are unchanged; the
+ *       removed cell count and net scraped mass are reported in a
+ *       rank-0 banner and as a '#'-comment header row of
+ *       wall_ledger_file. The pedestal refresh and every end-of-step
+ *       floor restoration skip the masked band, so nothing ever
+ *       re-creates mass/energy outside the wall.
+ *
+ *     - wall_band_eta_override (input, default 0 = off): when > 0, the
+ *       resistivity of the FIELD-advance Ohm's law is set to EXACTLY
+ *       this constant at every BAND-INTERIOR electric-field location
+ *       -- one whose complete interpolation neighborhood of
+ *       cell-centered cells is masked; E locations on the stair
+ *       interface itself keep the composed physical eta, so the
+ *       live-side field evolution and the interface scraper are
+ *       untouched. The override REPLACES the composed eta
+ *       (Spitzer/user parser + current-keyed anomalous terms +
+ *       density-keyed vacuum ramp), it does not compose with it:
+ *       eta_band = const, dEta/dState = 0 there. Both halves matter
+ *       (measured on the resistive-band physics of the production-formation
+ *       lane):
+ *       (a) INTERMEDIATE-ETA SHELL: a density-keyed eta ramp that
+ *           lands mid-band leaves a resistive shell whose L/R time
+ *           mu0 L^2 / eta can sit ON the drive timescale and screen
+ *           the coil drive (band L ~ 0.08 m: mu0 L^2 ~ 8e-9 Ohm m s,
+ *           so a ~10 us drive needs eta_band >> ~1e-3 Ohm m -- choose
+ *           the override at or above the deck's vacuum-eta SATURATION
+ *           value, uniform across the band, never mid-ramp);
+ *       (b) STATE-DEPENDENT STIFFNESS: the current-keyed Chodura term
+ *           scales ~1/n and explodes at the clamped floor density --
+ *           a huge eta DOES insulate, but its Jacobian stiffness is
+ *           what froze the production arm's Newton (run_v8_wall,
+ *           step 415: 118 + 36 admissibility-pinned energy rows). A
+ *           constant override removes the band from the Jacobian's
+ *           eta chain entirely.
+ *       The preconditioner ingests the identically overridden eta
+ *       (per-staggering fills; the cell-centered interval-bound fill
+ *       takes max(composed, override) so it keeps bounding the edge
+ *       values), keeping residual/PC exact twins. Joule heating keeps
+ *       the composed eta (masked cells receive no fluid increments
+ *       anyway).
+ *
+ *     WALL FLUID BC vs the reference code (the `orange` source tree, surveyed 2026-08):
+ *     The reference code treats the shaped wall as a hard, IMPERMEABLE, NO-SLIP
+ *     solid -- all three velocity components held at zero on the wall
+ *     nodes and the adjacent cut-cell skin layer (rows omitted from
+ *     the implicit momentum solve, vp.f90/aniso_visc.f90), an explicit
+ *     zero-mass-flux advection condition at the contour (adv.f90; no
+ *     recycling/sputtering/absorption model anywhere), and a
+ *     fixed-temperature Dirichlet bath at the background fill
+ *     temperature (t_bc = 'd': T_i = tm0, T_e = f_te*tm0; anything
+ *     else leaves the wall adiabatic). Particles and momentum are
+ *     perfectly confined; only heat leaves, through conduction. OUR
+ *     interface is deliberately different -- the "dielectric scraper":
+ *     absorb-image Riemann faces (mass, momentum and enthalpy that
+ *     cross are gone, the fluid analog of the run32 wall particle
+ *     scraper) with C-inf rectified normal momentum, composed with the
+ *     one-sided wall_thermal_bc drain. If a reference-parity no-normal-
+ *     flow reflecting wall is ever needed, add it as a future
+ *     wall_fluid_bc knob (absorb | reflect) rather than changing this
+ *     default.
+ *
  * - The fluid is deliberately untouched by default: the wall region is
  *   expected to sit in the dust/vacuum fill (frozen momentum,
  *   E -> eta J). The optional THERMAL wall boundary (wall_thermal_bc)
@@ -178,7 +259,48 @@
  *   AMREX_INPUTS_FILE_PREFIX like the inputs file itself when relative)
  * - wall_thermal_bc = none (default) | zero_flux | temperature
  * - wall_temperature = <eV> (temperature mode only)
+ * - wall_band_eta_override = <ohm m> (default 0 = off): constant,
+ *   state-independent field-advance eta at band-interior electric-
+ *   field locations; see the band-hygiene note above. Aimed at the
+ *   dielectric standoff (the conductor modes pin the masked E rows
+ *   outright, making the override redundant there).
+ *
+ * FORWARD NOTE (work item B, deferred): a field-side EB treatment of
+ * the dielectric mode -- identity/Green's-contour rows for B inside
+ * the band to keep the EM solve from moving flux through unresolved
+ * band structure -- would hook in exactly like the conductor
+ * contracts: a per-staggering first-masked B table consumed by
+ * ProjectElectricField's caller and by the PC row emission through an
+ * extended View(). Nothing in the fluid contract below would change.
  */
+/**
+ * \brief Device view of the wall-band resistivity override
+ * (implicit_mhd.wall_band_eta_override; see the ImplicitMHDWallMask
+ * class comment). A location is BAND-INTERIOR -- and its field-advance
+ * eta is REPLACED by the constant eta_override (dEta/dState = 0) -- iff
+ * i >= first_band_*[j] for its staggering: every cell-centered cell of
+ * its density/temperature interpolation neighborhood is masked, so E
+ * locations on the stair interface itself (which bound live cells)
+ * keep the composed eta by construction. The pointers are pre-offset
+ * like the mask tables (nodal j valid over [-ng, nz+ng], cell j over
+ * [-ng, nz-1+ng]); first_band_cc is the plain masked cell-centered
+ * table, consumed by the preconditioner's cell-centered interval-bound
+ * fill (max(composed, override) there, so its maximum keeps bounding
+ * the overridden edge values). Consumed by the residual's Ohm assembly
+ * and by the solver-side PC eta fills only -- the preconditioner
+ * itself ingests the overridden MultiFabs, so residual and PC stay
+ * exact twins with no extra machinery.
+ */
+struct WallBandEtaOverrideView
+{
+    bool active = false;
+    amrex::Real eta_override = 0.0;
+    const int* first_band_er = nullptr; //!< E_r rows: (r-cell, z-node)
+    const int* first_band_et = nullptr; //!< E_theta rows: (r-node, z-node)
+    const int* first_band_ez = nullptr; //!< E_z rows: (r-node, z-cell)
+    const int* first_band_cc = nullptr; //!< cc fill: (r-cell, z-cell)
+};
+
 class ImplicitMHDWallMask
 {
 public:
@@ -249,6 +371,14 @@ public:
      * engages (the stencils see a continuous live field). */
     [[nodiscard]] warpx::mhd_pc::WallMaskView View () const;
 
+    /** Device view of the wall-band resistivity override
+     * (implicit_mhd.wall_band_eta_override): active only when the wall
+     * is active AND the override is positive, in every wall_model
+     * (under the conductor contracts the overridden rows are
+     * subsequently pinned by the projection, so the override is
+     * redundant there by construction). See WallBandEtaOverrideView. */
+    [[nodiscard]] WallBandEtaOverrideView BandEtaOverrideView () const;
+
     /** Device view of the rigid-conductor FLUID freeze for the
      * preconditioner's cell-centered fluid sweeps: active whenever a
      * thermal wall BC is active (the same gate as the residual's
@@ -292,6 +422,10 @@ private:
     bool m_dielectric = false;
     ThermalBC m_thermal_bc = ThermalBC::none;
     amrex::Real m_wall_temperature = 0.0; //!< [eV], temperature mode
+    /** implicit_mhd.wall_band_eta_override [ohm m]: constant
+     * field-advance eta at band-interior electric-field locations
+     * (0 = off). */
+    amrex::Real m_band_eta_override = 0.0;
     int m_ng = 0;   //!< axial ghost extension of the index tables
     int m_nz = 0;   //!< axial cells
 
@@ -312,6 +446,14 @@ private:
     amrex::Gpu::ManagedVector<int> m_first_guarded_er; //!< (r-cell, z-node)
     amrex::Gpu::ManagedVector<int> m_first_guarded_et; //!< (r-node, z-node)
     amrex::Gpu::ManagedVector<int> m_first_guarded_ez; //!< (r-node, z-cell)
+    /** First BAND-INTERIOR radial index per axial index (see
+     * WallBandEtaFloorView: every cell of the location's interpolation
+     * neighborhood masked; >= the masked index everywhere), same layout
+     * and memory contract as the masked tables. The cell-centered band
+     * table is m_first_masked_cc itself. */
+    amrex::Gpu::ManagedVector<int> m_first_band_er; //!< (r-cell, z-node)
+    amrex::Gpu::ManagedVector<int> m_first_band_et; //!< (r-node, z-node)
+    amrex::Gpu::ManagedVector<int> m_first_band_ez; //!< (r-node, z-cell)
     /** Live seam-guarded rows per family in the valid domain
      * [E_r, E_theta, E_z] (banner reporting). */
     amrex::Array<long, 3> m_seam_guarded_rows = {0, 0, 0};

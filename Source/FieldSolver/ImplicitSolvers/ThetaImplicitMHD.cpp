@@ -1037,6 +1037,19 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
                 "on the solver-assembled Ohm electric field and the recast "
                 "flux kernels");
         }
+        if (m_wall_mask.GetThermalBC() !=
+            ImplicitMHDWallMask::ThermalBC::none) {
+            // The exterior clamp parks the band at the floor image and
+            // the flux kernels divide by max(rho, floor) when loading
+            // band cell states: a zero floor would make the clamped
+            // band 0/0.
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_mass_density_floor > 0.0_rt,
+                "implicit_mhd.wall_thermal_bc (the rigid-conductor fluid "
+                "freeze) requires a positive "
+                "implicit_mhd.mass_density_floor: the shaped-wall "
+                "exterior clamp parks the band at the floor image");
+        }
         // The temperature wall exchanges heat conductively: without a
         // conduction channel the reservoir is unreachable and the mode
         // would be a silent no-op (zero_flux without conduction is
@@ -1483,6 +1496,16 @@ ThetaImplicitMHD::GetMHDFieldResistivityCCForPC (const amrex::Real time) const
     // (the PC never differentiates eta; the standard frozen-eta lag).
     const amrex::MultiFab& temperature_cc =
         *m_WarpX->m_fields.get(ElectronTemperatureCCName, 0);
+    // Wall-band eta override (see the residual's Ohm assembly): the
+    // cell-centered fill only feeds the resistive block's interval
+    // bound through its maximum, so masked cells take
+    // max(composed, override) here -- never less than either the
+    // overridden band-interior edges or the composed interface edges
+    // they neighbor.
+    const WallBandEtaOverrideView wall_band_view =
+        m_wall_mask.BandEtaOverrideView();
+    const int* const band_override_cc = wall_band_view.first_band_cc;
+    const amrex::Real band_eta_override = wall_band_view.eta_override;
     for (amrex::MFIter mfi(resistivity); mfi.isValid(); ++mfi) {
         const amrex::Box box = mfi.validbox();
         const auto eta_field = resistivity.array(mfi);
@@ -1493,11 +1516,15 @@ ThetaImplicitMHD::GetMHDFieldResistivityCCForPC (const amrex::Real time) const
                 charge_to_mass * rho(i, j, k);
             const amrex::Real charge_density_value =
                 std::max(charge_density_raw, charge_density_floor);
-            eta_field(i, j, k) =
+            amrex::Real value =
                 theta_implicit_mhd::vacuum_keyed_resistivity(
                     eta(charge_density_value, te_cc(i, j, k), 0.0_rt, time),
                     charge_density_raw, charge_density_floor,
                     vacuum_division_guard, vacuum_eta_scale);
+            if (band_override_cc != nullptr && i >= band_override_cc[j]) {
+                value = std::max(value, band_eta_override);
+            }
+            eta_field(i, j, k) = value;
         });
     }
     return &resistivity;
@@ -1565,6 +1592,16 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
         *m_WarpX->m_fields.get(FieldResistivityE1Name, 0);
     amrex::MultiFab& axial_resistivity =
         *m_WarpX->m_fields.get(FieldResistivityE2Name, 0);
+    // Wall-band eta override at the SAME band-interior rows as the
+    // residual's Ohm assembly (see AssembleOhmElectricField): the PC's
+    // stencil emission consumes these edge fills, so replacing here is
+    // what keeps residual and preconditioner exact twins in the band.
+    const WallBandEtaOverrideView wall_band_view =
+        m_wall_mask.BandEtaOverrideView();
+    const int* const band_override_er = wall_band_view.first_band_er;
+    const int* const band_override_et = wall_band_view.first_band_et;
+    const int* const band_override_ez = wall_band_view.first_band_ez;
+    const amrex::Real band_eta_override = wall_band_view.eta_override;
     for (amrex::MFIter mfi(azimuthal_resistivity); mfi.isValid(); ++mfi) {
         const auto eta_radial = radial_resistivity.array(mfi);
         const auto eta_azimuthal = azimuthal_resistivity.array(mfi);
@@ -1587,12 +1624,16 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
                     charge_to_mass * node_density(i, j);
                 const amrex::Real charge_density_value =
                     std::max(charge_density_raw, charge_density_floor);
-                eta_azimuthal(i, j, k) =
+                amrex::Real value =
                     theta_implicit_mhd::vacuum_keyed_resistivity(
                         eta(charge_density_value, node_temperature(i, j),
                             0.0_rt, time),
                         charge_density_raw, charge_density_floor,
                         vacuum_division_guard, vacuum_eta_scale);
+                if (band_override_et != nullptr && i >= band_override_et[j]) {
+                    value = band_eta_override;
+                }
+                eta_azimuthal(i, j, k) = value;
             });
         // Er z-faces: nodes averaged in r.
         amrex::ParallelFor(
@@ -1613,11 +1654,15 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
                     std::max(charge_density_raw, charge_density_floor);
                 const amrex::Real temperature = 0.5_rt *
                     (node_temperature(i, j) + node_temperature(i + 1, j));
-                eta_radial(i, j, k) =
+                amrex::Real value =
                     theta_implicit_mhd::vacuum_keyed_resistivity(
                         eta(charge_density_value, temperature, 0.0_rt, time),
                         charge_density_raw, charge_density_floor,
                         vacuum_division_guard, vacuum_eta_scale);
+                if (band_override_er != nullptr && i >= band_override_er[j]) {
+                    value = band_eta_override;
+                }
+                eta_radial(i, j, k) = value;
             });
         // Ez r-faces: nodes averaged in z.
         amrex::ParallelFor(
@@ -1638,11 +1683,15 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
                     std::max(charge_density_raw, charge_density_floor);
                 const amrex::Real temperature = 0.5_rt *
                     (node_temperature(i, j) + node_temperature(i, j + 1));
-                eta_axial(i, j, k) =
+                amrex::Real value =
                     theta_implicit_mhd::vacuum_keyed_resistivity(
                         eta(charge_density_value, temperature, 0.0_rt, time),
                         charge_density_raw, charge_density_floor,
                         vacuum_division_guard, vacuum_eta_scale);
+                if (band_override_ez != nullptr && i >= band_override_ez[j]) {
+                    value = band_eta_override;
+                }
+                eta_axial(i, j, k) = value;
             });
     }
     return {&radial_resistivity, &azimuthal_resistivity, &axial_resistivity};
@@ -2915,8 +2964,12 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
         // Python fluid loaders (beforeInitEsolve callbacks) overwrite the
         // parser fill AFTER InitializeFluidState's floor clamp; raise a
         // below-floor loaded state to admissibility once before the first
-        // bounded solve (see SanitizeLoadedState).
+        // bounded solve (see SanitizeLoadedState). The shaped-wall
+        // exterior clamp runs AFTER the raise (so its fixed image is the
+        // band's final state) and is idempotent on restarted states that
+        // already carry it.
         SanitizeLoadedState();
+        ClampWallExteriorState();
         m_loaded_state_sanitized = true;
     }
     RefreshHaloPedestal();
@@ -6806,6 +6859,29 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
     const int* const seam_guard_er = wall_seam_view.first_guarded_er;
     const int* const seam_guard_et = wall_seam_view.first_guarded_et;
     const int* const seam_guard_ez = wall_seam_view.first_guarded_ez;
+    // Wall-band resistivity override (implicit_mhd.wall_band_eta_override,
+    // see ImplicitMHDWallMask): the field-advance eta is REPLACED by
+    // the constant override at band-INTERIOR rows -- locations whose
+    // complete cell-centered interpolation neighborhood is masked, so
+    // the stair-interface E rows (which bound live cells) keep the
+    // composed physical eta -- making the frozen band current-free by
+    // construction (mu0 L^2 / eta_band << the drive time; no
+    // intermediate-eta shell) with dEta/dState = 0 there (the
+    // current-keyed anomalous terms explode at the clamped floor
+    // density; their Jacobian stiffness froze the production arm's
+    // Newton). The tables are geometry-static and the override is a
+    // constant, so JFNK probes see constant band rows; the
+    // preconditioner ingests the identically overridden eta through
+    // the solver-side PC fills (GetMHDFieldResistivityCC/EdgeForPC),
+    // keeping residual and PC exact twins. Null tables when inactive
+    // (bit-identical to no override). Joule heating keeps the composed
+    // eta (masked cells receive no fluid increments anyway).
+    const WallBandEtaOverrideView wall_band_view =
+        m_wall_mask.BandEtaOverrideView();
+    const int* const band_override_er = wall_band_view.first_band_er;
+    const int* const band_override_et = wall_band_view.first_band_et;
+    const int* const band_override_ez = wall_band_view.first_band_ez;
+    const amrex::Real band_eta_override = wall_band_view.eta_override;
     constexpr int flux_induction_t1 = FaceFluxComponent::induction_t1;
     constexpr int flux_induction_t2 = FaceFluxComponent::induction_t2;
     constexpr int flux_signal_left = FaceFluxComponent::signal_left;
@@ -6844,12 +6920,17 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 std::max(charge_density_raw, charge_density_floor);
             const amrex::Real temperature_e =
                 0.5_rt * (te_nodal(i, j, k) + te_nodal(i + 1, j, k));
-            const amrex::Real resistivity =
+            amrex::Real resistivity =
                 theta_implicit_mhd::vacuum_keyed_resistivity(
                     eta(charge_density_value, temperature_e,
                         current_magnitude, time),
                     charge_density_raw, charge_density_floor,
                     vacuum_division_guard, vacuum_eta_scale);
+            if (band_override_er != nullptr && i >= band_override_er[j]) {
+                // Wall-band eta override (see the capture comment):
+                // REPLACES the composed eta, dEta/dState = 0.
+                resistivity = band_eta_override;
+            }
             electric_r(i, j, k) =
                 zface(i, j, k, flux_induction_t2) + resistivity * jr;
             // Wall-seam guard (see the capture comment): the Hall,
@@ -6958,12 +7039,17 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 std::max(charge_density_raw, charge_density_floor);
             const amrex::Real temperature_e =
                 0.5_rt * (te_nodal(i, j, k) + te_nodal(i, j + 1, k));
-            const amrex::Real resistivity =
+            amrex::Real resistivity =
                 theta_implicit_mhd::vacuum_keyed_resistivity(
                     eta(charge_density_value, temperature_e,
                         current_magnitude, time),
                     charge_density_raw, charge_density_floor,
                     vacuum_division_guard, vacuum_eta_scale);
+            if (band_override_ez != nullptr && i >= band_override_ez[j]) {
+                // Wall-band eta override (see the capture comment):
+                // REPLACES the composed eta, dEta/dState = 0.
+                resistivity = band_eta_override;
+            }
             electric_z(i, j, k) =
                 -rface(i, j, k, flux_induction_t1) + resistivity * jz;
             // Wall-seam guard (see the capture comment).
@@ -7191,12 +7277,17 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                           jz_corner * jz_corner);
             const amrex::Real charge_density_value =
                 std::max(rho_q(i, j, k), charge_density_floor);
-            const amrex::Real resistivity =
+            amrex::Real resistivity =
                 theta_implicit_mhd::vacuum_keyed_resistivity(
                     eta(charge_density_value, te_nodal(i, j, k),
                         current_magnitude, time),
                     rho_q(i, j, k), charge_density_floor,
                     vacuum_division_guard, vacuum_eta_scale);
+            if (band_override_et != nullptr && i >= band_override_et[j]) {
+                // Wall-band eta override (see the capture comment):
+                // REPLACES the composed eta, dEta/dState = 0.
+                resistivity = band_eta_override;
+            }
             electric_theta(i, j, k) =
                 average + dissipation + resistivity * jt_corner;
             // Wall-seam guard (see the capture comment): at the first
@@ -8667,6 +8758,200 @@ void ThetaImplicitMHD::SanitizeLoadedState ()
     m_state.CopyMultiFabBlocksToFields();
 }
 
+void ThetaImplicitMHD::ClampWallExteriorState ()
+{
+#if defined(WARPX_DIM_RZ)
+    // Rigid-vacuum exterior clamp of the shaped-wall band (the
+    // band-hygiene contract; see ImplicitMHDWallMask): in every
+    // wall_live-freezing mode, SET every masked fluid cell to the fixed
+    // clamp image -- whatever the IC (parser or Python loader) put
+    // outside the contour is scraped at t = 0. Measured failure without
+    // it (formation ladder, T5): a reference-matched IC left
+    // above-vacuum-threshold density in the frozen band, which stayed
+    // electrically conductive under the dielectric standoff -- band
+    // |J_theta| 20x the interior median, current-keyed anomalous-eta
+    // blow-up, wholesale Newton soft-caps, partial screening of the
+    // coil drive.
+    //
+    // The image is a FIXED value per block (never a function of the
+    // current state), so the clamp is bit-exactly idempotent: restarted
+    // states that already carry it are unchanged, and the frozen-row
+    // identities plus the band exclusions of RefreshHaloPedestal and
+    // the FinishStateUpdate floor restorations preserve it bit-exactly
+    // afterwards. Each value sits the standard admissibility SLACK
+    // MARGIN above its bound -- the 1e-6 (|value| + bound) convention
+    // evaluated at value = bound, i.e. bound * (1 + 2e-6) -- so the
+    // band is admissible for the bounded Newton solve and satisfies the
+    // end-of-step positivity assertions. Energies land on their
+    // floor-consistent values at the configured BACKGROUND temperature:
+    // under wall_thermal_bc = temperature that is the wall reservoir
+    // T_wall itself (the band is parked AT the reservoir, so the
+    // one-sided interface drain starts at exactly zero gradient), else
+    // the temperature floors when set (through the admissibility
+    // temperature coefficients at the clamp density), else the
+    // pressure floors -- always the max, so the image never violates a
+    // bound.
+    if (m_wall_mask.GetThermalBC() == ImplicitMHDWallMask::ThermalBC::none) {
+        return;
+    }
+    const bool total_energy_closure = m_ion_closure == "total_energy";
+    const bool cgl_closure = m_ion_closure == "cgl";
+    const AdmissibilityBounds bounds = MakeAdmissibilityBounds();
+    const amrex::Real slack = 2.0e-6_rt;
+    const amrex::Real density_image =
+        m_mass_density_floor * (1.0_rt + slack);
+    // Wall-reservoir pressure at the clamp density (temperature mode):
+    // p_wall = n_image kB T_wall = rho_image (q/m) T_wall[eV] for the
+    // quasi-neutral single-ion fluid (both conduction channels use the
+    // same reservoir).
+    const amrex::Real wall_pressure =
+        (m_wall_mask.GetThermalBC() ==
+         ImplicitMHDWallMask::ThermalBC::temperature)
+            ? density_image * m_ion_charge_to_mass *
+                  m_wall_mask.WallTemperature_eV()
+            : 0.0_rt;
+    const auto image_of = [&] (const amrex::Real floor,
+                               const amrex::Real coefficient,
+                               const amrex::Real wall_bound) {
+        return std::max({floor, coefficient * density_image, wall_bound}) *
+               (1.0_rt + slack);
+    };
+    const amrex::Real electron_image = image_of(
+        bounds.floors[1], bounds.temperature_coefficients[1],
+        wall_pressure / (m_gamma_e - 1.0_rt));
+    // Zero momentum, so the total-energy image is purely internal; the
+    // CGL blocks are internal energies natively (U_par bounds at p/2,
+    // U_perp at p).
+    const amrex::Real ion_image = image_of(
+        bounds.floors[2], bounds.temperature_coefficients[2],
+        cgl_closure ? 0.5_rt * wall_pressure
+                    : wall_pressure / (m_gamma_i - 1.0_rt));
+    const amrex::Real ion_perp_image = image_of(
+        bounds.floors[3], bounds.temperature_coefficients[3],
+        wall_pressure);
+
+    amrex::MultiFab& density_block =
+        m_state.getMultiFabBlock(MassDensityName, 0);
+    amrex::MultiFab& momentum_block =
+        m_state.getMultiFabBlock(MomentumDensityName, 0);
+    amrex::MultiFab& electron_energy_block =
+        m_state.getMultiFabBlock(ElectronEnergyName, 0);
+    amrex::MultiFab* const ion_energy_block =
+        total_energy_closure ? &m_state.getMultiFabBlock(IonEnergyName, 0)
+                             : nullptr;
+    amrex::MultiFab* const ion_parallel_block =
+        cgl_closure ? &m_state.getMultiFabBlock(IonParallelEnergyName, 0)
+                    : nullptr;
+    amrex::MultiFab* const ion_perp_block =
+        cgl_closure ? &m_state.getMultiFabBlock(IonPerpEnergyName, 0)
+                    : nullptr;
+
+    const int* const AMREX_RESTRICT wall_fm =
+        m_wall_mask.FirstMaskedCellCentered();
+    const int wall_mz_lo = -m_wall_mask.GhostCells();
+    const int wall_mz_hi =
+        m_wall_mask.AxialCells() - 1 + m_wall_mask.GhostCells();
+    const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
+    const amrex::Real dr = m_WarpX->Geom(0).CellSize(0);
+    const amrex::Real dz = m_WarpX->Geom(0).CellSize(1);
+    const amrex::Real two_pi_dr_dz = 2.0_rt * MathConst::pi * dr * dz;
+
+    // Scrape banner reduction: clamped-cell count (any component
+    // actually changed; bit-zero on a restarted state that already
+    // carries the clamp) and the NET mass removed, with the exact
+    // 2 pi r dr dz cell volumes.
+    amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+    amrex::ReduceData<amrex::Real, amrex::Long> reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+    for (amrex::MFIter mfi(density_block); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto rho = density_block.array(mfi);
+        const auto mom = momentum_block.array(mfi);
+        const auto energy = electron_energy_block.array(mfi);
+        const auto ion_e = ion_energy_block
+                               ? ion_energy_block->array(mfi)
+                               : amrex::Array4<amrex::Real>{};
+        const auto ion_par = ion_parallel_block
+                                 ? ion_parallel_block->array(mfi)
+                                 : amrex::Array4<amrex::Real>{};
+        const auto ion_perp = ion_perp_block
+                                  ? ion_perp_block->array(mfi)
+                                  : amrex::Array4<amrex::Real>{};
+        reduce_op.eval(
+            box, reduce_data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                const int jc =
+                    std::max(wall_mz_lo, std::min(wall_mz_hi, j));
+                if (i < wall_fm[jc]) {
+                    return {0.0_rt, amrex::Long(0)};
+                }
+                const amrex::Real volume =
+                    two_pi_dr_dz * (radial_lower + (i + 0.5_rt) * dr);
+                const amrex::Real mass_removed =
+                    (rho(i, j, k) - density_image) * volume;
+                bool changed = rho(i, j, k) != density_image;
+                rho(i, j, k) = density_image;
+                for (int component = 0; component < 3; ++component) {
+                    changed = changed ||
+                              (mom(i, j, k, component) != 0.0_rt);
+                    mom(i, j, k, component) = 0.0_rt;
+                }
+                changed = changed || (energy(i, j, k) != electron_image);
+                energy(i, j, k) = electron_image;
+                if (ion_e) {
+                    changed = changed || (ion_e(i, j, k) != ion_image);
+                    ion_e(i, j, k) = ion_image;
+                } else if (ion_par) {
+                    changed = changed ||
+                              (ion_par(i, j, k) != ion_image) ||
+                              (ion_perp(i, j, k) != ion_perp_image);
+                    ion_par(i, j, k) = ion_image;
+                    ion_perp(i, j, k) = ion_perp_image;
+                }
+                return {mass_removed, amrex::Long(changed ? 1 : 0)};
+            });
+    }
+    auto sums = reduce_data.value(reduce_op);
+    amrex::Real mass_removed = amrex::get<0>(sums);
+    amrex::Long cells_clamped = amrex::get<1>(sums);
+    amrex::ParallelAllReduce::Sum(mass_removed,
+                                  amrex::ParallelContext::CommunicatorSub());
+    amrex::ParallelAllReduce::Sum(cells_clamped,
+                                  amrex::ParallelContext::CommunicatorSub());
+
+    const auto& periodicity = m_WarpX->Geom(0).periodicity();
+    density_block.FillBoundaryAndSync(periodicity);
+    momentum_block.FillBoundaryAndSync(periodicity);
+    electron_energy_block.FillBoundaryAndSync(periodicity);
+    if (ion_energy_block) {
+        ion_energy_block->FillBoundaryAndSync(periodicity);
+    } else if (ion_parallel_block) {
+        ion_parallel_block->FillBoundaryAndSync(periodicity);
+        ion_perp_block->FillBoundaryAndSync(periodicity);
+    }
+    m_state.CopyMultiFabBlocksToFields();
+
+    amrex::Print().SetPrecision(17)
+        << "ThetaImplicitMHD: shaped-wall exterior clamp: "
+        << cells_clamped << " cells scraped to the rigid vacuum image, "
+        << "net mass removed [kg] = " << mass_removed << "\n";
+    if (!m_wall_ledger_file.empty() &&
+        amrex::ParallelDescriptor::IOProcessor()) {
+        // Header row of the shaped-wall ledger ('#'-comment, so the
+        // "step mass energy" consumers skip it): the t = 0 scrape,
+        // machine-readable for the ctest gate. First write of the run,
+        // so it owns the truncation.
+        std::ofstream ledger(m_wall_ledger_file,
+                             m_wall_ledger_started ? std::ios::app
+                                                   : std::ios::trunc);
+        m_wall_ledger_started = true;
+        ledger.precision(17);
+        ledger << "# exterior clamp: cells " << cells_clamped
+               << " mass_removed_kg " << mass_removed << "\n";
+    }
+#endif
+}
+
 void ThetaImplicitMHD::RefreshHaloPedestal ()
 {
     if (m_halo_pedestal_fraction <= 0.0_rt) {
@@ -8874,6 +9159,24 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
     // it does not inject heat.
     const AdmissibilityBounds bounds = MakeAdmissibilityBounds();
 
+    // Shaped-wall band exclusion (the band-hygiene contract, see
+    // ClampWallExteriorState): the masked band is not fluid -- it sits
+    // bit-exactly on the rigid vacuum clamp image, whose values rest a
+    // fixed slack above their bounds. The restorations below re-land a
+    // per-cell margin computed FROM the current value, which on a
+    // bound-resident cell is strictly increasing (bound + 1e-6 (|v| +
+    // bound) > v at v = bound (1 + 2e-6)): without the skip the band
+    // would ratchet upward a few ULP-scale increments per step, i.e.
+    // re-create energy outside the wall and break the bit-static
+    // contract.
+    const bool wall_freeze = m_wall_mask.GetThermalBC() !=
+                             ImplicitMHDWallMask::ThermalBC::none;
+    const int* const AMREX_RESTRICT wall_fm =
+        wall_freeze ? m_wall_mask.FirstMaskedCellCentered() : nullptr;
+    const int wall_mz_lo = -m_wall_mask.GhostCells();
+    const int wall_mz_hi =
+        m_wall_mask.AxialCells() - 1 + m_wall_mask.GhostCells();
+
     if (m_electron_temperature_floor > 0.0_rt) {
         // Electron-temperature floor restoration at the accepted step end:
         // U_e >= max(p_e_floor, n kB T_e_floor)/(gamma_e - 1). The
@@ -8897,6 +9200,14 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
             const auto energy_old = old_energy_block.const_array(mfi);
             const auto energy_array = electron_energy_block.array(mfi);
             amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                if (wall_freeze) {
+                    // Wall band exclusion (see the capture comment).
+                    const int jc =
+                        std::max(wall_mz_lo, std::min(wall_mz_hi, j));
+                    if (i >= wall_fm[jc]) {
+                        return;
+                    }
+                }
                 if (energy_old(i, j, k) <
                     energy_per_density * rho_old(i, j, k)) {
                     return; // ratchet: was below the floor, do not lift
@@ -8960,6 +9271,14 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
             const auto ion_e_old = old_ion_energy_block.const_array(mfi);
             const auto ion_e = ion_energy_block.array(mfi);
             amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                if (wall_freeze) {
+                    // Wall band exclusion (see the capture comment).
+                    const int jc =
+                        std::max(wall_mz_lo, std::min(wall_mz_hi, j));
+                    if (i >= wall_fm[jc]) {
+                        return;
+                    }
+                }
                 amrex::Real kinetic_energy = 0.0_rt;
                 amrex::Real kinetic_energy_old = 0.0_rt;
                 for (int component = 0; component < 3; ++component) {
@@ -9029,6 +9348,15 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
                 const auto energy_array = energy_block.array(mfi);
                 amrex::ParallelFor(
                     box, [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                        if (wall_freeze) {
+                            // Wall band exclusion (see the capture
+                            // comment).
+                            const int jc = std::max(
+                                wall_mz_lo, std::min(wall_mz_hi, j));
+                            if (i >= wall_fm[jc]) {
+                                return;
+                            }
+                        }
                         const bool ratchet_engaged =
                             energy_old(i, j, k) >=
                             block_coefficient * rho_old(i, j, k);

@@ -5289,12 +5289,21 @@ Jacobian probes.
     surface current meets the (possibly anomalous) plasma resistivity at
     the near-floor wall-band density — an unbounded spurious heat source
     inside the metal. Either active mode upgrades the masked band to a
-    RIGID conductor: every fluid increment inside masked cells is zero
-    (the band keeps its bounded load state forever — no Joule pile-up,
-    no drained-heat accumulation), the stair interface faces drain the
-    interior one-sidedly (what crosses is gone: mass, momentum,
-    enthalpy — the fluid analog of an embedded-boundary particle
-    scraper), and faces between two masked cells carry no conduction.
+    RIGID conductor: every fluid increment inside masked cells is zero,
+    the stair interface faces drain the interior one-sidedly (what
+    crosses is gone: mass, momentum, enthalpy — the fluid analog of an
+    embedded-boundary particle scraper), and faces between two masked
+    cells carry no conduction. The band's state itself is the rigid
+    VACUUM image: at first-step sanitize time every masked fluid cell is
+    clamped to the mass-density floor with zero momentum and
+    floor-consistent energies at the background temperature —
+    ``wall_temperature`` itself in ``temperature`` mode, so the
+    interface drain starts at exactly zero gradient (whatever the IC
+    loaded outside the contour is scraped; a rank-0 banner and a
+    ``#``-comment header row of ``wall_ledger_file`` report the removed
+    cell count and net mass), the clamp is bit-exactly idempotent
+    across restarts, and the halo pedestal plus every end-of-step floor
+    restoration skip the band so it stays bit-static forever.
     ``zero_flux`` additionally makes the wall adiabatic: interface faces
     carry exactly zero conductive flux. ``temperature`` makes the wall a
     heat SINK instead: interface faces drain conductively toward
@@ -5319,6 +5328,40 @@ Jacobian probes.
     ``implicit_mhd.wall_thermal_bc = temperature`` (required there, in
     eV; an error in the other modes). Applied to both the electron and
     ion conduction channels.
+
+.. pp:param:: implicit_mhd.wall_band_eta_override
+    :type: ``float`` (Ohm m)
+    :default: ``0`` (off)
+
+    Electrical hygiene of the shaped-wall band (requires an active
+    ``implicit_mhd.wall_model``; aimed at ``dielectric``, whose
+    EM-transparent band otherwise relies on the density-keyed vacuum
+    resistivity to stay current-free): when positive, the resistivity
+    of the FIELD-advance Ohm's law is set to EXACTLY this constant at
+    every band-INTERIOR electric-field location — one whose complete
+    cell-centered interpolation neighborhood is masked. The override
+    REPLACES the composed eta (user parser + current-keyed anomalous
+    terms + density-keyed vacuum ramp) rather than composing with it:
+    :math:`\eta_{\mathrm{band}}` is a state-independent constant with
+    :math:`\partial\eta/\partial(\mathrm{state}) = 0` in the band.
+    Both properties are load-bearing (measured on the FRC formation
+    ladder): a density-keyed ramp that lands mid-band leaves a
+    resistive shell whose :math:`\mu_0 L^2/\eta` time can sit on the
+    drive timescale and screen the coil drive, and the current-keyed
+    anomalous terms explode at the clamped floor density — the
+    Jacobian stiffness that froze a production arm's Newton (150
+    zero-progress solves, 154 pinned energy rows). Choose the value at
+    or above the deck's vacuum-eta saturation so
+    :math:`\mu_0 L_{\mathrm{band}}^2/\eta_{\mathrm{band}}` is far
+    below the drive timescale (band :math:`L \sim 0.08` m: a 10 us
+    drive needs :math:`\eta_{\mathrm{band}} \gg 10^{-3}` Ohm m). E
+    rows on the stair interface itself (which bound live cells) keep
+    the composed eta, so the live-side field evolution and the
+    interface scraper are untouched; the preconditioner ingests the
+    identically overridden eta, and Joule heating keeps the composed
+    resistivity (masked cells receive no fluid increments anyway).
+    Under the conductor contracts the overridden rows are subsequently
+    pinned by the projection, making the override redundant there.
 
 .. pp:param:: implicit_mhd.conduction_coefficient_state
     :type: ``string``
@@ -5349,7 +5392,9 @@ Jacobian probes.
     capture plus the one-sided conductive drain, integrated from the
     accepted theta-state face fluxes with exact per-face annulus areas
     (both r- and z-normal interfaces). Rows of ``step mass energy``,
-    written and printed on the ``absorb_ledger_interval`` cadence; the
+    written and printed on the ``absorb_ledger_interval`` cadence,
+    preceded by a ``#``-comment header row reporting the first-step
+    exterior clamp (scraped cell count and net mass removed); the
     accumulation always runs and the printed line appears even without
     a file. This is the wall heat-load instrument: for a converged
     solve the booked energy matches the interior's loss through the

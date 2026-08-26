@@ -126,6 +126,21 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
     std::string polyline_file;
     pp.query("wall_polyline_file", polyline_file);
 
+    // Wall-band resistivity override (see the class comment): parsed
+    // before the early return so an override without a wall model is a
+    // loud input error, never a silent no-op.
+    const bool has_band_eta_override = utils::parser::queryWithParser(
+        pp, "wall_band_eta_override", m_band_eta_override);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_band_eta_override >= 0.0,
+        "implicit_mhd.wall_band_eta_override must be non-negative");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !has_band_eta_override || m_band_eta_override == 0.0 ||
+            wall_model != "none",
+        "implicit_mhd.wall_band_eta_override requires an active "
+        "implicit_mhd.wall_model (the override acts on the masked wall "
+        "band)");
+
     // Thermal wall boundary at the stair-step fluid interface (see the
     // class comment): parsed BEFORE the early return so a thermal BC
     // without a wall model is a loud input error, never a silent no-op.
@@ -324,6 +339,33 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
         const int j = jj - m_ng;
         ez_g[jj] = std::min(ez_h[jj], guard_from_cells(j - 2, j + 2));
     }
+    // --- Band-interior tables (wall_band_eta_override, see the class
+    // comment): first radial index per axial row at which EVERY
+    // cell-centered cell of the location's density/temperature
+    // interpolation neighborhood is masked -- E locations on the stair
+    // interface (bounding at least one live cell) are excluded by
+    // construction, so flooring eta there never touches the live-side
+    // field evolution. Derived purely from the cell-centered masked
+    // table (geometry-static). Per staggering: an E_r z-face (r-cell i,
+    // z-node j) reads cells (i, j-1) and (i, j); an E_theta corner
+    // (r-node i, z-node j) reads the four cells around it; an E_z
+    // r-face (r-node i, z-cell j) reads cells (i-1, j) and (i, j).
+    amrex::Vector<int> er_b(n_nodal);
+    amrex::Vector<int> et_b(n_nodal);
+    amrex::Vector<int> ez_b(n_cell);
+    const auto nodal_shift = [&] (const int first_cc) {
+        return (first_cc == never_masked) ? never_masked : first_cc + 1;
+    };
+    for (int jj = 0; jj < n_nodal; ++jj) {
+        const int j = jj - m_ng;
+        const int both = std::max(cc_masked_at(j - 1), cc_masked_at(j));
+        er_b[jj] = both;
+        et_b[jj] = nodal_shift(both);
+    }
+    for (int jj = 0; jj < n_cell; ++jj) {
+        ez_b[jj] = nodal_shift(cc_h[jj]);
+    }
+
     // Live seam-guarded rows per family in the valid domain (banner
     // reporting): rows i with first_guarded <= i < first_masked. E_r
     // rows are r-cells 0..nr-1; E_theta and E_z rows are r-nodes 0..nr.
@@ -350,6 +392,9 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
     m_first_guarded_er.resize(n_nodal);
     m_first_guarded_et.resize(n_nodal);
     m_first_guarded_ez.resize(n_cell);
+    m_first_band_er.resize(n_nodal);
+    m_first_band_et.resize(n_nodal);
+    m_first_band_ez.resize(n_cell);
     std::copy(er_h.begin(), er_h.end(), m_first_masked_er.begin());
     std::copy(et_h.begin(), et_h.end(), m_first_masked_et.begin());
     std::copy(ez_h.begin(), ez_h.end(), m_first_masked_ez.begin());
@@ -357,6 +402,9 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
     std::copy(er_g.begin(), er_g.end(), m_first_guarded_er.begin());
     std::copy(et_g.begin(), et_g.end(), m_first_guarded_et.begin());
     std::copy(ez_g.begin(), ez_g.end(), m_first_guarded_ez.begin());
+    std::copy(er_b.begin(), er_b.end(), m_first_band_er.begin());
+    std::copy(et_b.begin(), et_b.end(), m_first_band_et.begin());
+    std::copy(ez_b.begin(), ez_b.end(), m_first_band_ez.begin());
 
     // Active BEFORE the banner: ThermalBCName()/GetThermalBC() gate on
     // m_active, so printing first reports "thermal BC none" for an
@@ -382,6 +430,10 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
                    << " cells; thermal BC " << ThermalBCName();
     if (m_thermal_bc == ThermalBC::temperature) {
         amrex::Print() << " (T_wall = " << m_wall_temperature << " eV)";
+    }
+    if (m_band_eta_override > 0.0) {
+        amrex::Print() << "; band eta override " << m_band_eta_override
+                       << " ohm m (constant at band-interior E rows)";
     }
     amrex::Print() << "\n";
 #endif
@@ -417,6 +469,25 @@ warpx::mhd_pc::WallMaskView ImplicitMHDWallMask::View () const
         view.first_guarded_er = m_first_guarded_er.data() + m_ng;
         view.first_guarded_et = m_first_guarded_et.data() + m_ng;
         view.first_guarded_ez = m_first_guarded_ez.data() + m_ng;
+    }
+    return view;
+}
+
+WallBandEtaOverrideView ImplicitMHDWallMask::BandEtaOverrideView () const
+{
+    WallBandEtaOverrideView view;
+    // Active in every wall_model: under the conductor contracts the
+    // overridden band-interior rows are subsequently pinned by the
+    // projection (the override is redundant but harmless); under the
+    // dielectric standoff it is the band's electrical-hygiene contract
+    // (see the class comment).
+    view.active = m_active && (m_band_eta_override > 0.0);
+    if (view.active) {
+        view.eta_override = m_band_eta_override;
+        view.first_band_er = m_first_band_er.data() + m_ng;
+        view.first_band_et = m_first_band_et.data() + m_ng;
+        view.first_band_ez = m_first_band_ez.data() + m_ng;
+        view.first_band_cc = m_first_masked_cc.data() + m_ng;
     }
     return view;
 }
