@@ -1,0 +1,173 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Shaped-wall EXTERIOR CLAMP test (RZ, central recast flux, live ions,
+# total_energy closure, dielectric standoff on the stepped polyline
+# r_w = 0.30 m for z < 0 / 0.22 m for z > 0, zero drive): the IC
+# deliberately CONTAMINATES the wall band -- uniform density rho0
+# (2000x the mass floor) everywhere, plus an axial velocity painted
+# only outside r = 0.31 m -- the T5 formation-ladder failure in
+# miniature (a reference-matched IC left above-vacuum-threshold density in
+# the frozen band, which stayed electrically conductive and screened
+# the coil drive).
+#
+# Contract under test (see analysis_mhd_wall_dielectric_clamp.py):
+# - at first-step sanitize time the solver clamps every masked cell to
+#   the rigid vacuum image -- rho = mass floor, u = 0, floor-consistent
+#   energies, each a fixed 2e-6 slack above its bound -- and reports
+#   the scraped cell count and net mass removed as a '#'-comment header
+#   row of wall_ledger_file (asserted against the analysis's own
+#   integral of the diag000000 exterior);
+# - the exterior stays BIT-IDENTICAL to the clamp image across the
+#   remaining steps with the halo pedestal, the electron/ion
+#   temperature floors, and the floor-consistency supply all ACTIVE
+#   (each of those paths must skip the band; the pedestal alone would
+#   otherwise repopulate it to 0.05 rho0 every step);
+# - the interior is untouched by the clamp: the quiet uniform interior
+#   equilibrium stays at its IC values to solver precision.
+
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+my_constants.T0_ev = 100.0
+my_constants.Ti_ev = 50.0
+my_constants.Tmin_ev = 2.0
+my_constants.Tfloor_ev = 1.0
+my_constants.chi = 20.0
+my_constants.B0 = 1.0e-3
+my_constants.D = 100.0
+my_constants.uz_band = 2.0e3
+my_constants.nr = 16
+my_constants.nz = 8
+my_constants.Lr = 0.5
+my_constants.Lz = 0.5
+my_constants.dt = 2.0e-5
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 8
+amr.n_cell = nr nz
+amr.max_grid_size = 8
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 -0.5*Lz
+geometry.prob_hi = Lr 0.5*Lz
+boundary.field_lo = none none
+boundary.field_hi = pec none
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+# The quiet uniform equilibrium's residual sits at the roundoff floor
+# (~1e-14 in solver units): a pure relative tolerance makes Newton
+# chase noise until the line search cannot decrease it.
+newton.absolute_tolerance = 1.0e-18
+newton.relative_tolerance = 1.0e-8
+newton.max_iterations = 12
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-11
+gmres.max_iterations = 1000
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = T0_ev
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = 5.0/3.0
+hybrid_pic_model.n_floor = 1.0e16
+hybrid_pic_model.plasma_resistivity(rho,J,t) = mu0*D
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+# Split external fields: required by wall_model = dielectric; the drive
+# itself is ZERO (the clamp contract is a pure fluid measurement).
+hybrid_pic_model.add_external_fields = 1
+external_vector_potential.fields = hold
+external_vector_potential.hold.Ay_external_grid_function(x,y,z) = "0.0"
+external_vector_potential.hold.A_time_external_function(t) = "1.0"
+external_vector_potential.do_diva_cleaning = 0
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.mass_density_floor = 5.0e-4*rho0
+implicit_mhd.electron_pressure_floor = 1.0e-4*n0*q_e*Tmin_ev
+implicit_mhd.ion_pressure_floor = 1.0e-4*n0*q_e*Tmin_ev
+implicit_mhd.gamma_e = 5.0/3.0
+implicit_mhd.gamma_i = 5.0/3.0
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.reference_ion_pressure = n0*q_e*Ti_ev
+# Every band-repopulation path ARMED (the teeth of the exclusion
+# checks): the dynamic halo pedestal (0.05 x the rho0 peak, far above
+# the clamped band density), the electron/ion temperature floors (the
+# end-of-step restorations re-land a value-derived margin, which on a
+# bound-resident band cell is strictly increasing), and the
+# floor-consistency supply.
+implicit_mhd.halo_pedestal_fraction = 0.05
+implicit_mhd.electron_temperature_floor = Tfloor_ev*q_e/kb
+implicit_mhd.ion_temperature_floor = Tfloor_ev*q_e/kb
+implicit_mhd.floor_consistency_rate = 1.0e4
+# Drag-bounded fluid (the live_fluid_pc convention): keeps the 100 eV
+# acoustic-CFL deck Newton-tame at the CI budget.
+implicit_mhd.vacuum_mass_density = 2.0*rho0
+implicit_mhd.vacuum_drag_rate = 1.0e7
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.electron_pressure(x,y,z) = "n0 * q_e * T0_ev"
+implicit_mhd.ion_pressure(x,y,z) = "n0 * q_e * Ti_ev"
+# Momentum contamination painted strictly outside both wall sections
+# (r > 0.31 m > r_w everywhere): the clamp must zero it exactly.
+implicit_mhd.velocity_z(x,y,z) = "if(x > 0.31, uz_band, 0.0)"
+implicit_mhd.evolve_ion_fluid = true
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 1.0
+implicit_mhd.include_joule_heating = false
+implicit_mhd.thermal_diffusivity_electron = chi
+implicit_mhd.resistive_theta = 1.0
+
+implicit_mhd.wall_model = dielectric
+implicit_mhd.wall_polyline_file = wall_step_r30_r22.csv
+implicit_mhd.wall_thermal_bc = zero_flux
+implicit_mhd.wall_ledger_file = diags/wall_ledger.txt
+
+warpx.B_ext_grid_init_style = parse_b_ext_grid_function
+warpx.Bx_external_grid_function(x,y,z) = 0.0
+warpx.By_external_grid_function(x,y,z) = 0.0
+warpx.Bz_external_grid_function(x,y,z) = 0.0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 4
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy \
+                       implicit_mhd_ion_energy \
+                       implicit_mhd_momentum_r implicit_mhd_momentum_t \
+                       implicit_mhd_momentum_z
+diag1.write_species = 0

@@ -1514,6 +1514,59 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# shaped-wall EXTERIOR CLAMP (the band-hygiene contract, T5 in
+# miniature): a deliberately contaminated IC -- uniform rho0 (2000x the
+# mass floor) plus painted band momentum -- must be scraped to the
+# rigid vacuum image at first-step sanitize time (ledger header closes
+# against the measured removal), stay BIT-IDENTICAL there with the
+# halo pedestal, the temperature floors and the floor-consistency
+# supply all armed (every repopulation path must skip the band), and
+# leave the quiet interior equilibrium untouched
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_dielectric_clamp  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_wall_dielectric_clamp  # inputs
+    "analysis_mhd_wall_dielectric_clamp.py diags"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# wall-band eta override, the no-knob CONTRAST (the T5 repro in
+# miniature): with a density-independent constant eta the clamped
+# frozen band stays electrically conductive -- the uniform-Bz ramp's
+# shielding response books a deep-band |j_theta| DOMINATING the
+# interior response (the screening teeth of the override run's
+# collapse check)
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_band_eta_conductive  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_band_eta implicit_mhd.wall_band_eta_override=0.0"  # inputs
+    "analysis_mhd_wall_band_eta.py diags/diag000006 reference"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# wall-band eta override (implicit_mhd.wall_band_eta_override), the
+# headline: the constant state-independent band eta at mu0*Dwall (500x
+# the plasma eta; bit-equal across the band, asserted from the plotted
+# PC eta register) must collapse the deep-band eddy |j_theta| below
+# 1e-2 of the no-knob twin (the production bar from the run_v8_wall
+# frozen-step abort) while the live interior RECOVERS the shielding
+# (interface rows keep the composed eta) and the driven window stays
+# Newton-grind-free; the in-run resistive assembly validation asserts
+# the overridden residual/PC row twin-ness at every update
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_band_eta_override  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_wall_band_eta  # inputs
+    "analysis_mhd_wall_band_eta.py diags/diag000006 override ../test_rz_theta_implicit_mhd_wall_band_eta_conductive/diags/diag000006"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_band_eta_conductive  # dependency
+)
+
 # selectable z-end fluid boundary, mode "outflow" (rectified outgoing-only
 # end ghosts): a hot slab with outward end flow drains mass and total
 # fluid energy strictly monotonically through the z faces

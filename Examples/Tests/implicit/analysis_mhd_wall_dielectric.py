@@ -146,6 +146,37 @@ def band_drift(a, b):
     return worst
 
 
+# The rigid vacuum clamp image (the shaped-wall exterior clamp, applied
+# at first-step sanitize time in every wall_live-freezing mode): deck
+# floors mass 5e-4 rho0 and electron pressure 1e-4 n0 q_e Tmin, no
+# temperature floors, each value a fixed 2e-6 slack above its bound.
+PROTON_MASS = 1.67262192595e-27  # WarpX parser m_p (ablastr::constant)
+QE = 1.602176634e-19
+N0 = 1.0e18
+TMIN_EV = 2.0
+GAMMA = 5.0 / 3.0
+SLACK = 2.0e-6
+CLAMP_IMAGE = {
+    "implicit_mhd_mass_density": 5.0e-4 * N0 * PROTON_MASS * (1.0 + SLACK),
+    "implicit_mhd_electron_energy": 1.0e-4 * N0 * QE * TMIN_EV
+    / (GAMMA - 1.0) * (1.0 + SLACK),
+    "implicit_mhd_momentum_r": 0.0,
+    "implicit_mhd_momentum_t": 0.0,
+    "implicit_mhd_momentum_z": 0.0,
+}
+
+
+def band_image_mismatch(state):
+    """Max relative mismatch of the masked band against the clamp image."""
+    worst = 0.0
+    for f, value in CLAMP_IMAGE.items():
+        scale = max(abs(value), float(np.max(np.abs(state[f]))), 1.0e-300)
+        err = np.max(np.abs(state[f] - value), initial=0.0, where=masked) / scale
+        print(f"clamp image mismatch {f}: {err:.3e} of scale")
+        worst = max(worst, err)
+    return worst
+
+
 # Calibrated thresholds (measured on the 2-rank OMP CI layout):
 # - the transparent probe-ring linkage lands at 0.496 (r = 0.34) and
 #   0.316 (r = 0.41) of the loop flux scale;
@@ -202,13 +233,18 @@ elif mode == "dielectric":
         print(f"pointwise |{name}_dielectric - {name}_none|max/scale = {err:.3e}")
         assert err < TOL_MATCH_B, f"dielectric {name} deviates from none: {err:.3e}"
 
-    # --- 3. masked-band FLUID state bit-static (pec_response contract) ------
-    drift = band_drift(state0, state1)
-    assert drift < TOL_STATIC, f"dielectric masked band changed ({drift:.3e})"
+    # --- 3. masked-band FLUID state on the rigid vacuum clamp image ---------
+    # (the pec_response freeze contract plus the first-step exterior
+    # clamp: the uniform rho0 IC loaded the band far above the floor
+    # and must have been scraped)
+    mismatch = band_image_mismatch(state1)
+    assert mismatch < TOL_STATIC, (
+        f"dielectric masked band off the clamp image ({mismatch:.3e})"
+    )
 
-    # ... while the none twin's band DOES evolve (the check has teeth;
-    # the twins share this run's initial state bit-exactly).
-    print("none-twin band evolution (teeth of the bit-static check):")
+    # ... while the none twin's band DOES evolve un-clamped (the check
+    # has teeth; the twins share this run's initial state bit-exactly).
+    print("none-twin band evolution (teeth of the clamp-image check):")
     drift_none = band_drift(state0, state_none)
     assert drift_none > MIN_BAND_EVOLVES, (
         f"none twin's band unexpectedly static ({drift_none:.3e})"
@@ -221,8 +257,11 @@ else:  # pec_response
             f"pec_response probe-ring flux NOT pinned at ring {i_ring} "
             f"({dpsi / psi_scale:.3e} of scale)"
         )
-    # ... and the fluid contract is the same rigid freeze.
-    drift = band_drift(state0, state1)
-    assert drift < TOL_STATIC, f"pec_response masked band changed ({drift:.3e})"
+    # ... and the fluid contract is the same rigid freeze onto the
+    # exterior clamp image.
+    mismatch = band_image_mismatch(state1)
+    assert mismatch < TOL_STATIC, (
+        f"pec_response masked band off the clamp image ({mismatch:.3e})"
+    )
 
 print(f"dielectric shaped-wall transparency test ({mode}) PASSED")

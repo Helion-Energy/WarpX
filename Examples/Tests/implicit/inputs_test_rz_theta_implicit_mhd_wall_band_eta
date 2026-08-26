@@ -1,0 +1,161 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Wall-band resistivity OVERRIDE test (implicit_mhd.wall_band_eta_override;
+# RZ, central recast flux, frozen ions, dielectric standoff on the
+# stepped polyline, uniform external Bz drive ramp): the T5
+# formation-ladder failure in miniature. The plasma resistivity is a
+# density-INDEPENDENT constant eta = mu0*D, so even after the exterior
+# clamp scrapes the band to the mass floor the frozen band stays
+# electrically CONDUCTIVE -- the ramp's shielding response drives a
+# finite eddy J_theta through the dielectric (EM-transparent) band,
+# the measured screening channel of the flying formation run (band
+# |J_theta| 20x the interior median).
+#
+# Contract under test (see analysis_mhd_wall_band_eta.py):
+# - deck default (wall_band_eta_override = mu0*Dwall, Dwall = 1e4
+#   m^2/s): every band-interior E row carries EXACTLY this constant
+#   eta (bit-equal across the band, dEta/dState = 0 -- asserted from
+#   the plotted PC eta register), the response current decays on
+#   mu0 L^2/eta_band = L^2/Dwall ~ 4e-6 s << dt, so the deep-band
+#   |j_theta| COLLAPSES below 1e-2 of the no-knob run's while the LIVE
+#   interior recovers the shielding, and the driven window stays
+#   Newton-grind-free;
+# - CLI-override twin (wall_band_eta_override = 0, the T5 repro): the
+#   same deck books a deep-band |j_theta| DOMINATING the interior
+#   response (the screening teeth).
+# The run is preconditioned with the MHD block PC's resistive block
+# WITH assembly validation, so the overridden-eta residual/PC
+# twin-ness is asserted inside the run itself at every update.
+
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+my_constants.T0_ev = 100.0
+my_constants.Tmin_ev = 2.0
+my_constants.chi = 20.0
+my_constants.B0 = 1.0e-3
+my_constants.D = 20.0
+my_constants.nr = 16
+my_constants.nz = 8
+my_constants.Lr = 0.5
+my_constants.Lz = 0.5
+my_constants.dt = 2.0e-5
+my_constants.tau = 2.0e-4
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 6
+amr.n_cell = nr nz
+amr.max_grid_size = 8
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 -0.5*Lz
+geometry.prob_hi = Lr 0.5*Lz
+boundary.field_lo = none none
+boundary.field_hi = pec none
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-14
+newton.relative_tolerance = 1.0e-9
+newton.max_iterations = 12
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-9
+gmres.max_iterations = 1000
+
+jacobian.pc_type = pc_mhd_block
+pc_mhd_block.resistive_validate_assembly = 1
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = T0_ev
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = 5.0/3.0
+hybrid_pic_model.n_floor = 1.0e16
+# Density-INDEPENDENT constant resistivity: the vacuum-eta channel is
+# deliberately absent, so band hygiene rests on wall_band_eta_override
+# alone (the knob under test).
+hybrid_pic_model.plasma_resistivity(rho,J,t) = mu0*D
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+# Uniform external Bz drive ramp through the split-field scheme
+# (A_theta = (r/2) B0, scaled by t/tau): the shielding response is the
+# band current source under test.
+hybrid_pic_model.add_external_fields = 1
+external_vector_potential.fields = drive
+external_vector_potential.drive.Ay_external_grid_function(x,y,z) = "0.5 * x * B0"
+external_vector_potential.drive.A_time_external_function(t) = "t/tau"
+external_vector_potential.do_diva_cleaning = 0
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.mass_density_floor = 5.0e-4*rho0
+implicit_mhd.electron_pressure_floor = 1.0e-4*n0*q_e*Tmin_ev
+implicit_mhd.gamma_e = 5.0/3.0
+implicit_mhd.gamma_i = 5.0/3.0
+implicit_mhd.reference_ion_pressure = 0.0
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.electron_pressure(x,y,z) = "n0 * q_e * T0_ev"
+implicit_mhd.evolve_ion_fluid = false
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 1.0
+implicit_mhd.include_joule_heating = false
+implicit_mhd.thermal_diffusivity_electron = chi
+implicit_mhd.resistive_theta = 1.0
+
+implicit_mhd.wall_model = dielectric
+implicit_mhd.wall_polyline_file = wall_step_r30_r22.csv
+implicit_mhd.wall_thermal_bc = zero_flux
+# Band electrical hygiene (the knob under test; the CTest contrast twin
+# overrides this to 0 on the CLI -- the T5 repro). Dwall = 1e4 m^2/s,
+# inlined because a my_constants symbol referenced ONLY here would trip
+# the unused-inputs check when the twin overrides the knob.
+implicit_mhd.wall_band_eta_override = mu0*1.0e4
+
+warpx.B_ext_grid_init_style = parse_b_ext_grid_function
+warpx.Bx_external_grid_function(x,y,z) = 0.0
+warpx.By_external_grid_function(x,y,z) = 0.0
+warpx.Bz_external_grid_function(x,y,z) = 0.0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 6
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Br Bt Bz implicit_mhd_field_resistivity_e1 \
+                       implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy \
+                       implicit_mhd_momentum_r implicit_mhd_momentum_t \
+                       implicit_mhd_momentum_z
+diag1.write_species = 0

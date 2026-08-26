@@ -137,6 +137,11 @@ external_vector_potential.do_diva_cleaning = 0
 
 implicit_mhd.reference_mass_density = rho0
 implicit_mhd.reference_magnetic_field = B0
+# Positive floors: the rigid-conductor freeze scrapes the masked band
+# onto the floor image at first-step sanitize time (the exterior
+# clamp), and the flux kernels divide by max(rho, floor) there.
+implicit_mhd.mass_density_floor = 5.0e-4*rho0
+implicit_mhd.electron_pressure_floor = 1.0e-4*n0*q_e*Tmin_ev
 implicit_mhd.gamma_e = 5.0/3.0
 implicit_mhd.gamma_i = 5.0/3.0
 implicit_mhd.reference_ion_pressure = 0.0

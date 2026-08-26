@@ -18,9 +18,14 @@ requires live ions and shares this code template; the formation decks
 exercise it). The stepped polyline presents r-normal AND z-normal stair
 interface faces plus interior-metal faces.
 
-In BOTH modes the masked band is a RIGID conductor: every fluid
-increment inside masked cells is zero, so the whole band must stay
-bit-static across the run in every fluid moment.
+In BOTH modes the masked band is a RIGID conductor: at first-step
+sanitize time the solver clamps every masked cell to the rigid vacuum
+image (rho = mass floor, u = 0, floor-consistent electron energy, each
+a fixed 2e-6 slack above its bound -- the exterior clamp; the uniform
+rho0 IC deliberately loads the band far above the floor), and every
+fluid increment inside masked cells is zero afterwards: from the first
+post-clamp snapshot on, the whole band must sit ON the clamp image and
+stay bit-static in every fluid moment.
 
 mode = "zero_flux": the interface passes exactly nothing -- the interior
 (unmasked) energy is conserved to solver tolerance -- while the Gaussian
@@ -53,7 +58,7 @@ diag_dir = sys.argv[1]
 mode = sys.argv[2]
 assert mode in ("zero_flux", "temperature"), f"unknown mode {mode}"
 
-proton_mass = 1.67262192369e-27
+proton_mass = 1.67262192595e-27  # WarpX parser m_p (ablastr::constant)
 qe = 1.602176634e-19
 n0 = 1.0e20
 T0_ev = 100.0
@@ -150,13 +155,44 @@ print(f"total    energy trace: {total_energy / total_energy[0]}")
 
 # ---- checks common to both modes -------------------------------------
 
-# The masked band is a rigid conductor: EVERY fluid moment of EVERY
-# masked cell (interface metal included) is bit-static in both modes.
+# The masked band was scraped onto the rigid vacuum clamp image at
+# first-step sanitize time (the exterior clamp; deck floors: mass
+# 1e-4 rho0, electron pressure 1e-4 n0 q_e Tmin, no temperature
+# floors). In temperature mode the energy image sits at the WALL
+# RESERVOIR temperature (n_image kB T_wall at the clamp density), so
+# the one-sided interface drain starts at exactly zero gradient; in
+# zero_flux mode it rests on the pressure floor.
+SLACK = 2.0e-6
+rho_image = 1.0e-4 * n0 * proton_mass * (1.0 + SLACK)
+electron_bound = 1.0e-4 * n0 * qe * Tmin_ev / (gamma - 1.0)
+if mode == "temperature":
+    n_image = rho_image / proton_mass
+    electron_bound = max(electron_bound,
+                         n_image * qe * Twall_ev / (gamma - 1.0))
+clamp_image = {
+    "implicit_mhd_mass_density": rho_image,
+    "implicit_mhd_electron_energy": electron_bound * (1.0 + SLACK),
+    "implicit_mhd_momentum_r": 0.0,
+    "implicit_mhd_momentum_t": 0.0,
+    "implicit_mhd_momentum_z": 0.0,
+}
+for f, value in clamp_image.items():
+    scale = max(abs(value), np.max(np.abs(states[1][f])), 1.0e-300)
+    err = np.max(np.abs(states[1][f] - value), initial=0.0, where=masked)
+    print(f"clamp image mismatch {f}: {err / scale:.3e} of scale")
+    assert err / scale < 1.0e-13, (
+        f"masked band not on the clamp image ({f}: {err:.3e}, "
+        f"expected {value:.6e})"
+    )
+
+# ...and stays a rigid conductor afterwards: EVERY fluid moment of
+# EVERY masked cell (interface metal included) is bit-static across the
+# post-clamp snapshots in both modes.
 for f in FIELDS:
-    scale = np.max(np.abs(states[0][f]))
+    scale = np.max(np.abs(states[1][f]))
     scale = scale if scale > 0.0 else 1.0
     drift = np.max(
-        np.abs(states[-1][f] - states[0][f]),
+        np.abs(states[-1][f] - states[1][f]),
         initial=0.0,
         where=masked,
     ) / scale
