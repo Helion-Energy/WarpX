@@ -272,6 +272,27 @@ protected:
     bool m_particle_suborbits = false;
 
     /**
+     * \brief whether to specularly reflect particles at the r-max domain boundary
+     * inside the implicit per-particle Picard iteration, so that wall-crossing
+     * orbits are reflected during the nonlinear solve rather than only once per
+     * step after it. Only active in RZ geometry with a reflecting particle
+     * boundary at r-hi.
+     */
+    bool m_reflect_particles_at_rmax = false;
+
+    /**
+     * \brief whether to overwrite the r-max guard cells of the particle-gather
+     * electric field with the discrete energy-adjoint of the guard-current fold
+     * applied to the deposited J at a reflecting r-max wall (per-component parity
+     * mirror: E_r odd, E_theta/E_z even). Only active in RZ geometry with a PEC
+     * field boundary and a Reflecting particle boundary at r-hi, where the fold
+     * parity (particle-Reflecting precedence) is otherwise not adjoint to the
+     * PEC-image ghosts the gather reads, making the wall band a standing
+     * discrete energy source: Sum_p q v.E(x_p) != integral J.E there.
+     */
+    bool m_adjoint_gather_ghosts = false;
+
+    /**
      * \brief whether the details of unconverged particles are printed out during
      * the particle evolve loops
      */
@@ -301,6 +322,36 @@ protected:
      * \brief Width for mass matrices in the preconditioner
      */
     int m_mass_matrices_pc_width = -1;
+
+    /**
+     * \brief Whether to fold the physical-boundary response into the mass
+     * matrices themselves. The deposit leaves raw band entries with guard
+     * rows and guard columns at physical boundaries; when enabled, those are
+     * folded into the interior band with the deposit-side guard-current
+     * parities (row fold) and the gather-side ghost-image parities (column
+     * remap), so the stored bands represent the composed interior operator.
+     * Guard rows/columns are zeroed after folding, which leaves the
+     * mass-matrix matvec unchanged (the folded content enters through
+     * interior entries instead of through the vector-side guard fold and
+     * ghost-image fill). Currently implemented for the RZ r-hi boundary with
+     * field PEC + particle Reflecting; see ApplyMassMatricesBoundaryRows.
+     */
+    bool m_mass_matrices_boundary_rows = false;
+
+    /**
+     * \brief One-shot verification of the mass-matrix Jacobian action against
+     * the true (particle) current response: when >= 0, at this step index the
+     * first mass-matrix linear-stage evaluation is compared row-by-row in
+     * radius against a full particle push/deposit at the identical field
+     * state, the per-row relative errors are printed, and the run aborts.
+     * Debug instrumentation; default off (-1).
+     */
+    int m_verify_mm_jvp_step = -1;
+
+    /**
+     * \brief Internal latch so the mass-matrix JVP verification runs once.
+     */
+    bool m_verify_mm_jvp_done = false;
 
     /**
      * \brief Direction-dependent component number of mass matrices elements
@@ -348,6 +399,38 @@ protected:
     void PreRHSOp ( amrex::Real  a_cur_time,
                     int          a_nl_iter,
                     bool         a_from_jacobian );
+
+    /**
+     * \brief Overwrite the r-max guard cells of Efield_fp (the particle gather
+     * field) with the energy-adjoint ghost fill of the reflecting-wall J fold.
+     * Called from PreRHSOp between the E filter and the particle push; gated on
+     * m_adjoint_gather_ghosts and the RZ PEC/Reflecting r-hi boundary combination.
+     */
+    void ApplyAdjointGatherGhosts ();
+
+    /**
+     * \brief Fold the physical-boundary response into the mass-matrix bands
+     * at the RZ r-hi wall (field PEC + particle Reflecting). Composes the
+     * guard-row current fold (J_r odd, J_theta/J_z even) with the active
+     * gather ghost-image column convention (PEC conductor image, or the
+     * fold-adjoint image when adjoint_gather_ghosts is on), then zeroes the
+     * folded guard rows and columns. The wall-node self-fold doubling of
+     * nodal-in-r rows is deliberately left to the downstream guard-current
+     * fold acting on the matvec result (see the implementation comments), so
+     * the stored wall-node rows keep the raw-deposit half-normalized
+     * convention. Called at the end of FinishMassMatrices when
+     * mass_matrices_boundary_rows is enabled; must run after the band
+     * symmetry completion, which reads the raw guard rows.
+     */
+    void ApplyMassMatricesBoundaryRows ();
+
+    /**
+     * \brief One-shot comparison of the mass-matrix linear-stage current
+     * against a full particle push/deposit at the identical field state,
+     * reported per radial row. Aborts on completion by design (debug
+     * instrumentation, gated by verify_mm_jvp_step).
+     */
+    void VerifyMassMatricesJVP ( amrex::Real a_cur_time );
 
     /**
      * \brief Communicate Mass Matrices used for PC and apply boundary conditions

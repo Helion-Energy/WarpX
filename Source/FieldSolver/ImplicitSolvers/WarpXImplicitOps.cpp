@@ -12,6 +12,7 @@
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
 #include "Fields.H"
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
+#include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "Parallelization/GuardCellManager.H"
 #include "Particles/MultiParticleContainer.H"
 #include "Particles/ParticleBoundaryBuffer.H"
@@ -60,6 +61,32 @@ WarpX::SetElectricFieldAndApplyBCs ( const WarpXSolverVec& a_E, amrex::Real a_ti
     amrex::MultiFab::Copy(*Efield_fp[0][2], *Evec[0][2], 0, 0, ncomps, Evec[0][2]->nGrowVect());
     FillBoundaryE(guard_cells.ng_alloc_EB, WarpX::sync_nodal_points);
     ApplyEfieldBoundary(0, PatchType::fine, a_time);
+
+#if defined(WARPX_DIM_RZ)
+    // Thin resistive-shell wall (RZ r-max, hybrid_pic_model.resistive_wall):
+    // ApplyEfieldBoundary above zeroed the tangential wall rows of the
+    // iterate copy (hard PEC identity). Restore them from the raw solver
+    // iterate a_E and image the r-hi tangential ghosts odd about that value,
+    // so the Faraday curl and the particle gather of this residual
+    // evaluation see the iterate's wall value -- the map stays a
+    // deterministic function of the iterate (recomputing the shell value
+    // here from Bfield_fp would read the PREVIOUS residual evaluation's
+    // B^{n+theta}: a hidden one-evaluation lag in Jacobian probes). The wall
+    // row converges to the shell value through the residual: the Ohm-solve
+    // wrapper tail (HybridPICModel::HybridPICSolveE -> ApplyResistiveWallE)
+    // imposes E_t(wall) = (eta_w/delta) K_t(B^{n+theta}(iterate)) on the
+    // residual output, making the wall row a relaxation (Robin) equation
+    // E_wall = (eta_w/delta) K(B(E)) at the fixed point. Composition: runs
+    // LAST at this site (after the PEC image); implicit_evolve.
+    // adjoint_gather_ghosts (PreRHSOp) later overwrites only the r-hi GHOST
+    // rows of the gather source (gather-only, wall node untouched), so the
+    // two knobs compose without ordering surprises; E_r keeps the PEC
+    // normal image.
+    if (m_hybrid_pic_model && m_hybrid_pic_model->m_resistive_wall) {
+        m_hybrid_pic_model->ImposeResistiveWallIterateRowsE(
+            Efield_fp[0], Evec[0], 0);
+    }
+#endif
 }
 
 void

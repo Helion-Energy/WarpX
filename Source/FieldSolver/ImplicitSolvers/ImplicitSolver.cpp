@@ -4,6 +4,12 @@
 #include "Particles/MultiParticleContainer.H"
 #include "Utils/WarpXAlgorithmSelection.H"
 
+#include <array>
+#include <cmath>
+#include <limits>
+#include <memory>
+#include <vector>
+
 using namespace amrex;
 using namespace amrex::literals;
 
@@ -530,6 +536,8 @@ void ImplicitSolver::parseNonlinearSolverParams ( const amrex::ParmParse&  pp )
         pp.query("max_particle_iterations", m_max_particle_iterations);
         pp.query("particle_tolerance", m_particle_tolerance);
         pp.query("particle_suborbits", m_particle_suborbits);
+        pp.query("reflect_particles_at_rmax", m_reflect_particles_at_rmax);
+        pp.query("adjoint_gather_ghosts", m_adjoint_gather_ghosts);
         pp.query("print_unconverged_particle_details", m_print_unconverged_particle_details);
         pp.query("use_mass_matrices_jacobian", m_use_mass_matrices_jacobian);
         pp.query("use_mass_matrices_pc", m_use_mass_matrices_pc);
@@ -540,6 +548,17 @@ void ImplicitSolver::parseNonlinearSolverParams ( const amrex::ParmParse&  pp )
             // Default m_skip_particle_picard_init to true if using suborbits
             if (m_particle_suborbits) { m_skip_particle_picard_init = true; }
             pp.query("skip_particle_picard_init", m_skip_particle_picard_init);
+            pp.query("mass_matrices_boundary_rows", m_mass_matrices_boundary_rows);
+            pp.query("verify_mm_jvp_step", m_verify_mm_jvp_step);
+            if (m_mass_matrices_boundary_rows && m_use_mass_matrices_pc) {
+                std::stringstream warningMsg;
+                warningMsg << "mass_matrices_boundary_rows folds the physical-boundary "
+                    "response into the Jacobian mass-matrix bands; the preconditioner "
+                    "containers copy diagonal band entries from those bands and then "
+                    "apply their own guard-current fold, so combining both options "
+                    "applies a boundary treatment twice on the preconditioner side.";
+                ablastr::warn_manager::WMRecordWarning("ImplicitSolver", warningMsg.str());
+            }
         }
         if (m_use_mass_matrices_pc) {
             m_mass_matrices_pc_width = 0;
@@ -856,6 +875,24 @@ void ImplicitSolver::PreRHSOp ( const amrex::Real  a_cur_time,
         m_WarpX->ApplyFilterMF(m_WarpX->m_fields.get_mr_levels_alldirs(FieldType::Efield_fp, finest_level), 0);
     }
 
+    // Restore discrete energy adjointness between the guard-current fold and
+    // the particle field gather at a reflecting r-max wall: overwrite the r-hi
+    // guard cells of the gather-source Efield_fp with the parity mirror that is
+    // the exact energy adjoint of the J fold (ApplyReflectiveBoundarytoJfield).
+    // Ordering makes this a gather-only modification within each ComputeRHS
+    // evaluation: the Faraday curl already consumed the PEC-imaged ghosts in
+    // the UpdateWarpXFields step (SetElectricFieldAndApplyBCs fills ghosts,
+    // then UpdateMagneticFieldAndApplyBCs takes curl(E); see e.g.
+    // ThetaImplicitHybrid::ComputeRHS, which calls UpdateWarpXFields before
+    // PreRHSOp), and the Ohm/field solve rewrites Efield_fp after PreRHSOp
+    // returns, so nothing downstream reads the overridden ghosts. Applied
+    // after the E filter above so the mirrored values are the filtered ones
+    // the interior gather sees. Runs in Jacobian evaluations too: the residual
+    // map must include it for the linearization to be consistent.
+    if (m_adjoint_gather_ghosts) {
+        ApplyAdjointGatherGhosts();
+    }
+
     // Advance the particle positions by 1/2 dt,
     // particle velocities by dt, then take average of old and new v,
     // deposit currents, giving J at n+1/2
@@ -868,6 +905,7 @@ void ImplicitSolver::PreRHSOp ( const amrex::Real  a_cur_time,
     options.use_mass_matrices_pc = m_use_mass_matrices_pc;
     options.use_mass_matrices_jacobian = m_use_mass_matrices_jacobian;
     options.evolve_suborbit_particles_only = false;
+    options.reflect_particles_at_rmax = m_reflect_particles_at_rmax;
 
     if (a_nl_iter == 0 && !a_from_jacobian &&
         m_use_mass_matrices_jacobian && m_skip_particle_picard_init) {
@@ -940,6 +978,14 @@ void ImplicitSolver::PreRHSOp ( const amrex::Real  a_cur_time,
                 m_WarpX->m_fields.get(FieldType::current_fp, Direction{2}, lev),
                 PatchType::fine);
         }
+        // One-shot debug verification of the mass-matrix current response
+        // against a full particle push/deposit at this exact field state
+        // (aborts on completion by design).
+        if (m_verify_mm_jvp_step >= 0 && !m_verify_mm_jvp_done &&
+            m_WarpX->getistep(0) >= m_verify_mm_jvp_step) {
+            m_verify_mm_jvp_done = true;
+            VerifyMassMatricesJVP(a_cur_time);
+        }
     } else {
         m_WarpX->SyncCurrentAndRho();
     }
@@ -951,6 +997,277 @@ void ImplicitSolver::PreRHSOp ( const amrex::Real  a_cur_time,
         PreLinearSolve();
     }
 
+}
+
+void ImplicitSolver::ApplyAdjointGatherGhosts ()
+{
+#if defined(WARPX_DIM_RZ)
+    using warpx::fields::FieldType;
+
+    // Gate: the adjoint fill below is derived for the r-hi boundary combination
+    // field PEC + particle Reflecting, where the guard-J fold takes the
+    // particle-Reflecting parity precedence (psign assignment in
+    // PEC::ApplyReflectiveBoundarytoJfield): J_r (normal) folds odd,
+    // J_theta/J_z (tangential) fold even -- while the gather ghosts hold the
+    // PEC conductor image (SetEfieldOnPEC) with the opposite parity on all
+    // three components.
+    if (WarpX::field_boundary_hi[0] != FieldBoundaryType::PEC) { return; }
+    if (WarpX::particle_boundary_hi[0] != ParticleBoundaryType::Reflecting) { return; }
+
+    // Parity per component = the J-fold psign for this combination. The fold's
+    // radius weight (rscale = r_guard/r_valid) transposes against the
+    // deposition volumes (V ~ r after the inverse-volume scaling, at the
+    // component-staggered radii) to exactly 1, so the energy-adjoint ghost
+    // fill is a pure parity mirror across the wall (node index N):
+    //   E_r(N+g)     = -E_r(N-1-g)   (cc-in-r: mirror about the wall plane)
+    //   E_theta(N+g) = +E_theta(N-g) (nodal-in-r: mirror about the wall node)
+    //   E_z(N+g)     = +E_z(N-g)
+    // With this fill, Sum_p q v.E(x_p) equals the r-weighted Sum_i V_i J_i E_i
+    // over the interior for every deposit (verified to roundoff standalone).
+    // The wall node itself is untouched: the fold's self-mirror doubling there
+    // is the wall node's half-volume normalization, not an energy term. B
+    // ghosts are left unchanged (B does no work on the particles; revisit if
+    // the wall momentum channel ever needs the matching treatment).
+    const amrex::GpuArray<amrex::Real,3> parity = {-1.0_rt, 1.0_rt, 1.0_rt};
+
+    for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+        amrex::Box domain_box = m_WarpX->Geom(lev).Domain();
+        domain_box.convert(amrex::IntVect::TheNodeVector());
+        const int ir_wall_node = domain_box.bigEnd(0);
+
+        const ablastr::fields::VectorField E =
+            m_WarpX->m_fields.get_alldirs(FieldType::Efield_fp, lev);
+
+        for (int dir = 0; dir < 3; ++dir) {
+            amrex::MultiFab& Emf = *E[dir];
+            const int is_nodal_r = static_cast<int>(Emf.ixType().nodeCentered(0));
+            // Mirror about the wall in this component's index space; same
+            // arithmetic as the J-fold mirror (mirrorfac, hi side).
+            const int mirrorfac = 2*ir_wall_node - (1 - is_nodal_r);
+            const amrex::Real psign = parity[dir];
+
+            // No tiling: ghost regions are written, and the r-hi guard band
+            // must be handled exactly once per fab.
+            for (amrex::MFIter mfi(Emf, false); mfi.isValid(); ++mfi) {
+                const amrex::Box& vbx = mfi.validbox();
+                // Only fabs whose valid region touches the r-hi wall own the
+                // physical guard band there; other fabs' r-hi ghosts overlap
+                // neighboring valid data and keep their FillBoundary values.
+                if (vbx.bigEnd(0) != ir_wall_node - (1 - is_nodal_r)) { continue; }
+
+                const amrex::Box& fabbox = mfi.fabbox();
+                const int ir_lo = fabbox.smallEnd(0);
+                // Guard band: first index beyond the wall through the fab
+                // edge, over the full transverse extent (including transverse
+                // ghosts, matching the transverse-grown fold boxes).
+                amrex::Box gbx = fabbox;
+                gbx.setSmall(0, ir_wall_node + is_nodal_r);
+
+                auto const& Earr = Emf.array(mfi);
+                // Writes go only to guard indices beyond the wall and reads
+                // come only from indices at or below it, so iterations are
+                // independent.
+                amrex::ParallelFor(gbx, Emf.nComp(),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k, int n)
+                {
+                    const int im = mirrorfac - i;
+                    if (im >= ir_lo) {
+                        Earr(i,j,k,n) = psign * Earr(im,j,k,n);
+                    }
+                });
+            }
+        }
+    }
+#endif
+}
+
+void ImplicitSolver::VerifyMassMatricesJVP ( const amrex::Real a_cur_time )
+{
+#if defined(WARPX_DIM_RZ)
+    // One-shot ground-truth check of the mass-matrix Jacobian action: the
+    // linear stage has just produced the mass-matrix current
+    //   J_mm(Z) = fold(scale(J0 + S*(E(Z) - E0)))
+    // at the perturbed field state Z currently held in Efield_fp. Here the
+    // true current response at the identical state is evaluated with a full
+    // particle push/deposit, J_true(Z) = fold(scale(deposit(Z))), and the
+    // baseline J_base = fold(scale(J0)) is rebuilt from the stored raw J0.
+    // Since J_mm is affine in E, J_mm - J_true measures the Jacobian-action
+    // error of the mass matrices on the actual Krylov direction eps*v =
+    // E(Z) - E0, and (J_true - J_base) is the true response that normalizes
+    // it. Errors are reported per radial row (aggregated over z), which
+    // resolves the wall band. The probe overwrites the linear-stage state
+    // (particle iterates, rho, J0 pairing), so the run aborts on completion.
+    using namespace amrex::literals;
+    using ablastr::fields::Direction;
+    using warpx::fields::FieldType;
+
+    amrex::Print() << "\n==== ImplicitSolver::VerifyMassMatricesJVP (one-shot) ====\n";
+    amrex::Print() << "step index " << m_WarpX->getistep(0)
+                   << ", time " << a_cur_time
+                   << ", boundary rows " << (m_mass_matrices_boundary_rows ? "ON" : "OFF")
+                   << ", adjoint gather ghosts " << (m_adjoint_gather_ghosts ? "ON" : "OFF")
+                   << "\n";
+
+    const int lev0 = 0;
+    ablastr::fields::VectorField Jfp = m_WarpX->m_fields.get_alldirs(FieldType::current_fp, lev0);
+    const ablastr::fields::VectorField J0 =
+        m_WarpX->m_fields.get_alldirs(FieldType::current_fp_non_suborbit, lev0);
+    const ablastr::fields::VectorField E =
+        m_WarpX->m_fields.get_alldirs(FieldType::Efield_fp, lev0);
+    const ablastr::fields::VectorField E0 =
+        m_WarpX->m_fields.get_alldirs(FieldType::Efield_fp_save, lev0);
+
+    // Magnitude of the Krylov direction eps*v = E - E0 (valid cells)
+    amrex::Real dE2 = 0.0;
+    for (int dir = 0; dir < 3; ++dir) {
+        amrex::MultiFab tmp(E[dir]->boxArray(), E[dir]->DistributionMap(), 1, 0);
+        amrex::MultiFab::LinComb(tmp, 1.0_rt, *E[dir], 0, -1.0_rt, *E0[dir], 0, 0, 1, 0);
+        const amrex::Real n2 = tmp.norm2(0);
+        dE2 += n2*n2;
+    }
+    amrex::Print() << "|eps*v| = |E - E0| = " << std::sqrt(dE2) << "\n";
+
+    // (1) Save J_mm(Z): the folded, volume-scaled linear-stage current.
+    std::array<std::unique_ptr<amrex::MultiFab>,3> Jmm, Jbase;
+    for (int dir = 0; dir < 3; ++dir) {
+        Jmm[dir] = std::make_unique<amrex::MultiFab>(
+            Jfp[dir]->boxArray(), Jfp[dir]->DistributionMap(),
+            Jfp[dir]->nComp(), Jfp[dir]->nGrowVect());
+        amrex::MultiFab::Copy(*Jmm[dir], *Jfp[dir], 0, 0, Jfp[dir]->nComp(), Jfp[dir]->nGrowVect());
+    }
+
+    // Shared post-deposit sequence: the same scaling/communication/boundary
+    // operations the residual evaluation applies to a raw deposit.
+    auto finish_raw_J = [&]() {
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            ablastr::fields::VectorField Jl =
+                m_WarpX->m_fields.get_alldirs(FieldType::current_fp, lev);
+            m_WarpX->ApplyInverseVolumeScalingToCurrentDensity(Jl[0], Jl[1], Jl[2], lev);
+        }
+        m_WarpX->SyncCurrent("current_fp");
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            m_WarpX->ApplyJfieldBoundary(lev,
+                m_WarpX->m_fields.get(FieldType::current_fp, Direction{0}, lev),
+                m_WarpX->m_fields.get(FieldType::current_fp, Direction{1}, lev),
+                m_WarpX->m_fields.get(FieldType::current_fp, Direction{2}, lev),
+                PatchType::fine);
+        }
+    };
+
+    // (2) Rebuild J_base = fold(scale(J0)) from the stored raw baseline.
+    for (int dir = 0; dir < 3; ++dir) {
+        amrex::MultiFab::Copy(*Jfp[dir], *J0[dir], 0, 0, J0[dir]->nComp(), J0[dir]->nGrowVect());
+    }
+    finish_raw_J();
+    for (int dir = 0; dir < 3; ++dir) {
+        Jbase[dir] = std::make_unique<amrex::MultiFab>(
+            Jfp[dir]->boxArray(), Jfp[dir]->DistributionMap(),
+            Jfp[dir]->nComp(), Jfp[dir]->nGrowVect());
+        amrex::MultiFab::Copy(*Jbase[dir], *Jfp[dir], 0, 0,
+                              Jfp[dir]->nComp(), Jfp[dir]->nGrowVect());
+    }
+
+    // (3) True response: full particle push/deposit at the identical field
+    // state (a nonlinear-stage evaluation, no mass-matrix routing shortcuts).
+    {
+        ImplicitOptions options;
+        options.linear_stage_of_jfnk = false;
+        options.use_mass_matrices_pc = false;
+        options.use_mass_matrices_jacobian = false;
+        options.evolve_suborbit_particles_only = false;
+        options.reflect_particles_at_rmax = m_reflect_particles_at_rmax;
+        options.max_particle_iterations = m_max_particle_iterations;
+        options.particle_tolerance = m_particle_tolerance;
+        const bool skip_deposition = false;
+        m_WarpX->PushParticlesandDeposit(a_cur_time, skip_deposition,
+            PositionPushType::Full, MomentumPushType::Full, &options);
+        CumulateJ();
+        finish_raw_J();
+    }
+    // current_fp now holds J_true(Z)
+
+    // (4) Per-radial-row aggregates over the level-0 valid region.
+    amrex::Box dom_node = m_WarpX->Geom(lev0).Domain();
+    dom_node.convert(amrex::IntVect::TheNodeVector());
+    const int ir_lo = dom_node.smallEnd(0);
+    const int nrow = dom_node.length(0) + 1;
+    const char* comp_names[3] = {"Jr", "Jt", "Jz"};
+
+    for (int dir = 0; dir < 3; ++dir) {
+        std::vector<amrex::Real> num2(nrow, 0.0), den2(nrow, 0.0), mm2(nrow, 0.0);
+        const int is_nodal_r = static_cast<int>(Jfp[dir]->ixType().nodeCentered(0));
+        const int ir_wall = dom_node.bigEnd(0) - (1 - is_nodal_r);
+
+        for (amrex::MFIter mfi(*Jfp[dir]); mfi.isValid(); ++mfi) {
+            const amrex::Box& vbx = mfi.validbox();
+            const int ncomp = Jfp[dir]->nComp();
+            amrex::FArrayBox h_true(vbx, ncomp, amrex::The_Pinned_Arena());
+            amrex::FArrayBox h_mm(vbx, ncomp, amrex::The_Pinned_Arena());
+            amrex::FArrayBox h_base(vbx, ncomp, amrex::The_Pinned_Arena());
+            h_true.copy<amrex::RunOn::Device>((*Jfp[dir])[mfi], vbx, 0, vbx, 0, ncomp);
+            h_mm.copy<amrex::RunOn::Device>((*Jmm[dir])[mfi], vbx, 0, vbx, 0, ncomp);
+            h_base.copy<amrex::RunOn::Device>((*Jbase[dir])[mfi], vbx, 0, vbx, 0, ncomp);
+            amrex::Gpu::streamSynchronize();
+            auto const& at = h_true.const_array();
+            auto const& am = h_mm.const_array();
+            auto const& ab = h_base.const_array();
+            const auto lo = amrex::lbound(vbx);
+            const auto hi = amrex::ubound(vbx);
+            for (int n = 0; n < ncomp; ++n) {
+                for (int j = lo.y; j <= hi.y; ++j) {
+                    for (int i = lo.x; i <= hi.x; ++i) {
+                        const int irow = i - ir_lo;
+                        if (irow < 0 || irow >= nrow) { continue; }
+                        const amrex::Real dnum = am(i,j,0,n) - at(i,j,0,n);
+                        const amrex::Real dden = at(i,j,0,n) - ab(i,j,0,n);
+                        num2[irow] += dnum*dnum;
+                        den2[irow] += dden*dden;
+                        mm2[irow]  += (am(i,j,0,n) - ab(i,j,0,n))*(am(i,j,0,n) - ab(i,j,0,n));
+                    }
+                }
+            }
+        }
+        amrex::ParallelDescriptor::ReduceRealSum(num2.data(), nrow);
+        amrex::ParallelDescriptor::ReduceRealSum(den2.data(), nrow);
+        amrex::ParallelDescriptor::ReduceRealSum(mm2.data(), nrow);
+
+        amrex::Print() << "\n-- " << comp_names[dir]
+            << " (wall row ir = " << ir_wall << ", rows printed wall -> axis) --\n";
+        amrex::Print() << "  dist  ir    |dJ_true|      |dJ_mm|        |dJ_mm-dJ_true|  rel\n";
+        amrex::Real num2_wall = 0.0, den2_wall = 0.0, num2_int = 0.0, den2_int = 0.0;
+        for (int irow = ir_wall - ir_lo; irow >= 0; --irow) {
+            const int dist = ir_wall - (irow + ir_lo);
+            const amrex::Real den = std::sqrt(den2[irow]);
+            const amrex::Real num = std::sqrt(num2[irow]);
+            const amrex::Real mmv = std::sqrt(mm2[irow]);
+            const amrex::Real rel = num / std::max(den, std::numeric_limits<amrex::Real>::min());
+            if (dist <= 3) { num2_wall += num2[irow]; den2_wall += den2[irow]; }
+            else           { num2_int  += num2[irow]; den2_int  += den2[irow]; }
+            amrex::Print() << "  " << std::setw(4) << dist
+                << "  " << std::setw(4) << (irow + ir_lo)
+                << "  " << std::scientific << std::setprecision(6) << den
+                << "  " << mmv << "  " << num
+                << "  " << std::setprecision(3) << rel << "\n";
+        }
+        constexpr amrex::Real tiny = std::numeric_limits<amrex::Real>::min();
+        amrex::Print() << "  summary " << comp_names[dir]
+            << ": wall band (dist<=3) rel = "
+            << std::scientific << std::setprecision(3)
+            << std::sqrt(num2_wall)/std::max(std::sqrt(den2_wall), tiny)
+            << ", interior rel = "
+            << std::sqrt(num2_int)/std::max(std::sqrt(den2_int), tiny)
+            << "\n";
+    }
+
+    amrex::Print() << "\n==== VerifyMassMatricesJVP complete ====\n\n";
+    WARPX_ABORT_WITH_MESSAGE(
+        "ImplicitSolver: verify_mm_jvp complete (one-shot diagnostic; the probe "
+        "overwrites solver state, so the run aborts by design).");
+#else
+    amrex::ignore_unused(a_cur_time);
+    WARPX_ABORT_WITH_MESSAGE(
+        "ImplicitSolver: verify_mm_jvp_step is only implemented for RZ geometry.");
+#endif
 }
 
 void ImplicitSolver::SyncMassMatricesPCAndApplyBCs ()
@@ -1253,6 +1570,232 @@ void ImplicitSolver::FinishMassMatrices ()
         }
     }
 #endif
+
+    // Fold the physical-boundary response into the completed bands. Must run
+    // after the symmetry completion above, which reads the raw guard rows.
+    if (m_mass_matrices_boundary_rows) {
+        ApplyMassMatricesBoundaryRows();
+    }
+}
+
+void ImplicitSolver::ApplyMassMatricesBoundaryRows ()
+{
+#if defined(WARPX_DIM_RZ)
+    BL_PROFILE("ImplicitSolver::ApplyMassMatricesBoundaryRows()");
+    using namespace amrex::literals;
+
+    // Physical-boundary rows for the particle mass matrices at the r-hi wall,
+    // for the boundary combination field PEC + particle Reflecting (same gate
+    // as the guard-current fold parity precedence and the adjoint ghost fill).
+    //
+    // The deposit writes raw band entries S_ab(i; D) coupling J_a(i) to
+    // E_b(i+D), including guard rows (i beyond the wall) and guard columns
+    // (i+D beyond the wall), exactly as it writes raw guard J. The true
+    // residual composes that band with two boundary maps (see e.g. Chen &
+    // Chacon, Comput. Phys. Commun. 197 (2015) 73, and Chacon & Chen,
+    // J. Comput. Phys. 316 (2016) 578, for the mass-matrix formulation of the
+    // linearized current response):
+    //  - a gather-side ghost image G: guard E_b equals q_b times its interior
+    //    mirror (PEC conductor image by default; the fold-adjoint image when
+    //    adjoint_gather_ghosts is on), with the wall-node tangential E zeroed
+    //    on the conductor before every gather;
+    //  - a deposit-side row fold F: guard J_a rows fold onto their interior
+    //    mirrors with the particle-Reflecting parity precedence (J_r odd,
+    //    J_theta/J_z even) and the radius weight rscale = r_guard/r_interior,
+    //    including the wall-node self-fold doubling for nodal-in-r rows
+    //    (the wall node's half-volume normalization; cf. Verboncoeur,
+    //    J. Comput. Phys. 174 (2001) 421).
+    // On the raw (pre-inverse-volume) bands rscale cancels exactly against
+    // the guard/interior ring-volume ratio (V ~ r at the staggered radius),
+    // so both legs reduce to pure parity maps here.
+    //
+    // Folded guard rows and guard columns are zeroed afterwards: their
+    // content now enters through interior entries, and the vector-side guard
+    // fold and ghost-image fill applied around the mass-matrix matvec then
+    // contribute nothing extra, so the matvec is unchanged while the stored
+    // bands become the true composed interior operator (required by any
+    // consumer that reads band entries directly rather than acting through
+    // the folded matvec).
+    if (WarpX::field_boundary_hi[0] != FieldBoundaryType::PEC) { return; }
+    if (WarpX::particle_boundary_hi[0] != ParticleBoundaryType::Reflecting) { return; }
+
+    using ablastr::fields::Direction;
+    using warpx::fields::FieldType;
+
+    // Row parity p_a: the guard-current fold parity for this boundary
+    // combination (psign of ApplyReflectiveBoundarytoJfield, Reflecting
+    // precedence). Column parity q_b: the ghost-image parity the gather
+    // actually uses, which must follow the adjoint_gather_ghosts knob.
+    const amrex::GpuArray<amrex::Real,3> p_row = {-1.0_rt, 1.0_rt, 1.0_rt};
+    const amrex::GpuArray<amrex::Real,3> q_col = m_adjoint_gather_ghosts ?
+        amrex::GpuArray<amrex::Real,3>{-1.0_rt,  1.0_rt,  1.0_rt} :
+        amrex::GpuArray<amrex::Real,3>{ 1.0_rt, -1.0_rt, -1.0_rt};
+
+    for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+
+        amrex::Box domain_box = m_WarpX->Geom(lev).Domain();
+        domain_box.convert(amrex::IntVect::TheNodeVector());
+        const int ir_wall_node = domain_box.bigEnd(0);
+
+        const ablastr::fields::VectorField J =
+            m_WarpX->m_fields.get_alldirs(FieldType::current_fp, lev);
+        const std::array<ablastr::fields::VectorField,3> S = {
+            m_WarpX->m_fields.get_alldirs(FieldType::MassMatrices_X, lev),
+            m_WarpX->m_fields.get_alldirs(FieldType::MassMatrices_Y, lev),
+            m_WarpX->m_fields.get_alldirs(FieldType::MassMatrices_Z, lev) };
+
+        const std::array<std::array<amrex::IntVect,3>,3> ncomp_ab =
+            {{ {m_ncomp_xx, m_ncomp_xy, m_ncomp_xz},
+               {m_ncomp_yx, m_ncomp_yy, m_ncomp_yz},
+               {m_ncomp_zx, m_ncomp_zy, m_ncomp_zz} }};
+
+        for (int a = 0; a < 3; ++a) {
+            // row staggering in r (J_a); E_b and J_b share per-component staggering
+            const int na = static_cast<int>(J[a]->ixType().nodeCentered(0));
+            for (int b = 0; b < 3; ++b) {
+                amrex::MultiFab& Smf = *S[a][b];
+                const int nb = static_cast<int>(J[b]->ixType().nodeCentered(0));
+                const int ncomp0 = ncomp_ab[a][b][0];
+                const int ncomp1 = ncomp_ab[a][b][1];
+                // Band-center offset in r; same staggering rule as ApplyMassMatrices
+                const int off0 = (a == b) ? (ncomp0 - 1)/2
+                               : ((na > nb) ? ncomp0/2 : (ncomp0 - 1)/2);
+                const amrex::Real pa = p_row[a];
+                const amrex::Real qb = q_col[b];
+                // Mirror maps about the wall (node index N): nodal m(i) = 2N - i,
+                // cell-centered m(i) = 2N - 1 - i; same arithmetic as the
+                // guard-current fold (mirrorfac, hi side).
+                const int mfac_row = 2*ir_wall_node - (1 - na);
+                const int mfac_col = 2*ir_wall_node - (1 - nb);
+                // First index beyond the wall per staggering
+                const int first_guard_row = ir_wall_node + na;
+                const int first_guard_col = ir_wall_node + nb;
+                const int wall_row = ir_wall_node - (1 - na);
+
+                // No tiling: guard regions are read/written and the wall band
+                // must be handled exactly once per fab.
+                for (amrex::MFIter mfi(Smf, false); mfi.isValid(); ++mfi) {
+                    const amrex::Box& vbx = mfi.validbox();
+                    // Only fabs whose valid region touches the r-hi wall own
+                    // the physical guard band there.
+                    if (vbx.bigEnd(0) != wall_row) { continue; }
+                    const amrex::Box& fbx = mfi.fabbox();
+                    auto const& Sarr = Smf.array(mfi);
+
+                    // ---- Column remap (rows at or inside the wall) ----
+                    // Entries whose column lies beyond the wall move to the
+                    // imaged interior column with parity q_b; wall-node
+                    // tangential columns are dead (that E is zeroed on the
+                    // conductor before every gather). Each iteration reads
+                    // and writes only its own row's components, and source
+                    // components (columns beyond the wall) are disjoint from
+                    // destinations (at or inside it), so grid iterations are
+                    // independent as required by ParallelFor (see the note
+                    // for issue #7097 at the symmetry-completion fold).
+                    // Guard rows are excluded: their column remap composes
+                    // with the row fold below, where the re-mapped offset is
+                    // measured from the destination row so the folded entry
+                    // stays inside the allocated band.
+                    // First column index needing treatment: the dead wall
+                    // node for nodal-in-r columns, the first guard column
+                    // otherwise.
+                    const int first_bc_col = (nb == 1) ? ir_wall_node : first_guard_col;
+                    amrex::Box cbx = fbx;
+                    cbx.setSmall(0, std::max(fbx.smallEnd(0),
+                                             first_bc_col - (ncomp0 - 1 - off0)));
+                    cbx.setBig(0, wall_row);
+                    if (cbx.ok()) {
+                        amrex::ParallelFor(cbx,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                        {
+                            for (int m = 0; m < ncomp1; ++m) {
+                                for (int n = ncomp0 - 1; n >= 0; --n) {
+                                    const int c = i + (n - off0);
+                                    if (c < first_guard_col) {
+                                        if (nb == 1 && c == ir_wall_node) {
+                                            Sarr(i,j,k, n + ncomp0*m) = 0.0_rt;
+                                        }
+                                        continue;
+                                    }
+                                    const int comp_src = n + ncomp0*m;
+                                    const amrex::Real v = Sarr(i,j,k,comp_src);
+                                    Sarr(i,j,k,comp_src) = 0.0_rt;
+                                    if (v == 0.0_rt) { continue; }
+                                    const int n_dst = (mfac_col - c) - i + off0;
+                                    if (n_dst >= 0 && n_dst < ncomp0) {
+                                        Sarr(i,j,k, n_dst + ncomp0*m) += qb*v;
+                                    }
+                                }
+                            }
+                        });
+                    }
+
+                    // ---- Row fold (guard rows onto interior mirrors) ----
+                    // For each interior destination row iv the single mirror
+                    // source is the guard row ig = mfac_row - iv, whose
+                    // entries are still raw (column remap skipped them): the
+                    // composed map applies q_b for columns beyond the wall,
+                    // drops dead wall-node tangential columns, and lands at
+                    // offset D' = c_final - iv. The wall-node SELF-fold
+                    // (iv == ig at the wall node for nodal-in-r rows) is
+                    // deliberately NOT applied here: the raw-deposit fold
+                    // machinery still acts on the mass-matrix matvec result
+                    // (it must, for the raw baseline current), and it doubles
+                    // the wall-node row there - folding the doubling into the
+                    // band as well double-counts it (measured as an exact
+                    // factor-2 wall-row error when tried). The stored bands
+                    // therefore carry the wall-node row in the raw-deposit
+                    // convention: half-normalized until the standard guard
+                    // fold doubles it. Each iteration writes only its own row
+                    // and reads only its guard mirror, so iterations are
+                    // independent.
+                    amrex::Box rbx = fbx;
+                    rbx.setSmall(0, std::max(fbx.smallEnd(0),
+                                             mfac_row - fbx.bigEnd(0)));
+                    rbx.setBig(0, wall_row - na); // strictly below the self-fold row
+                    if (rbx.ok()) {
+                        amrex::ParallelFor(rbx,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                        {
+                            const int ig = mfac_row - i;
+                            for (int m = 0; m < ncomp1; ++m) {
+                                for (int n = 0; n < ncomp0; ++n) {
+                                    const amrex::Real v = Sarr(ig,j,k, n + ncomp0*m);
+                                    if (v == 0.0_rt) { continue; }
+                                    const int c = ig + (n - off0);
+                                    if (nb == 1 && c == ir_wall_node) {
+                                        continue; // dead wall-node column
+                                    }
+                                    const bool ghost_col = (c >= first_guard_col);
+                                    const int c_final = ghost_col ? (mfac_col - c) : c;
+                                    const amrex::Real w = ghost_col ? qb : 1.0_rt;
+                                    const int n_dst = c_final - i + off0;
+                                    if (n_dst >= 0 && n_dst < ncomp0) {
+                                        Sarr(i,j,k, n_dst + ncomp0*m) += pa*w*v;
+                                    }
+                                    // out-of-band entries cannot occur for
+                                    // this fold (the reflected offset stays
+                                    // inside the band; see the design note)
+                                }
+                            }
+                        });
+                    }
+
+                    // ---- Zero the folded guard rows ----
+                    amrex::Box gbx = fbx;
+                    gbx.setSmall(0, first_guard_row);
+                    if (gbx.ok()) {
+                        amrex::ParallelFor(gbx, ncomp0*ncomp1,
+                        [=] AMREX_GPU_DEVICE (int i, int j, int k, int n)
+                        {
+                            Sarr(i,j,k,n) = 0.0_rt;
+                        });
+                    }
+                }
+            }
+        }
+    }
+#endif
 }
 
 void ImplicitSolver::PrintBaseImplicitSolverParameters () const
@@ -1260,6 +1803,10 @@ void ImplicitSolver::PrintBaseImplicitSolverParameters () const
     amrex::Print() << "max particle iterations:             " << m_max_particle_iterations << "\n";
     amrex::Print() << "particle relative tolerance:         " << m_particle_tolerance << "\n";
     amrex::Print() << "use particle suborbits:              " << (m_particle_suborbits ? "true":"false") << "\n";
+    amrex::Print() << "reflect particles at r-max:          "
+                   << (m_reflect_particles_at_rmax ? "true":"false") << "\n";
+    amrex::Print() << "adjoint gather ghosts at r-max:      "
+                   << (m_adjoint_gather_ghosts ? "true":"false") << "\n";
     amrex::Print() << "print unconverged particle details:  " << (m_print_unconverged_particle_details ? "true":"false") << "\n";
     amrex::Print() << "Nonlinear solver type:               " << amrex::getEnumNameString(m_nlsolver_type) << "\n";
     if ( (m_nlsolver_type == NonlinearSolverType::newton)
@@ -1269,6 +1816,8 @@ void ImplicitSolver::PrintBaseImplicitSolverParameters () const
             amrex::Print() << "    for jacobian calc:   " << (m_use_mass_matrices_jacobian ? "true":"false") << "\n";
             if (m_use_mass_matrices_jacobian) {
                 amrex::Print() << "        skip particle picard init:  " << (m_skip_particle_picard_init ? "true":"false") << "\n";
+                amrex::Print() << "        boundary rows:              "
+                               << (m_mass_matrices_boundary_rows ? "true":"false") << "\n";
             }
             amrex::Print() << "    for preconditioner:  " << (m_use_mass_matrices_pc ? "true":"false") << "\n";
             if (m_use_mass_matrices_pc) {

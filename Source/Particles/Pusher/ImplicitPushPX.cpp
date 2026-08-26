@@ -56,6 +56,186 @@ namespace {
     enum qed_flags : int { no_qed, has_qed };
     enum depos_order_flags : int { order_one = 1, order_two, order_three, order_four };
 
+    /* Segmented, energy- and momentum-conserving specular reflection at
+     * the r-max domain boundary, applied inside the implicit (Picard)
+     * position update so the nonlinear solve sees the reflected orbit
+     * instead of an orbit that spends part of the step outside the wall.
+     *
+     * Geometry: the implied full-step end position x^{n+1} = x^n + 2*dxp
+     * is checked; if its (x,y) radius exceeds r_wall, the exact
+     * segment-cylinder crossing fraction s in (0,1] is found from
+     * |x^n_perp + s*d_perp| = r_wall with d = x^{n+1} - x^n, i.e. the
+     * quadratic a*s^2 + b*s + c = 0 with a = |d_perp|^2,
+     * b = 2*(x^n_perp . d_perp), c = |x^n_perp|^2 - r_wall^2 (outgoing
+     * root, cancellation-safe branch; the b > 0 branch reduces to the
+     * linear fallback s = -c/b as a -> 0). The chord velocity
+     * v_in = d/dt is specularly reflected at the wall point x_w: its
+     * radial component in the frame at x_w is negated, so
+     * |v_out| = |v_in| exactly (energy conserved to roundoff for a
+     * force-free bounce), the tangential component is preserved
+     * (tangential momentum conserved), and the wall absorbs the normal
+     * impulse 2*m*v_r. The new end position is
+     * x1' = x_w + (1-s)*dt*v_out. A second crossing (grazing bounce with
+     * a long tangential flight) is handled by one more identical
+     * construction; anything still outside after that is clamped to the
+     * wall and counted via clamp_count (safety net; a reflected orbit
+     * cannot reach r < 0 since v_out points inward from the wall).
+     *
+     * Bookkeeping (Crank-Nicolson consistency): the stored dxp is set so
+     * the theta/gather/deposit position is the time-centered point of the
+     * segmented orbit, x_c = x^n + 0.5*dt*v_avg with
+     * v_avg = s*v_in + (1-s)*v_out, which equals the chord midpoint
+     * (x^n + x1')/2 since x1' = x^n + dt*v_avg by construction.
+     *
+     * Velocity: the stored (ux,uy,uz) is the arithmetic mean of the
+     * endpoint momenta, u^{n+1/2} = (u^n + u^{n+1})/2, and the end of
+     * step extrapolates u^{n+1} = 2*u^{n+1/2} - u^n. Specular reflection
+     * must therefore be applied to the reconstructed END momentum and the
+     * result re-centered: u^{n+1}_reflected = R u^{n+1}, with R the
+     * reflection about the wall normal at x_w acting on the (x,y)
+     * components (identity on z), and
+     * u^{n+1/2} <- (u^n + R u^{n+1})/2 componentwise. R is orthogonal, so
+     * |u^{n+1}_reflected| = |u^{n+1}| exactly, gamma^{n+1} (computed in
+     * UpdatePositionImplicit from the extrapolated end momentum) is
+     * invariant, and this is the scaling-consistent image of v_out:
+     * v = u*gaminv with gaminv = 2/(gamma^n + gamma^{n+1}) unchanged by
+     * the bounce. A force-free bounce then gives |u^{n+1}| = |u^n| to
+     * roundoff. (Naively negating the radial component of the stored mean
+     * instead would extrapolate to u_r^{n+1} ~ -3*u_r^n, injecting radial
+     * momentum at every bounce.) uz is untouched; z is periodic.
+     *
+     * Deposition pairing: the exact chord/velocity identity
+     * (x^{n+1} - x^n)/dt = u^{n+1/2}*gaminv is intentionally replaced on
+     * bounce steps by this segmented-average pairing — direct deposition
+     * at the time-centered position with the stored u is the consistent
+     * pairing for this pusher; the deposition routines are unmodified.
+     *
+     * Particles in RZ carry Cartesian (x,y), so all operations below are
+     * on the Cartesian coordinates. */
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    void ReflectParticleAtRmax (
+        int const ip,
+        amrex::ParticleReal const r_wall,
+        amrex::ParticleReal const xp_n,
+        amrex::ParticleReal const yp_n,
+        amrex::ParticleReal const uxp_n,
+        amrex::ParticleReal const uyp_n,
+        amrex::ParticleReal & dxp,
+        amrex::ParticleReal & dyp,
+        amrex::ParticleReal & xp,
+        amrex::ParticleReal & yp,
+        amrex::ParticleReal * const ux,
+        amrex::ParticleReal * const uy,
+        amrex::Long * const clamp_count)
+    {
+        const amrex::ParticleReal rw2 = r_wall*r_wall;
+
+        // Implied full-step end position; nothing to do if it is in-domain
+        {
+            const amrex::ParticleReal x1 = xp_n + 2.0_prt*dxp;
+            const amrex::ParticleReal y1 = yp_n + 2.0_prt*dyp;
+            if (x1*x1 + y1*y1 <= rw2) { return; }
+        }
+
+        // Segment start and remaining chord displacement (perp components)
+        amrex::ParticleReal px = xp_n;
+        amrex::ParticleReal py = yp_n;
+        amrex::ParticleReal ddx = 2.0_prt*dxp;
+        amrex::ParticleReal ddy = 2.0_prt*dyp;
+
+        // Reconstructed pre-reflection end momentum u^{n+1} = 2*ubar - u^n
+        amrex::ParticleReal u1x = 2.0_prt*ux[ip] - uxp_n;
+        amrex::ParticleReal u1y = 2.0_prt*uy[ip] - uyp_n;
+
+        bool clamped = false;
+        constexpr int max_bounces = 2;
+        for (int nb = 0; nb <= max_bounces; ++nb) {
+            const amrex::ParticleReal ex = px + ddx;
+            const amrex::ParticleReal ey = py + ddy;
+            if (ex*ex + ey*ey <= rw2) { break; }         // end in-domain: done
+            if (nb == max_bounces) { clamped = true; break; }
+
+            // Outgoing wall-crossing fraction s in [0,1]
+            const amrex::ParticleReal a = ddx*ddx + ddy*ddy;
+            const amrex::ParticleReal b = 2.0_prt*(px*ddx + py*ddy);
+            const amrex::ParticleReal c = px*px + py*py - rw2;
+            if (a <= 0.0_prt) { clamped = true; break; } // no motion, cannot cross
+            // disc >= b^2 whenever the start is in-domain (c <= 0); the
+            // max() only guards roundoff-outside degenerate starts
+            const amrex::ParticleReal disc =
+                amrex::max(b*b - 4.0_prt*a*c, 0.0_prt);
+            const amrex::ParticleReal sq = std::sqrt(disc);
+            // Outgoing (larger) root; the b > 0 branch is the
+            // cancellation-safe form and tends to the linear solution
+            // s = -c/b as a -> 0
+            amrex::ParticleReal s = (b <= 0.0_prt) ? (sq - b)/(2.0_prt*a)
+                                                   : -2.0_prt*c/(b + sq);
+            s = amrex::min(amrex::max(s, 0.0_prt), 1.0_prt);
+
+            // Wall point and outward unit normal there
+            const amrex::ParticleReal wx = px + s*ddx;
+            const amrex::ParticleReal wy = py + s*ddy;
+            const amrex::ParticleReal rwp = std::sqrt(wx*wx + wy*wy);
+            if (rwp <= 0.0_prt) { clamped = true; break; }
+            const amrex::ParticleReal nhx = wx/rwp;
+            const amrex::ParticleReal nhy = wy/rwp;
+
+            // Specularly reflect the remaining chord displacement
+            // (1-s)*d: |v_out| = |v_in|, tangential component preserved
+            amrex::ParticleReal remx = (1.0_prt - s)*ddx;
+            amrex::ParticleReal remy = (1.0_prt - s)*ddy;
+            const amrex::ParticleReal rdot = remx*nhx + remy*nhy;
+            remx -= 2.0_prt*rdot*nhx;
+            remy -= 2.0_prt*rdot*nhy;
+
+            // Reflect the reconstructed end momentum in the same frame
+            const amrex::ParticleReal udot = u1x*nhx + u1y*nhy;
+            u1x -= 2.0_prt*udot*nhx;
+            u1y -= 2.0_prt*udot*nhy;
+
+            px = wx;
+            py = wy;
+            ddx = remx;
+            ddy = remy;
+        }
+
+        // Final end position of the segmented orbit
+        amrex::ParticleReal x1f = px + ddx;
+        amrex::ParticleReal y1f = py + ddy;
+        if (clamped) {
+            // Safety net: clamp the end point to the wall and zero the
+            // radial end momentum there; counted through clamp_count
+            const amrex::ParticleReal r1f = std::sqrt(x1f*x1f + y1f*y1f);
+            if (r1f > 0.0_prt) {
+                const amrex::ParticleReal scale = r_wall/r1f;
+                x1f *= scale;
+                y1f *= scale;
+                const amrex::ParticleReal nhx = x1f/r_wall;
+                const amrex::ParticleReal nhy = y1f/r_wall;
+                const amrex::ParticleReal udot = u1x*nhx + u1y*nhy;
+                u1x -= udot*nhx;
+                u1y -= udot*nhy;
+            }
+            if (clamp_count != nullptr) {
+                amrex::Gpu::Atomic::Add(clamp_count, amrex::Long(1));
+            }
+        }
+
+        // CN bookkeeping: theta position = time-centered point of the
+        // segmented orbit (chord midpoint x^n + 0.5*dt*v_avg)
+        dxp = 0.5_prt*(x1f - xp_n);
+        dyp = 0.5_prt*(y1f - yp_n);
+        xp = xp_n + dxp;
+        yp = yp_n + dyp;
+
+        // Re-center the stored mean so the step-end extrapolation
+        // u^{n+1} = 2*ubar - u^n yields the reflected end momentum.
+        // Energy conserved to roundoff for force-free bounces; tangential
+        // momentum conserved; the wall absorbs the 2*m*v_r normal impulse.
+        ux[ip] = 0.5_prt*(uxp_n + u1x);
+        uy[ip] = 0.5_prt*(uyp_n + u1y);
+    }
+
     template<int exteb_control, int qed_control>
     AMREX_GPU_DEVICE AMREX_FORCE_INLINE
     bool PushXPSingleStep (
@@ -78,6 +258,9 @@ namespace {
         amrex::ParticleReal & step_norm,
         amrex::ParticleReal const & particle_tolerance,
         int const & max_iterations,
+        bool const reflect_at_rmax,
+        amrex::ParticleReal const r_wall,
+        amrex::Long * const reflect_clamp_count,
         amrex::ParticleReal const & Ex_external_particle,
         amrex::ParticleReal const & Ey_external_particle,
         amrex::ParticleReal const & Ez_external_particle,
@@ -150,6 +333,12 @@ namespace {
         xp = xp_n + dxp;
         yp = yp_n + dyp;
         zp = zp_n + dzp;
+        // Reflect wall-crossing orbits at r-max inside the implicit position
+        // update (segmented conserving reflection, see ReflectParticleAtRmax)
+        if (reflect_at_rmax) {
+            ReflectParticleAtRmax(ip, r_wall, xp_n, yp_n, uxp_n, uyp_n,
+                                  dxp, dyp, xp, yp, ux, uy, reflect_clamp_count);
+        }
         setPosition(ip, xp, yp, zp);
 
         // Propogate ballistically if the suborbit starts out of bounds, avoiding
@@ -244,6 +433,15 @@ namespace {
             xp = xp_n + dxp;
             yp = yp_n + dyp;
             zp = zp_n + dzp;
+            // Reflect wall-crossing orbits at r-max inside the implicit
+            // position update so the Picard fixed point (and everything
+            // downstream: gather, deposit, step-end velocity) is the
+            // reflected orbit (segmented conserving reflection, see
+            // ReflectParticleAtRmax)
+            if (reflect_at_rmax) {
+                ReflectParticleAtRmax(ip, r_wall, xp_n, yp_n, uxp_n, uyp_n,
+                                      dxp, dyp, xp, yp, ux, uy, reflect_clamp_count);
+            }
             setPosition(ip, xp, yp, zp);
 
             // Check for convergence based on the step norm of the position change
@@ -545,8 +743,22 @@ PhysicalParticleContainer::ImplicitPushXP (WarpXParIter & pti,
     const amrex::ParticleReal particle_tolerance = implicit_options->particle_tolerance;
     [[maybe_unused]] const bool print_unconverged_particle_details = implicit_options->print_unconverged_particle_details;
 
+    // Specular reflection at the r-max wall inside the Picard iteration:
+    // RZ geometry with a reflecting particle boundary at r-hi only
+    bool reflect_at_rmax = false;
+    amrex::ParticleReal r_wall = 0.0_prt;
+#if defined(WARPX_DIM_RZ)
+    if (implicit_options->reflect_particles_at_rmax &&
+        WarpX::particle_boundary_hi[0] == ParticleBoundaryType::Reflecting) {
+        reflect_at_rmax = true;
+        r_wall = static_cast<amrex::ParticleReal>(warpx.Geom(0).ProbHi(0));
+    }
+#endif
+
     amrex::Gpu::Buffer<amrex::Long> unconverged_particles({0});
     amrex::Long* unconverged_particles_ptr = unconverged_particles.data();
+    amrex::Gpu::Buffer<amrex::Long> reflect_clamps({0});
+    amrex::Long* reflect_clamp_ptr = (reflect_at_rmax ? reflect_clamps.data() : nullptr);
     int *nsuborbits = (HasiAttrib("nsuborbits") ? pti.GetiAttribs("nsuborbits").dataPtr() + offset: nullptr);
 
     // Using this version of For with compile time options
@@ -607,6 +819,7 @@ PhysicalParticleContainer::ImplicitPushXP (WarpXParIter & pti,
                 ip, dt, setPosition, false,
                 xp, yp, zp, ux, uy, uz, xp_n, yp_n, zp_n, ux_n[ip], uy_n[ip], uz_n[ip],
                 step_norm, particle_tolerance, max_iterations,
+                reflect_at_rmax, r_wall, reflect_clamp_ptr,
                 Ex_external_particle, Ey_external_particle, Ez_external_particle,
                 Bx_external_particle, By_external_particle, Bz_external_particle,
                 Bxp, Byp, Bzp,
@@ -653,6 +866,15 @@ PhysicalParticleContainer::ImplicitPushXP (WarpXParIter & pti,
         }
 
     });
+
+    if (reflect_at_rmax) {
+        const amrex::Long num_reflect_clamps = *(reflect_clamps.copyToHost());
+        if (num_reflect_clamps > 0) {
+            ablastr::warn_manager::WMRecordWarning("ImplicitPushXP",
+                "reflect_particles_at_rmax: " + std::to_string(num_reflect_clamps) +
+                " reflected end positions clamped to the wall (double-reflection pathology).");
+        }
+    }
 
     // Setup for handling the unconverged particles. A list of their indices is
     // gathered, their weights saved, and their weight set to zero (so they
@@ -908,6 +1130,19 @@ PhysicalParticleContainer::ImplicitPushXPSubOrbits (WarpXParIter& pti,
     const int max_iterations = implicit_options->max_particle_iterations + iter_buffer;
     const amrex::ParticleReal particle_tolerance = implicit_options->particle_tolerance;
 
+    // Specular reflection at the r-max wall inside the Picard iteration:
+    // RZ geometry with a reflecting particle boundary at r-hi only.
+    // Clamp events are not counted on the suborbit path (nullptr counter).
+    bool reflect_at_rmax = false;
+    amrex::ParticleReal r_wall = 0.0_prt;
+#if defined(WARPX_DIM_RZ)
+    if (implicit_options->reflect_particles_at_rmax &&
+        WarpX::particle_boundary_hi[0] == ParticleBoundaryType::Reflecting) {
+        reflect_at_rmax = true;
+        r_wall = static_cast<amrex::ParticleReal>(warpx.Geom(0).ProbHi(0));
+    }
+#endif
+
     long * unconverged_i = unconverged_indices.data() + index_offset;
     amrex::ParticleReal * saved_w = saved_weights.data() + index_offset;
 
@@ -1010,6 +1245,7 @@ PhysicalParticleContainer::ImplicitPushXPSubOrbits (WarpXParIter& pti,
                                  this_suborbit_out_of_bounds,
                                  xp, yp, zp, ux, uy, uz, xp_n, yp_n, zp_n, uxp_n, uyp_n, uzp_n,
                                  step_norm, particle_tolerance, max_iterations,
+                                 reflect_at_rmax, r_wall, nullptr,
                                  Ex_external_particle, Ey_external_particle, Ez_external_particle,
                                  Bx_external_particle, By_external_particle, Bz_external_particle,
                                  Bxp, Byp, Bzp,

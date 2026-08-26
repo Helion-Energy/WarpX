@@ -12,6 +12,10 @@ struct ImplicitOptions
     bool use_mass_matrices_pc = false;
     bool linear_stage_of_jfnk = false;
     bool evolve_suborbit_particles_only = false;
+    /** Specularly reflect particles at the r-max domain boundary inside the
+     *  implicit per-particle Picard iteration (RZ geometry with a reflecting
+     *  particle boundary at r-hi only). */
+    bool reflect_particles_at_rmax = false;
 };
 
 #endif
