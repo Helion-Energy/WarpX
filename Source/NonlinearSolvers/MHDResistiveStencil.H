@@ -95,6 +95,41 @@ struct WallFluidFreezeView
 };
 
 /**
+ * \brief Device view of the shaped wall's FIELD freeze
+ * (implicit_mhd.wall_field_freeze): every evolved magnetic-field face
+ * whose COMPLETE Faraday update stencil (its curl-E edges) lies in the
+ * masked E region is an exact identity row in the residual
+ * (F = B - B^n; the field twin of the fluid wall_live identities), so
+ * the exterior plasma-response B stays bit-frozen at its boot/restart
+ * value. Faces with at least one live E edge stay LIVE -- the last
+ * live Faraday row closes against the surface E, so interior induction
+ * is untouched.
+ *
+ * Per magnetic-field staggering, a face row (i, j) is frozen iff
+ * i >= first_frozen_*[j]; the pointers are pre-offset like the mask
+ * tables (z-cell tables for Br/Bt valid over [-ng, nz-1+ng], the
+ * z-node Bz table over [-ng, nz+ng]). The row emission below drops
+ * every emission of a frozen row (the assemblies' explicit identity
+ * diagonal then makes it a pure identity row); COLUMNS from live rows
+ * into frozen faces are kept -- the residual's live-row stencils
+ * genuinely read the frozen values, so the emitted matrix is the exact
+ * block-triangular Jacobian structure [I 0; C A_live] and the
+ * banded/direct LU reproduces the exact inverse. The approximate
+ * Chebyshev application only reproduces the identity rows to its
+ * polynomial accuracy, which is why MHDBlockPC restores dB = r_B on
+ * the frozen faces after the field-block inverses. Geometry-static
+ * (built once at wall Define), so JFNK probes and the frozen sparse
+ * patterns see constant structure.
+ */
+struct WallFieldFreezeView
+{
+    bool active = false;
+    const int* first_frozen_br = nullptr; //!< B_r faces: (r-node, z-cell)
+    const int* first_frozen_bt = nullptr; //!< B_theta faces: (r-cell, z-cell)
+    const int* first_frozen_bz = nullptr; //!< B_z faces: (r-cell, z-node)
+};
+
+/**
  * \brief Frozen geometric constants of the discrete resistive curl-curl
  *
  *     A d = theta_r dt curl((eta_field/mu0) curl d)
@@ -186,6 +221,11 @@ struct ResistiveStencilConstants
     amrex::Real radial_cell_size = 0.0;
     /** Stair-step PEC wall mask (inactive by default: identical rows). */
     WallMaskView wall;
+    /** Shaped-wall field freeze (implicit_mhd.wall_field_freeze,
+     * inactive by default): frozen magnetic-field faces emit nothing --
+     * exact identity rows -- while their columns stay in the live rows
+     * (see WallFieldFreezeView). */
+    WallFieldFreezeView field_freeze;
 #endif
 };
 
@@ -338,6 +378,24 @@ EmitResistiveRow (const ResistiveStencilConstants& c,
     emit_node_flux(i + 1, -c.scale * c.inverse_dz);
     emit_node_flux(i, c.scale * c.inverse_dz);
 #elif defined(WARPX_DIM_RZ)
+    // Shaped-wall field freeze: a frozen magnetic-field face is an exact
+    // identity row -- emit nothing (the assemblies add the identity
+    // diagonal themselves). Columns from live rows into frozen faces are
+    // deliberately kept: the residual's live-row stencils read the frozen
+    // values, so keeping them emits the exact block-triangular Jacobian
+    // (see WallFieldFreezeView).
+    if (c.field_freeze.active)
+    {
+        const int* const first_frozen =
+            (a_component == 0)
+                ? c.field_freeze.first_frozen_br
+                : ((a_component == 1) ? c.field_freeze.first_frozen_bt
+                                      : c.field_freeze.first_frozen_bz);
+        if (i >= first_frozen[j])
+        {
+            return;
+        }
+    }
     const amrex::Real inverse_dr2 = c.inverse_dr * c.inverse_dr;
     const amrex::Real inverse_dz2 = c.inverse_dz * c.inverse_dz;
     // Column emission: under the z_lo mirror (axial_lo_mirror) a

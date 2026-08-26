@@ -264,14 +264,75 @@
  *   field locations; see the band-hygiene note above. Aimed at the
  *   dielectric standoff (the conductor modes pin the masked E rows
  *   outright, making the override redundant there).
+ * - wall_field_freeze = <bool> (default 0 = off, bit-identical):
+ *   FIELD-side freeze of the masked band (work item B, v1). When on,
+ *   every EVOLVED magnetic-field face whose COMPLETE Faraday update
+ *   stencil -- its curl-E edges -- lies in the masked E region becomes
+ *   an exact identity row of the residual (F = B - B^n, unit Jacobian
+ *   diagonal; the field twin of the fluid wall_live identities): the
+ *   plasma-response B on/outside the wall contour stays bit-frozen at
+ *   its boot/restart value (physically ~0: the response starts zero
+ *   and the exterior carries no fluid), so the discrete curl of the
+ *   evolved B -- the band current Eric's directive targets -- is
+ *   exactly zero at every strictly-exterior location from step 1 on.
+ *   The painted EXTERNAL fields (split registers) are untouched: the
+ *   coil drive still penetrates by prescription.
  *
- * FORWARD NOTE (work item B, deferred): a field-side EB treatment of
- * the dielectric mode -- identity/Green's-contour rows for B inside
- * the band to keep the EM solve from moving flux through unresolved
- * band structure -- would hook in exactly like the conductor
- * contracts: a per-staggering first-masked B table consumed by
- * ProjectElectricField's caller and by the PC row emission through an
- * extended View(). Nothing in the fluid contract below would change.
+ *   FREEZE-FACE CONVENTION (which faces count as "on the contour"):
+ *   frozen iff ALL curl-E edges of the face are masked --
+ *   B_r (r-node i, z-cell j) reads E_theta (i, j) and (i, j+1), so
+ *   first_frozen_br[j] = max(first_masked_et[j], first_masked_et[j+1]);
+ *   B_theta (r-cell i, z-cell j) reads E_r (i, j), (i, j+1) and
+ *   E_z nodes (i, j), (i+1, j), so first_frozen_bt[j] =
+ *   max(first_masked_er[j], first_masked_er[j+1], first_masked_ez[j]);
+ *   B_z (r-cell i, z-node j) reads E_theta nodes (i, j) and (i+1, j),
+ *   so first_frozen_bz[j] = first_masked_et[j]. The max() composition
+ *   is INT_MAX-safe (a never-masked table entry keeps the whole row
+ *   never-frozen), the same all-adjacent-masked convention as the
+ *   band-interior eta tables. At a stair corner this is the
+ *   conservative OUTER envelope: a face with even one live E edge
+ *   stays LIVE, so the last live Faraday row still closes against the
+ *   surface E and interior induction is untouched. The one-cell shell
+ *   of cells straddling the freeze boundary loses the exact
+ *   discrete-curl structure of its B update (its div B can drift by
+ *   the dropped surface-E increments); the shell lies inside the
+ *   floor-clamped band, so the drift is bounded and never touches
+ *   live fluid.
+ *
+ *   CONSISTENCY TRIANGLE: the scraped fluid (exterior clamp, rho at
+ *   the floor and u = 0 outside the contour), the frozen exterior
+ *   response field (this knob) and J -> 0 at the boundary close each
+ *   other -- with no exterior current there is nothing for the
+ *   exterior field to evolve toward, and with the exterior field
+ *   frozen the discrete curl feeding the band current is static at
+ *   its (zero) boot value, consistent with the zero-density band.
+ *   With the freeze on, the wall_band_eta_override becomes moot for
+ *   the FIELD advance (the band-interior E rows no longer influence
+ *   any live B row): the freeze supersedes the override's job; both
+ *   knobs stay independent and composable.
+ *
+ *   Interactions: requires an active wall_model. Under pec_response
+ *   it is an exact no-op (the pinned E already makes fully-masked
+ *   faces identity rows); under pec it OVERRIDES the eddy-response
+ *   closure of fully-masked faces (the response is pinned outright,
+ *   so the metal no longer shields the drive there -- not recommended);
+ *   it is aimed at dielectric, whose EM-transparent band otherwise
+ *   lets the response solve move flux through unresolved band
+ *   structure. Domain-ghost fills (ApplyBfieldBoundary, the
+ *   Green's-function open-boundary r_hi/z-cap fills) act on DOMAIN
+ *   ghosts outside the valid box and never overlap the interior
+ *   frozen faces (the polyline is interior by the axis-clearance
+ *   guard); checkpoint/restart carries the frozen faces like any
+ *   state, and the freeze then holds the restart value. A
+ *   Green's-contour exterior FILL (response-consistent exterior field
+ *   instead of a frozen one) is a documented FUTURE upgrade of this
+ *   hook. The preconditioner sees the identical freeze through
+ *   GetMHDWallFieldFreezeForPC(): the resistive stencil emission
+ *   drops frozen rows to identities (keeping their columns in live
+ *   rows -- the exact block-triangular structure) and the block PC
+ *   restores dB = r_B on frozen faces after the field-block inverses
+ *   (residual/PC exact twins, validated in-run by
+ *   pc_mhd_block.resistive_validate_assembly).
  */
 /**
  * \brief Device view of the wall-band resistivity override
@@ -387,6 +448,14 @@ public:
      * by design. */
     [[nodiscard]] warpx::mhd_pc::WallFluidFreezeView FluidFreezeView () const;
 
+    /** Device view of the shaped wall's FIELD freeze
+     * (implicit_mhd.wall_field_freeze; see the class comment): the
+     * per-B-staggering first-frozen tables consumed by the residual's
+     * frozen-row rhs zeroing, by FinishStateUpdate's bit-exact carry,
+     * and by the preconditioner (identity rows + post-inverse restore).
+     * Active only when the wall is active AND the freeze is requested. */
+    [[nodiscard]] warpx::mhd_pc::WallFieldFreezeView FieldFreezeView () const;
+
     /** Count of LIVE (unmasked) seam-guarded rows per electric-field
      * family in the valid domain, for banners: [E_r, E_theta, E_z].
      * Zero everywhere when the wall is inactive or dielectric (the
@@ -426,6 +495,10 @@ private:
      * field-advance eta at band-interior electric-field locations
      * (0 = off). */
     amrex::Real m_band_eta_override = 0.0;
+    /** implicit_mhd.wall_field_freeze: identity rows for every evolved
+     * magnetic-field face whose complete Faraday stencil is masked (see
+     * the class comment). */
+    bool m_field_freeze = false;
     int m_ng = 0;   //!< axial ghost extension of the index tables
     int m_nz = 0;   //!< axial cells
 
@@ -454,9 +527,20 @@ private:
     amrex::Gpu::ManagedVector<int> m_first_band_er; //!< (r-cell, z-node)
     amrex::Gpu::ManagedVector<int> m_first_band_et; //!< (r-node, z-node)
     amrex::Gpu::ManagedVector<int> m_first_band_ez; //!< (r-node, z-cell)
+    /** First FROZEN radial index per axial index for the FIELD freeze
+     * (see WallFieldFreezeView and the freeze-face convention in the
+     * class comment: all curl-E edges masked), same layout and memory
+     * contract as the masked tables. Built in every active wall_model
+     * (geometry-static); consumed only when m_field_freeze is set. */
+    amrex::Gpu::ManagedVector<int> m_first_frozen_br; //!< (r-node, z-cell)
+    amrex::Gpu::ManagedVector<int> m_first_frozen_bt; //!< (r-cell, z-cell)
+    amrex::Gpu::ManagedVector<int> m_first_frozen_bz; //!< (r-cell, z-node)
     /** Live seam-guarded rows per family in the valid domain
      * [E_r, E_theta, E_z] (banner reporting). */
     amrex::Array<long, 3> m_seam_guarded_rows = {0, 0, 0};
+    /** Frozen magnetic-field faces per family in the valid domain
+     * [B_r, B_theta, B_z] (banner reporting). */
+    amrex::Array<long, 3> m_frozen_faces = {0, 0, 0};
 };
 
 #endif // WARPX_IMPLICIT_MHD_WALL_MASK_H_

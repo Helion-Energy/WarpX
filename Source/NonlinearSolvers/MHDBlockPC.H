@@ -1198,6 +1198,11 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
     // assemblies drop the same masked tangential-E rows the residual
     // projects (inactive default leaves the emission unchanged).
     stencil_constants.wall = m_ops->GetMHDWallMaskForPC();
+    // Shaped-wall field freeze (implicit_mhd.wall_field_freeze): frozen
+    // magnetic-field faces assemble as pure identity rows, matching the
+    // residual's F = B - B^n rows exactly (their columns stay in the
+    // live rows: the exact block-triangular Jacobian structure).
+    stencil_constants.field_freeze = m_ops->GetMHDWallFieldFreezeForPC();
     // z_lo mirror plane (pmc + fluid symmetry): the end rows fold their
     // ghost columns with the mirror parities instead of keeping the
     // tangential-E-zero Neumann-end convention.
@@ -1703,9 +1708,51 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
         stacked_component += block_solution.nComp();
     }
 
+    // Shaped-wall FIELD freeze (implicit_mhd.wall_field_freeze): the
+    // residual's frozen magnetic-field faces are exact identity rows
+    // with no momentum coupling, so their preconditioned update is the
+    // RHS itself -- the field twin of the fluid identity restore above.
+    // Restored after the Faraday corrector (whose curl writes every
+    // face, including frozen ones) so the field-block inverses receive
+    // the exact identity RHS there, and again after the resistive block
+    // (the banded/direct LU propagates identity rows exactly, but the
+    // approximate Chebyshev application only does so to its polynomial
+    // accuracy).
+    const warpx::mhd_pc::WallFieldFreezeView field_freeze =
+        m_ops->GetMHDWallFieldFreezeForPC();
+    const auto restore_frozen_faces = [&] ()
+    {
+        if (!field_freeze.active)
+        {
+            return;
+        }
+        const amrex::Array<const int*, 3> first_frozen = {
+            field_freeze.first_frozen_br, field_freeze.first_frozen_bt,
+            field_freeze.first_frozen_bz};
+        for (int component = 0; component < 3; ++component)
+        {
+            const int* const AMREX_RESTRICT first = first_frozen[component];
+            for (amrex::MFIter mfi(*solution_fields[0][component]); mfi.isValid(); ++mfi)
+            {
+                const auto face = solution_fields[0][component]->array(mfi);
+                const auto face_rhs = rhs_fields[0][component]->const_array(mfi);
+                amrex::ParallelFor(
+                    mfi.validbox(),
+                    [=] AMREX_GPU_DEVICE(int i, int j, int k)
+                    {
+                        if (i >= first[j])
+                        {
+                            face(i, j, k) = face_rhs(i, j, k);
+                        }
+                    });
+            }
+        }
+    };
+
     if (m_faraday_active)
     {
         ApplyFaradayCorrector(solution);
+        restore_frozen_faces();
     }
 
     if (m_resistive_active)
@@ -1713,6 +1760,7 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
         // Composed after the Faraday corrector: the B block then applies
         // the consistent triangular product J_BB^{-1} (bB - J_BM dM).
         ApplyResistiveBlock(solution);
+        restore_frozen_faces();
     }
 }
 
@@ -2072,10 +2120,11 @@ MHDBlockPC<T, Ops>::ApplyResistiveCurlCurl ()
     stencil_constants.include_inertia = m_resistive_inertia_active;
     stencil_constants.inertia_scale = m_resistive_inertia_scale;
 #if defined(WARPX_DIM_RZ)
-    // Same wall-mask row drops and z_lo mirror fold as the frozen
-    // assemblies (see UpdateResistiveBlock): matrix-free application ==
-    // assembled operator.
+    // Same wall-mask row drops, field-freeze identity rows and z_lo
+    // mirror fold as the frozen assemblies (see UpdateResistiveBlock):
+    // matrix-free application == assembled operator.
     stencil_constants.wall = m_ops->GetMHDWallMaskForPC();
+    stencil_constants.field_freeze = m_ops->GetMHDWallFieldFreezeForPC();
     stencil_constants.axial_lo_mirror = m_ops->GetMHDZLoMirrorForPC();
 #endif
 
