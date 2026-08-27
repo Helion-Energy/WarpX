@@ -155,6 +155,22 @@ public:
     }
 
     /**
+     * \brief Notify the operator of the role of the next ComputeRHS()
+     * call issued with a_from_jacobian = false: true when it evaluates
+     * the nonlinear residual at an accepted Newton iterate (the F(U_k)
+     * that drives the convergence test and seeds the Jacobian base
+     * RHS), false when it evaluates a line-search trial state.
+     * Matrix-free Jacobian probes are already tagged by
+     * a_from_jacobian. The no-op default -- and solvers that never
+     * call this, such as Picard -- leave every evaluation classified
+     * as an iterate evaluation.
+     */
+    virtual void SetResidualIsNewtonIterate (bool a_is_iterate)
+    {
+        amrex::ignore_unused(a_is_iterate);
+    }
+
+    /**
      * \brief L2 norm of a_residual restricted to the FREE subspace: every
      * component EXCEPT those whose direction components the most recent
      * ProjectAndLimitSolverStep call clamped onto their admissibility
