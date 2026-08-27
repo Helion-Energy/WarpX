@@ -2170,6 +2170,21 @@ class CircuitCoupling(object):
     plugin_library: str, optional
         With engine='external', the plugin's shared-library path.
 
+    plugin_config: str, optional
+        With engine='external', the opaque configuration string handed to
+        the plugin's Define (typically a path to the engine's own
+        configuration file; its format is entirely the engine's business).
+
+    plugin_restart_config: str, optional
+        Optional replacement for plugin_config on restart runs (the
+        restored checkpoint supersedes engine-side boot work such as a
+        pre-roll, which the restart config can skip).
+
+    probe_crosscheck: bool, optional
+        Validation knob: cross-check every batched linkage measurement
+        against the single-coil reference probes and abort on
+        disagreement.
+
     corrector_iterations: int, optional
         Predictor-corrector passes per coupling substep (default 1;
         0 = lagged predictor only).
@@ -2183,12 +2198,18 @@ class CircuitCoupling(object):
         coils,
         engine=None,
         plugin_library=None,
+        plugin_config=None,
+        plugin_restart_config=None,
+        probe_crosscheck=None,
         corrector_iterations=None,
         corrector_rtol=None,
     ):
         self.coils = coils
         self.engine = engine
         self.plugin_library = plugin_library
+        self.plugin_config = plugin_config
+        self.plugin_restart_config = plugin_restart_config
+        self.probe_crosscheck = probe_crosscheck
         self.corrector_iterations = corrector_iterations
         self.corrector_rtol = corrector_rtol
 
@@ -2210,6 +2231,12 @@ class CircuitCoupling(object):
             pywarpx.circuit.engine = self.engine
         if self.plugin_library is not None:
             pywarpx.circuit.plugin_library = self.plugin_library
+        if self.plugin_config is not None:
+            pywarpx.circuit.plugin_config = self.plugin_config
+        if self.plugin_restart_config is not None:
+            pywarpx.circuit.plugin_restart_config = self.plugin_restart_config
+        if self.probe_crosscheck is not None:
+            pywarpx.circuit.probe_crosscheck = self.probe_crosscheck
         if self.corrector_iterations is not None:
             pywarpx.circuit.add_new_attr(
                 "coupling.corrector_iterations", self.corrector_iterations

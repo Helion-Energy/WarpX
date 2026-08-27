@@ -65,6 +65,11 @@ public:
         int corrector_iterations = 1;
         amrex::Real corrector_rtol = 1.0e-6;
         amrex::Real scale_floor = 1.0e-3;   //!< floor of the convergence denominator
+        /** Cross-check every batched linkage measurement against the
+         * single-coil reference probes and abort beyond
+         * crosscheck_rtol (a validation knob; circuit.probe_crosscheck). */
+        bool probe_crosscheck = false;
+        amrex::Real crosscheck_rtol = 1.0e-12;
     };
 
     CircuitCoupler (warpx::circuit::CoilSet const& coils,
@@ -96,6 +101,40 @@ public:
      * totals. */
     void FinishStep ();
 
+    /** Measure every coil's plasma flux linkage from the current
+     * plasma-frame field registers into the linkage registers, batched:
+     * one device pass, one stream synchronization, one MPI all-reduce
+     * over the coil vector (LinkageBatch). Pass refresh_plasma_current =
+     * false when the caller's own loop has just computed
+     * hybrid_current_fp_plasma for this exact field state (implicit
+     * consumers: the residual evaluation already holds it), skipping the
+     * full-grid curl recomputation the reciprocity probe otherwise pays.
+     */
+    void MeasureLinkages (bool refresh_plasma_current);
+
+    /** Newton/iterate-scope driving for implicit consumers, replacing the
+     * substep protocol above: open the coupling step [t0, t0 + dt],
+     * seeding the engine's interval-entry linkages from the LATEST
+     * measurement (call MeasureLinkages first, on the committed t^n
+     * state). The engine snapshots its accepted state; discontinuous
+     * transitions (switches, stage swaps) latch on committed time only.
+     */
+    void BeginStepMeasured (amrex::Real t0, amrex::Real dt);
+
+    /** One engine advance over [t0, t1] against the latest measured
+     * linkages (call MeasureLinkages on the iterate first). accept =
+     * false evaluations replay from the interval entry state -- a pure
+     * function of the measurement, legal inside every residual
+     * evaluation (exact in-residual coupling) or once per Newton iterate
+     * (lagged quasi-Newton); the interval may be re-targeted freely
+     * (theta-stage time in-residual, the full step on the accepting
+     * call). Pushes the realized scales onto the field registers as
+     * linear segments over [t0, t1] but does NOT refresh the external
+     * fields -- the caller owns its refresh points. Exactly one
+     * accept = true call per step, on the accepted final state, followed
+     * by FinishStep(). */
+    void EvaluateInterval (amrex::Real t0, amrex::Real t1, bool accept);
+
     /** The current coupling interval, for the Python engine. */
     struct Interval
     {
@@ -122,7 +161,6 @@ public:
     [[nodiscard]] ExternalCircuit* Plugin () const { return m_plugin.get(); }
 
 private:
-    void MeasureLinkages ();
     void RefreshCircuitFields (amrex::Real t0, amrex::Real t1);
     void FireEngine (char const* hook, bool accept);
     [[nodiscard]] std::vector<amrex::Real> CoupledScales (amrex::Real t) const;
@@ -136,6 +174,10 @@ private:
     int m_substep_count = 0;
     std::map<std::string, amrex::Real> m_lambda;        //!< latest measurement
     std::map<std::string, amrex::Real> m_lambda_start;  //!< at interval entry
+
+    warpx::circuit::LinkageBatch m_batch;               //!< batched probes
+    std::vector<amrex::Real> m_lambda_scratch;
+    std::vector<const amrex::MultiFab*> m_a_theta_scratch;
 };
 
 #endif // WARPX_CIRCUIT_CIRCUITCOUPLER_H_

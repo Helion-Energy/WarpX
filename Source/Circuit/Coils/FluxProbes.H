@@ -11,9 +11,13 @@
 
 #include "CoilSet.H"
 
+#include <AMReX_Box.H>
+#include <AMReX_GpuContainers.H>
 #include <AMReX_MultiFab.H>
 
 #include <array>
+#include <map>
+#include <vector>
 
 namespace warpx::circuit
 {
@@ -79,6 +83,109 @@ namespace warpx::circuit
     amrex::Real CouplingPowerIntegral (
         const std::array<const amrex::MultiFab*, 3>& J,
         const std::array<const amrex::MultiFab*, 3>& E);
+
+    /** Geometry-keyed owner-mask cache: the owner mask of a MultiFab's
+     * (BoxArray, DistributionMapping, index type) triple under the given
+     * periodicity, computed once and reused until the layout changes (a
+     * regrid allocates a new BoxArray/DistributionMapping ref, which
+     * misses the identity check and rebuilds the entry). Replaces the
+     * per-call iMultiFab allocation of the probe integrals. The cached
+     * BoxArray/DistributionMapping copies keep the identity refs alive,
+     * so a pointer-identity hit can never alias a rebuilt layout. */
+    const amrex::iMultiFab& CachedOwnerMask (const amrex::MultiFab& mf,
+                                             const amrex::Periodicity& period);
+
+    /** Batched multi-coil linkage measurement.
+     *
+     * Layered ABOVE the single-coil probe functions (which remain the
+     * reference implementation and keep their explicit-MultiFab
+     * signatures): all static factors of every coil's probe integrand --
+     * owner masks, radius/trapezoid/plane weights, 2 pi dr (dz) volume
+     * factors, the disk probe's I_ref * n_turns -- are folded once into
+     * per-(coil, box) weight tables on the run mesh, so one measurement
+     * is a batch of weight-dot-field products: every device kernel is
+     * issued asynchronously, block partials land in fixed slots, one
+     * fixed-order combine kernel forms the coil vector, and the host
+     * pays exactly ONE stream synchronization, ONE device-to-host copy
+     * of n_coils doubles and ONE MPI all-reduce over the vector --
+     * against one sync + one all-reduce PER COIL for the serial loop.
+     * The fixed reduction tree makes the result deterministic
+     * run-to-run (no atomics); it matches the single-coil functions to
+     * summation-order roundoff (1e-15-class relative), not bitwise.
+     *
+     * The weight tables are geometry-keyed (BoxArray +
+     * DistributionMapping + Geometry identity) and rebuilt on a regrid,
+     * like CachedOwnerMask. RZ (m = 0), level 0, collective.
+     */
+    class LinkageBatch
+    {
+    public:
+        /** Measure every measured coil's plasma flux linkage.
+         *
+         * \param[in]  coils    the coil set (rows of the batch)
+         * \param[in]  probes   per-coil probe kind (ProbeKind::none rows
+         *                      report lambda = 0)
+         * \param[in]  a_theta  per-coil unit vector potential
+         *                      <field_name>_Aext theta component (node r,
+         *                      node z) at I_ref * n_turns; may be null
+         *                      for non-reciprocity rows
+         * \param[in]  bz       plasma-frame B_z (cell r, node z); may be
+         *                      null when no row uses the disk probe
+         * \param[in]  j_theta  plasma-frame J_theta (node r, node z); may
+         *                      be null when no row uses reciprocity
+         * \param[out] lambda   per-coil lambda_phys * I_ref * n_turns,
+         *                      coil order, zeros for unmeasured rows
+         */
+        void Measure (const CoilSet& coils,
+                      const std::vector<ProbeKind>& probes,
+                      const std::vector<const amrex::MultiFab*>& a_theta,
+                      const amrex::MultiFab* bz,
+                      const amrex::MultiFab* j_theta,
+                      std::vector<amrex::Real>& lambda);
+
+        /** One weight-dot-field job: the cells of one box measured for
+         * one coil row. Public for the CUDA extended-lambda rule (device
+         * lambdas must live in public member functions); not API. */
+        struct Job
+        {
+            int row = 0;             //!< coil index
+            amrex::Box box;          //!< cell enumeration box
+            long weight_offset = 0;  //!< into m_weights
+            long partial_offset = 0; //!< into m_partials (GPU)
+            int nblocks = 0;         //!< reduction blocks (GPU)
+        };
+
+        /** (Re)build the geometry-keyed weight pack; called by Measure on
+         * a key miss. Public for the CUDA extended-lambda rule; not API. */
+        void BuildPack (const CoilSet& coils,
+                        const std::vector<ProbeKind>& probes,
+                        const std::vector<const amrex::MultiFab*>& a_theta,
+                        const amrex::MultiFab* bz,
+                        const amrex::MultiFab* j_theta);
+
+    private:
+        bool m_built = false;
+        int m_ncoils = 0;
+        //! layout identity of the pack (regrid invalidation)
+        amrex::BoxArray m_key_ba_j, m_key_ba_bz;
+        amrex::DistributionMapping m_key_dm_j, m_key_dm_bz;
+        amrex::Box m_key_domain;
+
+        //! per-source jobs, keyed by the source's MFIter box index
+        std::map<int, std::vector<Job>> m_jobs_j;
+        std::map<int, std::vector<Job>> m_jobs_bz;
+
+        amrex::Gpu::DeviceVector<double> m_weights;
+        amrex::Gpu::DeviceVector<double> m_partials;
+        amrex::Gpu::DeviceVector<double> m_lambda_device;
+        //! per-row fixed-order combine segments: for row r, the partial
+        //! slabs [seg_partial_offset[k], + seg_nblocks[k]) for k in
+        //! [seg_begin[r], seg_begin[r+1])
+        amrex::Gpu::DeviceVector<long> m_seg_partial_offset;
+        amrex::Gpu::DeviceVector<int> m_seg_nblocks;
+        amrex::Gpu::DeviceVector<int> m_seg_begin;
+        amrex::Gpu::PinnedVector<double> m_lambda_host;
+    };
 
 } // namespace warpx::circuit
 
