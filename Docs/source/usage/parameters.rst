@@ -5690,6 +5690,34 @@ Jacobian probes.
     naturally with :pp:param:`implicit_mhd.resistive_theta` ``= 1``,
     which damps the stiff halo field modes this term creates.
 
+.. pp:param:: implicit_mhd.joule_ohm_current
+    :type: ``bool``
+    :default: ``false``
+
+    Reference-code-style Ohm-current Joule quench. In cells where the field
+    advance is diffusion dominated,
+
+    .. math::
+
+        \Delta t \, \eta_\mathrm{field} / \mu_0 > \min(\Delta x)^2,
+
+    the :math:`|\boldsymbol J|^2` of the electron-energy Joule deposit is
+    evaluated from Ohm's law as :math:`|\boldsymbol
+    E|^2/\eta_\mathrm{field}^2` — with :math:`\boldsymbol E` the solved
+    stage electric field and :math:`\eta_\mathrm{field}` the same
+    floored/boosted field-advance resistivity the field solve uses
+    (including the vacuum boost of
+    :pp:param:`implicit_mhd.vacuum_resistivity_diffusivity` and the
+    :pp:param:`implicit_mhd.wall_band_eta_override`) — instead of the
+    pointwise curl-B current. The heating coefficient keeps the
+    un-boosted user :math:`\eta` (see
+    :pp:param:`implicit_mhd.include_joule_heating`), so where
+    :math:`\eta_\mathrm{field}` is vacuum-boosted the halo Joule deposit
+    is quenched quadratically: the stiff implicit field solve relaxes
+    :math:`\boldsymbol E` while the pointwise curl-B current stays at
+    gradient-noise scale. Binary per-cell switch (no smooth blend),
+    matching the reference code's "fancy current" rule.
+
 .. pp:param:: implicit_mhd.resistive_theta
     :type: ``float``
     :default: :pp:param:`implicit_evolve.theta`

@@ -160,6 +160,8 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     pp.query("floor_ledger_file", m_floor_ledger_file);
     utils::parser::queryWithParser(pp, "vacuum_resistivity_diffusivity",
                                    m_vacuum_resistivity_diffusivity);
+    // Reference-code-style Ohm-current Joule quench (see m_joule_ohm_current).
+    pp.query("joule_ohm_current", m_joule_ohm_current);
     // Sentinel -1 = "not set": defaulted to the global implicit_evolve.theta
     // in Define(), where theta is parsed.
     utils::parser::queryWithParser(pp, "resistive_theta", m_resistive_theta);
@@ -808,6 +810,12 @@ void ThetaImplicitMHD::AllocateLevelMFs (ablastr::fields::MultiFabRegister& fiel
 
     fields.alloc_init(TotalCurrentCCName, lev, ba, dm, 3, guard_cells, 0.0_rt);
     fields.alloc_init(MagneticFieldCCName, lev, ba, dm, 3, guard_cells, 0.0_rt);
+    // Cell-centered stage-E gather of the Ohm-current Joule quench
+    // (joule_ohm_current). Allocated unconditionally (the register remake
+    // machinery wants a static field list); filled only when the quench
+    // is active, and only read at valid cells (no ghosts).
+    fields.alloc_init(OhmElectricFieldCCName, lev, ba, dm, 3, amrex::IntVect(0),
+                      0.0_rt);
     // Cell-centered T_e scratch of the temperature-primary nodal closure
     // fill (FillFluidSources); ghosts computed in place from the ghosted
     // moments, never FillBoundary'd.
@@ -2275,6 +2283,7 @@ void ThetaImplicitMHD::PrintParameters () const
                    << m_pressure_corner_width_fraction << "\n"
                    << "Positivity step safety:        " << m_positivity_safety << "\n"
                    << "Joule heating:                 " << m_include_joule_heating << "\n"
+                   << "Joule Ohm-current quench:      " << m_joule_ohm_current << "\n"
                    << "Resistive theta:               " << m_resistive_theta << "\n"
                    << "Conduction theta:              " << m_conduction_theta
                    << "\n"
@@ -3441,6 +3450,60 @@ void ThetaImplicitMHD::FillCellCenteredElectromagneticFields ()
     }
 }
 
+void ThetaImplicitMHD::FillCellCenteredOhmElectricField ()
+{
+    // Gather the SOLVED stage E -- the same Efield_fp the Faraday update
+    // consumes, assembled fresh on every residual evaluation (Jacobian
+    // probes included) -- to cell centers for the Ohm-current Joule
+    // quench (see m_joule_ohm_current). Only valid cells are filled: the
+    // interpolation stencils read at most one nodal index above the cell,
+    // which the staggered valid boxes always carry, and the fluid RHS
+    // kernels read the gather at valid cells only.
+    const auto electric_field =
+        m_WarpX->m_fields.get_alldirs(FieldType::Efield_fp, 0);
+    amrex::MultiFab& electric_field_cc =
+        *m_WarpX->m_fields.get(OhmElectricFieldCCName, 0);
+
+    const auto cell_stag = cell_staggering();
+    const auto coarsening = amrex::GpuArray<int, 3>{1, 1, 1};
+    for (int component = 0; component < 3; ++component) {
+        const auto electric_stag = field_staggering(*electric_field[component]);
+        for (amrex::MFIter mfi(electric_field_cc); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox();
+            const auto electric_cc = electric_field_cc.array(mfi);
+            const auto electric = electric_field[component]->const_array(mfi);
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+                electric_cc(i, j, k, component) = ablastr::coarsen::sample::Interp(
+                    electric, electric_stag, cell_stag, coarsening, i, j, k, 0);
+            });
+        }
+    }
+    // Under the split-field external-A scheme Efield_fp holds only the
+    // plasma response (E_ext is subtracted for the Faraday bookkeeping of
+    // the evolved response B; see AssembleOhmElectricField). Ohm's law --
+    // whose resistive part the quench divides by -- holds for the TOTAL
+    // field, so add the cell-centered external E back, mirroring the
+    // B_ext fold of FillCellCenteredElectromagneticFields. At wall-masked
+    // (pec) locations the projection wrote -E_ext, so the gather
+    // correctly reads total E = 0 inside the conductor.
+    if (m_hybrid_pic_model->m_add_external_fields) {
+        const auto external_field =
+            m_WarpX->m_fields.get_alldirs(FieldType::hybrid_E_fp_external, 0);
+        for (int component = 0; component < 3; ++component) {
+            const auto external_stag = field_staggering(*external_field[component]);
+            for (amrex::MFIter mfi(electric_field_cc); mfi.isValid(); ++mfi) {
+                const amrex::Box box = mfi.validbox();
+                const auto electric_cc = electric_field_cc.array(mfi);
+                const auto external = external_field[component]->const_array(mfi);
+                amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+                    electric_cc(i, j, k, component) += ablastr::coarsen::sample::Interp(
+                        external, external_stag, cell_stag, coarsening, i, j, k, 0);
+                });
+            }
+        }
+    }
+}
+
 void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& state,
                                    const amrex::Real start_time, const int nonlinear_iteration,
                                    const bool from_jacobian)
@@ -3564,6 +3627,14 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
                     });
             }
         }
+    }
+    if (m_joule_ohm_current && m_include_joule_heating) {
+        // Ohm-current Joule quench: refresh the cell-centered gather of
+        // the just-assembled stage E on EVERY residual evaluation, so the
+        // quenched deposit below is exactly the map the matrix-free
+        // Jacobian probes differentiate. Bit-identical OFF path: nothing
+        // is gathered and the deposit keeps the curl-B current.
+        FillCellCenteredOhmElectricField();
     }
     ComputeFluidRHS(rhs, theta_time);
 }
@@ -4127,6 +4198,39 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
     // Joule heating evaluates eta at the SAME hybrid-floored density as
     // Ohm's law, so the electron heating rate matches the field's eta J.
     const amrex::Real eta_density_floor = OhmMassDensityFloor();
+    // Reference-code-style Ohm-current Joule quench (implicit_mhd.joule_ohm_current,
+    // see m_joule_ohm_current): in cells where the FIELD advance is
+    // diffusion dominated -- dt eta_field / mu0 > min(dx)^2, precomputed
+    // here as eta_field > mu0 min(dx)^2 / dt -- the deposit's |J|^2 is
+    // replaced by |E|^2 / eta_field^2 with E the solved stage electric
+    // field (FillCellCenteredOhmElectricField) and eta_field the SAME
+    // floored/boosted composition the field solve uses: the site's own
+    // user eta through vacuum_keyed_resistivity keyed to the Ohm guard,
+    // then the wall-band override folded through its maximum (the
+    // cell-centered convention of GetMHDFieldResistivityCCForPC). The
+    // COEFFICIENT keeps the un-boosted user eta. Binary per-cell switch,
+    // exactly as the reference code.
+    const bool joule_ohm_current =
+        m_joule_ohm_current && include_joule_heating;
+    const amrex::Real joule_min_cell_size =
+        1.0_rt / std::max({inverse_cell_size[0], inverse_cell_size[1],
+                           inverse_cell_size[2]});
+    const amrex::Real joule_quench_eta_threshold =
+        joule_ohm_current ? PhysConst::mu0 * joule_min_cell_size *
+                                joule_min_cell_size / m_dt
+                          : std::numeric_limits<amrex::Real>::max();
+    const amrex::Real joule_charge_density_floor =
+        charge_to_mass * eta_density_floor;
+    const amrex::Real joule_vacuum_division_guard =
+        charge_to_mass * m_mass_density_floor;
+    const amrex::Real joule_vacuum_eta_scale =
+        PhysConst::mu0 * m_vacuum_resistivity_diffusivity;
+    const WallBandEtaOverrideView joule_band_view =
+        m_wall_mask.BandEtaOverrideView();
+    const int* const joule_band_cc = joule_band_view.first_band_cc;
+    const amrex::Real joule_band_eta = joule_band_view.eta_override;
+    const amrex::MultiFab& ohm_electric_cc =
+        *m_WarpX->m_fields.get(OhmElectricFieldCCName, 0);
     const theta_implicit_mhd::FluxParameters flux_parameters =
         MakeFluxParameters();
 
@@ -4142,6 +4246,7 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
         const auto ion_e = ion_energy.const_array(mfi);
         const auto j_plasma = current.const_array(mfi);
         const auto magnetic = magnetic_field.const_array(mfi);
+        const auto e_ohm = ohm_electric_cc.const_array(mfi);
         const auto rho_increment = density_rhs.array(mfi);
         const auto momentum_increment = momentum_rhs.array(mfi);
         const auto energy_increment = electron_energy_rhs.array(mfi);
@@ -4328,12 +4433,36 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
             // already-recovered pressure over the already-floored density.
             const amrex::Real temperature_e =
                 pressure_e * PhysConst::q_e / (charge_density * PhysConst::kb);
-            const amrex::Real joule_heating =
-                include_joule_heating
-                    ? eta(charge_density, temperature_e, current_magnitude,
-                          time) *
-                          current_magnitude * current_magnitude
-                    : 0.0_rt;
+            amrex::Real joule_heating = 0.0_rt;
+            if (include_joule_heating) {
+                const amrex::Real eta_joule = eta(
+                    charge_density, temperature_e, current_magnitude, time);
+                amrex::Real square_current =
+                    current_magnitude * current_magnitude;
+                if (joule_ohm_current) {
+                    // Ohm-current quench (see the host constants): the
+                    // cell-centered twin of the field advance's
+                    // eta_field, from the site's own eta_joule.
+                    amrex::Real eta_field =
+                        theta_implicit_mhd::vacuum_keyed_resistivity(
+                            eta_joule, charge_to_mass * rho(i, j, k),
+                            joule_charge_density_floor,
+                            joule_vacuum_division_guard,
+                            joule_vacuum_eta_scale);
+                    if (joule_band_cc != nullptr && i >= joule_band_cc[j]) {
+                        eta_field = std::max(eta_field, joule_band_eta);
+                    }
+                    if (eta_field > joule_quench_eta_threshold) {
+                        const amrex::Real e_x = e_ohm(i, j, k, 0);
+                        const amrex::Real e_y = e_ohm(i, j, k, 1);
+                        const amrex::Real e_z = e_ohm(i, j, k, 2);
+                        square_current =
+                            (e_x * e_x + e_y * e_y + e_z * e_z) /
+                            (eta_field * eta_field);
+                    }
+                }
+                joule_heating = eta_joule * square_current;
+            }
             amrex::Real pressure_work =
                 -pressure_e * divergence_electron_velocity;
             const bool guard_floors =
@@ -7652,6 +7781,31 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     // (vacuum_keyed_resistivity): vacuum field diffusion never heats
     // plasma.
     const amrex::Real eta_density_floor = OhmMassDensityFloor();
+    // Reference-code-style Ohm-current Joule quench (implicit_mhd.joule_ohm_current):
+    // identical composition to the ComputeFluidRHS site (the E-based
+    // fluid RHS), see the comment there -- the two sites MUST stay exact
+    // twins so the residual is one map regardless of the flux path.
+    const bool joule_ohm_current =
+        m_joule_ohm_current && include_joule_heating;
+    const amrex::Real joule_min_cell_size =
+        1.0_rt / std::max({inverse_cell_size[0], inverse_cell_size[1],
+                           inverse_cell_size[2]});
+    const amrex::Real joule_quench_eta_threshold =
+        joule_ohm_current ? PhysConst::mu0 * joule_min_cell_size *
+                                joule_min_cell_size / m_dt
+                          : std::numeric_limits<amrex::Real>::max();
+    const amrex::Real joule_charge_density_floor =
+        charge_to_mass * eta_density_floor;
+    const amrex::Real joule_vacuum_division_guard =
+        charge_to_mass * m_mass_density_floor;
+    const amrex::Real joule_vacuum_eta_scale =
+        PhysConst::mu0 * m_vacuum_resistivity_diffusivity;
+    const WallBandEtaOverrideView joule_band_view =
+        m_wall_mask.BandEtaOverrideView();
+    const int* const joule_band_cc = joule_band_view.first_band_cc;
+    const amrex::Real joule_band_eta = joule_band_view.eta_override;
+    const amrex::MultiFab& ohm_electric_cc =
+        *m_WarpX->m_fields.get(OhmElectricFieldCCName, 0);
     // Rigid-conductor fluid freeze (implicit_mhd.wall_thermal_bc): under
     // either thermal wall mode the masked conductor cells are NOT fluid
     // -- every increment inside them is zero, so the band keeps its
@@ -7718,6 +7872,7 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
         const auto uperp_old = old_ion_perp_energy.const_array(mfi);
         const auto j_plasma = current.const_array(mfi);
         const auto b_cc = magnetic_cc.const_array(mfi);
+        const auto e_ohm = ohm_electric_cc.const_array(mfi);
         const auto flux_arr = face_flux_mf.const_array(mfi);
 #if defined(WARPX_DIM_RZ)
         const auto rflux_arr = face_flux_r_mf.const_array(mfi);
@@ -8155,12 +8310,36 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
             // already-recovered pressure over the already-floored density.
             const amrex::Real temperature_e =
                 pressure_e * PhysConst::q_e / (charge_density * PhysConst::kb);
-            const amrex::Real joule_heating =
-                include_joule_heating
-                    ? eta(charge_density, temperature_e, current_magnitude,
-                          time) *
-                          current_magnitude * current_magnitude
-                    : 0.0_rt;
+            amrex::Real joule_heating = 0.0_rt;
+            if (include_joule_heating) {
+                const amrex::Real eta_joule = eta(
+                    charge_density, temperature_e, current_magnitude, time);
+                amrex::Real square_current =
+                    current_magnitude * current_magnitude;
+                if (joule_ohm_current) {
+                    // Ohm-current quench (see the host constants): the
+                    // cell-centered twin of the field advance's
+                    // eta_field, from the site's own eta_joule.
+                    amrex::Real eta_field =
+                        theta_implicit_mhd::vacuum_keyed_resistivity(
+                            eta_joule, charge_to_mass * rho(i, j, k),
+                            joule_charge_density_floor,
+                            joule_vacuum_division_guard,
+                            joule_vacuum_eta_scale);
+                    if (joule_band_cc != nullptr && i >= joule_band_cc[j]) {
+                        eta_field = std::max(eta_field, joule_band_eta);
+                    }
+                    if (eta_field > joule_quench_eta_threshold) {
+                        const amrex::Real e_x = e_ohm(i, j, k, 0);
+                        const amrex::Real e_y = e_ohm(i, j, k, 1);
+                        const amrex::Real e_z = e_ohm(i, j, k, 2);
+                        square_current =
+                            (e_x * e_x + e_y * e_y + e_z * e_z) /
+                            (eta_field * eta_field);
+                    }
+                }
+                joule_heating = eta_joule * square_current;
+            }
             amrex::Real pressure_work =
                 -pressure_e * divergence_electron_velocity;
             const amrex::Real energy_end =
