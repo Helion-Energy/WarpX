@@ -680,6 +680,21 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_vacuum_resistive  # dependency
 )
 
+# Reference-code-style Ohm-current Joule quench (implicit_mhd.joule_ohm_current):
+# calibrated one-step two-zone check -- the vacuum-boosted halo's Joule
+# deposit is quenched by orders of magnitude relative to the exact
+# OFF-knob integral eta0 |J^theta|^2 dt, while the bulk (criterion not
+# met) matches that integral tightly, i.e. is untouched by the knob
+add_warpx_test(
+    test_1d_theta_implicit_mhd_joule_ohm_quench  # name
+    1  # dims
+    2  # nprocs
+    inputs_test_1d_theta_implicit_mhd_joule_ohm_quench  # inputs
+    "analysis_mhd_joule_ohm_quench.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_sound  # name
     1  # dims

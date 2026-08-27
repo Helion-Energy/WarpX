@@ -197,6 +197,13 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * single-component diagnostic views (MomentumDiag*Name). */
     void PublishMomentumComponents () const;
     void FillCellCenteredElectromagneticFields ();
+    /** Gather the assembled stage E (Efield_fp; plus the external E under
+     * the split-field external-A scheme) to cell centers into
+     * OhmElectricFieldCCName for the Ohm-current Joule quench (see
+     * m_joule_ohm_current). Called by ComputeRHS after the stage E
+     * assembly on every residual evaluation, so matrix-free Jacobian
+     * probes see the quenched deposit exactly. */
+    void FillCellCenteredOhmElectricField ();
     void ComputeFluidRHS (WarpXSolverVec& rhs, amrex::Real time) const;
     void ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs, amrex::Real time) const;
     /** \param a_time the residual (theta-stage) time, forwarded to the
@@ -363,6 +370,14 @@ class ThetaImplicitMHD final : public ImplicitSolver
     inline static constexpr char ElectronTemperatureCCName[] =
         "implicit_mhd_electron_temperature_cc";
     inline static constexpr char MagneticFieldCCName[] = "implicit_mhd_magnetic_field_cc";
+    /** Cell-centered gather of the SOLVED stage electric field for the
+     * Ohm-current Joule quench (see m_joule_ohm_current): refreshed by
+     * FillCellCenteredOhmElectricField on every residual evaluation from
+     * the just-assembled Efield_fp (plus the external E under the
+     * split-field external-A scheme, whose subtraction is Faraday
+     * bookkeeping only -- Ohm's law holds for the total field). */
+    inline static constexpr char OhmElectricFieldCCName[] =
+        "implicit_mhd_ohm_electric_field_cc";
     // Field resistivity eta_field (user eta through the density-keyed
     // vacuum boost) scratch, filled on demand for the MHD block
     // preconditioner's resistive block: cell-centered (the activation
@@ -1000,6 +1015,23 @@ class ThetaImplicitMHD final : public ImplicitSolver
     amrex::Real m_hllc_contact_blend = 0.0;
     bool m_evolve_ion_fluid = true;
     bool m_include_joule_heating = true;
+    // ---- reference-code-style Ohm-current Joule quench (joule_ohm_current,
+    // default off), ported from the reference code's "fancy current" (psi.f90): at
+    // Joule-deposition cells where the FIELD advance is diffusion
+    // dominated, dt eta_field / mu0 > min(dx)^2, the |J|^2 of the
+    // electron-energy Joule deposit is evaluated from Ohm's law as
+    // |E|^2 / eta_field^2 -- E the SOLVED stage electric field (see
+    // OhmElectricFieldCCName) and eta_field the SAME floored/boosted
+    // field-advance resistivity the field solve uses (the user eta
+    // through vacuum_keyed_resistivity plus the wall-band override,
+    // composed like GetMHDFieldResistivityCCForPC) -- instead of the
+    // curl-B current. The heating COEFFICIENT keeps the un-boosted user
+    // eta (the eta_jh/eta split of the reference code's step.f90). Where eta_field is
+    // vacuum-boosted this quenches the halo Joule deposit quadratically:
+    // the stiff implicit field solve relaxes E while the pointwise
+    // curl-B current stays gradient-noise scale. Binary per-cell switch,
+    // exactly as the reference code (no smooth blend). ----
+    bool m_joule_ohm_current = false;
     // Circuit-in-the-residual coupling: every residual evaluation executes
     // the "externalcoiltheta" python callback (and FinishStateUpdate the
     // "externalcoilfinish" one) and then re-refreshes the external fields,

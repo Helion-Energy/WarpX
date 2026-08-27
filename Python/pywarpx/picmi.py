@@ -2781,6 +2781,17 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         keeps the user resistivity. Joule heating keeps the un-boosted
         user eta (vacuum field diffusion never heats plasma).
 
+    joule_ohm_current: bool, default=False
+        reference-code-style Ohm-current Joule quench. In cells where the field
+        advance is diffusion dominated (dt * eta_field / mu0 > min(dx)^2,
+        with eta_field the floored/boosted field-advance resistivity
+        including the vacuum boost and the wall-band override), the |J|^2
+        of the electron-energy Joule deposit is evaluated from Ohm's law
+        as |E|^2 / eta_field^2 using the solved stage electric field,
+        instead of the curl-B current. The heating coefficient keeps the
+        un-boosted user eta, so a vacuum-boosted halo's Joule deposit is
+        quenched quadratically. Binary per-cell switch (no blend).
+
     resistive_theta: float, optional
         Time centering of the dissipative Ohm terms (eta J including the
         vacuum boost, and the hyper-resistive term), in [0.5, 1]; the
@@ -2842,6 +2853,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         floor_consistency_width_fraction=None,
         floor_ledger_file=None,
         vacuum_resistivity_diffusivity=None,
+        joule_ohm_current=None,
         resistive_theta=None,
         resistive_direct_device_assembly=None,
         conduction_theta=None,
@@ -2923,6 +2935,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.floor_consistency_width_fraction = floor_consistency_width_fraction
         self.floor_ledger_file = floor_ledger_file
         self.vacuum_resistivity_diffusivity = vacuum_resistivity_diffusivity
+        self.joule_ohm_current = joule_ohm_current
         self.resistive_theta = resistive_theta
         self.resistive_direct_device_assembly = resistive_direct_device_assembly
         self.conduction_theta = conduction_theta
@@ -3014,6 +3027,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.vacuum_resistivity_diffusivity = (
             self.vacuum_resistivity_diffusivity
         )
+        implicit_mhd.joule_ohm_current = self.joule_ohm_current
         implicit_mhd.resistive_theta = self.resistive_theta
         implicit_mhd.resistive_direct_device_assembly = (
             self.resistive_direct_device_assembly
