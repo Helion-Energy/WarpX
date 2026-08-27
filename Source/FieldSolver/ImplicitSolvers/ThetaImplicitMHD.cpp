@@ -798,6 +798,21 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     utils::parser::queryWithParser(pp, "cgl_instability_width",
                                    m_cgl_instability_width);
     utils::parser::queryWithParser(pp, "cgl_null_scale", m_cgl_null_scale);
+    utils::parser::queryWithParser(pp, "electron_ion_equilibration",
+                                   m_electron_ion_equilibration);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_electron_ion_equilibration >= 0.0_rt,
+        "implicit_mhd.electron_ion_equilibration cannot be negative");
+    // The exchange relaxes the electron energy against an evolved ion
+    // energy block; the barotropic closure ties the ion temperature to
+    // the density and has no block to receive the pair term.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_electron_ion_equilibration == 0.0_rt ||
+            m_ion_closure == "total_energy" ||
+            m_ion_closure == "dual_energy" || m_ion_closure == "cgl",
+        "implicit_mhd.electron_ion_equilibration requires "
+        "implicit_mhd.ion_closure = total_energy, dual_energy, or cgl "
+        "(the exchange deposits into an evolved ion energy block)");
     pp.query("z_outflow_no_reflux", m_z_outflow_no_reflux);
     // The outflow mode is the smooth superset of the no-reflux clamp
     // (and wall_temperature keeps the passive momentum copy by design),
@@ -2559,6 +2574,12 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "Positivity step safety:        " << m_positivity_safety << "\n"
                    << "Joule heating:                 " << m_include_joule_heating << "\n"
                    << "Joule Ohm-current quench:      " << m_joule_ohm_current << "\n"
+                   << "e-i equilibration scale:       "
+                   << m_electron_ion_equilibration
+                   << (m_electron_ion_equilibration > 0.0_rt
+                           ? " (the reference code's eq_brate rate, step-old frozen)"
+                           : " (off)")
+                   << "\n"
                    << "Resistive theta:               " << m_resistive_theta << "\n"
                    << "Conduction theta:              " << m_conduction_theta
                    << "\n"
@@ -4600,8 +4621,10 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
 #if defined(WARPX_DIM_RZ)
     const amrex::Real radial_cell_size = m_WarpX->Geom(0).CellSize(0);
     const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
-    const amrex::Real gamma_i_minus_one = m_gamma_i - 1.0_rt;
 #endif
+    // Also read by the electron-ion equilibration's live ion pressure,
+    // so hoisted out of the RZ geometric-source guard.
+    const amrex::Real gamma_i_minus_one = m_gamma_i - 1.0_rt;
     const amrex::Real ion_energy_floor =
         total_energy_closure ? m_ion_pressure_floor / (m_gamma_i - 1.0_rt)
                              : 0.0_rt;
@@ -4615,6 +4638,24 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
     const amrex::Real pressure_floor = m_electron_pressure_floor;
     const bool evolve_ion_fluid = m_evolve_ion_fluid;
     const bool include_joule_heating = m_include_joule_heating;
+    // Electron-ion equilibration (see m_electron_ion_equilibration; the
+    // The reference code's eq_brate exchange): per-solve-uniform branch, so the OFF
+    // path performs no arithmetic at all. The rate coefficient folds
+    // The reference code's 4.75e-15 constant, the m_p/m_i mass ratio, and the
+    // user scale; the cap is the theta-scheme monotonicity bound of the
+    // pair-difference decay (the reference code's backward Euler needs none).
+    const bool ei_equilibration = m_electron_ion_equilibration > 0.0_rt;
+    const amrex::Real ei_rate_coefficient =
+        m_electron_ion_equilibration * 4.75e-15_rt * PhysConst::m_p *
+        m_ion_charge_to_mass / PhysConst::q_e;
+    const amrex::Real ei_rate_cap =
+        m_theta < 1.0_rt
+            ? 1.0_rt / ((m_gamma_e + m_gamma_i - 2.0_rt) *
+                        (1.0_rt - m_theta) * m_dt)
+            : std::numeric_limits<amrex::Real>::max();
+    const amrex::Real ei_inverse_ion_mass =
+        m_ion_charge_to_mass / PhysConst::q_e;
+    const amrex::Real ei_ion_pressure_floor = m_ion_pressure_floor;
     // Holmstrom-style vacuum cell switching: below the threshold the fluid
     // is passive dust with frozen momentum (conservative advection of mass
     // and energy remains, so exchange with neighboring plasma cells is
@@ -4954,11 +4995,50 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
             }
             // Halo source taper: pedestal-band cells are numerical mass
             // with no reactive response of their own.
-            pressure_work *= theta_implicit_mhd::floor_outflow_limiter(
-                rho_old(i, j, k), halo_pedestal);
+            const amrex::Real halo_source_taper =
+                theta_implicit_mhd::floor_outflow_limiter(
+                    rho_old(i, j, k), halo_pedestal);
+            pressure_work *= halo_source_taper;
             energy_increment(i, j, k) =
                 theta_dt * plasma_weight *
                 (-divergence_energy_flux + pressure_work + joule_heating);
+            // Electron-ion equilibration (see the host constants above
+            // and m_electron_ion_equilibration; the reference code's eq_brate
+            // exchange): the STEP-OLD frozen Spitzer rate times the LIVE
+            // linear pair term (p_i - p_e) -- +Q to the electron energy
+            // here, -Q to the ion energy below, under the SAME
+            // symmetric envelope (plasma_weight, halo taper), so
+            // U_e + E_i changes by exactly zero. Appended after the base
+            // increments under a per-solve-uniform branch: the OFF path
+            // performs no arithmetic at all.
+            amrex::Real equilibration_heating = 0.0_rt;
+            if (ei_equilibration) {
+                const amrex::Real ei_number_density =
+                    std::max(rho_old(i, j, k), density_floor) *
+                    ei_inverse_ion_mass;
+                const amrex::Real ei_te_ev =
+                    std::max(gamma_e_minus_one * energy_old(i, j, k),
+                             pressure_floor) /
+                    (ei_number_density * PhysConst::q_e);
+                const amrex::Real nu_ei =
+                    theta_implicit_mhd::electron_ion_equilibration_rate(
+                        ei_number_density, ei_te_ev, ei_rate_coefficient,
+                        ei_rate_cap);
+                amrex::Real ei_kinetic = 0.0_rt;
+                for (int component = 0; component < 3; ++component) {
+                    ei_kinetic += mom(i, j, k, component) *
+                                  mom(i, j, k, component);
+                }
+                ei_kinetic *=
+                    0.5_rt / std::max(rho(i, j, k), density_floor);
+                const amrex::Real pressure_i_live = std::max(
+                    gamma_i_minus_one * (ion_e(i, j, k) - ei_kinetic),
+                    ei_ion_pressure_floor);
+                equilibration_heating = halo_source_taper * nu_ei *
+                                        (pressure_i_live - pressure_e);
+                energy_increment(i, j, k) +=
+                    theta_dt * plasma_weight * equilibration_heating;
+            }
 
             if (total_energy_closure) {
                 const amrex::Real safe_density =
@@ -5025,10 +5105,7 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                         theta_implicit_mhd::floor_outflow_limiter(
                             internal_proxy_end, ion_energy_floor);
                 }
-                // Halo source taper (see the electron pdV term above).
-                const amrex::Real halo_source_taper =
-                    theta_implicit_mhd::floor_outflow_limiter(
-                        rho_old(i, j, k), halo_pedestal);
+                // Halo source taper hoisted above the electron pdV term.
                 ion_pressure_work *= halo_source_taper;
                 lorentz_work *= halo_source_taper;
                 // Kinetic-energy drain matched to the pedestal-band
@@ -5077,6 +5154,13 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                          (-divergence_ion_energy_flux + lorentz_work +
                           ion_pressure_work) -
                      drag_kinetic_drain - energy_relax_drain);
+                if (ei_equilibration) {
+                    // Electron-ion equilibration counterpart (see the
+                    // electron row above): the identical product with
+                    // the opposite sign -- exact pair conservation.
+                    ion_energy_increment(i, j, k) -=
+                        theta_dt * plasma_weight * equilibration_heating;
+                }
             }
 
             // Floor-consistency supply (see the host constants above and
@@ -8369,6 +8453,22 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                              : 0.0_rt;
     const bool evolve_ion_fluid = m_evolve_ion_fluid;
     const bool include_joule_heating = m_include_joule_heating;
+    // Electron-ion equilibration (see m_electron_ion_equilibration and
+    // the non-recast twin in ComputeFluidRHS -- the residual is one map
+    // regardless of the flux path): per-solve-uniform branch, so the
+    // OFF path performs no arithmetic at all. The rate coefficient
+    // folds the reference code's 4.75e-15 constant, the m_p/m_i mass ratio, and
+    // the user scale; the cap is the theta-scheme monotonicity bound of
+    // the pair-difference decay (the reference code's backward Euler needs none).
+    const bool ei_equilibration = m_electron_ion_equilibration > 0.0_rt;
+    const amrex::Real ei_rate_coefficient =
+        m_electron_ion_equilibration * 4.75e-15_rt * PhysConst::m_p *
+        m_ion_charge_to_mass / PhysConst::q_e;
+    const amrex::Real ei_rate_cap =
+        m_theta < 1.0_rt
+            ? 1.0_rt / ((m_gamma_e + m_gamma_i - 2.0_rt) *
+                        (1.0_rt - m_theta) * m_dt)
+            : std::numeric_limits<amrex::Real>::max();
     const amrex::Real work_kappa = m_hlld_kappa_signal;
     const amrex::Real electron_energy_floor_rate =
         m_electron_pressure_floor / (m_gamma_e - 1.0_rt) / theta_dt;
@@ -8555,11 +8655,13 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     // block below.
     const theta_implicit_mhd::FluxParameters flux_parameters =
         MakeFluxParameters();
+    // Also read by the electron-ion equilibration's live ion pressure,
+    // so hoisted out of the RZ block below.
+    const amrex::Real gamma_i_minus_one = m_gamma_i - 1.0_rt;
 #if defined(WARPX_DIM_RZ)
     const amrex::Real inverse_dr = inverse_cell_size[0];
     const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
     const amrex::Real radial_cell_size = m_WarpX->Geom(0).CellSize(0);
-    const amrex::Real gamma_i_minus_one = m_gamma_i - 1.0_rt;
     const amrex::Real inverse_mu0 = 1.0_rt / PhysConst::mu0;
     // Zero-flux wall (open field + reflect fluid): pointwise WORK/stress
     // evaluations at the last cell ring that read the cell-centered
@@ -9135,6 +9237,66 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
             energy_increment(i, j, k) =
                 wall_live * theta_dt * plasma_weight *
                 (-divergence_energy_flux + pressure_work + joule_heating);
+            // Electron-ion equilibration (see the host constants above
+            // and m_electron_ion_equilibration; the reference code's eq_brate
+            // exchange): the STEP-OLD frozen Spitzer rate times the LIVE
+            // linear pair term (p_i - p_e) -- +Q to the electron energy
+            // here, -Q to the ion channel of the active closure below,
+            // under the SAME symmetric envelope (wall_live,
+            // plasma_weight, halo taper), so the species pair sum
+            // changes by exactly zero. Appended after the base
+            // increments under a per-solve-uniform branch: the OFF path
+            // performs no arithmetic at all.
+            amrex::Real equilibration_heating = 0.0_rt;
+            if (ei_equilibration) {
+                const amrex::Real ei_number_density =
+                    std::max(rho_old(i, j, k), density_floor) *
+                    inverse_ion_mass;
+                const amrex::Real ei_te_ev =
+                    std::max(gamma_e_minus_one * energy_old(i, j, k),
+                             pressure_floor) /
+                    (ei_number_density * PhysConst::q_e);
+                const amrex::Real nu_ei =
+                    theta_implicit_mhd::electron_ion_equilibration_rate(
+                        ei_number_density, ei_te_ev, ei_rate_coefficient,
+                        ei_rate_cap);
+                amrex::Real pressure_i_live;
+                if (cgl_closure) {
+                    // p_eff = (p_par + 2 p_perp)/3 with p_par = 2 U_par
+                    // and p_perp = U_perp.
+                    pressure_i_live = (2.0_rt * upar(i, j, k) +
+                                       2.0_rt * uperp(i, j, k)) /
+                                      3.0_rt;
+                } else {
+                    amrex::Real ei_kinetic = 0.0_rt;
+                    for (int component = 0; component < 3; ++component) {
+                        ei_kinetic += mom(i, j, k, component) *
+                                      mom(i, j, k, component);
+                    }
+                    ei_kinetic *=
+                        0.5_rt / std::max(rho(i, j, k), density_floor);
+                    // dual: the SAME kinetic-fraction blended pressure
+                    // every other consumer sees (the dynamics' single
+                    // source of truth for the ion temperature).
+                    pressure_i_live =
+                        dual_energy_closure
+                            ? theta_implicit_mhd::
+                                  dual_energy_blended_pressure(
+                                      ion_e(i, j, k), ei_kinetic,
+                                      ion_int(i, j, k),
+                                      ion_int_old(i, j, k),
+                                      flux_parameters)
+                            : gamma_i_minus_one *
+                                  (ion_e(i, j, k) - ei_kinetic);
+                }
+                pressure_i_live =
+                    std::max(pressure_i_live, ion_pressure_floor);
+                equilibration_heating = halo_source_taper * nu_ei *
+                                        (pressure_i_live - pressure_e);
+                energy_increment(i, j, k) += wall_live * theta_dt *
+                                             plasma_weight *
+                                             equilibration_heating;
+            }
 
             if (total_energy_closure) {
                 const amrex::Real safe_density =
@@ -9241,6 +9403,17 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                          (-divergence_ion_energy_flux + lorentz_work +
                           ion_pressure_work) -
                      drag_kinetic_drain - energy_relax_drain);
+                if (ei_equilibration) {
+                    // Electron-ion equilibration counterpart (see the
+                    // electron row above): the identical product with
+                    // the opposite sign -- exact pair conservation.
+                    // Under dual_energy this books the internal change
+                    // into the conservative E_i stock; the auxiliary
+                    // U_i mirror is below.
+                    ion_energy_increment(i, j, k) -=
+                        wall_live * theta_dt * plasma_weight *
+                        equilibration_heating;
+                }
             }
 
             if (dual_energy_closure) {
@@ -9375,6 +9548,16 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                          (-divergence_ion_internal_flux + pdv_work +
                           viscous_heating) -
                      internal_relax_drain);
+                if (ei_equilibration) {
+                    // Electron-ion equilibration: U_i receives the
+                    // SAME internal-only exchange as E_i above (the
+                    // The reference code's step_tm split relaxes the internal
+                    // temperatures; KE is untouched), keeping the dual
+                    // pair consistent.
+                    ion_internal_increment(i, j, k) -=
+                        wall_live * theta_dt * plasma_weight *
+                        equilibration_heating;
+                }
             }
 
             if (cgl_closure) {
@@ -9665,6 +9848,21 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                          (-divergence_ion_perp_flux + perp_work +
                           perp_relaxation) -
                      perp_relax_drain);
+                if (ei_equilibration) {
+                    // Electron-ion equilibration counterpart:
+                    // isotropic-temperature deposit, -Q/3 to U_par and
+                    // -2Q/3 to U_perp (the same (1/3, 2/3) split as the
+                    // w = 0 isotropic work terms: equal dT_par = dT_perp
+                    // with U_par = n k T_par / 2, U_perp = n k T_perp).
+                    // The thirds sum to the electron row's -Q exactly.
+                    const amrex::Real equilibration_share =
+                        wall_live * theta_dt * plasma_weight *
+                        equilibration_heating / 3.0_rt;
+                    ion_parallel_increment(i, j, k) -=
+                        equilibration_share;
+                    ion_perp_increment(i, j, k) -=
+                        2.0_rt * equilibration_share;
+                }
             }
 
             // Floor-consistency supply (see the host constants above and

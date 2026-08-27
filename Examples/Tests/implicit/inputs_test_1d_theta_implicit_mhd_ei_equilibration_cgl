@@ -1,0 +1,107 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# CGL variant of the electron-ion equilibration deck (see
+# inputs_test_1d_theta_implicit_mhd_ei_equilibration for the physics
+# comments): the exchange must deposit isotropically into the CGL pair,
+# -Q/3 to U_par and -2Q/3 to U_perp, so equal dT_par = dT_perp keeps an
+# initially isotropic state exactly isotropic (dp_par = 2 dU_par
+# = dp_perp = dU_perp) while p_eff = (p_par + 2 p_perp)/3 follows the
+# same frozen-rate recurrence as the total_energy closure. At B = 0 and
+# exact isotropy every CGL-specific stress, work, and relaxation term
+# is identically zero.
+my_constants.n0 = 2.0e20
+my_constants.Te0 = 44.0
+my_constants.Ti0 = 12.0
+my_constants.rho0 = n0 * m_p
+my_constants.pe0 = n0 * Te0 * q_e
+my_constants.pi0 = n0 * Ti0 * q_e
+my_constants.gamma = 5.0/3.0
+my_constants.B0 = sqrt(mu0 * (pe0 + pi0))
+my_constants.lnL0 = 24 + 3*log(10) - 0.5*log(n0) + log(Te0)
+my_constants.nu0 = 4.75e-15 * lnL0 * n0 / (Te0 * sqrt(Te0))
+my_constants.dt = 0.1 / ((2*gamma - 2) * nu0)
+my_constants.nz = 16
+my_constants.Lz = 0.2
+
+max_step = 30
+amr.n_cell = nz
+amr.max_grid_size = 16
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 20
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-10
+gmres.max_iterations = 400
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te0
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = pi0
+implicit_mhd.ion_closure = cgl
+implicit_mhd.electron_ion_equilibration = 1.0
+implicit_mhd.ion_pressure_floor = 1.0e-8 * pi0
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-8 * pe0
+implicit_mhd.fluid_flux = hlld
+implicit_mhd.allow_hlld = true   # cgl requires hlld; kernel coverage only
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.ion_pressure(x,y,z) = pi0
+implicit_mhd.electron_pressure(x,y,z) = pe0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 30
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = implicit_mhd_mass_density \
+                       implicit_mhd_ion_parallel_energy \
+                       implicit_mhd_ion_perp_energy \
+                       implicit_mhd_electron_energy
+diag1.write_species = 0

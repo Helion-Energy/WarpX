@@ -4617,6 +4617,45 @@ Jacobian probes.
     (the :math:`w` weighting of stress and work always applies under
     ``cgl``).
 
+.. pp:param:: implicit_mhd.electron_ion_equilibration
+    :type: ``float``
+    :default: ``0`` (off)
+
+    Collisional electron-ion temperature equilibration — the reference code's
+    ``eq_brate`` exchange (``ntb.f90`` 658–700, active whenever the reference code
+    runs two-temperature mode) — as a scale on the reference code's rate
+    (``1`` = the reference code's coefficient exactly; the OFF path performs no
+    arithmetic at all). The exchange is the single energy-conserving
+    pair term
+
+    .. math::
+
+        \frac{dU_e}{dt} = +\nu\,(p_i - p_e) = -\frac{dU_i}{dt},
+        \qquad
+        \nu = 4.75\times 10^{-15}\,
+        \ln\Lambda\,\frac{m_p}{m_i}\,
+        \frac{n_i}{T_e[\mathrm{eV}]^{3/2}}\ \mathrm{s}^{-1},
+
+    with the reference code's NRL-style :math:`\ln\Lambda` branches
+    (:math:`23 + 3\ln 10 - \tfrac12\ln n + \tfrac32\ln T_e` for
+    :math:`T_e \le e^2` eV, else
+    :math:`24 + 3\ln 10 - \tfrac12\ln n + \ln T_e`; :math:`n` in
+    :math:`\mathrm{m}^{-3}`, :math:`Z=1`). The rate is FROZEN per solve
+    from the step-old density and electron pressure (the
+    ``conduction_coefficient_state = step_old`` idiom — the pair term
+    stays Newton-linear in the live energies; the reference code's backward-Euler
+    pair update with the coefficient at its P/C iterate is identical to
+    first order) and capped at the :math:`\theta`-scheme monotonicity
+    bound :math:`1/((\gamma_e + \gamma_i - 2)(1-\theta)\,\Delta t)`.
+    Deposits: :math:`+Q` to :math:`U_e`; :math:`-Q` to the ion channel
+    of the active closure (:math:`E_i` under ``total_energy``; both
+    :math:`E_i` and the auxiliary :math:`U_i` under ``dual_energy``;
+    the isotropic split :math:`-Q/3` to :math:`U_\parallel` and
+    :math:`-2Q/3` to :math:`U_\perp` under ``cgl``), under the same
+    symmetric source envelope in both rows, so the species pair sum is
+    conserved to round-off by construction. Requires an ion closure
+    that evolves an ion energy block.
+
 .. pp:param:: implicit_mhd.mass_density_floor
     :type: ``float``
     :unit: :math:`\mathrm{kg\,m^{-3}}`

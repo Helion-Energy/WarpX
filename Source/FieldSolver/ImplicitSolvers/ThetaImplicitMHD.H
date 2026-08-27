@@ -657,6 +657,42 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // rate (the stress/work weighting still applies whenever the
     // closure is cgl).
     amrex::Real m_cgl_null_scale = 1.0;
+    // ---- Electron-ion temperature equilibration (0 = OFF, no
+    // arithmetic at all; 1 = the reference code's rate; other values scale it).
+    // The reference code's eq_brate collisional exchange (ntb.f90 658-700, called
+    // from the step_tm P/C loop at 322 whenever two_t = 1 -- the reference shot's
+    // configuration -- with NO deck knob of its own): a time-implicit,
+    // energy-conserving Spitzer pair relaxation between the electron
+    // and ion temperatures,
+    //     dTi/dt = -(gamma_i - 1) z nu (Ti - Te),
+    //     dTe/dt = +(gamma_e - 1) nu (Ti - Te),
+    //     nu = 4.75e-15 lnLambda (m_p/m_i) n_i z^2 / Te[eV]^{3/2},
+    // which in this solver's energy variables (z_eff = 1) is the single
+    // linear pair term
+    //     dU_e/dt = +nu (p_i - p_e) = -dU_i/dt,
+    // conserving U_e + U_i(internal) by construction. Placement: in the
+    // Newton residual with the rate FROZEN from the step-old density
+    // and electron pressure (the conduction_coefficient_state =
+    // step_old precedent -- Newton-linear, JFNK-exact, and equivalent
+    // to the reference code's coefficient-at-the-iterate backward Euler to first
+    // order), the live pressures floored like every recovered pressure,
+    // and the rate capped at the theta-scheme monotonicity bound
+    // 1/((gamma_e + gamma_i - 2)(1 - theta) dt) so the pair difference
+    // decays monotonically like the reference code's backward Euler. Deposits: +Q
+    // to U_e; -Q to the ion channel of every closure (E_i under
+    // total_energy; BOTH E_i and the auxiliary U_i under dual_energy,
+    // keeping the pair consistent; the isotropic-temperature split
+    // -Q/3 to U_par and -2Q/3 to U_perp under cgl, the same (1/3, 2/3)
+    // convention as the w = 0 isotropic work split). Same envelope as
+    // the other reactive/relaxation sources (plasma_weight, wall_live,
+    // halo_source_taper), applied SYMMETRICALLY to both rows so the
+    // pair sum is exact under every gate. Requires an evolved ion
+    // energy block. Rationale: without it Joule-heated electrons never
+    // warm the bulk ions -- the reference code's 152 eV live-median total
+    // temperature vs our 44/12 eV Te/Ti split at matched formation
+    // time, with the e-i relaxation time microsecond-class at
+    // n ~ 1e20-3e20, Te ~ 40 eV.
+    amrex::Real m_electron_ion_equilibration = 0.0;
     // Vacuum cell-switch threshold for the ion fluid (0 disables): cells
     // below it are passive dust with frozen momentum (Holmstrom-style).
     amrex::Real m_vacuum_mass_density = 0.0;

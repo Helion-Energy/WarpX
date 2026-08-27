@@ -487,6 +487,60 @@ vacuum_keyed_resistivity (const amrex::Real user_resistivity,
                      vacuum_resistivity * vacuum_resistivity);
 }
 
+/**
+ * \brief Frozen-coefficient Spitzer electron-ion temperature
+ * equilibration rate [1/s], the reference code's verbatim eq_brate coefficient
+ * (ntb.f90 658-700, the f_n = 0 electron-ion branch, z_eff = 1):
+ *
+ *     nu = 4.75e-15 lnLambda (m_p/m_i) n_i / Te[eV]^{3/2},
+ *
+ * with the NRL-style Coulomb-logarithm branches exactly as the reference code
+ * writes them (their +3 ln 10 converts NRL's cm^-3 to the m^-3 density
+ * used here; the branch point is the reference code's e^2 = 7.389 eV, not NRL's
+ * 10 Z^2):
+ *
+ *     Te <= e^2 : lnLambda = 23 + 3 ln 10 - ln(n)/2 + 3 ln(Te)/2
+ *     Te >  e^2 : lnLambda = 24 + 3 ln 10 - ln(n)/2 + ln(Te)
+ *
+ * The caller passes number_density and Te precomputed from the
+ * STEP-OLD state (floored like every frozen coefficient), so the rate
+ * is a per-solve constant: the pair term nu (p_i - p_e) it multiplies
+ * stays Newton-linear in the live energies (the
+ * conduction_coefficient_state = step_old idiom). The reference code evaluates the
+ * same coefficient at its predictor/corrector iterate and applies a
+ * backward-Euler pair update -- identical to first order in dt.
+ *
+ * Deviations from the Fortran, both documented defensive-only:
+ * lnLambda is clamped at zero (the reference code has no clamp; a negative value
+ * -- reachable only at extreme density/low Te -- would anti-relax),
+ * and the rate is capped at rate_cap, the theta-scheme monotonicity
+ * bound 1/((gamma_e + gamma_i - 2)(1 - theta) dt) precomputed by the
+ * host (the reference code's backward Euler is unconditionally monotone and needs
+ * no cap; at the cap the theta update reaches equilibrium in exactly
+ * one step instead of overshooting). The reference code's en^2/enm density factor
+ * is its P/C time-centering artifact, = n_i to O(dt): the single
+ * step-old n_i is used here.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+electron_ion_equilibration_rate (const amrex::Real number_density,
+                                 const amrex::Real electron_temperature_ev,
+                                 const amrex::Real rate_coefficient,
+                                 const amrex::Real rate_cap) noexcept {
+    constexpr amrex::Real three_ln_ten = 6.907755278982137;
+    constexpr amrex::Real branch_te_ev = 7.389056098930650; // e^2
+    const amrex::Real log_n = std::log(number_density);
+    const amrex::Real log_te = std::log(electron_temperature_ev);
+    const amrex::Real coulomb_log = std::max(
+        electron_temperature_ev <= branch_te_ev
+            ? 23.0 + three_ln_ten - 0.5 * log_n + 1.5 * log_te
+            : 24.0 + three_ln_ten - 0.5 * log_n + log_te,
+        0.0);
+    return std::min(rate_coefficient * coulomb_log * number_density /
+                        (electron_temperature_ev *
+                         std::sqrt(electron_temperature_ev)),
+                    rate_cap);
+}
+
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
 ion_pressure (const amrex::Real density,
               const FluxParameters& parameters) noexcept {

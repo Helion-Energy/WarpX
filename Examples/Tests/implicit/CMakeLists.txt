@@ -1128,6 +1128,69 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# The reference code's electron-ion temperature equilibration (eq_brate): a uniform
+# static two-temperature state must relax p_i - p_e through the exact
+# per-step frozen-coefficient theta recurrence of the reference code's Spitzer
+# rate (branches, refresh, antisymmetry), conserving U_e + U_i to
+# round-off (recast/central path)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_ei_equilibration  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_ei_equilibration  # inputs
+    "analysis_mhd_ei_equilibration.py diags/diag000000 diags/diag000030 total"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# reversed variant: cold electrons against warm ions (the opposite
+# relaxation direction AND the low-Te Coulomb-logarithm branch)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_ei_equilibration_reverse  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_ei_equilibration my_constants.Te0=5.0 my_constants.Ti0=15.0"  # inputs
+    "analysis_mhd_ei_equilibration.py diags/diag000000 diags/diag000030 total"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# non-recast (centered-flux) path of the same exchange: the residual
+# must be one map regardless of the flux path
+add_warpx_test(
+    test_1d_theta_implicit_mhd_ei_equilibration_centered  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_ei_equilibration implicit_mhd.fluid_flux=centered implicit_mhd.viscosity=0"  # inputs
+    "analysis_mhd_ei_equilibration.py diags/diag000000 diags/diag000030 total"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# dual-energy closure: the exchange must deposit into BOTH E_i and the
+# auxiliary U_i (the analysis asserts the pair stays pinned)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_ei_equilibration_dual  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_ei_equilibration_dual  # inputs
+    "analysis_mhd_ei_equilibration.py diags/diag000000 diags/diag000030 dual"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# cgl closure: the isotropic -Q/3 / -2Q/3 pair deposit must keep an
+# isotropic state exactly isotropic while p_eff follows the recurrence
+add_warpx_test(
+    test_1d_theta_implicit_mhd_ei_equilibration_cgl  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_ei_equilibration_cgl  # inputs
+    "analysis_mhd_ei_equilibration.py diags/diag000000 diags/diag000030 cgl"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # hlld variants of the closure/positivity suite: the recast must
 # reproduce the exact-Riemann plateaus, the exact static contact, and
 # the exact fluid-energy pairing of the hllc/rusanov paths
