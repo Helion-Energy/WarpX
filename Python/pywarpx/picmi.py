@@ -2781,6 +2781,17 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         keeps the user resistivity. Joule heating keeps the un-boosted
         user eta (vacuum field diffusion never heats plasma).
 
+    circuit_hook_scope: str, default="residual"
+        Scope of the "externalcoiltheta" circuit hook when
+        external_field_iteration is on. "residual" fires it on every
+        residual evaluation (bit-identical default). "newton" fires it
+        only at accepted Newton iterates: matrix-free Jacobian probes
+        and line-search trials reuse the coil scales cached from the
+        last iterate evaluation (lagged-circuit quasi-Newton; possibly
+        a few extra Newton iterations, hundreds fewer python
+        round-trips per step, converged answer unchanged to solver
+        tolerance).
+
     resistive_theta: float, optional
         Time centering of the dissipative Ohm terms (eta J including the
         vacuum boost, and the hyper-resistive term), in [0.5, 1]; the
@@ -2828,6 +2839,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         electron_pressure_floor=None,
         vacuum_mass_density=None,
         external_field_iteration=None,
+        circuit_hook_scope=None,
         vacuum_drag_rate=None,
         halo_pedestal_fraction=None,
         halo_pedestal_drag_rate=None,
@@ -2908,6 +2920,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.electron_pressure_floor = electron_pressure_floor
         self.vacuum_mass_density = vacuum_mass_density
         self.external_field_iteration = external_field_iteration
+        self.circuit_hook_scope = circuit_hook_scope
         self.vacuum_drag_rate = vacuum_drag_rate
         self.halo_pedestal_fraction = halo_pedestal_fraction
         self.halo_pedestal_drag_rate = halo_pedestal_drag_rate
@@ -2996,6 +3009,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.electron_pressure_floor = self.electron_pressure_floor
         implicit_mhd.vacuum_mass_density = self.vacuum_mass_density
         implicit_mhd.external_field_iteration = self.external_field_iteration
+        implicit_mhd.circuit_hook_scope = self.circuit_hook_scope
         implicit_mhd.vacuum_drag_rate = self.vacuum_drag_rate
         implicit_mhd.halo_pedestal_fraction = self.halo_pedestal_fraction
         implicit_mhd.halo_pedestal_drag_rate = self.halo_pedestal_drag_rate

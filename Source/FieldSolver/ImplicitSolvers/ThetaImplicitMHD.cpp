@@ -167,6 +167,20 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     utils::parser::queryWithParser(pp, "conduction_theta", m_conduction_theta);
     utils::parser::queryWithParser(pp, "positivity_safety", m_positivity_safety);
     pp.query("external_field_iteration", m_external_field_iteration);
+    {
+        // Scope of the "externalcoiltheta" circuit hook: "residual"
+        // fires it on every residual evaluation (bit-identical default),
+        // "newton" only at accepted Newton iterates (see the
+        // m_circuit_hook_newton_scope member documentation).
+        std::string circuit_hook_scope = "residual";
+        pp.query("circuit_hook_scope", circuit_hook_scope);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            circuit_hook_scope == "residual" ||
+                circuit_hook_scope == "newton",
+            "implicit_mhd.circuit_hook_scope must be 'residual' or "
+            "'newton'");
+        m_circuit_hook_newton_scope = (circuit_hook_scope == "newton");
+    }
     pp.query("fluid_flux", m_fluid_flux);
     utils::parser::queryWithParser(pp, "viscosity", m_viscosity);
     // Thermal diffusivities: legacy numeric key (bit-identical constant
@@ -2191,6 +2205,14 @@ void ThetaImplicitMHD::PrintParameters () const
                    << m_hybrid_pic_model->m_include_electron_pressure_term << "\n"
                    << "External vector potential:     "
                    << m_hybrid_pic_model->m_add_external_fields << "\n"
+                   // Circuit-hook scope, only when the coupling is live.
+                   << (m_external_field_iteration
+                           ? std::string(
+                                 "Circuit hook scope:            ") +
+                                 (m_circuit_hook_newton_scope ? "newton"
+                                                              : "residual") +
+                                 "\n"
+                           : std::string{})
                    << "Evolve ion fluid:              " << m_evolve_ion_fluid << "\n"
                    << "Fluid flux:                    " << m_fluid_flux << "\n"
                    << "Shaped conducting-wall mask:   "
@@ -2914,6 +2936,7 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
     BL_PROFILE("ThetaImplicitMHD::OneStep()");
 
     m_dt = dt;
+    m_circuit_hook_calls = 0;
     SaveEoldMultifab();
 
     if (m_hybrid_pic_model->m_add_external_fields) {
@@ -3065,6 +3088,17 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
     }
     m_WarpX->reduced_diags->ComputeDiagsMidStep(step);
     FinishStateUpdate(start_time + m_dt);
+    if (m_external_field_iteration) {
+        // Sync-tax instrument: how many python round-trips the circuit
+        // hook cost this step (the end-of-step "externalcoilfinish"
+        // commit is separate and fires once in either scope).
+        amrex::Print() << "ThetaImplicitMHD: step " << step + 1
+                       << " externalcoiltheta calls = "
+                       << m_circuit_hook_calls << " (circuit_hook_scope = "
+                       << (m_circuit_hook_newton_scope ? "newton"
+                                                       : "residual")
+                       << ")\n";
+    }
     ExecutePythonCallback("afterEpush");
     return exit_status;
 }
@@ -3467,7 +3501,9 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
         }
     }
 
-    if (m_external_field_iteration) {
+    if (m_external_field_iteration &&
+        (!m_circuit_hook_newton_scope ||
+         (!from_jacobian && m_residual_is_newton_iterate))) {
         // Circuit-in-the-residual coupling: python measures the
         // reciprocity flux linkage of THIS iterate's plasma current
         // (hybrid_current_fp_plasma, just computed), re-advances the
@@ -3478,7 +3514,18 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
         // probes see the coupled plasma-circuit physics and Newton
         // converges both together (the segregated lagged alternative is
         // unstable at strong coil-plasma coupling).
+        //
+        // circuit_hook_scope = newton instead fires the hook ONLY at
+        // accepted Newton iterates: Jacobian probes and line-search
+        // trials skip both the python round-trip and the external-field
+        // refresh, reusing the coil scales (and the theta-time external
+        // fields computed from them) cached here at the last iterate
+        // evaluation. The Jacobian then sees a per-iterate lagged
+        // circuit (quasi-Newton); the converged answer is unchanged
+        // because convergence is still tested on this live-coupled
+        // iterate residual.
         ExecutePythonCallback("externalcoiltheta");
+        ++m_circuit_hook_calls;
         m_hybrid_pic_model->m_external_vector_potential->UpdateHybridExternalFields(
             start_time + m_theta * m_dt, m_dt);
     }
