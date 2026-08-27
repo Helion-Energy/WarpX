@@ -1,0 +1,14 @@
+# base input parameters
+FILE = inputs_test_rz_theta_implicit_mhd_vacuum_resistive_pc
+
+# Device-assembly parity twin of the preconditioned stiff RZ
+# vacuum-resistive deck (single rank): at every active preconditioner
+# update the direct solver's CSR values are computed twice -- through the
+# host emission+fold and directly on the device through the frozen
+# entry-to-slot map -- and gated bitwise (<= 4 ULP asserted; exact FP64
+# equality expected, and observed on CPU builds where both paths run the
+# same compiled emission), alongside the roundoff matvec check against
+# the matrix-free operator. The physics assertions are the baseline's,
+# unchanged.
+pc_mhd_block.resistive_validate_assembly = 1
+implicit_mhd.resistive_direct_device_assembly = on
