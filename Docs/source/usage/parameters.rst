@@ -741,7 +741,9 @@ Overall simulation parameters
               LU along z on the device (portable on CPU and CUDA/HIP
               builds, no external dependency; single-rank runs only;
               periodic z is treated exactly through a folded ring
-              ordering at twice the bandwidth).
+              ordering at twice the bandwidth). On single-rank runs the
+              ``direct`` refreeze and apply are device-resident (see
+              :pp:param:`implicit_mhd.resistive_direct_device_assembly`).
             - ``pc_mhd_block.banded_precision`` (``string``, default:
               ``double``): hlld only; storage precision of the banded
               factorization and sweeps. ``double`` matches the
@@ -762,6 +764,10 @@ Overall simulation parameters
               them to roundoff against the matrix-free operator on a
               deterministic pseudo-random vector, aborting on mismatch
               (available on every build; used by the CI assembly tests).
+              When the device value refresh is active (see
+              :pp:param:`implicit_mhd.resistive_direct_device_assembly`)
+              the device- and host-assembled CSR value arrays are
+              additionally compared bitwise (:math:`\le 4` ULP asserted).
             - ``pc_mhd_block.wave_relaxation`` (``float``, default: 0.5):
               weighted block-Jacobi factor for the three-component wave
               smoother;
@@ -5711,6 +5717,26 @@ Jacobian probes.
     1``) gives :math:`1/(1+z) \to 0`, damping those modes in one step
     with the ideal dynamics still second-order centered. Values other
     than the global theta require ``fluid_flux = hlld`` or ``central``.
+
+.. pp:param:: implicit_mhd.resistive_direct_device_assembly
+    :type: ``string``
+    :default: ``auto``
+
+    Assembly and transport mode of the direct resistive preconditioner
+    block (``pc_mhd_block.resistive_solver = direct``). ``auto`` (the
+    default) keeps the whole refreeze/apply cycle device-resident on
+    single-rank runs: after the one-time host sparsity freeze, the CSR
+    values are recomputed in kernels from the coefficient fields' device
+    arrays through the frozen entry-to-slot map, and every application
+    packs the right-hand side and unpacks the solution on the device --
+    no per-refreeze coefficient mirrors and no per-apply host round
+    trip. Multi-rank runs fall back to the host gather path
+    automatically. ``on`` forces the device path (aborts on multi-rank
+    runs); ``off`` forces the host gather everywhere. With
+    :pp:param:`pc_mhd_block.resistive_validate_assembly` the device- and
+    host-assembled value arrays are additionally gated bitwise
+    (:math:`\le 4` ULP; exact equality expected, the allowance absorbs
+    device FMA contraction only) at every update.
 
 .. pp:param:: implicit_mhd.conduction_theta
     :type: ``float``
