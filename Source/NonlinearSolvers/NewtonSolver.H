@@ -251,12 +251,17 @@ private:
 
     /**
      * \brief Compute the nonlinear residual: F(U) = U - b - R(U).
+     * a_is_iterate distinguishes the evaluation at an accepted Newton
+     * iterate (the F(U_k) driving the convergence test) from a
+     * line-search trial evaluation; the operator is notified through
+     * SetResidualIsNewtonIterate() before ComputeRHS() runs.
      */
     void EvalResidual ( Vec&         a_F,
                   const Vec&         a_U,
                   const Vec&         a_b,
                         amrex::Real  a_time,
-                        int          a_iter ) const;
+                        int          a_iter,
+                        bool         a_is_iterate ) const;
 
 };
 
@@ -428,7 +433,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
     for (iter = 0; iter < m_maxits;) {
 
         // Compute residual: F(U) = U - b - R(U)
-        EvalResidual(m_F, a_U, a_b, a_time, iter);
+        EvalResidual(m_F, a_U, a_b, a_time, iter, true);
 
         // Compute norm of the residual
         norm_abs = m_F.norm2();
@@ -550,7 +555,7 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                 m_trial_U.Copy(a_U);
                 m_trial_U.increment(m_dU, -step_length);
 
-                EvalResidual(m_trial_F, m_trial_U, a_b, a_time, iter);
+                EvalResidual(m_trial_F, m_trial_U, a_b, a_time, iter, false);
                 const amrex::Real trial_norm = m_trial_F.norm2();
                 if (trial_norm <= (1.0_rt - armijo * step_length) * norm_abs) {
                     a_U.Copy(m_trial_U);
@@ -622,7 +627,8 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                          ++backtrack) {
                         m_trial_U.Copy(a_U);
                         m_trial_U.increment(m_dU, -rescue_step);
-                        EvalResidual(m_trial_F, m_trial_U, a_b, a_time, iter);
+                        EvalResidual(m_trial_F, m_trial_U, a_b, a_time, iter,
+                                     false);
                         amrex::Real trial_defect = 0.0_rt;
                         amrex::Long trial_pinned = 0;
                         const amrex::Real free_trial =
@@ -765,9 +771,11 @@ void NewtonSolver<Vec,Ops>::EvalResidual ( Vec&         a_F,
                                      const Vec&         a_U,
                                      const Vec&         a_b,
                                            amrex::Real  a_time,
-                                           int          a_iter ) const
+                                           int          a_iter,
+                                           bool         a_is_iterate ) const
 {
     BL_PROFILE("NewtonSolver::EvalResidual()");
+    m_ops->SetResidualIsNewtonIterate(a_is_iterate);
     m_ops->ComputeRHS( m_R, a_U, a_time, a_iter, false );
 
     // Compute residual: F(U) = U - b - R(U)
