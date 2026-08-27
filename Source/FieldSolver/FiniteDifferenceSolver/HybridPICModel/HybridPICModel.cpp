@@ -60,6 +60,7 @@ void HybridPICModel::ReadParameters ()
     // The B-field update is subcycled to improve stability - the number
     // of sub steps can be specified by the user.
     utils::parser::queryWithParser(pp_hybrid, "substeps", m_substeps);
+    pp_hybrid.query("substeps_from_checkpoint", m_substeps_from_checkpoint);
     if (m_substeps % 2 != 0) {
         ablastr::warn_manager::WMRecordWarning(
             "HybridPIC",
@@ -10309,6 +10310,11 @@ void HybridPICModel::BfieldEvolve (
                 // restart this full step and this time use RKF45
                 t = 0._rt;
                 n_accepted = 0;
+                // Attempts spent on the abandoned RK4 integration must not
+                // size the next half: the end-of-half update reads
+                // n_attempts, and counting rescue + abandoned-RK4 attempts
+                // together is what locked in over-ratcheted plateaus.
+                n_attempts = 0;
                 // reset B_old to the original one, stored in component 1
                 // (one fused pass over the three directions)
                 FusedCopy3(

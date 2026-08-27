@@ -714,8 +714,21 @@ public:
 
     // Declare variables to hold hybrid-PIC model parameters
     /** Number of substeps to take when evolving B (also used as initial substep
-     *  count guess when RKF45 adaptive stepping is active) */
+     *  count guess when RKF45 adaptive stepping is active). This is live
+     *  controller state: the end-of-half update ratchets it and, under pure
+     *  RK4 operation, never relaxes it (attempts per half always equal the
+     *  current count, so the relax blend is a fixed point). Checkpoints
+     *  persist the live value (hybrid_substeps.dat) and restarts restore it;
+     *  re-seeding from the inputs value against a mid-stroke field state
+     *  manufactures a NaN-recovery on the first post-restart substep and
+     *  permanently over-ratchets the count (measured 2.8x B-field cost). */
     int m_substeps = 10;
+
+    /** Restore m_substeps from the checkpoint on restart (default). Set to 0
+     *  to keep the inputs value instead (controller experiments, e.g. seed
+     *  probes). Legacy checkpoints without hybrid_substeps.dat always keep
+     *  the inputs value. */
+    bool m_substeps_from_checkpoint = true;
 
     /** Intervals to use RKF45 integrator and to update substeps parameter */
     ablastr::utils::text::IntervalsParser m_rkf45_intervals;

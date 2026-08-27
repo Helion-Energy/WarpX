@@ -105,6 +105,38 @@ WarpX::InitFromCheckpoint ()
     amrex::Print()<< Utils::TextMsg::Info(
         "restart from checkpoint " + restart_chkfile);
 
+    // Restore the hybrid B-substep controller state (the live substep
+    // count). Absent for legacy checkpoints, which then keep the inputs
+    // value as the seed (bridgeable via hybrid_pic_model.substeps).
+    if (auto * hybrid_pic_model = get_pointer_HybridPICModel()) {
+        if (hybrid_pic_model->m_substeps_from_checkpoint) {
+            const std::string SubstepsFile(
+                restart_chkfile + "/hybrid_substeps.dat");
+            if (amrex::FileExists(SubstepsFile)) {
+                Vector<char> substepsCharPtr;
+                ParallelDescriptor::ReadAndBcastFile(
+                    SubstepsFile, substepsCharPtr);
+                const std::string substepsString(substepsCharPtr.dataPtr());
+                std::istringstream iss(
+                    substepsString, std::istringstream::in);
+                std::string version_line;
+                std::getline(iss, version_line);
+                int substeps_restored = 0;
+                iss >> substeps_restored;
+                if (substeps_restored >= 2) {
+                    const int substeps_inputs = hybrid_pic_model->m_substeps;
+                    hybrid_pic_model->m_substeps = substeps_restored;
+                    amrex::Print() << Utils::TextMsg::Info(
+                        "[hybrid] B-substep count restored from checkpoint: "
+                        + std::to_string(substeps_restored)
+                        + " (inputs value " + std::to_string(substeps_inputs)
+                        + "; set hybrid_pic_model.substeps_from_checkpoint"
+                        + " = 0 to keep the inputs value)");
+                }
+            }
+        }
+    }
+
     // Header
     {
         const std::string File(restart_chkfile + "/WarpXHeader");

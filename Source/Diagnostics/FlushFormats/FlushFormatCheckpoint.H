@@ -37,6 +37,8 @@ class FlushFormatCheckpoint final : public FlushFormatPlotfile
     void WriteDMaps (const std::string& dir, int nlev) const;
 
     void WriteReducedDiagsData (std::string const & dir) const;
+
+    void WriteHybridPICData (std::string const & dir) const;
 };
 
 #endif // WARPX_FLUSHFORMATCHECKPOINT_H_

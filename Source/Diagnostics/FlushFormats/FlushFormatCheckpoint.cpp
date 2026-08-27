@@ -7,6 +7,7 @@
 #include "Diagnostics/ParticleDiag/ParticleDiag.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
 #include "Fields.H"
+#include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "Particles/WarpXParticleContainer.H"
 #include "Utils/TextMsg.H"
 #include "WarpX.H"
@@ -21,6 +22,8 @@
 #include <AMReX_REAL.H>
 #include <AMReX_Utility.H>
 #include <AMReX_VisMF.H>
+
+#include <fstream>
 
 #ifndef WARPX_UNITY_ID
 #define WARPX_UNITY_ID
@@ -196,6 +199,8 @@ FlushFormatCheckpoint::WriteToFile (
 
     WriteReducedDiagsData(checkpointname);
 
+    WriteHybridPICData(checkpointname);
+
     VisMF::SetHeaderVersion(current_version);
 
 }
@@ -295,5 +300,25 @@ FlushFormatCheckpoint::WriteReducedDiagsData (std::string const & dir) const
     if (ParallelDescriptor::IOProcessor()) {
         auto & warpx = WarpX::GetInstance();
         warpx.reduced_diags->WriteCheckpointData(dir);
+    }
+}
+
+void
+FlushFormatCheckpoint::WriteHybridPICData (std::string const & dir) const
+{
+    if (ParallelDescriptor::IOProcessor()) {
+        auto & warpx = WarpX::GetInstance();
+        auto const * hybrid_pic_model = warpx.get_pointer_HybridPICModel();
+        if (hybrid_pic_model) {
+            // The live B-substep count is controller state, not
+            // configuration: a restart that re-seeds it from the inputs
+            // value against a mid-stroke field state manufactures a
+            // NaN-recovery on the first post-restart substep and
+            // permanently over-ratchets the count. Restored by
+            // WarpX::InitFromCheckpoint.
+            std::ofstream ofs(dir + "/hybrid_substeps.dat",
+                              std::ofstream::trunc);
+            ofs << "version 1\n" << hybrid_pic_model->m_substeps << "\n";
+        }
     }
 }
