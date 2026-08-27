@@ -5835,6 +5835,35 @@ Jacobian probes.
     live-coupled iterate residual and the end-of-step ``externalcoilfinish``
     commit is unaffected.
 
+.. pp:param:: implicit_mhd.circuit_driver
+    :type: ``string``
+    :default: ``python``
+
+    Which coupler fires at the circuit hook points when
+    :pp:param:`implicit_mhd.external_field_iteration` is on. ``python``
+    (bit-identical default) executes the
+    ``externalcoiltheta``/``externalcoilfinish`` callbacks. ``native``
+    drives the C++ circuit-coupling engine in-process instead (requires
+    :pp:param:`circuit.coils` and :pp:param:`circuit.engine`, typically
+    ``external`` with a compiled plugin): each firing measures the
+    iterate's plasma flux linkages with the engine's batched device
+    probes (one device pass, one stream synchronization and one
+    all-reduce per measurement, reusing the plasma current the residual
+    evaluation just computed), re-advances the engine from the committed
+    step entry to the theta-stage time (``accept = false``: repeatable,
+    discontinuous engine transitions stay latched at committed state)
+    and realizes the returned coil scales through the same external-field
+    refresh as the python path. The end-of-step commit performs the
+    single ``accept = true`` advance over :math:`[t^n, t^{n+1}]` on the
+    accepted state, where engine switches/stage swaps latch, followed by
+    the engine's ``FinishStep``. Honors both
+    :pp:param:`implicit_mhd.circuit_hook_scope` values: ``residual``
+    restores exact circuit-in-residual coupling (the python path's
+    per-evaluation host round-trip and device-to-host flux pulls are
+    eliminated entirely); ``newton`` keeps the lagged quasi-Newton
+    economy. The engine passes the measured per-interval EMF unfiltered;
+    any smoothing is engine-side policy.
+
 .. pp:param:: implicit_mhd.mass_density(x,y,z)
     :type: ``string``
     :unit: :math:`\mathrm{kg\,m^{-3}}`

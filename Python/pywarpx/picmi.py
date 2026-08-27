@@ -2803,6 +2803,19 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         round-trips per step, converged answer unchanged to solver
         tolerance).
 
+    circuit_driver: str, default="python"
+        Which coupler fires at the circuit hook points when
+        external_field_iteration is on. "python" (bit-identical
+        default) executes the externalcoiltheta/externalcoilfinish
+        callbacks. "native" drives the C++ circuit-coupling engine
+        in-process (requires circuit.coils and circuit.engine,
+        typically HybridPICSolver(circuit=CircuitCoupling(...,
+        engine="external", plugin_library=...))): batched device flux
+        probes (one device pass, one sync, one all-reduce per
+        measurement) and an in-process circuit advance replace the
+        python round-trip and its per-evaluation device-to-host
+        copies; with circuit_hook_scope="residual" this restores
+        EXACT circuit-in-residual coupling at native cost.
 
     resistive_theta: float, optional
         Time centering of the dissipative Ohm terms (eta J including the
@@ -2858,6 +2871,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         vacuum_mass_density=None,
         external_field_iteration=None,
         circuit_hook_scope=None,
+        circuit_driver=None,
         vacuum_drag_rate=None,
         halo_pedestal_fraction=None,
         halo_pedestal_drag_rate=None,
@@ -2941,6 +2955,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.vacuum_mass_density = vacuum_mass_density
         self.external_field_iteration = external_field_iteration
         self.circuit_hook_scope = circuit_hook_scope
+        self.circuit_driver = circuit_driver
         self.vacuum_drag_rate = vacuum_drag_rate
         self.halo_pedestal_fraction = halo_pedestal_fraction
         self.halo_pedestal_drag_rate = halo_pedestal_drag_rate
@@ -3030,6 +3045,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.vacuum_mass_density = self.vacuum_mass_density
         implicit_mhd.external_field_iteration = self.external_field_iteration
         implicit_mhd.circuit_hook_scope = self.circuit_hook_scope
+        implicit_mhd.circuit_driver = self.circuit_driver
         implicit_mhd.vacuum_drag_rate = self.vacuum_drag_rate
         implicit_mhd.halo_pedestal_fraction = self.halo_pedestal_fraction
         implicit_mhd.halo_pedestal_drag_rate = self.halo_pedestal_drag_rate
