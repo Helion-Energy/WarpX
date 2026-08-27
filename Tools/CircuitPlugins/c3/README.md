@@ -147,24 +147,30 @@ B +249.7787 mWb on both sides, post-swap lock-flux drift 3.1e-12 /
 
 ## Remaining WarpX-side integration TODOs
 
-1. **Matrix-file generation**: the deck/driver must export the
-   `c3-mel-blocks v1` file from its mesh probe
-   (`_bank_discrete_inductance_matrices` + the ring-kernel overrides) at
-   setup, or the loader grows a handshake to pass M_EE/M_EW directly.
-2. **Ring/lock eps ports**: Define currently carries only the coil
-   ports; passive rings get eps = 0 inside the plugin. The deck gives
-   rings their own probes and eps ports -- the driver must Define them
-   (the plugin already maps any east channel by name) once the coupler
-   plumbs ring flux probes.
-3. **Painted scales for rings/extra**: only Define'd ports return
-   scales; D03/D04 painting (`--paint-d0304`) and ring painted modes
-   need driver-side ports + I_ref conventions.
-4. **Restart plumbing**: pass `preroll=0` in the plugin config on
-   restart runs (Define otherwise re-runs the bias soak before
-   ReadCheckpoint overwrites it -- correct but wasted minutes).
-5. **Checkpoint I/O rank**: WriteCheckpoint writes one file; the driver
-   must call it on the I/O rank only (per the ABI header) and fan the
-   file out with the WarpX checkpoint.
+Driver status (the in-tree `Source/Circuit` engine +
+`implicit_mhd.circuit_driver = native`):
+
+1. **Matrix-file generation** -- OPEN (deck-side export is canonical):
+   `validation/export_case.py` writes the `c3-mel-blocks v1` file from
+   the deck's mesh probe (`_bank_discrete_inductance_matrices` + the
+   ring-kernel overrides); the deck passes its path through
+   `circuit.plugin_config`. A WarpX-side generator would duplicate the
+   deck's amp-turn/mirror conventions and is deferred.
+2. **Ring/lock eps ports** -- MECHANISM LANDED, deck wiring open: the
+   coupler measures ANY `circuit.coils` entry (batched probes, disk or
+   reciprocity) and the plugin maps east channels by name, so rings are
+   declared as coils with their own probes and `python_scale` fields.
+   The deck-side ring declarations (positions, I_ref conventions) are
+   the remaining piece.
+3. **Painted scales for rings/extra** -- OPEN (deck-side conventions;
+   D03/D04 painting and ring painted modes need deck ports + I_ref
+   choices).
+4. **Restart plumbing** -- CLOSED: `circuit.plugin_restart_config`
+   replaces `plugin_config` on restart runs; set it to the same string
+   plus `,preroll=0` (ReadCheckpoint supersedes the bias soak).
+5. **Checkpoint I/O rank** -- CLOSED: the engine calls WriteCheckpoint
+   on the I/O rank only and restores on every rank at InitData, next to
+   the scale-segment checkpoint (`circuit_coupling.dat`).
 6. **Performance**: the dense LU is ~6 s per factorization at the
    full-mirror 2464 unknowns (fine offline; the LRU cache keeps counts
    low). If in-loop cost matters, port the blocked/tiled factorization
