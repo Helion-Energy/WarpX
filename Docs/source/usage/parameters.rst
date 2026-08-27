@@ -6210,7 +6210,37 @@ Jacobian probes.
 
     With :pp:param:`circuit.engine` = ``external``, a free-form string handed to the
     engine's ``Define`` (typically the path of the engine's own configuration file; its
-    format is entirely the engine's business).
+    format is entirely the engine's business). An inline ``key=value,...`` string must be
+    double-quoted in the inputs so the parameter parser keeps it whole.
+
+.. pp:param:: circuit.plugin_restart_config
+    :type: ``str``
+    :optional:
+
+    Optional replacement for :pp:param:`circuit.plugin_config` on restart runs. The
+    restored checkpoint (``ExternalCircuit::ReadCheckpoint``) supersedes any engine-side
+    boot state, so a restart configuration can skip boot work that ``Define`` would
+    otherwise redo (e.g. a machine-time pre-roll). When unset, restarts hand ``Define``
+    the ordinary :pp:param:`circuit.plugin_config`.
+
+.. pp:param:: circuit.probe_crosscheck
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Validation knob: cross-check every batched linkage measurement against the
+    single-coil reference probes (``DiskFluxLinkage``/``ReciprocityLinkage``), print the
+    per-coil deltas and abort when they disagree beyond
+    :pp:param:`circuit.probe_crosscheck_rtol`. The batched path folds the identical
+    integrand factors into per-coil weight tables and differs from the reference only in
+    floating-point summation order.
+
+.. pp:param:: circuit.probe_crosscheck_rtol
+    :type: ``float``
+    :default: ``1.e-12``
+    :optional:
+
+    Relative disagreement bound of :pp:param:`circuit.probe_crosscheck`.
 
 .. pp:param:: circuit.coupling.corrector_iterations
     :type: ``int``
