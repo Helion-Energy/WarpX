@@ -1207,6 +1207,20 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# device-assembly parity twin (single rank, so the device value refresh
+# engages): the device-refreshed CSR values are gated bitwise against the
+# host emission+fold at every preconditioner update, on top of the
+# roundoff matvec check; physics assertions are the baseline's
+add_warpx_test(
+    test_rz_theta_implicit_mhd_resistive_pc_assembly_device  # name
+    RZ  # dims
+    1  # nprocs
+    inputs_test_rz_theta_implicit_mhd_resistive_pc_assembly_device  # inputs
+    "analysis_mhd_vacuum_resistive_rz.py diags/diag000000 diags/diag000002"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # banded twin: the same preconditioned physics with the resistive block
 # inverted by the block-banded LU along z (dense radial blocks treat the
 # axis/wall/halo coupling exactly; periodic-z wraps PC-grade dropped); one
