@@ -13,13 +13,16 @@
 #include <AMReX_Array.H>
 #include <AMReX_BLProfiler.H>
 #include <AMReX_Geometry.H>
+#include <AMReX_GpuAtomic.H>
 #include <AMReX_GpuContainers.H>
 #include <AMReX_GpuDevice.H>
+#include <AMReX_GpuLaunch.H>
 #include <AMReX_iMultiFab.H>
 #include <AMReX_Loop.H>
 #include <AMReX_MFIter.H>
 #include <AMReX_MultiFab.H>
 #include <AMReX_ParallelDescriptor.H>
+#include <AMReX_ParmParse.H>
 #include <AMReX_Vector.H>
 
 #if defined(WARPX_USE_CUDSS)
@@ -33,13 +36,219 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <string>
 #include <utility>
 
 namespace warpx::mhd_pc
 {
+
+/**
+ * \brief Device-copyable view of the direct solver's canonical unknown
+ * indexing: the exact integer arithmetic of the host-side
+ * WrapPoint/GlobalIndex pair (periodic directions wrap to the low-side
+ * image, row-major over the canonical component ranges), usable inside
+ * kernels.
+ */
+struct DirectIndexView
+{
+    amrex::GpuArray<amrex::Long, 3> component_offset = {0, 0, 0};
+    amrex::GpuArray<amrex::GpuArray<int, AMREX_SPACEDIM>, 3> component_low = {};
+    amrex::GpuArray<amrex::GpuArray<int, AMREX_SPACEDIM>, 3> component_high = {};
+    amrex::GpuArray<int, AMREX_SPACEDIM> domain_low = {};
+    amrex::GpuArray<int, AMREX_SPACEDIM> domain_length = {};
+    amrex::GpuArray<int, AMREX_SPACEDIM> domain_periodic = {};
+
+    /** \brief Canonical unknown index of a stored face point. */
+    [[nodiscard]] AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Long
+    Index (const int a_component, const int i, const int j, const int k) const
+    {
+        const int point[3] = {i, j, k};
+        amrex::Long index = 0;
+        for (int direction = AMREX_SPACEDIM - 1; direction >= 0; --direction)
+        {
+            int wrapped = point[direction];
+            if (domain_periodic[direction])
+            {
+                int offset =
+                    (wrapped - domain_low[direction]) % domain_length[direction];
+                if (offset < 0)
+                {
+                    offset += domain_length[direction];
+                }
+                wrapped = domain_low[direction] + offset;
+            }
+            index = index * (component_high[a_component][direction] -
+                             component_low[a_component][direction] + 1) +
+                    (wrapped - component_low[a_component][direction]);
+        }
+        return component_offset[a_component] + index;
+    }
+};
+
+namespace direct_detail
+{
+
+/**
+ * \brief Recompute the owned rows of one face component directly on the
+ * device: re-run the shared stencil emission on the coefficient
+ * MultiFabs' device arrays and accumulate the values into the frozen CSR
+ * slots through the entry-to-slot map, in the exact per-row order of the
+ * host pattern build (the identity diagonal first, then the emission).
+ * Each canonical row is owned by exactly one stored point, so its slots
+ * are touched by a single thread and the accumulation needs no atomics.
+ * Emissions beyond the frozen per-row count are dropped and counted in
+ * a_structure_errors (a structure change is an assembly bug; the caller
+ * asserts the count is zero).
+ */
+inline void
+RefreshComponentValues (const ResistiveStencilConstants& a_constants,
+                        const int a_component,
+                        const amrex::iMultiFab& a_entry_base,
+                        const amrex::Array<const amrex::MultiFab*, 3>& a_eta_edge,
+                        const amrex::Array<const amrex::MultiFab*, 3>& a_eta_h_edge,
+                        const amrex::Array<const amrex::MultiFab*, 3>& a_hall_edge,
+                        const amrex::Array<const amrex::MultiFab*, 3>& a_inertia_edge,
+                        const int* const a_entry_slot, amrex::Real* const a_values,
+                        int* const a_structure_errors)
+{
+    for (amrex::MFIter mfi(a_entry_base); mfi.isValid(); ++mfi)
+    {
+        ResistiveStencilArrays arrays;
+        for (int field = 0; field < 3; ++field)
+        {
+            if (a_eta_edge[field] != nullptr)
+            {
+                arrays.eta[field] = a_eta_edge[field]->const_array(mfi);
+            }
+            if (a_eta_h_edge[field] != nullptr)
+            {
+                arrays.eta_h[field] = a_eta_h_edge[field]->const_array(mfi);
+            }
+            if (a_hall_edge[field] != nullptr)
+            {
+                arrays.hall[field] = a_hall_edge[field]->const_array(mfi);
+            }
+            if (a_inertia_edge[field] != nullptr)
+            {
+                arrays.inertia[field] = a_inertia_edge[field]->const_array(mfi);
+            }
+        }
+        const auto entry_base = a_entry_base.const_array(mfi);
+        const ResistiveStencilConstants constants = a_constants;
+        const int row_component = a_component;
+        amrex::ParallelFor(
+            mfi.validbox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                const int base = entry_base(i, j, k, 0);
+                if (base < 0)
+                {
+                    return; // a stored duplicate, not the owned image
+                }
+                const int count = entry_base(i, j, k, 1);
+                int emitted = 0;
+                const auto record = [&] (const amrex::Real a_value)
+                {
+                    if (emitted < count)
+                    {
+                        a_values[a_entry_slot[base + emitted]] += a_value;
+                    }
+                    ++emitted;
+                };
+                // The identity of I + A; the stencil emits only A.
+                record(amrex::Real(1.0));
+                EmitResistiveRow(
+                    constants, arrays, row_component, i, j, k,
+                    [&] (const int a_column_component, const int ic, const int jc,
+                         const int kc, const amrex::Real a_value)
+                    {
+                        // The columns are frozen in the entry-to-slot map.
+                        amrex::ignore_unused(a_column_component, ic, jc, kc);
+                        record(a_value);
+                    });
+                if (emitted != count)
+                {
+                    amrex::Gpu::Atomic::AddNoRet(a_structure_errors, 1);
+                }
+            });
+    }
+}
+
+/** \brief Gather the owned stored faces of one component into the
+ * canonical device right-hand side (single-rank: the owned faces tile
+ * the unknowns, so every element is written exactly once). */
+inline void
+GatherComponentRhs (const DirectIndexView& a_view, const int a_component,
+                    const amrex::iMultiFab& a_entry_base,
+                    const amrex::MultiFab& a_faces, amrex::Real* const a_rhs)
+{
+    for (amrex::MFIter mfi(a_entry_base); mfi.isValid(); ++mfi)
+    {
+        const auto entry_base = a_entry_base.const_array(mfi);
+        const auto faces = a_faces.const_array(mfi);
+        const DirectIndexView view = a_view;
+        const int component = a_component;
+        amrex::ParallelFor(mfi.validbox(),
+                           [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                           {
+                               if (entry_base(i, j, k, 0) < 0)
+                               {
+                                   return;
+                               }
+                               a_rhs[view.Index(component, i, j, k)] =
+                                   faces(i, j, k);
+                           });
+    }
+}
+
+/** \brief Scatter the canonical device solution to every stored face of
+ * one component (duplicated faces read the same canonical unknown, so
+ * they stay bitwise consistent). */
+inline void
+ScatterComponentSolution (const DirectIndexView& a_view, const int a_component,
+                          const amrex::Real* const a_solution,
+                          amrex::MultiFab& a_faces)
+{
+    for (amrex::MFIter mfi(a_faces); mfi.isValid(); ++mfi)
+    {
+        const auto faces = a_faces.array(mfi);
+        const DirectIndexView view = a_view;
+        const int component = a_component;
+        amrex::ParallelFor(mfi.validbox(),
+                           [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                           {
+                               faces(i, j, k) =
+                                   a_solution[view.Index(component, i, j, k)];
+                           });
+    }
+}
+
+/** \brief Zero a device vector of matrix values. */
+inline void
+ZeroRealVector (amrex::Real* const a_data, const std::size_t a_size)
+{
+    amrex::ParallelFor(static_cast<amrex::Long>(a_size),
+                       [=] AMREX_GPU_DEVICE (amrex::Long flat)
+                       {
+                           a_data[flat] = amrex::Real(0.0);
+                       });
+}
+
+/** \brief Zero a single device counter. */
+inline void
+ZeroIntScalar (int* const a_data)
+{
+    amrex::single_task([=] AMREX_GPU_DEVICE ()
+                       {
+                           *a_data = 0;
+                       });
+}
+
+} // namespace direct_detail
 
 /**
  * \brief Exact sparse inverse of the resistive block operator I + A,
@@ -65,6 +274,20 @@ namespace warpx::mhd_pc
  * factorizes and solves for all ranks; the solution is broadcast and
  * scattered, which also keeps duplicated stored faces bitwise
  * consistent across ranks.
+ *
+ * Single-rank runs (the production configuration) refresh the values
+ * DEVICE-RESIDENT after the one-time host pattern freeze: the shared
+ * stencil emission is re-run in kernels on the coefficient MultiFabs'
+ * device arrays and scattered through a device copy of the frozen
+ * entry-to-slot map, and each application packs the right-hand side and
+ * unpacks the solution on the device -- no per-refreeze coefficient
+ * mirrors and no per-apply host round trip
+ * (implicit_mhd.resistive_direct_device_assembly = auto/on/off, default
+ * auto = on for single-rank runs). The host gather path remains the
+ * multi-rank fallback, and pc_mhd_block.resistive_validate_assembly runs
+ * both paths and asserts the two CSR value arrays agree bitwise (<= 4
+ * ULP; exact equality expected and observed on CPU builds, the allowance
+ * absorbs device FMA contraction only).
  *
  * The numeric backend is NVIDIA cuDSS (CUDA builds configured with
  * WarpX_CUDSS=ON). Assembly and the roundoff matvec validation against
@@ -111,6 +334,24 @@ class ResistiveDirectSolver
                          nullptr, nullptr, nullptr});
 
         [[nodiscard]] bool IsDefined () const { return m_is_defined; }
+
+        /**
+         * \brief Run the host assembly alongside the device value
+         * refresh at every update so the two CSR value arrays can be
+         * compared bitwise (pc_mhd_block.resistive_validate_assembly).
+         */
+        void SetValidationMode (const bool a_validate)
+        {
+            m_validate_parity = a_validate;
+        }
+
+        /** \brief Whether the values are refreshed device-resident
+         * (single-rank; implicit_mhd.resistive_direct_device_assembly).
+         */
+        [[nodiscard]] bool UsesDeviceAssembly () const
+        {
+            return m_use_device_assembly;
+        }
 
         /**
          * \brief Recompute the matrix values from the frozen eta_field
@@ -225,6 +466,41 @@ class ResistiveDirectSolver
          * rank's global matrix. */
         void FoldGlobalValues ();
 
+        /** \brief One-time htod of the frozen entry-to-slot map and the
+         * per-row emission ranges; allocates the device CSR values
+         * buffer the refreshes update in place (single-rank device
+         * assembly only). */
+        void UploadFrozenMaps ();
+
+        /** \brief Device value refresh through the frozen maps (see
+         * direct_detail::RefreshComponentValues); asserts the emission
+         * structure is unchanged. */
+        void RefreshValuesOnDevice (
+            const ResistiveStencilConstants& a_constants,
+            const amrex::Array<const amrex::MultiFab*, 3>& a_eta_edge,
+            const amrex::Array<const amrex::MultiFab*, 3>& a_eta_h_edge,
+            const amrex::Array<const amrex::MultiFab*, 3>& a_hall_edge,
+            const amrex::Array<const amrex::MultiFab*, 3>& a_inertia_edge);
+
+        /** \brief Bitwise gate of the device-refreshed CSR values
+         * against the host emission+fold on the same frozen state
+         * (validation mode only; <= 4 ULP asserted, see the class
+         * comment). */
+        void CheckAssemblyParity () const;
+
+        /** \brief Monotonic unsigned image of the FP64 total order (the
+         * standard sign-magnitude flip), for ULP distances. */
+        [[nodiscard]] static std::uint64_t
+        OrderedBits (const amrex::Real a_value)
+        {
+            static_assert(sizeof(amrex::Real) == sizeof(std::uint64_t),
+                          "the assembly parity gate expects FP64 amrex::Real");
+            std::uint64_t bits = 0;
+            std::memcpy(&bits, &a_value, sizeof(bits));
+            return (bits >> 63U) != 0U ? ~bits
+                                       : (bits | 0x8000000000000000ULL);
+        }
+
         bool m_is_defined = false;
         bool m_pattern_built = false;
 
@@ -266,6 +542,26 @@ class ResistiveDirectSolver
         amrex::Vector<amrex::Real> m_rhs;
         amrex::Vector<amrex::Real> m_solution;
 
+        // Single-rank device assembly (see the class comment): the frozen
+        // per-row emission ranges (component 0 the first local entry of
+        // the row, component 1 the entry count, -1 marking stored
+        // duplicates), the device entry-to-slot map, the device CSR
+        // values the refreshes update in place, and the structure-change
+        // counter the refresh kernels flag into.
+        bool m_use_device_assembly = false;
+        bool m_validate_parity = false;
+        DirectIndexView m_index_view;
+        amrex::Array<std::unique_ptr<amrex::iMultiFab>, 3> m_entry_base_host;
+        amrex::Array<std::unique_ptr<amrex::iMultiFab>, 3> m_entry_base_device;
+        amrex::Gpu::DeviceVector<int> m_entry_slot_device;
+        amrex::Gpu::DeviceVector<amrex::Real> m_values_device;
+        amrex::Gpu::DeviceVector<int> m_structure_errors_device;
+
+        // Device solve vectors (device-filled in the single-rank device
+        // path, staged from the host vectors otherwise).
+        amrex::Gpu::DeviceVector<amrex::Real> m_device_rhs;
+        amrex::Gpu::DeviceVector<amrex::Real> m_device_solution;
+
 #if defined(WARPX_USE_CUDSS)
         bool m_cudss_ready = false;
         cudssHandle_t m_cudss_handle = nullptr;
@@ -277,8 +573,6 @@ class ResistiveDirectSolver
         amrex::Gpu::DeviceVector<int> m_device_row_offsets;
         amrex::Gpu::DeviceVector<int> m_device_column_indices;
         amrex::Gpu::DeviceVector<amrex::Real> m_device_values;
-        amrex::Gpu::DeviceVector<amrex::Real> m_device_rhs;
-        amrex::Gpu::DeviceVector<amrex::Real> m_device_solution;
 #endif
 };
 
@@ -356,6 +650,50 @@ ResistiveDirectSolver::Define (const amrex::Geometry& a_geometry,
         "ResistiveDirectSolver requires a nonempty level with fewer than 2^31 face "
         "unknowns");
 
+    // Device value refresh and device RHS/solution transport (see the
+    // class comment): auto engages on single-rank runs; multi-rank runs
+    // keep the host gather path.
+    {
+        std::string device_assembly = "auto";
+        const amrex::ParmParse pp_implicit_mhd("implicit_mhd");
+        pp_implicit_mhd.query("resistive_direct_device_assembly", device_assembly);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            device_assembly == "auto" || device_assembly == "on" ||
+                device_assembly == "off",
+            "implicit_mhd.resistive_direct_device_assembly must be auto, on, or "
+            "off");
+        const bool single_rank = amrex::ParallelDescriptor::NProcs() == 1;
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            device_assembly != "on" || single_rank,
+            "implicit_mhd.resistive_direct_device_assembly = on requires a "
+            "single-rank run (multi-rank assembles through the host gather)");
+        m_use_device_assembly =
+            device_assembly == "on" || (device_assembly == "auto" && single_rank);
+    }
+
+    // Device-copyable twin of WrapPoint/GlobalIndex for the kernels.
+    for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+    {
+        m_index_view.domain_low[direction] = domain.smallEnd(direction);
+        m_index_view.domain_length[direction] = domain.length(direction);
+        m_index_view.domain_periodic[direction] =
+            m_geometry.isPeriodic(direction) ? 1 : 0;
+    }
+    for (int component = 0; component < 3; ++component)
+    {
+        const ComponentMap& map = m_component_map[component];
+        if (!map.active)
+        {
+            continue;
+        }
+        m_index_view.component_offset[component] = map.offset;
+        for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+        {
+            m_index_view.component_low[component][direction] = map.low[direction];
+            m_index_view.component_high[component][direction] = map.high[direction];
+        }
+    }
+
     for (int component = 0; component < 3; ++component)
     {
         if (!m_component_map[component].active)
@@ -379,6 +717,19 @@ ResistiveDirectSolver::Define (const amrex::Geometry& a_geometry,
         m_face_host[component] = std::make_unique<amrex::MultiFab>(
             faces.boxArray(), faces.DistributionMap(), 1, 0,
             amrex::MFInfo().SetArena(amrex::The_Pinned_Arena()));
+
+        if (m_use_device_assembly)
+        {
+            // Frozen per-row emission ranges, filled at the pattern
+            // freeze and uploaded once (see UploadFrozenMaps).
+            m_entry_base_host[component] = std::make_unique<amrex::iMultiFab>(
+                faces.boxArray(), faces.DistributionMap(), 2, 0,
+                amrex::MFInfo().SetArena(amrex::The_Pinned_Arena()));
+            m_entry_base_host[component]->setVal(-1, 0, 1, 0);
+            m_entry_base_host[component]->setVal(0, 1, 1, 0);
+            m_entry_base_device[component] = std::make_unique<amrex::iMultiFab>(
+                faces.boxArray(), faces.DistributionMap(), 2, 0);
+        }
 
         // The device-to-host mirror copies require matching ghost layouts.
         const amrex::MultiFab& eta = *a_eta_edge[component];
@@ -419,6 +770,8 @@ ResistiveDirectSolver::Define (const amrex::Geometry& a_geometry,
 
     m_rhs.resize(m_num_rows);
     m_solution.resize(m_num_rows);
+    m_device_rhs.resize(m_num_rows);
+    m_device_solution.resize(m_num_rows);
     m_is_defined = true;
 }
 
@@ -453,6 +806,11 @@ ResistiveDirectSolver::EmitLocalRows (const ResistiveStencilConstants& a_constan
         {
             const amrex::Box box = mfi.validbox();
             const auto owner = m_owner_host[component]->const_array(mfi);
+            amrex::Array4<int> entry_base;
+            if (build_pattern && m_entry_base_host[component])
+            {
+                entry_base = m_entry_base_host[component]->array(mfi);
+            }
             ResistiveStencilArrays arrays;
             for (int eta_component = 0; eta_component < 3; ++eta_component)
             {
@@ -488,6 +846,7 @@ ResistiveDirectSolver::EmitLocalRows (const ResistiveStencilConstants& a_constan
                     const amrex::IntVect point(AMREX_D_DECL(i, j, k));
                     const amrex::Long row = GlobalIndex(component, WrapPoint(point));
                     const auto row_index = static_cast<int>(row);
+                    const std::size_t row_entry_start = entry;
                     ++owned_rows;
                     // The identity of I + A; the stencil emits only A.
                     record(row_index, row_index, amrex::Real(1.0));
@@ -502,6 +861,14 @@ ResistiveDirectSolver::EmitLocalRows (const ResistiveStencilConstants& a_constan
                                 a_column_component, WrapPoint(column_point));
                             record(row_index, static_cast<int>(column), a_value);
                         });
+                    if (entry_base)
+                    {
+                        // Frozen per-row emission range of the device
+                        // value refresh (local entry order).
+                        entry_base(i, j, k, 0) = static_cast<int>(row_entry_start);
+                        entry_base(i, j, k, 1) =
+                            static_cast<int>(entry - row_entry_start);
+                    }
                 });
         }
     }
@@ -686,6 +1053,15 @@ ResistiveDirectSolver::AssembleValues (
              m_inertia_host[2] != nullptr),
         "ResistiveDirectSolver electron-inertia assembly requires the "
         "inertia-coefficient staggerings at Define()");
+    const bool first_assembly = !m_pattern_built;
+    // The one-time pattern freeze runs on the host; afterwards the host
+    // emission+fold survives only as the multi-rank fallback and as the
+    // parity reference of the validation mode -- the production
+    // single-rank refreeze is the device refresh alone, with no
+    // coefficient mirror traffic.
+    const bool host_assembly =
+        first_assembly || !m_use_device_assembly || m_validate_parity;
+
     for (int component = 0; component < 3; ++component)
     {
         if (!m_component_map[component].active)
@@ -695,39 +1071,160 @@ ResistiveDirectSolver::AssembleValues (
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             a_eta_edge[component] == m_eta_source[component],
             "ResistiveDirectSolver eta_field staggerings changed after Define()");
-        amrex::dtoh_memcpy(*m_eta_host[component], *a_eta_edge[component]);
+        if (host_assembly)
+        {
+            amrex::dtoh_memcpy(*m_eta_host[component], *a_eta_edge[component]);
+        }
         if (m_eta_h_host[component])
         {
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 a_eta_h_edge[component] == m_eta_h_source[component],
                 "ResistiveDirectSolver eta_H staggerings changed after Define()");
-            amrex::dtoh_memcpy(*m_eta_h_host[component], *a_eta_h_edge[component]);
+            if (host_assembly)
+            {
+                amrex::dtoh_memcpy(*m_eta_h_host[component],
+                                   *a_eta_h_edge[component]);
+            }
         }
         if (m_hall_host[component])
         {
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 a_hall_edge[component] == m_hall_source[component],
                 "ResistiveDirectSolver Hall staggerings changed after Define()");
-            amrex::dtoh_memcpy(*m_hall_host[component], *a_hall_edge[component]);
+            if (host_assembly)
+            {
+                amrex::dtoh_memcpy(*m_hall_host[component], *a_hall_edge[component]);
+            }
         }
         if (m_inertia_host[component])
         {
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 a_inertia_edge[component] == m_inertia_source[component],
                 "ResistiveDirectSolver inertia staggerings changed after Define()");
-            amrex::dtoh_memcpy(*m_inertia_host[component],
-                               *a_inertia_edge[component]);
+            if (host_assembly)
+            {
+                amrex::dtoh_memcpy(*m_inertia_host[component],
+                                   *a_inertia_edge[component]);
+            }
         }
     }
-    amrex::Gpu::streamSynchronize();
 
-    const bool first_assembly = !m_pattern_built;
-    EmitLocalRows(a_constants);
+    if (host_assembly)
+    {
+        amrex::Gpu::streamSynchronize();
+        EmitLocalRows(a_constants);
+    }
     if (first_assembly)
     {
         BuildGlobalPattern();
+        if (m_use_device_assembly)
+        {
+            UploadFrozenMaps();
+        }
     }
-    FoldGlobalValues();
+    if (host_assembly)
+    {
+        FoldGlobalValues();
+    }
+    if (m_use_device_assembly)
+    {
+        RefreshValuesOnDevice(a_constants, a_eta_edge, a_eta_h_edge, a_hall_edge,
+                              a_inertia_edge);
+        if (host_assembly)
+        {
+            CheckAssemblyParity();
+        }
+    }
+}
+
+inline void
+ResistiveDirectSolver::UploadFrozenMaps ()
+{
+    // Single-rank device assembly: the gathered global entry order IS the
+    // local emission order (BuildGlobalPattern's single-rank branch), so
+    // the entry-to-slot map and the per-row emission ranges recorded at
+    // the pattern freeze index the same entries. One-time transfers.
+    for (int component = 0; component < 3; ++component)
+    {
+        if (m_entry_base_host[component])
+        {
+            amrex::htod_memcpy(*m_entry_base_device[component],
+                               *m_entry_base_host[component]);
+        }
+    }
+    m_entry_slot_device.resize(m_entry_slot.size());
+    amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_entry_slot.begin(),
+                          m_entry_slot.end(), m_entry_slot_device.begin());
+    m_values_device.resize(m_matrix_values.size());
+    m_structure_errors_device.resize(1);
+    amrex::Gpu::streamSynchronize();
+}
+
+inline void
+ResistiveDirectSolver::RefreshValuesOnDevice (
+    const ResistiveStencilConstants& a_constants,
+    const amrex::Array<const amrex::MultiFab*, 3>& a_eta_edge,
+    const amrex::Array<const amrex::MultiFab*, 3>& a_eta_h_edge,
+    const amrex::Array<const amrex::MultiFab*, 3>& a_hall_edge,
+    const amrex::Array<const amrex::MultiFab*, 3>& a_inertia_edge)
+{
+    BL_PROFILE("ResistiveDirect::RefreshValuesOnDevice()");
+
+    direct_detail::ZeroRealVector(m_values_device.data(), m_values_device.size());
+    direct_detail::ZeroIntScalar(m_structure_errors_device.data());
+    for (int component = 0; component < 3; ++component)
+    {
+        if (!m_component_map[component].active)
+        {
+            continue;
+        }
+        direct_detail::RefreshComponentValues(
+            a_constants, component, *m_entry_base_device[component], a_eta_edge,
+            a_eta_h_edge, a_hall_edge, a_inertia_edge, m_entry_slot_device.data(),
+            m_values_device.data(), m_structure_errors_device.data());
+    }
+    int structure_errors = 0;
+    amrex::Gpu::copy(amrex::Gpu::deviceToHost, m_structure_errors_device.begin(),
+                     m_structure_errors_device.end(), &structure_errors);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        structure_errors == 0,
+        "ResistiveDirectSolver device value refresh changed the emission "
+        "structure (the frozen sparsity pattern was violated)");
+}
+
+inline void
+ResistiveDirectSolver::CheckAssemblyParity () const
+{
+    // Bitwise gate of the device value refresh against the host
+    // emission+fold on the same frozen state: identical EmitResistiveRow
+    // arithmetic accumulated in the identical per-slot order, so exact
+    // FP64 equality is expected (and observed on CPU builds, where both
+    // paths run the same compiled code); the <= 4 ULP allowance absorbs
+    // device FMA contraction of the emission arithmetic only.
+    const std::size_t num_values = m_matrix_values.size();
+    amrex::Vector<amrex::Real> device_values(num_values);
+    amrex::Gpu::copy(amrex::Gpu::deviceToHost, m_values_device.begin(),
+                     m_values_device.end(), device_values.begin());
+    std::uint64_t max_ulp = 0;
+    amrex::Real max_difference = 0.0;
+    for (std::size_t slot = 0; slot < num_values; ++slot)
+    {
+        const std::uint64_t host_bits = OrderedBits(m_matrix_values[slot]);
+        const std::uint64_t device_bits = OrderedBits(device_values[slot]);
+        max_ulp = std::max(max_ulp, host_bits > device_bits
+                                        ? host_bits - device_bits
+                                        : device_bits - host_bits);
+        max_difference =
+            amrex::max(max_difference,
+                       std::abs(m_matrix_values[slot] - device_values[slot]));
+    }
+    amrex::Print() << "pc_mhd_block resistive direct assembly parity: max ULP = "
+                   << max_ulp << " (max |device - host| = " << max_difference
+                   << " over " << num_values << " values)\n";
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        max_ulp <= 4U,
+        "ResistiveDirectSolver device-assembled values differ from the host "
+        "assembly beyond FMA contraction (> 4 ULP)");
 }
 
 inline void
@@ -755,23 +1252,32 @@ ResistiveDirectSolver::Factorize ()
         WARPX_CUDSS_CHECK(cudssConfigCreate(&m_cudss_config));
         WARPX_CUDSS_CHECK(cudssDataCreate(m_cudss_handle, &m_cudss_data));
 
+        // Device assembly refreshes m_values_device in place, so the CSR
+        // wraps it directly; the host path stages through m_device_values.
         m_device_row_offsets.resize(m_row_offsets.size());
         m_device_column_indices.resize(m_column_indices.size());
-        m_device_values.resize(m_matrix_values.size());
-        m_device_rhs.resize(m_num_rows);
-        m_device_solution.resize(m_num_rows);
         amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_row_offsets.begin(),
                               m_row_offsets.end(), m_device_row_offsets.begin());
         amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_column_indices.begin(),
                               m_column_indices.end(), m_device_column_indices.begin());
-        amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_matrix_values.begin(),
-                              m_matrix_values.end(), m_device_values.begin());
+        amrex::Real* matrix_values = nullptr;
+        if (m_use_device_assembly)
+        {
+            matrix_values = m_values_device.data();
+        }
+        else
+        {
+            m_device_values.resize(m_matrix_values.size());
+            amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_matrix_values.begin(),
+                                  m_matrix_values.end(), m_device_values.begin());
+            matrix_values = m_device_values.data();
+        }
         amrex::Gpu::streamSynchronize();
 
         WARPX_CUDSS_CHECK(cudssMatrixCreateCsr(
             &m_cudss_matrix, num_rows, num_rows, num_values,
             m_device_row_offsets.data(), nullptr, m_device_column_indices.data(),
-            m_device_values.data(), CUDSS_R_32I, CUDSS_R_32I, CUDSS_R_64F,
+            matrix_values, CUDSS_R_32I, CUDSS_R_32I, CUDSS_R_64F,
             CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
         WARPX_CUDSS_CHECK(cudssMatrixCreateDn(&m_cudss_rhs, num_rows, 1, num_rows,
                                               m_device_rhs.data(), CUDSS_R_64F,
@@ -783,6 +1289,12 @@ ResistiveDirectSolver::Factorize ()
                                        m_cudss_config, m_cudss_data, m_cudss_matrix,
                                        m_cudss_solution, m_cudss_rhs));
         m_cudss_ready = true;
+    }
+    else if (m_use_device_assembly)
+    {
+        // The refresh already updated the wrapped device buffer in place
+        // (same stream: ordered before the factorization).
+        WARPX_CUDSS_CHECK(cudssMatrixSetValues(m_cudss_matrix, m_values_device.data()));
     }
     else
     {
@@ -808,40 +1320,60 @@ ResistiveDirectSolver::Solve (const amrex::Array<amrex::MultiFab*, 3>& a_faces)
     BL_PROFILE("ResistiveDirect::Solve()");
 
     // Gather the owned stored faces into the canonical right-hand side.
-    std::fill(m_rhs.begin(), m_rhs.end(), amrex::Real(0.0));
-    for (int component = 0; component < 3; ++component)
+    if (m_use_device_assembly)
     {
-        if (!m_component_map[component].active)
+        // Single-rank device path: pack the right-hand side on the
+        // device; every canonical element is owned locally, so the
+        // gather writes each element exactly once (no zero fill).
+        for (int component = 0; component < 3; ++component)
         {
-            continue;
-        }
-        amrex::dtoh_memcpy(*m_face_host[component], *a_faces[component]);
-        amrex::Gpu::streamSynchronize();
-        for (amrex::MFIter mfi(*m_face_host[component]); mfi.isValid(); ++mfi)
-        {
-            const amrex::Box box = mfi.validbox();
-            const auto owner = m_owner_host[component]->const_array(mfi);
-            const auto values = m_face_host[component]->const_array(mfi);
-            amrex::LoopOnCpu(box,
-                             [&] (int i, int j, int k)
-                             {
-                                 if (!owner(i, j, k))
-                                 {
-                                     return;
-                                 }
-                                 const amrex::IntVect point(AMREX_D_DECL(i, j, k));
-                                 m_rhs[GlobalIndex(component, WrapPoint(point))] =
-                                     values(i, j, k);
-                             });
+            if (!m_component_map[component].active)
+            {
+                continue;
+            }
+            direct_detail::GatherComponentRhs(m_index_view, component,
+                                              *m_entry_base_device[component],
+                                              *a_faces[component],
+                                              m_device_rhs.data());
         }
     }
-    if (amrex::ParallelDescriptor::NProcs() > 1)
+    else
     {
-        // The owned faces partition the unknowns, so the sum assembles
-        // the global right-hand side on the factorizing rank.
-        amrex::ParallelDescriptor::ReduceRealSum(
-            m_rhs.data(), static_cast<int>(m_num_rows),
-            amrex::ParallelDescriptor::IOProcessorNumber());
+        std::fill(m_rhs.begin(), m_rhs.end(), amrex::Real(0.0));
+        for (int component = 0; component < 3; ++component)
+        {
+            if (!m_component_map[component].active)
+            {
+                continue;
+            }
+            amrex::dtoh_memcpy(*m_face_host[component], *a_faces[component]);
+            amrex::Gpu::streamSynchronize();
+            for (amrex::MFIter mfi(*m_face_host[component]); mfi.isValid(); ++mfi)
+            {
+                const amrex::Box box = mfi.validbox();
+                const auto owner = m_owner_host[component]->const_array(mfi);
+                const auto values = m_face_host[component]->const_array(mfi);
+                amrex::LoopOnCpu(box,
+                                 [&] (int i, int j, int k)
+                                 {
+                                     if (!owner(i, j, k))
+                                     {
+                                         return;
+                                     }
+                                     const amrex::IntVect point(AMREX_D_DECL(i, j, k));
+                                     m_rhs[GlobalIndex(component, WrapPoint(point))] =
+                                         values(i, j, k);
+                                 });
+            }
+        }
+        if (amrex::ParallelDescriptor::NProcs() > 1)
+        {
+            // The owned faces partition the unknowns, so the sum assembles
+            // the global right-hand side on the factorizing rank.
+            amrex::ParallelDescriptor::ReduceRealSum(
+                m_rhs.data(), static_cast<int>(m_num_rows),
+                amrex::ParallelDescriptor::IOProcessorNumber());
+        }
     }
 
 #if defined(WARPX_USE_CUDSS)
@@ -849,20 +1381,44 @@ ResistiveDirectSolver::Solve (const amrex::Array<amrex::MultiFab*, 3>& a_faces)
     {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_cudss_ready, "ResistiveDirectSolver::Solve() called before Factorize()");
-        amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_rhs.begin(), m_rhs.end(),
-                              m_device_rhs.begin());
+        if (!m_use_device_assembly)
+        {
+            amrex::Gpu::copyAsync(amrex::Gpu::hostToDevice, m_rhs.begin(),
+                                  m_rhs.end(), m_device_rhs.begin());
+        }
         WARPX_CUDSS_CHECK(cudssExecute(m_cudss_handle, CUDSS_PHASE_SOLVE,
                                        m_cudss_config, m_cudss_data, m_cudss_matrix,
                                        m_cudss_solution, m_cudss_rhs));
-        amrex::Gpu::copyAsync(amrex::Gpu::deviceToHost, m_device_solution.begin(),
-                              m_device_solution.end(), m_solution.begin());
-        amrex::Gpu::streamSynchronize();
+        if (!m_use_device_assembly)
+        {
+            amrex::Gpu::copyAsync(amrex::Gpu::deviceToHost, m_device_solution.begin(),
+                                  m_device_solution.end(), m_solution.begin());
+            amrex::Gpu::streamSynchronize();
+        }
     }
 #else
     WARPX_ABORT_WITH_MESSAGE(
         "pc_mhd_block.resistive_solver = direct requires a CUDA build configured "
         "with WarpX_CUDSS=ON (NVIDIA cuDSS); chebyshev is the portable default");
 #endif
+
+    if (m_use_device_assembly)
+    {
+        // Unpack the device solution to every stored face (duplicated
+        // faces read the same canonical unknown).
+        for (int component = 0; component < 3; ++component)
+        {
+            if (!m_component_map[component].active)
+            {
+                continue;
+            }
+            direct_detail::ScatterComponentSolution(m_index_view, component,
+                                                    m_device_solution.data(),
+                                                    *a_faces[component]);
+        }
+        amrex::Gpu::streamSynchronize();
+        return;
+    }
 
     if (amrex::ParallelDescriptor::NProcs() > 1)
     {

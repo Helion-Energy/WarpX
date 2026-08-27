@@ -2790,6 +2790,12 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         marginal and sign-flipping. Values other than the global theta
         require fluid_flux="hlld".
 
+    resistive_direct_device_assembly: {"auto", "on", "off"}, optional
+        Device-resident value refresh and RHS/solution transport of the
+        direct resistive preconditioner block (single-rank runs only;
+        "auto", the default, engages it exactly there). "off" keeps the
+        host gather path everywhere.
+
     conduction_theta: float, optional
         Time centering of the thermal-conduction stage, in [0.5, 1];
         everything else keeps the global theta. Default: the global
@@ -2837,6 +2843,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         floor_ledger_file=None,
         vacuum_resistivity_diffusivity=None,
         resistive_theta=None,
+        resistive_direct_device_assembly=None,
         conduction_theta=None,
         fluid_flux=None,
         allow_hlld=None,
@@ -2917,6 +2924,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.floor_ledger_file = floor_ledger_file
         self.vacuum_resistivity_diffusivity = vacuum_resistivity_diffusivity
         self.resistive_theta = resistive_theta
+        self.resistive_direct_device_assembly = resistive_direct_device_assembly
         self.conduction_theta = conduction_theta
         self.fluid_flux = fluid_flux
         self.allow_hlld = allow_hlld
@@ -2930,9 +2938,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.conduction_chi_max = conduction_chi_max
         self.conduction_qs_chi = conduction_qs_chi
         self.conduction_qs_onset = conduction_qs_onset
-        self.conduction_qs_reference_temperature = (
-            conduction_qs_reference_temperature
-        )
+        self.conduction_qs_reference_temperature = conduction_qs_reference_temperature
         self.pressure_corner_width_fraction = pressure_corner_width_fraction
         self.r_open_fluid = r_open_fluid
         self.z_boundary_fluid = z_boundary_fluid
@@ -3009,6 +3015,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
             self.vacuum_resistivity_diffusivity
         )
         implicit_mhd.resistive_theta = self.resistive_theta
+        implicit_mhd.resistive_direct_device_assembly = (
+            self.resistive_direct_device_assembly
+        )
         implicit_mhd.conduction_theta = self.conduction_theta
         implicit_mhd.fluid_flux = self.fluid_flux
         implicit_mhd.allow_hlld = self.allow_hlld
@@ -3055,8 +3064,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.wall_ledger_file = self.wall_ledger_file
         implicit_mhd.wall_band_eta_override = self.wall_band_eta_override
         implicit_mhd.wall_field_freeze = self.wall_field_freeze
-        implicit_mhd.conduction_coefficient_state = (
-            self.conduction_coefficient_state)
+        implicit_mhd.conduction_coefficient_state = self.conduction_coefficient_state
         implicit_mhd.absorb_ledger_interval = self.absorb_ledger_interval
         implicit_mhd.absorb_ledger_file = self.absorb_ledger_file
         implicit_mhd.hllc_signal_closure = self.hllc_signal_closure
@@ -3414,9 +3422,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
                 self.reduced_electron_mass_ratio
             )
         if self.electron_inertia_bdf2 is not None:
-            pywarpx.hybridpicmodel.electron_inertia_bdf2 = (
-                self.electron_inertia_bdf2
-            )
+            pywarpx.hybridpicmodel.electron_inertia_bdf2 = self.electron_inertia_bdf2
         if self.electron_inertia_linear_below is not None:
             pywarpx.hybridpicmodel.electron_inertia_linear_below = (
                 self.electron_inertia_linear_below

@@ -1226,6 +1226,9 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
         {
             m_resistive_direct =
                 std::make_unique<warpx::mhd_pc::ResistiveDirectSolver>();
+            // Validation runs the host assembly next to the device value
+            // refresh so the two CSR value arrays can be gated bitwise.
+            m_resistive_direct->SetValidationMode(m_resistive_validate_assembly);
         }
         if (!m_resistive_direct->IsDefined())
         {
@@ -1233,17 +1236,28 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
                                        m_resistive_eta_h_edge, m_resistive_hall_edge,
                                        m_resistive_inertia_edge);
         }
+        const amrex::Real assemble_start = amrex::ParallelDescriptor::second();
         m_resistive_direct->AssembleValues(stencil_constants, m_resistive_eta_edge,
                                            m_resistive_eta_h_edge, m_resistive_hall_edge,
                                            m_resistive_inertia_edge);
+        const amrex::Real assemble_seconds =
+            amrex::ParallelDescriptor::second() - assemble_start;
         if (m_resistive_validate_assembly)
         {
             ValidateResistiveAssembly();
         }
+        amrex::Real factorize_seconds = 0.0;
         if (m_resistive_direct_enabled)
         {
+            const amrex::Real factorize_start = amrex::ParallelDescriptor::second();
             m_resistive_direct->Factorize();
+            factorize_seconds = amrex::ParallelDescriptor::second() - factorize_start;
         }
+        amrex::Print() << "pc_mhd_block resistive refreeze (direct, "
+                       << (m_resistive_direct->UsesDeviceAssembly() ? "device"
+                                                                    : "host")
+                       << " assembly): assemble " << assemble_seconds
+                       << " s, factorize " << factorize_seconds << " s\n";
     }
 
     if (m_resistive_banded_enabled)
@@ -1267,6 +1281,7 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
         if (first_factorization || m_banded_refreeze == "newton" ||
             this->m_time != m_banded_frozen_time)
         {
+            const amrex::Real refreeze_start = amrex::ParallelDescriptor::second();
             m_resistive_banded->AssembleValues(stencil_constants,
                                                m_resistive_eta_edge,
                                                m_resistive_eta_h_edge,
@@ -1274,6 +1289,12 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
                                                m_resistive_inertia_edge);
             m_resistive_banded->Factorize();
             m_banded_frozen_time = this->m_time;
+            // The banded scatter/factorization is device-resident already
+            // (no host mirrors); the print mirrors the direct solver's.
+            amrex::Print() << "pc_mhd_block resistive refreeze (banded, device "
+                              "assembly): "
+                           << amrex::ParallelDescriptor::second() - refreeze_start
+                           << " s\n";
         }
     }
 }
