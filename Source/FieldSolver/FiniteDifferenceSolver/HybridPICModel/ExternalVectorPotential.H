@@ -63,9 +63,12 @@ protected:
     // Clean div A
     bool m_do_clean_divA = true;
 
-    /** Piecewise-linear scale segment for python-driven coils: the coil
-     * scale is s_old at t_old and s_new at t_new, interpolated linearly in
-     * between. The E-field scale is the exact constant slope
+    /** Piecewise-linear scale segment for externally driven (e.g.
+     * circuit-coupled) fields: the field scale is s_old at t_old and s_new
+     * at t_new, interpolated linearly in between and extrapolated linearly
+     * beyond t_new (so a per-step push contract is required; a missed push
+     * silently ramps the drive, which UpdateHybridExternalFields warns
+     * about). The E-field scale is the exact constant slope
      * -(s_new - s_old)/(t_new - t_old), which is the discrete Faraday
      * partner of the linear B-scale (no finite-difference approximation).
      */
@@ -83,17 +86,57 @@ protected:
 
 public:
 
-    /** Set the piecewise-linear scale segment of a python-driven coil for
-     * the upcoming step. Must be called before the step's field refresh
-     * (e.g. from a "beforestep" callback); aborts if the coil was not
-     * declared with <name>.python_scale = 1 or the name is unknown.
+    /** Number of independent external vector-potential fields. */
+    [[nodiscard]] int nFields () const { return m_nFields; }
+
+    /** Registry base name of external field i (fields "<name>_Aext"). */
+    [[nodiscard]] const std::string& FieldName (int i) const { return m_field_names[i]; }
+
+    /** Scale of external field i at time t: the live piecewise-linear
+     * segment for SetScale-driven fields, otherwise the compiled
+     * A_time_external_function parser. */
+    [[nodiscard]] amrex::Real TimeScale (int i, amrex::Real t) const;
+
+    /** Whether external field i is scale-driven through SetScale. */
+    [[nodiscard]] bool UsesPythonScale (int i) const { return m_use_python_scale[i]; }
+
+    /** The live scale segment of field i (for checkpointing); returns
+     * false for parser-driven fields. */
+    bool GetScaleSegment (int i, amrex::Real& s_old, amrex::Real& s_new,
+                          amrex::Real& t_old, amrex::Real& t_new) const
+    {
+        if (!m_use_python_scale[i]) { return false; }
+        s_old = m_python_scale[i].s_old;
+        s_new = m_python_scale[i].s_new;
+        t_old = m_python_scale[i].t_old;
+        t_new = m_python_scale[i].t_new;
+        return true;
+    }
+
+    /** Set the piecewise-linear scale segment of a scale-driven field for
+     * the upcoming coupling interval. Must be called before the interval's
+     * field refresh (e.g. from a "beforestep" callback or the circuit
+     * coupler); aborts if the field was not declared with
+     * <name>.python_scale = 1 or the name is unknown.
      */
     void SetScale (const std::string& coil_name, amrex::Real s_old,
                    amrex::Real s_new, amrex::Real t_old, amrex::Real t_new);
 
-    /** Current scale of a coil at time t (parser or python segment). */
+    /** Current scale of a named field at time t (parser or segment). */
     [[nodiscard]] amrex::Real GetScale (const std::string& coil_name,
                                         amrex::Real t) const;
+
+protected:
+
+    /** Whether any field is SetScale-driven (fixed after ReadParameters). */
+    bool m_any_python_scale = false;
+
+    /** Whether the parser-driven ("static within a coupling interval")
+     * partial sums cached in the <...>_static registry fields are current.
+     * Set by an All refresh, consumed by CircuitOnly refreshes. */
+    bool m_static_cache_valid = false;
+
+public:
 
     // Default Constructor
     ExternalVectorPotential ();
@@ -116,7 +159,7 @@ public:
     void InitData ();
 
     void CalculateExternalCurlA ();
-    void CalculateExternalCurlA (std::string& coil_name);
+    void CalculateExternalCurlA (const std::string& coil_name);
 
     AMREX_FORCE_INLINE
     void AddExternalFieldFromVectorPotential (
@@ -126,9 +169,23 @@ public:
         std::array< std::unique_ptr<amrex::iMultiFab>,3> const& eb_update,
         int lev);
 
+    /** Which fields to re-accumulate in UpdateHybridExternalFields.
+     *
+     * All: every field; when SetScale-driven fields exist, the sums of the
+     * parser-driven fields are cached to the <...>_static registry fields
+     * as a side effect. CircuitOnly: reuse those cached sums (the
+     * parser-driven fields stay frozen at their last All refresh, exactly
+     * as they are frozen between the step's scheduled refreshes) and
+     * re-accumulate only the SetScale-driven fields at their live
+     * segments -- the cheap per-substep refresh for circuit-coupled
+     * drives. Both modes end with a single FillBoundary per component.
+     */
+    enum class RefreshMode { All, CircuitOnly };
+
     void UpdateHybridExternalFields (
         amrex::Real t,
-        amrex::Real dt
+        amrex::Real dt,
+        RefreshMode mode = RefreshMode::All
     );
 };
 
