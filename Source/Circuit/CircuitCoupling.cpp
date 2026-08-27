@@ -97,11 +97,18 @@ CircuitCoupling::CircuitCoupling ()
     if (m_engine == "external") {
         pp_circuit.get("plugin_library", m_plugin_library);
         pp_circuit.query("plugin_config", m_plugin_config);
+        // Optional restart-run replacement for plugin_config (both are
+        // opaque engine strings): lets a restart deck skip engine-side
+        // boot work that ReadCheckpoint supersedes (e.g. a pre-roll).
+        pp_circuit.query("plugin_restart_config", m_plugin_restart_config);
     }
     utils::parser::queryWithParser(pp_circuit,
         "coupling.corrector_iterations", m_coupler_params.corrector_iterations);
     utils::parser::queryWithParser(pp_circuit,
         "coupling.corrector_rtol", m_coupler_params.corrector_rtol);
+    pp_circuit.query("probe_crosscheck", m_coupler_params.probe_crosscheck);
+    utils::parser::queryWithParser(pp_circuit,
+        "probe_crosscheck_rtol", m_coupler_params.crosscheck_rtol);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_coupler_params.corrector_iterations >= 0,
         "circuit.coupling.corrector_iterations must be >= 0");
@@ -286,11 +293,20 @@ CircuitCoupling::InitData ()
                 names.push_back(m_coils.coil(ic).name);
                 i_ref.push_back(m_coils.coil(ic).I_ref);
             }
-            plugin->Define(names, i_ref, m_plugin_config);
+            // On restart, hand the engine the restart variant of its
+            // opaque config when one is declared (circuit.
+            // plugin_restart_config): ReadCheckpoint below supersedes any
+            // engine-side boot state, so engines can skip boot work
+            // (e.g. a pre-roll) that Define would otherwise redo.
+            const bool restarting = !m_restart_dir.empty();
+            plugin->Define(names, i_ref,
+                           (restarting && !m_plugin_restart_config.empty())
+                               ? m_plugin_restart_config
+                               : m_plugin_config);
             // On restart, restore the engine's own state on every rank
             // (the engine runs replicated in lockstep, exactly like the
             // Python-callback engine).
-            if (!m_restart_dir.empty()) {
+            if (restarting) {
                 plugin->ReadCheckpoint(m_restart_dir);
             }
         }

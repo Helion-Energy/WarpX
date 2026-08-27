@@ -36,42 +36,78 @@ CircuitCoupler::CircuitCoupler (warpx::circuit::CoilSet const& coils,
 {}
 
 void
-CircuitCoupler::MeasureLinkages ()
+CircuitCoupler::MeasureLinkages (const bool refresh_plasma_current)
 {
     using namespace warpx::circuit;
     auto& warpx = WarpX::GetInstance();
     auto* hybrid = warpx.get_pointer_HybridPICModel();
 
     bool any_reciprocity = false;
+    bool any_disk = false;
     for (const ProbeKind kind : m_probes) {
         if (kind == ProbeKind::reciprocity) { any_reciprocity = true; }
+        if (kind == ProbeKind::disk) { any_disk = true; }
     }
-    if (any_reciprocity) {
-        // J_plasma = curl B / mu0 - J_ext of the CURRENT plasma-frame B
+    if (any_reciprocity && refresh_plasma_current) {
+        // J_plasma = curl B / mu0 - J_ext of the CURRENT plasma-frame B.
+        // Implicit consumers whose residual evaluation just computed it
+        // pass refresh_plasma_current = false and skip this full-grid
+        // curl.
         hybrid->CalculatePlasmaCurrent(
             warpx.m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp,
                                                  warpx.finestLevel()),
             warpx.GetEBUpdateEFlag());
     }
 
+    // Batched measurement: one device pass, one stream synchronization,
+    // one all-reduce over the coil vector (the per-coil single probes
+    // remain the validated reference below).
+    const amrex::MultiFab* bz = any_disk
+        ? warpx.m_fields.get(FieldType::Bfield_fp,
+                             ablastr::fields::Direction{2}, 0)
+        : nullptr;
+    const amrex::MultiFab* j_theta = any_reciprocity
+        ? warpx.m_fields.get(FieldType::hybrid_current_fp_plasma,
+                             ablastr::fields::Direction{1}, 0)
+        : nullptr;
+    m_a_theta_scratch.assign(m_coils.size(), nullptr);
     for (int ic = 0; ic < m_coils.size(); ++ic) {
-        const Coil& c = m_coils.coil(ic);
-        const ProbeKind kind = m_probes[ic];
-        if (kind == ProbeKind::none) { continue; }
-        amrex::Real lam = 0.0;
-        if (kind == ProbeKind::disk) {
-            const amrex::MultiFab& bz = *warpx.m_fields.get(
-                FieldType::Bfield_fp, ablastr::fields::Direction{2}, 0);
-            lam = DiskFluxLinkage(c, bz);
-        } else {
-            const amrex::MultiFab& a_theta = *warpx.m_fields.get(
-                c.field_name + "_Aext", ablastr::fields::Direction{1}, 0);
-            const amrex::MultiFab& j_theta = *warpx.m_fields.get(
-                FieldType::hybrid_current_fp_plasma,
+        if (m_probes[ic] == ProbeKind::reciprocity) {
+            m_a_theta_scratch[ic] = warpx.m_fields.get(
+                m_coils.coil(ic).field_name + "_Aext",
                 ablastr::fields::Direction{1}, 0);
-            lam = ReciprocityLinkage(a_theta, j_theta);
         }
-        m_lambda[c.name] = lam;
+    }
+    m_batch.Measure(m_coils, m_probes, m_a_theta_scratch, bz, j_theta,
+                    m_lambda_scratch);
+    for (int ic = 0; ic < m_coils.size(); ++ic) {
+        if (m_probes[ic] == ProbeKind::none) { continue; }
+        m_lambda[m_coils.coil(ic).name] = m_lambda_scratch[ic];
+    }
+
+    if (m_params.probe_crosscheck) {
+        // Validation mode: re-measure through the single-coil reference
+        // probes and pin the batched values against them.
+        for (int ic = 0; ic < m_coils.size(); ++ic) {
+            const Coil& c = m_coils.coil(ic);
+            const ProbeKind kind = m_probes[ic];
+            if (kind == ProbeKind::none) { continue; }
+            const amrex::Real reference = (kind == ProbeKind::disk)
+                ? DiskFluxLinkage(c, *bz)
+                : ReciprocityLinkage(*m_a_theta_scratch[ic], *j_theta);
+            const amrex::Real batched = m_lambda_scratch[ic];
+            const amrex::Real scale = std::max(
+                std::abs(reference), std::abs(batched));
+            const amrex::Real delta = std::abs(batched - reference);
+            amrex::Print() << "circuit probe_crosscheck: coil " << c.name
+                           << " batched = " << batched
+                           << " reference = " << reference
+                           << " |delta| = " << delta << "\n";
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                delta <= m_params.crosscheck_rtol * std::max(scale, 1.0e-300),
+                "circuit.probe_crosscheck: batched linkage of coil '" +
+                c.name + "' disagrees with the single-coil reference probe");
+        }
     }
 }
 
@@ -164,7 +200,7 @@ CircuitCoupler::BeginStep (const amrex::Real t0, const amrex::Real dt)
     m_substep_count = 0;
     // The evolved fields hold the plasma response here (called after the
     // split-field subtraction): seed the linkage registers at t^n.
-    MeasureLinkages();
+    MeasureLinkages(true);
     m_lambda_start = m_lambda;
     FireEngine("circuitbeginstep", false);
 }
@@ -173,7 +209,7 @@ void
 CircuitCoupler::PredictSubstep (const amrex::Real t0, const amrex::Real t1)
 {
     m_interval = Interval{t0, t1, m_substep_count, 0};
-    MeasureLinkages();
+    MeasureLinkages(true);
     m_lambda_start = m_lambda;
     FireEngine("circuitpredict", false);
     RefreshCircuitFields(t0, t1);
@@ -182,7 +218,7 @@ CircuitCoupler::PredictSubstep (const amrex::Real t0, const amrex::Real t1)
 bool
 CircuitCoupler::CorrectSubstep (const amrex::Real t0, const amrex::Real t1)
 {
-    MeasureLinkages();   // lambda(t1) of the current field iterate
+    MeasureLinkages(true);   // lambda(t1) of the current field iterate
     m_interval.iteration += 1;
     const std::vector<amrex::Real> s_prev = CoupledScales(t1);
     FireEngine("circuitcorrect", false);
@@ -218,7 +254,7 @@ CircuitCoupler::AcceptSubstep (const amrex::Real t0, const amrex::Real t1)
     ++m_substep_count;
     // Final linkages of the accepted substep: the engine's next predictor
     // reads these as its interval-entry values.
-    MeasureLinkages();
+    MeasureLinkages(true);
     if (m_plugin) {
         FireEngine("circuitaccept", true);
     }
@@ -229,6 +265,34 @@ CircuitCoupler::FinishStep ()
 {
     m_interval.iteration = 0;
     FireEngine("circuitfinish", false);
+}
+
+void
+CircuitCoupler::BeginStepMeasured (const amrex::Real t0, const amrex::Real dt)
+{
+    m_interval = Interval{t0, t0 + dt, -1, 0};
+    m_substep_count = 0;
+    // The caller measured the committed t^n state (MeasureLinkages):
+    // seed the interval-entry linkage registers from it. The engine
+    // snapshots its accepted state; the first EvaluateInterval of the
+    // step then sees eps = 0 exactly (the ABI's predictor convention).
+    m_lambda_start = m_lambda;
+    FireEngine("circuitbeginstep", false);
+}
+
+void
+CircuitCoupler::EvaluateInterval (const amrex::Real t0, const amrex::Real t1,
+                                  const bool accept)
+{
+    m_interval.t0 = t0;
+    m_interval.t1 = t1;
+    m_interval.substep = 0;
+    if (!accept) { m_interval.iteration += 1; }
+    // accept = false: restore-and-re-advance from the interval entry (a
+    // pure function of the caller's latest measurement). accept = true:
+    // exactly once per step, on the accepted final state -- discontinuous
+    // engine transitions latch here, in committed time.
+    FireEngine(accept ? "circuitaccept" : "circuitcorrect", accept);
 }
 
 amrex::Real
