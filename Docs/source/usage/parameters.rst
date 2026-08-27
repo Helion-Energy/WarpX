@@ -5806,6 +5806,35 @@ Jacobian probes.
     velocity, this selects an electron-MHD limit with
     :math:`\boldsymbol u_e=-\boldsymbol J/\rho_q`.
 
+.. pp:param:: implicit_mhd.external_field_iteration
+    :type: ``bool``
+    :default: ``false``
+
+    Circuit-in-the-residual coupling. Every residual evaluation executes the
+    ``externalcoiltheta`` python callback (and the end-of-step commit the
+    ``externalcoilfinish`` one) and then refreshes the split external fields,
+    so python can re-advance a coupled external circuit against the current
+    iterate's plasma flux linkage and push updated coil scale segments
+    (``warpx.set_external_vector_potential_scale``). Requires
+    :pp:param:`hybrid_pic_model.add_external_fields`.
+
+.. pp:param:: implicit_mhd.circuit_hook_scope
+    :type: ``string``
+    :default: ``residual``
+
+    Scope of the ``externalcoiltheta`` hook when
+    :pp:param:`implicit_mhd.external_field_iteration` is on. ``residual``
+    fires it on every residual evaluation (bit-identical default).
+    ``newton`` fires it only on the residual evaluations at accepted Newton
+    iterates: matrix-free Jacobian probes and line-search trials skip the
+    python round-trip and reuse the coil scales cached from the last iterate
+    evaluation. The Jacobian then sees a per-iterate lagged circuit
+    (quasi-Newton) — possibly a few extra Newton iterations, hundreds fewer
+    python round-trips per step — while the converged answer is unchanged to
+    solver tolerance, because convergence is still tested on the
+    live-coupled iterate residual and the end-of-step ``externalcoilfinish``
+    commit is unaffected.
+
 .. pp:param:: implicit_mhd.mass_density(x,y,z)
     :type: ``string``
     :unit: :math:`\mathrm{kg\,m^{-3}}`

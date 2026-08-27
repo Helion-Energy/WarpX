@@ -96,6 +96,15 @@ class ThetaImplicitMHD final : public ImplicitSolver
         return true;
     }
 
+    /** Record whether the next non-Jacobian ComputeRHS call evaluates
+     * the residual at an accepted Newton iterate (see the base
+     * declaration); read by the implicit_mhd.circuit_hook_scope =
+     * newton gating of the external-coil circuit hook. */
+    void SetResidualIsNewtonIterate (bool is_iterate) override
+    {
+        m_residual_is_newton_iterate = is_iterate;
+    }
+
     /** Free-subspace residual norm over the complement of the clamp
      * masks recorded by the last ProjectAndLimitSolverStep call, with
      * the pinned-defect norm and clamped-component count (see the base
@@ -1040,6 +1049,28 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // segregated one-step-lagged alternative is unstable whenever the
     // coil-plasma mutual coupling is strong.
     bool m_external_field_iteration = false;
+    // implicit_mhd.circuit_hook_scope = newton: fire the external-coil
+    // hook ONLY on the residual evaluations at accepted Newton iterates
+    // -- never inside matrix-free Jacobian probes or line-search trials,
+    // which reuse the coil scales cached from the last iterate
+    // evaluation (a lagged-circuit quasi-Newton: the Jacobian and the
+    // Armijo grades see a per-iterate frozen circuit, possibly costing a
+    // few extra Newton iterations, while the converged answer is
+    // unchanged -- convergence is still tested on the live-coupled
+    // iterate residual, and the end-of-step "externalcoilfinish" commit
+    // is untouched). Removes the per-evaluation python round-trip and
+    // its host-device flux-probe reductions from the GMRES/line-search
+    // inner loops. Default false (scope = residual, bit-identical).
+    bool m_circuit_hook_newton_scope = false;
+    // Whether the next non-Jacobian ComputeRHS call evaluates the
+    // residual at an accepted Newton iterate (maintained by the Newton
+    // solver through SetResidualIsNewtonIterate; true by default so
+    // solvers that never notify keep residual-scope semantics).
+    bool m_residual_is_newton_iterate = true;
+    // Per-step "externalcoiltheta" firing count, printed at the end of
+    // OneStep when the circuit coupling is active (the sync-tax
+    // instrument for circuit_hook_scope).
+    amrex::Long m_circuit_hook_calls = 0;
     // Stair-step conducting shaped-wall mask (implicit_mhd.wall_model,
     // RZ recast path only; default none = bit-identical): projects the
     // tangential E to the conductor condition on/outside the revolved
