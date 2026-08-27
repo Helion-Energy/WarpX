@@ -279,6 +279,66 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# dual-energy (the reference code's mixmaster) ion closure: cold supersonic advection
+# stays bit-cold under the fk-blended pressure, while the total_energy
+# twin on the identical flow shows the total-minus-kinetic cancellation
+# heating the closure exists to remove
+add_warpx_test(
+    test_1d_theta_implicit_mhd_dual_energy_advection  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_dual_energy_advection  # inputs
+    "analysis_mhd_dual_energy_advection.py diags/diag000032"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_dual_energy_advection_total  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_dual_energy_advection implicit_mhd.ion_closure=total_energy"  # inputs
+    "analysis_mhd_dual_energy_advection_total.py diags/diag000032 ../test_1d_theta_implicit_mhd_dual_energy_advection/diags/diag000032"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_dual_energy_advection  # dependency
+)
+
+# dual-energy converging-flow stagnation: heating comes ONLY from the
+# physical blended PdV work, so the blended pressure holds the analytic
+# adiabat; the total_energy twin overshoots it on the identical flow
+add_warpx_test(
+    test_1d_theta_implicit_mhd_dual_energy_stagnation  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_dual_energy_stagnation  # inputs
+    "analysis_mhd_dual_energy_stagnation.py diags/diag000032"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_dual_energy_stagnation_total  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_dual_energy_stagnation implicit_mhd.ion_closure=total_energy"  # inputs
+    "analysis_mhd_dual_energy_stagnation_total.py diags/diag000032 ../test_1d_theta_implicit_mhd_dual_energy_stagnation/diags/diag000032"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_dual_energy_stagnation  # dependency
+)
+
+# dual-energy restart round-trip: the auxiliary U_i block is checkpointed
+# like every other fluid block, so a run restarted from the mid-run
+# checkpoint reproduces the uninterrupted final state to round-off
+add_warpx_test(
+    test_1d_theta_implicit_mhd_dual_energy_restart  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_dual_energy_stagnation amr.restart='../test_1d_theta_implicit_mhd_dual_energy_stagnation/diags/chk000016'"  # inputs
+    "analysis_mhd_dual_energy_restart.py diags/diag000032 ../test_1d_theta_implicit_mhd_dual_energy_stagnation/diags/diag000032"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_dual_energy_stagnation  # dependency
+)
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_temperature_floor  # name
     1  # dims

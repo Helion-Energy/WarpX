@@ -119,7 +119,37 @@ struct FluxParameters {
     // subtraction. Asymptotes stay exact (floor below, E_i - KE above);
     // the inflation is width/2, confined to near-corner cells.
     amrex::Real pressure_corner_width_fraction = 0.0;
+    // Dual-energy ion closure (the reference code's "mixmaster" mix = -1 form):
+    // BOTH the conservative ion total energy E_i (evolved exactly as
+    // under total_energy_closure, which MakeFluxParameters keeps true)
+    // and the auxiliary internal energy U_i are evolved, and the ion
+    // pressure every consumer sees is the kinetic-fraction blend
+    //     p_i = fk p_i(E_i) + (1 - fk) (gamma_i - 1) U_i,
+    //     fk  = 1 - KE/(gamma_i E_i)   (smoothly rectified to [0, 1]),
+    // so KE-dominated cells (fk -> 0) read their pressure from U_i and
+    // never see the total-minus-kinetic catastrophic cancellation.
+    // load_cell_state_dual overwrites CellState::ion_pressure /
+    // ion_internal with the blend and refreshes the acoustic speeds
+    // (the CGL pattern); hlld_flux/central_flux add the U_i advection
+    // channel. Mutually exclusive with cgl_closure.
+    bool dual_energy_closure = false;
+    // Optional low-internal-energy cutoff (the reference code's mix = -2 variant;
+    // 0 = off): cells whose STEP-OLD U_i sits below
+    // cutoff * max_domain(U_i_old) get fk = 0 exactly (pure internal
+    // pressure in the halo/dust). The mask and the max are per-solve
+    // frozen (step-old), so the branch is a constant for JFNK probes.
+    amrex::Real dual_energy_internal_cutoff = 0.0;
+    amrex::Real dual_energy_internal_old_max = 0.0;
 };
+
+// C-infinity rectifier width of the dual-energy kinetic fraction: fk_raw
+// = 1 - KE/(gamma_i E_i) <= 1 automatically (KE >= 0, guarded E_i > 0),
+// and the lower clamp to 0 is the smooth_max of this width -- exact to
+// O(w^2) one width away from fk = 0, so mid-range blends (an imploding
+// sheet at fk ~ 0.4) are untouched while the kink at KE = gamma_i E_i
+// (exactly the KE-dominated population the closure exists for) is
+// smoothed away for the matrix-free Jacobian probes.
+constexpr amrex::Real dual_energy_fk_width = 0.05;
 
 struct CellState {
     amrex::Real density;
@@ -149,6 +179,11 @@ struct CellState {
     // isotropic closures are undisturbed. ---
     amrex::Real ion_parallel_energy = 0.0;
     amrex::Real ion_perp_energy = 0.0;
+    // --- Dual-energy addition: the EVOLVED auxiliary internal energy
+    // U_i (load_cell_state_dual; ion_internal then holds the BLENDED
+    // internal energy the pressure consumers see). Default zero so the
+    // other closures are undisturbed. ---
+    amrex::Real ion_internal_energy = 0.0;
 };
 
 struct FaceFlux {
@@ -162,6 +197,11 @@ struct FaceFlux {
     // work terms are pointwise RHS sources, not fluxes).
     amrex::Real ion_parallel_energy = 0.0;
     amrex::Real ion_perp_energy = 0.0;
+    // Dual-energy closure: advective flux of the auxiliary internal
+    // energy U_i (populated by hlld_flux/central_flux only when
+    // FluxParameters::dual_energy_closure is set; the blended PdV work
+    // and the viscous heating are pointwise RHS sources, not fluxes).
+    amrex::Real ion_internal_energy = 0.0;
     // --- HLLD additions (populated by hlld_flux only; default-zero so
     // the existing hllc/rusanov paths are undisturbed). ---
     // Maxwell-stress part of the momentum flux; momentum[] holds the
@@ -702,6 +742,153 @@ load_cell_state_hlld_cgl (const amrex::Array4<const amrex::Real>& density,
     CellState state = load_cell_state_cgl(
         density, momentum, electron_energy, ion_energy, ion_parallel_energy,
         ion_perp_energy, current, i, j, k, normal_direction, parameters);
+    finish_magnetized_state(state, magnetic, i, j, k, normal_direction,
+                            parameters);
+    return state;
+}
+
+/**
+ * \brief Kinetic-fraction blend weight of the dual-energy ion closure
+ * (the reference code's mixmaster mix = -1 weight, vp.f90: fk = 1 - w_k/(gam wik)):
+ *
+ *     fk = 1 - KE / (gamma_i * smooth-floor(E_i, U_i_floor)),
+ *
+ * smoothly rectified onto [0, 1] -- the upper bound holds automatically
+ * (KE >= 0 and the guarded E_i > 0 give fk_raw <= 1), and the lower clamp
+ * is the C-infinity smooth_max of width dual_energy_fk_width, so the
+ * whole map is smooth in (E_i, KE) for the matrix-free Jacobian probes
+ * (the task-critical population sits exactly at the KE ~ gamma_i E_i
+ * corner a hard clamp would kink). The division guard is the ion
+ * internal-energy floor, which total_energy/dual_energy require positive.
+ *
+ * The optional low-internal cutoff (the reference code's mix = -2 variant) zeroes
+ * fk where the STEP-OLD U_i sits below cutoff * max_domain(U_i_old);
+ * both the mask input and the max are per-solve frozen constants, so the
+ * branch is state-independent for the probes.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+dual_energy_kinetic_fraction (const amrex::Real ion_energy,
+                              const amrex::Real kinetic_energy,
+                              const amrex::Real old_internal_energy,
+                              const FluxParameters& parameters) noexcept {
+    if (parameters.dual_energy_internal_cutoff > 0.0 &&
+        old_internal_energy < parameters.dual_energy_internal_cutoff *
+                                  parameters.dual_energy_internal_old_max) {
+        return 0.0;
+    }
+    const amrex::Real internal_floor =
+        parameters.ion_pressure_floor / (parameters.gamma_i - 1.0);
+    const amrex::Real guarded_energy =
+        smooth_positive_floor(ion_energy, internal_floor);
+    const amrex::Real raw =
+        1.0 - kinetic_energy / (parameters.gamma_i * guarded_energy);
+    return smooth_max(raw, 0.0, dual_energy_fk_width);
+}
+
+/**
+ * \brief Blended ion pressure of the dual-energy closure, the single
+ * expression every consumer shares (loaders, RZ geometric sources, the
+ * pointwise PdV work, conduction temperatures):
+ *
+ *     p_i = fk p(E_i) + (1 - fk) smooth-floor((gamma_i - 1) U_i, p_floor),
+ *
+ * with p(E_i) the SAME C^1 smooth-max recovery (and KE-scaled corner
+ * width) as load_cell_state's total-energy branch, and fk the smoothly
+ * rectified kinetic fraction above.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+dual_energy_blended_pressure (const amrex::Real ion_energy,
+                              const amrex::Real kinetic_energy,
+                              const amrex::Real internal_energy,
+                              const amrex::Real old_internal_energy,
+                              const FluxParameters& parameters) noexcept {
+    const amrex::Real internal_floor =
+        parameters.ion_pressure_floor / (parameters.gamma_i - 1.0);
+    const amrex::Real excess =
+        ion_energy - kinetic_energy - internal_floor;
+    const amrex::Real corner_width = std::max(
+        internal_floor,
+        parameters.pressure_corner_width_fraction * kinetic_energy);
+    const amrex::Real pressure_total =
+        (parameters.gamma_i - 1.0) *
+        (internal_floor +
+         0.5 * (excess + std::sqrt(excess * excess +
+                                   corner_width * corner_width)));
+    const amrex::Real pressure_internal = smooth_positive_floor(
+        (parameters.gamma_i - 1.0) * internal_energy,
+        parameters.ion_pressure_floor);
+    const amrex::Real fk = dual_energy_kinetic_fraction(
+        ion_energy, kinetic_energy, old_internal_energy, parameters);
+    return fk * pressure_total + (1.0 - fk) * pressure_internal;
+}
+
+/**
+ * \brief load_cell_state for the dual-energy ion closure: the base
+ * loader runs with total_energy_closure TRUE (MakeFluxParameters keeps it
+ * set under dual_energy), so ion_pressure arrives as the smooth-floored
+ * recovery p(E_i) = (gamma_i - 1) smooth-max(E_i - KE, U_i_floor); this
+ * wrapper loads the evolved U_i, forms the kinetic-fraction blend
+ *
+ *     p_i = fk p(E_i) + (1 - fk) smooth-floor((gamma_i - 1) U_i, p_floor)
+ *
+ * (the reference code's step_velo pressure, vp.f90 ~585-595, with the internal
+ * branch floored by the same C-infinity smooth-max idiom as the CGL
+ * pressures), overwrites ion_pressure/ion_internal with it, and rebuilds
+ * the acoustic speeds -- EVERY pressure consumer (momentum flux, wave
+ * fan, signal bounds, conduction temperatures, drain-gate scales) then
+ * sees the blend. E_i itself (state.ion_energy and its recovered-channel
+ * machinery inside the E_i flux) keeps the total_energy assembly.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE CellState
+load_cell_state_dual (const amrex::Array4<const amrex::Real>& density,
+                      const amrex::Array4<const amrex::Real>& momentum,
+                      const amrex::Array4<const amrex::Real>& electron_energy,
+                      const amrex::Array4<const amrex::Real>& ion_energy,
+                      const amrex::Array4<const amrex::Real>& ion_internal_energy,
+                      const amrex::Array4<const amrex::Real>& old_ion_internal_energy,
+                      const amrex::Array4<const amrex::Real>& current,
+                      const int i, const int j, const int k,
+                      const int normal_direction,
+                      const FluxParameters& parameters) noexcept {
+    CellState state =
+        load_cell_state(density, momentum, electron_energy, ion_energy,
+                        current, i, j, k, normal_direction, parameters);
+    state.ion_internal_energy = ion_internal_energy(i, j, k);
+    amrex::Real kinetic_energy = 0.0;
+    for (int component = 0; component < 3; ++component) {
+        kinetic_energy += state.momentum[component] * state.momentum[component];
+    }
+    kinetic_energy *= 0.5 / state.safe_density;
+    state.ion_pressure = dual_energy_blended_pressure(
+        state.ion_energy, kinetic_energy, state.ion_internal_energy,
+        old_ion_internal_energy(i, j, k), parameters);
+    state.ion_internal = state.ion_pressure / (parameters.gamma_i - 1.0);
+    // The acoustic speeds depend on ion_pressure and must be rebuilt.
+    finish_acoustic_speeds(state, normal_direction, parameters);
+    return state;
+}
+
+/**
+ * \brief load_cell_state_dual plus the cell-centered TOTAL magnetic field
+ * and the fast-magnetosonic wave speeds (built from the blended pressure)
+ * required by hlld_flux/central_flux under the dual-energy closure.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE CellState
+load_cell_state_hlld_dual (const amrex::Array4<const amrex::Real>& density,
+                           const amrex::Array4<const amrex::Real>& momentum,
+                           const amrex::Array4<const amrex::Real>& electron_energy,
+                           const amrex::Array4<const amrex::Real>& ion_energy,
+                           const amrex::Array4<const amrex::Real>& ion_internal_energy,
+                           const amrex::Array4<const amrex::Real>& old_ion_internal_energy,
+                           const amrex::Array4<const amrex::Real>& current,
+                           const amrex::Array4<const amrex::Real>& magnetic,
+                           const int i, const int j, const int k,
+                           const int normal_direction,
+                           const FluxParameters& parameters) noexcept {
+    CellState state = load_cell_state_dual(
+        density, momentum, electron_energy, ion_energy, ion_internal_energy,
+        old_ion_internal_energy, current, i, j, k, normal_direction,
+        parameters);
     finish_magnetized_state(state, magnetic, i, j, k, normal_direction,
                             parameters);
     return state;
@@ -1272,6 +1459,24 @@ hlld_flux (const CellState& left, const CellState& right,
                     uperp_star_right - uperp_star_left,
                     right.ion_perp_energy - uperp_star_right);
     }
+    if (parameters.dual_energy_closure) {
+        // Dual-energy auxiliary internal energy: pure advection with the
+        // contact (star values fraction * U_i, the U_e/CGL pattern). The
+        // blended PdV work -p_blend div u and the viscous heating are
+        // pointwise sources in the fluid RHS, not fluxes: U_i is the
+        // internal-energy (non-conservative) formulation riding next to
+        // the conservative E_i channel above.
+        const amrex::Real uint_star_left =
+            fraction_left * left.ion_internal_energy;
+        const amrex::Real uint_star_right =
+            fraction_right * right.ion_internal_energy;
+        flux.ion_internal_energy =
+            central(left.ion_internal_energy * u_left,
+                    right.ion_internal_energy * u_right,
+                    uint_star_left - left.ion_internal_energy,
+                    uint_star_right - uint_star_left,
+                    right.ion_internal_energy - uint_star_right);
+    }
     flux.induction_t1 =
         sqrt_mu0 *
         (central(bt1_flux_left, bt1_flux_right, bt1_star_left - bt1_left,
@@ -1449,7 +1654,8 @@ hlld_flux (const CellState& left, const CellState& right,
  *   the corner E_theta reduces to the weighted average of the four ideal
  *   EMF states (central, no field dissipation).
  * The CGL channels are not populated (the input parser rejects
- * fluid_flux = central with ion_closure = cgl). The electron channels
+ * fluid_flux = central with ion_closure = cgl); the dual-energy U_i
+ * channel is (centered pure advection). The electron channels
  * (U_e advection and the div(u_e) velocity flux) use the electron
  * velocity, which carries -J/(rho_q) under the Hall term: central is the
  * Hall-capable recast flux, the induction channels staying in the ION
@@ -1515,6 +1721,14 @@ central_flux (const CellState& left, const CellState& right,
                right.electron_energy * right.electron_velocity_normal);
     flux.ion_energy = 0.5 * (u_left * (left.ion_energy + p_gas_left) +
                              u_right * (right.ion_energy + p_gas_right));
+    if (parameters.dual_energy_closure) {
+        // Dual-energy auxiliary internal energy: centered pure advection
+        // (the q -> 0 limit of the hlld_flux star channel); the blended
+        // PdV work and the viscous heating are pointwise RHS sources.
+        flux.ion_internal_energy =
+            0.5 * (u_left * left.ion_internal_energy +
+                   u_right * right.ion_internal_energy);
+    }
     flux.electron_velocity =
         0.5 * (left.electron_velocity_normal + right.electron_velocity_normal);
     flux.induction_t1 =

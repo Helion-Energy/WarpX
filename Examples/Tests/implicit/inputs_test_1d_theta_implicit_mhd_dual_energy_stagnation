@@ -1,0 +1,127 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# 1D converging-flow stagnation: rho uniform, v_z = -v0 sin(2 pi z / Lz)
+# (Mach ~6 on the two-temperature sound speed, KE ~40x the ion internal
+# energy), so plasma compresses onto the z = 0 plane and rarefies at
+# z = Lz/2. The initial entropy is uniform, so for the smooth
+# (pre-steepening) flow the ion adiabat p_i / rho^gamma stays at its
+# initial value everywhere: the dual_energy closure heats ONLY through
+# the physical blended PdV work (plus the small prescribed viscous
+# heating) and holds the adiabat to a few percent, while the
+# total_energy closure's recovered pressure additionally integrates the
+# E_i-minus-KE cancellation error of the kinetic-dominated state and
+# overshoots it (measured 1.19x the dual error at these parameters).
+# The total_energy contrast twin reuses this input with
+# implicit_mhd.ion_closure=total_energy; the restart twin restarts from
+# the mid-run checkpoint and must reproduce the final state (including
+# the U_i block) to round-off.
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.Ti = 10.0
+my_constants.P0 = n0 * Ti * q_e
+my_constants.gamma = 5.0/3.0
+my_constants.B0 = sqrt(mu0 * P0)
+my_constants.nz = 128
+my_constants.Lz = 1.0
+# two-temperature sound speed ~5.7e4 m/s
+my_constants.v0 = 3.4e5
+my_constants.dt = 0.15 * (Lz / nz) / v0
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 32
+amr.n_cell = nz
+amr.max_grid_size = 128
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+# theta = 1: the theta = 0.5 trapezoidal centering leaves the ripple's
+# marginal modes undamped (|g| -> 1) and the Newton solve wedges at
+# ~step 9 for BOTH energy-bearing closures; backward Euler damps them
+# and keeps the closure contrast the test measures.
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 20
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-9
+gmres.max_iterations = 400
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Ti
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = P0
+implicit_mhd.ion_closure = dual_energy
+implicit_mhd.ion_pressure_floor = 1.0e-6 * P0
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-9 * P0
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 50.0
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.velocity_z(x,y,z) = "-v0 * sin(2*pi*z/Lz)"
+implicit_mhd.ion_pressure(x,y,z) = P0
+implicit_mhd.electron_pressure(x,y,z) = P0
+
+# A uniform axial field keeps the electromagnetic subsystem quiescent.
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 B0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1 chk
+diag1.intervals = 32
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz implicit_mhd_mass_density implicit_mhd_momentum_z \
+                       implicit_mhd_ion_energy implicit_mhd_ion_internal_energy \
+                       implicit_mhd_electron_energy
+diag1.write_species = 0
+# Mid-run checkpoint for the restart round-trip twin.
+chk.intervals = 16
+chk.diag_type = Full
+chk.format = checkpoint
+chk.file_prefix = diags/chk

@@ -2669,16 +2669,46 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Davis signal bounds, region blend, B_n -> 0 rotational-layer
         degeneracy scale, and star-denominator guard respectively.
 
-    ion_closure: {"barotropic", "total_energy"}, optional
+    ion_closure: {"barotropic", "total_energy", "dual_energy", "cgl"}, optional
         Ion thermodynamic closure. The default barotropic closure evaluates
         the ion pressure from reference_ion_pressure and gamma_i;
         "total_energy" evolves the conservative ion total energy density as
         an additional JFNK unknown, capturing shock and compressional
-        heating.
+        heating. "dual_energy" (the reference code's mixmaster mix=-1 split-energy
+        form; requires fluid_flux="hlld" or "central") evolves BOTH the
+        conservative total E_i (exactly as under "total_energy") and an
+        auxiliary internal ion energy U_i, and every consumer of the ion
+        pressure sees the kinetic-fraction blend
+        p_i = fk p_i(E_i) + (1 - fk)(gamma_i - 1) U_i with
+        fk = 1 - KE/(gamma_i E_i): kinetic-energy-dominated cells
+        (imploding sheets, exhaust flow, axis stagnation) read their
+        pressure from U_i and never see the total-minus-kinetic
+        catastrophic-cancellation heating. At every accepted step end
+        the reference code's mixmaster re-sync rewrites E_i := KE + p_i/(gamma_i-1)
+        (the identity in thermal cells; in KE-dominated cells it drains
+        the step's cancellation drift into the U_i anchor), and thermal
+        cells (fk > dual_energy_sync_threshold) additionally overwrite
+        U_i := E_i - KE (the standard Enzo-style bookkeeping). "cgl"
+        evolves the bi-Maxwellian internal-energy pair (see the cgl_*
+        parameters; fluid_flux="hlld" only).
+
+    dual_energy_internal_cutoff: float, default=0 (off)
+        With ion_closure="dual_energy": the reference code's mix=-2 low-internal
+        cutoff. Cells whose step-old U_i sits below
+        cutoff * max_domain(U_i_old) get fk = 0 exactly (pure internal
+        pressure in the halo/dust); the max is a once-per-step step-old
+        global reduction, frozen for the whole nonlinear solve.
+
+    dual_energy_sync_threshold: float, default=0.99
+        With ion_closure="dual_energy": fk threshold of the end-of-step
+        Enzo re-sync U_i := E_i - KE (thermal cells only, where the
+        recovery is well conditioned); the mixmaster E_i rewrite runs
+        unconditionally.
 
     ion_pressure: float or str, optional
         Initial ion pressure in Pa, optionally as an expression of ``x``,
-        ``y``, and ``z``. Required with ion_closure="total_energy".
+        ``y``, and ``z``. Required with ion_closure="total_energy",
+        "dual_energy", or "cgl".
 
     ion_pressure_floor: float, optional
         Positive ion-pressure floor in Pa whose internal-energy equivalent
@@ -2951,6 +2981,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         hlld_kappa_bn=None,
         hlld_kappa_denominator=None,
         ion_closure=None,
+        dual_energy_internal_cutoff=None,
+        dual_energy_sync_threshold=None,
         ion_pressure=None,
         ion_pressure_anisotropy=None,
         cgl_relaxation_scale=None,
@@ -3038,6 +3070,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.hlld_kappa_bn = hlld_kappa_bn
         self.hlld_kappa_denominator = hlld_kappa_denominator
         self.ion_closure = ion_closure
+        self.dual_energy_internal_cutoff = dual_energy_internal_cutoff
+        self.dual_energy_sync_threshold = dual_energy_sync_threshold
         self.ion_pressure = ion_pressure
         self.ion_pressure_anisotropy = ion_pressure_anisotropy
         self.cgl_relaxation_scale = cgl_relaxation_scale
@@ -3159,6 +3193,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.hlld_kappa_bn = self.hlld_kappa_bn
         implicit_mhd.hlld_kappa_denominator = self.hlld_kappa_denominator
         implicit_mhd.ion_closure = self.ion_closure
+        implicit_mhd.dual_energy_internal_cutoff = self.dual_energy_internal_cutoff
+        implicit_mhd.dual_energy_sync_threshold = self.dual_energy_sync_threshold
         implicit_mhd.__setattr__("ion_pressure(x,y,z)", self.ion_pressure)
         implicit_mhd.__setattr__(
             "ion_pressure_anisotropy(x,y,z)", self.ion_pressure_anisotropy

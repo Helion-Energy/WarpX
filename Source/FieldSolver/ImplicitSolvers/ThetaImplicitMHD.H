@@ -185,7 +185,8 @@ class ThetaImplicitMHD final : public ImplicitSolver
                                      amrex::MultiFab& electron_energy,
                                      amrex::MultiFab& ion_energy,
                                      amrex::MultiFab& ion_parallel_energy,
-                                     amrex::MultiFab& ion_perp_energy) const;
+                                     amrex::MultiFab& ion_perp_energy,
+                                     amrex::MultiFab& ion_internal_energy) const;
     /** Zero-gradient (Neumann) fill of the axial domain ghosts,
      * staggering aware: cell-centered-in-z data clamps to the boundary
      * cell (zero gradient across the boundary face) while NODAL-in-z
@@ -369,6 +370,13 @@ class ThetaImplicitMHD final : public ImplicitSolver
         "implicit_mhd_ion_parallel_energy";
     inline static constexpr char IonPerpEnergyName[] =
         "implicit_mhd_ion_perp_energy";
+    // Dual-energy (the reference code's mixmaster) ion closure: the auxiliary internal
+    // ion energy U_i evolved alongside the conservative total E_i; the
+    // ion pressure every consumer sees is the kinetic-fraction blend
+    // p_i = fk p_i(E_i) + (1 - fk)(gamma_i - 1) U_i (see
+    // FluxParameters::dual_energy_closure in ThetaImplicitMHD_K.H).
+    inline static constexpr char IonInternalEnergyName[] =
+        "implicit_mhd_ion_internal_energy";
     // Single-component cell-centered views of the momentum density for
     // field diagnostics (the 3-component register block cannot pass
     // through the generic fields_to_plot path; exact T_i reconstruction
@@ -477,6 +485,7 @@ class ThetaImplicitMHD final : public ImplicitSolver
             signal_right,
             signal_alfven_left,  // fan rotational bounds S_M -+ c_An*:
             signal_alfven_right, // corner-EMF dissipation coefficients
+            ion_internal_energy, // dual_energy closure: U_i advective flux
             count
         };
     };
@@ -492,6 +501,8 @@ class ThetaImplicitMHD final : public ImplicitSolver
         "implicit_mhd_old_ion_parallel_energy";
     inline static constexpr char OldIonPerpEnergyName[] =
         "implicit_mhd_old_ion_perp_energy";
+    inline static constexpr char OldIonInternalEnergyName[] =
+        "implicit_mhd_old_ion_internal_energy";
     // Resistive backward-Euler option (m_resistive_theta): the
     // beginning-of-step plasma current J^n (captured once per step) and
     // the per-residual resistive-stage scratch
@@ -511,7 +522,7 @@ class ThetaImplicitMHD final : public ImplicitSolver
 
     // Newton active set of the most recent ProjectAndLimitSolverStep
     // call, one cell-centered mask per fluid block in the block order
-    // (rho, U_e, E_i or U_par, U_perp): 1 = this solve's Newton
+    // (rho, U_e, E_i or U_par, U_perp or U_i): 1 = this solve's Newton
     // direction component was clamped onto its admissibility bound,
     // 0 = free. Allocated once on first use (the box layout is fixed
     // after Define), overwritten by every projection call, and consumed
@@ -554,14 +565,43 @@ class ThetaImplicitMHD final : public ImplicitSolver
     amrex::Real m_ion_temperature_floor = 0.0;
     amrex::Real m_electron_temperature_floor = 0.0;
     // Ion thermodynamic closure: "barotropic" (default; p_i from the
-    // polytropic law), "total_energy" (E_i evolved as a JFNK block), or
-    // "cgl" (bi-Maxwellian: U_par = p_par/2 and U_perp = p_perp evolved
-    // as JFNK blocks with CGL work terms and ion-ion isotropization;
-    // hlld only). Under cgl the fan sees the effective isotropic
-    // pressure p_eff = (p_par + 2 p_perp)/3 and the pressure recovery
-    // is LINEAR in the unknowns (no kinetic-energy subtraction).
+    // polytropic law), "total_energy" (E_i evolved as a JFNK block),
+    // "dual_energy" (the reference code's mixmaster mix = -1 split-energy form:
+    // E_i evolved exactly as under total_energy PLUS the auxiliary
+    // internal energy U_i as an extra JFNK block; the ion pressure every
+    // consumer sees is the kinetic-fraction blend
+    // p_i = fk p_i(E_i) + (1 - fk)(gamma_i - 1) U_i with
+    // fk = 1 - KE/(gamma_i E_i), killing the total-minus-kinetic
+    // catastrophic-cancellation heating of KE-dominated cells; recast
+    // fluxes hlld/central only), or "cgl" (bi-Maxwellian:
+    // U_par = p_par/2 and U_perp = p_perp evolved as JFNK blocks with
+    // CGL work terms and ion-ion isotropization; hlld only). Under cgl
+    // the fan sees the effective isotropic pressure
+    // p_eff = (p_par + 2 p_perp)/3 and the pressure recovery is LINEAR
+    // in the unknowns (no kinetic-energy subtraction).
     std::string m_ion_closure = "barotropic";
     amrex::Real m_ion_pressure_floor = 0.0;
+    // Dual-energy low-internal cutoff fraction (the reference code's mix = -2
+    // variant; 0 = off): cells whose STEP-OLD U_i sits below
+    // fraction * max_domain(U_i_old) get fk = 0 exactly (pure internal
+    // pressure in the halo/dust). The max is a once-per-step step-old
+    // global reduction, frozen for the whole nonlinear solve.
+    amrex::Real m_dual_energy_internal_cutoff = 0.0;
+    // Dual-energy end-of-step re-sync (the reference code's mixmaster temperature
+    // update, ntb.f90): at every accepted step end E_i's internal
+    // content is rewritten from the blended pressure,
+    // E_i := KE + p_blend/(gamma_i - 1) -- the identity in thermal
+    // cells, while in KE-dominated cells it drains the step's
+    // cancellation drift into the U_i anchor (without it the drift
+    // accumulates in the conservative E_i and the blend re-imports
+    // fk >= 1 - 1/gamma_i of the accumulated total) -- and cells with
+    // fk > this threshold (thermal, well-conditioned recovery)
+    // additionally overwrite U_i := E_i - KE (the standard Enzo-style
+    // sync), so the two energy variables cannot drift apart in thermal
+    // regions.
+    amrex::Real m_dual_energy_sync_threshold = 0.99;
+    // Per-step frozen max_domain(U_i_old) of the cutoff mask.
+    amrex::Real m_dual_energy_internal_old_max = 0.0;
     // CGL isotropization: Braginskii ion-ion collision rate times this
     // scale (0 disables relaxation), with the given Coulomb logarithm.
     amrex::Real m_cgl_relaxation_scale = 1.0;
@@ -1186,7 +1226,7 @@ class ThetaImplicitMHD final : public ImplicitSolver
     [[nodiscard]] theta_implicit_mhd::FluxParameters MakeFluxParameters () const;
 
     /** Per-block admissibility lower bounds of the fluid blocks, in the
-     * order (rho, U_e, E_i or U_par, U_perp) used by LimitSolverStep and
+     * order (rho, U_e, E_i or U_par, U_perp or U_i) used by LimitSolverStep and
      * ProjectAndLimitSolverStep: the bound of block b at a cell with
      * step-old density rho_old and step-old value u_old is
      *
