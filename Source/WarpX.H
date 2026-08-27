@@ -15,6 +15,7 @@
 #include "BoundaryConditions/GreensFunctionOpenBC_fwd.H"
 #include "BoundaryConditions/PEC_Insulator_fwd.H"
 #include "BoundaryConditions/PML_fwd.H"
+#include "Circuit/CircuitCoupling_fwd.H"
 #include "Diagnostics/MultiDiagnostics_fwd.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags_fwd.H"
 #include "EmbeddedBoundary/WarpXFaceInfoBox_fwd.H"
@@ -162,6 +163,7 @@ public:
     MultiFluidContainer& GetFluidContainer () { return *myfl; }
     ElectrostaticSolver& GetElectrostaticSolver () {return *m_electrostatic_solver;}
     [[nodiscard]] HybridPICModel * get_pointer_HybridPICModel () const { return m_hybrid_pic_model.get(); }
+    [[nodiscard]] CircuitCoupling * get_pointer_CircuitCoupling () const { return m_circuit_coupling.get(); }
     MultiDiagnostics& GetMultiDiags () {return *multi_diags;}
     ParticleBoundaryBuffer& GetParticleBoundaryBuffer () { return *m_particle_boundary_buffer; }
     amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& GetEBUpdateEFlag() { return m_eb_update_E; }
@@ -1283,6 +1285,11 @@ private:
      * hybrid-PIC B-field advance; lazily constructed in
      * ApplyBfieldBoundary when active (boundary.field_hi[0] == open). */
     std::unique_ptr<GreensFunctionOpenBC> m_open_bc_greens;
+
+    /** Coil / circuit-coupling subsystem (circuit.coils): unit coil fields
+     * and discrete inductances driving the hybrid solver's split external
+     * fields. */
+    std::unique_ptr<CircuitCoupling> m_circuit_coupling;
 
     // External fields parameters
     std::unique_ptr<ExternalFieldParams> m_p_ext_field_params;

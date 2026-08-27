@@ -5996,6 +5996,35 @@ Jacobian probes.
     live-coupled iterate residual and the end-of-step ``externalcoilfinish``
     commit is unaffected.
 
+.. pp:param:: implicit_mhd.circuit_driver
+    :type: ``string``
+    :default: ``python``
+
+    Which coupler fires at the circuit hook points when
+    :pp:param:`implicit_mhd.external_field_iteration` is on. ``python``
+    (bit-identical default) executes the
+    ``externalcoiltheta``/``externalcoilfinish`` callbacks. ``native``
+    drives the C++ circuit-coupling engine in-process instead (requires
+    :pp:param:`circuit.coils` and :pp:param:`circuit.engine`, typically
+    ``external`` with a compiled plugin): each firing measures the
+    iterate's plasma flux linkages with the engine's batched device
+    probes (one device pass, one stream synchronization and one
+    all-reduce per measurement, reusing the plasma current the residual
+    evaluation just computed), re-advances the engine from the committed
+    step entry to the theta-stage time (``accept = false``: repeatable,
+    discontinuous engine transitions stay latched at committed state)
+    and realizes the returned coil scales through the same external-field
+    refresh as the python path. The end-of-step commit performs the
+    single ``accept = true`` advance over :math:`[t^n, t^{n+1}]` on the
+    accepted state, where engine switches/stage swaps latch, followed by
+    the engine's ``FinishStep``. Honors both
+    :pp:param:`implicit_mhd.circuit_hook_scope` values: ``residual``
+    restores exact circuit-in-residual coupling (the python path's
+    per-evaluation host round-trip and device-to-host flux pulls are
+    eliminated entirely); ``newton`` keeps the lagged quasi-Newton
+    economy. The engine passes the measured per-interval EMF unfiltered;
+    any smoothing is engine-side policy.
+
 .. pp:param:: implicit_mhd.mass_density(x,y,z)
     :type: ``string``
     :unit: :math:`\mathrm{kg\,m^{-3}}`
@@ -6278,6 +6307,145 @@ Jacobian probes.
     :optional:
 
     This sets the relative strength of the external vector potential by a dimensionless implicit time function, which can compute the external B fields and E fields based on the value and first time derivative of the function.
+
+.. pp:param:: external_vector_potential.<field_name>.python_scale
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Drive this field's dimensionless scale through piecewise-linear segments pushed at runtime
+    (``warpx.set_external_vector_potential_scale(name, s_old, s_new, t_old, t_new)`` from Python,
+    e.g. from a circuit model in a callback) instead of the compiled
+    :pp:param:`external_vector_potential.<field_name>.A_time_external_grid_function(t)`.
+    The B field follows the linear interpolant of the segment and the E field carries its exact
+    constant slope (the discrete Faraday partner of the linear B scale). The segment is
+    extrapolated linearly past ``t_new``, so a fresh segment must be pushed every coupling
+    interval; a refresh well past ``t_new`` records a high-priority warning.
+
+.. pp:param:: external_vector_potential.<field_name>.initial_scale
+    :type: ``float``
+    :default: ``1.``
+    :optional:
+
+    With :pp:param:`external_vector_potential.<field_name>.python_scale` enabled, the constant
+    scale held (e.g. a coil at its pre-ramp current) until the first runtime segment is pushed.
+
+.. pp:param:: circuit.coils
+    :type: list of ``str``
+    :optional:
+
+    Names of circular filament coils whose fields drive the hybrid solver's split external
+    fields (requires :pp:param:`hybrid_pic_model.add_external_fields`). Each coil pairs with an
+    entry of :pp:param:`external_vector_potential.fields` (by default the entry with the coil's
+    own name) and, unless disabled, its ``<name>_Aext`` field is filled at initialization with
+    the coil's field at the reference amp-turns from the axisymmetric ring kernel (a direct
+    free-space evaluation; the coil may sit outside the domain). In RZ geometry the fill uses
+    the discrete mesh convention (quarter-cell filament offset, Legendre-parameter clip) whose
+    disk-flux self-inductance is the value a coupled circuit port must use; the discrete self-
+    and mutual-inductance table of the coil set on the run mesh is printed at initialization.
+    Per-coil parameters, prefixed ``circuit.<name>.``:
+
+    * ``r``, ``z`` (required): filament radius and axial position [m]; ``r`` must be positive.
+    * ``n_turns`` (default ``1``): turn count; the filled field and the inductances scale with it.
+    * ``I_ref`` (default ``1``): reference current [A]; a drive scale of 1 (see
+      :pp:param:`external_vector_potential.<field_name>.python_scale`) reproduces the coil at
+      ``I_ref``.
+    * ``field_name`` (default: the coil name): the paired external-field entry.
+    * ``fill_unit_field`` (default ``1``): fill ``<field_name>_Aext`` from the ring kernel;
+      disable to keep whatever the external-field initialization loaded (file or expressions).
+    * ``probe`` (default ``default``): the coil's plasma flux-linkage measurement for the
+      coupling engine — ``disk`` (plasma-frame :math:`B_z` through the coil circle, the same
+      staircase rules as the discrete self-inductance; valid with conducting walls),
+      ``reciprocity`` (:math:`\int A^\mathrm{unit} \cdot J_p\, dV`; exact in free space,
+      requires the Green's-function open boundary), or ``none`` (drive-only).
+      ``default`` selects reciprocity when the open boundary is active, disk otherwise.
+
+.. pp:param:: circuit.engine
+    :type: ``str``
+    :default: ``none``
+    :optional:
+
+    The external circuit engine coupled to the coils per B-field substep (RZ):
+    ``callbacks`` drives the coupling through the Python hooks ``circuitbeginstep`` /
+    ``circuitpredict`` / ``circuitcorrect`` / ``circuitfinish`` (the handlers read the coupling
+    interval and the flux-linkage registers via ``get_coupling_interval`` /
+    ``get_coil_flux_linkage`` and push scale segments via
+    ``set_external_vector_potential_scale``); ``external`` loads a compiled engine from
+    :pp:param:`circuit.plugin_library` (a shared library exporting
+    ``warpx_create_external_circuit``). Every measured coil's paired field must be declared
+    with :pp:param:`external_vector_potential.<field_name>.python_scale`. Each accepted
+    substep of the (possibly adaptive) B-field advance is one predictor-corrector coupling
+    interval: the engine advances the circuit from the interval entry with held EMF
+    estimates, the substep integrates on the refreshed circuit-driven fields, and each
+    corrector pass re-advances the circuit with the measured
+    :math:`\varepsilon = \Delta\lambda_p/\Delta t` and re-integrates the substep until the
+    realized scales settle. The lagged variant (``corrector_iterations = 0``) is unstable
+    for strong coil-plasma coupling.
+
+.. pp:param:: circuit.plugin_library
+    :type: ``str``
+    :optional:
+
+    With :pp:param:`circuit.engine` = ``external``, the path of the engine's shared library.
+    The library must export ``warpx_create_external_circuit`` and
+    ``warpx_external_circuit_abi_version`` (checked against the
+    ``WARPX_EXTERNAL_CIRCUIT_ABI_VERSION`` of the running WarpX at load time; see
+    ``Source/Circuit/ExternalCircuit.H``, whose plugin ABI is self-contained: the engine
+    receives per-coil EMF estimates and returns realized coil scales, calling no WarpX
+    symbols).
+
+.. pp:param:: circuit.plugin_config
+    :type: ``str``
+    :optional:
+
+    With :pp:param:`circuit.engine` = ``external``, a free-form string handed to the
+    engine's ``Define`` (typically the path of the engine's own configuration file; its
+    format is entirely the engine's business). An inline ``key=value,...`` string must be
+    double-quoted in the inputs so the parameter parser keeps it whole.
+
+.. pp:param:: circuit.plugin_restart_config
+    :type: ``str``
+    :optional:
+
+    Optional replacement for :pp:param:`circuit.plugin_config` on restart runs. The
+    restored checkpoint (``ExternalCircuit::ReadCheckpoint``) supersedes any engine-side
+    boot state, so a restart configuration can skip boot work that ``Define`` would
+    otherwise redo (e.g. a machine-time pre-roll). When unset, restarts hand ``Define``
+    the ordinary :pp:param:`circuit.plugin_config`.
+
+.. pp:param:: circuit.probe_crosscheck
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Validation knob: cross-check every batched linkage measurement against the
+    single-coil reference probes (``DiskFluxLinkage``/``ReciprocityLinkage``), print the
+    per-coil deltas and abort when they disagree beyond
+    :pp:param:`circuit.probe_crosscheck_rtol`. The batched path folds the identical
+    integrand factors into per-coil weight tables and differs from the reference only in
+    floating-point summation order.
+
+.. pp:param:: circuit.probe_crosscheck_rtol
+    :type: ``float``
+    :default: ``1.e-12``
+    :optional:
+
+    Relative disagreement bound of :pp:param:`circuit.probe_crosscheck`.
+
+.. pp:param:: circuit.coupling.corrector_iterations
+    :type: ``int``
+    :default: ``1``
+    :optional:
+
+    Corrector passes per coupling substep (``0`` = lagged predictor only).
+
+.. pp:param:: circuit.coupling.corrector_rtol
+    :type: ``float``
+    :default: ``1.e-6``
+    :optional:
+
+    Early-exit tolerance of the corrector: converged when the re-advanced coil scales move
+    by less than this relative amount.
 
 
 Grid types (collocated, staggered, hybrid)
@@ -7578,6 +7746,25 @@ This shifts analysis from post-processing to runtime calculation of reduction op
         In particular, by choosing a weighting function which returns either
         1 or 0, it is possible to compute the charge on only some part of the
         embedded boundary.
+
+    * ``CircuitCoupling``
+        This type writes the per-step ledger of the coil / circuit coupling
+        (requires :pp:param:`circuit.coils`; RZ): for every coil the realized
+        drive scale :math:`s = I/I_\mathrm{ref}`, its segment slope
+        :math:`ds/dt`, and the measured plasma flux linkage
+        :math:`\lambda = \lambda_\mathrm{phys} I_\mathrm{ref} n` (zero for
+        unmeasured coils or without a coupling engine), followed by the two
+        sides of the coupling-power double entry
+
+        .. math::
+
+            P_\mathrm{circuit} = -\sum_k \frac{ds_k}{dt} \lambda_k,
+            \qquad
+            P_\mathrm{field} = \int J_p \cdot E_\mathrm{ext}\, dV,
+
+        which agree to roundoff whenever the drive slopes are constant over
+        the step (no power is created or lost in the exchange); in coupled
+        runs the imbalance measures the within-step slope variation.
 
     * ``ColliderRelevant``
         This diagnostics computes properties of two colliding beams that are relevant for particle colliders.

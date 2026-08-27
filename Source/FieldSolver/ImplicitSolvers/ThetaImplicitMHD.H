@@ -20,6 +20,7 @@
 #include <memory>
 #include <string>
 
+class CircuitCoupler;
 class HybridPICModel;
 namespace theta_implicit_mhd {
 struct FluxParameters;
@@ -1189,6 +1190,28 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // solver through SetResidualIsNewtonIterate; true by default so
     // solvers that never notify keep residual-scope semantics).
     bool m_residual_is_newton_iterate = true;
+    // implicit_mhd.circuit_driver = native: drive the circuit through the
+    // C++ circuit-coupling engine (circuit.coils + circuit.engine,
+    // typically a compiled ExternalCircuit plugin) instead of the python
+    // "externalcoiltheta"/"externalcoilfinish" hooks. Same firing points
+    // and circuit_hook_scope semantics as the python driver, with the
+    // python round-trip and its per-evaluation device->host flux pulls
+    // replaced by the engine's batched device probes (one device pass,
+    // one sync, one all-reduce per measurement) and an in-process
+    // AdvanceInterval: residual scope restores EXACT circuit-in-residual
+    // coupling at native cost. In-residual (accept = false) advances
+    // target the theta-stage time and replay from the committed interval
+    // entry; the single accept = true advance and FinishStep commit fire
+    // from FinishStateUpdate on the accepted end-of-step state, so
+    // discontinuous engine transitions latch in committed time only.
+    // Default false (driver = python, bit-identical).
+    bool m_circuit_native = false;
+    // Whether the native circuit step is open: BeginStep is fired lazily
+    // at the FIRST qualifying residual evaluation of the step, where the
+    // just-computed plasma current is exactly the committed t^n state
+    // (the Newton initial iterate is the old state), so the interval
+    // entry linkages are seeded without an extra full-grid curl.
+    bool m_circuit_step_open = false;
     // Per-step "externalcoiltheta" firing count, printed at the end of
     // OneStep when the circuit coupling is active (the sync-tax
     // instrument for circuit_hook_scope).
@@ -1223,6 +1246,11 @@ class ThetaImplicitMHD final : public ImplicitSolver
 
     void SaveMagneticField ();
     void UpdateWarpXFields (const WarpXSolverVec& state, amrex::Real start_time);
+
+    /** The C++ circuit-coupling engine's coupler for the native circuit
+     * driver; aborts with a configuration message when circuit.coils /
+     * circuit.engine are not set up. */
+    [[nodiscard]] CircuitCoupler& NativeCircuitCoupler () const;
     [[nodiscard]] theta_implicit_mhd::FluxParameters MakeFluxParameters () const;
 
     /** Per-block admissibility lower bounds of the fluid blocks, in the

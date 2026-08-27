@@ -6,35 +6,47 @@
 #
 # License: BSD-3-Clause-LBNL
 
-"""Driven circuit-coupled deck for implicit_mhd.circuit_hook_scope.
+"""Driven circuit-coupled deck for the theta-implicit MHD circuit hooks.
 
 A uniform static plasma in a uniform Bz is driven by ONE painted
 external coil (A_theta = 0.5*Bc*r, python_scale) whose scale follows a
-toy driven RL loop advanced INSIDE the residual through the
-"externalcoiltheta" hook (implicit_mhd.external_field_iteration = 1):
+toy driven RL loop
 
     L_C dI/dt + R_C I = V0 - eps,   eps = d(lambda)/dt,
 
-with lambda a fixed linear functional of the plasma-response J_theta
-(a mutual-inductance surrogate: the same smooth state->circuit map the
-production coupler applies, minus the geometry). Backward-Euler
-circuit advance from the per-step committed snapshot, so the pushed
-scale segment is a pure function of the current iterate -- exactly the
-production ImplicitCircuitCoupler contract.
+with lambda the DISK flux linkage of the plasma-response Bz through the
+coil circle -- the exact functional of the C++ engine's DiskFluxLinkage
+probe (quarter-cell filament offset, strict r_cell < r_off test,
+unclamped linear interpolation between the bracketing node planes) --
+advanced by one backward-Euler step per coupling interval from the
+per-step committed snapshot: the pushed scale segment is a pure function
+of the current iterate, the production coupling contract.
 
-Run twice by CTest (--scope residual | newton):
+Three axes, selected by CLI flags (combined into the CTest arms):
 
-* residual: the hook fires on EVERY residual evaluation (default,
-  bit-compatible with the pre-knob behavior);
-* newton:   the hook fires ONLY at accepted Newton iterates; Jacobian
-  probes and line-search trials reuse the cached coil scales
-  (lagged-circuit quasi-Newton).
+--scope residual|newton   implicit_mhd.circuit_hook_scope: fire the
+    coupling on every residual evaluation (default) or only at accepted
+    Newton iterates (lagged-circuit quasi-Newton).
+
+--driver python|native    implicit_mhd.circuit_driver: the RL loop
+    advanced in python through the externalcoiltheta/externalcoilfinish
+    hooks (default), or by the compiled rl_test_circuit plugin (the
+    IDENTICAL backward-Euler map) behind the C++ circuit-coupling
+    engine, with the engine's batched device flux probes replacing the
+    python measurement. The parity analyses assert the committed
+    per-step coil scales agree across scopes and across drivers.
+
+--extra-coils N           N additional measured-only coils (zero painted
+    field, disk probes) to exercise the multi-coil batched measurement;
+    with --crosscheck, circuit.probe_crosscheck pins every batched
+    linkage against the single-coil reference probes (native only).
+
+--r-open                  Green's-function open boundary at r_hi and
+    reciprocity probes on the extra coils (ring-kernel unit fields):
+    exercises the batched reciprocity path (native only).
 
 The deck writes circuit_hook_history.csv (per step: hook calls, the
-committed scale, lambda, eps). The newton-scope test's analysis
-(analysis_mhd_circuit_hook_scope.py) asserts the committed per-step
-scales match the residual run to solver tolerance -- the converged
-ANSWER is scope-independent -- while the hook-call counts collapse.
+committed scale, lambda, eps).
 """
 
 import argparse
@@ -53,6 +65,28 @@ parser.add_argument(
     default="residual",
     help="implicit_mhd.circuit_hook_scope under test",
 )
+parser.add_argument(
+    "--driver",
+    choices=["python", "native"],
+    default="python",
+    help="implicit_mhd.circuit_driver under test",
+)
+parser.add_argument(
+    "--extra-coils",
+    type=int,
+    default=0,
+    help="additional measured-only coils (native driver only)",
+)
+parser.add_argument(
+    "--crosscheck",
+    action="store_true",
+    help="enable circuit.probe_crosscheck (native driver only)",
+)
+parser.add_argument(
+    "--r-open",
+    action="store_true",
+    help="Green's open r_hi boundary + reciprocity extra-coil probes",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
@@ -69,6 +103,8 @@ nr = 8
 nz = 16
 rmax = 0.1
 zmax = 0.2
+dr = rmax / nr
+dz = 2.0 * zmax / nz
 
 sound_speed = np.sqrt(gamma * (Pe0 + Pi0) / rho0)
 alfven_speed = B0 / np.sqrt(constants.mu0 * rho0)
@@ -79,28 +115,102 @@ theta = 1.0
 # --- toy driven RL circuit --------------------------------------------
 # Unit reference current: the coil scale IS the loop current. V0/R_C = 1
 # targets s -> 1 with an L/R time of three steps, so the scale segments
-# move every step; C_M sizes the plasma back-EMF term (the coupling
-# under test) without any pretense of real geometry. Its budget: the
-# state->scale loop gain carries C_M/(theta dt) through eps and another
-# 1/dt through the pushed E-scale slope, so C_M ~ 1e-5 keeps the
-# coupled nonlinearity comfortably inside the Newton basin while the
-# measured lambda stays far above roundoff for the parity asserts.
-R_C = 1.0
+# move every step. The plasma back-EMF eps is the honest d/dt of the
+# response disk flux; V0 = R_C sized well above its measured magnitude
+# keeps the coupled nonlinearity inside the Newton basin while the
+# linkage stays far above roundoff for the parity asserts.
+R_C = 2000.0
 L_C = 3.0 * dt * R_C
-V0 = 1.0
-C_M = 1.0e-5
+V0 = 2000.0
 Bc = 0.25 * B0  # painted coil Bz per unit scale
+coil_r = 0.06
+coil_z = 0.0
 
 grid = picmi.CylindricalGrid(
     number_of_cells=[nr, nz],
-    warpx_max_grid_size=64,
+    warpx_max_grid_size=8 if args.extra_coils > 0 else 64,
     lower_bound=[0.0, -zmax],
     upper_bound=[rmax, zmax],
     lower_boundary_conditions=["none", "none"],
-    upper_boundary_conditions=["dirichlet", "none"],
+    upper_boundary_conditions=["open" if args.r_open else "dirichlet", "none"],
     lower_boundary_conditions_particles=["none", "absorbing"],
     upper_boundary_conditions_particles=["reflecting", "absorbing"],
 )
+
+A_external = {
+    "drive": {
+        "Ax_external_function": "0.0",
+        "Ay_external_function": f"0.5*{Bc}*x",
+        "Az_external_function": "0.0",
+        "python_scale": True,
+        "initial_scale": 0.0,
+    }
+}
+extra_names = [f"extra{k}" for k in range(args.extra_coils)]
+for name in extra_names:
+    A_external[name] = {
+        "Ax_external_function": "0.0",
+        "Ay_external_function": "0.0",
+        "Az_external_function": "0.0",
+        "python_scale": True,
+        "initial_scale": 0.0,
+    }
+
+circuit = None
+if args.driver == "native":
+    from pathlib import Path
+
+    # The fixture plugin is emitted into the runtime output directory
+    # (build/bin); ctest runs each test in build/bin/<test_name>/.
+    plugin = Path.cwd().resolve().parent / "librl_test_circuit.so"
+    coils = [
+        picmi.CircuitCoil(
+            name="drive",
+            r=coil_r,
+            z=coil_z,
+            n_turns=1.0,
+            I_ref=1.0,
+            fill_unit_field=False,  # keep the painted analytic A
+            probe="disk",
+        )
+    ]
+    for k, name in enumerate(extra_names):
+        if args.r_open:
+            # Reciprocity rows: real ring-kernel unit fields on coils
+            # outside the wall, valid under the Green's open boundary.
+            coils.append(
+                picmi.CircuitCoil(
+                    name=name,
+                    r=0.12 + 0.01 * k,
+                    z=-0.1 + 0.05 * k,
+                    n_turns=1.0,
+                    I_ref=1.0,
+                    fill_unit_field=True,
+                    probe="reciprocity",
+                )
+            )
+        else:
+            # Measured-only disk rows (zero painted field).
+            coils.append(
+                picmi.CircuitCoil(
+                    name=name,
+                    r=0.03 + 0.005 * k,
+                    z=-0.1 + 0.05 * k,
+                    n_turns=1.0,
+                    I_ref=1.0,
+                    fill_unit_field=False,
+                    probe="disk",
+                )
+            )
+    circuit = picmi.CircuitCoupling(
+        coils=coils,
+        engine="external",
+        plugin_library=str(plugin),
+        # the value carries '=' and ',': pywarpx double-quotes it whole
+        # for ParmParse; plain floats (numpy reprs are not parseable)
+        plugin_config=f"R={float(R_C)},L={float(L_C)},V0={float(V0)}",
+        probe_crosscheck=args.crosscheck,
+    )
 
 solver = picmi.HybridPICSolver(
     grid=grid,
@@ -111,16 +221,9 @@ solver = picmi.HybridPICSolver(
     plasma_resistivity=1.0e-6,
     include_hall_term=False,
     include_electron_pressure_term=False,
-    A_external={
-        "drive": {
-            "Ax_external_function": "0.0",
-            "Ay_external_function": f"0.5*{Bc}*x",
-            "Az_external_function": "0.0",
-            "python_scale": True,
-            "initial_scale": 0.0,
-        }
-    },
+    A_external=A_external,
     do_external_diva_cleaning=False,
+    circuit=circuit,
 )
 
 nonlinear_solver = picmi.NewtonNonlinearSolver(
@@ -149,6 +252,7 @@ evolve_scheme = picmi.ThetaImplicitMHDEvolveScheme(
     viscosity=3.0e3,  # the central flux requires the explicit viscous stabilization
     external_field_iteration=1,
     circuit_hook_scope=args.scope,
+    circuit_driver=args.driver,
 )
 
 sim = picmi.Simulation(
@@ -171,8 +275,7 @@ sim.initialize_warpx()
 
 # --- circuit coupler ---------------------------------------------------
 warpx = libwarpx.libwarpx_so.get_instance()
-jt_wrapper = None
-radii = None
+bz_wrapper = None
 
 # Per-step committed circuit state and instrumentation. lam_n is the
 # committed linkage; i_n the committed loop current; hook counts reset
@@ -183,23 +286,31 @@ history = []
 
 
 def measure_lambda():
-    """Fixed linear functional of the plasma-response J_theta.
+    """DiskFluxLinkage of the plasma-response Bz, mirrored exactly.
 
-    lambda = C_M * mu0 * sum(J_theta * r) * dr * dz -- a smooth
-    mutual-inductance surrogate; hybrid_current_fp_plasma holds the
-    plasma-response current at every hook firing (recomputed from the
-    iterate's B just before the hook, and left plasma-only through the
-    end-of-step commit).
+    lambda = I_ref * n_turns * 2 pi dr *
+             sum_{j in {j0, j0+1}} w_j sum_{r_c < r_off} Bz(i, j) r_c,
+
+    with the quarter-cell filament offset, the STRICT r_c < r_off cell
+    test and the unclamped linear weight between the bracketing node
+    planes -- the identical staircase conventions as the C++ probe, so
+    the python and native drivers integrate the same measurement.
+    Bfield_fp holds the plasma response at every firing point.
     """
-    global jt_wrapper, radii
-    if jt_wrapper is None:
-        jt_wrapper = fields.JyFPPlasmaWrapper(level=0)
-    jt = np.squeeze(np.asarray(jt_wrapper[...]))
-    dr = rmax / nr
-    dz = 2.0 * zmax / nz
-    if radii is None:
-        radii = (np.arange(jt.shape[0]) + 0.5) * dr
-    return C_M * constants.mu0 * float(np.sum(jt * radii[:, None])) * dr * dz
+    global bz_wrapper
+    if bz_wrapper is None:
+        bz_wrapper = fields.BzFPWrapper(level=0)
+    bz = np.squeeze(np.asarray(bz_wrapper[...]))  # (nr cells, nz+1 nodes)
+    r_off = coil_r + 0.25 * dr
+    z_off = coil_z + 0.25 * dz
+    j0 = int(np.floor((z_off - (-zmax)) / dz))
+    j0 = min(max(j0, 0), nz - 1)
+    w = (z_off - (-zmax + j0 * dz)) / dz
+    r_c = (np.arange(nr) + 0.5) * dr
+    inside = r_c < r_off
+    plane_sum = lambda j: float(np.sum(bz[inside, j] * r_c[inside]))  # noqa: E731
+    lam = (1.0 - w) * plane_sum(j0) + w * plane_sum(j0 + 1)
+    return 2.0 * np.pi * dr * lam  # I_ref = n_turns = 1
 
 
 def advance_circuit(lam):
@@ -233,10 +344,32 @@ def hook_finish():
     counts["theta"] = 0
 
 
-for name, function in (("externalcoiltheta", hook_theta), ("externalcoilfinish", hook_finish)):
-    if name not in callbacks.callback_instances:
-        callbacks.callback_instances[name] = callbacks.CallbackFunctions(name=name)
-    callbacks.installcallback(name, function)
+def record_native_step():
+    """Per-step committed record of the native driver (afterstep)."""
+    state["t_n"] += dt
+    state["step"] += 1
+    scale = warpx.get_external_vector_potential_scale("drive", state["t_n"])
+    lam_end = warpx.get_coil_flux_linkage("drive")
+    eps = (lam_end - state["lam_n"]) / (theta * dt)
+    state["lam_n"] = lam_end
+    history.append((state["step"], state["t_n"], -1, scale, lam_end, eps))
+
+
+if args.driver == "python":
+    for name, function in (
+        ("externalcoiltheta", hook_theta),
+        ("externalcoilfinish", hook_finish),
+    ):
+        if name not in callbacks.callback_instances:
+            callbacks.callback_instances[name] = callbacks.CallbackFunctions(name=name)
+        callbacks.installcallback(name, function)
+    # Seed the committed linkage at t = 0 exactly like the native
+    # driver's step-entry measurement: between steps Bfield_fp holds the
+    # totals, which at scale 0 equal the plasma response.
+    state["lam_n"] = measure_lambda()
+else:
+    callbacks.installcallback("afterstep", record_native_step)
+    state["lam_n"] = measure_lambda()
 
 sim.step(max_steps)
 
@@ -245,17 +378,19 @@ rows = np.array(history)
 np.savetxt(
     "circuit_hook_history.csv",
     rows,
-    header=f"scope={args.scope}\nstep t_end hook_calls scale lambda eps",
+    header=f"scope={args.scope} driver={args.driver}\n"
+    "step t_end hook_calls scale lambda eps",
 )
 
-assert len(history) == max_steps, "the finish hook must fire once per step"
-assert np.all(rows[:, 2] >= 1), "the theta hook must fire at least once per step"
+assert len(history) == max_steps, "the per-step commit must fire once per step"
+if args.driver == "python":
+    assert np.all(rows[:, 2] >= 1), "the theta hook must fire at least once per step"
 # The drive must actually ramp and the plasma back-react (a live
 # coupling channel, not a decorative one).
 assert rows[-1, 3] > 0.1, "the RL drive did not ramp the coil scale"
 assert np.any(rows[:, 4] != 0.0), "no plasma flux linkage was ever measured"
 
-print("--- circuit hook history (scope = {}) ---".format(args.scope))
+print(f"--- circuit hook history (scope = {args.scope}, driver = {args.driver}) ---")
 for step, t_end, calls, scale, lam, eps in history:
     print(
         f"step {int(step)}: hook_calls = {int(calls)}, scale = {scale:.12e}, "

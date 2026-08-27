@@ -14,6 +14,9 @@
 #include "WarpX.H"
 
 #include <ablastr/fields/MultiFabRegister.H>
+#include <ablastr/warn_manager/WarnManager.H>
+
+#include <string>
 
 using namespace amrex;
 using namespace warpx::fields;
@@ -72,6 +75,7 @@ ExternalVectorPotential::ReadParameters ()
             (m_field_names[i]+".python_scale").c_str(), python_scale);
         m_use_python_scale[i] = python_scale;
         if (python_scale) {
+            m_any_python_scale = true;
             // Scale held constant at initial_scale until the first
             // SetScale call (e.g. a coil at its pre-ramp current).
             amrex::Real initial_scale = 1.0_rt;
@@ -152,6 +156,23 @@ ExternalVectorPotential::AllocateLevelMFs (
     fields.alloc_init(FieldType::hybrid_B_fp_external, Direction{2},
         lev, amrex::convert(ba, Bz_nodal_flag),
         dm, ncomps, ngEB, 0.0_rt);
+
+    // Cached partial sums of the parser-driven fields, used by the
+    // CircuitOnly refresh mode to avoid re-accumulating every field when
+    // only the SetScale-driven scales changed. Only needed when at least
+    // one field is SetScale-driven.
+    if (m_any_python_scale) {
+        const amrex::IntVect E_flags[3] = {Ex_nodal_flag, Ey_nodal_flag, Ez_nodal_flag};
+        const amrex::IntVect B_flags[3] = {Bx_nodal_flag, By_nodal_flag, Bz_nodal_flag};
+        for (int idir = 0; idir < 3; ++idir) {
+            fields.alloc_init("hybrid_E_fp_external_static", Direction{idir},
+                lev, amrex::convert(ba, E_flags[idir]),
+                dm, ncomps, ngEB, 0.0_rt);
+            fields.alloc_init("hybrid_B_fp_external_static", Direction{idir},
+                lev, amrex::convert(ba, B_flags[idir]),
+                dm, ncomps, ngEB, 0.0_rt);
+        }
+    }
 }
 
 void
@@ -245,6 +266,21 @@ ExternalVectorPotential::InitData ()
 }
 
 
+amrex::Real
+ExternalVectorPotential::TimeScale (const int i, const amrex::Real t) const
+{
+    if (m_use_python_scale[i]) {
+        const ScaleSegment& segment = m_python_scale[i];
+        const amrex::Real slope =
+            (segment.t_new > segment.t_old)
+                ? (segment.s_new - segment.s_old) /
+                      (segment.t_new - segment.t_old)
+                : 0.0_rt;
+        return segment.s_old + slope * (t - segment.t_old);
+    }
+    return m_A_time_scale[i](t);
+}
+
 void
 ExternalVectorPotential::SetScale (const std::string& coil_name,
                                    const amrex::Real s_old,
@@ -276,16 +312,7 @@ ExternalVectorPotential::GetScale (const std::string& coil_name,
 {
     for (int i = 0; i < m_nFields; ++i) {
         if (m_field_names[i] == coil_name) {
-            if (m_use_python_scale[i]) {
-                const ScaleSegment& segment = m_python_scale[i];
-                const amrex::Real slope =
-                    (segment.t_new > segment.t_old)
-                        ? (segment.s_new - segment.s_old) /
-                              (segment.t_new - segment.t_old)
-                        : 0.0_rt;
-                return segment.s_old + slope * (t - segment.t_old);
-            }
-            return m_A_time_scale[i](t);
+            return TimeScale(i, t);
         }
     }
     WARPX_ABORT_WITH_MESSAGE(
@@ -296,13 +323,13 @@ ExternalVectorPotential::GetScale (const std::string& coil_name,
 void
 ExternalVectorPotential::CalculateExternalCurlA ()
 {
-    for (auto fname : m_field_names) {
+    for (const auto& fname : m_field_names) {
         CalculateExternalCurlA(fname);
     }
 }
 
 void
-ExternalVectorPotential::CalculateExternalCurlA (std::string& coil_name)
+ExternalVectorPotential::CalculateExternalCurlA (const std::string& coil_name)
 {
     using ablastr::fields::Direction;
     auto & warpx = WarpX::GetInstance();
@@ -324,8 +351,7 @@ ExternalVectorPotential::CalculateExternalCurlA (std::string& coil_name)
         // domain ghosts -- without the growth, e.g. the RZ r_max ring of
         // the external B field would keep its allocation value (zero) and
         // inject a spurious drive-scaled field jump into every wall
-        // stencil that reads it (the theta-implicit MHD corner EMF and
-        // z-face fans).
+        // stencil that reads it.
         amrex::IntVect ngrow = A_ext[lev][0]->nGrowVect();
         for (int idir = 0; idir < 3; ++idir) {
             ngrow = amrex::min(ngrow, A_ext[lev][idir]->nGrowVect());
@@ -359,11 +385,11 @@ ExternalVectorPotential::AddExternalFieldFromVectorPotential (
     // Accumulate over the boxes grown into the domain ghosts as well: the
     // source ghosts are trusted there (the analytic A fill and its exact
     // ghost curls), which is what fills e.g. the RZ r_max ring of the
-    // external E/B fields that the theta-implicit MHD wall stencils read;
-    // FillBoundary cannot reach non-periodic domain ghosts. No growth
-    // below the axis in curvilinear geometries (no trusted parity data
-    // there), and none when embedded boundaries are enabled (the eb_update
-    // flags are not guaranteed to carry matching ghost data). There is no
+    // external E/B fields that wall-adjacent stencils read; FillBoundary
+    // cannot reach non-periodic domain ghosts. No growth below the axis
+    // in curvilinear geometries (no trusted parity data there), and none
+    // when embedded boundaries are enabled (the eb_update flags are not
+    // guaranteed to carry matching ghost data). There is no
     // double-counting of the += on shared box faces: MFIter::tilebox(nodal,
     // ngrow) grows only the tiles touching the valid-box edge, ghost
     // regions are per-FAB storage, and the nodal points shared between
@@ -445,7 +471,8 @@ ExternalVectorPotential::AddExternalFieldFromVectorPotential (
 }
 
 void
-ExternalVectorPotential::UpdateHybridExternalFields (const amrex::Real t, const amrex::Real dt)
+ExternalVectorPotential::UpdateHybridExternalFields (const amrex::Real t, const amrex::Real dt,
+                                                     const RefreshMode mode)
 {
     using ablastr::fields::Direction;
     auto& warpx = WarpX::GetInstance();
@@ -455,26 +482,32 @@ ExternalVectorPotential::UpdateHybridExternalFields (const amrex::Real t, const 
     ablastr::fields::MultiLevelVectorField E_ext =
         warpx.m_fields.get_mr_levels_alldirs(FieldType::hybrid_E_fp_external, warpx.finestLevel());
 
-    // Zero E and B external fields prior to accumulating external fields
-    for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
-        for (int idir = 0; idir < 3; ++idir) {
-            B_ext[lev][Direction{idir}]->setVal(0.0_rt);
-            E_ext[lev][Direction{idir}]->setVal(0.0_rt);
-        }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        mode == RefreshMode::All || (m_any_python_scale && m_static_cache_valid),
+        "UpdateHybridExternalFields(CircuitOnly) requires at least one "
+        "SetScale-driven field and a preceding All-mode refresh");
+
+    ablastr::fields::MultiLevelVectorField B_static, E_static;
+    if (m_any_python_scale) {
+        B_static = warpx.m_fields.get_mr_levels_alldirs("hybrid_B_fp_external_static", warpx.finestLevel());
+        E_static = warpx.m_fields.get_mr_levels_alldirs("hybrid_E_fp_external_static", warpx.finestLevel());
     }
 
-    // Iterate over external fields and add together with individual time functions.
-    for (int i = 0; i < m_nFields; ++i) {
+    // Per-field accumulation into a destination register pair. The scale of
+    // a SetScale-driven field follows its live piecewise-linear segment
+    // (E carries the exact constant slope -- the discrete Faraday partner of
+    // the linear B-scale); parser-driven fields keep the compiled time
+    // function with a centered finite difference for the E scale.
+    auto accumulate_field = [&](int i,
+                                ablastr::fields::MultiLevelVectorField& dst_E,
+                                ablastr::fields::MultiLevelVectorField& dst_B)
+    {
         const std::string Aext_field = m_field_names[i] + std::string{"_Aext"};
         const std::string curlAext_field = m_field_names[i] + std::string{"_curlAext"};
 
         amrex::Real scale_factor_B;
         amrex::Real scale_factor_E;
         if (m_use_python_scale[i]) {
-            // Piecewise-linear python-driven scale: B follows the linear
-            // interpolant of the (s_old, s_new) segment and E carries its
-            // exact constant slope, so the discrete Faraday relation
-            // between B_ext and E_ext holds without FD approximation.
             const ScaleSegment& segment = m_python_scale[i];
             const amrex::Real slope =
                 (segment.t_new > segment.t_old)
@@ -483,6 +516,21 @@ ExternalVectorPotential::UpdateHybridExternalFields (const amrex::Real t, const 
                     : 0.0_rt;
             scale_factor_B = segment.s_old + slope * (t - segment.t_old);
             scale_factor_E = -slope;
+
+            // A missed per-interval push silently ramps the drive along the
+            // stale segment's extrapolation -- warn when the refresh time
+            // has run well past the segment.
+            if (segment.t_new > segment.t_old &&
+                t > segment.t_new + 0.5_rt * (segment.t_new - segment.t_old)) {
+                ablastr::warn_manager::WMRecordWarning(
+                    "ExternalVectorPotential",
+                    "External field '" + m_field_names[i] + "' is being "
+                    "refreshed at t = " + std::to_string(t) + ", well past "
+                    "its scale segment's t_new = " +
+                    std::to_string(segment.t_new) + "; the drive is "
+                    "extrapolating a stale segment (missed SetScale push?)",
+                    ablastr::warn_manager::WarnPriority::high);
+            }
         } else {
             // Get B-field Scaling Factor
             scale_factor_B = m_A_time_scale[i](t);
@@ -499,13 +547,72 @@ ExternalVectorPotential::UpdateHybridExternalFields (const amrex::Real t, const 
             warpx.m_fields.get_mr_levels_alldirs(curlAext_field, warpx.finestLevel());
 
         for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
-            AddExternalFieldFromVectorPotential(E_ext[lev], scale_factor_E, A_ext[lev], warpx.GetEBUpdateEFlag()[lev], lev);
-            AddExternalFieldFromVectorPotential(B_ext[lev], scale_factor_B, curlA_ext[lev], warpx.GetEBUpdateBFlag()[lev], lev);
+            AddExternalFieldFromVectorPotential(dst_E[lev], scale_factor_E, A_ext[lev], warpx.GetEBUpdateEFlag()[lev], lev);
+            AddExternalFieldFromVectorPotential(dst_B[lev], scale_factor_B, curlA_ext[lev], warpx.GetEBUpdateBFlag()[lev], lev);
+        }
+    };
 
+    auto copy_register = [&](ablastr::fields::MultiLevelVectorField& dst,
+                             ablastr::fields::MultiLevelVectorField const& src)
+    {
+        for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
             for (int idir = 0; idir < 3; ++idir) {
-                E_ext[lev][Direction{idir}]->FillBoundary(warpx.Geom(lev).periodicity());
-                B_ext[lev][Direction{idir}]->FillBoundary(warpx.Geom(lev).periodicity());
+                auto& dst_mf = *dst[lev][Direction{idir}];
+                auto const& src_mf = *src[lev][Direction{idir}];
+                amrex::MultiFab::Copy(dst_mf, src_mf, 0, 0, dst_mf.nComp(),
+                    amrex::min(dst_mf.nGrowVect(), src_mf.nGrowVect()));
             }
+        }
+    };
+
+    if (mode == RefreshMode::All) {
+        if (m_any_python_scale) {
+            // Accumulate the parser-driven fields into the static cache,
+            // seed the totals from it, then add the SetScale-driven fields.
+            for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+                for (int idir = 0; idir < 3; ++idir) {
+                    B_static[lev][Direction{idir}]->setVal(0.0_rt);
+                    E_static[lev][Direction{idir}]->setVal(0.0_rt);
+                }
+            }
+            for (int i = 0; i < m_nFields; ++i) {
+                if (!m_use_python_scale[i]) { accumulate_field(i, E_static, B_static); }
+            }
+            m_static_cache_valid = true;
+            copy_register(E_ext, E_static);
+            copy_register(B_ext, B_static);
+        } else {
+            for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+                for (int idir = 0; idir < 3; ++idir) {
+                    B_ext[lev][Direction{idir}]->setVal(0.0_rt);
+                    E_ext[lev][Direction{idir}]->setVal(0.0_rt);
+                }
+            }
+            for (int i = 0; i < m_nFields; ++i) {
+                accumulate_field(i, E_ext, B_ext);
+            }
+        }
+    } else {
+        // CircuitOnly: the parser-driven fields stay frozen at their cached
+        // sums (exactly as they are frozen between the step's scheduled
+        // All refreshes).
+        copy_register(E_ext, E_static);
+        copy_register(B_ext, B_static);
+    }
+
+    if (m_any_python_scale) {
+        for (int i = 0; i < m_nFields; ++i) {
+            if (m_use_python_scale[i]) { accumulate_field(i, E_ext, B_ext); }
+        }
+    }
+
+    // One ghost exchange per component after all accumulation (the
+    // accumulation itself never reads ghosts, so exchanging once at the end
+    // is exact and avoids the per-field FillBoundary cost).
+    for (int lev = 0; lev <= warpx.finestLevel(); ++lev) {
+        for (int idir = 0; idir < 3; ++idir) {
+            E_ext[lev][Direction{idir}]->FillBoundary(warpx.Geom(lev).periodicity());
+            B_ext[lev][Direction{idir}]->FillBoundary(warpx.Geom(lev).periodicity());
         }
     }
     amrex::Gpu::streamSynchronize();

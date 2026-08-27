@@ -2873,6 +2873,20 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         round-trips per step, converged answer unchanged to solver
         tolerance).
 
+    circuit_driver: str, default="python"
+        Which coupler fires at the circuit hook points when
+        external_field_iteration is on. "python" (bit-identical
+        default) executes the externalcoiltheta/externalcoilfinish
+        callbacks. "native" drives the C++ circuit-coupling engine
+        in-process (requires circuit.coils and circuit.engine,
+        typically HybridPICSolver(circuit=CircuitCoupling(...,
+        engine="external", plugin_library=...))): batched device flux
+        probes (one device pass, one sync, one all-reduce per
+        measurement) and an in-process circuit advance replace the
+        python round-trip and its per-evaluation device-to-host
+        copies; with circuit_hook_scope="residual" this restores
+        EXACT circuit-in-residual coupling at native cost.
+
     resistive_theta: float, optional
         Time centering of the dissipative Ohm terms (eta J including the
         vacuum boost, and the hyper-resistive term), in [0.5, 1]; the
@@ -2927,6 +2941,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         vacuum_mass_density=None,
         external_field_iteration=None,
         circuit_hook_scope=None,
+        circuit_driver=None,
         vacuum_drag_rate=None,
         halo_pedestal_fraction=None,
         halo_pedestal_drag_rate=None,
@@ -3016,6 +3031,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.vacuum_mass_density = vacuum_mass_density
         self.external_field_iteration = external_field_iteration
         self.circuit_hook_scope = circuit_hook_scope
+        self.circuit_driver = circuit_driver
         self.vacuum_drag_rate = vacuum_drag_rate
         self.halo_pedestal_fraction = halo_pedestal_fraction
         self.halo_pedestal_drag_rate = halo_pedestal_drag_rate
@@ -3111,6 +3127,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.vacuum_mass_density = self.vacuum_mass_density
         implicit_mhd.external_field_iteration = self.external_field_iteration
         implicit_mhd.circuit_hook_scope = self.circuit_hook_scope
+        implicit_mhd.circuit_driver = self.circuit_driver
         implicit_mhd.vacuum_drag_rate = self.vacuum_drag_rate
         implicit_mhd.halo_pedestal_fraction = self.halo_pedestal_fraction
         implicit_mhd.halo_pedestal_drag_rate = self.halo_pedestal_drag_rate
@@ -3212,6 +3229,154 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.include_joule_heating = self.include_joule_heating
 
         self.nonlinear_solver.nonlinear_solver_initialize_inputs()
+
+
+class CircuitCoil(object):
+    """One circular filament coil of the circuit-coupling subsystem
+    (circuit.<name>.*).
+
+    Parameters
+    ----------
+    name: str
+        Unique coil name; by default also the paired entry of
+        external_vector_potential.fields.
+
+    r, z: float
+        Filament radius and axial position [m]; r must be positive.
+
+    n_turns: float, optional
+        Turn count (the filled field and the inductances scale with it).
+
+    I_ref: float, optional
+        Reference current [A]: a drive scale of 1 reproduces the coil at
+        I_ref.
+
+    field_name: str, optional
+        The paired external-field entry (default: the coil name).
+
+    fill_unit_field: bool, optional
+        Fill <field_name>_Aext from the ring kernel at initialization
+        (default true).
+
+    probe: str, optional
+        The coil's plasma flux-linkage measurement: 'default', 'disk',
+        'reciprocity' or 'none'.
+    """
+
+    def __init__(
+        self,
+        name,
+        r,
+        z,
+        n_turns=None,
+        I_ref=None,
+        field_name=None,
+        fill_unit_field=None,
+        probe=None,
+    ):
+        self.name = name
+        self.r = r
+        self.z = z
+        self.n_turns = n_turns
+        self.I_ref = I_ref
+        self.field_name = field_name
+        self.fill_unit_field = fill_unit_field
+        self.probe = probe
+
+
+class CircuitCoupling(object):
+    """The coil set and coupling engine of the circuit-coupling subsystem
+    (circuit.*), passed to HybridPICSolver as circuit=...
+
+    Parameters
+    ----------
+    coils: list of CircuitCoil
+        The coil set.
+
+    engine: str, optional
+        'none' (default; the coils are static or driven per step from
+        Python), 'callbacks' (the per-substep Python hook contract:
+        circuitbeginstep / circuitpredict / circuitcorrect /
+        circuitfinish), or 'external' (a compiled ExternalCircuit plugin).
+
+    plugin_library: str, optional
+        With engine='external', the plugin's shared-library path.
+
+    plugin_config: str, optional
+        With engine='external', the opaque configuration string handed to
+        the plugin's Define (typically a path to the engine's own
+        configuration file; its format is entirely the engine's business).
+
+    plugin_restart_config: str, optional
+        Optional replacement for plugin_config on restart runs (the
+        restored checkpoint supersedes engine-side boot work such as a
+        pre-roll, which the restart config can skip).
+
+    probe_crosscheck: bool, optional
+        Validation knob: cross-check every batched linkage measurement
+        against the single-coil reference probes and abort on
+        disagreement.
+
+    corrector_iterations: int, optional
+        Predictor-corrector passes per coupling substep (default 1;
+        0 = lagged predictor only).
+
+    corrector_rtol: float, optional
+        Early-exit tolerance of the corrector on the realized coil scales.
+    """
+
+    def __init__(
+        self,
+        coils,
+        engine=None,
+        plugin_library=None,
+        plugin_config=None,
+        plugin_restart_config=None,
+        probe_crosscheck=None,
+        corrector_iterations=None,
+        corrector_rtol=None,
+    ):
+        self.coils = coils
+        self.engine = engine
+        self.plugin_library = plugin_library
+        self.plugin_config = plugin_config
+        self.plugin_restart_config = plugin_restart_config
+        self.probe_crosscheck = probe_crosscheck
+        self.corrector_iterations = corrector_iterations
+        self.corrector_rtol = corrector_rtol
+
+    def coupling_initialize_inputs(self):
+        pywarpx.circuit.coils = [coil.name for coil in self.coils]
+        for coil in self.coils:
+            for attr, key in (
+                (coil.r, "r"),
+                (coil.z, "z"),
+                (coil.n_turns, "n_turns"),
+                (coil.I_ref, "I_ref"),
+                (coil.field_name, "field_name"),
+                (coil.fill_unit_field, "fill_unit_field"),
+                (coil.probe, "probe"),
+            ):
+                if attr is not None:
+                    pywarpx.circuit.add_new_attr(f"{coil.name}.{key}", attr)
+        if self.engine is not None:
+            pywarpx.circuit.engine = self.engine
+        if self.plugin_library is not None:
+            pywarpx.circuit.plugin_library = self.plugin_library
+        if self.plugin_config is not None:
+            pywarpx.circuit.plugin_config = self.plugin_config
+        if self.plugin_restart_config is not None:
+            pywarpx.circuit.plugin_restart_config = self.plugin_restart_config
+        if self.probe_crosscheck is not None:
+            pywarpx.circuit.probe_crosscheck = self.probe_crosscheck
+        if self.corrector_iterations is not None:
+            pywarpx.circuit.add_new_attr(
+                "coupling.corrector_iterations", self.corrector_iterations
+            )
+        if self.corrector_rtol is not None:
+            pywarpx.circuit.add_new_attr(
+                "coupling.corrector_rtol", self.corrector_rtol
+            )
 
 
 class HybridPICSolver(picmistandard.base._ClassWithInit):
@@ -3453,6 +3618,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         Jz_external_function=None,
         A_external=None,
         do_external_diva_cleaning=None,
+        circuit=None,
         **kw,
     ):
         self.grid = grid
@@ -3495,6 +3661,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.A_external = A_external
 
         self.do_external_diva_cleaning = do_external_diva_cleaning
+
+        self.circuit = circuit
 
         # Handle keyword arguments used in expressions
         self.user_defined_kw = {}
@@ -3669,6 +3837,9 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
                             self.mangle_dict,
                         ),
                     )
+
+        if self.circuit is not None:
+            self.circuit.coupling_initialize_inputs()
 
 
 class ElectrostaticSolver(picmistandard.PICMI_ElectrostaticSolver):

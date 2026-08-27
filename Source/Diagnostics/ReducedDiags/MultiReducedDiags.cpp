@@ -8,6 +8,7 @@
 
 #include "BeamRelevant.H"
 #include "ChargeOnEB.H"
+#include "CircuitCouplingDiag.H"
 #include "ColliderRelevant.H"
 #include "DifferentialLuminosity.H"
 #include "DifferentialLuminosity2D.H"
@@ -57,6 +58,7 @@ MultiReducedDiags::MultiReducedDiags ()
         std::map<std::string, std::function<std::unique_ptr<ReducedDiags>(CS)>>{
             {"BeamRelevant",          [](CS s){return std::make_unique<BeamRelevant>(s);}},
             {"ChargeOnEB",            [](CS s){return std::make_unique<ChargeOnEB>(s);}},
+            {"CircuitCoupling",       [](CS s){return std::make_unique<CircuitCouplingDiag>(s);}},
             {"ColliderRelevant",      [](CS s){return std::make_unique<ColliderRelevant>(s);}},
             {"DifferentialLuminosity",[](CS s){return std::make_unique<DifferentialLuminosity>(s);}},
             {"DifferentialLuminosity2D",[](CS s){return std::make_unique<DifferentialLuminosity2D>(s);}},

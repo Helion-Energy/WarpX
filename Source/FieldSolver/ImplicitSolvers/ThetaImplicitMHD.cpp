@@ -8,6 +8,8 @@
 #include "ThetaImplicitMHD_K.H"
 
 #include "BoundaryConditions/GreensFunctionOpenBC.H"
+#include "Circuit/CircuitCoupler.H"
+#include "Circuit/CircuitCoupling.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
 #include "EmbeddedBoundary/Enabled.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
@@ -191,6 +193,24 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
             "implicit_mhd.circuit_hook_scope must be 'residual' or "
             "'newton'");
         m_circuit_hook_newton_scope = (circuit_hook_scope == "newton");
+    }
+    {
+        // Which coupler drives the circuit at the hook firing points:
+        // "python" (default, bit-identical) executes the
+        // externalcoiltheta/externalcoilfinish callbacks; "native" drives
+        // the C++ circuit-coupling engine in-process (see the
+        // m_circuit_native member documentation).
+        std::string circuit_driver = "python";
+        pp.query("circuit_driver", circuit_driver);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            circuit_driver == "python" || circuit_driver == "native",
+            "implicit_mhd.circuit_driver must be 'python' or 'native'");
+        m_circuit_native = (circuit_driver == "native");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_circuit_native || m_external_field_iteration,
+            "implicit_mhd.circuit_driver = native requires "
+            "implicit_mhd.external_field_iteration = 1 (the native driver "
+            "replaces the python hooks at the same firing points)");
     }
     pp.query("fluid_flux", m_fluid_flux);
     utils::parser::queryWithParser(pp, "viscosity", m_viscosity);
@@ -3129,6 +3149,17 @@ void ThetaImplicitMHD::AddExternalFieldsToTotals (const amrex::Real sign) const
     }
 }
 
+CircuitCoupler& ThetaImplicitMHD::NativeCircuitCoupler () const
+{
+    CircuitCoupling* const coupling = m_WarpX->get_pointer_CircuitCoupling();
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        coupling != nullptr && coupling->Coupler() != nullptr,
+        "implicit_mhd.circuit_driver = native requires the circuit "
+        "coupling engine: declare circuit.coils and circuit.engine "
+        "(typically 'external' with circuit.plugin_library)");
+    return *coupling->Coupler();
+}
+
 void ThetaImplicitMHD::SaveMagneticField ()
 {
     using ablastr::fields::Direction;
@@ -3148,6 +3179,11 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
 
     m_dt = dt;
     m_circuit_hook_calls = 0;
+    // Native circuit driver: (re)open the coupling step lazily at the
+    // first qualifying residual evaluation. A step replayed after a
+    // failed solve re-fires BeginStep with the same t0 -- the engine
+    // re-snapshots its last ACCEPTED state, the contractual replay.
+    m_circuit_step_open = false;
     SaveEoldMultifab();
 
     if (m_hybrid_pic_model->m_add_external_fields) {
@@ -3316,14 +3352,17 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
     m_WarpX->reduced_diags->ComputeDiagsMidStep(step);
     FinishStateUpdate(start_time + m_dt);
     if (m_external_field_iteration) {
-        // Sync-tax instrument: how many python round-trips the circuit
-        // hook cost this step (the end-of-step "externalcoilfinish"
-        // commit is separate and fires once in either scope).
+        // Sync-tax instrument: how many circuit-hook firings the step
+        // cost (python round-trips, or native engine advances; the
+        // end-of-step commit is separate and fires once in either
+        // scope).
         amrex::Print() << "ThetaImplicitMHD: step " << step + 1
                        << " externalcoiltheta calls = "
                        << m_circuit_hook_calls << " (circuit_hook_scope = "
                        << (m_circuit_hook_newton_scope ? "newton"
                                                        : "residual")
+                       << ", circuit_driver = "
+                       << (m_circuit_native ? "native" : "python")
                        << ")\n";
     }
     ExecutePythonCallback("afterEpush");
@@ -3799,14 +3838,34 @@ void ThetaImplicitMHD::ComputeRHS (WarpXSolverVec& rhs, const WarpXSolverVec& st
         //
         // circuit_hook_scope = newton instead fires the hook ONLY at
         // accepted Newton iterates: Jacobian probes and line-search
-        // trials skip both the python round-trip and the external-field
+        // trials skip both the circuit round-trip and the external-field
         // refresh, reusing the coil scales (and the theta-time external
         // fields computed from them) cached here at the last iterate
         // evaluation. The Jacobian then sees a per-iterate lagged
         // circuit (quasi-Newton); the converged answer is unchanged
         // because convergence is still tested on this live-coupled
         // iterate residual.
-        ExecutePythonCallback("externalcoiltheta");
+        if (m_circuit_native) {
+            // Native driver: measure this iterate's linkages with the
+            // engine's batched device probes (feeding the plasma current
+            // just computed above -- no python, no per-coil pulls, no
+            // full-grid re-curl) and re-advance the engine from the
+            // committed interval entry to the THETA-STAGE time
+            // (accept = false: switches and stage swaps stay latched at
+            // the committed state). The engine pushes the realized coil
+            // scales as segments; the shared refresh below realizes them
+            // on the external fields exactly like the python path.
+            CircuitCoupler& coupler = NativeCircuitCoupler();
+            coupler.MeasureLinkages(false);
+            if (!m_circuit_step_open) {
+                coupler.BeginStepMeasured(start_time, m_dt);
+                m_circuit_step_open = true;
+            }
+            coupler.EvaluateInterval(start_time, start_time + m_theta * m_dt,
+                                     false);
+        } else {
+            ExecutePythonCallback("externalcoiltheta");
+        }
         ++m_circuit_hook_calls;
         m_hybrid_pic_model->m_external_vector_potential->UpdateHybridExternalFields(
             start_time + m_theta * m_dt, m_dt);
@@ -10635,7 +10694,25 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
         if (m_external_field_iteration) {
             // Final circuit pass against the accepted end-of-step plasma
             // current, leaving the circuit state converged at t^{n+1}.
-            ExecutePythonCallback("externalcoilfinish");
+            if (m_circuit_native) {
+                // The single accept = true advance of the step, over the
+                // full committed interval [t^n, t^{n+1}] on the accepted
+                // final state (Bfield_fp and hybrid_current_fp_plasma
+                // hold the plasma-response frame here; J was just
+                // recomputed above): discontinuous engine transitions
+                // latch NOW, in committed time. FinishStep closes the
+                // engine's per-step bookkeeping.
+                CircuitCoupler& coupler = NativeCircuitCoupler();
+                coupler.MeasureLinkages(false);
+                if (m_circuit_step_open) {
+                    coupler.EvaluateInterval(end_time - m_dt, end_time,
+                                             true);
+                    coupler.FinishStep();
+                    m_circuit_step_open = false;
+                }
+            } else {
+                ExecutePythonCallback("externalcoilfinish");
+            }
         }
         // Refresh the external fields at t^{n+1} for the final Ohm's-law
         // recompute below. These same stored values are added back to the

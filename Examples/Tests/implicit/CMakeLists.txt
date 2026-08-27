@@ -1879,6 +1879,64 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_circuit_hook_residual  # dependency
 )
 
+# Test-fixture ExternalCircuit plugin (independent driven RL loops, the
+# exact backward-Euler map of the python-hook reference) for the native
+# circuit-driver tests: a self-contained MODULE library dlopen'd through
+# circuit.plugin_library. Links nothing (the ABI header pulls only the
+# amrex::Real typedef); ablastr provides the include paths.
+if(RZ IN_LIST WarpX_DIMS)
+    warpx_set_suffix_dims(_rl_plugin_sd RZ)
+    add_library(rl_test_circuit MODULE rl_test_circuit.cpp)
+    target_link_libraries(rl_test_circuit PRIVATE ablastr_${_rl_plugin_sd})
+    target_include_directories(rl_test_circuit
+        PRIVATE ${WarpX_SOURCE_DIR}/Source)
+    set_target_properties(rl_test_circuit PROPERTIES
+        POSITION_INDEPENDENT_CODE TRUE
+        PREFIX "lib"
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+endif()
+
+# native-driver twin of the residual-scope reference: the SAME coupled
+# RL map advanced by the compiled plugin behind the C++ circuit-coupling
+# engine (implicit_mhd.circuit_driver = native), measuring with the
+# engine's batched device disk probe instead of the python hook; the
+# analysis asserts the committed per-step coil scales and linkages match
+# the python driver to solver tolerance
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_native  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_hook_picmi.py --scope residual --driver native"  # inputs
+    analysis_mhd_circuit_native_parity.py  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_circuit_hook_residual  # dependency
+)
+# multi-coil batched-probe equivalence (5 disk rows, 2 ranks, multi-box
+# grids): circuit.probe_crosscheck re-measures every batched linkage
+# through the single-coil reference probes and aborts on disagreement
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_crosscheck  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_hook_picmi.py --scope residual --driver native --extra-coils 4 --crosscheck"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+# reciprocity-probe twin of the crosscheck under the Green's-function
+# open r_hi boundary (ring-kernel unit fields on coils outside the
+# wall): exercises the batched reciprocity path
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_crosscheck_reciprocity  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_hook_picmi.py --scope residual --driver native --extra-coils 2 --crosscheck --r-open"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+
 add_warpx_test(
     test_2d_theta_implicit_jfnk_vandb  # name
     2  # dims
