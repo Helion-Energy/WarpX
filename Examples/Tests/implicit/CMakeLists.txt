@@ -594,6 +594,24 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_braginskii_qs_twin  # dependency
 )
 
+# Reference-code-style density-keyed halo boost of the Braginskii chi_perp
+# (implicit_mhd.conduction_halo_boost, keyed to the dynamic reference of
+# vacuum_reference_peak_fraction): a two-zone magnetized column whose
+# rarefied half must relax its cross-field Te ripple at the composed
+# boost diffusivity sqrt(chi_perp^2 + (D_boost (n_ref/n)^2)^2) -- five
+# decades above the physical chi_perp there -- while the bulk half
+# keeps physical Braginskii (boost two decades below chi_perp in the
+# quadrature): boosted perp flux in the LOW-DENSITY zone only
+add_warpx_test(
+    test_1d_theta_implicit_mhd_conduction_halo_boost  # name
+    1  # dims
+    2  # nprocs
+    inputs_test_1d_theta_implicit_mhd_conduction_halo_boost  # inputs
+    "analysis_mhd_conduction_halo_boost.py diags/diag000000 diags/diag000010"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # conduction-stage L-stability (implicit_mhd.conduction_theta):
 # backward-Euler conduction (theta_c = 1) must obliterate a seeded
 # grid-Nyquist Te ripple at theta dt chi/dx^2 = 1e3 (one-step factor
@@ -691,6 +709,25 @@ add_warpx_test(
     2  # nprocs
     inputs_test_1d_theta_implicit_mhd_joule_ohm_quench  # inputs
     "analysis_mhd_joule_ohm_quench.py diags/diag000000 diags/diag000001"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Reference-code-style dynamic reference density
+# (implicit_mhd.vacuum_reference_peak_fraction): the joule-ohm-quench
+# sibling with a MID-DENSITY zone (2% of the peak) whose Joule deposit
+# is quenched ONLY because the dynamic reference max(n_floor,
+# 0.1 n_peak) re-keys the vacuum boost and the dominance criterion --
+# the analysis re-derives the static-reference margin showing the
+# knob-OFF run would leave the zone unquenched, and the bulk (still
+# non-dominated under the dynamic reference) must match the exact
+# OFF integral
+add_warpx_test(
+    test_1d_theta_implicit_mhd_dynamic_reference  # name
+    1  # dims
+    2  # nprocs
+    inputs_test_1d_theta_implicit_mhd_dynamic_reference  # inputs
+    "analysis_mhd_dynamic_reference.py diags/diag000000 diags/diag000001"  # analysis
     OFF  # checksum
     OFF  # dependency
 )
@@ -1443,6 +1480,23 @@ add_warpx_test(
     2  # nprocs
     "inputs_test_rz_theta_implicit_mhd_wall_thermal implicit_mhd.wall_model=dielectric implicit_mhd.wall_thermal_bc=temperature implicit_mhd.wall_temperature=2.0 hybrid_pic_model.add_external_fields=1 external_vector_potential.fields=hold external_vector_potential.do_diva_cleaning=0"  # inputs
     "analysis_mhd_wall_thermal.py diags temperature"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Reference-code-style wall-row viscosity slip mask
+# (implicit_mhd.wall_viscosity_mask): a sheared column u_z = A r inside
+# a cylinder wall must deposit the discretely exact uniform shear
+# heating 2 rho nu A^2 in every live-viscosity cell while every face
+# within wall_viscosity_mask_width of the masked contour carries zero
+# viscous stress AND zero stress work -- zero viscous deposit at the
+# masked-adjacent rows, unchanged elsewhere
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_viscosity_mask  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_wall_viscosity_mask  # inputs
+    "analysis_mhd_wall_viscosity_mask.py diags/diag000000 diags/diag000003"  # analysis
     OFF  # checksum
     OFF  # dependency
 )

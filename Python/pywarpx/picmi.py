@@ -2792,6 +2792,46 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         un-boosted user eta, so a vacuum-boosted halo's Joule deposit is
         quenched quadratically. Binary per-cell switch (no blend).
 
+    vacuum_reference_peak_fraction: float, default=0 (off)
+        reference-code-style dynamic reference density (en0 = max(en00,
+        0.1*max(n)), refreshed per step): fraction of the instantaneous
+        (step-old) global density peak keying the density-keyed halo
+        mechanisms -- the field-eta vacuum boost
+        (vacuum_resistivity_diffusivity), the joule_ohm_current
+        diffusion-dominance criterion, and the conduction halo boost
+        (conduction_halo_boost). The effective reference is
+        max(Ohm guard, fraction * rho_peak), frozen for each nonlinear
+        solve (Newton-consistent) and printed on change. 0 keeps the
+        static Ohm-guard reference (bit-identical). The Joule heating
+        coefficient keeps the un-boosted user eta either way.
+
+    wall_viscosity_mask: bool, default=False
+        reference-code-style wall-row viscosity slip mask (requires an active
+        wall_model): zeroes the viscous face coefficient -- the momentum
+        stress AND its heating work, which share one coefficient
+        assembly -- at faces within wall_viscosity_mask_width cells of
+        the masked shaped-wall contour, so no viscous dissipation beads
+        form at the coil-footprint wall ripple.
+
+    wall_viscosity_mask_width: int, default=2
+        Width of the wall-row viscosity mask in fluid cells measured
+        from the masked contour (Chebyshev distance over the stair-step
+        tables).
+
+    conduction_halo_boost: float, default=0 (off)
+        Density-keyed halo boost of the Braginskii chi_perp in m^2/s
+        (thermal_conduction_model="braginskii" only): the reference code's
+        low-density perp-chi boost. chi_perp is composed with
+        D_boost*(rho_ref/rho)^2 -- reaching D_boost at the reference
+        density, quadratic in reference/n below it, vanishing
+        quadratically above -- through the same smooth quadrature max as
+        the vacuum resistivity, with rho_ref the shared (dynamic)
+        reference of vacuum_reference_peak_fraction. Applied to
+        chi_perp only, both species channels, BEFORE the
+        conduction_chi_min/max clamps (the reference code's ntb.f90 order: the
+        clamps cap the boosted value); the boost inputs follow
+        conduction_coefficient_state like the base chi.
+
     circuit_hook_scope: str, default="residual"
         Scope of the "externalcoiltheta" circuit hook when
         external_field_iteration is on. "residual" fires it on every
@@ -2865,6 +2905,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         floor_consistency_width_fraction=None,
         floor_ledger_file=None,
         vacuum_resistivity_diffusivity=None,
+        vacuum_reference_peak_fraction=None,
         joule_ohm_current=None,
         resistive_theta=None,
         resistive_direct_device_assembly=None,
@@ -2872,6 +2913,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         fluid_flux=None,
         allow_hlld=None,
         viscosity=None,
+        wall_viscosity_mask=None,
+        wall_viscosity_mask_width=None,
         thermal_diffusivity_ion=None,
         thermal_diffusivity_electron=None,
         conduction_flux_limit_factor=None,
@@ -2882,6 +2925,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         conduction_qs_chi=None,
         conduction_qs_onset=None,
         conduction_qs_reference_temperature=None,
+        conduction_halo_boost=None,
         pressure_corner_width_fraction=None,
         r_open_fluid=None,
         z_boundary_fluid=None,
@@ -2948,6 +2992,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.floor_consistency_width_fraction = floor_consistency_width_fraction
         self.floor_ledger_file = floor_ledger_file
         self.vacuum_resistivity_diffusivity = vacuum_resistivity_diffusivity
+        self.vacuum_reference_peak_fraction = vacuum_reference_peak_fraction
         self.joule_ohm_current = joule_ohm_current
         self.resistive_theta = resistive_theta
         self.resistive_direct_device_assembly = resistive_direct_device_assembly
@@ -2955,6 +3000,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.fluid_flux = fluid_flux
         self.allow_hlld = allow_hlld
         self.viscosity = viscosity
+        self.wall_viscosity_mask = wall_viscosity_mask
+        self.wall_viscosity_mask_width = wall_viscosity_mask_width
         self.thermal_diffusivity_ion = thermal_diffusivity_ion
         self.thermal_diffusivity_electron = thermal_diffusivity_electron
         self.conduction_flux_limit_factor = conduction_flux_limit_factor
@@ -2965,6 +3012,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.conduction_qs_chi = conduction_qs_chi
         self.conduction_qs_onset = conduction_qs_onset
         self.conduction_qs_reference_temperature = conduction_qs_reference_temperature
+        self.conduction_halo_boost = conduction_halo_boost
         self.pressure_corner_width_fraction = pressure_corner_width_fraction
         self.r_open_fluid = r_open_fluid
         self.z_boundary_fluid = z_boundary_fluid
@@ -3041,6 +3089,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.vacuum_resistivity_diffusivity = (
             self.vacuum_resistivity_diffusivity
         )
+        implicit_mhd.vacuum_reference_peak_fraction = (
+            self.vacuum_reference_peak_fraction
+        )
         implicit_mhd.joule_ohm_current = self.joule_ohm_current
         implicit_mhd.resistive_theta = self.resistive_theta
         implicit_mhd.resistive_direct_device_assembly = (
@@ -3050,6 +3101,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.fluid_flux = self.fluid_flux
         implicit_mhd.allow_hlld = self.allow_hlld
         implicit_mhd.viscosity = self.viscosity
+        implicit_mhd.wall_viscosity_mask = self.wall_viscosity_mask
+        implicit_mhd.wall_viscosity_mask_width = self.wall_viscosity_mask_width
         # strings route to the parser signature; numbers keep the
         # bit-identical constant fast path
         if isinstance(self.thermal_diffusivity_ion, str):
@@ -3078,6 +3131,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.conduction_qs_reference_temperature = (
             self.conduction_qs_reference_temperature
         )
+        implicit_mhd.conduction_halo_boost = self.conduction_halo_boost
         implicit_mhd.pressure_corner_width_fraction = (
             self.pressure_corner_width_fraction
         )

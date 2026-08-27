@@ -160,6 +160,15 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     pp.query("floor_ledger_file", m_floor_ledger_file);
     utils::parser::queryWithParser(pp, "vacuum_resistivity_diffusivity",
                                    m_vacuum_resistivity_diffusivity);
+    // Reference-code-style dynamic reference density (see
+    // m_vacuum_reference_peak_fraction).
+    utils::parser::queryWithParser(pp, "vacuum_reference_peak_fraction",
+                                   m_vacuum_reference_peak_fraction);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_vacuum_reference_peak_fraction >= 0.0_rt &&
+            m_vacuum_reference_peak_fraction < 1.0_rt,
+        "implicit_mhd.vacuum_reference_peak_fraction must be in [0, 1) "
+        "(0 disables the dynamic reference; the reference code uses 0.1)");
     // Reference-code-style Ohm-current Joule quench (see m_joule_ohm_current).
     pp.query("joule_ohm_current", m_joule_ohm_current);
     // Sentinel -1 = "not set": defaulted to the global implicit_evolve.theta
@@ -185,6 +194,16 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     }
     pp.query("fluid_flux", m_fluid_flux);
     utils::parser::queryWithParser(pp, "viscosity", m_viscosity);
+    // Reference-code-style wall-row viscosity mask (see m_wall_viscosity_mask);
+    // the active-wall requirement is asserted in Define, where the wall
+    // mask is built.
+    pp.query("wall_viscosity_mask", m_wall_viscosity_mask);
+    utils::parser::queryWithParser(pp, "wall_viscosity_mask_width",
+                                   m_wall_viscosity_mask_width);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_wall_viscosity_mask_width >= 1,
+        "implicit_mhd.wall_viscosity_mask_width must be at least one "
+        "fluid cell inside the masked wall contour");
     // Thermal diffusivities: legacy numeric key (bit-identical constant
     // fast path) or the parser signature (rho,Te,Ti,J,t), not both. Same
     // symbol conventions as plasma_resistivity(rho,Te,J,t) plus Ti [K]
@@ -312,6 +331,22 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
             "implicit_mhd.conduction_qs_reference_temperature (the "
             "load-envelope temperature T0, in eV)");
     }
+    // Density-keyed halo boost of the Braginskii chi_perp (see
+    // m_conduction_halo_boost): the reference code's low-density perp-chi boost,
+    // keyed to the same reference density as the field-eta vacuum boost.
+    utils::parser::queryWithParser(pp, "conduction_halo_boost",
+                                   m_conduction_halo_boost);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_conduction_halo_boost >= 0.0_rt,
+        "implicit_mhd.conduction_halo_boost cannot be negative "
+        "(0 disables the halo perp-chi boost)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_conduction_halo_boost == 0.0_rt || m_conduction_braginskii,
+        "implicit_mhd.conduction_halo_boost boosts the Braginskii "
+        "chi_perp and requires implicit_mhd.thermal_conduction_model = "
+        "braginskii (with the parser diffusivities, carry the halo "
+        "boost inside the deck-level thermal_diffusivity_* expressions "
+        "instead)");
     utils::parser::queryWithParser(pp, "pressure_corner_width_fraction",
                                    m_pressure_corner_width_fraction);
     pp.query("r_open_fluid", m_r_open_fluid);
@@ -1059,6 +1094,11 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
                 "on the solver-assembled Ohm electric field and the recast "
                 "flux kernels");
         }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_wall_viscosity_mask || m_wall_mask.IsActive(),
+            "implicit_mhd.wall_viscosity_mask zeroes the viscous face "
+            "coefficient along the shaped-wall contour and requires an "
+            "active implicit_mhd.wall_model");
         if (m_wall_mask.GetThermalBC() !=
             ImplicitMHDWallMask::ThermalBC::none) {
             // The exterior clamp parks the band at the floor image and
@@ -1471,6 +1511,43 @@ ThetaImplicitMHD::OhmMassDensityFloor () const
 }
 
 amrex::Real
+ThetaImplicitMHD::VacuumReferenceMassDensity () const
+{
+    // The static Ohm guard is the exact fraction = 0 limit
+    // (m_vacuum_reference_mass_density stays 0), so the default is
+    // bit-identical; with the dynamic reference active the max keeps a
+    // globally decaying state from dragging the reference below the
+    // guard (the reference code's en0 = max(en00, 0.1 max(en)) composition).
+    return std::max(OhmMassDensityFloor(), m_vacuum_reference_mass_density);
+}
+
+void ThetaImplicitMHD::RefreshVacuumReferenceDensity (const int step)
+{
+    if (m_vacuum_reference_peak_fraction <= 0.0_rt) {
+        return;
+    }
+    // Global step-old density peak (MultiFab::max is an all-rank
+    // reduction), from the state at OneStep refresh time -- the state
+    // that becomes m_state_old, so every residual/Jacobian evaluation of
+    // this solve keys the boosts to the same frozen reference.
+    const amrex::Real density_peak =
+        m_state.getMultiFabBlock(MassDensityName, 0).max(0);
+    m_vacuum_reference_mass_density =
+        m_vacuum_reference_peak_fraction * density_peak;
+    const amrex::Real reference = VacuumReferenceMassDensity();
+    if (m_vacuum_reference_printed < 0.0_rt ||
+        std::abs(reference - m_vacuum_reference_printed) >
+            0.01_rt * m_vacuum_reference_printed) {
+        amrex::Print() << "ThetaImplicitMHD: step " << step + 1
+                       << " vacuum reference density = " << reference
+                       << " kg/m^3 (" << m_vacuum_reference_peak_fraction
+                       << " x peak " << density_peak << ", Ohm guard "
+                       << OhmMassDensityFloor() << ")\n";
+        m_vacuum_reference_printed = reference;
+    }
+}
+
+amrex::Real
 ThetaImplicitMHD::GetMHDReferenceResistivityForPC (const amrex::Real time) const
 {
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -1513,6 +1590,12 @@ ThetaImplicitMHD::GetMHDFieldResistivityCCForPC (const amrex::Real time) const
         m_ion_charge_to_mass * m_mass_density_floor;
     const amrex::Real vacuum_eta_scale =
         PhysConst::mu0 * m_vacuum_resistivity_diffusivity;
+    // Vacuum-boost reference: the per-step frozen dynamic reference
+    // (VacuumReferenceMassDensity; the static Ohm guard when the
+    // dynamic fraction is off), matching the residual's Ohm assembly so
+    // the PC sees the identical eta_field.
+    const amrex::Real vacuum_reference_charge_density =
+        m_ion_charge_to_mass * VacuumReferenceMassDensity();
     // Te [K] frozen at the preconditioner update state: the cell-centered
     // temperature-primary scratch, refreshed by the last FillFluidSources
     // (the PC never differentiates eta; the standard frozen-eta lag).
@@ -1541,7 +1624,7 @@ ThetaImplicitMHD::GetMHDFieldResistivityCCForPC (const amrex::Real time) const
             amrex::Real value =
                 theta_implicit_mhd::vacuum_keyed_resistivity(
                     eta(charge_density_value, te_cc(i, j, k), 0.0_rt, time),
-                    charge_density_raw, charge_density_floor,
+                    charge_density_raw, vacuum_reference_charge_density,
                     vacuum_division_guard, vacuum_eta_scale);
             if (band_override_cc != nullptr && i >= band_override_cc[j]) {
                 value = std::max(value, band_eta_override);
@@ -1581,6 +1664,10 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
         m_ion_charge_to_mass * m_mass_density_floor;
     const amrex::Real vacuum_eta_scale =
         PhysConst::mu0 * m_vacuum_resistivity_diffusivity;
+    // Vacuum-boost reference: the per-step frozen dynamic reference
+    // (see the cell-centered fill above).
+    const amrex::Real vacuum_reference_charge_density =
+        m_ion_charge_to_mass * VacuumReferenceMassDensity();
 #if defined(WARPX_DIM_1D_Z)
     amrex::MultiFab& node_resistivity =
         *m_WarpX->m_fields.get(FieldResistivityE0Name, 0);
@@ -1599,7 +1686,7 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
             eta_field(i, j, k) =
                 theta_implicit_mhd::vacuum_keyed_resistivity(
                     eta(charge_density_value, temperature, 0.0_rt, time),
-                    charge_density_raw, charge_density_floor,
+                    charge_density_raw, vacuum_reference_charge_density,
                     vacuum_division_guard, vacuum_eta_scale);
         });
     }
@@ -1650,7 +1737,7 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
                     theta_implicit_mhd::vacuum_keyed_resistivity(
                         eta(charge_density_value, node_temperature(i, j),
                             0.0_rt, time),
-                        charge_density_raw, charge_density_floor,
+                        charge_density_raw, vacuum_reference_charge_density,
                         vacuum_division_guard, vacuum_eta_scale);
                 if (band_override_et != nullptr && i >= band_override_et[j]) {
                     value = band_eta_override;
@@ -1679,7 +1766,7 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
                 amrex::Real value =
                     theta_implicit_mhd::vacuum_keyed_resistivity(
                         eta(charge_density_value, temperature, 0.0_rt, time),
-                        charge_density_raw, charge_density_floor,
+                        charge_density_raw, vacuum_reference_charge_density,
                         vacuum_division_guard, vacuum_eta_scale);
                 if (band_override_er != nullptr && i >= band_override_er[j]) {
                     value = band_eta_override;
@@ -1708,7 +1795,7 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
                 amrex::Real value =
                     theta_implicit_mhd::vacuum_keyed_resistivity(
                         eta(charge_density_value, temperature, 0.0_rt, time),
-                        charge_density_raw, charge_density_floor,
+                        charge_density_raw, vacuum_reference_charge_density,
                         vacuum_division_guard, vacuum_eta_scale);
                 if (band_override_ez != nullptr && i >= band_override_ez[j]) {
                     value = band_eta_override;
@@ -1719,8 +1806,9 @@ ThetaImplicitMHD::GetMHDFieldResistivityEdgeForPC (const amrex::Real time) const
     return {&radial_resistivity, &azimuthal_resistivity, &axial_resistivity};
 #else
     amrex::ignore_unused(density, temperature_cc, eta, charge_to_mass,
-                         charge_density_floor,
-                         vacuum_division_guard, vacuum_eta_scale, time);
+                         charge_density_floor, vacuum_division_guard,
+                         vacuum_eta_scale, vacuum_reference_charge_density,
+                         time);
     return {nullptr, nullptr, nullptr};
 #endif
 }
@@ -2257,6 +2345,13 @@ void ThetaImplicitMHD::PrintParameters () const
     amrex::Print()
                    << "Ion closure:                   " << m_ion_closure << "\n"
                    << "Viscosity [m2/s]:              " << m_viscosity << "\n"
+                   << "Wall viscosity mask:           "
+                   << (m_wall_viscosity_mask
+                           ? "ON (width " +
+                                 std::to_string(m_wall_viscosity_mask_width) +
+                                 " cells)"
+                           : std::string("off"))
+                   << "\n"
                    << "Thermal diffusivity i/e [m2/s]: "
                    << (m_chi_ion_is_parser
                            ? std::string("chi_i(rho,Te,Ti,J,t) = ") +
@@ -2311,6 +2406,14 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "\n"
                    << "Vacuum eta diffusivity [m2/s]: "
                    << m_vacuum_resistivity_diffusivity << "\n"
+                   << "Vacuum reference peak fraction: "
+                   << m_vacuum_reference_peak_fraction
+                   << (m_vacuum_reference_peak_fraction > 0.0_rt
+                           ? " (dynamic en0, refreshed per step)"
+                           : " (static Ohm-guard reference)")
+                   << "\n"
+                   << "Conduction halo boost [m2/s]:  "
+                   << m_conduction_halo_boost << "\n"
                    << "Halo pedestal fraction:        " << m_halo_pedestal_fraction
                    << "\n"
                    << "Halo pedestal drag rate [1/s]: " << m_halo_pedestal_drag_rate
@@ -3005,6 +3108,7 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
         m_loaded_state_sanitized = true;
     }
     RefreshHaloPedestal();
+    RefreshVacuumReferenceDensity(step);
     m_state_old.Copy(m_state);
 
     // Ghosted beginning-of-step fluid state for the flux kernels' floor
@@ -4266,12 +4370,16 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
         joule_ohm_current ? PhysConst::mu0 * joule_min_cell_size *
                                 joule_min_cell_size / m_dt
                           : std::numeric_limits<amrex::Real>::max();
-    const amrex::Real joule_charge_density_floor =
-        charge_to_mass * eta_density_floor;
     const amrex::Real joule_vacuum_division_guard =
         charge_to_mass * m_mass_density_floor;
     const amrex::Real joule_vacuum_eta_scale =
         PhysConst::mu0 * m_vacuum_resistivity_diffusivity;
+    // Vacuum-boost reference of the quench's eta_field (and hence of the
+    // diffusion-dominance criterion): the per-step frozen dynamic
+    // Reference (VacuumReferenceMassDensity), matching the field
+    // advance. The eta_joule ARGUMENT floor keeps the static Ohm guard.
+    const amrex::Real joule_vacuum_reference =
+        charge_to_mass * VacuumReferenceMassDensity();
     const WallBandEtaOverrideView joule_band_view =
         m_wall_mask.BandEtaOverrideView();
     const int* const joule_band_cc = joule_band_view.first_band_cc;
@@ -4493,7 +4601,7 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                     amrex::Real eta_field =
                         theta_implicit_mhd::vacuum_keyed_resistivity(
                             eta_joule, charge_to_mass * rho(i, j, k),
-                            joule_charge_density_floor,
+                            joule_vacuum_reference,
                             joule_vacuum_division_guard,
                             joule_vacuum_eta_scale);
                     if (joule_band_cc != nullptr && i >= joule_band_cc[j]) {
@@ -4765,6 +4873,19 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     // advective channels).
     const amrex::Real viscosity = m_viscosity;
     const bool add_viscosity = (viscosity > 0.0_rt);
+    // Wall-row viscosity mask (implicit_mhd.wall_viscosity_mask; the
+    // The reference code's 'skin'/'bndy' slip rows of step.f90 disip): a non-null
+    // table zeroes the viscous face coefficient -- the momentum stress
+    // AND its heating work, which share this one assembly -- at every
+    // face either of whose adjacent cells lies within
+    // wall_viscosity_mask_width cells (Chebyshev distance over the
+    // stair-step contour) of the masked region. Static geometry, so the
+    // branches are constants for the JFNK probes.
+    const int* const AMREX_RESTRICT wall_viscosity_first_masked =
+        (add_viscosity && m_wall_viscosity_mask && m_wall_mask.IsActive())
+            ? m_wall_mask.FirstMaskedCellCentered()
+            : nullptr;
+    const int wall_viscosity_width = m_wall_viscosity_mask_width;
     // Thermal conduction shares the viscous flux's spacing convention.
     const amrex::Real chi_ion = m_thermal_diffusivity_ion;
     const amrex::Real chi_electron = m_thermal_diffusivity_electron;
@@ -4876,6 +4997,23 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     // Smooth density guard of the entropy argument, at the same Ohm
     // density scale the Braginskii coefficient inputs are floored at.
     const amrex::Real qs_density_guard = OhmMassDensityFloor();
+    // Density-keyed halo boost of the Braginskii chi_perp
+    // (implicit_mhd.conduction_halo_boost; the reference code's low-density
+    // perp-chi boost, ntb.f90 t_cond ~584): chi_perp is composed with
+    // chi_halo = D_boost (rho_ref/rho)^2 through the
+    // vacuum_keyed_resistivity quadrature smooth max, keyed to the same
+    // per-step frozen reference as the field-eta vacuum boost and with
+    // the density division guarded at the positivity floor. The boost
+    // input is the coefficient-state face charge density (raw, not
+    // Ohm-floored: the boost must grow below the guard), so it follows
+    // conduction_coefficient_state exactly like the base chi.
+    const bool add_halo_boost =
+        m_conduction_braginskii && m_conduction_halo_boost > 0.0_rt;
+    const amrex::Real halo_boost_chi = m_conduction_halo_boost;
+    const amrex::Real halo_boost_reference =
+        m_ion_charge_to_mass * VacuumReferenceMassDensity();
+    const amrex::Real halo_boost_guard =
+        m_ion_charge_to_mass * m_mass_density_floor;
     // Stair-step wall thermal boundary (implicit_mhd.wall_thermal_bc):
     // the conducting-wall mask is electromagnetic only, so without this
     // the conduction operator exchanges blindly across the stair-step
@@ -5320,7 +5458,31 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
             // passes no viscous flux either -- the override below zeroes
             // the tangential pair, and the normal member must not survive
             // alone.
-            if (add_viscosity
+            // Wall-row viscosity mask (see the host constants): the
+            // The reference code's slip rows -- a face is a slip face when either
+            // adjacent cell sits within wall_viscosity_mask_width cells
+            // (Chebyshev distance over the stair-step tables) of the
+            // masked contour; the zeroed coefficient removes the
+            // momentum stress AND its heating work together (the
+            // conservative pair must never split).
+            bool viscosity_slip_face = false;
+            if (wall_viscosity_first_masked != nullptr) {
+                const auto near_wall = [&] (const int ic, const int jc) {
+                    for (int dj = -wall_viscosity_width;
+                         dj <= wall_viscosity_width; ++dj) {
+                        const int jz = std::max(
+                            wall_mask_z_lo,
+                            std::min(wall_mask_z_hi, jc + dj));
+                        if (ic >= wall_viscosity_first_masked[jz] -
+                                       wall_viscosity_width) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+                viscosity_slip_face = near_wall(il, jl) || near_wall(i, j);
+            }
+            if (add_viscosity && !viscosity_slip_face
 #if defined(WARPX_DIM_RZ)
                 && !(reflect_wall && i == radial_wall_face)
 #endif
@@ -5907,9 +6069,24 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         // acts on the channel whose own thermal content
                         // breaks the envelope, and a separate ion T0
                         // would be an uncalibratable second knob.
-                        brag_chi_perp_ion = brag_clamp(
+                        amrex::Real chi_perp_ion_value =
                             add_qs ? chi_perp_raw + qs_boost(face_ti)
-                                   : chi_perp_raw);
+                                   : chi_perp_raw;
+                        // Density-keyed halo boost (see the host
+                        // constants): applied to the unclamped perp
+                        // value, BEFORE the chi_min/max clamps -- the
+                        // The reference code's ntb.f90 t_cond order (boost at ~584,
+                        // clamps at ~592-593), so chi_max still caps
+                        // the boosted halo diffusivity.
+                        if (add_halo_boost) {
+                            chi_perp_ion_value =
+                                theta_implicit_mhd::vacuum_keyed_resistivity(
+                                    chi_perp_ion_value,
+                                    chi_charge_to_mass * face_density,
+                                    halo_boost_reference,
+                                    halo_boost_guard, halo_boost_chi);
+                        }
+                        brag_chi_perp_ion = brag_clamp(chi_perp_ion_value);
                         // Wall interface faces keep the one-sided
                         // isotropic drain with the tensor's nn
                         // projection as its scalar chi.
@@ -6044,9 +6221,21 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         // Quasi-shorting boost (see the ion channel and
                         // the qs_boost lambda): additive chi_perp, keyed
                         // on the electron temperature, clamped after.
-                        brag_chi_perp_electron = brag_clamp(
+                        amrex::Real chi_perp_electron_value =
                             add_qs ? chi_perp_raw + qs_boost(face_te)
-                                   : chi_perp_raw);
+                                   : chi_perp_raw;
+                        // Density-keyed halo boost, pre-clamp like the
+                        // ion channel (the reference code's ntb.f90 order).
+                        if (add_halo_boost) {
+                            chi_perp_electron_value =
+                                theta_implicit_mhd::vacuum_keyed_resistivity(
+                                    chi_perp_electron_value,
+                                    chi_charge_to_mass * face_density,
+                                    halo_boost_reference,
+                                    halo_boost_guard, halo_boost_chi);
+                        }
+                        brag_chi_perp_electron =
+                            brag_clamp(chi_perp_electron_value);
                         // Wall interface faces keep the one-sided
                         // isotropic drain with the tensor's nn
                         // projection as its scalar chi.
@@ -6707,14 +6896,18 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
     const amrex::Real charge_density_floor =
         m_ion_charge_to_mass * density_floor;
     // Density-keyed vacuum resistivity of the FIELD advance (see
-    // vacuum_keyed_resistivity in ThetaImplicitMHD_K.H): keyed to the Ohm
-    // guard, divisions guarded at the (far lower) positivity floor so the
-    // boost stays uncapped over the reachable density range. Joule
-    // heating keeps the un-boosted user eta.
+    // vacuum_keyed_resistivity in ThetaImplicitMHD_K.H): keyed to the
+    // vacuum reference (the Ohm guard, raised to the per-step frozen
+    // dynamic reference under vacuum_reference_peak_fraction), divisions
+    // guarded at the (far lower) positivity floor so the boost stays
+    // uncapped over the reachable density range. Joule heating keeps the
+    // un-boosted user eta.
     const amrex::Real vacuum_eta_scale =
         PhysConst::mu0 * m_vacuum_resistivity_diffusivity;
     const amrex::Real vacuum_division_guard =
         m_ion_charge_to_mass * m_mass_density_floor;
+    const amrex::Real vacuum_reference_charge_density =
+        m_ion_charge_to_mass * VacuumReferenceMassDensity();
     constexpr int flux_induction_t1 = FaceFluxComponent::induction_t1;
     constexpr int flux_induction_t2 = FaceFluxComponent::induction_t2;
 
@@ -6747,7 +6940,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 theta_implicit_mhd::vacuum_keyed_resistivity(
                     eta(charge_density_value, te_nodal(i, j, k),
                         current_magnitude, time),
-                    rho_q(i, j, k), charge_density_floor,
+                    rho_q(i, j, k), vacuum_reference_charge_density,
                     vacuum_division_guard, vacuum_eta_scale);
             electric_x(i, j, k) =
                 flux_arr(i, j, k, flux_induction_t2) + resistivity * jx;
@@ -6851,7 +7044,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 theta_implicit_mhd::vacuum_keyed_resistivity(
                     eta(charge_density_value, temperature_e,
                         current_magnitude, time),
-                    charge_density_raw, charge_density_floor,
+                    charge_density_raw, vacuum_reference_charge_density,
                     vacuum_division_guard, vacuum_eta_scale);
             const amrex::Real safe_density =
                 std::max(rho(i, j, k), density_floor);
@@ -7028,14 +7221,18 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
     const amrex::Real charge_density_floor =
         m_ion_charge_to_mass * density_floor;
     // Density-keyed vacuum resistivity of the FIELD advance (see
-    // vacuum_keyed_resistivity in ThetaImplicitMHD_K.H): keyed to the Ohm
-    // guard, divisions guarded at the (far lower) positivity floor so the
-    // boost stays uncapped over the reachable density range. Joule
-    // heating keeps the un-boosted user eta.
+    // vacuum_keyed_resistivity in ThetaImplicitMHD_K.H): keyed to the
+    // vacuum reference (the Ohm guard, raised to the per-step frozen
+    // dynamic reference under vacuum_reference_peak_fraction), divisions
+    // guarded at the (far lower) positivity floor so the boost stays
+    // uncapped over the reachable density range. Joule heating keeps the
+    // un-boosted user eta.
     const amrex::Real vacuum_eta_scale =
         PhysConst::mu0 * m_vacuum_resistivity_diffusivity;
     const amrex::Real vacuum_division_guard =
         m_ion_charge_to_mass * m_mass_density_floor;
+    const amrex::Real vacuum_reference_charge_density =
+        m_ion_charge_to_mass * VacuumReferenceMassDensity();
     const amrex::Real kappa_signal = m_hlld_kappa_signal;
     const amrex::Real kappa_denominator = m_hlld_kappa_denominator;
     const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
@@ -7133,7 +7330,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 theta_implicit_mhd::vacuum_keyed_resistivity(
                     eta(charge_density_value, temperature_e,
                         current_magnitude, time),
-                    charge_density_raw, charge_density_floor,
+                    charge_density_raw, vacuum_reference_charge_density,
                     vacuum_division_guard, vacuum_eta_scale);
             if (band_override_er != nullptr && i >= band_override_er[j]) {
                 // Wall-band eta override (see the capture comment):
@@ -7252,7 +7449,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 theta_implicit_mhd::vacuum_keyed_resistivity(
                     eta(charge_density_value, temperature_e,
                         current_magnitude, time),
-                    charge_density_raw, charge_density_floor,
+                    charge_density_raw, vacuum_reference_charge_density,
                     vacuum_division_guard, vacuum_eta_scale);
             if (band_override_ez != nullptr && i >= band_override_ez[j]) {
                 // Wall-band eta override (see the capture comment):
@@ -7490,7 +7687,7 @@ void ThetaImplicitMHD::AssembleOhmElectricField (const amrex::Real time,
                 theta_implicit_mhd::vacuum_keyed_resistivity(
                     eta(charge_density_value, te_nodal(i, j, k),
                         current_magnitude, time),
-                    rho_q(i, j, k), charge_density_floor,
+                    rho_q(i, j, k), vacuum_reference_charge_density,
                     vacuum_division_guard, vacuum_eta_scale);
             if (band_override_et != nullptr && i >= band_override_et[j]) {
                 // Wall-band eta override (see the capture comment):
@@ -7841,12 +8038,16 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
         joule_ohm_current ? PhysConst::mu0 * joule_min_cell_size *
                                 joule_min_cell_size / m_dt
                           : std::numeric_limits<amrex::Real>::max();
-    const amrex::Real joule_charge_density_floor =
-        charge_to_mass * eta_density_floor;
     const amrex::Real joule_vacuum_division_guard =
         charge_to_mass * m_mass_density_floor;
     const amrex::Real joule_vacuum_eta_scale =
         PhysConst::mu0 * m_vacuum_resistivity_diffusivity;
+    // Vacuum-boost reference of the quench's eta_field (and hence of the
+    // diffusion-dominance criterion): the per-step frozen dynamic
+    // Reference (VacuumReferenceMassDensity), matching the field
+    // advance. The eta_joule ARGUMENT floor keeps the static Ohm guard.
+    const amrex::Real joule_vacuum_reference =
+        charge_to_mass * VacuumReferenceMassDensity();
     const WallBandEtaOverrideView joule_band_view =
         m_wall_mask.BandEtaOverrideView();
     const int* const joule_band_cc = joule_band_view.first_band_cc;
@@ -8370,7 +8571,7 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                     amrex::Real eta_field =
                         theta_implicit_mhd::vacuum_keyed_resistivity(
                             eta_joule, charge_to_mass * rho(i, j, k),
-                            joule_charge_density_floor,
+                            joule_vacuum_reference,
                             joule_vacuum_division_guard,
                             joule_vacuum_eta_scale);
                     if (joule_band_cc != nullptr && i >= joule_band_cc[j]) {

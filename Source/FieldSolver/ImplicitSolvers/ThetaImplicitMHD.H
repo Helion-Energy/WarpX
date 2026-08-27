@@ -157,6 +157,21 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * it. No-op when halo_pedestal_fraction = 0. See
      * m_halo_pedestal_fraction for the offset-density rationale. */
     void RefreshHaloPedestal ();
+    /** Recompute the dynamic vacuum-reference density once per step (the
+     * The reference code's en0 update, step.f90 ~218: en0 = max(en00, 0.1 max(en))):
+     * m_vacuum_reference_mass_density = vacuum_reference_peak_fraction
+     * times the global step-old density peak, FROZEN for the whole
+     * nonlinear solve so every residual/Jacobian evaluation keys the
+     * density-keyed boosts to the same reference (Newton-consistent).
+     * Rank 0 prints the effective reference on >1% change. No-op when
+     * vacuum_reference_peak_fraction = 0. */
+    void RefreshVacuumReferenceDensity (int step);
+    /** Effective reference mass density of the density-keyed boosts
+     * (the field-eta vacuum boost, the Ohm-current Joule quench
+     * criterion, and the conduction halo boost): the static Ohm guard
+     * by default, raised to fraction * rho_peak when the dynamic
+     * Reference is active (see m_vacuum_reference_peak_fraction). */
+    [[nodiscard]] amrex::Real VacuumReferenceMassDensity () const;
     /** Mass-density equivalent of the Ohm's-law division guard
      * (hybrid_pic_model.n_floor). Deliberately independent of the fluid
      * admissibility floor m_mass_density_floor: eta/T_e evaluations and
@@ -753,6 +768,31 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // un-boosted user eta. See vacuum_keyed_resistivity in
     // ThetaImplicitMHD_K.H for the full rationale. hlld path only. ----
     amrex::Real m_vacuum_resistivity_diffusivity = 0.0;
+    // ---- reference-code-style DYNAMIC reference density (en0_upd = 1,
+    // step.f90 ~218-224: en0 = max(en00, 0.1 * MAXVAL(en)), refreshed
+    // every step): fraction of the instantaneous (step-old) global
+    // density peak keying the density-keyed halo mechanisms -- the
+    // field-eta vacuum boost (vacuum_keyed_resistivity), the
+    // joule_ohm_current diffusion-dominance criterion (through the
+    // boosted eta_field it tests), and the conduction halo boost
+    // (conduction_halo_boost). The effective reference is
+    // max(Ohm guard, fraction * rho_peak) -- see
+    // VacuumReferenceMassDensity() -- so the static Ohm-guard keying is
+    // the exact fraction = 0 limit (bit-identical default). Rationale:
+    // the static guard protects only near-vacuum cells, leaving the
+    // 1e18..6e19 halo band taking full Joule/conduction; the reference code keys
+    // the same three mechanisms on the tenth-of-peak en0, which tracks
+    // compression. The Joule COEFFICIENT keeps the un-boosted user eta
+    // (the eta_jh/eta split of the reference code's step.f90) and the eta-parser
+    // density arguments keep the static Ohm-guard floor. ----
+    amrex::Real m_vacuum_reference_peak_fraction = 0.0;
+    // The frozen per-step dynamic reference (fraction * step-old global
+    // density peak; 0 while inactive), refreshed once per step by
+    // RefreshVacuumReferenceDensity, a per-solve constant like the halo
+    // pedestal.
+    amrex::Real m_vacuum_reference_mass_density = 0.0;
+    // Last rank-0-printed effective reference (print on >1% change).
+    amrex::Real m_vacuum_reference_printed = -1.0;
     // ---- Resistive theta (default: the global implicit_evolve.theta).
     // The dissipative Ohm terms (eta J including the vacuum boost, and
     // the hyper-resistive term) are evaluated at the theta_r-weighted
@@ -899,6 +939,22 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // normal-gradient viscous stress and its velocity-weighted work enter
     // the face registers as an exactly conservative pair.
     amrex::Real m_viscosity = 0.0;
+    // ---- Wall-row viscosity mask (implicit_mhd.wall_viscosity_mask,
+    // default off = bit-identical; requires an active wall mask): the
+    // The reference code's slip wall rows (step.f90 disip: CALL set(vis_*, 'skin'/
+    // 'bndy'/'subr'/'subz', small_vis) -- viscosity vanishes on the
+    // wall-adjacent rows). Zeroes the viscous face COEFFICIENT -- the
+    // momentum stress AND its velocity-weighted heating work, which
+    // share the same coefficient assembly (an exactly conservative
+    // pair, so both must go together) -- at every face either of whose
+    // adjacent cells lies within wall_viscosity_mask_width cells
+    // (Chebyshev distance over the stair-step first-masked tables) of
+    // the masked wall contour. Kills the coil-footprint viscous-heating
+    // bead row a uniform viscosity deposits under every wall ripple
+    // (heating the reference code does not have). The mask is static geometry after
+    // Define, so JFNK probes see constant structure. ----
+    bool m_wall_viscosity_mask = false;
+    int m_wall_viscosity_mask_width = 2;
     // Thermal diffusivities chi_i/chi_e [m^2/s] of the recast face fluxes
     // (0 = off): conservative internal-energy diffusion
     // -chi rho_f d(e_spec)/dn (q = -kappa grad T, Chacon JCP 526 (2025))
@@ -991,6 +1047,32 @@ class ThetaImplicitMHD final : public ImplicitSolver
     amrex::Real m_conduction_qs_chi = 0.0;
     amrex::Real m_conduction_qs_onset = 1.5;
     amrex::Real m_conduction_qs_reference_temperature = 0.0;
+    // Density-keyed halo boost of the Braginskii chi_perp
+    // (implicit_mhd.conduction_halo_boost [m^2/s], braginskii only,
+    // 0 = off): the reference code's low-density perp-chi boost
+    // (ntb.f90 t_cond ~584: xip = MAX(xip, xip*(en0/en)^2*dp_mn)),
+    // draining residual halo heat to the wall bath while the bulk keeps
+    // physical Braginskii. chi_perp is composed with the boost
+    // diffusivity chi_halo = D_boost * (rho_ref/rho)^2 -- reaching
+    // D_boost AT the reference density, quadratic in reference/n below
+    // it, vanishing quadratically above -- through the same C-infinity
+    // quadrature smooth max as vacuum_keyed_resistivity (whose kernel is
+    // reused verbatim), with rho_ref the mechanism's shared dynamic
+    // Reference (VacuumReferenceMassDensity: the reference code's en0) and the
+    // division guarded at the positivity floor. ORDER OF COMPOSITION
+    // (matches the reference code's ntb.f90 t_cond): the boost applies to the raw
+    // Braginskii perp value (after the additive quasi-shorting term,
+    // which is our own knob) and BEFORE the chi_min/chi_max clamps --
+    // in the reference code the boost at line ~584 precedes the
+    // xipi_mn/xipi_mx clamps at ~592-593, so the clamps cap the BOOSTED
+    // value (chi_max still bounds the halo diffusivity). Perp only:
+    // The reference code does not boost xil (it only re-enforces xil >= xip for its
+    // (xil-xip)/B^2 operator form, which our SPD tensor split does not
+    // need). Both species channels, with the SAME
+    // conduction_coefficient_state face inputs as the base chi (the
+    // boost is evaluated at the coefficient-state face density, so
+    // step_old keeps Newton-linear diffusion).
+    amrex::Real m_conduction_halo_boost = 0.0;
     // Floor-independent corner width of the C^1 smooth-max pressure
     // recovery (see FluxParameters::pressure_corner_width_fraction;
     // 0 = legacy width = internal-energy floor).

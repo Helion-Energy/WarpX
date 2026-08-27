@@ -1,0 +1,134 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Reference-code-style DYNAMIC reference density
+# (implicit_mhd.vacuum_reference_peak_fraction = 0.1): two-zone plasma --
+# bulk (n0) in z < Lz/2, MID-DENSITY halo (n_mid = 0.02 n0) in
+# z >= Lz/2. The static Ohm guard n_floor sits far below the mid zone,
+# so with the fraction OFF the vacuum boost there is negligible,
+# D_vac*(n_floor/n_mid)^2 = 250 m^2/s (field diffusivity hypot(100,250)
+# = 269, a factor ~9 BELOW the reference code's dominance threshold dz^2/dt =
+# 2441.4: the OFF-knob run would NOT quench the mid zone -- the
+# calibration guard in the analysis re-derives this margin). With the
+# fraction ON the reference becomes max(n_floor, 0.1*n_peak) = 1e17 and
+# the mid-zone boost is D_vac*(n_ref/n_mid)^2 = 2.5e6 m^2/s (dominated
+# with three decades of margin), while the bulk boost is
+# D_vac*(n_ref/n0)^2 = 1e3 (still a factor ~2.4 below the threshold:
+# the bulk deposit stays the exact OFF integral).
+my_constants.n0 = 1.0e18
+my_constants.n_mid = 2.0e16
+my_constants.n_floor_ohm = 1.0e15
+my_constants.peak_fraction = 0.1
+my_constants.rho0 = n0 * m_p
+my_constants.rho_mid = n_mid * m_p
+my_constants.Te = 1.0
+my_constants.Pe = n0 * Te * q_e
+my_constants.dB = 1.0e-4
+my_constants.nz = 64
+my_constants.Lz = 1.0
+my_constants.k = 2*pi/Lz
+my_constants.theta = 0.5
+my_constants.theta_resistive = 1.0
+# User (physical) resistivity: magnetic diffusivity D_user = 100 m^2/s.
+# The Joule COEFFICIENT everywhere; also the bulk field-advance eta.
+my_constants.D_user = 1.0e2
+my_constants.eta0 = mu0 * D_user
+# Vacuum boost amplitude (see the header note for the per-zone margins).
+my_constants.D_vac = 1.0e5
+# Mid-zone one-step stiffness z = dt*(2.5e6)*k_eff^2 ~ 10 under
+# backward-Euler resistive centering: J^{n+1} = J^n/(1+z), so the
+# Ohm-current deposit sits (2/(2+z))^2 ~ 0.028 below the OFF integral.
+my_constants.dt = 1.0e-7
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 1
+amr.n_cell = nz
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = theta
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-14
+newton.relative_tolerance = 1.0e-12
+newton.max_iterations = 20
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-12
+gmres.max_iterations = 1000
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = 5.0/3.0
+hybrid_pic_model.n_floor = n_floor_ohm
+hybrid_pic_model.plasma_resistivity(rho,J,t) = eta0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = dB
+implicit_mhd.gamma_e = 5.0/3.0
+implicit_mhd.gamma_i = 5.0/3.0
+implicit_mhd.reference_ion_pressure = 0.0
+implicit_mhd.mass_density(x,y,z) = if(z < Lz/2, rho0, rho_mid)
+implicit_mhd.electron_pressure(x,y,z) = Pe
+implicit_mhd.evolve_ion_fluid = false
+implicit_mhd.fluid_flux = central
+# Required stabilization of the central flux; inert here (frozen ions
+# zero every momentum increment).
+implicit_mhd.viscosity = 1.0e-2
+implicit_mhd.include_joule_heating = true
+implicit_mhd.joule_ohm_current = true
+implicit_mhd.vacuum_resistivity_diffusivity = D_vac
+implicit_mhd.vacuum_reference_peak_fraction = peak_fraction
+implicit_mhd.resistive_theta = theta_resistive
+
+warpx.B_ext_grid_init_style = parse_B_ext_grid_function
+warpx.Bx_external_grid_function(x,y,z) = dB*sin(k*z)
+warpx.By_external_grid_function(x,y,z) = 0.0
+warpx.Bz_external_grid_function(x,y,z) = 0.0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 1
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Ex Ey Ez Bx By Bz \
+                       implicit_mhd_mass_density implicit_mhd_momentum_density \
+                       implicit_mhd_electron_energy
+diag1.write_species = 0

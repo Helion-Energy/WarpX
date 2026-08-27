@@ -4929,6 +4929,33 @@ Jacobian probes.
     stress work against). The zero-flux reflecting wall passes no
     viscous flux, matching the advective wall policy.
 
+.. pp:param:: implicit_mhd.wall_viscosity_mask
+    :type: ``bool``
+    :default: ``false``
+
+    Reference-code-style wall-row viscosity slip mask (requires an active
+    :pp:param:`implicit_mhd.wall_model`; default off is bit-identical).
+    Zeroes the viscous face COEFFICIENT — the momentum stress AND its
+    velocity-weighted heating work, which share one coefficient
+    assembly and must never split (an exactly conservative pair) — at
+    every face either of whose adjacent cells lies within
+    :pp:param:`implicit_mhd.wall_viscosity_mask_width` cells (Chebyshev
+    distance over the stair-step first-masked tables) of the masked
+    wall contour. This is the reference code's slip-wall treatment (``step.f90``
+    ``disip``: viscosity set to ``small_vis`` on the ``'skin'`` /
+    ``'bndy'`` / ``'subr'`` / ``'subz'`` rows): with a uniform
+    viscosity, every coil-footprint ripple of the shaped wall otherwise
+    deposits a viscous-heating bead row that the reference code does
+    not have. The mask is static geometry after initialization, so JFNK
+    probes see constant structure.
+
+.. pp:param:: implicit_mhd.wall_viscosity_mask_width
+    :type: ``int``
+    :default: ``2``
+
+    Width of the wall-row viscosity mask in fluid cells measured from
+    the masked contour (at least 1).
+
 .. pp:param:: implicit_mhd.thermal_diffusivity_ion
     :type: ``float``
     :default: ``0``
@@ -5103,6 +5130,42 @@ Jacobian probes.
 
     Load-envelope temperature :math:`T_0` of the quasi-shorting
     pseudo-entropy. Required (positive) when ``conduction_qs_chi > 0``.
+
+.. pp:param:: implicit_mhd.conduction_halo_boost
+    :type: ``float``
+    :unit: :math:`\mathrm{m^2\,s^{-1}}`
+    :default: ``0`` (off)
+
+    Density-keyed halo boost of the Braginskii :math:`\chi_\perp`
+    (requires ``thermal_conduction_model = braginskii``): the reference code's
+    low-density perpendicular-conduction boost (``ntb.f90`` ``t_cond``:
+    ``xip = MAX(xip, xip*(en0/en)**2*dp_mn)``), draining residual halo
+    heat to the wall bath while the bulk keeps physical Braginskii.
+    :math:`\chi_\perp` is composed with the boost diffusivity
+
+    .. math::
+
+        \chi_\mathrm{halo} = D_\mathrm{boost}\,
+        (\rho_\mathrm{ref}/\rho)^2
+
+    — reaching :math:`D_\mathrm{boost}` at the reference density,
+    quadratic in :math:`\rho_\mathrm{ref}/\rho` below it and vanishing
+    quadratically above — through the same :math:`C^\infty` quadrature
+    smooth max as
+    :pp:param:`implicit_mhd.vacuum_resistivity_diffusivity` (the
+    identical kernel), with :math:`\rho_\mathrm{ref}` the shared
+    reference density (the Ohm guard, raised to the dynamic
+    per-step reference under
+    :pp:param:`implicit_mhd.vacuum_reference_peak_fraction` — the
+    the reference code's ``en0``) and the density division guarded at the positivity
+    floor. Applied to :math:`\chi_\perp` ONLY (both species channels;
+    the parallel channel keeps physical Braginskii), and BEFORE the
+    ``conduction_chi_min/max`` clamps — the reference code's order (the boost
+    precedes the ``xipi_mn/mx`` clamps in ``t_cond``), so ``chi_max``
+    still caps the boosted halo diffusivity. The boost inputs follow
+    :pp:param:`implicit_mhd.conduction_coefficient_state` like every
+    other Braginskii coefficient input (``step_old`` keeps
+    Newton-linear diffusion).
 
 .. pp:param:: implicit_mhd.pressure_corner_width_fraction
     :type: ``float``
@@ -5694,7 +5757,44 @@ Jacobian probes.
     matrix-free Jacobian probes. Joule heating keeps the un-boosted user
     :math:`\eta`: vacuum field diffusion never heats plasma. Pairs
     naturally with :pp:param:`implicit_mhd.resistive_theta` ``= 1``,
-    which damps the stiff halo field modes this term creates.
+    which damps the stiff halo field modes this term creates. With
+    :pp:param:`implicit_mhd.vacuum_reference_peak_fraction` the static
+    Ohm-guard reference is raised to the dynamic per-step
+    tenth-of-peak reference (the reference code's ``en0``).
+
+.. pp:param:: implicit_mhd.vacuum_reference_peak_fraction
+    :type: ``float``
+    :default: ``0`` (off)
+
+    Reference-code-style DYNAMIC reference density of the density-keyed halo
+    mechanisms (``step.f90``: ``en0 = MAX(en00, 0.1*MAXVAL(en))``,
+    refreshed every step). When positive, the reference density keying
+    the field-eta vacuum boost
+    (:pp:param:`implicit_mhd.vacuum_resistivity_diffusivity`), the
+    :pp:param:`implicit_mhd.joule_ohm_current` diffusion-dominance
+    criterion (through the boosted :math:`\eta_\mathrm{field}` it
+    tests), and the conduction halo boost
+    (:pp:param:`implicit_mhd.conduction_halo_boost`) becomes
+
+    .. math::
+
+        \rho_\mathrm{ref} = \max\!\big(\rho_\mathrm{ref,\Omega},\;
+        f \, \rho_\mathrm{peak}\big),
+
+    with :math:`\rho_\mathrm{peak}` the global maximum of the STEP-OLD
+    mass density, recomputed once per step at step start and FROZEN for
+    the whole nonlinear solve (every residual and Jacobian evaluation
+    keys the boosts to the same reference: Newton-consistent), and
+    :math:`\rho_\mathrm{ref,\Omega}` the static Ohm density guard —
+    the exact ``f = 0`` limit, so the default is bit-identical.
+    Rationale: the static guard protects only near-vacuum cells,
+    leaving the intermediate halo band under full Joule heating and
+    physical (tiny) cross-field conduction; keying on a tenth of the
+    peak tracks compression like the reference code's ``en0``. The Joule heating
+    COEFFICIENT keeps the un-boosted user :math:`\eta` and the
+    eta-parser density arguments keep the static Ohm-guard floor
+    either way. The effective reference is printed (rank 0) on >1%
+    change.
 
 .. pp:param:: implicit_mhd.joule_ohm_current
     :type: ``bool``

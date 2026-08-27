@@ -394,7 +394,12 @@ floor_consistency_deficit (const amrex::Real value,
  * with vacuum_scale = mu0 * D_vac (D_vac the magnetic diffusivity the
  * boost reaches AT the Ohm reference density rho_ref, in m^2/s) and
  * rho_ref the Ohm's-law division guard (hybrid n_floor equivalent) --
- * the same density at which Ohm's law stops trusting the fluid.
+ * the same density at which Ohm's law stops trusting the fluid -- or,
+ * under implicit_mhd.vacuum_reference_peak_fraction, the per-step
+ * frozen dynamic reference max(guard, fraction * rho_peak) (the reference code's
+ * en0; see ThetaImplicitMHD::VacuumReferenceMassDensity). The same
+ * kernel also composes the conduction halo boost (chi_perp with
+ * D_boost (rho_ref/rho)^2, vacuum_scale = D_boost without the mu0).
  *
  * First-principles motivation: below the Ohm reference the "fluid" is a
  * numerical halo/pedestal, not plasma; the physically correct field

@@ -404,8 +404,10 @@ public:
      * pre-offset like the View() pointers (valid over the z-cell range
      * [-GhostCells(), AxialCells() - 1 + GhostCells()]); consumers must
      * clamp their axial index to that range (constant continuation,
-     * like the polyline itself). Non-null only when a thermal wall BC
-     * is active. */
+     * like the polyline itself). Non-null in every active wall_model
+     * (thermal-BC consumers gate themselves on GetThermalBC(); the
+     * wall-row viscosity mask reads it with or without a thermal
+     * wall). */
     [[nodiscard]] const int* FirstMaskedCellCentered () const;
 
     [[nodiscard]] int GhostCells () const { return m_ng; }

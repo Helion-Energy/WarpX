@@ -504,7 +504,11 @@ const char* ImplicitMHDWallMask::ThermalBCName () const
 
 const int* ImplicitMHDWallMask::FirstMaskedCellCentered () const
 {
-    if (GetThermalBC() == ThermalBC::none) { return nullptr; }
+    // Non-null in EVERY active wall_model (the table is geometry-static
+    // and always built): the thermal-BC consumers gate themselves on
+    // GetThermalBC(), while the wall-row viscosity mask needs the
+    // contour with or without a thermal wall.
+    if (!m_active) { return nullptr; }
     return m_first_masked_cc.data() + m_ng;
 }
 
