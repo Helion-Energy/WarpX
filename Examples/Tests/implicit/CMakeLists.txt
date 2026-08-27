@@ -1706,6 +1706,36 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# circuit-in-the-residual coupling, hook-scope reference: a toy driven
+# RL loop rides the "externalcoiltheta" hook on EVERY residual
+# evaluation (implicit_mhd.circuit_hook_scope = residual, the
+# bit-compatible default) and records the per-step hook counts and
+# committed coil scales
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_hook_residual  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_hook_picmi.py --scope residual"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# newton-scope twin: the hook fires ONLY at accepted Newton iterates
+# (Jacobian probes and line-search trials reuse the cached coil
+# scales); the analysis asserts the committed per-step coil scales
+# match the residual-scope run to solver tolerance while the hook-call
+# counts collapse
+add_warpx_test(
+    test_rz_theta_implicit_mhd_circuit_hook_newton  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_circuit_hook_picmi.py --scope newton"  # inputs
+    analysis_mhd_circuit_hook_scope.py  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_circuit_hook_residual  # dependency
+)
+
 add_warpx_test(
     test_2d_theta_implicit_jfnk_vandb  # name
     2  # dims
