@@ -1,0 +1,132 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Cold supersonic advection of a transverse-velocity ripple in uniform
+# density: u_z is uniform (Mach ~22) and u_x(z) is a supersonic
+# sinusoid, so div u = 0, the exact solution advects everything
+# unchanged, and NOTHING heats -- but the kinetic energy is QUADRATIC in
+# the advected transverse momentum (the sin^2 carries the 2k harmonic),
+# so under the total_energy closure the recovered pressure is the
+# catastrophic small difference E_i - KE of two ~10^3 x larger advected
+# quantities whose discrete phase errors differ (k vs 2k), and the
+# mismatch reads as spurious heating -- the measured production
+# signature (the artificial warm axis column). The dual_energy closure
+# reads the pressure from the auxiliary U_i in these kinetic-dominated
+# cells (fk ~ 0.4) and stays cold. The total_energy contrast twin reuses
+# this input with implicit_mhd.ion_closure=total_energy. A uniform
+# density keeps everything linear EXCEPT the KE, isolating the
+# cancellation channel; the axial field is dynamically negligible
+# (v_A ~ 200 m/s), so the shear launches no Alfven dynamics on the run
+# time.
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.Ti = 1.0
+my_constants.P0 = n0 * Ti * q_e
+my_constants.gamma = 5.0/3.0
+# solver-vec normalization at the ram scale; the ACTUAL field is tiny
+my_constants.B0 = sqrt(mu0 * rho0) * 4.0e5
+my_constants.Bz0 = 1.0e-4
+my_constants.nz = 64
+my_constants.Lz = 1.0
+# two-temperature sound speed ~1.8e4 m/s: Mach ~22
+my_constants.v0 = 4.0e5
+my_constants.vt = 4.0e5
+my_constants.dt = 0.4 * (Lz / nz) / v0
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 32
+amr.n_cell = nz
+amr.max_grid_size = 64
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+# theta = 1: the theta = 0.5 trapezoidal centering leaves the ripple's
+# marginal modes undamped (|g| -> 1) and the Newton solve wedges at
+# ~step 9 for BOTH energy-bearing closures; backward Euler damps them
+# and keeps the closure contrast the test measures.
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 20
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-9
+gmres.max_iterations = 400
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Ti
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = P0
+implicit_mhd.ion_closure = dual_energy
+implicit_mhd.ion_pressure_floor = 1.0e-6 * P0
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-9 * P0
+# central requires a positive viscosity; the transverse shear makes its
+# heating real but small (~2% of the internal energy over the run), and
+# BOTH closures receive it.
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 1.0
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.velocity_x(x,y,z) = "vt * sin(2*pi*z/Lz)"
+implicit_mhd.velocity_z(x,y,z) = v0
+implicit_mhd.ion_pressure(x,y,z) = P0
+implicit_mhd.electron_pressure(x,y,z) = P0
+
+# A dynamically negligible uniform axial field keeps the electromagnetic
+# subsystem quiescent on the run time.
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 Bz0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 32
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz implicit_mhd_mass_density implicit_mhd_momentum_x \
+                       implicit_mhd_momentum_z implicit_mhd_ion_energy \
+                       implicit_mhd_ion_internal_energy implicit_mhd_electron_energy
+diag1.write_species = 0

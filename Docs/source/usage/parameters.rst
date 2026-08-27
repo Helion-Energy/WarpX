@@ -4464,6 +4464,44 @@ Jacobian probes.
     :pp:param:`implicit_mhd.ion_pressure_floor`, and :math:`\gamma_i>1`; the
     ``pc_mhd_block`` preconditioner supports only the barotropic closure.
 
+    ``dual_energy`` (``fluid_flux = hlld`` or ``central`` only) is the
+    the reference code's "mixmaster" (mix = -1) split-energy form for the ions: it
+    evolves BOTH the conservative total :math:`E_i` (assembled exactly as
+    under ``total_energy``) and an auxiliary internal ion energy
+    :math:`U_i` as JFNK unknowns, and every consumer of the ion pressure
+    (momentum gradient and Maxwell-stress-adjacent gas pressure, wave-fan
+    signal speeds, flux functions, drain-gate scales, conduction
+    temperatures) sees the kinetic-fraction blend
+
+    .. math::
+
+        P_i = f_k\,(\gamma_i-1)\,\mathrm{smoothmax}(E_i - K, U_{i,\mathrm{floor}})
+              + (1-f_k)\,(\gamma_i-1)\,U_i,
+        \qquad f_k = 1 - \frac{K}{\gamma_i E_i}
+
+    (:math:`K = \rho_i|\boldsymbol{u}_i|^2/2`; :math:`f_k` smoothly
+    rectified to :math:`[0,1]`). Kinetic-energy-dominated cells
+    (:math:`f_k \to 0`: imploding sheets, exhaust flow, stagnation on
+    axis) read their pressure from :math:`U_i` and never see the
+    total-minus-kinetic catastrophic-cancellation heating that leaves
+    spurious warm plasma there under ``total_energy``. :math:`U_i`
+    advects with the contact (the fan's star channel), gains the blended
+    PdV work :math:`-P_i\nabla\cdot\boldsymbol{u}_i` pointwise, and
+    receives the internal-only share of every source the :math:`E_i`
+    channel books (viscous heating as the positive-definite face
+    dissipation, the ion conductive flux verbatim, the pedestal-band
+    internal drain, the floor machinery); KE-specific terms (Lorentz
+    work, the drag's kinetic drain, the electron pdV pairing) stay with
+    :math:`E_i` alone. At every accepted step end the reference code's mixmaster
+    re-sync rewrites :math:`E_i := K + P_i/(\gamma_i-1)` (the identity
+    in thermal cells; in KE-dominated cells it drains the step's
+    cancellation drift into the :math:`U_i` anchor instead of letting it
+    accumulate in the conservative :math:`E_i`), and thermal cells
+    (:math:`f_k >` :pp:param:`implicit_mhd.dual_energy_sync_threshold`)
+    additionally overwrite :math:`U_i := E_i - K`, the standard
+    Enzo-style dual-energy re-sync. Same requirements as
+    ``total_energy``.
+
     ``cgl`` (``fluid_flux = hlld`` only) evolves the CGL bi-Maxwellian
     ion internal energies :math:`U_\parallel = p_\parallel/2` and
     :math:`U_\perp = p_\perp` as two JFNK unknowns instead of
@@ -4486,6 +4524,29 @@ Jacobian probes.
     ``ion_pressure_anisotropy(x,y,z)`` parser sets the initial
     :math:`p_\perp/p_\parallel` (default 1) with
     :math:`p_\mathrm{eff}` pinned to ``ion_pressure(x,y,z)``.
+
+.. pp:param:: implicit_mhd.dual_energy_internal_cutoff
+    :type: ``float``
+    :default: ``0`` (off)
+
+    With ``ion_closure = dual_energy``: the reference code's mix = -2 low-internal
+    cutoff. Cells whose STEP-OLD :math:`U_i` sits below
+    ``cutoff`` :math:`\times\max_\mathrm{domain}(U_{i,\mathrm{old}})`
+    get :math:`f_k = 0` exactly (pure internal pressure in the
+    halo/dust). Both the mask input and the max are per-step frozen
+    (step-old) constants, so the branch is state-independent for the
+    matrix-free Jacobian probes.
+
+.. pp:param:: implicit_mhd.dual_energy_sync_threshold
+    :type: ``float``
+    :default: ``0.99``
+
+    With ``ion_closure = dual_energy``: :math:`f_k` threshold of the
+    end-of-step Enzo-style re-sync :math:`U_i := E_i - K` (thermal cells
+    only, where the blend is total-dominated and the recovery is well
+    conditioned), so the two energy variables cannot drift apart in
+    thermal regions. The mixmaster :math:`E_i` rewrite (see
+    ``ion_closure``) runs unconditionally.
 
 .. pp:param:: implicit_mhd.cgl_relaxation_scale
     :type: ``float``
