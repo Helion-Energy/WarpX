@@ -81,6 +81,7 @@ CachedOwnerMask (const amrex::MultiFab& mf, const amrex::Periodicity& period)
 amrex::Real
 DiskFluxLinkage (const Coil& coil, const amrex::MultiFab& Bz)
 {
+    BL_PROFILE("warpx::circuit::DiskFluxLinkage");
 #if !defined(WARPX_DIM_RZ)
     amrex::ignore_unused(coil, Bz);
     WARPX_ABORT_WITH_MESSAGE(
@@ -141,6 +142,7 @@ amrex::Real
 ReciprocityLinkage (const amrex::MultiFab& A_theta,
                     const amrex::MultiFab& J_theta)
 {
+    BL_PROFILE("warpx::circuit::ReciprocityLinkage");
 #if !defined(WARPX_DIM_RZ)
     amrex::ignore_unused(A_theta, J_theta);
     WARPX_ABORT_WITH_MESSAGE(
@@ -444,6 +446,12 @@ LinkageBatch::Measure (const CoilSet& coils,
                        const amrex::MultiFab* j_theta,
                        std::vector<amrex::Real>& lambda)
 {
+    // The profiler count of this region IS the sync/all-reduce count of
+    // the measurement path: one stream synchronization, one
+    // device-to-host copy and one MPI all-reduce per call, coil-count
+    // independent (the per-coil reference probes appear only under
+    // circuit.probe_crosscheck).
+    BL_PROFILE("warpx::circuit::LinkageBatch::Measure");
 #if !defined(WARPX_DIM_RZ)
     amrex::ignore_unused(coils, probes, a_theta, bz, j_theta);
     lambda.assign(coils.size(), 0.0);
