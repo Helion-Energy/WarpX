@@ -4810,6 +4810,113 @@ Jacobian probes.
     The first write of a run truncates a stale file; the counters
     restart at zero on a simulation restart.
 
+.. pp:param:: implicit_mhd.density_eater_rate
+    :type: ``float``
+    :unit: 1/step
+    :default: ``0`` (off, bit-identical)
+
+    The reference code's density eater (``ntb.f90`` ``density_eater``, trigger
+    ``eaten_type > 0``): a one-sided per-step relaxation of the mass
+    density toward a low target in a fixed axial band,
+
+    .. math:: \rho \; := \; \min\!\big(\rho,\;
+        (1 - r)\,\max(\rho, \rho_\mathrm{t}) + r\,\rho_\mathrm{t}\big),
+
+    i.e. the excess above the target :math:`\rho_\mathrm{t}` decays by
+    the factor :math:`(1 - r)` each step (the reference code hard-codes
+    :math:`r = 0.2`; the rate is per *step*, dt-independent, like the
+    source) and at-or-below-target cells are never touched. Applied to
+    the committed :math:`t^{n+1}` state at the top of the end-of-step
+    restorations -- outside every implicit solve, matching the reference code's
+    call site in ``step_en`` -- so Newton/JFNK consistency is
+    untouched; the eaten state is the next solve's frozen step-old
+    state. Faithful to the source, ONLY the density state variable is
+    modified. Under the reference shot's closure (``mix = -1``,
+    two-temperature) that means: velocity is preserved, so the momentum
+    density scales with the mass; the ion energy *densities* (the
+    conservative :math:`E_i`, the dual-energy :math:`U_i`, and the CGL
+    pair) are invariant -- the removed mass gives up nothing, so the
+    per-particle ion temperature *rises*; and the electron
+    *temperature* is preserved (``te`` is the reference code's electron state),
+    so the electron energy density scales with the mass. A frozen ion
+    fluid (``evolve_ion_fluid = 0``) disables the eater, the reference code's
+    ``fluid = 0`` bypass. Wall-masked (rigid-conductor) cells are
+    excluded (the reference code's ``x_kind < 1`` skip). The removed mass and
+    electron energy are booked (see
+    :pp:param:`implicit_mhd.density_eater_ledger_file`).
+
+.. pp:param:: implicit_mhd.density_eater_target_fraction
+    :type: ``float``
+    :default: ``0.01``
+
+    Eater target as a fraction of the eater reference density (the reference code
+    ``en0/100``). The target must be at or above
+    :pp:param:`implicit_mhd.mass_density_floor` (the reference code keeps it at 10x
+    the ``f_en_mn`` floor).
+
+.. pp:param:: implicit_mhd.density_eater_reference_density
+    :type: ``float``
+    :unit: kg/m^3
+    :default: :pp:param:`implicit_mhd.reference_mass_density`
+
+    Eater reference base density (the reference code's ``en0`` input, a *number*
+    density there -- multiply by the ion mass).
+
+.. pp:param:: implicit_mhd.density_eater_reference_peak_fraction
+    :type: ``float``
+    :default: ``0.1``
+
+    The reference code's ``en0_upd = 1`` dynamic reference (``step.f90``): the eater
+    reference is ``max(base, fraction x step-old global density
+    peak)``, refreshed every step. ``0`` freezes the reference at the
+    base (``en0_upd = 0``).
+
+.. pp:param:: implicit_mhd.density_eater_band
+    :type: ``string``: ``z_lo`` or ``z_center``
+    :default: ``z_lo`` when the z_lo pmc mirror plane is active, else ``z_center``
+
+    Axial band of the eater, the reference code's ``sym_bc`` dispatch: on a
+    half-domain the band sits at the mirror plane, on a full domain it
+    straddles the domain z-center.
+
+.. pp:param:: implicit_mhd.density_eater_band_cells
+    :type: ``int``
+    :default: ``-1`` (the reference code's grid rule)
+
+    Band size in cell planes: the plane count from the boundary
+    (``z_lo``) or the half-width about the center (``z_center``). Any
+    value <= 0 selects the reference code's grid rule -- ``2 + nz/500`` planes at
+    ``z_lo`` (``sym_bc = 1``: ``ngrd = 1 + nz/500``, vertex planes
+    ``1 .. 1 + ngrd``), half-width ``1 + nz/1000`` about the center
+    otherwise.
+
+.. pp:param:: implicit_mhd.density_eater_flux_sign
+    :type: ``int``: ``-1``, ``0``, or ``1``
+    :default: ``1`` in RZ, ``0`` (and required) in 1D
+
+    Closed-flux gate, the reference code's ``psi(k) > 0`` condition: with
+    :math:`s = \pm 1` the eater acts only where
+    :math:`s\,\psi(r, z) > 0`, with :math:`\psi = \int_0^r B_z\,r'\,dr'`
+    the poloidal-flux integral of the theta-stage *total* :math:`B_z`
+    (plasma response plus the stored external field under the
+    split-field drive; the reference code gates on the step-old :math:`\psi`, so an
+    intra-step stage is faithful). ``0`` disables the gate. 1D has no
+    poloidal flux, so only ``0`` is accepted there.
+
+.. pp:param:: implicit_mhd.density_eater_ledger_file
+    :type: ``string``
+    :default: none (no file)
+
+    File for the eater removal ledger (requires a positive
+    :pp:param:`implicit_mhd.density_eater_rate`): rows of
+    ``step mass energy`` appended every step, holding the *cumulative*
+    removed mass [kg] and electron energy [J] (per unit cross-section
+    in 1D) at the committed end-of-step state. The ion energy density
+    is invariant under the eater by construction (the reference code's wio/wik
+    preservation), so these two columns close the accounting. The
+    first write of a run truncates a stale file; the counters restart
+    at zero on a simulation restart.
+
 .. pp:param:: implicit_mhd.electron_pressure_floor
     :type: ``float``
     :unit: Pa

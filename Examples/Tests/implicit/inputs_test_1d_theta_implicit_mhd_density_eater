@@ -1,0 +1,136 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.Ti = 100.0
+my_constants.P0 = n0 * Ti * q_e
+my_constants.Te = 0.01
+my_constants.gamma = 5.0/3.0
+my_constants.B0 = 1.0e-3
+my_constants.nz = 64
+my_constants.Lz = 1.0
+my_constants.bump = 4.0
+my_constants.sound_speed = sqrt(gamma*P0/rho0)
+my_constants.vy0 = 0.01 * sound_speed
+my_constants.dt = 0.1 * (Lz/nz) / sound_speed
+# Eater: the reference code's rate/target (0.2 per step toward 0.01 x reference); the
+# Reference defaults to reference_mass_density = rho0 and the dynamic
+# peak fraction (0.1 x peak = 0.4 rho0 < rho0) never engages, so the
+# target is the CONSTANT 0.01 rho0 and the band excess decays by the
+# analytic factor 0.8 per step.
+my_constants.eater_rate = 0.2
+my_constants.eater_cells = 4
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 10
+amr.n_cell = nz
+amr.max_grid_size = 16
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-11
+newton.relative_tolerance = 1.0e-9
+newton.max_iterations = 12
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-10
+gmres.max_iterations = 300
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_velocity = sound_speed
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = P0
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.mass_density_floor = 1.0e-5 * rho0
+implicit_mhd.ion_pressure_floor = 1.0e-8 * P0
+implicit_mhd.electron_pressure_floor = 1.0e-8 * (n0 * Te * q_e)
+implicit_mhd.fluid_flux = hllc
+
+# Eater test stage: a STATIC contact (uniform total pressure, uniform
+# tangential velocity, zero normal velocity, uniform Bz) with two
+# over-dense bumps -- one inside the eater band (the first eater_cells
+# cell planes at z_lo), one far outside it (out of acoustic reach of the
+# band's tiny eater-induced pressure perturbation over 10 steps). The
+# electrons carry a uniform temperature Te << Ti, so the ion pressure
+# profile P0 - n Te q_e keeps the TOTAL pressure exactly uniform and the
+# only evolution is the eater's: the band excess relaxes by the analytic
+# factor (1 - eater_rate) per step while the second bump is untouched.
+my_constants.z_band = eater_cells*(Lz/nz)
+implicit_mhd.mass_density(x,y,z) = \
+    "rho0 * if(z < z_band, bump, if((z>=0.75*Lz) and (z<0.875*Lz), bump, 1.0))"
+implicit_mhd.electron_pressure(x,y,z) = \
+    "n0 * Te * q_e * if(z < z_band, bump, if((z>=0.75*Lz) and (z<0.875*Lz), bump, 1.0))"
+implicit_mhd.ion_pressure(x,y,z) = \
+    "P0 - n0 * Te * q_e * if(z < z_band, bump, if((z>=0.75*Lz) and (z<0.875*Lz), bump, 1.0))"
+implicit_mhd.velocity_y(x,y,z) = vy0
+
+# The reference code's density eater, the mechanism under test (see ApplyDensityEater
+# and the analysis script): the band is pinned explicitly so the test
+# does not depend on the grid-rule default.
+implicit_mhd.density_eater_rate = eater_rate
+implicit_mhd.density_eater_target_fraction = 0.01
+implicit_mhd.density_eater_band = z_lo
+implicit_mhd.density_eater_band_cells = eater_cells
+implicit_mhd.density_eater_ledger_file = diags/eater_ledger.txt
+
+# A uniform field keeps the electromagnetic subsystem quiescent.
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 B0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 1
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz implicit_mhd_mass_density \
+                       implicit_mhd_momentum_y \
+                       implicit_mhd_ion_energy \
+                       implicit_mhd_electron_energy
+diag1.write_species = 0

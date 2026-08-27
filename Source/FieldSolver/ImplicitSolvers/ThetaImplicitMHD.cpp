@@ -160,6 +160,25 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     utils::parser::queryWithParser(pp, "floor_consistency_width_fraction",
                                    m_floor_consistency_width_fraction);
     pp.query("floor_ledger_file", m_floor_ledger_file);
+    // The reference code's density eater (see ApplyDensityEater).
+    utils::parser::queryWithParser(pp, "density_eater_rate",
+                                   m_density_eater_rate);
+    utils::parser::queryWithParser(pp, "density_eater_target_fraction",
+                                   m_density_eater_target_fraction);
+    utils::parser::queryWithParser(pp, "density_eater_reference_density",
+                                   m_density_eater_reference_density);
+    utils::parser::queryWithParser(pp, "density_eater_reference_peak_fraction",
+                                   m_density_eater_reference_peak_fraction);
+    pp.query("density_eater_band", m_density_eater_band);
+    utils::parser::queryWithParser(pp, "density_eater_band_cells",
+                                   m_density_eater_band_cells);
+#if defined(WARPX_DIM_RZ)
+    // The reference code's default: the psi > 0 closed-flux gate is always on.
+    m_density_eater_flux_sign = 1;
+#endif
+    utils::parser::queryWithParser(pp, "density_eater_flux_sign",
+                                   m_density_eater_flux_sign);
+    pp.query("density_eater_ledger_file", m_density_eater_ledger_file);
     utils::parser::queryWithParser(pp, "vacuum_resistivity_diffusivity",
                                    m_vacuum_resistivity_diffusivity);
     // Reference-code-style dynamic reference density (see
@@ -689,6 +708,60 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "implicit_mhd.floor_consistency_rate (the ledger books the "
         "floor-consistency supply, which does not exist without it)");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_density_eater_rate >= 0.0_rt && m_density_eater_rate <= 1.0_rt,
+        "implicit_mhd.density_eater_rate must be in [0, 1] (the per-step "
+        "fraction of the excess above target removed; the reference code uses 0.2)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_density_eater_target_fraction > 0.0_rt,
+        "implicit_mhd.density_eater_target_fraction must be positive "
+        "(the reference code uses 0.01: target = en0/100)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_density_eater_reference_peak_fraction >= 0.0_rt &&
+            m_density_eater_reference_peak_fraction < 1.0_rt,
+        "implicit_mhd.density_eater_reference_peak_fraction must be in "
+        "[0, 1) (0 freezes the reference at the base; the reference code uses 0.1)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_density_eater_band.empty() || m_density_eater_band == "z_lo" ||
+            m_density_eater_band == "z_center",
+        "implicit_mhd.density_eater_band must be 'z_lo' or 'z_center' "
+        "(unset = z_lo when the z_lo pmc mirror is active, else "
+        "z_center: the reference code's sym_bc dispatch)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_density_eater_flux_sign >= -1 && m_density_eater_flux_sign <= 1,
+        "implicit_mhd.density_eater_flux_sign must be -1, 0, or 1");
+#if !defined(WARPX_DIM_RZ)
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_density_eater_flux_sign == 0,
+        "implicit_mhd.density_eater_flux_sign requires RZ (the "
+        "closed-flux gate is a poloidal-flux integral; there is no "
+        "poloidal flux in 1D)");
+#endif
+    if (m_density_eater_rate > 0.0_rt) {
+        // The target must stay an admissible density: the eater pulls
+        // cells DOWN onto it, so a target below the positivity floor
+        // would break the end-of-step floor assertions. The dynamic
+        // Reference only RAISES the target, so checking the base
+        // suffices.
+        const amrex::Real eater_reference_base =
+            m_density_eater_reference_density > 0.0_rt
+                ? m_density_eater_reference_density
+                : m_reference_mass_density;
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_density_eater_target_fraction * eater_reference_base >=
+                m_mass_density_floor,
+            "implicit_mhd.density_eater_target_fraction x the eater "
+            "reference density must be at or above "
+            "implicit_mhd.mass_density_floor (the eater relaxes cells "
+            "onto the target; the reference code keeps it at 10x the floor)");
+    }
+    // Same contract as the floor ledger: a ledger file without the
+    // mechanism is a configuration error, not a silent no-op.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_density_eater_ledger_file.empty() || m_density_eater_rate > 0.0_rt,
+        "implicit_mhd.density_eater_ledger_file requires a positive "
+        "implicit_mhd.density_eater_rate (the ledger books the eater "
+        "removal, which does not exist without it)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_vacuum_resistivity_diffusivity >= 0.0_rt,
         "implicit_mhd.vacuum_resistivity_diffusivity cannot be negative");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -1145,6 +1218,12 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         "implicit_mhd.z_boundary_fluid = wall_temperature/outflow requires "
         "non-periodic z boundaries (boundary.field_lo/hi = none or open "
         "in z)");
+    if (m_density_eater_band.empty()) {
+        // The reference code's sym_bc dispatch (ntb.f90:783-792): the eater band
+        // sits at the mirror plane on a half-domain, else about the
+        // domain z-center.
+        m_density_eater_band = m_z_lo_pmc ? "z_lo" : "z_center";
+    }
     // Stair-step shaped wall (implicit_mhd.wall_model = pec |
     // pec_response | dielectric): a static mask built from the revolved
     // wall polyline (run32's EB analog for the implicit path). The
@@ -2511,6 +2590,32 @@ void ThetaImplicitMHD::PrintParameters () const
                                                        : m_floor_ledger_file)
                        << "\n";
     }
+    if (m_density_eater_rate > 0.0_rt) {
+        amrex::Print() << "Density eater rate [1/step]:   "
+                       << m_density_eater_rate << "\n"
+                       << "Density eater target fraction: "
+                       << m_density_eater_target_fraction << " of "
+                       << (m_density_eater_reference_density > 0.0_rt
+                               ? m_density_eater_reference_density
+                               : m_reference_mass_density)
+                       << " kg/m^3"
+                       << (m_density_eater_reference_peak_fraction > 0.0_rt
+                               ? " (dynamic en0, refreshed per step)"
+                               : " (static reference)")
+                       << "\n"
+                       << "Density eater band:            "
+                       << m_density_eater_band << " ("
+                       << (m_density_eater_band_cells > 0
+                               ? std::to_string(m_density_eater_band_cells)
+                               : std::string("the reference code's grid rule"))
+                       << " cells), flux gate "
+                       << m_density_eater_flux_sign << "\n"
+                       << "Density eater ledger:          "
+                       << (m_density_eater_ledger_file.empty()
+                               ? "(none)"
+                               : m_density_eater_ledger_file)
+                       << "\n";
+    }
     if (m_ion_closure == "dual_energy") {
         amrex::Print() << "Dual-energy internal cutoff:   "
                        << m_dual_energy_internal_cutoff << "\n"
@@ -3350,7 +3455,7 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
         AccumulateFloorConsistencySupplyLedger(m_dt, step);
     }
     m_WarpX->reduced_diags->ComputeDiagsMidStep(step);
-    FinishStateUpdate(start_time + m_dt);
+    FinishStateUpdate(start_time + m_dt, step);
     if (m_external_field_iteration) {
         // Sync-tax instrument: how many circuit-hook firings the step
         // cost (python round-trips, or native engine advances; the
@@ -10197,7 +10302,288 @@ void ThetaImplicitMHD::RefreshHaloPedestal ()
     m_state.CopyMultiFabBlocksToFields();
 }
 
-void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
+void ThetaImplicitMHD::ApplyDensityEater (const int step)
+{
+    if (m_density_eater_rate <= 0.0_rt) {
+        return;
+    }
+    if (!m_evolve_ion_fluid) {
+        // The reference code's fluid = 0 skips step_en entirely (ntb.f90:71-75): the
+        // eater never runs on a frozen fluid.
+        return;
+    }
+
+    // ---- Target: target_fraction x max(base, peak_fraction x step-old
+    // global density peak) -- the reference code's en0/100 with the en0_upd = 1
+    // dynamic reference en0 = MAX(en00, 0.1 MAXVAL(en)) refreshed at
+    // step start (step.f90:218-225; m_state_old still holds the
+    // step-start state here).
+    const amrex::Real reference_base =
+        m_density_eater_reference_density > 0.0_rt
+            ? m_density_eater_reference_density
+            : m_reference_mass_density;
+    amrex::Real reference = reference_base;
+    if (m_density_eater_reference_peak_fraction > 0.0_rt) {
+        // MultiFab::max is an all-rank reduction.
+        const amrex::Real density_peak =
+            m_state_old.getMultiFabBlock(MassDensityName, 0).max(0);
+        reference =
+            std::max(reference_base,
+                     m_density_eater_reference_peak_fraction * density_peak);
+    }
+    const amrex::Real target = m_density_eater_target_fraction * reference;
+
+    // ---- Band (the reference code's ntb.f90:782-792, vertex planes mapped to cell
+    // planes): z_lo = the first 2 + nz/500 planes at the mirror plane
+    // (sym_bc = 1: ngrd = 1 + nz/500, planes 1 .. 1 + ngrd), z_center =
+    // the planes within 1 + nz/1000 of the domain z-center.
+    const amrex::Box domain = m_WarpX->Geom(0).Domain();
+#if defined(WARPX_DIM_1D_Z)
+    constexpr int z_dir = 0;
+#else
+    constexpr int z_dir = 1;
+#endif
+    const int axial_cells = domain.length(z_dir);
+    int band_lo = domain.smallEnd(z_dir);
+    int band_hi = domain.bigEnd(z_dir);
+    if (m_density_eater_band == "z_lo") {
+        const int band_cells = m_density_eater_band_cells > 0
+                                   ? m_density_eater_band_cells
+                                   : 2 + axial_cells / 500;
+        band_hi = band_lo + band_cells - 1;
+    } else {
+        const int half_width = m_density_eater_band_cells > 0
+                                   ? m_density_eater_band_cells
+                                   : 1 + axial_cells / 1000;
+        const int center = domain.smallEnd(z_dir) + axial_cells / 2;
+        band_lo = center - half_width;
+        band_hi = center + half_width;
+    }
+    band_lo = std::max(band_lo, domain.smallEnd(z_dir));
+    band_hi = std::min(band_hi, domain.bigEnd(z_dir));
+    amrex::Box band_box = domain;
+    band_box.setSmall(z_dir, band_lo);
+    band_box.setBig(z_dir, band_hi);
+
+    amrex::MultiFab& density_block =
+        m_state.getMultiFabBlock(MassDensityName, 0);
+
+#if defined(WARPX_DIM_RZ)
+    // ---- Closed-flux gate (the reference code's psi(k) > 0, ntb.f90:799): psi(r, z)
+    // = integral_0^r Bz r' dr' per band plane, from the theta-stage
+    // TOTAL Bz (Bfield_fp holds the plasma response under the
+    // split-field drive, so the stored external Bz is added back;
+    // The reference code gates on the STEP-OLD psi -- the eater runs in step_en
+    // before pstep -- so an intra-step field stage is faithful). The
+    // radial prefix sum spans ranks: gather the per-cell contributions
+    // to a host profile, reduce, and integrate to the cell centers.
+    amrex::Gpu::DeviceVector<amrex::Real> psi_gate_device;
+    const amrex::Real* psi_gate = nullptr;
+    const int band_planes = band_hi - band_lo + 1;
+    const int radial_lo = domain.smallEnd(0);
+    const int radial_cells = domain.length(0);
+    if (m_density_eater_flux_sign != 0) {
+        using ablastr::fields::Direction;
+        amrex::Gpu::DeviceVector<amrex::Real> contribution_device(
+            static_cast<std::size_t>(radial_cells) * band_planes, 0.0_rt);
+        amrex::Real* const contribution_ptr = contribution_device.data();
+        const amrex::MultiFab& bz_face =
+            *m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{2}, 0);
+        const amrex::MultiFab* const bz_external =
+            m_hybrid_pic_model->m_add_external_fields
+                ? m_WarpX->m_fields.get(FieldType::hybrid_B_fp_external,
+                                        Direction{2}, 0)
+                : nullptr;
+        const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
+        const amrex::Real radial_cell_size = m_WarpX->Geom(0).CellSize(0);
+        const int gate_band_lo = band_lo;
+        const int gate_band_planes = band_planes;
+        const int gate_radial_lo = radial_lo;
+        for (amrex::MFIter mfi(density_block); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox() & band_box;
+            if (box.isEmpty()) {
+                continue;
+            }
+            const auto bz = bz_face.const_array(mfi);
+            const auto bz_ext = bz_external
+                                    ? bz_external->const_array(mfi)
+                                    : amrex::Array4<const amrex::Real>{};
+            amrex::ParallelFor(box,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    // Cell-centered total Bz from the z-face pair.
+                    amrex::Real bz_center =
+                        0.5_rt * (bz(i, j, k) + bz(i, j + 1, k));
+                    if (bz_ext) {
+                        bz_center += 0.5_rt * (bz_ext(i, j, k) +
+                                               bz_ext(i, j + 1, k));
+                    }
+                    const amrex::Real r_center =
+                        radial_lower +
+                        (i - gate_radial_lo + 0.5_rt) * radial_cell_size;
+                    contribution_ptr[(i - gate_radial_lo) *
+                                         gate_band_planes +
+                                     (j - gate_band_lo)] =
+                        bz_center * r_center * radial_cell_size;
+                });
+        }
+        amrex::Vector<amrex::Real> contribution(
+            static_cast<std::size_t>(radial_cells) * band_planes, 0.0_rt);
+        amrex::Gpu::copy(amrex::Gpu::deviceToHost,
+                         contribution_device.begin(),
+                         contribution_device.end(), contribution.begin());
+        amrex::ParallelAllReduce::Sum(
+            contribution.data(), static_cast<int>(contribution.size()),
+            amrex::ParallelContext::CommunicatorSub());
+        amrex::Vector<amrex::Real> psi(contribution.size(), 0.0_rt);
+        const amrex::Real flux_sign =
+            static_cast<amrex::Real>(m_density_eater_flux_sign);
+        for (int plane = 0; plane < band_planes; ++plane) {
+            amrex::Real accumulated = 0.0_rt;
+            for (int ir = 0; ir < radial_cells; ++ir) {
+                const amrex::Real cell_flux =
+                    contribution[static_cast<std::size_t>(ir) * band_planes +
+                                 plane];
+                psi[static_cast<std::size_t>(ir) * band_planes + plane] =
+                    flux_sign * (accumulated + 0.5_rt * cell_flux);
+                accumulated += cell_flux;
+            }
+        }
+        psi_gate_device.resize(psi.size());
+        amrex::Gpu::copy(amrex::Gpu::hostToDevice, psi.begin(), psi.end(),
+                         psi_gate_device.begin());
+        psi_gate = psi_gate_device.data();
+    }
+#endif
+
+    // ---- Eater pass, fused with the removal bookkeeping. The reference code
+    // ntb.f90:794-805:
+    //     en_lim = 0.8 MAX(en, en0/100) + 0.2 (en0/100)
+    //     en     = MIN(en, en_lim)
+    // with ONLY the density state touched: velocities are the reference code's
+    // momentum state (untouched), so the momentum DENSITY scales with
+    // the mass; wio/wik are untouched energy DENSITIES (the reference shot
+    // mix = -1 closure), so E_i, U_i, and the CGL pair are invariant
+    // (the per-particle ion temperature RISES as the removed mass gives
+    // up nothing); te is the reference code's electron state (flg_wie false), so
+    // U_e scales with the mass (electron-temperature-preserving).
+    amrex::MultiFab& momentum_block =
+        m_state.getMultiFabBlock(MomentumDensityName, 0);
+    amrex::MultiFab& electron_energy_block =
+        m_state.getMultiFabBlock(ElectronEnergyName, 0);
+    const amrex::Real rate = m_density_eater_rate;
+    const amrex::Real electron_energy_floor =
+        m_electron_pressure_floor / (m_gamma_e - 1.0_rt);
+    // Rigid-conductor wall exclusion (the reference code's x_kind < 1 CYCLE at
+    // ntb.f90:798: masked cells are not fluid).
+    const bool wall_freeze = m_wall_mask.GetThermalBC() !=
+                             ImplicitMHDWallMask::ThermalBC::none;
+    const int* const AMREX_RESTRICT wall_fm =
+        wall_freeze ? m_wall_mask.FirstMaskedCellCentered() : nullptr;
+    const int wall_mz_lo = -m_wall_mask.GhostCells();
+    const int wall_mz_hi =
+        m_wall_mask.AxialCells() - 1 + m_wall_mask.GhostCells();
+    // Geometry cell measure (booked units kg and J; per unit
+    // cross-section in 1D), the floor-ledger convention.
+    amrex::Real cell_volume = 1.0_rt;
+    for (int dim = 0; dim < AMREX_SPACEDIM; ++dim) {
+        cell_volume *= m_WarpX->Geom(0).CellSize(dim);
+    }
+#if defined(WARPX_DIM_RZ)
+    const amrex::Real ledger_radial_lower = m_WarpX->Geom(0).ProbLo(0);
+    const amrex::Real ledger_radial_cell_size = m_WarpX->Geom(0).CellSize(0);
+#endif
+    amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+    amrex::ReduceData<amrex::Real, amrex::Real> reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+    for (amrex::MFIter mfi(density_block); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox() & band_box;
+        if (box.isEmpty()) {
+            continue;
+        }
+        const auto rho = density_block.array(mfi);
+        const auto mom = momentum_block.array(mfi);
+        const auto electron_energy = electron_energy_block.array(mfi);
+        reduce_op.eval(
+            box, reduce_data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                if (wall_freeze) {
+                    const int jc =
+                        std::max(wall_mz_lo, std::min(wall_mz_hi, j));
+                    if (i >= wall_fm[jc]) {
+                        return {0.0_rt, 0.0_rt};
+                    }
+                }
+#if defined(WARPX_DIM_RZ)
+                if (psi_gate != nullptr &&
+                    psi_gate[(i - radial_lo) * band_planes +
+                             (j - band_lo)] <= 0.0_rt) {
+                    return {0.0_rt, 0.0_rt};
+                }
+#endif
+                const amrex::Real density_old = rho(i, j, k);
+                const amrex::Real density_limit =
+                    (1.0_rt - rate) * std::max(density_old, target) +
+                    rate * target;
+                if (density_old <= density_limit) {
+                    // At or below target: the MIN leaves the cell alone.
+                    return {0.0_rt, 0.0_rt};
+                }
+                const amrex::Real scale = density_limit / density_old;
+                rho(i, j, k) = density_limit;
+                for (int component = 0; component < 3; ++component) {
+                    mom(i, j, k, component) *= scale;
+                }
+                const amrex::Real electron_old = electron_energy(i, j, k);
+                amrex::Real electron_new = scale * electron_old;
+                // Keep the absolute electron positivity floor with the
+                // standard slack margin (the temperature-proportional
+                // bound scales with rho, so it is preserved by scale).
+                electron_new = std::max(
+                    electron_new,
+                    electron_energy_floor +
+                        1.0e-6_rt * (electron_new + electron_energy_floor));
+                electron_energy(i, j, k) = electron_new;
+                amrex::Real measure = 1.0_rt;
+#if defined(WARPX_DIM_RZ)
+                measure = 2.0_rt * MathConst::pi *
+                          (ledger_radial_lower +
+                           (i - radial_lo + 0.5_rt) *
+                               ledger_radial_cell_size);
+#endif
+                return {measure * (density_old - density_limit),
+                        measure * (electron_old - electron_new)};
+            });
+    }
+    ReduceTuple removal_totals = reduce_data.value(reduce_op);
+    amrex::Real step_totals[2] = {
+        cell_volume * amrex::get<0>(removal_totals),
+        cell_volume * amrex::get<1>(removal_totals)};
+    amrex::ParallelAllReduce::Sum(step_totals, 2,
+                                  amrex::ParallelContext::CommunicatorSub());
+    m_eater_removed_mass += step_totals[0];
+    m_eater_removed_energy += step_totals[1];
+
+    const auto& periodicity = m_WarpX->Geom(0).periodicity();
+    density_block.FillBoundaryAndSync(periodicity);
+    momentum_block.FillBoundaryAndSync(periodicity);
+    electron_energy_block.FillBoundaryAndSync(periodicity);
+
+    if (!m_density_eater_ledger_file.empty() &&
+        amrex::ParallelDescriptor::IOProcessor()) {
+        // Truncate at the first write of the run, append afterwards
+        // (the floor-ledger convention).
+        std::ofstream ledger(m_density_eater_ledger_file,
+                             m_density_eater_ledger_started
+                                 ? std::ios::app
+                                 : std::ios::trunc);
+        m_density_eater_ledger_started = true;
+        ledger.precision(17);
+        ledger << step + 1 << " " << m_eater_removed_mass << " "
+               << m_eater_removed_energy << "\n";
+    }
+}
+
+void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time, const int step)
 {
     const amrex::Real inverse_theta = 1.0_rt / m_theta;
     m_state.linComb(inverse_theta, m_state, 1.0_rt - inverse_theta, m_state_old);
@@ -10236,6 +10622,15 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time)
             }
         }
     }
+
+    // The reference code's density eater (see ApplyDensityEater): runs on the
+    // committed t^{n+1} state BEFORE the floor restorations, matching
+    // The reference code's order within a step -- density_eater at the end of
+    // step_en (ntb.f90:202), then the mixmaster energy/temperature
+    // update and the step_tm floors on the eaten density. The
+    // restorations below therefore key their density-dependent bounds
+    // to the eaten density, exactly the state the next solve freezes.
+    ApplyDensityEater(step);
 
     // End-of-step floor restorations below evaluate the temperature
     // floors' density-dependent bounds with the END-OF-STEP density: it is

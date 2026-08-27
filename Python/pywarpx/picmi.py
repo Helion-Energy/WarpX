@@ -2803,6 +2803,59 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         conservation instrument of the reservoir, the floor-side
         sibling of wall_ledger_file.
 
+    density_eater_rate: float, default=0 (off, bit-identical)
+        the reference code's density eater (ntb.f90 density_eater, eaten_type > 0):
+        per-STEP fraction of the density excess above the eater target
+        removed each step in a fixed axial band,
+        rho := min(rho, (1 - rate) * max(rho, target) + rate * target)
+        (the reference code hard-codes 0.2). Applied to the committed end-of-step
+        state outside the implicit solves. ONLY the density state is
+        touched: velocity is preserved (momentum density scales with
+        the mass), the ion energy DENSITIES (E_i, U_i, the CGL pair)
+        are invariant (the reference shot wio/wik preservation: per-particle
+        ion temperature rises), and the electron temperature is
+        preserved (U_e scales with the mass). Removal is booked (see
+        density_eater_ledger_file).
+
+    density_eater_target_fraction: float, default=0.01
+        Eater target as a fraction of the eater reference density
+        (the reference code's en0/100).
+
+    density_eater_reference_density: float, optional
+        Eater reference base density in kg/m^3 (the reference code's en0 input,
+        a number density there). Defaults to reference_mass_density.
+
+    density_eater_reference_peak_fraction: float, default=0.1
+        the reference code's en0_upd=1 dynamic reference: the eater reference is
+        max(base, fraction * step-old global density peak), refreshed
+        per step. 0 freezes the reference at the base (en0_upd=0).
+
+    density_eater_band: {"z_lo", "z_center"}, optional
+        Axial band of the eater. Default follows the reference code's sym_bc
+        dispatch: "z_lo" when the z_lo pmc mirror plane is active,
+        else "z_center".
+
+    density_eater_band_cells: int, optional
+        Band size in cell planes: the plane count from the boundary
+        ("z_lo") or the half-width about the center ("z_center").
+        Default (unset or <= 0) is the reference code's grid rule: 2 + nz/500
+        planes at z_lo, half-width 1 + nz/1000 about the center.
+
+    density_eater_flux_sign: int, default=1 in RZ, 0 in 1D
+        Closed-flux gate (the reference code's psi(k) > 0): +1 eats only where
+        sign * psi > 0, with psi(r, z) the poloidal-flux integral of
+        the theta-stage total Bz; -1 flips the flux convention; 0
+        disables the gate. RZ only (1D has no poloidal flux and
+        requires 0).
+
+    density_eater_ledger_file: str, optional
+        File for the eater removal ledger (requires
+        density_eater_rate > 0): "step mass energy" rows appended
+        every step with the cumulative removed mass [kg] and electron
+        energy [J] at the committed end-of-step state. The ion energy
+        density is invariant under the eater by construction, so these
+        two columns close the accounting.
+
     vacuum_resistivity_diffusivity: float, default=0 (off)
         Density-keyed vacuum resistivity of the field advance in m^2/s
         (fluid_flux="hlld" only): the Ohm's law sees the smooth, uncapped
@@ -2949,6 +3002,14 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         floor_consistency_rate=None,
         floor_consistency_width_fraction=None,
         floor_ledger_file=None,
+        density_eater_rate=None,
+        density_eater_target_fraction=None,
+        density_eater_reference_density=None,
+        density_eater_reference_peak_fraction=None,
+        density_eater_band=None,
+        density_eater_band_cells=None,
+        density_eater_flux_sign=None,
+        density_eater_ledger_file=None,
         vacuum_resistivity_diffusivity=None,
         vacuum_reference_peak_fraction=None,
         joule_ohm_current=None,
@@ -3039,6 +3100,16 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.floor_consistency_rate = floor_consistency_rate
         self.floor_consistency_width_fraction = floor_consistency_width_fraction
         self.floor_ledger_file = floor_ledger_file
+        self.density_eater_rate = density_eater_rate
+        self.density_eater_target_fraction = density_eater_target_fraction
+        self.density_eater_reference_density = density_eater_reference_density
+        self.density_eater_reference_peak_fraction = (
+            density_eater_reference_peak_fraction
+        )
+        self.density_eater_band = density_eater_band
+        self.density_eater_band_cells = density_eater_band_cells
+        self.density_eater_flux_sign = density_eater_flux_sign
+        self.density_eater_ledger_file = density_eater_ledger_file
         self.vacuum_resistivity_diffusivity = vacuum_resistivity_diffusivity
         self.vacuum_reference_peak_fraction = vacuum_reference_peak_fraction
         self.joule_ohm_current = joule_ohm_current
@@ -3137,6 +3208,18 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
             self.floor_consistency_width_fraction
         )
         implicit_mhd.floor_ledger_file = self.floor_ledger_file
+        implicit_mhd.density_eater_rate = self.density_eater_rate
+        implicit_mhd.density_eater_target_fraction = self.density_eater_target_fraction
+        implicit_mhd.density_eater_reference_density = (
+            self.density_eater_reference_density
+        )
+        implicit_mhd.density_eater_reference_peak_fraction = (
+            self.density_eater_reference_peak_fraction
+        )
+        implicit_mhd.density_eater_band = self.density_eater_band
+        implicit_mhd.density_eater_band_cells = self.density_eater_band_cells
+        implicit_mhd.density_eater_flux_sign = self.density_eater_flux_sign
+        implicit_mhd.density_eater_ledger_file = self.density_eater_ledger_file
         implicit_mhd.vacuum_resistivity_diffusivity = (
             self.vacuum_resistivity_diffusivity
         )
@@ -3374,9 +3457,7 @@ class CircuitCoupling(object):
                 "coupling.corrector_iterations", self.corrector_iterations
             )
         if self.corrector_rtol is not None:
-            pywarpx.circuit.add_new_attr(
-                "coupling.corrector_rtol", self.corrector_rtol
-            )
+            pywarpx.circuit.add_new_attr("coupling.corrector_rtol", self.corrector_rtol)
 
 
 class HybridPICSolver(picmistandard.base._ClassWithInit):

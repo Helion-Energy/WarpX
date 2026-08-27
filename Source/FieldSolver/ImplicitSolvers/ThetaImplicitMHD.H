@@ -180,7 +180,7 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * while the fluid floor stays a pure positivity guard. Computed from
      * the live hybrid n_floor (Python can update it at runtime). */
     [[nodiscard]] amrex::Real OhmMassDensityFloor () const;
-    void FinishStateUpdate (amrex::Real end_time);
+    void FinishStateUpdate (amrex::Real end_time, int step);
     void FillFluidSources (const WarpXSolverVec& state);
     void ApplyFluidDomainBoundaries (amrex::MultiFab& density, amrex::MultiFab& momentum,
                                      amrex::MultiFab& electron_energy,
@@ -266,6 +266,32 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * residual kernels. Must be called after the nonlinear solve and
      * before FinishStateUpdate extrapolates the state to t^{n+1}. */
     void AccumulateFloorConsistencySupplyLedger (amrex::Real dt, int step);
+    /** The reference code's density eater (ntb.f90:773-807, trigger eaten_type > 0 at
+     * ntb.f90:202): a one-sided per-step relaxation of the mass density
+     * toward a low target in a fixed axial band,
+     *     rho_lim = (1 - rate) * max(rho, target) + rate * target,
+     *     rho    := min(rho, rho_lim),
+     * i.e. the excess above target decays by the factor (1 - rate) per
+     * step; at-or-below-target cells are never touched (the MIN).
+     * The reference code hard-codes rate = 0.2 and target = en0/100 with the
+     * step-start dynamic reference en0 = max(en0_input,
+     * 0.1 max(en)) (step.f90:218-225, en0_upd = 1 default). The eater
+     * modifies ONLY the density state variable: velocities and the ion
+     * energy DENSITIES (the reference shot's closure mix = -1: wio and wik both
+     * state variables, both untouched) are preserved, so momentum
+     * density scales with the mass, E_i/U_i (and the CGL pair) are
+     * invariant (the per-particle ion temperature RISES), and the
+     * electron temperature is preserved (te is the reference code's electron
+     * state under flg_wie = false, so U_e scales with the mass).
+     * Applied to the committed t^{n+1} state at the top of
+     * FinishStateUpdate (before the floor restorations, matching the
+     * The reference code's order eater -> mixmaster within step_en/ntbstep), outside
+     * every implicit solve like the reference code's call site. The removed mass
+     * and (electron) energy are booked cumulatively and optionally
+     * appended to density_eater_ledger_file as "step mass energy" rows
+     * (the floor-ledger conventions). Wall-masked (rigid-conductor)
+     * cells are excluded, the x_kind < 1 analog. */
+    void ApplyDensityEater (int step);
     /** Assemble the solver-owned Ohm's law E = -u x B + eta J (hlld path).
      * With at_resistive_stage = true (residual evaluations) the
      * dissipative terms (eta J, the vacuum-eta boost, and the
@@ -795,6 +821,51 @@ class ThetaImplicitMHD final : public ImplicitSolver
     amrex::Real m_floor_supplied_energy = 0.0;
     std::string m_floor_ledger_file;
     bool m_floor_ledger_started = false;
+    // ---- the reference code's density eater (see ApplyDensityEater): per-STEP
+    // fraction of the density excess above the target removed each step
+    // (0 = off, bit-identical when off; the reference code hard-codes 0.2 --
+    // dt-independent, like the source). ----
+    amrex::Real m_density_eater_rate = 0.0;
+    // Target = target_fraction x reference (the reference code's en0/100).
+    amrex::Real m_density_eater_target_fraction = 0.01;
+    // Reference base density [kg/m^3] (the reference code's en0 input, a NUMBER
+    // density there -- multiply by the ion mass). Sentinel <= 0 defaults
+    // to implicit_mhd.reference_mass_density.
+    amrex::Real m_density_eater_reference_density = -1.0;
+    // Dynamic reference (the reference code's en0_upd = 1, step.f90:218-225):
+    // Reference = max(base, fraction x step-old global density peak);
+    // 0 freezes the reference at the base (en0_upd = 0).
+    amrex::Real m_density_eater_reference_peak_fraction = 0.1;
+    // Axial band: "z_lo" (the reference code's sym_bc = 1: planes at the mirror
+    // plane) or "z_center" (planes about the domain z-center); empty =
+    // auto (z_lo when the z_lo pmc mirror is active, else z_center) --
+    // The reference code's sym_bc dispatch (ntb.f90:783-792). Resolved in Define.
+    std::string m_density_eater_band;
+    // Band size in cells; <= 0 = the reference code's grid rule (z_lo: 2 + nz/500
+    // planes from the boundary; z_center: half-width 1 + nz/1000 about
+    // the center). An explicit value is the plane count (z_lo) or the
+    // half-width (z_center).
+    int m_density_eater_band_cells = -1;
+    // Closed-flux gate (the reference code's psi(k) > 0, ntb.f90:799): +1 eats only
+    // where sign * psi > 0 with psi(r, z) the poloidal flux integral of
+    // the theta-stage TOTAL Bz (plasma + external under the split-field
+    // drive; the reference code gates on the step-old psi, so any intra-step stage
+    // is faithful), -1 flips the convention, 0 disables the gate. RZ
+    // only: 1D has no poloidal flux, so the default (and only legal
+    // value) there is 0.
+    int m_density_eater_flux_sign = 0;
+    // Eater removal ledger: cumulative removed mass [kg] and electron
+    // energy [J] ([kg/m^2], [J/m^2] in 1D), booked at the committed
+    // t^{n+1} state each step and optionally appended to
+    // density_eater_ledger_file as "step mass energy" rows (every step;
+    // first write of a run truncates a stale file). The ion energy
+    // DENSITY is invariant under the eater by construction (the reference code's
+    // wio/wik preservation), so the mass and electron columns close the
+    // accounting. Counters restart at zero on a simulation restart.
+    amrex::Real m_eater_removed_mass = 0.0;
+    amrex::Real m_eater_removed_energy = 0.0;
+    std::string m_density_eater_ledger_file;
+    bool m_density_eater_ledger_started = false;
     // The frozen per-step pedestal state (0 while inactive): density,
     // electron energy, ion internal energy (total_energy closure), and
     // the CGL pair.

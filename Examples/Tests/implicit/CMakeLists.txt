@@ -496,6 +496,25 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_static_contact_hllc  # dependency
 )
 
+# The reference code's density eater (ntb.f90 density_eater, eaten_type > 0): on a
+# static contact with an over-dense zone in the z_lo band, the band
+# excess above the 0.01 rho0 target must decay by the analytic factor
+# (1 - rate) = 0.8 per step with velocity and electron temperature
+# preserved, the ion energy DENSITY invariant (the reference shot wio/wik
+# preservation -- per-particle T_i rises), a far out-of-band bump
+# untouched, and the removal ledger closing the domain mass deficit.
+# OFF-state bit-identity is by construction (rate = 0 returns before
+# touching any state).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_density_eater  # name
+    1  # dims
+    2  # nprocs
+    inputs_test_1d_theta_implicit_mhd_density_eater  # inputs
+    "analysis_mhd_density_eater.py diags/diag000000 diags/diag000010"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_positivity  # name
     1  # dims
