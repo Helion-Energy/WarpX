@@ -981,6 +981,17 @@ public:
      *  kernel; the sponge layer and its P_sponge booking read it.
      *  Mutable: written inside the const solve path. */
     mutable amrex::Real m_je_c_art = 0.0;
+    /** Check B for NaN/Inf every Nth relax substep push instead of
+     *  after every push; the je path additionally re-checks once at
+     *  the end of every half-step, so a half never hands unverified
+     *  fields onward. WHY: the every-push device-reduction check
+     *  measured 2.7% of a full-stroke production step (43.3M calls)
+     *  while feeding an abort that is terminal either way --
+     *  a detection latency of N-1 substeps changes nothing but the
+     *  length of the discarded tail. Default 1 = the legacy
+     *  every-push behavior (bit-identical).
+     *  Input: substep_finite_check_interval. */
+    int m_substep_finite_check_interval = 1;
     /** Sponge reference latch: the reference fields seed from the
      *  stored fields on the first ApplyJeSpongeLayer call (the t = 0
      *  state on a fresh boot; on a checkpoint restart they re-seed

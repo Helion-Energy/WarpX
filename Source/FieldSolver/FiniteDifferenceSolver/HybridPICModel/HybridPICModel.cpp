@@ -80,6 +80,11 @@ void HybridPICModel::ReadParameters ()
     utils::parser::queryWithParser(pp_hybrid, "substep_safety", m_substep_safety);
     utils::parser::queryWithParser(pp_hybrid, "substep_max_growth", m_substep_max_growth);
     pp_hybrid.query("max_substep_attempts", m_max_substep_attempts);
+    pp_hybrid.query("substep_finite_check_interval",
+                    m_substep_finite_check_interval);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_substep_finite_check_interval >= 1,
+        "hybrid_pic_model.substep_finite_check_interval must be >= 1");
 
     utils::parser::queryWithParser(pp_hybrid, "holmstrom_vacuum_region", m_holmstrom_vacuum_region);
     utils::parser::queryWithParser(pp_hybrid, "holmstrom_transition_width", m_holmstrom_transition_width);
@@ -10473,6 +10478,7 @@ void HybridPICModel::BfieldEvolve (
     // stage never consumes, a gated-off E-solve, an E exchange of an
     // unchanged field, and the B push -- collapse to a single EvolveB
     // plus its B exchange.
+    int je_push_count = 0;
     auto je_relax_b_push = [&] (amrex::Real dt_push) -> bool
     {
         warpx.EvolveB(dt_push, subcycling_half, warpx.gett_old(0));
@@ -10482,6 +10488,16 @@ void HybridPICModel::BfieldEvolve (
             if (ilev > 0) {
                 warpx.ApplyBfieldBoundarySubstep(ilev, PatchType::coarse);
             }
+        }
+        // Throttled finiteness check (see the
+        // m_substep_finite_check_interval member doc): every Nth
+        // push; the end of the half-step re-checks unconditionally
+        // below, so a skipped push never leaks unverified fields
+        // past this half.
+        ++je_push_count;
+        if (m_substep_finite_check_interval > 1 &&
+            (je_push_count % m_substep_finite_check_interval) != 0) {
+            return true;
         }
         bool ok = true;
         for (int idim = 0; idim < 3; ++idim) {
@@ -10707,6 +10723,23 @@ void HybridPICModel::BfieldEvolve (
         }
 
         if (++n_attempts > m_max_substep_attempts) { break; }
+    }
+
+    // End-of-half finiteness backstop for the throttled je check
+    // (see the m_substep_finite_check_interval member doc): the last
+    // pushes of the half may have skipped their check, and the half
+    // must never hand unverified fields onward.
+    if (je_relax && m_substep_finite_check_interval > 1) {
+        bool ok = true;
+        for (int idim = 0; idim < 3; ++idim) {
+            ok = ok && Bfield[lev][idim]->is_finite(/*local=*/true);
+        }
+        amrex::ParallelDescriptor::ReduceBoolAnd(ok);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(ok,
+            "NaN or Inf value encountered in the B-field at the end "
+            "of a Je-form relax half-step (throttled finiteness "
+            "check). The (E, J_e) state cannot be rolled back; reduce "
+            "the timestep or raise hybrid_pic_model.substeps.");
     }
 
     // Adjust the number of substeps for the next RKF45/RK4 half-step.
