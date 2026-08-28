@@ -10378,16 +10378,18 @@ void HybridPICModel::BfieldEvolve (
         }
     }
 
-    // Controller witness line, throttled to >= 5% drift since the last
-    // report: the RK4 fixed point stays silent, an RKF45 relaxation prints
-    // a coarse staircase, and a rescue jump prints immediately.
+    // Controller witness line, throttled to >= 15% drift since the last
+    // report: the RK4 fixed point stays silent, equilibrium hunting (the
+    // relax blend moves ~5% nearly every step) stays silent, an RKF45
+    // decay staircase prints a coarse trace, and a rescue jump (target
+    // doubling class) trips the threshold immediately.
     if (m_substeps_last_reported < 0) {
         m_substeps_last_reported = m_substeps;
     } else {
         const int delta = (m_substeps > m_substeps_last_reported)
             ? m_substeps - m_substeps_last_reported
             : m_substeps_last_reported - m_substeps;
-        if (20 * delta >= m_substeps_last_reported) {
+        if (20 * delta >= 3 * m_substeps_last_reported) {
             amrex::Print() << "[hybrid] B-substep count adjusted: "
                            << m_substeps_last_reported << " -> " << m_substeps
                            << " (step " << step << ")\n";

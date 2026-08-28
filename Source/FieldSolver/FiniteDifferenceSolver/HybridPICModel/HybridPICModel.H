@@ -732,7 +732,7 @@ public:
 
     /** Last B-substep count reported to stdout by the controller witness
      *  line; -1 until the first end-of-half adjustment seeds it. Reporting
-     *  is throttled to >= 5% changes since the last report, so the RK4
+     *  is throttled to >= 15% changes since the last report, so the RK4
      *  fixed point (count never moves) stays silent while an RKF45 decay
      *  or a rescue jump is witnessed in the log. */
     int m_substeps_last_reported = -1;
