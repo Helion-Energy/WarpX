@@ -10378,6 +10378,23 @@ void HybridPICModel::BfieldEvolve (
         }
     }
 
+    // Controller witness line, throttled to >= 5% drift since the last
+    // report: the RK4 fixed point stays silent, an RKF45 relaxation prints
+    // a coarse staircase, and a rescue jump prints immediately.
+    if (m_substeps_last_reported < 0) {
+        m_substeps_last_reported = m_substeps;
+    } else {
+        const int delta = (m_substeps > m_substeps_last_reported)
+            ? m_substeps - m_substeps_last_reported
+            : m_substeps_last_reported - m_substeps;
+        if (20 * delta >= m_substeps_last_reported) {
+            amrex::Print() << "[hybrid] B-substep count adjusted: "
+                           << m_substeps_last_reported << " -> " << m_substeps
+                           << " (step " << step << ")\n";
+            m_substeps_last_reported = m_substeps;
+        }
+    }
+
     if (WarpX::GetInstance().Verbose()) {
         amrex::Print() << "B-field update "
             << (subcycling_half == SubcyclingHalf::FirstHalf ? "1st" : "2nd") << " half"

@@ -730,6 +730,13 @@ public:
      *  the inputs value. */
     bool m_substeps_from_checkpoint = true;
 
+    /** Last B-substep count reported to stdout by the controller witness
+     *  line; -1 until the first end-of-half adjustment seeds it. Reporting
+     *  is throttled to >= 5% changes since the last report, so the RK4
+     *  fixed point (count never moves) stays silent while an RKF45 decay
+     *  or a rescue jump is witnessed in the log. */
+    int m_substeps_last_reported = -1;
+
     /** Intervals to use RKF45 integrator and to update substeps parameter */
     ablastr::utils::text::IntervalsParser m_rkf45_intervals;
     /** Relative tolerance for RKF45 adaptive substep error control */
