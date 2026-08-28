@@ -336,6 +336,14 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         // refactors at every preconditioner update.
         std::string m_banded_refreeze = "step";
         RT m_banded_frozen_time = std::numeric_limits<RT>::lowest();
+        // Shared refreeze override honored by BOTH resistive solvers:
+        // empty (default) preserves each branch's legacy cadence (banded
+        // -> banded_refreeze, direct -> every update); "step"/"newton"
+        // force that cadence on whichever solver is active. "step" on
+        // the direct/cuDSS path gives the banded-style once-per-step
+        // frozen-coefficient lag at cuDSS factor cost.
+        std::string m_resistive_refreeze;
+        RT m_direct_frozen_time = std::numeric_limits<RT>::lowest();
         // Whether the residual's Ohm law carries the hyper-resistive term
         // (deck-static: sizes the stencil scratch and the banded
         // bandwidth at Define) and whether the frozen eta_H content is in
@@ -532,6 +540,7 @@ MHDBlockPC<T, Ops>::ReadParameters ()
     pp.query("resistive_solver", m_resistive_solver);
     pp.query("banded_precision", m_banded_precision);
     pp.query("banded_refreeze", m_banded_refreeze);
+    pp.query("resistive_refreeze", m_resistive_refreeze);
     pp.query("resistive_validate_assembly", m_resistive_validate_assembly);
     utils::parser::queryWithParser(pp, "max_coarsening_level", m_max_coarsening_level);
     utils::parser::queryWithParser(pp, "wave_relaxation", m_wave_relaxation);
@@ -593,6 +602,10 @@ MHDBlockPC<T, Ops>::ReadParameters ()
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_banded_refreeze == "step" || m_banded_refreeze == "newton",
         "pc_mhd_block.banded_refreeze must be step or newton");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_resistive_refreeze.empty() || m_resistive_refreeze == "step" ||
+            m_resistive_refreeze == "newton",
+        "pc_mhd_block.resistive_refreeze must be 'step' or 'newton'");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_max_coarsening_level >= 0,
                                      "pc_mhd_block.max_coarsening_level cannot be negative");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_reference_mass_density > 0.0,
@@ -1236,6 +1249,21 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
                                        m_resistive_eta_h_edge, m_resistive_hall_edge,
                                        m_resistive_inertia_edge);
         }
+        // Refreeze cadence: legacy = every update; "step" reuses the
+        // step's first factorization across its Newton iterations (the
+        // banded-style frozen-coefficient lag). Validation mode always
+        // refreshes so the host/device parity gate keeps its semantics.
+        const std::string direct_refreeze =
+            m_resistive_refreeze.empty() ? "newton" : m_resistive_refreeze;
+        const bool direct_stale = !m_resistive_direct->IsDefined() ||
+                                  m_resistive_validate_assembly ||
+                                  direct_refreeze == "newton" ||
+                                  this->m_time != m_direct_frozen_time;
+        if (!direct_stale)
+        {
+            return;
+        }
+        m_direct_frozen_time = this->m_time;
         const amrex::Real assemble_start = amrex::ParallelDescriptor::second();
         m_resistive_direct->AssembleValues(stencil_constants, m_resistive_eta_edge,
                                            m_resistive_eta_h_edge, m_resistive_hall_edge,
@@ -1278,7 +1306,10 @@ MHDBlockPC<T, Ops>::UpdateResistiveBlock ()
                                        m_resistive_hyper ? 2 : 1,
                                        m_banded_precision == "single");
         }
-        if (first_factorization || m_banded_refreeze == "newton" ||
+        const std::string banded_refreeze_effective =
+            m_resistive_refreeze.empty() ? m_banded_refreeze
+                                         : m_resistive_refreeze;
+        if (first_factorization || banded_refreeze_effective == "newton" ||
             this->m_time != m_banded_frozen_time)
         {
             const amrex::Real refreeze_start = amrex::ParallelDescriptor::second();
