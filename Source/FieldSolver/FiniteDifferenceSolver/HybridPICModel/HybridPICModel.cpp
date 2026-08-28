@@ -300,10 +300,11 @@ void HybridPICModel::ReadParameters ()
         pp_hybrid.query("qdsmc_conduction_fd_time", fdtime);
         if (fdtime == "ssprk2") { m_cond_fd_time = 0; }
         else if (fdtime == "rkf45") { m_cond_fd_time = 1; }
+        else if (fdtime == "rkl2") { m_cond_fd_time = 2; }
         else {
             WARPX_ABORT_WITH_MESSAGE(
                 "hybrid_pic_model.qdsmc_conduction_fd_time must be "
-                "'ssprk2' or 'rkf45'");
+                "'ssprk2', 'rkf45' or 'rkl2'");
         }
         utils::parser::queryWithParser(pp_hybrid,
             "qdsmc_conduction_fd_rtol", m_cond_fd_rtol);
@@ -5025,6 +5026,13 @@ void HybridPICModel::QdsmcTransportOnceGrid (int const lev,
                                 : std::numeric_limits<amrex::Real>::max();
     };
 
+    // rkl2 is conduction-only: super-time-stepping's stability region
+    // hugs the negative real axis and is unsafe on this advective
+    // operator.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_cond_fd_time != 2,
+        "qdsmc_conduction_fd_time = rkl2 applies to the FD conduction "
+        "operator only; the grid transport operator supports ssprk2 or "
+        "rkf45");
     QdsmcRKIntegrator const integ(
         use_rkf45 ? QdsmcRKIntegrator::Scheme::RKF45
                   : QdsmcRKIntegrator::Scheme::SSPRK2,
@@ -6756,8 +6764,9 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
     };
 
     QdsmcRKIntegrator const integ(
-        use_rkf45 ? QdsmcRKIntegrator::Scheme::RKF45
-                  : QdsmcRKIntegrator::Scheme::SSPRK2,
+        (m_cond_fd_time == 2) ? QdsmcRKIntegrator::Scheme::RKL2
+        : use_rkf45           ? QdsmcRKIntegrator::Scheme::RKF45
+                              : QdsmcRKIntegrator::Scheme::SSPRK2,
         eval_rhs, cap, m_cond_fd_rtol, m_cond_fd_atol,
         m_substep_safety, m_substep_max_growth, max_sub, post_step,
         mask_err ? &floor_mask : nullptr);

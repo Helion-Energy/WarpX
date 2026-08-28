@@ -61,15 +61,26 @@ struct QdsmcRKStats
  *     BfieldEvolveRKF45. NOT SSP (negative tableau weights): no
  *     monotonicity guarantee -- gate against SSPRK2 before making it a
  *     production default on monotone operators.
+ *   - RKL2: Runge--Kutta--Legendre super-time-stepping (Meyer, Balsara
+ *     & Aslam, JCP 257 (2014)): one super-step of s stages covers the
+ *     stability window of ~s^2/4 explicit steps, so a parabolic
+ *     subcycle count N costs ~2 sqrt(N) RHS evaluations instead of
+ *     ~2 N. PARABOLIC OPERATORS ONLY (the stability region hugs the
+ *     negative real axis -- useless and unsafe on advection). NOT SSP
+ *     and not error-adaptive: the safety factor scales the super-step
+ *     against the stability ceiling, rtol/atol are unused, and the
+ *     monotone/maximum-principle guarantee of SSPRK2 is demoted to a
+ *     gated measurement (same production rule as RKF45 above).
  *
- *  Controller (matches BfieldEvolve): accept when the weighted max-norm
- *  error ratio err = max |y_hi - y_lo| / (atol + rtol |y_old|) <= 1;
+ *  Controller (SSPRK2/RKF45, matches BfieldEvolve): accept when the
+ *  weighted max-norm error ratio
+ *  err = max |y_hi - y_lo| / (atol + rtol |y_old|) <= 1;
  *  dt *= clamp(safety * err^(-1/(p+1))) with growth factor max_growth
  *  on accept and a floor of 0.1 on reject. */
 class QdsmcRKIntegrator
 {
 public:
-    enum class Scheme : int { SSPRK2 = 0, RKF45 = 1 };
+    enum class Scheme : int { SSPRK2 = 0, RKF45 = 1, RKL2 = 2 };
 
     using Rhs = std::function<void (amrex::MultiFab&, amrex::MultiFab&)>;
     using Cap = std::function<amrex::Real ()>;
@@ -112,6 +123,8 @@ public:
         using namespace amrex::literals;
         QdsmcRKStats st;
         if (t_end <= 0.0_rt) { return st; }
+
+        if (m_scheme == Scheme::RKL2) { return AdvanceRKL2(y, t_end); }
 
         int const nk = (m_scheme == Scheme::RKF45) ? 6 : 2;
         int const nc = y.nComp();
@@ -167,6 +180,129 @@ public:
     }
 
 private:
+    /** RKL2 super-time-stepping advance. Per super-step tau, the stage
+     *  count s satisfies tau <= safety * dt_expl * (s^2+s-2)/4 with
+     *  dt_expl from the ceiling functor (evaluated once at super-step
+     *  entry; the coefficient state is that of the entry RHS call).
+     *  Recurrence (Meyer, Balsara & Aslam 2014):
+     *      Y_1 = Y_0 + mu_t1 tau M(Y_0),          mu_t1 = b_1 w_1
+     *      Y_j = mu_j Y_{j-1} + nu_j Y_{j-2} + (1 - mu_j - nu_j) Y_0
+     *            + mu_tj tau M(Y_{j-1}) + ga_tj tau M(Y_0),  j = 2..s
+     *  with b_0 = b_1 = 1/3, b_j = (j^2+j-2)/(2j(j+1)),
+     *  w_1 = 4/(s^2+s-2), mu_j = ((2j-1)/j) b_j/b_{j-1},
+     *  nu_j = -((j-1)/j) b_j/b_{j-2}, mu_tj = mu_j w_1,
+     *  ga_tj = -(1 - b_{j-1}) mu_tj.
+     *  post_step runs after EVERY stage with the stage's effective time
+     *  increment (c_j - c_{j-1}) tau, c_j = (j^2+j-2)/(s^2+s-2) and
+     *  c_1 = mu_t1; the increments sum to tau exactly, so BC flux
+     *  injections scaled by the post-step dt still integrate to the
+     *  full interval. Stage states are built in the caller's y (the
+     *  ghosted buffer the RHS functor refreshes); Y_{j-1}, Y_{j-2},
+     *  M(Y_0) are archived in ghostless temporaries. Stats: n_attempts
+     *  and n_accepted count STAGES (one RHS evaluation each, the work
+     *  unit the attempts budget bounds); the dt trajectory books the
+     *  per-stage increments. The stage count of a super-step is sized
+     *  to the remaining budget BEFORE the recurrence starts -- the
+     *  recurrence cannot stop midway (intermediate stages are not
+     *  consistent solutions), so a budget-limited super-step covers a
+     *  shorter tau and the while loop continues (or exits with
+     *  t_done < t_end, which the caller's budget warning reports). */
+    QdsmcRKStats AdvanceRKL2 (amrex::MultiFab & y, amrex::Real const t_end) const
+    {
+        using namespace amrex::literals;
+        QdsmcRKStats st;
+        int const nc = y.nComp();
+        amrex::MultiFab y0  (y.boxArray(), y.DistributionMap(), nc, 0);
+        amrex::MultiFab yjm1(y.boxArray(), y.DistributionMap(), nc, 0);
+        amrex::MultiFab yjm2(y.boxArray(), y.DistributionMap(), nc, 0);
+        amrex::MultiFab my0 (y.boxArray(), y.DistributionMap(), nc, 0);
+        amrex::MultiFab mjm1(y.boxArray(), y.DistributionMap(), nc, 0);
+
+        auto book = [&] (amrex::Real const dts)
+        {
+            ++st.n_attempts;
+            ++st.n_accepted;
+            st.dt_last = dts;
+            if (st.n_accepted == 1) {
+                st.dt_first = dts; st.dt_min = dts; st.dt_max = dts;
+            } else {
+                st.dt_min = amrex::min(st.dt_min, dts);
+                st.dt_max = amrex::max(st.dt_max, dts);
+            }
+        };
+
+        while (st.t_done < t_end*(1.0_rt - 1.0e-12_rt))
+        {
+            if (st.n_attempts >= m_max_attempts) { break; }
+
+            // Entry evaluation M(Y_0) (side effect: the ceiling functor's
+            // coefficient state) and the stability-sized stage count.
+            m_rhs(y, my0);
+            amrex::Real const dt_expl = m_cap ? m_cap()
+                : std::numeric_limits<amrex::Real>::max();
+            amrex::Real tau = t_end - st.t_done;
+            int s = 2;
+            if (tau > m_safety*dt_expl) {
+                amrex::Real const nn = tau/(m_safety*dt_expl);
+                s = static_cast<int>(std::ceil(
+                        0.5_rt*(std::sqrt(9.0_rt + 16.0_rt*nn) - 1.0_rt)));
+                s = std::max(s, 2);
+            }
+            int const s_budget = m_max_attempts - st.n_attempts;
+            if (s > s_budget) {
+                s = std::max(2, s_budget);
+                tau = amrex::min(tau, m_safety*dt_expl
+                    * 0.25_rt*(amrex::Real(s)*(amrex::Real(s) + 1.0_rt)
+                               - 2.0_rt));
+            }
+
+            amrex::Real const ssq =
+                amrex::Real(s)*(amrex::Real(s) + 1.0_rt) - 2.0_rt;
+            amrex::Real const w1 = 4.0_rt/ssq;
+
+            // Stage 1 (into y; archives: y0 = Y_0, yjm1 = Y_1)
+            amrex::MultiFab::Copy(y0, y, 0, 0, nc, 0);
+            amrex::Real const mu_t1 = w1/3.0_rt;   // b_1 w_1
+            amrex::MultiFab::LinComb(y, 1.0_rt, y0, 0,
+                                     mu_t1*tau, my0, 0, 0, nc, 0);
+            if (m_post_step) { m_post_step(y, mu_t1*tau); }
+            book(mu_t1*tau);
+            amrex::MultiFab::Copy(yjm1, y, 0, 0, nc, 0);
+            amrex::MultiFab::Copy(yjm2, y0, 0, 0, nc, 0);
+            amrex::Real c_prev = mu_t1;
+            amrex::Real b_jm1 = 1.0_rt/3.0_rt;     // b_1
+            amrex::Real b_jm2 = 1.0_rt/3.0_rt;     // b_0
+
+            for (int j = 2; j <= s; ++j) {
+                // y holds Y_{j-1}: evaluate M(Y_{j-1}) (ghost refresh
+                // is the RHS functor's job), then overwrite y with Y_j.
+                m_rhs(y, mjm1);
+                amrex::Real const rj = amrex::Real(j);
+                amrex::Real const bj =
+                    (rj*rj + rj - 2.0_rt)/(2.0_rt*rj*(rj + 1.0_rt));
+                amrex::Real const mu   = ((2.0_rt*rj - 1.0_rt)/rj)*bj/b_jm1;
+                amrex::Real const nu   = -((rj - 1.0_rt)/rj)*bj/b_jm2;
+                amrex::Real const mu_t = mu*w1;
+                amrex::Real const ga_t = -(1.0_rt - b_jm1)*mu_t;
+                amrex::MultiFab::LinComb(y, mu, yjm1, 0, nu, yjm2,
+                                         0, 0, nc, 0);
+                amrex::MultiFab::Saxpy(y, 1.0_rt - mu - nu, y0, 0, 0, nc, 0);
+                amrex::MultiFab::Saxpy(y, mu_t*tau, mjm1, 0, 0, nc, 0);
+                amrex::MultiFab::Saxpy(y, ga_t*tau, my0, 0, 0, nc, 0);
+                amrex::Real const cj = (rj*rj + rj - 2.0_rt)/ssq;
+                if (m_post_step) { m_post_step(y, (cj - c_prev)*tau); }
+                book((cj - c_prev)*tau);
+                c_prev = cj;
+                std::swap(yjm2, yjm1);
+                amrex::MultiFab::Copy(yjm1, y, 0, 0, nc, 0);
+                b_jm2 = b_jm1;
+                b_jm1 = bj;
+            }
+            st.t_done += tau;
+        }
+        return st;
+    }
+
     /** Weighted max-norm error ratio of e against y0 (globally reduced). */
     public:
     amrex::Real ErrNorm (amrex::MultiFab const & e,

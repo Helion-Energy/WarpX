@@ -1451,8 +1451,13 @@ public:
      *  maximum principle; default), 1 = rkf45 (Fehlberg 4(5), the
      *  whistler-validated pair shared with BfieldEvolve; NOT SSP -- gate
      *  via the X-point stress arm before production use on monotone
-     *  operators). Both are error-adaptive on top of the stability
-     *  ceiling. Input: qdsmc_conduction_fd_time = ssprk2 | rkf45. */
+     *  operators), 2 = rkl2 (Runge--Kutta--Legendre super-time-stepping:
+     *  covers a parabolic subcycle count N in ~2 sqrt(N) stages instead
+     *  of ~2 N RHS evaluations; stability-driven, NOT error-adaptive --
+     *  rtol/atol unused; NOT SSP, same gating rule as rkf45; conduction
+     *  only, the grid transport operator aborts on it). ssprk2/rkf45 are
+     *  error-adaptive on top of the stability ceiling. Input:
+     *  qdsmc_conduction_fd_time = ssprk2 | rkf45 | rkl2. */
     int m_cond_fd_time = 0;
     /** FD adaptive-integrator error tolerances (weighted max-norm,
      *  accept at err <= 1): relative and absolute [K]. Inputs:
