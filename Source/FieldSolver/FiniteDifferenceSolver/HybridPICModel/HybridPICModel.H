@@ -1084,6 +1084,63 @@ public:
      *  drive change, carried by the track terms). */
     bool m_je_sponge_init = false;
 
+    /** Semi-implicit E_L relaxation of the relax advance
+     *  (je_el_frac > 0 activates): every substep, E relaxes toward
+     *  the generalized-Ohm manifold through the RHO-WEIGHTED
+     *  implicit update
+     *      E <- (E + f N / rho_ref) / (1 + f rho / rho_ref),
+     *  N = enE - grad Pe + rho eta J the Ohm numerator the solve
+     *  already assembles, f = je_el_frac the per-substep relaxation
+     *  fraction, rho_ref = q_e je_el_n_ref a CONSTANT reference.
+     *  WHY: the honest-E_L system is only half honest -- the ion
+     *  response is deposited once per global step and frozen across
+     *  substeps, so the ion-Langmuir loop closes through an aliased
+     *  response at unresolvable omega_pi dt >> 1 and pumps E_L into
+     *  a growing bath (the measured ~10x / 400 steps,
+     *  c_art-independent longitudinal signature); the bath's habitat
+     *  is density-contrast seams and edges. This update damps the
+     *  oscillation around the Ohm manifold in the SAME semi-implicit
+     *  relaxation style as the rest of the advance, at the substep
+     *  level and adjacent to the fine-level conduction so grad Pe
+     *  and E_L co-evolve self-consistently. It differs from the
+     *  legacy qn pin (m_je_qn_frac) in the one way that matters: the
+     *  rho-weighted form divides ONLY by the constant reference --
+     *  no floored local density anywhere (removing those divisions
+     *  is the point of the Je form). The weighting self-gates:
+     *  full-strength at rho_ref-class densities, smoothly inert in
+     *  vacuum where the eta floor owns E_L. Longitudinal by
+     *  frequency separation, not projection: the relaxation rate
+     *  sits far below the whistler ceiling, so the transverse
+     *  physics rides free. Prefer this over je_qn_frac; do not arm
+     *  both. Inputs: je_el_frac (default 0 = off),
+     *  je_el_n_ref [m^-3] (required when armed; n0-class). */
+    amrex::Real m_je_el_frac = 0.0;
+    amrex::Real m_je_el_n_ref = 0.0;
+
+    /** Mass-matrix-linearized ion response of the relax advance
+     *  (je_ji_lin = 1): the deposited ion current is frozen across
+     *  the substeps of a global step, so the honest-E_L system
+     *  closes its ion-Langmuir loop through a response aliased at
+     *  omega_pi dt >> 1 -- the pump of the longitudinal bath. This
+     *  gives the substepped field system the LINEARIZED ion response
+     *  along the fine trajectory instead: a persistent
+     *  delta-J_i field advances by the cold-ion susceptibility,
+     *  d(dJ_i)/dt = (q rho_i / m_i) E, integrated backward-Euler and
+     *  absorbed implicitly into the Ampere-Maxwell update as the
+     *  diagonal mass-matrix factor 1/(1 + chi),
+     *  chi = dt_sub^2 inv_eps_art q rho_i / m_i = (omega_pi_art
+     *  dt_sub)^2 -- unconditionally stable at any chi, pointwise,
+     *  division-free (the density MULTIPLIES). dJ_i resets at every
+     *  half-step entry, where the real deposition (whose particles
+     *  gathered the same E) takes over the response. v1 limits,
+     *  documented: unmagnetized ion response (ion gyration is far
+     *  below substep scales) and the (E, J_e) CN anticipation does
+     *  not see the ion factor (O(theta chi) splitting error).
+     *  Inputs: je_ji_lin (default 0), je_ji_mi [kg] (ion mass,
+     *  required when armed). */
+    int m_je_ji_lin = 0;
+    amrex::Real m_je_ji_mi = 0.0;
+
     /** Density anchor of the qn-pin blend and its guarded division
      *  [m^-3]: a PHYSICS reference (fraction-of-n0 class), decoupled
      *  from the statistics-anchored one-count je_n_min. WHY: a

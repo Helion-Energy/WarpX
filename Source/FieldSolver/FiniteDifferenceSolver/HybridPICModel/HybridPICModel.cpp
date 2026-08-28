@@ -855,6 +855,29 @@ void HybridPICModel::ReadParameters ()
             "je_form (the sponge damps the relax advance's evolved "
             "field state; the algebraic e-form has no such state)");
         pp_hybrid.query("je_hyper_res", m_je_hyper_res);
+        utils::parser::queryWithParser(pp_hybrid, "je_el_frac",
+                                       m_je_el_frac);
+        utils::parser::queryWithParser(pp_hybrid, "je_el_n_ref",
+                                       m_je_el_n_ref);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_je_el_frac == 0.0_rt || m_je_el_n_ref > 0.0_rt,
+            "hybrid_pic_model.je_el_frac requires je_el_n_ref > 0 "
+            "(the constant reference density of the rho-weighted "
+            "E_L relaxation; n0-class)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !(m_je_el_frac > 0.0_rt && m_je_qn_frac > 0.0_rt),
+            "hybrid_pic_model.je_el_frac and je_qn_frac must not be "
+            "armed together (the E_L relaxation supersedes the "
+            "divided-Ohm qn pin; set je_qn_frac = 0)");
+        pp_hybrid.query("je_ji_lin", m_je_ji_lin);
+        utils::parser::queryWithParser(pp_hybrid, "je_ji_mi",
+                                       m_je_ji_mi);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_je_ji_lin || m_je_ji_mi > 0.0_rt,
+            "hybrid_pic_model.je_ji_lin requires je_ji_mi > 0 (the "
+            "ion mass of the cold-ion response; the mass-matrix "
+            "coefficient path reuses the implicit-side deposition "
+            "and is wired separately)");
         pp_hybrid.query("je_adaptive", m_je_adaptive);
         utils::parser::queryWithParser(pp_hybrid, "je_rk_rtol",
                                        m_je_rk_rtol);
@@ -1150,6 +1173,15 @@ void HybridPICModel::AllocateLevelMFs (
             fields.alloc_init("hybrid_je_qvisc_fp", lev,
                 amrex::convert(ba, amrex::IntVect::TheNodeVector()),
                 dm, 1, amrex::IntVect(0), 0.0_rt);
+        }
+        // Linearized ion-response state (see the m_je_ji_lin member
+        // doc): the accumulated delta-J_i of the current half-step,
+        // 3 comps nodal, pointwise (no ghosts); reset at every
+        // half-step entry where the real deposition takes over.
+        if (m_je_ji_lin) {
+            fields.alloc_init("hybrid_je_dji_fp", lev,
+                amrex::convert(ba, amrex::IntVect::TheNodeVector()),
+                dm, 3, amrex::IntVect(0), 0.0_rt);
         }
         // Curl-curl hyper-resistivity scratch (see the m_je_hyper_res
         // member doc): eta_H curl J and E_H = curl(eta_H curl J),
@@ -10489,6 +10521,14 @@ void HybridPICModel::BfieldEvolve (
     int n_attempts = 0;
     int n_accepted = 0;
 
+    // Linearized ion response resets at the half-step entry (see the
+    // m_je_ji_lin member doc): the fresh deposition owns the response
+    // accumulated by the previous half.
+    if (je_relax && m_je_ji_lin) {
+        WarpX::GetInstance().m_fields.get("hybrid_je_dji_fp", lev)
+            ->setVal(0.0_rt);
+    }
+
     // Circuit coupling: each accepted substep is a coupling interval of
     // the predictor-corrector exchange with the external circuit engine
     // (fields here hold the plasma response; the coupled coils' external
@@ -10563,8 +10603,10 @@ void HybridPICModel::BfieldEvolve (
         ? warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp,
                              lev)
         : nullptr;
+    MultiFab * dji_state_mf = (je_relax && m_je_ji_lin)
+        ? warpx.m_fields.get("hybrid_je_dji_fp", lev) : nullptr;
     std::array<MultiFab, 3> E_sav, E_res, B_res;
-    MultiFab Je_sav, Te_sav, Te_res;
+    MultiFab Je_sav, Te_sav, Te_res, Dji_sav;
     if (je_adapt) {
         for (int ii = 0; ii < 3; ++ii) {
             E_sav[ii].define(Efield[lev][ii]->boxArray(),
@@ -10586,6 +10628,11 @@ void HybridPICModel::BfieldEvolve (
             Te_res.define(Te_mf->boxArray(), Te_mf->DistributionMap(),
                           1, amrex::IntVect(0));
         }
+        if (dji_state_mf) {
+            Dji_sav.define(dji_state_mf->boxArray(),
+                           dji_state_mf->DistributionMap(), 3,
+                           dji_state_mf->nGrowVect());
+        }
     }
     auto je_pe_refresh = [&] () {
         QDSMCFillElectronPressureFromTe(lev);
@@ -10606,6 +10653,10 @@ void HybridPICModel::BfieldEvolve (
         if (je_te) {
             MultiFab::Copy(Te_sav, *Te_mf, 0, 0, 1, Te_sav.nGrowVect());
         }
+        if (dji_state_mf) {
+            MultiFab::Copy(Dji_sav, *dji_state_mf, 0, 0, 3,
+                           Dji_sav.nGrowVect());
+        }
     };
     auto je_restore_entry = [&] () {
         for (int ii = 0; ii < 3; ++ii) {
@@ -10618,6 +10669,10 @@ void HybridPICModel::BfieldEvolve (
         if (je_te) {
             MultiFab::Copy(*Te_mf, Te_sav, 0, 0, 1, Te_sav.nGrowVect());
             je_pe_refresh();
+        }
+        if (dji_state_mf) {
+            MultiFab::Copy(*dji_state_mf, Dji_sav, 0, 0, 3,
+                           Dji_sav.nGrowVect());
         }
     };
     // One full split cycle at dt_c: half push -> (E, J_e) advance on

@@ -847,6 +847,27 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         amrex::Real const gam_qn =
             hybrid_model->m_je_qn_frac / dt_full;
         bool const use_qn = (gam_qn > 0.0_rt);
+        // rho-weighted semi-implicit E_L relaxation (see the
+        // m_je_el_frac member doc): per-substep fraction and the
+        // CONSTANT reference density -- the only division it makes.
+        bool const use_el = (hybrid_model->m_je_el_frac > 0.0_rt);
+        // a RATE pinned to the attempt dt (dt_cf), not a per-substep
+        // fraction: a fixed-fraction application is an iteration, not
+        // an ODE term, and the adaptive doubling legs would see an
+        // O(1) difference from their different application counts
+        // (the dt-pinned-coefficient lesson, third instance). On the
+        // fixed path dt_cf = dt_je and this reduces to the plain
+        // per-substep fraction.
+        amrex::Real const gam_el = use_el
+            ? hybrid_model->m_je_el_frac / dt_cf : 0.0_rt;
+        amrex::Real const inv_rho_el = use_el
+            ? 1.0_rt / (PhysConst::q_e * hybrid_model->m_je_el_n_ref)
+            : 0.0_rt;
+        // cold-ion mass-matrix response (see the m_je_ji_lin member
+        // doc): kI/rho = q_e/m_i; the density MULTIPLIES.
+        bool const use_ji = (hybrid_model->m_je_ji_lin != 0);
+        amrex::Real const ki_over_rho = use_ji
+            ? PhysConst::q_e / hybrid_model->m_je_ji_mi : 0.0_rt;
         amrex::Real const inv_eps_art = PhysConst::mu0 * c_art * c_art;
         amrex::Real const qm = PhysConst::q_e / PhysConst::m_e;
         bool const use_vm = hybrid_model->m_je_var_mass;
@@ -868,6 +889,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         }
 
         MultiFab & Je_mf = *warpx.m_fields.get("hybrid_je_fp", lev);
+        MultiFab * Dji_mf = use_ji
+            ? warpx.m_fields.get("hybrid_je_dji_fp", lev) : nullptr;
         // Crank-Nicolson advance (see the m_je_time_stagger member
         // doc): trapezoidal coefficients on the coupled local (E, J_e)
         // system in place of backward Euler; the centered-split B
@@ -908,6 +931,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
             Array4<Real> const& Et = Efield[1]->array(mfi);
             Array4<Real> const& Ez = Efield[2]->array(mfi);
             Array4<Real> const& Je = Je_mf.array(mfi);
+            Array4<Real> Dji;
+            if (Dji_mf) { Dji = Dji_mf->array(mfi); }
             Array4<Real const> const& enE = enE_nodal_mf.const_array(mfi);
             Array4<Real const> const& rho = rhofield.const_array(mfi);
             Array4<Real const> const& Pe  = Pefield.const_array(mfi);
@@ -1122,6 +1147,50 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     ezn = (ezn + lam * ((enE(i,j,k,2) - gpz
                         + rho_v * eta_v * Jz(i,j,k)) / rho_gq))
                         * inv_l;
+                }
+                if (use_el) {
+                    // rho-weighted semi-implicit E_L relaxation (see
+                    // the m_je_el_frac member doc): E relaxes toward
+                    // the Ohm manifold, dividing ONLY by the constant
+                    // reference; the rate self-gates with density.
+                    amrex::Real const lam_el =
+                        dt_r * gam_el * rho_v * inv_rho_el;
+                    amrex::Real const fac =
+                        dt_r * gam_el * inv_rho_el;
+                    amrex::Real const inv_el =
+                        1.0_rt / (1.0_rt + lam_el);
+                    ern = (ern + fac * (enE(i,j,k,0) - gpr
+                        + rho_v * eta_v * Jr(i,j,k))) * inv_el;
+                    etn = (etn + fac * (enE(i,j,k,1) - gpt
+                        + rho_v * eta_v * Jt(i,j,k))) * inv_el;
+                    ezn = (ezn + fac * (enE(i,j,k,2) - gpz
+                        + rho_v * eta_v * Jz(i,j,k))) * inv_el;
+                }
+                if (use_ji) {
+                    // cold-ion mass-matrix response (see the
+                    // m_je_ji_lin member doc), staged backward-Euler:
+                    // dE/dt = -inv_eps dJi, d(dJi)/dt = kI E, with
+                    // chi = dt^2 inv_eps kI the diagonal factor.
+                    amrex::Real const kI = ki_over_rho * rho_v;
+                    amrex::Real const chi =
+                        dt_r * dt_r * inv_eps_art * kI;
+                    amrex::Real const inv_ji =
+                        1.0_rt / (1.0_rt + chi);
+                    ern = (ern - dt_r * inv_eps_art * Dji(i,j,k,0))
+                        * inv_ji;
+                    etn = (etn - dt_r * inv_eps_art * Dji(i,j,k,1))
+                        * inv_ji;
+                    ezn = (ezn - dt_r * inv_eps_art * Dji(i,j,k,2))
+                        * inv_ji;
+                    if (!skip_r) {
+                        Dji(i,j,k,0) += dt_r * kI * ern;
+                    }
+                    if (!skip_t) {
+                        Dji(i,j,k,1) += dt_r * kI * etn;
+                    }
+                    if (!skip_z) {
+                        Dji(i,j,k,2) += dt_r * kI * ezn;
+                    }
                 }
                 if (on_axis) {
                     jnr = 0.0_rt; jnt = 0.0_rt;
@@ -1828,6 +1897,27 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         amrex::Real const gam_qn =
             hybrid_model->m_je_qn_frac / dt_full;
         bool const use_qn = (gam_qn > 0.0_rt);
+        // rho-weighted semi-implicit E_L relaxation (see the
+        // m_je_el_frac member doc): per-substep fraction and the
+        // CONSTANT reference density -- the only division it makes.
+        bool const use_el = (hybrid_model->m_je_el_frac > 0.0_rt);
+        // a RATE pinned to the attempt dt (dt_cf), not a per-substep
+        // fraction: a fixed-fraction application is an iteration, not
+        // an ODE term, and the adaptive doubling legs would see an
+        // O(1) difference from their different application counts
+        // (the dt-pinned-coefficient lesson, third instance). On the
+        // fixed path dt_cf = dt_je and this reduces to the plain
+        // per-substep fraction.
+        amrex::Real const gam_el = use_el
+            ? hybrid_model->m_je_el_frac / dt_cf : 0.0_rt;
+        amrex::Real const inv_rho_el = use_el
+            ? 1.0_rt / (PhysConst::q_e * hybrid_model->m_je_el_n_ref)
+            : 0.0_rt;
+        // cold-ion mass-matrix response (see the m_je_ji_lin member
+        // doc): kI/rho = q_e/m_i; the density MULTIPLIES.
+        bool const use_ji = (hybrid_model->m_je_ji_lin != 0);
+        amrex::Real const ki_over_rho = use_ji
+            ? PhysConst::q_e / hybrid_model->m_je_ji_mi : 0.0_rt;
         amrex::Real const inv_eps_art = PhysConst::mu0 * c_art * c_art;
         amrex::Real const qm = PhysConst::q_e / PhysConst::m_e;
         bool const use_vm = hybrid_model->m_je_var_mass;
@@ -1849,6 +1939,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         }
 
         MultiFab & Je_mf = *warpx.m_fields.get("hybrid_je_fp", lev);
+        MultiFab * Dji_mf = use_ji
+            ? warpx.m_fields.get("hybrid_je_dji_fp", lev) : nullptr;
         // Crank-Nicolson advance (see the m_je_time_stagger member
         // doc): trapezoidal coefficients on the coupled local (E, J_e)
         // system in place of backward Euler; the centered-split B
@@ -1889,6 +1981,8 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             Array4<Real> const& Ey = Efield[1]->array(mfi);
             Array4<Real> const& Ez = Efield[2]->array(mfi);
             Array4<Real> const& Je = Je_mf.array(mfi);
+            Array4<Real> Dji;
+            if (Dji_mf) { Dji = Dji_mf->array(mfi); }
             Array4<Real const> const& enE = enE_nodal_mf.const_array(mfi);
             Array4<Real const> const& rho = rhofield.const_array(mfi);
             Array4<Real const> const& Pe  = Pefield.const_array(mfi);
@@ -2107,6 +2201,40 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     ezn = (ezn + lam * ((enE(i,j,k,2) - gpz
                         + rho_v * eta_v * Jz(i,j,k)) / rho_gq))
                         * inv_l;
+                }
+                if (use_el) {
+                    // rho-weighted semi-implicit E_L relaxation (see
+                    // the m_je_el_frac member doc)
+                    amrex::Real const lam_el =
+                        dt_r * gam_el * rho_v * inv_rho_el;
+                    amrex::Real const fac =
+                        dt_r * gam_el * inv_rho_el;
+                    amrex::Real const inv_el =
+                        1.0_rt / (1.0_rt + lam_el);
+                    exn = (exn + fac * (enE(i,j,k,0) - gpx
+                        + rho_v * eta_v * Jx(i,j,k))) * inv_el;
+                    eyn = (eyn + fac * (enE(i,j,k,1) - gpy
+                        + rho_v * eta_v * Jy(i,j,k))) * inv_el;
+                    ezn = (ezn + fac * (enE(i,j,k,2) - gpz
+                        + rho_v * eta_v * Jz(i,j,k))) * inv_el;
+                }
+                if (use_ji) {
+                    // cold-ion mass-matrix response (see the
+                    // m_je_ji_lin member doc), staged backward-Euler
+                    amrex::Real const kI = ki_over_rho * rho_v;
+                    amrex::Real const chi =
+                        dt_r * dt_r * inv_eps_art * kI;
+                    amrex::Real const inv_ji =
+                        1.0_rt / (1.0_rt + chi);
+                    exn = (exn - dt_r * inv_eps_art * Dji(i,j,k,0))
+                        * inv_ji;
+                    eyn = (eyn - dt_r * inv_eps_art * Dji(i,j,k,1))
+                        * inv_ji;
+                    ezn = (ezn - dt_r * inv_eps_art * Dji(i,j,k,2))
+                        * inv_ji;
+                    Dji(i,j,k,0) += dt_r * kI * exn;
+                    Dji(i,j,k,1) += dt_r * kI * eyn;
+                    Dji(i,j,k,2) += dt_r * kI * ezn;
                 }
                 if (qv) {
                     // dissipated energy density this substep:
