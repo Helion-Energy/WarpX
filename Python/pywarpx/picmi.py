@@ -1923,6 +1923,7 @@ class MHDBlockPreconditioner(PreconditionerBase):
         resistive_solver=None,
         banded_precision=None,
         banded_refreeze=None,
+        resistive_refreeze=None,
         resistive_validate_assembly=None,
     ):
         self.verbose = verbose
@@ -1939,6 +1940,7 @@ class MHDBlockPreconditioner(PreconditionerBase):
         self.resistive_solver = resistive_solver
         self.banded_precision = banded_precision
         self.banded_refreeze = banded_refreeze
+        self.resistive_refreeze = resistive_refreeze
         self.resistive_validate_assembly = resistive_validate_assembly
 
     def preconditioner_type_initialize_inputs(self):
@@ -1962,6 +1964,7 @@ class MHDBlockPreconditioner(PreconditionerBase):
         pc_mhd_block.resistive_solver = self.resistive_solver
         pc_mhd_block.banded_precision = self.banded_precision
         pc_mhd_block.banded_refreeze = self.banded_refreeze
+        pc_mhd_block.resistive_refreeze = self.resistive_refreeze
         pc_mhd_block.resistive_validate_assembly = self.resistive_validate_assembly
 
 
@@ -3014,6 +3017,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         vacuum_reference_peak_fraction=None,
         joule_ohm_current=None,
         electron_ion_equilibration=None,
+        braginskii_tangential_limiter=None,
         resistive_theta=None,
         resistive_direct_device_assembly=None,
         conduction_theta=None,
@@ -3115,6 +3119,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.vacuum_reference_peak_fraction = vacuum_reference_peak_fraction
         self.joule_ohm_current = joule_ohm_current
         self.electron_ion_equilibration = electron_ion_equilibration
+        self.braginskii_tangential_limiter = braginskii_tangential_limiter
         self.resistive_theta = resistive_theta
         self.resistive_direct_device_assembly = resistive_direct_device_assembly
         self.conduction_theta = conduction_theta
@@ -3231,6 +3236,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.joule_ohm_current = self.joule_ohm_current
         implicit_mhd.electron_ion_equilibration = (
             self.electron_ion_equilibration)
+        implicit_mhd.braginskii_tangential_limiter = (
+            self.braginskii_tangential_limiter)
         implicit_mhd.resistive_theta = self.resistive_theta
         implicit_mhd.resistive_direct_device_assembly = (
             self.resistive_direct_device_assembly
