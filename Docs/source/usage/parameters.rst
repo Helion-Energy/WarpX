@@ -5584,10 +5584,18 @@ Jacobian probes.
     carry exactly zero conductive flux. ``temperature`` makes the wall a
     heat SINK instead: interface faces drain conductively toward
     ``wall_temperature`` (requires a nonzero thermal diffusivity). The
-    drain is ONE-SIDED — smoothly gated to zero at/below the wall value
-    and fully open above twice it, so the reservoir cools the interior
-    toward T_wall but never heats plasma (or the near-floor dust rim)
-    above it — and ALWAYS free-streaming limited at the wall face
+    drain is ONE-SIDED — smoothly gated to zero at/below the reachable
+    anchor (the maximum of ``wall_temperature`` and the corresponding
+    temperature floor) and fully open above twice it, so the reservoir
+    cools
+    the interior toward T_wall but never heats plasma (or the
+    near-floor dust rim) above it and never fights the admissibility
+    projection's temperature-floor ratchet (a reservoir-anchored gate
+    with T_wall below a floor was measured to deadlock Newton: the
+    projection pins the wall-adjacent energy rows at the floor bound
+    while the still-open drain demands descent — iteration-0 frozen
+    solves until the ``newton.max_frozen_steps`` trip) — and ALWAYS
+    free-streaming limited at the wall face
     (factor = ``conduction_flux_limit_factor`` when set, else 1). A
     two-sided, un-capped Dirichlet exchange was measured fatal on the
     FRC formation ladder: the reservoir heats the machine's entire
@@ -5603,7 +5611,15 @@ Jacobian probes.
     Wall reservoir temperature of
     ``implicit_mhd.wall_thermal_bc = temperature`` (required there, in
     eV; an error in the other modes). Applied to both the electron and
-    ion conduction channels.
+    ion conduction channels. The drain's smooth gate closes at the
+    maximum of ``wall_temperature`` and the corresponding
+    :pp:param:`implicit_mhd.electron_temperature_floor` /
+    :pp:param:`implicit_mhd.ion_temperature_floor` — the reachable set
+    of the admissibility projection — so a ``wall_temperature`` below
+    an active temperature floor cools the wall-adjacent plasma to the
+    FLOOR temperature only (a rank-0 warning reports the
+    mis-configuration; the reservoir value below the floor is
+    unreachable by construction).
 
 .. pp:param:: implicit_mhd.wall_band_eta_override
     :type: ``float`` (Ohm m)

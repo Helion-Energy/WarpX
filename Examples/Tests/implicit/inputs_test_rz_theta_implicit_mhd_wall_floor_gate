@@ -1,0 +1,194 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Wall-drain gate vs temperature-floor ratchet (the reachable-set gate
+# anchor): a quiet uniform plasma at T0 sits inside a flat dielectric
+# wall just inside r_max, with wall_thermal_bc = temperature and a wall
+# reservoir DELIBERATELY far below the electron/ion temperature floors
+# (T_wall = 0.5 eV << T_floor = 9.5 eV ~ T0 = 10 eV, so the one-way
+# ratchet is engaged everywhere from step 0) and dt far above the
+# wall-face free-streaming time dr/v_te ~ 4e-9 s (dt/tau ~ 2600): the
+# drain demands, per solve, far more descent than the headroom between
+# the IC and the floor bound. The z_lo mirror (pmc + symmetry fluid
+# ghosts) closes every axial escape channel -- the exact seam of the
+# production failure (z_lo-mirror x inner-wall corner).
+#
+# REPRODUCER CONTRACT (the bug this deck was built to catch): with the
+# wall drain gated on the RESERVOIR value alone, the gate never closes
+# while the admissibility projection's temperature ratchet pins the
+# same components at the floor bound -- a stuck fixed point. Measured
+# unfixed behavior: the first solve descends the live column to the
+# bound, every subsequent solve has its energy directions fully pinned
+# (trial state == state, Armijo cannot decrease, the free subspace is
+# at round-off so the noise gate skips the rescue), iteration-0 frozen
+# steps accumulate within a handful of steps, and the run ABORTS on the
+# newton.max_frozen_steps trip long before max_step.
+#
+# WITH the fix (the gate anchored at max(reservoir, temperature-floor
+# image) -- the reachable set), the drain closes smoothly exactly where
+# the projection stops the state: zero frozen steps, every step
+# accepted, and the wall-adjacent ring settles AT the floor from above
+# (see analysis_mhd_wall_floor_gate.py).
+#
+# ion_closure = dual_energy exercises the twin booking (the identical
+# gated wall flux enters E_i AND U_i); floor_consistency_rate > 0 arms
+# the bound-riding supply exactly as in production (its capacity is far
+# below the drain demand, so it must not mask the deadlock).
+
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.T0_ev = 10.0
+my_constants.Tfloor_ev = 9.5
+my_constants.Twall_ev = 0.5
+my_constants.Pe = n0 * T0_ev * q_e
+my_constants.Pi = n0 * T0_ev * q_e
+my_constants.gamma = 5.0/3.0
+my_constants.B0 = 0.01
+my_constants.chi = 60.0
+my_constants.Lr = 0.08
+my_constants.Lz = 0.4
+my_constants.nr = 16
+my_constants.nz = 32
+# dt >> the wall-face free-streaming time dr/v_te(T0) ~ 3.8e-9 s: the
+# per-solve drain demand dwarfs the IC-to-floor headroom (the deadlock
+# arm of the reproducer contract above).
+my_constants.dt = 1.0e-5
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 16
+amr.n_cell = nr nz
+amr.max_grid_size = 16
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 0.0
+geometry.prob_hi = Lr Lz
+boundary.field_lo = none pmc
+boundary.field_hi = pec none
+boundary.particle_lo = none reflecting
+boundary.particle_hi = reflecting absorbing
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-13
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 20
+# Production policy (the tolerant line search + frozen-step guard):
+# under the unfixed gate the deadlock then presents exactly as in
+# production -- iteration-0 frozen solves counted up to the trip below
+# (with the default require_convergence = true it aborts even earlier,
+# in the very first line search).
+newton.require_convergence = false
+# The unfixed reproducer trips this within a handful of steps (see the
+# contract above); the fixed run must never count a frozen solve.
+newton.max_frozen_steps = 5
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+# 1e-8 inexact-Newton forcing: measured identical Newton trajectories
+# (3 iters/solve, final norms ~1e-11) at half the GMRES cost of 1e-12
+# on this unpreconditioned acoustic-CFL-113 deck.
+gmres.relative_tolerance = 1.0e-8
+gmres.max_iterations = 1000
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = T0_ev
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+# Split external fields: required by wall_model = dielectric; the drive
+# itself is ZERO (the gate contract is a pure fluid measurement).
+hybrid_pic_model.add_external_fields = 1
+external_vector_potential.fields = hold
+external_vector_potential.hold.Ay_external_grid_function(x,y,z) = "0.0"
+external_vector_potential.hold.A_time_external_function(t) = "1.0"
+external_vector_potential.do_diva_cleaning = 0
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = Pi
+implicit_mhd.ion_closure = dual_energy
+implicit_mhd.mass_density_floor = 1.0e-4 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-4 * Pe
+implicit_mhd.ion_pressure_floor = 1.0e-4 * Pi
+# Temperature floors just below the IC temperature: the ratchet bound
+# is engaged in EVERY live cell from step 0 (the absolute pressure
+# floors above sit 4 decades lower and never bind).
+implicit_mhd.electron_temperature_floor = Tfloor_ev*q_e/kb
+implicit_mhd.ion_temperature_floor = Tfloor_ev*q_e/kb
+# Bound-riding supply armed as in production: capacity ~ theta dt rate
+# (w/2) per solve, far below the free-streaming-scale drain demand.
+implicit_mhd.floor_consistency_rate = 1.0e3
+implicit_mhd.fluid_flux = central
+# central-flux stabilization guard; near-inert here (quiet IC, u = 0)
+implicit_mhd.viscosity = 1.0
+implicit_mhd.include_joule_heating = false
+implicit_mhd.thermal_diffusivity_electron = chi
+implicit_mhd.thermal_diffusivity_ion = chi
+implicit_mhd.z_boundary_fluid = outflow
+implicit_mhd.z_lo_boundary_fluid = symmetry
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.electron_pressure(x,y,z) = Pe
+implicit_mhd.ion_pressure(x,y,z) = Pi
+
+# Flat dielectric wall just inside r_max (r_w = 0.065, between the
+# cell centers at 0.0625 and 0.0675: live cells i <= 12, masked band
+# i >= 13), reservoir far below the floors.
+implicit_mhd.wall_model = dielectric
+implicit_mhd.wall_polyline_file = wall_flat_r065.csv
+implicit_mhd.wall_thermal_bc = temperature
+implicit_mhd.wall_temperature = Twall_ev
+implicit_mhd.wall_ledger_file = diags/wall_ledger.txt
+
+warpx.B_ext_grid_init_style = parse_b_ext_grid_function
+warpx.Bx_external_grid_function(x,y,z) = 0.0
+warpx.By_external_grid_function(x,y,z) = 0.0
+warpx.Bz_external_grid_function(x,y,z) = 0.0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 16
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy \
+                       implicit_mhd_ion_energy \
+                       implicit_mhd_ion_internal_energy \
+                       implicit_mhd_momentum_r implicit_mhd_momentum_t \
+                       implicit_mhd_momentum_z
+diag1.write_species = 0

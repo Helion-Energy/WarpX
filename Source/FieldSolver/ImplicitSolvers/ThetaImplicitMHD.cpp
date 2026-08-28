@@ -1296,6 +1296,35 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
                 "conduction channel (thermal_diffusivity_ion/electron, "
                 "constant or parser, or thermal_conduction_model = "
                 "braginskii): the wall reservoir exchanges conductively");
+            // Contract guard: with wall_temperature below a temperature
+            // floor the reservoir is unreachable by construction -- the
+            // admissibility projection stops the state at the floor
+            // first. A WARNING, not an abort: the wall-drain gate is
+            // anchored at max(reservoir, floor image) (see the wall
+            // host constants in the conduction kernel), so the drain
+            // closes smoothly at the floor and the run survives; the
+            // wall then effectively cools to the FLOOR temperature, not
+            // to wall_temperature, which the user should know.
+            const amrex::Real wall_temperature_kelvin =
+                m_wall_mask.WallTemperature_eV() * PhysConst::q_e /
+                PhysConst::kb;
+            if (wall_temperature_kelvin < m_electron_temperature_floor ||
+                wall_temperature_kelvin < m_ion_temperature_floor) {
+                ablastr::warn_manager::WMRecordWarning(
+                    "ThetaImplicitMHD",
+                    "implicit_mhd.wall_temperature ("
+                    + std::to_string(m_wall_mask.WallTemperature_eV())
+                    + " eV) is below an active temperature floor "
+                    "(implicit_mhd.electron/ion_temperature_floor): the "
+                    "floors bound the state from below, so the wall "
+                    "reservoir temperature is unreachable and the wall "
+                    "drain closes at the floor instead -- the plasma "
+                    "cools to the FLOOR temperature, not to "
+                    "wall_temperature. Raise wall_temperature to at "
+                    "least the floors (or lower the floors) if the "
+                    "reservoir value is meant to be reached.",
+                    ablastr::warn_manager::WarnPriority::medium);
+            }
         }
     }
 #else
@@ -5464,6 +5493,33 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const amrex::Real wall_e_spec_ion =
         m_ion_charge_to_mass * m_wall_mask.WallTemperature_eV() /
         (m_gamma_i - 1.0_rt);
+    // Wall-drain GATE anchors: the drain's C^1 gate must close exactly
+    // where the Newton projection stops the state -- the REACHABLE set.
+    // With wall_temperature below a temperature floor, gating on the
+    // reservoir value alone never closes while the projection's one-way
+    // temperature ratchet pins the same components at the floor bound: a
+    // stuck fixed point (the drain keeps demanding descent on pinned
+    // rows, Armijo grades on frozen components, and the run dies on the
+    // consecutive-frozen-step trip -- measured at the z_lo-mirror x
+    // inner-wall corner of the production mirror deck). Anchor at
+    // max(wall reservoir, temperature-floor image), using the SAME
+    // density-free specific-energy images of the floors as
+    // MakeAdmissibilityBounds (n kB T = rho (q/m)/e kB T[K]). Every
+    // other one-sided drain already anchors at its reachable set
+    // (advective gates at the pedestal images, floor supply at the
+    // projection bound); this makes the wall conduction drain match.
+    // Only the GATE argument moves: the drain MAGNITUDE keeps the true
+    // wall_e_spec_* reservoir values. Decks with wall_temperature at or
+    // above the floors (every existing temperature-wall deck) see
+    // gate == reservoir, bit-identical to the previous behavior.
+    const amrex::Real wall_gate_e_spec_electron = std::max(
+        wall_e_spec_electron,
+        m_ion_charge_to_mass / PhysConst::q_e * PhysConst::kb *
+            m_electron_temperature_floor / (m_gamma_e - 1.0_rt));
+    const amrex::Real wall_gate_e_spec_ion = std::max(
+        wall_e_spec_ion,
+        m_ion_charge_to_mass / PhysConst::q_e * PhysConst::kb *
+            m_ion_temperature_floor / (m_gamma_i - 1.0_rt));
     const amrex::Real wall_te_kelvin = m_wall_mask.WallTemperature_eV() *
                                        PhysConst::q_e / PhysConst::kb;
     // The interface exchange is ONE-SIDED (a drain toward T_wall, C^1
@@ -6611,12 +6667,16 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     amrex::Real conductive_flux;
                     if (wall_face) {
                         // One-sided rectified wall drain (see the host
-                        // constants): zero at/below the wall value, C^1
-                        // full above twice it -- the reservoir cools the
-                        // interior toward T_wall but never heats it.
-                        // The interior e_int is the conduction-stage
-                        // value; the drain's sign/cap structure is
-                        // unchanged.
+                        // constants): zero at/below the GATE anchor
+                        // (max of the wall value and the temperature-
+                        // floor image, so the gate closes exactly where
+                        // the projection stops the state), C^1 full
+                        // above twice it -- the reservoir cools the
+                        // interior toward T_wall but never heats it and
+                        // never fights the floor ratchet. The drain
+                        // magnitude keeps the true wall value. The
+                        // interior e_int is the conduction-stage value;
+                        // the drain's sign/cap structure is unchanged.
                         const amrex::Real interior_e_spec =
                             wall_left_masked ? e_spec_ion_right
                                              : e_spec_ion_left;
@@ -6624,7 +6684,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             chi_ion_face * face_density *
                             (interior_e_spec - wall_e_spec_ion) *
                             theta_implicit_mhd::floor_outflow_limiter(
-                                interior_e_spec, wall_e_spec_ion) *
+                                interior_e_spec, wall_gate_e_spec_ion) *
                             inverse_normal_size;
                         // free-streaming cap, ALWAYS on at the wall face
                         const amrex::Real thermal_speed = std::sqrt(
@@ -6767,10 +6827,10 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     }
                     amrex::Real conductive_flux;
                     if (wall_face) {
-                        // One-sided rectified wall drain (see the ion
-                        // channel above): the interior e_int is the
-                        // conduction-stage value, the structure is
-                        // unchanged.
+                        // One-sided rectified wall drain, gated at the
+                        // reachable-set anchor (see the ion channel
+                        // above): the interior e_int is the conduction-
+                        // stage value, the structure is unchanged.
                         const amrex::Real interior_e_spec =
                             wall_left_masked ? e_spec_electron_right
                                              : e_spec_electron_left;
@@ -6778,7 +6838,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             chi_electron_face * face_density *
                             (interior_e_spec - wall_e_spec_electron) *
                             theta_implicit_mhd::floor_outflow_limiter(
-                                interior_e_spec, wall_e_spec_electron) *
+                                interior_e_spec, wall_gate_e_spec_electron) *
                             inverse_normal_size;
                         const amrex::Real thermal_speed = std::sqrt(
                             PhysConst::kb * face_te / PhysConst::m_e);
