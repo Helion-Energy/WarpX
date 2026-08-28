@@ -44,7 +44,7 @@ HybridDissipation::HybridDissipation (const std::string& rd_name)
         "geometry");
 #endif
 
-    m_data.resize(4, 0.0_rt);
+    m_data.resize(5, 0.0_rt);
 
     if (amrex::ParallelDescriptor::IOProcessor() && m_write_header) {
         std::ofstream ofs{m_path + m_rd_name + "." + m_extension,
@@ -57,6 +57,7 @@ HybridDissipation::HybridDissipation (const std::string& rd_name)
         ofs << m_sep << "[" << c++ << "]P_etaH(W)";
         ofs << m_sep << "[" << c++ << "]P_diss(W)";
         ofs << m_sep << "[" << c++ << "]P_sigma_vac(W)";
+        ofs << m_sep << "[" << c++ << "]P_sponge(W)";
         ofs << "\n";
         ofs.close();
     }
@@ -373,14 +374,145 @@ HybridDissipation::ComputeDiags (const int step)
         p_sigma = amrex::get<0>(rdata.value(rop));
     }
 
+    // Sponge-cap loss (see m_je_sponge_width): the wave energy the
+    // z-cap layers remove, at the rate the damping applies it,
+    // P_sponge = Int xi(z)/tau_max (eps_art |dE|^2 + |dB|^2/mu0) dV
+    // with dX the deviation from the drive-tracking target (the same
+    // arithmetic as ApplyJeSpongeLayer -- book what the layer damps,
+    // on the wave part only, or the column reads the imposed drive:
+    // the P_sigma_vac lesson). Zero unless the sponge is active and
+    // the relax solve has published c_art.
+    amrex::Real p_sponge = 0.0_rt;
+    const amrex::Real Ls = hybrid->m_je_sponge_width;
+    const amrex::Real c_art_pub = hybrid->m_je_c_art;
+    if (Ls > 0.0_rt && c_art_pub > 0.0_rt) {
+        const amrex::Real vw = (hybrid->m_je_sponge_vw > 0.0_rt)
+            ? hybrid->m_je_sponge_vw : c_art_pub;
+        const amrex::Real inv_tau_max = vw * hybrid->m_je_sponge_lnf / Ls;
+        const amrex::Real eps_art =
+            1.0_rt / (PhysConst::mu0 * c_art_pub * c_art_pub);
+        const amrex::Real inv_mu0 = 1.0_rt / PhysConst::mu0;
+        const amrex::Real zlo_d = geom.ProbLo(1);
+        const amrex::Real zhi_d = geom.ProbHi(1);
+        const amrex::Real z_lo_edge = zlo_d + Ls;
+        const amrex::Real z_hi_edge = zhi_d - Ls;
+        const std::array<const amrex::MultiFab*, 3> E = {
+            warpx.m_fields.get(FieldType::Efield_fp,
+                               ablastr::fields::Direction{0}, lev),
+            warpx.m_fields.get(FieldType::Efield_fp,
+                               ablastr::fields::Direction{1}, lev),
+            warpx.m_fields.get(FieldType::Efield_fp,
+                               ablastr::fields::Direction{2}, lev)};
+        const amrex::MultiFab* Eref =
+            warpx.m_fields.get("hybrid_sponge_Eref_fp", lev);
+        const amrex::MultiFab* Bref =
+            warpx.m_fields.get("hybrid_sponge_Bref_fp", lev);
+        const bool have_ext = hybrid->m_add_external_fields &&
+            (hybrid->m_je_sponge_track_eext ||
+             hybrid->m_je_sponge_track_bext);
+        const amrex::Real trkE =
+            (have_ext && hybrid->m_je_sponge_track_eext) ? 1.0_rt : 0.0_rt;
+        const amrex::Real trkB =
+            (have_ext && hybrid->m_je_sponge_track_bext) ? 1.0_rt : 0.0_rt;
+        std::array<const amrex::MultiFab*, 3> Eex =
+            {nullptr, nullptr, nullptr};
+        std::array<const amrex::MultiFab*, 3> Bex =
+            {nullptr, nullptr, nullptr};
+        const amrex::MultiFab* Eex0 = nullptr;
+        const amrex::MultiFab* Bex0 = nullptr;
+        if (have_ext) {
+            for (int d = 0; d < 3; ++d) {
+                Eex[d] = warpx.m_fields.get(
+                    FieldType::hybrid_E_fp_external,
+                    ablastr::fields::Direction{d}, lev);
+                Bex[d] = warpx.m_fields.get(
+                    FieldType::hybrid_B_fp_external,
+                    ablastr::fields::Direction{d}, lev);
+            }
+            Eex0 = warpx.m_fields.get("hybrid_sponge_Eext0_fp", lev);
+            Bex0 = warpx.m_fields.get("hybrid_sponge_Bext0_fp", lev);
+        }
+        const auto mask = amrex::OwnerMask(*E[0], geom.periodicity());
+        amrex::ReduceOps<amrex::ReduceOpSum> rop;
+        amrex::ReduceData<amrex::Real> rdata(rop);
+        using RT = typename decltype(rdata)::Type;
+        for (amrex::MFIter mfi(*E[0], amrex::TilingIfNotGPU());
+             mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.tilebox();
+            const auto Er = E[0]->const_array(mfi);
+            const auto Et = E[1]->const_array(mfi);
+            const auto Ez = E[2]->const_array(mfi);
+            const auto Brr = B[0]->const_array(mfi);
+            const auto Btt = B[1]->const_array(mfi);
+            const auto Bzz = B[2]->const_array(mfi);
+            const auto er = Eref->const_array(mfi);
+            const auto br = Bref->const_array(mfi);
+            amrex::Array4<const amrex::Real> xer, xet, xez,
+                xbr, xbt, xbz, xe0, xb0;
+            if (have_ext) {
+                xer = Eex[0]->const_array(mfi);
+                xet = Eex[1]->const_array(mfi);
+                xez = Eex[2]->const_array(mfi);
+                xbr = Bex[0]->const_array(mfi);
+                xbt = Bex[1]->const_array(mfi);
+                xbz = Bex[2]->const_array(mfi);
+                xe0 = Eex0->const_array(mfi);
+                xb0 = Bex0->const_array(mfi);
+            }
+            const auto m_arr = mask->const_array(mfi);
+            const bool use_ext = have_ext;
+            rop.eval(box, rdata,
+                [=] AMREX_GPU_DEVICE (int i, int j, int) -> RT
+            {
+                if (!m_arr(i, j, 0)) { return {0.0_rt}; }
+                const amrex::Real z = zlo_d + j*dz;
+                amrex::Real xi = 0.0_rt;
+                if (z > z_hi_edge) { xi = (z - z_hi_edge) / Ls; }
+                else if (z < z_lo_edge) { xi = (z_lo_edge - z) / Ls; }
+                if (xi <= 0.0_rt) { return {0.0_rt}; }
+                xi = amrex::min(xi, 1.0_rt);
+                const amrex::Real r = rmin + i*dr;
+                const amrex::Real r_vol =
+                    (r > 0.0_rt) ? r : dr/8.0_rt;
+                const amrex::Real dV =
+                    2.0_rt*MathConst::pi*r_vol*dr*dz;
+                const amrex::Real der = Er(i, j, 0) - er(i, j, 0, 0)
+                    - (use_ext ? trkE*(xer(i, j, 0) - xe0(i, j, 0, 0))
+                               : 0.0_rt);
+                const amrex::Real det = Et(i, j, 0) - er(i, j, 0, 1)
+                    - (use_ext ? trkE*(xet(i, j, 0) - xe0(i, j, 0, 1))
+                               : 0.0_rt);
+                const amrex::Real dez = Ez(i, j, 0) - er(i, j, 0, 2)
+                    - (use_ext ? trkE*(xez(i, j, 0) - xe0(i, j, 0, 2))
+                               : 0.0_rt);
+                const amrex::Real dbr = Brr(i, j, 0) - br(i, j, 0, 0)
+                    - (use_ext ? trkB*(xbr(i, j, 0) - xb0(i, j, 0, 0))
+                               : 0.0_rt);
+                const amrex::Real dbt = Btt(i, j, 0) - br(i, j, 0, 1)
+                    - (use_ext ? trkB*(xbt(i, j, 0) - xb0(i, j, 0, 1))
+                               : 0.0_rt);
+                const amrex::Real dbz = Bzz(i, j, 0) - br(i, j, 0, 2)
+                    - (use_ext ? trkB*(xbz(i, j, 0) - xb0(i, j, 0, 2))
+                               : 0.0_rt);
+                const amrex::Real u2 =
+                    eps_art*(der*der + det*det + dez*dez)
+                    + inv_mu0*(dbr*dbr + dbt*dbt + dbz*dbz);
+                return {xi * inv_tau_max * u2 * dV};
+            });
+        }
+        p_sponge = amrex::get<0>(rdata.value(rop));
+    }
+
     amrex::ParallelDescriptor::ReduceRealSum(p_eta);
     amrex::ParallelDescriptor::ReduceRealSum(p_eta_h);
     amrex::ParallelDescriptor::ReduceRealSum(p_sigma);
+    amrex::ParallelDescriptor::ReduceRealSum(p_sponge);
 
     m_data[0] = p_eta;
     m_data[1] = p_eta_h;
-    m_data[2] = p_eta + p_eta_h + p_sigma;
+    m_data[2] = p_eta + p_eta_h + p_sigma + p_sponge;
     m_data[3] = p_sigma;
+    m_data[4] = p_sponge;
 #else
     amrex::ignore_unused(step);
 #endif

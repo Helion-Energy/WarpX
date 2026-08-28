@@ -832,6 +832,9 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         if (hybrid_model->m_je_c_max > 0.0_rt) {
             c_art = amrex::min(c_art, hybrid_model->m_je_c_max);
         }
+        // Publish for the sponge caps and their P_sponge booking
+        // (see the m_je_c_art member doc).
+        hybrid_model->m_je_c_art = c_art;
         // Quasineutral relaxation toward the one-count-guarded Ohm
         // value (see the m_je_qn_frac member doc): pins the slow/
         // longitudinal sector algebraically, plasma-blended.
@@ -1799,6 +1802,9 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         if (hybrid_model->m_je_c_max > 0.0_rt) {
             c_art = amrex::min(c_art, hybrid_model->m_je_c_max);
         }
+        // Publish for the sponge caps and their P_sponge booking
+        // (see the m_je_c_art member doc).
+        hybrid_model->m_je_c_art = c_art;
         // Quasineutral relaxation toward the one-count-guarded Ohm
         // value (see the m_je_qn_frac member doc): pins the slow/
         // longitudinal sector algebraically, plasma-blended.

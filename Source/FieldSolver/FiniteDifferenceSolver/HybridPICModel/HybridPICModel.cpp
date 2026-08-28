@@ -828,6 +828,27 @@ void HybridPICModel::ReadParameters ()
                                        m_je_vacuum_eta_n_gate);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_je_vacuum_eta >= 0.0_rt,
             "hybrid_pic_model.je_vacuum_eta cannot be negative");
+        utils::parser::queryWithParser(pp_hybrid, "je_sponge_width",
+                                       m_je_sponge_width);
+        utils::parser::queryWithParser(pp_hybrid, "je_sponge_lnf",
+                                       m_je_sponge_lnf);
+        utils::parser::queryWithParser(pp_hybrid, "je_sponge_vw",
+                                       m_je_sponge_vw);
+        pp_hybrid.query("je_sponge_track_eext", m_je_sponge_track_eext);
+        pp_hybrid.query("je_sponge_track_bext", m_je_sponge_track_bext);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_je_sponge_width >= 0.0_rt && m_je_sponge_vw >= 0.0_rt,
+            "hybrid_pic_model.je_sponge_width and je_sponge_vw cannot "
+            "be negative");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_je_sponge_width == 0.0_rt || m_je_sponge_lnf > 0.0_rt,
+            "hybrid_pic_model.je_sponge_lnf must be positive when the "
+            "sponge layer is active (the validated range is 3-6)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_je_sponge_width == 0.0_rt || m_esolve_je,
+            "hybrid_pic_model.je_sponge_width requires esolve = "
+            "je_form (the sponge damps the relax advance's evolved "
+            "field state; the algebraic e-form has no such state)");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_je_qn_frac >= 0.0_rt,
             "hybrid_pic_model.je_qn_frac cannot be negative");
         utils::parser::queryWithParser(pp_hybrid, "gol_div_clean_frac",
@@ -1098,6 +1119,28 @@ void HybridPICModel::AllocateLevelMFs (
             fields.alloc_init("hybrid_je_qvisc_fp", lev,
                 amrex::convert(ba, amrex::IntVect::TheNodeVector()),
                 dm, 1, amrex::IntVect(0), 0.0_rt);
+        }
+        // Sponge-cap reference fields (see the m_je_sponge_width
+        // member doc): the frozen first-call stored state (3 comps
+        // each) and, for the drive-tracking targets, the external
+        // fields at the seed time. Pointwise use only -- no ghosts.
+        // Collocated-only, like the J_e state itself.
+        if (m_je_sponge_width > 0.0_rt) {
+            fields.alloc_init("hybrid_sponge_Eref_fp", lev,
+                amrex::convert(ba, amrex::IntVect::TheNodeVector()),
+                dm, 3, amrex::IntVect(0), 0.0_rt);
+            fields.alloc_init("hybrid_sponge_Bref_fp", lev,
+                amrex::convert(ba, amrex::IntVect::TheNodeVector()),
+                dm, 3, amrex::IntVect(0), 0.0_rt);
+            if (m_add_external_fields &&
+                (m_je_sponge_track_eext || m_je_sponge_track_bext)) {
+                fields.alloc_init("hybrid_sponge_Eext0_fp", lev,
+                    amrex::convert(ba, amrex::IntVect::TheNodeVector()),
+                    dm, 3, amrex::IntVect(0), 0.0_rt);
+                fields.alloc_init("hybrid_sponge_Bext0_fp", lev,
+                    amrex::convert(ba, amrex::IntVect::TheNodeVector()),
+                    dm, 3, amrex::IntVect(0), 0.0_rt);
+            }
         }
     }
 
@@ -10627,6 +10670,14 @@ void HybridPICModel::BfieldEvolve (
                             "the centered Je-form relax substep.");
                     }
                 }
+                // Sponge caps (see the m_je_sponge_width member doc):
+                // damp the wave fields toward their drive-tracking
+                // references over the z-cap layers, on the completed
+                // substep state -- operator-split, so neither the
+                // curl pushes nor the (E, J_e) advance see it.
+                if (m_je_sponge_width > 0.0_rt) {
+                    ApplyJeSpongeLayer(Bfield, Efield, lev, dt_sub);
+                }
             }
             if (je_relax && m_je_cond_lockstep) {
                 // tight T_e <-> (J_e, B) coupling (see the member
@@ -10698,6 +10749,164 @@ void HybridPICModel::BfieldEvolve (
         "BfieldEvolve: exceeded max substep attempts;"
         "consider relaxing hybrid_pic_model.substep_rtol/substep_atol."
     );
+}
+
+void HybridPICModel::ApplyJeSpongeLayer (
+    ablastr::fields::MultiLevelVectorField const& Bfield,
+    ablastr::fields::MultiLevelVectorField const& Efield,
+    int lev, amrex::Real dt_sub)
+{
+    auto& warpx = WarpX::GetInstance();
+    // The z direction of this build's coordinate set.
+#if defined(WARPX_DIM_1D_Z)
+    constexpr int zdim = 0;
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+    constexpr int zdim = 1;
+#else
+    constexpr int zdim = 2;
+#endif
+    // The sponge damps the evolved field STATE pointwise; like the
+    // J_e state itself it is collocated-only (all comps on nodes).
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        Efield[lev][0]->ixType() == Bfield[lev][0]->ixType() &&
+        Efield[lev][0]->ixType().nodeCentered(),
+        "hybrid_pic_model.je_sponge_width requires the collocated "
+        "(all-nodal) grid of the Je-form relax advance");
+
+    MultiFab & Eref = *warpx.m_fields.get("hybrid_sponge_Eref_fp", lev);
+    MultiFab & Bref = *warpx.m_fields.get("hybrid_sponge_Bref_fp", lev);
+    const bool have_ext = m_add_external_fields &&
+        (m_je_sponge_track_eext || m_je_sponge_track_bext);
+    std::array<const MultiFab*, 3> Eext = {nullptr, nullptr, nullptr};
+    std::array<const MultiFab*, 3> Bext = {nullptr, nullptr, nullptr};
+    MultiFab * Eext0 = nullptr;
+    MultiFab * Bext0 = nullptr;
+    if (have_ext) {
+        for (int d = 0; d < 3; ++d) {
+            Eext[d] = warpx.m_fields.get(FieldType::hybrid_E_fp_external,
+                                         ablastr::fields::Direction{d}, lev);
+            Bext[d] = warpx.m_fields.get(FieldType::hybrid_B_fp_external,
+                                         ablastr::fields::Direction{d}, lev);
+        }
+        Eext0 = warpx.m_fields.get("hybrid_sponge_Eext0_fp", lev);
+        Bext0 = warpx.m_fields.get("hybrid_sponge_Bext0_fp", lev);
+    }
+
+    // Matching speed: the knob, else the published relax c_art (set
+    // by the (E, J_e) solve, which runs before the first sponge
+    // application in every accepted substep).
+    const amrex::Real vw = (m_je_sponge_vw > 0.0_rt)
+        ? m_je_sponge_vw : m_je_c_art;
+    if (vw <= 0.0_rt) { return; }
+    const amrex::Real Ls = m_je_sponge_width;
+    const amrex::Real inv_tau_max = vw * m_je_sponge_lnf / Ls;
+
+    if (!m_je_sponge_init) {
+        // Seed the references from the current stored state (the
+        // t = 0 state on a fresh boot -- the first accepted substep
+        // has advanced it by one dt_sub, negligible against the
+        // stroke) and freeze the external fields alongside them.
+        for (int d = 0; d < 3; ++d) {
+            MultiFab::Copy(Eref, *Efield[lev][d], 0, d, 1, 0);
+            MultiFab::Copy(Bref, *Bfield[lev][d], 0, d, 1, 0);
+            if (have_ext) {
+                MultiFab::Copy(*Eext0, *Eext[d], 0, d, 1, 0);
+                MultiFab::Copy(*Bext0, *Bext[d], 0, d, 1, 0);
+            }
+        }
+        m_je_sponge_init = true;
+        const auto& geomp = warpx.Geom(lev);
+        amrex::Print() << "[je] sponge caps: L_s = " << Ls << " m (~"
+            << static_cast<int>(Ls / geomp.CellSize(zdim))
+            << " cells), ln(1/f) = " << m_je_sponge_lnf
+            << ", v_w = " << vw << " m/s"
+            << (m_je_sponge_vw > 0.0_rt ? "" : " (c_art)")
+            << ", tau_max = " << Ls / (vw * m_je_sponge_lnf)
+            << " s, track ext E/B = " << m_je_sponge_track_eext
+            << "/" << m_je_sponge_track_bext << "\n";
+        return;
+    }
+
+    const auto& geom = warpx.Geom(lev);
+    const amrex::Real zlo = geom.ProbLo(zdim);
+    const amrex::Real zhi = geom.ProbHi(zdim);
+    const amrex::Real dz = geom.CellSize(zdim);
+    const amrex::Real z_lo_edge = zlo + Ls;
+    const amrex::Real z_hi_edge = zhi - Ls;
+    const amrex::Real trkE = (have_ext && m_je_sponge_track_eext)
+        ? 1.0_rt : 0.0_rt;
+    const amrex::Real trkB = (have_ext && m_je_sponge_track_bext)
+        ? 1.0_rt : 0.0_rt;
+    const bool use_ext = have_ext;
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(Eref, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        Array4<Real> const& Er = Efield[lev][0]->array(mfi);
+        Array4<Real> const& Et = Efield[lev][1]->array(mfi);
+        Array4<Real> const& Ez = Efield[lev][2]->array(mfi);
+        Array4<Real> const& Br = Bfield[lev][0]->array(mfi);
+        Array4<Real> const& Bt = Bfield[lev][1]->array(mfi);
+        Array4<Real> const& Bz = Bfield[lev][2]->array(mfi);
+        Array4<Real const> const& er = Eref.const_array(mfi);
+        Array4<Real const> const& br = Bref.const_array(mfi);
+        Array4<Real const> xer, xet, xez, xbrr, xbt, xbz, xe0, xb0;
+        if (use_ext) {
+            xer = Eext[0]->const_array(mfi);
+            xet = Eext[1]->const_array(mfi);
+            xez = Eext[2]->const_array(mfi);
+            xbrr = Bext[0]->const_array(mfi);
+            xbt = Bext[1]->const_array(mfi);
+            xbz = Bext[2]->const_array(mfi);
+            xe0 = Eext0->const_array(mfi);
+            xb0 = Bext0->const_array(mfi);
+        }
+        amrex::Real const dt_l = dt_sub;
+        amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+#if defined(WARPX_DIM_1D_Z)
+            const amrex::Real z = zlo + i*dz;
+            amrex::ignore_unused(j, k);
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+            const amrex::Real z = zlo + j*dz;
+#else
+            const amrex::Real z = zlo + k*dz;
+#endif
+            amrex::Real xi = 0.0_rt;
+            if (z > z_hi_edge) { xi = (z - z_hi_edge) / Ls; }
+            else if (z < z_lo_edge) { xi = (z_lo_edge - z) / Ls; }
+            if (xi <= 0.0_rt) { return; }
+            xi = amrex::min(xi, 1.0_rt);
+            const amrex::Real s =
+                1.0_rt / (1.0_rt + dt_l * xi * inv_tau_max);
+            // drive-tracking targets (see the member doc): the frozen
+            // reference plus the external-field change since the seed
+            amrex::Real tgt;
+            tgt = er(i,j,k,0) + (use_ext ? trkE
+                * (xer(i,j,k) - xe0(i,j,k,0)) : 0.0_rt);
+            Er(i,j,k) = tgt + (Er(i,j,k) - tgt) * s;
+            tgt = er(i,j,k,1) + (use_ext ? trkE
+                * (xet(i,j,k) - xe0(i,j,k,1)) : 0.0_rt);
+            Et(i,j,k) = tgt + (Et(i,j,k) - tgt) * s;
+            tgt = er(i,j,k,2) + (use_ext ? trkE
+                * (xez(i,j,k) - xe0(i,j,k,2)) : 0.0_rt);
+            Ez(i,j,k) = tgt + (Ez(i,j,k) - tgt) * s;
+            tgt = br(i,j,k,0) + (use_ext ? trkB
+                * (xbrr(i,j,k) - xb0(i,j,k,0)) : 0.0_rt);
+            Br(i,j,k) = tgt + (Br(i,j,k) - tgt) * s;
+            tgt = br(i,j,k,1) + (use_ext ? trkB
+                * (xbt(i,j,k) - xb0(i,j,k,1)) : 0.0_rt);
+            Bt(i,j,k) = tgt + (Bt(i,j,k) - tgt) * s;
+            tgt = br(i,j,k,2) + (use_ext ? trkB
+                * (xbz(i,j,k) - xb0(i,j,k,2)) : 0.0_rt);
+            Bz(i,j,k) = tgt + (Bz(i,j,k) - tgt) * s;
+        });
+    }
+    // Refresh the ghost values of the damped state so the next
+    // substep's stencils see the sponged fields consistently.
+    warpx.FillBoundaryE(Efield[lev][0]->nGrowVect(), std::nullopt);
+    warpx.FillBoundaryB(Bfield[lev][0]->nGrowVect(), std::nullopt);
 }
 
 void HybridPICModel::BfieldEvolveRK4 (

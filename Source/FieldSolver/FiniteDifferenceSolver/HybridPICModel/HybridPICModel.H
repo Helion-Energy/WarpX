@@ -163,6 +163,16 @@ public:
         int step, amrex::Real dt_half, int lev, SubcyclingHalf subcycling_half,
         amrex::IntVect ng, std::optional<bool> nodal_sync);
 
+    /** Topanga-style sponge cap of the relax advance (see the
+     *  m_je_sponge_width member doc): damp the stored wave fields
+     *  toward their drive-tracking references over the z-cap layers,
+     *  implicitly, once per accepted substep. Seeds the reference
+     *  fields (and prints the sponge boot line) on its first call. */
+    void ApplyJeSpongeLayer (
+        ablastr::fields::MultiLevelVectorField const& Bfield,
+        ablastr::fields::MultiLevelVectorField const& Efield,
+        int lev, amrex::Real dt_sub);
+
     void BfieldEvolveRK4 (
         ablastr::fields::MultiLevelVectorField const& Bfield,
         ablastr::fields::MultiLevelVectorField const& Efield,
@@ -917,6 +927,66 @@ public:
      *  je_n_min, and decks with a background fill must set it well
      *  below that fill. Input: je_vacuum_eta_n_gate. */
     amrex::Real m_je_vacuum_eta_n_gate = 0.0;
+
+    /** Topanga-style sponge cap of the relax advance [m] (Belyaev,
+     *  Larson, Cohen & Clark, Phys. Plasmas 31, 012902 (2024),
+     *  Sec. II B; je_sponge_width > 0 activates): inside a layer of
+     *  this width at each z end of the domain the stored WAVE fields
+     *  are damped toward their references, with the rate 1/tau
+     *  ramped linearly from zero at the layer's inner edge to
+     *  1/tau_max at the wall (the ramp is the paper's
+     *  anti-reflection requirement; a constant rate reflects off the
+     *  layer's own inner edge), tau_max = L_s / (v_w ln(1/f_s)).
+     *  Applied implicitly once per accepted substep,
+     *  operator-split from the curl advance, so the substep error
+     *  control never sees it; unconditionally stable at any dt/tau.
+     *  WHY: the z caps are Neumann (== PMC at the engine level,
+     *  matching the GS solve's B_r = 0 construction) and REFLECT the
+     *  retained hyperbolic branch; the sponge eats wave content on
+     *  the way in and again on the way out WITHOUT changing the
+     *  static cap condition (a z = open ghost continuation conflicts
+     *  with the loaded equilibrium instead; measured). The layer
+     *  damps the FIELD state only -- particles are never damped (the
+     *  paper's mean-flow pile-up lesson; these caps absorb particles
+     *  anyway) -- and only its wave part: the coil drive must cross
+     *  the caps for the whole stroke, so the damping target is the
+     *  frozen first-call stored state plus (per the track knobs) the
+     *  change of the analytic external field since then. Books as
+     *  P_sponge in the HybridDissipation reduced diagnostic.
+     *  0 = off (bit-identical legacy path). Input: je_sponge_width. */
+    amrex::Real m_je_sponge_width = 0.0;
+    /** Sponge damping exponent ln(1/f_s) (default 4; the validated
+     *  range is 3-6: significantly higher reflects off the layer's
+     *  inner edge, significantly lower under-absorbs).
+     *  Input: je_sponge_lnf. */
+    amrex::Real m_je_sponge_lnf = 4.0;
+    /** Sponge matching speed v_w [m/s] (default 0 = the relax
+     *  advance's current c_art, the fastest signal in the sub-floor
+     *  cap region, where the formal Alfven speed exceeds it; slower
+     *  Alfvenic/whistler content then sees MORE damping per
+     *  crossing, which the ramp tolerates). Input: je_sponge_vw. */
+    amrex::Real m_je_sponge_vw = 0.0;
+    /** Sponge reference drive-tracking for E (default 1) and B
+     *  (default 0): 1 = the damping target adds the CHANGE of the
+     *  analytic external field since the reference seed. The
+     *  defaults encode the measured store conventions of the relax
+     *  advance -- the deep-gap stored E carries the inductive drive
+     *  (the P_sigma_vac booking lesson) while the stored B excludes
+     *  the split-off B_ext -- and the drive-on/wave-free smoke is
+     *  the per-deck check (P_sponge must stay ~0 under pure drive).
+     *  Inputs: je_sponge_track_eext, je_sponge_track_bext. */
+    int m_je_sponge_track_eext = 1;
+    int m_je_sponge_track_bext = 0;
+    /** Published relax c_art [m/s], set per substep by the solve
+     *  kernel; the sponge layer and its P_sponge booking read it.
+     *  Mutable: written inside the const solve path. */
+    mutable amrex::Real m_je_c_art = 0.0;
+    /** Sponge reference latch: the reference fields seed from the
+     *  stored fields on the first ApplyJeSpongeLayer call (the t = 0
+     *  state on a fresh boot; on a checkpoint restart they re-seed
+     *  from the RESTART state -- the cap-region difference is the
+     *  drive change, carried by the track terms). */
+    bool m_je_sponge_init = false;
 
     /** Density anchor of the qn-pin blend and its guarded division
      *  [m^-3]: a PHYSICS reference (fraction-of-n0 class), decoupled
