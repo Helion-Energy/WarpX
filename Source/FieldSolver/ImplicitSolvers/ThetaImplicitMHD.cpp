@@ -428,11 +428,22 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     pp.query("hllc_signal_closure", m_hllc_signal_closure);
     utils::parser::queryWithParser(pp, "hllc_contact_blend", m_hllc_contact_blend);
     pp.query("ion_closure", m_ion_closure);
+    pp.query("braginskii_tangential_limiter", m_braginskii_tangential_limiter);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_braginskii_tangential_limiter == "none" ||
+            m_braginskii_tangential_limiter == "minmod",
+        "implicit_mhd.braginskii_tangential_limiter must be 'none' or "
+        "'minmod'");
     utils::parser::queryWithParser(pp, "dual_energy_internal_cutoff",
                                    m_dual_energy_internal_cutoff);
     utils::parser::queryWithParser(pp, "dual_energy_sync_threshold",
                                    m_dual_energy_sync_threshold);
     pp.query("evolve_ion_fluid", m_evolve_ion_fluid);
+    utils::parser::queryWithParser(pp, "pinned_cell_report_max",
+                                   m_pinned_cell_report_max);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_pinned_cell_report_max >= 0,
+        "implicit_mhd.pinned_cell_report_max cannot be negative");
     pp.query("include_joule_heating", m_include_joule_heating);
 
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_reference_mass_density > 0.0_rt,
@@ -2598,6 +2609,8 @@ void ThetaImplicitMHD::PrintParameters () const
                                  ")"
                            : std::string{})
                    << "\n"
+                   << "Braginskii tangential limiter: "
+                   << m_braginskii_tangential_limiter << "\n"
                    << "Pressure corner width fraction: "
                    << m_pressure_corner_width_fraction << "\n"
                    << "Positivity step safety:        " << m_positivity_safety << "\n"
@@ -4449,6 +4462,14 @@ ThetaImplicitMHD::FreeResidualNorm (const WarpXSolverVec& residual,
         return residual.norm2();
     }
 
+    // This method runs only on the line-search failure path, so the
+    // active set here is the one blocking progress: list its cells,
+    // rate-limited (first call, then every 25th) so a max_frozen_steps
+    // plateau reports a handful of coordinate blocks, not thousands.
+    if (m_free_residual_norm_calls++ % 25 == 0) {
+        PrintPinnedCells();
+    }
+
     const bool dual_energy_closure = m_ion_closure == "dual_energy";
     const bool total_energy_closure =
         m_ion_closure == "total_energy" || dual_energy_closure;
@@ -4534,6 +4555,93 @@ std::string ThetaImplicitMHD::PinnedComponentReport () const
         report += std::to_string(m_projected_per_block[block]);
     }
     return report;
+}
+
+void ThetaImplicitMHD::PrintPinnedCells () const
+{
+    if (m_pinned_cell_report_max <= 0 || m_projected_components == 0) {
+        return;
+    }
+    const bool dual_energy_closure = m_ion_closure == "dual_energy";
+    const bool total_energy_closure =
+        m_ion_closure == "total_energy" || dual_energy_closure;
+    const bool cgl_closure = m_ion_closure == "cgl";
+    const int num_blocks = (cgl_closure || dual_energy_closure)
+                               ? 4
+                               : (total_energy_closure ? 3 : 2);
+    const std::array<const char*, 4> block_labels = {
+        "mass", "electron_energy",
+        cgl_closure ? "ion_par_energy" : "ion_energy",
+        dual_energy_closure ? "ion_internal_energy" : "ion_perp_energy"};
+
+    // Bounded device harvest of the active set: (block, i, j, k) tuples
+    // claimed through an atomic cursor. Overflow past the cap is counted
+    // but not stored, so the report cost is fixed no matter how large
+    // the active set grows.
+    const int cap = m_pinned_cell_report_max;
+    amrex::Gpu::DeviceVector<int> cell_buffer(static_cast<std::size_t>(cap) * 4, 0);
+    amrex::Gpu::DeviceVector<unsigned> cursor(1, 0u);
+    int* const buffer_ptr = cell_buffer.data();
+    unsigned* const cursor_ptr = cursor.data();
+    for (int block = 0; block < num_blocks; ++block) {
+        const amrex::iMultiFab& mask = m_projection_masks[block];
+        if (!mask.ok()) {
+            continue;
+        }
+        for (amrex::MFIter mfi(mask); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox();
+            const auto mask_array = mask.const_array(mfi);
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+                if (mask_array(i, j, k) == 1) {
+                    const unsigned slot = amrex::Gpu::Atomic::Add(cursor_ptr, 1u);
+                    if (slot < static_cast<unsigned>(cap)) {
+                        buffer_ptr[4 * slot + 0] = block;
+                        buffer_ptr[4 * slot + 1] = i;
+                        buffer_ptr[4 * slot + 2] = j;
+                        buffer_ptr[4 * slot + 3] = k;
+                    }
+                }
+            });
+        }
+    }
+    amrex::Gpu::streamSynchronize();
+    std::vector<int> host_cells(cell_buffer.size());
+    unsigned host_count = 0;
+    amrex::Gpu::copy(amrex::Gpu::deviceToHost, cell_buffer.begin(),
+                     cell_buffer.end(), host_cells.begin());
+    amrex::Gpu::copy(amrex::Gpu::deviceToHost, cursor.begin(), cursor.end(),
+                     &host_count);
+    if (host_count == 0) {
+        return;
+    }
+
+    const amrex::Geometry& geometry = m_WarpX->Geom(0);
+    const auto problem_lo = geometry.ProbLoArray();
+    const auto cell_size = geometry.CellSizeArray();
+    const int listed = std::min(static_cast<int>(host_count), cap);
+    std::stringstream report;
+    report << "Newton pinned cells (rank "
+           << amrex::ParallelDescriptor::MyProc() << ", listing " << listed
+           << " of " << host_count << " local):\n";
+    for (int entry = 0; entry < listed; ++entry) {
+        const int block = host_cells[4 * entry + 0];
+        const int i = host_cells[4 * entry + 1];
+#if defined(WARPX_DIM_1D_Z)
+        report << "  " << block_labels[block] << " (i)=(" << i << ")  at ("
+               << problem_lo[0] + (i + 0.5_rt) * cell_size[0];
+#else
+        const int j = host_cells[4 * entry + 2];
+        report << "  " << block_labels[block] << " (i,j)=(" << i << ',' << j
+               << ")  at (" << problem_lo[0] + (i + 0.5_rt) * cell_size[0]
+               << ", " << problem_lo[1] + (j + 0.5_rt) * cell_size[1];
+#if defined(WARPX_DIM_3D)
+        const int k = host_cells[4 * entry + 3];
+        report << ", " << problem_lo[2] + (k + 0.5_rt) * cell_size[2];
+#endif
+#endif
+        report << ") m\n";
+    }
+    amrex::AllPrint() << report.str();
 }
 
 theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
@@ -5335,6 +5443,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const bool chi_any_parser = chi_ion_is_parser || chi_electron_is_parser;
     const amrex::Real conduction_limit = m_conduction_flux_limit_factor;
     const bool braginskii = m_conduction_braginskii;
+    const bool brag_tangential_minmod =
+        braginskii && m_braginskii_tangential_limiter == "minmod";
     const bool chi_needs_state =
         chi_any_parser || conduction_limit > 0.0_rt || braginskii;
     const amrex::Real chi_charge_to_mass = m_ion_charge_to_mass;
@@ -6399,12 +6509,38 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                         std::max(rho(ic, jc, kc),
                                                  parameters.density_floor));
                             };
-                        brag_grad_t_electron =
-                            0.25_rt * inverse_tangential_size *
-                            (electron_e_spec(ipl, jpl, kpl) +
-                             electron_e_spec(ipr, jpr, kpr) -
-                             electron_e_spec(iml, jml, kml) -
-                             electron_e_spec(imr, jmr, kmr));
+                        if (brag_tangential_minmod) {
+                            // Sharma-Hammett monotone cross term: the
+                            // face tangential slope is the mean of the
+                            // two cells' minmod-limited one-sided
+                            // slopes -- zero at tangential extrema, so
+                            // the cross-term flux cannot demand states
+                            // below the local stencil minimum (the
+                            // plasma-edge electron pinning mechanism).
+                            const amrex::Real center_left =
+                                electron_e_spec(il, jl, kl);
+                            const amrex::Real center_right =
+                                electron_e_spec(i, j, k);
+                            brag_grad_t_electron =
+                                0.5_rt * inverse_tangential_size *
+                                (theta_implicit_mhd::minmod_pair(
+                                     electron_e_spec(ipl, jpl, kpl) -
+                                         center_left,
+                                     center_left -
+                                         electron_e_spec(iml, jml, kml)) +
+                                 theta_implicit_mhd::minmod_pair(
+                                     electron_e_spec(ipr, jpr, kpr) -
+                                         center_right,
+                                     center_right -
+                                         electron_e_spec(imr, jmr, kmr)));
+                        } else {
+                            brag_grad_t_electron =
+                                0.25_rt * inverse_tangential_size *
+                                (electron_e_spec(ipl, jpl, kpl) +
+                                 electron_e_spec(ipr, jpr, kpr) -
+                                 electron_e_spec(iml, jml, kml) -
+                                 electron_e_spec(imr, jmr, kmr));
+                        }
                         if (conduction_stage) {
                             // Stage extrapolation of the tangential
                             // samples, folded into the gradient (the
@@ -6427,15 +6563,39 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                                 parameters
                                                     .density_floor));
                                 };
+                            amrex::Real grad_t_electron_old;
+                            if (brag_tangential_minmod) {
+                                const amrex::Real center_left =
+                                    electron_e_spec_old(il, jl, kl);
+                                const amrex::Real center_right =
+                                    electron_e_spec_old(i, j, k);
+                                grad_t_electron_old =
+                                    0.5_rt * inverse_tangential_size *
+                                    (theta_implicit_mhd::minmod_pair(
+                                         electron_e_spec_old(ipl, jpl,
+                                                             kpl) -
+                                             center_left,
+                                         center_left -
+                                             electron_e_spec_old(
+                                                 iml, jml, kml)) +
+                                     theta_implicit_mhd::minmod_pair(
+                                         electron_e_spec_old(ipr, jpr,
+                                                             kpr) -
+                                             center_right,
+                                         center_right -
+                                             electron_e_spec_old(
+                                                 imr, jmr, kmr)));
+                            } else {
+                                grad_t_electron_old =
+                                    0.25_rt * inverse_tangential_size *
+                                    (electron_e_spec_old(ipl, jpl, kpl) +
+                                     electron_e_spec_old(ipr, jpr, kpr) -
+                                     electron_e_spec_old(iml, jml, kml) -
+                                     electron_e_spec_old(imr, jmr, kmr));
+                            }
                             brag_grad_t_electron =
                                 stage_new_weight * brag_grad_t_electron +
-                                stage_old_weight *
-                                    (0.25_rt * inverse_tangential_size *
-                                     (electron_e_spec_old(ipl, jpl, kpl) +
-                                      electron_e_spec_old(ipr, jpr, kpr) -
-                                      electron_e_spec_old(iml, jml, kml) -
-                                      electron_e_spec_old(imr, jmr,
-                                                          kmr)));
+                                stage_old_weight * grad_t_electron_old;
                         }
                         if (chi_total_energy) {
                             const auto ion_e_spec =
@@ -6490,12 +6650,33 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                                      corner_width));
                                     return internal / safe_density;
                                 };
-                            brag_grad_t_ion =
-                                0.25_rt * inverse_tangential_size *
-                                (ion_e_spec(ipl, jpl, kpl) +
-                                 ion_e_spec(ipr, jpr, kpr) -
-                                 ion_e_spec(iml, jml, kml) -
-                                 ion_e_spec(imr, jmr, kmr));
+                            if (brag_tangential_minmod) {
+                                // Same monotone form as the electron
+                                // stencil above.
+                                const amrex::Real center_left =
+                                    ion_e_spec(il, jl, kl);
+                                const amrex::Real center_right =
+                                    ion_e_spec(i, j, k);
+                                brag_grad_t_ion =
+                                    0.5_rt * inverse_tangential_size *
+                                    (theta_implicit_mhd::minmod_pair(
+                                         ion_e_spec(ipl, jpl, kpl) -
+                                             center_left,
+                                         center_left -
+                                             ion_e_spec(iml, jml, kml)) +
+                                     theta_implicit_mhd::minmod_pair(
+                                         ion_e_spec(ipr, jpr, kpr) -
+                                             center_right,
+                                         center_right -
+                                             ion_e_spec(imr, jmr, kmr)));
+                            } else {
+                                brag_grad_t_ion =
+                                    0.25_rt * inverse_tangential_size *
+                                    (ion_e_spec(ipl, jpl, kpl) +
+                                     ion_e_spec(ipr, jpr, kpr) -
+                                     ion_e_spec(iml, jml, kml) -
+                                     ion_e_spec(imr, jmr, kmr));
+                            }
                             if (conduction_stage) {
                                 // Stage extrapolation (see the electron
                                 // stencil above).
@@ -6541,16 +6722,40 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                                    internal_floor) /
                                                safe_density_old;
                                     };
+                                amrex::Real grad_t_ion_old;
+                                if (brag_tangential_minmod) {
+                                    const amrex::Real center_left =
+                                        ion_e_spec_old(il, jl, kl);
+                                    const amrex::Real center_right =
+                                        ion_e_spec_old(i, j, k);
+                                    grad_t_ion_old =
+                                        0.5_rt * inverse_tangential_size *
+                                        (theta_implicit_mhd::minmod_pair(
+                                             ion_e_spec_old(ipl, jpl,
+                                                            kpl) -
+                                                 center_left,
+                                             center_left -
+                                                 ion_e_spec_old(iml, jml,
+                                                                kml)) +
+                                         theta_implicit_mhd::minmod_pair(
+                                             ion_e_spec_old(ipr, jpr,
+                                                            kpr) -
+                                                 center_right,
+                                             center_right -
+                                                 ion_e_spec_old(imr, jmr,
+                                                                kmr)));
+                                } else {
+                                    grad_t_ion_old =
+                                        0.25_rt *
+                                        inverse_tangential_size *
+                                        (ion_e_spec_old(ipl, jpl, kpl) +
+                                         ion_e_spec_old(ipr, jpr, kpr) -
+                                         ion_e_spec_old(iml, jml, kml) -
+                                         ion_e_spec_old(imr, jmr, kmr));
+                                }
                                 brag_grad_t_ion =
                                     stage_new_weight * brag_grad_t_ion +
-                                    stage_old_weight *
-                                        (0.25_rt *
-                                         inverse_tangential_size *
-                                         (ion_e_spec_old(ipl, jpl, kpl) +
-                                          ion_e_spec_old(ipr, jpr, kpr) -
-                                          ion_e_spec_old(iml, jml, kml) -
-                                          ion_e_spec_old(imr, jmr,
-                                                         kmr)));
+                                    stage_old_weight * grad_t_ion_old;
                             }
                         }
                     }

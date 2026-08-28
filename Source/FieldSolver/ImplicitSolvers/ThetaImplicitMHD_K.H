@@ -261,6 +261,29 @@ floor_outflow_limiter (const amrex::Real value,
     return s * s * (3.0 - 2.0 * s);
 }
 
+/**
+ * \brief Minmod of the two one-sided tangential differences of one cell,
+ * for the Braginskii cross-term stencil (Sharma & Hammett 2007): zero
+ * whenever the differences disagree in sign (a tangential extremum), the
+ * smaller-magnitude difference otherwise. Killing the cross-term flux at
+ * tangential extrema restores the discrete maximum principle that the
+ * centered corner average violates -- an unlimited cross term at a
+ * steep oblique interface demands states below the local stencil
+ * minimum, which the admissibility projection then pins (the
+ * plasma-vacuum-edge electron_energy freeze of the formation ladder).
+ * C^0 like every minmod; the value is continuous through zero.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+minmod_pair (const amrex::Real up_difference,
+             const amrex::Real down_difference) noexcept {
+    if (up_difference * down_difference <= 0.0) {
+        return 0.0;
+    }
+    return std::abs(up_difference) < std::abs(down_difference)
+               ? up_difference
+               : down_difference;
+}
+
 // C-infinity smoothed min/max of absolute width >= 0 (exact hard min/max
 // at width = 0): smin(a, b) = (a + b - sqrt((a - b)^2 + w^2))/2. The
 // smoothing only widens the interval: smin <= min and smax >= max.

@@ -117,6 +117,16 @@ class ThetaImplicitMHD final : public ImplicitSolver
 
     [[nodiscard]] std::string PinnedComponentReport () const override;
 
+    /** List up to implicit_mhd.pinned_cell_report_max clamped cells from
+     * the last projection's active-set masks -- block name, (i,j[,k])
+     * index, and physical cell-center coordinates -- one line per cell
+     * via amrex::AllPrint() (rank-local scan: each rank prints its own
+     * cells; the counts in PinnedComponentReport remain global). Called
+     * from FreeResidualNorm, i.e. only on the line-search failure path,
+     * rate-limited there so a long frozen plateau does not flood the
+     * log. Public for the NVCC extended-lambda requirement. */
+    void PrintPinnedCells () const;
+
     /**
      * \brief The MHD residual is evaluable for ARBITRARY real states by
      * construction: densities are max-floored, pressures and energies go
@@ -559,6 +569,11 @@ class ThetaImplicitMHD final : public ImplicitSolver
     mutable std::array<amrex::iMultiFab, 4> m_projection_masks;
     mutable std::array<amrex::Long, 4> m_projected_per_block = {0, 0, 0, 0};
     mutable amrex::Long m_projected_components = 0;
+    // Pinned-cell coordinate dump on the line-search failure path:
+    // largest number of cells listed per report (0 disables), and the
+    // failure-path call counter driving the rate limit.
+    int m_pinned_cell_report_max = 16;
+    mutable amrex::Long m_free_residual_norm_calls = 0;
 
     amrex::Real m_ion_charge_to_mass;
     amrex::Real m_gamma_e = 5.0 / 3.0;
@@ -1164,6 +1179,12 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // diffusivities above: braginskii computes its own coefficients.
     std::string m_thermal_conduction_model = "isotropic";
     bool m_conduction_braginskii = false;
+    // Braginskii cross-term tangential-gradient limiter: "none" keeps
+    // the legacy centered corner average (bit-identical); "minmod" is
+    // the Sharma-Hammett monotone form (see minmod_pair in _K.H) that
+    // kills the cross-term flux at tangential extrema -- the fix for
+    // the plasma-edge electron_energy direction pinning.
+    std::string m_braginskii_tangential_limiter = "none";
     // Coulomb logarithm of the Braginskii collision times tau_e/tau_i.
     amrex::Real m_conduction_coulomb_log = 10.0;
     // Optional absolute clamps [m^2/s] on the Braginskii chi_par and
