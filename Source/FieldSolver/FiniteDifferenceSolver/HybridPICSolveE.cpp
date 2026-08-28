@@ -799,6 +799,12 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         amrex::Real const dt_je =
             (hybrid_model->m_je_dt_sub > 0.0_rt)
                 ? hybrid_model->m_je_dt_sub : dt_full;
+        // dt-dependent artificial COEFFICIENTS evaluate at dt_cf,
+        // pinned per attempt by the adaptive loop (see the
+        // m_je_dt_coeff member doc); the integration dt stays dt_je.
+        amrex::Real const dt_cf =
+            (hybrid_model->m_je_dt_coeff > 0.0_rt)
+                ? hybrid_model->m_je_dt_coeff : dt_je;
         amrex::Real const rho_1c =
             PhysConst::q_e * hybrid_model->m_je_n_min;
         // qn-pin anchor: physics-referenced (je_qn_n_ref,
@@ -828,7 +834,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         amrex::Real c_art = amrex::min(
             PhysConst::c,
             hybrid_model->m_je_c_frac
-                / (dt_je * std::sqrt(sum_inv_dx2)));
+                / (dt_cf * std::sqrt(sum_inv_dx2)));
         if (hybrid_model->m_je_c_max > 0.0_rt) {
             c_art = amrex::min(c_art, hybrid_model->m_je_c_max);
         }
@@ -853,7 +859,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         amrex::Real const visc_frac = hybrid_model->m_je_visc_frac;
         bool const use_visc = use_vm && (visc_frac > 0.0_rt);
         amrex::Real const gam_vis0 = use_visc
-            ? 2.0_rt * vm_alpha / (visc_frac * dt_je) : 0.0_rt;
+            ? 2.0_rt * vm_alpha / (visc_frac * dt_cf) : 0.0_rt;
         amrex::Real const dx2_min = dx_min * dx_min;
         amrex::Real const mu0_l = PhysConst::mu0;
         MultiFab * qvisc_mf = nullptr;
@@ -945,6 +951,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
             Real const dr_l = m_dr;
             Real const rmin_l = m_rmin;
             amrex::Real const dt_r = dt_je;
+            amrex::Real const dt_cf_l = dt_cf;
             amrex::ParallelFor(mfi.tilebox(),
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                 bool const skip_r = upd_r && upd_r(i,j,k) == 0;
@@ -980,7 +987,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     amrex::Real const me_v =
                         HybridPICModel::JeEffectiveElectronMass(
                             B2t, amrex::max(rho_v, rho_1c),
-                            dt_r, dx_min, vm_alpha);
+                            dt_cf_l, dx_min, vm_alpha);
                     qm_c = PhysConst::q_e / me_v;
                 }
                 amrex::Real gam_vis = 0.0_rt;
@@ -1773,6 +1780,12 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         amrex::Real const dt_je =
             (hybrid_model->m_je_dt_sub > 0.0_rt)
                 ? hybrid_model->m_je_dt_sub : dt_full;
+        // dt-dependent artificial COEFFICIENTS evaluate at dt_cf,
+        // pinned per attempt by the adaptive loop (see the
+        // m_je_dt_coeff member doc); the integration dt stays dt_je.
+        amrex::Real const dt_cf =
+            (hybrid_model->m_je_dt_coeff > 0.0_rt)
+                ? hybrid_model->m_je_dt_coeff : dt_je;
         amrex::Real const rho_1c =
             PhysConst::q_e * hybrid_model->m_je_n_min;
         // qn-pin anchor: physics-referenced (je_qn_n_ref,
@@ -1802,7 +1815,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         amrex::Real c_art = amrex::min(
             PhysConst::c,
             hybrid_model->m_je_c_frac
-                / (dt_je * std::sqrt(sum_inv_dx2)));
+                / (dt_cf * std::sqrt(sum_inv_dx2)));
         if (hybrid_model->m_je_c_max > 0.0_rt) {
             c_art = amrex::min(c_art, hybrid_model->m_je_c_max);
         }
@@ -1827,7 +1840,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         amrex::Real const visc_frac = hybrid_model->m_je_visc_frac;
         bool const use_visc = use_vm && (visc_frac > 0.0_rt);
         amrex::Real const gam_vis0 = use_visc
-            ? 2.0_rt * vm_alpha / (visc_frac * dt_je) : 0.0_rt;
+            ? 2.0_rt * vm_alpha / (visc_frac * dt_cf) : 0.0_rt;
         amrex::Real const dx2_min = dx_min * dx_min;
         amrex::Real const mu0_l = PhysConst::mu0;
         MultiFab * qvisc_mf = nullptr;
@@ -1921,6 +1934,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             auto const n_coefs_z =
                 static_cast<int>(m_stencil_coefs_z.size());
             amrex::Real const dt_r = dt_je;
+            amrex::Real const dt_cf_l = dt_cf;
             amrex::ParallelFor(mfi.tilebox(),
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) {
                 bool const skip_x = upd_x && upd_x(i,j,k) == 0;
@@ -1952,7 +1966,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                     amrex::Real const me_v =
                         HybridPICModel::JeEffectiveElectronMass(
                             B2t, amrex::max(rho_v, rho_1c),
-                            dt_r, dx_min, vm_alpha);
+                            dt_cf_l, dx_min, vm_alpha);
                     qm_c = PhysConst::q_e / me_v;
                 }
                 amrex::Real gam_vis = 0.0_rt;

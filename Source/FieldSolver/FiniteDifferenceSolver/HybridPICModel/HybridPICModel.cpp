@@ -10650,11 +10650,24 @@ void HybridPICModel::BfieldEvolve (
         return true;
     };
     // Scaled max-norm |fine - full| / (atol + rtol |fine|) over the
-    // valid region.
+    // valid region. When weight_floor is set, each cell's
+    // contribution is weighted by (1 - g), g the vacuum-eta floor
+    // gate exp(-rho/(rho_gate/3)): in floor-armed cells E is
+    // ALGEBRAICALLY SLAVED to the floored-Ohm limit (the strong
+    // implicit damp is a projection, not an ODE), so its doubling
+    // difference measures the slaving, not truncation -- unweighted,
+    // it binds the controller to absurd dt_sub (measured: ~3000
+    // substeps per half where the fixed path needs ~20).
     auto je_wls_err = [&] (const MultiFab& fine, const MultiFab& full,
-                           amrex::Real atol,
-                           amrex::Real rtol_l) -> amrex::Real
+                           amrex::Real atol, amrex::Real rtol_l,
+                           bool weight_floor) -> amrex::Real
     {
+        const bool wf = weight_floor && (m_je_vacuum_eta > 0.0_rt);
+        const amrex::Real rho_vgate = wf
+            ? 3.0_rt / (PhysConst::q_e *
+                ((m_je_vacuum_eta_n_gate > 0.0_rt)
+                     ? m_je_vacuum_eta_n_gate : m_je_n_min))
+            : 0.0_rt;
         amrex::ReduceOps<amrex::ReduceOpMax> rop;
         amrex::ReduceData<amrex::Real> rdata(rop);
         using RT = typename decltype(rdata)::Type;
@@ -10662,6 +10675,8 @@ void HybridPICModel::BfieldEvolve (
             const amrex::Box bx = mfi.tilebox();
             auto const& a = fine.const_array(mfi);
             auto const& b = full.const_array(mfi);
+            amrex::Array4<const amrex::Real> rr;
+            if (wf) { rr = rhofield[lev]->const_array(mfi); }
             rop.eval(bx, rdata,
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) -> RT
             {
@@ -10669,7 +10684,12 @@ void HybridPICModel::BfieldEvolve (
                     amrex::Math::abs(a(i,j,k) - b(i,j,k));
                 const amrex::Real s =
                     atol + rtol_l * amrex::Math::abs(a(i,j,k));
-                return { d / s };
+                amrex::Real w = 1.0_rt;
+                if (wf) {
+                    w -= std::exp(
+                        -amrex::max(rr(i,j,k), 0.0_rt) * rho_vgate);
+                }
+                return { w * d / s };
             });
         }
         amrex::Real err = amrex::get<0>(rdata.value(rop));
@@ -10717,6 +10737,11 @@ void HybridPICModel::BfieldEvolve (
             // doc): the whole split cycle advances, the doubling
             // error is E-normed, and a rejection backs every
             // operator up to the entry snapshots and refines dt_sub.
+            // Pin the dt-dependent artificial coefficients to the
+            // attempt dt (see the m_je_dt_coeff member doc): both
+            // doubling legs must integrate ONE equation set or the
+            // error carries an O(1) floor.
+            m_je_dt_coeff = dt_sub;
             je_save_entry();
             amrex::Real err_e = 0.0_rt, err_b = 0.0_rt,
                         err_t = 0.0_rt;
@@ -10748,14 +10773,17 @@ void HybridPICModel::BfieldEvolve (
                 for (int ii = 0; ii < 3; ++ii) {
                     err_e = amrex::max(err_e,
                         je_wls_err(*Efield[lev][ii], E_res[ii],
-                                   m_je_rk_atol_e, rt_l));
+                                   m_je_rk_atol_e, rt_l,
+                                   /*weight_floor=*/true));
                     err_b = amrex::max(err_b,
                         je_wls_err(*Bfield[lev][ii], B_res[ii],
-                                   m_je_rk_atol_b, rt_l));
+                                   m_je_rk_atol_b, rt_l,
+                                   /*weight_floor=*/false));
                 }
                 if (je_te) {
                     err_t = je_wls_err(*Te_mf, Te_res,
-                                       m_je_rk_atol_te, rt_l);
+                                       m_je_rk_atol_te, rt_l,
+                                       /*weight_floor=*/false);
                 }
                 const amrex::Real error =
                     amrex::max(err_e, amrex::max(err_b, err_t));
@@ -10763,6 +10791,14 @@ void HybridPICModel::BfieldEvolve (
                 step_change_factor = m_substep_safety
                     * std::pow(error + 1.e-10_rt, -1.0_rt/3.0_rt);
                 step_succeeded = (error <= 1.0_rt);
+                if (step_succeeded && warpx.Verbose()
+                    && (n_accepted % 100 == 0)) {
+                    amrex::Print() << "[je] adaptive accept #"
+                        << n_accepted << ": dt_sub/dt_half = "
+                        << dt_sub/dt_half << ", err E " << err_e
+                        << ", B " << err_b << ", Te " << err_t
+                        << "\n";
+                }
                 if (!step_succeeded) {
                     je_restore_entry();
                     if (warpx.Verbose()) {

@@ -833,6 +833,20 @@ public:
     /** Current B-substep dt, published for the Eq-(27) mass evaluation.
      *  Mutable: set inside the const substep loop; 0 -> full-step dt. */
     mutable amrex::Real m_je_dt_sub = 0.0;
+    /** Coefficient-evaluation dt for the relax advance's
+     *  dt-DEPENDENT artificial parameters -- the c_art CFL value,
+     *  the Eq-(27) mass and the viscous rate -- decoupled from the
+     *  integration dt. WHY: the adaptive loop's step-doubling
+     *  comparison integrates the same interval at dt and dt/2; if
+     *  the artificial parameters follow the cycle dt, the two legs
+     *  integrate DIFFERENT equations (c_art alone changes 2x) and
+     *  the doubling error carries an O(1) floor no refinement can
+     *  close -- the controller grinds. The adaptive path pins this
+     *  to the attempt dt_sub so every leg of one comparison sees ONE
+     *  consistent equation set; 0 (the fixed-path value) falls back
+     *  to the integration dt, bit-identical legacy behavior.
+     *  Mutable: set inside the const substep loop. */
+    mutable amrex::Real m_je_dt_coeff = 0.0;
 
     /** Je-form advance (how the (E, J_e) system is integrated).
      *  0 = jacobi: the screened elliptic solve above,
