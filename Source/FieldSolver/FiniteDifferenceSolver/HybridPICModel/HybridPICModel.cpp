@@ -4354,10 +4354,11 @@ void HybridPICModel::QDSMCAddTemperatureRelaxation (int const lev, amrex::Real c
 
         amrex::MultiFab const & rho_s = *warpx.m_fields.get("rho_fp_" + spec_name, lev);
 
-        // Per-cell ion temperature [eV] (NGP velocity-variance deposit, done once
-        // by the caller and shared via Ti_dep_by_species), moved onto the field's
-        // cell-centered grid with one guard cell so the cc->nodal interpolation
-        // has its neighbours at box edges.
+        // Per-cell ion temperature [eV] (trace/3 of the shape/stagger-aware
+        // (Tr,Tt,Tz) moment deposit, collapsed once by the caller and shared
+        // via Ti_dep_by_species), moved onto the field's cell-centered grid
+        // with one guard cell so the cc->nodal interpolation has its
+        // neighbours at box edges.
         amrex::MultiFab const & Ti_dep = *Ti_dep_by_species.at(spec_name);
         amrex::MultiFab Ti_cc(cc_ba, Te.DistributionMap(), 1, 1);
         Ti_cc.setVal(0.0_rt);
@@ -4500,11 +4501,12 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
         auto const m_i = pc.getMass();
         if (m_i <= 0._prt) { continue; }
 
-        // Ion temperature [eV] (NGP) -- only needed as the nu_ei parser argument
-        // (Q_ei drag/diffusion). Skipped when only the redirect is active. When
-        // relaxation is on, T_i was deposited once by the caller and is shared via
-        // Ti_dep_by_species (QDSMCAddTemperatureRelaxation ran just before with no
-        // intervening ion motion).
+        // Ion temperature [eV] (trace/3 of the shape/stagger-aware moment
+        // deposit) -- only needed as the nu_ei parser argument (Q_ei
+        // drag/diffusion). Skipped when only the redirect is active. When
+        // relaxation is on, T_i was collapsed once by the caller and is shared
+        // via Ti_dep_by_species (QDSMCAddTemperatureRelaxation ran just before
+        // with no intervening ion motion).
         amrex::MultiFab Ti_cc(cc_ba, Te.DistributionMap(), 1, 0);
         Ti_cc.setVal(0.0_rt);
         if (do_relax) {
@@ -5223,10 +5225,11 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
     }
 
     // Steps 6b/6c both need each charged species' T_i when Q_ei relaxation is
-    // on. Deposit it ONCE here (the expensive per-particle NGP temperature
-    // reduction) and share it: the electron sink (6b) and the ion-heating
+    // on. Collapse it ONCE here from the shape/stagger-aware (Tr,Tt,Tz)
+    // moment deposit (no per-particle pass: DepositTemperatures ran at step
+    // scope) and share it: the electron sink (6b) and the ion-heating
     // operator (6c) run back-to-back with no intervening ion motion, so the
-    // deposited T_i is identical for both.
+    // shared T_i is identical for both.
     std::map<std::string, amrex::MultiFab*> Ti_dep_by_species;
     // Owns the per-species cell-centered scalar T_i built from the shape-aware
     // deposition below; must outlive the QDSMCAddTemperatureRelaxation /
@@ -5285,7 +5288,7 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
 
             // AccumulateVelocitiesAndComputeTemperature writes T_<nm> in Kelvin;
             // the Q_ei consumers (and the nu_ei parser) expect T_i in eV, matching
-            // the previous NGP deposit. Convert K -> eV below.
+            // the pre-conversion scalar deposit. Convert K -> eV below.
             amrex::Real const K_per_eV = PhysConst::q_e / PhysConst::kb;
 
             amrex::MultiFab const & Tr = *T_vf[lev][Direction{0}];
@@ -9657,7 +9660,7 @@ void HybridPICModel::QDSMCBuildTiDeposits (int const lev,
 
         // AccumulateVelocitiesAndComputeTemperature writes T_<nm> in Kelvin;
         // the Q_ei consumers (and the nu_ei parser) expect T_i in eV, matching
-        // the previous NGP deposit. Convert K -> eV below.
+        // the pre-conversion scalar deposit. Convert K -> eV below.
         amrex::Real const K_per_eV = PhysConst::q_e / PhysConst::kb;
 
         amrex::MultiFab const & Tr = *T_vf[lev][Direction{0}];
