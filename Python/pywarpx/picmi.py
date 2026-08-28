@@ -3013,6 +3013,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         vacuum_resistivity_diffusivity=None,
         vacuum_reference_peak_fraction=None,
         joule_ohm_current=None,
+        electron_ion_equilibration=None,
         resistive_theta=None,
         resistive_direct_device_assembly=None,
         conduction_theta=None,
@@ -3113,6 +3114,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.vacuum_resistivity_diffusivity = vacuum_resistivity_diffusivity
         self.vacuum_reference_peak_fraction = vacuum_reference_peak_fraction
         self.joule_ohm_current = joule_ohm_current
+        self.electron_ion_equilibration = electron_ion_equilibration
         self.resistive_theta = resistive_theta
         self.resistive_direct_device_assembly = resistive_direct_device_assembly
         self.conduction_theta = conduction_theta
@@ -3227,6 +3229,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
             self.vacuum_reference_peak_fraction
         )
         implicit_mhd.joule_ohm_current = self.joule_ohm_current
+        implicit_mhd.electron_ion_equilibration = (
+            self.electron_ion_equilibration)
         implicit_mhd.resistive_theta = self.resistive_theta
         implicit_mhd.resistive_direct_device_assembly = (
             self.resistive_direct_device_assembly
