@@ -2323,6 +2323,14 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         Reduces to ``eta * J**2`` for a single ion species. Only used when
         ``solve_electron_energy_equation`` is True.
 
+    include_biermann_battery: bool, default=False
+        Keep ``-grad(Pe)/(e n)`` in the Faraday-solve E so its curl (the
+        Biermann battery term) enters the B-field integration. With a
+        barotropic closure that curl vanishes and the term is dropped as
+        an optimization; with ``solve_electron_energy_equation`` the
+        electron temperature decouples from the density and the term is
+        physical.
+
     joule_heating_resistivity: float or str, optional
         Resistivity expression (of ``rho``, ``J``, ``t``) evaluated by the
         Joule heating source instead of ``plasma_resistivity``. Default:
@@ -2502,6 +2510,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         darwin_vacuum_recovery_relaxation_time=None,
         darwin_vacuum_recovery_relative_tolerance=None,
         include_joule_heating=None,
+        include_biermann_battery=None,
         joule_redirect_Te_threshold=None,
         electron_ion_relaxation_rate=None,
         qdsmc_n_floor=None,
@@ -2556,6 +2565,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
             darwin_vacuum_recovery_relative_tolerance
         )
         self.include_joule_heating = include_joule_heating
+        self.include_biermann_battery = include_biermann_battery
         self.joule_heating_resistivity = joule_heating_resistivity
         self.joule_heating_n_min = joule_heating_n_min
         self.joule_redirect_Te_threshold = joule_redirect_Te_threshold
@@ -2690,6 +2700,10 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
             )
         if self.include_joule_heating is not None:
             pywarpx.hybridpicmodel.include_joule_heating = self.include_joule_heating
+        if self.include_biermann_battery is not None:
+            pywarpx.hybridpicmodel.include_biermann_battery = (
+                self.include_biermann_battery
+            )
         if self.joule_redirect_Te_threshold is not None:
             pywarpx.hybridpicmodel.joule_redirect_Te_threshold = (
                 self.joule_redirect_Te_threshold
