@@ -854,6 +854,31 @@ void HybridPICModel::ReadParameters ()
             "hybrid_pic_model.je_sponge_width requires esolve = "
             "je_form (the sponge damps the relax advance's evolved "
             "field state; the algebraic e-form has no such state)");
+        pp_hybrid.query("je_adaptive", m_je_adaptive);
+        utils::parser::queryWithParser(pp_hybrid, "je_rk_rtol",
+                                       m_je_rk_rtol);
+        utils::parser::queryWithParser(pp_hybrid, "je_rk_atol_e",
+                                       m_je_rk_atol_e);
+        utils::parser::queryWithParser(pp_hybrid, "je_rk_atol_b",
+                                       m_je_rk_atol_b);
+        utils::parser::queryWithParser(pp_hybrid, "je_rk_atol_te",
+                                       m_je_rk_atol_te);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_je_adaptive || m_esolve_je,
+            "hybrid_pic_model.je_adaptive requires esolve = je_form");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_je_adaptive || !m_solve_electron_energy_equation ||
+                (m_je_cond_lockstep && m_cond_operator == 1),
+            "hybrid_pic_model.je_adaptive with the electron energy "
+            "equation requires je_conduction_lockstep = 1 (the fine-"
+            "level conduction split) and qdsmc_conduction_operator = "
+            "fd (the SDE marker advance cannot be rolled back on a "
+            "rejected substep)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_je_adaptive ||
+                (m_je_rk_atol_e > 0.0_rt && m_je_rk_atol_b > 0.0_rt &&
+                 m_je_rk_atol_te > 0.0_rt),
+            "hybrid_pic_model.je_rk_atol_* must be positive");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_je_qn_frac >= 0.0_rt,
             "hybrid_pic_model.je_qn_frac cannot be negative");
         utils::parser::queryWithParser(pp_hybrid, "gol_div_clean_frac",
@@ -10459,13 +10484,16 @@ void HybridPICModel::BfieldEvolve (
         coupler = warpx.get_pointer_CircuitCoupling()->Coupler();
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        !(je_relax && coupler &&
+        !(je_relax && coupler && !m_je_adaptive &&
           (m_je_centered_split || m_je_cond_lockstep ||
            m_je_time_stagger)),
         "The centered Je-form split, the conduction lockstep and the "
         "staggered advance are not supported with an active circuit "
-        "coupling engine: the corrector re-integration cannot re-run "
-        "the interleaved electron/conduction advances.");
+        "coupling engine on the FIXED substep path: the corrector "
+        "re-integration cannot re-run the interleaved electron/"
+        "conduction advances. The adaptive path (je_adaptive = 1) "
+        "restores its entry snapshots and re-runs the whole cycle, "
+        "so it composes with the coupler.");
 
     const amrex::Real t_half_start = warpx.gett_old(0)
         + ((subcycling_half == SubcyclingHalf::SecondHalf) ? dt_half : 0.0_rt);
@@ -10507,6 +10535,134 @@ void HybridPICModel::BfieldEvolve (
         return ok;
     };
 
+    // ------------------------------------------------------------------
+    // Adaptive coupled substep machinery (see the m_je_adaptive member
+    // doc): entry snapshots for the back-up-and-refine semantics, the
+    // full-step results the doubling error compares against, and the
+    // split cycle itself.
+    const bool je_adapt = je_relax && (m_je_adaptive != 0);
+    const bool je_te = je_adapt && m_solve_electron_energy_equation;
+    MultiFab * je_state_mf = je_relax
+        ? warpx.m_fields.get("hybrid_je_fp", lev) : nullptr;
+    MultiFab * Te_mf = je_te
+        ? warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp,
+                             lev)
+        : nullptr;
+    std::array<MultiFab, 3> E_sav, E_res, B_res;
+    MultiFab Je_sav, Te_sav, Te_res;
+    if (je_adapt) {
+        for (int ii = 0; ii < 3; ++ii) {
+            E_sav[ii].define(Efield[lev][ii]->boxArray(),
+                             Efield[lev][ii]->DistributionMap(), 1,
+                             Efield[lev][ii]->nGrowVect());
+            E_res[ii].define(Efield[lev][ii]->boxArray(),
+                             Efield[lev][ii]->DistributionMap(), 1,
+                             amrex::IntVect(0));
+            B_res[ii].define(Bfield[lev][ii]->boxArray(),
+                             Bfield[lev][ii]->DistributionMap(), 1,
+                             amrex::IntVect(0));
+        }
+        Je_sav.define(je_state_mf->boxArray(),
+                      je_state_mf->DistributionMap(), 3,
+                      je_state_mf->nGrowVect());
+        if (je_te) {
+            Te_sav.define(Te_mf->boxArray(), Te_mf->DistributionMap(),
+                          1, Te_mf->nGrowVect());
+            Te_res.define(Te_mf->boxArray(), Te_mf->DistributionMap(),
+                          1, amrex::IntVect(0));
+        }
+    }
+    auto je_pe_refresh = [&] () {
+        QDSMCFillElectronPressureFromTe(lev);
+        warpx.ApplyElectronPressureBoundary(lev, PatchType::fine);
+        ablastr::utils::communication::FillBoundary(
+            *warpx.m_fields.get(FieldType::hybrid_electron_pressure_fp,
+                                lev),
+            WarpX::do_single_precision_comms,
+            warpx.Geom(lev).periodicity(), true);
+    };
+    auto je_save_entry = [&] () {
+        for (int ii = 0; ii < 3; ++ii) {
+            MultiFab::Copy(E_sav[ii], *Efield[lev][ii], 0, 0, 1,
+                           E_sav[ii].nGrowVect());
+        }
+        MultiFab::Copy(Je_sav, *je_state_mf, 0, 0, 3,
+                       Je_sav.nGrowVect());
+        if (je_te) {
+            MultiFab::Copy(Te_sav, *Te_mf, 0, 0, 1, Te_sav.nGrowVect());
+        }
+    };
+    auto je_restore_entry = [&] () {
+        for (int ii = 0; ii < 3; ++ii) {
+            MultiFab::Copy(*Efield[lev][ii], E_sav[ii], 0, 0, 1,
+                           E_sav[ii].nGrowVect());
+            MultiFab::Copy(*Bfield[lev][ii], B_old[ii], 0, 0, 1, ng);
+        }
+        MultiFab::Copy(*je_state_mf, Je_sav, 0, 0, 3,
+                       Je_sav.nGrowVect());
+        if (je_te) {
+            MultiFab::Copy(*Te_mf, Te_sav, 0, 0, 1, Te_sav.nGrowVect());
+            je_pe_refresh();
+        }
+    };
+    // One full split cycle at dt_c: half push -> (E, J_e) advance on
+    // the midpoint B -> fine-level conduction -> second half push
+    // (full push then advance under the Lie split).
+    auto je_coupled_cycle = [&] (amrex::Real dt_c) -> bool
+    {
+        m_je_dt_sub = dt_c;
+        const bool stag = m_je_centered_split || m_je_time_stagger;
+        if (!je_relax_b_push(stag ? 0.5_rt*dt_c : dt_c)) {
+            return false;
+        }
+        CalculatePlasmaCurrent(Bfield, eb_update_E);
+        m_je_relax_advance = true;
+        HybridPICSolveE(Efield, Jfield, Bfield, rhofield, eb_update_E,
+                        true);
+        m_je_relax_advance = false;
+        if (Bz_IndexType[0] == Ez_IndexType[0]) {
+            warpx.FillBoundaryE(ng, nodal_sync);
+        }
+        if (je_te) {
+            QdsmcConductionOnce(lev, dt_c,
+                /*use_rho_new=*/(subcycling_half ==
+                                 SubcyclingHalf::SecondHalf));
+            je_pe_refresh();
+        }
+        if (stag) {
+            if (!je_relax_b_push(0.5_rt*dt_c)) { return false; }
+        }
+        return true;
+    };
+    // Scaled max-norm |fine - full| / (atol + rtol |fine|) over the
+    // valid region.
+    auto je_wls_err = [&] (const MultiFab& fine, const MultiFab& full,
+                           amrex::Real atol,
+                           amrex::Real rtol_l) -> amrex::Real
+    {
+        amrex::ReduceOps<amrex::ReduceOpMax> rop;
+        amrex::ReduceData<amrex::Real> rdata(rop);
+        using RT = typename decltype(rdata)::Type;
+        for (MFIter mfi(fine, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            const amrex::Box bx = mfi.tilebox();
+            auto const& a = fine.const_array(mfi);
+            auto const& b = full.const_array(mfi);
+            rop.eval(bx, rdata,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) -> RT
+            {
+                const amrex::Real d =
+                    amrex::Math::abs(a(i,j,k) - b(i,j,k));
+                const amrex::Real s =
+                    atol + rtol_l * amrex::Math::abs(a(i,j,k));
+                return { d / s };
+            });
+        }
+        amrex::Real err = amrex::get<0>(rdata.value(rop));
+        amrex::ParallelDescriptor::ReduceRealMax(err);
+        return err;
+    };
+    // ------------------------------------------------------------------
+
     // Step the magnetic field forward (from t -> t + dt_half) using the user
     // specified integration scheme. The loop is set up such that the timestep
     // for a given step (dt_sub) can be modified within the loop, i.e.,
@@ -10541,6 +10697,71 @@ void HybridPICModel::BfieldEvolve (
             step_change_factor = m_substep_safety * std::pow(error + 1.e-10_rt, -0.2_rt);
             step_succeeded = (error <= 1._rt);
 
+        } else if (je_adapt) {
+            // Adaptive coupled substep (see the m_je_adaptive member
+            // doc): the whole split cycle advances, the doubling
+            // error is E-normed, and a rejection backs every
+            // operator up to the entry snapshots and refines dt_sub.
+            je_save_entry();
+            amrex::Real err_e = 0.0_rt, err_b = 0.0_rt,
+                        err_t = 0.0_rt;
+            bool ok = je_coupled_cycle(dt_sub);
+            if (ok) {
+                for (int ii = 0; ii < 3; ++ii) {
+                    MultiFab::Copy(E_res[ii], *Efield[lev][ii],
+                                   0, 0, 1, amrex::IntVect(0));
+                    MultiFab::Copy(B_res[ii], *Bfield[lev][ii],
+                                   0, 0, 1, amrex::IntVect(0));
+                }
+                if (je_te) {
+                    MultiFab::Copy(Te_res, *Te_mf, 0, 0, 1,
+                                   amrex::IntVect(0));
+                }
+                je_restore_entry();
+                ok = je_coupled_cycle(0.5_rt*dt_sub)
+                     && je_coupled_cycle(0.5_rt*dt_sub);
+            }
+            if (!ok) {
+                // a non-finite push is a rejection here, not an
+                // abort: the snapshots make restore-and-retry legal
+                step_succeeded = false;
+                step_change_factor = 0.3_rt;
+                je_restore_entry();
+            } else {
+                const amrex::Real rt_l = (m_je_rk_rtol > 0.0_rt)
+                    ? m_je_rk_rtol : m_substep_rtol;
+                for (int ii = 0; ii < 3; ++ii) {
+                    err_e = amrex::max(err_e,
+                        je_wls_err(*Efield[lev][ii], E_res[ii],
+                                   m_je_rk_atol_e, rt_l));
+                    err_b = amrex::max(err_b,
+                        je_wls_err(*Bfield[lev][ii], B_res[ii],
+                                   m_je_rk_atol_b, rt_l));
+                }
+                if (je_te) {
+                    err_t = je_wls_err(*Te_mf, Te_res,
+                                       m_je_rk_atol_te, rt_l);
+                }
+                const amrex::Real error =
+                    amrex::max(err_e, amrex::max(err_b, err_t));
+                // the CN cycle is 2nd order: exponent -1/(p+1) = -1/3
+                step_change_factor = m_substep_safety
+                    * std::pow(error + 1.e-10_rt, -1.0_rt/3.0_rt);
+                step_succeeded = (error <= 1.0_rt);
+                if (!step_succeeded) {
+                    je_restore_entry();
+                    if (warpx.Verbose()) {
+                        amrex::Print() << "[je] adaptive reject at "
+                            << "t/dt_half = " << t/dt_half
+                            << ": err E " << err_e << ", B " << err_b
+                            << ", Te " << err_t << " (choke = "
+                            << ((err_e >= err_b && err_e >= err_t)
+                                    ? "E"
+                                    : (err_b >= err_t ? "B" : "Te"))
+                            << ")\n";
+                    }
+                }
+            }
         } else if (je_relax) {
             // Lie split: one full Faraday push with the frozen E^n.
             // Centered (Strang) split -- also the B staggering of the
@@ -10621,6 +10842,15 @@ void HybridPICModel::BfieldEvolve (
                     step_change_factor =
                         m_substep_safety * std::pow(error + 1.e-10_rt, -0.2_rt);
                     step_succeeded = (error <= 1._rt);
+                } else if (je_adapt) {
+                    // fine-level circuit corrector: back the whole
+                    // cycle up to the entry snapshots and re-run it
+                    // against the refreshed scale segments, at the
+                    // accepted (finer-pair) quality
+                    je_restore_entry();
+                    step_succeeded =
+                        je_coupled_cycle(0.5_rt*dt_sub)
+                        && je_coupled_cycle(0.5_rt*dt_sub);
                 } else if (je_relax) {
                     // corrector re-integration from the substep entry
                     // state: E and J_e are still frozen (their advance
@@ -10657,7 +10887,7 @@ void HybridPICModel::BfieldEvolve (
             for (int ii = 0; ii < 3; ii++) {
                 MultiFab::Copy(B_old[ii], *Bfield[lev][ii], 0, 0, 1, ng);
             }
-            if (je_relax) {
+            if (je_relax && !je_adapt) {
                 // The (E, J_e) advance (see the m_je_centered_split
                 // and m_je_time_stagger member docs): exactly once per
                 // accepted substep, by the accepted dt_sub (still
@@ -10666,7 +10896,9 @@ void HybridPICModel::BfieldEvolve (
                 // under the Lie split, the half-level (midpoint) B
                 // under the centered split and the CN advance. Runs
                 // after the coupling interval closes, so the advance
-                // sees the settled external scale segments.
+                // sees the settled external scale segments. (The
+                // adaptive path advanced the whole cycle in the
+                // attempt phase -- see the m_je_adaptive member doc.)
                 CalculatePlasmaCurrent(Bfield, eb_update_E);
                 m_je_relax_advance = true;
                 HybridPICSolveE(Efield, Jfield, Bfield, rhofield,
@@ -10686,6 +10918,8 @@ void HybridPICModel::BfieldEvolve (
                             "the centered Je-form relax substep.");
                     }
                 }
+            }
+            if (je_relax) {
                 // Sponge caps (see the m_je_sponge_width member doc):
                 // damp the wave fields toward their drive-tracking
                 // references over the z-cap layers, on the completed
@@ -10694,8 +10928,16 @@ void HybridPICModel::BfieldEvolve (
                 if (m_je_sponge_width > 0.0_rt) {
                     ApplyJeSpongeLayer(Bfield, Efield, lev, dt_sub);
                 }
+                // the accepted-state copy in B_old must reflect the
+                // adaptive path's full-cycle result (the copy above
+                // ran before the cycle's second half push on the
+                // fixed path only)
+                for (int ii = 0; ii < 3; ii++) {
+                    MultiFab::Copy(B_old[ii], *Bfield[lev][ii],
+                                   0, 0, 1, ng);
+                }
             }
-            if (je_relax && m_je_cond_lockstep) {
+            if (je_relax && !je_adapt && m_je_cond_lockstep) {
                 // tight T_e <-> (J_e, B) coupling (see the member
                 // doc): advance conduction by this substep against
                 // the substep-level B and hand the refreshed Pe to

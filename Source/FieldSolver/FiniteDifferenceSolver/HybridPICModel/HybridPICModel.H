@@ -981,6 +981,43 @@ public:
      *  kernel; the sponge layer and its P_sponge booking read it.
      *  Mutable: written inside the const solve path. */
     mutable amrex::Real m_je_c_art = 0.0;
+    /** Adaptive coupled substep integration of the relax advance
+     *  (je_adaptive = 1): every substep advances the FULL split
+     *  cycle -- Faraday half push, the pointwise-implicit (E, J_e)
+     *  advance on the midpoint B, the fine-level conduction split
+     *  (when the electron energy equation runs;
+     *  je_conduction_lockstep and the fd conduction operator are
+     *  required), the second half push -- and the local error is
+     *  measured by STEP DOUBLING: one dt_sub cycle against two
+     *  dt_sub/2 cycles (a classical embedded tableau cannot see an
+     *  operator-split cycle built on an implicit pointwise solve).
+     *  The scaled max-norm over E is the PRIMARY error bound -- the
+     *  dynamic E carries the fastest coupled (electron-scale)
+     *  content, and a frozen-E B-push error is blind by linearity --
+     *  with B and T_e normed alongside for choke attribution. A
+     *  rejection backs the WHOLE cycle up (entry snapshots of E,
+     *  J_e, T_e; B from its substep-entry copy) and redoes every
+     *  operator at the finer dt_sub, so the coupled system stays
+     *  consistent at the substepped level; the fixed relax loop's
+     *  cannot-roll-back abort becomes restore-and-retry here. The
+     *  finer (half+half) result is the accepted state. An active
+     *  circuit coupling advances at the same fine level: its
+     *  corrector re-integration restores the snapshots and re-runs
+     *  the cycle against the refreshed scale segments. Only the ion
+     *  current and charge density stay frozen per global half-step
+     *  (a mass-matrix linearization of the ion response along the
+     *  fine trajectory is the planned refinement). Default 0 = the
+     *  fixed-substep loop, bit-identical. Input: je_adaptive. */
+    int m_je_adaptive = 0;
+    /** Adaptive-je error tolerances: the relative tolerance of the
+     *  scaled max-norms (default 0 = inherit substep_rtol) and the
+     *  per-field absolute floors -- E in V/m, B in T, T_e in K.
+     *  Inputs: je_rk_rtol, je_rk_atol_e, je_rk_atol_b,
+     *  je_rk_atol_te. */
+    amrex::Real m_je_rk_rtol = 0.0;
+    amrex::Real m_je_rk_atol_e = 1.0;
+    amrex::Real m_je_rk_atol_b = 1.0e-9;
+    amrex::Real m_je_rk_atol_te = 1.0;
     /** Check B for NaN/Inf every Nth relax substep push instead of
      *  after every push; the je path additionally re-checks once at
      *  the end of every half-step, so a half never hands unverified

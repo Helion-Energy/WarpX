@@ -886,7 +886,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         ? "centered" : "lie"))
                 << ", visc_frac = " << hybrid_model->m_je_visc_frac
                 << ", n_min = " << hybrid_model->m_je_n_min
-                << " m^-3 (must be the one-count level)\n";
+                << " m^-3 (must be the one-count level)"
+                << (hybrid_model->m_je_adaptive
+                        ? ", adaptive = E-normed doubling"
+                        : "")
+                << "\n";
         }
 
 #ifdef AMREX_USE_OMP
@@ -1856,7 +1860,11 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                         ? "centered" : "lie"))
                 << ", visc_frac = " << hybrid_model->m_je_visc_frac
                 << ", n_min = " << hybrid_model->m_je_n_min
-                << " m^-3 (must be the one-count level)\n";
+                << " m^-3 (must be the one-count level)"
+                << (hybrid_model->m_je_adaptive
+                        ? ", adaptive = E-normed doubling"
+                        : "")
+                << "\n";
         }
 
 #ifdef AMREX_USE_OMP
