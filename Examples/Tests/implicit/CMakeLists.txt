@@ -1626,6 +1626,26 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# wall-drain gate anchored at the reachable set: with wall_temperature
+# far BELOW the electron/ion temperature floors (the ratchet engaged
+# from step 0) and dt far above the wall-face free-streaming time, a
+# reservoir-anchored drain gate never closes while the projection pins
+# the same components at the floor bound -- iteration-0 frozen steps
+# within a handful of steps and the max_frozen_steps abort (the
+# reproducer contract, documented in the deck). With the gate anchored
+# at max(reservoir, floor image) the run completes with zero frozen
+# solves and the wall-adjacent ring settles AT the floor from above, in
+# the electron channel and the dual_energy twin pair alike
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_floor_gate  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_wall_floor_gate  # inputs
+    "analysis_mhd_wall_floor_gate.py diags/diag000000 diags/diag000016"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # Reference-code-style wall-row viscosity slip mask
 # (implicit_mhd.wall_viscosity_mask): a sheared column u_z = A r inside
 # a cylinder wall must deposit the discretely exact uniform shear
