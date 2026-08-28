@@ -173,6 +173,16 @@ public:
         ablastr::fields::MultiLevelVectorField const& Efield,
         int lev, amrex::Real dt_sub);
 
+    /** Hyper-resistivity of the relax advance, born in the curl-curl
+     *  form (see the m_je_hyper_res member doc): one operator-split
+     *  application of dB/dt = -curl(E_H), E_H = +curl(eta_H curl J),
+     *  per accepted substep, with J the substep's Ampere current and
+     *  eta_H evaluated pointwise INSIDE the outer curl. */
+    void ApplyJeHyperCurlCurl (
+        ablastr::fields::MultiLevelVectorField const& Bfield,
+        ablastr::fields::MultiLevelScalarField const& rhofield,
+        int lev, amrex::Real dt_sub);
+
     void BfieldEvolveRK4 (
         ablastr::fields::MultiLevelVectorField const& Bfield,
         ablastr::fields::MultiLevelVectorField const& Efield,
@@ -981,6 +991,30 @@ public:
      *  kernel; the sponge layer and its P_sponge booking read it.
      *  Mutable: written inside the const solve path. */
     mutable amrex::Real m_je_c_art = 0.0;
+    /** Hyper-resistivity on the relax advance (je_hyper_res, default
+     *  1): the legacy component-Laplacian hyper-res term lives only
+     *  in the e-form Yee kernels, so the relax path historically ran
+     *  with eta_H DYNAMICALLY INERT (its whistler control being the
+     *  Eq-27 mass cap + je_visc). This applies the term for real,
+     *  born in the CURL-CURL form: one operator-split update
+     *  dB/dt = -curl(E_H), E_H = +curl(eta_H curl J) per accepted
+     *  substep, J the substep's Ampere current, eta_H(rho, |B|)
+     *  evaluated pointwise INSIDE the outer curl. WHY curl-curl and
+     *  not the Laplacian: del^2 J = grad(div J) - curl(curl J), and
+     *  with a NON-CONSTANT coefficient (density gates, |B| ramps,
+     *  the whistler collar) the component-Laplacian form leaks
+     *  grad(eta_H) x (div-sector) sources into Faraday, while this
+     *  composition is sign-definite for arbitrary coefficient
+     *  variation: dW/dt = -Int eta_H |curl J|^2 dV exactly (three
+     *  nested curls integrate by parts pairwise). Explicit
+     *  application is stable with large margin: the substep dt is
+     *  O(1e-3) of the fourth-order diffusion CFL dx^4 mu0 / eta_H at
+     *  campaign values. Active when plasma_hyper_resistivity is set
+     *  and esolve = je_form (relax); je_hyper_res = 0 is the
+     *  kill-switch A/B against the historical inert behavior.
+     *  RZ m = 0 collocated only in this version. Books as a REAL
+     *  P_etaH in HybridDissipation (the curl-form integrand). */
+    int m_je_hyper_res = 1;
     /** Adaptive coupled substep integration of the relax advance
      *  (je_adaptive = 1): every substep advances the FULL split
      *  cycle -- Faraday half push, the pointwise-implicit (E, J_e)

@@ -854,6 +854,7 @@ void HybridPICModel::ReadParameters ()
             "hybrid_pic_model.je_sponge_width requires esolve = "
             "je_form (the sponge damps the relax advance's evolved "
             "field state; the algebraic e-form has no such state)");
+        pp_hybrid.query("je_hyper_res", m_je_hyper_res);
         pp_hybrid.query("je_adaptive", m_je_adaptive);
         utils::parser::queryWithParser(pp_hybrid, "je_rk_rtol",
                                        m_je_rk_rtol);
@@ -1149,6 +1150,20 @@ void HybridPICModel::AllocateLevelMFs (
             fields.alloc_init("hybrid_je_qvisc_fp", lev,
                 amrex::convert(ba, amrex::IntVect::TheNodeVector()),
                 dm, 1, amrex::IntVect(0), 0.0_rt);
+        }
+        // Curl-curl hyper-resistivity scratch (see the m_je_hyper_res
+        // member doc): eta_H curl J and E_H = curl(eta_H curl J),
+        // 3 comps nodal, one ghost each for the nested curls.
+        // Gate on the expression string: the derived
+        // m_include_hyper_resistivity_term flag is set at parser
+        // compile time, AFTER this allocation runs.
+        if (m_je_hyper_res && m_eta_h_expression != "0.0") {
+            fields.alloc_init("hybrid_je_hyper_w_fp", lev,
+                amrex::convert(ba, amrex::IntVect::TheNodeVector()),
+                dm, 3, amrex::IntVect(1), 0.0_rt);
+            fields.alloc_init("hybrid_je_hyper_eh_fp", lev,
+                amrex::convert(ba, amrex::IntVect::TheNodeVector()),
+                dm, 3, amrex::IntVect(1), 0.0_rt);
         }
         // Sponge-cap reference fields (see the m_je_sponge_width
         // member doc): the frozen first-call stored state (3 comps
@@ -10920,6 +10935,14 @@ void HybridPICModel::BfieldEvolve (
                 }
             }
             if (je_relax) {
+                // Curl-curl hyper-resistivity (see the m_je_hyper_res
+                // member doc): the real eta_H application of the
+                // relax path, once per accepted substep, before the
+                // absorber.
+                if (m_je_hyper_res && m_include_hyper_resistivity_term) {
+                    ApplyJeHyperCurlCurl(Bfield, rhofield, lev, dt_sub);
+                    warpx.FillBoundaryB(ng, nodal_sync);
+                }
                 // Sponge caps (see the m_je_sponge_width member doc):
                 // damp the wave fields toward their drive-tracking
                 // references over the z-cap layers, on the completed
@@ -11182,6 +11205,172 @@ void HybridPICModel::ApplyJeSpongeLayer (
     // substep's stencils see the sponged fields consistently.
     warpx.FillBoundaryE(Efield[lev][0]->nGrowVect(), std::nullopt);
     warpx.FillBoundaryB(Bfield[lev][0]->nGrowVect(), std::nullopt);
+}
+
+void HybridPICModel::ApplyJeHyperCurlCurl (
+    ablastr::fields::MultiLevelVectorField const& Bfield,
+    ablastr::fields::MultiLevelScalarField const& rhofield,
+    int lev, amrex::Real dt_sub)
+{
+#if defined(WARPX_DIM_RZ)
+    auto& warpx = WarpX::GetInstance();
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        Bfield[lev][0]->ixType().nodeCentered(),
+        "hybrid_pic_model.je_hyper_res requires the collocated "
+        "(all-nodal) grid of the Je-form relax advance");
+    // The substep's Ampere current (refreshed by
+    // CalculatePlasmaCurrent before every (E, J_e) advance); its
+    // ghosts are valid to the depth the curl below needs.
+    ablastr::fields::VectorField J =
+        warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma,
+                                   lev);
+    MultiFab & Ws = *warpx.m_fields.get("hybrid_je_hyper_w_fp", lev);
+    MultiFab & Eh = *warpx.m_fields.get("hybrid_je_hyper_eh_fp", lev);
+    const bool b_split = m_add_external_fields &&
+        m_hyper_resistivity_has_B_dependence;
+    std::array<const MultiFab*, 3> Bext = {nullptr, nullptr, nullptr};
+    if (b_split) {
+        for (int d = 0; d < 3; ++d) {
+            Bext[d] = warpx.m_fields.get(FieldType::hybrid_B_fp_external,
+                                         ablastr::fields::Direction{d},
+                                         lev);
+        }
+    }
+    const auto eta_h_l = m_eta_h;
+    const auto& geom = warpx.Geom(lev);
+    const amrex::Real dr = geom.CellSize(0);
+    const amrex::Real dz = geom.CellSize(1);
+    const amrex::Real rmin = geom.ProbLo(0);
+    const amrex::Real i2r = 0.5_rt/dr, i2z = 0.5_rt/dz;
+
+    // pass 1: Ws = eta_H(rho, |B|) curl J at nodes (m = 0)
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(Ws, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        Array4<Real> const& w = Ws.array(mfi);
+        Array4<Real const> const& jr = J[0]->const_array(mfi);
+        Array4<Real const> const& jt = J[1]->const_array(mfi);
+        Array4<Real const> const& jz = J[2]->const_array(mfi);
+        Array4<Real const> const& rho = rhofield[lev]->const_array(mfi);
+        Array4<Real const> const& br = Bfield[lev][0]->const_array(mfi);
+        Array4<Real const> const& bt = Bfield[lev][1]->const_array(mfi);
+        Array4<Real const> const& bz = Bfield[lev][2]->const_array(mfi);
+        Array4<Real const> xbr, xbt, xbz;
+        if (b_split) {
+            xbr = Bext[0]->const_array(mfi);
+            xbt = Bext[1]->const_array(mfi);
+            xbz = Bext[2]->const_array(mfi);
+        }
+        const bool bs = b_split;
+        amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            const amrex::Real r = rmin + i*dr;
+            const bool axis = r < 0.5_rt*dr;
+            amrex::Real b2 = 0.0_rt;
+            {
+                amrex::Real cbr = br(i,j,k), cbt = bt(i,j,k),
+                            cbz = bz(i,j,k);
+                if (bs) {
+                    cbr += xbr(i,j,k); cbt += xbt(i,j,k);
+                    cbz += xbz(i,j,k);
+                }
+                b2 = cbr*cbr + cbt*cbt + cbz*cbz;
+            }
+            const amrex::Real eh_c = eta_h_l(
+                amrex::max(rho(i,j,k), 0.0_rt), std::sqrt(b2));
+            const amrex::Real dz_jt =
+                (jt(i,j+1,k) - jt(i,j-1,k)) * i2z;
+            const amrex::Real dz_jr =
+                (jr(i,j+1,k) - jr(i,j-1,k)) * i2z;
+            const amrex::Real dr_jz =
+                (jz(i+1,j,k) - jz(i-1,j,k)) * i2r;
+            const amrex::Real dr_jt =
+                (jt(i+1,j,k) - jt(i-1,j,k)) * i2r;
+            // m = 0 nodal curl; on axis J_r = J_t = 0 by parity and
+            // (1/r) d_r (r J_t) -> 2 d_r J_t
+            const amrex::Real wr = -dz_jt;
+            const amrex::Real wt = dz_jr - dr_jz;
+            const amrex::Real wz = axis
+                ? 2.0_rt * (jt(i+1,j,k) - jt(i,j,k)) / dr
+                : dr_jt + jt(i,j,k)/r;
+            w(i,j,k,0) = axis ? 0.0_rt : eh_c * wr;
+            w(i,j,k,1) = axis ? 0.0_rt : eh_c * wt;
+            w(i,j,k,2) = eh_c * wz;
+        });
+    }
+    ablastr::utils::communication::FillBoundary(
+        Ws, WarpX::do_single_precision_comms, geom.periodicity(), false);
+
+    // pass 2: E_H = curl(Ws)
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(Eh, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        Array4<Real> const& e = Eh.array(mfi);
+        Array4<Real const> const& w = Ws.const_array(mfi);
+        amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            const amrex::Real r = rmin + i*dr;
+            const bool axis = r < 0.5_rt*dr;
+            const amrex::Real dz_wt =
+                (w(i,j+1,k,1) - w(i,j-1,k,1)) * i2z;
+            const amrex::Real dz_wr =
+                (w(i,j+1,k,0) - w(i,j-1,k,0)) * i2z;
+            const amrex::Real dr_wz =
+                (w(i+1,j,k,2) - w(i-1,j,k,2)) * i2r;
+            const amrex::Real dr_wt =
+                (w(i+1,j,k,1) - w(i-1,j,k,1)) * i2r;
+            e(i,j,k,0) = axis ? 0.0_rt : -dz_wt;
+            e(i,j,k,1) = axis ? 0.0_rt : dz_wr - dr_wz;
+            e(i,j,k,2) = axis
+                ? 2.0_rt * (w(i+1,j,k,1) - w(i,j,k,1)) / dr
+                : dr_wt + w(i,j,k,1)/r;
+        });
+    }
+    ablastr::utils::communication::FillBoundary(
+        Eh, WarpX::do_single_precision_comms, geom.periodicity(), false);
+
+    // pass 3: B -= dt curl(E_H)
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(Eh, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        Array4<Real> const& br = Bfield[lev][0]->array(mfi);
+        Array4<Real> const& bt = Bfield[lev][1]->array(mfi);
+        Array4<Real> const& bz = Bfield[lev][2]->array(mfi);
+        Array4<Real const> const& e = Eh.const_array(mfi);
+        const amrex::Real dt_l = dt_sub;
+        amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+            const amrex::Real r = rmin + i*dr;
+            const bool axis = r < 0.5_rt*dr;
+            const amrex::Real dz_et =
+                (e(i,j+1,k,1) - e(i,j-1,k,1)) * i2z;
+            const amrex::Real dz_er =
+                (e(i,j+1,k,0) - e(i,j-1,k,0)) * i2z;
+            const amrex::Real dr_ez =
+                (e(i+1,j,k,2) - e(i-1,j,k,2)) * i2r;
+            const amrex::Real dr_et =
+                (e(i+1,j,k,1) - e(i-1,j,k,1)) * i2r;
+            if (!axis) {
+                br(i,j,k) -= dt_l * (-dz_et);
+                bt(i,j,k) -= dt_l * (dz_er - dr_ez);
+                bz(i,j,k) -= dt_l * (dr_et + e(i,j,k,1)/r);
+            } else {
+                // B_r = B_t = 0 on axis by m = 0 parity
+                bz(i,j,k) -= dt_l * 2.0_rt
+                    * (e(i+1,j,k,1) - e(i,j,k,1)) / dr;
+            }
+        });
+    }
+#else
+    amrex::ignore_unused(Bfield, rhofield, lev, dt_sub);
+    WARPX_ABORT_WITH_MESSAGE(
+        "hybrid_pic_model.je_hyper_res: the curl-curl hyper-"
+        "resistivity of the relax advance is RZ-only in this "
+        "version; set je_hyper_res = 0 on other geometries");
+#endif
 }
 
 void HybridPICModel::BfieldEvolveRK4 (

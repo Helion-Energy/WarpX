@@ -303,6 +303,85 @@ HybridDissipation::ComputeDiags (const int step)
         p_eta_h += amrex::get<1>(rv);
     }
 
+    // Curl-form hyper-resistive loss of the relax advance (see
+    // m_je_hyper_res): P_etaH = Int eta_H |curl J|^2 dV, the REAL
+    // sink of ApplyJeHyperCurlCurl -- exact by the pairwise
+    // integration by parts of the three nested curls. The
+    // Laplacian-form booking above stays gated OFF on the relax path
+    // (that operator never applies there); this block replaces it
+    // when the curl-curl application is active. Nodal (collocated
+    // contract), owner mask, m = 0 curl, same stencil as the
+    // applier.
+    const bool je_hyper = hybrid->m_include_hyper_resistivity_term
+        && hybrid->m_esolve_je && hybrid->m_je_advance == 1
+        && (hybrid->m_je_hyper_res != 0);
+    if (je_hyper) {
+        const amrex::Real i2r = 0.5_rt/dr, i2z = 0.5_rt/dz;
+        std::array<const amrex::MultiFab*, 3> Bx =
+            {nullptr, nullptr, nullptr};
+        if (external_b_split && has_B_dep) {
+            for (int d = 0; d < 3; ++d) { Bx[d] = B_ext[d]; }
+        }
+        const auto mask = amrex::OwnerMask(*J[0], geom.periodicity());
+        amrex::ReduceOps<amrex::ReduceOpSum> rop;
+        amrex::ReduceData<amrex::Real> rdata(rop);
+        using RT = typename decltype(rdata)::Type;
+        for (amrex::MFIter mfi(*J[0], amrex::TilingIfNotGPU());
+             mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.tilebox();
+            const auto jr = J[0]->const_array(mfi);
+            const auto jt = J[1]->const_array(mfi);
+            const auto jz = J[2]->const_array(mfi);
+            const auto br = B[0]->const_array(mfi);
+            const auto bt = B[1]->const_array(mfi);
+            const auto bz = B[2]->const_array(mfi);
+            amrex::Array4<const amrex::Real> xr, xt, xz;
+            const bool bs = (Bx[0] != nullptr);
+            if (bs) {
+                xr = Bx[0]->const_array(mfi);
+                xt = Bx[1]->const_array(mfi);
+                xz = Bx[2]->const_array(mfi);
+            }
+            const auto rho_arr = rho->const_array(mfi);
+            const auto m_arr = mask->const_array(mfi);
+            rop.eval(box, rdata,
+                [=] AMREX_GPU_DEVICE (int i, int j, int) -> RT
+            {
+                if (!m_arr(i, j, 0)) { return {0.0_rt}; }
+                const amrex::Real r = rmin + i*dr;
+                const bool axis = r < 0.5_rt*dr;
+                const amrex::Real r_vol =
+                    (r > 0.0_rt) ? r : dr/8.0_rt;
+                const amrex::Real dV =
+                    2.0_rt*MathConst::pi*r_vol*dr*dz;
+                amrex::Real b2 = 0.0_rt;
+                {
+                    amrex::Real cr = br(i,j,0), ct = bt(i,j,0),
+                                cz = bz(i,j,0);
+                    if (bs) {
+                        cr += xr(i,j,0); ct += xt(i,j,0);
+                        cz += xz(i,j,0);
+                    }
+                    b2 = cr*cr + ct*ct + cz*cz;
+                }
+                const amrex::Real ehc = eta_h(
+                    amrex::max(rho_arr(i,j,0), 0.0_rt),
+                    std::sqrt(b2));
+                const amrex::Real wr = axis ? 0.0_rt
+                    : -(jt(i,j+1,0) - jt(i,j-1,0)) * i2z;
+                const amrex::Real wt = axis ? 0.0_rt
+                    : (jr(i,j+1,0) - jr(i,j-1,0)) * i2z
+                      - (jz(i+1,j,0) - jz(i-1,j,0)) * i2r;
+                const amrex::Real wz = axis
+                    ? 2.0_rt * (jt(i+1,j,0) - jt(i,j,0)) / dr
+                    : (jt(i+1,j,0) - jt(i-1,j,0)) * i2r
+                      + jt(i,j,0)/r;
+                return {ehc * (wr*wr + wt*wt + wz*wz) * dV};
+            });
+        }
+        p_eta_h += amrex::get<0>(rdata.value(rop));
+    }
+
     // Vacuum-eta-floor conduction loss (see m_je_vacuum_eta): the
     // sigma E channel of the relax advance, P_sigma = Int g(rho)/
     // eta_vac |E|^2 dV. Zero unless the floor is active. E is
