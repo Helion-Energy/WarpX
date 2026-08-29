@@ -99,7 +99,7 @@ assert np.min(final_energy) > 0.999 * pressure_reference / (gamma - 1.0)
 
 assert input_value("hybrid_pic_model.include_hall_term") == "false"
 assert input_value("hybrid_pic_model.include_electron_pressure_term") == "false"
-assert input_value("implicit_mhd.fluid_flux") == "centered"
+assert input_value("implicit_mhd.fluid_flux") == "legacy_e_centered"
 preconditioner = input_value("jacobian.pc_type")
 assert preconditioner == "pc_mhd_block"
 assert input_value("pc_mhd_block.include_ideal_mhd_coupling") == "true"
