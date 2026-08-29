@@ -1316,16 +1316,19 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         // trivially satisfied and stays legal -- the masked-cell Joule
         // gate still applies).
         if (m_wall_mask.GetThermalBC() ==
-            ImplicitMHDWallMask::ThermalBC::temperature) {
+                ImplicitMHDWallMask::ThermalBC::temperature ||
+            m_wall_mask.GetThermalBC() ==
+                ImplicitMHDWallMask::ThermalBC::dirichlet) {
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 m_conduction_braginskii || m_chi_ion_is_parser ||
                     m_chi_electron_is_parser ||
                     m_thermal_diffusivity_ion > 0.0_rt ||
                     m_thermal_diffusivity_electron > 0.0_rt,
-                "implicit_mhd.wall_thermal_bc = temperature requires a "
-                "conduction channel (thermal_diffusivity_ion/electron, "
-                "constant or parser, or thermal_conduction_model = "
-                "braginskii): the wall reservoir exchanges conductively");
+                "implicit_mhd.wall_thermal_bc = temperature/dirichlet "
+                "requires a conduction channel "
+                "(thermal_diffusivity_ion/electron, constant or parser, "
+                "or thermal_conduction_model = braginskii): the wall "
+                "reservoir exchanges conductively");
             // Contract guard: with wall_temperature below a temperature
             // floor the reservoir is unreachable by construction -- the
             // admissibility projection stops the state at the floor
@@ -2548,7 +2551,10 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "Wall thermal BC:               "
                    << m_wall_mask.ThermalBCName()
                    << (m_wall_mask.GetThermalBC() ==
-                               ImplicitMHDWallMask::ThermalBC::temperature
+                                   ImplicitMHDWallMask::ThermalBC::
+                                       temperature ||
+                               m_wall_mask.GetThermalBC() ==
+                                   ImplicitMHDWallMask::ThermalBC::dirichlet
                            ? " (T_wall = " +
                                  std::to_string(
                                      m_wall_mask.WallTemperature_eV()) +
@@ -5710,8 +5716,20 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const bool wall_mechanics =
         (wall_thermal_mode != ImplicitMHDWallMask::ThermalBC::none);
     const bool wall_thermal = add_conduction && wall_mechanics;
-    const bool wall_dirichlet =
-        (wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::temperature);
+    // Interface faces exchange against a T_wall reservoir in BOTH the
+    // one-sided drain mode (temperature) and the two-sided pin mode
+    // (dirichlet); zero_flux insulates them.
+    const bool wall_reservoir =
+        (wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::temperature ||
+         wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::dirichlet);
+    // wall_thermal_bc = dirichlet (the reference code's t_bc = 'd' contract): the
+    // interface exchange is TWO-SIDED at the half-cell Dirichlet
+    // distance -- the bath restores sub-T_wall cells instead of only
+    // draining -- and stays free-streaming limited in both directions
+    // (the rr12_S0w fatality was the UN-capped two-sided exchange; see
+    // the host-constant comment below).
+    const bool wall_pin =
+        (wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::dirichlet);
     const int* const AMREX_RESTRICT wall_first_masked_cc =
         wall_mechanics ? m_wall_mask.FirstMaskedCellCentered() : nullptr;
     // The table covers z cells [-ng, nz - 1 + ng] of the MASK's ghost
@@ -6264,7 +6282,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
             const bool wall_skip_conduction =
                 wall_thermal &&
                 ((wall_left_masked && wall_right_masked) ||
-                 (wall_interface && !wall_dirichlet));
+                 (wall_interface && !wall_reservoir));
 
             if (add_conduction && !wall_skip_conduction
 #if defined(WARPX_DIM_RZ)
@@ -7032,12 +7050,27 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         const amrex::Real interior_e_spec =
                             wall_left_masked ? e_spec_ion_right
                                              : e_spec_ion_left;
-                        amrex::Real drain =
-                            chi_ion_face * face_density *
-                            (interior_e_spec - wall_e_spec_ion) *
-                            theta_implicit_mhd::floor_outflow_limiter(
-                                interior_e_spec, wall_gate_e_spec_ion) *
-                            inverse_normal_size;
+                        amrex::Real drain;
+                        if (wall_pin) {
+                            // Dirichlet pin: two-sided exchange against
+                            // the floor-anchored bath at the half-cell
+                            // distance (the wall value sits ON the
+                            // interface, not one cell in). No gate, no
+                            // rectifier -- the cap below bounds both
+                            // directions.
+                            drain = chi_ion_face * face_density *
+                                    (interior_e_spec -
+                                     wall_gate_e_spec_ion) *
+                                    2.0_rt * inverse_normal_size;
+                        } else {
+                            drain =
+                                chi_ion_face * face_density *
+                                (interior_e_spec - wall_e_spec_ion) *
+                                theta_implicit_mhd::floor_outflow_limiter(
+                                    interior_e_spec,
+                                    wall_gate_e_spec_ion) *
+                                inverse_normal_size;
+                        }
                         // free-streaming cap, ALWAYS on at the wall face
                         const amrex::Real thermal_speed = std::sqrt(
                             PhysConst::kb * face_ti / conduction_ion_mass);
@@ -7189,12 +7222,23 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         const amrex::Real interior_e_spec =
                             wall_left_masked ? e_spec_electron_right
                                              : e_spec_electron_left;
-                        amrex::Real drain =
-                            chi_electron_face * face_density *
-                            (interior_e_spec - wall_e_spec_electron) *
-                            theta_implicit_mhd::floor_outflow_limiter(
-                                interior_e_spec, wall_gate_e_spec_electron) *
-                            inverse_normal_size;
+                        amrex::Real drain;
+                        if (wall_pin) {
+                            // Dirichlet pin (see the ion channel).
+                            drain = chi_electron_face * face_density *
+                                    (interior_e_spec -
+                                     wall_gate_e_spec_electron) *
+                                    2.0_rt * inverse_normal_size;
+                        } else {
+                            drain =
+                                chi_electron_face * face_density *
+                                (interior_e_spec -
+                                 wall_e_spec_electron) *
+                                theta_implicit_mhd::floor_outflow_limiter(
+                                    interior_e_spec,
+                                    wall_gate_e_spec_electron) *
+                                inverse_normal_size;
+                        }
                         const amrex::Real thermal_speed = std::sqrt(
                             PhysConst::kb * face_te / PhysConst::m_e);
                         const amrex::Real free_streaming_flux =
@@ -10538,13 +10582,15 @@ void ThetaImplicitMHD::ClampWallExteriorState ()
     const amrex::Real slack = 2.0e-6_rt;
     const amrex::Real density_image =
         m_mass_density_floor * (1.0_rt + slack);
-    // Wall-reservoir pressure at the clamp density (temperature mode):
-    // p_wall = n_image kB T_wall = rho_image (q/m) T_wall[eV] for the
-    // quasi-neutral single-ion fluid (both conduction channels use the
-    // same reservoir).
+    // Wall-reservoir pressure at the clamp density (temperature and
+    // dirichlet modes): p_wall = n_image kB T_wall = rho_image (q/m)
+    // T_wall[eV] for the quasi-neutral single-ion fluid (both
+    // conduction channels use the same reservoir).
     const amrex::Real wall_pressure =
         (m_wall_mask.GetThermalBC() ==
-         ImplicitMHDWallMask::ThermalBC::temperature)
+             ImplicitMHDWallMask::ThermalBC::temperature ||
+         m_wall_mask.GetThermalBC() ==
+             ImplicitMHDWallMask::ThermalBC::dirichlet)
             ? density_image * m_ion_charge_to_mass *
                   m_wall_mask.WallTemperature_eV()
             : 0.0_rt;

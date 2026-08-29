@@ -158,9 +158,9 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
     pp.query("wall_thermal_bc", thermal_bc);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         thermal_bc == "none" || thermal_bc == "zero_flux" ||
-            thermal_bc == "temperature",
-        "implicit_mhd.wall_thermal_bc must be 'none', 'zero_flux' or "
-        "'temperature'");
+            thermal_bc == "temperature" || thermal_bc == "dirichlet",
+        "implicit_mhd.wall_thermal_bc must be 'none', 'zero_flux', "
+        "'temperature' or 'dirichlet'");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         thermal_bc == "none" || wall_model != "none",
         "implicit_mhd.wall_thermal_bc requires implicit_mhd.wall_model = "
@@ -168,19 +168,20 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
         "shaped-wall mask)");
     const bool has_wall_temperature = utils::parser::queryWithParser(
         pp, "wall_temperature", m_wall_temperature);
-    if (thermal_bc == "temperature") {
-        m_thermal_bc = ThermalBC::temperature;
+    if (thermal_bc == "temperature" || thermal_bc == "dirichlet") {
+        m_thermal_bc = (thermal_bc == "dirichlet") ? ThermalBC::dirichlet
+                                                   : ThermalBC::temperature;
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             has_wall_temperature && m_wall_temperature > 0.0,
-            "implicit_mhd.wall_thermal_bc = temperature requires a "
-            "positive implicit_mhd.wall_temperature (in eV)");
+            "implicit_mhd.wall_thermal_bc = temperature/dirichlet requires "
+            "a positive implicit_mhd.wall_temperature (in eV)");
     } else {
         m_thermal_bc = (thermal_bc == "zero_flux") ? ThermalBC::zero_flux
                                                    : ThermalBC::none;
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !has_wall_temperature,
             "implicit_mhd.wall_temperature requires "
-            "implicit_mhd.wall_thermal_bc = temperature");
+            "implicit_mhd.wall_thermal_bc = temperature or dirichlet");
     }
 
     if (wall_model == "none") {
@@ -477,7 +478,8 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
                    << " masked corner (E_theta) rows in the valid domain; "
                    << "axis clearance " << min_first_masked
                    << " cells; thermal BC " << ThermalBCName();
-    if (m_thermal_bc == ThermalBC::temperature) {
+    if (m_thermal_bc == ThermalBC::temperature ||
+        m_thermal_bc == ThermalBC::dirichlet) {
         amrex::Print() << " (T_wall = " << m_wall_temperature << " eV)";
     }
     if (m_band_eta_override > 0.0) {
@@ -498,6 +500,7 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
 const char* ImplicitMHDWallMask::ThermalBCName () const
 {
     if (!m_active || m_thermal_bc == ThermalBC::none) { return "none"; }
+    if (m_thermal_bc == ThermalBC::dirichlet) { return "dirichlet"; }
     return (m_thermal_bc == ThermalBC::temperature) ? "temperature"
                                                     : "zero_flux";
 }

@@ -45,7 +45,16 @@ Both modes gate the r = 0 axis health: the reflecting parity origin must
 compose cleanly with the shaped wall (z-uniform axis column, radial
 monotonicity preserved, no NaNs anywhere).
 
-Usage: analysis_mhd_wall_thermal.py <diag_dir> <zero_flux|temperature>
+Usage: analysis_mhd_wall_thermal.py <diag_dir> <zero_flux|temperature|dirichlet>
+
+mode = "dirichlet" (CLI override wall_thermal_bc=dirichlet,
+wall_temperature=4.0): the interface faces PIN the wall temperature
+(the reference code's t_bc='d' contract) -- a TWO-SIDED exchange at the
+half-cell Dirichlet distance, free-streaming capped in both
+directions. The shared drain-mode gates apply (rigidity, monotone
+interior drain, ledger closure, ledge draining), with the ring
+anchored at the DISTINCT 4 eV bath -- proving the mode plumbing
+end-to-end against the temperature twin's 2 eV.
 """
 
 import glob
@@ -56,14 +65,14 @@ import yt
 
 diag_dir = sys.argv[1]
 mode = sys.argv[2]
-assert mode in ("zero_flux", "temperature"), f"unknown mode {mode}"
+assert mode in ("zero_flux", "temperature", "dirichlet"), f"unknown mode {mode}"
 
 proton_mass = 1.67262192595e-27  # WarpX parser m_p (ablastr::constant)
 qe = 1.602176634e-19
 n0 = 1.0e20
 T0_ev = 100.0
 Tmin_ev = 2.0
-Twall_ev = 2.0
+Twall_ev = 4.0 if mode == "dirichlet" else 2.0
 gamma = 5.0 / 3.0
 
 FIELDS = (
@@ -165,7 +174,7 @@ print(f"total    energy trace: {total_energy / total_energy[0]}")
 SLACK = 2.0e-6
 rho_image = 1.0e-4 * n0 * proton_mass * (1.0 + SLACK)
 electron_bound = 1.0e-4 * n0 * qe * Tmin_ev / (gamma - 1.0)
-if mode == "temperature":
+if mode in ("temperature", "dirichlet"):
     n_image = rho_image / proton_mass
     electron_bound = max(electron_bound,
                          n_image * qe * Twall_ev / (gamma - 1.0))
@@ -259,7 +268,8 @@ else:
     )
     drained_fraction = 1.0 - interior_energy[-1] / interior_energy[0]
     print(f"interior drained fraction: {drained_fraction:.3f}")
-    assert 0.05 < drained_fraction < 0.60, (
+    max_drained = 0.80 if mode == "dirichlet" else 0.60
+    assert 0.05 < drained_fraction < max_drained, (
         f"unphysical drain fraction {drained_fraction:.3f}"
     )
     # ...and the ledger closes against the measured interior loss.

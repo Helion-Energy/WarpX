@@ -1609,6 +1609,21 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# mode "dirichlet": the interface faces PIN the wall temperature (the
+# The reference code's t_bc='d' contract) -- a two-sided exchange at the half-cell
+# Dirichlet distance, free-streaming capped in both directions; T_wall
+# = 4 eV (distinct from the temperature twin's 2 eV, proving the mode
+# plumbing end-to-end) under the same rigidity/ledger-closure/axis gates
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_thermal_dirichlet  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_thermal implicit_mhd.wall_thermal_bc=dirichlet implicit_mhd.wall_temperature=4.0"  # inputs
+    "analysis_mhd_wall_thermal.py diags dirichlet"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # dielectric standoff, FLUID-contract regression: the temperature-mode
 # thermal wall run again under wall_model=dielectric (which requires the
 # split external fields; the drive is zero) must satisfy the identical

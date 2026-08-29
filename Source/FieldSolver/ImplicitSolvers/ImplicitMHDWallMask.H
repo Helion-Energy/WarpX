@@ -209,6 +209,14 @@
  *     two-sided, un-capped exchange heats the machine's entire
  *     near-floor wall rim on the sub-step cell-diffusion time and was
  *     measured fatal on the formation ladder (rr12_S0w).
+ *   * wall_thermal_bc = dirichlet: the interface faces PIN the wall
+ *     temperature (the reference code's t_bc = 'd' contract): a TWO-SIDED
+ *     conductive exchange against T_wall at the half-cell Dirichlet
+ *     distance, free-streaming limited in BOTH directions (this is
+ *     what distinguishes it from the rr12-fatal unlimited exchange).
+ *     The pin target is anchored at max(T_wall, temperature-floor
+ *     image), so the bath restores floor-adjacent cells instead of
+ *     demanding states the admissibility projection forbids.
  *
  *   The default none keeps wall_model bit-identical to the
  *   electromagnetic-only wall.
@@ -257,8 +265,8 @@
  *   pec_response | dielectric
  * - wall_polyline_file = <csv path> ("z, r" rows; resolved against
  *   AMREX_INPUTS_FILE_PREFIX like the inputs file itself when relative)
- * - wall_thermal_bc = none (default) | zero_flux | temperature
- * - wall_temperature = <eV> (temperature mode only)
+ * - wall_thermal_bc = none (default) | zero_flux | temperature | dirichlet
+ * - wall_temperature = <eV> (temperature/dirichlet modes)
  * - wall_band_eta_override = <ohm m> (default 0 = off): constant,
  *   state-independent field-advance eta at band-interior electric-
  *   field locations; see the band-hygiene note above. Aimed at the
@@ -367,7 +375,7 @@ class ImplicitMHDWallMask
 public:
     /** Thermal wall boundary at the stair-step fluid interface
      * (implicit_mhd.wall_thermal_bc); see the class comment. */
-    enum class ThermalBC { none, zero_flux, temperature };
+    enum class ThermalBC { none, zero_flux, temperature, dirichlet };
 
     /** Parse the wall inputs and, when active, build the static
      * first-masked-radial-index tables per electric-field staggering over
