@@ -315,6 +315,14 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "implicit_mhd.conduction_coulomb_log must be positive");
     const bool has_conduction_chi_min = utils::parser::queryWithParser(
         pp, "conduction_chi_min", m_conduction_chi_min);
+    utils::parser::queryWithParser(
+        pp, "conduction_chi_par_min", m_conduction_chi_par_min);
+    utils::parser::queryWithParser(
+        pp, "conduction_chi_par_max", m_conduction_chi_par_max);
+    utils::parser::queryWithParser(
+        pp, "conduction_chi_perp_min", m_conduction_chi_perp_min);
+    utils::parser::queryWithParser(
+        pp, "conduction_chi_perp_max", m_conduction_chi_perp_max);
     const bool has_conduction_chi_max = utils::parser::queryWithParser(
         pp, "conduction_chi_max", m_conduction_chi_max);
     // The clamps only enter the Braginskii coefficient evaluation: set
@@ -5623,8 +5631,18 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const amrex::Real brag_small_b2 =
         PhysConst::mu0 *
         (m_electron_pressure_floor + m_ion_pressure_floor);
-    const amrex::Real brag_chi_min = m_conduction_chi_min;
-    const amrex::Real brag_chi_max = m_conduction_chi_max;
+    const amrex::Real brag_chi_par_min = (m_conduction_chi_par_min >= 0.0_rt)
+                                             ? m_conduction_chi_par_min
+                                             : m_conduction_chi_min;
+    const amrex::Real brag_chi_par_max = (m_conduction_chi_par_max >= 0.0_rt)
+                                             ? m_conduction_chi_par_max
+                                             : m_conduction_chi_max;
+    const amrex::Real brag_chi_perp_min =
+        (m_conduction_chi_perp_min >= 0.0_rt) ? m_conduction_chi_perp_min
+                                              : m_conduction_chi_min;
+    const amrex::Real brag_chi_perp_max =
+        (m_conduction_chi_perp_max >= 0.0_rt) ? m_conduction_chi_perp_max
+                                              : m_conduction_chi_max;
     // Quasi-shorting cross-field boost (implicit_mhd.conduction_qs_*):
     // an ADDITIVE Braginskii chi_perp keyed to the pseudo-entropy excess
     // above the load envelope (see the header and the qs_boost lambda in
@@ -6863,14 +6881,30 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 // at chi_max with knee width chi_max/10 (exact
                 // pass-through below 0.9 chi_max). Both maps are
                 // monotone, so chi_perp <= chi_par is preserved.
-                const auto brag_clamp = [=] (amrex::Real chi_value) {
+                // Reference-matched per-component clamps: parallel and
+                // perpendicular conductivities
+                // carry separate floors and caps (the reference code's xil*_mn/mx vs
+                // xip*_mn/mx, global.f90:75-77). The dedicated knobs
+                // default to the legacy shared chi_min/chi_max, so decks
+                // that set neither are bit-identical.
+                const auto clamp_with = [=] (amrex::Real chi_value,
+                                             const amrex::Real lo,
+                                             const amrex::Real hi) {
                     chi_value = theta_implicit_mhd::smooth_positive_floor(
-                        chi_value, brag_chi_min);
-                    if (brag_chi_max > 0.0_rt) {
+                        chi_value, lo);
+                    if (hi > 0.0_rt) {
                         chi_value = theta_implicit_mhd::soft_upper_clip(
-                            chi_value, brag_chi_max, 0.1_rt * brag_chi_max);
+                            chi_value, hi, 0.1_rt * hi);
                     }
                     return chi_value;
+                };
+                const auto brag_clamp_par = [=] (amrex::Real chi_value) {
+                    return clamp_with(chi_value, brag_chi_par_min,
+                                      brag_chi_par_max);
+                };
+                const auto brag_clamp_perp = [=] (amrex::Real chi_value) {
+                    return clamp_with(chi_value, brag_chi_perp_min,
+                                      brag_chi_perp_max);
                 };
                 // Quasi-shorting cross-field boost (implicit_mhd.
                 // conduction_qs_chi, braginskii only): ADDITIVE chi_perp
@@ -6933,7 +6967,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                               brag_i_denominator_1) *
                                  x +
                              1.0_rt);
-                        brag_chi_par_ion = brag_clamp(chi_par_raw);
+                        brag_chi_par_ion = brag_clamp_par(chi_par_raw);
                         // Quasi-shorting boost of the ION channel: s is
                         // keyed on the ion temperature with the SAME
                         // envelope T0 -- the broken-surface shorting
@@ -6957,7 +6991,12 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                     halo_boost_reference,
                                     halo_boost_guard, halo_boost_chi);
                         }
-                        brag_chi_perp_ion = brag_clamp(chi_perp_ion_value);
+                        brag_chi_perp_ion = brag_clamp_perp(chi_perp_ion_value);
+                        // The reference code's t_cond: xil = MAX(xil, xip) after the
+                        // clamps -- parallel at least perpendicular (also
+                        // keeps the tensor cross term sign-safe).
+                        brag_chi_par_ion =
+                            std::max(brag_chi_par_ion, brag_chi_perp_ion);
                         // Wall interface faces keep the one-sided
                         // isotropic drain with the tensor's nn
                         // projection as its scalar chi.
@@ -7099,7 +7138,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                               brag_e_denominator_1) *
                                  x +
                              1.0_rt);
-                        brag_chi_par_electron = brag_clamp(chi_par_raw);
+                        brag_chi_par_electron = brag_clamp_par(chi_par_raw);
                         // Quasi-shorting boost (see the ion channel and
                         // the qs_boost lambda): additive chi_perp, keyed
                         // on the electron temperature, clamped after.
@@ -7117,7 +7156,10 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                     halo_boost_guard, halo_boost_chi);
                         }
                         brag_chi_perp_electron =
-                            brag_clamp(chi_perp_electron_value);
+                            brag_clamp_perp(chi_perp_electron_value);
+                        // The reference code's te_cond: parallel at least perpendicular.
+                        brag_chi_par_electron = std::max(
+                            brag_chi_par_electron, brag_chi_perp_electron);
                         // Wall interface faces keep the one-sided
                         // isotropic drain with the tensor's nn
                         // projection as its scalar chi.

@@ -3018,6 +3018,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         joule_ohm_current=None,
         electron_ion_equilibration=None,
         braginskii_tangential_limiter=None,
+        conduction_chi_par_min=None,
+        conduction_chi_par_max=None,
+        conduction_chi_perp_min=None,
+        conduction_chi_perp_max=None,
         resistive_theta=None,
         resistive_direct_device_assembly=None,
         conduction_theta=None,
@@ -3120,6 +3124,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.joule_ohm_current = joule_ohm_current
         self.electron_ion_equilibration = electron_ion_equilibration
         self.braginskii_tangential_limiter = braginskii_tangential_limiter
+        self.conduction_chi_par_min = conduction_chi_par_min
+        self.conduction_chi_par_max = conduction_chi_par_max
+        self.conduction_chi_perp_min = conduction_chi_perp_min
+        self.conduction_chi_perp_max = conduction_chi_perp_max
         self.resistive_theta = resistive_theta
         self.resistive_direct_device_assembly = resistive_direct_device_assembly
         self.conduction_theta = conduction_theta
@@ -3238,6 +3246,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
             self.electron_ion_equilibration)
         implicit_mhd.braginskii_tangential_limiter = (
             self.braginskii_tangential_limiter)
+        implicit_mhd.conduction_chi_par_min = self.conduction_chi_par_min
+        implicit_mhd.conduction_chi_par_max = self.conduction_chi_par_max
+        implicit_mhd.conduction_chi_perp_min = self.conduction_chi_perp_min
+        implicit_mhd.conduction_chi_perp_max = self.conduction_chi_perp_max
         implicit_mhd.resistive_theta = self.resistive_theta
         implicit_mhd.resistive_direct_device_assembly = (
             self.resistive_direct_device_assembly

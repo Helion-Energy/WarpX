@@ -1199,6 +1199,12 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // soft cap at chi_max (exact pass-through below 0.9 chi_max), applied
     // per channel BEFORE the free-streaming limiter.
     amrex::Real m_conduction_chi_min = 0.0;
+    // Reference-matched per-component clamps (xil*_mn/mx vs xip*_mn/mx):
+    // -1 (default) inherits the shared chi_min/chi_max above.
+    amrex::Real m_conduction_chi_par_min = -1.0;
+    amrex::Real m_conduction_chi_par_max = -1.0;
+    amrex::Real m_conduction_chi_perp_min = -1.0;
+    amrex::Real m_conduction_chi_perp_max = -1.0;
     amrex::Real m_conduction_chi_max = 0.0;
     // Quasi-shorting cross-field boost of the Braginskii chi_perp
     // (implicit_mhd.conduction_qs_*, braginskii only; qs_chi = 0
