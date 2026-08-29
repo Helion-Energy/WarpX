@@ -11322,12 +11322,20 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time, const int 
     const int wall_mz_hi =
         m_wall_mask.AxialCells() - 1 + m_wall_mask.GhostCells();
 
-    if (m_electron_temperature_floor > 0.0_rt) {
-        // Electron-temperature floor restoration at the accepted step end:
+    {
+        // Electron floor restoration at the accepted step end:
         // U_e >= max(p_e_floor, n kB T_e_floor)/(gamma_e - 1). The
         // restoration lands the same 1e-6 (|value| + bound) SLACK MARGIN
         // above the bound as the direction projection, never exactly on
-        // it (see the CGL restoration below for why).
+        // it (see the CGL restoration below for why). The ABSOLUTE part
+        // is enforced unconditionally -- the ion blocks' round-off/
+        // stagnation insurance convention. The previous contract left it
+        // to the theta-aware step limiter alone; the clamp-era formation
+        // arms died on the positivity assert below through exactly that
+        // gap (a stagnation-accepted iterate under runaway conduction
+        // demands), while every ion block was silently repaired. The
+        // temperature part rides on top when electron_temperature_floor
+        // is set, ratchet-gated on the step-old value as before.
         const amrex::MultiFab& density_block =
             m_state.getMultiFabBlock(MassDensityName, 0);
         const amrex::MultiFab& old_density_block =
@@ -11336,8 +11344,10 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time, const int 
             m_state_old.getMultiFabBlock(ElectronEnergyName, 0);
         amrex::MultiFab& electron_energy_block =
             m_state.getMultiFabBlock(ElectronEnergyName, 0);
+        const amrex::Real abs_floor = bounds.floors[1];
         const amrex::Real energy_per_density =
             bounds.temperature_coefficients[1];
+        const bool has_te_floor = m_electron_temperature_floor > 0.0_rt;
         for (amrex::MFIter mfi(electron_energy_block); mfi.isValid(); ++mfi) {
             const amrex::Box box = mfi.validbox();
             const auto rho = density_block.const_array(mfi);
@@ -11353,16 +11363,15 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time, const int 
                         return;
                     }
                 }
-                if (energy_old(i, j, k) <
-                    energy_per_density * rho_old(i, j, k)) {
-                    return; // ratchet: was below the floor, do not lift
-                }
-                // Only the temperature part needs restoring: the CONSTANT
-                // absolute floor survives the theta extrapolation on its
-                // own, so it is left untouched here (near-absolute-floor
-                // cells keep their pre-temperature-floor behavior).
+                const bool ratchet_engaged =
+                    has_te_floor &&
+                    energy_old(i, j, k) >=
+                        energy_per_density * rho_old(i, j, k);
                 const amrex::Real cell_floor =
-                    energy_per_density * rho(i, j, k);
+                    ratchet_engaged
+                        ? std::max(abs_floor,
+                                   energy_per_density * rho(i, j, k))
+                        : abs_floor;
                 const amrex::Real margin =
                     1.0e-6_rt *
                     (std::abs(energy_array(i, j, k)) + cell_floor);
