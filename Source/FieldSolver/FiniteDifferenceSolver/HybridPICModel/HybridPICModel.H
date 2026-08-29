@@ -874,7 +874,7 @@ public:
      *     (beta(x) + curlcurl_theta) E_theta = (mu0 e / m_e_eff) num_theta,
      *
      * with beta = mu0 e^2 n / m_e_eff evaluated from the UNfloored
-     * midpoint density and curlcurl_theta = -(1/r) d_r (r d_r .) - d_z^2 .
+     * frozen-family density (see m_curlcurl_pol_frozen_rho) and curlcurl_theta = -(1/r) d_r (r d_r .) - d_z^2 .
      * + 1/r^2 (the theta component of the vector curl-curl). The RZ
      * metric is absorbed into a Cartesian-form nodal ABec operator by
      * multiplying the equation by r:
@@ -1040,13 +1040,19 @@ public:
     mutable bool m_esolve_pol_verified = false;
     bool m_inertia_jpold_captured = false;
 
-    /** curlcurl_form stage 2: evaluate the poloidal stage's density-derived
-     *  operator content -- the beta rows, the zero-density RHS membership
-     *  test, the vacuum-closure gamma gate, and the numerator fold weights
-     *  -- from the per-step-frozen rho^n snapshot ("hybrid_rho_n_frozen",
-     *  captured on the first non-Jacobian evaluation of each step, the
-     *  same latch the inertia drho/dt leg uses) instead of the live
-     *  per-evaluation midpoint deposit. The binary gates are otherwise
+    /** curlcurl_form: evaluate BOTH elliptic stages' density-derived
+     *  operator content -- the toroidal fold and acoef, the poloidal beta
+     *  rows, the RHS membership tests, the vacuum-closure gamma gate, and
+     *  the numerator fold weights -- from the per-step-frozen rho^n
+     *  snapshot ("hybrid_rho_n_frozen", captured at STEP ENTRY from the
+     *  committed component-0 deposit -- the tensor/vacmask capture family
+     *  -- before any residual evaluation; the inertia assembly's lazy
+     *  capture is then a per-step no-op on the same latch) instead of the
+     *  live per-evaluation midpoint deposit. The entry capture also covers
+     *  the resistive push-field correction's Ohm passes, which run BEFORE
+     *  the first midpoint deposit of the step (an EMPTY density there
+     *  degenerates the operators; measured as a first-solve CG cap on
+     *  seeded vacuum-column decks). The binary gates are otherwise
      *  re-decided from a fresh deposit in EVERY residual evaluation, so
      *  near-threshold cells flip membership under finite-difference
      *  Jacobian probe deposits (an O(1) operator-row change at probe

@@ -4338,12 +4338,15 @@ Maxwell solver: kinetic-fluid hybrid
     :default: ``true``
     :optional:
 
-    With ``esolve = curlcurl_form``, evaluate the poloidal stage's density-derived operator
-    content — the screening (:math:`\beta`) rows, the zero-density RHS membership test, the
-    vacuum-closure :math:`\gamma` gate, and the numerator fold weights — from the
-    per-step-frozen :math:`\rho^n` snapshot (captured on the first non-Jacobian residual
-    evaluation of each step, the same latch as the inertia :math:`\partial\rho/\partial t`
-    leg) instead of the live per-evaluation midpoint deposit. The binary gates are otherwise
+    With ``esolve = curlcurl_form``, evaluate both elliptic stages' density-derived operator
+    content — the toroidal fold and screening coefficient, the poloidal screening
+    (:math:`\beta`) rows, the RHS membership tests, the vacuum-closure :math:`\gamma` gate,
+    and the numerator fold weights — from the per-step-frozen :math:`\rho^n` snapshot
+    (captured at step entry from the committed component-0 deposit, before any residual
+    evaluation — this also covers the resistive push-field correction's Ohm passes, which
+    run before the step's first midpoint deposit; the same latch as the inertia
+    :math:`\partial\rho/\partial t` leg) instead of the live per-evaluation midpoint
+    deposit. The binary gates are otherwise
     re-decided from a fresh particle deposit in every residual evaluation, so near-threshold
     cells flip membership under finite-difference Jacobian probe deposits and between
     Newton/line-search evaluations — an :math:`O(1)` operator-row change at probe amplitude

@@ -355,11 +355,11 @@ class BlockBandedPC : public Preconditioner<T,Ops>
                                             //   zero in true vacuum
 
             // curlcurl_form coefficient windows (allocated in that mode
-            // only). The theta sector reads the LIVE midpoint density with
-            // the kernels' cc-convention averages of the nodal deposit
-            // (mirrored, including the known half-cell misregistration);
-            // the poloidal sector reads the per-step-frozen rho^n snapshot
-            // exactly as SolveEPolCurlCurlRZ does.
+            // only). Both sectors read the solves' frozen-family density
+            // source (the per-step entry snapshot when captured, the
+            // midpoint deposit otherwise) with the kernels' cc-convention
+            // averages of the nodal deposit mirrored, including the known
+            // half-cell misregistration.
             PArr acTh, foldTh, rhswTh;      // theta acoef, fold rho, RHS wt
             PArr acPr, foldPr, rhswPr;      // Er rows
             PArr acPz, foldPz, rhswPz;      // Ez rows
@@ -1780,9 +1780,9 @@ void BlockBandedPC<T,Ops>::FillCoeffs (BoxSys& S,
         }
 
         // ---- curlcurl_form coefficient windows ----
-        // theta rows read the LIVE midpoint density; poloidal rows read
-        // the per-step-frozen rho^n snapshot when in play (hRhoPol), the
-        // midpoint deposit otherwise -- exactly the solves' own selection.
+        // Both sectors read the solves' own density selection: the
+        // per-step-frozen entry snapshot when in play (hRhoPol), the
+        // midpoint deposit otherwise.
         // Both use the kernels' cc-convention index arithmetic on the
         // nodal deposit (mirrored, including the flagged half-cell
         // misregistration: the PC targets the operator as built).
@@ -1802,12 +1802,15 @@ void BlockBandedPC<T,Ops>::FillCoeffs (BoxSys& S,
             auto rhoPol = [&](int i, int j) -> RT {
                 return have_rho_pol ? hRhoPol.get(i,j,0) : hRho.get(i,j,0);
             };
+            // theta rows follow the solve's frozen-family source (the
+            // entry-capture fix moved the toroidal fold/operator onto the
+            // same snapshot the poloidal stage reads)
             for (int i = S.acTh.ilo; i <= S.acTh.ihi; i++) {
                 const RT rr = std::max(rmin + i*dr, RT(0.125)*dr);
                 for (int j = S.acTh.jlo; j <= S.acTh.jhi; j++) {
                     const RT rho_n4 = std::max(RT(0.0),
-                        RT(0.25)*(hRho.get(i,j) + hRho.get(i-1,j)
-                                + hRho.get(i,j-1) + hRho.get(i-1,j-1)));
+                        RT(0.25)*(rhoPol(i,j) + rhoPol(i-1,j)
+                                + rhoPol(i,j-1) + rhoPol(i-1,j-1)));
                     S.acTh.ref(i,j) = rr*beta_fac*rho_n4 + RT(1.0)/rr;
                     S.foldTh.ref(i,j) = rho_n4;
                     const bool dir = (i <= 0) || (i >= m_ihi_nd)

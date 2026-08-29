@@ -1460,6 +1460,20 @@ void HybridPICModel::HybridPICSolveE (
         amrex::MultiFab & Etheta = *Efield[1];
         amrex::MultiFab & num = *m_num_theta;
         const int mid = rhofield.nComp()/2;
+        // Density source for BOTH elliptic stages (toroidal fold/operator
+        // and the poloidal stage): the per-step-frozen rho^n snapshot once
+        // captured (at step entry since the entry-capture fix; the
+        // push-field correction's Ohm passes run before the first midpoint
+        // deposit, whose EMPTY state otherwise degenerates the operators),
+        // the live midpoint deposit otherwise (initialization solves, knob
+        // off). Fold weights, screening rows, membership tests, and gamma
+        // gate must all read the SAME density (null-family rule).
+        amrex::MultiFab const * rho_pol = &rhofield;
+        int rho_pol_comp = mid;
+        if (m_curlcurl_pol_frozen_rho && m_inertia_rho_n_captured) {
+            rho_pol = warpx.m_fields.get("hybrid_rho_n_frozen", lev);
+            rho_pol_comp = 0;
+        }
         // Response-frame source: transform the multiplied-through equation
         // BEFORE solving, (beta + curlcurl) E_p = rhs - (beta + curlcurl)
         // E_ext. In-domain curlcurl E_ext = -s'(t) curlcurl A = mu0 J_coil
@@ -1483,23 +1497,25 @@ void HybridPICModel::HybridPICSolveE (
         {
             auto const & n_arr = num.array(mfi);
             auto const & e_arr = Etheta.const_array(mfi);
-            auto const & r_arr = rhofield.const_array(mfi);
+            auto const & r_arr = rho_pol->const_array(mfi);
+            const int rc_th = rho_pol_comp;
             amrex::Array4<amrex::Real const> xt;
             if (Et_ext) { xt = Et_ext->const_array(mfi); }
             amrex::ParallelFor(mfi.tilebox(),
             [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
-                // nodal density from the cell-centered midpoint deposit
+                // nodal density (cell-centered-convention average of the
+                // frozen-family source)
                 amrex::Real const rho_n = amrex::max(0.0_rt,
-                    0.25_rt*(r_arr(i, j, k, mid)
-                           + r_arr(i-1, j, k, mid)
-                           + r_arr(i, j-1, k, mid)
-                           + r_arr(i-1, j-1, k, mid)));
+                    0.25_rt*(r_arr(i, j, k, rc_th)
+                           + r_arr(i-1, j, k, rc_th)
+                           + r_arr(i, j-1, k, rc_th)
+                           + r_arr(i-1, j-1, k, rc_th)));
                 n_arr(i, j, k) += rho_n * e_arr(i, j, k);
                 if (xt) { n_arr(i, j, k) -= rho_n * xt(i, j, k); }
             });
         }
-        SolveEThetaCurlCurlRZ(Etheta, num, rhofield, mid, lev);
+        SolveEThetaCurlCurlRZ(Etheta, num, *rho_pol, rho_pol_comp, lev);
 
         // Stage 2: the poloidal (E_r, E_z) pair through the coupled
         // curl-curl solve (the identity form: a component Laplacian
@@ -1519,12 +1535,8 @@ void HybridPICModel::HybridPICSolveE (
         // weights, beta rows, RHS membership test, and gamma gate must
         // all read the SAME density: mixed sources reopen the gradient
         // null family the gate closes.
-        amrex::MultiFab const * rho_pol = &rhofield;
-        int rho_pol_comp = mid;
-        if (m_curlcurl_pol_frozen_rho && m_inertia_rho_n_captured) {
-            rho_pol = warpx.m_fields.get("hybrid_rho_n_frozen", lev);
-            rho_pol_comp = 0;
-        }
+        // (rho_pol / rho_pol_comp selected once above, shared with the
+        // toroidal stage)
         for (int c = 0; c < 2; ++c) {
             const int dir = (c == 0) ? 0 : 2;
             amrex::MultiFab & Ec = *Efield[dir];
@@ -2545,6 +2557,15 @@ void HybridPICModel::SolveEThetaCurlCurlRZ (amrex::MultiFab& Etheta,
     MultiFab::Copy(p_mf, z_mf, 0, 0, 1, ng0);
     Real rz_old = MultiFab::Dot(res, 0, z_mf, 0, 1, 0);
     Real const rhs_norm = std::sqrt(MultiFab::Dot(rhs, 0, rhs, 0, 1, 0));
+    // Exactly zero RHS (every row gated, or a quiescent state): the unique
+    // solution of this SPD system is identically zero -- return it exactly
+    // instead of asking CG to beat a sub-roundoff tolerance (1e-11 of the
+    // 1e-300 floor) from a nonzero warm start, which it can never do.
+    if (rhs_norm == 0.0_rt) {
+        Etheta.setVal(0.0_rt);
+        Etheta.FillBoundary(geom.periodicity());
+        return;
+    }
     // Tight tolerance: this solve runs inside every residual evaluation
     // including finite-difference Jacobian probes (the Darwin E_L
     // precedent) -- solver noise above the probe scale poisons secants.
@@ -3266,6 +3287,15 @@ void HybridPICModel::SolveEPolCurlCurlRZ (amrex::MultiFab& Er,
     Real const rhs_norm = std::sqrt(
         MultiFab::Dot(rhs_r, 0, rhs_r, 0, 1, 0)
       + MultiFab::Dot(rhs_z, 0, rhs_z, 0, 1, 0));
+    // Exactly zero RHS: the unique solution of the SPD system is
+    // identically zero -- return it exactly (see the toroidal solve).
+    if (rhs_norm == 0.0_rt) {
+        Er.setVal(0.0_rt);
+        Ez.setVal(0.0_rt);
+        Er.FillBoundary(geom.periodicity());
+        Ez.FillBoundary(geom.periodicity());
+        return;
+    }
     // Tight tolerance: this solve runs inside every residual evaluation
     // including finite-difference Jacobian probes (the Darwin E_L
     // precedent) -- solver noise above the probe scale poisons secants.

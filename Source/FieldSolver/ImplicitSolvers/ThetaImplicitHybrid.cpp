@@ -256,6 +256,33 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
         m_hybrid_pic_model->CaptureTensorStepStart();
     }
 
+    // curlcurl_form + frozen gates: capture the per-step-frozen rho^n
+    // snapshot HERE, from the committed entry deposit in component 0 of
+    // rho_fp (the tensor/vacmask capture family), BEFORE any residual
+    // evaluation of the step. The resistive push-field correction runs
+    // its Ohm passes before the first midpoint deposit and before the
+    // inertia assembly's lazy capture, so the first elliptic solves of
+    // the run otherwise read an EMPTY midpoint density -- beta = 0
+    // everywhere and every anchored RHS row zeroed against a nonzero
+    // resistive warm start, an unreachable tolerance (measured: seeded
+    // vacuum-column decks cap the toroidal CG at the very first solve).
+    // The inertia assembly's own capture becomes a per-step no-op (latch
+    // already set); the drho/dt leg, the gates, and the toroidal fold all
+    // read this same entry snapshot.
+    if (m_hybrid_pic_model->m_esolve_curlcurl
+        && m_hybrid_pic_model->m_curlcurl_pol_frozen_rho) {
+        for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+            amrex::MultiFab const & rho_fp =
+                *m_WarpX->m_fields.get(FieldType::rho_fp, lev);
+            amrex::MultiFab & rho_n_frozen =
+                *m_WarpX->m_fields.get("hybrid_rho_n_frozen", lev);
+            amrex::MultiFab::Copy(rho_n_frozen, rho_fp, 0, 0, 1,
+                                  amrex::min(rho_n_frozen.nGrowVect(),
+                                             rho_fp.nGrowVect()));
+        }
+        m_hybrid_pic_model->m_inertia_rho_n_captured = true;
+    }
+
     // External vector-potential drive, split-field form: the solver state
     // carries the PLASMA fields only, so the field boundary conditions act
     // on the plasma response while the imposed external field rides
