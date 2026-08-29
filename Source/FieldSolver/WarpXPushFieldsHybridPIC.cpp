@@ -342,9 +342,21 @@ void WarpX::HybridPICDepositRhoAndJ ()
         mypc->DepositCurrent(current_fp, dt[0], -0.5_rt * dt[0]);
     }
 
-    // TODO: Perhaps add flag here for when using temperature accumulation in Hybrid
-    // Perform Temperature Deposition at time t_{n}
-    mypc->DepositTemperatures(m_fields, 0.0_rt);
+    // Perform Temperature Deposition at time t_{n}. Interval-gated (see
+    // the m_t_deposit_interval member doc): the consumers are
+    // collision-rate-class and tolerate a deposit held for N steps; the
+    // T_<species> fields persist between deposits. Always deposits on
+    // the first call after boot or restart — the fields are otherwise
+    // unseeded (restart does not round-trip them).
+    {
+        auto & hybrid = *m_hybrid_pic_model;
+        if (!hybrid.m_t_deposited_once
+            || hybrid.m_t_deposit_interval <= 1
+            || istep[0] % hybrid.m_t_deposit_interval == 0) {
+            mypc->DepositTemperatures(m_fields, 0.0_rt);
+            hybrid.m_t_deposited_once = true;
+        }
+    }
 
     // Deposit cold-relativistic fluid charge and current
     if (do_fluid_species) {

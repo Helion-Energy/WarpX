@@ -87,6 +87,11 @@ void HybridPICModel::ReadParameters ()
         "speed). The e-form sponge is B-side only: E is algebraic "
         "and regenerates every solve, so the E-side reference/"
         "tracking knobs are je_form-only by construction.");
+
+    utils::parser::queryWithParser(pp_hybrid, "temperature_deposition_interval",
+                                   m_t_deposit_interval);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_t_deposit_interval >= 1,
+        "hybrid_pic_model.temperature_deposition_interval must be >= 1");
     if (m_substeps % 2 != 0) {
         ablastr::warn_manager::WMRecordWarning(
             "HybridPIC",

@@ -787,6 +787,24 @@ public:
      *  which the ramp tolerates). Input: je_sponge_vw. */
     amrex::Real m_je_sponge_vw = 0.0;
 
+    /** Interval (in steps) of the per-species temperature moment deposit
+     *  (DepositTemperatures — measured ~20% of a production step). Its
+     *  consumers are collision-rate-class quantities (Q_ei relaxation,
+     *  the nu_ei parser, ion heating) whose inputs evolve on collisional
+     *  timescales, orders of magnitude slower than dt — a deposit held
+     *  for N steps changes those rates at the 1e-4-class level while
+     *  removing (N-1)/N of the deposit cost. The T_<species> fields
+     *  persist between deposits; the deposit always runs on the FIRST
+     *  call after boot or restart regardless of the interval (the fields
+     *  are otherwise unseeded — restart does not round-trip them).
+     *  Diagnostics requesting T_<species> read values up to N-1 steps
+     *  stale. 1 = every step (bit-identical legacy path). Input:
+     *  temperature_deposition_interval. */
+    int m_t_deposit_interval = 1;
+    /** First-deposit latch of the interval gate above (set by the
+     *  HybridPICDepositRhoAndJ call site). */
+    bool m_t_deposited_once = false;
+
     /** Intervals to use RKF45 integrator and to update substeps parameter */
     ablastr::utils::text::IntervalsParser m_rkf45_intervals;
     /** Relative tolerance for RKF45 adaptive substep error control */
