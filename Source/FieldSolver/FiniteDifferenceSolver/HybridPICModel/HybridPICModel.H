@@ -639,7 +639,7 @@ public:
      *
      * Called from HybridPICEvolveFields when m_solve_electron_energy_equation is true.
      *
-     * Scheme dispatch (qdsmc_time_advance, Thrust-A bake-off):
+     * Scheme dispatch (qdsmc_time_advance bake-off):
      *   - euler (default, #6982-identical): forward-Euler push with
      *     V_e(J_i^{n-1/2}, B^n, rho^n), Lie sources after transport.
      *   - leapfrog: T_e lives at HALF-INTEGER times; this call advances
@@ -1601,7 +1601,7 @@ public:
     enum struct QdsmcTimeAdvance { Euler, Leapfrog, PC };
     QdsmcTimeAdvance m_qdsmc_time_advance = QdsmcTimeAdvance::PC;
 
-    /** Half-gradient-corrected QDSMC deposit (Thrust B / B1): markers carry
+    /** Half-gradient-corrected QDSMC deposit (B1): markers carry
      *  limited MC slopes of their content and the scatter deposits
      *  w * (A + 1/2 G . (x_dest - x_p)). Conservation is exact (the
      *  correction sums to zero by the hat's first-moment property); the
@@ -1626,7 +1626,7 @@ public:
     void ApplyQdsmcEnergySources (int lev, amrex::Real dt_src,
                                   bool fill_te_ghosts) const;
 
-    /** One Ito tensor-conduction substep on level lev over dt_c (Thrust C),
+    /** One Ito tensor-conduction substep on level lev over dt_c,
      *  operating on the energy density u = 3/2 n_e k_B T_e (NOT on the
      *  entropy K_e: conduction is not adiabatic, and mapping the Fourier
      *  flux into K-space drags in n-gradient corrections). Each owned node
@@ -1996,7 +1996,7 @@ public:
      * m_relaxation_excluded_species. */
     [[nodiscard]] bool IsRelaxationExcluded (std::string const & species_name) const;
 
-    /** Ito-process tensor thermal conduction on T_e (Thrust C):
+    /** Ito-process tensor thermal conduction on T_e:
      *   dU_e/dt += div(kappa grad T_e),
      *   kappa = kappa_par b b + kappa_perp (I - b b),  b = B/|B|,
      * applied as a split substep bracketing the entropy transport
@@ -2278,7 +2278,7 @@ public:
      *  no intermediate reconstruction): the composed per-donor map is the
      *  bilinear corner image, so cross/corner transport is carried within
      *  a single branch remap. Fluxes remain face-local first-class
-     *  objects (Thrust D) computed by deterministic recomputation from
+     *  objects computed by deterministic recomputation from
      *  both neighbors (race-free, no atomics), so conservation stays
      *  telescoping-exact; each leg keeps the forward-donor fold rule
      *  (degenerate image = point mass, positivity unconditional). The
@@ -2286,7 +2286,7 @@ public:
      *  Input: qdsmc_advection_fluxform_unsplit. */
     bool m_adv_ff_unsplit = false;
 
-    /** Domain-face conduction BCs on T_e (Thrust D). Per grid dim and
+    /** Domain-face conduction BCs on T_e. Per grid dim and
      *  side: 0 = adiabatic (default; the fluxform wall faces already
      *  carry F = 0 = exact zero heat flux), 1 = isothermal (the
      *  boundary node row is a thermal bath pinned to the wall
@@ -2329,7 +2329,7 @@ public:
      *  qdsmc_conduction_closed_floor_faces. */
     bool m_cond_closed_floor_faces = true;
 
-    /** Apply the Thrust-D domain-face conduction BCs (isothermal pin /
+    /** Apply the domain-face conduction BCs (isothermal pin /
      *  prescribed-flux injection) to the boundary node rows and
      *  accumulate the wall tallies. Called at the end of every
      *  conduction substep, before the final T_e ghost fill, for all
@@ -2339,7 +2339,7 @@ public:
                                       amrex::MultiFab & Te,
                                       amrex::MultiFab const & rho) const;
 
-    /** Embedded-boundary conduction BC (Thrust D EB leg, staircase
+    /** Embedded-boundary conduction BC (EB leg, staircase
      *  per-line form — deliberately NO boundary normals: level-set
      *  mirror normals are ill-posed at staircase corners (the covered-B
      *  fill campaign's div instability), while per-sweep-line 1D folds
@@ -2364,7 +2364,7 @@ public:
      *  isothermal, qdsmc_conduction_eb_Te(x,y,z). */
     int m_cond_eb_bc = 0;
 
-    /** Advection-marker EB handling (Thrust D, the E7-replacement at
+    /** Advection-marker EB handling (the E7-replacement at
      *  embedded boundaries; dsmc-eb-reflection semantics at sub-cell
      *  hop scale): markers homed at covered nodes (level set <= 0)
      *  never move — V_e inside the conductor is not physical — and

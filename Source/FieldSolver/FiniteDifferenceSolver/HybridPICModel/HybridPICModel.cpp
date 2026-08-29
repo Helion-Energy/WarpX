@@ -499,7 +499,7 @@ void HybridPICModel::ReadParameters ()
                 "hybrid_pic_model.qdsmc_conduction_eb_bc must be "
                 "'adiabatic' or 'isothermal'");
         }
-        // Thrust-D domain-face BCs (per grid dim, lo/hi)
+        // domain-face conduction BCs (per grid dim, lo/hi)
         for (int side = 0; side < 2; ++side) {
             std::string const sfx = (side == 0) ? "_lo" : "_hi";
             std::vector<std::string> types;
@@ -5840,7 +5840,7 @@ namespace
      *  data, so per-dim nesting -- not a weight product -- is required).
      *  Stencil indices are clamped into [lo, hi] on non-periodic dims
      *  (degenerate end stencils at walls, E7-spirit placeholder until the
-     *  Thrust-D reflection BCs); on periodic dims they read the filled
+     *  reflection BCs); on periodic dims they read the filled
      *  ghosts. */
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
     amrex::Real qdsmc_interp_nd (int const kind,
@@ -7401,7 +7401,7 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
     // curvature-activated remap leak of the scatter deposit is absent by
     // construction; the cost is exact conservation (optional global
     // fixup below). Pure gather = race-free: OMP-threadable, unlike the
-    // scatter deposit. TODO(Thrust D): reflected feet at walls replace the
+    // scatter deposit. TODO: reflected feet at walls replace the
     // E7-style clamp; vacuum_fast_front semantics differ here (floored
     // nodes keep their Te and are only read, never updated).
     if (m_adv_form == 1)
@@ -7663,7 +7663,7 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                     }
 
                     // foot in index space, clamped to the interpolation
-                    // reach and (E7-style, pending Thrust D) into the
+                    // reach and (E7-style, pending) into the
                     // domain on non-periodic edges
                     int i0[3] = {i, j, k};
                     amrex::Real fr[3] = {0.0_rt, 0.0_rt, 0.0_rt};
@@ -7761,7 +7761,7 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
     // (deterministic, so the neighbor gets bit-identical values): no face
     // scratch, no atomics, race-free -> OMP-threaded. Wall faces carry
     // zero flux = exact adiabatic default (replaces the E7 clamp;
-    // Thrust D adds tallies/isothermal variants on the same faces).
+    // later legs add tallies/isothermal variants on the same faces).
     if (m_adv_form == 2)
     {
         // The sweeps clamp the per-axis displacement at
@@ -9184,7 +9184,7 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
 
                 // Continuous destination in grid-index space, hard-clamped
                 // to the deposit's guard reach and (E7-style, pending the
-                // Thrust-D reflection BCs) just inside non-periodic domain
+                // reflection BCs) just inside non-periodic domain
                 // edges.
                 amrex::Real s[AMREX_SPACEDIM];
                 int i0[AMREX_SPACEDIM];
