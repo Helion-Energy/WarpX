@@ -1855,6 +1855,20 @@ void HybridPICModel::HybridPICSolveE (
             "hybrid_pic_model.je_yee_coupling = 1 requires the "
             "staggered (Yee) grid; remove warpx.grid_type = "
             "collocated");
+        // unmaintained-ghost clamp masks for the gathers (see
+        // GatherToNodes): every non-periodic face clamps, except the
+        // cylindrical axis whose guards are parity-maintained
+        const amrex::Box dom_cell = warpx.Geom(lev).Domain();
+        amrex::GpuArray<int,3> clamp_lo{0,0,0}, clamp_hi{0,0,0};
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            if (!warpx.Geom(lev).isPeriodic(d)) {
+                clamp_lo[d] = 1;
+                clamp_hi[d] = 1;
+            }
+        }
+#if defined(WARPX_DIM_RZ)
+        clamp_lo[0] = 0;
+#endif
         ablastr::fields::VectorField En =
             warpx.m_fields.get_alldirs("hybrid_je_yee_en_fp", lev);
         ablastr::fields::VectorField Jn =
@@ -1873,7 +1887,8 @@ void HybridPICModel::HybridPICSolveE (
                 "je_yee_coupling: the gather/scatter adjointness "
                 "self-check failed");
             for (int d = 0; d < 3; ++d) {
-                ablastr::fields::GatherToNodes(*En[d], *Efield[d]);
+                ablastr::fields::GatherToNodes(*En[d], *Efield[d],
+                    dom_cell, clamp_lo, clamp_hi);
             }
             m_je_yee_en_init = true;
             amrex::Print() << "[je] yee coupling: nodal relax core + "
@@ -1883,9 +1898,11 @@ void HybridPICModel::HybridPICSolveE (
         }
         for (int d = 0; d < 3; ++d) {
             ablastr::fields::GatherToNodes(*Jn[d],
-                                           *current_fp_plasma[d]);
-            ablastr::fields::GatherToNodes(*Jin[d], *Jfield[d]);
-            ablastr::fields::GatherToNodes(*Bn[d], *Bfield[d]);
+                *current_fp_plasma[d], dom_cell, clamp_lo, clamp_hi);
+            ablastr::fields::GatherToNodes(*Jin[d], *Jfield[d],
+                dom_cell, clamp_lo, clamp_hi);
+            ablastr::fields::GatherToNodes(*Bn[d], *Bfield[d],
+                dom_cell, clamp_lo, clamp_hi);
         }
         if (m_add_external_fields) {
             ablastr::fields::VectorField Ben =
@@ -1901,8 +1918,10 @@ void HybridPICModel::HybridPICSolveE (
                 warpx.m_fields.get_alldirs(
                     FieldType::hybrid_E_fp_external, 0);
             for (int d = 0; d < 3; ++d) {
-                ablastr::fields::GatherToNodes(*Ben[d], *Bext[d]);
-                ablastr::fields::GatherToNodes(*Een[d], *Eext[d]);
+                ablastr::fields::GatherToNodes(*Ben[d], *Bext[d],
+                    dom_cell, clamp_lo, clamp_hi);
+                ablastr::fields::GatherToNodes(*Een[d], *Eext[d],
+                    dom_cell, clamp_lo, clamp_hi);
             }
         }
         warpx.get_pointer_fdtd_solver_fp(lev)->HybridPICSolveE(

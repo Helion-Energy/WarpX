@@ -86,12 +86,27 @@ namespace ablastr::fields
     /** Gather a staggered MultiFab to the all-nodal registration:
      *  dst(node) = equal-weight average of the surrounding source
      *  points (see the header doc). Source ghosts must be valid to
-     *  depth 1 in each offset dimension. Fills the valid nodal box.
+     *  depth 1 in each offset dimension ACROSS INTERIOR and PERIODIC
+     *  boundaries; at NON-PERIODIC domain faces the stencil is
+     *  clamped to the source-valid domain (the ghost ring there is
+     *  never written by exchanges -- reading it is the classic
+     *  domain-ghost trap), which degrades the face ring to a
+     *  one-sided first-order sample. That ring is boundary-condition
+     *  territory for the consumers. Pass the CELL-CENTERED domain box
+     *  and per-dim/per-face clamp masks (clamp exactly the faces
+     *  whose ghost rings no exchange maintains: e.g. the cylindrical
+     *  axis guards ARE parity-filled and must stay in the stencil,
+     *  while the radial wall and unmaintained z caps are clamped).
+     *  A default-constructed (invalid) domain box disables clamping.
+     *  Fills the valid nodal box.
      */
     inline void
     GatherToNodes (
         amrex::MultiFab & dst_nodal,
         amrex::MultiFab const & src,
+        amrex::Box const & domain_cell = amrex::Box(),
+        amrex::GpuArray<int,3> const & clamp_lo = {0, 0, 0},
+        amrex::GpuArray<int,3> const & clamp_hi = {0, 0, 0},
         const int scomp = 0,
         const int dcomp = 0)
     {
@@ -102,6 +117,20 @@ namespace ablastr::fields
             sf[d] = src.ixType().nodeCentered(d) ? 1 : 0;
         }
         GpuArray<int,3> const cr{1,1,1};
+        // source-valid index range of the domain, per dim/face, for
+        // the unmaintained-ghost clamp (unclamped faces get a huge
+        // range)
+        GpuArray<int,3> slo{-2000000000, -2000000000, -2000000000};
+        GpuArray<int,3> shi{2000000000, 2000000000, 2000000000};
+        const bool have_dom = domain_cell.ok();
+        if (have_dom) {
+            const Box sdom = amrex::convert(domain_cell,
+                                            src.ixType());
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                if (clamp_lo[d]) { slo[d] = sdom.smallEnd(d); }
+                if (clamp_hi[d]) { shi[d] = sdom.bigEnd(d); }
+            }
+        }
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -111,8 +140,26 @@ namespace ablastr::fields
             auto const& s4 = src.const_array(mfi);
             ParallelFor(mfi.tilebox(),
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) {
-                d4(i,j,k,dcomp) = ablastr::coarsen::sample::Interp(
-                    s4, sf, sc, cr, i, j, k, scomp);
+                using namespace amrex::literals;
+                // stencil bounds per dim: node gathers src at
+                // (idx-1, idx) along offset dims, (idx) along
+                // matching dims -- clamped to the source domain
+                int i0 = sf[0] ? i : i - 1, i1 = i;
+                int j0 = sf[1] ? j : j - 1, j1 = j;
+                int k0 = sf[2] ? k : k - 1, k1 = k;
+                i0 = amrex::max(i0, slo[0]); i1 = amrex::min(i1, shi[0]);
+                j0 = amrex::max(j0, slo[1]); j1 = amrex::min(j1, shi[1]);
+                k0 = amrex::max(k0, slo[2]); k1 = amrex::min(k1, shi[2]);
+                amrex::Real acc = 0.0_rt;
+                int cnt = 0;
+                for (int kk = k0; kk <= k1; ++kk) {
+                for (int jj = j0; jj <= j1; ++jj) {
+                for (int ii = i0; ii <= i1; ++ii) {
+                    acc += s4(ii, jj, kk, scomp);
+                    ++cnt;
+                }}}
+                d4(i,j,k,dcomp) = acc
+                    / static_cast<amrex::Real>(cnt);
             });
         }
     }
@@ -155,6 +202,8 @@ namespace ablastr::fields
                 // average the 2^d adjacent nodes, volume weighted;
                 // the target weight normalizes (adjoint form)
                 amrex::Real num = 0.0_rt, den = 0.0_rt;
+                amrex::Real unw = 0.0_rt;
+                int cnt = 0;
                 const int ni = st[0] ? 0 : 1;
                 const int nj = st[1] ? 0 : 1;
                 const int nk = st[2] ? 0 : 1;
@@ -163,12 +212,21 @@ namespace ablastr::fields
                 for (int ii = 0; ii <= ni; ++ii) {
                     const amrex::Real vn = stagger_coupling_rweight(
                         i + ii, 1, cyl_rmin_over_dr, cyl);
-                    num += vn * s4(i + ii, j + jj, k + kk, scomp);
+                    const amrex::Real gv =
+                        s4(i + ii, j + jj, k + kk, scomp);
+                    num += vn * gv;
                     den += vn;
+                    unw += gv;
+                    ++cnt;
                 }}}
-                // den > 0 except a fully axis-degenerate stencil,
-                // which cannot occur for a valid staggered target
-                d4(i,j,k,dcomp) = num / den;
+                // a target whose whole stencil sits AT the axis has
+                // zero total volume weight (components nodal in r at
+                // i = 0): the volume-weighted form is 0/0 there, and
+                // the correct value is the plain (unweighted) average
+                // -- for the no-offset case, the axis node itself
+                d4(i,j,k,dcomp) = (den > 0.0_rt)
+                    ? num / den
+                    : unw / static_cast<amrex::Real>(cnt);
             });
         }
     }
@@ -201,11 +259,28 @@ namespace ablastr::fields
         MultiFab g(convert(ba_c, IntVect::TheNodeVector()), dm_c, 1, 1);
         MultiFab Gu(g.boxArray(), dm_c, 1, 0);
         MultiFab Sg(u.boxArray(), dm_c, 1, 0);
-        auto hashfill = [] (MultiFab & mf, int salt) {
+        auto hashfill = [] (MultiFab & mf, int salt, bool windowed) {
             for (MFIter mfi(mf); mfi.isValid(); ++mfi) {
                 auto const& a = mf.array(mfi);
+                // window the NODAL side to the strict interior so
+                // every stencil the two inner products count stays on
+                // valid data: the identity is a property of the
+                // operator pair, and an unwindowed finite box counts
+                // boundary ghosts asymmetrically (a property of the
+                // box, not the pair)
+                const Box vb = mfi.validbox();
                 ParallelFor(mfi.growntilebox(1),
                     [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    if (windowed) {
+                        const amrex::IntVect p(AMREX_D_DECL(i, j, k));
+                        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                            if (p[d] < vb.smallEnd(d) + 2 ||
+                                p[d] > vb.bigEnd(d) - 2) {
+                                a(i,j,k) = 0.0_rt;
+                                return;
+                            }
+                        }
+                    }
                     // deterministic position hash in (-1, 1)
                     unsigned h = static_cast<unsigned>(
                         (i * 73856093) ^ (j * 19349663)
@@ -216,8 +291,8 @@ namespace ablastr::fields
                 });
             }
         };
-        hashfill(u, 1);
-        hashfill(g, 2);
+        hashfill(u, 1, false);
+        hashfill(g, 2, true);
         GatherToNodes(Gu, u);
         ScatterFromNodes(Sg, g, /*cyl=*/false, 0.0_rt);
         const amrex::Real ip_n = MultiFab::Dot(Gu, 0, g, 0, 1, 0);
