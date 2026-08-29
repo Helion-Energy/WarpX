@@ -850,10 +850,14 @@ void HybridPICModel::ReadParameters ()
             "hybrid_pic_model.je_sponge_lnf must be positive when the "
             "sponge layer is active (the validated range is 3-6)");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            m_je_sponge_width == 0.0_rt || m_esolve_je,
-            "hybrid_pic_model.je_sponge_width requires esolve = "
-            "je_form (the sponge damps the relax advance's evolved "
-            "field state; the algebraic e-form has no such state)");
+            m_je_sponge_width == 0.0_rt || m_esolve_je ||
+                m_je_sponge_vw > 0.0_rt,
+            "hybrid_pic_model.je_sponge_width on esolve = e_form "
+            "requires an explicit je_sponge_vw (the e-form path "
+            "publishes no c_art to fall back on). The e-form sponge "
+            "is B-side only: E is algebraic there and regenerates "
+            "every solve, so the E-side reference/tracking knobs are "
+            "je_form-only by construction.");
         pp_hybrid.query("je_hyper_res", m_je_hyper_res);
         utils::parser::queryWithParser(pp_hybrid, "je_el_frac",
                                        m_je_el_frac);
@@ -10980,6 +10984,20 @@ void HybridPICModel::BfieldEvolve (
         }
 
         if (step_succeeded) {
+            // e-form sponge caps (B-side; see ApplySpongeLayerBYee):
+            // damp the accepted B BEFORE the coupler reads its
+            // linkages (the engine's next predictor must not see
+            // cap-wave content the layer removes) and BEFORE the
+            // B_old latch below (the next substep's entry state and
+            // any corrector replay are post-sponge). The RK4
+            // NaN-restart rewinds to the half-start static copy and
+            // REPLAYS the half, sponge applications included -- that
+            // is consistent; do not special-case it. The je path
+            // applies its own sponge after its post-accept (E, J_e)
+            // advance instead.
+            if (!je_relax && m_je_sponge_width > 0.0_rt) {
+                ApplySpongeLayerBYee(Bfield, lev, dt_sub);
+            }
             // Close the coupling interval on the accepted field state (the
             // engine's next predictor reads these linkages).
             if (coupler) {
@@ -11296,6 +11314,88 @@ void HybridPICModel::ApplyJeSpongeLayer (
     // substep's stencils see the sponged fields consistently.
     warpx.FillBoundaryE(Efield[lev][0]->nGrowVect(), std::nullopt);
     warpx.FillBoundaryB(Bfield[lev][0]->nGrowVect(), std::nullopt);
+}
+
+void HybridPICModel::ApplySpongeLayerBYee (
+    ablastr::fields::MultiLevelVectorField const& Bfield,
+    int lev, amrex::Real dt_sub)
+{
+    auto& warpx = WarpX::GetInstance();
+#if defined(WARPX_DIM_1D_Z)
+    constexpr int zdim = 0;
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+    constexpr int zdim = 1;
+#else
+    constexpr int zdim = 2;
+#endif
+    const amrex::Real vw = m_je_sponge_vw;   // asserted > 0 at parse
+    const amrex::Real Ls = m_je_sponge_width;
+    const amrex::Real inv_tau_max = vw * m_je_sponge_lnf / Ls;
+    const auto& geom = warpx.Geom(lev);
+    const amrex::Real zlo = geom.ProbLo(zdim);
+    const amrex::Real zhi = geom.ProbHi(zdim);
+    const amrex::Real dz = geom.CellSize(zdim);
+    const amrex::Real z_lo_edge = zlo + Ls;
+    const amrex::Real z_hi_edge = zhi - Ls;
+
+    if (!m_sponge_yee_init) {
+        // Seed the plasma-frame references from the current in-loop
+        // state (B_ext is subtracted at substep-loop entry on this
+        // path, so this IS the plasma response; the drive never sees
+        // the layer and needs no tracking term).
+        for (int d = 0; d < 3; ++d) {
+            m_sponge_bref_yee[d] = std::make_unique<MultiFab>(
+                Bfield[lev][d]->boxArray(),
+                Bfield[lev][d]->DistributionMap(), 1,
+                amrex::IntVect(0));
+            MultiFab::Copy(*m_sponge_bref_yee[d], *Bfield[lev][d],
+                           0, 0, 1, 0);
+        }
+        m_sponge_yee_init = true;
+        amrex::Print() << "[sponge] Yee B-side caps: L_s = " << Ls
+            << " m (~" << static_cast<int>(Ls / dz)
+            << " cells), ln(1/f) = " << m_je_sponge_lnf
+            << ", v_w = " << vw << " m/s, tau_max = "
+            << Ls / (vw * m_je_sponge_lnf)
+            << " s (plasma-frame reference frozen at first call)\n";
+        return;
+    }
+
+    for (int d = 0; d < 3; ++d) {
+        MultiFab & B = *Bfield[lev][d];
+        MultiFab & Bref = *m_sponge_bref_yee[d];
+        // the ramp coordinate offsets by half a cell where this
+        // component is cell-centered along z
+        const amrex::Real zoff =
+            B.ixType().nodeCentered(zdim) ? 0.0_rt : 0.5_rt;
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(B, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            Array4<Real> const& b = B.array(mfi);
+            Array4<Real const> const& br = Bref.const_array(mfi);
+            const amrex::Real dt_l = dt_sub;
+            amrex::ParallelFor(mfi.tilebox(),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+#if defined(WARPX_DIM_1D_Z)
+                const amrex::Real z = zlo + (i + zoff)*dz;
+                amrex::ignore_unused(j, k);
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+                const amrex::Real z = zlo + (j + zoff)*dz;
+#else
+                const amrex::Real z = zlo + (k + zoff)*dz;
+#endif
+                amrex::Real xi = 0.0_rt;
+                if (z > z_hi_edge) { xi = (z - z_hi_edge) / Ls; }
+                else if (z < z_lo_edge) { xi = (z_lo_edge - z) / Ls; }
+                if (xi <= 0.0_rt) { return; }
+                xi = amrex::min(xi, 1.0_rt);
+                const amrex::Real s =
+                    1.0_rt / (1.0_rt + dt_l * xi * inv_tau_max);
+                b(i,j,k) = br(i,j,k) + (b(i,j,k) - br(i,j,k)) * s;
+            });
+        }
+    }
 }
 
 void HybridPICModel::ApplyJeHyperCurlCurl (

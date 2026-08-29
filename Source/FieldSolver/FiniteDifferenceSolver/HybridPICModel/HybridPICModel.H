@@ -183,6 +183,30 @@ public:
         ablastr::fields::MultiLevelScalarField const& rhofield,
         int lev, amrex::Real dt_sub);
 
+    /** E-form (Yee) variant of the sponge cap: B-SIDE ONLY -- the
+     *  algebraic e-form E regenerates every solve, so only the
+     *  evolved B carries wave state into the caps. Per-direction on
+     *  each component's own staggering (the ramp coordinate offsets
+     *  by half a cell where B_d is cell-centered in z), damping the
+     *  in-loop PLASMA-frame B (the substep loop subtracts B_ext at
+     *  entry and re-adds at exit, so the drive never sees the layer
+     *  and no ext-change tracking is needed here) toward its frozen
+     *  first-call reference. Applied once per ACCEPTED substep,
+     *  BEFORE the circuit coupler reads its linkages and BEFORE the
+     *  B_old latch. Requires an explicit je_sponge_vw (the e-form
+     *  path publishes no c_art to fall back on). References live in
+     *  m_sponge_bref_yee, lazily seeded on the first call. */
+    void ApplySpongeLayerBYee (
+        ablastr::fields::MultiLevelVectorField const& Bfield,
+        int lev, amrex::Real dt_sub);
+
+    /** Frozen first-call B references of the e-form (Yee) sponge,
+     *  one per component staggering; seeded by ApplySpongeLayerBYee.
+     *  Mutable-by-convention: the class is stateful across substeps. */
+    std::array<std::unique_ptr<amrex::MultiFab>, 3> m_sponge_bref_yee;
+    /** Seed latch of the Yee sponge references. */
+    bool m_sponge_yee_init = false;
+
     void BfieldEvolveRK4 (
         ablastr::fields::MultiLevelVectorField const& Bfield,
         ablastr::fields::MultiLevelVectorField const& Efield,
