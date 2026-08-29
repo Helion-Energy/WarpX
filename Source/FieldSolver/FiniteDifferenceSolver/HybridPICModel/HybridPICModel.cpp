@@ -11439,6 +11439,20 @@ void HybridPICModel::ApplyJeHyperCurlCurl (
     const amrex::Real rmin = geom.ProbLo(0);
     const amrex::Real i2r = 0.5_rt/dr, i2z = 0.5_rt/dz;
 
+    // Evaluate every pass strictly inside non-periodic domain faces:
+    // the centered stencils have no valid neighbor on the outermost
+    // node ring there, and FillBoundary never writes domain ghosts --
+    // reading them injects garbage into B at the walls (the M03
+    // first-substep NaN class). The r-lo face is the axis, which has
+    // its own parity-corrected stencil and stays included. With the
+    // scratch fields zeroed below, the excluded ring contributes no
+    // hyper flux: the operator ends one node inside the walls.
+    amrex::Box dom_int = amrex::surroundingNodes(geom.Domain());
+    if (!geom.isPeriodic(0)) { dom_int.growHi(0, -1); }
+    if (!geom.isPeriodic(1)) { dom_int.grow(1, -1); }
+    Ws.setVal(0.0_rt);
+    Eh.setVal(0.0_rt);
+
     // pass 1: Ws = eta_H(rho, |B|) curl J at nodes (m = 0)
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
@@ -11459,7 +11473,7 @@ void HybridPICModel::ApplyJeHyperCurlCurl (
             xbz = Bext[2]->const_array(mfi);
         }
         const bool bs = b_split;
-        amrex::ParallelFor(mfi.tilebox(),
+        amrex::ParallelFor(mfi.tilebox() & dom_int,
             [=] AMREX_GPU_DEVICE (int i, int j, int k) {
             const amrex::Real r = rmin + i*dr;
             const bool axis = r < 0.5_rt*dr;
@@ -11505,7 +11519,7 @@ void HybridPICModel::ApplyJeHyperCurlCurl (
     for (MFIter mfi(Eh, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
         Array4<Real> const& e = Eh.array(mfi);
         Array4<Real const> const& w = Ws.const_array(mfi);
-        amrex::ParallelFor(mfi.tilebox(),
+        amrex::ParallelFor(mfi.tilebox() & dom_int,
             [=] AMREX_GPU_DEVICE (int i, int j, int k) {
             const amrex::Real r = rmin + i*dr;
             const bool axis = r < 0.5_rt*dr;
@@ -11537,7 +11551,7 @@ void HybridPICModel::ApplyJeHyperCurlCurl (
         Array4<Real> const& bz = Bfield[lev][2]->array(mfi);
         Array4<Real const> const& e = Eh.const_array(mfi);
         const amrex::Real dt_l = dt_sub;
-        amrex::ParallelFor(mfi.tilebox(),
+        amrex::ParallelFor(mfi.tilebox() & dom_int,
             [=] AMREX_GPU_DEVICE (int i, int j, int k) {
             const amrex::Real r = rmin + i*dr;
             const bool axis = r < 0.5_rt*dr;
