@@ -2009,6 +2009,26 @@ public:
     amrex::ParserExecutor<2> m_eta_h;
     bool m_include_hyper_resistivity_term = false;
     bool m_hyper_resistivity_has_B_dependence = false;
+    /** Apply the hyper-resistivity as the adjoint-paired curl-curl form
+     *  E_H = +curl(eta_H curl J) instead of the component-wise vector
+     *  Laplacian -eta_H lap J (cross-lane operator ruling: the two differ
+     *  by eta_H grad(div J), which is NOT Faraday-invisible under a
+     *  spatially varying eta_H — grad(eta_H) x grad(div J) is a spurious
+     *  B source at coefficient ramps, driven by deposition-noise div J at
+     *  ~70% of ||curlcurl J|| — and the component Laplacian is not the
+     *  discrete grad-div - curl-curl split, leaking curl at truncation
+     *  order). The composition uses the NATIVE Yee curls (J on edges ->
+     *  curl -> faces, eta_H applied at faces where |B| is native -> curl
+     *  back to edges), which are mutually adjoint by construction, so
+     *  the dissipation -int eta_H |curl J|^2 is sign-definite discretely
+     *  (the collocated-curl failure mode: checkerboard-blind stencils
+     *  without adjoint pairing admit positive-real grid-scale
+     *  eigenvalues). Boundary statement: the operator ends one node
+     *  inside non-periodic domain faces (r_max wall, non-periodic z) and
+     *  carries no wall flux — no pass reads a domain ghost. RZ only.
+     *  Default off (the Laplacian path is bit-identical legacy).
+     *  Input: hyper_resistivity_curl_curl. */
+    bool m_hyper_res_curl_curl = false;
 
     /** External current */
     std::string m_Jx_ext_grid_function = "0.0";

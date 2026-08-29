@@ -95,6 +95,13 @@ void HybridPICModel::ReadParameters ()
                                    m_t_deposit_interval);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_t_deposit_interval >= 1,
         "hybrid_pic_model.temperature_deposition_interval must be >= 1");
+
+    pp_hybrid.query("hyper_resistivity_curl_curl", m_hyper_res_curl_curl);
+#if !(defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER))
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_hyper_res_curl_curl,
+        "hybrid_pic_model.hyper_resistivity_curl_curl is implemented for "
+        "the RZ solver only (the Cartesian conversion is a follow-up)");
+#endif
     if (m_substeps % 2 != 0) {
         ablastr::warn_manager::WMRecordWarning(
             "HybridPIC",

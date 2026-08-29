@@ -651,6 +651,119 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         eta_overlay_mf = warpx.m_fields.get_alldirs("hybrid_eta_overlay_fp", lev);
     }
 
+    // Adjoint-paired curl-curl hyper-resistivity (see the
+    // m_hyper_res_curl_curl member doc): precompute K = eta_H (curl J) on
+    // the B staggering with the native Yee edge->face curl; the Faraday
+    // hyper term in the kernels below becomes +(curl K) via the native
+    // face->edge curl (the Ampere forms, including the exact on-axis
+    // regularization), replacing the component Laplacian at the same
+    // accumulation site. K is zeroed and computed on valid faces only;
+    // box-boundary ghosts are exchanged, non-periodic DOMAIN ghosts stay
+    // zero and are never read: the kernels skip the one-node ring at
+    // non-periodic domain faces, so the operator carries no wall flux.
+    const bool use_hyper_cc = hybrid_model->m_hyper_res_curl_curl
+        && include_hyper_resistivity_term && solve_for_Faraday;
+    MultiFab Kr_mf, Kt_mf, Kz_mf;
+    Box hyper_cc_er_box, hyper_cc_et_box, hyper_cc_ez_box;
+    if (use_hyper_cc) {
+        Kr_mf.define(Bfield[0]->boxArray(), Bfield[0]->DistributionMap(),
+                     1, IntVect(1));
+        Kt_mf.define(Bfield[1]->boxArray(), Bfield[1]->DistributionMap(),
+                     1, IntVect(1));
+        Kz_mf.define(Bfield[2]->boxArray(), Bfield[2]->DistributionMap(),
+                     1, IntVect(1));
+        Kr_mf.setVal(0.0_rt);
+        Kt_mf.setVal(0.0_rt);
+        Kz_mf.setVal(0.0_rt);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(Kr_mf, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            Array4<Real> const& Kr = Kr_mf.array(mfi);
+            Array4<Real> const& Kt = Kt_mf.array(mfi);
+            Array4<Real> const& Kz = Kz_mf.array(mfi);
+            Array4<Real const> const& Jr_a = Jfield[0]->const_array(mfi);
+            Array4<Real const> const& Jtheta_a = Jfield[1]->const_array(mfi);
+            Array4<Real const> const& Jz_a = Jfield[2]->const_array(mfi);
+            Array4<Real const> const& Br_a = Bfield[0]->const_array(mfi);
+            Array4<Real const> const& Btheta_a = Bfield[1]->const_array(mfi);
+            Array4<Real const> const& Bz_a = Bfield[2]->const_array(mfi);
+            Array4<Real const> const& rho_a = rhofield.const_array(mfi);
+            Real const * const AMREX_RESTRICT coefs_r = m_stencil_coefs_r.dataPtr();
+            int const n_coefs_r = static_cast<int>(m_stencil_coefs_r.size());
+            Real const * const AMREX_RESTRICT coefs_z = m_stencil_coefs_z.dataPtr();
+            int const n_coefs_z = static_cast<int>(m_stencil_coefs_z.size());
+            Real const dr_l = m_dr;
+            Real const rmin_l = m_rmin;
+            Box const& tbr = mfi.tilebox(Bfield[0]->ixType().toIntVect());
+            Box const& tbt = mfi.tilebox(Bfield[1]->ixType().toIntVect());
+            Box const& tbz = mfi.tilebox(Bfield[2]->ixType().toIntVect());
+            amrex::ParallelFor(tbr, tbt, tbz,
+                [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) {
+                    // K_r on the Br staggering: (curl J)_r = -dz Jtheta
+                    Real btot = 0._rt;
+                    if (hyper_resistivity_has_B_dependence) {
+                        const Real br_v = Br_a(i, j, 0);
+                        const Real bt_v = Interp(Btheta_a, Btheta_stag, Br_stag, coarsen, i, j, 0, 0);
+                        const Real bz_v = Interp(Bz_a, Bz_stag, Br_stag, coarsen, i, j, 0, 0);
+                        btot = std::sqrt(br_v*br_v + bt_v*bt_v + bz_v*bz_v);
+                    }
+                    const Real rho_v = Interp(rho_a, nodal, Br_stag, coarsen, i, j, 0, 0);
+                    Kr(i, j, 0) = -eta_h(rho_v, btot)
+                        * T_Algo::UpwardDz(Jtheta_a, coefs_z, n_coefs_z, i, j, 0, 0);
+                },
+                [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) {
+                    // K_theta on the Btheta staggering:
+                    // (curl J)_theta = dz Jr - dr Jz
+                    Real btot = 0._rt;
+                    if (hyper_resistivity_has_B_dependence) {
+                        const Real br_v = Interp(Br_a, Br_stag, Btheta_stag, coarsen, i, j, 0, 0);
+                        const Real bt_v = Btheta_a(i, j, 0);
+                        const Real bz_v = Interp(Bz_a, Bz_stag, Btheta_stag, coarsen, i, j, 0, 0);
+                        btot = std::sqrt(br_v*br_v + bt_v*bt_v + bz_v*bz_v);
+                    }
+                    const Real rho_v = Interp(rho_a, nodal, Btheta_stag, coarsen, i, j, 0, 0);
+                    Kt(i, j, 0) = eta_h(rho_v, btot)
+                        * ( T_Algo::UpwardDz(Jr_a, coefs_z, n_coefs_z, i, j, 0, 0)
+                          - T_Algo::UpwardDr(Jz_a, coefs_r, n_coefs_r, i, j, 0, 0) );
+                },
+                [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) {
+                    // K_z on the Bz staggering (cell-centered in r, no
+                    // axis singularity): (curl J)_z = (1/r) dr (r Jtheta)
+                    const Real r = rmin_l + (i + 0.5_rt)*dr_l;
+                    Real btot = 0._rt;
+                    if (hyper_resistivity_has_B_dependence) {
+                        const Real br_v = Interp(Br_a, Br_stag, Bz_stag, coarsen, i, j, 0, 0);
+                        const Real bt_v = Interp(Btheta_a, Btheta_stag, Bz_stag, coarsen, i, j, 0, 0);
+                        const Real bz_v = Bz_a(i, j, 0);
+                        btot = std::sqrt(br_v*br_v + bt_v*bt_v + bz_v*bz_v);
+                    }
+                    const Real rho_v = Interp(rho_a, nodal, Bz_stag, coarsen, i, j, 0, 0);
+                    Kz(i, j, 0) = eta_h(rho_v, btot)
+                        * T_Algo::UpwardDrr_over_r(Jtheta_a, r, dr_l, coefs_r, n_coefs_r, i, j, 0, 0);
+                });
+        }
+        const auto& period = warpx.Geom(lev).periodicity();
+        Kr_mf.FillBoundary(period);
+        Kt_mf.FillBoundary(period);
+        Kz_mf.FillBoundary(period);
+
+        // One-node-inside interior boxes per E staggering: exclude the
+        // r_max wall ring and, when z is non-periodic, both z-end rings
+        // (the axis is not a wall and keeps its own handling).
+        const Box& dom = warpx.Geom(lev).Domain();
+        const bool z_periodic = warpx.Geom(lev).isPeriodic(1);
+        auto interior = [&](amrex::IntVect const& iv) {
+            Box b = amrex::convert(dom, iv);
+            b.growHi(0, -1);
+            if (!z_periodic) { b.grow(1, -1); }
+            return b;
+        };
+        hyper_cc_er_box = interior(Efield[0]->ixType().toIntVect());
+        hyper_cc_et_box = interior(Efield[1]->ixType().toIntVect());
+        hyper_cc_ez_box = interior(Efield[2]->ixType().toIntVect());
+    }
+
     // Loop through the grids, and over the tiles within each grid for the
     // initial, nodal calculation of E
 #ifdef AMREX_USE_OMP
@@ -770,6 +883,16 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
             eta_overlay_z = eta_overlay_mf[2]->const_array(mfi);
         }
 
+        // Curl-curl hyper-resistivity intermediates (default-constructed
+        // and never indexed when the mode is off -- the kernels gate on
+        // use_hyper_cc).
+        Array4<Real const> Kr_cc, Kt_cc, Kz_cc;
+        if (use_hyper_cc) {
+            Kr_cc = Kr_mf.const_array(mfi);
+            Kt_cc = Kt_mf.const_array(mfi);
+            Kz_cc = Kz_mf.const_array(mfi);
+        }
+
         // Extract structures indicating where the fields
         // should be updated, given the position of the embedded boundaries
         amrex::Array4<int> update_Er_arr, update_Etheta_arr, update_Ez_arr;
@@ -875,10 +998,21 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                         // r on cell-centered point (Jr is cell-centered in r)
                         const Real r = rmin + (i + 0.5_rt)*dr;
+                        if (use_hyper_cc) {
+                            // Adjoint curl-curl form: E_H = +(curl K)_r
+                            // = -dz K_theta; the one-node-inside box ends
+                            // the operator off non-periodic walls.
+                            if (hyper_cc_er_box.contains(
+                                    amrex::IntVect(AMREX_D_DECL(i, j, 0)))) {
+                                Er(i, j, 0) -= T_Algo::DownwardDz(
+                                    Kt_cc, coefs_z, n_coefs_z, i, j, 0, 0);
+                            }
+                        } else {
                         auto nabla2Jr = T_Algo::Dr_rDr_over_r(Jr, r, dr, coefs_r, n_coefs_r, i, j, 0, 0)
                             + T_Algo::Dzz(Jr, coefs_z, n_coefs_z, i, j, 0, 0) - Jr(i, j, 0)/(r*r);
 
                         Er(i, j, 0) -= eta_h(rho_val, btot_val) * nabla2Jr;
+                        }
                     }
                 }
 
@@ -960,6 +1094,19 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                             btot_val = std::sqrt(br_val*br_val + bt_val*bt_val + bz_val*bz_val);
                         }
 
+                        if (use_hyper_cc) {
+                            // Adjoint curl-curl form: E_H = +(curl K)_theta
+                            // = dz K_r - dr K_z (this branch runs off-axis
+                            // only -- the kernel returned at r < dr/2 with
+                            // Etheta pinned to 0); one-node-inside box ends
+                            // the operator off non-periodic walls.
+                            if (hyper_cc_et_box.contains(
+                                    amrex::IntVect(AMREX_D_DECL(i, j, 0)))) {
+                                Etheta(i, j, 0) +=
+                                    T_Algo::DownwardDz(Kr_cc, coefs_z, n_coefs_z, i, j, 0, 0)
+                                    - T_Algo::DownwardDr(Kz_cc, coefs_r, n_coefs_r, i, j, 0, 0);
+                            }
+                        } else {
                         // Special handling of the hyper-resistivity term on axis to avoid division by zero
                         // and ensure that Etheta remains 0 on axis for m=0 mode
                         auto nabla2Jtheta = 0.0_rt;
@@ -969,6 +1116,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         }
 
                         Etheta(i, j, 0) -= eta_h(rho_val, btot_val) * nabla2Jtheta;
+                        }
                     }
                 }
 
@@ -1049,6 +1197,23 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         // r on nodal point (Jz is nodal in r)
                         const Real r = rmin + i*dr;
 
+                        if (use_hyper_cc) {
+                            // Adjoint curl-curl form: E_H = +(curl K)_z
+                            // = (1/r) dr (r K_theta), with the exact
+                            // Ampere-style on-axis regularization
+                            // (K_theta is linear in r near the axis);
+                            // one-node-inside box ends the operator off
+                            // non-periodic walls.
+                            if (hyper_cc_ez_box.contains(
+                                    amrex::IntVect(AMREX_D_DECL(i, j, 0)))) {
+                                if (r > 0.5_rt*dr) {
+                                    Ez(i, j, 0) += T_Algo::DownwardDrr_over_r(
+                                        Kt_cc, r, dr, coefs_r, n_coefs_r, i, j, 0, 0);
+                                } else {
+                                    Ez(i, j, 0) += 4._rt * Kt_cc(i, j, 0) / dr;
+                                }
+                            }
+                        } else {
                         auto nabla2Jz = T_Algo::Dzz(Jz, coefs_z, n_coefs_z, i, j, 0, 0);
                         if (r > 0.5_rt*dr) {
                             nabla2Jz += T_Algo::Dr_rDr_over_r(Jz, r, dr, coefs_r, n_coefs_r, i, j, 0, 0);
@@ -1060,6 +1225,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         }
 
                         Ez(i, j, 0) -= eta_h(rho_val, btot_val) * nabla2Jz;
+                        }
                     }
                 }
 
