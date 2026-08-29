@@ -18,6 +18,7 @@
 #include "Fluids/QdsmcParticleContainer_fwd.H"
 
 #include "EBJBoundary.H"
+#include "ESolveBandedPC.H"
 #include "ExternalVectorPotential.H"
 #include "Utils/WarpXAlgorithmSelection.H"
 
@@ -1143,6 +1144,31 @@ public:
     /** Set by the first CaptureTensorStepStart of the run; solves before
      *  it (initialization) fall back to the live density. */
     bool m_tensor_rho_captured = false;
+
+    /** Inner-solve preconditioner selection for the elliptic E-solves
+     *  (hybrid_pic_model.esolve_pc): "jacobi" (default; the legacy
+     *  point-diagonal path, bit-identical) or "block_banded" -- a z-line
+     *  block-banded direct factorization of the inner operator, extracted
+     *  from the solve's own apply by probing and used as the Krylov
+     *  preconditioner (tolerances and convergence checks unchanged; the
+     *  poloidal operator's exact SPD inverse keeps CG legal). Fixes the
+     *  cold-start transient budget wall: the unpreconditioned coupled
+     *  vacuum block grinds Jacobi-CG/BiCGStab into the 25000-iteration
+     *  caps on sharp-column decks. RZ + single MPI rank (v1). */
+    bool m_esolve_pc_banded = false;
+    /** Per-step rebuild stamp for the inner factorizations, bumped by the
+     *  end-of-step / step-entry hooks (RotateElectronInertiaHistory,
+     *  CaptureTensorStepStart). Within a step the factorization is
+     *  bit-stable across all residual evaluations (iron rule; staleness
+     *  costs Krylov iterations only, never correctness). */
+    int m_esolve_pc_stamp = 0;
+#if defined(WARPX_DIM_RZ)
+    /** Lazily built per-solver factorizations (mutable: the solves are
+     *  const; rebuilt when the stamp advances). */
+    mutable std::unique_ptr<ESolveBandedPC> m_theta_bpc;
+    mutable std::unique_ptr<ESolveBandedPC> m_pol_bpc;
+    mutable std::unique_ptr<ESolveBandedPC> m_tensor_bpc;
+#endif
 
     /** One-shot discrete verification of the tensor-Helmholtz assembly
      *  (hybrid_pic_model.tensor_verify, the esolve_pol_verify pattern):

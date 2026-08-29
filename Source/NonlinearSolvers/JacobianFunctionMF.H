@@ -172,6 +172,14 @@ void JacobianFunctionMF<T,Ops>::define ( const T& a_U,
             m_preCond = std::make_unique<HallJacobiPC<T,Ops>>();
         } else if (m_pc_type == PreconditionerType::pc_block_banded) {
             m_preCond = std::make_unique<BlockBandedPC<T,Ops>>();
+        } else if (m_pc_type == PreconditionerType::pc_curlcurl_banded) {
+            // the form-aware BlockBandedPC: assembles the Jacobian of the
+            // configured hybrid_pic_model.esolve form (e_form rows are the
+            // pc_block_banded assembly; curlcurl_form composes the inner
+            // elliptic operator with the numerator response)
+            auto pc = std::make_unique<BlockBandedPC<T,Ops>>();
+            pc->SetFormAware(true);
+            m_preCond = std::move(pc);
         } else {
             m_preCond = std::make_unique<MatrixPC<T,Ops>>();
             m_preCond->setName(amrex::getEnumNameString(m_pc_type));

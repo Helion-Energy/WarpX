@@ -11,6 +11,7 @@ AMREX_ENUM(PreconditionerType,
     pc_jacobi,
     pc_hall_jacobi,
     pc_block_banded,
+    pc_curlcurl_banded,
     pc_petsc,
     none
 );

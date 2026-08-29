@@ -170,6 +170,21 @@ public:
     }
 
     /**
+     * \brief Return the per-step-frozen rho^n snapshot the curlcurl_form
+     * poloidal stage reads for its operator content and gates
+     * (hybrid_rho_n_frozen, component 0), for preconditioners that mirror
+     * that stage. Returns nullptr when the snapshot is not in play (e_form
+     * decks, curlcurl_pol_frozen_rho = 0, or before the first capture of a
+     * run) -- callers then fall back to the midpoint density, matching the
+     * solve's own fallback.
+     */
+    virtual const amrex::MultiFab* GetRhoPolFrozenForPC (int lev) const
+    {
+        amrex::ignore_unused(lev);
+        return nullptr;
+    }
+
+    /**
      * \brief Fill and return E-staggered beta coefficients for the
      * electron-inertia curl-curl preconditioner. The inertia operator in
      * divided form is beta(x) E + curl curl E = beta(x) b with

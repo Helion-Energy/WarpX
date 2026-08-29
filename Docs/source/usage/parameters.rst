@@ -324,7 +324,7 @@ Overall simulation parameters
 
         - ``implicit_evolve.use_mass_matrices_pc`` (``bool``, default: false).
           When ``true``, the plasma response is captured in the preconditioner.
-          Requires use of a preconditioner (``jacobian.pc_type = pc_curl_curl_mlmg``, ``pc_petsc``, ``pc_jacobi``, ``pc_hall_jacobi``, or ``pc_block_banded``).
+          Requires use of a preconditioner (``jacobian.pc_type = pc_curl_curl_mlmg``, ``pc_petsc``, ``pc_jacobi``, ``pc_hall_jacobi``, ``pc_block_banded``, or ``pc_curlcurl_banded``).
 
         - ``implicit_evolve.mass_matrices_pc_width`` (``integer``, default: 0).
           If using ``jacobian.pc_type = pc_petsc``, this parameter specifies the width of the mass matrices included in the preconditioner.
@@ -397,6 +397,13 @@ Overall simulation parameters
             - ``precond.bb_overlap`` (``int``, default: 8): restricted-additive-Schwarz overlap depth in cells (per-box mode only).
             - ``precond.bb_global`` (``int``, default: -1): replicated-global mode; -1 auto-enables whenever the BoxArray has more than one box, 0 per-box Schwarz, 1 force global.
             - ``precond.bb_device_solve`` (``bool``, default: true when compiled with ``WarpX_CUDSS``): factorize and solve on GPU via cuDSS.
+
+          - ``jacobian.pc_type = pc_curlcurl_banded``: The form-aware variant of ``pc_block_banded`` for the theta-implicit hybrid solver: it assembles the Jacobian of the configured ``hybrid_pic_model.esolve`` form. RZ geometry only.
+            With ``esolve = e_form`` the assembly (and behavior) is identical to ``pc_block_banded``.
+            With ``esolve = curlcurl_form`` the outer residual is :math:`F(E) = E - A^{-1}\,\mathrm{RHS}(E)` — :math:`A` the multiplied-through inner elliptic operator (screening :math:`\beta` rows plus the volume-scaled composed curl-curl and the gated vacuum-Gauss closure) and :math:`\mathrm{RHS}` the numerator, whose :math:`E`-dependence runs through the same :math:`\delta B \to \delta J \to \delta[(J-J_i)\times B]` chain as ``e_form`` (plus density-weighted resistive legs) but with no density division — so the Jacobian is :math:`J = A^{-1}(A-N)` and the preconditioner applies :math:`P^{-1}r = (A-N)^{-1}(A\,r)`: one banded matvec of the probed (unfactored) :math:`A` plus one factored block-banded solve of :math:`A-N`.
+            Both operators are extracted by the same colored probing with per-operator extraction self-checks; ``precond.bb_verify`` compares the pure applies :math:`A\,(J_\mathrm{fd}\,du)` against :math:`(A-N)\,du` (algebraically the FD-Jacobian gate without factoring :math:`A`).
+            Not implemented for ``esolve = tensor_form`` (whose point-implicit gyration internalizes the whistler response; use ``hybrid_pic_model.esolve_pc`` for its inner solve).
+            Shares the ``precond.bb_*`` knob family with ``pc_block_banded``; ``curlcurl_form`` always runs the replicated-global system.
 
           - ``jacobian.pc_type = pc_petsc``: Use the PETSc solver.
 
@@ -4302,11 +4309,16 @@ Maxwell solver: kinetic-fluid hybrid
     the large implicit step) and ``include_electron_inertia = 1`` with
     ``electron_inertia_djedt_only = 1`` and ``electron_inertia_bdf2 = 0``. With external
     vector-potential coils the inductive :math:`\mathbf{E}_\mathrm{ext}` subtraction is
-    unconditional on this path (no vacuum branch exists to gate it). Run with
-    ``jacobian.pc_type = none``: ``pc_block_banded`` assembles the ``e_form`` (divided)
-    Jacobian rows, which do not model this residual — measured convergence is identical to
-    the unpreconditioned solve while paying the factorization cost (a boot-time warning is
-    recorded).
+    unconditional on this path (no vacuum branch exists to gate it). Recommended solver
+    stack: ``curlcurl_n_min`` at the one-count density (removes the deposit-tail
+    conditioning floor) with ``jacobian.pc_type = pc_curlcurl_banded`` (the form-aware
+    outer preconditioner; measured 2 Newton / 3-4 GMRES per step flat through
+    sharp-column cold starts that saturate budgets unpreconditioned). The
+    ``e_form``-assembled ``pc_block_banded`` does not model this residual — measured
+    convergence is identical to the unpreconditioned solve while paying the factorization
+    cost (a boot-time warning is recorded). ``hybrid_pic_model.esolve_pc = block_banded``
+    additionally collapses the inner CG counts on screening-dominated (uniform-plasma)
+    decks; keep the default ``jacobi`` on vacuum-column decks (see its entry).
 
 .. pp:param:: hybrid_pic_model.esolve_pol_verify
     :type: ``bool``
@@ -4362,6 +4374,34 @@ Maxwell solver: kinetic-fluid hybrid
     modification; physics features must not anchor here. All gates keep reading the
     per-step-frozen density snapshot. ``pc_curlcurl_banded`` mirrors the anchored gates
     identically.
+
+.. pp:param:: hybrid_pic_model.esolve_pc
+    :type: ``string``
+    :default: ``jacobi``
+    :optional:
+
+    Preconditioner of the inner elliptic E-solves run per residual evaluation by
+    ``esolve = curlcurl_form`` (the toroidal Helmholtz CG and the coupled poloidal
+    curl-curl CG) and ``esolve = tensor_form`` in RZ (the coupled 3-component BiCGStab).
+    ``jacobi`` is the legacy point-diagonal path (bit-identical). ``block_banded``
+    assembles a screened metric component-Laplacian model of the inner operator
+    analytically from the same frozen coefficient fields the solve builds (the toroidal
+    row is its exact ABec stencil; the tensor rows keep the pointwise 3×3 screening
+    tensor exact; the poloidal pair uses the per-component vector-Laplacian form, exact
+    on vacuum-Gauss-completed rows and spectrally equivalent where the screening
+    dominates), packs it with one dense block per radial index and factors it by
+    block-banded LU across the radius once per time step, with a factor/solve
+    round-trip gate at every rebuild. Applied strictly as the Krylov preconditioner
+    (tolerances and convergence checks unchanged; staleness or model error can only
+    cost iterations; SPD by construction, so CG stays legal). Measured: on
+    screening-dominated (uniform-plasma) decks the inner counts collapse (toroidal
+    ~250 → 1-2, poloidal → ~6); on cold-start column decks the anchored operator's
+    intermediate edge band breaks the spectral equivalence on gradient-family modes
+    and point-Jacobi is the better default — set ``curlcurl_n_min`` (which removes the
+    conditioning floor itself) and prefer ``jacobian.pc_type = pc_curlcurl_banded``
+    for the outer solve there. RZ only; single MPI rank (any box layout) in this
+    version — multi-rank runs must keep ``jacobi``. The environment variable
+    ``WARPX_ESOLVE_STATS=1`` prints per-solve iteration counts for either path.
 
 .. pp:param:: hybrid_pic_model.darwin_vacuum_recovery
     :type: ``bool``

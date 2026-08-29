@@ -1897,6 +1897,28 @@ class BlockBandedPreconditioner(PreconditionerBase):
         precond.bb_device_solve = self.device_solve
 
 
+class CurlCurlBandedPreconditioner(BlockBandedPreconditioner):
+    """
+    The form-aware variant of the block-banded direct preconditioner (RZ
+    only): it assembles the Jacobian of the configured
+    hybrid_pic_model.esolve form. With esolve = e_form the assembly is
+    identical to BlockBandedPreconditioner; with esolve = curlcurl_form the
+    outer Jacobian is the composition A^-1 (A - N) of the multiplied-through
+    inner elliptic operator A and the numerator response N, applied as one
+    banded matvec plus one factored banded solve. Not implemented for
+    esolve = tensor_form (which does not need an outer preconditioner; use
+    hybrid_pic_model.esolve_pc = "block_banded" for its inner solve).
+
+    Takes the same optional parameters as BlockBandedPreconditioner (the
+    precond.bb_* knob family is shared).
+    """
+
+    def preconditioner_type_initialize_inputs(self, jacobian=None):
+        super().preconditioner_type_initialize_inputs(jacobian)
+        if jacobian is not None:
+            jacobian.pc_type = "pc_curlcurl_banded"
+
+
 class PETScPreconditioner(PreconditionerBase):
     """
     Sets up the PETSc preconditioner used during the nonlinear solver
@@ -2009,7 +2031,7 @@ class NewtonNonlinearSolver(NonlinearSolverBase):
         When use_mass_matrices_pc is True, the width of the preconditioner mass matrices
 
     pc_type: preconditioner instance, optional
-        The preconditioner type, An instance of either CurlCurlMLMGPreconditioner, JacobiPreconditioner, BlockBandedPreconditioner, or PETScPreconditioner
+        The preconditioner type, An instance of either CurlCurlMLMGPreconditioner, JacobiPreconditioner, BlockBandedPreconditioner, CurlCurlBandedPreconditioner, or PETScPreconditioner
     """
 
     def __init__(

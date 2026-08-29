@@ -1186,6 +1186,23 @@ ThetaImplicitHybrid::GetRhoMidForPC ( const int lev ) const
     return m_WarpX->m_fields.get(FieldType::rho_fp, lev);
 }
 
+const amrex::MultiFab*
+ThetaImplicitHybrid::GetRhoPolFrozenForPC ( const int lev ) const
+{
+    // Mirror of the poloidal stage's own density-source selection
+    // (HybridPICModel::HybridPICSolveE): the per-step-frozen rho^n
+    // snapshot once captured this step, otherwise nullptr so PC callers
+    // fall back to the midpoint density exactly as the solve does.
+    const HybridPICModel* hybrid = m_hybrid_pic_model;
+    if (hybrid == nullptr
+        || !hybrid->m_esolve_curlcurl
+        || !hybrid->m_curlcurl_pol_frozen_rho
+        || !hybrid->m_inertia_rho_n_captured) {
+        return nullptr;
+    }
+    return m_WarpX->m_fields.get("hybrid_rho_n_frozen", lev);
+}
+
 namespace
 {
     /** Per-node beta = 1/d_e^2 for the divided electron-inertia curl-curl

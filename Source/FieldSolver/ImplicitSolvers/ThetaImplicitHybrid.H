@@ -117,6 +117,11 @@ public:
      *  of the current Newton iterate. */
     const amrex::MultiFab* GetRhoMidForPC (int lev) const override;
 
+    /** The per-step-frozen rho^n snapshot consumed by the curlcurl_form
+     *  poloidal stage (hybrid_rho_n_frozen, component 0); nullptr whenever
+     *  the solve itself would fall back to the midpoint density. */
+    const amrex::MultiFab* GetRhoPolFrozenForPC (int lev) const override;
+
     /** E-staggered beta = 1/d_e^2 coefficients for the electron-inertia
      *  curl-curl preconditioner (the divided curl-curl operator form of
      *  Amano et al., J. Comput. Phys. 275, 197 (2014)), assembled

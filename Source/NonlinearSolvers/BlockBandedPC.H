@@ -155,10 +155,31 @@ class BlockBandedPC : public Preconditioner<T,Ops>
 
         [[nodiscard]] inline bool IsDefined () const override { return m_is_defined; }
 
+        /** pc_curlcurl_banded entry: follow hybrid_pic_model.esolve. With
+         *  e_form the assembly is exactly pc_block_banded's; with
+         *  curlcurl_form the outer Jacobian is J = A^{-1} (A - N) -- A the
+         *  multiplied-through inner elliptic operator (beta + volume-scaled
+         *  curl-curl + gated vacuum-Gauss closure), N the numerator
+         *  response (the delta-B -> delta-J -> delta[(J-Ji)xB] chain
+         *  without the 1/rho division, plus rho-weighted eta/eta_H legs) --
+         *  so the PC applies P^{-1} r = (A - N)^{-1} (A r): one banded
+         *  matvec (A, probed unfactored) + one factored banded solve.
+         *  Must be called before Define(). */
+        inline void SetFormAware (bool a_v) { m_form_aware = a_v; }
+
     protected:
 
         bool m_is_defined = false;
         bool m_verbose = false;
+        /** Follow the configured esolve form (pc_curlcurl_banded). */
+        bool m_form_aware = false;
+        /** Resolved in Define(): assemble the curlcurl_form composition. */
+        bool m_form_curlcurl = false;
+        /** Hall term active (cached per Update): gates the whistler
+         *  delta-J x B0 leg of the curlcurl_form numerator response (the
+         *  kernel's delta-Je is delta-J only when Hall is on; the ion
+         *  deposit is frozen). */
+        bool m_hall_on = true;
         /** Electron inertia active in the frozen operator (set at each
          *  coefficient fill from the hybrid model; routes the exact nodal
          *  inertia chain in the frozen apply). */
@@ -315,6 +336,10 @@ class BlockBandedPC : public Preconditioner<T,Ops>
             // blk[b][d]: row-major bsz[b] x bsz[b+d-bw] block, col block b+d-bw
             std::vector<std::vector<std::vector<RT>>> blk;
             std::vector<std::vector<int>> piv;
+            // curlcurl_form: the UNfactored inner elliptic operator A
+            // (same block layout), applied as a matvec ahead of the
+            // factored (A - N) solve
+            std::vector<std::vector<std::vector<RT>>> blkA;
 
             // frozen coefficients
             PArr B0rn, B0tn, B0zn;          // nodal B0
@@ -328,6 +353,17 @@ class BlockBandedPC : public Preconditioner<T,Ops>
             PArr ciN;                       // nodal inertia coefficient
                                             //   (m_e_eff/e) s_dt / rho_lim,
                                             //   zero in true vacuum
+
+            // curlcurl_form coefficient windows (allocated in that mode
+            // only). The theta sector reads the LIVE midpoint density with
+            // the kernels' cc-convention averages of the nodal deposit
+            // (mirrored, including the known half-cell misregistration);
+            // the poloidal sector reads the per-step-frozen rho^n snapshot
+            // exactly as SolveEPolCurlCurlRZ does.
+            PArr acTh, foldTh, rhswTh;      // theta acoef, fold rho, RHS wt
+            PArr acPr, foldPr, rhswPr;      // Er rows
+            PArr acPz, foldPz, rhswPz;      // Ez rows
+            PArr gamN;                      // nodal vacuum-closure gate
 
             // scratch for the frozen apply
             PArr inEr, inEt, inEz;
@@ -380,13 +416,34 @@ class BlockBandedPC : public Preconditioner<T,Ops>
         void FillCoeffs (BoxSys& S,
             const HostFab& hBr, const HostFab& hBt, const HostFab& hBz,
             const HostFab& hRho, const HostFab& hJir, const HostFab& hJit,
-            const HostFab& hJiz, bool have_ji);
+            const HostFab& hJiz, bool have_ji,
+            const HostFab& hRhoPol, bool have_rho_pol);
         void GatherGlobal (const amrex::MultiFab& src, int scomp,
                            HostFab& out, int ng) const;
-        void ApplyFrozenBox (BoxSys& S) const;
-        void ProbeAndFill (BoxSys& S);
+        void ApplyFrozenBox (BoxSys& S, bool a_A_only = false) const;
+        /** curlcurl_form stage 4: rows of (A - N) (or A alone). wallEt/
+         *  wallEz carry the saved wall-column inputs for the identity
+         *  rows (the PEC column kill of ApplyFrozenBox). */
+        void ApplyFrozenBoxCurlCurl (BoxSys& S, bool a_A_only,
+            const std::vector<RT>& wallEt, const std::vector<RT>& wallEz) const;
+        void ProbeAndFill (BoxSys& S, bool a_A_only = false);
         void FactorBox (BoxSys& S) const;
         void SolveBox (BoxSys& S) const;
+
+        /** Poloidal closure node volume (without the common dz), the
+         *  PolNodeVol mirror: interior r_n dr; axis half cell dr^2/8 at
+         *  rmin = 0; wall half cell at the domain-top node. */
+        [[nodiscard]] RT PolVol (int i) const
+        {
+            if (i == 0) { return (m_rmin + RT(0.25)*m_dr)*RT(0.5)*m_dr; }
+            if (i == m_ihi_nd) {
+                return (m_rmin + i*m_dr - RT(0.25)*m_dr)*RT(0.5)*m_dr;
+            }
+            return (m_rmin + i*m_dr)*m_dr;
+        }
+        // domain index facts (set in BuildSystems): top r node, top r cell,
+        // nodal-z domain ends (Dirichlet-cap tests)
+        int m_ihi_nd = 0, m_ircc_hi = 0, m_zlo_d = 0, m_zhi_nd = 0;
 #ifdef WARPX_USE_CUDSS
         bool BuildCSR (const BoxSys& S);
         void CuDSSFactor (BoxSys& S);
@@ -408,7 +465,7 @@ class BlockBandedPC : public Preconditioner<T,Ops>
 #endif
             SolveBox(S);
         }
-        void SelfCheck (BoxSys& S, int isys) const;
+        void SelfCheck (BoxSys& S, int isys, bool a_A_only = false) const;
 
     public:
         // public: contains an extended __device__ lambda (ParallelFor);
@@ -555,6 +612,22 @@ void BlockBandedPC<T,Ops>::Define ( const T& a_U, Ops* const a_ops )
 
     readParameters();
 
+    // pc_curlcurl_banded: resolve the configured esolve form. e_form keeps
+    // the pc_block_banded assembly bit-for-bit; curlcurl_form switches the
+    // frozen apply to the A/(A - N) composition (class doc at SetFormAware)
+    // and forces the replicated-global system (one global coefficient
+    // gather covers the frozen-rho snapshot too).
+    if (m_form_aware) {
+        const HybridPICModel* hybrid = m_ops->GetHybridPICModel();
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!hybrid->m_esolve_tensor,
+            "pc_curlcurl_banded: no outer preconditioner is implemented for "
+            "esolve = tensor_form (the point-implicit gyration internalizes "
+            "the whistler response; run jacobian.pc_type = none with "
+            "hybrid_pic_model.esolve_pc = block_banded for the inner solve)");
+        m_form_curlcurl = hybrid->m_esolve_curlcurl;
+        if (m_form_curlcurl) { m_global = 1; }
+    }
+
     const auto& geom = m_ops->GetGeometry(0);
     m_dr = geom.CellSize(0);
     m_dz = geom.CellSize(1);
@@ -591,6 +664,12 @@ void BlockBandedPC<T,Ops>::BuildSystems (const T& a_U)
     const Box dom = geom.Domain();
     const bool zper = geom.isPeriodic(1);
     const int znD = dom.length(1);
+    // curlcurl_form domain index facts (Dirichlet-row/axis/wall tests of
+    // the mirrored inner solves; global nodal indices as in the kernels)
+    m_ircc_hi = dom.bigEnd(0);
+    m_ihi_nd = dom.bigEnd(0) + 1;
+    m_zlo_d = dom.smallEnd(1);
+    m_zhi_nd = dom.bigEnd(1) + 1;
     // The kernels' axis special cases trigger on r < dr/2; a domain is
     // axis-bearing when its lower r edge sits below that (annulus decks
     // with rmin >= dr get plain truncation instead of parity mirrors).
@@ -682,6 +761,11 @@ void BlockBandedPC<T,Ops>::BuildSystems (const T& a_U)
         S.etahEr = S.etaEr; S.etahEt = S.etaEt; S.etahEz = S.etaEz;
         S.irhoEr = S.etaEr; S.irhoEt = S.etaEt; S.irhoEz = S.etaEz;
         S.adEr = S.etaEr;   S.adEt = S.etaEt;   S.adEz = S.etaEz;
+        if (m_form_curlcurl) {
+            S.acTh = S.etaEt; S.foldTh = S.etaEt; S.rhswTh = S.etaEt;
+            S.acPr = S.etaEr; S.foldPr = S.etaEr; S.rhswPr = S.etaEr;
+            S.acPz = S.etaEz; S.foldPz = S.etaEz; S.rhswPz = S.etaEz;
+        }
 
         // face-point eta_H windows + eta_H*curl(dJ) scratch for the
         // composed hyper-resistivity rows (hyper_resistivity_curlcurl).
@@ -728,6 +812,7 @@ void BlockBandedPC<T,Ops>::BuildSystems (const T& a_U)
         S.enR.define(S.rlo_s, S.rhi_s+1, znlo, znhi, zw, zn, 0, RT(1.0), false);
         S.enT = S.enR; S.enZ = S.enR;
         S.eiR = S.enR; S.eiT = S.enR; S.eiZ = S.enR;
+        if (m_form_curlcurl) { S.gamN = S.enR; }
         // outputs = row windows
         S.oEr.define(S.rlo_s, S.rhi_s,   zw ? S.zlo : S.zlo, zw ? S.zhi : S.zhi+1, zw, zn, 0, RT(1.0), false);
         S.oEt.define(S.rlo_s, S.rhi_s+1, zw ? S.zlo : S.zlo, zw ? S.zhi : S.zhi+1, zw, zn, 0, RT(1.0), false);
@@ -743,7 +828,8 @@ void BlockBandedPC<T,Ops>::BuildSystems (const T& a_U)
         }
         S.x.assign(S.ntot, RT(0.0));
 
-        // block storage estimate at the max bandwidth (3)
+        // block storage estimate at the max bandwidth (3); curlcurl mode
+        // additionally stores the unfactored A blocks
         double bytes = 0.0;
         for (int b = 0; b < S.nb; b++) {
             for (int d = -3; d <= 3; d++) {
@@ -752,7 +838,7 @@ void BlockBandedPC<T,Ops>::BuildSystems (const T& a_U)
                 bytes += double(S.bsz[b])*double(S.bsz[bc])*sizeof(RT);
             }
         }
-        mem_gb += bytes/1.0e9;
+        mem_gb += (m_form_curlcurl ? 2.0 : 1.0)*bytes/1.0e9;
 
         m_sys.push_back(std::move(S));
     }
@@ -798,9 +884,13 @@ void BlockBandedPC<T,Ops>::BuildSystems (const T& a_U)
     m_work_defined = true;
 }
 
-/** Frozen linearized operator: inputs in S.inE*, outputs into S.oE*. */
+/** Frozen linearized operator: inputs in S.inE*, outputs into S.oE*.
+ *  e_form: rows of I - delta-E_ohm. curlcurl_form: rows of (A - N) --
+ *  the mirrored inner elliptic operator minus the scaled numerator
+ *  response -- or of A alone when a_A_only is set (the matvec leg of
+ *  P^{-1} = (A - N)^{-1} A). */
 template <class T, class Ops>
-void BlockBandedPC<T,Ops>::ApplyFrozenBox (BoxSys& S) const
+void BlockBandedPC<T,Ops>::ApplyFrozenBox (BoxSys& S, bool a_A_only) const
 {
     const RT tdt = m_theta * this->m_dt;
     const RT dr = m_dr, dz = m_dz, rmin = m_rmin;
@@ -826,6 +916,9 @@ void BlockBandedPC<T,Ops>::ApplyFrozenBox (BoxSys& S) const
         }
     }
 
+    // Stages 1-3 build the numerator-response chain; the A-only apply
+    // (curlcurl_form matvec leg) acts on the raw inputs and skips them.
+    if (!a_A_only) {
     // ---- stage 1: delta-B = theta*dt * (Faraday expressions) ----
     // (EvolveBCylindrical: Br += dt*UpDz(Et); Bt += dt*(UpDr(Ez) - UpDz(Er));
     //  Bz += -dt*UpDrr_over_r(Et); axis: Br(0)=0)
@@ -916,9 +1009,13 @@ void BlockBandedPC<T,Ops>::ApplyFrozenBox (BoxSys& S) const
             const RT b0r = S.B0rn.get(i,j);
             const RT b0t = S.B0tn.get(i,j);
             const RT b0z = S.B0zn.get(i,j);
-            RT er = jt*b0z - jz*b0t;
-            RT et = jz*b0r - jr*b0z;
-            RT ez = jr*b0t - jt*b0r;
+            // curlcurl_form: the kernel's delta-Je is (hall ? delta-J : 0)
+            // -- the ion deposit is frozen -- so the whistler leg gates on
+            // the Hall term. (e_form keeps its landed convention.)
+            const bool whl = !m_form_curlcurl || m_hall_on;
+            RT er = whl ? (jt*b0z - jz*b0t) : RT(0.0);
+            RT et = whl ? (jz*b0r - jr*b0z) : RT(0.0);
+            RT ez = whl ? (jr*b0t - jt*b0r) : RT(0.0);
             if (m_include_drift) {
                 // delta-B to nodes
                 const RT br = RT(0.5)*(S.dBr.get(i,j-1) + S.dBr.get(i,j));
@@ -945,6 +1042,12 @@ void BlockBandedPC<T,Ops>::ApplyFrozenBox (BoxSys& S) const
                 S.eiZ.ref(i,j) = ci*jz;
             }
         }
+    }
+    } // end !a_A_only (stages 1-3)
+
+    if (m_form_curlcurl) {
+        ApplyFrozenBoxCurlCurl(S, a_A_only, wallEt, wallEz);
+        return;
     }
 
     // ---- stage 4: rows out = in - delta_E_ohm ----
@@ -1049,6 +1152,194 @@ void BlockBandedPC<T,Ops>::ApplyFrozenBox (BoxSys& S) const
     }
 }
 
+/** curlcurl_form stage 4: mirrored rows of the inner solves.
+ *  theta rows = the MLNodeABecLaplacian-form operator of
+ *  SolveEThetaCurlCurlRZ; Er/Ez rows = the fused energy-form apply of
+ *  SolveEPolCurlCurlRZ (V-scaled composed curl-curl + gated
+ *  -grad(gamma div .) closure with the PolNodeVol half cells); minus the
+ *  RHS-weighted numerator response unless a_A_only. Dirichlet rows
+ *  (theta axis/wall + z caps, Ez wall, Er z caps) are identity on the
+ *  saved input; their RHS weights are zeroed in FillCoeffs, matching the
+ *  solves' own row zeroing. Non-periodic z is mirrored structurally but
+ *  cap COLUMNS are not killed (v1; the gate decks run periodic z). */
+template <class T, class Ops>
+void BlockBandedPC<T,Ops>::ApplyFrozenBoxCurlCurl (BoxSys& S, bool a_A_only,
+    const std::vector<RT>& wallEt, const std::vector<RT>& wallEz) const
+{
+    const RT dr = m_dr, dz = m_dz, rmin = m_rmin;
+    const bool zw = S.zwrap;
+    const bool wall_saved_t = S.wall_pec && !wallEt.empty();
+    const bool wall_saved_z = S.wall_pec && !wallEz.empty();
+
+    // ---- Er rows (cell r, node z) ----
+    for (int i = S.oEr.ilo; i <= S.oEr.ihi; i++) {
+        const RT rc = rmin + (i + RT(0.5))*dr;
+        const RT rcm = rmin + (i - RT(0.5))*dr;
+        for (int j = S.oEr.jlo; j <= S.oEr.jhi; j++) {
+            if (!zw && (j <= m_zlo_d || j >= m_zhi_nd)) {
+                S.oEr.ref(i,j) = S.inEr.get(i,j);   // Dirichlet cap row
+                continue;
+            }
+            const RT wp = (S.inEr.get(i,j+1) - S.inEr.get(i,j))/dz
+                        - (S.inEz.get(i+1,j) - S.inEz.get(i,j))/dr;
+            const RT wm = (S.inEr.get(i,j) - S.inEr.get(i,j-1))/dz
+                        - (S.inEz.get(i+1,j-1) - S.inEz.get(i,j-1))/dr;
+            RT dd = RT(0.0);
+            if (S.gamN.get(i,j) > RT(0.0)) {
+                RT f = rc*S.inEr.get(i,j);
+                if (i > 0) { f -= rcm*S.inEr.get(i-1,j); }
+                dd += f/PolVol(i)
+                    + (S.inEz.get(i,j) - S.inEz.get(i,j-1))/dz;
+            }
+            if (S.gamN.get(i+1,j) > RT(0.0)) {
+                RT f = -rc*S.inEr.get(i,j);
+                if (i + 1 <= m_ircc_hi) {
+                    f += (rmin + (i + RT(1.5))*dr)*S.inEr.get(i+1,j);
+                }
+                dd -= f/PolVol(i+1)
+                    + (S.inEz.get(i+1,j) - S.inEz.get(i+1,j-1))/dz;
+            }
+            RT out = S.acPr.get(i,j)*S.inEr.get(i,j)
+                   - rc*dr*(wp - wm)/dz + rc*dd;
+            if (!a_A_only) {
+                RT dnum = RT(0.5)*(S.enR.get(i,j) + S.enR.get(i+1,j));
+                RT res = S.etaEr.get(i,j)*S.dJr.get(i,j);
+                if (m_hyperres_cc) {
+                    res += -(S.cWt.get(i,j) - S.cWt.get(i,j-1))/dz;
+                } else {
+                    const RT etah = S.etahEr.get(i,j);
+                    if (etah != RT(0.0)) {
+                        const RT lap =
+                            ( (rc + RT(0.5)*dr)*(S.dJr.get(i+1,j) - S.dJr.get(i,j))
+                            - (rc - RT(0.5)*dr)*(S.dJr.get(i,j) - S.dJr.get(i-1,j)) )/(rc*dr*dr)
+                            + (S.dJr.get(i,j-1) - RT(2.0)*S.dJr.get(i,j) + S.dJr.get(i,j+1))/(dz*dz)
+                            - S.dJr.get(i,j)/(rc*rc);
+                        res -= etah*lap;
+                    }
+                }
+                dnum += S.foldPr.get(i,j)*res;
+                out -= S.rhswPr.get(i,j)*dnum;
+            }
+            S.oEr.ref(i,j) = out;
+        }
+    }
+
+    // ---- Etheta rows (node r, node z) ----
+    for (int i = S.oEt.ilo; i <= S.oEt.ihi; i++) {
+        const RT r = rmin + i*dr;
+        const RT rcp = rmin + (i + RT(0.5))*dr;
+        const RT rcm = rmin + (i - RT(0.5))*dr;
+        for (int j = S.oEt.jlo; j <= S.oEt.jhi; j++) {
+            if (i <= 0 || i >= m_ihi_nd
+                || (!zw && (j <= m_zlo_d || j >= m_zhi_nd))) {
+                // Dirichlet identity row (axis regularity / PEC wall /
+                // z caps); the wall input was column-killed above, so the
+                // row diagonal reads the saved value
+                S.oEt.ref(i,j) = (wall_saved_t && i == S.wall_node)
+                    ? wallEt[S.inEt.jmap(j)] : S.inEt.get(i,j);
+                continue;
+            }
+            // axis column is Dirichlet in the solve: reads of the i = 0
+            // DOF return zero (the wall column is killed on the input)
+            const RT et_im = (i - 1 == 0) ? RT(0.0) : S.inEt.get(i-1,j);
+            RT out = S.acTh.get(i,j)*S.inEt.get(i,j)
+                - ( rcp*(S.inEt.get(i+1,j) - S.inEt.get(i,j))
+                  - rcm*(S.inEt.get(i,j) - et_im) )/(dr*dr)
+                - RT(0.5)*(rcp + rcm)
+                  *(S.inEt.get(i,j+1) - RT(2.0)*S.inEt.get(i,j) + S.inEt.get(i,j-1))
+                  /(dz*dz);
+            if (!a_A_only) {
+                RT res = S.etaEt.get(i,j)*S.dJt.get(i,j);
+                if (m_hyperres_cc) {
+                    res += (S.cWr.get(i,j) - S.cWr.get(i,j-1))/dz
+                         - (S.cWz.get(i,j) - S.cWz.get(i-1,j))/dr;
+                } else {
+                    const RT etah = S.etahEt.get(i,j);
+                    if (etah != RT(0.0)) {
+                        const RT lap =
+                            ( (r + RT(0.5)*dr)*(S.dJt.get(i+1,j) - S.dJt.get(i,j))
+                            - (r - RT(0.5)*dr)*(S.dJt.get(i,j) - S.dJt.get(i-1,j)) )/(r*dr*dr)
+                            + (S.dJt.get(i,j-1) - RT(2.0)*S.dJt.get(i,j) + S.dJt.get(i,j+1))/(dz*dz)
+                            - S.dJt.get(i,j)/(r*r);
+                        res -= etah*lap;
+                    }
+                }
+                const RT dnum = S.enT.get(i,j) + S.foldTh.get(i,j)*res;
+                out -= S.rhswTh.get(i,j)*dnum;
+            }
+            S.oEt.ref(i,j) = out;
+        }
+    }
+
+    // ---- Ez rows (node r, cell z) ----
+    for (int i = S.oEz.ilo; i <= S.oEz.ihi; i++) {
+        const RT r = rmin + i*dr;
+        const RT rcp = rmin + (i + RT(0.5))*dr;
+        const RT rcm = rmin + (i - RT(0.5))*dr;
+        const bool on_axis = S.has_axis && (r < RT(0.5)*dr) && (r > -RT(0.5)*dr);
+        for (int j = S.oEz.jlo; j <= S.oEz.jhi; j++) {
+            if (i >= m_ihi_nd) {
+                S.oEz.ref(i,j) = (wall_saved_z && i == S.wall_node)
+                    ? wallEz[S.inEz.jmap(j)] : S.inEz.get(i,j);
+                continue;
+            }
+            const RT wp = (S.inEr.get(i,j+1) - S.inEr.get(i,j))/dz
+                        - (S.inEz.get(i+1,j) - S.inEz.get(i,j))/dr;
+            RT cc = rcp*wp;
+            if (i > 0) {
+                const RT wm = (S.inEr.get(i-1,j+1) - S.inEr.get(i-1,j))/dz
+                            - (S.inEz.get(i,j) - S.inEz.get(i-1,j))/dr;
+                cc -= rcm*wm;
+            }
+            if (S.gamN.get(i,j) > RT(0.0) || S.gamN.get(i,j+1) > RT(0.0)) {
+                const RT Vn = PolVol(i);
+                RT dd = RT(0.0);
+                if (S.gamN.get(i,j) > RT(0.0)) {
+                    RT f = rcp*S.inEr.get(i,j);
+                    if (i > 0) { f -= rcm*S.inEr.get(i-1,j); }
+                    dd += f/Vn + (S.inEz.get(i,j) - S.inEz.get(i,j-1))/dz;
+                }
+                if (S.gamN.get(i,j+1) > RT(0.0)) {
+                    RT f = rcp*S.inEr.get(i,j+1);
+                    if (i > 0) { f -= rcm*S.inEr.get(i-1,j+1); }
+                    dd -= f/Vn + (S.inEz.get(i,j+1) - S.inEz.get(i,j))/dz;
+                }
+                cc += Vn*dd/dz;
+            }
+            RT out = S.acPz.get(i,j)*S.inEz.get(i,j) + cc;
+            if (!a_A_only) {
+                RT dnum = RT(0.5)*(S.enZ.get(i,j) + S.enZ.get(i,j+1));
+                RT res = S.etaEz.get(i,j)*S.dJz.get(i,j);
+                if (m_hyperres_cc) {
+                    res += on_axis
+                        ? RT(4.0)*S.cWt.get(i,j)/dr
+                        : ( (r + RT(0.5)*dr)*S.cWt.get(i,j)
+                          - (r - RT(0.5)*dr)*S.cWt.get(i-1,j) )/(r*dr);
+                } else {
+                    const RT etah = S.etahEz.get(i,j);
+                    if (etah != RT(0.0)) {
+                        RT lap = (S.dJz.get(i,j-1) - RT(2.0)*S.dJz.get(i,j)
+                                  + S.dJz.get(i,j+1))/(dz*dz);
+                        if (on_axis) {
+                            lap += RT(2.0)*
+                                (S.dJz.get(i-1,j) - RT(2.0)*S.dJz.get(i,j)
+                                 + S.dJz.get(i+1,j))/(dr*dr);
+                        } else {
+                            lap += ( (r + RT(0.5)*dr)*(S.dJz.get(i+1,j) - S.dJz.get(i,j))
+                                   - (r - RT(0.5)*dr)*(S.dJz.get(i,j) - S.dJz.get(i-1,j)) )
+                                   /(r*dr*dr);
+                        }
+                        res -= etah*lap;
+                    }
+                }
+                dnum += S.foldPz.get(i,j)*res;
+                out -= S.rhswPz.get(i,j)*dnum;
+            }
+            S.oEz.ref(i,j) = out;
+        }
+    }
+}
+
 template <class T, class Ops>
 void BlockBandedPC<T,Ops>::GatherGlobal (const amrex::MultiFab& src, int scomp,
                                          HostFab& out, int ng) const
@@ -1127,7 +1418,7 @@ void BlockBandedPC<T,Ops>::GatherCoefficients (const T& a_U)
     if (m_global) {
         // replicated global system: gather each coefficient field onto a
         // domain-spanning host buffer on every rank
-        HostFab hBr, hBt, hBz, hRho, hJir, hJit, hJiz;
+        HostFab hBr, hBt, hBz, hRho, hJir, hJit, hJiz, hRhoPol;
         GatherGlobal(*B_mfs[0], 0, hBr, 3);
         GatherGlobal(*B_mfs[1], 0, hBt, 3);
         GatherGlobal(*B_mfs[2], 0, hBz, 3);
@@ -1137,8 +1428,18 @@ void BlockBandedPC<T,Ops>::GatherCoefficients (const T& a_U)
             GatherGlobal(*Ji_mfs[1], 0, hJit, 3);
             GatherGlobal(*Ji_mfs[2], 0, hJiz, 3);
         }
+        bool have_rho_pol = false;
+        if (m_form_curlcurl) {
+            // the poloidal stage's own density source: the per-step-frozen
+            // rho^n snapshot when in play, the midpoint deposit otherwise
+            const MultiFab* rho_pol_mf = m_ops->GetRhoPolFrozenForPC(0);
+            if (rho_pol_mf != nullptr) {
+                GatherGlobal(*rho_pol_mf, 0, hRhoPol, 3);
+                have_rho_pol = true;
+            }
+        }
         FillCoeffs(m_sys[0], hBr, hBt, hBz, hRho, hJir, hJit, hJiz,
-                   have_ji_glob);
+                   have_ji_glob, hRhoPol, have_rho_pol);
         return;
     }
 
@@ -1156,7 +1457,11 @@ void BlockBandedPC<T,Ops>::GatherCoefficients (const T& a_U)
             CopyFabToHost(m_Jipad[1], mfi, hJit);
             CopyFabToHost(m_Jipad[2], mfi, hJiz);
         }
-        FillCoeffs(S, hBr, hBt, hBz, hRho, hJir, hJit, hJiz, have_ji);
+        // Schwarz path never runs in curlcurl mode (Define forces the
+        // replicated-global system there): no frozen-rho staging needed
+        const HostFab hRhoPolEmpty{};
+        FillCoeffs(S, hBr, hBt, hBz, hRho, hJir, hJit, hJiz, have_ji,
+                   hRhoPolEmpty, false);
     }
 }
 
@@ -1164,7 +1469,8 @@ template <class T, class Ops>
 void BlockBandedPC<T,Ops>::FillCoeffs (BoxSys& S,
     const HostFab& hBr, const HostFab& hBt, const HostFab& hBz,
     const HostFab& hRho, const HostFab& hJir, const HostFab& hJit,
-    const HostFab& hJiz, bool have_ji)
+    const HostFab& hJiz, bool have_ji,
+    const HostFab& hRhoPol, bool have_rho_pol)
 {
     using namespace amrex;
 
@@ -1189,9 +1495,13 @@ void BlockBandedPC<T,Ops>::FillCoeffs (BoxSys& S,
     // 1/(theta dt) (two-point form / first step after seeding); mirrors
     // ComputeElectronInertiaNodal. The theta*dt of the Faraday stage
     // cancels it back to the dimensionless (2 theta + 1)/2 class.
-    m_inertia_exact = inertia_on;
+    // curlcurl_form: the dJe/dt E-response IS the elliptic operator A (and
+    // the measured numerator is frozen), so the exact nodal inertia chain
+    // is not part of the numerator response
+    m_inertia_exact = inertia_on && !m_form_curlcurl;
+    m_hall_on = hall_on;
     RT s_dt = RT(0.0);
-    if (inertia_on) {
+    if (m_inertia_exact) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(this->m_dt > RT(0.0),
             "pc_block_banded: inertia coefficients need the time step "
             "(CurTimeStep not called before Update)");
@@ -1305,7 +1615,7 @@ void BlockBandedPC<T,Ops>::FillCoeffs (BoxSys& S,
                 // advective (Je.grad)u term and of u drho/dt are omitted
                 // (electron-drift-CFL small; priced by the FD gate).
                 RT ci = RT(0.0);
-                if (inertia_on) {
+                if (m_inertia_exact) {
                     const RT rho_mid_n = hRho.get(i, j, 0);
                     if (rho_mid_n > RT(0.0)) {
                         const RT rho_lim_n =
@@ -1468,11 +1778,96 @@ void BlockBandedPC<T,Ops>::FillCoeffs (BoxSys& S,
                 }
             }
         }
+
+        // ---- curlcurl_form coefficient windows ----
+        // theta rows read the LIVE midpoint density; poloidal rows read
+        // the per-step-frozen rho^n snapshot when in play (hRhoPol), the
+        // midpoint deposit otherwise -- exactly the solves' own selection.
+        // Both use the kernels' cc-convention index arithmetic on the
+        // nodal deposit (mirrored, including the flagged half-cell
+        // misregistration: the PC targets the operator as built).
+        if (m_form_curlcurl) {
+            const RT q_e = static_cast<RT>(PhysConst::q_e);
+            const RT me_eff_cc =
+                static_cast<RT>(hybrid->m_electron_inertia_mass);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(me_eff_cc > RT(0.0),
+                "pc_curlcurl_banded: electron inertia mass not resolved "
+                "before the first preconditioner update");
+            const RT beta_fac = mu0*q_e/me_eff_cc;
+            const RT rhs_fac = beta_fac;
+            // one-count membership anchor (mirrors the solves' gates;
+            // 0 = the legacy strictly-zero gating)
+            const RT rho_1c =
+                q_e*static_cast<RT>(hybrid->m_curlcurl_n_min);
+            auto rhoPol = [&](int i, int j) -> RT {
+                return have_rho_pol ? hRhoPol.get(i,j,0) : hRho.get(i,j,0);
+            };
+            for (int i = S.acTh.ilo; i <= S.acTh.ihi; i++) {
+                const RT rr = std::max(rmin + i*dr, RT(0.125)*dr);
+                for (int j = S.acTh.jlo; j <= S.acTh.jhi; j++) {
+                    const RT rho_n4 = std::max(RT(0.0),
+                        RT(0.25)*(hRho.get(i,j) + hRho.get(i-1,j)
+                                + hRho.get(i,j-1) + hRho.get(i-1,j-1)));
+                    S.acTh.ref(i,j) = rr*beta_fac*rho_n4 + RT(1.0)/rr;
+                    S.foldTh.ref(i,j) = rho_n4;
+                    const bool dir = (i <= 0) || (i >= m_ihi_nd)
+                        || (!S.zwrap && (j <= m_zlo_d || j >= m_zhi_nd))
+                        || (rho_1c > RT(0.0) && !(rho_n4 > rho_1c));
+                    S.rhswTh.ref(i,j) = dir ? RT(0.0) : rr*rhs_fac;
+                }
+            }
+            for (int i = S.acPr.ilo; i <= S.acPr.ihi; i++) {
+                const RT V = (rmin + (i + RT(0.5))*dr)*dr;
+                for (int j = S.acPr.jlo; j <= S.acPr.jhi; j++) {
+                    const RT rho_p = std::max(RT(0.0),
+                        RT(0.5)*(rhoPol(i,j) + rhoPol(i,j-1)));
+                    S.acPr.ref(i,j) = beta_fac*rho_p*V;
+                    S.foldPr.ref(i,j) = rho_p;
+                    const bool dir =
+                        (!S.zwrap && (j <= m_zlo_d || j >= m_zhi_nd));
+                    S.rhswPr.ref(i,j) = (dir || !(rho_p > rho_1c))
+                        ? RT(0.0) : V*rhs_fac;
+                }
+            }
+            for (int i = S.acPz.ilo; i <= S.acPz.ihi; i++) {
+                const RT V = (i == 0) ? RT(0.125)*dr*dr : (rmin + i*dr)*dr;
+                for (int j = S.acPz.jlo; j <= S.acPz.jhi; j++) {
+                    const RT rho_p = std::max(RT(0.0),
+                        RT(0.5)*(rhoPol(i,j) + rhoPol(std::max(i-1,0),j)));
+                    S.acPz.ref(i,j) = beta_fac*rho_p*V;
+                    S.foldPz.ref(i,j) = rho_p;
+                    const bool dir = (i >= m_ihi_nd);
+                    S.rhswPz.ref(i,j) = (dir || !(rho_p > rho_1c))
+                        ? RT(0.0) : V*rhs_fac;
+                }
+            }
+            // nodal vacuum-closure gate (one-sided at the axis/wall nodes,
+            // zero on non-periodic caps; out-of-window reads return zero =
+            // the solve's setBndry(0) convention)
+            for (int i = S.gamN.ilo; i <= S.gamN.ihi; i++) {
+                for (int j = S.gamN.jlo; j <= S.gamN.jhi; j++) {
+                    if (!S.zwrap && (j <= m_zlo_d || j >= m_zhi_nd)) {
+                        S.gamN.ref(i,j) = RT(0.0);
+                        continue;
+                    }
+                    RT rho_n;
+                    if (i <= 0) {
+                        rho_n = RT(0.5)*(rhoPol(i,j) + rhoPol(i,j-1));
+                    } else if (i >= m_ihi_nd) {
+                        rho_n = RT(0.5)*(rhoPol(i-1,j) + rhoPol(i-1,j-1));
+                    } else {
+                        rho_n = RT(0.25)*(rhoPol(i,j) + rhoPol(i-1,j)
+                                        + rhoPol(i,j-1) + rhoPol(i-1,j-1));
+                    }
+                    S.gamN.ref(i,j) = (rho_n > rho_1c) ? RT(0.0) : RT(1.0);
+                }
+            }
+        }
     }
 }
 
 template <class T, class Ops>
-void BlockBandedPC<T,Ops>::ProbeAndFill (BoxSys& S)
+void BlockBandedPC<T,Ops>::ProbeAndFill (BoxSys& S, bool a_A_only)
 {
     // DOF (column) windows per component: lit points may only sit on
     // actual unknowns, not on the padded input windows
@@ -1486,17 +1881,18 @@ void BlockBandedPC<T,Ops>::ProbeAndFill (BoxSys& S)
     const int SP = 8;
     S.bw = 3;
 
-    // ---- allocate blocks ----
-    S.blk.assign(S.nb, {});
-    S.piv.assign(S.nb, {});
+    // ---- allocate blocks (a_A_only extracts the unfactored A blocks) ----
+    auto& tblk = a_A_only ? S.blkA : S.blk;
+    tblk.assign(S.nb, {});
+    if (!a_A_only) { S.piv.assign(S.nb, {}); }
     for (int b = 0; b < S.nb; b++) {
-        S.blk[b].resize(2*S.bw + 1);
+        tblk[b].resize(2*S.bw + 1);
         for (int d = 0; d <= 2*S.bw; d++) {
             const int bc = b + d - S.bw;
             if (bc < 0 || bc >= S.nb) { continue; }
-            S.blk[b][d].assign(std::size_t(S.bsz[b])*S.bsz[bc], RT(0.0));
+            tblk[b][d].assign(std::size_t(S.bsz[b])*S.bsz[bc], RT(0.0));
         }
-        S.piv[b].assign(S.bsz[b], 0);
+        if (!a_A_only) { S.piv[b].assign(S.bsz[b], 0); }
     }
 
     // ---- pass 2: extraction ----
@@ -1528,7 +1924,7 @@ void BlockBandedPC<T,Ops>::ProbeAndFill (BoxSys& S)
                     }
                 }
                 if (!any) { continue; }
-                ApplyFrozenBox(S);
+                ApplyFrozenBox(S, a_A_only);
 
                 // for every lit column, harvest the rows in its window
                 for (int ci = cw.ilo + pr; ci <= cw.ihi; ci += SP) {
@@ -1546,7 +1942,7 @@ void BlockBandedPC<T,Ops>::ProbeAndFill (BoxSys& S)
                                 const int brow = io - S.rlo_s;
                                 const int d = bcol - brow + S.bw;
                                 if (d < 0 || d > 2*S.bw) { continue; }
-                                auto& blkv = S.blk[brow][d];
+                                auto& blkv = tblk[brow][d];
                                 if (blkv.empty()) { continue; }
                                 for (int dj = -3; dj <= 3; dj++) {
                                     int jo = cj + dj;
@@ -1573,7 +1969,10 @@ void BlockBandedPC<T,Ops>::ProbeAndFill (BoxSys& S)
     }
 
     // trim the effective bandwidth: drop outer block diagonals that are
-    // entirely zero (FactorBox/SolveBox/ApplyBlocks loop to S.bwf)
+    // entirely zero (FactorBox/SolveBox/ApplyBlocks loop to S.bwf).
+    // Skipped for the A-only pass: A's reach is a subset of the full
+    // operator's and blkA is only ever used through the full-band matvec.
+    if (a_A_only) { return; }
     int bwf = 1;
     for (int b = 0; b < S.nb; b++) {
         for (int d = 0; d <= 2*S.bw; d++) {
@@ -1805,7 +2204,7 @@ void BlockBandedPC<T,Ops>::SolveBox (BoxSys& S) const
 }
 
 template <class T, class Ops>
-void BlockBandedPC<T,Ops>::SelfCheck (BoxSys& S, int isys) const
+void BlockBandedPC<T,Ops>::SelfCheck (BoxSys& S, int isys, bool a_A_only) const
 {
     // extracted matrix must reproduce the frozen apply on a random vector
     // (exact modulo roundoff; disagreement means the band was aliased)
@@ -1837,11 +2236,11 @@ void BlockBandedPC<T,Ops>::SelfCheck (BoxSys& S, int isys) const
             v[S.boff[b] + locEz(S,b,j)] = val;
         }
     }
-    ApplyFrozenBox(S);
+    ApplyFrozenBox(S, a_A_only);
 
     // matrix apply
     std::vector<RT> w;
-    ApplyBlocks(S, S.blk, v, w);
+    ApplyBlocks(S, a_A_only ? S.blkA : S.blk, v, w);
 
     RT num = RT(0.0), den = RT(0.0);
     for (int b = 0; b < S.nb; b++) {
@@ -1861,7 +2260,8 @@ void BlockBandedPC<T,Ops>::SelfCheck (BoxSys& S, int isys) const
     const RT rel = (den > RT(0.0)) ? std::sqrt(num/den) : std::sqrt(num);
     if (m_verbose || rel > RT(1.0e-11)) {
         amrex::AllPrint() << "pc_block_banded: box " << isys
-            << " extraction self-check rel err = " << rel
+            << (a_A_only ? " A-extraction" : " extraction")
+            << " self-check rel err = " << rel
             << " (bw " << S.bw << ")\n";
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(rel <= RT(1.0e-10),
@@ -1968,38 +2368,55 @@ void BlockBandedPC<T,Ops>::VerifyFD (const T& a_U)
         // gather the direction once (collective), apply the single global
         // system, then write the owned boxes
         BoxSys& S = m_sys[0];
-        HostFab hEr, hEt, hEz;
-        GatherGlobal(*(du_vec2[0][0]), 0, hEr, 1);
-        GatherGlobal(*(du_vec2[0][1]), 0, hEt, 1);
-        GatherGlobal(*(du_vec2[0][2]), 0, hEz, 1);
-        S.inEr.setzero(); S.inEt.setzero(); S.inEz.setzero();
-        for (int i = S.inEr.ilo; i <= S.inEr.ihi; i++) {
-            for (int j = S.oEr.jlo; j <= S.oEr.jhi; j++) { S.inEr.ref(i,j) = hEr.get(i,j); }
-        }
-        for (int i = S.inEt.ilo; i <= S.inEt.ihi; i++) {
-            for (int j = S.oEt.jlo; j <= S.oEt.jhi; j++) { S.inEt.ref(i,j) = hEt.get(i,j); }
-        }
-        for (int i = S.inEz.ilo; i <= S.inEz.ihi; i++) {
-            for (int j = S.oEz.jlo; j <= S.oEz.jhi; j++) { S.inEz.ref(i,j) = hEz.get(i,j); }
-        }
-        ApplyFrozenBox(S);
-        for (int dim = 0; dim < 3; dim++) {
-            amrex::MultiFab& mf = *(jm_vec[0][dim]);
-            const PArr& out = (dim==0) ? S.oEr : ((dim==1) ? S.oEt : S.oEz);
-            for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
-                const amrex::Box tb = amrex::convert(mfi.validbox(), mf.ixType());
-#ifdef AMREX_USE_GPU
-                amrex::FArrayBox hout(tb, 1, amrex::The_Pinned_Arena());
-                auto ha = hout.array();
-                amrex::LoopOnCpu(tb, [&](int i, int j, int k) { ha(i,j,k) = out.get(i,j); });
-                amrex::FArrayBox& dfab = mf[mfi];
-                amrex::Gpu::htod_memcpy(dfab.dataPtr(), hout.dataPtr(),
-                                        hout.size()*sizeof(amrex::Real));
-#else
-                auto darr = mf.array(mfi);
-                amrex::LoopOnCpu(tb, [&](int i, int j, int k) { darr(i,j,k) = out.get(i,j); });
-#endif
+        auto apply_model = [&](T& a_out, T& a_in, bool a_A_only)
+        {
+            auto& in_vec = a_in.getArrayVec();
+            auto& out_vec = a_out.getArrayVec();
+            HostFab hEr, hEt, hEz;
+            GatherGlobal(*(in_vec[0][0]), 0, hEr, 1);
+            GatherGlobal(*(in_vec[0][1]), 0, hEt, 1);
+            GatherGlobal(*(in_vec[0][2]), 0, hEz, 1);
+            S.inEr.setzero(); S.inEt.setzero(); S.inEz.setzero();
+            for (int i = S.inEr.ilo; i <= S.inEr.ihi; i++) {
+                for (int j = S.oEr.jlo; j <= S.oEr.jhi; j++) { S.inEr.ref(i,j) = hEr.get(i,j); }
             }
+            for (int i = S.inEt.ilo; i <= S.inEt.ihi; i++) {
+                for (int j = S.oEt.jlo; j <= S.oEt.jhi; j++) { S.inEt.ref(i,j) = hEt.get(i,j); }
+            }
+            for (int i = S.inEz.ilo; i <= S.inEz.ihi; i++) {
+                for (int j = S.oEz.jlo; j <= S.oEz.jhi; j++) { S.inEz.ref(i,j) = hEz.get(i,j); }
+            }
+            ApplyFrozenBox(S, a_A_only);
+            for (int dim = 0; dim < 3; dim++) {
+                amrex::MultiFab& mf = *(out_vec[0][dim]);
+                const PArr& out = (dim==0) ? S.oEr : ((dim==1) ? S.oEt : S.oEz);
+                for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
+                    const amrex::Box tb = amrex::convert(mfi.validbox(), mf.ixType());
+#ifdef AMREX_USE_GPU
+                    amrex::FArrayBox hout(tb, 1, amrex::The_Pinned_Arena());
+                    auto ha = hout.array();
+                    amrex::LoopOnCpu(tb, [&](int i, int j, int k) { ha(i,j,k) = out.get(i,j); });
+                    amrex::FArrayBox& dfab = mf[mfi];
+                    amrex::Gpu::htod_memcpy(dfab.dataPtr(), hout.dataPtr(),
+                                            hout.size()*sizeof(amrex::Real));
+#else
+                    auto darr = mf.array(mfi);
+                    amrex::LoopOnCpu(tb, [&](int i, int j, int k) { darr(i,j,k) = out.get(i,j); });
+#endif
+                }
+            }
+        };
+        apply_model(Jm, dU, false);
+        if (m_form_curlcurl) {
+            // A-composed gate: the model J = A^{-1}(A - N) cannot be
+            // applied without factoring A, so compare pure applies instead:
+            // A (J_fd du) must equal (A - N) du. Replace Jd by A*Jd; Jm
+            // already holds (A - N) du.
+            T AJd;
+            AJd.Define(a_U);
+            AJd.zero();
+            apply_model(AJd, Jd, true);
+            Jd.Copy(AJd);
         }
     } else {
 
@@ -2053,9 +2470,16 @@ void BlockBandedPC<T,Ops>::VerifyFD (const T& a_U)
     diff.increment(Jm, -RT(1.0));
     const RT nJd = Jd.norm2();
     const RT ndiff = diff.norm2();
+    if (m_form_curlcurl) {
+        amrex::Print() << "pc_curlcurl_banded VERIFY (A-composed): "
+            << "||A J_fd du|| = " << nJd
+            << ", ||A J_fd du - (A-N) du||/||A J_fd du|| = "
+            << (nJd > RT(0.0) ? ndiff/nJd : ndiff) << "\n";
+    } else {
     amrex::Print() << "pc_block_banded VERIFY: ||J_fd*du|| = " << nJd
         << ", ||J_fd*du - J_pc*du||/||J_fd*du|| = "
         << (nJd > RT(0.0) ? ndiff/nJd : ndiff) << "\n";
+    }
 
     // per-component breakdown + worst-row locator (localizes wall/axis
     // ring truncation vs distributed stencil error)
@@ -2247,6 +2671,12 @@ void BlockBandedPC<T,Ops>::Update (const T& a_U)
     for (std::size_t s = 0; s < m_sys.size(); s++) {
         ProbeAndFill(m_sys[s]);
         SelfCheck(m_sys[s], int(s));
+        if (m_form_curlcurl) {
+            // second pass: the unfactored A blocks for the matvec leg of
+            // P^{-1} = (A - N)^{-1} A
+            ProbeAndFill(m_sys[s], true);
+            SelfCheck(m_sys[s], int(s), true);
+        }
     }
     const auto t1 = amrex::second();
     // under verify, keep pre-factor copies for an LU round-trip check
@@ -2336,30 +2766,57 @@ void BlockBandedPC<T,Ops>::Update (const T& a_U)
         GatherGlobal(*(r_vec[0][0]), 0, hRr, 1);
         GatherGlobal(*(r_vec[0][1]), 0, hRt, 1);
         GatherGlobal(*(r_vec[0][2]), 0, hRz, 1);
-        S.inEr.setzero(); S.inEt.setzero(); S.inEz.setzero();
-        for (int i = S.inEr.ilo; i <= S.inEr.ihi; i++) {
-            for (int j = S.oEr.jlo; j <= S.oEr.jhi; j++) { S.inEr.ref(i,j) = hEr.get(i,j); }
+        auto fill_in = [&](const HostFab& fEr, const HostFab& fEt,
+                           const HostFab& fEz)
+        {
+            S.inEr.setzero(); S.inEt.setzero(); S.inEz.setzero();
+            for (int i = S.inEr.ilo; i <= S.inEr.ihi; i++) {
+                for (int j = S.oEr.jlo; j <= S.oEr.jhi; j++) { S.inEr.ref(i,j) = fEr.get(i,j); }
+            }
+            for (int i = S.inEt.ilo; i <= S.inEt.ihi; i++) {
+                for (int j = S.oEt.jlo; j <= S.oEt.jhi; j++) { S.inEt.ref(i,j) = fEt.get(i,j); }
+            }
+            for (int i = S.inEz.ilo; i <= S.inEz.ihi; i++) {
+                for (int j = S.oEz.jlo; j <= S.oEz.jhi; j++) { S.inEz.ref(i,j) = fEz.get(i,j); }
+            }
+        };
+        // curlcurl mode: x = (A-N)^{-1} A r, so the round-trip reference is
+        // A r (captured by an A-only apply); e_form reference is r itself
+        std::vector<RT> refR, refT, refZ;
+        if (m_form_curlcurl) {
+            fill_in(hRr, hRt, hRz);
+            ApplyFrozenBox(S, true);
+            auto save = [&](const PArr& out, std::vector<RT>& dst) {
+                dst.assign(std::size_t(std::max(0, out.ihi-out.ilo+1))
+                           *std::size_t(std::max(out.nj,0)), RT(0.0));
+                for (int i = out.ilo; i <= out.ihi; i++) {
+                    for (int j = out.jlo; j <= out.jhi; j++) {
+                        dst[std::size_t(i-out.ilo)*out.nj + out.jmap(j)]
+                            = out.get(i,j);
+                    }
+                }
+            };
+            save(S.oEr, refR); save(S.oEt, refT); save(S.oEz, refZ);
         }
-        for (int i = S.inEt.ilo; i <= S.inEt.ihi; i++) {
-            for (int j = S.oEt.jlo; j <= S.oEt.jhi; j++) { S.inEt.ref(i,j) = hEt.get(i,j); }
-        }
-        for (int i = S.inEz.ilo; i <= S.inEz.ihi; i++) {
-            for (int j = S.oEz.jlo; j <= S.oEz.jhi; j++) { S.inEz.ref(i,j) = hEz.get(i,j); }
-        }
+        fill_in(hEr, hEt, hEz);
         ApplyFrozenBox(S);
         RT num = RT(0.0), den = RT(0.0), dmax = RT(0.0);
         int imax = -1, jmax = -1, cmax = -1;
-        auto acc = [&](const PArr& out, const HostFab& hr, int comp) {
+        auto acc = [&](const PArr& out, const HostFab& hr,
+                       const std::vector<RT>& ref, int comp) {
             for (int i = out.ilo; i <= out.ihi; i++) {
                 for (int j = out.jlo; j <= out.jhi; j++) {
-                    const RT rr = hr.get(i,j);
+                    const RT rr = m_form_curlcurl
+                        ? ref[std::size_t(i-out.ilo)*out.nj + out.jmap(j)]
+                        : hr.get(i,j);
                     const RT d = out.get(i,j) - rr;
                     num += d*d; den += rr*rr;
                     if (std::abs(d) > dmax) { dmax = std::abs(d); imax = i; jmax = j; cmax = comp; }
                 }
             }
         };
-        acc(S.oEr, hRr, 0); acc(S.oEt, hRt, 1); acc(S.oEz, hRz, 2);
+        acc(S.oEr, hRr, refR, 0); acc(S.oEt, hRt, refT, 1);
+        acc(S.oEz, hRz, refZ, 2);
         amrex::Print() << "pc_block_banded APPLY round-trip rel err = "
             << (den > RT(0.0) ? std::sqrt(num/den) : std::sqrt(num))
             << ", max |diff| = " << dmax << " at comp " << cmax
@@ -2403,6 +2860,13 @@ void BlockBandedPC<T,Ops>::Apply (T& a_x, const T& a_b)
             for (int j = S.oEz.jlo; j <= S.oEz.jhi; j++) {
                 S.x[S.boff[b] + locEz(S,b,j)] = hEz.get(i,j);
             }
+        }
+        if (m_form_curlcurl) {
+            // P^{-1} r = (A - N)^{-1} (A r): banded matvec ahead of the
+            // factored solve
+            std::vector<RT> wv;
+            ApplyBlocks(S, S.blkA, S.x, wv);
+            std::copy(wv.begin(), wv.end(), S.x.begin());
         }
         SolveDispatch(S);
         // Every rank holds the identical global solution; write owned boxes.
@@ -2487,6 +2951,11 @@ void BlockBandedPC<T,Ops>::Apply (T& a_x, const T& a_b)
             }
         }
 
+        if (m_form_curlcurl) {
+            std::vector<RT> wv;
+            ApplyBlocks(S, S.blkA, S.x, wv);
+            std::copy(wv.begin(), wv.end(), S.x.begin());
+        }
         SolveDispatch(S);
 
         // unpack solution over the FULL valid boxes (duplicated periodic

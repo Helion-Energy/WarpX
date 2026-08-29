@@ -275,10 +275,33 @@ void HybridPICModel::ReadParameters ()
                     "(divided) Jacobian rows, which do not model the "
                     "curlcurl_form residual: measured convergence is "
                     "identical to running with no preconditioner while "
-                    "paying the factor/apply cost. Prefer pc_type = none "
-                    "with esolve = curlcurl_form until a curlcurl-aware "
-                    "variant lands.",
+                    "paying the factor/apply cost. Use jacobian.pc_type = "
+                    "pc_curlcurl_banded (the form-aware variant) instead.",
                     ablastr::warn_manager::WarnPriority::high);
+            }
+        }
+
+        // Inner-solve preconditioner for the elliptic E-solves (both
+        // curlcurl_form stages and the RZ tensor_form BiCGStab): "jacobi"
+        // (default; the legacy point-diagonal path, bit-identical) or
+        // "block_banded" (z-line block-banded direct factorization used as
+        // the Krylov preconditioner; see ESolveBandedPC.H). The cold-start
+        // transient otherwise exhausts the unpreconditioned inner budgets
+        // (Jacobi-CG/BiCGStab 25000-iteration caps) on sharp-column decks.
+        if (m_esolve_curlcurl || m_esolve_tensor) {
+            std::string esolve_pc = "jacobi";
+            pp_hybrid.query("esolve_pc", esolve_pc);
+            if (esolve_pc == "block_banded") {
+                m_esolve_pc_banded = true;
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    amrex::ParallelDescriptor::NProcs() == 1,
+                    "hybrid_pic_model.esolve_pc = block_banded supports a "
+                    "single MPI rank in v1 (use esolve_pc = jacobi on "
+                    "multi-rank runs)");
+            } else if (esolve_pc != "jacobi") {
+                WARPX_ABORT_WITH_MESSAGE(
+                    "hybrid_pic_model.esolve_pc must be 'jacobi' or "
+                    "'block_banded'");
             }
         }
     }
@@ -2215,6 +2238,57 @@ void HybridPICModel::FillElectronPressureMF (
 // Darwin longitudinal-field constraint
 // =============================================================================
 
+namespace {
+#if defined(WARPX_DIM_RZ)
+    /** Single-rank host copy of one component of a MultiFab over its
+     *  converted domain box (esolve_pc analytic row assembly; the
+     *  block_banded path asserts NProcs == 1). */
+    struct EsolvePCHostGrid
+    {
+        amrex::Box bx;
+        std::vector<amrex::Real> v;
+        void fill (amrex::MultiFab const& mf, int comp,
+                   amrex::Box const& dombx)
+        {
+            bx = dombx;
+            v.assign(std::size_t(bx.numPts()), 0.0);
+            const auto dlo = bx.smallEnd();
+            const auto dlen = bx.size();
+            for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
+                const amrex::Box vb = mfi.validbox();
+                const auto& fab = mf[mfi];
+                const amrex::Box fb = fab.box();
+                const auto flo = fb.smallEnd();
+                const auto flen = fb.size();
+                const auto np = std::size_t(fb.numPts());
+                std::vector<amrex::Real> tmp(np);
+#ifdef AMREX_USE_GPU
+                amrex::Gpu::dtoh_memcpy(tmp.data(), fab.dataPtr(comp),
+                                        np*sizeof(amrex::Real));
+#else
+                std::copy_n(fab.dataPtr(comp), np, tmp.data());
+#endif
+                for (int j = vb.smallEnd(1); j <= vb.bigEnd(1); ++j) {
+                    for (int i = vb.smallEnd(0); i <= vb.bigEnd(0); ++i) {
+                        v[std::size_t(i-dlo[0])
+                          + std::size_t(dlen[0])*std::size_t(j-dlo[1])]
+                            = tmp[std::size_t(i-flo[0])
+                                  + std::size_t(flen[0])*std::size_t(j-flo[1])];
+                    }
+                }
+            }
+        }
+        [[nodiscard]] amrex::Real get (int i, int j) const
+        {
+            const auto lo = bx.smallEnd();
+            const auto len = bx.size();
+            return v[std::size_t(i-lo[0])
+                     + std::size_t(len[0])*std::size_t(j-lo[1])];
+        }
+    };
+#endif
+}
+
 void HybridPICModel::SolveEThetaCurlCurlRZ (amrex::MultiFab& Etheta,
                                             amrex::MultiFab const& num,
                                             amrex::MultiFab const& rho,
@@ -2406,11 +2480,67 @@ void HybridPICModel::SolveEThetaCurlCurlRZ (amrex::MultiFab& Etheta,
         });
     }
 
+    // Inner preconditioner (hybrid_pic_model.esolve_pc): z-line block-
+    // banded direct factorization of this row (the toroidal operator is
+    // already the screened metric component Laplacian, so the PC model is
+    // the exact ABec row), assembled analytically from the same acoef and
+    // rebuilt once per step. The acoef drifts with the live midpoint
+    // density within a step, which only costs CG iterations (the PC never
+    // enters the converged answer).
+    ESolveBandedPC* bpc = nullptr;
+    if (m_esolve_pc_banded) {
+        if (!m_theta_bpc) { m_theta_bpc = std::make_unique<ESolveBandedPC>(); }
+        // Rebuild only once the step's frozen-rho capture has happened:
+        // the step-entry resistive-push correction solves can run BEFORE
+        // the first midpoint deposit of a run (empty rho = the degenerate
+        // vacuum operator) -- a factorization seeded there poisons every
+        // later solve of the step. Until then a stale factorization (or
+        // none, first step) is used, which only costs iterations.
+        if (!m_theta_bpc->Ready(m_esolve_pc_stamp)
+            && m_inertia_rho_n_captured) {
+            EsolvePCHostGrid ha;
+            ha.fill(acoef, 0, dom_nd);
+            m_theta_bpc->BuildRows(m_esolve_pc_stamp, geom, {&rhs},
+                [&](int /*c*/, int i, int j,
+                    ESolveBandedPC::AddFn const& add)
+                {
+                    const bool dir_row = (i <= dlo.x) || (i >= dhi.x)
+                        || (!z_periodic && (j <= dlo.y || j >= dhi.y));
+                    if (dir_row) { add(0, i, j, 1.0_rt); return; }
+                    Real const bp = rmin + (i + 0.5_rt)*dr;   // b(i)
+                    Real const bm = rmin + (i - 0.5_rt)*dr;   // b(i-1)
+                    // exact ABec row; off-diagonals only to live columns
+                    // (Dirichlet neighbors are pinned to zero: their
+                    // diagonal contribution stays, the coupling drops)
+                    add(0, i, j, ha.get(i,j)
+                        + (bp + bm)*inv_dr2 + (bp + bm)*inv_dz2);
+                    if (i + 1 < dhi.x) { add(0, i+1, j, -bp*inv_dr2); }
+                    if (i - 1 > dlo.x) { add(0, i-1, j, -bm*inv_dr2); }
+                    Real const bz = 0.5_rt*(bp + bm);
+                    if (z_periodic || j + 1 < dhi.y) {
+                        add(0, i, j+1, -bz*inv_dz2);
+                    }
+                    if (z_periodic || j - 1 > dlo.y) {
+                        add(0, i, j-1, -bz*inv_dz2);
+                    }
+                });
+        }
+        if (m_theta_bpc->Built()) { bpc = m_theta_bpc.get(); }
+    }
+    auto precond = [&](MultiFab& z_out, MultiFab& r_in)
+    {
+        if (bpc) {
+            bpc->Apply({&r_in}, {&diag}, {&z_out});
+        } else {
+            MultiFab::Copy(z_out, r_in, 0, 0, 1, ng0);
+            MultiFab::Divide(z_out, diag, 0, 0, 1, 0);
+        }
+    };
+
     // r0 = rhs - A x0
     apply_op(Ax, Etheta);
     MultiFab::LinComb(res, 1.0_rt, rhs, 0, -1.0_rt, Ax, 0, 0, 1, ng0);
-    MultiFab::Copy(z_mf, res, 0, 0, 1, ng0);
-    MultiFab::Divide(z_mf, diag, 0, 0, 1, 0);
+    precond(z_mf, res);
     p_mf.setVal(0.0_rt);
     MultiFab::Copy(p_mf, z_mf, 0, 0, 1, ng0);
     Real rz_old = MultiFab::Dot(res, 0, z_mf, 0, 1, 0);
@@ -2429,8 +2559,7 @@ void HybridPICModel::SolveEThetaCurlCurlRZ (amrex::MultiFab& Etheta,
         Real const alpha = rz_old / pAp;
         MultiFab::Saxpy(Etheta, alpha, p_mf, 0, 0, 1, ng0);
         MultiFab::Saxpy(res, -alpha, Ax, 0, 0, 1, ng0);
-        MultiFab::Copy(z_mf, res, 0, 0, 1, ng0);
-        MultiFab::Divide(z_mf, diag, 0, 0, 1, 0);
+        precond(z_mf, res);
         Real const rz_new = MultiFab::Dot(res, 0, z_mf, 0, 1, 0);
         Real const beta_cg = rz_new / rz_old;
         rz_old = rz_new;
@@ -2438,6 +2567,10 @@ void HybridPICModel::SolveEThetaCurlCurlRZ (amrex::MultiFab& Etheta,
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(it < max_cg,
         "SolveEThetaCurlCurlRZ: CG failed to converge");
+    if (std::getenv("WARPX_ESOLVE_STATS") != nullptr) {
+        amrex::Print() << "[theta-cg] its = " << it << " pc = "
+            << (bpc ? "banded" : "jacobi") << "\n";
+    }
 
     Etheta.FillBoundary(geom.periodicity());
 #endif
@@ -2461,6 +2594,7 @@ namespace {
     }
 #endif
 }
+
 
 void HybridPICModel::SolveEPolCurlCurlRZ (amrex::MultiFab& Er,
                                           amrex::MultiFab& Ez,
@@ -2993,6 +3127,105 @@ void HybridPICModel::SolveEPolCurlCurlRZ (amrex::MultiFab& Er,
             << ", z-sector = " << err_z << "\n";
     }
 
+    // Inner preconditioner (hybrid_pic_model.esolve_pc): the z-line
+    // block-banded direct factorization of the coupled (Er, Ez) operator,
+    // rebuilt once per step by probing the fused apply above. The operator
+    // is per-step-frozen on the default path (curlcurl_pol_frozen_rho), so
+    // the factorization is its exact SPD inverse within the step -- CG
+    // stays legal and converges in O(1) iterations; in the live-rho A/B
+    // mode the intra-step drift only costs iterations. On the Dirichlet
+    // rows the residual is identically zero, so the identity rows never
+    // couple in (same invariant the Jacobi path relies on).
+    // Inner preconditioner (hybrid_pic_model.esolve_pc): the PC MODEL is
+    // the screened metric COMPONENT LAPLACIAN, a + V*(-lap E_c [+ E_r/r^2]),
+    // assembled analytically from the same frozen acoefs -- per-component
+    // decoupled ((lap_vec)_r = lap - 1/r^2, (lap_vec)_z = lap in RZ m = 0),
+    // SPD with the energy-form volume scalings (the off-diagonal metric
+    // fluxes are symmetric under V, incl. the axis half-cell pair), exact
+    // on gamma-completed deep-vacuum rows (curlcurl - grad div = -lap_vec)
+    // and spectrally equivalent on plasma rows (the grad-div difference is
+    // dominated by the beta screening). Rebuilt once per step; drift and
+    // model error only cost CG iterations.
+    ESolveBandedPC* bpc = nullptr;
+    if (m_esolve_pc_banded) {
+        if (!m_pol_bpc) { m_pol_bpc = std::make_unique<ESolveBandedPC>(); }
+        // Build only after the step's frozen-rho capture (see the toroidal
+        // hook): the step-entry correction solves can precede the first
+        // midpoint deposit, and a factorization of that degenerate vacuum
+        // operator poisons the whole step. Stale factorizations are fine.
+        if (!m_pol_bpc->Ready(m_esolve_pc_stamp)
+            && m_inertia_rho_n_captured) {
+            EsolvePCHostGrid har, haz;
+            har.fill(acoef_r, 0, dom_r);
+            haz.fill(acoef_z, 0, dom_z);
+            Real const inv_dr2 = inv_dr*inv_dr;
+            m_pol_bpc->BuildRows(m_esolve_pc_stamp, geom, {&Er, &Ez},
+                [&](int c, int i, int j, ESolveBandedPC::AddFn const& add)
+                {
+                    if (c == 0) {
+                        // Er row (cc r, node z)
+                        if (!z_periodic && (j <= rlo.y || j >= rhi.y)) {
+                            add(0, i, j, 1.0_rt);   // Dirichlet cap row
+                            return;
+                        }
+                        Real const rc = rmin + (i + 0.5_rt)*dr;
+                        Real const V = rc*dr;
+                        Real diag = har.get(i,j) + V/(rc*rc)
+                                  + 2.0_rt*V*inv_dz2;
+                        // radial faces at nodes (axis face metric r = 0
+                        // vanishes; the wall-node face is natural/dropped,
+                        // matching the energy-form wall row)
+                        Real const rfp = rmin + (i + 1)*dr;
+                        Real const rfm = rmin + i*dr;
+                        if (i + 1 <= rhi.x) {
+                            diag += V*rfp/(rc*dr*dr);
+                            add(0, i+1, j, -V*rfp/(rc*dr*dr));
+                        }
+                        if (rfm > 0.0_rt) {
+                            diag += V*rfm/(rc*dr*dr);
+                            if (i - 1 >= rlo.x) {
+                                add(0, i-1, j, -V*rfm/(rc*dr*dr));
+                            }
+                        }
+                        add(0, i, j, diag);
+                        if (z_periodic || j + 1 < rhi.y) {
+                            add(0, i, j+1, -V*inv_dz2);
+                        }
+                        if (z_periodic || j - 1 > rlo.y) {
+                            add(0, i, j-1, -V*inv_dz2);
+                        }
+                    } else {
+                        // Ez row (node r, cc z)
+                        if (i >= zhi.x) { add(1, i, j, 1.0_rt); return; }
+                        Real const V = (i == zlo.x)
+                            ? 0.125_rt*dr*dr : (rmin + i*dr)*dr;
+                        Real diag = haz.get(i,j) + 2.0_rt*V*inv_dz2;
+                        if (i == zlo.x) {
+                            // m = 0 axis regularity: (1/r)d_r(r d_r) ->
+                            // 2 d_rr with the even mirror (the 2*Drr class)
+                            diag += 4.0_rt*V*inv_dr2;
+                            add(1, i+1, j, -4.0_rt*V*inv_dr2);
+                        } else {
+                            Real const rn = rmin + i*dr;
+                            Real const rcp = rmin + (i + 0.5_rt)*dr;
+                            Real const rcm = rmin + (i - 0.5_rt)*dr;
+                            diag += V*(rcp + rcm)/(rn*dr*dr);
+                            // wall neighbor is a pinned Dirichlet DOF:
+                            // diagonal contribution stays, coupling drops
+                            if (i + 1 < zhi.x) {
+                                add(1, i+1, j, -V*rcp/(rn*dr*dr));
+                            }
+                            add(1, i-1, j, -V*rcm/(rn*dr*dr));
+                        }
+                        add(1, i, j, diag);
+                        add(1, i, j+1, -V*inv_dz2);
+                        add(1, i, j-1, -V*inv_dz2);
+                    }
+                });
+        }
+        if (m_pol_bpc->Built()) { bpc = m_pol_bpc.get(); }
+    }
+
     // Jacobi-preconditioned CG on the coupled two-field system. rhs is
     // orthogonal to any residual curl-curl null content by the beta = 0
     // row zeroing above; the closure makes the free rows SPD wherever
@@ -3007,13 +3240,23 @@ void HybridPICModel::SolveEPolCurlCurlRZ (amrex::MultiFab& Er,
     MultiFab p_r(Er.boxArray(), dm, 1, IntVect(1));
     MultiFab p_z(Ez.boxArray(), dm, 1, IntVect(1));
 
+    auto precond = [&](MultiFab& z_r, MultiFab& z_z,
+                       MultiFab& r_r, MultiFab& r_z)
+    {
+        if (bpc) {
+            bpc->Apply({&r_r, &r_z}, {&diag_r, &diag_z}, {&z_r, &z_z});
+        } else {
+            MultiFab::Copy(z_r, r_r, 0, 0, 1, ng0);
+            MultiFab::Divide(z_r, diag_r, 0, 0, 1, 0);
+            MultiFab::Copy(z_z, r_z, 0, 0, 1, ng0);
+            MultiFab::Divide(z_z, diag_z, 0, 0, 1, 0);
+        }
+    };
+
     apply_op(Ax_r, Ax_z, Er, Ez);
     MultiFab::LinComb(res_r, 1.0_rt, rhs_r, 0, -1.0_rt, Ax_r, 0, 0, 1, ng0);
     MultiFab::LinComb(res_z, 1.0_rt, rhs_z, 0, -1.0_rt, Ax_z, 0, 0, 1, ng0);
-    MultiFab::Copy(zz_r, res_r, 0, 0, 1, ng0);
-    MultiFab::Divide(zz_r, diag_r, 0, 0, 1, 0);
-    MultiFab::Copy(zz_z, res_z, 0, 0, 1, ng0);
-    MultiFab::Divide(zz_z, diag_z, 0, 0, 1, 0);
+    precond(zz_r, zz_z, res_r, res_z);
     p_r.setVal(0.0_rt);
     p_z.setVal(0.0_rt);
     MultiFab::Copy(p_r, zz_r, 0, 0, 1, ng0);
@@ -3031,14 +3274,35 @@ void HybridPICModel::SolveEPolCurlCurlRZ (amrex::MultiFab& Er,
     // multi-thousand Jacobi-CG iterations per cold solve -- the vacuum
     // block is a bare vector Laplacian and plain Jacobi does not see its
     // long-wavelength modes. Uniform-plasma decks converge in O(100)
-    // (beta-dominant rows). The factored (block-banded direct) backend is
-    // the production follow-up, as for the toroidal stage.
+    // (beta-dominant rows). The esolve_pc = block_banded backend removes
+    // this wall (exact SPD inverse; O(1) iterations).
     int const max_cg = 25000;
+    const bool cg_dbg = (std::getenv("WARPX_ESOLVE_STATS") != nullptr);
     int it = 0;
     for (; it < max_cg; ++it) {
         Real const res_norm = std::sqrt(
             MultiFab::Dot(res_r, 0, res_r, 0, 1, 0)
           + MultiFab::Dot(res_z, 0, res_z, 0, 1, 0));
+        if (cg_dbg && it > 0 && (it % 2000 == 0)) {
+            amrex::Print() << "[pol-cg] it " << it << " |r| = " << res_norm
+                << " tol = " << tol << " |rhs| = " << rhs_norm << "\n";
+            // stall locator (host scan; debug only)
+            for (int cdbg = 0; cdbg < 2; ++cdbg) {
+                const MultiFab& rmf = (cdbg == 0) ? res_r : res_z;
+                Real dmax = 0.0_rt; int imax = -1, jmax = -1;
+                for (MFIter mfi(rmf); mfi.isValid(); ++mfi) {
+                    const auto& arr = rmf.const_array(mfi);
+                    const Box vb = mfi.validbox();
+                    amrex::LoopOnCpu(vb, [&](int i, int j, int k) {
+                        const Real v = std::abs(arr(i,j,k));
+                        if (v > dmax) { dmax = v; imax = i; jmax = j; }
+                    });
+                }
+                amrex::Print() << "   res_" << (cdbg == 0 ? "r" : "z")
+                    << " max = " << dmax << " at (" << imax << ","
+                    << jmax << ")\n";
+            }
+        }
         if (res_norm <= tol) { break; }
         apply_op(Ax_r, Ax_z, p_r, p_z);
         Real const pAp = MultiFab::Dot(p_r, 0, Ax_r, 0, 1, 0)
@@ -3048,10 +3312,7 @@ void HybridPICModel::SolveEPolCurlCurlRZ (amrex::MultiFab& Er,
         MultiFab::Saxpy(Ez, alpha, p_z, 0, 0, 1, ng0);
         MultiFab::Saxpy(res_r, -alpha, Ax_r, 0, 0, 1, ng0);
         MultiFab::Saxpy(res_z, -alpha, Ax_z, 0, 0, 1, ng0);
-        MultiFab::Copy(zz_r, res_r, 0, 0, 1, ng0);
-        MultiFab::Divide(zz_r, diag_r, 0, 0, 1, 0);
-        MultiFab::Copy(zz_z, res_z, 0, 0, 1, ng0);
-        MultiFab::Divide(zz_z, diag_z, 0, 0, 1, 0);
+        precond(zz_r, zz_z, res_r, res_z);
         Real const rz_new = MultiFab::Dot(res_r, 0, zz_r, 0, 1, 0)
                           + MultiFab::Dot(res_z, 0, zz_z, 0, 1, 0);
         Real const beta_cg = rz_new / rz_old;
@@ -3061,6 +3322,10 @@ void HybridPICModel::SolveEPolCurlCurlRZ (amrex::MultiFab& Er,
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(it < max_cg,
         "SolveEPolCurlCurlRZ: CG failed to converge");
+    if (std::getenv("WARPX_ESOLVE_STATS") != nullptr) {
+        amrex::Print() << "[pol-cg] its = " << it << " pc = "
+            << (bpc ? "banded" : "jacobi") << "\n";
+    }
     Er.FillBoundary(geom.periodicity());
     Ez.FillBoundary(geom.periodicity());
 #endif
@@ -4120,6 +4385,9 @@ void HybridPICModel::CaptureTensorStepStart ()
 {
     if (!m_esolve_tensor) { return; }
     ABLASTR_PROFILE("HybridPICModel::CaptureTensorStepStart()");
+    // step-entry hook: advance the per-step rebuild stamp of the inner
+    // elliptic-solve factorization (esolve_pc = block_banded)
+    ++m_esolve_pc_stamp;
     EnsureTensorScratch();
     using ablastr::fields::Direction;
     auto & warpx = WarpX::GetInstance();
@@ -5241,8 +5509,172 @@ void HybridPICModel::SolveETensorRZ (
             v[c].setVal(0.0_rt);
         }
     };
+
+    // Inner preconditioner (hybrid_pic_model.esolve_pc): the PC MODEL is
+    // the pointwise screening tensor (kept exact, incl. its cross-
+    // component gyration blocks through the kernel's stagger interps)
+    // plus the metric COMPONENT LAPLACIAN -- exact for the toroidal row
+    // (whose curl-curl IS the component form) and spectrally equivalent
+    // for the poloidal pair (grad-div difference bounded by screening).
+    // Assembled analytically from the same frozen coefficient fields,
+    // once per step; drift of the B-dependent tensor coefficients only
+    // costs BiCGStab iterations.
+    ESolveBandedPC* bpc = nullptr;
+    if (m_esolve_pc_banded) {
+        if (!m_tensor_bpc) { m_tensor_bpc = std::make_unique<ESolveBandedPC>(); }
+        // Rebuild once per step (CaptureTensorStepStart stamp). Unlike the
+        // curlcurl hooks there is no empty-density trap here: the tensor
+        // coefficient assembly reads the per-step-frozen snapshot once
+        // captured and the (valid) initial component-0 deposit before that
+        // -- the same rho_g fallback the solve itself uses -- so the
+        // initialization solves may build too (the sharp-column init solve
+        // otherwise exhausts the unpreconditioned BiCGStab budget).
+        if (!m_tensor_bpc->Ready(m_esolve_pc_stamp)) {
+            std::array<std::array<EsolvePCHostGrid, 5>, 3> hcf;
+            const Box domc[3] = {dom_r, dom_t, dom_z};
+            for (int c2 = 0; c2 < 3; ++c2) {
+                for (int q = 0; q < 5; ++q) {
+                    hcf[c2][q].fill(*coef[c2], q, domc[c2]);
+                }
+            }
+            auto const rloT = amrex::lbound(dom_r);
+            auto const rhiT = amrex::ubound(dom_r);
+            Real const inv_dr2 = inv_dr*inv_dr;
+            m_tensor_bpc->BuildRows(m_esolve_pc_stamp, geom,
+                {Efield[0], Efield[1], Efield[2]},
+                [&](int c, int i, int j, ESolveBandedPC::AddFn const& add)
+                {
+                    if ((c == 1 && (i <= tlo.x || i >= thi.x))
+                        || (c == 2 && i >= zhi.x)) {
+                        add(c, i, j, 1.0_rt);   // Dirichlet identity rows
+                        return;
+                    }
+                    // metric component Laplacian (energy-form V scalings;
+                    // Dirichlet-column couplings eliminated: diagonal
+                    // contribution kept, coupling dropped)
+                    Real V, diag;
+                    if (c == 0) {
+                        Real const rc = rmin + (i + 0.5_rt)*dr;
+                        V = rc*dr;
+                        diag = V/(rc*rc) + 2.0_rt*V*inv_dz2;
+                        Real const rfp = rmin + (i + 1)*dr;
+                        Real const rfm = rmin + i*dr;
+                        if (i + 1 <= rhiT.x) {
+                            diag += V*rfp/(rc*dr*dr);
+                            add(0, i+1, j, -inv_mu0*V*rfp/(rc*dr*dr));
+                        }
+                        if (rfm > 0.0_rt) {
+                            diag += V*rfm/(rc*dr*dr);
+                            if (i - 1 >= rloT.x) {
+                                add(0, i-1, j, -inv_mu0*V*rfm/(rc*dr*dr));
+                            }
+                        }
+                        add(0, i, j+1, -inv_mu0*V*inv_dz2);
+                        add(0, i, j-1, -inv_mu0*V*inv_dz2);
+                    } else if (c == 1) {
+                        Real const rn = rmin + i*dr;
+                        V = rn*dr;
+                        Real const rcp = rmin + (i + 0.5_rt)*dr;
+                        Real const rcm = rmin + (i - 0.5_rt)*dr;
+                        diag = V/(rn*rn) + 2.0_rt*V*inv_dz2
+                             + V*(rcp + rcm)/(rn*dr*dr);
+                        if (i + 1 < thi.x) {
+                            add(1, i+1, j, -inv_mu0*V*rcp/(rn*dr*dr));
+                        }
+                        if (i - 1 > tlo.x) {
+                            add(1, i-1, j, -inv_mu0*V*rcm/(rn*dr*dr));
+                        }
+                        add(1, i, j+1, -inv_mu0*V*inv_dz2);
+                        add(1, i, j-1, -inv_mu0*V*inv_dz2);
+                    } else {
+                        V = (i == zlo.x) ? 0.125_rt*dr*dr : (rmin + i*dr)*dr;
+                        diag = 2.0_rt*V*inv_dz2;
+                        if (i == zlo.x) {
+                            // m = 0 axis regularity (the 2*Drr class)
+                            diag += 4.0_rt*V*inv_dr2;
+                            add(2, i+1, j, -inv_mu0*4.0_rt*V*inv_dr2);
+                        } else {
+                            Real const rn = rmin + i*dr;
+                            Real const rcp = rmin + (i + 0.5_rt)*dr;
+                            Real const rcm = rmin + (i - 0.5_rt)*dr;
+                            diag += V*(rcp + rcm)/(rn*dr*dr);
+                            if (i + 1 < zhi.x) {
+                                add(2, i+1, j, -inv_mu0*V*rcp/(rn*dr*dr));
+                            }
+                            add(2, i-1, j, -inv_mu0*V*rcm/(rn*dr*dr));
+                        }
+                        add(2, i, j+1, -inv_mu0*V*inv_dz2);
+                        add(2, i, j-1, -inv_mu0*V*inv_dz2);
+                    }
+                    // pointwise screening tensor V kE M^{-1} (exact,
+                    // cross components through the kernel's 2/4-point
+                    // stagger interps; entries into Dirichlet columns
+                    // dropped -- those DOFs are pinned to zero)
+                    Real const av = hcf[c][0].get(i,j);
+                    Real const b1 = hcf[c][1].get(i,j);
+                    Real const b2 = hcf[c][2].get(i,j);
+                    Real const b3 = hcf[c][3].get(i,j);
+                    Real const kE = hcf[c][4].get(i,j);
+                    Real const m11 = av, m12 = b3, m13 = -b2;
+                    Real const m21 = -b3, m22 = av, m23 = b1;
+                    Real const m31 = b2, m32 = -b1, m33 = av;
+                    Real const det = m11*(m22*m33 - m23*m32)
+                        - m12*(m21*m33 - m23*m31)
+                        + m13*(m21*m32 - m22*m31);
+                    Real minv[3];
+                    if (c == 0) {
+                        minv[0] = m22*m33 - m23*m32;
+                        minv[1] = m13*m32 - m12*m33;
+                        minv[2] = m12*m23 - m13*m22;
+                    } else if (c == 1) {
+                        minv[0] = m23*m31 - m21*m33;
+                        minv[1] = m11*m33 - m13*m31;
+                        minv[2] = m13*m21 - m11*m23;
+                    } else {
+                        minv[0] = m21*m32 - m22*m31;
+                        minv[1] = m12*m31 - m11*m32;
+                        minv[2] = m11*m22 - m12*m21;
+                    }
+                    Real const tfac = V*kE/det;
+                    add(c, i, j, inv_mu0*diag + tfac*minv[c]);
+                    auto addx = [&](int c2, int i2, int j2, Real w)
+                    {
+                        if (c2 == 1 && (i2 <= tlo.x || i2 >= thi.x)) { return; }
+                        if (c2 == 2 && i2 >= zhi.x) { return; }
+                        add(c2, i2, j2, tfac*minv[c2]*w);
+                    };
+                    if (c == 0) {
+                        addx(1, i,   j,   0.5_rt);
+                        addx(1, i+1, j,   0.5_rt);
+                        addx(2, i,   j-1, 0.25_rt);
+                        addx(2, i,   j,   0.25_rt);
+                        addx(2, i+1, j-1, 0.25_rt);
+                        addx(2, i+1, j,   0.25_rt);
+                    } else if (c == 1) {
+                        addx(0, i-1, j,   0.5_rt);
+                        addx(0, i,   j,   0.5_rt);
+                        addx(2, i,   j-1, 0.5_rt);
+                        addx(2, i,   j,   0.5_rt);
+                    } else {
+                        addx(0, i-1, j,   0.25_rt);
+                        addx(0, i,   j,   0.25_rt);
+                        addx(0, i-1, j+1, 0.25_rt);
+                        addx(0, i,   j+1, 0.25_rt);
+                        addx(1, i,   j,   0.5_rt);
+                        addx(1, i,   j+1, 0.5_rt);
+                    }
+                });
+        }
+        if (m_tensor_bpc->Built()) { bpc = m_tensor_bpc.get(); }
+    }
+
     auto prec3 = [&](std::array<MultiFab, 3>& z, std::array<MultiFab, 3>& r)
     {
+        if (bpc) {
+            bpc->Apply({&r[0], &r[1], &r[2]}, {&diag[0], &diag[1], &diag[2]},
+                       {&z[0], &z[1], &z[2]});
+            return;
+        }
         for (int c = 0; c < 3; ++c) {
             MultiFab::Copy(z[c], r[c], 0, 0, 1, 0);
             MultiFab::Divide(z[c], diag[c], 0, 0, 1, 0);
@@ -5583,6 +6015,10 @@ void HybridPICModel::SolveETensorRZ (
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(it < max_it,
         "SolveETensorRZ: BiCGStab failed to converge");
+    if (std::getenv("WARPX_ESOLVE_STATS") != nullptr) {
+        amrex::Print() << "[tensor-rz] its = " << it << " restarts = "
+            << n_restart << " pc = " << (bpc ? "banded" : "jacobi") << "\n";
+    }
 
     for (int c = 0; c < 3; ++c) {
         MultiFab::Copy(*Efield[c], x[c], 0, 0, 1, 0);
@@ -6028,6 +6464,9 @@ void HybridPICModel::RotateElectronInertiaHistory (amrex::Real a_theta)
         "hybrid_pic_model.include_electron_inertia is not supported in 1D "
         "radial geometries.");
 #else
+    // end-of-step hook: advance the per-step rebuild stamp of the inner
+    // elliptic-solve factorizations (esolve_pc = block_banded)
+    ++m_esolve_pc_stamp;
     auto & warpx = WarpX::GetInstance();
     constexpr int lev = 0;
 
