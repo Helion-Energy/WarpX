@@ -841,10 +841,13 @@ void HybridPICModel::ReadParameters ()
                                        m_je_sponge_vw);
         pp_hybrid.query("je_sponge_track_eext", m_je_sponge_track_eext);
         pp_hybrid.query("je_sponge_track_bext", m_je_sponge_track_bext);
+        utils::parser::queryWithParser(pp_hybrid, "je_sponge_track_tau",
+                                       m_je_sponge_track_tau);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            m_je_sponge_width >= 0.0_rt && m_je_sponge_vw >= 0.0_rt,
-            "hybrid_pic_model.je_sponge_width and je_sponge_vw cannot "
-            "be negative");
+            m_je_sponge_width >= 0.0_rt && m_je_sponge_vw >= 0.0_rt
+            && m_je_sponge_track_tau >= 0.0_rt,
+            "hybrid_pic_model.je_sponge_width, je_sponge_vw and "
+            "je_sponge_track_tau cannot be negative");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_je_sponge_width == 0.0_rt || m_je_sponge_lnf > 0.0_rt,
             "hybrid_pic_model.je_sponge_lnf must be positive when the "
@@ -11230,7 +11233,10 @@ void HybridPICModel::ApplyJeSpongeLayer (
             << (m_je_sponge_vw > 0.0_rt ? "" : " (c_art)")
             << ", tau_max = " << Ls / (vw * m_je_sponge_lnf)
             << " s, track ext E/B = " << m_je_sponge_track_eext
-            << "/" << m_je_sponge_track_bext << "\n";
+            << "/" << m_je_sponge_track_bext
+            << ", ref track tau = " << m_je_sponge_track_tau
+            << " s" << (m_je_sponge_track_tau > 0.0_rt
+                        ? "" : " (frozen)") << "\n";
         return;
     }
 
@@ -11256,8 +11262,8 @@ void HybridPICModel::ApplyJeSpongeLayer (
         Array4<Real> const& Br = Bfield[lev][0]->array(mfi);
         Array4<Real> const& Bt = Bfield[lev][1]->array(mfi);
         Array4<Real> const& Bz = Bfield[lev][2]->array(mfi);
-        Array4<Real const> const& er = Eref.const_array(mfi);
-        Array4<Real const> const& br = Bref.const_array(mfi);
+        Array4<Real> const& er = Eref.array(mfi);
+        Array4<Real> const& br = Bref.array(mfi);
         Array4<Real const> xer, xet, xez, xbrr, xbt, xbz, xe0, xb0;
         if (use_ext) {
             xer = Eext[0]->const_array(mfi);
@@ -11270,6 +11276,20 @@ void HybridPICModel::ApplyJeSpongeLayer (
             xb0 = Bext0->const_array(mfi);
         }
         amrex::Real const dt_l = dt_sub;
+        // Reference tracking (je_sponge_track_tau > 0): the stored
+        // reference follows the DAMPED plasma-frame state as a
+        // first-order low-pass with time constant tau, so the sponge
+        // damps only the fast (wave) band and follows the slowly
+        // evolving compression background instead of fighting it --
+        // a frozen reference becomes a stale pin that RADIATES
+        // inward as the background moves away from it (measured on
+        // the full-stroke panel: inward Alfvenic fronts launched
+        // from the caps from mid-stroke on). alpha = dt/tau per
+        // accepted substep (a physical-time filter: the ACTUAL
+        // substep dt is correct here, not the dt_cf pin).
+        amrex::Real const alpha = (m_je_sponge_track_tau > 0.0_rt)
+            ? amrex::min(1.0_rt, dt_l / m_je_sponge_track_tau)
+            : 0.0_rt;
         amrex::ParallelFor(mfi.tilebox(),
             [=] AMREX_GPU_DEVICE (int i, int j, int k) {
 #if defined(WARPX_DIM_1D_Z)
@@ -11287,27 +11307,41 @@ void HybridPICModel::ApplyJeSpongeLayer (
             xi = amrex::min(xi, 1.0_rt);
             const amrex::Real s =
                 1.0_rt / (1.0_rt + dt_l * xi * inv_tau_max);
-            // drive-tracking targets (see the member doc): the frozen
+            // drive-tracking targets (see the member doc): the
             // reference plus the external-field change since the seed
+            amrex::Real dxe[3] = {0.0_rt, 0.0_rt, 0.0_rt};
+            amrex::Real dxb[3] = {0.0_rt, 0.0_rt, 0.0_rt};
+            if (use_ext) {
+                dxe[0] = trkE * (xer(i,j,k) - xe0(i,j,k,0));
+                dxe[1] = trkE * (xet(i,j,k) - xe0(i,j,k,1));
+                dxe[2] = trkE * (xez(i,j,k) - xe0(i,j,k,2));
+                dxb[0] = trkB * (xbrr(i,j,k) - xb0(i,j,k,0));
+                dxb[1] = trkB * (xbt(i,j,k) - xb0(i,j,k,1));
+                dxb[2] = trkB * (xbz(i,j,k) - xb0(i,j,k,2));
+            }
             amrex::Real tgt;
-            tgt = er(i,j,k,0) + (use_ext ? trkE
-                * (xer(i,j,k) - xe0(i,j,k,0)) : 0.0_rt);
+            tgt = er(i,j,k,0) + dxe[0];
             Er(i,j,k) = tgt + (Er(i,j,k) - tgt) * s;
-            tgt = er(i,j,k,1) + (use_ext ? trkE
-                * (xet(i,j,k) - xe0(i,j,k,1)) : 0.0_rt);
+            tgt = er(i,j,k,1) + dxe[1];
             Et(i,j,k) = tgt + (Et(i,j,k) - tgt) * s;
-            tgt = er(i,j,k,2) + (use_ext ? trkE
-                * (xez(i,j,k) - xe0(i,j,k,2)) : 0.0_rt);
+            tgt = er(i,j,k,2) + dxe[2];
             Ez(i,j,k) = tgt + (Ez(i,j,k) - tgt) * s;
-            tgt = br(i,j,k,0) + (use_ext ? trkB
-                * (xbrr(i,j,k) - xb0(i,j,k,0)) : 0.0_rt);
+            tgt = br(i,j,k,0) + dxb[0];
             Br(i,j,k) = tgt + (Br(i,j,k) - tgt) * s;
-            tgt = br(i,j,k,1) + (use_ext ? trkB
-                * (xbt(i,j,k) - xb0(i,j,k,1)) : 0.0_rt);
+            tgt = br(i,j,k,1) + dxb[1];
             Bt(i,j,k) = tgt + (Bt(i,j,k) - tgt) * s;
-            tgt = br(i,j,k,2) + (use_ext ? trkB
-                * (xbz(i,j,k) - xb0(i,j,k,2)) : 0.0_rt);
+            tgt = br(i,j,k,2) + dxb[2];
             Bz(i,j,k) = tgt + (Bz(i,j,k) - tgt) * s;
+            if (alpha > 0.0_rt) {
+                // low-pass the stored (drive-free) reference toward
+                // the damped state minus the tracked drive delta
+                er(i,j,k,0) += alpha * (Er(i,j,k) - dxe[0] - er(i,j,k,0));
+                er(i,j,k,1) += alpha * (Et(i,j,k) - dxe[1] - er(i,j,k,1));
+                er(i,j,k,2) += alpha * (Ez(i,j,k) - dxe[2] - er(i,j,k,2));
+                br(i,j,k,0) += alpha * (Br(i,j,k) - dxb[0] - br(i,j,k,0));
+                br(i,j,k,1) += alpha * (Bt(i,j,k) - dxb[1] - br(i,j,k,1));
+                br(i,j,k,2) += alpha * (Bz(i,j,k) - dxb[2] - br(i,j,k,2));
+            }
         });
     }
     // Refresh the ghost values of the damped state so the next
@@ -11357,7 +11391,10 @@ void HybridPICModel::ApplySpongeLayerBYee (
             << " cells), ln(1/f) = " << m_je_sponge_lnf
             << ", v_w = " << vw << " m/s, tau_max = "
             << Ls / (vw * m_je_sponge_lnf)
-            << " s (plasma-frame reference frozen at first call)\n";
+            << " s (plasma-frame reference seeded at first call, "
+            << (m_je_sponge_track_tau > 0.0_rt
+                ? "tracking" : "frozen") << ", tau = "
+            << m_je_sponge_track_tau << " s)\n";
         return;
     }
 
@@ -11368,12 +11405,18 @@ void HybridPICModel::ApplySpongeLayerBYee (
         // component is cell-centered along z
         const amrex::Real zoff =
             B.ixType().nodeCentered(zdim) ? 0.0_rt : 0.5_rt;
+        // reference tracking, as on the je variant (see the comment
+        // there): low-pass the reference toward the damped state so
+        // the sponge follows the slow background
+        const amrex::Real alpha = (m_je_sponge_track_tau > 0.0_rt)
+            ? amrex::min(1.0_rt, dt_sub / m_je_sponge_track_tau)
+            : 0.0_rt;
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
         for (MFIter mfi(B, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
             Array4<Real> const& b = B.array(mfi);
-            Array4<Real const> const& br = Bref.const_array(mfi);
+            Array4<Real> const& br = Bref.array(mfi);
             const amrex::Real dt_l = dt_sub;
             amrex::ParallelFor(mfi.tilebox(),
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) {
@@ -11393,6 +11436,9 @@ void HybridPICModel::ApplySpongeLayerBYee (
                 const amrex::Real s =
                     1.0_rt / (1.0_rt + dt_l * xi * inv_tau_max);
                 b(i,j,k) = br(i,j,k) + (b(i,j,k) - br(i,j,k)) * s;
+                if (alpha > 0.0_rt) {
+                    br(i,j,k) += alpha * (b(i,j,k) - br(i,j,k));
+                }
             });
         }
     }

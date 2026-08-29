@@ -210,6 +210,20 @@ public:
     std::array<std::unique_ptr<amrex::MultiFab>, 3> m_sponge_bref_yee;
     /** Seed latch of the Yee sponge references. */
     bool m_sponge_yee_init = false;
+    /** Sponge reference tracking time constant [s]
+     *  (je_sponge_track_tau, default 0 = frozen legacy references).
+     *  When > 0, the sponge references (both variants) follow the
+     *  DAMPED state as a first-order low-pass with this time
+     *  constant: choose it well above the wave periods to be damped
+     *  and below the background (drive/compression) evolution
+     *  timescale, so the layer damps only the fast band and follows
+     *  the slow background. A frozen reference under an evolving
+     *  background becomes a stale pin that continuously RADIATES
+     *  inward from the caps (measured: Alfvenic-speed inward fronts
+     *  from mid-stroke on the full-stroke panel). Tracking also
+     *  softens the checkpoint-restart wart: a restored reference
+     *  re-converges within tau instead of persisting. */
+    amrex::Real m_je_sponge_track_tau = 0.0;
 
     void BfieldEvolveRK4 (
         ablastr::fields::MultiLevelVectorField const& Bfield,
