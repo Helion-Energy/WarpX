@@ -504,9 +504,12 @@ FullDiagnostics::InitializeFieldFunctorsRZopenPMD (int lev)
                 AddRZModesToOutputNames(std::string("F"), ncomp);
             }
         } else if ( m_varnames_fields[comp] == "Te" ){
-            // Electron temperature [K]: closure-implied by default, the
-            // QDSMC electron-energy-equation state variable when that
-            // equation is solved.
+            // Electron temperature [K], a state variable when the hybrid-PIC
+            // electron-energy equation (QDSMC) is solved (closure-mirrored
+            // otherwise). The MultiFab is allocated unconditionally by
+            // HybridPICModel::AllocateLevelMFs, so the get() below is safe
+            // even when the energy equation is off -- the field is just
+            // zero in that case.
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC,
                 "The 'Te' diagnostic output requires the hybrid-PIC solver "
@@ -959,9 +962,10 @@ FullDiagnostics::InitializeFieldFunctors (int lev)
         } else if ( m_varnames[comp] == "F" ){
             m_all_field_functors[lev][comp] = std::make_unique<CellCenterFunctor>(warpx.m_fields.get(FieldType::F_fp, lev), lev, m_crse_ratio);
         } else if ( m_varnames[comp] == "Te" ){
-            // Electron temperature [K]: closure-implied by default, the
-            // QDSMC electron-energy-equation state variable when that
-            // equation is solved.
+            // Electron temperature [K] -- state variable for the hybrid-PIC
+            // electron-energy equation (closure-mirrored otherwise).
+            // Unconditionally allocated; zero when
+            // solve_electron_energy_equation is off.
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC,
                 "The 'Te' diagnostic output requires the hybrid-PIC solver "

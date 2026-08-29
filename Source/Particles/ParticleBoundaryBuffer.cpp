@@ -60,6 +60,10 @@ struct FindEmbeddedBoundaryIntersection {
     amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_dxi;
     amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> m_plo;
     amrex::ParticleReal m_mass;
+    //! Collection surface offset: particles are collected where the signed
+    //! distance to the EB crosses this value (0 = the EB surface itself;
+    //! positive for the insulating wall's standoff shell).
+    amrex::Real m_phi_offset;
 
     template <typename DstData, typename SrcData>
     AMREX_GPU_HOST_DEVICE
@@ -96,7 +100,10 @@ struct FindEmbeddedBoundaryIntersection {
         amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const plo = m_plo;
         amrex::ParticleReal const mass = m_mass;
 
-        // Bisection algorithm to find the point where phi(x,y,z)=0 (i.e. on the embedded boundary)
+        // Bisection algorithm to find the point where phi(x,y,z)=offset (the
+        // collection surface: the embedded boundary itself for offset=0, the
+        // insulating wall's standoff shell for offset>0)
+        amrex::Real const phi_offset = m_phi_offset;
         amrex::Real const dt_fraction = amrex::bisect( 0.0, 1.0,
             [=] (amrex::Real dt_frac) {
                 int i, j, k;
@@ -106,7 +113,7 @@ struct FindEmbeddedBoundaryIntersection {
                 ablastr::particles::compute_weights<amrex::IndexType::NODE>(
                     x_temp, y_temp, z_temp, plo, dxi, i, j, k, W);
                 amrex::Real const phi_value = ablastr::particles::interp_field_nodal(i, j, k, W, phiarr);
-                return phi_value;
+                return phi_value - phi_offset;
             } );
 
         // Also record the real time on the destination
@@ -359,6 +366,16 @@ void ParticleBoundaryBuffer::clearParticles (int const i) {
 
 void ParticleBoundaryBuffer::gatherParticlesFromDomainBoundaries (MultiParticleContainer& mypc, amrex::Real cur_time)
 {
+    const amrex::Real dt = WarpX::GetInstance().getdt(0);
+    for (int i = 0; i < numSpecies(); ++i)
+    {
+        gatherParticlesFromDomainBoundaries(mypc.GetParticleContainer(i), i, cur_time, dt);
+    }
+}
+
+void ParticleBoundaryBuffer::gatherParticlesFromDomainBoundaries (
+    WarpXParticleContainer const& pc, const int i, amrex::Real cur_time, amrex::Real dt)
+{
     ABLASTR_PROFILE("ParticleBoundaryBuffer::gatherParticles");
 
     using PIter = amrex::ParConstIterSoA<PIdx::nattribs, 0, amrex::PolymorphicArenaAllocator>;
@@ -372,10 +389,8 @@ void ParticleBoundaryBuffer::gatherParticlesFromDomainBoundaries (MultiParticleC
         for (int iside = 0; iside < 2; ++iside)
         {
             auto& buffer = m_particle_containers[2*idim+iside];
-            for (int i = 0; i < numSpecies(); ++i)
             {
                 if (!m_do_boundary_buffer[2*idim+iside][i]) { continue; }
-                const WarpXParticleContainer& pc = mypc.GetParticleContainer(i);
                 if (!buffer[i].isDefined())
                 {
                     buffer[i] = pc.make_alike<>();
@@ -448,8 +463,6 @@ void ParticleBoundaryBuffer::gatherParticlesFromDomainBoundaries (MultiParticleC
                         }
                         {
                           ABLASTR_PROFILE("ParticleBoundaryBuffer::gatherParticles::filterAndTransform");
-                          auto& warpx = WarpX::GetInstance();
-                          const auto dt = warpx.getdt(pti.GetLevel());
                           auto & buf = buffer[i];
                           const int step_scraped_index = buf.GetIntCompIndex("stepScraped") - WarpXParticleContainer::NArrayInt;
                           const int delta_index = buf.GetRealCompIndex("deltaTimeScraped") - WarpXParticleContainer::NArrayReal;
@@ -472,6 +485,19 @@ void ParticleBoundaryBuffer::gatherParticlesFromDomainBoundaries (MultiParticleC
 void ParticleBoundaryBuffer::gatherParticlesFromEmbeddedBoundaries (
     MultiParticleContainer& mypc, ablastr::fields::MultiLevelScalarField const& distance_to_eb, amrex::Real cur_time)
 {
+    if (!EB::enabled()) { return; }
+    const amrex::Real dt = WarpX::GetInstance().getdt(0);
+    for (int i = 0; i < numSpecies(); ++i)
+    {
+        gatherParticlesFromEmbeddedBoundaries(mypc.GetParticleContainer(i), i, distance_to_eb, cur_time, dt);
+    }
+}
+
+void ParticleBoundaryBuffer::gatherParticlesFromEmbeddedBoundaries (
+    WarpXParticleContainer const& pc, const int i,
+    ablastr::fields::MultiLevelScalarField const& distance_to_eb,
+    amrex::Real cur_time, amrex::Real dt)
+{
     if (EB::enabled()) {
         ABLASTR_PROFILE("ParticleBoundaryBuffer::gatherParticles::EB");
 
@@ -482,10 +508,8 @@ void ParticleBoundaryBuffer::gatherParticlesFromEmbeddedBoundaries (
         auto plo = geom.ProbLoArray();
 
         auto& buffer = m_particle_containers[m_particle_containers.size()-1];
-        for (int i = 0; i < numSpecies(); ++i)
         {
-            if (!m_do_boundary_buffer[AMREX_SPACEDIM*2][i]) { continue; }
-            const auto& pc = mypc.GetParticleContainer(i);
+            if (!m_do_boundary_buffer[AMREX_SPACEDIM*2][i]) { return; }
             if (!buffer[i].isDefined())
             {
                 buffer[i] = pc.make_alike<>();
@@ -511,6 +535,22 @@ void ParticleBoundaryBuffer::gatherParticlesFromEmbeddedBoundaries (
             {
                 const auto& plevel = pc.GetParticles(lev);
                 auto dxi = warpx_instance.Geom(lev).InvCellSizeArray();
+
+                // Insulating EB wall: particles are collected where the
+                // signed distance falls below the standoff band, not at the
+                // surface -- keep the buffer's capture surface consistent
+                // with the scraper's.
+                amrex::Real phi_offset = 0.0_rt;
+                if (WarpX::eb_boundary_type == EmbeddedBoundaryType::Insulating) {
+                    // smallest cell size: must stay below the
+                    // signed-distance roof (see ParticleScraper.H)
+                    amrex::Real dx_min = warpx_instance.Geom(lev).CellSize(0);
+                    for (int d = 1; d < AMREX_SPACEDIM; ++d) {
+                        dx_min = amrex::min(dx_min, warpx_instance.Geom(lev).CellSize(d));
+                    }
+                    phi_offset = WarpX::eb_standoff_cells * dx_min;
+                }
+
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -536,7 +576,7 @@ void ParticleBoundaryBuffer::gatherParticlesFromEmbeddedBoundaries (
                         amrex::Real const phi_value = ablastr::particles::doGatherScalarFieldNodal(
                             xp, yp, zp, phiarr, dxi, plo
                         );
-                        return phi_value < 0.0 ? 1 : 0;
+                        return phi_value < phi_offset ? 1 : 0;
                     };
 
                     const auto ptile_data = ptile.getConstParticleTileData();
@@ -560,8 +600,6 @@ void ParticleBoundaryBuffer::gatherParticlesFromEmbeddedBoundaries (
                         if (new_np > capacity) { ptile_buffer.reserve(2*new_np); }
                         ptile_buffer.resize(new_np);
                     }
-                    auto &warpx = WarpX::GetInstance();
-                    const auto dt = warpx.getdt(pti.GetLevel());
                     auto & buf = buffer[i];
                     const int step_scraped_index = buf.GetIntCompIndex("stepScraped") - WarpXParticleContainer::NArrayInt;
                     const int delta_index = buf.GetRealCompIndex("deltaTimeScraped") - WarpXParticleContainer::NArrayReal;
@@ -575,7 +613,7 @@ void ParticleBoundaryBuffer::gatherParticlesFromEmbeddedBoundaries (
                                                            FindEmbeddedBoundaryIntersection{step_scraped_index, delta_index,
                                                                                             time_scraped_index, normal_index,
                                                                                             step, cur_time, dt, phiarr, dxi, plo,
-                                                                                            pc.getMass()},
+                                                                                            pc.getMass(), phi_offset},
                                                            0, dst_index);
 
                     }

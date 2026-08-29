@@ -47,6 +47,16 @@ Functions can be called at the following times:
 * ``particleinjection``: called when particle injection happens, after the position
   advance and before deposition is called, allowing a user
   defined particle distribution to be injected each time step
+* ``externalcoiltheta``: inside every residual evaluation of the theta-implicit
+  hybrid solver when ``implicit_evolve.external_field_iteration`` is on, after
+  the plasma current of the current iterate has been computed and before the
+  external fields are refreshed — re-advance a coupled external circuit
+  against the iterate's flux linkage and push updated coil scale segments
+  (``set_external_vector_potential_scale``)
+* ``externalcoilfinish``: once per step at the end-of-step field update under
+  ``implicit_evolve.external_field_iteration``, before the final boundary
+  values are imposed at :math:`t^{n+1}` — leave the circuit state converged
+  at the end of the step
 
 Example that calls the Python function ``myplots`` after each step:
 
@@ -297,12 +307,32 @@ callback_instances = {
     "particleloader": {},
     "beforestep": {},
     "afterstep": {},
+    # circuit-coupling engine contract (fired by the CircuitCoupler from
+    # inside the hybrid B-field substep loop; the handlers read the coupling
+    # interval and the flux-linkage registers through
+    # libwarpx.warpx.get_coupling_interval / get_coil_flux_linkage and push
+    # scale segments through set_external_vector_potential_scale):
+    #  - circuitbeginstep: the step opened on the plasma-frame fields;
+    #    commit the previous step's last accepted advance, snapshot state
+    #  - circuitpredict: advance the interval [t0, t1] from its entry state
+    #    with held EMF estimates (a re-fired predict means the substep was
+    #    rejected or resized: advance from the same entry state again)
+    #  - circuitcorrect: re-advance from the same entry state with the
+    #    corrected EMFs (linkage registers now hold lambda(t1))
+    #  - circuitfinish: the step closed on the accepted state; commit
+    #    histories and per-step bookkeeping
+    "circuitbeginstep": {},
+    "circuitpredict": {},
+    "circuitcorrect": {},
+    "circuitfinish": {},
     "afterdiagnostics": {},
     "afterrestart": {},
     "oncheckpointsignal": {},
     "onbreaksignal": {},
     "particleinjection": {},
     "appliedfields": {},
+    "externalcoiltheta": {},
+    "externalcoilfinish": {},
 }
 
 # --- Now create the actual instances.

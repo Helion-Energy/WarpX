@@ -308,9 +308,13 @@ public:
      *                          current positions of the particles. When different than 0,
      *                          the particle position will be temporarily modified to match
      *                          the time of the deposition.
+     *
+     * Virtual so that containers with non-standard deposition (e.g. the
+     * orbit-averaged deposition of SubcycledParticleContainer) can serve
+     * their own moments to any caller.
      */
-    void DepositCurrent (ablastr::fields::MultiLevelVectorField const & J,
-                         amrex::Real dt, amrex::Real relative_time);
+    virtual void DepositCurrent (ablastr::fields::MultiLevelVectorField const & J,
+                                 amrex::Real dt, amrex::Real relative_time);
 
     /**
      * \brief Deposit current density, sum guard values, and apply boundary conditions.
@@ -336,12 +340,16 @@ public:
      *            final density by some volume norm in cylindrical and spherical geometry
      * \param[in] interpolate_across_levels whether to average down from the fine patch to the coarse patch
      * \param[in] icomp component of the MultiFab where rho is deposited (old, new)
+     *
+     * Virtual so that containers with non-standard deposition (e.g. the
+     * orbit-averaged deposition of SubcycledParticleContainer) can serve
+     * their own moments to any caller.
      */
-    void DepositCharge (const ablastr::fields::MultiLevelScalarField& rho,
-                        bool local = false, bool reset = false,
-                        bool apply_boundary_and_scale_volume = false,
-                        bool interpolate_across_levels = true,
-                        int icomp = 0);
+    virtual void DepositCharge (const ablastr::fields::MultiLevelScalarField& rho,
+                                bool local = false, bool reset = false,
+                                bool apply_boundary_and_scale_volume = false,
+                                bool interpolate_across_levels = true,
+                                int icomp = 0);
     void DepositCharge (amrex::MultiFab* rho, int lev,
                         bool local = false, bool reset = false,
                         bool apply_boundary_and_scale_volume = false,

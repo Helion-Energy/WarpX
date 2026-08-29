@@ -292,41 +292,44 @@ WarpX::Evolve (int numsteps)
         if( electrostatic_solver_id != ElectrostaticSolverAlgo::None ||
             electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC )
         {
-            ExecutePythonCallback("beforeEsolve");
+            // Skip if using implicit solver (fields already evolved in OneStep)
+            if (!m_implicit_solver) {
+                ExecutePythonCallback("beforeEsolve");
 
-            if (electrostatic_solver_id != ElectrostaticSolverAlgo::None) {
-                // Electrostatic solver:
-                // The E-field is always reset to hold just the electrostatic component
-                bool const reset_E_field = true;
-                // The B-field is also reset unless the Darwin solver is used
-                bool const reset_B_field = true;
+                if (electrostatic_solver_id != ElectrostaticSolverAlgo::None) {
+                    // Electrostatic solver:
+                    // The E-field is always reset to hold just the electrostatic component
+                    bool const reset_E_field = true;
+                    // The B-field is also reset unless the Darwin solver is used
+                    bool const reset_B_field = true;
 
-                // For each species: deposit charge and add the associated space-charge
-                // E and B field to the grid ; this is done at the end of the PIC
-                // loop (i.e. immediately after a `Redistribute` and before particle
-                // positions are next pushed) so that the particles do not deposit out of bounds
-                // and so that the fields are at the correct time in the output.
-                ComputeSpaceChargeField( reset_E_field, reset_B_field );
-                if (electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameElectroMagnetostatic) {
-                    // Call Magnetostatic Solver to solve for the vector potential A and compute the
-                    // B field.  Time varying A contribution to E field is neglected.
-                    // This is currently a lab frame calculation.
-                    ComputeMagnetostaticField();
+                    // For each species: deposit charge and add the associated space-charge
+                    // E and B field to the grid ; this is done at the end of the PIC
+                    // loop (i.e. immediately after a `Redistribute` and before particle
+                    // positions are next pushed) so that the particles do not deposit out of bounds
+                    // and so that the fields are at the correct time in the output.
+                    ComputeSpaceChargeField( reset_E_field, reset_B_field );
+                    if (electrostatic_solver_id == ElectrostaticSolverAlgo::LabFrameElectroMagnetostatic) {
+                        // Call Magnetostatic Solver to solve for the vector potential A and compute the
+                        // B field.  Time varying A contribution to E field is neglected.
+                        // This is currently a lab frame calculation.
+                        ComputeMagnetostaticField();
+                    }
+                    // Since the fields were reset above, the external fields are added
+                    // back on to the fine patch fields. This make it so that the net fields
+                    // are the sum of the field solution and any external field.
+                    for (int lev = 0; lev <= max_level; ++lev) {
+                        AddExternalFields(lev);
+                    }
+                } else if (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) {
+                    // Hybrid-PIC case:
+                    // The particles are now at p^{n+1/2} and x^{n+1}. The fields
+                    // are updated according to the hybrid-PIC scheme (Ohm's law
+                    // and Ampere's law).
+                    HybridPICEvolveFields();
                 }
-                // Since the fields were reset above, the external fields are added
-                // back on to the fine patch fields. This make it so that the net fields
-                // are the sum of the field solution and any external field.
-                for (int lev = 0; lev <= max_level; ++lev) {
-                    AddExternalFields(lev);
-                }
-            } else if (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) {
-                // Hybrid-PIC case:
-                // The particles are now at p^{n+1/2} and x^{n+1}. The fields
-                // are updated according to the hybrid-PIC scheme (Ohm's law
-                // and Ampere's law).
-                HybridPICEvolveFields();
+                ExecutePythonCallback("afterEsolve");
             }
-            ExecutePythonCallback("afterEsolve");
         }
 
         bool const do_diagnostic = (multi_diags->DoComputeAndPack(step) || reduced_diags->DoDiags(step));
@@ -405,6 +408,19 @@ void WarpX::OneStep (
 
     // implicit solver
     if (m_implicit_solver) {
+        // Python-callback semantics under the implicit schemes: the field
+        // updates run inside the nonlinear residual evaluations (at iterate
+        // states, including Jacobian probes), where per-update callbacks
+        // must not fire. Instead, fire one coherent set of events around
+        // OneStep at well-defined states: beforeEsolve with the t^n state
+        // (note: charge/current deposition happens inside the nonlinear
+        // iteration, not before it), and afterEpush/afterBpush (plus
+        // afterEsolve for the hybrid solver) with the converged t^{n+1}
+        // state.
+        const bool fire_esolve_callbacks =
+            (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC);
+        if (fire_esolve_callbacks) { ExecutePythonCallback("beforeEsolve"); }
+
         // advance fields and particles by one time step
         const int exit_status = m_implicit_solver->OneStep(a_cur_time, a_dt, a_step);
         if (exit_status < 0) {
@@ -414,6 +430,10 @@ void WarpX::OneStep (
                       << "Nonlinear solver failed to converge: exit status = " << exit_status;
             WARPX_ABORT_WITH_MESSAGE(solverMsg.str());
         }
+
+        ExecutePythonCallback("afterEpush");
+        ExecutePythonCallback("afterBpush");
+        if (fire_esolve_callbacks) { ExecutePythonCallback("afterEsolve"); }
     }
     // explicit solver
     else {

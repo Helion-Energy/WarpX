@@ -1,0 +1,627 @@
+#!/usr/bin/env python3
+#
+# --- Test script for the kinetic-fluid hybrid model in WarpX wherein ions are
+# --- treated as kinetic particles and electrons as an isothermal, inertialess
+# --- background fluid. The script is set up to produce either parallel or
+# --- perpendicular (Bernstein) EM modes and can be run in 1d, 2d or 3d
+# --- Cartesian geometries. See Section 4.2 and 4.3 of Munoz et al. (2018).
+# --- As a CI test only a small number of steps are taken using the 1d version.
+# --- This version uses the theta-implicit hybrid solver.
+
+import argparse
+import os
+import sys
+
+import dill
+import numpy as np
+from mpi4py import MPI as mpi
+
+from pywarpx import callbacks, libwarpx, picmi
+
+constants = picmi.constants
+
+comm = mpi.COMM_WORLD
+
+simulation = picmi.Simulation(warpx_serialize_initial_conditions=True, verbose=0)
+
+
+class EMModes(object):
+    """The following runs a simulation of an uniform plasma at a set
+    temperature (Te = Ti) with an external magnetic field applied in either the
+    z-direction (parallel to domain) or x-direction (perpendicular to domain).
+    The analysis script (in this same directory) analyzes the output field data
+    for EM modes. This input is based on the EM modes tests as described by
+    Munoz et al. (2018) and tests done by Scott Nicks at TAE Technologies.
+    """
+
+    # Applied field parameters
+    B0 = 0.25  # Initial magnetic field strength (T)
+    beta = [0.01, 0.1]  # Plasma beta, used to calculate temperature
+
+    # Plasma species parameters
+    m_ion = [100.0, 400.0]  # Ion mass (electron masses)
+    vA_over_c = [1e-4, 1e-3]  # ratio of Alfven speed and the speed of light
+
+    # Spatial domain
+    Nz = [1024, 1920]  # number of cells in z direction
+    Nx = 8  # number of cells in x (and y) direction for >1 dimensions
+
+    # Temporal domain (if not run as a CI test)
+    LT = 300.0  # Simulation temporal length (ion cyclotron periods)
+
+    # Numerical parameters
+    NPPC = [1024, 256, 64]  # Seed number of particles per cell
+    DZ = 1.0 / 10.0  # Cell size (ion skin depths)
+    DT = [5e-4, 4e-4]  # Time step (ion cyclotron periods)
+
+    # Plasma resistivity - used to dampen the mode excitation
+    eta = [[1e-7, 1e-7], [1e-7, 1e-5], [1e-7, 1e-4]]
+    # Number of substeps used to update B
+    substeps = 40
+
+    def __init__(
+        self,
+        test,
+        dim,
+        B_dir,
+        verbose,
+        darwin=False,
+        inertia=False,
+        inertia_seeded=False,
+        mass_matrices=False,
+        callback_gating=False,
+    ):
+        """Get input parameters for the specific case desired."""
+        self.test = test
+        self.dim = int(dim)
+        self.B_dir = B_dir
+        self.verbose = verbose or self.test
+        self.darwin = darwin
+        self.inertia_seeded = inertia_seeded
+        self.inertia = inertia or inertia_seeded
+        self.mass_matrices = mass_matrices
+        self.callback_gating = callback_gating
+        assert not (self.inertia_seeded and B_dir != "z"), (
+            "--inertia-seeded seeds a transverse mode on the Bz guide "
+            "field and requires --bdir z"
+        )
+
+        # sanity check
+        assert dim > 0 and dim < 4, f"{dim}-dimensions not a valid input"
+
+        # get simulation parameters from the defaults given the direction of
+        # the initial B-field and the dimensionality
+        self.get_simulation_parameters()
+
+        # calculate various plasma parameters based on the simulation input
+        self.get_plasma_quantities()
+
+        if self.test and self.dim == 3:
+            # CI-sized 3D column: the production-length column at 3D cost
+            # would run for tens of minutes on the CI runners.
+            self.Nz = 128
+            self.NPPC = 32
+
+        if self.inertia_seeded:
+            # Electron-inertia dispersion variant: a short box at the same
+            # resolution (dz = d_e for M/m = 100) with a single seeded
+            # transverse mode at k d_e ~ 1, dumped every step for a
+            # complex-frequency fit against the inertia-modified whistler
+            # branch (see analysis_inertia.py).
+            self.Nz = 256
+
+        self.dz = self.DZ * self.l_i
+        self.Lz = self.Nz * self.dz
+        self.Lx = self.Nx * self.dz
+
+        self.dt = self.DT * self.t_ci
+
+        if not self.test:
+            self.total_steps = int(self.LT / self.DT)
+            # output diagnostics 20 times per cyclotron period
+            self.diag_steps = int(1.0 / 20 / self.DT)
+        else:
+            # if this is a test case run for only a small number of steps
+            self.total_steps = 50
+            self.diag_steps = 10
+
+        if self.inertia_seeded:
+            self.total_steps = 100
+            self.diag_steps = 1
+
+        # dump all the current attributes to a dill pickle file
+        if comm.rank == 0:
+            with open("sim_parameters.dpkl", "wb") as f:
+                dill.dump(self, f)
+
+        # print out plasma parameters
+        if comm.rank == 0:
+            print(
+                f"Initializing simulation with input parameters:\n"
+                f"\tT = {self.T_plasma:.3f} eV\n"
+                f"\tn = {self.n_plasma:.1e} m^-3\n"
+                f"\tB0 = {self.B0:.2f} T\n"
+                f"\tM/m = {self.m_ion:.0f}\n"
+            )
+            print(
+                f"Plasma parameters:\n"
+                f"\tl_i = {self.l_i:.1e} m\n"
+                f"\tt_ci = {self.t_ci:.1e} s\n"
+                f"\tv_ti = {self.v_ti:.1e} m/s\n"
+                f"\tvA = {self.vA:.1e} m/s\n"
+            )
+            print(
+                f"Numerical parameters:\n"
+                f"\tdz = {self.dz:.1e} m\n"
+                f"\tdt = {self.dt:.1e} s\n"
+                f"\tdiag steps = {self.diag_steps:d}\n"
+                f"\ttotal steps = {self.total_steps:d}\n"
+            )
+
+        self.setup_run()
+
+        if self.callback_gating:
+            self._setup_callback_gating()
+
+    def get_simulation_parameters(self):
+        """Pick appropriate parameters from the defaults given the direction
+        of the B-field and the simulation dimensionality."""
+        if self.B_dir == "z":
+            idx = 0
+            self.Bx = 0.0
+            self.By = 0.0
+            self.Bz = self.B0
+        elif self.B_dir == "y":
+            idx = 1
+            self.Bx = 0.0
+            self.By = self.B0
+            self.Bz = 0.0
+        else:
+            idx = 1
+            self.Bx = self.B0
+            self.By = 0.0
+            self.Bz = 0.0
+
+        self.beta = self.beta[idx]
+        self.m_ion = self.m_ion[idx]
+        self.vA_over_c = self.vA_over_c[idx]
+        self.Nz = self.Nz[idx]
+        self.DT = self.DT[idx]
+
+        self.NPPC = self.NPPC[self.dim - 1]
+        self.eta = self.eta[self.dim - 1][idx]
+
+    def get_plasma_quantities(self):
+        """Calculate various plasma parameters based on the simulation input."""
+        # Ion mass (kg)
+        self.M = self.m_ion * constants.m_e
+
+        # Cyclotron angular frequency (rad/s) and period (s)
+        self.w_ci = constants.q_e * abs(self.B0) / self.M
+        self.t_ci = 2.0 * np.pi / self.w_ci
+
+        # Alfven speed (m/s): vA = B / sqrt(mu0 * n * (M + m)) = c * omega_ci / w_pi
+        self.vA = self.vA_over_c * constants.c
+        self.n_plasma = (self.B0 / self.vA) ** 2 / (
+            constants.mu0 * (self.M + constants.m_e)
+        )
+
+        # Ion plasma frequency (Hz)
+        self.w_pi = np.sqrt(constants.q_e**2 * self.n_plasma / (self.M * constants.ep0))
+
+        # Skin depth (m)
+        self.l_i = constants.c / self.w_pi
+
+        # Ion thermal velocity (m/s) from beta = 2 * (v_ti / vA)**2
+        self.v_ti = np.sqrt(self.beta / 2.0) * self.vA
+
+        # Temperature (eV) from thermal speed: v_ti = sqrt(kT / M)
+        self.T_plasma = self.v_ti**2 * self.M / constants.q_e  # eV
+
+        # Larmor radius (m)
+        self.rho_i = self.v_ti / self.w_ci
+
+    def setup_run(self):
+        """Setup simulation components."""
+
+        #######################################################################
+        # Set geometry and boundary conditions                                #
+        #######################################################################
+
+        if self.dim == 1:
+            grid_object = picmi.Cartesian1DGrid
+        elif self.dim == 2:
+            grid_object = picmi.Cartesian2DGrid
+        else:
+            grid_object = picmi.Cartesian3DGrid
+
+        self.grid = grid_object(
+            number_of_cells=[self.Nx, self.Nx, self.Nz][-self.dim :],
+            warpx_max_grid_size=self.Nz,
+            lower_bound=[-self.Lx / 2.0, -self.Lx / 2.0, 0][-self.dim :],
+            upper_bound=[self.Lx / 2.0, self.Lx / 2.0, self.Lz][-self.dim :],
+            lower_boundary_conditions=["periodic"] * self.dim,
+            upper_boundary_conditions=["periodic"] * self.dim,
+        )
+        simulation.time_step_size = self.dt
+        simulation.max_steps = self.total_steps
+        simulation.current_deposition_algo = "direct"
+        simulation.particle_shape = 1
+        simulation.verbose = self.verbose
+
+        #######################################################################
+        # Field solver and external field                                     #
+        #######################################################################
+
+        self.solver = picmi.HybridPICSolver(
+            grid=self.grid,
+            Te=self.T_plasma,
+            n0=self.n_plasma,
+            plasma_resistivity=self.eta,
+            substeps=self.substeps,
+            darwin=self.darwin,
+            include_electron_inertia=True if self.inertia else None,
+        )
+        simulation.solver = self.solver
+
+        if self.inertia_seeded:
+            # Seed one transverse mode at k d_e ~ 1 (mode 41 in the short
+            # box) on top of the uniform field; both circular branches are
+            # populated and the fast (whistler) one is fit by the analysis.
+            k_seed = 2.0 * np.pi * 41.0 / self.Lz
+            Bx_expr = f"{2.0e-3 * self.B0}*cos({k_seed}*z)"
+        else:
+            Bx_expr = self.Bx
+        B_ext = picmi.AnalyticInitialField(
+            Bx_expression=Bx_expr, By_expression=self.By, Bz_expression=self.Bz
+        )
+        simulation.add_applied_field(B_ext)
+
+        #######################################################################
+        # Implicit solver setup                                               #
+        #######################################################################
+
+        # Create GMRES linear solver for Newton (JFNK). The electron-inertia
+        # term adds an unpreconditioned (2 theta + 1)/2 * (k d_e)^2 curl-curl
+        # block to the Jacobian; with the seeded coherent whistler the
+        # default Krylov budget under-converges and Newton loses its basin,
+        # so the FD-JVP dispersion variant carries a matched restart length
+        # (with the backtracking line search below it converges in ~3
+        # iterations). With the exact mass-matrix Jacobian and the Jacobi
+        # preconditioner the default budget suffices (2-iteration Newton),
+        # which is exactly what the mass-matrices variant exercises.
+        boost_gmres = self.inertia_seeded and not self.mass_matrices
+        gmres_solver = picmi.GMRESLinearSolver(
+            verbose_int=1,
+            max_iterations=400 if boost_gmres else 100,
+            restart_length=200 if boost_gmres else None,
+            relative_tolerance=1.0e-4,
+            absolute_tolerance=0.0,
+        )
+
+        # Create nonlinear solver using Newton (JFNK)
+        nonlinear_solver = picmi.NewtonNonlinearSolver(
+            verbose=True,
+            max_iterations=20,
+            relative_tolerance=1.0e-6,
+            absolute_tolerance=0.0,
+            require_convergence=False,
+            linear_solver=gmres_solver,
+            max_particle_iterations=21,
+            particle_tolerance=1.0e-10,
+            use_mass_matrices_jacobian=True if self.mass_matrices else None,
+            use_mass_matrices_pc=True if self.mass_matrices else None,
+            pc_type=picmi.JacobiPreconditioner(
+                verbose=False,
+                max_iter=200,
+                relative_tolerance=1.0e-4,
+                absolute_tolerance=0.0,
+            )
+            if self.mass_matrices
+            else None,
+        )
+        if self.inertia_seeded:
+            import pywarpx
+
+            pywarpx.warpx.get_bucket("newton").line_search = 1
+
+        # Create the theta-implicit hybrid evolve scheme
+        evolve_scheme = picmi.ThetaImplicitHybridEvolveScheme(
+            theta=0.5,
+            nonlinear_solver=nonlinear_solver,
+        )
+        simulation.evolve_scheme = evolve_scheme
+
+        if self.darwin and self.dim == 3:
+            # The 3D E_L Poisson solve dominates the residual-evaluation
+            # cost; the default 1e-10 tolerance is far tighter than any
+            # quantity checked at CI scale.
+            import pywarpx
+
+            pywarpx.hybridpicmodel.darwin_poisson_relative_tolerance = 1.0e-8
+
+        #######################################################################
+        # Particle types setup                                                #
+        #######################################################################
+
+        self.ions = picmi.Species(
+            name="ions",
+            charge="q_e",
+            mass=self.M,
+            initial_distribution=picmi.UniformDistribution(
+                density=self.n_plasma,
+                rms_velocity=[self.v_ti] * 3,
+            ),
+        )
+        simulation.add_species(
+            self.ions,
+            layout=picmi.PseudoRandomLayout(
+                grid=self.grid, n_macroparticles_per_cell=self.NPPC
+            ),
+        )
+
+        #######################################################################
+        # Add diagnostics                                                     #
+        #######################################################################
+
+        if self.B_dir == "z":
+            self.output_file_name = "par_field_data.txt"
+        else:
+            self.output_file_name = "perp_field_data.txt"
+
+        if self.test:
+            particle_diag = picmi.ParticleDiagnostic(
+                name="field_diag",
+                period=self.total_steps,
+            )
+            simulation.add_diagnostic(particle_diag)
+            field_diag = picmi.FieldDiagnostic(
+                name="field_diag",
+                grid=self.grid,
+                period=self.total_steps,
+                data_list=["B", "E", "J_displacement"],
+                warpx_verbose=0,
+            )
+            simulation.add_diagnostic(field_diag)
+
+        if self.B_dir == "z" or self.dim == 1:
+            line_diag = picmi.ReducedDiagnostic(
+                diag_type="FieldProbe",
+                probe_geometry="Line",
+                z_probe=0,
+                z1_probe=self.Lz,
+                resolution=self.Nz - 1,
+                name=self.output_file_name[:-4],
+                period=self.diag_steps,
+                path="diags/",
+            )
+            simulation.add_diagnostic(line_diag)
+        else:
+            # install a custom "reduced diagnostic" to save the average field
+            callbacks.installafterEsolve(self._record_average_fields)
+            try:
+                os.mkdir("diags")
+            except OSError:
+                # diags directory already exists
+                pass
+            with open(f"diags/{self.output_file_name}", "w") as f:
+                f.write(
+                    "[0]step() [1]time(s) [2]z_coord(m) "
+                    "[3]Ez_lev0-(V/m) [4]Bx_lev0-(T) [5]By_lev0-(T)\n"
+                )
+
+        #######################################################################
+        # Initialize simulation                                               #
+        #######################################################################
+
+        simulation.initialize_inputs()
+        simulation.initialize_warpx()
+
+    def _record_average_fields(self):
+        """A custom reduced diagnostic to store the average E&M fields in a
+        similar format as the reduced diagnostic so that the same analysis
+        script can be used regardless of the simulation dimension.
+        """
+        step = simulation.extension.warpx.getistep(lev=0) - 1
+
+        if step % self.diag_steps != 0:
+            return
+
+        Bx_warpx = simulation.fields.get("Bfield_fp", dir="x", level=0)[...]
+        By_warpx = simulation.fields.get("Bfield_fp", dir="y", level=0)[...]
+        Ez_warpx = simulation.fields.get("Efield_fp", dir="z", level=0)[...]
+
+        if libwarpx.amr.ParallelDescriptor.MyProc() != 0:
+            return
+
+        t = step * self.dt
+        z_vals = np.linspace(0, self.Lz, self.Nz, endpoint=False)
+
+        if self.dim == 2:
+            Ez = np.mean(Ez_warpx[:-1], axis=0)
+            Bx = np.mean(Bx_warpx[:-1], axis=0)
+            By = np.mean(By_warpx[:-1], axis=0)
+        else:
+            Ez = np.mean(Ez_warpx[:-1, :-1], axis=(0, 1))
+            Bx = np.mean(Bx_warpx[:-1], axis=(0, 1))
+            By = np.mean(By_warpx[:-1], axis=(0, 1))
+
+        with open(f"diags/{self.output_file_name}", "a") as f:
+            for ii in range(self.Nz):
+                f.write(
+                    f"{step:05d} {t:.10e} {z_vals[ii]:.10e} {Ez[ii]:+.10e} "
+                    f"{Bx[ii]:+.10e} {By[ii]:+.10e}\n"
+                )
+
+    def _setup_callback_gating(self):
+        """Install the implicit-scheme callback-contract instrumentation.
+
+        Under the implicit evolve schemes the step-family python callbacks
+        must fire exactly once per step, at coherent states: beforeEsolve
+        with the t^n state, and afterEpush/afterBpush/afterEsolve with the
+        delivered t^{n+1} state -- never inside the nonlinear residual
+        evaluations (iterate states, Jacobian probes included). At
+        afterEpush, hybrid_current_fp_plasma must hold the end-of-step
+        Ampere closure curl(B^{n+1})/mu0: that is the read contract of a
+        segregated circuit coupler measuring the plasma flux linkage
+        between steps.
+        """
+        self._cb_counts = {
+            name: 0
+            for name in [
+                "beforestep",
+                "beforeEsolve",
+                "afterEpush",
+                "afterBpush",
+                "afterEsolve",
+                "afterstep",
+            ]
+        }
+        self._jp_max_rel_err = 0.0
+
+        def make_counter(name):
+            def count():
+                self._cb_counts[name] += 1
+
+            return count
+
+        for name in self._cb_counts:
+            if name != "afterEpush":
+                callbacks.installcallback(name, make_counter(name))
+        callbacks.installcallback("afterEpush", self._check_plasma_current)
+
+    def _check_plasma_current(self):
+        """Count afterEpush fires and check the plasma-current contract.
+
+        The comparison uses the same read path as a segregated circuit
+        coupler (the hybrid_current_fp_plasma wrappers) against a python
+        finite-difference curl of the B field observed at the same moment.
+        1D_Z staggering: Bx/By are cell-centered in z, Jx/Jy nodal, so
+        (curl B)_x = -dBy/dz and (curl B)_y = +dBx/dz land on the interior
+        nodes.
+        """
+        self._cb_counts["afterEpush"] += 1
+        if self.dim != 1:
+            return
+
+        def valid(name, direction):
+            # global valid-region array, z as the only remaining axis
+            return np.squeeze(simulation.fields.get(name, dir=direction, level=0)[...])
+
+        Jx = valid("hybrid_current_fp_plasma", "x")
+        Jy = valid("hybrid_current_fp_plasma", "y")
+        Bx = valid("Bfield_fp", "x")
+        By = valid("Bfield_fp", "y")
+        assert Jx.shape[0] == Bx.shape[0] + 1, (
+            f"unexpected staggering: J nodes {Jx.shape[0]} vs B cells {Bx.shape[0]}"
+        )
+        inv_mu0_dz = 1.0 / (constants.mu0 * self.dz)
+        Jx_pred = -(By[1:] - By[:-1]) * inv_mu0_dz
+        Jy_pred = (Bx[1:] - Bx[:-1]) * inv_mu0_dz
+        scale = max(np.abs(Jx).max(), np.abs(Jy).max())
+        err = (
+            max(
+                np.abs(Jx[1:-1] - Jx_pred).max(),
+                np.abs(Jy[1:-1] - Jy_pred).max(),
+            )
+            / scale
+        )
+        self._jp_max_rel_err = max(self._jp_max_rel_err, err)
+
+    def finalize_callback_gating(self):
+        """Assert the callback-firing and state contracts after the run."""
+        print(
+            f"Callback gating: counts over {self.total_steps} steps = "
+            f"{self._cb_counts}, max J_plasma rel err = "
+            f"{self._jp_max_rel_err:.3e}"
+        )
+        for name, count in self._cb_counts.items():
+            assert count == self.total_steps, (
+                f"callback '{name}' fired {count} times over "
+                f"{self.total_steps} steps: the implicit schemes must fire "
+                "the step-family callbacks exactly once per step, at the "
+                "converged state (never inside residual evaluations)"
+            )
+        assert self._jp_max_rel_err < 1e-9, (
+            "hybrid_current_fp_plasma observed at afterEpush is not the "
+            f"end-of-step curl(B^(n+1))/mu0 (max rel err "
+            f"{self._jp_max_rel_err:.3e}): the segregated-coupler "
+            "flux-linkage read contract is broken"
+        )
+
+
+##########################
+# parse input parameters
+##########################
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "-t",
+    "--test",
+    help="toggle whether this script is run as a short CI test",
+    action="store_true",
+)
+parser.add_argument(
+    "-d", "--dim", help="Simulation dimension", required=False, type=int, default=1
+)
+parser.add_argument(
+    "--bdir",
+    help="Direction of the B-field",
+    required=False,
+    choices=["x", "y", "z"],
+    default="z",
+)
+parser.add_argument(
+    "-v",
+    "--verbose",
+    help="Verbose output",
+    action="store_true",
+)
+parser.add_argument(
+    "--darwin",
+    help="use the Darwin (magnetoinductive) field split",
+    action="store_true",
+)
+parser.add_argument(
+    "--inertia",
+    help="include the electron-inertia term (physical electron mass)",
+    action="store_true",
+)
+parser.add_argument(
+    "--inertia-seeded",
+    help="electron-inertia dispersion variant: short box, one seeded "
+    "whistler mode at k*d_e ~ 1, per-step dumps (implies --inertia)",
+    action="store_true",
+)
+parser.add_argument(
+    "--mass-matrices",
+    help="use the exact mass-matrix Jacobian and the Jacobi "
+    "preconditioner in the Newton solve (implicit only)",
+    action="store_true",
+)
+parser.add_argument(
+    "--callback-gating",
+    help="instrument the step-family python callbacks and assert the "
+    "implicit-scheme contract: exactly one fire per step, with "
+    "hybrid_current_fp_plasma at afterEpush holding the end-of-step "
+    "curl(B)/mu0 (the segregated circuit-coupler read contract)",
+    action="store_true",
+)
+args, left = parser.parse_known_args()
+sys.argv = sys.argv[:1] + left
+
+run = EMModes(
+    test=args.test,
+    dim=args.dim,
+    B_dir=args.bdir,
+    verbose=args.verbose,
+    darwin=args.darwin,
+    inertia=args.inertia,
+    inertia_seeded=args.inertia_seeded,
+    mass_matrices=args.mass_matrices,
+    callback_gating=args.callback_gating,
+)
+simulation.step()
+
+if args.callback_gating:
+    run.finalize_callback_gating()

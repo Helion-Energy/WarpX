@@ -848,6 +848,27 @@ Domain Boundary Conditions
     * ``neumann``: For the electrostatic multigrid solver, a Neumann boundary condition (with gradient of the potential equal to 0) will be applied on the specified boundary.
 
     * ``open``: For the electrostatic Poisson solver based on a Integrated Green Function method.
+      In RZ geometry with the hybrid-PIC solver (:pp:param:`algo.maxwell_solver = hybrid`), ``open`` on the upper radial face
+      and/or the axial (z) faces selects a free-space (Green's-function) boundary for the B-field advance: the ghost values
+      of B on the open faces are filled with the free-space field of the interior sources through the axisymmetric
+      ring-current Green's function (poloidal components, differenced from one shared flux-function table so the ghost field
+      is discretely divergence-free, including the corner ghosts where open faces meet) and Ampere's law (toroidal
+      component: :math:`r B_\theta` continues radially beyond r_hi, and :math:`B_\theta` continues z-invariantly at fixed
+      radius beyond an open z cap, freezing the enclosed axial-current profile at its boundary-plane value). The boundary
+      then carries no image currents. Supported for m = 0 only, on the r_hi/z_lo/z_hi faces in any combination (r_lo is the
+      symmetry axis); open z faces require non-periodic z.
+      Applied fields must be loaded through the hybrid solver's split external fields
+      (:pp:param:`hybrid_pic_model.add_external_fields`); initializing the evolved B directly via
+      :pp:param:`warpx.B_ext_grid_init_style` is rejected (a curl-free applied field would be erased at the open faces).
+      Optional controls: ``boundary.open_bc_coarsening`` (interior linear source-binning factor of the precomputed kernel,
+      default ``4``; bins near the open face are automatically graded down to single nodes under a multipole acceptance
+      criterion), ``boundary.open_bc_image_sum_rtol`` (relative tolerance of the periodic-z image sum at kernel assembly,
+      default ``1e-6``, must be positive), ``boundary.open_bc_max_images`` (cap on image pairs, default ``200``, must be
+      at least 1).
+      When the Green's-function machinery is not active, ``open`` instead applies an uncoupled zero-gradient
+      continuation: the ghost values of E and B on the open faces copy the nearest valid plane (staggering-aware),
+      so a field with no normal gradient passes through the boundary unaltered and no conducting-wall image is
+      imposed. The initial projection-based divergence cleaner treats these faces as Neumann.
 
 .. pp:param:: boundary.potential_lo/hi_x/y/z
     :link_aliases:
@@ -1039,6 +1060,39 @@ additionally define the electric potential at the embedded boundary with an anal
       ``boundary.<species_name>.u_th`` (in units of :math:`c`, i.e. :math:`\sqrt{k_B T_\mathrm{wall}/m}/c`),
       the same input used by the domain ``thermal`` particle boundary condition. The same standard
       deviation is used to sample all components.
+
+.. pp:param:: boundary.eb_type
+    :type: ``string``
+    :default: ``absorbing``
+    :optional:
+
+    The embedded-boundary wall type. Options are:
+
+    * ``absorbing``: Particles are collected where they reach the embedded boundary surface. This is the default behavior.
+
+    * ``insulating``: A collecting wall held off the plasma by a maintained density standoff band.
+      Particles are collected where the signed distance to the embedded boundary falls below
+      :pp:param:`boundary.eb_standoff_cells` cells, so no charge is ever deposited against the wall,
+      and the collected charge and kinetic energy are tallied per species (accessible from Python
+      through ``warpx.get_eb_collected_charge(species_name)`` and ``warpx.get_eb_collected_energy(species_name)``).
+      With the hybrid-PIC electron energy equation
+      (:pp:param:`hybrid_pic_model.solve_electron_energy_equation`), the electron temperature is
+      additionally filled with zero normal gradient into the standoff band and the covered region
+      each step (so :math:`\nabla P_e` drives no spurious electric field at the plasma edge), and
+      the electron entropy deposited on below-floor nodes by the transport markers is folded back
+      onto the neighboring live-plasma nodes instead of being dropped (which is otherwise a
+      one-way energy drain at every density-floor boundary).
+      Requires ``boundary.particle_eb = absorbing``.
+
+.. pp:param:: boundary.eb_standoff_cells
+    :type: ``float``
+    :default: ``2.``
+    :optional:
+
+    Width of the insulating wall's standoff band, in cells (measured with the smallest cell size
+    of the level — the embedded boundary's signed-distance field saturates a few smallest-cells
+    from the surface, so the band must be measured in the same unit or an anisotropic grid
+    collects the entire domain). Must be at most 4. Only used with ``boundary.eb_type = insulating``.
 
 .. _param-particle-thermalizer:
 
@@ -1924,6 +1978,74 @@ Particle initialization
 
     If ``1`` is given, this species will not be pushed
     by any pusher during the simulation.
+
+.. pp:param:: <species_name>.do_subcycled_push
+    :type: ``0`` or ``1``
+    :default: ``0``
+    :optional:
+
+    If ``1`` is given, this species is advanced on its own subcycle time step,
+    smaller than the global time step, against the (frozen) fields of the
+    current step. The subcycle step is
+    ``dt_sub = min(subcycling_cfl_cyclotron/omega_c(B_max), subcycling_cfl_grid*dx_min/v_ref)``,
+    with the final subcycle truncated so the subcycles sum exactly to the global
+    step. Boundary conditions and embedded-boundary scraping are applied every
+    subcycle, so wall-loss records in the particle boundary buffer carry the
+    sub-step absorption time. This is intended for species whose gyration or
+    grid-crossing time is much shorter than the global step, e.g. fusion-born
+    alpha particles in Ohm's-law hybrid simulations or strongly magnetized
+    species in electrostatic simulations. Requires a single mesh level and is
+    not compatible with implicit evolution schemes or particle splitting.
+
+.. pp:param:: <species_name>.do_orbit_averaged_deposition
+    :type: ``0`` or ``1``
+    :default: ``1``
+    :optional:
+
+    Only used when ``<species_name>.do_subcycled_push = 1``. If ``1``, the
+    species deposits its charge and current densities every subcycle, scaled by
+    ``dt_sub/dt``, and the accumulated **orbit-averaged** moments (time averages
+    over the global step) are served to the field solvers in place of an
+    instantaneous deposition at the end-of-step positions. The per-step weights
+    sum exactly to one, so the deposited charge equals the charge carried by
+    the macroparticles. The orbit-averaged current is the species' vector flux
+    times its charge, so particle fluxes through surfaces can be computed
+    directly from the deposited current.
+
+.. pp:param:: <species_name>.subcycling_cfl_cyclotron
+    :type: `float`
+    :default: ``0.1``
+    :optional:
+
+    Only used when ``<species_name>.do_subcycled_push = 1``. Maximum gyration
+    angle (in radians) per subcycle, evaluated with the maximum magnitude of
+    the magnetic field on the grid.
+
+.. pp:param:: <species_name>.subcycling_cfl_grid
+    :type: `float`
+    :default: ``0.4``
+    :optional:
+
+    Only used when ``<species_name>.do_subcycled_push = 1``. Maximum fraction
+    of the smallest cell size crossed per subcycle at the reference speed.
+
+.. pp:param:: <species_name>.subcycling_v_ref
+    :type: `float`
+    :default: ``-1.``
+    :optional:
+
+    Only used when ``<species_name>.do_subcycled_push = 1``. Reference speed
+    (in m/s) for the grid-crossing subcycle constraint. When not positive, the
+    maximum particle speed of the species is computed each step and used
+    instead.
+
+.. pp:param:: <species_name>.subcycling_max_subcycles
+    :type: `int`
+    :default: ``10000``
+    :optional:
+
+    Only used when ``<species_name>.do_subcycled_push = 1``. Safety cap on the
+    number of subcycles per global step.
 
 .. pp:param:: <species_name>.addIntegerAttributes
     :type: list of ``string``
@@ -2893,6 +3015,25 @@ Details about the collision models can be found in the :ref:`theory section <mul
     - ``background_stopping`` for slowing of ions due to collisions with electrons or ions.
       This implements the approximate formulae as derived in Introduction to Plasma Physics,
       from Goldston and Rutherford, section 14.2.
+    - ``hybrid_electron_stopping`` for slowing of fast ions on the self-consistent electron
+      fluid of the hybrid-PIC solver, with the lost kinetic energy heating the electron
+      temperature. This applies the same Goldston and Rutherford ion-on-electron slowing-down
+      rate as ``background_stopping`` with ``background_type = electrons`` (their equation 14.12,
+      with the Coulomb logarithm supplied by :pp:param:`<collision_name>.coulomb_log`), but
+      evaluates it from the hybrid solver's own fields -- :math:`n_e` from the deposited charge
+      density and :math:`T_e` from the electron-energy-equation temperature field -- and drags
+      each particle's velocity exponentially toward the local electron fluid velocity
+      :math:`u_e` (drag only, no diffusion), handling the relativistic proper-velocity
+      conversion exactly. Each particle's weighted kinetic-energy loss is deposited per cell
+      and added to :math:`T_e` in the source stage of the same step, so the channel conserves
+      energy (when the energy-budget instrument is armed it is bracketed as its own classes,
+      ``stopping_bulk``/``stopping_band``, a sub-account of the source stage). This collision
+      requires :pp:param:`hybrid_pic_model.solve_electron_energy_equation` to be enabled;
+      stopping on a prescribed (non-evolving) background remains ``background_stopping``'s job,
+      and ion stopping (drag on background ions) is out of scope here (use
+      ``background_stopping`` with ``background_type = ions``). For a species pushed with
+      ``<species>.do_subcycled_push`` the drag is still applied once per global time step
+      (the exponential update is unconditionally stable at any :math:`\nu_s \Delta t`).
     - ``bremsstrahlung`` for slowing of electrons due to Bremsstrahlung collisions with ions.
       This uses the cross sections as given by `Seltzer and Berger <https://doi.org/10.1016/0092-640X(86)90014-8>`__.
     - ``inverse_bremsstrahlung`` for inverse bremstrahlung absorption of photons from the collisions of electrons and ions.
@@ -2922,8 +3063,10 @@ Details about the collision models can be found in the :ref:`theory section <mul
     Wtih ``inverse_bremsstrahlung``, this is the photon species being absorbed and the electron species they are colliding with, in that order.
     If using ``background_mcc`` or ``background_stopping`` type this should be the name of the
     species for which collisions with a background will be included.
+    If using ``hybrid_electron_stopping`` this should be the name of the fast ion species
+    slowed on the electron fluid.
     If using ``pulsed_decay`` type this should be the name of the parent species.
-    In these three cases, only one species name should be given.
+    In these four cases, only one species name should be given.
     If using ``linear_breit_wheeler`` these should be two photon species.
     If using ``linear_compton``, these should be two species: first, a photon species, and second, a lepton species, in this exact order.
 
@@ -3076,6 +3219,14 @@ Details about the collision models can be found in the :ref:`theory section <mul
 
     Only for ``background_stopping``, where it is required when ``background_type`` is set to ``ions``.
     This specifies the charge state of the background ions.
+
+.. pp:param:: <collision_name>.coulomb_log
+    :type: ``float``
+
+    Only for ``hybrid_electron_stopping``, where it is required and must be positive.
+    The Coulomb logarithm :math:`\log\Lambda` used in the slowing-down rate (unlike
+    ``background_stopping``, which computes it from the background parameters, the
+    self-consistent-fluid operator takes it as an input).
 
 .. pp:param:: <collision_name>.background_type
     :type: ``string``
@@ -3768,6 +3919,26 @@ Maxwell solver: kinetic-fluid hybrid
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the exponent used to calculate
     the electron pressure (see :ref:`here <theory-hybrid-model-elec-temp>`).
 
+.. pp:param:: hybrid_pic_model.include_hall_term
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    Whether the Hall contribution — the total (curl-B) current in the
+    :math:`(\boldsymbol{J} - \boldsymbol{J}_i)\times\boldsymbol{B}/(e n_e)` term of the generalized
+    Ohm's law — enters the E-field solve. With it off the term reduces to the ideal
+    :math:`-\boldsymbol{u}_i\times\boldsymbol{B}` motional field. Turning both this and
+    :pp:param:`hybrid_pic_model.include_electron_pressure_term` off makes a species-free
+    resistive-vacuum simulation exactly linear.
+
+.. pp:param:: hybrid_pic_model.include_electron_pressure_term
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    Whether the electron-pressure gradient :math:`-\nabla P_e/(e n_e)` enters the E-field solve.
+    The electron pressure itself (closure or energy equation) is still evaluated.
+
 .. pp:param:: hybrid_pic_model.plasma_resistivity(rho,J,t)
     :type: ``float`` or ``str``
     :default: ``0``
@@ -3782,6 +3953,19 @@ Maxwell solver: kinetic-fluid hybrid
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the plasma hyper-resistivity in :math:`\Omega m^3`.
 
+.. pp:param:: hybrid_pic_model.plasma_resistivity_<species>(rho_s,rho,Te,J,J_s,B,t)
+    :type: ``float`` or ``str``
+    :default: ``0``
+    :optional:
+
+    If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this adds a per-species resistivity overlay in :math:`\Omega m`
+    for the named charged species, on top of :pp:param:`hybrid_pic_model.plasma_resistivity(rho,J,t)`
+    (see the :ref:`theory section <theory-kinetic-fluid-hybrid-model>`). The expression can depend on the species
+    charge density ``rho_s`` and total charge density ``rho`` (:math:`C/m^3`), the electron temperature ``Te`` (:math:`K`),
+    the current-density magnitudes ``J`` and ``J_s`` (:math:`A/m^2`), the magnetic-field magnitude ``B`` (:math:`T`)
+    and the time ``t`` (:math:`s`). The same effective per-species resistivity enters the Joule-heating source of the
+    electron energy equation when :pp:param:`hybrid_pic_model.include_joule_heating` is on.
+
 .. pp:param:: hybrid_pic_model.solve_electron_energy_equation
     :type: ``bool``
     :default: ``false``
@@ -3791,6 +3975,112 @@ Maxwell solver: kinetic-fluid hybrid
     electron pressure with the electron energy equation, solved with the QDSMC scheme
     (see the :ref:`theory section <theory-hybrid-model-electron-energy-eq>`), instead of evaluating the polytropic
     closure with the constant reference state :math:`(n_0, T_{e0})`.
+
+    Also supported with ``algo.evolve_scheme = theta_implicit_hybrid``, where the QDSMC stage runs
+    theta-centered inside every nonlinear residual evaluation (midpoint electron velocity and a
+    second-order midpoint characteristic push for the entropy markers) and the electron temperature is
+    converged together with the electric field by nonlinear elimination (or through the segregated
+    outer iteration, see :pp:param:`implicit_evolve.qdsmc_segregated_solve`). The Picard nonlinear
+    solver is recommended for this configuration. The stochastic ion-heating realization of the
+    electron-ion energy exchange is applied once per step after the nonlinear solve. The Te-threshold
+    Joule redirect (:pp:param:`hybrid_pic_model.redirect_joule_to_ions`) and per-species resistivities
+    are not yet supported with the implicit scheme.
+
+    With the energy equation on, the electron temperature is evolved state: it is written into
+    checkpoints and restored on restart together with the plasma current (restarting from an older
+    checkpoint without these fields falls back to re-seeding the temperature from the density
+    adiabat, with a warning). The non-default leapfrog time advance keeps no checkpointed history
+    and re-self-starts after a restart with a :math:`\Delta t/2` transient. Exact bitwise
+    continuation of the energy-equation evolution across a restart is not yet guaranteed (the
+    entropy-marker stage re-initializes on re-entry); field/particle restart is unaffected.
+
+.. pp:param:: implicit_evolve.qdsmc_segregated_solve
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If ``algo.evolve_scheme = theta_implicit_hybrid`` and
+    :pp:param:`hybrid_pic_model.solve_electron_energy_equation` is on, solve the coupled field/electron-energy
+    system in segregated midpoint-iterated form: the nonlinear solver converges the field system with the
+    electron pressure frozen, then one re-entrant QDSMC stage pass re-solves the midpoint entropy transport
+    against the converged fields, and an outer loop iterates the pair to joint self-consistency (measured on
+    the relative change of the emitted electron pressure between outer iterations). The converged coupled
+    state is the same as the default (monolithic) form up to the solver tolerances; the segregated form keeps
+    the marker gather/push/deposit chain out of Jacobian-vector products, line-search trials, and Picard
+    sweeps of the field solve.
+
+.. pp:param:: implicit_evolve.qdsmc_outer_max_iterations
+    :type: ``integer``
+    :default: ``20``
+    :optional:
+
+    Maximum number of outer (stage/field) iterations of the segregated solve.
+
+.. pp:param:: implicit_evolve.qdsmc_outer_relative_tolerance
+    :type: ``float``
+    :default: ``1.e-6``
+    :optional:
+
+    Outer convergence tolerance of the segregated solve: the relative :math:`L_2` change of the emitted
+    electron pressure between consecutive outer iterations.
+
+.. pp:param:: implicit_evolve.qdsmc_outer_require_convergence
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    Whether a segregated outer loop that reaches :pp:param:`implicit_evolve.qdsmc_outer_max_iterations`
+    without satisfying the tolerance is a fatal error (mirrors ``newton.require_convergence``).
+
+.. pp:param:: implicit_evolve.qdsmc_outer_verbose
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Print the per-step outer-iteration history (relative pressure change) of the segregated solve.
+
+.. pp:param:: implicit_evolve.external_field_iteration
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If ``algo.evolve_scheme = theta_implicit_hybrid`` with external vector-potential fields, iterate the
+    external drive inside the nonlinear residual (circuit-in-the-residual coupling): every residual
+    evaluation executes the ``externalcoiltheta`` python callback after the plasma current of the current
+    iterate has been computed (``hybrid_current_fp_plasma``), then refreshes the external fields at the
+    updated coil scales. From the callback, python measures the flux linkage of the iterate's plasma
+    response, re-advances a coupled external circuit against it, and pushes updated coil scale segments
+    through ``set_external_vector_potential_scale`` (the coils must be declared with
+    :pp:param:`external_vector_potential.<field_name>.python_scale`). At the end of the step the
+    ``externalcoilfinish`` callback runs once before the end-of-step external state is finalized, so the
+    circuit state and the final coil segments are left at :math:`t^{n+1}`. Because the callback runs in
+    every evaluation, the coupled plasma-circuit map stays smooth in the state and matrix-free Jacobian
+    probes see the coupled physics — Newton converges plasma and circuit together (a step-lagged circuit
+    is unstable at strong coil-plasma coupling).
+
+    On the Darwin unified drive (:pp:param:`hybrid_pic_model.darwin`) the updated scales re-enter through
+    the boundary values of the evolved vector potential (re-running the vacuum recovery when active) and B
+    is re-derived. The recovery's live-probe mode is then forced on; run with a tight
+    :pp:param:`hybrid_pic_model.darwin_vacuum_recovery_relative_tolerance`, and note the recovery is
+    re-applied after the callback in every evaluation, so a finite
+    :pp:param:`hybrid_pic_model.darwin_vacuum_recovery_relaxation_time` is currently applied twice per
+    evaluation — run circuit-coupled decks with the default (instant) recovery.
+
+    On the split-field path (standard theta-implicit hybrid) the callback runs in the plasma-response
+    frame: the stored external fields are subtracted from the totals first (so flux-linkage probes reading
+    B measure the response only), the externals are refreshed at the updated scales, and the totals are
+    restored for the Ohm solve of the same evaluation.
+
+.. pp:param:: hybrid_pic_model.qdsmc_n_floor
+    :type: ``float``
+    :default: ``1``
+    :optional:
+
+    Deposited-weight threshold, in :math:`m^{-3}`, for the QDSMC electron-energy-equation update: cells whose
+    deposited marker weight is at or below this value are skipped and keep their previous electron temperature
+    (guarding the division by the deposited weight in cells no QDSMC marker reached). The density floor used in
+    the :math:`K_e \leftrightarrow T_e` conversion itself is :pp:param:`hybrid_pic_model.n_floor`.
+    Defaults to :pp:param:`hybrid_pic_model.n_floor`.
 
 .. pp:param:: hybrid_pic_model.include_joule_heating
     :type: ``bool``
@@ -3814,6 +4104,163 @@ Maxwell solver: kinetic-fluid hybrid
     electron heating at the threshold and allows :math:`T_i > T_e` to develop, mimicking regimes where the
     electrons radiate strongly.
 
+.. pp:param:: hybrid_pic_model.joule_redirect_allow_undamped
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    By default the Te-threshold Joule redirect refuses to run (aborts at initialization) when no
+    :pp:param:`hybrid_pic_model.electron_ion_relaxation_rate(rho,Te,Ti,t)` is specified: without the
+    relaxation channel the stochastic ion-heating operator has no drag leg, so the redirected energy
+    lands as pure undamped velocity diffusion, which is anti-stabilizing (fast ions generated in
+    low-density cells deposit current noise that feeds back into the Joule source). Set this flag to
+    force the legacy undamped behavior (intended for control-arm reproduction only).
+
+.. pp:param:: hybrid_pic_model.joule_redirect_kick_cap_vth_frac
+    :type: ``float``
+    :default: ``-1`` (off)
+    :optional:
+
+    If :math:`> 0`, clamps the redirect's per-particle stochastic kick so that
+    :math:`\sigma_\mathrm{redirect} \leq f\, v_\mathrm{th}` with :math:`v_\mathrm{th} = \sqrt{k_B T/m_i}`
+    (equivalently, the per-application redirected energy per ion satisfies :math:`E_s \leq f^2 k_B T`),
+    where :math:`T` is the cell's deposited ion temperature when the relaxation channel is on (otherwise
+    the local electron temperature sets the velocity scale). The clipped remainder is dropped (not
+    deposited later) and accumulated in the dropped-energy tally.
+
+.. pp:param:: hybrid_pic_model.joule_redirect_n_min_factor
+    :type: ``float``
+    :default: ``0`` (off)
+    :optional:
+
+    If :math:`> 0`, redirected Joule energy is only staged in cells with density
+    :math:`n \geq g\, n_\mathrm{floor}` (:math:`g` this factor, typically 2--4); below the gate the
+    above-threshold source is dropped to the dropped-energy tally instead of heating anything. This keeps
+    the redirect's per-macro-ion kicks out of nearly empty cells, where few macro-ions share the cell's
+    redirected energy.
+
+.. pp:param:: hybrid_pic_model.joule_heating_resistivity(rho,J,Te,t)
+    :type: ``float`` or ``str``
+    :optional:
+
+    Separate resistivity, in :math:`\Omega\,m`, used only to evaluate the Joule-heating (and redirect)
+    source. When set, the E-field solve keeps :pp:param:`hybrid_pic_model.plasma_resistivity(rho,J,t)`
+    (including any numerical vacuum-regularizer ramp needed for stability) while the heating uses this
+    physical resistivity, so the numerical resistivity does not heat the plasma edge. The expression can
+    depend on the total charge density ``rho`` (:math:`C/m^3`), the plasma-current magnitude ``J``
+    (:math:`A/m^2`), the local electron temperature ``Te`` (eV, permitting a Spitzer form) and the time
+    ``t`` (s). Defaults to the E-solve resistivity.
+
+.. pp:param:: hybrid_pic_model.joule_heating_n_min
+    :type: ``float``
+    :default: :pp:param:`hybrid_pic_model.n_floor`
+    :optional:
+
+    Independent density gate, in :math:`m^{-3}`, for the Joule-heating source: cells with density at or
+    below :math:`\max(\texttt{joule\_heating\_n\_min}, n_\mathrm{floor})` receive no Joule heat, and the
+    declined source energy is accumulated in the dropped-energy tally. This restricts heating to the
+    physical-resistivity region without moving the solver floor.
+
+.. pp:param:: hybrid_pic_model.qdsmc_energy_sink(rho,Te,B,t)
+    :type: ``float`` or ``str``
+    :optional:
+
+    Volumetric electron-energy loss-density rate :math:`S`, in :math:`W/m^3`, subtracted from the
+    electron energy at every energy-equation source application (sign convention: :math:`S > 0`
+    removes energy). Each application updates
+    :math:`T_e \mathrel{-}= \Delta t \, (\gamma - 1) S / (n_e k_B)` per cell, mirroring the
+    Joule-heating conversion; cells at or below the solver density floor are untouched. The expression
+    can depend on the total charge density ``rho`` (:math:`C/m^3`, as in
+    :pp:param:`hybrid_pic_model.plasma_resistivity(rho,J,t)`), the local electron temperature ``Te``
+    (eV), the local magnetic-field magnitude ``B`` (T) and the time ``t`` (s) — intended for
+    radiative-loss closures such as bremsstrahlung-like :math:`n^2 \sqrt{T_e}` or synchrotron-like
+    :math:`n T_e B^2` forms, expressed through ``rho`` and ``Te``. The per-cell decrement is clamped so
+    :math:`T_e` never lands below :pp:param:`hybrid_pic_model.qdsmc_conduction_Te_floor` (plain
+    positivity when that floor is unset); the clamped-away energy accumulates in a cumulative tally
+    (``sink_floor`` in the dropped-energy print, on the
+    :pp:param:`hybrid_pic_model.joule_dropped_energy_print_interval` cadence). Requires
+    :pp:param:`hybrid_pic_model.solve_electron_energy_equation`; supported on the explicit
+    (``euler``/``leapfrog``/``pc``) time-advance schemes.
+
+.. pp:param:: hybrid_pic_model.Te_shunt_threshold
+    :type: ``float``
+    :default: ``-1`` (off)
+    :optional:
+
+    General electron-temperature limiter with ion shunt (the any-channel generalization of the
+    Joule-scoped :pp:param:`hybrid_pic_model.joule_redirect_Te_threshold`): open-set cells whose
+    :math:`T_e` exceeds this threshold, in eV, are capped to it after the energy-equation sources, and
+    the excess energy :math:`\tfrac{3}{2} n_e k_B (T_e - T_\mathrm{cap})` is delivered to the kinetic
+    ions as stochastic kicks (per-ion energy :math:`Z_s k_B (T_e - T_\mathrm{cap})` per species). Unlike
+    the Joule redirect, this intercepts heating from every channel (transport, conduction, reconnection).
+    The relaxation-channel guard rail, per-particle kick cap, and redirect density gate all apply; below
+    the gate the excess is dropped to the tally. Staged energy is tallied (``te_shunt`` in the dropped
+    print). Must sit below :pp:param:`hybrid_pic_model.Te_abort_threshold` when both are set.
+
+.. pp:param:: hybrid_pic_model.Te_abort_threshold
+    :type: ``float``
+    :default: ``-1`` (off)
+    :optional:
+
+    Graceful failure mode for electron-temperature runaways: if the open-set (:math:`n > n_\mathrm{floor}`)
+    :math:`\max(T_e)` exceeds this ceiling, in eV, after the energy-equation sources, the simulation
+    aborts with a clear message (instead of eventually crashing inside the transport). Quarantined
+    sub-floor cells may carry arbitrary temperature without tripping the abort — they are decoupled
+    by design.
+
+.. pp:param:: hybrid_pic_model.joule_dropped_energy_print_interval
+    :type: ``int``
+    :default: ``200``
+    :optional:
+
+    Step interval for printing the cumulative dropped-Joule-energy tallies (heating gate, redirect gate,
+    kick cap, in J) to stdout for the deck-side energy audit. The print only fires when at least one
+    decline channel is armed; ``0`` disables it. The contamination tally (below) shares this cadence.
+
+.. pp:param:: hybrid_pic_model.qdsmc_contamination_n_boundary
+    :type: ``float``
+    :default: ``-1`` (off)
+    :optional:
+
+    Quarantine-contamination instrument: cells with density at or below this boundary, in
+    :math:`m^{-3}`, form the quarantined class. Every electron-thermal-conduction split-sweep face flux
+    that carries energy from a quarantined cell into an open cell is accumulated into cumulative
+    per-grid-axis tallies (J), with a separate channel for the subset whose quarantined-side node is
+    below :pp:param:`hybrid_pic_model.n_floor` while ``qdsmc_conduction_vacuum_fast_front`` is active,
+    and another for redirected Joule energy staged as ion kicks inside quarantined cells. Set the
+    boundary above ``n_floor`` to watch the low-density ignition band; only the (production) split
+    fluxform conduction path is instrumented.
+
+.. pp:param:: hybrid_pic_model.qdsmc_cliff_limited_deposit
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Cliff-aware electron-entropy deposit. The QDSMC transport carries the entropy function
+    :math:`K = T_e n^{1-\gamma}`; entropy numerically spilled onto a node whose density differs from the
+    marker's home density re-materializes through the polytropic recovery with its temperature scaled by
+    :math:`(n_\mathrm{dest}/n_\mathrm{home})^{\gamma-1}` — correct for resolved smooth compression, but an
+    energy-manufacturing heat pump at unresolved density cliffs. When enabled, each destination node's
+    entropy share is blended from the isentropic value toward the temperature-invariant (isothermal)
+    value, keyed on :math:`r = |\ln(n_\mathrm{dest}/n_\mathrm{home})|`: pure isentropic below
+    :pp:param:`hybrid_pic_model.qdsmc_cliff_deposit_r1` (default 0.35), fully isothermal above
+    :pp:param:`hybrid_pic_model.qdsmc_cliff_deposit_r2` (default 1.4). Home-node deposits are bit-exact
+    whenever the cell's one-step density change stays below :math:`e^{r_1}`. Requires
+    ``qdsmc_gradient_deposit = 1``.
+
+.. pp:param:: hybrid_pic_model.qdsmc_energy_budget
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Per-stage open-set energy budget instrument (``pc`` time-advance only): brackets each stage of the
+    Strang advance (conduction / sources / transport / sources / conduction) with the class-summed
+    thermal energy :math:`U = \tfrac{3}{2} n_e k_B T_e` and accumulates each stage's :math:`\Delta U`
+    (cumulative, J), split into the bulk (:math:`n` above
+    :pp:param:`hybrid_pic_model.qdsmc_contamination_n_boundary`) and the band between ``n_floor`` and
+    that boundary. The transport channel carries both advection and the polytropic compression (pdV)
+    signal. Printed on the :pp:param:`hybrid_pic_model.joule_dropped_energy_print_interval` cadence.
+
 .. pp:param:: hybrid_pic_model.electron_ion_relaxation_rate(rho,Te,Ti,t)
     :type: ``float`` or ``str``
     :optional:
@@ -3823,10 +4270,26 @@ Maxwell solver: kinetic-fluid hybrid
     electron-ion thermal-equilibration exchange :math:`Q_{ei} = \sum_s 3 n_s k_B \nu_{ei} (T_e - T_{i,s})`
     as a sink on the electron fluid, paired with matching (energy-conserving) heating of the ion
     macro-particles. The required shape-aware ion temperature deposition
-    (``<species>.do_temperature_deposition``) is enabled automatically on every charged species.
+    (``<species>.do_temperature_deposition``) is enabled automatically on every charged species not
+    listed in :pp:param:`hybrid_pic_model.electron_ion_relaxation_excluded_species`.
     The expression can depend on the total charge density ``rho`` (:math:`C/m^3`), the electron and ion
     temperatures ``Te`` and ``Ti`` (both in eV) and the time ``t`` (:math:`s`), which permits, e.g., the
     NRL-formulary Spitzer rate.
+
+.. pp:param:: hybrid_pic_model.electron_ion_relaxation_excluded_species
+    :type: list of ``str``
+    :optional:
+
+    Space-separated list of species names excluded from the electron-ion relaxation exchange. A fast
+    non-thermal species (e.g. fusion products) carries a velocity spread whose deposited "temperature"
+    is not a temperature, and the relaxation would drag :math:`T_e` toward it. Excluded species do not
+    enter the electron-side :math:`Q_{ei}` sink, receive no ion-side heating kicks, and are skipped by
+    the automatic ``do_temperature_deposition`` arming (setting
+    ``<species>.do_temperature_deposition = 1`` explicitly still enables the deposit itself). Their
+    charge density still counts in the species-fraction denominators, so the remaining species exchange
+    with their physical weights. Every listed name must be a defined particle species. When the Joule
+    redirect or the :math:`T_e` shunt is active, energy staged for an excluded species is declined
+    rather than delivered.
 
 .. pp:param:: hybrid_pic_model.J[x/y/z]_external_grid_function(x,y,z,t)
     :type: ``float`` or ``str``
@@ -3841,6 +4304,162 @@ Maxwell solver: kinetic-fluid hybrid
     :optional:
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the plasma density floor, in :math:`m^{-3}`, which is useful since the generalized Ohm's law used to calculate the E-field includes a :math:`1/n` term.
+
+.. pp:param:: hybrid_pic_model.implicit_push_excludes_resistive_field
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If ``algo.evolve_scheme = theta_implicit_hybrid``, subtract the resistive part of the Ohm field
+    (:math:`\eta \mathbf{J}` and hyper-resistivity) from the electric field gathered by the ions.
+    This makes the implicit particle push momentum-consistent with the explicit scheme, where ions
+    gather the no-resistivity Ohm field and the ion-side resistive friction is the separate
+    (optional) resistive-drag collision operator; without it the ions pick up a spurious resistive
+    acceleration and the Joule energy accounting double-counts. The correction couples the resistive
+    field into the particle response and can destabilize the Newton nonlinear solver in
+    whistler-marginal configurations; it is validated with the Picard solver.
+
+.. pp:param:: hybrid_pic_model.darwin
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    If ``algo.evolve_scheme = theta_implicit_hybrid``, this switches the solver to the Darwin
+    (magnetoinductive) field split: the electric field is decomposed as :math:`\mathbf{E} = \mathbf{E}_T + \mathbf{E}_L`,
+    where the longitudinal part is the instantaneous solution of the ambipolar constraint
+    :math:`\nabla^2\phi = \nabla\cdot[-\nabla P_e/(q_e n_e)]`, :math:`\mathbf{E}_L = \nabla\phi`,
+    and the transverse part advances the magnetic vector potential,
+    :math:`\mathbf{A}^{n+1} = \mathbf{A}^n - \Delta t\,\mathbf{E}_T^{n+\theta}` with
+    :math:`\mathbf{B} = \mathbf{B}_\mathrm{static} + \nabla\times\mathbf{A}`
+    (:math:`\mathbf{B}_\mathrm{static}` is the initial magnetic field; the vector potential
+    accumulates all subsequent changes, keeping :math:`\mathbf{B}` solenoidal by construction).
+    This removes the radiative light-wave branch while retaining the Hall/whistler physics
+    (Hewett and Nielson, J. Comput. Phys. **29**, 219 (1978); Hewett, Comput. Phys. Comm. **84**, 243 (1994)).
+    The total current retains the longitudinal displacement current,
+    :math:`\mathbf{J} = \nabla\times\mathbf{B}/\mu_0 - \varepsilon_0\,\partial_t \mathbf{E}_L`,
+    which preserves charge continuity of the electron current.
+    Restarts are not supported yet. In RZ only the :math:`m = 0` azimuthal mode is supported.
+
+.. pp:param:: hybrid_pic_model.darwin_poisson_relative_tolerance
+    :type: ``float``
+    :default: ``1e-10``
+    :optional:
+
+    Relative tolerance of the MLMG solve for the Darwin constraint potential
+    (also ``darwin_poisson_absolute_tolerance``, default 0, ``darwin_poisson_max_iterations``,
+    default 200, and ``darwin_poisson_verbosity``, default 0).
+
+.. pp:param:: hybrid_pic_model.include_electron_inertia
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Add the electron-inertia term to the generalized Ohm's law: the Je-form of the material
+    derivative :math:`-(m_e^\mathrm{eff}/e)\,\mathrm{D}\mathbf{u}_e/\mathrm{D}t` of the electron
+    fluid velocity :math:`\mathbf{u}_e = -\mathbf{J}_e/\rho`,
+
+    .. math:: \mathbf{E}_\mathrm{inertial} = \frac{m_e^\mathrm{eff}}{e\,\rho}\left[
+        \frac{\partial \mathbf{J}_e}{\partial t}
+        - \frac{\mathbf{J}_e}{\rho}\frac{\partial \rho}{\partial t}
+        - (\mathbf{J}_e\cdot\nabla)\frac{\mathbf{J}_e}{\rho} \right],
+
+    whose cold-electron limit is the collisionless inertial impedance
+    :math:`\mathbf{E} = (m_e/e^2 n_e)\,\partial\mathbf{J}_e/\partial t`, following the implicit-PIC
+    formulation of Angus *et al.* The term rolls the whistler branch over at the effective electron
+    skin depth :math:`d_e = c/\omega_{pe}(m_e^\mathrm{eff})`, providing physical electron-scale
+    dispersion and damping. The time derivative uses a second-order three-point stencil on the
+    per-step electron-current history, centered at the :math:`\theta` stage where Ohm's law is
+    imposed (``electron_inertia_bdf2``, default on; two-point form when off), with the
+    :math:`\theta`-extrapolated iterate. Only cells with strictly zero density drop the term
+    (density-floored cells keep their inertia). Requires
+    ``algo.evolve_scheme = theta_implicit_hybrid``. Supported in 1D, 2D, 3D and RZ (:math:`m = 0`).
+
+.. pp:param:: hybrid_pic_model.reduced_electron_mass_ratio
+    :type: ``float``
+    :default: ``0``
+    :optional:
+
+    When positive, the effective electron mass is the lightest charged ion mass divided by this
+    ratio (``0`` selects the physical electron mass). Reduced ratios move the electron-scale
+    physics toward the grid scale at affordable resolution.
+
+.. pp:param:: hybrid_pic_model.electron_inertia_bdf2
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    Use the second-order three-point time-derivative stencil for the inertial
+    :math:`\partial\mathbf{J}_e/\partial t`, centered at the :math:`\theta` stage where the Ohm's
+    law is imposed: classic BDF2 for :math:`\theta = 1`, reducing exactly to the two-point midpoint
+    difference at :math:`\theta = 1/2` (an endpoint-BDF2 stencil at :math:`\theta < 1` would be
+    mis-centered and pumps reactive modes). When off, always use the two-point form.
+
+.. pp:param:: hybrid_pic_model.darwin_vacuum_recovery
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    With ``hybrid_pic_model.darwin``, replace the evolved vector potential in low-density
+    (vacuum) cells with the magnetostatic solution driven by the retained plasma currents and
+    the boundary values of :math:`\mathbf{A}`, so the vacuum-region field responds
+    instantaneously instead of at the density-floored halo's transport rate — the vacuum-field
+    limit of the resistive-vacuum treatment of Hewett, J. Comput. Phys. **38**, 378 (1980),
+    imposed elliptically. Implemented in correction form: with the field-implied current
+    :math:`\mu_0 \mathbf{J}_\mathrm{imp} = \nabla\times\nabla\times\mathbf{A}`, the correction
+    solves :math:`\nabla^2 \delta\mathbf{A} = +\mu_0\,\mathbf{J}_\mathrm{imp}` restricted to the
+    masked cells, with homogeneous Dirichlet values on non-periodic faces and inside embedded
+    conductors, and :math:`\mathbf{A} \mathrel{+}= \delta\mathbf{A}` in the masked cells. An
+    empty mask reduces to the exact identity. Supported in 2D, 3D and RZ (:math:`m = 0`),
+    single level.
+
+.. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_mask
+    :type: ``string``
+    :default: ``vacuum``
+    :optional:
+
+    Where the recovery replaces the field, evaluated on the step-entry charge density:
+    ``vacuum`` (:math:`\rho < q_e\,n_\mathrm{floor}`, including true vacuum), ``transition``
+    (:math:`0 < \rho < q_e\,n_\mathrm{floor}`) or ``global`` (everywhere; diagnostic use).
+
+.. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_cadence
+    :type: ``string``
+    :default: ``half``
+    :optional:
+
+    ``half`` applies the recovery inside every nonlinear-solver residual evaluation at the
+    theta-stage field (a nonlinear elimination of the vacuum field dynamics), plus once at the
+    end-of-step state; ``full`` applies it at the end-of-step state only (cheaper; the vacuum
+    dynamics stay in the residual).
+
+.. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_relaxation_time
+    :type: ``float``
+    :default: ``0``
+    :optional:
+
+    Finite response time of the vacuum recovery (seconds; ``0`` replaces instantly). The band
+    vector potential relaxes toward the magnetostatic solution,
+    :math:`\mathbf{A} \mathrel{+}= (1 - e^{-\Delta t_\mathrm{eff}/\tau})\,\delta\mathbf{A}`,
+    capping the reconstructed band EMF at the correction rate instead of the one-interval jump —
+    the analog of the halo's finite response time that the instantaneous elliptic limit
+    idealizes away. Slow drives (ramp time :math:`\gg \tau`) are delivered unchanged.
+
+.. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_components
+    :type: ``string``
+    :default: ``flux``
+    :optional:
+
+    ``flux`` recovers only the out-of-plane component (:math:`A_\theta` in RZ, :math:`A_y` in
+    2D) that carries the boundary-driven flux; in 3D it is equivalent to ``all``. ``all``
+    recovers every component; caution: in RZ the in-plane corrections are discretely
+    inconsistent with the curl-curl source near the axis and can destabilize the
+    :math:`B_\theta`-carrying content.
+    ``darwin_vacuum_recovery_density_fraction`` (default 1) scales the mask threshold below
+    ``n_floor``: use values below 1 when the Ohm's-law floor sits inside real plasma so the
+    vacuum treatment stays in the genuine low-density region.
+    The MLMG controls are ``darwin_vacuum_recovery_relative_tolerance`` (default ``1e-8``),
+    ``darwin_vacuum_recovery_absolute_tolerance`` (default 0),
+    ``darwin_vacuum_recovery_max_iterations`` (default 200) and
+    ``darwin_vacuum_recovery_verbosity`` (default 0).
 
 .. pp:param:: hybrid_pic_model.substeps
     :type: ``int``
@@ -3924,6 +4543,22 @@ Maxwell solver: kinetic-fluid hybrid
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the vacuum region handling of the generalized Ohm's Law to suppress vacuum fluctuations. :cite:t:`param-holmstrom2013handlingvacuumregionshybrid`.
 
+.. pp:param:: hybrid_pic_model.holmstrom_transition_width
+    :type: ``float``
+    :default: ``0``
+    :optional:
+
+    Smooth transition width of the Holmström vacuum gate, as a fraction of
+    ``n_floor``. With a width :math:`w > 0` the Hall and electron-pressure
+    part of the Ohm's-law electric field is multiplied by
+    :math:`\tfrac{1}{2}(1 + \tanh((\rho - \rho_{floor})/(w\,\rho_{floor})))`
+    instead of switching off discontinuously below the floor. The binary
+    branch makes the implicit residual discontinuous in the state wherever
+    cells straddle the gate, which produces Newton limit cycles and a
+    growing grid-scale mode at the plasma edge under the theta-implicit
+    solver; the smooth blend restores differentiability. ``0`` (default)
+    keeps the legacy hard branch.
+
 .. pp:param:: hybrid_pic_model.add_external_fields
     :type: ``bool``
     :default: ``false``
@@ -3972,6 +4607,133 @@ Maxwell solver: kinetic-fluid hybrid
     :optional:
 
     This sets the relative strength of the external vector potential by a dimensionless implicit time function, which can compute the external B fields and E fields based on the value and first time derivative of the function.
+
+.. pp:param:: external_vector_potential.<field_name>.in_initial_field
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Declare that this coil's t=0 field is already contained in the loaded
+    initial B field (e.g. a free-boundary equilibrium whose flux includes the
+    confining coil set). By default the first-step state assembly adds each
+    external field's t=0 value on top of the initial condition to form the
+    total field, which double-counts a coil the initial condition already
+    carries; setting this flag skips that coil in the t=0 addition. The coil
+    is still stripped and restored by the per-step external-field
+    choreography like any other.
+
+
+Grid types (collocated, staggered, hybrid)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. pp:param:: external_vector_potential.<field_name>.python_scale
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Drive this field's dimensionless scale through piecewise-linear segments pushed at runtime
+    (``warpx.set_external_vector_potential_scale(name, s_old, s_new, t_old, t_new)`` from Python,
+    e.g. from a circuit model in a callback) instead of the compiled
+    :pp:param:`external_vector_potential.<field_name>.A_time_external_grid_function(t)`.
+    The B field follows the linear interpolant of the segment and the E field carries its exact
+    constant slope (the discrete Faraday partner of the linear B scale). The segment is
+    extrapolated linearly past ``t_new``, so a fresh segment must be pushed every coupling
+    interval; a refresh well past ``t_new`` records a high-priority warning.
+
+.. pp:param:: external_vector_potential.<field_name>.initial_scale
+    :type: ``float``
+    :default: ``1.``
+    :optional:
+
+    With :pp:param:`external_vector_potential.<field_name>.python_scale` enabled, the constant
+    scale held (e.g. a coil at its pre-ramp current) until the first runtime segment is pushed.
+
+.. pp:param:: circuit.coils
+    :type: list of ``str``
+    :optional:
+
+    Names of circular filament coils whose fields drive the hybrid solver's split external
+    fields (requires :pp:param:`hybrid_pic_model.add_external_fields`). Each coil pairs with an
+    entry of :pp:param:`external_vector_potential.fields` (by default the entry with the coil's
+    own name) and, unless disabled, its ``<name>_Aext`` field is filled at initialization with
+    the coil's field at the reference amp-turns from the axisymmetric ring kernel (a direct
+    free-space evaluation; the coil may sit outside the domain). In RZ geometry the fill uses
+    the discrete mesh convention (quarter-cell filament offset, Legendre-parameter clip) whose
+    disk-flux self-inductance is the value a coupled circuit port must use; the discrete self-
+    and mutual-inductance table of the coil set on the run mesh is printed at initialization.
+    Per-coil parameters, prefixed ``circuit.<name>.``:
+
+    * ``r``, ``z`` (required): filament radius and axial position [m]; ``r`` must be positive.
+    * ``n_turns`` (default ``1``): turn count; the filled field and the inductances scale with it.
+    * ``I_ref`` (default ``1``): reference current [A]; a drive scale of 1 (see
+      :pp:param:`external_vector_potential.<field_name>.python_scale`) reproduces the coil at
+      ``I_ref``.
+    * ``field_name`` (default: the coil name): the paired external-field entry.
+    * ``fill_unit_field`` (default ``1``): fill ``<field_name>_Aext`` from the ring kernel;
+      disable to keep whatever the external-field initialization loaded (file or expressions).
+    * ``probe`` (default ``default``): the coil's plasma flux-linkage measurement for the
+      coupling engine — ``disk`` (plasma-frame :math:`B_z` through the coil circle, the same
+      staircase rules as the discrete self-inductance; valid with conducting walls),
+      ``reciprocity`` (:math:`\int A^\mathrm{unit} \cdot J_p\, dV`; exact in free space,
+      requires the Green's-function open boundary), or ``none`` (drive-only).
+      ``default`` selects reciprocity when the open boundary is active, disk otherwise.
+
+.. pp:param:: circuit.engine
+    :type: ``str``
+    :default: ``none``
+    :optional:
+
+    The external circuit engine coupled to the coils per B-field substep (RZ):
+    ``callbacks`` drives the coupling through the Python hooks ``circuitbeginstep`` /
+    ``circuitpredict`` / ``circuitcorrect`` / ``circuitfinish`` (the handlers read the coupling
+    interval and the flux-linkage registers via ``get_coupling_interval`` /
+    ``get_coil_flux_linkage`` and push scale segments via
+    ``set_external_vector_potential_scale``); ``external`` loads a compiled engine from
+    :pp:param:`circuit.plugin_library` (a shared library exporting
+    ``warpx_create_external_circuit``). Every measured coil's paired field must be declared
+    with :pp:param:`external_vector_potential.<field_name>.python_scale`. Each accepted
+    substep of the (possibly adaptive) B-field advance is one predictor-corrector coupling
+    interval: the engine advances the circuit from the interval entry with held EMF
+    estimates, the substep integrates on the refreshed circuit-driven fields, and each
+    corrector pass re-advances the circuit with the measured
+    :math:`\varepsilon = \Delta\lambda_p/\Delta t` and re-integrates the substep until the
+    realized scales settle. The lagged variant (``corrector_iterations = 0``) is unstable
+    for strong coil-plasma coupling.
+
+.. pp:param:: circuit.plugin_library
+    :type: ``str``
+    :optional:
+
+    With :pp:param:`circuit.engine` = ``external``, the path of the engine's shared library.
+    The library must export ``warpx_create_external_circuit`` and
+    ``warpx_external_circuit_abi_version`` (checked against the
+    ``WARPX_EXTERNAL_CIRCUIT_ABI_VERSION`` of the running WarpX at load time; see
+    ``Source/Circuit/ExternalCircuit.H``, whose plugin ABI is self-contained: the engine
+    receives per-coil EMF estimates and returns realized coil scales, calling no WarpX
+    symbols).
+
+.. pp:param:: circuit.plugin_config
+    :type: ``str``
+    :optional:
+
+    With :pp:param:`circuit.engine` = ``external``, a free-form string handed to the
+    engine's ``Define`` (typically the path of the engine's own configuration file; its
+    format is entirely the engine's business).
+
+.. pp:param:: circuit.coupling.corrector_iterations
+    :type: ``int``
+    :default: ``1``
+    :optional:
+
+    Corrector passes per coupling substep (``0`` = lagged predictor only).
+
+.. pp:param:: circuit.coupling.corrector_rtol
+    :type: ``float``
+    :default: ``1.e-6``
+    :optional:
+
+    Early-exit tolerance of the corrector: converged when the re-advanced coil scales move
+    by less than this relative amount.
 
 
 Grid types (collocated, staggered, hybrid)
@@ -4983,6 +5745,21 @@ This shifts analysis from post-processing to runtime calculation of reduction op
            The FieldProbe reduced diagnostic does not yet add a Lorentz back transformation for boosted frame simulations.
            Thus, it records field data in the boosted frame, not (yet) in the lab frame.
 
+    * ``ScrapedParticleEnergy``
+        This type tallies the kinetic energy carried out of the domain by particles absorbed at the
+        domain (and, when compiled in, embedded) boundaries — the particle-outflow advection term of
+        a per-step energy ledger.
+
+        The output columns are, for each species and boundary, the kinetic energy scraped during the
+        step (in Joules), followed by the cumulative scraped energy since the start of the run (in
+        Joules). The cumulative sums are preserved across checkpoint/restart, and are integrated
+        every step regardless of the write interval.
+
+        The tally reads the particle boundary buffer, so ``<species>.save_particles_at_*`` must be
+        enabled for the species and boundaries of interest (boundaries without an enabled buffer
+        report zero). Each absorbed particle is counted exactly once, also when a
+        ``BoundaryScrapingDiagnostic`` clears the buffer between outputs.
+
     * ``RhoMaximum``
         This type computes the maximum and minimum values of the total charge density as well as
         the maximum absolute value of the charge density of each charged species.
@@ -5283,6 +6060,52 @@ This shifts analysis from post-processing to runtime calculation of reduction op
         In particular, by choosing a weighting function which returns either
         1 or 0, it is possible to compute the charge on only some part of the
         embedded boundary.
+
+    * ``CircuitCoupling``
+        This type writes the per-step ledger of the coil / circuit coupling
+        (requires :pp:param:`circuit.coils`; RZ): for every coil the realized
+        drive scale :math:`s = I/I_\mathrm{ref}`, its segment slope
+        :math:`ds/dt`, and the measured plasma flux linkage
+        :math:`\lambda = \lambda_\mathrm{phys} I_\mathrm{ref} n` (zero for
+        unmeasured coils or without a coupling engine), followed by the two
+        sides of the coupling-power double entry
+
+        .. math::
+
+            P_\mathrm{circuit} = -\sum_k \frac{ds_k}{dt} \lambda_k,
+            \qquad
+            P_\mathrm{field} = \int J_p \cdot E_\mathrm{ext}\, dV,
+
+        which agree to roundoff whenever the drive slopes are constant over
+        the step (no power is created or lost in the exchange); in coupled
+        runs the imbalance measures the within-step slope variation.
+
+    * ``HybridDissipation``
+        This type integrates the Ohmic and hyper-resistive dissipation power
+        of the hybrid (Ohm's law) solver (RZ),
+
+        .. math::
+
+            P_\eta = \int \eta\, |J|^2\, dV,
+            \qquad
+            P_{\eta_H} = -\int \eta_H\, J \cdot \nabla^2 J\, dV,
+
+        evaluated with the same staggering, interpolations, and cylindrical
+        vector-Laplacian stencils as the Ohm's-law kernels, on the plasma
+        current of the step's final field solve. Under a polytropic electron
+        closure these powers leave the system entirely (there is no Ohmic
+        heating channel), so they must be booked as a sink in any energy
+        conservation statement; with an electron energy equation the
+        :math:`\eta` term is instead the transfer rate into the electron
+        internal energy. If a dedicated ``joule_heating_resistivity`` is
+        used, the electron receipt uses that resistivity while this
+        diagnostic integrates the field-solve :math:`\eta`; their difference
+        is the dissipation the heating channel deliberately declines and
+        remains a true sink. The hyper-resistive term never enters the
+        heating source. Embedded-boundary-frozen cells are skipped exactly
+        as in the solver, and the hyper-resistive integrand is not evaluated
+        on the outermost cell ring of the domain. Columns:
+        :math:`P_\eta` [W], :math:`P_{\eta_H}` [W], and their sum.
 
     * ``ColliderRelevant``
         This diagnostics computes properties of two colliding beams that are relevant for particle colliders.

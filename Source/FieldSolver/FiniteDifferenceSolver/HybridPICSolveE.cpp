@@ -4,6 +4,7 @@
  *
  * Authors: Roelof Groenewald (TAE Technologies)
  *          S. Eric Clark (Helion Energy)
+ *          Prabhat Kumar (Helion Energy)
  *
  * License: BSD-3-Clause-LBNL
  */
@@ -475,7 +476,7 @@ void FiniteDifferenceSolver::HybridPICSolveE (
     amrex::MultiFab const& Pefield,
     [[maybe_unused]]std::array< std::unique_ptr<amrex::iMultiFab>,3 > const& eb_update_E,
     int lev, HybridPICModel const* hybrid_model,
-    const bool solve_for_Faraday)
+    const bool solve_for_Faraday, const bool include_resistivity)
 {
     // Select algorithm (The choice of algorithm is a runtime option,
     // but we compile code for each algorithm, using templates)
@@ -484,14 +485,14 @@ void FiniteDifferenceSolver::HybridPICSolveE (
 
         HybridPICSolveECylindrical <CylindricalYeeAlgorithm> (
             Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
-            eb_update_E, lev, hybrid_model, solve_for_Faraday
+            eb_update_E, lev, hybrid_model, solve_for_Faraday, include_resistivity
         );
 
 #elif defined(WARPX_DIM_RSPHERE)
 
         HybridPICSolveESpherical <SphericalYeeAlgorithm> (
             Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
-            lev, hybrid_model, solve_for_Faraday
+            lev, hybrid_model, solve_for_Faraday, include_resistivity
         );
 
 #else
@@ -499,12 +500,12 @@ void FiniteDifferenceSolver::HybridPICSolveE (
     {
         HybridPICSolveECartesian <CartesianYeeAlgorithm> (
             Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
-            eb_update_E, lev, hybrid_model, solve_for_Faraday
+            eb_update_E, lev, hybrid_model, solve_for_Faraday, include_resistivity
         );
     } else {
         HybridPICSolveECartesian <CartesianNodalAlgorithm> (
             Efield, Jfield, Jifield, Bfield, rhofield, Pefield,
-            eb_update_E, lev, hybrid_model, solve_for_Faraday
+            eb_update_E, lev, hybrid_model, solve_for_Faraday, include_resistivity
         );
     }
 #endif
@@ -525,13 +526,39 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     amrex::MultiFab const& Pefield,
     std::array< std::unique_ptr<amrex::iMultiFab>,3 > const& eb_update_E,
     int lev, HybridPICModel const* hybrid_model,
-    const bool solve_for_Faraday )
+    const bool solve_for_Faraday, const bool include_resistivity )
 {
     // Both steps below do not currently support m > 0 and should be
     // modified if such support wants to be added
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         (m_nmodes == 1),
         "Ohm's law solver only support m = 0 azimuthal mode at present.");
+
+    // Je-form relax advance (esolve = je_form): the division-free electron-momentum
+    // E advance (see the m_je_advance member doc). Requirements are checked
+    // here; the advance itself runs after the nodal enE assembly below
+    // and returns before the legacy divided-Ohm path.
+    bool const je_relax_solve =
+        hybrid_model->m_esolve_je && (hybrid_model->m_je_advance == 1);
+    if (je_relax_solve) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            WarpX::grid_type == ablastr::utils::enums::GridType::Collocated,
+            "hybrid_pic_model.esolve = je_form (v1) requires "
+            "warpx.grid_type = collocated");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !hybrid_model->m_add_external_fields ||
+                hybrid_model->m_external_field_mode ==
+                    HybridPICModel::ExternalFieldMode::Split,
+            "esolve = je_form with external fields supports the Split "
+            "external-field mode only on this fork (TotalAssembled and "
+            "UnifiedA are untested with the relax advance)");
+        // The RK substep STAGES and particle-E calls return the frozen
+        // state (see the m_je_relax_advance member doc): only the
+        // once-per-accepted-substep advance raised by BfieldEvolve
+        // mutates (E, J_e). Returning here also skips the enE assembly
+        // below on every no-op call.
+        if (!hybrid_model->m_je_relax_advance) { return; }
+    }
 
     // for the profiler
     amrex::LayoutData<amrex::Real>* cost = WarpX::getCosts(lev);
@@ -545,13 +572,72 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     const auto resistivity_has_J_dependence = hybrid_model->m_resistivity_has_J_dependence;
     const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
+    const bool include_electron_inertia = hybrid_model->m_include_electron_inertia;
 
-    const bool include_external_fields = hybrid_model->m_add_external_fields;
+    const bool include_external_fields = hybrid_model->m_add_external_fields
+        && !hybrid_model->m_external_unified;
+    const bool include_hall_term = hybrid_model->m_include_hall_term;
+    const bool include_electron_pressure_term =
+        hybrid_model->m_include_electron_pressure_term;
+    // The stored electric field follows the split-field convention in both
+    // schemes: the inductive E_ext is subtracted from plasma cells (where
+    // the generalized Ohm's law itself is the electric field and the
+    // external drive must not be double-counted), and the caller re-adds
+    // E_ext when assembling the particle-push field and advances the
+    // external flux analytically from A(t). The modes differ only in the
+    // Hall-term field: the explicit scheme keeps Bfield_fp plasma-only
+    // during the advance so the kernels add B_ext here; the implicit
+    // scheme hands the kernels the total field already.
+    const bool external_split = hybrid_model->m_external_split;
+
+    // External-field convention (see HybridPICModel::ExternalFieldMode):
+    // only the Split mode assembles totals inside the kernels by adding
+    // B_ext; TotalAssembled consumers hand the kernels total B already, and
+    // UnifiedA consumers never touch the external-field registers. The
+    // E_ext subtraction is gated per cell on rho >= rho_floor unless the
+    // consumer requires the smooth unconditional form (matrix-free
+    // implicit residuals).
+    const bool external_b_split = include_external_fields &&
+        (hybrid_model->m_external_field_mode ==
+         HybridPICModel::ExternalFieldMode::Split);
+    const bool include_E_ext = include_external_fields &&
+        (hybrid_model->m_external_field_mode !=
+         HybridPICModel::ExternalFieldMode::UnifiedA);
+    const bool subtract_E_ext_everywhere = hybrid_model->m_subtract_E_ext_everywhere;
 
     const bool holmstrom_vacuum_region = hybrid_model->m_holmstrom_vacuum_region;
+    // Smooth Hall/grad-Pe turn-off across the vacuum gate: the binary branch
+    // makes the residual discontinuous in the state exactly where cells
+    // straddle the gate (Newton limit-cycles and grid-scale E jumps at the
+    // separatrix edge); a tanh blend over holmstrom_transition_width*n_floor
+    // restores smoothness. Width 0 (default) keeps the hard branch.
+    const Real holmstrom_inv_width =
+        (hybrid_model->m_holmstrom_transition_width > 0._rt)
+        ? 1._rt / (hybrid_model->m_holmstrom_transition_width * rho_floor)
+        : 0._rt;
+    const bool holmstrom_smooth =
+        holmstrom_vacuum_region && (holmstrom_inv_width > 0._rt);
+
+    // Energy-equation-era gating (see the drag/battery ledger in the
+    // HybridPICModel docs):
+    //  * grad Pe stays in the FARADAY solves too when the Biermann battery
+    //    is kept (curl(grad Pe/(e n)) = (grad Pe x grad n)/(e n^2) != 0
+    //    once Te decouples from n);
+    //  * eta J enters the PUSH solve when the Q_ei drag operator is on --
+    //    dropping it is itself the single-species ion-side friction, so
+    //    E* + drag would book the friction twice. Hyper-resistivity is a
+    //    numerical B smoother and stays Faraday-only in either mode.
+    const bool add_grad_pe_faraday = hybrid_model->m_include_biermann_battery
+        && hybrid_model->m_include_electron_pressure_term;
+    const bool add_resistivity_push =
+        hybrid_model->m_include_temperature_relaxation;
 
     auto & warpx = WarpX::GetInstance();
     const amrex::Real t_new = warpx.gett_new(lev);
+    // Nodal electron-inertia field, assembled by the caller each
+    // evaluation (theta-implicit hybrid only; stays zero elsewhere).
+    amrex::MultiFab const * Ei_nodal_mf = include_electron_inertia
+        ? warpx.m_fields.get("hybrid_E_inertial_nodal", lev) : nullptr;
     ablastr::fields::VectorField Bfield_external, Efield_external;
     if (include_external_fields) {
         Bfield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_external, 0); // lev=0
@@ -591,6 +677,19 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     auto const& ba = convert(rhofield.boxArray(), IntVect::TheNodeVector());
     MultiFab enE_nodal_mf(ba, rhofield.DistributionMap(), 3, IntVect::TheZeroVector());
 
+    // Per-species resistive overlay added to Ohm's-law E alongside +eta_global J.
+    // Computed once per step (HybridPICEvolveFields -> ComputeResistiveOverlay)
+    // into the registered hybrid_eta_overlay_fp fields and only READ here, so
+    // the subcycled E-solves share it instead of recomputing it. When no
+    // per-species resistivity parser is registered the fields are not
+    // allocated and the per-cell add is skipped (E += 0 is a no-op) --
+    // bit-identical to the single-eta path.
+    const bool has_eta_overlay = hybrid_model->m_has_per_species_eta;
+    ablastr::fields::VectorField eta_overlay_mf = {nullptr, nullptr, nullptr};
+    if (has_eta_overlay) {
+        eta_overlay_mf = warpx.m_fields.get_alldirs("hybrid_eta_overlay_fp", lev);
+    }
+
     // Loop through the grids, and over the tiles within each grid for the
     // initial, nodal calculation of E
 #ifdef AMREX_USE_OMP
@@ -615,7 +714,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         Array4<Real const> const& Bz = Bfield[2]->const_array(mfi);
 
         Array4<Real> Br_ext, Btheta_ext, Bz_ext;
-        if (include_external_fields) {
+        if (external_b_split) {
             Br_ext = Bfield_external[0]->array(mfi);
             Btheta_ext = Bfield_external[1]->array(mfi);
             Bz_ext = Bfield_external[2]->array(mfi);
@@ -639,24 +738,29 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
             auto Btheta_interp = Interp(Btheta, Btheta_stag, nodal, coarsen, i, j, 0, 0);
             auto Bz_interp = Interp(Bz, Bz_stag, nodal, coarsen, i, j, 0, 0);
 
-            if (include_external_fields) {
+            if (external_b_split) {
                 Br_interp += Interp(Br_ext, Br_stag, nodal, coarsen, i, j, 0, 0);
                 Btheta_interp += Interp(Btheta_ext, Btheta_stag, nodal, coarsen, i, j, 0, 0);
                 Bz_interp += Interp(Bz_ext, Bz_stag, nodal, coarsen, i, j, 0, 0);
             }
 
-            // calculate enE = (J - Ji) x B
+            // calculate enE = (J - Ji) x B (without the Hall term the total
+            // current drops out and this is the ideal -u_i x B motional
+            // field)
+            const Real jer = (include_hall_term ? jr_interp : 0.0_rt) - jir_interp;
+            const Real jet = (include_hall_term ? jtheta_interp : 0.0_rt) - jit_interp;
+            const Real jez = (include_hall_term ? jz_interp : 0.0_rt) - jiz_interp;
             enE_nodal(i, j, 0, 0) = (
-                (jtheta_interp - jit_interp) * Bz_interp
-                - (jz_interp - jiz_interp) * Btheta_interp
+                jet * Bz_interp
+                - jez * Btheta_interp
             );
             enE_nodal(i, j, 0, 1) = (
-                (jz_interp - jiz_interp) * Br_interp
-                - (jr_interp - jir_interp) * Bz_interp
+                jez * Br_interp
+                - jer * Bz_interp
             );
             enE_nodal(i, j, 0, 2) = (
-                (jr_interp - jir_interp) * Btheta_interp
-                - (jtheta_interp - jit_interp) * Br_interp
+                jer * Btheta_interp
+                - jet * Br_interp
             );
         });
 
@@ -666,6 +770,310 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
             wt = static_cast<Real>(amrex::second()) - wt;
             amrex::HostDevice::Atomic::Add( &(*cost)[mfi.index()], wt);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Je-form relax advance (esolve = je_form, je_advance = relax): J_e is a
+    // persistent dynamical field and E advances by Ampere-Maxwell with
+    // displacement current at the CFL-set artificial light speed; the
+    // stiff LOCAL electron-momentum terms (E coupling, gyration,
+    // friction, vacuum decay) are solved pointwise implicitly in closed
+    // form -- division-free, no linear algebra, no density floor. E is
+    // the full physical field state (grad Pe always included); with
+    // Split external fields the state stays internal-only and the
+    // physics uses E_state + E_ext (quasi-static over a substep).
+    // Steady state recovers generalized Ohm + Ampere exactly. Reached
+    // once per ACCEPTED substep (the advance gate was checked at entry);
+    // returns before the legacy divided-Ohm path below. RZ mode 0: the
+    // axis nodes carry the parity conditions E_r = E_theta = J_e,r =
+    // J_e,theta = 0 (only the z components are regular at r = 0).
+    if (je_relax_solve) {
+        auto const dx_arr = warpx.Geom(lev).CellSizeArray();
+        amrex::Real sum_inv_dx2 = 0.0_rt;
+        amrex::Real dx_min = dx_arr[0];
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            sum_inv_dx2 += 1.0_rt / (dx_arr[d] * dx_arr[d]);
+            dx_min = amrex::min(dx_min, dx_arr[d]);
+        }
+        amrex::Real const dt_full = warpx.getdt(lev);
+        amrex::Real const dt_je =
+            (hybrid_model->m_je_dt_sub > 0.0_rt)
+                ? hybrid_model->m_je_dt_sub : dt_full;
+        amrex::Real const rho_1c =
+            PhysConst::q_e * hybrid_model->m_je_n_min;
+        // Eq-(30) vacuum damping: LOCAL current decay below the
+        // one-count level, no CFL (see the member doc).
+        amrex::Real const vac_gamma =
+            (hybrid_model->m_je_vac_gamma_frac > 0.0_rt)
+                ? hybrid_model->m_je_vac_gamma_frac / dt_full : 0.0_rt;
+        bool const use_vac_damping = (vac_gamma > 0.0_rt);
+        amrex::Real c_art = amrex::min(
+            PhysConst::c,
+            hybrid_model->m_je_c_frac
+                / (dt_je * std::sqrt(sum_inv_dx2)));
+        if (hybrid_model->m_je_c_max > 0.0_rt) {
+            c_art = amrex::min(c_art, hybrid_model->m_je_c_max);
+        }
+        // Quasineutral relaxation toward the one-count-guarded Ohm
+        // value (see the m_je_qn_frac member doc): pins the slow/
+        // longitudinal sector algebraically, plasma-blended.
+        amrex::Real const gam_qn =
+            hybrid_model->m_je_qn_frac / dt_full;
+        bool const use_qn = (gam_qn > 0.0_rt);
+        amrex::Real const inv_eps_art = PhysConst::mu0 * c_art * c_art;
+        amrex::Real const qm = PhysConst::q_e / PhysConst::m_e;
+        bool const use_vm = hybrid_model->m_je_var_mass;
+        amrex::Real const vm_alpha = hybrid_model->m_je_alpha;
+        // Anomalous viscous friction in Eq-27-capped cells (see the
+        // m_je_visc_frac member doc): gamma_visc = gam_vis0 *
+        // (1 - m_e/m_e'), identically zero wherever electron physics
+        // is resolved. gam_vis0 sets the capped grid mode's
+        // dissipation length to je_visc_frac * dx.
+        amrex::Real const visc_frac = hybrid_model->m_je_visc_frac;
+        bool const use_visc = use_vm && (visc_frac > 0.0_rt);
+        amrex::Real const gam_vis0 = use_visc
+            ? 2.0_rt * vm_alpha / (visc_frac * dt_je) : 0.0_rt;
+        amrex::Real const dx2_min = dx_min * dx_min;
+        amrex::Real const mu0_l = PhysConst::mu0;
+        MultiFab * qvisc_mf = nullptr;
+        if (use_visc && hybrid_model->m_solve_electron_energy_equation) {
+            qvisc_mf = warpx.m_fields.get("hybrid_je_qvisc_fp", lev);
+        }
+
+        MultiFab & Je_mf = *warpx.m_fields.get("hybrid_je_fp", lev);
+        bool const seed_je = !hybrid_model->m_je_init;
+        hybrid_model->m_je_init = true;
+        if (seed_je) {
+            amrex::Print() << "[je] relax boot: c_art = " << c_art
+                << " m/s (CFL value "
+                << hybrid_model->m_je_c_frac
+                       / (dt_je * std::sqrt(sum_inv_dx2))
+                << ", cap " << hybrid_model->m_je_c_max
+                << "), gamma_qn = " << gam_qn
+                << " 1/s, dt_sub = " << dt_je
+                << " s, var_mass = "
+                << (hybrid_model->m_je_var_mass ? "on" : "off")
+                << " (alpha " << hybrid_model->m_je_alpha
+                << "), split = "
+                << (hybrid_model->m_je_centered_split
+                        ? "centered" : "lie")
+                << ", visc_frac = " << hybrid_model->m_je_visc_frac
+                << ", n_min = " << hybrid_model->m_je_n_min
+                << " m^-3 (must be the one-count level)\n";
+        }
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(*Efield[0], TilingIfNotGPU()); mfi.isValid();
+             ++mfi) {
+            Array4<Real> const& Er = Efield[0]->array(mfi);
+            Array4<Real> const& Et = Efield[1]->array(mfi);
+            Array4<Real> const& Ez = Efield[2]->array(mfi);
+            Array4<Real> const& Je = Je_mf.array(mfi);
+            Array4<Real const> const& enE = enE_nodal_mf.const_array(mfi);
+            Array4<Real const> const& rho = rhofield.const_array(mfi);
+            Array4<Real const> const& Pe  = Pefield.const_array(mfi);
+            Array4<Real const> const& Jr = Jfield[0]->const_array(mfi);
+            Array4<Real const> const& Jt = Jfield[1]->const_array(mfi);
+            Array4<Real const> const& Jz = Jfield[2]->const_array(mfi);
+            Array4<Real const> const& Jir = Jifield[0]->const_array(mfi);
+            Array4<Real const> const& Jit = Jifield[1]->const_array(mfi);
+            Array4<Real const> const& Jiz = Jifield[2]->const_array(mfi);
+            Array4<Real const> const& Br = Bfield[0]->const_array(mfi);
+            Array4<Real const> const& Bt = Bfield[1]->const_array(mfi);
+            Array4<Real const> const& Bz = Bfield[2]->const_array(mfi);
+            Array4<Real> Br_e, Bt_e, Bz_e;
+            if (external_b_split) {
+                Br_e = Bfield_external[0]->array(mfi);
+                Bt_e = Bfield_external[1]->array(mfi);
+                Bz_e = Bfield_external[2]->array(mfi);
+            }
+            Array4<Real> Er_e, Et_e, Ez_e;
+            if (include_E_ext) {
+                Er_e = Efield_external[0]->array(mfi);
+                Et_e = Efield_external[1]->array(mfi);
+                Ez_e = Efield_external[2]->array(mfi);
+            }
+            amrex::Array4<int> upd_r, upd_t, upd_z;
+            if (EB::enabled()) {
+                upd_r = eb_update_E[0]->array(mfi);
+                upd_t = eb_update_E[1]->array(mfi);
+                upd_z = eb_update_E[2]->array(mfi);
+            }
+            amrex::Array4<Real> qv;
+            if (qvisc_mf) { qv = qvisc_mf->array(mfi); }
+            Real const * const AMREX_RESTRICT coefs_r =
+                m_stencil_coefs_r.dataPtr();
+            auto const n_coefs_r =
+                static_cast<int>(m_stencil_coefs_r.size());
+            Real const * const AMREX_RESTRICT coefs_z =
+                m_stencil_coefs_z.dataPtr();
+            auto const n_coefs_z =
+                static_cast<int>(m_stencil_coefs_z.size());
+            Real const dr_l = m_dr;
+            Real const rmin_l = m_rmin;
+            amrex::Real const dt_r = dt_je;
+            amrex::ParallelFor(mfi.tilebox(),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                bool const skip_r = upd_r && upd_r(i,j,k) == 0;
+                bool const skip_t = upd_t && upd_t(i,j,k) == 0;
+                bool const skip_z = upd_z && upd_z(i,j,k) == 0;
+                if (skip_r && skip_t && skip_z) { return; }
+                // RZ mode-0 axis parity (nodal r index): E_r, E_theta
+                // and the J_e r/theta components vanish at r = 0.
+                bool const on_axis =
+                    (rmin_l + i*dr_l) < 0.5_rt*dr_l;
+                amrex::Real const rho_v =
+                    amrex::max(rho(i,j,k), 0.0_rt);
+                amrex::Real br = Br(i,j,k), bt = Bt(i,j,k),
+                            bz = Bz(i,j,k);
+                amrex::Real etr = Er(i,j,k), ett = Et(i,j,k),
+                            etz = Ez(i,j,k);
+                if (external_b_split) {
+                    br += Br_e(i,j,k); bt += Bt_e(i,j,k);
+                    bz += Bz_e(i,j,k);
+                }
+                if (include_E_ext) {
+                    etr += Er_e(i,j,k); ett += Et_e(i,j,k);
+                    etz += Ez_e(i,j,k);
+                }
+                // Eq-(27) variable electron mass (see member doc):
+                // per-cell inflation where the grid-whistler speed
+                // would violate the substep CFL; inert (== m_e)
+                // wherever the physics is resolved. Applies to every
+                // 1/m_e in the J_e update below.
+                amrex::Real qm_c = qm;
+                if (use_vm) {
+                    amrex::Real const B2t = br*br + bt*bt + bz*bz;
+                    amrex::Real const me_v =
+                        HybridPICModel::JeEffectiveElectronMass(
+                            B2t, amrex::max(rho_v, rho_1c),
+                            dt_r, dx_min, vm_alpha);
+                    qm_c = PhysConst::q_e / me_v;
+                }
+                amrex::Real gam_vis = 0.0_rt;
+                if (use_visc) {
+                    // m_e / m_e' == qm_c / qm exactly
+                    gam_vis = gam_vis0 * (1.0_rt - qm_c / qm);
+                    // The drag reaches B as a resistive diffusion with
+                    // diffusivity gam_vis * d_e'^2 through the EXPLICIT
+                    // substep loop; cap it at that loop's diffusion CFL
+                    // (d_e'^2 = 1/(mu0 qm_c rho_g)), else the target
+                    // dissipation length destabilizes the sheet it is
+                    // meant to protect (measured: 20x violation at a
+                    // 0.2 dx target).
+                    amrex::Real const gam_cfl = 0.25_rt * dx2_min
+                        * mu0_l * qm_c * amrex::max(rho_v, rho_1c)
+                        / dt_r;
+                    gam_vis = amrex::min(gam_vis, gam_cfl);
+                }
+                amrex::Real const kE = qm_c * rho_v;
+                amrex::Real const gpr = T_Algo::UpwardDr(
+                    Pe, coefs_r, n_coefs_r, i, j, 0, 0);
+                amrex::Real const gpt = 0.0_rt;   // mode 0
+                amrex::Real const gpz = T_Algo::UpwardDz(
+                    Pe, coefs_z, n_coefs_z, i, j, 0, 0);
+                amrex::Real jtot_val = 0.0_rt;
+                if (resistivity_has_J_dependence) {
+                    jtot_val = std::sqrt(
+                        Jr(i,j,k)*Jr(i,j,k) + Jt(i,j,k)*Jt(i,j,k)
+                        + Jz(i,j,k)*Jz(i,j,k));
+                }
+                amrex::Real const eta_v = eta(rho_v, jtot_val, t_new);
+                amrex::Real gam_v = 0.0_rt;
+                if (use_vac_damping) {
+                    gam_v = vac_gamma * 0.5_rt * (1.0_rt - std::tanh(
+                        (rho_v - rho_1c) / (0.5_rt * rho_1c)));
+                }
+                // Ampere drive Jc - J_i (Jfield = curl B/mu0 - J_ext)
+                amrex::Real const rcr = Jr(i,j,k) - Jir(i,j,k);
+                amrex::Real const rct = Jt(i,j,k) - Jit(i,j,k);
+                amrex::Real const rcz = Jz(i,j,k) - Jiz(i,j,k);
+                // previous J_e (seeded from the Ampere closure on the
+                // first call)
+                amrex::Real const jor = seed_je ? rcr : Je(i,j,k,0);
+                amrex::Real const jot = seed_je ? rct : Je(i,j,k,1);
+                amrex::Real const joz = seed_je ? rcz : Je(i,j,k,2);
+                // implicit local solve:
+                //   (a I - [beta]x) Je' = r,  beta = qm dt B_tot
+                //   inverse = (a^2 I + a [beta]x + beta beta^T)
+                //             / (a (a^2 + |beta|^2))
+                amrex::Real const a = 1.0_rt
+                    + dt_r * (dt_r * kE * inv_eps_art
+                              + kE * eta_v + gam_v + gam_vis);
+                amrex::Real const ber = qm_c * dt_r * br;
+                amrex::Real const bet = qm_c * dt_r * bt;
+                amrex::Real const bez = qm_c * dt_r * bz;
+                amrex::Real const b2 = ber*ber + bet*bet + bez*bez;
+                amrex::Real const rr = jor
+                    + dt_r * kE * (etr + dt_r * inv_eps_art * rcr)
+                    - dt_r * kE * eta_v * Jir(i,j,k)
+                    + qm_c * dt_r * gpr;
+                amrex::Real const rt = jot
+                    + dt_r * kE * (ett + dt_r * inv_eps_art * rct)
+                    - dt_r * kE * eta_v * Jit(i,j,k)
+                    + qm_c * dt_r * gpt;
+                amrex::Real const rz = joz
+                    + dt_r * kE * (etz + dt_r * inv_eps_art * rcz)
+                    - dt_r * kE * eta_v * Jiz(i,j,k)
+                    + qm_c * dt_r * gpz;
+                amrex::Real const bdotr = ber*rr + bet*rt + bez*rz;
+                amrex::Real const inv = 1.0_rt / (a * (a*a + b2));
+                amrex::Real jnr =
+                    (a*a*rr + a*(bet*rz - bez*rt) + bdotr*ber) * inv;
+                amrex::Real jnt =
+                    (a*a*rt + a*(bez*rr - ber*rz) + bdotr*bet) * inv;
+                amrex::Real const jnz =
+                    (a*a*rz + a*(ber*rt - bet*rr) + bdotr*bez) * inv;
+                amrex::Real ern = Er(i,j,k)
+                    + dt_r * inv_eps_art * (rcr - jnr);
+                amrex::Real etn = Et(i,j,k)
+                    + dt_r * inv_eps_art * (rct - jnt);
+                amrex::Real ezn = Ez(i,j,k)
+                    + dt_r * inv_eps_art * (rcz - jnz);
+                if (use_qn) {
+                    // implicit relaxation toward the one-count-guarded
+                    // Ohm value, plasma-blended (the OPTIONAL floored
+                    // division of the qn pin -- see the member doc)
+                    amrex::Real const w_qn = 0.5_rt
+                        * (1.0_rt + std::tanh(
+                              (rho_v - rho_1c) / (0.5_rt * rho_1c)));
+                    amrex::Real const lam = dt_r * gam_qn * w_qn;
+                    amrex::Real const rho_gq =
+                        amrex::max(rho_v, rho_1c);
+                    amrex::Real const inv_l = 1.0_rt / (1.0_rt + lam);
+                    ern = (ern + lam * ((enE(i,j,k,0) - gpr
+                        + rho_v * eta_v * Jr(i,j,k)) / rho_gq))
+                        * inv_l;
+                    etn = (etn + lam * ((enE(i,j,k,1) - gpt
+                        + rho_v * eta_v * Jt(i,j,k)) / rho_gq))
+                        * inv_l;
+                    ezn = (ezn + lam * ((enE(i,j,k,2) - gpz
+                        + rho_v * eta_v * Jz(i,j,k)) / rho_gq))
+                        * inv_l;
+                }
+                if (on_axis) {
+                    jnr = 0.0_rt; jnt = 0.0_rt;
+                    ern = 0.0_rt; etn = 0.0_rt;
+                }
+                if (qv) {
+                    // dissipated energy density this substep:
+                    // gamma_visc * m_e' |J_e|^2 / (e^2 n_g) * dt,
+                    // with m_e'/(e^2 n_g) = 1/(qm_c * rho_g)
+                    amrex::Real const j2 =
+                        (skip_r ? 0.0_rt : jnr*jnr)
+                        + (skip_t ? 0.0_rt : jnt*jnt)
+                        + (skip_z ? 0.0_rt : jnz*jnz);
+                    qv(i,j,k) += gam_vis * dt_r * j2
+                        / (qm_c * amrex::max(rho_v, rho_1c));
+                }
+                if (!skip_r) { Je(i,j,k,0) = jnr; Er(i,j,k) = ern; }
+                if (!skip_t) { Je(i,j,k,1) = jnt; Et(i,j,k) = etn; }
+                if (!skip_z) { Je(i,j,k,2) = jnz; Ez(i,j,k) = ezn; }
+            });
+        }
+        return;
     }
 
     // Loop through the grids, and over the tiles within each grid again
@@ -688,11 +1096,22 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         Array4<Real const> const& Jtheta = Jfield[1]->const_array(mfi);
         Array4<Real const> const& Jz = Jfield[2]->const_array(mfi);
         Array4<Real const> const& enE = enE_nodal_mf.const_array(mfi);
+        Array4<Real const> eiN;
+        if (Ei_nodal_mf) { eiN = Ei_nodal_mf->const_array(mfi); }
         Array4<Real const> const& rho = rhofield.const_array(mfi);
         Array4<Real const> const& Pe = Pefield.const_array(mfi);
         Array4<Real> const& Br = Bfield[0]->array(mfi);
         Array4<Real> const& Btheta = Bfield[1]->array(mfi);
         Array4<Real> const& Bz = Bfield[2]->array(mfi);
+        // Overlay arrays stay default-constructed (never indexed) when no
+        // per-species resistivity is registered -- the kernels gate the read
+        // on has_eta_overlay.
+        Array4<Real const> eta_overlay_r, eta_overlay_t, eta_overlay_z;
+        if (has_eta_overlay) {
+            eta_overlay_r = eta_overlay_mf[0]->const_array(mfi);
+            eta_overlay_t = eta_overlay_mf[1]->const_array(mfi);
+            eta_overlay_z = eta_overlay_mf[2]->const_array(mfi);
+        }
 
         // Extract structures indicating where the fields
         // should be updated, given the position of the embedded boundaries
@@ -704,7 +1123,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         }
 
         Array4<Real> Er_ext, Etheta_ext, Ez_ext;
-        if (include_external_fields) {
+        if (include_E_ext) {
             Er_ext = Efield_external[0]->array(mfi);
             Etheta_ext = Efield_external[1]->array(mfi);
             Ez_ext = Efield_external[2]->array(mfi);
@@ -736,12 +1155,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Er_stag, coarsen, i, j, 0, 0);
 
-                if (rho_val < rho_floor && holmstrom_vacuum_region) {
+                if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                     Er(i, j, 0) = 0._rt;
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
                     // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
-                    const Real grad_Pe = (!solve_for_Faraday) ?
+                    const Real grad_Pe =
+                        (solve_for_Faraday ? add_grad_pe_faraday
+                                           : include_electron_pressure_term) ?
                         T_Algo::UpwardDr(Pe, coefs_r, n_coefs_r, i, j, 0, 0)
                         : 0._rt;
 
@@ -751,11 +1172,25 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     // safety condition since we divide by rho
                     const auto rho_val_limited = std::max(rho_val, rho_floor);
 
-                    Er(i, j, 0) = (enE_r - grad_Pe) / rho_val_limited;
+                    Real ohm_val = (enE_r - grad_Pe) / rho_val_limited;
+                    if (holmstrom_smooth) {
+                        ohm_val *= 0.5_rt * (1._rt + std::tanh(
+                            (rho_val - rho_floor) * holmstrom_inv_width));
+                    }
+                    Er(i, j, 0) = ohm_val;
+                }
+                if (include_electron_inertia) {
+                    Er(i, j, 0) += Interp(eiN, nodal, Er_stag, coarsen, i, j, 0, 0);
                 }
 
-                // Add resistivity only if E field value is used to update B
-                if (solve_for_Faraday) {
+
+                // Resistivity: whenever the caller kept eta in this solve
+                // (always true for the Faraday solves; the push/stored-E
+                // solve follows the caller), or when the Q_ei drag operator
+                // carries the ion-side friction (dropping eta J from the
+                // push field IS the friction, so E* + drag would book it
+                // twice).
+                if (include_resistivity || add_resistivity_push) {
                     Real jtot_val = 0._rt;
                     if (resistivity_has_J_dependence) {
                         // Interpolate current to appropriate staggering to match E field
@@ -766,8 +1201,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
 
                     Er(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jr(i, j, 0);
+                    // Per-species resistive overlay (Phys. Plasmas 31, 012902 (2024)); zero
+                    // when no per-species eta is registered.
+                    if (has_eta_overlay) { Er(i, j, 0) += eta_overlay_r(i, j, 0); }
 
-                    if (include_hyper_resistivity_term) {
+                    if (include_hyper_resistivity_term && solve_for_Faraday) {
 
                         // Interpolate B field to appropriate staggering to match E field
                         Real btot_val = 0._rt;
@@ -787,7 +1225,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_E_ext && (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                     Er(i, j, 0) -= Er_ext(i, j, 0);
                 }
             },
@@ -809,7 +1247,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Etheta_stag, coarsen, i, j, 0, 0);
 
-                if (rho_val < rho_floor && holmstrom_vacuum_region) {
+                if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                     Etheta(i, j, 0) = 0._rt;
                 } else {
                     // Get the gradient of the electron pressure
@@ -822,11 +1260,25 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     // safety condition since we divide by rho
                     const auto rho_val_limited = std::max(rho_val, rho_floor);
 
-                    Etheta(i, j, 0) = (enE_t - grad_Pe) / rho_val_limited;
+                    Real ohm_val = (enE_t - grad_Pe) / rho_val_limited;
+                    if (holmstrom_smooth) {
+                        ohm_val *= 0.5_rt * (1._rt + std::tanh(
+                            (rho_val - rho_floor) * holmstrom_inv_width));
+                    }
+                    Etheta(i, j, 0) = ohm_val;
+                }
+                if (include_electron_inertia) {
+                    Etheta(i, j, 0) += Interp(eiN, nodal, Etheta_stag, coarsen, i, j, 0, 1);
                 }
 
-                // Add resistivity only if E field value is used to update B
-                if (solve_for_Faraday) {
+
+                // Resistivity: whenever the caller kept eta in this solve
+                // (always true for the Faraday solves; the push/stored-E
+                // solve follows the caller), or when the Q_ei drag operator
+                // carries the ion-side friction (dropping eta J from the
+                // push field IS the friction, so E* + drag would book it
+                // twice).
+                if (include_resistivity || add_resistivity_push) {
                     Real jtot_val = 0._rt;
                     if(resistivity_has_J_dependence) {
                         // Interpolate current to appropriate staggering to match E field
@@ -837,8 +1289,9 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
 
                     Etheta(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jtheta(i, j, 0);
+                    if (has_eta_overlay) { Etheta(i, j, 0) += eta_overlay_t(i, j, 0); }
 
-                    if (include_hyper_resistivity_term) {
+                    if (include_hyper_resistivity_term && solve_for_Faraday) {
 
                         // Interpolate B field to appropriate staggering to match E field
                         Real btot_val = 0._rt;
@@ -861,7 +1314,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_E_ext && (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                     Etheta(i, j, 0) -= Etheta_ext(i, j, 0);
                 }
             },
@@ -875,12 +1328,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, 0, 0);
 
-                if (rho_val < rho_floor && holmstrom_vacuum_region) {
+                if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                     Ez(i, j, 0) = 0._rt;
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
                     // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
-                    const Real grad_Pe = (!solve_for_Faraday) ?
+                    const Real grad_Pe =
+                        (solve_for_Faraday ? add_grad_pe_faraday
+                                           : include_electron_pressure_term) ?
                         T_Algo::UpwardDz(Pe, coefs_z, n_coefs_z, i, j, 0, 0)
                         : 0._rt;
 
@@ -890,11 +1345,25 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     // safety condition since we divide by rho
                     const auto rho_val_limited = std::max(rho_val, rho_floor);
 
-                    Ez(i, j, 0) = (enE_z - grad_Pe) / rho_val_limited;
+                    Real ohm_val = (enE_z - grad_Pe) / rho_val_limited;
+                    if (holmstrom_smooth) {
+                        ohm_val *= 0.5_rt * (1._rt + std::tanh(
+                            (rho_val - rho_floor) * holmstrom_inv_width));
+                    }
+                    Ez(i, j, 0) = ohm_val;
+                }
+                if (include_electron_inertia) {
+                    Ez(i, j, 0) += Interp(eiN, nodal, Ez_stag, coarsen, i, j, 0, 2);
                 }
 
-                // Add resistivity only if E field value is used to update B
-                if (solve_for_Faraday) {
+
+                // Resistivity: whenever the caller kept eta in this solve
+                // (always true for the Faraday solves; the push/stored-E
+                // solve follows the caller), or when the Q_ei drag operator
+                // carries the ion-side friction (dropping eta J from the
+                // push field IS the friction, so E* + drag would book it
+                // twice).
+                if (include_resistivity || add_resistivity_push) {
                     Real jtot_val = 0._rt;
                     if (resistivity_has_J_dependence) {
                         // Interpolate current to appropriate staggering to match E field
@@ -905,8 +1374,9 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
 
                     Ez(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jz(i, j, 0);
+                    if (has_eta_overlay) { Ez(i, j, 0) += eta_overlay_z(i, j, 0); }
 
-                    if (include_hyper_resistivity_term) {
+                    if (include_hyper_resistivity_term && solve_for_Faraday) {
 
                         // Interpolate B field to appropriate staggering to match E field
                         Real btot_val = 0._rt;
@@ -934,7 +1404,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields && (rho_val >= rho_floor)) {
+                if (include_E_ext && (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                     Ez(i, j, 0) -= Ez_ext(i, j, 0);
                 }
             }
@@ -959,7 +1429,7 @@ void FiniteDifferenceSolver::HybridPICSolveESpherical (
     amrex::MultiFab const& /*rhofield*/,
     amrex::MultiFab const& /*Pefield*/,
     int /*lev*/, HybridPICModel const* /*hybrid_model*/,
-    const bool /*solve_for_Faraday*/ )
+    const bool /*solve_for_Faraday*/, const bool /*include_resistivity*/ )
 {
     WARPX_ABORT_WITH_MESSAGE("HybridPICSolveESphrical not fully implemented");
 }
@@ -975,8 +1445,35 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     amrex::MultiFab const& Pefield,
     std::array< std::unique_ptr<amrex::iMultiFab>,3 > const& eb_update_E,
     int lev, HybridPICModel const* hybrid_model,
-    const bool solve_for_Faraday )
+    const bool solve_for_Faraday, const bool include_resistivity )
 {
+    // Je-form relax advance (esolve = je_form): the division-free
+    // electron-momentum E advance (see the m_je_advance member doc).
+    // Requirements are checked here; the advance itself runs after the
+    // nodal enE assembly below and returns before the legacy
+    // divided-Ohm path.
+    bool const je_relax_solve =
+        hybrid_model->m_esolve_je && (hybrid_model->m_je_advance == 1);
+    if (je_relax_solve) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            WarpX::grid_type == ablastr::utils::enums::GridType::Collocated,
+            "hybrid_pic_model.esolve = je_form (v1) requires "
+            "warpx.grid_type = collocated");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !hybrid_model->m_add_external_fields ||
+                hybrid_model->m_external_field_mode ==
+                    HybridPICModel::ExternalFieldMode::Split,
+            "esolve = je_form with external fields supports the Split "
+            "external-field mode only on this fork (TotalAssembled and "
+            "UnifiedA are untested with the relax advance)");
+        // The RK substep STAGES and particle-E calls return the frozen
+        // state (see the m_je_relax_advance member doc): only the
+        // once-per-accepted-substep advance raised by BfieldEvolve
+        // mutates (E, J_e). Returning here also skips the enE assembly
+        // below on every no-op call.
+        if (!hybrid_model->m_je_relax_advance) { return; }
+    }
+
     // for the profiler
     amrex::LayoutData<amrex::Real>* cost = WarpX::getCosts(lev);
 
@@ -989,13 +1486,72 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     const auto resistivity_has_J_dependence = hybrid_model->m_resistivity_has_J_dependence;
     const auto hyper_resistivity_has_B_dependence = hybrid_model->m_hyper_resistivity_has_B_dependence;
     const bool include_hyper_resistivity_term = hybrid_model->m_include_hyper_resistivity_term;
+    const bool include_electron_inertia = hybrid_model->m_include_electron_inertia;
 
-    const bool include_external_fields = hybrid_model->m_add_external_fields;
+    const bool include_external_fields = hybrid_model->m_add_external_fields
+        && !hybrid_model->m_external_unified;
+    const bool include_hall_term = hybrid_model->m_include_hall_term;
+    const bool include_electron_pressure_term =
+        hybrid_model->m_include_electron_pressure_term;
+    // The stored electric field follows the split-field convention in both
+    // schemes: the inductive E_ext is subtracted from plasma cells (where
+    // the generalized Ohm's law itself is the electric field and the
+    // external drive must not be double-counted), and the caller re-adds
+    // E_ext when assembling the particle-push field and advances the
+    // external flux analytically from A(t). The modes differ only in the
+    // Hall-term field: the explicit scheme keeps Bfield_fp plasma-only
+    // during the advance so the kernels add B_ext here; the implicit
+    // scheme hands the kernels the total field already.
+    const bool external_split = hybrid_model->m_external_split;
+
+    // External-field convention (see HybridPICModel::ExternalFieldMode):
+    // only the Split mode assembles totals inside the kernels by adding
+    // B_ext; TotalAssembled consumers hand the kernels total B already, and
+    // UnifiedA consumers never touch the external-field registers. The
+    // E_ext subtraction is gated per cell on rho >= rho_floor unless the
+    // consumer requires the smooth unconditional form (matrix-free
+    // implicit residuals).
+    const bool external_b_split = include_external_fields &&
+        (hybrid_model->m_external_field_mode ==
+         HybridPICModel::ExternalFieldMode::Split);
+    const bool include_E_ext = include_external_fields &&
+        (hybrid_model->m_external_field_mode !=
+         HybridPICModel::ExternalFieldMode::UnifiedA);
+    const bool subtract_E_ext_everywhere = hybrid_model->m_subtract_E_ext_everywhere;
 
     const bool holmstrom_vacuum_region = hybrid_model->m_holmstrom_vacuum_region;
+    // Smooth Hall/grad-Pe turn-off across the vacuum gate: the binary branch
+    // makes the residual discontinuous in the state exactly where cells
+    // straddle the gate (Newton limit-cycles and grid-scale E jumps at the
+    // separatrix edge); a tanh blend over holmstrom_transition_width*n_floor
+    // restores smoothness. Width 0 (default) keeps the hard branch.
+    const Real holmstrom_inv_width =
+        (hybrid_model->m_holmstrom_transition_width > 0._rt)
+        ? 1._rt / (hybrid_model->m_holmstrom_transition_width * rho_floor)
+        : 0._rt;
+    const bool holmstrom_smooth =
+        holmstrom_vacuum_region && (holmstrom_inv_width > 0._rt);
+
+    // Energy-equation-era gating (see the drag/battery ledger in the
+    // HybridPICModel docs):
+    //  * grad Pe stays in the FARADAY solves too when the Biermann battery
+    //    is kept (curl(grad Pe/(e n)) = (grad Pe x grad n)/(e n^2) != 0
+    //    once Te decouples from n);
+    //  * eta J enters the PUSH solve when the Q_ei drag operator is on --
+    //    dropping it is itself the single-species ion-side friction, so
+    //    E* + drag would book the friction twice. Hyper-resistivity is a
+    //    numerical B smoother and stays Faraday-only in either mode.
+    const bool add_grad_pe_faraday = hybrid_model->m_include_biermann_battery
+        && hybrid_model->m_include_electron_pressure_term;
+    const bool add_resistivity_push =
+        hybrid_model->m_include_temperature_relaxation;
 
     auto & warpx = WarpX::GetInstance();
     const amrex::Real t_new = warpx.gett_new(lev);
+    // Nodal electron-inertia field, assembled by the caller each
+    // evaluation (theta-implicit hybrid only; stays zero elsewhere).
+    amrex::MultiFab const * Ei_nodal_mf = include_electron_inertia
+        ? warpx.m_fields.get("hybrid_E_inertial_nodal", lev) : nullptr;
     ablastr::fields::VectorField Bfield_external, Efield_external;
     if (include_external_fields) {
         Bfield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_external, 0); // lev=0
@@ -1035,6 +1591,18 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     auto const& ba = convert(rhofield.boxArray(), IntVect::TheNodeVector());
     MultiFab enE_nodal_mf(ba, rhofield.DistributionMap(), 3, IntVect::TheZeroVector());
 
+    // Per-species resistive overlay added to Ohm's-law E alongside +eta_global J.
+    // Computed once per step into the registered hybrid_eta_overlay_fp fields
+    // and only READ here; see HybridPICSolveECylindrical (RZ branch) for the
+    // design notes. When no per-species parser is registered the fields are
+    // not allocated and the per-cell add is skipped (bit-identical
+    // single-eta path).
+    const bool has_eta_overlay = hybrid_model->m_has_per_species_eta;
+    ablastr::fields::VectorField eta_overlay_mf = {nullptr, nullptr, nullptr};
+    if (has_eta_overlay) {
+        eta_overlay_mf = warpx.m_fields.get_alldirs("hybrid_eta_overlay_fp", lev);
+    }
+
     // Loop through the grids, and over the tiles within each grid for the
     // initial, nodal calculation of E
 #ifdef AMREX_USE_OMP
@@ -1059,7 +1627,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         Array4<Real const> const& Bz = Bfield[2]->const_array(mfi);
 
         Array4<Real> Bx_ext, By_ext, Bz_ext;
-        if (include_external_fields) {
+        if (external_b_split) {
             Bx_ext = Bfield_external[0]->array(mfi);
             By_ext = Bfield_external[1]->array(mfi);
             Bz_ext = Bfield_external[2]->array(mfi);
@@ -1083,24 +1651,29 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             auto By_interp = Interp(By, By_stag, nodal, coarsen, i, j, k, 0);
             auto Bz_interp = Interp(Bz, Bz_stag, nodal, coarsen, i, j, k, 0);
 
-            if (include_external_fields) {
+            if (external_b_split) {
                 Bx_interp += Interp(Bx_ext, Bx_stag, nodal, coarsen, i, j, k, 0);
                 By_interp += Interp(By_ext, By_stag, nodal, coarsen, i, j, k, 0);
                 Bz_interp += Interp(Bz_ext, Bz_stag, nodal, coarsen, i, j, k, 0);
             }
 
-            // calculate enE = (J - Ji) x B
+            // calculate enE = (J - Ji) x B (without the Hall term the total
+            // current drops out and this is the ideal -u_i x B motional
+            // field)
+            const Real jex = (include_hall_term ? jx_interp : 0.0_rt) - jix_interp;
+            const Real jey = (include_hall_term ? jy_interp : 0.0_rt) - jiy_interp;
+            const Real jez = (include_hall_term ? jz_interp : 0.0_rt) - jiz_interp;
             enE_nodal(i, j, k, 0) = (
-                (jy_interp - jiy_interp) * Bz_interp
-                - (jz_interp - jiz_interp) * By_interp
+                jey * Bz_interp
+                - jez * By_interp
             );
             enE_nodal(i, j, k, 1) = (
-                (jz_interp - jiz_interp) * Bx_interp
-                - (jx_interp - jix_interp) * Bz_interp
+                jez * Bx_interp
+                - jex * Bz_interp
             );
             enE_nodal(i, j, k, 2) = (
-                (jx_interp - jix_interp) * By_interp
-                - (jy_interp - jiy_interp) * Bx_interp
+                jex * By_interp
+                - jey * Bx_interp
             );
         });
 
@@ -1110,6 +1683,308 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             wt = static_cast<amrex::Real>(amrex::second()) - wt;
             amrex::HostDevice::Atomic::Add( &(*cost)[mfi.index()], wt);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Je-form relax advance (esolve = je_form, je_advance = relax): J_e
+    // is a persistent dynamical field and E advances by Ampere-Maxwell
+    // with displacement current at the CFL-set artificial light speed;
+    // the stiff LOCAL electron-momentum terms (E coupling, gyration,
+    // friction, vacuum decay) are solved pointwise implicitly in closed
+    // form -- division-free, no linear algebra, no density floor. E is
+    // the full physical field state (grad Pe always included); with
+    // Split external fields the state stays internal-only and the
+    // physics uses E_state + E_ext (quasi-static over a substep).
+    // Steady state recovers generalized Ohm + Ampere exactly. Reached
+    // once per ACCEPTED substep (the advance gate was checked at entry);
+    // returns before the legacy divided-Ohm path below.
+    if (je_relax_solve) {
+        auto const dx_arr = warpx.Geom(lev).CellSizeArray();
+        amrex::Real sum_inv_dx2 = 0.0_rt;
+        amrex::Real dx_min = dx_arr[0];
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            sum_inv_dx2 += 1.0_rt / (dx_arr[d] * dx_arr[d]);
+            dx_min = amrex::min(dx_min, dx_arr[d]);
+        }
+        amrex::Real const dt_full = warpx.getdt(lev);
+        amrex::Real const dt_je =
+            (hybrid_model->m_je_dt_sub > 0.0_rt)
+                ? hybrid_model->m_je_dt_sub : dt_full;
+        amrex::Real const rho_1c =
+            PhysConst::q_e * hybrid_model->m_je_n_min;
+        // Eq-(30) vacuum damping: LOCAL current decay below the
+        // one-count level, no CFL (see the member doc).
+        amrex::Real const vac_gamma =
+            (hybrid_model->m_je_vac_gamma_frac > 0.0_rt)
+                ? hybrid_model->m_je_vac_gamma_frac / dt_full : 0.0_rt;
+        bool const use_vac_damping = (vac_gamma > 0.0_rt);
+        amrex::Real c_art = amrex::min(
+            PhysConst::c,
+            hybrid_model->m_je_c_frac
+                / (dt_je * std::sqrt(sum_inv_dx2)));
+        if (hybrid_model->m_je_c_max > 0.0_rt) {
+            c_art = amrex::min(c_art, hybrid_model->m_je_c_max);
+        }
+        // Quasineutral relaxation toward the one-count-guarded Ohm
+        // value (see the m_je_qn_frac member doc): pins the slow/
+        // longitudinal sector algebraically, plasma-blended.
+        amrex::Real const gam_qn =
+            hybrid_model->m_je_qn_frac / dt_full;
+        bool const use_qn = (gam_qn > 0.0_rt);
+        amrex::Real const inv_eps_art = PhysConst::mu0 * c_art * c_art;
+        amrex::Real const qm = PhysConst::q_e / PhysConst::m_e;
+        bool const use_vm = hybrid_model->m_je_var_mass;
+        amrex::Real const vm_alpha = hybrid_model->m_je_alpha;
+        // Anomalous viscous friction in Eq-27-capped cells (see the
+        // m_je_visc_frac member doc): gamma_visc = gam_vis0 *
+        // (1 - m_e/m_e'), identically zero wherever electron physics
+        // is resolved. gam_vis0 sets the capped grid mode's
+        // dissipation length to je_visc_frac * dx.
+        amrex::Real const visc_frac = hybrid_model->m_je_visc_frac;
+        bool const use_visc = use_vm && (visc_frac > 0.0_rt);
+        amrex::Real const gam_vis0 = use_visc
+            ? 2.0_rt * vm_alpha / (visc_frac * dt_je) : 0.0_rt;
+        amrex::Real const dx2_min = dx_min * dx_min;
+        amrex::Real const mu0_l = PhysConst::mu0;
+        MultiFab * qvisc_mf = nullptr;
+        if (use_visc && hybrid_model->m_solve_electron_energy_equation) {
+            qvisc_mf = warpx.m_fields.get("hybrid_je_qvisc_fp", lev);
+        }
+
+        MultiFab & Je_mf = *warpx.m_fields.get("hybrid_je_fp", lev);
+        bool const seed_je = !hybrid_model->m_je_init;
+        hybrid_model->m_je_init = true;
+        if (seed_je) {
+            amrex::Print() << "[je] relax boot: c_art = " << c_art
+                << " m/s (CFL value "
+                << hybrid_model->m_je_c_frac
+                       / (dt_je * std::sqrt(sum_inv_dx2))
+                << ", cap " << hybrid_model->m_je_c_max
+                << "), gamma_qn = " << gam_qn
+                << " 1/s, dt_sub = " << dt_je
+                << " s, var_mass = "
+                << (hybrid_model->m_je_var_mass ? "on" : "off")
+                << " (alpha " << hybrid_model->m_je_alpha
+                << "), split = "
+                << (hybrid_model->m_je_centered_split
+                        ? "centered" : "lie")
+                << ", visc_frac = " << hybrid_model->m_je_visc_frac
+                << ", n_min = " << hybrid_model->m_je_n_min
+                << " m^-3 (must be the one-count level)\n";
+        }
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(*Efield[0], TilingIfNotGPU()); mfi.isValid();
+             ++mfi) {
+            Array4<Real> const& Ex = Efield[0]->array(mfi);
+            Array4<Real> const& Ey = Efield[1]->array(mfi);
+            Array4<Real> const& Ez = Efield[2]->array(mfi);
+            Array4<Real> const& Je = Je_mf.array(mfi);
+            Array4<Real const> const& enE = enE_nodal_mf.const_array(mfi);
+            Array4<Real const> const& rho = rhofield.const_array(mfi);
+            Array4<Real const> const& Pe  = Pefield.const_array(mfi);
+            Array4<Real const> const& Jx = Jfield[0]->const_array(mfi);
+            Array4<Real const> const& Jy = Jfield[1]->const_array(mfi);
+            Array4<Real const> const& Jz = Jfield[2]->const_array(mfi);
+            Array4<Real const> const& Jix = Jifield[0]->const_array(mfi);
+            Array4<Real const> const& Jiy = Jifield[1]->const_array(mfi);
+            Array4<Real const> const& Jiz = Jifield[2]->const_array(mfi);
+            Array4<Real const> const& Bx = Bfield[0]->const_array(mfi);
+            Array4<Real const> const& By = Bfield[1]->const_array(mfi);
+            Array4<Real const> const& Bz = Bfield[2]->const_array(mfi);
+            Array4<Real> Bx_e, By_e, Bz_e;
+            if (external_b_split) {
+                Bx_e = Bfield_external[0]->array(mfi);
+                By_e = Bfield_external[1]->array(mfi);
+                Bz_e = Bfield_external[2]->array(mfi);
+            }
+            Array4<Real> Ex_e, Ey_e, Ez_e;
+            if (include_E_ext) {
+                Ex_e = Efield_external[0]->array(mfi);
+                Ey_e = Efield_external[1]->array(mfi);
+                Ez_e = Efield_external[2]->array(mfi);
+            }
+            amrex::Array4<int> upd_x, upd_y, upd_z;
+            if (EB::enabled()) {
+                upd_x = eb_update_E[0]->array(mfi);
+                upd_y = eb_update_E[1]->array(mfi);
+                upd_z = eb_update_E[2]->array(mfi);
+            }
+            amrex::Array4<Real> qv;
+            if (qvisc_mf) { qv = qvisc_mf->array(mfi); }
+            Real const * const AMREX_RESTRICT coefs_x =
+                m_stencil_coefs_x.dataPtr();
+            auto const n_coefs_x =
+                static_cast<int>(m_stencil_coefs_x.size());
+            Real const * const AMREX_RESTRICT coefs_y =
+                m_stencil_coefs_y.dataPtr();
+            auto const n_coefs_y =
+                static_cast<int>(m_stencil_coefs_y.size());
+            Real const * const AMREX_RESTRICT coefs_z =
+                m_stencil_coefs_z.dataPtr();
+            auto const n_coefs_z =
+                static_cast<int>(m_stencil_coefs_z.size());
+            amrex::Real const dt_r = dt_je;
+            amrex::ParallelFor(mfi.tilebox(),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                bool const skip_x = upd_x && upd_x(i,j,k) == 0;
+                bool const skip_y = upd_y && upd_y(i,j,k) == 0;
+                bool const skip_z = upd_z && upd_z(i,j,k) == 0;
+                if (skip_x && skip_y && skip_z) { return; }
+                amrex::Real const rho_v =
+                    amrex::max(rho(i,j,k), 0.0_rt);
+                amrex::Real bx = Bx(i,j,k), by = By(i,j,k),
+                            bz = Bz(i,j,k);
+                amrex::Real etx = Ex(i,j,k), ety = Ey(i,j,k),
+                            etz = Ez(i,j,k);
+                if (external_b_split) {
+                    bx += Bx_e(i,j,k); by += By_e(i,j,k);
+                    bz += Bz_e(i,j,k);
+                }
+                if (include_E_ext) {
+                    etx += Ex_e(i,j,k); ety += Ey_e(i,j,k);
+                    etz += Ez_e(i,j,k);
+                }
+                // Eq-(27) variable electron mass (see member doc):
+                // per-cell inflation where the grid-whistler speed
+                // would violate the substep CFL; inert (== m_e)
+                // wherever the physics is resolved. Applies to every
+                // 1/m_e in the J_e update below.
+                amrex::Real qm_c = qm;
+                if (use_vm) {
+                    amrex::Real const B2t = bx*bx + by*by + bz*bz;
+                    amrex::Real const me_v =
+                        HybridPICModel::JeEffectiveElectronMass(
+                            B2t, amrex::max(rho_v, rho_1c),
+                            dt_r, dx_min, vm_alpha);
+                    qm_c = PhysConst::q_e / me_v;
+                }
+                amrex::Real gam_vis = 0.0_rt;
+                if (use_visc) {
+                    // m_e / m_e' == qm_c / qm exactly
+                    gam_vis = gam_vis0 * (1.0_rt - qm_c / qm);
+                    // The drag reaches B as a resistive diffusion with
+                    // diffusivity gam_vis * d_e'^2 through the EXPLICIT
+                    // substep loop; cap it at that loop's diffusion CFL
+                    // (d_e'^2 = 1/(mu0 qm_c rho_g)), else the target
+                    // dissipation length destabilizes the sheet it is
+                    // meant to protect (measured: 20x violation at a
+                    // 0.2 dx target).
+                    amrex::Real const gam_cfl = 0.25_rt * dx2_min
+                        * mu0_l * qm_c * amrex::max(rho_v, rho_1c)
+                        / dt_r;
+                    gam_vis = amrex::min(gam_vis, gam_cfl);
+                }
+                amrex::Real const kE = qm_c * rho_v;
+                amrex::Real const gpx = T_Algo::UpwardDx(
+                    Pe, coefs_x, n_coefs_x, i, j, k);
+#if defined(WARPX_DIM_3D)
+                amrex::Real const gpy = T_Algo::UpwardDy(
+                    Pe, coefs_y, n_coefs_y, i, j, k);
+#else
+                amrex::Real const gpy = 0.0_rt;
+                amrex::ignore_unused(coefs_y, n_coefs_y);
+#endif
+                amrex::Real const gpz = T_Algo::UpwardDz(
+                    Pe, coefs_z, n_coefs_z, i, j, k);
+                amrex::Real jtot_val = 0.0_rt;
+                if (resistivity_has_J_dependence) {
+                    jtot_val = std::sqrt(
+                        Jx(i,j,k)*Jx(i,j,k) + Jy(i,j,k)*Jy(i,j,k)
+                        + Jz(i,j,k)*Jz(i,j,k));
+                }
+                amrex::Real const eta_v = eta(rho_v, jtot_val, t_new);
+                amrex::Real gam_v = 0.0_rt;
+                if (use_vac_damping) {
+                    gam_v = vac_gamma * 0.5_rt * (1.0_rt - std::tanh(
+                        (rho_v - rho_1c) / (0.5_rt * rho_1c)));
+                }
+                // Ampere drive Jc - J_i (Jfield = curl B/mu0 - J_ext)
+                amrex::Real const rcx = Jx(i,j,k) - Jix(i,j,k);
+                amrex::Real const rcy = Jy(i,j,k) - Jiy(i,j,k);
+                amrex::Real const rcz = Jz(i,j,k) - Jiz(i,j,k);
+                // previous J_e (seeded from the Ampere closure on the
+                // first call)
+                amrex::Real const jox = seed_je ? rcx : Je(i,j,k,0);
+                amrex::Real const joy = seed_je ? rcy : Je(i,j,k,1);
+                amrex::Real const joz = seed_je ? rcz : Je(i,j,k,2);
+                // implicit local solve:
+                //   (a I - [beta]x) Je' = r,  beta = qm dt B_tot
+                //   inverse = (a^2 I + a [beta]x + beta beta^T)
+                //             / (a (a^2 + |beta|^2))
+                amrex::Real const a = 1.0_rt
+                    + dt_r * (dt_r * kE * inv_eps_art
+                              + kE * eta_v + gam_v + gam_vis);
+                amrex::Real const bex = qm_c * dt_r * bx;
+                amrex::Real const bey = qm_c * dt_r * by;
+                amrex::Real const bez = qm_c * dt_r * bz;
+                amrex::Real const b2 = bex*bex + bey*bey + bez*bez;
+                amrex::Real const rx = jox
+                    + dt_r * kE * (etx + dt_r * inv_eps_art * rcx)
+                    - dt_r * kE * eta_v * Jix(i,j,k)
+                    + qm_c * dt_r * gpx;
+                amrex::Real const ry = joy
+                    + dt_r * kE * (ety + dt_r * inv_eps_art * rcy)
+                    - dt_r * kE * eta_v * Jiy(i,j,k)
+                    + qm_c * dt_r * gpy;
+                amrex::Real const rz = joz
+                    + dt_r * kE * (etz + dt_r * inv_eps_art * rcz)
+                    - dt_r * kE * eta_v * Jiz(i,j,k)
+                    + qm_c * dt_r * gpz;
+                amrex::Real const bdotr = bex*rx + bey*ry + bez*rz;
+                amrex::Real const inv = 1.0_rt / (a * (a*a + b2));
+                amrex::Real const jnx =
+                    (a*a*rx + a*(bey*rz - bez*ry) + bdotr*bex) * inv;
+                amrex::Real const jny =
+                    (a*a*ry + a*(bez*rx - bex*rz) + bdotr*bey) * inv;
+                amrex::Real const jnz =
+                    (a*a*rz + a*(bex*ry - bey*rx) + bdotr*bez) * inv;
+                amrex::Real exn = Ex(i,j,k)
+                    + dt_r * inv_eps_art * (rcx - jnx);
+                amrex::Real eyn = Ey(i,j,k)
+                    + dt_r * inv_eps_art * (rcy - jny);
+                amrex::Real ezn = Ez(i,j,k)
+                    + dt_r * inv_eps_art * (rcz - jnz);
+                if (use_qn) {
+                    // implicit relaxation toward the one-count-guarded
+                    // Ohm value, plasma-blended (the OPTIONAL floored
+                    // division of the qn pin -- see the member doc)
+                    amrex::Real const w_qn = 0.5_rt
+                        * (1.0_rt + std::tanh(
+                              (rho_v - rho_1c) / (0.5_rt * rho_1c)));
+                    amrex::Real const lam = dt_r * gam_qn * w_qn;
+                    amrex::Real const rho_gq =
+                        amrex::max(rho_v, rho_1c);
+                    amrex::Real const inv_l = 1.0_rt / (1.0_rt + lam);
+                    exn = (exn + lam * ((enE(i,j,k,0) - gpx
+                        + rho_v * eta_v * Jx(i,j,k)) / rho_gq))
+                        * inv_l;
+                    eyn = (eyn + lam * ((enE(i,j,k,1) - gpy
+                        + rho_v * eta_v * Jy(i,j,k)) / rho_gq))
+                        * inv_l;
+                    ezn = (ezn + lam * ((enE(i,j,k,2) - gpz
+                        + rho_v * eta_v * Jz(i,j,k)) / rho_gq))
+                        * inv_l;
+                }
+                if (qv) {
+                    // dissipated energy density this substep:
+                    // gamma_visc * m_e' |J_e|^2 / (e^2 n_g) * dt,
+                    // with m_e'/(e^2 n_g) = 1/(qm_c * rho_g)
+                    amrex::Real const j2 =
+                        (skip_x ? 0.0_rt : jnx*jnx)
+                        + (skip_y ? 0.0_rt : jny*jny)
+                        + (skip_z ? 0.0_rt : jnz*jnz);
+                    qv(i,j,k) += gam_vis * dt_r * j2
+                        / (qm_c * amrex::max(rho_v, rho_1c));
+                }
+                if (!skip_x) { Je(i,j,k,0) = jnx; Ex(i,j,k) = exn; }
+                if (!skip_y) { Je(i,j,k,1) = jny; Ey(i,j,k) = eyn; }
+                if (!skip_z) { Je(i,j,k,2) = jnz; Ez(i,j,k) = ezn; }
+            });
+        }
+        return;
     }
 
     // Loop through the grids, and over the tiles within each grid again
@@ -1132,11 +2007,22 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         Array4<Real const> const& Jy = Jfield[1]->const_array(mfi);
         Array4<Real const> const& Jz = Jfield[2]->const_array(mfi);
         Array4<Real const> const& enE = enE_nodal_mf.const_array(mfi);
+        Array4<Real const> eiN;
+        if (Ei_nodal_mf) { eiN = Ei_nodal_mf->const_array(mfi); }
         Array4<Real const> const& rho = rhofield.const_array(mfi);
         Array4<Real const> const& Pe = Pefield.array(mfi);
         Array4<Real> const& Bx = Bfield[0]->array(mfi);
         Array4<Real> const& By = Bfield[1]->array(mfi);
         Array4<Real> const& Bz = Bfield[2]->array(mfi);
+        // Overlay arrays stay default-constructed (never indexed) when no
+        // per-species resistivity is registered -- the kernels gate the read
+        // on has_eta_overlay.
+        Array4<Real const> eta_overlay_x, eta_overlay_y, eta_overlay_z;
+        if (has_eta_overlay) {
+            eta_overlay_x = eta_overlay_mf[0]->const_array(mfi);
+            eta_overlay_y = eta_overlay_mf[1]->const_array(mfi);
+            eta_overlay_z = eta_overlay_mf[2]->const_array(mfi);
+        }
 
         // Extract structures indicating where the fields
         // should be updated, given the position of the embedded boundaries
@@ -1148,7 +2034,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         }
 
         Array4<Real> Ex_ext, Ey_ext, Ez_ext;
-        if (include_external_fields) {
+        if (include_E_ext) {
             Ex_ext = Efield_external[0]->array(mfi);
             Ey_ext = Efield_external[1]->array(mfi);
             Ez_ext = Efield_external[2]->array(mfi);
@@ -1176,12 +2062,14 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ex_stag, coarsen, i, j, k, 0);
 
-            if (rho_val < rho_floor && holmstrom_vacuum_region) {
+            if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                 Ex(i, j, k) = 0._rt;
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
                 // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
-                const Real grad_Pe = (!solve_for_Faraday) ?
+                const Real grad_Pe =
+                    (solve_for_Faraday ? add_grad_pe_faraday
+                                       : include_electron_pressure_term) ?
                     T_Algo::UpwardDx(Pe, coefs_x, n_coefs_x, i, j, k)
                     : 0._rt;
 
@@ -1191,11 +2079,25 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 // safety condition since we divide by rho
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
 
-                Ex(i, j, k) = (enE_x - grad_Pe) / rho_val_limited;
+                Real ohm_val = (enE_x - grad_Pe) / rho_val_limited;
+                if (holmstrom_smooth) {
+                    ohm_val *= 0.5_rt * (1._rt + std::tanh(
+                        (rho_val - rho_floor) * holmstrom_inv_width));
+                }
+                Ex(i, j, k) = ohm_val;
+            }
+            if (include_electron_inertia) {
+                Ex(i, j, k) += Interp(eiN, nodal, Ex_stag, coarsen, i, j, k, 0);
             }
 
-            // Add resistivity only if E field value is used to update B
-            if (solve_for_Faraday) {
+
+            // Resistivity: whenever the caller kept eta in this solve
+            // (always true for the Faraday solves; the push/stored-E
+            // solve follows the caller), or when the Q_ei drag operator
+            // carries the ion-side friction (dropping eta J from the
+            // push field IS the friction, so E* + drag would book it
+            // twice).
+            if (include_resistivity || add_resistivity_push) {
                 Real jtot_val = 0._rt;
                 if (resistivity_has_J_dependence) {
                     // Interpolate current to appropriate staggering to match E field
@@ -1206,8 +2108,9 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
 
                 Ex(i, j, k) += eta(rho_val, jtot_val, t_new) * Jx(i, j, k);
+                if (has_eta_overlay) { Ex(i, j, k) += eta_overlay_x(i, j, k); }
 
-                if (include_hyper_resistivity_term) {
+                if (include_hyper_resistivity_term && solve_for_Faraday) {
 
                     // Interpolate B field to appropriate staggering to match E field
                     Real btot_val = 0._rt;
@@ -1226,7 +2129,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields && (rho_val >= rho_floor)) {
+            if (include_E_ext && (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                 Ex(i, j, k) -= Ex_ext(i, j, k);
             }
         });
@@ -1240,12 +2143,14 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ey_stag, coarsen, i, j, k, 0);
 
-            if (rho_val < rho_floor && holmstrom_vacuum_region) {
+            if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                 Ey(i, j, k) = 0._rt;
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
                 // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
-                const Real grad_Pe = (!solve_for_Faraday) ?
+                const Real grad_Pe =
+                    (solve_for_Faraday ? add_grad_pe_faraday
+                                       : include_electron_pressure_term) ?
                     T_Algo::UpwardDy(Pe, coefs_y, n_coefs_y, i, j, k)
                     : 0._rt;
 
@@ -1255,11 +2160,25 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 // safety condition since we divide by rho
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
 
-                Ey(i, j, k) = (enE_y - grad_Pe) / rho_val_limited;
+                Real ohm_val = (enE_y - grad_Pe) / rho_val_limited;
+                if (holmstrom_smooth) {
+                    ohm_val *= 0.5_rt * (1._rt + std::tanh(
+                        (rho_val - rho_floor) * holmstrom_inv_width));
+                }
+                Ey(i, j, k) = ohm_val;
+            }
+            if (include_electron_inertia) {
+                Ey(i, j, k) += Interp(eiN, nodal, Ey_stag, coarsen, i, j, k, 1);
             }
 
-            // Add resistivity only if E field value is used to update B
-            if (solve_for_Faraday) {
+
+            // Resistivity: whenever the caller kept eta in this solve
+            // (always true for the Faraday solves; the push/stored-E
+            // solve follows the caller), or when the Q_ei drag operator
+            // carries the ion-side friction (dropping eta J from the
+            // push field IS the friction, so E* + drag would book it
+            // twice).
+            if (include_resistivity || add_resistivity_push) {
                 Real jtot_val = 0._rt;
                 if (resistivity_has_J_dependence) {
                     // Interpolate current to appropriate staggering to match E field
@@ -1270,8 +2189,9 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
 
                 Ey(i, j, k) += eta(rho_val, jtot_val, t_new) * Jy(i, j, k);
+                if (has_eta_overlay) { Ey(i, j, k) += eta_overlay_y(i, j, k); }
 
-                if (include_hyper_resistivity_term) {
+                if (include_hyper_resistivity_term && solve_for_Faraday) {
 
                     // Interpolate B field to appropriate staggering to match E field
                     Real btot_val = 0._rt;
@@ -1290,7 +2210,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields && (rho_val >= rho_floor)) {
+            if (include_E_ext && (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                 Ey(i, j, k) -= Ey_ext(i, j, k);
             }
         });
@@ -1304,12 +2224,14 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             // Interpolate to get the appropriate charge density in space
             const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, k, 0);
 
-            if (rho_val < rho_floor && holmstrom_vacuum_region) {
+            if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
                 Ez(i, j, k) = 0._rt;
             } else {
                 // Get the gradient of the electron pressure if the longitudinal part of
                 // the E-field should be included, otherwise ignore it since curl x (grad Pe) = 0
-                const Real grad_Pe = (!solve_for_Faraday) ?
+                const Real grad_Pe =
+                    (solve_for_Faraday ? add_grad_pe_faraday
+                                       : include_electron_pressure_term) ?
                     T_Algo::UpwardDz(Pe, coefs_z, n_coefs_z, i, j, k)
                     : 0._rt;
 
@@ -1319,11 +2241,25 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 // safety condition since we divide by rho
                 const auto rho_val_limited = std::max(rho_val, rho_floor);
 
-                Ez(i, j, k) = (enE_z - grad_Pe) / rho_val_limited;
+                Real ohm_val = (enE_z - grad_Pe) / rho_val_limited;
+                if (holmstrom_smooth) {
+                    ohm_val *= 0.5_rt * (1._rt + std::tanh(
+                        (rho_val - rho_floor) * holmstrom_inv_width));
+                }
+                Ez(i, j, k) = ohm_val;
+            }
+            if (include_electron_inertia) {
+                Ez(i, j, k) += Interp(eiN, nodal, Ez_stag, coarsen, i, j, k, 2);
             }
 
-            // Add resistivity only if E field value is used to update B
-            if (solve_for_Faraday) {
+
+            // Resistivity: whenever the caller kept eta in this solve
+            // (always true for the Faraday solves; the push/stored-E
+            // solve follows the caller), or when the Q_ei drag operator
+            // carries the ion-side friction (dropping eta J from the
+            // push field IS the friction, so E* + drag would book it
+            // twice).
+            if (include_resistivity || add_resistivity_push) {
                 Real jtot_val = 0._rt;
                 if (resistivity_has_J_dependence) {
                     // Interpolate current to appropriate staggering to match E field
@@ -1334,8 +2270,9 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
 
                 Ez(i, j, k) += eta(rho_val, jtot_val, t_new) * Jz(i, j, k);
+                if (has_eta_overlay) { Ez(i, j, k) += eta_overlay_z(i, j, k); }
 
-                if (include_hyper_resistivity_term) {
+                if (include_hyper_resistivity_term && solve_for_Faraday) {
 
                     // Interpolate B field to appropriate staggering to match E field
                     Real btot_val = 0._rt;
@@ -1354,7 +2291,7 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 }
             }
 
-            if (include_external_fields && (rho_val >= rho_floor)) {
+            if (include_E_ext && (subtract_E_ext_everywhere || rho_val >= rho_floor)) {
                 Ez(i, j, k) -= Ez_ext(i, j, k);
             }
         });

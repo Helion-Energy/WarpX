@@ -171,7 +171,9 @@ ion-derived density as
         T_e = \frac{\sum K_e N_e}{\sum N_e}\, n_e^{\gamma - 1}.
 
 Since the scheme only advects the electron entropy, thermal conduction is
-neglected (:math:`\nabla\cdot\vec{q}_e = 0`).
+neglected (:math:`\nabla\cdot\vec{q}_e = 0`) unless the optional conduction
+pass described :ref:`below <theory-hybrid-model-electron-conduction>` is
+enabled.
 
 Two source terms can be enabled on the right-hand side. The first is the Joule
 (Ohmic) heating consistent with the resistive friction in Ohm's law
@@ -183,16 +185,17 @@ Two source terms can be enabled on the right-hand side. The first is the Joule
         \frac{d T_e}{d t} = (\gamma - 1) \sum_s \frac{Z_s e^2\, \eta_{s,\mathrm{eff}}\, n_s |\Delta\vec{V}|^2}{k_B},
 
 where :math:`\Delta\vec{V} = \vec{J}/(e n_e)` is the electron-ion relative
-drift, :math:`Z_s` the charge state and :math:`\eta_{s,\mathrm{eff}} = \eta`
-the Ohm's-law resistivity. For a single species this reduces
+drift, :math:`Z_s` the charge state and
+:math:`\eta_{s,\mathrm{eff}} = \eta + \eta_s` the sum of the global and
+per-species resistivities (see above). For a single species this reduces
 exactly to the familiar :math:`dT_e/dt = (\gamma - 1)\,\eta J^2/(n_e k_B)`.
 Above a user-set electron temperature threshold the heat can optionally be
 redirected to the kinetic ions instead of the electron fluid
-(``hybrid_pic_model.joule_redirect_Te_threshold``), which is useful to model
+(``hybrid_pic_model.redirect_joule_to_ions``), which is useful to model
 regimes where the electrons radiate strongly.
 
-The second source is the electron-ion temperature relaxation, enabled by
-specifying the rate ``hybrid_pic_model.electron_ion_relaxation_rate``,
+The second source is the electron-ion temperature relaxation
+(``hybrid_pic_model.include_temperature_relaxation``),
 
     .. math::
 
@@ -203,10 +206,69 @@ The sink on the electron fluid is paired with a matching thermal-velocity
 kick on the ion macro-particles of each species so that the exchange
 conserves energy exactly.
 
+With an embedded boundary present, the recommended wall model for the energy
+equation is the insulating wall (``boundary.eb_type = insulating``): the
+plasma is held off the conductor by a maintained density standoff band
+(particles are collected ``boundary.eb_standoff_cells`` cells before the
+surface, with the collected charge and energy tallied per species), the
+electron temperature is filled with zero normal gradient into the band and
+the covered region each step, and the electron entropy the transport markers
+deposit on below-floor nodes is folded back onto the neighboring live-plasma
+nodes. Together these make the wall band insulating for the transported
+electron energy: without them, entropy dropped at the density-floor boundary
+acts as a one-way energy drain, and the stale temperature in the band lets
+:math:`\nabla P_e` drive a spurious electric field at the plasma edge.
+
 Verification tests of the transport terms (adiabatic compression, and slab
 transport through a below-floor halo), the Joule source (force-free field
 decay) and the :math:`Q_{ei}` exchange are described in the
 :ref:`examples section <examples-ohm-solver-electron-energy-eq>`.
+
+.. _theory-hybrid-model-electron-conduction:
+
+Electron thermal conduction
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+An optional conduction pass (``hybrid_pic_model.qdsmc_conduction``) transports
+the electron internal energy with the same deterministic
+Green's-function-sampling machinery as the entropy advection
+:cite:p:`kfhm-Albright2002`. Each cell spawns a small set of Gauss-Hermite
+nodes that sample the Gaussian kernel of the diffusion operator over one pass,
+
+.. math::
+
+    \Delta x_k = \xi_k \sqrt{2 D \Delta t} + \nabla D\, \Delta t,
+    \qquad D = \frac{2\,\kappa(T_e, n_e)}{3 n_e k_B},
+
+with the three-node rule :math:`\xi \in \{0, \pm\sqrt{3}\}`,
+:math:`w \in \{2/3, 1/6, 1/6\}` (Gaussian moments through fifth order) and
+the conductivity :math:`\kappa(T,n)` a user expression
+(``hybrid_pic_model.qdsmc_conduction_kappa(T,n)``). Because every node weight
+is positive and the deposit is conservative, the pass is unconditionally
+stable and positivity-preserving with no conduction CFL limit -- the
+time-step restrictions that make strongly anisotropic conduction stiff for
+grid-stencil discretizations do not arise
+:cite:p:`kfhm-SharmaHammett2007,kfhm-Sovinec2004`.
+
+In the ``parallel`` mode the kicks run along the local magnetic field
+direction: the pass is a per-step quadrature of the field-line
+Green's-function solution of parallel transport
+:cite:p:`kfhm-delCastilloNegrete2011`, and transports no energy across field
+lines by construction. A verification case with a hot patch on circular field
+lines measures cross-field pollution consistent with zero
+(:math:`\kappa_{\perp,\mathrm{num}}/\kappa_\parallel \lesssim 10^{-3}`,
+bounded by fit noise), the property that motivates field-line methods at the
+:math:`\kappa_\parallel/\kappa_\perp \gg 1` ratios of magnetized
+plasmas. A free-streaming flux limiter
+(``hybrid_pic_model.qdsmc_conduction_flux_limiter``) optionally blends the
+diffusivity harmonically against :math:`q_\mathrm{fs} = \alpha n k_B T
+v_{\mathrm{th},e}` at steep gradients.
+
+The nonlinear-front verification test releases a hot slab with
+:math:`\kappa \propto T^{5/2}` into a cold background and asserts the
+Zel'dovich-Barenblatt self-similar front exponent
+:math:`x_f \propto t^{2/9}`; a Gaussian-spread test checks the linear
+variance growth, the discrete maximum principle and the energy ledger.
 
 Electron current
 ^^^^^^^^^^^^^^^^
@@ -274,6 +336,31 @@ Ohm's law:
     .. math::
 
         \boldsymbol{E} = -\frac{1}{en_e}\left( \boldsymbol{J}_e\times\boldsymbol{B} + \boldsymbol{\nabla} P_e \right)+\eta\boldsymbol{J}-\eta_h \nabla^2\boldsymbol{J}.
+
+Multi-species resistivity
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The single resistivity :math:`\eta` above assumes the electron drag is the
+same against every ion species. Following :cite:t:`kfhm-Belyaev2024`, the drag
+can instead be resolved per species by adding to Ohm's law the overlay
+
+    .. math::
+
+        \vec{E} \mathrel{+}= \sum_s \eta_s\, f_s\, e n_e \left( \vec{V}_s - \vec{V}_e \right),
+        \qquad f_s = \frac{\rho_s}{\sum_t \rho_t},
+
+where :math:`f_s` is the charge-density fraction of species :math:`s`,
+:math:`\vec{V}_s` its fluid velocity, and each :math:`\eta_s` is a user
+expression of :math:`(\rho_s, \rho, T_e, |\vec{J}|, |\vec{J}_s|, |\vec{B}|, t)`
+(``hybrid_pic_model.plasma_resistivity_<species>(rho_s,rho,Te,J,J_s,B,t)``).
+This permits, for example, a temperature-dependent Spitzer drag against one
+species on top of a constant background resistivity. When all ion species
+drift together the overlay reduces to
+:math:`\left(\sum_s f_s \eta_s\right)\vec{J}`, i.e. an effective resistivity
+:math:`\eta_{\mathrm{eff}} = \eta + \sum_s f_s \eta_s`. The same
+:math:`\eta_{s,\mathrm{eff}} = \eta + \eta_s` enters the per-species Joule
+heating of the :ref:`electron energy equation
+<theory-hybrid-model-electron-energy-eq>`.
 
 Lastly, if an electron temperature is given from which the electron pressure can
 be calculated, the model is fully constrained and can be evolved given initial

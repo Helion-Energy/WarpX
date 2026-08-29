@@ -32,6 +32,7 @@ AMREX_ENUM(MediumForEM,
 AMREX_ENUM(EvolveScheme,
            Explicit,
            Theta_Implicit_EM,
+           Theta_Implicit_Hybrid,
            Semi_Implicit_EM,
            Strang_Implicit_Spectral_EM,
            Default = Explicit);
@@ -147,6 +148,17 @@ AMREX_ENUM(ParticleBoundaryType,
            Periodic,      //!< particles are introduced from the periodic boundary
            Thermal,
            None,          //!< For r=0 boundary with RZ simulations
+           Default = Absorbing);
+
+/** Embedded-boundary wall type
+ */
+AMREX_ENUM(EmbeddedBoundaryType,
+           Absorbing,     //!< particles are collected at the EB surface (default)
+           Insulating,    /**< collecting wall held off the plasma by a density standoff
+                             band: particles are collected `boundary.eb_standoff_cells`
+                             cells before the surface and, with the hybrid electron
+                             energy equation on, T_e/P_e are filled with zero normal
+                             gradient into the band and the covered region */
            Default = Absorbing);
 
 /** MPI reductions

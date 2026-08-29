@@ -7,6 +7,7 @@ foreach(D IN LISTS WarpX_DIMS)
         PhotonParticleContainer.cpp
         PhysicalParticleContainer.cpp
         RigidInjectedParticleContainer.cpp
+        SubcycledParticleContainer.cpp
         WarpXParticleContainer.cpp
         LaserParticleContainer.cpp
         ParticleBoundaryBuffer.cpp

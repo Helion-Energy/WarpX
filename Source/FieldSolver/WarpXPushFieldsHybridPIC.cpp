@@ -7,6 +7,7 @@
  *
  * License: BSD-3-Clause-LBNL
  */
+#include "Circuit/CircuitCoupling.H"
 #include "Fields.H"
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "Particles/MultiParticleContainer.H"
@@ -24,6 +25,11 @@ using namespace amrex;
 
 void WarpX::HybridPICEvolveFields ()
 {
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_hybrid_pic_model->m_include_electron_inertia,
+        "hybrid_pic_model.include_electron_inertia requires "
+        "algo.evolve_scheme = theta_implicit_hybrid (the explicit "
+        "hybrid loop never assembles the inertial field).");
     using ablastr::fields::Direction;
     using warpx::fields::FieldType;
 
@@ -54,27 +60,45 @@ void WarpX::HybridPICEvolveFields ()
                     m_fields.get(FieldType::Bfield_fp, Direction{idim}, lev)->nGrowVect());
             }
         }
+
+        // Open the circuit-coupling step on the plasma-frame fields: the
+        // engine seeds its linkage registers at t^n and snapshots its state.
+        if (m_circuit_coupling && m_circuit_coupling->Coupler()) {
+            m_circuit_coupling->Coupler()->BeginStep(gett_old(0), dt[0]);
+        }
     }
 
     // The particles have now been pushed to their t_{n+1} positions.
     // Perform charge deposition at t_{n+1} and current deposition at t_{n+1/2}.
     HybridPICDepositRhoAndJ();
 
-    // Electron pressure/temperature update at t=n+1, right after the
-    // deposition. With solve_electron_energy_equation on, the QDSMC
-    // entropy-transport step advances T_e and emits Pe = n_e k_B T_e at the
-    // end (it needs rho_fp = rho^{n+1} and hybrid_rho_fp_temp = rho^{n},
-    // which the deposit just above established). Otherwise the algebraic
-    // closure fills Pe (and mirrors the implied T_e for diagnostics) at
-    // this same point.
+    // Electron-pressure update. When solve_electron_energy_equation is on,
+    // run the QDSMC entropy-transport step (which also emits Pe = n_e k_B T_e
+    // at the end). Otherwise the legacy algebraic adiabatic closure is run
+    // below (at ~L213) -- Pe is recomputed each step from rho with no
+    // temperature evolution.
+    //
+    // QDSMC needs rho_fp = rho^{n+1} and hybrid_rho_fp_temp = rho^{n}, which
+    // the deposit just above has established.
     if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
         m_hybrid_pic_model->AdvanceElectronEnergyQDSMC(dt[0]);
-    } else {
-        m_hybrid_pic_model->CalculateElectronPressure();
     }
 
     // Get the external current
     m_hybrid_pic_model->GetCurrentExternal();
+
+    // Compute the per-species resistive overlay once per step into the
+    // registered hybrid_eta_overlay_fp fields; the (subcycled) E-solves
+    // below only read it. Its inputs (Vs_fp, Ve_fp, rho_fp_<spec>, T_e) are
+    // per-step quantities, so recomputing it inside every E-solve would be
+    // pure overhead.
+    if (m_hybrid_pic_model->m_has_per_species_eta) {
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            auto eta_overlay = m_fields.get_alldirs("hybrid_eta_overlay_fp", lev);
+            m_hybrid_pic_model->ComputeResistiveOverlay(
+                lev, *eta_overlay[0], *eta_overlay[1], *eta_overlay[2]);
+        }
+    }
 
     // Reference hybrid-PIC multifabs
     ablastr::fields::MultiLevelScalarField rho_fp_temp = m_fields.get_mr_levels(FieldType::hybrid_rho_fp_temp, finest_level);
@@ -118,6 +142,19 @@ void WarpX::HybridPICEvolveFields ()
         SubcyclingHalf::FirstHalf, guard_cells.ng_FieldSolver,
         WarpX::sync_nodal_points
     );
+
+    // qdsmc_time_advance = pc: single mid-step corrector transport
+    // T_e^n -> T_e^{n+1} using V_e^{n+1/2}(J_i^{n+1/2}, B^{n+1/2},
+    // rho^{n+1/2}). Must run AFTER the first B half-push (B^{n+1/2} in the
+    // register) and BEFORE the rho averaging just below (the K_e / N_e load
+    // needs rho_fp_temp = rho^n). The first half-push above ran with the
+    // previous step's Pe^n; the Pe^{n+1} emitted here serves the second
+    // half-push and the final E-solve.
+    if (m_hybrid_pic_model->m_solve_electron_energy_equation &&
+        m_hybrid_pic_model->m_qdsmc_time_advance ==
+            HybridPICModel::QdsmcTimeAdvance::PC) {
+        m_hybrid_pic_model->AdvanceElectronEnergyQDSMC_PC(dt[0]);
+    }
 
     // Average rho^{n} and rho^{n+1} to get rho^{n+1/2} in rho_fp_temp
     for (int lev = 0; lev <= finest_level; ++lev)
@@ -175,6 +212,20 @@ void WarpX::HybridPICEvolveFields ()
             0.5_rt*dt[0]);
     }
 
+    // Electron pressure entering the final E-solve at t^{n+1}. With the
+    // energy equation on, Pe was already emitted by the QDSMC advance
+    // earlier in this function; qdsmc_time_advance = leapfrog additionally
+    // gets the linearly extrapolated Pe^{n+1} here (both half-pushes above
+    // consumed the time-centered Pe^{n+1/2}, mirroring the J_i^{n+1}
+    // extrapolation just above -- no-op for the other schemes). Otherwise
+    // the legacy algebraic adiabatic closure computes Pe(rho^{n+1}) at this
+    // same point (it must not overwrite a QDSMC-emitted Pe).
+    if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
+        m_hybrid_pic_model->ApplyQdsmcPeExtrapolation();
+    } else {
+        m_hybrid_pic_model->CalculateElectronPressure();
+    }
+
     // Update the E field to t=n+1 using the extrapolated J_i^n+1 value
     m_hybrid_pic_model->CalculatePlasmaCurrent(
         m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp, finest_level),
@@ -186,6 +237,19 @@ void WarpX::HybridPICEvolveFields ()
         m_fields.get_mr_levels(FieldType::rho_fp, finest_level),
         m_eb_update_E, false);
     FillBoundaryE(guard_cells.ng_FieldSolver, WarpX::sync_nodal_points);
+
+    // Close the circuit-coupling step on the accepted plasma-frame fields
+    // (the engine commits its histories and per-step bookkeeping).
+    if (add_external_fields && m_circuit_coupling && m_circuit_coupling->Coupler()) {
+        m_circuit_coupling->Coupler()->FinishStep();
+    }
+
+    // Update Ve_fp and per-species Vs_fp at t=n+1 for the next step's
+    // particle-level drag operator and per-species resistive overlay.
+    if (m_hybrid_pic_model->m_need_fluid_velocities) {
+        m_hybrid_pic_model->CalculateElectronFluidVelocity();
+        m_hybrid_pic_model->CalculateIonFluidVelocity();
+    }
 
     // Handle field splitting for Hybrid field push
     if (add_external_fields) {
@@ -226,83 +290,68 @@ void WarpX::HybridPICDepositRhoAndJ ()
     using ablastr::fields::Direction;
     using warpx::fields::FieldType;
 
+    // Perform charge deposition in component 0 of rho_fp at current time.
+    mypc->DepositCharge(m_fields.get_mr_levels(FieldType::rho_fp, finest_level), 0._rt);
+
     auto current_fp = m_fields.get_mr_levels_alldirs(FieldType::current_fp, finest_level);
-    auto rho_fp = m_fields.get_mr_levels(FieldType::rho_fp, finest_level);
     if (m_hybrid_pic_model->m_need_per_species_fields) {
-        // Per-species deposition at t_{n+1} (rho) and t_{n-1/2} (J): each
-        // charged species deposits its charge once into its own MultiFab and
-        // the raw deposits are accumulated into the total rho_fp (which gets
-        // its guard-cell sum, filtering, boundaries and RZ volume scaling
-        // later, via SyncCurrentAndRho); the current deposits accumulate
-        // directly into the total current_fp. The per-species charge
-        // densities are kept on the grid for the electron-energy-equation
-        // sources.
-        auto rho_species_sum = m_fields.get_mr_levels("hybrid_rho_species_sum_fp", finest_level);
-        for (int lev = 0; lev <= finest_level; ++lev) {
-            rho_fp[lev]->setVal(0._rt);
-            rho_species_sum[lev]->setVal(0._rt);
-            for (int idim = 0; idim < 3; ++idim) { current_fp[lev][idim]->setVal(0._rt); }
+        // Per-species current deposition at t_{n-1/2}: each charged species
+        // deposits into its own MultiFab and the totals are accumulated into
+        // current_fp. The per-species fields are kept on the grid for
+        // downstream coupling (electron-energy-equation sources, per-species
+        // resistivity, resistive-drag collision operator).
+        for (auto const & J_lev : current_fp) {
+            for (int idim = 0; idim < 3; ++idim) { J_lev[idim]->setVal(0._rt); }
         }
         for (auto const & spec : mypc->GetSpeciesNames()) {
             auto & pc = mypc->GetParticleContainerFromName(spec);
-            if (pc.getCharge() == 0._prt || pc.do_not_deposit) { continue; }
-            auto rho_spec = m_fields.get_mr_levels("rho_fp_" + spec, finest_level);
-            pc.DepositCurrent(current_fp, dt[0], -0.5_rt * dt[0]);
-            pc.DepositCharge(rho_spec, /*local*/true, /*reset*/true,
+            if (pc.getCharge() == 0._prt) { continue; }
+            auto J_spec = m_fields.get_mr_levels_alldirs("current_fp_" + spec, finest_level);
+            for (auto const & J_lev : J_spec) {
+                for (int idim = 0; idim < 3; ++idim) { J_lev[idim]->setVal(0._rt); }
+            }
+            pc.DepositCurrent(J_spec, dt[0], -0.5_rt * dt[0]);
+            for (int lev = 0; lev <= finest_level; ++lev) {
+                for (int idim = 0; idim < 3; ++idim) {
+                    MultiFab::Add(*current_fp[lev][idim], *J_spec[lev][idim],
+                                  0, 0, 1, current_fp[lev][idim]->nGrowVect());
+                }
+            }
+            // Fold the guard-cell deposits of J_spec into the valid cells of
+            // neighboring boxes. pc.DepositCurrent above is a local deposit:
+            // shape-spread contributions from particles near box edges land in
+            // guard cells and are only correct after a SumBoundary. The total
+            // current_fp gets this later via SyncCurrentAndRho (which is why the
+            // raw, unsummed J_spec is accumulated into it above), but the
+            // per-species fields are consumed directly (Vs = Js/rhos, per-species
+            // resistivity, resistive drag) and need their own sum here.
+            for (int lev = 0; lev <= finest_level; ++lev) {
+                for (int idim = 0; idim < 3; ++idim) {
+                    ablastr::utils::communication::SumBoundary(
+                        *J_spec[lev][idim], 0, J_spec[lev][idim]->nComp(),
+                        J_spec[lev][idim]->nGrowVect(), J_spec[lev][idim]->nGrowVect(),
+                        WarpX::do_single_precision_comms, Geom(lev).periodicity());
+                }
+            }
+            // Per-species charge density (used by the electron-energy-equation
+            // sources and to recover the species bulk velocity Vs = Js/rhos in
+            // CalculateIonFluidVelocity).
+            pc.DepositCharge(m_fields.get_mr_levels("rho_fp_" + spec, finest_level),
+                             /*local*/false, /*reset*/true,
                              /*apply_boundary_and_scale_volume*/false,
                              /*interpolate_across_levels*/false);
-            // Accumulate the RAW (locally deposited, unsummed) per-species
-            // charge density into the total: shape-spread contributions near
-            // box edges sit in guard cells at this point and are folded into
-            // the valid cells of the total later by SyncCurrentAndRho,
-            // exactly as in the single-pass deposition path.
-            for (int lev = 0; lev <= finest_level; ++lev) {
-                MultiFab::Add(*rho_fp[lev], *rho_spec[lev],
-                              0, 0, 1, rho_fp[lev]->nGrowVect());
-            }
-#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
-            // Radial geometries: apply the inverse-volume scaling to the
-            // per-species deposit so it carries a physical charge density,
-            // with the same scale-then-guard-sum processing as the totals
-            // below. The Joule and Q_ei sources compare the species sum
-            // against the physical rho_floor (and recover n_s from it), so
-            // a raw radial deposit would engage the floor at healthy
-            // densities near the axis and corrupt the species fractions.
-            for (int lev = 0; lev <= finest_level; ++lev) {
-                ApplyInverseVolumeScalingToChargeDensity(rho_spec[lev], lev);
-            }
-#endif
-            // The per-species charge densities themselves are consumed
-            // directly (species fractions in the Joule and Q_ei sources) and
-            // need their own guard-cell sum here.
-            for (int lev = 0; lev <= finest_level; ++lev) {
-                ablastr::utils::communication::SumBoundary(
-                    *rho_spec[lev], 0, rho_spec[lev]->nComp(),
-                    rho_spec[lev]->nGrowVect(), rho_spec[lev]->nGrowVect(),
-                    WarpX::do_single_precision_comms, Geom(lev).periodicity());
-            }
-            // Species-summed physical charge density (same form as the
-            // rho_fp_s numerators), shared by the electron-energy-equation
-            // consumers. Accumulated AFTER the guard-cell sum so its valid
-            // and ghost cells are final.
-            for (int lev = 0; lev <= finest_level; ++lev) {
-                MultiFab::Add(*rho_species_sum[lev], *rho_spec[lev],
-                              0, 0, 1, rho_species_sum[lev]->nGrowVect());
-            }
         }
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
         for (int lev = 0; lev <= finest_level; ++lev) {
-            ApplyInverseVolumeScalingToChargeDensity(rho_fp[lev], lev);
             ApplyInverseVolumeScalingToCurrentDensity(
                 current_fp[lev][0], current_fp[lev][1], current_fp[lev][2], lev);
         }
 #endif
     } else {
-        // Single-pass deposition (rho at t_{n+1}, J at t_{n-1/2}): no active
-        // feature consumes the per-species fields, so skip the per-species
-        // deposits and guard-cell sums entirely. Zeroing and the RZ inverse
-        // volume scaling are handled inside.
-        mypc->DepositCharge(rho_fp, 0._rt);
+        // Single-pass current deposition at t_{n-1/2}: no active feature
+        // consumes the per-species fields, so skip the extra per-species
+        // charge deposits and guard-cell sums entirely. Zeroing and the RZ
+        // inverse volume scaling are handled inside.
         mypc->DepositCurrent(current_fp, dt[0], -0.5_rt * dt[0]);
     }
 
@@ -378,38 +427,65 @@ void WarpX::HybridPICInitializeRhoJandB ()
     // step. From the first step onward, HybridPICEvolveFields refreshes Pe
     // right after each deposition (via the closure, or via the QDSMC entropy
     // transport when solve_electron_energy_equation is on).
-    // With the energy equation on the closure is evaluated on floored density.
-    // T_e is not checkpointed either, so on restart the seed re-derives it from
-    // the restored rho: evolved T_e structure is not preserved across a restart.
-    m_hybrid_pic_model->CalculateElectronPressure(
-        m_hybrid_pic_model->m_solve_electron_energy_equation);
-
-    if (restart_chkfile.empty()) {
-        // Handle field splitting for Hybrid field push
-        if (m_hybrid_pic_model->m_add_external_fields) {
-            // Get the external fields
-            // Currently t_new is what t_old will be when entering the solver since
-            // after initialization the t_old is set to t_new, then t_new is incremented by dt
-            m_hybrid_pic_model->m_external_vector_potential->UpdateHybridExternalFields(
-                gett_new(0),
-                0.5_rt*dt[0]);
-
-            // If using split fields, add the external field at t=0
-            for (int lev = 0; lev <= finest_level; ++lev) {
-                for (int idim = 0; idim < 3; ++idim) {
-                    // Check to make sure field only contains numeric values
-                    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                        m_fields.get(FieldType::hybrid_B_fp_external, Direction{idim}, lev)->is_finite(),
-                        "Non-finite value detected in external B-field at t=0."
-                    );
-
-                    MultiFab::Add(
-                        *m_fields.get(FieldType::Bfield_fp, Direction{idim}, lev),
-                        *m_fields.get(FieldType::hybrid_B_fp_external, Direction{idim}, lev),
-                        0, 0, 1,
-                        m_fields.get(FieldType::Bfield_fp, Direction{idim}, lev)->nGrowVect());
-                }
+    //
+    // With the energy equation on, seed T_e itself on the floored adiabat
+    // (uniform K_e -- the transport's zero-gradient state, PR #7128) and
+    // emit Pe = n_e k_B T_e from it, with the same boundary treatment
+    // CalculateElectronPressure applies. Calling the algebraic closure here
+    // instead would leave K_e ~ 0 across the floored halo (its T_e mirror
+    // divides by the floored density while the pressure uses the raw one),
+    // re-creating the absorbing edge on the first step. T_e itself is
+    // checkpointed when the energy equation is on (checkpoint_restart flag
+    // on hybrid_electron_temperature_fp): InitFromCheckpoint restores it
+    // and pre-sets m_qdsmc_te_seeded, so the seed below is skipped and the
+    // evolved thermal structure survives the restart. Restarting from an
+    // older checkpoint without the T_e file falls back to the adiabat
+    // re-seed (with a warning). The non-default leapfrog Pe extrapolation
+    // carries no checkpointed history either way: it re-self-starts after
+    // a restart with a dt/2 transient (pc and euler carry no such state).
+    //
+    // The adiabat seed runs ONCE per process: this entry point executes at
+    // step == step_begin of EVERY Evolve() entry (each segmented PICMI
+    // sim.step()), and an unconditional re-seed would wipe the evolved T_e
+    // mid-run — the same re-entry class as the closure Pe reset fixed
+    // earlier on this branch. Pe is still re-emitted from the CURRENT T_e
+    // on every entry.
+    if (m_hybrid_pic_model->m_solve_electron_energy_equation) {
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            if (!m_hybrid_pic_model->m_qdsmc_te_seeded) {
+                m_hybrid_pic_model->SeedTeAdiabat(lev);
             }
+            m_hybrid_pic_model->QDSMCFillElectronPressureFromTe(lev);
+            ApplyElectronPressureBoundary(lev, PatchType::fine);
+            ablastr::utils::communication::FillBoundary(
+                *m_fields.get(FieldType::hybrid_electron_pressure_fp, lev),
+                do_single_precision_comms,
+                Geom(lev).periodicity(),
+                true);
+        }
+        m_hybrid_pic_model->m_qdsmc_te_seeded = true;
+    } else {
+        m_hybrid_pic_model->CalculateElectronPressure();
+    }
+
+    // Handle field splitting for the hybrid field push: stage the external
+    // fields and add their contribution to the total field once, at the
+    // true start of the run. This entry point executes at the first step
+    // of EVERY Evolve() call, and beyond the first entry Bfield_fp already
+    // carries the external contribution (segmented stepping through
+    // repeated sim.step() calls re-enters here mid-run) -- adding it again
+    // double-counts the external field on every re-entry. On restart the
+    // checkpointed fields likewise already contain it.
+    if (restart_chkfile.empty() && istep[0] == 0) {
+        // Form the total initial field: add the t=0 external B on top of the
+        // loaded initial condition, coil by coil, skipping coils whose flux
+        // the initial condition already contains
+        // (external_vector_potential.<name>.in_initial_field). The arrays
+        // are left holding the full t=0 external sum for the first push
+        // (t_new is what t_old will be when entering the solver since after
+        // initialization t_old is set to t_new, then t_new is incremented).
+        if (m_hybrid_pic_model->m_add_external_fields) {
+            m_hybrid_pic_model->m_external_vector_potential->AddInitialExternalBField();
         }
     }
 

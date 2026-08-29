@@ -135,6 +135,14 @@ guardCellManager::Init (
     amrex::ignore_unused(ngy, ngJy, ngz, ngJz);
 #endif
 
+    // Ampere's-law current evaluation in the hybrid solver fills one guard
+    // cell before interpolating J to the grids used by Ohm's law. Particle
+    // shape normally supplies this allocation, but particle-free fluid modes
+    // must request it explicitly.
+    if (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) {
+        ng_alloc_J.max(IntVect::TheUnitVector());
+    }
+
     // TODO Adding one cell for rho should not be necessary, given that the number of guard cells
     // now takes into account the time step (see code block below). However, this does seem to be
     // necessary in order to avoid some remaining instances of out-of-bound array access in
@@ -319,6 +327,15 @@ guardCellManager::Init (
     if ((electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) &&
         (ng_FieldSolver < IntVect(AMREX_D_DECL(2, 2, 2)))) {
         ng_FieldSolver += 1;
+    }
+
+    // The hybrid-PIC Ohm/Ampere kernels compute the plasma current into one
+    // guard cell of the J-family fields (their tileboxes are grown by 1),
+    // so J needs at least one allocated guard cell even when no particle
+    // shape requires any (e.g. species-free vacuum decks). Any deck with
+    // particles already satisfies this.
+    if (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) {
+        ng_alloc_J.max(IntVect(AMREX_D_DECL(1, 1, 1)));
     }
 
     // Number of guard cells is the max of that determined by particle shape factor and

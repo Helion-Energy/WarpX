@@ -32,6 +32,7 @@
 #include <Fluids/WarpXFluidContainer.H>
 #include <Particles/ParticleBoundaryBuffer.H>
 #include <AcceleratorLattice/AcceleratorLattice.H>
+#include <Circuit/CircuitCoupling.H>
 #include <Utils/TextMsg.H>
 #include <Utils/WarpXAlgorithmSelection.H>
 #include <Utils/WarpXConst.H>
@@ -219,6 +220,13 @@ void init_WarpX (py::module& m)
             py::arg("lev"),
             "Get the current physical time step size on mesh-refinement level ``lev``."
         )
+        .def("setdt",
+            [](WarpX & wx, amrex::Real dt_new){ wx.setdt(dt_new); },
+            py::arg("dt"),
+            "Set the physical time step size on all mesh-refinement levels. "
+            "Requires synchronized particle velocities: call "
+            "``synchronize_velocity_with_position()`` first."
+        )
 
         .def("set_potential_on_domain_boundary",
             [](WarpX& wx,
@@ -275,6 +283,59 @@ void init_WarpX (py::module& m)
             },
             "Gets the number of substeps taken in the hybrid solver."
         )
+        .def("set_external_vector_potential_scale",
+            [](WarpX& wx, std::string const & name, amrex::Real s_old,
+               amrex::Real s_new, amrex::Real t_old, amrex::Real t_new) {
+                auto * hybrid_pic_model = wx.get_pointer_HybridPICModel();
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    hybrid_pic_model && hybrid_pic_model->m_add_external_fields,
+                    "set_external_vector_potential_scale requires the hybrid "
+                    "solver with external fields enabled");
+                hybrid_pic_model->m_external_vector_potential->SetScale(
+                    name, s_old, s_new, t_old, t_new);
+            },
+            py::arg("name"), py::arg("s_old"), py::arg("s_new"),
+            py::arg("t_old"), py::arg("t_new"),
+            "Sets the piecewise-linear scale segment of a scale-driven "
+            "external vector potential field for the upcoming interval."
+        )
+        .def("get_external_vector_potential_scale",
+            [](WarpX& wx, std::string const & name, amrex::Real t) {
+                auto * hybrid_pic_model = wx.get_pointer_HybridPICModel();
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    hybrid_pic_model && hybrid_pic_model->m_add_external_fields,
+                    "get_external_vector_potential_scale requires the hybrid "
+                    "solver with external fields enabled");
+                return hybrid_pic_model->m_external_vector_potential->GetScale(
+                    name, t);
+            },
+            py::arg("name"), py::arg("t"),
+            "Gets the scale of an external vector potential field at time t."
+        )
+        .def("get_coupling_interval",
+            [](WarpX& wx) {
+                auto * cc = wx.get_pointer_CircuitCoupling();
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(cc && cc->Coupler(),
+                    "get_coupling_interval requires an active circuit "
+                    "coupling engine (circuit.engine)");
+                auto const& iv = cc->Coupler()->CurrentInterval();
+                return py::make_tuple(iv.t0, iv.t1, iv.substep, iv.iteration);
+            },
+            "Gets the circuit coupling interval as (t0, t1, substep, "
+            "iteration); iteration 0 is the predictor."
+        )
+        .def("get_coil_flux_linkage",
+            [](WarpX& wx, std::string const & name) {
+                auto * cc = wx.get_pointer_CircuitCoupling();
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(cc && cc->Coupler(),
+                    "get_coil_flux_linkage requires an active circuit "
+                    "coupling engine (circuit.engine)");
+                return cc->Coupler()->CoilLinkage(name);
+            },
+            py::arg("name"),
+            "Gets the latest measured plasma flux linkage of a circuit "
+            "coil (lambda_phys * I_ref * n_turns)."
+        )
         .def("set_hybrid_pic_density_floor",
             [](WarpX& wx, amrex::Real n_floor) {
                 wx.get_pointer_HybridPICModel()->m_n_floor = n_floor;
@@ -287,6 +348,41 @@ void init_WarpX (py::module& m)
                 return wx.get_pointer_HybridPICModel()->m_n_floor;
             },
             "Gets the number of substeps to take in the hybrid solver."
+        )
+        .def("get_qdsmc_wall_tally",
+            [](WarpX& wx, int dim, int side) {
+                return wx.get_pointer_HybridPICModel()
+                    ->GetQdsmcWallTally(dim, side);
+            },
+            py::arg("dim"), py::arg("side"),
+            "Cumulative QDSMC conduction wall-BC energy tally for the "
+            "domain face (dim, side: 0=lo, 1=hi), in node-u units "
+            "[J/m^3] summed over boundary nodes (positive = energy "
+            "added to the plasma)."
+        )
+        .def("get_qdsmc_eb_tally",
+            [](WarpX& wx) {
+                return wx.get_pointer_HybridPICModel()->GetQdsmcEbTally();
+            },
+            "Cumulative QDSMC conduction embedded-boundary energy tally "
+            "(isothermal EB BC), node-u units [J/m^3] summed over fluid "
+            "nodes (positive = energy added to the plasma)."
+        )
+        .def("get_eb_collected_charge",
+            [](WarpX& wx, std::string const& species_name) {
+                return wx.GetPartContainer().GetEBCollectedCharge(species_name);
+            },
+            py::arg("species_name"),
+            "Gets the cumulative charge [C] the given species has deposited "
+            "on the embedded boundary (insulating EB wall type only)."
+        )
+        .def("get_eb_collected_energy",
+            [](WarpX& wx, std::string const& species_name) {
+                return wx.GetPartContainer().GetEBCollectedEnergy(species_name);
+            },
+            py::arg("species_name"),
+            "Gets the cumulative kinetic energy [J] the given species has "
+            "deposited on the embedded boundary (insulating EB wall type only)."
         )
     ;
 }

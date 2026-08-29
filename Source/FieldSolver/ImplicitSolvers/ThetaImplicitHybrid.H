@@ -1,0 +1,267 @@
+/* Copyright 2026 Prabhat Kumar
+ *
+ * This file is part of WarpX.
+ *
+ * License: BSD-3-Clause-LBNL
+ */
+#ifndef THETA_IMPLICIT_HYBRID_H_
+#define THETA_IMPLICIT_HYBRID_H_
+
+#include "FieldSolver/ImplicitSolvers/WarpXSolverVec.H"
+#include "ImplicitSolver.H"
+
+#include <AMReX_Array.H>
+#include <AMReX_MultiFab.H>
+#include <AMReX_REAL.H>
+
+class HybridPICModel;
+
+/** @file
+ *  Theta-implicit hybrid-PIC time solver class. This is a fully implicit
+ *  algorithm where both the fields and particles are treated implicitly.
+ *
+ *  In the hybrid-PIC model, ions are kinetic particles while electrons are
+ *  treated as a massless, charge-neutralizing fluid. The electric field is
+ *  determined algebraically from the generalized Ohm's law.
+ *
+ *  The magnetic field evolves via Faraday's law:
+ *  Bg^{n+1} = Bg^n - dt*curl(Eg^{n+theta})
+ *
+ *  Particles are advanced as:
+ *  xp^{n+1} = xp^n + dt*up^{n+1/2}/(0.5*(gammap^n + gammap^{n+1}))
+ *  up^{n+1} = up^n + dt*qp/mp*(Ep^{n+theta} + up^{n+1/2}/gammap^{n+1/2} x Bp^{n+theta})
+ *
+ *  where f^{n+theta} = (1.0-theta)*f^{n} + theta*f^{n+1} with 0.5 <= theta <= 1.0
+ *
+ *  The key difference from fully electromagnetic implicit solvers is that E is computed
+ *  from the generalized Ohm's law at each nonlinear iteration. The nonlinear solver finds
+ *  the self-consistent E^{n+theta} such that:
+ *
+ *     E = (J_e x B) / (n_e * e)          (Hall term)
+ *       - grad(P_e) / (n_e * e)          (Electron pressure)
+ *       + eta * J                         (Resistivity)
+ *       - eta_H * laplacian(J_e)          (Hyper-resistivity)
+ *
+ *  where the electron current is:
+ *     J_e = J_plasma - J_ion
+ *
+ *  and the plasma current is computed from Ampere's law:
+ *     J_plasma = curl(B) / mu_0
+ *
+ *  The nonlinear solver iterates to find the self-consistent solution
+ *  E^{n+theta} = Ohm(B^{n+theta}, J_i^{n+1/2}, rho^{n+1/2}).
+ *
+ *  The user-specified time-biasing parameter theta is bounded between 0.5 and 1.0.
+ *  Significant damping of high-k modes will occur as theta approaches 1.0. Since
+ *  there are no light waves in the hybrid model (the displacement current is neglected),
+ *  the CFL condition for light waves does not apply. The time step is limited by:
+ *  1. Resolving the relevant ion physics (cyclotron motion, etc.)
+ *  2. Particles not traveling outside the ghost region (MPI limitation)
+ *  3. The need to resolve whistler waves if hyper-resistivity is insufficient
+ *
+ */
+
+class ThetaImplicitHybrid : public ImplicitSolver
+{
+public:
+
+    ThetaImplicitHybrid() = default;
+
+    ~ThetaImplicitHybrid() override = default;
+
+    // Prohibit Move and Copy operations
+    ThetaImplicitHybrid(const ThetaImplicitHybrid&) = delete;
+    ThetaImplicitHybrid& operator=(const ThetaImplicitHybrid&) = delete;
+    ThetaImplicitHybrid(ThetaImplicitHybrid&&) = delete;
+    ThetaImplicitHybrid& operator=(ThetaImplicitHybrid&&) = delete;
+
+    void Define ( WarpX*  a_WarpX, bool  a_from_restart ) override;
+
+    void PrintParameters () const override;
+
+    /**
+     * \brief Advances the simulation one time step
+     *
+     * \param[in] start_time The time at the start of the time step
+     * \param[in] a_dt The time step size
+     * \param[in] a_step The time step number
+     *
+     * \return The nonlinear solver exit status (negative on failure)
+     */
+    int OneStep ( amrex::Real  start_time,
+                  amrex::Real  a_dt,
+                  int          a_step ) override;
+
+    void ComputeRHS ( WarpXSolverVec&  a_RHS,
+                const WarpXSolverVec&  a_E,
+                      amrex::Real      start_time,
+                      int              a_nl_iter,
+                      bool             a_from_jacobian ) override;
+
+    // Hybrid model has no light waves, so return 0 for the PC theta parameter
+    [[nodiscard]] amrex::Real GetThetaForPC () const override { return amrex::Real(0.0); }
+
+private:
+
+    /**
+     * \brief Pointer to the hybrid-PIC model that computes E from Ohm's law.
+     * This is owned by WarpX, not by this class.
+     */
+    HybridPICModel* m_hybrid_pic_model = nullptr;
+
+    /**
+     * \brief Solver vectors for the electric field.
+     * m_E: E field at time n+theta (during solve), then n+1 (after FinishFieldUpdate)
+     * m_Eold: E field at time n (saved at start of timestep)
+     *
+     * m_Eold is needed for:
+     * - Initial guess for the nonlinear solver
+     * - Reference value for residual computation in ComputeRHS
+     * - Extrapolation from t^{n+theta} to t^{n+1} in FinishFieldUpdate
+     */
+    WarpXSolverVec m_E;
+    WarpXSolverVec m_Eold;
+
+    /**
+     * \brief Update the E and B fields owned by WarpX. Updates B^{n+theta}
+     * from E via Faraday's law, then computes E^{n+theta} from Ohm's law.
+     */
+    void UpdateWarpXFields ( const WarpXSolverVec&  a_E,
+                             bool a_from_jacobian,
+                             amrex::Real            start_time );
+
+    /**
+     * \brief Extrapolate fields from t^{n+theta} to t^{n+1} after convergence.
+     * Uses: F^{n+1} = (1/theta)*F^{n+theta} + (1 - 1/theta)*F^n
+     * This is applied to both E and B fields.
+     */
+    void FinishFieldUpdate ( amrex::Real end_time );
+
+    /** Darwin split (hybrid_pic_model.darwin): when true, the solver state
+     *  is the transverse field E_T, the magnetic field is advanced through
+     *  the vector potential (B = B_static + curl A,
+     *  A^{n+1} = A^n - dt E_T^{n+theta}) instead of Faraday's law, and the
+     *  longitudinal field E_L = grad(phi) comes from the instantaneous
+     *  ambipolar constraint (HybridPICModel::ComputeDarwinELong), refreshed
+     *  once per nonlinear iteration. */
+    bool m_darwin = false;
+
+    /** One-time Darwin state capture (B_static = B(t=0), A = 0), performed
+     *  at the top of the first OneStep when all fields are initialized. */
+    bool m_darwin_initialized = false;
+
+    /** Cached in Define: vacuum vector-potential recovery enabled
+     *  (hybrid_pic_model.darwin_vacuum_recovery), and its "half" cadence
+     *  (apply inside every residual evaluation at the theta-stage field, in
+     *  addition to the end-of-step application both cadences share). */
+    bool m_vacuum_recovery = false;
+    bool m_vacuum_recovery_half = false;
+
+    /** Circuit-in-the-residual coupling
+     *  (implicit_evolve.external_field_iteration): every residual
+     *  evaluation executes the "externalcoiltheta" python callback after
+     *  the iterate's plasma current is computed (and FinishFieldUpdate the
+     *  "externalcoilfinish" one before the end-of-step boundary values are
+     *  imposed), then re-imposes the external-drive boundary values of A
+     *  at the updated coil scales and re-derives B. Python measures the
+     *  flux linkage of the iterate's plasma current
+     *  (hybrid_current_fp_plasma), re-advances the coupled circuit, and
+     *  pushes coil scale segments (SetScale). The map stays smooth in the
+     *  state, so matrix-free Jacobian probes see the coupled
+     *  plasma-circuit physics and Newton converges both together (a
+     *  step-lagged circuit is unstable at strong coil-plasma coupling).
+     *  On the Darwin unified drive the scales re-enter through the
+     *  boundary pin (+ vacuum recovery); on the split-field path the
+     *  callback runs in the plasma-response frame (stored externals
+     *  subtracted, refreshed at the new scales, then restored). */
+    bool m_external_field_iteration = false;
+
+    /** Apply the particle boundary conditions and re-bin (Redistribute)
+     *  BEFORE the end-of-step deposits
+     *  (implicit_evolve.redistribute_before_end_deposits, default false).
+     *  The full-dt extrapolated positions can exceed the deposit guard
+     *  range (v dt > range * dx) -- a documented hazard of the
+     *  deposit-then-redistribute posture that CI decks dodge with inert
+     *  ions but driven production decks with warm boundary populations
+     *  cannot (the crosser rate scales with particle count). Opt-in: the
+     *  redistribution reorders particles ahead of the next step's
+     *  deposits, so enabling it changes bit-pinned CI trajectories. */
+    bool m_redistribute_before_end_deposits = false;
+
+    /** Cached in Define: subtract the resistive Ohm-field part from the
+     *  particle push field (hybrid_pic_model.implicit_push_excludes_resistive_field
+     *  and a resistive term configured). */
+    bool m_use_resistive_push_correction = false;
+
+    /** Segregated midpoint-iterated solve for the QDSMC electron-energy
+     *  stage (implicit_evolve.qdsmc_segregated_solve): the stage is lifted
+     *  out of the residual evaluations -- the inner nonlinear solver
+     *  converges the field system at frozen electron pressure, then one
+     *  re-entrant stage pass re-solves the midpoint entropy transport
+     *  against the converged fields, and the outer loop in OneStep iterates
+     *  the pair to joint self-consistency (convergence measured on the
+     *  relative change of the emitted pressure). Keeps the marker
+     *  gather/push/deposit chain out of Jacobian-vector products and
+     *  line-search trials; the coupled fixed point is unchanged. */
+    bool m_qdsmc_segregated_solve = false;
+    int m_qdsmc_outer_max_iterations = 20;
+    amrex::Real m_qdsmc_outer_relative_tolerance = 1.0e-6;
+    bool m_qdsmc_outer_require_convergence = true;
+    bool m_qdsmc_outer_verbose = false;
+
+    /** Previous outer iterate of the emitted electron pressure, for the
+     *  outer convergence test (allocated on first use). */
+    amrex::Vector<std::unique_ptr<amrex::MultiFab>> m_qdsmc_Pe_prev;
+
+    /** Outer loop of the segregated solve: alternate {inner nonlinear solve
+     *  at frozen Pe, one stage pass on the as-left converged grid state}
+     *  until the emitted pressure stops changing. Ends on the stage pass so
+     *  the markers and V_e are consistent with the accepted field state
+     *  (QDSMCFinishImplicitStep completes the characteristic unchanged).
+     *
+     *  \return the inner solver's exit status, or -7 if the outer loop
+     *          reached qdsmc_outer_max_iterations with
+     *          qdsmc_outer_require_convergence set. */
+    int SolveSegregated ( amrex::Real start_time, int a_step );
+
+    /** Darwin magnetic-field update: A^{n+theta} = A_old - theta dt E_T
+     *  (from Efield_fp, which holds the transverse state at entry),
+     *  then B = B_static + curl A with boundary treatment. */
+    void DarwinUpdateA_B ( amrex::Real a_thetadt, amrex::Real a_time,
+                           bool a_from_jacobian );
+
+public:
+
+    /** Unified external drive on the Darwin path: impose the (gauge-shifted)
+     * external vector potential as the boundary value of the evolved A on
+     * non-periodic domain boundaries, and hold A inside embedded-boundary
+     * bodies (frozen enclosed flux). Applied after every A update.
+     *
+     * Public only for CUDA: the body defines extended __device__ lambdas
+     * (ParallelFor), and nvcc requires the enclosing member function of an
+     * extended lambda to have public access (hard error since CUDA 13). */
+    void DarwinApplyABoundary ( amrex::Real a_time );
+
+private:
+
+    /** Derive B = B_static + curl A (with the derived-field boundary
+     * treatment) from the current A. Used by the circuit-in-the-residual
+     * coupling to re-derive B after the boundary values of A were
+     * re-imposed at updated coil scales. */
+    void DarwinDeriveB ();
+
+    /** Split-field path: add a_sign times the stored external B/E arrays
+     * to the total fields. The circuit-in-the-residual coupling uses the
+     * (-1, refresh, +1) sequence to expose the plasma-response frame to
+     * the python flux-linkage probes and re-assemble circuit-consistent
+     * totals within the evaluation. */
+    void AddSplitExternalFields ( amrex::Real a_sign );
+
+    /** f_i(t_init) for each external A field: the Darwin gauge zeroes A at
+     * initialization, so boundary values impose the CHANGE of the external
+     * vector potential since then. */
+    amrex::Vector<amrex::Real> m_fext_init;
+
+};
+
+#endif

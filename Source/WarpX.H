@@ -12,8 +12,10 @@
 #ifndef WARPX_H_
 #define WARPX_H_
 
+#include "BoundaryConditions/GreensFunctionOpenBC_fwd.H"
 #include "BoundaryConditions/PEC_Insulator_fwd.H"
 #include "BoundaryConditions/PML_fwd.H"
+#include "Circuit/CircuitCoupling_fwd.H"
 #include "Diagnostics/MultiDiagnostics_fwd.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags_fwd.H"
 #include "EmbeddedBoundary/WarpXFaceInfoBox_fwd.H"
@@ -161,6 +163,7 @@ public:
     MultiFluidContainer& GetFluidContainer () { return *myfl; }
     ElectrostaticSolver& GetElectrostaticSolver () {return *m_electrostatic_solver;}
     [[nodiscard]] HybridPICModel * get_pointer_HybridPICModel () const { return m_hybrid_pic_model.get(); }
+    [[nodiscard]] CircuitCoupling * get_pointer_CircuitCoupling () const { return m_circuit_coupling.get(); }
     MultiDiagnostics& GetMultiDiags () {return *multi_diags;}
     ParticleBoundaryBuffer& GetParticleBoundaryBuffer () { return *m_particle_boundary_buffer; }
     amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>,3 > >& GetEBUpdateEFlag() { return m_eb_update_E; }
@@ -223,6 +226,29 @@ public:
      *  Default is Absorbing
      */
     static inline ParticleBoundaryType eb_particle_boundary = ParticleBoundaryType::Absorbing;
+
+    /** Embedded-boundary wall type (`boundary.eb_type`).
+     *
+     *  Absorbing (default): particles are collected where the signed distance
+     *  to the EB crosses zero -- the historical behavior.
+     *
+     *  Insulating: a collecting wall held off the plasma by a maintained
+     *  density standoff band. Particles are collected `eb_standoff_cells`
+     *  cells before the surface (so no charge is ever deposited against the
+     *  wall), the collected charge and kinetic energy are tallied per
+     *  species, and -- with the hybrid electron energy equation on -- T_e is
+     *  filled with zero normal gradient into the band and the covered region
+     *  each step, so grad P_e drives no spurious E field at the plasma edge.
+     */
+    static inline auto eb_boundary_type = EmbeddedBoundaryType::Absorbing;
+
+    /** Width of the insulating-wall standoff band, in cells
+     *  (`boundary.eb_standoff_cells`): particles are collected where the
+     *  signed distance to the EB falls below this many cells (times the
+     *  largest cell size of the level). Only used with
+     *  `boundary.eb_type = insulating`.
+     */
+    static inline amrex::Real eb_standoff_cells = amrex::Real(2.0);
 
     //! Integers that correspond to the time dependency of J (constant, linear)
     //! and rho (linear, quadratic) for the PSATD algorithm
@@ -605,6 +631,10 @@ public:
 
     void ApplyEfieldBoundary (int lev, PatchType patch_type, amrex::Real cur_time);
     void ApplyBfieldBoundary (int lev, PatchType patch_type, SubcyclingHalf subcycling_half, amrex::Real cur_time);
+    /** Apply only the reflecting (PMC) condition to the B-field, for field
+     * solvers that update B outside the standard push (e.g. the hybrid
+     * solver's substepped Faraday advance). */
+    void ApplyBfieldBoundarySubstep (int lev, PatchType patch_type);
 
 #if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
     // Applies the boundary conditions that are specific to the axis when in RZ.
@@ -721,6 +751,13 @@ public:
     void sett_new (int lev, amrex::Real time) {t_new[lev] = time;}
     [[nodiscard]] amrex::Vector<amrex::Real> getdt () const {return dt;}
     [[nodiscard]] amrex::Real getdt (int lev) const {return dt.at(lev);}
+    /** Set the physical time step to \c dt_new on every mesh-refinement
+     * level (the uniform-dt invariant of non-subcycled runs; aborts under
+     * AMR subcycling). Requires the particle velocities to be synchronized
+     * with the positions (SynchronizeVelocityWithPosition) so the next
+     * step's leapfrog re-stagger uses the new step size consistently.
+     */
+    void setdt (amrex::Real dt_new);
     [[nodiscard]] int getdo_moving_window() const {return do_moving_window;}
     [[nodiscard]] amrex::Real getmoving_window_x() const {return moving_window_x;}
     [[nodiscard]] bool getis_synchronized() const {return m_is_synchronized;}
@@ -1316,6 +1353,16 @@ private:
 
     // Insulator boundary conditions
     std::unique_ptr<PEC_Insulator> pec_insulator_boundary;
+
+    /** Green's-function open (free-space) field boundary for the RZ
+     * hybrid-PIC B-field advance; lazily constructed in
+     * ApplyBfieldBoundary when active (boundary.field_hi[0] == open). */
+    std::unique_ptr<GreensFunctionOpenBC> m_open_bc_greens;
+
+    /** Coil / circuit-coupling subsystem (circuit.coils): unit coil fields
+     * and discrete inductances driving the hybrid solver's split external
+     * fields. */
+    std::unique_ptr<CircuitCoupling> m_circuit_coupling;
 
     // External fields parameters
     std::unique_ptr<ExternalFieldParams> m_p_ext_field_params;

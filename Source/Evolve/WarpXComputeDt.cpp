@@ -45,6 +45,22 @@ minDim (const amrex::Real* x)
     return std::min({AMREX_D_DECL(x[0], x[1], x[2])});
 }
 
+void
+WarpX::setdt (amrex::Real dt_new)
+{
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(dt_new > 0.,
+        "setdt: the time step must be positive");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_do_subcycling,
+        "setdt is not implemented for AMR subcycling (per-level dt)");
+    // The leapfrog stagger must be at the synchronized state: the next
+    // step's initial half-push then re-staggers with the new dt. A mid-
+    // stagger change would leave the velocities offset by (dt_old-dt_new)/2.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_is_synchronized,
+        "setdt requires synchronized particle velocities: call "
+        "synchronize_velocity_with_position() first");
+    for (auto & d : dt) { d = dt_new; }
+}
+
 /**
  * Determine the timestep of the simulation. */
 void

@@ -329,9 +329,12 @@ void doVarianceDepositionShapeNKernel(
         const amrex::Real wpy_var = static_cast<amrex::Real>(wp)*sz_jy[iz];
         const amrex::Real wpz_var = static_cast<amrex::Real>(wp)*sz_jz[iz];
 
-        const amrex::IntVectND<3> ixv{lo.z+l_jx+iz, 0, 0};
-        const amrex::IntVectND<3> iyv{lo.z+l_jy+iz, 0, 0};
-        const amrex::IntVectND<3> izv{lo.z+l_jz+iz, 0, 0};
+        // 1D: the only index dimension is component 0 of the box, so
+        // the tile offset is lo.x even though the physical axis is z
+        // (same index-space/physical-space split as CurrentDeposition).
+        const amrex::IntVectND<3> ixv{lo.x+l_jx+iz, 0, 0};
+        const amrex::IntVectND<3> iyv{lo.x+l_jy+iz, 0, 0};
+        const amrex::IntVectND<3> izv{lo.x+l_jz+iz, 0, 0};
 
         varianceDepositionSubKernel(
             vx, vy, vz,
@@ -372,9 +375,14 @@ void doVarianceDepositionShapeNKernel(
             const amrex::Real wpy_var = wp*sx_jy[ix]*sz_jy[iz];
             const amrex::Real wpz_var = wp*sx_jz[ix]*sz_jz[iz];
 
-            const amrex::IntVectND<3> ixv{lo.x+j_jx+ix, lo.z+l_jx+iz, 0};
-            const amrex::IntVectND<3> iyv{lo.x+j_jy+ix, lo.z+l_jy+iz, 0};
-            const amrex::IntVectND<3> izv{lo.x+j_jz+ix, lo.z+l_jz+iz, 0};
+            // 2D/RZ: physical z is index component 1, so the tile
+            // offset is lo.y — lo.z is identically zero in 2D and
+            // using it deposits at tile-LOCAL z indices (correct only
+            // for the box at the domain corner; out of bounds on any
+            // z-offset box, matching CurrentDeposition's lo.y).
+            const amrex::IntVectND<3> ixv{lo.x+j_jx+ix, lo.y+l_jx+iz, 0};
+            const amrex::IntVectND<3> iyv{lo.x+j_jy+ix, lo.y+l_jy+iz, 0};
+            const amrex::IntVectND<3> izv{lo.x+j_jz+ix, lo.y+l_jz+iz, 0};
 
             varianceDepositionSubKernel(
 #if defined(WARPX_DIM_RZ)

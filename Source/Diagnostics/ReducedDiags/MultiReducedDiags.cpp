@@ -8,6 +8,8 @@
 
 #include "BeamRelevant.H"
 #include "ChargeOnEB.H"
+#include "CircuitCouplingDiag.H"
+#include "HybridDissipation.H"
 #include "ColliderRelevant.H"
 #include "DifferentialLuminosity.H"
 #include "DifferentialLuminosity2D.H"
@@ -17,6 +19,7 @@
 #include "FieldPoyntingFlux.H"
 #include "FieldProbe.H"
 #include "FieldReduction.H"
+#include "HybridDissipation.H"
 #include "LoadBalanceCosts.H"
 #include "LoadBalanceEfficiency.H"
 #include "ParticleEnergy.H"
@@ -26,6 +29,7 @@
 #include "ParticleMomentum.H"
 #include "ParticleNumber.H"
 #include "RhoMaximum.H"
+#include "ScrapedParticleEnergy.H"
 #include "Timestep.H"
 #include "Utils/TextMsg.H"
 
@@ -57,9 +61,12 @@ MultiReducedDiags::MultiReducedDiags ()
         std::map<std::string, std::function<std::unique_ptr<ReducedDiags>(CS)>>{
             {"BeamRelevant",          [](CS s){return std::make_unique<BeamRelevant>(s);}},
             {"ChargeOnEB",            [](CS s){return std::make_unique<ChargeOnEB>(s);}},
+            {"CircuitCoupling",       [](CS s){return std::make_unique<CircuitCouplingDiag>(s);}},
+            {"HybridDissipation",     [](CS s){return std::make_unique<HybridDissipation>(s);}},
             {"ColliderRelevant",      [](CS s){return std::make_unique<ColliderRelevant>(s);}},
             {"DifferentialLuminosity",[](CS s){return std::make_unique<DifferentialLuminosity>(s);}},
             {"DifferentialLuminosity2D",[](CS s){return std::make_unique<DifferentialLuminosity2D>(s);}},
+            {"HybridDissipation",     [](CS s){return std::make_unique<HybridDissipation>(s);}},
             {"ParticleEnergy",        [](CS s){return std::make_unique<ParticleEnergy>(s);}},
             {"ParticleExtrema",       [](CS s){return std::make_unique<ParticleExtrema>(s);}},
             {"ParticleHistogram",     [](CS s){return std::make_unique<ParticleHistogram>(s);}},
@@ -75,6 +82,7 @@ MultiReducedDiags::MultiReducedDiags ()
             {"LoadBalanceCosts",      [](CS s){return std::make_unique<LoadBalanceCosts>(s);}},
             {"LoadBalanceEfficiency", [](CS s){return std::make_unique<LoadBalanceEfficiency>(s);}},
             {"RhoMaximum",            [](CS s){return std::make_unique<RhoMaximum>(s);}},
+            {"ScrapedParticleEnergy", [](CS s){return std::make_unique<ScrapedParticleEnergy>(s);}},
             {"Timestep",              [](CS s){return std::make_unique<Timestep>(s);}}
     };
     // loop over all reduced diags and fill m_multi_rd with requested reduced diags

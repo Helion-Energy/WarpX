@@ -12,7 +12,9 @@
 #include "WarpX.H"
 
 #include "BoundaryConditions/FieldBoundaries.H"
+#include "BoundaryConditions/GreensFunctionOpenBC.H"
 #include "BoundaryConditions/PEC_Insulator.H"
+#include "Circuit/CircuitCoupling.H"
 #include "BoundaryConditions/PML.H"
 #include "Diagnostics/MultiDiagnostics.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
@@ -300,6 +302,26 @@ void WarpX::MakeWarpX ()
             eb_particle_boundary == ParticleBoundaryType::Reflecting ||
             eb_particle_boundary == ParticleBoundaryType::Thermal,
             "boundary.particle_eb must be Absorbing, Reflecting, or Thermal");
+
+        // Embedded-boundary wall type. Defaults to Absorbing (the historical
+        // behavior); Insulating collects particles a standoff band before the
+        // surface and holds a zero-normal-gradient T_e/P_e fill into the band
+        // (hybrid electron energy equation).
+        pp_boundary.query_enum_case_insensitive("eb_type", eb_boundary_type);
+        if (eb_boundary_type == EmbeddedBoundaryType::Insulating) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                eb_particle_boundary == ParticleBoundaryType::Absorbing,
+                "boundary.eb_type = insulating is a collecting wall and "
+                "requires boundary.particle_eb = absorbing (the default)");
+            utils::parser::queryWithParser(
+                pp_boundary, "eb_standoff_cells", eb_standoff_cells);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                eb_standoff_cells >= 0.0 && eb_standoff_cells <= 4.0,
+                "boundary.eb_standoff_cells must be in [0, 4]: the EB "
+                "signed-distance field saturates at (ngrow+1) smallest "
+                "cells from the surface, and a standoff beyond the "
+                "saturation roof collects every fluid cell");
+        }
     }
 
     CheckGriddingForRZSpectral();
@@ -426,6 +448,12 @@ WarpX::WarpX ()
     {
         // Create hybrid-PIC model object if needed
         m_hybrid_pic_model = std::make_unique<HybridPICModel>();
+    }
+
+    if (CircuitCoupling::IsConfigured())
+    {
+        // Coil / circuit-coupling subsystem (circuit.coils)
+        m_circuit_coupling = std::make_unique<CircuitCoupling>();
     }
 
     current_buffer_masks.resize(nlevs_max);
@@ -782,9 +810,28 @@ WarpX::ReadParameters ()
             std::any_of(field_boundary_hi.begin(), field_boundary_hi.end(), [](auto fb){return (fb == FieldBoundaryType::Open ); }) ;
 
         if(is_any_boundary_open){
+            // In RZ geometry with the hybrid-PIC solver, `open` on the r_hi
+            // face and/or the z_lo/z_hi cap faces selects the Green's-function
+            // free-space boundary for the B-field advance (see
+            // BoundaryConditions/GreensFunctionOpenBC). The r_lo face is the
+            // symmetry axis and can never be open.
+#if defined(WARPX_DIM_RZ)
+            const bool open_bc_greens_rz =
+                (electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC) &&
+                (field_boundary_lo[0] != FieldBoundaryType::Open) &&
+                ((field_boundary_hi[0] == FieldBoundaryType::Open) ||
+                 (field_boundary_lo[1] == FieldBoundaryType::Open) ||
+                 (field_boundary_hi[1] == FieldBoundaryType::Open));
+#else
+            const bool open_bc_greens_rz = false;
+#endif
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                poisson_solver_id == PoissonSolverAlgo::IntegratedGreenFunction,
-                "Field open boundary conditions are only implemented for the FFT-based Poisson solver");
+                poisson_solver_id == PoissonSolverAlgo::IntegratedGreenFunction ||
+                open_bc_greens_rz,
+                "Field open boundary conditions are only implemented for the FFT-based "
+                "Poisson solver, or (in RZ geometry with the hybrid-PIC solver) on the "
+                "r_hi and z faces where they select the Green's-function free-space "
+                "boundary");
         }
 
 
@@ -850,8 +897,9 @@ WarpX::ReadParameters ()
             );
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 (electromagnetic_solver_id == ElectromagneticSolverAlgo::None ||
-                 evolve_scheme == EvolveScheme::Theta_Implicit_EM),
-                "For electromagnetic solvers, warpx.dt_update_interval can only be used with algo.evolve_scheme = theta_implicit_em."
+                 evolve_scheme == EvolveScheme::Theta_Implicit_EM ||
+                 evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid),
+                "For electromagnetic solvers, warpx.dt_update_interval can only be used with algo.evolve_scheme = theta_implicit_em or theta_implicit_hybrid."
             );
         }
 
@@ -1287,13 +1335,17 @@ WarpX::ReadParameters ()
         else if (evolve_scheme == EvolveScheme::Theta_Implicit_EM) {
             m_implicit_solver = std::make_unique<ThetaImplicitEM>();
         }
+        else if (evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid) {
+            m_implicit_solver = std::make_unique<ThetaImplicitHybrid>();
+        }
         else if (evolve_scheme == EvolveScheme::Strang_Implicit_Spectral_EM) {
             m_implicit_solver = std::make_unique<StrangImplicitSpectralEM>();
         }
 
         // implicit evolve schemes not setup to use mirrors
         if (evolve_scheme == EvolveScheme::Semi_Implicit_EM ||
-            evolve_scheme == EvolveScheme::Theta_Implicit_EM) {
+            evolve_scheme == EvolveScheme::Theta_Implicit_EM ||
+            evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid) {
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE( m_num_mirrors == 0,
                 "Mirrors cannot be used with Implicit evolve schemes.");
         }
@@ -1423,6 +1475,64 @@ WarpX::ReadParameters ()
                 "With the strang_implicit_spectral_em evolve scheme, the algo.maxwell_solver must be psatd");
         }
 
+        // Checks for hybrid implicit scheme
+        if (evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                electromagnetic_solver_id == ElectromagneticSolverAlgo::HybridPIC,
+                "ThetaImplicitHybrid scheme requires the HybridPIC solver");
+
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                current_deposition_algo == CurrentDepositionAlgo::Direct,
+                "Only Direct current deposition is supported with the implicit hybrid scheme");
+
+            const amrex::ParmParse pp_hybrid("hybrid_pic_model");
+            bool solve_electron_energy_equation = false;
+            pp_hybrid.query("solve_electron_energy_equation", solve_electron_energy_equation);
+            if (solve_electron_energy_equation) {
+                // The theta-centered QDSMC energy stage runs inside the
+                // nonlinear residual; these two options are not wired into
+                // that path yet.
+                bool joule_redirect = false;
+                pp_hybrid.query("redirect_joule_to_ions", joule_redirect);
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!joule_redirect,
+                    "hybrid_pic_model.redirect_joule_to_ions is not yet supported with "
+                    "algo.evolve_scheme = theta_implicit_hybrid");
+                std::string energy_sink_tmp;
+                pp_hybrid.query("qdsmc_energy_sink(rho,Te,B,t)", energy_sink_tmp);
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(energy_sink_tmp.empty(),
+                    "hybrid_pic_model.qdsmc_energy_sink(rho,Te,B,t) is not yet supported "
+                    "with algo.evolve_scheme = theta_implicit_hybrid");
+                // The fast-ion stopping heat is consumed inside
+                // ApplyQdsmcEnergySources, which the theta-implicit energy
+                // stage does not run -- the staged energy would silently
+                // accumulate and never land on T_e.
+                std::vector<std::string> collision_names_tmp;
+                const amrex::ParmParse pp_collisions_tmp("collisions");
+                pp_collisions_tmp.queryarr("collision_names", collision_names_tmp);
+                for (auto const& coll_nm : collision_names_tmp) {
+                    const amrex::ParmParse pp_coll_tmp(coll_nm);
+                    std::string coll_type_tmp;
+                    pp_coll_tmp.query("type", coll_type_tmp);
+                    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                        coll_type_tmp != "hybrid_electron_stopping",
+                        "The hybrid_electron_stopping collision is not yet supported "
+                        "with algo.evolve_scheme = theta_implicit_hybrid");
+                }
+                std::vector<std::string> species_names_tmp;
+                const amrex::ParmParse pp_particles_tmp("particles");
+                pp_particles_tmp.queryarr("species_names", species_names_tmp);
+                for (auto const& sp : species_names_tmp) {
+                    std::string per_species_eta;
+                    pp_hybrid.query(
+                        ("plasma_resistivity_" + sp + "(rho_s,rho,Te,J,J_s,B,t)").c_str(),
+                        per_species_eta);
+                    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(per_species_eta.empty(),
+                        "hybrid_pic_model.plasma_resistivity_<species> is not yet supported with "
+                        "algo.evolve_scheme = theta_implicit_hybrid");
+                }
+            }
+        }
+
         // Load balancing parameters
         std::vector<std::string> load_balance_intervals_string_vec = {"0"};
         pp_algo.queryarr("load_balance_intervals", load_balance_intervals_string_vec);
@@ -1495,6 +1605,7 @@ WarpX::ReadParameters ()
 
             // These evolve schemes permit time steps that violate the CFL condition
             if (evolve_scheme == EvolveScheme::Theta_Implicit_EM ||
+                evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid ||
                 evolve_scheme == EvolveScheme::Strang_Implicit_Spectral_EM) {
                 pp_particles.query("max_grid_crossings", particle_max_grid_crossings);
             }
@@ -2741,6 +2852,11 @@ WarpX::AllocLevelMFs (int lev, const BoxArray& ba, const DistributionMapping& dm
     if (do_dive_cleaning) {
         rho_ncomps = 2*ncomps;
     }
+
+    if (evolve_scheme == EvolveScheme::Theta_Implicit_Hybrid) {
+        rho_ncomps = 2*ncomps;  // Need old and new time levels
+    }
+
     if (WarpX::electromagnetic_solver_id == ElectromagneticSolverAlgo::PSATD) {
         if (do_dive_cleaning || update_with_rho || current_correction) {
             // For the PSATD-JRhom algorithm we can allocate only one rho component (no distinction between old and new)

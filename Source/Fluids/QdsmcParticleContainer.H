@@ -23,9 +23,13 @@
 /**
  * @brief Indexing for the QDSMC fictitious-particle SoA storage.
  *
- * QDSMC particles are one-per-cell Lagrangian markers used to transport the
+ * QDSMC particles are one-per-node Lagrangian markers used to transport the
  * electron entropy K_e by the electron fluid velocity V_e over one PIC step
- * (see Belyaev et al., Phys. Plasmas 31, 012902 (2024), Sec. III.A).
+ * (see Belyaev et al., Phys. Plasmas 31, 012902 (2024), Sec. III.A). Homing
+ * the markers at the nodes of the (nodal) QDSMC grid fields makes the
+ * at-rest gather/deposit round trip the identity; cell-center homes would
+ * smooth the fields by a [1/2,1/2]^dim box filter every step (a numerical
+ * diffusion ~ dx^2/(4*dt) per direction, independent of dt).
  *
  * Layout: AMReX's `ParticleContainerPureSoA\<NReal=nattribs, NInt=0\>` treats the
  * first AMREX_SPACEDIM real attributes as the AMReX particle positions used
@@ -38,10 +42,10 @@
  *     3D   : [x, y, z]         -> AMReX positions 0, 1, 2
  *
  *   User attributes (always present, 3D semantic regardless of field dim):
- *     x_node, y_node, z_node : home position (cell center at start of QDSMC step)
+ *     x_node, y_node, z_node : home position (owning grid node)
  *     vx, vy, vz             : electron-fluid velocity gathered at home (3 components)
  *     entropy                : weighted entropy K_e * N_e carried by this particle
- *     np_real                : extensive electron count N_e represented by this marker
+ *     np_real                : weight N_e (electrons in this node's dual cell)
  *
  * The home positions and velocities are always stored as 3 components even when
  * the field dimension is lower. In 2D the y-home is set to 0 at init; in 1D
@@ -61,12 +65,18 @@ struct QdsmcPIdx
         y,
 #endif
         z,
-        // Home position (3D, used for cell-centered gather at start of step).
+        // Home position (3D, the owning node; gather target at start of step).
         x_node, y_node, z_node,
         // Electron-fluid velocity gathered at home (3 components, always).
         vx, vy, vz,
         // QDSMC transported scalars: weighted entropy and electron count.
         entropy, np_real,
+        // Limited (MC) slopes of the transported scalars, per GRID dimension
+        // (d0/d1/d2; unused above AMREX_SPACEDIM stay 0), in physical units
+        // [attr / m]. Loaded by SetK and consumed by the gradient-corrected
+        // deposit; zeroed by ResetParticles.
+        entropy_g0, entropy_g1, entropy_g2,
+        np_g0, np_g1, np_g2,
         nattribs
     };
 };
@@ -75,7 +85,7 @@ struct QdsmcPIdx
 /**
  * @brief Container for QDSMC fictitious electron-energy-equation particles.
  *
- * One particle is initialized per cell at its center; the particle's velocity
+ * One particle is initialized per grid node; the particle's velocity
  * is set to V_e (gathered at home), its entropy slot to K_e * N_e, its weight
  * slot to N_e, and the particle is then pushed by one PIC step. After the
  * push, entropy and weight are scattered back to the grid; the new K_e is
@@ -107,7 +117,13 @@ public:
     using const_iterator = amrex::ParConstIterSoA<QdsmcPIdx::nattribs, 0>;
 
     /**
-     * @brief Initialize one particle per cell at the cell center.
+     * @brief Initialize one particle per grid node.
+     *
+     * Node ownership is unique: box-seam nodes belong to the lower box, and
+     * in periodic directions the domain's top node (the image of the bottom
+     * one) gets no marker. At a non-periodic domain-top node the particle
+     * position is pulled 1e-6*dx inside the boundary so Redistribute cannot
+     * delete it; the home record keeps the same pulled-in position.
      *
      * For dim D < 3 the missing position components of the home are set to 0.
      * Particle velocity, entropy and np_real are all set to 0; subsequent
@@ -136,28 +152,120 @@ public:
                const amrex::MultiFab & rhofield);
 
     /**
-     * @brief Advance the particle position by x = x_home + v*dt (forward Euler).
+     * @brief Two-stage midpoint (RK2) velocity evaluation: re-gather the
+     *        velocity field at the trajectory midpoint
+     *        x_mid = home + (dt/2) * v, where v is the velocity currently
+     *        stored on the particle (from SetV), and overwrite vx/vy/vz
+     *        with the midpoint sample. A subsequent PushX(dt) then realizes
+     *        x_new = home + dt * v(x_mid).
+     *
+     *        The midpoint excursion is at most half the one-cell CFL bound,
+     *        so the gather stays within the home tile's ghost coverage and
+     *        no Redistribute is needed. In non-periodic directions x_mid is
+     *        clamped just inside the domain (same guard as PushX).
+     */
+    void GatherVAtMidpoint (int lev, amrex::Real dt,
+                            amrex::MultiFab const* eb_dist,
+                            const amrex::MultiFab & Ux,
+                            const amrex::MultiFab & Uy,
+                            const amrex::MultiFab & Uz);
+
+    /**
+     * @brief Advance the particle position by x = x_home + frac*v*dt.
      *        In non-periodic directions the new position is clamped just
      *        inside the domain so Redistribute() cannot delete the marker
      *        (the carried entropy accumulates at the boundary nodes instead).
      *        Calls Redistribute() at the end so particles end up in the
      *        correct tile for their new position.
+     *
+     *        The displacement is always taken from the marker's home, so the
+     *        method may be called repeatedly with different velocities or
+     *        fractions (e.g. the two stages of a midpoint push). Markers may
+     *        cross multiple cells in one call; Redistribute() reassigns tiles.
+     *
+     * @param frac fraction of the full-step displacement (1 = full step,
+     *        0.5 = move to the temporal midpoint of the characteristic)
      */
-    void PushX (int lev, amrex::Real dt);
+    /** \param[in] eb_dist nodal signed distance to the embedded boundary
+     *        (nullptr = no EB marker handling). With it, markers homed at
+     *        covered nodes (distance <= 0) never move — V_e is not physical
+     *        inside the conductor — and markers pushed into the conductor
+     *        are specularly mirrored back across the level set,
+     *        x -> x - 2 phi(x) n(x) (the dsmc-eb-reflection semantics at
+     *        sub-cell hop scale); a mirror that lands covered again (deep
+     *        staircase corner) falls back to the home position. The same
+     *        mirror guards the midpoint velocity sample. */
+    void PushX (int lev, amrex::Real dt, amrex::Real frac = 1.0,
+                amrex::MultiFab const* eb_dist = nullptr);
+
+    /**
+     * @brief Gather a 3-component nodal vector field at the marker's CURRENT
+     *        position (as set by a previous PushX) into the velocity
+     *        attributes. Second stage of the midpoint push: after
+     *        PushX(lev, dt, 0.5) has placed the marker at the characteristic
+     *        midpoint (and redistributed it to the owning tile), this samples
+     *        v there so a following PushX(lev, dt, 1.0) completes
+     *        x = x_home + dt*v(x_mid), the second-order midpoint
+     *        characteristic.
+     */
+    void GatherVAtCurrentPosition (int lev,
+                                   const amrex::MultiFab & Ux,
+                                   const amrex::MultiFab & Uy,
+                                   const amrex::MultiFab & Uz);
 
     /**
      * @brief Scatter the per-particle entropy (K_e * N_e) onto Kfield via
      *        linear shape-factor weighted atomic add.
      *        Kfield is zeroed at the start of this call.
+     *
+     * @param gradient_corrected deposit w * (A + 1/2 G . (x_dest - x_p))
+     *        instead of w * A, using the limited slopes loaded by SetK. The
+     *        correction sums to zero exactly (the hat's weighted mean is the
+     *        particle position), so conservation is unchanged, and it
+     *        cancels the hat kernel's second moment, making the remap exact
+     *        through quadratics (2nd-order spatial transport). The MC
+     *        limiter keeps deposited values within the local neighbor range
+     *        (positivity).
      */
-    void DepositK (int lev, amrex::MultiFab & Kfield);
+    /** Cliff-aware entropy deposit options (HybridPICModel's
+     * qdsmc_cliff_limited_deposit). The K-diffusion heat pump: entropy
+     * K = Te n^(1-gamma) spilled onto a node of different density
+     * re-materializes through the polytropic recovery as Te scaled by
+     * (n_dest/n_home)^(gamma-1) -- physical for resolved smooth
+     * compression, an energy-manufacturing amplifier at unresolved
+     * density cliffs (measured: the cascade engine on a stiff production-class deck). When
+     * enabled, each destination node's entropy share is blended between
+     * the isentropic spill (factor 1) and the isothermal spill (factor
+     * (n_home/n_dest)^(gamma-1), temperature-invariant) keyed on
+     * r = |ln(n_dest/n_home)|: pure isentropic below r1, pure isothermal
+     * above r2. Home-node deposits keep factor exactly 1 whenever the
+     * cell's one-step density change stays below e^{r1} (the at-rest
+     * identity is bit-exact). Implemented for the gradient-corrected
+     * deposit path only. */
+    struct CliffDeposit
+    {
+        bool enabled = false;
+        amrex::MultiFab const* rho_new = nullptr;  //!< nodal rho^{n+1} [C/m^3]
+        amrex::Real n_floor = 1.0;                 //!< [m^-3], K<->Te floor
+        amrex::Real gamma = 5.0/3.0;
+        amrex::Real r1 = 0.35;                     //!< blend start, |ln ratio|
+        amrex::Real r2 = 1.4;                      //!< fully isothermal
+    };
+
+    void DepositK (int lev, amrex::MultiFab & Kfield,
+                   bool gradient_corrected,
+                   CliffDeposit const & cliff);
+    void DepositK (int lev, amrex::MultiFab & Kfield,
+                   bool gradient_corrected = false);
 
     /**
      * @brief Scatter the per-particle extensive electron count N_e onto Field
      *        via linear shape-factor weighted atomic add.
      *        Field is zeroed at the start of this call.
+     *        See DepositK for the gradient_corrected option.
      */
-    void DepositField (int lev, amrex::MultiFab & Field);
+    void DepositField (int lev, amrex::MultiFab & Field,
+                       bool gradient_corrected = false);
 
     /**
      * @brief Reset particle position to home, zero velocity / entropy / weight.
@@ -165,15 +273,23 @@ public:
      */
     void ResetParticles (int lev);
 
+
 private:
     /**
      * @brief Scatter one real attribute of every marker onto a nodal
      *        MultiFab with the order-1 charge-deposition kernel:
      *        field += scale * attribute * S(x). The field is zeroed first
      *        and guard-cell deposits are summed back in afterward.
+     *
+     * @param slope_attr0 index of the first of AMREX_SPACEDIM consecutive
+     *        slope attributes for the half-gradient-corrected deposit, or
+     *        -1 for the plain point deposit.
      */
-    void DepositScalar (int lev, int attr, amrex::Real scale,
-                        amrex::MultiFab & field);
+    public:
+    void DepositScalar (int lev, int attr, int slope_attr0,
+                        amrex::Real scale, amrex::MultiFab & field,
+                        CliffDeposit const & cliff);
+    private:
 };
 
 #endif // WARPX_QDSMCPARTICLECONTAINER_H_

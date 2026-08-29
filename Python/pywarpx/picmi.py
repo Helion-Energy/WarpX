@@ -2078,6 +2078,107 @@ class ThetaImplicitEMEvolveScheme(picmistandard.base._ClassWithInit):
         self.nonlinear_solver.nonlinear_solver_initialize_inputs()
 
 
+class ThetaImplicitHybridEvolveScheme(picmistandard.base._ClassWithInit):
+    """
+    Sets up the "theta implicit" hybrid-PIC evolve scheme
+
+    Parameters
+    ----------
+    nonlinear_solver: nonlinear solver instance
+        The nonlinear solver to use for the iterations
+
+    theta: float, optional
+        The "theta" parameter, determining the level of implicitness
+
+    qdsmc_segregated_solve: bool, optional
+        Segregated midpoint-iterated solve for the QDSMC electron-energy
+        stage: the nonlinear solver converges the field system at frozen
+        electron pressure and an outer loop alternates it with one
+        re-entrant stage pass per iteration, instead of re-running the
+        stage inside every residual evaluation. Requires the electron
+        energy equation.
+
+    qdsmc_outer_max_iterations: integer, optional
+        Maximum number of outer (stage/field) iterations of the
+        segregated solve
+
+    qdsmc_outer_relative_tolerance: float, optional
+        Outer convergence tolerance on the relative change of the emitted
+        electron pressure between outer iterations
+
+    qdsmc_outer_require_convergence: bool, optional
+        Whether a non-converged outer loop is a fatal error
+
+    qdsmc_outer_verbose: bool, optional
+        Print the outer-iteration pressure-change history
+
+    external_field_iteration: bool, optional
+        Circuit-in-the-residual coupling: every residual evaluation
+        executes the "externalcoiltheta" python callback (and the
+        end-of-step update the "externalcoilfinish" one) after the
+        iterate's plasma current is computed, then refreshes the external
+        fields at the updated coil scales, so python can advance a coupled
+        external circuit against the iterate's flux linkage and push
+        updated coil scale segments (set_external_vector_potential_scale).
+        Requires external fields; works on both the Darwin unified drive
+        (scales re-enter through the boundary pin) and the split-field
+        path (the callback runs in the plasma-response frame).
+
+    redistribute_before_end_deposits: bool, optional
+        Apply the particle boundary conditions and re-bin (Redistribute)
+        before the end-of-step closure deposits. The full-dt extrapolated
+        positions can exceed the deposit guard range for warm boundary
+        populations (an abort, not an error estimate); enabling this
+        removes the hazard at the cost of reordering particles ahead of
+        the next step's deposits (changes bit-pinned trajectories).
+    """
+
+    def __init__(
+        self,
+        nonlinear_solver,
+        theta=None,
+        qdsmc_segregated_solve=None,
+        qdsmc_outer_max_iterations=None,
+        qdsmc_outer_relative_tolerance=None,
+        qdsmc_outer_require_convergence=None,
+        qdsmc_outer_verbose=None,
+        external_field_iteration=None,
+        redistribute_before_end_deposits=None,
+    ):
+        self.nonlinear_solver = nonlinear_solver
+        self.theta = theta
+        self.qdsmc_segregated_solve = qdsmc_segregated_solve
+        self.qdsmc_outer_max_iterations = qdsmc_outer_max_iterations
+        self.qdsmc_outer_relative_tolerance = qdsmc_outer_relative_tolerance
+        self.qdsmc_outer_require_convergence = qdsmc_outer_require_convergence
+        self.qdsmc_outer_verbose = qdsmc_outer_verbose
+        self.external_field_iteration = external_field_iteration
+        self.redistribute_before_end_deposits = redistribute_before_end_deposits
+
+        assert isinstance(nonlinear_solver, NonlinearSolverBase)
+
+    def solver_scheme_initialize_inputs(self):
+        pywarpx.algo.evolve_scheme = "theta_implicit_hybrid"
+        implicit_evolve = pywarpx.warpx.get_bucket("implicit_evolve")
+        implicit_evolve.theta = self.theta
+        # Assign only when set: an unconditional None assignment would
+        # clobber values written to the bucket directly by the user.
+        for knob in [
+            "qdsmc_segregated_solve",
+            "qdsmc_outer_max_iterations",
+            "qdsmc_outer_relative_tolerance",
+            "qdsmc_outer_require_convergence",
+            "qdsmc_outer_verbose",
+            "external_field_iteration",
+            "redistribute_before_end_deposits",
+        ]:
+            value = getattr(self, knob)
+            if value is not None:
+                setattr(implicit_evolve, knob, value)
+
+        self.nonlinear_solver.nonlinear_solver_initialize_inputs()
+
+
 class SemiImplicitEMEvolveScheme(picmistandard.base._ClassWithInit):
     """
     Sets up the "semi-implicit" electromagnetic evolve scheme
@@ -2097,6 +2198,127 @@ class SemiImplicitEMEvolveScheme(picmistandard.base._ClassWithInit):
         pywarpx.algo.evolve_scheme = "semi_implicit_em"
 
         self.nonlinear_solver.nonlinear_solver_initialize_inputs()
+
+
+class CircuitCoil(object):
+    """One circular filament coil of the circuit-coupling subsystem
+    (circuit.<name>.*).
+
+    Parameters
+    ----------
+    name: str
+        Unique coil name; by default also the paired entry of
+        external_vector_potential.fields.
+
+    r, z: float
+        Filament radius and axial position [m]; r must be positive.
+
+    n_turns: float, optional
+        Turn count (the filled field and the inductances scale with it).
+
+    I_ref: float, optional
+        Reference current [A]: a drive scale of 1 reproduces the coil at
+        I_ref.
+
+    field_name: str, optional
+        The paired external-field entry (default: the coil name).
+
+    fill_unit_field: bool, optional
+        Fill <field_name>_Aext from the ring kernel at initialization
+        (default true).
+
+    probe: str, optional
+        The coil's plasma flux-linkage measurement: 'default', 'disk',
+        'reciprocity' or 'none'.
+    """
+
+    def __init__(
+        self,
+        name,
+        r,
+        z,
+        n_turns=None,
+        I_ref=None,
+        field_name=None,
+        fill_unit_field=None,
+        probe=None,
+    ):
+        self.name = name
+        self.r = r
+        self.z = z
+        self.n_turns = n_turns
+        self.I_ref = I_ref
+        self.field_name = field_name
+        self.fill_unit_field = fill_unit_field
+        self.probe = probe
+
+
+class CircuitCoupling(object):
+    """The coil set and coupling engine of the circuit-coupling subsystem
+    (circuit.*), passed to HybridPICSolver as circuit=...
+
+    Parameters
+    ----------
+    coils: list of CircuitCoil
+        The coil set.
+
+    engine: str, optional
+        'none' (default; the coils are static or driven per step from
+        Python), 'callbacks' (the per-substep Python hook contract:
+        circuitbeginstep / circuitpredict / circuitcorrect /
+        circuitfinish), or 'external' (a compiled ExternalCircuit plugin).
+
+    plugin_library: str, optional
+        With engine='external', the plugin's shared-library path.
+
+    corrector_iterations: int, optional
+        Predictor-corrector passes per coupling substep (default 1;
+        0 = lagged predictor only).
+
+    corrector_rtol: float, optional
+        Early-exit tolerance of the corrector on the realized coil scales.
+    """
+
+    def __init__(
+        self,
+        coils,
+        engine=None,
+        plugin_library=None,
+        corrector_iterations=None,
+        corrector_rtol=None,
+    ):
+        self.coils = coils
+        self.engine = engine
+        self.plugin_library = plugin_library
+        self.corrector_iterations = corrector_iterations
+        self.corrector_rtol = corrector_rtol
+
+    def coupling_initialize_inputs(self):
+        pywarpx.circuit.coils = [coil.name for coil in self.coils]
+        for coil in self.coils:
+            for attr, key in (
+                (coil.r, "r"),
+                (coil.z, "z"),
+                (coil.n_turns, "n_turns"),
+                (coil.I_ref, "I_ref"),
+                (coil.field_name, "field_name"),
+                (coil.fill_unit_field, "fill_unit_field"),
+                (coil.probe, "probe"),
+            ):
+                if attr is not None:
+                    pywarpx.circuit.add_new_attr(f"{coil.name}.{key}", attr)
+        if self.engine is not None:
+            pywarpx.circuit.engine = self.engine
+        if self.plugin_library is not None:
+            pywarpx.circuit.plugin_library = self.plugin_library
+        if self.corrector_iterations is not None:
+            pywarpx.circuit.add_new_attr(
+                "coupling.corrector_iterations", self.corrector_iterations
+            )
+        if self.corrector_rtol is not None:
+            pywarpx.circuit.add_new_attr(
+                "coupling.corrector_rtol", self.corrector_rtol
+            )
 
 
 class HybridPICSolver(picmistandard.base._ClassWithInit):
@@ -2128,6 +2350,88 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         Can be a constant value or an expression depending on ``rho`` (charge density)
         and ``B`` (magnetic field magnitude).
 
+    plasma_resistivity_species: dict, optional
+        Per-species resistivity overlays added on top of ``plasma_resistivity``,
+        as a dictionary mapping a charged species name to a value or expression
+        in Ohm*m. The expression may depend on ``rho_s`` (the species charge
+        density), ``rho`` (total charge density), ``Te`` (electron temperature
+        in Kelvin), ``J`` (plasma current density magnitude), ``J_s`` (the
+        species current density magnitude), ``B`` (magnetic field magnitude)
+        and ``t`` (time). The effective resistivity applied to species ``s``
+        in Ohm's law, the Joule heating source and the resistive drag is
+        ``plasma_resistivity + plasma_resistivity_species[s]``.
+
+    implicit_push_excludes_resistive_field: bool, default=False
+        With the theta-implicit hybrid evolve scheme, subtract the resistive
+        part of the Ohm field from the field gathered by the ions
+        (momentum-consistent with the explicit scheme's push field). Can
+        destabilize the Newton nonlinear solver in whistler-marginal
+        configurations; validated with the Picard solver.
+
+    darwin: bool, default=False
+        Whether to use the Darwin (magnetoinductive) field split with the
+        theta-implicit hybrid evolve scheme: the longitudinal electric field
+        comes from an instantaneous ambipolar constraint and the transverse
+        field advances the magnetic vector potential, removing the radiative
+        branch (Hewett & Nielson, J. Comput. Phys. 29, 219 (1978)).
+
+    include_electron_inertia: bool, default=False
+        Add the electron-inertia term to the generalized Ohm's law (the
+        Je-form material derivative of the electron fluid velocity, per the
+        implicit-PIC formulation of Angus et al.), rolling the whistler
+        branch over at the effective electron skin depth. Theta-implicit
+        hybrid evolve scheme only.
+
+    reduced_electron_mass_ratio: float, default=0
+        When > 0, the effective electron mass is the lightest ion mass
+        divided by this ratio (0 selects the physical electron mass),
+        moving the electron-scale dispersion and damping relative to the
+        grid.
+
+    electron_inertia_bdf2: bool, default=True
+        Use the second-order three-point stencil, centered at the theta
+        stage, for the inertial time derivative (two-point form when off).
+
+    darwin_vacuum_recovery: bool, default=False
+        With the Darwin split, replace the evolved vector potential in
+        low-density (vacuum) cells with the magnetostatic solution driven by
+        the retained plasma currents and the boundary values of A, so the
+        vacuum-region field responds instantaneously instead of at the
+        density-floored halo's transport rate (the vacuum-field limit of
+        Hewett, J. Comput. Phys. 38, 378 (1980)).
+
+    darwin_vacuum_recovery_mask: str, default="vacuum"
+        Where the recovery replaces the field: "vacuum" (density below
+        ``n_floor``, including true vacuum), "transition" (strictly between
+        zero and ``n_floor``) or "global" (everywhere; diagnostic).
+
+    darwin_vacuum_recovery_cadence: str, default="half"
+        "half" applies the recovery inside every nonlinear-solver residual
+        evaluation at the theta-stage field (plus once at the end-of-step
+        state); "full" applies it at the end-of-step state only.
+
+    darwin_vacuum_recovery_components: str, default="flux"
+        "flux" recovers only the out-of-plane component (A_theta in RZ, A_y
+        in 2D) that carries the boundary-driven flux; in 3D it is
+        equivalent to "all". "all" recovers every component (caution: the
+        in-plane corrections are discretely inconsistent with the source
+        near the RZ axis and can destabilize the B_theta content there).
+
+    darwin_vacuum_recovery_relaxation_time: float, default=0
+        Finite response time (seconds) of the vacuum recovery: the band A
+        relaxes toward the magnetostatic solution instead of replacing
+        instantly, capping the reconstructed band EMF at the correction
+        rate. 0 = instant replacement.
+
+    darwin_vacuum_recovery_density_fraction: float, default=1.0
+        Fraction of ``n_floor`` below which the recovery masks apply. Use
+        values < 1 when the Ohm's-law floor sits inside real plasma (e.g.
+        raised floors on driven decks), so the vacuum treatment stays in
+        the genuine low-density region.
+
+    darwin_vacuum_recovery_relative_tolerance: float, default=1e-8
+        Relative tolerance of the recovery's per-component Poisson solves.
+
     solve_electron_energy_equation: bool, default=False
         Solve the electron energy equation instead of the algebraic adiabatic
         pressure closure: the electron entropy ``K = Te * ne**(1-gamma)`` is
@@ -2140,23 +2444,50 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         Reduces to ``eta * J**2`` for a single ion species. Only used when
         ``solve_electron_energy_equation`` is True.
 
-    joule_redirect_Te_threshold: float, optional
-        Electron temperature threshold in eV above which the Joule heating of
-        a cell is routed to the ions (as an energy-conserving stochastic kick)
-        instead of the electrons, allowing ``Ti > Te`` to develop. Specifying
-        a value >= 0 enables the redirect (off by default). Requires
-        ``include_joule_heating``.
+    joule_heating_resistivity: float or str, optional
+        Resistivity expression (of ``rho``, ``J``, ``t``) evaluated by the
+        Joule heating source instead of ``plasma_resistivity``. Default:
+        ``plasma_resistivity`` itself (identical behavior). Set this to the
+        physical (un-boosted) resistivity when ``plasma_resistivity``
+        carries a density-ramped vacuum regularization: the ramp exists to
+        relax the vacuum field and must not heat the near-floor plasma
+        edge, whose heat capacity scales with density.
 
-    electron_ion_relaxation_rate: float or str, optional
+    joule_heating_n_min: float, optional
+        Density (m^-3) below which the Joule source is dropped. Default:
+        ``n_floor`` (the historical gate). Raise it to keep heating out of
+        the resistivity-ramp band without moving the Ohm's-law floor.
+
+    joule_redirect_Te_threshold: float, default=-1 (off)
+        Electron temperature threshold in eV above which the Joule heat is
+        routed to the ions (as an energy-conserving stochastic kick) instead
+        of the electrons, allowing ``Ti > Te`` to develop. Setting a
+        threshold >= 0 arms the redirect. Requires ``include_joule_heating``.
+
+    electron_ion_relaxation_rate: float or str
         Value or expression for the electron-ion energy-equilibration rate
-        ``nu_ei`` in 1/s. Specifying it enables the electron-ion thermal
-        equilibration ``Q_ei`` on the electron temperature, with the conjugate
-        ion heating applied as an energy-conserving drag-diffusion kick on
-        each ion (the required shape-aware ion temperature deposition is
-        enabled automatically on every charged species). The expression may
+        ``nu_ei`` in 1/s. Specifying it enables the ``Q_ei`` exchange on the
+        electron temperature, with the conjugate ion heating applied as an
+        energy-conserving drag-diffusion kick on each ion. The expression may
         depend on ``rho`` (charge density in C/m^3), ``Te`` and ``Ti``
-        (temperatures in eV) and ``t`` (time). Only used when
-        ``solve_electron_energy_equation`` is True.
+        (temperatures in eV) and ``t`` (time).
+
+    qdsmc_n_floor: float, optional
+        Deposited-weight threshold (in m^-3) for the QDSMC electron
+        temperature update: cells whose deposited marker weight is at or
+        below this value are skipped and keep their previous temperature
+        (the density floor used in the entropy <-> temperature conversion
+        itself is ``n_floor``). Defaults to ``n_floor``.
+
+    qdsmc_kappa_par: float or str, optional
+        Parallel electron thermal conductivity kappa_par(n, Te, t) in
+        W/(m K) (``n`` in m^-3, ``Te`` in eV, ``t`` in s). Specifying it
+        enables the Ito tensor-conduction substep of the QDSMC energy
+        equation. Requires ``solve_electron_energy_equation``.
+
+    qdsmc_kappa_perp: float or str, optional
+        Perpendicular electron thermal conductivity kappa_perp(n, Te, t)
+        in W/(m K); default 0 (the full tensor always ships).
 
     substeps: int, default=10
         Total number of substeps used to advance the B-field over one full
@@ -2223,6 +2554,15 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         'Az_external_function', plus 'A_time_external_function' with (t) dependence, or
         alternatively 'load_from_file': True with a 'path' to an OpenPMD file along with
         'A_time_external_function'.
+        Alternatively to a compiled time function, a field entry may set
+        'python_scale': True (optionally with 'initial_scale') to drive the
+        field's scale through piecewise-linear segments pushed at runtime via
+        ``warpx.set_external_vector_potential_scale`` (e.g. from a circuit
+        model in a callback).
+        An entry may also set 'in_initial_field': True to declare that the coil's t=0
+        field is already contained in the loaded initial B field (e.g. a free-boundary
+        equilibrium whose flux includes the confining coils); the first-step state
+        assembly then does not add that coil's field on top of the initial condition.
 
     do_external_diva_cleaning: bool (default=True)
         This flag can be used to disable divA cleaning. This may be necessary when using a non-periodic
@@ -2259,10 +2599,28 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         n_floor=None,
         plasma_resistivity=None,
         plasma_hyper_resistivity=None,
+        plasma_resistivity_species=None,
+        joule_heating_resistivity=None,
+        joule_heating_n_min=None,
         solve_electron_energy_equation=None,
+        implicit_push_excludes_resistive_field=None,
+        darwin=None,
+        include_electron_inertia=None,
+        reduced_electron_mass_ratio=None,
+        electron_inertia_bdf2=None,
+        darwin_vacuum_recovery=None,
+        darwin_vacuum_recovery_mask=None,
+        darwin_vacuum_recovery_cadence=None,
+        darwin_vacuum_recovery_components=None,
+        darwin_vacuum_recovery_density_fraction=None,
+        darwin_vacuum_recovery_relaxation_time=None,
+        darwin_vacuum_recovery_relative_tolerance=None,
         include_joule_heating=None,
         joule_redirect_Te_threshold=None,
         electron_ion_relaxation_rate=None,
+        qdsmc_n_floor=None,
+        qdsmc_kappa_par=None,
+        qdsmc_kappa_perp=None,
         substeps=None,
         use_rkf45=None,
         substep_rtol=None,
@@ -2276,6 +2634,7 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         Jz_external_function=None,
         A_external=None,
         do_external_diva_cleaning=None,
+        circuit=None,
         **kw,
     ):
         self.grid = grid
@@ -2287,11 +2646,39 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         self.n_floor = n_floor
         self.plasma_resistivity = plasma_resistivity
         self.plasma_hyper_resistivity = plasma_hyper_resistivity
+        self.plasma_resistivity_species = plasma_resistivity_species
 
         self.solve_electron_energy_equation = solve_electron_energy_equation
+        self.implicit_push_excludes_resistive_field = (
+            implicit_push_excludes_resistive_field
+        )
+        self.darwin = darwin
+        self.include_electron_inertia = include_electron_inertia
+        self.reduced_electron_mass_ratio = reduced_electron_mass_ratio
+        self.electron_inertia_bdf2 = electron_inertia_bdf2
+        self.darwin_vacuum_recovery = darwin_vacuum_recovery
+        self.darwin_vacuum_recovery_mask = darwin_vacuum_recovery_mask
+        self.darwin_vacuum_recovery_cadence = darwin_vacuum_recovery_cadence
+        self.darwin_vacuum_recovery_components = darwin_vacuum_recovery_components
+        self.darwin_vacuum_recovery_density_fraction = (
+            darwin_vacuum_recovery_density_fraction
+        )
+        self.darwin_vacuum_recovery_relaxation_time = (
+            darwin_vacuum_recovery_relaxation_time
+        )
+        self.darwin_vacuum_recovery_relative_tolerance = (
+            darwin_vacuum_recovery_relative_tolerance
+        )
         self.include_joule_heating = include_joule_heating
+        self.joule_heating_resistivity = joule_heating_resistivity
+        self.joule_heating_n_min = joule_heating_n_min
         self.joule_redirect_Te_threshold = joule_redirect_Te_threshold
         self.electron_ion_relaxation_rate = electron_ion_relaxation_rate
+        self.qdsmc_n_floor = qdsmc_n_floor
+        self.qdsmc_kappa_par = qdsmc_kappa_par
+        self.qdsmc_kappa_perp = qdsmc_kappa_perp
+
+        self.solve_electron_energy_equation = solve_electron_energy_equation
 
         self.substeps = substeps
         self.use_rkf45 = use_rkf45
@@ -2311,6 +2698,8 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
 
         self.do_external_diva_cleaning = do_external_diva_cleaning
 
+        self.circuit = circuit
+
         # Handle keyword arguments used in expressions
         self.user_defined_kw = {}
         for k in list(kw.keys()):
@@ -2324,6 +2713,12 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
         # The keywords are mangled if there is a conflicting variable already
         # defined in my_constants with the same name but different value.
         self.mangle_dict = pywarpx.my_constants.add_keywords(self.user_defined_kw)
+
+        # Open BC means FieldBoundaryType::Open (the Green's-function
+        # free-space boundary on the RZ r_hi and z faces) for the hybrid
+        # solver, rather than a perfectly-matched layer (PML is not
+        # implemented for the hybrid field advance).
+        BC_map["open"] = "open"
 
         self.grid.grid_initialize_inputs()
 
@@ -2345,12 +2740,68 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
                 self.plasma_hyper_resistivity, self.mangle_dict
             ),
         )
-        # Only emit the electron-energy-equation attributes that were
-        # explicitly set, so the generated input deck contains only
-        # user-specified parameters.
+        if self.plasma_resistivity_species is not None:
+            for name, expr in self.plasma_resistivity_species.items():
+                pywarpx.hybridpicmodel.__setattr__(
+                    f"plasma_resistivity_{name}(rho_s,rho,Te,J,J_s,B,t)",
+                    pywarpx.my_constants.mangle_expression(expr, self.mangle_dict),
+                )
+        if self.joule_heating_resistivity is not None:
+            pywarpx.hybridpicmodel.__setattr__(
+                "joule_heating_resistivity(rho,J,Te,t)",
+                pywarpx.my_constants.mangle_expression(
+                    self.joule_heating_resistivity, self.mangle_dict
+                ),
+            )
+        pywarpx.hybridpicmodel.joule_heating_n_min = self.joule_heating_n_min
+        # Only assign the electron-energy-equation attributes when given, so
+        # that scripts setting them directly on the hybridpicmodel bucket are
+        # not clobbered with None here.
         if self.solve_electron_energy_equation is not None:
             pywarpx.hybridpicmodel.solve_electron_energy_equation = (
                 self.solve_electron_energy_equation
+            )
+        if self.implicit_push_excludes_resistive_field is not None:
+            pywarpx.hybridpicmodel.implicit_push_excludes_resistive_field = (
+                self.implicit_push_excludes_resistive_field
+            )
+        if self.darwin is not None:
+            pywarpx.hybridpicmodel.darwin = self.darwin
+        if self.include_electron_inertia is not None:
+            pywarpx.hybridpicmodel.include_electron_inertia = (
+                self.include_electron_inertia
+            )
+        if self.reduced_electron_mass_ratio is not None:
+            pywarpx.hybridpicmodel.reduced_electron_mass_ratio = (
+                self.reduced_electron_mass_ratio
+            )
+        if self.electron_inertia_bdf2 is not None:
+            pywarpx.hybridpicmodel.electron_inertia_bdf2 = self.electron_inertia_bdf2
+        if self.darwin_vacuum_recovery is not None:
+            pywarpx.hybridpicmodel.darwin_vacuum_recovery = self.darwin_vacuum_recovery
+        if self.darwin_vacuum_recovery_mask is not None:
+            pywarpx.hybridpicmodel.darwin_vacuum_recovery_mask = (
+                self.darwin_vacuum_recovery_mask
+            )
+        if self.darwin_vacuum_recovery_cadence is not None:
+            pywarpx.hybridpicmodel.darwin_vacuum_recovery_cadence = (
+                self.darwin_vacuum_recovery_cadence
+            )
+        if self.darwin_vacuum_recovery_components is not None:
+            pywarpx.hybridpicmodel.darwin_vacuum_recovery_components = (
+                self.darwin_vacuum_recovery_components
+            )
+        if self.darwin_vacuum_recovery_density_fraction is not None:
+            pywarpx.hybridpicmodel.darwin_vacuum_recovery_density_fraction = (
+                self.darwin_vacuum_recovery_density_fraction
+            )
+        if self.darwin_vacuum_recovery_relaxation_time is not None:
+            pywarpx.hybridpicmodel.darwin_vacuum_recovery_relaxation_time = (
+                self.darwin_vacuum_recovery_relaxation_time
+            )
+        if self.darwin_vacuum_recovery_relative_tolerance is not None:
+            pywarpx.hybridpicmodel.darwin_vacuum_recovery_relative_tolerance = (
+                self.darwin_vacuum_recovery_relative_tolerance
             )
         if self.include_joule_heating is not None:
             pywarpx.hybridpicmodel.include_joule_heating = self.include_joule_heating
@@ -2365,6 +2816,22 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
                     self.electron_ion_relaxation_rate, self.mangle_dict
                 ),
             )
+        if self.qdsmc_kappa_par is not None:
+            pywarpx.hybridpicmodel.__setattr__(
+                "qdsmc_kappa_par(n,Te,t)",
+                pywarpx.my_constants.mangle_expression(
+                    self.qdsmc_kappa_par, self.mangle_dict
+                ),
+            )
+        if self.qdsmc_kappa_perp is not None:
+            pywarpx.hybridpicmodel.__setattr__(
+                "qdsmc_kappa_perp(n,Te,t)",
+                pywarpx.my_constants.mangle_expression(
+                    self.qdsmc_kappa_perp, self.mangle_dict
+                ),
+            )
+        if self.qdsmc_n_floor is not None:
+            pywarpx.hybridpicmodel.qdsmc_n_floor = self.qdsmc_n_floor
         pywarpx.hybridpicmodel.substeps = self.substeps
         pywarpx.hybridpicmodel.use_rkf45 = self.use_rkf45
         pywarpx.hybridpicmodel.substep_rtol = self.substep_rtol
@@ -2429,12 +2896,37 @@ class HybridPICSolver(picmistandard.base._ClassWithInit):
                             field_dict["Az_external_function"], self.mangle_dict
                         ),
                     )
-                pywarpx.external_vector_potential.__setattr__(
-                    f"{field_name}.A_time_external_function(t)",
-                    pywarpx.my_constants.mangle_expression(
-                        field_dict["A_time_external_function"], self.mangle_dict
-                    ),
-                )
+                if field_dict.get("in_initial_field", False):
+                    # The coil's t=0 field is already contained in the
+                    # loaded initial B (e.g. a free-boundary equilibrium
+                    # file including the confining coils): the first-step
+                    # state assembly must not add it again.
+                    pywarpx.external_vector_potential.__setattr__(
+                        f"{field_name}.in_initial_field", 1
+                    )
+                if field_dict.get("python_scale", False):
+                    # Piecewise-linear scale segments pushed from python
+                    # (warpx.set_external_vector_potential_scale) instead of
+                    # a compiled time function.
+                    pywarpx.external_vector_potential.__setattr__(
+                        f"{field_name}.python_scale", 1
+                    )
+                    if "initial_scale" in field_dict:
+                        pywarpx.external_vector_potential.__setattr__(
+                            f"{field_name}.initial_scale",
+                            field_dict["initial_scale"],
+                        )
+                else:
+                    pywarpx.external_vector_potential.__setattr__(
+                        f"{field_name}.A_time_external_function(t)",
+                        pywarpx.my_constants.mangle_expression(
+                            field_dict["A_time_external_function"],
+                            self.mangle_dict,
+                        ),
+                    )
+
+        if self.circuit is not None:
+            self.circuit.coupling_initialize_inputs()
 
 
 class ElectrostaticSolver(picmistandard.PICMI_ElectrostaticSolver):
@@ -3446,6 +3938,19 @@ class EmbeddedBoundary(picmistandard.base._ClassWithInit):
         Whether to cover cells with multiple cuts.
         (If False, this will raise an error if some cells have multiple cuts)
 
+    eb_type: string, default=None
+        The embedded-boundary wall type, "absorbing" (the default behavior:
+        particles are collected at the surface) or "insulating" (a collecting
+        wall held off the plasma by a density standoff band: particles are
+        collected eb_standoff_cells cells before the surface, the collected
+        charge/energy is tallied per species, and with the hybrid electron
+        energy equation on, T_e is filled with zero normal gradient into
+        the band and the covered region each step).
+
+    eb_standoff_cells: float, default=None
+        Width of the insulating wall's standoff band, in cells (WarpX
+        default 2). Only used with eb_type="insulating".
+
     Parameters used in the analytic expressions should be given as additional keyword arguments.
 
     """
@@ -3459,6 +3964,8 @@ class EmbeddedBoundary(picmistandard.base._ClassWithInit):
         stl_reverse_normal=False,
         potential=None,
         cover_multiple_cuts=None,
+        eb_type=None,
+        eb_standoff_cells=None,
         **kw,
     ):
         assert stl_file is None or implicit_function is None, Exception(
@@ -3486,6 +3993,9 @@ class EmbeddedBoundary(picmistandard.base._ClassWithInit):
         self.potential = potential
 
         self.cover_multiple_cuts = cover_multiple_cuts
+
+        self.eb_type = eb_type
+        self.eb_standoff_cells = eb_standoff_cells
 
         # Handle keyword arguments used in expressions
         self.user_defined_kw = {}
@@ -3520,6 +4030,11 @@ class EmbeddedBoundary(picmistandard.base._ClassWithInit):
             pywarpx.eb2.stl_reverse_normal = self.stl_reverse_normal
 
         pywarpx.eb2.cover_multiple_cuts = self.cover_multiple_cuts
+
+        if self.eb_type is not None:
+            pywarpx.boundary.eb_type = self.eb_type
+        if self.eb_standoff_cells is not None:
+            pywarpx.boundary.eb_standoff_cells = self.eb_standoff_cells
 
         if self.potential is not None:
             expression = pywarpx.my_constants.mangle_expression(
@@ -4291,8 +4806,9 @@ class FieldDiagnostic(picmistandard.PICMI_FieldDiagnostic, WarpXDiagnosticBase):
                     "proc_number",
                     "part_per_cell",
                     "eb_covered",
-                    # Electron temperature/pressure of the hybrid-PIC
-                    # (Ohm's law) solver; only valid with that solver.
+                    # Hybrid-PIC electron-energy-equation state. Both are
+                    # always allocated when the hybrid solver is selected,
+                    # zero-initialized otherwise.
                     "Te",
                     "Pe",
                 ]:
@@ -5094,7 +5610,9 @@ class ReducedDiagnostic(picmistandard.base._ClassWithInit, WarpXDiagnosticBase):
             "FieldMomentum",
             "FieldMaximum",
             "FieldPoyntingFlux",
+            "HybridDissipation",
             "RhoMaximum",
+            "ScrapedParticleEnergy",
             "ParticleNumber",
             "LoadBalanceCosts",
             "LoadBalanceEfficiency",

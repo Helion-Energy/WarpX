@@ -1,0 +1,12 @@
+{
+  "ions": {
+    "particle_momentum_x": 5.048145207826318e-17,
+    "particle_momentum_y": 5.0508552917283256e-17,
+    "particle_momentum_z": 5.0483928178679055e-17,
+    "particle_position_x": 143167.5229732613,
+    "particle_position_y": 143164.31797258795,
+    "particle_theta": 2573659.353010271,
+    "particle_weight": 8.128734783888919e+18
+  },
+  "lev=0": {}
+}

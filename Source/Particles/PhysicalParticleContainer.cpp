@@ -208,6 +208,9 @@ PhysicalParticleContainer::PhysicalParticleContainer (AmrCore* amr_core, int isp
     // shape-aware ion temperature of every charged species, so turn the
     // deposition on automatically when it is configured. Done here (rather
     // than in HybridPICModel) because the flag must be known by AllocData.
+    // Species listed in electron_ion_relaxation_excluded_species are skipped
+    // by the exchange and do not need the deposit (an explicit
+    // <species>.do_temperature_deposition = 1 above still wins).
     if (!m_do_temperature_deposition && m_charge != 0._prt) {
         const ParmParse pp_hybrid("hybrid_pic_model");
         bool solve_electron_energy_equation = false;
@@ -215,7 +218,12 @@ PhysicalParticleContainer::PhysicalParticleContainer (AmrCore* amr_core, int isp
         std::string nu_ei_expression;
         if (solve_electron_energy_equation &&
             pp_hybrid.query("electron_ion_relaxation_rate(rho,Te,Ti,t)", nu_ei_expression)) {
-            m_do_temperature_deposition = true;
+            std::vector<std::string> excluded_species;
+            pp_hybrid.queryarr("electron_ion_relaxation_excluded_species", excluded_species);
+            if (std::find(excluded_species.begin(), excluded_species.end(), species_name)
+                == excluded_species.end()) {
+                m_do_temperature_deposition = true;
+            }
         }
     }
 
@@ -1877,9 +1885,12 @@ PhysicalParticleContainer::DepositTemperature (
     if (!m_do_temperature_deposition) { return; }
 
     // The temperature deposit runs its own shape-N moment kernels
-    // (doVarianceDepositionShapeN) and works with any current-deposition
-    // algorithm; implicit pushers and shared-memory deposition change the
-    // u/x staging assumptions and are not supported.
+    // (doVarianceDepositionShapeN) from AccumulateVelocitiesAndComputeTemperature,
+    // sharing no code or particle staging with the current-deposition algorithm,
+    // and the T_<species> fields inherit current_fp's guard cells (which only
+    // grow for the non-direct algorithms). The current-deposition algorithm is
+    // therefore not restricted here; implicit pushers and shared-memory
+    // deposition change the u/x staging assumptions and remain unsupported.
     if (push_type != PushType::Explicit
         || WarpX::do_shared_mem_current_deposition
         )

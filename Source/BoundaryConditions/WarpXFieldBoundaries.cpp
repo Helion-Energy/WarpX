@@ -1,4 +1,5 @@
 #include "WarpX.H"
+#include "BoundaryConditions/GreensFunctionOpenBC.H"
 #include "BoundaryConditions/PEC_Insulator.H"
 #include "BoundaryConditions/PML.H"
 #include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceSolver.H"
@@ -46,6 +47,60 @@ namespace
                std::any_of(particle_boundary_hi.begin(), particle_boundary_hi.end(), isPT);
     }
 
+    /** Zero-gradient continuation of a field into the domain ghost cells
+     * on every face marked Open: ghost values copy the nearest valid
+     * plane (staggering-aware). */
+    void ApplyOpenBoundaryExtrapolation (
+        ablastr::fields::VectorField const& field,
+        const amrex::Array<FieldBoundaryType,AMREX_SPACEDIM>& field_boundary_lo,
+        const amrex::Array<FieldBoundaryType,AMREX_SPACEDIM>& field_boundary_hi,
+        const amrex::Geometry& geom, const amrex::IntVect& ng)
+    {
+        for (int icomp = 0; icomp < 3; ++icomp) {
+            amrex::MultiFab* mf = field[icomp];
+            const amrex::Box domain = amrex::convert(geom.Domain(),
+                                                     mf->ixType().toIntVect());
+            const auto dlo = domain.smallEnd();
+            const auto dhi = domain.bigEnd();
+            amrex::GpuArray<int, 3> lo_open{0, 0, 0};
+            amrex::GpuArray<int, 3> hi_open{0, 0, 0};
+            for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+                lo_open[idim] =
+                    (field_boundary_lo[idim] == FieldBoundaryType::Open);
+                hi_open[idim] =
+                    (field_boundary_hi[idim] == FieldBoundaryType::Open);
+            }
+            amrex::GpuArray<int, 3> dlo_a{0, 0, 0};
+            amrex::GpuArray<int, 3> dhi_a{0, 0, 0};
+            for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+                dlo_a[idim] = dlo[idim];
+                dhi_a[idim] = dhi[idim];
+            }
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (amrex::MFIter mfi(*mf, amrex::TilingIfNotGPU());
+                 mfi.isValid(); ++mfi) {
+                const amrex::Box gbx = mfi.growntilebox(ng);
+                auto const& arr = mf->array(mfi);
+                amrex::ParallelFor(gbx,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                        int src[3] = {i, j, k};
+                        bool outside = false;
+                        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                            if (src[d] < dlo_a[d] && lo_open[d]) {
+                                src[d] = dlo_a[d]; outside = true;
+                            } else if (src[d] > dhi_a[d] && hi_open[d]) {
+                                src[d] = dhi_a[d]; outside = true;
+                            }
+                        }
+                        if (outside) {
+                            arr(i, j, k) = arr(src[0], src[1], src[2]);
+                        }
+                    });
+            }
+        }
+    }
 }
 
 void WarpX::ApplyEfieldBoundary(const int lev, PatchType patch_type, amrex::Real time)
@@ -124,6 +179,20 @@ void WarpX::ApplyEfieldBoundary(const int lev, PatchType patch_type, amrex::Real
         }
     }
 
+    bool open_extrap_e =
+        ::isAnyBoundary<FieldBoundaryType::Open>(field_boundary_lo, field_boundary_hi);
+#if defined(WARPX_DIM_RZ)
+    open_extrap_e = open_extrap_e && !GreensFunctionOpenBC::IsActive();
+#endif
+    if (open_extrap_e) {
+        ::ApplyOpenBoundaryExtrapolation(
+            m_fields.get_alldirs(patch_type == PatchType::fine
+                                     ? FieldType::Efield_fp
+                                     : FieldType::Efield_cp, lev),
+            field_boundary_lo, field_boundary_hi, Geom(lev),
+            get_ng_fieldgather());
+    }
+
     if (::isAnyBoundary<FieldBoundaryType::PEC_Insulator>(field_boundary_lo, field_boundary_hi)) {
         if (patch_type == PatchType::fine) {
             pec_insulator_boundary->ApplyPEC_InsulatortoEfield(
@@ -171,11 +240,47 @@ void WarpX::ApplyEfieldBoundary(const int lev, PatchType patch_type, amrex::Real
                                  m_fields.get(FieldType::Efield_cp, Direction{2}, lev), lev);
     }
 #endif
+
+#if defined(WARPX_DIM_RZ)
+    // Green's-function open boundary (hybrid solver, r_hi): the open face
+    // imposes no wall condition on E, but the physical r_hi ghosts feed the
+    // particle gather, the E-filter, and near-boundary stencils, and no
+    // other handler ever writes them -- they would otherwise carry values
+    // left by previous evaluations (hidden state that breaks the implicit
+    // residual's determinism). Continue the outermost valid ring outward
+    // (zero-gradient, the free-space consistent choice).
+    if (GreensFunctionOpenBC::IsActive() && patch_type == PatchType::fine) {
+        for (int dir = 0; dir < 3; ++dir) {
+            GreensFunctionOpenBC::FillGhostsZeroGradientRhi(
+                *m_fields.get(FieldType::Efield_fp, Direction{dir}, lev), Geom(lev));
+        }
+    }
+#endif
 }
 
 void WarpX::ApplyBfieldBoundary (const int lev, PatchType patch_type, SubcyclingHalf subcycling_half, amrex::Real time)
 {
     using ablastr::fields::Direction;
+
+#if defined(WARPX_DIM_RZ)
+    // Green's-function open (free-space) boundary with an open z (cap)
+    // face: the fill must run BEFORE the reflecting/axis fills, because
+    // the PEC and on-axis mirrors read interior cap-ghost values at the
+    // corners and must see this application's values (the Green's fill
+    // itself reads only valid data, so it is safe to run first). With
+    // r_hi-only open the original tail position below is kept unchanged.
+    const bool open_bc_greens_z =
+        (field_boundary_lo[1] == FieldBoundaryType::Open) ||
+        (field_boundary_hi[1] == FieldBoundaryType::Open);
+    if (GreensFunctionOpenBC::IsActive() && open_bc_greens_z &&
+        patch_type == PatchType::fine) {
+        if (!m_open_bc_greens) {
+            m_open_bc_greens = std::make_unique<GreensFunctionOpenBC>();
+        }
+        m_open_bc_greens->ApplyToBfield(
+            m_fields.get_alldirs(FieldType::Bfield_fp, lev), Geom(lev), lev);
+    }
+#endif
 
     if (::isAnyBoundary<FieldBoundaryType::PEC>(field_boundary_lo, field_boundary_hi)) {
         if (patch_type == PatchType::fine) {
@@ -252,6 +357,63 @@ void WarpX::ApplyBfieldBoundary (const int lev, PatchType patch_type, Subcycling
                                  m_fields.get(FieldType::Bfield_cp,Direction{2},lev), lev);
     }
 #endif
+
+#if defined(WARPX_DIM_RZ)
+    // Green's-function open (free-space) boundary on the r_hi face for the
+    // hybrid-PIC B-field advance: fill the radial ghost values of B with
+    // the free-space field of the interior sources (default off; active
+    // only with boundary.field_hi[0] == open and the hybrid solver). When
+    // a z cap is open too, the fill already ran at the top of this method.
+    if (GreensFunctionOpenBC::IsActive() && !open_bc_greens_z &&
+        patch_type == PatchType::fine) {
+        if (!m_open_bc_greens) {
+            m_open_bc_greens = std::make_unique<GreensFunctionOpenBC>();
+        }
+        m_open_bc_greens->ApplyToBfield(
+            m_fields.get_alldirs(FieldType::Bfield_fp, lev), Geom(lev), lev);
+    }
+#endif
+
+    bool open_extrap =
+        ::isAnyBoundary<FieldBoundaryType::Open>(field_boundary_lo, field_boundary_hi);
+#if defined(WARPX_DIM_RZ)
+    // The Green's-function fill provides the physical open-face ghosts.
+    open_extrap = open_extrap && !GreensFunctionOpenBC::IsActive();
+#endif
+    if (open_extrap) {
+        ::ApplyOpenBoundaryExtrapolation(
+            m_fields.get_alldirs(patch_type == PatchType::fine
+                                     ? FieldType::Bfield_fp
+                                     : FieldType::Bfield_cp, lev),
+            field_boundary_lo, field_boundary_hi, Geom(lev),
+            get_ng_fieldgather());
+    }
+}
+
+void WarpX::ApplyBfieldBoundarySubstep (const int lev, PatchType patch_type)
+{
+    if (::isAnyBoundary<FieldBoundaryType::PMC>(field_boundary_lo, field_boundary_hi)) {
+        PEC::ApplyPECtoEfield(
+            m_fields.get_alldirs(
+                patch_type == PatchType::fine ? FieldType::Bfield_fp
+                                              : FieldType::Bfield_cp, lev),
+            field_boundary_lo, field_boundary_hi, FieldBoundaryType::PMC,
+            get_ng_fieldgather(), Geom(lev),
+            lev, patch_type, ref_ratio);
+    }
+#if defined(WARPX_DIM_RZ)
+    // The Green's-function open boundary provides the physical B ghost
+    // fill when active; the plain continuation applies otherwise.
+    if (GreensFunctionOpenBC::IsActive()) { return; }
+#endif
+    if (::isAnyBoundary<FieldBoundaryType::Open>(field_boundary_lo, field_boundary_hi)) {
+        ::ApplyOpenBoundaryExtrapolation(
+            m_fields.get_alldirs(
+                patch_type == PatchType::fine ? FieldType::Bfield_fp
+                                              : FieldType::Bfield_cp, lev),
+            field_boundary_lo, field_boundary_hi, Geom(lev),
+            get_ng_fieldgather());
+    }
 }
 
 void WarpX::ApplyRhofieldBoundary (const int lev, MultiFab* rho,
@@ -405,5 +567,35 @@ void WarpX::ApplyElectronPressureBoundary (const int lev, PatchType patch_type)
             amrex::Abort(Utils::TextMsg::Err(
             "ApplyElectronPressureBoundary: Only one level implemented for hybrid solver."));
         }
+    }
+
+    // Zero-gradient (staggering-aware even-mirror) domain-ghost fills for
+    // the nodal electron scalars at non-periodic boundaries: FillBoundary
+    // leaves non-periodic domain ghosts untouched, so without these any
+    // Ohm-path stencil reaching a domain-end ghost reads stale values --
+    // and a clamp would be no better for nodal data (a centered stencil
+    // at the end node would see half the interior gradient instead of
+    // zero, i.e. a spurious end-node grad Pe). The pressure keeps the
+    // legacy PEC image above on PEC sides (bit-identical; it also
+    // rewrites the boundary node) and gains the pure-ghost mirror on the
+    // remaining non-periodic sides; the temperature -- previously never
+    // ghost-filled at domain ends -- gets the pure-ghost mirror on every
+    // non-periodic side, so eta(Te)-class consumers see the zero-gradient
+    // image. 'none' sides (the RZ axis) keep their own parity handling.
+    if (patch_type == PatchType::fine) {
+        ablastr::fields::ScalarField electron_pressure_fp =
+            m_fields.get(FieldType::hybrid_electron_pressure_fp, lev);
+        PEC::ApplyZeroGradientToScalar(
+            electron_pressure_fp,
+            field_boundary_lo, field_boundary_hi,
+            Geom(lev), lev, patch_type, ref_ratio,
+            /*include_pec=*/false);
+        ablastr::fields::ScalarField electron_temperature_fp =
+            m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+        PEC::ApplyZeroGradientToScalar(
+            electron_temperature_fp,
+            field_boundary_lo, field_boundary_hi,
+            Geom(lev), lev, patch_type, ref_ratio,
+            /*include_pec=*/true);
     }
 }

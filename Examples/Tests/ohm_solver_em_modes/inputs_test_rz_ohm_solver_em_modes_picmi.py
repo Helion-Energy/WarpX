@@ -13,6 +13,7 @@ import dill
 import numpy as np
 from mpi4py import MPI as mpi
 
+import pywarpx
 from pywarpx import picmi
 
 constants = picmi.constants
@@ -28,6 +29,11 @@ class CylindricalNormalModes(object):
     z-direction (parallel to domain).
     The analysis script (in this same directory) analyzes the output field
     data for EM modes.
+
+    With ``--esolve je_form`` the same configuration runs on the Je-form
+    generalized-Ohm's-law solve (dynamical electron current, relax
+    advance) instead of the legacy E-form; the Je-form requires a
+    collocated grid and the one-count density level for je_n_min.
     """
 
     # Applied field parameters
@@ -56,10 +62,11 @@ class CylindricalNormalModes(object):
     # Number of substeps used to update B
     substeps = 40
 
-    def __init__(self, test, verbose):
+    def __init__(self, test, verbose, esolve="e_form"):
         """Get input parameters for the specific case desired."""
         self.test = test
         self.verbose = verbose or self.test
+        self.esolve = esolve
 
         # calculate various plasma parameters based on the simulation input
         self.get_plasma_quantities()
@@ -253,8 +260,27 @@ parser.add_argument(
     help="Verbose output",
     action="store_true",
 )
+parser.add_argument(
+    "--esolve",
+    choices=["e_form", "je_form"],
+    default="e_form",
+    help="E-solve form (hybrid_pic_model.esolve): e_form = the legacy "
+    "algebraic solve, je_form = the dynamical electron-current solve "
+    "(relax advance, collocated grid)",
+)
 args, left = parser.parse_known_args()
 sys.argv = sys.argv[:1] + left
 
-run = CylindricalNormalModes(test=args.test, verbose=args.verbose)
+if args.esolve == "je_form":
+    # the Je-form relax advance requires a collocated grid
+    simulation = picmi.Simulation(verbose=0, warpx_grid_type="collocated")
+
+run = CylindricalNormalModes(test=args.test, verbose=args.verbose, esolve=args.esolve)
+simulation.initialize_inputs()
+if args.esolve == "je_form":
+    pywarpx.hybridpicmodel.esolve = "je_form"
+    # the one-count density level (one macroparticle's deposit): the
+    # contract value for je_n_min -- never lower
+    pywarpx.hybridpicmodel.je_n_min = run.n_plasma / run.NPPC
+simulation.initialize_warpx()
 simulation.step()

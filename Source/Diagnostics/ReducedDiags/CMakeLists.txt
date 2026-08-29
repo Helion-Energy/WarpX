@@ -4,6 +4,8 @@ foreach(D IN LISTS WarpX_DIMS)
       PRIVATE
         BeamRelevant.cpp
         ChargeOnEB.cpp
+        CircuitCouplingDiag.cpp
+        HybridDissipation.cpp
         ColliderRelevant.cpp
         DifferentialLuminosity.cpp
         DifferentialLuminosity2D.cpp
@@ -15,6 +17,7 @@ foreach(D IN LISTS WarpX_DIMS)
         FieldProbeParticleContainer.cpp
         FieldReduction.cpp
         FieldProbe.cpp
+        HybridDissipation.cpp
         LoadBalanceCosts.cpp
         LoadBalanceEfficiency.cpp
         MultiReducedDiags.cpp
@@ -26,6 +29,7 @@ foreach(D IN LISTS WarpX_DIMS)
         ParticleNumber.cpp
         ReducedDiags.cpp
         RhoMaximum.cpp
+        ScrapedParticleEnergy.cpp
         Timestep.cpp
     )
 endforeach()
