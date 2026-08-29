@@ -71,10 +71,13 @@ void HybridPICModel::ReadParameters ()
                                    m_je_sponge_lnf);
     utils::parser::queryWithParser(pp_hybrid, "je_sponge_vw",
                                    m_je_sponge_vw);
+    utils::parser::queryWithParser(pp_hybrid, "je_sponge_track_tau",
+                                   m_je_sponge_track_tau);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        m_je_sponge_width >= 0.0_rt && m_je_sponge_vw >= 0.0_rt,
-        "hybrid_pic_model.je_sponge_width and je_sponge_vw cannot be "
-        "negative");
+        m_je_sponge_width >= 0.0_rt && m_je_sponge_vw >= 0.0_rt
+            && m_je_sponge_track_tau >= 0.0_rt,
+        "hybrid_pic_model.je_sponge_width, je_sponge_vw and "
+        "je_sponge_track_tau cannot be negative");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_je_sponge_width == 0.0_rt || m_je_sponge_lnf > 0.0_rt,
         "hybrid_pic_model.je_sponge_lnf must be positive when the "
@@ -10508,7 +10511,9 @@ void HybridPICModel::ApplySpongeLayerBYee (
             << " cells), ln(1/f) = " << m_je_sponge_lnf
             << ", v_w = " << vw << " m/s, tau_max = "
             << Ls / (vw * m_je_sponge_lnf)
-            << " s (plasma-frame reference frozen at first call)\n";
+            << " s (plasma-frame reference seeded at first call, "
+            << (m_je_sponge_track_tau > 0.0_rt ? "tracking" : "frozen")
+            << ", tau = " << m_je_sponge_track_tau << " s)\n";
         return;
     }
 
@@ -10519,12 +10524,19 @@ void HybridPICModel::ApplySpongeLayerBYee (
         // component is cell-centered along z
         const amrex::Real zoff =
             B.ixType().nodeCentered(zdim) ? 0.0_rt : 0.5_rt;
+        // reference tracking, as on the je variant (see the
+        // m_je_sponge_track_tau member doc): low-pass the reference
+        // toward the damped state so the sponge follows the slow
+        // background instead of pinning to a stale seed
+        const amrex::Real alpha = (m_je_sponge_track_tau > 0.0_rt)
+            ? amrex::min(1.0_rt, dt_sub / m_je_sponge_track_tau)
+            : 0.0_rt;
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
         for (MFIter mfi(B, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
             Array4<Real> const& b = B.array(mfi);
-            Array4<Real const> const& br = Bref.const_array(mfi);
+            Array4<Real> const& br = Bref.array(mfi);
             const amrex::Real dt_l = dt_sub;
             amrex::ParallelFor(mfi.tilebox(),
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) {
@@ -10544,6 +10556,9 @@ void HybridPICModel::ApplySpongeLayerBYee (
                 const amrex::Real s =
                     1.0_rt / (1.0_rt + dt_l * xi * inv_tau_max);
                 b(i,j,k) = br(i,j,k) + (b(i,j,k) - br(i,j,k)) * s;
+                if (alpha > 0.0_rt) {
+                    br(i,j,k) += alpha * (b(i,j,k) - br(i,j,k));
+                }
             });
         }
     }

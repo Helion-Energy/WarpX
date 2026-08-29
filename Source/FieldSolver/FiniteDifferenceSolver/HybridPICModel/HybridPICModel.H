@@ -787,6 +787,20 @@ public:
      *  which the ramp tolerates). Input: je_sponge_vw. */
     amrex::Real m_je_sponge_vw = 0.0;
 
+    /** Sponge reference-tracking time constant [s] (0 = frozen reference,
+     *  bit-identical to the original behavior). A frozen reference under
+     *  an evolving background becomes a stale pin: as the drive carries
+     *  the cap-region state away from the seed, the layer forces against
+     *  the growing difference and radiates the mismatch inward (measured
+     *  on the je full-stroke panel: Alfvenic inward fronts from
+     *  mid-stroke, spurious cap-region wave field at 0.4-0.65 of the
+     *  interior level). With tau > 0 the reference low-passes toward the
+     *  damped state (alpha = dt_sub/tau per accepted substep), following
+     *  the slow background while still absorbing wave-timescale content;
+     *  it also re-converges a restart-reseeded reference within tau.
+     *  Input: je_sponge_track_tau. */
+    amrex::Real m_je_sponge_track_tau = 0.0;
+
     /** Interval (in steps) of the per-species temperature moment deposit
      *  (DepositTemperatures — measured ~20% of a production step). Its
      *  consumers are collision-rate-class quantities (Q_ei relaxation,
