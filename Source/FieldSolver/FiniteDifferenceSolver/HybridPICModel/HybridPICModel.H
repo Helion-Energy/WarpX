@@ -183,6 +183,27 @@ public:
         ablastr::fields::MultiLevelScalarField const& rhofield,
         int lev, amrex::Real dt_sub);
 
+    /** Native-Yee variant of the curl-curl hyper-resistivity for the
+     *  Yee-coupled relax advance (see the m_je_yee_coupling member
+     *  doc): the same operator-split dB/dt = -curl(curl(eta_H curl J))
+     *  composed from the NATIVE Yee curls -- curl J lands on the faces
+     *  through the Faraday-form stencils, curl back to the edges
+     *  through the Ampere-form stencils, and the final Faraday-form
+     *  push updates B. Consecutive Yee curls are mutual transposes in
+     *  the volume-weighted inner products, so the composition is
+     *  sign-definite ON THE GRID -- the property the retired
+     *  collocated centered-difference composition lacked (its
+     *  measured grid-scale growth is documented on m_je_hyper_res).
+     *  Boundary contract: every pass is evaluated strictly inside
+     *  non-periodic domain faces on zeroed scratch (the axis keeps
+     *  the standard RZ m = 0 on-axis rules), so no pass reads an
+     *  unfilled domain ghost and the operator carries no wall flux.
+     *  RZ m = 0 only in this version. */
+    void ApplyJeHyperCurlCurlYee (
+        ablastr::fields::MultiLevelVectorField const& Bfield,
+        ablastr::fields::MultiLevelScalarField const& rhofield,
+        int lev, amrex::Real dt_sub);
+
     /** E-form (Yee) variant of the sponge cap: B-SIDE ONLY -- the
      *  algebraic e-form E regenerates every solve, so only the
      *  evolved B carries wave state into the caps. Per-direction on
@@ -193,8 +214,10 @@ public:
      *  and no ext-change tracking is needed here) toward its frozen
      *  first-call reference. Applied once per ACCEPTED substep,
      *  BEFORE the circuit coupler reads its linkages and BEFORE the
-     *  B_old latch. Requires an explicit je_sponge_vw (the e-form
-     *  path publishes no c_art to fall back on). References live in
+     *  B_old latch. On the E-FORM path an explicit je_sponge_vw is
+     *  required (no c_art is published there); the Yee-COUPLED je
+     *  path (which also routes here) falls back to the published
+     *  relax c_art like the collocated variant. References live in
      *  m_sponge_bref_yee, lazily seeded on the first call. */
     void ApplySpongeLayerBYee (
         ablastr::fields::MultiLevelVectorField const& Bfield,
@@ -917,6 +940,54 @@ public:
      *  jacobi aborts at parse. */
     int m_je_advance = 1;
     amrex::Real m_je_c_frac = 0.5;
+    /** Yee-coupled relax advance (je_yee_coupling = 1, OPT-IN): the
+     *  fields live on the standard Yee staggering -- B on faces, E on
+     *  edges, native Yee Faraday curl -- and ONLY the pointwise
+     *  vector-coupled (E, J_e) relax update runs nodally. Rationale:
+     *  the collocated chain's centered stencils are odd-even blind
+     *  and anti-diffusive, forcing heavy artificial dissipation
+     *  inside an explicit loop; Yee's compact staggering supplies
+     *  benign natural diffusion and mutually adjoint curls, so the
+     *  artificial hyper-resistivity can stay light.
+     *
+     *  COUPLING INTERFACE (ablastr::fields::StaggerCoupling --
+     *  second-order, momentum-conserving, adjoint pair; see that
+     *  header): per accepted substep the advance GATHERS the Ampere
+     *  current, ion current, B, and (when armed) the external fields
+     *  to nodes, runs the unchanged nodal kernel, and SCATTERS the
+     *  updated E to the edges for the Faraday push.
+     *
+     *  PERSISTENT-STATE PLACEMENT (the design fork, decided): the
+     *  dynamical E state PERSISTS AT THE NODES (hybrid_je_yee_en_fp)
+     *  and the edge E is a fresh projection each substep. The
+     *  literal alternative -- E persisting on edges and round-
+     *  tripping gather/scatter every substep -- multiplies standing
+     *  structure by cos^2(k dx/2) per offset dim PER SUBSTEP
+     *  (6%/substep at 12 cells per wavelength; extinction within one
+     *  step at production substep counts) and was rejected. With
+     *  nodal persistence no state ever accumulates interface
+     *  smoothing: only propagating information crossing the
+     *  interface sees it, which is the intended benign diffusion.
+     *
+     *  STABILITY (c_art carries over unchanged): the coupled wave
+     *  loop's per-dim symbol is [2 sin(k dx/2)/dx] (compact curl,
+     *  each direction) x cos(k dx/2) (each interface leg), i.e.
+     *  (sin(k dx)/dx)^2 for the round trip -- IDENTICAL to the
+     *  collocated centered-difference loop's symbol, with the same
+     *  maximum 1/dx^2 at k dx = pi/2. The interface exactly
+     *  compensates the compact curls' extra stiffness, so
+     *  c_art = min(c, je_c_frac/(dt_sub sqrt(sum dx_i^-2))) is
+     *  unchanged.
+     *
+     *  Sponge caps route to the Yee B-side variant (the E-side cap
+     *  damping of the collocated path is deferred: cap E is slaved
+     *  to B through the relax dynamics on the tau_relax scale).
+     *  Requires the staggered grid; incompatible with je_adaptive
+     *  and with embedded boundaries in this version. */
+    int m_je_yee_coupling = 0;
+    /** Seed latch of the nodal E state of the Yee-coupled advance
+     *  (gathered once from the initial edge E). */
+    mutable bool m_je_yee_en_init = false;
     /** Absolute ceiling on the relax form's artificial light speed
      *  [m/s]. The CFL formula alone saturates at the REAL c when
      *  dt_sub is small relative to dx (measured on a compression

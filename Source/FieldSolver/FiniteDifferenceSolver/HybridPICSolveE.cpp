@@ -540,11 +540,20 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
     // and returns before the legacy divided-Ohm path.
     bool const je_relax_solve =
         hybrid_model->m_esolve_je && (hybrid_model->m_je_advance == 1);
+    // Yee-coupled advance (see the m_je_yee_coupling member doc): the
+    // dispatcher hands this function ALL-NODAL gathered views of E,
+    // the Ampere and ion currents, and B; the kernel below is
+    // unchanged. The gathered externals are fetched by name here and
+    // the staggering descriptors collapse to nodal.
+    bool const je_yee = je_relax_solve &&
+        (hybrid_model->m_je_yee_coupling != 0);
     if (je_relax_solve) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            je_yee ||
             WarpX::grid_type == ablastr::utils::enums::GridType::Collocated,
             "hybrid_pic_model.esolve = je_form (v1) requires "
-            "warpx.grid_type = collocated");
+            "warpx.grid_type = collocated (or je_yee_coupling = 1 on "
+            "the staggered grid)");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !hybrid_model->m_add_external_fields ||
                 hybrid_model->m_external_field_mode ==
@@ -640,21 +649,36 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         ? warpx.m_fields.get("hybrid_E_inertial_nodal", lev) : nullptr;
     ablastr::fields::VectorField Bfield_external, Efield_external;
     if (include_external_fields) {
-        Bfield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_external, 0); // lev=0
-        Efield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_E_fp_external, 0); // lev=0
+        if (je_yee) {
+            // nodal gathers of the externals, refreshed by the
+            // dispatcher right before this advance (the kernel reads
+            // them pointwise against the nodal state)
+            Bfield_external =
+                warpx.m_fields.get_alldirs("hybrid_je_yee_ben_fp", 0);
+            Efield_external =
+                warpx.m_fields.get_alldirs("hybrid_je_yee_een_fp", 0);
+        } else {
+            Bfield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_external, 0); // lev=0
+            Efield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_E_fp_external, 0); // lev=0
+        }
     }
 
     // Index type required for interpolating fields from their respective
     // staggering to the Ex, Ey, Ez locations
-    amrex::GpuArray<int, 3> const& Er_stag = hybrid_model->Ex_IndexType;
-    amrex::GpuArray<int, 3> const& Etheta_stag = hybrid_model->Ey_IndexType;
-    amrex::GpuArray<int, 3> const& Ez_stag = hybrid_model->Ez_IndexType;
-    amrex::GpuArray<int, 3> const& Jr_stag = hybrid_model->Jx_IndexType;
-    amrex::GpuArray<int, 3> const& Jtheta_stag = hybrid_model->Jy_IndexType;
-    amrex::GpuArray<int, 3> const& Jz_stag = hybrid_model->Jz_IndexType;
-    amrex::GpuArray<int, 3> const& Br_stag = hybrid_model->Bx_IndexType;
-    amrex::GpuArray<int, 3> const& Btheta_stag = hybrid_model->By_IndexType;
-    amrex::GpuArray<int, 3> const& Bz_stag = hybrid_model->Bz_IndexType;
+    // Yee-coupled advance: every field this function receives is
+    // already nodal (see the je_yee note at entry), so the staggering
+    // descriptors collapse to nodal and the interpolations below
+    // become pass-throughs.
+    amrex::GpuArray<int, 3> const stag_nodal_je = {1, 1, 1};
+    amrex::GpuArray<int, 3> const& Er_stag = je_yee ? stag_nodal_je : hybrid_model->Ex_IndexType;
+    amrex::GpuArray<int, 3> const& Etheta_stag = je_yee ? stag_nodal_je : hybrid_model->Ey_IndexType;
+    amrex::GpuArray<int, 3> const& Ez_stag = je_yee ? stag_nodal_je : hybrid_model->Ez_IndexType;
+    amrex::GpuArray<int, 3> const& Jr_stag = je_yee ? stag_nodal_je : hybrid_model->Jx_IndexType;
+    amrex::GpuArray<int, 3> const& Jtheta_stag = je_yee ? stag_nodal_je : hybrid_model->Jy_IndexType;
+    amrex::GpuArray<int, 3> const& Jz_stag = je_yee ? stag_nodal_je : hybrid_model->Jz_IndexType;
+    amrex::GpuArray<int, 3> const& Br_stag = je_yee ? stag_nodal_je : hybrid_model->Bx_IndexType;
+    amrex::GpuArray<int, 3> const& Btheta_stag = je_yee ? stag_nodal_je : hybrid_model->By_IndexType;
+    amrex::GpuArray<int, 3> const& Bz_stag = je_yee ? stag_nodal_je : hybrid_model->Bz_IndexType;
 
     // Parameters for `interp` that maps from Yee to nodal mesh and back
     amrex::GpuArray<int, 3> const& nodal = {1, 1, 1};
@@ -1593,11 +1617,20 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
     // divided-Ohm path.
     bool const je_relax_solve =
         hybrid_model->m_esolve_je && (hybrid_model->m_je_advance == 1);
+    // Yee-coupled advance (see the m_je_yee_coupling member doc): the
+    // dispatcher hands this function ALL-NODAL gathered views of E,
+    // the Ampere and ion currents, and B; the kernel below is
+    // unchanged. The gathered externals are fetched by name here and
+    // the staggering descriptors collapse to nodal.
+    bool const je_yee = je_relax_solve &&
+        (hybrid_model->m_je_yee_coupling != 0);
     if (je_relax_solve) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            je_yee ||
             WarpX::grid_type == ablastr::utils::enums::GridType::Collocated,
             "hybrid_pic_model.esolve = je_form (v1) requires "
-            "warpx.grid_type = collocated");
+            "warpx.grid_type = collocated (or je_yee_coupling = 1 on "
+            "the staggered grid)");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !hybrid_model->m_add_external_fields ||
                 hybrid_model->m_external_field_mode ==
@@ -1693,21 +1726,34 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         ? warpx.m_fields.get("hybrid_E_inertial_nodal", lev) : nullptr;
     ablastr::fields::VectorField Bfield_external, Efield_external;
     if (include_external_fields) {
-        Bfield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_external, 0); // lev=0
-        Efield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_E_fp_external, 0); // lev=0
+        if (je_yee) {
+            // nodal gathers of the externals, refreshed by the
+            // dispatcher right before this advance (the kernel reads
+            // them pointwise against the nodal state)
+            Bfield_external =
+                warpx.m_fields.get_alldirs("hybrid_je_yee_ben_fp", 0);
+            Efield_external =
+                warpx.m_fields.get_alldirs("hybrid_je_yee_een_fp", 0);
+        } else {
+            Bfield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_B_fp_external, 0); // lev=0
+            Efield_external = warpx.m_fields.get_alldirs(FieldType::hybrid_E_fp_external, 0); // lev=0
+        }
     }
 
     // Index type required for interpolating fields from their respective
     // staggering to the Ex, Ey, Ez locations
-    amrex::GpuArray<int, 3> const& Ex_stag = hybrid_model->Ex_IndexType;
-    amrex::GpuArray<int, 3> const& Ey_stag = hybrid_model->Ey_IndexType;
-    amrex::GpuArray<int, 3> const& Ez_stag = hybrid_model->Ez_IndexType;
-    amrex::GpuArray<int, 3> const& Jx_stag = hybrid_model->Jx_IndexType;
-    amrex::GpuArray<int, 3> const& Jy_stag = hybrid_model->Jy_IndexType;
-    amrex::GpuArray<int, 3> const& Jz_stag = hybrid_model->Jz_IndexType;
-    amrex::GpuArray<int, 3> const& Bx_stag = hybrid_model->Bx_IndexType;
-    amrex::GpuArray<int, 3> const& By_stag = hybrid_model->By_IndexType;
-    amrex::GpuArray<int, 3> const& Bz_stag = hybrid_model->Bz_IndexType;
+    // Yee-coupled advance: nodal inputs, nodal descriptors (see the
+    // je_yee note at entry).
+    amrex::GpuArray<int, 3> const stag_nodal_je = {1, 1, 1};
+    amrex::GpuArray<int, 3> const& Ex_stag = je_yee ? stag_nodal_je : hybrid_model->Ex_IndexType;
+    amrex::GpuArray<int, 3> const& Ey_stag = je_yee ? stag_nodal_je : hybrid_model->Ey_IndexType;
+    amrex::GpuArray<int, 3> const& Ez_stag = je_yee ? stag_nodal_je : hybrid_model->Ez_IndexType;
+    amrex::GpuArray<int, 3> const& Jx_stag = je_yee ? stag_nodal_je : hybrid_model->Jx_IndexType;
+    amrex::GpuArray<int, 3> const& Jy_stag = je_yee ? stag_nodal_je : hybrid_model->Jy_IndexType;
+    amrex::GpuArray<int, 3> const& Jz_stag = je_yee ? stag_nodal_je : hybrid_model->Jz_IndexType;
+    amrex::GpuArray<int, 3> const& Bx_stag = je_yee ? stag_nodal_je : hybrid_model->Bx_IndexType;
+    amrex::GpuArray<int, 3> const& By_stag = je_yee ? stag_nodal_je : hybrid_model->By_IndexType;
+    amrex::GpuArray<int, 3> const& Bz_stag = je_yee ? stag_nodal_je : hybrid_model->Bz_IndexType;
 
     // Parameters for `interp` that maps from Yee to nodal mesh and back
     amrex::GpuArray<int, 3> const& nodal = {1, 1, 1};

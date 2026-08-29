@@ -15,6 +15,7 @@
 #include "QdsmcRKIntegrator.H"
 
 #include <ablastr/coarsen/sample.H>
+#include <ablastr/fields/StaggerCoupling.H>
 #include <ablastr/utils/Communication.H>
 
 #include <AMReX_GpuContainers.H>
@@ -814,6 +815,12 @@ void HybridPICModel::ReadParameters ()
                 "hybrid_pic_model.je_advance must be 'relax' ('jacobi' "
                 "is not ported on this fork)");
         }
+        pp_hybrid.query("je_yee_coupling", m_je_yee_coupling);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_je_yee_coupling ||
+                (m_esolve_je && m_je_advance == 1),
+            "hybrid_pic_model.je_yee_coupling requires esolve = "
+            "je_form with the relax advance");
         utils::parser::queryWithParser(pp_hybrid, "gol_c_frac", m_je_c_frac);
         utils::parser::queryWithParser(pp_hybrid, "je_c_frac", m_je_c_frac);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -897,6 +904,11 @@ void HybridPICModel::ReadParameters ()
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !m_je_adaptive || m_esolve_je,
             "hybrid_pic_model.je_adaptive requires esolve = je_form");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !(m_je_yee_coupling && m_je_adaptive),
+            "hybrid_pic_model.je_yee_coupling is incompatible with "
+            "je_adaptive in this version (the adaptive entry "
+            "snapshots do not carry the nodal E state)");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !m_je_adaptive || !m_solve_electron_energy_equation ||
                 (m_je_cond_lockstep && m_cond_operator == 1),
@@ -1171,6 +1183,44 @@ void HybridPICModel::AllocateLevelMFs (
         fields.alloc_init("hybrid_je_fp", lev,
             amrex::convert(ba, amrex::IntVect::TheNodeVector()),
             dm, 3, amrex::IntVect(0), 0.0_rt);
+        // Yee-coupled advance (see the m_je_yee_coupling member doc):
+        // the persistent nodal E state and the per-advance nodal
+        // gathers of the Ampere current, ion current, B, and (when
+        // armed) the external fields. Pointwise consumers only -- no
+        // ghosts (the scatter reads valid nodes, which contain the
+        // staggered boxes).
+        if (m_je_yee_coupling) {
+            for (int d = 0; d < 3; ++d) {
+                fields.alloc_init("hybrid_je_yee_en_fp",
+                    ablastr::fields::Direction{d}, lev,
+                    amrex::convert(ba, amrex::IntVect::TheNodeVector()),
+                    dm, 1, amrex::IntVect(0), 0.0_rt);
+                fields.alloc_init("hybrid_je_yee_jn_fp",
+                    ablastr::fields::Direction{d}, lev,
+                    amrex::convert(ba, amrex::IntVect::TheNodeVector()),
+                    dm, 1, amrex::IntVect(0), 0.0_rt);
+                fields.alloc_init("hybrid_je_yee_jin_fp",
+                    ablastr::fields::Direction{d}, lev,
+                    amrex::convert(ba, amrex::IntVect::TheNodeVector()),
+                    dm, 1, amrex::IntVect(0), 0.0_rt);
+                fields.alloc_init("hybrid_je_yee_bn_fp",
+                    ablastr::fields::Direction{d}, lev,
+                    amrex::convert(ba, amrex::IntVect::TheNodeVector()),
+                    dm, 1, amrex::IntVect(0), 0.0_rt);
+                if (m_add_external_fields) {
+                    fields.alloc_init("hybrid_je_yee_ben_fp",
+                        ablastr::fields::Direction{d}, lev,
+                        amrex::convert(ba,
+                            amrex::IntVect::TheNodeVector()),
+                        dm, 1, amrex::IntVect(0), 0.0_rt);
+                    fields.alloc_init("hybrid_je_yee_een_fp",
+                        ablastr::fields::Direction{d}, lev,
+                        amrex::convert(ba,
+                            amrex::IntVect::TheNodeVector()),
+                        dm, 1, amrex::IntVect(0), 0.0_rt);
+                }
+            }
+        }
         // Anomalous-friction heat accumulator [J/m^3] (see the
         // m_je_visc_frac member doc): filled per substep by the relax
         // kernel, drained into T_e once per step. Only meaningful --
@@ -1197,12 +1247,32 @@ void HybridPICModel::AllocateLevelMFs (
         // m_include_hyper_resistivity_term flag is set at parser
         // compile time, AFTER this allocation runs.
         if (m_je_hyper_res && m_eta_h_expression != "0.0") {
-            fields.alloc_init("hybrid_je_hyper_w_fp", lev,
-                amrex::convert(ba, amrex::IntVect::TheNodeVector()),
-                dm, 3, amrex::IntVect(1), 0.0_rt);
-            fields.alloc_init("hybrid_je_hyper_eh_fp", lev,
-                amrex::convert(ba, amrex::IntVect::TheNodeVector()),
-                dm, 3, amrex::IntVect(1), 0.0_rt);
+            if (m_je_yee_coupling) {
+                // native-Yee composition (ApplyJeHyperCurlCurlYee):
+                // W = eta_H curl J on the FACE (B) registrations,
+                // E_H = curl W on the EDGE (E) registrations
+                const amrex::IntVect b_flags[3] =
+                    {Bx_nodal_flag, By_nodal_flag, Bz_nodal_flag};
+                const amrex::IntVect e_flags[3] =
+                    {Ex_nodal_flag, Ey_nodal_flag, Ez_nodal_flag};
+                for (int d = 0; d < 3; ++d) {
+                    fields.alloc_init("hybrid_je_yee_hw_fp",
+                        ablastr::fields::Direction{d}, lev,
+                        amrex::convert(ba, b_flags[d]),
+                        dm, 1, amrex::IntVect(1), 0.0_rt);
+                    fields.alloc_init("hybrid_je_yee_he_fp",
+                        ablastr::fields::Direction{d}, lev,
+                        amrex::convert(ba, e_flags[d]),
+                        dm, 1, amrex::IntVect(1), 0.0_rt);
+                }
+            } else {
+                fields.alloc_init("hybrid_je_hyper_w_fp", lev,
+                    amrex::convert(ba, amrex::IntVect::TheNodeVector()),
+                    dm, 3, amrex::IntVect(1), 0.0_rt);
+                fields.alloc_init("hybrid_je_hyper_eh_fp", lev,
+                    amrex::convert(ba, amrex::IntVect::TheNodeVector()),
+                    dm, 3, amrex::IntVect(1), 0.0_rt);
+            }
         }
         // Sponge-cap reference fields (see the m_je_sponge_width
         // member doc): the frozen first-call stored state (3 comps
@@ -1766,11 +1836,100 @@ void HybridPICModel::HybridPICSolveE (
     // coupling with solve_for_Faraday; the theta-implicit solver overrides
     // this to assemble the full Ohm E (grad(Pe) and eta*J together).
     const bool incl_eta = include_resistivity.value_or(solve_for_Faraday);
-    warpx.get_pointer_fdtd_solver_fp(lev)->HybridPICSolveE(
-        Efield, current_fp_plasma, Jfield, Bfield, rhofield,
-        *electron_pressure_fp, eb_update_E, lev, this, solve_for_Faraday,
-        incl_eta
-    );
+    if (m_je_yee_coupling && m_je_relax_advance) {
+        // Yee-coupled relax advance (see the m_je_yee_coupling member
+        // doc): gather the staggered inputs to the nodes through the
+        // second-order momentum-conserving adjoint pair, run the
+        // UNCHANGED nodal kernel on the persistent nodal E state, and
+        // scatter the updated E to the edges for the Faraday push.
+        // The nodal state never round-trips the interface, so no
+        // field accumulates interface smoothing.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!EB::enabled(),
+            "hybrid_pic_model.je_yee_coupling does not support "
+            "embedded boundaries in this version");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !(Efield[0]->ixType().nodeCentered() &&
+              Bfield[0]->ixType().nodeCentered() &&
+              Bfield[1]->ixType().nodeCentered() &&
+              Bfield[2]->ixType().nodeCentered()),
+            "hybrid_pic_model.je_yee_coupling = 1 requires the "
+            "staggered (Yee) grid; remove warpx.grid_type = "
+            "collocated");
+        ablastr::fields::VectorField En =
+            warpx.m_fields.get_alldirs("hybrid_je_yee_en_fp", lev);
+        ablastr::fields::VectorField Jn =
+            warpx.m_fields.get_alldirs("hybrid_je_yee_jn_fp", lev);
+        ablastr::fields::VectorField Jin =
+            warpx.m_fields.get_alldirs("hybrid_je_yee_jin_fp", lev);
+        ablastr::fields::VectorField Bn =
+            warpx.m_fields.get_alldirs("hybrid_je_yee_bn_fp", lev);
+        if (!m_je_yee_en_init) {
+            // one-time boot: adjoint self-check of the coupling pair
+            // (see StaggerCoupling.H), then seed the nodal E state
+            // from the initial edge E
+            const amrex::Real mis =
+                ablastr::fields::AdjointSelfCheck(*Efield[0]);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(mis < 1.0e-12,
+                "je_yee_coupling: the gather/scatter adjointness "
+                "self-check failed");
+            for (int d = 0; d < 3; ++d) {
+                ablastr::fields::GatherToNodes(*En[d], *Efield[d]);
+            }
+            m_je_yee_en_init = true;
+            amrex::Print() << "[je] yee coupling: nodal relax core + "
+                << "Yee Faraday; adjoint self-check "
+                << mis << "; nodal E state seeded from the initial "
+                << "edge E\n";
+        }
+        for (int d = 0; d < 3; ++d) {
+            ablastr::fields::GatherToNodes(*Jn[d],
+                                           *current_fp_plasma[d]);
+            ablastr::fields::GatherToNodes(*Jin[d], *Jfield[d]);
+            ablastr::fields::GatherToNodes(*Bn[d], *Bfield[d]);
+        }
+        if (m_add_external_fields) {
+            ablastr::fields::VectorField Ben =
+                warpx.m_fields.get_alldirs("hybrid_je_yee_ben_fp",
+                                           lev);
+            ablastr::fields::VectorField Een =
+                warpx.m_fields.get_alldirs("hybrid_je_yee_een_fp",
+                                           lev);
+            ablastr::fields::VectorField Bext =
+                warpx.m_fields.get_alldirs(
+                    FieldType::hybrid_B_fp_external, 0);
+            ablastr::fields::VectorField Eext =
+                warpx.m_fields.get_alldirs(
+                    FieldType::hybrid_E_fp_external, 0);
+            for (int d = 0; d < 3; ++d) {
+                ablastr::fields::GatherToNodes(*Ben[d], *Bext[d]);
+                ablastr::fields::GatherToNodes(*Een[d], *Eext[d]);
+            }
+        }
+        warpx.get_pointer_fdtd_solver_fp(lev)->HybridPICSolveE(
+            En, Jn, Jin, Bn, rhofield, *electron_pressure_fp,
+            eb_update_E, lev, this, solve_for_Faraday, incl_eta
+        );
+#if defined(WARPX_DIM_RZ)
+        const bool cyl = true;
+#else
+        const bool cyl = false;
+#endif
+        const amrex::Real rmin_over_dr =
+            warpx.Geom(lev).ProbLo(0) / warpx.Geom(lev).CellSize(0);
+        for (int d = 0; d < 3; ++d) {
+            ablastr::fields::ScatterFromNodes(*Efield[d], *En[d],
+                                              cyl, rmin_over_dr);
+        }
+        // the Faraday pushes read edge-E ghosts (the caller's
+        // conditional exchange covers the collocated path only)
+        warpx.FillBoundaryE(Efield[0]->nGrowVect(), std::nullopt);
+    } else {
+        warpx.get_pointer_fdtd_solver_fp(lev)->HybridPICSolveE(
+            Efield, current_fp_plasma, Jfield, Bfield, rhofield,
+            *electron_pressure_fp, eb_update_E, lev, this,
+            solve_for_Faraday, incl_eta
+        );
+    }
     amrex::Real const time = warpx.gett_old(0) + warpx.getdt(0);
     warpx.ApplyEfieldBoundary(lev, patch_type, time);
 }
@@ -11052,7 +11211,15 @@ void HybridPICModel::BfieldEvolve (
                 // relax path, once per accepted substep, before the
                 // absorber.
                 if (m_je_hyper_res && m_include_hyper_resistivity_term) {
-                    ApplyJeHyperCurlCurl(Bfield, rhofield, lev, dt_sub);
+                    if (m_je_yee_coupling) {
+                        // native Yee composition (mutually adjoint
+                        // curls; see the m_je_yee_coupling member doc)
+                        ApplyJeHyperCurlCurlYee(Bfield, rhofield, lev,
+                                                dt_sub);
+                    } else {
+                        ApplyJeHyperCurlCurl(Bfield, rhofield, lev,
+                                             dt_sub);
+                    }
                     warpx.FillBoundaryB(ng, nodal_sync);
                 }
                 // Sponge caps (see the m_je_sponge_width member doc):
@@ -11061,7 +11228,15 @@ void HybridPICModel::BfieldEvolve (
                 // substep state -- operator-split, so neither the
                 // curl pushes nor the (E, J_e) advance see it.
                 if (m_je_sponge_width > 0.0_rt) {
-                    ApplyJeSpongeLayer(Bfield, Efield, lev, dt_sub);
+                    if (m_je_yee_coupling) {
+                        // the coupled path's fields are Yee-staggered:
+                        // B-side caps (cap E is slaved to B through
+                        // the relax dynamics; see the member doc)
+                        ApplySpongeLayerBYee(Bfield, lev, dt_sub);
+                    } else {
+                        ApplyJeSpongeLayer(Bfield, Efield, lev,
+                                           dt_sub);
+                    }
                 }
                 // the accepted-state copy in B_old must reflect the
                 // adaptive path's full-cycle result (the copy above
@@ -11362,7 +11537,12 @@ void HybridPICModel::ApplySpongeLayerBYee (
 #else
     constexpr int zdim = 2;
 #endif
-    const amrex::Real vw = m_je_sponge_vw;   // asserted > 0 at parse
+    // the knob, else the published relax c_art on the Yee-coupled je
+    // path (asserted > 0 at parse for the e-form consumers, which
+    // publish no c_art)
+    const amrex::Real vw = (m_je_sponge_vw > 0.0_rt)
+        ? m_je_sponge_vw : m_je_c_art;
+    if (vw <= 0.0_rt) { return; }
     const amrex::Real Ls = m_je_sponge_width;
     const amrex::Real inv_tau_max = vw * m_je_sponge_lnf / Ls;
     const auto& geom = warpx.Geom(lev);
@@ -11626,6 +11806,269 @@ void HybridPICModel::ApplyJeHyperCurlCurl (
         "hybrid_pic_model.je_hyper_res: the curl-curl hyper-"
         "resistivity of the relax advance is RZ-only in this "
         "version; set je_hyper_res = 0 on other geometries");
+#endif
+}
+
+#if defined(WARPX_DIM_RZ)
+namespace {
+    /** eta_H(rho, |B|) evaluated at a staggered target point of the
+     *  native-Yee curl-curl composition: rho and the B components are
+     *  brought to the target registration with the second-order
+     *  equal-weight interpolation (a free device function -- nvcc
+     *  forbids nesting extended device lambdas). */
+    template <class F>
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    amrex::Real JeYeeHyperEtaAt (
+        F const& eta_h,
+        amrex::Array4<amrex::Real const> const& rho,
+        amrex::Array4<amrex::Real const> const& br4,
+        amrex::Array4<amrex::Real const> const& bt4,
+        amrex::Array4<amrex::Real const> const& bz4,
+        amrex::Array4<amrex::Real const> const& xbr,
+        amrex::Array4<amrex::Real const> const& xbt,
+        amrex::Array4<amrex::Real const> const& xbz,
+        bool bs,
+        amrex::GpuArray<int,3> const& nodal_st,
+        amrex::GpuArray<int,3> const& br_st,
+        amrex::GpuArray<int,3> const& bt_st,
+        amrex::GpuArray<int,3> const& bz_st,
+        amrex::GpuArray<int,3> const& cr,
+        amrex::GpuArray<int,3> const& tstag,
+        int i, int j)
+    {
+        using namespace amrex::literals;
+        using ablastr::coarsen::sample::Interp;
+        const amrex::Real rv = amrex::max(
+            Interp(rho, nodal_st, tstag, cr, i, j, 0, 0), 0.0_rt);
+        amrex::Real cbr = Interp(br4, br_st, tstag, cr, i, j, 0, 0);
+        amrex::Real cbt = Interp(bt4, bt_st, tstag, cr, i, j, 0, 0);
+        amrex::Real cbz = Interp(bz4, bz_st, tstag, cr, i, j, 0, 0);
+        if (bs) {
+            cbr += Interp(xbr, br_st, tstag, cr, i, j, 0, 0);
+            cbt += Interp(xbt, bt_st, tstag, cr, i, j, 0, 0);
+            cbz += Interp(xbz, bz_st, tstag, cr, i, j, 0, 0);
+        }
+        return eta_h(rv, std::sqrt(cbr*cbr + cbt*cbt + cbz*cbz));
+    }
+}
+#endif
+
+void HybridPICModel::ApplyJeHyperCurlCurlYee (
+    ablastr::fields::MultiLevelVectorField const& Bfield,
+    ablastr::fields::MultiLevelScalarField const& rhofield,
+    int lev, amrex::Real dt_sub)
+{
+#if defined(WARPX_DIM_RZ)
+    using ablastr::coarsen::sample::Interp;
+    auto& warpx = WarpX::GetInstance();
+    // The substep's Ampere current on the edges (refreshed by
+    // CalculatePlasmaCurrent before every advance; ghosts valid).
+    ablastr::fields::VectorField J =
+        warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma,
+                                   lev);
+    ablastr::fields::VectorField W =
+        warpx.m_fields.get_alldirs("hybrid_je_yee_hw_fp", lev);
+    ablastr::fields::VectorField Eh =
+        warpx.m_fields.get_alldirs("hybrid_je_yee_he_fp", lev);
+    const bool b_split = m_add_external_fields &&
+        m_hyper_resistivity_has_B_dependence;
+    std::array<const MultiFab*, 3> Bext = {nullptr, nullptr, nullptr};
+    if (b_split) {
+        for (int d = 0; d < 3; ++d) {
+            Bext[d] = warpx.m_fields.get(FieldType::hybrid_B_fp_external,
+                                         ablastr::fields::Direction{d},
+                                         lev);
+        }
+    }
+    const auto eta_h_l = m_eta_h;
+    const auto& geom = warpx.Geom(lev);
+    const amrex::Real dr = geom.CellSize(0);
+    const amrex::Real dz = geom.CellSize(1);
+    const amrex::Real rmin = geom.ProbLo(0);
+    const amrex::Real idr = 1.0_rt/dr, idz = 1.0_rt/dz;
+
+    // Boundary contract (see the declaration doc): zeroed scratch and
+    // every pass strictly inside non-periodic domain faces. The r-lo
+    // face is the axis, handled by the standard RZ m = 0 rules below.
+    auto interior = [&] (amrex::IntVect const& t) {
+        amrex::Box ib = amrex::convert(geom.Domain(), t);
+        if (!geom.isPeriodic(0)) { ib.growHi(0, -1); }
+        if (!geom.isPeriodic(1)) { ib.grow(1, -1); }
+        return ib;
+    };
+    for (int d = 0; d < 3; ++d) {
+        W[d]->setVal(0.0_rt);
+        Eh[d]->setVal(0.0_rt);
+    }
+
+    amrex::GpuArray<int,3> const nodal_st = {1, 1, 1};
+    amrex::GpuArray<int,3> const cr = {1, 1, 1};
+    amrex::GpuArray<int,3> br_st{1,1,1}, bt_st{1,1,1}, bz_st{1,1,1};
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        br_st[d] = Bfield[lev][0]->ixType().nodeCentered(d) ? 1 : 0;
+        bt_st[d] = Bfield[lev][1]->ixType().nodeCentered(d) ? 1 : 0;
+        bz_st[d] = Bfield[lev][2]->ixType().nodeCentered(d) ? 1 : 0;
+    }
+    const amrex::IntVect wr_t = W[0]->ixType().toIntVect();
+    const amrex::IntVect wt_t = W[1]->ixType().toIntVect();
+    const amrex::IntVect wz_t = W[2]->ixType().toIntVect();
+    const amrex::Box wr_int = interior(wr_t);
+    const amrex::Box wt_int = interior(wt_t);
+    const amrex::Box wz_int = interior(wz_t);
+
+    // pass 1: W(faces) = eta_H(rho, |B|) * (curl J), the Faraday-form
+    // compact stencils (edge -> face)
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(*W[0], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        Array4<Real> const& wr = W[0]->array(mfi);
+        Array4<Real> const& wt = W[1]->array(mfi);
+        Array4<Real> const& wz = W[2]->array(mfi);
+        Array4<Real const> const& jr = J[0]->const_array(mfi);
+        Array4<Real const> const& jt = J[1]->const_array(mfi);
+        Array4<Real const> const& jz = J[2]->const_array(mfi);
+        Array4<Real const> const& rho = rhofield[lev]->const_array(mfi);
+        Array4<Real const> const& br4 = Bfield[lev][0]->const_array(mfi);
+        Array4<Real const> const& bt4 = Bfield[lev][1]->const_array(mfi);
+        Array4<Real const> const& bz4 = Bfield[lev][2]->const_array(mfi);
+        Array4<Real const> xbr, xbt, xbz;
+        if (b_split) {
+            xbr = Bext[0]->const_array(mfi);
+            xbt = Bext[1]->const_array(mfi);
+            xbz = Bext[2]->const_array(mfi);
+        }
+        const bool bs = b_split;
+        const amrex::GpuArray<int,3> wr_stag =
+            {br_st[0], br_st[1], br_st[2]};
+        const amrex::GpuArray<int,3> wt_stag =
+            {bt_st[0], bt_st[1], bt_st[2]};
+        const amrex::GpuArray<int,3> wz_stag =
+            {bz_st[0], bz_st[1], bz_st[2]};
+        amrex::ParallelFor(
+            mfi.tilebox(wr_t) & wr_int,
+            mfi.tilebox(wt_t) & wt_int,
+            mfi.tilebox(wz_t) & wz_int,
+            [=] AMREX_GPU_DEVICE (int i, int j, int) {
+                // W_r on the Br registration (nodal r): 0 on axis
+                const amrex::Real r = rmin + i*dr;
+                if (r < 0.5_rt*dr) { wr(i,j,0) = 0.0_rt; return; }
+                wr(i,j,0) = JeYeeHyperEtaAt(eta_h_l, rho, br4, bt4,
+                    bz4, xbr, xbt, xbz, bs, nodal_st, br_st,
+                    bt_st, bz_st, cr, wr_stag, i, j)
+                    * (-(jt(i,j+1,0) - jt(i,j,0)) * idz);
+            },
+            [=] AMREX_GPU_DEVICE (int i, int j, int) {
+                wt(i,j,0) = JeYeeHyperEtaAt(eta_h_l, rho, br4, bt4,
+                    bz4, xbr, xbt, xbz, bs, nodal_st, br_st,
+                    bt_st, bz_st, cr, wt_stag, i, j)
+                    * ((jr(i,j+1,0) - jr(i,j,0)) * idz
+                       - (jz(i+1,j,0) - jz(i,j,0)) * idr);
+            },
+            [=] AMREX_GPU_DEVICE (int i, int j, int) {
+                // W_z on the Bz registration (cell-centered r)
+                const amrex::Real rc = rmin + (i + 0.5_rt)*dr;
+                wz(i,j,0) = JeYeeHyperEtaAt(eta_h_l, rho, br4, bt4,
+                    bz4, xbr, xbt, xbz, bs, nodal_st, br_st,
+                    bt_st, bz_st, cr, wz_stag, i, j)
+                    * (((rc + 0.5_rt*dr)*jt(i+1,j,0)
+                        - (rc - 0.5_rt*dr)*jt(i,j,0)) * idr / rc);
+            });
+    }
+    for (int d = 0; d < 3; ++d) {
+        ablastr::utils::communication::FillBoundary(
+            *W[d], WarpX::do_single_precision_comms,
+            geom.periodicity(), false);
+    }
+
+    const amrex::IntVect er_t = Eh[0]->ixType().toIntVect();
+    const amrex::IntVect et_t = Eh[1]->ixType().toIntVect();
+    const amrex::IntVect ez_t = Eh[2]->ixType().toIntVect();
+    const amrex::Box er_int = interior(er_t);
+    const amrex::Box et_int = interior(et_t);
+    const amrex::Box ez_int = interior(ez_t);
+
+    // pass 2: E_H(edges) = curl W, the Ampere-form compact stencils
+    // (face -> edge), standard RZ m = 0 axis rules
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(*Eh[0], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        Array4<Real> const& er = Eh[0]->array(mfi);
+        Array4<Real> const& et = Eh[1]->array(mfi);
+        Array4<Real> const& ez = Eh[2]->array(mfi);
+        Array4<Real const> const& wr = W[0]->const_array(mfi);
+        Array4<Real const> const& wt = W[1]->const_array(mfi);
+        Array4<Real const> const& wz = W[2]->const_array(mfi);
+        amrex::ParallelFor(
+            mfi.tilebox(er_t) & er_int,
+            mfi.tilebox(et_t) & et_int,
+            mfi.tilebox(ez_t) & ez_int,
+            [=] AMREX_GPU_DEVICE (int i, int j, int) {
+                er(i,j,0) = -(wt(i,j,0) - wt(i,j-1,0)) * idz;
+            },
+            [=] AMREX_GPU_DEVICE (int i, int j, int) {
+                const amrex::Real r = rmin + i*dr;
+                if (r < 0.5_rt*dr) { et(i,j,0) = 0.0_rt; return; }
+                et(i,j,0) = (wr(i,j,0) - wr(i,j-1,0)) * idz
+                    - (wz(i,j,0) - wz(i-1,j,0)) * idr;
+            },
+            [=] AMREX_GPU_DEVICE (int i, int j, int) {
+                const amrex::Real r = rmin + i*dr;
+                if (r < 0.5_rt*dr) {
+                    // W_theta is linear in r for small r (m = 0)
+                    ez(i,j,0) = 4.0_rt * wt(i,j,0) / dr;
+                    return;
+                }
+                ez(i,j,0) = ((r + 0.5_rt*dr)*wt(i,j,0)
+                             - (r - 0.5_rt*dr)*wt(i-1,j,0)) * idr / r;
+            });
+    }
+    for (int d = 0; d < 3; ++d) {
+        ablastr::utils::communication::FillBoundary(
+            *Eh[d], WarpX::do_single_precision_comms,
+            geom.periodicity(), false);
+    }
+
+    // pass 3: B += dt * (Faraday form of E_H) = -dt curl E_H
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(*W[0], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        Array4<Real> const& br = Bfield[lev][0]->array(mfi);
+        Array4<Real> const& bt = Bfield[lev][1]->array(mfi);
+        Array4<Real> const& bz = Bfield[lev][2]->array(mfi);
+        Array4<Real const> const& er = Eh[0]->const_array(mfi);
+        Array4<Real const> const& et = Eh[1]->const_array(mfi);
+        Array4<Real const> const& ez = Eh[2]->const_array(mfi);
+        const amrex::Real dt_l = dt_sub;
+        amrex::ParallelFor(
+            mfi.tilebox(wr_t) & wr_int,
+            mfi.tilebox(wt_t) & wt_int,
+            mfi.tilebox(wz_t) & wz_int,
+            [=] AMREX_GPU_DEVICE (int i, int j, int) {
+                const amrex::Real r = rmin + i*dr;
+                if (r < 0.5_rt*dr) { return; }   // Br = 0 on axis
+                br(i,j,0) += dt_l * (et(i,j+1,0) - et(i,j,0)) * idz;
+            },
+            [=] AMREX_GPU_DEVICE (int i, int j, int) {
+                bt(i,j,0) += dt_l
+                    * ((ez(i+1,j,0) - ez(i,j,0)) * idr
+                       - (er(i,j+1,0) - er(i,j,0)) * idz);
+            },
+            [=] AMREX_GPU_DEVICE (int i, int j, int) {
+                const amrex::Real rc = rmin + (i + 0.5_rt)*dr;
+                bz(i,j,0) -= dt_l
+                    * (((rc + 0.5_rt*dr)*et(i+1,j,0)
+                        - (rc - 0.5_rt*dr)*et(i,j,0)) * idr / rc);
+            });
+    }
+#else
+    amrex::ignore_unused(Bfield, rhofield, lev, dt_sub);
+    WARPX_ABORT_WITH_MESSAGE(
+        "hybrid_pic_model.je_yee_coupling: the native-Yee curl-curl "
+        "hyper-resistivity is RZ-only in this version; set "
+        "je_hyper_res = 0 on other geometries");
 #endif
 }
 

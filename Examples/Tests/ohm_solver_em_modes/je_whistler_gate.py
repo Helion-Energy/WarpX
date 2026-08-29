@@ -61,6 +61,13 @@ parser.add_argument(
     "(warpx.use_filter)",
 )
 parser.add_argument(
+    "--je-yee",
+    action="store_true",
+    help="Yee-coupled relax advance (hybrid_pic_model.je_yee_coupling): "
+    "fields on the standard Yee staggering, nodal relax core coupled "
+    "through the second-order adjoint gather/scatter pair",
+)
+parser.add_argument(
     "--je-advance",
     choices=["cn", "be"],
     default="cn",
@@ -151,7 +158,7 @@ simulation = picmi.Simulation(
     verbose=1 if args.verbose else 0,
     warpx_serialize_initial_conditions=True,
     warpx_current_deposition_algo="direct",
-    warpx_grid_type="collocated",
+    warpx_grid_type=None if args.je_yee else "collocated",
     warpx_use_filter=1 if args.use_filter else None,
 )
 
@@ -192,6 +199,8 @@ simulation.initialize_inputs()
 
 if args.esolve == "je_form":
     pywarpx.hybridpicmodel.esolve = "je_form"
+    if args.je_yee:
+        pywarpx.hybridpicmodel.je_yee_coupling = 1
     # uniform plasma: the one-count level only guards true vacuum; keep it
     # far below n0 so neither the denominator guard nor the Eq-30 vacuum
     # damping blend touches the mode
