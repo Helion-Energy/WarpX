@@ -1063,7 +1063,20 @@ public:
      *  pass reads an unfilled domain ghost and the operator carries
      *  no flux through walls.
      *  RZ m = 0 collocated only in this version. Books as a REAL
-     *  P_etaH in HybridDissipation (the curl-form integrand). */
+     *  P_etaH in HybridDissipation (the curl-form integrand).
+     *  KNOWN INSTABILITY (do not arm in production): the current
+     *  three-pass composition uses 2dz-centered nodal curls, which
+     *  are odd-even blind (zero damping at the checkerboard scale)
+     *  and are not the discrete adjoints of the Ampere curl that
+     *  produces J -- the sign-definiteness argument above holds
+     *  discretely only under adjoint pairing, and the mismatch
+     *  admits slowly e-folding grid-scale growth (measured: decay
+     *  fixture blows up from roundoff at refined resolution despite
+     *  a nominal 4x explicit-stability margin; coarser configs hide
+     *  the same growth inside typical run lengths). The v2 rework
+     *  must build the composition as D^T (eta_H D) with D one
+     *  discrete curl matrix (stencil and its transpose), restoring
+     *  definiteness by construction. */
     int m_je_hyper_res = 0;
     /** Adaptive coupled substep integration of the relax advance
      *  (je_adaptive = 1): every substep advances the FULL split
