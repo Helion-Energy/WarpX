@@ -167,6 +167,11 @@ class BlockBandedPC : public Preconditioner<T,Ops>
         int m_update_interval = 1;
         bool m_include_drift = true;
         bool m_include_hyper = true;
+        /** Follows hybrid_pic_model.hyper_resistivity_curlcurl (cached per
+         *  Update): eta_H rows use the composed curl(eta_H curl dJ) instead
+         *  of the truncated -eta_H lap(dJ), matching the configured
+         *  residual operator either way (same +-2 band reach). */
+        bool m_hyperres_cc = false;
         bool m_verify = false;
         RT m_max_mem_gb = 8.0;
         /** PEC-wall treatment: -1 auto (from the upper-r field BC),
@@ -316,6 +321,8 @@ class BlockBandedPC : public Preconditioner<T,Ops>
             PArr Je0rn, Je0tn, Je0zn;       // nodal frozen electron current
             PArr etaEr, etaEt, etaEz;       // eta at row points
             PArr etahEr, etahEt, etahEz;    // eta_H at row points
+            PArr etahBr, etahBt, etahBz;    // eta_H at face (curl J) points
+                                            //   (hyper_resistivity_curlcurl)
             PArr irhoEr, irhoEt, irhoEz;    // Holmstrom-masked 1/rho_lim
             PArr adEr, adEt, adEz;          // extra diagonal (reserved; zero)
             PArr ciN;                       // nodal inertia coefficient
@@ -326,6 +333,8 @@ class BlockBandedPC : public Preconditioner<T,Ops>
             PArr inEr, inEt, inEz;
             PArr dBr, dBt, dBz;
             PArr dJr, dJt, dJz;
+            PArr cWr, cWt, cWz;             // eta_H * curl(delta-J) at faces
+                                            //   (hyper_resistivity_curlcurl)
             PArr enR, enT, enZ;
             PArr eiR, eiT, eiZ;             // nodal inertia response ci*dJe
             PArr oEr, oEt, oEz;
@@ -674,6 +683,23 @@ void BlockBandedPC<T,Ops>::BuildSystems (const T& a_U)
         S.irhoEr = S.etaEr; S.irhoEt = S.etaEt; S.irhoEz = S.etaEz;
         S.adEr = S.etaEr;   S.adEt = S.etaEt;   S.adEz = S.etaEz;
 
+        // face-point eta_H windows + eta_H*curl(dJ) scratch for the
+        // composed hyper-resistivity rows (hyper_resistivity_curlcurl).
+        // No parity mirrors and z clipped to the domain in non-wrap runs:
+        // out-of-band reads return zero, matching the Ohm wrapper's
+        // zero-extension of curl J past non-periodic boundaries.
+        {
+            const int zcloD = zw ? zclo : std::max(zclo, dom.smallEnd(1));
+            const int zchiD = zw ? zchi : std::min(zchi, dom.bigEnd(1));
+            const int znloD = zw ? znlo : std::max(znlo, dom.smallEnd(1));
+            const int znhiD = zw ? znhi : std::min(znhi, dom.bigEnd(1)+1);
+            // Wr (node r, cell z); Wt (cell r, cell z); Wz (cell r, node z)
+            S.cWr.define(rNodeLo, rNodeHi, zcloD, zchiD, zw, zn, 0, RT(1.0), false);
+            S.cWt.define(rCellLo, rCellHi, zcloD, zchiD, zw, zn, 0, RT(1.0), false);
+            S.cWz.define(rCellLo, rCellHi, znloD, znhiD, zw, zn, 0, RT(1.0), false);
+            S.etahBr = S.cWr; S.etahBt = S.cWt; S.etahBz = S.cWz;
+        }
+
         // scratch: inputs (valid DOF windows), stages (padded windows)
         S.inEr.define(S.rlo_s, S.rhi_s,   znlo, znhi, zw, zn, 0, RT(1.0), false);
         S.inEt.define(S.rlo_s, S.rhi_s+1, znlo, znhi, zw, zn, 0, RT(1.0), false);
@@ -853,6 +879,33 @@ void BlockBandedPC<T,Ops>::ApplyFrozenBox (BoxSys& S) const
         }
     }
 
+    // ---- stage 2.5: cW = eta_H * curl(delta-J) at faces ----
+    // (hyper_resistivity_curlcurl rows; out-of-band reads of cW return
+    // zero = the wrapper's zero-extension convention)
+    if (m_hyperres_cc) {
+        for (int i = S.cWr.ilo; i <= S.cWr.ihi; i++) {
+            for (int j = S.cWr.jlo; j <= S.cWr.jhi; j++) {
+                S.cWr.ref(i,j) = -S.etahBr.get(i,j)
+                    *(S.dJt.get(i,j+1) - S.dJt.get(i,j))/dz;
+            }
+        }
+        for (int i = S.cWt.ilo; i <= S.cWt.ihi; i++) {
+            for (int j = S.cWt.jlo; j <= S.cWt.jhi; j++) {
+                S.cWt.ref(i,j) = S.etahBt.get(i,j)
+                    *( (S.dJr.get(i,j+1) - S.dJr.get(i,j))/dz
+                     - (S.dJz.get(i+1,j) - S.dJz.get(i,j))/dr );
+            }
+        }
+        for (int i = S.cWz.ilo; i <= S.cWz.ihi; i++) {
+            const RT r = rmin + (i + RT(0.5))*dr;
+            for (int j = S.cWz.jlo; j <= S.cWz.jhi; j++) {
+                S.cWz.ref(i,j) = S.etahBz.get(i,j)
+                    *( (rmin + (i+1)*dr)*S.dJt.get(i+1,j)
+                     - (rmin + i*dr)*S.dJt.get(i,j) )/(r*dr);
+            }
+        }
+    }
+
     // ---- stage 3: nodal delta-enE ----
     for (int i = S.enR.ilo; i <= S.enR.ihi; i++) {
         for (int j = S.enR.jlo; j <= S.enR.jhi; j++) {
@@ -904,6 +957,10 @@ void BlockBandedPC<T,Ops>::ApplyFrozenBox (BoxSys& S) const
             if (m_inertia_exact) {
                 ohm += RT(0.5)*(S.eiR.get(i,j) + S.eiR.get(i+1,j));
             }
+            if (m_hyperres_cc) {
+                // composed row: +(curl cW)_r = -d_z cWt
+                ohm += -(S.cWt.get(i,j) - S.cWt.get(i,j-1))/dz;
+            } else {
             const RT etah = S.etahEr.get(i,j);
             if (etah != RT(0.0)) {
                 const RT lap =
@@ -912,6 +969,7 @@ void BlockBandedPC<T,Ops>::ApplyFrozenBox (BoxSys& S) const
                     + (S.dJr.get(i,j-1) - RT(2.0)*S.dJr.get(i,j) + S.dJr.get(i,j+1))/(dz*dz)
                     - S.dJr.get(i,j)/(rc*rc);
                 ohm -= etah*lap;
+            }
             }
             S.oEr.ref(i,j) = (RT(1.0) + S.adEr.get(i,j))*S.inEr.get(i,j) - ohm;
         }
@@ -930,6 +988,11 @@ void BlockBandedPC<T,Ops>::ApplyFrozenBox (BoxSys& S) const
             if (m_inertia_exact) {
                 ohm += S.eiT.get(i,j);
             }
+            if (m_hyperres_cc) {
+                // composed row: +(curl cW)_t = d_z cWr - d_r cWz
+                ohm += (S.cWr.get(i,j) - S.cWr.get(i,j-1))/dz
+                     - (S.cWz.get(i,j) - S.cWz.get(i-1,j))/dr;
+            } else {
             const RT etah = S.etahEt.get(i,j);
             if (etah != RT(0.0)) {
                 const RT lap =
@@ -938,6 +1001,7 @@ void BlockBandedPC<T,Ops>::ApplyFrozenBox (BoxSys& S) const
                     + (S.dJt.get(i,j-1) - RT(2.0)*S.dJt.get(i,j) + S.dJt.get(i,j+1))/(dz*dz)
                     - S.dJt.get(i,j)/(r*r);
                 ohm -= etah*lap;
+            }
             }
             const RT et_in = (S.wall_pec && i == S.wall_node)
                 ? wallEt[S.inEt.jmap(j)] : S.inEt.get(i,j);
@@ -954,16 +1018,29 @@ void BlockBandedPC<T,Ops>::ApplyFrozenBox (BoxSys& S) const
             if (m_inertia_exact) {
                 ohm += RT(0.5)*(S.eiZ.get(i,j) + S.eiZ.get(i,j+1));
             }
+            if (m_hyperres_cc) {
+                // composed row: +(curl cW)_z = (1/r) d_r (r cWt); the
+                // Ampere-closure axis limit 4 cWt/dr is exact (no factor-2
+                // soft spot, unlike the truncated fallback below).
+                ohm += on_axis
+                    ? RT(4.0)*S.cWt.get(i,j)/dr
+                    : ( (r + RT(0.5)*dr)*S.cWt.get(i,j)
+                      - (r - RT(0.5)*dr)*S.cWt.get(i-1,j) )/(r*dr);
+            } else {
             const RT etah = S.etahEz.get(i,j);
             if (etah != RT(0.0)) {
                 RT lap = (S.dJz.get(i,j-1) - RT(2.0)*S.dJz.get(i,j) + S.dJz.get(i,j+1))/(dz*dz);
                 if (on_axis) {
-                    lap += (S.dJz.get(i-1,j) - RT(2.0)*S.dJz.get(i,j) + S.dJz.get(i+1,j))/(dr*dr);
+                    // m = 0 regularity: the axis limit of (1/r)d_r(r d_r)
+                    // is 2 d_rr (matches the corrected kernel row).
+                    lap += RT(2.0)*
+                        (S.dJz.get(i-1,j) - RT(2.0)*S.dJz.get(i,j) + S.dJz.get(i+1,j))/(dr*dr);
                 } else {
                     lap += ( (r + RT(0.5)*dr)*(S.dJz.get(i+1,j) - S.dJz.get(i,j))
                            - (r - RT(0.5)*dr)*(S.dJz.get(i,j) - S.dJz.get(i-1,j)) )/(r*dr*dr);
                 }
                 ohm -= etah*lap;
+            }
             }
             const RT ez_in = (S.wall_pec && i == S.wall_node)
                 ? wallEz[S.inEz.jmap(j)] : S.inEz.get(i,j);
@@ -1340,6 +1417,55 @@ void BlockBandedPC<T,Ops>::FillCoeffs (BoxSys& S,
         for (int i = S.oEz.ilo; i <= S.oEz.ihi; i++) {
             for (int j = S.oEz.jlo; j <= S.oEz.jhi; j++) {
                 row_coeffs(2, i, j, S.etaEz, S.etahEz, S.irhoEz, S.adEz);
+            }
+        }
+
+        // Face-point eta_H for the composed hyper-resistivity rows
+        // (mirrors the Ohm wrapper's face-averaged coefficient inside the
+        // outer curl). Cached knob: rows must match the configured
+        // residual operator.
+        m_hyperres_cc = hyper_on && hybrid->m_hyper_resistivity_curlcurl;
+        if (m_hyperres_cc) {
+            const bool b_dep = hybrid->m_hyper_resistivity_has_B_dependence;
+            auto etah_face = [&](int comp, int i, int j) -> RT {
+                RT rho_f, br, bt, bz;
+                if (comp == 0) {        // Wr point (node r, cell z)
+                    rho_f = RT(0.5)*(rho_nodal(i,j) + rho_nodal(i,j+1));
+                    br = B0r.get(i,j);
+                    bt = RT(0.5)*(B0t.get(i-1,j) + B0t.get(i,j));
+                    bz = RT(0.25)*( B0z.get(i-1,j) + B0z.get(i,j)
+                                  + B0z.get(i-1,j+1) + B0z.get(i,j+1) );
+                } else if (comp == 1) { // Wt point (cell r, cell z)
+                    rho_f = RT(0.25)*( rho_nodal(i,j) + rho_nodal(i+1,j)
+                                     + rho_nodal(i,j+1) + rho_nodal(i+1,j+1) );
+                    br = RT(0.5)*(B0r.get(i,j) + B0r.get(i+1,j));
+                    bt = B0t.get(i,j);
+                    bz = RT(0.5)*(B0z.get(i,j) + B0z.get(i,j+1));
+                } else {                // Wz point (cell r, node z)
+                    rho_f = RT(0.5)*(rho_nodal(i,j) + rho_nodal(i+1,j));
+                    br = RT(0.25)*( B0r.get(i,j-1) + B0r.get(i,j)
+                                  + B0r.get(i+1,j-1) + B0r.get(i+1,j) );
+                    bt = RT(0.5)*(B0t.get(i,j-1) + B0t.get(i,j));
+                    bz = B0z.get(i,j);
+                }
+                const RT btot = b_dep
+                    ? std::sqrt(br*br + bt*bt + bz*bz) : RT(0.0);
+                return static_cast<RT>(etah_exec(rho_f, btot));
+            };
+            for (int i = S.etahBr.ilo; i <= S.etahBr.ihi; i++) {
+                for (int j = S.etahBr.jlo; j <= S.etahBr.jhi; j++) {
+                    S.etahBr.ref(i,j) = etah_face(0, i, j);
+                }
+            }
+            for (int i = S.etahBt.ilo; i <= S.etahBt.ihi; i++) {
+                for (int j = S.etahBt.jlo; j <= S.etahBt.jhi; j++) {
+                    S.etahBt.ref(i,j) = etah_face(1, i, j);
+                }
+            }
+            for (int i = S.etahBz.ilo; i <= S.etahBz.ihi; i++) {
+                for (int j = S.etahBz.jlo; j <= S.etahBz.jhi; j++) {
+                    S.etahBz.ref(i,j) = etah_face(2, i, j);
+                }
             }
         }
     }
