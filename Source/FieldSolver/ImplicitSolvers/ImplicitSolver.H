@@ -211,6 +211,17 @@ public:
     }
 
     /**
+     * \brief Localize a non-converged Newton residual: print per-block
+     * norms and the largest-|F| cells with physical coordinates. Base
+     * implementation is a no-op; solvers with block structure override.
+     * Called by NewtonSolver on budget-pegged exits (rate-limited).
+     */
+    virtual void
+    ResidualHotspotReport (const WarpXSolverVec& /*a_residual*/) const
+    {
+    }
+
+    /**
      * \brief Whether matrix-free Jacobian probe perturbations must be
      * limited to the admissible state domain. Operators whose residual
      * evaluation clamps every floored quantity pointwise can return

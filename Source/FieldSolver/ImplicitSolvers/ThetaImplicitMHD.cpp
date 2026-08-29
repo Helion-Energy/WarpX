@@ -4644,6 +4644,103 @@ void ThetaImplicitMHD::PrintPinnedCells () const
     amrex::AllPrint() << report.str();
 }
 
+void ThetaImplicitMHD::ResidualHotspotReport (const WarpXSolverVec& residual) const
+{
+    const bool dual_energy_closure = m_ion_closure == "dual_energy";
+    const bool total_energy_closure =
+        m_ion_closure == "total_energy" || dual_energy_closure;
+    const bool cgl_closure = m_ion_closure == "cgl";
+    const int num_blocks = (cgl_closure || dual_energy_closure)
+                               ? 4
+                               : (total_energy_closure ? 3 : 2);
+    const std::array<const char*, 4> block_names = {
+        MassDensityName, ElectronEnergyName,
+        cgl_closure ? IonParallelEnergyName : IonEnergyName,
+        dual_energy_closure ? IonInternalEnergyName : IonPerpEnergyName};
+    const std::array<const char*, 4> block_labels = {
+        "mass", "electron_energy",
+        cgl_closure ? "ion_par_energy" : "ion_energy",
+        dual_energy_closure ? "ion_internal_energy" : "ion_perp_energy"};
+
+    const amrex::Geometry& geometry = m_WarpX->Geom(0);
+    const auto problem_lo = geometry.ProbLoArray();
+    const auto cell_size = geometry.CellSizeArray();
+    std::stringstream report;
+    report << "Newton residual hotspots (unscaled block norms; cells within "
+              "2x of each block max):\n";
+
+    constexpr int cap = 8;
+    amrex::Gpu::DeviceVector<int> cell_buffer(cap * 3, 0);
+    amrex::Gpu::DeviceVector<amrex::Real> value_buffer(cap, 0.0_rt);
+    amrex::Gpu::DeviceVector<unsigned> cursor(1, 0u);
+    int* const buffer_ptr = cell_buffer.data();
+    amrex::Real* const value_ptr = value_buffer.data();
+    unsigned* const cursor_ptr = cursor.data();
+
+    auto harvest = [&] (const amrex::MultiFab& block_mf, const char* label) {
+        const amrex::Real block_max = block_mf.norm0(0, 0, true);
+        const amrex::Real block_l2 = block_mf.norm2(0);
+        report << "  " << label << ": |F|_2 = " << block_l2
+               << ", |F|_max = " << block_max;
+        if (block_max <= 0.0_rt) {
+            report << "\n";
+            return;
+        }
+        const unsigned zero_cursor = 0u;
+        amrex::Gpu::copy(amrex::Gpu::hostToDevice, &zero_cursor,
+                         &zero_cursor + 1, cursor.begin());
+        const amrex::Real threshold = 0.5_rt * block_max;
+        for (amrex::MFIter mfi(block_mf); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox();
+            const auto arr = block_mf.const_array(mfi);
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE(int i, int j, int k) {
+                if (std::abs(arr(i, j, k)) >= threshold) {
+                    const unsigned slot = amrex::Gpu::Atomic::Add(cursor_ptr, 1u);
+                    if (slot < static_cast<unsigned>(cap)) {
+                        buffer_ptr[3 * slot + 0] = i;
+                        buffer_ptr[3 * slot + 1] = j;
+                        buffer_ptr[3 * slot + 2] = k;
+                        value_ptr[slot] = arr(i, j, k);
+                    }
+                }
+            });
+        }
+        amrex::Gpu::streamSynchronize();
+        std::vector<int> host_cells(cell_buffer.size());
+        std::vector<amrex::Real> host_values(value_buffer.size());
+        unsigned host_count = 0;
+        amrex::Gpu::copy(amrex::Gpu::deviceToHost, cell_buffer.begin(),
+                         cell_buffer.end(), host_cells.begin());
+        amrex::Gpu::copy(amrex::Gpu::deviceToHost, value_buffer.begin(),
+                         value_buffer.end(), host_values.begin());
+        amrex::Gpu::copy(amrex::Gpu::deviceToHost, cursor.begin(),
+                         cursor.end(), &host_count);
+        const int listed = std::min(static_cast<int>(host_count), cap);
+        report << "  (" << host_count << " cells >= half-max)\n";
+        for (int entry = 0; entry < listed; ++entry) {
+            const int i = host_cells[3 * entry + 0];
+            const int j = host_cells[3 * entry + 1];
+            report << "    F = " << host_values[entry] << " at (i,j)=(" << i
+                   << ',' << j << ")  ("
+                   << problem_lo[0] + (i + 0.5_rt) * cell_size[0]
+#if !defined(WARPX_DIM_1D_Z)
+                   << ", " << problem_lo[1] + (j + 0.5_rt) * cell_size[1]
+#endif
+                   << ") m\n";
+        }
+    };
+
+    for (int block = 0; block < num_blocks; ++block) {
+        harvest(residual.getMultiFabBlock(block_names[block], 0),
+                block_labels[block]);
+    }
+    const std::array<const char*, 3> face_labels = {"B_r", "B_theta", "B_z"};
+    for (int component = 0; component < 3; ++component) {
+        harvest(*residual.getArrayVec()[0][component], face_labels[component]);
+    }
+    amrex::AllPrint() << report.str();
+}
+
 theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
 {
     theta_implicit_mhd::FluxParameters flux_parameters = {

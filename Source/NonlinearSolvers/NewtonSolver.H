@@ -169,6 +169,8 @@ private:
      * \brief Maximum iterations for the Newton solver.
      */
     int m_maxits = 100;
+    // Counter of budget-pegged exits driving the hotspot-report rate limit.
+    mutable amrex::Long m_budget_pegged_exits = 0;
 
     /**
      * \brief Total nonlinear iterations for the diagnostic file
@@ -715,6 +717,11 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
             if (this->m_verbose) {
                 amrex::Print() << "Newton: exiting at iter = " << std::setw(3) << iter
                                << ". Maximum iteration reached: iter = " << m_maxits << "\n";
+            }
+            // Budget-pegged exit: localize the residual (first exit and
+            // every 25th after -- the report is a bounded device scan).
+            if (m_budget_pegged_exits++ % 25 == 0) {
+                m_ops->ResidualHotspotReport(m_F);
             }
             break;
         }

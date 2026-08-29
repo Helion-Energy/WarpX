@@ -127,6 +127,13 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * log. Public for the NVCC extended-lambda requirement. */
     void PrintPinnedCells () const;
 
+    /** Localize a non-converged Newton residual: per-block L2 norms
+     * (fluid blocks and B faces, unscaled MultiFab norms) plus the
+     * cells within 2x of each block's max |F|, with physical
+     * coordinates (bounded harvest, same pattern as PrintPinnedCells).
+     * Public for the NVCC extended-lambda requirement. */
+    void ResidualHotspotReport (const WarpXSolverVec& residual) const override;
+
     /**
      * \brief The MHD residual is evaluable for ARBITRARY real states by
      * construction: densities are max-floored, pressures and energies go
