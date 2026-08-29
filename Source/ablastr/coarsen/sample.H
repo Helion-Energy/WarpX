@@ -44,7 +44,7 @@ namespace ablastr::coarsen::sample
      *
      * \return interpolated field at cell (i,j,k) of a coarsened Array4
      */
-    AMREX_GPU_DEVICE
+    AMREX_GPU_HOST_DEVICE
     AMREX_FORCE_INLINE
     amrex::Real Interp (
         amrex::Array4<amrex::Real const> const& arr_src,

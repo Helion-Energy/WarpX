@@ -2438,7 +2438,7 @@ namespace {
      *  r dr over the existing half (axis at rmin = 0: dr^2/8). A free
      *  function: capturing a device lambda inside another extended lambda
      *  is CUDA-illegal. */
-    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
     amrex::Real PolNodeVol (int i, amrex::Real rmin, amrex::Real dr,
                             int ihi_nd)
     {
@@ -4490,12 +4490,17 @@ void HybridPICModel::SolveETensor1D (
     // adjugate. Checks staggering, signs, and factors of the fused rows.
     if (m_esolve_tensor_verify && !m_esolve_tensor_verified) {
         m_esolve_tensor_verified = true;
+        // one-shot debug block: temporaries live in pinned host memory so
+        // the host comparison loop below can read them on GPU builds
+        // (device-arena fabs would segfault under amrex::LoopOnCpu)
         std::array<MultiFab, 3> F, AF;
         for (int c = 0; c < 3; ++c) {
             F[c].define(Efield[c]->boxArray(),
-                        Efield[c]->DistributionMap(), 1, IntVect(1));
+                        Efield[c]->DistributionMap(), 1, IntVect(1),
+                        MFInfo().SetArena(The_Pinned_Arena()));
             AF[c].define(Efield[c]->boxArray(),
-                         Efield[c]->DistributionMap(), 1, IntVect(0));
+                         Efield[c]->DistributionMap(), 1, IntVect(0),
+                         MFInfo().SetArena(The_Pinned_Arena()));
         }
         Real const Lz = geom.ProbLength(0);
         Real const zlo0 = geom.ProbLo(0);
@@ -4522,7 +4527,8 @@ void HybridPICModel::SolveETensor1D (
         // be a never-filled VALID row)
         MultiFab G(amrex::convert(rho.boxArray(),
                                   amrex::IntVect::TheZeroVector()),
-                   rho.DistributionMap(), 2, IntVect(1));
+                   rho.DistributionMap(), 2, IntVect(1),
+                   MFInfo().SetArena(The_Pinned_Arena()));
         // G comp 0 = (curl F)_x = -dFy/dz, comp 1 = (curl F)_y = +dFx/dz,
         // both cell-centered from the nodal transverse pair
         for (MFIter mfi(G, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
@@ -4538,6 +4544,16 @@ void HybridPICModel::SolveETensor1D (
             });
         }
         G.FillBoundary(geom.periodicity());
+        // pinned copy of the (device) coefficient fields for the host
+        // loop, and a stream sync so every device write above is visible
+        std::array<MultiFab, 3> coef_h;
+        for (int c = 0; c < 3; ++c) {
+            coef_h[c].define(coef[c]->boxArray(),
+                             coef[c]->DistributionMap(), coef[c]->nComp(),
+                             IntVect(0), MFInfo().SetArena(The_Pinned_Arena()));
+            MultiFab::Copy(coef_h[c], *coef[c], 0, 0, coef[c]->nComp(), 0);
+        }
+        Gpu::streamSynchronize();
         Real errmax[3] = {0.0_rt, 0.0_rt, 0.0_rt};
         for (int c = 0; c < 3; ++c) {
             GpuArray<int, 3> const Sc = E_stag[c];
@@ -4553,7 +4569,7 @@ void HybridPICModel::SolveETensor1D (
                 auto const & fy = F[1].const_array(mfi);
                 auto const & fz = F[2].const_array(mfi);
                 auto const & g  = G.const_array(mfi);
-                auto const & cf = coef[c]->const_array(mfi);
+                auto const & cf = coef_h[c].const_array(mfi);
                 const int cc = c;
                 auto const & bx0 = mfi.validbox();
                 amrex::LoopOnCpu(bx0, [&] (int i, int j, int k)
@@ -5221,10 +5237,15 @@ void HybridPICModel::SolveETensorRZ (
     // 3x3 adjugate inverse (the 1D tensor_verify pattern).
     if (m_esolve_tensor_verify && !m_esolve_tensor_verified) {
         m_esolve_tensor_verified = true;
+        // one-shot debug block: temporaries live in pinned host memory so
+        // the host comparison loop below can read them on GPU builds
+        // (device-arena fabs would segfault under amrex::LoopOnCpu)
         std::array<MultiFab, 3> F, AF;
         for (int c = 0; c < 3; ++c) {
-            F[c].define(Efield[c]->boxArray(), dm, 1, IntVect(1));
-            AF[c].define(Efield[c]->boxArray(), dm, 1, IntVect(0));
+            F[c].define(Efield[c]->boxArray(), dm, 1, IntVect(1),
+                        MFInfo().SetArena(The_Pinned_Arena()));
+            AF[c].define(Efield[c]->boxArray(), dm, 1, IntVect(0),
+                         MFInfo().SetArena(The_Pinned_Arena()));
             F[c].setVal(0.0_rt);
         }
         for (int c = 0; c < 3; ++c) {
@@ -5262,7 +5283,8 @@ void HybridPICModel::SolveETensorRZ (
         // stored cc W = d_z F_r - d_r F_z
         MultiFab Wc(amrex::convert(warpx.boxArray(lev),
                                    amrex::IntVect::TheZeroVector()),
-                    dm, 1, IntVect(1));
+                    dm, 1, IntVect(1),
+                    MFInfo().SetArena(The_Pinned_Arena()));
         for (MFIter mfi(Wc, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
             auto const & w = Wc.array(mfi);
             auto const & fr = F[0].const_array(mfi);
@@ -5277,7 +5299,8 @@ void HybridPICModel::SolveETensorRZ (
         Wc.setBndry(0.0_rt);
         Wc.FillBoundary(geom.periodicity());
         // stored gated nodal D = gamma div_pol F
-        MultiFab D(gam.boxArray(), dm, 1, 1);
+        MultiFab D(gam.boxArray(), dm, 1, 1,
+                   MFInfo().SetArena(The_Pinned_Arena()));
         for (MFIter mfi(D, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
             auto const & dv = D.array(mfi);
             auto const & fr = F[0].const_array(mfi);
@@ -5303,10 +5326,12 @@ void HybridPICModel::SolveETensorRZ (
         // stored toroidal curl pair: wr on B_r stagger, wz on B_z stagger
         MultiFab Wr(amrex::convert(warpx.boxArray(lev),
                                    Bfield[0]->ixType().toIntVect()),
-                    dm, 1, IntVect(1));
+                    dm, 1, IntVect(1),
+                    MFInfo().SetArena(The_Pinned_Arena()));
         MultiFab Wz(amrex::convert(warpx.boxArray(lev),
                                    Bfield[2]->ixType().toIntVect()),
-                    dm, 1, IntVect(1));
+                    dm, 1, IntVect(1),
+                    MFInfo().SetArena(The_Pinned_Arena()));
         for (MFIter mfi(Wr, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
             auto const & w = Wr.array(mfi);
             auto const & ft = F[1].const_array(mfi);
@@ -5331,6 +5356,16 @@ void HybridPICModel::SolveETensorRZ (
         Wz.setBndry(0.0_rt);
         Wr.FillBoundary(geom.periodicity());
         Wz.FillBoundary(geom.periodicity());
+        // pinned copy of the (device) coefficient fields for the host
+        // loop, and a stream sync so every device write above is visible
+        std::array<MultiFab, 3> coef_h;
+        for (int c = 0; c < 3; ++c) {
+            coef_h[c].define(coef[c]->boxArray(),
+                             coef[c]->DistributionMap(), coef[c]->nComp(),
+                             IntVect(0), MFInfo().SetArena(The_Pinned_Arena()));
+            MultiFab::Copy(coef_h[c], *coef[c], 0, 0, coef[c]->nComp(), 0);
+        }
+        Gpu::streamSynchronize();
         Real errmax[3] = {0.0_rt, 0.0_rt, 0.0_rt};
         for (int c = 0; c < 3; ++c) {
             GpuArray<int, 3> const Sc = E_stag[c];
@@ -5347,7 +5382,7 @@ void HybridPICModel::SolveETensorRZ (
                 auto const & dv = D.const_array(mfi);
                 auto const & wr = Wr.const_array(mfi);
                 auto const & wz = Wz.const_array(mfi);
-                auto const & cf = coef[c]->const_array(mfi);
+                auto const & cf = coef_h[c].const_array(mfi);
                 const int cc = c;
                 auto const & bx0 = mfi.validbox();
                 amrex::LoopOnCpu(bx0, [&] (int i, int j, int k)

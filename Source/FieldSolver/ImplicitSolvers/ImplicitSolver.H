@@ -400,6 +400,10 @@ protected:
                     int          a_nl_iter,
                     bool         a_from_jacobian );
 
+    // The next two members are public: they contain extended device
+    // lambdas (ParallelFor), which nvcc 13 requires to live in public
+    // member functions (the 2fc85ed9b rule).
+    public:
     /**
      * \brief Overwrite the r-max guard cells of Efield_fp (the particle gather
      * field) with the energy-adjoint ghost fill of the reflecting-wall J fold.
@@ -423,6 +427,7 @@ protected:
      * symmetry completion, which reads the raw guard rows.
      */
     void ApplyMassMatricesBoundaryRows ();
+    protected:
 
     /**
      * \brief One-shot comparison of the mass-matrix linear-stage current
