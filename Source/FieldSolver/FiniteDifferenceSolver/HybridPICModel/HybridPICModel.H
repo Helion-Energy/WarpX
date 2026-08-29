@@ -163,6 +163,39 @@ public:
         int step, amrex::Real dt_half, int lev, SubcyclingHalf subcycling_half,
         amrex::IntVect ng, std::optional<bool> nodal_sync);
 
+    /** Topanga-style sponge caps for the e-form (Yee) substep loop,
+     *  B-SIDE ONLY (Belyaev, Larson, Cohen & Clark, Phys. Plasmas 31,
+     *  012902 (2024), Sec. II B — Topanga itself is e-form-class in
+     *  its hybrid region and damps only the evolved B there; the
+     *  algebraic E regenerates every solve and carries no wave state).
+     *  Inside a layer of width je_sponge_width at each z end, damp the
+     *  in-loop PLASMA-frame B (B_ext is subtracted at substep-loop
+     *  entry and re-added at exit, so the drive never sees the layer
+     *  and no external-change tracking is needed) toward its frozen
+     *  first-call reference, with the rate ramped linearly from zero
+     *  at the layer's inner edge (the paper's anti-reflection
+     *  requirement) to 1/tau_max = v_w ln(1/f_s)/L_s at the wall.
+     *  Implicit per-direction update on each component's own
+     *  staggering (the ramp coordinate offsets half a cell where B_d
+     *  is cell-centered in z); unconditionally stable at any
+     *  dt/tau and operator-split from the curl advance, so the
+     *  substep error control never sees it. Applied once per ACCEPTED
+     *  substep, BEFORE any coupling-interval close and BEFORE the
+     *  B_old latch. Restart note: the references re-seed from the
+     *  restored state on a mid-stroke restart (unround-tripped
+     *  companion state; sidecar round-trip is a follow-up). */
+    void ApplySpongeLayerBYee (
+        ablastr::fields::MultiLevelVectorField const& Bfield,
+        int lev, amrex::Real dt_sub);
+
+    /** Frozen first-call plasma-frame B references of the Yee sponge,
+     *  one per component staggering (valid region only; ghosts are
+     *  refreshed after each application); lazily seeded by
+     *  ApplySpongeLayerBYee on its first call. */
+    std::array<std::unique_ptr<amrex::MultiFab>, 3> m_sponge_bref_yee;
+    /** Seed latch of the Yee sponge references. */
+    bool m_sponge_yee_init = false;
+
     void BfieldEvolveRK4 (
         ablastr::fields::MultiLevelVectorField const& Bfield,
         ablastr::fields::MultiLevelVectorField const& Efield,
@@ -736,6 +769,23 @@ public:
      *  fixed point (count never moves) stays silent while an RKF45 decay
      *  or a rescue jump is witnessed in the log. */
     int m_substeps_last_reported = -1;
+
+    /** Sponge-cap layer width [m] at each z end (see ApplySpongeLayerBYee;
+     *  0 = off, bit-identical legacy path). Knob names keep the je_sponge_*
+     *  spelling of the je-form lineage so matched decks drive both forms
+     *  with identical inputs. Input: je_sponge_width. */
+    amrex::Real m_je_sponge_width = 0.0;
+    /** Sponge damping exponent ln(1/f_s) (default 4; validated range 3-6:
+     *  significantly higher reflects off the layer's inner edge,
+     *  significantly lower under-absorbs). Input: je_sponge_lnf. */
+    amrex::Real m_je_sponge_lnf = 4.0;
+    /** Sponge matching speed v_w [m/s]. REQUIRED > 0 when the layer is
+     *  active on this form (no publishable fallback exists: the fastest
+     *  retained signal at the caps is the whistler branch at cap-band
+     *  parameters — deck-set from cap parameters; over-setting is the safe
+     *  direction, slower content just sees more damping per crossing,
+     *  which the ramp tolerates). Input: je_sponge_vw. */
+    amrex::Real m_je_sponge_vw = 0.0;
 
     /** Intervals to use RKF45 integrator and to update substeps parameter */
     ablastr::utils::text::IntervalsParser m_rkf45_intervals;
