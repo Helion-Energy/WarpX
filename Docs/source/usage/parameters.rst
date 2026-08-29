@@ -3902,6 +3902,24 @@ Maxwell solver: kinetic-fluid hybrid
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the plasma hyper-resistivity in :math:`\Omega m^3`.
 
+.. pp:param:: hybrid_pic_model.hyper_resistivity_curlcurl
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Apply the hyper-resistive term in its exact operator form
+    :math:`+\nabla \times (\eta_H \nabla \times \vec{J})`, with the two curls composed
+    from the discrete staggered curl stencils and the (face-averaged) coefficient inside
+    the outer curl, instead of the truncated component Laplacian
+    :math:`-\eta_H \nabla^2 \vec{J}`. The two agree only for constant :math:`\eta_H` and
+    :math:`\nabla \cdot \vec{J} = 0`; deposited and Ampere-closure currents carry discrete
+    divergence, and the truncated form's :math:`\nabla (\nabla \cdot \vec{J})` remainder is
+    non-dissipative, while the exact form is energy-sign-definite
+    (:math:`\int \vec{E}_H \cdot \vec{J} = \int \eta_H |\nabla \times \vec{J}|^2 \geq 0`).
+    Off by default to preserve existing trajectories; the exact form is intended to become
+    the default. The truncated RZ form also carries a factor-2 on-axis defect in its
+    :math:`E_z` row that the composed form does not.
+
 .. pp:param:: hybrid_pic_model.plasma_resistivity_<species>(rho_s,rho,Te,J,J_s,B,t)
     :type: ``float`` or ``str``
     :default: ``0``
@@ -4240,10 +4258,10 @@ Maxwell solver: kinetic-fluid hybrid
     term, dropping the advective and :math:`\partial\rho/\partial t` legs. Combined with
     ``electron_inertia_bdf2 = false``, the two-point stencil with measured current history is
     algebraically identical to the operator form :math:`-d_e^2\,\nabla\times\nabla\times
-    \mathbf{E}` of Amano et al., J. Comput. Phys. **275**, 197 (2014) — the **Amano form** of
-    the generalized Ohm's law, as opposed to the legacy algebraic **E-form** with its density
-    division — which regularizes the Ohm solve in depleted and vacuum regions without any bare
-    density division. The added
+    \mathbf{E}` (Amano et al., J. Comput. Phys. **275**, 197 (2014)) — the **curl-curl form**
+    of the generalized Ohm's law, as opposed to the legacy algebraic **E-form** with its
+    density division — which regularizes the Ohm solve in depleted and vacuum regions without
+    any bare density division. The added
     elliptic character makes preconditioning of the implicit solve essential:
     ``jacobian.pc_type = pc_block_banded`` in RZ, or ``pc_curl_curl_mlmg`` (which switches
     automatically to the divided inertia operator with this form) elsewhere.
@@ -4256,7 +4274,8 @@ Maxwell solver: kinetic-fluid hybrid
     Form of the generalized Ohm's law solve. ``e_form`` (default) is the legacy algebraic
     solve: every term is divided by the (floored) density, so a density pedestal
     (``n_floor``) regularizes depleted regions and the fields there follow the floored
-    vacuum branch. ``amano_form`` is the division-free multiplied-through solve (Amano,
+    vacuum branch. ``curlcurl_form`` (renamed from ``amano_form``, which is now a hard
+    error) is the division-free multiplied-through solve (Amano,
     J. Comput. Phys. **275**, 197 (2014); the transverse Darwin solve of Hewett & Nielson,
     J. Comput. Phys. **29**, 219 (1978)): the equation is multiplied by :math:`en` and the
     :math:`\partial\mathbf{J}_e/\partial t` leg's dependence on :math:`\mathbf{E}` becomes
@@ -4267,12 +4286,18 @@ Maxwell solver: kinetic-fluid hybrid
     \infty` as :math:`n \to 0`). The measured part of :math:`\partial\mathbf{J}_e/\partial
     t` is differenced against the step-start plasma current
     (:math:`\nabla\times\mathbf{B}^n/\mu_0`), which keeps the iterate's curl-curl content
-    on the operator side of the solve. Currently implemented in RZ :math:`m = 0`, where
-    the vector Helmholtz system decouples per component: the toroidal (:math:`E_\theta`)
-    sector is a scalar nodal Helmholtz solve and the poloidal (:math:`E_r`, :math:`E_z`)
-    sectors are staggering-native scalar solves, each handled by a Jacobi-preconditioned
-    CG iteration per residual evaluation; the longitudinal (:math:`E_L`) recovery stage
-    follows. Requires
+    on the operator side of the solve. Currently implemented in RZ :math:`m = 0`: the
+    toroidal (:math:`E_\theta`) sector is a scalar nodal Helmholtz solve, and the poloidal
+    (:math:`E_r`, :math:`E_z`) sector is one coupled solve with the true poloidal
+    curl-curl operator composed from the discrete curls (a component Laplacian equals it
+    only where the discrete divergence vanishes and otherwise spuriously screens the
+    longitudinal field at density-contrast edges), each handled by Jacobi-preconditioned
+    CG per residual evaluation; on strictly zero-density rows — where the
+    multiplied-through equation is empty — the poloidal system is closed with the vacuum
+    Gauss constraint (an energy-form :math:`-\nabla(\gamma\,\nabla\cdot\,.)` completion
+    gated to zero-density nodes, making deep vacuum the full vector Laplacian), and the
+    longitudinal (:math:`E_L`) recovery stage follows.
+    Requires
     ``algo.evolve_scheme = theta_implicit_hybrid`` (the elliptic solve is amortized over
     the large implicit step) and ``include_electron_inertia = 1`` with
     ``electron_inertia_djedt_only = 1`` and ``electron_inertia_bdf2 = 0``. With external
@@ -4282,6 +4307,39 @@ Maxwell solver: kinetic-fluid hybrid
     Jacobian rows, which do not model this residual — measured convergence is identical to
     the unpreconditioned solve while paying the factorization cost (a boot-time warning is
     recorded).
+
+.. pp:param:: hybrid_pic_model.esolve_pol_verify
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    With ``esolve = curlcurl_form``, run a one-shot discrete verification of the poloidal
+    curl-curl assembly on the first poloidal solve: the fused operator rows applied to a
+    deterministic pseudo-random poloidal field are compared against the directly composed
+    :math:`\nabla\times(\nabla\times\,.)` through a stored cell-centered
+    :math:`(\nabla\times\mathbf{E})_\theta` field, and the maximum relative row error is
+    printed per sector (roundoff on interior and natural-boundary rows; Dirichlet rows are
+    identity by construction). Debug/verification aid; the run then continues normally.
+
+.. pp:param:: hybrid_pic_model.curlcurl_pol_frozen_rho
+    :type: ``bool``
+    :default: ``true``
+    :optional:
+
+    With ``esolve = curlcurl_form``, evaluate the poloidal stage's density-derived operator
+    content — the screening (:math:`\beta`) rows, the zero-density RHS membership test, the
+    vacuum-closure :math:`\gamma` gate, and the numerator fold weights — from the
+    per-step-frozen :math:`\rho^n` snapshot (captured on the first non-Jacobian residual
+    evaluation of each step, the same latch as the inertia :math:`\partial\rho/\partial t`
+    leg) instead of the live per-evaluation midpoint deposit. The binary gates are otherwise
+    re-decided from a fresh particle deposit in every residual evaluation, so near-threshold
+    cells flip membership under finite-difference Jacobian probe deposits and between
+    Newton/line-search evaluations — an :math:`O(1)` operator-row change at probe amplitude
+    that poisons the Jacobian-vector products and compounds near-tolerance misses on
+    sharp-edge cold starts. The screening rows and fold weights freeze together with the
+    gates (a frozen-plasma gate over a live-zero screening row would reopen the curl-curl
+    gradient null family on edge cells whose deposit tail vacates mid-step). ``0`` restores
+    the legacy live-density coupling for A/B comparison.
 
 .. pp:param:: hybrid_pic_model.darwin_vacuum_recovery
     :type: ``bool``
@@ -4349,6 +4407,71 @@ Maxwell solver: kinetic-fluid hybrid
     ``darwin_vacuum_recovery_absolute_tolerance`` (default 0),
     ``darwin_vacuum_recovery_max_iterations`` (default 200) and
     ``darwin_vacuum_recovery_verbosity`` (default 0).
+
+.. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_operator
+    :type: ``string``
+    :default: ``poisson``
+    :optional:
+
+    Iteration operator of the recovery correction solve. ``poisson`` (default) is the
+    nodal finite-difference vector-Poisson map; the recovery defect is measured with
+    composed discrete curls either way, so the converged recovery (masked
+    :math:`\nabla \times (\nabla \times \vec{A}) = 0`) is identical. ``curlcurl`` solves
+    the correction with the native edge-staggered ``amrex::MLCurlCurl`` operator,
+    :math:`(\nabla \times \nabla \times{} + \beta)\, \delta\vec{A} = -\mu_0 \vec{J}_{imp}`,
+    which cancels the measured defect in a single solve and needs no nodal-edge
+    interpolation of the correction. :math:`\beta` (set by
+    ``darwin_vacuum_recovery_curlcurl_beta``, default ``1e-8``, relative to the grid-scale
+    curl-curl diagonal :math:`\sum_d 4/\Delta x_d^2`) is a Tikhonov closure of the
+    curl-curl null space; it shapes the iteration only, not the fixed point, and its
+    gradient-family content in :math:`\delta\vec{A}` never reaches
+    :math:`\vec{B} = \nabla \times \vec{A}`. Cartesian (3D / 2D-XZ) only, no embedded
+    boundaries: ``amrex::MLCurlCurl`` carries no cylindrical metric, so RZ stays on
+    ``poisson``.
+
+.. pp:param:: hybrid_pic_model.tensor_mass_alpha
+    :type: ``float``
+    :default: ``0.5``
+
+    With ``hybrid_pic_model.esolve = tensor_form``: CFL fraction :math:`\alpha` of the
+    effective-electron-mass regularization (Amano et al., J. Comput. Phys. 275, 197 (2014),
+    Eq. (27) class), :math:`m_e' = \max(m_e, B^2 q_e/(\mu_0 \rho_g)\,
+    (\Delta t_\theta/(2\alpha\,\Delta x))^2)`. The inflation is inert wherever the electron
+    physics is resolved and regularizes the tensor coefficients in near-vacuum.
+    ``tensor_n_min`` (default 0 = fall back to ``n_floor``) is the one-count density anchor
+    of the :math:`\rho_g` guard in the same formula (a statistics anchor: set it to the
+    one-macroparticle-per-cell density). In RZ it also anchors the tensor solve's
+    membership gates (the vacuum-closure :math:`\gamma` gate and the RHS test): sub-one-count
+    rows keep their screening in the operator but take the :math:`\nabla\cdot\mathbf{E} = 0`
+    continuation as their content — a strictly-zero gate would leave epsilon deposit-tail
+    rows as near-null gradient directions and the unfloored division would reappear as a
+    solver conditioning floor.
+    The ``tensor_form`` E-solve eliminates the electron momentum equation in closed form on
+    the curl-curl base (stateless Je elimination): every coefficient scales with density
+    moments, the vacuum limit is pure curl-curl, and no density floor or vacuum resistivity
+    enters the E assembly. Requires ``algo.evolve_scheme = theta_implicit_hybrid`` and
+    ``include_electron_inertia = 0`` (the elimination is the inertia treatment). Supported
+    in 1D_Z (periodic) and RZ :math:`m = 0` (periodic z, axis-inclusive domain, non-Darwin).
+    The RZ assembly solves all three components as one coupled system on the native Yee
+    staggerings: the poloidal curl-curl rows are the composed identity-form rows (completed
+    in vacuum by the same energy-form :math:`-\nabla(\gamma\,\nabla\cdot\,.)` closure as
+    ``curlcurl_form``), the toroidal row composes the native curls with the axis regularity
+    carried by the :math:`r = 0` metric, and every density-derived coefficient and gate
+    reads a per-step-frozen snapshot of the committed entry density (bit-stable through all
+    residual evaluations of a step -- the frozen-gates rule). One-shot discrete row
+    verification via ``hybrid_pic_model.tensor_verify``.
+
+.. pp:param:: hybrid_pic_model.darwin_vacuum_recovery_frozen_mask
+    :type: ``bool``
+    :default: ``1``
+
+    Freeze the recovery/Faraday-overwrite mask density per step: the masks read a snapshot
+    of the committed step-entry density instead of the live deposit, so the vacuum/plasma
+    partition is constant through every residual evaluation of the implicit step and
+    refreshes between steps. With a live read the partition follows the nonlinear iterate
+    (the deposit refreshes per evaluation), which makes the residual map non-smooth and can
+    stall the Newton solver at a tolerance-independent level. ``0`` restores the legacy
+    live-density masks.
 
 .. pp:param:: hybrid_pic_model.substeps
     :type: ``int``

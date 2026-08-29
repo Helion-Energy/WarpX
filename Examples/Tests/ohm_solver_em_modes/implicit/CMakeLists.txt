@@ -73,7 +73,8 @@ add_warpx_test(
 label_warpx_test(test_1d_ohm_solver_em_modes_implicit_inertia_mm_picmi slow)
 
 # Curl-curl MLMG preconditioner in its hybrid electron-inertia mode (the
-# Amano operator form): runs the seeded-inertia dispersion variant at the
+# curl-curl operator form of Amano et al., J. Comput. Phys. 275, 197
+# (2014)): runs the seeded-inertia dispersion variant at the
 # DEFAULT Krylov budget with newton.require_convergence -- the plain
 # inertia variant needs a boosted GMRES restart length to converge, so the
 # preconditioner replacing that crutch is itself the solver assertion, and

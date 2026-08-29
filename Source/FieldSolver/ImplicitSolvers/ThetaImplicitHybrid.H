@@ -118,7 +118,8 @@ public:
     const amrex::MultiFab* GetRhoMidForPC (int lev) const override;
 
     /** E-staggered beta = 1/d_e^2 coefficients for the electron-inertia
-     *  curl-curl preconditioner (divided Amano operator form), assembled
+     *  curl-curl preconditioner (the divided curl-curl operator form of
+     *  Amano et al., J. Comput. Phys. 275, 197 (2014)), assembled
      *  from the midpoint density with the Ohm floor and taper mirrored
      *  from the E-solve kernel. Non-null only with electron inertia in the
      *  two-point dJe/dt-only (operator) form; aborts in RZ. */

@@ -654,8 +654,9 @@ parser.add_argument(
 parser.add_argument(
     "--pc-curl-curl",
     help="precondition with pc_curl_curl_mlmg in its hybrid electron-inertia "
-    "mode (switches the inertia term to the Amano operator form and runs "
-    "the default Krylov budget with convergence required)",
+    "mode (switches the inertia term to the curl-curl operator form of "
+    "Amano et al. and runs the default Krylov budget with convergence "
+    "required)",
     action="store_true",
 )
 parser.add_argument(

@@ -646,6 +646,17 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         eta_overlay_mf = warpx.m_fields.get_alldirs("hybrid_eta_overlay_fp", lev);
     }
 
+    // Exact-operator hyper-resistivity: E_H = +curl(eta_H curl J) with the
+    // coefficient inside the outer curl (energy-sign-definite for varying
+    // eta_H), precomputed by the caller (HybridPICModel::HybridPICSolveE)
+    // from the same plasma current the kernels bind below.
+    const bool hyperres_curlcurl = include_hyper_resistivity_term
+        && hybrid_model->m_hyper_resistivity_curlcurl;
+    ablastr::fields::VectorField eH_mf = {nullptr, nullptr, nullptr};
+    if (hyperres_curlcurl) {
+        eH_mf = warpx.m_fields.get_alldirs("hybrid_hyperres_E_fp", lev);
+    }
+
     // Loop through the grids, and over the tiles within each grid for the
     // initial, nodal calculation of E
 #ifdef AMREX_USE_OMP
@@ -756,18 +767,18 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         Array4<Real const> const& enE = enE_nodal_mf.const_array(mfi);
         Array4<Real const> eiN;
         if (Ei_nodal_mf) { eiN = Ei_nodal_mf->const_array(mfi); }
-        // amano_form (division-free) toroidal sector: the numerator
+        // curlcurl_form (division-free) toroidal sector: the numerator
         // capture target and the measured inertia numerator (see
-        // HybridPICModel::SolveEThetaAmanoRZ; both nodal). The arrays stay
+        // HybridPICModel::SolveEThetaCurlCurlRZ; both nodal). The arrays stay
         // default-constructed on the e_form path and gate the kernel
         // branches.
-        Array4<Real> amano_num, amano_num_r, amano_num_z;
-        Array4<Real const> eiA;
-        if (hybrid_model->m_esolve_amano) {
-            amano_num = hybrid_model->m_num_theta->array(mfi);
-            amano_num_r = hybrid_model->m_num_pol[0]->array(mfi);
-            amano_num_z = hybrid_model->m_num_pol[1]->array(mfi);
-            eiA = hybrid_model->m_ei_amano_theta->const_array(mfi);
+        Array4<Real> cc_num, cc_num_r, cc_num_z;
+        Array4<Real const> eiCC;
+        if (hybrid_model->m_esolve_curlcurl) {
+            cc_num = hybrid_model->m_num_theta->array(mfi);
+            cc_num_r = hybrid_model->m_num_pol[0]->array(mfi);
+            cc_num_z = hybrid_model->m_num_pol[1]->array(mfi);
+            eiCC = hybrid_model->m_ei_curlcurl_theta->const_array(mfi);
         }
         Array4<Real const> const& rho = rhofield.const_array(mfi);
         Array4<Real const> const& Pe = Pefield.const_array(mfi);
@@ -782,6 +793,12 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
             eta_overlay_r = eta_overlay_mf[0]->const_array(mfi);
             eta_overlay_t = eta_overlay_mf[1]->const_array(mfi);
             eta_overlay_z = eta_overlay_mf[2]->const_array(mfi);
+        }
+        Array4<Real const> eHr, eHt, eHz;
+        if (hyperres_curlcurl) {
+            eHr = eH_mf[0]->const_array(mfi);
+            eHt = eH_mf[1]->const_array(mfi);
+            eHz = eH_mf[2]->const_array(mfi);
         }
 
         // Extract structures indicating where the fields
@@ -822,25 +839,25 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                 // Skip field update in the embedded boundaries
                 if (update_Er_arr && update_Er_arr(i, j, 0) == 0) {
-                    if (amano_num_r) { amano_num_r(i, j, 0) = 0._rt; }
+                    if (cc_num_r) { cc_num_r(i, j, 0) = 0._rt; }
                     return;
                 }
 
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Er_stag, coarsen, i, j, 0, 0);
 
-                // amano_form poloidal sector: capture the multiplied-through
+                // curlcurl_form poloidal sector: capture the multiplied-through
                 // numerator (division-free) for the grad-div-completed
                 // vector-Helmholtz solve; Er is zeroed so the resistive
                 // blocks accumulate cleanly for the caller's fold.
-                if (amano_num_r) {
+                if (cc_num_r) {
                     const Real grad_Pe_a =
                         (!solve_for_Faraday && include_electron_pressure_term) ?
                         T_Algo::UpwardDr(Pe, coefs_r, n_coefs_r, i, j, 0, 0)
                         : 0._rt;
                     const auto enE_ra = Interp(enE, nodal, Er_stag, coarsen, i, j, 0, 0);
-                    amano_num_r(i, j, 0) = enE_ra - grad_Pe_a
-                        + Interp(eiA, nodal, Er_stag, coarsen, i, j, 0, 0);
+                    cc_num_r(i, j, 0) = enE_ra - grad_Pe_a
+                        + Interp(eiCC, nodal, Er_stag, coarsen, i, j, 0, 0);
                     Er(i, j, 0) = 0._rt;
                 } else {
 
@@ -882,7 +899,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     Er(i, j, 0) += Interp(eiN, nodal, Er_stag, coarsen, i, j, 0, 0);
                 }
 
-                } // end !amano_num_r
+                } // end !cc_num_r
 
 
                 // Add resistivity only if E field value is used to update B
@@ -901,7 +918,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     // when no per-species eta is registered.
                     if (has_eta_overlay) { Er(i, j, 0) += eta_overlay_r(i, j, 0); }
 
-                    if (include_hyper_resistivity_term) {
+                    if (hyperres_curlcurl) {
+                        // Exact operator: E_H = +curl(eta_H curl J), the
+                        // coefficient inside the outer curl; composed by
+                        // the caller (eta_H face-averaged there).
+                        Er(i, j, 0) += eHr(i, j, 0);
+                    } else if (include_hyper_resistivity_term) {
+                        // Truncated identity (-lap J = curl curl J only at
+                        // div J = 0); trajectory-preserving default.
 
                         // Interpolate B field to appropriate staggering to match E field
                         Real btot_val = 0._rt;
@@ -921,7 +945,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields && !amano_num_r) {
+                if (include_external_fields && !cc_num_r) {
                     const amrex::Real w_ext = subtract_E_ext_everywhere
                         ? 1._rt
                         : HybridExtSubWeight(rho_val, rho_floor, floor_w);
@@ -934,7 +958,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                 // Skip field update in the embedded boundaries
                 if (update_Etheta_arr && update_Etheta_arr(i, j, 0) == 0) {
-                    if (amano_num) { amano_num(i, j, 0) = 0._rt; }
+                    if (cc_num) { cc_num(i, j, 0) = 0._rt; }
                     return;
                 }
 
@@ -943,14 +967,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 // Mode m=0: // Ensure that Etheta remains 0 on axis
                 if (r < 0.5_rt*dr) {
                     Etheta(i, j, 0, 0) = 0.;
-                    if (amano_num) { amano_num(i, j, 0) = 0._rt; }
+                    if (cc_num) { cc_num(i, j, 0) = 0._rt; }
                     return;
                 }
 
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Etheta_stag, coarsen, i, j, 0, 0);
 
-                // amano_form (division-free) toroidal sector: assemble the
+                // curlcurl_form (division-free) toroidal sector: assemble the
                 // multiplied-through numerator e n E_theta_num = the
                 // (J - J_i) x B numerator plus the measured inertia
                 // numerator (both division-free); Etheta is zeroed so the
@@ -958,10 +982,10 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 // E-valued terms cleanly for the caller to fold into the
                 // numerator (times e rho) ahead of the elliptic solve.
                 // No vacuum branch and no floor exist on this path.
-                if (amano_num) {
+                if (cc_num) {
                     const auto enE_t = Interp(enE, nodal, Etheta_stag,
                                               coarsen, i, j, 0, 1);
-                    amano_num(i, j, 0) = enE_t + eiA(i, j, 0, 1);
+                    cc_num(i, j, 0) = enE_t + eiCC(i, j, 0, 1);
                     Etheta(i, j, 0) = 0._rt;
                 } else {
 
@@ -994,7 +1018,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     Etheta(i, j, 0) += Interp(eiN, nodal, Etheta_stag, coarsen, i, j, 0, 1);
                 }
 
-                } // end !amano_num
+                } // end !cc_num
 
 
                 // Add resistivity only if E field value is used to update B
@@ -1011,7 +1035,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     Etheta(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jtheta(i, j, 0);
                     if (has_eta_overlay) { Etheta(i, j, 0) += eta_overlay_t(i, j, 0); }
 
-                    if (include_hyper_resistivity_term) {
+                    if (hyperres_curlcurl) {
+                        // Exact operator: E_H = +curl(eta_H curl J), the
+                        // coefficient inside the outer curl; composed by
+                        // the caller (the axis row returned early above,
+                        // keeping Etheta = 0 there).
+                        Etheta(i, j, 0) += eHt(i, j, 0);
+                    } else if (include_hyper_resistivity_term) {
+                        // Truncated identity; trajectory-preserving default.
 
                         // Interpolate B field to appropriate staggering to match E field
                         Real btot_val = 0._rt;
@@ -1034,8 +1065,8 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     }
                 }
 
-                if (include_external_fields && !amano_num) {
-                    // amano_form defers the (unconditional) E_ext_theta
+                if (include_external_fields && !cc_num) {
+                    // curlcurl_form defers the (unconditional) E_ext_theta
                     // subtraction to after the elliptic solve -- there is
                     // no vacuum branch to gate on.
                     const amrex::Real w_ext = subtract_E_ext_everywhere
@@ -1050,23 +1081,23 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                 // Skip field update in the embedded boundaries
                 if (update_Ez_arr && update_Ez_arr(i, j, 0) == 0) {
-                    if (amano_num_z) { amano_num_z(i, j, 0) = 0._rt; }
+                    if (cc_num_z) { cc_num_z(i, j, 0) = 0._rt; }
                     return;
                 }
 
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, 0, 0);
 
-                // amano_form poloidal sector: numerator capture (see the
+                // curlcurl_form poloidal sector: numerator capture (see the
                 // Er branch).
-                if (amano_num_z) {
+                if (cc_num_z) {
                     const Real grad_Pe_a =
                         (!solve_for_Faraday && include_electron_pressure_term) ?
                         T_Algo::UpwardDz(Pe, coefs_z, n_coefs_z, i, j, 0, 0)
                         : 0._rt;
                     const auto enE_za = Interp(enE, nodal, Ez_stag, coarsen, i, j, 0, 2);
-                    amano_num_z(i, j, 0) = enE_za - grad_Pe_a
-                        + Interp(eiA, nodal, Ez_stag, coarsen, i, j, 0, 2);
+                    cc_num_z(i, j, 0) = enE_za - grad_Pe_a
+                        + Interp(eiCC, nodal, Ez_stag, coarsen, i, j, 0, 2);
                     Ez(i, j, 0) = 0._rt;
                 } else {
 
@@ -1102,7 +1133,7 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     Ez(i, j, 0) += Interp(eiN, nodal, Ez_stag, coarsen, i, j, 0, 2);
                 }
 
-                } // end !amano_num_z
+                } // end !cc_num_z
 
 
                 // Add resistivity only if E field value is used to update B
@@ -1119,7 +1150,14 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                     Ez(i, j, 0) += eta(rho_val, jtot_val, t_new) * Jz(i, j, 0);
                     if (has_eta_overlay) { Ez(i, j, 0) += eta_overlay_z(i, j, 0); }
 
-                    if (include_hyper_resistivity_term) {
+                    if (hyperres_curlcurl) {
+                        // Exact operator: E_H = +curl(eta_H curl J), the
+                        // coefficient inside the outer curl; composed by
+                        // the caller (the Ampere-closure stencil owns the
+                        // axis row, with the correct axis limit).
+                        Ez(i, j, 0) += eHz(i, j, 0);
+                    } else if (include_hyper_resistivity_term) {
+                        // Truncated identity; trajectory-preserving default.
 
                         // Interpolate B field to appropriate staggering to match E field
                         Real btot_val = 0._rt;
@@ -1137,17 +1175,21 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                         if (r > 0.5_rt*dr) {
                             nabla2Jz += T_Algo::Dr_rDr_over_r(Jz, r, dr, coefs_r, n_coefs_r, i, j, 0, 0);
                         } else {
-                            // Special handling of the hyper-resistivity term on axis to avoid division by zero
-                            // and ensure that Jz remains well-behaved on axis for m=0 mode
-                            // This works since there is a symmetry condition on axis that cancels the geometric 1/r term
-                            nabla2Jz += T_Algo::Drr(Jz, coefs_r, n_coefs_r, i, j, 0, 0);
+                            // m = 0 regularity: lim_{r->0} (1/r) d_r(r d_r Jz)
+                            // = 2 d_rr Jz. NOTE: trajectories of eta_H runs
+                            // with on-axis current change relative to the
+                            // historical (factor-2-low) row; the exact
+                            // curl-curl path (hyper_resistivity_curlcurl)
+                            // has this limit by composition.
+                            nabla2Jz += 2.0_rt *
+                                T_Algo::Drr(Jz, coefs_r, n_coefs_r, i, j, 0, 0);
                         }
 
                         Ez(i, j, 0) -= eta_h(rho_val, btot_val) * nabla2Jz;
                     }
                 }
 
-                if (include_external_fields && !amano_num_z) {
+                if (include_external_fields && !cc_num_z) {
                     const amrex::Real w_ext = subtract_E_ext_everywhere
                         ? 1._rt
                         : HybridExtSubWeight(rho_val, rho_floor, floor_w);
@@ -1296,6 +1338,17 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
         eta_overlay_mf = warpx.m_fields.get_alldirs("hybrid_eta_overlay_fp", lev);
     }
 
+    // Exact-operator hyper-resistivity: E_H = +curl(eta_H curl J) with the
+    // coefficient inside the outer curl (energy-sign-definite for varying
+    // eta_H), precomputed by the caller (HybridPICModel::HybridPICSolveE)
+    // from the same plasma current the kernels bind below.
+    const bool hyperres_curlcurl = include_hyper_resistivity_term
+        && hybrid_model->m_hyper_resistivity_curlcurl;
+    ablastr::fields::VectorField eH_mf = {nullptr, nullptr, nullptr};
+    if (hyperres_curlcurl) {
+        eH_mf = warpx.m_fields.get_alldirs("hybrid_hyperres_E_fp", lev);
+    }
+
     // Loop through the grids, and over the tiles within each grid for the
     // initial, nodal calculation of E
 #ifdef AMREX_USE_OMP
@@ -1414,6 +1467,12 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
             eta_overlay_y = eta_overlay_mf[1]->const_array(mfi);
             eta_overlay_z = eta_overlay_mf[2]->const_array(mfi);
         }
+        Array4<Real const> eHx, eHy, eHz;
+        if (hyperres_curlcurl) {
+            eHx = eH_mf[0]->const_array(mfi);
+            eHy = eH_mf[1]->const_array(mfi);
+            eHz = eH_mf[2]->const_array(mfi);
+        }
 
         // Extract structures indicating where the fields
         // should be updated, given the position of the embedded boundaries
@@ -1495,7 +1554,14 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 Ex(i, j, k) += eta(rho_val, jtot_val, t_new) * Jx(i, j, k);
                 if (has_eta_overlay) { Ex(i, j, k) += eta_overlay_x(i, j, k); }
 
-                if (include_hyper_resistivity_term) {
+                if (hyperres_curlcurl) {
+                    // Exact operator: E_H = +curl(eta_H curl J), the
+                    // coefficient inside the outer curl; composed by the
+                    // caller (eta_H face-averaged there).
+                    Ex(i, j, k) += eHx(i, j, k);
+                } else if (include_hyper_resistivity_term) {
+                    // Truncated identity (-lap J = curl curl J only at
+                    // div J = 0); trajectory-preserving default.
 
                     // Interpolate B field to appropriate staggering to match E field
                     Real btot_val = 0._rt;
@@ -1573,7 +1639,13 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 Ey(i, j, k) += eta(rho_val, jtot_val, t_new) * Jy(i, j, k);
                 if (has_eta_overlay) { Ey(i, j, k) += eta_overlay_y(i, j, k); }
 
-                if (include_hyper_resistivity_term) {
+                if (hyperres_curlcurl) {
+                    // Exact operator: E_H = +curl(eta_H curl J), the
+                    // coefficient inside the outer curl; composed by the
+                    // caller (eta_H face-averaged there).
+                    Ey(i, j, k) += eHy(i, j, k);
+                } else if (include_hyper_resistivity_term) {
+                    // Truncated identity; trajectory-preserving default.
 
                     // Interpolate B field to appropriate staggering to match E field
                     Real btot_val = 0._rt;
@@ -1651,7 +1723,13 @@ void FiniteDifferenceSolver::HybridPICSolveECartesian (
                 Ez(i, j, k) += eta(rho_val, jtot_val, t_new) * Jz(i, j, k);
                 if (has_eta_overlay) { Ez(i, j, k) += eta_overlay_z(i, j, k); }
 
-                if (include_hyper_resistivity_term) {
+                if (hyperres_curlcurl) {
+                    // Exact operator: E_H = +curl(eta_H curl J), the
+                    // coefficient inside the outer curl; composed by the
+                    // caller (eta_H face-averaged there).
+                    Ez(i, j, k) += eHz(i, j, k);
+                } else if (include_hyper_resistivity_term) {
+                    // Truncated identity; trajectory-preserving default.
 
                     // Interpolate B field to appropriate staggering to match E field
                     Real btot_val = 0._rt;

@@ -14,6 +14,7 @@
 #include <ablastr/coarsen/sample.H>
 #include <ablastr/utils/Communication.H>
 
+#include <AMReX_MLCurlCurl.H>
 #include <AMReX_MLEBNodeFDLaplacian.H>
 #include <AMReX_MLMG.H>
 #include <AMReX_MLNodeABecLaplacian.H>
@@ -31,6 +32,7 @@
 
 #include <AMReX_Random.H>
 
+#include <cmath>
 #include <limits>
 #include <string>
 #include <vector>
@@ -156,6 +158,7 @@ void HybridPICModel::ReadParameters ()
         m_qdsmc_conduction_substeps >= 1,
         "hybrid_pic_model.qdsmc_conduction_substeps must be >= 1");
     pp_hybrid.query("plasma_hyper_resistivity(rho,B)", m_eta_h_expression);
+    pp_hybrid.query("hyper_resistivity_curlcurl", m_hyper_resistivity_curlcurl);
 
     utils::parser::queryWithParser(pp_hybrid, "n_floor", m_n_floor);
     utils::parser::queryWithParser(pp_hybrid, "n_floor_smooth_width",
@@ -183,7 +186,7 @@ void HybridPICModel::ReadParameters ()
                     m_implicit_push_excludes_resistive_field);
 
     // E-solve form: "e_form" (default) = the legacy algebraic solve with
-    // the floored density division; "amano_form" = the division-free
+    // the floored density division; "curlcurl_form" = the division-free
     // multiplied-through solve (Amano, J. Comput. Phys. 275, 197 (2014);
     // Hewett & Nielson, J. Comput. Phys. 29, 219 (1978)) in which the
     // dJe/dt leg's dependence on E becomes the elliptic operator
@@ -199,23 +202,61 @@ void HybridPICModel::ReadParameters ()
     {
         std::string esolve = "e_form";
         pp_hybrid.query("esolve", esolve);
-        if (esolve == "amano_form") { m_esolve_amano = true; }
+        if (esolve == "curlcurl_form") { m_esolve_curlcurl = true; }
+        else if (esolve == "tensor_form") { m_esolve_tensor = true; }
+        else if (esolve == "amano_form") {
+            // backward-compatibility guard: the value was retired, not
+            // aliased -- decks must name the operator identity explicitly
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.esolve = amano_form was renamed to "
+                "curlcurl_form; update the input deck");
+        }
         else if (esolve != "e_form") {
             WARPX_ABORT_WITH_MESSAGE(
-                "hybrid_pic_model.esolve must be 'e_form' or 'amano_form'");
+                "hybrid_pic_model.esolve must be 'e_form', "
+                "'curlcurl_form' or 'tensor_form'");
         }
-        if (m_esolve_amano) {
-#if !defined(WARPX_DIM_RZ)
+        if (m_esolve_tensor) {
+#if !defined(WARPX_DIM_1D_Z) && !defined(WARPX_DIM_RZ)
             WARPX_ABORT_WITH_MESSAGE(
-                "hybrid_pic_model.esolve = amano_form is currently "
-                "RZ-only (the toroidal m = 0 sector)");
+                "hybrid_pic_model.esolve = tensor_form supports 1D_Z and "
+                "RZ (m = 0) only");
 #endif
             std::string scheme;
             const amrex::ParmParse pp_algo("algo");
             pp_algo.query("evolve_scheme", scheme);
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 scheme == "theta_implicit_hybrid",
-                "hybrid_pic_model.esolve = amano_form requires "
+                "hybrid_pic_model.esolve = tensor_form requires "
+                "algo.evolve_scheme = theta_implicit_hybrid (the elliptic "
+                "solve is amortized over the large implicit step)");
+            utils::parser::queryWithParser(
+                pp_hybrid, "tensor_mass_alpha", m_tensor_alpha);
+            utils::parser::queryWithParser(
+                pp_hybrid, "tensor_n_min", m_tensor_n_min);
+            pp_hybrid.query("tensor_verify", m_esolve_tensor_verify);
+        }
+        if (m_esolve_curlcurl) {
+#if !defined(WARPX_DIM_RZ)
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.esolve = curlcurl_form is currently "
+                "RZ-only (the toroidal m = 0 sector)");
+#endif
+            // One-shot discrete verification of the poloidal curl-curl
+            // assembly (see SolveEPolCurlCurlRZ).
+            pp_hybrid.query("esolve_pol_verify", m_esolve_pol_verify);
+            // Per-step-frozen density for the poloidal stage's operator
+            // content and gates (see the member documentation; default on
+            // -- the iron rule: residual-consumed binary decisions must be
+            // a pure function of the iterate or bit-frozen per step).
+            pp_hybrid.query("curlcurl_pol_frozen_rho",
+                            m_curlcurl_pol_frozen_rho);
+            std::string scheme;
+            const amrex::ParmParse pp_algo("algo");
+            pp_algo.query("evolve_scheme", scheme);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                scheme == "theta_implicit_hybrid",
+                "hybrid_pic_model.esolve = curlcurl_form requires "
                 "algo.evolve_scheme = theta_implicit_hybrid (the elliptic "
                 "solve is amortized over the large implicit step; the "
                 "explicit advance does not run elliptic solves)");
@@ -227,10 +268,11 @@ void HybridPICModel::ReadParameters ()
                     "HybridPICModel",
                     "jacobian.pc_type = pc_block_banded assembles the e_form "
                     "(divided) Jacobian rows, which do not model the "
-                    "amano_form residual: measured convergence is identical "
-                    "to running with no preconditioner while paying the "
-                    "factor/apply cost. Prefer pc_type = none with "
-                    "esolve = amano_form until an amano-aware variant lands.",
+                    "curlcurl_form residual: measured convergence is "
+                    "identical to running with no preconditioner while "
+                    "paying the factor/apply cost. Prefer pc_type = none "
+                    "with esolve = curlcurl_form until a curlcurl-aware "
+                    "variant lands.",
                     ablastr::warn_manager::WarnPriority::high);
             }
         }
@@ -254,15 +296,34 @@ void HybridPICModel::ReadParameters ()
             "the 1D radial geometries.");
 #endif
     }
-    if (m_esolve_amano) {
+    if (m_esolve_curlcurl) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_include_electron_inertia && m_electron_inertia_djedt_only
                 && !m_electron_inertia_bdf2,
-            "hybrid_pic_model.esolve = amano_form requires "
+            "hybrid_pic_model.esolve = curlcurl_form requires "
             "include_electron_inertia = 1 with electron_inertia_djedt_only "
             "= 1 and electron_inertia_bdf2 = 0 (the dJe/dt leg IS the "
             "elliptic operator; the derivation is shared with the "
             "pc_curl_curl_mlmg hybrid mode)");
+    }
+    if (m_esolve_tensor) {
+        // The closed-form Je elimination IS the electron-inertia treatment
+        // (the dJe/dt leg becomes the curl-curl operator, the gyration and
+        // friction the pointwise tensor); the additive inertia term would
+        // double-count it.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_include_electron_inertia,
+            "hybrid_pic_model.esolve = tensor_form eliminates the electron "
+            "momentum equation in closed form; set include_electron_inertia "
+            "= 0 (the additive inertia term would double-count the dJe/dt "
+            "leg)");
+        utils::parser::queryWithParser(
+            pp_hybrid, "reduced_electron_mass_ratio",
+            m_reduced_electron_mass_ratio);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_reduced_electron_mass_ratio >= 0.0,
+            "hybrid_pic_model.reduced_electron_mass_ratio must be >= 0 "
+            "(0 selects the physical electron mass)");
     }
 
     // Darwin (magnetoinductive) field split, consumed by the theta-implicit
@@ -324,6 +385,26 @@ void HybridPICModel::ReadParameters ()
                 m_darwin_vacrec_max_iters);
             pp_hybrid.query("darwin_vacuum_recovery_verbosity",
                             m_darwin_vacrec_verbosity);
+            pp_hybrid.query("darwin_vacuum_recovery_frozen_mask",
+                            m_darwin_vacuum_recovery_frozen_mask);
+            pp_hybrid.query("darwin_vacuum_recovery_operator",
+                            m_darwin_vacuum_recovery_operator);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_darwin_vacuum_recovery_operator == "poisson"
+                || m_darwin_vacuum_recovery_operator == "curlcurl",
+                "hybrid_pic_model.darwin_vacuum_recovery_operator must be "
+                "'poisson' or 'curlcurl'");
+            utils::parser::queryWithParser(
+                pp_hybrid, "darwin_vacuum_recovery_curlcurl_beta",
+                m_darwin_vacrec_cc_beta_rel);
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                m_darwin_vacuum_recovery_operator != "curlcurl",
+                "hybrid_pic_model.darwin_vacuum_recovery_operator = "
+                "curlcurl requires Cartesian geometry (amrex::MLCurlCurl "
+                "carries no cylindrical metric; the RZ recovery stays on "
+                "the fixed-point-exact 'poisson' map).");
+#endif
             // Live-probe mode (see the member documentation): env-gated,
             // and forced on by circuit-in-the-residual solvers.
             m_vacuum_recovery_live_probes =
@@ -542,6 +623,13 @@ void HybridPICModel::AllocateLevelMFs (
                 fields.alloc_init("hybrid_A_vac_dA_nodal", Direction{dir},
                     lev, amrex::convert(ba, amrex::IntVect::TheNodeVector()),
                     dm, ncomps, ngRho, 0.0_rt);
+                // Edge-staggered persistent correction for the "curlcurl"
+                // recovery operator (warm start across evaluations).
+                if (m_darwin_vacuum_recovery_operator == "curlcurl") {
+                    fields.alloc_init("hybrid_A_vac_dA_edge", Direction{dir},
+                        lev, amrex::convert(ba, E_stag[dir]), dm, ncomps,
+                        ngEB, 0.0_rt);
+                }
                 fields.alloc_init("hybrid_J_vac_fp", Direction{dir},
                     lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB,
                     0.0_rt);
@@ -554,6 +642,15 @@ void HybridPICModel::AllocateLevelMFs (
                 // so BDF2 is valid from the first step.
                 fields.alloc_init("hybrid_A_vac_nm1_fp", Direction{dir},
                     lev, amrex::convert(ba, E_stag[dir]), dm, ncomps, ngEB,
+                    0.0_rt);
+            }
+            // Frozen mask density (see the member documentation): the
+            // per-step snapshot of the committed entry rho the recovery
+            // and Faraday-overwrite masks read instead of the live
+            // (iterate-dependent) rho_fp component 0.
+            if (m_darwin_vacuum_recovery_frozen_mask) {
+                fields.alloc_init("hybrid_rho_vacmask_fp",
+                    lev, amrex::convert(ba, rho_nodal_flag), dm, 1, ngRho,
                     0.0_rt);
             }
         }
@@ -617,6 +714,27 @@ void HybridPICModel::AllocateLevelMFs (
     fields.alloc_init(FieldType::hybrid_current_fp_plasma, Direction{2},
         lev, amrex::convert(ba, jz_nodal_flag),
         dm, ncomps, ngJ, 0.0_rt);
+
+    // Exact-operator hyper-resistivity scratch (m_hyper_resistivity_curlcurl):
+    // curl J on the B (face) staggering and the composed
+    // E_H = curl(eta_H curl J) back on the J (edge) staggering, recomputed
+    // per Ohm-solve call. Gate on the expression, not
+    // m_include_hyper_resistivity_term: that flag is derived in InitData,
+    // after this allocation runs.
+    if ((m_eta_h_expression != "0.0") && m_hyper_resistivity_curlcurl) {
+        const amrex::IntVect B_stag_hr[3] =
+            {Bx_nodal_flag, By_nodal_flag, Bz_nodal_flag};
+        const amrex::IntVect J_stag_hr[3] =
+            {jx_nodal_flag, jy_nodal_flag, jz_nodal_flag};
+        for (int dir = 0; dir < 3; ++dir) {
+            fields.alloc_init("hybrid_hyperres_curlJ_fp", Direction{dir},
+                lev, amrex::convert(ba, B_stag_hr[dir]), dm, ncomps, ngJ,
+                0.0_rt);
+            fields.alloc_init("hybrid_hyperres_E_fp", Direction{dir},
+                lev, amrex::convert(ba, J_stag_hr[dir]), dm, ncomps, ngJ,
+                0.0_rt);
+        }
+    }
 
     // Per-species ion fields - one set per charged species. current_fp_s
     // and rho_fp_s are deposited from particles and accumulated into the
@@ -1209,20 +1327,108 @@ void HybridPICModel::HybridPICSolveE (
     // coupling with solve_for_Faraday; the theta-implicit solver overrides
     // this to assemble the full Ohm E (grad(Pe) and eta*J together).
     const bool incl_eta = include_resistivity.value_or(solve_for_Faraday);
+    if (m_esolve_tensor) {
+        // tensor_form: the stateless Je elimination replaces the FD Ohm
+        // kernel entirely (Hall/motional, inertia, resistive friction all
+        // live in the pointwise tensor and the measured RHS; see
+        // m_esolve_tensor).
+#if defined(WARPX_DIM_RZ)
+        SolveETensorRZ(Efield, Jfield, Bfield, rhofield,
+                       *electron_pressure_fp, lev, solve_for_Faraday,
+                       incl_eta);
+#else
+        SolveETensor1D(Efield, Jfield, Bfield, rhofield,
+                       *electron_pressure_fp, lev, solve_for_Faraday,
+                       incl_eta);
+#endif
+    } else {
+    // Exact-operator hyper-resistivity (m_hyper_resistivity_curlcurl):
+    // precompute E_H = +curl(eta_H curl J) of the SAME plasma current the
+    // Ohm kernels consume (after the conductor-wall row zeroing above).
+    // First curl edge -> face (ComputeCurlA); eta_H is applied INSIDE the
+    // outer curl, at the face points, which is the energy-sign-definite
+    // form for spatially varying eta_H (E_H.J integrates to
+    // eta_H |curl J|^2 >= 0); the scaled field is zero-extended past
+    // non-periodic walls (the E_L source convention); second curl
+    // face -> edge through the Ampere closure (curl/mu0), scaled back by
+    // mu0. The kernels then add E_H in place of the truncated
+    // -eta_H lap J.
+    if (m_include_hyper_resistivity_term && m_hyper_resistivity_curlcurl
+        && incl_eta) {
+        auto * fdtd = warpx.get_pointer_fdtd_solver_fp(lev);
+        ablastr::fields::VectorField curlJ =
+            warpx.m_fields.get_alldirs("hybrid_hyperres_curlJ_fp", lev);
+        ablastr::fields::VectorField E_H =
+            warpx.m_fields.get_alldirs("hybrid_hyperres_E_fp", lev);
+        fdtd->ComputeCurlA(curlJ, current_fp_plasma,
+                           warpx.GetEBUpdateBFlag()[lev], lev);
+        {
+            using namespace ablastr::coarsen::sample;
+            const amrex::GpuArray<int, 3> nodal{1, 1, 1};
+            const amrex::GpuArray<int, 3> cr{1, 1, 1};
+            const amrex::GpuArray<int, 3> B_stag[3] =
+                {Bx_IndexType, By_IndexType, Bz_IndexType};
+            const auto eta_h = m_eta_h;
+            const bool has_B = m_hyper_resistivity_has_B_dependence;
+            for (int dir = 0; dir < 3; ++dir) {
+                const amrex::GpuArray<int, 3> stag = B_stag[dir];
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+                for (amrex::MFIter mfi(*curlJ[dir], amrex::TilingIfNotGPU());
+                     mfi.isValid(); ++mfi) {
+                    auto const & w = curlJ[dir]->array(mfi);
+                    auto const & rho_arr = rhofield.const_array(mfi);
+                    auto const & bx = Bfield[0]->const_array(mfi);
+                    auto const & by = Bfield[1]->const_array(mfi);
+                    auto const & bz = Bfield[2]->const_array(mfi);
+                    const amrex::GpuArray<int, 3> sbx = Bx_IndexType;
+                    const amrex::GpuArray<int, 3> sby = By_IndexType;
+                    const amrex::GpuArray<int, 3> sbz = Bz_IndexType;
+                    amrex::ParallelFor(mfi.tilebox(),
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                    {
+                        const amrex::Real rho_f =
+                            Interp(rho_arr, nodal, stag, cr, i, j, k, 0);
+                        amrex::Real btot = 0.0_rt;
+                        if (has_B) {
+                            const amrex::Real bxv =
+                                Interp(bx, sbx, stag, cr, i, j, k, 0);
+                            const amrex::Real byv =
+                                Interp(by, sby, stag, cr, i, j, k, 0);
+                            const amrex::Real bzv =
+                                Interp(bz, sbz, stag, cr, i, j, k, 0);
+                            btot = std::sqrt(bxv*bxv + byv*byv + bzv*bzv);
+                        }
+                        w(i, j, k) *= eta_h(rho_f, btot);
+                    });
+                }
+            }
+        }
+        for (int dir = 0; dir < 3; ++dir) {
+            curlJ[dir]->setBndry(0.0_rt);
+            curlJ[dir]->FillBoundary(warpx.Geom(lev).periodicity());
+        }
+        fdtd->CalculateCurrentAmpere(E_H, curlJ, eb_update_E, lev);
+        for (int dir = 0; dir < 3; ++dir) {
+            E_H[dir]->mult(PhysConst::mu0);
+            E_H[dir]->FillBoundary(warpx.Geom(lev).periodicity());
+        }
+    }
     warpx.get_pointer_fdtd_solver_fp(lev)->HybridPICSolveE(
         Efield, current_fp_plasma, Jfield, Bfield, rhofield,
         *electron_pressure_fp, eb_update_E, lev, this, solve_for_Faraday,
         incl_eta
     );
 
-    // amano_form (division-free) toroidal sector: the kernel above left
+    // curlcurl_form (division-free) toroidal sector: the kernel above left
     // the multiplied-through numerator in m_num_theta and only the
     // E-valued resistive/hyper-resistive accumulations in E_theta. Fold
     // those into the numerator (times e n, unfloored), solve the
     // multiplied-through Helmholtz system for E_theta, and apply the
     // deferred external-field subtraction unconditionally (no vacuum
     // branch exists on this path).
-    if (m_esolve_amano) {
+    if (m_esolve_curlcurl) {
         amrex::MultiFab & Etheta = *Efield[1];
         amrex::MultiFab & num = *m_num_theta;
         const int mid = rhofield.nComp()/2;
@@ -1265,15 +1471,32 @@ void HybridPICModel::HybridPICSolveE (
                 if (xt) { n_arr(i, j, k) -= rho_n * xt(i, j, k); }
             });
         }
-        SolveEThetaAmanoRZ(Etheta, num, rhofield, mid, lev);
+        SolveEThetaCurlCurlRZ(Etheta, num, rhofield, mid, lev);
 
-        // Stage 2: the poloidal pair through the grad-div-completed
-        // vector-Helmholtz solves (decoupled per component in RZ m = 0).
-        // Fold the kernel's E-valued resistive accumulations into each
-        // numerator with the staggering-consistent unfloored density,
-        // subtract the (usually zero: A_theta drives have no poloidal
-        // E_ext) response-frame external term, and solve on the native
-        // staggerings.
+        // Stage 2: the poloidal (E_r, E_z) pair through the coupled
+        // curl-curl solve (the identity form: a component Laplacian
+        // equals it only at zero discrete divergence and otherwise
+        // spuriously screens E_L at density-contrast edges). Fold the
+        // kernel's E-valued resistive accumulations into each numerator
+        // with the staggering-consistent unfloored density and subtract
+        // the (usually zero: A_theta drives have no poloidal E_ext)
+        // response-frame external term; the solve runs once on both
+        // native staggerings.
+        //
+        // Poloidal-stage density source: the per-step-frozen rho^n
+        // snapshot (see m_curlcurl_pol_frozen_rho) once it has been
+        // captured this step (ComputeElectronInertiaNodal runs before
+        // this solve in every residual evaluation); the live midpoint
+        // deposit otherwise (initialization solves, knob off). The fold
+        // weights, beta rows, RHS membership test, and gamma gate must
+        // all read the SAME density: mixed sources reopen the gradient
+        // null family the gate closes.
+        amrex::MultiFab const * rho_pol = &rhofield;
+        int rho_pol_comp = mid;
+        if (m_curlcurl_pol_frozen_rho && m_inertia_rho_n_captured) {
+            rho_pol = warpx.m_fields.get("hybrid_rho_n_frozen", lev);
+            rho_pol_comp = 0;
+        }
         for (int c = 0; c < 2; ++c) {
             const int dir = (c == 0) ? 0 : 2;
             amrex::MultiFab & Ec = *Efield[dir];
@@ -1288,7 +1511,7 @@ void HybridPICModel::HybridPICSolveE (
             // Clamp the staggered density average into the cell-centered
             // domain: boundary-node rows otherwise read unfilled rho
             // ghosts (the E_z axis node is a LIVE row; the clamp mirrors
-            // SolveEPolAmanoRZ's own coefficient assembly). Periodic z
+            // SolveEPolCurlCurlRZ's own coefficient assembly). Periodic z
             // ghosts ARE validly filled, so the z clamp disarms there.
             amrex::Box const dom_cc = warpx.Geom(lev).Domain();
             const int ilo_cc = dom_cc.smallEnd(0);
@@ -1306,7 +1529,8 @@ void HybridPICModel::HybridPICSolveE (
             {
                 auto const & n_arr = numc.array(mfi);
                 auto const & e_arr = Ec.const_array(mfi);
-                auto const & r_arr = rhofield.const_array(mfi);
+                auto const & r_arr = rho_pol->const_array(mfi);
+                const int rc_pol = rho_pol_comp;
                 amrex::Array4<amrex::Real const> xt;
                 if (Ex_ext) { xt = Ex_ext->const_array(mfi); }
                 amrex::ParallelFor(mfi.tilebox(),
@@ -1316,22 +1540,25 @@ void HybridPICModel::HybridPICSolveE (
                     if (is_er) {
                         int const jm = amrex::max(j - 1, jlo_cc);
                         int const jp = amrex::min(j, jhi_cc);
-                        rho_p = 0.5_rt*(r_arr(i, jp, k, mid)
-                                      + r_arr(i, jm, k, mid));
+                        rho_p = 0.5_rt*(r_arr(i, jp, k, rc_pol)
+                                      + r_arr(i, jm, k, rc_pol));
                     } else {
                         int const im = amrex::max(i - 1, ilo_cc);
                         int const ip = amrex::min(i, ihi_cc);
-                        rho_p = 0.5_rt*(r_arr(ip, j, k, mid)
-                                      + r_arr(im, j, k, mid));
+                        rho_p = 0.5_rt*(r_arr(ip, j, k, rc_pol)
+                                      + r_arr(im, j, k, rc_pol));
                     }
                     rho_p = amrex::max(0.0_rt, rho_p);
                     n_arr(i, j, k) += rho_p * e_arr(i, j, k);
                     if (xt) { n_arr(i, j, k) -= rho_p * xt(i, j, k); }
                 });
             }
-            SolveEPolAmanoRZ(Ec, numc, rhofield, mid, c, lev);
         }
+        SolveEPolCurlCurlRZ(*Efield[0], *Efield[2],
+                            *m_num_pol[0], *m_num_pol[1],
+                            *rho_pol, rho_pol_comp, lev);
     }
+    } // end !m_esolve_tensor
 
     amrex::Real const time = warpx.gett_old(0) + warpx.getdt(0);
     warpx.ApplyEfieldBoundary(lev, patch_type, time);
@@ -1983,24 +2210,24 @@ void HybridPICModel::FillElectronPressureMF (
 // Darwin longitudinal-field constraint
 // =============================================================================
 
-void HybridPICModel::SolveEThetaAmanoRZ (amrex::MultiFab& Etheta,
-                                         amrex::MultiFab const& num,
-                                         amrex::MultiFab const& rho,
-                                         int const rho_comp,
-                                         int const lev) const
+void HybridPICModel::SolveEThetaCurlCurlRZ (amrex::MultiFab& Etheta,
+                                            amrex::MultiFab const& num,
+                                            amrex::MultiFab const& rho,
+                                            int const rho_comp,
+                                            int const lev) const
 {
 #if !defined(WARPX_DIM_RZ)
     amrex::ignore_unused(Etheta, num, rho, rho_comp, lev);
     WARPX_ABORT_WITH_MESSAGE(
-        "SolveEThetaAmanoRZ: the amano_form toroidal solve is RZ-only");
+        "SolveEThetaCurlCurlRZ: the curlcurl_form toroidal solve is RZ-only");
 #else
-    ABLASTR_PROFILE("HybridPICModel::SolveEThetaAmanoRZ()");
+    ABLASTR_PROFILE("HybridPICModel::SolveEThetaCurlCurlRZ()");
 
     using namespace amrex;
 
     auto & warpx = WarpX::GetInstance();
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(lev == 0,
-        "hybrid_pic_model.esolve = amano_form supports a single level");
+        "hybrid_pic_model.esolve = curlcurl_form supports a single level");
     Geometry const & geom = warpx.Geom(lev);
     auto const dx_arr = geom.CellSizeArray();
     Real const dr = dx_arr[0];
@@ -2067,14 +2294,14 @@ void HybridPICModel::SolveEThetaAmanoRZ (amrex::MultiFab& Etheta,
     // documented follow-up.
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         WarpX::field_boundary_hi[0] == FieldBoundaryType::PEC,
-        "hybrid_pic_model.esolve = amano_form currently requires a PEC "
+        "hybrid_pic_model.esolve = curlcurl_form currently requires a PEC "
         "wall at r_hi (the Green's open face mapping is a follow-up)");
     const bool z_periodic = geom.isPeriodic(1);
     if (!z_periodic) {
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             WarpX::field_boundary_lo[1] == FieldBoundaryType::PEC
                 && WarpX::field_boundary_hi[1] == FieldBoundaryType::PEC,
-            "hybrid_pic_model.esolve = amano_form: non-periodic z requires "
+            "hybrid_pic_model.esolve = curlcurl_form: non-periodic z requires "
             "PEC z boundaries");
     }
 
@@ -2197,25 +2424,45 @@ void HybridPICModel::SolveEThetaAmanoRZ (amrex::MultiFab& Etheta,
         MultiFab::LinComb(p_mf, 1.0_rt, z_mf, 0, beta_cg, p_mf, 0, 0, 1, ng0);
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(it < max_cg,
-        "SolveEThetaAmanoRZ: CG failed to converge");
+        "SolveEThetaCurlCurlRZ: CG failed to converge");
 
     Etheta.FillBoundary(geom.periodicity());
 #endif
 }
 
-void HybridPICModel::SolveEPolAmanoRZ (amrex::MultiFab& E,
-                                       amrex::MultiFab const& num,
-                                       amrex::MultiFab const& rho,
-                                       int const rho_comp,
-                                       int const comp,
-                                       int const lev) const
+namespace {
+#if defined(WARPX_DIM_RZ)
+    /** Node volume (without the common dz) for the poloidal vacuum-closure
+     *  energy (1/2) sum gamma Vn (div E)^2 in SolveEPolCurlCurlRZ:
+     *  interior r_n dr; domain-end half cells carry the exact integral of
+     *  r dr over the existing half (axis at rmin = 0: dr^2/8). A free
+     *  function: capturing a device lambda inside another extended lambda
+     *  is CUDA-illegal. */
+    AMREX_GPU_DEVICE AMREX_FORCE_INLINE
+    amrex::Real PolNodeVol (int i, amrex::Real rmin, amrex::Real dr,
+                            int ihi_nd)
+    {
+        if (i == 0) { return (rmin + 0.25*dr)*0.5*dr; }
+        if (i == ihi_nd) { return (rmin + i*dr - 0.25*dr)*0.5*dr; }
+        return (rmin + i*dr)*dr;
+    }
+#endif
+}
+
+void HybridPICModel::SolveEPolCurlCurlRZ (amrex::MultiFab& Er,
+                                          amrex::MultiFab& Ez,
+                                          amrex::MultiFab const& num_r,
+                                          amrex::MultiFab const& num_z,
+                                          amrex::MultiFab const& rho,
+                                          int const rho_comp,
+                                          int const lev) const
 {
 #if !defined(WARPX_DIM_RZ)
-    amrex::ignore_unused(E, num, rho, rho_comp, comp, lev);
+    amrex::ignore_unused(Er, Ez, num_r, num_z, rho, rho_comp, lev);
     WARPX_ABORT_WITH_MESSAGE(
-        "SolveEPolAmanoRZ: the amano_form poloidal solve is RZ-only");
+        "SolveEPolCurlCurlRZ: the curlcurl_form poloidal solve is RZ-only");
 #else
-    ABLASTR_PROFILE("HybridPICModel::SolveEPolAmanoRZ()");
+    ABLASTR_PROFILE("HybridPICModel::SolveEPolCurlCurlRZ()");
     using namespace amrex;
 
     auto & warpx = WarpX::GetInstance();
@@ -2228,218 +2475,573 @@ void HybridPICModel::SolveEPolAmanoRZ (amrex::MultiFab& E,
         / m_electron_inertia_mass;
     Real const rhs_fac = beta_fac;
     const bool z_periodic = geom.isPeriodic(1);
-    // comp 0 = E_r (cc r, nodal z, +1/r^2 term, r_hi Neumann-free,
-    //           z-cap Dirichlet 0);
-    // comp 1 = E_z (nodal r, cc z, no 1/r^2, axis Neumann-regular,
-    //           r_hi Dirichlet 0, z-cap natural)
-    const bool is_er = (comp == 0);
-    Real const roff = is_er ? 0.5_rt : 0.0_rt;
-
-    Box const dom_st = amrex::convert(geom.Domain(), E.ixType().toIntVect());
-    auto const dlo = amrex::lbound(dom_st);
-    auto const dhi = amrex::ubound(dom_st);
     Real const inv_dr = 1.0_rt/dr;
-    Real const inv_dz2 = 1.0_rt/(dz*dz);
+    Real const inv_dz = 1.0_rt/dz;
+    Real const inv_dz2 = inv_dz*inv_dz;
 
-    // Finite-volume row: beta V E - [sig_+ (E_+ - E) - sig_- (E - E_-)]/dr
-    //                    - V d2z E (+ V E / r^2 for E_r) = V rhs,
-    // with V = r dr (axis node of E_z: dr^2/8) and sig = face r. The axis
-    // face of E_r has r = 0 (zero flux by metric); the outer Neumann face
-    // of E_r carries zero flux; Dirichlet rows are identity.
-    MultiFab acoef(E.boxArray(), E.DistributionMap(), 1, 0);
-    MultiFab rhs(E.boxArray(), E.DistributionMap(), 1, 0);
+    // Staggered domain bounds: E_r (cc r, nodal z), E_z (nodal r, cc z).
+    Box const dom_r = amrex::convert(geom.Domain(), Er.ixType().toIntVect());
+    Box const dom_z = amrex::convert(geom.Domain(), Ez.ixType().toIntVect());
+    auto const rlo = amrex::lbound(dom_r);
+    auto const rhi = amrex::ubound(dom_r);
+    auto const zlo = amrex::lbound(dom_z);
+    auto const zhi = amrex::ubound(dom_z);
+
+    auto const & dm = Er.DistributionMap();
+
+    // Row scalings (control volumes without the common dz): V_r = r_c dr,
+    // V_z = r_n dr (E_z axis node: dr^2/8). beta from the staggered
+    // UNfloored density (the caller passes the per-step-frozen rho^n
+    // snapshot by default, the live midpoint deposit with
+    // curlcurl_pol_frozen_rho = 0 -- see the member doc), clamped at zero
+    // (negative deposits must not flip the operator sign). RHS rows with
+    // zero staggered density are zeroed: the multiplied-through equation
+    // is 0 = 0 without electrons, and the interpolation-bleed numerator
+    // there is exactly the content inconsistent with the curl-curl
+    // gradient null space (see the header doc).
+    MultiFab acoef_r(Er.boxArray(), dm, 1, 0);
+    MultiFab acoef_z(Ez.boxArray(), dm, 1, 0);
+    MultiFab rhs_r(Er.boxArray(), dm, 1, 0);
+    MultiFab rhs_z(Ez.boxArray(), dm, 1, 0);
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
-    for (MFIter mfi(acoef, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    for (MFIter mfi(acoef_r, TilingIfNotGPU()); mfi.isValid(); ++mfi)
     {
-        auto const & a_arr = acoef.array(mfi);
-        auto const & r_arr = rhs.array(mfi);
+        auto const & a_arr = acoef_r.array(mfi);
+        auto const & b_arr = rhs_r.array(mfi);
         auto const & rho_arr = rho.const_array(mfi);
-        auto const & num_arr = num.const_array(mfi);
+        auto const & num_arr = num_r.const_array(mfi);
         amrex::ParallelFor(mfi.tilebox(),
         [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
-            Real const r = rmin + (i + roff)*dr;
-            Real const V = (!is_er && i == dlo.x)
-                ? 0.125_rt*dr*dr : r*dr;
-            // staggering-consistent density (unfloored, clamped at 0)
-            Real rho_p;
-            if (is_er) {
-                // (cc r, nodal z): average the two z-neighbors
-                rho_p = 0.5_rt*(rho_arr(i, j, k, rho_comp)
-                              + rho_arr(i, j-1, k, rho_comp));
-            } else {
-                // (nodal r, cc z): average the two r-neighbors
-                rho_p = 0.5_rt*(rho_arr(i, j, k, rho_comp)
-                              + rho_arr(amrex::max(i-1, dlo.x), j, k,
-                                        rho_comp));
-            }
-            rho_p = amrex::max(0.0_rt, rho_p);
-            Real a = beta_fac*rho_p*V;
-            if (is_er) { a += V/(r*r); }
-            a_arr(i, j, k) = a;
-            r_arr(i, j, k) = V*rhs_fac*num_arr(i, j, k);
+            Real const V = (rmin + (i + 0.5_rt)*dr)*dr;
+            // (cc r, nodal z): average the two z-neighbor cells; the
+            // non-periodic cap rows read a z ghost but are Dirichlet
+            // identity rows whose coefficients are never consumed
+            Real const rho_p = amrex::max(0.0_rt,
+                0.5_rt*(rho_arr(i, j, k, rho_comp)
+                      + rho_arr(i, j-1, k, rho_comp)));
+            a_arr(i, j, k) = beta_fac*rho_p*V;
+            b_arr(i, j, k) = (rho_p > 0.0_rt)
+                ? V*rhs_fac*num_arr(i, j, k) : 0.0_rt;
         });
     }
-
-    // Dirichlet rows (inlined per kernel below -- a nested extended
-    // lambda is CUDA-illegal): E_r -> z-cap nodes (tangential E at PEC)
-    // unless periodic; E_z -> the PEC wall node at r_hi.
-
-    auto apply_op = [&](MultiFab& out, MultiFab& in)
-    {
-        in.FillBoundary(geom.periodicity());
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
-        for (MFIter mfi(out, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    for (MFIter mfi(acoef_z, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        auto const & a_arr = acoef_z.array(mfi);
+        auto const & b_arr = rhs_z.array(mfi);
+        auto const & rho_arr = rho.const_array(mfi);
+        auto const & num_arr = num_z.const_array(mfi);
+        amrex::ParallelFor(mfi.tilebox(),
+        [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
-            auto const & o = out.array(mfi);
-            auto const & p = in.const_array(mfi);
-            auto const & a = acoef.const_array(mfi);
+            Real const V = (i == zlo.x)
+                ? 0.125_rt*dr*dr : (rmin + i*dr)*dr;
+            // (nodal r, cc z): average the two r-neighbor cells (clamped
+            // into the domain at the axis; the wall node reads an r ghost
+            // but is a Dirichlet identity row)
+            Real const rho_p = amrex::max(0.0_rt,
+                0.5_rt*(rho_arr(i, j, k, rho_comp)
+                      + rho_arr(amrex::max(i-1, zlo.x), j, k, rho_comp)));
+            a_arr(i, j, k) = beta_fac*rho_p*V;
+            b_arr(i, j, k) = (rho_p > 0.0_rt)
+                ? V*rhs_fac*num_arr(i, j, k) : 0.0_rt;
+        });
+    }
+
+    // Dirichlet rows (PEC tangential E): zero RHS and warm start; the
+    // matching residual/search-direction entries then stay exactly zero
+    // through CG, so the identity rows never couple into the free rows.
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(rhs_r, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        auto const & b_arr = rhs_r.array(mfi);
+        auto const & e_arr = Er.array(mfi);
+        amrex::ParallelFor(mfi.tilebox(),
+        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            amrex::ignore_unused(i);
+            if (!z_periodic && (j <= rlo.y || j >= rhi.y)) {
+                b_arr(i,j,k) = 0.0_rt; e_arr(i,j,k) = 0.0_rt;
+            }
+        });
+    }
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(rhs_z, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        auto const & b_arr = rhs_z.array(mfi);
+        auto const & e_arr = Ez.array(mfi);
+        amrex::ParallelFor(mfi.tilebox(),
+        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            amrex::ignore_unused(j);
+            if (i >= zhi.x) {
+                b_arr(i,j,k) = 0.0_rt; e_arr(i,j,k) = 0.0_rt;
+            }
+        });
+    }
+
+    // Vacuum-closure gate: gamma = 1 on strictly-vacuum NODES (nodal
+    // unfloored density <= 0), 0 elsewhere. Where the unfloored density
+    // vanishes the multiplied-through equation is 0 = 0 and the bare
+    // curl-curl rows are singular along discrete gradients (a null
+    // family the Jacobi preconditioner reinjects, random-walking junk
+    // into the vacuum E that edge particles then gather; measured as CG
+    // grinding at 10k-17k iterations and intermittent Newton divergence
+    // on a vacuum-annulus column deck). The physical closure is the
+    // vacuum Gauss constraint div E = 0, imposed below as the energy-form
+    // -grad(gamma div .) completion. The axis and wall nodes use their
+    // half-cell FV divergence over the EXISTING faces only (axis: the
+    // inner face has zero metric area; wall: normal E lives half a cell
+    // inside, the PEC surface-charge face is outside the half cell) --
+    // gating them too is what closes the wall-line gradient family
+    // (phi free along the wall nodes otherwise). Non-periodic cap nodes
+    // stay ungated (their E_r rows are Dirichlet; a vacuum region
+    // touching the caps would retain a null family -- documented
+    // limitation, not exercised by the periodic-z decks). Deep vacuum
+    // carries the full vector Laplacian (curlcurl - grad div) and the
+    // system is SPD on the free rows, while every row carrying plasma
+    // keeps the pure identity form (the density-sheet rows couple to the
+    // closure only as its boundary data).
+    Box const dom_nd = amrex::convert(geom.Domain(),
+                                      IntVect::TheNodeVector());
+    auto const nlo = amrex::lbound(dom_nd);
+    auto const nhi = amrex::ubound(dom_nd);
+    MultiFab gam(amrex::convert(warpx.boxArray(lev),
+                                IntVect::TheNodeVector()),
+                 dm, 1, 1);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(gam, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        auto const & g = gam.array(mfi);
+        auto const & rho_arr = rho.const_array(mfi);
+        amrex::ParallelFor(mfi.tilebox(),
+        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            if (!z_periodic && (j <= nlo.y || j >= nhi.y)) {
+                g(i,j,k) = 0.0_rt; return;
+            }
+            Real rho_n;
+            if (i <= nlo.x) {
+                rho_n = 0.5_rt*(rho_arr(i, j, k, rho_comp)
+                              + rho_arr(i, j-1, k, rho_comp));
+            } else if (i >= nhi.x) {
+                rho_n = 0.5_rt*(rho_arr(i-1, j, k, rho_comp)
+                              + rho_arr(i-1, j-1, k, rho_comp));
+            } else {
+                rho_n = 0.25_rt*(rho_arr(i, j, k, rho_comp)
+                               + rho_arr(i-1, j, k, rho_comp)
+                               + rho_arr(i, j-1, k, rho_comp)
+                               + rho_arr(i-1, j-1, k, rho_comp));
+            }
+            g(i,j,k) = (rho_n > 0.0_rt) ? 0.0_rt : 1.0_rt;
+        });
+    }
+    gam.setBndry(0.0_rt);
+    gam.FillBoundary(geom.periodicity());
+
+    int const ihi_nd = nhi.x;
+
+    // Fused block operator: row = a E + V (curlcurl E)|_pol
+    // - V grad(gamma div E)|_pol, W and the gated FV divergence
+    // recomputed inline from the input pair (one ghost each); Dirichlet
+    // rows are identity. The E_r row carries no radial second difference
+    // of E_r and no 1/r^2 term ((curlcurl)_r = -d_z(d_z E_r - d_r E_z));
+    // the E_z row carries no axial second difference of E_z. Natural
+    // curl rows drop the missing W cell (E_z axis: W(-1); every W cell
+    // of the E_r wall row exists). Cross-coefficient symmetry on the
+    // free rows follows from the energy form (header doc). The wall
+    // nodes' divergence reads the (identically zero) Dirichlet E_z wall
+    // DOFs, which is harmless.
+    auto apply_op = [&](MultiFab& out_r, MultiFab& out_z,
+                        MultiFab& in_r, MultiFab& in_z)
+    {
+        in_r.FillBoundary(geom.periodicity());
+        in_z.FillBoundary(geom.periodicity());
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(out_r, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            auto const & o = out_r.array(mfi);
+            auto const & pr = in_r.const_array(mfi);
+            auto const & pz = in_z.const_array(mfi);
+            auto const & a = acoef_r.const_array(mfi);
+            auto const & g = gam.const_array(mfi);
             amrex::ParallelFor(mfi.tilebox(),
             [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
-                const bool dir_row = is_er
-                    ? (!z_periodic && (j <= dlo.y || j >= dhi.y))
-                    : (i >= dhi.x);
-                if (dir_row) { o(i,j,k) = p(i,j,k); return; }
-                Real const r = rmin + (i + roff)*dr;
-                Real const V = (!is_er && i == dlo.x)
-                    ? 0.125_rt*dr*dr : r*dr;
-                // radial faces (face r; zero flux where the face is a
-                // free/regularity boundary)
-                Real const rfm = rmin + (i + roff - 0.5_rt)*dr;
-                Real const rfp = rmin + (i + roff + 0.5_rt)*dr;
-                Real fm = 0.0_rt, fp = 0.0_rt;
-                const bool at_ilo = (i <= dlo.x);
-                const bool at_ihi = (i >= dhi.x);
-                if (!at_ilo || is_er) {
-                    // E_r's inner face at the axis has rfm = 0 (metric
-                    // kills it automatically when i = 0)
-                    Real const rf = (is_er && i == dlo.x) ? 0.0_rt
-                        : amrex::max(rfm, 0.0_rt);
-                    fm = rf*(p(i,j,k) - p(i-1,j,k))*inv_dr;
+                if (!z_periodic && (j <= rlo.y || j >= rhi.y)) {
+                    o(i,j,k) = pr(i,j,k); return;
                 }
-                if (!(is_er && at_ihi)) {
-                    // E_r outer Neumann face: zero flux at the wall
-                    fp = rfp*(p(i+1,j,k) - p(i,j,k))*inv_dr;
-                }
-                // z second difference (periodic through ghosts; E_z cap
-                // faces natural = zero flux; E_r cap nodes are Dirichlet
-                // rows and never reach here when non-periodic)
-                Real d2z;
-                if (!z_periodic && !is_er
-                    && (j <= dlo.y || j >= dhi.y)) {
-                    if (j <= dlo.y) {
-                        d2z = (p(i,j+1,k) - p(i,j,k))*inv_dz2;
-                    } else {
-                        d2z = (p(i,j-1,k) - p(i,j,k))*inv_dz2;
+                Real const rc = rmin + (i + 0.5_rt)*dr;
+                Real const wp = (pr(i,j+1,k) - pr(i,j,k))*inv_dz
+                              - (pz(i+1,j,k) - pz(i,j,k))*inv_dr;
+                Real const wm = (pr(i,j,k) - pr(i,j-1,k))*inv_dz
+                              - (pz(i+1,j-1,k) - pz(i,j-1,k))*inv_dr;
+                Real dd = 0.0_rt;
+                if (g(i,j,k) > 0.0_rt) {
+                    // gated FV divergence at node (i, j)
+                    Real f = rc*pr(i,j,k);
+                    if (i > 0) {
+                        f -= (rmin + (i - 0.5_rt)*dr)*pr(i-1,j,k);
                     }
-                } else {
-                    d2z = (p(i,j+1,k) - 2.0_rt*p(i,j,k) + p(i,j-1,k))
-                          *inv_dz2;
+                    dd += f/PolNodeVol(i, rmin, dr, ihi_nd)
+                        + (pz(i,j,k) - pz(i,j-1,k))*inv_dz;
                 }
-                // FV row: the radial term is the flux DIFFERENCE (the
-                // [r dE/dr] surface term of the r-integrated cell), not a
-                // divided difference -- everything else in the row carries
-                // V = r dr. (An extra 1/dr here overweighted the radial
-                // Laplacian by 1/dr relative to beta/z/rhs: invisible on
-                // radially uniform configs, structurally wrong under a
-                // radially driven one.)
-                o(i,j,k) = a(i,j,k)*p(i,j,k)
-                    - (fp - fm) - V*d2z;
+                if (g(i+1,j,k) > 0.0_rt) {
+                    // gated FV divergence at node (i+1, j); the outer
+                    // flux is dropped at the wall node (half cell)
+                    Real f = -rc*pr(i,j,k);
+                    if (i + 1 <= rhi.x) {
+                        f += (rmin + (i + 1.5_rt)*dr)*pr(i+1,j,k);
+                    }
+                    dd -= f/PolNodeVol(i+1, rmin, dr, ihi_nd)
+                        + (pz(i+1,j,k) - pz(i+1,j-1,k))*inv_dz;
+                }
+                o(i,j,k) = a(i,j,k)*pr(i,j,k) - rc*dr*(wp - wm)*inv_dz
+                    + rc*dd;
+            });
+        }
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(out_z, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            auto const & o = out_z.array(mfi);
+            auto const & pr = in_r.const_array(mfi);
+            auto const & pz = in_z.const_array(mfi);
+            auto const & a = acoef_z.const_array(mfi);
+            auto const & g = gam.const_array(mfi);
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                if (i >= zhi.x) { o(i,j,k) = pz(i,j,k); return; }
+                Real const rcp = rmin + (i + 0.5_rt)*dr;
+                Real const rcm = rmin + (i - 0.5_rt)*dr;
+                Real const wp = (pr(i,j+1,k) - pr(i,j,k))*inv_dz
+                              - (pz(i+1,j,k) - pz(i,j,k))*inv_dr;
+                Real cc = rcp*wp;
+                if (i > zlo.x) {
+                    Real const wm = (pr(i-1,j+1,k) - pr(i-1,j,k))*inv_dz
+                                  - (pz(i,j,k) - pz(i-1,j,k))*inv_dr;
+                    cc -= rcm*wm;
+                }
+                if (g(i,j,k) > 0.0_rt || g(i,j+1,k) > 0.0_rt) {
+                    Real const Vn = PolNodeVol(i, rmin, dr, ihi_nd);
+                    Real dd = 0.0_rt;
+                    if (g(i,j,k) > 0.0_rt) {
+                        Real f = rcp*pr(i,j,k);
+                        if (i > 0) { f -= rcm*pr(i-1,j,k); }
+                        dd += f/Vn
+                            + (pz(i,j,k) - pz(i,j-1,k))*inv_dz;
+                    }
+                    if (g(i,j+1,k) > 0.0_rt) {
+                        Real f = rcp*pr(i,j+1,k);
+                        if (i > 0) { f -= rcm*pr(i-1,j+1,k); }
+                        dd -= f/Vn
+                            + (pz(i,j+1,k) - pz(i,j,k))*inv_dz;
+                    }
+                    cc += Vn*dd*inv_dz;
+                }
+                o(i,j,k) = a(i,j,k)*pz(i,j,k) + cc;
             });
         }
     };
 
-    // Dirichlet rows: zero RHS and initial guess
+    // Jacobi diagonals: the exact diagonal of the fused rows (Dirichlet
+    // rows get 1; their residual entries are identically zero).
+    MultiFab diag_r(Er.boxArray(), dm, 1, 0);
+    MultiFab diag_z(Ez.boxArray(), dm, 1, 0);
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
-    for (MFIter mfi(rhs, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    for (MFIter mfi(diag_r, TilingIfNotGPU()); mfi.isValid(); ++mfi)
     {
-        auto const & r_arr = rhs.array(mfi);
-        auto const & e_arr = E.array(mfi);
+        auto const & d = diag_r.array(mfi);
+        auto const & a = acoef_r.const_array(mfi);
+        auto const & g = gam.const_array(mfi);
         amrex::ParallelFor(mfi.tilebox(),
         [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
-            const bool dir_row = is_er
-                ? (!z_periodic && (j <= dlo.y || j >= dhi.y))
-                : (i >= dhi.x);
-            if (dir_row) {
-                r_arr(i,j,k) = 0.0_rt; e_arr(i,j,k) = 0.0_rt;
+            if (!z_periodic && (j <= rlo.y || j >= rhi.y)) {
+                d(i,j,k) = 1.0_rt; return;
             }
+            Real const rc = rmin + (i + 0.5_rt)*dr;
+            Real dv = 0.0_rt;
+            if (g(i,j,k) > 0.0_rt) { dv += rc*rc/PolNodeVol(i, rmin, dr, ihi_nd); }
+            if (g(i+1,j,k) > 0.0_rt) { dv += rc*rc/PolNodeVol(i+1, rmin, dr, ihi_nd); }
+            d(i,j,k) = a(i,j,k) + 2.0_rt*rc*dr*inv_dz2 + dv;
         });
     }
-
-    // Jacobi diagonal
-    MultiFab diag(E.boxArray(), E.DistributionMap(), 1, 0);
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
-    for (MFIter mfi(diag, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    for (MFIter mfi(diag_z, TilingIfNotGPU()); mfi.isValid(); ++mfi)
     {
-        auto const & d = diag.array(mfi);
-        auto const & a = acoef.const_array(mfi);
+        auto const & d = diag_z.array(mfi);
+        auto const & a = acoef_z.const_array(mfi);
+        auto const & g = gam.const_array(mfi);
         amrex::ParallelFor(mfi.tilebox(),
         [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
-            Real const V = (!is_er && i == dlo.x)
-                ? 0.125_rt*dr*dr : (rmin + (i + roff)*dr)*dr;
-            // exact diagonal of the FV row: sum of the ACTIVE face radii
-            // (mirrors apply_op's face gating, incl. the E_z axis half
-            // cell and the one-sided natural z rows)
-            Real rdiag = 0.0_rt;
-            if (!(i <= dlo.x) || is_er) {
-                rdiag += (is_er && i == dlo.x) ? 0.0_rt
-                    : amrex::max(rmin + (i + roff - 0.5_rt)*dr, 0.0_rt);
-            }
-            if (!(is_er && i >= dhi.x)) {
-                rdiag += rmin + (i + roff + 0.5_rt)*dr;
-            }
-            Real const zdiag = (!z_periodic && !is_er
-                && (j <= dlo.y || j >= dhi.y)) ? 1.0_rt : 2.0_rt;
-            d(i,j,k) = a(i,j,k) + rdiag*inv_dr + zdiag*V*inv_dz2;
+            if (i >= zhi.x) { d(i,j,k) = 1.0_rt; return; }
+            Real rdiag = rmin + (i + 0.5_rt)*dr;
+            if (i > zlo.x) { rdiag += rmin + (i - 0.5_rt)*dr; }
+            Real const gsum = ((g(i,j,k) > 0.0_rt) ? 1.0_rt : 0.0_rt)
+                            + ((g(i,j+1,k) > 0.0_rt) ? 1.0_rt : 0.0_rt);
+            d(i,j,k) = a(i,j,k) + rdiag*inv_dr
+                + gsum*PolNodeVol(i, rmin, dr, ihi_nd)*inv_dz2;
         });
     }
 
+    // One-shot discrete verification (hybrid_pic_model.esolve_pol_verify):
+    // fused rows on a deterministic pseudo-random poloidal field vs the
+    // directly composed curl(curl .) and -grad(gamma div .) through
+    // STORED cell-centered W and nodal D fields -- the composition reads
+    // the stored ghosts filled by the boundary exchange (periodic z) and
+    // zeroed r ghosts (axis/wall convention), so it checks the fused
+    // kernel's staggering, metric factors, and boundary gating
+    // independently of its inline arithmetic.
+    if (m_esolve_pol_verify && !m_esolve_pol_verified) {
+        m_esolve_pol_verified = true;
+        MultiFab Fr(Er.boxArray(), dm, 1, IntVect(1));
+        MultiFab Fz(Ez.boxArray(), dm, 1, IntVect(1));
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(Fr, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            auto const & fr = Fr.array(mfi);
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                if (!z_periodic && (j <= rlo.y || j >= rhi.y)) {
+                    fr(i,j,k) = 0.0_rt; return;
+                }
+                // periodic z identifies the duplicated nodal DOFs j = lo
+                // and j = hi: hash the wrapped index so the test field is
+                // single-valued (an inconsistent pair would make the
+                // fused/composed paths legitimately disagree through the
+                // ghost exchange)
+                int jw = j;
+                if (z_periodic) {
+                    int const nzc = rhi.y - rlo.y;
+                    jw = rlo.y + (((j - rlo.y) % nzc) + nzc) % nzc;
+                }
+                auto h = static_cast<unsigned int>(i*73856093)
+                       ^ static_cast<unsigned int>(jw*19349663)
+                       ^ 0x9e3779b9u;
+                h = h*1103515245u + 12345u;
+                fr(i,j,k) = Real((h >> 8) & 0xFFFFu)/32768.0_rt - 1.0_rt;
+            });
+        }
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(Fz, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            auto const & fz = Fz.array(mfi);
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                if (i >= zhi.x) { fz(i,j,k) = 0.0_rt; return; }
+                auto h = static_cast<unsigned int>(i*73856093)
+                       ^ static_cast<unsigned int>(j*19349663)
+                       ^ 0x85ebca6bu;
+                h = h*1103515245u + 12345u;
+                fz(i,j,k) = Real((h >> 8) & 0xFFFFu)/32768.0_rt - 1.0_rt;
+            });
+        }
+        MultiFab Ar(Er.boxArray(), dm, 1, 0);
+        MultiFab Az(Ez.boxArray(), dm, 1, 0);
+        apply_op(Ar, Az, Fr, Fz);
+        MultiFab W(warpx.boxArray(lev), dm, 1, IntVect(1));
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(W, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            auto const & w = W.array(mfi);
+            auto const & fr = Fr.const_array(mfi);
+            auto const & fz = Fz.const_array(mfi);
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                w(i,j,k) = (fr(i,j+1,k) - fr(i,j,k))*inv_dz
+                         - (fz(i+1,j,k) - fz(i,j,k))*inv_dr;
+            });
+        }
+        W.setBndry(0.0_rt);
+        W.FillBoundary(geom.periodicity());
+        // stored gated divergence D = gamma div F on nodes (the closure's
+        // composed reference)
+        MultiFab D(gam.boxArray(), dm, 1, 1);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(D, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            auto const & dv = D.array(mfi);
+            auto const & fr = Fr.const_array(mfi);
+            auto const & fz = Fz.const_array(mfi);
+            auto const & g = gam.const_array(mfi);
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                if (!(g(i,j,k) > 0.0_rt)) { dv(i,j,k) = 0.0_rt; return; }
+                Real f = 0.0_rt;
+                if (i <= rhi.x) {
+                    f += (rmin + (i + 0.5_rt)*dr)*fr(i,j,k);
+                }
+                if (i > 0) {
+                    f -= (rmin + (i - 0.5_rt)*dr)*fr(i-1,j,k);
+                }
+                dv(i,j,k) = f/PolNodeVol(i, rmin, dr, ihi_nd)
+                    + (fz(i,j,k) - fz(i,j-1,k))*inv_dz;
+            });
+        }
+        D.setBndry(0.0_rt);
+        D.FillBoundary(geom.periodicity());
+        MultiFab Rr(Er.boxArray(), dm, 1, 0);
+        MultiFab Rz(Ez.boxArray(), dm, 1, 0);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(Rr, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            auto const & o = Rr.array(mfi);
+            auto const & fr = Fr.const_array(mfi);
+            auto const & w = W.const_array(mfi);
+            auto const & a = acoef_r.const_array(mfi);
+            auto const & dv = D.const_array(mfi);
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                if (!z_periodic && (j <= rlo.y || j >= rhi.y)) {
+                    o(i,j,k) = 0.0_rt; return;
+                }
+                Real const rc = rmin + (i + 0.5_rt)*dr;
+                o(i,j,k) = a(i,j,k)*fr(i,j,k)
+                    - rc*dr*(w(i,j,k) - w(i,j-1,k))*inv_dz
+                    + rc*(dv(i,j,k) - dv(i+1,j,k));
+            });
+        }
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(Rz, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+        {
+            auto const & o = Rz.array(mfi);
+            auto const & fz = Fz.const_array(mfi);
+            auto const & w = W.const_array(mfi);
+            auto const & a = acoef_z.const_array(mfi);
+            auto const & dv = D.const_array(mfi);
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                if (i >= zhi.x) { o(i,j,k) = 0.0_rt; return; }
+                Real const rcp = rmin + (i + 0.5_rt)*dr;
+                Real cc = rcp*w(i,j,k);
+                if (i > zlo.x) {
+                    cc -= (rmin + (i - 0.5_rt)*dr)*w(i-1,j,k);
+                }
+                cc += PolNodeVol(i, rmin, dr, ihi_nd)
+                    *(dv(i,j,k) - dv(i,j+1,k))*inv_dz;
+                o(i,j,k) = a(i,j,k)*fz(i,j,k) + cc;
+            });
+        }
+        MultiFab::Subtract(Ar, Rr, 0, 0, 1, 0);
+        MultiFab::Subtract(Az, Rz, 0, 0, 1, 0);
+        Real const err_r = Ar.norminf(0)
+            / amrex::max(Rr.norminf(0), 1.0e-300_rt);
+        Real const err_z = Az.norminf(0)
+            / amrex::max(Rz.norminf(0), 1.0e-300_rt);
+        amrex::Print() << "[SolveEPolCurlCurlRZ] discrete verify (fused vs "
+            "composed curl(curl .)): max rel row error r-sector = " << err_r
+            << ", z-sector = " << err_z << "\n";
+    }
+
+    // Jacobi-preconditioned CG on the coupled two-field system. rhs is
+    // orthogonal to any residual curl-curl null content by the beta = 0
+    // row zeroing above; the closure makes the free rows SPD wherever
+    // gamma covers the vacuum (see the gate comment).
     auto const ng0 = IntVect(0);
-    MultiFab Ax(E.boxArray(), E.DistributionMap(), 1, 0);
-    MultiFab res(E.boxArray(), E.DistributionMap(), 1, 0);
-    MultiFab z_mf(E.boxArray(), E.DistributionMap(), 1, 0);
-    MultiFab p_mf(E.boxArray(), E.DistributionMap(), 1, IntVect(1));
+    MultiFab Ax_r(Er.boxArray(), dm, 1, 0);
+    MultiFab Ax_z(Ez.boxArray(), dm, 1, 0);
+    MultiFab res_r(Er.boxArray(), dm, 1, 0);
+    MultiFab res_z(Ez.boxArray(), dm, 1, 0);
+    MultiFab zz_r(Er.boxArray(), dm, 1, 0);
+    MultiFab zz_z(Ez.boxArray(), dm, 1, 0);
+    MultiFab p_r(Er.boxArray(), dm, 1, IntVect(1));
+    MultiFab p_z(Ez.boxArray(), dm, 1, IntVect(1));
 
-    apply_op(Ax, E);
-    MultiFab::LinComb(res, 1.0_rt, rhs, 0, -1.0_rt, Ax, 0, 0, 1, ng0);
-    MultiFab::Copy(z_mf, res, 0, 0, 1, ng0);
-    MultiFab::Divide(z_mf, diag, 0, 0, 1, 0);
-    p_mf.setVal(0.0_rt);
-    MultiFab::Copy(p_mf, z_mf, 0, 0, 1, ng0);
-    Real rz_old = MultiFab::Dot(res, 0, z_mf, 0, 1, 0);
-    Real const rhs_norm = std::sqrt(MultiFab::Dot(rhs, 0, rhs, 0, 1, 0));
+    apply_op(Ax_r, Ax_z, Er, Ez);
+    MultiFab::LinComb(res_r, 1.0_rt, rhs_r, 0, -1.0_rt, Ax_r, 0, 0, 1, ng0);
+    MultiFab::LinComb(res_z, 1.0_rt, rhs_z, 0, -1.0_rt, Ax_z, 0, 0, 1, ng0);
+    MultiFab::Copy(zz_r, res_r, 0, 0, 1, ng0);
+    MultiFab::Divide(zz_r, diag_r, 0, 0, 1, 0);
+    MultiFab::Copy(zz_z, res_z, 0, 0, 1, ng0);
+    MultiFab::Divide(zz_z, diag_z, 0, 0, 1, 0);
+    p_r.setVal(0.0_rt);
+    p_z.setVal(0.0_rt);
+    MultiFab::Copy(p_r, zz_r, 0, 0, 1, ng0);
+    MultiFab::Copy(p_z, zz_z, 0, 0, 1, ng0);
+    Real rz_old = MultiFab::Dot(res_r, 0, zz_r, 0, 1, 0)
+                + MultiFab::Dot(res_z, 0, zz_z, 0, 1, 0);
+    Real const rhs_norm = std::sqrt(
+        MultiFab::Dot(rhs_r, 0, rhs_r, 0, 1, 0)
+      + MultiFab::Dot(rhs_z, 0, rhs_z, 0, 1, 0));
+    // Tight tolerance: this solve runs inside every residual evaluation
+    // including finite-difference Jacobian probes (the Darwin E_L
+    // precedent) -- solver noise above the probe scale poisons secants.
     Real const tol = 1.0e-11_rt * amrex::max(rhs_norm, 1.0e-300_rt);
-    int const max_cg = 2000;
+    // Iteration budget: a half-vacuum column deck (32 x 128) measures
+    // multi-thousand Jacobi-CG iterations per cold solve -- the vacuum
+    // block is a bare vector Laplacian and plain Jacobi does not see its
+    // long-wavelength modes. Uniform-plasma decks converge in O(100)
+    // (beta-dominant rows). The factored (block-banded direct) backend is
+    // the production follow-up, as for the toroidal stage.
+    int const max_cg = 25000;
     int it = 0;
     for (; it < max_cg; ++it) {
-        Real const res_norm = std::sqrt(MultiFab::Dot(res, 0, res, 0, 1, 0));
+        Real const res_norm = std::sqrt(
+            MultiFab::Dot(res_r, 0, res_r, 0, 1, 0)
+          + MultiFab::Dot(res_z, 0, res_z, 0, 1, 0));
         if (res_norm <= tol) { break; }
-        apply_op(Ax, p_mf);
-        Real const pAp = MultiFab::Dot(p_mf, 0, Ax, 0, 1, 0);
+        apply_op(Ax_r, Ax_z, p_r, p_z);
+        Real const pAp = MultiFab::Dot(p_r, 0, Ax_r, 0, 1, 0)
+                       + MultiFab::Dot(p_z, 0, Ax_z, 0, 1, 0);
         Real const alpha = rz_old / pAp;
-        MultiFab::Saxpy(E, alpha, p_mf, 0, 0, 1, ng0);
-        MultiFab::Saxpy(res, -alpha, Ax, 0, 0, 1, ng0);
-        MultiFab::Copy(z_mf, res, 0, 0, 1, ng0);
-        MultiFab::Divide(z_mf, diag, 0, 0, 1, 0);
-        Real const rz_new = MultiFab::Dot(res, 0, z_mf, 0, 1, 0);
+        MultiFab::Saxpy(Er, alpha, p_r, 0, 0, 1, ng0);
+        MultiFab::Saxpy(Ez, alpha, p_z, 0, 0, 1, ng0);
+        MultiFab::Saxpy(res_r, -alpha, Ax_r, 0, 0, 1, ng0);
+        MultiFab::Saxpy(res_z, -alpha, Ax_z, 0, 0, 1, ng0);
+        MultiFab::Copy(zz_r, res_r, 0, 0, 1, ng0);
+        MultiFab::Divide(zz_r, diag_r, 0, 0, 1, 0);
+        MultiFab::Copy(zz_z, res_z, 0, 0, 1, ng0);
+        MultiFab::Divide(zz_z, diag_z, 0, 0, 1, 0);
+        Real const rz_new = MultiFab::Dot(res_r, 0, zz_r, 0, 1, 0)
+                          + MultiFab::Dot(res_z, 0, zz_z, 0, 1, 0);
         Real const beta_cg = rz_new / rz_old;
         rz_old = rz_new;
-        MultiFab::LinComb(p_mf, 1.0_rt, z_mf, 0, beta_cg, p_mf, 0, 0, 1, ng0);
+        MultiFab::LinComb(p_r, 1.0_rt, zz_r, 0, beta_cg, p_r, 0, 0, 1, ng0);
+        MultiFab::LinComb(p_z, 1.0_rt, zz_z, 0, beta_cg, p_z, 0, 0, 1, ng0);
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(it < max_cg,
-        "SolveEPolAmanoRZ: CG failed to converge");
-    E.FillBoundary(geom.periodicity());
+        "SolveEPolCurlCurlRZ: CG failed to converge");
+    Er.FillBoundary(geom.periodicity());
+    Ez.FillBoundary(geom.periodicity());
 #endif
 }
 
@@ -2730,9 +3332,13 @@ void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian,
     const bool live_probes = m_vacuum_recovery_live_probes;
     const bool frozen_probe = a_from_jacobian && !live_probes;
 
-    // Mask policy on the step-entry charge density (rho^n, component 0 of
-    // rho_fp): frozen across the step, so the mask cannot flicker between
-    // nonlinear-solver iterations.
+    // Mask policy on the step-entry charge density. With the frozen mask
+    // (default) the masks read the per-step snapshot captured at implicit
+    // step entry, so membership cannot flicker between residual
+    // evaluations; the legacy path reads rho_fp component 0 live, which
+    // under the implicit scheme is a pre-push deposit that follows the
+    // iterate from the second evaluation on (see the
+    // m_darwin_vacuum_recovery_frozen_mask member documentation).
     amrex::Real const rho_floor = PhysConst::q_e * m_n_floor
         * m_darwin_vacuum_recovery_density_fraction;
     const int mask_mode = (m_darwin_vacuum_recovery_mask == "global") ? 2
@@ -2746,7 +3352,9 @@ void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian,
         warpx.m_fields.get_alldirs("hybrid_J_vac_fp", lev);
     ablastr::fields::VectorField dA =
         warpx.m_fields.get_alldirs("hybrid_A_vac_dA_nodal", lev);
-    amrex::MultiFab const & rho = *warpx.m_fields.get(FieldType::rho_fp, lev);
+    amrex::MultiFab const & rho = m_darwin_vacuum_recovery_frozen_mask
+        ? *warpx.m_fields.get("hybrid_rho_vacmask_fp", lev)
+        : *warpx.m_fields.get(FieldType::rho_fp, lev);
 
     // The field-implied current J_imp = curl(curl A)/mu0 on the E staggering.
     // Bfield_fp is curl scratch here (the caller rebuilds B = B_static +
@@ -2820,6 +3428,16 @@ void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian,
 #else
     const bool flux_only = (m_darwin_vacuum_recovery_components == "flux");
 #endif
+
+    // "curlcurl" iteration operator: the native edge-staggered
+    // amrex::MLCurlCurl backend (Cartesian-only, parse-guarded; see the
+    // m_darwin_vacuum_recovery_operator member documentation). J_imp was
+    // computed above on the shared path.
+    if (m_darwin_vacuum_recovery_operator == "curlcurl") {
+        VacuumRecoveryCurlCurlSolve(frozen_probe, omega, rho, rho_floor,
+                                    mask_mode, flux_only);
+        return;
+    }
 
     for (int dir = 0; dir < 3; ++dir) {
         if (flux_only && dir != 1) { continue; }
@@ -3001,6 +3619,247 @@ void HybridPICModel::ComputeVacuumARecovery (bool a_from_jacobian,
 #endif
 }
 
+void HybridPICModel::VacuumRecoveryCurlCurlSolve (bool a_frozen_probe,
+                                                  amrex::Real a_omega,
+                                                  amrex::MultiFab const& a_rho,
+                                                  amrex::Real a_rho_floor,
+                                                  int a_mask_mode,
+                                                  bool a_flux_only)
+{
+#if defined(WARPX_DIM_1D_Z) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE) || defined(WARPX_DIM_RZ)
+    amrex::ignore_unused(a_frozen_probe, a_omega, a_rho, a_rho_floor,
+                         a_mask_mode, a_flux_only);
+    WARPX_ABORT_WITH_MESSAGE(
+        "darwin_vacuum_recovery_operator = curlcurl requires Cartesian "
+        "geometry (parse-guarded; this call is unreachable).");
+#else
+    ABLASTR_PROFILE("HybridPICModel::VacuumRecoveryCurlCurlSolve()");
+    using namespace amrex;
+    using namespace ablastr::coarsen::sample;
+
+    auto & warpx = WarpX::GetInstance();
+    constexpr int lev = 0;
+    Geometry const & geom = warpx.Geom(lev);
+    const bool trace = (std::getenv("WARPX_DEBUG_VACREC") != nullptr);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!EB::enabled(),
+        "darwin_vacuum_recovery_operator = curlcurl does not support "
+        "embedded boundaries (amrex::MLCurlCurl has no EB form).");
+
+    ablastr::fields::VectorField A =
+        warpx.m_fields.get_alldirs("hybrid_A_fp", lev);
+    ablastr::fields::VectorField Jvac =
+        warpx.m_fields.get_alldirs("hybrid_J_vac_fp", lev);
+    ablastr::fields::VectorField dA =
+        warpx.m_fields.get_alldirs("hybrid_A_vac_dA_edge", lev);
+
+    amrex::GpuArray<int, 3> const coarsen_rr = {1, 1, 1};
+    amrex::GpuArray<int, 3> const nodal = {1, 1, 1};
+    const amrex::GpuArray<int, 3> A_stag[3] =
+        {Ex_IndexType, Ey_IndexType, Ez_IndexType};
+
+    // Domain extents/periodicity for the boundary-edge guard (the
+    // homogeneous-Dirichlet correction rows carry no source, matching the
+    // Poisson path's boundary-node convention).
+    const amrex::Box dom_cc = geom.Domain();
+    amrex::GpuArray<int, 3> per{{1, 1, 1}};
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        per[d] = geom.isPeriodic(d) ? 1 : 0;
+    }
+
+    const amrex::Real rho_floor = a_rho_floor;
+    const int mask_mode = a_mask_mode;
+
+    if (!a_frozen_probe) {
+        // rhs = -mu0 J_imp on the edge staggering, source-masked, zero on
+        // non-periodic boundary edges; at the fixed point of the recovery
+        // iteration the masked J_imp (composed curl(curl A)) vanishes
+        // identically, exactly as on the Poisson path.
+        std::array<std::unique_ptr<amrex::MultiFab>, 3> rhs_v;
+        amrex::Real rhs_max = 0.0_rt;
+        amrex::Real dA_max = 0.0_rt;
+        for (int dir = 0; dir < 3; ++dir) {
+            rhs_v[dir] = std::make_unique<amrex::MultiFab>(
+                dA[dir]->boxArray(), dA[dir]->DistributionMap(), 1,
+                dA[dir]->nGrowVect());
+            rhs_v[dir]->setVal(0.0_rt);
+            if (a_flux_only && dir != 1) { continue; }
+            amrex::MultiFab const & Jd = *Jvac[dir];
+            const amrex::Box dom_e = amrex::convert(
+                dom_cc, dA[dir]->ixType().toIntVect());
+            amrex::GpuArray<int, 3> dlo{{0, 0, 0}};
+            amrex::GpuArray<int, 3> dhi{{0, 0, 0}};
+            amrex::GpuArray<int, 3> is_nd{{0, 0, 0}};
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                dlo[d] = dom_e.smallEnd(d);
+                dhi[d] = dom_e.bigEnd(d);
+                is_nd[d] = dA[dir]->ixType().nodeCentered(d) ? 1 : 0;
+            }
+            amrex::GpuArray<int, 3> const stag = A_stag[dir];
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(*rhs_v[dir], TilingIfNotGPU());
+                 mfi.isValid(); ++mfi) {
+                auto const & rhs_arr = rhs_v[dir]->array(mfi);
+                auto const & J_arr   = Jd.const_array(mfi);
+                auto const & rho_arr = a_rho.const_array(mfi);
+                amrex::ParallelFor(mfi.tilebox(),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    const int idx[3] = {i, j, k};
+                    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                        // Dirichlet rows: edge points lying in a
+                        // non-periodic domain-boundary face (nodal index
+                        // at either end).
+                        if (!per[d] && is_nd[d]
+                            && (idx[d] <= dlo[d] || idx[d] >= dhi[d])) {
+                            rhs_arr(i, j, k) = 0.0_rt;
+                            return;
+                        }
+                    }
+                    amrex::Real const rho_val =
+                        Interp(rho_arr, nodal, stag, coarsen_rr, i, j, k, 0);
+                    const bool in_mask = (mask_mode == 2)
+                        || (mask_mode == 0 && rho_val < rho_floor)
+                        || (mask_mode == 1 && rho_val > 0.0_rt
+                            && rho_val < rho_floor);
+                    rhs_arr(i, j, k) = in_mask
+                        ? -PhysConst::mu0 * J_arr(i, j, k)
+                        : 0.0_rt;
+                });
+            }
+            rhs_max = amrex::max(rhs_max, rhs_v[dir]->norminf(0));
+            dA_max = amrex::max(dA_max, dA[dir]->norminf(0));
+        }
+
+        // Empty mask and no stored correction: exact identity, skip.
+        if (rhs_max == 0.0_rt && dA_max == 0.0_rt) {
+            if (trace) {
+                amrex::Print() << "[vac-recover] (curlcurl) empty mask, "
+                    "skipped\n";
+            }
+            return;
+        }
+
+        amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM> lobc, hibc;
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            lobc[d] = geom.isPeriodic(d) ? amrex::LinOpBCType::Periodic
+                                         : amrex::LinOpBCType::Dirichlet;
+            hibc[d] = lobc[d];
+        }
+
+        amrex::LPInfo const info;
+        amrex::MLCurlCurl linop({geom}, {warpx.boxArray(lev)},
+                                {warpx.DistributionMap(lev)}, info);
+        linop.setDomainBC(lobc, hibc);
+        // Tikhonov closure of the curl-curl null space (gradient family):
+        // beta relative to the grid-scale curl-curl diagonal. Shapes the
+        // iteration only -- the fixed point (masked J_imp = 0) does not
+        // move, and gradient-family dA content never reaches B = curl A.
+        amrex::Real kg2 = 0.0_rt;
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            kg2 += 4.0_rt / (geom.CellSize(d) * geom.CellSize(d));
+        }
+        linop.setScalars(1.0_rt, m_darwin_vacrec_cc_beta_rel * kg2);
+
+        // Warm start: the persistent edge correction (Dirichlet rows stay
+        // zero by construction).
+        for (int dir = 0; dir < 3; ++dir) {
+            dA[dir]->setBndry(0.0_rt);
+            dA[dir]->FillBoundary(geom.periodicity());
+        }
+
+        // WarpX -> AMReX component slots (see CurlCurlMLMGPC):
+        // 2D: missing dim is y in WarpX, z in AMReX -> {0, 2, 1}.
+#if defined(WARPX_DIM_3D)
+        const int slot[3] = {0, 1, 2};
+#else
+        const int slot[3] = {0, 2, 1};
+#endif
+        amrex::Array<amrex::MultiFab, 3> sol
+            {amrex::MultiFab(*dA[slot[0]], amrex::make_alias, 0, 1),
+             amrex::MultiFab(*dA[slot[1]], amrex::make_alias, 0, 1),
+             amrex::MultiFab(*dA[slot[2]], amrex::make_alias, 0, 1)};
+        amrex::Array<amrex::MultiFab, 3> rhs
+            {amrex::MultiFab(*rhs_v[slot[0]], amrex::make_alias, 0, 1),
+             amrex::MultiFab(*rhs_v[slot[1]], amrex::make_alias, 0, 1),
+             amrex::MultiFab(*rhs_v[slot[2]], amrex::make_alias, 0, 1)};
+
+        amrex::MLMGT<amrex::Array<amrex::MultiFab, 3>> mlmg(linop);
+        mlmg.setVerbose(trace ? std::max(m_darwin_vacrec_verbosity, 2)
+                              : m_darwin_vacrec_verbosity);
+        mlmg.setMaxIter(m_darwin_vacrec_max_iters);
+        mlmg.setThrowException(true);
+        linop.prepareRHS({&rhs});
+        amrex::Real resid = 0.0_rt;
+        bool solve_ok = true;
+        std::string fail_msg;
+        try {
+            resid = mlmg.solve({&sol}, {&rhs},
+                               m_darwin_vacrec_rtol, m_darwin_vacrec_atol);
+        } catch (std::exception const & e) {
+            // Degrade to the identity for this evaluation (as on the
+            // Poisson path) instead of aborting the nonlinear iteration.
+            for (int dir = 0; dir < 3; ++dir) { dA[dir]->setVal(0.0_rt); }
+            solve_ok = false;
+            fail_msg = e.what();
+        }
+        if (trace) {
+            amrex::Print() << "[vac-recover] (curlcurl) |rhs|max = "
+                << rhs_max << " |dA|max = ("
+                << dA[0]->norminf(0) << ", " << dA[1]->norminf(0) << ", "
+                << dA[2]->norminf(0) << ") resid = " << resid
+                << (solve_ok ? "" : (" (SOLVE FAILED: " + fail_msg + ")"))
+                << "\n";
+        }
+        if (!solve_ok) { return; }
+        for (int dir = 0; dir < 3; ++dir) {
+            dA[dir]->FillBoundary(geom.periodicity());
+        }
+    } else {
+        // Frozen probe: nothing to apply if the stored correction is zero
+        // (preserves the exact-identity property bit-for-bit).
+        amrex::Real dA_max = 0.0_rt;
+        for (int dir = 0; dir < 3; ++dir) {
+            dA_max = amrex::max(dA_max, dA[dir]->norminf(0));
+        }
+        if (dA_max == 0.0_rt) { return; }
+    }
+
+    // A += omega dA at the component's edge points, replace-masked (same
+    // staggering: no interpolation). The caller re-applies the A boundary
+    // values afterwards.
+    for (int dir = 0; dir < 3; ++dir) {
+        if (a_flux_only && dir != 1) { continue; }
+        amrex::MultiFab & Ad = *A[dir];
+        amrex::MultiFab const & dAd = *dA[dir];
+        amrex::GpuArray<int, 3> const stag = A_stag[dir];
+        const amrex::Real omega = a_omega;
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(Ad, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const & a_arr   = Ad.array(mfi);
+            auto const & dA_arr  = dAd.const_array(mfi);
+            auto const & rho_arr = a_rho.const_array(mfi);
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                amrex::Real const rho_val =
+                    Interp(rho_arr, nodal, stag, coarsen_rr, i, j, k, 0);
+                const bool in_mask = (mask_mode == 2)
+                    || (mask_mode == 0 && rho_val < rho_floor)
+                    || (mask_mode == 1 && rho_val > 0.0_rt
+                        && rho_val < rho_floor);
+                if (!in_mask) { return; }
+                a_arr(i, j, k) += omega * dA_arr(i, j, k);
+            });
+        }
+        Ad.FillBoundary(geom.periodicity());
+    }
+#endif
+}
+
 void HybridPICModel::ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_long,
                                           bool a_from_jacobian, bool a_bdf2)
 {
@@ -3035,7 +3894,12 @@ void HybridPICModel::ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_lon
 #endif
     amrex::Real const inv_dt = 1.0_rt / a_dt_eff;
 
-    amrex::MultiFab const & rho = *warpx.m_fields.get(FieldType::rho_fp, lev);
+    // Same frozen-vs-live mask density selection as ComputeVacuumARecovery
+    // (the two consumers straddle the per-evaluation deposit: a live read
+    // hands them INCONSISTENT masks within one evaluation).
+    amrex::MultiFab const & rho = m_darwin_vacuum_recovery_frozen_mask
+        ? *warpx.m_fields.get("hybrid_rho_vacmask_fp", lev)
+        : *warpx.m_fields.get(FieldType::rho_fp, lev);
     amrex::GpuArray<int, 3> const coarsen_rr = {1, 1, 1};
     amrex::GpuArray<int, 3> const nodal = {1, 1, 1};
     const amrex::GpuArray<int, 3> A_stag[3] =
@@ -3128,6 +3992,1549 @@ void HybridPICModel::ApplyVacuumFaradayE (amrex::Real a_dt_eff, bool a_add_E_lon
 }
 
 
+void HybridPICModel::ResolveElectronInertiaMass ()
+{
+    // Effective electron mass: the lightest ion species divided by the
+    // reduced mass ratio (physical m_e when the ratio is unset). The ratio
+    // moves the effective electron skin depth d_e = c/omega_pe(m_e_eff)
+    // relative to the grid. Must run before any consumer of
+    // m_electron_inertia_mass (the curlcurl_form elliptic solves read it
+    // through beta_fac and divide by it).
+    if (m_electron_inertia_mass != 0.0_rt) { return; }
+    if (m_reduced_electron_mass_ratio > 0.0_rt) {
+        amrex::Real m_ion_min = std::numeric_limits<amrex::Real>::max();
+        auto & mypc = WarpX::GetInstance().GetPartContainer();
+        for (int isp = 0; isp < mypc.nSpecies(); ++isp) {
+            auto & pc = mypc.GetParticleContainer(isp);
+            if (pc.getCharge() != 0.0_rt) {
+                m_ion_min = std::min(m_ion_min, pc.getMass());
+            }
+        }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_ion_min < std::numeric_limits<amrex::Real>::max(),
+            "reduced_electron_mass_ratio requires at least one charged "
+            "ion species");
+        m_electron_inertia_mass = m_ion_min / m_reduced_electron_mass_ratio;
+    } else {
+        m_electron_inertia_mass = PhysConst::m_e;
+    }
+    amrex::Print() << "[HybridPICModel] electron inertia: m_e_eff = "
+        << m_electron_inertia_mass << " kg (mass ratio "
+        << m_reduced_electron_mass_ratio << ")\n";
+}
+
+void HybridPICModel::EnsureCurlCurlScratch ()
+{
+    if (!m_esolve_curlcurl || m_jp_old_nodal) { return; }
+    ResolveElectronInertiaMass();
+    using ablastr::fields::Direction;
+    auto & warpx = WarpX::GetInstance();
+    constexpr int lev = 0;
+    ablastr::fields::VectorField const Jp =
+        warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
+    amrex::MultiFab const & Ei =
+        *warpx.m_fields.get("hybrid_E_inertial_nodal", lev);
+    for (int c = 0; c < 3; ++c) {
+        m_jp_old_stag[c] = std::make_unique<amrex::MultiFab>(
+            Jp[c]->boxArray(), Jp[c]->DistributionMap(), 1,
+            Jp[c]->nGrowVect());
+        m_jp_old_stag[c]->setVal(0.0);
+    }
+    m_jp_old_nodal = std::make_unique<amrex::MultiFab>(
+        Ei.boxArray(), Ei.DistributionMap(), 3, amrex::IntVect(1));
+    m_jp_old_nodal->setVal(0.0);
+    // Zero measured-inertia numerator = the exact quiescent pre-history:
+    // solves that run before the first inertia assembly (the resistive
+    // push-field correction pair) read it.
+    m_ei_curlcurl_theta = std::make_unique<amrex::MultiFab>(
+        Ei.boxArray(), Ei.DistributionMap(), 3, amrex::IntVect(1));
+    m_ei_curlcurl_theta->setVal(0.0);
+    m_num_theta = std::make_unique<amrex::MultiFab>(
+        Ei.boxArray(), Ei.DistributionMap(), 1, amrex::IntVect(1));
+    m_num_theta->setVal(0.0);
+    amrex::MultiFab const & Er_mf = *warpx.m_fields.get(
+        FieldType::Efield_fp, Direction{0}, lev);
+    amrex::MultiFab const & Ez_mf = *warpx.m_fields.get(
+        FieldType::Efield_fp, Direction{2}, lev);
+    m_num_pol[0] = std::make_unique<amrex::MultiFab>(
+        Er_mf.boxArray(), Er_mf.DistributionMap(), 1, amrex::IntVect(1));
+    m_num_pol[0]->setVal(0.0);
+    m_num_pol[1] = std::make_unique<amrex::MultiFab>(
+        Ez_mf.boxArray(), Ez_mf.DistributionMap(), 1, amrex::IntVect(1));
+    m_num_pol[1]->setVal(0.0);
+}
+
+void HybridPICModel::EnsureTensorScratch () const
+{
+    if (!m_esolve_tensor || m_tensor_jp_old[0]) { return; }
+    const_cast<HybridPICModel*>(this)->ResolveElectronInertiaMass();
+    using ablastr::fields::Direction;
+    auto & warpx = WarpX::GetInstance();
+    constexpr int lev = 0;
+    for (int c = 0; c < 3; ++c) {
+        amrex::MultiFab const & E = *warpx.m_fields.get(
+            FieldType::Efield_fp, Direction{c}, lev);
+        m_tensor_jp_old[c] = std::make_unique<amrex::MultiFab>(
+            E.boxArray(), E.DistributionMap(), 1, E.nGrowVect());
+        // Zero = the exact quiescent pre-history for any solve that runs
+        // before the first step-entry capture.
+        m_tensor_jp_old[c]->setVal(0.0);
+    }
+    // Per-step-frozen density snapshot for the RZ tensor assembly (see
+    // m_tensor_rho_old): every rho-derived coefficient AND binary gate of
+    // the RZ solve reads this one bit-frozen field, so gate membership and
+    // screening rows cannot flip between residual evaluations (the item-1
+    // iron-rule discipline; the 1D path keeps the legacy live comp-0 read).
+    {
+        amrex::MultiFab const & rho_mf = *warpx.m_fields.get(
+            FieldType::rho_fp, lev);
+        m_tensor_rho_old = std::make_unique<amrex::MultiFab>(
+            rho_mf.boxArray(), rho_mf.DistributionMap(), 1,
+            rho_mf.nGrowVect());
+        m_tensor_rho_old->setVal(0.0);
+    }
+}
+
+void HybridPICModel::CaptureTensorStepStart ()
+{
+    if (!m_esolve_tensor) { return; }
+    ABLASTR_PROFILE("HybridPICModel::CaptureTensorStepStart()");
+    EnsureTensorScratch();
+    using ablastr::fields::Direction;
+    auto & warpx = WarpX::GetInstance();
+    constexpr int lev = 0;
+    // Bfield_fp holds the committed B^n at step entry; refresh the plasma
+    // current register from it (J_ext-aware) and snapshot it. The register
+    // is recomputed at the theta stage by every residual evaluation, so
+    // the copy is the only per-step-frozen carrier.
+    CalculatePlasmaCurrent(
+        warpx.m_fields.get_mr_levels_alldirs(FieldType::Bfield_fp,
+                                             warpx.finestLevel()),
+        warpx.GetEBUpdateEFlag());
+    for (int c = 0; c < 3; ++c) {
+        amrex::MultiFab const & Jp = *warpx.m_fields.get(
+            FieldType::hybrid_current_fp_plasma, Direction{c}, lev);
+        amrex::MultiFab::Copy(*m_tensor_jp_old[c], Jp, 0, 0, 1,
+                              amrex::min(m_tensor_jp_old[c]->nGrowVect(),
+                                         Jp.nGrowVect()));
+    }
+    // Frozen density snapshot: component 0 of rho_fp holds the committed
+    // entry deposit at step entry (the darwin vacmask / A-recovery mask
+    // family). Bit-frozen through every residual evaluation of the step.
+    {
+        amrex::MultiFab const & rho_mf = *warpx.m_fields.get(
+            FieldType::rho_fp, lev);
+        amrex::MultiFab::Copy(*m_tensor_rho_old, rho_mf, 0, 0, 1,
+                              amrex::min(m_tensor_rho_old->nGrowVect(),
+                                         rho_mf.nGrowVect()));
+        m_tensor_rho_captured = true;
+    }
+#if defined(WARPX_DIM_RZ)
+    // Exchange + refresh the frozen carriers' ghosts once per step: the RZ
+    // assembly Interps them across staggers (the E_z axis row reads the
+    // r < 0 ghost of Jp_r, which is odd across the axis for m = 0).
+    {
+        amrex::Geometry const & geom = warpx.Geom(lev);
+        for (int c = 0; c < 3; ++c) {
+            m_tensor_jp_old[c]->FillBoundary(geom.periodicity());
+        }
+        m_tensor_rho_old->FillBoundary(geom.periodicity());
+        if (geom.ProbLo(0) == 0.0) {
+            amrex::MultiFab & jr = *m_tensor_jp_old[0];
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (amrex::MFIter mfi(jr); mfi.isValid(); ++mfi) {
+                amrex::Box gbx = mfi.growntilebox();
+                if (gbx.smallEnd(0) >= 0) { continue; }
+                gbx.setBig(0, -1);
+                auto const & arr = jr.array(mfi);
+                amrex::ParallelFor(gbx,
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    // J_r is cc in r: the mirror of ghost cell i is cell
+                    // -1 - i (odd parity across the axis at m = 0)
+                    arr(i, j, k) = -arr(-1 - i, j, k);
+                });
+            }
+        }
+    }
+#endif
+}
+
+namespace
+{
+    /** Closed-form inverse application of M = a I - [beta]x:
+     *  M^{-1} v = (a^2 v + a beta x v + (beta.v) beta) / (a (a^2 + b2)).
+     *  a >= 1 by construction, so the division is regular everywhere. */
+    AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+    void TensorMinv (amrex::Real a,
+                     amrex::Real bx, amrex::Real by, amrex::Real bz,
+                     amrex::Real vx, amrex::Real vy, amrex::Real vz,
+                     amrex::Real& ox, amrex::Real& oy, amrex::Real& oz)
+    {
+        amrex::Real const b2 = bx*bx + by*by + bz*bz;
+        amrex::Real const inv = 1.0_rt / (a * (a*a + b2));
+        amrex::Real const bdv = bx*vx + by*vy + bz*vz;
+        ox = (a*a*vx + a*(by*vz - bz*vy) + bdv*bx) * inv;
+        oy = (a*a*vy + a*(bz*vx - bx*vz) + bdv*by) * inv;
+        oz = (a*a*vz + a*(bx*vy - by*vx) + bdv*bz) * inv;
+    }
+}
+
+void HybridPICModel::SolveETensor1D (
+    ablastr::fields::VectorField const& Efield,
+    ablastr::fields::VectorField const& Jifield,
+    ablastr::fields::VectorField const& Bfield,
+    amrex::MultiFab const& rho,
+    amrex::MultiFab const& Pe,
+    int const lev, bool const solve_for_Faraday,
+    bool const include_resistivity) const
+{
+#if !defined(WARPX_DIM_1D_Z)
+    amrex::ignore_unused(Efield, Jifield, Bfield, rho, Pe, lev,
+                         solve_for_Faraday, include_resistivity);
+    WARPX_ABORT_WITH_MESSAGE(
+        "SolveETensor1D: the tensor_form E-solve is 1D-only in v1");
+#else
+    ABLASTR_PROFILE("HybridPICModel::SolveETensor1D()");
+    using namespace amrex;
+    using namespace ablastr::coarsen::sample;
+
+    auto & warpx = WarpX::GetInstance();
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(lev == 0,
+        "hybrid_pic_model.esolve = tensor_form supports a single level");
+    Geometry const & geom = warpx.Geom(lev);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(geom.isPeriodic(0),
+        "hybrid_pic_model.esolve = tensor_form (1D) requires periodic z");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_add_external_fields,
+        "hybrid_pic_model.esolve = tensor_form does not support split "
+        "external fields yet");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_resistivity_has_J_dependence,
+        "hybrid_pic_model.esolve = tensor_form does not support "
+        "J-dependent resistivity yet");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_include_hyper_resistivity_term,
+        "hybrid_pic_model.esolve = tensor_form does not support "
+        "hyper-resistivity yet");
+    // Transverse components must share the z-nodal stagger (Yee); a
+    // collocated grid composes its curls to a different (wide) stencil
+    // than the 3-point form assembled here.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        Efield[0]->ixType() == Efield[1]->ixType()
+            && Efield[0]->ixType() != Efield[2]->ixType(),
+        "hybrid_pic_model.esolve = tensor_form (1D) requires the staggered "
+        "(Yee) grid");
+
+    EnsureTensorScratch();
+
+    Real const dz = geom.CellSizeArray()[0];
+    Real const inv_dz2 = 1.0_rt/(dz*dz);
+    // dt_eff = theta dt, published per step by the theta-implicit solver;
+    // solves that run before the first step entry (initialization) fall
+    // back to the theta = 1/2 value -- constant within any given step
+    // either way.
+    Real const dt_eff = (m_tensor_dt_eff > 0.0_rt)
+        ? m_tensor_dt_eff : 0.5_rt*warpx.getdt(lev);
+    Real const rho_1c = PhysConst::q_e
+        * ((m_tensor_n_min > 0.0_rt) ? m_tensor_n_min : m_n_floor);
+    Real const me_eff = m_electron_inertia_mass;
+    Real const alpha = m_tensor_alpha;
+    Real const qe = PhysConst::q_e;
+    Real const mu0 = PhysConst::mu0;
+    Real const inv_mu0 = 1.0_rt/mu0;
+    const auto eta = m_eta;
+    Real const t_new = warpx.gett_new(lev);
+    const bool use_eta = include_resistivity;
+    const bool use_gpe = !solve_for_Faraday
+        && m_include_electron_pressure_term;
+    // Component 0 = the pre-push deposit: the SAME density the e_form Ohm
+    // kernel this path replaces consumes (always valid -- the midpoint
+    // component nComp()/2 is empty until the step's first PreRHSOp
+    // deposit, but the resistive push-field correction pair solves E
+    // inside UpdateWarpXFields BEFORE it; measured: the empty component
+    // gives kE = 0 everywhere and the pure-curl-curl periodic transverse
+    // system is singular).
+    const int rho_mid = 0;
+
+    GpuArray<int, 3> const nodal = {1, 1, 1};
+    GpuArray<int, 3> const coarsen_rr = {1, 1, 1};
+    const GpuArray<int, 3> E_stag[3] =
+        {Ex_IndexType, Ey_IndexType, Ez_IndexType};
+    const GpuArray<int, 3> B_stag[3] =
+        {Bx_IndexType, By_IndexType, Bz_IndexType};
+    const GpuArray<int, 3> J_stag[3] =
+        {Jx_IndexType, Jy_IndexType, Jz_IndexType};
+
+    // Per-component pointwise coefficients on the component's stagger:
+    // comp 0 = a, 1..3 = beta, 4 = kE; and the RHS.
+    std::array<std::unique_ptr<MultiFab>, 3> coef, rhs;
+    for (int c = 0; c < 3; ++c) {
+        coef[c] = std::make_unique<MultiFab>(
+            Efield[c]->boxArray(), Efield[c]->DistributionMap(), 5,
+            IntVect(0));
+        rhs[c] = std::make_unique<MultiFab>(
+            Efield[c]->boxArray(), Efield[c]->DistributionMap(), 1,
+            IntVect(0));
+    }
+
+    for (int c = 0; c < 3; ++c) {
+        GpuArray<int, 3> const Sc = E_stag[c];
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(*coef[c], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const & cf  = coef[c]->array(mfi);
+            auto const & rh  = rhs[c]->array(mfi);
+            auto const & rho_arr = rho.const_array(mfi);
+            auto const & pe_arr  = Pe.const_array(mfi);
+            auto const & bx_arr = Bfield[0]->const_array(mfi);
+            auto const & by_arr = Bfield[1]->const_array(mfi);
+            auto const & bz_arr = Bfield[2]->const_array(mfi);
+            auto const & jix_arr = Jifield[0]->const_array(mfi);
+            auto const & jiy_arr = Jifield[1]->const_array(mfi);
+            auto const & jiz_arr = Jifield[2]->const_array(mfi);
+            auto const & jpx_arr = m_tensor_jp_old[0]->const_array(mfi);
+            auto const & jpy_arr = m_tensor_jp_old[1]->const_array(mfi);
+            auto const & jpz_arr = m_tensor_jp_old[2]->const_array(mfi);
+            const GpuArray<int, 3> Sx = E_stag[0], Sy = E_stag[1],
+                Sz = E_stag[2];
+            const GpuArray<int, 3> Bx_s = B_stag[0], By_s = B_stag[1],
+                Bz_s = B_stag[2];
+            const GpuArray<int, 3> Jx_s = J_stag[0], Jy_s = J_stag[1],
+                Jz_s = J_stag[2];
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                // local density (midpoint deposit) and total B at Sc
+                Real const rho_v = amrex::max(0.0_rt,
+                    Interp(rho_arr, nodal, Sc, coarsen_rr, i, j, k, rho_mid));
+                Real const bx = Interp(bx_arr, Bx_s, Sc, coarsen_rr, i, j, k, 0);
+                Real const by = Interp(by_arr, By_s, Sc, coarsen_rr, i, j, k, 0);
+                Real const bz = Interp(bz_arr, Bz_s, Sc, coarsen_rr, i, j, k, 0);
+                // Eq-(27)-class effective mass: vacuum/statistics
+                // regularization of qm (inert wherever resolved)
+                Real const B2 = bx*bx + by*by + bz*bz;
+                Real const s = dt_eff / (2.0_rt*alpha*dz);
+                Real const me_v = amrex::max(me_eff,
+                    B2*qe/(mu0*amrex::max(rho_v, rho_1c)) * s*s);
+                Real const qm = qe/me_v;
+                Real const kE = qm*rho_v;
+                Real const eta_v = use_eta
+                    ? eta(rho_v, 0.0_rt, t_new) : 0.0_rt;
+                Real const a = 1.0_rt + dt_eff*kE*eta_v;
+                Real const bex = dt_eff*qm*bx;
+                Real const bey = dt_eff*qm*by;
+                Real const bez = dt_eff*qm*bz;
+                cf(i, j, k, 0) = a;
+                cf(i, j, k, 1) = bex;
+                cf(i, j, k, 2) = bey;
+                cf(i, j, k, 3) = bez;
+                cf(i, j, k, 4) = kE;
+                // measured currents at Sc: step-start plasma current and
+                // the midpoint ion deposit
+                Real const jpx = Interp(jpx_arr, Sx, Sc, coarsen_rr, i, j, k, 0);
+                Real const jpy = Interp(jpy_arr, Sy, Sc, coarsen_rr, i, j, k, 0);
+                Real const jpz = Interp(jpz_arr, Sz, Sc, coarsen_rr, i, j, k, 0);
+                Real const jix = Interp(jix_arr, Jx_s, Sc, coarsen_rr, i, j, k, 0);
+                Real const jiy = Interp(jiy_arr, Jy_s, Sc, coarsen_rr, i, j, k, 0);
+                Real const jiz = Interp(jiz_arr, Jz_s, Sc, coarsen_rr, i, j, k, 0);
+                Real const jex = jpx - jix;
+                Real const jey = jpy - jiy;
+                Real const jez = jpz - jiz;
+                // grad Pe on the component's stagger: only the z component
+                // carries a gradient in 1D (Pe is z-nodal, E_z z-cell-
+                // centered: the two-point difference is the native
+                // staggered gradient)
+                Real gpx = 0.0_rt, gpy = 0.0_rt, gpz = 0.0_rt;
+                if (use_gpe && c == 2) {
+                    gpz = (pe_arr(i+1, j, k) - pe_arr(i, j, k))/dz;
+                }
+                // w = kE eta Jp^n - qm (B x Je_meas) - qm grad Pe
+                Real const wx = kE*eta_v*jpx - qm*(by*jez - bz*jey) - qm*gpx;
+                Real const wy = kE*eta_v*jpy - qm*(bz*jex - bx*jez) - qm*gpy;
+                Real const wz = kE*eta_v*jpz - qm*(bx*jey - by*jex) - qm*gpz;
+                Real ox, oy, oz;
+                TensorMinv(a, bex, bey, bez, wx, wy, wz, ox, oy, oz);
+                // The 1D E_z row has no elliptic part: at kE = 0 (true
+                // vacuum) it degenerates -- make it an identity row, E_z = 0
+                // (no longitudinal field is minted in vacuum).
+                if (c == 2 && !(kE > 0.0_rt)) {
+                    rh(i, j, k) = 0.0_rt;
+                } else {
+                    rh(i, j, k) = (c == 0) ? ox : ((c == 1) ? oy : oz);
+                }
+            });
+        }
+    }
+
+    // Matrix-free operator: L E |_c = (1/mu0) curlcurl E |_c
+    //                                 + kE [M^{-1} E]_c  at stagger Sc,
+    // with curlcurl = -d2/dz2 on the transverse pair (the discrete
+    // staggered curl composed with itself) and identically zero on E_z.
+    auto apply_op = [&](std::array<MultiFab, 3>& out,
+                        std::array<MultiFab, 3>& in)
+    {
+        for (int c = 0; c < 3; ++c) {
+            in[c].FillBoundary(geom.periodicity());
+        }
+        for (int c = 0; c < 3; ++c) {
+            GpuArray<int, 3> const Sc = E_stag[c];
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(out[c], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                auto const & o  = out[c].array(mfi);
+                auto const & px = in[0].const_array(mfi);
+                auto const & py = in[1].const_array(mfi);
+                auto const & pz = in[2].const_array(mfi);
+                auto const & cf = coef[c]->const_array(mfi);
+                const GpuArray<int, 3> Sx = E_stag[0], Sy = E_stag[1],
+                    Sz = E_stag[2];
+                const int cc = c;
+                amrex::ParallelFor(mfi.tilebox(),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    auto const & pself = (cc == 0) ? px : ((cc == 1) ? py : pz);
+                    Real ell = 0.0_rt;
+                    if (cc < 2) {
+                        ell = -inv_mu0*(pself(i+1, j, k)
+                            - 2.0_rt*pself(i, j, k)
+                            + pself(i-1, j, k))*inv_dz2;
+                    }
+                    // degenerate vacuum E_z row: identity (see the RHS
+                    // assembly)
+                    if (cc == 2 && !(cf(i,j,k,4) > 0.0_rt)) {
+                        o(i, j, k) = pself(i, j, k);
+                        return;
+                    }
+                    Real const vx = Interp(px, Sx, Sc, coarsen_rr, i, j, k, 0);
+                    Real const vy = Interp(py, Sy, Sc, coarsen_rr, i, j, k, 0);
+                    Real const vz = Interp(pz, Sz, Sc, coarsen_rr, i, j, k, 0);
+                    Real ox, oy, oz;
+                    TensorMinv(cf(i,j,k,0), cf(i,j,k,1), cf(i,j,k,2),
+                               cf(i,j,k,3), vx, vy, vz, ox, oy, oz);
+                    Real const tv = (cc == 0) ? ox : ((cc == 1) ? oy : oz);
+                    o(i, j, k) = ell + cf(i,j,k,4)*tv;
+                });
+            }
+        }
+    };
+
+    // Jacobi diagonal: elliptic row diagonal plus the tensor's own
+    // diagonal entry kE (a^2 + beta_c^2)/(a (a^2 + b2)).
+    std::array<MultiFab, 3> diag;
+    for (int c = 0; c < 3; ++c) {
+        diag[c].define(Efield[c]->boxArray(),
+                       Efield[c]->DistributionMap(), 1, IntVect(0));
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(diag[c], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const & d  = diag[c].array(mfi);
+            auto const & cf = coef[c]->const_array(mfi);
+            const int cc = c;
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                Real const a = cf(i,j,k,0);
+                Real const bc = cf(i,j,k,1+cc);
+                Real const b2 = cf(i,j,k,1)*cf(i,j,k,1)
+                    + cf(i,j,k,2)*cf(i,j,k,2) + cf(i,j,k,3)*cf(i,j,k,3);
+                Real const tdiag = cf(i,j,k,4)*(a*a + bc*bc)
+                    /(a*(a*a + b2));
+                Real const ell = (cc < 2)
+                    ? 2.0_rt*inv_mu0*inv_dz2 : 0.0_rt;
+                // identity diagonal for the degenerate vacuum E_z row
+                d(i,j,k) = (cc == 2 && !(cf(i,j,k,4) > 0.0_rt))
+                    ? 1.0_rt : (ell + tdiag);
+            });
+        }
+    }
+
+    // Preconditioned BiCGStab on the 3-component composite (the gyration
+    // part of the tensor is antisymmetric: the operator is non-symmetric).
+    // Warm start from the incoming E (previous evaluation); tight
+    // tolerance -- the solve runs inside FD-Jacobian probe evaluations.
+    auto dot3 = [&](std::array<MultiFab, 3>& u, std::array<MultiFab, 3>& v)
+    {
+        Real s = 0.0_rt;
+        for (int c = 0; c < 3; ++c) {
+            s += MultiFab::Dot(u[c], 0, v[c], 0, 1, 0);
+        }
+        return s;
+    };
+    auto make3 = [&](std::array<MultiFab, 3>& v, int ng)
+    {
+        for (int c = 0; c < 3; ++c) {
+            v[c].define(Efield[c]->boxArray(),
+                        Efield[c]->DistributionMap(), 1, IntVect(ng));
+            v[c].setVal(0.0_rt);
+        }
+    };
+    auto prec3 = [&](std::array<MultiFab, 3>& z, std::array<MultiFab, 3>& r)
+    {
+        for (int c = 0; c < 3; ++c) {
+            MultiFab::Copy(z[c], r[c], 0, 0, 1, 0);
+            MultiFab::Divide(z[c], diag[c], 0, 0, 1, 0);
+        }
+    };
+
+    // One-shot discrete verification (hybrid_pic_model.tensor_verify):
+    // apply_op on a
+    // deterministic multi-mode field vs the independently composed
+    // (1/mu0) curl(curl F) (two staggered curls through a stored
+    // cell-centered G) + kE M^{-1} F with M inverted by a general 3x3
+    // adjugate. Checks staggering, signs, and factors of the fused rows.
+    if (m_esolve_tensor_verify && !m_esolve_tensor_verified) {
+        m_esolve_tensor_verified = true;
+        std::array<MultiFab, 3> F, AF;
+        for (int c = 0; c < 3; ++c) {
+            F[c].define(Efield[c]->boxArray(),
+                        Efield[c]->DistributionMap(), 1, IntVect(1));
+            AF[c].define(Efield[c]->boxArray(),
+                         Efield[c]->DistributionMap(), 1, IntVect(0));
+        }
+        Real const Lz = geom.ProbLength(0);
+        Real const zlo0 = geom.ProbLo(0);
+        for (int c = 0; c < 3; ++c) {
+            GpuArray<int, 3> const Sc = E_stag[c];
+            Real const off = (Sc[0] == 1) ? 0.0_rt : 0.5_rt;
+            Real const ph = 0.7_rt*(c + 1);
+            for (MFIter mfi(F[c], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                auto const & f = F[c].array(mfi);
+                amrex::ParallelFor(mfi.growntilebox(),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    Real const z = zlo0 + (i + off)*dz;
+                    Real const k1 = 2.0_rt*MathConst::pi*3.0_rt/Lz;
+                    Real const k2 = 2.0_rt*MathConst::pi*17.0_rt/Lz;
+                    f(i, j, k) = std::sin(k1*z + ph)
+                        + 0.37_rt*std::cos(k2*z + 2.0_rt*ph);
+                });
+            }
+        }
+        apply_op(AF, F);  // fills F's ghosts
+        // stored intermediate G = curl F on the cell-centered stagger
+        // (rho's BoxArray is nodal: convert, or the nodal seam cell would
+        // be a never-filled VALID row)
+        MultiFab G(amrex::convert(rho.boxArray(),
+                                  amrex::IntVect::TheZeroVector()),
+                   rho.DistributionMap(), 2, IntVect(1));
+        // G comp 0 = (curl F)_x = -dFy/dz, comp 1 = (curl F)_y = +dFx/dz,
+        // both cell-centered from the nodal transverse pair
+        for (MFIter mfi(G, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const & g = G.array(mfi);
+            auto const & fx = F[0].const_array(mfi);
+            auto const & fy = F[1].const_array(mfi);
+            amrex::ParallelFor(amrex::convert(mfi.validbox(),
+                                              amrex::IntVect(0)),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                g(i, j, k, 0) = -(fy(i+1, j, k) - fy(i, j, k))/dz;
+                g(i, j, k, 1) =  (fx(i+1, j, k) - fx(i, j, k))/dz;
+            });
+        }
+        G.FillBoundary(geom.periodicity());
+        Real errmax[3] = {0.0_rt, 0.0_rt, 0.0_rt};
+        for (int c = 0; c < 3; ++c) {
+            GpuArray<int, 3> const Sc = E_stag[c];
+            const GpuArray<int, 3> Sx = E_stag[0], Sy = E_stag[1],
+                Sz = E_stag[2];
+            Real emax = 0.0_rt;
+            // normalize by the global row magnitude (a pointwise relative
+            // error inflates at the field's zero crossings)
+            Real const afmax = AF[c].norminf(0);
+            for (MFIter mfi(AF[c]); mfi.isValid(); ++mfi) {
+                auto const & af = AF[c].const_array(mfi);
+                auto const & fx = F[0].const_array(mfi);
+                auto const & fy = F[1].const_array(mfi);
+                auto const & fz = F[2].const_array(mfi);
+                auto const & g  = G.const_array(mfi);
+                auto const & cf = coef[c]->const_array(mfi);
+                const int cc = c;
+                auto const & bx0 = mfi.validbox();
+                amrex::LoopOnCpu(bx0, [&] (int i, int j, int k)
+                {
+                    // reference (1/mu0) curl(curl F): back-curl of the
+                    // stored G ((curl G)_x = -dG_y/dz, (curl G)_y =
+                    // +dG_x/dz; both nodal from the cc pair)
+                    Real ell_ref = 0.0_rt;
+                    if (cc == 0) {
+                        ell_ref = inv_mu0
+                            *(-(g(i, j, k, 1) - g(i-1, j, k, 1))/dz);
+                    } else if (cc == 1) {
+                        ell_ref = inv_mu0
+                            *( (g(i, j, k, 0) - g(i-1, j, k, 0))/dz);
+                    }
+                    // reference tensor part with an adjugate 3x3 inverse
+                    Real const a  = cf(i, j, k, 0);
+                    Real const b1 = cf(i, j, k, 1);
+                    Real const b2c = cf(i, j, k, 2);
+                    Real const b3 = cf(i, j, k, 3);
+                    Real const kE = cf(i, j, k, 4);
+                    Real const vx = Interp(fx, Sx, Sc, coarsen_rr,
+                                           i, j, k, 0);
+                    Real const vy = Interp(fy, Sy, Sc, coarsen_rr,
+                                           i, j, k, 0);
+                    Real const vz = Interp(fz, Sz, Sc, coarsen_rr,
+                                           i, j, k, 0);
+                    // M = a I - [b]x, rows: [a, b3, -b2; -b3, a, b1;
+                    //                        b2, -b1, a]
+                    Real const m11 = a, m12 = b3, m13 = -b2c;
+                    Real const m21 = -b3, m22 = a, m23 = b1;
+                    Real const m31 = b2c, m32 = -b1, m33 = a;
+                    Real const det = m11*(m22*m33 - m23*m32)
+                        - m12*(m21*m33 - m23*m31)
+                        + m13*(m21*m32 - m22*m31);
+                    Real const i11 = (m22*m33 - m23*m32)/det;
+                    Real const i12 = (m13*m32 - m12*m33)/det;
+                    Real const i13 = (m12*m23 - m13*m22)/det;
+                    Real const i21 = (m23*m31 - m21*m33)/det;
+                    Real const i22 = (m11*m33 - m13*m31)/det;
+                    Real const i23 = (m13*m21 - m11*m23)/det;
+                    Real const i31 = (m21*m32 - m22*m31)/det;
+                    Real const i32 = (m12*m31 - m11*m32)/det;
+                    Real const i33 = (m11*m22 - m12*m21)/det;
+                    Real minv_v[3] = {
+                        i11*vx + i12*vy + i13*vz,
+                        i21*vx + i22*vy + i23*vz,
+                        i31*vx + i32*vy + i33*vz };
+                    Real const ref = ell_ref + kE*minv_v[cc];
+                    Real const scale = amrex::max(afmax, 1.0e-30_rt);
+                    Real const e = std::abs(af(i, j, k) - ref)/scale;
+                    if (false) {
+                        amrex::AllPrint() << "[tv-seam] c=" << cc
+                            << " i=" << i << " e=" << e
+                            << " af=" << af(i,j,k) << " ref=" << ref
+                            << " ell_ref=" << ell_ref
+                            << " kEminv=" << kE*minv_v[cc]
+                            << " kE=" << kE << " a=" << a
+                            << " v=(" << vx << "," << vy << "," << vz
+                            << ")\n";
+                    }
+                    if (false) {
+                        amrex::AllPrint() << "[tv-dbg] c=" << cc
+                            << " i=" << i << " af=" << af(i,j,k)
+                            << " ref=" << ref << " ell_ref=" << ell_ref
+                            << " kE=" << kE << " minv=" << minv_v[cc]
+                            << " a=" << a << " b=(" << b1 << "," << b2c
+                            << "," << b3 << ") v=(" << vx << "," << vy
+                            << "," << vz << ")\n";
+                    }
+                    emax = amrex::max(emax, e);
+                });
+            }
+            amrex::ParallelDescriptor::ReduceRealMax(emax);
+            errmax[c] = emax;
+        }
+        amrex::Print() << "[tensor-verify] max rel row error: x = "
+            << errmax[0] << " y = " << errmax[1] << " z = " << errmax[2]
+            << "\n";
+    }
+
+    std::array<MultiFab, 3> x, r0, rr, pv, vv, sv, tv, zv, yv;
+    make3(x, 1); make3(r0, 0); make3(rr, 0); make3(pv, 1);
+    make3(vv, 0); make3(sv, 1); make3(tv, 0); make3(zv, 1); make3(yv, 1);
+    for (int c = 0; c < 3; ++c) {
+        MultiFab::Copy(x[c], *Efield[c], 0, 0, 1, 0);
+    }
+    apply_op(vv, x);   // vv = A x0 (scratch use)
+    Real rhs_nrm2 = 0.0_rt;
+    for (int c = 0; c < 3; ++c) {
+        MultiFab::LinComb(r0[c], 1.0_rt, *rhs[c], 0, -1.0_rt, vv[c], 0,
+                          0, 1, IntVect(0));
+        MultiFab::Copy(rr[c], r0[c], 0, 0, 1, 0);
+        rhs_nrm2 += MultiFab::Dot(*rhs[c], 0, *rhs[c], 0, 1, 0);
+    }
+    Real const tol = 1.0e-11_rt
+        * amrex::max(std::sqrt(rhs_nrm2), 1.0e-300_rt);
+    Real rho_o = 1.0_rt, alpha_b = 1.0_rt, omega_b = 1.0_rt;
+    for (int c = 0; c < 3; ++c) { vv[c].setVal(0.0_rt); }
+    int const max_it = 2000;
+    int it = 0;
+    const bool dbg = (std::getenv("WARPX_TENSOR_DEBUG") != nullptr);
+    if (dbg) {
+        amrex::Print() << "[tensor] |rhs| = " << std::sqrt(rhs_nrm2)
+            << " tol = " << tol << " |r0| = " << std::sqrt(dot3(rr, rr))
+            << "\n";
+    }
+    for (; it < max_it; ++it) {
+        Real const rnrm = std::sqrt(dot3(rr, rr));
+        if (dbg && (it % 100 == 0)) {
+            amrex::Print() << "[tensor] it " << it << " |r| = " << rnrm
+                << " alpha = " << alpha_b << " omega = " << omega_b
+                << "\n";
+        }
+        if (rnrm <= tol) { break; }
+        Real const rho_n = dot3(r0, rr);
+        Real const beta_b = (rho_n/rho_o)*(alpha_b/omega_b);
+        rho_o = rho_n;
+        for (int c = 0; c < 3; ++c) {
+            // p = r + beta (p - omega v)
+            MultiFab::Saxpy(pv[c], -omega_b, vv[c], 0, 0, 1, IntVect(0));
+            MultiFab::LinComb(pv[c], 1.0_rt, rr[c], 0, beta_b, pv[c], 0,
+                              0, 1, IntVect(0));
+        }
+        prec3(yv, pv);
+        apply_op(vv, yv);
+        alpha_b = rho_n/dot3(r0, vv);
+        for (int c = 0; c < 3; ++c) {
+            MultiFab::LinComb(sv[c], 1.0_rt, rr[c], 0, -alpha_b, vv[c], 0,
+                              0, 1, IntVect(0));
+            MultiFab::Saxpy(x[c], alpha_b, yv[c], 0, 0, 1, IntVect(0));
+        }
+        if (std::sqrt(dot3(sv, sv)) <= tol) { break; }
+        prec3(zv, sv);
+        apply_op(tv, zv);
+        omega_b = dot3(tv, sv)/dot3(tv, tv);
+        for (int c = 0; c < 3; ++c) {
+            MultiFab::Saxpy(x[c], omega_b, zv[c], 0, 0, 1, IntVect(0));
+            MultiFab::LinComb(rr[c], 1.0_rt, sv[c], 0, -omega_b, tv[c], 0,
+                              0, 1, IntVect(0));
+        }
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(it < max_it,
+        "SolveETensor1D: BiCGStab failed to converge");
+
+    for (int c = 0; c < 3; ++c) {
+        MultiFab::Copy(*Efield[c], x[c], 0, 0, 1, 0);
+        Efield[c]->FillBoundary(geom.periodicity());
+    }
+#endif
+}
+
+void HybridPICModel::SolveETensorRZ (
+    ablastr::fields::VectorField const& Efield,
+    ablastr::fields::VectorField const& Jifield,
+    ablastr::fields::VectorField const& Bfield,
+    amrex::MultiFab const& rho,
+    amrex::MultiFab const& Pe,
+    int const lev, bool const solve_for_Faraday,
+    bool const include_resistivity) const
+{
+#if !defined(WARPX_DIM_RZ)
+    amrex::ignore_unused(Efield, Jifield, Bfield, rho, Pe, lev,
+                         solve_for_Faraday, include_resistivity);
+    WARPX_ABORT_WITH_MESSAGE(
+        "SolveETensorRZ: the RZ tensor_form E-solve is RZ-only");
+#else
+    ABLASTR_PROFILE("HybridPICModel::SolveETensorRZ()");
+    using namespace amrex;
+    using namespace ablastr::coarsen::sample;
+
+    auto & warpx = WarpX::GetInstance();
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(lev == 0,
+        "hybrid_pic_model.esolve = tensor_form supports a single level");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(WarpX::ncomps == 1,
+        "hybrid_pic_model.esolve = tensor_form supports only the m = 0 "
+        "azimuthal mode in RZ");
+    Geometry const & geom = warpx.Geom(lev);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(geom.isPeriodic(1),
+        "hybrid_pic_model.esolve = tensor_form (RZ) requires periodic z "
+        "(v1)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(geom.ProbLo(0) == 0.0,
+        "hybrid_pic_model.esolve = tensor_form (RZ) requires the domain "
+        "to include the axis (r_min = 0)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_darwin,
+        "hybrid_pic_model.esolve = tensor_form (RZ) does not support the "
+        "darwin split yet (curlcurl E_L != 0 discretely in RZ -- the "
+        "transverse-state sector caveat)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_add_external_fields,
+        "hybrid_pic_model.esolve = tensor_form does not support split "
+        "external fields yet");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_resistivity_has_J_dependence,
+        "hybrid_pic_model.esolve = tensor_form does not support "
+        "J-dependent resistivity yet");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_include_hyper_resistivity_term,
+        "hybrid_pic_model.esolve = tensor_form does not support "
+        "hyper-resistivity yet");
+
+    EnsureTensorScratch();
+
+    auto const dx_arr = geom.CellSizeArray();
+    Real const dr = dx_arr[0];
+    Real const dz = dx_arr[1];
+    Real const rmin = geom.ProbLo(0);
+    Real const inv_dr = 1.0_rt/dr;
+    Real const inv_dz = 1.0_rt/dz;
+    Real const inv_dz2 = inv_dz*inv_dz;
+    Real const dx_min = amrex::min(dr, dz);
+    Real const dt_eff = (m_tensor_dt_eff > 0.0_rt)
+        ? m_tensor_dt_eff : 0.5_rt*warpx.getdt(lev);
+    Real const rho_1c = PhysConst::q_e
+        * ((m_tensor_n_min > 0.0_rt) ? m_tensor_n_min : m_n_floor);
+    Real const me_eff = m_electron_inertia_mass;
+    Real const alpha = m_tensor_alpha;
+    Real const qe = PhysConst::q_e;
+    Real const mu0 = PhysConst::mu0;
+    Real const inv_mu0 = 1.0_rt/mu0;
+    const auto eta = m_eta;
+    Real const t_new = warpx.gett_new(lev);
+    const bool use_eta = include_resistivity;
+    const bool use_gpe = !solve_for_Faraday
+        && m_include_electron_pressure_term;
+
+    // Per-step-frozen density: EVERY rho-derived coefficient and binary
+    // gate below reads this one bit-frozen snapshot (see m_tensor_rho_old).
+    // Solves before the first step-entry capture (initialization) fall
+    // back to the live component-0 deposit.
+    amrex::MultiFab const & rho_g = m_tensor_rho_captured
+        ? *m_tensor_rho_old : rho;
+
+    GpuArray<int, 3> const nodal = {1, 1, 1};
+    GpuArray<int, 3> const coarsen_rr = {1, 1, 1};
+    const GpuArray<int, 3> E_stag[3] =
+        {Ex_IndexType, Ey_IndexType, Ez_IndexType};
+    const GpuArray<int, 3> B_stag[3] =
+        {Bx_IndexType, By_IndexType, Bz_IndexType};
+    const GpuArray<int, 3> J_stag[3] =
+        {Jx_IndexType, Jy_IndexType, Jz_IndexType};
+
+    // Staggered domain bounds: E_r (cc r, nodal z), E_t (nodal),
+    // E_z (nodal r, cc z); plus the nodal box for the closure gate.
+    Box const dom_r = amrex::convert(geom.Domain(),
+                                     Efield[0]->ixType().toIntVect());
+    Box const dom_t = amrex::convert(geom.Domain(),
+                                     Efield[1]->ixType().toIntVect());
+    Box const dom_z = amrex::convert(geom.Domain(),
+                                     Efield[2]->ixType().toIntVect());
+    auto const tlo = amrex::lbound(dom_t);
+    auto const thi = amrex::ubound(dom_t);
+    auto const zlo = amrex::lbound(dom_z);
+    auto const zhi = amrex::ubound(dom_z);
+    Box const dom_nd = amrex::convert(geom.Domain(),
+                                      IntVect::TheNodeVector());
+    auto const nlo = amrex::lbound(dom_nd);
+    auto const nhi = amrex::ubound(dom_nd);
+    int const ihi_nd = nhi.x;
+    auto const & dm = Efield[0]->DistributionMap();
+
+    // Vacuum-closure gate on sub-one-count NODES from the FROZEN nodal
+    // density (direct nodal read -- rho is nodal in RZ). The threshold is
+    // the one-count anchor rho_1c (tensor_n_min / n_floor): a STATISTICS
+    // guard in the anchor taxonomy, not a physics floor -- no density is
+    // ever modified. A strictly-zero gate leaves epsilon-density deposit-
+    // tail rows with near-null poloidal gradient directions (eigenvalue
+    // ~ V kE ~ rho_tail) driven by a NON-rho-scaled RHS (qm B x Je_meas
+    // bleed): the solve then regenerates the unfloored 1/rho division as
+    // an intractable conditioning floor (measured: point-Jacobi BiCGStab
+    // flooring 5 orders above tolerance with restart churn). Gating at
+    // one count hands those rows to the div E = 0 continuation instead;
+    // their (tiny) screening rows stay in the operator, which keeps every
+    // row definite regardless of the gate (closure + screening overlap is
+    // additive in the energy form -- membership mismatch is safe in this
+    // direction, unlike the item-1 null-family direction).
+    MultiFab gam(amrex::convert(warpx.boxArray(lev),
+                                IntVect::TheNodeVector()), dm, 1, 1);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(gam, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        auto const & g = gam.array(mfi);
+        auto const & rho_arr = rho_g.const_array(mfi);
+        const bool zper = geom.isPeriodic(1);
+        Real const rho_gate = rho_1c;
+        amrex::ParallelFor(mfi.tilebox(),
+        [=] AMREX_GPU_DEVICE (int i, int j, int k)
+        {
+            if (!zper && (j <= nlo.y || j >= nhi.y)) {
+                g(i,j,k) = 0.0_rt; return;
+            }
+            g(i,j,k) = (rho_arr(i, j, k, 0) > rho_gate) ? 0.0_rt : 1.0_rt;
+        });
+    }
+    gam.setBndry(0.0_rt);
+    gam.FillBoundary(geom.periodicity());
+
+    // Pointwise coefficients on each component's stagger (comp 0 = a,
+    // 1..3 = beta, 4 = kE) and the V-scaled RHS. Every rho read is the
+    // frozen snapshot through a proper nodal-source Interp.
+    std::array<std::unique_ptr<MultiFab>, 3> coef, rhs;
+    for (int c = 0; c < 3; ++c) {
+        coef[c] = std::make_unique<MultiFab>(
+            Efield[c]->boxArray(), dm, 5, IntVect(0));
+        rhs[c] = std::make_unique<MultiFab>(
+            Efield[c]->boxArray(), dm, 1, IntVect(0));
+    }
+    for (int c = 0; c < 3; ++c) {
+        GpuArray<int, 3> const Sc = E_stag[c];
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(*coef[c], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const & cf  = coef[c]->array(mfi);
+            auto const & rh  = rhs[c]->array(mfi);
+            auto const & e_arr = Efield[c]->array(mfi);
+            auto const & rho_arr = rho_g.const_array(mfi);
+            auto const & pe_arr  = Pe.const_array(mfi);
+            auto const & br_arr = Bfield[0]->const_array(mfi);
+            auto const & bt_arr = Bfield[1]->const_array(mfi);
+            auto const & bz_arr = Bfield[2]->const_array(mfi);
+            auto const & jir_arr = Jifield[0]->const_array(mfi);
+            auto const & jit_arr = Jifield[1]->const_array(mfi);
+            auto const & jiz_arr = Jifield[2]->const_array(mfi);
+            auto const & jpr_arr = m_tensor_jp_old[0]->const_array(mfi);
+            auto const & jpt_arr = m_tensor_jp_old[1]->const_array(mfi);
+            auto const & jpz_arr = m_tensor_jp_old[2]->const_array(mfi);
+            const GpuArray<int, 3> Sr = E_stag[0], St = E_stag[1],
+                Sz = E_stag[2];
+            const GpuArray<int, 3> Br_s = B_stag[0], Bt_s = B_stag[1],
+                Bz_s = B_stag[2];
+            const GpuArray<int, 3> Jr_s = J_stag[0], Jt_s = J_stag[1],
+                Jz_s = J_stag[2];
+            const int cc = c;
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                // Dirichlet identity rows: E_theta axis (regularity) and
+                // wall (PEC), E_z wall (PEC). Zero RHS and warm start.
+                const bool dirichlet =
+                    (cc == 1 && (i <= tlo.x || i >= thi.x))
+                    || (cc == 2 && i >= zhi.x);
+                Real const rho_v = amrex::max(0.0_rt,
+                    Interp(rho_arr, nodal, Sc, coarsen_rr, i, j, k, 0));
+                Real const br = Interp(br_arr, Br_s, Sc, coarsen_rr, i, j, k, 0);
+                Real const bt = Interp(bt_arr, Bt_s, Sc, coarsen_rr, i, j, k, 0);
+                Real const bz = Interp(bz_arr, Bz_s, Sc, coarsen_rr, i, j, k, 0);
+                Real const B2 = br*br + bt*bt + bz*bz;
+                Real const s = dt_eff / (2.0_rt*alpha*dx_min);
+                Real const me_v = amrex::max(me_eff,
+                    B2*qe/(mu0*amrex::max(rho_v, rho_1c)) * s*s);
+                Real const qm = qe/me_v;
+                Real const kE = qm*rho_v;
+                Real const eta_v = use_eta
+                    ? eta(rho_v, 0.0_rt, t_new) : 0.0_rt;
+                Real const a = 1.0_rt + dt_eff*kE*eta_v;
+                Real const ber = dt_eff*qm*br;
+                Real const bet = dt_eff*qm*bt;
+                Real const bez = dt_eff*qm*bz;
+                cf(i, j, k, 0) = a;
+                cf(i, j, k, 1) = ber;
+                cf(i, j, k, 2) = bet;
+                cf(i, j, k, 3) = bez;
+                cf(i, j, k, 4) = kE;
+                if (dirichlet) {
+                    rh(i, j, k) = 0.0_rt;
+                    e_arr(i, j, k) = 0.0_rt;
+                    return;
+                }
+                // Sub-one-count rows: the numerator there is stencil-
+                // support bleed of the wider interpolations (the identity
+                // form's RHS-membership argument) driving near-null
+                // gradient directions -- zero it so the closed operator's
+                // continuation owns those rows (see the gamma gate).
+                if (!(rho_v > rho_1c)) {
+                    rh(i, j, k) = 0.0_rt;
+                    return;
+                }
+                Real const jpr = Interp(jpr_arr, Sr, Sc, coarsen_rr, i, j, k, 0);
+                Real const jpt = Interp(jpt_arr, St, Sc, coarsen_rr, i, j, k, 0);
+                Real const jpz = Interp(jpz_arr, Sz, Sc, coarsen_rr, i, j, k, 0);
+                Real const jir = Interp(jir_arr, Jr_s, Sc, coarsen_rr, i, j, k, 0);
+                Real const jit = Interp(jit_arr, Jt_s, Sc, coarsen_rr, i, j, k, 0);
+                Real const jiz = Interp(jiz_arr, Jz_s, Sc, coarsen_rr, i, j, k, 0);
+                Real const jer = jpr - jir;
+                Real const jet = jpt - jit;
+                Real const jez = jpz - jiz;
+                // grad Pe on the component's stagger: nodal Pe makes the
+                // poloidal two-point differences land exactly on E_r/E_z
+                // (no averaging); no theta gradient at m = 0.
+                Real gpr = 0.0_rt, gpz = 0.0_rt;
+                if (use_gpe && cc == 0) {
+                    gpr = (pe_arr(i+1, j, k) - pe_arr(i, j, k))*inv_dr;
+                } else if (use_gpe && cc == 2) {
+                    gpz = (pe_arr(i, j+1, k) - pe_arr(i, j, k))*inv_dz;
+                }
+                // w = kE eta Jp^n - qm (B x Je_meas) - qm grad Pe
+                Real const wr = kE*eta_v*jpr - qm*(bt*jez - bz*jet) - qm*gpr;
+                Real const wt = kE*eta_v*jpt - qm*(bz*jer - br*jez);
+                Real const wz = kE*eta_v*jpz - qm*(br*jet - bt*jer) - qm*gpz;
+                Real or_, ot_, oz_;
+                TensorMinv(a, ber, bet, bez, wr, wt, wz, or_, ot_, oz_);
+                // Control-volume row scaling (the identity form's): V_r =
+                // r_c dr, V_t = r_n dr, V_z = r_n dr (axis: dr^2/8).
+                Real V;
+                if (cc == 0) {
+                    V = (rmin + (i + 0.5_rt)*dr)*dr;
+                } else if (cc == 1) {
+                    V = (rmin + i*dr)*dr;
+                } else {
+                    V = (i == zlo.x) ? 0.125_rt*dr*dr : (rmin + i*dr)*dr;
+                }
+                rh(i, j, k) = V*((cc == 0) ? or_ : ((cc == 1) ? ot_ : oz_));
+            });
+        }
+    }
+
+    // Axis parity for the scratch r-component ghosts: the E_z axis row's
+    // tensor coupling Interps E_r across the axis (cc r: ghost i maps to
+    // cell -1 - i, odd for m = 0). Applied after each ghost exchange.
+    auto axis_mirror_r = [&](MultiFab& fr)
+    {
+        if (rmin != 0.0_rt) { return; }
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(fr); mfi.isValid(); ++mfi) {
+            Box gbx = mfi.growntilebox();
+            if (gbx.smallEnd(0) >= 0) { continue; }
+            gbx.setBig(0, -1);
+            auto const & arr = fr.array(mfi);
+            amrex::ParallelFor(gbx,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                arr(i, j, k) = -arr(-1 - i, j, k);
+            });
+        }
+    };
+
+    // Fused operator: out_c = inv_mu0 * [V-scaled (curlcurl in)_c
+    // - V grad(gamma div in)|_pol] + V_c kE [M^{-1} in]_c.
+    // Poloidal rows are the composed identity-form rows (W through cell
+    // centers); the toroidal row composes w_r = -d_z E_t (B_r stagger) and
+    // w_z = (1/r_c) d_r (r E_t) (B_z stagger), whose energy gradient
+    // carries the axis regularity through r_0 = 0 (no hand-built branch).
+    auto apply_op = [&](std::array<MultiFab, 3>& out,
+                        std::array<MultiFab, 3>& in)
+    {
+        for (int c = 0; c < 3; ++c) {
+            in[c].FillBoundary(geom.periodicity());
+        }
+        axis_mirror_r(in[0]);
+        for (int c = 0; c < 3; ++c) {
+            GpuArray<int, 3> const Sc = E_stag[c];
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(out[c], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                auto const & o  = out[c].array(mfi);
+                auto const & pr = in[0].const_array(mfi);
+                auto const & pt = in[1].const_array(mfi);
+                auto const & pz = in[2].const_array(mfi);
+                auto const & cf = coef[c]->const_array(mfi);
+                auto const & g  = gam.const_array(mfi);
+                const GpuArray<int, 3> Sr = E_stag[0], St = E_stag[1],
+                    Sz = E_stag[2];
+                const int cc = c;
+                amrex::ParallelFor(mfi.tilebox(),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    // Dirichlet identity rows (see the RHS assembly)
+                    if ((cc == 1 && (i <= tlo.x || i >= thi.x))
+                        || (cc == 2 && i >= zhi.x)) {
+                        auto const & pself =
+                            (cc == 1) ? pt : pz;
+                        o(i,j,k) = pself(i,j,k);
+                        return;
+                    }
+                    Real ell = 0.0_rt;
+                    if (cc == 0) {
+                        Real const rc = rmin + (i + 0.5_rt)*dr;
+                        Real const wp = (pr(i,j+1,k) - pr(i,j,k))*inv_dz
+                                      - (pz(i+1,j,k) - pz(i,j,k))*inv_dr;
+                        Real const wm = (pr(i,j,k) - pr(i,j-1,k))*inv_dz
+                                      - (pz(i+1,j-1,k) - pz(i,j-1,k))*inv_dr;
+                        Real dd = 0.0_rt;
+                        if (g(i,j,k) > 0.0_rt) {
+                            Real f = rc*pr(i,j,k);
+                            if (i > 0) {
+                                f -= (rmin + (i - 0.5_rt)*dr)*pr(i-1,j,k);
+                            }
+                            dd += f/PolNodeVol(i, rmin, dr, ihi_nd)
+                                + (pz(i,j,k) - pz(i,j-1,k))*inv_dz;
+                        }
+                        if (g(i+1,j,k) > 0.0_rt) {
+                            Real f = -rc*pr(i,j,k);
+                            if (i + 1 <= ihi_nd - 1) {
+                                f += (rmin + (i + 1.5_rt)*dr)*pr(i+1,j,k);
+                            }
+                            dd -= f/PolNodeVol(i+1, rmin, dr, ihi_nd)
+                                + (pz(i+1,j,k) - pz(i+1,j-1,k))*inv_dz;
+                        }
+                        ell = -rc*dr*(wp - wm)*inv_dz + rc*dd;
+                    } else if (cc == 2) {
+                        Real const rcp = rmin + (i + 0.5_rt)*dr;
+                        Real const rcm = rmin + (i - 0.5_rt)*dr;
+                        Real const wp = (pr(i,j+1,k) - pr(i,j,k))*inv_dz
+                                      - (pz(i+1,j,k) - pz(i,j,k))*inv_dr;
+                        Real ccv = rcp*wp;
+                        if (i > zlo.x) {
+                            Real const wm =
+                                (pr(i-1,j+1,k) - pr(i-1,j,k))*inv_dz
+                                - (pz(i,j,k) - pz(i-1,j,k))*inv_dr;
+                            ccv -= rcm*wm;
+                        }
+                        if (g(i,j,k) > 0.0_rt || g(i,j+1,k) > 0.0_rt) {
+                            Real const Vn = PolNodeVol(i, rmin, dr, ihi_nd);
+                            Real dd = 0.0_rt;
+                            if (g(i,j,k) > 0.0_rt) {
+                                Real f = rcp*pr(i,j,k);
+                                if (i > 0) { f -= rcm*pr(i-1,j,k); }
+                                dd += f/Vn
+                                    + (pz(i,j,k) - pz(i,j-1,k))*inv_dz;
+                            }
+                            if (g(i,j+1,k) > 0.0_rt) {
+                                Real f = rcp*pr(i,j+1,k);
+                                if (i > 0) { f -= rcm*pr(i-1,j+1,k); }
+                                dd -= f/Vn
+                                    + (pz(i,j+1,k) - pz(i,j,k))*inv_dz;
+                            }
+                            ccv += Vn*dd*inv_dz;
+                        }
+                        ell = ccv;
+                    } else {
+                        // toroidal: V_t (d_z w_r - d_r w_z), w_r/w_z
+                        // recomputed inline from the nodal in_t
+                        Real const rn = rmin + i*dr;
+                        Real const rp = rmin + (i + 1)*dr;
+                        Real const rm = rmin + (i - 1)*dr;
+                        Real const rcp = rmin + (i + 0.5_rt)*dr;
+                        Real const rcm = rmin + (i - 0.5_rt)*dr;
+                        Real const wrp = -(pt(i,j+1,k) - pt(i,j,k))*inv_dz;
+                        Real const wrm = -(pt(i,j,k) - pt(i,j-1,k))*inv_dz;
+                        Real const wzp =
+                            (rp*pt(i+1,j,k) - rn*pt(i,j,k))/(rcp*dr);
+                        Real const wzm =
+                            (rn*pt(i,j,k) - rm*pt(i-1,j,k))/(rcm*dr);
+                        ell = rn*dr*((wrp - wrm)*inv_dz
+                                     - (wzp - wzm)*inv_dr);
+                    }
+                    Real const vr = Interp(pr, Sr, Sc, coarsen_rr, i, j, k, 0);
+                    Real const vt = Interp(pt, St, Sc, coarsen_rr, i, j, k, 0);
+                    Real const vz = Interp(pz, Sz, Sc, coarsen_rr, i, j, k, 0);
+                    Real or_, ot_, oz_;
+                    TensorMinv(cf(i,j,k,0), cf(i,j,k,1), cf(i,j,k,2),
+                               cf(i,j,k,3), vr, vt, vz, or_, ot_, oz_);
+                    Real const tv = (cc == 0) ? or_ : ((cc == 1) ? ot_ : oz_);
+                    Real V;
+                    if (cc == 0) {
+                        V = (rmin + (i + 0.5_rt)*dr)*dr;
+                    } else if (cc == 1) {
+                        V = (rmin + i*dr)*dr;
+                    } else {
+                        V = (i == zlo.x) ? 0.125_rt*dr*dr
+                                         : (rmin + i*dr)*dr;
+                    }
+                    o(i,j,k) = inv_mu0*ell + V*cf(i,j,k,4)*tv;
+                });
+            }
+        }
+    };
+
+    // Jacobi diagonals: the elliptic self-coefficients of the fused rows
+    // (inv_mu0-scaled, closure-gated) plus the tensor's own V-scaled
+    // diagonal; Dirichlet rows get 1.
+    std::array<MultiFab, 3> diag;
+    for (int c = 0; c < 3; ++c) {
+        diag[c].define(Efield[c]->boxArray(), dm, 1, IntVect(0));
+        GpuArray<int, 3> const Sc = E_stag[c];
+        amrex::ignore_unused(Sc);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(diag[c], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const & d  = diag[c].array(mfi);
+            auto const & cf = coef[c]->const_array(mfi);
+            auto const & g  = gam.const_array(mfi);
+            const int cc = c;
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                if ((cc == 1 && (i <= tlo.x || i >= thi.x))
+                    || (cc == 2 && i >= zhi.x)) {
+                    d(i,j,k) = 1.0_rt; return;
+                }
+                Real ell;
+                Real V;
+                if (cc == 0) {
+                    Real const rc = rmin + (i + 0.5_rt)*dr;
+                    Real dv = 0.0_rt;
+                    if (g(i,j,k) > 0.0_rt) {
+                        dv += rc*rc/PolNodeVol(i, rmin, dr, ihi_nd);
+                    }
+                    if (g(i+1,j,k) > 0.0_rt) {
+                        dv += rc*rc/PolNodeVol(i+1, rmin, dr, ihi_nd);
+                    }
+                    ell = 2.0_rt*rc*dr*inv_dz2 + dv;
+                    V = rc*dr;
+                } else if (cc == 2) {
+                    Real rdiag = rmin + (i + 0.5_rt)*dr;
+                    if (i > zlo.x) { rdiag += rmin + (i - 0.5_rt)*dr; }
+                    Real const gsum =
+                        ((g(i,j,k) > 0.0_rt) ? 1.0_rt : 0.0_rt)
+                        + ((g(i,j+1,k) > 0.0_rt) ? 1.0_rt : 0.0_rt);
+                    Real const Vn = PolNodeVol(i, rmin, dr, ihi_nd);
+                    ell = rdiag*inv_dr + gsum*Vn*inv_dz2;
+                    V = (i == zlo.x) ? 0.125_rt*dr*dr : (rmin + i*dr)*dr;
+                } else {
+                    Real const rn = rmin + i*dr;
+                    Real const rcp = rmin + (i + 0.5_rt)*dr;
+                    Real const rcm = rmin + (i - 0.5_rt)*dr;
+                    ell = 2.0_rt*rn*dr*inv_dz2
+                        + rn*rn*(1.0_rt/rcp + 1.0_rt/rcm)*inv_dr;
+                    V = rn*dr;
+                }
+                Real const a = cf(i,j,k,0);
+                Real const bc = cf(i,j,k,1+cc);
+                Real const b2 = cf(i,j,k,1)*cf(i,j,k,1)
+                    + cf(i,j,k,2)*cf(i,j,k,2) + cf(i,j,k,3)*cf(i,j,k,3);
+                Real const tdiag = cf(i,j,k,4)*(a*a + bc*bc)
+                    /(a*(a*a + b2));
+                d(i,j,k) = inv_mu0*ell + V*tdiag;
+            });
+        }
+    }
+
+    auto dot3 = [&](std::array<MultiFab, 3>& u, std::array<MultiFab, 3>& v)
+    {
+        Real s = 0.0_rt;
+        for (int c = 0; c < 3; ++c) {
+            s += MultiFab::Dot(u[c], 0, v[c], 0, 1, 0);
+        }
+        return s;
+    };
+    auto make3 = [&](std::array<MultiFab, 3>& v, int ng)
+    {
+        for (int c = 0; c < 3; ++c) {
+            v[c].define(Efield[c]->boxArray(), dm, 1, IntVect(ng));
+            v[c].setVal(0.0_rt);
+        }
+    };
+    auto prec3 = [&](std::array<MultiFab, 3>& z, std::array<MultiFab, 3>& r)
+    {
+        for (int c = 0; c < 3; ++c) {
+            MultiFab::Copy(z[c], r[c], 0, 0, 1, 0);
+            MultiFab::Divide(z[c], diag[c], 0, 0, 1, 0);
+        }
+    };
+
+    // One-shot discrete verification (hybrid_pic_model.tensor_verify):
+    // the fused rows on a deterministic pseudo-random field vs the
+    // independently composed references through STORED, ghost-exchanged
+    // intermediates -- cc W and gated nodal D for the poloidal pair
+    // (the esolve_pol_verify pattern), the (B_r, B_z)-staggered curl pair
+    // for the toroidal row -- plus the pointwise tensor through a general
+    // 3x3 adjugate inverse (the 1D tensor_verify pattern).
+    if (m_esolve_tensor_verify && !m_esolve_tensor_verified) {
+        m_esolve_tensor_verified = true;
+        std::array<MultiFab, 3> F, AF;
+        for (int c = 0; c < 3; ++c) {
+            F[c].define(Efield[c]->boxArray(), dm, 1, IntVect(1));
+            AF[c].define(Efield[c]->boxArray(), dm, 1, IntVect(0));
+            F[c].setVal(0.0_rt);
+        }
+        for (int c = 0; c < 3; ++c) {
+            const int cc = c;
+            const bool znodal = (E_stag[c][1] == 1);
+            const int nzc = nhi.y - nlo.y;
+            const int jlo_nd = nlo.y;
+            for (MFIter mfi(F[c], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                auto const & f = F[c].array(mfi);
+                amrex::ParallelFor(mfi.tilebox(),
+                [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                {
+                    if ((cc == 1 && (i <= tlo.x || i >= thi.x))
+                        || (cc == 2 && i >= zhi.x)) {
+                        f(i,j,k) = 0.0_rt; return;
+                    }
+                    // periodic z identifies duplicated nodal DOFs: hash
+                    // the wrapped index (single-valued through the ghost
+                    // exchange)
+                    int jw = j;
+                    if (znodal) {
+                        jw = jlo_nd
+                            + (((j - jlo_nd) % nzc) + nzc) % nzc;
+                    }
+                    auto h = static_cast<unsigned int>(i*73856093)
+                           ^ static_cast<unsigned int>(jw*19349663)
+                           ^ (0x9e3779b9u + 0x1234567u*cc);
+                    h = h*1103515245u + 12345u;
+                    f(i,j,k) = Real((h >> 8) & 0xFFFFu)/32768.0_rt
+                        - 1.0_rt;
+                });
+            }
+        }
+        apply_op(AF, F);  // fills F's ghosts (+ axis mirror on F_r)
+        // stored cc W = d_z F_r - d_r F_z
+        MultiFab Wc(amrex::convert(warpx.boxArray(lev),
+                                   amrex::IntVect::TheZeroVector()),
+                    dm, 1, IntVect(1));
+        for (MFIter mfi(Wc, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const & w = Wc.array(mfi);
+            auto const & fr = F[0].const_array(mfi);
+            auto const & fz = F[2].const_array(mfi);
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                w(i,j,k) = (fr(i,j+1,k) - fr(i,j,k))*inv_dz
+                         - (fz(i+1,j,k) - fz(i,j,k))*inv_dr;
+            });
+        }
+        Wc.setBndry(0.0_rt);
+        Wc.FillBoundary(geom.periodicity());
+        // stored gated nodal D = gamma div_pol F
+        MultiFab D(gam.boxArray(), dm, 1, 1);
+        for (MFIter mfi(D, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const & dv = D.array(mfi);
+            auto const & fr = F[0].const_array(mfi);
+            auto const & fz = F[2].const_array(mfi);
+            auto const & g  = gam.const_array(mfi);
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                if (!(g(i,j,k) > 0.0_rt)) { dv(i,j,k) = 0.0_rt; return; }
+                Real f = 0.0_rt;
+                if (i <= ihi_nd - 1) {
+                    f += (rmin + (i + 0.5_rt)*dr)*fr(i,j,k);
+                }
+                if (i > 0) {
+                    f -= (rmin + (i - 0.5_rt)*dr)*fr(i-1,j,k);
+                }
+                dv(i,j,k) = f/PolNodeVol(i, rmin, dr, ihi_nd)
+                    + (fz(i,j,k) - fz(i,j-1,k))*inv_dz;
+            });
+        }
+        D.setBndry(0.0_rt);
+        D.FillBoundary(geom.periodicity());
+        // stored toroidal curl pair: wr on B_r stagger, wz on B_z stagger
+        MultiFab Wr(amrex::convert(warpx.boxArray(lev),
+                                   Bfield[0]->ixType().toIntVect()),
+                    dm, 1, IntVect(1));
+        MultiFab Wz(amrex::convert(warpx.boxArray(lev),
+                                   Bfield[2]->ixType().toIntVect()),
+                    dm, 1, IntVect(1));
+        for (MFIter mfi(Wr, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const & w = Wr.array(mfi);
+            auto const & ft = F[1].const_array(mfi);
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                w(i,j,k) = -(ft(i,j+1,k) - ft(i,j,k))*inv_dz;
+            });
+        }
+        for (MFIter mfi(Wz, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            auto const & w = Wz.array(mfi);
+            auto const & ft = F[1].const_array(mfi);
+            amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                Real const rc = rmin + (i + 0.5_rt)*dr;
+                w(i,j,k) = ((rmin + (i+1)*dr)*ft(i+1,j,k)
+                            - (rmin + i*dr)*ft(i,j,k))/(rc*dr);
+            });
+        }
+        Wr.setBndry(0.0_rt);
+        Wz.setBndry(0.0_rt);
+        Wr.FillBoundary(geom.periodicity());
+        Wz.FillBoundary(geom.periodicity());
+        Real errmax[3] = {0.0_rt, 0.0_rt, 0.0_rt};
+        for (int c = 0; c < 3; ++c) {
+            GpuArray<int, 3> const Sc = E_stag[c];
+            const GpuArray<int, 3> Sr = E_stag[0], St = E_stag[1],
+                Sz = E_stag[2];
+            Real emax = 0.0_rt;
+            Real const afmax = AF[c].norminf(0);
+            for (MFIter mfi(AF[c]); mfi.isValid(); ++mfi) {
+                auto const & af = AF[c].const_array(mfi);
+                auto const & fr = F[0].const_array(mfi);
+                auto const & ft = F[1].const_array(mfi);
+                auto const & fz = F[2].const_array(mfi);
+                auto const & w  = Wc.const_array(mfi);
+                auto const & dv = D.const_array(mfi);
+                auto const & wr = Wr.const_array(mfi);
+                auto const & wz = Wz.const_array(mfi);
+                auto const & cf = coef[c]->const_array(mfi);
+                const int cc = c;
+                auto const & bx0 = mfi.validbox();
+                amrex::LoopOnCpu(bx0, [&] (int i, int j, int k)
+                {
+                    if ((cc == 1 && (i <= tlo.x || i >= thi.x))
+                        || (cc == 2 && i >= zhi.x)) {
+                        return;  // identity rows by construction
+                    }
+                    Real ell_ref;
+                    Real V;
+                    if (cc == 0) {
+                        Real const rc = rmin + (i + 0.5_rt)*dr;
+                        ell_ref = -rc*dr*(w(i,j,k) - w(i,j-1,k))*inv_dz
+                            + rc*(dv(i,j,k) - dv(i+1,j,k));
+                        V = rc*dr;
+                    } else if (cc == 2) {
+                        Real const rcp = rmin + (i + 0.5_rt)*dr;
+                        Real ccv = rcp*w(i,j,k);
+                        if (i > zlo.x) {
+                            ccv -= (rmin + (i - 0.5_rt)*dr)*w(i-1,j,k);
+                        }
+                        Real const Vn = PolNodeVol(i, rmin, dr, ihi_nd);
+                        ccv += Vn*(dv(i,j,k) - dv(i,j+1,k))*inv_dz;
+                        ell_ref = ccv;
+                        V = (i == zlo.x) ? 0.125_rt*dr*dr
+                                         : (rmin + i*dr)*dr;
+                    } else {
+                        Real const rn = rmin + i*dr;
+                        ell_ref = rn*dr*((wr(i,j,k) - wr(i,j-1,k))*inv_dz
+                            - (wz(i,j,k) - wz(i-1,j,k))*inv_dr);
+                        V = rn*dr;
+                    }
+                    Real const a  = cf(i, j, k, 0);
+                    Real const b1 = cf(i, j, k, 1);
+                    Real const b2c = cf(i, j, k, 2);
+                    Real const b3 = cf(i, j, k, 3);
+                    Real const kE = cf(i, j, k, 4);
+                    Real const vr = Interp(fr, Sr, Sc, coarsen_rr,
+                                           i, j, k, 0);
+                    Real const vt = Interp(ft, St, Sc, coarsen_rr,
+                                           i, j, k, 0);
+                    Real const vz = Interp(fz, Sz, Sc, coarsen_rr,
+                                           i, j, k, 0);
+                    Real const m11 = a, m12 = b3, m13 = -b2c;
+                    Real const m21 = -b3, m22 = a, m23 = b1;
+                    Real const m31 = b2c, m32 = -b1, m33 = a;
+                    Real const det = m11*(m22*m33 - m23*m32)
+                        - m12*(m21*m33 - m23*m31)
+                        + m13*(m21*m32 - m22*m31);
+                    Real const minv_v0 = ((m22*m33 - m23*m32)*vr
+                        + (m13*m32 - m12*m33)*vt
+                        + (m12*m23 - m13*m22)*vz)/det;
+                    Real const minv_v1 = ((m23*m31 - m21*m33)*vr
+                        + (m11*m33 - m13*m31)*vt
+                        + (m13*m21 - m11*m23)*vz)/det;
+                    Real const minv_v2 = ((m21*m32 - m22*m31)*vr
+                        + (m12*m31 - m11*m32)*vt
+                        + (m11*m22 - m12*m21)*vz)/det;
+                    Real const tvv = (cc == 0) ? minv_v0
+                        : ((cc == 1) ? minv_v1 : minv_v2);
+                    Real const ref = inv_mu0*ell_ref + V*kE*tvv;
+                    Real const scale = amrex::max(afmax, 1.0e-30_rt);
+                    emax = amrex::max(emax,
+                                      std::abs(af(i, j, k) - ref)/scale);
+                });
+            }
+            amrex::ParallelDescriptor::ReduceRealMax(emax);
+            errmax[c] = emax;
+        }
+        amrex::Print() << "[tensor-verify-rz] max rel row error: r = "
+            << errmax[0] << " t = " << errmax[1] << " z = " << errmax[2]
+            << "\n";
+    }
+
+    // Point-Jacobi preconditioned BiCGStab on the coupled 3-component
+    // system (gyration makes it non-symmetric). Warm start from the
+    // incoming E; tight tolerance -- the solve runs inside FD-Jacobian
+    // probe evaluations. The vacuum-annulus iteration economics are the
+    // identity form's (Jacobi does not see the long-wavelength vacuum
+    // modes; the factored backend is the production follow-up).
+    std::array<MultiFab, 3> x, r0, rr, pv, vv, sv, tv2, zv, yv;
+    make3(x, 1); make3(r0, 0); make3(rr, 0); make3(pv, 1);
+    make3(vv, 0); make3(sv, 1); make3(tv2, 0); make3(zv, 1); make3(yv, 1);
+    for (int c = 0; c < 3; ++c) {
+        MultiFab::Copy(x[c], *Efield[c], 0, 0, 1, 0);
+    }
+    apply_op(vv, x);
+    Real rhs_nrm2 = 0.0_rt;
+    for (int c = 0; c < 3; ++c) {
+        MultiFab::LinComb(r0[c], 1.0_rt, *rhs[c], 0, -1.0_rt, vv[c], 0,
+                          0, 1, IntVect(0));
+        MultiFab::Copy(rr[c], r0[c], 0, 0, 1, 0);
+        rhs_nrm2 += MultiFab::Dot(*rhs[c], 0, *rhs[c], 0, 1, 0);
+    }
+    Real const tol = 1.0e-11_rt
+        * amrex::max(std::sqrt(rhs_nrm2), 1.0e-300_rt);
+    Real rho_o = 1.0_rt, alpha_b = 1.0_rt, omega_b = 1.0_rt;
+    for (int c = 0; c < 3; ++c) { vv[c].setVal(0.0_rt); }
+    int const max_it = 25000;
+    int it = 0;
+    int n_restart = 0;
+    const bool dbg = (std::getenv("WARPX_TENSOR_DEBUG") != nullptr);
+    // Breakdown/drift guard: point-Jacobi BiCGStab on the ill-conditioned
+    // vacuum-annulus composite is prone to (near-)breakdown (rho or
+    // omega denominators collapsing) and to recursion drift of the
+    // recursive residual. Restart from the current (finite) iterate:
+    // recompute the true residual, re-seed the shadow vector, and clear
+    // the directions. Detected BEFORE the update, so x never absorbs a
+    // non-finite step.
+    auto restart = [&]()
+    {
+        apply_op(vv, x);
+        for (int c = 0; c < 3; ++c) {
+            MultiFab::LinComb(rr[c], 1.0_rt, *rhs[c], 0, -1.0_rt, vv[c],
+                              0, 0, 1, IntVect(0));
+            MultiFab::Copy(r0[c], rr[c], 0, 0, 1, 0);
+            pv[c].setVal(0.0_rt);
+            vv[c].setVal(0.0_rt);
+        }
+        rho_o = 1.0_rt; alpha_b = 1.0_rt; omega_b = 1.0_rt;
+        ++n_restart;
+    };
+    auto bad = [](Real v) { return !std::isfinite(v); };
+    for (; it < max_it; ++it) {
+        Real const rnrm = std::sqrt(dot3(rr, rr));
+        if (dbg && (it % 200 == 0)) {
+            amrex::Print() << "[tensor-rz] it " << it << " |r| = " << rnrm
+                << " tol = " << tol << " restarts = " << n_restart
+                << "\n";
+        }
+        if (rnrm <= tol) { break; }
+        if (bad(rnrm)) {
+            // recursive residual corrupted but x is still finite (the
+            // guards below block non-finite updates): resync
+            restart();
+            continue;
+        }
+        // periodic true-residual resync against recursion drift
+        if (it > 0 && (it % 1000 == 0)) { restart(); continue; }
+        Real const rho_n = dot3(r0, rr);
+        Real const beta_b = (rho_n/rho_o)*(alpha_b/omega_b);
+        if (bad(beta_b) || rho_n == 0.0_rt) { restart(); continue; }
+        rho_o = rho_n;
+        for (int c = 0; c < 3; ++c) {
+            MultiFab::Saxpy(pv[c], -omega_b, vv[c], 0, 0, 1, IntVect(0));
+            MultiFab::LinComb(pv[c], 1.0_rt, rr[c], 0, beta_b, pv[c], 0,
+                              0, 1, IntVect(0));
+        }
+        prec3(yv, pv);
+        apply_op(vv, yv);
+        Real const den_a = dot3(r0, vv);
+        alpha_b = rho_n/den_a;
+        if (bad(alpha_b)) { restart(); continue; }
+        for (int c = 0; c < 3; ++c) {
+            MultiFab::LinComb(sv[c], 1.0_rt, rr[c], 0, -alpha_b, vv[c], 0,
+                              0, 1, IntVect(0));
+            MultiFab::Saxpy(x[c], alpha_b, yv[c], 0, 0, 1, IntVect(0));
+        }
+        if (std::sqrt(dot3(sv, sv)) <= tol) { break; }
+        prec3(zv, sv);
+        apply_op(tv2, zv);
+        Real const den_o = dot3(tv2, tv2);
+        omega_b = dot3(tv2, sv)/den_o;
+        if (bad(omega_b) || omega_b == 0.0_rt) {
+            // accept the alpha half-step (already in x), then restart
+            for (int c = 0; c < 3; ++c) {
+                MultiFab::Copy(rr[c], sv[c], 0, 0, 1, 0);
+            }
+            restart();
+            continue;
+        }
+        for (int c = 0; c < 3; ++c) {
+            MultiFab::Saxpy(x[c], omega_b, zv[c], 0, 0, 1, IntVect(0));
+            MultiFab::LinComb(rr[c], 1.0_rt, sv[c], 0, -omega_b, tv2[c], 0,
+                              0, 1, IntVect(0));
+        }
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(it < max_it,
+        "SolveETensorRZ: BiCGStab failed to converge");
+
+    for (int c = 0; c < 3; ++c) {
+        MultiFab::Copy(*Efield[c], x[c], 0, 0, 1, 0);
+        Efield[c]->FillBoundary(geom.periodicity());
+    }
+#endif
+}
+
 void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
                                                   amrex::Real a_dt,
                                                   bool a_from_jacobian)
@@ -3154,32 +5561,9 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
     amrex::Geometry const & geom = warpx.Geom(lev);
     auto const dx_arr = geom.CellSizeArray();
 
-    // Effective electron mass, resolved on first use: the lightest ion
-    // species divided by the reduced mass ratio (physical m_e when the
-    // ratio is unset). The ratio moves the effective electron skin depth
-    // d_e = c/omega_pe(m_e_eff) relative to the grid.
-    if (m_electron_inertia_mass == 0.0_rt) {
-        if (m_reduced_electron_mass_ratio > 0.0_rt) {
-            amrex::Real m_ion_min = std::numeric_limits<amrex::Real>::max();
-            auto & mypc = warpx.GetPartContainer();
-            for (int isp = 0; isp < mypc.nSpecies(); ++isp) {
-                auto & pc = mypc.GetParticleContainer(isp);
-                if (pc.getCharge() != 0.0_rt) {
-                    m_ion_min = std::min(m_ion_min, pc.getMass());
-                }
-            }
-            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                m_ion_min < std::numeric_limits<amrex::Real>::max(),
-                "reduced_electron_mass_ratio requires at least one charged "
-                "ion species");
-            m_electron_inertia_mass = m_ion_min / m_reduced_electron_mass_ratio;
-        } else {
-            m_electron_inertia_mass = PhysConst::m_e;
-        }
-        amrex::Print() << "[HybridPICModel] electron inertia: m_e_eff = "
-            << m_electron_inertia_mass << " kg (mass ratio "
-            << m_reduced_electron_mass_ratio << ")\n";
-    }
+    // Effective electron mass, resolved on first use (see
+    // ResolveElectronInertiaMass).
+    ResolveElectronInertiaMass();
     amrex::Real const me_over_e = m_electron_inertia_mass / PhysConst::q_e;
 
     amrex::MultiFab const & rho = *warpx.m_fields.get(FieldType::rho_fp, lev);
@@ -3299,35 +5683,13 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
         m_inertia_history_levels = 1;
     }
 
-    // amano_form: capture the step-start plasma current (curl B_old) once
+    // curlcurl_form: capture the step-start plasma current (curl B_old) once
     // per step and keep its nodal theta component as the measured
     // reference of the dJe/dt leg. Differencing against B_old (rather
     // than the iterate's B(theta)) is what leaves the iterate's
     // curl-curl-E content on the operator side of the toroidal solve.
-    if (m_esolve_amano) {
-        if (!m_jp_old_nodal) {
-            for (int c = 0; c < 3; ++c) {
-                m_jp_old_stag[c] = std::make_unique<amrex::MultiFab>(
-                    Jp[c]->boxArray(), Jp[c]->DistributionMap(), 1,
-                    Jp[c]->nGrowVect());
-            }
-            m_jp_old_nodal = std::make_unique<amrex::MultiFab>(
-                Ei.boxArray(), Ei.DistributionMap(), 3, amrex::IntVect(1));
-            m_ei_amano_theta = std::make_unique<amrex::MultiFab>(
-                Ei.boxArray(), Ei.DistributionMap(), 3, amrex::IntVect(1));
-            m_num_theta = std::make_unique<amrex::MultiFab>(
-                Ei.boxArray(), Ei.DistributionMap(), 1, amrex::IntVect(1));
-            amrex::MultiFab const & Er_mf = *warpx.m_fields.get(
-                FieldType::Efield_fp, Direction{0}, lev);
-            amrex::MultiFab const & Ez_mf = *warpx.m_fields.get(
-                FieldType::Efield_fp, Direction{2}, lev);
-            m_num_pol[0] = std::make_unique<amrex::MultiFab>(
-                Er_mf.boxArray(), Er_mf.DistributionMap(), 1,
-                amrex::IntVect(1));
-            m_num_pol[1] = std::make_unique<amrex::MultiFab>(
-                Ez_mf.boxArray(), Ez_mf.DistributionMap(), 1,
-                amrex::IntVect(1));
-        }
+    if (m_esolve_curlcurl) {
+        EnsureCurlCurlScratch();
         if (!a_from_jacobian && !m_inertia_jpold_captured) {
             ablastr::fields::VectorField B_old =
                 warpx.m_fields.get_alldirs(FieldType::B_old, lev);
@@ -3407,7 +5769,7 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
     amrex::Real const rmin = geom.ProbLo(0);
 #endif
 
-    const bool amano = m_esolve_amano;
+    const bool curlcurl = m_esolve_curlcurl;
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -3423,8 +5785,8 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
         amrex::GpuArray<int, 3> const sx_th = J_stag[0];
         amrex::GpuArray<int, 3> const sy_th = J_stag[1];
         amrex::GpuArray<int, 3> const sz_th = J_stag[2];
-        if (amano) {
-            eia  = m_ei_amano_theta->array(mfi);
+        if (curlcurl) {
+            eia  = m_ei_curlcurl_theta->array(mfi);
             jpr  = Jp[0]->const_array(mfi);
             jpth = Jp[1]->const_array(mfi);
             jpz  = Jp[2]->const_array(mfi);
@@ -3438,7 +5800,7 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
         {
             amrex::Real const rho_n   = rhona(i, j, k, 0);
             amrex::Real const rho_mid = rhoa(i, j, k, mid);
-            // amano_form: the division-free measured inertia numerator for
+            // curlcurl_form: the division-free measured inertia numerator for
             // the toroidal solve, (m_e/e) dJe_meas/dt, with the measured
             // electron current differenced against the STEP-START plasma
             // current (curl B_old) so the iterate's curl-curl-E content
@@ -3451,7 +5813,7 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
             // vacuum by construction. The taper touches only this
             // fictional source; the operator's screening beta stays
             // unfloored (no pedestal in the dynamics) and nothing divides.
-            if (amano) {
+            if (curlcurl) {
                 amrex::Real const w_src = (taper_w > 0.0_rt)
                     ? 0.5_rt*(1.0_rt + std::tanh(
                         (amrex::max(rho_mid, 0.0_rt) - rho_floor)/taper_w))
@@ -3595,9 +5957,9 @@ void HybridPICModel::ComputeElectronInertiaNodal (amrex::Real a_theta,
     }
     Ei.setBndry(0.0_rt);
     Ei.FillBoundary(geom.periodicity());
-    if (m_esolve_amano) {
-        m_ei_amano_theta->setBndry(0.0_rt);
-        m_ei_amano_theta->FillBoundary(geom.periodicity());
+    if (m_esolve_curlcurl) {
+        m_ei_curlcurl_theta->setBndry(0.0_rt);
+        m_ei_curlcurl_theta->FillBoundary(geom.periodicity());
     }
 #endif
 }
@@ -3687,7 +6049,7 @@ void HybridPICModel::RotateElectronInertiaHistory (amrex::Real a_theta)
     }
 
     // Re-arm the step-start density capture for the next step's first
-    // evaluation (see ComputeElectronInertiaNodal), and the amano_form
+    // evaluation (see ComputeElectronInertiaNodal), and the curlcurl_form
     // step-start plasma-current capture with it.
     m_inertia_rho_n_captured = false;
     m_inertia_jpold_captured = false;

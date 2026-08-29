@@ -131,6 +131,13 @@ void ThetaImplicitHybrid::Define ( WarpX* const a_WarpX, const bool a_from_resta
         }
     }
 
+    // curlcurl_form: the correction's per-evaluation Ohm-solve pair runs
+    // BEFORE the inertia assembly that used to allocate the elliptic
+    // scratch lazily, so allocate it up front (no-op on e_form). Stale
+    // scratch content cancels exactly in the correction's two-pass
+    // difference; unallocated arrays do not.
+    m_hybrid_pic_model->EnsureCurlCurlScratch();
+
     const amrex::ParmParse pp("implicit_evolve");
     pp.query("theta", m_theta);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
@@ -239,6 +246,16 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
 
     m_dt = a_dt;
 
+    // tensor_form: publish the theta interval and snapshot the step-start
+    // plasma current Jp^n = curl(B^n)/mu0 - J_ext (Bfield_fp holds the
+    // committed B^n here). Both are per-step-frozen inputs of the
+    // stateless Je elimination, constant through every residual
+    // evaluation of the step.
+    if (m_hybrid_pic_model->m_esolve_tensor) {
+        m_hybrid_pic_model->m_tensor_dt_eff = m_theta * m_dt;
+        m_hybrid_pic_model->CaptureTensorStepStart();
+    }
+
     // External vector-potential drive, split-field form: the solver state
     // carries the PLASMA fields only, so the field boundary conditions act
     // on the plasma response while the imposed external field rides
@@ -311,6 +328,24 @@ int ThetaImplicitHybrid::OneStep ( const amrex::Real  start_time,
             amrex::MultiFab & rho_fp = *m_WarpX->m_fields.get(FieldType::rho_fp, lev);
             rho_n_store[lev] = std::make_unique<amrex::MultiFab>(rho_fp, amrex::make_alias, 0, 1);
             rho_n_alias.push_back(rho_n_store[lev].get());
+        }
+        // Frozen vacuum-recovery mask density: snapshot the same committed
+        // entry rho the E_L^n solve below consumes, so the recovery/
+        // Faraday-overwrite partition is constant through every residual
+        // evaluation of the step (rho_fp component 0 is a pre-push deposit
+        // that follows the iterate from the second evaluation on -- see
+        // m_darwin_vacuum_recovery_frozen_mask).
+        if (m_vacuum_recovery
+            && m_hybrid_pic_model->m_darwin_vacuum_recovery_frozen_mask) {
+            for (int lev = 0; lev < m_num_amr_levels; ++lev) {
+                amrex::MultiFab const & rho_fp =
+                    *m_WarpX->m_fields.get(FieldType::rho_fp, lev);
+                amrex::MultiFab & rho_mask =
+                    *m_WarpX->m_fields.get("hybrid_rho_vacmask_fp", lev);
+                amrex::MultiFab::Copy(rho_mask, rho_fp, 0, 0, 1,
+                                      amrex::min(rho_mask.nGrowVect(),
+                                                 rho_fp.nGrowVect()));
+            }
         }
         // With electron inertia, the E_L source reads the inertial field
         // at its last converged assembly (t^{n-1+theta}) here -- a
