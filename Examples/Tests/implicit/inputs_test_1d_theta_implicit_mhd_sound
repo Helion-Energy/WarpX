@@ -71,6 +71,7 @@ hybrid_pic_model.include_electron_pressure_term = true
 ######## IMPLICIT MHD STATE ######
 #################################
 
+implicit_mhd.fluid_flux = legacy_e_centered   # pin the legacy E-based scheme (the default is now central)
 implicit_mhd.reference_mass_density = rho0
 implicit_mhd.reference_magnetic_field = B0
 implicit_mhd.gamma_e = gamma

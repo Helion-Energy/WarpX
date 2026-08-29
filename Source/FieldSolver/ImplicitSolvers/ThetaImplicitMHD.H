@@ -1091,7 +1091,12 @@ class ThetaImplicitMHD final : public ImplicitSolver
     std::string m_wall_ledger_file;
     bool m_wall_ledger_started = false;
     amrex::Real m_positivity_safety = 0.99;
-    std::string m_fluid_flux = "centered";
+    // Production default: the recast central/FD flux.
+    // The legacy "legacy_e_centered" (non-recast, E-based) form and every Riemann flux
+    // (rusanov/hllc/hlld) remain explicit opt-ins. Note central requires
+    // a positive implicit_mhd.viscosity (asserted with a clear message):
+    // the flux carries no Riemann dissipation by design.
+    std::string m_fluid_flux = "central";
     // Conservative-form recast (fluid_flux = hlld): B replaces E as the
     // JFNK array block and E is derived from the Riemann EMF + eta J.
     bool m_use_hlld = false;

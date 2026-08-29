@@ -2313,7 +2313,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Advance ion density and momentum. Set False with Hall physics enabled
         and zero ion velocity for an electron-MHD limit.
 
-    fluid_flux: {"centered", "rusanov", "hllc", "hlld", "central"}, optional
+    fluid_flux: {"legacy_e_centered", "rusanov", "hllc", "hlld", "central"}, optional
         hlld is not a production flux (central + viscosity is) and
         requires the explicit opt-in allow_hlld=True (kernel regression
         coverage only).

@@ -1161,7 +1161,7 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_ei_equilibration_centered  # name
     1  # dims
     1  # nprocs
-    "inputs_test_1d_theta_implicit_mhd_ei_equilibration implicit_mhd.fluid_flux=centered implicit_mhd.viscosity=0"  # inputs
+    "inputs_test_1d_theta_implicit_mhd_ei_equilibration implicit_mhd.fluid_flux=legacy_e_centered implicit_mhd.viscosity=0"  # inputs
     "analysis_mhd_ei_equilibration.py diags/diag000000 diags/diag000030 total"  # analysis
     OFF  # checksum
     OFF  # dependency

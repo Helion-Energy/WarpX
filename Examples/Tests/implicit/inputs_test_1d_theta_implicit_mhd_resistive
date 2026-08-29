@@ -82,7 +82,7 @@ implicit_mhd.reference_ion_pressure = 0.0
 implicit_mhd.mass_density(x,y,z) = rho0
 implicit_mhd.electron_pressure(x,y,z) = Pe
 implicit_mhd.evolve_ion_fluid = false
-implicit_mhd.fluid_flux = centered
+implicit_mhd.fluid_flux = legacy_e_centered
 implicit_mhd.include_joule_heating = true
 
 warpx.B_ext_grid_init_style = parse_B_ext_grid_function

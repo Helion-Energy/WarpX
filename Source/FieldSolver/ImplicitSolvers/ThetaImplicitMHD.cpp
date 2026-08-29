@@ -479,12 +479,23 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
                                      "implicit_mhd.mass_density_floor must be positive");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_electron_pressure_floor >= 0.0_rt,
                                      "implicit_mhd.electron_pressure_floor cannot be negative");
+    // RENAMED: the legacy pre-recast E-based scheme is
+    // now "legacy_e_centered". The old name "centered" is a HARD ERROR
+    // (not a silent alias): it is one letter from "central" (the
+    // production recast FD flux) and the two are entirely different
+    // schemes -- an alias would preserve exactly the confusion the
+    // rename removes.
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        m_fluid_flux == "centered" || m_fluid_flux == "rusanov" ||
+        m_fluid_flux != "centered",
+        "implicit_mhd.fluid_flux = centered was RENAMED legacy_e_centered "
+        "(the legacy pre-recast E-based scheme). If you meant the "
+        "production recast FD flux, use central.");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_fluid_flux == "legacy_e_centered" || m_fluid_flux == "rusanov" ||
             m_fluid_flux == "hllc" || m_fluid_flux == "hlld" ||
             m_fluid_flux == "central",
-        "implicit_mhd.fluid_flux must be centered, rusanov, hllc, hlld, "
-        "or central");
+        "implicit_mhd.fluid_flux must be legacy_e_centered, rusanov, "
+        "hllc, hlld, or central");
     m_use_hlld = (m_fluid_flux == "hlld");
     m_use_central = (m_fluid_flux == "central");
     m_use_recast = m_use_hlld || m_use_central;
@@ -659,7 +670,7 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         // gated by test_1d_theta_implicit_mhd_halo_pedestal_central).
         // Only the legacy non-recast centered flux lacks the gates.
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            m_fluid_flux != "centered",
+            m_fluid_flux != "legacy_e_centered",
             "implicit_mhd.halo_pedestal_fraction requires a recast fluid "
             "flux (central, rusanov, hllc, or hlld): the pedestal band is "
             "held by the recast face-flux donor drain gates, which the "
@@ -1708,9 +1719,9 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
             "plasma_resistivity to be constant or time-only (no rho or J "
             "dependence)");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            m_fluid_flux == "centered",
+            m_fluid_flux == "legacy_e_centered",
             "pc_mhd_block with the E-based state currently requires "
-            "implicit_mhd.fluid_flux = centered");
+            "implicit_mhd.fluid_flux = legacy_e_centered");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             m_ion_closure == "barotropic",
             "pc_mhd_block with the E-based state currently requires "
