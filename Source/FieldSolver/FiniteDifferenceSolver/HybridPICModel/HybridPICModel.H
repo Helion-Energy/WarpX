@@ -202,7 +202,11 @@ public:
 
     /** Frozen first-call B references of the e-form (Yee) sponge,
      *  one per component staggering; seeded by ApplySpongeLayerBYee.
-     *  Mutable-by-convention: the class is stateful across substeps. */
+     *  Mutable-by-convention: the class is stateful across substeps.
+     *  RESTART WART: on a mid-stroke checkpoint restart the lazy seed
+     *  re-runs from the RESTORED state, so the damping target retains
+     *  whatever cap-wave content existed at the checkpoint.
+     *  Unround-tripped companion state; sidecar round-trip queued. */
     std::array<std::unique_ptr<amrex::MultiFab>, 3> m_sponge_bref_yee;
     /** Seed latch of the Yee sponge references. */
     bool m_sponge_yee_init = false;
@@ -1103,9 +1107,13 @@ public:
     int m_substep_finite_check_interval = 1;
     /** Sponge reference latch: the reference fields seed from the
      *  stored fields on the first ApplyJeSpongeLayer call (the t = 0
-     *  state on a fresh boot; on a checkpoint restart they re-seed
-     *  from the RESTART state -- the cap-region difference is the
-     *  drive change, carried by the track terms). */
+     *  state on a fresh boot). RESTART WART: on a checkpoint restart
+     *  they re-seed from the RESTORED state -- the track terms carry
+     *  the drive change since t = 0, but any cap-region PLASMA-wave
+     *  content present at the checkpoint is baked into the new
+     *  damping target instead of being damped away. Unround-tripped
+     *  companion state; a sidecar round-trip (hybrid_substeps.dat
+     *  pattern) is the queued fix. */
     bool m_je_sponge_init = false;
 
     /** Semi-implicit E_L relaxation of the relax advance

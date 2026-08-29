@@ -11396,6 +11396,11 @@ void HybridPICModel::ApplySpongeLayerBYee (
             });
         }
     }
+    // Refresh ghost values of the damped B: the next substep's first
+    // stage interpolates B at box edges and the B_old latch copies
+    // ghost layers -- both would read stale pre-sponge ghosts on any
+    // multi-box layout without this exchange.
+    warpx.FillBoundaryB(Bfield[lev][0]->nGrowVect(), std::nullopt);
 }
 
 void HybridPICModel::ApplyJeHyperCurlCurl (
