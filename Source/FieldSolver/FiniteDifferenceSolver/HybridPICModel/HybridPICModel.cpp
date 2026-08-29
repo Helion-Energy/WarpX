@@ -251,6 +251,11 @@ void HybridPICModel::ReadParameters ()
             // a pure function of the iterate or bit-frozen per step).
             pp_hybrid.query("curlcurl_pol_frozen_rho",
                             m_curlcurl_pol_frozen_rho);
+            // One-count membership anchor of the curlcurl_form gates
+            // (see the member documentation; 0 = legacy strictly-zero
+            // gating, bit-identical).
+            utils::parser::queryWithParser(
+                pp_hybrid, "curlcurl_n_min", m_curlcurl_n_min);
             std::string scheme;
             const amrex::ParmParse pp_algo("algo");
             pp_algo.query("evolve_scheme", scheme);
@@ -2239,6 +2244,13 @@ void HybridPICModel::SolveEThetaCurlCurlRZ (amrex::MultiFab& Etheta,
     // rhs scale applied by the caller convention: rhs = mu0 e/m_e * num;
     // the metric multiply-through by r happens here for both sides.
     Real const rhs_fac = PhysConst::mu0 * PhysConst::q_e / me_eff;
+    // One-count RHS membership anchor (hybrid_pic_model.curlcurl_n_min;
+    // 0 = legacy ungated rows): sub-one-count rows would otherwise solve
+    // E_theta from interpolation-bleed content against the bare 1/r
+    // screening -- the unfloored division resurfacing on deposit-tail
+    // rows. No gamma family here (the toroidal sector has no gradient
+    // null space); the row keeps its (regular) operator.
+    Real const rho_1c = PhysConst::q_e * m_curlcurl_n_min;
 
     // Coefficients: nodal acoef = r*beta + 1/r (the 1/r is the metric-
     // absorbed 1/r^2 vector-Helmholtz term; at the axis node the row is a
@@ -2272,7 +2284,8 @@ void HybridPICModel::SolveEThetaCurlCurlRZ (amrex::MultiFab& Etheta,
                        + rho_arr(i, j-1, k, rho_comp)
                        + rho_arr(i-1, j-1, k, rho_comp)));
             a_arr(i, j, k) = r*beta_fac*rho_n + 1.0_rt/r;
-            r_arr(i, j, k) = r*rhs_fac*num_arr(i, j, k);
+            r_arr(i, j, k) = (rho_1c <= 0.0_rt || rho_n > rho_1c)
+                ? r*rhs_fac*num_arr(i, j, k) : 0.0_rt;
         });
     }
 #ifdef AMREX_USE_OMP
@@ -2474,6 +2487,12 @@ void HybridPICModel::SolveEPolCurlCurlRZ (amrex::MultiFab& Er,
     Real const beta_fac = PhysConst::mu0 * PhysConst::q_e
         / m_electron_inertia_mass;
     Real const rhs_fac = beta_fac;
+    // One-count membership anchor (hybrid_pic_model.curlcurl_n_min;
+    // 0 = legacy strictly-zero gating). Sub-anchor rows keep their tiny
+    // screening in the operator but take a zeroed RHS and the gamma
+    // div E = 0 completion as content -- the SolveETensorRZ recipe (a
+    // statistics guard, never a density modification).
+    Real const rho_1c = PhysConst::q_e * m_curlcurl_n_min;
     const bool z_periodic = geom.isPeriodic(1);
     Real const inv_dr = 1.0_rt/dr;
     Real const inv_dz = 1.0_rt/dz;
@@ -2523,7 +2542,7 @@ void HybridPICModel::SolveEPolCurlCurlRZ (amrex::MultiFab& Er,
                 0.5_rt*(rho_arr(i, j, k, rho_comp)
                       + rho_arr(i, j-1, k, rho_comp)));
             a_arr(i, j, k) = beta_fac*rho_p*V;
-            b_arr(i, j, k) = (rho_p > 0.0_rt)
+            b_arr(i, j, k) = (rho_p > rho_1c)
                 ? V*rhs_fac*num_arr(i, j, k) : 0.0_rt;
         });
     }
@@ -2548,7 +2567,7 @@ void HybridPICModel::SolveEPolCurlCurlRZ (amrex::MultiFab& Er,
                 0.5_rt*(rho_arr(i, j, k, rho_comp)
                       + rho_arr(amrex::max(i-1, zlo.x), j, k, rho_comp)));
             a_arr(i, j, k) = beta_fac*rho_p*V;
-            b_arr(i, j, k) = (rho_p > 0.0_rt)
+            b_arr(i, j, k) = (rho_p > rho_1c)
                 ? V*rhs_fac*num_arr(i, j, k) : 0.0_rt;
         });
     }
@@ -2644,7 +2663,9 @@ void HybridPICModel::SolveEPolCurlCurlRZ (amrex::MultiFab& Er,
                                + rho_arr(i, j-1, k, rho_comp)
                                + rho_arr(i-1, j-1, k, rho_comp));
             }
-            g(i,j,k) = (rho_n > 0.0_rt) ? 0.0_rt : 1.0_rt;
+            // anchored gate: sub-one-count nodes take the div E = 0
+            // completion (rho_1c = 0 reproduces the strictly-zero gate)
+            g(i,j,k) = (rho_n > rho_1c) ? 0.0_rt : 1.0_rt;
         });
     }
     gam.setBndry(0.0_rt);

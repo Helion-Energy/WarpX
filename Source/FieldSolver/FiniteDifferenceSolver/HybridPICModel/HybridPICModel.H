@@ -1061,6 +1061,24 @@ public:
      *  only). */
     bool m_curlcurl_pol_frozen_rho = true;
 
+    /** One-count membership anchor [m^-3] of the curlcurl_form gates
+     *  (hybrid_pic_model.curlcurl_n_min; rho_1c = q_e * curlcurl_n_min).
+     *  Strictly-zero gating (the default, 0 = the legacy behavior) leaves
+     *  epsilon deposit-tail rows -- tiny-but-positive staggered density --
+     *  as near-null gradient directions: their screening is
+     *  a = beta rho_p V with an RHS of interpolation bleed, i.e. the
+     *  unfloored E = num/rho_p division resurfacing (measured as
+     *  radial-Nyquist E_r striping in the vacuum region integrated into
+     *  secular B_theta checkering), and they are excluded from the gamma
+     *  closure. With the anchor set to the one-macroparticle-per-cell
+     *  density (a STATISTICS guard in the anchor taxonomy -- never a
+     *  physics floor, no density is modified), sub-one-count rows keep
+     *  their (tiny, sign-definite) screening in the operator but take the
+     *  vacuum div E = 0 completion as their content and a zeroed RHS --
+     *  the SolveETensorRZ recipe. Gates keep reading the per-step-frozen
+     *  snapshot; the anchor is a constant (iron rule). */
+    amrex::Real m_curlcurl_n_min = 0.0;
+
     /** E-solve form "tensor_form": the stateless Je elimination on the
      *  curl-curl base. The theta-level electron momentum equation
      *  (backward Euler over dt_eff = theta dt, division-free, Amano,

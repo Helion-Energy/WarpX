@@ -4341,6 +4341,28 @@ Maxwell solver: kinetic-fluid hybrid
     gradient null family on edge cells whose deposit tail vacates mid-step). ``0`` restores
     the legacy live-density coupling for A/B comparison.
 
+.. pp:param:: hybrid_pic_model.curlcurl_n_min
+    :type: ``float`` (number density, m\ :sup:`-3`)
+    :default: ``0``
+    :optional:
+
+    One-count membership anchor of the ``esolve = curlcurl_form`` gates
+    (:math:`\rho_{1c} = e\,n_\mathrm{min}`), the ``tensor_n_min`` recipe ported to the
+    identity-form solves. With the default strictly-zero gating, deposit-tail rows with
+    tiny-but-positive staggered density keep the multiplied-through row
+    :math:`a = \beta \rho_p V` against an interpolation-bleed RHS — the unfloored
+    :math:`E = \mathrm{num}/\rho_p` division resurfacing as near-null gradient directions
+    excluded from the vacuum-Gauss :math:`\gamma` closure (measured as radial-Nyquist
+    :math:`E_r` striping in the vacuum region, integrated by Faraday into secularly growing
+    :math:`B_\theta` checkering). With the anchor set to the one-macroparticle-per-cell
+    density, sub-one-count rows keep their (tiny, sign-definite) screening in the operator
+    but take a zeroed RHS and the :math:`\nabla\cdot\mathbf{E} = 0` completion as their
+    content; the toroidal solve zeroes the analogous sub-anchor RHS rows (no :math:`\gamma`
+    family there). A statistics guard in the anchor taxonomy — never a density
+    modification; physics features must not anchor here. All gates keep reading the
+    per-step-frozen density snapshot. ``pc_curlcurl_banded`` mirrors the anchored gates
+    identically.
+
 .. pp:param:: hybrid_pic_model.darwin_vacuum_recovery
     :type: ``bool``
     :default: ``false``
