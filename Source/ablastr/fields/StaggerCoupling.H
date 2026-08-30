@@ -68,10 +68,13 @@
  *    parity fields vanish linearly there.
  *
  *  A runtime self-check (adjointness to roundoff) is provided; the
- *  consumers run it once at coupling boot. It exercises the
- *  UNCLAMPED Cartesian-weighted pair on a single box; the clamped
- *  rings and the cylindrical radial weights rest on the analysis
- *  above, not on the check.
+ *  consumers run it once at coupling boot. Three passes: the
+ *  Cartesian-weighted identity, the cylindrical-weighted identity,
+ *  and constant preservation with the r-hi clamp active -- see the
+ *  AdjointSelfCheck doc for the measured coverage limits (single
+ *  box; the axis-degenerate scatter fallback and ghost-trap
+ *  detection are NOT exercised; z-face clamps share the r-face
+ *  code path).
  */
 namespace ablastr::fields
 {
@@ -250,16 +253,26 @@ namespace ablastr::fields
      *      (boundary stencils of a finite box are a property of the
      *      box, not the pair);
      *   2. the same identity under the CYLINDRICAL radial weights
-     *      (rmin = 0, so the axis column and the axis-degenerate
-     *      scatter fallback sit inside the tested region);
+     *      (rmin = 0). COVERAGE LIMIT: for an r-offset prototype
+     *      (Er) the scatter denominators are >= 1, so the
+     *      axis-degenerate den == 0 fallback never executes here,
+     *      and the r-weights annihilate the axis column's
+     *      contribution -- the fallback branch (hit in production
+     *      by r-nodal components) rests on inspection, not on this
+     *      check;
      *   3. constant preservation of BOTH maps with the r-hi domain
      *      CLAMP active on the gather: G(1) = 1 on every valid node
      *      including the clamped face ring (a clamped average of a
      *      constant is the constant), and S(1) = 1 on every valid
-     *      staggered point including the axis ring.
-     *  Passes 2 and 3 cover the production (RZ, wall-clamped)
-     *  configuration that the plain Cartesian identity alone does
-     *  not reach. */
+     *      staggered point including the axis ring. COVERAGE LIMIT:
+     *      the constant fills ghosts too, so this catches clamp
+     *      weight/count errors but NOT a clamp that wrongly reads
+     *      unmaintained ghosts; only the r-hi face is exercised
+     *      (the z-face clamps share the identical code path).
+     *  Passes 2 and 3 extend the plain Cartesian identity toward
+     *  the production (RZ, wall-clamped) configuration within the
+     *  stated limits; single-box by design (interface-node
+     *  double-counting is a property of plain dot products). */
     inline amrex::Real
     AdjointSelfCheck (
         amrex::MultiFab const & staggered_proto)
@@ -357,19 +370,22 @@ namespace ablastr::fields
         ScatterFromNodes(Sg, g, /*cyl=*/true, 0.0_rt);
         Gu.plus(-1.0_rt, 0, 1, 0);
         Sg.plus(-1.0_rt, 0, 1, 0);
+        // Device-safe valid-region max: the Array4 points at device
+        // memory on GPU builds, so a host loop over it is a crash or
+        // a garbage read -- reduce on the device instead.
         auto vmax = [] (MultiFab const & mf) {
-            amrex::Real m = 0.0_rt;
+            amrex::ReduceOps<amrex::ReduceOpMax> rop;
+            amrex::ReduceData<amrex::Real> rdata(rop);
+            using RT = typename decltype(rdata)::Type;
             for (MFIter mfi(mf); mfi.isValid(); ++mfi) {
                 auto const& a4 = mf.const_array(mfi);
-                amrex::Real fm = 0.0_rt;
-                amrex::LoopOnCpu(mfi.validbox(),
-                    [&] (int i, int j, int k) {
-                    fm = amrex::max(fm,
-                        amrex::Math::abs(a4(i,j,k)));
-                });
-                m = amrex::max(m, fm);
+                rop.eval(mfi.validbox(), rdata,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) -> RT
+                    {
+                        return {amrex::Math::abs(a4(i,j,k))};
+                    });
             }
-            return m;
+            return amrex::get<0>(rdata.value(rop));
         };
         worst = amrex::max(worst, vmax(Gu));
         worst = amrex::max(worst, vmax(Sg));

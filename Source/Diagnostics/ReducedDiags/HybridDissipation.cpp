@@ -348,11 +348,17 @@ HybridDissipation::ComputeDiags (const int step)
         amrex::ReduceOps<amrex::ReduceOpSum> rop;
         amrex::ReduceData<amrex::Real> rdata(rop);
         using RT = typename decltype(rdata)::Type;
+        // The owner masks must outlive the whole comp loop: rop.eval
+        // is asynchronous on GPU and rdata.value() below is the only
+        // sync point -- a per-iteration mask could be freed while a
+        // kernel still reads it.
+        std::vector<std::unique_ptr<amrex::iMultiFab>> masks;
         for (int comp = 0; comp < 3; ++comp) {
             const amrex::IntVect wt_iv = B[comp]->ixType().toIntVect();
             const amrex::Box w_int = interior(wt_iv);
-            const auto mask = amrex::OwnerMask(*B[comp],
-                                               geom.periodicity());
+            masks.push_back(amrex::OwnerMask(*B[comp],
+                                             geom.periodicity()));
+            const auto & mask = masks.back();
             // target staggering of this face component
             amrex::GpuArray<int,3> tstag{1,1,1};
             for (int d = 0; d < AMREX_SPACEDIM; ++d) {

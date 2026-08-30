@@ -1433,7 +1433,12 @@ public:
      *  the local solve) and measured on the whistler gate at 0.186%
      *  on the inertia branch, gap fraction 1.00 (the BE-Lie record
      *  is 0.696%/0.99; the retired fully explicit staggered interim
-     *  scored 0.287 - 0.303%). Being neutral, the scheme exposes
+     *  scored 0.287 - 0.303%). Gate records quote the deck-default
+     *  bilinear-filter-ON configuration; same-binary filter-off
+     *  measures CN 0.359% / e-form 0.175% -- the filter shifts the
+     *  two esolve forms in OPPOSITE directions (both gate-safe), so
+     *  cross-form gate comparisons must state the filter setting.
+     *  Being neutral, the scheme exposes
      *  dynamics BE silently damped: with the qn pin off, a
      *  c_art-resonant parametric decay of the artificial longitudinal
      *  E_L branch (three-wave, spectrally identified on the 1D

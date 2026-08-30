@@ -985,6 +985,13 @@ void HybridPICModel::ReadParameters ()
             m_je_eee_stride >= 0,
             "hybrid_pic_model.je_eee_stride cannot be negative "
             "(0 = automatic, matched to the conduction CFL)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !(m_je_eee && m_je_adaptive),
+            "hybrid_pic_model.je_eee is incompatible with je_adaptive "
+            "in this version: the adaptive coupled cycle advances the "
+            "fine-level conduction but does not apply the fine-level "
+            "energy sources, so arming both would silently drop the "
+            "Joule/exchange heating");
     }
 }
 
