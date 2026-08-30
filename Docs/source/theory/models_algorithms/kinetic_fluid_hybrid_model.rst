@@ -364,7 +364,7 @@ MLMG can still stop early if it reaches its internal machine-precision
 residual threshold.
 
 This first version is restricted to one Cartesian, periodic AMR level, a
-staggered field grid, ``implicit_mhd.fluid_flux = centered``, and zero
+staggered field grid, ``implicit_mhd.fluid_flux = legacy_e_centered``, and zero
 hyper-resistivity. Ions may evolve or be frozen, and the Hall and
 electron-pressure Ohm terms may be enabled independently. Resistivity may be
 constant or time dependent; density, current, and per-species dependence is
@@ -398,8 +398,10 @@ acoustic, Alfvén, and magnetosonic dynamics; it does not establish
 grid-independent robustness for discontinuities or checkerboard modes.
 
 The fluid divergence is evaluated from one shared face flux, so mass and
-fluid momentum telescope conservatively on the periodic mesh. The default
-``implicit_mhd.fluid_flux = centered`` option retains a second-order centered
+fluid momentum telescope conservatively on the periodic mesh. The
+``implicit_mhd.fluid_flux = legacy_e_centered`` option (the legacy pre-recast
+E-based scheme, formerly named ``centered``; the default is now ``central``,
+the conservative-form recast flux) retains a second-order centered
 operator for smooth, low-dissipation verification. The optional ``rusanov``
 flux adds piecewise-constant local Lax--Friedrichs dissipation using the
 ion/electron acoustic and advective speeds. Newton updates and matrix-free

@@ -657,7 +657,8 @@ Overall simulation parameters
             still stop early at its internal machine-precision residual
             threshold.
 
-            With the E-based state (``implicit_mhd.fluid_flux = centered``),
+            With the E-based state
+            (``implicit_mhd.fluid_flux = legacy_e_centered``),
             the prototype requires one Cartesian, periodic AMR level,
             ``warpx.grid_type = staggered``, and
             zero ``hybrid_pic_model.plasma_hyper_resistivity``. Resistivity
@@ -758,6 +759,17 @@ Overall simulation parameters
               frozen-coefficient preconditioner lag; the factorization
               dominates the banded cost), ``newton`` refactors at every
               preconditioner update.
+            - ``pc_mhd_block.resistive_refreeze`` (``string``, default:
+              empty): shared refreeze-cadence override honored by BOTH
+              resistive backends. Empty (the default) preserves each
+              branch's legacy cadence (``banded`` follows
+              ``banded_refreeze``; ``direct`` refactors at every
+              preconditioner update); ``step`` or ``newton`` forces
+              that cadence on whichever resistive solver is active —
+              ``step`` on the ``direct``/cuDSS path buys the
+              banded-style once-per-step frozen-coefficient lag at
+              cuDSS factor cost. When set, it takes precedence over
+              ``banded_refreeze``.
             - ``pc_mhd_block.resistive_validate_assembly`` (``bool``,
               default: false): hlld only; at every active preconditioner
               update, assemble the direct solver's sparse rows and check
@@ -4372,8 +4384,8 @@ Jacobian probes.
     boundaries, runtime load balancing, hybrid external currents,
     Holmstrom vacuum regions, particle mass matrices, and existing field-only
     preconditioners are not supported. The prototype ``pc_mhd_block``
-    preconditioner is available only with staggered fields, centered fluid
-    fluxes, and zero hyper-resistivity. It supports evolving or frozen ions and
+    preconditioner is available only with staggered fields, the
+    ``legacy_e_centered`` fluid flux, and zero hyper-resistivity. It supports evolving or frozen ions and
     permits the Hall and electron-pressure Ohm terms, but its first Hall block
     is a constant-coefficient spectral-magnitude approximation rather than a
     full multidimensional electron-subsystem solve. Its scalar reference
@@ -5019,12 +5031,39 @@ Jacobian probes.
     nonlinear solve and re-evaluated at the end of the step for the
     floor restoration.
 
+.. pp:param:: implicit_mhd.pinned_cell_report_max
+    :type: ``int``
+    :default: ``16``
+
+    Maximum number of clamped (pinned) cells listed when a Newton
+    line-search failure triggers the free-subspace rescue (see
+    ``newton.max_frozen_steps``): up to this many cells from the last
+    admissibility projection's active-set masks are printed, one line
+    per cell — block name, cell index, and physical cell-center
+    coordinates — rank-locally (each rank lists its own cells) and
+    rate-limited so a long frozen plateau does not flood the log.
+    ``0`` disables the listing; the global per-block pinned counts of
+    the projection report are printed either way.
+
 .. pp:param:: implicit_mhd.fluid_flux
     :type: ``string``
-    :default: ``centered``
+    :default: ``central``
 
-    Fluid face flux. ``centered`` gives the second-order, low-dissipation
-    operator used by smooth-wave verification. ``rusanov`` uses a
+    Fluid face flux: one of ``legacy_e_centered``, ``rusanov``,
+    ``hllc``, ``hlld`` (opt-in via ``implicit_mhd.allow_hlld``, see
+    below), or ``central`` (the default). The pre-recast name
+    ``centered`` was RENAMED ``legacy_e_centered`` (the legacy E-based
+    scheme) and is a HARD ERROR, not a silent alias: it is one letter
+    from ``central`` (the production recast flux) and the two are
+    entirely different schemes. The default ``central`` requires a
+    positive :pp:param:`implicit_mhd.viscosity` (the central flux
+    carries no Riemann dissipation by design), so a deck that sets
+    neither ``fluid_flux`` nor ``viscosity`` aborts at setup with a
+    migration message: set the viscosity, or select another flux
+    explicitly.
+
+    ``legacy_e_centered`` gives the second-order, low-dissipation
+    E-based operator used by smooth-wave verification. ``rusanov`` uses a
     piecewise-constant local Lax--Friedrichs flux for conservative,
     nonoscillatory fluid transport. ``hllc`` uses a contact-preserving
     HLLC flux: stationary contacts and held equilibria are not diffused
@@ -5261,13 +5300,31 @@ Jacobian probes.
     standard collision times, and the Braginskii magnetization fits for
     :math:`\chi_\perp` in :math:`x = (\Omega\tau)^2` (exactly
     :math:`\chi_\parallel` at :math:`x = 0`, so the unmagnetized limit
-    reproduces the isotropic flux). The tangential gradient uses the
-    standard 4-cell corner stencil. Mutually exclusive with the
+    reproduces the isotropic flux). The tangential gradient of the
+    cross term uses the corner stencil selected by
+    :pp:param:`implicit_mhd.braginskii_tangential_limiter`
+    (minmod-limited by default). Mutually exclusive with the
     constant/parser diffusivities; requires ``fluid_flux = hlld`` or
     ``central`` and a positive ``electron_pressure_floor``. At a shaped
     thermal wall the interface faces keep the one-sided isotropic drain
     (with the tensor's nn projection as its scalar :math:`\chi`); the
     tensor is never extended across the wall interface.
+
+.. pp:param:: implicit_mhd.braginskii_tangential_limiter
+    :type: ``string``
+    :default: ``minmod``
+
+    Slope treatment of the tangential-gradient corner stencil in the
+    Braginskii cross term :math:`(\chi_\parallel -
+    \chi_\perp)\,\hat{b}_n\,(\hat{b}\cdot\nabla e)`
+    (``thermal_conduction_model = braginskii`` only). ``minmod`` (the
+    default) builds the tangential slope from the monotone
+    Sharma--Hammett minmod pairs (Sharma & Hammett, JCP 227 (2007)
+    123): the cross-term flux vanishes at tangential extrema, so the
+    tensor flux cannot create new extrema — the centered corner
+    stencil is non-monotone and, at clamp-forced anisotropy, carried a
+    measured wall-ledger heating runaway. ``none`` selects the legacy
+    centered corner average.
 
 .. pp:param:: implicit_mhd.conduction_coulomb_log
     :type: ``float``
@@ -5283,7 +5340,12 @@ Jacobian probes.
 
     Optional absolute floor in m^2/s on the Braginskii
     :math:`\chi_\parallel` and :math:`\chi_\perp` (smooth-max, applied
-    per channel before the free-streaming limiter).
+    per channel before the free-streaming limiter). This shared bound
+    is in the solver's OPERATOR convention (it is applied to
+    :math:`\chi` as the internal-energy diffusion coefficient,
+    unconverted); see
+    :pp:param:`implicit_mhd.conduction_chi_par_min` for the
+    per-component, physical-convention bounds that override it.
 
 .. pp:param:: implicit_mhd.conduction_chi_max
     :type: ``float``
@@ -5293,7 +5355,56 @@ Jacobian probes.
     :math:`\chi_\parallel` and :math:`\chi_\perp`: a :math:`C^2` soft
     clip with knee width ``chi_max/10`` (exact pass-through below
     ``0.9 chi_max``), applied per channel before the free-streaming
-    limiter.
+    limiter. Operator convention, like ``conduction_chi_min``.
+
+.. pp:param:: implicit_mhd.conduction_chi_par_min
+    :type: ``float``
+    :default: ``-1`` (inherit)
+
+    Per-component clamp bounds in m^2/s on the Braginskii
+    diffusivities: ``conduction_chi_par_min``/``_max`` bound
+    :math:`\chi_\parallel` and ``conduction_chi_perp_min``/``_max``
+    bound :math:`\chi_\perp`, with the same smooth-max floor and
+    :math:`C^2` soft cap as the shared clamps above. Unlike the legacy
+    shared ``conduction_chi_min``/``conduction_chi_max`` (which keep
+    their historical operator-convention meaning), the per-component
+    bounds are DEFINED in the physical :math:`\kappa/(n k_B)`
+    convention of Braginskii's tables and converted internally by the
+    per-species :math:`(\gamma - 1)` factor of the internal-energy
+    flux operator, so the reference code's ``xil*_mn/mx``/``xip*_mn/mx`` values drop
+    in unchanged. ``-1`` (the default) inherits the corresponding
+    shared ``conduction_chi_min``/``conduction_chi_max`` value,
+    unconverted, so decks that set none of the four keep the
+    shared-clamp bounds. Independently of these knobs, after the
+    clamps (and the perp-only boosts below) the ordering guard
+    :math:`\chi_\parallel \geq \chi_\perp` is ALWAYS re-applied per
+    channel (the reference code's ``ntb.f90`` ``xil = MAX(xil, xip)``), so
+    separately clamped or perp-boosted components cannot invert the
+    tensor anisotropy — note the guard can raise
+    :math:`\chi_\parallel` in decks whose ``conduction_qs_chi`` or
+    ``conduction_halo_boost`` pushes the boosted :math:`\chi_\perp`
+    above it, even with all four knobs at their defaults.
+
+.. pp:param:: implicit_mhd.conduction_chi_par_max
+    :type: ``float``
+    :default: ``-1`` (inherit)
+
+    Physical-convention cap on the Braginskii :math:`\chi_\parallel`;
+    see :pp:param:`implicit_mhd.conduction_chi_par_min`.
+
+.. pp:param:: implicit_mhd.conduction_chi_perp_min
+    :type: ``float``
+    :default: ``-1`` (inherit)
+
+    Physical-convention floor on the Braginskii :math:`\chi_\perp`;
+    see :pp:param:`implicit_mhd.conduction_chi_par_min`.
+
+.. pp:param:: implicit_mhd.conduction_chi_perp_max
+    :type: ``float``
+    :default: ``-1`` (inherit)
+
+    Physical-convention cap on the Braginskii :math:`\chi_\perp`;
+    see :pp:param:`implicit_mhd.conduction_chi_par_min`.
 
 .. pp:param:: implicit_mhd.conduction_qs_chi
     :type: ``float``
@@ -5564,7 +5675,7 @@ Jacobian probes.
     and the cell-centered Joule heating :math:`\eta J^2` of the PEC
     surface current meets the (possibly anomalous) plasma resistivity at
     the near-floor wall-band density — an unbounded spurious heat source
-    inside the metal. Either active mode upgrades the masked band to a
+    inside the metal. Any active mode upgrades the masked band to a
     RIGID conductor: every fluid increment inside masked cells is zero,
     the stair interface faces drain the interior one-sidedly (what
     crosses is gone: mass, momentum, enthalpy — the fluid analog of an
@@ -5601,25 +5712,39 @@ Jacobian probes.
     FRC formation ladder: the reservoir heats the machine's entire
     near-floor wall rim on the sub-step cell-diffusion time while the
     contact hot spots drain at many times the free-streaming flux —
-    conduction-type Newton hostility on every wall face at once. The
-    mask is static geometry, so all of this is smooth in the state for
-    the JFNK probes.
+    conduction-type Newton hostility on every wall face at once.
+    ``dirichlet`` PINS the interface temperature instead (the reference code's
+    ``t_bc = 'd'`` contract): a TWO-SIDED conductive exchange against
+    the ``wall_temperature`` bath at the half-cell Dirichlet distance
+    (the wall value sits ON the interface, not one cell in), so the
+    bath restores sub-T_wall cells as well as draining hot ones. The
+    exchange is free-streaming capped in BOTH directions (the same
+    harmonic cap as the ``temperature`` drain — the fatality above was
+    the two-sided exchange WITHOUT the cap), and the pin target is
+    anchored at the reachable set, the maximum of ``wall_temperature``
+    and the corresponding temperature-floor image, so the pin never
+    fights the admissibility projection's floor ratchet. Like
+    ``temperature``, it requires ``wall_temperature`` and a conduction
+    channel. The mask is static geometry, so all of this is smooth in
+    the state for the JFNK probes.
 
 .. pp:param:: implicit_mhd.wall_temperature
     :type: ``float`` (eV)
 
     Wall reservoir temperature of
-    ``implicit_mhd.wall_thermal_bc = temperature`` (required there, in
-    eV; an error in the other modes). Applied to both the electron and
-    ion conduction channels. The drain's smooth gate closes at the
-    maximum of ``wall_temperature`` and the corresponding
+    ``implicit_mhd.wall_thermal_bc = temperature`` or ``dirichlet``
+    (required in both, in eV; an error in the other modes). Applied to
+    both the electron and ion conduction channels. The drain's smooth
+    gate closes at the maximum of ``wall_temperature`` and the
+    corresponding
     :pp:param:`implicit_mhd.electron_temperature_floor` /
     :pp:param:`implicit_mhd.ion_temperature_floor` — the reachable set
     of the admissibility projection — so a ``wall_temperature`` below
     an active temperature floor cools the wall-adjacent plasma to the
     FLOOR temperature only (a rank-0 warning reports the
     mis-configuration; the reservoir value below the floor is
-    unreachable by construction).
+    unreachable by construction). Under ``dirichlet`` the same
+    reachable anchor is the pin target itself.
 
 .. pp:param:: implicit_mhd.wall_band_eta_override
     :type: ``float`` (Ohm m)
@@ -5952,6 +6077,30 @@ Jacobian probes.
     ``hybrid_pic_model.include_joule_heating`` option. Hyper-resistive
     heating is not yet included, so total-energy accounting is incomplete
     when ``plasma_hyper_resistivity`` is nonzero.
+
+.. pp:param:: implicit_mhd.joule_ion_fraction
+    :type: ``float``
+    :default: ``0`` (all-electron)
+
+    Direct ion share of the Joule power (the reference code's ``f_ohmi``,
+    ``vp.f90`` ``dw0_io``): the fraction :math:`f` of the Joule
+    deposit is booked into the ion energy channel, with the electron
+    channel keeping :math:`1 - f`. ``0`` (the default) is the legacy
+    all-electron deposit (bit-identical). A constant in ``(0, 1]``
+    books that fixed share. ``-1`` selects the reference code's Te-keyed tanh
+    split
+
+    .. math::
+
+        f = 0.1 + 0.4\,\big(1 + \tanh((T_e[\mathrm{eV}] - 60)/20)\big)
+
+    (the ``f_ohmi = -1`` flown by the reference shot's run).
+    Requires a recast flux (``fluid_flux = hlld`` or ``central``) and
+    ``ion_closure = total_energy`` or ``dual_energy`` — the ion share
+    needs an ion energy channel. The ion share follows the same
+    wall-freeze/theta staging envelope as the electron deposit and
+    the same un-boosted heating :math:`\eta` (see
+    :pp:param:`implicit_mhd.joule_ohm_current`).
 
 .. pp:param:: implicit_mhd.vacuum_resistivity_diffusivity
     :type: ``float``
