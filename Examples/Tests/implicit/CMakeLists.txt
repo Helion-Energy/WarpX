@@ -1593,18 +1593,19 @@ add_warpx_test(
     OFF  # dependency
 )
 
-# mode "temperature": the interface faces exchange conductively against
+# mode "outflow_limited" (RENAMED from temperature -- a capped one-sided
+# drain is not a temperature pin): the interface faces exchange conductively against
 # the T_wall reservoir, draining the interior strictly monotonically
 # through a one-sided sink (the scraper-analog wall) -- the
 # wall-adjacent ring hugs T_wall without undershoot, the step ledge
 # drains through its z-normal interface faces too, the masked band
 # stays bit-static, and the axis column stays clean
 add_warpx_test(
-    test_rz_theta_implicit_mhd_wall_thermal_temperature  # name
+    test_rz_theta_implicit_mhd_wall_thermal_outflow_limited  # name
     RZ  # dims
     2  # nprocs
-    "inputs_test_rz_theta_implicit_mhd_wall_thermal implicit_mhd.wall_thermal_bc=temperature implicit_mhd.wall_temperature=2.0"  # inputs
-    "analysis_mhd_wall_thermal.py diags temperature"  # analysis
+    "inputs_test_rz_theta_implicit_mhd_wall_thermal implicit_mhd.wall_thermal_bc=outflow_limited implicit_mhd.wall_temperature=2.0"  # inputs
+    "analysis_mhd_wall_thermal.py diags outflow_limited"  # analysis
     OFF  # checksum
     OFF  # dependency
 )
@@ -1635,8 +1636,8 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_wall_thermal_dielectric  # name
     RZ  # dims
     2  # nprocs
-    "inputs_test_rz_theta_implicit_mhd_wall_thermal implicit_mhd.wall_model=dielectric implicit_mhd.wall_thermal_bc=temperature implicit_mhd.wall_temperature=2.0 hybrid_pic_model.add_external_fields=1 external_vector_potential.fields=hold external_vector_potential.do_diva_cleaning=0"  # inputs
-    "analysis_mhd_wall_thermal.py diags temperature"  # analysis
+    "inputs_test_rz_theta_implicit_mhd_wall_thermal implicit_mhd.wall_model=dielectric implicit_mhd.wall_thermal_bc=outflow_limited implicit_mhd.wall_temperature=2.0 hybrid_pic_model.add_external_fields=1 external_vector_potential.fields=hold external_vector_potential.do_diva_cleaning=0"  # inputs
+    "analysis_mhd_wall_thermal.py diags outflow_limited"  # analysis
     OFF  # checksum
     OFF  # dependency
 )

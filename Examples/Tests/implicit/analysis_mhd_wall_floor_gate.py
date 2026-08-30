@@ -10,7 +10,7 @@
 
 The deck (see inputs_test_rz_theta_implicit_mhd_wall_floor_gate) puts a
 quiet uniform plasma at T0 = 10 eV inside a flat dielectric wall with
-wall_thermal_bc = temperature and a reservoir far BELOW the temperature
+wall_thermal_bc = outflow_limited and a reservoir far BELOW the temperature
 floors (T_wall = 0.5 eV << T_floor = 9.5 eV), the one-way ratchet
 engaged everywhere from step 0, and dt far above the wall-face
 free-streaming time.

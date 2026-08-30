@@ -4,7 +4,7 @@
 
 # Wall-drain gate vs temperature-floor ratchet (the reachable-set gate
 # anchor): a quiet uniform plasma at T0 sits inside a flat dielectric
-# wall just inside r_max, with wall_thermal_bc = temperature and a wall
+# wall just inside r_max, with wall_thermal_bc = outflow_limited and a wall
 # reservoir DELIBERATELY far below the electron/ion temperature floors
 # (T_wall = 0.5 eV << T_floor = 9.5 eV ~ T0 = 10 eV, so the one-way
 # ratchet is engaged everywhere from step 0) and dt far above the
@@ -167,7 +167,7 @@ implicit_mhd.ion_pressure(x,y,z) = Pi
 # i >= 13), reservoir far below the floors.
 implicit_mhd.wall_model = dielectric
 implicit_mhd.wall_polyline_file = wall_flat_r065.csv
-implicit_mhd.wall_thermal_bc = temperature
+implicit_mhd.wall_thermal_bc = outflow_limited
 implicit_mhd.wall_temperature = Twall_ev
 implicit_mhd.wall_ledger_file = diags/wall_ledger.txt
 

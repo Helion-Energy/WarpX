@@ -1340,16 +1340,18 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
         // trivially satisfied and stays legal -- the masked-cell Joule
         // gate still applies).
         if (m_wall_mask.GetThermalBC() ==
-                ImplicitMHDWallMask::ThermalBC::temperature ||
+                ImplicitMHDWallMask::ThermalBC::outflow_limited ||
             m_wall_mask.GetThermalBC() ==
-                ImplicitMHDWallMask::ThermalBC::dirichlet) {
+                ImplicitMHDWallMask::ThermalBC::dirichlet ||
+            m_wall_mask.GetThermalBC() ==
+                ImplicitMHDWallMask::ThermalBC::dirichlet_limited) {
             WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
                 m_conduction_braginskii || m_chi_ion_is_parser ||
                     m_chi_electron_is_parser ||
                     m_thermal_diffusivity_ion > 0.0_rt ||
                     m_thermal_diffusivity_electron > 0.0_rt,
-                "implicit_mhd.wall_thermal_bc = temperature/dirichlet "
-                "requires a conduction channel "
+                "implicit_mhd.wall_thermal_bc reservoir modes require a "
+                "conduction channel "
                 "(thermal_diffusivity_ion/electron, constant or parser, "
                 "or thermal_conduction_model = braginskii): the wall "
                 "reservoir exchanges conductively");
@@ -2574,11 +2576,10 @@ void ThetaImplicitMHD::PrintParameters () const
                    << m_wall_mask.ModeName() << "\n"
                    << "Wall thermal BC:               "
                    << m_wall_mask.ThermalBCName()
-                   << (m_wall_mask.GetThermalBC() ==
-                                   ImplicitMHDWallMask::ThermalBC::
-                                       temperature ||
-                               m_wall_mask.GetThermalBC() ==
-                                   ImplicitMHDWallMask::ThermalBC::dirichlet
+                   << (m_wall_mask.GetThermalBC() !=
+                                   ImplicitMHDWallMask::ThermalBC::none &&
+                               m_wall_mask.GetThermalBC() !=
+                                   ImplicitMHDWallMask::ThermalBC::zero_flux
                            ? " (T_wall = " +
                                  std::to_string(
                                      m_wall_mask.WallTemperature_eV()) +
@@ -5778,8 +5779,11 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     // one-sided drain mode (temperature) and the two-sided pin mode
     // (dirichlet); zero_flux insulates them.
     const bool wall_reservoir =
-        (wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::temperature ||
-         wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::dirichlet);
+        (wall_thermal_mode ==
+             ImplicitMHDWallMask::ThermalBC::outflow_limited ||
+         wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::dirichlet ||
+         wall_thermal_mode ==
+             ImplicitMHDWallMask::ThermalBC::dirichlet_limited);
     // wall_thermal_bc = dirichlet (the reference code's t_bc = 'd' contract): the
     // interface exchange is TWO-SIDED at the half-cell Dirichlet
     // distance -- the bath restores sub-T_wall cells instead of only
@@ -5787,6 +5791,16 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     // (the rr12_S0w fatality was the UN-capped two-sided exchange; see
     // the host-constant comment below).
     const bool wall_pin =
+        (wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::dirichlet ||
+         wall_thermal_mode ==
+             ImplicitMHDWallMask::ThermalBC::dirichlet_limited);
+    // dirichlet (unqualified) is the HARD pin: NO free-streaming cap on
+    // the wall exchange -- the implicit solver converges on whatever
+    // outflow the pinned wall temperature demands (Eric 2026-08-30:
+    // the capped exchange bottles the heat flux in). dirichlet_limited
+    // keeps the capped two-sided variant; outflow_limited (the renamed
+    // one-sided drain) stays capped.
+    const bool wall_uncapped =
         (wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::dirichlet);
     const int* const AMREX_RESTRICT wall_first_masked_cc =
         wall_mechanics ? m_wall_mask.FirstMaskedCellCentered() : nullptr;
@@ -7135,15 +7149,21 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                     wall_gate_e_spec_ion) *
                                 inverse_normal_size;
                         }
-                        // free-streaming cap, ALWAYS on at the wall face
-                        const amrex::Real thermal_speed = std::sqrt(
-                            PhysConst::kb * face_ti / conduction_ion_mass);
-                        const amrex::Real free_streaming_flux =
-                            face_charge_density / PhysConst::q_e *
-                            PhysConst::kb * face_ti * thermal_speed;
-                        drain /= 1.0_rt +
-                                 std::abs(drain) / (wall_conduction_limit *
-                                                    free_streaming_flux);
+                        // free-streaming cap on the wall exchange --
+                        // except under the HARD dirichlet pin, where the
+                        // solver converges on the demanded outflow.
+                        if (!wall_uncapped) {
+                            const amrex::Real thermal_speed = std::sqrt(
+                                PhysConst::kb * face_ti /
+                                conduction_ion_mass);
+                            const amrex::Real free_streaming_flux =
+                                face_charge_density / PhysConst::q_e *
+                                PhysConst::kb * face_ti * thermal_speed;
+                            drain /=
+                                1.0_rt +
+                                std::abs(drain) / (wall_conduction_limit *
+                                                   free_streaming_flux);
+                        }
                         // +n flux toward a right-side wall, -n toward a
                         // left-side wall (matches the two-sided sign).
                         conductive_flux =
@@ -7308,14 +7328,17 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                     wall_gate_e_spec_electron) *
                                 inverse_normal_size;
                         }
-                        const amrex::Real thermal_speed = std::sqrt(
-                            PhysConst::kb * face_te / PhysConst::m_e);
-                        const amrex::Real free_streaming_flux =
-                            face_charge_density / PhysConst::q_e *
-                            PhysConst::kb * face_te * thermal_speed;
-                        drain /= 1.0_rt +
-                                 std::abs(drain) / (wall_conduction_limit *
-                                                    free_streaming_flux);
+                        if (!wall_uncapped) {
+                            const amrex::Real thermal_speed = std::sqrt(
+                                PhysConst::kb * face_te / PhysConst::m_e);
+                            const amrex::Real free_streaming_flux =
+                                face_charge_density / PhysConst::q_e *
+                                PhysConst::kb * face_te * thermal_speed;
+                            drain /=
+                                1.0_rt +
+                                std::abs(drain) / (wall_conduction_limit *
+                                                   free_streaming_flux);
+                        }
                         conductive_flux =
                             wall_right_masked ? drain : -drain;
                     } else if (braginskii) {
@@ -10680,9 +10703,11 @@ void ThetaImplicitMHD::ClampWallExteriorState ()
     // conduction channels use the same reservoir).
     const amrex::Real wall_pressure =
         (m_wall_mask.GetThermalBC() ==
-             ImplicitMHDWallMask::ThermalBC::temperature ||
+             ImplicitMHDWallMask::ThermalBC::outflow_limited ||
          m_wall_mask.GetThermalBC() ==
-             ImplicitMHDWallMask::ThermalBC::dirichlet)
+             ImplicitMHDWallMask::ThermalBC::dirichlet ||
+         m_wall_mask.GetThermalBC() ==
+             ImplicitMHDWallMask::ThermalBC::dirichlet_limited)
             ? density_image * m_ion_charge_to_mass *
                   m_wall_mask.WallTemperature_eV()
             : 0.0_rt;

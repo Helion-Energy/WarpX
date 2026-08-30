@@ -265,7 +265,9 @@
  *   pec_response | dielectric
  * - wall_polyline_file = <csv path> ("z, r" rows; resolved against
  *   AMREX_INPUTS_FILE_PREFIX like the inputs file itself when relative)
- * - wall_thermal_bc = none (default) | zero_flux | temperature | dirichlet
+ * - wall_thermal_bc = none (default) | zero_flux | outflow_limited |
+ *   dirichlet | dirichlet_limited ('temperature' was RENAMED
+ *   outflow_limited: a capped one-sided drain is not a temperature pin)
  * - wall_temperature = <eV> (temperature/dirichlet modes)
  * - wall_band_eta_override = <ohm m> (default 0 = off): constant,
  *   state-independent field-advance eta at band-interior electric-
@@ -375,7 +377,13 @@ class ImplicitMHDWallMask
 public:
     /** Thermal wall boundary at the stair-step fluid interface
      * (implicit_mhd.wall_thermal_bc); see the class comment. */
-    enum class ThermalBC { none, zero_flux, temperature, dirichlet };
+    enum class ThermalBC {
+        none,
+        zero_flux,
+        outflow_limited, // one-sided capped drain (was 'temperature')
+        dirichlet,       // HARD pin: uncapped two-sided half-cell exchange
+        dirichlet_limited // the free-streaming-capped two-sided variant
+    };
 
     /** Parse the wall inputs and, when active, build the static
      * first-masked-radial-index tables per electric-field staggering over

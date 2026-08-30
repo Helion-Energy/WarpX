@@ -32,7 +32,7 @@ mode = "zero_flux": the interface passes exactly nothing -- the interior
 core measurably flattens (interior conduction is alive, the mode did not
 kill the operator globally).
 
-mode = "temperature" (CLI override wall_thermal_bc=temperature,
+mode = "outflow_limited" (CLI override wall_thermal_bc=outflow_limited,
 wall_temperature=2.0): the interface faces exchange conductively against
 the T_wall reservoir, draining the interior ONE-SIDEDLY (the drain
 leaves the fluid system -- the scraper-analog sink). The interior energy
@@ -65,14 +65,14 @@ import yt
 
 diag_dir = sys.argv[1]
 mode = sys.argv[2]
-assert mode in ("zero_flux", "temperature", "dirichlet"), f"unknown mode {mode}"
+assert mode in ("zero_flux", "outflow_limited", "dirichlet"), f"unknown mode {mode}"
 
 proton_mass = 1.67262192595e-27  # WarpX parser m_p (ablastr::constant)
 qe = 1.602176634e-19
 n0 = 1.0e20
 T0_ev = 100.0
 Tmin_ev = 2.0
-Twall_ev = 4.0 if mode == "dirichlet" else 2.0
+Twall_ev = 4.0 if mode == "dirichlet" else 2.0  # outflow_limited pins 2 eV
 gamma = 5.0 / 3.0
 
 FIELDS = (
@@ -174,7 +174,7 @@ print(f"total    energy trace: {total_energy / total_energy[0]}")
 SLACK = 2.0e-6
 rho_image = 1.0e-4 * n0 * proton_mass * (1.0 + SLACK)
 electron_bound = 1.0e-4 * n0 * qe * Tmin_ev / (gamma - 1.0)
-if mode in ("temperature", "dirichlet"):
+if mode in ("outflow_limited", "dirichlet"):
     n_image = rho_image / proton_mass
     electron_bound = max(electron_bound,
                          n_image * qe * Twall_ev / (gamma - 1.0))

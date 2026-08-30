@@ -157,10 +157,17 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
     std::string thermal_bc = "none";
     pp.query("wall_thermal_bc", thermal_bc);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        thermal_bc != "temperature",
+        "implicit_mhd.wall_thermal_bc = temperature was RENAMED "
+        "outflow_limited (it is a free-streaming-capped one-sided drain, "
+        "not a temperature pin). For a true Dirichlet wall use dirichlet "
+        "(hard, uncapped) or dirichlet_limited (capped).");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         thermal_bc == "none" || thermal_bc == "zero_flux" ||
-            thermal_bc == "temperature" || thermal_bc == "dirichlet",
+            thermal_bc == "outflow_limited" || thermal_bc == "dirichlet" ||
+            thermal_bc == "dirichlet_limited",
         "implicit_mhd.wall_thermal_bc must be 'none', 'zero_flux', "
-        "'temperature' or 'dirichlet'");
+        "'outflow_limited', 'dirichlet' or 'dirichlet_limited'");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         thermal_bc == "none" || wall_model != "none",
         "implicit_mhd.wall_thermal_bc requires implicit_mhd.wall_model = "
@@ -168,20 +175,26 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
         "shaped-wall mask)");
     const bool has_wall_temperature = utils::parser::queryWithParser(
         pp, "wall_temperature", m_wall_temperature);
-    if (thermal_bc == "temperature" || thermal_bc == "dirichlet") {
-        m_thermal_bc = (thermal_bc == "dirichlet") ? ThermalBC::dirichlet
-                                                   : ThermalBC::temperature;
+    if (thermal_bc == "outflow_limited" || thermal_bc == "dirichlet" ||
+        thermal_bc == "dirichlet_limited") {
+        m_thermal_bc = (thermal_bc == "dirichlet")
+                           ? ThermalBC::dirichlet
+                           : ((thermal_bc == "dirichlet_limited")
+                                  ? ThermalBC::dirichlet_limited
+                                  : ThermalBC::outflow_limited);
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             has_wall_temperature && m_wall_temperature > 0.0,
-            "implicit_mhd.wall_thermal_bc = temperature/dirichlet requires "
-            "a positive implicit_mhd.wall_temperature (in eV)");
+            "implicit_mhd.wall_thermal_bc = outflow_limited/dirichlet/"
+            "dirichlet_limited requires a positive "
+            "implicit_mhd.wall_temperature (in eV)");
     } else {
         m_thermal_bc = (thermal_bc == "zero_flux") ? ThermalBC::zero_flux
                                                    : ThermalBC::none;
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !has_wall_temperature,
-            "implicit_mhd.wall_temperature requires "
-            "implicit_mhd.wall_thermal_bc = temperature or dirichlet");
+            "implicit_mhd.wall_temperature requires a reservoir "
+            "wall_thermal_bc (outflow_limited, dirichlet or "
+            "dirichlet_limited)");
     }
 
     if (wall_model == "none") {
@@ -478,8 +491,9 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
                    << " masked corner (E_theta) rows in the valid domain; "
                    << "axis clearance " << min_first_masked
                    << " cells; thermal BC " << ThermalBCName();
-    if (m_thermal_bc == ThermalBC::temperature ||
-        m_thermal_bc == ThermalBC::dirichlet) {
+    if (m_thermal_bc == ThermalBC::outflow_limited ||
+        m_thermal_bc == ThermalBC::dirichlet ||
+        m_thermal_bc == ThermalBC::dirichlet_limited) {
         amrex::Print() << " (T_wall = " << m_wall_temperature << " eV)";
     }
     if (m_band_eta_override > 0.0) {
@@ -501,8 +515,11 @@ const char* ImplicitMHDWallMask::ThermalBCName () const
 {
     if (!m_active || m_thermal_bc == ThermalBC::none) { return "none"; }
     if (m_thermal_bc == ThermalBC::dirichlet) { return "dirichlet"; }
-    return (m_thermal_bc == ThermalBC::temperature) ? "temperature"
-                                                    : "zero_flux";
+    if (m_thermal_bc == ThermalBC::dirichlet_limited) {
+        return "dirichlet_limited";
+    }
+    return (m_thermal_bc == ThermalBC::outflow_limited) ? "outflow_limited"
+                                                        : "zero_flux";
 }
 
 const int* ImplicitMHDWallMask::FirstMaskedCellCentered () const

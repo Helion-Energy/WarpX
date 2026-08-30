@@ -19,7 +19,7 @@
 # passes exactly nothing (interior energy conserved, every masked cell
 # bit-static) while the Gaussian core measurably flattens (interior
 # conduction alive). The temperature-mode ctest overrides
-# implicit_mhd.wall_thermal_bc=temperature wall_temperature=2.0 on the
+# implicit_mhd.wall_thermal_bc=outflow_limited wall_temperature=2.0 on the
 # CLI: the interface exchanges against the T_wall reservoir (interior
 # energy drains strictly monotonically through the one-sided wall sink,
 # the wall-adjacent ring hugs T_wall without undershoot, the step ledge

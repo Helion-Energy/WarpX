@@ -2547,7 +2547,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         r = 0 axis (the parity origin owns it); pinching to the axis
         aborts at setup.
 
-    wall_thermal_bc: {"none", "zero_flux", "temperature", "dirichlet"}, optional
+    wall_thermal_bc: {"none", "zero_flux", "outflow_limited", "dirichlet", "dirichlet_limited"}, optional
         Thermal boundary at the stair-step wall interface (requires an
         active wall_model). The default "none" keeps the wall
         electromagnetic-only: conduction exchanges blindly across the
@@ -2560,23 +2560,25 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         and the interface drains the interior one-sidedly — the
         embedded-boundary scraper analog) and drops conduction between
         masked cells. "zero_flux" additionally insulates the interface
-        (adiabatic wall); "temperature" drains conductively toward the
+        (adiabatic wall); "outflow_limited" (RENAMED from "temperature":
+        a capped one-sided drain is not a temperature pin) drains
+        conductively toward the
         wall_temperature reservoir instead (requires a nonzero thermal
         diffusivity). The drain is one-sided (smoothly gated off
         at/below the wall value: the reservoir cools the interior
         toward T_wall, never heats it) and always free-streaming
         limited at the wall face (factor = conduction_flux_limit_factor
-        when set, else 1). "dirichlet" PINS the interface temperature
-        instead (the reference code's t_bc='d' contract): a two-sided exchange
-        against the floor-anchored T_wall bath at the half-cell
-        Dirichlet distance, free-streaming limited in both directions
-        (the bath restores sub-T_wall cells as well as draining hot
-        ones).
+        when set, else 1). "dirichlet" is the HARD pin (the reference code's
+        t_bc='d' contract): a two-sided UNCAPPED exchange against the
+        floor-anchored T_wall bath at the half-cell Dirichlet distance --
+        the implicit solver converges on whatever outflow the pin
+        demands. "dirichlet_limited" is the same exchange with the
+        free-streaming cap in both directions.
 
     wall_temperature: float, optional
         Wall reservoir temperature [eV] of
-        wall_thermal_bc="temperature"/"dirichlet" (required there; an
-        error in the other modes). Applied to both conduction channels.
+        the reservoir modes (required there; an error in the other
+        modes). Applied to both conduction channels.
 
     wall_ledger_file: str, optional
         File for the shaped-wall deposition ledger (active with any

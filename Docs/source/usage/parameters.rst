@@ -5684,7 +5684,7 @@ Jacobian probes.
     VACUUM image: at first-step sanitize time every masked fluid cell is
     clamped to the mass-density floor with zero momentum and
     floor-consistent energies at the background temperature —
-    ``wall_temperature`` itself in ``temperature`` mode, so the
+    ``wall_temperature`` itself in ``outflow_limited`` mode, so the
     interface drain starts at exactly zero gradient (whatever the IC
     loaded outside the contour is scraped; a rank-0 banner and a
     ``#``-comment header row of ``wall_ledger_file`` report the removed
@@ -5692,7 +5692,7 @@ Jacobian probes.
     across restarts, and the halo pedestal plus every end-of-step floor
     restoration skip the band so it stays bit-static forever.
     ``zero_flux`` additionally makes the wall adiabatic: interface faces
-    carry exactly zero conductive flux. ``temperature`` makes the wall a
+    carry exactly zero conductive flux. ``outflow_limited`` makes the wall a
     heat SINK instead: interface faces drain conductively toward
     ``wall_temperature`` (requires a nonzero thermal diffusivity). The
     drain is ONE-SIDED — smoothly gated to zero at/below the reachable
@@ -5719,12 +5719,12 @@ Jacobian probes.
     (the wall value sits ON the interface, not one cell in), so the
     bath restores sub-T_wall cells as well as draining hot ones. The
     exchange is free-streaming capped in BOTH directions (the same
-    harmonic cap as the ``temperature`` drain — the fatality above was
+    harmonic cap as the ``outflow_limited`` drain — the fatality above was
     the two-sided exchange WITHOUT the cap), and the pin target is
     anchored at the reachable set, the maximum of ``wall_temperature``
     and the corresponding temperature-floor image, so the pin never
     fights the admissibility projection's floor ratchet. Like
-    ``temperature``, it requires ``wall_temperature`` and a conduction
+    ``outflow_limited``, it requires ``wall_temperature`` and a conduction
     channel. The mask is static geometry, so all of this is smooth in
     the state for the JFNK probes.
 
@@ -5732,7 +5732,7 @@ Jacobian probes.
     :type: ``float`` (eV)
 
     Wall reservoir temperature of
-    ``implicit_mhd.wall_thermal_bc = temperature`` or ``dirichlet``
+    ``implicit_mhd.wall_thermal_bc = outflow_limited`` or ``dirichlet``
     (required in both, in eV; an error in the other modes). Applied to
     both the electron and ion conduction channels. The drain's smooth
     gate closes at the maximum of ``wall_temperature`` and the
