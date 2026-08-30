@@ -301,6 +301,8 @@ WarpX::InitFromCheckpoint ()
     // restored plasma-current components (see m_qdsmc_J_plasma_valid).
     int n_levels_with_te_restored = 0;
     int n_jplasma_components_restored = 0;
+    int n_je_yee_en_components_restored = 0;
+    int n_sponge_ref_fields_restored = 0;
 
     // Initialize the field data
     for (int lev = 0; lev < nlevs; ++lev)
@@ -426,9 +428,15 @@ WarpX::InitFromCheckpoint ()
         // [dir=..] and/or [level=..].
         std::string const jplasma_name =
             amrex::getEnumNameString(FieldType::hybrid_current_fp_plasma) + "[";
+        std::string const je_yee_en_name = "hybrid_je_yee_en_fp[";
         for (auto const& name : restored_names) {
             if (name.rfind(te_name, 0) == 0) { ++n_levels_with_te_restored; }
             if (name.rfind(jplasma_name, 0) == 0) { ++n_jplasma_components_restored; }
+            if (name.rfind(je_yee_en_name, 0) == 0) { ++n_je_yee_en_components_restored; }
+            if (name.rfind("hybrid_sponge_Eref_fp", 0) == 0 ||
+                name.rfind("hybrid_sponge_Bref_fp", 0) == 0) {
+                ++n_sponge_ref_fields_restored;
+            }
         }
 
     }
@@ -456,6 +464,45 @@ WarpX::InitFromCheckpoint ()
                 "re-seeded from the density adiabat, so evolved electron thermal "
                 "structure from before the checkpoint is not preserved.",
                 ablastr::warn_manager::WarnPriority::high);
+        }
+    }
+    // Yee-coupled relax advance: with the nodal E state restored on
+    // every level, suppress the first-advance gather seed -- the
+    // restart then continues the exact persistent state instead of a
+    // re-projection of the edge E (see the m_je_yee_coupling doc).
+    if (m_hybrid_pic_model
+        && m_hybrid_pic_model->m_je_yee_coupling
+        && n_je_yee_en_components_restored == 3*nlevs) {
+        m_hybrid_pic_model->m_je_yee_en_init = true;
+        amrex::Print() << "restart: Yee-coupled nodal E state restored "
+                          "from checkpoint (gather seed suppressed)\n";
+    }
+    // Sponge references are companion state of the damped fields:
+    // with BOTH restored on every level, suppress the first-call
+    // seed so the layer keeps damping toward the carried references
+    // instead of re-freezing on the restored (cap-wave-bearing)
+    // state -- the re-seed approximation documented on the latch.
+    if (m_hybrid_pic_model
+        && m_hybrid_pic_model->m_je_sponge_width > 0.0_rt
+        && n_sponge_ref_fields_restored == 2*nlevs) {
+        m_hybrid_pic_model->m_je_sponge_init = true;
+        amrex::Print() << "restart: sponge references restored from "
+                          "checkpoint (re-seed suppressed)\n";
+    }
+    // Je-form relax advance: restore the adapted substep count (see
+    // the sidecar write in FlushFormatCheckpoint) so the substep
+    // sequence continues the uninterrupted run's exactly.
+    if (m_hybrid_pic_model && m_hybrid_pic_model->m_esolve_je
+        && m_hybrid_pic_model->m_je_advance == 1) {
+        std::ifstream ifs(restart_chkfile + "/hybrid_substeps.dat");
+        if (ifs.good()) {
+            int n_sub = 0;
+            ifs >> n_sub;
+            if (n_sub >= 2) {
+                m_hybrid_pic_model->m_substeps = n_sub;
+                amrex::Print() << "restart: relax substep count "
+                    "restored from checkpoint (" << n_sub << ")\n";
+            }
         }
     }
 

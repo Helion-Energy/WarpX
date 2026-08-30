@@ -1190,9 +1190,15 @@ void HybridPICModel::AllocateLevelMFs (
     // -- no ghosts. Collocated-only (asserted at solve time), so all
     // three components live on the all-nodal staggering.
     if (m_esolve_je && m_je_advance == 1) {
+        // Checkpointed: J_e is persistent dynamical state -- without
+        // the flag a restart re-converges it from zero through the
+        // relax dynamics (self-healing but approximate); with it the
+        // restart is exact. Older checkpoints without the field are
+        // skipped gracefully by read_restarts.
         fields.alloc_init("hybrid_je_fp", lev,
             amrex::convert(ba, amrex::IntVect::TheNodeVector()),
-            dm, 3, amrex::IntVect(0), 0.0_rt);
+            dm, 3, amrex::IntVect(0), 0.0_rt,
+            true, true, true);
         // Yee-coupled advance (see the m_je_yee_coupling member doc):
         // the persistent nodal E state and the per-advance nodal
         // gathers of the Ampere current, ion current, B, and (when
@@ -1201,10 +1207,17 @@ void HybridPICModel::AllocateLevelMFs (
         // staggered boxes).
         if (m_je_yee_coupling) {
             for (int d = 0; d < 3; ++d) {
+                // Checkpointed: the nodal E is THE persistent E state
+                // of the coupled advance (the edge E is a projection).
+                // The restore pre-sets m_je_yee_en_init (WarpXIO), so
+                // the first-advance gather seed -- the documented
+                // re-projection approximation -- is suppressed and a
+                // mid-stroke restart is exact.
                 fields.alloc_init("hybrid_je_yee_en_fp",
                     ablastr::fields::Direction{d}, lev,
                     amrex::convert(ba, amrex::IntVect::TheNodeVector()),
-                    dm, 1, amrex::IntVect(0), 0.0_rt);
+                    dm, 1, amrex::IntVect(0), 0.0_rt,
+                    true, true, true);
                 fields.alloc_init("hybrid_je_yee_jn_fp",
                     ablastr::fields::Direction{d}, lev,
                     amrex::convert(ba, amrex::IntVect::TheNodeVector()),
@@ -1290,20 +1303,28 @@ void HybridPICModel::AllocateLevelMFs (
         // fields at the seed time. Pointwise use only -- no ghosts.
         // Collocated-only, like the J_e state itself.
         if (m_je_sponge_width > 0.0_rt) {
+            // Checkpointed: the references are companion state of the
+            // damped fields -- restoring them (and pre-setting the
+            // seed latch, see WarpXIO) removes the re-seed
+            // approximation documented on m_je_sponge_init.
             fields.alloc_init("hybrid_sponge_Eref_fp", lev,
                 amrex::convert(ba, amrex::IntVect::TheNodeVector()),
-                dm, 3, amrex::IntVect(0), 0.0_rt);
+                dm, 3, amrex::IntVect(0), 0.0_rt,
+                true, true, true);
             fields.alloc_init("hybrid_sponge_Bref_fp", lev,
                 amrex::convert(ba, amrex::IntVect::TheNodeVector()),
-                dm, 3, amrex::IntVect(0), 0.0_rt);
+                dm, 3, amrex::IntVect(0), 0.0_rt,
+                true, true, true);
             if (m_add_external_fields &&
                 (m_je_sponge_track_eext || m_je_sponge_track_bext)) {
                 fields.alloc_init("hybrid_sponge_Eext0_fp", lev,
                     amrex::convert(ba, amrex::IntVect::TheNodeVector()),
-                    dm, 3, amrex::IntVect(0), 0.0_rt);
+                    dm, 3, amrex::IntVect(0), 0.0_rt,
+                    true, true, true);
                 fields.alloc_init("hybrid_sponge_Bext0_fp", lev,
                     amrex::convert(ba, amrex::IntVect::TheNodeVector()),
-                    dm, 3, amrex::IntVect(0), 0.0_rt);
+                    dm, 3, amrex::IntVect(0), 0.0_rt,
+                    true, true, true);
             }
         }
     }

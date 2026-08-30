@@ -315,7 +315,123 @@ HybridDissipation::ComputeDiags (const int step)
     const bool je_hyper = hybrid->m_include_hyper_resistivity_term
         && hybrid->m_esolve_je && hybrid->m_je_advance == 1
         && (hybrid->m_je_hyper_res != 0);
-    if (je_hyper) {
+    if (je_hyper && hybrid->m_je_yee_coupling) {
+#if defined(WARPX_DIM_RZ)
+        // Native-Yee booking (see ApplyJeHyperCurlCurlYee): the same
+        // REAL sink, P_etaH = Int eta_H |curl J|^2 dV, with curl J on
+        // the FACE registrations through the Faraday-form compact
+        // stencils, eta_H interpolated to each face, per-registration
+        // owner masks and volumes, and every integrand point strictly
+        // inside non-periodic domain faces (the applier's boundary
+        // contract -- the curls must not read unfilled domain ghosts).
+        const amrex::Real idr = 1.0_rt/dr, idz = 1.0_rt/dz;
+        amrex::GpuArray<int,3> const nodal_st = {1, 1, 1};
+        amrex::GpuArray<int,3> const cr_st = {1, 1, 1};
+        amrex::GpuArray<int,3> br_st{1,1,1}, bt_st{1,1,1},
+            bz_st{1,1,1};
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            br_st[d] = B[0]->ixType().nodeCentered(d) ? 1 : 0;
+            bt_st[d] = B[1]->ixType().nodeCentered(d) ? 1 : 0;
+            bz_st[d] = B[2]->ixType().nodeCentered(d) ? 1 : 0;
+        }
+        std::array<const amrex::MultiFab*, 3> Bx =
+            {nullptr, nullptr, nullptr};
+        if (external_b_split && has_B_dep) {
+            for (int d = 0; d < 3; ++d) { Bx[d] = B_ext[d]; }
+        }
+        auto interior = [&] (amrex::IntVect const& t) {
+            amrex::Box ib = amrex::convert(geom.Domain(), t);
+            if (!geom.isPeriodic(0)) { ib.growHi(0, -1); }
+            if (!geom.isPeriodic(1)) { ib.grow(1, -1); }
+            return ib;
+        };
+        amrex::ReduceOps<amrex::ReduceOpSum> rop;
+        amrex::ReduceData<amrex::Real> rdata(rop);
+        using RT = typename decltype(rdata)::Type;
+        for (int comp = 0; comp < 3; ++comp) {
+            const amrex::IntVect wt_iv = B[comp]->ixType().toIntVect();
+            const amrex::Box w_int = interior(wt_iv);
+            const auto mask = amrex::OwnerMask(*B[comp],
+                                               geom.periodicity());
+            // target staggering of this face component
+            amrex::GpuArray<int,3> tstag{1,1,1};
+            for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                tstag[d] = B[comp]->ixType().nodeCentered(d) ? 1 : 0;
+            }
+            const int comp_l = comp;
+            for (amrex::MFIter mfi(*B[comp], amrex::TilingIfNotGPU());
+                 mfi.isValid(); ++mfi) {
+                const amrex::Box box = mfi.tilebox(wt_iv) & w_int;
+                const auto jr = J[0]->const_array(mfi);
+                const auto jt = J[1]->const_array(mfi);
+                const auto jz = J[2]->const_array(mfi);
+                const auto br4 = B[0]->const_array(mfi);
+                const auto bt4 = B[1]->const_array(mfi);
+                const auto bz4 = B[2]->const_array(mfi);
+                amrex::Array4<const amrex::Real> xr, xt, xz;
+                const bool bs = (Bx[0] != nullptr);
+                if (bs) {
+                    xr = Bx[0]->const_array(mfi);
+                    xt = Bx[1]->const_array(mfi);
+                    xz = Bx[2]->const_array(mfi);
+                }
+                const auto rho_arr = rho->const_array(mfi);
+                const auto m_arr = mask->const_array(mfi);
+                rop.eval(box, rdata,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int) -> RT
+                {
+                    using ablastr::coarsen::sample::Interp;
+                    if (!m_arr(i, j, 0)) { return {0.0_rt}; }
+                    // registration radius and volume of this face
+                    const amrex::Real r_face = rmin
+                        + (tstag[0] ? i : i + 0.5_rt)*dr;
+                    if (comp_l == 0 && r_face < 0.5_rt*dr) {
+                        return {0.0_rt};   // W_r = 0 on axis (m = 0)
+                    }
+                    const amrex::Real r_vol =
+                        (r_face > 0.0_rt) ? r_face : dr/8.0_rt;
+                    const amrex::Real dV =
+                        2.0_rt*MathConst::pi*r_vol*dr*dz;
+                    // eta_H(rho, |B|) at this face
+                    const amrex::Real rv = amrex::max(
+                        Interp(rho_arr, nodal_st, tstag, cr_st,
+                               i, j, 0, 0), 0.0_rt);
+                    amrex::Real cbr = Interp(br4, br_st, tstag,
+                                             cr_st, i, j, 0, 0);
+                    amrex::Real cbt = Interp(bt4, bt_st, tstag,
+                                             cr_st, i, j, 0, 0);
+                    amrex::Real cbz = Interp(bz4, bz_st, tstag,
+                                             cr_st, i, j, 0, 0);
+                    if (bs) {
+                        cbr += Interp(xr, br_st, tstag, cr_st,
+                                      i, j, 0, 0);
+                        cbt += Interp(xt, bt_st, tstag, cr_st,
+                                      i, j, 0, 0);
+                        cbz += Interp(xz, bz_st, tstag, cr_st,
+                                      i, j, 0, 0);
+                    }
+                    const amrex::Real ehc = eta_h(rv,
+                        std::sqrt(cbr*cbr + cbt*cbt + cbz*cbz));
+                    // Faraday-form compact curl component (the
+                    // applier's pass-1 stencils)
+                    amrex::Real w = 0.0_rt;
+                    if (comp_l == 0) {
+                        w = -(jt(i,j+1,0) - jt(i,j,0)) * idz;
+                    } else if (comp_l == 1) {
+                        w = (jr(i,j+1,0) - jr(i,j,0)) * idz
+                            - (jz(i+1,j,0) - jz(i,j,0)) * idr;
+                    } else {
+                        w = ((r_face + 0.5_rt*dr)*jt(i+1,j,0)
+                             - (r_face - 0.5_rt*dr)*jt(i,j,0))
+                            * idr / r_face;
+                    }
+                    return {ehc * w * w * dV};
+                });
+            }
+        }
+        p_eta_h += amrex::get<0>(rdata.value(rop));
+#endif
+    } else if (je_hyper) {
         const amrex::Real i2r = 0.5_rt/dr, i2z = 0.5_rt/dz;
         std::array<const amrex::MultiFab*, 3> Bx =
             {nullptr, nullptr, nullptr};

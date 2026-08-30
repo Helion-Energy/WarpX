@@ -5,6 +5,7 @@
 #   include "BoundaryConditions/PML_RZ.H"
 #endif
 #include "Diagnostics/ParticleDiag/ParticleDiag.H"
+#include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
 #include "Circuit/CircuitCoupling.H"
 #include "Diagnostics/ReducedDiags/MultiReducedDiags.H"
 #include "Fields.H"
@@ -189,6 +190,23 @@ FlushFormatCheckpoint::WriteToFile (
 
         warpx.m_fields.write_checkpoints(lev, amrex::MultiFabFileFullPrefix(lev, checkpointname, default_level_prefix, ""));
 
+    }
+
+    // Je-form relax advance: the adapted substep count is integrator
+    // state (the 95/5 relaxation carries it across steps) -- without
+    // this sidecar a restart re-enters at the input-deck value and
+    // the substep sequence, hence the trajectory, diverges from the
+    // uninterrupted run (measured: percent-class field differences).
+    {
+        auto const * hybrid = warpx.get_pointer_HybridPICModel();
+        if (hybrid != nullptr && hybrid->m_esolve_je
+            && hybrid->m_je_advance == 1
+            && amrex::ParallelDescriptor::IOProcessor()) {
+            std::ofstream ofs(checkpointname + "/hybrid_substeps.dat",
+                              std::ofstream::out);
+            ofs << hybrid->m_substeps << "\n";
+            ofs.close();
+        }
     }
 
     CheckpointParticles(checkpointname, particle_diags);
