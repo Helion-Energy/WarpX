@@ -970,6 +970,21 @@ void HybridPICModel::ReadParameters ()
             "hybrid_pic_model.je_conduction_lockstep requires "
             "esolve = je_form (it moves the conduction advance into "
             "the relax substep loop)");
+        pp_hybrid.query("je_eee", m_je_eee);
+        utils::parser::queryWithParser(pp_hybrid, "je_eee_stride",
+                                       m_je_eee_stride);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_je_eee ||
+                (m_je_cond_lockstep && m_cond_operator == 1 &&
+                 m_solve_electron_energy_equation),
+            "hybrid_pic_model.je_eee (fine-level electron energy "
+            "coupling) requires je_conduction_lockstep = 1, "
+            "qdsmc_conduction_operator = fd, and "
+            "solve_electron_energy_equation = 1");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_je_eee_stride >= 0,
+            "hybrid_pic_model.je_eee_stride cannot be negative "
+            "(0 = automatic, matched to the conduction CFL)");
     }
 }
 
@@ -7289,6 +7304,9 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
         m_substep_safety, m_substep_max_growth, max_sub, post_step,
         mask_err ? &floor_mask : nullptr);
     QdsmcRKStats const st = integ.Advance(T_cur, dt_c);
+    // publish the last stable internal step for the automatic
+    // je_eee lockstep cadence (see the m_je_eee member doc)
+    if (st.dt_last > 0.0_rt) { m_cond_fd_last_dt_stable = st.dt_last; }
 
     // WARPX_QDSMC_COND_STATS: one line per integrator call from the stats
     // the call already returns (no added reductions; zero cost unset) --
@@ -9813,7 +9831,12 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
             QdsmcPhaseMinTe(lev, "euler_enter");
             QdsmcTransportOnce(lev, dt, /*midpoint=*/false);
             QdsmcPhaseMinTe(lev, "euler_transport");
-            ApplyQdsmcEnergySources(lev, dt, /*fill_te_ghosts=*/false);
+            // under je_eee the sources run at the lockstep cadence
+            // inside the relax substep loop instead
+            if (!m_je_eee) {
+                ApplyQdsmcEnergySources(lev, dt,
+                                        /*fill_te_ghosts=*/false);
+            }
             QdsmcPhaseMinTe(lev, "euler_sources");
             // Lie conduction, matching euler's Lie sources (no-op unless
             // the kappa_par parser is set, keeping the control bit-identical
@@ -9861,11 +9884,17 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
             QdsmcConductionOnce(lev, 0.5_rt * dt_adv, /*use_rho_new=*/false);
         }
         QdsmcPhaseMinTe(lev, "lf_conduction_half1");
-        ApplyQdsmcEnergySources(lev, 0.5_rt * dt_adv, /*fill_te_ghosts=*/true);
+        if (!m_je_eee) {
+            ApplyQdsmcEnergySources(lev, 0.5_rt * dt_adv,
+                                    /*fill_te_ghosts=*/true);
+        }
         QdsmcPhaseMinTe(lev, "lf_sources1");
         QdsmcTransportOnce(lev, dt_adv, /*midpoint=*/true);
         QdsmcPhaseMinTe(lev, "lf_transport");
-        ApplyQdsmcEnergySources(lev, 0.5_rt * dt_adv, /*fill_te_ghosts=*/true);
+        if (!m_je_eee) {
+            ApplyQdsmcEnergySources(lev, 0.5_rt * dt_adv,
+                                    /*fill_te_ghosts=*/true);
+        }
         QdsmcPhaseMinTe(lev, "lf_sources2");
         if (!m_je_cond_lockstep) {
             QdsmcConductionOnce(lev, 0.5_rt * dt_adv, /*use_rho_new=*/true);
@@ -10050,10 +10079,20 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
         bool const ebud = m_energy_budget;
         std::array<amrex::Real, 2> ub0{}, ub1{}, ub2{}, ub3{}, ub4{}, ub5{};
         if (ebud) { ub0 = QDSMCClassEnergy(lev); }
-        QdsmcConductionOnce(lev, 0.5_rt * dt, /*use_rho_new=*/false);
+        // Under je_conduction_lockstep the conduction halves live in
+        // the relax substep loop (this gate was present on the euler
+        // and leapfrog schemes but missing here: the default scheme
+        // double-applied conduction under the lockstep prototype);
+        // under je_eee the sources move there too.
+        if (!m_je_cond_lockstep) {
+            QdsmcConductionOnce(lev, 0.5_rt * dt, /*use_rho_new=*/false);
+        }
         QdsmcPhaseMinTe(lev, "pc_conduction_half1");
         if (ebud) { ub1 = QDSMCClassEnergy(lev); }
-        ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true);
+        if (!m_je_eee) {
+            ApplyQdsmcEnergySources(lev, 0.5_rt * dt,
+                                    /*fill_te_ghosts=*/true);
+        }
         QdsmcPhaseMinTe(lev, "pc_sources1");
         if (ebud) { ub2 = QDSMCClassEnergy(lev); }
         // Pre-transport Te snapshot for the compression split of the
@@ -10073,10 +10112,15 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
             m_ebud_comp_bulk += comp[0];
             m_ebud_comp_band += comp[1];
         }
-        ApplyQdsmcEnergySources(lev, 0.5_rt * dt, /*fill_te_ghosts=*/true);
+        if (!m_je_eee) {
+            ApplyQdsmcEnergySources(lev, 0.5_rt * dt,
+                                    /*fill_te_ghosts=*/true);
+        }
         QdsmcPhaseMinTe(lev, "pc_sources2");
         if (ebud) { ub4 = QDSMCClassEnergy(lev); }
-        QdsmcConductionOnce(lev, 0.5_rt * dt, /*use_rho_new=*/true);
+        if (!m_je_cond_lockstep) {
+            QdsmcConductionOnce(lev, 0.5_rt * dt, /*use_rho_new=*/true);
+        }
         QdsmcPhaseMinTe(lev, "pc_conduction_half2");
         if (ebud) {
             ub5 = QDSMCClassEnergy(lev);
@@ -10806,6 +10850,32 @@ void HybridPICModel::BfieldEvolve (
         return ok;
     };
 
+    // Lockstep application at the batched cadence (see the accepted
+    // branch): under je_eee the energy sources run first (Lie split,
+    // both at the accumulated physical dt, reading the substep-level
+    // plasma current), then conduction, then the Pe refresh the next
+    // substep's electron advance reads.
+    auto je_apply_lockstep = [&] (amrex::Real dt_batch)
+    {
+        if (m_je_eee) {
+            ApplyQdsmcEnergySources(lev, dt_batch,
+                                    /*fill_te_ghosts=*/true);
+        }
+        QdsmcConductionOnce(lev, dt_batch,
+            /*use_rho_new=*/(subcycling_half ==
+                             SubcyclingHalf::SecondHalf));
+        QDSMCFillElectronPressureFromTe(lev);
+        warpx.ApplyElectronPressureBoundary(lev, PatchType::fine);
+        ablastr::utils::communication::FillBoundary(
+            *warpx.m_fields.get(
+                FieldType::hybrid_electron_pressure_fp, lev),
+            WarpX::do_single_precision_comms,
+            warpx.Geom(lev).periodicity(), true);
+    };
+    amrex::Real je_cond_acc = 0.0_rt;
+    int je_cond_batch = 0;
+    amrex::ignore_unused(je_cond_batch);
+
     // ------------------------------------------------------------------
     // Adaptive coupled substep machinery (see the m_je_adaptive member
     // doc): entry snapshots for the back-up-and-refine semantics, the
@@ -11298,22 +11368,37 @@ void HybridPICModel::BfieldEvolve (
                 }
             }
             if (je_relax && !je_adapt && m_je_cond_lockstep) {
-                // tight T_e <-> (J_e, B) coupling (see the member
-                // doc): advance conduction by this substep against
-                // the substep-level B and hand the refreshed Pe to
-                // the next substep's electron advance
-                QdsmcConductionOnce(lev, dt_sub,
-                    /*use_rho_new=*/(subcycling_half ==
-                                     SubcyclingHalf::SecondHalf));
-                QDSMCFillElectronPressureFromTe(lev);
-                warpx.ApplyElectronPressureBoundary(
-                    lev, PatchType::fine);
-                ablastr::utils::communication::FillBoundary(
-                    *warpx.m_fields.get(
-                        FieldType::hybrid_electron_pressure_fp,
-                        lev),
-                    WarpX::do_single_precision_comms,
-                    warpx.Geom(lev).periodicity(), true);
+                // tight T_e <-> (J_e, B) coupling (see the
+                // m_je_cond_lockstep and m_je_eee member docs):
+                // accumulate the accepted substep and, at the
+                // lockstep cadence, advance conduction -- and under
+                // je_eee the energy sources first, at the SAME
+                // accumulated physical dt from the substep-level
+                // dissipation channels -- against the substep-level
+                // B, handing the refreshed Pe to the next substep's
+                // electron advance. The half-step end flushes any
+                // remainder, so applied increments sum to the half
+                // exactly.
+                je_cond_acc += dt_sub;
+                ++je_cond_batch;
+                int stride = 1;
+                if (m_je_eee) {
+                    stride = m_je_eee_stride;
+                    if (stride == 0) {
+                        stride = (m_cond_fd_last_dt_stable > 0.0_rt
+                                  && dt_sub > 0.0_rt)
+                            ? amrex::min(64, amrex::max(1,
+                                  static_cast<int>(
+                                      m_cond_fd_last_dt_stable
+                                      / dt_sub)))
+                            : 1;
+                    }
+                }
+                if (je_cond_batch >= stride) {
+                    je_apply_lockstep(je_cond_acc);
+                    je_cond_acc = 0.0_rt;
+                    je_cond_batch = 0;
+                }
             }
             dt_sub *= std::min(m_substep_max_growth, step_change_factor);
         } else {
@@ -11325,6 +11410,15 @@ void HybridPICModel::BfieldEvolve (
         }
 
         if (++n_attempts > m_max_substep_attempts) { break; }
+    }
+
+    // Batched-lockstep remainder flush (see the accepted-branch
+    // block): applied increments must sum to the half exactly.
+    if (je_relax && !je_adapt && m_je_cond_lockstep
+        && je_cond_acc > 0.0_rt) {
+        je_apply_lockstep(je_cond_acc);
+        je_cond_acc = 0.0_rt;
+        je_cond_batch = 0;
     }
 
     // End-of-half finiteness backstop for the throttled je check

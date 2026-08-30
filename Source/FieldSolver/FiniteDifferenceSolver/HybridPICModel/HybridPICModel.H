@@ -1469,6 +1469,48 @@ public:
      *  step is identical (sum of dt_sub = dt). Requires esolve =
      *  je_form; default off. Input: je_conduction_lockstep. */
     bool m_je_cond_lockstep = false;
+    /** Fine-level electron-energy coupling of the relax advance
+     *  (je_eee = 1, opt-in; requires je_conduction_lockstep, the FD
+     *  conduction operator, and the electron energy equation): the
+     *  Ohmic/exchange/friction ENERGY SOURCES join the conduction
+     *  advance inside the substep loop -- ApplyQdsmcEnergySources at
+     *  the lockstep cadence with the accumulated batch dt, reading
+     *  the SUBSTEP-level plasma current (the relax loop's real
+     *  dissipation channels) -- and the step-level Strang source
+     *  calls are suppressed. grad Pe in the (E, J_e) momentum then
+     *  reads the substep-evolved Te through the lockstep Pe refresh,
+     *  which the prototype already performs. The polytrope closure
+     *  remains the default (je_eee = 0).
+     *
+     *  CADENCE (je_eee_stride, first-class): conduction + sources
+     *  apply every N accepted substeps with dt_batch = the exact sum
+     *  of the batched substep dts, and the half-step end FLUSHES the
+     *  remainder unconditionally, so applied time increments sum to
+     *  the half exactly (the super-step invariant that keeps
+     *  flux-injection totals and floor cadence honest). stride 0
+     *  (default) is AUTOMATIC: N matched to the FD conduction CFL --
+     *  each call then advances about one internal conduction step,
+     *  so the per-call overhead (tensor rebuild, boundary fills, and
+     *  under je_eee the per-particle ion-temperature deposit of the
+     *  exchange source) amortizes over the widest batch that adds no
+     *  internal subcycling. Accuracy cost of batching: the
+     *  anisotropy tensor and heating coefficients hold the
+     *  batch-entry B/J for dt_batch -- bounded by the same CFL
+     *  scale, second-order small. Rates are physical-time (dt_batch
+     *  multiplies), never per-substep fractions (the dt-consistency
+     *  lesson). Super-timestepping (RKL2-class) economics at this
+     *  cadence are a PENDING MEASUREMENT: at per-substep calls the
+     *  stage count s ~ sqrt(N) is too small to pay for the fixed
+     *  overhead, and only the batched regime recovers the
+     *  documented large-N savings -- if wired, it must stay
+     *  parabolic-only (parse-enforced) and opt-in. */
+    int m_je_eee = 0;
+    int m_je_eee_stride = 0;
+    /** Last FD-conduction stability step [s], published by
+     *  QdsmcConductionOnceFD for the automatic je_eee cadence
+     *  (0 until the first conduction call; the first batch then
+     *  runs at stride 1). */
+    mutable amrex::Real m_cond_fd_last_dt_stable = 0.0;
 
     /** Amano Eq (27) effective electron mass, multiplied through by m_i
      *  (the ion mass cancels): m_e' = max(m_e, B^2 q_e/(mu0 rho_e) *
