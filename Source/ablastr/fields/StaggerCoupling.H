@@ -241,21 +241,25 @@ namespace ablastr::fields
         }
     }
 
-    /** Adjointness self-check: on an internal single-box test grid
-     *  (staggered like `staggered_proto`), fills deterministic
-     *  pseudo-random u (staggered) and g (nodal), and returns the
-     *  relative mismatch of <G u, g>_N vs <u, S g>_S. Consumers
-     *  assert < 1e-12 at boot.
-     *
-     *  The normalized scatter above IS the exact transpose on any
-     *  uniform grid, cylindrical radial weights included: the
-     *  normalization sum over a stencil equals the target volume
-     *  identically (e.g. (r_i + r_{i+1})/2 = r_{i+1/2}), so
-     *  normalized and transpose forms coincide -- and the pair is
-     *  exactly constant-preserving, at the axis ring too. The check
-     *  runs the Cartesian weights on its own single box (interface
-     *  nodes on multi-box layouts would double-count in plain dot
-     *  products, which is a property of the check, not the pair). */
+    /** Self-check of the coupling pair on an internal single-box
+     *  test grid (staggered like `staggered_proto`). Three passes,
+     *  returning the WORST relative mismatch; consumers assert
+     *  < 1e-12 at boot:
+     *   1. Cartesian-weighted adjointness <G u, g> = <u, S g> with
+     *      the nodal test field windowed to the strict interior
+     *      (boundary stencils of a finite box are a property of the
+     *      box, not the pair);
+     *   2. the same identity under the CYLINDRICAL radial weights
+     *      (rmin = 0, so the axis column and the axis-degenerate
+     *      scatter fallback sit inside the tested region);
+     *   3. constant preservation of BOTH maps with the r-hi domain
+     *      CLAMP active on the gather: G(1) = 1 on every valid node
+     *      including the clamped face ring (a clamped average of a
+     *      constant is the constant), and S(1) = 1 on every valid
+     *      staggered point including the axis ring.
+     *  Passes 2 and 3 cover the production (RZ, wall-clamped)
+     *  configuration that the plain Cartesian identity alone does
+     *  not reach. */
     inline amrex::Real
     AdjointSelfCheck (
         amrex::MultiFab const & staggered_proto)
@@ -303,13 +307,74 @@ namespace ablastr::fields
         };
         hashfill(u, 1, false);
         hashfill(g, 2, true);
+
+        // registration r-weight applied in place (pass 2 weighting)
+        auto rweight = [] (MultiFab & mf, bool node_reg) {
+            const int st_r = mf.ixType().nodeCentered(0) ? 1 : 0;
+            amrex::ignore_unused(node_reg);
+            for (MFIter mfi(mf); mfi.isValid(); ++mfi) {
+                auto const& a4 = mf.array(mfi);
+                ParallelFor(mfi.tilebox(),
+                    [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    a4(i,j,k) *= stagger_coupling_rweight(
+                        i, st_r, 0.0_rt, true);
+                });
+            }
+        };
+
+        // pass 1: Cartesian-weighted adjointness
         GatherToNodes(Gu, u);
         ScatterFromNodes(Sg, g, /*cyl=*/false, 0.0_rt);
-        const amrex::Real ip_n = MultiFab::Dot(Gu, 0, g, 0, 1, 0);
-        const amrex::Real ip_s = MultiFab::Dot(u, 0, Sg, 0, 1, 0);
-        const amrex::Real scale = amrex::max(
+        amrex::Real ip_n = MultiFab::Dot(Gu, 0, g, 0, 1, 0);
+        amrex::Real ip_s = MultiFab::Dot(u, 0, Sg, 0, 1, 0);
+        amrex::Real scale = amrex::max(
             amrex::Math::abs(ip_n), amrex::Math::abs(ip_s), 1e-300_rt);
-        return amrex::Math::abs(ip_n - ip_s) / scale;
+        amrex::Real worst = amrex::Math::abs(ip_n - ip_s) / scale;
+
+        // pass 2: cylindrical-weighted adjointness (rmin = 0): weight
+        // each dot by its side's registration radius
+        ScatterFromNodes(Sg, g, /*cyl=*/true, 0.0_rt);
+        MultiFab Gu_w(Gu.boxArray(), dm_c, 1, 0);
+        MultiFab::Copy(Gu_w, Gu, 0, 0, 1, 0);
+        rweight(Gu_w, true);
+        MultiFab Sg_w(Sg.boxArray(), dm_c, 1, 0);
+        MultiFab::Copy(Sg_w, Sg, 0, 0, 1, 0);
+        rweight(Sg_w, false);
+        ip_n = MultiFab::Dot(Gu_w, 0, g, 0, 1, 0);
+        ip_s = MultiFab::Dot(u, 0, Sg_w, 0, 1, 0);
+        scale = amrex::max(
+            amrex::Math::abs(ip_n), amrex::Math::abs(ip_s), 1e-300_rt);
+        worst = amrex::max(worst,
+            amrex::Math::abs(ip_n - ip_s) / scale);
+
+        // pass 3: constant preservation with the r-hi clamp active
+        // (gather) and cylindrical weights (scatter, axis ring)
+        u.setVal(1.0_rt);
+        g.setVal(1.0_rt);
+        GpuArray<int,3> clo{0,0,0}, chi{0,0,0};
+        chi[0] = 1;
+        GatherToNodes(Gu, u, cbox, clo, chi);
+        ScatterFromNodes(Sg, g, /*cyl=*/true, 0.0_rt);
+        Gu.plus(-1.0_rt, 0, 1, 0);
+        Sg.plus(-1.0_rt, 0, 1, 0);
+        auto vmax = [] (MultiFab const & mf) {
+            amrex::Real m = 0.0_rt;
+            for (MFIter mfi(mf); mfi.isValid(); ++mfi) {
+                auto const& a4 = mf.const_array(mfi);
+                amrex::Real fm = 0.0_rt;
+                amrex::LoopOnCpu(mfi.validbox(),
+                    [&] (int i, int j, int k) {
+                    fm = amrex::max(fm,
+                        amrex::Math::abs(a4(i,j,k)));
+                });
+                m = amrex::max(m, fm);
+            }
+            return m;
+        };
+        worst = amrex::max(worst, vmax(Gu));
+        worst = amrex::max(worst, vmax(Sg));
+        amrex::ParallelDescriptor::ReduceRealMax(worst);
+        return worst;
     }
 
 } // namespace ablastr::fields
