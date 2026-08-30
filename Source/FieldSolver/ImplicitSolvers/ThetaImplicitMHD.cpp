@@ -499,6 +499,26 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     m_use_hlld = (m_fluid_flux == "hlld");
     m_use_central = (m_fluid_flux == "central");
     m_use_recast = m_use_hlld || m_use_central;
+    // The reference code's f_ohmi (vp.f90 dw0_io / te_step split): the ion species
+    // receives a direct share of the Joule power. 0 = legacy
+    // all-electron; (0, 1] = constant share; -1 = the reference code's Te-keyed
+    // split f = 0.1 + 0.4 (1 + tanh((Te[eV] - 60)/20)) flown by
+    // The reference shot (f_ohmi = -1 in every stage).
+    utils::parser::queryWithParser(
+        pp, "joule_ion_fraction", m_joule_ion_fraction);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_joule_ion_fraction == -1.0_rt ||
+            (m_joule_ion_fraction >= 0.0_rt &&
+             m_joule_ion_fraction <= 1.0_rt),
+        "implicit_mhd.joule_ion_fraction must be in [0, 1] or -1 (the "
+        "the reference code's Te-keyed tanh split)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_joule_ion_fraction == 0.0_rt ||
+            (m_use_recast && (m_ion_closure == "total_energy" ||
+                              m_ion_closure == "dual_energy")),
+        "implicit_mhd.joule_ion_fraction requires a recast fluid flux "
+        "and the total_energy or dual_energy ion closure (the ion Joule "
+        "share needs an ion energy channel)");
     // hlld is NOT a production flux (central + viscosity is): the hlld
     // path stays only as kernel regression coverage and must be opted
     // into explicitly, so no production deck can reach it silently.
@@ -617,7 +637,11 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
             "implicit_mhd.fluid_flux = central requires a positive "
             "implicit_mhd.viscosity: the central flux has no Riemann "
             "dissipation, so the explicit viscous face flux must provide "
-            "the nonlinear stabilization");
+            "the nonlinear stabilization. NOTE central is the DEFAULT "
+            "since 2026-08-28 -- decks that previously ran without any "
+            "fluid_flux line must now either set implicit_mhd.viscosity "
+            "or select a flux explicitly (the old default was renamed "
+            "legacy_e_centered)");
     }
     utils::parser::queryWithParser(pp, "hlld_kappa_signal",
                                    m_hlld_kappa_signal);
@@ -5648,18 +5672,52 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const amrex::Real brag_small_b2 =
         PhysConst::mu0 *
         (m_electron_pressure_floor + m_ion_pressure_floor);
-    const amrex::Real brag_chi_par_min = (m_conduction_chi_par_min >= 0.0_rt)
-                                             ? m_conduction_chi_par_min
-                                             : m_conduction_chi_min;
-    const amrex::Real brag_chi_par_max = (m_conduction_chi_par_max >= 0.0_rt)
-                                             ? m_conduction_chi_par_max
-                                             : m_conduction_chi_max;
-    const amrex::Real brag_chi_perp_min =
-        (m_conduction_chi_perp_min >= 0.0_rt) ? m_conduction_chi_perp_min
-                                              : m_conduction_chi_min;
-    const amrex::Real brag_chi_perp_max =
-        (m_conduction_chi_perp_max >= 0.0_rt) ? m_conduction_chi_perp_max
-                                              : m_conduction_chi_max;
+    // Convention bridge ((gamma - 1), 2026-08-29 parity audit): the flux
+    // q = -rho chi grad(e_spec) with e_spec = kB T/((gamma - 1) m_i) gives
+    // kappa_eff = n kB chi/(gamma - 1), while Braginskii's chi
+    // (3.16/3.9 kB T tau/m) is the kappa/(n kB) convention -- realizing
+    // his kappa requires chi_code = (gamma - 1) chi_Brag. Without the
+    // factor every Braginskii coefficient ran 1/(gamma - 1) = 1.5x hot
+    // (the reference code's ntb.f90 t_cond is kappa-convention and never had the skew).
+    // The PER-COMPONENT clamp knobs are therefore DEFINED in the physical
+    // kappa/(n kB) convention (the reference code's xil/xip values drop in unchanged)
+    // and converted per species here; the LEGACY shared chi_min/chi_max
+    // keep their historical operator-convention meaning (calibrated
+    // QS/production decks) and inherit unconverted.
+    const amrex::Real brag_e_convention = m_gamma_e - 1.0_rt;
+    const amrex::Real brag_i_convention = m_gamma_i - 1.0_rt;
+    const amrex::Real brag_par_lo_e =
+        (m_conduction_chi_par_min >= 0.0_rt)
+            ? brag_e_convention * m_conduction_chi_par_min
+            : m_conduction_chi_min;
+    const amrex::Real brag_par_hi_e =
+        (m_conduction_chi_par_max >= 0.0_rt)
+            ? brag_e_convention * m_conduction_chi_par_max
+            : m_conduction_chi_max;
+    const amrex::Real brag_par_lo_i =
+        (m_conduction_chi_par_min >= 0.0_rt)
+            ? brag_i_convention * m_conduction_chi_par_min
+            : m_conduction_chi_min;
+    const amrex::Real brag_par_hi_i =
+        (m_conduction_chi_par_max >= 0.0_rt)
+            ? brag_i_convention * m_conduction_chi_par_max
+            : m_conduction_chi_max;
+    const amrex::Real brag_perp_lo_e =
+        (m_conduction_chi_perp_min >= 0.0_rt)
+            ? brag_e_convention * m_conduction_chi_perp_min
+            : m_conduction_chi_min;
+    const amrex::Real brag_perp_hi_e =
+        (m_conduction_chi_perp_max >= 0.0_rt)
+            ? brag_e_convention * m_conduction_chi_perp_max
+            : m_conduction_chi_max;
+    const amrex::Real brag_perp_lo_i =
+        (m_conduction_chi_perp_min >= 0.0_rt)
+            ? brag_i_convention * m_conduction_chi_perp_min
+            : m_conduction_chi_min;
+    const amrex::Real brag_perp_hi_i =
+        (m_conduction_chi_perp_max >= 0.0_rt)
+            ? brag_i_convention * m_conduction_chi_perp_max
+            : m_conduction_chi_max;
     // Quasi-shorting cross-field boost (implicit_mhd.conduction_qs_*):
     // an ADDITIVE Braginskii chi_perp keyed to the pseudo-entropy excess
     // above the load envelope (see the header and the qs_boost lambda in
@@ -6908,14 +6966,13 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 // Smooth clamps of the Braginskii chi_par/chi_perp
                 // (0 = off): smooth-max floor at chi_min; C^2 soft cap
                 // at chi_max with knee width chi_max/10 (exact
-                // pass-through below 0.9 chi_max). Both maps are
-                // monotone, so chi_perp <= chi_par is preserved.
-                // Reference-matched per-component clamps: parallel and
-                // perpendicular conductivities
-                // carry separate floors and caps (the reference code's xil*_mn/mx vs
-                // xip*_mn/mx, global.f90:75-77). The dedicated knobs
-                // default to the legacy shared chi_min/chi_max, so decks
-                // that set neither are bit-identical.
+                // pass-through below 0.9 chi_max). Per-component bounds
+                // (the reference code's xil*_mn/mx vs xip*_mn/mx, global.f90:75-77)
+                // are physical-convention values converted per species
+                // in the host constants; the par >= perp guard below
+                // re-establishes the ordering the separate clamps (and
+                // the perp boosts) can break -- the reference code applies the same
+                // MAX after its clamps (ntb.f90:594).
                 const auto clamp_with = [=] (amrex::Real chi_value,
                                              const amrex::Real lo,
                                              const amrex::Real hi) {
@@ -6926,14 +6983,6 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             chi_value, hi, 0.1_rt * hi);
                     }
                     return chi_value;
-                };
-                const auto brag_clamp_par = [=] (amrex::Real chi_value) {
-                    return clamp_with(chi_value, brag_chi_par_min,
-                                      brag_chi_par_max);
-                };
-                const auto brag_clamp_perp = [=] (amrex::Real chi_value) {
-                    return clamp_with(chi_value, brag_chi_perp_min,
-                                      brag_chi_perp_max);
                 };
                 // Quasi-shorting cross-field boost (implicit_mhd.
                 // conduction_qs_chi, braginskii only): ADDITIVE chi_perp
@@ -6983,8 +7032,11 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         const amrex::Real tau_ion =
                             brag_tau_i_coefficient * kb_ti *
                             std::sqrt(kb_ti) / face_number_density;
+                        // (gamma_i - 1): kappa-convention -> operator
+                        // convention (see the host-constant comment).
                         const amrex::Real chi_par_raw =
-                            3.9_rt * kb_ti * tau_ion / conduction_ion_mass;
+                            brag_i_convention * 3.9_rt * kb_ti * tau_ion /
+                            conduction_ion_mass;
                         const amrex::Real omega_tau =
                             brag_omega_i_coefficient * tau_ion;
                         const amrex::Real x =
@@ -6996,7 +7048,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                               brag_i_denominator_1) *
                                  x +
                              1.0_rt);
-                        brag_chi_par_ion = brag_clamp_par(chi_par_raw);
+                        brag_chi_par_ion = clamp_with(
+                            chi_par_raw, brag_par_lo_i, brag_par_hi_i);
                         // Quasi-shorting boost of the ION channel: s is
                         // keyed on the ion temperature with the SAME
                         // envelope T0 -- the broken-surface shorting
@@ -7020,17 +7073,28 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                     halo_boost_reference,
                                     halo_boost_guard, halo_boost_chi);
                         }
-                        brag_chi_perp_ion = brag_clamp_perp(chi_perp_ion_value);
+                        brag_chi_perp_ion = clamp_with(
+                            chi_perp_ion_value, brag_perp_lo_i,
+                            brag_perp_hi_i);
                         // The reference code's t_cond: xil = MAX(xil, xip) after the
                         // clamps -- parallel at least perpendicular (also
                         // keeps the tensor cross term sign-safe).
                         brag_chi_par_ion =
                             std::max(brag_chi_par_ion, brag_chi_perp_ion);
-                        // Wall interface faces keep the one-sided
-                        // isotropic drain with the tensor's nn
-                        // projection as its scalar chi.
+                        // Wall interface faces: the drain's scalar chi is
+                        // the PERP-clamped coefficient, NOT the tensor nn
+                        // projection. The reference code's flux-conserving wall only
+                        // ever exposes the perpendicular channel (B is
+                        // tangential to its polyline); our stair-step
+                        // z-normal faces see b_n ~ 1 and the nn projection
+                        // leaked the PARALLEL clamp class into the wall
+                        // conductance (the E5 wall-ledger runaway channel,
+                        // 2026-08-29 parity audit). Interior faces keep
+                        // the full tensor.
                         chi_ion_face =
-                            brag_chi_perp_ion +
+                            wall_face
+                                ? brag_chi_perp_ion
+                                : brag_chi_perp_ion +
                             (brag_chi_par_ion - brag_chi_perp_ion) *
                                 brag_bn * brag_bn / brag_b2_dir;
                     }
@@ -7168,9 +7232,11 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         const amrex::Real tau_electron =
                             brag_tau_e_coefficient * kb_te *
                             std::sqrt(kb_te) / face_number_density;
+                        // (gamma_e - 1): kappa-convention -> operator
+                        // convention (see the host-constant comment).
                         const amrex::Real chi_par_raw =
-                            3.16_rt * kb_te * tau_electron /
-                            PhysConst::m_e;
+                            brag_e_convention * 3.16_rt * kb_te *
+                            tau_electron / PhysConst::m_e;
                         const amrex::Real omega_tau =
                             brag_omega_e_coefficient * tau_electron;
                         const amrex::Real x =
@@ -7182,7 +7248,8 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                               brag_e_denominator_1) *
                                  x +
                              1.0_rt);
-                        brag_chi_par_electron = brag_clamp_par(chi_par_raw);
+                        brag_chi_par_electron = clamp_with(
+                            chi_par_raw, brag_par_lo_e, brag_par_hi_e);
                         // Quasi-shorting boost (see the ion channel and
                         // the qs_boost lambda): additive chi_perp, keyed
                         // on the electron temperature, clamped after.
@@ -7199,19 +7266,21 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                     halo_boost_reference,
                                     halo_boost_guard, halo_boost_chi);
                         }
-                        brag_chi_perp_electron =
-                            brag_clamp_perp(chi_perp_electron_value);
+                        brag_chi_perp_electron = clamp_with(
+                            chi_perp_electron_value, brag_perp_lo_e,
+                            brag_perp_hi_e);
                         // The reference code's te_cond: parallel at least perpendicular.
                         brag_chi_par_electron = std::max(
                             brag_chi_par_electron, brag_chi_perp_electron);
-                        // Wall interface faces keep the one-sided
-                        // isotropic drain with the tensor's nn
-                        // projection as its scalar chi.
+                        // Wall interface faces: PERP-clamped scalar chi,
+                        // not the nn projection (see the ion channel).
                         chi_electron_face =
-                            brag_chi_perp_electron +
-                            (brag_chi_par_electron -
-                             brag_chi_perp_electron) *
-                                brag_bn * brag_bn / brag_b2_dir;
+                            wall_face
+                                ? brag_chi_perp_electron
+                                : brag_chi_perp_electron +
+                                      (brag_chi_par_electron -
+                                       brag_chi_perp_electron) *
+                                          brag_bn * brag_bn / brag_b2_dir;
                     }
                     amrex::Real conductive_flux;
                     if (wall_face) {
@@ -8912,6 +8981,9 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                              : 0.0_rt;
     const bool evolve_ion_fluid = m_evolve_ion_fluid;
     const bool include_joule_heating = m_include_joule_heating;
+    // The reference code's f_ohmi ion Joule share (see the ctor parse); asserted at
+    // setup to require a recast flux + an ion energy closure.
+    const amrex::Real joule_ion_fraction = m_joule_ion_fraction;
     // Electron-ion equilibration (see m_electron_ion_equilibration and
     // the non-recast twin in ComputeFluidRHS -- the residual is one map
     // regardless of the flux path): per-solve-uniform branch, so the
@@ -9660,6 +9732,26 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 }
                 joule_heating = eta_joule * square_current;
             }
+            // The reference code's f_ohmi: peel the direct ion share off the electron
+            // deposit (vp.f90 dw0_io with the UN-boosted eta_jh; the
+            // electron row keeps (1 - f), te_step convention). The share
+            // is booked into the ion channel(s) below under the SAME
+            // wall_live/theta_dt/plasma_weight envelope.
+            amrex::Real joule_ion_share = 0.0_rt;
+            if (include_joule_heating && joule_ion_fraction != 0.0_rt) {
+                const amrex::Real f_ohmi =
+                    (joule_ion_fraction < 0.0_rt)
+                        ? 0.1_rt +
+                              0.4_rt *
+                                  (1.0_rt +
+                                   std::tanh((temperature_e * PhysConst::kb /
+                                                  PhysConst::q_e -
+                                              60.0_rt) /
+                                             20.0_rt))
+                        : joule_ion_fraction;
+                joule_ion_share = f_ohmi * joule_heating;
+                joule_heating -= joule_ion_share;
+            }
             amrex::Real pressure_work =
                 -pressure_e * divergence_electron_velocity;
             const amrex::Real energy_end =
@@ -9860,7 +9952,7 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                     wall_live * theta_dt *
                     (plasma_weight *
                          (-divergence_ion_energy_flux + lorentz_work +
-                          ion_pressure_work) -
+                          ion_pressure_work + joule_ion_share) -
                      drag_kinetic_drain - energy_relax_drain);
                 if (ei_equilibration) {
                     // Electron-ion equilibration counterpart (see the
@@ -10005,7 +10097,7 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                     wall_live * theta_dt *
                     (plasma_weight *
                          (-divergence_ion_internal_flux + pdv_work +
-                          viscous_heating) -
+                          viscous_heating + joule_ion_share) -
                      internal_relax_drain);
                 if (ei_equilibration) {
                     // Electron-ion equilibration: U_i receives the

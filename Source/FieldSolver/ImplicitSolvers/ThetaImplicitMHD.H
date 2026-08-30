@@ -1196,7 +1196,12 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // the Sharma-Hammett monotone form (see minmod_pair in _K.H) that
     // kills the cross-term flux at tangential extrema -- the fix for
     // the plasma-edge electron_energy direction pinning.
-    std::string m_braginskii_tangential_limiter = "none";
+    // Default minmod (2026-08-29 parity audit): the centered corner
+    // stencil of the Braginskii cross term is non-monotone where
+    // The reference code's FEM form is SPD; at clamp-forced anisotropy it carried a
+    // measured wall-ledger runaway (3.3e11 J -> 3.5e4 J under minmod in
+    // the E4 A/B). "none" remains selectable for the centered reference.
+    std::string m_braginskii_tangential_limiter = "minmod";
     // Coulomb logarithm of the Braginskii collision times tau_e/tau_i.
     amrex::Real m_conduction_coulomb_log = 10.0;
     // Optional absolute clamps [m^2/s] on the Braginskii chi_par and
@@ -1293,6 +1298,10 @@ class ThetaImplicitMHD final : public ImplicitSolver
     amrex::Real m_hllc_contact_blend = 0.0;
     bool m_evolve_ion_fluid = true;
     bool m_include_joule_heating = true;
+    // The reference code's f_ohmi: direct ion share of the Joule power (0 = legacy
+    // all-electron; (0,1] constant; -1 = the Te-keyed tanh split
+    // 0.1 + 0.4 (1 + tanh((Te[eV] - 60)/20)) the reference shot flies).
+    amrex::Real m_joule_ion_fraction = 0.0;
     // ---- reference-code-style Ohm-current Joule quench (joule_ohm_current,
     // default off), ported from the reference code's "fancy current" (psi.f90): at
     // Joule-deposition cells where the FIELD advance is diffusion

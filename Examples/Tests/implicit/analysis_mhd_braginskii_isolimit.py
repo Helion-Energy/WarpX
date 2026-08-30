@@ -61,7 +61,7 @@ number_density = 1.0e18
 te0_eV = 10.0
 ti0_eV = 40.0
 coulomb_log = 10.0
-chi_max = 7.0e6
+chi_max = 4.6667e6  # scaled by (gamma - 1) with the convention fix
 gamma = 5.0 / 3.0
 relative_amplitude = 0.005
 number_of_cells = 64
@@ -80,13 +80,16 @@ def braginskii_chi_parallel(temperature_eV, tau_prefactor, coefficient, mass):
 tau_shared = (
     np.pi**1.5 * constants.epsilon_0**2 / (constants.elementary_charge**4 * coulomb_log)
 )
-chi_electron = braginskii_chi_parallel(
+# (gamma - 1): the operator is q = -rho chi grad(e_spec), so realizing
+# Braginskii's kappa/(n kB) coefficient requires chi_code = (gamma - 1) chi
+# (the 2026-08-29 convention fix; the solver applies the same factor).
+chi_electron = (gamma - 1.0) * braginskii_chi_parallel(
     te0_eV,
     6.0 * np.sqrt(2.0) * np.sqrt(constants.electron_mass) * tau_shared,
     3.16,
     constants.electron_mass,
 )
-chi_ion_raw = braginskii_chi_parallel(
+chi_ion_raw = (gamma - 1.0) * braginskii_chi_parallel(
     ti0_eV,
     12.0 * np.sqrt(constants.proton_mass) * tau_shared,
     3.9,

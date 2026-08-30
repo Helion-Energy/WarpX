@@ -2314,24 +2314,31 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         and zero ion velocity for an electron-MHD limit.
 
     fluid_flux: {"legacy_e_centered", "rusanov", "hllc", "hlld", "central"}, optional
+        Cell-face fluid flux; the default is "central". The pre-recast
+        name "centered" was renamed "legacy_e_centered" (the legacy
+        E-based scheme) and is a hard error, not a silent alias.
         hlld is not a production flux (central + viscosity is) and
         requires the explicit opt-in allow_hlld=True (kernel regression
         coverage only).
-        Cell-face fluid flux. Centered is low-dissipation for smooth flows;
-        Rusanov adds local Lax--Friedrichs regularization; HLLC is a
-        contact-preserving approximate Riemann flux. HLLD selects the
+        "legacy_e_centered" is the low-dissipation second-order E-based
+        operator for smooth flows; Rusanov adds local Lax--Friedrichs
+        regularization; HLLC is a contact-preserving approximate Riemann
+        flux. HLLD selects the
         conservative-form recast (1D and RZ): B replaces E as the JFNK
         field unknown and one smoothed HLLD Riemann solution per face
         supplies the fluid fluxes, the Maxwell stress, and the ideal EMF
         (corner UCT-HLL E_theta in RZ); E is the derived Ohm's-law
         quantity -u x B + eta J - eta_H laplacian(J). Requires no Hall
         term and no electron-pressure Ohm term.
-        "central" is the same recast with a Chacon-style central
-        conservative flux (the zero-dissipation limit of the hlld fan; a
-        few flops per face, smoother residuals for GMRES) in place of the
-        Riemann solver; it requires a positive viscosity for nonlinear
-        stability and shares the hlld recast constraints (1D/RZ, no
-        electron-pressure Ohm term; cgl is not supported). Unlike hlld,
+        "central" (the default) is the same recast with a Chacon-style
+        central conservative flux (the zero-dissipation limit of the
+        hlld fan; a few flops per face, smoother residuals for GMRES)
+        in place of the Riemann solver; it requires a positive
+        viscosity for nonlinear stability (the central flux carries no
+        Riemann dissipation by design, so a run that sets neither
+        fluid_flux nor viscosity aborts at setup) and shares the hlld
+        recast constraints (1D/RZ, no electron-pressure Ohm term; cgl
+        is not supported). Unlike hlld,
         "central" supports Hall MHD (include_hall_term on the
         HybridPICSolver): the solver-assembled Ohm's law gains the edge
         Hall EMF (J x B)/rho_q, converting the ion-frame ideal EMF to
@@ -2883,6 +2890,17 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         un-boosted user eta, so a vacuum-boosted halo's Joule deposit is
         quenched quadratically. Binary per-cell switch (no blend).
 
+    joule_ion_fraction: float, default=0 (all-electron)
+        Direct ion share of the Joule power (the reference code's f_ohmi): the
+        fraction f of the Joule deposit is booked into the ion energy
+        channel, with the electron channel keeping (1 - f). 0 (default)
+        is the legacy all-electron deposit; a constant in (0, 1] books
+        that fixed share; -1 selects the reference code's Te-keyed tanh split
+        f = 0.1 + 0.4*(1 + tanh((Te[eV] - 60)/20)) (the f_ohmi = -1
+        flown by the reference shot's run). Requires a recast flux
+        (fluid_flux="hlld" or "central") and ion_closure="total_energy"
+        or "dual_energy" (the ion share needs an ion energy channel).
+
     vacuum_reference_peak_fraction: float, default=0 (off)
         reference-code-style dynamic reference density (en0 = max(en00,
         0.1*max(n)), refreshed per step): fraction of the instantaneous
@@ -2947,6 +2965,15 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         python round-trip and its per-evaluation device-to-host
         copies; with circuit_hook_scope="residual" this restores
         EXACT circuit-in-residual coupling at native cost.
+
+    braginskii_tangential_limiter: {"minmod", "none"}, optional
+        Slope treatment of the Braginskii cross-term tangential gradient
+        (thermal_conduction_model="braginskii" only). The default
+        "minmod" uses the monotone Sharma-Hammett one-sided slopes, so
+        the cross-term flux cannot demand states below the local stencil
+        minimum; "none" selects the legacy centered corner stencil (the
+        non-monotone reference, measured to carry a wall-ledger runaway
+        at clamp-forced anisotropy).
 
     resistive_theta: float, optional
         Time centering of the dissipative Ohm terms (eta J including the
@@ -3021,6 +3048,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         vacuum_resistivity_diffusivity=None,
         vacuum_reference_peak_fraction=None,
         joule_ohm_current=None,
+        joule_ion_fraction=None,
         electron_ion_equilibration=None,
         braginskii_tangential_limiter=None,
         conduction_chi_par_min=None,
@@ -3127,6 +3155,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.vacuum_resistivity_diffusivity = vacuum_resistivity_diffusivity
         self.vacuum_reference_peak_fraction = vacuum_reference_peak_fraction
         self.joule_ohm_current = joule_ohm_current
+        self.joule_ion_fraction = joule_ion_fraction
         self.electron_ion_equilibration = electron_ion_equilibration
         self.braginskii_tangential_limiter = braginskii_tangential_limiter
         self.conduction_chi_par_min = conduction_chi_par_min
@@ -3247,6 +3276,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
             self.vacuum_reference_peak_fraction
         )
         implicit_mhd.joule_ohm_current = self.joule_ohm_current
+        implicit_mhd.joule_ion_fraction = self.joule_ion_fraction
         implicit_mhd.electron_ion_equilibration = (
             self.electron_ion_equilibration)
         implicit_mhd.braginskii_tangential_limiter = (

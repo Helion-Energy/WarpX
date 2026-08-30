@@ -104,7 +104,10 @@ implicit_mhd.thermal_conduction_model = braginskii
 implicit_mhd.conduction_coulomb_log = 10.0
 # inert floor (far below both chi) + active soft cap on the ion channel
 implicit_mhd.conduction_chi_min = 100.0
-implicit_mhd.conduction_chi_max = 7.0e6
+# cap scaled by (gamma - 1) = 2/3 with the 2026-08-29 conduction
+# convention fix, preserving the designed knee geometry (electron chi
+# below the knee, raw ion chi above it)
+implicit_mhd.conduction_chi_max = 4.6667e6
 implicit_mhd.mass_density(x,y,z) = rho0
 implicit_mhd.ion_pressure(x,y,z) = Pi0*(1.0 + dTi*sin(kz*z))
 implicit_mhd.electron_pressure(x,y,z) = Pe0*(1.0 + dTe*sin(kz*z))

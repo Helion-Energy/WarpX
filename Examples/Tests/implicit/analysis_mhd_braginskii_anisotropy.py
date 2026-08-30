@@ -58,7 +58,10 @@ tau_electron = (
     * np.sqrt(kbt)
     / (number_density * constants.elementary_charge**4 * coulomb_log)
 )
-chi_parallel = 3.16 * kbt * tau_electron / constants.electron_mass
+gamma = 5.0 / 3.0  # the deck's gamma_e
+# (gamma - 1): kappa-convention -> operator convention (see the
+# isolimit analysis; the solver applies the same factor).
+chi_parallel = (gamma - 1.0) * 3.16 * kbt * tau_electron / constants.electron_mass
 x_magnetization = (
     constants.elementary_charge
     * magnetic_field
