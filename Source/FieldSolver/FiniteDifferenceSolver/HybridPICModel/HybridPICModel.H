@@ -834,7 +834,14 @@ public:
     /** Run the per-substep B-field finiteness check (RK4 path) only on every
      *  N-th substep attempt, plus always on the final substep of each
      *  half-step and on the attempt immediately following a failed attempt.
-     *  Default 1 checks every attempt (the historical behavior). */
+     *  Default 1 checks every attempt (the historical behavior).
+     *  CAVEAT: with values > 1, a substep whose check is skipped can be
+     *  consumed by any same-step corrector-style consumer before the next
+     *  check runs. On a plain run the eventual check aborts (terminal
+     *  either way); under an external corrector loop that treats a check
+     *  failure as recoverable (e.g. a circuit-coupling engine), the skip
+     *  forfeits the retry and accepts an unverified push -- keep the
+     *  default 1 on coupled runs. */
     int m_substep_finite_check_interval = 1;
 
     bool m_holmstrom_vacuum_region = false;
