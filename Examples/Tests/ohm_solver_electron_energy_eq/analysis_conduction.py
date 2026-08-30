@@ -6,6 +6,7 @@
 # --- maximum principle and conserving the bump energy.
 
 import glob
+import re
 import sys
 
 import numpy as np
@@ -71,19 +72,39 @@ def main():
     variances = np.array(variances)
     m0s = np.array(m0s)
 
-    # 1) Variance growth rate: sanity window only. At CI scale the
-    #    conservative delta transport competes with two remap scales
-    #    (the advection stage's dx^2/(4 dt) and the kernel's deposit
-    #    granularity), so the absolute rate is verified loosely here;
-    #    the tight kernel-accuracy check is the nonlinear-front test
+    # 1) Variance growth rate. On the KERNEL operator this is a sanity
+    #    window only: at CI scale the conservative delta transport
+    #    competes with two remap scales (the advection stage's
+    #    dx^2/(4 dt) and the kernel's deposit granularity), so the
+    #    absolute rate is verified loosely; the tight kernel-accuracy
+    #    check is the nonlinear-front test
     #    (analysis_conduction_front.py), whose self-similar exponent is
-    #    insensitive to those additive numerical scales.
+    #    insensitive to those additive numerical scales. The grid-FD
+    #    operator has no such scales, so its absolute rate is pinned
+    #    tightly here -- this guards the kappa -> chi -> divergence
+    #    assembly calibration chain end to end (a heat-capacity-class
+    #    3/2 slip passes the sanity window but fails the tight pin; the
+    #    measured FD rate error at this resolution is -6%).
+    fd_operator = False
+    try:
+        with open("warpx_used_inputs") as f:
+            fd_operator = bool(
+                re.search(r"qdsmc_conduction_operator\s*=\s*\"?fd", f.read())
+            )
+    except OSError:
+        pass
     slope = np.polyfit(times, variances, 1)[0]
     slope_err = abs(slope - 2.0 * D) / (2.0 * D)
     print(f"\nvariance slope: {slope:.4e} (theory {2.0 * D:.4e}, "
-          f"rel err {slope_err:.2%})")
-    assert 0.1 * 2.0 * D < slope < 2.0 * 2.0 * D, (
-        f"variance growth outside sanity window: {slope:.3e}")
+          f"rel err {slope_err:.2%}, "
+          f"operator {'fd' if fd_operator else 'kernel'})")
+    if fd_operator:
+        assert slope_err < 0.15, (
+            f"FD conduction rate off theory: {slope:.3e} vs "
+            f"{2.0 * D:.3e} ({slope_err:.2%})")
+    else:
+        assert 0.1 * 2.0 * D < slope < 2.0 * 2.0 * D, (
+            f"variance growth outside sanity window: {slope:.3e}")
 
     # 2) Energy ledger: the excess-temperature sum is the bump's thermal
     #    energy at uniform density; the residual drift bound covers the

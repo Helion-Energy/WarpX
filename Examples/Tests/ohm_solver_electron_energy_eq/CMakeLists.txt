@@ -41,6 +41,36 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Same Gaussian-bump fixture on the grid-FD conduction operator. Unlike
+# the kernel path (whose absolute rate competes with remap scales, hence
+# the sanity window in the analysis), the FD operator admits a tight
+# rate assert: the analysis detects the operator from warpx_used_inputs
+# and pins the variance slope to 15%. Guards the kappa -> chi ->
+# divergence-assembly calibration chain end to end (a heat-capacity
+# class 3/2 slip passes the kernel test's sanity window but fails this).
+add_warpx_test(
+    test_2d_ohm_solver_electron_energy_conduction_fd_picmi  # name
+    2  # dims
+    2  # nprocs
+    "inputs_test_2d_ohm_solver_electron_energy_conduction_picmi.py --test --fd"  # inputs
+    "analysis_conduction.py"  # analysis
+    "analysis_default_regression.py --path diags/diag1000040"  # checksum
+    OFF  # dependency
+)
+
+# RZ radial through-axis mode of the grid-FD operator (curvilinear
+# J Xi^ij form). The committed tight-rate analysis (10% slope window,
+# r-weighted ledger) previously had no CI consumer.
+add_warpx_test(
+    test_rz_ohm_solver_electron_energy_conduction_picmi  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_2d_ohm_solver_electron_energy_conduction_picmi.py --test --rz"  # inputs
+    "analysis_conduction_rz.py"  # analysis
+    "analysis_default_regression.py --path diags/diag1000040"  # checksum
+    OFF  # dependency
+)
+
 # Grid-FD conduction on circular field lines with the Sharma-Hammett
 # cross-flux limiter (qdsmc_conduction_fd_limiter = sh): the anisotropic
 # cross-term stress case, b-hat rotating against the grid everywhere.
