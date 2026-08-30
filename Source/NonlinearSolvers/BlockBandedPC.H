@@ -1799,6 +1799,9 @@ void BlockBandedPC<T,Ops>::FillCoeffs (BoxSys& S,
             // 0 = the legacy strictly-zero gating)
             const RT rho_1c =
                 q_e*static_cast<RT>(hybrid->m_curlcurl_n_min);
+            // registration convention follows the solves
+            // (curlcurl_staggered_sources)
+            const bool stagsrc = hybrid->m_curlcurl_staggered_sources;
             auto rhoPol = [&](int i, int j) -> RT {
                 return have_rho_pol ? hRhoPol.get(i,j,0) : hRho.get(i,j,0);
             };
@@ -1808,9 +1811,10 @@ void BlockBandedPC<T,Ops>::FillCoeffs (BoxSys& S,
             for (int i = S.acTh.ilo; i <= S.acTh.ihi; i++) {
                 const RT rr = std::max(rmin + i*dr, RT(0.125)*dr);
                 for (int j = S.acTh.jlo; j <= S.acTh.jhi; j++) {
-                    const RT rho_n4 = std::max(RT(0.0),
-                        RT(0.25)*(rhoPol(i,j) + rhoPol(i-1,j)
-                                + rhoPol(i,j-1) + rhoPol(i-1,j-1)));
+                    const RT rho_n4 = std::max(RT(0.0), stagsrc
+                        ? rhoPol(i,j)
+                        : RT(0.25)*(rhoPol(i,j) + rhoPol(i-1,j)
+                                  + rhoPol(i,j-1) + rhoPol(i-1,j-1)));
                     S.acTh.ref(i,j) = rr*beta_fac*rho_n4 + RT(1.0)/rr;
                     S.foldTh.ref(i,j) = rho_n4;
                     const bool dir = (i <= 0) || (i >= m_ihi_nd)
@@ -1822,8 +1826,9 @@ void BlockBandedPC<T,Ops>::FillCoeffs (BoxSys& S,
             for (int i = S.acPr.ilo; i <= S.acPr.ihi; i++) {
                 const RT V = (rmin + (i + RT(0.5))*dr)*dr;
                 for (int j = S.acPr.jlo; j <= S.acPr.jhi; j++) {
-                    const RT rho_p = std::max(RT(0.0),
-                        RT(0.5)*(rhoPol(i,j) + rhoPol(i,j-1)));
+                    const RT rho_p = std::max(RT(0.0), stagsrc
+                        ? RT(0.5)*(rhoPol(i,j) + rhoPol(i+1,j))
+                        : RT(0.5)*(rhoPol(i,j) + rhoPol(i,j-1)));
                     S.acPr.ref(i,j) = beta_fac*rho_p*V;
                     S.foldPr.ref(i,j) = rho_p;
                     const bool dir =
@@ -1835,8 +1840,9 @@ void BlockBandedPC<T,Ops>::FillCoeffs (BoxSys& S,
             for (int i = S.acPz.ilo; i <= S.acPz.ihi; i++) {
                 const RT V = (i == 0) ? RT(0.125)*dr*dr : (rmin + i*dr)*dr;
                 for (int j = S.acPz.jlo; j <= S.acPz.jhi; j++) {
-                    const RT rho_p = std::max(RT(0.0),
-                        RT(0.5)*(rhoPol(i,j) + rhoPol(std::max(i-1,0),j)));
+                    const RT rho_p = std::max(RT(0.0), stagsrc
+                        ? RT(0.5)*(rhoPol(i,j) + rhoPol(i,j+1))
+                        : RT(0.5)*(rhoPol(i,j) + rhoPol(std::max(i-1,0),j)));
                     S.acPz.ref(i,j) = beta_fac*rho_p*V;
                     S.foldPz.ref(i,j) = rho_p;
                     const bool dir = (i >= m_ihi_nd);
@@ -1854,7 +1860,9 @@ void BlockBandedPC<T,Ops>::FillCoeffs (BoxSys& S,
                         continue;
                     }
                     RT rho_n;
-                    if (i <= 0) {
+                    if (stagsrc) {
+                        rho_n = rhoPol(i,j);   // direct nodal read
+                    } else if (i <= 0) {
                         rho_n = RT(0.5)*(rhoPol(i,j) + rhoPol(i,j-1));
                     } else if (i >= m_ihi_nd) {
                         rho_n = RT(0.5)*(rhoPol(i-1,j) + rhoPol(i-1,j-1));

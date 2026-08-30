@@ -1086,6 +1086,24 @@ public:
      *  snapshot; the anchor is a constant (iron rule). */
     amrex::Real m_curlcurl_n_min = 0.0;
 
+    /** Registration-correct density consumption for the curlcurl_form
+     *  elliptic stages (hybrid_pic_model.curlcurl_staggered_sources;
+     *  default false = the landed conventions, bit-preserved). The rho
+     *  field is NODAL in RZ, but the elliptic-side consumers -- the
+     *  toroidal fold and acoef/anchor, the poloidal acoefs, RHS-membership
+     *  gates and fold weights, and the vacuum-closure gamma gate -- read
+     *  it with cell-centered-source conventions, landing every screening
+     *  coefficient half a cell off its row point (the kernel-side
+     *  numerator capture and eta/Holmstrom reads use proper staggered
+     *  Interp and are already correct). At the marginal one-count band
+     *  this is an O(1) numerator-vs-screening self-inconsistency on edge
+     *  rows. With the knob on, all four consumers use the proper
+     *  staggered/nodal Interp forms of the SAME frozen-family density:
+     *  direct rho(i,j) at nodal points (theta, gamma), the r-pair average
+     *  at Er points, the z-pair average at Ez points.
+     *  pc_curlcurl_banded's row mirrors follow the knob. */
+    bool m_curlcurl_staggered_sources = false;
+
     /** E-solve form "tensor_form": the stateless Je elimination on the
      *  curl-curl base. The theta-level electron momentum equation
      *  (backward Euler over dt_eff = theta dt, division-free, Amano,

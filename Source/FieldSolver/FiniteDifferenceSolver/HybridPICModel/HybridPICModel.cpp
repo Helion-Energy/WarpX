@@ -256,6 +256,11 @@ void HybridPICModel::ReadParameters ()
             // gating, bit-identical).
             utils::parser::queryWithParser(
                 pp_hybrid, "curlcurl_n_min", m_curlcurl_n_min);
+            // Registration-correct staggered density consumption for the
+            // elliptic stages (see the member documentation; default off =
+            // the landed conventions, bit-identical).
+            pp_hybrid.query("curlcurl_staggered_sources",
+                            m_curlcurl_staggered_sources);
             std::string scheme;
             const amrex::ParmParse pp_algo("algo");
             pp_algo.query("evolve_scheme", scheme);
@@ -1499,18 +1504,21 @@ void HybridPICModel::HybridPICSolveE (
             auto const & e_arr = Etheta.const_array(mfi);
             auto const & r_arr = rho_pol->const_array(mfi);
             const int rc_th = rho_pol_comp;
+            const bool stag = m_curlcurl_staggered_sources;
             amrex::Array4<amrex::Real const> xt;
             if (Et_ext) { xt = Et_ext->const_array(mfi); }
             amrex::ParallelFor(mfi.tilebox(),
             [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
-                // nodal density (cell-centered-convention average of the
-                // frozen-family source)
-                amrex::Real const rho_n = amrex::max(0.0_rt,
-                    0.25_rt*(r_arr(i, j, k, rc_th)
-                           + r_arr(i-1, j, k, rc_th)
-                           + r_arr(i, j-1, k, rc_th)
-                           + r_arr(i-1, j-1, k, rc_th)));
+                // nodal density of the frozen-family source: direct nodal
+                // read (registration-correct, curlcurl_staggered_sources)
+                // or the legacy cell-centered-convention average
+                amrex::Real const rho_n = amrex::max(0.0_rt, stag
+                    ? r_arr(i, j, k, rc_th)
+                    : 0.25_rt*(r_arr(i, j, k, rc_th)
+                             + r_arr(i-1, j, k, rc_th)
+                             + r_arr(i, j-1, k, rc_th)
+                             + r_arr(i-1, j-1, k, rc_th)));
                 n_arr(i, j, k) += rho_n * e_arr(i, j, k);
                 if (xt) { n_arr(i, j, k) -= rho_n * xt(i, j, k); }
             });
@@ -1573,11 +1581,21 @@ void HybridPICModel::HybridPICSolveE (
                 const int rc_pol = rho_pol_comp;
                 amrex::Array4<amrex::Real const> xt;
                 if (Ex_ext) { xt = Ex_ext->const_array(mfi); }
+                const bool stag = m_curlcurl_staggered_sources;
                 amrex::ParallelFor(mfi.tilebox(),
                 [=] AMREX_GPU_DEVICE (int i, int j, int k)
                 {
                     amrex::Real rho_p;
-                    if (is_er) {
+                    if (stag) {
+                        // proper staggered Interp of the nodal source:
+                        // r-pair at Er points, z-pair at Ez points (the
+                        // neighbor nodes exist for every valid row point)
+                        rho_p = is_er
+                            ? 0.5_rt*(r_arr(i, j, k, rc_pol)
+                                    + r_arr(i+1, j, k, rc_pol))
+                            : 0.5_rt*(r_arr(i, j, k, rc_pol)
+                                    + r_arr(i, j+1, k, rc_pol));
+                    } else if (is_er) {
                         int const jm = amrex::max(j - 1, jlo_cc);
                         int const jp = amrex::min(j, jhi_cc);
                         rho_p = 0.5_rt*(r_arr(i, jp, k, rc_pol)
@@ -2359,16 +2377,20 @@ void HybridPICModel::SolveEThetaCurlCurlRZ (amrex::MultiFab& Etheta,
         auto const & rho_arr = rho.const_array(mfi);
         auto const & num_arr = num.const_array(mfi);
         Real const rcap = 0.125_rt * dr;
+        const bool stag = m_curlcurl_staggered_sources;
         amrex::ParallelFor(nbx, [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
             Real const r = amrex::max(rmin + i*dr, rcap);
-            // node-interpolated midpoint density, UNfloored (clamped at
-            // zero: negative deposits must not flip the operator sign)
-            Real const rho_n = amrex::max(0.0_rt,
-                0.25_rt*(rho_arr(i, j, k, rho_comp)
-                       + rho_arr(i-1, j, k, rho_comp)
-                       + rho_arr(i, j-1, k, rho_comp)
-                       + rho_arr(i-1, j-1, k, rho_comp)));
+            // nodal density, UNfloored (clamped at zero: negative deposits
+            // must not flip the operator sign): direct nodal read
+            // (registration-correct, curlcurl_staggered_sources) or the
+            // legacy cell-centered-convention average
+            Real const rho_n = amrex::max(0.0_rt, stag
+                ? rho_arr(i, j, k, rho_comp)
+                : 0.25_rt*(rho_arr(i, j, k, rho_comp)
+                         + rho_arr(i-1, j, k, rho_comp)
+                         + rho_arr(i, j-1, k, rho_comp)
+                         + rho_arr(i-1, j-1, k, rho_comp)));
             a_arr(i, j, k) = r*beta_fac*rho_n + 1.0_rt/r;
             r_arr(i, j, k) = (rho_1c <= 0.0_rt || rho_n > rho_1c)
                 ? r*rhs_fac*num_arr(i, j, k) : 0.0_rt;
@@ -2648,6 +2670,8 @@ void HybridPICModel::SolveEPolCurlCurlRZ (amrex::MultiFab& Er,
     // div E = 0 completion as content -- the SolveETensorRZ recipe (a
     // statistics guard, never a density modification).
     Real const rho_1c = PhysConst::q_e * m_curlcurl_n_min;
+    // Registration-correct density consumption (see the member doc)
+    const bool stag = m_curlcurl_staggered_sources;
     const bool z_periodic = geom.isPeriodic(1);
     Real const inv_dr = 1.0_rt/dr;
     Real const inv_dz = 1.0_rt/dz;
@@ -2690,12 +2714,16 @@ void HybridPICModel::SolveEPolCurlCurlRZ (amrex::MultiFab& Er,
         [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
             Real const V = (rmin + (i + 0.5_rt)*dr)*dr;
-            // (cc r, nodal z): average the two z-neighbor cells; the
-            // non-periodic cap rows read a z ghost but are Dirichlet
-            // identity rows whose coefficients are never consumed
-            Real const rho_p = amrex::max(0.0_rt,
-                0.5_rt*(rho_arr(i, j, k, rho_comp)
-                      + rho_arr(i, j-1, k, rho_comp)));
+            // (cc r, nodal z) row point: the r-pair average of the nodal
+            // source (registration-correct, curlcurl_staggered_sources)
+            // or the legacy cell-centered-convention z-pair; non-periodic
+            // cap rows are Dirichlet identity rows whose coefficients are
+            // never consumed
+            Real const rho_p = amrex::max(0.0_rt, stag
+                ? 0.5_rt*(rho_arr(i, j, k, rho_comp)
+                        + rho_arr(i+1, j, k, rho_comp))
+                : 0.5_rt*(rho_arr(i, j, k, rho_comp)
+                        + rho_arr(i, j-1, k, rho_comp)));
             a_arr(i, j, k) = beta_fac*rho_p*V;
             b_arr(i, j, k) = (rho_p > rho_1c)
                 ? V*rhs_fac*num_arr(i, j, k) : 0.0_rt;
@@ -2715,12 +2743,16 @@ void HybridPICModel::SolveEPolCurlCurlRZ (amrex::MultiFab& Er,
         {
             Real const V = (i == zlo.x)
                 ? 0.125_rt*dr*dr : (rmin + i*dr)*dr;
-            // (nodal r, cc z): average the two r-neighbor cells (clamped
-            // into the domain at the axis; the wall node reads an r ghost
-            // but is a Dirichlet identity row)
-            Real const rho_p = amrex::max(0.0_rt,
-                0.5_rt*(rho_arr(i, j, k, rho_comp)
-                      + rho_arr(amrex::max(i-1, zlo.x), j, k, rho_comp)));
+            // (nodal r, cc z) row point: the z-pair average of the nodal
+            // source (registration-correct, curlcurl_staggered_sources)
+            // or the legacy cell-centered-convention r-pair (clamped into
+            // the domain at the axis; the wall node is a Dirichlet
+            // identity row)
+            Real const rho_p = amrex::max(0.0_rt, stag
+                ? 0.5_rt*(rho_arr(i, j, k, rho_comp)
+                        + rho_arr(i, j+1, k, rho_comp))
+                : 0.5_rt*(rho_arr(i, j, k, rho_comp)
+                        + rho_arr(amrex::max(i-1, zlo.x), j, k, rho_comp)));
             a_arr(i, j, k) = beta_fac*rho_p*V;
             b_arr(i, j, k) = (rho_p > rho_1c)
                 ? V*rhs_fac*num_arr(i, j, k) : 0.0_rt;
@@ -2806,7 +2838,11 @@ void HybridPICModel::SolveEPolCurlCurlRZ (amrex::MultiFab& Er,
                 g(i,j,k) = 0.0_rt; return;
             }
             Real rho_n;
-            if (i <= nlo.x) {
+            if (stag) {
+                // direct nodal read (registration-correct; valid at every
+                // domain node, no edge special cases)
+                rho_n = rho_arr(i, j, k, rho_comp);
+            } else if (i <= nlo.x) {
                 rho_n = 0.5_rt*(rho_arr(i, j, k, rho_comp)
                               + rho_arr(i, j-1, k, rho_comp));
             } else if (i >= nhi.x) {

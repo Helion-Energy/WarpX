@@ -4356,6 +4356,25 @@ Maxwell solver: kinetic-fluid hybrid
     gradient null family on edge cells whose deposit tail vacates mid-step). ``0`` restores
     the legacy live-density coupling for A/B comparison.
 
+.. pp:param:: hybrid_pic_model.curlcurl_staggered_sources
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Registration-correct density consumption for the ``esolve = curlcurl_form`` elliptic
+    stages. The charge density is nodal in RZ, but the elliptic-side consumers — the
+    toroidal numerator fold and screening coefficient, the poloidal screening rows,
+    RHS-membership gates and fold weights, and the vacuum-closure :math:`\gamma` gate —
+    read it with cell-centered-source index conventions, landing every screening
+    coefficient half a cell off its row point (the Ohm kernel's own numerator capture and
+    :math:`\eta(\rho)` reads use proper staggered interpolation and are already correct).
+    At the marginal one-count band this is an :math:`O(1)` numerator-vs-screening
+    self-inconsistency on edge rows. With this knob on, all elliptic-side consumers use the
+    proper staggered/nodal interpolation of the same frozen-family density (direct nodal
+    read at nodal points, the r-pair average at :math:`E_r` points, the z-pair average at
+    :math:`E_z` points); ``pc_curlcurl_banded`` mirrors the convention. Default off
+    preserves the landed conventions bit-for-bit.
+
 .. pp:param:: hybrid_pic_model.curlcurl_n_min
     :type: ``float`` (number density, m\ :sup:`-3`)
     :default: ``0``
