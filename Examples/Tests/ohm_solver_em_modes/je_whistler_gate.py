@@ -55,10 +55,13 @@ parser.add_argument(
     "(1.0); 0 = off (unstable honest-E_L dynamics, study only)",
 )
 parser.add_argument(
-    "--use-filter",
-    action="store_true",
+    "--filter",
+    choices=["default", "on", "off"],
+    default="default",
     help="bilinear (binomial) filtering of the deposited J/rho "
-    "(warpx.use_filter)",
+    "(warpx.use_filter). NOTE: the WarpX default is ON for this 1D "
+    "explicit configuration, so 'default' and 'on' run the same "
+    "config -- 'off' is the only true A/B arm",
 )
 parser.add_argument(
     "--je-yee",
@@ -159,7 +162,7 @@ simulation = picmi.Simulation(
     warpx_serialize_initial_conditions=True,
     warpx_current_deposition_algo="direct",
     warpx_grid_type=None if args.je_yee else "collocated",
-    warpx_use_filter=1 if args.use_filter else None,
+    warpx_use_filter={"default": None, "on": 1, "off": 0}[args.filter],
 )
 
 B_ext = picmi.AnalyticInitialField(

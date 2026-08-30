@@ -52,8 +52,15 @@
  *    w the gather weight (2^-d). Adjointness makes the round trip
  *    S G symmetric positive semi-definite -- the coupling interface
  *    is non-amplifying and conservative: <G u, g>_N = <u, S g>_S
- *    exactly. On a uniform Cartesian grid S reduces to the same
- *    equal-weight average as G.
+ *    exactly FOR THE UNCLAMPED PAIR. On a uniform Cartesian grid S
+ *    reduces to the same equal-weight average as G.
+ *    Face-clamp caveat: at clamped non-periodic domain faces (see
+ *    GatherToNodes) the gather degrades to a one-sided sample while
+ *    the scatter is unchanged, so exact adjointness and the SPSD
+ *    round trip hold on the interior only -- the clamped face rings
+ *    trade adjointness for never reading unmaintained ghosts. The
+ *    convex-combination bound (non-amplifying in max norm) survives
+ *    everywhere.
  *    Cylindrical caveat, documented deliberately: at the axis the
  *    node volume vanishes, so the innermost staggered ring receives
  *    its value from the first off-axis node alone -- an O(dr) local
@@ -61,7 +68,10 @@
  *    parity fields vanish linearly there.
  *
  *  A runtime self-check (adjointness to roundoff) is provided; the
- *  consumers run it once at coupling boot.
+ *  consumers run it once at coupling boot. It exercises the
+ *  UNCLAMPED Cartesian-weighted pair on a single box; the clamped
+ *  rings and the cylindrical radial weights rest on the analysis
+ *  above, not on the check.
  */
 namespace ablastr::fields
 {

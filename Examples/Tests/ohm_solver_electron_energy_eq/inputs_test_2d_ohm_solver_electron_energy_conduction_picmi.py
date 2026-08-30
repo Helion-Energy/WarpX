@@ -247,7 +247,7 @@ class ConductionTest(object):
             # and the whistler frequency at this grid/dt must stay under
             # the explicit B-substepping stability limit
             # (omega ~ k_max^2 B / (mu0 n e); 0.1 T would put
-            # omega dt_sub ~ 40 and detonate within two steps).
+            # omega dt_sub ~ 40 and blow up within two steps).
             prof = f"(1.0e-3*{ramp}*{taper})"
             b_init = picmi.AnalyticInitialField(
                 Bx_expression=f"-z/{rr}*{prof}",

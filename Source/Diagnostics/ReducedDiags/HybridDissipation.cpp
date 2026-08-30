@@ -85,11 +85,11 @@ HybridDissipation::ComputeDiags (const int step)
     // kernels (gated on solve_for_Faraday); the Je-form relax branch
     // returns before reaching them, so eta_H is dynamically inert on
     // that path and booking it there would be fiction (measured: the
-    // prospective column dominated a full-stroke je ledger while no
-    // solver term existed). Book P_etaH = 0 under the relax advance
-    // until a je-side hyper-resistivity (curl-curl form) exists.
-    // NOTE for monitors: detonation thresholds keyed on the P_etaH
-    // column must move to P_diss on je runs with this booking.
+    // prospective column dominated a long production je run's ledger
+    // while no solver term existed). Book P_etaH = 0 under the relax
+    // advance until a je-side hyper-resistivity (curl-curl form)
+    // exists. NOTE for monitors: abort/alarm thresholds keyed on the
+    // P_etaH column must move to P_diss on je runs with this booking.
     const bool include_hyper = hybrid->m_include_hyper_resistivity_term
         && !(hybrid->m_esolve_je && hybrid->m_je_advance == 1);
     const bool external_b_split = hybrid->m_add_external_fields &&

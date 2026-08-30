@@ -243,7 +243,7 @@ public:
      *  the slow background. A frozen reference under an evolving
      *  background becomes a stale pin that continuously RADIATES
      *  inward from the caps (measured: Alfvenic-speed inward fronts
-     *  from mid-stroke on the full-stroke panel). Tracking also
+     *  from mid-drive in long compression-driven runs). Tracking also
      *  softens the checkpoint-restart wart: a restored reference
      *  re-converges within tau instead of persisting. */
     amrex::Real m_je_sponge_track_tau = 0.0;
@@ -1132,11 +1132,11 @@ public:
      *  the whistler collar) the component-Laplacian form leaks
      *  grad(eta_H) x (div-sector) sources into Faraday, while this
      *  composition is sign-definite for arbitrary coefficient
-     *  variation: dW/dt = -Int eta_H |curl J|^2 dV exactly (three
-     *  nested curls integrate by parts pairwise). Explicit
-     *  application is stable with large margin: the substep dt is
-     *  O(1e-3) of the fourth-order diffusion CFL dx^4 mu0 / eta_H at
-     *  campaign values. Active when plasma_hyper_resistivity is set
+     *  variation IN THE CONTINUUM: dW/dt = -Int eta_H |curl J|^2 dV
+     *  (three nested curls integrate by parts pairwise) -- see the
+     *  KNOWN INSTABILITY note below for why this does NOT carry to
+     *  the shipped discretization.
+     *  Active when plasma_hyper_resistivity is set
      *  and esolve = je_form (relax) and je_hyper_res = 1.
      *  DEFAULT 0: a physics operator must not default on before its
      *  production-habitat validation -- the original default of 1
@@ -1204,10 +1204,14 @@ public:
      *  after every push; the je path additionally re-checks once at
      *  the end of every half-step, so a half never hands unverified
      *  fields onward. WHY: the every-push device-reduction check
-     *  measured 2.7% of a full-stroke production step (43.3M calls)
-     *  while feeding an abort that is terminal either way --
+     *  measured ~3% of a production-scale step while feeding the
+     *  uncoupled path's abort, which is terminal either way -- there
      *  a detection latency of N-1 substeps changes nothing but the
-     *  length of the discarded tail. Default 1 = the legacy
+     *  length of the discarded tail. CAVEAT: on the circuit-coupler
+     *  corrector path a failed check is RECOVERABLE (restore and
+     *  retry at a smaller dt_sub); an interval > 1 can accept an
+     *  unverified push there and forfeit the retry -- keep the
+     *  default on coupled runs. Default 1 = the legacy
      *  every-push behavior (bit-identical).
      *  Input: substep_finite_check_interval. */
     int m_substep_finite_check_interval = 1;
@@ -1218,8 +1222,8 @@ public:
      *  the drive change since t = 0, but any cap-region PLASMA-wave
      *  content present at the checkpoint is baked into the new
      *  damping target instead of being damped away. Unround-tripped
-     *  companion state; a sidecar round-trip (hybrid_substeps.dat
-     *  pattern) is the queued fix. */
+     *  companion state; a sidecar round-trip of the reference
+     *  fields is the queued fix. */
     bool m_je_sponge_init = false;
 
     /** Semi-implicit E_L relaxation of the relax advance
@@ -1426,9 +1430,10 @@ public:
      *  reads its interval-midpoint B: every coupling is second-order
      *  time-centered. Motivated by the 1D energy testbed (the
      *  substep-scaling drift is centering-invariant = the BE bias of
-     *  the local solve) and measured on the whistler gate at 0.287 -
-     *  0.303% on the inertia branch, gap fraction 1.00 (the BE-Lie
-     *  record is 0.696%/0.99). Being neutral, the scheme exposes
+     *  the local solve) and measured on the whistler gate at 0.186%
+     *  on the inertia branch, gap fraction 1.00 (the BE-Lie record
+     *  is 0.696%/0.99; the retired fully explicit staggered interim
+     *  scored 0.287 - 0.303%). Being neutral, the scheme exposes
      *  dynamics BE silently damped: with the qn pin off, a
      *  c_art-resonant parametric decay of the artificial longitudinal
      *  E_L branch (three-wave, spectrally identified on the 1D
@@ -1707,7 +1712,7 @@ public:
     enum struct QdsmcTimeAdvance { Euler, Leapfrog, PC };
     QdsmcTimeAdvance m_qdsmc_time_advance = QdsmcTimeAdvance::PC;
 
-    /** Half-gradient-corrected QDSMC deposit (B1): markers carry
+    /** Half-gradient-corrected QDSMC deposit: markers carry
      *  limited MC slopes of their content and the scatter deposits
      *  w * (A + 1/2 G . (x_dest - x_p)). Conservation is exact (the
      *  correction sums to zero by the hat's first-moment property); the
@@ -2253,7 +2258,7 @@ public:
     bool m_cond_vacuum_fast_front = true;
 
     /** Conduction grid-transfer form. 0 = scatter (spawn daughters at each
-     *  node, deposit u forward with the B1 half-gradient hat; exactly
+     *  node, deposit u forward with the half-gradient-corrected hat; exactly
      *  conservative). 1 = layer (Milstein layer/gather form: T^{n+1}(node)
      *  = sum_q w_q Interp(T^n)(foot_q), the adjoint transfer; pointwise
      *  interpolation has no deposit-moment frame seam, so the curvature-
@@ -2326,8 +2331,9 @@ public:
      *  Boris--Book limiter clips the antidiffusive fluxes at extrema:
      *  keys-class interior accuracy with hat positivity/monotonicity and
      *  exact (flux-form) conservation. Requires the hat kernel and
-     *  qdsmc_gradient_deposit = 0 (B1 would partially cancel the variance
-     *  the tally then over-compensates). Input:
+     *  qdsmc_gradient_deposit = 0 (the half-gradient correction would
+     *  partially cancel the variance the tally then over-compensates).
+     *  Input:
      *  qdsmc_advection_compensate. */
     bool m_adv_compensate = false;
 
@@ -2470,8 +2476,9 @@ public:
      *  isothermal, qdsmc_conduction_eb_Te(x,y,z). */
     int m_cond_eb_bc = 0;
 
-    /** Advection-marker EB handling (the E7-replacement at
-     *  embedded boundaries; dsmc-eb-reflection semantics at sub-cell
+    /** Advection-marker EB handling (replacing the legacy adiabatic
+     *  wall clamp at embedded boundaries; dsmc-eb-reflection
+     *  semantics at sub-cell
      *  hop scale): markers homed at covered nodes (level set <= 0)
      *  never move — V_e inside the conductor is not physical — and
      *  fluid markers pushed into the conductor are specularly mirrored
@@ -2540,12 +2547,13 @@ public:
 
     amrex::Real GetQdsmcCondFloorTally () const { return m_cond_floor_tally; }
 
-    /** Scatter-form deposit kernel. 0 = hat (2^d CIC + the B1
+    /** Scatter-form deposit kernel. 0 = hat (2^d CIC + the
      *  half-gradient correction). 1 = Keys cubic convolution (a = -1/2,
      *  4^d): partition of unity is exact (conservation stays exact) and
      *  the kernel reproduces quadratics, so its first AND second deposit
-     *  moments vanish -- the remap diffusion the B1 correction fights,
-     *  including the curvature-rotated cross part the per-axis B1 cannot
+     *  moments vanish -- the remap diffusion the half-gradient correction
+     *  fights, including the curvature-rotated cross part the per-axis
+     *  correction cannot
      *  cancel, is absent by construction (no correction applied). The
      *  price is Godunov's: negative lobes, NOT monotone -- sharp fronts
      *  can ring/undershoot. Interpolating at zero displacement, so the

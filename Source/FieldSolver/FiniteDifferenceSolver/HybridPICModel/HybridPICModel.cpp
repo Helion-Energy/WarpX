@@ -439,7 +439,7 @@ void HybridPICModel::ReadParameters ()
             (m_cond_deposit_kernel == 0 && !m_qdsmc_gradient_deposit),
             "hybrid_pic_model.qdsmc_advection_compensate requires the hat "
             "deposit kernel and qdsmc_gradient_deposit = 0 (the FCT pass "
-            "replaces the B1 correction)");
+            "replaces the half-gradient correction)");
         WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
             !(m_adv_form == 2 && m_adv_compensate),
             "hybrid_pic_model.qdsmc_advection_compensate is a scatter-form "
@@ -869,6 +869,16 @@ void HybridPICModel::ReadParameters ()
             "every solve, so the E-side reference/tracking knobs are "
             "je_form-only by construction.");
         pp_hybrid.query("je_hyper_res", m_je_hyper_res);
+        if (m_je_hyper_res) {
+            ablastr::warn_manager::WMRecordWarning(
+                "HybridPIC",
+                "je_hyper_res = 1 arms the curl-curl hyper-resistivity, "
+                "which has a KNOWN grid-scale instability at refined "
+                "resolution (non-adjoint centered curls -- see the knob "
+                "documentation in HybridPICModel.H). Do not arm in "
+                "production runs.",
+                ablastr::warn_manager::WarnPriority::high);
+        }
         utils::parser::queryWithParser(pp_hybrid, "je_el_frac",
                                        m_je_el_frac);
         utils::parser::queryWithParser(pp_hybrid, "je_el_n_ref",
@@ -5589,7 +5599,7 @@ void HybridPICModel::QdsmcTransportOnce (int const lev, amrex::Real const dt_adv
     m_qdsmc_pc->SetK(lev, Ke, rho);
     QdsmcPhaseMinTe(lev, "transport_set_vk");
 
-    // EB marker handling (adiabatic E7-replacement, matching the
+    // EB marker handling (replacing the legacy adiabatic clamp, matching the
     // conduction sweeps' fold-back): covered-home markers freeze,
     // markers pushed into the conductor mirror back across the level
     // set, and the midpoint velocity sample is mirror-guarded too.
@@ -6020,7 +6030,7 @@ namespace
      *  qdsmc_interp1d per grid dim (the monotone kind is nonlinear in the
      *  data, so per-dim nesting -- not a weight product -- is required).
      *  Stencil indices are clamped into [lo, hi] on non-periodic dims
-     *  (degenerate end stencils at walls, E7-spirit placeholder until the
+     *  (degenerate end stencils at walls, a clamp-style placeholder until the
      *  reflection BCs); on periodic dims they read the filled
      *  ghosts. */
     AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
@@ -7583,7 +7593,7 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
     // construction; the cost is exact conservation (optional global
     // fixup below). Pure gather = race-free: OMP-threadable, unlike the
     // scatter deposit. TODO: reflected feet at walls replace the
-    // E7-style clamp; vacuum_fast_front semantics differ here (floored
+    // legacy wall clamp; vacuum_fast_front semantics differ here (floored
     // nodes keep their Te and are only read, never updated).
     if (m_adv_form == 1)
     {
@@ -7844,7 +7854,7 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                     }
 
                     // foot in index space, clamped to the interpolation
-                    // reach and (E7-style, pending) into the
+                    // reach and (clamp-style, pending the reflection BCs) into the
                     // domain on non-periodic edges
                     int i0[3] = {i, j, k};
                     amrex::Real fr[3] = {0.0_rt, 0.0_rt, 0.0_rt};
@@ -7941,7 +7951,7 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
     // face fluxes of a node are recomputed locally from the same data
     // (deterministic, so the neighbor gets bit-identical values): no face
     // scratch, no atomics, race-free -> OMP-threaded. Wall faces carry
-    // zero flux = exact adiabatic default (replaces the E7 clamp;
+    // zero flux = exact adiabatic default (replaces the legacy clamp;
     // later legs add tallies/isothermal variants on the same faces).
     if (m_adv_form == 2)
     {
@@ -9199,7 +9209,7 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
             if (ne0 <= 0.0_rt) { return; }   // nothing to carry; recovery skips too
 
             // u and its MC-limited slopes (per grid dim) at the source
-            // node -- the B1 half-gradient correction for the daughter
+            // node -- the half-gradient correction for the daughter
             // deposit. One-sided clamping at non-periodic domain edges
             // degrades to a zero slope, as in SetK.
             amrex::Real const u0 = 1.5_rt * kb * ne0 * Te_arr(i,j,k);
@@ -9364,7 +9374,7 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
                     drift[2] + o0*bzv + o1*p1z + o2*p2z};
 
                 // Continuous destination in grid-index space, hard-clamped
-                // to the deposit's guard reach and (E7-style, pending the
+                // to the deposit's guard reach and (clamp-style, pending the
                 // reflection BCs) just inside non-periodic domain
                 // edges.
                 amrex::Real s[AMREX_SPACEDIM];
@@ -11476,9 +11486,9 @@ void HybridPICModel::ApplyJeSpongeLayer (
         // damps only the fast (wave) band and follows the slowly
         // evolving compression background instead of fighting it --
         // a frozen reference becomes a stale pin that RADIATES
-        // inward as the background moves away from it (measured on
-        // the full-stroke panel: inward Alfvenic fronts launched
-        // from the caps from mid-stroke on). alpha = dt/tau per
+        // inward as the background moves away from it (measured in
+        // long compression-driven runs: inward Alfvenic fronts
+        // launched from the caps from mid-drive on). alpha = dt/tau per
         // accepted substep (a physical-time filter: the ACTUAL
         // substep dt is correct here, not the dt_cf pin).
         amrex::Real const alpha = (m_je_sponge_track_tau > 0.0_rt)
@@ -11686,9 +11696,12 @@ void HybridPICModel::ApplyJeHyperCurlCurl (
 
     // Evaluate every pass strictly inside non-periodic domain faces:
     // the centered stencils have no valid neighbor on the outermost
-    // node ring there, and FillBoundary never writes domain ghosts --
-    // reading them injects garbage into B at the walls (the M03
-    // first-substep NaN class). The r-lo face is the axis, which has
+    // node ring there, and FillBoundary never writes domain ghosts.
+    // Those ghosts hold their zero initialization, so pre-fix
+    // wall-row reads produced spurious stencil values and a one-node
+    // wall flux (implicated in first-substep NaN aborts at
+    // production resolution; the precise blow-up chain is still
+    // being re-derived). The r-lo face is the axis, which has
     // its own parity-corrected stencil and stays included. With the
     // scratch fields zeroed below, the excluded ring contributes no
     // hyper flux: the operator ends one node inside the walls.

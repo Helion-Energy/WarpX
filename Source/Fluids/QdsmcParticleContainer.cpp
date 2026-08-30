@@ -858,7 +858,7 @@ QdsmcParticleContainer::PushX (int lev, amrex::Real dt, amrex::Real frac,
                 // conductor are specularly mirrored back across the
                 // level set (a mirror that lands covered again — deep
                 // staircase corner — keeps the marker home). This is
-                // the adiabatic E7-replacement at the EB, matching the
+                // the adiabatic-clamp replacement at the EB, matching the
                 // conduction sweeps' fold-back.
 #if defined(WARPX_DIM_3D)
                 amrex::Real const hy_eb = y_node[ip];
