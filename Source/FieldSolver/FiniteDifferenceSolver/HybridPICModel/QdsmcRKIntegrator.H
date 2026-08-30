@@ -129,6 +129,11 @@ public:
         int const nk = (m_scheme == Scheme::RKF45) ? 6 : 2;
         int const nc = y.nComp();
         amrex::MultiFab y0(y.boxArray(), y.DistributionMap(), nc, 0);
+        // Error scratch is hoisted out of the attempt loop: allocating it
+        // per attempt (as a Step-local) costs one arena round trip per
+        // substep, which at production substep counts is tens of millions
+        // of allocations per stroke.
+        amrex::MultiFab e_scratch(y.boxArray(), y.DistributionMap(), nc, 0);
         amrex::Vector<amrex::MultiFab> k(nk);
         for (int s = 0; s < nk; ++s) {
             k[s].define(y.boxArray(), y.DistributionMap(), nc, 0);
@@ -139,6 +144,11 @@ public:
             (m_scheme == Scheme::RKF45) ? -0.2_rt : -0.5_rt;
         amrex::Real dt = t_end;
 
+        // SSPRK2 archive invariant: y == y0 (bitwise) at every attempt
+        // entry -- established by the copy above, re-established by the
+        // fused predictor's archive on accepted attempts and by the
+        // rewind copy on rejected ones. The predictor reads y in place of
+        // y0 and archives it, which retires the per-accept y0 <- y copy.
         while (st.t_done < t_end*(1.0_rt - 1.0e-12_rt))
         {
             if (st.n_attempts >= m_max_attempts) { break; }
@@ -151,9 +161,9 @@ public:
 
             amrex::Real err;
             if (m_scheme == Scheme::RKF45) {
-                err = StepRKF45(y, y0, k, dt);
+                err = StepRKF45(y, y0, k, e_scratch, dt);
             } else {
-                err = StepSSPRK2(y, y0, k, dt);
+                err = StepSSPRK2(y, y0, k, e_scratch, dt);
             }
 
             amrex::Real const fac =
@@ -169,7 +179,9 @@ public:
                     st.dt_min = amrex::min(st.dt_min, dt);
                     st.dt_max = amrex::max(st.dt_max, dt);
                 }
-                amrex::MultiFab::Copy(y0, y, 0, 0, nc, 0);
+                if (m_scheme == Scheme::RKF45) {
+                    amrex::MultiFab::Copy(y0, y, 0, 0, nc, 0);
+                }
                 dt *= amrex::min(m_max_growth, fac);
             } else {
                 amrex::MultiFab::Copy(y, y0, 0, 0, nc, 0);
@@ -212,8 +224,11 @@ private:
         using namespace amrex::literals;
         QdsmcRKStats st;
         int const nc = y.nComp();
+        // Y_{j-1} needs no archive of its own: the caller's y holds it at
+        // every stage entry (the fused stage kernel reads it there before
+        // overwriting), so only Y_{j-2}, Y_0, and the two RHS archives
+        // are kept.
         amrex::MultiFab y0  (y.boxArray(), y.DistributionMap(), nc, 0);
-        amrex::MultiFab yjm1(y.boxArray(), y.DistributionMap(), nc, 0);
         amrex::MultiFab yjm2(y.boxArray(), y.DistributionMap(), nc, 0);
         amrex::MultiFab my0 (y.boxArray(), y.DistributionMap(), nc, 0);
         amrex::MultiFab mjm1(y.boxArray(), y.DistributionMap(), nc, 0);
@@ -260,22 +275,44 @@ private:
                 amrex::Real(s)*(amrex::Real(s) + 1.0_rt) - 2.0_rt;
             amrex::Real const w1 = 4.0_rt/ssq;
 
-            // Stage 1 (into y; archives: y0 = Y_0, yjm1 = Y_1)
-            amrex::MultiFab::Copy(y0, y, 0, 0, nc, 0);
+            // Stage 1 (into y; archives y0 = yjm2 = Y_0 and applies the
+            // Euler update in one fused launch, in place of a copy, a
+            // LinComb, and two archive copies)
             amrex::Real const mu_t1 = w1/3.0_rt;   // b_1 w_1
-            amrex::MultiFab::LinComb(y, 1.0_rt, y0, 0,
-                                     mu_t1*tau, my0, 0, 0, nc, 0);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+            for (amrex::MFIter mfi(y0, amrex::TilingIfNotGPU());
+                 mfi.isValid(); ++mfi) {
+                amrex::Box const bx = mfi.tilebox();
+                auto const & y_arr    = y.array(mfi);
+                auto const & y0_arr   = y0.array(mfi);
+                auto const & yjm2_arr = yjm2.array(mfi);
+                auto const & my0_arr  = my0.const_array(mfi);
+                amrex::Real const c1 = mu_t1*tau;
+                amrex::ParallelFor(bx, nc,
+                    [=] AMREX_GPU_DEVICE (int i, int j, int kk, int c)
+                {
+                    amrex::Real const yv = y_arr(i,j,kk,c);
+                    y0_arr(i,j,kk,c) = yv;
+                    yjm2_arr(i,j,kk,c) = yv;
+                    y_arr(i,j,kk,c) = 1.0_rt*yv + c1*my0_arr(i,j,kk,c);
+                });
+            }
             if (m_post_step) { m_post_step(y, mu_t1*tau); }
             book(mu_t1*tau);
-            amrex::MultiFab::Copy(yjm1, y, 0, 0, nc, 0);
-            amrex::MultiFab::Copy(yjm2, y0, 0, 0, nc, 0);
             amrex::Real c_prev = mu_t1;
             amrex::Real b_jm1 = 1.0_rt/3.0_rt;     // b_1
             amrex::Real b_jm2 = 1.0_rt/3.0_rt;     // b_0
 
             for (int j = 2; j <= s; ++j) {
-                // y holds Y_{j-1}: evaluate M(Y_{j-1}) (ghost refresh
-                // is the RHS functor's job), then overwrite y with Y_j.
+                // y holds Y_{j-1} (with its post-step mutation): evaluate
+                // M(Y_{j-1}) (ghost refresh is the RHS functor's job),
+                // then one fused launch computes Y_j in the exact
+                // per-element accumulation order of the original
+                // LinComb + 3 Saxpy sequence (bit-identical), reading
+                // Y_{j-1} from y before overwriting and re-archiving it
+                // as the next stage's Y_{j-2}.
                 m_rhs(y, mjm1);
                 amrex::Real const rj = amrex::Real(j);
                 amrex::Real const bj =
@@ -284,17 +321,36 @@ private:
                 amrex::Real const nu   = -((rj - 1.0_rt)/rj)*bj/b_jm2;
                 amrex::Real const mu_t = mu*w1;
                 amrex::Real const ga_t = -(1.0_rt - b_jm1)*mu_t;
-                amrex::MultiFab::LinComb(y, mu, yjm1, 0, nu, yjm2,
-                                         0, 0, nc, 0);
-                amrex::MultiFab::Saxpy(y, 1.0_rt - mu - nu, y0, 0, 0, nc, 0);
-                amrex::MultiFab::Saxpy(y, mu_t*tau, mjm1, 0, 0, nc, 0);
-                amrex::MultiFab::Saxpy(y, ga_t*tau, my0, 0, 0, nc, 0);
+                amrex::Real const w0   = 1.0_rt - mu - nu;
+                amrex::Real const ct_m = mu_t*tau;
+                amrex::Real const ct_g = ga_t*tau;
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+                for (amrex::MFIter mfi(y0, amrex::TilingIfNotGPU());
+                     mfi.isValid(); ++mfi) {
+                    amrex::Box const bx = mfi.tilebox();
+                    auto const & y_arr    = y.array(mfi);
+                    auto const & yjm2_arr = yjm2.array(mfi);
+                    auto const & y0_arr   = y0.const_array(mfi);
+                    auto const & mjm1_arr = mjm1.const_array(mfi);
+                    auto const & my0_arr  = my0.const_array(mfi);
+                    amrex::ParallelFor(bx, nc,
+                        [=] AMREX_GPU_DEVICE (int i, int jj, int kk, int c)
+                    {
+                        amrex::Real const yv = y_arr(i,jj,kk,c);
+                        amrex::Real r = mu*yv + nu*yjm2_arr(i,jj,kk,c);
+                        r = r + w0*y0_arr(i,jj,kk,c);
+                        r = r + ct_m*mjm1_arr(i,jj,kk,c);
+                        r = r + ct_g*my0_arr(i,jj,kk,c);
+                        yjm2_arr(i,jj,kk,c) = yv;
+                        y_arr(i,jj,kk,c) = r;
+                    });
+                }
                 amrex::Real const cj = (rj*rj + rj - 2.0_rt)/ssq;
                 if (m_post_step) { m_post_step(y, (cj - c_prev)*tau); }
                 book((cj - c_prev)*tau);
                 c_prev = cj;
-                std::swap(yjm2, yjm1);
-                amrex::MultiFab::Copy(yjm1, y, 0, 0, nc, 0);
                 b_jm2 = b_jm1;
                 b_jm1 = bj;
             }
@@ -402,23 +458,65 @@ private:
     private:
 
     /** One SSPRK2 attempt: y <- candidate; returns the error ratio from
-     *  the embedded Euler solution (e = dt/2 (k2 - k1)). */
-    amrex::Real StepSSPRK2 (amrex::MultiFab & y, amrex::MultiFab const & y0,
+     *  the embedded Euler solution (e = dt/2 (k2 - k1)).
+     *
+     *  Fused-glue form. The predictor requires (and the accept path of
+     *  Advance maintains) y == y0 bitwise at entry: it reads y in place
+     *  of y0, archives it into y0 (retiring the per-accept y0 <- y
+     *  copy), and applies the Euler update -- one launch instead of a
+     *  copy plus a LinComb. The corrector fuses the error assembly and
+     *  the two-pass solution update into a single launch, accumulating
+     *  in the exact per-element order of the original LinComb + Saxpy
+     *  sequence, so all results are bit-identical to the unfused form. */
+    amrex::Real StepSSPRK2 (amrex::MultiFab & y, amrex::MultiFab & y0,
                             amrex::Vector<amrex::MultiFab> & k,
+                            amrex::MultiFab & e,
                             amrex::Real const dt) const
     {
         using namespace amrex::literals;
         int const nc = y.nComp();
-        // predictor y = y0 + dt k1 (also the embedded order-1 solution)
-        amrex::MultiFab::LinComb(y, 1.0_rt, y0, 0, dt, k[0], 0, 0, nc, 0);
+        // predictor: y0 = y (archive); y = y0 + dt k1 (embedded order-1)
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (amrex::MFIter mfi(y0, amrex::TilingIfNotGPU());
+             mfi.isValid(); ++mfi) {
+            amrex::Box const bx = mfi.tilebox();
+            auto const & y_arr  = y.array(mfi);
+            auto const & y0_arr = y0.array(mfi);
+            auto const & k1_arr = k[0].const_array(mfi);
+            amrex::ParallelFor(bx, nc,
+                [=] AMREX_GPU_DEVICE (int i, int j, int kk, int c)
+            {
+                amrex::Real const yv = y_arr(i,j,kk,c);
+                y0_arr(i,j,kk,c) = yv;
+                y_arr(i,j,kk,c) = yv + dt*k1_arr(i,j,kk,c);
+            });
+        }
         m_rhs(y, k[1]);
         // corrector y = y0 + dt/2 (k1 + k2); error e = dt/2 (k2 - k1)
-        amrex::MultiFab e(y.boxArray(), y.DistributionMap(), nc, 0);
-        amrex::MultiFab::LinComb(e, -0.5_rt*dt, k[0], 0, 0.5_rt*dt, k[1],
-                                 0, 0, nc, 0);
-        amrex::MultiFab::LinComb(y, 1.0_rt, y0, 0, 0.5_rt*dt, k[0],
-                                 0, 0, nc, 0);
-        amrex::MultiFab::Saxpy(y, 0.5_rt*dt, k[1], 0, 0, nc, 0);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+        for (amrex::MFIter mfi(y0, amrex::TilingIfNotGPU());
+             mfi.isValid(); ++mfi) {
+            amrex::Box const bx = mfi.tilebox();
+            auto const & y_arr  = y.array(mfi);
+            auto const & e_arr  = e.array(mfi);
+            auto const & y0_arr = y0.const_array(mfi);
+            auto const & k1_arr = k[0].const_array(mfi);
+            auto const & k2_arr = k[1].const_array(mfi);
+            amrex::ParallelFor(bx, nc,
+                [=] AMREX_GPU_DEVICE (int i, int j, int kk, int c)
+            {
+                amrex::Real const k1v = k1_arr(i,j,kk,c);
+                amrex::Real const k2v = k2_arr(i,j,kk,c);
+                e_arr(i,j,kk,c) = (-0.5_rt*dt)*k1v + (0.5_rt*dt)*k2v;
+                amrex::Real r = 1.0_rt*y0_arr(i,j,kk,c) + (0.5_rt*dt)*k1v;
+                r = r + (0.5_rt*dt)*k2v;
+                y_arr(i,j,kk,c) = r;
+            });
+        }
         return ErrNorm(e, y0);
     }
 
@@ -427,6 +525,7 @@ private:
      *  ratio from the 4th/5th difference. */
     amrex::Real StepRKF45 (amrex::MultiFab & y, amrex::MultiFab const & y0,
                            amrex::Vector<amrex::MultiFab> & k,
+                           amrex::MultiFab & e,
                            amrex::Real const dt) const
     {
         using namespace amrex::literals;
@@ -463,7 +562,6 @@ private:
         stage({{a61, 0}, {a62, 1}, {a63, 2}, {a64, 3}, {a65, 4}}, 5);
 
         // 5th-order candidate and 4th/5th error in one pass each
-        amrex::MultiFab e(y.boxArray(), y.DistributionMap(), nc, 0);
         amrex::MultiFab::LinComb(y, 1.0_rt, y0, 0, dt*b51, k[0], 0, 0, nc, 0);
         amrex::MultiFab::Saxpy(y, dt*b53, k[2], 0, 0, nc, 0);
         amrex::MultiFab::Saxpy(y, dt*b54, k[3], 0, 0, nc, 0);
