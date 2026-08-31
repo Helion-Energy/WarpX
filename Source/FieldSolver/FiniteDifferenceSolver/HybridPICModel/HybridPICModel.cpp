@@ -128,6 +128,16 @@ void HybridPICModel::ReadParameters ()
 
     utils::parser::queryWithParser(pp_hybrid, "holmstrom_vacuum_region", m_holmstrom_vacuum_region);
     utils::parser::queryWithParser(pp_hybrid, "holmstrom_transition_width", m_holmstrom_transition_width);
+    utils::parser::queryWithParser(pp_hybrid, "holmstrom_axis_radius", m_holmstrom_axis_radius);
+    utils::parser::queryWithParser(pp_hybrid, "holmstrom_axis_rolloff", m_holmstrom_axis_rolloff);
+#ifndef WARPX_DIM_RZ
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_holmstrom_axis_radius <= 0._rt,
+        "hybrid_pic_model.holmstrom_axis_radius is only supported in RZ geometry");
+#endif
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_holmstrom_axis_radius <= 0._rt || m_holmstrom_vacuum_region,
+        "hybrid_pic_model.holmstrom_axis_radius requires holmstrom_vacuum_region = 1");
     pp_hybrid.query("include_hall_term", m_include_hall_term);
     pp_hybrid.query("include_electron_pressure_term", m_include_electron_pressure_term);
 

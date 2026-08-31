@@ -578,6 +578,18 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
         : 0._rt;
     const bool holmstrom_smooth =
         holmstrom_vacuum_region && (holmstrom_inv_width > 0._rt);
+    // Radial confinement of the gate (see the knob doc): eligibility is
+    // masked to r < axis_radius so sub-floor halo cells beyond it keep the
+    // ungated legacy Ohm E exactly. The rolloff width smooths the mask's
+    // own radial edge for the smooth gate; the hard rho-branch uses a hard
+    // radial cutoff.
+    const bool holmstrom_axis_confined =
+        holmstrom_vacuum_region && (hybrid_model->m_holmstrom_axis_radius > 0._rt);
+    const Real holmstrom_axis_r = hybrid_model->m_holmstrom_axis_radius;
+    const Real holmstrom_axis_inv_w =
+        (hybrid_model->m_holmstrom_axis_rolloff > 0._rt)
+        ? 1._rt / hybrid_model->m_holmstrom_axis_rolloff
+        : 0._rt;
 
     // Energy-equation-era gating (see the drag/battery ledger in the
     // HybridPICModel docs):
@@ -935,7 +947,17 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Er_stag, coarsen, i, j, 0, 0);
 
-                if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
+                // Axis-confinement mask (1 = gate eligible); Er is
+                // cell-centered in r.
+                const Real r_gate_c = rmin + (i + 0.5_rt)*dr;
+                const Real ax_mask = !holmstrom_axis_confined ? 1._rt
+                    : (holmstrom_axis_inv_w > 0._rt
+                        ? 0.5_rt * (1._rt - std::tanh(
+                            (r_gate_c - holmstrom_axis_r) * holmstrom_axis_inv_w))
+                        : (r_gate_c < holmstrom_axis_r ? 1._rt : 0._rt));
+
+                if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth
+                    && (!holmstrom_axis_confined || r_gate_c < holmstrom_axis_r)) {
                     Er(i, j, 0) = 0._rt;
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
@@ -954,8 +976,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                     Real ohm_val = (enE_r - grad_Pe) / rho_val_limited;
                     if (holmstrom_smooth) {
-                        ohm_val *= 0.5_rt * (1._rt + std::tanh(
+                        const Real g = 0.5_rt * (1._rt + std::tanh(
                             (rho_val - rho_floor) * holmstrom_inv_width));
+                        // Legacy arithmetic when unconfined (bit-identical).
+                        ohm_val *= (holmstrom_axis_confined
+                                    ? 1._rt - (1._rt - g)*ax_mask : g);
                     }
                     Er(i, j, 0) = ohm_val;
                 }
@@ -1039,7 +1064,16 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Etheta_stag, coarsen, i, j, 0, 0);
 
-                if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
+                // Axis-confinement mask (1 = gate eligible); reuses the
+                // nodal r computed above.
+                const Real ax_mask = !holmstrom_axis_confined ? 1._rt
+                    : (holmstrom_axis_inv_w > 0._rt
+                        ? 0.5_rt * (1._rt - std::tanh(
+                            (r - holmstrom_axis_r) * holmstrom_axis_inv_w))
+                        : (r < holmstrom_axis_r ? 1._rt : 0._rt));
+
+                if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth
+                    && (!holmstrom_axis_confined || r < holmstrom_axis_r)) {
                     Etheta(i, j, 0) = 0._rt;
                 } else {
                     // Get the gradient of the electron pressure
@@ -1054,8 +1088,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                     Real ohm_val = (enE_t - grad_Pe) / rho_val_limited;
                     if (holmstrom_smooth) {
-                        ohm_val *= 0.5_rt * (1._rt + std::tanh(
+                        const Real g = 0.5_rt * (1._rt + std::tanh(
                             (rho_val - rho_floor) * holmstrom_inv_width));
+                        // Legacy arithmetic when unconfined (bit-identical).
+                        ohm_val *= (holmstrom_axis_confined
+                                    ? 1._rt - (1._rt - g)*ax_mask : g);
                     }
                     Etheta(i, j, 0) = ohm_val;
                 }
@@ -1135,7 +1172,17 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
                 // Interpolate to get the appropriate charge density in space
                 const Real rho_val = Interp(rho, nodal, Ez_stag, coarsen, i, j, 0, 0);
 
-                if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth) {
+                // Axis-confinement mask (1 = gate eligible); Ez is nodal
+                // in r.
+                const Real r_gate_n = rmin + i*dr;
+                const Real ax_mask = !holmstrom_axis_confined ? 1._rt
+                    : (holmstrom_axis_inv_w > 0._rt
+                        ? 0.5_rt * (1._rt - std::tanh(
+                            (r_gate_n - holmstrom_axis_r) * holmstrom_axis_inv_w))
+                        : (r_gate_n < holmstrom_axis_r ? 1._rt : 0._rt));
+
+                if (rho_val < rho_floor && holmstrom_vacuum_region && !holmstrom_smooth
+                    && (!holmstrom_axis_confined || r_gate_n < holmstrom_axis_r)) {
                     Ez(i, j, 0) = 0._rt;
                 } else {
                     // Get the gradient of the electron pressure if the longitudinal part of
@@ -1154,8 +1201,11 @@ void FiniteDifferenceSolver::HybridPICSolveECylindrical (
 
                     Real ohm_val = (enE_z - grad_Pe) / rho_val_limited;
                     if (holmstrom_smooth) {
-                        ohm_val *= 0.5_rt * (1._rt + std::tanh(
+                        const Real g = 0.5_rt * (1._rt + std::tanh(
                             (rho_val - rho_floor) * holmstrom_inv_width));
+                        // Legacy arithmetic when unconfined (bit-identical).
+                        ohm_val *= (holmstrom_axis_confined
+                                    ? 1._rt - (1._rt - g)*ax_mask : g);
                     }
                     Ez(i, j, 0) = ohm_val;
                 }

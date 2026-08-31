@@ -855,6 +855,24 @@ public:
      * the plasma edge). 0 (default) keeps the legacy hard branch. */
     amrex::Real m_holmstrom_transition_width = 0.0;
 
+    /** Radial confinement of the Holmstrom vacuum gate (RZ only). With
+     * radius R > 0 the gate is ELIGIBLE only at r < R: sub-floor cells
+     * beyond R keep the ungated legacy Ohm's-law E exactly. Motivation:
+     * a choked mirror-throat axis channel can sit below n_floor while
+     * carrying peak |B|, where the floor-clamped Hall term produces
+     * unphysical E spikes that feed grid-band B noise via Faraday and
+     * kick through-axis particles; confining the gate to that channel
+     * treats the measured pathology while leaving the outer halo -- and
+     * the gate's historically problematic plasma/vacuum seam there --
+     * untouched. 0 (default) keeps the gate global when armed. */
+    amrex::Real m_holmstrom_axis_radius = 0.0;
+
+    /** Radial rolloff width [m] of the axis confinement mask. 0 (default)
+     * is a hard radial edge at the confinement radius; w > 0 rolls the
+     * mask off as 0.5*(1 - tanh((r - R)/w)) so the gate's own radial
+     * boundary does not introduce a new hard seam in the sub-floor halo. */
+    amrex::Real m_holmstrom_axis_rolloff = 0.0;
+
     /** Independent Ohm's-law term controls: whether the Hall contribution
      * (the curl-B total current in the (J - J_i) x B / (e n) term; with it
      * off the term reduces to the ideal -u_i x B motional field) and the
