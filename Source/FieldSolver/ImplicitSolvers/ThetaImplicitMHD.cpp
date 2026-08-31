@@ -11780,45 +11780,125 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time, const int 
                                      PhysConst::mu0;
     const amrex::Real energy_tolerance =
         64.0_rt * std::numeric_limits<amrex::Real>::epsilon() * energy_scale;
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        density.min(0) >= m_mass_density_floor - density_tolerance,
-        "theta_implicit_mhd produced a final mass density below its positivity floor");
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        electron_energy.min(0) >=
-            m_electron_pressure_floor / (m_gamma_e - 1.0_rt) - energy_tolerance,
-        "theta_implicit_mhd produced a final electron energy below its positivity floor");
+    // Positivity checker (2026-08-30, the R2/R3 postmortems): a bare
+    // assert message cannot distinguish a genuine sub-floor value from a
+    // NON-FINITE value riding a stagnation-accepted state (every
+    // comparison with NaN is false, so the std::max-based restorations
+    // above pass NaNs through untouched and the old assert fired with a
+    // misleading "below its floor"). Report the finite min, the
+    // non-finite census, and up to 8 offending cells, THEN abort.
+    const amrex::Geometry& check_geom = m_WarpX->Geom(0);
+    const auto check_lo = check_geom.ProbLoArray();
+    const auto check_dx = check_geom.CellSizeArray();
+    const auto check_positivity = [&] (const amrex::MultiFab& mf,
+                                       const amrex::Real bound,
+                                       const amrex::Real tolerance,
+                                       const char* label) {
+        amrex::ReduceOps<amrex::ReduceOpMin, amrex::ReduceOpSum> ops;
+        amrex::ReduceData<amrex::Real, amrex::Long> data(ops);
+        for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
+            const auto arr = mf.const_array(mfi);
+            ops.eval(mfi.validbox(), data,
+                     [=] AMREX_GPU_DEVICE (int i, int j, int k)
+                         -> amrex::GpuTuple<amrex::Real, amrex::Long> {
+                         const amrex::Real v = arr(i, j, k);
+                         const bool finite = amrex::Math::isfinite(v);
+                         return {finite
+                                     ? v
+                                     : std::numeric_limits<
+                                           amrex::Real>::max(),
+                                 finite ? amrex::Long(0) : amrex::Long(1)};
+                     });
+        }
+        amrex::Real finite_min = amrex::get<0>(data.value(ops));
+        amrex::Long nonfinite = amrex::get<1>(data.value(ops));
+        amrex::ParallelAllReduce::Min(
+            finite_min, amrex::ParallelContext::CommunicatorSub());
+        amrex::ParallelAllReduce::Sum(
+            nonfinite, amrex::ParallelContext::CommunicatorSub());
+        if (nonfinite == 0 && finite_min >= bound - tolerance) { return; }
+        constexpr int cap = 8;
+        amrex::Gpu::DeviceVector<int> cells(cap * 3, 0);
+        amrex::Gpu::DeviceVector<amrex::Real> values(cap, 0.0_rt);
+        amrex::Gpu::DeviceVector<unsigned> cursor(1, 0u);
+        int* const cell_ptr = cells.data();
+        amrex::Real* const value_ptr = values.data();
+        unsigned* const cursor_ptr = cursor.data();
+        const amrex::Real cell_bound = bound - tolerance;
+        for (amrex::MFIter mfi(mf); mfi.isValid(); ++mfi) {
+            const auto arr = mf.const_array(mfi);
+            amrex::ParallelFor(
+                mfi.validbox(), [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    const amrex::Real v = arr(i, j, k);
+                    if (!amrex::Math::isfinite(v) || v < cell_bound) {
+                        const unsigned slot =
+                            amrex::Gpu::Atomic::Add(cursor_ptr, 1u);
+                        if (slot < static_cast<unsigned>(cap)) {
+                            cell_ptr[3 * slot + 0] = i;
+                            cell_ptr[3 * slot + 1] = j;
+                            cell_ptr[3 * slot + 2] = k;
+                            value_ptr[slot] = v;
+                        }
+                    }
+                });
+        }
+        amrex::Gpu::streamSynchronize();
+        std::vector<int> host_cells(cells.size());
+        std::vector<amrex::Real> host_values(values.size());
+        unsigned host_count = 0;
+        amrex::Gpu::copy(amrex::Gpu::deviceToHost, cells.begin(),
+                         cells.end(), host_cells.begin());
+        amrex::Gpu::copy(amrex::Gpu::deviceToHost, values.begin(),
+                         values.end(), host_values.begin());
+        amrex::Gpu::copy(amrex::Gpu::deviceToHost, cursor.begin(),
+                         cursor.end(), &host_count);
+        std::stringstream report;
+        report << "theta_implicit_mhd FINAL-STATE POSITIVITY VIOLATION in "
+               << label << ": finite min = " << finite_min
+               << " vs bound " << bound << " (tol " << tolerance
+               << "), NON-FINITE cells = " << nonfinite << ", "
+               << host_count << " offending cells; first "
+               << std::min<unsigned>(host_count, cap) << ":\n";
+        for (unsigned entry = 0;
+             entry < std::min<unsigned>(host_count, cap); ++entry) {
+            const int i = host_cells[3 * entry + 0];
+            const int j = host_cells[3 * entry + 1];
+            report << "  " << label << " = " << host_values[entry]
+                   << " at (i,j)=(" << i << ',' << j << ")  ("
+                   << check_lo[0] + (i + 0.5_rt) * check_dx[0]
+#if !defined(WARPX_DIM_1D_Z)
+                   << ", " << check_lo[1] + (j + 0.5_rt) * check_dx[1]
+#endif
+                   << ") m\n";
+        }
+        amrex::AllPrint() << report.str();
+        WARPX_ABORT_WITH_MESSAGE(
+            std::string("theta_implicit_mhd produced an inadmissible "
+                        "final ") +
+            label + " (see the violation report above)");
+    };
+    check_positivity(density, m_mass_density_floor, density_tolerance,
+                     "mass_density");
+    check_positivity(electron_energy,
+                     m_electron_pressure_floor / (m_gamma_e - 1.0_rt),
+                     energy_tolerance, "electron_energy");
     if (m_ion_closure == "total_energy" || m_ion_closure == "dual_energy") {
-        const amrex::MultiFab& ion_energy =
-            *m_WarpX->m_fields.get(IonEnergyName, 0);
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            ion_energy.min(0) >=
-                m_ion_pressure_floor / (m_gamma_i - 1.0_rt) - energy_tolerance,
-            "theta_implicit_mhd produced a final ion total energy below its "
-            "internal-energy floor");
+        check_positivity(*m_WarpX->m_fields.get(IonEnergyName, 0),
+                         m_ion_pressure_floor / (m_gamma_i - 1.0_rt),
+                         energy_tolerance, "ion_energy");
         if (m_ion_closure == "dual_energy") {
-            const amrex::MultiFab& ion_internal =
-                *m_WarpX->m_fields.get(IonInternalEnergyName, 0);
-            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-                ion_internal.min(0) >=
-                    m_ion_pressure_floor / (m_gamma_i - 1.0_rt) -
-                        energy_tolerance,
-                "theta_implicit_mhd produced a final ion internal energy "
-                "below its positivity floor");
+            check_positivity(
+                *m_WarpX->m_fields.get(IonInternalEnergyName, 0),
+                m_ion_pressure_floor / (m_gamma_i - 1.0_rt),
+                energy_tolerance, "ion_internal_energy");
         }
     } else if (m_ion_closure == "cgl") {
-        const amrex::MultiFab& parallel_energy =
-            *m_WarpX->m_fields.get(IonParallelEnergyName, 0);
-        const amrex::MultiFab& perp_energy =
-            *m_WarpX->m_fields.get(IonPerpEnergyName, 0);
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            parallel_energy.min(0) >=
-                0.5_rt * m_ion_pressure_floor - energy_tolerance,
-            "theta_implicit_mhd produced a final ion parallel energy below "
-            "its positivity floor");
-        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-            perp_energy.min(0) >= m_ion_pressure_floor - energy_tolerance,
-            "theta_implicit_mhd produced a final ion perpendicular energy "
-            "below its positivity floor");
+        check_positivity(*m_WarpX->m_fields.get(IonParallelEnergyName, 0),
+                         0.5_rt * m_ion_pressure_floor, energy_tolerance,
+                         "ion_parallel_energy");
+        check_positivity(*m_WarpX->m_fields.get(IonPerpEnergyName, 0),
+                         m_ion_pressure_floor, energy_tolerance,
+                         "ion_perp_energy");
     }
 
     if (m_use_recast) {
