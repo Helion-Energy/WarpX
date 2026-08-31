@@ -191,7 +191,9 @@ public:
         return st;
     }
 
-private:
+    // nvcc (CUDA >= 13) requires that member functions whose bodies
+    // contain extended __device__ lambdas (every ParallelFor) be public.
+public:
     /** RKL2 super-time-stepping advance. Per super-step tau, the stage
      *  count s satisfies tau <= safety * dt_expl * (s^2+s-2)/4 with
      *  dt_expl from the ceiling functor (evaluated once at super-step
@@ -455,7 +457,8 @@ private:
         }
         return err;
     }
-    private:
+    // Public for the same nvcc-13 extended-__device__-lambda rule.
+    public:
 
     /** One SSPRK2 attempt: y <- candidate; returns the error ratio from
      *  the embedded Euler solution (e = dt/2 (k2 - k1)).
@@ -519,6 +522,8 @@ private:
         }
         return ErrNorm(e, y0);
     }
+
+    private:
 
     /** One Fehlberg 4(5) attempt (coefficients identical to
      *  BfieldEvolveRKF45): y <- 5th-order candidate; returns the error
