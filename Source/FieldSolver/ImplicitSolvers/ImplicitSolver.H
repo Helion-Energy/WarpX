@@ -222,6 +222,17 @@ public:
     }
 
     /**
+     * \brief Project a solver state onto the operator's admissible set
+     * (positivity floors), scrubbing non-finite values. Called by
+     * NewtonSolver on the stagnation-accept path so a non-converged
+     * accepted iterate cannot carry inadmissible or NaN values into the
+     * time loop. Base implementation is a no-op.
+     */
+    virtual void ProjectStateToAdmissibleSet (WarpXSolverVec& /*a_U*/) const
+    {
+    }
+
+    /**
      * \brief Whether matrix-free Jacobian probe perturbations must be
      * limited to the admissible state domain. Operators whose residual
      * evaluation clamps every floored quantity pointwise can return

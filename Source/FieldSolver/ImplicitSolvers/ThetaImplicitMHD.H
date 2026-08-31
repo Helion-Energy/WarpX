@@ -134,6 +134,13 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * Public for the NVCC extended-lambda requirement. */
     void ResidualHotspotReport (const WarpXSolverVec& residual) const override;
 
+    /** Project the fluid blocks onto their theta-aware floor images
+     * (value >= (1 - theta) old + theta floor, so the extrapolated end
+     * state respects the absolute floors) and scrub non-finite values
+     * to the same bound. Stagnation-accept insurance: R5 booked a
+     * NEGATIVE 6e17 J wall ledger from garbage accepted states. */
+    void ProjectStateToAdmissibleSet (WarpXSolverVec& a_U) const override;
+
     /**
      * \brief The MHD residual is evaluable for ARBITRARY real states by
      * construction: densities are max-floored, pressures and energies go

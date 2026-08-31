@@ -698,7 +698,15 @@ void NewtonSolver<Vec,Ops>::Solve (Vec&         a_U,
                     amrex::Print()
                         << "WARNING: Newton line search stagnated at iter = "
                         << iter << " (rel. norm " << norm_rel
-                        << "); accepting the current iterate and continuing\n";
+                        << "); accepting the current iterate (projected "
+                           "onto the admissible set) and continuing\n";
+                    // Stagnation-accept insurance: the accepted iterate
+                    // is non-converged fiction; project it onto the
+                    // operator's admissible set (floors, NaN scrub) so
+                    // it cannot launder inadmissible values into the
+                    // time loop (measured: a NEGATIVE 6e17 J wall-ledger
+                    // booking rode this path on the formation ladder).
+                    m_ops->ProjectStateToAdmissibleSet(a_U);
                 }
                 break;
             }

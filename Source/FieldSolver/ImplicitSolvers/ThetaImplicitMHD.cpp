@@ -4791,6 +4791,51 @@ void ThetaImplicitMHD::ResidualHotspotReport (const WarpXSolverVec& residual) co
     amrex::AllPrint() << report.str();
 }
 
+void ThetaImplicitMHD::ProjectStateToAdmissibleSet (WarpXSolverVec& a_U) const
+{
+    const bool dual_energy_closure = m_ion_closure == "dual_energy";
+    const bool total_energy_closure =
+        m_ion_closure == "total_energy" || dual_energy_closure;
+    const bool cgl_closure = m_ion_closure == "cgl";
+    const int num_blocks = (cgl_closure || dual_energy_closure)
+                               ? 4
+                               : (total_energy_closure ? 3 : 2);
+    const std::array<const char*, 4> block_names = {
+        MassDensityName, ElectronEnergyName,
+        cgl_closure ? IonParallelEnergyName : IonEnergyName,
+        dual_energy_closure ? IonInternalEnergyName : IonPerpEnergyName};
+    const AdmissibilityBounds bounds = MakeAdmissibilityBounds();
+    const amrex::Real theta = m_theta;
+    for (int block = 0; block < num_blocks; ++block) {
+        const amrex::Real floor = bounds.floors[block];
+        amrex::MultiFab& value_mf =
+            a_U.getMultiFabBlock(block_names[block], 0);
+        const amrex::MultiFab& old_mf =
+            m_state_old.getMultiFabBlock(block_names[block], 0);
+        for (amrex::MFIter mfi(value_mf); mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.validbox();
+            const auto value = value_mf.array(mfi);
+            const auto old_value = old_mf.const_array(mfi);
+            amrex::ParallelFor(box, [=] AMREX_GPU_DEVICE (int i, int j,
+                                                          int k) {
+                // The theta-aware image: value >= (1 - theta) old +
+                // theta floor keeps the extrapolated end state at or
+                // above the absolute floor (the LimitSolverStep bound).
+                // Non-finite values are scrubbed TO the image: every
+                // comparison with NaN is false, so a plain max would
+                // pass them through.
+                const amrex::Real image =
+                    (1.0_rt - theta) * old_value(i, j, k) + theta * floor;
+                const amrex::Real v = value(i, j, k);
+                value(i, j, k) = amrex::Math::isfinite(v)
+                                     ? std::max(v, image)
+                                     : image;
+            });
+        }
+        value_mf.FillBoundaryAndSync(m_WarpX->Geom(0).periodicity());
+    }
+}
+
 theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
 {
     theta_implicit_mhd::FluxParameters flux_parameters = {
