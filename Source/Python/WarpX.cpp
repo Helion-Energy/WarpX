@@ -352,5 +352,27 @@ void init_WarpX (py::module& m)
             "Gets the cumulative kinetic energy [J] the given species has "
             "deposited on the embedded boundary (insulating EB wall type only)."
         )
+        .def("get_boundary_absorbed_charge",
+            [](WarpX& wx, std::string const& species_name, int dim, int iside) {
+                return wx.GetPartContainer().GetBoundaryAbsorbedCharge(
+                    species_name, dim, iside);
+            },
+            py::arg("species_name"), py::arg("dim"), py::arg("iside"),
+            "Gets the cumulative charge [C] the given species has lost to the "
+            "absorbing/open domain boundary face (dim, iside), iside 0=lo 1=hi "
+            "(RZ: dim 0=r, 1=z). Collective: call on all ranks. Not preserved "
+            "across restart."
+        )
+        .def("get_boundary_absorbed_energy",
+            [](WarpX& wx, std::string const& species_name, int dim, int iside) {
+                return wx.GetPartContainer().GetBoundaryAbsorbedEnergy(
+                    species_name, dim, iside);
+            },
+            py::arg("species_name"), py::arg("dim"), py::arg("iside"),
+            "Gets the cumulative kinetic energy [J] the given species has lost "
+            "to the absorbing/open domain boundary face (dim, iside), iside "
+            "0=lo 1=hi (RZ: dim 0=r, 1=z). Collective: call on all ranks. Not "
+            "preserved across restart."
+        )
     ;
 }

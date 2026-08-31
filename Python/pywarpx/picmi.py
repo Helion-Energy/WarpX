@@ -5503,6 +5503,7 @@ class ReducedDiagnostic(picmistandard.base._ClassWithInit, WarpXDiagnosticBase):
 
         # The simple diagnostics do not require any additional arguments
         self._simple_reduced_diagnostics = [
+            "ParticleBoundaryFlux",
             "ParticleEnergy",
             "ParticleMomentum",
             "FieldEnergy",

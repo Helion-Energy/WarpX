@@ -5642,6 +5642,25 @@ This shifts analysis from post-processing to runtime calculation of reduction op
         report zero). Each absorbed particle is counted exactly once, also when a
         ``BoundaryScrapingDiagnostic`` clears the buffer between outputs.
 
+    * ``ParticleBoundaryFlux``
+        This type reports the cumulative particle losses through the absorbing and open domain
+        boundary faces, per species and per face: the physical weight (number of physical
+        particles), the charge (in Coulombs), and the kinetic energy (in Joules).
+
+        The output columns are, for each species and each domain face (axis and lo/hi side, in the
+        axis names of the geometry — e.g. ``r``/``z`` in RZ), the cumulative lost weight, charge and
+        kinetic energy since the start of the run. The cumulative convention matches the integrated
+        columns of ``FieldPoyntingFlux``, so windowed differences give the flux through a face over
+        the window. Losses are booked where the particle boundary conditions remove particles, at
+        every application (including sub-cycled species). Thermal boundaries re-inject particles and
+        are not booked.
+
+        Unlike ``ScrapedParticleEnergy`` this diagnostic does not use the particle boundary buffer
+        (no ``<species>.save_particles_at_*`` setup and no per-particle storage of the losses, which
+        suits loss-dominated runs), and it adds the weight and charge columns; however the tallies
+        are not (yet) preserved across checkpoint/restart, so analyses spanning a restart must use
+        windowed differences within each leg.
+
     * ``RhoMaximum``
         This type computes the maximum and minimum values of the total charge density as well as
         the maximum absolute value of the charge density of each charged species.

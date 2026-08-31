@@ -19,6 +19,7 @@ foreach(D IN LISTS WarpX_DIMS)
         LoadBalanceCosts.cpp
         LoadBalanceEfficiency.cpp
         MultiReducedDiags.cpp
+        ParticleBoundaryFlux.cpp
         ParticleEnergy.cpp
         ParticleExtrema.cpp
         ParticleHistogram.cpp

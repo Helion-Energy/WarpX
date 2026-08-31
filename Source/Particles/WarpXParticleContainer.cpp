@@ -34,6 +34,7 @@
 #include <AMReX.H>
 #include <AMReX_AmrCore.H>
 #include <AMReX_AmrParGDB.H>
+#include <AMReX_Array.H>
 #include <AMReX_BLassert.H>
 #include <AMReX_Box.H>
 #include <AMReX_BoxArray.H>
@@ -64,6 +65,8 @@
 #include <AMReX_ParticleTransformation.H>
 #include <AMReX_ParticleUtil.H>
 #include <AMReX_Random.H>
+#include <AMReX_Reduce.H>
+#include <AMReX_Tuple.H>
 #include <AMReX_Utility.H>
 #ifdef AMREX_USE_EB
 #   include "EmbeddedBoundary/ParticleBoundaryProcess.H"
@@ -2905,6 +2908,165 @@ WarpXParticleContainer::ApplyBoundaryConditions (){
             );
         }
     }
+
+    // Book what this call just lost, while the invalidated particles still
+    // carry their out-of-domain stored positions (Redistribute purges them).
+    TallyBoundaryLostParticles();
+}
+
+void
+WarpXParticleContainer::TallyBoundaryLostParticles ()
+{
+    using namespace amrex::literals;
+
+    constexpr int nfaces = 2*AMREX_SPACEDIM;
+
+    // Per-face classification table over the STORED coordinate slots
+    // (RZ stores (r, theta, z), so dim 0 always compares the x slot and the
+    // z dimension the z slot). coord_sel: 0 = x slot, 1 = y slot, 2 = z slot.
+    amrex::GpuArray<int, nfaces> coord_sel;
+    amrex::GpuArray<amrex::Real, nfaces> bound;
+    amrex::GpuArray<int, nfaces> lossy;
+    for (int f = 0; f < nfaces; ++f) {
+        coord_sel[f] = -1;
+        bound[f] = 0.0_rt;
+        lossy[f] = 0;
+    }
+
+    auto const& bcs = m_boundary_conditions.data;
+    auto is_lossy = [](ParticleBoundaryType bc) -> int {
+        return (bc == ParticleBoundaryType::Absorbing ||
+                bc == ParticleBoundaryType::Open) ? 1 : 0;
+    };
+#ifndef WARPX_DIM_1D_Z
+    coord_sel[0] = 0;
+    coord_sel[1] = 0;
+    bound[0] = Geom(0).ProbLo(0);
+    bound[1] = Geom(0).ProbHi(0);
+    lossy[0] = is_lossy(bcs.xmin_bc);
+    lossy[1] = is_lossy(bcs.xmax_bc);
+#endif
+#ifdef WARPX_DIM_3D
+    coord_sel[2] = 1;
+    coord_sel[3] = 1;
+    bound[2] = Geom(0).ProbLo(1);
+    bound[3] = Geom(0).ProbHi(1);
+    lossy[2] = is_lossy(bcs.ymin_bc);
+    lossy[3] = is_lossy(bcs.ymax_bc);
+#endif
+#if defined(WARPX_ZINDEX)
+    coord_sel[2*WARPX_ZINDEX] = 2;
+    coord_sel[2*WARPX_ZINDEX+1] = 2;
+    bound[2*WARPX_ZINDEX] = Geom(0).ProbLo(WARPX_ZINDEX);
+    bound[2*WARPX_ZINDEX+1] = Geom(0).ProbHi(WARPX_ZINDEX);
+    lossy[2*WARPX_ZINDEX] = is_lossy(bcs.zmin_bc);
+    lossy[2*WARPX_ZINDEX+1] = is_lossy(bcs.zmax_bc);
+#endif
+
+    bool any_lossy = false;
+    for (int f = 0; f < nfaces; ++f) { any_lossy = any_lossy || (lossy[f] != 0); }
+    if (!any_lossy) { return; }
+
+    if (m_boundary_absorbed_weight.empty()) {
+        m_boundary_absorbed_weight.resize(nfaces, 0.0_rt);
+        m_boundary_absorbed_charge.resize(nfaces, 0.0_rt);
+        m_boundary_absorbed_energy.resize(nfaces, 0.0_rt);
+    }
+
+    amrex::ParticleReal const q = getCharge();
+    amrex::ParticleReal const m = getMass();
+    amrex::Real const inv_c2 = 1.0_rt / (PhysConst::c * PhysConst::c);
+
+    for (int f = 0; f < nfaces; ++f)
+    {
+        if (lossy[f] == 0) { continue; }
+
+        amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum, amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+
+        for (int lev = 0; lev <= finestLevel(); ++lev)
+        {
+            // No OpenMP here: the tiles share one ReduceData.
+            for (WarpXParIter pti(*this, lev); pti.isValid(); ++pti)
+            {
+                const auto GetPosition = GetParticlePosition<PIdx>(pti);
+                auto& soa = pti.GetStructOfArrays();
+                const uint64_t * const AMREX_RESTRICT idcpu = soa.GetIdCPUData().data();
+                amrex::ParticleReal const * const AMREX_RESTRICT w_ptr  = soa.GetRealData(PIdx::w).data();
+                amrex::ParticleReal const * const AMREX_RESTRICT ux_ptr = soa.GetRealData(PIdx::ux).data();
+                amrex::ParticleReal const * const AMREX_RESTRICT uy_ptr = soa.GetRealData(PIdx::uy).data();
+                amrex::ParticleReal const * const AMREX_RESTRICT uz_ptr = soa.GetRealData(PIdx::uz).data();
+
+                reduce_op.eval(pti.numParticles(), reduce_data,
+                    [=] AMREX_GPU_DEVICE (const long ip) -> ReduceTuple
+                    {
+                        if (amrex::ConstParticleIDWrapper{idcpu[ip]}.is_valid()) {
+                            return {0.0_rt, 0.0_rt, 0.0_rt};
+                        }
+
+                        amrex::ParticleReal x, y, z;
+                        GetPosition.AsStored(ip, x, y, z);
+
+                        // Attribute a corner exit to the lowest lossy face
+                        // index the particle is outside of.
+                        int face = -1;
+                        for (int ff = 0; ff < nfaces; ++ff) {
+                            if (lossy[ff] == 0) { continue; }
+                            amrex::Real const c = (coord_sel[ff] == 0)
+                                ? static_cast<amrex::Real>(x)
+                                : ((coord_sel[ff] == 1) ? static_cast<amrex::Real>(y)
+                                                        : static_cast<amrex::Real>(z));
+                            bool const beyond = ((ff % 2) == 0) ? (c < bound[ff])
+                                                                : (c > bound[ff]);
+                            if (beyond) { face = ff; break; }
+                        }
+                        if (face != f) { return {0.0_rt, 0.0_rt, 0.0_rt}; }
+
+                        auto const w = static_cast<amrex::Real>(w_ptr[ip]);
+                        amrex::Real const charge = static_cast<amrex::Real>(q) * w;
+                        amrex::Real energy = 0.0_rt;
+                        if (m > 0.0_prt) {
+                            auto const ux = static_cast<amrex::Real>(ux_ptr[ip]);
+                            auto const uy = static_cast<amrex::Real>(uy_ptr[ip]);
+                            auto const uz = static_cast<amrex::Real>(uz_ptr[ip]);
+                            amrex::Real const u2 = ux*ux + uy*uy + uz*uz;
+                            amrex::Real const gamma = std::sqrt(1.0_rt + u2*inv_c2);
+                            // m c^2 (gamma - 1) = m u^2 / (gamma + 1), stable
+                            // for non-relativistic particles
+                            energy = w * static_cast<amrex::Real>(m) * u2 / (gamma + 1.0_rt);
+                        }
+                        return {w, charge, energy};
+                    });
+            }
+        }
+
+        ReduceTuple const r = reduce_data.value(reduce_op);
+        m_boundary_absorbed_weight[f] += amrex::get<0>(r);
+        m_boundary_absorbed_charge[f] += amrex::get<1>(r);
+        m_boundary_absorbed_energy[f] += amrex::get<2>(r);
+    }
+}
+
+amrex::Real
+WarpXParticleContainer::GetBoundaryAbsorbedWeight (int dim, int iside) const
+{
+    if (m_boundary_absorbed_weight.empty()) { return amrex::Real(0.0); }
+    return m_boundary_absorbed_weight[2*dim + iside];
+}
+
+amrex::Real
+WarpXParticleContainer::GetBoundaryAbsorbedCharge (int dim, int iside) const
+{
+    if (m_boundary_absorbed_charge.empty()) { return amrex::Real(0.0); }
+    return m_boundary_absorbed_charge[2*dim + iside];
+}
+
+amrex::Real
+WarpXParticleContainer::GetBoundaryAbsorbedEnergy (int dim, int iside) const
+{
+    if (m_boundary_absorbed_energy.empty()) { return amrex::Real(0.0); }
+    return m_boundary_absorbed_energy[2*dim + iside];
 }
 
 void

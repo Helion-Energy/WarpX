@@ -556,6 +556,31 @@ public:
      */
     void ApplyBoundaryConditions ();
 
+    /** Accumulate the physical weight, charge [C] and kinetic energy [J] of
+     *  the particles that the ApplyBoundaryConditions call just invalidated
+     *  into the per-domain-face tallies below. Lost particles keep their
+     *  out-of-domain stored position until the next Redistribute, which is
+     *  what classifies the face; a particle outside several lossy faces at
+     *  once (corner exit) is attributed to the lowest face index only.
+     *  Faces are indexed dim*2+side (side 0 = lo, 1 = hi) in the AMReX dim
+     *  convention of the stored coordinates (RZ: dim 0 = r, dim 1 = z).
+     *  Only Absorbing and Open faces tally; Thermal re-injection is
+     *  deliberately not booked (v1). Tallies are RANK-LOCAL cumulative (no
+     *  MPI here — this runs per subcycle for subcycled species); readers
+     *  perform the global sum. Must be called exactly once per boundary
+     *  application, after the BC kernel and before Redistribute purges the
+     *  invalid particles — double invocation double-counts.
+     */
+    void TallyBoundaryLostParticles ();
+
+    /** Rank-local cumulative tallies of particles lost to Absorbing/Open
+     *  domain faces; index dim*2+side. Empty until the first loss-capable
+     *  boundary application. NOT persisted through checkpoint/restart (v1):
+     *  ledger analyses must use windowed deltas. */
+    amrex::Real GetBoundaryAbsorbedWeight (int dim, int iside) const;
+    amrex::Real GetBoundaryAbsorbedCharge (int dim, int iside) const;
+    amrex::Real GetBoundaryAbsorbedEnergy (int dim, int iside) const;
+
     bool do_splitting = false;
     int do_not_deposit = 0;
     bool initialize_self_fields = false;
@@ -669,6 +694,13 @@ protected:
 
     // Controls boundaries for particles exiting the domain
     ParticleBoundaries m_boundary_conditions;
+
+    /** Rank-local cumulative weight / charge [C] / kinetic energy [J] of
+     *  particles lost to Absorbing/Open domain faces, indexed dim*2+side.
+     *  Filled by TallyBoundaryLostParticles; sized lazily on first use. */
+    amrex::Vector<amrex::Real> m_boundary_absorbed_weight;
+    amrex::Vector<amrex::Real> m_boundary_absorbed_charge;
+    amrex::Vector<amrex::Real> m_boundary_absorbed_energy;
 
     // Controls whether particle trajectoris are cropped when particles
     // cross a PEC boundary

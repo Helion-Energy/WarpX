@@ -20,6 +20,7 @@
 #include "HybridDissipation.H"
 #include "LoadBalanceCosts.H"
 #include "LoadBalanceEfficiency.H"
+#include "ParticleBoundaryFlux.H"
 #include "ParticleEnergy.H"
 #include "ParticleExtrema.H"
 #include "ParticleHistogram.H"
@@ -63,6 +64,7 @@ MultiReducedDiags::MultiReducedDiags ()
             {"DifferentialLuminosity",[](CS s){return std::make_unique<DifferentialLuminosity>(s);}},
             {"DifferentialLuminosity2D",[](CS s){return std::make_unique<DifferentialLuminosity2D>(s);}},
             {"HybridDissipation",     [](CS s){return std::make_unique<HybridDissipation>(s);}},
+            {"ParticleBoundaryFlux",  [](CS s){return std::make_unique<ParticleBoundaryFlux>(s);}},
             {"ParticleEnergy",        [](CS s){return std::make_unique<ParticleEnergy>(s);}},
             {"ParticleExtrema",       [](CS s){return std::make_unique<ParticleExtrema>(s);}},
             {"ParticleHistogram",     [](CS s){return std::make_unique<ParticleHistogram>(s);}},

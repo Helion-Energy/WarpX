@@ -1403,6 +1403,24 @@ amrex::Real MultiParticleContainer::GetEBCollectedEnergy (
     return m_eb_collected_energy[getSpeciesID(species_name)];
 }
 
+amrex::Real MultiParticleContainer::GetBoundaryAbsorbedCharge (
+    const std::string& species_name, int dim, int iside) const
+{
+    amrex::Real v = allcontainers[getSpeciesID(species_name)]
+        ->GetBoundaryAbsorbedCharge(dim, iside);
+    amrex::ParallelDescriptor::ReduceRealSum(v);
+    return v;
+}
+
+amrex::Real MultiParticleContainer::GetBoundaryAbsorbedEnergy (
+    const std::string& species_name, int dim, int iside) const
+{
+    amrex::Real v = allcontainers[getSpeciesID(species_name)]
+        ->GetBoundaryAbsorbedEnergy(dim, iside);
+    amrex::ParallelDescriptor::ReduceRealSum(v);
+    return v;
+}
+
 #ifdef WARPX_QED
 void MultiParticleContainer::InitQED ()
 {

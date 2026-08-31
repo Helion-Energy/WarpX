@@ -357,6 +357,21 @@ public:
      *  zero-mass species are not tallied). */
     [[nodiscard]] amrex::Real GetEBCollectedEnergy (const std::string& species_name) const;
 
+    /** Cumulative charge [C] the given species has lost to the Absorbing/Open
+     *  domain boundary face (dim, iside) since the start of the run (not
+     *  preserved across restart). COLLECTIVE: performs a global sum, must be
+     *  called on all ranks. Face convention: dim in the AMReX dim ordering of
+     *  the stored coordinates (RZ: 0 = r, 1 = z), iside 0 = lo, 1 = hi. */
+    [[nodiscard]] amrex::Real GetBoundaryAbsorbedCharge (
+        const std::string& species_name, int dim, int iside) const;
+
+    /** Cumulative kinetic energy [J] the given species has lost to the
+     *  Absorbing/Open domain boundary face (dim, iside) since the start of
+     *  the run (not preserved across restart; zero-mass species tally zero).
+     *  COLLECTIVE: performs a global sum, must be called on all ranks. */
+    [[nodiscard]] amrex::Real GetBoundaryAbsorbedEnergy (
+        const std::string& species_name, int dim, int iside) const;
+
     std::string m_B_ext_particle_s = "none";
     std::string m_E_ext_particle_s = "none";
     // Parser for B_external on the particle

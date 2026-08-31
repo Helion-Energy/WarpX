@@ -20,3 +20,13 @@ add_warpx_test(
     "analysis_default_regression.py --path diags/diagInst008000/"  # checksum
     OFF  # dependency
 )
+
+add_warpx_test(
+    test_rz_particle_boundary_flux  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_particle_boundary_flux  # inputs
+    "analysis_boundary_flux.py"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)

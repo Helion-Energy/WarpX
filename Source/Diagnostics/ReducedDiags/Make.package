@@ -15,6 +15,7 @@ CEXE_sources += FieldReduction.cpp
 CEXE_sources += HybridDissipation.cpp
 CEXE_sources += LoadBalanceCosts.cpp
 CEXE_sources += LoadBalanceEfficiency.cpp
+CEXE_sources += ParticleBoundaryFlux.cpp
 CEXE_sources += ParticleEnergy.cpp
 CEXE_sources += ParticleExtrema.cpp
 CEXE_sources += ParticleHistogram.cpp
