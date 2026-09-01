@@ -73,11 +73,47 @@ void HybridPICModel::ReadParameters ()
                                    m_je_sponge_vw);
     utils::parser::queryWithParser(pp_hybrid, "je_sponge_track_tau",
                                    m_je_sponge_track_tau);
+    // Adaptive two-tier matching (see ApplySpongeLayerBYee): the branch
+    // speeds are measured per cap every accepted substep instead of
+    // being deck-set to a single scalar.
+    utils::parser::queryWithParser(pp_hybrid, "je_sponge_vw_tau",
+                                   m_je_sponge_vw_tau);
+    utils::parser::queryWithParser(pp_hybrid, "je_sponge_vw_scale",
+                                   m_je_sponge_vw_scale);
+    utils::parser::queryWithParser(pp_hybrid, "je_sponge_vw_min",
+                                   m_je_sponge_vw_min);
+    utils::parser::queryWithParser(pp_hybrid, "je_sponge_vw_max",
+                                   m_je_sponge_vw_max);
+    utils::parser::queryWithParser(pp_hybrid, "je_sponge_grade",
+                                   m_je_sponge_grade);
+    utils::parser::queryWithParser(pp_hybrid, "je_sponge_tier_frac",
+                                   m_je_sponge_tier_frac);
+    utils::parser::queryWithParser(pp_hybrid, "je_sponge_grade_max_ratio",
+                                   m_je_sponge_grade_max_ratio);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_je_sponge_width >= 0.0_rt && m_je_sponge_vw >= 0.0_rt
-            && m_je_sponge_track_tau >= 0.0_rt,
-        "hybrid_pic_model.je_sponge_width, je_sponge_vw and "
-        "je_sponge_track_tau cannot be negative");
+            && m_je_sponge_track_tau >= 0.0_rt
+            && m_je_sponge_vw_tau >= 0.0_rt
+            && m_je_sponge_vw_min >= 0.0_rt && m_je_sponge_vw_max >= 0.0_rt,
+        "hybrid_pic_model.je_sponge_width, je_sponge_vw, "
+        "je_sponge_track_tau, je_sponge_vw_tau, je_sponge_vw_min and "
+        "je_sponge_vw_max cannot be negative");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_je_sponge_vw_scale > 0.0_rt,
+        "hybrid_pic_model.je_sponge_vw_scale must be positive");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_je_sponge_tier_frac >= 0.0_rt && m_je_sponge_tier_frac <= 1.0_rt,
+        "hybrid_pic_model.je_sponge_tier_frac is the inner (slow-matched) "
+        "tier width as a fraction of je_sponge_width and must lie in "
+        "[0, 1] (1 = single slow-matched ramp, 0 = single fast-matched)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_je_sponge_grade_max_ratio >= 1.0_rt,
+        "hybrid_pic_model.je_sponge_grade_max_ratio must be >= 1");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_je_sponge_vw_max == 0.0_rt
+            || m_je_sponge_vw_max >= m_je_sponge_vw_min,
+        "hybrid_pic_model.je_sponge_vw_max must not be below "
+        "je_sponge_vw_min");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_je_sponge_width == 0.0_rt || m_je_sponge_lnf > 0.0_rt,
         "hybrid_pic_model.je_sponge_lnf must be positive when the "
@@ -10487,6 +10523,156 @@ void HybridPICModel::BfieldEvolve (
     );
 }
 
+bool HybridPICModel::MeasureSpongeCapSpeeds (
+    ablastr::fields::MultiLevelVectorField const& Bfield,
+    int lev, int cap, amrex::Real& v_slow, amrex::Real& v_fast)
+{
+    using namespace amrex::literals;
+    using ablastr::coarsen::sample::Interp;
+
+    auto& warpx = WarpX::GetInstance();
+#if defined(WARPX_DIM_1D_Z)
+    constexpr int zdim = 0;
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+    constexpr int zdim = 1;
+#else
+    constexpr int zdim = 2;
+#endif
+
+    // Ion mass per unit charge, resolved once (see m_sponge_m_over_q).
+    if (m_sponge_m_over_q == 0.0_rt) {
+        amrex::Real m_over_q_sum = 0.0_rt;
+        int n_ion = 0;
+        auto& mypc = warpx.GetPartContainer();
+        for (int isp = 0; isp < mypc.nSpecies(); ++isp) {
+            auto& pc = mypc.GetParticleContainer(isp);
+            if (pc.getCharge() > 0.0_rt && pc.getMass() > 0.0_rt) {
+                m_over_q_sum += pc.getMass() / pc.getCharge();
+                ++n_ion;
+            }
+        }
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(n_ion > 0,
+            "the adaptive sponge (hybrid_pic_model.je_sponge_vw_tau > 0) "
+            "needs at least one positively charged ion species to convert "
+            "the solver's charge density into a mass density");
+        m_sponge_m_over_q = m_over_q_sum / static_cast<amrex::Real>(n_ion);
+    }
+
+    const amrex::Real Ls = m_je_sponge_width;
+    const auto& geom = warpx.Geom(lev);
+    const amrex::Real zlo = geom.ProbLo(zdim);
+    const amrex::Real zhi = geom.ProbHi(zdim);
+    const amrex::Real dz = geom.CellSize(zdim);
+    const amrex::Real z_lo_edge = zlo + Ls;
+    const amrex::Real z_hi_edge = zhi - Ls;
+    // fastest RETAINED signal: the whistler branch at the grid cutoff
+    const amrex::Real kmax = MathConst::pi / dz;
+    const amrex::Real rho_floor = PhysConst::q_e * m_n_floor;
+    const amrex::Real m_over_q = m_sponge_m_over_q;
+    const amrex::Real mu0 = PhysConst::mu0;
+    const int cap_lo = (cap == 0) ? 1 : 0;
+
+    amrex::MultiFab const& rho = *warpx.m_fields.get(FieldType::rho_fp, lev);
+    amrex::GpuArray<int, 3> const rho_stag = {1, 1, 1};
+    // Destination is cell-centred in the SIMULATED dimensions only: the
+    // unused dimensions must stay nodal to match the source staggering
+    // (rho and the *_IndexType arrays are nodal there for exactly this
+    // reason -- see the "unused dimensions ... nodal" note where the
+    // index types are built). If they differ, Interp widens its stencil
+    // into the collapsed dimension and reads outside the fab: an
+    // in-arena out-of-bounds read that returns a plausible neighbour
+    // value on interior boxes and garbage on the last one (measured:
+    // exact analytic answer from the lo-z cap, NaN from the hi-z cap).
+    amrex::GpuArray<int, 3> cc_stag = {0, 0, 0};
+    for (int d = AMREX_SPACEDIM; d < 3; ++d) { cc_stag[d] = 1; }
+    amrex::GpuArray<int, 3> const coarsen = {1, 1, 1};
+    auto const bx_stag = Bx_IndexType;
+    auto const by_stag = By_IndexType;
+    auto const bz_stag = Bz_IndexType;
+
+    amrex::ReduceOps<amrex::ReduceOpSum, amrex::ReduceOpSum,
+                     amrex::ReduceOpSum> reduce_op;
+    amrex::ReduceData<amrex::Real, amrex::Real, amrex::Real>
+        reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+
+    // Untiled, with the cell box recovered from the VALID box rather
+    // than from a converted tilebox: converting a nodal tilebox to cell
+    // type can reach one cell past the valid region on boxes that end
+    // at a domain face, and the interpolation stencil then reads
+    // never-written ghosts (measured: NaN out of the hi-z cap only).
+    // enclosedCells(validbox) is exactly that box's own cell footprint,
+    // so the bands stay complete, non-overlapping and in bounds.
+    for (MFIter mfi(rho); mfi.isValid(); ++mfi)
+    {
+        // one cell-centred pass: both speeds are scalars per cap, so
+        // the honest place to form them is where rho lives after
+        // interpolation, not on three different B staggerings
+        amrex::Box tile_box = amrex::enclosedCells(mfi.validbox());
+        tile_box &= geom.Domain();
+        if (!tile_box.ok()) { continue; }
+        amrex::Array4<amrex::Real const> const& rho_arr = rho.const_array(mfi);
+        amrex::Array4<amrex::Real const> const& bx =
+            Bfield[lev][0]->const_array(mfi);
+        amrex::Array4<amrex::Real const> const& by =
+            Bfield[lev][1]->const_array(mfi);
+        amrex::Array4<amrex::Real const> const& bz =
+            Bfield[lev][2]->const_array(mfi);
+
+        reduce_op.eval(tile_box, reduce_data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple
+            {
+#if defined(WARPX_DIM_1D_Z)
+                const amrex::Real z = zlo + (i + 0.5_rt)*dz;
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+                const amrex::Real z = zlo + (j + 0.5_rt)*dz;
+#else
+                const amrex::Real z = zlo + (k + 0.5_rt)*dz;
+#endif
+                amrex::Real xi = 0.0_rt;
+                if (cap_lo == 1) {
+                    if (z < z_lo_edge) { xi = (z_lo_edge - z) / Ls; }
+                } else {
+                    if (z > z_hi_edge) { xi = (z - z_hi_edge) / Ls; }
+                }
+                if (xi <= 0.0_rt) { return {0.0_rt, 0.0_rt, 0.0_rt}; }
+                xi = amrex::min(xi, 1.0_rt);
+
+                // the solver's own floor: an evacuated cap must not
+                // mint a divergent speed (and below the floor BOTH
+                // branches are floor-set, which is why the ratio is a
+                // stable number there)
+                amrex::Real const rho_cc = amrex::max(
+                    Interp(rho_arr, rho_stag, cc_stag, coarsen, i, j, k, 0),
+                    rho_floor);
+                amrex::Real const bxc =
+                    Interp(bx, bx_stag, cc_stag, coarsen, i, j, k, 0);
+                amrex::Real const byc =
+                    Interp(by, by_stag, cc_stag, coarsen, i, j, k, 0);
+                amrex::Real const bzc =
+                    Interp(bz, bz_stag, cc_stag, coarsen, i, j, k, 0);
+                amrex::Real const bmag =
+                    std::sqrt(bxc*bxc + byc*byc + bzc*bzc);
+
+                // v_A = |B|/sqrt(mu0 rho_m), rho_m = rho_charge (m_i/q_i)
+                amrex::Real const va =
+                    bmag / std::sqrt(mu0 * rho_cc * m_over_q);
+                // v_w = k |B|/(mu0 n_e e) with n_e e = rho_charge
+                amrex::Real const vw = kmax * bmag / (mu0 * rho_cc);
+                return {xi*va, xi*vw, xi};
+            });
+    }
+
+    ReduceTuple const hv = reduce_data.value(reduce_op);
+    amrex::Real sums[3] = {amrex::get<0>(hv), amrex::get<1>(hv),
+                           amrex::get<2>(hv)};
+    amrex::ParallelDescriptor::ReduceRealSum(sums, 3);
+    if (sums[2] <= 0.0_rt) { return false; }
+    v_slow = sums[0] / sums[2];
+    v_fast = sums[1] / sums[2];
+    return true;
+}
+
 void HybridPICModel::ApplySpongeLayerBYee (
     ablastr::fields::MultiLevelVectorField const& Bfield,
     int lev, amrex::Real dt_sub)
@@ -10502,6 +10688,9 @@ void HybridPICModel::ApplySpongeLayerBYee (
     const amrex::Real vw = m_je_sponge_vw;   // asserted > 0 at parse
     const amrex::Real Ls = m_je_sponge_width;
     const amrex::Real inv_tau_max = vw * m_je_sponge_lnf / Ls;
+    // adaptive matching is armed by the EMA constant; without it the
+    // layer is the legacy fixed-v_w single ramp, bit for bit
+    const bool adaptive = (m_je_sponge_vw_tau > 0.0_rt);
     const auto& geom = warpx.Geom(lev);
     const amrex::Real zlo = geom.ProbLo(zdim);
     const amrex::Real zhi = geom.ProbHi(zdim);
@@ -10530,8 +10719,149 @@ void HybridPICModel::ApplySpongeLayerBYee (
             << Ls / (vw * m_je_sponge_lnf)
             << " s (plasma-frame reference seeded at first call, "
             << (m_je_sponge_track_tau > 0.0_rt ? "tracking" : "frozen")
-            << ", tau = " << m_je_sponge_track_tau << " s)\n";
+            << ", tau = " << m_je_sponge_track_tau << " s), matching: "
+            << (adaptive
+                ? (m_je_sponge_grade != 0
+                    ? "ADAPTIVE two-tier (v_w above is the seed only)"
+                    : "ADAPTIVE single-speed, fast branch "
+                      "(v_w above is the seed only)")
+                : "FIXED single-speed (legacy)")
+            << (adaptive ? ", vw_tau = " : "") ;
+        if (adaptive) {
+            amrex::Print() << m_je_sponge_vw_tau << " s, tier_frac = "
+                << m_je_sponge_tier_frac;
+        }
+        amrex::Print() << "\n";
         return;
+    }
+
+    // Per-cap rate profile: rate(xi) is piecewise linear and continuous,
+    // ramping 0 -> r1 across the inner tier [0, frac] and r1 -> r2 across
+    // the outer tier [frac, 1]. frac == 1 collapses it to the single
+    // linear ramp of the legacy path (r2 unused), which is how both the
+    // legacy branch and every degenerate adaptive case are expressed.
+    amrex::GpuArray<amrex::Real, 2> frac_c = {1.0_rt, 1.0_rt};
+    amrex::GpuArray<amrex::Real, 2> r1_c = {inv_tau_max, inv_tau_max};
+    amrex::GpuArray<amrex::Real, 2> r2_c = {inv_tau_max, inv_tau_max};
+
+    if (adaptive) {
+        const amrex::Real lnf = m_je_sponge_lnf;
+        bool degenerate[2] = {false, false};
+        // last RAW measurement per cap, reported next to the smoothed
+        // value so the EMA's effect is observable in a production log
+        // (raw == smoothed means the branch speeds are steady; a large
+        // raw/smoothed gap means tau is long relative to the drift)
+        amrex::Real raw_s[2] = {0.0_rt, 0.0_rt};
+        amrex::Real raw_f[2] = {0.0_rt, 0.0_rt};
+        for (int c = 0; c < 2; ++c) {
+            amrex::Real vs = 0.0_rt;
+            amrex::Real vf = 0.0_rt;
+            const bool measured =
+                MeasureSpongeCapSpeeds(Bfield, lev, c, vs, vf);
+            if (measured) {
+                vs *= m_je_sponge_vw_scale;
+                vf *= m_je_sponge_vw_scale;
+            } else {
+                // no weighted cells on this cap (degenerate geometry):
+                // fall back to the deck seed rather than inventing one
+                vs = vw;
+                vf = vw;
+            }
+            raw_s[c] = vs;
+            raw_f[c] = vf;
+            if (!m_sponge_vw_ema_init) {
+                // seed FROM the measurement: no ramp-in transient, and a
+                // restart re-seeds itself in one substep
+                m_sponge_vslow_ema[c] = vs;
+                m_sponge_vfast_ema[c] = vf;
+            } else {
+                const amrex::Real a =
+                    amrex::min(1.0_rt, dt_sub / m_je_sponge_vw_tau);
+                m_sponge_vslow_ema[c] += a * (vs - m_sponge_vslow_ema[c]);
+                m_sponge_vfast_ema[c] += a * (vf - m_sponge_vfast_ema[c]);
+            }
+            if (m_je_sponge_vw_min > 0.0_rt) {
+                m_sponge_vslow_ema[c] =
+                    amrex::max(m_sponge_vslow_ema[c], m_je_sponge_vw_min);
+                m_sponge_vfast_ema[c] =
+                    amrex::max(m_sponge_vfast_ema[c], m_je_sponge_vw_min);
+            }
+            if (m_je_sponge_vw_max > 0.0_rt) {
+                m_sponge_vslow_ema[c] =
+                    amrex::min(m_sponge_vslow_ema[c], m_je_sponge_vw_max);
+                m_sponge_vfast_ema[c] =
+                    amrex::min(m_sponge_vfast_ema[c], m_je_sponge_vw_max);
+            }
+
+            const amrex::Real v_slow = m_sponge_vslow_ema[c];
+            // a pathological dynamic range is rail-limited, not trusted
+            const amrex::Real v_fast = amrex::min(
+                m_sponge_vfast_ema[c],
+                v_slow * m_je_sponge_grade_max_ratio);
+            const amrex::Real frac = m_je_sponge_tier_frac;
+
+            if (m_je_sponge_grade == 0) {
+                // single-speed adaptive arm: legacy ramp shape, fast match
+                frac_c[c] = 1.0_rt;
+                r1_c[c] = lnf * v_fast / Ls;
+                r2_c[c] = r1_c[c];
+            } else if (v_fast <= v_slow || frac >= 1.0_rt
+                       || frac <= 0.0_rt) {
+                // degenerate: collapse to one tier. Ordering/ratio
+                // pathologies take the larger speed; tier_frac 1 and 0
+                // are the exact single-slow and single-fast layers.
+                degenerate[c] = (v_fast <= v_slow);
+                const amrex::Real v_one =
+                    (frac >= 1.0_rt && v_fast > v_slow) ? v_slow
+                    : (frac <= 0.0_rt && v_fast > v_slow) ? v_fast
+                    : amrex::max(v_slow, v_fast);
+                frac_c[c] = 1.0_rt;
+                r1_c[c] = lnf * v_one / Ls;
+                r2_c[c] = r1_c[c];
+            } else {
+                frac_c[c] = frac;
+                r1_c[c] = lnf * v_slow / (frac * Ls);
+                r2_c[c] = lnf * v_fast / ((1.0_rt - frac) * Ls);
+            }
+        }
+        m_sponge_vw_ema_init = true;
+
+        // witness, throttled to >= 10% moves on either speed of either
+        // cap (same philosophy as the substep controller witness)
+        bool report = false;
+        for (int c = 0; c < 2; ++c) {
+            const amrex::Real rs = m_sponge_vslow_reported[c];
+            const amrex::Real rf = m_sponge_vfast_reported[c];
+            if (rs <= 0.0_rt || rf <= 0.0_rt
+                || std::abs(m_sponge_vslow_ema[c] - rs) > 0.1_rt * rs
+                || std::abs(m_sponge_vfast_ema[c] - rf) > 0.1_rt * rf) {
+                report = true;
+            }
+        }
+        if (report) {
+            for (int c = 0; c < 2; ++c) {
+                m_sponge_vslow_reported[c] = m_sponge_vslow_ema[c];
+                m_sponge_vfast_reported[c] = m_sponge_vfast_ema[c];
+            }
+            amrex::Print() << "[sponge] adaptive:";
+            for (int c = 0; c < 2; ++c) {
+                const amrex::Real vs = m_sponge_vslow_ema[c];
+                const amrex::Real vf = m_sponge_vfast_ema[c];
+                amrex::Print() << (c == 0 ? " lo" : ";  hi")
+                    << " v_A = " << vs << " m/s, v_w = " << vf
+                    << " m/s (raw " << raw_s[c] << "/" << raw_f[c]
+                    << "), ratio = " << (vs > 0.0_rt ? vf/vs : 0.0_rt)
+                    << ", L1/L2 = " << frac_c[c]*Ls << "/"
+                    << (1.0_rt - frac_c[c])*Ls
+                    << " m, R1/R2 = " << r1_c[c] << "/" << r2_c[c]
+                    << " 1/s (tau " << (r1_c[c] > 0.0_rt ? 1.0_rt/r1_c[c] : 0.0_rt)
+                    << "/" << (r2_c[c] > 0.0_rt ? 1.0_rt/r2_c[c] : 0.0_rt)
+                    << " s)"
+                    << (degenerate[c] ? " [DEGENERATE: v_w <= v_A, "
+                                        "single tier at the larger]" : "");
+            }
+            amrex::Print() << "\n";
+        }
     }
 
     for (int d = 0; d < 3; ++d) {
@@ -10555,6 +10885,9 @@ void HybridPICModel::ApplySpongeLayerBYee (
             Array4<Real> const& b = B.array(mfi);
             Array4<Real> const& br = Bref.array(mfi);
             const amrex::Real dt_l = dt_sub;
+            const amrex::GpuArray<amrex::Real, 2> frac_l = frac_c;
+            const amrex::GpuArray<amrex::Real, 2> r1_l = r1_c;
+            const amrex::GpuArray<amrex::Real, 2> r2_l = r2_c;
             amrex::ParallelFor(mfi.tilebox(),
                 [=] AMREX_GPU_DEVICE (int i, int j, int k) {
 #if defined(WARPX_DIM_1D_Z)
@@ -10566,12 +10899,20 @@ void HybridPICModel::ApplySpongeLayerBYee (
                 const amrex::Real z = zlo + (k + zoff)*dz;
 #endif
                 amrex::Real xi = 0.0_rt;
-                if (z > z_hi_edge) { xi = (z - z_hi_edge) / Ls; }
+                int cap = 0;
+                if (z > z_hi_edge) { xi = (z - z_hi_edge) / Ls; cap = 1; }
                 else if (z < z_lo_edge) { xi = (z_lo_edge - z) / Ls; }
                 if (xi <= 0.0_rt) { return; }
                 xi = amrex::min(xi, 1.0_rt);
-                const amrex::Real s =
-                    1.0_rt / (1.0_rt + dt_l * xi * inv_tau_max);
+                // piecewise-linear, continuous at the tier interface:
+                // 0 -> r1 across [0, fr], r1 -> r2 across [fr, 1].
+                // fr == 1 is the single-ramp (legacy/degenerate) form.
+                const amrex::Real fr = frac_l[cap];
+                const amrex::Real rate = (xi <= fr)
+                    ? r1_l[cap] * xi / fr
+                    : r1_l[cap] + (r2_l[cap] - r1_l[cap])
+                                  * (xi - fr) / (1.0_rt - fr);
+                const amrex::Real s = 1.0_rt / (1.0_rt + dt_l * rate);
                 b(i,j,k) = br(i,j,k) + (b(i,j,k) - br(i,j,k)) * s;
                 if (alpha > 0.0_rt) {
                     br(i,j,k) += alpha * (b(i,j,k) - br(i,j,k));

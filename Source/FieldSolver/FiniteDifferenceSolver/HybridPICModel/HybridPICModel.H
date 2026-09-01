@@ -175,6 +175,37 @@ public:
      *  first-call reference, with the rate ramped linearly from zero
      *  at the layer's inner edge (the paper's anti-reflection
      *  requirement) to 1/tau_max = v_w ln(1/f_s)/L_s at the wall.
+     *
+     *  WHY A SINGLE v_w CANNOT WORK (the two-tier motivation): a wave of
+     *  speed v crossing the layer accumulates attenuation ~ ln(1/f_s)
+     *  (v_w/v) <xi>, i.e. it scales as v_w/v, so one scalar matches ONE
+     *  branch and mistreats every other by that ratio. Measured on the
+     *  production anchor, cap band: v_slow (Alfven) 1.18e7 m/s, v_fast
+     *  (whistler at k_max = pi/dz) 2.73e8 m/s, ratio 23.2 — and the
+     *  legacy deck constant 1e8 sits BETWEEN them, 8.5x too fast for the
+     *  Alfven branch (over-damped: a stiff pin that reflects) and 2.7x
+     *  too slow for the whistler branch (under-damped: leaks through to
+     *  the hard wall behind the layer). A single-speed layer therefore
+     *  WALLS the slow branch and LEAKS the fast one simultaneously,
+     *  which is the quantitative content of the "impedance geometry"
+     *  failure that lost to bare ends on the full-stroke panel.
+     *
+     *  TWO-TIER PROFILE (je_sponge_grade = 1, adaptive path): the layer
+     *  is split at je_sponge_tier_frac into an INNER slow-matched tier
+     *  of width L1 and an OUTER fast-matched tier of width L2, with the
+     *  rate ramped linearly 0 -> R1 = ln(1/f_s) v_slow/L1 across tier 1
+     *  and R1 -> R2 = ln(1/f_s) v_fast/L2 across tier 2. The profile is
+     *  piecewise-linear and CONTINUOUS at the interface: a rate step is
+     *  itself an impedance discontinuity, so the anti-reflection
+     *  requirement is applied per tier rather than once. Slow content
+     *  meets its match first and is absorbed in tier 1; fast content
+     *  crosses tier 1 nearly unattenuated (it accumulates only
+     *  R1 L1/v_fast = ln(1/f_s) v_slow/v_fast << ln(1/f_s)) and is
+     *  absorbed in tier 2 at its own match. Tiering rather than a single
+     *  graded rate is what lets each branch's WIDTH be sized
+     *  independently — absorption quality is set by attenuation per cell
+     *  (ln(1/f_s) dz/L for that tier), so a branch needing gentler
+     *  per-cell treatment simply gets a wider tier.
      *  Implicit per-direction update on each component's own
      *  staggering (the ramp coordinate offsets half a cell where B_d
      *  is cell-centered in z); unconditionally stable at any
@@ -188,6 +219,30 @@ public:
         ablastr::fields::MultiLevelVectorField const& Bfield,
         int lev, amrex::Real dt_sub);
 
+    /** \brief Measure the two wave-branch speeds in one z-cap band.
+     *
+     * Returns the xi-weighted means over the cap-band cells of
+     *   v_slow = |B| / sqrt(mu0 rho_m)          (Alfven branch)
+     *   v_fast = k_max |B| / (mu0 n_e e)        (grid-scale whistler,
+     *                                            k_max = pi/dz)
+     * i.e. the slowest and fastest signals the scheme retains at the
+     * caps. Both are evaluated on CELL CENTRES from cell-centred
+     * averages of the Yee B components and the solver's own charge
+     * density, floored at n_floor exactly as the Ohm solve floors it,
+     * so an evacuated cap cannot mint a divergent speed. The weight is
+     * the ramp coordinate xi, so the deep layer — where the damping
+     * rate actually matters — dominates the mean.
+     *
+     * \param[in] lev        refinement level
+     * \param[in] cap        0 = lo-z cap, 1 = hi-z cap
+     * \param[out] v_slow    xi-weighted mean Alfven speed [m/s]
+     * \param[out] v_fast    xi-weighted mean whistler speed [m/s]
+     * \return true if the band held any weighted cells on any rank
+     */
+    bool MeasureSpongeCapSpeeds (
+        ablastr::fields::MultiLevelVectorField const& Bfield,
+        int lev, int cap, amrex::Real& v_slow, amrex::Real& v_fast);
+
     /** Frozen first-call plasma-frame B references of the Yee sponge,
      *  one per component staggering (valid region only; ghosts are
      *  refreshed after each application); lazily seeded by
@@ -195,6 +250,33 @@ public:
     std::array<std::unique_ptr<amrex::MultiFab>, 3> m_sponge_bref_yee;
     /** Seed latch of the Yee sponge references. */
     bool m_sponge_yee_init = false;
+    /** Time-averaged (EMA) branch speeds per cap [m/s], index 0 = lo-z,
+     *  1 = hi-z; only used when the adaptive path is armed
+     *  (je_sponge_vw_tau > 0). Seeded from the first measurement so the
+     *  layer never rides a ramp-in transient. NOT round-tripped through
+     *  the checkpoint: on restart they re-seed from the first
+     *  post-restart measurement, which is self-healing because seeding
+     *  IS the measurement (unlike the B references, whose restart wart
+     *  is a genuine state loss). */
+    std::array<amrex::Real, 2> m_sponge_vslow_ema = {0.0, 0.0};
+    std::array<amrex::Real, 2> m_sponge_vfast_ema = {0.0, 0.0};
+    /** Seed latch of the adaptive-speed EMAs. */
+    bool m_sponge_vw_ema_init = false;
+    /** Last reported adaptive speeds [m/s]; the witness print is
+     *  throttled to >= 10% changes, same philosophy as the substep
+     *  controller witness. */
+    std::array<amrex::Real, 2> m_sponge_vslow_reported = {0.0, 0.0};
+    std::array<amrex::Real, 2> m_sponge_vfast_reported = {0.0, 0.0};
+    /** Ion mass per unit charge m_i/q_i [kg/C], resolved once from the
+     *  charged species on the first adaptive call and used to convert
+     *  the solver's charge density to a mass density
+     *  (rho_m = rho_charge * m_i/q_i). Exact for a single ion species
+     *  (the production case); for several species it is the unweighted
+     *  mean over charged species, which is a representative scalar for
+     *  impedance matching rather than a conserved quantity — the layer
+     *  tolerates a modest mis-set speed (it shifts where in the layer a
+     *  branch is absorbed, not whether it is). */
+    amrex::Real m_sponge_m_over_q = 0.0;
 
     void BfieldEvolveRK4 (
         ablastr::fields::MultiLevelVectorField const& Bfield,
@@ -784,8 +866,50 @@ public:
      *  retained signal at the caps is the whistler branch at cap-band
      *  parameters — deck-set from cap parameters; over-setting is the safe
      *  direction, slower content just sees more damping per crossing,
-     *  which the ramp tolerates). Input: je_sponge_vw. */
+     *  which the ramp tolerates). With the adaptive path armed
+     *  (je_sponge_vw_tau > 0) this becomes the SEED/fallback value only:
+     *  the operating speeds are measured per cap every accepted substep.
+     *  Input: je_sponge_vw. */
     amrex::Real m_je_sponge_vw = 0.0;
+
+    /** EMA time constant [s] of the adaptive branch-speed measurement.
+     *  0 (default) = LEGACY path: the single fixed je_sponge_vw with a
+     *  linear ramp, bit-identical to the pre-adaptive code. > 0 arms the
+     *  adaptive path, where both branch speeds are measured per cap on
+     *  every accepted substep and low-passed with this constant so the
+     *  layer's impedance does not chatter (a time-varying impedance
+     *  scatters in its own right). Input: je_sponge_vw_tau. */
+    amrex::Real m_je_sponge_vw_tau = 0.0;
+    /** Profile selector within the adaptive path: 1 (default) = TWO-TIER
+     *  (see ApplySpongeLayerBYee), 0 = single-speed linear ramp matched
+     *  to the fast branch, retained as an experimental arm. Ignored on
+     *  the legacy path. Input: je_sponge_grade. */
+    int m_je_sponge_grade = 1;
+    /** Inner (slow-matched) tier width as a fraction of je_sponge_width,
+     *  default 0.5. 1.0 degenerates EXACTLY to a single slow-matched
+     *  linear ramp and 0.0 to a single fast-matched one — both are free
+     *  validation cases. Input: je_sponge_tier_frac. */
+    amrex::Real m_je_sponge_tier_frac = 0.5;
+    /** Multiplier applied to BOTH measured branch speeds (default 1.0 =
+     *  pure measured matching), so the operating point can be moved off
+     *  the raw measurement without a rebuild. Input: je_sponge_vw_scale. */
+    amrex::Real m_je_sponge_vw_scale = 1.0;
+    /** Optional clamps [m/s] on the EMA'd speeds (0 = unset). Safety
+     *  rails against a transient measurement excursion; they do not
+     *  participate in normal operation. Inputs: je_sponge_vw_min,
+     *  je_sponge_vw_max. */
+    amrex::Real m_je_sponge_vw_min = 0.0;
+    amrex::Real m_je_sponge_vw_max = 0.0;
+    /** Ceiling on the measured v_fast/v_slow ratio (default 100), so a
+     *  pathological measurement cannot mint an absurd tier dynamic
+     *  range. The physical ratio is a stable number wherever the density
+     *  floor governs the cap band (see ApplySpongeLayerBYee): it reduces
+     *  to k_max sqrt(m_i/(mu0 n_floor))/e, independent of local B and
+     *  local density — measured ~23 on the production anchor. A ratio
+     *  seen DRIFTING in the witness print is therefore a red flag that
+     *  the floor assumption has broken, not routine variation.
+     *  Input: je_sponge_grade_max_ratio. */
+    amrex::Real m_je_sponge_grade_max_ratio = 100.0;
 
     /** Sponge reference-tracking time constant [s] (0 = frozen reference,
      *  bit-identical to the original behavior). A frozen reference under
