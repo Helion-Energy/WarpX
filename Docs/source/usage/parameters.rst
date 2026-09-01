@@ -5922,6 +5922,45 @@ Jacobian probes.
     Wall temperature of the z-end fluid ghosts; required with (and only
     valid with) ``implicit_mhd.z_boundary_fluid = wall_temperature``.
 
+.. pp:param:: implicit_mhd.z_wall_conduction
+    :type: ``bool``
+    :default: ``false``
+
+    Conductive z-end exchange (requires ``implicit_mhd.z_boundary_fluid
+    = wall_temperature`` and an active conduction channel). By default
+    the conductive face flux at the z domain end faces goes through the
+    PLAIN interior branch differencing the interior cell against the
+    wall-image ghost at the one-cell Neumann-ghost distance — an
+    exchange that inherits every interior guard: the free-streaming cap
+    when ``conduction_flux_limit_factor`` is armed, and the pressure
+    floors, which CLAMP the ghost image wherever
+    :math:`n\,k_B T_\mathrm{wall}` falls below a pressure floor (at low
+    exhaust densities the branch then drains toward the floor image,
+    not the wall). Enabled, the z domain END boundary faces (z_hi
+    always; z_lo unless it is the ``symmetry`` mirror plane) instead
+    carry a HARD Dirichlet-class conductive exchange against the
+    :math:`T_\mathrm{wall}` reservoir in both energy channels (electron
+    always; ion under the ``total_energy``/``dual_energy`` closures,
+    the only ones whose ion-energy register consumes conduction), at
+    the half-cell Dirichlet distance (the wall value sits ON the face,
+    flux :math:`\chi \rho_f (e - e_\mathrm{wall}) \, 2/\Delta z`) with
+    NO free-streaming cap — the implicit solver converges on the
+    demanded outflow, exactly like the r-wall ``wall_thermal_bc =
+    dirichlet`` pin (like that pin, the bath anchors at the
+    temperature-floor images, identical for wall temperatures at/above
+    the floors). Under Braginskii conduction the exchange coefficient
+    is the full anisotropic tensor scalar
+    :math:`\chi_{nn} = \chi_\perp + (\chi_\parallel - \chi_\perp)
+    b_n^2/|b|^2` evaluated at the face with the magnetic-field inputs
+    taken ONE-SIDED from the interior cell plus the staggered face
+    :math:`B_n` (end walls intersect an axial field at normal
+    incidence, so the exchange is :math:`\chi_\parallel`-dominated —
+    the physics point of the knob). The exchange REPLACES the plain
+    conductive branch at those faces, is part of the JFNK residual
+    (smooth in the state, conduction-stage/frozen-coefficient
+    conventions identical to the interior operator), and the default
+    keeps the legacy end faces bit-identical.
+
 .. pp:param:: implicit_mhd.z_lo_boundary_fluid
     :type: ``string``
     :default: *none* (inherit ``z_boundary_fluid``)

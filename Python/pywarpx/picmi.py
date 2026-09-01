@@ -2490,6 +2490,26 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Wall temperature in eV of the z-end fluid ghosts; required with
         (and only valid with) z_boundary_fluid="wall_temperature".
 
+    z_wall_conduction: bool, optional
+        Conductive z-end exchange (default False; requires
+        z_boundary_fluid="wall_temperature" and an active conduction
+        channel). By default the end faces conduct through the plain
+        interior branch against the wall-image ghost at the one-cell
+        Neumann-ghost distance, inheriting every interior guard (the
+        free-streaming cap when armed; the pressure floors, which clamp
+        the ghost image at low densities). Enabled, the z domain END
+        boundary faces (z_hi always; z_lo unless it is the "symmetry"
+        mirror plane) instead carry a HARD Dirichlet-class conductive
+        exchange against the T_wall reservoir in both energy channels —
+        half-cell Dirichlet distance (the wall value sits on the face),
+        no free-streaming cap, the z-end twin of the r-wall
+        wall_thermal_bc="dirichlet" pin. Under Braginskii conduction
+        the exchange coefficient is the full anisotropic tensor scalar
+        chi_nn = chi_perp + (chi_par - chi_perp) bn^2/|b|^2 with the B
+        inputs taken one-sided from the interior cell plus the
+        staggered face Bn (par-dominated for an axial field: end walls
+        intersect field lines at normal incidence).
+
     z_lo_boundary_fluid: {"symmetry"}, optional
         Fluid-moment ghost treatment at the z_lo end only (RZ,
         fluid_flux="hlld" or "central"). Unset, z_lo inherits
@@ -3097,6 +3117,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         r_open_fluid=None,
         z_boundary_fluid=None,
         z_wall_temperature=None,
+        z_wall_conduction=None,
         z_lo_boundary_fluid=None,
         wall_model=None,
         wall_polyline_file=None,
@@ -3205,6 +3226,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.r_open_fluid = r_open_fluid
         self.z_boundary_fluid = z_boundary_fluid
         self.z_wall_temperature = z_wall_temperature
+        self.z_wall_conduction = z_wall_conduction
         self.z_lo_boundary_fluid = z_lo_boundary_fluid
         self.wall_model = wall_model
         self.wall_polyline_file = wall_polyline_file
@@ -3353,6 +3375,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.r_open_fluid = self.r_open_fluid
         implicit_mhd.z_boundary_fluid = self.z_boundary_fluid
         implicit_mhd.z_wall_temperature = self.z_wall_temperature
+        implicit_mhd.z_wall_conduction = self.z_wall_conduction
         implicit_mhd.z_lo_boundary_fluid = self.z_lo_boundary_fluid
         implicit_mhd.wall_model = self.wall_model
         implicit_mhd.wall_polyline_file = self.wall_polyline_file

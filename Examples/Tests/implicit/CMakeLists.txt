@@ -1993,6 +1993,39 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# conductive z-end exchange, NULL TWIN (implicit_mhd.z_wall_conduction=0
+# on the CLI): the legacy wall_temperature end faces -- the plain
+# Braginskii tensor branch against the wall-image ghost at the ONE-CELL
+# Neumann-ghost distance. The twin must match the one-cell Dirichlet
+# diffusion column exactly (the analysis integrates the identical
+# backward-Euler operator), proving the knob's default preserves the
+# legacy end-face behavior quantitatively
+add_warpx_test(
+    test_rz_theta_implicit_mhd_z_wall_conduction_off  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_z_wall_conduction implicit_mhd.z_wall_conduction=0"  # inputs
+    "analysis_mhd_z_wall_conduction.py diags off"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# conductive z-end exchange, knob ON: both end faces REPLACE the plain
+# branch with the hard half-cell Dirichlet exchange
+# chi_nn rho (e - e_wall) 2/dz at the cap-pinned chi_par (bn = 1 -> the
+# PARALLEL channel), in both energy channels; the run must match the
+# half-cell pin column (2x the legacy end-face exchange) and its end
+# cells must land materially below the null twin's
+add_warpx_test(
+    test_rz_theta_implicit_mhd_z_wall_conduction  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_z_wall_conduction  # inputs
+    "analysis_mhd_z_wall_conduction.py diags on ../test_rz_theta_implicit_mhd_z_wall_conduction_off/diags"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_z_wall_conduction_off  # dependency
+)
+
 # staggering-aware Neumann z-ghost fill: nodal-in-z fields must mirror
 # evenly about the boundary node (zero centered end-node gradient under a
 # z-linear ramp) while cell-centered fields keep the bit-identical clamp;

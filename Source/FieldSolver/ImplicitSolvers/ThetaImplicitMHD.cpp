@@ -459,6 +459,12 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
             "implicit_mhd.z_wall_temperature requires "
             "implicit_mhd.z_boundary_fluid = wall_temperature");
     }
+    pp.query("z_wall_conduction", m_z_wall_conduction);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_z_wall_conduction || m_z_boundary_fluid == "wall_temperature",
+        "implicit_mhd.z_wall_conduction requires "
+        "implicit_mhd.z_boundary_fluid = wall_temperature (the conductive "
+        "z-end exchange drains against the z_wall_temperature reservoir)");
     utils::parser::queryWithParser(pp, "absorb_ledger_interval",
                                    m_absorb_ledger_interval);
     pp.query("wall_ledger_file", m_wall_ledger_file);
@@ -659,6 +665,16 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
             (has_ion_conduction || has_electron_conduction),
         "implicit_mhd.conduction_flux_limit_factor requires a nonzero "
         "thermal diffusivity (nothing to limit)");
+    // The conductive z-end exchange is carried by the conduction face
+    // registers: without a channel the reservoir is unreachable and the
+    // knob would be a silent no-op.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_z_wall_conduction ||
+            has_ion_conduction || has_electron_conduction,
+        "implicit_mhd.z_wall_conduction requires a conduction channel "
+        "(thermal_diffusivity_ion/electron, constant or parser, or "
+        "thermal_conduction_model = braginskii): the z-end reservoir "
+        "exchanges conductively");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_pressure_corner_width_fraction >= 0.0_rt,
         "implicit_mhd.pressure_corner_width_fraction cannot be negative");
@@ -2629,6 +2645,10 @@ void ThetaImplicitMHD::PrintParameters () const
                              "(mirror; PMC fields)\n"
                            : "")
                    << "Z wall temperature [eV]:       " << m_z_wall_temperature << "\n"
+                   << "Z wall conduction:             "
+                   << (m_z_wall_conduction ? "on (hard Dirichlet end faces)"
+                                           : "off (legacy end faces)")
+                   << "\n"
                    << "HLLC signal closure:           " << m_hllc_signal_closure << "\n"
                    << "HLLC contact blend:            " << m_hllc_contact_blend << "\n";
     if (m_use_hlld) {
@@ -5953,6 +5973,38 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
         (m_conduction_flux_limit_factor > 0.0_rt)
             ? m_conduction_flux_limit_factor
             : 1.0_rt;
+    // Conductive z-end exchange (implicit_mhd.z_wall_conduction; see the
+    // header): the z domain END boundary faces of the z-face family carry
+    // a HARD half-cell Dirichlet exchange against the z_wall_temperature
+    // reservoir, REPLACING the plain conductive branch at those faces --
+    // no free-streaming cap, the z-end twin of the shaped-wall dirichlet
+    // pin above. z_hi always; z_lo only when it is not the mirror plane
+    // (whose parity ghosts already zero the conductive flux through the
+    // plane). The reservoir uses the exact ghost-fill conversion
+    // e_spec = (q/m) T_wall[eV]/(gamma - 1) and, like the wall pin,
+    // anchors the bath at the temperature-floor images (identical for
+    // every deck whose wall temperature sits at/above the floors) so the
+    // exchange never fights the floor ratchet. Face classification is
+    // static geometry: the branches below stay C-infinity in the state.
+    const bool z_wall_conduction =
+        m_z_wall_conduction && add_conduction && (normal == 2);
+    const bool z_wall_conduction_lo = z_wall_conduction && !m_z_lo_pmc;
+#if defined(WARPX_DIM_RZ)
+    const int z_axial_dim = 1;
+#else
+    const int z_axial_dim = 0;
+#endif
+    const int z_end_face_lo = m_WarpX->Geom(0).Domain().smallEnd(z_axial_dim);
+    const int z_end_face_hi =
+        m_WarpX->Geom(0).Domain().bigEnd(z_axial_dim) + 1;
+    const amrex::Real z_wall_bath_e_spec_electron = std::max(
+        m_ion_charge_to_mass * m_z_wall_temperature / (m_gamma_e - 1.0_rt),
+        m_ion_charge_to_mass / PhysConst::q_e * PhysConst::kb *
+            m_electron_temperature_floor / (m_gamma_e - 1.0_rt));
+    const amrex::Real z_wall_bath_e_spec_ion = std::max(
+        m_ion_charge_to_mass * m_z_wall_temperature / (m_gamma_i - 1.0_rt),
+        m_ion_charge_to_mass / PhysConst::q_e * PhysConst::kb *
+            m_ion_temperature_floor / (m_gamma_i - 1.0_rt));
 #if defined(WARPX_DIM_1D_Z)
     const amrex::Real inverse_normal_size =
         1.0_rt / m_WarpX->Geom(0).CellSize(0);
@@ -6556,6 +6608,20 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 // always free-streaming limited.
                 const bool wall_face =
                     wall_left_masked || wall_right_masked;
+                // Conductive z-end wall faces (see the z_wall_conduction
+                // host constants): the z domain END faces of this z-face
+                // family. Static geometry; a shaped-wall interface face
+                // keeps the EB machinery (the branch order below).
+#if defined(WARPX_DIM_RZ)
+                const int z_axial_index = j;
+#else
+                const int z_axial_index = i;
+#endif
+                const bool z_end_hi_face =
+                    z_wall_conduction && z_axial_index == z_end_face_hi;
+                const bool z_end_lo_face =
+                    z_wall_conduction_lo && z_axial_index == z_end_face_lo;
+                const bool z_end_wall_face = z_end_hi_face || z_end_lo_face;
                 amrex::Real face_charge_density = 0.0_rt;
                 amrex::Real face_te = 0.0_rt;
                 amrex::Real face_ti = 0.0_rt;
@@ -6774,12 +6840,25 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 if (braginskii) {
                     const int tangent1 = (normal + 1) % 3;
                     const int tangent2 = (normal + 2) % 3;
-                    const amrex::Real bt1 =
+                    amrex::Real bt1 =
                         0.5_rt * (left.magnetic[tangent1] +
                                   right.magnetic[tangent1]);
-                    const amrex::Real bt2 =
+                    amrex::Real bt2 =
                         0.5_rt * (left.magnetic[tangent2] +
                                   right.magnetic[tangent2]);
+                    if (z_end_wall_face) {
+                        // Conductive z-end faces take the tangential B
+                        // ONE-SIDED from the interior cell (the ghost
+                        // image is a boundary-condition artifact, never
+                        // a field sample; the staggered bn_face is
+                        // already the single-valued face B_n), so the
+                        // chi_nn projection of the reservoir exchange
+                        // sees the interior field geometry only.
+                        const auto& interior_side =
+                            z_end_hi_face ? left : right;
+                        bt1 = interior_side.magnetic[tangent1];
+                        bt2 = interior_side.magnetic[tangent2];
+                    }
                     brag_bn = bn_face;
                     brag_b2 = brag_bn * brag_bn + bt1 * bt1 + bt2 * bt2;
                     brag_b2_dir = theta_implicit_mhd::smooth_positive_floor(
@@ -6789,7 +6868,11 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     // z (= tangent2) for r-faces; the theta gradient
                     // vanishes for m = 0.
                     brag_bt = (normal == 0) ? bt2 : bt1;
-                    if (!wall_face) {
+                    // Wall interface AND conductive z-end faces skip the
+                    // tangential corner stencil: their exchange is the
+                    // pure normal Dirichlet form below (no cross term
+                    // against ghost-row samples).
+                    if (!wall_face && !z_end_wall_face) {
                         const int tangential = (normal == 0) ? 2 : 0;
                         int ipl = il, jpl = jl, kpl = kl;
                         int ipr = i, jpr = j, kpr = k;
@@ -7269,6 +7352,26 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         // left-side wall (matches the two-sided sign).
                         conductive_flux =
                             wall_right_masked ? drain : -drain;
+                    } else if (z_end_wall_face) {
+                        // Conductive z-end exchange (implicit_mhd.
+                        // z_wall_conduction): hard half-cell Dirichlet
+                        // exchange against the z-wall reservoir -- the
+                        // z-end twin of the shaped-wall dirichlet pin,
+                        // with NO free-streaming cap (the implicit
+                        // solver converges on the demanded outflow).
+                        // chi_ion_face is the full tensor nn scalar
+                        // (one-sided interior B, see the face geometry
+                        // above); the interior e_int is the conduction-
+                        // stage value. +n toward the z_hi wall, -n
+                        // toward the z_lo wall.
+                        const amrex::Real interior_e_spec =
+                            z_end_hi_face ? e_spec_ion_left
+                                          : e_spec_ion_right;
+                        const amrex::Real drain =
+                            chi_ion_face * face_density *
+                            (interior_e_spec - z_wall_bath_e_spec_ion) *
+                            2.0_rt * inverse_normal_size;
+                        conductive_flux = z_end_hi_face ? drain : -drain;
                     } else if (braginskii) {
                         // Anisotropic tensor flux: the normal gradient
                         // uses the SAME (conduction-stage) specific
@@ -7437,6 +7540,20 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         }
                         conductive_flux =
                             wall_right_masked ? drain : -drain;
+                    } else if (z_end_wall_face) {
+                        // Conductive z-end exchange (see the ion
+                        // channel): hard half-cell Dirichlet reservoir
+                        // exchange, no free-streaming cap, one-sided
+                        // tensor scalar chi.
+                        const amrex::Real interior_e_spec =
+                            z_end_hi_face ? e_spec_electron_left
+                                          : e_spec_electron_right;
+                        const amrex::Real drain =
+                            chi_electron_face * face_density *
+                            (interior_e_spec -
+                             z_wall_bath_e_spec_electron) *
+                            2.0_rt * inverse_normal_size;
+                        conductive_flux = z_end_hi_face ? drain : -drain;
                     } else if (braginskii) {
                         // Anisotropic tensor flux (see the ion channel).
                         const amrex::Real gradient_normal =

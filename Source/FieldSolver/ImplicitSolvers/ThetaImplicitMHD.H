@@ -1040,6 +1040,28 @@ class ThetaImplicitMHD final : public ImplicitSolver
     std::string m_z_boundary_fluid = "neumann";
     // Wall temperature [eV] of z_boundary_fluid = wall_temperature.
     amrex::Real m_z_wall_temperature = 0.0;
+    // Conductive z-end exchange (implicit_mhd.z_wall_conduction; requires
+    // z_boundary_fluid = wall_temperature and an active conduction
+    // channel): the z domain END boundary faces (z_hi always; z_lo unless
+    // it is the mirror plane) carry a HARD Dirichlet-class conductive
+    // exchange against the T_wall reservoir in both energy channels --
+    // half-cell Dirichlet distance (the wall value sits ON the face,
+    // flux chi rho_f (e - e_wall) 2/dz) with NO free-streaming cap (the
+    // solver converges on the demanded outflow, the z-end twin of
+    // wall_thermal_bc = dirichlet). Under Braginskii the coefficient is
+    // the full tensor scalar chi_nn = chi_perp + (chi_par - chi_perp)
+    // bn^2/|b|^2 with the B inputs one-sided from the interior cell +
+    // the staggered face B_n (par-dominated for an axial end field: the
+    // end wall intersects the field lines at normal incidence). The
+    // exchange REPLACES the plain conductive branch at those faces;
+    // default false keeps the legacy end faces bit-identical -- the
+    // plain branch differencing the interior against the wall-image
+    // ghost at the ONE-CELL Neumann-ghost distance, which inherits the
+    // interior guards (free-streaming cap when armed; pressure floors
+    // clamping the ghost image wherever n kB T_wall falls below them,
+    // so at low densities the legacy path drains toward the floor
+    // image, not the wall -- the measured production inertness).
+    bool m_z_wall_conduction = false;
     // Fluid-moment ghost treatment at the z_lo end ONLY (RZ, recast
     // path): empty (default) inherits z_boundary_fluid; "symmetry" makes
     // z = z_lo a mirror-symmetry plane -- the z_lo ghost rows are the
