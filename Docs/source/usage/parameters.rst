@@ -290,6 +290,8 @@ Overall simulation parameters
           - ``implicit_evolve.max_particle_iterations`` (``integer``, default: 21)
           - ``implicit_evolve.particle_tolerance`` (``float``, default: 1.e-10)
           - ``implicit_evolve.particle_suborbits`` (``bool``, default: false)
+          - ``implicit_evolve.suborbit_warning_threshold`` (``int``, default: 5)
+          - ``implicit_evolve.suborbit_statistics_interval`` (``int``, default: 100)
           - ``implicit_evolve.print_unconverged_particle_details`` (``bool``, default: false)
 
         - ``implicit_evolve.use_mass_matrices_jacobian`` (``bool``, default: false).
@@ -366,6 +368,31 @@ Overall simulation parameters
       Note that exact energy convergence is achieved only with one grid block and :pp:param:`psatd.periodic_single_box_fft = 1`. Otherwise,
       the energy conservation is spoiled because of the inconsistency of the periodic assumption of the spectral solver and the
       non-periodic behavior of the individual blocks.
+
+    * ``semi_implicit_darwin``: Use the semi-implicit Darwin field solver.
+
+      This solver advances the electrostatic (longitudinal) field together with the inductive
+      (magnetoinductive Darwin) field, thereby retaining low-frequency magnetic effects while
+      filtering out light waves.
+
+      - **Requirements and restrictions:**
+
+        - This solver requires an electrostatic solver to also be set, i.e.
+          :pp:param:`warpx.do_electrostatic` must be specified (e.g. ``warpx.do_electrostatic = labframe``).
+          Unlike a pure electrostatic run, setting ``algo.evolve_scheme = semi_implicit_darwin`` does
+          **not** disable the electromagnetic solver, since the magnetic field is still evolved.
+        - The electromagnetic solver must be the Yee solver, i.e. :pp:param:`algo.maxwell_solver` = ``yee``
+          (the default). No other Maxwell solver is compatible with the Darwin scheme.
+
+      - **Linear (GMRES) solver options:**
+        The magnetoinductive solve uses the AMReX GMRES linear solver, whose parameters are set with the
+        ``amrex_gmres`` prefix:
+
+        - ``amrex_gmres.verbose_int`` (``int``, default: 2) Level of verbosity of the linear solver output.
+        - ``amrex_gmres.restart_length`` (``int``, default: 30) How often to restart the GMRES iterations.
+        - ``amrex_gmres.max_iterations`` (``int``, default: 1000) Maximum number of iterations.
+        - ``amrex_gmres.relative_tolerance`` (``float``, default: 1.0e-4) Relative tolerance of the convergence.
+        - ``amrex_gmres.absolute_tolerance`` (``float``, default: 0.0) Absolute tolerance of the convergence.
 
 .. _param-electrostatic-pic:
 
@@ -1030,6 +1057,15 @@ additionally define the electric potential at the embedded boundary with an anal
     * ``Absorbing``: Particles that reach the embedded boundary are deleted. This is the default behavior.
 
     * ``Reflecting``: Particles that reach the embedded boundary are specularly reflected back into the simulation domain
+
+    * ``Thermal``: Particles that reach the embedded boundary are re-emitted back into the simulation domain
+      with a thermalized velocity, as from a fully accommodating diffuse wall. The two velocity components
+      tangential to the local surface are sampled from a ``gaussian`` distribution, and the component along
+      the (inward) surface normal is sampled from a ``gaussian flux`` distribution.
+      The standard deviation for these distributions should be provided for each species using
+      ``boundary.<species_name>.u_th`` (in units of :math:`c`, i.e. :math:`\sqrt{k_B T_\mathrm{wall}/m}/c`),
+      the same input used by the domain ``thermal`` particle boundary condition. The same standard
+      deviation is used to sample all components.
 
 .. _param-particle-thermalizer:
 
@@ -3030,6 +3066,23 @@ Details about the collision models can be found in the :ref:`theory section <mul
     With ``forward``, the scattering angle is set to zero, i.e. the products are emitted in the same direction as the reactant (in the center of mass frame).
     With ``backward``, the scattering angle is set to :math:`\pi`, i.e. the products are emitted in the opposite direction of the reactant (in the center of mass frame).
 
+.. pp:param:: <collision_name>.create_products
+    :type: ``bool``
+    :default: ``1``
+    :optional:
+
+    Only for ``nuclearfusion``. When true, the product particles are created, otherwise not.
+
+.. pp:param:: <collision_name>.save_particle_production
+    :type: ``bool``
+    :default: ``0``
+    :optional:
+
+    Only for ``nuclearfusion``.
+    When true, the integrated product particle density is saved in a MultiFab with the name ``<collision_name>_particle_production``.
+    The data can be written out by adding that name to the ``<diag_name>.fields_to_plot`` input parameter.
+    The option can be used in conjunction with ``<collision_name>.create_products`` to save only the product density and not create particles.
+
 .. pp:param:: <collision_name>.background_density
     :type: ``float``
 
@@ -3269,6 +3322,22 @@ Details about the collision models can be found in the :ref:`theory section <mul
     This is only implemented for the explicit evolve scheme and is not available for the implicit evolve schemes, because the implicit
     formulation is intrinsically energy-conserving when combined with MCC collisions, as shown in `Angus et al., J. Comput. Phys. 456, 2022 <https://doi.org/10.1016/j.jcp.2022.111030>`__.
 
+.. pp:param:: collisions.shuffling_method
+    :type: ``bool``
+    :default: 0
+    :optional:
+
+    Specify the shuffling method used for pairwise collisions (which includes ``pairwisecoulomb``, ``nuclearfusion``, ``bremsstrahlung``, ``linear_breit_wheeler``, ``dsmc``, and ``linear_compton``).
+    This can also be set for individual collisions using there collision name as the prefix, .. pp:param:: <collision_name>.shuffling_method.
+    The particles are shuffled within each cell to obtain good statistical properties, so that each particle can collide with each other particle in the cell with equal probability.
+    Several shuffling methods are implemented with have different properties.
+
+    - ``FisherYates`` The default, is the best method numerically with the best randomness characteristics, and should be free of correlation effects. Every particle within a cell is swapped with another random particle within the cell. Note that the shuffle can be slow and take a significant amount of simulation time with large numbers of particles per cell.
+
+    - ``Modulus`` The particles are shuffled algorithmically, using a linear congruential generator where the particle ``i`` is replace by the particle ``(i*step + offset) % n``, where ``n`` is the number of particles, ``step`` is chosen randomly and is coprime with ``n``, and ``offset`` is chosen randomly. To increase randomness, multiple shuffles are done, with the particles in each cell divided randomly into up to five subgroups. The number of shuffles can be specified by the input paralel ``<collision_name>.modulus_rounds``, which defaults to 5. This method would be reasonable when there is some turnover of paticles in the cells. The advantage is that this shuffle is substantially faster (by orders of magnitude on GPU) than the Fisher-Yates and standard methods. In all of the tests performed, including ``pairwisecoulomb`` and ``nuclearfusion``, the collision rates were properly produced with this method. However, use carefully and check the results closely.
+
+    - ``None`` No shuffling is done. This option is here primarily for testing purposes and should not be used in production simulatins. However, this would be reasonable in cases where there is a large flux of particles across the cells, particularly in 2D and 3D, so that the turnover of particles in the cells is significant in the time that it would be expected that a particle would interact with all of the other particles in the cell. Use carefully and check the results closely.
+
 .. _running-cpp-parameters-numerics:
 
 Numerics and algorithms
@@ -3287,9 +3356,11 @@ Time step
     The ratio between the actual timestep that is used in the simulation
     and the Courant-Friedrichs-Lewy (CFL) limit. (e.g. for ``warpx.cfl=1``,
     the timestep will be exactly equal to the CFL limit.)
-    For some speed v and grid spacing dx, this limits the timestep to ``warpx.cfl * dx / v``.
-    When used with the electromagnetic solver, ``v`` is the speed of light.
-    For the electrostatic solver, ``v`` is the maximum speed among all particles in the domain.
+    For some speed ``v`` and grid spacing ``dx``, this limits the timestep to ``warpx.cfl * dx / v``.
+    When used with electromagnetic solvers that treat light waves explicitly, ``v`` is the speed of light.
+    For the electrostatic solver and electromagnetic solvers that treat light waves implicitly, ``dx / v``
+    is the minimum direction-dependent value ``dx_i / v_i`` among all particles in the domain, where ``v_i`` is the
+    maximum speed in grid direction ``i`` and ``dx_i`` is the associated grid spacing.
 
 .. pp:param:: warpx.const_dt
     :type: ``float``
@@ -3314,6 +3385,13 @@ Time step
     :optional:
 
     When adaptive timestepping is activated, information about the new time step and the simulation conditions are output to the file specified by this parameter.
+
+.. pp:param:: warpx.dt_update_write_interval
+    :type: ``string``
+    :optional:
+
+    When adaptive timestepping is activated and :pp:param:`warpx.dt_update_diagnostic_file` is specified, this specifies the interval when data is written to the diagnostic file.
+    The default is to write every time the time step is updated.
 
 .. pp:param:: warpx.max_omegap_dt
     :type: ``float``

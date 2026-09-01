@@ -305,7 +305,7 @@ void FiniteDifferenceSolver::EvolveBCartesianECT (
 
                 if (S(i, j, k) <= 0) { return; }
 
-                if (!(flag_info_cell_dim(i, j, k) == 0)) { return; }
+                if (!(flag_info_cell_dim(i, j, k) == FaceInfo::extended)) { return; }
 
                 // Owner-unique assembly: faces on shared nodal planes are
                 // assembled once so the Venl sum across copies is exact
@@ -442,7 +442,7 @@ void FiniteDifferenceSolver::EvolveBCartesianECT (
             amrex::ParallelFor(tb, [=] AMREX_GPU_DEVICE(int i, int j, int k) {
                 if (S(i, j, k) <= 0) { return; }
 
-                if (flag_info_cell_dim(i, j, k) == 0) {
+                if (flag_info_cell_dim(i, j, k) == FaceInfo::extended) {
                     // Unstable face: deferred update of the seam-sync path
                     // (the fused path already updated it in phase 1)
                     if (sync) {
@@ -450,10 +450,10 @@ void FiniteDifferenceSolver::EvolveBCartesianECT (
                     }
                     return;
                 }
-                else if (flag_info_cell_dim(i, j, k) == 1) {
+                else if (flag_info_cell_dim(i, j, k) == FaceInfo::available) {
                     //Stable cell which hasn't been intruded
                     B(i, j, k) = B(i, j, k) - dt * Rho(i, j, k);
-                } else if (flag_info_cell_dim(i, j, k) == 2) {
+                } else if (flag_info_cell_dim(i, j, k) == FaceInfo::intruded) {
                     //Stable cell which has been intruded
                     Venl_dim(i, j, k) += Rho(i, j, k) * S_mod(i, j, k);
                     B(i, j, k) = B(i, j, k) - dt * Venl_dim(i, j, k) / S(i, j, k);
