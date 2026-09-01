@@ -1,0 +1,20 @@
+# base input parameters
+FILE = inputs_base_1d_theta_implicit_mhd_conduction_halo_boost
+
+# Ion-only discriminator and clamp-order arm: dp = 1e6 rides the
+# boosted halo ion value onto the DEFINED-convention perp cap (the
+# clamps cap the BOOSTED value, the reference code's t_cond order): the measured ion
+# chi must equal the cap itself, while the electron channel must stay
+# on its RAW value -- an electron leak of the boost (the pre-2026-08-31
+# both-channels form) would drag the electron ripple onto the same cap
+# rate. Also exercises the dynamic peak-fraction reference path winning
+# the max composition over the base.
+implicit_mhd.conduction_halo_boost = 1.0e6
+implicit_mhd.vacuum_reference_base_density = 0.02 * n0 * m_p
+implicit_mhd.vacuum_reference_peak_fraction = 0.1
+implicit_mhd.conduction_chi_perp_min = 0.001
+implicit_mhd.conduction_chi_perp_max = 100.0
+implicit_mhd.conduction_chi_par_min = 0.001
+implicit_mhd.conduction_chi_par_max = 1.0e6
+warpx.const_dt = 1.7e-6
+max_step = 10

@@ -5433,7 +5433,10 @@ Jacobian probes.
     :math:`T_0`. The :math:`s` inputs follow
     :pp:param:`implicit_mhd.conduction_coefficient_state` like every
     other Braginskii coefficient input; the ``conduction_chi_min/max``
-    clamp applies AFTER the addition.
+    clamp applies AFTER the addition. Mutually exclusive with
+    :pp:param:`implicit_mhd.conduction_halo_boost` (see there: against
+    a reference-parity perp cap the additive term saturates every face
+    onto the cap and silently erases the multiplicative boost).
 
 .. pp:param:: implicit_mhd.conduction_qs_onset
     :type: ``float``
@@ -5450,40 +5453,49 @@ Jacobian probes.
     pseudo-entropy. Required (positive) when ``conduction_qs_chi > 0``.
 
 .. pp:param:: implicit_mhd.conduction_halo_boost
-    :type: ``float``
-    :unit: :math:`\mathrm{m^2\,s^{-1}}`
+    :type: ``float`` (dimensionless)
     :default: ``0`` (off)
 
-    Density-keyed halo boost of the Braginskii :math:`\chi_\perp`
-    (requires ``thermal_conduction_model = braginskii``): the reference code's
-    low-density perpendicular-conduction boost (``ntb.f90`` ``t_cond``:
-    ``xip = MAX(xip, xip*(en0/en)**2*dp_mn)``), draining residual halo
-    heat to the wall bath while the bulk keeps physical Braginskii.
-    :math:`\chi_\perp` is composed with the boost diffusivity
+    Density-keyed halo boost of the Braginskii ION :math:`\chi_\perp`
+    (requires ``thermal_conduction_model = braginskii``): the
+    dimensionless ``dp_mn`` of the reference code's exact low-density
+    perpendicular-conduction boost (``ntb.f90`` ``t_cond``:
+    ``xip = MAX(xip, xip*(en0/en)**2*dp_mn)``; the reference code hardwires
+    ``dp_mn = 1``), draining halo heat to the wall bath while the bulk
+    keeps physical Braginskii. The raw ion perp value is MULTIPLIED by
 
     .. math::
 
-        \chi_\mathrm{halo} = D_\mathrm{boost}\,
-        (\rho_\mathrm{ref}/\rho)^2
+        \max\!\big(1,\; d_p \, (\rho_\mathrm{ref}/\rho)^2\big)
 
-    — reaching :math:`D_\mathrm{boost}` at the reference density,
-    quadratic in :math:`\rho_\mathrm{ref}/\rho` below it and vanishing
-    quadratically above — through the same :math:`C^\infty` quadrature
-    smooth max as
-    :pp:param:`implicit_mhd.vacuum_resistivity_diffusivity` (the
-    identical kernel), with :math:`\rho_\mathrm{ref}` the shared
-    reference density (the Ohm guard, raised to the dynamic
-    per-step reference under
+    — a no-op above the reference density, growing quadratically below
+    it — with :math:`\rho_\mathrm{ref}` the shared reference density
+    (the Ohm guard, raised by
+    :pp:param:`implicit_mhd.vacuum_reference_base_density` and
     :pp:param:`implicit_mhd.vacuum_reference_peak_fraction` — the
     the reference code's ``en0``) and the density division guarded at the positivity
-    floor. Applied to :math:`\chi_\perp` ONLY (both species channels;
-    the parallel channel keeps physical Braginskii), and BEFORE the
-    ``conduction_chi_min/max`` clamps — the reference code's order (the boost
-    precedes the ``xipi_mn/mx`` clamps in ``t_cond``), so ``chi_max``
-    still caps the boosted halo diffusivity. The boost inputs follow
+    floor. ION channel ONLY (the reference code's ``te_cond`` carries no boost) and
+    :math:`\chi_\perp` only (the parallel channel keeps physical
+    Braginskii), applied BEFORE the ``conduction_chi_min/max`` clamps —
+    the reference code's order (the boost precedes the ``xipi_mn/mx`` clamps in
+    ``t_cond``), so the perp cap bounds the boosted halo diffusivity:
+    at reference-shot parameters the boosted halo value rides the
+    ``conduction_chi_perp_max`` cap (the thermally shorted halo). The
+    boost inputs follow
     :pp:param:`implicit_mhd.conduction_coefficient_state` like every
     other Braginskii coefficient input (``step_old`` keeps
-    Newton-linear diffusion).
+    Newton-linear diffusion), and the coefficients are frozen per solve,
+    so the ``MAX`` kink is never differentiated.
+
+    Mutually exclusive with
+    :pp:param:`implicit_mhd.conduction_qs_chi`: the quasi-shorting
+    pseudo-entropy is maximal on exactly the low-density halo band the
+    ``dp`` boost targets, and at production amplitudes
+    (``conduction_qs_chi`` :math:`\gtrsim 10^4` against a reference-parity
+    perp cap :math:`\sim 10^2`) even its zero-entropy smooth-max tail
+    exceeds the cap, so every face rides ``conduction_chi_perp_max``
+    and the multiplicative boost is exactly invisible after the clamp.
+    Arm exactly one halo-shorting mechanism.
 
 .. pp:param:: implicit_mhd.pressure_corner_width_fraction
     :type: ``float``
@@ -6130,9 +6142,10 @@ Jacobian probes.
     :math:`\eta`: vacuum field diffusion never heats plasma. Pairs
     naturally with :pp:param:`implicit_mhd.resistive_theta` ``= 1``,
     which damps the stiff halo field modes this term creates. With
-    :pp:param:`implicit_mhd.vacuum_reference_peak_fraction` the static
-    Ohm-guard reference is raised to the dynamic per-step
-    tenth-of-peak reference (the reference code's ``en0``).
+    :pp:param:`implicit_mhd.vacuum_reference_peak_fraction` and/or
+    :pp:param:`implicit_mhd.vacuum_reference_base_density` the static
+    Ohm-guard reference is raised to the dynamic tenth-of-peak /
+    static ``en00`` reference (the reference code's ``en0``).
 
 .. pp:param:: implicit_mhd.vacuum_reference_peak_fraction
     :type: ``float``
@@ -6151,14 +6164,16 @@ Jacobian probes.
     .. math::
 
         \rho_\mathrm{ref} = \max\!\big(\rho_\mathrm{ref,\Omega},\;
-        f \, \rho_\mathrm{peak}\big),
+        \rho_\mathrm{en00},\; f \, \rho_\mathrm{peak}\big),
 
     with :math:`\rho_\mathrm{peak}` the global maximum of the STEP-OLD
     mass density, recomputed once per step at step start and FROZEN for
     the whole nonlinear solve (every residual and Jacobian evaluation
-    keys the boosts to the same reference: Newton-consistent), and
+    keys the boosts to the same reference: Newton-consistent),
+    :math:`\rho_\mathrm{en00}` the static base
+    :pp:param:`implicit_mhd.vacuum_reference_base_density`, and
     :math:`\rho_\mathrm{ref,\Omega}` the static Ohm density guard —
-    the exact ``f = 0`` limit, so the default is bit-identical.
+    the exact base ``= f = 0`` limit, so the default is bit-identical.
     Rationale: the static guard protects only near-vacuum cells,
     leaving the intermediate halo band under full Joule heating and
     physical (tiny) cross-field conduction; keying on a tenth of the
@@ -6167,6 +6182,25 @@ Jacobian probes.
     eta-parser density arguments keep the static Ohm-guard floor
     either way. The effective reference is printed (rank 0) on >1%
     change.
+
+.. pp:param:: implicit_mhd.vacuum_reference_base_density
+    :type: ``float``
+    :unit: :math:`\mathrm{kg\,m^{-3}}`
+    :default: ``0`` (off)
+
+    Static base of the shared reference density: the reference code's ``en00``
+    glob card as a mass density (the reference shot flies ``en00 = 3.3e20``
+    m\ :sup:`-3`). Enters the reference as
+    :math:`\max(\rho_\mathrm{ref,\Omega}, \rho_\mathrm{en00},
+    f\rho_\mathrm{peak})`; ``0`` keeps the legacy Ohm-guard base.
+    Calibration identity: the field-eta boost curve depends only on the
+    product :math:`D_\mathrm{vac}\,\rho_\mathrm{ref}^2`, so switching
+    the base from the Ohm guard :math:`n_g` to ``en00`` while rescaling
+    :pp:param:`implicit_mhd.vacuum_resistivity_diffusivity` by
+    :math:`(n_g/\mathrm{en00})^2` leaves the field advance unchanged
+    and keys the conduction halo boost
+    (:pp:param:`implicit_mhd.conduction_halo_boost`) at the reference code's
+    reference.
 
 .. pp:param:: implicit_mhd.joule_ohm_current
     :type: ``bool``

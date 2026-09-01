@@ -673,20 +673,70 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_braginskii_qs_twin  # dependency
 )
 
-# Reference-code-style density-keyed halo boost of the Braginskii chi_perp
-# (implicit_mhd.conduction_halo_boost, keyed to the dynamic reference of
-# vacuum_reference_peak_fraction): a two-zone magnetized column whose
-# rarefied half must relax its cross-field Te ripple at the composed
-# boost diffusivity sqrt(chi_perp^2 + (D_boost (n_ref/n)^2)^2) -- five
-# decades above the physical chi_perp there -- while the bulk half
-# keeps physical Braginskii (boost two decades below chi_perp in the
-# quadrature): boosted perp flux in the LOW-DENSITY zone only
+# Reference-code-style density-keyed halo boost of the Braginskii ION chi_perp
+# (implicit_mhd.conduction_halo_boost, the dimensionless dp_mn of the
+# exact multiplicative the reference code's form, keyed to the shared reference of
+# vacuum_reference_base_density -- the reference code's en00): a single-zone
+# entropy-mode magnetized column whose cross-field ION e_spec ripple
+# must relax at raw chi_perp_i MULTIPLIED by exactly dp (n_ref/n)^2 =
+# 100 while the electron channel stays frozen (no electron boost)
 add_warpx_test(
     test_1d_theta_implicit_mhd_conduction_halo_boost  # name
     1  # dims
     2  # nprocs
     inputs_test_1d_theta_implicit_mhd_conduction_halo_boost  # inputs
-    "analysis_mhd_conduction_halo_boost.py diags/diag000000 diags/diag000010"  # analysis
+    "analysis_mhd_conduction_halo_boost.py boost diags/diag000000 diags/diag000010"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The sub-reference twin: dp = 1 with the reference BELOW the density
+# (boost = 0.09 < 1) is an EXACT no-op of the multiplicative MAX form --
+# both channels must decay at their raw Braginskii chi_perp (an
+# additive/quadrature floor composition would still add here)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_conduction_halo_boost_noop  # name
+    1  # dims
+    2  # nprocs
+    inputs_test_1d_theta_implicit_mhd_conduction_halo_boost_noop  # inputs
+    "analysis_mhd_conduction_halo_boost.py noop diags/diag000000 diags/diag000010"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The ion-only discriminator and clamp-order twin: dp = 1e6 rides the
+# boosted ion value onto the DEFINED-convention perp cap (the clamps
+# cap the BOOSTED value, the reference code's t_cond order): the measured ion chi
+# must equal the cap itself while the electron channel stays on its
+# RAW value -- an electron leak of the boost (the pre-2026-08-31
+# both-channels form) would drag it onto the same cap rate; also
+# exercises the dynamic peak-fraction reference path winning the max
+# composition over the static base
+add_warpx_test(
+    test_1d_theta_implicit_mhd_conduction_halo_boost_ion_only  # name
+    1  # dims
+    2  # nprocs
+    inputs_test_1d_theta_implicit_mhd_conduction_halo_boost_ion_only  # inputs
+    "analysis_mhd_conduction_halo_boost.py ion_only diags/diag000000 diags/diag000010"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The production-stack routing gate (the run_h1_halodrain masking hunt,
+# 2026-08-31): the "boost" arm's exact x100 gate re-run through every
+# routing knob of the RZ production conduction stack -- explicit
+# conduction_theta (== theta), step-old frozen coefficients, the
+# free-streaming limiter (at an amplitude that keeps it inert), armed
+# per-component + legacy clamps with the target interior, and the hlld
+# fan; none of them may re-route or re-scale the boost. The actual
+# production masker (conduction_qs_chi saturating every face onto the
+# perp cap) is excluded against the dp boost by the parse guard.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_conduction_halo_boost_production_stack  # name
+    1  # dims
+    2  # nprocs
+    inputs_test_1d_theta_implicit_mhd_conduction_halo_boost_production_stack  # inputs
+    "analysis_mhd_conduction_halo_boost.py production_stack diags/diag000000 diags/diag000010"  # analysis
     OFF  # checksum
     OFF  # dependency
 )

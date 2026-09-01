@@ -2911,10 +2911,20 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         (vacuum_resistivity_diffusivity), the joule_ohm_current
         diffusion-dominance criterion, and the conduction halo boost
         (conduction_halo_boost). The effective reference is
-        max(Ohm guard, fraction * rho_peak), frozen for each nonlinear
-        solve (Newton-consistent) and printed on change. 0 keeps the
-        static Ohm-guard reference (bit-identical). The Joule heating
-        coefficient keeps the un-boosted user eta either way.
+        max(Ohm guard, vacuum_reference_base_density, fraction *
+        rho_peak), frozen for each nonlinear solve (Newton-consistent)
+        and printed on change. 0 keeps the static reference
+        (bit-identical). The Joule heating coefficient keeps the
+        un-boosted user eta either way.
+
+    vacuum_reference_base_density: float, default=0 (off)
+        Static base of the shared reference density in kg/m^3: the
+        the reference code's en00 glob card (the reference shot flies en00 = 3.3e20 m^-3, as a
+        mass density). The effective reference is max(Ohm guard, this,
+        fraction * rho_peak); 0 keeps the legacy Ohm-guard base.
+        Calibration note: rescale vacuum_resistivity_diffusivity by
+        (n_guard/en00)^2 when switching bases -- the field-eta boost
+        curve depends only on the product D_vac * rho_ref^2.
 
     wall_viscosity_mask: bool, default=False
         reference-code-style wall-row viscosity slip mask (requires an active
@@ -2930,18 +2940,24 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         tables).
 
     conduction_halo_boost: float, default=0 (off)
-        Density-keyed halo boost of the Braginskii chi_perp in m^2/s
-        (thermal_conduction_model="braginskii" only): the reference code's
-        low-density perp-chi boost. chi_perp is composed with
-        D_boost*(rho_ref/rho)^2 -- reaching D_boost at the reference
-        density, quadratic in reference/n below it, vanishing
-        quadratically above -- through the same smooth quadrature max as
-        the vacuum resistivity, with rho_ref the shared (dynamic)
-        reference of vacuum_reference_peak_fraction. Applied to
-        chi_perp only, both species channels, BEFORE the
-        conduction_chi_min/max clamps (the reference code's ntb.f90 order: the
-        clamps cap the boosted value); the boost inputs follow
-        conduction_coefficient_state like the base chi.
+        Density-keyed halo boost of the Braginskii ION chi_perp
+        (thermal_conduction_model="braginskii" only): the DIMENSIONLESS
+        dp_mn of the reference code's exact low-density perp boost, ntb.f90
+        t_cond ~584: xip = MAX(xip, xip*(en0/en)^2*dp_mn). The raw ion
+        perp value is MULTIPLIED by max(1, dp*(rho_ref/rho)^2) -- a
+        no-op above the reference density, growing quadratically below
+        it -- with rho_ref the shared reference (see
+        vacuum_reference_peak_fraction / vacuum_reference_base_density).
+        Ion channel ONLY (the reference code's te_cond has no boost), chi_perp only,
+        BEFORE the conduction_chi_min/max clamps (the reference code's order: the
+        perp cap bounds the boosted halo value -- the thermally shorted
+        halo); the boost inputs follow conduction_coefficient_state like
+        the base chi. The reference code hardwires dp_mn = 1. Mutually exclusive
+        with conduction_qs_chi: the quasi-shorting entropy is maximal
+        on the same low-density halo band, and at production amplitudes
+        its additive term saturates every face onto the perp cap,
+        silently erasing the multiplicative boost -- arm exactly one
+        halo-shorting mechanism.
 
     circuit_hook_scope: str, default="residual"
         Scope of the "externalcoiltheta" circuit hook when
@@ -3049,6 +3065,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         density_eater_ledger_file=None,
         vacuum_resistivity_diffusivity=None,
         vacuum_reference_peak_fraction=None,
+        vacuum_reference_base_density=None,
         joule_ohm_current=None,
         joule_ion_fraction=None,
         electron_ion_equilibration=None,
@@ -3156,6 +3173,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.density_eater_ledger_file = density_eater_ledger_file
         self.vacuum_resistivity_diffusivity = vacuum_resistivity_diffusivity
         self.vacuum_reference_peak_fraction = vacuum_reference_peak_fraction
+        self.vacuum_reference_base_density = vacuum_reference_base_density
         self.joule_ohm_current = joule_ohm_current
         self.joule_ion_fraction = joule_ion_fraction
         self.electron_ion_equilibration = electron_ion_equilibration
@@ -3276,6 +3294,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         )
         implicit_mhd.vacuum_reference_peak_fraction = (
             self.vacuum_reference_peak_fraction
+        )
+        implicit_mhd.vacuum_reference_base_density = (
+            self.vacuum_reference_base_density
         )
         implicit_mhd.joule_ohm_current = self.joule_ohm_current
         implicit_mhd.joule_ion_fraction = self.joule_ion_fraction

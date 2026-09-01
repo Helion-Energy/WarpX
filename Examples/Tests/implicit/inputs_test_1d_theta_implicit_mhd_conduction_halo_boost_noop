@@ -1,0 +1,12 @@
+# base input parameters
+FILE = inputs_base_1d_theta_implicit_mhd_conduction_halo_boost
+
+# Sub-reference no-op arm: dp = 1 with the reference BELOW the density
+# (n_ref = 0.3 n0, boost = 0.09 < 1) -- the multiplicative MAX form is
+# an EXACT no-op, so both channels must decay at their raw Braginskii
+# chi_perp (a quadrature/additive floor composition would still add
+# here). ~40% ion ripple decay over 10 steps at the RAW ion value.
+implicit_mhd.conduction_halo_boost = 1.0
+implicit_mhd.vacuum_reference_base_density = 0.3 * n0 * m_p
+warpx.const_dt = 4.3e-7
+max_step = 10

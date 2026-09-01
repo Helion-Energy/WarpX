@@ -1,0 +1,143 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Density-keyed halo boost of the Braginskii ION chi_perp
+# (implicit_mhd.conduction_halo_boost, the DIMENSIONLESS dp_mn of the
+# exact the reference code's multiplicative low-density boost, ntb.f90 t_cond ~584:
+# xip = MAX(xip, xip*(en0/en)^2*dp_mn)): a SINGLE-ZONE magnetized
+# column (uniform Bx PERPENDICULAR to z, so all z conduction is
+# cross-field) at the halo density scale, ENTROPY-MODE initialized --
+# both species' pressures are uniform and the DENSITY carries the
+# ripple rho = rho0 (1 - dr sin(k4 z)), so e_spec = p/((gamma-1) rho)
+# is rippled while grad(p) = 0: no acoustic response, and the ripple
+# decays diffusively at the effective cross-field chi of each channel,
+# measured against the kernel's own first-principles Braginskii
+# formula. u = 0, J = 0, eta = 0, no equilibration. Pe = 10 Pi keeps
+# the pressure ripple regrown by partial ion-ripple decay too weak to
+# excite sound inside the window.
+#
+# Single zone ON PURPOSE: a two-zone (bulk|halo) variant of this test
+# is uninitializable for evolved ions -- continuous e_spec forces a
+# 100x pressure step (interface blast), continuous pressure forces a
+# 100x e_spec step whose interface faces (mid-density, weakly
+# magnetized, chi_perp ~ n/sqrt(T)/B^2) drain the halo-side cell many
+# times its energy content per step and pin Newton on the
+# admissibility bounds. The three derived arms cover the boost
+# quantitatively (x100), the sub-reference exact no-op, and the
+# ion-only/cap-order discrimination instead.
+#
+# Each derived arm sets its own conduction_halo_boost, reference
+# density knobs, warpx.const_dt, and max_step.
+my_constants.n0 = 1.0e16
+my_constants.rho0 = n0 * m_p
+# uniform pressures: Ti = 1 eV, Te = 10 eV (Pe = 10 Pi)
+my_constants.Ti0 = 1.0
+my_constants.Te0 = 10.0
+my_constants.Pi0 = n0 * Ti0 * q_e
+my_constants.Pe0 = n0 * Te0 * q_e
+my_constants.gamma = 5.0/3.0
+# Bx = 0.5 mT: ions at x = (Omega tau)^2 ~ 1e2, electrons ~ 9e4 --
+# both on the magnetized branch, both computed exactly by the
+# analysis; the Alfven CFL v_A dt/dx stays < ~15 in every arm (the
+# solver's comfortable envelope; at CFL ~5e4 the matrix-free Newton
+# direction degrades into line-search aborts)
+my_constants.B0 = 5.0e-4
+my_constants.nz = 64
+my_constants.Lz = 1.0
+my_constants.kz4 = 8*pi/Lz
+# density-ripple amplitude (the e_spec ripple at uniform pressure)
+my_constants.dr = 0.05
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+amr.n_cell = nz
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 20
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-10
+gmres.max_iterations = 300
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te0
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.reference_ion_pressure = Pi0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-8 * Pe0
+implicit_mhd.ion_pressure_floor = 1.0e-8 * Pi0
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 0.5
+implicit_mhd.evolve_ion_fluid = true
+implicit_mhd.ion_closure = dual_energy
+implicit_mhd.thermal_conduction_model = braginskii
+implicit_mhd.conduction_coulomb_log = 10.0
+# ENTROPY-MODE ripple: uniform pressures, rippled density
+implicit_mhd.mass_density(x,y,z) = rho0 * (1.0 - dr*sin(kz4*z))
+implicit_mhd.electron_pressure(x,y,z) = Pe0
+implicit_mhd.ion_pressure(x,y,z) = Pi0
+
+# Uniform TANGENTIAL field: bhat_n = 0 on every z face, so the
+# Braginskii tensor reduces to pure chi_perp (+ the ion halo boost)
+# along z; the electromagnetic subsystem is quiescent (u = 0, J = 0,
+# eta = 0).
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = B0 0.0 0.0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 10
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bx jz implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy \
+                       implicit_mhd_ion_internal_energy
+diag1.write_species = 0

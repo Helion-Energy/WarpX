@@ -940,10 +940,12 @@ class ThetaImplicitMHD final : public ImplicitSolver
     amrex::Real m_halo_pedestal_ion_parallel = 0.0;
     amrex::Real m_halo_pedestal_ion_perp = 0.0;
     // ---- Density-keyed vacuum resistivity D_vac [m^2/s] (0 disables):
-    // the FIELD advance sees eta >= mu0 * D_vac * (rho_ref_ohm/rho)^2
-    // with rho_ref_ohm the Ohm density guard; Joule heating keeps the
+    // the FIELD advance sees eta >= mu0 * D_vac * (rho_ref/rho)^2
+    // with rho_ref the shared reference (VacuumReferenceMassDensity;
+    // the Ohm density guard at defaults); Joule heating keeps the
     // un-boosted user eta. See vacuum_keyed_resistivity in
-    // ThetaImplicitMHD_K.H for the full rationale. hlld path only. ----
+    // ThetaImplicitMHD_K.H for the full rationale. Recast family
+    // (hlld/central) only. ----
     amrex::Real m_vacuum_resistivity_diffusivity = 0.0;
     // ---- reference-code-style DYNAMIC reference density (en0_upd = 1,
     // step.f90 ~218-224: en0 = max(en00, 0.1 * MAXVAL(en)), refreshed
@@ -953,16 +955,25 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // joule_ohm_current diffusion-dominance criterion (through the
     // boosted eta_field it tests), and the conduction halo boost
     // (conduction_halo_boost). The effective reference is
-    // max(Ohm guard, fraction * rho_peak) -- see
+    // max(Ohm guard, en00 base, fraction * rho_peak) -- see
     // VacuumReferenceMassDensity() -- so the static Ohm-guard keying is
-    // the exact fraction = 0 limit (bit-identical default). Rationale:
-    // the static guard protects only near-vacuum cells, leaving the
-    // 1e18..6e19 halo band taking full Joule/conduction; the reference code keys
-    // the same three mechanisms on the tenth-of-peak en0, which tracks
-    // compression. The Joule COEFFICIENT keeps the un-boosted user eta
-    // (the eta_jh/eta split of the reference code's step.f90) and the eta-parser
-    // density arguments keep the static Ohm-guard floor. ----
+    // the exact base = fraction = 0 limit (bit-identical default).
+    // Rationale: the static guard protects only near-vacuum cells,
+    // leaving the 1e18..6e19 halo band taking full Joule/conduction;
+    // The reference code keys the same three mechanisms on the tenth-of-peak en0,
+    // which tracks compression. The Joule COEFFICIENT keeps the
+    // un-boosted user eta (the eta_jh/eta split of the reference code's step.f90) and
+    // the eta-parser density arguments keep the static Ohm-guard
+    // floor. ----
     amrex::Real m_vacuum_reference_peak_fraction = 0.0;
+    // Static base of the shared reference [kg/m^3]: the reference code's en00
+    // (glob card en00, e.g. The reference shot's 3.3e20 m^-3 as a mass density).
+    // 0 keeps the legacy Ohm-guard base. NOTE the calibration identity:
+    // with base en00 and D_vac = dp_mn the field-eta boost curve
+    // mu0 D_vac (rho_ref/rho)^2 equals the legacy Ohm-guard keying with
+    // D_vac = dp_mn (en00/n_guard)^2 -- both are the same 1/rho^2 curve,
+    // only the coefficient split changes.
+    amrex::Real m_vacuum_reference_base_density = 0.0;
     // The frozen per-step dynamic reference (fraction * step-old global
     // density peak; 0 while inactive), refreshed once per step by
     // RefreshVacuumReferenceDensity, a per-solve constant like the halo
@@ -1246,28 +1257,32 @@ class ThetaImplicitMHD final : public ImplicitSolver
     amrex::Real m_conduction_qs_chi = 0.0;
     amrex::Real m_conduction_qs_onset = 1.5;
     amrex::Real m_conduction_qs_reference_temperature = 0.0;
-    // Density-keyed halo boost of the Braginskii chi_perp
-    // (implicit_mhd.conduction_halo_boost [m^2/s], braginskii only,
-    // 0 = off): the reference code's low-density perp-chi boost
+    // Density-keyed halo boost of the Braginskii ION chi_perp
+    // (implicit_mhd.conduction_halo_boost, DIMENSIONLESS dp_mn,
+    // braginskii only, 0 = off, the reference code hardwires 1): the exact reference code
+    // low-density perp-chi boost
     // (ntb.f90 t_cond ~584: xip = MAX(xip, xip*(en0/en)^2*dp_mn)),
-    // draining residual halo heat to the wall bath while the bulk keeps
-    // physical Braginskii. chi_perp is composed with the boost
-    // diffusivity chi_halo = D_boost * (rho_ref/rho)^2 -- reaching
-    // D_boost AT the reference density, quadratic in reference/n below
-    // it, vanishing quadratically above -- through the same C-infinity
-    // quadrature smooth max as vacuum_keyed_resistivity (whose kernel is
-    // reused verbatim), with rho_ref the mechanism's shared dynamic
-    // Reference (VacuumReferenceMassDensity: the reference code's en0) and the
-    // division guarded at the positivity floor. ORDER OF COMPOSITION
-    // (matches the reference code's ntb.f90 t_cond): the boost applies to the raw
-    // Braginskii perp value (after the additive quasi-shorting term,
-    // which is our own knob) and BEFORE the chi_min/chi_max clamps --
-    // in the reference code the boost at line ~584 precedes the
-    // xipi_mn/xipi_mx clamps at ~592-593, so the clamps cap the BOOSTED
-    // value (chi_max still bounds the halo diffusivity). Perp only:
-    // The reference code does not boost xil (it only re-enforces xil >= xip for its
-    // (xil-xip)/B^2 operator form, which our SPD tensor split does not
-    // need). Both species channels, with the SAME
+    // draining halo heat to the wall bath while the bulk keeps physical
+    // Braginskii. The perp value is MULTIPLIED by
+    // max(1, dp_mn * (rho_ref/rho)^2) -- a no-op above the reference
+    // density, growing quadratically below it -- with rho_ref the
+    // mechanism's shared reference (VacuumReferenceMassDensity: the
+    // The reference code's en0 = max(en00, fraction * peak)) and the density division
+    // guarded at the positivity floor. The MAX kink is benign: the
+    // conduction coefficients are frozen at conduction_coefficient_state
+    // and never differentiated. ORDER OF COMPOSITION (matches the reference code
+    // ntb.f90 t_cond): the boost applies to the raw Braginskii perp
+    // value (after the additive quasi-shorting term, which is our own
+    // knob) and BEFORE the chi_min/chi_max clamps -- in the reference code the boost
+    // at line ~584 precedes the xipi_mn/xipi_mx clamps at ~592-593, so
+    // the clamps cap the BOOSTED value (the perp cap bounds the halo
+    // diffusivity: with the reference shot's (1e18-class halo, en0 = 3.3e20) the
+    // boosted value slams xipi_mx = 100 -- the "thermally shorted halo").
+    // Perp only: the reference code does not boost xil (it only re-enforces
+    // xil >= xip for its (xil-xip)/B^2 operator form, which our SPD
+    // tensor split does not need). ION CHANNEL ONLY: the reference code's te_cond
+    // carries bare clamps -- an electron boost here (the pre-2026-08-31
+    // form) is a reference-parity defect. Same
     // conduction_coefficient_state face inputs as the base chi (the
     // boost is evaluated at the coefficient-state face density, so
     // step_old keeps Newton-linear diffusion).

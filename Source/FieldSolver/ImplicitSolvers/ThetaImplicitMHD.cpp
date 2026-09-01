@@ -190,6 +190,16 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
             m_vacuum_reference_peak_fraction < 1.0_rt,
         "implicit_mhd.vacuum_reference_peak_fraction must be in [0, 1) "
         "(0 disables the dynamic reference; the reference code uses 0.1)");
+    // Static base of the shared reference density (the reference code's en00
+    // [kg/m^3]; see m_vacuum_reference_base_density). 0 keeps the legacy
+    // Ohm-guard base.
+    utils::parser::queryWithParser(pp, "vacuum_reference_base_density",
+                                   m_vacuum_reference_base_density);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_vacuum_reference_base_density >= 0.0_rt,
+        "implicit_mhd.vacuum_reference_base_density cannot be negative "
+        "(0 keeps the Ohm-guard base; the reference code's en00 is a mass density "
+        "in kg/m^3)");
     // Reference-code-style Ohm-current Joule quench (see m_joule_ohm_current).
     pp.query("joule_ohm_current", m_joule_ohm_current);
     // Sentinel -1 = "not set": defaulted to the global implicit_evolve.theta
@@ -378,15 +388,17 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
             "implicit_mhd.conduction_qs_reference_temperature (the "
             "load-envelope temperature T0, in eV)");
     }
-    // Density-keyed halo boost of the Braginskii chi_perp (see
-    // m_conduction_halo_boost): the reference code's low-density perp-chi boost,
+    // Density-keyed halo boost of the Braginskii ION chi_perp (see
+    // m_conduction_halo_boost): the DIMENSIONLESS dp_mn of the reference code's
+    // multiplicative low-density boost (ntb.f90 t_cond ~584,
+    // xip = MAX(xip, xip (en0/en)^2 dp_mn); the reference code hardwires dp_mn = 1),
     // keyed to the same reference density as the field-eta vacuum boost.
     utils::parser::queryWithParser(pp, "conduction_halo_boost",
                                    m_conduction_halo_boost);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_conduction_halo_boost >= 0.0_rt,
         "implicit_mhd.conduction_halo_boost cannot be negative "
-        "(0 disables the halo perp-chi boost)");
+        "(0 disables the halo perp-chi boost; the reference code's dp_mn is 1)");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_conduction_halo_boost == 0.0_rt || m_conduction_braginskii,
         "implicit_mhd.conduction_halo_boost boosts the Braginskii "
@@ -394,6 +406,27 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "braginskii (with the parser diffusivities, carry the halo "
         "boost inside the deck-level thermal_diffusivity_* expressions "
         "instead)");
+    // The two perp-chi shorting channels are mutually exclusive: the
+    // quasi-shorting entropy s = (T/T0)(rho0/rho)^{2/3} is maximal on
+    // exactly the low-density halo band the dp boost targets, and its
+    // smooth-max ramp never reaches zero -- at production amplitudes
+    // (qs_chi >~ 1e4 against the reference-parity perp cap ~1e2) even the
+    // ZERO-entropy tail qs_chi (sqrt(onset^2 + w^2) - onset)/2 exceeds
+    // the cap, so every face rides conduction_chi_perp_max and the
+    // multiplicative boost is exactly invisible post-clamp (the
+    // run_h1_halodrain no-op, 2026-08-31: boost/no-boost twins
+    // identical to chaos level while both ride the cap).
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_conduction_halo_boost == 0.0_rt || m_conduction_qs_chi == 0.0_rt,
+        "implicit_mhd.conduction_halo_boost and "
+        "implicit_mhd.conduction_qs_chi both short the Braginskii "
+        "chi_perp channel and are mutually exclusive: the quasi-shorting "
+        "entropy is maximal on the same low-density halo band the "
+        "density-keyed boost targets, and against the per-component "
+        "chi_perp cap the additive term saturates every face onto the "
+        "cap -- silently erasing the multiplicative dp boost. Arm "
+        "exactly one halo-shorting mechanism (the reference-parity dp "
+        "boost, or the quasi-shorting envelope term).");
     utils::parser::queryWithParser(pp, "pressure_corner_width_fraction",
                                    m_pressure_corner_width_fraction);
     pp.query("r_open_fluid", m_r_open_fluid);
@@ -1774,12 +1807,14 @@ ThetaImplicitMHD::OhmMassDensityFloor () const
 amrex::Real
 ThetaImplicitMHD::VacuumReferenceMassDensity () const
 {
-    // The static Ohm guard is the exact fraction = 0 limit
-    // (m_vacuum_reference_mass_density stays 0), so the default is
-    // bit-identical; with the dynamic reference active the max keeps a
-    // globally decaying state from dragging the reference below the
-    // guard (the reference code's en0 = max(en00, 0.1 max(en)) composition).
-    return std::max(OhmMassDensityFloor(), m_vacuum_reference_mass_density);
+    // The static Ohm guard is the exact base = fraction = 0 limit
+    // (both extra terms stay 0), so the default is bit-identical; the
+    // static base realizes the reference code's en00 and with the dynamic
+    // Reference active the max keeps a globally decaying state from
+    // dragging the reference below base or guard (the full reference code
+    // en0 = max(en00, 0.1 max(en)) composition, step.f90 ~218-224).
+    return std::max({OhmMassDensityFloor(), m_vacuum_reference_base_density,
+                     m_vacuum_reference_mass_density});
 }
 
 void ThetaImplicitMHD::RefreshVacuumReferenceDensity (const int step)
@@ -2681,9 +2716,15 @@ void ThetaImplicitMHD::PrintParameters () const
                    << m_vacuum_reference_peak_fraction
                    << (m_vacuum_reference_peak_fraction > 0.0_rt
                            ? " (dynamic en0, refreshed per step)"
-                           : " (static Ohm-guard reference)")
+                           : " (static reference)")
                    << "\n"
-                   << "Conduction halo boost [m2/s]:  "
+                   << "Vacuum reference base [kg/m3]: "
+                   << m_vacuum_reference_base_density
+                   << (m_vacuum_reference_base_density > 0.0_rt
+                           ? " (the reference code's en00)"
+                           : " (Ohm-guard base)")
+                   << "\n"
+                   << "Conduction halo boost dp (ion): "
                    << m_conduction_halo_boost << "\n"
                    << "Halo pedestal fraction:        " << m_halo_pedestal_fraction
                    << "\n"
@@ -5782,19 +5823,21 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     // Smooth density guard of the entropy argument, at the same Ohm
     // density scale the Braginskii coefficient inputs are floored at.
     const amrex::Real qs_density_guard = OhmMassDensityFloor();
-    // Density-keyed halo boost of the Braginskii chi_perp
+    // Density-keyed halo boost of the Braginskii ION chi_perp
     // (implicit_mhd.conduction_halo_boost; the reference code's low-density
-    // perp-chi boost, ntb.f90 t_cond ~584): chi_perp is composed with
-    // chi_halo = D_boost (rho_ref/rho)^2 through the
-    // vacuum_keyed_resistivity quadrature smooth max, keyed to the same
-    // per-step frozen reference as the field-eta vacuum boost and with
-    // the density division guarded at the positivity floor. The boost
+    // perp-chi boost): the exact ntb.f90 t_cond ~584 form
+    //     xip = MAX(xip, xip (en0/en)^2 dp_mn),
+    // a multiplicative boost of the raw ion perp value by
+    // max(1, dp (rho_ref/rho)^2), keyed to the same per-step frozen
+    // Reference as the field-eta vacuum boost (the reference code's shared en0)
+    // and with the density division guarded at the positivity floor.
+    // Ion channel ONLY (the reference code's te_cond carries no boost). The boost
     // input is the coefficient-state face charge density (raw, not
     // Ohm-floored: the boost must grow below the guard), so it follows
     // conduction_coefficient_state exactly like the base chi.
     const bool add_halo_boost =
         m_conduction_braginskii && m_conduction_halo_boost > 0.0_rt;
-    const amrex::Real halo_boost_chi = m_conduction_halo_boost;
+    const amrex::Real halo_boost_dp = m_conduction_halo_boost;
     const amrex::Real halo_boost_reference =
         m_ion_charge_to_mass * VacuumReferenceMassDensity();
     const amrex::Real halo_boost_guard =
@@ -7119,18 +7162,31 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             add_qs ? chi_perp_raw + qs_boost(face_ti)
                                    : chi_perp_raw;
                         // Density-keyed halo boost (see the host
-                        // constants): applied to the unclamped perp
-                        // value, BEFORE the chi_min/max clamps -- the
-                        // The reference code's ntb.f90 t_cond order (boost at ~584,
-                        // clamps at ~592-593), so chi_max still caps
-                        // the boosted halo diffusivity.
+                        // constants): the reference code's exact ntb.f90 t_cond
+                        // ~584 form
+                        //     xip = MAX(xip, xip (en0/en)^2 dp_mn),
+                        // a MULTIPLICATIVE boost of the perp value by
+                        // max(1, dp (rho_ref/rho)^2) -- ION channel
+                        // only, matching the reference code (te_cond carries no
+                        // boost) -- applied BEFORE the chi_min/max
+                        // clamps (boost at ~584, clamps at ~592-593),
+                        // so the perp cap still bounds the boosted halo
+                        // diffusivity. The coefficients are frozen at
+                        // the coefficient state (Newton never
+                        // differentiates them), so the MAX kink at
+                        // boost = 1 is benign.
                         if (add_halo_boost) {
-                            chi_perp_ion_value =
-                                theta_implicit_mhd::vacuum_keyed_resistivity(
-                                    chi_perp_ion_value,
+                            const amrex::Real guarded_density =
+                                theta_implicit_mhd::smooth_positive_floor(
                                     chi_charge_to_mass * face_density,
-                                    halo_boost_reference,
-                                    halo_boost_guard, halo_boost_chi);
+                                    halo_boost_guard);
+                            const amrex::Real ratio =
+                                halo_boost_reference / guarded_density;
+                            const amrex::Real boost =
+                                halo_boost_dp * ratio * ratio;
+                            if (boost > 1.0_rt) {
+                                chi_perp_ion_value *= boost;
+                            }
                         }
                         brag_chi_perp_ion = clamp_with(
                             chi_perp_ion_value, brag_perp_lo_i,
@@ -7318,19 +7374,14 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         // Quasi-shorting boost (see the ion channel and
                         // the qs_boost lambda): additive chi_perp, keyed
                         // on the electron temperature, clamped after.
-                        amrex::Real chi_perp_electron_value =
+                        // NO halo boost on the electron channel: the reference code
+                        // boosts the ION perp only (ntb.f90 t_cond ~584;
+                        // te_cond carries bare clamps) -- the halo drains
+                        // through ion conduction while the electron
+                        // channel keeps physical Braginskii.
+                        const amrex::Real chi_perp_electron_value =
                             add_qs ? chi_perp_raw + qs_boost(face_te)
                                    : chi_perp_raw;
-                        // Density-keyed halo boost, pre-clamp like the
-                        // ion channel (the reference code's ntb.f90 order).
-                        if (add_halo_boost) {
-                            chi_perp_electron_value =
-                                theta_implicit_mhd::vacuum_keyed_resistivity(
-                                    chi_perp_electron_value,
-                                    chi_charge_to_mass * face_density,
-                                    halo_boost_reference,
-                                    halo_boost_guard, halo_boost_chi);
-                        }
                         brag_chi_perp_electron = clamp_with(
                             chi_perp_electron_value, brag_perp_lo_e,
                             brag_perp_hi_e);

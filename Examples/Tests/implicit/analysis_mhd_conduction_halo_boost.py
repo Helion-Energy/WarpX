@@ -6,32 +6,55 @@
 #
 # License: BSD-3-Clause-LBNL
 
-"""Density-keyed halo boost of the Braginskii chi_perp
-(implicit_mhd.conduction_halo_boost) keyed to the dynamic reference
-(implicit_mhd.vacuum_reference_peak_fraction).
+"""Density-keyed halo boost of the Braginskii ION chi_perp
+(implicit_mhd.conduction_halo_boost): the reference code's exact multiplicative
+low-density boost (ntb.f90 t_cond ~584,
+xip = MAX(xip, xip*(en0/en)^2*dp_mn)), keyed to the shared reference
+density (implicit_mhd.vacuum_reference_base_density, the reference code's en00,
+raised by implicit_mhd.vacuum_reference_peak_fraction).
 
-Strongly magnetized column (uniform Bx perpendicular to z, frozen ions,
-J = 0, eta = 0): all z transport is cross-field electron conduction.
-Two density zones -- bulk n0 (z < Lz/2) and halo n0/100 (z >= Lz/2) --
-carry the same on-ripple temperature profile Te = T0 (1 + a sin(k4 z)),
-whose specific-internal-energy ripple decays diffusively at each zone's
-effective cross-field diffusivity.  With the dynamic reference
-n_ref = max(n_floor, 0.1 n_peak) = 0.1 n0 and D_boost = 1 m^2/s:
+Single-zone magnetized column (uniform Bx perpendicular to z: all z
+transport is cross-field), ENTROPY-MODE initialized -- both species'
+pressures uniform, the density carrying the ripple -- so grad(p) = 0
+and each channel's e_spec ripple decays diffusively at that channel's
+effective cross-field chi, without an acoustic response. Three arms
+share the base deck (each with its own dt sized to ~50% decay of its
+target channel):
 
-1. HALO gate -- the boost diffusivity D_boost (n_ref/n_halo)^2 =
-   100 m^2/s dwarfs the physical chi_perp (~1e-3 m^2/s at the halo
-   density): the measured halo ripple-decay diffusivity must match the
-   implementation's quadrature composition
-   sqrt(chi_perp^2 + chi_boost^2) within a calibrated band.
+"boost"    (dp = 1, static base n_ref = 10 n0): the ion chi_perp is
+           MULTIPLIED by exactly dp (n_ref/n0)^2 = 100 -- measured
+           against the kernel's first-principles raw value; the
+           electron channel must stay frozen on this short window
+           (an electron leak of the boost decays it by ~16%).
+"noop"     (dp = 1, base n_ref = 0.3 n0, boost = 0.09 < 1): the
+           multiplicative MAX form is an EXACT no-op -- both channels
+           decay at their raw Braginskii chi_perp (an additive or
+           quadrature floor composition would still add here).
+"ion_only" (dp = 1e6, perp clamps armed, dynamic peak-fraction
+           reference): the boosted ion value rides the
+           DEFINED-convention perp cap -- the measured ion chi must
+           equal the cap itself (clamps cap the BOOSTED value, the
+           the reference code's t_cond order) -- while the electron channel stays on
+           its raw value: a leak of the boost onto the electron channel
+           (the pre-2026-08-31 both-channels form) would drag it onto
+           the same cap rate.
 
-2. BULK gate -- at the peak density the boost is
-   D_boost (n_ref/n0)^2 = 0.01 m^2/s, entering the quadrature BELOW the
-   physical chi_perp ~ 0.1 m^2/s: the bulk keeps physical Braginskii
-   (the measured bulk decay stays two decades under the halo's, inside
-   a loose physical band) -- boosted perp flux in the LOW-DENSITY zone
-   only.
+"production_stack" (the "boost" arm's exact x100 gate re-run through
+           the RZ production routing stack -- explicit
+           conduction_theta == theta, conduction_coefficient_state =
+           step_old, conduction_flux_limit_factor = 0.3 at an
+           amplitude that keeps the limiter inert, wide armed
+           per-component + legacy clamps with the x100 target
+           interior, and fluid_flux = hlld): none of those knobs may
+           re-route or re-scale the boost (the run_h1_halodrain
+           masking hunt, 2026-08-31 -- the actual production masker,
+           conduction_qs_chi saturating every face onto the perp cap,
+           is excluded against the dp boost by the parse guard).
 
-Usage: analysis_mhd_conduction_halo_boost.py <initial_plotfile> <final_plotfile>
+Every arm also closes sum(U_e) and sum(U_i) separately to roundoff
+(conservative face flux, no equilibration, no Joule).
+
+Usage: analysis_mhd_conduction_halo_boost.py <arm> <initial_plotfile> <final_plotfile>
 """
 
 import sys
@@ -42,6 +65,9 @@ import yt
 
 yt.set_log_level(50)
 
+arm = sys.argv[1]
+assert arm in ("boost", "noop", "ion_only", "production_stack")
+
 
 def get_data(plotfile):
     ds = yt.load(plotfile)
@@ -51,25 +77,40 @@ def get_data(plotfile):
     return ds, data
 
 
-initial_ds, initial = get_data(sys.argv[1])
-final_ds, final = get_data(sys.argv[2])
+initial_ds, initial = get_data(sys.argv[2])
+final_ds, final = get_data(sys.argv[3])
 
-# constants from inputs_test_1d_theta_implicit_mhd_conduction_halo_boost
-bulk_number_density = 1.0e18
-halo_number_density = 1.0e16
-t0_eV = 10.0
+# constants from inputs_base_1d_theta_implicit_mhd_conduction_halo_boost
+number_density = 1.0e16
+ti_eV = 1.0
+te_eV = 10.0
 gamma = 5.0 / 3.0
-b_field = 0.05
+b_field = 5.0e-4
 coulomb_log = 10.0
-boost_diffusivity = 1.0
-peak_fraction = 0.1
 number_of_cells = 64
 domain_length = 1.0
 ripple_mode = 4
-n_floor_ohm = 1.0e10  # hybrid_pic_model.n_floor
-mass_density_floor = 1.0e-6 * bulk_number_density * constants.proton_mass
+ripple_amplitude_ic = 0.05
+mass_density_floor = 1.0e-6 * number_density * constants.proton_mass
 cell_size = domain_length / number_of_cells
 z_centers = (np.arange(number_of_cells) + 0.5) * cell_size
+
+if arm in ("boost", "production_stack"):
+    dp_mn = 1.0
+    # static base reference (implicit_mhd.vacuum_reference_base_density)
+    reference_density = 10.0 * number_density
+elif arm == "noop":
+    dp_mn = 1.0
+    reference_density = 0.3 * number_density
+else:
+    dp_mn = 1.0e6
+    # max(base 0.02 n0, 0.1 * step-old peak): the rippled step-old peak
+    # is n0 (1 + dr) and the fraction path must win the composition
+    reference_density = 0.1 * number_density * (1.0 + ripple_amplitude_ic)
+# DEFINED-convention perp clamp bounds of the ion_only arm (the
+# operator applies the (gamma - 1) convention bridge)
+perp_min_defined = 0.001
+perp_cap_defined = 100.0
 
 elapsed_time = float(final_ds.current_time - initial_ds.current_time)
 assert elapsed_time > 0.0
@@ -77,125 +118,149 @@ assert elapsed_time > 0.0
 
 def fields(data):
     rho = data["boxlib", "implicit_mhd_mass_density"].value.ravel()
-    energy = data["boxlib", "implicit_mhd_electron_energy"].value.ravel()
-    return rho, energy
+    ue = data["boxlib", "implicit_mhd_electron_energy"].value.ravel()
+    ui = data["boxlib", "implicit_mhd_ion_internal_energy"].value.ravel()
+    return rho, ue, ui
 
 
-rho_i, energy_i = fields(initial)
-rho_f, energy_f = fields(final)
-# frozen ion fluid: identical densities
-assert np.array_equal(rho_i, rho_f)
+rho_i, ue_i, ui_i = fields(initial)
+rho_f, ue_f, ui_f = fields(final)
 
-e_spec_i = energy_i / rho_i
-e_spec_f = energy_f / rho_f
+# ---- conservation gates: conduction is a conservative face flux and
+# there is no equilibration/Joule, but the momentum channel is LIVE --
+# the pressure ripple regrown by partial temperature-ripple decay
+# drives O(dr^2) pdV/kinetic exchange growing with the window (measured
+# 1e-12..1.3e-6 across the arms), so the per-channel budgets are gated
+# as a sanity bound four decades under the 50%-class decay signal ----
+volume = cell_size
+for name, total_i, total_f in (
+    ("U_e", ue_i.sum() * volume, ue_f.sum() * volume),
+    ("U_i", ui_i.sum() * volume, ui_f.sum() * volume),
+):
+    drift = abs(total_f - total_i) / abs(total_i)
+    print(f"{name} conservation drift = {drift:.3e}")
+    assert drift < 1.0e-5
 
 
-# ---- the implementation's effective cross-field diffusivity of a
-# uniform-density zone at (n, T0): Braginskii Z = 1 chi_perp composed
-# with the halo boost through the vacuum_keyed_resistivity quadrature
-# smooth max ----
-def braginskii_chi_perp(number_density, te_kelvin):
+# ---- the kernel's own first-principles Braginskii chi_perp of each
+# channel (kappa/(n kB) convention; the operator applies the
+# (gamma - 1) bridge) ----
+def braginskii_chi_perp(species, t_eV):
+    kb_t = t_eV * constants.elementary_charge
     tau_shared = (
         np.pi**1.5
         * constants.epsilon_0**2
         / (constants.elementary_charge**4 * coulomb_log)
     )
-    kb_te = constants.k * te_kelvin
-    tau_e = (
-        6.0
-        * np.sqrt(2.0)
-        * np.sqrt(constants.electron_mass)
-        * tau_shared
-        * kb_te
-        * np.sqrt(kb_te)
-        / number_density
-    )
-    chi_par = 3.16 * kb_te * tau_e / constants.electron_mass
-    x_mag = (
-        constants.elementary_charge * b_field / constants.electron_mass * tau_e
-    ) ** 2
+    if species == "e":
+        mass = constants.electron_mass
+        tau = (
+            6.0
+            * np.sqrt(2.0)
+            * np.sqrt(mass)
+            * tau_shared
+            * kb_t
+            * np.sqrt(kb_t)
+            / number_density
+        )
+        chi_par = 3.16 * kb_t * tau / mass
+        numerator_1 = 4.664 / 11.92
+        denominator_1 = 14.79 / 3.7703
+        denominator_2 = 1.0 / 3.7703
+    else:
+        mass = constants.proton_mass
+        tau = (
+            12.0 * np.sqrt(mass) * tau_shared * kb_t * np.sqrt(kb_t) / number_density
+        )
+        chi_par = 3.9 * kb_t * tau / mass
+        numerator_1 = 2.0 / 2.645
+        denominator_1 = 2.70 / 0.677
+        denominator_2 = 1.0 / 0.677
+    x_mag = (constants.elementary_charge * b_field / mass * tau) ** 2
     return (
         chi_par
-        * (4.664 / 11.92 * x_mag + 1.0)
-        / ((x_mag / 3.7703 + 14.79 / 3.7703) * x_mag + 1.0)
+        * (numerator_1 * x_mag + 1.0)
+        / ((denominator_2 * x_mag + denominator_1) * x_mag + 1.0)
     )
 
 
-t0_kelvin = t0_eV * constants.elementary_charge / constants.k
-# dynamic reference: max(static Ohm guard, fraction * n_peak); the
-# frozen step-old peak is the bulk density (frozen ions)
-reference_density = max(n_floor_ohm, peak_fraction * bulk_number_density)
-assert reference_density == 1.0e17
+rho = number_density * constants.proton_mass
+rho_ref = reference_density * constants.proton_mass
+rho_guarded = np.sqrt(rho**2 + mass_density_floor**2)
+boost = max(1.0, dp_mn * (rho_ref / rho_guarded) ** 2)
 
+raw_e = braginskii_chi_perp("e", te_eV)
+raw_i = braginskii_chi_perp("i", ti_eV)
+boosted_i = raw_i * boost
+expected_e = raw_e
+if arm == "ion_only":
+    # armed clamps cap the BOOSTED value (DEFINED convention)
+    boosted_i = min(max(boosted_i, perp_min_defined), perp_cap_defined)
+    expected_e = min(max(raw_e, perp_min_defined), perp_cap_defined)
 
-def composed_chi(number_density):
-    rho = number_density * constants.proton_mass
-    rho_ref = reference_density * constants.proton_mass
-    rho_guarded = np.sqrt(rho**2 + mass_density_floor**2)
-    chi_boost = boost_diffusivity * (rho_ref / rho_guarded) ** 2
-    chi_perp = braginskii_chi_perp(number_density, t0_kelvin)
-    return np.hypot(chi_perp, chi_boost), chi_perp, chi_boost
-
-
-chi_halo, chi_perp_halo, chi_boost_halo = composed_chi(halo_number_density)
-chi_bulk, chi_perp_bulk, chi_boost_bulk = composed_chi(bulk_number_density)
+convention = gamma - 1.0  # kappa/(n kB) -> operator convention
+chi_expected_i = convention * boosted_i
+chi_expected_e = convention * expected_e
 print(
-    f"halo: chi_perp {chi_perp_halo:.3e} + boost {chi_boost_halo:.3e} "
-    f"-> composed {chi_halo:.3e} m^2/s"
+    f"raw chi_perp_e {raw_e:.4e}, raw chi_perp_i {raw_i:.4e}, "
+    f"boost x{boost:.4g} -> expected operator chi: ion "
+    f"{chi_expected_i:.4e}, electron {chi_expected_e:.4e} m^2/s"
 )
-print(
-    f"bulk: chi_perp {chi_perp_bulk:.3e} + boost {chi_boost_bulk:.3e} "
-    f"-> composed {chi_bulk:.3e} m^2/s"
-)
-# calibration guards: the boost dominates the halo and stays under the
-# physical bulk chi_perp
-assert chi_boost_halo > 1.0e3 * chi_perp_halo
-assert chi_boost_bulk < 0.5 * chi_perp_bulk
 
-# ---- measured ripple decay per zone (windows away from the two zone
-# interfaces at z = 0 and z = Lz/2; the run's diffusion length
-# sqrt(chi_halo t) ~ 0.024 stays well inside the 0.15 margins) ----
+# ---- measured ripple decay per channel (full periodic domain) ----
 k_ripple = 2.0 * np.pi * ripple_mode / domain_length
-# discrete diffusion eigenvalue of the ripple mode (face-difference
-# operator): keff^2 = (2/dz sin(k dz/2))^2
+# discrete diffusion eigenvalue of the face-difference operator
 k_eff_sq = (2.0 / cell_size * np.sin(0.5 * k_ripple * cell_size)) ** 2
+basis = np.column_stack(
+    [
+        np.ones(number_of_cells),
+        np.sin(k_ripple * z_centers),
+        np.cos(k_ripple * z_centers),
+    ]
+)
 
 
-def measured_chi(window):
-    basis = np.column_stack(
-        [
-            np.ones(window.sum()),
-            np.sin(k_ripple * z_centers[window]),
-            np.cos(k_ripple * z_centers[window]),
-        ]
+def ripple_amplitude(values):
+    coefficients = np.linalg.lstsq(basis, values, rcond=None)[0]
+    return np.hypot(coefficients[1], coefficients[2])
+
+
+def measure(energy_initial, energy_final):
+    retention = ripple_amplitude(energy_final / rho_f) / ripple_amplitude(
+        energy_initial / rho_i
     )
-
-    def amplitude(values):
-        coefficients = np.linalg.lstsq(basis, values[window], rcond=None)[0]
-        return np.hypot(coefficients[1], coefficients[2])
-
-    return np.log(amplitude(e_spec_i) / amplitude(e_spec_f)) / (k_eff_sq * elapsed_time)
+    return -np.log(retention) / (k_eff_sq * elapsed_time), retention
 
 
-bulk_window = (z_centers > 0.15) & (z_centers < 0.35)
-halo_window = (z_centers > 0.65) & (z_centers < 0.85)
-assert bulk_window.sum() >= 10 and halo_window.sum() >= 10
+chi_ion, retention_ion = measure(ui_i, ui_f)
+chi_ele, retention_ele = measure(ue_i, ue_f)
+print(f"ion measured chi = {chi_ion:.4e} (predicted {chi_expected_i:.4e}), "
+      f"retention {retention_ion:.4f}")
+print(f"ele measured chi = {chi_ele:.4e} (predicted {chi_expected_e:.4e}), "
+      f"retention {retention_ele:.4f}")
 
-chi_halo_measured = measured_chi(halo_window)
-chi_bulk_measured = measured_chi(bulk_window)
-print(f"halo measured chi = {chi_halo_measured:.4e} (predicted {chi_halo:.4e})")
-print(f"bulk measured chi = {chi_bulk_measured:.4e} (predicted {chi_bulk:.4e})")
+# the arm's window must resolve its target ion rate (~half-decay class)
+assert 0.05 < retention_ion < 0.9
 
-# ---- gate 1: the halo decays at the composed boost diffusivity ----
-assert 0.8 * chi_halo < chi_halo_measured < 1.2 * chi_halo
+# ION gate: the measured chi matches the arm's prediction -- x100
+# multiplied raw ("boost"), exactly raw ("noop": a floor composition
+# would still add), or exactly the cap ("ion_only": clamps cap the
+# boosted value)
+assert 0.8 * chi_expected_i < chi_ion < 1.2 * chi_expected_i
 
-# ---- gate 2: the bulk keeps physical Braginskii (no boost leak) ----
-# two decades of separation, and a loose physical band (the on-ripple
-# Te variation moves chi_perp by ~ +/-15%)
-assert chi_bulk_measured < 0.02 * chi_halo_measured
-assert 0.5 * chi_bulk < chi_bulk_measured < 2.0 * chi_bulk
+# ELECTRON gate: never boosted
+if arm in ("boost", "production_stack"):
+    # the electron channel is frozen on this short window; an electron
+    # leak of the x100 boost decays it by ~16% (retention ~0.84)
+    expected_retention = np.exp(-chi_expected_e * k_eff_sq * elapsed_time)
+    assert expected_retention > 0.995
+    assert retention_ele > 0.99
+else:
+    # measurable electron decay at the RAW value; in the ion_only arm a
+    # leaked boost would drag it onto the cap rate (retention ~0.5)
+    assert 0.7 * chi_expected_e < chi_ele < 1.3 * chi_expected_e
 
 newton_history = np.atleast_2d(np.loadtxt("diags/newton.txt"))
 assert newton_history[-1, 2] >= 1
 
-print("conduction halo boost: all gates passed")
+print(f"conduction halo boost ({arm}): all gates passed")

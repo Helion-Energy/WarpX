@@ -1,0 +1,47 @@
+# base input parameters
+FILE = inputs_base_1d_theta_implicit_mhd_conduction_halo_boost
+
+# Production-stack arm (the run_h1_halodrain masking hunt, 2026-08-31):
+# the EXACT quantitative x100 gate of the "boost" arm, re-run through
+# every routing knob of the RZ production conduction stack that could
+# plausibly assemble or consume the ion chi_perp differently --
+# an explicit conduction_theta (== theta: conduction_stage must stay
+# false and the staged arithmetic must not run), step-old frozen
+# coefficients (the boost input follows conduction_coefficient_state),
+# the free-streaming flux limiter, armed DEFINED-convention
+# per-component clamps PLUS the legacy shared pair (the per-component
+# precedence must not re-route the boost), and the hlld fan. The
+# measured ion chi must still be raw x100 and the electron channel must
+# still be frozen. conduction_qs_chi is absent BY LAW: the parse guard
+# rejects it alongside the dp boost -- the additive quasi-shorting term
+# saturating every face onto the perp cap was exactly the production
+# masking mechanism this arm regression-proofs the rest of the stack
+# against.
+#
+# The ripple amplitude is lowered to keep the armed limiter INERT at
+# the boosted flux (|q|/(f q_fs) ~ 6e-2 at t = 0, a ~5% depression of
+# the measured chi, well inside the x100 gate): this arm gates the
+# ROUTING; the limiter physics gate is
+# test_1d_theta_implicit_mhd_conduction_limiter's job.
+my_constants.dr = 2.0e-4
+implicit_mhd.conduction_halo_boost = 1.0
+implicit_mhd.vacuum_reference_base_density = 10.0 * n0 * m_p
+implicit_mhd.conduction_theta = 0.5
+implicit_mhd.conduction_coefficient_state = step_old
+implicit_mhd.conduction_flux_limit_factor = 0.3
+implicit_mhd.fluid_flux = hlld
+implicit_mhd.allow_hlld = true
+# wide DEFINED-convention per-component clamps: the x100 target
+# (394.4 x 100 = 3.94e4) stays interior -- clipping it would fail the
+# gate low, a collapsed clamp window would fail it high; the parallel
+# window only feeds the (inert, bhat_n = 0) tensor cross term
+implicit_mhd.conduction_chi_par_min = 1.0e-3
+implicit_mhd.conduction_chi_par_max = 1.0e9
+implicit_mhd.conduction_chi_perp_min = 1.0e-3
+implicit_mhd.conduction_chi_perp_max = 1.0e5
+# legacy shared pair armed alongside (production parity): the
+# per-component values above must keep precedence
+implicit_mhd.conduction_chi_min = 1.0
+implicit_mhd.conduction_chi_max = 1.0e6
+warpx.const_dt = 4.3e-9
+max_step = 10
