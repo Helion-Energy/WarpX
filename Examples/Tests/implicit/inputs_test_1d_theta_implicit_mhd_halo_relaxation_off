@@ -1,0 +1,118 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Knob-off NULL TWIN of inputs_test_1d_theta_implicit_mhd_halo_relaxation:
+# the identical three-region column with the outlet OFF (all
+# halo_relaxation knobs at their 0/off defaults). The legacy path must
+# be untouched -- the hot band's 100 eV channels, which the ON test
+# drains by ~4% in 8 steps, must stay exactly where the legacy static
+# contact holds them (solver-tolerance noise away from the cold-band
+# contacts), and no ledger file may be produced. The per-solve-uniform
+# OFF branch performs no arithmetic at all, so the twin certifies the
+# bit-identical-when-off contract at regression strength.
+my_constants.n_hot = 1.0e18
+my_constants.n_bulk = 2.5e19
+my_constants.rho_hot = n_hot * m_p
+my_constants.rho_bulk = n_bulk * m_p
+my_constants.T_hot = 100.0
+my_constants.T_cold = 0.5
+# Uniform pressure across the hot/bulk contact (the bulk band reads
+# T = T_hot * n_hot/n_bulk = 4 eV > T_med); the cold band dips.
+my_constants.P_hot = n_hot * T_hot * q_e
+my_constants.P_cold = n_hot * T_cold * q_e
+my_constants.v0 = 2.0e4
+my_constants.nz = 64
+my_constants.Lz = 1.0
+my_constants.dt = 1.0e-9
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 8
+amr.n_cell = nz
+amr.max_grid_size = nz
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-11
+newton.max_iterations = 8
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-11
+gmres.max_iterations = 200
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = T_hot
+hybrid_pic_model.n0_ref = n_hot
+hybrid_pic_model.gamma = 5.0/3.0
+hybrid_pic_model.n_floor = 1.0e8
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho_hot
+implicit_mhd.reference_magnetic_field = 1.0e-4
+implicit_mhd.gamma_e = 5.0/3.0
+implicit_mhd.gamma_i = 5.0/3.0
+implicit_mhd.reference_ion_pressure = P_hot
+implicit_mhd.mass_density(x,y,z) = if(z<0.4375, rho_hot, if(z<0.6875, rho_bulk, rho_hot))
+implicit_mhd.electron_pressure(x,y,z) = if(z<0.6875, P_hot, P_cold)
+implicit_mhd.ion_pressure(x,y,z) = if(z<0.6875, P_hot, P_cold)
+implicit_mhd.velocity_x(x,y,z) = v0
+implicit_mhd.evolve_ion_fluid = true
+implicit_mhd.fluid_flux = central
+# The central flux requires the explicit viscous stabilization (the
+# production pairing); the uniform slip has zero shear, so it is inert
+# away from the contacts.
+implicit_mhd.viscosity = 3000.0
+implicit_mhd.include_joule_heating = true
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.electron_pressure_floor = 1.0e-8
+implicit_mhd.ion_pressure_floor = 1.0e-8
+# NO halo_relaxation knobs: the legacy path must be untouched -- no
+# decay anywhere, no ledger file (asserted by the analysis).
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 8
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Ex Ey Ez Bx By Bz \
+                       implicit_mhd_mass_density implicit_mhd_momentum_density \
+                       implicit_mhd_electron_energy implicit_mhd_ion_energy
+diag1.write_species = 0

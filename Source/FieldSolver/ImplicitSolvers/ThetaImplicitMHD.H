@@ -290,6 +290,25 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * residual kernels. Must be called after the nonlinear solve and
      * before FinishStateUpdate extrapolates the state to t^{n+1}. */
     void AccumulateFloorConsistencySupplyLedger (amrex::Real dt, int step);
+    /** Halo temperature-relaxation bookkeeping (halo_relaxation_rate > 0):
+     * the windowed outlet drains fluid energy into the prescribed cold
+     * medium by design, so the conservation ledger tracks it explicitly.
+     * Re-evaluates the SAME rectified windowed drains the residual
+     * kernels applied, at the ACCEPTED theta state (m_state against the
+     * frozen m_state_old -- for a converged solve U^{n+1} - U^n =
+     * dt * RHS(theta state), so the booked energy matches the fluid
+     * energy loss to the nonlinear solver tolerance, exactly the
+     * wall-ledger contract), integrates them over the domain with the
+     * geometry's cell measure (2 pi r dr dz in RZ), accumulates the
+     * cumulative removed-energy counter, and appends a "step energy" row
+     * to implicit_mhd.halo_relaxation_ledger_file when set. Only the
+     * CONSERVED blocks are booked: U_e always, E_i's internal part under
+     * total_energy/dual_energy (the auxiliary U_i mirror would
+     * double-count), and U_par + U_perp under cgl. Wall-masked
+     * (rigid-conductor) cells are excluded, mirroring the residual
+     * kernels. Must be called after the nonlinear solve and before
+     * FinishStateUpdate extrapolates the state to t^{n+1}. */
+    void AccumulateHaloRelaxationLedger (amrex::Real dt, int step);
     /** The reference code's density eater (ntb.f90:773-807, trigger eaten_type > 0 at
      * ntb.f90:202): a one-sided per-step relaxation of the mass density
      * toward a low target in a fixed axial band,
@@ -847,6 +866,66 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // the corresponding positivity floors so the drain can never
     // demand an inadmissible state.
     amrex::Real m_halo_pedestal_energy_rate = 0.0;
+    // ---- Windowed halo temperature-relaxation outlet (0 = off,
+    // bit-identical when off): relaxes BOTH species' internal energies
+    // toward the prescribed cold-medium temperature
+    // halo_relaxation_temperature [eV] at the rate halo_relaxation_rate
+    // [1/s], in the halo density WINDOW below halo_relaxation_n_max
+    // [m^-3] -- the halo can dissipate into some medium. The window is
+    // the pedestal-energy ramp form transplanted to the fixed upper edge
+    // rho_max = n_max m_i, keyed to the STEP-OLD density (a per-solve
+    // constant mask): full rate at/below 1.125 rho_max, exactly zero
+    // at/above 1.25 rho_max, C^1 in between -- never a hard branch. The
+    // window's LOWER edge is the existing positivity/pedestal floor
+    // machinery: the per-channel targets are clamped from below at the
+    // positivity-floor images, so the drain can never demand an
+    // inadmissible state, and the pedestal band keeps its own relaxation
+    // (halo_pedestal_energy_rate). Targets are the cold-medium energies
+    // n kB T_med at the LOCAL step-old density, per channel through the
+    // z-wall ghost-fill conversion n kB T = rho (q/m) T[eV]:
+    // U_e -> rho (q/m) T_med / (gamma_e - 1), the ion internal part
+    // e = E_i - |m|^2/(2 rho) -> rho (q/m) T_med / (gamma_i - 1) under
+    // total_energy (the auxiliary U_i mirrors it under dual_energy), and
+    // U_par -> rho (q/m) T_med / 2, U_perp -> rho (q/m) T_med under cgl.
+    // ONE-SIDED (rectified): the C^1 gate closes each drain where its
+    // energy sits at/below the target (full exact rate at/above twice
+    // it), so the outlet only COOLS toward the medium and never heats a
+    // sub-target cell. Part of the JFNK residual (theta-weighted,
+    // per-solve frozen coefficients: linear in the Newton iterate
+    // through the engaged regime). The removed energy is BOOKED per step
+    // (AccumulateHaloRelaxationLedger) so the outlet is auditable. ----
+    amrex::Real m_halo_relaxation_rate = 0.0;
+    // Cold-medium temperature [eV] both species relax toward (the
+    // "temperature" target mode; unused under the "ion" valve below).
+    amrex::Real m_halo_relaxation_temperature = 0.0;
+    // Target mode (implicit_mhd.halo_relaxation_target): false =
+    // "temperature" (default, the fixed cold-medium form above); true =
+    // "ion", the reference code's te <= tm one-way valve (vp.f90:731
+    // te = MIN(te, tm), the reference-shot-flown Te-runaway breaker, paired with
+    // ntb.f90:107) in relaxed, JFNK-safe form -- ONLY the electron
+    // energy drains, toward the LOCAL ion-temperature image
+    // n kB Ti / (gamma_e - 1) with Ti read from the STEP-OLD ion energy
+    // state (p_i = (gamma_i - 1)(E_i - |m|^2/(2 rho)) under
+    // total_energy/dual_energy, p_eff = (2 U_par + 2 U_perp)/3 under
+    // cgl; a per-solve frozen coefficient), through the SAME window,
+    // rate, one-sided gate, floor clamp, and ledger; ion channels are
+    // untouched (the reference code destroys the capped electron excess -- the
+    // relaxed drain at high rate reproduces the clip without the
+    // discontinuity). Requires an ion closure with an energy channel.
+    bool m_halo_relaxation_ion_target = false;
+    // Upper edge of the halo density window [m^-3] (number density of
+    // the quasi-neutral single-ion fluid; converted to the mass density
+    // rho_max = n_max e / (q/m) at the kernel sites).
+    amrex::Real m_halo_relaxation_n_max = 0.0;
+    // Halo relaxation ledger: cumulative removed fluid energy [J]
+    // ([J/m^2] in 1D: the cell measure is the geometry's), evaluated at
+    // the accepted theta state each step and optionally appended to
+    // halo_relaxation_ledger_file as "step energy" rows (every step;
+    // first write of a run truncates a stale file). Counter restarts at
+    // zero on a simulation restart.
+    amrex::Real m_halo_relaxation_energy = 0.0;
+    std::string m_halo_relaxation_ledger_file;
+    bool m_halo_relaxation_ledger_started = false;
     // ---- Floor-consistency relaxation rate [1/s] (0 = off, bit-identical
     // when off): the consistency completion of the admissibility floors.
     // Measured escalation trigger (production rr13e_C1w, the annihilation

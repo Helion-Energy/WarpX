@@ -155,6 +155,30 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
                                    m_halo_pedestal_drag_rate);
     utils::parser::queryWithParser(pp, "halo_pedestal_energy_rate",
                                    m_halo_pedestal_energy_rate);
+    // Windowed halo temperature-relaxation outlet (see
+    // m_halo_relaxation_rate).
+    utils::parser::queryWithParser(pp, "halo_relaxation_rate",
+                                   m_halo_relaxation_rate);
+    utils::parser::queryWithParser(pp, "halo_relaxation_temperature",
+                                   m_halo_relaxation_temperature);
+    utils::parser::queryWithParser(pp, "halo_relaxation_n_max",
+                                   m_halo_relaxation_n_max);
+    {
+        // Electron-target mode of the outlet: "temperature" (default)
+        // relaxes both species toward the fixed cold-medium temperature;
+        // "ion" is the reference code's te <= tm valve (vp.f90:731) in relaxed
+        // form -- U_e drains toward the LOCAL ion-temperature image, ion
+        // channels untouched (see m_halo_relaxation_ion_target).
+        std::string halo_relaxation_target = "temperature";
+        pp.query("halo_relaxation_target", halo_relaxation_target);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            halo_relaxation_target == "temperature" ||
+                halo_relaxation_target == "ion",
+            "implicit_mhd.halo_relaxation_target must be 'temperature' "
+            "or 'ion'");
+        m_halo_relaxation_ion_target = (halo_relaxation_target == "ion");
+    }
+    pp.query("halo_relaxation_ledger_file", m_halo_relaxation_ledger_file);
     utils::parser::queryWithParser(pp, "floor_consistency_rate",
                                    m_floor_consistency_rate);
     utils::parser::queryWithParser(pp, "floor_consistency_width_fraction",
@@ -793,6 +817,41 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "implicit_mhd.halo_pedestal_energy_rate requires "
         "implicit_mhd.ion_closure = total_energy, dual_energy, or cgl "
         "(the barotropic closure evolves no ion energy block to relax)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_halo_relaxation_rate >= 0.0_rt,
+        "implicit_mhd.halo_relaxation_rate cannot be negative");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_halo_relaxation_rate == 0.0_rt || m_halo_relaxation_ion_target ||
+            m_halo_relaxation_temperature > 0.0_rt,
+        "implicit_mhd.halo_relaxation_rate with halo_relaxation_target = "
+        "temperature requires a positive "
+        "implicit_mhd.halo_relaxation_temperature (the cold-medium "
+        "temperature [eV] the halo energies relax toward)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_halo_relaxation_rate == 0.0_rt ||
+            m_halo_relaxation_n_max > 0.0_rt,
+        "implicit_mhd.halo_relaxation_rate requires a positive "
+        "implicit_mhd.halo_relaxation_n_max (the upper edge [m^-3] of "
+        "the halo density window; the lower edge is the existing "
+        "positivity/pedestal floor scale)");
+    // The ion-target valve reads the local ion temperature from the ion
+    // energy state: the barotropic closure evolves none to read.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_halo_relaxation_rate == 0.0_rt || !m_halo_relaxation_ion_target ||
+            m_ion_closure == "total_energy" ||
+            m_ion_closure == "dual_energy" || m_ion_closure == "cgl",
+        "implicit_mhd.halo_relaxation_target = ion requires "
+        "implicit_mhd.ion_closure = total_energy, dual_energy, or cgl "
+        "(the electron target is the local ion-temperature image, which "
+        "the barotropic closure does not evolve)");
+    // The ledger is the outlet's conservation instrument: a file without
+    // the outlet is a configuration error, not a silent no-op.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_halo_relaxation_ledger_file.empty() ||
+            m_halo_relaxation_rate > 0.0_rt,
+        "implicit_mhd.halo_relaxation_ledger_file requires a positive "
+        "implicit_mhd.halo_relaxation_rate (the ledger books the outlet's "
+        "removed energy, which does not exist without it)");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_floor_consistency_rate >= 0.0_rt,
         "implicit_mhd.floor_consistency_rate cannot be negative");
@@ -2752,6 +2811,27 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "\n"
                    << "Halo pedestal energy rate [1/s]: "
                    << m_halo_pedestal_energy_rate << "\n";
+    if (m_halo_relaxation_rate > 0.0_rt) {
+        amrex::Print() << "Halo relaxation rate [1/s]:    "
+                       << m_halo_relaxation_rate << "\n"
+                       << "Halo relaxation target:        "
+                       << (m_halo_relaxation_ion_target
+                               ? "ion (the reference code's te<=tm valve, electron "
+                                 "channel only)"
+                               : "temperature (both species)")
+                       << "\n";
+        if (!m_halo_relaxation_ion_target) {
+            amrex::Print() << "Halo relaxation T_med [eV]:    "
+                           << m_halo_relaxation_temperature << "\n";
+        }
+        amrex::Print() << "Halo relaxation n_max [m^-3]:  "
+                       << m_halo_relaxation_n_max << "\n"
+                       << "Halo relaxation ledger:        "
+                       << (m_halo_relaxation_ledger_file.empty()
+                               ? "(none)"
+                               : m_halo_relaxation_ledger_file)
+                       << "\n";
+    }
     if (m_floor_consistency_rate > 0.0_rt) {
         amrex::Print() << "Floor consistency rate [1/s]:  "
                        << m_floor_consistency_rate
@@ -3627,6 +3707,12 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
         // Book the floor-consistency supply from the accepted theta state
         // (m_state), before FinishStateUpdate extrapolates it to t^{n+1}.
         AccumulateFloorConsistencySupplyLedger(m_dt, step);
+    }
+    if (m_halo_relaxation_rate > 0.0_rt) {
+        // Book the halo relaxation outlet's removed energy from the
+        // accepted theta state, before FinishStateUpdate extrapolates it
+        // to t^{n+1}.
+        AccumulateHaloRelaxationLedger(m_dt, step);
     }
     m_WarpX->reduced_diags->ComputeDiagsMidStep(step);
     FinishStateUpdate(start_time + m_dt, step);
@@ -5069,6 +5155,29 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
     const amrex::Real halo_pedestal_energy_rate = m_halo_pedestal_energy_rate;
     const amrex::Real halo_pedestal_ion_internal =
         std::max(m_halo_pedestal_ion_internal, ion_energy_floor);
+    // Windowed halo temperature-relaxation outlet (see
+    // m_halo_relaxation_rate): per-solve frozen constants. The window is
+    // keyed to the step-old density (fixed upper edge rho_max with the
+    // pedestal-energy ramp form: full at/below 1.125 rho_max, exactly
+    // zero at/above 1.25 rho_max); the per-channel targets are the
+    // cold-medium energies n kB T_med = rho (q/m) T_med[eV] at the LOCAL
+    // step-old density (the z-wall ghost-fill conversion) -- or, under
+    // the "ion" target valve, the electron channel's LOCAL step-old
+    // ion-temperature image -- clamped from below at the positivity-
+    // floor images so the drain can never demand an inadmissible state.
+    const bool halo_relaxation = m_halo_relaxation_rate > 0.0_rt;
+    const bool halo_relaxation_ion_target = m_halo_relaxation_ion_target;
+    const amrex::Real halo_relaxation_rate = m_halo_relaxation_rate;
+    const amrex::Real halo_relaxation_rho_max =
+        m_halo_relaxation_n_max * PhysConst::q_e / m_ion_charge_to_mass;
+    const amrex::Real halo_relaxation_electron_spec =
+        m_ion_charge_to_mass * m_halo_relaxation_temperature /
+        (m_gamma_e - 1.0_rt);
+    const amrex::Real halo_relaxation_ion_spec =
+        m_ion_charge_to_mass * m_halo_relaxation_temperature /
+        (m_gamma_i - 1.0_rt);
+    const amrex::Real halo_relaxation_electron_floor =
+        m_electron_pressure_floor / (m_gamma_e - 1.0_rt);
     // Floor-consistency relaxation source (see m_floor_consistency_rate
     // and floor_consistency_deficit): one-sided per-cell supply at the
     // SAME theta-stage admissibility bounds the Newton projection
@@ -5550,6 +5659,71 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                     // the opposite sign -- exact pair conservation.
                     ion_energy_increment(i, j, k) -=
                         theta_dt * plasma_weight * equilibration_heating;
+                }
+            }
+
+            // Windowed halo temperature-relaxation outlet (see the host
+            // constants above and m_halo_relaxation_rate): one-sided
+            // drains of BOTH species' internal energies toward the
+            // cold-medium targets at the LOCAL step-old density (or, under
+            // the "ion" valve, of the electron energy alone toward the
+            // frozen local ion-temperature image), engaged in the C^1
+            // halo density window below rho_max. Appended AFTER the base
+            // increments under a per-solve-uniform branch, so the OFF
+            // path performs no arithmetic at all -- bit-identical. Booked
+            // per step by AccumulateHaloRelaxationLedger.
+            if (halo_relaxation) {
+                const amrex::Real relax_scale =
+                    theta_dt * halo_relaxation_rate *
+                    (1.0_rt -
+                     theta_implicit_mhd::floor_outflow_limiter(
+                         rho_old(i, j, k) - halo_relaxation_rho_max,
+                         0.125_rt * halo_relaxation_rho_max));
+                amrex::Real electron_target =
+                    rho_old(i, j, k) * halo_relaxation_electron_spec;
+                if (halo_relaxation_ion_target) {
+                    // The reference code's te <= tm valve: the frozen local ion-
+                    // temperature image n kB Ti_old / (gamma_e - 1) from
+                    // the step-old internal part of E_i (this site never
+                    // sees cgl/dual, asserted above).
+                    amrex::Real momentum_square_old = 0.0_rt;
+                    for (int component = 0; component < 3; ++component) {
+                        momentum_square_old +=
+                            mom_old(i, j, k, component) *
+                            mom_old(i, j, k, component);
+                    }
+                    const amrex::Real pressure_i_old =
+                        gamma_i_minus_one *
+                        (ion_e_old(i, j, k) -
+                         0.5_rt * momentum_square_old /
+                             std::max(rho_old(i, j, k), density_floor));
+                    electron_target =
+                        pressure_i_old / gamma_e_minus_one;
+                }
+                electron_target = std::max(electron_target,
+                                           halo_relaxation_electron_floor);
+                energy_increment(i, j, k) -=
+                    relax_scale * (energy(i, j, k) - electron_target) *
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        energy(i, j, k), electron_target);
+                if (total_energy_closure && !halo_relaxation_ion_target) {
+                    const amrex::Real ion_target =
+                        std::max(rho_old(i, j, k) * halo_relaxation_ion_spec,
+                                 ion_energy_floor);
+                    const amrex::Real safe_density =
+                        std::max(rho(i, j, k), density_floor);
+                    amrex::Real momentum_square = 0.0_rt;
+                    for (int component = 0; component < 3; ++component) {
+                        momentum_square += mom(i, j, k, component) *
+                                           mom(i, j, k, component);
+                    }
+                    const amrex::Real internal_energy =
+                        ion_e(i, j, k) -
+                        0.5_rt * momentum_square / safe_density;
+                    ion_energy_increment(i, j, k) -=
+                        relax_scale * (internal_energy - ion_target) *
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            internal_energy, ion_target);
                 }
             }
 
@@ -8070,6 +8244,233 @@ void ThetaImplicitMHD::AccumulateFloorConsistencySupplyLedger (
     }
 }
 
+void ThetaImplicitMHD::AccumulateHaloRelaxationLedger (const amrex::Real dt,
+                                                       const int step)
+{
+    // The outlet is a pure state-local drain: no flux recompute is
+    // needed -- re-evaluate the SAME rectified windowed drains the
+    // residual kernels applied, at the accepted theta state (m_state)
+    // against the frozen step-old state (m_state_old). For a converged
+    // solve U^{n+1} - U^n = dt * RHS(theta state), so the booked energy
+    // dt * rate * window * (value - target) * gate matches the outlet's
+    // share of the state change to the nonlinear solver tolerance
+    // (frozen/stagnated solves violate this at the residual level, as
+    // they do all conservation). Only the CONSERVED blocks are booked:
+    // U_e always, E_i's internal part under total_energy/dual_energy
+    // (the auxiliary U_i mirror would double-count), U_par + U_perp
+    // under cgl.
+    const bool dual_energy_closure = m_ion_closure == "dual_energy";
+    const bool total_energy_closure =
+        m_ion_closure == "total_energy" || dual_energy_closure;
+    const bool cgl_closure = m_ion_closure == "cgl";
+    const bool ion_target = m_halo_relaxation_ion_target;
+    const amrex::Real rate = m_halo_relaxation_rate;
+    const amrex::Real rho_max =
+        m_halo_relaxation_n_max * PhysConst::q_e / m_ion_charge_to_mass;
+    const amrex::Real electron_spec =
+        m_ion_charge_to_mass * m_halo_relaxation_temperature /
+        (m_gamma_e - 1.0_rt);
+    const amrex::Real ion_spec = m_ion_charge_to_mass *
+                                 m_halo_relaxation_temperature /
+                                 (m_gamma_i - 1.0_rt);
+    const amrex::Real parallel_spec =
+        0.5_rt * m_ion_charge_to_mass * m_halo_relaxation_temperature;
+    const amrex::Real perp_spec =
+        m_ion_charge_to_mass * m_halo_relaxation_temperature;
+    const amrex::Real electron_floor =
+        m_electron_pressure_floor / (m_gamma_e - 1.0_rt);
+    const amrex::Real ion_energy_floor =
+        m_ion_pressure_floor / (m_gamma_i - 1.0_rt);
+    const amrex::Real parallel_floor = 0.5_rt * m_ion_pressure_floor;
+    const amrex::Real perp_floor = m_ion_pressure_floor;
+    const amrex::Real density_floor = m_mass_density_floor;
+    const amrex::Real gamma_e_minus_one = m_gamma_e - 1.0_rt;
+    const amrex::Real gamma_i_minus_one = m_gamma_i - 1.0_rt;
+
+    const amrex::MultiFab& density_mf =
+        m_state.getMultiFabBlock(MassDensityName, 0);
+    const amrex::MultiFab& old_density_mf =
+        m_state_old.getMultiFabBlock(MassDensityName, 0);
+    const amrex::MultiFab& momentum_mf =
+        m_state.getMultiFabBlock(MomentumDensityName, 0);
+    const amrex::MultiFab& old_momentum_mf =
+        m_state_old.getMultiFabBlock(MomentumDensityName, 0);
+    const amrex::MultiFab& electron_energy_mf =
+        m_state.getMultiFabBlock(ElectronEnergyName, 0);
+    const amrex::MultiFab* const ion_energy_mf =
+        total_energy_closure ? &m_state.getMultiFabBlock(IonEnergyName, 0)
+                             : nullptr;
+    const amrex::MultiFab* const old_ion_energy_mf =
+        total_energy_closure
+            ? &m_state_old.getMultiFabBlock(IonEnergyName, 0)
+            : nullptr;
+    const amrex::MultiFab* const ion_parallel_mf =
+        cgl_closure ? &m_state.getMultiFabBlock(IonParallelEnergyName, 0)
+                    : nullptr;
+    const amrex::MultiFab* const ion_perp_mf =
+        cgl_closure ? &m_state.getMultiFabBlock(IonPerpEnergyName, 0)
+                    : nullptr;
+    const amrex::MultiFab* const old_ion_parallel_mf =
+        cgl_closure
+            ? &m_state_old.getMultiFabBlock(IonParallelEnergyName, 0)
+            : nullptr;
+    const amrex::MultiFab* const old_ion_perp_mf =
+        cgl_closure ? &m_state_old.getMultiFabBlock(IonPerpEnergyName, 0)
+                    : nullptr;
+
+    // Geometry cell measure: product of the cell sizes, with the RZ
+    // radial annulus weight 2 pi r_center applied per cell in-kernel, so
+    // the booked units are J (J/m^2 in 1D -- the geometry's own
+    // measure).
+    amrex::Real cell_volume = 1.0_rt;
+    for (int dim = 0; dim < AMREX_SPACEDIM; ++dim) {
+        cell_volume *= m_WarpX->Geom(0).CellSize(dim);
+    }
+#if defined(WARPX_DIM_RZ)
+    const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
+    const amrex::Real radial_cell_size = m_WarpX->Geom(0).CellSize(0);
+#endif
+    // Rigid-conductor wall exclusion, mirroring the residual kernels'
+    // wall_live factor.
+    const bool wall_thermal_freeze =
+        (m_wall_mask.GetThermalBC() != ImplicitMHDWallMask::ThermalBC::none);
+    const int* const AMREX_RESTRICT wall_first_masked_cc =
+        wall_thermal_freeze ? m_wall_mask.FirstMaskedCellCentered() : nullptr;
+    const int wall_mask_z_lo = -m_wall_mask.GhostCells();
+    const int wall_mask_z_hi =
+        m_wall_mask.AxialCells() - 1 + m_wall_mask.GhostCells();
+
+    amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
+    amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+    using ReduceTuple = typename decltype(reduce_data)::Type;
+    for (amrex::MFIter mfi(density_mf); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto rho = density_mf.const_array(mfi);
+        const auto rho_old = old_density_mf.const_array(mfi);
+        const auto mom = momentum_mf.const_array(mfi);
+        const auto mom_old = old_momentum_mf.const_array(mfi);
+        const auto energy = electron_energy_mf.const_array(mfi);
+        const auto ion_e = total_energy_closure
+                               ? ion_energy_mf->const_array(mfi)
+                               : amrex::Array4<const amrex::Real>{};
+        const auto ion_e_old = total_energy_closure
+                                   ? old_ion_energy_mf->const_array(mfi)
+                                   : amrex::Array4<const amrex::Real>{};
+        const auto upar = cgl_closure
+                              ? ion_parallel_mf->const_array(mfi)
+                              : amrex::Array4<const amrex::Real>{};
+        const auto uperp = cgl_closure
+                               ? ion_perp_mf->const_array(mfi)
+                               : amrex::Array4<const amrex::Real>{};
+        const auto upar_old = cgl_closure
+                                  ? old_ion_parallel_mf->const_array(mfi)
+                                  : amrex::Array4<const amrex::Real>{};
+        const auto uperp_old = cgl_closure
+                                   ? old_ion_perp_mf->const_array(mfi)
+                                   : amrex::Array4<const amrex::Real>{};
+        reduce_op.eval(
+            box, reduce_data,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
+                if (wall_thermal_freeze) {
+                    const int mask_jz = std::max(
+                        wall_mask_z_lo, std::min(wall_mask_z_hi, j));
+                    if (i >= wall_first_masked_cc[mask_jz]) {
+                        return {0.0_rt};
+                    }
+                }
+                amrex::Real measure = 1.0_rt;
+#if defined(WARPX_DIM_RZ)
+                measure = 2.0_rt * MathConst::pi *
+                          (radial_lower + (i + 0.5_rt) * radial_cell_size);
+#endif
+                const amrex::Real window =
+                    1.0_rt -
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        rho_old(i, j, k) - rho_max, 0.125_rt * rho_max);
+                amrex::Real electron_target =
+                    rho_old(i, j, k) * electron_spec;
+                if (ion_target) {
+                    amrex::Real pressure_i_old;
+                    if (cgl_closure) {
+                        pressure_i_old = (2.0_rt * upar_old(i, j, k) +
+                                          2.0_rt * uperp_old(i, j, k)) /
+                                         3.0_rt;
+                    } else {
+                        amrex::Real momentum_square_old = 0.0_rt;
+                        for (int component = 0; component < 3;
+                             ++component) {
+                            momentum_square_old +=
+                                mom_old(i, j, k, component) *
+                                mom_old(i, j, k, component);
+                        }
+                        pressure_i_old =
+                            gamma_i_minus_one *
+                            (ion_e_old(i, j, k) -
+                             0.5_rt * momentum_square_old /
+                                 std::max(rho_old(i, j, k),
+                                          density_floor));
+                    }
+                    electron_target = pressure_i_old / gamma_e_minus_one;
+                }
+                electron_target =
+                    std::max(electron_target, electron_floor);
+                amrex::Real drain =
+                    (energy(i, j, k) - electron_target) *
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        energy(i, j, k), electron_target);
+                if (total_energy_closure && !ion_target) {
+                    const amrex::Real target = std::max(
+                        rho_old(i, j, k) * ion_spec, ion_energy_floor);
+                    const amrex::Real safe_density =
+                        std::max(rho(i, j, k), density_floor);
+                    amrex::Real momentum_square = 0.0_rt;
+                    for (int component = 0; component < 3; ++component) {
+                        momentum_square += mom(i, j, k, component) *
+                                           mom(i, j, k, component);
+                    }
+                    const amrex::Real internal_energy =
+                        ion_e(i, j, k) -
+                        0.5_rt * momentum_square / safe_density;
+                    drain += (internal_energy - target) *
+                             theta_implicit_mhd::floor_outflow_limiter(
+                                 internal_energy, target);
+                } else if (cgl_closure && !ion_target) {
+                    const amrex::Real parallel_target = std::max(
+                        rho_old(i, j, k) * parallel_spec, parallel_floor);
+                    const amrex::Real perp_target = std::max(
+                        rho_old(i, j, k) * perp_spec, perp_floor);
+                    drain += (upar(i, j, k) - parallel_target) *
+                             theta_implicit_mhd::floor_outflow_limiter(
+                                 upar(i, j, k), parallel_target);
+                    drain += (uperp(i, j, k) - perp_target) *
+                             theta_implicit_mhd::floor_outflow_limiter(
+                                 uperp(i, j, k), perp_target);
+                }
+                return {measure * window * drain};
+            });
+    }
+    amrex::Real step_energy =
+        dt * rate * cell_volume *
+        amrex::get<0>(reduce_data.value(reduce_op));
+    amrex::ParallelAllReduce::Sum(step_energy,
+                                  amrex::ParallelContext::CommunicatorSub());
+    m_halo_relaxation_energy += step_energy;
+
+    if (!m_halo_relaxation_ledger_file.empty() &&
+        amrex::ParallelDescriptor::IOProcessor()) {
+        // Truncate at the first write of the run (a stale file from a
+        // previous run in the same directory would otherwise keep
+        // accumulating appended rows), append afterwards.
+        std::ofstream ledger(m_halo_relaxation_ledger_file,
+                             m_halo_relaxation_ledger_started
+                                 ? std::ios::app
+                                 : std::ios::trunc);
+        m_halo_relaxation_ledger_started = true;
+        ledger.precision(17);
+        ledger << step + 1 << " " << m_halo_relaxation_energy << "\n";
+    }
+}
+
 bool ThetaImplicitMHD::PrepareResistiveStageCurrents (
     const bool at_resistive_stage) const
 {
@@ -9333,6 +9734,39 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                  0.5_rt * m_ion_pressure_floor);
     const amrex::Real halo_pedestal_ion_perp =
         std::max(m_halo_pedestal_ion_perp, m_ion_pressure_floor);
+    // Windowed halo temperature-relaxation outlet (see
+    // m_halo_relaxation_rate): per-solve frozen constants, the exact
+    // twin of the ComputeFluidRHS site (the residual is one map
+    // regardless of the flux path). Window keyed to the step-old density
+    // (fixed upper edge rho_max, pedestal-energy ramp form: full
+    // at/below 1.125 rho_max, exactly zero at/above 1.25 rho_max);
+    // per-channel targets are the cold-medium energies n kB T_med =
+    // rho (q/m) T_med[eV] at the LOCAL step-old density (the z-wall
+    // ghost-fill conversion; U_par = n kB T/2 and U_perp = n kB T under
+    // cgl) -- or, under the "ion" target valve, the electron channel's
+    // LOCAL step-old ion-temperature image -- clamped from below at the
+    // positivity-floor images so the drain can never demand an
+    // inadmissible state.
+    const bool halo_relaxation = m_halo_relaxation_rate > 0.0_rt;
+    const bool halo_relaxation_ion_target = m_halo_relaxation_ion_target;
+    const amrex::Real halo_relaxation_rate = m_halo_relaxation_rate;
+    const amrex::Real halo_relaxation_rho_max =
+        m_halo_relaxation_n_max * PhysConst::q_e / m_ion_charge_to_mass;
+    const amrex::Real halo_relaxation_electron_spec =
+        m_ion_charge_to_mass * m_halo_relaxation_temperature /
+        (m_gamma_e - 1.0_rt);
+    const amrex::Real halo_relaxation_ion_spec =
+        m_ion_charge_to_mass * m_halo_relaxation_temperature /
+        (m_gamma_i - 1.0_rt);
+    const amrex::Real halo_relaxation_parallel_spec =
+        0.5_rt * m_ion_charge_to_mass * m_halo_relaxation_temperature;
+    const amrex::Real halo_relaxation_perp_spec =
+        m_ion_charge_to_mass * m_halo_relaxation_temperature;
+    const amrex::Real halo_relaxation_electron_floor =
+        m_electron_pressure_floor / (m_gamma_e - 1.0_rt);
+    const amrex::Real halo_relaxation_parallel_floor =
+        0.5_rt * m_ion_pressure_floor;
+    const amrex::Real halo_relaxation_perp_floor = m_ion_pressure_floor;
     // Floor-consistency relaxation source (see m_floor_consistency_rate
     // and floor_consistency_deficit): one-sided per-cell supply at the
     // SAME theta-stage admissibility bounds the Newton projection
@@ -10649,6 +11083,115 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                         equilibration_share;
                     ion_perp_increment(i, j, k) -=
                         2.0_rt * equilibration_share;
+                }
+            }
+
+            // Windowed halo temperature-relaxation outlet (see the host
+            // constants above and m_halo_relaxation_rate): one-sided
+            // drains of BOTH species' internal energies toward the
+            // cold-medium targets at the LOCAL step-old density (or,
+            // under the "ion" valve, of the electron energy alone toward
+            // the frozen local ion-temperature image), engaged in the
+            // C^1 halo density window below rho_max. Appended AFTER the
+            // base increments under a per-solve-uniform branch, so the
+            // OFF path performs no arithmetic at all -- bit-identical.
+            // Wall-frozen cells are excluded (wall_live), like every
+            // other source. Booked per step by
+            // AccumulateHaloRelaxationLedger.
+            if (halo_relaxation) {
+                const amrex::Real relax_scale =
+                    wall_live * theta_dt * halo_relaxation_rate *
+                    (1.0_rt -
+                     theta_implicit_mhd::floor_outflow_limiter(
+                         rho_old(i, j, k) - halo_relaxation_rho_max,
+                         0.125_rt * halo_relaxation_rho_max));
+                amrex::Real electron_target =
+                    rho_old(i, j, k) * halo_relaxation_electron_spec;
+                if (halo_relaxation_ion_target) {
+                    // The reference code's te <= tm valve: the frozen local ion-
+                    // temperature image n kB Ti_old / (gamma_e - 1) from
+                    // the step-old ion energy state.
+                    amrex::Real pressure_i_old;
+                    if (cgl_closure) {
+                        // p_eff = (p_par + 2 p_perp)/3 with p_par =
+                        // 2 U_par and p_perp = U_perp.
+                        pressure_i_old = (2.0_rt * upar_old(i, j, k) +
+                                          2.0_rt * uperp_old(i, j, k)) /
+                                         3.0_rt;
+                    } else {
+                        amrex::Real momentum_square_old = 0.0_rt;
+                        for (int component = 0; component < 3;
+                             ++component) {
+                            momentum_square_old +=
+                                mom_old(i, j, k, component) *
+                                mom_old(i, j, k, component);
+                        }
+                        pressure_i_old =
+                            gamma_i_minus_one *
+                            (ion_e_old(i, j, k) -
+                             0.5_rt * momentum_square_old /
+                                 std::max(rho_old(i, j, k),
+                                          density_floor));
+                    }
+                    electron_target = pressure_i_old / gamma_e_minus_one;
+                }
+                electron_target = std::max(electron_target,
+                                           halo_relaxation_electron_floor);
+                energy_increment(i, j, k) -=
+                    relax_scale * (energy(i, j, k) - electron_target) *
+                    theta_implicit_mhd::floor_outflow_limiter(
+                        energy(i, j, k), electron_target);
+                if (total_energy_closure && !halo_relaxation_ion_target) {
+                    const amrex::Real ion_target =
+                        std::max(rho_old(i, j, k) * halo_relaxation_ion_spec,
+                                 ion_energy_floor);
+                    const amrex::Real safe_density =
+                        std::max(rho(i, j, k), density_floor);
+                    amrex::Real momentum_square = 0.0_rt;
+                    for (int component = 0; component < 3; ++component) {
+                        momentum_square += mom(i, j, k, component) *
+                                           mom(i, j, k, component);
+                    }
+                    const amrex::Real internal_energy =
+                        ion_e(i, j, k) -
+                        0.5_rt * momentum_square / safe_density;
+                    ion_energy_increment(i, j, k) -=
+                        relax_scale * (internal_energy - ion_target) *
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            internal_energy, ion_target);
+                    if (dual_energy_closure) {
+                        // The auxiliary U_i mirrors the SAME internal
+                        // drain toward the same target, keyed on its own
+                        // (purely internal) value -- exactly the
+                        // pedestal-relaxation pairing.
+                        ion_internal_increment(i, j, k) -=
+                            relax_scale *
+                            (ion_int(i, j, k) - ion_target) *
+                            theta_implicit_mhd::floor_outflow_limiter(
+                                ion_int(i, j, k), ion_target);
+                    }
+                } else if (cgl_closure && !halo_relaxation_ion_target) {
+                    // U_par and U_perp are purely internal under this
+                    // closure: they relax toward their cold-medium
+                    // images n kB T_med / 2 and n kB T_med directly.
+                    const amrex::Real parallel_target =
+                        std::max(rho_old(i, j, k) *
+                                     halo_relaxation_parallel_spec,
+                                 halo_relaxation_parallel_floor);
+                    const amrex::Real perp_target =
+                        std::max(rho_old(i, j, k) *
+                                     halo_relaxation_perp_spec,
+                                 halo_relaxation_perp_floor);
+                    ion_parallel_increment(i, j, k) -=
+                        relax_scale *
+                        (upar(i, j, k) - parallel_target) *
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            upar(i, j, k), parallel_target);
+                    ion_perp_increment(i, j, k) -=
+                        relax_scale *
+                        (uperp(i, j, k) - perp_target) *
+                        theta_implicit_mhd::floor_outflow_limiter(
+                            uperp(i, j, k), perp_target);
                 }
             }
 

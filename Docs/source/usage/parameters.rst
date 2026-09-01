@@ -4782,6 +4782,95 @@ Jacobian probes.
     cyclotron scale, of order :math:`0.1/\Delta t` for typical
     implicit MHD steps).
 
+.. pp:param:: implicit_mhd.halo_relaxation_rate
+    :type: ``float``
+    :unit: 1/s
+    :default: ``0`` (off, bit-identical)
+
+    Windowed halo temperature-relaxation outlet: relaxes BOTH species'
+    internal energies toward the prescribed cold-medium temperature
+    :pp:param:`implicit_mhd.halo_relaxation_temperature` at this rate,
+    in the halo density window below
+    :pp:param:`implicit_mhd.halo_relaxation_n_max` -- a model of the
+    halo dissipating into some medium. The window is :math:`C^1` in the
+    step-old density (a per-solve constant mask, the pedestal-energy
+    ramp form transplanted to the fixed upper edge
+    :math:`\rho_\mathrm{max} = n_\mathrm{max} m_i`): full rate at and
+    below :math:`1.125\,\rho_\mathrm{max}`, exactly zero at and above
+    :math:`1.25\,\rho_\mathrm{max}`; the lower edge is the existing
+    positivity/pedestal floor machinery (targets are clamped from below
+    at the positivity-floor images, and the pedestal band keeps its own
+    relaxation). Per-channel targets are the cold-medium energies
+    :math:`n k_B T_\mathrm{med}` at the LOCAL step-old density:
+    :math:`U_e \to \rho\,(q/m)\,T_\mathrm{med}/(\gamma_e - 1)`, the ion
+    internal part :math:`e = E_i - |\mathbf{m}|^2/(2\rho) \to
+    \rho\,(q/m)\,T_\mathrm{med}/(\gamma_i - 1)` under ``total_energy``
+    (the auxiliary :math:`U_i` mirrors it under ``dual_energy``), and
+    :math:`U_\parallel \to \rho\,(q/m)\,T_\mathrm{med}/2`,
+    :math:`U_\perp \to \rho\,(q/m)\,T_\mathrm{med}` under ``cgl`` (the
+    barotropic closure relaxes the electron channel only). The drains
+    are one-sided (rectified): a :math:`C^1` gate closes each one where
+    its energy sits at or below the target (full exact rate at and
+    above twice it), so the outlet only cools toward the medium and
+    never heats a sub-target cell. Part of the JFNK residual
+    (theta-weighted, per-solve frozen coefficients). The removed energy
+    is booked per step (see
+    :pp:param:`implicit_mhd.halo_relaxation_ledger_file`). Keep
+    :math:`\nu\,\Delta t \lesssim 5\times 10^{-3}` (non-stiff).
+
+.. pp:param:: implicit_mhd.halo_relaxation_target
+    :type: ``string``
+    :default: ``temperature``
+
+    Target mode of the halo relaxation outlet. ``temperature`` (the
+    default) relaxes both species toward the fixed cold-medium
+    temperature above. ``ion`` is the reference code's :math:`t_e \le t_m` one-way
+    valve (``vp.f90:731``, ``te = MIN(te, tm)``, the reference-shot-flown
+    Te-runaway breaker) in relaxed, JFNK-safe form: ONLY the electron
+    energy drains, toward the LOCAL ion-temperature image
+    :math:`n k_B T_i/(\gamma_e - 1)` with :math:`T_i` read from the
+    step-old ion energy state (:math:`p_i = (\gamma_i - 1)(E_i -
+    |\mathbf{m}|^2/(2\rho))` under ``total_energy``/``dual_energy``,
+    :math:`p_\mathrm{eff} = (2 U_\parallel + 2 U_\perp)/3` under
+    ``cgl``; a per-solve frozen coefficient), through the same window,
+    rate, one-sided gate, floor clamp, and ledger; the ion channels are
+    untouched. At high rate this reproduces the reference code's clip without its
+    discontinuity. Requires an ion closure with an energy channel;
+    :pp:param:`implicit_mhd.halo_relaxation_temperature` is unused.
+
+.. pp:param:: implicit_mhd.halo_relaxation_temperature
+    :type: ``float``
+    :unit: eV
+    :default: ``0``
+
+    Cold-medium temperature the halo energies relax toward (required
+    positive when :pp:param:`implicit_mhd.halo_relaxation_rate` is on
+    with the ``temperature`` target). Typical bath values are of order
+    1 eV.
+
+.. pp:param:: implicit_mhd.halo_relaxation_n_max
+    :type: ``float``
+    :unit: m^-3
+    :default: ``0``
+
+    Upper edge of the halo relaxation density window, as a number
+    density of the quasi-neutral single-ion fluid (required positive
+    when :pp:param:`implicit_mhd.halo_relaxation_rate` is on). Cells
+    above :math:`1.25\,n_\mathrm{max}` (step-old) are exactly
+    untouched.
+
+.. pp:param:: implicit_mhd.halo_relaxation_ledger_file
+    :type: ``string``
+    :default: *none*
+
+    File for the halo relaxation ledger (requires a positive
+    :pp:param:`implicit_mhd.halo_relaxation_rate`): "step energy" rows
+    appended every step with the cumulative removed fluid energy [J]
+    evaluated at the accepted theta state -- the conservation
+    instrument of the outlet, following the wall-ledger contract (a
+    converged solve books the removal to the nonlinear solver
+    tolerance).
+
 .. pp:param:: implicit_mhd.floor_consistency_width_fraction
     :type: ``float``
     :default: ``0.1``

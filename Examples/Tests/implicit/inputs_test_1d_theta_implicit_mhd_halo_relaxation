@@ -1,0 +1,133 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Three-region static column probing every gate of the windowed halo
+# temperature-relaxation outlet (implicit_mhd.halo_relaxation_*):
+#   * HOT sub-window band (n_hot = 1e18 << n_max): both channels decay
+#     toward the cold-medium targets at EXACTLY the theta-discretized
+#     rate (the one-sided gates are identically 1 at 100 eV vs 1 eV);
+#   * ABOVE-window band (n_bulk = 2.5e19 >= 1.25 n_max, window weight
+#     exactly zero): untouched despite being far above target -- loaded
+#     at the SAME pressure as the hot band (T = 4 eV > T_med), so a
+#     leaky window would drain it detectably with no initial pressure
+#     jump at its contacts;
+#   * COLD sub-window band (T = 0.5 eV < T_med = 1 eV): the one-sided
+#     rectifier is exactly closed -- never heated toward the medium.
+# The uniform transverse slip v0 puts a kinetic part into E_i, so the
+# internal-only extraction of the ion drain is genuinely exercised
+# (momentum must stay invariant). The cold band carries a small static
+# pressure dip whose acoustic response stays confined to the
+# contact-adjacent cells over 8 steps (sound crosses ~1e-3 of a cell
+# per step); interior cells see only solver-tolerance noise.
+my_constants.n_hot = 1.0e18
+my_constants.n_bulk = 2.5e19
+my_constants.n_max = 1.0e19
+my_constants.rho_hot = n_hot * m_p
+my_constants.rho_bulk = n_bulk * m_p
+my_constants.T_hot = 100.0
+my_constants.T_med = 1.0
+my_constants.T_cold = 0.5
+# Uniform pressure across the hot/bulk contact (the bulk band reads
+# T = T_hot * n_hot/n_bulk = 4 eV > T_med); the cold band dips.
+my_constants.P_hot = n_hot * T_hot * q_e
+my_constants.P_cold = n_hot * T_cold * q_e
+my_constants.v0 = 2.0e4
+my_constants.nu = 5.0e6
+my_constants.nz = 64
+my_constants.Lz = 1.0
+my_constants.dt = 1.0e-9
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 8
+amr.n_cell = nz
+amr.max_grid_size = nz
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-11
+newton.max_iterations = 8
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-11
+gmres.max_iterations = 200
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = T_hot
+hybrid_pic_model.n0_ref = n_hot
+hybrid_pic_model.gamma = 5.0/3.0
+hybrid_pic_model.n_floor = 1.0e8
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho_hot
+implicit_mhd.reference_magnetic_field = 1.0e-4
+implicit_mhd.gamma_e = 5.0/3.0
+implicit_mhd.gamma_i = 5.0/3.0
+implicit_mhd.reference_ion_pressure = P_hot
+implicit_mhd.mass_density(x,y,z) = if(z<0.4375, rho_hot, if(z<0.6875, rho_bulk, rho_hot))
+implicit_mhd.electron_pressure(x,y,z) = if(z<0.6875, P_hot, P_cold)
+implicit_mhd.ion_pressure(x,y,z) = if(z<0.6875, P_hot, P_cold)
+implicit_mhd.velocity_x(x,y,z) = v0
+implicit_mhd.evolve_ion_fluid = true
+implicit_mhd.fluid_flux = central
+# The central flux requires the explicit viscous stabilization (the
+# production pairing); the uniform slip has zero shear, so it is inert
+# away from the contacts.
+implicit_mhd.viscosity = 3000.0
+implicit_mhd.include_joule_heating = true
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.electron_pressure_floor = 1.0e-8
+implicit_mhd.ion_pressure_floor = 1.0e-8
+# The windowed halo temperature-relaxation outlet under test.
+implicit_mhd.halo_relaxation_rate = nu
+implicit_mhd.halo_relaxation_temperature = T_med
+implicit_mhd.halo_relaxation_n_max = n_max
+implicit_mhd.halo_relaxation_ledger_file = halo_relaxation_ledger.txt
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 8
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Ex Ey Ez Bx By Bz \
+                       implicit_mhd_mass_density implicit_mhd_momentum_density \
+                       implicit_mhd_electron_energy implicit_mhd_ion_energy
+diag1.write_species = 0

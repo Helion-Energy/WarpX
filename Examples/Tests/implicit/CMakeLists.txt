@@ -422,6 +422,52 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Calibrated windowed halo temperature-relaxation outlet
+# (implicit_mhd.halo_relaxation_*): on a three-region static column the
+# hot sub-window band drains BOTH species toward the cold-medium
+# targets at the exact theta-discretized rate (measured nu to < 2%),
+# the above-window band (window weight exactly zero) and the sub-target
+# cold band (one-sided rectifier exactly closed) are untouched, and the
+# removal ledger closes against the domain energy loss to < 1e-6
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_relaxation  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_halo_relaxation  # inputs
+    "analysis_mhd_halo_relaxation.py on diags/diag000000 diags/diag000008"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Knob-off NULL TWIN of the same column: the legacy path must be
+# untouched (the outlet would have drained the hot band by ~4%) and no
+# ledger file may be produced -- the bit-identical-when-off contract
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_relaxation_off  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_halo_relaxation_off  # inputs
+    "analysis_mhd_halo_relaxation.py off diags/diag000000 diags/diag000008"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Ion-target valve mode (halo_relaxation_target = ion, the reference code's
+# te <= tm cap vp.f90:731 in relaxed JFNK-safe form): on a uniform
+# sub-window column the electron energy decays toward the LOCAL frozen
+# ion-temperature image at the exact theta rate while the ion channel,
+# momentum, and density stay untouched; the ledger closes against the
+# electron-energy loss
+add_warpx_test(
+    test_1d_theta_implicit_mhd_halo_relaxation_ion_target  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_halo_relaxation_ion_target  # inputs
+    "analysis_mhd_halo_relaxation.py ion_target diags/diag000000 diags/diag000008"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # Engineered Newton active-set deadlock (the rr13d_C1 production-corpse
 # mechanism): a partnerless ion-energy sink pinned at a temperature-floor
 # admissibility bound dominates the residual norm and stagnates the

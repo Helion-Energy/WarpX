@@ -2810,6 +2810,47 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         accreted drive forcing cannot pin the ion-energy Newton
         residual.
 
+    halo_relaxation_rate: float, default=0 (off, bit-identical)
+        Windowed halo temperature-relaxation outlet rate in 1/s: relax
+        BOTH species' internal energies toward the prescribed
+        cold-medium temperature halo_relaxation_temperature, in the halo
+        density window below halo_relaxation_n_max (a model of the halo
+        dissipating into some medium). C^1 window keyed to the step-old
+        density (full at/below 1.125x n_max, exactly zero at/above
+        1.25x); targets are the cold-medium energies n*kB*T_med at the
+        LOCAL density per channel (U_e, the ion internal part under
+        total_energy/dual_energy, U_par/U_perp under cgl), clamped from
+        below at the positivity floors. One-sided (rectified): the
+        outlet only cools toward the medium, never heats a sub-target
+        cell. Part of the JFNK residual (theta-weighted, per-solve
+        frozen coefficients); the removed energy is booked (see
+        halo_relaxation_ledger_file). Keep rate*dt <= 5e-3 (non-stiff).
+
+    halo_relaxation_target: str, default="temperature"
+        Target mode of the halo relaxation outlet: "temperature" (both
+        species toward the fixed cold-medium temperature) or "ion" (the
+        the reference code's te <= tm valve, vp.f90:731, in relaxed JFNK-safe form:
+        ONLY the electron energy drains, toward the LOCAL step-old
+        ion-temperature image n*kB*Ti/(gamma_e-1); ion channels
+        untouched; requires an ion closure with an energy channel).
+
+    halo_relaxation_temperature: float, default=0
+        Cold-medium temperature in eV the halo energies relax toward
+        (required positive with halo_relaxation_rate > 0 and the
+        "temperature" target; unused under "ion").
+
+    halo_relaxation_n_max: float, default=0
+        Upper edge of the halo relaxation density window in m^-3
+        (number density; required positive with halo_relaxation_rate >
+        0). Cells above 1.25x this (step-old) are exactly untouched.
+
+    halo_relaxation_ledger_file: str, optional
+        File for the halo relaxation ledger (requires
+        halo_relaxation_rate > 0): "step energy" rows appended every
+        step with the cumulative removed fluid energy [J] evaluated at
+        the accepted theta state — the conservation instrument of the
+        outlet, the relaxation-side sibling of wall_ledger_file.
+
     floor_consistency_width_fraction: float, default=0.1
         Rectifier width of the floor-consistency source as a fraction of
         the cell bound; the bound-riding supply capacity is
@@ -3072,6 +3113,11 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         halo_pedestal_fraction=None,
         halo_pedestal_drag_rate=None,
         halo_pedestal_energy_rate=None,
+        halo_relaxation_rate=None,
+        halo_relaxation_target=None,
+        halo_relaxation_temperature=None,
+        halo_relaxation_n_max=None,
+        halo_relaxation_ledger_file=None,
         floor_consistency_rate=None,
         floor_consistency_width_fraction=None,
         floor_ledger_file=None,
@@ -3179,6 +3225,11 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.halo_pedestal_fraction = halo_pedestal_fraction
         self.halo_pedestal_drag_rate = halo_pedestal_drag_rate
         self.halo_pedestal_energy_rate = halo_pedestal_energy_rate
+        self.halo_relaxation_rate = halo_relaxation_rate
+        self.halo_relaxation_target = halo_relaxation_target
+        self.halo_relaxation_temperature = halo_relaxation_temperature
+        self.halo_relaxation_n_max = halo_relaxation_n_max
+        self.halo_relaxation_ledger_file = halo_relaxation_ledger_file
         self.floor_consistency_rate = floor_consistency_rate
         self.floor_consistency_width_fraction = floor_consistency_width_fraction
         self.floor_ledger_file = floor_ledger_file
@@ -3294,6 +3345,11 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.halo_pedestal_fraction = self.halo_pedestal_fraction
         implicit_mhd.halo_pedestal_drag_rate = self.halo_pedestal_drag_rate
         implicit_mhd.halo_pedestal_energy_rate = self.halo_pedestal_energy_rate
+        implicit_mhd.halo_relaxation_rate = self.halo_relaxation_rate
+        implicit_mhd.halo_relaxation_target = self.halo_relaxation_target
+        implicit_mhd.halo_relaxation_temperature = self.halo_relaxation_temperature
+        implicit_mhd.halo_relaxation_n_max = self.halo_relaxation_n_max
+        implicit_mhd.halo_relaxation_ledger_file = self.halo_relaxation_ledger_file
         implicit_mhd.floor_consistency_rate = self.floor_consistency_rate
         implicit_mhd.floor_consistency_width_fraction = (
             self.floor_consistency_width_fraction
