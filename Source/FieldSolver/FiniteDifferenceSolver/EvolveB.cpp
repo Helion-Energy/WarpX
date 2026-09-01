@@ -252,7 +252,11 @@ void FiniteDifferenceSolver::EvolveBCartesianECT (
     // the owners. Single-box non-periodic layouts take the fused
     // communication-free path below, bit-identical to the historical one.
     const bool seam_sync = warpx.ECTNeedsSeamSync();
-    AMREX_ALWAYS_ASSERT(lev == warpx.maxLevel());
+    // The ECT solver is single-level: ComputeFaceExtensions fills the
+    // borrowing structure and the owner masks at maxLevel() only, so there is
+    // nothing for a coarser level to read here
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(lev == warpx.maxLevel(),
+        "EvolveBCartesianECT: the ECT solver does not support mesh refinement");
 
     Venl[0]->setVal(0.);
     Venl[1]->setVal(0.);

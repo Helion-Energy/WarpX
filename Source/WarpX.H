@@ -1310,11 +1310,14 @@ private:
      * each face, so faces on shared nodal planes are decided exactly once and
      * the cross-box consequences can be reduced to the owner afterwards. */
     amrex::Vector<std::array< std::unique_ptr<amrex::iMultiFab>, 3 > > m_ect_face_owner_mask;
-    /** EB/ECT: true when any unstable or intruded face sits within one cell of
-     * a fab boundary (or on a shared nodal plane), i.e. when the conformal
-     * B push must synchronize the enlarged-cell accumulator (Venl) across
-     * boxes. False for single-box non-periodic layouts: the legacy
-     * communication-free path is then taken and stays bit-identical. */
+    /** EB/ECT: true when the level has more than one box, or is periodic in
+     * any direction, i.e. whenever a face can be shared between fabs and the
+     * conformal B push must therefore synchronize the enlarged-cell
+     * accumulator (Venl) across boxes. This is a property of the layout, not
+     * of where the cut cells actually fall: it is set for any multi-box or
+     * periodic layout, whether or not a cut cell is near a seam. False only
+     * for single-box non-periodic layouts, which take the legacy
+     * communication-free path and stay bit-identical to it. */
     bool m_ect_needs_seam_sync = false;
 
     // Copy of the coarse aux
