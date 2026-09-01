@@ -969,20 +969,18 @@ public:
     void ComputeFaceExtensions();
     /**
     * \brief Do the one-way extension. Borrowing decisions are made only by the
-    * owner copy of each face; the area each lender gave away and the intruded
-    * marks recorded toward faces of other fabs are accumulated per direction
-    * for the cross-box reduction in ComputeFaceExtensions.
+    * owner copy of each face; the area each lender gave away is accumulated
+    * per direction in \c lent_area for the cross-box reduction in
+    * ComputeFaceExtensions.
     */
     void ComputeOneWayExtensions (
-        std::array< std::unique_ptr<amrex::MultiFab>, 3 >& lent_area,
-        std::array< std::unique_ptr<amrex::iMultiFab>, 3 >& intruded_mark);
+        std::array< std::unique_ptr<amrex::MultiFab>, 3 >& lent_area);
     /**
     * \brief Do the eight-ways extension (same cross-box bookkeeping as the
     * one-way pass).
     */
     void ComputeEightWaysExtensions (
-        std::array< std::unique_ptr<amrex::MultiFab>, 3 >& lent_area,
-        std::array< std::unique_ptr<amrex::iMultiFab>, 3 >& intruded_mark);
+        std::array< std::unique_ptr<amrex::MultiFab>, 3 >& lent_area);
 
 #ifdef WARPX_USE_FFT
     auto&  get_spectral_solver_fp (int lev) {return *spectral_solver_fp[lev];}
