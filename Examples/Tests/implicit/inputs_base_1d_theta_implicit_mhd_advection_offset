@@ -1,0 +1,168 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Offset-density advection (implicit_mhd.advection_density_offset_fraction,
+# The reference code's subtract/advect/re-add density advance): a cold, highly
+# supersonic ENTROPY WAVE -- uniform velocity, uniform total pressure,
+# density structure only.  For uniform u and uniform p the Euler system
+# reduces to pure translation of rho at speed v0, so the exact solution
+# is known analytically for every channel and any deviation of the
+# uniform halo from its loaded value is purely numerical.
+#
+# The loaded profile is a smoothed top hat of peak density n0, with
+# TWO-CELL edges, riding on a featureless halo at n_halo.  The central
+# flux carries no Riemann dissipation in the mass channel, so those edges
+# radiate a dispersive wake that alternates sign cell to cell across the
+# halo and advectively EVACUATES it -- exactly the "noise in the low
+# density region" the offset removes, and the production pathology (a
+# halo driven onto its positivity bound) in miniature.
+#
+# Density scales, in units of the advective background n_off:
+#   n0     = 6e15  = 6   x n_off  (above the 1.2 n_off exact-zero tail:
+#                                  the pulse is transported bit-identically)
+#   n_off  = 1e15  = 0.1 * n_ref, the reference code's f_en_mn * en0
+#   n_halo = 2e14  = 0.2 x n_off  (deeply sub-offset: fully rectified)
+my_constants.n0 = 6.0e15
+my_constants.n_halo = 2.0e14
+my_constants.rho0 = n0 * m_p
+my_constants.rho_halo = n_halo * m_p
+# The shared vacuum reference is set through the STATIC base (the reference code's
+# en00) so that it does not ride on the Ohm density guard, which is left
+# far below everything.
+my_constants.n_ref = 1.0e16
+
+# UNIFORM electron pressure [Pa]: the entropy wave needs a uniform TOTAL
+# pressure, so p_e is prescribed as an absolute value rather than as n*T
+# (the ion closure is barotropic with zero reference pressure, so p_e is
+# the whole pressure).  At n0 this is ~1 eV.
+my_constants.Pe = 1.0e-3
+my_constants.Te = Pe / (n0 * q_e)
+
+my_constants.nz = 64
+my_constants.Lz = 1.0
+my_constants.dz = Lz / nz
+
+# Mach ~7 against the halo sound speed sqrt(gamma Pe / rho_halo)
+# ~ 7.1e4 m/s (the fastest acoustic signal in the domain) and Mach ~39
+# in the pulse, so the dynamics are advection-dominated everywhere.
+my_constants.v0 = 5.0e5
+# Advective Courant number 0.25: over 24 steps the pulse translates
+# exactly six cells.
+my_constants.dt = 0.25 * dz / v0
+
+# Solver-vec normalisation at the ram scale (the dual-energy advection
+# precedent); the ACTUAL axial field is Bz0, chosen so the halo Alfven
+# speed (1.5e4 m/s) is dynamically negligible.
+my_constants.B_ref = sqrt(mu0 * rho0) * v0
+my_constants.Bz0 = 1.0e-5
+
+# Smoothed top hat, TWO-cell edges, in the first third of the domain.
+my_constants.zlo = 0.15
+my_constants.zhi = 0.35
+my_constants.edge = 2.0 * dz
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 24
+amr.n_cell = nz
+amr.max_grid_size = nz
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+# Backward Euler.  The theta = 1/2 admissibility bound on a bounded
+# block is (1 - theta) U_old + theta * floor, i.e. HALF the step-old
+# value however low the floor is set, and the halo's advected electron
+# energy wants to move by more than that in a single step here.  At
+# theta = 1 the bound collapses onto the floor itself, which is nine
+# decades lower, so the bounded Newton solve has room; the dispersive
+# mass-channel ripple the test measures survives (the central flux still
+# carries no mass dissipation) and BOTH twins get the same damping.
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-8
+newton.max_iterations = 20
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-6
+gmres.max_iterations = 200
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = 5.0/3.0
+hybrid_pic_model.n_floor = 1.0e12
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B_ref
+implicit_mhd.gamma_e = 5.0/3.0
+implicit_mhd.gamma_i = 5.0/3.0
+implicit_mhd.reference_ion_pressure = 0.0
+implicit_mhd.evolve_ion_fluid = true
+# Static vacuum reference (the reference code's en00): rho_ref = n_ref * m_p, and
+# the advective background is offset_fraction * rho_ref.
+implicit_mhd.vacuum_reference_base_density = n_ref * m_p
+# Production flux family.  central carries no mass-channel dissipation,
+# which is what exposes the halo noise; a positive viscosity is required
+# and acts on velocity gradients only (identically zero on the loaded
+# uniform-velocity state, and identical in the ON and OFF twins).  At
+# 1 m^2/s the diffusion number nu dt/dz^2 is 4e-5, so it cannot be the
+# source of any difference the analysis measures.
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 1.0
+# Six decades below the halo, so the state's positivity machinery has
+# room to be exercised by the null twin's undershoot without pinning.
+implicit_mhd.mass_density_floor = 1.0e-6 * rho_halo
+implicit_mhd.electron_pressure_floor = 1.0e-12 * Pe
+
+implicit_mhd.mass_density(x,y,z) = "rho_halo + (rho0 - rho_halo) * 0.5 * (tanh((z - zlo) / edge) - tanh((z - zhi) / edge))"
+implicit_mhd.velocity_z(x,y,z) = v0
+implicit_mhd.electron_pressure(x,y,z) = Pe
+
+# Dynamically negligible uniform axial field.
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 Bz0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 24
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz implicit_mhd_mass_density implicit_mhd_momentum_z \
+                       implicit_mhd_electron_energy
+diag1.write_species = 0

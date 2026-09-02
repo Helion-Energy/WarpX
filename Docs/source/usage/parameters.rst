@@ -4782,6 +4782,89 @@ Jacobian probes.
     cyclotron scale, of order :math:`0.1/\Delta t` for typical
     implicit MHD steps).
 
+.. pp:param:: implicit_mhd.advection_density_offset_fraction
+    :type: ``float``
+    :default: ``0`` (off, bit-identical)
+
+    Offset-density advection: the fraction :math:`f_\mathrm{off}` of the
+    shared vacuum reference density defining the advective background
+
+    .. math::
+
+       \rho_\mathrm{off} = f_\mathrm{off}\,\rho_\mathrm{ref},
+
+    with :math:`\rho_\mathrm{ref}` the same reference the vacuum
+    resistivity and the conduction halo boost key to (the Ohm density
+    guard, raised by :pp:param:`implicit_mhd.vacuum_reference_base_density`
+    and the per-step frozen
+    :pp:param:`implicit_mhd.vacuum_reference_peak_fraction` times the
+    density peak). The **advective mass flux only** then transports
+
+    .. math::
+
+       D(\rho) = \mathrm{smooth\text{-}max}(\rho - \rho_\mathrm{off},\,0)
+
+    -- the rectified *perturbation* -- in place of :math:`\rho`. This is the flux-form transliteration of
+    the subtract / advect / re-add density advance
+    (:math:`n \to n - f_\mathrm{off}\rho_\mathrm{ref}`, advect,
+    :math:`\max(\cdot, 0)`, add back), whose stated purpose is to
+    "remove the floor value to reduce noise in the low density region":
+    advecting the perturbation about a non-zero background is
+    numerically cleaner than advecting the small, noisy absolute
+    density. Both the source scheme's advance and every mass flux
+    channel of the recast fluxes here are *linear* in the cell
+    densities, and :math:`\rho_\mathrm{off}` is a constant field, so
+    subtracting the offset from the state and adding it back afterwards
+    cancels identically -- the only surviving arithmetic is the
+    non-negativity clamp on the perturbation, which is what :math:`D`
+    applies. Consequences:
+
+    * **Exactly conservative.** The offset enters only as the density
+      argument of a face flux, so the divergence still telescopes and
+      total mass changes solely through the domain boundary.
+    * **Exact clamp tail.** At and above :math:`1.2\,\rho_\mathrm{off}`
+      the smoothing is exactly inactive (a :math:`C^1` gate whose value
+      and slope both vanish there): :math:`D = \rho -
+      \rho_\mathrm{off}` with no smoothing residue surviving into the
+      plasma.
+    * **Advectively static halo.** As :math:`\rho \to 0` the
+      transported density tends to zero: a sub-offset cell has no
+      advective mass flux at all, so sub-offset density structure
+      produces none of the dispersive ripple a centred flux would
+      otherwise amplify there.
+    * **Price, stated plainly.** Above the offset the flux is the
+      legacy flux *minus the background's own flux*
+      :math:`\rho_\mathrm{off}\mathbf{u}`, so the core mass transport
+      loses the term
+      :math:`\rho_\mathrm{off}\,\nabla\!\cdot\!\mathbf{u}`: the
+      numerical background does not compress with the plasma. That is
+      identically zero for divergence-free flow and
+      :math:`O(\rho_\mathrm{off}/\rho)` otherwise, which is why the
+      offset must be kept far below the plasma density. It is the
+      source scheme's own behaviour, not a deviation from it.
+    * **Mass channel only.** The momentum and energy channels advect at
+      the velocity :math:`u = \mathbf{m}/\rho` recovered from the full
+      density, exactly as in the source scheme, and carry no explicit
+      density factor to offset.
+
+    The source scheme's in-loop :math:`\max(n, 0)` clamp is carried by
+    the rectifier itself, not by the drain gates: :math:`D` vanishes
+    below the offset, so a sub-offset donor has no advective outflow
+    left for a gate to close, and the mass donor drain gate is
+    deliberately left at its floor/pedestal anchors. Note that with a
+    halo's mass flux switched off but its momentum still live, the
+    halo's *temperature* (advected energy over frozen mass) can drift;
+    the existing halo machinery
+    (:pp:param:`implicit_mhd.halo_pedestal_drag_rate`,
+    :pp:param:`implicit_mhd.halo_relaxation_rate`) is what bounds that.
+    Orthogonal to, and composable with,
+    :pp:param:`implicit_mhd.halo_pedestal_fraction`, which raises the
+    *state* onto a pedestal once per step (tracked non-conservation);
+    this knob never touches the state. Requires
+    ``implicit_mhd.fluid_flux = central`` or ``hlld`` and
+    :math:`f_\mathrm{off}\,\rho_\mathrm{ref} >`
+    :pp:param:`implicit_mhd.mass_density_floor`.
+
 .. pp:param:: implicit_mhd.halo_relaxation_rate
     :type: ``float``
     :unit: 1/s

@@ -2832,6 +2832,31 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         accreted drive forcing cannot pin the ion-energy Newton
         residual.
 
+    advection_density_offset_fraction: float, default=0 (off, bit-identical)
+        Offset-density advection (requires fluid_flux="central" or
+        "hlld"): fraction f_off of the shared vacuum reference density
+        rho_ref defining the advective background rho_off = f_off
+        rho_ref, so the ADVECTIVE MASS FLUX transports D(rho) = rho_off +
+        smooth-max(rho - rho_off, 0) in place of rho -- the flux form of
+        a subtract / advect / re-add density advance ("remove the floor
+        value to reduce noise in the low density region"). Every mass
+        flux channel of the recast fluxes is linear in the two cell
+        densities, so the subtraction and the re-addition cancel
+        identically and the only surviving arithmetic is the
+        non-negativity clamp on the perturbation. Exactly conservative
+        (the offset is a face-flux density argument, so the divergence
+        still telescopes); BIT-IDENTICAL at and above 1.2 rho_off, so
+        core-class states are untouched; and as rho -> 0 the transported
+        density tends to rho_off, so sub-offset structure generates no
+        differential mass flux and the numerical halo advects as a
+        uniform medium instead of amplifying the centred flux's
+        dispersive ripple. Mass channel only -- momentum and energy
+        advect at u = m/rho recovered from the full density. The mass
+        donor drain gate additionally anchors at rho_off, the
+        conservative form of the source scheme's in-loop max(n, 0).
+        Orthogonal to halo_pedestal_fraction, which raises the STATE
+        (tracked non-conservation); this knob never touches the state.
+
     halo_relaxation_rate: float, default=0 (off, bit-identical)
         Windowed halo temperature-relaxation outlet rate in 1/s: relax
         BOTH species' internal energies toward the prescribed
@@ -3172,6 +3197,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         halo_pedestal_fraction=None,
         halo_pedestal_drag_rate=None,
         halo_pedestal_energy_rate=None,
+        advection_density_offset_fraction=None,
         halo_relaxation_rate=None,
         halo_relaxation_target=None,
         halo_relaxation_temperature=None,
@@ -3288,6 +3314,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.halo_pedestal_fraction = halo_pedestal_fraction
         self.halo_pedestal_drag_rate = halo_pedestal_drag_rate
         self.halo_pedestal_energy_rate = halo_pedestal_energy_rate
+        self.advection_density_offset_fraction = advection_density_offset_fraction
         self.halo_relaxation_rate = halo_relaxation_rate
         self.halo_relaxation_target = halo_relaxation_target
         self.halo_relaxation_temperature = halo_relaxation_temperature
@@ -3412,6 +3439,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.halo_pedestal_fraction = self.halo_pedestal_fraction
         implicit_mhd.halo_pedestal_drag_rate = self.halo_pedestal_drag_rate
         implicit_mhd.halo_pedestal_energy_rate = self.halo_pedestal_energy_rate
+        implicit_mhd.advection_density_offset_fraction = (
+            self.advection_density_offset_fraction
+        )
         implicit_mhd.halo_relaxation_rate = self.halo_relaxation_rate
         implicit_mhd.halo_relaxation_target = self.halo_relaxation_target
         implicit_mhd.halo_relaxation_temperature = self.halo_relaxation_temperature

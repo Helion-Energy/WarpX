@@ -1,0 +1,7 @@
+# base input parameters
+FILE = inputs_base_1d_theta_implicit_mhd_advection_offset
+
+# NULL TWIN: the knob is not set at all, so the legacy central mass flux
+# runs untouched.  This is the reference every other arm of the family is
+# graded against -- the noise the offset removes, the conservation the
+# offset must reproduce, and the bitwise baseline of the two no-op arms.
