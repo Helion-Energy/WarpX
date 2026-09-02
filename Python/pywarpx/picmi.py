@@ -2600,6 +2600,28 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         the reservoir modes (required there; an error in the other
         modes). Applied to both conduction channels.
 
+    wall_conduction_scale: {"perp", "parallel"}, optional
+        Braginskii clamp CLASS of the shaped-wall interface conductance
+        (requires thermal_conduction_model="braginskii"). Interface
+        faces never use the anisotropic tensor's bn-bn projection — on
+        the stair-step contour the face normals are grid-aligned, so
+        that projection is a geometry artifact — they use a clamped
+        per-component coefficient, and this selects which. "perp"
+        (default) takes the conduction_chi_perp_min/max-clamped
+        coefficient: the reading that a flux-conforming wall only
+        exposes the cross-field channel. "parallel" takes the
+        conduction_chi_par_min/max-clamped one, reproducing the
+        measured the reference code's wall conductance G (their implicit temperature
+        solve pins every wall-conforming cut-cell vertex at the 0.5 eV
+        anchor for BOTH species and builds G from the PARALLEL
+        conductivity clamp maximum). Under production clamp classes the
+        two differ by up to 1e4 in wall conductance, hence in the halo
+        thermal time constant tau = C/G. Applies to both species and to
+        every reservoir wall_thermal_bc mode; only the chi that
+        multiplies the drain changes — sign, one-sided gate and
+        free-streaming cap are untouched — and the selector is a
+        per-solve constant, so JFNK smoothness is unchanged.
+
     wall_ledger_file: str, optional
         File for the shaped-wall deposition ledger (active with any
         wall_thermal_bc): cumulative mass [kg] and fluid energy [J]
@@ -3169,6 +3191,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         wall_polyline_file=None,
         wall_thermal_bc=None,
         wall_temperature=None,
+        wall_conduction_scale=None,
         wall_ledger_file=None,
         wall_band_eta_override=None,
         wall_field_freeze=None,
@@ -3283,6 +3306,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.wall_polyline_file = wall_polyline_file
         self.wall_thermal_bc = wall_thermal_bc
         self.wall_temperature = wall_temperature
+        self.wall_conduction_scale = wall_conduction_scale
         self.wall_ledger_file = wall_ledger_file
         self.wall_band_eta_override = wall_band_eta_override
         self.wall_field_freeze = wall_field_freeze
@@ -3437,6 +3461,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.wall_polyline_file = self.wall_polyline_file
         implicit_mhd.wall_thermal_bc = self.wall_thermal_bc
         implicit_mhd.wall_temperature = self.wall_temperature
+        implicit_mhd.wall_conduction_scale = self.wall_conduction_scale
         implicit_mhd.wall_ledger_file = self.wall_ledger_file
         implicit_mhd.wall_band_eta_override = self.wall_band_eta_override
         implicit_mhd.wall_field_freeze = self.wall_field_freeze

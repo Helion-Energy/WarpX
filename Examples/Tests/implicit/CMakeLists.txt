@@ -1738,6 +1738,44 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Braginskii clamp CLASS of the shaped-wall interface conductance
+# (implicit_mhd.wall_conduction_scale), DEFAULT/legacy twin: a hot
+# uniform column inside a straight cylinder wall under the HARD
+# dirichlet pin (no free-streaming cap, no one-sided gate -- the only
+# thing the knob touches is the chi that multiplies the exchange), with
+# B TANGENTIAL to the wall so every radial face has b_n = 0 and the
+# interior tensor nn projection is chi_perp exactly. Both per-component
+# clamps ride their (production-ratio, 1e4 apart) caps over the whole
+# run, so with theta = 1 each mode's conduction subsystem is EXACTLY a
+# linear backward-Euler cylindrical Dirichlet column and the analysis
+# integrates the identical discrete operator. "perp" is the default:
+# the wall face conducts at the interior coefficient
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_conduction_scale_perp  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_wall_conduction_scale  # inputs
+    "analysis_mhd_wall_conduction_scale.py diags perp"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# ...and "parallel" (the reference-matched wall conductance G, whose
+# implicit temperature solve builds G from the PARALLEL conductivity
+# clamp maximum xile_mx = xili_mx at every cut-cell node): BOTH species
+# channels must land on the 1e4-stronger column, and the measured
+# first-step parallel/perp drain separation must be the analytic clamp
+# ratio -- the quantitative gate on the reference-parity fix
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_conduction_scale_parallel  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_conduction_scale implicit_mhd.wall_conduction_scale=parallel"  # inputs
+    "analysis_mhd_wall_conduction_scale.py diags parallel ../test_rz_theta_implicit_mhd_wall_conduction_scale_perp/diags"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_conduction_scale_perp  # dependency
+)
+
 # wall-drain gate anchored at the reachable set: with wall_temperature
 # far BELOW the electron/ion temperature floors (the ratchet engaged
 # from step 0) and dt far above the wall-face free-streaming time, a

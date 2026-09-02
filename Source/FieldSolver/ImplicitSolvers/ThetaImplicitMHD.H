@@ -1388,6 +1388,42 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // boost is evaluated at the coefficient-state face density, so
     // step_old keeps Newton-linear diffusion).
     amrex::Real m_conduction_halo_boost = 0.0;
+    // Braginskii clamp CLASS of the shaped-wall interface conductance
+    // (implicit_mhd.wall_conduction_scale, braginskii only):
+    //   "perp"     (default) -- the wall-interface drain's scalar chi is
+    //              the chi_PERP-clamped coefficient. The reasoning was
+    //              that the reference code's flux-conforming polyline wall only ever
+    //              exposes the cross-field channel (B is tangential to
+    //              the polyline), while our stair-step z-normal faces see
+    //              b_n ~ 1 and the tensor nn projection leaked the
+    //              parallel clamp class into the wall conductance.
+    //   "parallel" -- the drain's scalar chi is the chi_PAR-clamped
+    //              coefficient: the reference code's measured wall conductance
+    //              (2026-09-02 halo-sink instrumentation of the reference shot).
+    //              The reference code's implicit temperature solve pins EVERY
+    //              cut-cell vertex at the 0.5 eV anchor (sten.f:536,
+    //              bnd = 'i' -> msk(:n_cut) = .FALSE., NOT the part
+    //              card's t_bc = 'd' mask), and the halo->wall
+    //              conductance G = Sum_halo (K.1)_i that sets the halo
+    //              temperature is bounded by the PARALLEL clamp maximum
+    //              xile_mx = xili_mx = 1e6 n kB: removing that single
+    //              term takes their halo from 0.5 eV to 5e4 eV in 73
+    //              steps (measured tau_halo = 106 ns ion / 261 ns
+    //              electron during formation). Under the production
+    //              clamp classes (perp [1, 100] vs par [100, 1e6]) the
+    //              perp scale makes our wall conductance up to 1e4x
+    //              weaker than theirs.
+    // BOTH species channels and every reservoir wall_thermal_bc mode
+    // (outflow_limited / dirichlet / dirichlet_limited) take the selected
+    // scale. ONLY the chi that multiplies the drain changes: its sign,
+    // the C^1 reachable-set gate, the rectifier and the free-streaming
+    // cap are untouched. The selector is a per-solve constant (no new
+    // state-dependent branching), so the JFNK residual stays as smooth as
+    // before. Interior faces always keep the full tensor nn projection,
+    // and the z-end conductive exchange (z_wall_conduction) keeps its
+    // one-sided nn scalar -- this knob is the shaped-wall interface only.
+    std::string m_wall_conduction_scale = "perp";
+    bool m_wall_conduction_parallel_scale = false;
     // Floor-independent corner width of the C^1 smooth-max pressure
     // recovery (see FluxParameters::pressure_corner_width_fraction;
     // 0 = legacy width = internal-energy floor).

@@ -451,6 +451,27 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "cap -- silently erasing the multiplicative dp boost. Arm "
         "exactly one halo-shorting mechanism (the reference-parity dp "
         "boost, or the quasi-shorting envelope term).");
+    // Braginskii clamp CLASS of the shaped-wall interface conductance
+    // (see m_wall_conduction_scale): "perp" (default, the historical
+    // behavior) or "parallel" (the reference code's measured wall conductance G,
+    // set by the PARALLEL clamp maximum xile_mx = xili_mx = 1e6 n kB).
+    pp.query("wall_conduction_scale", m_wall_conduction_scale);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_wall_conduction_scale == "perp" ||
+            m_wall_conduction_scale == "parallel",
+        "implicit_mhd.wall_conduction_scale must be 'perp' (the "
+        "chi_perp-clamped wall drain) or 'parallel' (the chi_par-clamped "
+        "reference-matched wall conductance)");
+    m_wall_conduction_parallel_scale =
+        (m_wall_conduction_scale == "parallel");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_wall_conduction_parallel_scale || m_conduction_braginskii,
+        "implicit_mhd.wall_conduction_scale = parallel selects between "
+        "the Braginskii chi_par/chi_perp CLAMP CLASSES at the shaped-wall "
+        "interface faces and requires "
+        "implicit_mhd.thermal_conduction_model = braginskii (the "
+        "constant/parser diffusivities carry a single scalar chi, which "
+        "the wall drain already uses unchanged)");
     utils::parser::queryWithParser(pp, "pressure_corner_width_fraction",
                                    m_pressure_corner_width_fraction);
     pp.query("r_open_fluid", m_r_open_fluid);
@@ -2805,6 +2826,12 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "\n"
                    << "Conduction halo boost dp (ion): "
                    << m_conduction_halo_boost << "\n"
+                   << "Wall conduction scale:         "
+                   << m_wall_conduction_scale
+                   << (m_wall_conduction_parallel_scale
+                           ? " (chi_par clamp class, the reference code's G parity)"
+                           : " (chi_perp clamp class)")
+                   << "\n"
                    << "Halo pedestal fraction:        " << m_halo_pedestal_fraction
                    << "\n"
                    << "Halo pedestal drag rate [1/s]: " << m_halo_pedestal_drag_rate
@@ -3599,6 +3626,10 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
         // already carry it.
         SanitizeLoadedState();
         ClampWallExteriorState();
+        // The reference code's zero velocity IC on the live no-slip band, AFTER the
+        // exterior clamp (which owns the masked side): the residual's
+        // momentum identity rows then hold u = 0 there forever.
+        PinWallNoSlipMomentum();
         m_loaded_state_sanitized = true;
     }
     RefreshHaloPedestal();
@@ -6032,6 +6063,12 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const bool add_halo_boost =
         m_conduction_braginskii && m_conduction_halo_boost > 0.0_rt;
     const amrex::Real halo_boost_dp = m_conduction_halo_boost;
+    // Braginskii clamp CLASS of the shaped-wall interface conductance
+    // (implicit_mhd.wall_conduction_scale; see the header): a per-solve
+    // constant selector, so the wall branch below stays a static branch
+    // and the JFNK probes see the same smoothness they always did.
+    const bool wall_conduction_parallel_scale =
+        m_wall_conduction_parallel_scale;
     const amrex::Real halo_boost_reference =
         m_ion_charge_to_mass * VacuumReferenceMassDensity();
     const amrex::Real halo_boost_guard =
@@ -7454,18 +7491,26 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         brag_chi_par_ion =
                             std::max(brag_chi_par_ion, brag_chi_perp_ion);
                         // Wall interface faces: the drain's scalar chi is
-                        // the PERP-clamped coefficient, NOT the tensor nn
-                        // projection. The reference code's flux-conserving wall only
-                        // ever exposes the perpendicular channel (B is
-                        // tangential to its polyline); our stair-step
-                        // z-normal faces see b_n ~ 1 and the nn projection
-                        // leaked the PARALLEL clamp class into the wall
-                        // conductance (the E5 wall-ledger runaway channel,
-                        // 2026-08-29 parity audit). Interior faces keep
-                        // the full tensor.
+                        // a CLAMPED per-component coefficient, NOT the
+                        // tensor nn projection (which on our stair-step
+                        // z-normal faces sees b_n ~ 1 and leaked the
+                        // parallel class in through a geometry artifact --
+                        // the E5 wall-ledger runaway channel, 2026-08-29
+                        // parity audit). Which clamp CLASS is the knob
+                        // implicit_mhd.wall_conduction_scale (see the
+                        // header): "perp" (default) keeps the
+                        // cross-field-only reading of the reference code's polyline
+                        // wall; "parallel" reproduces their MEASURED wall
+                        // conductance G, which their implicit temperature
+                        // solve builds from the PARALLEL clamp maximum
+                        // xili_mx = 1e6 n kB at every cut-cell node
+                        // (2026-09-02 halo-sink instrumentation). Interior
+                        // faces keep the full tensor either way.
                         chi_ion_face =
                             wall_face
-                                ? brag_chi_perp_ion
+                                ? (wall_conduction_parallel_scale
+                                       ? brag_chi_par_ion
+                                       : brag_chi_perp_ion)
                                 : brag_chi_perp_ion +
                             (brag_chi_par_ion - brag_chi_perp_ion) *
                                 brag_bn * brag_bn / brag_b2_dir;
@@ -7665,11 +7710,17 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         // The reference code's te_cond: parallel at least perpendicular.
                         brag_chi_par_electron = std::max(
                             brag_chi_par_electron, brag_chi_perp_electron);
-                        // Wall interface faces: PERP-clamped scalar chi,
-                        // not the nn projection (see the ion channel).
+                        // Wall interface faces: the clamped per-component
+                        // scalar chi selected by
+                        // implicit_mhd.wall_conduction_scale, not the nn
+                        // projection (see the ion channel). BOTH species
+                        // take the same clamp class -- the reference code anchors
+                        // both at 0.5 eV with xile_mx = xili_mx.
                         chi_electron_face =
                             wall_face
-                                ? brag_chi_perp_electron
+                                ? (wall_conduction_parallel_scale
+                                       ? brag_chi_par_electron
+                                       : brag_chi_perp_electron)
                                 : brag_chi_perp_electron +
                                       (brag_chi_par_electron -
                                        brag_chi_perp_electron) *

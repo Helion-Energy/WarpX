@@ -5847,6 +5847,44 @@ Jacobian probes.
     unreachable by construction). Under ``dirichlet`` the same
     reachable anchor is the pin target itself.
 
+.. pp:param:: implicit_mhd.wall_conduction_scale
+    :type: ``string``
+    :default: ``perp``
+
+    Braginskii clamp CLASS of the shaped-wall interface conductance
+    (requires ``implicit_mhd.thermal_conduction_model = braginskii``;
+    the constant/parser diffusivities carry a single scalar chi that the
+    wall drain already uses unchanged). Interface faces never use the
+    anisotropic tensor's :math:`\hat b_n \hat b_n` projection — on the
+    stair-step contour the face normals are grid-aligned, so that
+    projection is a geometry artifact rather than a physical channel —
+    they use a clamped per-component coefficient, and this knob selects
+    which one. ``perp`` (default) takes the
+    :pp:param:`implicit_mhd.conduction_chi_perp_max` /
+    ``conduction_chi_perp_min``-clamped coefficient: the reading that a
+    flux-conforming wall only ever exposes the cross-field channel
+    because B is tangential to the contour. ``parallel`` takes the
+    ``conduction_chi_par_min/max``-clamped coefficient instead, which
+    reproduces the reference code's MEASURED wall conductance: their implicit
+    temperature solve pins every wall-conforming cut-cell vertex at the
+    0.5 eV anchor for BOTH species and builds the halo-to-wall
+    conductance :math:`G = \sum (K\cdot 1)_i` from the PARALLEL
+    conductivity clamp maximum ``xile_mx = xili_mx``, and removing that
+    single term takes their halo from 0.5 eV to 5e4 eV in 73 steps.
+    Under production clamp classes (perp :math:`[1, 100]` vs par
+    :math:`[100, 10^6]`) the two settings differ by up to
+    :math:`10^4` in wall conductance and therefore in the halo thermal
+    time constant :math:`\tau = C/G`. The selection applies to BOTH
+    species channels and to every reservoir
+    :pp:param:`implicit_mhd.wall_thermal_bc` mode
+    (``outflow_limited``, ``dirichlet``, ``dirichlet_limited``); only the
+    chi that multiplies the drain changes — the drain's sign, its
+    one-sided reachable-set gate and its free-streaming cap are
+    untouched. Interior faces always keep the full tensor, and the z-end
+    exchange (:pp:param:`implicit_mhd.z_wall_conduction`) keeps its own
+    one-sided nn scalar. The selector is a per-solve constant, so the
+    Newton/JFNK residual stays exactly as smooth as before.
+
 .. pp:param:: implicit_mhd.wall_band_eta_override
     :type: ``float`` (Ohm m)
     :default: ``0`` (off)

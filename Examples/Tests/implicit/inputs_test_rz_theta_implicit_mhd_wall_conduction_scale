@@ -1,0 +1,163 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Braginskii clamp CLASS of the shaped-wall interface conductance
+# (implicit_mhd.wall_conduction_scale): a hot static uniform RZ column
+# (T0 = 100 eV both species) inside a STRAIGHT cylinder wall at
+# r_w = 0.065 m (the mask's first conductor cell center is 0.06875, so
+# the wall interface is the grid face at r = 0.0625), against a
+# wall_thermal_bc = dirichlet bath at T_wall = 2 eV -- the HARD pin, so
+# the exchange carries NO free-streaming cap and NO one-sided gate and
+# the only thing the knob changes is the chi that multiplies it.
+#
+# B is uniform along z, i.e. TANGENTIAL to the cylinder: every radial
+# face (interior and interface alike) has b_n = 0, so the interior
+# tensor nn projection is chi_perp EXACTLY and the wall face's clamp
+# class is the ONLY place the parallel scale can enter. The distinction
+# is therefore unambiguous: with "perp" the wall face conducts at the
+# same coefficient as the interior faces, with "parallel" it conducts
+# 1e4 times harder.
+#
+# Both per-component clamps are SATURATED over the whole run (the raw
+# Braginskii coefficients of both species stay >= 5x above their caps at
+# the coldest face temperature reached), so the effective diffusivities
+# are the state-independent constants (gamma - 1) * chi_*_cap to machine
+# precision (the soft cap's tanh knee is 0.1 cap wide: a 5x margin
+# saturates it to 1e-17) and, with theta = 1, each run's conduction
+# subsystem is EXACTLY a linear backward-Euler cylindrical diffusion
+# column with a half-cell Dirichlet bath on its outer face. The analysis
+# integrates that identical discrete operator per mode.
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+my_constants.T0_ev = 100.0
+my_constants.Twall_ev = 2.0
+my_constants.Pe0 = n0 * T0_ev * q_e
+my_constants.Pi0 = n0 * T0_ev * q_e
+my_constants.gamma = 5.0/3.0
+# 5 G along z: strongly magnetized electrons (Omega_e tau_e ~ 1.1e3 at
+# the face state) so chi_perp_e sits ~4e-6 of chi_par_e -- far enough
+# below the perp cap to saturate it -- while the ion channel stays
+# comfortably above BOTH of its caps
+my_constants.B0 = 5.0e-4
+my_constants.Lr = 0.1
+my_constants.Lz = 0.1
+my_constants.nr = 8
+my_constants.nz = 8
+my_constants.dr = Lr / nr
+# per-component clamps, DEFINED (kappa/(n kB)) convention; the operator
+# diffusivity is (gamma - 1) * cap. The 1e4 separation is the production
+# clamp separation (perp [1, 100] vs par [100, 1e6]).
+my_constants.chi_par_cap = 1.0e5
+my_constants.chi_perp_cap = chi_par_cap / 1.0e4
+my_constants.chi_op_par = (gamma - 1.0) * chi_par_cap
+# conduction-paced step at the PARALLEL scale: chi_op_par dt / dr^2 =
+# 0.125, so the wall face's half-cell Dirichlet rate is
+# 2 * 0.125 * (r_face/r_center) = 0.278 per step and the wall ring cools
+# 100 -> 24.5 eV over the run. Sound CFL 4.2e-3 (2.5e-2 integrated) and
+# Alfven CFL 2.6e-4: the acoustic response to the ring cooling is a
+# sub-percent contamination of the conduction gate.
+my_constants.dt = 0.125 * dr^2 / chi_op_par
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 6
+amr.n_cell = nr nz
+amr.max_grid_size = 4
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 -0.5*Lz
+geometry.prob_hi = Lr 0.5*Lz
+boundary.field_lo = none none
+boundary.field_hi = pec none
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 20
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-11
+gmres.max_iterations = 300
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = T0_ev
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = Pi0
+implicit_mhd.mass_density_floor = 1.0e-4 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-6 * Pe0
+implicit_mhd.ion_pressure_floor = 1.0e-6 * Pi0
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 0.5
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.thermal_conduction_model = braginskii
+implicit_mhd.conduction_coulomb_log = 10.0
+implicit_mhd.conduction_chi_par_max = chi_par_cap
+implicit_mhd.conduction_chi_perp_max = chi_perp_cap
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.electron_pressure(x,y,z) = Pe0
+implicit_mhd.ion_pressure(x,y,z) = Pi0
+
+# Straight cylinder wall with the HARD Dirichlet thermal pin: the
+# interface exchange is uncapped and ungated, so the drain magnitude is
+# exactly chi_wall rho (e - e_wall) 2/dr. wall_conduction_scale keeps
+# its "perp" default here; the parallel ctest overrides it on the CLI.
+implicit_mhd.wall_model = pec
+implicit_mhd.wall_polyline_file = wall_flat_r065.csv
+implicit_mhd.wall_thermal_bc = dirichlet
+implicit_mhd.wall_temperature = Twall_ev
+implicit_mhd.wall_ledger_file = diags/wall_ledger.txt
+
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 B0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 1
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy implicit_mhd_ion_energy \
+                       implicit_mhd_momentum_r implicit_mhd_momentum_t \
+                       implicit_mhd_momentum_z
+diag1.write_species = 0
