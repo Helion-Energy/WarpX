@@ -113,14 +113,14 @@ public:
     /**
      * \brief Rebuild d_e^2 and the Jacobi diagonal from the charge density.
      *
-     * The coefficients depend on the density alone, and the density is not
-     * updated inside the magnetic substep loop, so within one step every
-     * substep solves the same operator with a different right-hand side.
-     * The rebuild is therefore guarded by a content signature of rho (its
-     * sum and infinity norm) and skipped when the density has not moved --
-     * this is call-site independent, so no hook can be missed. Setup and
-     * solve costs are accumulated separately (see m_setup_time /
-     * m_solve_time) so the split is visible in the runtime report.
+     * Called on every solve and rebuilt unconditionally: it is three grid
+     * passes against a solve of order a hundred, and every cheap staleness
+     * signature either moves by itself (MultiFab::sum is not
+     * bit-reproducible across boxes) or can collide, which here would mean
+     * silently solving with a stale d_e^2. See the implementation for the
+     * measurement. Setup and solve costs are accumulated separately (see
+     * m_setup_time / m_solve_time) so the split stays visible in the
+     * runtime report.
      */
     void PrepareCoefficients (amrex::MultiFab const& rhofield,
                               amrex::Real rho_floor, int lev);
@@ -155,9 +155,8 @@ public:
     long m_n_setups = 0;
     double m_setup_time = 0.0;
     double m_solve_time = 0.0;
-    /** Iterations of the first solve after each coefficient rebuild (cold,
-     *  in the sense that the warm-start guess is furthest from the answer)
-     *  versus the rest, so the value of warm starting is measurable. */
+    /** Iterations of the solves started from a zero guess rather than from
+     *  the previous substep's correction, so warm starting is measurable. */
     long m_n_cold_solves = 0;
     long m_n_cold_iters = 0;
 
@@ -184,12 +183,6 @@ public:
 private:
     bool m_defined = false;
     bool m_coefs_valid = false;
-    /** Set when the coefficients were just rebuilt, so that the first solve
-     *  against a new operator is reported separately from the warm ones. */
-    bool m_fresh_coefs = false;
-    /** Content signature of the rho used to build the current coefficients. */
-    amrex::Real m_rho_sum = 0.0;
-    amrex::Real m_rho_norm0 = -1.0;
 
     /** d_e^2 = m_e / (mu0 e rho_floored), at the E-field staggering. */
     EVec m_de2;

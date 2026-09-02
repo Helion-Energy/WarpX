@@ -381,15 +381,38 @@ ElectronInertiaElliptic::PrepareCoefficients (
 {
     ABLASTR_PROFILE("ElectronInertiaElliptic::PrepareCoefficients()");
 
-    // The coefficients depend only on the density, and the density is held
-    // fixed across the magnetic substeps. Skip the rebuild when rho has not
-    // moved; the signature is a pair of global reductions over rho, which is
-    // one grid pass against roughly a hundred for the solve it guards.
-    const Real rho_sum = rhofield.sum(0);
-    const Real rho_norm0 = rhofield.norm0(0, 0);
-    if (m_coefs_valid && rho_sum == m_rho_sum && rho_norm0 == m_rho_norm0) {
-        return;
-    }
+    // The coefficients are rebuilt unconditionally, every solve.
+    //
+    // They depend only on the density, and the density is held fixed across
+    // the magnetic substeps, so this looks like an obvious place to cache.
+    // It was cached, on a signature of two global reductions over rho, and
+    // that was wrong twice over. MultiFab::sum is not bit-reproducible for
+    // unchanged data once the level spans more than one box: on a 256 x 1024
+    // grid the same rho alternates between ...804669 and ...804662 from call
+    // to call, because the partial sums are combined in whatever order the
+    // threads finish in. An exact-equality guard on a value that moves by
+    // itself fired on roughly half the solves, so the cache was not buying
+    // the rebuild it was supposed to buy -- and it cost two collectives on
+    // every solve to not buy it.
+    //
+    // Worse, any signature cheap enough to be worth computing can collide,
+    // and a collision here is a silent physics error: the operator would be
+    // solved with a stale d_e^2. The rebuild is three grid passes against a
+    // solve of order a hundred, so caching it was never worth that exposure.
+    // Rebuilding always is simpler, strictly correct, and removes two
+    // collectives per solve from the critical path. The setup timer below
+    // keeps the cost visible: measured at 2.0 ms per rebuild on a 256 x 1024
+    // grid on CPU, so 162 ms per step against a solve cost of 6.1 s -- 2.7%.
+    // On a GPU the three passes are a few kernel launches and the trade is
+    // even more favourable, because what is removed is latency and what is
+    // added is bandwidth.
+    //
+    // If this ever does become worth caching, the guard has to be a
+    // signature that cannot move on its own: summing the raw bit patterns of
+    // rho as unsigned integers is exact and order-independent, unlike the
+    // floating-point sum, and detects any changed bit. That costs one pass
+    // over rho and one collective, so it is only a win where the rebuild is
+    // expensive relative to a collective -- which is the CPU, not the GPU.
 
     const double t0 = amrex::second();
 
@@ -518,12 +541,7 @@ ElectronInertiaElliptic::PrepareCoefficients (
     amrex::Gpu::streamSynchronize();
     m_setup_time += amrex::second() - t0;
     ++m_n_setups;
-    m_rho_sum = rho_sum;
-    m_rho_norm0 = rho_norm0;
     m_coefs_valid = true;
-    // The first solve after a rebuild is the one whose warm-start guess is
-    // furthest from the answer; Solve accounts it separately.
-    m_fresh_coefs = true;
 }
 
 void
@@ -794,8 +812,7 @@ ElectronInertiaElliptic::Solve (ablastr::fields::VectorField const& Efield, int 
         return;
     }
 
-    const bool cold = !m_warm_start || (m_n_solves == 0) || m_fresh_coefs;
-    m_fresh_coefs = false;
+    const bool cold = !m_warm_start || (m_n_solves == 0);
     if (cold) { SetVal3(m_x, 0._rt); }
 
     // r = b - A x
