@@ -4799,6 +4799,63 @@ Maxwell solver: kinetic-fluid hybrid
     difference at :math:`\theta = 1/2` (an endpoint-BDF2 stencil at :math:`\theta < 1` would be
     mis-centered and pumps reactive modes). When off, always use the two-point form.
 
+.. pp:param:: hybrid_pic_model.include_electron_inertia_elliptic
+    :type: ``bool``
+    :default: ``false``
+    :optional:
+
+    Add the electron-inertia term to the generalized Ohm's law in *elliptic* form. Substituting
+    Ampere's law (:math:`\mathbf{J} = \nabla\times\mathbf{B}/\mu_0`) and then Faraday's law
+    (:math:`\partial\mathbf{B}/\partial t = -\nabla\times\mathbf{E}`) into
+    :math:`(m_e/e^2 n)\,\partial\mathbf{J}/\partial t` *before* discretising in time converts
+    the inertia term into a spatial operator acting on :math:`\mathbf{E}` itself,
+
+    .. math:: \mathbf{E} + d_e^2\,\nabla\times(\nabla\times\mathbf{E})
+              = \mathbf{E}_\mathrm{inertialess},
+              \qquad d_e^2 = \frac{m_e}{\mu_0 e^2 n},
+
+    which is solved for :math:`\mathbf{E}` every time Ohm's law is imposed. The resulting
+    whistler dispersion relation is
+    :math:`\omega = \Omega_{ce}(k d_e)^2/(1+(k d_e)^2) \to \Omega_{ce}`, i.e. bounded by the
+    electron cyclotron frequency at every wavenumber the grid can represent, in place of the
+    inertialess :math:`\omega = \Omega_{ce}(k d_e)^2`, which has no high-wavenumber cutoff and
+    therefore sets the magnetic substep CFL from a mode with no physical counterpart.
+
+    Unlike :pp:param:`hybrid_pic_model.include_electron_inertia`, this form stores no
+    electron-current history: it is algebraic in time, so nothing is lagged across a substep and
+    nothing has to be reconstructed on restart. It also does not require the theta-implicit
+    evolve scheme. The two are mutually exclusive -- enabling both would count the inertia twice.
+
+    The advective part of the electron material derivative,
+    :math:`-(m_e/e)(\mathbf{u}_e\cdot\nabla)\mathbf{u}_e`, is omitted: it is suppressed
+    relative to the terms retained by the ratio of the electron gyroradius to the gradient scale
+    length, and omitting it is what preserves the algebraic-in-time property.
+
+    The discrete :math:`\nabla\times\nabla\times` is formed as the exact composition of the
+    two curls the hybrid loop already applies -- the E-to-B curl of Faraday's law followed by the
+    B-to-E curl of Ampere's law -- so the frequency bound holds for the discrete dispersion
+    relation on the actual grid, not only in the continuum limit. The system is solved with
+    Jacobi-preconditioned BiCGStab for the correction to the inertialess field.
+
+    Available in 1D, 2D (XZ), 3D and RZ (:math:`m = 0`) on the staggered (Yee) grid. Field
+    boundaries must have a homogeneous linear form -- ``periodic``, ``pec``, ``pmc``/``neumann``,
+    or ``none`` (the :math:`r=0` axis); any other type is rejected at setup rather than silently
+    approximated.
+
+.. pp:param:: hybrid_pic_model.electron_inertia_relative_tolerance
+    :type: ``float``
+    :default: ``1e-8``
+    :optional:
+
+    Relative residual at which the elliptic electron-inertia solve is accepted. Also
+    ``electron_inertia_max_iterations`` (default ``200``),
+    ``electron_inertia_verbosity`` (default ``0``; ``1`` emits a per-step iteration and timing
+    report, ``2`` adds a per-solve line, ``3`` adds the residual history), and
+    ``electron_inertia_warm_start`` (default ``true``, seed each solve with the previous
+    substep's correction). A solve that fails to converge aborts: a partially converged
+    :math:`\mathbf{E}` is never accepted, because it silently restores the unbounded
+    high-wavenumber branch the term exists to remove.
+
 .. pp:param:: hybrid_pic_model.darwin_vacuum_recovery
     :type: ``bool``
     :default: ``false``

@@ -1,3 +1,4 @@
+CEXE_sources += ElectronInertiaElliptic.cpp
 CEXE_sources += HybridPICModel.cpp
 CEXE_sources += ExternalVectorPotential.cpp
 

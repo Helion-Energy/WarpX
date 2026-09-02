@@ -263,6 +263,37 @@ void HybridPICModel::ReadParameters ()
 #endif
     }
 
+    // Electron inertia in elliptic form -- an independent path from the
+    // Je-form above (see the member documentation in HybridPICModel.H and
+    // the derivation in ElectronInertiaElliptic.H).
+    pp_hybrid.query("include_electron_inertia_elliptic",
+                    m_include_electron_inertia_elliptic);
+    if (m_include_electron_inertia_elliptic) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_include_electron_inertia,
+            "hybrid_pic_model.include_electron_inertia and "
+            "hybrid_pic_model.include_electron_inertia_elliptic are two "
+            "different discretizations of the same physical term and cannot "
+            "be enabled together: the Je-form adds an explicit inertial "
+            "field built from a time-lagged electron current, while the "
+            "elliptic form folds the same term into the operator solved for "
+            "E. Enabling both would count the inertia twice.");
+        utils::parser::queryWithParser(
+            pp_hybrid, "electron_inertia_relative_tolerance",
+            m_electron_inertia_rtol);
+        utils::parser::queryWithParser(
+            pp_hybrid, "electron_inertia_max_iterations",
+            m_electron_inertia_max_iters);
+        pp_hybrid.query("electron_inertia_verbosity",
+                        m_electron_inertia_verbose);
+        pp_hybrid.query("electron_inertia_warm_start",
+                        m_electron_inertia_warm_start);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_electron_inertia_rtol > 0.0 && m_electron_inertia_max_iters > 0,
+            "hybrid_pic_model.electron_inertia_relative_tolerance must be "
+            "positive and electron_inertia_max_iterations must be >= 1.");
+    }
+
     // Darwin (magnetoinductive) field split, consumed by the theta-implicit
     // hybrid solver (see the member documentation in HybridPICModel.H).
     pp_hybrid.query("darwin", m_darwin);
@@ -2255,6 +2286,12 @@ void HybridPICModel::HybridPICSolveE (
             eb_update_E[lev], lev, solve_for_Faraday, include_resistivity
         );
     }
+    // The final E update of a step is the one called with
+    // solve_for_Faraday = false, so this is the natural once-per-step point
+    // to emit the elliptic-solve iteration and timing report.
+    if (!solve_for_Faraday && m_inertia_elliptic) {
+        m_inertia_elliptic->ReportAndResetStats();
+    }
     // Allow execution of Python callback after E-field push
     ExecutePythonCallback("afterEpush");
 }
@@ -2308,6 +2345,30 @@ void HybridPICModel::HybridPICSolveE (
     );
     amrex::Real const time = warpx.gett_old(0) + warpx.getdt(0);
     warpx.ApplyEfieldBoundary(lev, patch_type, time);
+
+    // Electron inertia, elliptic form. The field assembled above is the
+    // inertialess Ohm's law; it becomes the right-hand side of
+    //     E + d_e^2 curl(curl E) = E_inertialess
+    // and the corrected E replaces it in place, so every downstream consumer
+    // (Faraday, the particle gather, diagnostics) sees the inertial field
+    // without knowing this step happened. The boundary pass above runs
+    // first, so the right-hand side already satisfies the physical boundary
+    // conditions and the correction only has to satisfy their homogeneous
+    // form; it is repeated afterwards to leave E exactly boundary-consistent.
+    if (m_include_electron_inertia_elliptic) {
+        if (!m_inertia_elliptic) {
+            m_inertia_elliptic = std::make_unique<ElectronInertiaElliptic>();
+            m_inertia_elliptic->m_rtol = m_electron_inertia_rtol;
+            m_inertia_elliptic->m_max_iter = m_electron_inertia_max_iters;
+            m_inertia_elliptic->m_verbose = m_electron_inertia_verbose;
+            m_inertia_elliptic->m_warm_start = m_electron_inertia_warm_start;
+            m_inertia_elliptic->Define(Efield, lev);
+        }
+        m_inertia_elliptic->PrepareCoefficients(
+            rhofield, PhysConst::q_e * m_n_floor, lev);
+        m_inertia_elliptic->Solve(Efield, lev);
+        warpx.ApplyEfieldBoundary(lev, patch_type, time);
+    }
 }
 
 void HybridPICModel::CalculateElectronPressure() const

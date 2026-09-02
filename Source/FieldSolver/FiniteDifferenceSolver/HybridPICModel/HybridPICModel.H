@@ -17,6 +17,7 @@
 #include "Fields.H"
 #include "Fluids/QdsmcParticleContainer_fwd.H"
 
+#include "ElectronInertiaElliptic.H"
 #include "ExternalVectorPotential.H"
 #include "Utils/WarpXAlgorithmSelection.H"
 
@@ -1150,6 +1151,30 @@ public:
     bool m_include_electron_inertia = false;
     amrex::Real m_reduced_electron_mass_ratio = 0.0;
     bool m_electron_inertia_bdf2 = true;
+
+    /** Electron inertia in ELLIPTIC form: an independent path from the
+     *  Je-form above, and mutually exclusive with it. Substituting Ampere's
+     *  and Faraday's laws into the inertia term before discretising in time
+     *  turns it into a spatial operator on E,
+     *      E + d_e^2 curl(curl E) = E_inertialess,
+     *  which is solved for E each time Ohm's law is imposed. Unlike the
+     *  Je-form this carries no electron-current history at all -- nothing to
+     *  lag, nothing to rotate, nothing to reconstruct on restart -- and it
+     *  bounds the whistler branch at Omega_ce for every wavenumber the grid
+     *  can represent, instead of letting omega ~ k^2 run past Omega_ce at
+     *  the grid scale and set the magnetic substep CFL. See
+     *  ElectronInertiaElliptic.H for the derivation, the measured
+     *  justification for omitting the advective term, and the boundary
+     *  condition mapping. */
+    bool m_include_electron_inertia_elliptic = false;
+    amrex::Real m_electron_inertia_rtol = 1.e-8;
+    int m_electron_inertia_max_iters = 200;
+    int m_electron_inertia_verbose = 0;
+    bool m_electron_inertia_warm_start = true;
+    /** Lazily constructed on the first E solve, once the field register and
+     *  the level layout exist. Mutable because the E solve is const. */
+    mutable std::unique_ptr<ElectronInertiaElliptic> m_inertia_elliptic;
+
     /** Effective electron mass, resolved lazily on first use (needs the
      *  ion species list). */
     amrex::Real m_electron_inertia_mass = 0.0;
