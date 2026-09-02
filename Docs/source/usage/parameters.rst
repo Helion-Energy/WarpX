@@ -1036,14 +1036,15 @@ additionally define the electric potential at the embedded boundary with an anal
     :default: ``0``
 
     Only used with the ECT (enlarged cell technique) Maxwell solver
-    (:pp:param:`algo.maxwell_solver = ect`). When nonzero, the one-way
-    face-extension pass is skipped and every unstable cut face is enlarged with
-    the symmetric, area-proportional eight-way split. The one-way pass borrows
-    the entire area deficit from the first stable cardinal neighbor in a fixed
-    lattice order, which is not wall-normal aware and displaces the enlarged-face
-    area centroid off the wall normal (a :math:`\cos(4\theta)` symmetry-breaking
-    seed on curved walls). The default (``0``) keeps the historical one-way pass
-    and is bit-identical to previous behavior.
+    (:pp:param:`algo.maxwell_solver = ect`). The default (``0``) keeps the
+    historical algorithm, which stabilizes cut-cell faces in three steps: first, a one
+    way pass tries to borrow area from the first stable neighbor face in a fixed
+    Cartesian-lattice order; second, an eight-way pass tries to borrow area
+    proportionally from all neighboring faces; third, the Benkler-Chavannes-Kuster
+    method is applied.  When this parameter is set ``!= 0``, the one-way pass is
+    skipped in favor of the eight-way pass.  The one-way pass is not wall-normal
+    aware and may break symmetry at curved boundaries; the eight-way pass is
+    expected to be more symmetric.
 
 .. _param-particle-thermalizer:
 
