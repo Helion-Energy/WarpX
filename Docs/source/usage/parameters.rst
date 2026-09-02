@@ -3836,6 +3836,10 @@ Maxwell solver: kinetic-fluid hybrid
     electron pressure with the electron energy equation, solved with the QDSMC scheme
     (see the :ref:`theory section <theory-hybrid-model-electron-energy-eq>`), instead of evaluating the polytropic
     closure with the constant reference state :math:`(n_0, T_{e0})`.
+    With this on, the electron temperature is evolved state and is written to (and restored from) checkpoints,
+    so a restarted run continues from the evolved electron thermal structure. Restarting from a checkpoint
+    written before this field was checkpointed still works, but re-seeds the temperature from the density
+    adiabat and issues a warning.
 
 .. pp:param:: hybrid_pic_model.include_joule_heating
     :type: ``bool``
