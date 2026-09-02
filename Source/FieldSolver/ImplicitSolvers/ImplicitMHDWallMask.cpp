@@ -151,6 +151,22 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
         "implicit_mhd.wall_model (the freeze acts on the masked wall "
         "band's magnetic-field faces)");
 
+    // Reference-parity no-slip pin of the live band adjacent to the contour
+    // (see the class comment): parsed before the early return so a pin
+    // without a wall model is a loud input error, never a silent no-op.
+    pp.query("wall_no_slip", m_no_slip);
+    utils::parser::queryWithParser(pp, "wall_no_slip_width",
+                                   m_no_slip_width);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_no_slip_width >= 1,
+        "implicit_mhd.wall_no_slip_width must pin at least one live fluid "
+        "cell row (2 reproduces the reference code's wall + skin depth)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_no_slip || wall_model != "none",
+        "implicit_mhd.wall_no_slip requires an active "
+        "implicit_mhd.wall_model (the pin acts on the live fluid rows "
+        "adjacent to the masked wall band)");
+
     // Thermal wall boundary at the stair-step fluid interface (see the
     // class comment): parsed BEFORE the early return so a thermal BC
     // without a wall model is a loud input error, never a silent no-op.
@@ -500,6 +516,12 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
         amrex::Print() << "; band eta override " << m_band_eta_override
                        << " ohm m (constant at band-interior E rows)";
     }
+    if (m_no_slip) {
+        amrex::Print() << "; no-slip pin active (momentum identity rows on "
+                          "the first "
+                       << m_no_slip_width
+                       << " live cell rows adjacent to the contour)";
+    }
     if (m_field_freeze) {
         amrex::Print() << "; field freeze active (exterior evolved-B "
                           "identity rows: "
@@ -620,7 +642,12 @@ warpx::mhd_pc::WallFluidFreezeView ImplicitMHDWallMask::FluidFreezeView () const
     // wall_model (the dielectric standoff keeps the field-side View()
     // inactive but its fluid contract still freezes the band).
     view.active = (GetThermalBC() != ThermalBC::none);
-    if (view.active) {
+    // The reference code's no-slip pin is INDEPENDENT of the thermal BC (an
+    // electromagnetic-only wall pins its live band too), so the tables
+    // are published whenever either contract is on.
+    view.no_slip_active = NoSlip();
+    view.no_slip_width = m_no_slip_width;
+    if (view.active || view.no_slip_active) {
         view.first_masked_cc = m_first_masked_cc.data() + m_ng;
         view.z_lo = -m_ng;
         view.z_hi = m_nz - 1 + m_ng;

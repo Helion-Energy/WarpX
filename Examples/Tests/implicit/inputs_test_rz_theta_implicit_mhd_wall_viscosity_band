@@ -1,0 +1,152 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Wall viscosity BAND VALUE (implicit_mhd.wall_viscosity_band_value):
+# The reference code's band coefficient, on the sheared-column deck of
+# inputs_test_rz_theta_implicit_mhd_wall_viscosity_mask.  A
+# uniform-density, uniform-pressure plasma with a linear axial shear
+# u_z = A r sits inside a cylinder wall (r_w = 0.30 m, cells i >= 15
+# masked at dr = 0.02).  With B = 0, J = 0, eta = 0, no conduction and
+# no Joule heating, the ONLY active physics is the explicit viscosity:
+# the r-face stress tau = -mu A is constant for a constant coefficient
+# mu, so the paired stress work deposits the DISCRETELY EXACT uniform
+# shear heating
+#     dE_i/dt = 2 mu A^2
+# in every cell whose two radial faces carry the SAME mu -- exact
+# because r W = -mu A^2 r^2 gives (r_hi^2 - r_lo^2)/(r_c dr) = 2.
+#
+# Three coefficient regimes on one deck, each with its own analytic mu
+# (see analysis_mhd_wall_viscosity_band.py):
+#   - UNMASKED (wall_viscosity_mask = 0): mu = rho nu everywhere, so
+#     the band cells heat at the interior rate;
+#   - ZERO BAND (mask on, band value 0 -- the legacy behavior, kept
+#     bit-identical): every r-face at i >= first_masked - 3 = 12 carries
+#     zero viscous stress AND zero stress work, so cells i >= 12 receive
+#     no deposit at all;
+#   - PEDESTAL (mask on, band value 1e-4 Pa s = the reference code's small_vis,
+#     step.f90:90/184-195): those same faces carry the ABSOLUTE dynamic
+#     viscosity 1e-4 Pa s -- NOT scaled by density, which is the point
+#     of a pedestal -- so cells 13 and 14 heat at 2 * 1e-4 * A^2,
+#     a factor mu_band / (rho nu) = 29.9 above the interior here.
+#
+# The band is deliberately ONE CELL WIDER (width 3) than the sheared
+# column needs, so the two gated rows (13, 14) sit strictly INSIDE it:
+# the coefficient jump at the band edge relaxes the local velocity jump
+# there at the (30x faster) band rate, so the first band row and the
+# last interior row are transition rows whose stress is no longer the
+# constant tau = -mu A the analytic deposit assumes.  Rows 10, 11, 12
+# and the last cell (open r face) are excluded for the same reason.
+# The run is likewise kept SHORT (nu_band t / (rho r dr) small) so the
+# gated rows' own velocity jumps stay within a fraction of a percent of
+# A dr, and the differential heating across the band edge stays a
+# percent-scale acoustic correction.
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.T0_ev = 4.0
+my_constants.A = 1.0e3
+my_constants.nu = 20.0
+my_constants.gamma = 5.0/3.0
+my_constants.B0 = 0.01
+my_constants.Lr = 0.48
+my_constants.Lz = 0.32
+my_constants.nr = 24
+my_constants.nz = 8
+my_constants.dt = 2.0e-8
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 3
+amr.n_cell = nr nz
+amr.max_grid_size = 8
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 -0.5*Lz
+geometry.prob_hi = Lr 0.5*Lz
+boundary.field_lo = none none
+boundary.field_hi = pec none
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 12
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-10
+gmres.max_iterations = 300
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = T0_ev
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-6 * n0 * T0_ev * q_e
+implicit_mhd.ion_pressure_floor = 1.0e-6 * n0 * T0_ev * q_e
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = nu
+implicit_mhd.wall_viscosity_mask = 1
+implicit_mhd.wall_viscosity_mask_width = 3
+implicit_mhd.wall_viscosity_band_value = 1.0e-4
+implicit_mhd.include_joule_heating = false
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.electron_pressure(x,y,z) = n0 * T0_ev * q_e
+implicit_mhd.ion_pressure(x,y,z) = n0 * T0_ev * q_e
+implicit_mhd.velocity_z(x,y,z) = A * x
+
+# Cylinder conducting wall at r = 0.30 m (constant continuation covers
+# the z ghosts); electromagnetic-only wall (no thermal BC): the
+# viscosity band is the only wall-fluid coupling under test.
+implicit_mhd.wall_model = pec
+implicit_mhd.wall_polyline_file = wall_cylinder_r30.csv
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 3
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = implicit_mhd_mass_density \
+                       implicit_mhd_ion_energy \
+                       implicit_mhd_electron_energy \
+                       implicit_mhd_momentum_r implicit_mhd_momentum_t \
+                       implicit_mhd_momentum_z
+diag1.write_species = 0

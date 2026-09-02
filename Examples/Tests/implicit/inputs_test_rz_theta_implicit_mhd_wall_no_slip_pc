@@ -1,0 +1,160 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Reference-parity NO-SLIP PIN preconditioner-parity test (RZ, central
+# recast flux, pec cylinder wall, LIVE fluid, pc_mhd_block).
+#
+# The pin makes the three MOMENTUM rows of the first
+# wall_no_slip_width LIVE cells adjacent to the contour exact
+# identities in the residual (the structural twin of the reference code's omitted
+# vr/vz matrix rows, vp.f90:221/233) while their density and energy
+# rows keep evolving.  pc_mhd_block must emit the matching identity
+# rows -- mask exactly those components out of the cell-centered
+# signal/wave sweeps and restore them from the RHS afterwards.  A
+# residual-only wall term whose identity rows are missing from the
+# preconditioner is a measured 7-21x GMRES stagnation (the
+# z_wall_conduction lesson), and the pin sits on the wall-adjacent LIVE
+# rows where the momentum wave Schur is strongest -- exactly the rows
+# the masked-band rigid freeze does NOT cover.
+#
+# The deck is deliberately in the regime where the preconditioner
+# actually does work: the acoustic CFL c_s dt / dr ~ 3 puts every
+# direction above the signal-CFL floor (below it the signal diffusion
+# block is exactly the identity and the test would prove nothing), and
+# a Gaussian electron-pressure hill on top of the sheared column keeps
+# the momentum block genuinely coupled.  B = 0, eta = 0: the field
+# blocks are trivial here on purpose -- the shaped-wall FIELD side is
+# covered by test_rz_theta_implicit_mhd_wall_live_fluid_pc, and this
+# test is about the cell-centered FLUID sweeps.  Measured on this deck:
+# 29.3 GMRES iterations per Newton iteration with the pin ON, 33.6 with
+# it OFF (the pin makes the solve slightly CHEAPER, as identity rows
+# should), and 36.9 with the pin ON but the pin's PC rows compiled OUT
+# -- 1.26x the correct preconditioner.  The same A/B on a stiffer twin
+# (const_dt = 6e-6, acoustic CFL ~ 11) reads 93.8 correct vs 139.8
+# broken, 1.49x: the penalty grows with the wave CFL exactly as the
+# masked-band freeze's does, which is why the gate exists even though
+# this CI-sized deck keeps it well under the margin.
+#
+# Contract under test (see analysis_mhd_wall_no_slip_pc.py), against
+# the wall_no_slip = 0 twin of the identical preconditioned deck:
+# - Newton converges in a few iterations per step;
+# - every GMRES call CONVERGES well inside its iteration cap;
+# - the pin's GMRES cost per Newton iteration stays within a small
+#   factor of the OFF twin's -- the whole point of the identity rows.
+
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.T0_ev = 4.0
+my_constants.Thot_ev = 12.0
+my_constants.w = 0.12
+my_constants.A = 1.0e3
+my_constants.nu = 20.0
+my_constants.gamma = 5.0/3.0
+my_constants.B0 = 0.01
+my_constants.Lr = 0.48
+my_constants.Lz = 0.32
+my_constants.nr = 24
+my_constants.nz = 8
+my_constants.dt = 1.5e-6
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 3
+amr.n_cell = nr nz
+amr.max_grid_size = 8
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 -0.5*Lz
+geometry.prob_hi = Lr 0.5*Lz
+boundary.field_lo = none none
+boundary.field_hi = pec none
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 0.0
+newton.relative_tolerance = 1.0e-6
+newton.max_iterations = 10
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-7
+gmres.max_iterations = 400
+
+jacobian.pc_type = pc_mhd_block
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = T0_ev
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e16
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-6 * n0 * T0_ev * q_e
+implicit_mhd.ion_pressure_floor = 1.0e-6 * n0 * T0_ev * q_e
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.evolve_ion_fluid = true
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = nu
+implicit_mhd.include_joule_heating = false
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.electron_pressure(x,y,z) = "n0 * q_e * (T0_ev + (Thot_ev - T0_ev) * exp(-(x*x)/(w*w)))"
+implicit_mhd.ion_pressure(x,y,z) = n0 * T0_ev * q_e
+implicit_mhd.velocity_z(x,y,z) = A * x
+
+# Cylinder conducting wall at r = 0.30 m (constant continuation covers
+# the z ghosts); electromagnetic-only wall, so the no-slip pin is the
+# only wall-fluid momentum coupling and it is exercised WITHOUT the
+# masked-band rigid freeze (wall_thermal_bc) sitting on top of it --
+# the pinned rows are LIVE fluid rows, which is the point.
+implicit_mhd.wall_model = pec
+implicit_mhd.wall_polyline_file = wall_cylinder_r30.csv
+implicit_mhd.wall_no_slip = 1
+implicit_mhd.wall_no_slip_width = 2
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 3
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = implicit_mhd_mass_density \
+                       implicit_mhd_ion_energy \
+                       implicit_mhd_electron_energy \
+                       implicit_mhd_momentum_r implicit_mhd_momentum_t \
+                       implicit_mhd_momentum_z
+diag1.write_species = 0

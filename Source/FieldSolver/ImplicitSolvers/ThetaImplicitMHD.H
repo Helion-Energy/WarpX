@@ -177,6 +177,18 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * (rank-0 banner + a '#'-comment header row of wall_ledger_file).
      * No-op without the freeze. */
     void ClampWallExteriorState ();
+    /** Zero the momentum of the live no-slip band adjacent to the shaped
+     * wall (implicit_mhd.wall_no_slip; see ImplicitMHDWallMask): the
+     * discrete analog of the reference code's exactly-zero velocity IC
+     * (init_cond.f90:82) which, composed with the residual's
+     * momentum identity rows on the same cells, holds u = 0 there for
+     * the whole run. Runs ONCE at load-sanitize time (right after
+     * ClampWallExteriorState) and is bit-exactly idempotent, so
+     * restarted states are unchanged. Under total_energy/dual_energy the
+     * removed kinetic energy is subtracted from E_i (floored), so the
+     * INTERNAL energy is preserved and the pin thermalizes nothing.
+     * No-op without the pin. */
+    void PinWallNoSlipMomentum ();
     /** Recompute the dynamic halo pedestal density once per step (frozen
      * for the whole nonlinear solve) and raise sub-pedestal cells onto
      * it. No-op when halo_pedestal_fraction = 0. See
@@ -1233,22 +1245,42 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // normal-gradient viscous stress and its velocity-weighted work enter
     // the face registers as an exactly conservative pair.
     amrex::Real m_viscosity = 0.0;
-    // ---- Wall-row viscosity mask (implicit_mhd.wall_viscosity_mask,
+    // ---- Wall viscosity BAND (implicit_mhd.wall_viscosity_mask,
     // default off = bit-identical; requires an active wall mask): the
-    // The reference code's slip wall rows (step.f90 disip: CALL set(vis_*, 'skin'/
-    // 'bndy'/'subr'/'subz', small_vis) -- viscosity vanishes on the
-    // wall-adjacent rows). Zeroes the viscous face COEFFICIENT -- the
-    // momentum stress AND its velocity-weighted heating work, which
-    // share the same coefficient assembly (an exactly conservative
-    // pair, so both must go together) -- at every face either of whose
-    // adjacent cells lies within wall_viscosity_mask_width cells
-    // (Chebyshev distance over the stair-step first-masked tables) of
-    // the masked wall contour. Kills the coil-footprint viscous-heating
-    // bead row a uniform viscosity deposits under every wall ripple
-    // (heating the reference code does not have). The mask is static geometry after
-    // Define, so JFNK probes see constant structure. ----
+    // The reference code's wall-viscosity band of step.f90 disip
+    // (CALL set(vis_*, 'skin'/'bndy'/'subr'/'subz', small_vis) -- the
+    // reduced-viscosity band that sits INSIDE their hard no-slip pin;
+    // see implicit_mhd.wall_no_slip for the pin itself). Substitutes a
+    // single viscous face COEFFICIENT -- for the momentum stress AND
+    // its velocity-weighted heating work, which share the same
+    // coefficient assembly (an exactly conservative pair, so both must
+    // take the same value) -- at every face either of whose adjacent
+    // cells lies within wall_viscosity_mask_width cells (Chebyshev
+    // distance over the stair-step first-masked tables) of the masked
+    // wall contour. Kills the coil-footprint viscous-heating bead row a
+    // uniform viscosity deposits under every wall ripple. The band is
+    // static geometry after Define, so JFNK probes see constant
+    // structure.
+    //
+    // wall_viscosity_band_value [Pa s] is the substituted coefficient:
+    //   0 (default) -- the legacy behavior: the whole viscous block is
+    //     SKIPPED on band faces (stress and heating exactly zero,
+    //     bit-identical to the pre-band code);
+    //   > 0 -- the reference code's actual contract: a hard SET to a fixed
+    //     PEDESTAL, small_vis = 1e-4 Pa s in the reference shot (step.f90:90,
+    //     184-195). UNITS: implicit_mhd.viscosity is the KINEMATIC-style
+    //     knob nu [m^2/s] that the face assembly multiplies by the face
+    //     mass density (rho_f nu, a dynamic viscosity), whereas this
+    //     band value is the DYNAMIC viscosity itself [Pa s = kg/(m s)],
+    //     deliberately NOT scaled by density -- that is the whole point
+    //     of a pedestal: it CAPS the coefficient where compressed plasma
+    //     touches the wall (measured 3.3-40x below rho nu there) and
+    //     FLOORS it in the near-vacuum halo (45x above). To match a
+    //     kinematic nu at a reference density rho_ref, pass
+    //     rho_ref * nu. ----
     bool m_wall_viscosity_mask = false;
     int m_wall_viscosity_mask_width = 2;
+    amrex::Real m_wall_viscosity_band_value = 0.0;
     // Thermal diffusivities chi_i/chi_e [m^2/s] of the recast face fluxes
     // (0 = off): conservative internal-energy diffusion
     // -chi rho_f d(e_spec)/dn (q = -kappa grad T, Chacon JCP 526 (2025))

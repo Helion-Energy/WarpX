@@ -1796,7 +1796,7 @@ add_warpx_test(
     OFF  # dependency
 )
 
-# Reference-code-style wall-row viscosity slip mask
+# Reference-code-style wall viscosity band, default (zero) coefficient
 # (implicit_mhd.wall_viscosity_mask): a sheared column u_z = A r inside
 # a cylinder wall must deposit the discretely exact uniform shear
 # heating 2 rho nu A^2 in every live-viscosity cell while every face
@@ -1811,6 +1811,108 @@ add_warpx_test(
     "analysis_mhd_wall_viscosity_mask.py diags/diag000000 diags/diag000003"  # analysis
     OFF  # checksum
     OFF  # dependency
+)
+
+# wall viscosity BAND VALUE, regime 1/3 -- UNMASKED reference
+# (wall_viscosity_mask = 0 on the CLI): the band cells must heat at the
+# same rho nu deposit as the interior, fixing the "no band at all"
+# analytic coefficient the other two regimes are measured against
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_viscosity_band_unmasked  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_viscosity_band implicit_mhd.wall_viscosity_mask=0 implicit_mhd.wall_viscosity_band_value=0"  # inputs
+    "analysis_mhd_wall_viscosity_band.py diags/diag000000 diags/diag000003 unmasked"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# wall viscosity BAND VALUE, regime 2/3 -- ZERO band (band value 0 on
+# the CLI, the DEFAULT): the legacy exact-zero band must be preserved
+# unchanged by the coefficient-substitution rework -- no viscous
+# deposit at all on the band rows, full deposit in the interior
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_viscosity_band_zero  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_viscosity_band implicit_mhd.wall_viscosity_band_value=0"  # inputs
+    "analysis_mhd_wall_viscosity_band.py diags/diag000000 diags/diag000003 zero"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# wall viscosity BAND VALUE, regime 3/3 -- the reference code's PEDESTAL (band value
+# 1e-4 Pa s = small_vis, step.f90:90): the band faces must carry that
+# ABSOLUTE dynamic viscosity, not zero and not rho nu, so cells 13-14
+# heat at the exact 2 mu_band A^2 rate (29.9x the interior here) while
+# the live interior rows keep their own rho nu deposit
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_viscosity_band  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_wall_viscosity_band  # inputs
+    "analysis_mhd_wall_viscosity_band.py diags/diag000000 diags/diag000003 band"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Reference-parity NO-SLIP PIN, NULL TWIN (implicit_mhd.wall_no_slip=0 on
+# the CLI): today's free-slip stair wall -- the masked-side image copies
+# the tangential momentum verbatim, so the wall-adjacent rows slide at
+# rho A r with no pin anywhere
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_no_slip_off  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_no_slip implicit_mhd.wall_no_slip=0"  # inputs
+    "analysis_mhd_wall_no_slip.py diags/diag000003 off"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Reference-parity NO-SLIP PIN, knob ON (width 2 = their wall + skin
+# depth): the first two LIVE cell rows adjacent to the contour must
+# carry EXACTLY zero momentum in all three components, the pin must
+# deposit real wall drag into the first unpinned row (the transport
+# channel free slip does not have), and the far interior must match the
+# null twin to solver precision
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_no_slip  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_wall_no_slip  # inputs
+    "analysis_mhd_wall_no_slip.py diags/diag000003 on ../test_rz_theta_implicit_mhd_wall_no_slip_off/diags/diag000003"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_no_slip_off  # dependency
+)
+
+# no-slip pin preconditioner parity, NULL TWIN (wall_no_slip=0 on the
+# CLI): the healthy pc_mhd_block baseline on the live-fluid shaped-wall
+# deck, whose GMRES cost per Newton iteration the pinned run is graded
+# against
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_no_slip_pc_off  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_no_slip_pc implicit_mhd.wall_no_slip=0"  # inputs
+    "analysis_mhd_wall_no_slip_pc.py diags/newton.txt off"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# no-slip pin preconditioner parity, the headline: pc_mhd_block must
+# emit identity rows for exactly the pinned MOMENTUM components (mask
+# them out of the cell-centered sweeps, restore them from the RHS), so
+# the pinned solve stays within a small factor of the null twin's GMRES
+# cost -- a residual-only wall term is a measured 7-21x stagnation
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_no_slip_pc  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_wall_no_slip_pc  # inputs
+    "analysis_mhd_wall_no_slip_pc.py diags/newton.txt on ../test_rz_theta_implicit_mhd_wall_no_slip_pc_off/diags/newton.txt"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_no_slip_pc_off  # dependency
 )
 
 # wall-seam guard on the Hall/inertia/hyper Ohm terms: a ramped coil

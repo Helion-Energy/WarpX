@@ -5268,28 +5268,108 @@ Jacobian probes.
     :type: ``bool``
     :default: ``false``
 
-    Reference-code-style wall-row viscosity slip mask (requires an active
+    Reference-code-style wall viscosity BAND (requires an active
     :pp:param:`implicit_mhd.wall_model`; default off is bit-identical).
-    Zeroes the viscous face COEFFICIENT — the momentum stress AND its
-    velocity-weighted heating work, which share one coefficient
-    assembly and must never split (an exactly conservative pair) — at
-    every face either of whose adjacent cells lies within
+    Substitutes a single viscous face COEFFICIENT — for the momentum
+    stress AND its velocity-weighted heating work, which share one
+    coefficient assembly and must never split (an exactly conservative
+    pair) — at every face either of whose adjacent cells lies within
     :pp:param:`implicit_mhd.wall_viscosity_mask_width` cells (Chebyshev
     distance over the stair-step first-masked tables) of the masked
-    wall contour. This is the reference code's slip-wall treatment (``step.f90``
-    ``disip``: viscosity set to ``small_vis`` on the ``'skin'`` /
-    ``'bndy'`` / ``'subr'`` / ``'subz'`` rows): with a uniform
-    viscosity, every coil-footprint ripple of the shaped wall otherwise
-    deposits a viscous-heating bead row that the reference code does
-    not have. The mask is static geometry after initialization, so JFNK
-    probes see constant structure.
+    wall contour. This is the reference code's wall-viscosity band (``step.f90``
+    ``disip``: viscosity SET to ``small_vis`` on the ``'skin'`` /
+    ``'bndy'`` / ``'subr'`` / ``'subz'`` rows), the reduced-viscosity
+    band that sits INSIDE their hard no-slip pin (see
+    :pp:param:`implicit_mhd.wall_no_slip`): with a uniform viscosity,
+    every coil-footprint ripple of the shaped wall otherwise deposits a
+    viscous-heating bead row that the reference code does not have. The
+    substituted coefficient is
+    :pp:param:`implicit_mhd.wall_viscosity_band_value`; its default 0
+    keeps the legacy behavior of skipping the viscous block entirely on
+    band faces. The band is static geometry after initialization, so
+    JFNK probes see constant structure.
 
 .. pp:param:: implicit_mhd.wall_viscosity_mask_width
     :type: ``int``
     :default: ``2``
 
-    Width of the wall-row viscosity mask in fluid cells measured from
-    the masked contour (at least 1).
+    Width of the wall viscosity band in fluid cells measured from the
+    masked contour (at least 1).
+
+.. pp:param:: implicit_mhd.wall_viscosity_band_value
+    :type: ``float`` (Pa s)
+    :default: ``0`` (the legacy exact-zero band)
+
+    Viscous face coefficient substituted on the band faces selected by
+    :pp:param:`implicit_mhd.wall_viscosity_mask` (which is required when
+    this is positive). ``0`` skips the viscous block entirely on those
+    faces — stress and heating exactly zero, bit-identical to the
+    pre-band code. A positive value is the reference code's actual contract: a hard
+    SET to a fixed PEDESTAL, ``small_vis = 1e-4`` Pa s in the reference shot
+    (``step.f90:90``, ``184-195``).
+
+    UNITS. :pp:param:`implicit_mhd.viscosity` is the kinematic-style
+    knob :math:`\nu` [m²/s] that the face assembly multiplies by the
+    face mass density (:math:`\rho_f \nu`, a dynamic viscosity), whereas
+    this band value is the DYNAMIC viscosity itself [Pa s = kg/(m s)],
+    deliberately NOT scaled by density — that is the whole point of a
+    pedestal: it CAPS the coefficient where compressed plasma touches
+    the wall (measured 3.3–40x below :math:`\rho\nu` there in the reference shot)
+    and FLOORS it in the near-vacuum halo (45x above). To match a
+    kinematic :math:`\nu` at a reference density, pass
+    :math:`\rho_{\rm ref}\nu`.
+
+.. pp:param:: implicit_mhd.wall_no_slip
+    :type: ``bool``
+    :default: ``false``
+
+    Reference-parity NO-SLIP PIN of the shaped wall (requires an active
+    :pp:param:`implicit_mhd.wall_model`; default off is bit-identical,
+    and this is INDEPENDENT of
+    :pp:param:`implicit_mhd.wall_thermal_bc` — an electromagnetic-only
+    wall pins too). The reference code builds its implicit momentum matrices with
+    ``bnd = 'i'`` for :math:`v_r` and :math:`v_z` (``vp.f90:221/233``,
+    ``sten.f:115-121``), which OMITS the rows of the wall-contour
+    vertices AND of the adjacent cut-cell "skin" layer; an omitted row
+    is an exact zero increment (``solv.f:88-96``), and with velocities
+    allocated at exactly zero (``init_cond.f90:82``) those two
+    vertex layers are pinned at :math:`u = 0` for the entire run —
+    measured bit-exact zero on all 762 wall and 762 skin vertices of
+    the reference shot's earlier dump while the interior ran 1.7e5–6.2e5 m/s.
+
+    Our realization is the structural twin: the first
+    :pp:param:`implicit_mhd.wall_no_slip_width` LIVE (unmasked) cell rows
+    adjacent to the contour get their three MOMENTUM increments zeroed
+    in the residual, making them exact identity rows
+    :math:`F = m - m^n` (density and the energy channels keep evolving,
+    exactly as the reference code keeps advecting ``en`` and the energies on the
+    skin), and the state's band momentum is zeroed ONCE at
+    load-sanitize time — the discrete analog of the reference code's zero velocity
+    IC, and idempotent, so the identity rows then hold :math:`u = 0`
+    bit-exactly forever. Zeroing the band momentum preserves the
+    INTERNAL energy under ``total_energy``/``dual_energy`` (the removed
+    kinetic part is subtracted from :math:`E_i` and floored), so the pin
+    thermalizes nothing at boot.
+
+    Without the pin our stair-face image copies the tangential momentum
+    verbatim — a perfect free-slip wall with no tangential momentum sink
+    at all. Pair the pin with
+    :pp:param:`implicit_mhd.wall_viscosity_band_value`: the reference code
+    substitutes a small fixed dynamic viscosity INSIDE the pin so the
+    pinned layer does not transmit large stress into the bulk, and
+    landing only one of the two halves is what a free-slip near-wall jet
+    against a frozen wall image (with the viscous coefficient zeroed)
+    exploits. The band is static geometry, so JFNK probes see constant
+    structure, and ``pc_mhd_block`` emits the matching momentum identity
+    rows.
+
+.. pp:param:: implicit_mhd.wall_no_slip_width
+    :type: ``int``
+    :default: ``1``
+
+    Number of LIVE cell rows adjacent to the masked contour whose
+    momentum the no-slip pin holds at zero (at least 1). ``2``
+    reproduces the reference code's wall-node + skin depth.
 
 .. pp:param:: implicit_mhd.thermal_diffusivity_ion
     :type: ``float``
