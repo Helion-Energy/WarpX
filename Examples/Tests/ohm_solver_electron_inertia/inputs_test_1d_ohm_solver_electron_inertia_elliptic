@@ -1,0 +1,87 @@
+# Whistler dispersion with the elliptic electron-inertia term.
+#
+# A uniform magnetised plasma in 1D with B along z, periodic, seeded with a
+# comb of transverse B perturbations at box modes 8, 16, 24 and 30. The field
+# probe records the transverse B along the line every step, so a 2D FFT over
+# (z, t) recovers omega(k) directly. The analysis script isolates the
+# right-hand branch with B+ = Bx + i By and compares the measured frequency
+# to the inertial dispersion relation.
+#
+# The mass ratio is m_i/m_e = 100 and the cell size is a tenth of an ion skin
+# depth, so the electron skin depth is exactly one cell and the seeded modes
+# span k*d_e = 0.785 .. 2.945. Over that range the two Ohm's laws are not
+# close: the inertialess relation omega = Omega_ce (k d_e)^2 reaches
+# 3.96 Omega_ce at the top mode -- above the electron cyclotron frequency --
+# while the inertial relation omega = Omega_ce (k d_e)^2/(1 + (k d_e)^2)
+# saturates at 0.798 Omega_ce. The wavenumber in both is the discrete one of
+# the Yee curl pair, (2/dz) sin(k dz/2), which is what the operator actually
+# sees. The test therefore pins the whole curve, not just its endpoint: it
+# fails both if the term is absent and if it is too strong.
+#
+# Omega_ce = 4.397050e10 rad/s, T_ce = 1.4290e-10 s, dt = T_ce/20.
+# 512 steps give a frequency resolution of 0.039 Omega_ce.
+
+my_constants.B0   = 0.25
+my_constants.L    = 4.38530624e-04
+my_constants.amp  = 2.5e-05
+
+max_step = 512
+warpx.const_dt = 7.144774e-12
+warpx.serialize_initial_conditions = 1
+warpx.verbose = 0
+
+amr.n_cell = 64
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = 4.38530624e-04
+
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+boundary.particle_lo = periodic
+boundary.particle_hi = periodic
+
+algo.maxwell_solver = hybrid
+algo.particle_shape = 1
+algo.current_deposition = direct
+
+hybrid_pic_model.elec_temp = 2.554995e-03
+hybrid_pic_model.n0_ref = 6.014761e+23
+hybrid_pic_model.gamma = 1.0
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.substeps = 8
+hybrid_pic_model.n_floor = 1.0e20
+
+hybrid_pic_model.include_electron_inertia_elliptic = 1
+hybrid_pic_model.electron_inertia_relative_tolerance = 1.0e-10
+hybrid_pic_model.electron_inertia_max_iterations = 100
+
+warpx.B_ext_grid_init_style = parse_B_ext_grid_function
+warpx.Bx_external_grid_function(x,y,z) = amp*( cos(2*pi*8*z/L) + cos(2*pi*16*z/L) + cos(2*pi*24*z/L) + cos(2*pi*30*z/L) )
+warpx.By_external_grid_function(x,y,z) = 0.0
+warpx.Bz_external_grid_function(x,y,z) = B0
+
+particles.species_names = ions
+
+ions.charge = q_e
+ions.mass = 9.109384e-29
+ions.injection_style = NUniformPerCell
+ions.num_particles_per_cell_each_dim = 400
+ions.profile = constant
+ions.density = 6.014761e+23
+ions.momentum_distribution_type = gaussian
+ions.ux_th = 7.071243e-06
+ions.uy_th = 7.071243e-06
+ions.uz_th = 7.071243e-06
+
+warpx.reduced_diags_names = probe
+probe.type = FieldProbe
+probe.probe_geometry = Line
+probe.z_probe  = 3.4260205e-06
+probe.z1_probe = 4.3510460e-04
+probe.resolution = 64
+probe.intervals = 1
+probe.integrate = 0
+probe.interp_order = 1
