@@ -161,13 +161,99 @@ restoring the statistics, because copies at identical positions carry
 identical deposition error. The matched arm must be made by removing
 samples, not by duplicating them.
 
-## Status
+## Identity gate (performed)
 
-The prolongation and the decimation are implemented and validated
-numerically. The end-to-end path -- extract from a running case, remap,
-reload, and continue -- is specified above but has **not** yet been
-exercised against a live run; in particular the same-resolution identity
-test (remap at ratio 1 and confirm the continuation tracks an
-uninterrupted run) has not been performed. Do that before drawing any
-physics conclusion from a remapped continuation, because it is what
-separates round-trip losses from genuine resolution effects.
+The gate that licenses every later inference: remap at **refinement
+ratio 1** -- where the prolongation is the identity -- continue, and
+compare against the uninterrupted reference over the same interval.
+Anything that shows up is a round-trip loss, not a resolution effect.
+
+Fixture: cylindrical hybrid case, 64x128, 16 ppc (262k particles), one
+kinetic species, evolving structured profile, split at step 100 and
+continued 100 steps against a 200-step reference. Small, but it
+exercises the whole path end to end -- openPMD particle round-trip,
+field-state write, hybrid continuation -- which is what the gate tests.
+Both arms use identical particle counts.
+
+**Run single-threaded.** With `OMP_NUM_THREADS=8`, two bit-identical
+reference decks diverge from *each other* by 4-9e-3 by step 200 --
+threaded deposition ordering reseeds roundoff, which then amplifies.
+That is the same magnitude as the effect being measured, so a threaded
+gate reports a false failure. At `OMP_NUM_THREADS=1` the code is
+bit-reproducible (two identical runs differ by exactly 0.0), and only
+then does the gate mean anything.
+
+| measurement | value |
+|---|---|
+| rho at load vs source state | **max rel 6.0e-16**, L2 1.3e-16 |
+| total \|rho\| at load | difference **exactly 0** |
+| div B, reference | 6.0e-13 T/m (rel 4.0e-15) |
+| div B, continuation | 6.8e-13 T/m (rel 4.6e-15) |
+| B after 100 steps | max rel **8.0e-4**, L2 4.2e-5 |
+| rho after 100 steps | max rel 1.5e-4, L2 1.4e-5 |
+| total \|rho\| after 100 steps | rel 5.6e-7 |
+| field energy drift | rel 1.2e-6 |
+
+**Verdict: the remap is faithful; the residual is not a round-trip
+loss.** The state at the moment of load reproduces the source to
+roundoff -- 6.0e-16 in deposited rho, with total weight identical to the
+last bit. There is no systematic error: no velocity-centering offset, no
+dropped particles, no weight loss. What remains is a roundoff-level seed
+(particles return in file order rather than the internal sorted order,
+so deposition sums in a different order) which then amplifies:
+
+| step | difference |
+|---|---|
+| 0 (load) | 6.0e-16 |
+| 20 | 1.8e-3 |
+| 100 | 8.0e-4 |
+
+Growth is ~1.4 per step until roughly step 20, then it **saturates** and
+stops growing. That is chaotic amplification reaching the local noise
+amplitude, not a defect -- and it is the same level two identical
+threaded runs reach on their own.
+
+### What this means for how the tool must be used
+
+**Pointwise trajectory comparison is meaningless beyond ~20 steps here.**
+The inference "the fine continuation differs from the coarse one,
+therefore resolution matters" is *invalid* stated that way, because two
+identical runs differ by the same amount after the Lyapunov time. Any
+resolution study built on this tool must therefore:
+
+1. compare **statistical** measures -- profiles, moments, scale lengths,
+   spectra, time-averages -- not cell-by-cell field differences;
+2. carry a **chaotic-floor control**: a same-resolution remapped
+   continuation, whose divergence from the reference is the noise floor
+   the resolution signal has to beat;
+3. quote the resolution effect only where it **exceeds that floor**.
+
+Combined with the three-arm particles-per-cell design above, a defensible
+study is: coarse/full, coarse/half (sampling), fine/half (resolution),
+plus a ratio-1 remap of the coarse arm (chaotic floor). A difference
+matters when it is larger than both the sampling arm and the floor arm.
+
+### Reproducing
+
+```
+cd identity
+export OMP_NUM_THREADS=1          # required; see above
+python3 ref.py  --nsplit 100 --nsteps 200 --nr 64 --nz 128 --ppc 16 --outdir id_ref
+python3 cont.py --particles id_ref/pdump/openpmd_000100.h5 \
+                --bfield    id_ref/B_split.npz --nsteps 100 --outdir id_cont
+python3 compare.py --ref id_ref --cont id_cont --split 100 --final 200
+```
+
+`compare.py` reports B and rho differences, divergence cleanliness on
+both arms, weight and energy drift, and classifies the outcome. Note it
+labels anything above roundoff as needing attribution -- the attribution
+for this fixture is above.
+
+### Still untested
+
+The external-field variant. This fixture sets the initial field through
+the grid-init style, which writes the field state directly, so total and
+plasma-frame B coincide and the decomposition cannot be got wrong. A
+production state carrying a hybrid external-field register must decide
+explicitly whether the remapped array is total or plasma-frame, and
+verify it on the first dump, per the traps above.

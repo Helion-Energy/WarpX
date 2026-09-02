@@ -1,0 +1,10 @@
+# run outputs and logs -- regenerate with the commands in ../README.md
+*.log
+*.npz
+id_*/
+det_*/
+run_*/
+smoke*/
+cont/
+payload/
+warpx_used_inputs
