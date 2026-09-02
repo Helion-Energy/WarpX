@@ -1072,6 +1072,28 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_mirror_full  # dependency
 )
 
+# RZ coverage of the TVD reconstruction (implicit_mhd.fluid_reconstruction)
+# on the PRODUCTION flux (central + viscosity): the same mirror-parity
+# Reference, which asserts that the discrete operator commutes with the
+# z-mirror to solver roundoff for every field of the parity table. That is
+# a structural check the 1D gates cannot make -- it exercises the widened
+# stencil on radial faces, across the axis (whose cell-centered current
+# ghosts the reconstruction newly fills with the m = 0 vector parity), and
+# on z faces at once, and it fails if the limiter is not symmetric under
+# (far_left, left | right, far_right) -> (far_right, right | left,
+# far_left). The limited slope is odd and symmetric in its two one-sided
+# differences and the guard is built from a symmetric stencil norm, so it
+# is; this is the gate that keeps it that way.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_mirror_full_reconstruction  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_mirror_full implicit_mhd.fluid_reconstruction=median"  # inputs
+    "analysis_mhd_mirror_full.py diags/diag000000 diags/diag000032"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_mirror_full  # dependency
+)
+
 # Green's-function open r_hi boundary through the implicit residual: the
 # same outflow physics with the uniform Bz supplied by the split external
 # vector potential; the ghost fill (a linear map of the interior J_theta)
@@ -2336,6 +2358,140 @@ add_warpx_test(
     analysis_mhd_circuit_hook_scope.py  # analysis
     OFF  # checksum
     test_rz_theta_implicit_mhd_circuit_hook_residual  # dependency
+)
+
+# ---------------------------------------------------------------------
+# TVD reconstruction of the recast face states
+# (implicit_mhd.fluid_reconstruction; the reference code's adv_type = 4 median
+# limiter). Three gate families sharing two base decks.
+# ---------------------------------------------------------------------
+
+# ORDER OF ACCURACY. A sine density perturbation advected as an exact
+# contact on 32/64/128 cells, with dt held FIXED across the family (keyed
+# to the finest grid) so the theta = 0.5 temporal error is a common
+# constant and the measured order is purely spatial. Five twins carry the
+# refinement family; the sixth arm's analysis reads all six and asserts
+# first order OFF (donor cell) against second order ON, and reports the
+# effective diffusivity of each arm against the audit's c_f dx / 2.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_order_none_n32  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=32 implicit_mhd.fluid_reconstruction=none"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_order_none_n64  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=64 implicit_mhd.fluid_reconstruction=none"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_reconstruction_order_none_n32  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_order_none_n128  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=128 implicit_mhd.fluid_reconstruction=none"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_reconstruction_order_none_n64  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_order_median_n32  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=32 implicit_mhd.fluid_reconstruction=median"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_reconstruction_order_none_n128  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_order_median_n64  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=64 implicit_mhd.fluid_reconstruction=median"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_reconstruction_order_median_n32  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_order  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=128 implicit_mhd.fluid_reconstruction=median"  # inputs
+    "analysis_mhd_reconstruction_order.py diags/diag000000 diags/diag000100"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_reconstruction_order_median_n64  # dependency
+)
+
+# TVD / NO NEW EXTREMA. A 4:1 square contact advected 0.4 domain lengths
+# with hlld. The median limiter must hold the invariant interval while
+# the UNLIMITED twin (the same reconstruction with the limiter removed)
+# rings -- without that twin the gate would be vacuous, since donor cell
+# is monotone by construction too. Also gates that the reconstruction
+# never manufactures an inadmissible ion internal energy.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_tvd_none  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_tvd implicit_mhd.fluid_reconstruction=none"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_tvd_vanalbada  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_tvd implicit_mhd.fluid_reconstruction=vanalbada"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_reconstruction_tvd_none  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_tvd_unlimited  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_tvd implicit_mhd.fluid_reconstruction=unlimited"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_reconstruction_tvd_vanalbada  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_tvd  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_tvd implicit_mhd.fluid_reconstruction=median"  # inputs
+    "analysis_mhd_reconstruction_tvd.py diags/diag000000 diags/diag000120"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_reconstruction_tvd_unlimited  # dependency
+)
+
+# DEFAULT-PATH IDENTITY. The same deck with the knob absent and with
+# fluid_reconstruction = none must agree BITWISE: the new branch sits on
+# the JFNK residual hot path of every production deck, and the whole
+# committed checksum suite depends on the default not having moved.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_identity_default  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_tvd my_constants.nz=32 max_step=50 diag1.intervals=50"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_reconstruction_identity  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_tvd my_constants.nz=32 max_step=50 diag1.intervals=50 implicit_mhd.fluid_reconstruction=none"  # inputs
+    "analysis_mhd_reconstruction_identity.py diags/diag000050"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_reconstruction_identity_default  # dependency
 )
 
 # Test-fixture ExternalCircuit plugin (independent driven RL loops, the

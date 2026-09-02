@@ -2344,6 +2344,42 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Hall EMF (J x B)/rho_q, converting the ion-frame ideal EMF to
         the electron frame.
 
+    fluid_reconstruction: {"none", "median", "vanalbada", "unlimited"}, optional
+        TVD reconstruction of the face states handed to the recast fluid
+        flux; the default "none" is the bit-identical donor-cell path.
+        Without it the recast hands hlld/central the RAW cell-centre
+        states -- a piecewise-CONSTANT reconstruction -- so the hlld path
+        is a first-order Godunov scheme with modified-equation
+        dissipation ~ c_f dx/2.
+        "median" is the reference code's adv_type = 4 limiter (fmed over the
+        second-order upwind extrapolation, the second-order centered
+        interpolation, and the donor value), which on a uniform stencil
+        is identically MUSCL with the minmod slope; it is smoothed for
+        the matrix-free Jacobian probes at width
+        reconstruction_kappa, which costs a numerical diffusivity
+        0.354 kappa |u| dx and new extrema up to kappa/4 of the largest
+        stencil difference.
+        "vanalbada" is the C-infinity rational sibling: exactly second
+        order with no diffusivity penalty, no overshoot at a plateau
+        edge, but new extrema up to 0.10355 of the local jump on the
+        opposite-sign branch. "unlimited" is the oscillatory
+        centered-slope reference (diagnostic only).
+        The reconstruction acts on primitive variables and floors every
+        reconstructed density and internal energy, so the conserved ion
+        energy is never reconstructed directly and E_i - KE stays above
+        the ion internal-energy floor at every face; it therefore
+        requires strictly positive mass_density_floor and
+        electron_pressure_floor (and ion_pressure_floor with an evolved
+        ion energy channel). Note that a limiter needs an UPWIND flux to
+        enforce monotonicity: with fluid_flux="central" it changes the
+        smooth-region face states but cannot suppress a dispersive
+        overshoot.
+
+    reconstruction_kappa: float, default=0.01
+        Smoothing width fraction of the "median" limiter (unused by the
+        other modes); both the numerical diffusivity and the
+        new-extremum bound above scale linearly in it.
+
     viscosity: float, default=0 (off)
         Explicit ion kinematic viscosity nu_i in m^2/s of the recast face
         fluxes (fluid_flux="hlld" or "central"; required positive for
@@ -3204,6 +3240,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         conduction_theta=None,
         fluid_flux=None,
         allow_hlld=None,
+        fluid_reconstruction=None,
+        reconstruction_kappa=None,
         viscosity=None,
         wall_viscosity_mask=None,
         wall_viscosity_mask_width=None,
@@ -3322,6 +3360,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.conduction_theta = conduction_theta
         self.fluid_flux = fluid_flux
         self.allow_hlld = allow_hlld
+        self.fluid_reconstruction = fluid_reconstruction
+        self.reconstruction_kappa = reconstruction_kappa
         self.viscosity = viscosity
         self.wall_viscosity_mask = wall_viscosity_mask
         self.wall_viscosity_mask_width = wall_viscosity_mask_width
@@ -3456,6 +3496,8 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.conduction_theta = self.conduction_theta
         implicit_mhd.fluid_flux = self.fluid_flux
         implicit_mhd.allow_hlld = self.allow_hlld
+        implicit_mhd.fluid_reconstruction = self.fluid_reconstruction
+        implicit_mhd.reconstruction_kappa = self.reconstruction_kappa
         implicit_mhd.viscosity = self.viscosity
         implicit_mhd.wall_viscosity_mask = self.wall_viscosity_mask
         implicit_mhd.wall_viscosity_mask_width = self.wall_viscosity_mask_width

@@ -770,6 +770,75 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
             "or select a flux explicitly (the old default was renamed "
             "legacy_e_centered)");
     }
+    // TVD reconstruction of the recast face states (see the header): the
+    // The reference code's adv_type = 4 median limiter, its C-infinity rational
+    // sibling, and an unlimited diagnostic twin. Default "none" keeps
+    // the donor-cell path bit-identical.
+    pp.query("fluid_reconstruction", m_fluid_reconstruction);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_fluid_reconstruction == "none" ||
+            m_fluid_reconstruction == "median" ||
+            m_fluid_reconstruction == "vanalbada" ||
+            m_fluid_reconstruction == "unlimited",
+        "implicit_mhd.fluid_reconstruction must be none, median, "
+        "vanalbada, or unlimited");
+    m_fluid_reconstruction_mode =
+        (m_fluid_reconstruction == "median")
+            ? theta_implicit_mhd::reconstruction_median
+            : ((m_fluid_reconstruction == "vanalbada")
+                   ? theta_implicit_mhd::reconstruction_vanalbada
+                   : ((m_fluid_reconstruction == "unlimited")
+                          ? theta_implicit_mhd::reconstruction_unlimited
+                          : theta_implicit_mhd::reconstruction_none));
+    const bool reconstruction_active =
+        (m_fluid_reconstruction_mode !=
+         theta_implicit_mhd::reconstruction_none);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !reconstruction_active || m_use_recast,
+        "implicit_mhd.fluid_reconstruction requires the "
+        "conservative-form recast (implicit_mhd.fluid_flux = hlld or "
+        "central): the reconstruction is wired into the recast "
+        "face-flux registers only");
+    utils::parser::queryWithParser(pp, "reconstruction_kappa",
+                                   m_reconstruction_kappa);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_reconstruction_kappa >= 0.0_rt,
+        "implicit_mhd.reconstruction_kappa cannot be negative");
+    if (reconstruction_active) {
+        // The limiters' monotonicity statement holds for an advective
+        // CFL <= 1 (a reconstructed face state must not be overtaken
+        // within the step). The implicit solve is unconditionally
+        // STABLE at any CFL, so this is a monotonicity caveat and not a
+        // stability one -- and dt is not known here -- but a deck that
+        // runs a large advective CFL should not expect the TVD bound.
+        //
+        // Positivity of the reconstructed face states rests on the
+        // limiter's neighbour bound PLUS an explicit smooth floor on
+        // every reconstructed density and internal energy (the neighbour
+        // bound alone is widened by the C-infinity smoothing, which at a
+        // 10^4 density step across one cell is enough to undershoot).
+        // The floors must therefore be strictly positive -- the same
+        // contract thermal_conduction_model = braginskii already
+        // requires of the electron pressure floor, and for the same
+        // reason: a zero floor turns a C-infinity guard into a hard
+        // clamp with a kink at exactly the states that need it.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_mass_density_floor > 0.0_rt &&
+                m_electron_pressure_floor > 0.0_rt,
+            "implicit_mhd.fluid_reconstruction requires strictly positive "
+            "implicit_mhd.mass_density_floor and "
+            "implicit_mhd.electron_pressure_floor: they are the anchors "
+            "of the reconstructed face states' positivity floors");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_ion_pressure_floor > 0.0_rt ||
+                (m_ion_closure != "total_energy" &&
+                 m_ion_closure != "dual_energy" && m_ion_closure != "cgl"),
+            "implicit_mhd.fluid_reconstruction with an evolved ion energy "
+            "channel requires a strictly positive "
+            "implicit_mhd.ion_pressure_floor: it is the anchor of the "
+            "reconstructed internal ion energy's positivity floor, which "
+            "is what keeps E_i - KE admissible at every face");
+    }
     utils::parser::queryWithParser(pp, "hlld_kappa_signal",
                                    m_hlld_kappa_signal);
     utils::parser::queryWithParser(pp, "hlld_kappa_contact",
@@ -2737,6 +2806,14 @@ void ThetaImplicitMHD::PrintParameters () const
                            : std::string{})
                    << "Evolve ion fluid:              " << m_evolve_ion_fluid << "\n"
                    << "Fluid flux:                    " << m_fluid_flux << "\n"
+                   << "Fluid reconstruction:          "
+                   << m_fluid_reconstruction
+                   << (m_fluid_reconstruction_mode ==
+                               theta_implicit_mhd::reconstruction_median
+                           ? " (kappa = " +
+                                 std::to_string(m_reconstruction_kappa) + ")"
+                           : std::string{})
+                   << "\n"
                    << "Shaped conducting-wall mask:   "
                    << m_wall_mask.ModeName() << "\n"
                    << "Wall thermal BC:               "
@@ -4157,14 +4234,26 @@ void ThetaImplicitMHD::FillCellCenteredElectromagneticFields ()
         // outermost valid ring; running after the axial pass makes the
         // corner ghosts consistent too. The axis side is left to the
         // kernels' own parity handling.
+        // The AXIS ghosts are additionally filled when the TVD
+        // reconstruction is active: its four-cell normal stencil reaches
+        // one cell BELOW the axis at the first radial face above it, and
+        // the Hall drift it reconstructs is built from J_cc. The image is
+        // the m = 0 vector parity (J_r, J_theta odd, J_z even) --
+        // identical to the one ApplyMagneticCCDomainGhosts applies to the
+        // cell-centered B. Gated on the reconstruction so every existing
+        // deck keeps its historical (alloc-zero) axis ghosts bit for bit.
         const amrex::Box current_domain = amrex::convert(
             m_WarpX->Geom(0).Domain(), total_current_cc.ixType().toIntVect());
+        const int radial_domain_lo = current_domain.smallEnd(0);
         const int radial_domain_hi = current_domain.bigEnd(0);
         const int ncomp = total_current_cc.nComp();
+        const bool fill_axis = (m_fluid_reconstruction_mode !=
+                                theta_implicit_mhd::reconstruction_none);
         for (amrex::MFIter mfi(total_current_cc); mfi.isValid(); ++mfi) {
             const amrex::Box grown =
                 amrex::grow(mfi.validbox(), total_current_cc.nGrowVect());
-            if (grown.bigEnd(0) <= radial_domain_hi) {
+            if (grown.bigEnd(0) <= radial_domain_hi &&
+                (!fill_axis || grown.smallEnd(0) >= radial_domain_lo)) {
                 continue;
             }
             const auto arr = total_current_cc.array(mfi);
@@ -4172,6 +4261,11 @@ void ThetaImplicitMHD::FillCellCenteredElectromagneticFields ()
                                [=] AMREX_GPU_DEVICE (int i, int j, int k, int n) {
                 if (i > radial_domain_hi) {
                     arr(i, j, k, n) = arr(radial_domain_hi, j, k, n);
+                } else if (fill_axis && i < radial_domain_lo) {
+                    const int mirror = 2 * radial_domain_lo - 1 - i;
+                    arr(i, j, k, n) =
+                        (n == 2) ? arr(mirror, j, k, n)
+                                 : -arr(mirror, j, k, n);
                 }
             });
         }
@@ -5112,6 +5206,8 @@ theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
         m_dual_energy_internal_old_max;
     flux_parameters.pressure_corner_width_fraction =
         m_pressure_corner_width_fraction;
+    flux_parameters.fluid_reconstruction = m_fluid_reconstruction_mode;
+    flux_parameters.reconstruction_kappa = m_reconstruction_kappa;
     // Per-step frozen pedestal state (0 while the pedestal is off):
     // anchors the per-block drain gates and the halo source taper.
     flux_parameters.halo_pedestal = m_halo_pedestal_density;
@@ -6269,6 +6365,37 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
         (wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::dirichlet);
     const int* const AMREX_RESTRICT wall_first_masked_cc =
         wall_mechanics ? m_wall_mask.FirstMaskedCellCentered() : nullptr;
+    // ---- TVD reconstruction (implicit_mhd.fluid_reconstruction).
+    // The stencil widens from 1 to 2 cells along the face normal. The
+    // fluid registers already carry 2 guard cells (AllocateLevelMFs) and
+    // every ghost fill -- FillBoundaryAndSync, the axis/wall radial
+    // mirrors, the Neumann and outflow z ends, the z_lo mirror parity --
+    // runs over the FULL grown box with index-arithmetic images that are
+    // correct at both ghost depths, so the second layer is filled with
+    // the same boundary condition as the first.
+    const bool reconstruct_faces =
+        (parameters.fluid_reconstruction !=
+         theta_implicit_mhd::reconstruction_none);
+    // Degrade to donor cell at and beside the stair-step wall contour.
+    // The masked side of an interface face presents the ABSORB IMAGE of
+    // the interior (below), not a fluid state, and a cell one row inside
+    // the contour would otherwise reconstruct a slope built from metal;
+    // both are exactly the "reconstructing across the mask" failure. The
+    // mask is static geometry, so this stays a constant branch for the
+    // JFNK probes. The table is consulted whenever the mask exists, not
+    // only when the thermal wall does.
+    const int* const AMREX_RESTRICT reconstruction_first_masked_cc =
+        (reconstruct_faces && m_wall_mask.IsActive())
+            ? m_wall_mask.FirstMaskedCellCentered()
+            : nullptr;
+    // The reference-parity no-slip band (implicit_mhd.wall_no_slip) pins the
+    // momentum of the first NoSlipWidth() live rows to zero. A limiter
+    // reading across that pin would extrapolate interior momentum toward
+    // the wall face; the pin's whole point is that it does not. Donor
+    // cell there too.
+    const bool reconstruction_no_slip =
+        reconstruct_faces && m_wall_mask.NoSlip();
+    const int reconstruction_no_slip_width = m_wall_mask.NoSlipWidth();
     // The table covers z cells [-ng, nz - 1 + ng] of the MASK's ghost
     // width; kernel boxes may reach one cell past it at the z ends, so
     // reads are clamped (constant continuation, like the polyline).
@@ -6538,6 +6665,48 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
             };
             auto left = load_state(il, jl, kl);
             auto right = load_state(i, j, k);
+
+            if (reconstruct_faces) {
+                // Four-cell normal stencil (far_left, left | right,
+                // far_right); the outer two live in the second guard
+                // layer at a grid or domain edge.
+                int ill = il, jll = jl, kll = kl;
+                shift_index(ill, jll, kll, normal, -1);
+                int irr = i, jrr = j, krr = k;
+                shift_index(irr, jrr, krr, normal, 1);
+                bool donor_cell = false;
+                if (reconstruction_first_masked_cc != nullptr) {
+                    const auto masked = [=] (const int ic, const int jc) {
+                        const int jz = std::max(
+                            wall_mask_z_lo, std::min(wall_mask_z_hi, jc));
+                        return ic >= reconstruction_first_masked_cc[jz];
+                    };
+                    donor_cell = masked(ill, jll) || masked(il, jl) ||
+                                 masked(i, j) || masked(irr, jrr);
+                }
+                if (!donor_cell && reconstruction_no_slip) {
+                    const auto pinned = [=] (const int ic, const int jc) {
+                        for (int dj = -reconstruction_no_slip_width;
+                             dj <= reconstruction_no_slip_width; ++dj) {
+                            const int jz = std::max(
+                                wall_mask_z_lo,
+                                std::min(wall_mask_z_hi, jc + dj));
+                            if (ic >= reconstruction_first_masked_cc[jz] -
+                                          reconstruction_no_slip_width) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+                    donor_cell = pinned(il, jl) || pinned(i, j);
+                }
+                if (!donor_cell) {
+                    const auto far_left = load_state(ill, jll, kll);
+                    const auto far_right = load_state(irr, jrr, krr);
+                    theta_implicit_mhd::reconstruct_face_states(
+                        far_left, far_right, normal, parameters, left, right);
+                }
+            }
 
             // Wall face classification against the cell-centered mask
             // (see the host constants above the loop): exactly one

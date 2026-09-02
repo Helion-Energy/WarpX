@@ -140,6 +140,14 @@ struct FluxParameters {
     // frozen (step-old), so the branch is a constant for JFNK probes.
     amrex::Real dual_energy_internal_cutoff = 0.0;
     amrex::Real dual_energy_internal_old_max = 0.0;
+    // TVD reconstruction of the face states handed to the recast fluxes
+    // (implicit_mhd.fluid_reconstruction; 0 = none, the bit-identical
+    // donor-cell default -- see reconstruct_face_states). The mode is a
+    // per-solve constant, so the branch below is not a state branch.
+    int fluid_reconstruction = 0;
+    // Smoothing width fraction of the median limiter (see limited_slope):
+    // w = sqrt(kappa^2 (d_up^2 + d_down^2) + guard^2).
+    amrex::Real reconstruction_kappa = 0.01;
 };
 
 // C-infinity rectifier width of the dual-energy kinetic fraction: fk_raw
@@ -184,6 +192,11 @@ struct CellState {
     // internal energy the pressure consumers see). Default zero so the
     // other closures are undisturbed. ---
     amrex::Real ion_internal_energy = 0.0;
+    // The per-solve FROZEN step-old U_i, carried only so the
+    // reconstruction path can rebuild the blended pressure with the same
+    // (constant) low-internal cutoff mask the loader used. Filled by
+    // load_cell_state_dual; unread by every other consumer.
+    amrex::Real old_ion_internal_energy = 0.0;
 };
 
 struct FaceFlux {
@@ -342,6 +355,61 @@ smooth_positive_floor (const amrex::Real value,
     const amrex::Real excess = value - floor;
     return floor +
            0.5 * (excess + std::sqrt(excess * excess + floor * floor));
+}
+
+/**
+ * \brief C-infinity median of three -- the smoothed the reference code's `fmed`
+ * (adv.f90:1344, `MIN(MAX(p1,p2), MAX(p3, MIN(p1,p2)))`).
+ *
+ * Built from the identity med = a + b + c - min3 - max3 with the file's
+ * smooth_min/smooth_max in place of the hard ones, NOT from a literal
+ * transcription of the reference code's nested expression. The reason is exact
+ * cancellation: smooth_min widens down by the same amount smooth_max
+ * widens up, so this form returns a at a = b = c for every width, while
+ * the literal nested form returns a - 0.104 w. That difference is the
+ * whole ballgame here -- the limiter is applied to slopes, a = b = c = 0
+ * is a uniform region, and an O(w) slope there would manufacture a
+ * spurious face jump on every face of every quiescent region (halo
+ * pedestal, vacuum, held equilibria).
+ *
+ * The identity is then collapsed analytically before it is evaluated.
+ * Writing s0 = sqrt((a - b)^2 + w^2) and m = (a + b)/2 - c, the two
+ * inner extrema are (a + b)/2 -+ s0/2 and the whole expression telescopes
+ * to
+ *
+ *     med = (a + b)/2 + (s1 - s2)/2,
+ *     s1 = sqrt((m - s0/2)^2 + w^2),  s2 = sqrt((m + s0/2)^2 + w^2).
+ *
+ * That is not merely cheaper (three square roots instead of four): it
+ * makes the a = b = c case exact IN FLOATING POINT. There m = 0, so s1
+ * and s2 are the same expression evaluated at -+ s0/2, produce bitwise
+ * identical values, and cancel to exactly zero, while (a + b)/2 with
+ * a = b is exact. The un-collapsed sum a + b + c - min3 - max3 is exact
+ * only in real arithmetic and leaves a 1 ulp residue -- enough to break
+ * a bitwise quiescence claim for no reason.
+ *
+ * Deviation from the hard median is bounded by w/2 (measured 0.4998 w
+ * over 2e5 random triples); the hard median is recovered as w -> 0 (to
+ * round-off, like every smooth_min/smooth_max in this file), and the map
+ * is homogeneous of degree one in (a, b, c, w), so a scale-free width
+ * keeps a scale-free limiter. The (a, b) pair is the inner one, so the
+ * two one-sided differences enter symmetrically; c (the donor candidate,
+ * always 0 in slope form) is the odd argument.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+smooth_median3 (const amrex::Real a, const amrex::Real b, const amrex::Real c,
+                const amrex::Real width) noexcept {
+    const amrex::Real pair_mean = 0.5 * (a + b);
+    const amrex::Real difference = a - b;
+    const amrex::Real half_span =
+        0.5 * std::sqrt(difference * difference + width * width);
+    const amrex::Real offset = pair_mean - c;
+    const amrex::Real low = offset - half_span;
+    const amrex::Real high = offset + half_span;
+    const amrex::Real width_squared = width * width;
+    return pair_mean +
+           0.5 * (std::sqrt(low * low + width_squared) -
+                  std::sqrt(high * high + width_squared));
 }
 
 // Rectifier width of the floor-consistency relaxation source, as a
@@ -736,14 +804,8 @@ load_cell_state_cgl (const amrex::Array4<const amrex::Real>& density,
  * load_cell_state_hlld_cgl.
  */
 AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE void
-finish_magnetized_state (CellState& state,
-                         const amrex::Array4<const amrex::Real>& magnetic,
-                         const int i, const int j, const int k,
-                         const int normal_direction,
-                         const FluxParameters& parameters) noexcept {
-    for (int component = 0; component < 3; ++component) {
-        state.magnetic[component] = magnetic(i, j, k, component);
-    }
+finish_magnetized_speeds (CellState& state, const int normal_direction,
+                          const FluxParameters& parameters) noexcept {
     const int tangent1 = (normal_direction + 1) % 3;
     const int tangent2 = (normal_direction + 2) % 3;
     // Rescaled-unit Alfven speeds (b = B/sqrt(mu0)): c_An^2 = b_n^2/rho,
@@ -770,6 +832,24 @@ finish_magnetized_state (CellState& state,
     state.fast_speed = std::sqrt(fast2);
     state.fast_wave_speed =
         std::abs(state.ion_velocity[normal_direction]) + state.fast_speed;
+}
+
+/**
+ * \brief finish_magnetized_speeds with the cell-centered TOTAL magnetic
+ * field loaded from its array first (the array-reading shell used by the
+ * loaders; the reconstruction path fills state.magnetic itself and calls
+ * finish_magnetized_speeds directly).
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE void
+finish_magnetized_state (CellState& state,
+                         const amrex::Array4<const amrex::Real>& magnetic,
+                         const int i, const int j, const int k,
+                         const int normal_direction,
+                         const FluxParameters& parameters) noexcept {
+    for (int component = 0; component < 3; ++component) {
+        state.magnetic[component] = magnetic(i, j, k, component);
+    }
+    finish_magnetized_speeds(state, normal_direction, parameters);
 }
 
 /**
@@ -931,6 +1011,7 @@ load_cell_state_dual (const amrex::Array4<const amrex::Real>& density,
         load_cell_state(density, momentum, electron_energy, ion_energy,
                         current, i, j, k, normal_direction, parameters);
     state.ion_internal_energy = ion_internal_energy(i, j, k);
+    state.old_ion_internal_energy = old_ion_internal_energy(i, j, k);
     amrex::Real kinetic_energy = 0.0;
     for (int component = 0; component < 3; ++component) {
         kinetic_energy += state.momentum[component] * state.momentum[component];
@@ -969,6 +1050,507 @@ load_cell_state_hlld_dual (const amrex::Array4<const amrex::Real>& density,
     finish_magnetized_state(state, magnetic, i, j, k, normal_direction,
                             parameters);
     return state;
+}
+
+// ---------------------------------------------------------------------
+// TVD reconstruction (implicit_mhd.fluid_reconstruction)
+// ---------------------------------------------------------------------
+//
+// WHAT THIS IS. Without it the recast hands hlld_flux/central_flux the
+// RAW cell-centre states of the two cells adjacent to a face, i.e. a
+// piecewise-CONSTANT reconstruction: hlld is then a first-order Godunov
+// scheme whose modified-equation dissipation on the fast-magnetosonic
+// characteristic fields is D ~ c_f dx/2. The reference code flies adv_type = 4
+// (get_flux_hyb2, adv.f90:1039-1167), a piecewise-linear scheme that
+// builds a second-order upwind extrapolation q_up and a second-order
+// centered interpolation q_cn at the control surface and takes
+// fmed(q_up, q_cn, q_C) with q_C the donor value.
+//
+// PARITY IDENTITY (verified against the local source). On the uniform
+// stencil this codebase uses, the reference code's control surface sits midway
+// between two nodes, so their geometric factors reduce to gdf_up = 3/2
+// and gdf_cn = 0 (adv.f90:1122-1129):
+//     q_up = q_C + (q_C - q_U)/2,     q_cn = q_C + (q_D - q_C)/2,
+//     fmed(q_up, q_cn, q_C) = q_C + (1/2) med(0, d_up, d_down)
+//                           = q_C + (1/2) minmod(d_up, d_down).
+// So adv_type = 4 IS MUSCL with the minmod slope, evaluated in the
+// donor cell. The implementation below works in that slope form: it
+// produces BOTH one-sided face states (left-extrapolated from the left
+// cell, right-extrapolated from the right cell) and lets the Riemann
+// solver do the upwinding that the reference code does with its own velocity sign, which
+// is the equivalent statement inside a Godunov-type flux.
+//
+// LIMITER MODES.
+//  * none (default): donor-cell -- bit-identical to the pre-port code
+//    (the reconstruction block is not entered at all).
+//  * median: the reference code's fmed, smoothed. See the width discussion below.
+//  * vanalbada: the C-infinity rational sibling. NO absolute values, NO
+//    square roots, no kink anywhere, and EXACTLY second order in smooth
+//    flow. Not a smoothed minmod -- a natively smooth limiter -- so it
+//    pays for its smoothness somewhere else (see the bounds below).
+//  * unlimited: the plain centered slope. Second order and OSCILLATORY;
+//    a diagnostic reference for the TVD gate (it is the twin that must
+//    show new extrema), never a production mode.
+//
+// WHY THE MEDIAN NEEDS A SLOPE-KEYED WIDTH, AND WHAT IT COSTS. minmod
+// has TWO kinds of kink: the extremum kink (d_up d_down < 0), where the
+// two one-sided differences bracket zero, and the SELECTION kink at
+// d_up = d_down, where which difference is smaller flips. A width keyed
+// to the curvature |d_down - d_up| smooths the first and vanishes
+// identically at the second, so it cannot be used. The width must
+// therefore scale with the slope itself,
+//     w = sqrt(kappa^2 (d_up^2 + d_down^2) + guard^2),
+// and that is not free: on a smooth profile (d_up = d_down = d) the
+// smoothed median returns d - w/2 = d (1 - kappa/sqrt(2)), a RELATIVE
+// slope defect of kappa/sqrt(2) (measured 0.99292964 vs the predicted
+// 0.99292893 at kappa = 0.01). Through the flux difference that is a
+// numerical diffusivity
+//     D_median = (kappa/(2 sqrt(2))) |u| dx = 0.354 kappa |u| dx,
+// i.e. the median scheme is formally first order with 0.7% (at the
+// default kappa = 0.01) of the donor-cell dissipation |u| dx/2 it
+// replaces. That is the honest trade for a JFNK-safe median; vanalbada
+// has no such term.
+//
+// NEW-EXTREMA BOUNDS (measured over 5e5 random four-cell stencils, and
+// each equal to its closed form). The two limiters fail differently and
+// the difference decides which one a deck wants:
+//
+//   mode       | outside [q_C, q_D] by, as a fraction of ...
+//              |   the LOCAL jump      the LARGEST stencil difference
+//   median     |   unbounded           kappa/4      (0.00248 at 0.01)
+//   vanalbada  |   0.10355             0.10355
+//   unlimited  |   unbounded           0.25
+//
+// The median row is intrinsic, not a tuning failure: minmod's kinks lie
+// along RAYS through the origin of the (d_up, d_down) plane, and ANY
+// homogeneous smoothing of width kappa|d| rounds the d_down = 0 ray
+// transversally -- leaving a slope of order kappa |d_up| where minmod is
+// exactly zero. That is unbounded relative to a vanishing local jump but
+// bounded by kappa/4 of the stencil scale, which is the measure that
+// matters at a plateau edge. van Albada is exactly zero on d_down = 0
+// (its guard is absolute, not slope-keyed), so it does NOT overshoot at a
+// plateau edge at all; it pays instead on the opposite-sign branch, worst
+// case d_up/d_down = 1 - sqrt(2) where the slope is -0.20711 d_down.
+//
+// Do NOT read that table as "vanalbada is the tighter limiter on a
+// square wave": the advected square-contact regression measures the
+// opposite (median 3.3e-3 of the jump against vanalbada 5.0e-3, both
+// against unlimited's 3.4e-1). The table is a PLATEAU-EDGE statement and
+// a solution stops having pristine plateau edges after a few steps --
+// across the smeared front van Albada's opposite-sign branch is live
+// everywhere while the median's kappa/4 bound shrinks with the local
+// differences. Both bounds hold; only one of them is the operative one
+// on an evolved profile. The real distinction is elsewhere: vanalbada is
+// exactly second order with no diffusivity penalty and no kink anywhere,
+// median is reference-exact and pays 0.354 kappa |u| dx.
+//
+// POSITIVITY. The hard median is bounded by the two ADJACENT cell
+// values (med(a,b,c) always lies in [min(a,b), max(a,b)], and the
+// centered candidate is a convex combination of q_C and q_D), so an
+// exact median can never reconstruct a negative density or pressure
+// from positive neighbours. The C-infinity smoothing widens that bound
+// by O(w), which at a 10^4 density step across one cell IS enough to
+// undershoot, so every reconstructed density and internal energy is
+// additionally passed through reconstruction_positive_floor -- the
+// smooth_positive_floor idiom with its width DECOUPLED from the floor,
+// so a healthy cell is inflated by a relative 2.5e-7 (floor/value)^2
+// instead of the percent-level inflation smooth_positive_floor applies
+// a few floors up (12% at value = 2 floor -- i.e. across the whole halo
+// pedestal band).
+// The reconstruction is done on PRIMITIVE variables (density, velocity,
+// SPECIFIC internal energies, cell-centered B, and the Hall drift), so
+// a uniform-temperature contact reconstructs with no spurious pressure
+// oscillation and the floors act directly on the quantities that have
+// them.
+//
+// JFNK. Every mode is C-infinity in the state except at the single
+// point where all four stencil values of a variable vanish (the
+// guard then vanishes with them). There the limited slope is
+// identically zero and the map is homogeneous of degree one, so the
+// matrix-free directional derivative still exists; it is the second
+// derivative that is undefined, at a state (an identically zero field
+// block, e.g. B_theta in a poloidal-only run) where the reconstruction
+// output is exactly the donor-cell value anyway.
+//
+// PRECONDITIONER. The reconstruction widens the RESIDUAL's fluid
+// stencil from three points to five; the assembled preconditioner is
+// left at its donor-cell (three-point) stencil deliberately. A
+// first-order preconditioner for a second-order operator is the
+// standard construction -- it is better conditioned than the operator
+// it preconditions and cannot introduce the limiter's own
+// nondifferentiability into the assembled matrix -- and it keeps the
+// PC bandwidth (and the banded/direct factorizations built on it)
+// unchanged. GMRES still sees the true widened Jacobian through the
+// matrix-free probes, so the SOLUTION is second order regardless.
+//
+// COMPATIBILITY. Meaningful only with an UPWIND flux. A limiter needs
+// an upwind selection to enforce monotonicity: with fluid_flux =
+// central, which carries no Riemann dissipation at all, the limiter
+// clipping to donor cell reduces central_flux to EXACTLY the
+// unreconstructed centered flux, so reconstruction cannot suppress a
+// dispersive overshoot there. It still changes the smooth-region face
+// states (and hence the pressure-gradient and induction channels), so
+// it is not forbidden -- but the central path's remedy for ringing is
+// limited artificial dissipation, not reconstruction.
+constexpr int reconstruction_none = 0;
+constexpr int reconstruction_median = 1;
+constexpr int reconstruction_vanalbada = 2;
+constexpr int reconstruction_unlimited = 3;
+
+// Relative guard of the limiter widths: guard = this times the RMS of
+// the three stencil values entering one slope. Its only job is to keep
+// the smoothing width (median) and the van Albada denominator strictly
+// positive; it is deliberately far below the difference scale of any
+// resolved structure, so it contributes a relative residual error of
+// order guard/4 = 2.5e-7 and never drives the limiter.
+constexpr amrex::Real reconstruction_relative_guard = 1.0e-6;
+
+// Width of the reconstruction positivity floor, as a fraction of the
+// floor. It is DECOUPLED from the floor -- unlike smooth_positive_floor,
+// whose width IS the floor -- because a value sitting only a few floors
+// up is exactly the halo pedestal band, and smooth_positive_floor
+// inflates it by percent-level amounts there (12% at value = 2 floor).
+// With width = f * floor the RELATIVE inflation well above the knee is
+// (f/2)^2 (floor/value)^2, i.e. 2.5e-7 (floor/value)^2 at f = 1e-3:
+// 2.5e-7 at the floor's own scale, ~1.6e-8 across a production halo
+// pedestal band (value ~ 4 floors), and below round-off in the bulk --
+// while the map stays C-infinity and the floor stays a hard lower
+// bound. The width still exceeds the matrix-free probe scale
+// (~1e-8 |u|) by five orders of magnitude at the floor, which is what
+// the smoothing has to beat.
+constexpr amrex::Real reconstruction_floor_width_fraction = 1.0e-3;
+
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+reconstruction_positive_floor (const amrex::Real value,
+                               const amrex::Real floor) noexcept {
+    if (floor <= 0.0) {
+        // No floor to enforce (the deck opted out); the limiter's own
+        // neighbour bound is then the only guarantee.
+        return value;
+    }
+    const amrex::Real width = reconstruction_floor_width_fraction * floor;
+    const amrex::Real excess = value - floor;
+    return floor +
+           0.5 * (excess + std::sqrt(excess * excess + width * width));
+}
+
+/**
+ * \brief Limited MUSCL slope of one cell from its two one-sided
+ * differences, in the mode selected by
+ * implicit_mhd.fluid_reconstruction (see the block comment above).
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+limited_slope (const amrex::Real difference_up,
+               const amrex::Real difference_down, const amrex::Real guard,
+               const FluxParameters& parameters) noexcept {
+    if (parameters.fluid_reconstruction == reconstruction_unlimited) {
+        return 0.5 * (difference_up + difference_down);
+    }
+    const amrex::Real up_squared = difference_up * difference_up;
+    const amrex::Real down_squared = difference_down * difference_down;
+    const amrex::Real guard_squared = guard * guard;
+    if (parameters.fluid_reconstruction == reconstruction_vanalbada) {
+        // van Albada (1982) averaged slope: exactly the centered slope
+        // when the two differences agree, exactly zero when they are
+        // equal and opposite, and a rational function of the data with
+        // a strictly positive denominator -- no |.|, no sqrt, no kink.
+        const amrex::Real denominator =
+            up_squared + down_squared + 2.0 * guard_squared;
+        if (denominator <= 0.0) {
+            return 0.0;
+        }
+        return (difference_down * (up_squared + guard_squared) +
+                difference_up * (down_squared + guard_squared)) /
+               denominator;
+    }
+    // median: minmod(d_up, d_down) = med(0, d_up, d_down), smoothed.
+    const amrex::Real kappa = parameters.reconstruction_kappa;
+    const amrex::Real width = std::sqrt(
+        kappa * kappa * (up_squared + down_squared) + guard_squared);
+    return smooth_median3(difference_up, difference_down, 0.0, width);
+}
+
+/**
+ * \brief Limited face values of one scalar on both sides of a face,
+ * from its four-cell stencil along the face normal.
+ *
+ * Stencil naming is relative to the face: (far_left, left | right,
+ * far_right). The outputs are the left cell's right-edge extrapolation
+ * and the right cell's left-edge extrapolation, i.e. the two Riemann
+ * input states.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE void
+reconstruct_face_pair (const amrex::Real far_left, const amrex::Real left,
+                       const amrex::Real right, const amrex::Real far_right,
+                       const FluxParameters& parameters,
+                       amrex::Real& face_left,
+                       amrex::Real& face_right) noexcept {
+    const amrex::Real difference_left = left - far_left;
+    const amrex::Real difference_middle = right - left;
+    const amrex::Real difference_right = far_right - right;
+    const amrex::Real guard_left =
+        reconstruction_relative_guard *
+        std::sqrt(far_left * far_left + left * left + right * right);
+    const amrex::Real guard_right =
+        reconstruction_relative_guard *
+        std::sqrt(left * left + right * right + far_right * far_right);
+    face_left = left + 0.5 * limited_slope(difference_left,
+                                           difference_middle, guard_left,
+                                           parameters);
+    face_right = right - 0.5 * limited_slope(difference_middle,
+                                             difference_right, guard_right,
+                                             parameters);
+}
+
+/**
+ * \brief Rebuild every DERIVED member of a CellState from its
+ * independent members (density, momentum, electron_energy, ion_energy,
+ * the closure energies, and magnetic), term for term as the loaders
+ * build them.
+ *
+ * Used only by the reconstruction path, which overwrites the
+ * independent members with limited face values. The Hall drift
+ * u_e,n - u_i,n is passed separately because CellState stores the
+ * electron velocity, not the drift; reconstructing the DRIFT (rather
+ * than the electron velocity) keeps u_e,n consistent with the
+ * reconstructed ion velocity and makes the Hall-off case exactly zero.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE void
+rebuild_cell_state (CellState& state, const amrex::Real hall_drift,
+                    const int normal_direction,
+                    const FluxParameters& parameters) noexcept {
+    state.safe_density = std::max(state.density, parameters.density_floor);
+    for (int component = 0; component < 3; ++component) {
+        state.ion_velocity[component] =
+            state.momentum[component] / state.safe_density;
+    }
+    if (parameters.total_energy_closure) {
+        amrex::Real kinetic_energy = 0.0;
+        for (int component = 0; component < 3; ++component) {
+            kinetic_energy +=
+                state.momentum[component] * state.momentum[component];
+        }
+        kinetic_energy *= 0.5 / state.safe_density;
+        const amrex::Real internal_floor =
+            parameters.ion_pressure_floor / (parameters.gamma_i - 1.0);
+        const amrex::Real excess =
+            state.ion_energy - kinetic_energy - internal_floor;
+        const amrex::Real corner_width = std::max(
+            internal_floor,
+            parameters.pressure_corner_width_fraction * kinetic_energy);
+        state.ion_internal =
+            internal_floor +
+            0.5 * (excess + std::sqrt(excess * excess +
+                                      corner_width * corner_width));
+        state.ion_pressure = (parameters.gamma_i - 1.0) * state.ion_internal;
+    } else {
+        state.ion_energy = 0.0;
+        state.ion_internal = 0.0;
+        state.ion_pressure = ion_pressure(state.safe_density, parameters);
+    }
+    state.electron_pressure =
+        std::max((parameters.gamma_e - 1.0) * state.electron_energy,
+                 parameters.electron_pressure_floor);
+    state.electron_velocity_normal =
+        state.ion_velocity[normal_direction] + hall_drift;
+    finish_acoustic_speeds(state, normal_direction, parameters);
+    if (parameters.cgl_closure) {
+        state.ion_internal =
+            state.ion_parallel_energy + state.ion_perp_energy;
+        const amrex::Real pressure_parallel = smooth_positive_floor(
+            2.0 * state.ion_parallel_energy, parameters.ion_pressure_floor);
+        const amrex::Real pressure_perp = smooth_positive_floor(
+            state.ion_perp_energy, parameters.ion_pressure_floor);
+        state.ion_pressure = (pressure_parallel + 2.0 * pressure_perp) / 3.0;
+        finish_acoustic_speeds(state, normal_direction, parameters);
+    } else if (parameters.dual_energy_closure) {
+        amrex::Real kinetic_energy = 0.0;
+        for (int component = 0; component < 3; ++component) {
+            kinetic_energy +=
+                state.momentum[component] * state.momentum[component];
+        }
+        kinetic_energy *= 0.5 / state.safe_density;
+        state.ion_pressure = dual_energy_blended_pressure(
+            state.ion_energy, kinetic_energy, state.ion_internal_energy,
+            state.old_ion_internal_energy, parameters);
+        state.ion_internal = state.ion_pressure / (parameters.gamma_i - 1.0);
+        finish_acoustic_speeds(state, normal_direction, parameters);
+    }
+    finish_magnetized_speeds(state, normal_direction, parameters);
+}
+
+/**
+ * \brief Replace the two donor-cell face states with the limited
+ * piecewise-linear reconstruction over the four-cell normal stencil.
+ *
+ * \param[in]     far_left  cell one further out on the left
+ * \param[in]     far_right cell one further out on the right
+ * \param[in,out] left      donor cell on the left, reconstructed in place
+ * \param[in,out] right     donor cell on the right, reconstructed in place
+ *
+ * The step-old U_i of each donor is carried through unchanged (it is a
+ * per-solve frozen constant selecting the dual-energy low-internal
+ * cutoff mask; reconstructing it would make a static branch move).
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE void
+reconstruct_face_states (const CellState& far_left, const CellState& far_right,
+                         const int normal_direction,
+                         const FluxParameters& parameters, CellState& left,
+                         CellState& right) noexcept {
+    const CellState donor_left = left;
+    const CellState donor_right = right;
+    const auto reconstruct = [&] (const amrex::Real q_far_left,
+                                  const amrex::Real q_left,
+                                  const amrex::Real q_right,
+                                  const amrex::Real q_far_right,
+                                  amrex::Real& out_left,
+                                  amrex::Real& out_right) {
+        reconstruct_face_pair(q_far_left, q_left, q_right, q_far_right,
+                              parameters, out_left, out_right);
+    };
+    // Density first: every specific quantity below is multiplied back by
+    // the RECONSTRUCTED face density.
+    reconstruct(far_left.density, donor_left.density, donor_right.density,
+                far_right.density, left.density, right.density);
+    left.density =
+        reconstruction_positive_floor(left.density, parameters.density_floor);
+    right.density =
+        reconstruction_positive_floor(right.density, parameters.density_floor);
+    // Velocity (primitive), then momentum = rho_face u_face.
+    for (int component = 0; component < 3; ++component) {
+        amrex::Real velocity_left = 0.0;
+        amrex::Real velocity_right = 0.0;
+        reconstruct(far_left.ion_velocity[component],
+                    donor_left.ion_velocity[component],
+                    donor_right.ion_velocity[component],
+                    far_right.ion_velocity[component], velocity_left,
+                    velocity_right);
+        left.momentum[component] = left.density * velocity_left;
+        right.momentum[component] = right.density * velocity_right;
+    }
+    // SPECIFIC internal energies: a contact at uniform temperature then
+    // reconstructs with no spurious pressure oscillation, and the floors
+    // below act on the energy densities the closures actually bound.
+    const amrex::Real electron_energy_floor =
+        parameters.electron_pressure_floor / (parameters.gamma_e - 1.0);
+    const amrex::Real ion_internal_floor =
+        parameters.ion_pressure_floor / (parameters.gamma_i - 1.0);
+    const auto specific = [] (const amrex::Real value, const CellState& state) {
+        return value / state.safe_density;
+    };
+    {
+        amrex::Real energy_left = 0.0;
+        amrex::Real energy_right = 0.0;
+        reconstruct(specific(far_left.electron_energy, far_left),
+                    specific(donor_left.electron_energy, donor_left),
+                    specific(donor_right.electron_energy, donor_right),
+                    specific(far_right.electron_energy, far_right),
+                    energy_left, energy_right);
+        left.electron_energy = reconstruction_positive_floor(
+            left.density * energy_left, electron_energy_floor);
+        right.electron_energy = reconstruction_positive_floor(
+            right.density * energy_right, electron_energy_floor);
+    }
+    if (parameters.total_energy_closure) {
+        // The INTERNAL part of E_i (E_i - KE) is what has a floor and
+        // what a contact holds uniform; the kinetic part is rebuilt from
+        // the reconstructed momentum so E_i and m stay consistent.
+        const auto specific_internal = [] (const CellState& state) {
+            amrex::Real kinetic_energy = 0.0;
+            for (int component = 0; component < 3; ++component) {
+                kinetic_energy +=
+                    state.momentum[component] * state.momentum[component];
+            }
+            kinetic_energy *= 0.5 / state.safe_density;
+            return (state.ion_energy - kinetic_energy) / state.safe_density;
+        };
+        amrex::Real internal_left = 0.0;
+        amrex::Real internal_right = 0.0;
+        reconstruct(specific_internal(far_left), specific_internal(donor_left),
+                    specific_internal(donor_right),
+                    specific_internal(far_right), internal_left,
+                    internal_right);
+        amrex::Real kinetic_left = 0.0;
+        amrex::Real kinetic_right = 0.0;
+        for (int component = 0; component < 3; ++component) {
+            kinetic_left += left.momentum[component] * left.momentum[component];
+            kinetic_right +=
+                right.momentum[component] * right.momentum[component];
+        }
+        kinetic_left *=
+            0.5 / std::max(left.density, parameters.density_floor);
+        kinetic_right *=
+            0.5 / std::max(right.density, parameters.density_floor);
+        left.ion_energy =
+            reconstruction_positive_floor(left.density * internal_left,
+                                          ion_internal_floor) +
+            kinetic_left;
+        right.ion_energy =
+            reconstruction_positive_floor(right.density * internal_right,
+                                          ion_internal_floor) +
+            kinetic_right;
+    }
+    if (parameters.dual_energy_closure) {
+        amrex::Real internal_left = 0.0;
+        amrex::Real internal_right = 0.0;
+        reconstruct(specific(far_left.ion_internal_energy, far_left),
+                    specific(donor_left.ion_internal_energy, donor_left),
+                    specific(donor_right.ion_internal_energy, donor_right),
+                    specific(far_right.ion_internal_energy, far_right),
+                    internal_left, internal_right);
+        left.ion_internal_energy = reconstruction_positive_floor(
+            left.density * internal_left, ion_internal_floor);
+        right.ion_internal_energy = reconstruction_positive_floor(
+            right.density * internal_right, ion_internal_floor);
+    }
+    if (parameters.cgl_closure) {
+        amrex::Real parallel_left = 0.0;
+        amrex::Real parallel_right = 0.0;
+        reconstruct(specific(far_left.ion_parallel_energy, far_left),
+                    specific(donor_left.ion_parallel_energy, donor_left),
+                    specific(donor_right.ion_parallel_energy, donor_right),
+                    specific(far_right.ion_parallel_energy, far_right),
+                    parallel_left, parallel_right);
+        left.ion_parallel_energy = reconstruction_positive_floor(
+            left.density * parallel_left, 0.5 * parameters.ion_pressure_floor);
+        right.ion_parallel_energy = reconstruction_positive_floor(
+            right.density * parallel_right,
+            0.5 * parameters.ion_pressure_floor);
+        amrex::Real perp_left = 0.0;
+        amrex::Real perp_right = 0.0;
+        reconstruct(specific(far_left.ion_perp_energy, far_left),
+                    specific(donor_left.ion_perp_energy, donor_left),
+                    specific(donor_right.ion_perp_energy, donor_right),
+                    specific(far_right.ion_perp_energy, far_right), perp_left,
+                    perp_right);
+        left.ion_perp_energy = reconstruction_positive_floor(
+            left.density * perp_left, parameters.ion_pressure_floor);
+        right.ion_perp_energy = reconstruction_positive_floor(
+            right.density * perp_right, parameters.ion_pressure_floor);
+    }
+    // Cell-centered B. hlld_flux/central_flux take the NORMAL component
+    // from the single-valued staggered face value, so only the tangential
+    // reconstruction reaches the fluxes; the normal component still feeds
+    // the fast-speed estimate and is reconstructed for consistency.
+    for (int component = 0; component < 3; ++component) {
+        reconstruct(far_left.magnetic[component],
+                    donor_left.magnetic[component],
+                    donor_right.magnetic[component],
+                    far_right.magnetic[component], left.magnetic[component],
+                    right.magnetic[component]);
+    }
+    // Hall drift u_e,n - u_i,n: exactly zero for every cell with the Hall
+    // term off, so the reconstruction is exactly zero there too.
+    const auto drift = [=] (const CellState& state) {
+        return state.electron_velocity_normal -
+               state.ion_velocity[normal_direction];
+    };
+    amrex::Real drift_left = 0.0;
+    amrex::Real drift_right = 0.0;
+    reconstruct(drift(far_left), drift(donor_left), drift(donor_right),
+                drift(far_right), drift_left, drift_right);
+    rebuild_cell_state(left, drift_left, normal_direction, parameters);
+    rebuild_cell_state(right, drift_right, normal_direction, parameters);
 }
 
 // The side-dependent HLLC channels (the LLF ion-energy and centered

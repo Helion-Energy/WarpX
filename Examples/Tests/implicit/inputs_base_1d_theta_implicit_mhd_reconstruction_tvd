@@ -1,0 +1,134 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# TVD / new-extrema base deck for implicit_mhd.fluid_reconstruction.
+#
+# A square density contact (4:1) advected ~0.24 domain lengths at uniform ion
+# and electron pressure. The exact solution is the initial square
+# translated by velocity * t: no value outside [rho_low, rho_high] may
+# ever appear. The arms differ ONLY in fluid_reconstruction:
+#
+#   none       donor cell -- first-order Godunov, monotone by
+#              construction (it smears the step, it does not ring)
+#   median     the reference code's fmed limiter -- second order in smooth flow,
+#              still monotone: THE gate
+#   unlimited  the plain centered slope -- second order and dispersive,
+#              the twin that MUST ring (it is what makes the median gate
+#              non-vacuous)
+#
+# hlld, not central: a slope limiter needs an upwind selection to
+# enforce monotonicity, so the limiter only becomes a TVD device in
+# combination with a Riemann flux.
+
+my_constants.n0 = 1.0e20
+my_constants.rho_low = n0 * m_p
+my_constants.rho_high = 4.0 * rho_low
+my_constants.Te = 10.0
+my_constants.Pe = n0 * Te * q_e
+my_constants.Pi = Pe
+my_constants.gamma = 5.0/3.0
+my_constants.velocity = 1.0e5
+my_constants.B0 = 1.0e-3
+my_constants.nz = 128
+my_constants.Lz = 1.0
+my_constants.sound_speed = sqrt(gamma*(Pe+Pi)/rho_low)
+my_constants.dt = 0.4 * (Lz/nz) / (velocity + sound_speed)
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 120
+amr.n_cell = nz
+amr.max_grid_size = 128
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = false
+newton.absolute_tolerance = 0.0
+newton.relative_tolerance = 1.0e-8
+newton.max_iterations = 20
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-8
+gmres.max_iterations = 100
+
+# Production's preconditioner, left at its donor-cell three-point
+# stencil while the reconstruction widens the residual's fluid stencil
+# to five points (see ThetaImplicitMHD_K.H): this arm is also the
+# coverage that the mismatch is harmless.
+jacobian.pc_type = pc_mhd_block
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho_low
+implicit_mhd.reference_velocity = velocity
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = Pi
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.mass_density_floor = 1.0e-6 * rho_low
+implicit_mhd.ion_pressure_floor = 1.0e-9 * Pi
+implicit_mhd.electron_pressure_floor = 1.0e-9 * Pe
+implicit_mhd.fluid_flux = hlld
+implicit_mhd.allow_hlld = true   # the limiter needs an UPWIND flux
+# implicit_mhd.fluid_reconstruction is deliberately ABSENT: the arms set
+# it from the command line, and the identity gate needs one arm in which
+# the knob is never written at all.
+
+implicit_mhd.mass_density(x,y,z) = \
+    "if((z>=0.25*Lz) and (z<0.75*Lz), rho_high, rho_low)"
+implicit_mhd.ion_pressure(x,y,z) = Pi
+implicit_mhd.electron_pressure(x,y,z) = Pe
+implicit_mhd.velocity_z(x,y,z) = velocity
+
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 B0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 120
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = implicit_mhd_mass_density implicit_mhd_electron_energy \
+                       implicit_mhd_ion_energy
+diag1.write_species = 0

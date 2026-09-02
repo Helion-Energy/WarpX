@@ -5244,6 +5244,105 @@ Jacobian probes.
     the dissipative terms (an over-implicit stage would numerically damp
     whistlers first-order in :math:`\Delta t`).
 
+.. pp:param:: implicit_mhd.fluid_reconstruction
+    :type: ``string``
+    :default: ``none``
+
+    TVD reconstruction of the face states handed to the recast fluid
+    flux: one of ``none`` (the default), ``median``, ``vanalbada``, or
+    ``unlimited``. Requires a recast flux
+    (``implicit_mhd.fluid_flux = hlld`` or ``central``) and strictly
+    positive positivity floors (see below).
+
+    Without it the recast hands ``hlld``/``central`` the RAW cell-centre
+    states of the two cells adjacent to a face — a piecewise-CONSTANT
+    reconstruction — so the ``hlld`` path is a **first-order** Godunov
+    scheme whose modified-equation dissipation on the fast-magnetosonic
+    characteristic fields is :math:`D \sim c_f \Delta x / 2`.
+
+    ``median`` is the reference code's ``adv_type = 4`` limiter (``get_flux_hyb2``,
+    a median-of-three ``fmed`` over the second-order upwind
+    extrapolation, the second-order centered interpolation, and the donor
+    value). On the uniform stencil this solver uses, the reference code's geometric
+    factors reduce to :math:`3/2` and :math:`0` and that median is
+    *identically* MUSCL with the minmod slope,
+    :math:`\sigma = \mathrm{minmod}(\Delta_{up}, \Delta_{down})`, so the
+    implementation works in slope form and produces both one-sided face
+    states, letting the Riemann solver perform the upwinding that the reference code does
+    with its own velocity sign. The hard ``MIN``/``MAX`` median is a
+    derivative kink that the matrix-free Newton line search cannot cross,
+    so it is smoothed with the file's ``smooth_min``/``smooth_max``
+    idiom at width
+    :math:`w = \sqrt{\kappa^2 (\Delta_{up}^2 + \Delta_{down}^2) +
+    \epsilon^2}` (:pp:param:`implicit_mhd.reconstruction_kappa`). The
+    width cannot be keyed to the curvature — that vanishes identically at
+    the minmod *selection* kink :math:`\Delta_{up} = \Delta_{down}` — so
+    it is keyed to the slope, which costs a numerical diffusivity
+    :math:`0.354\,\kappa\,|u|\,\Delta x` (0.7% of the donor-cell
+    dissipation it replaces, at the default :math:`\kappa`) and admits
+    new extrema up to :math:`\kappa/4` of the largest stencil difference.
+
+    ``vanalbada`` is the van Albada (1982) averaged slope, the
+    :math:`C^\infty` rational sibling: no absolute values, no square
+    roots, no kink anywhere, and *exactly* second order in smooth flow
+    (no diffusivity penalty). It is not a smoothed minmod, so it fails
+    differently: it is identically zero on the
+    :math:`\Delta_{down} = 0` ray and therefore does not overshoot at a
+    plateau edge at all, but it admits new extrema up to
+    :math:`0.10355\,|q_D - q_C|` on the opposite-sign branch (worst case
+    :math:`\Delta_{up}/\Delta_{down} = 1 - \sqrt{2}`). For a square wave
+    it is the tighter limiter; at a smooth extremum ``median`` clips
+    harder; only ``median`` is reference-exact.
+
+    ``unlimited`` is the plain centered slope — second order and
+    oscillatory. It is a diagnostic reference (the twin that must ring in
+    the TVD regression), never a production mode.
+
+    The reconstruction is applied to PRIMITIVE variables — density,
+    velocity, the SPECIFIC internal energies, the cell-centered magnetic
+    field, and the Hall drift :math:`u_{e,n} - u_{i,n}` — so a
+    uniform-temperature contact reconstructs with no spurious pressure
+    oscillation, and every reconstructed density and internal energy
+    density is then passed through a :math:`C^\infty` positivity floor.
+    In particular the conserved ion energy is never reconstructed
+    directly: the *internal* part :math:`E_i - KE` is reconstructed and
+    floored, and the kinetic part is rebuilt from the reconstructed
+    momentum, so :math:`E_i - KE \ge U_{i,\mathrm{floor}}` holds at every
+    face by construction. Because those floors are the positivity
+    guarantee, the mode requires strictly positive
+    ``implicit_mhd.mass_density_floor`` and
+    ``electron_pressure_floor`` (and ``ion_pressure_floor`` with an
+    evolved ion energy channel).
+
+    NOTE that a limiter needs an UPWIND selection to enforce
+    monotonicity. With ``fluid_flux = central`` — which carries no
+    Riemann dissipation at all — the reconstruction changes the
+    smooth-region face states but cannot suppress a dispersive overshoot:
+    where the limiter clips, ``central`` reduces exactly to the
+    unreconstructed centered flux. The central path's remedy for
+    dispersive ringing is limited artificial dissipation, not
+    reconstruction.
+
+    The stencil widens from one to two cells along the face normal. The
+    fluid registers already carry two guard cells and every ghost fill
+    covers both layers, so no ghost widening is needed; the
+    reconstruction degrades gracefully to donor cell at and beside the
+    stair-step wall contour (``implicit_mhd.wall_mask``) and inside the
+    no-slip pinned band (``implicit_mhd.wall_no_slip``), so it never
+    reconstructs across the mask or across the pin.
+
+.. pp:param:: implicit_mhd.reconstruction_kappa
+    :type: ``float``
+    :default: ``0.01``
+
+    Smoothing width fraction of the ``median`` limiter (unused by the
+    other modes). It buys JFNK smoothness at the minmod kinks and costs a
+    numerical diffusivity :math:`0.354\,\kappa\,|u|\,\Delta x` plus new
+    extrema bounded by :math:`\kappa/4` of the largest stencil
+    difference; both scale linearly in :math:`\kappa`, so a deck that
+    needs a tighter bound can lower it as long as the width stays far
+    above the matrix-free probe scale.
+
 .. pp:param:: implicit_mhd.viscosity
     :type: ``float``
     :default: ``0``
