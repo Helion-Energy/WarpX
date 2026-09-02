@@ -134,6 +134,35 @@ public:
      */
     [[nodiscard]] amrex::Real MaxParticleSpeed ();
 
+    /** Component-resolved global maximum speeds (m/s) of this species. */
+    struct MaxSpeeds
+    {
+        amrex::Real full = 0.0;        //!< max |v|
+        amrex::Real meridional = 0.0;  //!< max sqrt(v_r^2 + v_z^2)
+        amrex::Real azimuthal = 0.0;   //!< max |v_theta|
+    };
+
+    /** Global maxima of the full, meridional and azimuthal speeds, in a
+     * single pass.
+     *
+     * In cylindrical geometry the momenta are stored as lab Cartesian
+     * components alongside the azimuthal position angle, so the decomposition
+     * uses that stored angle,
+     *
+     *   v_r     =  v_x cos(theta) + v_y sin(theta)
+     *   v_theta = -v_x sin(theta) + v_y cos(theta)
+     *
+     * which is exact and free of the r -> 0 singularity that dividing by the
+     * radius would introduce. Outside cylindrical geometry there is no
+     * distinct azimuthal direction: the meridional entry is set to the full
+     * speed and the azimuthal entry to zero, so that sizing on the meridional
+     * speed degenerates to sizing on the full speed.
+     *
+     * Public because the reduction uses an extended device lambda, which
+     * CUDA does not allow inside private/protected member functions.
+     */
+    [[nodiscard]] MaxSpeeds MaxParticleSpeedsByComponent ();
+
     /** Number of subcycles used in the most recent Evolve call */
     [[nodiscard]] int getNSubcycles () const { return m_n_subcycles; }
 
@@ -170,10 +199,43 @@ protected:
     /** CFL fraction of a cell crossing per subcycle */
     amrex::Real m_cfl_grid = 0.4;
     /** Reference speed for the grid CFL; <= 0 selects the per-step max
-     * particle speed */
+     * particle speed (the measured path) */
     amrex::Real m_v_ref = -1.0;
+    /** Size the grid-crossing CFL on the meridional speed instead of the full
+     * speed (measured path only; default 0 = full speed, i.e. the behavior of
+     * the code before this option existed).
+     *
+     * Motivation: a species accelerated by a rising axial flux (betatron
+     * pumping) conserves the canonical angular momentum
+     * m r v_theta + q psi/(2 pi), so the gained speed is almost entirely
+     * AZIMUTHAL. In cylindrical geometry with a single azimuthal mode, motion
+     * in theta crosses no (r,z) cell, so the deposition guard band -- the
+     * constraint the grid CFL exists to satisfy -- is set by the meridional
+     * speed alone. Sizing on the full speed then over-resolves by the ratio
+     * of the two, which for a strongly pumped population is a factor of a
+     * few. The constraint is per subcycle, not per step, because boundary
+     * handling redistributes the particles every subcycle.
+     *
+     * The maxima are re-measured every evaluation and never inferred from a
+     * cached azimuthal fraction: that fraction is a property of the current
+     * regime, and any pitch-angle scattering or loss of axisymmetry converts
+     * v_theta into meridional speed with no warning. */
+    int m_v_ref_meridional = 0;
+    /** Fraction of max |v_theta| added to the meridional speed when sizing on
+     * the meridional leg. In one subcycle the meridional displacement
+     * generated out of an azimuthal velocity by the Lorentz turning is
+     * ~ (1/2) omega_c dt_sub |v_theta|, i.e. half the cyclotron CFL; at the
+     * default cyclotron CFL of 0.1 that is ~5%, so the default 0.2 is roughly
+     * a factor of four of margin. */
+    amrex::Real m_v_theta_margin = 0.2;
     /** Cap on the number of subcycles per step (safety) */
     int m_max_subcycles = 10000;
+    /** Treat a binding subcycle cap as an error rather than silently clamping
+     * (measured path only; the fixed-v_ref path keeps its historical
+     * clamping behavior). A silent clamp under-resolves the grid crossing
+     * exactly as a stale reference speed would, but leaves no trace, so the
+     * measured path refuses to continue instead. */
+    int m_cap_is_error = 1;
     /** Accumulate time-averaged rho/J over the subcycles and serve them from
      * the DepositCharge/DepositCurrent overrides */
     bool m_do_orbit_averaged_deposition = true;
@@ -184,6 +246,13 @@ protected:
 
     /** One-time boot print of the subcycle configuration (first Evolve) */
     bool m_boot_printed = false;
+    /** Subcycle count at the last witness line; -1 until the boot print seeds
+     * it. Reporting is throttled to changes above 10% so a count hunting
+     * between neighbouring values stays quiet. */
+    int m_n_subcycles_last_reported = -1;
+    /** True once the meridional-sizing gate has been reported, so the warning
+     * about falling back to the full speed is issued only once. */
+    bool m_meridional_gate_reported = false;
 
     /** Orbit-averaged moment accumulators and per-subcycle scratch (level 0
      * only; multi-level runs are not supported) */

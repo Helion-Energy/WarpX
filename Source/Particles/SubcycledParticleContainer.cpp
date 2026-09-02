@@ -45,12 +45,23 @@ SubcycledParticleContainer::SubcycledParticleContainer (amrex::AmrCore* amr_core
     utils::parser::queryWithParser(pp_species_name, "subcycling_cfl_grid", m_cfl_grid);
     utils::parser::queryWithParser(pp_species_name, "subcycling_v_ref", m_v_ref);
     utils::parser::queryWithParser(pp_species_name, "subcycling_max_subcycles", m_max_subcycles);
+    pp_species_name.query("subcycling_v_ref_meridional", m_v_ref_meridional);
+    utils::parser::queryWithParser(pp_species_name, "subcycling_v_theta_margin", m_v_theta_margin);
+    pp_species_name.query("subcycling_cap_is_error", m_cap_is_error);
     pp_species_name.query("do_orbit_averaged_deposition", m_do_orbit_averaged_deposition);
 
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_cfl_cyclotron > 0._rt && m_cfl_grid > 0._rt && m_max_subcycles > 0,
         "<species>.subcycling_cfl_cyclotron, subcycling_cfl_grid and "
         "subcycling_max_subcycles must be positive");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_v_theta_margin >= 0._rt,
+        "<species>.subcycling_v_theta_margin must be non-negative");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !(m_v_ref_meridional != 0 && m_v_ref > 0._rt),
+        "<species>.subcycling_v_ref_meridional sizes the grid CFL on the "
+        "measured meridional speed and therefore requires the measured "
+        "reference speed, i.e. <species>.subcycling_v_ref <= 0");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !do_splitting,
         "Particle splitting is not supported for subcycled species");
@@ -89,17 +100,85 @@ SubcycledParticleContainer::ComputeSubcycleCount (ablastr::fields::MultiFabRegis
         dt_sub = amrex::min(dt_sub, m_cfl_cyclotron / omega_c);
     }
 
-    const amrex::Real v_ref = (m_v_ref > 0._rt) ? m_v_ref : MaxParticleSpeed();
+    // Reference speed for the grid-crossing CFL. A positive input is used as
+    // given; otherwise the speed is measured from the particles this step.
+    // The measured path can size on the meridional speed instead of the full
+    // speed (see m_v_ref_meridional), which requires cylindrical geometry
+    // with a single azimuthal mode: only then does motion in theta cross no
+    // (r,z) cell, so that the deposition guard band -- the constraint the
+    // grid CFL exists to satisfy -- is set by the meridional speed alone.
+    const bool measured = (m_v_ref <= 0._rt);
+    bool meridional_used = false;
+    MaxSpeeds speeds;
+    amrex::Real v_ref = m_v_ref;
+
+    if (measured)
+    {
+#if defined(WARPX_DIM_RZ)
+        const bool meridional_ok = (WarpX::n_rz_azimuthal_modes == 1);
+#else
+        const bool meridional_ok = false;
+#endif
+        if (m_v_ref_meridional != 0 && !meridional_ok && !m_meridional_gate_reported)
+        {
+            ablastr::warn_manager::WMRecordWarning("SubcycledParticleContainer",
+                "Species '" + species_name + "': subcycling_v_ref_meridional "
+                "requires cylindrical geometry with a single azimuthal mode "
+                "(warpx.n_rz_azimuthal_modes = 1), because only then does "
+                "azimuthal motion cross no cell of the (r,z) deposition grid. "
+                "Falling back to sizing the grid CFL on the FULL particle "
+                "speed, which is conservative.",
+                ablastr::warn_manager::WarnPriority::high);
+            m_meridional_gate_reported = true;
+        }
+        meridional_used = (m_v_ref_meridional != 0) && meridional_ok;
+
+        if (meridional_used)
+        {
+            // Re-measured every evaluation: never inferred from a cached
+            // azimuthal fraction, which is a property of the current regime
+            // and would silently go stale under pitch-angle scattering.
+            speeds = MaxParticleSpeedsByComponent();
+            v_ref = speeds.meridional + m_v_theta_margin * speeds.azimuthal;
+        }
+        else
+        {
+            v_ref = MaxParticleSpeed();
+            speeds.full = v_ref;
+        }
+    }
+
+    const auto dx = WarpX::GetInstance().Geom(lev).CellSizeArray();
+    amrex::Real dx_min = dx[0];
+    for (int d = 1; d < AMREX_SPACEDIM; ++d) { dx_min = amrex::min(dx_min, dx[d]); }
+
     if (v_ref > 0._rt)
     {
-        const auto dx = WarpX::GetInstance().Geom(lev).CellSizeArray();
-        amrex::Real dx_min = dx[0];
-        for (int d = 1; d < AMREX_SPACEDIM; ++d) { dx_min = amrex::min(dx_min, dx[d]); }
         dt_sub = amrex::min(dt_sub, m_cfl_grid * dx_min / v_ref);
     }
 
-    // Safety cap on the subcycle count
-    dt_sub = amrex::max(dt_sub, dt / static_cast<amrex::Real>(m_max_subcycles));
+    // Safety cap on the subcycle count. On the measured path a binding cap
+    // means the requested resolution was silently dropped -- the same
+    // under-resolution a stale reference speed would produce, but leaving no
+    // trace -- so refuse to continue instead of clamping.
+    const amrex::Real dt_sub_capped = dt / static_cast<amrex::Real>(m_max_subcycles);
+    if (dt_sub < dt_sub_capped)
+    {
+        const auto n_wanted = static_cast<int>(
+            std::ceil(dt/dt_sub * (1._rt - 1.e-12)));
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !(measured && m_cap_is_error != 0),
+            "Species '" + species_name + "': the subcycle count required by "
+            "the CFL conditions (" + std::to_string(n_wanted) + ") exceeds "
+            "<species>.subcycling_max_subcycles (" +
+            std::to_string(m_max_subcycles) + ") at reference speed " +
+            std::to_string(v_ref) + " m/s and |B|max " + std::to_string(bmax) +
+            " T. Clamping would silently under-resolve the particle motion "
+            "within a subcycle, so the run is stopped instead. Raise the cap, "
+            "relax subcycling_cfl_grid / subcycling_cfl_cyclotron, or set "
+            "<species>.subcycling_cap_is_error = 0 to restore clamping.");
+        dt_sub = dt_sub_capped;
+    }
 
     m_dt_subcycle = dt_sub;
     // The small tolerance avoids an extra (zero-length) subcycle when
@@ -114,12 +193,46 @@ SubcycledParticleContainer::ComputeSubcycleCount (ablastr::fields::MultiFabRegis
                        << " T, cyclotron CFL " << m_cfl_cyclotron
                        << ", grid CFL " << m_cfl_grid
                        << ", v_ref = " << v_ref
-                       << " m/s, cap " << m_max_subcycles
+                       << " m/s (" << (measured ? "measured" : "fixed")
+                       << (measured
+                           ? (meridional_used ? ", meridional" : ", full speed")
+                           : "")
+                       << "), cap " << m_max_subcycles
+                       << (measured && m_cap_is_error != 0 ? " (error)" : "")
                        << ", orbit-averaged deposition "
                        << (m_do_orbit_averaged_deposition ? "on" : "off")
                        << ")\n";
         m_boot_printed = true;
     }
+    else if (measured && m_n_subcycles != m_n_subcycles_last_reported)
+    {
+        // Throttled: only when the settled count actually moves, and only
+        // once it has moved by more than a small fraction, so that a count
+        // hunting between neighbouring values stays quiet.
+        const auto n_last = static_cast<amrex::Real>(m_n_subcycles_last_reported);
+        const auto n_now = static_cast<amrex::Real>(m_n_subcycles);
+        if (m_n_subcycles_last_reported < 0 ||
+            std::abs(n_now - n_last) > 0.1_rt * amrex::max(n_last, 1._rt))
+        {
+            const amrex::Real dt_grid = (v_ref > 0._rt)
+                ? m_cfl_grid * dx_min / v_ref : dt;
+            amrex::Print() << "[subcycle] " << species_name
+                           << ": count " << m_n_subcycles_last_reported
+                           << " -> " << m_n_subcycles
+                           << " (v_ref = " << v_ref << " m/s";
+            if (meridional_used)
+            {
+                amrex::Print() << ", meridional " << speeds.meridional
+                               << ", |v_theta| " << speeds.azimuthal
+                               << ", full " << speeds.full;
+            }
+            amrex::Print() << ", binding leg "
+                           << (dt_grid <= m_dt_subcycle*(1._rt + 1.e-9) ? "grid" : "cyclotron")
+                           << ")\n";
+            m_n_subcycles_last_reported = m_n_subcycles;
+        }
+    }
+    if (m_n_subcycles_last_reported < 0) { m_n_subcycles_last_reported = m_n_subcycles; }
 }
 
 amrex::Real
@@ -142,6 +255,63 @@ SubcycledParticleContainer::MaxParticleSpeed ()
     amrex::ParallelDescriptor::ReduceRealMax(vmax);
 
     return amrex::max(static_cast<amrex::Real>(vmax), 0._rt);
+}
+
+SubcycledParticleContainer::MaxSpeeds
+SubcycledParticleContainer::MaxParticleSpeedsByComponent ()
+{
+    MaxSpeeds s;
+    if (TotalNumberOfParticles(true, false) == 0) { return s; }
+
+    using PType = typename WarpXParticleContainer::SuperParticleType;
+    const amrex::ParticleReal inv_c2 = 1._prt/(PhysConst::c*PhysConst::c);
+
+    amrex::ReduceOps<amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpMax> reduce_ops;
+    auto r = amrex::ParticleReduce<
+        amrex::ReduceData<amrex::ParticleReal, amrex::ParticleReal, amrex::ParticleReal>>(
+        *this,
+        [=] AMREX_GPU_DEVICE (const PType& p) noexcept
+            -> amrex::GpuTuple<amrex::ParticleReal, amrex::ParticleReal, amrex::ParticleReal>
+        {
+            const amrex::ParticleReal ux = p.rdata(PIdx::ux);
+            const amrex::ParticleReal uy = p.rdata(PIdx::uy);
+            const amrex::ParticleReal uz = p.rdata(PIdx::uz);
+            const amrex::ParticleReal usq = ux*ux + uy*uy + uz*uz;
+            // proper velocity u = gamma v  =>  v = u / sqrt(1 + u^2/c^2)
+            const amrex::ParticleReal inv_gamma =
+                1._prt/std::sqrt(1._prt + usq*inv_c2);
+            const amrex::ParticleReal vfull = std::sqrt(usq)*inv_gamma;
+#if defined(WARPX_DIM_RZ) || defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+            // The momenta are lab Cartesian components; theta is the stored
+            // azimuthal position angle, so the rotation is exact and has no
+            // r -> 0 singularity.
+            const amrex::ParticleReal theta = p.rdata(PIdx::theta);
+            const amrex::ParticleReal ct = std::cos(theta);
+            const amrex::ParticleReal st = std::sin(theta);
+            const amrex::ParticleReal vr = ( ux*ct + uy*st)*inv_gamma;
+            const amrex::ParticleReal vt = (-ux*st + uy*ct)*inv_gamma;
+            const amrex::ParticleReal vz = uz*inv_gamma;
+            const amrex::ParticleReal vmer = std::sqrt(vr*vr + vz*vz);
+            const amrex::ParticleReal vaz = std::abs(vt);
+#else
+            const amrex::ParticleReal vmer = vfull;
+            const amrex::ParticleReal vaz = 0._prt;
+#endif
+            return {vfull, vmer, vaz};
+        },
+        reduce_ops);
+
+    auto vfull = amrex::get<0>(r);
+    auto vmer  = amrex::get<1>(r);
+    auto vaz   = amrex::get<2>(r);
+    amrex::ParallelDescriptor::ReduceRealMax(vfull);
+    amrex::ParallelDescriptor::ReduceRealMax(vmer);
+    amrex::ParallelDescriptor::ReduceRealMax(vaz);
+
+    s.full = amrex::max(static_cast<amrex::Real>(vfull), 0._rt);
+    s.meridional = amrex::max(static_cast<amrex::Real>(vmer), 0._rt);
+    s.azimuthal = amrex::max(static_cast<amrex::Real>(vaz), 0._rt);
+    return s;
 }
 
 void

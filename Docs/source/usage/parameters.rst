@@ -1999,6 +1999,42 @@ Particle initialization
     maximum particle speed of the species is computed each step and used
     instead.
 
+.. pp:param:: <species_name>.subcycling_v_ref_meridional
+    :type: `int`
+    :default: ``0``
+    :optional:
+
+    Only used when ``<species_name>.do_subcycled_push = 1`` and the reference
+    speed is measured (``subcycling_v_ref`` not positive). When ``1``, the
+    grid-crossing constraint is sized on the maximum *meridional* speed
+    :math:`\sqrt{v_r^2 + v_z^2}` plus a margin (see
+    ``subcycling_v_theta_margin``) instead of the maximum full speed.
+
+    This is useful for a species accelerated by a rising axial flux, which
+    conserves the canonical angular momentum and therefore gains almost
+    entirely *azimuthal* speed. In cylindrical geometry with a single
+    azimuthal mode, motion in :math:`\theta` crosses no cell of the
+    :math:`(r,z)` deposition grid, so the constraint that the grid CFL exists
+    to satisfy is set by the meridional speed alone, and sizing on the full
+    speed over-resolves by the ratio of the two. Requires cylindrical geometry
+    with ``warpx.n_rz_azimuthal_modes = 1``; otherwise a warning is issued and
+    the full speed is used. The maxima are re-measured every evaluation and
+    never inferred from a cached azimuthal fraction, which would go stale
+    under pitch-angle scattering.
+
+.. pp:param:: <species_name>.subcycling_v_theta_margin
+    :type: `float`
+    :default: ``0.2``
+    :optional:
+
+    Only used with ``<species_name>.subcycling_v_ref_meridional = 1``.
+    Fraction of the maximum :math:`|v_\theta|` added to the maximum meridional
+    speed. Within one subcycle the Lorentz turning converts a fraction
+    :math:`\sim \tfrac{1}{2}\omega_c \Delta t_{\mathrm{sub}}` of the azimuthal
+    velocity into meridional motion, i.e. half the cyclotron CFL, so the
+    default leaves roughly a factor of four of margin at the default cyclotron
+    CFL.
+
 .. pp:param:: <species_name>.subcycling_max_subcycles
     :type: `int`
     :default: ``10000``
@@ -2006,6 +2042,18 @@ Particle initialization
 
     Only used when ``<species_name>.do_subcycled_push = 1``. Safety cap on the
     number of subcycles per global step.
+
+.. pp:param:: <species_name>.subcycling_cap_is_error
+    :type: `int`
+    :default: ``1``
+    :optional:
+
+    Only used when ``<species_name>.do_subcycled_push = 1`` and the reference
+    speed is measured. When ``1`` (the default), a subcycle count that would
+    exceed ``subcycling_max_subcycles`` aborts the run instead of silently
+    clamping, since clamping under-resolves the particle motion within a
+    subcycle without leaving any trace. Set to ``0`` to restore clamping. The
+    fixed-``subcycling_v_ref`` path always clamps.
 
 .. pp:param:: <species_name>.addIntegerAttributes
     :type: list of ``string``

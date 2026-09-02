@@ -1,0 +1,85 @@
+# Meridional sizing of the subcycle count: analytic measurement gate.
+#
+# Five particles with exactly known proper velocities probe the component
+# decomposition used to size the grid-crossing CFL. In cylindrical geometry the
+# momenta are stored as lab Cartesian components alongside the azimuthal
+# position angle theta, so
+#
+#   v_r     =  v_x cos(theta) + v_y sin(theta)
+#   v_theta = -v_x sin(theta) + v_y cos(theta)
+#
+# Particles 0-3 sit at theta = 0 (v_r = v_x, v_theta = v_y):
+#   p0  pure azimuthal, |v| = 5.8833e7   -> meridional 0
+#   p1  pure axial,     |v| = 9.9994e6   -> meridional 9.9994e6
+#   p2  pure radial,    |v| = 1.9956e7   -> meridional 1.9956e7  (the maximum)
+#   p3  mixed
+# Particle 4 sits at theta = pi/2 (x = 0, y = 0.2) and carries u_x only, which
+# under the correct rotation is PURELY AZIMUTHAL (v_theta = -v_x, v_r = 0). If
+# the rotation were dropped and the Cartesian components used directly, p4
+# would register as the largest meridional speed and the subcycle count would
+# collapse onto the full-speed answer. It is the rotation test.
+#
+# Expected, with dr = 0.5/64 the binding cell size, grid CFL 0.4, dt = 1e-9:
+#   full speed      5.8833273e7 -> dt_sub 5.31162e-11 -> 19 subcycles
+#   meridional      1.9956e7 + 0.2*5.8833e7 = 3.1722e7
+#                                   -> dt_sub 9.85112e-11 -> 11 subcycles
+# The cyclotron leg is deliberately far from binding (weak B) so the grid leg
+# is the one under test.
+
+max_step = 2
+warpx.const_dt = 1.0e-9
+warpx.verbose = 1
+warpx.serialize_initial_conditions = 1
+
+amr.n_cell = 64 64
+amr.max_grid_size = 64
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 -0.5
+geometry.prob_hi = 0.5  0.5
+
+boundary.field_lo = none periodic
+boundary.field_hi = pec periodic
+boundary.particle_lo = none periodic
+boundary.particle_hi = absorbing periodic
+
+# Inert field advance: the density floor sits above any deposited density and
+# the vacuum treatment zeroes E, so B keeps its uniform initial value.
+algo.maxwell_solver = hybrid
+algo.particle_shape = 1
+hybrid_pic_model.elec_temp = 1.0
+hybrid_pic_model.gamma = 1.0
+hybrid_pic_model.n_floor = 1.0e30
+hybrid_pic_model.holmstrom_vacuum_region = 1
+
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 1.0e-4
+
+particles.species_names = probe
+
+probe.species_type = hydrogen
+probe.injection_style = multipleparticles
+probe.multiple_particles_pos_x = 0.20 0.20 0.20 0.20 0.0
+probe.multiple_particles_pos_y = 0.0  0.0  0.0  0.0  0.20
+probe.multiple_particles_pos_z = 0.0  0.1 -0.1  0.05 0.0
+probe.multiple_particles_ux = 0.0                    0.0                   6.671281903963041e-02 1.0006922855944562e-02 2.0013845711889124e-01
+probe.multiple_particles_uy = 2.0013845711889124e-01 0.0                   0.0                   3.3356409519815204e-03 0.0
+probe.multiple_particles_uz = 0.0                    3.335640951981520e-02 0.0                   1.3342563807926083e-02 0.0
+probe.multiple_particles_weight = 1.0 1.0 1.0 1.0 1.0
+
+probe.do_subcycled_push = 1
+probe.do_orbit_averaged_deposition = 1
+# Measured reference speed, sized on the meridional component.
+probe.subcycling_v_ref = -1.0
+probe.subcycling_v_ref_meridional = 1
+probe.subcycling_v_theta_margin = 0.2
+probe.subcycling_cfl_cyclotron = 0.1
+probe.subcycling_cfl_grid = 0.4
+probe.subcycling_max_subcycles = 100000
+
+diagnostics.diags_names = diag1
+diag1.intervals = 100000
+diag1.diag_type = Full
+diag1.fields_to_plot = rho
