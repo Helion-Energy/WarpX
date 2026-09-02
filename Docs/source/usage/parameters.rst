@@ -6168,6 +6168,75 @@ Jacobian probes.
     conventions identical to the interior operator), and the default
     keeps the legacy end faces bit-identical.
 
+.. pp:param:: implicit_mhd.wall_conduction_pc_rows
+    :type: ``bool``
+    :default: ``true``
+
+    Emit MHD block preconditioner rows for the two WALL THERMAL residual
+    terms: the shaped-wall interface drain
+    (:pp:param:`implicit_mhd.wall_thermal_bc` reservoir modes) and the
+    z-end conductive exchange
+    (:pp:param:`implicit_mhd.z_wall_conduction`). At frozen coefficients
+    each is a plain POSITIVE diagonal on the energy row of the
+    wall-adjacent interior cell,
+
+    .. math::
+
+        \frac{\partial F}{\partial U} \supset
+        \theta_c \, \Delta t \; \frac{r_f}{r_c \, \Delta n} \;
+        \frac{2 \chi_\mathrm{wall} \rho_f}{\Delta n \, \rho},
+
+    so ``pc_mhd_block`` inverts it exactly, one cell at a time. Without
+    the rows those cells were preconditioned as identities against a
+    residual diagonal measured at 57 on the production formation deck
+    under :pp:param:`implicit_mhd.wall_conduction_scale` ``= parallel``
+    (0.0057 under ``perp``: the 1e4 clamp-class lever lands entirely on
+    the wall rows) — a residual-only wall term whose rows the
+    preconditioner does not carry is a measured GMRES stagnation. The
+    rate is accumulated by the residual's OWN conduction kernel, out of
+    the same :math:`\chi`, face density, gate and free-streaming-cap
+    factors, so the emitted row cannot drift from the term it
+    preconditions. Setting this to ``0`` restores the row-less
+    preconditioner (for A/B measurement); the residual is bit-identical
+    either way, and nothing is allocated on decks without a conductive
+    wall term.
+
+.. pp:param:: implicit_mhd.wall_conduction_validate_rows
+    :type: ``bool``
+    :default: ``false``
+
+    Round-off check, on every residual evaluation, that the emitted wall
+    thermal preconditioner rows still factor the residual's own wall
+    drain — the conduction twin of
+    :pp:param:`pc_mhd_block.resistive_validate_assembly`. Aborts if the
+    emitted conductance times the drain's own temperature difference
+    departs from the drain by more than 1e-12 relative. Also prints the
+    emitted ``theta dt D`` maxima per energy channel.
+
+.. pp:param:: implicit_mhd.wall_conduction_validate_rows_reference
+    :type: ``float``
+    :default: ``0`` (off)
+
+    Analytic value of the largest emitted ``theta dt D`` on the ELECTRON
+    channel. On a deck whose wall conductance is known in closed form
+    (saturated Braginskii clamps against a hard Dirichlet bath) this pins
+    the emitted diagonal to the analytic half-cell rate INCLUDING the
+    cylindrical :math:`r_f/r_c` weight, which the factorization check
+    above cannot see. Requires
+    :pp:param:`implicit_mhd.wall_conduction_validate_rows`; the relative
+    tolerance is
+    :pp:param:`implicit_mhd.wall_conduction_validate_rows_tolerance`.
+
+.. pp:param:: implicit_mhd.wall_conduction_validate_rows_tolerance
+    :type: ``float``
+    :default: ``1e-6``
+
+    Relative tolerance of
+    :pp:param:`implicit_mhd.wall_conduction_validate_rows_reference`.
+    The default covers the soft clamp's tanh knee (measured 9e-9 on a
+    5x-saturated deck) while still catching a dropped cylindrical metric
+    (11%), a missing half-cell factor (2x) or a wrong conduction theta.
+
 .. pp:param:: implicit_mhd.z_lo_boundary_fluid
     :type: ``string``
     :default: *none* (inherit ``z_boundary_fluid``)

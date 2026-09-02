@@ -1776,6 +1776,59 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_wall_conduction_scale_perp  # dependency
 )
 
+# PRECONDITIONER ROWS for the wall thermal terms, ROW CORRECTNESS 1/2 --
+# the shaped-wall interface drain. The same saturated-clamp uniform
+# column as the wall_conduction_scale pair (whose conduction subsystem is
+# an exactly known backward-Euler cylindrical Dirichlet column), now with
+# pc_mhd_block on and the emitted rows graded IN-RUN against the analytic
+# half-cell rate: theta dt D = 2 chi_op dt/dr^2 * r_face/r_cell
+# = 0.25 * (0.0625/0.05625) * 1e-4 = 2.777777778e-05 at the deck's
+# default perp clamp class, the cylindrical metric
+# included. wall_conduction_validate_rows separately aborts if the
+# emitted conductance stops factoring the residual's own drain to 1e-12.
+# The physics assertions are the perp arm's, unchanged: a preconditioner
+# may not move the converged answer.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_conduction_rows  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_conduction_scale jacobian.pc_type=pc_mhd_block implicit_mhd.wall_conduction_validate_rows=1 implicit_mhd.wall_conduction_validate_rows_reference=2.777777778e-05"  # inputs
+    "analysis_mhd_wall_conduction_scale.py diags perp"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# preconditioner rows, the ITERATION-COUNT gate -- BASELINE twin
+# (implicit_mhd.wall_conduction_pc_rows = 0 on the CLI): the row-less
+# preconditioner whose cumulative GMRES count the headline is graded
+# against
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_conduction_pc_off  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_conduction_pc implicit_mhd.wall_conduction_pc_rows=0"  # inputs
+    "analysis_mhd_wall_conduction_pc.py diags/diag000006 diags/newton.txt off"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# preconditioner rows, the HEADLINE: a z-shaped temperature spreads the
+# wall-face Braginskii conductance over decades along the contour (the
+# production band, not one degenerate ring), both wall terms are live
+# (the dirichlet interface drain at the PARALLEL clamp class and the
+# z-end conductive exchange), and the emitted rows must cut the
+# cumulative GMRES count against the row-less twin at IDENTICAL Newton
+# work and an unmoved converged state
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_conduction_pc  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_wall_conduction_pc  # inputs
+    "analysis_mhd_wall_conduction_pc.py diags/diag000006 diags/newton.txt on ../test_rz_theta_implicit_mhd_wall_conduction_pc_off/diags/diag000006 ../test_rz_theta_implicit_mhd_wall_conduction_pc_off/diags/newton.txt"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_conduction_pc_off  # dependency
+)
+
 # wall-drain gate anchored at the reachable set: with wall_temperature
 # far BELOW the electron/ion temperature floors (the ratchet engaged
 # from step 0) and dt far above the wall-face free-streaming time, a
@@ -2207,6 +2260,25 @@ add_warpx_test(
     RZ  # dims
     2  # nprocs
     inputs_test_rz_theta_implicit_mhd_z_wall_conduction  # inputs
+    "analysis_mhd_z_wall_conduction.py diags on ../test_rz_theta_implicit_mhd_z_wall_conduction_off/diags"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_z_wall_conduction_off  # dependency
+)
+
+# PRECONDITIONER ROWS for the wall thermal terms, ROW CORRECTNESS 2/2 --
+# the z-end conductive exchange. The same saturated-clamp uniform column
+# as the pair above, whose end-face Dirichlet rate the deck fixes at
+# 2 chi_op dt/dz^2 = 1 exactly, now with pc_mhd_block on: the emitted row
+# must be theta dt D = 1 (z faces carry no cylindrical weight -- the
+# other half of the geometry the factorization check cannot see), and
+# wall_conduction_validate_rows aborts if the emitted conductance stops
+# factoring the residual's own end-face drain. Physics assertions are the
+# knob-ON arm's, unchanged.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_z_wall_conduction_rows  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_z_wall_conduction jacobian.pc_type=pc_mhd_block implicit_mhd.wall_conduction_validate_rows=1 implicit_mhd.wall_conduction_validate_rows_reference=1.0"  # inputs
     "analysis_mhd_z_wall_conduction.py diags on ../test_rz_theta_implicit_mhd_z_wall_conduction_off/diags"  # analysis
     OFF  # checksum
     test_rz_theta_implicit_mhd_z_wall_conduction_off  # dependency

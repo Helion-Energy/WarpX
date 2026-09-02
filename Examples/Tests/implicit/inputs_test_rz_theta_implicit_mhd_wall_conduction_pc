@@ -1,0 +1,170 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# PRECONDITIONER ROWS for the two WALL THERMAL residual terms
+# (implicit_mhd.wall_conduction_pc_rows): the shaped-wall interface drain
+# (wall_thermal_bc = dirichlet) and the z-end conductive exchange
+# (z_wall_conduction). Both are, at frozen coefficients, a plain POSITIVE
+# diagonal theta dt D on the energy row of the wall-adjacent interior
+# cell; until this knob existed pc_mhd_block carried NO row for either,
+# so those rows were preconditioned as identities against a residual
+# diagonal measured at 57 on the production formation deck under
+# wall_conduction_scale = parallel.
+#
+# The deck is built so the emitted rows are a BAND, not a single
+# degenerate outlier -- which is the whole reason the missing rows cost
+# iterations. A z-shaped temperature (10% -> 100% of T0 over the column)
+# with chi_par ~ Te^{5/2}/n spreads the wall-face conductance over two
+# and a half decades along the contour, the way the production wall's
+# state-dependent Braginskii chi does. A uniform wall ring is a single
+# repeated eigenvalue and GMRES absorbs it in about one iteration no
+# matter how large it is; the production pathology is the SPREAD.
+#
+# The production clamp separation is kept exactly (perp [., 1e2],
+# par [., 1e6]) so wall_conduction_scale = parallel puts the wall faces
+# 1e4 above the interior perp faces: the wall rows are then the dominant
+# unpreconditioned stiffness, as they are in the production arm.
+#
+# Contract under test (see analysis_mhd_wall_conduction_pc.py), against
+# the wall_conduction_pc_rows = 0 twin of the identical deck:
+# - the converged physics is IDENTICAL (the rows are a preconditioner,
+#   and the residual is bit-unchanged by switching them on);
+# - Newton takes the same number of iterations;
+# - the cumulative GMRES iteration count is STRICTLY below the twin's,
+#   with margin.
+# Measured on this deck: 497 preconditioned vs 602 without the rows
+# (-17.4%) at an identical 29 Newton iterations.
+
+my_constants.n0 = 1.0e18
+my_constants.rho0 = n0 * m_p
+my_constants.T0_ev = 100.0
+my_constants.Twall_ev = 2.0
+my_constants.Pe0 = n0 * T0_ev * q_e
+my_constants.Pi0 = n0 * T0_ev * q_e
+my_constants.gamma = 5.0/3.0
+my_constants.B0 = 5.0e-4
+my_constants.Lr = 0.1
+my_constants.Lz = 0.6
+my_constants.nr = 8
+my_constants.nz = 48
+my_constants.dr = Lr / nr
+# Production per-component clamps, DEFINED (kappa/(n kB)) convention.
+my_constants.chi_par_cap = 1.0e6
+my_constants.chi_perp_cap = 1.0e2
+my_constants.chi_op_par = (gamma - 1.0) * chi_par_cap
+# Conduction-paced step at the PARALLEL clamp: chi_op_par dt / dr^2 = 0.5
+# were the clamp saturated. The z-shaped temperature keeps the raw
+# Braginskii chi BELOW the cap over most of the wall, which is the point
+# -- the emitted rows then span the decades the analysis is grading.
+my_constants.dt = 0.5 * dr^2 / chi_op_par
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 6
+amr.n_cell = nr nz
+amr.max_grid_size = 24
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 0.0
+geometry.prob_hi = Lr Lz
+boundary.field_lo = none none
+boundary.field_hi = pec none
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 20
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-11
+gmres.max_iterations = 300
+
+jacobian.pc_type = pc_mhd_block
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = T0_ev
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = Pi0
+implicit_mhd.mass_density_floor = 1.0e-4 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-6 * Pe0
+implicit_mhd.ion_pressure_floor = 1.0e-6 * Pi0
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 0.5
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.thermal_conduction_model = braginskii
+implicit_mhd.conduction_coulomb_log = 10.0
+implicit_mhd.conduction_chi_par_max = chi_par_cap
+implicit_mhd.conduction_chi_perp_max = chi_perp_cap
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.electron_pressure(x,y,z) = "Pe0 * (0.10 + 0.90 * exp(-((z - 0.5*Lz)^2) / 0.02))"
+implicit_mhd.ion_pressure(x,y,z) = "Pi0 * (0.10 + 0.90 * exp(-((z - 0.5*Lz)^2) / 0.02))"
+
+# TERM (a): the shaped-wall interface drain, hard Dirichlet pin at the
+# PARALLEL clamp class (the reference-matched wall conductance G).
+implicit_mhd.wall_model = pec
+implicit_mhd.wall_polyline_file = wall_flat_r065.csv
+implicit_mhd.wall_thermal_bc = dirichlet
+implicit_mhd.wall_temperature = Twall_ev
+implicit_mhd.wall_conduction_scale = parallel
+
+# TERM (b): the z-end conductive exchange, on both ends.
+implicit_mhd.z_boundary_fluid = wall_temperature
+implicit_mhd.z_wall_temperature = Twall_ev
+implicit_mhd.z_wall_conduction = 1
+
+# Round-off check that the emitted rows still factor the residual's own
+# wall drain, on every residual evaluation of both arms.
+implicit_mhd.wall_conduction_validate_rows = 1
+
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 B0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 6
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = implicit_mhd_mass_density \
+                       implicit_mhd_electron_energy implicit_mhd_ion_energy
+diag1.write_species = 0

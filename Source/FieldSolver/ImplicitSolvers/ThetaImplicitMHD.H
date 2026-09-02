@@ -441,6 +441,12 @@ class ThetaImplicitMHD final : public ImplicitSolver
         return m_z_lo_pmc;
     }
 
+    [[nodiscard]] const amrex::MultiFab*
+    GetMHDWallConductionDiagonalForPC () const override
+    {
+        return m_wall_conduction_diagonal.get();
+    }
+
     inline static constexpr char MassDensityName[] = "implicit_mhd_mass_density";
     inline static constexpr char MomentumDensityName[] = "implicit_mhd_momentum_density";
     inline static constexpr char ElectronEnergyName[] = "implicit_mhd_electron_energy";
@@ -1153,6 +1159,56 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // so at low densities the legacy path drains toward the floor
     // image, not the wall -- the measured production inertness).
     bool m_z_wall_conduction = false;
+    // Preconditioner rows for the two WALL THERMAL residual terms -- the
+    // shaped-wall interface drain (wall_thermal_bc reservoir modes) and
+    // the z-end conductive exchange (z_wall_conduction). Both are linear
+    // in the cell's energy unknown at frozen coefficients, so each adds a
+    // POSITIVE diagonal theta dt D to its energy row; neither had a
+    // preconditioner row, which left those rows at the identity while the
+    // residual carried a diagonal measured at 57 on the production
+    // formation deck under wall_conduction_scale = parallel (0.0057 under
+    // perp: the 1e4 clamp-class lever lands entirely here). A
+    // residual-only wall term whose rows the preconditioner does not
+    // carry is the measured 7-21x GMRES stagnation of the
+    // z_wall_conduction arms.
+    //
+    // The rate is accumulated by the residual's OWN conduction kernel, at
+    // the face where it computes the drain and out of the same
+    // chi/face-density/limiter factors, so the emitted row cannot drift
+    // from the term it preconditions (implicit_mhd.
+    // wall_conduction_validate_rows checks the factorization to round-off
+    // in-run, the conduction twin of pc_mhd_block.
+    // resistive_validate_assembly). Component layout: 0 = electron,
+    // 1 = ion total, 2 = ion internal (dual-energy only).
+    //
+    // Default on; implicit_mhd.wall_conduction_pc_rows = 0 restores the
+    // row-less preconditioner for A/B measurement.
+    bool m_wall_conduction_pc_rows = true;
+    bool m_wall_conduction_validate_rows = false;
+    // Analytic reference for the emitted rows: the largest theta dt D the
+    // deck expects on the ELECTRON channel. On a deck whose wall
+    // conductance is known in closed form -- saturated Braginskii clamps
+    // against a hard Dirichlet bath -- this pins the emitted diagonal to
+    // the analytic half-cell rate 2 chi dt/dn^2 INCLUDING the cylindrical
+    // r_face/r_cell weight, which the factorization check above cannot
+    // see (it only pins the row to the drain, not the drain's geometry).
+    // Zero (the default) skips it.
+    amrex::Real m_wall_conduction_validate_rows_reference = 0.0;
+    amrex::Real m_wall_conduction_validate_rows_tolerance = 1.0e-6;
+    // Set at the first ComputeFaceFluxes: the rows are live only when a
+    // conductive wall term actually exists. Everything below stays
+    // unallocated and the PC accessor keeps returning nullptr otherwise,
+    // so decks without a conductive wall are bit-identical.
+    bool m_wall_conduction_rows_active = false;
+    std::unique_ptr<amrex::MultiFab> m_wall_conduction_diagonal;
+    // Components of m_wall_conduction_diagonal: the three energy channels
+    // in the solver's block order, plus the validation scratch that
+    // wall_conduction_validate_rows reduces.
+    static constexpr int WallConductionRowElectron = 0;
+    static constexpr int WallConductionRowIonTotal = 1;
+    static constexpr int WallConductionRowIonInternal = 2;
+    static constexpr int WallConductionRowMismatch = 3;
+    static constexpr int WallConductionRowComponents = 4;
     // Fluid-moment ghost treatment at the z_lo end ONLY (RZ, recast
     // path): empty (default) inherits z_boundary_fluid; "symmetry" makes
     // z = z_lo a mirror-symmetry plane -- the z_lo ghost rows are the

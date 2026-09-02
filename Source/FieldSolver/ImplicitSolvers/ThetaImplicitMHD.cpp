@@ -524,6 +524,25 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "implicit_mhd.z_wall_conduction requires "
         "implicit_mhd.z_boundary_fluid = wall_temperature (the conductive "
         "z-end exchange drains against the z_wall_temperature reservoir)");
+    // Preconditioner rows for the wall thermal terms (see the members):
+    // on by default -- the shaped-wall drain and the z-end exchange are
+    // plain positive diagonals on the energy rows and leaving them at the
+    // identity is a measured GMRES stagnation. The knob exists for A/B
+    // measurement and for reproducing the row-less behavior.
+    pp.query("wall_conduction_pc_rows", m_wall_conduction_pc_rows);
+    pp.query("wall_conduction_validate_rows",
+             m_wall_conduction_validate_rows);
+    utils::parser::queryWithParser(pp,
+                                   "wall_conduction_validate_rows_reference",
+                                   m_wall_conduction_validate_rows_reference);
+    utils::parser::queryWithParser(pp,
+                                   "wall_conduction_validate_rows_tolerance",
+                                   m_wall_conduction_validate_rows_tolerance);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_wall_conduction_validate_rows_reference == 0.0_rt ||
+            m_wall_conduction_validate_rows,
+        "implicit_mhd.wall_conduction_validate_rows_reference requires "
+        "implicit_mhd.wall_conduction_validate_rows");
     utils::parser::queryWithParser(pp, "absorb_ledger_interval",
                                    m_absorb_ledger_interval);
     pp.query("wall_ledger_file", m_wall_ledger_file);
@@ -5824,6 +5843,44 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
 
 void ThetaImplicitMHD::ComputeFaceFluxes (const amrex::Real a_time)
 {
+    // Wall-thermal preconditioner rows (see the members): the rate is
+    // accumulated INSIDE the conduction kernel below, so it is reset here
+    // and is complete once every direction has run. The MHD block
+    // preconditioner reads it at its update, whose most recent residual
+    // evaluation is the base Newton iterate (NewtonSolver evaluates the
+    // residual, then calls updatePreCondMat) -- the frozen-coefficient
+    // state the rows are supposed to carry.
+    //
+    // The rows exist only where a conductive wall term does: a conduction
+    // channel AND either a reservoir wall_thermal_bc (the interface
+    // drain) or z_wall_conduction (the z-end exchange). Everything else
+    // never allocates and never enters the kernel.
+    {
+        const auto wall_thermal_mode = m_wall_mask.GetThermalBC();
+        const bool wall_reservoir =
+            (wall_thermal_mode ==
+                 ImplicitMHDWallMask::ThermalBC::outflow_limited ||
+             wall_thermal_mode == ImplicitMHDWallMask::ThermalBC::dirichlet ||
+             wall_thermal_mode ==
+                 ImplicitMHDWallMask::ThermalBC::dirichlet_limited);
+        const bool conduction_channel =
+            m_conduction_braginskii || m_chi_ion_is_parser ||
+            m_chi_electron_is_parser || m_thermal_diffusivity_ion > 0.0_rt ||
+            m_thermal_diffusivity_electron > 0.0_rt;
+        m_wall_conduction_rows_active =
+            m_wall_conduction_pc_rows && conduction_channel &&
+            (wall_reservoir || m_z_wall_conduction);
+    }
+    if (m_wall_conduction_rows_active) {
+        if (m_wall_conduction_diagonal == nullptr) {
+            const amrex::MultiFab& density =
+                *m_WarpX->m_fields.get(MassDensityName, 0);
+            m_wall_conduction_diagonal = std::make_unique<amrex::MultiFab>(
+                density.boxArray(), density.DistributionMap(),
+                WallConductionRowComponents, 0);
+        }
+        m_wall_conduction_diagonal->setVal(0.0_rt);
+    }
 #if defined(WARPX_DIM_1D_Z)
     ComputeDirectionalFaceFluxes(*m_WarpX->m_fields.get(FaceFluxZName, 0), 2,
                                  a_time);
@@ -5837,6 +5894,56 @@ void ThetaImplicitMHD::ComputeFaceFluxes (const amrex::Real a_time)
     WARPX_ABORT_WITH_MESSAGE(
         "ThetaImplicitMHD::ComputeFaceFluxes() requires 1D or RZ geometry");
 #endif
+    // Round-off check of the emitted rows against the residual's own wall
+    // drain (implicit_mhd.wall_conduction_validate_rows; the conduction
+    // twin of pc_mhd_block.resistive_validate_assembly). The kernel
+    // records, per wall face, the relative mismatch between the drain it
+    // adds to the flux and the conductance it emits times the same
+    // temperature difference: if the two expressions ever drift apart,
+    // the preconditioner would be inverting an operator the residual no
+    // longer has, and every downstream iteration-count gate would go
+    // quiet instead of failing.
+    if (m_wall_conduction_rows_active && m_wall_conduction_validate_rows &&
+        m_wall_conduction_diagonal != nullptr) {
+        const amrex::Real mismatch =
+            m_wall_conduction_diagonal->max(WallConductionRowMismatch);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            mismatch <= 1.0e-12_rt,
+            "implicit_mhd.wall_conduction_validate_rows: the wall thermal "
+            "preconditioner rows no longer factor the residual's own wall "
+            "drain (relative mismatch above 1e-12)");
+        // Emitted-row report: theta dt D is the dimensionless diagonal the
+        // preconditioner inverts.
+        const amrex::Real theta_dt = m_theta * m_dt;
+        const amrex::Real row_electron =
+            theta_dt *
+            m_wall_conduction_diagonal->max(WallConductionRowElectron);
+        amrex::Print()
+            << "ThetaImplicitMHD: wall conduction pc rows: mismatch = "
+            << mismatch << ", theta dt D_max = electron " << row_electron
+            << ", ion " << theta_dt *
+                   m_wall_conduction_diagonal->max(WallConductionRowIonTotal)
+            << ", ion_internal "
+            << theta_dt * m_wall_conduction_diagonal->max(
+                              WallConductionRowIonInternal)
+            << "\n";
+        // Analytic gate (see the member): on a closed-form deck the
+        // emitted electron row must be the analytic half-cell Dirichlet
+        // rate, cylindrical metric included.
+        if (m_wall_conduction_validate_rows_reference > 0.0_rt) {
+            const amrex::Real deviation =
+                std::abs(row_electron /
+                             m_wall_conduction_validate_rows_reference -
+                         1.0_rt);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                deviation <= m_wall_conduction_validate_rows_tolerance,
+                "implicit_mhd.wall_conduction_validate_rows_reference: the "
+                "emitted wall thermal preconditioner row does not match the "
+                "deck's analytic theta dt D (check the half-cell factor, "
+                "the conduction theta and the cylindrical r_face/r_cell "
+                "weight)");
+        }
+    }
 }
 
 void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
@@ -6324,12 +6431,50 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     constexpr int flux_alfven_left = FaceFluxComponent::signal_alfven_left;
     constexpr int flux_alfven_right = FaceFluxComponent::signal_alfven_right;
 
+    // Wall-thermal PRECONDITIONER ROWS (implicit_mhd.
+    // wall_conduction_pc_rows; see the members and ComputeFaceFluxes).
+    // Both conductive wall terms below -- the shaped-wall interface drain
+    // and the z-end exchange -- are, at frozen coefficients, a positive
+    // diagonal on the interior cell's energy row:
+    //
+    //   dF/dU = 1 + theta dt * (metric/dn) * G * (theta_c/theta) / rho
+    //
+    // with G the SAME conductance the drain is built from. Emitting it
+    // here, in the residual's own kernel and out of the residual's own
+    // factors, is the only way the row cannot drift from the term it
+    // preconditions; recomputing chi in the preconditioner would have to
+    // duplicate the Braginskii clamps, the halo boost, the coefficient
+    // state and the wall clamp class. The stage weight is folded in here
+    // so the preconditioner's plain theta dt multiplication lands on the
+    // effective conduction_theta * dt (see the conduction_stage block
+    // above). The one factor NOT carried is plasma_weight, which is
+    // identically 1 outside the (unused) holmstrom_vacuum halo and would
+    // only ever make the emitted row an over-estimate there -- safe for a
+    // preconditioner, which is what it is.
+    const bool emit_wall_rows =
+        m_wall_conduction_rows_active && m_wall_conduction_diagonal != nullptr;
+    const bool validate_wall_rows =
+        emit_wall_rows && m_wall_conduction_validate_rows;
+    const amrex::Real wall_row_stage_weight =
+        conduction_stage ? stage_new_weight : 1.0_rt;
+    const int wall_row_electron = WallConductionRowElectron;
+    const int wall_row_ion_total = WallConductionRowIonTotal;
+    const int wall_row_ion_internal = WallConductionRowIonInternal;
+    const int wall_row_mismatch = WallConductionRowMismatch;
     for (amrex::MFIter mfi(face_flux_mf); mfi.isValid(); ++mfi) {
         // Grow in the transverse direction(s): the corner UCT EMF reads
         // both adjacent faces of each family, including one ghost face at
         // grid boundaries; the kernel inputs are ghosted deeply enough.
         const amrex::Box box =
             amrex::grow(mfi.validbox(), face_flux_mf.nGrowVect());
+        // Cell-centered valid box of this fab: the row scatter below
+        // targets the face's INTERIOR cell and fires only when that cell
+        // is owned here, so the grown face box (and the face shared by
+        // two boxes) contributes exactly once with no ghost exchange.
+        const amrex::Box wall_row_cells = amrex::enclosedCells(mfi.validbox());
+        const auto wall_rows =
+            emit_wall_rows ? m_wall_conduction_diagonal->array(mfi)
+                           : amrex::Array4<amrex::Real>{};
         const auto rho = density.const_array(mfi);
         const auto mom = momentum.const_array(mfi);
         const auto energy = electron_energy.const_array(mfi);
@@ -6883,6 +7028,72 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 const bool z_end_lo_face =
                     z_wall_conduction_lo && z_axial_index == z_end_face_lo;
                 const bool z_end_wall_face = z_end_hi_face || z_end_lo_face;
+                // Wall-thermal PRECONDITIONER ROW scatter (see the host
+                // constants). Both wall drains below are built as
+                //     drain = conductance * (interior e_int - bath),
+                // so the interior cell's energy-row diagonal gains
+                //     (metric/dn) * conductance * (theta_c/theta) / rho
+                // per wall face. The metric reproduces the divergence
+                // this face enters: r_face/r_cell on RZ radial faces
+                // (a factor 2 in the first ring -- dropping it is not an
+                // option), plain 1/dn on axial faces. The scatter fires
+                // only for the cell that OWNS the face here, so a face
+                // seen by two boxes contributes once.
+                const auto wall_row_metric = [=] (const int ic)
+                {
+                    amrex::Real metric = inverse_normal_size;
+#if defined(WARPX_DIM_RZ)
+                    if (radial_faces) {
+                        metric *=
+                            (radial_lower + i * radial_cell_size) /
+                            (radial_lower +
+                             (static_cast<amrex::Real>(ic) + 0.5_rt) *
+                                 radial_cell_size);
+                    }
+#else
+                    amrex::ignore_unused(ic);
+#endif
+                    return metric;
+                };
+                const auto emit_wall_row =
+                    [=] (const int channel, const int ic, const int jc,
+                         const int kc, const amrex::Real conductance,
+                         const amrex::Real interior_safe_density)
+                {
+                    if (!emit_wall_rows) { return; }
+                    if (!wall_row_cells.contains(
+                            amrex::IntVect(AMREX_D_DECL(ic, jc, kc)))) {
+                        return;
+                    }
+                    amrex::Gpu::Atomic::AddNoRet(
+                        &wall_rows(ic, jc, kc, channel),
+                        wall_row_metric(ic) * conductance *
+                            wall_row_stage_weight / interior_safe_density);
+                };
+                // Round-off guard of the factorization the row assumes
+                // (implicit_mhd.wall_conduction_validate_rows): the
+                // conductance emitted above, times the same temperature
+                // difference the drain uses, must reproduce the drain the
+                // flux actually carries.
+                const auto validate_wall_row =
+                    [=] (const int ic, const int jc, const int kc,
+                         const amrex::Real conductance,
+                         const amrex::Real drain,
+                         const amrex::Real interior_e_spec,
+                         const amrex::Real bath)
+                {
+                    if (!validate_wall_rows) { return; }
+                    if (!wall_row_cells.contains(
+                            amrex::IntVect(AMREX_D_DECL(ic, jc, kc)))) {
+                        return;
+                    }
+                    const amrex::Real reference =
+                        conductance * (interior_e_spec - bath);
+                    amrex::Gpu::Atomic::Max(
+                        &wall_rows(ic, jc, kc, wall_row_mismatch),
+                        std::abs(reference - drain) /
+                            std::max(std::abs(drain), 1.0e-300_rt));
+                };
                 amrex::Real face_charge_density = 0.0_rt;
                 amrex::Real face_te = 0.0_rt;
                 amrex::Real face_ti = 0.0_rt;
@@ -7581,7 +7792,14 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         const amrex::Real interior_e_spec =
                             wall_left_masked ? e_spec_ion_right
                                              : e_spec_ion_left;
+                        // The drain keeps its EXACT original floating-point
+                        // association: the conductance the preconditioner
+                        // row needs is built beside it, only when the rows
+                        // are live, so switching the rows on cannot move
+                        // the residual by even a bit.
                         amrex::Real drain;
+                        amrex::Real conductance = 0.0_rt;
+                        amrex::Real bath;
                         if (wall_pin) {
                             // Dirichlet pin: two-sided exchange against
                             // the floor-anchored bath at the half-cell
@@ -7593,14 +7811,24 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                     (interior_e_spec -
                                      wall_gate_e_spec_ion) *
                                     2.0_rt * inverse_normal_size;
+                            bath = wall_gate_e_spec_ion;
+                            if (emit_wall_rows) {
+                                conductance = chi_ion_face * face_density *
+                                              2.0_rt * inverse_normal_size;
+                            }
                         } else {
-                            drain =
-                                chi_ion_face * face_density *
-                                (interior_e_spec - wall_e_spec_ion) *
+                            const amrex::Real gate =
                                 theta_implicit_mhd::floor_outflow_limiter(
                                     interior_e_spec,
-                                    wall_gate_e_spec_ion) *
-                                inverse_normal_size;
+                                    wall_gate_e_spec_ion);
+                            drain = chi_ion_face * face_density *
+                                    (interior_e_spec - wall_e_spec_ion) *
+                                    gate * inverse_normal_size;
+                            bath = wall_e_spec_ion;
+                            if (emit_wall_rows) {
+                                conductance = chi_ion_face * face_density *
+                                              gate * inverse_normal_size;
+                            }
                         }
                         // free-streaming cap on the wall exchange --
                         // except under the HARD dirichlet pin, where the
@@ -7612,10 +7840,53 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             const amrex::Real free_streaming_flux =
                                 face_charge_density / PhysConst::q_e *
                                 PhysConst::kb * face_ti * thermal_speed;
-                            drain /=
+                            const amrex::Real cap =
                                 1.0_rt +
                                 std::abs(drain) / (wall_conduction_limit *
                                                    free_streaming_flux);
+                            drain /= cap;
+                            conductance /= cap;
+                        }
+                        // Preconditioner row on the INTERIOR cell (the
+                        // live side of the interface). Under dual_energy
+                        // the identical flux is booked into BOTH ion
+                        // rows, and e_int is the fk blend of the two, so
+                        // the pair's exact Jacobi diagonals are the fk /
+                        // (1 - fk) split of one conductance -- not the
+                        // full value twice.
+                        if (emit_wall_rows) {
+                            const int ric = wall_left_masked ? i : il;
+                            const int rjc = wall_left_masked ? j : jl;
+                            const int rkc = wall_left_masked ? k : kl;
+                            const auto& interior =
+                                wall_left_masked ? right : left;
+                            amrex::Real kinetic_fraction = 1.0_rt;
+                            if (parameters.dual_energy_closure) {
+                                amrex::Real kinetic = 0.0_rt;
+                                for (int component = 0; component < 3;
+                                     ++component) {
+                                    kinetic +=
+                                        interior.momentum[component] *
+                                        interior.momentum[component];
+                                }
+                                kinetic *=
+                                    0.5_rt / interior.safe_density;
+                                kinetic_fraction = theta_implicit_mhd::
+                                    dual_energy_kinetic_fraction(
+                                        interior.ion_energy, kinetic,
+                                        ion_int_old(ric, rjc, rkc),
+                                        parameters);
+                                emit_wall_row(
+                                    wall_row_ion_internal, ric, rjc, rkc,
+                                    (1.0_rt - kinetic_fraction) *
+                                        conductance,
+                                    interior.safe_density);
+                            }
+                            emit_wall_row(wall_row_ion_total, ric, rjc, rkc,
+                                          kinetic_fraction * conductance,
+                                          interior.safe_density);
+                            validate_wall_row(ric, rjc, rkc, conductance,
+                                              drain, interior_e_spec, bath);
                         }
                         // +n flux toward a right-side wall, -n toward a
                         // left-side wall (matches the two-sided sign).
@@ -7640,6 +7911,48 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             chi_ion_face * face_density *
                             (interior_e_spec - z_wall_bath_e_spec_ion) *
                             2.0_rt * inverse_normal_size;
+                        const amrex::Real conductance =
+                            chi_ion_face * face_density * 2.0_rt *
+                            inverse_normal_size;
+                        // Preconditioner row on the interior cell: this
+                        // branch is EXACTLY linear in it (no gate, no
+                        // cap), so the emitted diagonal is the exact
+                        // Jacobian entry at frozen coefficients.
+                        if (emit_wall_rows) {
+                            const int ric = z_end_hi_face ? il : i;
+                            const int rjc = z_end_hi_face ? jl : j;
+                            const int rkc = z_end_hi_face ? kl : k;
+                            const auto& interior =
+                                z_end_hi_face ? left : right;
+                            amrex::Real kinetic_fraction = 1.0_rt;
+                            if (parameters.dual_energy_closure) {
+                                amrex::Real kinetic = 0.0_rt;
+                                for (int component = 0; component < 3;
+                                     ++component) {
+                                    kinetic +=
+                                        interior.momentum[component] *
+                                        interior.momentum[component];
+                                }
+                                kinetic *=
+                                    0.5_rt / interior.safe_density;
+                                kinetic_fraction = theta_implicit_mhd::
+                                    dual_energy_kinetic_fraction(
+                                        interior.ion_energy, kinetic,
+                                        ion_int_old(ric, rjc, rkc),
+                                        parameters);
+                                emit_wall_row(
+                                    wall_row_ion_internal, ric, rjc, rkc,
+                                    (1.0_rt - kinetic_fraction) *
+                                        conductance,
+                                    interior.safe_density);
+                            }
+                            emit_wall_row(wall_row_ion_total, ric, rjc, rkc,
+                                          kinetic_fraction * conductance,
+                                          interior.safe_density);
+                            validate_wall_row(ric, rjc, rkc, conductance,
+                                              drain, interior_e_spec,
+                                              z_wall_bath_e_spec_ion);
+                        }
                         conductive_flux = z_end_hi_face ? drain : -drain;
                     } else if (braginskii) {
                         // Anisotropic tensor flux: the normal gradient
@@ -7785,22 +8098,39 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         const amrex::Real interior_e_spec =
                             wall_left_masked ? e_spec_electron_right
                                              : e_spec_electron_left;
+                        // Conductance beside the unchanged drain (see the
+                        // ion channel): the residual keeps its exact
+                        // floating-point association.
                         amrex::Real drain;
+                        amrex::Real conductance = 0.0_rt;
+                        amrex::Real bath;
                         if (wall_pin) {
                             // Dirichlet pin (see the ion channel).
                             drain = chi_electron_face * face_density *
                                     (interior_e_spec -
                                      wall_gate_e_spec_electron) *
                                     2.0_rt * inverse_normal_size;
+                            bath = wall_gate_e_spec_electron;
+                            if (emit_wall_rows) {
+                                conductance = chi_electron_face *
+                                              face_density * 2.0_rt *
+                                              inverse_normal_size;
+                            }
                         } else {
-                            drain =
-                                chi_electron_face * face_density *
-                                (interior_e_spec -
-                                 wall_e_spec_electron) *
+                            const amrex::Real gate =
                                 theta_implicit_mhd::floor_outflow_limiter(
                                     interior_e_spec,
-                                    wall_gate_e_spec_electron) *
-                                inverse_normal_size;
+                                    wall_gate_e_spec_electron);
+                            drain = chi_electron_face * face_density *
+                                    (interior_e_spec -
+                                     wall_e_spec_electron) *
+                                    gate * inverse_normal_size;
+                            bath = wall_e_spec_electron;
+                            if (emit_wall_rows) {
+                                conductance = chi_electron_face *
+                                              face_density * gate *
+                                              inverse_normal_size;
+                            }
                         }
                         if (!wall_uncapped) {
                             const amrex::Real thermal_speed = std::sqrt(
@@ -7808,10 +8138,24 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             const amrex::Real free_streaming_flux =
                                 face_charge_density / PhysConst::q_e *
                                 PhysConst::kb * face_te * thermal_speed;
-                            drain /=
+                            const amrex::Real cap =
                                 1.0_rt +
                                 std::abs(drain) / (wall_conduction_limit *
                                                    free_streaming_flux);
+                            drain /= cap;
+                            conductance /= cap;
+                        }
+                        if (emit_wall_rows) {
+                            const int ric = wall_left_masked ? i : il;
+                            const int rjc = wall_left_masked ? j : jl;
+                            const int rkc = wall_left_masked ? k : kl;
+                            const auto& interior =
+                                wall_left_masked ? right : left;
+                            emit_wall_row(wall_row_electron, ric, rjc, rkc,
+                                          conductance,
+                                          interior.safe_density);
+                            validate_wall_row(ric, rjc, rkc, conductance,
+                                              drain, interior_e_spec, bath);
                         }
                         conductive_flux =
                             wall_right_masked ? drain : -drain;
@@ -7828,6 +8172,23 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             (interior_e_spec -
                              z_wall_bath_e_spec_electron) *
                             2.0_rt * inverse_normal_size;
+                        const amrex::Real conductance =
+                            chi_electron_face * face_density * 2.0_rt *
+                            inverse_normal_size;
+                        if (emit_wall_rows) {
+                            const int ric = z_end_hi_face ? il : i;
+                            const int rjc = z_end_hi_face ? jl : j;
+                            const int rkc = z_end_hi_face ? kl : k;
+                            const auto& interior =
+                                z_end_hi_face ? left : right;
+                            emit_wall_row(wall_row_electron, ric, rjc, rkc,
+                                          conductance,
+                                          interior.safe_density);
+                            validate_wall_row(
+                                ric, rjc, rkc, conductance, drain,
+                                interior_e_spec,
+                                z_wall_bath_e_spec_electron);
+                        }
                         conductive_flux = z_end_hi_face ? drain : -drain;
                     } else if (braginskii) {
                         // Anisotropic tensor flux (see the ion channel).

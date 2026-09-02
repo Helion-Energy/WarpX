@@ -260,6 +260,9 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         inline static constexpr char MassDensityName[] = "implicit_mhd_mass_density";
         inline static constexpr char MomentumDensityName[] = "implicit_mhd_momentum_density";
         inline static constexpr char ElectronEnergyName[] = "implicit_mhd_electron_energy";
+        inline static constexpr char IonEnergyName[] = "implicit_mhd_ion_energy";
+        inline static constexpr char IonInternalEnergyName[] =
+            "implicit_mhd_ion_internal_energy";
 
         bool m_is_defined = false;
         bool m_hlld_state = false;
@@ -302,6 +305,12 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         int m_max_coarsening_level = 30;
         int m_signal_components = 0;
         int m_momentum_component = -1;
+        // Stacked component index of each wall-conduction energy channel
+        // -- electron, ion total, ion internal -- in the solver's block
+        // order, or -1 when the closure carries no such block. Filled at
+        // Define; consumed by the wall-conduction row scaling in
+        // ApplySignalDiffusionBlocks.
+        amrex::GpuArray<int, 3> m_wall_conduction_component = {-1, -1, -1};
 
         // Resistive-block inner solver: "chebyshev" (the portable
         // fixed-count iteration) or "direct" (exact sparse
@@ -833,11 +842,26 @@ MHDBlockPC<T, Ops>::DefineSignalDiffusion (const T& state)
 
     m_signal_components = 0;
     m_momentum_component = -1;
+    m_wall_conduction_component = {-1, -1, -1};
     for (const auto& spec : state.getMultiFabBlockSpecs())
     {
         if (spec.name == MomentumDensityName)
         {
             m_momentum_component = m_signal_components;
+        }
+        // Energy channels of the wall-conduction rows, in the component
+        // order the solver's diagonal register uses.
+        else if (spec.name == ElectronEnergyName)
+        {
+            m_wall_conduction_component[0] = m_signal_components;
+        }
+        else if (spec.name == IonEnergyName)
+        {
+            m_wall_conduction_component[1] = m_signal_components;
+        }
+        else if (spec.name == IonInternalEnergyName)
+        {
+            m_wall_conduction_component[2] = m_signal_components;
         }
         m_signal_components += state.getMultiFabBlock(spec.name, 0).nComp();
     }
@@ -1752,6 +1776,59 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
                               m_momentum_component, 3, 0);
     }
 #endif
+
+    // WALL THERMAL / z-END CONDUCTION ROWS (see
+    // ImplicitSolver::GetMHDWallConductionDiagonalForPC). Two residual
+    // terms -- the shaped-wall interface drain
+    // (implicit_mhd.wall_thermal_bc reservoir modes) and the z-end
+    // conductive exchange (implicit_mhd.z_wall_conduction) -- are, at
+    // frozen coefficients, a plain POSITIVE diagonal theta dt D on the
+    // energy row of the wall-adjacent interior cell. Without a row here
+    // those cells were preconditioned as identities against a residual
+    // diagonal measured at 57 on the production formation deck under
+    // wall_conduction_scale = parallel: exactly the residual-only-wall-
+    // term pathology that costs a measured 7-21x in GMRES stagnations.
+    //
+    // The exact 1x1 inverse of that diagonal is a division, composed
+    // AFTER the shared Helmholtz/wave sweeps (which own the rest of the
+    // row) and BEFORE the masked-band identity restore below -- the band
+    // cells are exact identity rows and must not be scaled; they are
+    // disjoint from the LIVE interior cells the drain acts on, and the
+    // restore has the last word either way. The solver hands over the
+    // rate divided by theta dt, so this is the only place the two agree
+    // on the step scale.
+    //
+    // D == 0 (nullptr register: every deck without a conductive wall
+    // term, and wall_conduction_pc_rows = 0) leaves the solution
+    // bit-identical.
+    const amrex::MultiFab* const wall_conduction =
+        m_ops->GetMHDWallConductionDiagonalForPC();
+    if (wall_conduction != nullptr)
+    {
+        const RT wall_conduction_h = m_h;
+        for (int channel = 0; channel < 3; ++channel)
+        {
+            const int component = m_wall_conduction_component[channel];
+            if (component < 0)
+            {
+                continue;
+            }
+            for (amrex::MFIter mfi(*m_signal_solution); mfi.isValid(); ++mfi)
+            {
+                const auto signal_solution = m_signal_solution->array(mfi);
+                const auto diagonal = wall_conduction->const_array(mfi);
+                amrex::ParallelFor(
+                    mfi.validbox(),
+                    [=] AMREX_GPU_DEVICE(int i, int j, int k)
+                    {
+                        signal_solution(i, j, k, component) /=
+                            RT(1.0) +
+                            wall_conduction_h *
+                                static_cast<RT>(diagonal(i, j, k, channel));
+                    });
+            }
+        }
+    }
 
     stacked_component = 0;
     for (const auto& spec : rhs.getMultiFabBlockSpecs())

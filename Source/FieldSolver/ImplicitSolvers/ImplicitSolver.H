@@ -558,6 +558,35 @@ public:
     }
 
     /**
+     * \brief Return the cell-centered wall-thermal conduction rows of the
+     * MHD energy blocks: per cell and per energy channel, the DIMENSIONLESS
+     * Jacobian diagonal increment of the residual's wall conduction terms
+     * DIVIDED by theta dt -- the preconditioner multiplies by its own
+     * theta dt and inverts 1 + theta dt D.
+     *
+     * Two residual terms contribute, both linear in the cell's energy
+     * unknown at frozen coefficients and both previously absent from the
+     * preconditioner: the shaped-wall interface drain
+     * (implicit_mhd.wall_thermal_bc reservoir modes) and the z-end
+     * conductive exchange (implicit_mhd.z_wall_conduction). Under
+     * implicit_mhd.wall_conduction_scale = parallel the first is up to 1e4
+     * stiffer, which is where the missing rows are measurable.
+     *
+     * Component layout is the solver's energy-block order: 0 = electron
+     * energy, 1 = ion total energy, 2 = ion internal energy (dual-energy
+     * closure only; zero otherwise).
+     *
+     * The nullptr default -- and the nullptr returned whenever neither
+     * wall term is active -- keeps every other scheme and every deck
+     * without a conductive wall bit-identical.
+     */
+    [[nodiscard]] virtual const amrex::MultiFab*
+    GetMHDWallConductionDiagonalForPC () const
+    {
+        return nullptr;
+    }
+
+    /**
      * \brief Return true when the z_lo domain face is the theta-implicit
      * MHD mirror-symmetry plane (boundary.field_lo = pmc on z paired with
      * implicit_mhd.z_lo_boundary_fluid = symmetry): the MHD block
