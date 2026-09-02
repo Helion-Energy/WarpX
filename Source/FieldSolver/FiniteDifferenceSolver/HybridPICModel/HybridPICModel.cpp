@@ -2290,7 +2290,7 @@ void HybridPICModel::HybridPICSolveE (
     // solve_for_Faraday = false, so this is the natural once-per-step point
     // to emit the elliptic-solve iteration and timing report.
     if (!solve_for_Faraday && m_inertia_elliptic) {
-        m_inertia_elliptic->ReportAndResetStats();
+        m_inertia_elliptic->ReportAndResetStats(m_substeps);
     }
     // Allow execution of Python callback after E-field push
     ExecutePythonCallback("afterEpush");

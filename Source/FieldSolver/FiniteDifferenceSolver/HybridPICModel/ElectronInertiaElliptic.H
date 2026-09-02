@@ -136,8 +136,11 @@ public:
      */
     void Solve (ablastr::fields::VectorField const& Efield, int lev);
 
-    /** Emit the accumulated iteration and timing statistics, then reset them. */
-    void ReportAndResetStats ();
+    /** Emit the accumulated iteration and timing statistics, then reset
+     *  them. \p substeps is the magnetic substep count the step ran at,
+     *  reported alongside the solve cost because per-substep cost cannot be
+     *  recovered from a step wall time without it. */
+    void ReportAndResetStats (int substeps);
 
     // ---- runtime knobs (see HybridPICModel::ReadParameters) ----
     amrex::Real m_rtol = 1.e-8;

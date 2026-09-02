@@ -924,24 +924,28 @@ ElectronInertiaElliptic::Solve (ablastr::fields::VectorField const& Efield, int 
 }
 
 void
-ElectronInertiaElliptic::ReportAndResetStats ()
+ElectronInertiaElliptic::ReportAndResetStats (int substeps)
 {
     if (m_verbose < 1 || m_n_solves == 0) { return; }
-    const double mean = static_cast<double>(m_n_iters)
-                      / static_cast<double>(std::max(m_n_solves, 1L));
+    const auto n = static_cast<double>(std::max(m_n_solves, 1L));
+    const double mean = static_cast<double>(m_n_iters) / n;
     const double cold_mean = (m_n_cold_solves > 0)
         ? static_cast<double>(m_n_cold_iters)
           / static_cast<double>(m_n_cold_solves)
         : 0.0;
-    amrex::Print() << "Electron inertia (elliptic): " << m_n_solves
+    // The substep count is emitted alongside the solve cost because the two
+    // only mean anything together: this term buys its keep by letting the
+    // magnetic substep count fall, and per-substep cost cannot be recovered
+    // from a wall-clock step time without knowing how many substeps that
+    // step actually took. Reporting it here removes the need to infer it.
+    amrex::Print() << "Electron inertia (elliptic): " << substeps
+                   << " B-substeps, " << m_n_solves
                    << " solves, mean " << mean << " iterations (max "
-                   << m_max_iters_seen << "), first-after-rebuild mean "
+                   << m_max_iters_seen << "), zero-guess mean "
                    << cold_mean << "; setup " << m_setup_time * 1.e3
                    << " ms over " << m_n_setups << " rebuilds, solve "
                    << m_solve_time * 1.e3 << " ms, "
-                   << (m_solve_time * 1.e3
-                       / static_cast<double>(std::max(m_n_solves, 1L)))
-                   << " ms/solve\n";
+                   << (m_solve_time * 1.e3 / n) << " ms/solve\n";
     m_n_solves = 0; m_n_iters = 0; m_max_iters_seen = 0;
     m_n_setups = 0; m_setup_time = 0.0; m_solve_time = 0.0;
     m_n_cold_solves = 0; m_n_cold_iters = 0;
