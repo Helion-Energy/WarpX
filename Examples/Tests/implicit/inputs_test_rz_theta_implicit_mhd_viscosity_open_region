@@ -1,0 +1,142 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.Ti = 100.0
+my_constants.P0 = n0 * Ti * q_e
+my_constants.Te = 1.0
+my_constants.gamma = 5.0/3.0
+# Guide field: uniform Bz, so psi(r) = int_0^r Bz r' dr' = B0 r^2/2 --
+# a monotone radial coordinate the nu_op gate can cut at a known radius.
+# B0 is chosen dynamically inert (v_A = 21.8 m/s, k v_A = 2.2e3 /s, four
+# orders below the viscous rate nu k^2 = 1.9e7 /s), so the sheared
+# rotation is PURE momentum diffusion: with only E_r = -v_theta Bz and
+# no z-dependence of Bz, curl E is negligible and the field is frozen.
+my_constants.B0 = 1.0e-5
+# Solver-vec normalization ONLY (the energy blocks are scaled by
+# B_ref^2/mu0): the guide field is deliberately far below the
+# thermal scale, so B_ref must be the thermal magnetic field or the
+# energy blocks enter the residual norm 1e7 too large and the JFNK
+# finite difference degenerates to round-off.
+my_constants.B_ref = sqrt(mu0 * P0)
+my_constants.nr = 32
+my_constants.nz = 8
+my_constants.Lr = 0.5
+my_constants.Lz = 0.0625
+# Region cut at r_c = 16 dr = 0.25 m, exactly the face between cells 15
+# and 16: psi_bnd = B0 r_c^2/2 sits 6% clear of both neighbouring
+# cell-centre psi values.
+my_constants.r_cut = 0.25
+my_constants.psi_bnd = 0.5 * B0 * r_cut * r_cut
+# The reference code's nu_op pair at the reference shot [8, 18] us card: nu_op_mul = 0.1
+# above nu_op_bnd. The tenuous (large-psi) region gets 200 m^2/s, the
+# dense (small-psi) region keeps the full 2000 m^2/s.
+my_constants.nu_hi = 2000.0
+my_constants.nu_op_mul = 0.1
+my_constants.sound_speed = sqrt(gamma*P0/rho0)
+my_constants.shear = 1.0e-3 * sound_speed
+my_constants.dt = 5.0e-9
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 16
+amr.n_cell = nr nz
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = RZ
+geometry.prob_lo = 0.0 0.0
+geometry.prob_hi = Lr Lz
+boundary.field_lo = none periodic
+boundary.field_hi = pec periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-11
+newton.relative_tolerance = 1.0e-9
+newton.max_iterations = 12
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-10
+gmres.max_iterations = 400
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_velocity = sound_speed
+implicit_mhd.reference_magnetic_field = B_ref
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = P0
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.ion_pressure_floor = 1.0e-8 * P0
+implicit_mhd.electron_pressure_floor = 1.0e-8 * (n0 * Te * q_e)
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = nu_hi
+
+# Two-region gate: an AXIALLY sheared rotation v_theta = shear sin(k z),
+# uniform in r, on a uniform column. The radial viscous flux is
+# identically zero at t = 0 (no radial gradient), the axis face carries
+# the r = 0 weight, and the r_max PEC ghost mirrors v_theta EVENLY, so
+# each radius decays independently at its own nu(r) k_eff^2 -- the
+# measurement the analysis makes on both sides of the psi cut.
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.ion_pressure(x,y,z) = P0
+implicit_mhd.electron_pressure(x,y,z) = n0 * Te * q_e
+implicit_mhd.velocity_y(x,y,z) = shear * sin(2*pi*z/Lz)
+
+# The reference code's nu_op (step.f90 disip:199-201): scale the interior viscous face
+# coefficient where psi > nu_op_bnd. Hard threshold (width 0), the
+# Reference-exact form -- psi is keyed to the step-old field and frozen
+# across the Newton solve.
+implicit_mhd.viscosity_open_multiplier = nu_op_mul
+implicit_mhd.viscosity_open_psi = psi_bnd
+
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 B0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 16
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz implicit_mhd_mass_density \
+                       implicit_mhd_momentum_t
+diag1.write_species = 0

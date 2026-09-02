@@ -2344,13 +2344,48 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Hall EMF (J x B)/rho_q, converting the ion-frame ideal EMF to
         the electron frame.
 
-    viscosity: float, default=0 (off)
+    viscosity: float or str, default=0 (off)
         Explicit ion kinematic viscosity nu_i in m^2/s of the recast face
         fluxes (fluid_flux="hlld" or "central"; required positive for
         "central"). Adds the normal-gradient viscous momentum stress and
         its exactly paired stress work on the ion total-energy channel to
         the same face registers, keeping the discrete energy exchange
         conservative. Not supported with ion_closure="cgl".
+
+        A str routes to implicit_mhd.viscosity(t), a parser expression in
+        the simulation time t [s] evaluated once per step at the
+        theta-stage time -- the reference code's glob_mod d_nur card, which is
+        constant within a restart segment (the reference shot steps 2000 -> 500
+        m^2/s at 8 us). Stage it as a SMOOTH (tanh-blended) schedule: the
+        coefficient sits inside the JFNK residual, so a hard time branch
+        would step the operator discontinuously between steps.
+
+    viscosity_open_multiplier: float or str, default=1 (off)
+        the reference code's nu_op_mul (step.f90 disip): the factor applied to the
+        interior ion viscous face coefficient wherever the poloidal flux
+        exceeds viscosity_open_psi -- the tenuous/open region (the reference shot
+        uses 0.1 from 8 us on). RZ only. A str routes to the time-staged
+        parser implicit_mhd.viscosity_open_multiplier(t), same contract
+        as `viscosity`. The multiplier never applies to the
+        wall_viscosity_band_value pedestal: the reference code scales before the
+        small_vis wall assignment overwrites it.
+
+    viscosity_open_psi: float, default=0
+        the reference code's nu_op_bnd in Wb/rad: the threshold on
+        psi(r, z) = int_0^r Bz r' dr' (psi = 0 on the axis, the reference code's
+        convention) selecting the region viscosity_open_multiplier
+        scales. The reference shot uses 5e-4.
+
+    viscosity_open_psi_width: float, default=0 (the reference-exact hard
+        threshold)
+        Optional tanh half-width in Wb/rad of the psi threshold. The
+        threshold is keyed to the step-old field, frozen across the
+        Newton solve, so the hard form is not Newton-hostile; the width
+        exists only to damp step-to-step chatter of threshold cells.
+
+    viscosity_open_flux_sign: int, default=1
+        Sign convention mapping the local Bz orientation onto the reference code's
+        psi (mirrors density_eater_flux_sign); 0 disables the mechanism.
 
     thermal_diffusivity_ion: float or str, default=0 (off)
         Ion thermal diffusivity chi_i in m^2/s of the recast face fluxes
@@ -2948,6 +2983,14 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         disables the gate. RZ only (1D has no poloidal flux and
         requires 0).
 
+    density_eater_start_time: float, optional
+        Simulation time [s] at which the eater switches on: it is skipped
+        on every step whose end time is below it (the reference code's eaten_type
+        0 -> 1 card flip -- the reference shot turns the eater on at 8 us on the
+        machine clock). Unset = active from step one. A hard gate is
+        faithful here: the eater is an operator-split projection of the
+        committed end-of-step state, outside every Newton solve.
+
     density_eater_ledger_file: str, optional
         File for the eater removal ledger (requires
         density_eater_rate > 0): "step mass energy" rows appended
@@ -3187,6 +3230,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         density_eater_band=None,
         density_eater_band_cells=None,
         density_eater_flux_sign=None,
+        density_eater_start_time=None,
         density_eater_ledger_file=None,
         vacuum_resistivity_diffusivity=None,
         vacuum_reference_peak_fraction=None,
@@ -3205,6 +3249,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         fluid_flux=None,
         allow_hlld=None,
         viscosity=None,
+        viscosity_open_multiplier=None,
+        viscosity_open_psi=None,
+        viscosity_open_psi_width=None,
+        viscosity_open_flux_sign=None,
         wall_viscosity_mask=None,
         wall_viscosity_mask_width=None,
         wall_viscosity_band_value=None,
@@ -3305,6 +3353,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.density_eater_band = density_eater_band
         self.density_eater_band_cells = density_eater_band_cells
         self.density_eater_flux_sign = density_eater_flux_sign
+        self.density_eater_start_time = density_eater_start_time
         self.density_eater_ledger_file = density_eater_ledger_file
         self.vacuum_resistivity_diffusivity = vacuum_resistivity_diffusivity
         self.vacuum_reference_peak_fraction = vacuum_reference_peak_fraction
@@ -3323,6 +3372,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.fluid_flux = fluid_flux
         self.allow_hlld = allow_hlld
         self.viscosity = viscosity
+        self.viscosity_open_multiplier = viscosity_open_multiplier
+        self.viscosity_open_psi = viscosity_open_psi
+        self.viscosity_open_psi_width = viscosity_open_psi_width
+        self.viscosity_open_flux_sign = viscosity_open_flux_sign
         self.wall_viscosity_mask = wall_viscosity_mask
         self.wall_viscosity_mask_width = wall_viscosity_mask_width
         self.wall_viscosity_band_value = wall_viscosity_band_value
@@ -3433,6 +3486,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.density_eater_band = self.density_eater_band
         implicit_mhd.density_eater_band_cells = self.density_eater_band_cells
         implicit_mhd.density_eater_flux_sign = self.density_eater_flux_sign
+        implicit_mhd.density_eater_start_time = self.density_eater_start_time
         implicit_mhd.density_eater_ledger_file = self.density_eater_ledger_file
         implicit_mhd.vacuum_resistivity_diffusivity = (
             self.vacuum_resistivity_diffusivity
@@ -3456,7 +3510,22 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.conduction_theta = self.conduction_theta
         implicit_mhd.fluid_flux = self.fluid_flux
         implicit_mhd.allow_hlld = self.allow_hlld
-        implicit_mhd.viscosity = self.viscosity
+        # strings route to the time-staged parser signature (the reference code's
+        # glob_mod d_nur card); numbers keep the bit-identical constant
+        # fast path
+        if isinstance(self.viscosity, str):
+            implicit_mhd.__setattr__("viscosity(t)", self.viscosity)
+        else:
+            implicit_mhd.viscosity = self.viscosity
+        if isinstance(self.viscosity_open_multiplier, str):
+            implicit_mhd.__setattr__(
+                "viscosity_open_multiplier(t)", self.viscosity_open_multiplier
+            )
+        else:
+            implicit_mhd.viscosity_open_multiplier = self.viscosity_open_multiplier
+        implicit_mhd.viscosity_open_psi = self.viscosity_open_psi
+        implicit_mhd.viscosity_open_psi_width = self.viscosity_open_psi_width
+        implicit_mhd.viscosity_open_flux_sign = self.viscosity_open_flux_sign
         implicit_mhd.wall_viscosity_mask = self.wall_viscosity_mask
         implicit_mhd.wall_viscosity_mask_width = self.wall_viscosity_mask_width
         implicit_mhd.wall_viscosity_band_value = self.wall_viscosity_band_value

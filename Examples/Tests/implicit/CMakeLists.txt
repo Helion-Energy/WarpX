@@ -561,6 +561,21 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Density eater TIME GATE (implicit_mhd.density_eater_start_time, the
+# The reference code's eaten_type 0 -> 1 card flip the reference shot makes at 8 us): the same
+# deck with the gate at 4.5 dt must leave the band untouched -- and write
+# no ledger row -- for four steps, then reproduce the full analytic
+# contract from step 5 on.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_density_eater_start_time  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_density_eater implicit_mhd.density_eater_start_time=4.5*dt"  # inputs
+    "analysis_mhd_density_eater.py diags/diag000000 diags/diag000010 5"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 add_warpx_test(
     test_1d_theta_implicit_mhd_positivity  # name
     1  # dims
@@ -1370,6 +1385,53 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# TIME-STAGED viscosity (implicit_mhd.viscosity(t), the reference code's glob_mod
+# d_nur card: the reference shot drops 2000 -> 500 m^2/s at 8 us). A decaying
+# transverse shear on a uniform column is a discrete eigenmode of the
+# viscous face-difference operator, so -d ln(amplitude)/dt reads the
+# coefficient straight back out. This scalar-viscosity anchor pins the
+# measurement (and is the bit-identity twin below).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_viscosity_shear  # name
+    1  # dims
+    2  # nprocs
+    inputs_test_1d_theta_implicit_mhd_viscosity_shear  # inputs
+    "analysis_mhd_viscosity_table.py scalar diags/diag000000 diags/diag000064"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The staged twin: both plateaus must land on their analytic rate, every
+# per-step rate must track nu(t_n + theta dt) k_eff^2 through the tanh
+# transition, and the transition must be RESOLVED over many steps
+# (a hard time branch inside the JFNK residual is what this forbids).
+add_warpx_test(
+    test_1d_theta_implicit_mhd_viscosity_table  # name
+    1  # dims
+    2  # nprocs
+    inputs_test_1d_theta_implicit_mhd_viscosity_table  # inputs
+    "analysis_mhd_viscosity_table.py table diags/diag000000 diags/diag000064"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Bit-identity: the staged deck with the table collapsed to a single
+# value (nu_lo = nu_hi, so the tanh term is an exact algebraic zero) must
+# reproduce the scalar anchor EXACTLY (every field of every plotfile,
+# plus the Newton history) -- the parser path costs nothing. Collapsing
+# the CONSTANT rather than overriding the expression keeps every
+# my_constants entry queried, which amrex.abort_on_unused_inputs
+# requires.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_viscosity_table_identity  # name
+    1  # dims
+    2  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_viscosity_table my_constants.nu_lo=2000.0"  # inputs
+    "analysis_mhd_viscosity_table.py identity diags/diag000000 diags/diag000064"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_viscosity_shear  # dependency
+)
+
 # ion thermal conduction on the central-flux face registers: a 1% sinusoidal
 # ion-temperature mode on a uniform static background, with chi_i stiff
 # against the acoustic response (chi k / c_s ~ 57), must decay at the
@@ -1852,6 +1914,35 @@ add_warpx_test(
     2  # nprocs
     inputs_test_rz_theta_implicit_mhd_wall_viscosity_band  # inputs
     "analysis_mhd_wall_viscosity_band.py diags/diag000000 diags/diag000003 band"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# The reference code's nu_op open-region viscosity multiplier (step.f90 disip:199-201,
+# WHERE (psi > nu_op_bnd) vis = nu_op_mul vis -- the reference shot arms it at 8 us
+# with 0.1 above 5e-4 Wb/rad). An axially sheared rotation on a uniform
+# column with uniform Bz makes psi = B0 r^2/2 a known radial cut, and
+# each radius then decays at its own nu(r) k_eff^2: the SELECTED
+# (large-psi) band must measure 0.1 nu and its complement exactly nu.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_viscosity_open_region  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_viscosity_open_region  # inputs
+    "analysis_mhd_viscosity_open_region.py open diags/diag000000 diags/diag000016"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Inactive twin (nu_op_mul = 1): the mechanism releases its table and the
+# whole column must run at the unscaled viscosity -- the no-op gate on
+# the region machinery.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_viscosity_open_region_off  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_viscosity_open_region my_constants.nu_op_mul=1.0"  # inputs
+    "analysis_mhd_viscosity_open_region.py off diags/diag000000 diags/diag000016"  # analysis
     OFF  # checksum
     OFF  # dependency
 )

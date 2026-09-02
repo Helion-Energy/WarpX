@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdlib>
 #include <fstream>
 #include <limits>
@@ -202,6 +203,10 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
 #endif
     utils::parser::queryWithParser(pp, "density_eater_flux_sign",
                                    m_density_eater_flux_sign);
+    // Time gate (the reference code's eaten_type 0 -> 1 card flip): unset = the
+    // eater runs from step one, exactly as before.
+    utils::parser::queryWithParser(pp, "density_eater_start_time",
+                                   m_density_eater_start_time);
     pp.query("density_eater_ledger_file", m_density_eater_ledger_file);
     utils::parser::queryWithParser(pp, "vacuum_resistivity_diffusivity",
                                    m_vacuum_resistivity_diffusivity);
@@ -266,7 +271,60 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
             "replaces the python hooks at the same firing points)");
     }
     pp.query("fluid_flux", m_fluid_flux);
-    utils::parser::queryWithParser(pp, "viscosity", m_viscosity);
+    // Ion viscosity: either the static key (bit-identical legacy path)
+    // or the time-staged parser implicit_mhd.viscosity(t), not both.
+    // The parser is a function of the simulation time only -- the reference code's
+    // glob_mod d_nur card, which is piecewise constant per restart
+    // segment and which the deck compiles into a tanh-blended schedule
+    // (the plasma_resistivity table precedent). Host-evaluated once per
+    // step in UpdateStagedViscosity; the value seeded here is the t = 0
+    // one, so the setup-time validation below sees the first card.
+    {
+        const bool has_viscosity_const =
+            utils::parser::queryWithParser(pp, "viscosity", m_viscosity);
+        std::string expression;
+        if (pp.query("viscosity(t)", expression)) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !has_viscosity_const,
+                "Specify either implicit_mhd.viscosity or "
+                "implicit_mhd.viscosity(t), not both");
+            m_viscosity_expression = expression;
+            m_viscosity_parser =
+                std::make_unique<amrex::Parser>(utils::parser::makeParser(
+                    expression, {"t"}));
+            m_viscosity_evaluate = m_viscosity_parser->compile<1>();
+            m_viscosity_is_parser = true;
+            m_viscosity = m_viscosity_evaluate(0.0_rt);
+        }
+    }
+    // The reference code's nu_op open/tenuous-region viscosity multiplier (see the
+    // header): same static-or-staged contract as the viscosity itself.
+    {
+        const bool has_open_const = utils::parser::queryWithParser(
+            pp, "viscosity_open_multiplier", m_viscosity_open_multiplier);
+        std::string expression;
+        if (pp.query("viscosity_open_multiplier(t)", expression)) {
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                !has_open_const,
+                "Specify either implicit_mhd.viscosity_open_multiplier or "
+                "implicit_mhd.viscosity_open_multiplier(t), not both");
+            m_viscosity_open_multiplier_expression = expression;
+            m_viscosity_open_multiplier_parser =
+                std::make_unique<amrex::Parser>(utils::parser::makeParser(
+                    expression, {"t"}));
+            m_viscosity_open_multiplier_evaluate =
+                m_viscosity_open_multiplier_parser->compile<1>();
+            m_viscosity_open_multiplier_is_parser = true;
+            m_viscosity_open_multiplier =
+                m_viscosity_open_multiplier_evaluate(0.0_rt);
+        }
+    }
+    utils::parser::queryWithParser(pp, "viscosity_open_psi",
+                                   m_viscosity_open_psi);
+    utils::parser::queryWithParser(pp, "viscosity_open_psi_width",
+                                   m_viscosity_open_psi_width);
+    utils::parser::queryWithParser(pp, "viscosity_open_flux_sign",
+                                   m_viscosity_open_flux_sign);
     // Reference-code-style wall viscosity band (see m_wall_viscosity_mask); the
     // active-wall requirement is asserted in Define, where the wall
     // mask is built.
@@ -660,6 +718,38 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "implicit_mhd.viscosity is not supported with "
         "implicit_mhd.ion_closure = cgl (the viscous stress work is only "
         "paired into the total_energy ion-energy channel)");
+    // ---- the reference code's nu_op region multiplier (see the header). ----
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_viscosity_open_multiplier >= 0.0_rt,
+        "implicit_mhd.viscosity_open_multiplier cannot be negative "
+        "(1 = off; the reference shot uses 0.1 from 8 us on)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_viscosity_open_psi_width >= 0.0_rt,
+        "implicit_mhd.viscosity_open_psi_width cannot be negative "
+        "(0 = the reference-exact hard psi threshold)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_viscosity_open_flux_sign >= -1 && m_viscosity_open_flux_sign <= 1,
+        "implicit_mhd.viscosity_open_flux_sign must be -1, 0, or 1");
+    const bool viscosity_open_requested =
+        m_viscosity_open_multiplier != 1.0_rt ||
+        m_viscosity_open_multiplier_is_parser;
+#if !defined(WARPX_DIM_RZ)
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !viscosity_open_requested,
+        "implicit_mhd.viscosity_open_multiplier requires RZ (the region "
+        "gate is a poloidal-flux integral; there is no poloidal flux in "
+        "1D)");
+#endif
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !viscosity_open_requested || m_viscosity_open_flux_sign != 0,
+        "implicit_mhd.viscosity_open_multiplier requires a nonzero "
+        "implicit_mhd.viscosity_open_flux_sign (0 disables the psi gate, "
+        "which would make the multiplier a silent no-op)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !viscosity_open_requested || m_viscosity > 0.0_rt ||
+            m_viscosity_is_parser,
+        "implicit_mhd.viscosity_open_multiplier scales the ion viscous "
+        "face coefficient and requires a positive implicit_mhd.viscosity");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_thermal_diffusivity_ion >= 0.0_rt &&
             m_thermal_diffusivity_electron >= 0.0_rt,
@@ -2757,7 +2847,19 @@ void ThetaImplicitMHD::PrintParameters () const
     }
     amrex::Print()
                    << "Ion closure:                   " << m_ion_closure << "\n"
-                   << "Viscosity [m2/s]:              " << m_viscosity << "\n"
+                   << "Viscosity [m2/s]:              "
+                   << (m_viscosity_is_parser
+                           ? m_viscosity_expression + " (staged in t)"
+                           : std::to_string(m_viscosity))
+                   << "\n"
+                   << "Open-region nu multiplier:     "
+                   << (m_viscosity_open_multiplier_is_parser
+                           ? m_viscosity_open_multiplier_expression +
+                                 " (staged in t)"
+                           : std::to_string(m_viscosity_open_multiplier))
+                   << " above psi = " << m_viscosity_open_psi
+                   << " Wb/rad (sign " << m_viscosity_open_flux_sign
+                   << ", width " << m_viscosity_open_psi_width << ")\n"
                    << "Wall viscosity mask:           "
                    << (m_wall_viscosity_mask
                            ? "ON (width " +
@@ -2919,6 +3021,12 @@ void ThetaImplicitMHD::PrintParameters () const
                                : std::string("the reference code's grid rule"))
                        << " cells), flux gate "
                        << m_density_eater_flux_sign << "\n"
+                       << "Density eater start time [s]:  "
+                       << (m_density_eater_start_time >
+                                   std::numeric_limits<amrex::Real>::lowest()
+                               ? std::to_string(m_density_eater_start_time)
+                               : std::string("(from step one)"))
+                       << "\n"
                        << "Density eater ledger:          "
                        << (m_density_eater_ledger_file.empty()
                                ? "(none)"
@@ -3614,6 +3722,13 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
     }
 
     SaveMagneticField();
+
+    // Time-staged viscous coefficients (the reference code's glob_mod d_nur /
+    // nu_op card): refreshed ONCE here, at the theta-stage time, from
+    // the step-old field just saved -- so every residual of this step's
+    // Newton solve sees the same frozen coefficient, exactly like a
+    // segment card in the reference code. A no-op unless a staged key is set.
+    UpdateStagedViscosity(start_time + m_theta * m_dt);
 
     if (m_resistive_theta != m_theta) {
         // Capture the beginning-of-step plasma current J^n = curl B^n/mu0
@@ -5924,6 +6039,20 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const bool wall_viscosity_pedestal =
         (wall_viscosity_first_masked != nullptr) &&
         (wall_viscosity_band_value > 0.0_rt);
+    // The reference code's nu_op open-region viscosity multiplier (see the header):
+    // a per-cell table over the whole domain, rebuilt once per step from
+    // the step-old poloidal flux, so the branch structure is constant
+    // for the JFNK probes. A null pointer is the legacy path -- the
+    // coefficient is then never multiplied at all, keeping the default
+    // bit-identical.
+    const amrex::Real* const AMREX_RESTRICT viscosity_region_scale =
+        (add_viscosity && m_viscosity_region_active)
+            ? m_viscosity_region_scale.dataPtr()
+            : nullptr;
+    const int viscosity_region_radial_lo = m_viscosity_region_radial_lo;
+    const int viscosity_region_axial_lo = m_viscosity_region_axial_lo;
+    const int viscosity_region_radial_cells = m_viscosity_region_radial_cells;
+    const int viscosity_region_axial_cells = m_viscosity_region_axial_cells;
     // Thermal conduction shares the viscous flux's spacing convention.
     const amrex::Real chi_ion = m_thermal_diffusivity_ion;
     const amrex::Real chi_electron = m_thermal_diffusivity_electron;
@@ -6713,9 +6842,34 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 // Interior: rho_f nu (implicit_mhd.viscosity is the
                 // kinematic-style knob). Band: the absolute dynamic
                 // pedestal, density-independent by design.
-                const amrex::Real viscous_coefficient =
+                amrex::Real viscous_coefficient =
                     viscosity_band_face ? wall_viscosity_band_value
                                         : face_density * viscosity;
+                // The reference code's nu_op (step.f90:199-201): the region multiplier
+                // scales the INTERIOR coefficient only -- their WHERE
+                // runs BEFORE the small_vis wall assignment, which
+                // overwrites it. The face takes the mean of its two
+                // adjacent cell multipliers (our coefficient lives on
+                // faces; theirs on the nodes their operator differences).
+                if (viscosity_region_scale != nullptr &&
+                    !viscosity_band_face) {
+                    const auto region_scale_at =
+                        [=] (const int ic, const int jc) {
+                            const int ir = std::min(
+                                std::max(ic - viscosity_region_radial_lo, 0),
+                                viscosity_region_radial_cells - 1);
+                            const int jz = std::min(
+                                std::max(jc - viscosity_region_axial_lo, 0),
+                                viscosity_region_axial_cells - 1);
+                            return viscosity_region_scale
+                                [static_cast<std::size_t>(ir) *
+                                     viscosity_region_axial_cells +
+                                 jz];
+                        };
+                    viscous_coefficient *=
+                        0.5_rt * (region_scale_at(il, jl) +
+                                  region_scale_at(i, j));
+                }
                 amrex::Real viscous_work = 0.0_rt;
                 for (int component = 0; component < 3; ++component) {
                     const amrex::Real viscous_stress =
@@ -9755,6 +9909,19 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     const bool add_viscous_heating =
         dual_energy_closure && m_viscosity > 0.0_rt;
     const amrex::Real viscosity = m_viscosity;
+    // The dual-energy heating source must carry the SAME face
+    // coefficient as the conservative stress pair, so the reference code's nu_op
+    // region multiplier is applied here too (null = the legacy path).
+    const amrex::Real* const AMREX_RESTRICT viscous_heating_region_scale =
+        (add_viscous_heating && m_viscosity_region_active)
+            ? m_viscosity_region_scale.dataPtr()
+            : nullptr;
+    const int viscous_heating_region_radial_lo = m_viscosity_region_radial_lo;
+    const int viscous_heating_region_axial_lo = m_viscosity_region_axial_lo;
+    const int viscous_heating_region_radial_cells =
+        m_viscosity_region_radial_cells;
+    const int viscous_heating_region_axial_cells =
+        m_viscosity_region_axial_cells;
     // --- CGL closure constants (all host-precomputed and strictly
     // positive, so every in-kernel regularization is C-infinity). ---
     const amrex::Real ion_pressure_floor = m_ion_pressure_floor;
@@ -10876,7 +11043,35 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                                     inverse_spacing;
                                 shear += du * du;
                             }
-                            return face_density * viscosity * shear;
+                            amrex::Real dissipation =
+                                face_density * viscosity * shear;
+                            if (viscous_heating_region_scale != nullptr) {
+                                const auto region_scale_at =
+                                    [=] (const int ic, const int jc) {
+                                        const int ir = std::min(
+                                            std::max(
+                                                ic -
+                                                    viscous_heating_region_radial_lo,
+                                                0),
+                                            viscous_heating_region_radial_cells -
+                                                1);
+                                        const int jz = std::min(
+                                            std::max(
+                                                jc -
+                                                    viscous_heating_region_axial_lo,
+                                                0),
+                                            viscous_heating_region_axial_cells -
+                                                1);
+                                        return viscous_heating_region_scale
+                                            [static_cast<std::size_t>(ir) *
+                                                 viscous_heating_region_axial_cells +
+                                             jz];
+                                    };
+                                dissipation *=
+                                    0.5_rt * (region_scale_at(i, j) +
+                                              region_scale_at(in, jn));
+                            }
+                            return dissipation;
                         };
 #if defined(WARPX_DIM_1D_Z)
                     viscous_heating =
@@ -12093,9 +12288,159 @@ void ThetaImplicitMHD::RefreshHaloPedestal ()
     m_state.CopyMultiFabBlocksToFields();
 }
 
-void ThetaImplicitMHD::ApplyDensityEater (const int step)
+void ThetaImplicitMHD::UpdateStagedViscosity (const amrex::Real time)
+{
+    // Both guards are checked EVERY step, so a malformed table trips at
+    // the first evaluation that leaves the admissible set rather than at
+    // the transition, where a sign or magnitude slip would otherwise
+    // enter the residual silently. Non-negativity is the load-bearing
+    // clause: the viscous stress and its work are an exactly
+    // conservative pair whose dissipation rho_f nu |du/dn|^2 is
+    // positive-definite only for nu >= 0 -- a negative staged value
+    // would turn the ion-energy channel into a SINK and is the direct
+    // route to an inadmissible ion energy.
+    if (m_viscosity_is_parser) {
+        m_viscosity = m_viscosity_evaluate(time);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            std::isfinite(m_viscosity) && m_viscosity >= 0.0_rt,
+            "implicit_mhd.viscosity(t) evaluated negative or non-finite: "
+            "the staged kinematic viscosity must stay non-negative and "
+            "finite over the whole run");
+    }
+    if (m_viscosity_open_multiplier_is_parser) {
+        m_viscosity_open_multiplier =
+            m_viscosity_open_multiplier_evaluate(time);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            std::isfinite(m_viscosity_open_multiplier) &&
+                m_viscosity_open_multiplier >= 0.0_rt,
+            "implicit_mhd.viscosity_open_multiplier(t) evaluated negative "
+            "or non-finite: the staged region multiplier must stay "
+            "non-negative and finite over the whole run");
+    }
+    BuildViscosityRegionScale();
+}
+
+void ThetaImplicitMHD::BuildViscosityRegionScale ()
+{
+#if defined(WARPX_DIM_RZ)
+    // Inactive: release the table so the face assembly takes the
+    // bit-identical null-pointer path.
+    const bool active = (m_viscosity > 0.0_rt) &&
+                        (m_viscosity_open_multiplier != 1.0_rt) &&
+                        (m_viscosity_open_flux_sign != 0);
+    m_viscosity_region_active = active;
+    if (!active) {
+        m_viscosity_region_scale.clear();
+        return;
+    }
+
+    // ---- psi(r, z) = sign * int_0^r Bz r' dr' over the WHOLE domain,
+    // from the theta-stage TOTAL Bz (Bfield_fp holds the plasma response
+    // under the split-field drive, so the stored external Bz is added
+    // back). The reference code keys nu_op on the step-old psi (disip runs at the
+    // top of the step), so this call site -- right after
+    // SaveMagneticField -- is the faithful stage. The radial prefix sum
+    // spans ranks: gather per-cell contributions to a host profile,
+    // reduce, integrate to the cell centers.
+    using ablastr::fields::Direction;
+    const amrex::Box domain = m_WarpX->Geom(0).Domain();
+    const int radial_lo = domain.smallEnd(0);
+    const int axial_lo = domain.smallEnd(1);
+    const int radial_cells = domain.length(0);
+    const int axial_cells = domain.length(1);
+    const std::size_t table_size =
+        static_cast<std::size_t>(radial_cells) * axial_cells;
+    amrex::Gpu::DeviceVector<amrex::Real> contribution_device(table_size,
+                                                              0.0_rt);
+    amrex::Real* const contribution_ptr = contribution_device.data();
+    const amrex::MultiFab& bz_face =
+        *m_WarpX->m_fields.get(FieldType::Bfield_fp, Direction{2}, 0);
+    const amrex::MultiFab* const bz_external =
+        m_hybrid_pic_model->m_add_external_fields
+            ? m_WarpX->m_fields.get(FieldType::hybrid_B_fp_external,
+                                    Direction{2}, 0)
+            : nullptr;
+    const amrex::Real radial_lower = m_WarpX->Geom(0).ProbLo(0);
+    const amrex::Real radial_cell_size = m_WarpX->Geom(0).CellSize(0);
+    const amrex::MultiFab& density_block =
+        m_state.getMultiFabBlock(MassDensityName, 0);
+    for (amrex::MFIter mfi(density_block); mfi.isValid(); ++mfi) {
+        const amrex::Box box = mfi.validbox();
+        const auto bz = bz_face.const_array(mfi);
+        const auto bz_ext = bz_external ? bz_external->const_array(mfi)
+                                        : amrex::Array4<const amrex::Real>{};
+        amrex::ParallelFor(box,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                // Cell-centered total Bz from the z-face pair.
+                amrex::Real bz_center =
+                    0.5_rt * (bz(i, j, k) + bz(i, j + 1, k));
+                if (bz_ext) {
+                    bz_center +=
+                        0.5_rt * (bz_ext(i, j, k) + bz_ext(i, j + 1, k));
+                }
+                const amrex::Real r_center =
+                    radial_lower + (i - radial_lo + 0.5_rt) * radial_cell_size;
+                contribution_ptr[static_cast<std::size_t>(i - radial_lo) *
+                                     axial_cells +
+                                 (j - axial_lo)] =
+                    bz_center * r_center * radial_cell_size;
+            });
+    }
+    amrex::Vector<amrex::Real> contribution(table_size, 0.0_rt);
+    amrex::Gpu::copy(amrex::Gpu::deviceToHost, contribution_device.begin(),
+                     contribution_device.end(), contribution.begin());
+    amrex::ParallelAllReduce::Sum(contribution.data(),
+                                  static_cast<int>(contribution.size()),
+                                  amrex::ParallelContext::CommunicatorSub());
+
+    // ---- the reference code's step.f90:199-201, WHERE (psi > nu_op_bnd) vis *= mul,
+    // realized as a per-cell multiplier. A zero width is the exact hard
+    // WHERE; a positive width blends it with the tanh the rest of this
+    // solver uses for gates.
+    amrex::Vector<amrex::Real> scale(table_size, 1.0_rt);
+    const amrex::Real flux_sign =
+        static_cast<amrex::Real>(m_viscosity_open_flux_sign);
+    const amrex::Real threshold = m_viscosity_open_psi;
+    const amrex::Real width = m_viscosity_open_psi_width;
+    const amrex::Real multiplier = m_viscosity_open_multiplier;
+    for (int plane = 0; plane < axial_cells; ++plane) {
+        amrex::Real accumulated = 0.0_rt;
+        for (int ir = 0; ir < radial_cells; ++ir) {
+            const std::size_t index =
+                static_cast<std::size_t>(ir) * axial_cells + plane;
+            const amrex::Real cell_flux = contribution[index];
+            const amrex::Real psi =
+                flux_sign * (accumulated + 0.5_rt * cell_flux);
+            accumulated += cell_flux;
+            const amrex::Real selected =
+                width > 0.0_rt
+                    ? 0.5_rt * (1.0_rt + std::tanh((psi - threshold) / width))
+                    : (psi > threshold ? 1.0_rt : 0.0_rt);
+            scale[index] = 1.0_rt + (multiplier - 1.0_rt) * selected;
+        }
+    }
+    m_viscosity_region_scale.resize(table_size);
+    amrex::Gpu::copy(amrex::Gpu::hostToDevice, scale.begin(), scale.end(),
+                     m_viscosity_region_scale.begin());
+    m_viscosity_region_radial_lo = radial_lo;
+    m_viscosity_region_axial_lo = axial_lo;
+    m_viscosity_region_radial_cells = radial_cells;
+    m_viscosity_region_axial_cells = axial_cells;
+#else
+    m_viscosity_region_active = false;
+#endif
+}
+
+void ThetaImplicitMHD::ApplyDensityEater (const amrex::Real time,
+                                          const int step)
 {
     if (m_density_eater_rate <= 0.0_rt) {
+        return;
+    }
+    if (time < m_density_eater_start_time) {
+        // The reference code's eaten_type = 0 for this segment (ntb.f90:201 skips the
+        // whole density_eater call): the state is untouched, so the gate
+        // is bit-identical to an eater-free run before its start time.
         return;
     }
     if (!m_evolve_ion_fluid) {
@@ -12421,7 +12766,7 @@ void ThetaImplicitMHD::FinishStateUpdate (const amrex::Real end_time, const int 
     // update and the step_tm floors on the eaten density. The
     // restorations below therefore key their density-dependent bounds
     // to the eaten density, exactly the state the next solve freezes.
-    ApplyDensityEater(step);
+    ApplyDensityEater(end_time, step);
 
     // End-of-step floor restorations below evaluate the temperature
     // floors' density-dependent bounds with the END-OF-STEP density: it is

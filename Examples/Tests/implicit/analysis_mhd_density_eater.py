@@ -24,9 +24,10 @@ clause is checked analytically (the reference code's ntb.f90:773-807 semantics):
      touch them, so the momentum DENSITY scales with the mass);
   3. ion energy-density preservation: E_i in the band is INVARIANT (the
      the reference shot's closure keeps wio and wik: the removed mass gives up
-     nothing, so the per-particle ion temperature RISES -- checked as a
-     factor > 5 rise over the run). NOTE: this is the faithful reference code
-     semantics -- the eater is NOT a cold-dilution refill;
+     nothing, so the per-particle ion temperature RISES -- checked
+     against the analytic (1 - rate)^-n factor). NOTE: this is the
+     faithful the reference code's semantics -- the eater is NOT a cold-dilution
+     refill;
   4. electron temperature preservation: U_e/rho in the band is invariant
      (te is the reference code's electron state under flg_wie = false, so U_e
      scales with the mass);
@@ -36,7 +37,17 @@ clause is checked analytically (the reference code's ntb.f90:773-807 semantics):
      deficit (periodic conservative fluxes remove nothing else) and the
      removed electron energy matches the domain U_e deficit.
 
+With the optional third argument (the reference code's eaten_type 0 -> 1 card flip,
+implicit_mhd.density_eater_start_time) the same deck must additionally
+show a clean TIME GATE: the band is untouched to solver round-off on
+every step before the gate -- no relaxation, no ledger row -- and the
+analytic (1 - rate)^n decay then starts from the first gated step, with
+every other clause above unchanged. The gate is exact, not smoothed: the
+eater is an operator-split projection of the committed end-of-step state,
+outside every Newton solve.
+
 Usage: analysis_mhd_density_eater.py diags/diag000000 diags/diag000010
+                                     [first eaten step]
 """
 
 import sys
@@ -92,6 +103,9 @@ def get_data(plotfile):
 
 
 initial_dir = sys.argv[1]
+# The first step on which the eater is allowed to run (1 = ungated).
+first_eaten_step = int(sys.argv[3]) if len(sys.argv) > 3 else 1
+n_eaten = n_steps - first_eaten_step + 1
 prefix = initial_dir[: -len("000000")]
 snapshots = [get_data(f"{prefix}{step:06d}") for step in range(n_steps + 1)]
 initial = snapshots[0]
@@ -101,55 +115,74 @@ rho_initial = initial["implicit_mhd_mass_density"]
 assert np.allclose(rho_initial[band], bump * rho0, rtol=1.0e-12, atol=0.0)
 assert np.allclose(rho_initial[far_bump], bump * rho0, rtol=1.0e-12, atol=0.0)
 
-# 1a. Step 1 is the pure eater applied to the preserved static state:
-# rho = target + (1 - rate)(rho0_band - target), momentum and U_e scale
-# by rho_new/rho_old, E_i untouched. The pre-eater solve preserves the
-# static contact to first-step Newton/GMRES tolerance noise (measured
-# ~2e-7 relative on this deck), so the analytic comparisons carry a
-# 1e-5 relative gate (two orders above the noise, five below the
+# 0. Time gate: every step before the gate leaves the band alone. The
+# eater returns before touching any state, so only the deck's own static
+# solve noise appears here. Vacuous (an empty range) when ungated.
+for step in range(1, first_eaten_step):
+    held = snapshots[step]["implicit_mhd_mass_density"][band]
+    assert np.allclose(held, bump * rho0, rtol=1.0e-5, atol=0.0), (
+        f"the band was eaten at step {step}, before the eater's start "
+        f"time: max rel drift {np.max(np.abs(held / (bump * rho0) - 1.0)):.3e}"
+    )
+if first_eaten_step > 1:
+    print(
+        f"time gate: band untouched for {first_eaten_step - 1} steps before "
+        "the eater's start time"
+    )
+
+# 1a. The FIRST eaten step is the pure eater applied to the preserved
+# static state: rho = target + (1 - rate)(rho0_band - target), momentum
+# and U_e scale by rho_new/rho_old, E_i untouched. The pre-eater solve
+# preserves the static contact to first-step Newton/GMRES tolerance noise
+# (measured ~2e-7 relative on this deck), so the analytic comparisons
+# carry a 1e-5 relative gate (two orders above the noise, five below the
 # 0.2/step signal). atol=0 everywhere: the fields span 12 orders of
 # magnitude in SI, so any absolute tolerance would be vacuous for some
 # block.
 rho_step1_expected = target + (1.0 - rate) * (bump * rho0 - target)
 scale_step1 = rho_step1_expected / (bump * rho0)
-step1 = snapshots[1]
+step1 = snapshots[first_eaten_step]
+step1_reference = snapshots[first_eaten_step - 1]
 assert np.allclose(
     step1["implicit_mhd_mass_density"][band],
     rho_step1_expected,
     rtol=1.0e-5,
     atol=0.0,
-), "step-1 band density is not the analytic eater limit"
+), "the first eaten step is not the analytic eater limit"
 assert np.allclose(
     step1["implicit_mhd_momentum_y"][band],
-    scale_step1 * initial["implicit_mhd_momentum_y"][band],
+    scale_step1 * step1_reference["implicit_mhd_momentum_y"][band],
     rtol=1.0e-5,
     atol=0.0,
-), "step-1 band momentum did not scale with the eaten mass"
+), "the first eaten step's band momentum did not scale with the eaten mass"
 assert np.allclose(
     step1["implicit_mhd_electron_energy"][band],
-    scale_step1 * initial["implicit_mhd_electron_energy"][band],
+    scale_step1 * step1_reference["implicit_mhd_electron_energy"][band],
     rtol=1.0e-5,
     atol=0.0,
-), "step-1 band electron energy did not scale with the eaten mass"
+), "the first eaten step's band electron energy did not scale with the eaten mass"
 # E_i carries the deck's largest static-solve noise (measured 6e-6 at
 # the band-edge contact cells, where the compensating p_i/p_e jumps
 # meet); 1e-4 is still four orders below the 9x per-particle
 # temperature-rise signal the invariance implies.
 assert np.allclose(
     step1["implicit_mhd_ion_energy"][band],
-    initial["implicit_mhd_ion_energy"][band],
+    step1_reference["implicit_mhd_ion_energy"][band],
     rtol=1.0e-4,
     atol=0.0,
-), "step-1 band ion energy density is not invariant"
-print(f"step 1: analytic eater limit exact (band rho -> {scale_step1:.6f} x)")
+), "the first eaten step's band ion energy density is not invariant"
+print(
+    f"step {first_eaten_step}: analytic eater limit exact "
+    f"(band rho -> {scale_step1:.6f} x)"
+)
 
 # 1b. Sustained analytic exponential relaxation of the band excess. The
 # eater's tiny electron-pressure perturbation (p_e/P <= 4 Te/Ti = 4e-4)
 # launches weak acoustics, so later steps carry a small contamination;
 # 1e-3 relative on the excess is far below the 0.8/step signal.
-for step in range(1, n_steps + 1):
+for step in range(first_eaten_step, n_steps + 1):
     excess = snapshots[step]["implicit_mhd_mass_density"][band] - target
-    expected = (bump * rho0 - target) * (1.0 - rate) ** step
+    expected = (bump * rho0 - target) * (1.0 - rate) ** (step - first_eaten_step + 1)
     assert np.allclose(excess, expected, rtol=1.0e-3, atol=0.0), (
         f"band excess at step {step} is not the analytic "
         f"(1 - rate)^n decay: max rel err = "
@@ -159,8 +192,8 @@ ratio = (snapshots[n_steps]["implicit_mhd_mass_density"][band] - target) / (
     snapshots[n_steps - 1]["implicit_mhd_mass_density"][band] - target
 )
 print(
-    f"exponential relaxation: 10 steps analytic, last-step excess ratio "
-    f"{ratio.mean():.6f} (expected {1.0 - rate})"
+    f"exponential relaxation: {n_eaten} eaten steps analytic, last-step "
+    f"excess ratio {ratio.mean():.6f} (expected {1.0 - rate})"
 )
 
 # 2. Velocity preservation in the band across the full run.
@@ -201,9 +234,13 @@ temperature_rise = (
     (initial["implicit_mhd_ion_energy"][band] - kinetic_initial)
     / initial["implicit_mhd_mass_density"][band]
 )
-assert np.all(temperature_rise > 5.0), (
-    "the eaten band's per-particle ion temperature did not rise "
-    "(the faithful energy-density-preserving semantics)"
+expected_rise = (bump * rho0) / (
+    target + (bump * rho0 - target) * (1.0 - rate) ** n_eaten
+)
+assert np.all(temperature_rise > 0.9 * expected_rise), (
+    "the eaten band's per-particle ion temperature did not rise as the "
+    f"faithful energy-density-preserving semantics require (measured "
+    f"{temperature_rise.min():.3f}x, analytic {expected_rise:.3f}x)"
 )
 print(
     f"ion closure: E_i invariant to {np.max(np.abs(ion_e_drift)):.2e}, "
@@ -240,8 +277,9 @@ print(f"band restriction: far bump drift {np.max(np.abs(far_drift)):.2e}")
 # 6. Ledger closure ("step mass energy" rows of cumulative removals; 1D
 # units are per unit cross-section, i.e. kg/m^2 = sum(drho) dz).
 ledger = np.atleast_2d(np.loadtxt("diags/eater_ledger.txt"))
-assert ledger.shape[0] == n_steps, (
-    f"ledger rows ({ledger.shape[0]}) != steps ({n_steps})"
+assert ledger.shape[0] == n_eaten, (
+    f"ledger rows ({ledger.shape[0]}) != eaten steps ({n_eaten}): the "
+    "gate must suppress the ledger row too"
 )
 assert np.all(np.diff(ledger[:, 1]) >= 0.0) and np.all(np.diff(ledger[:, 2]) >= 0.0), (
     "the removal ledger must be cumulative (nondecreasing)"
