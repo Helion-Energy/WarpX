@@ -47,6 +47,7 @@ SubcycledParticleContainer::SubcycledParticleContainer (amrex::AmrCore* amr_core
     utils::parser::queryWithParser(pp_species_name, "subcycling_max_subcycles", m_max_subcycles);
     pp_species_name.query("subcycling_v_ref_meridional", m_v_ref_meridional);
     utils::parser::queryWithParser(pp_species_name, "subcycling_v_theta_margin", m_v_theta_margin);
+    utils::parser::queryWithParser(pp_species_name, "subcycling_v_ref_hysteresis", m_v_ref_hysteresis);
     pp_species_name.query("subcycling_cap_is_error", m_cap_is_error);
     pp_species_name.query("do_orbit_averaged_deposition", m_do_orbit_averaged_deposition);
 
@@ -57,6 +58,9 @@ SubcycledParticleContainer::SubcycledParticleContainer (amrex::AmrCore* amr_core
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_v_theta_margin >= 0._rt,
         "<species>.subcycling_v_theta_margin must be non-negative");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_v_ref_hysteresis >= 0._rt && m_v_ref_hysteresis < 1._rt,
+        "<species>.subcycling_v_ref_hysteresis must lie in [0, 1)");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !(m_v_ref_meridional != 0 && m_v_ref > 0._rt),
         "<species>.subcycling_v_ref_meridional sizes the grid CFL on the "
@@ -139,7 +143,11 @@ SubcycledParticleContainer::ComputeSubcycleCount (ablastr::fields::MultiFabRegis
             // azimuthal fraction, which is a property of the current regime
             // and would silently go stale under pitch-angle scattering.
             speeds = MaxParticleSpeedsByComponent();
-            v_ref = speeds.meridional + m_v_theta_margin * speeds.azimuthal;
+            // Per-particle combination (see MaxSpeeds), then a hard clamp at
+            // the full-speed answer. The clamp makes the meridional option
+            // unable to size ABOVE the baseline it is trying to improve on:
+            // its worst case is parity, never a regression.
+            v_ref = amrex::min(speeds.combined, speeds.full);
         }
         else
         {
@@ -180,10 +188,31 @@ SubcycledParticleContainer::ComputeSubcycleCount (ablastr::fields::MultiFabRegis
         dt_sub = dt_sub_capped;
     }
 
-    m_dt_subcycle = dt_sub;
     // The small tolerance avoids an extra (zero-length) subcycle when
     // dt/dt_sub is an exact integer up to roundoff.
-    m_n_subcycles = amrex::max(1, static_cast<int>(std::ceil(dt/dt_sub * (1._rt - 1.e-12))));
+    const int n_implied =
+        amrex::max(1, static_cast<int>(std::ceil(dt/dt_sub * (1._rt - 1.e-12))));
+
+    // Hold the count through small changes (meridional sizing only, so the
+    // other paths stay bit-identical to their previous behavior). The speeds
+    // move slightly every step, and acting on that would rescale the
+    // deposition cadence for no benefit. Nothing is skipped: the maxima are
+    // still measured every step, so a genuine excursion is caught when it
+    // happens; only the reaction to a small change is suppressed.
+    if (meridional_used && m_n_subcycles_last_reported > 0 &&
+        m_v_ref_hysteresis > 0._rt &&
+        std::abs(n_implied - m_n_subcycles) <=
+            m_v_ref_hysteresis * static_cast<amrex::Real>(m_n_subcycles))
+    {
+        // Keep m_n_subcycles; make the subcycles uniform over the step so the
+        // retained count still covers dt exactly.
+        m_dt_subcycle = dt / static_cast<amrex::Real>(m_n_subcycles);
+    }
+    else
+    {
+        m_n_subcycles = n_implied;
+        m_dt_subcycle = dt_sub;
+    }
 
     if (!m_boot_printed)
     {
@@ -224,7 +253,10 @@ SubcycledParticleContainer::ComputeSubcycleCount (ablastr::fields::MultiFabRegis
             {
                 amrex::Print() << ", meridional " << speeds.meridional
                                << ", |v_theta| " << speeds.azimuthal
-                               << ", full " << speeds.full;
+                               << ", combined " << speeds.combined
+                               << ", full " << speeds.full
+                               << (speeds.combined > speeds.full
+                                   ? " (clamped to full)" : "");
             }
             amrex::Print() << ", binding leg "
                            << (dt_grid <= m_dt_subcycle*(1._rt + 1.e-9) ? "grid" : "cyclotron")
@@ -265,13 +297,17 @@ SubcycledParticleContainer::MaxParticleSpeedsByComponent ()
 
     using PType = typename WarpXParticleContainer::SuperParticleType;
     const amrex::ParticleReal inv_c2 = 1._prt/(PhysConst::c*PhysConst::c);
+    const auto margin = static_cast<amrex::ParticleReal>(m_v_theta_margin);
 
-    amrex::ReduceOps<amrex::ReduceOpMax, amrex::ReduceOpMax, amrex::ReduceOpMax> reduce_ops;
+    amrex::ReduceOps<amrex::ReduceOpMax, amrex::ReduceOpMax,
+                     amrex::ReduceOpMax, amrex::ReduceOpMax> reduce_ops;
     auto r = amrex::ParticleReduce<
-        amrex::ReduceData<amrex::ParticleReal, amrex::ParticleReal, amrex::ParticleReal>>(
+        amrex::ReduceData<amrex::ParticleReal, amrex::ParticleReal,
+                          amrex::ParticleReal, amrex::ParticleReal>>(
         *this,
         [=] AMREX_GPU_DEVICE (const PType& p) noexcept
-            -> amrex::GpuTuple<amrex::ParticleReal, amrex::ParticleReal, amrex::ParticleReal>
+            -> amrex::GpuTuple<amrex::ParticleReal, amrex::ParticleReal,
+                               amrex::ParticleReal, amrex::ParticleReal>
         {
             const amrex::ParticleReal ux = p.rdata(PIdx::ux);
             const amrex::ParticleReal uy = p.rdata(PIdx::uy);
@@ -297,20 +333,25 @@ SubcycledParticleContainer::MaxParticleSpeedsByComponent ()
             const amrex::ParticleReal vmer = vfull;
             const amrex::ParticleReal vaz = 0._prt;
 #endif
-            return {vfull, vmer, vaz};
+            // Combined PER PARTICLE: summing the separate maxima would mix
+            // two different particles and can exceed every particle's speed.
+            return {vfull, vmer, vaz, vmer + margin*vaz};
         },
         reduce_ops);
 
     auto vfull = amrex::get<0>(r);
     auto vmer  = amrex::get<1>(r);
     auto vaz   = amrex::get<2>(r);
+    auto vcomb = amrex::get<3>(r);
     amrex::ParallelDescriptor::ReduceRealMax(vfull);
     amrex::ParallelDescriptor::ReduceRealMax(vmer);
     amrex::ParallelDescriptor::ReduceRealMax(vaz);
+    amrex::ParallelDescriptor::ReduceRealMax(vcomb);
 
     s.full = amrex::max(static_cast<amrex::Real>(vfull), 0._rt);
     s.meridional = amrex::max(static_cast<amrex::Real>(vmer), 0._rt);
     s.azimuthal = amrex::max(static_cast<amrex::Real>(vaz), 0._rt);
+    s.combined = amrex::max(static_cast<amrex::Real>(vcomb), 0._rt);
     return s;
 }
 

@@ -46,3 +46,21 @@ add_warpx_test(
     OFF  # checksum
     OFF  # dependency
 )
+
+# Regression guard against building the reference speed by summing the
+# meridional and azimuthal maxima. Those are independent reductions, attained
+# in general by different particles, so their sum can exceed the speed of
+# every particle present -- and hence exceed the full-speed answer the option
+# exists to improve on. The two particles here carry equal speeds, one purely
+# meridional and one purely azimuthal, which is the configuration that
+# separates the two forms most sharply. Quantitative check in
+# analysis_vref_crossparticle.py, run by hand for the reason noted above.
+add_warpx_test(
+    test_rz_subcycled_vref_crossparticle  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_subcycled_vref_crossparticle  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)

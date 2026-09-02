@@ -55,7 +55,13 @@ full = max(components(*p)[0] for p in UOC)
 merid = max(components(*p)[1] for p in UOC)
 azim = max(components(*p)[2] for p in UOC)
 
-v_ref_expected = merid + MARGIN * azim
+# The reference speed is the maximum over particles of the PER-PARTICLE
+# combination v_mer + margin*|v_theta|, clamped at the full speed. Summing the
+# independent maxima instead would mix two different particles and can exceed
+# every particle's own speed -- see analysis_vref_crossparticle.py, the
+# regression gate for exactly that bug.
+combined = max(c[1] + MARGIN * c[2] for c in (components(*p) for p in UOC))
+v_ref_expected = min(combined, full)
 dt_sub_expected = CFL_GRID * DR / v_ref_expected
 # integer ceil of DT/dt_sub, with the same 1e-12 guard the code applies
 n_expected = max(1, math.ceil(DT / dt_sub_expected * (1 - 1e-12)))
@@ -73,6 +79,7 @@ print(f"mode           : {mode}")
 print(f"max |v|        : {full:.6e} m/s")
 print(f"max meridional : {merid:.6e} m/s")
 print(f"max |v_theta|  : {azim:.6e} m/s")
+print(f"max combined   : {combined:.6e} m/s")
 print(f"v_ref expected : {v_ref_expected:.6e} m/s   got {v_got:.6e}")
 print(f"n_sub expected : {n_expected}                got {n_got}")
 

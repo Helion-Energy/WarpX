@@ -1,0 +1,79 @@
+# Regression gate: the meridional reference speed must never exceed the
+# full-speed answer.
+#
+# Two particles at theta = 0, both with the SAME speed V:
+#   p0  pure meridional (radial): v_r = V      -> v_mer = V,  |v_theta| = 0
+#   p1  pure azimuthal:           v_theta = V  -> v_mer = 0,  |v_theta| = V
+#
+# The two component maxima are therefore attained by DIFFERENT particles:
+#   max |v|          = V
+#   max v_meridional = V   (from p0)
+#   max |v_theta|    = V   (from p1)
+#
+# Summing the independent maxima gives V + margin*V = 1.2 V at the default
+# margin, which is larger than the speed of EVERY particle present and larger
+# than the full-speed reference -- sizing on it would do strictly more work
+# than not using the option at all. Reducing the combination per particle
+# gives max(V + margin*0, 0 + margin*V) = V, and the clamp against the full
+# speed holds it at V. The expected reference speed is therefore exactly the
+# full speed V, i.e. parity with the meridional option disabled, and never
+# above it.
+#
+# V is chosen as 2e7 m/s; with dr = 0.5/64, grid CFL 0.4 and dt = 1e-9 the
+# expected count is the same with the option on and off.
+
+max_step = 2
+warpx.const_dt = 1.0e-9
+warpx.verbose = 1
+warpx.serialize_initial_conditions = 1
+
+amr.n_cell = 64 64
+amr.max_grid_size = 64
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 -0.5
+geometry.prob_hi = 0.5  0.5
+
+boundary.field_lo = none periodic
+boundary.field_hi = pec periodic
+boundary.particle_lo = none periodic
+boundary.particle_hi = absorbing periodic
+
+algo.maxwell_solver = hybrid
+algo.particle_shape = 1
+hybrid_pic_model.elec_temp = 1.0
+hybrid_pic_model.gamma = 1.0
+hybrid_pic_model.n_floor = 1.0e30
+hybrid_pic_model.holmstrom_vacuum_region = 1
+
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 1.0e-4
+
+particles.species_names = probe
+
+probe.species_type = hydrogen
+probe.injection_style = multipleparticles
+probe.multiple_particles_pos_x = 0.20 0.20
+probe.multiple_particles_pos_y = 0.0  0.0
+probe.multiple_particles_pos_z = 0.0  0.1
+# u/c for v = 2e7 m/s: p0 carries it radially (u_x), p1 azimuthally (u_y)
+probe.multiple_particles_ux = 6.671281903963041e-02 0.0
+probe.multiple_particles_uy = 0.0                   6.671281903963041e-02
+probe.multiple_particles_uz = 0.0                   0.0
+probe.multiple_particles_weight = 1.0 1.0
+
+probe.do_subcycled_push = 1
+probe.do_orbit_averaged_deposition = 1
+probe.subcycling_v_ref = -1.0
+probe.subcycling_v_ref_meridional = 1
+probe.subcycling_v_theta_margin = 0.2
+probe.subcycling_cfl_cyclotron = 0.1
+probe.subcycling_cfl_grid = 0.4
+probe.subcycling_max_subcycles = 100000
+
+diagnostics.diags_names = diag1
+diag1.intervals = 100000
+diag1.diag_type = Full
+diag1.fields_to_plot = rho

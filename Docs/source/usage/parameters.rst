@@ -2028,12 +2028,33 @@ Particle initialization
     :optional:
 
     Only used with ``<species_name>.subcycling_v_ref_meridional = 1``.
-    Fraction of the maximum :math:`|v_\theta|` added to the maximum meridional
-    speed. Within one subcycle the Lorentz turning converts a fraction
+    Fraction of :math:`|v_\theta|` added to the meridional speed. Within one
+    subcycle the Lorentz turning converts a fraction
     :math:`\sim \tfrac{1}{2}\omega_c \Delta t_{\mathrm{sub}}` of the azimuthal
     velocity into meridional motion, i.e. half the cyclotron CFL, so the
     default leaves roughly a factor of four of margin at the default cyclotron
     CFL.
+
+    The combination is formed **per particle** and then maximized, not by
+    summing the separate meridional and azimuthal maxima: those are
+    independent reductions, attained in general by different particles, so
+    their sum can exceed the speed of every particle present. The reference
+    speed is additionally clamped at the maximum full speed, so enabling
+    meridional sizing can never require more subcycles than leaving it off.
+
+.. pp:param:: <species_name>.subcycling_v_ref_hysteresis
+    :type: `float`
+    :default: ``0.2``
+    :optional:
+
+    Only used with ``<species_name>.subcycling_v_ref_meridional = 1``. The
+    subcycle count is left unchanged while the newly implied count differs
+    from the current one by less than this fraction, which stops the count
+    chattering between neighbouring values and rescaling the deposition
+    cadence for no benefit. The speeds are still measured every step, so a
+    genuine excursion is acted on when it happens. Holding a count up to this
+    fraction below the implied one lets the effective grid CFL overshoot by
+    the same fraction; at the defaults that is 0.48 against a limit of one.
 
 .. pp:param:: <species_name>.subcycling_max_subcycles
     :type: `int`

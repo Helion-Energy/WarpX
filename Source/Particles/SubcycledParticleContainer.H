@@ -134,16 +134,33 @@ public:
      */
     [[nodiscard]] amrex::Real MaxParticleSpeed ();
 
-    /** Component-resolved global maximum speeds (m/s) of this species. */
+    /** Component-resolved global maximum speeds (m/s) of this species.
+     *
+     * \c combined is the maximum over particles of the PER-PARTICLE quantity
+     * v_meridional + margin*|v_theta|, and is the quantity the grid CFL is
+     * sized on. It is deliberately NOT the sum of \c meridional and
+     * \c azimuthal: those are independent reductions, attained in general by
+     * DIFFERENT particles, so their sum can exceed the speed of every
+     * particle present -- and in particular exceed \c full, which would make
+     * sizing on it strictly worse than sizing on the full speed. Reduced per
+     * particle, the combination is bounded by
+     * max_a (cos a + margin*sin a) = sqrt(1 + margin^2) times that particle's
+     * own speed, i.e. 1.0198*|v| at the default margin.
+     *
+     * \c full, \c meridional and \c azimuthal are kept separately because they
+     * are what make a mis-sized reference speed diagnosable from the witness
+     * line.
+     */
     struct MaxSpeeds
     {
         amrex::Real full = 0.0;        //!< max |v|
         amrex::Real meridional = 0.0;  //!< max sqrt(v_r^2 + v_z^2)
         amrex::Real azimuthal = 0.0;   //!< max |v_theta|
+        amrex::Real combined = 0.0;    //!< max of v_mer + margin*|v_theta|
     };
 
-    /** Global maxima of the full, meridional and azimuthal speeds, in a
-     * single pass.
+    /** Global maxima of the full, meridional, azimuthal and combined speeds,
+     * in a single pass.
      *
      * In cylindrical geometry the momenta are stored as lab Cartesian
      * components alongside the azimuthal position angle, so the decomposition
@@ -228,6 +245,16 @@ protected:
      * default cyclotron CFL of 0.1 that is ~5%, so the default 0.2 is roughly
      * a factor of four of margin. */
     amrex::Real m_v_theta_margin = 0.2;
+    /** Fractional change in the implied subcycle count below which the count
+     * is left alone (meridional sizing only). The measured speeds move a
+     * little every step, so without this the count chatters between
+     * neighbouring values and rescales the deposition cadence for no benefit.
+     * Only the count is held: no measurement is skipped, so a genuine
+     * excursion is still caught on the step it happens. Holding a count up to
+     * this fraction below the newly implied one lets the effective grid CFL
+     * overshoot by the same fraction, which the default leaves far below
+     * unity. */
+    amrex::Real m_v_ref_hysteresis = 0.2;
     /** Cap on the number of subcycles per step (safety) */
     int m_max_subcycles = 10000;
     /** Treat a binding subcycle cap as an error rather than silently clamping
