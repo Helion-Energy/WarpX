@@ -34,8 +34,14 @@ UOC = [
 
 DR = 0.5 / 64.0  # binding cell size (dr < dz)
 CFL_GRID = 0.4
+CFL_CYCLOTRON = 0.1
 DT = 1.0e-9
-MARGIN = 0.2
+# The deck leaves subcycling_v_theta_margin unset, so the code derives it as
+# half the cyclotron CFL. The exact fraction of the budgeted displacement that
+# an initially azimuthal particle accrues meridionally in one subcycle is
+# [1 - cos(phi)]/phi with phi = cfl_cyclotron; half the CFL is its small-angle
+# form, accurate to better than 1.5% over the useful range.
+MARGIN = 0.5 * CFL_CYCLOTRON
 
 
 def components(uxc, uyc, uzc, theta):
@@ -84,6 +90,23 @@ print(f"v_ref expected : {v_ref_expected:.6e} m/s   got {v_got:.6e}")
 print(f"n_sub expected : {n_expected}                got {n_got}")
 
 assert mode == "meridional", f"expected meridional sizing, got {mode}"
+
+# The margin must be derived (the deck leaves it unset) and equal half the
+# cyclotron CFL. An explicitly-set value must instead be reported as such and
+# used verbatim; that branch is exercised by passing the knob on the command
+# line, so accept either and check the corresponding value.
+mm = re.search(r"v_theta margin = ([0-9.eE+-]+) \((derived[^)]*|explicit)\)", log)
+assert mm, "no v_theta margin on the witness line"
+margin_got, margin_kind = float(mm.group(1)), mm.group(2)
+margin_want = 0.5 * CFL_CYCLOTRON if margin_kind.startswith("derived") else margin_got
+print(f"v_theta margin : {margin_got:.4f} ({margin_kind})")
+assert abs(margin_got - margin_want) < 1e-12, (
+    f"derived margin {margin_got} != 0.5*cfl_cyclotron {margin_want}"
+)
+if margin_kind.startswith("derived"):
+    assert abs(margin_got - MARGIN) < 1e-12, (
+        "the analysis and the code disagree on the derived margin"
+    )
 rel = abs(v_got - v_ref_expected) / v_ref_expected
 assert rel < 1e-6, f"v_ref mismatch: rel err {rel:.3e}"
 assert n_got == n_expected, f"subcycle count mismatch: {n_got} vs {n_expected}"

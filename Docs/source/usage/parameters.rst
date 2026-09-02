@@ -2024,16 +2024,32 @@ Particle initialization
 
 .. pp:param:: <species_name>.subcycling_v_theta_margin
     :type: `float`
-    :default: ``0.2``
+    :default: derived, as half of ``subcycling_cfl_cyclotron``
     :optional:
 
     Only used with ``<species_name>.subcycling_v_ref_meridional = 1``.
-    Fraction of :math:`|v_\theta|` added to the meridional speed. Within one
-    subcycle the Lorentz turning converts a fraction
-    :math:`\sim \tfrac{1}{2}\omega_c \Delta t_{\mathrm{sub}}` of the azimuthal
-    velocity into meridional motion, i.e. half the cyclotron CFL, so the
-    default leaves roughly a factor of four of margin at the default cyclotron
-    CFL.
+    Fraction of :math:`|v_\theta|` added to the meridional speed. Left unset,
+    it is **derived** from the cyclotron CFL; an explicitly set value is used
+    as given.
+
+    The derivation is exact rather than a matter of taste. The cyclotron leg
+    limits the turning angle within a subcycle to
+    :math:`\varphi = \omega_c \Delta t_{\mathrm{sub}} \le`
+    ``subcycling_cfl_cyclotron`` radians, and a particle starting purely
+    azimuthal accrues a meridional displacement
+    :math:`v_\theta\,[1-\cos\varphi]/\omega_c` over that subcycle. As a
+    fraction of the budgeted displacement :math:`v_{\mathrm{ref}}\Delta
+    t_{\mathrm{sub}}` that is exactly
+
+    .. math:: \frac{1 - \cos\varphi}{\varphi}
+
+    whose small-angle form is :math:`\varphi/2`. Evaluated at the endpoint
+    this is 0.0500 at a cyclotron CFL of 0.1, 0.0997 at 0.2 and 0.1973 at 0.4,
+    i.e. half the cyclotron CFL to better than 1.5% across the useful range.
+
+    Deriving it makes the coupling automatic: a deck that raises the cyclotron
+    CFL then gets the correct margin without having to know that a second knob
+    must move with it.
 
     The combination is formed **per particle** and then maximized, not by
     summing the separate meridional and azimuthal maxima: those are

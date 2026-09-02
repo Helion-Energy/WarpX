@@ -68,7 +68,7 @@ probe.do_subcycled_push = 1
 probe.do_orbit_averaged_deposition = 1
 probe.subcycling_v_ref = -1.0
 probe.subcycling_v_ref_meridional = 1
-probe.subcycling_v_theta_margin = 0.2
+# v_theta margin left unset: derived as half the cyclotron CFL (0.05 here)
 probe.subcycling_cfl_cyclotron = 0.1
 probe.subcycling_cfl_grid = 0.4
 probe.subcycling_max_subcycles = 100000

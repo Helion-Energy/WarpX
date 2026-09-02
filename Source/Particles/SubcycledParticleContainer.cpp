@@ -55,9 +55,12 @@ SubcycledParticleContainer::SubcycledParticleContainer (amrex::AmrCore* amr_core
         m_cfl_cyclotron > 0._rt && m_cfl_grid > 0._rt && m_max_subcycles > 0,
         "<species>.subcycling_cfl_cyclotron, subcycling_cfl_grid and "
         "subcycling_max_subcycles must be positive");
+    // A negative value is the sentinel for "derive from the cyclotron CFL";
+    // anything explicitly set must be a genuine non-negative fraction.
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        m_v_theta_margin >= 0._rt,
-        "<species>.subcycling_v_theta_margin must be non-negative");
+        m_v_theta_margin >= 0._rt || m_v_theta_margin == -1._rt,
+        "<species>.subcycling_v_theta_margin must be non-negative, or left "
+        "unset (-1) to derive it as half the cyclotron CFL");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_v_ref_hysteresis >= 0._rt && m_v_ref_hysteresis < 1._rt,
         "<species>.subcycling_v_ref_hysteresis must lie in [0, 1)");
@@ -226,7 +229,15 @@ SubcycledParticleContainer::ComputeSubcycleCount (ablastr::fields::MultiFabRegis
                        << (measured
                            ? (meridional_used ? ", meridional" : ", full speed")
                            : "")
-                       << "), cap " << m_max_subcycles
+                       << ")";
+        if (meridional_used)
+        {
+            amrex::Print() << ", v_theta margin = " << EffectiveVThetaMargin()
+                           << (VThetaMarginIsDerived()
+                               ? " (derived as half the cyclotron CFL)"
+                               : " (explicit)");
+        }
+        amrex::Print() << ", cap " << m_max_subcycles
                        << (measured && m_cap_is_error != 0 ? " (error)" : "")
                        << ", orbit-averaged deposition "
                        << (m_do_orbit_averaged_deposition ? "on" : "off")
@@ -297,7 +308,7 @@ SubcycledParticleContainer::MaxParticleSpeedsByComponent ()
 
     using PType = typename WarpXParticleContainer::SuperParticleType;
     const amrex::ParticleReal inv_c2 = 1._prt/(PhysConst::c*PhysConst::c);
-    const auto margin = static_cast<amrex::ParticleReal>(m_v_theta_margin);
+    const auto margin = static_cast<amrex::ParticleReal>(EffectiveVThetaMargin());
 
     amrex::ReduceOps<amrex::ReduceOpMax, amrex::ReduceOpMax,
                      amrex::ReduceOpMax, amrex::ReduceOpMax> reduce_ops;

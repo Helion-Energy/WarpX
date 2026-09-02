@@ -180,6 +180,21 @@ public:
      */
     [[nodiscard]] MaxSpeeds MaxParticleSpeedsByComponent ();
 
+    /** Fraction of |v_theta| folded into the meridional reference speed.
+     * Returns the explicit input when one was given, otherwise the value
+     * derived from the cyclotron CFL (see m_v_theta_margin). */
+    [[nodiscard]] amrex::Real EffectiveVThetaMargin () const
+    {
+        return (m_v_theta_margin >= 0.0) ? m_v_theta_margin
+                                         : 0.5*m_cfl_cyclotron;
+    }
+
+    /** True when the v_theta margin was derived rather than set in the deck */
+    [[nodiscard]] bool VThetaMarginIsDerived () const
+    {
+        return m_v_theta_margin < 0.0;
+    }
+
     /** Number of subcycles used in the most recent Evolve call */
     [[nodiscard]] int getNSubcycles () const { return m_n_subcycles; }
 
@@ -238,13 +253,31 @@ protected:
      * regime, and any pitch-angle scattering or loss of axisymmetry converts
      * v_theta into meridional speed with no warning. */
     int m_v_ref_meridional = 0;
-    /** Fraction of max |v_theta| added to the meridional speed when sizing on
-     * the meridional leg. In one subcycle the meridional displacement
-     * generated out of an azimuthal velocity by the Lorentz turning is
-     * ~ (1/2) omega_c dt_sub |v_theta|, i.e. half the cyclotron CFL; at the
-     * default cyclotron CFL of 0.1 that is ~5%, so the default 0.2 is roughly
-     * a factor of four of margin. */
-    amrex::Real m_v_theta_margin = 0.2;
+    /** Fraction of |v_theta| added to the meridional speed when sizing on the
+     * meridional leg. Negative (the default) means DERIVE it from the
+     * cyclotron CFL; a non-negative input is used as given.
+     *
+     * The derivation follows from the code rather than from taste. The
+     * cyclotron leg of ComputeSubcycleCount enforces
+     * dt_sub <= cfl_cyclotron/omega_c, so the turning angle within a subcycle
+     * is phi = omega_c*dt_sub <= cfl_cyclotron radians. A particle starting
+     * purely azimuthal accrues meridional displacement
+     * v_theta*[1 - cos(phi)]/omega_c over that subcycle, which as a fraction
+     * of the budgeted displacement v_ref*dt_sub is exactly
+     *
+     *     [1 - cos(phi)] / phi
+     *
+     * whose small-angle form is phi/2. At the endpoint phi = cfl_cyclotron
+     * that is 0.0500 at 0.1, 0.0997 at 0.2 and 0.1973 at 0.4 -- i.e.
+     * cfl_cyclotron/2 to better than 1.5% across the useful range, which is
+     * the value used when the knob is left unset.
+     *
+     * Deriving it makes the coupling automatic: a deck that raises the
+     * cyclotron CFL then gets the right margin without having to know that a
+     * second knob has to move with it.
+     *
+     * \see EffectiveVThetaMargin */
+    amrex::Real m_v_theta_margin = -1.0;
     /** Fractional change in the implied subcycle count below which the count
      * is left alone (meridional sizing only). The measured speeds move a
      * little every step, so without this the count chatters between
