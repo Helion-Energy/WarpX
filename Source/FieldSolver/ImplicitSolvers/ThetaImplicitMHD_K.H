@@ -140,6 +140,15 @@ struct FluxParameters {
     // frozen (step-old), so the branch is a constant for JFNK probes.
     amrex::Real dual_energy_internal_cutoff = 0.0;
     amrex::Real dual_energy_internal_old_max = 0.0;
+    // Offset-density advection (0 = off, bit-identical): the absolute
+    // background density rho_off = fraction * rho_ref [kg/m^3] the
+    // ADVECTIVE MASS FLUX subtracts before transporting and re-adds
+    // afterward -- the reference code's subtract/advect/re-add density advance
+    // (ntb.f90 step_en, f_en_mn * en0). A per-solve constant of
+    // the frozen vacuum reference; see
+    // ThetaImplicitMHD::m_advection_density_offset_fraction and
+    // offset_density_shift below.
+    amrex::Real advection_density_offset = 0.0;
 };
 
 // C-infinity rectifier width of the dual-energy kinetic fraction: fk_raw
@@ -445,6 +454,132 @@ floor_consistency_deficit (const amrex::Real value,
     const amrex::Real gate =
         floor_outflow_limiter(deficit + 3.0 * width, width);
     return gate * smooth_max(deficit, 0.0, width);
+}
+
+// Relative corner width of the offset-density rectifier
+// (offset_density_shift): the smoothing of the reference code's MAX(delta, 0) is
+// EXACT for delta >= 2 f rho_off, i.e. for every cell at or above
+// 1.2 rho_off, and the on-offset corner inflation is f/2 = 5% of the
+// offset. Same construction and the same choice of width as
+// floor_consistency_width_fraction.
+constexpr amrex::Real advection_offset_width_fraction = 0.1;
+
+/**
+ * \brief Offset-density advection: the shift D(rho) - rho applied to the
+ * density argument of the ADVECTIVE MASS FLUX, so that the flux
+ * transports the RECTIFIED PERTURBATION
+ *
+ *     D(rho) = smooth-max(rho - rho_off, 0)
+ *
+ * in place of rho. This is the reference code's subtract / advect / re-add density
+ * advance (ntb.f90:178-195, step_en) written in flux form:
+ *
+ *     en -= f_en_mn en0;  advect;  MAX(en, 0);  en += f_en_mn en0.
+ *
+ * WHY THE FLUX FORM IS THE SAME OPERATOR. Their adv() is a conservative
+ * divergence of face fluxes (adv.f90 get_adv_z / get_adv_r,
+ * "zeroth order reconstruction of the divergence"), and every mass
+ * channel in this file (central_flux's arithmetic mean, hlld_flux's
+ * telescoped fan at frozen wave speeds, and the HLL/star branches they
+ * specialize) is LINEAR in the pair (rho_L, rho_R). Writing A for the
+ * linear advance, step_en evolves the perturbation,
+ *
+ *     delta_new = delta_old + A(clamp(delta)),   rho = rho_off + delta,
+ *
+ * and since rho_off is a CONSTANT field, rho_new - rho_old =
+ * delta_new - delta_old: subtracting the offset from the state and
+ * adding it back afterwards cancels identically, and the entire content
+ * of the transformation is that the flux sees clamp(delta) instead of
+ * rho. That is what this function delivers, as an additive shift so the
+ * knob-off path is untouched arithmetic.
+ *
+ * The background is therefore NOT transported. That is the point, and
+ * it is the property that distinguishes this from the (superficially
+ * similar) alternative of transporting rho_off + clamp(delta): with the
+ * background in the flux, a halo whose velocity has any divergence gets
+ * its density redistributed at the rho_off scale rather than its own,
+ * which on the calibrated entropy-wave benchmark was measured to be a
+ * larger error than the dispersive ripple the knob exists to remove.
+ * With the background inert, a sub-offset cell's advective mass flux is
+ * identically zero and the halo is advectively STATIC.
+ *
+ * PRICE, STATED PLAINLY. Above the offset the flux is the legacy flux
+ * MINUS the background's own flux rho_off u, so the core mass transport
+ * loses the term rho_off div(u): the numerical background does not
+ * compress with the plasma. It is identically zero for a
+ * divergence-free flow (in particular for the pure translation of an
+ * entropy wave, where the constant drops out of the divergence), and
+ * O(rho_off/rho) otherwise -- 1e-3 at the reference shot setting. This is
+ * exactly the source scheme's behaviour, not a deviation from it, and
+ * it is why the offset must be kept far below the plasma density.
+ *
+ * CONSERVATION. D enters only as the density argument of a FACE flux,
+ * so the divergence still telescopes: total mass changes solely through
+ * the domain-boundary faces, exactly as with the legacy flux. This is
+ * structural, not a numerical near-cancellation.
+ *
+ * SMOOTHNESS / JFNK. rho_off is a per-solve constant (the frozen vacuum
+ * Reference), so the only state dependence is through rho itself: with
+ * x = rho - rho_off and w = advection_offset_width_fraction * rho_off,
+ *
+ *     D    = gate * smooth_max(x, 0, w) + (1 - gate) * x,
+ *     gate = floor_outflow_limiter(3 w - x, w),
+ *
+ * a C-infinity smooth-max blended by the C^1 smoothstep gate -- the
+ * construction of floor_consistency_deficit, with no branch on the
+ * state anywhere. Guarantees:
+ *  (a) NON-NEGATIVE TRANSPORT: D >= 0 for every state (smooth_max is
+ *      >= 0, and the gate only opens where x > 0 already), so the
+ *      rectified perturbation can never reverse a flux, and D <= rho
+ *      wherever rho >= w/2 -- the shift is a drain, never a source.
+ *  (b) EXACT CLAMP TAIL: for x >= 2 w, i.e. at and above 1.2 rho_off,
+ *      D = x = rho - rho_off EXACTLY (the gate's value and slope both
+ *      vanish there): no smoothing residue survives into the plasma.
+ *  (c) EXACT HALO LIMIT: as rho -> 0, smooth_max(x, 0, w) -> 0, so
+ *      D -> 0 and a deep sub-offset cell contributes NO advective mass
+ *      flux at all. Sub-offset density structure therefore generates no
+ *      differential mass flux and the halo advects as nothing rather
+ *      than as amplified round-off -- the noise reduction the reference code's
+ *      comment names ("Remove the floor value to reduce noise in the
+ *      low density region").
+ *  (d) BOUNDED CORNER: D <= max(x, 0) + w/2, so the smoothing inflates
+ *      the transported perturbation by at most half a width.
+ *
+ * MASS CHANNEL ONLY, by construction and by fidelity to the reference code. step_en
+ * subtracts for the DENSITY advance alone; the momentum and temperature
+ * advances (step_mo, step_tm) and every derived quantity run on the
+ * full en -- exactly as load_cell_state here recovers velocities and
+ * pressures from the full rho. The other conserved channels' advective
+ * fluxes carry no explicit density factor (they transport momentum,
+ * E_i, U_e at the velocity u = m/rho), so there is no density argument
+ * in them to offset, and no constant background of momentum or energy
+ * that an offset could define. Their floors keep the existing pedestal
+ * / positivity images. NOTE the consequence for a halo whose momentum
+ * stays live: with its mass flux switched off, a sub-offset cell's
+ * density no longer follows its own velocity divergence, so the halo's
+ * TEMPERATURE (advected energy over frozen mass) can drift. The
+ * existing halo machinery -- the pedestal drag, the windowed
+ * temperature-relaxation outlet -- is what bounds that.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+offset_density_shift (const amrex::Real density,
+                      const amrex::Real offset) noexcept {
+    if (offset <= 0.0) {
+        return 0.0;
+    }
+    const amrex::Real width = advection_offset_width_fraction * offset;
+    const amrex::Real perturbation = density - offset;
+    if (perturbation >= 2.0 * width) {
+        // Exact clamp tail == the gate's own zero (guarantee (b)): the
+        // transported density is rho - rho_off exactly.
+        return -offset;
+    }
+    const amrex::Real gate =
+        floor_outflow_limiter(3.0 * width - perturbation, width);
+    const amrex::Real transported =
+        gate * smooth_max(perturbation, 0.0, width) +
+        (1.0 - gate) * perturbation;
+    return transported - density;
 }
 
 /**
@@ -1482,6 +1617,29 @@ hlld_flux (const CellState& left, const CellState& right,
                         rho_star_left - left.density,
                         rho_star_right - rho_star_left,
                         right.density - rho_star_right);
+    if (parameters.advection_density_offset > 0.0) {
+        // Offset-density advection, the same additive correction as in
+        // central_flux: the telescoped fan is linear in the five
+        // arguments of `central` AND in the two input densities at
+        // frozen wave speeds, so substituting rho -> rho + s
+        // (s = offset_density_shift <= 0, the shift onto the rectified
+        // perturbation) propagates as
+        //   physical flux : m_n         -> m_n + s u
+        //   star density  : rho fraction-> rho fraction + s fraction
+        //   input density : rho         -> rho + s
+        // and the difference is exactly the `central` of the s-terms.
+        // Exactly zero -- bit-identical -- when the knob is off.
+        // See offset_density_shift.
+        const amrex::Real shift_left = offset_density_shift(
+            left.density, parameters.advection_density_offset);
+        const amrex::Real shift_right = offset_density_shift(
+            right.density, parameters.advection_density_offset);
+        flux.mass += central(
+            shift_left * u_left, shift_right * u_right,
+            shift_left * (fraction_left - 1.0),
+            shift_right * fraction_right - shift_left * fraction_left,
+            shift_right * (1.0 - fraction_right));
+    }
     flux.momentum[normal_direction] =
         central(momn_flux_left, momn_flux_right,
                 momn_star_left - left.momentum[normal_direction],
@@ -1771,6 +1929,23 @@ central_flux (const CellState& left, const CellState& right,
     FaceFlux flux;
     flux.mass = 0.5 * (left.momentum[normal_direction] +
                        right.momentum[normal_direction]);
+    if (parameters.advection_density_offset > 0.0) {
+        // Offset-density advection (the reference code's subtract/advect/re-add
+        // density advance): transport the rectified perturbation
+        // D(rho) = smooth-max(rho - rho_off, 0) instead of rho. The
+        // centred mass channel is LINEAR in the two densities, so the
+        // whole transformation is the additive correction
+        // 0.5 (s_L u_L + s_R u_R) with s = D(rho) - rho -- exactly zero,
+        // and hence bit-identical to the line above, when the knob is
+        // off. See offset_density_shift for the derivation.
+        flux.mass +=
+            0.5 * (offset_density_shift(left.density,
+                                         parameters.advection_density_offset) *
+                       u_left +
+                   offset_density_shift(right.density,
+                                         parameters.advection_density_offset) *
+                       u_right);
+    }
     flux.momentum[normal_direction] =
         0.5 * ((left.momentum[normal_direction] * u_left + p_total_left -
                 bn2) +

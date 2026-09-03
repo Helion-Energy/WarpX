@@ -1,0 +1,11 @@
+# base input parameters
+FILE = inputs_base_1d_theta_implicit_mhd_advection_offset
+
+# HEADLINE ARM: the offset ON at f_off = 0.1 of the shared vacuum
+# reference (rho_ref = n_ref * m_p here), i.e. an advective background of
+# n_off = 1e15 m^-3 -- five times the loaded halo and a sixth of the
+# pulse peak.  The halo is therefore fully rectified (the transported
+# density there is the uniform background, so sub-offset structure
+# generates no differential mass flux) while every cell of the pulse
+# sits above 1.2 n_off and is transported bit-identically.
+implicit_mhd.advection_density_offset_fraction = 0.1

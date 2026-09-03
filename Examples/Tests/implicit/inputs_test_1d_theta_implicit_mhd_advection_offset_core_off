@@ -1,0 +1,12 @@
+# base input parameters
+FILE = inputs_base_1d_theta_implicit_mhd_advection_offset
+
+# QUIESCENT NULL TWIN for the core-class no-harm arm: the same entropy
+# wave with three-cell pulse edges instead of one, so the centred flux
+# radiates no wake worth the name and the halo stays at its loaded value
+# to a part in 1e3.  That is what makes a BITWISE comparison possible at
+# a positive offset: on the sharp deck the null twin drives cells down
+# onto the positivity floor, and no positive offset can be inert against
+# a cell below it (the input guard requires rho_off to exceed that
+# floor, so the two bands necessarily overlap).
+my_constants.edge = 3.0 * dz

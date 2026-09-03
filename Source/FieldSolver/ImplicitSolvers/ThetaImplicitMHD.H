@@ -825,6 +825,74 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // f-scaled-image rule displaces every block's operating point into
     // the interior by the same argument as the density.
     amrex::Real m_halo_pedestal_fraction = 0.0;
+    // ---- Offset-density ADVECTION (0 disables; bit-identical off). ----
+    //
+    // Fraction f_off of the shared vacuum reference density defining the
+    // advective background offset
+    //     rho_off = f_off * VacuumReferenceMassDensity(),
+    // the flux-form transliteration of the reference code's subtract/advect/re-add
+    // density advance (ntb.f90:178-195, step_en):
+    //     en -= f_en_mn en0;  advect;  MAX(en, 0);  en += f_en_mn en0.
+    // The ADVECTIVE MASS FLUX (only) transports the RECTIFIED
+    // PERTURBATION
+    //     D(rho) = smooth-max(rho - rho_off, 0)
+    // instead of rho. Both their advance and every mass channel here
+    // are conservative and linear in the cell densities, so subtracting
+    // the offset from the state and adding it back afterwards cancels
+    // identically (rho_off is a constant field) and the whole content
+    // of the transformation is that the flux sees clamp(delta). See
+    // theta_implicit_mhd::offset_density_shift for the derivation and
+    // the conservation / smoothness / exact-tail guarantees.
+    //
+    // THE BACKGROUND IS NOT TRANSPORTED, and that is the point: a
+    // sub-offset cell's advective mass flux is identically zero, so the
+    // halo is advectively STATIC. The alternative -- transporting
+    // rho_off + clamp(delta), which would keep supra-offset cells
+    // bitwise identical to the legacy flux -- was implemented and
+    // MEASURED on the calibrated entropy-wave benchmark: with the
+    // background in the flux, a halo whose velocity has any divergence
+    // has its density redistributed at the rho_off scale instead of its
+    // own, a larger error (0.7 rho_halo across the domain) than the
+    // dispersive ripple the knob exists to remove (1e-4). The price of
+    // the faithful form is that above the offset the flux is the legacy
+    // flux minus the background's own flux, i.e. the core mass
+    // transport loses rho_off div(u) -- identically zero for
+    // divergence-free flow, O(rho_off/rho) otherwise (1e-3 at the
+    // The reference shot setting). Keep the offset far below the plasma density.
+    //
+    // WHY FRACTION-KEYED, NOT AN ABSOLUTE kg/m^3. The reference code's own offset is
+    // f_en_mn * en0 with en0 = max(en00, 0.1 max(en)) -- a DYNAMIC
+    // Reference that tracks the compressing plasma. VacuumReferenceMass-
+    // Density() is exactly that composition already (max of the Ohm
+    // guard, the static base en00, and vacuum_reference_peak_fraction
+    // times the per-step frozen density peak), and it is the reference
+    // the vacuum resistivity, the conduction halo boost, and the Ohm
+    // guard all key to. With vacuum_reference_peak_fraction = 0.1 our
+    // Reference IS their en0 and f_off is literally their f_en_mn
+    // (the reference shot: 1e-3, i.e. 3.3e17 m^-3 against en0 = 3.3e20 m^-3). An
+    // absolute knob would have to be retuned every time the reference
+    // moves and would key the offset to nothing the rest of the halo
+    // machinery shares.
+    //
+    // COMPOSITION. (i) the reference code's in-loop MAX(en, 0) is carried by the
+    // rectifier itself, not by the drain gates: D(rho) vanishes below
+    // the offset, so a sub-offset donor has no advective outflow to
+    // gate. The mass donor drain gate is deliberately left at its
+    // floor/pedestal anchors. (ii) The halo pedestal
+    // (m_halo_pedestal_fraction) is orthogonal and
+    // composes: it RAISES the state onto rho_ped once per step (tracked
+    // non-conservation) to move the halo operating point off the Newton
+    // bound, while this knob never touches the state at all -- it only
+    // changes which density the face flux transports, so it is exactly
+    // conservative. (iii) The positivity floor is untouched and stays
+    // orders of magnitude below rho_off. (iv) RECAST FLUX FAMILY ONLY
+    // (fluid_flux = central or hlld): the correction is implemented in
+    // central_flux and hlld_flux, whose mass channels are the linear
+    // forms the equivalence proof needs. The legacy face_flux family
+    // (rusanov/hllc/legacy_e_centered) keeps the unmodified flux, and
+    // the input parser asserts the combination away rather than
+    // shipping a second, differently-gated implementation.
+    amrex::Real m_advection_density_offset_fraction = 0.0;
     // Velocity relaxation rate [1/s] of the pedestal band (0 disables).
     // The drag engages C^1-smoothly below TWICE the density pedestal
     // (weight 1 - floor_outflow_limiter(rho_old, rho_ped): full rate at

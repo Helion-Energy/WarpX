@@ -155,6 +155,10 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
                                    m_halo_pedestal_drag_rate);
     utils::parser::queryWithParser(pp, "halo_pedestal_energy_rate",
                                    m_halo_pedestal_energy_rate);
+    // Offset-density advection (the reference code's step_en subtract/advect/
+    // re-add; see m_advection_density_offset_fraction).
+    utils::parser::queryWithParser(pp, "advection_density_offset_fraction",
+                                   m_advection_density_offset_fraction);
     // Windowed halo temperature-relaxation outlet (see
     // m_halo_relaxation_rate).
     utils::parser::queryWithParser(pp, "halo_relaxation_rate",
@@ -837,6 +841,22 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
             "must exceed implicit_mhd.mass_density_floor (the pedestal "
             "must sit above the positivity guard so the halo band rides "
             "an interior point of the admissible set)");
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_advection_density_offset_fraction >= 0.0_rt &&
+            m_advection_density_offset_fraction < 1.0_rt,
+        "implicit_mhd.advection_density_offset_fraction must be in [0, 1)");
+    if (m_advection_density_offset_fraction > 0.0_rt) {
+        // The correction lives in the recast mass channels (central_flux
+        // and hlld_flux), whose linearity in the two densities is what
+        // makes the subtract/advect/re-add transformation exact; the
+        // legacy face_flux family keeps the unmodified flux rather than
+        // carrying a second implementation.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_use_recast,
+            "implicit_mhd.advection_density_offset_fraction requires "
+            "implicit_mhd.fluid_flux = central or hlld (the offset is "
+            "applied in the recast mass flux channels)");
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_halo_pedestal_drag_rate >= 0.0_rt,
@@ -1921,6 +1941,25 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
             "unpreconditioned");
     }
 
+    if (m_advection_density_offset_fraction > 0.0_rt) {
+        // The advective background must sit well ABOVE the positivity
+        // guard: it is a halo background, not a positivity device, and
+        // an offset at or below the floor could never engage (the same
+        // "well above" rule as the halo pedestal). Checked here because
+        // the shared reference needs the hybrid model; the value used is
+        // the STATIC part of VacuumReferenceMassDensity (the dynamic
+        // peak term only raises it), so the check is conservative.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_advection_density_offset_fraction * VacuumReferenceMassDensity() >
+                m_mass_density_floor,
+            "implicit_mhd.advection_density_offset_fraction times the "
+            "vacuum reference density (max of the Ohm guard "
+            "hybrid_pic_model.n_floor, implicit_mhd."
+            "vacuum_reference_base_density, and the dynamic peak term) "
+            "must exceed implicit_mhd.mass_density_floor: the advective "
+            "background must sit above the positivity guard");
+    }
+
     FillFluidSources(m_state);
     m_is_defined = true;
 }
@@ -2885,6 +2924,14 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "\n"
                    << "Halo pedestal energy rate [1/s]: "
                    << m_halo_pedestal_energy_rate << "\n";
+    if (m_advection_density_offset_fraction > 0.0_rt) {
+        amrex::Print() << "Advection density offset:      "
+                       << m_advection_density_offset_fraction
+                       << " x reference (the reference code's f_en_mn en0; = "
+                       << m_advection_density_offset_fraction *
+                              VacuumReferenceMassDensity()
+                       << " kg/m^3 at the current reference)\n";
+    }
     if (m_halo_relaxation_rate > 0.0_rt) {
         amrex::Print() << "Halo relaxation rate [1/s]:    "
                        << m_halo_relaxation_rate << "\n"
@@ -5120,6 +5167,16 @@ theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
     flux_parameters.halo_pedestal_ion_internal = m_halo_pedestal_ion_internal;
     flux_parameters.halo_pedestal_ion_parallel = m_halo_pedestal_ion_parallel;
     flux_parameters.halo_pedestal_ion_perp = m_halo_pedestal_ion_perp;
+    // Advective background offset rho_off = f_off * rho_ref, the reference code's
+    // f_en_mn * en0. VacuumReferenceMassDensity() is refreshed once per
+    // step (RefreshVacuumReferenceDensity) and frozen for the whole
+    // nonlinear solve, so this is a per-solve constant and the Newton
+    // residual sees a fixed operator. Exactly 0.0 when the knob is off,
+    // which every consumer short-circuits on.
+    flux_parameters.advection_density_offset =
+        m_advection_density_offset_fraction > 0.0_rt
+            ? m_advection_density_offset_fraction * VacuumReferenceMassDensity()
+            : 0.0_rt;
     return flux_parameters;
 }
 
@@ -6681,6 +6738,15 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
             // dynamically invariant set while the Newton admissibility
             // bound stays at the far-lower positivity floor -- no cell
             // ever operates on a bound.
+            // The offset-density advection (FluxParameters::
+            // advection_density_offset) deliberately does NOT anchor
+            // this gate: its own C^1 rectifier already carries the reference code's
+            // in-loop MAX(en, 0) (see offset_density_shift), and it
+            // does so by driving the TRANSPORTED density to zero below
+            // the offset -- a sub-offset donor has no advective outflow
+            // left for a gate to close. This gate therefore keeps its
+            // floor/pedestal anchors, and the Newton admissibility
+            // bound is untouched.
             const amrex::Real mass_gate_floor = std::max(
                 parameters.density_floor, parameters.halo_pedestal);
             flux.mass *= donor_blend(

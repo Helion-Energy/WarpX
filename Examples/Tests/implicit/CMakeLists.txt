@@ -422,6 +422,86 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Offset-density advection (implicit_mhd.advection_density_offset_fraction,
+# The reference code's subtract/advect/re-add density advance), NULL TWIN: a
+# two-cell-edged top-hat entropy wave advecting across a featureless
+# sub-offset halo with the knob off, so the central flux's dispersive
+# wake fills the halo with sign-alternating ripple and drains it.
+# Grades itself on exact mass conservation and on being measurably sick
+# (otherwise the headline gates would be vacuous)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_advection_offset_off  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_advection_offset_off  # inputs
+    "analysis_mhd_advection_offset.py off diags/diag000000 diags/diag000024"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# THE HEADLINE: the same wave with the offset ON at 0.1 of the shared
+# vacuum reference.  Mass is conserved to round-off and matches the null
+# twin to round-off (the offset is a face-flux density argument, so the
+# divergence still telescopes); the halo error stops being grid-scale
+# ripple (its grid-scale share and its cell-to-cell sign alternation
+# both collapse) and the halo is no longer advectively evacuated; and
+# the resolved pulse -- above the rectifier's exact-zero tail -- keeps
+# the null twin's peak, mass and second moment and lands on the exact
+# solution's centroid, which is what rules out "bought it with
+# diffusion"
+add_warpx_test(
+    test_1d_theta_implicit_mhd_advection_offset  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_advection_offset  # inputs
+    "analysis_mhd_advection_offset.py on diags/diag000000 diags/diag000024 ../test_1d_theta_implicit_mhd_advection_offset_off/diags/diag000000 ../test_1d_theta_implicit_mhd_advection_offset_off/diags/diag000024"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_advection_offset_off  # dependency
+)
+
+# Knob explicitly at zero: the early-return path must reproduce the null
+# twin BITWISE, not merely to round-off -- the default-off contract
+add_warpx_test(
+    test_1d_theta_implicit_mhd_advection_offset_zero  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_advection_offset implicit_mhd.advection_density_offset_fraction=0.0"  # inputs
+    "analysis_mhd_advection_offset.py zero diags/diag000000 diags/diag000024 ../test_1d_theta_implicit_mhd_advection_offset_off/diags/diag000000 ../test_1d_theta_implicit_mhd_advection_offset_off/diags/diag000024"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_advection_offset_off  # dependency
+)
+
+# Quiescent null twin (three-cell pulse edges) for the core-class arm
+# below: with no dispersive wake worth the name the halo never leaves
+# its loaded value, which is what makes a BITWISE comparison possible at
+# a positive offset
+add_warpx_test(
+    test_1d_theta_implicit_mhd_advection_offset_core_off  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_advection_offset_core_off  # inputs
+    "analysis_mhd_advection_offset.py zero diags/diag000000 diags/diag000024 diags/diag000000 diags/diag000024"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# Core-class no-harm: the knob POSITIVE but with the offset four decades
+# below every cell in the domain (n >> rho_off everywhere, halo
+# included).  What the offset removes there is the background's own
+# advective flux, whose divergence is rho_off div(u) -- identically zero
+# for this deck's uniform velocity -- so the arm must reproduce the null
+# twin to solver precision.  This is the live-code twin of the arm
+# above: the early return is NOT taken, the rectifier runs
+add_warpx_test(
+    test_1d_theta_implicit_mhd_advection_offset_core  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_advection_offset_core_off implicit_mhd.advection_density_offset_fraction=2.0e-6"  # inputs
+    "analysis_mhd_advection_offset.py core diags/diag000000 diags/diag000024 ../test_1d_theta_implicit_mhd_advection_offset_core_off/diags/diag000000 ../test_1d_theta_implicit_mhd_advection_offset_core_off/diags/diag000024"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_advection_offset_core_off  # dependency
+)
+
 # Calibrated windowed halo temperature-relaxation outlet
 # (implicit_mhd.halo_relaxation_*): on a three-region static column the
 # hot sub-window band drains BOTH species toward the cold-medium
