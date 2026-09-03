@@ -4317,6 +4317,7 @@ Maxwell solver: kinetic-fluid hybrid
     selecting ``parser`` without supplying ``qdsmc_nu_par``, is an error rather than a silent
     fallback.
 
+
 .. pp:param:: hybrid_pic_model.qdsmc_viscosity_flux_limit_factor
     :type: ``float``
     :default: ``0.1``
@@ -4495,18 +4496,32 @@ Maxwell solver: kinetic-fluid hybrid
            per Jacobian probe — bracketing there would make every channel scale with the iteration
            count rather than with the physics.
 
-    .. warning::
+    .. note::
 
-       In **RZ the printed values are not physical joules**. The class-energy functional weights each
-       node by :math:`\prod_d \Delta x_d = \Delta r\,\Delta z`, omitting the cylindrical
-       :math:`2\pi r` Jacobian, so the channels are :math:`\int u\,dr\,dz` rather than
-       :math:`\int u\,dV`. Ratios between channels are still meaningful and closure still holds (the
-       measure is self-consistent), but the absolute numbers are low by the energy-weighted
-       :math:`\langle 2\pi r\rangle` of the domain and must not be compared against ``P_nu``, particle
-       energies, or any other true volume integral. Measured on a test fixture: the ``visc`` channel
-       read 0.832 against 0.314 J for the same heating integrated properly by the ``HybridDissipation``
-       diagnostic, a ratio of 0.377 against a domain mean :math:`\pi r_\mathrm{max} = 0.393`.
-       Cartesian 1D/2D/3D are unaffected.
+       **RZ values changed.** These channels previously weighted each node by
+       :math:`\prod_d \Delta x_d = \Delta r\,\Delta z`, omitting the cylindrical :math:`2\pi r`
+       Jacobian, so in RZ they were integrals of :math:`u\,dr\,dz` reported in joules. They now use the
+       true volume element — shared with the ``HybridDissipation`` diagnostic via
+       ``QdsmcVolumeElement.H`` — including the on-axis nodal ring weighted at its volume centroid
+       :math:`r = \Delta r/8`. The same correction applies to the cumulative audit tallies (dropped
+       Joule energy, declined sink and stopping heat, ``Te`` shunt, contamination).
+
+       **Every RZ budget or tally number produced before this change is wrong by a factor of**
+       :math:`2\pi\langle r\rangle_u`, the energy-weighted mean radius. It is profile dependent, and
+       its *direction* depends on machine size: below one for
+       :math:`\langle r\rangle_u < 1/2\pi \approx 0.159` m (old numbers read too high), above one past
+       that (old numbers read too low). Measured on a production-like geometry
+       (:math:`r \in [0, 0.2]` m, :math:`z \in [-2, 2]` m, near-flat radial profile): **0.539**,
+       against the flat-profile reference :math:`\pi r_\mathrm{max} = 0.628` — historical numbers on
+       that geometry read 1.85x too high. Cartesian 1D/2D/3D are unaffected and bit-identical.
+
+       With the volume element corrected the budget and the ``HybridDissipation`` diagnostic became
+       comparable for the first time: two independent routes to the viscous dissipation, one
+       integrating an analytic source density over the domain, the other differencing the class-summed
+       thermal energy across a stage bracket. Measured agreement between ``visc_bulk + visc_band`` and
+       :math:`\int P_\nu\,dt` is **4.1e-4** on the test fixture and **1.6e-3** on the production-like
+       geometry; the residual is the intra-step sampling offset, since Strang applies the source twice
+       per step while the diagnostic field retains only the last call's rate.
 
 .. pp:param:: hybrid_pic_model.electron_ion_relaxation_rate(rho,Te,Ti,t)
     :type: ``float`` or ``str``

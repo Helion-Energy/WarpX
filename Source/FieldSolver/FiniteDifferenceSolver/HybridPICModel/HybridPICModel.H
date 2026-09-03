@@ -1638,6 +1638,25 @@ public:
     void WarnEnergyBudgetPathLimits (char const * path_name,
                                      char const * limits) const;
 
+    /** Volume integral over the domain of one component of an energy-DENSITY
+     * field [X/m^3] -> [X], deduplicating box-seam and periodic-image points.
+     *
+     * The single reduction behind every energy tally and budget channel in
+     * this class, so they all carry the same volume element -- the one in
+     * QdsmcVolumeElement.H that the HybridDissipation reduced diagnostic also
+     * uses. In RZ that includes the cylindrical 2 pi r Jacobian and the
+     * on-axis centroid weighting; without it these sums are integrals of
+     * u dr dz mislabelled as joules. In Cartesian geometry it is the
+     * historical "reduce, then scale by the constant cell volume", unchanged
+     * and bit-identical.
+     *
+     * \param mf   energy-density field; its index type sets the radial
+     *             centring (nodal in r for the T_e-family fields).
+     * \param comp component to integrate.
+     * \param lev  AMR level (supplies the geometry). */
+    [[nodiscard]] amrex::Real EnergyVolumeIntegral (
+        amrex::MultiFab const & mf, int comp, int lev) const;
+
     /** Class-summed thermal energy {bulk, band} [J] for the energy budget
      * (nodal sum_unique; classes per the m_energy_budget doc). */
     std::array<amrex::Real, 2> QDSMCClassEnergy (int lev) const;

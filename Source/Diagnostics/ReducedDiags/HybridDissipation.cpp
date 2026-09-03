@@ -13,6 +13,7 @@
 #   include "FieldSolver/FiniteDifferenceSolver/FiniteDifferenceAlgorithms/CylindricalYeeAlgorithm.H"
 #endif
 #include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/HybridPICModel.H"
+#include "FieldSolver/FiniteDifferenceSolver/HybridPICModel/QdsmcVolumeElement.H"
 #include "Fields.H"
 #include "Utils/TextMsg.H"
 #include "Utils/WarpXConst.H"
@@ -185,6 +186,8 @@ HybridDissipation::ComputeDiags (const int step)
         const amrex::GpuArray<int, 3> self_stag =
             (d == 0) ? Jr_stag : ((d == 1) ? Jt_stag : Jz_stag);
         const bool nodal_r = (self_stag[0] == 1);
+        const QdsmcVolumeElement vol =
+            MakeQdsmcVolumeElement(geom, J[d]->ixType());
         // owner mask so shared nodal points count once across boxes
         const auto mask = amrex::OwnerMask(*J[d], geom.periodicity());
 
@@ -244,16 +247,14 @@ HybridDissipation::ComputeDiags (const int step)
                                              + jz_v*jz_v);
                     }
 
-                    // geometry: r at this component's radial staggering,
-                    // and the volume-centroid radius of the ring it owns
-                    // (the nodal axis ring owns [0, dr/2] -> centroid dr/8)
+                    // r at this component's radial staggering (the physics
+                    // below needs it); the control volume comes from the
+                    // shared element in QdsmcVolumeElement.H, which is the
+                    // same one the electron-energy budget integrates against
+                    // -- that is what makes the two ledgers comparable.
                     const Real r = nodal_r ? (rmin + i*dr)
                                            : (rmin + (i + 0.5_rt)*dr);
-                    Real r_vol = r;
-                    if (nodal_r && i == dom_lo.x && rmin == 0.0_rt) {
-                        r_vol = 0.125_rt*dr;
-                    }
-                    const Real dV = 2.0_rt*MathConst::pi*r_vol*dr*dz;
+                    const Real dV = vol(i);
 
                     const Real pe = eta(rho_val, jtot_val, t_new)*jv*jv*dV;
 
@@ -333,6 +334,8 @@ HybridDissipation::ComputeDiags (const int step)
     if (warpx.m_fields.has("hybrid_qdsmc_visc_heating_fp", lev)) {
         const amrex::MultiFab* Qnu =
             warpx.m_fields.get("hybrid_qdsmc_visc_heating_fp", lev);
+        const QdsmcVolumeElement vol =
+            MakeQdsmcVolumeElement(geom, Qnu->ixType());
         const auto mask = amrex::OwnerMask(*Qnu, geom.periodicity());
 
         amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
@@ -349,10 +352,7 @@ HybridDissipation::ComputeDiags (const int step)
                 [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) -> ReduceTuple
                 {
                     if (own(i, j, 0) == 0) { return {0.0_rt}; }
-                    // Nodal in r: the axis ring owns [0, dr/2], centroid dr/8.
-                    Real r_vol = rmin + i*dr;
-                    if (i == dom_lo.x && rmin == 0.0_rt) { r_vol = 0.125_rt*dr; }
-                    return {q_arr(i, j, 0) * 2.0_rt*MathConst::pi*r_vol*dr*dz};
+                    return {q_arr(i, j, 0) * vol(i)};
                 });
         }
         p_nu = amrex::get<0>(reduce_data.value(reduce_op));

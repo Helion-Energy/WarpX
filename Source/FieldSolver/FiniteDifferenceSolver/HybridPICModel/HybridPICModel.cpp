@@ -14,6 +14,7 @@
 #include "BraginskiiViscosity.H"
 #include "QdsmcFluxLimiters.H"
 #include "QdsmcRKIntegrator.H"
+#include "QdsmcVolumeElement.H"
 
 #include <ablastr/coarsen/sample.H>
 #include <ablastr/utils/Communication.H>
@@ -4197,11 +4198,8 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
     // nodal control volume dV is uniform up to boundary halves, which the
     // gates never straddle in practice).
     if (any_drop_tally) {
-        auto const dx = warpx.Geom(lev).CellSizeArray();
-        amrex::Real dV = 1.0_rt;
-        for (int d = 0; d < AMREX_SPACEDIM; ++d) { dV *= dx[d]; }
-        m_joule_dropped_heat_gate_J     += dropped_mf.sum_unique(0, false, period) * dV;
-        m_joule_dropped_redirect_gate_J += dropped_mf.sum_unique(1, false, period) * dV;
+        m_joule_dropped_heat_gate_J     += EnergyVolumeIntegral(dropped_mf, 0, lev);
+        m_joule_dropped_redirect_gate_J += EnergyVolumeIntegral(dropped_mf, 1, lev);
     }
 
     Te.FillBoundary(Te.nGrowVect(), period);
@@ -4362,7 +4360,6 @@ void HybridPICModel::QDSMCAddViscousHeating (int const lev,
         amrex::Array4<amrex::Real const> const & Bx_arr = B_fp[0]->const_array(mfi);
         amrex::Array4<amrex::Real const> const & By_arr = B_fp[1]->const_array(mfi);
         amrex::Array4<amrex::Real const> const & Bz_arr = B_fp[2]->const_array(mfi);
-
         amrex::ParallelFor(mfi.tilebox(),
             [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
@@ -4551,12 +4548,8 @@ void HybridPICModel::QDSMCShuntTeExcess (int const lev,
 
     Te.FillBoundary(Te.nGrowVect(), period);
 
-    auto const dxc = warpx.Geom(lev).CellSizeArray();
-    amrex::Real dV = 1.0_rt;
-    for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) { dV *= dxc[dd]; }
-    m_te_shunt_J += tally_mf.sum_unique(0, false, period) * dV;
-    m_joule_dropped_redirect_gate_J +=
-        tally_mf.sum_unique(1, false, period) * dV;
+    m_te_shunt_J += EnergyVolumeIntegral(tally_mf, 0, lev);
+    m_joule_dropped_redirect_gate_J += EnergyVolumeIntegral(tally_mf, 1, lev);
 }
 
 
@@ -4651,10 +4644,7 @@ void HybridPICModel::QDSMCApplyEnergySink (int const lev, amrex::Real const dt_s
 
     // Fold the declined per-cell energy density into the cumulative audit
     // tally [J] (unique-node sum, periodic images deduplicated).
-    auto const dx = warpx.Geom(lev).CellSizeArray();
-    amrex::Real dV = 1.0_rt;
-    for (int d = 0; d < AMREX_SPACEDIM; ++d) { dV *= dx[d]; }
-    m_energy_sink_declined_J += declined_mf.sum_unique(0, false, period) * dV;
+    m_energy_sink_declined_J += EnergyVolumeIntegral(declined_mf, 0, lev);
 
     Te.FillBoundary(Te.nGrowVect(), period);
 }
@@ -4772,10 +4762,7 @@ void HybridPICModel::QDSMCApplyFastIonHeating (int const lev) const
     // Fold the declined per-cell energy density into the cumulative audit
     // tally [J] (unique-node sum, periodic images deduplicated), then zero
     // the staging field for the next step's deposits.
-    auto const dx = warpx.Geom(lev).CellSizeArray();
-    amrex::Real dV = 1.0_rt;
-    for (int d = 0; d < AMREX_SPACEDIM; ++d) { dV *= dx[d]; }
-    m_stopping_declined_J += declined_mf.sum_unique(0, false, period) * dV;
+    m_stopping_declined_J += EnergyVolumeIntegral(declined_mf, 0, lev);
     Estage.setVal(0.0_rt);
 
     Te.FillBoundary(Te.nGrowVect(), period);
@@ -5187,14 +5174,11 @@ void HybridPICModel::QDSMCApplyIonHeating (int const lev, amrex::Real const dt,
     // their cumulative audit tallies [J] (cell-centered boxes are
     // disjoint, a plain sum suffices).
     if (kick_cap_armed || contam_kicks_on) {
-        auto const dx = warpx.Geom(lev).CellSizeArray();
-        amrex::Real dV = 1.0_rt;
-        for (int d = 0; d < AMREX_SPACEDIM; ++d) { dV *= dx[d]; }
         if (kick_cap_armed) {
-            m_joule_dropped_kick_cap_J += dropped_cc.sum(0, false) * dV;
+            m_joule_dropped_kick_cap_J += EnergyVolumeIntegral(dropped_cc, 0, lev);
         }
         if (contam_kicks_on) {
-            m_contam_kicks_J += contam_cc.sum(0, false) * dV;
+            m_contam_kicks_J += EnergyVolumeIntegral(contam_cc, 0, lev);
         }
     }
 }
@@ -9081,15 +9065,10 @@ void HybridPICModel::QdsmcConductionOnce (int const lev, amrex::Real const dt_c,
         // contamination tallies [J] (unique-node sum; u is an energy
         // density, so face flux x nodal dual-cell volume = energy moved).
         if (contam_on) {
-            auto const dxc = geom.CellSizeArray();
-            amrex::Real dV = 1.0_rt;
-            for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) { dV *= dxc[dd]; }
             for (int c = 0; c < AMREX_SPACEDIM; ++c) {
-                m_contam_axis_J[c] +=
-                    contam_mf.sum_unique(c, false, period) * dV;
+                m_contam_axis_J[c] += EnergyVolumeIntegral(contam_mf, c, lev);
             }
-            m_contam_fast_front_J +=
-                contam_mf.sum_unique(3, false, period) * dV;
+            m_contam_fast_front_J += EnergyVolumeIntegral(contam_mf, 3, lev);
             // (printed from ApplyQdsmcEnergySources, which runs every step
             // whether or not conduction is enabled)
         }
@@ -9978,6 +9957,44 @@ void HybridPICModel::WarnEnergyBudgetPathLimits (char const * path_name,
         ablastr::warn_manager::WarnPriority::high);
 }
 
+amrex::Real HybridPICModel::EnergyVolumeIntegral (
+    amrex::MultiFab const & mf, int const comp, int const lev) const
+{
+    auto & warpx = WarpX::GetInstance();
+    amrex::Geometry const & geom = warpx.Geom(lev);
+    amrex::Periodicity const & period = geom.periodicity();
+
+#if defined(WARPX_DIM_RZ)
+    // Cylindrical: the volume element varies with radius, so it has to be
+    // folded in per point BEFORE the reduction rather than scaled on after.
+    QdsmcVolumeElement const vol =
+        MakeQdsmcVolumeElement(geom, mf.ixType());
+    amrex::MultiFab scaled(mf.boxArray(), mf.DistributionMap(), 1, 0);
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (MFIter mfi(scaled, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+    {
+        amrex::Array4<amrex::Real>       const & s_arr = scaled.array(mfi);
+        amrex::Array4<amrex::Real const> const & m_arr = mf.const_array(mfi);
+        amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                s_arr(i, j, k) = m_arr(i, j, k, comp) * vol(i);
+            });
+    }
+    return scaled.sum_unique(0, false, period);
+#else
+    // Cartesian: the element is constant, so this is the historical
+    // "reduce, then scale" -- kept verbatim so the answer is bit-identical
+    // to every result produced before the RZ fix.
+    auto const dxc = geom.CellSizeArray();
+    amrex::Real dV = 1.0_rt;
+    for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) { dV *= dxc[dd]; }
+    return mf.sum_unique(comp, false, period) * dV;
+#endif
+}
+
 std::array<amrex::Real, 2> HybridPICModel::QDSMCClassEnergy (int const lev) const
 {
     // Class-summed thermal energy {bulk, band} [J] for the per-stage energy
@@ -10015,11 +10032,8 @@ std::array<amrex::Real, 2> HybridPICModel::QDSMCClassEnergy (int const lev) cons
         });
     }
     amrex::Periodicity const & period = warpx.Geom(lev).periodicity();
-    auto const dxc = warpx.Geom(lev).CellSizeArray();
-    amrex::Real dV = 1.0_rt;
-    for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) { dV *= dxc[dd]; }
-    return {u_cls.sum_unique(0, false, period) * dV,
-            u_cls.sum_unique(1, false, period) * dV};
+    return {EnergyVolumeIntegral(u_cls, 0, lev),
+            EnergyVolumeIntegral(u_cls, 1, lev)};
 }
 
 
@@ -10067,11 +10081,8 @@ std::array<amrex::Real, 2> HybridPICModel::QDSMCCompressionEnergy (
         });
     }
     amrex::Periodicity const & period = warpx.Geom(lev).periodicity();
-    auto const dxc = warpx.Geom(lev).CellSizeArray();
-    amrex::Real dV = 1.0_rt;
-    for (int dd = 0; dd < AMREX_SPACEDIM; ++dd) { dV *= dxc[dd]; }
-    return {u_cls.sum_unique(0, false, period) * dV,
-            u_cls.sum_unique(1, false, period) * dV};
+    return {EnergyVolumeIntegral(u_cls, 0, lev),
+            EnergyVolumeIntegral(u_cls, 1, lev)};
 }
 
 
