@@ -37,6 +37,7 @@
 #include <AMReX_Random.H>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <iomanip>
@@ -187,6 +188,7 @@ void HybridPICModel::ReadParameters ()
         Abort("hybrid_pic_model.elec_temp must be specified when using the hybrid solver");
     }
     const bool n0_ref_given = utils::parser::queryWithParser(pp_hybrid, "n0_ref", m_n0_ref);
+    m_n0_ref_given = n0_ref_given;
     if (m_gamma != 1.0 && !n0_ref_given) {
         Abort("hybrid_pic_model.n0_ref should be specified if hybrid_pic_model.gamma != 1");
     }
@@ -194,7 +196,8 @@ void HybridPICModel::ReadParameters ()
     pp_hybrid.query("plasma_resistivity(rho,J,t)", m_eta_expression);
     pp_hybrid.query("plasma_hyper_resistivity(rho,B)", m_eta_h_expression);
 
-    utils::parser::queryWithParser(pp_hybrid, "n_floor", m_n_floor);
+    m_n_floor_given =
+        utils::parser::queryWithParser(pp_hybrid, "n_floor", m_n_floor);
 
     // Master gate for the electron-energy equation. When enabled, K_e is
     // advected each step by fictitious Lagrangian particles moving with V_e
@@ -1398,6 +1401,11 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
         }
     }
 
+    // Both electron transport legs are now configured and their coefficient
+    // sources compiled, so the ratio they form can be measured. Unconditional
+    // by construction -- there is no knob to reach this call with.
+    AuditTransportPrandtl();
+
     // Isothermal-EB bath temperature Te(x,y,z) [eV] for the conduction
     // EB BC (evaluated at covered node positions).
     m_cond_eb_Te_parser = std::make_unique<amrex::Parser>(
@@ -1660,6 +1668,314 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
             m_qdsmc_pc->InitParticles(lev);
         }
     }
+}
+
+void HybridPICModel::AuditTransportPrandtl () const
+{
+    // Solver-side Prandtl gate for the electron energy equation. It has no
+    // enable flag, and that omission IS the design. The deck-side twin of
+    // this check was correct and completely ineffective: its Prandtl arm
+    // defaulted to disabled, no launcher ever enabled it, and it never fired
+    // once across a campaign that ran three orders of magnitude of stiffness
+    // disparity between two legs of the same transport tensor. Any check a
+    // deck can omit or fork away is optional in practice. This one is not --
+    // it warns from the solver, so every deck inherits it.
+    //
+    // WHAT IT MEASURES, AND WHY NOT A TEXTBOOK Pr. Both coefficients can
+    // come from arbitrary user parsers, so there is no constant to test
+    // equality against and a hardcoded Prandtl target would be wrong for
+    // legitimate configurations. What is defensible whatever the parsers say
+    // is how far the CLAMPS move the ratio the parsers asked for:
+    //
+    //   Pr_phys    = nu_par / chi_par                       (uncapped)
+    //   Pr_capped  = min(nu_par, nu_max) / min(chi_par, chi_max)
+    //   distortion = Pr_capped / Pr_phys
+    //
+    // Braginskii (1965) builds nu_e and chi_e from the SAME collision time
+    // carrying different moments, which fixes their ratio at order unity for
+    // a given closure. A distortion far from 1 therefore says the ceilings,
+    // not the physics, are setting the balance of viscous to thermal
+    // transport -- and says it without asserting what that balance should be.
+    //
+    // WHY THERE IS NO STABILITY ARM HERE. The theta-implicit MHD solver's
+    // transport audit tests a scheme bound, D_chi <= 1/(1 - theta_chi). That
+    // arm does not port: this conduction operator is EXPLICIT and adaptively
+    // subcycled (qdsmc_conduction_fd_cfl, _fd_rtol, _fd_max_subcycles), so it
+    // spends substeps to stay stable rather than going non-monotone. A
+    // transplanted 1/(1 - theta) test would be a warning that can never fire,
+    // which is the exact failure mode this gate exists to prevent.
+    //
+    // The pairing is nu vs chi rather than the MHD audit's chi vs eta because
+    // both of these are ELECTRON transport coefficients out of one closure,
+    // so their ratio has a physical value to be distorted away from.
+
+    // The ratio only exists when the energy equation carries both legs. With
+    // the viscosity off there is no second coefficient, and the boot print
+    // above already states that in as many words -- nothing to add, and
+    // nothing that could be wrong.
+    if (!m_solve_electron_energy_equation) { return; }
+    if (!m_include_electron_viscosity) { return; }
+    if (!m_include_thermal_conduction) {
+        // Same argument, other leg, but worth a line rather than silence: a
+        // viscous ceiling with no conduction to balance clamps against
+        // nothing at all.
+        amrex::Print() << "[qdsmc] Prandtl audit: electron viscosity is on "
+            "but thermal conduction is off (no qdsmc_kappa_par), so there is "
+            "no chi_e to form a ratio against -- nothing audited\n";
+        return;
+    }
+
+    // Print AND record. The print sits next to the numbers that produced it;
+    // the warn-manager entry survives into the end-of-run warning summary. A
+    // gate whose whole premise is that checks get skipped should not stake
+    // itself on one line of init scrollback being read.
+    auto const warn = [] (std::string const & msg) {
+        amrex::Print() << "  WARNING: " << msg << "\n";
+        ablastr::warn_manager::WMRecordWarning(
+            "HybridPICModel", "electron transport Prandtl audit: " + msg,
+            ablastr::warn_manager::WarnPriority::high);
+    };
+    auto const fmt = [] (amrex::Real const v) {
+        std::ostringstream os;
+        os << std::setprecision(4) << v;
+        return os.str();
+    };
+
+    // ---- Reference state ------------------------------------------------
+    // Both coefficients are steep functions of (n_e, T_e), so the ratio is
+    // only meaningful at a stated point. Derive that point from the run's own
+    // configuration rather than hardcoding one, and print it, so every number
+    // below can be re-derived by hand.
+    //
+    // m_elec_temp is k_B T_e in JOULES by the time it is read here --
+    // ReadParameters converts the eV input in place -- while the T_e FIELD is
+    // Kelvin. Both conversions are spelled out below rather than folded,
+    // because confusing the two is a live defect class in this file.
+    amrex::Real const Te_J  = m_elec_temp;
+    amrex::Real const Te_eV = Te_J / PhysConst::q_e;
+
+    // Density reference. The defaults of n0_ref and n_floor are both the
+    // trivial 1 m^-3, which is not a plasma density and would make every
+    // coefficient below meaningless, so only an explicitly supplied value
+    // counts. n0_ref first: it is the deck's own stated reference density
+    // (the polytropic closure reads it), whereas n_floor is a floor.
+    amrex::Real n_ref = 0.0_rt;
+    std::string n_ref_src;
+    if (m_n0_ref_given && m_n0_ref > 0.0_rt) {
+        n_ref = m_n0_ref;
+        n_ref_src = "hybrid_pic_model.n0_ref";
+    } else if (m_n_floor_given && m_n_floor > 0.0_rt) {
+        n_ref = m_n_floor;
+        // Both coefficients go as 1/n_e, so a floor-valued reference leaves
+        // the RATIO intact but makes each magnitude read high -- the
+        // ceilings then look like they bite harder than they will.
+        n_ref_src = "hybrid_pic_model.n_floor -- a FLOOR, not a typical "
+                    "density, so both coefficients read HIGH and the "
+                    "ceilings look like they bite harder than they will";
+    }
+
+    // Field reference. B is loaded by the deck AFTER this runs, so there is
+    // no defensible magnitude to evaluate at; say 0 and label it. The
+    // built-in Braginskii nu_par carries no |B| dependence at all (only
+    // nu_perp does), so the parallel row -- the one every warning keys on --
+    // is exact under qdsmc_viscosity_model = braginskii.
+    amrex::Real const B_ref = 0.0_rt;
+
+    amrex::Print() << "\n"
+        << "*** [qdsmc] ELECTRON TRANSPORT PRANDTL AUDIT (solver-side, "
+           "always on) ***\n";
+
+    if (n_ref <= 0.0_rt) {
+        // Refuse to invent a density rather than quietly evaluating at the
+        // 1 m^-3 default: a fabricated reference state produces numbers that
+        // look auditable and are not.
+        amrex::Print()
+            << "  reference state: Te = " << fmt(Te_eV) << " eV "
+               "(hybrid_pic_model.elec_temp); NO DENSITY REFERENCE -- neither "
+               "n0_ref nor n_floor was supplied, and both transport "
+               "coefficients are functions of n_e, so the clamp distortion is "
+               "NOT evaluated. The symmetry checks below need no reference "
+               "state and still run.\n";
+    } else {
+        // chi = kappa / (3/2 n_e k_B): c_v is (3/2) k_B per electron, the
+        // convention the conduction operator and the chi_max fold both use
+        // (see the kcap_c = 1.5 kB chi_max n fold in InitData). Dropping the
+        // c_v factor on one side only is exactly the class of error that
+        // makes a transport table off by 1/(gamma-1) for a whole campaign.
+        //
+        // m_kappa_par is compiled from the ALREADY-CAPPED expression, so the
+        // physical value has to come from a throwaway parser over the raw
+        // string. Reading m_kappa_par here would report the clamped ratio as
+        // if it were the physical one -- the gate would measure zero
+        // distortion no matter how hard the cap bit.
+        amrex::Parser kpar_raw_parser(
+            utils::parser::makeParser(m_kappa_par_expression, {"n","Te","t"}));
+        auto const kpar_raw = kpar_raw_parser.compile<3>();
+        amrex::Parser kperp_raw_parser(
+            utils::parser::makeParser(m_kappa_perp_expression, {"n","Te","t"}));
+        auto const kperp_raw = kperp_raw_parser.compile<3>();
+
+        amrex::Real const cv_n = 1.5_rt * n_ref * PhysConst::kb;
+        amrex::Real const chi_par_phys =
+            std::max(kpar_raw(n_ref, Te_eV, 0.0_rt) / cv_n, 0.0_rt);
+        amrex::Real const chi_perp_phys =
+            std::max(kperp_raw(n_ref, Te_eV, 0.0_rt) / cv_n, 0.0_rt);
+
+        amrex::Real nu_par_phys  = 0.0_rt;
+        amrex::Real nu_perp_phys = 0.0_rt;
+        if (m_visc_model == 1) {
+            amrex::Real const tau_e = braginskii_tau_e(
+                n_ref, Te_J, m_visc_Z_eff, m_visc_coulomb_log);
+            nu_par_phys  = braginskii_nu_par(Te_J, tau_e);
+            nu_perp_phys = braginskii_nu_perp(
+                nu_par_phys, PhysConst::q_e * B_ref * tau_e / PhysConst::m_e);
+        } else {
+            nu_par_phys  = m_visc_nu_par(n_ref, Te_eV, B_ref);
+            nu_perp_phys = m_visc_nu_perp(n_ref, Te_eV, B_ref);
+        }
+        nu_par_phys  = std::max(nu_par_phys,  0.0_rt);
+        nu_perp_phys = std::max(nu_perp_phys, 0.0_rt);
+
+        // The ceilings, applied the way the operators apply them: a hard min,
+        // off when zero.
+        auto const capped = [] (amrex::Real const v,
+                                amrex::Real const ceiling) {
+            return (ceiling > 0.0_rt) ? std::min(v, ceiling) : v;
+        };
+        amrex::Real const chi_par_cap  = capped(chi_par_phys,  m_cond_chi_max);
+        amrex::Real const chi_perp_cap = capped(chi_perp_phys, m_cond_chi_max);
+        amrex::Real const nu_par_cap   = capped(nu_par_phys,   m_visc_nu_max);
+        amrex::Real const nu_perp_cap  = capped(nu_perp_phys,  m_visc_nu_max);
+
+        std::string const chi_note = (m_cond_chi_max > 0.0_rt)
+            ? "(qdsmc_conduction_chi_max = " + fmt(m_cond_chi_max) + ")"
+            : std::string("(no chi ceiling)");
+        std::string const nu_note = (m_visc_nu_max > 0.0_rt)
+            ? "(qdsmc_viscosity_nu_max = " + fmt(m_visc_nu_max) + ")"
+            : std::string("(no nu ceiling)");
+
+        amrex::Print()
+            << "  reference state: n_e = " << fmt(n_ref) << " m^-3 ("
+            << n_ref_src << "), Te = " << fmt(Te_eV)
+            << " eV (hybrid_pic_model.elec_temp), |B| = " << fmt(B_ref)
+            << " T (no field reference exists at init)\n"
+            << "  chi_par = " << fmt(chi_par_phys) << " -> "
+            << fmt(chi_par_cap) << " m^2/s   " << chi_note << "\n"
+            << "  nu_par  = " << fmt(nu_par_phys) << " -> "
+            << fmt(nu_par_cap) << " m^2/s   " << nu_note << "\n";
+
+        bool const ratio_ok = (chi_par_phys > 0.0_rt) &&
+                              (nu_par_phys  > 0.0_rt) &&
+                              (chi_par_cap  > 0.0_rt);
+        if (!ratio_ok) {
+            amrex::Print() << "  Pr_par: not formed -- a parallel coefficient "
+                "is zero at the reference state\n";
+        } else {
+            amrex::Real const pr_phys = nu_par_phys / chi_par_phys;
+            amrex::Real const pr_cap  = nu_par_cap  / chi_par_cap;
+            amrex::Real const dist    = pr_cap / pr_phys;
+            // Fraction of each physical coefficient the ceilings leave
+            // standing. Both are <= 1, and the smaller one names the leg
+            // doing the clamping -- read off the measurement rather than
+            // inferred from which knob happens to be set.
+            amrex::Real const chi_keep = chi_par_cap / chi_par_phys;
+            amrex::Real const nu_keep  = nu_par_cap  / nu_par_phys;
+
+            amrex::Print()
+                << "  Pr_par = nu_par/chi_par: physical " << fmt(pr_phys)
+                << ", as clamped " << fmt(pr_cap) << "   -> clamp distortion "
+                << fmt(dist) << "x  (chi keeps " << fmt(chi_keep)
+                << " of physical, nu keeps " << fmt(nu_keep) << ")\n";
+
+            if (chi_perp_phys > 0.0_rt && nu_perp_phys > 0.0_rt &&
+                chi_perp_cap > 0.0_rt) {
+                // Second row, no warning arm of its own. The cross-field
+                // electron viscosity is smaller than the parallel one by
+                // 1 + (Omega_ce tau_e)^2 and is physically negligible in a
+                // magnetised target; evaluated here at |B| = 0 it is the
+                // UNMAGNETISED limit, i.e. a bound, not the running value.
+                amrex::Print()
+                    << "  Pr_perp (|B| = 0, unmagnetised bound): physical "
+                    << fmt(nu_perp_phys / chi_perp_phys) << ", as clamped "
+                    << fmt(nu_perp_cap / chi_perp_cap) << "\n";
+            }
+
+            if (dist > 0.0_rt && std::isfinite(dist) &&
+                std::abs(std::log10(dist)) > 1.0_rt)
+            {
+                // The nu ceiling that reproduces the physical ratio at
+                // whatever the chi leg has been left at:
+                //   nu_max = nu_phys * (chi_cap / chi_phys)
+                // gives min(nu_phys, nu_max)/chi_cap == nu_phys/chi_phys
+                // exactly, in both directions -- it lowers nu_max when the
+                // chi ceiling binds and raises it when the nu ceiling does.
+                amrex::Real const nu_match = nu_par_phys * chi_keep;
+                std::string const leg = (chi_keep < nu_keep)
+                    ? "the CONDUCTION leg (qdsmc_conduction_chi_max = "
+                          + fmt(m_cond_chi_max) + " m^2/s)"
+                    : "the VISCOSITY leg (qdsmc_viscosity_nu_max = "
+                          + fmt(m_visc_nu_max) + " m^2/s)";
+                warn("the transport ceilings move the electron Prandtl "
+                     "number by " + fmt(dist) + "x at the audited reference "
+                     "state: Pr_par = nu_par/chi_par is " + fmt(pr_phys) +
+                     " physically and " + fmt(pr_cap) + " as clamped. The "
+                     "binding cap is " + leg + ", which leaves " +
+                     fmt(std::min(chi_keep, nu_keep)) + " of its physical "
+                     "coefficient standing while the other leg keeps " +
+                     fmt(std::max(chi_keep, nu_keep)) + ". Braginskii (1965) "
+                     "builds both coefficients from one collision time, so "
+                     "this ratio is a closure property and the caps are "
+                     "overriding it. Set "
+                     "hybrid_pic_model.qdsmc_viscosity_nu_max = " +
+                     fmt(nu_match) + " m^2/s to restore the physical ratio at "
+                     "the current chi ceiling.");
+            }
+        }
+    }
+
+    // ---- Symmetry of the ceilings ----------------------------------------
+    // Sharper than the distortion arm and independent of it: one leg capped
+    // and the other free is a TRAJECTORY hazard, so it warns even where the
+    // ratio at the reference state is still acceptable.
+    bool const chi_capped = (m_cond_chi_max > 0.0_rt);
+    bool const nu_capped  = (m_visc_nu_max  > 0.0_rt);
+    if (chi_capped != nu_capped) {
+        warn(std::string("clamp ASYMMETRY -- ") +
+             (chi_capped
+                  ? "qdsmc_conduction_chi_max = " + fmt(m_cond_chi_max) +
+                    " m^2/s is set while qdsmc_viscosity_nu_max is off"
+                  : "qdsmc_viscosity_nu_max = " + fmt(m_visc_nu_max) +
+                    " m^2/s is set while qdsmc_conduction_chi_max is off") +
+             ". Both chi_e and nu_e climb as ~Te^(5/2)/n_e off the same "
+             "collision time, so an ABSOLUTE ceiling on one leg alone pins "
+             "that leg in the hot core while the other keeps rising: the "
+             "Prandtl distortion then grows without bound along the "
+             "trajectory, however matched the pair looks at t = 0. This is a "
+             "trajectory hazard, not a state hazard -- cap both legs or "
+             "neither.");
+    }
+
+    // ---- Symmetry of the free-streaming limiters -------------------------
+    // Same hazard, different mechanism: these bound their leg at the local
+    // free-streaming flux instead of at an absolute number.
+    bool const chi_limited = (m_cond_flux_limit_factor > 0.0_rt);
+    bool const nu_limited  = (m_visc_flux_limit_factor > 0.0_rt);
+    if (chi_limited != nu_limited) {
+        warn("free-streaming limiter ASYMMETRY -- "
+             "qdsmc_conduction_flux_limit_factor = " +
+             fmt(m_cond_flux_limit_factor) +
+             " and qdsmc_viscosity_flux_limit_factor = " +
+             fmt(m_visc_flux_limit_factor) + ", so exactly one channel is "
+             "limited. Each limiter saturates its own leg at the local "
+             "free-streaming flux (q_fs = n_e kB Te v_te for heat, "
+             "Pi_fs = 2 n_e kB Te for momentum), so the limited leg flattens "
+             "wherever it bites while the unlimited one keeps its full "
+             "Braginskii value. The ratio drifts with the trajectory for the "
+             "same reason an asymmetric hard cap distorts it -- limit both "
+             "channels or neither.");
+    }
+
+    amrex::Print() << "*** end Prandtl audit ***\n\n";
 }
 
 void HybridPICModel::GetCurrentExternal ()

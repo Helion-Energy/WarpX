@@ -4348,6 +4348,29 @@ Maxwell solver: kinetic-fluid hybrid
     Global kinematic-viscosity ceiling in :math:`m^2/s`, applied as a hard minimum to both channels —
     the viscosity analogue of :pp:param:`hybrid_pic_model.qdsmc_conduction_chi_max`.
 
+.. note::
+
+    **The solver audits the Prandtl consistency of these ceilings, always.** Whenever the electron
+    energy equation runs with both transport legs active — a ``hybrid_pic_model.qdsmc_kappa_par``
+    conductivity and a :pp:param:`hybrid_pic_model.qdsmc_viscosity_model` other than ``none`` — an
+    ``ELECTRON TRANSPORT PRANDTL AUDIT`` block is printed at initialization. It reports
+    :math:`\chi_\parallel` and :math:`\nu_\parallel` at a reference state taken from the deck itself
+    (:pp:param:`hybrid_pic_model.n0_ref` or :pp:param:`hybrid_pic_model.n_floor`, and
+    :pp:param:`hybrid_pic_model.elec_temp`, all printed so the numbers can be reproduced by hand),
+    together with the electron Prandtl number :math:`\mathrm{Pr} = \nu_\parallel/\chi_\parallel`
+    before and after the ceilings apply.
+
+    A high-priority warning is raised when the ceilings move that ratio by more than a factor of
+    ten, when exactly one of ``qdsmc_conduction_chi_max`` /
+    :pp:param:`hybrid_pic_model.qdsmc_viscosity_nu_max` is set, or when exactly one of
+    ``qdsmc_conduction_flux_limit_factor`` /
+    :pp:param:`hybrid_pic_model.qdsmc_viscosity_flux_limit_factor` is active. The first case also
+    reports the ``qdsmc_viscosity_nu_max`` that restores the physical ratio at the current
+    :math:`\chi` ceiling. Braginskii (1965) builds both coefficients from the same collision time,
+    so their ratio is a property of the closure: capping or limiting one leg and not the other
+    overrides it, and the distortion grows without bound as the plasma heats. **No input parameter
+    disables the audit** — measuring what the ceilings do to the closure is not optional.
+
 .. pp:param:: hybrid_pic_model.qdsmc_viscosity_coulomb_log
 .. pp:param:: hybrid_pic_model.qdsmc_viscosity_Z_eff
     :type: ``float``

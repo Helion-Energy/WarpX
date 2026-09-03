@@ -89,6 +89,16 @@ public:
 
     /**
      * \brief
+     * Report how far the transport CLAMPS move the electron Prandtl number
+     * nu_par/chi_par away from the physical one, and warn when they move it
+     * far or move it asymmetrically. Called once from InitData; prints the
+     * table on rank 0 whenever the energy equation carries both transport
+     * legs, and is deliberately NOT switchable -- see the definition.
+     */
+    void AuditTransportPrandtl () const;
+
+    /**
+     * \brief
      * Function to evaluate the external current expressions and populate the
      * external current multifab. Note the external current can be a function
      * of time and therefore this should be re-evaluated at every step.
@@ -1049,6 +1059,12 @@ public:
     amrex::Real m_elec_temp;
     /** Reference electron density */
     amrex::Real m_n0_ref = 1.0;
+    /** True when the deck actually supplied n0_ref / n_floor. The defaults
+     * of both are the trivial 1 m^-3, which is not a plasma density; the
+     * transport audit needs to know whether a density reference exists at
+     * all rather than silently evaluating its coefficients at the default. */
+    bool m_n0_ref_given = false;
+    bool m_n_floor_given = false;
     /** Electron pressure scaling exponent */
     amrex::Real m_gamma = 5.0/3.0;
 
