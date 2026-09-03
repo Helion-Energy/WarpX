@@ -425,16 +425,79 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         "implicit_mhd.conduction_coulomb_log must be positive");
     const bool has_conduction_chi_min = utils::parser::queryWithParser(
         pp, "conduction_chi_min", m_conduction_chi_min);
-    utils::parser::queryWithParser(
+    const bool has_chi_par_min = utils::parser::queryWithParser(
         pp, "conduction_chi_par_min", m_conduction_chi_par_min);
-    utils::parser::queryWithParser(
+    const bool has_chi_par_max = utils::parser::queryWithParser(
         pp, "conduction_chi_par_max", m_conduction_chi_par_max);
-    utils::parser::queryWithParser(
+    const bool has_chi_perp_min = utils::parser::queryWithParser(
         pp, "conduction_chi_perp_min", m_conduction_chi_perp_min);
-    utils::parser::queryWithParser(
+    const bool has_chi_perp_max = utils::parser::queryWithParser(
         pp, "conduction_chi_perp_max", m_conduction_chi_perp_max);
     const bool has_conduction_chi_max = utils::parser::queryWithParser(
         pp, "conduction_chi_max", m_conduction_chi_max);
+    // The per-component clamps carried none of the validation the shared
+    // pair below has always had, even though they are the ones production
+    // actually sets. Four ways that stayed silent:
+    //
+    //   (a) a NEGATIVE value is the internal "unset" sentinel (-1, tested
+    //       as >= 0 at the Braginskii clamp assembly), so a typo'd -100
+    //       did not clamp at -100 -- it silently disabled the knob and
+    //       fell back to the shared clamp;
+    //   (b) inverted bounds (max < min) applied whichever limit landed
+    //       last instead of erroring;
+    //   (c) set under thermal_conduction_model = isotropic they are pure
+    //       no-ops -- the exact trap the shared pair already guards;
+    //   (d) worst, a HALF-SET pair silently straddles two unit
+    //       conventions. The per-component knobs are defined in the
+    //       physical kappa/(n kB) convention and are multiplied by
+    //       (gamma - 1) per species at assembly; the shared fallback
+    //       keeps the historical operator convention and inherits
+    //       unconverted. So setting chi_par_min alone gives a clamp whose
+    //       floor is (gamma-1)*par_min but whose ceiling is a raw
+    //       chi_max -- a 1.5x skew at gamma = 5/3 between the two ends of
+    //       one clamp.
+    const bool has_any_component_clamp =
+        has_chi_par_min || has_chi_par_max || has_chi_perp_min ||
+        has_chi_perp_max;
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_conduction_braginskii || !has_any_component_clamp,
+        "implicit_mhd.conduction_chi_par_min/max and chi_perp_min/max "
+        "clamp the Braginskii coefficients and require "
+        "implicit_mhd.thermal_conduction_model = braginskii (they are "
+        "silent no-ops under the isotropic model)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        (!has_chi_par_min || m_conduction_chi_par_min >= 0.0_rt) &&
+            (!has_chi_par_max || m_conduction_chi_par_max >= 0.0_rt) &&
+            (!has_chi_perp_min || m_conduction_chi_perp_min >= 0.0_rt) &&
+            (!has_chi_perp_max || m_conduction_chi_perp_max >= 0.0_rt),
+        "implicit_mhd.conduction_chi_par_min/max and chi_perp_min/max "
+        "cannot be negative: a negative value is the internal 'unset' "
+        "sentinel and would silently disable the clamp rather than "
+        "apply it");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !(has_chi_par_min && has_chi_par_max) ||
+            m_conduction_chi_par_max > m_conduction_chi_par_min,
+        "implicit_mhd.conduction_chi_par_max must exceed "
+        "conduction_chi_par_min");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !(has_chi_perp_min && has_chi_perp_max) ||
+            m_conduction_chi_perp_max > m_conduction_chi_perp_min,
+        "implicit_mhd.conduction_chi_perp_max must exceed "
+        "conduction_chi_perp_min");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        has_chi_par_min == has_chi_par_max,
+        "implicit_mhd.conduction_chi_par_min and conduction_chi_par_max "
+        "must be set together: the per-component knobs are in the "
+        "kappa/(n kB) convention and are scaled by (gamma - 1), while the "
+        "shared conduction_chi_min/max fallback is in the operator "
+        "convention and is not, so a half-set pair clamps its two ends in "
+        "different units");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        has_chi_perp_min == has_chi_perp_max,
+        "implicit_mhd.conduction_chi_perp_min and conduction_chi_perp_max "
+        "must be set together (see conduction_chi_par_min/max: a half-set "
+        "pair mixes the kappa/(n kB) and operator conventions within one "
+        "clamp)");
     // The clamps only enter the Braginskii coefficient evaluation: set
     // with the isotropic model they would be silent no-ops.
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
