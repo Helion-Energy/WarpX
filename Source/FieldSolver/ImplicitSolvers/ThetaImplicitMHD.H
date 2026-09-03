@@ -1204,6 +1204,30 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // wave/advective dynamics keep the global centering. The conduction
     // COEFFICIENTS keep their own conduction_coefficient_state rule. ----
     amrex::Real m_conduction_theta = -1.0;
+    // ---- Viscous theta (default: the global implicit_evolve.theta).
+    // The third leg of the same dissipation tensor. The viscous face
+    // stress and its work read the per-side ion velocities at the
+    // theta_v stage
+    //     u^{n+theta_v} = (theta_v/theta) u^{n+theta}
+    //                     + (1 - theta_v/theta) u^n,
+    // exactly the m_conduction_theta construction with velocity in place
+    // of specific internal energy, and like it needs no stage registers:
+    // u^n = (rho u)^n / rho^n comes from the old-state arrays the flux
+    // kernel already holds. Linear in the theta-stage values, so
+    // matrix-free Jacobian probes see the shifted centering exactly.
+    //
+    // Why it exists: resistive_theta and conduction_theta could already
+    // be set independently, but nu was hardwired to the global centering,
+    // so the three components of ONE tensor operator could not be staged
+    // uniformly -- the deck's own consistency check had to report
+    // "no viscous staging knob exists" as a permanent finding. With this,
+    // theta_eta = theta_chi = theta_nu is reachable without dragging the
+    // hyperbolic part to backward Euler via a global theta.
+    //
+    // Note the extrapolation is applied BEFORE the no-slip image, so the
+    // antisymmetric wall reflection mirrors the staged velocity rather
+    // than a mixed-stage one. ----
+    amrex::Real m_viscous_theta = -1.0;
     // Non-periodic z (RZ only): the solver fills axial domain ghosts with
     // zero-gradient (Neumann) values, giving outflow ends instead of the
     // periodic seam. Set automatically when the z geometry is non-periodic.

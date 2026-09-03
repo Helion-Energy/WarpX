@@ -240,6 +240,7 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     utils::parser::queryWithParser(pp, "resistive_theta", m_resistive_theta);
     // Same sentinel convention for the conduction-stage centering.
     utils::parser::queryWithParser(pp, "conduction_theta", m_conduction_theta);
+    utils::parser::queryWithParser(pp, "viscous_theta", m_viscous_theta);
     utils::parser::queryWithParser(pp, "positivity_safety", m_positivity_safety);
     pp.query("external_field_iteration", m_external_field_iteration);
     {
@@ -2134,6 +2135,25 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
             "channel (only the conductive face fluxes consume the "
             "shifted centering)");
     }
+    if (m_viscous_theta < 0.0_rt) {
+        // Default: the viscous stress keeps the global centering.
+        m_viscous_theta = m_theta;
+    }
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_viscous_theta >= 0.5_rt && m_viscous_theta <= 1.0_rt,
+        "implicit_mhd.viscous_theta must be between 0.5 and 1");
+    if (m_viscous_theta != m_theta) {
+        // Like conduction_theta, no stage registers: the staged velocities
+        // are extrapolated in-kernel from the old-state arrays the flux
+        // already reads. Guard the silent no-op only.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_viscosity > 0.0_rt || m_viscosity_is_parser ||
+                m_wall_viscosity_band_value > 0.0_rt,
+            "implicit_mhd.viscous_theta different from "
+            "implicit_evolve.theta requires an active viscous channel "
+            "(only the viscous face stress consumes the shifted "
+            "centering)");
+    }
     parseNonlinearSolverParams(pp);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_nlsolver_type == NonlinearSolverType::newton,
@@ -3175,6 +3195,12 @@ void ThetaImplicitMHD::PrintParameters () const
                    << "\n"
                    << "Resistive theta:               " << m_resistive_theta << "\n"
                    << "Conduction theta:              " << m_conduction_theta
+                   << "\n"
+                   << "Viscous theta:                 " << m_viscous_theta
+                   << ((m_resistive_theta == m_conduction_theta &&
+                        m_conduction_theta == m_viscous_theta)
+                           ? "   (dissipation tensor UNIFORMLY staged)"
+                           : "   (dissipation tensor staging NOT uniform)")
                    << "\n"
                    << "Vacuum eta diffusivity [m2/s]: "
                    << m_vacuum_resistivity_diffusivity << "\n"
@@ -6456,6 +6482,13 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const bool conduction_stage = (m_conduction_theta != m_theta);
     const amrex::Real stage_new_weight = m_conduction_theta / m_theta;
     const amrex::Real stage_old_weight = 1.0_rt - stage_new_weight;
+    // Viscous-stage centering (implicit_mhd.viscous_theta): the same
+    // extrapolation applied to the velocities the viscous face stress
+    // reads, u^{n+theta_v} = (theta_v/theta) u^{n+theta} + (1 - .) u^n.
+    // viscous_stage = false keeps the theta path bit-identical.
+    const bool viscous_stage = (m_viscous_theta != m_theta);
+    const amrex::Real viscous_new_weight = m_viscous_theta / m_theta;
+    const amrex::Real viscous_old_weight = 1.0_rt - viscous_new_weight;
     const bool add_conduction =
         braginskii ||
         (chi_ion > 0.0_rt || chi_electron > 0.0_rt || chi_any_parser);
@@ -7511,9 +7544,38 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                   region_scale_at(i, j));
                 }
                 amrex::Real viscous_work = 0.0_rt;
+                // Staged old-state velocities for viscous_theta. Hoisted
+                // out of the component loop: both sides' densities are
+                // component-independent, and the floor must match the one
+                // the conduction stage uses so the two legs of the same
+                // tensor never disagree about what an empty cell is.
+                amrex::Real viscous_rho_old_left = 1.0_rt;
+                amrex::Real viscous_rho_old_right = 1.0_rt;
+                if (viscous_stage) {
+                    viscous_rho_old_left = std::max(
+                        rho_old(il, jl, kl), parameters.density_floor);
+                    viscous_rho_old_right = std::max(
+                        rho_old(i, j, k), parameters.density_floor);
+                }
                 for (int component = 0; component < 3; ++component) {
                     amrex::Real left_velocity = left.ion_velocity[component];
                     amrex::Real right_velocity = right.ion_velocity[component];
+                    if (viscous_stage) {
+                        // u^n = (rho u)^n / rho^n. Applied BEFORE the
+                        // no-slip image below, so the antisymmetric wall
+                        // reflection mirrors the staged velocity rather
+                        // than a mixed-stage one.
+                        left_velocity =
+                            viscous_new_weight * left_velocity +
+                            viscous_old_weight *
+                                (mom_old(il, jl, kl, component) /
+                                 viscous_rho_old_left);
+                        right_velocity =
+                            viscous_new_weight * right_velocity +
+                            viscous_old_weight *
+                                (mom_old(i, j, k, component) /
+                                 viscous_rho_old_right);
+                    }
                     if (no_slip_face && component != normal) {
                         if (wall_right_masked) {
                             right_velocity = -left_velocity;
