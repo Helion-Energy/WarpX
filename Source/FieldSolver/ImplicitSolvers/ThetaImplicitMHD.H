@@ -1326,6 +1326,19 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // a numerical diffusivity 0.354 kappa |u| dx -- 0.7% of the
     // donor-cell dissipation it replaces at the default 0.01.
     amrex::Real m_reconstruction_kappa = 0.01;
+    // ---- Limited Rusanov dissipation of the CENTRAL flux
+    // (implicit_mhd.central_dissipation; 0 = off, bit-identical). The
+    // central flux carries no Riemann dissipation by design, so a slope
+    // limiter in front of it has nothing to limit -- where it clips,
+    // central reduces exactly to the unreconstructed centered flux. This
+    // supplies the missing upwinding as a scalar jump penalty
+    // -(c/2) alpha (U_R - U_L) taken across the face states the kernel
+    // hands the flux, i.e. across the RECONSTRUCTED jump when
+    // fluid_reconstruction is active. central + reconstruction +
+    // dissipation is therefore MUSCL-Rusanov: second order in smooth
+    // flow, monotone at a discontinuity, no wave fan. See the contract
+    // block above the term in ThetaImplicitMHD_K.H.
+    amrex::Real m_central_dissipation = 0.0;
     // Explicit ion kinematic viscosity nu_i [m^2/s] of the recast face
     // fluxes (0 = off; required positive for fluid_flux = central). The
     // normal-gradient viscous stress and its velocity-weighted work enter

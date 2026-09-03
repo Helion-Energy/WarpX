@@ -148,6 +148,14 @@ struct FluxParameters {
     // Smoothing width fraction of the median limiter (see limited_slope):
     // w = sqrt(kappa^2 (d_up^2 + d_down^2) + guard^2).
     amrex::Real reconstruction_kappa = 0.01;
+    // Limited Rusanov dissipation of the CENTRAL flux
+    // (implicit_mhd.central_dissipation; 0 = off, the bit-identical
+    // zero-dissipation default). See the block comment above
+    // central_flux: the coefficient scales a Rusanov term whose JUMP is
+    // taken across the face states the caller supplies, so with
+    // fluid_reconstruction active the limiter -- not the knob -- sets
+    // the dissipation, and central becomes MUSCL-Rusanov.
+    amrex::Real central_dissipation = 0.0;
 };
 
 // C-infinity rectifier width of the dual-energy kinetic fraction: fk_raw
@@ -2417,6 +2425,92 @@ central_flux (const CellState& left, const CellState& right,
         u_left - left.fast_speed, u_right - right.fast_speed, signal_width);
     flux.signal_right = smooth_max(
         u_left + left.fast_speed, u_right + right.fast_speed, signal_width);
+
+    // ------------------------------------------------------------------
+    // LIMITED RUSANOV DISSIPATION (implicit_mhd.central_dissipation)
+    // ------------------------------------------------------------------
+    //
+    // WHY. A slope limiter only becomes a monotonicity device in
+    // combination with an UPWIND selection: it works by shrinking the
+    // jump that an upwind flux dissipates. The central flux dissipates
+    // nothing, so a limiter in front of it clips to donor cell and
+    // central reduces EXACTLY to the unreconstructed centered flux --
+    // reconstruction alone cannot suppress a dispersive overshoot here.
+    // This term supplies the missing upwinding in the cheapest form that
+    // still carries a limiter: a Rusanov (local Lax-Friedrichs) jump
+    // penalty, no wave fan, no Riemann solve.
+    //
+    // THE CONTRACT. The dissipation is
+    //
+    //     F = F_central - (c/2) alpha (U_R - U_L),
+    //
+    // with alpha a smooth upper bound on the local signal speed and
+    // c = central_dissipation in [0, 1]. Two properties follow, and they
+    // are the whole design:
+    //
+    //  (a) The JUMP is taken across the face states this function is
+    //      GIVEN, not across cell centres. The caller
+    //      (ComputeDirectionalFaceFluxes) has already applied
+    //      fluid_reconstruction to them, so
+    //        - reconstruction = none:  U_R - U_L is the full cell jump
+    //          and this is first-order Rusanov -- monotone, and
+    //          dissipative at alpha dx / 2;
+    //        - reconstruction = median: U_R - U_L is the LIMITED jump,
+    //          which is O(dx^2) in smooth flow and O(jump) at a
+    //          discontinuity. The scheme is then MUSCL-Rusanov: second
+    //          order where the solution is smooth, full monotone
+    //          protection where it is not.
+    //      So the limiter, not this knob, sets the dissipation. The knob
+    //      only says whether any upwinding exists at all.
+    //
+    //  (b) Each conserved channel gets the SAME alpha, i.e. this is the
+    //      scalar (Rusanov) dissipation, not a characteristic
+    //      decomposition. That is deliberately the most diffusive and
+    //      most robust choice: its semi-discrete form contributes
+    //      +alpha (U_{i+1} - 2 U_i + U_{i-1}) / (2 dx) to every channel,
+    //      a positive-coefficient Laplacian, so it is monotone and
+    //      positivity-FRIENDLY in every variable it touches. Given that
+    //      the formation campaign loses arms to ion-energy positivity,
+    //      a scheme that can only diffuse is the right trade against a
+    //      sharper characteristic-wise term.
+    //
+    // WHAT IT DOES NOT TOUCH. The induction channels and the Maxwell
+    // stress are left alone. Dissipating the induction flux is numerical
+    // resistivity: it would fight the explicit eta / eta_H, and in RZ it
+    // would break the deliberate choice that central leaves
+    // signal_alfven_* at zero so the corner E_theta is the pure ideal
+    // average and a held equilibrium suffers no corner diffusion. Field
+    // dissipation stays where the deck controls it.
+    //
+    // ALPHA. The smoothed Davis fast bound, additionally maxed against
+    // the per-cell wave_speed so the ELECTRON channel stays covered when
+    // the Hall term makes |u_e| exceed the ion fast speed (central is
+    // the Hall-capable recast flux; the U_e channel advects with u_e).
+    if (parameters.central_dissipation > 0.0) {
+        const amrex::Real dissipation_speed = smooth_max(
+            smooth_max(-flux.signal_left, flux.signal_right, signal_width),
+            smooth_max(left.wave_speed, right.wave_speed, signal_width),
+            signal_width);
+        const amrex::Real coefficient =
+            0.5 * parameters.central_dissipation * dissipation_speed;
+        flux.mass -= coefficient * (right.density - left.density);
+        for (int component = 0; component < 3; ++component) {
+            flux.momentum[component] -=
+                coefficient *
+                (right.momentum[component] - left.momentum[component]);
+        }
+        flux.electron_energy -=
+            coefficient * (right.electron_energy - left.electron_energy);
+        if (parameters.total_energy_closure) {
+            flux.ion_energy -=
+                coefficient * (right.ion_energy - left.ion_energy);
+        }
+        if (parameters.dual_energy_closure) {
+            flux.ion_internal_energy -=
+                coefficient *
+                (right.ion_internal_energy - left.ion_internal_energy);
+        }
+    }
     return flux;
 }
 

@@ -5331,6 +5331,60 @@ Jacobian probes.
     no-slip pinned band (``implicit_mhd.wall_no_slip``), so it never
     reconstructs across the mask or across the pin.
 
+.. pp:param:: implicit_mhd.central_dissipation
+    :type: ``float``
+    :default: ``0`` (off)
+
+    Limited Rusanov (local Lax--Friedrichs) dissipation of the
+    ``central`` flux, as a coefficient in :math:`[0, 1]`. Requires
+    ``implicit_mhd.fluid_flux = central``; ``0`` is the bit-identical
+    zero-dissipation default.
+
+    The ``central`` flux carries no Riemann dissipation by design, so a
+    slope limiter placed in front of it has nothing to limit: where
+    :pp:param:`implicit_mhd.fluid_reconstruction` clips, ``central``
+    reduces *exactly* to the unreconstructed centered flux. This knob
+    supplies the missing upwinding in the cheapest form that still
+    carries a limiter — a scalar jump penalty, no wave fan, no Riemann
+    solve:
+
+    .. math::
+
+        F = F_\mathrm{central} - \frac{c}{2}\,\alpha\,(U_R - U_L),
+
+    with :math:`\alpha` a smooth upper bound on the local signal speed
+    (the smoothed Davis fast bound, additionally maxed against the
+    per-cell wave speed so the electron channel stays covered when the
+    Hall term makes :math:`|u_e|` exceed the ion fast speed).
+
+    **The jump is taken across the face states the flux is given**, not
+    across cell centres, and the reconstruction has already been applied
+    to those. So the limiter — not this coefficient — sets the
+    dissipation:
+
+    * ``fluid_reconstruction = none``: :math:`U_R - U_L` is the full cell
+      jump, and this is first-order Rusanov — monotone, dissipating at
+      :math:`\alpha \Delta x / 2`.
+    * ``fluid_reconstruction = median``: :math:`U_R - U_L` is the
+      *limited* jump, which is :math:`O(\Delta x^2)` in smooth flow and
+      :math:`O(\text{jump})` at a discontinuity. The scheme is then
+      MUSCL--Rusanov: second order where the solution is smooth, full
+      monotone protection where it is not.
+
+    Each conserved channel receives the same :math:`\alpha`, i.e. this is
+    the scalar Rusanov dissipation rather than a characteristic
+    decomposition. That is deliberately the most diffusive and most
+    robust choice: its semi-discrete form contributes
+    :math:`+\alpha (U_{i+1} - 2U_i + U_{i-1})/(2\Delta x)` to every
+    channel — a positive-coefficient Laplacian — so it is monotone and
+    positivity-*friendly* in every variable it touches.
+
+    The induction channels and the Maxwell stress are deliberately left
+    alone: dissipating the induction flux is numerical resistivity, it
+    would fight the explicit :math:`\eta` / :math:`\eta_H`, and in RZ it
+    would break the choice that ``central`` leaves the fan's rotational
+    speeds at zero so a held equilibrium suffers no corner diffusion.
+
 .. pp:param:: implicit_mhd.reconstruction_kappa
     :type: ``float``
     :default: ``0.01``
