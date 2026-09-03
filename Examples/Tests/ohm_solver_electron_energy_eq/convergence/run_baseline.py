@@ -26,8 +26,21 @@ import numpy as np
 HERE = pathlib.Path(__file__).resolve().parent
 DECK = HERE / "qdsmc_advection_test.py"
 
+# Default qdsmc_time_advance for the three main sections, set from --advance.
+# The recorded baseline in this file was measured at "euler"; production runs
+# "pc", so the sweeps have to be runnable at either without editing call sites.
+# Sections that deliberately pin a scheme (the bake-off) pass advance=
+# explicitly and are left alone by the setdefault below.
+ADVANCE = "euler"
+
 
 def run_case(python, outdir, tag, **kw):
+    kw.setdefault("advance", ADVANCE)
+    # The scheme goes in the CACHE KEY, not just the command. run_case skips
+    # when the npz exists, so without this a pc sweep into an outdir that
+    # already holds euler results would silently "[skip]" every case and
+    # report the euler numbers as if they were pc.
+    tag = f"{tag}_{kw['advance']}"
     out = outdir / f"{tag}.npz"
     if out.exists():
         print(f"[skip] {tag} (exists)")
@@ -74,7 +87,17 @@ def main():
     ap.add_argument(
         "--ncell-dt", type=int, default=128, help="fixed grid for the dt sweep"
     )
+    ap.add_argument(
+        "--advance",
+        choices=["euler", "leapfrog", "pc"],
+        default="euler",
+        help="qdsmc_time_advance for the three main sections. Default euler "
+        "reproduces the recorded baseline; production runs pc.",
+    )
     args = ap.parse_args()
+
+    global ADVANCE
+    ADVANCE = args.advance
 
     outdir = pathlib.Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
