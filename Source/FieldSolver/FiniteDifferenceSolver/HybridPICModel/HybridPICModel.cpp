@@ -5728,8 +5728,20 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
     // caught there. It has no ion-redirect leg: the redirect delivers heat
     // to ions through the e-i drift, which the viscous stress does not act
     // on.
+    // Bracketed as its own budget class when the instrument is armed -- a
+    // sub-account of src like the sink and the stopping heat. The bracket is
+    // tight around the viscous call alone: the only thing between it and the
+    // Joule call above is QdsmcPhaseMinTe, which is a read-only min/argmin
+    // probe, so this dU is the viscous channel and nothing else.
     if (m_include_electron_viscosity) {
+        std::array<amrex::Real, 2> uv0{}, uv1{};
+        if (m_energy_budget) { uv0 = QDSMCClassEnergy(lev); }
         QDSMCAddViscousHeating(lev, dt_src);
+        if (m_energy_budget) {
+            uv1 = QDSMCClassEnergy(lev);
+            m_ebud_visc_bulk += uv1[0] - uv0[0];
+            m_ebud_visc_band += uv1[1] - uv0[1];
+        }
         QdsmcPhaseMinTe(lev, "sources_viscosity");
     }
     // General Te limiter with ion shunt (any-channel excess -> ions; runs
@@ -10097,7 +10109,15 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
                     << " stopping_bulk=" << m_ebud_stopping_bulk
                     << " stopping_band=" << m_ebud_stopping_band
                     << " U_bulk=" << ub5[0] << " U_band=" << ub5[1]
-                    << " (dU cumulative; adv includes comp; src includes sink+stopping)\n";
+                    // Appended, never inserted: the existing key=value pairs
+                    // keep the positions they have always had, so a reader
+                    // that splits this line on whitespace is unaffected.
+                    << " visc_bulk=" << m_ebud_visc_bulk
+                    << " visc_band=" << m_ebud_visc_band
+                    << " (dU cumulative; TOTAL = adv+cond+src;"
+                       " comp is a SUBSET of adv;"
+                       " sink, stopping and visc are SUBSETS of src"
+                       " -- do not add the subsets to the total)\n";
             }
         }
 

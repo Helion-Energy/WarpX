@@ -1600,6 +1600,19 @@ public:
      * src, like the sink), bracketed separately when the instrument is
      * armed. */
     mutable amrex::Real m_ebud_stopping_bulk = 0.0, m_ebud_stopping_band = 0.0;
+    /** PHYSICAL Braginskii viscous heat part of the source-stage dU (a
+     * sub-account of src, like the sink and the stopping heat), bracketed
+     * separately when the instrument is armed.
+     *
+     * Without this the viscous channel is booked -- it runs inside
+     * ApplyQdsmcEnergySources, so the src brackets already contain it and
+     * closure is not affected -- but it is not ATTRIBUTABLE: it lands in
+     * src_bulk indistinguishably from Joule, the sink and the stopping heat,
+     * recoverable only by subtracting the others. The dissipation diagnostic
+     * gives the viscous channel its own column (P_nu); this is the energy
+     * ledger's equivalent, measured the same way every other term here is --
+     * as a bracketed dU, not as a re-summed analytic source. */
+    mutable amrex::Real m_ebud_visc_bulk = 0.0, m_ebud_visc_band = 0.0;
 
     /** Class-summed thermal energy {bulk, band} [J] for the energy budget
      * (nodal sum_unique; classes per the m_energy_budget doc). */

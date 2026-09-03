@@ -4444,6 +4444,31 @@ Maxwell solver: kinetic-fluid hybrid
     that boundary. The transport channel carries both advection and the polytropic compression (pdV)
     signal. Printed on the :pp:param:`hybrid_pic_model.joule_dropped_energy_print_interval` cadence.
 
+    **Which terms are totals and which are subsets.** The printed channels are *not* all additive —
+    summing them all double-counts. The step total is
+
+    .. math::
+
+        \Delta U = \mathrm{adv} + \mathrm{cond} + \mathrm{src},
+
+    and the remaining channels are sub-accounts measured inside those brackets: ``comp`` is a subset of
+    ``adv`` (the polytropic part of the transport stage), while ``sink``, ``stopping`` and ``visc`` are
+    subsets of ``src`` (they are bracketed individually inside the source stage). ``src`` therefore also
+    contains the Joule heating and the ion-shunt/redirect legs, which have no separate channel and can
+    only be obtained by subtraction.
+
+    Because every channel is measured as a bracketed :math:`\Delta U` using the same
+    :math:`U` functional, the three total channels telescope exactly across a step:
+    ``adv + cond + src`` reproduces :math:`U_{\mathrm{end}} - U_{\mathrm{start}}` of the advance to
+    round-off *by construction*. A nonzero residual therefore does not mean the accounting is
+    approximate — it means some stage changed :math:`U` outside every bracket, which is exactly what
+    the instrument is for. Note that :math:`U` is evaluated with the live ``rho_fp``, so density
+    changes between advances move :math:`U` without any stage having run; that inter-advance gap is
+    physical bookkeeping, not a leak.
+
+    New channels are **appended** to the print line, never inserted, so a reader that splits it on
+    whitespace keeps working.
+
 .. pp:param:: hybrid_pic_model.electron_ion_relaxation_rate(rho,Te,Ti,t)
     :type: ``float`` or ``str``
     :optional:
