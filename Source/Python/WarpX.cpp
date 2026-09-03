@@ -315,7 +315,28 @@ void init_WarpX (py::module& m)
             [](WarpX& wx) {
                 return wx.get_pointer_HybridPICModel()->m_n_floor;
             },
-            "Gets the number of substeps to take in the hybrid solver."
+            "Gets the density floor used in the hybrid solver."
+        )
+        .def("set_qdsmc_density_floor",
+            [](WarpX& wx, amrex::Real n_floor) {
+                wx.get_pointer_HybridPICModel()->m_qdsmc_n_floor = n_floor;
+            },
+            py::arg("n_floor"),
+            "Sets the QDSMC electron-energy density floor "
+            "(hybrid_pic_model.qdsmc_n_floor): cells at or below it keep a "
+            "stale T_e instead of being updated. This is a SEPARATE floor "
+            "from set_hybrid_pic_density_floor, and the two carry a "
+            "relationship: if this floor sits below the hybrid floor, no "
+            "cell can ever fall under it and the T_e-freeze gate is "
+            "unreachable. A deck that schedules the hybrid floor at runtime "
+            "must move this one too, or the gate silently changes meaning "
+            "mid-run."
+        )
+        .def("get_qdsmc_density_floor",
+            [](WarpX& wx) {
+                return wx.get_pointer_HybridPICModel()->m_qdsmc_n_floor;
+            },
+            "Gets the QDSMC electron-energy density floor."
         )
         .def("get_qdsmc_wall_tally",
             [](WarpX& wx, int dim, int side) {
