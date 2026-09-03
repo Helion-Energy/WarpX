@@ -9804,6 +9804,13 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
     // (AdvanceElectronEnergyQDSMC_PC); nothing happens at this call site.
     if (m_qdsmc_time_advance == QdsmcTimeAdvance::PC) { return; }
 
+    WarnEnergyBudgetPathLimits(
+        "qdsmc_time_advance = euler or leapfrog",
+        "The per-stage energy budget brackets NOTHING on these paths: the "
+        "stage brackets and the energy_budget_J print line exist only in the "
+        "pc driver, so the instrument produces no output at all here. Use "
+        "qdsmc_time_advance = pc for the full ledger.");
+
     auto & warpx = WarpX::GetInstance();
 
     // J_plasma (at B^n) is needed for V_e. On all but the first step it is
@@ -9917,6 +9924,59 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC (amrex::Real const dt) const
     m_qdsmc_pe_prev_valid    = true;
 }
 
+
+void HybridPICModel::PrintEnergyBudget (amrex::Real const u_bulk,
+                                        amrex::Real const u_band,
+                                        char const * note) const
+{
+    // Single emitter for the energy_budget_J line, shared by the pc and the
+    // theta-implicit paths so the two can never drift apart in field order or
+    // spelling. The KEY ORDER IS FROZEN: new channels are appended after
+    // visc_band, never inserted, so a reader that splits this line on
+    // whitespace keeps every field position it has. Only the trailing
+    // free-text note differs between paths -- it names which channels that
+    // path actually accounts.
+    auto & warpx = WarpX::GetInstance();
+    if (m_joule_dropped_print_interval <= 0) { return; }
+    if (warpx.getistep(0) % m_joule_dropped_print_interval != 0) { return; }
+    amrex::Print() << "[qdsmc] step " << warpx.getistep(0)
+        << " energy_budget_J:"
+        << " adv_bulk="  << m_ebud_adv_bulk
+        << " comp_bulk=" << m_ebud_comp_bulk
+        << " cond_bulk=" << m_ebud_cond_bulk
+        << " src_bulk="  << m_ebud_src_bulk
+        << " adv_band="  << m_ebud_adv_band
+        << " comp_band=" << m_ebud_comp_band
+        << " cond_band=" << m_ebud_cond_band
+        << " src_band="  << m_ebud_src_band
+        << " sink_bulk=" << m_ebud_sink_bulk
+        << " sink_band=" << m_ebud_sink_band
+        << " stopping_bulk=" << m_ebud_stopping_bulk
+        << " stopping_band=" << m_ebud_stopping_band
+        << " U_bulk=" << u_bulk << " U_band=" << u_band
+        << " visc_bulk=" << m_ebud_visc_bulk
+        << " visc_band=" << m_ebud_visc_band
+        << " (dU cumulative; " << note << ")\n";
+}
+
+void HybridPICModel::WarnEnergyBudgetPathLimits (char const * path_name,
+                                                 char const * limits) const
+{
+    // The energy budget's stage brackets are not uniform across the
+    // time-advance paths, and a partially-accounted (or entirely absent)
+    // ledger reads from the log exactly like a fully-accounted one whose
+    // channels happened to measure zero. State the difference once, loudly,
+    // on any path that is not the fully bracketed pc path.
+    if (!m_energy_budget) { return; }
+    static bool warned = false;
+    if (warned) { return; }
+    warned = true;
+    ablastr::warn_manager::WMRecordWarning(
+        "HybridPICModel",
+        std::string("hybrid_pic_model.qdsmc_energy_budget is set and this run "
+                    "uses ") + path_name + ". " + limits,
+        ablastr::warn_manager::WarnPriority::high);
+}
 
 std::array<amrex::Real, 2> HybridPICModel::QDSMCClassEnergy (int const lev) const
 {
@@ -10092,33 +10152,10 @@ void HybridPICModel::AdvanceElectronEnergyQDSMC_PC (amrex::Real const dt) const
             m_ebud_src_band  += (ub2[1] - ub1[1]) + (ub4[1] - ub3[1]);
             m_ebud_adv_bulk  += ub3[0] - ub2[0];
             m_ebud_adv_band  += ub3[1] - ub2[1];
-            if (m_joule_dropped_print_interval > 0 &&
-                warpx.getistep(0) % m_joule_dropped_print_interval == 0) {
-                amrex::Print() << "[qdsmc] step " << warpx.getistep(0)
-                    << " energy_budget_J:"
-                    << " adv_bulk="  << m_ebud_adv_bulk
-                    << " comp_bulk=" << m_ebud_comp_bulk
-                    << " cond_bulk=" << m_ebud_cond_bulk
-                    << " src_bulk="  << m_ebud_src_bulk
-                    << " adv_band="  << m_ebud_adv_band
-                    << " comp_band=" << m_ebud_comp_band
-                    << " cond_band=" << m_ebud_cond_band
-                    << " src_band="  << m_ebud_src_band
-                    << " sink_bulk=" << m_ebud_sink_bulk
-                    << " sink_band=" << m_ebud_sink_band
-                    << " stopping_bulk=" << m_ebud_stopping_bulk
-                    << " stopping_band=" << m_ebud_stopping_band
-                    << " U_bulk=" << ub5[0] << " U_band=" << ub5[1]
-                    // Appended, never inserted: the existing key=value pairs
-                    // keep the positions they have always had, so a reader
-                    // that splits this line on whitespace is unaffected.
-                    << " visc_bulk=" << m_ebud_visc_bulk
-                    << " visc_band=" << m_ebud_visc_band
-                    << " (dU cumulative; TOTAL = adv+cond+src;"
-                       " comp is a SUBSET of adv;"
-                       " sink, stopping and visc are SUBSETS of src"
-                       " -- do not add the subsets to the total)\n";
-            }
+            PrintEnergyBudget(ub5[0], ub5[1],
+                "TOTAL = adv+cond+src; comp is a SUBSET of adv;"
+                " sink, stopping and visc are SUBSETS of src"
+                " -- do not add the subsets to the total");
         }
 
         // Emit P_e = n_e * k_B * T_e for the downstream Ohm's-law
@@ -10373,6 +10410,16 @@ void HybridPICModel::AdvanceElectronEnergyQDSMCTheta (amrex::Real const dt,
         "AdvanceElectronEnergyQDSMCTheta called with "
         "solve_electron_energy_equation=true but the "
         "QDSMC particle container was not constructed (InitData not run?)");
+
+    WarnEnergyBudgetPathLimits(
+        "the theta-implicit hybrid evolve scheme",
+        "On this path the energy budget accounts the SOURCE stage only "
+        "(src, with visc as its sub-account), bracketed once per step at "
+        "converged state in QDSMCFinishImplicitStep. adv, comp and cond read "
+        "zero here and are NOT measured: conduction does not run on this "
+        "path, and a transport bracket would have to measure against the "
+        "provisional T_e that the recovery discards. Use qdsmc_time_advance "
+        "= pc with the explicit scheme for the full ledger.");
 
     using ablastr::fields::Direction;
 
@@ -10666,14 +10713,51 @@ void HybridPICModel::QDSMCFinishImplicitStep (amrex::Real const dt, amrex::Real 
         QDSMCUpdateTe(lev, rho_end);
         amrex::MultiFab & rho_fp = *warpx.m_fields.get(FieldType::rho_fp, lev);
         amrex::MultiFab rho_half(rho_fp, amrex::make_alias, rho_fp.nComp()/2, 1);
+
+        // Energy budget, theta-implicit path. THIS is the only place on this
+        // path where a bracket may be placed: the deterministic sources are
+        // re-applied here ONCE, against converged states, after the recovery
+        // above has overwritten whatever provisional T_e the last residual
+        // evaluation left behind. The same sources also run inside
+        // AdvanceElectronEnergyQDSMCTheta, which the nonlinear solver calls
+        // once per iteration AND once per Jacobian probe; bracketing there
+        // would make every accumulator scale with the iteration count instead
+        // of with the physics -- a term that looks plausible and drifts with
+        // problem difficulty. So the brackets live here and nowhere else.
+        //
+        // Only src (and its visc sub-account) is accounted on this path. adv,
+        // comp and cond are deliberately NOT: conduction does not run on the
+        // theta path at all, and a transport bracket here would have to
+        // measure against the discarded provisional T_e, using a midpoint rho
+        // weight that does not match the rho_end the recovery used. That
+        // number would not mean what its name says, so it is left absent and
+        // documented rather than filled in. See WarnEnergyBudgetInertPath.
+        std::array<amrex::Real, 2> us0{}, us1{};
+        if (m_energy_budget) { us0 = QDSMCClassEnergy(lev); }
         if (m_include_joule_heating) {
             QDSMCAddJouleHeating(lev, dt, rho_half, nullptr);
         }
         if (m_include_electron_viscosity) {
+            std::array<amrex::Real, 2> uv0{}, uv1{};
+            if (m_energy_budget) { uv0 = QDSMCClassEnergy(lev); }
             QDSMCAddViscousHeating(lev, dt, rho_half);
+            if (m_energy_budget) {
+                uv1 = QDSMCClassEnergy(lev);
+                m_ebud_visc_bulk += uv1[0] - uv0[0];
+                m_ebud_visc_band += uv1[1] - uv0[1];
+            }
         }
         if (m_include_temperature_relaxation) {
             QDSMCAddTemperatureRelaxation(lev, dt, rho_half, m_qdsmc_Ti_by_name[lev]);
+        }
+        if (m_energy_budget) {
+            us1 = QDSMCClassEnergy(lev);
+            m_ebud_src_bulk += us1[0] - us0[0];
+            m_ebud_src_band += us1[1] - us0[1];
+            PrintEnergyBudget(us1[0], us1[1],
+                "theta-implicit path: only src is accounted, with visc as its"
+                " sub-account; adv, comp and cond are NOT measured on this"
+                " path -- see qdsmc_energy_budget in the docs");
         }
         QDSMCFillElectronPressureFromTe(lev, rho_end);
 

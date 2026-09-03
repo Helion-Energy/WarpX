@@ -1614,6 +1614,30 @@ public:
      * as a bracketed dU, not as a re-summed analytic source. */
     mutable amrex::Real m_ebud_visc_bulk = 0.0, m_ebud_visc_band = 0.0;
 
+    /** Emit the energy_budget_J line. Single emitter shared by the pc and
+     * theta-implicit paths so the two cannot drift apart in field order or
+     * spelling; the key order is FROZEN and new channels are appended, never
+     * inserted. Honours the joule_dropped_energy_print_interval cadence.
+     *
+     * \param u_bulk,u_band current class energies [J] to report.
+     * \param note trailing free text naming which channels this path
+     *        accounts (the only part that differs between paths). */
+    void PrintEnergyBudget (amrex::Real u_bulk, amrex::Real u_band,
+                            char const * note) const;
+
+    /** Warn once that the energy-budget instrument is not fully bracketed on
+     * this time-advance path. Only the pc path brackets every stage; euler
+     * and leapfrog bracket nothing, and the theta-implicit path accounts the
+     * source stage only. A partial or absent ledger reads from the log
+     * exactly like a complete one whose channels measured zero, so the
+     * difference is stated rather than left to be inferred. No-op unless
+     * m_energy_budget.
+     *
+     * \param path_name human-readable name of the path.
+     * \param limits what this path does and does not account. */
+    void WarnEnergyBudgetPathLimits (char const * path_name,
+                                     char const * limits) const;
+
     /** Class-summed thermal energy {bulk, band} [J] for the energy budget
      * (nodal sum_unique; classes per the m_energy_budget doc). */
     std::array<amrex::Real, 2> QDSMCClassEnergy (int lev) const;

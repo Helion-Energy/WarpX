@@ -4436,7 +4436,7 @@ Maxwell solver: kinetic-fluid hybrid
     :default: ``false``
     :optional:
 
-    Per-stage open-set energy budget instrument (``pc`` time-advance only): brackets each stage of the
+    Per-stage open-set energy budget instrument: brackets each stage of the
     Strang advance (conduction / sources / transport / sources / conduction) with the class-summed
     thermal energy :math:`U = \tfrac{3}{2} n_e k_B T_e` and accumulates each stage's :math:`\Delta U`
     (cumulative, J), split into the bulk (:math:`n` above
@@ -4468,6 +4468,45 @@ Maxwell solver: kinetic-fluid hybrid
 
     New channels are **appended** to the print line, never inserted, so a reader that splits it on
     whitespace keeps working.
+
+    **Coverage is not the same on every time-advance path.** The instrument warns loudly at run time
+    on any path that is not fully bracketed, but in summary:
+
+    .. list-table::
+       :header-rows: 1
+       :widths: 22 16 62
+
+       * - Path
+         - Channels live
+         - Notes
+       * - ``pc`` (explicit)
+         - all
+         - Fully bracketed. ``adv + cond + src`` telescopes to the advance's :math:`\Delta U`.
+       * - ``euler``, ``leapfrog``
+         - none
+         - No brackets and no print at all; the knob is accepted but the instrument does nothing.
+       * - theta-implicit
+         - ``src``, ``visc``
+         - Bracketed once per step at converged state in ``QDSMCFinishImplicitStep``. ``adv``,
+           ``comp`` and ``cond`` read zero and are *not* measured: conduction does not run on this
+           path, and a transport bracket there would have to measure against the provisional
+           :math:`T_e` that the end-of-step recovery discards. The brackets are deliberately kept out
+           of the residual evaluation, which the nonlinear solver calls once per iteration *and* once
+           per Jacobian probe — bracketing there would make every channel scale with the iteration
+           count rather than with the physics.
+
+    .. warning::
+
+       In **RZ the printed values are not physical joules**. The class-energy functional weights each
+       node by :math:`\prod_d \Delta x_d = \Delta r\,\Delta z`, omitting the cylindrical
+       :math:`2\pi r` Jacobian, so the channels are :math:`\int u\,dr\,dz` rather than
+       :math:`\int u\,dV`. Ratios between channels are still meaningful and closure still holds (the
+       measure is self-consistent), but the absolute numbers are low by the energy-weighted
+       :math:`\langle 2\pi r\rangle` of the domain and must not be compared against ``P_nu``, particle
+       energies, or any other true volume integral. Measured on a test fixture: the ``visc`` channel
+       read 0.832 against 0.314 J for the same heating integrated properly by the ``HybridDissipation``
+       diagnostic, a ratio of 0.377 against a domain mean :math:`\pi r_\mathrm{max} = 0.393`.
+       Cartesian 1D/2D/3D are unaffected.
 
 .. pp:param:: hybrid_pic_model.electron_ion_relaxation_rate(rho,Te,Ti,t)
     :type: ``float`` or ``str``
