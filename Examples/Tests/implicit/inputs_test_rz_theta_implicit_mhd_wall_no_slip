@@ -2,36 +2,40 @@
 ############ CONSTANTS ##########
 #################################
 
-# Reference-parity shaped-wall NO-SLIP PIN (implicit_mhd.wall_no_slip): the
-# same sheared column the wall-viscosity-band test uses -- uniform
-# density and pressure, a linear axial shear u_z = A r inside a cylinder
-# wall (r_w = 0.30 m, cells i >= 15 masked at dr = 0.02), B = 0, J = 0,
-# eta = 0, no conduction, no Joule -- but with the viscosity live
-# EVERYWHERE (no wall_viscosity_mask), so the wall-adjacent rows carry
-# real viscous stress and the pin has something to hold against.
+# Reference-parity shaped-wall NO-SLIP FACE condition
+# (implicit_mhd.wall_no_slip): the same sheared column the
+# wall-viscosity-band test uses -- uniform density and pressure, a
+# linear axial shear u_z = A r inside a cylinder wall (r_w = 0.30 m,
+# cells i >= 15 masked at dr = 0.02), B = 0, J = 0, eta = 0, no
+# conduction, no Joule -- but with the viscosity live EVERYWHERE (no
+# wall_viscosity_mask), so the wall-adjacent row carries real viscous
+# stress and the wall has something to hold against.
 #
-# The reference code omits the vr/vz rows of the wall-contour vertices AND of the
-# adjacent cut-cell "skin" layer from its implicit momentum matrices
-# (vp.f90:221/233 bnd = 'i', sten.f:115-121, solv.f:88-96), and its
-# velocities are allocated at exactly zero (init_cond.f90:82):
-# those two vertex layers are pinned at u = 0 for the whole run
-# (measured bit-exact zero on all 762 wall and 762 skin vertices of
-# The reference shot's earlier dump while the interior ran 1.7e5-6.2e5 m/s).
-# wall_no_slip_width = 2 is that wall + skin depth.
+# A no-slip wall constrains the TANGENTIAL slip AT THE CONTOUR: the
+# masked side of a stair interface face presents the ANTISYMMETRIC
+# tangential image -u_t of the interior state, so the face-centered
+# tangential velocity is exactly zero and the viscous difference
+# quotient is the half-cell one-sided wall gradient (0 - u_t)/(dr/2).
+# That is the reference code's unconditional contour Dirichlet (sten.f:1080-87,
+# bb(n_1d+1:) = 0 for every bnd); their additional pinned "skin" ring
+# is the cut-cell boundary layer of a NODE-COLLOCATED mesh whose
+# layer-2 nodes are measured LIVE, not an inward band of cells.
 #
 # Contract under test (see analysis_mhd_wall_no_slip.py), against the
 # wall_no_slip = 0 twin of the identical deck:
-#  - pin ON: the first 2 LIVE cell rows (i = 13, 14) carry EXACTLY zero
-#    momentum in all three components, for the whole run;
-#  - pin OFF: those same rows slide essentially freely (our stair-face
-#    image copies the tangential momentum verbatim -- a perfect-slip
-#    wall), staying within a few percent of the initial rho A r;
-#  - the pin deposits wall drag into the first UNPINNED row (i = 12),
-#    which is the transport channel the free-slip wall does not have;
+#  - ON: the wall-adjacent live row i = 14 keeps a LIVE momentum row
+#    (it is not pinned to zero) but loses tangential momentum to the
+#    wall shear relative to the free-slip twin;
+#  - OFF: the same row slides essentially freely (the stair-face image
+#    copies the tangential momentum verbatim -- a perfect-slip wall),
+#    staying within a few percent of the initial rho A r;
+#  - the drag is graded against the analytic wall shear
+#    tau_w = rho nu u_t/(dr/2), which is what makes it a no-slip wall
+#    rather than an arbitrary momentum sink;
 #  - the far interior (i <= 8) is unchanged from the OFF twin to solver
-#    precision: the pin must not reach past its own shear layer.
+#    precision: the wall layer must not reach past itself.
 # The run is kept SHORT (nu t / dr^2 = 7.5e-3) so the shear layer stays
-# inside the band-adjacent rows.
+# inside the wall-adjacent rows.
 my_constants.n0 = 1.0e20
 my_constants.rho0 = n0 * m_p
 my_constants.T0_ev = 4.0
@@ -118,13 +122,14 @@ implicit_mhd.ion_pressure(x,y,z) = n0 * T0_ev * q_e
 implicit_mhd.velocity_z(x,y,z) = A * x
 
 # Cylinder conducting wall at r = 0.30 m (constant continuation covers
-# the z ghosts); electromagnetic-only wall (no thermal BC): the no-slip
-# pin is the only wall-fluid momentum coupling under test, and it is
-# deliberately independent of wall_thermal_bc.
+# the z ghosts). zero_flux is the INSULATING fluid contract: it makes
+# the masked band a rigid conductor (a solid for the no-slip face to
+# act against) and passes no heat, so the tangential wall shear is the
+# only wall-fluid coupling under test.
 implicit_mhd.wall_model = pec
 implicit_mhd.wall_polyline_file = wall_cylinder_r30.csv
+implicit_mhd.wall_thermal_bc = zero_flux
 implicit_mhd.wall_no_slip = 1
-implicit_mhd.wall_no_slip_width = 2
 
 #################################
 ########### DIAGNOSTICS #########

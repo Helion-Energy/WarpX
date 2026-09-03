@@ -1484,6 +1484,20 @@ void ThetaImplicitMHD::Define (WarpX* const warpx, const bool from_restart)
             "coefficient (implicit_mhd.wall_viscosity_band_value) along the "
             "shaped-wall contour and requires an active "
             "implicit_mhd.wall_model");
+        // The no-slip wall is a VISCOUS condition -- the tangential wall
+        // shear mu u_t/(dn/2) carried by the contour faces. Without a
+        // viscous coefficient there is no shear to carry and the knob
+        // would be a silent no-op (the free-slip wall it is meant to
+        // replace).
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !m_wall_mask.NoSlip() ||
+                m_viscosity > 0.0_rt || m_wall_viscosity_band_value > 0.0_rt,
+            "implicit_mhd.wall_no_slip is a viscous FACE condition (the "
+            "tangential wall shear at the shaped contour) and requires a "
+            "viscous coefficient: set implicit_mhd.viscosity, or "
+            "implicit_mhd.wall_viscosity_band_value with "
+            "wall_viscosity_mask covering the contour (the reference code's small_vis "
+            "pedestal). With neither, the wall stays free-slip");
         if (m_wall_mask.GetThermalBC() !=
             ImplicitMHDWallMask::ThermalBC::none) {
             // The exterior clamp parks the band at the floor image and
@@ -2790,11 +2804,10 @@ void ThetaImplicitMHD::PrintParameters () const
                            ? " (dynamic pedestal)"
                            : " (band faces carry no viscosity)")
                    << "\n"
-                   << "Wall no-slip pin:              "
+                   << "Wall no-slip face condition:   "
                    << (m_wall_mask.NoSlip()
-                           ? "ON (" +
-                                 std::to_string(m_wall_mask.NoSlipWidth()) +
-                                 " live cell rows pinned at u = 0)"
+                           ? std::string("ON (u_t = 0 at the contour; "
+                                         "normal component free)")
                            : std::string("off"))
                    << "\n"
                    << "Thermal diffusivity i/e [m2/s]: "
@@ -3673,10 +3686,6 @@ int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real d
         // already carry it.
         SanitizeLoadedState();
         ClampWallExteriorState();
-        // The reference code's zero velocity IC on the live no-slip band, AFTER the
-        // exterior clamp (which owns the masked side): the residual's
-        // momentum identity rows then hold u = 0 there forever.
-        PinWallNoSlipMomentum();
         m_loaded_state_sanitized = true;
     }
     RefreshHaloPedestal();
@@ -6240,6 +6249,16 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const bool wall_mechanics =
         (wall_thermal_mode != ImplicitMHDWallMask::ThermalBC::none);
     const bool wall_thermal = add_conduction && wall_mechanics;
+    // Reference-parity NO-SLIP wall FACE condition (implicit_mhd.
+    // wall_no_slip; see ImplicitMHDWallMask): the tangential fluid
+    // velocity is held at zero ON the stair-step contour, realized as
+    // the antisymmetric tangential image of the interior state in the
+    // viscous face stress (see the viscous block in the kernel). It
+    // rides on the same stair-interface classification as the rigid
+    // conductor -- and REQUIRES it (a no-slip face needs a solid on the
+    // far side, so ImplicitMHDWallMask rejects wall_no_slip without a
+    // wall_thermal_bc), hence wall_mechanics is already true here.
+    const bool wall_no_slip = m_wall_mask.NoSlip();
     // Interface faces exchange against a T_wall reservoir in BOTH the
     // one-sided drain mode (temperature) and the two-sided pin mode
     // (dirichlet); zero_flux insulates them.
@@ -6848,7 +6867,29 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
             }
             const bool viscosity_band_face =
                 viscosity_slip_face && wall_viscosity_pedestal;
-            if (add_viscosity && (!viscosity_slip_face || viscosity_band_face)
+            // NO-SLIP wall FACE condition (implicit_mhd.wall_no_slip):
+            // a no-slip wall constrains the TANGENTIAL slip AT the
+            // contour, u_t|wall = 0, and nothing else. On a stair
+            // interface face the masked side therefore presents the
+            // ANTISYMMETRIC tangential image of the interior state,
+            // -u_t, so the face-centered tangential velocity is exactly
+            // zero and the viscous difference quotient
+            // (u_t^image - u_t^interior)/dn = -2 u_t/dn is the half-cell
+            // one-sided wall gradient (0 - u_t)/(dn/2): the textbook
+            // wall shear tau_w = mu u_t/(dn/2). The NORMAL component is
+            // untouched -- the fluid stays free to lift off the wall (and
+            // to be scraped by the absorbing image, which owns that
+            // channel) -- exactly as the interior cell momentum stays a
+            // live unknown. Because the face velocity is zero the paired
+            // viscous WORK vanishes on the tangential components: the
+            // wall does no work, so the tangential kinetic energy the
+            // stress removes is converted to internal energy in the
+            // adjacent cell instead of being exported. Static geometry,
+            // C-infinity in the state, and it is a plain face flux, so
+            // the JFNK Jacobian sees it like any other viscous term.
+            const bool no_slip_face = wall_no_slip && wall_interface;
+            if (add_viscosity &&
+                (!viscosity_slip_face || viscosity_band_face || no_slip_face)
 #if defined(WARPX_DIM_RZ)
                 && !(reflect_wall && i == radial_wall_face)
 #endif
@@ -6857,21 +6898,33 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                     0.5_rt * (left.density + right.density);
                 // Interior: rho_f nu (implicit_mhd.viscosity is the
                 // kinematic-style knob). Band: the absolute dynamic
-                // pedestal, density-independent by design.
+                // pedestal, density-independent by design. A no-slip
+                // contour face keeps whichever of the two the deck asked
+                // for -- the pedestal when the band covers it (the reference code's
+                // small_vis on the 'bndy' row), else the physical
+                // rho_f nu -- but never the legacy exact-zero skip,
+                // which would silently make the wall free-slip again.
                 const amrex::Real viscous_coefficient =
                     viscosity_band_face ? wall_viscosity_band_value
                                         : face_density * viscosity;
                 amrex::Real viscous_work = 0.0_rt;
                 for (int component = 0; component < 3; ++component) {
+                    amrex::Real left_velocity = left.ion_velocity[component];
+                    amrex::Real right_velocity = right.ion_velocity[component];
+                    if (no_slip_face && component != normal) {
+                        if (wall_right_masked) {
+                            right_velocity = -left_velocity;
+                        } else {
+                            left_velocity = -right_velocity;
+                        }
+                    }
                     const amrex::Real viscous_stress =
                         -viscous_coefficient *
-                        (right.ion_velocity[component] -
-                         left.ion_velocity[component]) *
+                        (right_velocity - left_velocity) *
                         inverse_normal_size;
                     flux.momentum[component] += viscous_stress;
                     viscous_work += 0.5_rt *
-                                    (left.ion_velocity[component] +
-                                     right.ion_velocity[component]) *
+                                    (left_velocity + right_velocity) *
                                     viscous_stress;
                 }
                 flux.ion_energy += viscous_work;
@@ -10314,23 +10367,14 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
     const int wall_mask_z_lo = -m_wall_mask.GhostCells();
     const int wall_mask_z_hi =
         m_wall_mask.AxialCells() - 1 + m_wall_mask.GhostCells();
-    // Reference-parity NO-SLIP PIN (implicit_mhd.wall_no_slip; see
-    // ImplicitMHDWallMask): the first wall_no_slip_width LIVE cell rows
-    // adjacent to the contour get their three MOMENTUM increments
-    // zeroed -- exact identity rows F = m - m^n, the structural twin of
-    // The reference code's omitted vr/vz matrix rows (vp.f90:221/233 bnd = 'i',
-    // solv.f:88-96) -- while their density and energy rows keep
-    // evolving, exactly as the reference code keeps advecting en and the energies on
-    // the skin. Composed with the load-time zeroing of the same band
-    // (PinWallNoSlipMomentum, the discrete analog of the reference code's zero
-    // velocity IC), the band holds u = 0 bit-exactly for the whole run.
-    // INDEPENDENT of the thermal BC, so an electromagnetic-only wall
-    // pins too; static geometry, so JFNK probes see constant structure
-    // and the preconditioner emits the matching identity rows.
-    const bool wall_no_slip = m_wall_mask.NoSlip();
-    const int* const AMREX_RESTRICT wall_no_slip_first_masked =
-        wall_no_slip ? m_wall_mask.FirstMaskedCellCentered() : nullptr;
-    const int wall_no_slip_width = m_wall_mask.NoSlipWidth();
+    // The reference-parity no-slip wall contract (implicit_mhd.wall_no_slip)
+    // lives entirely in ComputeDirectionalFaceFluxes: it is a FACE
+    // condition on the tangential velocity at the stair contour (the
+    // antisymmetric tangential viscous image), not a volumetric
+    // constraint, so there is nothing for the cell-centered increment
+    // kernel below to mask. The wall-adjacent LIVE cells keep their
+    // three momentum rows as ordinary unknowns -- free to be advected,
+    // to be replenished by their neighbours, and to lift off the wall.
     // Also read by the dual-energy blend in 1D, so hoisted out of the RZ
     // block below.
     const theta_implicit_mhd::FluxParameters flux_parameters =
@@ -10808,31 +10852,10 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
                 }
             }
 
-            // The reference code's no-slip pin (see the host constants above): the
-            // MOMENTUM rows only -- the same Chebyshev walk over the
-            // stair tables the viscosity band uses, restricted to LIVE
-            // cells, so a stair riser pins its axially adjacent cells
-            // too and width 2 reproduces the reference code's wall + skin depth.
-            // Density and the energy channels keep their wall_live
-            // envelope untouched.
-            amrex::Real momentum_live = wall_live;
-            if (wall_no_slip) {
-                const int mask_jz = std::max(wall_mask_z_lo,
-                                             std::min(wall_mask_z_hi, j));
-                if (i < wall_no_slip_first_masked[mask_jz]) {
-                    for (int dj = -wall_no_slip_width;
-                         dj <= wall_no_slip_width; ++dj) {
-                        const int jz = std::max(
-                            wall_mask_z_lo,
-                            std::min(wall_mask_z_hi, j + dj));
-                        if (i >= wall_no_slip_first_masked[jz] -
-                                     wall_no_slip_width) {
-                            momentum_live = 0.0_rt;
-                            break;
-                        }
-                    }
-                }
-            }
+            // The momentum rows share the rigid-conductor envelope of
+            // the other fluid channels and nothing else: the no-slip
+            // wall acts through the face stress registers, not here.
+            const amrex::Real momentum_live = wall_live;
 
             rho_increment(i, j, k) =
                 evolve_ion_fluid
@@ -12129,121 +12152,6 @@ void ThetaImplicitMHD::ClampWallExteriorState ()
         ledger << "# exterior clamp: cells " << cells_clamped
                << " mass_removed_kg " << mass_removed << "\n";
     }
-#endif
-}
-
-void ThetaImplicitMHD::PinWallNoSlipMomentum ()
-{
-#if defined(WARPX_DIM_RZ)
-    // Reference-parity no-slip pin, state half (implicit_mhd.wall_no_slip;
-    // see ImplicitMHDWallMask for the mechanism and the measurement).
-    // The reference code's pin is the composition of two facts: the momentum rows of
-    // the wall and skin vertices are OMITTED from its implicit matrices
-    // (so their increment is exactly zero, vp.f90:221/233 + solv.f:88-96)
-    // and the velocities are allocated at exactly zero
-    // (init_cond.f90:82). The residual carries the first half as
-    // identity rows; this is the second -- zero the live band's momentum
-    // ONCE, at load-sanitize time, so the identity rows then hold u = 0
-    // bit-exactly for the whole run (a frozen row's theta extrapolation
-    // is the frozen value itself). Bit-exactly idempotent: after the
-    // first pass the band momentum IS zero, so nothing changes on a
-    // restarted state.
-    //
-    // Under total_energy/dual_energy the removed kinetic energy is
-    // subtracted from the conservative E_i, so the band's INTERNAL
-    // energy is preserved exactly rather than thermalized (the pin is a
-    // boundary condition, not a stagnation shock); the result is floored
-    // at the same ion-energy floor image the rest of the solver uses.
-    // The auxiliary U_i (dual_energy) and the CGL blocks are internal
-    // energies natively and are untouched.
-    if (!m_wall_mask.NoSlip()) {
-        return;
-    }
-    const bool dual_energy_closure = m_ion_closure == "dual_energy";
-    const bool total_energy_closure =
-        m_ion_closure == "total_energy" || dual_energy_closure;
-
-    amrex::MultiFab& density_block =
-        m_state.getMultiFabBlock(MassDensityName, 0);
-    amrex::MultiFab& momentum_block =
-        m_state.getMultiFabBlock(MomentumDensityName, 0);
-    amrex::MultiFab* const ion_energy_block =
-        total_energy_closure ? &m_state.getMultiFabBlock(IonEnergyName, 0)
-                             : nullptr;
-
-    const int* const AMREX_RESTRICT wall_fm =
-        m_wall_mask.FirstMaskedCellCentered();
-    const int wall_mz_lo = -m_wall_mask.GhostCells();
-    const int wall_mz_hi =
-        m_wall_mask.AxialCells() - 1 + m_wall_mask.GhostCells();
-    const int no_slip_width = m_wall_mask.NoSlipWidth();
-    const amrex::Real density_floor = m_mass_density_floor;
-    const amrex::Real ion_energy_floor =
-        m_ion_pressure_floor / (m_gamma_i - 1.0_rt);
-
-    amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
-    amrex::ReduceData<amrex::Long> reduce_data(reduce_op);
-    using ReduceTuple = typename decltype(reduce_data)::Type;
-    for (amrex::MFIter mfi(momentum_block); mfi.isValid(); ++mfi) {
-        const amrex::Box box = mfi.validbox();
-        const auto rho = density_block.const_array(mfi);
-        const auto mom = momentum_block.array(mfi);
-        const auto ion_e = ion_energy_block
-                               ? ion_energy_block->array(mfi)
-                               : amrex::Array4<amrex::Real>{};
-        reduce_op.eval(
-            box, reduce_data,
-            [=] AMREX_GPU_DEVICE (int i, int j, int k) -> ReduceTuple {
-                const int jc =
-                    std::max(wall_mz_lo, std::min(wall_mz_hi, j));
-                if (i >= wall_fm[jc]) {
-                    // Masked band: not fluid (the exterior clamp owns it).
-                    return {amrex::Long(0)};
-                }
-                bool in_band = false;
-                for (int dj = -no_slip_width; dj <= no_slip_width; ++dj) {
-                    const int jz = std::max(
-                        wall_mz_lo, std::min(wall_mz_hi, j + dj));
-                    if (i >= wall_fm[jz] - no_slip_width) {
-                        in_band = true;
-                        break;
-                    }
-                }
-                if (!in_band) { return {amrex::Long(0)}; }
-                amrex::Real kinetic_energy = 0.0_rt;
-                bool changed = false;
-                for (int component = 0; component < 3; ++component) {
-                    const amrex::Real momentum = mom(i, j, k, component);
-                    kinetic_energy += momentum * momentum;
-                    changed = changed || (momentum != 0.0_rt);
-                    mom(i, j, k, component) = 0.0_rt;
-                }
-                if (ion_e) {
-                    kinetic_energy *=
-                        0.5_rt / std::max(rho(i, j, k), density_floor);
-                    ion_e(i, j, k) =
-                        std::max(ion_e(i, j, k) - kinetic_energy,
-                                 ion_energy_floor);
-                }
-                return {amrex::Long(changed ? 1 : 0)};
-            });
-    }
-    auto sums = reduce_data.value(reduce_op);
-    amrex::Long cells_pinned = amrex::get<0>(sums);
-    amrex::ParallelAllReduce::Sum(cells_pinned,
-                                  amrex::ParallelContext::CommunicatorSub());
-
-    const auto& periodicity = m_WarpX->Geom(0).periodicity();
-    momentum_block.FillBoundaryAndSync(periodicity);
-    if (ion_energy_block) {
-        ion_energy_block->FillBoundaryAndSync(periodicity);
-    }
-    m_state.CopyMultiFabBlocksToFields();
-
-    amrex::Print() << "ThetaImplicitMHD: shaped-wall no-slip pin: "
-                   << cells_pinned
-                   << " live band cells zeroed to u = 0 (width "
-                   << no_slip_width << ")\n";
 #endif
 }
 

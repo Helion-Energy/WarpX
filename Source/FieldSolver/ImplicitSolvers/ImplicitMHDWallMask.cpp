@@ -151,21 +151,34 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
         "implicit_mhd.wall_model (the freeze acts on the masked wall "
         "band's magnetic-field faces)");
 
-    // Reference-parity no-slip pin of the live band adjacent to the contour
-    // (see the class comment): parsed before the early return so a pin
-    // without a wall model is a loud input error, never a silent no-op.
+    // Reference-parity no-slip FACE condition at the contour (see the class
+    // comment): parsed before the early return so a no-slip wall without
+    // a wall model is a loud input error, never a silent no-op.
     pp.query("wall_no_slip", m_no_slip);
-    utils::parser::queryWithParser(pp, "wall_no_slip_width",
-                                   m_no_slip_width);
-    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        m_no_slip_width >= 1,
-        "implicit_mhd.wall_no_slip_width must pin at least one live fluid "
-        "cell row (2 reproduces the reference code's wall + skin depth)");
+    // BACKWARD COMPATIBILITY: wall_no_slip_width selected how many LIVE
+    // interior cell rows the (removed) volumetric momentum pin froze.
+    // The no-slip condition is now a face condition at the contour and
+    // has no inward width at all, so a deck that still sets it is asking
+    // for behavior that no longer exists -- a loud error, not a silent
+    // change of meaning.
+    {
+        amrex::Real removed_width = 0.0;
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !utils::parser::queryWithParser(pp, "wall_no_slip_width",
+                                            removed_width),
+            "implicit_mhd.wall_no_slip_width was REMOVED. The no-slip wall "
+            "is a FACE condition on the tangential velocity at the shaped "
+            "contour (u_t = 0 there), not a volumetric momentum pin of a "
+            "band of interior cells: it has no inward width. Delete the "
+            "parameter. The reference code's pinned skin vertices are the cut-cell "
+            "boundary nodes themselves (bound.f:74-108), not an interior "
+            "band -- their layer-2 nodes run live.");
+    }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         !m_no_slip || wall_model != "none",
         "implicit_mhd.wall_no_slip requires an active "
-        "implicit_mhd.wall_model (the pin acts on the live fluid rows "
-        "adjacent to the masked wall band)");
+        "implicit_mhd.wall_model (the no-slip condition acts on the "
+        "stair-step faces of the masked wall band)");
 
     // Thermal wall boundary at the stair-step fluid interface (see the
     // class comment): parsed BEFORE the early return so a thermal BC
@@ -212,6 +225,19 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
             "wall_thermal_bc (outflow_limited, dirichlet or "
             "dirichlet_limited)");
     }
+    // A no-slip condition needs a SOLID on the far side of the face.
+    // Without the rigid-conductor fluid contract the masked band is
+    // ordinary live fluid (the wall is electromagnetic only), and
+    // holding u_t = 0 on a face between two live fluid cells would
+    // manufacture a shear layer in the middle of the plasma instead of
+    // a wall boundary layer.
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        !m_no_slip || m_thermal_bc != ThermalBC::none,
+        "implicit_mhd.wall_no_slip requires an active "
+        "implicit_mhd.wall_thermal_bc (zero_flux is enough): the no-slip "
+        "face condition needs the rigid-conductor fluid contract that "
+        "makes the masked band a SOLID. Without it the band is ordinary "
+        "live fluid and u_t = 0 would be imposed between two fluid cells");
 
     if (wall_model == "none") {
         m_active = false;
@@ -517,10 +543,9 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
                        << " ohm m (constant at band-interior E rows)";
     }
     if (m_no_slip) {
-        amrex::Print() << "; no-slip pin active (momentum identity rows on "
-                          "the first "
-                       << m_no_slip_width
-                       << " live cell rows adjacent to the contour)";
+        amrex::Print() << "; no-slip face condition active (u_t = 0 at the "
+                          "stair contour, antisymmetric tangential viscous "
+                          "image; normal component free)";
     }
     if (m_field_freeze) {
         amrex::Print() << "; field freeze active (exterior evolved-B "
@@ -642,12 +667,7 @@ warpx::mhd_pc::WallFluidFreezeView ImplicitMHDWallMask::FluidFreezeView () const
     // wall_model (the dielectric standoff keeps the field-side View()
     // inactive but its fluid contract still freezes the band).
     view.active = (GetThermalBC() != ThermalBC::none);
-    // The reference code's no-slip pin is INDEPENDENT of the thermal BC (an
-    // electromagnetic-only wall pins its live band too), so the tables
-    // are published whenever either contract is on.
-    view.no_slip_active = NoSlip();
-    view.no_slip_width = m_no_slip_width;
-    if (view.active || view.no_slip_active) {
+    if (view.active) {
         view.first_masked_cc = m_first_masked_cc.data() + m_ng;
         view.z_lo = -m_ng;
         view.z_hi = m_nz - 1 + m_ng;

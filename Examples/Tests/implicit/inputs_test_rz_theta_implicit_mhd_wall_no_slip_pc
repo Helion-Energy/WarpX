@@ -2,21 +2,19 @@
 ############ CONSTANTS ##########
 #################################
 
-# Reference-parity NO-SLIP PIN preconditioner-parity test (RZ, central
-# recast flux, pec cylinder wall, LIVE fluid, pc_mhd_block).
+# Reference-parity NO-SLIP FACE condition, preconditioner parity (RZ,
+# central recast flux, pec cylinder wall, LIVE fluid, pc_mhd_block).
 #
-# The pin makes the three MOMENTUM rows of the first
-# wall_no_slip_width LIVE cells adjacent to the contour exact
-# identities in the residual (the structural twin of the reference code's omitted
-# vr/vz matrix rows, vp.f90:221/233) while their density and energy
-# rows keep evolving.  pc_mhd_block must emit the matching identity
-# rows -- mask exactly those components out of the cell-centered
-# signal/wave sweeps and restore them from the RHS afterwards.  A
-# residual-only wall term whose identity rows are missing from the
-# preconditioner is a measured 7-21x GMRES stagnation (the
-# z_wall_conduction lesson), and the pin sits on the wall-adjacent LIVE
-# rows where the momentum wave Schur is strongest -- exactly the rows
-# the masked-band rigid freeze does NOT cover.
+# The no-slip wall is a FACE condition on the tangential velocity at the
+# stair contour (an antisymmetric tangential image in the viscous face
+# stress), so it adds NO identity rows anywhere: every wall-adjacent
+# LIVE cell keeps ordinary momentum unknowns, and the new term is a
+# plain residual-only face flux exactly like the interior viscous
+# stress.  This deck is the guard that the wave/diffusion Schur of
+# pc_mhd_block still covers the solve with it on -- a residual-only wall
+# term the preconditioner does not see is a measured 7-21x GMRES
+# stagnation (the z_wall_conduction lesson), and the wall face sits on
+# the LIVE rows where the momentum wave Schur is strongest.
 #
 # The deck is deliberately in the regime where the preconditioner
 # actually does work: the acoustic CFL c_s dt / dr ~ 3 puts every
@@ -26,22 +24,14 @@
 # the momentum block genuinely coupled.  B = 0, eta = 0: the field
 # blocks are trivial here on purpose -- the shaped-wall FIELD side is
 # covered by test_rz_theta_implicit_mhd_wall_live_fluid_pc, and this
-# test is about the cell-centered FLUID sweeps.  Measured on this deck:
-# 29.3 GMRES iterations per Newton iteration with the pin ON, 33.6 with
-# it OFF (the pin makes the solve slightly CHEAPER, as identity rows
-# should), and 36.9 with the pin ON but the pin's PC rows compiled OUT
-# -- 1.26x the correct preconditioner.  The same A/B on a stiffer twin
-# (const_dt = 6e-6, acoustic CFL ~ 11) reads 93.8 correct vs 139.8
-# broken, 1.49x: the penalty grows with the wave CFL exactly as the
-# masked-band freeze's does, which is why the gate exists even though
-# this CI-sized deck keeps it well under the margin.
+# test is about the cell-centered FLUID sweeps.
 #
 # Contract under test (see analysis_mhd_wall_no_slip_pc.py), against
 # the wall_no_slip = 0 twin of the identical preconditioned deck:
 # - Newton converges in a few iterations per step;
 # - every GMRES call CONVERGES well inside its iteration cap;
-# - the pin's GMRES cost per Newton iteration stays within a small
-#   factor of the OFF twin's -- the whole point of the identity rows.
+# - the wall face condition's GMRES cost per Newton iteration stays
+#   within a small factor of the OFF twin's.
 
 my_constants.n0 = 1.0e20
 my_constants.rho0 = n0 * m_p
@@ -134,14 +124,15 @@ implicit_mhd.ion_pressure(x,y,z) = n0 * T0_ev * q_e
 implicit_mhd.velocity_z(x,y,z) = A * x
 
 # Cylinder conducting wall at r = 0.30 m (constant continuation covers
-# the z ghosts); electromagnetic-only wall, so the no-slip pin is the
-# only wall-fluid momentum coupling and it is exercised WITHOUT the
-# masked-band rigid freeze (wall_thermal_bc) sitting on top of it --
-# the pinned rows are LIVE fluid rows, which is the point.
+# the z ghosts). zero_flux is the INSULATING fluid contract: the masked
+# band becomes the rigid conductor the no-slip face acts against, and
+# passes no heat, so the tangential wall shear is the only wall-fluid
+# coupling the preconditioner is graded on. Every wall-adjacent row
+# stays LIVE fluid, which is the point.
 implicit_mhd.wall_model = pec
 implicit_mhd.wall_polyline_file = wall_cylinder_r30.csv
+implicit_mhd.wall_thermal_bc = zero_flux
 implicit_mhd.wall_no_slip = 1
-implicit_mhd.wall_no_slip_width = 2
 
 #################################
 ########### DIAGNOSTICS #########

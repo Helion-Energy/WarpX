@@ -177,18 +177,6 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * (rank-0 banner + a '#'-comment header row of wall_ledger_file).
      * No-op without the freeze. */
     void ClampWallExteriorState ();
-    /** Zero the momentum of the live no-slip band adjacent to the shaped
-     * wall (implicit_mhd.wall_no_slip; see ImplicitMHDWallMask): the
-     * discrete analog of the reference code's exactly-zero velocity IC
-     * (init_cond.f90:82) which, composed with the residual's
-     * momentum identity rows on the same cells, holds u = 0 there for
-     * the whole run. Runs ONCE at load-sanitize time (right after
-     * ClampWallExteriorState) and is bit-exactly idempotent, so
-     * restarted states are unchanged. Under total_energy/dual_energy the
-     * removed kinetic energy is subtracted from E_i (floored), so the
-     * INTERNAL energy is preserved and the pin thermalizes nothing.
-     * No-op without the pin. */
-    void PinWallNoSlipMomentum ();
     /** Recompute the dynamic halo pedestal density once per step (frozen
      * for the whole nonlinear solve) and raise sub-pedestal cells onto
      * it. No-op when halo_pedestal_fraction = 0. See

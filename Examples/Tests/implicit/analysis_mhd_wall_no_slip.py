@@ -6,36 +6,42 @@
 #
 # License: BSD-3-Clause-LBNL
 
-"""Reference-parity shaped-wall no-slip pin (implicit_mhd.wall_no_slip).
+"""Reference-parity shaped-wall no-slip FACE condition
+(implicit_mhd.wall_no_slip).
 
 A linear axial shear u_z = A r inside a cylinder conducting wall
 (r_w = 0.30 m -> first masked cell i = 15 at dr = 0.02) with the
 explicit viscosity live everywhere (no wall_viscosity_mask), B = 0,
-J = 0, eta = 0, no conduction, no Joule.
+J = 0, eta = 0, no conduction, no Joule.  wall_thermal_bc = zero_flux
+makes the masked band a rigid, insulating conductor, so the tangential
+wall shear is the ONLY wall-fluid coupling.
 
-the reference code omits the vr/vz rows of the wall-contour vertices AND of the
-adjacent cut-cell skin layer from its implicit momentum matrices and
-starts every velocity at exactly zero, so those two vertex layers are
-pinned at u = 0 for the whole run (measured bit-exact zero on all 762
-wall and 762 skin vertices of the reference shot's earlier dump).  Our port is the
-structural twin: momentum identity rows on the first
-wall_no_slip_width LIVE cell rows adjacent to the contour, composed
-with a load-time zeroing of the same rows.
+A no-slip wall constrains the TANGENTIAL slip AT THE CONTOUR.  The
+masked side of a stair interface face presents the ANTISYMMETRIC
+tangential image -u_t of the interior state, so the face-centered
+tangential velocity is exactly zero and the viscous difference quotient
+(u_t^image - u_t^interior)/dr = -2 u_t/dr is the half-cell one-sided
+wall gradient (0 - u_t)/(dr/2): the textbook wall shear
+tau_w = mu u_t/(dr/2) = 2 rho nu u_t/dr.  The NORMAL component is
+untouched and every wall-adjacent LIVE cell keeps all three momentum
+rows as ordinary unknowns.
 
 Gates, against the wall_no_slip = 0 twin of the identical deck:
 
-  1. PIN: with the knob ON, cells i = 13, 14 (width 2 = the reference code's wall +
-     skin depth) carry EXACTLY zero momentum in all three components.
-  2. FREE SLIP: with the knob OFF, those same rows slide essentially
-     freely -- our stair-face image copies the tangential momentum
-     verbatim -- staying within a few percent of rho A r.  This is
-     today's behavior, and the OFF twin reproduces it.
-  3. WALL DRAG: the pin deposits drag into the first UNPINNED row
-     (i = 12), which is the momentum transport channel the free-slip
-     wall does not have.
-  4. LOCALITY: the far interior (i <= 8) is unchanged from the OFF
-     twin to solver precision -- the pin must not reach past its own
-     shear layer.
+  1. LIVE ROWS: the wall-adjacent live rows are NOT pinned -- they keep
+     a finite tangential momentum.  A volumetric momentum pin would seal
+     those control volumes off from the domain entirely (both of their
+     face velocities become zero), which is what
+     analysis_mhd_wall_no_slip_lift.py gates.
+  2. WALL SHEAR: the momentum the wall removes from the wall-adjacent
+     row matches the analytic first-order estimate
+     dm_z = 2 rho nu u_t t / dr^2, i.e. it really is the half-cell wall
+     shear and not an arbitrary sink.
+  3. FREE SLIP (off mode): with the knob OFF those rows slide freely --
+     the stair-face image copies the tangential momentum verbatim --
+     staying within a few percent of rho A r.
+  4. LOCALITY: the far interior (i <= 8) is unchanged from the OFF twin
+     to solver precision; the wall layer must not reach past itself.
 
 Usage:
   analysis_mhd_wall_no_slip.py <final_plotfile> off
@@ -54,20 +60,19 @@ yt.set_log_level(50)
 NUMBER_DENSITY = 1.0e20
 RHO0 = NUMBER_DENSITY * constants.proton_mass
 SHEAR_RATE = 1.0e3
+VISCOSITY = 20.0
+FINAL_TIME = 3 * 5.0e-8
 WALL_RADIUS = 0.30
 NUMBER_OF_CELLS_R = 24
 RADIAL_EXTENT = 0.48
 CELL_SIZE = RADIAL_EXTENT / NUMBER_OF_CELLS_R
-NO_SLIP_WIDTH = 2
 
 # Mask geometry (the implementation's cell-centered convention: first
 # cell whose center (i + 1/2) dr sits on/outside the polyline radius).
 FIRST_MASKED = int(np.ceil(WALL_RADIUS / CELL_SIZE - 0.5 - 1.0e-3))
 assert FIRST_MASKED == 15
-FIRST_PINNED = FIRST_MASKED - NO_SLIP_WIDTH  # = 13
-PINNED = slice(FIRST_PINNED, FIRST_MASKED)  # live rows 13, 14
-DRAG_ROW = FIRST_PINNED - 1  # = 12, first unpinned row
-FAR_INTERIOR = slice(2, FIRST_PINNED - 4)  # rows 2..8
+WALL_CELL = FIRST_MASKED - 1  # = 14, the live cell touching the contour
+FAR_INTERIOR = slice(2, 9)  # rows 2..8
 
 COMPONENTS = ("r", "t", "z")
 
@@ -94,40 +99,50 @@ momentum_scale = float(np.max(free_slip_momentum))
 for name, field in state.items():
     assert np.isfinite(field).all(), f"momentum_{name} has non-finite values"
 
-band_absmax = {
-    name: float(np.max(np.abs(field[PINNED, :]))) for name, field in state.items()
-}
+wall_row = {name: float(np.mean(field[WALL_CELL, :])) for name, field in state.items()}
 for name in COMPONENTS:
     print(
-        f"pin band (i = {FIRST_PINNED}..{FIRST_MASKED - 1}) "
-        f"|momentum_{name}|max = {band_absmax[name]:.6e} "
-        f"({band_absmax[name] / momentum_scale:.3e} of rho A r_max)"
+        f"wall-adjacent live row i = {WALL_CELL}: momentum_{name} = "
+        f"{wall_row[name]:.6e} "
+        f"({wall_row[name] / free_slip_momentum[WALL_CELL]:.6f} of rho A r)"
     )
 
 if mode == "on":
-    # --- Gate 1: the pin is exact ---
-    for name in COMPONENTS:
-        assert band_absmax[name] == 0.0, (
-            f"wall_no_slip = 1 left momentum_{name} = {band_absmax[name]:.6e} "
-            f"on the pinned rows (must be exactly zero: the residual's "
-            f"momentum identity rows carry the load-time zeroing forward)"
-        )
-
     assert len(sys.argv) > 3, "on mode needs the wall_no_slip = 0 twin"
     reference = load(sys.argv[3])
+    reference_row = float(np.mean(reference["z"][WALL_CELL, :]))
 
-    # --- Gate 3: wall drag reaches the first unpinned row ---
-    pinned_drag = float(np.mean(state["z"][DRAG_ROW, :]))
-    free_drag = float(np.mean(reference["z"][DRAG_ROW, :]))
-    relative_drag = (free_drag - pinned_drag) / free_drag
-    print(
-        f"first unpinned row i = {DRAG_ROW}: momentum_z pinned "
-        f"{pinned_drag:.6e} vs free-slip {free_drag:.6e} "
-        f"(drag = {relative_drag:.3e} of the free-slip value)"
+    # --- Gate 1: the wall-adjacent rows stay LIVE ---
+    # The no-slip condition is a face constraint on the tangential
+    # velocity, not a volumetric pin: the cell keeps moving.
+    slide = wall_row["z"] / free_slip_momentum[WALL_CELL]
+    print(f"gate 1 live row: momentum_z / (rho A r) = {slide:.6f}")
+    assert slide > 0.5, (
+        f"the wall-adjacent live row kept only {slide:.3e} of its "
+        "tangential momentum: a no-slip WALL condition constrains the "
+        "slip at the face, it does not pin the interior cell"
     )
-    assert relative_drag > 1.0e-4, (
-        "the pin deposited no measurable wall drag into the first "
-        "unpinned row: the no-slip shear layer is missing"
+
+    # --- Gate 2: the removed momentum is the half-cell wall shear ---
+    # First-order: dm_z = tau_w t / dr with tau_w = rho nu u_t/(dr/2).
+    removed = reference_row - wall_row["z"]
+    analytic = (
+        2.0
+        * RHO0
+        * VISCOSITY
+        * SHEAR_RATE
+        * radius[WALL_CELL]
+        * FINAL_TIME
+        / CELL_SIZE**2
+    )
+    print(
+        f"gate 2 wall shear: removed {removed:.6e} vs analytic "
+        f"{analytic:.6e} (ratio {removed / analytic:.4f})"
+    )
+    assert 0.5 < removed / analytic < 1.5, (
+        f"the wall removed {removed:.3e} of tangential momentum against "
+        f"the analytic half-cell wall shear {analytic:.3e}: this is not a "
+        "no-slip wall boundary layer"
     )
 
     # --- Gate 4: the far interior is untouched ---
@@ -146,25 +161,23 @@ if mode == "on":
             / momentum_scale
         )
         print(f"far interior |d momentum_{name}|max / (rho A r_max) = {far_error:.3e}")
-        assert far_error < 1.0e-8, (
-            f"the pin changed the far interior momentum_{name} by "
+        assert far_error < 1.0e-6, (
+            f"the wall condition changed the far interior momentum_{name} by "
             f"{far_error:.3e} of the momentum scale: the shear layer is "
-            "leaking past its own band"
+            "leaking past the wall row"
         )
 else:
-    # --- Gate 2: today's free-slip wall, reproduced by the OFF twin ---
-    free_slip_band = free_slip_momentum[PINNED, np.newaxis]
-    slide = state["z"][PINNED, :] / free_slip_band
+    # --- Gate 3: today's free-slip wall, reproduced by the OFF twin ---
+    band = slice(FIRST_MASKED - 2, FIRST_MASKED)
+    free_slip_band = free_slip_momentum[band, np.newaxis]
+    slide = state["z"][band, :] / free_slip_band
     print(
-        f"free-slip band momentum_z / (rho A r): min {slide.min():.6f} "
+        f"free-slip rows momentum_z / (rho A r): min {slide.min():.6f} "
         f"max {slide.max():.6f}"
     )
     np.testing.assert_allclose(slide, 1.0, rtol=0.05)
-    assert band_absmax["z"] > 0.5 * momentum_scale * (
-        radius[FIRST_PINNED] / radius[-1]
-    ), "the wall_no_slip = 0 twin is not free-slip"
     # The setup drives no radial or azimuthal flow at all: those stay at
-    # round-off (measured 5.5e-9 of the momentum scale, in the wall band).
+    # round-off.
     for name in ("r", "t"):
         np.testing.assert_allclose(
             state[name], 0.0, rtol=0.0, atol=1.0e-6 * momentum_scale
@@ -173,4 +186,4 @@ else:
 newton_history = np.atleast_2d(np.loadtxt("diags/newton.txt"))
 assert newton_history[-1, 2] >= 1
 
-print(f"wall no-slip pin ({mode}): all gates passed")
+print(f"wall no-slip face condition ({mode}): all gates passed")

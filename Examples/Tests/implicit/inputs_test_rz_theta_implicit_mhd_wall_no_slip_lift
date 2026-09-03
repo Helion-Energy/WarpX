@@ -1,0 +1,167 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Shaped-wall NO-SLIP LIFT-OFF / REPLENISHMENT regression
+# (implicit_mhd.wall_no_slip).  A no-slip wall constrains the TANGENTIAL
+# slip AT THE WALL FACE.  It must NOT forbid a wall-adjacent interior
+# cell from moving normal to the wall, and it must NOT seal that cell
+# off from its neighbours -- zeroing a cell-centered momentum zeroes the
+# face velocities on BOTH of its faces, so the whole finite control
+# volume stops exchanging mass, momentum and enthalpy with the domain.
+# Its remaining channels are then whatever wall sinks touch it (here a
+# cold-wall ion conduction drain) with no advective supply to balance
+# them.  This deck reproduces that SEAL and its consequences; it is not
+# a crash reproducer, and it is run on the production flux
+# (fluid_flux = central) where the pinned configuration completes the
+# window without positivity violations.
+#
+# Setup: uniform plasma inside a cylinder conducting wall (r_w = 0.30 m
+# -> first masked cell i = 15 at dr = 0.02) with
+#   - a RADIAL expansion u_r = Ar r, so every live cell has a normal
+#     (wall-directed) velocity and a uniform -2 Ar density drift.  The
+#     wall-adjacent live cell MUST participate: it loses mass through
+#     the absorbing stair face and gains it from the interior.
+#   - an AXIAL shear u_z = Az r, the tangential component the no-slip
+#     face condition is allowed to damp.
+#   - a COLD wall reservoir (T_wall = 2 eV against a 100 eV plasma) with
+#     a strong ion conduction channel, chi_i t / dr^2 = 4.8: the wall-
+#     adjacent ring is drained hard and can only stay warm by advecting
+#     hot fluid in from the interior.
+#   - NO ion volumetric source at all (eta = 0, no Joule, no
+#     equilibration), exactly as in the production arm where
+#     joule_ion_fraction = -1 routes all Joule to the electrons.
+#
+# B = 0 apart from a nominal Bz for the wave scaling; the wall is
+# electromagnetic-PEC with a thermal reservoir, so the stair interface
+# faces present the absorbing image and the masked band is a rigid
+# conductor.
+#
+# Gates (analysis_mhd_wall_no_slip_lift.py), against the
+# wall_no_slip = 0 twin of the identical deck:
+#   1. LIFT-OFF: the wall-adjacent live cell keeps a NORMAL momentum
+#      (the wall may not pin u_r).
+#   2. REPLENISHMENT: its mass density tracks the expansion drift, i.e.
+#      it exchanges fluid with its neighbours instead of being sealed.
+#   3. ION-ENERGY BUDGET: its ion energy tracks the twin's, because a
+#      zero-velocity wall face transports no energy.  A sealed cell has
+#      a different budget entirely.
+#   4. TANGENTIAL DRAG: the no-slip condition still removes tangential
+#      momentum at the wall face relative to the twin, and leaves the
+#      far interior alone.
+
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.T0_ev = 100.0
+my_constants.Twall_ev = 2.0
+my_constants.chi_i = 2.0e3
+my_constants.nu = 50.0
+my_constants.Ar = 5.0e4
+my_constants.Az = 5.0e4
+my_constants.gamma = 5.0/3.0
+my_constants.B0 = 0.01
+my_constants.Lr = 0.48
+my_constants.Lz = 0.32
+my_constants.nr = 24
+my_constants.nz = 8
+my_constants.dt = 8.0e-8
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 12
+amr.n_cell = nr nz
+amr.max_grid_size = 8
+amr.max_level = 0
+
+geometry.dims = RZ
+warpx.n_rz_azimuthal_modes = 1
+geometry.prob_lo = 0.0 -0.5*Lz
+geometry.prob_hi = Lr 0.5*Lz
+boundary.field_lo = none none
+boundary.field_hi = pec none
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-9
+newton.max_iterations = 20
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-10
+gmres.max_iterations = 300
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = T0_ev
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-6 * n0 * T0_ev * q_e
+implicit_mhd.ion_pressure_floor = 1.0e-6 * n0 * T0_ev * q_e
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = nu
+implicit_mhd.thermal_diffusivity_ion = chi_i
+implicit_mhd.include_joule_heating = false
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.electron_pressure(x,y,z) = n0 * T0_ev * q_e
+implicit_mhd.ion_pressure(x,y,z) = n0 * T0_ev * q_e
+implicit_mhd.velocity_x(x,y,z) = Ar * x
+implicit_mhd.velocity_z(x,y,z) = Az * x
+
+# Cylinder conducting wall at r = 0.30 m (constant continuation covers
+# the z ghosts) with a COLD reservoir: the one-sided drain is what
+# empties the wall-adjacent ion energy when the cell cannot be
+# advectively replenished.
+implicit_mhd.wall_model = pec
+implicit_mhd.wall_polyline_file = wall_cylinder_r30.csv
+implicit_mhd.wall_thermal_bc = outflow_limited
+implicit_mhd.wall_temperature = Twall_ev
+implicit_mhd.wall_no_slip = 1
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 12
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = implicit_mhd_mass_density \
+                       implicit_mhd_ion_energy \
+                       implicit_mhd_electron_energy \
+                       implicit_mhd_momentum_r implicit_mhd_momentum_t \
+                       implicit_mhd_momentum_z
+diag1.write_species = 0

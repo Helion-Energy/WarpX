@@ -6,24 +6,23 @@
 #
 # License: BSD-3-Clause-LBNL
 
-"""No-slip pin preconditioner-parity test (RZ MHD).
+"""No-slip wall preconditioner-parity test (RZ MHD).
 
-implicit_mhd.wall_no_slip makes the three MOMENTUM rows of the first
-wall_no_slip_width LIVE cells adjacent to the shaped-wall contour exact
-identities in the residual (the structural twin of the reference code's omitted
-vr/vz matrix rows) while their density and energy rows keep evolving.
-pc_mhd_block must emit the matching identity rows: mask exactly those
-components out of the cell-centered signal/wave sweeps and restore them
-from the RHS afterwards.  A residual-only wall term whose identity rows
-are missing from the preconditioner is a measured 7-21x GMRES
-stagnation (the z_wall_conduction lesson), and the pin sits on the
-wall-adjacent LIVE rows where the momentum wave Schur is strongest --
-the rows the masked-band freeze does not cover.
+implicit_mhd.wall_no_slip is a FACE condition on the tangential velocity
+at the shaped-wall contour: the masked side of a stair interface face
+presents the antisymmetric tangential image -u_t of the interior state,
+so the face-centered tangential velocity is exactly zero and the viscous
+face stress carries the half-cell wall shear.  It adds NO identity rows
+anywhere -- every wall-adjacent LIVE cell keeps ordinary momentum
+unknowns -- so it is a plain residual-only face flux, exactly like the
+interior viscous stress, and pc_mhd_block covers it through the same
+wave/diffusion Schur.
 
-Measured A/B on this deck (pin ON both times, PC rows compiled in vs
-out): 29.3 vs 36.9 GMRES iterations per Newton iteration, and 93.8 vs
-139.8 on a stiffer twin (const_dt = 6e-6, acoustic CFL ~ 11) -- the
-penalty grows with the wave CFL, like the masked-band freeze's.
+This test is the guard on that claim.  A residual-only wall term the
+preconditioner does not cover is a measured 7-21x GMRES stagnation (the
+z_wall_conduction lesson), and the wall face sits on the LIVE rows where
+the momentum wave Schur is strongest -- the rows the masked-band rigid
+freeze does not cover.
 
 mode = "off" (the wall_no_slip = 0 twin): asserts the preconditioned
 baseline is healthy and records its GMRES cost per Newton iteration.
@@ -32,8 +31,7 @@ mode = "on" (the headline): asserts
  1. Newton converged in a few iterations per step,
  2. every step's GMRES calls converged well inside the iteration cap,
  3. the mean GMRES iterations per Newton iteration do not exceed the
-    OFF twin's by more than MAX_GMRES_MARGIN -- the identity rows must
-    keep the pinned momentum out of the preconditioned spectrum.
+    OFF twin's by more than MAX_GMRES_MARGIN.
 
 Usage:
   analysis_mhd_wall_no_slip_pc.py <newton.txt> off
@@ -45,7 +43,7 @@ import sys
 import numpy as np
 
 MAX_NEWTON_ITERS_PER_STEP = 6
-# The deck's GMRES cap; a PC that does not mirror the pin pegs it.
+# The deck's GMRES cap; a PC that does not cover the wall term pegs it.
 GMRES_CAP = 400.0
 MAX_GMRES_ITERS_PER_NEWTON = 300.0
 # The final linear residual is measured against the step's FINAL
@@ -54,7 +52,8 @@ MAX_GMRES_ITERS_PER_NEWTON = 300.0
 # AT the RHS scale, orders above the converged norm), not a
 # restatement of gmres.relative_tolerance.
 MAX_GMRES_RESIDUAL_FRACTION = 1.0
-# "within a small factor": the identity rows must keep the pin free.
+# "within a small factor": the wall face term must not cost the
+# preconditioned solve anything structural.
 MAX_GMRES_MARGIN = 2.0
 
 
@@ -111,13 +110,13 @@ if mode == "on":
     reference_per_newton = gmres_per_newton(sys.argv[3])
     margin = mean_per_newton / max(reference_per_newton, 1.0e-300)
     print(
-        f"pin ON {mean_per_newton:.2f} vs OFF {reference_per_newton:.2f} "
-        f"gmres/newton-iter -> margin {margin:.3f}x"
+        f"no-slip ON {mean_per_newton:.2f} vs OFF "
+        f"{reference_per_newton:.2f} gmres/newton-iter -> margin "
+        f"{margin:.3f}x"
     )
     assert margin < MAX_GMRES_MARGIN, (
-        f"the no-slip pin costs {margin:.2f}x the OFF twin's GMRES "
-        "iterations: pc_mhd_block is not emitting the pinned momentum "
-        "identity rows"
+        f"the no-slip wall face costs {margin:.2f}x the OFF twin's GMRES "
+        "iterations: pc_mhd_block no longer covers the wall shear term"
     )
 
 print(f"wall no-slip preconditioner-parity test ({mode}) PASSED")
