@@ -5126,6 +5126,19 @@ Jacobian probes.
     intra-step stage is faithful). ``0`` disables the gate. 1D has no
     poloidal flux, so only ``0`` is accepted there.
 
+.. pp:param:: implicit_mhd.density_eater_start_time
+    :type: ``float``
+    :default: none (the eater runs from step one)
+
+    Simulation time [s] at which the eater switches on: it is skipped
+    on every step whose END time is below it, leaving the state
+    bit-identical to an eater-free run (and writing no ledger row).
+    This is the reference code's ``eaten_type`` 0 → 1 card flip — the reference shot turns
+    the eater on at the 8 us segment boundary. A HARD gate is the
+    faithful form: the eater is an operator-split projection of the
+    committed :math:`t^{n+1}` state, outside every Newton solve, so a
+    time branch cannot reach a residual.
+
 .. pp:param:: implicit_mhd.density_eater_ledger_file
     :type: ``string``
     :default: none (no file)
@@ -5346,6 +5359,84 @@ Jacobian probes.
     (its internal-energy blocks track no kinetic energy to pair the
     stress work against). The zero-flux reflecting wall passes no
     viscous flux, matching the advective wall policy.
+
+.. pp:param:: implicit_mhd.viscosity(t)
+    :type: ``string`` (parser expression in ``t``)
+    :default: none (the static :pp:param:`implicit_mhd.viscosity` key)
+
+    TIME-STAGED viscosity: the same coefficient as
+    :pp:param:`implicit_mhd.viscosity`, given as a parser expression in
+    the simulation time ``t`` [s]. Mutually exclusive with the static
+    key. This is the reference code's ``glob_mod`` ``d_nur`` card, which is a
+    constant within each restart segment and changes only at a segment
+    boundary (the reference shot steps 2000 → 500 m^2/s at 8 us).
+
+    Evaluated ONCE PER STEP on the host, at the theta-stage time
+    :math:`t^n + \theta \Delta t`, so every residual of a Newton solve
+    sees the same frozen scalar: the JFNK Jacobian carries no time
+    nonlinearity and the device kernels pay nothing. Stage it as a
+    SMOOTH (tanh-blended) schedule — the coefficient sits inside the
+    residual, so a hard time branch would step the operator
+    discontinuously between steps. A single-value expression is
+    bit-identical to the static key.
+
+.. pp:param:: implicit_mhd.viscosity_open_multiplier
+    :type: ``float`` (or ``implicit_mhd.viscosity_open_multiplier(t)``,
+        a parser expression in ``t``)
+    :default: ``1`` (off)
+
+    The reference code's ``nu_op_mul`` (``step.f90`` ``disip``,
+    ``IF (nu_op_mul /= 1) WHERE (psi > nu_op_bnd) vis_r = nu_op_mul*vis_r``):
+    the factor applied to the INTERIOR ion viscous face coefficient
+    wherever the poloidal flux exceeds
+    :pp:param:`implicit_mhd.viscosity_open_psi` — the tenuous/open
+    region (the reference shot arms it at 8 us with ``0.1``). RZ only: the gate is
+    a poloidal-flux integral and there is no poloidal flux in 1D.
+
+    The multiplier never touches the
+    :pp:param:`implicit_mhd.wall_viscosity_band_value` pedestal — the reference code
+    scales BEFORE the ``small_vis`` wall assignment overwrites it. Our
+    coefficient lives on faces while theirs lives on the nodes their
+    operator differences, so a face takes the MEAN of its two adjacent
+    cell multipliers. The per-cell table is rebuilt once per step from
+    the STEP-OLD field (the reference code's ``disip`` runs at the top of a step),
+    so the branch structure is constant for the JFNK probes. The
+    ``(t)`` form stages it on the same contract as
+    ``implicit_mhd.viscosity(t)``.
+
+.. pp:param:: implicit_mhd.viscosity_open_psi
+    :type: ``float``
+    :default: ``0``
+
+    The reference code's ``nu_op_bnd`` in Wb/rad: the threshold on
+    :math:`\psi(r, z) = \int_0^r B_z\,r'\,dr'` (the theta-stage total
+    :math:`B_z`, plasma response plus the stored external field under
+    the split-field drive) that selects the region
+    :pp:param:`implicit_mhd.viscosity_open_multiplier` scales. The
+    convention matches the reference code exactly — they pin :math:`\psi = 0` on
+    the axis and feed it volt-seconds/:math:`2\pi` — so their card
+    value transfers as a number. The reference shot uses ``5e-4``.
+
+.. pp:param:: implicit_mhd.viscosity_open_psi_width
+    :type: ``float``
+    :default: ``0`` (the reference-exact hard threshold)
+
+    Optional tanh half-width in Wb/rad of the
+    :pp:param:`implicit_mhd.viscosity_open_psi` threshold. The threshold
+    is keyed to the step-old field and frozen across the Newton solve,
+    so the hard form is not Newton-hostile; the width exists only to
+    damp step-to-step chatter of cells sitting on the threshold.
+
+.. pp:param:: implicit_mhd.viscosity_open_flux_sign
+    :type: ``int``: ``-1``, ``0``, or ``1``
+    :default: ``1``
+
+    Sign convention mapping the local :math:`B_z` orientation onto the
+    the reference code :math:`\psi` (mirrors
+    :pp:param:`implicit_mhd.density_eater_flux_sign`): the gate fires
+    where :math:`s\,\psi >` the threshold. ``0`` disables the
+    mechanism outright and is rejected together with a non-unit
+    multiplier, which would then be a silent no-op.
 
 .. pp:param:: implicit_mhd.wall_viscosity_mask
     :type: ``bool``

@@ -12,11 +12,13 @@
 #include "FieldSolver/ImplicitSolvers/WarpXSolverVec.H"
 
 #include <AMReX_Array.H>
+#include <AMReX_GpuContainers.H>
 #include <AMReX_Parser.H>
 #include <AMReX_REAL.H>
 #include <AMReX_iMultiFab.H>
 
 #include <array>
+#include <limits>
 #include <memory>
 #include <string>
 
@@ -345,8 +347,31 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * and (electron) energy are booked cumulatively and optionally
      * appended to density_eater_ledger_file as "step mass energy" rows
      * (the floor-ledger conventions). Wall-masked (rigid-conductor)
-     * cells are excluded, the x_kind < 1 analog. */
-    void ApplyDensityEater (int step);
+     * cells are excluded, the x_kind < 1 analog. Skipped entirely
+     * before density_eater_start_time (the reference code's eaten_type card
+     * flip). */
+    void ApplyDensityEater (amrex::Real time, int step);
+    /** Refresh the time-staged viscous coefficients for one step (the
+     * The reference code's glob_mod card: their d_nur / nu_op_mul are constants WITHIN
+     * a segment and change only at a restart boundary).
+     *
+     * Evaluates implicit_mhd.viscosity(t) and
+     * viscosity_open_multiplier(t) on the host at the theta-stage time
+     * and, in RZ, rebuilds the psi-keyed per-cell multiplier table from
+     * the step-old poloidal flux. Called once at the top of OneStep, so
+     * every residual of the Newton solve sees the SAME coefficient: the
+     * JFNK Jacobian carries no time nonlinearity and the staging is a
+     * smooth step-to-step schedule rather than an in-residual branch.
+     * The deck compiles its segment tables into tanh blends (the eta
+     * table precedent), so the schedule is C-infinity in t. */
+    void UpdateStagedViscosity (amrex::Real time);
+    /** Rebuild m_viscosity_region_scale from the poloidal flux of the
+     * current (step-old) magnetic field: 1 where sign * psi <=
+     * viscosity_open_psi and viscosity_open_multiplier above it, with an
+     * optional tanh blend of half-width viscosity_open_psi_width. RZ
+     * only; a no-op (and the table is released) whenever the mechanism
+     * is inactive. */
+    void BuildViscosityRegionScale ();
     /** Assemble the solver-owned Ohm's law E = -u x B + eta J (hlld path).
      * With at_resistive_stage = true (residual evaluations) the
      * dissipative terms (eta J, the vacuum-eta boost, and the
@@ -1084,6 +1109,16 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // only: 1D has no poloidal flux, so the default (and only legal
     // value) there is 0.
     int m_density_eater_flux_sign = 0;
+    // Time gate (implicit_mhd.density_eater_start_time [s]): the eater
+    // is skipped on every step whose END time is below it -- the reference code's
+    // eaten_type 0 -> 1 card flip (the reference shot turns the eater on at the
+    // 8 us segment boundary). Default lowest() = always on, so the gate
+    // is a no-op unless set. A HARD gate is the faithful form here: the
+    // eater is an operator-split projection applied to the committed
+    // t^{n+1} state, outside every Newton solve, so a time branch cannot
+    // reach a residual.
+    amrex::Real m_density_eater_start_time =
+        std::numeric_limits<amrex::Real>::lowest();
     // Eater removal ledger: cumulative removed mass [kg] and electron
     // energy [J] ([kg/m^2], [J/m^2] in 1D), booked at the committed
     // t^{n+1} state each step and optionally appended to
@@ -1368,7 +1403,67 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // fluxes (0 = off; required positive for fluid_flux = central). The
     // normal-gradient viscous stress and its velocity-weighted work enter
     // the face registers as an exactly conservative pair.
+    //
+    // This member always holds the value the kernels read. It is either
+    // the static key implicit_mhd.viscosity or, with the time-staged key
+    // implicit_mhd.viscosity(t), the parser refreshed ONCE PER STEP at
+    // the theta-stage time by UpdateStagedViscosity (see there for why
+    // the coefficient is frozen across a Newton solve).
     amrex::Real m_viscosity = 0.0;
+    // ---- Time-staged viscosity (implicit_mhd.viscosity(t), the reference code's
+    // glob_mod d_nur card staging: the reference shot drops d_nur 2000 -> 500
+    // m^2/s at the 8 us segment boundary). Mutually exclusive with the
+    // static implicit_mhd.viscosity key; absent, nothing below is
+    // touched and the static path stays bit-identical. The expression is
+    // a function of the simulation time t [s] only, so it is evaluated
+    // on the HOST -- the device kernels keep a plain scalar. ----
+    std::string m_viscosity_expression;
+    std::unique_ptr<amrex::Parser> m_viscosity_parser;
+    amrex::ParserExecutor<1> m_viscosity_evaluate;
+    bool m_viscosity_is_parser = false;
+    // ---- Open/tenuous-region viscosity multiplier (the reference code's nu_op
+    // pair of step.f90 disip:199-201,
+    //     IF (nu_op_mul /= 1) WHERE (psi > nu_op_bnd) vis_r = nu_op_mul*vis_r
+    // -- the reference shot turns it on at 8 us with nu_op_mul = 0.1,
+    // nu_op_bnd = 5e-4 Wb/rad). psi(r, z) = int_0^r Bz r' dr' is the
+    // poloidal flux function with psi = 0 on the axis, the SAME
+    // convention the reference code uses (psi.f90:261 pins psi on the axis; circ.f90
+    // feeds it volt-seconds/2pi), so nu_op_bnd transfers as a number.
+    // The threshold selects the TENUOUS region (measured on the reference shot
+    // the later reference dump: 72.5% of cells, median density at the background floor),
+    // matching the "! Low-density viscosity" comment at step.f90:198.
+    //
+    // RZ only (there is no poloidal flux in 1D). The multiplier applies
+    // to the INTERIOR coefficient only, never to the wall band -- the reference code
+    // orders the nu_op scaling BEFORE the small_vis wall assignment,
+    // which overwrites it (step.f90:203-204).
+    amrex::Real m_viscosity_open_multiplier = 1.0;
+    std::string m_viscosity_open_multiplier_expression;
+    std::unique_ptr<amrex::Parser> m_viscosity_open_multiplier_parser;
+    amrex::ParserExecutor<1> m_viscosity_open_multiplier_evaluate;
+    bool m_viscosity_open_multiplier_is_parser = false;
+    // Threshold nu_op_bnd [Wb/rad] and the sign convention that maps our
+    // Bz orientation onto the reference code's psi (mirrors density_eater_flux_sign;
+    // 0 disables the mechanism outright).
+    amrex::Real m_viscosity_open_psi = 0.0;
+    int m_viscosity_open_flux_sign = 1;
+    // Optional tanh half-width [Wb/rad] of the psi threshold. 0
+    // (default) is reference-exact: a hard WHERE. The threshold is keyed to
+    // the STEP-OLD field (frozen across the Newton solve), so the hard
+    // form is not Newton-hostile -- the width only exists to damp
+    // step-to-step chatter of cells sitting on the threshold.
+    amrex::Real m_viscosity_open_psi_width = 0.0;
+    // Per-cell multiplier over the WHOLE domain, rebuilt once per step
+    // by UpdateStagedViscosity and indexed by GLOBAL cell index
+    // [(i - radial_lo) * axial_cells + (j - axial_lo)], the
+    // wall-mask-table idiom: already reduced across ranks, so no ghost
+    // exchange and no per-residual communication. Empty = inactive.
+    amrex::Gpu::DeviceVector<amrex::Real> m_viscosity_region_scale;
+    int m_viscosity_region_radial_lo = 0;
+    int m_viscosity_region_axial_lo = 0;
+    int m_viscosity_region_radial_cells = 0;
+    int m_viscosity_region_axial_cells = 0;
+    bool m_viscosity_region_active = false;
     // ---- Wall viscosity BAND (implicit_mhd.wall_viscosity_mask,
     // default off = bit-identical; requires an active wall mask): the
     // The reference code's wall-viscosity band of step.f90 disip

@@ -1,0 +1,146 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.Ti = 100.0
+my_constants.P0 = n0 * Ti * q_e
+my_constants.Te = 1.0
+my_constants.gamma = 5.0/3.0
+# A dynamically irrelevant guide field: v_A = B0/sqrt(mu0 rho0) = 21.8
+# m/s, so the transverse Alfven frequency k v_A = 137 /s is nearly three
+# orders below the viscous rate nu k^2 = 7.9e4 /s (the overdamped
+# correction goes as its SQUARE, 3e-6) -- the shear mode is a PURE
+# momentum diffusion, not a damped Alfven wave.
+my_constants.B0 = 1.0e-5
+# Solver-vec normalization ONLY (the energy blocks are scaled by
+# B_ref^2/mu0): the guide field is deliberately far below the
+# thermal scale, so B_ref must be the thermal magnetic field or the
+# energy blocks enter the residual norm 1e7 too large and the JFNK
+# finite difference degenerates to round-off.
+my_constants.B_ref = sqrt(mu0 * P0)
+my_constants.nz = 64
+my_constants.Lz = 1.0
+my_constants.sound_speed = sqrt(gamma*P0/rho0)
+# 0.1% of the sound speed: the viscous heating this shear deposits over
+# the run is 1.4e-6 of the internal energy, so the acoustic back-reaction
+# on the transverse mode is unmeasurable.
+my_constants.shear = 1.0e-3 * sound_speed
+# The reference code's glob_mod d_nur card values (the reference shot: 2000 for [0, 8] us, 500
+# after) and the staging clock. The anchor deck
+# (inputs_test_1d_theta_implicit_mhd_viscosity_shear) is byte-identical
+# to this one except that it pins the FIRST card as a scalar; the
+# bit-identity twin re-runs THIS deck with the table collapsed to nu_hi.
+my_constants.nu_hi = 2000.0
+my_constants.nu_lo = 500.0
+my_constants.t_switch = 8.0e-6
+my_constants.tau_switch = 2.0e-6
+my_constants.dt = 2.5e-7
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 64
+amr.n_cell = nz
+amr.max_grid_size = 32
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+implicit_evolve.theta = 0.5
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-11
+newton.relative_tolerance = 1.0e-9
+newton.max_iterations = 12
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-10
+gmres.max_iterations = 300
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Te
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_velocity = sound_speed
+implicit_mhd.reference_magnetic_field = B_ref
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = P0
+implicit_mhd.ion_closure = total_energy
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.ion_pressure_floor = 1.0e-8 * P0
+implicit_mhd.electron_pressure_floor = 1.0e-8 * (n0 * Te * q_e)
+implicit_mhd.fluid_flux = central
+
+# Decaying transverse shear: a uniform column at rest carrying a single
+# transverse Fourier mode v_y = shear * sin(2 pi z / Lz). The central
+# flux carries no Riemann dissipation, so the ONLY momentum sink is the
+# explicit viscous face stress, and the mode is a discrete eigenmode of
+# the face-difference Laplacian: it decays at exactly nu k_eff^2 with
+# k_eff^2 = (4/dz^2) sin^2(k dz/2). Nothing else in the deck moves --
+# v_z = 0, the pressures and the density are uniform, and the guide
+# field is dynamically inert.
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.ion_pressure(x,y,z) = P0
+implicit_mhd.electron_pressure(x,y,z) = n0 * Te * q_e
+implicit_mhd.velocity_y(x,y,z) = shear * sin(2*pi*z/Lz)
+
+# The staged viscosity: exactly what the production formation deck's --viscosity-table
+# compiler emits for the reference code's card chain '2000,500@8' -- a tanh blend
+# v0 + 0.5 (v1 - v0) (1 + tanh((t - t1)/tau)). Smooth by construction:
+# the coefficient sits inside the JFNK residual, so a hard time branch
+# would step the operator discontinuously between steps. Host-evaluated
+# once per step at the theta-stage time (UpdateStagedViscosity), so the
+# analytic per-step decay rate is nu(t_n + theta dt) k_eff^2.
+implicit_mhd.viscosity(t) = "nu_hi + 0.5*(nu_lo - nu_hi)*(1 + tanh((t - t_switch)/tau_switch))"
+
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 B0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 1
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz implicit_mhd_mass_density \
+                       implicit_mhd_momentum_y \
+                       implicit_mhd_ion_energy \
+                       implicit_mhd_electron_energy
+diag1.write_species = 0
