@@ -1228,6 +1228,15 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // antisymmetric wall reflection mirrors the staged velocity rather
     // than a mixed-stage one. ----
     amrex::Real m_viscous_theta = -1.0;
+    // One-shot dissipation-tensor consistency audit, emitted at the first
+    // step (dt is only known then). This lived in ONE deck and therefore
+    // protected only that deck: the Prandtl arm of it shipped 2026-09-03
+    // defaulting to disabled and never fired across ~50 arms while
+    // production ran chi/eta = 1031. A guard that any deck can omit,
+    // fork or leave stale is not a guard -- so it belongs here, where
+    // every caller of this solver gets it whether they asked or not.
+    bool m_transport_audit_done = false;
+    void AuditTransportConsistency (amrex::Real time);
     // Non-periodic z (RZ only): the solver fills axial domain ghosts with
     // zero-gradient (Neumann) values, giving outflow ends instead of the
     // periodic seam. Set automatically when the z geometry is non-periodic.

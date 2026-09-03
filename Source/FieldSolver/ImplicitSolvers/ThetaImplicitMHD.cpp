@@ -3965,11 +3965,109 @@ void ThetaImplicitMHD::SaveMagneticField ()
     }
 }
 
+void ThetaImplicitMHD::AuditTransportConsistency (const amrex::Real time)
+{
+    // Solver-side twin of the deck's transport audit. Runs once, at the
+    // first step, because dt is not known before then.
+    //
+    // WHY IT IS HERE AND NOT IN A DECK: the deck version was correct and
+    // completely ineffective. Its Prandtl arm defaulted to disabled, no
+    // launcher ever enabled it, and it never fired once across ~50 arms
+    // while production ran chi/eta = 1031 -- three orders of magnitude of
+    // stiffness disparity between two legs of the same tensor. Any check
+    // a deck can omit or fork away is optional in practice. This one is
+    // not: it warns from the solver, so every deck inherits it.
+    if (m_transport_audit_done) { return; }
+    m_transport_audit_done = true;
+    if (!m_use_recast || m_dt <= 0.0_rt) { return; }
+
+    const auto cell_size = m_WarpX->Geom(0).CellSizeArray();
+    amrex::Real h = cell_size[0];
+    for (int d = 1; d < AMREX_SPACEDIM; ++d) { h = std::min(h, cell_size[d]); }
+    if (h <= 0.0_rt) { return; }
+
+    const amrex::Real eta_ohm = GetMHDReferenceResistivityForPC(time);
+    const amrex::Real eta_m = eta_ohm / PhysConst::mu0;      // m^2/s
+    if (!(eta_m > 0.0_rt) || !std::isfinite(eta_m)) { return; }
+
+    // chi cap in the OPERATOR convention. The per-component knobs are the
+    // physical kappa/(n kB) convention and are scaled by (gamma - 1) per
+    // species before they clamp, so compare the CONVERTED value -- the
+    // raw number is 1/(gamma-1) too large and reading it directly is the
+    // exact error the deck table shipped with for a full campaign.
+    const amrex::Real gam = std::max(m_gamma_e - 1.0_rt, m_gamma_i - 1.0_rt);
+    amrex::Real chi_cap = -1.0_rt;
+    if (m_conduction_chi_par_max >= 0.0_rt) {
+        chi_cap = gam * m_conduction_chi_par_max;
+    } else if (m_conduction_chi_max > 0.0_rt) {
+        chi_cap = m_conduction_chi_max;
+    }
+    if (!(chi_cap > 0.0_rt)) { return; }
+
+    const amrex::Real d_eta = eta_m * m_dt / (h * h);
+    const amrex::Real d_chi = chi_cap * m_dt / (h * h);
+    const amrex::Real ratio = chi_cap / eta_m;
+    // A >= 0 <=> D <= 1/(1-theta); unconditional at theta = 1.
+    const bool chi_bounded = (m_conduction_theta >= 1.0_rt);
+    const amrex::Real d_max_chi =
+        chi_bounded ? std::numeric_limits<amrex::Real>::infinity()
+                    : 1.0_rt / (1.0_rt - m_conduction_theta);
+    const amrex::Real prandtl_bound =
+        (d_eta > 0.0_rt && std::isfinite(d_max_chi)) ? d_max_chi / d_eta
+                                                     : -1.0_rt;
+
+    amrex::Print() << "\n"
+                   << "*** MHD TRANSPORT CONSISTENCY (solver-side audit) ***\n"
+                   << "  h = " << h << " m   dt = " << m_dt << " s\n"
+                   << "  eta = " << eta_m << " m^2/s   D_eta = " << d_eta << "\n"
+                   << "  chi cap = " << chi_cap << " m^2/s (operator convention"
+                   << (m_conduction_chi_par_max >= 0.0_rt
+                           ? ", = (gamma-1) x conduction_chi_par_max"
+                           : ", = conduction_chi_max")
+                   << ")   D_chi = " << d_chi << "\n"
+                   << "  chi/eta = " << ratio << "\n";
+    if (d_chi > d_max_chi) {
+        amrex::Print()
+            << "  WARNING: chi is NON-MONOTONE: D_chi = " << d_chi
+            << " exceeds the theta-scheme bound 1/(1-theta_chi) = "
+            << d_max_chi << ", so the update amplifier is negative and a "
+               "cell above its neighbour is driven NEGATIVE in one step.\n";
+    }
+    if (prandtl_bound > 0.0_rt && ratio > prandtl_bound) {
+        amrex::Print()
+            << "  WARNING: chi is NOT Prandtl-matched to eta: chi/eta = "
+            << ratio << " exceeds D_max/D_eta = " << prandtl_bound
+            << ".  The physical ratio scales as ~T^4/n, so an ABSOLUTE chi "
+               "clamp is unrelated to eta and pins in the hot core.  Set "
+               "implicit_mhd.conduction_chi_par_max <= "
+            << (prandtl_bound * eta_m / gam)
+            << " (kappa/(n kB) convention) to match.\n";
+    }
+    if (m_resistive_theta != m_conduction_theta ||
+        m_conduction_theta != m_viscous_theta) {
+        amrex::Print()
+            << "  WARNING: dissipation tensor NOT uniformly staged: "
+               "theta_eta = " << m_resistive_theta
+            << ", theta_chi = " << m_conduction_theta
+            << ", theta_nu = " << m_viscous_theta << ".\n";
+    }
+    if (m_resistive_theta != 0.5_rt || m_conduction_theta != 0.5_rt ||
+        m_viscous_theta != 0.5_rt) {
+        amrex::Print()
+            << "  WARNING: EXACT ENERGY CONSERVATION FORFEITED -- theta = 0.5 "
+               "is the exactly energy-conserving point of this scheme; a "
+               "dissipative leg above it is backward-Euler-flavoured and "
+               "discards energy numerically.\n";
+    }
+    amrex::Print() << "*** end transport audit ***\n\n";
+}
+
 int ThetaImplicitMHD::OneStep (const amrex::Real start_time, const amrex::Real dt, const int step)
 {
     BL_PROFILE("ThetaImplicitMHD::OneStep()");
 
     m_dt = dt;
+    AuditTransportConsistency(start_time);
     m_circuit_hook_calls = 0;
     // Native circuit driver: (re)open the coupling step lazily at the
     // first qualifying residual evaluation. A step replayed after a
