@@ -544,7 +544,7 @@ int main ()
     // (i) The limited SLOPE of a uniform stencil is EXACTLY zero, so the
     //     scheme manufactures no face jump anywhere in a quiescent region
     //     -- the property the collapsed smooth_median3 form buys, and the
-    //     one the literal nested the reference code's expression would lose (it returns
+    //     one the literal nested expression of the reference code would lose (it returns
     //     -0.104 w there, an O(w) jump on every face of every halo
     //     pedestal, vacuum band, and held equilibrium).
     for (const int mode : limiter_modes) {

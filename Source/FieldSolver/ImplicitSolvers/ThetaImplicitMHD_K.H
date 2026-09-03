@@ -375,7 +375,7 @@ smooth_positive_floor (const amrex::Real value,
 }
 
 /**
- * \brief C-infinity median of three -- the smoothed the reference code's `fmed`
+ * \brief C-infinity median of three -- the smoothed `fmed` of the reference code
  * (adv.f90:1344, `MIN(MAX(p1,p2), MAX(p3, MIN(p1,p2)))`).
  *
  * Built from the identity med = a + b + c - min3 - max3 with the file's
@@ -595,7 +595,7 @@ constexpr amrex::Real advection_offset_width_fraction = 0.1;
  * structural, not a numerical near-cancellation.
  *
  * SMOOTHNESS / JFNK. rho_off is a per-solve constant (the frozen vacuum
- * Reference), so the only state dependence is through rho itself: with
+ * reference), so the only state dependence is through rho itself: with
  * x = rho - rho_off and w = advection_offset_width_fraction * rho_off,
  *
  *     D    = gate * smooth_max(x, 0, w) + (1 - gate) * x,

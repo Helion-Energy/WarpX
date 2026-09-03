@@ -26,7 +26,7 @@ clause is checked analytically (the reference code's ntb.f90:773-807 semantics):
      the reference shot's closure keeps wio and wik: the removed mass gives up
      nothing, so the per-particle ion temperature RISES -- checked
      against the analytic (1 - rate)^-n factor). NOTE: this is the
-     faithful the reference code's semantics -- the eater is NOT a cold-dilution
+     semantics faithful to the reference code -- the eater is NOT a cold-dilution
      refill;
   4. electron temperature preservation: U_e/rho in the band is invariant
      (te is the reference code's electron state under flg_wie = false, so U_e

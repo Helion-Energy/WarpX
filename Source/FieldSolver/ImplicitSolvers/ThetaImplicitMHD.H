@@ -197,7 +197,7 @@ class ThetaImplicitMHD final : public ImplicitSolver
      * (the field-eta vacuum boost, the Ohm-current Joule quench
      * criterion, and the conduction halo boost): the static Ohm guard
      * by default, raised to fraction * rho_peak when the dynamic
-     * Reference is active (see m_vacuum_reference_peak_fraction). */
+     * reference is active (see m_vacuum_reference_peak_fraction). */
     [[nodiscard]] amrex::Real VacuumReferenceMassDensity () const;
     /** Mass-density equivalent of the Ohm's-law division guard
      * (hybrid_pic_model.n_floor). Deliberately independent of the fluid
@@ -875,13 +875,13 @@ class ThetaImplicitMHD final : public ImplicitSolver
     //
     // WHY FRACTION-KEYED, NOT AN ABSOLUTE kg/m^3. The reference code's own offset is
     // f_en_mn * en0 with en0 = max(en00, 0.1 max(en)) -- a DYNAMIC
-    // Reference that tracks the compressing plasma. VacuumReferenceMass-
+    // reference that tracks the compressing plasma. VacuumReferenceMass-
     // Density() is exactly that composition already (max of the Ohm
     // guard, the static base en00, and vacuum_reference_peak_fraction
     // times the per-step frozen density peak), and it is the reference
     // the vacuum resistivity, the conduction halo boost, and the Ohm
     // guard all key to. With vacuum_reference_peak_fraction = 0.1 our
-    // Reference IS their en0 and f_off is literally their f_en_mn
+    // reference IS their en0 and f_off is literally their f_en_mn
     // (the reference shot: 1e-3, i.e. 3.3e17 m^-3 against en0 = 3.3e20 m^-3). An
     // absolute knob would have to be retuned every time the reference
     // moves and would key the offset to nothing the rest of the halo
@@ -1076,7 +1076,7 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // to implicit_mhd.reference_mass_density.
     amrex::Real m_density_eater_reference_density = -1.0;
     // Dynamic reference (the reference code's en0_upd = 1, step.f90:218-225):
-    // Reference = max(base, fraction x step-old global density peak);
+    // reference = max(base, fraction x step-old global density peak);
     // 0 freezes the reference at the base (en0_upd = 0).
     amrex::Real m_density_eater_reference_peak_fraction = 0.1;
     // Axial band: "z_lo" (the reference code's sym_bc = 1: planes at the mirror

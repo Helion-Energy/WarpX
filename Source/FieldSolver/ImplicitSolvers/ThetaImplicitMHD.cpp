@@ -1152,7 +1152,7 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
         // The target must stay an admissible density: the eater pulls
         // cells DOWN onto it, so a target below the positivity floor
         // would break the end-of-step floor assertions. The dynamic
-        // Reference only RAISES the target, so checking the base
+        // reference only RAISES the target, so checking the base
         // suffices.
         const amrex::Real eater_reference_base =
             m_density_eater_reference_density > 0.0_rt
@@ -2169,7 +2169,7 @@ ThetaImplicitMHD::VacuumReferenceMassDensity () const
     // The static Ohm guard is the exact base = fraction = 0 limit
     // (both extra terms stay 0), so the default is bit-identical; the
     // static base realizes the reference code's en00 and with the dynamic
-    // Reference active the max keeps a globally decaying state from
+    // reference active the max keeps a globally decaying state from
     // dragging the reference below base or guard (the full reference code
     // en0 = max(en00, 0.1 max(en)) composition, step.f90 ~218-224).
     return std::max({OhmMassDensityFloor(), m_vacuum_reference_base_density,
@@ -5613,7 +5613,7 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
         PhysConst::mu0 * m_vacuum_resistivity_diffusivity;
     // Vacuum-boost reference of the quench's eta_field (and hence of the
     // diffusion-dominance criterion): the per-step frozen dynamic
-    // Reference (VacuumReferenceMassDensity), matching the field
+    // reference (VacuumReferenceMassDensity), matching the field
     // advance. The eta_joule ARGUMENT floor keeps the static Ohm guard.
     const amrex::Real joule_vacuum_reference =
         charge_to_mass * VacuumReferenceMassDensity();
@@ -10916,7 +10916,7 @@ void ThetaImplicitMHD::ComputeFluidRHSFromFaceFluxes (WarpXSolverVec& rhs,
         PhysConst::mu0 * m_vacuum_resistivity_diffusivity;
     // Vacuum-boost reference of the quench's eta_field (and hence of the
     // diffusion-dominance criterion): the per-step frozen dynamic
-    // Reference (VacuumReferenceMassDensity), matching the field
+    // reference (VacuumReferenceMassDensity), matching the field
     // advance. The eta_joule ARGUMENT floor keeps the static Ohm guard.
     const amrex::Real joule_vacuum_reference =
         charge_to_mass * VacuumReferenceMassDensity();

@@ -2703,7 +2703,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         coefficient: the reading that a flux-conforming wall only
         exposes the cross-field channel. "parallel" takes the
         conduction_chi_par_min/max-clamped one, reproducing the
-        measured the reference code's wall conductance G (their implicit temperature
+        measured wall conductance G of the reference code (their implicit temperature
         solve pins every wall-conforming cut-cell vertex at the 0.5 eV
         anchor for BOTH species and builds G from the PARALLEL
         conductivity clamp maximum). Under production clamp classes the

@@ -98,7 +98,7 @@
  * 2. RZ (m = 0) momentum wave Schur: the momentum block is composed with
  *    the cylindrical wave operator MHDWaveOpRZ
  *    (I - h^2 c_s^2 grad div + h^2/(mu0 rho_ref) W_B with the INPUT
- *    Reference field magnitude along zhat; the domain mean is near zero
+ *    reference field magnitude along zhat; the domain mean is near zero
  *    for reversed-field states, and W_B is quadratic in B so the sign
  *    structure is immaterial), applied after the scalar diffusion with a
  *    fixed-cycle MLMG and zero initial guess, engaged when the reference
@@ -1465,7 +1465,7 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
             "pc_mhd_block requires positive finite reference signal speeds");
         // Precondition only the UNRESOLVED part of the upwind dissipation:
         // subtract signal_cfl_floor cells per implicit interval from the
-        // Reference speed. Below the floor the diffusion switches off
+        // reference speed. Below the floor the diffusion switches off
         // exactly: on resolved states the residuals are smooth and any
         // preconditioner content only injects structure that GMRES must
         // then resolve against the Jacobian's rough (grid-scale HLLD)

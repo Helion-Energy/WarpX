@@ -16,7 +16,7 @@ my_constants.sound_speed = sqrt(gamma*P0/rho0)
 my_constants.vy0 = 0.01 * sound_speed
 my_constants.dt = 0.1 * (Lz/nz) / sound_speed
 # Eater: the reference code's rate/target (0.2 per step toward 0.01 x reference); the
-# Reference defaults to reference_mass_density = rho0 and the dynamic
+# reference defaults to reference_mass_density = rho0 and the dynamic
 # peak fraction (0.1 x peak = 0.4 rho0 < rho0) never engages, so the
 # target is the CONSTANT 0.01 rho0 and the band excess decays by the
 # analytic factor 0.8 per step.

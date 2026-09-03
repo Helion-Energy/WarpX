@@ -23,7 +23,7 @@ my_constants.B0 = sqrt(mu0 * (pe0 + pi0))
 # step-old (n, Te) -- Te changes as the pair relaxes, so the analysis
 # replicates the per-step frozen-rate recurrence rather than a single
 # exponential. p_e + p_i (and U_e + E_i) are conserved to round-off.
-# nu0 below is the initial the reference code's rate (Te0 = 44 eV sits on the
+# nu0 below is the initial reference-code rate (Te0 = 44 eV sits on the
 # high-Te lnLambda branch); the deck's dt puts K dt ~ 0.13.
 my_constants.lnL0 = 24 + 3*log(10) - 0.5*log(n0) + log(Te0)
 my_constants.nu0 = 4.75e-15 * lnL0 * n0 / (Te0 * sqrt(Te0))

@@ -786,7 +786,7 @@ add_warpx_test(
 )
 
 # Braginskii quasi-shorting twin (conduction_qs_chi = 0): the no-QS
-# Reference the braginskii_qs gates difference against
+# reference the braginskii_qs gates difference against
 add_warpx_test(
     test_1d_theta_implicit_mhd_braginskii_qs_twin  # name
     1  # dims
@@ -1169,7 +1169,7 @@ add_warpx_test(
 
 # RZ coverage of the TVD reconstruction (implicit_mhd.fluid_reconstruction)
 # on the PRODUCTION flux (central + viscosity): the same mirror-parity
-# Reference, which asserts that the discrete operator commutes with the
+# reference, which asserts that the discrete operator commutes with the
 # z-mirror to solver roundoff for every field of the parity table. That is
 # a structural check the 1D gates cannot make -- it exercises the widened
 # stencil on radial faces, across the axis (whose cell-centered current
@@ -2322,7 +2322,7 @@ add_warpx_test(
 )
 
 # shaped-wall LIVE-fluid preconditioner parity, the unpreconditioned
-# Reference twin: healthy Newton on the freeze contract without a PC
+# reference twin: healthy Newton on the freeze contract without a PC
 # (every other wall test runs frozen ions; the freeze/PC interaction
 # only exists with a live fluid)
 add_warpx_test(

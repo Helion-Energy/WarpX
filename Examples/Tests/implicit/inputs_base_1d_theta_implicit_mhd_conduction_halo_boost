@@ -4,7 +4,7 @@
 
 # Density-keyed halo boost of the Braginskii ION chi_perp
 # (implicit_mhd.conduction_halo_boost, the DIMENSIONLESS dp_mn of the
-# exact the reference code's multiplicative low-density boost, ntb.f90 t_cond ~584:
+# the reference code's exact multiplicative low-density boost, ntb.f90 t_cond ~584:
 # xip = MAX(xip, xip*(en0/en)^2*dp_mn)): a SINGLE-ZONE magnetized
 # column (uniform Bx PERPENDICULAR to z, so all z conduction is
 # cross-field) at the halo density scale, ENTROPY-MODE initialized --
