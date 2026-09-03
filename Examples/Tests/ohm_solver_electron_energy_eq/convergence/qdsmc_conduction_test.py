@@ -297,13 +297,18 @@ pywarpx.hybridpicmodel.add_new_attr("qdsmc_kappa_perp(n,Te,t)", kappa_perp_expr)
 pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = npts
 pywarpx.hybridpicmodel.qdsmc_conduction_flux_limit_factor = args.flux_limit
 pywarpx.hybridpicmodel.qdsmc_conduction_max_hop = args.max_hop
-pywarpx.hybridpicmodel.qdsmc_conduction_form = args.form
-pywarpx.hybridpicmodel.qdsmc_conduction_fluxform_unsplit = args.ff_unsplit
-pywarpx.hybridpicmodel.qdsmc_conduction_reconstruction = args.recon
+# Renamed by e8f2ea031: these four configure the SDE conduction operator's
+# advective sweep/remap, not the conduction-operator selection, and the old
+# qdsmc_conduction_* spellings now hard-abort (HybridPICModel.cpp:456-468).
+# Behaviour is unchanged by the rename -- under the production fd operator
+# they are inert either way; under sde they are honoured under the new name.
+pywarpx.hybridpicmodel.qdsmc_advection_form = args.form
+pywarpx.hybridpicmodel.qdsmc_advection_fluxform_unsplit = args.ff_unsplit
+pywarpx.hybridpicmodel.qdsmc_advection_reconstruction = args.recon
 pywarpx.hybridpicmodel.qdsmc_conduction_interp = args.interp
 pywarpx.hybridpicmodel.qdsmc_conduction_curved_feet = args.curved_feet
 pywarpx.hybridpicmodel.qdsmc_conduction_deposit_kernel = args.deposit_kernel
-pywarpx.hybridpicmodel.qdsmc_conduction_compensate = args.compensate
+pywarpx.hybridpicmodel.qdsmc_advection_compensate = args.compensate
 pywarpx.hybridpicmodel.qdsmc_conduction_fct_limiter = args.fct_limiter
 pywarpx.hybridpicmodel.qdsmc_conduction_operator = args.conduction_op
 pywarpx.hybridpicmodel.qdsmc_conduction_fd_order = args.fd_order

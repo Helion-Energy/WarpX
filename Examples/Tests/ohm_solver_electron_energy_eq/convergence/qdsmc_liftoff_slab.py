@@ -599,8 +599,8 @@ pywarpx.hybridpicmodel.qdsmc_time_advance = args.advance
 # insulating wall's maintained band Te it acts as a perpetual bath donor
 # (measured on this deck: +12.8% open-set energy per 400 steps). The
 # fluxform split sweeps with ppm/npts=3 are the gate-passed defaults.
-pywarpx.hybridpicmodel.qdsmc_conduction_form = "fluxform"
-pywarpx.hybridpicmodel.qdsmc_conduction_reconstruction = "ppm"
+pywarpx.hybridpicmodel.qdsmc_advection_form = "fluxform"
+pywarpx.hybridpicmodel.qdsmc_advection_reconstruction = "ppm"
 pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = 3
 pywarpx.hybridpicmodel.qdsmc_transport_operator = args.transport_op
 pywarpx.hybridpicmodel.qdsmc_conduction_operator = args.conduction_op

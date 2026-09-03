@@ -107,8 +107,8 @@ simulation.add_species(
 
 simulation.initialize_inputs()
 
-pywarpx.hybridpicmodel.qdsmc_conduction_form = args.form
-pywarpx.hybridpicmodel.qdsmc_conduction_reconstruction = "ppm"
+pywarpx.hybridpicmodel.qdsmc_advection_form = args.form
+pywarpx.hybridpicmodel.qdsmc_advection_reconstruction = "ppm"
 pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = args.npts
 pywarpx.hybridpicmodel.qdsmc_conduction_flux_limit_factor = 0.0
 pywarpx.hybridpicmodel.qdsmc_conduction_isotropic_launch = args.iso_launch

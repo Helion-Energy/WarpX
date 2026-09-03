@@ -215,13 +215,13 @@ pywarpx.hybridpicmodel.add_new_attr("qdsmc_kappa_perp(n,Te,t)", kappa_perp_expr)
 pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = npts
 pywarpx.hybridpicmodel.qdsmc_conduction_flux_limit_factor = args.flux_limit
 pywarpx.hybridpicmodel.qdsmc_conduction_max_hop = args.max_hop
-pywarpx.hybridpicmodel.qdsmc_conduction_form = args.form
-pywarpx.hybridpicmodel.qdsmc_conduction_fluxform_unsplit = args.ff_unsplit
-pywarpx.hybridpicmodel.qdsmc_conduction_reconstruction = args.recon
+pywarpx.hybridpicmodel.qdsmc_advection_form = args.form
+pywarpx.hybridpicmodel.qdsmc_advection_fluxform_unsplit = args.ff_unsplit
+pywarpx.hybridpicmodel.qdsmc_advection_reconstruction = args.recon
 pywarpx.hybridpicmodel.qdsmc_conduction_interp = args.interp
 pywarpx.hybridpicmodel.qdsmc_conduction_curved_feet = args.curved_feet
 pywarpx.hybridpicmodel.qdsmc_conduction_deposit_kernel = args.deposit_kernel
-pywarpx.hybridpicmodel.qdsmc_conduction_compensate = args.compensate
+pywarpx.hybridpicmodel.qdsmc_advection_compensate = args.compensate
 pywarpx.hybridpicmodel.qdsmc_conduction_fct_limiter = args.fct_limiter
 pywarpx.hybridpicmodel.qdsmc_conduction_conserve_fixup = args.conserve_fixup
 

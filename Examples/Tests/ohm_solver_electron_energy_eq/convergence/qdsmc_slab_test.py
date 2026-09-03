@@ -171,9 +171,9 @@ pywarpx.hybridpicmodel.add_new_attr("qdsmc_kappa_perp(n,Te,t)", "0.0")
 pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = npts
 pywarpx.hybridpicmodel.qdsmc_conduction_flux_limit_factor = 0.0
 pywarpx.hybridpicmodel.qdsmc_conduction_max_hop = args.max_hop
-pywarpx.hybridpicmodel.qdsmc_conduction_form = args.form
+pywarpx.hybridpicmodel.qdsmc_advection_form = args.form
 pywarpx.hybridpicmodel.qdsmc_conduction_operator = args.conduction_op
-pywarpx.hybridpicmodel.qdsmc_conduction_reconstruction = args.recon
+pywarpx.hybridpicmodel.qdsmc_advection_reconstruction = args.recon
 if args.bc == "isothermal":
     pywarpx.hybridpicmodel.qdsmc_conduction_bc_lo = ["isothermal", "adiabatic"]
     pywarpx.hybridpicmodel.qdsmc_conduction_bc_hi = ["isothermal", "adiabatic"]

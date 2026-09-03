@@ -254,9 +254,9 @@ if args.mode == "conduction":
 pywarpx.hybridpicmodel.qdsmc_conduction_quadrature_points = npts
 pywarpx.hybridpicmodel.qdsmc_conduction_flux_limit_factor = 0.0
 pywarpx.hybridpicmodel.qdsmc_conduction_max_hop = args.max_hop
-pywarpx.hybridpicmodel.qdsmc_conduction_form = "fluxform"
+pywarpx.hybridpicmodel.qdsmc_advection_form = "fluxform"
 pywarpx.hybridpicmodel.qdsmc_conduction_operator = args.conduction_op
-pywarpx.hybridpicmodel.qdsmc_conduction_reconstruction = args.recon
+pywarpx.hybridpicmodel.qdsmc_advection_reconstruction = args.recon
 pywarpx.hybridpicmodel.qdsmc_conduction_eb_bc = args.eb_bc
 if args.eb_bc == "isothermal":
     pywarpx.hybridpicmodel.add_new_attr(
