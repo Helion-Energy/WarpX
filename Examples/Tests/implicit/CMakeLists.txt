@@ -2471,6 +2471,231 @@ add_warpx_test(
     test_1d_theta_implicit_mhd_reconstruction_tvd_unlimited  # dependency
 )
 
+# ---------------------------------------------------------------------
+# Limited Rusanov dissipation of the CENTRAL (production) flux
+# (implicit_mhd.central_dissipation). central carries no Riemann
+# dissipation, so a slope limiter in front of it has nothing to limit;
+# these arms measure what that costs and what the pairing buys, on the
+# flux production actually flies.
+#
+# The BASELINE arm needs newton.require_convergence = 0 to complete at
+# all: with convergence required, undissipated central aborts at step 4
+# on this contact with "Newton line search failed to find a
+# residual-decreasing admissible step" after projecting mass onto the
+# density floor -- the campaign's own failure signature, reproduced on a
+# 1D CI-scale deck in 18 seconds.
+#
+# REGISTERED AT TWO LENGTHS. The full 120-step family below is the
+# verification case and is LABELS "slow" (excluded by the repo's
+# documented `ctest -LE slow`); a 30-step family carries CI. Same deck,
+# same 128 cells, same assertions -- only the integration time differs.
+#
+# Measured back to back in one window (baseline / lo / MUSCL, seconds):
+#     120 steps   47.4 / 22.4 / 64.0   = 133.7 s   slowest arm 64.0
+#      30 steps   16.2 /  6.5 / 16.6   =  39.3 s   slowest arm 16.6
+# a 3.41x cut that brings both the family and every individual arm inside
+# the repo's guidance. (This host is shared with other lanes, so all
+# absolute numbers here are upper bounds; the RATIO is what is robust,
+# and back-to-back is how it was taken.)
+#
+# The cost is the implicit solve, not the reconstruction arithmetic:
+# MUSCL needs 55.9 Jacobian applications per step against 25.1 for the
+# first-order arm, because the preconditioner deliberately keeps its
+# donor-cell three-point stencil while reconstruction widens the residual
+# to five points (see the deck's jacobian.pc_type note).
+#
+# WHY 30 STEPS AND NOT A COARSER MESH. A half-resolution arm (nz = 64 at
+# 60 steps, i.e. the identical physical time since dt scales as 1/nz) is
+# cheaper still, and was rejected: at that resolution the undissipated
+# baseline does not exhibit the controlled projection defect the gate
+# documents, it diverges outright (mass drift 2.0e+02, i.e. 20000%).
+# A blown-up reference arm would make "the baseline rings more than the
+# limiter" pass for the wrong reason. 30 steps at the production cell
+# size keeps the defect controlled and the band widths comparable to the
+# full arm.
+#
+# WHAT SURVIVES THE CUT (all re-measured at 30 steps, not carried over):
+#   the baseline's conservation defect is already fully developed
+#   (2.797e-04 at 30 steps vs 2.80e-04 at 120 -- the admissibility
+#   projection does its damage in the first few steps), the band ordering
+#   still separates (16 vs 28 cells), and both deliberate defects are
+#   still caught: dissipation forced off measures 1.626e-01 new extrema
+#   against a 2.500e-02 ceiling, and reconstruction forced off ties the
+#   first-order band at 28 cells and fails the strict inequality.
+# ---------------------------------------------------------------------
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_dissipation_baseline  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_tvd implicit_mhd.fluid_flux=central implicit_mhd.viscosity=2000.0 implicit_mhd.fluid_reconstruction=none implicit_mhd.central_dissipation=0.0 newton.require_convergence=0 newton.max_frozen_steps=1000"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+# First-order Rusanov reference: monotone, and the yardstick for how much
+# a purely first-order fix smears the front.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_dissipation_lo  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_tvd implicit_mhd.fluid_flux=central implicit_mhd.viscosity=2000.0 implicit_mhd.fluid_reconstruction=none implicit_mhd.central_dissipation=1.0"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_central_dissipation_baseline  # dependency
+)
+# MUSCL-Rusanov: the limiter sets the dissipation. Second order in
+# smooth flow, monotone at the front, no admissibility projections.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_dissipation  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_tvd implicit_mhd.fluid_flux=central implicit_mhd.viscosity=2000.0 implicit_mhd.fluid_reconstruction=median implicit_mhd.central_dissipation=1.0"  # inputs
+    "analysis_mhd_central_dissipation.py diags/diag000000 diags/diag000120"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_central_dissipation_lo  # dependency
+)
+# The full family is the VERIFICATION case, not the CI case. Excluded via
+# the repo's documented `ctest -LE slow`, using the same helper as the
+# other slow tests -- it guards on if(TEST ...), which matters because
+# add_warpx_test() returns early when 1 is not in WarpX_DIMS, so a raw
+# set_tests_properties() here would break configure in an RZ-only build.
+label_warpx_test(test_1d_theta_implicit_mhd_central_dissipation_baseline slow)
+label_warpx_test(test_1d_theta_implicit_mhd_central_dissipation_lo slow)
+label_warpx_test(test_1d_theta_implicit_mhd_central_dissipation slow)
+
+# The CI family: same deck, same 128 cells, 30 steps. Chained only among
+# themselves so that `-LE slow` leaves a complete, self-sufficient gate.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_dissipation_short_baseline  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_tvd max_step=30 diag1.intervals=30 implicit_mhd.fluid_flux=central implicit_mhd.viscosity=2000.0 implicit_mhd.fluid_reconstruction=none implicit_mhd.central_dissipation=0.0 newton.require_convergence=0 newton.max_frozen_steps=1000"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_dissipation_short_lo  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_tvd max_step=30 diag1.intervals=30 implicit_mhd.fluid_flux=central implicit_mhd.viscosity=2000.0 implicit_mhd.fluid_reconstruction=none implicit_mhd.central_dissipation=1.0"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_central_dissipation_short_baseline  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_dissipation_short  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_tvd max_step=30 diag1.intervals=30 implicit_mhd.fluid_flux=central implicit_mhd.viscosity=2000.0 implicit_mhd.fluid_reconstruction=median implicit_mhd.central_dissipation=1.0"  # inputs
+    "analysis_mhd_central_dissipation.py diags/diag000000 diags/diag000030"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_central_dissipation_short_lo  # dependency
+)
+
+# ORDER OF ACCURACY on the production flux. This is the gate that guards
+# the actual product: the TVD and identity gates protect monotonicity and
+# bit-identity, but nothing else would notice if the scheme silently
+# dropped to first order.
+#
+# TWO grids (32/64) at 30 steps rather than three at 100, for CI budget.
+# That is a measured choice, not a guess: the 30-step 2-level estimates
+# reproduce the 100-step 3-level study to within the study's own
+# grid-to-grid spread --
+#     arm        30-step 32->64    100-step 32->64 / 64->128 / overall
+#     baseline      1.994            1.994 / 1.983 / 1.988
+#     lo            0.971            0.907 / 0.954 / 0.930
+#     MUSCL         1.843            1.734 / 1.926 / 1.830
+# -- while the whole seven-test gate runs in 19.9 s on an idle host, the
+# slowest single arm being 6.5 s. (Both figures are uncontended; the same
+# arms measure 10-55 s under ~120-way load, so do not read scheduler
+# contention as a cost of the gate.)
+#
+# All three arms are registered because the two bracketing ones are cheap
+# and they are what make the MUSCL number mean something: without them a
+# reader cannot tell 1.8 from "the rig always says 1.8".
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_order_base_n32  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=32 max_step=30 diag1.intervals=30 implicit_mhd.fluid_flux=central implicit_mhd.viscosity=2000.0 implicit_mhd.fluid_reconstruction=none implicit_mhd.central_dissipation=0.0"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_order_base_n64  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=64 max_step=30 diag1.intervals=30 implicit_mhd.fluid_flux=central implicit_mhd.viscosity=2000.0 implicit_mhd.fluid_reconstruction=none implicit_mhd.central_dissipation=0.0"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_central_order_base_n32  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_order_lo_n32  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=32 max_step=30 diag1.intervals=30 implicit_mhd.fluid_flux=central implicit_mhd.viscosity=2000.0 implicit_mhd.fluid_reconstruction=none implicit_mhd.central_dissipation=1.0"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_central_order_base_n64  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_order_lo_n64  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=64 max_step=30 diag1.intervals=30 implicit_mhd.fluid_flux=central implicit_mhd.viscosity=2000.0 implicit_mhd.fluid_reconstruction=none implicit_mhd.central_dissipation=1.0"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_central_order_lo_n32  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_order_n32  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=32 max_step=30 diag1.intervals=30 implicit_mhd.fluid_flux=central implicit_mhd.viscosity=2000.0 implicit_mhd.fluid_reconstruction=median implicit_mhd.central_dissipation=1.0"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_central_order_lo_n64  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_order  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=64 max_step=30 diag1.intervals=30 implicit_mhd.fluid_flux=central implicit_mhd.viscosity=2000.0 implicit_mhd.fluid_reconstruction=median implicit_mhd.central_dissipation=1.0"  # inputs
+    "analysis_mhd_central_order.py diags/diag000030"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_central_order_n32  # dependency
+)
+
+# central_dissipation DEFAULT-PATH IDENTITY: the knob absent and the knob
+# written as 0 must agree bitwise, on the production flux.
+#
+# This runs on the SMOOTH sine deck, not the square contact one, for a
+# reason worth recording: both identity arms are by construction
+# UNDISSIPATED central, and undissipated central cannot complete the
+# square-contact deck at all (it aborts at step 4 on the density floor).
+# The identity has to be measured on a configuration that runs.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_dissipation_identity_default  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=32 max_step=30 diag1.intervals=30 implicit_mhd.fluid_flux=central implicit_mhd.viscosity=2000.0"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_dissipation_identity  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_order my_constants.nz=32 max_step=30 diag1.intervals=30 implicit_mhd.fluid_flux=central implicit_mhd.viscosity=2000.0 implicit_mhd.central_dissipation=0.0"  # inputs
+    "analysis_mhd_central_dissipation_identity.py diags/diag000030"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_central_dissipation_identity_default  # dependency
+)
+
 # DEFAULT-PATH IDENTITY. The same deck with the knob absent and with
 # fluid_reconstruction = none must agree BITWISE: the new branch sits on
 # the JFNK residual hot path of every production deck, and the whole

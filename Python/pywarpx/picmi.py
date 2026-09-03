@@ -2380,6 +2380,26 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         other modes); both the numerical diffusivity and the
         new-extremum bound above scale linearly in it.
 
+    central_dissipation: float, default=0 (off)
+        Limited Rusanov (local Lax--Friedrichs) jump penalty on the
+        "central" flux, coefficient in [0, 1]. Requires
+        fluid_flux="central"; 0 is the bit-identical default.
+        central carries no Riemann dissipation by design, so a slope
+        limiter in front of it has nothing to limit -- where
+        fluid_reconstruction clips, central reduces EXACTLY to the
+        unreconstructed centered flux. This supplies the missing
+        upwinding as F = F_central - (c/2) alpha (U_R - U_L), with alpha
+        a smooth bound on the local signal speed. The jump is taken
+        across the face states the flux is GIVEN, i.e. across the
+        RECONSTRUCTED jump, so the limiter -- not this coefficient --
+        sets the dissipation: with fluid_reconstruction="median" the
+        pair is MUSCL-Rusanov (second order in smooth flow, monotone at
+        a discontinuity); alone it is first-order Rusanov. Every
+        conserved channel gets the same alpha (scalar, not
+        characteristic), which makes it monotone and
+        positivity-friendly; the induction channels and Maxwell stress
+        are deliberately untouched so no numerical resistivity is added.
+
     viscosity: float, default=0 (off)
         Explicit ion kinematic viscosity nu_i in m^2/s of the recast face
         fluxes (fluid_flux="hlld" or "central"; required positive for
@@ -3242,6 +3262,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         allow_hlld=None,
         fluid_reconstruction=None,
         reconstruction_kappa=None,
+        central_dissipation=None,
         viscosity=None,
         wall_viscosity_mask=None,
         wall_viscosity_mask_width=None,
@@ -3362,6 +3383,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.allow_hlld = allow_hlld
         self.fluid_reconstruction = fluid_reconstruction
         self.reconstruction_kappa = reconstruction_kappa
+        self.central_dissipation = central_dissipation
         self.viscosity = viscosity
         self.wall_viscosity_mask = wall_viscosity_mask
         self.wall_viscosity_mask_width = wall_viscosity_mask_width
@@ -3498,6 +3520,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.allow_hlld = self.allow_hlld
         implicit_mhd.fluid_reconstruction = self.fluid_reconstruction
         implicit_mhd.reconstruction_kappa = self.reconstruction_kappa
+        implicit_mhd.central_dissipation = self.central_dissipation
         implicit_mhd.viscosity = self.viscosity
         implicit_mhd.wall_viscosity_mask = self.wall_viscosity_mask
         implicit_mhd.wall_viscosity_mask_width = self.wall_viscosity_mask_width

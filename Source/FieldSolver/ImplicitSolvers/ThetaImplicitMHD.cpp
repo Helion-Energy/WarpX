@@ -804,6 +804,23 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_reconstruction_kappa >= 0.0_rt,
         "implicit_mhd.reconstruction_kappa cannot be negative");
+    // Limited Rusanov dissipation of the central flux: the upwinding a
+    // slope limiter needs in order to BE a monotonicity device (see the
+    // contract block in ThetaImplicitMHD_K.H).
+    utils::parser::queryWithParser(pp, "central_dissipation",
+                                   m_central_dissipation);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_central_dissipation >= 0.0_rt && m_central_dissipation <= 1.0_rt,
+        "implicit_mhd.central_dissipation must be in [0, 1] (it scales a "
+        "Rusanov jump penalty; 1 is the full local Lax-Friedrichs "
+        "dissipation and anything above it is unconditionally unstable "
+        "in the monotonicity sense)");
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_central_dissipation == 0.0_rt || m_use_central,
+        "implicit_mhd.central_dissipation applies to "
+        "implicit_mhd.fluid_flux = central only: the other recast flux "
+        "(hlld) already carries its own wave-fan dissipation, and the "
+        "legacy fluxes are not wired into the recast face registers");
     if (reconstruction_active) {
         // The limiters' monotonicity statement holds for an advective
         // CFL <= 1 (a reconstructed face state must not be overtaken
@@ -2812,6 +2829,14 @@ void ThetaImplicitMHD::PrintParameters () const
                                theta_implicit_mhd::reconstruction_median
                            ? " (kappa = " +
                                  std::to_string(m_reconstruction_kappa) + ")"
+                           : std::string{})
+                   << "\n"
+                   << "Central Rusanov dissipation:   "
+                   << m_central_dissipation
+                   << (m_central_dissipation > 0.0_rt &&
+                               m_fluid_reconstruction_mode ==
+                                   theta_implicit_mhd::reconstruction_none
+                           ? " (WITHOUT reconstruction: first order)"
                            : std::string{})
                    << "\n"
                    << "Shaped conducting-wall mask:   "
@@ -5208,6 +5233,7 @@ theta_implicit_mhd::FluxParameters ThetaImplicitMHD::MakeFluxParameters () const
         m_pressure_corner_width_fraction;
     flux_parameters.fluid_reconstruction = m_fluid_reconstruction_mode;
     flux_parameters.reconstruction_kappa = m_reconstruction_kappa;
+    flux_parameters.central_dissipation = m_central_dissipation;
     // Per-step frozen pedestal state (0 while the pedestal is off):
     // anchors the per-block drain gates and the halo source taper.
     flux_parameters.halo_pedestal = m_halo_pedestal_density;
