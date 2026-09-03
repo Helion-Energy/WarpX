@@ -41,15 +41,66 @@ Three arms of the same deck, all on central + viscosity:
              The deliverable: the limiter sets the dissipation, so this
              is second order in smooth flow and monotone at the front.
 
-Measured (120 steps, 128 cells, central + viscosity = 2000), as the full
-2x2 of {reconstruction} x {dissipation} -- because the point is that
-NEITHER ingredient suffices alone:
+TWO LENGTHS, ONE SCRIPT. This file serves both the shortened CI arm (30
+steps) and the full verification arm (120 steps, LABELS "slow"); it takes
+the final plotfile from argv and its sibling arms from its own directory
+name, so nothing here is keyed to a step count. That is only safe because
+EVERY threshold below is structural -- a closed-form limiter bound, a
+strict ordering between two arms, round-off, or a floor multiple. None
+was fitted to the 120-step numbers, and each was re-measured at 30 steps
+before the short arm was registered (margins tabulated per gate).
+
+Measured (128 cells, central + viscosity = 2000), as the full 2x2 of
+{reconstruction} x {dissipation} -- because the point is that NEITHER
+ingredient suffices alone. Full arm, 120 steps:
 
     arm                    new extrema   band   min rho/rho_lo  mass drift
     baseline (none,   c=0)   3.058e-01     64      0.0827         2.80e-04
     recon    (median, c=0)   2.024e-01     39      0.3929         2.22e-16
     lo       (none,   c=1)   0.000e+00     54      1.000017       0.00e+00
     MUSCL    (median, c=1)   7.699e-04     26      0.99769        2.22e-16
+
+Short CI arm, 30 steps, same deck and resolution:
+
+    arm                    new extrema   band   min rho/rho_lo  mass drift
+    baseline (none,   c=0)   2.723e-01     22      0.1830         2.797e-04
+    lo       (none,   c=1)   1.802e-09     28      1.000000       2.22e-16
+    MUSCL    (median, c=1)   1.370e-05     16      0.999959       2.22e-16
+
+WHAT THE SHORT ARM DOES NOT ESTABLISH, and why the full arm stays
+registered as the verification case: the sharpness advantage over first
+order is still growing at step 30 (band ratio lo/MUSCL 1.75, against 2.08
+converged), MUSCL's own ringing has not yet developed (which is why the
+baseline/MUSCL ratio reads 19871x at 30 steps and the converged 397x at
+120), and the baseline has only fallen to 18% of rho_low on its way to
+the 8% it reaches by step 120. The short arm asserts the ORDERINGS; the
+full arm is where those magnitudes are measured.
+
+The one thing the short arm loses nothing on is the baseline's
+conservation defect: 2.797e-04 at 30 steps against 2.80e-04 at 120,
+because the admissibility projection does its damage in the first few
+steps and then stops.
+
+FALSIFIED, not merely passed. A shortened gate that can no longer catch
+the defect it was written for is worse than no gate, so the short arm was
+run against both ways of breaking the product and confirmed to FAIL:
+
+  central_dissipation forced to 0 under the limiter (reconstruction with
+  nothing to limit) -- gate 1 fires,
+      AssertionError: 0.16259023704900424
+  against the 2.500e-02 ceiling, 6.5x over. Gate 3 independently
+  collapses too (baseline/MUSCL ratio 1.67x, under the 10x floor).
+
+  fluid_reconstruction forced off (first-order Rusanov wearing the MUSCL
+  arm's name) -- gate 2 fires,
+      AssertionError: (np.int64(28), np.int64(28))
+  the band ties with the first-order arm exactly, as it must, since that
+  configuration IS the lo arm.
+
+Gate 1 catches losing the upwinding, gate 2 catches losing the limiter.
+Neither defect is caught by conservation or positivity: both broken runs
+conserve to 2.220e-16 and stay six orders above the density floor, which
+is precisely why gates 1 and 2 have to exist.
 
 Read the baseline row carefully. 31% of the jump appears as new extrema;
 density is driven to 8% of rho_low; and mass conservation is LOST at the
@@ -88,8 +139,8 @@ Gates:
     asserted.
 
 Usage: analysis_mhd_central_dissipation.py <initial> <final>
-       (the baseline and lo arms are read from
-        ../test_1d_theta_implicit_mhd_central_dissipation_*/diags)
+       (the baseline and lo arms are read from ../<this test>_baseline
+        and ../<this test>_lo, at the same <final> path)
 """
 
 import os
@@ -115,8 +166,10 @@ VELOCITY = 1.0e5
 RECONSTRUCTION_KAPPA = 0.01
 MEDIAN_BOUND = RECONSTRUCTION_KAPPA / 4.0
 
-TEST_STEM = "test_1d_theta_implicit_mhd_central_dissipation"
-PLOTFILE = "diags/diag000120"
+# Both the arm length and the arm family come from the invocation, so the
+# short and full registrations share this file without either one baking
+# in the other's step count.
+TEST_STEM = os.path.basename(os.getcwd())
 
 
 def get_fields(plotfile):
@@ -133,12 +186,13 @@ def get_fields(plotfile):
 
 def arm(mode):
     if mode == "main":
-        return PLOTFILE
-    return os.path.join("..", f"{TEST_STEM}_{mode}", PLOTFILE)
+        return sys.argv[2]
+    return os.path.join("..", f"{TEST_STEM}_{mode}", sys.argv[2])
 
 
 initial = get_fields(sys.argv[1])
 final_main = get_fields(sys.argv[2])
+print(f"arm family {TEST_STEM}, final plotfile {sys.argv[2]}")
 
 arms = {}
 for mode in ("baseline", "lo", "main"):
@@ -198,18 +252,30 @@ for mode, entry in arms.items():
 
 # 1. The limiter holds the invariant interval once there is upwinding for
 # it to limit. Ten times the closed-form bound is a ceiling with real
-# margin, not a fitted threshold.
+# margin, not a fitted threshold: the bound is kappa/4 of the largest
+# stencil difference, which does not depend on how long the deck runs.
+# Ceiling 2.500e-02 against 7.699e-04 at 120 steps and 1.370e-05 at 30.
+# THIS is the gate that catches dissipation being switched off underneath
+# the limiter: that configuration measures 1.626e-01, 6.5x OVER the
+# ceiling.
 assert arms["main"]["extremum"] < 10.0 * MEDIAN_BOUND, arms["main"]["extremum"]
 
 # 2. And it is sharper than simply making the scheme first order --
-# otherwise the cure would be worse than the disease.
+# otherwise the cure would be worse than the disease. A strict ordering,
+# so it needs no tolerance: 26 < 54 at 120 steps, 16 < 28 at 30.
+# THIS is the gate that catches the reconstruction being switched off:
+# that configuration IS the lo arm, so the band ties at 28 and the strict
+# inequality fails.
 assert arms["main"]["interior"] < arms["lo"]["interior"], (
     arms["main"]["interior"],
     arms["lo"]["interior"],
 )
 
 # 3. The undissipated baseline rings, by a wide margin. Without this the
-# gate above would be vacuous.
+# gate above would be vacuous. Measured ratio 397x at 120 steps and
+# 19871x at 30 -- the 10x demanded here is a floor under BOTH, not a fit
+# to either. (It is also a second, independent catch for dissipation
+# being switched off, which collapses the ratio to 1.67x.)
 assert arms["baseline"]["extremum"] > 10.0 * max(arms["main"]["extremum"], 1.0e-12), (
     arms["baseline"]["extremum"],
     arms["main"]["extremum"],
@@ -223,6 +289,9 @@ assert arms["baseline"]["extremum"] > 10.0 * max(arms["main"]["extremum"], 1.0e-
 # step while the dissipated arms need none -- lives in the run logs:
 # measured 13 projections in 30 steps for the baseline against 0 in 44
 # for MUSCL-Rusanov.)
+#
+# 100x the floor against a measured 1.0e6x at both lengths: six orders of
+# margin, so the threshold is a sanity bound rather than a discriminator.
 DENSITY_FLOOR = 1.0e-6 * DENSITY_LOW
 for mode in ("lo", "main"):
     assert arms[mode]["min_density"] > 100.0 * DENSITY_FLOOR, (

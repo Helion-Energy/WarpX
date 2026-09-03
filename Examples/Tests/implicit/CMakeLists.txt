@@ -2762,6 +2762,44 @@ add_warpx_test(
 # residual-decreasing admissible step" after projecting mass onto the
 # density floor -- the campaign's own failure signature, reproduced on a
 # 1D CI-scale deck in 18 seconds.
+#
+# REGISTERED AT TWO LENGTHS. The full 120-step family below is the
+# verification case and is LABELS "slow" (excluded by the repo's
+# documented `ctest -LE slow`); a 30-step family carries CI. Same deck,
+# same 128 cells, same assertions -- only the integration time differs.
+#
+# Measured back to back in one window (baseline / lo / MUSCL, seconds):
+#     120 steps   47.4 / 22.4 / 64.0   = 133.7 s   slowest arm 64.0
+#      30 steps   16.2 /  6.5 / 16.6   =  39.3 s   slowest arm 16.6
+# a 3.41x cut that brings both the family and every individual arm inside
+# the repo's guidance. (This host is shared with other lanes, so all
+# absolute numbers here are upper bounds; the RATIO is what is robust,
+# and back-to-back is how it was taken.)
+#
+# The cost is the implicit solve, not the reconstruction arithmetic:
+# MUSCL needs 55.9 Jacobian applications per step against 25.1 for the
+# first-order arm, because the preconditioner deliberately keeps its
+# donor-cell three-point stencil while reconstruction widens the residual
+# to five points (see the deck's jacobian.pc_type note).
+#
+# WHY 30 STEPS AND NOT A COARSER MESH. A half-resolution arm (nz = 64 at
+# 60 steps, i.e. the identical physical time since dt scales as 1/nz) is
+# cheaper still, and was rejected: at that resolution the undissipated
+# baseline does not exhibit the controlled projection defect the gate
+# documents, it diverges outright (mass drift 2.0e+02, i.e. 20000%).
+# A blown-up reference arm would make "the baseline rings more than the
+# limiter" pass for the wrong reason. 30 steps at the production cell
+# size keeps the defect controlled and the band widths comparable to the
+# full arm.
+#
+# WHAT SURVIVES THE CUT (all re-measured at 30 steps, not carried over):
+#   the baseline's conservation defect is already fully developed
+#   (2.797e-04 at 30 steps vs 2.80e-04 at 120 -- the admissibility
+#   projection does its damage in the first few steps), the band ordering
+#   still separates (16 vs 28 cells), and both deliberate defects are
+#   still caught: dissipation forced off measures 1.626e-01 new extrema
+#   against a 2.500e-02 ceiling, and reconstruction forced off ties the
+#   first-order band at 28 cells and fails the strict inequality.
 # ---------------------------------------------------------------------
 add_warpx_test(
     test_1d_theta_implicit_mhd_central_dissipation_baseline  # name
@@ -2793,6 +2831,44 @@ add_warpx_test(
     "analysis_mhd_central_dissipation.py diags/diag000000 diags/diag000120"  # analysis
     OFF  # checksum
     test_1d_theta_implicit_mhd_central_dissipation_lo  # dependency
+)
+# The full family is the VERIFICATION case, not the CI case. Excluded via
+# the repo's documented `ctest -LE slow`, using the same helper as the
+# other slow tests -- it guards on if(TEST ...), which matters because
+# add_warpx_test() returns early when 1 is not in WarpX_DIMS, so a raw
+# set_tests_properties() here would break configure in an RZ-only build.
+label_warpx_test(test_1d_theta_implicit_mhd_central_dissipation_baseline slow)
+label_warpx_test(test_1d_theta_implicit_mhd_central_dissipation_lo slow)
+label_warpx_test(test_1d_theta_implicit_mhd_central_dissipation slow)
+
+# The CI family: same deck, same 128 cells, 30 steps. Chained only among
+# themselves so that `-LE slow` leaves a complete, self-sufficient gate.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_dissipation_short_baseline  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_tvd max_step=30 diag1.intervals=30 implicit_mhd.fluid_flux=central implicit_mhd.viscosity=2000.0 implicit_mhd.fluid_reconstruction=none implicit_mhd.central_dissipation=0.0 newton.require_convergence=0 newton.max_frozen_steps=1000"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_dissipation_short_lo  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_tvd max_step=30 diag1.intervals=30 implicit_mhd.fluid_flux=central implicit_mhd.viscosity=2000.0 implicit_mhd.fluid_reconstruction=none implicit_mhd.central_dissipation=1.0"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_central_dissipation_short_baseline  # dependency
+)
+add_warpx_test(
+    test_1d_theta_implicit_mhd_central_dissipation_short  # name
+    1  # dims
+    1  # nprocs
+    "inputs_base_1d_theta_implicit_mhd_reconstruction_tvd max_step=30 diag1.intervals=30 implicit_mhd.fluid_flux=central implicit_mhd.viscosity=2000.0 implicit_mhd.fluid_reconstruction=median implicit_mhd.central_dissipation=1.0"  # inputs
+    "analysis_mhd_central_dissipation.py diags/diag000000 diags/diag000030"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_central_dissipation_short_lo  # dependency
 )
 
 # ORDER OF ACCURACY on the production flux. This is the gate that guards
