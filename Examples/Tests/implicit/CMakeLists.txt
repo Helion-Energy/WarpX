@@ -1822,6 +1822,31 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# OWNERSHIP of a z domain end face the shaped wall runs into. The
+# contour steps inward EXACTLY at the z_hi plane (the production
+# formation geometry in miniature), so the wall mask's per-z table
+# disagrees with its last in-domain row in the ghost rows every face
+# classifier reads when it asks what lies just outside a z domain face.
+# Without a precedence rule the boundary condition of a DOMAIN face is
+# decided by wall geometry OUTSIDE the simulated volume and the last
+# live z row splits mid-row: the cells under the overhang take the
+# shaped-wall interface contract (absorb image, wall_temperature bath,
+# wall chi clamp, wall cap rules) while their neighbours on the same
+# flat face take the z-end contract. With the two reservoirs on
+# opposite sides of the column temperature (2 eV vs 200 eV against
+# T0 = 100 eV) the split is a ~14 eV sign flip between neighbouring
+# cells; the contract under test is that the mask's authority stops at
+# the domain, so one flat boundary carries one condition.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_zend_ownership  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_wall_zend_ownership  # inputs
+    "analysis_mhd_wall_zend_ownership.py diags"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # PRECONDITIONER ROWS for the wall thermal terms, ROW CORRECTNESS 1/2 --
 # the shaped-wall interface drain. The same saturated-clamp uniform
 # column as the wall_conduction_scale pair (whose conduction subsystem is
