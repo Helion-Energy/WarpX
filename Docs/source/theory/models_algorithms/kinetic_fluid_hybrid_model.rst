@@ -270,6 +270,82 @@ Zel'dovich-Barenblatt self-similar front exponent
 :math:`x_f \propto t^{2/9}`; a Gaussian-spread test checks the linear
 variance growth, the discrete maximum principle and the energy ledger.
 
+Electron viscosity
+^^^^^^^^^^^^^^^^^^
+
+The electron energy equation optionally carries the *physical* Braginskii
+:cite:p:`kfhm-Braginskii1965` electron viscous dissipation
+(``hybrid_pic_model.qdsmc_viscosity_model``). With the traceless rate-of-strain
+tensor of the electron fluid velocity
+:math:`\boldsymbol{u}_e = (\boldsymbol{J}_i-\boldsymbol{J})/(en_e)`,
+
+.. math::
+
+    W_{ij} = \partial_i u_{e,j} + \partial_j u_{e,i}
+             - \tfrac{2}{3}\delta_{ij}\nabla\cdot\boldsymbol{u}_e ,
+    \qquad
+    S = \hat{b}\cdot\mathsf{W}\cdot\hat{b} ,
+
+the stress splits on the field-aligned projector
+:math:`\mathsf{P} = \hat{b}\hat{b} - \mathsf{I}/3` into
+:math:`\mathsf{W}^\parallel = \tfrac{3}{2} S \mathsf{P}` and the remainder
+:math:`\mathsf{W}^\perp`, which are orthogonal
+(:math:`\mathsf{W}^\parallel\!:\!\mathsf{W}^\perp = 0`). The dissipation
+therefore separates exactly:
+
+.. math::
+
+    Q_\nu = -\boldsymbol{\Pi}:\nabla\boldsymbol{u}_e
+          = \tfrac{3}{4}\mu_\parallel S^2
+          + \tfrac{1}{2}\mu_\perp\!\left(\mathsf{W}\!:\!\mathsf{W}
+            - \tfrac{3}{2}S^2\right) ,
+
+with :math:`\mu_\parallel = 0.73\, n_e k_B T_e \tau_e` (Braginskii's
+:math:`\eta_0^e`) and :math:`\mu_\perp` its :math:`\eta_1^e` counterpart,
+smaller by :math:`(\Omega_{ce}\tau_e)^2`. Both terms are separately
+non-negative, so the source is pointwise positive-definite. The parallel
+channel carries a free-streaming flux limit for the same reason parallel
+Spitzer conduction does, and that cap also bounds the heating response at
+:math:`dT_e/dt \le f|S|T_e`.
+
+Two omissions are deliberate and exact rather than approximate. Gyroviscosity
+(:math:`\eta_3^e`, :math:`\eta_4^e`) is *reactive*: it transports momentum
+without dissipating energy, and its contraction with
+:math:`\nabla\boldsymbol{u}_e` vanishes identically, so it contributes exactly
+zero to :math:`Q_\nu`. An isotropic reduction is not offered, because the two
+dissipative coefficients differ by :math:`(\Omega_{ce}\tau_e)^2` and an
+isotropic electron viscosity is not an approximation to this term at the
+magnetizations it is meant for.
+
+.. note::
+
+   **This is not the hyper-resistivity.** Since
+   :math:`\boldsymbol{u}_e \approx -\boldsymbol{J}/(en_e)`, the viscous force
+   shares a :math:`\nabla^2`-on-the-current form with the
+   :math:`\eta_h \nabla^2\boldsymbol{J}` term of Ohm's law above, and differs
+   entirely in the coefficient. :math:`\eta_h` is a *numerical* stabiliser for
+   unphysical modes, sized for stability rather than from a transport
+   coefficient, and its dissipation is deliberately **not** booked as heating:
+   it is reported in the ``P_etaH`` column of the ``HybridDissipation``
+   diagnostic and nothing receives it. The viscous dissipation *is* booked, and
+   is reported separately as ``P_nu``. The separation is maintained in the
+   inputs, in the code and in the diagnostics precisely because the shared form
+   invites conflating them.
+
+.. warning::
+
+   Only the *dissipation* enters the model: the conjugate viscous force
+   :math:`-\nabla\!\cdot\!\boldsymbol{\Pi}_e/(en_e)` is not added to Ohm's law,
+   so the viscous heat is a one-way source rather than a transfer out of a
+   tracked reservoir. Total energy is correspondingly not conserved by this
+   term alone.
+
+A manufactured-solution verification case drives a known
+:math:`\nabla\boldsymbol{u}_e` from :math:`\nabla\times\boldsymbol{B}` in a
+tilted guide field and pins the absolute heating rate against the closed form
+above; its companion arm sets the tilt to zero, where :math:`S` vanishes
+identically and a correct parallel viscosity must deposit no heat at all.
+
 Electron current
 ^^^^^^^^^^^^^^^^
 

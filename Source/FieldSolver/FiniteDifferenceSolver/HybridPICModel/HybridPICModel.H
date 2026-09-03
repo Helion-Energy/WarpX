@@ -562,6 +562,44 @@ public:
                                amrex::MultiFab * redirect_E) const;
 
     /**
+     * \brief PHYSICAL Braginskii electron viscous heating source (Thrust C
+     *        companion to the tensor conduction operator).
+     *
+     * Adds the anisotropic viscous dissipation of the electron fluid to T_e,
+     *   T_e += dt (gamma-1) Q_nu / (n_e k_B),
+     *   Q_nu = (3/4) mu_par S^2 + (1/2) mu_perp (W:W - (3/2) S^2)  [W/m^3],
+     * with the Braginskii coefficients and the tensor algebra in
+     * BraginskiiViscosity.H. Both terms are separately non-negative, so the
+     * source is pointwise positive-definite and cannot cool a cell.
+     *
+     * The electron fluid velocity is rebuilt on the nodal grid exactly as
+     * CalculateElectronFluidVelocity does it, u_e = (J_i - J_plasma)/rho,
+     * so the operator does not depend on Ve_fp being allocated or on where
+     * in the step it was last refreshed.
+     *
+     * Q_nu is also written (overwritten, not accumulated -- the theta path
+     * re-enters this on every Newton residual evaluation) to the nodal
+     * diagnostic field hybrid_qdsmc_visc_heating_fp, which is what the
+     * HybridDissipation reduced diag integrates into its P_nu column. That
+     * field is the only sound proof the term is live: a nonzero value in
+     * this channel's own sink column, not a knob in warpx_used_inputs.
+     *
+     * NOT the hyper-resistive term: see the m_eta_h declaration and the
+     * BraginskiiViscosity.H file comment for why the two are kept apart.
+     *
+     * \param lev AMR refinement level.
+     * \param dt  source-stage timestep [s] (the Strang callers pass dt/2).
+     */
+    void QDSMCAddViscousHeating (int lev, amrex::Real dt) const;
+
+    /** \brief Parameterized variant of QDSMCAddViscousHeating using the given
+     *         charge density for the coefficient state (rho^{n+1/2} on the
+     *         theta-implicit path), mirroring QDSMCAddJouleHeating.
+     */
+    void QDSMCAddViscousHeating (int lev, amrex::Real dt,
+                                 amrex::MultiFab const & rho) const;
+
+    /**
      * \brief Add the electron-ion thermal-equilibration sink Q_ei to T_e.
      *
      * Per ion species, cools T_e toward that species' (deposited) T_i:
@@ -1712,6 +1750,75 @@ public:
     amrex::ParserExecutor<3> m_kappa_par;
     amrex::ParserExecutor<3> m_kappa_perp;
 
+    /* ------------------------------------------------------------------
+     * PHYSICAL electron viscosity (Braginskii 1965) -- energy-BOOKED.
+     *
+     * This block is the physical Braginskii electron stress. Its
+     * dissipation IS booked into the electron energy equation and IS
+     * reported in its own reduced-diagnostic column (P_nu). It is NOT the
+     * hyper-resistivity m_eta_h, which is a numerical stabiliser whose
+     * dissipation is deliberately left unbooked -- the two share a grad^2
+     * form on the current and differ entirely in the coefficient. See the
+     * m_eta_h declaration and BraginskiiViscosity.H before touching either.
+     * ------------------------------------------------------------------ */
+
+    /** Electron viscosity model: 0 = none (default, term absent and
+     *  bit-identical to unset), 1 = braginskii (built-in coefficients from
+     *  n_e, T_e, |B| -- the intended production setting), 2 = parser (user
+     *  nu_par/nu_perp expressions, for manufactured solutions and
+     *  sensitivity scans). ANISOTROPIC in every case: the dissipative
+     *  cross-field coefficient is ~(Omega_ce tau_e)^2 below the
+     *  field-aligned one, so there is deliberately no isotropic mode --
+     *  an isotropic electron viscosity is physically meaningless at these
+     *  magnetisations. Input:
+     *  qdsmc_viscosity_model = none | braginskii | parser. */
+    int m_visc_model = 0;
+    /** True when m_visc_model != 0; the single gate every call site tests. */
+    bool m_include_electron_viscosity = false;
+    /** Kinematic viscosity parsers nu(n [m^-3], Te [eV], B [T]) in m^2/s,
+     *  consulted only under qdsmc_viscosity_model = parser. Inputs:
+     *  qdsmc_nu_par(n,Te,B) / qdsmc_nu_perp(n,Te,B). */
+    std::string m_visc_nu_par_expression = "0.0";
+    std::string m_visc_nu_perp_expression = "0.0";
+    std::unique_ptr<amrex::Parser> m_visc_nu_par_parser;
+    std::unique_ptr<amrex::Parser> m_visc_nu_perp_parser;
+    amrex::ParserExecutor<3> m_visc_nu_par;
+    amrex::ParserExecutor<3> m_visc_nu_perp;
+    /** Coulomb logarithm and effective ion charge entering the Braginskii
+     *  collision time tau_e. Inputs: qdsmc_viscosity_coulomb_log,
+     *  qdsmc_viscosity_Z_eff. */
+    amrex::Real m_visc_coulomb_log = 10.0;
+    amrex::Real m_visc_Z_eff = 1.0;
+    /** Free-streaming flux-limit factor f on the PARALLEL channel, the
+     *  momentum analogue of qdsmc_conduction_flux_limit_factor and set to
+     *  the same default for the same reason: unbounded Braginskii parallel
+     *  viscosity is as unphysically large as unbounded Spitzer parallel
+     *  conduction. Values <= 0 disable it (not recommended -- the limiter
+     *  is also what bounds the heating rate at dTe/dt <= f |S| Te). Input:
+     *  qdsmc_viscosity_flux_limit_factor. */
+    amrex::Real m_visc_flux_limit_factor = 0.1;
+    /** Global kinematic-viscosity ceiling [m^2/s], applied as a hard min to
+     *  both channels (the viscosity analogue of qdsmc_conduction_chi_max).
+     *  Off (0) is bit-identical to unset. Input:
+     *  qdsmc_viscosity_nu_max. */
+    amrex::Real m_visc_nu_max = 0.0;
+    /** Velocity-gradient reconstruction: 0 = none (centred differences,
+     *  2nd order, unbounded), 1 = mc (MC-limited slopes, default). The
+     *  heating is a positive-definite QUADRATIC in grad u_e, so grid-scale
+     *  deposition noise in u_e does not cancel -- it rectifies into a
+     *  spurious heat source everywhere. The MC slope equals the centred
+     *  derivative in smooth regions (retaining 2nd order) and vanishes at a
+     *  local extremum, which is exactly the checkerboard mode.
+     *
+     *  NOTE the deliberate difference from qdsmc_conduction_fd_limiter:
+     *  'smart' and 'sh' are FLUX reconstructions (an NVD face value and a
+     *  limited transverse face gradient) and have no meaning for an
+     *  algebraic source with no flux divergence, so they are not offered
+     *  here. mc is the inner limiter of the sh family, i.e. the same
+     *  primitive from QdsmcFluxLimiters.H. Input:
+     *  qdsmc_viscosity_limiter = none | mc. */
+    int m_visc_limiter = 1;
+
     /** Quiet Gauss--Hermite quadrature points per field-aligned direction
      *  (parallel, perpendicular), each in [2, 7]. npts = 2 is variance-exact
      *  but has a per-step 4th-moment defect (conduction weak order 1 in dt);
@@ -2152,7 +2259,33 @@ public:
      *  Set in ReadParameters. */
     bool m_need_per_species_fields = false;
 
-    /** Plasma hyper-resisitivity */
+    /** Plasma hyper-resistivity eta_H [Ohm m^3].
+     *
+     *  NUMERICAL STABILISER -- ITS DISSIPATION IS DELIBERATELY NOT BOOKED
+     *  AS HEATING. This is a standing decision, not an oversight, and it is
+     *  the reason the physical electron viscosity exists as a SEPARATE term
+     *  (m_visc_model, BraginskiiViscosity.H) rather than as a relabelling of
+     *  this one:
+     *
+     *   - eta_H is the sledgehammer for unphysical modes. Its magnitude is
+     *     chosen for stability, not from any transport coefficient, so the
+     *     energy it removes is a numerical artefact with no claim on the
+     *     electron internal energy. Booking it would credit T_e for the
+     *     removal of modes the model never resolved.
+     *   - The physical Braginskii electron viscosity has the SAME grad^2
+     *     form on the current (u_e ~ -J/(e n_e)) and differs entirely in
+     *     the coefficient. That shared form is exactly why the two must
+     *     stay explicitly apart -- a reader who sees only the form will
+     *     conflate them.
+     *
+     *  If you are here because P_etaH looks like uncounted energy: it is,
+     *  by design. Add or resize the physical viscosity instead; do not
+     *  route eta_H into the electron energy equation.
+     *
+     *  Its power is still REPORTED (never booked) in the HybridDissipation
+     *  reduced diag as the P_etaH column, kept separate from the physical
+     *  viscous column P_nu precisely so the two can never be confused.
+     */
     std::string m_eta_h_expression = "0.0";
     std::unique_ptr<amrex::Parser> m_hyper_resistivity_parser;
     amrex::ParserExecutor<2> m_eta_h;

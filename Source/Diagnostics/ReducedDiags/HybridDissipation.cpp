@@ -44,7 +44,7 @@ HybridDissipation::HybridDissipation (const std::string& rd_name)
         "geometry");
 #endif
 
-    m_data.resize(3, 0.0_rt);
+    m_data.resize(4, 0.0_rt);
 
     if (amrex::ParallelDescriptor::IOProcessor() && m_write_header) {
         std::ofstream ofs{m_path + m_rd_name + "." + m_extension,
@@ -55,7 +55,13 @@ HybridDissipation::HybridDissipation (const std::string& rd_name)
         ofs << m_sep << "[" << c++ << "]time(s)";
         ofs << m_sep << "[" << c++ << "]P_eta(W)";
         ofs << m_sep << "[" << c++ << "]P_etaH(W)";
+        // P_nu is APPENDED after the total rather than grouped with the other
+        // channels: this file is a shared artifact read across repositories,
+        // and inserting a column would silently hand a positional reader P_nu
+        // where it expects P_diss. Columns 0-4 keep their historical meaning;
+        // new channels go on the end.
         ofs << m_sep << "[" << c++ << "]P_diss(W)";
+        ofs << m_sep << "[" << c++ << "]P_nu(W)";
         ofs << "\n";
         ofs.close();
     }
@@ -290,12 +296,50 @@ HybridDissipation::ComputeDiags (const int step)
         p_eta_h += amrex::get<1>(rv);
     }
 
+    // PHYSICAL electron viscosity. Unlike the two terms above this is NOT
+    // re-derived here: the solver writes its heating rate Q_nu [W/m^3] to
+    // hybrid_qdsmc_visc_heating_fp and this column is the volume integral of
+    // exactly that field. A re-derived integrand can silently disagree with
+    // what the solver did (P_etaH already does, under
+    // hyper_resistivity_curl_curl); integrating the solver's own output
+    // cannot. A zero here therefore means the term did not run.
+    amrex::Real p_nu = 0.0_rt;
+    if (warpx.m_fields.has("hybrid_qdsmc_visc_heating_fp", lev)) {
+        const amrex::MultiFab* Qnu =
+            warpx.m_fields.get("hybrid_qdsmc_visc_heating_fp", lev);
+        const auto mask = amrex::OwnerMask(*Qnu, geom.periodicity());
+
+        amrex::ReduceOps<amrex::ReduceOpSum> reduce_op;
+        amrex::ReduceData<amrex::Real> reduce_data(reduce_op);
+        using ReduceTuple = typename decltype(reduce_data)::Type;
+
+        for (amrex::MFIter mfi(*Qnu, amrex::TilingIfNotGPU());
+             mfi.isValid(); ++mfi) {
+            const amrex::Box box = mfi.tilebox();
+            const auto q_arr = Qnu->const_array(mfi);
+            const auto own = mask->const_array(mfi);
+
+            reduce_op.eval(box, reduce_data,
+                [=] AMREX_GPU_DEVICE (int i, int j, int /*k*/) -> ReduceTuple
+                {
+                    if (own(i, j, 0) == 0) { return {0.0_rt}; }
+                    // Nodal in r: the axis ring owns [0, dr/2], centroid dr/8.
+                    Real r_vol = rmin + i*dr;
+                    if (i == dom_lo.x && rmin == 0.0_rt) { r_vol = 0.125_rt*dr; }
+                    return {q_arr(i, j, 0) * 2.0_rt*MathConst::pi*r_vol*dr*dz};
+                });
+        }
+        p_nu = amrex::get<0>(reduce_data.value(reduce_op));
+    }
+
     amrex::ParallelDescriptor::ReduceRealSum(p_eta);
     amrex::ParallelDescriptor::ReduceRealSum(p_eta_h);
+    amrex::ParallelDescriptor::ReduceRealSum(p_nu);
 
     m_data[0] = p_eta;
     m_data[1] = p_eta_h;
-    m_data[2] = p_eta + p_eta_h;
+    m_data[2] = p_eta + p_eta_h + p_nu;
+    m_data[3] = p_nu;
 #else
     amrex::ignore_unused(step);
 #endif

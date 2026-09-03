@@ -3996,6 +3996,23 @@ Maxwell solver: kinetic-fluid hybrid
 
     If :pp:param:`algo.maxwell_solver` is set to ``hybrid``, this sets the plasma hyper-resistivity in :math:`\Omega m^3`.
 
+    **This is a numerical stabiliser, not a transport coefficient, and its
+    dissipation is deliberately not booked as heating.** :math:`\eta_H` exists
+    to damp unphysical (typically grid-scale) modes; its magnitude is chosen
+    for stability, so the energy it removes has no claim on the electron
+    internal energy and no channel returns it to the plasma. Its power is
+    reported — never booked — in the ``P_etaH`` column of the
+    :ref:`HybridDissipation <reduced-diags>` reduced diagnostic.
+
+    Because :math:`u_e \approx -J/(e n_e)`, this term has the same
+    :math:`\nabla^2`-on-the-current form as the *physical* electron viscosity
+    (:pp:param:`hybrid_pic_model.qdsmc_viscosity_model`), and the two differ
+    entirely in the coefficient. They are kept as separate terms, separate
+    inputs and separate diagnostic columns for exactly that reason. If a run
+    needs physical viscous dissipation booked into the electron energy
+    equation, enable the viscosity model; do not route :math:`\eta_H` into
+    the energy equation.
+
 .. pp:param:: hybrid_pic_model.plasma_resistivity_<species>(rho_s,rho,Te,J,J_s,B,t)
     :type: ``float`` or ``str``
     :default: ``0``
@@ -4224,6 +4241,129 @@ Maxwell solver: kinetic-fluid hybrid
     :pp:param:`hybrid_pic_model.joule_dropped_energy_print_interval` cadence). Requires
     :pp:param:`hybrid_pic_model.solve_electron_energy_equation`; supported on the explicit
     (``euler``/``leapfrog``/``pc``) time-advance schemes.
+
+.. pp:param:: hybrid_pic_model.qdsmc_viscosity_model
+    :type: ``str``
+    :default: ``none``
+    :optional:
+
+    Physical **anisotropic electron viscosity** (Braginskii 1965), whose dissipation is booked as
+    electron heating. One of ``none`` (off; the term is absent and the run is bit-identical to
+    unset), ``braginskii`` (built-in coefficients from the local :math:`n_e`, :math:`T_e` and
+    :math:`|B|`), or ``parser`` (user-supplied
+    :pp:param:`hybrid_pic_model.qdsmc_nu_par(n,Te,B)` /
+    :pp:param:`hybrid_pic_model.qdsmc_nu_perp(n,Te,B)`, for manufactured solutions and sensitivity
+    scans). Requires :pp:param:`hybrid_pic_model.solve_electron_energy_equation`. Supported in 1D/2D/3D
+    Cartesian and RZ.
+
+    The source added to the electron energy equation is the Braginskii viscous dissipation
+
+    .. math::
+
+        Q_\nu = \tfrac{3}{4}\,\mu_\parallel S^2
+              + \tfrac{1}{2}\,\mu_\perp \left( W\!:\!W - \tfrac{3}{2} S^2 \right),
+        \qquad
+        T_e \mathrel{+}= \Delta t\,(\gamma-1)\, Q_\nu / (n_e k_B),
+
+    with :math:`W_{ij} = \partial_i u_{e,j} + \partial_j u_{e,i} - \tfrac{2}{3}\delta_{ij}\nabla\cdot u_e`
+    the traceless rate-of-strain tensor of the electron fluid velocity
+    :math:`u_e = (J_i - J)/(e n_e)`, :math:`S = \hat b \cdot W \cdot \hat b` the field-aligned strain,
+    and :math:`\mu_\parallel = m_e n_e \nu_\parallel`, :math:`\mu_\perp = m_e n_e \nu_\perp`. Both
+    terms are separately non-negative, so the source is pointwise positive-definite and can never cool
+    a cell. Under ``braginskii`` the coefficients are
+    :math:`\nu_\parallel = 0.73\, k_B T_e \tau_e / m_e` and
+    :math:`\nu_\perp = (0.51/0.73)\,\nu_\parallel / (1 + (\Omega_{ce}\tau_e)^2)` — the second is the
+    Braginskii :math:`\eta_1^e` regularised so it returns the (nearly isotropic) unmagnetised value at
+    a field null instead of diverging.
+
+    **Why anisotropic only.** The two coefficients differ by
+    :math:`(\Omega_{ce}\tau_e)^2`, which is :math:`\mathcal{O}(10^{12})` in a magnetised target, so an
+    isotropic electron viscosity is not a meaningful approximation to this term and no isotropic mode
+    is offered.
+
+    **Gyroviscosity is absent by construction, not by approximation.** Braginskii's
+    :math:`\eta_3`/:math:`\eta_4` stress is reactive — it transports momentum without dissipating
+    energy — and its contraction with the rate-of-strain tensor vanishes identically, so it
+    contributes exactly zero to :math:`Q_\nu`.
+
+    **Scope and limitation.** This adds the viscous *dissipation* to the electron energy equation; the
+    conjugate viscous force :math:`-\nabla\cdot\Pi_e/(e n_e)` is **not** added to Ohm's law, so the
+    heat is a one-way source rather than a transfer out of a tracked reservoir. See the
+    :ref:`theory section <theory-kinetic-fluid-hybrid-model>`.
+
+    **This is not hyper-resistivity.** Because :math:`u_e \approx -J/(e n_e)`, the viscous force shares
+    a :math:`\nabla^2`-on-the-current form with
+    :pp:param:`hybrid_pic_model.plasma_hyper_resistivity(rho,B)` and differs entirely in the
+    coefficient. :math:`\eta_H` is a numerical stabiliser whose dissipation is deliberately not booked;
+    this term is physical and is booked. They have separate inputs and separate diagnostic columns
+    (``P_etaH`` and ``P_nu``) so the two can never be confused.
+
+    **Verifying it is live.** Selecting the model prints a ``[qdsmc] electron viscosity model: ...``
+    line at initialization (the ``none`` line prints too, so a silent fallback is visible from the log
+    alone), and the heating rate is written to the nodal field ``hybrid_qdsmc_visc_heating_fp``
+    :math:`[W/m^3]`, which the ``P_nu`` column of the ``HybridDissipation`` reduced diagnostic
+    integrates. A nonzero value in that column is the only sound proof the term is active.
+
+.. pp:param:: hybrid_pic_model.qdsmc_nu_par(n,Te,B)
+.. pp:param:: hybrid_pic_model.qdsmc_nu_perp(n,Te,B)
+    :type: ``float`` or ``str``
+    :default: ``0``
+    :optional:
+
+    Field-aligned and cross-field kinematic electron viscosities in :math:`m^2/s`, read only under
+    :pp:param:`hybrid_pic_model.qdsmc_viscosity_model` = ``parser``. The expressions can depend on the
+    electron number density ``n`` (:math:`m^{-3}`), the electron temperature ``Te`` (eV) and the
+    magnetic-field magnitude ``B`` (T). Supplying them without selecting the ``parser`` model, or
+    selecting ``parser`` without supplying ``qdsmc_nu_par``, is an error rather than a silent
+    fallback.
+
+.. pp:param:: hybrid_pic_model.qdsmc_viscosity_flux_limit_factor
+    :type: ``float``
+    :default: ``0.1``
+    :optional:
+
+    Free-streaming flux-limit factor :math:`f` on the **parallel** viscous channel, the momentum
+    analogue of :pp:param:`hybrid_pic_model.qdsmc_conduction_flux_limit_factor`:
+    :math:`\mu_\mathrm{eff} = \mu_\parallel / (1 + \mu_\parallel |S| / (f\,\Pi_\mathrm{fs}))` with
+    :math:`\Pi_\mathrm{fs} = n_e m_e v_{te}^2` and :math:`v_{te} = \sqrt{2 k_B T_e/m_e}`. Unbounded
+    Braginskii parallel viscosity is as unphysically large as unbounded Spitzer parallel conduction and
+    needs the same remedy. Values :math:`\leq 0` disable the limiter, which is not recommended: the cap
+    is also what bounds the heating rate, at :math:`dT_e/dt \leq f |S| T_e`.
+
+.. pp:param:: hybrid_pic_model.qdsmc_viscosity_nu_max
+    :type: ``float``
+    :default: ``0`` (off)
+    :optional:
+
+    Global kinematic-viscosity ceiling in :math:`m^2/s`, applied as a hard minimum to both channels —
+    the viscosity analogue of :pp:param:`hybrid_pic_model.qdsmc_conduction_chi_max`.
+
+.. pp:param:: hybrid_pic_model.qdsmc_viscosity_coulomb_log
+.. pp:param:: hybrid_pic_model.qdsmc_viscosity_Z_eff
+    :type: ``float``
+    :default: ``10`` / ``1``
+    :optional:
+
+    Coulomb logarithm :math:`\ln\Lambda` and effective ion charge :math:`Z` entering the Braginskii
+    electron collision time :math:`\tau_e`. Read only under
+    :pp:param:`hybrid_pic_model.qdsmc_viscosity_model` = ``braginskii``.
+
+.. pp:param:: hybrid_pic_model.qdsmc_viscosity_limiter
+    :type: ``str``
+    :default: ``mc``
+    :optional:
+
+    Reconstruction of :math:`\nabla u_e` for the viscous source: ``none`` (centred differences, second
+    order, unbounded) or ``mc`` (MC-limited slopes). The heating is a positive-definite *quadratic* in
+    :math:`\nabla u_e`, so grid-scale deposition noise in :math:`u_e` does not cancel — it rectifies
+    into a spurious heat source everywhere. The MC slope equals the centred derivative in smooth
+    regions, retaining second order, and vanishes at a local extremum, which is exactly the
+    checkerboard mode.
+
+    Note the deliberate difference from :pp:param:`hybrid_pic_model.qdsmc_conduction_fd_limiter`: the
+    ``smart`` and ``sh`` families reconstruct *fluxes* and have no meaning for an algebraic source with
+    no flux divergence, so they are not offered here; naming one is an error rather than a silent
+    fallback. ``mc`` is the inner limiter of the ``sh`` family, i.e. the same primitive.
 
 .. pp:param:: hybrid_pic_model.Te_shunt_threshold
     :type: ``float``
@@ -6048,31 +6188,62 @@ This shifts analysis from post-processing to runtime calculation of reduction op
         embedded boundary.
 
     * ``HybridDissipation``
-        This type integrates the Ohmic and hyper-resistive dissipation power
-        of the hybrid (Ohm's law) solver (RZ),
+        This type integrates the dissipation power of the hybrid (Ohm's law)
+        solver (RZ), one column per channel,
 
         .. math::
 
             P_\eta = \int \eta\, |J|^2\, dV,
             \qquad
             P_{\eta_H} = -\int \eta_H\, J \cdot \nabla^2 J\, dV,
+            \qquad
+            P_\nu = \int Q_\nu\, dV.
 
-        evaluated with the same staggering, interpolations, and cylindrical
-        vector-Laplacian stencils as the Ohm's-law kernels, on the plasma
-        current of the step's final field solve. Under a polytropic electron
-        closure these powers leave the system entirely (there is no Ohmic
-        heating channel), so they must be booked as a sink in any energy
-        conservation statement; with an electron energy equation the
-        :math:`\eta` term is instead the transfer rate into the electron
-        internal energy. If a dedicated ``joule_heating_resistivity`` is
-        used, the electron receipt uses that resistivity while this
-        diagnostic integrates the field-solve :math:`\eta`; their difference
-        is the dissipation the heating channel deliberately declines and
-        remains a true sink. The hyper-resistive term never enters the
-        heating source. Embedded-boundary-frozen cells are skipped exactly
-        as in the solver, and the hyper-resistive integrand is not evaluated
-        on the outermost cell ring of the domain. Columns:
-        :math:`P_\eta` [W], :math:`P_{\eta_H}` [W], and their sum.
+        The first two are evaluated with the same staggering,
+        interpolations, and cylindrical vector-Laplacian stencils as the
+        Ohm's-law kernels, on the plasma current of the step's final field
+        solve. Under a polytropic electron closure these powers leave the
+        system entirely (there is no Ohmic heating channel), so they must be
+        booked as a sink in any energy conservation statement; with an
+        electron energy equation the :math:`\eta` term is instead the
+        transfer rate into the electron internal energy. If a dedicated
+        ``joule_heating_resistivity`` is used, the electron receipt uses
+        that resistivity while this diagnostic integrates the field-solve
+        :math:`\eta`; their difference is the dissipation the heating
+        channel deliberately declines and remains a true sink.
+        Embedded-boundary-frozen cells are skipped exactly as in the solver,
+        and the hyper-resistive integrand is not evaluated on the outermost
+        cell ring of the domain.
+
+        **The three channels are booked differently, on purpose.**
+        :math:`P_{\eta_H}` is *never* booked as heating: hyper-resistivity is
+        a numerical stabiliser for unphysical modes whose magnitude is chosen
+        for stability rather than from a transport coefficient, so this
+        column reports it and nothing receives it (see
+        :pp:param:`hybrid_pic_model.plasma_hyper_resistivity(rho,B)`).
+        :math:`P_\nu` *is* booked as heating: it is the physical Braginskii
+        electron viscous dissipation (see
+        :pp:param:`hybrid_pic_model.qdsmc_viscosity_model`), and unlike the
+        other two it is not re-derived here — the column integrates the
+        heating field the solver itself wrote, so it cannot disagree with
+        what was applied, and it reads exactly zero when the viscosity model
+        is ``none``. The hyper-resistive and viscous terms share a
+        :math:`\nabla^2`-on-the-current form and are kept in separate columns
+        precisely so that the numerical and the physical dissipation can
+        never be confused for one another.
+
+        Columns: :math:`P_\eta` [W], :math:`P_{\eta_H}` [W],
+        :math:`P_\mathrm{diss} = P_\eta + P_{\eta_H} + P_\nu` [W],
+        :math:`P_\nu` [W].
+
+        Note that :math:`P_\nu` is *appended after* the total rather than
+        grouped with the channels it belongs with. This is deliberate: the
+        reduced-diagnostic file is read positionally by tooling outside this
+        repository, so columns 0–4 keep the meaning they have always had and
+        new channels are added on the end. Follow the same rule for any future
+        channel — fold it into :math:`P_\mathrm{diss}` and append its column,
+        never insert one — and prefer reading these files by the column names
+        in the header line rather than by position.
 
     * ``ColliderRelevant``
         This diagnostics computes properties of two colliding beams that are relevant for particle colliders.

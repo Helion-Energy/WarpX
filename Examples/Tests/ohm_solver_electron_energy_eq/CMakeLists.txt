@@ -171,6 +171,35 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# PHYSICAL anisotropic electron viscosity (Braginskii 1965), the energy-BOOKED
+# companion to the numerical hyper-resistivity. Manufactured solution: a
+# tilted guide field with a small y-perturbation makes the electron fluid
+# carry curl(B), so grad u_e is analytic and the Braginskii heating has a
+# closed form. The active arm pins the absolute rate (coefficients, tensor
+# algebra, energy booking and units end to end); the null arm is the
+# anisotropy gate -- at zero tilt b_x vanishes everywhere, so the
+# field-aligned strain b.W.b is identically zero and a correct PARALLEL
+# viscosity must deposit no heat, while an isotropic one heats at full rate.
+add_warpx_test(
+    test_2d_ohm_solver_electron_viscosity_picmi  # name
+    2  # dims
+    2  # nprocs
+    "inputs_test_2d_ohm_solver_electron_viscosity_picmi.py --test"  # inputs
+    "analysis_viscosity.py"  # analysis
+    "analysis_default_regression.py --path diags/field_diags"  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_2d_ohm_solver_electron_viscosity_null_picmi  # name
+    2  # dims
+    2  # nprocs
+    "inputs_test_2d_ohm_solver_electron_viscosity_picmi.py --test --tilt-deg 0"  # inputs
+    "analysis_viscosity.py --null"  # analysis
+    "analysis_default_regression.py --path diags/field_diags"  # checksum
+    OFF  # dependency
+)
+
 # Insulating EB wall (boundary.eb_type = insulating) with the electron energy
 # equation. Entropy-drift tolerances are set from measured values with margin:
 # at rest the open-set drift is a saturating step-1 transient (-1.1e-4 at both

@@ -11,6 +11,7 @@
 
 #include "HybridPICModel.H"
 
+#include "BraginskiiViscosity.H"
 #include "QdsmcFluxLimiters.H"
 #include "QdsmcRKIntegrator.H"
 
@@ -444,6 +445,86 @@ void HybridPICModel::ReadParameters ()
         "hybrid_pic_model.qdsmc_conduction_max_hop must be positive");
     pp_hybrid.query("qdsmc_conduction_vacuum_fast_front",
                     m_cond_vacuum_fast_front);
+
+    // PHYSICAL Braginskii electron viscosity (energy-BOOKED). Distinct in
+    // every way from the hyper-resistivity that shares its grad^2 form --
+    // see the m_eta_h declaration and BraginskiiViscosity.H.
+    {
+        std::string vmodel = "none";
+        pp_hybrid.query("qdsmc_viscosity_model", vmodel);
+        if (vmodel == "none") { m_visc_model = 0; }
+        else if (vmodel == "braginskii") { m_visc_model = 1; }
+        else if (vmodel == "parser") { m_visc_model = 2; }
+        else {
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.qdsmc_viscosity_model must be 'none', "
+                "'braginskii' or 'parser'");
+        }
+        m_include_electron_viscosity = (m_visc_model != 0);
+
+#if defined(WARPX_DIM_RCYLINDER) || defined(WARPX_DIM_RSPHERE)
+        // grad u_e carries geometry-specific metric terms; only the
+        // Cartesian forms and the RZ (m = 0) cylindrical form are derived
+        // in QDSMCAddViscousHeating. Refuse rather than silently drop them.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(!m_include_electron_viscosity,
+            "hybrid_pic_model.qdsmc_viscosity_model is implemented for 1D/2D/"
+            "3D Cartesian and RZ only (the radial-cylindrical and radial-"
+            "spherical metric terms of grad u_e are not derived)");
+#endif
+
+        bool const has_nu_par =
+            pp_hybrid.query("qdsmc_nu_par(n,Te,B)", m_visc_nu_par_expression);
+        pp_hybrid.query("qdsmc_nu_perp(n,Te,B)", m_visc_nu_perp_expression);
+        // A deck that supplies the parsers but never selects the model (or
+        // vice versa) is the exact failure the boot print exists to catch;
+        // catch it earlier and louder, at parse time.
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !(m_visc_model == 2 && !has_nu_par),
+            "hybrid_pic_model.qdsmc_viscosity_model = 'parser' requires "
+            "hybrid_pic_model.qdsmc_nu_par(n,Te,B)");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !(m_visc_model != 2 && has_nu_par),
+            "hybrid_pic_model.qdsmc_nu_par(n,Te,B) is only read under "
+            "hybrid_pic_model.qdsmc_viscosity_model = 'parser'");
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !(m_include_electron_viscosity &&
+              !m_solve_electron_energy_equation),
+            "hybrid_pic_model.qdsmc_viscosity_model requires "
+            "hybrid_pic_model.solve_electron_energy_equation = 1 (the "
+            "viscous dissipation is booked into the electron energy "
+            "equation; there is nowhere to book it otherwise)");
+
+        utils::parser::queryWithParser(pp_hybrid,
+            "qdsmc_viscosity_coulomb_log", m_visc_coulomb_log);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_visc_coulomb_log > 0._rt,
+            "hybrid_pic_model.qdsmc_viscosity_coulomb_log must be positive");
+        utils::parser::queryWithParser(pp_hybrid,
+            "qdsmc_viscosity_Z_eff", m_visc_Z_eff);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_visc_Z_eff > 0._rt,
+            "hybrid_pic_model.qdsmc_viscosity_Z_eff must be positive");
+        utils::parser::queryWithParser(pp_hybrid,
+            "qdsmc_viscosity_flux_limit_factor", m_visc_flux_limit_factor);
+        utils::parser::queryWithParser(pp_hybrid,
+            "qdsmc_viscosity_nu_max", m_visc_nu_max);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_visc_nu_max >= 0._rt,
+            "hybrid_pic_model.qdsmc_viscosity_nu_max must be >= 0");
+
+        std::string vlim = "mc";
+        pp_hybrid.query("qdsmc_viscosity_limiter", vlim);
+        if (vlim == "none") { m_visc_limiter = 0; }
+        else if (vlim == "mc") { m_visc_limiter = 1; }
+        else {
+            // 'smart'/'sh' are flux reconstructions and have no meaning for
+            // an algebraic source; naming them here is a category error, so
+            // say so rather than silently falling back to mc.
+            WARPX_ABORT_WITH_MESSAGE(
+                "hybrid_pic_model.qdsmc_viscosity_limiter must be 'none' or "
+                "'mc' -- the 'smart'/'sh' families of "
+                "qdsmc_conduction_fd_limiter reconstruct FLUXES and do not "
+                "apply to the viscous heating source, which has no flux "
+                "divergence");
+        }
+    }
     {
         // The qdsmc_advection_* family configures the SDE conduction
         // operator's advective sweep/remap machinery ONLY
@@ -907,6 +988,19 @@ void HybridPICModel::AllocateLevelMFs (
             lev, amrex::convert(ba, rho_nodal_flag),
             dm, ncomps, ngRho, 0.0_rt);
 
+        // Braginskii viscous heating rate Q_nu [W/m^3], nodal. This is the
+        // physical viscosity channel's own sink field: QDSMCAddViscousHeating
+        // overwrites it every call and the HybridDissipation reduced diag
+        // integrates it into the P_nu column. A term that is configured but
+        // whose sink field is identically zero is a term that is not running
+        // -- that is the whole point of allocating it. No ghosts: it is read
+        // at valid nodes only.
+        if (m_include_electron_viscosity) {
+            fields.alloc_init("hybrid_qdsmc_visc_heating_fp",
+                lev, amrex::convert(ba, rho_nodal_flag),
+                dm, ncomps, amrex::IntVect::TheZeroVector(), 0.0_rt);
+        }
+
         // Theta-implicit hybrid saved states: T_e^n and J_plasma(B^n).
         // Only written on the implicit path; allocated with the rest of the
         // energy-equation fields for simplicity.
@@ -1218,6 +1312,59 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
     m_kappa_perp_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(kperp_expression, {"n","Te","t"}));
     m_kappa_perp = m_kappa_perp_parser->compile<3>();
+
+    // PHYSICAL Braginskii electron viscosity. Parsers compiled
+    // unconditionally ("0.0" when unset), consulted only under
+    // qdsmc_viscosity_model = parser.
+    m_visc_nu_par_parser = std::make_unique<amrex::Parser>(
+        utils::parser::makeParser(m_visc_nu_par_expression, {"n","Te","B"}));
+    m_visc_nu_par = m_visc_nu_par_parser->compile<3>();
+    m_visc_nu_perp_parser = std::make_unique<amrex::Parser>(
+        utils::parser::makeParser(m_visc_nu_perp_expression, {"n","Te","B"}));
+    m_visc_nu_perp = m_visc_nu_perp_parser->compile<3>();
+    {
+        // Boot print, unconditional (the "none" line is the load-bearing
+        // half): a run that selects the viscosity and one that silently
+        // does not must be distinguishable from the log alone.
+        // warpx_used_inputs records what was ASKED for, not what the solver
+        // resolved, and three defects this term is meant to avoid were all
+        // traced to terms that were configured but unverifiable.
+        static char const * const visc_names[] =
+            {"none (physical electron viscosity OFF)",
+             "braginskii (anisotropic, built-in coefficients)",
+             "parser (anisotropic, user nu_par/nu_perp)"};
+        static char const * const visc_lim_names[] =
+            {"none (centred grad u_e)", "mc (MC-limited slopes)"};
+        amrex::Print() << "[qdsmc] electron viscosity model: "
+            << visc_names[m_visc_model] << "\n";
+        if (m_include_electron_viscosity) {
+            amrex::Print() << "[qdsmc] electron viscosity limiter: "
+                << visc_lim_names[m_visc_limiter]
+                << "; free-streaming f = " << m_visc_flux_limit_factor
+                << (m_visc_flux_limit_factor > 0.0_rt
+                    ? " (parallel channel capped)"
+                    : " (DISABLED -- unbounded parallel viscosity)")
+                << "\n";
+            if (m_visc_model == 1) {
+                amrex::Print() << "[qdsmc] electron viscosity braginskii: "
+                    << "ln(Lambda) = " << m_visc_coulomb_log
+                    << ", Z_eff = " << m_visc_Z_eff << "\n";
+            } else {
+                amrex::Print() << "[qdsmc] electron viscosity nu_par = "
+                    << m_visc_nu_par_expression << ", nu_perp = "
+                    << m_visc_nu_perp_expression << " [m^2/s]\n";
+            }
+            if (m_visc_nu_max > 0.0_rt) {
+                amrex::Print() << "[qdsmc] electron viscosity nu ceiling: "
+                    << m_visc_nu_max << " m^2/s (hard min on both "
+                    "channels)\n";
+            }
+            amrex::Print() << "[qdsmc] electron viscosity dissipation is "
+                "BOOKED into the electron energy equation (column P_nu); "
+                "hyper-resistivity eta_H remains a numerical stabiliser and "
+                "is deliberately NOT booked\n";
+        }
+    }
 
     // Isothermal-EB bath temperature Te(x,y,z) [eV] for the conduction
     // EB BC (evaluated at covered node positions).
@@ -4061,6 +4208,267 @@ void HybridPICModel::QDSMCAddJouleHeating (int const lev, amrex::Real const dt,
 }
 
 
+void HybridPICModel::QDSMCAddViscousHeating (int const lev,
+                                             amrex::Real const dt) const
+{
+    auto & warpx = WarpX::GetInstance();
+    QDSMCAddViscousHeating(lev, dt,
+        *warpx.m_fields.get(warpx::fields::FieldType::rho_fp, lev));
+}
+
+void HybridPICModel::QDSMCAddViscousHeating (int const lev,
+                                             amrex::Real const dt,
+                                             amrex::MultiFab const & rho_in) const
+{
+    ABLASTR_PROFILE("HybridPICModel::QDSMCAddViscousHeating()");
+
+    using warpx::fields::FieldType;
+    using ablastr::coarsen::sample::Interp;
+
+    if (!m_include_electron_viscosity) { return; }
+
+    // PHYSICAL Braginskii electron viscous heating (Braginskii 1965; see
+    // BraginskiiViscosity.H for the coefficients and the tensor algebra).
+    //
+    //   Q_nu = (3/4) mu_par S^2 + (1/2) mu_perp (W:W - (3/2) S^2)  [W/m^3]
+    //   T_e += dt (gamma-1) Q_nu / (n_e k_B)
+    //
+    // This is NOT the hyper-resistive dissipation. eta_H is a numerical
+    // stabiliser and its dissipation stays unbooked on purpose; this term
+    // is the physical stress and its dissipation is booked here and
+    // reported in its own P_nu diagnostic column. The two share a grad^2
+    // form on the current and nothing else.
+
+    auto & warpx = WarpX::GetInstance();
+    amrex::Periodicity const & period = warpx.Geom(lev).periodicity();
+
+    amrex::MultiFab       & Te  =
+        *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
+    amrex::MultiFab const & rho = rho_in;
+    amrex::MultiFab       & Qnu =
+        *warpx.m_fields.get("hybrid_qdsmc_visc_heating_fp", lev);
+    ablastr::fields::VectorField J_plasma =
+        warpx.m_fields.get_alldirs(FieldType::hybrid_current_fp_plasma, lev);
+    ablastr::fields::VectorField J_ion =
+        warpx.m_fields.get_alldirs(FieldType::current_fp, lev);
+    ablastr::fields::VectorField B_fp =
+        warpx.m_fields.get_alldirs(FieldType::Bfield_fp, lev);
+
+    amrex::GpuArray<int, 3> const & Jx_stag = Jx_IndexType;
+    amrex::GpuArray<int, 3> const & Jy_stag = Jy_IndexType;
+    amrex::GpuArray<int, 3> const & Jz_stag = Jz_IndexType;
+    amrex::GpuArray<int, 3> const & Bx_stag = Bx_IndexType;
+    amrex::GpuArray<int, 3> const & By_stag = By_IndexType;
+    amrex::GpuArray<int, 3> const & Bz_stag = Bz_IndexType;
+    amrex::GpuArray<int, 3> const nodal   = {1, 1, 1};
+    amrex::GpuArray<int, 3> const coarsen = {1, 1, 1};
+
+    auto const rho_floor = PhysConst::q_e * m_n_floor;
+
+    // ---- Stage 1: nodal electron fluid velocity u_e = (J_i - J)/rho ----
+    // Rebuilt here rather than read from Ve_fp: that field is allocated
+    // only for the drag operators and is refreshed once per PIC step, while
+    // this source runs inside the Strang bracket (and, on the implicit
+    // path, inside the Newton residual). One ghost layer, filled by
+    // FillBoundary, feeds the centred/limited derivative stencil below.
+    amrex::MultiFab ue_nodal(Te.boxArray(), Te.DistributionMap(), 3,
+                             amrex::IntVect(1));
+    ue_nodal.setVal(0.0_rt);
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (amrex::MFIter mfi(ue_nodal, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        amrex::Array4<amrex::Real> const & ue = ue_nodal.array(mfi);
+        amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & Jpx = J_plasma[0]->const_array(mfi);
+        amrex::Array4<amrex::Real const> const & Jpy = J_plasma[1]->const_array(mfi);
+        amrex::Array4<amrex::Real const> const & Jpz = J_plasma[2]->const_array(mfi);
+        amrex::Array4<amrex::Real const> const & Jix = J_ion[0]->const_array(mfi);
+        amrex::Array4<amrex::Real const> const & Jiy = J_ion[1]->const_array(mfi);
+        amrex::Array4<amrex::Real const> const & Jiz = J_ion[2]->const_array(mfi);
+
+        amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                amrex::Real const rho_val =
+                    std::max(rho_arr(i, j, k), rho_floor);
+                ue(i, j, k, 0) =
+                    (Interp(Jix, Jx_stag, nodal, coarsen, i, j, k, 0)
+                   - Interp(Jpx, Jx_stag, nodal, coarsen, i, j, k, 0)) / rho_val;
+                ue(i, j, k, 1) =
+                    (Interp(Jiy, Jy_stag, nodal, coarsen, i, j, k, 0)
+                   - Interp(Jpy, Jy_stag, nodal, coarsen, i, j, k, 0)) / rho_val;
+                ue(i, j, k, 2) =
+                    (Interp(Jiz, Jz_stag, nodal, coarsen, i, j, k, 0)
+                   - Interp(Jpz, Jz_stag, nodal, coarsen, i, j, k, 0)) / rho_val;
+            });
+    }
+    ue_nodal.FillBoundary(period);
+
+    // ---- Stage 2: strain -> coefficients -> heating ----
+    // Qnu is OVERWRITTEN, never accumulated: the theta-implicit path
+    // re-enters this routine on every Newton residual evaluation, so a
+    // running tally here would over-count by the iteration count.
+    Qnu.setVal(0.0_rt);
+
+    auto const gamma_minus_1  = m_gamma - 1.0_rt;
+    auto const K_per_eV       = PhysConst::q_e / PhysConst::kb;
+    auto const dx             = warpx.Geom(lev).CellSizeArray();
+    amrex::Box const & domain = warpx.Geom(lev).Domain();
+    amrex::IntVect const dom_lo = domain.smallEnd();
+    amrex::IntVect const dom_hi = domain.bigEnd();
+#if defined(WARPX_DIM_RZ)
+    auto const problo         = warpx.Geom(lev).ProbLoArray();
+#endif
+
+    int const visc_model    = m_visc_model;
+    bool const mc_limited   = (m_visc_limiter == 1);
+    auto const nu_par_pars  = m_visc_nu_par;
+    auto const nu_perp_pars = m_visc_nu_perp;
+    auto const coulomb_log  = m_visc_coulomb_log;
+    auto const Z_eff        = m_visc_Z_eff;
+    auto const flux_limit_f = m_visc_flux_limit_factor;
+    auto const nu_max       = m_visc_nu_max;
+
+    // Grid direction d differentiates along physical vector component
+    // dim_to_dir[d]; components are always (x, y, z) / (r, theta, z).
+#if defined(WARPX_DIM_3D)
+    amrex::GpuArray<int, AMREX_SPACEDIM> const dim_to_dir = {0, 1, 2};
+#elif defined(WARPX_DIM_XZ) || defined(WARPX_DIM_RZ)
+    amrex::GpuArray<int, AMREX_SPACEDIM> const dim_to_dir = {0, 2};
+#else   // WARPX_DIM_1D_Z
+    amrex::GpuArray<int, AMREX_SPACEDIM> const dim_to_dir = {2};
+#endif
+
+    // The derivative stencil reads one node either side, so evaluation stops
+    // one node inside each non-periodic domain face -- the same rule the
+    // hyper-resistive operator and the P_etaH integrand follow. Those faces
+    // therefore carry no viscous heating, and in RZ this also keeps the
+    // singular 1/r metric terms off the axis node.
+    amrex::GpuArray<int, AMREX_SPACEDIM> shrink{};
+    for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+        shrink[d] = period.isPeriodic(d) ? 0 : 1;
+    }
+
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
+#endif
+    for (amrex::MFIter mfi(Te, TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+        amrex::Array4<amrex::Real> const & Te_arr = Te.array(mfi);
+        amrex::Array4<amrex::Real> const & Q_arr = Qnu.array(mfi);
+        amrex::Array4<amrex::Real const> const & ue = ue_nodal.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & rho_arr = rho.const_array(mfi);
+        amrex::Array4<amrex::Real const> const & Bx_arr = B_fp[0]->const_array(mfi);
+        amrex::Array4<amrex::Real const> const & By_arr = B_fp[1]->const_array(mfi);
+        amrex::Array4<amrex::Real const> const & Bz_arr = B_fp[2]->const_array(mfi);
+
+        amrex::ParallelFor(mfi.tilebox(),
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                amrex::IntVect const iv(AMREX_D_DECL(i, j, k));
+                for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                    if (iv[d] < dom_lo[d] + shrink[d] ||
+                        iv[d] > dom_hi[d] + 1 - shrink[d]) { return; }
+                }
+
+                // Vacuum gate: below the solver density floor u_e is the
+                // floored-rho quotient, not a fluid velocity, and nu_par
+                // ~ Te^{5/2}/n_e diverges there. Heating outside the plasma
+                // is a runaway vector, not physics.
+                amrex::Real const rho_val = rho_arr(i, j, k);
+                if (rho_val <= rho_floor) { return; }
+
+                amrex::Real const n_e  = rho_val / PhysConst::q_e;
+                amrex::Real const Te_K = Te_arr(i, j, k);
+                if (Te_K <= 0.0_rt) { return; }
+                amrex::Real const Te_J = Te_K * PhysConst::kb;
+
+                // Velocity gradient tensor G[dir][comp] = d u_comp / d x_dir.
+                amrex::Real G[3][3] = {{0.0_rt, 0.0_rt, 0.0_rt},
+                                       {0.0_rt, 0.0_rt, 0.0_rt},
+                                       {0.0_rt, 0.0_rt, 0.0_rt}};
+                for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+                    int const di = (d == 0) ? 1 : 0;
+                    int const dj = (d == 1) ? 1 : 0;
+                    int const dk = (d == 2) ? 1 : 0;
+                    amrex::Real const inv_dx = 1.0_rt / dx[d];
+                    for (int c = 0; c < 3; ++c) {
+                        amrex::Real const up = ue(i + di, j + dj, k + dk, c);
+                        amrex::Real const u0 = ue(i, j, k, c);
+                        amrex::Real const um = ue(i - di, j - dj, k - dk, c);
+                        G[dim_to_dir[d]][c] = mc_limited
+                            ? qdsmc_mc_slope(up - u0, u0 - um) * inv_dx
+                            : 0.5_rt * (up - um) * inv_dx;
+                    }
+                }
+#if defined(WARPX_DIM_RZ)
+                // Cylindrical metric terms of grad u at m = 0. The axis node
+                // is excluded above, so r > 0 here.
+                {
+                    amrex::Real const r = problo[0] + i * dx[0];
+                    G[1][0] = -ue(i, j, k, 1) / r;
+                    G[1][1] =  ue(i, j, k, 0) / r;
+                    G[1][2] =  0.0_rt;
+                }
+#endif
+
+                // Field direction. |B| = 0 leaves b-hat undefined; the
+                // regularised nu_perp then equals nu_par up to the 0.51/0.73
+                // ratio, so the choice of axis is immaterial there.
+                amrex::Real const bx =
+                    Interp(Bx_arr, Bx_stag, nodal, coarsen, i, j, k, 0);
+                amrex::Real const by =
+                    Interp(By_arr, By_stag, nodal, coarsen, i, j, k, 0);
+                amrex::Real const bz =
+                    Interp(Bz_arr, Bz_stag, nodal, coarsen, i, j, k, 0);
+                amrex::Real const Bmag = std::sqrt(bx*bx + by*by + bz*bz);
+                amrex::Real b[3] = {0.0_rt, 0.0_rt, 1.0_rt};
+                if (Bmag > 0.0_rt) {
+                    b[0] = bx / Bmag; b[1] = by / Bmag; b[2] = bz / Bmag;
+                }
+
+                // Kinematic viscosities [m^2/s].
+                amrex::Real nu_par;
+                amrex::Real nu_perp;
+                if (visc_model == 1) {
+                    amrex::Real const tau_e =
+                        braginskii_tau_e(n_e, Te_J, Z_eff, coulomb_log);
+                    nu_par  = braginskii_nu_par(Te_J, tau_e);
+                    nu_perp = braginskii_nu_perp(
+                        nu_par, PhysConst::q_e * Bmag * tau_e / PhysConst::m_e);
+                } else {
+                    amrex::Real const Te_eV = Te_K / K_per_eV;
+                    nu_par  = nu_par_pars(n_e, Te_eV, Bmag);
+                    nu_perp = nu_perp_pars(n_e, Te_eV, Bmag);
+                }
+                if (nu_max > 0.0_rt) {
+                    nu_par  = std::min(nu_par,  nu_max);
+                    nu_perp = std::min(nu_perp, nu_max);
+                }
+
+                // Dynamic viscosities [Pa s], with the free-streaming cap on
+                // the parallel channel only (the cross-field one is ~12
+                // orders smaller and never approaches the bound).
+                amrex::Real const S = braginskii_strain_par(G, b);
+                amrex::Real const mu_par = braginskii_visc_flux_limit(
+                    PhysConst::m_e * n_e * nu_par, std::abs(S),
+                    n_e * Te_J, flux_limit_f);
+                amrex::Real const mu_perp = PhysConst::m_e * n_e * nu_perp;
+
+                amrex::Real const Q =
+                    braginskii_viscous_heating(mu_par, mu_perp, G, S);
+
+                Q_arr(i, j, k) = Q;
+                Te_arr(i, j, k) +=
+                    dt * gamma_minus_1 * Q / (n_e * PhysConst::kb);
+            });
+    }
+
+    Te.FillBoundary(Te.nGrowVect(), period);
+}
+
+
 void HybridPICModel::QDSMCShuntTeExcess (int const lev,
                                          amrex::MultiFab * const redirect_E) const
 {
@@ -5315,6 +5723,15 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
         QDSMCAddJouleHeating(lev, dt_src, redirect_active ? &ion_redirect_E : nullptr);
         QdsmcPhaseMinTe(lev, "sources_joule");
     }
+    // PHYSICAL Braginskii viscous dissipation. Placed before the shunt so
+    // that, like every other heating channel, any excess it produces is
+    // caught there. It has no ion-redirect leg: the redirect delivers heat
+    // to ions through the e-i drift, which the viscous stress does not act
+    // on.
+    if (m_include_electron_viscosity) {
+        QDSMCAddViscousHeating(lev, dt_src);
+        QdsmcPhaseMinTe(lev, "sources_viscosity");
+    }
     // General Te limiter with ion shunt (any-channel excess -> ions; runs
     // after the Joule source so the staging merges into one OU kick
     // application).
@@ -5480,7 +5897,8 @@ void HybridPICModel::ApplyQdsmcEnergySources (int const lev, amrex::Real const d
     // bit-identical to #6982).
     if (fill_te_ghosts &&
         (m_include_joule_heating || m_include_temperature_relaxation ||
-         m_has_energy_sink || m_has_electron_stopping)) {
+         m_has_energy_sink || m_has_electron_stopping ||
+         m_include_electron_viscosity)) {
         amrex::MultiFab & Te =
             *warpx.m_fields.get(FieldType::hybrid_electron_temperature_fp, lev);
         Te.FillBoundary(warpx.Geom(lev).periodicity());
@@ -10099,6 +10517,12 @@ void HybridPICModel::AdvanceElectronEnergyQDSMCTheta (amrex::Real const dt,
             if (m_include_joule_heating) {
                 QDSMCAddJouleHeating(lev, 0.5_rt*dt, rho_half, nullptr);
             }
+            // Safe to re-enter on every residual evaluation: the heating is
+            // a pure function of the current field state and its diagnostic
+            // field is overwritten, not accumulated.
+            if (m_include_electron_viscosity) {
+                QDSMCAddViscousHeating(lev, 0.5_rt*dt, rho_half);
+            }
             if (m_include_temperature_relaxation) {
                 QDSMCAddTemperatureRelaxation(lev, 0.5_rt*dt, rho_half, m_qdsmc_Ti_by_name[lev]);
             }
@@ -10131,6 +10555,9 @@ void HybridPICModel::AdvanceElectronEnergyQDSMCTheta (amrex::Real const dt,
             // coefficient states.
             if (m_include_joule_heating) {
                 QDSMCAddJouleHeating(lev, dt, rho_half, nullptr);
+            }
+            if (m_include_electron_viscosity) {
+                QDSMCAddViscousHeating(lev, dt, rho_half);
             }
             if (m_include_temperature_relaxation) {
                 QDSMCAddTemperatureRelaxation(lev, dt, rho_half, m_qdsmc_Ti_by_name[lev]);
@@ -10221,6 +10648,9 @@ void HybridPICModel::QDSMCFinishImplicitStep (amrex::Real const dt, amrex::Real 
         amrex::MultiFab rho_half(rho_fp, amrex::make_alias, rho_fp.nComp()/2, 1);
         if (m_include_joule_heating) {
             QDSMCAddJouleHeating(lev, dt, rho_half, nullptr);
+        }
+        if (m_include_electron_viscosity) {
+            QDSMCAddViscousHeating(lev, dt, rho_half);
         }
         if (m_include_temperature_relaxation) {
             QDSMCAddTemperatureRelaxation(lev, dt, rho_half, m_qdsmc_Ti_by_name[lev]);

@@ -14,11 +14,12 @@
 #include <string>
 
 /**
- * \brief Volume-integrated Ohmic and hyper-resistive dissipation power of
- * the hybrid (Ohm's law) solver:
+ * \brief Volume-integrated dissipation power of the hybrid (Ohm's law)
+ * solver, one column per channel:
  *
  *   P_eta  = Int eta(rho, |J|, t) |J|^2 dV
  *   P_etaH = -Int eta_H(rho, |B|) J . lap(J) dV
+ *   P_nu   = Int Q_nu dV
  *
  * evaluated on the same staggering, interpolations, and vector-Laplacian
  * stencils as the Ohm's-law kernels, with J the plasma current of the
@@ -35,10 +36,37 @@
  * is the FIELD-side extraction; the electron-side receipt is the energy
  * budget's Joule column; their difference is the dissipation the heating
  * resistivity deliberately declines (e.g. the vacuum-regularizer ramp) and
- * must be booked as a true sink. The hyper-resistive term never enters the
- * heating source and is always a true sink.
+ * must be booked as a true sink.
  *
- * Columns: P_eta [W], P_etaH [W], P_diss = P_eta + P_etaH [W].
+ * THE THREE CHANNELS ARE BOOKED DIFFERENTLY ON PURPOSE:
+ *
+ *  - P_eta  (resistive) is a transfer into electron internal energy under
+ *    the energy-equation closure, a true sink under the polytropic one.
+ *  - P_etaH (hyper-resistive) is NEVER booked as heating. eta_H is a
+ *    NUMERICAL stabiliser for unphysical modes; its magnitude is chosen for
+ *    stability, not from a transport coefficient, so the energy it removes
+ *    has no claim on T_e. This column REPORTS it; nothing receives it. Do
+ *    not "fix" that by routing it into the electron energy equation -- see
+ *    the m_eta_h declaration in HybridPICModel.H.
+ *  - P_nu   (viscous) IS booked as heating. It is the PHYSICAL Braginskii
+ *    electron stress (BraginskiiViscosity.H), and unlike the two terms
+ *    above it is not re-derived here: the column integrates the solver's
+ *    own nodal heating field hybrid_qdsmc_visc_heating_fp, so it cannot
+ *    disagree with what was actually applied. It reads exactly zero when
+ *    qdsmc_viscosity_model = none.
+ *
+ * P_etaH and P_nu have the same grad^2-on-the-current FORM and are kept in
+ * separate columns precisely so the numerical and the physical dissipation
+ * can never be confused for one another.
+ *
+ * Columns: P_eta [W], P_etaH [W], P_diss = P_eta + P_etaH + P_nu [W],
+ *          P_nu [W].
+ *
+ * P_nu sits AFTER the total rather than beside the channels it belongs with,
+ * deliberately: this file is read positionally across repositories, so columns
+ * 0-4 keep their historical meaning and new channels are appended. Add future
+ * channels the same way -- fold them into P_diss and append the column, never
+ * insert one. Read by name from the header line, not by position.
  *
  * The hyper-resistive integrand needs one-cell neighbor stencils and is
  * skipped on the outermost cell ring of the domain (boundary-condition
