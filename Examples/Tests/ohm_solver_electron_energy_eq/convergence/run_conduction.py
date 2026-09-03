@@ -32,11 +32,24 @@ ENV = dict(
 )
 
 
+# Operator/integrator/limiter selection, applied to every case unless a
+# section overrides it. The sections pass only mode/ncell/nsteps/npts/
+# grad_deposit, so without this the sweep silently inherits the DECK
+# defaults -- `sde` and `ssprk2` -- and measures the SDE operator under
+# SSPRK2 rather than the production fd/rkl2 path it is usually run to
+# characterise. Set from the CLI below; the deck's own defaults are left
+# in place when a field here is None, so recorded sweeps still reproduce.
+SELECT = {"conduction_op": None, "fd_time": None, "fd_limiter": None}
+
+
 def run_case(tag, **kw):
     os.makedirs(OUT, exist_ok=True)
     path = os.path.join(OUT, f"{tag}.npz")
     if os.path.exists(path):
         return np.load(path)
+    for key, val in SELECT.items():
+        if val is not None:
+            kw.setdefault(key, val)
     cmd = [PY, os.path.join(HERE, "qdsmc_conduction_test.py"), "--out", path]
     for key, val in kw.items():
         cmd.append("--" + key.replace("_", "-"))
@@ -86,7 +99,25 @@ def sweep(section, npts, grad):
 
 
 if __name__ == "__main__":
-    sections = sys.argv[1:] or ["aligned2", "aligned2_np2", "nograd", "tilted"]
+    argv = []
+    for a in sys.argv[1:]:
+        # --<knob>=<value> selects an operator/integrator/limiter for every
+        # case; anything else is a section name.
+        if a.startswith("--") and "=" in a:
+            k, v = a[2:].split("=", 1)
+            k = k.replace("-", "_")
+            if k not in SELECT:
+                raise SystemExit(
+                    f"unknown selector --{k}; expected one of "
+                    + ", ".join(sorted(SELECT))
+                )
+            SELECT[k] = v
+        else:
+            argv.append(a)
+    if any(v is not None for v in SELECT.values()):
+        print("[select]", {k: v for k, v in SELECT.items() if v is not None},
+              flush=True)
+    sections = argv or ["aligned2", "aligned2_np2", "nograd", "tilted"]
     for s in sections:
         if s == "aligned2":
             sweep("aligned2", [3], 1)
