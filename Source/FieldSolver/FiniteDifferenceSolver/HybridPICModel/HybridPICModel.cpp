@@ -1199,6 +1199,18 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
             << lim_names[m_cond_fd_limiter]
             << (m_cond_fd_limiter >= 3
                 ? " -- cross-flux extrema bound armed\n" : "\n");
+        // The integrator gets the same treatment as the limiter, for the
+        // same reason: a run that selects rkl2 and one that falls back to
+        // ssprk2 are otherwise indistinguishable from the outputs, and
+        // used_inputs records what was ASKED for, not what the solver
+        // resolved. An A/B over the integrator is unverifiable without
+        // this line.
+        static char const * const fdt_names[] =
+            {"ssprk2 (monotone embedded 2(1), SSP)",
+             "rkf45 (Fehlberg 4(5), NOT SSP)",
+             "rkl2 (Runge-Kutta-Legendre super-time-stepping)"};
+        amrex::Print() << "[qdsmc] conduction fd integrator: "
+            << fdt_names[m_cond_fd_time] << "\n";
     }
     m_kappa_par_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(kpar_expression, {"n","Te","t"}));
@@ -6874,6 +6886,7 @@ void HybridPICModel::QdsmcConductionOnceFD (int const lev, amrex::Real const dt_
             << " attempts=" << st.n_attempts
             << " dt_first=" << st.dt_first
             << " dt_last=" << st.dt_last
+            << " rkl2_s_max=" << st.s_max
             << " t_done_frac="
             << ((dt_c > 0.0_rt) ? st.t_done/dt_c : 0.0_rt) << "\n";
     }

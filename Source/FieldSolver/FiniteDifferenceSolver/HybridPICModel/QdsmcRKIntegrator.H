@@ -34,6 +34,14 @@ struct QdsmcRKStats
     amrex::Real dt_first = 0.0;
     amrex::Real dt_min = 0.0;
     amrex::Real dt_max = 0.0;
+    // RKL2 only: largest super-step stage count used. This separates
+    // "super-time-stepping never engaged" from "it engaged and had nothing
+    // to do" -- s stays at its floor of 2 whenever the super-step already
+    // fits inside the explicit stability limit, and RKL2 is then
+    // indistinguishable from a 2-stage scheme by construction, so an A/B
+    // against SSPRK2 cannot show a difference no matter how it is run.
+    // Zero for the other schemes, which have no stage count.
+    int s_max = 0;
 };
 
 /** Adaptive explicit Runge--Kutta stepper over a single-component
@@ -272,6 +280,9 @@ public:
                     * 0.25_rt*(amrex::Real(s)*(amrex::Real(s) + 1.0_rt)
                                - 2.0_rt));
             }
+            // Recorded after the budget clamp, so it reports the stage
+            // count actually taken rather than the one requested.
+            st.s_max = std::max(st.s_max, s);
 
             amrex::Real const ssq =
                 amrex::Real(s)*(amrex::Real(s) + 1.0_rt) - 2.0_rt;
