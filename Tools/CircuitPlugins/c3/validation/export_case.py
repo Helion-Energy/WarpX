@@ -36,9 +36,11 @@ os.environ.setdefault("HETOOLS_USE_GPU", "0")
 import numpy as np
 import yaml
 
-DECK = (pathlib.Path.home() / "src/hetools/Examples/warpx/Profiles/"
-        "production/formation/RZ-mhd-formation")
-GREENS = pathlib.Path.home() / "src/hetools-greens/Machines/<machine>"
+from site_config import load_site  # noqa: E402
+
+SITE = load_site()
+DECK = pathlib.Path(SITE["deck_dir"]).expanduser()
+GREENS = pathlib.Path(SITE["machine_dir"]).expanduser()
 sys.path.insert(0, str(DECK))
 sys.path.insert(0, str(GREENS))
 
@@ -46,11 +48,14 @@ import c3_bank_source as c3src  # noqa: E402
 import coil_set  # noqa: E402
 import PICMI_inputs_RZ as deckmod  # noqa: E402
 
-# case-a/c clock conventions (c3_openloop_ref_shot / the deck defaults)
+# segment-mutual helper: named in the deck tree, resolved through the site file
+seg_mutual = getattr(c3src, SITE["seg_mutual"])
+
+# case-a/c clock conventions (the reference-shot open-loop deck defaults)
 DT_CIRC = 5.0e-8
 T0_MACHINE = -200.0e-6
 BANK_T_SHIFT = 2.5e-6
-# case-e clock conventions (c3_ref_circuit deck globals)
+# case-e clock conventions (the alternate-case circuit deck globals)
 T0_ALT = -170.0e-6
 
 
@@ -73,7 +78,7 @@ def write_matrix(path, names, m_ee, m_ew):
 def build_ref_shot_case(out, lock=False):
     """Export case_a (lock=False) or case_c (lock=True)."""
     out.mkdir(parents=True, exist_ok=True)
-    yaml_path = DECK / "ref_shot_circuit.yaml"
+    yaml_path = DECK / SITE["ref_shot_yaml"]
     doc = yaml.safe_load(yaml_path.read_text())
     by_coil = {e["coil"]: e for e in doc["coils"]}
 
@@ -119,12 +124,12 @@ def build_ref_shot_case(out, lock=False):
     if rings and all(s is not None for s in segs):
         for i in range(len(rings)):
             for j in range(i, len(rings)):
-                m_ij = c3src.ref_seg_mutual(segs[i], segs[j])
+                m_ij = seg_mutual(segs[i], segs[j])
                 m_ee[n_c + i, n_c + j] = m_ij
                 m_ee[n_c + j, n_c + i] = m_ij
             for j in range(len(rings)):
                 sjm = (segs[j][0], -segs[j][1], segs[j][2], -segs[j][3])
-                m_ew[n_c + i, n_c + j] = c3src.ref_seg_mutual(
+                m_ew[n_c + i, n_c + j] = seg_mutual(
                     segs[i], sjm)
     for j, rg in enumerate(rings):
         if rg.get("L_self") is not None:
@@ -179,8 +184,8 @@ def build_ref_shot_case(out, lock=False):
 def build_alt_case(out):
     """Export case_e: the alternate-case bank circuits on the cached c2 M_ff."""
     out.mkdir(parents=True, exist_ok=True)
-    yaml_path = GREENS / "circuits" / "alt_case_circuit.yaml"
-    cache = GREENS / "c2_alt_case" / "c2_data.npz"
+    yaml_path = GREENS / "circuits" / SITE["alt_case_yaml"]
+    cache = GREENS / SITE["alt_case_cache"] / "c2_data.npz"
     d = np.load(cache, allow_pickle=True)
     pack_names = [str(s) for s in d["pack_names"]]
     m_ff = d["m_ff"]

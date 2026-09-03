@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Python reference trajectories for the c3 plugin validation cases.
 
-Drives the REAL hetools machinery -- c3_ref_circuit / c3_stepper /
-c3_bank_source (imported from their home trees) -- on the exported case
+Drives the REAL hetools machinery -- the act-bank circuit module (named
+in the site config) / c3_stepper / c3_bank_source, imported from their
+home trees -- on the exported case
 inputs (mcomb.npy through a stub probe_fn, so both sides consume
 bit-identical matrices), with the single-pass WarpX cadence: one
 advance per coupling step to the interval end, arm_locks fired between
@@ -15,6 +16,7 @@ Run (deck venv):
 """
 
 import argparse
+import importlib
 import json
 import os
 import pathlib
@@ -25,15 +27,19 @@ os.environ.setdefault("HETOOLS_USE_GPU", "0")
 import numpy as np
 import yaml
 
-DECK = (pathlib.Path.home() / "src/hetools/Examples/warpx/Profiles/"
-        "production/formation/RZ-mhd-formation")
-GREENS = pathlib.Path.home() / "src/hetools-greens/Machines/<machine>"
+from site_config import load_site  # noqa: E402
+
+SITE = load_site()
+DECK = pathlib.Path(SITE["deck_dir"]).expanduser()
+GREENS = pathlib.Path(SITE["machine_dir"]).expanduser()
 sys.path.insert(0, str(DECK))
 sys.path.insert(0, str(GREENS))
 
 import c3_bank_source as c3src  # noqa: E402
-import c3_ref_circuit as c3  # noqa: E402
 import c3_stepper  # noqa: E402
+
+# the act-bank circuit module is named in the site config, not here
+c3 = importlib.import_module(SITE["circuit_module"])
 
 
 def load_manifest(path):

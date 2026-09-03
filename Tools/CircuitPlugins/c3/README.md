@@ -1,8 +1,9 @@
 # c3 act-bank external-circuit plugin
 
-The validated the reference code's act-bank solver (hetools-greens `Machines/<machine>/`
-`the reference circuit module` + `c3_stepper.py`, the 0.0221-relL2-vs-alternate-case
-configuration) and the production formation deck's full-mirror-machine adapter
+The reference code's validated act-bank solver (the hetools-greens
+`Machines/<machine>/` circuit module + `c3_stepper.py`, the configuration
+that records 0.0221 rel-L2 against the alternate reference case) and the
+production formation deck's full-mirror-machine adapter
 (`c3_bank_source.py`) as a compiled WarpX external-circuit plugin behind
 ABI v2 (`circuit.engine = external`, `circuit.plugin_library =
 libc3circuit.so`).
@@ -15,9 +16,10 @@ CMakeLists, and is dlopen'd `RTLD_LOCAL`.
 ```
 vendor/    ExternalCircuit.H (verbatim ABI v2 copy) + AMReX_REAL.H shim
 src/       the ports, named by their Python reference module:
-           ReferenceCircuit.{H,cpp}   <- the reference circuit module (NetBuilder,
-                                      AddCoil, SwdBank incl. the v7.2
-                                      reverse-recovery companion) +
+           ReferenceCircuit.{H,cpp} <- the act-bank circuit module
+                                      (NetBuilder, AddCoil, SwdBank incl.
+                                      the v7.2 reverse-recovery
+                                      companion) +
                                       c3_bank_source.add_passive_ring
            C3Stepper.{H,cpp}       <- c3_stepper.py (BE interval stepper,
                                       snapshot/restore)
@@ -111,6 +113,31 @@ file from the deck; the WarpX-side driver must generate it the same way
    into the matching stage on either side of the swap.
 
 ## Validation
+
+The validation scripts read the deck and machine-profile trees, which live
+in separate private repositories. Their locations and asset names are
+site-specific and are therefore supplied from OUTSIDE this repository, via
+a JSON file named by `C3_VALIDATION_SITE` (see
+`validation/site_config.py` for the full key list):
+
+```bash
+export C3_VALIDATION_SITE=~/.config/c3_validation_site.json
+```
+
+```json
+{
+  "deck_dir":       "<abs path to the formation deck directory>",
+  "machine_dir":    "<abs path to the machine profile directory>",
+  "circuit_module": "<name of the act-bank circuit python module>",
+  "seg_mutual":     "<segment-mutual function name in c3_bank_source>",
+  "ref_shot_yaml":  "<circuit yaml for the reference shot>",
+  "alt_case_yaml":  "<circuit yaml for the alternate reference case>",
+  "alt_case_cache": "<directory holding the cached c2 M_ff npz>"
+}
+```
+
+This indirection is deliberate: this repository is a fork of an
+open-source project and must carry no machine, shot or deck identity.
 
 ```bash
 HETOOLS_USE_GPU=0 ~/.env/warpx-mhd/bin/python3 validation/validate.py \
