@@ -98,18 +98,20 @@ parser.add_argument(
 )
 parser.add_argument(
     "--fd-limiter",
-    choices=["none", "upwind1", "smart"],
+    choices=["none", "upwind1", "smart", "sh", "sh_minmod"],
     default="smart",
     help="FD cross-flux limiter (hybrid_pic_model.qdsmc_conduction_fd_limiter); "
-    "none = unlimited QUICK control arm",
+    "none = unlimited QUICK control arm; sh = Sharma-Hammett flux-level "
+    "extrema bound, which is what production runs",
 )
 parser.add_argument(
     "--fd-time",
-    choices=["ssprk2", "rkf45"],
+    choices=["ssprk2", "rkf45", "rkl2"],
     default="ssprk2",
     help="FD subcycle integrator (hybrid_pic_model.qdsmc_conduction_fd_time): "
     "ssprk2 = monotone embedded 2(1) pair (keeps the max principle); "
-    "rkf45 = Fehlberg 4(5), NOT SSP",
+    "rkf45 = Fehlberg 4(5), NOT SSP; rkl2 = Runge-Kutta-Legendre "
+    "super-time-stepping, which is what production runs",
 )
 parser.add_argument(
     "--fd-cfl",
