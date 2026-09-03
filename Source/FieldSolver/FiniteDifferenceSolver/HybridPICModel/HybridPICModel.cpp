@@ -1323,6 +1323,37 @@ void HybridPICModel::InitData (const ablastr::fields::MultiFabRegister& fields)
     m_visc_nu_perp_parser = std::make_unique<amrex::Parser>(
         utils::parser::makeParser(m_visc_nu_perp_expression, {"n","Te","B"}));
     m_visc_nu_perp = m_visc_nu_perp_parser->compile<3>();
+    if (m_visc_model == 2) {
+        // A NEGATIVE kinematic viscosity inverts the sign of the whole
+        // heating term: Q = (3/4) mu_par S^2 + ... is positive-definite only
+        // for non-negative coefficients, so a negative nu turns the physical
+        // dissipation into a physical IMPOSSIBILITY -- viscosity cooling the
+        // electrons it dissipates into. A constant negative coefficient is a
+        // deck error, not a state the run can recover from, so refuse it here
+        // rather than let it start a long arm. Expressions that only go
+        // negative for some (n, Te, B) cannot be caught at parse time; those
+        // are clamped and counted at evaluation (see QDSMCAddViscousHeating).
+        auto const check_constant = [] (amrex::Parser const & parser,
+                                        amrex::ParserExecutor<3> const & exe,
+                                        char const * key)
+        {
+            // An expression that names none of (n, Te, B) is a literal, and
+            // its sign is knowable now.
+            if (!parser.symbols().empty()) { return; }
+            amrex::Real const value = exe(0.0_rt, 0.0_rt, 0.0_rt);
+            WARPX_ALWAYS_ASSERT_WITH_MESSAGE(value >= 0.0_rt,
+                "hybrid_pic_model." + std::string(key) + " is the constant "
+                + std::to_string(value) + ", which is negative. A negative "
+                "kinematic viscosity makes the Braginskii heating term "
+                "negative-definite -- viscous dissipation that COOLS the "
+                "electrons it is supposed to heat. Use a non-negative "
+                "coefficient.");
+        };
+        check_constant(*m_visc_nu_par_parser, m_visc_nu_par,
+                       "qdsmc_nu_par(n,Te,B)");
+        check_constant(*m_visc_nu_perp_parser, m_visc_nu_perp,
+                       "qdsmc_nu_perp(n,Te,B)");
+    }
     {
         // Boot print, unconditional (the "none" line is the load-bearing
         // half): a run that selects the viscosity and one that silently
@@ -4349,6 +4380,17 @@ void HybridPICModel::QDSMCAddViscousHeating (int const lev,
         shrink[d] = period.isPeriodic(d) ? 0 : 1;
     }
 
+    // Negative-coefficient audit, parser model only. The built-in Braginskii
+    // coefficients cannot go negative by construction (nu_par is a product of
+    // positive quantities and nu_perp is nu_par over 1 + (Omega tau)^2), so
+    // this allocates nothing and costs nothing there.
+    bool const track_negative_nu = (m_visc_model == 2);
+    amrex::MultiFab neg_mf;
+    if (track_negative_nu) {
+        neg_mf.define(Te.boxArray(), Te.DistributionMap(), 2, 0);
+        neg_mf.setVal(0.0_rt);
+    }
+
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (amrex::Gpu::notInLaunchRegion())
 #endif
@@ -4360,6 +4402,9 @@ void HybridPICModel::QDSMCAddViscousHeating (int const lev,
         amrex::Array4<amrex::Real const> const & Bx_arr = B_fp[0]->const_array(mfi);
         amrex::Array4<amrex::Real const> const & By_arr = B_fp[1]->const_array(mfi);
         amrex::Array4<amrex::Real const> const & Bz_arr = B_fp[2]->const_array(mfi);
+        amrex::Array4<amrex::Real> neg_arr{};
+        if (track_negative_nu) { neg_arr = neg_mf.array(mfi); }
+
         amrex::ParallelFor(mfi.tilebox(),
             [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
@@ -4438,6 +4483,23 @@ void HybridPICModel::QDSMCAddViscousHeating (int const lev,
                     amrex::Real const Te_eV = Te_K / K_per_eV;
                     nu_par  = nu_par_pars(n_e, Te_eV, Bmag);
                     nu_perp = nu_perp_pars(n_e, Te_eV, Bmag);
+                    // A user expression can go negative in some cells at some
+                    // times, which no parse-time check can see. Clamp to zero
+                    // -- a negative coefficient flips the sign of a
+                    // positive-definite dissipation -- but MARK every clamp,
+                    // because a guard that hides what it caught is the same
+                    // failure family as an uninstrumented term. Marked, not
+                    // counted in place: a shared counter would make this
+                    // kernel unsafe under ParallelFor. Reduced and reported
+                    // once below.
+                    if (nu_par < 0.0_rt) {
+                        nu_par = 0.0_rt;
+                        if (neg_arr) { neg_arr(i, j, k, 0) = 1.0_rt; }
+                    }
+                    if (nu_perp < 0.0_rt) {
+                        nu_perp = 0.0_rt;
+                        if (neg_arr) { neg_arr(i, j, k, 1) = 1.0_rt; }
+                    }
                 }
                 if (nu_max > 0.0_rt) {
                     nu_par  = std::min(nu_par,  nu_max);
@@ -4460,6 +4522,35 @@ void HybridPICModel::QDSMCAddViscousHeating (int const lev,
                 Te_arr(i, j, k) +=
                     dt * gamma_minus_1 * Q / (n_e * PhysConst::kb);
             });
+    }
+
+    // Report the clamp, once, with the count -- never silently. The clamp
+    // keeps the run physical; the warning is what stops it from being
+    // invisible, which is the whole point of catching it.
+    if (track_negative_nu) {
+        amrex::Real n_par  = neg_mf.sum_unique(0, false, period);
+        amrex::Real n_perp = neg_mf.sum_unique(1, false, period);
+        amrex::ParallelDescriptor::ReduceRealSum(n_par);
+        amrex::ParallelDescriptor::ReduceRealSum(n_perp);
+        if (n_par + n_perp > 0.0_rt) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                ablastr::warn_manager::WMRecordWarning(
+                    "HybridPICModel",
+                    "hybrid_pic_model.qdsmc_nu_par/_perp(n,Te,B) evaluated "
+                    "NEGATIVE and was clamped to zero at "
+                    + std::to_string(static_cast<long>(n_par)) + " (parallel) "
+                    "and " + std::to_string(static_cast<long>(n_perp))
+                    + " (cross-field) nodes on this call. A negative "
+                    "kinematic viscosity makes the Braginskii heating term "
+                    "negative-definite -- viscous dissipation that COOLS the "
+                    "electrons -- so it is clamped, but the expression does "
+                    "not mean what it says over the (n, Te, B) range this run "
+                    "reaches. Counted once; later calls are not re-reported.",
+                    ablastr::warn_manager::WarnPriority::high);
+            }
+        }
     }
 
     Te.FillBoundary(Te.nGrowVect(), period);

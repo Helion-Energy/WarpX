@@ -4317,6 +4317,15 @@ Maxwell solver: kinetic-fluid hybrid
     selecting ``parser`` without supplying ``qdsmc_nu_par``, is an error rather than a silent
     fallback.
 
+    **Both must be non-negative.** The heating
+    :math:`Q_\nu = \tfrac{3}{4}\mu_\parallel S^2 + \tfrac{1}{2}\mu_\perp(\ldots)` is positive-definite
+    only for non-negative coefficients; a negative viscosity turns the dissipation
+    negative-definite — viscous heating that *cools* the electrons. A constant negative value is a
+    deck error and **aborts at input parsing**. An expression that only goes negative for some
+    :math:`(n, T_e, B)` cannot be caught there, so it is clamped to zero at evaluation, the affected
+    nodes are counted, and a high-priority warning naming the knob and the counts is raised once —
+    the clamp is never silent. The built-in ``braginskii`` coefficients cannot go negative by
+    construction and pay nothing for this.
 
 .. pp:param:: hybrid_pic_model.qdsmc_viscosity_flux_limit_factor
     :type: ``float``
