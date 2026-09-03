@@ -6362,6 +6362,113 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
         m_ion_charge_to_mass * m_z_wall_temperature / (m_gamma_i - 1.0_rt),
         m_ion_charge_to_mass / PhysConst::q_e * PhysConst::kb *
             m_ion_temperature_floor / (m_gamma_i - 1.0_rt));
+    // ---- CORNER reconciliation of the half-cell Dirichlet exchanges ----
+    // Both hard exchanges above -- the shaped-wall reservoir pin
+    // (wall_thermal_bc) and the z-end pin (z_wall_conduction) -- are the
+    // discrete statement "the wall surface passes THIS CELL at the
+    // half-cell distance dn/2", written per FACE. A live cell can carry
+    // several of them at once and the branches know nothing about each
+    // other: a staircase corner of the shaped wall (masked in +r and in
+    // +z, e.g. every inside corner of an inclined contour), and the
+    // EB-meets-z_end corner (a shaped-wall r face on a cell that also
+    // owns a z domain end face). Summing the per-face exchanges hands
+    // that cell the divergence contribution of the SCALAR-summed wall
+    // area sum_f A_f -- identical to ONE exchange at the distance
+    // dn/(2M) for M equal faces, i.e. the wall placed M times closer to
+    // the cell centre than any wall can be, and the cell's wall
+    // diffusion number inflated by M. At production parameters that is
+    // what drives corner cells through their admissibility bound in one
+    // step (theta-scheme amplification A = (1 - (1 - th) D)/(1 + th D)
+    // is monotone only while D <= 1/(1 - th); doubling D at a corner is
+    // the difference between a drained cell and a NEGATIVE one).
+    //
+    // The staircase faces are the discrete image of ONE wall surface,
+    // and by the divergence theorem (the area vectors of a closed
+    // surface sum to zero) the staircase and the segment it represents
+    // share their VECTOR area while the staircase inflates the scalar
+    // area -- dr + dz instead of sqrt(dr^2 + dz^2) for a 45-degree
+    // contour. The geometrically consistent conductance of the cell is
+    // therefore the vector-area norm, applied as one weight to every
+    // wall face the cell owns:
+    //
+    //     w = sqrt(sum_d S_d^2) / sum_d S_d,
+    //     S_d = sum of A_f/V over this cell's wall faces on axis d.
+    //
+    // Faces on the SAME axis add scalarly inside S_d (a one-cell slot
+    // has walls on +z and -z: two distinct surfaces, both real), faces
+    // on different axes combine as vectors. w == 1 exactly whenever the
+    // cell's wall faces all lie on one axis, so every flat wall, every
+    // 1D deck and every existing regression is bit-identical; at a
+    // dr = dz corner w = 1/sqrt(2), which still drains sqrt(2)x harder
+    // than a flat face -- this is a geometric reconciliation, NOT a cap
+    // on the flux (the uncapped dirichlet contract is deliberate).
+    //
+    // Pure static geometry (the mask table and the domain end indices),
+    // so the branches stay C-infinity in the state and the emitted
+    // preconditioner rows take the identical weight.
+    // The inventory must be DIRECTION-INDEPENDENT: the radial pass has
+    // to see the cell's z-end face too (z_wall_conduction above is
+    // gated on this call's face family, and a corner is precisely the
+    // cell whose two hard pins live in different families).
+    const bool wall_corner_shaped = wall_thermal && wall_reservoir;
+    const bool corner_z_end = m_z_wall_conduction && add_conduction;
+    const bool corner_z_end_lo = corner_z_end && !m_z_lo_pmc;
+#if defined(WARPX_DIM_RZ)
+    const amrex::Real corner_dr = m_WarpX->Geom(0).CellSize(0);
+    const amrex::Real corner_dz = m_WarpX->Geom(0).CellSize(1);
+    const amrex::Real corner_radial_lower = m_WarpX->Geom(0).ProbLo(0);
+#endif
+    const auto wall_corner_weight =
+        [=] AMREX_GPU_DEVICE (const int ic, const int jc) noexcept
+    {
+#if defined(WARPX_DIM_RZ)
+        amrex::Real axis_radial = 0.0_rt;
+        if (wall_corner_shaped) {
+            const int jz = amrex::max(wall_mask_z_lo,
+                                      amrex::min(wall_mask_z_hi, jc));
+            const amrex::Real r_cell =
+                corner_radial_lower +
+                (static_cast<amrex::Real>(ic) + 0.5_rt) * corner_dr;
+            if (ic + 1 >= wall_first_masked_cc[jz]) {
+                axis_radial +=
+                    (corner_radial_lower +
+                     static_cast<amrex::Real>(ic + 1) * corner_dr) /
+                    (r_cell * corner_dr);
+            }
+        }
+        amrex::Real axis_axial = 0.0_rt;
+        if (wall_corner_shaped) {
+            const int jz_up = amrex::max(
+                wall_mask_z_lo, amrex::min(wall_mask_z_hi, jc + 1));
+            const int jz_down = amrex::max(
+                wall_mask_z_lo, amrex::min(wall_mask_z_hi, jc - 1));
+            if (ic >= wall_first_masked_cc[jz_up]) {
+                axis_axial += 1.0_rt / corner_dz;
+            }
+            if (ic >= wall_first_masked_cc[jz_down]) {
+                axis_axial += 1.0_rt / corner_dz;
+            }
+        }
+        // the z domain END faces are the second family of hard pins
+        if (corner_z_end && jc + 1 == z_end_face_hi) {
+            axis_axial += 1.0_rt / corner_dz;
+        }
+        if (corner_z_end_lo && jc == z_end_face_lo) {
+            axis_axial += 1.0_rt / corner_dz;
+        }
+        // single-axis cells (every flat wall) keep w = 1 bit-exactly
+        if (axis_radial <= 0.0_rt || axis_axial <= 0.0_rt) {
+            return 1.0_rt;
+        }
+        return std::sqrt(axis_radial * axis_radial + axis_axial * axis_axial) /
+               (axis_radial + axis_axial);
+#else
+        // 1D has a single axis: no corner exists, w = 1 bit-exactly.
+        amrex::ignore_unused(ic, jc, wall_corner_shaped, corner_z_end,
+                             corner_z_end_lo);
+        return 1.0_rt;
+#endif
+    };
 #if defined(WARPX_DIM_1D_Z)
     const amrex::Real inverse_normal_size =
         1.0_rt / m_WarpX->Geom(0).CellSize(0);
@@ -7028,6 +7135,24 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 const bool z_end_lo_face =
                     z_wall_conduction_lo && z_axial_index == z_end_face_lo;
                 const bool z_end_wall_face = z_end_hi_face || z_end_lo_face;
+                // Corner weight of the cell this face drains (see the
+                // wall_corner_weight host constant): one coherent wall
+                // condition per cell instead of the unguarded sum of
+                // the per-face half-cell exchanges. Exactly 1 on every
+                // flat wall, so the drains below are bit-identical
+                // there; both hard-pin branches take the SAME weight,
+                // which is what makes a shaped-wall face and a z-end
+                // face on one cell aware of each other.
+                amrex::Real corner_weight = 1.0_rt;
+                if (wall_face || z_end_wall_face) {
+                    const int corner_i =
+                        wall_face ? (wall_left_masked ? i : il)
+                                  : (z_end_hi_face ? il : i);
+                    const int corner_j =
+                        wall_face ? (wall_left_masked ? j : jl)
+                                  : (z_end_hi_face ? jl : j);
+                    corner_weight = wall_corner_weight(corner_i, corner_j);
+                }
                 // Wall-thermal PRECONDITIONER ROW scatter (see the host
                 // constants). Both wall drains below are built as
                 //     drain = conductance * (interior e_int - bath),
@@ -7810,11 +7935,13 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             drain = chi_ion_face * face_density *
                                     (interior_e_spec -
                                      wall_gate_e_spec_ion) *
-                                    2.0_rt * inverse_normal_size;
+                                    2.0_rt * inverse_normal_size *
+                                    corner_weight;
                             bath = wall_gate_e_spec_ion;
                             if (emit_wall_rows) {
                                 conductance = chi_ion_face * face_density *
-                                              2.0_rt * inverse_normal_size;
+                                              2.0_rt * inverse_normal_size *
+                                              corner_weight;
                             }
                         } else {
                             const amrex::Real gate =
@@ -7823,11 +7950,13 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                     wall_gate_e_spec_ion);
                             drain = chi_ion_face * face_density *
                                     (interior_e_spec - wall_e_spec_ion) *
-                                    gate * inverse_normal_size;
+                                    gate * inverse_normal_size *
+                                    corner_weight;
                             bath = wall_e_spec_ion;
                             if (emit_wall_rows) {
                                 conductance = chi_ion_face * face_density *
-                                              gate * inverse_normal_size;
+                                              gate * inverse_normal_size *
+                                              corner_weight;
                             }
                         }
                         // free-streaming cap on the wall exchange --
@@ -7910,10 +8039,10 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         const amrex::Real drain =
                             chi_ion_face * face_density *
                             (interior_e_spec - z_wall_bath_e_spec_ion) *
-                            2.0_rt * inverse_normal_size;
+                            2.0_rt * inverse_normal_size * corner_weight;
                         const amrex::Real conductance =
                             chi_ion_face * face_density * 2.0_rt *
-                            inverse_normal_size;
+                            inverse_normal_size * corner_weight;
                         // Preconditioner row on the interior cell: this
                         // branch is EXACTLY linear in it (no gate, no
                         // cap), so the emitted diagonal is the exact
@@ -8109,12 +8238,14 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             drain = chi_electron_face * face_density *
                                     (interior_e_spec -
                                      wall_gate_e_spec_electron) *
-                                    2.0_rt * inverse_normal_size;
+                                    2.0_rt * inverse_normal_size *
+                                    corner_weight;
                             bath = wall_gate_e_spec_electron;
                             if (emit_wall_rows) {
                                 conductance = chi_electron_face *
                                               face_density * 2.0_rt *
-                                              inverse_normal_size;
+                                              inverse_normal_size *
+                                              corner_weight;
                             }
                         } else {
                             const amrex::Real gate =
@@ -8124,12 +8255,14 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             drain = chi_electron_face * face_density *
                                     (interior_e_spec -
                                      wall_e_spec_electron) *
-                                    gate * inverse_normal_size;
+                                    gate * inverse_normal_size *
+                                    corner_weight;
                             bath = wall_e_spec_electron;
                             if (emit_wall_rows) {
                                 conductance = chi_electron_face *
                                               face_density * gate *
-                                              inverse_normal_size;
+                                              inverse_normal_size *
+                                              corner_weight;
                             }
                         }
                         if (!wall_uncapped) {
@@ -8171,10 +8304,10 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             chi_electron_face * face_density *
                             (interior_e_spec -
                              z_wall_bath_e_spec_electron) *
-                            2.0_rt * inverse_normal_size;
+                            2.0_rt * inverse_normal_size * corner_weight;
                         const amrex::Real conductance =
                             chi_electron_face * face_density * 2.0_rt *
-                            inverse_normal_size;
+                            inverse_normal_size * corner_weight;
                         if (emit_wall_rows) {
                             const int ric = z_end_hi_face ? il : i;
                             const int rjc = z_end_hi_face ? jl : j;

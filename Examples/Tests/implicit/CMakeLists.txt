@@ -1776,6 +1776,52 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_wall_conduction_scale_perp  # dependency
 )
 
+# CORNER contract of the hard half-cell Dirichlet wall pins. A static
+# uniform hot column inside a STEPPED wall under the uncapped dirichlet
+# pin, with the z-end exchange (z_wall_conduction) on against the same
+# bath, manufactures both corner families a live cell can sit in: a
+# staircase corner of the shaped wall (two wall_face drains) and the
+# EB-meets-z_hi corner (one wall_face drain plus one z_wall_conduction
+# end-face drain -- two INDEPENDENT code paths on orthogonal faces of
+# one cell). Summing the per-face half-cell exchanges places the wall
+# at dn/(2M) from the cell centre and inflates its wall diffusion
+# number by M; the corner must instead carry the vector-area
+# (divergence-theorem) conductance of the single wall surface the
+# staircase represents. Gated against the exact discrete
+# backward-Euler operator (electron conduction is the ONLY live
+# physics), with corner/flat drain ratios at matched radius as the
+# discriminator: the vector-area contract predicts 1.38, the unguarded
+# double drain 1.87.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_corner_drain  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_wall_corner_drain  # inputs
+    "analysis_mhd_wall_corner_drain.py diags"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# ...and the MONOTONICITY half of the same contract, which is what the
+# production corner deaths actually are: the same geometry at
+# theta = 1/2 with chi dt/dz^2 = 0.6, so a flat wall face (D = 1.2) is
+# comfortably inside the theta amplification bound 1/(1 - theta) = 2
+# while the UNGUARDED corner sum (D = 2.4) is past it. The analysis
+# integrates the identical theta-staged operator under both contracts
+# and scans every snapshot: the unguarded sum drives a live cell to
+# 0.009 eV -- BELOW the 2 eV reservoir it exchanges against, the seed
+# of the negative corner energies -- while the vector-area contract
+# keeps the whole live field above the bath.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_corner_monotone  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_corner_drain implicit_evolve.theta=0.5 my_constants.dt=0.6*dz^2/chi max_step=3"  # inputs
+    "analysis_mhd_wall_corner_drain.py diags 0.5 0.6 3"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # PRECONDITIONER ROWS for the wall thermal terms, ROW CORRECTNESS 1/2 --
 # the shaped-wall interface drain. The same saturated-clamp uniform
 # column as the wall_conduction_scale pair (whose conduction subsystem is
