@@ -2345,6 +2345,63 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         the electron frame.
 
     viscosity: float or str, default=0 (off)
+    fluid_reconstruction: {"none", "median", "vanalbada", "unlimited"}, optional
+        TVD reconstruction of the face states handed to the recast fluid
+        flux; the default "none" is the bit-identical donor-cell path.
+        Without it the recast hands hlld/central the RAW cell-centre
+        states -- a piecewise-CONSTANT reconstruction -- so the hlld path
+        is a first-order Godunov scheme with modified-equation
+        dissipation ~ c_f dx/2.
+        "median" is the reference code's adv_type = 4 limiter (fmed over the
+        second-order upwind extrapolation, the second-order centered
+        interpolation, and the donor value), which on a uniform stencil
+        is identically MUSCL with the minmod slope; it is smoothed for
+        the matrix-free Jacobian probes at width
+        reconstruction_kappa, which costs a numerical diffusivity
+        0.354 kappa |u| dx and new extrema up to kappa/4 of the largest
+        stencil difference.
+        "vanalbada" is the C-infinity rational sibling: exactly second
+        order with no diffusivity penalty, no overshoot at a plateau
+        edge, but new extrema up to 0.10355 of the local jump on the
+        opposite-sign branch. "unlimited" is the oscillatory
+        centered-slope reference (diagnostic only).
+        The reconstruction acts on primitive variables and floors every
+        reconstructed density and internal energy, so the conserved ion
+        energy is never reconstructed directly and E_i - KE stays above
+        the ion internal-energy floor at every face; it therefore
+        requires strictly positive mass_density_floor and
+        electron_pressure_floor (and ion_pressure_floor with an evolved
+        ion energy channel). Note that a limiter needs an UPWIND flux to
+        enforce monotonicity: with fluid_flux="central" it changes the
+        smooth-region face states but cannot suppress a dispersive
+        overshoot.
+
+    reconstruction_kappa: float, default=0.01
+        Smoothing width fraction of the "median" limiter (unused by the
+        other modes); both the numerical diffusivity and the
+        new-extremum bound above scale linearly in it.
+
+    central_dissipation: float, default=0 (off)
+        Limited Rusanov (local Lax--Friedrichs) jump penalty on the
+        "central" flux, coefficient in [0, 1]. Requires
+        fluid_flux="central"; 0 is the bit-identical default.
+        central carries no Riemann dissipation by design, so a slope
+        limiter in front of it has nothing to limit -- where
+        fluid_reconstruction clips, central reduces EXACTLY to the
+        unreconstructed centered flux. This supplies the missing
+        upwinding as F = F_central - (c/2) alpha (U_R - U_L), with alpha
+        a smooth bound on the local signal speed. The jump is taken
+        across the face states the flux is GIVEN, i.e. across the
+        RECONSTRUCTED jump, so the limiter -- not this coefficient --
+        sets the dissipation: with fluid_reconstruction="median" the
+        pair is MUSCL-Rusanov (second order in smooth flow, monotone at
+        a discontinuity); alone it is first-order Rusanov. Every
+        conserved channel gets the same alpha (scalar, not
+        characteristic), which makes it monotone and
+        positivity-friendly; the induction channels and Maxwell stress
+        are deliberately untouched so no numerical resistivity is added.
+
+    viscosity: float, default=0 (off)
         Explicit ion kinematic viscosity nu_i in m^2/s of the recast face
         fluxes (fluid_flux="hlld" or "central"; required positive for
         "central"). Adds the normal-gradient viscous momentum stress and
@@ -3274,6 +3331,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         conduction_theta=None,
         fluid_flux=None,
         allow_hlld=None,
+        fluid_reconstruction=None,
+        reconstruction_kappa=None,
+        central_dissipation=None,
         viscosity=None,
         viscosity_open_multiplier=None,
         viscosity_open_psi=None,
@@ -3398,6 +3458,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.conduction_theta = conduction_theta
         self.fluid_flux = fluid_flux
         self.allow_hlld = allow_hlld
+        self.fluid_reconstruction = fluid_reconstruction
+        self.reconstruction_kappa = reconstruction_kappa
+        self.central_dissipation = central_dissipation
         self.viscosity = viscosity
         self.viscosity_open_multiplier = viscosity_open_multiplier
         self.viscosity_open_psi = viscosity_open_psi
@@ -3556,6 +3619,10 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.viscosity_open_psi = self.viscosity_open_psi
         implicit_mhd.viscosity_open_psi_width = self.viscosity_open_psi_width
         implicit_mhd.viscosity_open_flux_sign = self.viscosity_open_flux_sign
+        implicit_mhd.fluid_reconstruction = self.fluid_reconstruction
+        implicit_mhd.reconstruction_kappa = self.reconstruction_kappa
+        implicit_mhd.central_dissipation = self.central_dissipation
+        implicit_mhd.viscosity = self.viscosity
         implicit_mhd.wall_viscosity_mask = self.wall_viscosity_mask
         implicit_mhd.wall_viscosity_mask_width = self.wall_viscosity_mask_width
         implicit_mhd.wall_viscosity_band_value = self.wall_viscosity_band_value

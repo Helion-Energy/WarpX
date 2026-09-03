@@ -1399,6 +1399,49 @@ class ThetaImplicitMHD final : public ImplicitSolver
     bool m_use_central = false;
     // Either recast flux (hlld or central): gates all recast plumbing.
     bool m_use_recast = false;
+    // ---- TVD reconstruction of the recast face states
+    // (implicit_mhd.fluid_reconstruction; default "none" = the
+    // bit-identical donor-cell path). The recast otherwise hands
+    // hlld_flux/central_flux the RAW cell-centre states, i.e. a
+    // piecewise-CONSTANT reconstruction, which makes the hlld path a
+    // first-order Godunov scheme (modified-equation dissipation
+    // ~ c_f dx/2). The reference code flies adv_type = 4 = get_flux_hyb2, a
+    // median-of-three (fmed) limited piecewise-linear scheme which --
+    // on this uniform stencil -- is identically MUSCL with the minmod
+    // slope (see the block comment above reconstruction_none in
+    // ThetaImplicitMHD_K.H for the algebraic identity, the smoothing
+    // width analysis, and the positivity argument).
+    //   none       donor cell (default, bit-identical)
+    //   median     the reference code's fmed, C-infinity smoothed
+    //   vanalbada  the C-infinity rational sibling (exactly 2nd order)
+    //   unlimited  plain centered slope; OSCILLATORY diagnostic twin
+    // Meaningful only with an UPWIND flux: a limiter needs an upwind
+    // selection to enforce monotonicity, so with fluid_flux = central
+    // (which has no Riemann dissipation at all) the reconstruction
+    // changes the smooth-region face states but cannot suppress a
+    // dispersive overshoot -- the central path's remedy is limited
+    // artificial dissipation, not reconstruction.
+    std::string m_fluid_reconstruction = "none";
+    int m_fluid_reconstruction_mode = 0;
+    // Smoothing width fraction of the median limiter. It cannot be keyed
+    // to the curvature (that width vanishes at the minmod SELECTION
+    // kink d_up = d_down), so it is keyed to the slope itself and costs
+    // a numerical diffusivity 0.354 kappa |u| dx -- 0.7% of the
+    // donor-cell dissipation it replaces at the default 0.01.
+    amrex::Real m_reconstruction_kappa = 0.01;
+    // ---- Limited Rusanov dissipation of the CENTRAL flux
+    // (implicit_mhd.central_dissipation; 0 = off, bit-identical). The
+    // central flux carries no Riemann dissipation by design, so a slope
+    // limiter in front of it has nothing to limit -- where it clips,
+    // central reduces exactly to the unreconstructed centered flux. This
+    // supplies the missing upwinding as a scalar jump penalty
+    // -(c/2) alpha (U_R - U_L) taken across the face states the kernel
+    // hands the flux, i.e. across the RECONSTRUCTED jump when
+    // fluid_reconstruction is active. central + reconstruction +
+    // dissipation is therefore MUSCL-Rusanov: second order in smooth
+    // flow, monotone at a discontinuity, no wave fan. See the contract
+    // block above the term in ThetaImplicitMHD_K.H.
+    amrex::Real m_central_dissipation = 0.0;
     // Explicit ion kinematic viscosity nu_i [m^2/s] of the recast face
     // fluxes (0 = off; required positive for fluid_flux = central). The
     // normal-gradient viscous stress and its velocity-weighted work enter
