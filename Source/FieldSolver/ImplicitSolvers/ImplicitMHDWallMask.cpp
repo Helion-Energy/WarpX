@@ -327,6 +327,39 @@ void ImplicitMHDWallMask::Define (const amrex::Geometry& geom,
         min_first_masked =
             std::min({min_first_masked, ez_h[jj], cc_h[jj]});
     }
+    // ---- OWNERSHIP AT THE z DOMAIN ENDS ----------------------------
+    // The mask's authority stops at the domain. The FLUID (cell-centered)
+    // table is read at ghost rows by every face classifier -- a z-face
+    // ON a z domain boundary asks the table for the class of the GHOST
+    // cell just outside it -- so leaving the polyline's out-of-domain
+    // continuation in those entries makes the boundary condition of a
+    // DOMAIN face depend on wall geometry outside the simulated volume.
+    // Where a contour cuts inward across the end plane (the production
+    // formation geometry: the contour steps 42 cells inward within the
+    // last few z cells), the entries disagree with the last in-domain
+    // row and the z domain face silently splits mid-row: the cells
+    // "under the overhang" take the shaped-wall interface contract --
+    // absorb image, wall_temperature bath, wall_conduction_scale chi
+    // clamp, wall cap/rectifier rules -- while their neighbours on the
+    // SAME domain face take the z-end contract (z_wall_temperature,
+    // tensor chi, uncapped). Two boundary authorities, one face, no
+    // precedence rule, and the winner decided outside the domain.
+    //
+    // The rule, enforced ONCE here so every consumer inherits it: a cell
+    // outside the z domain range takes the class of the nearest
+    // IN-DOMAIN cell. A z domain face is then classified by its INTERIOR
+    // cell alone -- the mask still wins for every cell it claims (a
+    // masked interior cell is interior metal and takes no domain-end
+    // exchange), and the domain boundary condition applies exactly to
+    // the cells the mask does not claim. Constant-continuation polylines
+    // (every existing deck) already satisfy this, so the clamp is
+    // bit-identical there. The NODAL field tables are untouched: their
+    // in-domain range includes the boundary node and the field freeze
+    // reads them on valid boxes only.
+    for (int jj = 0; jj < m_ng; ++jj) {
+        cc_h[jj] = cc_h[m_ng];
+        cc_h[n_cell - 1 - jj] = cc_h[n_cell - 1 - m_ng];
+    }
 
     // Axis clearance guard: the r = 0 reflecting boundary is the m = 0
     // parity ghost fill plus the axis-corner EMF parities, which assume

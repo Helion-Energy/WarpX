@@ -263,6 +263,29 @@
  *     image), so the bath restores floor-adjacent cells instead of
  *     demanding states the admissibility projection forbids.
  *
+ *   CORNER CONTRACT (all reservoir modes, and shared with the z-end
+ *   exchange implicit_mhd.z_wall_conduction). A live cell can own
+ *   SEVERAL half-cell exchanges at once -- a staircase corner of the
+ *   contour (masked in +r and in +z, i.e. every inside corner of an
+ *   inclined wall), or a contour face on a cell that also owns a z
+ *   domain end face (the EB-meets-z_end corner). Each exchange is the
+ *   statement "the wall passes this cell at dn/2", so ADDING them
+ *   places the wall at dn/(2M) from the cell centre and multiplies the
+ *   cell's wall diffusion number by M -- enough, at production
+ *   parameters, to push the theta-scheme amplification
+ *   (1 - (1 - th) D)/(1 + th D) past its monotonicity bound and drive
+ *   corner cells NEGATIVE in one step. The staircase faces are the
+ *   discrete image of ONE surface: by the divergence theorem they share
+ *   their VECTOR area with the segment they represent while inflating
+ *   the scalar area, so every wall face of a cell is scaled by
+ *   w = sqrt(sum_d S_d^2)/(sum_d S_d), S_d = the per-axis summed
+ *   area/volume elements of that cell's wall faces (faces on the same
+ *   axis -- a one-cell slot -- add scalarly; different axes combine as
+ *   vectors). w == 1 exactly for any single-axis cell, so every flat
+ *   wall and every 1D deck is bit-identical, and a dr = dz corner still
+ *   drains sqrt(2)x a flat face: this is a geometric reconciliation,
+ *   not a cap on the (deliberately uncapped) dirichlet flux.
+ *
  *   The default none keeps wall_model bit-identical to the
  *   electromagnetic-only wall.
  *
