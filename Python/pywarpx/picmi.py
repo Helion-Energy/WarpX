@@ -3252,6 +3252,20 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         "auto", the default, engages it exactly there). "off" keeps the
         host gather path everywhere.
 
+    viscous_theta: float, optional
+        Time centering of the VISCOUS stage, in [0.5, 1]; everything else
+        keeps the global theta. Default: the global theta
+        (bit-identical). The viscous face stress and its work read the
+        per-side ion velocities at
+            u^{n+theta_v} = (theta_v/theta) u^{n+theta}
+                            + (1 - theta_v/theta) u^n,
+        the velocity twin of conduction_theta, extrapolated in-kernel
+        from the old-state arrays (no stage registers). This is the third
+        leg of the dissipation tensor: setting resistive_theta,
+        conduction_theta and viscous_theta equal stages eta/chi/nu
+        uniformly without raising the GLOBAL theta, which would also drag
+        the hyperbolic part to backward Euler.
+
     conduction_theta: float, optional
         Time centering of the thermal-conduction stage, in [0.5, 1];
         everything else keeps the global theta. Default: the global
@@ -3328,6 +3342,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         resistive_theta=None,
         resistive_direct_device_assembly=None,
         conduction_theta=None,
+        viscous_theta=None,
         fluid_flux=None,
         allow_hlld=None,
         fluid_reconstruction=None,
@@ -3454,6 +3469,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.resistive_theta = resistive_theta
         self.resistive_direct_device_assembly = resistive_direct_device_assembly
         self.conduction_theta = conduction_theta
+        self.viscous_theta = viscous_theta
         self.fluid_flux = fluid_flux
         self.allow_hlld = allow_hlld
         self.fluid_reconstruction = fluid_reconstruction
@@ -3598,6 +3614,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
             self.resistive_direct_device_assembly
         )
         implicit_mhd.conduction_theta = self.conduction_theta
+        implicit_mhd.viscous_theta = self.viscous_theta
         implicit_mhd.fluid_flux = self.fluid_flux
         implicit_mhd.allow_hlld = self.allow_hlld
         # strings route to the time-staged parser signature (the reference code's
