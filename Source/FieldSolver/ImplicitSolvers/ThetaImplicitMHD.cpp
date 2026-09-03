@@ -6619,29 +6619,27 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
         (reconstruct_faces && m_wall_mask.IsActive())
             ? m_wall_mask.FirstMaskedCellCentered()
             : nullptr;
-    // MERGE-RESOLVED 2026-09-02 (@mhd), INTERIM -- see below.
     // The TVD reconstruction lane added this guard when wall_no_slip was
-    // a VOLUMETRIC pin: the first NoSlipWidth() live rows had their
-    // momentum frozen, so a limiter reading across them would
-    // extrapolate interior momentum toward the wall face when the pin's
-    // whole point was that it did not.
+    // a VOLUMETRIC pin, to stop the limiter extrapolating interior
+    // momentum across the frozen band. The no-slip lane then made
+    // wall_no_slip a FACE condition (bed42a54d) and removed
+    // NoSlipWidth(); no cell's momentum is constrained any more, so that
+    // premise is gone.
     //
-    // The no-slip lane has since made wall_no_slip a FACE condition
-    // (bed42a54d): interior cell momentum is free, only the tangential
-    // component at the wall FACE is constrained, and NoSlipWidth() no
-    // longer exists. The guard's premise -- a band of frozen interior
-    // cells -- is therefore gone, and extrapolating interior momentum is
-    // now legitimate physics.
+    // The guard SURVIVES, at width 1, for a different reason -- resolved
+    // 2026-09-02 by tracing the merged tree, and confirmed against the
+    // no-slip lane's own analysis. reconstruct_face_states() writes
+    // `left`/`right` IN PLACE, and the viscous block downstream reads
+    // those same states to build the no-slip antisymmetric image
+    // (right_velocity = -left_velocity). That image is only the
+    // half-cell wall gradient (0 - u_c)/(dn/2) if left/right are
+    // CELL-CENTRE values a distance dn apart, which is what
+    // inverse_normal_size = 1/dn assumes. Feeding it face-extrapolated
+    // states biases the wall friction tau_w by the limiter slope.
     //
-    // What survives is narrower: the reconstruction must still not
-    // manufacture a face state that overrides the boundary condition AT
-    // the wall face itself. So the width collapses to 1 (the
-    // wall-adjacent face) rather than a deck-set band. This is the
-    // conservative reading -- it keeps donor cell exactly where the BC
-    // lives and nowhere else. CONFIRM with the no-slip lane before this
-    // ships: if the face BC is applied downstream of reconstruction the
-    // guard may be removable entirely, and if it is applied upstream a
-    // width of 1 is required.
+    // So: donor cell at the wall-adjacent face only (width 1). Width 0
+    // would corrupt tau_w; width > 1 needlessly degrades the interior
+    // to first order where no boundary condition acts.
     const bool reconstruction_no_slip =
         reconstruct_faces && m_wall_mask.NoSlip();
     const int reconstruction_no_slip_width = 1;
