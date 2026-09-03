@@ -72,6 +72,18 @@
  * skipped on the outermost cell ring of the domain (boundary-condition
  * dependent there); the eta term covers the full domain. Nodal-staggered
  * components use owner masks so shared points count once.
+ *
+ * KNOWN LIMITATION -- P_etaH under hyper_resistivity_curl_curl. The P_etaH
+ * integrand is the component-wise vector Laplacian form -eta_H J.lap(J),
+ * unconditionally. When hybrid_pic_model.hyper_resistivity_curl_curl is on
+ * the solver instead applies E_H = +curl(eta_H curl J), whose dissipation is
+ * +Int eta_H |curl J|^2; the two differ by the eta_H grad(div J) terms, which
+ * is the whole reason that option exists. The curl-curl integrand is not
+ * implemented here, so with that flag set this column reports a quantity the
+ * solver never produced. ComputeDiags raises a high-priority warning in that
+ * case rather than returning the mismatched number silently. P_eta and P_nu
+ * are unaffected. Fixing this means adding the native-Yee curl-curl integrand
+ * (cylindrical curls, adjoint-paired as in the solver) behind the same flag.
  */
 class HybridDissipation : public ReducedDiags
 {

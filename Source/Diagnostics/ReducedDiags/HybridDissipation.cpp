@@ -20,6 +20,7 @@
 
 #include <ablastr/coarsen/sample.H>
 #include <ablastr/fields/MultiFabRegister.H>
+#include <ablastr/warn_manager/WarnManager.H>
 
 #include <AMReX_GpuContainers.H>
 #include <AMReX_iMultiFab.H>
@@ -89,6 +90,31 @@ HybridDissipation::ComputeDiags (const int step)
     const bool external_b_split = hybrid->m_add_external_fields &&
         hybrid->m_external_split;
     const amrex::Real t_new = warpx.gett_new(lev);
+
+    // KNOWN LIMITATION, made loud rather than left silent: the P_etaH
+    // integrand below is the component-wise vector Laplacian form,
+    // -eta_H J . lap(J). Under hyper_resistivity_curl_curl the SOLVER instead
+    // applies E_H = +curl(eta_H curl J), whose dissipation is
+    // +Int eta_H |curl J|^2 -- a different quantity (the two differ by the
+    // eta_H grad(div J) terms, which is exactly why that option exists). This
+    // column would then report a number the solver never produced. The
+    // curl-curl integrand is not implemented here; until it is, warn rather
+    // than quietly hand back a mismatched reading.
+    if (include_hyper && hybrid->m_hyper_res_curl_curl) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            ablastr::warn_manager::WMRecordWarning(
+                "HybridDissipation",
+                "hybrid_pic_model.hyper_resistivity_curl_curl is on, but the "
+                "P_etaH column integrates the component-wise vector Laplacian "
+                "form -eta_H J.lap(J), not the curl-curl dissipation "
+                "+Int eta_H |curl J|^2 that the solver actually applies. The "
+                "P_etaH reading does not correspond to this run's "
+                "hyper-resistive dissipation; P_eta and P_nu are unaffected.",
+                ablastr::warn_manager::WarnPriority::high);
+        }
+    }
 
     const std::array<const amrex::MultiFab*, 3> J = {
         warpx.m_fields.get(FieldType::hybrid_current_fp_plasma,

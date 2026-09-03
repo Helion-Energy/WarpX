@@ -6236,6 +6236,22 @@ This shifts analysis from post-processing to runtime calculation of reduction op
         :math:`P_\mathrm{diss} = P_\eta + P_{\eta_H} + P_\nu` [W],
         :math:`P_\nu` [W].
 
+        .. warning::
+
+           :math:`P_{\eta_H}` is integrated as the component-wise vector
+           Laplacian form :math:`-\eta_H \boldsymbol{J}\cdot\nabla^2\boldsymbol{J}`
+           unconditionally. With
+           ``hybrid_pic_model.hyper_resistivity_curl_curl`` enabled the solver
+           instead applies :math:`E_H = +\nabla\times(\eta_H \nabla\times\boldsymbol{J})`,
+           whose dissipation is :math:`\int \eta_H |\nabla\times\boldsymbol{J}|^2\,dV`
+           — a different quantity, differing by the
+           :math:`\eta_H \nabla(\nabla\cdot\boldsymbol{J})` terms. The curl-curl
+           integrand is not implemented in this diagnostic, so with that flag
+           set :math:`P_{\eta_H}` does not correspond to the run's actual
+           hyper-resistive dissipation. The diagnostic raises a high-priority
+           warning in that case rather than reporting the mismatch silently.
+           :math:`P_\eta` and :math:`P_\nu` are unaffected.
+
         Note that :math:`P_\nu` is *appended after* the total rather than
         grouped with the channels it belongs with. This is deliberate: the
         reduced-diagnostic file is read positionally by tooling outside this
