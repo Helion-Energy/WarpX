@@ -2177,6 +2177,10 @@ add_warpx_test(
 # the CLI): today's free-slip stair wall -- the masked-side image copies
 # the tangential momentum verbatim, so the wall-adjacent rows slide at
 # rho A r with no pin anywhere
+# Reference-parity NO-SLIP FACE condition, NULL TWIN
+# (implicit_mhd.wall_no_slip=0 on the CLI): the free-slip stair wall --
+# the masked-side image copies the tangential momentum verbatim, so the
+# wall-adjacent rows slide at rho A r
 add_warpx_test(
     test_rz_theta_implicit_mhd_wall_no_slip_off  # name
     RZ  # dims
@@ -2187,11 +2191,10 @@ add_warpx_test(
     OFF  # dependency
 )
 
-# Reference-parity NO-SLIP PIN, knob ON (width 2 = their wall + skin
-# depth): the first two LIVE cell rows adjacent to the contour must
-# carry EXACTLY zero momentum in all three components, the pin must
-# deposit real wall drag into the first unpinned row (the transport
-# channel free slip does not have), and the far interior must match the
+# Reference-parity NO-SLIP FACE condition, knob ON: the wall-adjacent LIVE
+# row must stay a live momentum row (not pinned), lose tangential
+# momentum at the analytic half-cell wall shear rate
+# tau_w = rho nu u_t/(dr/2), and leave the far interior matched to the
 # null twin to solver precision
 add_warpx_test(
     test_rz_theta_implicit_mhd_wall_no_slip  # name
@@ -2203,9 +2206,9 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_wall_no_slip_off  # dependency
 )
 
-# no-slip pin preconditioner parity, NULL TWIN (wall_no_slip=0 on the
-# CLI): the healthy pc_mhd_block baseline on the live-fluid shaped-wall
-# deck, whose GMRES cost per Newton iteration the pinned run is graded
+# no-slip preconditioner parity, NULL TWIN (wall_no_slip=0 on the CLI):
+# the healthy pc_mhd_block baseline on the live-fluid shaped-wall deck,
+# whose GMRES cost per Newton iteration the no-slip run is graded
 # against
 add_warpx_test(
     test_rz_theta_implicit_mhd_wall_no_slip_pc_off  # name
@@ -2217,11 +2220,12 @@ add_warpx_test(
     OFF  # dependency
 )
 
-# no-slip pin preconditioner parity, the headline: pc_mhd_block must
-# emit identity rows for exactly the pinned MOMENTUM components (mask
-# them out of the cell-centered sweeps, restore them from the RHS), so
-# the pinned solve stays within a small factor of the null twin's GMRES
-# cost -- a residual-only wall term is a measured 7-21x stagnation
+# no-slip preconditioner parity, the headline: the wall face condition
+# adds no identity rows -- it is a residual-only viscous face flux, so
+# pc_mhd_block must keep covering it through the wave/diffusion Schur
+# and the solve must stay within a small factor of the null twin's
+# GMRES cost (an uncovered residual-only wall term is a measured 7-21x
+# stagnation)
 add_warpx_test(
     test_rz_theta_implicit_mhd_wall_no_slip_pc  # name
     RZ  # dims
@@ -2230,6 +2234,38 @@ add_warpx_test(
     "analysis_mhd_wall_no_slip_pc.py diags/newton.txt on ../test_rz_theta_implicit_mhd_wall_no_slip_pc_off/diags/newton.txt"  # analysis
     OFF  # checksum
     test_rz_theta_implicit_mhd_wall_no_slip_pc_off  # dependency
+)
+
+# no-slip LIFT-OFF / REPLENISHMENT, NULL TWIN (wall_no_slip=0 on the
+# CLI): the free-slip reference the wall-adjacent live cell is graded
+# against -- it keeps its imposed normal and tangential momentum,
+# follows the -2 Ar expansion drift, and holds its ion energy against
+# the cold-wall drain because the interior can still resupply it
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_no_slip_lift_off  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_wall_no_slip_lift implicit_mhd.wall_no_slip=0"  # inputs
+    "analysis_mhd_wall_no_slip_lift.py diags/diag000012 off"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+# no-slip LIFT-OFF / REPLENISHMENT, knob ON: a no-slip wall constrains
+# TANGENTIAL slip at the wall FACE. It must leave the wall-adjacent
+# live cell free to move NORMAL to the wall, and it must not seal that
+# control volume off from its neighbours -- a sealed cell against a
+# cold wall reservoir with no volumetric ion source can only lose ion
+# energy. Gates lift-off, advective replenishment, ion-energy hold, and
+# that the tangential drag is real and stays local.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_wall_no_slip_lift  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_wall_no_slip_lift  # inputs
+    "analysis_mhd_wall_no_slip_lift.py diags/diag000012 on ../test_rz_theta_implicit_mhd_wall_no_slip_lift_off/diags/diag000012"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_wall_no_slip_lift_off  # dependency
 )
 
 # wall-seam guard on the Hall/inertia/hyper Ohm terms: a ramped coil

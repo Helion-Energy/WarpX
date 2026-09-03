@@ -3143,7 +3143,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         dissipation beads form at the coil-footprint wall ripple. The
         substituted value is wall_viscosity_band_value (default 0 = the
         legacy exact-zero band). This is the reduced-viscosity band that
-        sits INSIDE the reference code's no-slip pin (see wall_no_slip).
+        the reference code applies alongside its no-slip contour (see wall_no_slip).
 
     wall_viscosity_mask_width: int, default=2
         Width of the wall viscosity band in fluid cells measured from
@@ -3162,27 +3162,26 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         Requires wall_viscosity_mask=True.
 
     wall_no_slip: bool, default=False
-        reference-parity NO-SLIP PIN of the shaped wall (requires an active
-        wall_model; independent of wall_thermal_bc). The reference code omits the
-        vr/vz rows of the wall-contour vertices AND of the adjacent
-        cut-cell skin layer from its implicit momentum matrices
-        (vp.f90:221/233) and starts every velocity at exactly zero, so
-        those two vertex layers are pinned at u = 0 for the whole run.
-        Ours is the structural twin: the first wall_no_slip_width LIVE
-        cell rows adjacent to the contour get momentum identity rows in
-        the residual (density and energy keep evolving) plus a one-time,
-        idempotent zeroing of their momentum at load-sanitize time, so
-        u = 0 holds bit-exactly. Without it our stair-face image copies
-        the tangential momentum verbatim -- a perfect free-slip wall.
-        pc_mhd_block emits the matching identity rows. Pair it with
-        wall_viscosity_band_value: the reference code's small viscosity band lives
-        INSIDE the pin, and landing only one half is what a free-slip
-        near-wall jet exploits.
+        reference-parity NO-SLIP FACE condition of the shaped wall
+        (requires an active wall_model and an active wall_thermal_bc --
+        zero_flux is enough -- because a no-slip face needs a SOLID on
+        its far side). The tangential fluid velocity is held at zero ON
+        the contour: the masked side of a stair interface face presents
+        the ANTISYMMETRIC tangential image -u_t of the interior state,
+        so the face-centered tangential velocity is exactly zero and the
+        viscous face stress carries the half-cell wall shear
+        tau_w = mu * u_t / (dn/2). The NORMAL component is untouched --
+        the fluid stays free to lift off the wall, and the absorbing
+        stair image keeps owning that channel -- and every wall-adjacent
+        LIVE cell keeps all three momentum rows as ordinary unknowns, so
+        it still advects and is still replenished by its neighbours.
+        Without the knob the stair-face image copies the tangential
+        momentum verbatim: a perfect free-slip wall.
 
-    wall_no_slip_width: int, default=1
-        Number of LIVE cell rows adjacent to the masked contour whose
-        momentum the no-slip pin holds at zero (at least 1); 2
-        reproduces the reference code's wall-node + skin depth.
+        This is a VISCOUS condition and needs a viscous coefficient
+        (`viscosity`, or `wall_viscosity_band_value` where the band
+        covers the contour face -- the reference code's small_vis pedestal); with
+        neither, it is a loud input error rather than a silent no-op.
 
     conduction_halo_boost: float, default=0 (off)
         Density-keyed halo boost of the Braginskii ION chi_perp
@@ -3343,7 +3342,6 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         wall_viscosity_mask_width=None,
         wall_viscosity_band_value=None,
         wall_no_slip=None,
-        wall_no_slip_width=None,
         thermal_diffusivity_ion=None,
         thermal_diffusivity_electron=None,
         conduction_flux_limit_factor=None,
@@ -3470,7 +3468,6 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.wall_viscosity_mask_width = wall_viscosity_mask_width
         self.wall_viscosity_band_value = wall_viscosity_band_value
         self.wall_no_slip = wall_no_slip
-        self.wall_no_slip_width = wall_no_slip_width
         self.thermal_diffusivity_ion = thermal_diffusivity_ion
         self.thermal_diffusivity_electron = thermal_diffusivity_electron
         self.conduction_flux_limit_factor = conduction_flux_limit_factor
@@ -3627,7 +3624,6 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         implicit_mhd.wall_viscosity_mask_width = self.wall_viscosity_mask_width
         implicit_mhd.wall_viscosity_band_value = self.wall_viscosity_band_value
         implicit_mhd.wall_no_slip = self.wall_no_slip
-        implicit_mhd.wall_no_slip_width = self.wall_no_slip_width
         # strings route to the parser signature; numbers keep the
         # bit-identical constant fast path
         if isinstance(self.thermal_diffusivity_ion, str):

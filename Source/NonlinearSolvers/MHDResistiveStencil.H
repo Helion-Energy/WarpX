@@ -86,31 +86,17 @@ struct WallMaskView
  * WallMaskView: the FIELD-side view is inactive under wall_model =
  * dielectric while this fluid freeze stays active there.
  *
- * The SAME view also carries the reference-parity NO-SLIP PIN
- * (implicit_mhd.wall_no_slip, no_slip_active/no_slip_width): the first
- * no_slip_width LIVE cell rows adjacent to the masked contour have their
- * three MOMENTUM increments zeroed in the residual (F = m - m^n, the
- * structural twin of the reference code's omitted vr/vz matrix rows, vp.f90:221/233),
- * while their density and energy rows keep evolving. A live row (i, j) is
- * pinned iff i < first_masked_cc[jc] (it is live) and
- * i >= first_masked_cc[clamp(j + dj)] - no_slip_width for some
- * |dj| <= no_slip_width -- the same Chebyshev walk over the stair tables
- * the wall viscosity band uses, so a stair riser pins its axially adjacent
- * cells too. The preconditioner must emit identity rows for exactly those
- * momentum components: a residual-only pin leaves the fluid inverses
- * dividing identity rows by the wave/diffusion response, the same
- * spectrum collapse the masked-band freeze above guards against.
- * Independent of the thermal BC (active is the thermal gate,
- * no_slip_active is not), so the table pointers are published whenever
- * EITHER contract is on.
+ * The no-slip wall contract (implicit_mhd.wall_no_slip) is deliberately
+ * NOT carried here: it is a FACE condition on the tangential velocity at
+ * the contour (an antisymmetric tangential image in the viscous face
+ * stress), so it produces no identity rows and leaves every wall-adjacent
+ * LIVE cell's momentum an ordinary unknown. Like the interior viscous
+ * stress it is a residual-only face term, which the wave/diffusion Schur
+ * of pc_mhd_block already preconditions generically.
  */
 struct WallFluidFreezeView
 {
     bool active = false;
-    /** implicit_mhd.wall_no_slip: momentum identity rows on the live band
-     * adjacent to the contour (see above). Independent of `active`. */
-    bool no_slip_active = false;
-    int no_slip_width = 0; //!< live cell rows pinned (>= 1 when active)
     const int* first_masked_cc = nullptr; //!< fluid rows: (r-cell, z-cell)
     int z_lo = 0; //!< lowest valid table index (-ng)
     int z_hi = 0; //!< highest valid table index (nz - 1 + ng)

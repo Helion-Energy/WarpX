@@ -1675,26 +1675,22 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
     // band OUT of the sweep inputs here and restore the identity rows
     // after the copy-back below.
     //
-    // The SAME treatment covers the reference code's no-slip pin
-    // (implicit_mhd.wall_no_slip): the residual makes the three MOMENTUM
-    // rows of the first no_slip_width LIVE cells adjacent to the contour
-    // exact identities while their density/energy rows keep evolving, so
-    // exactly those components -- and only those -- are masked out here
-    // and restored below. A residual-only wall term whose identity rows
-    // are missing from the preconditioner is a measured 7-21x GMRES
-    // stagnation (the z_wall_conduction lesson), and the pin is on the
-    // wall-adjacent LIVE rows where the wave Schur is strongest.
+    // The no-slip wall (implicit_mhd.wall_no_slip) needs NOTHING here:
+    // it is a face condition on the tangential velocity at the contour
+    // (an antisymmetric tangential image in the viscous face stress), so
+    // the wall-adjacent LIVE cells keep ordinary momentum rows. Like the
+    // interior viscous stress it is a residual-only face term that this
+    // preconditioner covers generically through the wave/diffusion
+    // Schur; emitting identity rows for it -- as the earlier volumetric
+    // pin required -- would now be a silent residual/PC inconsistency.
     const warpx::mhd_pc::WallFluidFreezeView wall_freeze =
         m_ops->GetMHDWallFluidFreezeForPC();
     const bool wall_band_freeze = wall_freeze.active;
-    const bool wall_no_slip = wall_freeze.no_slip_active;
-    if (wall_band_freeze || wall_no_slip)
+    if (wall_band_freeze)
     {
         const int* const AMREX_RESTRICT first_masked = wall_freeze.first_masked_cc;
         const int mask_z_lo = wall_freeze.z_lo;
         const int mask_z_hi = wall_freeze.z_hi;
-        const int no_slip_width = wall_freeze.no_slip_width;
-        const int momentum_component = m_momentum_component;
         const int number_of_components = m_signal_components;
         for (amrex::MFIter mfi(*m_signal_rhs); mfi.isValid(); ++mfi)
         {
@@ -1704,26 +1700,7 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
                 [=] AMREX_GPU_DEVICE(int i, int j, int k, int n)
                 {
                     const int jc = amrex::max(mask_z_lo, amrex::min(mask_z_hi, j));
-                    if (i >= first_masked[jc])
-                    {
-                        if (wall_band_freeze) { signal_rhs(i, j, k, n) = RT(0.0); }
-                        return;
-                    }
-                    if (!wall_no_slip || n < momentum_component ||
-                        n >= momentum_component + 3)
-                    {
-                        return;
-                    }
-                    for (int dj = -no_slip_width; dj <= no_slip_width; ++dj)
-                    {
-                        const int jz =
-                            amrex::max(mask_z_lo, amrex::min(mask_z_hi, j + dj));
-                        if (i >= first_masked[jz] - no_slip_width)
-                        {
-                            signal_rhs(i, j, k, n) = RT(0.0);
-                            return;
-                        }
-                    }
+                    if (i >= first_masked[jc]) { signal_rhs(i, j, k, n) = RT(0.0); }
                 });
         }
     }
@@ -1836,12 +1813,7 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
         amrex::MultiFab& block_solution = solution.getMultiFabBlock(spec.name, 0);
         amrex::MultiFab::Copy(block_solution, *m_signal_solution, stacked_component, 0,
                               block_solution.nComp(), 0);
-        // The no-slip pin restores the MOMENTUM block only (its identity
-        // rows are per-component); the masked-band freeze restores every
-        // block.
-        const bool restore_no_slip =
-            wall_no_slip && (stacked_component == m_momentum_component);
-        if (wall_band_freeze || restore_no_slip)
+        if (wall_band_freeze)
         {
             // Identity restore of the masked band (see the wall_freeze
             // comment above): the residual's frozen rows are exact
@@ -1853,9 +1825,6 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
             const int* const AMREX_RESTRICT first_masked = wall_freeze.first_masked_cc;
             const int mask_z_lo = wall_freeze.z_lo;
             const int mask_z_hi = wall_freeze.z_hi;
-            const int no_slip_width = wall_freeze.no_slip_width;
-            const bool restore_band = wall_band_freeze;
-            const bool restore_pin = restore_no_slip;
             for (amrex::MFIter mfi(block_solution); mfi.isValid(); ++mfi)
             {
                 const auto block_out = block_solution.array(mfi);
@@ -1867,22 +1836,7 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
                         const int jc = amrex::max(mask_z_lo, amrex::min(mask_z_hi, j));
                         if (i >= first_masked[jc])
                         {
-                            if (restore_band)
-                            {
-                                block_out(i, j, k, n) = block_in(i, j, k, n);
-                            }
-                            return;
-                        }
-                        if (!restore_pin) { return; }
-                        for (int dj = -no_slip_width; dj <= no_slip_width; ++dj)
-                        {
-                            const int jz =
-                                amrex::max(mask_z_lo, amrex::min(mask_z_hi, j + dj));
-                            if (i >= first_masked[jz] - no_slip_width)
-                            {
-                                block_out(i, j, k, n) = block_in(i, j, k, n);
-                                return;
-                            }
+                            block_out(i, j, k, n) = block_in(i, j, k, n);
                         }
                     });
             }

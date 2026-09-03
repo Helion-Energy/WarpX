@@ -5606,7 +5606,7 @@ Jacobian probes.
     wall contour. This is the reference code's wall-viscosity band (``step.f90``
     ``disip``: viscosity SET to ``small_vis`` on the ``'skin'`` /
     ``'bndy'`` / ``'subr'`` / ``'subz'`` rows), the reduced-viscosity
-    band that sits INSIDE their hard no-slip pin (see
+    band the reference code applies alongside its no-slip contour (see
     :pp:param:`implicit_mhd.wall_no_slip`): with a uniform viscosity,
     every coil-footprint ripple of the shaped wall otherwise deposits a
     viscous-heating bead row that the reference code does not have. The
@@ -5650,53 +5650,79 @@ Jacobian probes.
     :type: ``bool``
     :default: ``false``
 
-    Reference-parity NO-SLIP PIN of the shaped wall (requires an active
-    :pp:param:`implicit_mhd.wall_model`; default off is bit-identical,
-    and this is INDEPENDENT of
-    :pp:param:`implicit_mhd.wall_thermal_bc` — an electromagnetic-only
-    wall pins too). The reference code builds its implicit momentum matrices with
-    ``bnd = 'i'`` for :math:`v_r` and :math:`v_z` (``vp.f90:221/233``,
-    ``sten.f:115-121``), which OMITS the rows of the wall-contour
-    vertices AND of the adjacent cut-cell "skin" layer; an omitted row
-    is an exact zero increment (``solv.f:88-96``), and with velocities
-    allocated at exactly zero (``init_cond.f90:82``) those two
-    vertex layers are pinned at :math:`u = 0` for the entire run —
-    measured bit-exact zero on all 762 wall and 762 skin vertices of
-    the reference shot's earlier dump while the interior ran 1.7e5–6.2e5 m/s.
+    Reference-parity NO-SLIP FACE condition of the shaped wall (requires an
+    active :pp:param:`implicit_mhd.wall_model` AND an active
+    :pp:param:`implicit_mhd.wall_thermal_bc` — ``zero_flux`` is enough;
+    default off is bit-identical). A no-slip face needs a SOLID on its
+    far side, and the rigid-conductor fluid contract is what makes the
+    masked band one; without it the band is ordinary live fluid and
+    :math:`u_t = 0` would be imposed between two fluid cells.
 
-    Our realization is the structural twin: the first
-    :pp:param:`implicit_mhd.wall_no_slip_width` LIVE (unmasked) cell rows
-    adjacent to the contour get their three MOMENTUM increments zeroed
-    in the residual, making them exact identity rows
-    :math:`F = m - m^n` (density and the energy channels keep evolving,
-    exactly as the reference code keeps advecting ``en`` and the energies on the
-    skin), and the state's band momentum is zeroed ONCE at
-    load-sanitize time — the discrete analog of the reference code's zero velocity
-    IC, and idempotent, so the identity rows then hold :math:`u = 0`
-    bit-exactly forever. Zeroing the band momentum preserves the
-    INTERNAL energy under ``total_energy``/``dual_energy`` (the removed
-    kinetic part is subtracted from :math:`E_i` and floored), so the pin
-    thermalizes nothing at boot.
+    WHAT IT DOES. On a stair interface face the masked side presents the
+    ANTISYMMETRIC TANGENTIAL image :math:`-u_t` of the interior state, so
+    the face-centered tangential velocity is exactly zero and the viscous
+    difference quotient
+    :math:`(u_t^{\rm image} - u_t^{\rm int})/\Delta n = -2u_t/\Delta n`
+    is the half-cell one-sided wall gradient
+    :math:`(0 - u_t)/(\Delta n/2)` — the textbook wall shear
+    :math:`\tau_w = \mu\, u_t/(\Delta n/2)`. The NORMAL component is
+    untouched: the fluid stays free to lift off the wall, and the
+    absorbing stair image keeps owning that channel (the permeability
+    half of the reference code's contract is still deliberately the scraper, see
+    :pp:param:`implicit_mhd.wall_model`). Every wall-adjacent LIVE cell
+    keeps all three momentum rows as ordinary unknowns, so it still
+    advects, still exchanges mass and enthalpy with its neighbours, and
+    still responds to the wall sinks.
 
-    Without the pin our stair-face image copies the tangential momentum
-    verbatim — a perfect free-slip wall with no tangential momentum sink
-    at all. Pair the pin with
-    :pp:param:`implicit_mhd.wall_viscosity_band_value`: the reference code
-    substitutes a small fixed dynamic viscosity INSIDE the pin so the
-    pinned layer does not transmit large stress into the bulk, and
-    landing only one of the two halves is what a free-slip near-wall jet
-    against a frozen wall image (with the viscous coefficient zeroed)
-    exploits. The band is static geometry, so JFNK probes see constant
-    structure, and ``pc_mhd_block`` emits the matching momentum identity
-    rows.
+    Because the imposed face velocity is zero the paired viscous WORK
+    vanishes on the tangential components: the wall does no work, so the
+    tangential kinetic energy the stress removes becomes internal energy
+    in the adjacent cell instead of being exported. It is a plain face
+    flux — static geometry, :math:`C^\infty` in the state — so the JFNK
+    Jacobian and ``pc_mhd_block`` see it exactly as they see the interior
+    viscous stress. No identity rows are involved anywhere.
 
-.. pp:param:: implicit_mhd.wall_no_slip_width
-    :type: ``int``
-    :default: ``1``
+    It is therefore a VISCOUS condition and requires a viscous
+    coefficient: :pp:param:`implicit_mhd.viscosity`, or
+    :pp:param:`implicit_mhd.wall_viscosity_band_value` where the band
+    covers the contour face (the reference code's ``small_vis`` pedestal). With
+    neither it is a loud input error, never a silent no-op — a no-slip
+    wall with no viscosity is the free-slip wall it exists to replace.
 
-    Number of LIVE cell rows adjacent to the masked contour whose
-    momentum the no-slip pin holds at zero (at least 1). ``2``
-    reproduces the reference code's wall-node + skin depth.
+    REFERENCE PARITY (source audit + the reference shot ``the later reference dump``). The reference code is
+    NODE-COLLOCATED on a cut-cell dual mesh (``state.f:20-25``,
+    ``mgeom.f90:261-288``): its mesh TERMINATES at the wall contour and
+    the boundary nodes sit EXACTLY on it with no control volume at all.
+    Its momentum matrices use ``bnd = 'i'`` for :math:`v_r` and
+    :math:`v_z` (``vp.f90:221/233``, ``sten.f:150-159``), omitting those
+    contour nodes and the single topological "skin" ring of interior
+    nodes with a grid neighbour outside the wall (``bound.f:74-108``),
+    which stands off the contour by a sub-cell distance (median
+    :math:`0.53\,\Delta r` in the reference shot). An omitted row is an exact zero
+    increment (``solv.f:88-96``) and velocities start at zero
+    (``init_cond.f90:82``), so those nodes are bit-exactly zero
+    forever — measured on all 762 wall and 762 skin vertices while the
+    interior ran 1.7e5–5.5e5 m/s.
+
+    Their LAYER-2 nodes are LIVE, though (measured :math:`|v_r|` median
+    1.68e3 m/s over the 502 radial-cut columns): the pinned set is the
+    contour plus one sub-cell-standoff ring, not an inward band, and it
+    has no width parameter. ``sten.f:1080-87`` makes the contour
+    Dirichlet unconditional (``bb(n_1d+1:) = 0`` for every ``bnd``), and
+    that is the part which survives translation to a cell-centered
+    finite-volume mesh: :math:`u = 0` ON the contour. The reference code even removes
+    the pin's viscous grip on the live fluid, substituting
+    ``small_vis = 1e-4`` Pa s on ``'skin'``, ``'bndy'`` AND
+    ``'subr'``/``'subz'`` — the first live layer (``step.f90:203-215``);
+    see :pp:param:`implicit_mhd.wall_viscosity_band_value`.
+
+    A volumetric momentum pin of wall-adjacent INTERIOR cells is NOT the
+    same thing and must not be used as a substitute: zeroing a cell's
+    momentum zeroes the face velocities on BOTH of its faces, sealing
+    that finite control volume off from the domain entirely. The
+    outermost live cell's density then stays bit-frozen for the whole
+    run and its ion energy has the wall sink as its only channel — a
+    monotone collapse with nothing to replenish it.
 
 .. pp:param:: implicit_mhd.thermal_diffusivity_ion
     :type: ``float``
