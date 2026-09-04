@@ -2269,6 +2269,33 @@ public:
      * deposited weight in cells no QDSMC marker reached. Defaults to the
      * same floor as the rest of the hybrid solver. */
     amrex::Real m_qdsmc_n_floor = 1.0;
+
+    /** Density floor (m^-3) for the electron-energy REPRESENTATION,
+     *  decoupled from hybrid_pic_model.n_floor.
+     *
+     *  n_floor is a property of the FIELD model: it keeps Ohm's law
+     *  non-singular (J/en) and sets the resistive vacuum region. The
+     *  K <-> T_e conversion, the T_e recovery and the conduction open
+     *  set need only numerical POSITIVITY, which is a property of the
+     *  representation. Welding the two means the electron-energy floor
+     *  cannot be lowered without also moving the Ohm's-law floor -- and
+     *  moving the Ohm's-law floor wrong is what burns trapped flux.
+     *
+     *  Threaded into exactly three sites, all identified by behaviour
+     *  rather than by line number:
+     *    1. SeedTeAdiabat        -- the adiabat T_e seed
+     *    2. QDSMCUpdateTe        -- the K -> T_e recovery
+     *    3. the bne build in QdsmcConductionOnceFD -- b_ne and the
+     *       b_open conduction set
+     *  The V_e zero guard is deliberately NOT included: that is a
+     *  separate judgement call about the advection velocity, not about
+     *  representation positivity.
+     *
+     *  DEFAULTS TO n_floor, resolved after n_floor is parsed, so a deck
+     *  that does not set it is bit-for-bit inert.
+     *  Input: qdsmc_te_n_floor. */
+    amrex::Real m_qdsmc_te_n_floor = 1.0;
+
     /** False until the adiabat T_e seed (SeedTeAdiabat, PR #7128) has run
      *  once. HybridPICInitializeRhoJandB executes at step == step_begin of
      *  EVERY Evolve() entry (each segmented PICMI sim.step()), and an

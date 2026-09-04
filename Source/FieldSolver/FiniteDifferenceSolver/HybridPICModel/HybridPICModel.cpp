@@ -209,6 +209,25 @@ void HybridPICModel::ReadParameters ()
                     m_solve_electron_energy_equation);
     pp_hybrid.query("qdsmc_n_floor", m_qdsmc_n_floor);
 
+    // Electron-energy REPRESENTATION floor, decoupled from the FIELD
+    // model's n_floor. n_floor exists to keep Ohm's law non-singular
+    // (J/en) and to set the resistive vacuum region; the K <-> T_e
+    // conversion, its recovery and the conduction open set need only
+    // numerical positivity. Welding the two means the electron-energy
+    // floor cannot be lowered without also moving the Ohm's-law floor,
+    // which is what burns trapped flux when it is moved wrong.
+    //
+    // Defaults to n_floor, so an unset deck is bit-for-bit inert. Note
+    // the ORDER: n_floor is parsed above, so the default below picks up
+    // a deck-supplied n_floor rather than the member's initial value.
+    m_qdsmc_te_n_floor = m_n_floor;
+    utils::parser::queryWithParser(pp_hybrid, "qdsmc_te_n_floor",
+                                   m_qdsmc_te_n_floor);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_qdsmc_te_n_floor > 0.0_rt,
+        "hybrid_pic_model.qdsmc_te_n_floor must be > 0 (it is a "
+        "positivity floor for the electron-energy representation)");
+
     pp_hybrid.query("implicit_push_excludes_resistive_field",
                     m_implicit_push_excludes_resistive_field);
 
@@ -3825,7 +3844,13 @@ void HybridPICModel::QDSMCInitializeKe (int const lev, amrex::MultiFab const & r
     Ke.setVal(0.0_rt);
 
     auto const gamma     = m_gamma;
-    auto const rho_floor = PhysConst::q_e * m_n_floor;
+    // SITE 2 of qdsmc_te_n_floor (the T_e -> K_e forward conversion).
+    // This one is NOT in the filed request, but it MUST move with the
+    // recovery in QDSMCUpdateTe: that function's own comment requires the
+    // two floors to match so the K -> T_e round-trip is exact for a marker
+    // that stayed home. Threading only the recovery would silently break
+    // that invariant.
+    auto const rho_floor = PhysConst::q_e * m_qdsmc_te_n_floor;
     // Conversion factor used by helion to keep K_e numerically O(1): T_e in K
     // is multiplied by (k_B / q_e) so K_e ends up scaled in eV-equivalent.
     auto const kb_over_qe = PhysConst::kb / PhysConst::q_e;
@@ -3940,9 +3965,11 @@ void HybridPICModel::QDSMCUpdateTe (int const lev, amrex::MultiFab const & rho_n
     // momentarily receives no deposit.
 
     auto const gamma      = m_gamma;
+    // SITE 3 of qdsmc_te_n_floor (the K_e -> T_e recovery).
     // Conversion floor: must match the floor QDSMCInitializeKe applies, so
-    // the K -> T_e round-trip is exact for a marker that stayed home.
-    auto const n_floor    = m_n_floor;
+    // the K -> T_e round-trip is exact for a marker that stayed home --
+    // which is why that site moved to the same knob.
+    auto const n_floor    = m_qdsmc_te_n_floor;
     // Deposited-weight guard: cells no QDSMC marker reached keep their T_e.
     auto const w_floor    = m_qdsmc_n_floor;
     auto const kb_over_qe = PhysConst::kb / PhysConst::q_e;
@@ -10282,7 +10309,10 @@ void HybridPICModel::SeedTeAdiabat (int const lev) const
 
     auto const n0_ref    = m_n0_ref;
     auto const gamma     = m_gamma;
-    auto const rho_floor = PhysConst::q_e * m_n_floor;
+    // SITE 1 of qdsmc_te_n_floor (the adiabat T_e seed): representation
+    // positivity, not the Ohm's-law vacuum floor. Defaults to n_floor,
+    // so this is bit-identical unless the deck sets the knob.
+    auto const rho_floor = PhysConst::q_e * m_qdsmc_te_n_floor;
     // m_elec_temp is k_B T_e0 [J]; the T_e field is in K.
     auto const Te0_K     = m_elec_temp / PhysConst::kb;
 
