@@ -3183,6 +3183,25 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         covers the contour face -- the reference code's small_vis pedestal); with
         neither, it is a loud input error rather than a silent no-op.
 
+    wall_corner_temperature_pin_rate: float, default=0 (off)
+        Relaxation rate [1/s] pinning shaped-wall CORNER cells to the wall
+        temperature. 0 disables it and the run is bit-identical.
+
+        A corner fluid cell has both a radial and an axial masked
+        neighbour, so the two no-slip faces between them pin all three
+        velocity components (the r-face pins theta and z, the z-face pins
+        r and theta) rather than the tangential pair a flat face pins. The
+        removed kinetic energy becomes internal energy in the adjacent
+        cell by design, so a corner converts all of it in a single cell --
+        a heat source where a drag term was intended. Rather than redo the
+        corner energy accounting, pin the cell: two walls means it sits in
+        the wall's pocket and is at T_wall to well within the error of
+        interest.
+
+        Applied as a linear relaxation of both temperature carriers toward
+        n k_B T_wall, which is a valid heat source under either ion
+        closure and stays Newton-friendly.
+
     joule_halo_taper: bool, default=False
         Taper the Joule heating source with the same pedestal envelope the
         other fluid sources already carry. Default False (bit-identical).
@@ -3413,6 +3432,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         conduction_halo_boost=None,
         conduction_chi_par_max_halo=None,
         joule_halo_taper=None,
+        wall_corner_temperature_pin_rate=None,
         pressure_corner_width_fraction=None,
         r_open_fluid=None,
         z_boundary_fluid=None,
@@ -3542,6 +3562,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.conduction_halo_boost = conduction_halo_boost
         self.conduction_chi_par_max_halo = conduction_chi_par_max_halo
         self.joule_halo_taper = joule_halo_taper
+        self.wall_corner_temperature_pin_rate = wall_corner_temperature_pin_rate
         self.pressure_corner_width_fraction = pressure_corner_width_fraction
         self.r_open_fluid = r_open_fluid
         self.z_boundary_fluid = z_boundary_fluid
@@ -3721,6 +3742,9 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
             self.conduction_chi_par_max_halo
         )
         implicit_mhd.joule_halo_taper = self.joule_halo_taper
+        implicit_mhd.wall_corner_temperature_pin_rate = (
+            self.wall_corner_temperature_pin_rate
+        )
         implicit_mhd.pressure_corner_width_fraction = (
             self.pressure_corner_width_fraction
         )

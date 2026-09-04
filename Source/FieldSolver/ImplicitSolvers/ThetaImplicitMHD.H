@@ -1775,6 +1775,27 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // (rho,Te,J,t) parser expression, so the heating coefficient carries
     // a hard floor into vacuum instead of decaying.
     bool m_joule_halo_taper = false;
+    // Pin the temperature of shaped-wall CORNER cells to the wall value
+    // (implicit_mhd.wall_corner_temperature_pin_rate, [1/s]; 0 = off =
+    // bit-identical). A corner fluid cell has BOTH a radial and an axial
+    // masked neighbour, so the no-slip face condition pins all three
+    // velocity components -- the r-face pins (theta,z), the z-face pins
+    // (r,theta) -- rather than the tangential pair a flat face would.
+    // The removed kinetic energy is converted to internal energy in the
+    // adjacent cell by design, so a corner converts ALL of it in one
+    // cell, making a heat source out of a drag term. Measured
+    // 2026-09-04: the lad8 blow-up nucleated 3-7 cells from the
+    // z = 6.633 m bore step and stayed there through its whole growth
+    // phase, while its healthy twin's hot spot sat 160 cells away.
+    //
+    // Rather than re-derive the corner energy accounting, pin the cell:
+    // a cell with wall on two sides sits in the wall's pocket and should
+    // be within a hair of T_wall anyway (Eric 2026-09-04). Applied as a
+    // linear relaxation of BOTH temperature carriers toward
+    // n kB T_wall, which is a valid heat source under either ion closure
+    // (adding an internal-energy source to a total-energy row is still
+    // heat) and stays Newton-friendly.
+    amrex::Real m_wall_corner_temperature_pin_rate = 0.0;
     // Braginskii clamp CLASS of the shaped-wall interface conductance
     // (implicit_mhd.wall_conduction_scale, braginskii only):
     //   "perp"     (default) -- the wall-interface drain's scalar chi is

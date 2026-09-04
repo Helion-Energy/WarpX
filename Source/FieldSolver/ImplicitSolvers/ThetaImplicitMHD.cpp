@@ -631,6 +631,13 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     // Taper the Joule source with the pedestal envelope (see
     // m_joule_halo_taper). Default false: bit-identical.
     pp.query("joule_halo_taper", m_joule_halo_taper);
+    // Corner temperature pin (see m_wall_corner_temperature_pin_rate).
+    utils::parser::queryWithParser(pp, "wall_corner_temperature_pin_rate",
+                                   m_wall_corner_temperature_pin_rate);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+        m_wall_corner_temperature_pin_rate >= 0.0_rt,
+        "implicit_mhd.wall_corner_temperature_pin_rate cannot be negative "
+        "(0 disables the corner temperature pin)");
     pp.query("wall_conduction_scale", m_wall_conduction_scale);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_wall_conduction_scale == "perp" ||
@@ -5820,6 +5827,19 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
     // identically 1 when the pedestal is off.
     const amrex::Real halo_pedestal = m_halo_pedestal_density;
     const bool joule_halo_taper = m_joule_halo_taper;
+    // Corner temperature pin (see m_wall_corner_temperature_pin_rate).
+    // n kB T_wall = rho (q/m) T_wall[eV] for the quasi-neutral single-ion
+    // fluid, the same identity the z-end wall fill uses.
+    const amrex::Real corner_pin_rate = m_wall_corner_temperature_pin_rate;
+    const amrex::Real corner_pin_pressure_per_density =
+        m_ion_charge_to_mass * m_z_wall_temperature;
+    const int* const AMREX_RESTRICT corner_pin_masked_cc =
+        (corner_pin_rate > 0.0_rt && m_wall_mask.IsActive())
+            ? m_wall_mask.FirstMaskedCellCentered()
+            : nullptr;
+    const amrex::Box& corner_pin_domain = m_WarpX->Geom(0).Domain();
+    const int corner_pin_jlo = corner_pin_domain.smallEnd(1);
+    const int corner_pin_jhi = corner_pin_domain.bigEnd(1);
     // Pedestal-band velocity relaxation (see m_halo_pedestal_drag_rate):
     // engages with the complement of the halo source taper, i.e. full
     // rate at the pedestal and exactly zero at/above twice it.
@@ -6199,6 +6219,29 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
             energy_increment(i, j, k) =
                 theta_dt * plasma_weight *
                 (-divergence_energy_flux + pressure_work + joule_heating);
+            // CORNER TEMPERATURE PIN (see the host constants): a fluid
+            // cell with BOTH a radial and an axial masked neighbour has
+            // all three velocity components pinned by the two no-slip
+            // faces, so it absorbs its entire kinetic energy as internal
+            // energy. Relax both temperature carriers to n kB T_wall
+            // instead -- a two-sided wall pocket is at the wall
+            // temperature to well within the error we care about.
+            if (corner_pin_masked_cc != nullptr) {
+                const int first_masked = corner_pin_masked_cc[j];
+                if (i == first_masked - 1) {
+                    const int jm = std::max(j - 1, corner_pin_jlo);
+                    const int jp = std::min(j + 1, corner_pin_jhi);
+                    if (i >= corner_pin_masked_cc[jm] ||
+                        i >= corner_pin_masked_cc[jp]) {
+                        const amrex::Real wall_pressure =
+                            corner_pin_pressure_per_density * rho(i, j, k);
+                        energy_increment(i, j, k) +=
+                            theta_dt * corner_pin_rate *
+                            (wall_pressure / gamma_e_minus_one -
+                             energy(i, j, k));
+                    }
+                }
+            }
             // Electron-ion equilibration (see the host constants above
             // and m_electron_ion_equilibration; the reference code's eq_brate
             // exchange): the STEP-OLD frozen Spitzer rate times the LIVE
@@ -6357,6 +6400,28 @@ void ThetaImplicitMHD::ComputeFluidRHS (WarpXSolverVec& rhs, const amrex::Real t
                     // the opposite sign -- exact pair conservation.
                     ion_energy_increment(i, j, k) -=
                         theta_dt * plasma_weight * equilibration_heating;
+                }
+                // Corner temperature pin, ion row (see the electron row
+                // above and the host constants). Same relaxation to
+                // n kB T_wall. Adding an internal-energy source to this
+                // row is valid under either ion closure: it is heat
+                // either way, and it never touches the kinetic part.
+                if (corner_pin_masked_cc != nullptr) {
+                    const int first_masked = corner_pin_masked_cc[j];
+                    if (i == first_masked - 1) {
+                        const int jm = std::max(j - 1, corner_pin_jlo);
+                        const int jp = std::min(j + 1, corner_pin_jhi);
+                        if (i >= corner_pin_masked_cc[jm] ||
+                            i >= corner_pin_masked_cc[jp]) {
+                            const amrex::Real wall_pressure =
+                                corner_pin_pressure_per_density *
+                                rho(i, j, k);
+                            ion_energy_increment(i, j, k) +=
+                                theta_dt * corner_pin_rate *
+                                (wall_pressure / gamma_i_minus_one -
+                                 internal_energy);
+                        }
+                    }
                 }
             }
 
