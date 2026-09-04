@@ -5854,7 +5854,28 @@ Jacobian probes.
 
     Coulomb logarithm of the Braginskii collision times
     :math:`\tau_e/\tau_i`
-    (``thermal_conduction_model = braginskii``).
+    (``thermal_conduction_model = braginskii``). A positive value is
+    used as a constant. ``-1`` evaluates it live at each face from the
+    face density :math:`n` (m\ :sup:`-3`) and temperatures (eV) with the
+    two-branch fits (the :math:`3\ln 10` converts the fits' cm\ :sup:`-3`
+    density):
+
+    .. math::
+
+        \ln\Lambda_e = \begin{cases}
+            23 + 3\ln 10 - \tfrac{1}{2}\ln n + \tfrac{3}{2}\ln T_e, & T_e \le e^2\ \mathrm{eV} \\
+            24 + 3\ln 10 - \tfrac{1}{2}\ln n + \ln T_e, & T_e > e^2\ \mathrm{eV}
+        \end{cases}
+        \qquad
+        \ln\Lambda_i = 23 + 3\ln 10 - \tfrac{1}{2}\ln 2 - \tfrac{1}{2}\ln n + \tfrac{3}{2}\ln T_i
+
+    (Z = 1; the electron branch point :math:`e^2 = 7.39` eV is where the
+    two fits meet, so :math:`\ln\Lambda_e` is continuous), each floored
+    at 1. The live value enters both the parallel coefficients and the
+    magnetization parameter :math:`x = (\Omega\tau)^2` of the
+    perpendicular fits. Positive values keep the constant path
+    bit-identical. The CGL isotropization rate keeps its own constant
+    :pp:param:`implicit_mhd.cgl_coulomb_log`.
 
 .. pp:param:: implicit_mhd.conduction_chi_min
     :type: ``float``

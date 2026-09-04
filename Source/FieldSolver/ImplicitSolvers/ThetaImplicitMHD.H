@@ -1636,7 +1636,15 @@ class ThetaImplicitMHD final : public ImplicitSolver
     // measured wall-ledger runaway (3.3e11 J -> 3.5e4 J under minmod in
     // the E4 A/B). "none" remains selectable for the centered reference.
     std::string m_braginskii_tangential_limiter = "minmod";
-    // Coulomb logarithm of the Braginskii collision times tau_e/tau_i.
+    // Coulomb logarithm of the Braginskii collision times tau_e/tau_i: a
+    // positive constant, or -1 for the LIVE two-branch form evaluated at
+    // each face from the face density and temperatures
+    // (coulomb_log_electron / coulomb_log_ion in ThetaImplicitMHD_K.H,
+    // the reference code's collision-time convention, floored at 1).
+    // Positive values keep the constant path bit-identical: the host
+    // coefficient divides by the constant and the kernel never touches
+    // lnLambda. The CGL isotropization rate keeps its own constant
+    // (m_cgl_coulomb_log); it does not share this plumbing.
     amrex::Real m_conduction_coulomb_log = 10.0;
     // Optional absolute clamps [m^2/s] on the Braginskii chi_par and
     // chi_perp (0 = off): C-infinity smooth-max floor at chi_min and C^2

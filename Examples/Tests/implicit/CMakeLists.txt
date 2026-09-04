@@ -785,6 +785,23 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Braginskii isolimit twin with the LIVE Coulomb logarithm
+# (implicit_mhd.conduction_coulomb_log = -1): at the deck's uniform state
+# the two-branch forms give lnLambda_e = 12.49 and lnLambda_i = 14.37, so
+# both channels must decay 10/lnLambda slower than the constant-lnLambda
+# twin (-20 and -30 percent, far outside the 5 percent gate; neither live
+# chi reaches the cap knee). The analysis also asserts that it REJECTS the
+# constant-lnLambda rates, so a knob that silently kept lnLambda = 10 fails.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_braginskii_live_coulomb_log  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_braginskii_isolimit implicit_mhd.conduction_coulomb_log=-1"  # inputs
+    "analysis_mhd_braginskii_live_coulomb_log.py diags/diag000000 diags/diag000010"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
 # Braginskii quasi-shorting twin (conduction_qs_chi = 0): the no-QS
 # reference the braginskii_qs gates difference against
 add_warpx_test(

@@ -432,8 +432,11 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     utils::parser::queryWithParser(pp, "conduction_coulomb_log",
                                    m_conduction_coulomb_log);
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
-        m_conduction_coulomb_log > 0.0_rt,
-        "implicit_mhd.conduction_coulomb_log must be positive");
+        m_conduction_coulomb_log > 0.0_rt ||
+            m_conduction_coulomb_log == -1.0_rt,
+        "implicit_mhd.conduction_coulomb_log must be positive (a constant "
+        "lnLambda) or exactly -1 (the live two-branch lnLambda evaluated "
+        "at each face from the face density and temperatures)");
     const bool has_conduction_chi_min = utils::parser::queryWithParser(
         pp, "conduction_chi_min", m_conduction_chi_min);
     const bool has_chi_par_min = utils::parser::queryWithParser(
@@ -3215,7 +3218,11 @@ void ThetaImplicitMHD::PrintParameters () const
                    << m_thermal_conduction_model
                    << (m_conduction_braginskii
                            ? " (lnLambda = " +
-                                 std::to_string(m_conduction_coulomb_log) +
+                                 (m_conduction_coulomb_log < 0.0_rt
+                                      ? std::string("live two-branch, face "
+                                                    "state, floor 1")
+                                      : std::to_string(
+                                            m_conduction_coulomb_log)) +
                                  ", chi min/max [m2/s] = " +
                                  std::to_string(m_conduction_chi_min) +
                                  " / " +
@@ -7067,10 +7074,25 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     // field-energy scale mu0 p_floor (the CGL small_b2 idiom) -- below
     // it the anisotropy is physically negligible and only the
     // (arbitrary) direction is smoothed away.
+    // Coulomb logarithm of the collision times. A positive
+    // conduction_coulomb_log is the constant the host coefficients have
+    // always divided by -- that path is bit-identical, the kernel never
+    // touches lnLambda. conduction_coulomb_log = -1 selects the LIVE
+    // two-branch form evaluated at the face state (coulomb_log_electron /
+    // coulomb_log_ion in ThetaImplicitMHD_K.H: the reference code's
+    // collision-time convention, the same electron form the e-i
+    // equilibration rate already uses), floored at 1 as the reference
+    // code floors it: the host coefficients then carry lnLambda = 1 and
+    // the kernel divides each face's tau by its own lnLambda, which also
+    // flows into the magnetization parameter x = (Omega tau)^2.
+    const bool brag_live_coulomb_log = (m_conduction_coulomb_log < 0.0_rt);
+    const amrex::Real brag_host_coulomb_log =
+        brag_live_coulomb_log ? 1.0_rt : m_conduction_coulomb_log;
+    const amrex::Real brag_coulomb_log_floor = 1.0_rt;
     const amrex::Real brag_tau_shared =
         std::pow(MathConst::pi, amrex::Real(1.5)) * PhysConst::epsilon_0 *
         PhysConst::epsilon_0 /
-        (std::pow(PhysConst::q_e, 4) * m_conduction_coulomb_log);
+        (std::pow(PhysConst::q_e, 4) * brag_host_coulomb_log);
     const amrex::Real brag_tau_e_coefficient =
         6.0_rt * std::sqrt(2.0_rt) * std::sqrt(PhysConst::m_e) *
         brag_tau_shared;
@@ -9008,9 +9030,22 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         const amrex::Real kb_ti = PhysConst::kb * face_ti;
                         const amrex::Real face_number_density =
                             face_charge_density / PhysConst::q_e;
-                        const amrex::Real tau_ion =
+                        // Collision time at the host coefficient's
+                        // lnLambda (the constant path, bit-identical);
+                        // the live lnLambda divides by the face value,
+                        // floored at 1 like the reference code.
+                        const amrex::Real tau_ion_host =
                             brag_tau_i_coefficient * kb_ti *
                             std::sqrt(kb_ti) / face_number_density;
+                        const amrex::Real tau_ion =
+                            brag_live_coulomb_log
+                                ? tau_ion_host /
+                                      std::max(
+                                          theta_implicit_mhd::coulomb_log_ion(
+                                              face_number_density,
+                                              kb_ti / PhysConst::q_e),
+                                          brag_coulomb_log_floor)
+                                : tau_ion_host;
                         // (gamma_i - 1): kappa-convention -> operator
                         // convention (see the host-constant comment).
                         const amrex::Real chi_par_raw =
@@ -9375,9 +9410,23 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         const amrex::Real kb_te = PhysConst::kb * face_te;
                         const amrex::Real face_number_density =
                             face_charge_density / PhysConst::q_e;
-                        const amrex::Real tau_electron =
+                        // Collision time at the host coefficient's
+                        // lnLambda (constant path, bit-identical); the
+                        // live lnLambda divides by the face value,
+                        // floored at 1 like the reference code.
+                        const amrex::Real tau_electron_host =
                             brag_tau_e_coefficient * kb_te *
                             std::sqrt(kb_te) / face_number_density;
+                        const amrex::Real tau_electron =
+                            brag_live_coulomb_log
+                                ? tau_electron_host /
+                                      std::max(
+                                          theta_implicit_mhd::
+                                              coulomb_log_electron(
+                                                  face_number_density,
+                                                  kb_te / PhysConst::q_e),
+                                          brag_coulomb_log_floor)
+                                : tau_electron_host;
                         // (gamma_e - 1): kappa-convention -> operator
                         // convention (see the host-constant comment).
                         const amrex::Real chi_par_raw =

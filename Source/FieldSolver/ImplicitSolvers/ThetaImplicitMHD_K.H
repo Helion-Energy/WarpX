@@ -722,19 +722,63 @@ vacuum_keyed_resistivity (const amrex::Real user_resistivity,
 }
 
 /**
+ * \brief Electron Coulomb logarithm, the two-branch NRL fit exactly as
+ * the reference code writes it in its collision-time coefficients
+ * (ntb.f90 t_cond and eq_brate, z_eff = 1). The +3 ln 10 converts
+ * NRL's cm^-3 to the m^-3 density used here; the branch point is the
+ * reference code's e^2 = 7.389 eV -- the temperature at which the two
+ * fits are equal, so lnLambda is continuous -- not NRL's nominal 10 Z^2:
+ *
+ *     Te <= e^2 : lnLambda = 23 + 3 ln 10 - ln(n)/2 + 3 ln(Te)/2
+ *     Te >  e^2 : lnLambda = 24 + 3 ln 10 - ln(n)/2 + ln(Te)
+ *
+ * UNFLOORED: each consumer applies its own floor (0 for the
+ * equilibration rate below, the reference code's 1 for the conduction
+ * collision times under conduction_coulomb_log = -1). The expression is
+ * the one the equilibration rate carried inline before it was shared, so
+ * that rate is bit-identical.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+coulomb_log_electron (const amrex::Real number_density,
+                      const amrex::Real electron_temperature_ev) noexcept {
+    constexpr amrex::Real three_ln_ten = 6.907755278982137;
+    constexpr amrex::Real branch_te_ev = 7.389056098930650; // e^2
+    const amrex::Real log_n = std::log(number_density);
+    const amrex::Real log_te = std::log(electron_temperature_ev);
+    return electron_temperature_ev <= branch_te_ev
+               ? 23.0 + three_ln_ten - 0.5 * log_n + 1.5 * log_te
+               : 24.0 + three_ln_ten - 0.5 * log_n + log_te;
+}
+
+/**
+ * \brief Ion-ion Coulomb logarithm for like ions with Z = 1, the NRL
+ * fit as the reference code writes it (ntb.f90 t_cond):
+ *
+ *     lnLambda = 23 + 3 ln 10 - ln(2)/2 - ln(n)/2 + 3 ln(Ti)/2,
+ *
+ * i.e. NRL's 23 - ln(sqrt(2 n_cm3) Z^3 Ti^{-3/2}) at Z = 1 with n in
+ * m^-3 and Ti in eV. UNFLOORED, see coulomb_log_electron.
+ */
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE amrex::Real
+coulomb_log_ion (const amrex::Real number_density,
+                 const amrex::Real ion_temperature_ev) noexcept {
+    constexpr amrex::Real three_ln_ten = 6.907755278982137;
+    constexpr amrex::Real half_ln_two = 0.34657359027997264;
+    return 23.0 + three_ln_ten - half_ln_two -
+           0.5 * std::log(number_density) +
+           1.5 * std::log(ion_temperature_ev);
+}
+
+/**
  * \brief Frozen-coefficient Spitzer electron-ion temperature
  * equilibration rate [1/s], the reference code's verbatim eq_brate coefficient
  * (ntb.f90 658-700, the f_n = 0 electron-ion branch, z_eff = 1):
  *
  *     nu = 4.75e-15 lnLambda (m_p/m_i) n_i / Te[eV]^{3/2},
  *
- * with the NRL-style Coulomb-logarithm branches exactly as the reference code
- * writes them (their +3 ln 10 converts NRL's cm^-3 to the m^-3 density
- * used here; the branch point is the reference code's e^2 = 7.389 eV, not NRL's
- * 10 Z^2):
- *
- *     Te <= e^2 : lnLambda = 23 + 3 ln 10 - ln(n)/2 + 3 ln(Te)/2
- *     Te >  e^2 : lnLambda = 24 + 3 ln 10 - ln(n)/2 + ln(Te)
+ * with lnLambda = coulomb_log_electron above (the two-branch form the
+ * Braginskii conduction collision times also use when
+ * conduction_coulomb_log = -1).
  *
  * The caller passes number_density and Te precomputed from the
  * STEP-OLD state (floored like every frozen coefficient), so the rate
@@ -760,15 +804,8 @@ electron_ion_equilibration_rate (const amrex::Real number_density,
                                  const amrex::Real electron_temperature_ev,
                                  const amrex::Real rate_coefficient,
                                  const amrex::Real rate_cap) noexcept {
-    constexpr amrex::Real three_ln_ten = 6.907755278982137;
-    constexpr amrex::Real branch_te_ev = 7.389056098930650; // e^2
-    const amrex::Real log_n = std::log(number_density);
-    const amrex::Real log_te = std::log(electron_temperature_ev);
     const amrex::Real coulomb_log = std::max(
-        electron_temperature_ev <= branch_te_ev
-            ? 23.0 + three_ln_ten - 0.5 * log_n + 1.5 * log_te
-            : 24.0 + three_ln_ten - 0.5 * log_n + log_te,
-        0.0);
+        coulomb_log_electron(number_density, electron_temperature_ev), 0.0);
     return std::min(rate_coefficient * coulomb_log * number_density /
                         (electron_temperature_ev *
                          std::sqrt(electron_temperature_ev)),

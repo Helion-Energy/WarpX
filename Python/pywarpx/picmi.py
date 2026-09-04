@@ -2495,7 +2495,14 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
 
     conduction_coulomb_log: float, default=10
         Coulomb logarithm of the Braginskii collision times tau_e/tau_i
-        (thermal_conduction_model="braginskii").
+        (thermal_conduction_model="braginskii"). A positive value is used
+        as a constant. -1 evaluates the two-branch (NRL-form) electron
+        and ion-ion Coulomb logarithms live at each face from the face
+        density and temperatures, floored at 1; the live value enters the
+        parallel coefficients and the magnetization parameter of the
+        perpendicular fits. Positive values keep the constant path
+        bit-identical. (The CGL isotropization rate keeps its own
+        constant cgl_coulomb_log.)
 
     conduction_chi_min: float, default=0 (off)
         Optional absolute floor [m^2/s] on the Braginskii chi_par and
