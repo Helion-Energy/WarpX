@@ -709,6 +709,12 @@ ThetaImplicitMHD::ThetaImplicitMHD () : m_ion_charge_to_mass(PhysConst::q_e / Ph
     // identity is a measured GMRES stagnation. The knob exists for A/B
     // measurement and for reproducing the row-less behavior.
     pp.query("wall_conduction_pc_rows", m_wall_conduction_pc_rows);
+    // Bulk-conduction face coefficients for the block preconditioner (see
+    // the members): on by default. At the production formation clamp the
+    // conduction diffusion number is 57 in the bulk and the energy rows
+    // were preconditioned as identities -- the measured "Newton frozen"
+    // class of failure. The knob exists for A/B measurement.
+    pp.query("conduction_pc_coefficients", m_conduction_pc_coefficients);
     pp.query("wall_conduction_validate_rows",
              m_wall_conduction_validate_rows);
     utils::parser::queryWithParser(pp,
@@ -3246,6 +3252,10 @@ void ThetaImplicitMHD::PrintParameters () const
                            ? " (the reference code's eq_brate rate, step-old frozen)"
                            : " (off)")
                    << "\n"
+                   << "Conduction PC coefficients:    "
+                   << (m_conduction_pc_coefficients ? "on" : "off")
+                   << " (bulk-conduction face registers for pc_mhd_block."
+                      "conduction_block)\n"
                    << "Resistive theta:               " << m_resistive_theta << "\n"
                    << "Conduction theta:              " << m_conduction_theta
                    << "\n"
@@ -6565,6 +6575,30 @@ void ThetaImplicitMHD::ComputeFaceFluxes (const amrex::Real a_time)
         m_wall_conduction_rows_active =
             m_wall_conduction_pc_rows && conduction_channel &&
             (wall_reservoir || m_z_wall_conduction);
+        // Bulk conduction face coefficients (see the members): live with
+        // any conduction channel, wall or not.
+        m_conduction_pc_active =
+            m_conduction_pc_coefficients && conduction_channel;
+    }
+    if (m_conduction_pc_active) {
+        const amrex::MultiFab& density =
+            *m_WarpX->m_fields.get(MassDensityName, 0);
+        for (int direction = 0; direction < AMREX_SPACEDIM; ++direction) {
+            if (m_conduction_pc_coefficient[direction] == nullptr) {
+                m_conduction_pc_coefficient[direction] =
+                    std::make_unique<amrex::MultiFab>(
+                        amrex::convert(
+                            density.boxArray(),
+                            amrex::IntVect::TheDimensionVector(direction)),
+                        density.DistributionMap(), ConductionPCComponents,
+                        0);
+            }
+            m_conduction_pc_coefficient[direction]->setVal(0.0_rt);
+        }
+        if (m_ion_closure == "dual_energy" && m_conduction_pc_blend == nullptr) {
+            m_conduction_pc_blend = std::make_unique<amrex::MultiFab>(
+                density.boxArray(), density.DistributionMap(), 1, 0);
+        }
     }
     if (m_wall_conduction_rows_active) {
         if (m_wall_conduction_diagonal == nullptr) {
@@ -6589,6 +6623,43 @@ void ThetaImplicitMHD::ComputeFaceFluxes (const amrex::Real a_time)
     WARPX_ABORT_WITH_MESSAGE(
         "ThetaImplicitMHD::ComputeFaceFluxes() requires 1D or RZ geometry");
 #endif
+    // Dual-energy blend weight per cell for the preconditioner's exact
+    // ion-pair conduction inverse (see the members): the live-state
+    // dual_energy_kinetic_fraction, the same f_k the residual's blended
+    // pressure uses.
+    if (m_conduction_pc_active && m_conduction_pc_blend != nullptr) {
+        const amrex::MultiFab& density =
+            *m_WarpX->m_fields.get(MassDensityName, 0);
+        const amrex::MultiFab& momentum =
+            *m_WarpX->m_fields.get(MomentumDensityName, 0);
+        const amrex::MultiFab& ion_energy =
+            *m_WarpX->m_fields.get(IonEnergyName, 0);
+        const amrex::MultiFab& old_ion_internal_energy =
+            *m_WarpX->m_fields.get(OldIonInternalEnergyName, 0);
+        const theta_implicit_mhd::FluxParameters parameters =
+            MakeFluxParameters();
+        for (amrex::MFIter mfi(*m_conduction_pc_blend); mfi.isValid(); ++mfi) {
+            const auto blend = m_conduction_pc_blend->array(mfi);
+            const auto rho = density.const_array(mfi);
+            const auto mom = momentum.const_array(mfi);
+            const auto ion_e = ion_energy.const_array(mfi);
+            const auto ion_int_old = old_ion_internal_energy.const_array(mfi);
+            amrex::ParallelFor(
+                mfi.validbox(), [=] AMREX_GPU_DEVICE (int i, int j, int k) {
+                    amrex::Real kinetic = 0.0_rt;
+                    for (int component = 0; component < 3; ++component) {
+                        kinetic += mom(i, j, k, component) *
+                                   mom(i, j, k, component);
+                    }
+                    kinetic *= 0.5_rt /
+                               std::max(rho(i, j, k), parameters.density_floor);
+                    blend(i, j, k) =
+                        theta_implicit_mhd::dual_energy_kinetic_fraction(
+                            ion_e(i, j, k), kinetic, ion_int_old(i, j, k),
+                            parameters);
+                });
+        }
+    }
     // Round-off check of the emitted rows against the residual's own wall
     // drain (implicit_mhd.wall_conduction_validate_rows; the conduction
     // twin of pc_mhd_block.resistive_validate_assembly). The kernel
@@ -7351,6 +7422,25 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const int wall_row_ion_total = WallConductionRowIonTotal;
     const int wall_row_ion_internal = WallConductionRowIonInternal;
     const int wall_row_mismatch = WallConductionRowMismatch;
+    // Bulk-conduction face coefficients for the block preconditioner (see
+    // the members and ComputeFaceFluxes): written per face by the same
+    // kernel that forms the conductive flux, from the same chi, so the
+    // preconditioner's Helmholtz block inverts the diffusivity the
+    // residual applies -- clamps, boosts, ceiling lift, nn projection and
+    // coefficient state included. The free-streaming cap enters through
+    // its linearization, chi/(1 + |q|/(f q_fs))^2 (the derivative of the
+    // harmonic form at fixed q_fs). The conduction-stage weight is folded
+    // in so the preconditioner's theta dt lands on conduction_theta dt.
+    // Only bulk faces write; wall interface and z-end faces keep zero.
+    const int conduction_pc_dim =
+        (normal_direction == 0) ? 0 : AMREX_SPACEDIM - 1;
+    const bool emit_conduction_pc =
+        m_conduction_pc_active &&
+        m_conduction_pc_coefficient[conduction_pc_dim] != nullptr;
+    const amrex::Real conduction_pc_stage_weight =
+        conduction_stage ? stage_new_weight : 1.0_rt;
+    const int conduction_pc_electron = ConductionPCElectron;
+    const int conduction_pc_ion_total = ConductionPCIonTotal;
     for (amrex::MFIter mfi(face_flux_mf); mfi.isValid(); ++mfi) {
         // Grow in the transverse direction(s): the corner UCT EMF reads
         // both adjacent faces of each family, including one ghost face at
@@ -7365,6 +7455,10 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
         const auto wall_rows =
             emit_wall_rows ? m_wall_conduction_diagonal->array(mfi)
                            : amrex::Array4<amrex::Real>{};
+        const auto conduction_pc =
+            emit_conduction_pc
+                ? m_conduction_pc_coefficient[conduction_pc_dim]->array(mfi)
+                : amrex::Array4<amrex::Real>{};
         const auto rho = density.const_array(mfi);
         const auto mom = momentum.const_array(mfi);
         const auto energy = electron_energy.const_array(mfi);
@@ -8865,6 +8959,9 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                 brag_bn * brag_bn / brag_b2_dir;
                     }
                     amrex::Real conductive_flux;
+                    // Harmonic cap factor of the bulk flux (1 = uncapped),
+                    // kept for the preconditioner coefficient below.
+                    amrex::Real conduction_pc_cap = 1.0_rt;
                     if (wall_face) {
                         // One-sided rectified wall drain (see the host
                         // constants): zero at/below the GATE anchor
@@ -9074,10 +9171,11 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             const amrex::Real free_streaming_flux =
                                 face_charge_density / PhysConst::q_e *
                                 PhysConst::kb * cap_ti * thermal_speed;
-                            conductive_flux /=
+                            conduction_pc_cap =
                                 1.0_rt + std::abs(conductive_flux) /
                                              (conduction_limit *
                                               free_streaming_flux);
+                            conductive_flux /= conduction_pc_cap;
                         }
                     } else {
                         conductive_flux =
@@ -9095,13 +9193,29 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             const amrex::Real free_streaming_flux =
                                 face_charge_density / PhysConst::q_e *
                                 PhysConst::kb * cap_ti * thermal_speed;
-                            conductive_flux /=
+                            conduction_pc_cap =
                                 1.0_rt + std::abs(conductive_flux) /
                                              (conduction_limit *
                                               free_streaming_flux);
+                            conductive_flux /= conduction_pc_cap;
                         }
                     }
                     flux.ion_energy += conductive_flux;
+                    if (emit_conduction_pc && !wall_face &&
+                        !z_end_wall_face && conduction_pc.contains(i, j, k)) {
+                        // Linearized normal diffusivity of the flux just
+                        // formed (see the host constants). Under
+                        // dual_energy the SAME flux is booked into both ion
+                        // registers and depends on the blended internal
+                        // energy, so the pair's Jacobian is rank one in the
+                        // register pair: the preconditioner inverts it
+                        // exactly from this one FULL coefficient plus the
+                        // cell blend weight (m_conduction_pc_blend), and
+                        // only the total slot is written here.
+                        conduction_pc(i, j, k, conduction_pc_ion_total) =
+                            conduction_pc_stage_weight * chi_ion_face /
+                            (conduction_pc_cap * conduction_pc_cap);
+                    }
                     if (chi_dual_energy) {
                         // Conduction is a purely internal-energy exchange:
                         // the auxiliary U_i channel receives the identical
@@ -9207,6 +9321,9 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                           brag_bn * brag_bn / brag_b2_dir;
                     }
                     amrex::Real conductive_flux;
+                    // Harmonic cap factor of the bulk flux (1 = uncapped),
+                    // kept for the preconditioner coefficient below.
+                    amrex::Real conduction_pc_cap = 1.0_rt;
                     if (wall_face) {
                         // One-sided rectified wall drain, gated at the
                         // reachable-set anchor (see the ion channel
@@ -9333,10 +9450,11 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             const amrex::Real free_streaming_flux =
                                 face_charge_density / PhysConst::q_e *
                                 PhysConst::kb * cap_te * thermal_speed;
-                            conductive_flux /=
+                            conduction_pc_cap =
                                 1.0_rt + std::abs(conductive_flux) /
                                              (conduction_limit *
                                               free_streaming_flux);
+                            conductive_flux /= conduction_pc_cap;
                         }
                     } else {
                         conductive_flux =
@@ -9351,13 +9469,20 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             const amrex::Real free_streaming_flux =
                                 face_charge_density / PhysConst::q_e *
                                 PhysConst::kb * cap_te * thermal_speed;
-                            conductive_flux /=
+                            conduction_pc_cap =
                                 1.0_rt + std::abs(conductive_flux) /
                                              (conduction_limit *
                                               free_streaming_flux);
+                            conductive_flux /= conduction_pc_cap;
                         }
                     }
                     flux.electron_energy += conductive_flux;
+                    if (emit_conduction_pc && !wall_face &&
+                        !z_end_wall_face && conduction_pc.contains(i, j, k)) {
+                        conduction_pc(i, j, k, conduction_pc_electron) =
+                            conduction_pc_stage_weight * chi_electron_face /
+                            (conduction_pc_cap * conduction_pc_cap);
+                    }
                 }
             }
 

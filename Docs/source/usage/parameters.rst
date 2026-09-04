@@ -797,6 +797,27 @@ Overall simulation parameters
               hlld only; resolved cells per implicit interval subtracted
               from the per-direction reference signal speed before the
               diffusion coefficient is formed.
+            - ``pc_mhd_block.conduction_block`` (``bool``, default: true):
+              recast path only; fold the solver's frozen per-face
+              conduction diffusivities
+              (:pp:param:`implicit_mhd.conduction_pc_coefficients`) into
+              the energy components of the cell-centered Helmholtz, so the
+              block inverts :math:`\mathbb I + \theta_c \Delta t\,
+              (-\nabla\cdot \chi \nabla)` -- the conduction operator the
+              Jacobian carries at frozen coefficients, Braginskii normal
+              projection, clamps, boosts and the free-streaming cap's
+              linearization included -- with the fixed
+              ``pc_mhd_block.fluid_iterations`` V-cycles. Without it the
+              energy rows are preconditioned as identities, which at the
+              production clamp (conduction number 57 in the bulk, 162 at a
+              stair-step corner) is a measured GMRES stagnation inside the
+              Newton budget.
+            - ``pc_mhd_block.conduction_threshold`` (``float``, default:
+              1.0): largest conduction number
+              :math:`\theta_c \Delta t\, \chi / h^2` over the faces below
+              which the conduction block stays at the identity (on resolved
+              conduction a fixed-cycle application of a near-identity
+              operator only injects structure GMRES must then resolve).
             - ``pc_mhd_block.max_coarsening_level`` (``int``, default: 30)
             - ``pc_mhd_block.agglomeration`` (``bool``, default: true)
             - ``pc_mhd_block.consolidation`` (``bool``, default: true)
@@ -6520,6 +6541,33 @@ Jacobian probes.
     (smooth in the state, conduction-stage/frozen-coefficient
     conventions identical to the interior operator), and the default
     keeps the legacy end faces bit-identical.
+
+.. pp:param:: implicit_mhd.conduction_pc_coefficients
+    :type: ``bool``
+    :default: ``true``
+
+    Hand the MHD block preconditioner the frozen bulk-conduction face
+    coefficients its ``pc_mhd_block.conduction_block`` inverts. The
+    conduction kernel writes, per face and per energy channel (electron,
+    ion total, ion internal), the linearized normal diffusivity it just
+    applied -- the Braginskii nn-projected (or scalar) :math:`\chi` after
+    the clamps, boosts and the halo ceiling lift, in the operator
+    convention, divided by the squared harmonic factor of the
+    free-streaming cap when the limiter is on, and multiplied by the
+    conduction-stage weight :math:`\theta_c/\theta` -- so the
+    preconditioner's plain :math:`\theta \Delta t` multiplication lands on
+    the :math:`\theta_c \Delta t\, \chi` of the Jacobian. Wall interface
+    faces and z-end pins hold zero (their drains are preconditioned by
+    :pp:param:`implicit_mhd.wall_conduction_pc_rows`). Under
+    ``dual_energy`` the same face flux is booked into both ion registers
+    and depends on their :math:`f_k` blend, so the pair's conduction
+    Jacobian is rank one in the register pair; the solver also hands over
+    the cell blend weight and the preconditioner inverts the pair exactly
+    (one Helmholtz solve on the blended right-hand side, distributed back
+    to both registers). Without a conduction channel nothing is allocated;
+    with the block engaged only the Newton iterates change, never the
+    converged state. ``0`` restores the identity energy blocks for A/B
+    measurement.
 
 .. pp:param:: implicit_mhd.wall_conduction_pc_rows
     :type: ``bool``

@@ -460,6 +460,24 @@ class ThetaImplicitMHD final : public ImplicitSolver
         return m_wall_conduction_diagonal.get();
     }
 
+    [[nodiscard]] amrex::Array<const amrex::MultiFab*, AMREX_SPACEDIM>
+    GetMHDConductionFaceCoefficientsForPC () const override
+    {
+        amrex::Array<const amrex::MultiFab*, AMREX_SPACEDIM> faces;
+        for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+        {
+            faces[direction] = m_conduction_pc_active
+                                   ? m_conduction_pc_coefficient[direction].get()
+                                   : nullptr;
+        }
+        return faces;
+    }
+
+    [[nodiscard]] const amrex::MultiFab* GetMHDConductionBlendForPC () const override
+    {
+        return m_conduction_pc_active ? m_conduction_pc_blend.get() : nullptr;
+    }
+
     inline static constexpr char MassDensityName[] = "implicit_mhd_mass_density";
     inline static constexpr char MomentumDensityName[] = "implicit_mhd_momentum_density";
     inline static constexpr char ElectronEnergyName[] = "implicit_mhd_electron_energy";
@@ -1333,6 +1351,38 @@ class ThetaImplicitMHD final : public ImplicitSolver
     static constexpr int WallConductionRowIonInternal = 2;
     static constexpr int WallConductionRowMismatch = 3;
     static constexpr int WallConductionRowComponents = 4;
+    // Bulk-conduction FACE coefficients for the MHD block preconditioner
+    // (implicit_mhd.conduction_pc_coefficients, default on; consumed by
+    // pc_mhd_block.conduction_block). The conduction kernel writes, per
+    // face and per energy channel, the linearized normal diffusivity it
+    // just applied -- the nn-projected, clamped, boosted, capped chi in
+    // the operator convention, over the squared harmonic cap factor when
+    // the free-streaming limiter is on, times the conduction-stage weight
+    // conduction_theta/theta -- so the preconditioner's Helmholtz block
+    // inverts the operator the residual actually carries at frozen
+    // coefficients. Wall interface faces and z-end pins hold zero (their
+    // drains have their own rows above). Under dual_energy the same flux
+    // is booked into both ion registers and depends on the blended
+    // internal energy, so the pair's conduction Jacobian is rank one in
+    // the register pair: the kernel writes the FULL ion diffusivity into
+    // the total slot (the internal slot stays zero) and ComputeFaceFluxes
+    // fills m_conduction_pc_blend with the live cell blend weight f_k, from
+    // which the preconditioner builds the exact pair inverse. Layout:
+    // 0 = electron, 1 = ion total, 2 = ion internal (unused).
+    //
+    // Without a conduction channel nothing is allocated and the accessor
+    // returns nullptr entries, so every conduction-free deck is
+    // bit-identical; with the block engaged only the Newton iterates
+    // change, never the converged state.
+    bool m_conduction_pc_coefficients = true;
+    bool m_conduction_pc_active = false;
+    amrex::Array<std::unique_ptr<amrex::MultiFab>, AMREX_SPACEDIM>
+        m_conduction_pc_coefficient;
+    std::unique_ptr<amrex::MultiFab> m_conduction_pc_blend;
+    static constexpr int ConductionPCElectron = 0;
+    static constexpr int ConductionPCIonTotal = 1;
+    static constexpr int ConductionPCIonInternal = 2;
+    static constexpr int ConductionPCComponents = 3;
     // Fluid-moment ghost treatment at the z_lo end ONLY (RZ, recast
     // path): empty (default) inherits z_boundary_fluid; "symmetry" makes
     // z = z_lo a mirror-symmetry plane -- the z_lo ghost rows are the

@@ -1889,6 +1889,17 @@ class MHDBlockPreconditioner(PreconditionerBase):
     resistive_iterations: int, optional
         Fixed iteration count of the resistive block (0 = automatic)
 
+    conduction_block: bool, optional
+        Fold the solver's frozen per-face conduction diffusivities into the
+        energy components of the cell-centered Helmholtz block, so the
+        preconditioner inverts the conduction operator the Jacobian
+        carries (default on). Requires implicit_mhd.conduction_pc_coefficients
+        (default on) to be handing the coefficients over.
+
+    conduction_threshold: float, optional
+        Largest conduction number theta_c dt chi/h^2 below which the
+        conduction block stays at the identity (default 1.0).
+
     resistive_threshold: float, optional
         Grid-scale resistive diffusion number below which the resistive
         block is the exact identity at zero cost
@@ -1925,6 +1936,8 @@ class MHDBlockPreconditioner(PreconditionerBase):
         banded_refreeze=None,
         resistive_refreeze=None,
         resistive_validate_assembly=None,
+        conduction_block=None,
+        conduction_threshold=None,
     ):
         self.verbose = verbose
         self.bottom_verbose = bottom_verbose
@@ -1942,6 +1955,8 @@ class MHDBlockPreconditioner(PreconditionerBase):
         self.banded_refreeze = banded_refreeze
         self.resistive_refreeze = resistive_refreeze
         self.resistive_validate_assembly = resistive_validate_assembly
+        self.conduction_block = conduction_block
+        self.conduction_threshold = conduction_threshold
 
     def preconditioner_type_initialize_inputs(self):
         # The Newton solver engages the preconditioner through
@@ -1966,6 +1981,8 @@ class MHDBlockPreconditioner(PreconditionerBase):
         pc_mhd_block.banded_refreeze = self.banded_refreeze
         pc_mhd_block.resistive_refreeze = self.resistive_refreeze
         pc_mhd_block.resistive_validate_assembly = self.resistive_validate_assembly
+        pc_mhd_block.conduction_block = self.conduction_block
+        pc_mhd_block.conduction_threshold = self.conduction_threshold
 
 
 class NonlinearSolverBase(picmistandard.base._ClassWithInit):
@@ -3183,6 +3200,15 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         covers the contour face -- the reference code's small_vis pedestal); with
         neither, it is a loud input error rather than a silent no-op.
 
+    conduction_pc_coefficients: bool, default=True
+        Hand the block preconditioner the frozen per-face conduction
+        diffusivities the conduction kernel applies (clamps, boosts, the
+        Braginskii normal projection, the free-streaming cap's
+        linearization and the conduction-stage weight included), so
+        pc_mhd_block.conduction_block can invert the conduction operator
+        the Jacobian carries. Off restores the identity energy blocks for
+        A/B measurement; the converged state never depends on it.
+
     viscous_flux_limit_factor: float, default=0 (off)
         Free-streaming cap on the VISCOUS momentum flux, the exact
         analogue of conduction_flux_limit_factor. A viscous stress is a
@@ -3448,6 +3474,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         joule_halo_taper=None,
         wall_corner_temperature_pin_rate=None,
         viscous_flux_limit_factor=None,
+        conduction_pc_coefficients=None,
         pressure_corner_width_fraction=None,
         r_open_fluid=None,
         z_boundary_fluid=None,
@@ -3579,6 +3606,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
         self.joule_halo_taper = joule_halo_taper
         self.wall_corner_temperature_pin_rate = wall_corner_temperature_pin_rate
         self.viscous_flux_limit_factor = viscous_flux_limit_factor
+        self.conduction_pc_coefficients = conduction_pc_coefficients
         self.pressure_corner_width_fraction = pressure_corner_width_fraction
         self.r_open_fluid = r_open_fluid
         self.z_boundary_fluid = z_boundary_fluid
@@ -3762,6 +3790,7 @@ class ThetaImplicitMHDEvolveScheme(picmistandard.base._ClassWithInit):
             self.wall_corner_temperature_pin_rate
         )
         implicit_mhd.viscous_flux_limit_factor = self.viscous_flux_limit_factor
+        implicit_mhd.conduction_pc_coefficients = self.conduction_pc_coefficients
         implicit_mhd.pressure_corner_width_fraction = (
             self.pressure_corner_width_fraction
         )

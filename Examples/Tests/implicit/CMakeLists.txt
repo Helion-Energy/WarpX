@@ -912,6 +912,29 @@ add_warpx_test(
     OFF  # dependency
 )
 
+# Conduction Helmholtz block of the MHD block preconditioner: the _off twin
+# runs first (unpreconditioned, physics gate of the backward-Euler variant),
+# the block run compares its converged state and Krylov work against it.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_conduction_pc_off  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_conduction_pc pc_mhd_block.conduction_block=0"  # inputs
+    "analysis_mhd_conduction_theta.py diags/diag000000 diags/diag000010 backward_euler"  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_conduction_pc  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_conduction_pc  # inputs
+    "analysis_mhd_conduction_pc.py diags/diag000010 ../test_1d_theta_implicit_mhd_conduction_pc_off/diags/diag000010 diags/diag000000"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_conduction_pc_off  # dependency
+)
+
 # density-keyed vacuum resistivity + resistive backward-Euler centering:
 # one-step transverse-mode decay matches the theta_r-discrete prediction
 # 1/(1+z) (not the trapezoidal value), with no electron heating from the
@@ -1606,6 +1629,51 @@ add_warpx_test(
     "analysis_mhd_braginskii_anisotropy.py diags/diag000000 diags/diag000010"  # analysis
     OFF  # checksum
     OFF  # dependency
+)
+
+# Conduction Helmholtz block of the MHD block preconditioner, RZ twin: the
+# _off run first (unpreconditioned), then the block run compares its
+# converged state and Krylov work against it (two ranks, anisotropic).
+add_warpx_test(
+    test_rz_theta_implicit_mhd_conduction_pc_off  # name
+    RZ  # dims
+    2  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_conduction_pc pc_mhd_block.conduction_block=0"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_conduction_pc  # name
+    RZ  # dims
+    2  # nprocs
+    inputs_test_rz_theta_implicit_mhd_conduction_pc  # inputs
+    "analysis_mhd_conduction_pc_rz.py diags/diag000004 ../test_rz_theta_implicit_mhd_conduction_pc_off/diags/diag000004 diags/diag000000"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_conduction_pc_off  # dependency
+)
+
+# Conduction block under the dual_energy ion closure: the exact rank-one
+# register-pair inverse. The _off run first, then the block run compares.
+add_warpx_test(
+    test_1d_theta_implicit_mhd_conduction_pc_dual_off  # name
+    1  # dims
+    1  # nprocs
+    "inputs_test_1d_theta_implicit_mhd_conduction_pc_dual pc_mhd_block.conduction_block=0"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_1d_theta_implicit_mhd_conduction_pc_dual  # name
+    1  # dims
+    1  # nprocs
+    inputs_test_1d_theta_implicit_mhd_conduction_pc_dual  # inputs
+    "analysis_mhd_conduction_pc_dual.py diags/diag000008 ../test_1d_theta_implicit_mhd_conduction_pc_dual_off/diags/diag000008"  # analysis
+    OFF  # checksum
+    test_1d_theta_implicit_mhd_conduction_pc_dual_off  # dependency
 )
 
 add_warpx_test(

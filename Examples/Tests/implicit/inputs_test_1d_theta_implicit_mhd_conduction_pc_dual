@@ -1,0 +1,150 @@
+#################################
+############ CONSTANTS ##########
+#################################
+
+# Conduction Helmholtz block of the MHD block preconditioner under the
+# dual_energy ion closure (pc_mhd_block.conduction_block): the
+# dual_energy_advection problem -- a uniform column advected at v0 with a
+# transverse shear, kinetic energy 500x the internal energy so the blend
+# weight sits at f_k = 1 - 1/gamma -- with a hot Gaussian pressure spot
+# and isotropic conduction on both channels, backward-Euler in the
+# conduction stage at the grid conduction number
+#   conduction_theta dt chi / dz^2 ~ 50.
+# The same conductive flux is booked into both ion registers and depends
+# on their f_k blend, so the pair's conduction Jacobian is rank one in the
+# register pair; the block inverts it exactly (one Helmholtz solve on the
+# blended right-hand side). Measured at landing: 2029 -> 368 GMRES
+# iterations over 8 steps against the _off twin, fields identical to
+# round-off; the earlier f_k-split diagonal version made this case WORSE
+# (2453), which is why this pair exists. The CTest twin overrides
+# pc_mhd_block.conduction_block = 0.
+my_constants.n0 = 1.0e20
+my_constants.rho0 = n0 * m_p
+my_constants.Ti = 1.0
+my_constants.P0 = n0 * Ti * q_e
+my_constants.gamma = 5.0/3.0
+# solver-vec normalization at the ram scale; the ACTUAL field is tiny
+my_constants.B0 = sqrt(mu0 * rho0) * 4.0e5
+my_constants.Bz0 = 1.0e-4
+my_constants.nz = 64
+my_constants.Lz = 1.0
+# two-temperature sound speed ~1.8e4 m/s: Mach ~22
+my_constants.v0 = 4.0e5
+my_constants.vt = 4.0e5
+my_constants.dt = 0.4 * (Lz / nz) / v0
+
+#################################
+####### GENERAL PARAMETERS ######
+#################################
+
+max_step = 8
+amr.n_cell = nz
+amr.max_grid_size = 64
+amr.max_level = 0
+
+geometry.dims = 1
+geometry.prob_lo = 0.0
+geometry.prob_hi = Lz
+boundary.field_lo = periodic
+boundary.field_hi = periodic
+
+#################################
+############ NUMERICS ###########
+#################################
+
+warpx.abort_on_warning_threshold = high
+warpx.verbose = 1
+warpx.const_dt = dt
+algo.maxwell_solver = hybrid
+algo.current_deposition = direct
+algo.evolve_scheme = theta_implicit_mhd
+
+implicit_evolve.nonlinear_solver = newton
+# theta = 1: the theta = 0.5 trapezoidal centering leaves the ripple's
+# marginal modes undamped (|g| -> 1) and the Newton solve wedges at
+# ~step 9 for BOTH energy-bearing closures; backward Euler damps them
+# and keeps the closure contrast the test measures.
+implicit_evolve.theta = 1.0
+
+newton.verbose = true
+newton.absolute_tolerance = 1.0e-12
+newton.relative_tolerance = 1.0e-10
+newton.max_iterations = 20
+newton.diagnostic_file = diags/newton.txt
+
+gmres.verbose_int = 0
+gmres.relative_tolerance = 1.0e-9
+gmres.max_iterations = 400
+gmres.restart_length = 200
+
+# The block preconditioner with only its conduction block engaged (no
+# signal diffusion; the 1D recast path has no wave Schur; eta = 0).
+jacobian.pc_type = pc_mhd_block
+pc_mhd_block.field_iterations = 2
+pc_mhd_block.fluid_iterations = 2
+pc_mhd_block.conduction_block = 1
+pc_mhd_block.conduction_threshold = 1.0
+pc_mhd_block.agglomeration = true
+pc_mhd_block.consolidation = true
+pc_mhd_block.max_coarsening_level = 30
+pc_mhd_block.verbose = 1
+
+#################################
+######### HYBRID OHM LAW ########
+#################################
+
+hybrid_pic_model.elec_temp = Ti
+hybrid_pic_model.n0_ref = n0
+hybrid_pic_model.gamma = gamma
+hybrid_pic_model.n_floor = 1.0e10
+hybrid_pic_model.plasma_resistivity(rho,J,t) = 0.0
+hybrid_pic_model.include_hall_term = false
+hybrid_pic_model.include_electron_pressure_term = false
+
+#################################
+######## IMPLICIT MHD STATE #####
+#################################
+
+implicit_mhd.reference_mass_density = rho0
+implicit_mhd.reference_magnetic_field = B0
+implicit_mhd.gamma_e = gamma
+implicit_mhd.gamma_i = gamma
+implicit_mhd.reference_ion_pressure = P0
+implicit_mhd.ion_closure = dual_energy
+implicit_mhd.ion_pressure_floor = 1.0e-6 * P0
+implicit_mhd.mass_density_floor = 1.0e-6 * rho0
+implicit_mhd.electron_pressure_floor = 1.0e-9 * P0
+# central requires a positive viscosity; the transverse shear makes its
+# heating real but small (~2% of the internal energy over the run), and
+# BOTH closures receive it.
+implicit_mhd.fluid_flux = central
+implicit_mhd.viscosity = 1.0
+implicit_mhd.mass_density(x,y,z) = rho0
+implicit_mhd.velocity_x(x,y,z) = "vt * sin(2*pi*z/Lz)"
+implicit_mhd.velocity_z(x,y,z) = v0
+implicit_mhd.ion_pressure(x,y,z) = P0*(1.0 + 0.3*exp(-((z-0.5*Lz)/0.08)^2))
+implicit_mhd.electron_pressure(x,y,z) = P0*(1.0 + 0.3*exp(-((z-0.5*Lz)/0.08)^2))
+# isotropic conduction on both channels, backward-Euler conduction stage;
+# conduction_theta dt chi / dz^2 = 50 at this deck's dt
+implicit_mhd.thermal_diffusivity_ion = 7.8e5
+implicit_mhd.thermal_diffusivity_electron = 7.8e5
+implicit_mhd.conduction_theta = 1.0
+
+# A dynamically negligible uniform axial field keeps the electromagnetic
+# subsystem quiescent on the run time.
+warpx.B_ext_grid_init_style = constant
+warpx.B_external_grid = 0.0 0.0 Bz0
+
+#################################
+########### DIAGNOSTICS #########
+#################################
+
+diagnostics.diags_names = diag1
+diag1.intervals = 8
+diag1.diag_type = Full
+diag1.format = plotfile
+diag1.file_prefix = diags/diag
+diag1.fields_to_plot = Bz implicit_mhd_mass_density implicit_mhd_momentum_x \
+                       implicit_mhd_momentum_z implicit_mhd_ion_energy \
+                       implicit_mhd_ion_internal_energy implicit_mhd_electron_energy
+diag1.write_species = 0

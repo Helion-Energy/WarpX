@@ -587,6 +587,55 @@ public:
     }
 
     /**
+     * \brief Per-direction FACE registers of the frozen bulk-conduction
+     * diffusivity for the MHD block preconditioner's cell-centered
+     * Helmholtz block (pc_mhd_block.conduction_block), or nullptr entries
+     * when no conduction channel is active.
+     *
+     * Component layout is the solver's energy-block order: 0 = electron
+     * energy, 1 = ion total energy, 2 = ion internal energy (dual-energy
+     * closure only; zero otherwise). Each value is the residual's own
+     * linearized normal diffusivity at that face in the OPERATOR
+     * convention [m^2/s] -- the nn-projected, clamped, boosted, capped
+     * chi the conductive face flux was formed with -- times the
+     * conduction-stage weight conduction_theta/theta, so the
+     * preconditioner's plain theta dt multiplication lands on the
+     * conduction_theta dt chi the Jacobian carries. Faces that carry no
+     * bulk conduction (wall interface faces, z-end pins, interior metal)
+     * hold zero; the wall drains are preconditioned by
+     * GetMHDWallConductionDiagonalForPC instead. Under the dual-energy ion
+     * closure the ion value is the FULL diffusivity in component 1 and
+     * component 2 is zero: the same face flux is booked into both ion
+     * registers and depends on the blended internal energy, so the pair's
+     * conduction Jacobian is rank one in the register pair, and the
+     * preconditioner inverts it exactly from this one coefficient plus the
+     * cell blend weight of GetMHDConductionBlendForPC.
+     */
+    [[nodiscard]] virtual amrex::Array<const amrex::MultiFab*, AMREX_SPACEDIM>
+    GetMHDConductionFaceCoefficientsForPC () const
+    {
+        amrex::Array<const amrex::MultiFab*, AMREX_SPACEDIM> none;
+        for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+        {
+            none[direction] = nullptr;
+        }
+        return none;
+    }
+
+    /**
+     * \brief Cell-centered dual-energy blend weight f_k (the weight of the
+     * ion total-energy register in the blended internal energy, evaluated
+     * at the live state) for the block preconditioner's exact ion-pair
+     * conduction inverse, or nullptr when the closure has no internal
+     * register or no conduction channel is active.
+     */
+    [[nodiscard]] virtual const amrex::MultiFab*
+    GetMHDConductionBlendForPC () const
+    {
+        return nullptr;
+    }
+
+    /**
      * \brief Return true when the z_lo domain face is the theta-implicit
      * MHD mirror-symmetry plane (boundary.field_lo = pmc on z paired with
      * implicit_mhd.z_lo_boundary_fluid = symmetry): the MHD block

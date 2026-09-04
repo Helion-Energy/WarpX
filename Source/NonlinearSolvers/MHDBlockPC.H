@@ -290,6 +290,42 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         RT m_signal_diffusion_scale = 0.0;
         RT m_signal_cfl_floor = 1.0;
         RT m_wave_cfl_threshold = 1.0;
+        // Bulk conduction Helmholtz block (pc_mhd_block.conduction_block,
+        // default on): the energy components of the stacked cell-centered
+        // Helmholtz take the solver's frozen per-face conduction
+        // diffusivities (ImplicitSolver::GetMHDConductionFaceCoefficientsForPC)
+        // as theta dt chi face coefficients, so the block inverts
+        //     [I + conduction_theta dt (-div chi grad)]
+        // -- the conduction operator the Jacobian carries at frozen
+        // coefficients, including the Braginskii nn projection, the clamps
+        // and boosts, and the free-streaming cap's linearization. Engaged
+        // when the largest conduction number theta_c dt chi/h^2 reaches
+        // conduction_threshold (identity below it: on resolved conduction a
+        // fixed-cycle application of a near-identity operator only injects
+        // structure GMRES must then resolve). Motivation: at the
+        // production formation clamp the conduction number is 57 (bulk)
+        // to 162 (stair-step corner) on anisotropic rows that were
+        // preconditioned as identities, and GMRES stagnated inside the
+        // Newton budget -- the "Newton made zero progress" failure class of
+        // every arm that flew the reference clamp. The offline gate
+        // (K = 2 fixed V-cycles) measured 13 Krylov iterations against 74
+        // unpreconditioned on the production analog.
+        bool m_conduction_block = true;
+        bool m_conduction_block_active = false;
+        RT m_conduction_threshold = 1.0;
+        RT m_conduction_number_max = 0.0;
+        // Dual-energy ion pair (see ApplySignalDiffusionBlocks): the same
+        // conductive flux is booked into the total and internal registers
+        // and depends on their f_k blend, so the pair's conduction Jacobian
+        // is I + (1 f_k^T) (x) theta_c dt K with (1 f_k^T) a projector
+        // (f_k + (1 - f_k) = 1); its exact inverse is one Helmholtz solve
+        // on the blended right-hand side u = f_k r_total + (1 - f_k)
+        // r_internal, d = (I + h K)^{-1} u - u, added to BOTH registers.
+        // The solver hands over f_k per cell (GetMHDConductionBlendForPC)
+        // and the FULL ion diffusivity in the total slot.
+        bool m_conduction_pair_active = false;
+        const amrex::MultiFab* m_conduction_blend = nullptr;
+        std::unique_ptr<amrex::MultiFab> m_pair_blended_rhs;
 
         int m_field_iterations = 2;
         int m_fluid_iterations = 2;
@@ -556,6 +592,10 @@ MHDBlockPC<T, Ops>::ReadParameters ()
     utils::parser::queryWithParser(pp, "signal_diffusion_scale", m_signal_diffusion_scale);
     utils::parser::queryWithParser(pp, "signal_cfl_floor", m_signal_cfl_floor);
     utils::parser::queryWithParser(pp, "wave_cfl_threshold", m_wave_cfl_threshold);
+    pp.query("conduction_block", m_conduction_block);
+    utils::parser::queryWithParser(pp, "conduction_threshold", m_conduction_threshold);
+    WARPX_ALWAYS_ASSERT_WITH_MESSAGE(m_conduction_threshold >= 0.0,
+                                     "pc_mhd_block.conduction_threshold cannot be negative");
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
         m_signal_diffusion_scale >= 0.0,
         "pc_mhd_block.signal_diffusion_scale cannot be negative");
@@ -879,11 +919,16 @@ MHDBlockPC<T, Ops>::DefineSignalDiffusion (const T& state)
         std::make_unique<amrex::MultiFab>(density.boxArray(), density.DistributionMap(), 1, 0);
     for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
     {
+        // One face coefficient per stacked component: the energy
+        // components carry the conduction block on top of the shared
+        // signal diffusion (see UpdateSignalDiffusion).
         m_signal_bcoef[direction] = std::make_unique<amrex::MultiFab>(
             amrex::convert(density.boxArray(), amrex::IntVect::TheDimensionVector(direction)),
-            density.DistributionMap(), 1, 0);
+            density.DistributionMap(), m_signal_components, 0);
     }
     m_signal_scratch =
+        std::make_unique<amrex::MultiFab>(density.boxArray(), density.DistributionMap(), 1, 0);
+    m_pair_blended_rhs =
         std::make_unique<amrex::MultiFab>(density.boxArray(), density.DistributionMap(), 1, 0);
     m_momentum_solution =
         std::make_unique<amrex::MultiFab>(density.boxArray(), density.DistributionMap(), 3, 1);
@@ -1538,12 +1583,65 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
         m_faraday_field->FillBoundary(m_geometry.periodicity());
     }
 
+    // Bulk conduction block (pc_mhd_block.conduction_block; see the
+    // members): the solver's frozen per-face conduction diffusivities,
+    // already carrying the conduction_theta/theta stage weight, folded
+    // into the energy components as theta dt chi -- exactly the
+    // conduction_theta dt chi of the Jacobian at frozen coefficients.
+    const auto conduction_faces = m_ops->GetMHDConductionFaceCoefficientsForPC();
+    m_conduction_block_active = false;
+    m_conduction_number_max = 0.0;
+    if (m_conduction_block)
+    {
+        for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+        {
+            if (conduction_faces[direction] == nullptr)
+            {
+                continue;
+            }
+            for (int channel = 0; channel < 3; ++channel)
+            {
+                if (m_wall_conduction_component[channel] < 0)
+                {
+                    continue;
+                }
+                const RT chi_max =
+                    static_cast<RT>(conduction_faces[direction]->max(channel, 0, false));
+                m_conduction_number_max = amrex::max(
+                    m_conduction_number_max,
+                    m_h * chi_max / (cell_size[direction] * cell_size[direction]));
+            }
+        }
+        m_conduction_block_active = m_conduction_number_max >= m_conduction_threshold;
+        if (m_conduction_block_active)
+        {
+            for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+            {
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    conduction_faces[direction] != nullptr,
+                    "pc_mhd_block.conduction_block: the solver handed over face "
+                    "coefficients for some but not all directions");
+            }
+        }
+    }
+    m_conduction_blend = m_ops->GetMHDConductionBlendForPC();
+    m_conduction_pair_active = m_conduction_block_active &&
+                               m_wall_conduction_component[1] >= 0 &&
+                               m_wall_conduction_component[2] >= 0 &&
+                               m_conduction_blend != nullptr;
+    const bool add_conduction = m_conduction_block_active;
+    const RT conduction_h = m_h;
+    const amrex::GpuArray<int, 3> energy_component = m_wall_conduction_component;
+    const int number_of_components = m_signal_components;
+
     m_signal_operator->setScalars(1.0, 1.0);
 #if defined(WARPX_DIM_RZ)
     // Cylindrical assembly: multiply [I + D (-lap_cyl)] u = b through by r,
     // i.e. a = r_cell, b_r = r_face D_r, b_z = r_cell D_z (and r b on the
     // right-hand side, applied when the RHS is loaded). The axis face has
     // r = 0, which enforces the regularity (zero-flux) condition there.
+    // Per stacked component: the shared signal diffusion plus, on the
+    // energy components, the conduction block's theta dt chi.
     const RT radial_lo = static_cast<RT>(m_geometry.ProbLo(0));
     const RT radial_cell_size = cell_size[0];
     const RT radial_diffusion = m_signal_diffusion[0];
@@ -1553,6 +1651,12 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
         const auto acoef = m_signal_acoef->array(mfi);
         const auto bcoef_r = m_signal_bcoef[0]->array(mfi);
         const auto bcoef_z = m_signal_bcoef[1]->array(mfi);
+        const auto conduction_r = add_conduction
+                                      ? conduction_faces[0]->const_array(mfi)
+                                      : amrex::Array4<const amrex::Real>{};
+        const auto conduction_z = add_conduction
+                                      ? conduction_faces[1]->const_array(mfi)
+                                      : amrex::Array4<const amrex::Real>{};
         amrex::ParallelFor(
             mfi.validbox(),
             [=] AMREX_GPU_DEVICE(int i, int j, int k)
@@ -1563,19 +1667,45 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
             });
         amrex::ParallelFor(
             amrex::convert(mfi.validbox(), amrex::IntVect::TheDimensionVector(0)),
-            [=] AMREX_GPU_DEVICE(int i, int j, int k)
+            number_of_components,
+            [=] AMREX_GPU_DEVICE(int i, int j, int k, int n)
             {
                 amrex::ignore_unused(j, k);
-                bcoef_r(i, j, k) =
-                    radial_diffusion * (radial_lo + static_cast<RT>(i) * radial_cell_size);
+                RT diffusion = radial_diffusion;
+                if (add_conduction)
+                {
+                    for (int channel = 0; channel < 3; ++channel)
+                    {
+                        if (energy_component[channel] == n)
+                        {
+                            diffusion +=
+                                conduction_h * static_cast<RT>(conduction_r(i, j, k, channel));
+                        }
+                    }
+                }
+                bcoef_r(i, j, k, n) =
+                    diffusion * (radial_lo + static_cast<RT>(i) * radial_cell_size);
             });
         amrex::ParallelFor(
             amrex::convert(mfi.validbox(), amrex::IntVect::TheDimensionVector(1)),
-            [=] AMREX_GPU_DEVICE(int i, int j, int k)
+            number_of_components,
+            [=] AMREX_GPU_DEVICE(int i, int j, int k, int n)
             {
                 amrex::ignore_unused(j, k);
-                bcoef_z(i, j, k) =
-                    axial_diffusion *
+                RT diffusion = axial_diffusion;
+                if (add_conduction)
+                {
+                    for (int channel = 0; channel < 3; ++channel)
+                    {
+                        if (energy_component[channel] == n)
+                        {
+                            diffusion +=
+                                conduction_h * static_cast<RT>(conduction_z(i, j, k, channel));
+                        }
+                    }
+                }
+                bcoef_z(i, j, k, n) =
+                    diffusion *
                     (radial_lo + (static_cast<RT>(i) + RT(0.5)) * radial_cell_size);
             });
     }
@@ -1584,7 +1714,33 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
     m_signal_operator->setACoeffs(0, 1.0);
     for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
     {
-        m_signal_bcoef[direction]->setVal(m_signal_diffusion[direction]);
+        const RT signal_diffusion = m_signal_diffusion[direction];
+        for (amrex::MFIter mfi(*m_signal_bcoef[direction]); mfi.isValid(); ++mfi)
+        {
+            const auto bcoef = m_signal_bcoef[direction]->array(mfi);
+            const auto conduction =
+                add_conduction ? conduction_faces[direction]->const_array(mfi)
+                               : amrex::Array4<const amrex::Real>{};
+            amrex::ParallelFor(
+                mfi.validbox(), number_of_components,
+                [=] AMREX_GPU_DEVICE(int i, int j, int k, int n)
+                {
+                    RT diffusion = signal_diffusion;
+                    if (add_conduction)
+                    {
+                        for (int channel = 0; channel < 3; ++channel)
+                        {
+                            if (energy_component[channel] == n)
+                            {
+                                diffusion +=
+                                    conduction_h *
+                                    static_cast<RT>(conduction(i, j, k, channel));
+                            }
+                        }
+                    }
+                    bcoef(i, j, k, n) = diffusion;
+                });
+        }
     }
 #endif
     amrex::Array<amrex::MultiFab const*, AMREX_SPACEDIM> face_coefficients;
@@ -1592,8 +1748,7 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
     {
         face_coefficients[direction] = m_signal_bcoef[direction].get();
     }
-    // Single-component coefficients broadcast across the stacked block
-    // components.
+    // Per-component face coefficients (one per stacked block component).
     m_signal_operator->setBCoeffs(0, face_coefficients);
 
     if (m_verbose)
@@ -1613,6 +1768,10 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
             amrex::Print() << m_signal_diffusion[direction]
                            << (direction + 1 < AMREX_SPACEDIM ? ", " : ")");
         }
+        amrex::Print() << ", conduction block = "
+                       << (m_conduction_block_active ? "active" : "inactive")
+                       << " (N_chi = " << m_conduction_number_max
+                       << (m_conduction_pair_active ? ", dual-energy pair)" : ")");
         amrex::Print() << ", Faraday = " << (m_faraday_active ? "active" : "inactive")
                        << ", wave Schur = " << (m_wave_schur_active ? "active" : "inactive")
                        << ", resistive = " << (m_resistive_active ? "active" : "inactive")
@@ -1658,6 +1817,32 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
     }
     WARPX_ALWAYS_ASSERT_WITH_MESSAGE(stacked_component == m_signal_components,
                                      "pc_mhd_block state block layout changed after Define()");
+
+    // Dual-energy ion pair (see the members): fold the two register
+    // right-hand sides into the blended one on the total slot, keep a copy
+    // for the distribution after the solve, and zero the internal slot.
+    if (m_conduction_pair_active)
+    {
+        const int total_component = m_wall_conduction_component[1];
+        const int internal_component = m_wall_conduction_component[2];
+        for (amrex::MFIter mfi(*m_signal_rhs); mfi.isValid(); ++mfi)
+        {
+            const auto signal_rhs = m_signal_rhs->array(mfi);
+            const auto blended = m_pair_blended_rhs->array(mfi);
+            const auto blend = m_conduction_blend->const_array(mfi);
+            amrex::ParallelFor(
+                mfi.validbox(),
+                [=] AMREX_GPU_DEVICE(int i, int j, int k)
+                {
+                    const RT weight = static_cast<RT>(blend(i, j, k));
+                    const RT u = weight * signal_rhs(i, j, k, total_component) +
+                                 (RT(1.0) - weight) * signal_rhs(i, j, k, internal_component);
+                    blended(i, j, k) = u;
+                    signal_rhs(i, j, k, total_component) = u;
+                    signal_rhs(i, j, k, internal_component) = RT(0.0);
+                });
+        }
+    }
 
     // Rigid-conductor fluid freeze of the shaped wall
     // (implicit_mhd.wall_thermal_bc, every wall_model including
@@ -1705,7 +1890,7 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
         }
     }
 
-    if (m_signal_diffusion_active)
+    if (m_signal_diffusion_active || m_conduction_block_active)
     {
 #if defined(WARPX_DIM_RZ)
         // The cylindrical operator assembly multiplied the equation by r.
@@ -1736,6 +1921,34 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
         // exact rather than V-cycle-approximate).
         amrex::MultiFab::Copy(*m_signal_solution, *m_signal_rhs, 0, 0, m_signal_components,
                               0);
+    }
+
+    // Dual-energy ion pair, second half (see the members): with v the
+    // Helmholtz solution of the blended right-hand side u, the exact pair
+    // inverse is d = v - u added to both registers' own right-hand sides.
+    if (m_conduction_pair_active)
+    {
+        const int total_component = m_wall_conduction_component[1];
+        const int internal_component = m_wall_conduction_component[2];
+        const amrex::MultiFab& total_rhs = rhs.getMultiFabBlock(IonEnergyName, 0);
+        const amrex::MultiFab& internal_rhs = rhs.getMultiFabBlock(IonInternalEnergyName, 0);
+        for (amrex::MFIter mfi(*m_signal_solution); mfi.isValid(); ++mfi)
+        {
+            const auto signal_solution = m_signal_solution->array(mfi);
+            const auto blended = m_pair_blended_rhs->const_array(mfi);
+            const auto r_total = total_rhs.const_array(mfi);
+            const auto r_internal = internal_rhs.const_array(mfi);
+            amrex::ParallelFor(
+                mfi.validbox(),
+                [=] AMREX_GPU_DEVICE(int i, int j, int k)
+                {
+                    const RT delta = signal_solution(i, j, k, total_component) - blended(i, j, k);
+                    signal_solution(i, j, k, total_component) =
+                        static_cast<RT>(r_total(i, j, k)) + delta;
+                    signal_solution(i, j, k, internal_component) =
+                        static_cast<RT>(r_internal(i, j, k)) + delta;
+                });
+        }
     }
 
 #if defined(WARPX_DIM_RZ)
