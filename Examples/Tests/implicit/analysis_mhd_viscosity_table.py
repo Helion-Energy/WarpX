@@ -220,11 +220,16 @@ if mode == "identity":
                 f"{name} at step {step} differs from the scalar-viscosity "
                 "anchor: the one-entry table is not bit-identical"
             )
-    with open("diags/newton.txt") as handle:
-        staged_history = handle.read()
-    with open(f"{baseline_directory}/diags/newton.txt") as handle:
-        anchor_history = handle.read()
-    assert staged_history == anchor_history, (
+    # newton.txt APPENDS across reruns in the same test directory, and the
+    # anchor and this twin are not necessarily rerun the same number of
+    # times: compare the LAST run's rows (one per step) of each.
+    staged_history = np.atleast_2d(np.loadtxt("diags/newton.txt"))[-n_steps:]
+    anchor_history = np.atleast_2d(
+        np.loadtxt(f"{baseline_directory}/diags/newton.txt")
+    )[-n_steps:]
+    assert staged_history.shape == anchor_history.shape == (n_steps, 9)
+    assert staged_history[0, 0] == anchor_history[0, 0] == 1
+    assert np.array_equal(staged_history, anchor_history), (
         "the Newton iteration history differs from the scalar anchor"
     )
     print(
