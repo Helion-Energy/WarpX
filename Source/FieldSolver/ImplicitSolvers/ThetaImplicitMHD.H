@@ -460,6 +460,11 @@ class ThetaImplicitMHD final : public ImplicitSolver
         return m_wall_conduction_diagonal.get();
     }
 
+    [[nodiscard]] amrex::Array<bool, 2> GetMHDZEndConductionForPC () const override
+    {
+        return {m_z_wall_conduction && !m_z_lo_pmc, m_z_wall_conduction};
+    }
+
     [[nodiscard]] amrex::Array<const amrex::MultiFab*, AMREX_SPACEDIM>
     GetMHDConductionFaceCoefficientsForPC () const override
     {
@@ -1344,13 +1349,20 @@ class ThetaImplicitMHD final : public ImplicitSolver
     bool m_wall_conduction_rows_active = false;
     std::unique_ptr<amrex::MultiFab> m_wall_conduction_diagonal;
     // Components of m_wall_conduction_diagonal: the three energy channels
-    // in the solver's block order, plus the validation scratch that
-    // wall_conduction_validate_rows reduces.
+    // in the solver's block order (shaped-wall interface drains PLUS z-end
+    // exchanges, summed per cell), the validation scratch that
+    // wall_conduction_validate_rows reduces, and the z-end part alone in
+    // the same channel order (the block preconditioner subtracts it when
+    // its Helmholtz owns the z-end exchange, see
+    // GetMHDZEndConductionForPC).
     static constexpr int WallConductionRowElectron = 0;
     static constexpr int WallConductionRowIonTotal = 1;
     static constexpr int WallConductionRowIonInternal = 2;
     static constexpr int WallConductionRowMismatch = 3;
-    static constexpr int WallConductionRowComponents = 4;
+    static constexpr int WallConductionRowZEndElectron = 4;
+    static constexpr int WallConductionRowZEndIonTotal = 5;
+    static constexpr int WallConductionRowZEndIonInternal = 6;
+    static constexpr int WallConductionRowComponents = 7;
     // Bulk-conduction FACE coefficients for the MHD block preconditioner
     // (implicit_mhd.conduction_pc_coefficients, default on; consumed by
     // pc_mhd_block.conduction_block). The conduction kernel writes, per

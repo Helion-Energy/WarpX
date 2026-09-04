@@ -347,6 +347,11 @@ class MHDBlockPC : public Preconditioner<T, Ops>
         // Define; consumed by the wall-conduction row scaling in
         // ApplySignalDiffusionBlocks.
         amrex::GpuArray<int, 3> m_wall_conduction_component = {-1, -1, -1};
+        // Conductive z-end exchange (ImplicitSolver::GetMHDZEndConductionForPC):
+        // the energy components take a homogeneous Dirichlet boundary at
+        // those ends, and the conduction block's end-face coefficient there
+        // is then the exact half-cell exchange (see UpdateSignalDiffusion).
+        amrex::Array<bool, 2> m_z_end_conduction = {false, false};
 
         // Resistive-block inner solver: "chebyshev" (the portable
         // fixed-count iteration) or "direct" (exact sparse
@@ -947,15 +952,42 @@ MHDBlockPC<T, Ops>::DefineSignalDiffusion (const T& state)
         amrex::Vector<amrex::Array<amrex::LinOpBCType, AMREX_SPACEDIM>> high_bc;
         low_bc.reserve(m_signal_components);
         high_bc.reserve(m_signal_components);
+        // Energy components at a conductive z end (implicit_mhd.
+        // z_wall_conduction): the residual's end face is a half-cell
+        // Dirichlet exchange 2 chi rho (e - e_wall)/dz, whose
+        // linearization at the frozen bath is the pure diagonal
+        // 2 theta_c dt chi/dz^2 on the end cell. A homogeneous Dirichlet
+        // LinOp boundary with the end-face coefficient theta dt chi w
+        // (emitted by the solver into the conduction face register)
+        // reproduces exactly that: AMReX's cell-centered Dirichlet stencil
+        // puts the boundary value on the face, i.e. 2 b/dz^2 on the end
+        // cell. With a zero end-face coefficient (block inactive, no
+        // conduction channel) the Dirichlet face is inert -- identical to
+        // the Neumann default -- so nothing else changes.
+        m_z_end_conduction = m_ops->GetMHDZEndConductionForPC();
+        constexpr int axial_direction = AMREX_SPACEDIM - 1;
         for (const auto& spec : state.getMultiFabBlockSpecs())
         {
             const bool is_momentum = spec.name == MomentumDensityName;
+            const bool is_energy = spec.name == ElectronEnergyName ||
+                                   spec.name == IonEnergyName ||
+                                   spec.name == IonInternalEnergyName;
             const int block_components = state.getMultiFabBlock(spec.name, 0).nComp();
             for (int component = 0; component < block_components; ++component)
             {
                 const int momentum_component = is_momentum ? component : -1;
-                low_bc.push_back(GetCellCenteredLinOpBC(false, momentum_component));
-                high_bc.push_back(GetCellCenteredLinOpBC(true, momentum_component));
+                auto lo = GetCellCenteredLinOpBC(false, momentum_component);
+                auto hi = GetCellCenteredLinOpBC(true, momentum_component);
+                if (is_energy && m_z_end_conduction[0])
+                {
+                    lo[axial_direction] = amrex::LinOpBCType::Dirichlet;
+                }
+                if (is_energy && m_z_end_conduction[1])
+                {
+                    hi[axial_direction] = amrex::LinOpBCType::Dirichlet;
+                }
+                low_bc.push_back(lo);
+                high_bc.push_back(hi);
             }
         }
         m_signal_operator->setDomainBC(low_bc, high_bc);
@@ -1612,6 +1644,30 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
                     m_h * chi_max / (cell_size[direction] * cell_size[direction]));
             }
         }
+        // A negative face coefficient would drive the maximum, hence the
+        // activation, to zero and silently turn the block into the
+        // identity; the solver guarantees chi_nn >= 0 (chi_par >= chi_perp,
+        // squared cap, positive stage weight), so this is an assertion.
+        for (int direction = 0; direction < AMREX_SPACEDIM; ++direction)
+        {
+            if (conduction_faces[direction] == nullptr)
+            {
+                continue;
+            }
+            for (int channel = 0; channel < 3; ++channel)
+            {
+                if (m_wall_conduction_component[channel] < 0)
+                {
+                    continue;
+                }
+                const RT minimum =
+                    static_cast<RT>(conduction_faces[direction]->min(channel, 0, false));
+                WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+                    minimum >= RT(0.0),
+                    "pc_mhd_block: the solver emitted a negative conduction face "
+                    "coefficient");
+            }
+        }
         m_conduction_block_active = m_conduction_number_max >= m_conduction_threshold;
         if (m_conduction_block_active)
         {
@@ -1635,6 +1691,17 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
     const int number_of_components = m_signal_components;
 
     m_signal_operator->setScalars(1.0, 1.0);
+    // Conductive z-end faces (Dirichlet faces of the energy components, see
+    // DefineSignalDiffusion): they carry the conduction block's end-face
+    // coefficient ALONE. The shared signal diffusion is a Neumann-face
+    // quantity there (a zero-flux face in the residual's advective
+    // operator) and must not enter a Dirichlet face; with the block
+    // inactive the coefficient is zero and the face is inert.
+    constexpr int axial_direction = AMREX_SPACEDIM - 1;
+    const bool z_end_lo_dirichlet = m_z_end_conduction[0];
+    const bool z_end_hi_dirichlet = m_z_end_conduction[1];
+    const int z_end_face_lo = m_geometry.Domain().smallEnd(axial_direction);
+    const int z_end_face_hi = m_geometry.Domain().bigEnd(axial_direction) + 1;
 #if defined(WARPX_DIM_RZ)
     // Cylindrical assembly: multiply [I + D (-lap_cyl)] u = b through by r,
     // i.e. a = r_cell, b_r = r_face D_r, b_z = r_cell D_z (and r b on the
@@ -1691,19 +1758,26 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
             number_of_components,
             [=] AMREX_GPU_DEVICE(int i, int j, int k, int n)
             {
-                amrex::ignore_unused(j, k);
+                amrex::ignore_unused(k);
                 RT diffusion = axial_diffusion;
-                if (add_conduction)
+                RT conduction = RT(0.0);
+                bool energy_row = false;
+                for (int channel = 0; channel < 3; ++channel)
                 {
-                    for (int channel = 0; channel < 3; ++channel)
+                    if (energy_component[channel] == n)
                     {
-                        if (energy_component[channel] == n)
+                        energy_row = true;
+                        if (add_conduction)
                         {
-                            diffusion +=
+                            conduction =
                                 conduction_h * static_cast<RT>(conduction_z(i, j, k, channel));
                         }
                     }
                 }
+                const bool z_end_dirichlet_face =
+                    energy_row && ((z_end_lo_dirichlet && j == z_end_face_lo) ||
+                                   (z_end_hi_dirichlet && j == z_end_face_hi));
+                diffusion = z_end_dirichlet_face ? conduction : diffusion + conduction;
                 bcoef_z(i, j, k, n) =
                     diffusion *
                     (radial_lo + (static_cast<RT>(i) + RT(0.5)) * radial_cell_size);
@@ -1721,24 +1795,35 @@ MHDBlockPC<T, Ops>::UpdateSignalDiffusion (const T& state)
             const auto conduction =
                 add_conduction ? conduction_faces[direction]->const_array(mfi)
                                : amrex::Array4<const amrex::Real>{};
+            const bool axial = (direction == axial_direction);
             amrex::ParallelFor(
                 mfi.validbox(), number_of_components,
                 [=] AMREX_GPU_DEVICE(int i, int j, int k, int n)
                 {
                     RT diffusion = signal_diffusion;
-                    if (add_conduction)
+                    RT conduction_value = RT(0.0);
+                    bool energy_row = false;
+                    for (int channel = 0; channel < 3; ++channel)
                     {
-                        for (int channel = 0; channel < 3; ++channel)
+                        if (energy_component[channel] == n)
                         {
-                            if (energy_component[channel] == n)
+                            energy_row = true;
+                            if (add_conduction)
                             {
-                                diffusion +=
+                                conduction_value =
                                     conduction_h *
                                     static_cast<RT>(conduction(i, j, k, channel));
                             }
                         }
                     }
-                    bcoef(i, j, k, n) = diffusion;
+                    const int axial_face = AMREX_D_PICK(i, j, k);
+                    const bool z_end_dirichlet_face =
+                        axial && energy_row &&
+                        ((z_end_lo_dirichlet && axial_face == z_end_face_lo) ||
+                         (z_end_hi_dirichlet && axial_face == z_end_face_hi));
+                    bcoef(i, j, k, n) = z_end_dirichlet_face
+                                            ? conduction_value
+                                            : diffusion + conduction_value;
                 });
         }
     }
@@ -1991,11 +2076,26 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
     // D == 0 (nullptr register: every deck without a conductive wall
     // term, and wall_conduction_pc_rows = 0) leaves the solution
     // bit-identical.
+    //
+    // When the conduction block is active its Helmholtz already owns the
+    // z-end exchange (Dirichlet end faces with the emitted end-face
+    // coefficient, see DefineSignalDiffusion), so only the shaped-wall
+    // interface remainder is composed here: the register's components
+    // 4-6 hold the z-end part alone and are subtracted from the summed
+    // rows. Composing the full row after a block that is no longer the
+    // identity on it over-damps the end cells by (1 + hK)(1 + hG)/(1 + hK
+    // + hG), which measured worse than no block at all.
     const amrex::MultiFab* const wall_conduction =
         m_ops->GetMHDWallConductionDiagonalForPC();
     if (wall_conduction != nullptr)
     {
         const RT wall_conduction_h = m_h;
+        const bool subtract_z_end =
+            m_conduction_block_active && (m_z_end_conduction[0] || m_z_end_conduction[1]);
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            !subtract_z_end || wall_conduction->nComp() >= 7,
+            "pc_mhd_block: the wall-conduction register lacks the z-end components");
+        constexpr int z_end_channel_offset = 4;
         for (int channel = 0; channel < 3; ++channel)
         {
             const int component = m_wall_conduction_component[channel];
@@ -2003,6 +2103,7 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
             {
                 continue;
             }
+            const int z_end_channel = channel + z_end_channel_offset;
             for (amrex::MFIter mfi(*m_signal_solution); mfi.isValid(); ++mfi)
             {
                 const auto signal_solution = m_signal_solution->array(mfi);
@@ -2011,10 +2112,13 @@ MHDBlockPC<T, Ops>::ApplySignalDiffusionBlocks (T& solution, const T& rhs)
                     mfi.validbox(),
                     [=] AMREX_GPU_DEVICE(int i, int j, int k)
                     {
+                        RT row = static_cast<RT>(diagonal(i, j, k, channel));
+                        if (subtract_z_end)
+                        {
+                            row -= static_cast<RT>(diagonal(i, j, k, z_end_channel));
+                        }
                         signal_solution(i, j, k, component) /=
-                            RT(1.0) +
-                            wall_conduction_h *
-                                static_cast<RT>(diagonal(i, j, k, channel));
+                            RT(1.0) + wall_conduction_h * row;
                     });
             }
         }

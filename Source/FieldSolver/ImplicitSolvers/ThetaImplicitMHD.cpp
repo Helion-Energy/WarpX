@@ -7413,18 +7413,14 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     // NoSlipWidth(); no cell's momentum is constrained any more, so that
     // premise is gone.
     //
-    // The guard SURVIVED, at width 1, for a different reason (resolved
-    // 2026-09-02): reconstruct_face_states() writes `left`/`right` IN
-    // PLACE and the viscous block used to read those same states, so
-    // its no-slip antisymmetric image (right_velocity = -left_velocity)
-    // was only the half-cell wall gradient (0 - u_c)/(dn/2) when the
-    // reconstruction was suppressed at that face. The diffusive legs
-    // now difference the cell-centred `cell_left`/`cell_right` copies
-    // taken before the reconstruction (see the kernel), everywhere,
-    // so tau_w no longer depends on this guard. It is kept, unchanged,
-    // because it also selects the ADVECTIVE flux at the wall-adjacent
-    // face (donor cell there); removing it is a separate decision with
-    // its own wall-test consequences.
+    // The guard survives at width 1. Interface faces themselves are
+    // donor cell by the mask check above, so the wall friction tau_w
+    // (built one face in from the no-slip antisymmetric image) never
+    // depended on it, and the diffusive legs now difference the
+    // cell-centred `cell_left`/`cell_right` copies (see the kernel) in
+    // any case. What the guard still does is select donor cell for the
+    // ADVECTIVE flux at the face one row inside the contour; removing
+    // it is a separate decision with its own wall-test consequences.
     const bool reconstruction_no_slip =
         reconstruct_faces && m_wall_mask.NoSlip();
     const int reconstruction_no_slip_width = 1;
@@ -7726,6 +7722,12 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
     const int wall_row_electron = WallConductionRowElectron;
     const int wall_row_ion_total = WallConductionRowIonTotal;
     const int wall_row_ion_internal = WallConductionRowIonInternal;
+    // z-end exchanges are ALSO recorded alone (see the register layout):
+    // the block preconditioner subtracts them from the summed rows when
+    // its Helmholtz owns the z-end exchange through the emitted end-face
+    // coefficient, and composes the full sum otherwise.
+    const int wall_row_zend_offset =
+        WallConductionRowZEndElectron - WallConductionRowElectron;
     const int wall_row_mismatch = WallConductionRowMismatch;
     // Bulk-conduction face coefficients for the block preconditioner (see
     // the members and ComputeFaceFluxes): written per face by the same
@@ -7841,8 +7843,11 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
             // temperatures and field direction from the same cell
             // values. Donor cell reconstruction leaves left/right
             // untouched, so these copies are then bit-identical to them.
-            const auto cell_left = left;
-            const auto cell_right = right;
+            // At a shaped-wall interface face the masked side's copy is
+            // refreshed below with the absorb image, so the diffusive legs
+            // see the same wall image the advective fan does.
+            auto cell_left = left;
+            auto cell_right = right;
 
             if (reconstruct_faces) {
                 // Four-cell normal stencil (far_left, left | right,
@@ -7975,6 +7980,18 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                 image.fast_wave_speed =
                     std::abs(image.ion_velocity[normal]) +
                     image.fast_speed;
+            }
+            if (wall_interface) {
+                // The masked side of an interface face is the absorb image
+                // just built (not a fluid cell): the diffusive legs must
+                // difference against it, exactly as before the cell-state
+                // copies existed (interface faces are donor cell by the
+                // mask check, so the interior side is unchanged).
+                if (wall_right_masked) {
+                    cell_right = right;
+                } else {
+                    cell_left = left;
+                }
             }
 
             amrex::Real bn_face = bn_staggered(i, j, k);
@@ -8819,7 +8836,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                         // chi_nn projection of the reservoir exchange
                         // sees the interior field geometry only.
                         const auto& interior_side =
-                            z_end_hi_face ? left : right;
+                            z_end_hi_face ? cell_left : cell_right;
                         bt1 = interior_side.magnetic[tangent1];
                         bt2 = interior_side.magnetic[tangent2];
                     }
@@ -9385,7 +9402,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             const int rjc = wall_left_masked ? j : jl;
                             const int rkc = wall_left_masked ? k : kl;
                             const auto& interior =
-                                wall_left_masked ? right : left;
+                                wall_left_masked ? cell_right : cell_left;
                             amrex::Real kinetic_fraction = 1.0_rt;
                             if (parameters.dual_energy_closure) {
                                 amrex::Real kinetic = 0.0_rt;
@@ -9449,7 +9466,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             const int rjc = z_end_hi_face ? jl : j;
                             const int rkc = z_end_hi_face ? kl : k;
                             const auto& interior =
-                                z_end_hi_face ? left : right;
+                                z_end_hi_face ? cell_left : cell_right;
                             amrex::Real kinetic_fraction = 1.0_rt;
                             if (parameters.dual_energy_closure) {
                                 amrex::Real kinetic = 0.0_rt;
@@ -9471,13 +9488,36 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                                     (1.0_rt - kinetic_fraction) *
                                         conductance,
                                     interior.safe_density);
+                                emit_wall_row(
+                                    wall_row_ion_internal + wall_row_zend_offset,
+                                    ric, rjc, rkc,
+                                    (1.0_rt - kinetic_fraction) *
+                                        conductance,
+                                    interior.safe_density);
                             }
                             emit_wall_row(wall_row_ion_total, ric, rjc, rkc,
+                                          kinetic_fraction * conductance,
+                                          interior.safe_density);
+                            emit_wall_row(wall_row_ion_total + wall_row_zend_offset,
+                                          ric, rjc, rkc,
                                           kinetic_fraction * conductance,
                                           interior.safe_density);
                             validate_wall_row(ric, rjc, rkc, conductance,
                                               drain, interior_e_spec,
                                               z_wall_bath_e_spec_ion);
+                        }
+                        // Conduction-block END-FACE coefficient: with the
+                        // preconditioner's homogeneous Dirichlet end
+                        // boundary on the energy rows this reproduces the
+                        // exchange's exact linearization 2 chi w/dz^2 on
+                        // the end cell (the bath is frozen, so the row is
+                        // a pure diagonal). The full ion value goes to the
+                        // total slot; the pair inverse blends it.
+                        if (emit_conduction_pc &&
+                            conduction_pc.contains(i, j, k)) {
+                            conduction_pc(i, j, k, conduction_pc_ion_total) =
+                                conduction_pc_stage_weight * chi_ion_face *
+                                corner_weight;
                         }
                         conductive_flux = z_end_hi_face ? drain : -drain;
                     } else if (braginskii) {
@@ -9739,7 +9779,7 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             const int rjc = wall_left_masked ? j : jl;
                             const int rkc = wall_left_masked ? k : kl;
                             const auto& interior =
-                                wall_left_masked ? right : left;
+                                wall_left_masked ? cell_right : cell_left;
                             emit_wall_row(wall_row_electron, ric, rjc, rkc,
                                           conductance,
                                           interior.safe_density);
@@ -9769,14 +9809,25 @@ void ThetaImplicitMHD::ComputeDirectionalFaceFluxes (
                             const int rjc = z_end_hi_face ? jl : j;
                             const int rkc = z_end_hi_face ? kl : k;
                             const auto& interior =
-                                z_end_hi_face ? left : right;
+                                z_end_hi_face ? cell_left : cell_right;
                             emit_wall_row(wall_row_electron, ric, rjc, rkc,
                                           conductance,
+                                          interior.safe_density);
+                            emit_wall_row(wall_row_electron + wall_row_zend_offset,
+                                          ric, rjc, rkc, conductance,
                                           interior.safe_density);
                             validate_wall_row(
                                 ric, rjc, rkc, conductance, drain,
                                 interior_e_spec,
                                 z_wall_bath_e_spec_electron);
+                        }
+                        // Conduction-block end-face coefficient (see the
+                        // ion channel).
+                        if (emit_conduction_pc &&
+                            conduction_pc.contains(i, j, k)) {
+                            conduction_pc(i, j, k, conduction_pc_electron) =
+                                conduction_pc_stage_weight *
+                                chi_electron_face * corner_weight;
                         }
                         conductive_flux = z_end_hi_face ? drain : -drain;
                     } else if (braginskii) {

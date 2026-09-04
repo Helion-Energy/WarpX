@@ -574,7 +574,12 @@ public:
      *
      * Component layout is the solver's energy-block order: 0 = electron
      * energy, 1 = ion total energy, 2 = ion internal energy (dual-energy
-     * closure only; zero otherwise).
+     * closure only; zero otherwise), each the SUM of the shaped-wall
+     * interface drains and the z-end exchanges of the cell; components
+     * 4-6 repeat the z-end part alone, so that a preconditioner whose
+     * Helmholtz block owns the z-end exchange (GetMHDZEndConductionForPC)
+     * can compose only the interface remainder. Component 3 is the
+     * solver's own validation scratch.
      *
      * The nullptr default -- and the nullptr returned whenever neither
      * wall term is active -- keeps every other scheme and every deck
@@ -600,10 +605,13 @@ public:
      * chi the conductive face flux was formed with -- times the
      * conduction-stage weight conduction_theta/theta, so the
      * preconditioner's plain theta dt multiplication lands on the
-     * conduction_theta dt chi the Jacobian carries. Faces that carry no
-     * bulk conduction (wall interface faces, z-end pins, interior metal)
-     * hold zero; the wall drains are preconditioned by
-     * GetMHDWallConductionDiagonalForPC instead. Under the dual-energy ion
+     * conduction_theta dt chi the Jacobian carries. Conductive z-end faces
+     * (implicit_mhd.z_wall_conduction) hold the exchange's chi times the
+     * cell's corner weight, which the preconditioner's Dirichlet end
+     * boundary (GetMHDZEndConductionForPC) turns into the exact half-cell
+     * exchange diagonal. Faces that carry no conduction at all (shaped-wall
+     * interface faces, interior metal) hold zero; the shaped-wall drains
+     * are preconditioned by GetMHDWallConductionDiagonalForPC instead. Under the dual-energy ion
      * closure the ion value is the FULL diffusivity in component 1 and
      * component 2 is zero: the same face flux is booked into both ion
      * registers and depends on the blended internal energy, so the pair's
@@ -633,6 +641,23 @@ public:
     GetMHDConductionBlendForPC () const
     {
         return nullptr;
+    }
+
+    /**
+     * \brief Whether the z_lo (index 0) and z_hi (index 1) domain end faces
+     * carry the theta-implicit MHD conductive z-end exchange
+     * (implicit_mhd.z_wall_conduction): a half-cell Dirichlet exchange of
+     * the energy densities against the z-wall reservoir. The block
+     * preconditioner then gives its energy components a homogeneous
+     * Dirichlet boundary at those ends, so that the end-face conduction
+     * coefficient of GetMHDConductionFaceCoefficientsForPC reproduces the
+     * linearized exchange 2 chi/dz^2 on the end cell exactly. With a zero
+     * end-face coefficient (block inactive, or no conduction channel) the
+     * Dirichlet boundary is inert, i.e. identical to the Neumann default.
+     */
+    [[nodiscard]] virtual amrex::Array<bool, 2> GetMHDZEndConductionForPC () const
+    {
+        return {false, false};
     }
 
     /**

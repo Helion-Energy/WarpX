@@ -2679,6 +2679,32 @@ add_warpx_test(
     test_rz_theta_implicit_mhd_z_wall_conduction_off  # dependency
 )
 
+# The conduction block with the conductive z-end exchange, at 200x the
+# resolved step (bulk conduction number 100, end-face exchange diagonal
+# 200): the preconditioner must own the end exchange through its Dirichlet
+# end boundary and the emitted end-face coefficient. Before that treatment
+# the block made this deck worse than no block (301 vs 128 GMRES). The _off
+# twin is the base (rows only) behaviour.
+add_warpx_test(
+    test_rz_theta_implicit_mhd_z_wall_conduction_pc_block_off  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_z_wall_conduction my_constants.dt=100.0*dz^2/chi_op max_step=4 jacobian.pc_type=pc_mhd_block implicit_mhd.evolve_ion_fluid=false implicit_mhd.ion_closure=barotropic implicit_mhd.reference_ion_pressure=0.0 gmres.max_iterations=3000 gmres.restart_length=300 newton.max_iterations=40 diag1.intervals=4 pc_mhd_block.conduction_block=0"  # inputs
+    OFF  # analysis
+    OFF  # checksum
+    OFF  # dependency
+)
+
+add_warpx_test(
+    test_rz_theta_implicit_mhd_z_wall_conduction_pc_block  # name
+    RZ  # dims
+    1  # nprocs
+    "inputs_test_rz_theta_implicit_mhd_z_wall_conduction my_constants.dt=100.0*dz^2/chi_op max_step=4 jacobian.pc_type=pc_mhd_block implicit_mhd.evolve_ion_fluid=false implicit_mhd.ion_closure=barotropic implicit_mhd.reference_ion_pressure=0.0 gmres.max_iterations=3000 gmres.restart_length=300 newton.max_iterations=40 diag1.intervals=4 pc_mhd_block.conduction_block=1"  # inputs
+    "analysis_mhd_conduction_pc_zwall.py diags/diag000004 ../test_rz_theta_implicit_mhd_z_wall_conduction_pc_block_off/diags/diag000004"  # analysis
+    OFF  # checksum
+    test_rz_theta_implicit_mhd_z_wall_conduction_pc_block_off  # dependency
+)
+
 # PRECONDITIONER ROWS for the wall thermal terms, ROW CORRECTNESS 2/2 --
 # the z-end conductive exchange. The same saturated-clamp uniform column
 # as the pair above, whose end-face Dirichlet rate the deck fixes at

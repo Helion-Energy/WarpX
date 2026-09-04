@@ -811,7 +811,21 @@ Overall simulation parameters
               energy rows are preconditioned as identities, which at the
               production clamp (conduction number 57 in the bulk, 162 at a
               stair-step corner) is a measured GMRES stagnation inside the
-              Newton budget.
+              Newton budget. With :pp:param:`implicit_mhd.z_wall_conduction`
+              the energy components take a homogeneous Dirichlet boundary
+              at the conducting z ends and the solver emits the exchange's
+              end-face coefficient, so the block owns the half-cell end
+              exchange exactly and the z-end Jacobi rows of
+              :pp:param:`implicit_mhd.wall_conduction_pc_rows` are not
+              composed on top of it (composing them after a non-identity
+              block over-damped the end cells and measured worse than no
+              block); the shaped-wall interface drains keep their rows.
+              The ``conduction_pc`` tests gate the Krylov gain against the
+              block-off twins, not the assembled operator itself: a
+              coefficient off by a factor of two still clusters the
+              spectrum and costs only a few iterations, so those gates
+              would not catch it (a direct assembled-operator check is a
+              follow-on).
             - ``pc_mhd_block.conduction_threshold`` (``float``, default:
               1.0): largest conduction number
               :math:`\theta_c \Delta t\, \chi / h^2` over the faces below
@@ -5444,16 +5458,19 @@ Jacobian probes.
     fluid registers already carry two guard cells and every ghost fill
     covers both layers, so no ghost widening is needed; the
     reconstruction degrades gracefully to donor cell at and beside the
-    stair-step wall contour (``implicit_mhd.wall_mask``) and inside the
-    no-slip pinned band (``implicit_mhd.wall_no_slip``), so it never
-    reconstructs across the mask or across the pin.
+    stair-step wall contour (``implicit_mhd.wall_mask``), and one row
+    further in when the wall is no-slip (``implicit_mhd.wall_no_slip``),
+    so it never reconstructs across the mask.
 
-    The reconstruction acts on the ADVECTIVE fan only. The physical
+    The reconstruction acts on the advective fan only. The physical
     diffusive legs on the same face registers -- the viscous stress
     (:pp:param:`implicit_mhd.viscosity`), the thermal conduction fluxes
-    and their free-streaming caps, and the transport-coefficient states
-    they are evaluated from -- always difference the two cell-centred
-    states a cell width apart, whatever the limiter. A gradient built
+    and their free-streaming caps, the transport-coefficient states they
+    are evaluated from and the face field direction of the Braginskii
+    tensor -- always difference the two cell-centred states (a cell
+    width apart in the bulk; against the wall image at a stair-step
+    interface face, against the reservoir at a conductive end face),
+    whatever the limiter. A gradient built
     from reconstructed face values is a limiter residual, not a
     derivative: on a linear profile the two reconstructed values of a
     face coincide and the flux vanishes (measured before the fix: 5% of

@@ -208,10 +208,14 @@ else:
     # a grind-free converged trace is the available proxy -- pinning at
     # the band/interface rows manifests as exactly this iteration
     # blow-up before the frozen-step guard trips.
+    # newton.txt APPENDS across reruns in the same test directory: the
+    # last six rows are the most recent run
     newton_rows = np.loadtxt("diags/newton.txt", ndmin=2)
+    assert len(newton_rows) >= 6, "override run did not complete all steps"
+    newton_rows = newton_rows[-6:]
+    assert newton_rows[0, 0] == 1, "the last six rows are not one complete run"
     newton_iters = newton_rows[:, 2]
     print(f"override-run newton iters/step: {newton_iters.astype(int).tolist()}")
-    assert len(newton_rows) == 6, "override run did not complete all steps"
     assert np.max(newton_iters) <= 4, (
         f"drive-era Newton grind ({int(np.max(newton_iters))} iters in a "
         "step): the band/interface freeze signature"
